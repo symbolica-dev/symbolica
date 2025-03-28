@@ -23,7 +23,7 @@ use pyo3::{
     PyObject, PyRef, PyResult, PyTypeInfo, Python,
 };
 use pyo3::{pyclass, types::PyModuleMethods};
-use rug::Complete;
+//use rug::Complete;
 use self_cell::self_cell;
 use smallvec::SmallVec;
 use smartstring::{LazyCompact, SmartString};
@@ -2269,8 +2269,9 @@ impl<'a> FromPyObject<'a> for ConvertibleToExpression {
             Ok(ConvertibleToExpression(Atom::new_num(num).into()))
         } else if let Ok(num) = ob.downcast::<PyInt>() {
             let a = format!("{}", num);
-            let i = Integer::from(rug::Integer::parse(&a).unwrap().complete());
-            Ok(ConvertibleToExpression(Atom::new_num(i).into()))
+            todo!()
+            //let i = Integer::from(rug::Integer::parse(&a).unwrap().complete());
+            //Ok(ConvertibleToExpression(Atom::new_num(i).into()))
         } else if let Ok(_) = ob.extract::<PyBackedStr>() {
             // disallow direct string conversion
             Err(exceptions::PyTypeError::new_err(
@@ -2314,7 +2315,8 @@ impl<'a> FromPyObject<'a> for Integer {
             Ok(num.into())
         } else if let Ok(num) = ob.downcast::<PyInt>() {
             let a = format!("{}", num);
-            Ok(Integer::from(rug::Integer::parse(&a).unwrap().complete()))
+            todo!()
+            //Ok(Integer::from(rug::Integer::parse(&a).unwrap().complete()))
         } else {
             Err(exceptions::PyValueError::new_err("Not a valid integer"))
         }
@@ -2331,7 +2333,7 @@ impl<'py> IntoPyObject<'py> for Integer {
             Integer::Natural(n) => n.into_pyobject(py),
             Integer::Double(d) => d.into_pyobject(py),
             Integer::Large(l) => unsafe {
-                Ok(Bound::from_owned_ptr(
+                /*Ok(Bound::from_owned_ptr(
                     py,
                     pyo3::ffi::PyLong_FromString(
                         l.to_string().as_str().as_ptr() as *const i8,
@@ -2340,7 +2342,8 @@ impl<'py> IntoPyObject<'py> for Integer {
                     ),
                 )
                 .downcast_into::<PyInt>()
-                .unwrap())
+                .unwrap())*/
+                todo!()
             },
         }
     }

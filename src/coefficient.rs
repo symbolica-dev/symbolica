@@ -18,7 +18,7 @@ use std::{
 
 use ahash::HashMap;
 use bytes::Buf;
-use rug::{integer::Order, ops::NegAssign};
+//use rug::{integer::Order, ops::NegAssign};
 use smallvec::{smallvec, SmallVec};
 
 use crate::{
@@ -116,7 +116,7 @@ impl From<(Integer, Integer)> for Coefficient {
     }
 }
 
-impl From<rug::Integer> for Coefficient {
+/*impl From<rug::Integer> for Coefficient {
     fn from(value: rug::Integer) -> Self {
         Coefficient::Rational(value.into())
     }
@@ -126,7 +126,7 @@ impl From<rug::Rational> for Coefficient {
     fn from(value: rug::Rational) -> Self {
         Coefficient::Rational(value.into())
     }
-}
+}*/
 
 impl From<Rational> for Coefficient {
     fn from(value: Rational) -> Self {
@@ -418,13 +418,14 @@ impl<'a> SerializedRational<'a> {
     }
 
     pub fn to_rat(&self) -> Rational {
-        let mut num = rug::Integer::from_digits(self.num_digits, Order::Lsf);
+        todo!()
+        /*let mut num = rug::Integer::from_digits(self.num_digits, Order::Lsf);
         let den = rug::Integer::from_digits(self.den_digits, Order::Lsf);
         if self.is_negative {
             num.neg_assign();
         }
 
-        Rational::from_unchecked(num, den)
+        Rational::from_unchecked(num, den)*/
     }
 }
 
@@ -1342,10 +1343,11 @@ impl<'a> AtomView<'a> {
 
                 match s {
                     Atom::PI => {
-                        out.to_num(Coefficient::Float(Float::with_val(
+                        todo!()
+                        /*out.to_num(Coefficient::Float(Float::with_val(
                             binary_prec,
                             rug::float::Constant::Pi,
-                        )));
+                        )));*/
                     }
                     Atom::E => {
                         out.to_num(Coefficient::Float(Float::with_val(binary_prec, 1).exp()));
@@ -1602,7 +1604,7 @@ mod test {
         assert_eq!(a, expr);
     }
 
-    #[test]
+    /*#[test]
     fn float() {
         let expr = parse!("1/2 x + 5.8912734891723 + sin(1.2334)").unwrap();
         let c = Coefficient::Float(Float::with_val(200, rug::float::Constant::Pi));
@@ -1618,7 +1620,7 @@ mod test {
             r,
             "1.57079632679489661923132169163975144209858469968755291048747*x+21.4724504210349"
         );
-    }
+    }*/
 
     #[test]
     fn float_convert() {

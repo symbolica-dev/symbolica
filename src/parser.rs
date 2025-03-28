@@ -9,7 +9,7 @@
 use std::{fmt::Write, string::String, sync::Arc};
 
 use bytes::Buf;
-use rug::Integer as MultiPrecisionInteger;
+//use rug::Integer as MultiPrecisionInteger;
 
 use smallvec::SmallVec;
 use smartstring::{LazyCompact, SmartString};
@@ -1203,7 +1203,8 @@ impl Token {
                         digit_buffer.extend(digits.iter().map(|&x| (x - b'0')));
                     }
 
-                    let mut p = MultiPrecisionInteger::new();
+                    todo!()
+                    /*let mut p = MultiPrecisionInteger::new();
                     unsafe {
                         p.assign_bytes_radix_unchecked(
                             &digit_buffer,
@@ -1212,7 +1213,7 @@ impl Token {
                         )
                     };
 
-                    field.element_from_coefficient(p.into())
+                    field.element_from_coefficient(p.into())*/
                 }
             }
 

@@ -1928,10 +1928,11 @@ impl<E: PositiveExponent> MultivariatePolynomial<IntegerRing, E> {
                     Integer::Natural(_) => {}
                     Integer::Double(_) => {}
                     Integer::Large(r) => {
-                        if r.as_limbs().len() > 4 {
+                        todo!()
+                        /*if r.as_limbs().len() > 4 {
                             debug!("big num {}", r);
                             return Err(HeuristicGCDError::MaxSizeExceeded);
-                        }
+                        }*/
                     }
                 }
 

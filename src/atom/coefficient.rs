@@ -1,7 +1,7 @@
 use std::io::Write;
 
 use bytes::{Buf, BufMut};
-use rug::{integer::Order, Integer as MultiPrecisionInteger};
+//use rug::{integer::Order, Integer as MultiPrecisionInteger};
 
 use crate::{
     coefficient::{
@@ -94,7 +94,8 @@ impl<'a> SerializedRationalPolynomial<'a> {
                 x @ 4 | x @ 5 => {
                     let (num_digits, _, new_source) = source.get_frac_u64();
                     *source = new_source;
-                    let i = MultiPrecisionInteger::from_digits(
+                    todo!()
+                    /*let i = MultiPrecisionInteger::from_digits(
                         &source[..num_digits as usize],
                         Order::Lsf,
                     );
@@ -103,7 +104,7 @@ impl<'a> SerializedRationalPolynomial<'a> {
                         Integer::from(-i)
                     } else {
                         Integer::from(i)
-                    }
+                    }*/
                 }
                 _ => unreachable!(),
             }
@@ -141,7 +142,8 @@ impl PackedRationalNumberWriter for Coefficient {
                     (*num, *den as u64).write_packed(dest)
                 }
                 _ => {
-                    let r = r.clone().to_multi_prec();
+                    todo!()
+                    /*let r = r.clone().to_multi_prec();
                     dest.put_u8(ARB_NUM | ARB_DEN);
 
                     let num_digits = r.numer().significant_digits::<u8>();
@@ -157,7 +159,7 @@ impl PackedRationalNumberWriter for Coefficient {
                     dest.resize(old_len + num_digits + den_digits, 0);
                     r.numer().write_digits(&mut dest[old_len..], Order::Lsf);
                     r.denom()
-                        .write_digits(&mut dest[old_len + num_digits..], Order::Lsf);
+                        .write_digits(&mut dest[old_len + num_digits..], Order::Lsf);*/
                 }
             },
             Coefficient::Float(f) => {
@@ -203,7 +205,8 @@ impl PackedRationalNumberWriter for Coefficient {
                             dest.put_i128_le(*d);
                         }
                         Integer::Large(l) => {
-                            if l.is_negative() {
+                            todo!()
+                            /*if l.is_negative() {
                                 dest.put_u8(5);
                             } else {
                                 dest.put_u8(4);
@@ -212,7 +215,7 @@ impl PackedRationalNumberWriter for Coefficient {
                             (num_digits as u64, 1).write_packed(dest);
                             let old_len = dest.len();
                             dest.resize(old_len + num_digits, 0);
-                            l.write_digits(&mut dest[old_len..], Order::Lsf);
+                            l.write_digits(&mut dest[old_len..], Order::Lsf);*/
                         }
                     }
                 }
@@ -253,10 +256,11 @@ impl PackedRationalNumberWriter for Coefficient {
                     (*num, *den as u64).get_packed_size()
                 }
                 _ => {
-                    let l = r.clone().to_multi_prec();
+                    todo!()
+                    /*let l = r.clone().to_multi_prec();
                     let n = l.numer().significant_digits::<u8>() as u64;
                     let d = l.denom().significant_digits::<u8>() as u64;
-                    1 + (n, d).get_packed_size() + n as u64 + d as u64
+                    1 + (n, d).get_packed_size() + n as u64 + d as u64*/
                 }
             },
             Coefficient::Float(f) => {

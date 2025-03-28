@@ -2951,8 +2951,8 @@ impl<E: PositiveExponent> MultivariatePolynomial<IntegerRing, E, LexOrder> {
 
         bound = &match bound {
             Integer::Natural(b) => Integer::Natural((b as f64).sqrt() as i64),
-            Integer::Double(b) => Integer::from(rug::Integer::from(b).sqrt()),
-            Integer::Large(b) => Integer::from(b.sqrt()),
+            Integer::Double(b) => todo!(), //Integer::from(rug::Integer::from(b).sqrt()),
+            Integer::Large(b) => todo!(),  //Integer::from(b.sqrt()),
         } + &1i64.into();
 
         &bound * &(&max_norm * &self.lcoeff().abs())
@@ -3596,7 +3596,7 @@ impl<E: PositiveExponent> MultivariatePolynomial<IntegerRing, E, LexOrder> {
             let prime = match max_p {
                 Integer::Natural(b) => b as u64,
                 Integer::Double(b) => b as u64,
-                Integer::Large(b) => b.to_u64().unwrap(),
+                Integer::Large(b) => todo!(), //b.to_u64().unwrap(),
             };
             let small_field_mod = Zp64::new(prime);
 

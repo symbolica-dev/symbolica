@@ -18,7 +18,7 @@ lto = true
 
 [profile.dev-optim]
 inherits = "dev"
-opt-level = 3
+opt-level = 1
 
 [lib]
 crate-type = ["lib"]
@@ -39,7 +39,7 @@ python_no_module = ["python_api"]
 python_abi3 = ["pyo3/abi3", "pyo3/abi3-py37"]
 tracing_only_warnings = ["tracing/release_max_level_warn"]
 # import/export objects that do not depend on the state using serde
-serde = ["dep:serde", "rug/serde"]
+#serde = ["dep:serde", "rug/serde"]
 # allow importing/exporting of atoms with a state map using bincode
 bincode = ["dep:bincode"]
 
@@ -65,7 +65,7 @@ once_cell = "1.19"
 rand = "0.8.5"
 rand_xoshiro = "0.6"
 rayon = "1.8"
-rug = "=1.25.0"
+#rug = "=1.25.0"
 self_cell = "1.0"
 serde = {version = "1.0", features = ["derive"], optional = true}
 smallvec = "1.13"

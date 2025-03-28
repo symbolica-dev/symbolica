@@ -646,12 +646,12 @@ impl<T: Into<Integer>> From<(T, T)> for Rational {
     }
 }
 
-impl From<rug::Rational> for Rational {
+/*impl From<rug::Rational> for Rational {
     fn from(value: rug::Rational) -> Self {
         let (num, den) = value.into_numer_denom();
         Q.to_element(num.into(), den.into(), false)
     }
-}
+}*/
 
 impl ToFiniteField<u32> for Rational {
     fn to_finite_field(&self, field: &Zp) -> <Zp as Ring>::Element {
@@ -731,19 +731,20 @@ impl Rational {
     }
 
     pub fn to_f64(&self) -> f64 {
-        rug::Rational::from((
+        todo!()
+        /*rug::Rational::from((
             self.numerator.clone().to_multi_prec(),
             self.denominator.clone().to_multi_prec(),
         ))
-        .to_f64()
+        .to_f64()*/
     }
 
-    pub fn to_multi_prec(self) -> rug::Rational {
+    /*pub fn to_multi_prec(self) -> rug::Rational {
         rug::Rational::from((
             self.numerator.to_multi_prec(),
             self.denominator.to_multi_prec(),
         ))
-    }
+    }*/
 
     /// Return a best approximation of the rational number where the denominator
     /// is less than or equal to `max_denominator`.
@@ -888,7 +889,8 @@ impl Rational {
                     Integer::Natural(n) => u64::BITS as u64 - (*n as u64).leading_zeros() as u64,
                     Integer::Double(n) => u128::BITS as u64 - (*n as u128).leading_zeros() as u64,
                     Integer::Large(n) => {
-                        let mut pos = 0;
+                        todo!()
+                        /*let mut pos = 0;
                         while let Some(p) = n.find_one(pos) {
                             if let Some(p2) = pos.checked_add(p) {
                                 if p2 == u32::MAX {
@@ -900,7 +902,7 @@ impl Rational {
                                 return Err("Could not reconstruct, as the log is too large");
                             }
                         }
-                        pos as u64
+                        pos as u64*/
                     }
                 };
 
@@ -1211,7 +1213,7 @@ mod test {
         poly::polynomial::PolynomialRing,
     };
 
-    #[test]
+    /*#[test]
     fn rounding() {
         let r: Rational = (11, 10).into();
         let res = r.round_in_interval((1, 1).into(), (12, 10).into());
@@ -1236,7 +1238,7 @@ mod test {
         .to_rational();
         let res = r.round(&(1, 100000000).into());
         assert_eq!(res, (93343, 29712).into());
-    }
+    }*/
 
     #[test]
     fn fraction_int() {
