@@ -595,6 +595,15 @@ impl Symbol {
         )
     }
 
+    /// Looks up a symbol by its namespaced name without creating it.
+    /// Use the [get_symbol!](crate::get_symbol) macro instead to define symbols in the current namespace.
+    pub fn get_symbol(name: NamespacedSymbol) -> Option<Symbol> {
+        State::get_global_state()
+            .read()
+            .unwrap()
+            .fetch_symbol(name.symbol.as_ref())
+    }
+
     /// Create a new variable from the symbol.
     pub fn to_atom(self) -> Atom {
         Atom::var(self)
@@ -803,6 +812,21 @@ impl Symbol {
     pub fn has_tag(&self, tag: impl AsRef<str>) -> bool {
         let r = tag.as_ref();
         self.get_data().tags.iter().any(|x| x == r)
+    }
+
+    /// Get the custom normalization function of the symbol, if any.
+    pub fn get_normalization_function(&self) -> Option<&NormalizationFunction> {
+        self.get_data().custom_normalization.as_ref()
+    }
+
+    /// Get the custom derivative function of the symbol, if any.
+    pub fn get_derivative_function(&self) -> Option<&DerivativeFunction> {
+        self.get_data().custom_derivative.as_ref()
+    }
+
+    /// Get the custom print function of the symbol, if any.
+    pub fn get_print_function(&self) -> Option<&PrintFunction> {
+        self.get_data().custom_print.as_ref()
     }
 
     /// Get all tags of the symbol.
@@ -2193,7 +2217,7 @@ macro_rules! tag {
 
 /// Create a new symbol or fetch the existing one with the same name.
 /// If no namespace is specified, the symbol is created in the
-/// current namespace.
+/// current namespace. Use [get_symbol!] to only fetch existing symbols.
 ///
 /// For example:
 /// ```no_run
@@ -2477,6 +2501,33 @@ macro_rules! try_symbol {
             (
                 $(
                     $crate::atom::Symbol::new($crate::wrap_symbol!($id)).with_attributes(gen_attr!()).build(),
+                )+
+            )
+        }
+    };
+}
+
+/// Looks up a symbol by its name without creating it.
+/// Use [symbol!] to define new symbols.
+///
+/// Returns `None` if the symbol has not been defined yet.
+/// ```
+/// use symbolica::get_symbol;
+/// let x = symbolica::get_symbol!("newsymbol::x");
+/// assert!(x.is_none());
+/// let sin = symbolica::get_symbol!("sin");
+/// assert!(sin.is_some());
+/// ```
+#[macro_export]
+macro_rules! get_symbol {
+    ($id: expr) => {
+        $crate::atom::Symbol::get_symbol($crate::wrap_symbol!($id))
+    };
+    ($($id: expr),*) => {
+        {
+            (
+                $(
+                    $crate::atom::Symbol::get_symbol($crate::wrap_symbol!($id)),
                 )+
             )
         }

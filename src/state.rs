@@ -348,6 +348,11 @@ impl State {
     }
 
     /// Get the symbol for a certain name if the name is already registered,
+    pub(crate) fn fetch_symbol(&self, name: &str) -> Option<Symbol> {
+        self.str_to_id.get(name).cloned()
+    }
+
+    /// Get the symbol for a certain name if the name is already registered,
     /// else register it and return a new symbol without attributes.
     pub(crate) fn get_symbol(&mut self, name: NamespacedSymbol) -> Result<Symbol, String> {
         match self.str_to_id.entry(name.symbol.into()) {
@@ -1096,9 +1101,10 @@ impl Drop for RecycledAtom {
             #[inline(always)]
             |ws| {
                 if let Ok(mut a) = ws.atom_buffer.try_borrow_mut()
-                    && a.len() < Workspace::ATOM_BUFFER_MAX {
-                        a.push(std::mem::replace(&mut self.0, Atom::Zero));
-                    }
+                    && a.len() < Workspace::ATOM_BUFFER_MAX
+                {
+                    a.push(std::mem::replace(&mut self.0, Atom::Zero));
+                }
             },
         );
     }

@@ -2218,7 +2218,16 @@ impl<T: ExportNumber + SingleFloat> ExpressionEvaluator<T> {
         self.export_cpp_impl("params_offset + ", "CudaNumber", false, &mut res);
 
         for (i, r) in &mut self.result_indices.iter().enumerate() {
-            res += &format!("\tout[out_offset + {}] = Z{};\n", i, r);
+            res += &format!("\tout[out_offset + {i}] = ");
+            res += &if *r < self.param_count {
+                format!("params[params_offset + {r}]")
+            } else if *r < self.reserved_indices {
+                self.stack[*r].export_wrapped_with("CudaNumber")
+            } else {
+                format!("Z{r}")
+            };
+
+            res += ";\n";
         }
 
         res += "\treturn;\n}\n";
@@ -2396,7 +2405,16 @@ extern "C" {{
         self.export_cpp_impl("", "T", true, &mut res);
 
         for (i, r) in &mut self.result_indices.iter().enumerate() {
-            res += &format!("\tout[{i}] = Z[{r}];\n");
+            res += &format!("\tout[{i}] = ");
+            res += &if *r < self.param_count {
+                format!("params[{r}]")
+            } else if *r < self.reserved_indices {
+                self.stack[*r].export_wrapped_with("T")
+            } else {
+                format!("Z[{r}]")
+            };
+
+            res += ";\n";
         }
 
         res += "\treturn;\n}\n";
