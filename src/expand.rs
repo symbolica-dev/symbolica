@@ -65,11 +65,11 @@ impl AtomView<'_> {
 
                 if let AtomView::Num(n) = exp
                     && let CoefficientView::Natural(n, 1, 0, 1) = n.get_coeff_view()
-                        && n.unsigned_abs() <= u32::MAX as u64
-                            && matches!(base, AtomView::Add(_) | AtomView::Mul(_))
-                        {
-                            return var.map(|s| !base.contains(s)).unwrap_or(false);
-                        }
+                    && n.unsigned_abs() <= u32::MAX as u64
+                    && matches!(base, AtomView::Add(_) | AtomView::Mul(_))
+                {
+                    return var.map(|s| !base.contains(s)).unwrap_or(false);
+                }
 
                 true
             }
@@ -125,10 +125,11 @@ impl AtomView<'_> {
         }
 
         if let Some(v) = var
-            && !self.contains(v) {
-                out.set_from_view(self);
-                return;
-            }
+            && !self.contains(v)
+        {
+            out.set_from_view(self);
+            return;
+        }
 
         match self {
             AtomView::Num(_) | AtomView::Var(_) | AtomView::Fun(_) => unreachable!(),
@@ -136,14 +137,22 @@ impl AtomView<'_> {
                 if let Some(v) = var_map {
                     *out = self.to_polynomial_in_vars::<E>(v).flatten(true);
                 } else {
-                    *out = self.to_polynomial::<_, E>(&Q, None).to_expression();
+                    if let Ok(p) = self.try_to_polynomial::<_, E>(&Q, None) {
+                        *out = p.to_expression();
+                    } else {
+                        self.expand_into(var, out);
+                    }
                 }
             }
             AtomView::Mul(_) => {
                 if let Some(v) = var_map {
                     *out = self.to_polynomial_in_vars::<E>(v).flatten(true);
                 } else {
-                    *out = self.to_polynomial::<_, E>(&Q, None).to_expression();
+                    if let Ok(p) = self.try_to_polynomial::<_, E>(&Q, None) {
+                        *out = p.to_expression();
+                    } else {
+                        self.expand_into(var, out);
+                    }
                 }
             }
             AtomView::Add(add_view) => {
@@ -165,10 +174,11 @@ impl AtomView<'_> {
     /// Expand an expression, but do not normalize the result.
     fn expand_no_norm(&self, workspace: &Workspace, var: Option<AtomView>, out: &mut Atom) -> bool {
         if let Some(s) = var
-            && !self.contains(s) {
-                out.set_from_view(self);
-                return false;
-            }
+            && !self.contains(s)
+        {
+            out.set_from_view(self);
+            return false;
+        }
 
         match self {
             AtomView::Pow(p) => {
@@ -183,9 +193,10 @@ impl AtomView<'_> {
                 let (negative, num) = 'get_num: {
                     if let AtomView::Num(n) = new_exp.as_view()
                         && let CoefficientView::Natural(n, 1, 0, 1) = n.get_coeff_view()
-                            && n.unsigned_abs() <= u32::MAX as u64 {
-                                break 'get_num (n < 0, n.unsigned_abs() as u32);
-                            }
+                        && n.unsigned_abs() <= u32::MAX as u64
+                    {
+                        break 'get_num (n < 0, n.unsigned_abs() as u32);
+                    }
 
                     let mut pow_h = workspace.new_atom();
                     let pow = pow_h.to_pow(new_base.as_view(), new_exp.as_view());
@@ -424,6 +435,23 @@ impl AtomView<'_> {
                 changed
             }
             AtomView::Mul(mul_view) => {
+                let mut changed = false;
+
+                // propagate to all arguments
+                let mut new_mul = ws.new_atom();
+                let m = new_mul.to_mul();
+                let mut new_arg = ws.new_atom();
+                for arg in mul_view {
+                    changed |= arg.expand_num_impl(ws, &mut new_arg);
+                    m.extend(new_arg.as_view());
+                }
+
+                if changed {
+                    new_mul.as_view().normalize(ws, &mut new_arg);
+                    new_arg.as_view().expand_num_impl(ws, out);
+                    return true;
+                }
+
                 if !mul_view.has_coefficient()
                     || !mul_view.iter().any(|a| matches!(a, AtomView::Add(_)))
                 {

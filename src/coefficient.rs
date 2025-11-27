@@ -760,16 +760,16 @@ impl ConvertToRing for Q {
                 if r.is_real() {
                     Ok(r.re)
                 } else {
-                    Err("Cannot convert complex to rational".to_owned())
+                    Err(format!("Cannot convert {r} to rational"))
                 }
             }
-            Coefficient::Float(_) => Err("Cannot convert float to rational".to_owned()),
+            Coefficient::Float(f) => Err(format!("Cannot convert float {f} to rational")),
             Coefficient::FiniteField(_, _) => {
                 Err("Cannot convert finite field to rational".to_owned())
             }
-            Coefficient::RationalPolynomial(_) => {
-                Err("Cannot convert rational polynomial to rational".to_owned())
-            }
+            Coefficient::RationalPolynomial(r) => Err(format!(
+"Cannot convert rational polynomial {r} to rational"
+            )),
         }
     }
 
@@ -787,23 +787,33 @@ impl ConvertToRing for Q {
                 if cr == 0 {
                     Ok(Rational::from_int_unchecked(r, d))
                 } else {
-                    Err("Cannot convert complex number to rational".to_owned())
+                    Err(format!(
+"Cannot convert complex number {} to rational",
+                        number.to_owned()
+))
                 }
             }
             CoefficientView::Large(r, i) => {
                 if i.is_zero() {
                     Ok(r.to_rat())
                 } else {
-                    Err("Cannot convert complex number to rational".to_owned())
+                    Err(format!(
+"Cannot convert complex number {} to rational",
+                        number.to_owned()
+))
                 }
             }
-            CoefficientView::Float(_, _) => Err("Cannot convert float to rational".to_owned()),
+            CoefficientView::Float(_, _) => Err(format!(
+"Cannot convert float {} to rational",
+                number.to_owned()
+)),
             CoefficientView::FiniteField(_, _) => {
                 Err("Cannot convert finite field to rational".to_owned())
             }
-            CoefficientView::RationalPolynomial(_) => {
-                Err("Cannot convert rational polynomial to rational".to_owned())
-            }
+            CoefficientView::RationalPolynomial(_) => Err(format!(
+"Cannot convert rational polynomial {} to rational",
+                number.to_owned()
+            )),
         }
     }
 }
@@ -827,15 +837,15 @@ impl ConvertToRing for IntegerRing {
                         Err("Cannot convert non-integer real number to integer".to_owned())
                     }
                 } else {
-                    Err("Cannot convert complex number to integer".to_owned())
+                    Err(format!("Cannot convert complex number {r} to integer"))
                 }
             }
-            Coefficient::Float(_) => Err("Cannot convert float to integer".to_owned()),
+            Coefficient::Float(f) => Err(format!("Cannot convert float {f} to integer")),
             Coefficient::FiniteField(_, _) => {
                 Err("Cannot convert finite field to integer".to_owned())
             }
-            Coefficient::RationalPolynomial(_) => {
-                Err("Cannot convert rational polynomial to rational".to_owned())
+            Coefficient::RationalPolynomial(r) => {
+                Err(format!("Cannot convert rational polynomial {r} to integer"))
             }
         }
     }
@@ -859,21 +869,28 @@ impl ConvertToRing for IntegerRing {
             }
             CoefficientView::Large(r, i) => {
                 if !i.is_zero() {
-                    return Err("Cannot convert complex number to integer".to_owned());
+                    return Err(format!(
+"Cannot convert complex number {} to integer",
+                        number.to_owned()
+));
                 }
                 let r = r.to_rat();
                 if !r.is_integer() {
-                    return Err("Cannot convert rational to integer".to_owned());
+                    return Err(format!("Cannot convert rational {r} to integer"));
                 }
                 Ok(r.numerator())
             }
-            CoefficientView::Float(_, _) => Err("Cannot convert float to integer".to_owned()),
+            CoefficientView::Float(_, _) => Err(format!(
+"Cannot convert float {} to integer",
+                number.to_owned()
+)),
             CoefficientView::FiniteField(_, _) => {
                 Err("Cannot convert finite field to integer".to_owned())
             }
-            CoefficientView::RationalPolynomial(_) => {
-                Err("Cannot convert rational polynomial to integer".to_owned())
-            }
+            CoefficientView::RationalPolynomial(_) => Err(format!(
+"Cannot convert rational polynomial {} to integer",
+                number.to_owned()
+            )),
         }
     }
 }
@@ -930,16 +947,17 @@ where
                         &r.re.denominator().to_finite_field(self),
                     ))
                 } else {
-                    Err("Cannot convert complex number to finite field".to_owned())
+                    Err(format!("Cannot convert complex number {r} to finite field"))
                 }
             }
-            Coefficient::Float(_) => Err("Cannot convert float to finite field".to_owned()),
+            Coefficient::Float(f) => Err(format!("Cannot convert float {f} to finite field",)),
             Coefficient::FiniteField(_, _) => {
                 Err("Cannot convert finite field to other one".to_owned())
             }
-            Coefficient::RationalPolynomial(_) => {
-                Err("Cannot convert rational polynomial to finite field".to_owned())
-            }
+            Coefficient::RationalPolynomial(_) => Err(format!(
+"Cannot convert rational polynomial {} to finite field",
+                number.to_owned()
+            )),
         }
     }
 
@@ -973,16 +991,23 @@ where
                         &l.denominator().to_finite_field(self),
                     ))
                 } else {
-                    Err("Cannot convert complex number to finite field".to_owned())
+                    Err(format!(
+"Cannot convert complex number {} to finite field",
+                        number.to_owned()
+))
                 }
             }
-            CoefficientView::Float(_, _) => Err("Cannot convert float to finite field".to_owned()),
+            CoefficientView::Float(_, _) => Err(format!(
+"Cannot convert float {} to finite field",
+                number.to_owned()
+)),
             CoefficientView::FiniteField(_, _) => {
                 Err("Cannot convert finite field to other one".to_owned())
             }
-            CoefficientView::RationalPolynomial(_) => {
-                Err("Cannot convert rational polynomial to finite field".to_owned())
-            }
+            CoefficientView::RationalPolynomial(_) => Err(format!(
+"Cannot convert rational polynomial {} to finite field",
+                number.to_owned()
+            )),
         }
     }
 }
@@ -1001,17 +1026,17 @@ impl ConvertToRing for FloatField<F64> {
                 if complex.is_real() {
                     Ok(F64(complex.re.to_f64()))
                 } else {
-                    Err("Cannot convert {number} to real float".to_string())
+                    Err(format!("Cannot convert {complex} to real float"))
                 }
             }
             crate::coefficient::Coefficient::Float(complex) => {
                 if complex.is_real() {
                     Ok(F64(complex.re.to_f64()))
                 } else {
-                    Err("Cannot convert {number} to real float".to_string())
+                    Err(format!("Cannot convert {complex} to real float"))
                 }
             }
-            _ => Err("Cannot convert {number} to complex".to_string()),
+            _ => Err(format!("Cannot convert {number} to complex")),
         }
     }
 
@@ -1037,17 +1062,17 @@ impl ConvertToRing for FloatField<Float> {
                 if complex.is_real() {
                     Ok(complex.re.to_multi_prec_float(self.get_rep().prec()))
                 } else {
-                    Err("Cannot convert {number} to real float".to_string())
+                    Err(format!("Cannot convert {complex} to real float"))
                 }
             }
             crate::coefficient::Coefficient::Float(complex) => {
                 if complex.is_real() {
                     Ok(complex.re)
                 } else {
-                    Err("Cannot convert {number} to real float".to_string())
+                    Err(format!("Cannot convert {complex} to real float"))
                 }
             }
-            _ => Err("Cannot convert {number} to complex".to_string()),
+            _ => Err(format!("Cannot convert {number} to complex")),
         }
     }
 
@@ -1077,7 +1102,7 @@ impl ConvertToRing for FloatField<Complex<F64>> {
                 complex.re.to_f64().into(),
                 complex.im.to_f64().into(),
             )),
-            _ => Err("Cannot convert {number} to complex".to_string()),
+            _ => Err(format!("Cannot convert {number} to complex")),
         }
     }
 
@@ -1104,7 +1129,7 @@ impl ConvertToRing for FloatField<Complex<Float>> {
                 complex.im.to_multi_prec_float(self.get_rep().im.prec()),
             )),
             crate::coefficient::Coefficient::Float(complex) => Ok(complex),
-            _ => Err("Cannot convert {number} to complex".to_string()),
+            _ => Err(format!("Cannot convert {number} to complex")),
         }
     }
 
@@ -1146,10 +1171,11 @@ impl ConvertToRing for AlgebraicExtension<Q> {
                     )
                 }
             }
-            Coefficient::Float(_) => Err("Cannot convert float to rational".to_owned()),
-            Coefficient::FiniteField(_, _) => {
-                Err("Cannot convert finite field to extension".to_owned())
-            }
+            Coefficient::Float(_) => Err(format!("Cannot convert float {} to extension", number)),
+            Coefficient::FiniteField(_, _) => Err(format!(
+"Cannot convert finite field {} to extension",
+                number
+            )),
             Coefficient::RationalPolynomial(_) => {
                 // TODO: this may be possible!
                 Err("Cannot convert rational polynomial to extension".to_owned())
@@ -1202,13 +1228,17 @@ impl ConvertToRing for AlgebraicExtension<Q> {
                     )
                 }
             }
-            CoefficientView::Float(_, _) => Err("Cannot convert float to rational".to_owned()),
+            CoefficientView::Float(_, _) => Err(format!(
+"Cannot convert float {} to rational",
+                number.to_owned()
+)),
             CoefficientView::FiniteField(_, _) => {
                 Err("Cannot convert finite field to rational".to_owned())
             }
-            CoefficientView::RationalPolynomial(_) => {
-                Err("Cannot convert rational polynomial to rational".to_owned())
-            }
+            CoefficientView::RationalPolynomial(_) => Err(format!(
+"Cannot convert rational polynomial {} to rational",
+                number.to_owned()
+            )),
         }
     }
 }

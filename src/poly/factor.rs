@@ -797,7 +797,7 @@ impl<E: PositiveExponent> Factorize
             }
         }
 
-        if !self.ring.is_one(&constant) {
+        if !self.ring.is_one(&constant) || full_factors.is_empty() {
             full_factors.push((self.constant(constant), 1));
         }
 

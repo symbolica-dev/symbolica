@@ -905,7 +905,7 @@ impl Symbol {
     /// Expert use: create a new function symbol. This constructor should be used with care as there are no checks
     /// about the validity of the identifier.
     ///
-    /// Sets related attributes automatically, e.g., a symbol that is marked as `integer` is also marked as `real` and `scalar`.
+    /// Sets related attributes automatically, e.g., a symbol that is marked as `integer` is also marked as `real`.
     pub const fn raw_fn(
         id: u32,
         wildcard_level: u8,
@@ -925,7 +925,7 @@ impl Symbol {
             is_antisymmetric,
             is_cyclesymmetric,
             is_linear,
-            is_scalar: is_scalar || is_real || is_integer || is_positive,
+            is_scalar,
             is_real: is_real || is_integer || is_positive,
             is_integer,
             is_positive,

@@ -956,7 +956,41 @@ pub trait AtomCore: private::Sealed {
         field: &R,
         var_map: impl Into<Option<Arc<Vec<PolyVariable>>>>,
     ) -> MultivariatePolynomial<R, E> {
-        self.as_atom_view().to_polynomial(field, var_map.into())
+        self.try_to_polynomial(field, var_map.into()).unwrap()
+    }
+
+    /// Convert the atom to a polynomial, optionally in the variable ordering
+    /// specified by `var_map`. If new variables are encountered, they are
+    /// added to the variable map. Similarly, non-polynomial parts are automatically
+    /// defined as a new independent variable in the polynomial.
+    ///
+    /// # Example
+    ///
+    /// ```
+    /// use symbolica::{atom::AtomCore, parse};
+    /// use symbolica::domains::rational::Q;
+    /// let expr = parse!("x^2 + 2*x + 1");
+    /// let poly = expr.to_polynomial::<_,u8>(&Q, None);
+    /// assert_eq!(poly.to_expression(), parse!("x^2 + 2 * x + 1"));
+    /// ```
+    ///
+    /// With explicit variable ordering:
+    ///
+    /// ```
+    /// # use std::sync::Arc;
+    /// use symbolica::{atom::{Atom, AtomCore}, parse, symbol};
+    /// use symbolica::domains::rational::Q;
+    /// let expr = parse!("x^2 + 2*x + 1");
+    /// let var_map = Arc::new(vec![symbol!("x").into()]);
+    /// let poly = expr.to_polynomial::<_,u8>(&Q, Some(var_map));
+    /// assert_eq!(poly.to_expression(), parse!("x^2 + 2 * x + 1"));
+    /// ```
+    fn try_to_polynomial<R: EuclideanDomain + ConvertToRing, E: Exponent>(
+        &self,
+        field: &R,
+        var_map: impl Into<Option<Arc<Vec<PolyVariable>>>>,
+    ) -> Result<MultivariatePolynomial<R, E>, String> {
+        self.as_atom_view().try_to_polynomial(field, var_map.into())
     }
 
     /// Convert the atom to a polynomial in specific variables.
@@ -1014,8 +1048,41 @@ pub trait AtomCore: private::Sealed {
         RationalPolynomial<RO, E>:
             FromNumeratorAndDenominator<R, RO, E> + FromNumeratorAndDenominator<RO, RO, E>,
     {
+        self.try_to_rational_polynomial(field, out_field, var_map)
+            .unwrap()
+    }
+
+    /// Convert the atom to a rational polynomial, optionally in the variable ordering
+    /// specified by `var_map`. If new variables are encountered, they are
+    /// added to the variable map. Similarly, non-rational polynomial parts are automatically
+    /// defined as a new independent variable in the rational polynomial.
+    ///
+    /// # Example
+    ///
+    /// ```
+    /// use symbolica::{atom::AtomCore, parse};;
+    /// use symbolica::domains::integer::Z;
+    /// use symbolica::domains::rational::Q;
+    /// let expr = parse!("(x^2 + 2*x + 1) / (x + 1)");
+    /// let rat_poly = expr.to_rational_polynomial::<_, _, u8>(&Q, &Z, None);
+    /// assert_eq!(rat_poly.to_expression(), parse!("1+x"));
+    /// ```
+    fn try_to_rational_polynomial<
+        R: EuclideanDomain + ConvertToRing,
+        RO: EuclideanDomain + PolynomialGCD<E>,
+        E: PositiveExponent,
+    >(
+        &self,
+        field: &R,
+        out_field: &RO,
+        var_map: impl Into<Option<Arc<Vec<PolyVariable>>>>,
+    ) -> Result<RationalPolynomial<RO, E>, String>
+    where
+        RationalPolynomial<RO, E>:
+            FromNumeratorAndDenominator<R, RO, E> + FromNumeratorAndDenominator<RO, RO, E>,
+    {
         self.as_atom_view()
-            .to_rational_polynomial(field, out_field, var_map.into())
+            .try_to_rational_polynomial(field, out_field, var_map.into())
     }
 
     /// Convert the atom to a rational polynomial with factorized denominators, optionally in the variable ordering
@@ -1051,8 +1118,45 @@ pub trait AtomCore: private::Sealed {
             + FromNumeratorAndFactorizedDenominator<RO, RO, E>,
         MultivariatePolynomial<RO, E>: Factorize,
     {
+        self.try_to_factorized_rational_polynomial(field, out_field, var_map.into())
+            .unwrap()
+    }
+
+    /// Convert the atom to a rational polynomial with factorized denominators, optionally in the variable ordering
+    /// specified by `var_map`. If new variables are encountered, they are
+    /// added to the variable map. Similarly, non-rational polynomial parts are automatically
+    /// defined as a new independent variable in the rational polynomial.
+    ///
+    /// # Example
+    ///
+    /// ```
+    /// use symbolica::{atom::AtomCore, parse};
+    /// use symbolica::domains::integer::Z;
+    /// use symbolica::domains::rational::Q;
+    /// let expr = parse!("(x^2 + 2*x + 1) / (x + 1)");
+    /// let fact_rat_poly = expr.to_factorized_rational_polynomial::<_, _, u8>(&Q, &Z, None);
+    /// assert_eq!(
+    ///     fact_rat_poly.numerator.to_expression(),
+    ///     parse!("x+1")
+    /// );
+    /// ```
+    fn try_to_factorized_rational_polynomial<
+        R: EuclideanDomain + ConvertToRing,
+        RO: EuclideanDomain + PolynomialGCD<E>,
+        E: PositiveExponent,
+    >(
+        &self,
+        field: &R,
+        out_field: &RO,
+        var_map: impl Into<Option<Arc<Vec<PolyVariable>>>>,
+    ) -> Result<FactorizedRationalPolynomial<RO, E>, String>
+    where
+        FactorizedRationalPolynomial<RO, E>: FromNumeratorAndFactorizedDenominator<R, RO, E>
+            + FromNumeratorAndFactorizedDenominator<RO, RO, E>,
+        MultivariatePolynomial<RO, E>: Factorize,
+    {
         self.as_atom_view()
-            .to_factorized_rational_polynomial(field, out_field, var_map.into())
+            .try_to_factorized_rational_polynomial(field, out_field, var_map.into())
     }
 
     /// Format the atom. See [AtomCore::printer] for more convenient printing.
