@@ -292,9 +292,9 @@ impl AtomView<'_> {
         let mut rhs = vec![RationalPolynomial::<_, E>::new(&Z, Arc::new(vec![])); system.len()];
 
         for (si, a) in system.iter().enumerate() {
-            let rat: RationalPolynomial<Z, E> = a.to_rational_polynomial(&Q, &Z, None);
+            let rat: RationalPolynomial<Z, E> = a.try_to_rational_polynomial(&Q, &Z, None)?;
 
-            let poly = rat.to_polynomial(vars, true).unwrap();
+            let poly = rat.to_polynomial(vars, true).map_err(|e| e.to_owned())?;
 
             for e in &mut row {
                 *e = RationalPolynomial::<_, E>::new(&Z, poly.variables.clone());

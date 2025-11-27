@@ -2431,7 +2431,13 @@ impl PythonTransformer {
     /// Create a transformer that computes the partial fraction decomposition in `x`.
     pub fn apart(&self, x: PythonExpression) -> PyResult<PythonTransformer> {
         self.append_transformer(Transformer::Map(Box::new(move |i, _state, o| {
-            let poly = i.to_rational_polynomial::<_, _, u32>(&Q, &Z, None);
+            let poly = i
+                .try_to_rational_polynomial::<_, _, u32>(&Q, &Z, None)
+                .map_err(|e| {
+                    TransformerError::ValueError(format!(
+                        "Could not convert expression to rational polynomial: {e}",
+                    ))
+                })?;
 
             let x = poly
                 .get_variables()
@@ -2465,7 +2471,13 @@ impl PythonTransformer {
     /// Create a transformer that writes the expression over a common denominator.
     pub fn together(&self) -> PyResult<PythonTransformer> {
         self.append_transformer(Transformer::Map(Box::new(|i, _state, o| {
-            let poly = i.to_rational_polynomial::<_, _, u32>(&Q, &Z, None);
+            let poly = i
+                .try_to_rational_polynomial::<_, _, u32>(&Q, &Z, None)
+                .map_err(|e| {
+                    TransformerError::ValueError(format!(
+                        "Could not convert expression to rational polynomial: {e}",
+                    ))
+                })?;
             *o = poly.to_expression();
             Ok(())
         })))
@@ -5691,8 +5703,7 @@ impl PythonExpression {
     /// >>> p = E('v1^2/2+v1^3/v4*v2+v3/(1+v4)')
     /// >>> print(p.together())
     pub fn together(&self) -> PyResult<PythonExpression> {
-        let poly = self.expr.to_rational_polynomial::<_, _, u32>(&Q, &Z, None);
-        Ok(poly.to_expression().into())
+        Ok(self.expr.together().into())
     }
 
     /// Cancel common factors between numerators and denominators.
@@ -5809,7 +5820,11 @@ impl PythonExpression {
 
                         let g = AlgebraicExtension::new(p);
                         PythonGaloisFieldPrimeTwoPolynomial {
-                            poly: self.expr.to_polynomial(&Z2, var_map).to_number_field(&g),
+                            poly: self
+                                .expr
+                                .try_to_polynomial(&Z2, var_map)
+                                .map_err(|e| exceptions::PyValueError::new_err(e))?
+                                .to_number_field(&g),
                         }
                         .into_py_any(py)
                     } else {
@@ -5823,32 +5838,50 @@ impl PythonExpression {
 
                         let g = AlgebraicExtension::new(p);
                         PythonGaloisFieldPolynomial {
-                            poly: self.expr.to_polynomial(&f, var_map).to_number_field(&g),
+                            poly: self
+                                .expr
+                                .try_to_polynomial(&f, var_map)
+                                .map_err(|e| exceptions::PyValueError::new_err(e))?
+                                .to_number_field(&g),
                         }
                         .into_py_any(py)
                     }
                 } else if m == 2 {
                     let g = AlgebraicExtension::galois_field(Z2, e as usize, name.into());
                     PythonGaloisFieldPrimeTwoPolynomial {
-                        poly: self.expr.to_polynomial(&Z2, var_map).to_number_field(&g),
+                        poly: self
+                            .expr
+                            .try_to_polynomial(&Z2, var_map)
+                            .map_err(|e| exceptions::PyValueError::new_err(e))?
+                            .to_number_field(&g),
                     }
                     .into_py_any(py)
                 } else {
                     let f = Zp64::new(m);
                     let g = AlgebraicExtension::galois_field(Zp64::new(m), e as usize, name.into());
                     PythonGaloisFieldPolynomial {
-                        poly: self.expr.to_polynomial(&f, var_map).to_number_field(&g),
+                        poly: self
+                            .expr
+                            .try_to_polynomial(&f, var_map)
+                            .map_err(|e| exceptions::PyValueError::new_err(e))?
+                            .to_number_field(&g),
                     }
                     .into_py_any(py)
                 }
             } else if m == 2 {
                 PythonPrimeTwoPolynomial {
-                    poly: self.expr.to_polynomial(&Z2, var_map),
+                    poly: self
+                        .expr
+                        .try_to_polynomial(&Z2, var_map)
+                        .map_err(|e| exceptions::PyValueError::new_err(e))?,
                 }
                 .into_py_any(py)
             } else {
                 PythonFiniteFieldPolynomial {
-                    poly: self.expr.to_polynomial(&Zp64::new(m), var_map),
+                    poly: self
+                        .expr
+                        .try_to_polynomial(&Zp64::new(m), var_map)
+                        .map_err(|e| exceptions::PyValueError::new_err(e))?,
                 }
                 .into_py_any(py)
             }
@@ -5864,18 +5897,28 @@ impl PythonExpression {
             if f.poly().exponents == [0, 2] && f.poly().get_constant() == Rational::one() {
                 // convert complex coefficients
                 PythonNumberFieldPolynomial {
-                    poly: self.expr.to_polynomial(&f, var_map),
+                    poly: self
+                        .expr
+                        .try_to_polynomial(&f, var_map)
+                        .map_err(|e| exceptions::PyValueError::new_err(e))?,
                 }
                 .into_py_any(py)
             } else {
                 PythonNumberFieldPolynomial {
-                    poly: self.expr.to_polynomial(&Q, var_map).to_number_field(&f),
+                    poly: self
+                        .expr
+                        .try_to_polynomial(&Q, var_map)
+                        .map_err(|e| exceptions::PyValueError::new_err(e))?
+                        .to_number_field(&f),
                 }
                 .into_py_any(py)
             }
         } else {
             PythonPolynomial {
-                poly: self.expr.to_polynomial(&Q, var_map),
+                poly: self
+                    .expr
+                    .try_to_polynomial(&Q, var_map)
+                    .map_err(|e| exceptions::PyValueError::new_err(e))?,
             }
             .into_py_any(py)
         }
@@ -5913,9 +5956,16 @@ impl PythonExpression {
             Some(Arc::new(var_map))
         };
 
-        Ok(PythonRationalPolynomial {
-            poly: self.expr.to_rational_polynomial(&Q, &Z, var_map),
-        })
+        let poly = self
+            .expr
+            .try_to_rational_polynomial(&Q, &Z, var_map)
+            .map_err(|e| {
+                exceptions::PyValueError::new_err(format!(
+                    "Could not convert expression to rational polynomial: {e}",
+                ))
+            })?;
+
+        Ok(PythonRationalPolynomial { poly })
     }
 
     /// Return an iterator over the pattern `self` matching to `lhs`.
@@ -15006,7 +15056,11 @@ impl ConvertibleToRationalPolynomial {
             Self::Expression(e) => {
                 let expr = &e.to_expression().expr;
 
-                let poly = expr.to_rational_polynomial(&Q, &Z, None);
+                let poly = expr.try_to_rational_polynomial(&Q, &Z, None).map_err(|_| {
+                    exceptions::PyValueError::new_err(
+                        "Expression cannot be converted to a rational polynomial.".to_string(),
+                    )
+                })?;
 
                 Ok(PythonRationalPolynomial { poly })
             }

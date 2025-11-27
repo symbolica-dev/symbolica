@@ -280,10 +280,12 @@ impl AtomView<'_> {
     /// Simplify logs in the argument of the exponential function.
     fn simplify_exp_log(&self, ws: &Workspace, out: &mut Atom) -> bool {
         if let AtomView::Fun(f) = self
-            && f.get_symbol() == Symbol::LOG && f.get_nargs() == 1 {
-                out.set_from_view(&f.iter().next().unwrap());
-                return true;
-            }
+            && f.get_symbol() == Symbol::LOG
+            && f.get_nargs() == 1
+        {
+            out.set_from_view(&f.iter().next().unwrap());
+            return true;
+        }
 
         if let AtomView::Mul(m) = self {
             let mut found_index = None;
@@ -373,20 +375,21 @@ impl Atom {
                 }
 
                 if let AtomView::Num(n) = &exp1
-                    && let AtomView::Num(n2) = &exp2 {
-                        let new_exp = helper.to_num(n.get_coeff_view() + n2.get_coeff_view());
+                    && let AtomView::Num(n2) = &exp2
+                {
+                    let new_exp = helper.to_num(n.get_coeff_view() + n2.get_coeff_view());
 
-                        if new_exp.to_num_view().is_zero() {
-                            self.to_num(1.into());
-                        } else if new_exp.to_num_view().is_one() {
-                            self.set_from_view(&base2);
-                        } else {
-                            p1.set_from_base_and_exp(base2, helper.as_view());
-                        }
-
-                        self.set_normalized(true);
-                        return true;
+                    if new_exp.to_num_view().is_zero() {
+                        self.to_num(1.into());
+                    } else if new_exp.to_num_view().is_one() {
+                        self.set_from_view(&base2);
+                    } else {
+                        p1.set_from_base_and_exp(base2, helper.as_view());
                     }
+
+                    self.set_normalized(true);
+                    return true;
+                }
 
                 let new_exp = helper.to_add();
                 new_exp.extend(exp1);
@@ -710,17 +713,19 @@ impl AtomView<'_> {
                             handle.set_from_view(&c);
 
                             if let AtomView::Num(n) = c
-                                && n.is_one() {
-                                    continue;
-                                }
+                                && n.is_one()
+                            {
+                                continue;
+                            }
 
                             atom_test_buf.push(handle);
                         }
                     } else {
                         if let AtomView::Num(n) = handle.as_view()
-                            && n.is_one() {
-                                continue;
-                            }
+                            && n.is_one()
+                        {
+                            continue;
+                        }
 
                         atom_test_buf.push(handle);
                     }
@@ -754,7 +759,7 @@ impl AtomView<'_> {
                                     }
 
                                     if n.is_zero() {
-                                        out.to_num(Coefficient::zero());
+                                        out.set_from_view(&v);
                                         return;
                                     }
 
@@ -797,7 +802,7 @@ impl AtomView<'_> {
                             }
 
                             if n.is_zero() {
-                                out.to_num(Coefficient::zero());
+                                out.set_from_view(&v);
                                 return;
                             }
 
@@ -836,14 +841,15 @@ impl AtomView<'_> {
                 #[inline(always)]
                 fn add_arg(f: &mut Fun, a: AtomView) {
                     if let AtomView::Fun(fa) = a
-                        && fa.get_symbol() == Symbol::ARG {
-                            // flatten f(arg(...)) = f(...)
-                            for aa in fa.iter() {
-                                f.add_arg(aa);
-                            }
-
-                            return;
+                        && fa.get_symbol() == Symbol::ARG
+                    {
+                        // flatten f(arg(...)) = f(...)
+                        for aa in fa.iter() {
+                            f.add_arg(aa);
                         }
+
+                        return;
+                    }
 
                     f.add_arg(a);
                 }
@@ -1056,15 +1062,17 @@ impl AtomView<'_> {
                     let arg = out_f.to_fun_view().iter().next().unwrap();
 
                     if let AtomView::Fun(f2) = arg
-                        && f2.get_symbol() == Symbol::EXP && f2.get_nargs() == 1 {
-                            let exp_arg = f2.iter().next().unwrap();
-                            if exp_arg.is_real() {
-                                let mut buffer = workspace.new_atom();
-                                buffer.set_from_view(&exp_arg);
-                                out.set_from_view(&buffer.as_view());
-                                return;
-                            }
+                        && f2.get_symbol() == Symbol::EXP
+                        && f2.get_nargs() == 1
+                    {
+                        let exp_arg = f2.iter().next().unwrap();
+                        if exp_arg.is_real() {
+                            let mut buffer = workspace.new_atom();
+                            buffer.set_from_view(&exp_arg);
+                            out.set_from_view(&buffer.as_view());
+                            return;
                         }
+                    }
                 }
 
                 if id == Symbol::EXP && out_f.to_fun_view().get_nargs() == 1 {
@@ -1183,10 +1191,11 @@ impl AtomView<'_> {
 
                     for a in out_f.to_fun_view() {
                         if let AtomView::Num(n) = a
-                            && n.is_zero() {
-                                out.to_num(Coefficient::zero());
-                                return;
-                            }
+                            && n.is_zero()
+                        {
+                            out.to_num(Coefficient::zero());
+                            return;
+                        }
                     }
                 }
 
@@ -1390,21 +1399,22 @@ impl AtomView<'_> {
                             break 'pow_simplify;
                         }
                     } else if let AtomView::Pow(p_base) = base_handle.as_view()
-                        && exp_handle.is_integer() {
-                            // rewrite (x^y)^z as x^(z*y) if z is integer
-                            let (p_base_base, p_base_exp) = p_base.get_base_exp();
+                        && exp_handle.is_integer()
+                    {
+                        // rewrite (x^y)^z as x^(z*y) if z is integer
+                        let (p_base_base, p_base_exp) = p_base.get_base_exp();
 
-                            let mut mul_h = workspace.new_atom();
-                            let mul = mul_h.to_mul();
-                            mul.extend(p_base_exp);
-                            mul.extend(exp_handle.as_view());
-                            let mut exp_h = workspace.new_atom();
-                            mul.as_view().normalize(workspace, &mut exp_h);
+                        let mut mul_h = workspace.new_atom();
+                        let mul = mul_h.to_mul();
+                        mul.extend(p_base_exp);
+                        mul.extend(exp_handle.as_view());
+                        let mut exp_h = workspace.new_atom();
+                        mul.as_view().normalize(workspace, &mut exp_h);
 
-                            mul_h.to_pow(p_base_base, exp_h.as_view());
-                            mul_h.as_view().normalize(workspace, out);
-                            break 'pow_simplify;
-                        }
+                        mul_h.to_pow(p_base_base, exp_h.as_view());
+                        mul_h.as_view().normalize(workspace, out);
+                        break 'pow_simplify;
+                    }
                     out.to_pow(base_handle.as_view(), exp_handle.as_view());
                 }
 
@@ -1429,9 +1439,10 @@ impl AtomView<'_> {
                     if let AtomView::Add(new_add) = r {
                         for c in new_add.iter() {
                             if let AtomView::Num(n) = c
-                                && n.is_zero() {
-                                    continue;
-                                }
+                                && n.is_zero()
+                            {
+                                continue;
+                            }
 
                             ns.extend(c);
                         }
@@ -1549,63 +1560,64 @@ impl AtomView<'_> {
         let mut helper = ws.new_atom();
         let mut b = ws.new_atom();
         if let AtomView::Add(a1) = self
-            && let AtomView::Add(a2) = rhs {
-                let mut s = a1.iter();
-                let mut t = a2.iter();
+            && let AtomView::Add(a2) = rhs
+        {
+            let mut s = a1.iter();
+            let mut t = a2.iter();
 
-                let mut curs = s.next();
-                let mut curst = t.next();
-                while curs.is_some() || curst.is_some() {
-                    if let Some(ss) = curs {
-                        if let Some(tt) = curst {
-                            match ss.cmp_terms(&tt) {
-                                Ordering::Less => {
-                                    a.extend(ss);
-                                    curs = s.next();
-                                }
-                                Ordering::Greater => {
-                                    a.extend(tt);
-                                    curst = t.next();
-                                }
-                                Ordering::Equal => {
-                                    b.set_from_view(&ss);
-                                    if b.merge_terms(tt, &mut helper) {
-                                        if let AtomView::Num(n) = b.as_view() {
-                                            if !n.is_zero() {
-                                                a.extend(b.as_view());
-                                            }
-                                        } else {
+            let mut curs = s.next();
+            let mut curst = t.next();
+            while curs.is_some() || curst.is_some() {
+                if let Some(ss) = curs {
+                    if let Some(tt) = curst {
+                        match ss.cmp_terms(&tt) {
+                            Ordering::Less => {
+                                a.extend(ss);
+                                curs = s.next();
+                            }
+                            Ordering::Greater => {
+                                a.extend(tt);
+                                curst = t.next();
+                            }
+                            Ordering::Equal => {
+                                b.set_from_view(&ss);
+                                if b.merge_terms(tt, &mut helper) {
+                                    if let AtomView::Num(n) = b.as_view() {
+                                        if !n.is_zero() {
                                             a.extend(b.as_view());
                                         }
                                     } else {
-                                        unreachable!("Equal terms do not merge:{}\n{}", ss, tt);
+                                        a.extend(b.as_view());
                                     }
-
-                                    curst = t.next();
-                                    curs = s.next();
+                                } else {
+                                    unreachable!("Equal terms do not merge:{}\n{}", ss, tt);
                                 }
-                            }
-                        } else {
-                            a.extend(ss);
-                            curs = s.next();
-                        }
-                    } else if let Some(tt) = curst {
-                        a.extend(tt);
-                        curst = t.next();
-                    }
-                }
 
-                if a.get_nargs() == 0 {
-                    out.to_num(Coefficient::zero());
-                } else if a.get_nargs() == 1 {
-                    let mut b = ws.new_atom();
-                    b.set_from_view(&a.to_add_view().iter().next().unwrap());
-                    out.set_from_view(&b.as_view());
-                } else {
-                    a.set_normalized(true);
+                                curst = t.next();
+                                curs = s.next();
+                            }
+                        }
+                    } else {
+                        a.extend(ss);
+                        curs = s.next();
+                    }
+                } else if let Some(tt) = curst {
+                    a.extend(tt);
+                    curst = t.next();
                 }
-                return;
             }
+
+            if a.get_nargs() == 0 {
+                out.to_num(Coefficient::zero());
+            } else if a.get_nargs() == 1 {
+                let mut b = ws.new_atom();
+                b.set_from_view(&a.to_add_view().iter().next().unwrap());
+                out.set_from_view(&b.as_view());
+            } else {
+                a.set_normalized(true);
+            }
+            return;
+        }
 
         if let AtomView::Add(a1) = self {
             if rhs.is_zero() {
