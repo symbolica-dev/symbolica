@@ -17680,12 +17680,23 @@ impl PythonNumericalIntegrator {
     }
 
     /// Export the grid, so that it can be sent to another thread or machine.
+    /// If you are exporting your main grid, make sure to set `export_samples` to `False` to avoid copying unprocessed samples.
+    ///
     /// Use `import_grid` to load the grid.
-    fn export_grid<'p>(&self, py: Python<'p>) -> PyResult<Bound<'p, PyBytes>> {
-        bincode::encode_to_vec(
-            &self.grid.clone_without_samples(),
-            bincode::config::standard(),
-        )
+    #[pyo3(signature = (export_samples = true))]
+    fn export_grid<'p>(
+        &self,
+        export_samples: bool,
+        py: Python<'p>,
+    ) -> PyResult<Bound<'p, PyBytes>> {
+        if export_samples {
+            bincode::encode_to_vec(&self.grid, bincode::config::standard())
+        } else {
+            bincode::encode_to_vec(
+                &self.grid.clone_without_samples(),
+                bincode::config::standard(),
+            )
+        }
         .map(|a| PyBytes::new(py, &a))
         .map_err(|e| pyo3::exceptions::PyIOError::new_err(e.to_string()))
     }
