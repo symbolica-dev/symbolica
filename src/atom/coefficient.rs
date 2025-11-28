@@ -198,14 +198,16 @@ impl PackedRationalNumberWriter for Coefficient {
                 dest.put_u8(FLOAT);
 
                 // TODO: improve serialization
-                let s = f.re.serialize();
-                dest.put_u64_le(s.len() as u64 + 4);
-                dest.put_u32_le(f.re.prec());
+                let s = f.re.get_num().serialize();
+                dest.put_u64_le(s.len() as u64 + 12);
+                dest.put_u32_le(f.re.get_num().prec());
+                dest.put_f64_le(f.re.get_absolute_error());
                 dest.write_all(&s).unwrap();
 
-                let s = f.im.serialize();
-                dest.put_u64_le(s.len() as u64 + 4);
-                dest.put_u32_le(f.im.prec());
+                let s = f.im.get_num().serialize();
+                dest.put_u64_le(s.len() as u64 + 12);
+                dest.put_u32_le(f.im.get_num().prec());
+                dest.put_f64_le(f.im.get_absolute_error());
                 dest.write_all(&s).unwrap();
             }
             Coefficient::FiniteField(num, f) => {
@@ -343,9 +345,9 @@ impl PackedRationalNumberWriter for Coefficient {
                 1 + packed_size_multi_rat(&c.re) + packed_size_multi_rat(&c.im)
             }
             Coefficient::Float(f) => {
-                let s = f.re.serialize();
-                let si = f.im.serialize();
-                1 + 8 + 4 + s.len() as u64 + 8 + 4 + si.len() as u64
+                let s = f.re.get_num().serialize();
+                let si = f.im.get_num().serialize();
+                1 + 8 + 12 + s.len() as u64 + 8 + 12 + si.len() as u64
             }
             Coefficient::FiniteField(m, i) => 2 + (*m.inner(), i.0 as u64).get_packed_size(),
             Coefficient::RationalPolynomial(_) => {

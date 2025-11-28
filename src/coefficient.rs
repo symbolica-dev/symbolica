@@ -18,6 +18,7 @@ use std::{
 
 use ahash::HashMap;
 use bytes::Buf;
+use numerica::domains::float::ErrorPropagatingFloat;
 use rug::{integer::Order, ops::NegAssign};
 use smallvec::{SmallVec, smallvec};
 
@@ -87,7 +88,7 @@ pub enum Coefficient {
     /// Infinity with an optional complex phase
     Infinity(Option<Complex<Rational>>),
     Complex(Complex<Rational>),
-    Float(Complex<Float>),
+    Float(Complex<ErrorPropagatingFloat<Float>>),
     FiniteField(FiniteFieldElement<u64>, FiniteFieldIndex),
     RationalPolynomial(RationalPolynomial<IntegerRing, u16>),
 }
@@ -197,13 +198,17 @@ from_via_rational!((usize, usize));
 
 impl From<f64> for Coefficient {
     fn from(value: f64) -> Self {
-        Coefficient::Float(Float::with_val(53, value).into())
+        Coefficient::Float(Complex::from(ErrorPropagatingFloat::from(Float::with_val(
+            53, value,
+        ))))
     }
 }
 
 impl From<&f64> for Coefficient {
     fn from(value: &f64) -> Self {
-        Coefficient::Float(Float::with_val(53, value).into())
+        Coefficient::Float(Complex::from(ErrorPropagatingFloat::from(Float::with_val(
+            53, value,
+        ))))
     }
 }
 
@@ -253,6 +258,12 @@ impl From<Rational> for Coefficient {
 
 impl From<Float> for Coefficient {
     fn from(value: Float) -> Self {
+        Coefficient::Float(Complex::from(ErrorPropagatingFloat::from(value)))
+    }
+}
+
+impl From<ErrorPropagatingFloat<Float>> for Coefficient {
+    fn from(value: ErrorPropagatingFloat<Float>) -> Self {
         Coefficient::Float(value.into())
     }
 }
@@ -265,6 +276,15 @@ impl From<Complex<Rational>> for Coefficient {
 
 impl From<Complex<Float>> for Coefficient {
     fn from(value: Complex<Float>) -> Self {
+        Coefficient::Float(Complex::new(
+            ErrorPropagatingFloat::from(value.re),
+            ErrorPropagatingFloat::from(value.im),
+        ))
+    }
+}
+
+impl From<Complex<ErrorPropagatingFloat<Float>>> for Coefficient {
+    fn from(value: Complex<ErrorPropagatingFloat<Float>>) -> Self {
         Coefficient::Float(value)
     }
 }
@@ -344,7 +364,19 @@ impl Coefficient {
         }
     }
 
+    /// Returns true if the coefficient is exactly zero.
     pub fn is_zero(&self) -> bool {
+        match self {
+            Coefficient::Indeterminate | Coefficient::Infinity(_) => false,
+            Coefficient::Complex(r) => r.is_zero(),
+            Coefficient::Float(f) => f.re.is_exact_zero() && f.im.is_exact_zero(),
+            Coefficient::FiniteField(num, _field) => *num.inner() == 0,
+            Coefficient::RationalPolynomial(r) => r.numerator.is_zero(),
+        }
+    }
+
+    /// Returns true if the coefficient is zero, either exactly or within precision for floats.
+    pub fn is_zero_within_precision(&self) -> bool {
         match self {
             Coefficient::Indeterminate | Coefficient::Infinity(_) => false,
             Coefficient::Complex(r) => r.is_zero(),
@@ -354,11 +386,12 @@ impl Coefficient {
         }
     }
 
+    /// Returns true if the coefficient is exactly one.
     pub fn is_one(&self) -> bool {
         match self {
             Coefficient::Indeterminate | Coefficient::Infinity(_) => false,
             Coefficient::Complex(r) => r.is_one(),
-            Coefficient::Float(f) => f.is_one(),
+            Coefficient::Float(_) => false,
             Coefficient::FiniteField(num, field) => {
                 let f = State::get_finite_field(*field);
                 f.is_one(num)
@@ -716,12 +749,15 @@ pub struct SerializedRationalPolynomial<'a>(pub &'a [u8]);
 pub struct SerializedFloat<'a>(pub &'a [u8]);
 
 impl SerializedFloat<'_> {
-    pub fn to_float(&self) -> Float {
+    pub fn to_float(&self) -> ErrorPropagatingFloat<Float> {
         let mut d = self.0;
-        let prec = d.get_u32_le();
-        Float::deserialize(d, prec)
+        let float_prec = d.get_u32_le();
+        let prec = d.get_f64_le();
+        let f = Float::deserialize(d, float_prec);
+        ErrorPropagatingFloat::new_with_absolute_error(f, prec)
     }
 
+    /// Returns true if the float is zero within its precision.
     pub fn is_zero(&self) -> bool {
         self.to_float().is_zero() // TODO: improve
     }
@@ -768,7 +804,7 @@ impl ConvertToRing for Q {
                 Err("Cannot convert finite field to rational".to_owned())
             }
             Coefficient::RationalPolynomial(r) => Err(format!(
-"Cannot convert rational polynomial {r} to rational"
+                "Cannot convert rational polynomial {r} to rational"
             )),
         }
     }
@@ -788,9 +824,9 @@ impl ConvertToRing for Q {
                     Ok(Rational::from_int_unchecked(r, d))
                 } else {
                     Err(format!(
-"Cannot convert complex number {} to rational",
+                        "Cannot convert complex number {} to rational",
                         number.to_owned()
-))
+                    ))
                 }
             }
             CoefficientView::Large(r, i) => {
@@ -798,20 +834,20 @@ impl ConvertToRing for Q {
                     Ok(r.to_rat())
                 } else {
                     Err(format!(
-"Cannot convert complex number {} to rational",
+                        "Cannot convert complex number {} to rational",
                         number.to_owned()
-))
+                    ))
                 }
             }
             CoefficientView::Float(_, _) => Err(format!(
-"Cannot convert float {} to rational",
+                "Cannot convert float {} to rational",
                 number.to_owned()
-)),
+            )),
             CoefficientView::FiniteField(_, _) => {
                 Err("Cannot convert finite field to rational".to_owned())
             }
             CoefficientView::RationalPolynomial(_) => Err(format!(
-"Cannot convert rational polynomial {} to rational",
+                "Cannot convert rational polynomial {} to rational",
                 number.to_owned()
             )),
         }
@@ -870,9 +906,9 @@ impl ConvertToRing for IntegerRing {
             CoefficientView::Large(r, i) => {
                 if !i.is_zero() {
                     return Err(format!(
-"Cannot convert complex number {} to integer",
+                        "Cannot convert complex number {} to integer",
                         number.to_owned()
-));
+                    ));
                 }
                 let r = r.to_rat();
                 if !r.is_integer() {
@@ -881,14 +917,14 @@ impl ConvertToRing for IntegerRing {
                 Ok(r.numerator())
             }
             CoefficientView::Float(_, _) => Err(format!(
-"Cannot convert float {} to integer",
+                "Cannot convert float {} to integer",
                 number.to_owned()
-)),
+            )),
             CoefficientView::FiniteField(_, _) => {
                 Err("Cannot convert finite field to integer".to_owned())
             }
             CoefficientView::RationalPolynomial(_) => Err(format!(
-"Cannot convert rational polynomial {} to integer",
+                "Cannot convert rational polynomial {} to integer",
                 number.to_owned()
             )),
         }
@@ -955,7 +991,7 @@ where
                 Err("Cannot convert finite field to other one".to_owned())
             }
             Coefficient::RationalPolynomial(_) => Err(format!(
-"Cannot convert rational polynomial {} to finite field",
+                "Cannot convert rational polynomial {} to finite field",
                 number.to_owned()
             )),
         }
@@ -992,20 +1028,20 @@ where
                     ))
                 } else {
                     Err(format!(
-"Cannot convert complex number {} to finite field",
+                        "Cannot convert complex number {} to finite field",
                         number.to_owned()
-))
+                    ))
                 }
             }
             CoefficientView::Float(_, _) => Err(format!(
-"Cannot convert float {} to finite field",
+                "Cannot convert float {} to finite field",
                 number.to_owned()
-)),
+            )),
             CoefficientView::FiniteField(_, _) => {
                 Err("Cannot convert finite field to other one".to_owned())
             }
             CoefficientView::RationalPolynomial(_) => Err(format!(
-"Cannot convert rational polynomial {} to finite field",
+                "Cannot convert rational polynomial {} to finite field",
                 number.to_owned()
             )),
         }
@@ -1067,7 +1103,7 @@ impl ConvertToRing for FloatField<Float> {
             }
             crate::coefficient::Coefficient::Float(complex) => {
                 if complex.is_real() {
-                    Ok(complex.re)
+                    Ok(complex.re.into_value())
                 } else {
                     Err(format!("Cannot convert {complex} to real float"))
                 }
@@ -1128,7 +1164,10 @@ impl ConvertToRing for FloatField<Complex<Float>> {
                 complex.re.to_multi_prec_float(self.get_rep().re.prec()),
                 complex.im.to_multi_prec_float(self.get_rep().im.prec()),
             )),
-            crate::coefficient::Coefficient::Float(complex) => Ok(complex),
+            crate::coefficient::Coefficient::Float(complex) => Ok(Complex::new(
+                complex.re.into_value(),
+                complex.im.into_value(),
+            )),
             _ => Err(format!("Cannot convert {number} to complex")),
         }
     }
@@ -1173,7 +1212,7 @@ impl ConvertToRing for AlgebraicExtension<Q> {
             }
             Coefficient::Float(_) => Err(format!("Cannot convert float {} to extension", number)),
             Coefficient::FiniteField(_, _) => Err(format!(
-"Cannot convert finite field {} to extension",
+                "Cannot convert finite field {} to extension",
                 number
             )),
             Coefficient::RationalPolynomial(_) => {
@@ -1229,14 +1268,14 @@ impl ConvertToRing for AlgebraicExtension<Q> {
                 }
             }
             CoefficientView::Float(_, _) => Err(format!(
-"Cannot convert float {} to rational",
+                "Cannot convert float {} to rational",
                 number.to_owned()
-)),
+            )),
             CoefficientView::FiniteField(_, _) => {
                 Err("Cannot convert finite field to rational".to_owned())
             }
             CoefficientView::RationalPolynomial(_) => Err(format!(
-"Cannot convert rational polynomial {} to rational",
+                "Cannot convert rational polynomial {} to rational",
                 number.to_owned()
             )),
         }
@@ -1283,7 +1322,22 @@ impl CoefficientView<'_> {
         }
     }
 
+    /// Returns true if the coefficient is exactly zero.
     pub fn is_zero(&self) -> bool {
+        match self {
+            CoefficientView::Natural(n, _, ni, _) => *n == 0 && *ni == 0,
+            CoefficientView::Large(r, i) => r.is_zero() && i.is_zero(),
+            CoefficientView::Float(r, i) => {
+                r.to_float().is_exact_zero() && i.to_float().is_exact_zero()
+            }
+            CoefficientView::FiniteField(num, _) => *num.inner() == 0,
+            CoefficientView::RationalPolynomial(p) => p.deserialize().is_zero(),
+            CoefficientView::Indeterminate | CoefficientView::Infinity(_) => false,
+        }
+    }
+
+    /// Returns true if the coefficient is zero, either exactly or within precision for floats.
+    pub fn is_zero_within_precision(&self) -> bool {
         match self {
             CoefficientView::Natural(n, _, ni, _) => *n == 0 && *ni == 0,
             CoefficientView::Large(r, i) => r.is_zero() && i.is_zero(),
@@ -1294,11 +1348,12 @@ impl CoefficientView<'_> {
         }
     }
 
+    ///  Returns true if the coefficient is exactly one.
     pub fn is_one(&self) -> bool {
         match self {
             CoefficientView::Natural(n, d, ni, di) => *n == *d && *ni == 0 && *di == 1,
             CoefficientView::Large(r, i) => i.is_zero() && r.to_rat().is_one(),
-            CoefficientView::Float(r, i) => i.is_zero() && r.to_float().is_one(),
+            CoefficientView::Float(_, _) => false,
             CoefficientView::FiniteField(num, field) => {
                 let f = State::get_finite_field(*field);
                 f.is_one(num)
@@ -1546,16 +1601,19 @@ impl CoefficientView<'_> {
                         Coefficient::one(),
                     )
                 } else {
-                    // FIXME: what precision should be used?
                     let f = fr.to_float();
-                    let p = f.prec();
+                    let p = f.get_num().prec(); // FIXME: what precision should be used?
+
                     (
                         Coefficient::one(),
                         Complex::new(f, fi.to_float())
-                            .powf(&Complex::new(
-                                Rational::from_int_unchecked(n2, d2).to_multi_prec_float(p),
-                                Rational::from_int_unchecked(ni2, di2).to_multi_prec_float(p),
-                            ))
+                            .powf(
+                                &Complex::new(
+                                    Rational::from_int_unchecked(n2, d2).to_multi_prec_float(p),
+                                    Rational::from_int_unchecked(ni2, di2).to_multi_prec_float(p),
+                                )
+                                .into(),
+                            )
                             .into(),
                         Coefficient::one(),
                     )
@@ -1563,26 +1621,33 @@ impl CoefficientView<'_> {
             }
             (&CoefficientView::Float(fr, fi), &CoefficientView::Large(r, d)) => {
                 let f = fr.to_float();
-                let p = f.prec();
+                let p = f.get_num().prec();
                 (
                     Coefficient::one(),
                     Complex::new(f, fi.to_float())
-                        .powf(&Complex::new(
-                            r.to_rat().to_multi_prec_float(p),
-                            d.to_rat().to_multi_prec_float(p),
-                        ))
+                        .powf(
+                            &Complex::new(
+                                r.to_rat().to_multi_prec_float(p),
+                                d.to_rat().to_multi_prec_float(p),
+                            )
+                            .into(),
+                        )
                         .into(),
                     Coefficient::one(),
                 )
             }
             (&CoefficientView::Natural(n2, d2, ni2, di2), &CoefficientView::Float(fr, fi)) => {
                 let f = fr.to_float();
-                let p = f.prec();
+                let p = f.get_num().prec();
                 (
                     Coefficient::one(),
                     Complex::new(
-                        Rational::from_int_unchecked(n2, d2).to_multi_prec_float(p),
-                        Rational::from_int_unchecked(ni2, di2).to_multi_prec_float(p),
+                        Rational::from_int_unchecked(n2, d2)
+                            .to_multi_prec_float(p)
+                            .into(),
+                        Rational::from_int_unchecked(ni2, di2)
+                            .to_multi_prec_float(p)
+                            .into(),
                     )
                     .powf(&Complex::new(f, fi.to_float()))
                     .into(),
@@ -1591,12 +1656,12 @@ impl CoefficientView<'_> {
             }
             (&CoefficientView::Large(r, d), &CoefficientView::Float(fr, fi)) => {
                 let f = fr.to_float();
-                let p = f.prec();
+                let p = f.get_num().prec();
                 (
                     Coefficient::one(),
                     Complex::new(
-                        r.to_rat().to_multi_prec_float(p),
-                        d.to_rat().to_multi_prec_float(p),
+                        r.to_rat().to_multi_prec_float(p).into(),
+                        d.to_rat().to_multi_prec_float(p).into(),
                     )
                     .powf(&Complex::new(f, fi.to_float()))
                     .into(),
@@ -2550,6 +2615,8 @@ impl TryFrom<&Atom> for Float {
     }
 }
 
+// TODO: add conversion from errorpropagating float
+
 impl<'a> TryFrom<AtomView<'a>> for Float {
     type Error = &'static str;
 
@@ -2558,7 +2625,7 @@ impl<'a> TryFrom<AtomView<'a>> for Float {
             match n.get_coeff_view() {
                 CoefficientView::Float(r, i) => {
                     if i.is_zero() {
-                        Ok(r.to_float())
+                        Ok(r.to_float().into_value())
                     } else {
                         Err("Cannot convert complex number to float")
                     }
@@ -2593,7 +2660,10 @@ impl<'a> TryFrom<AtomView<'a>> for Complex<Float> {
     fn try_from(value: AtomView<'a>) -> Result<Self, Self::Error> {
         if let AtomView::Num(n) = value {
             match n.get_coeff_view() {
-                CoefficientView::Float(f, i) => Ok(Complex::new(f.to_float(), i.to_float())),
+                CoefficientView::Float(f, i) => Ok(Complex::new(
+                    f.to_float().into_value(),
+                    i.to_float().into_value(),
+                )),
                 _ => Err("Not a float"),
             }
         } else {
@@ -2855,27 +2925,61 @@ impl AtomView<'_> {
         match self {
             AtomView::Num(n) => match n.get_coeff_view() {
                 CoefficientView::Natural(n, d, ni, di) => {
-                    out.to_num(Coefficient::Float(Complex::new(
-                        Float::with_val(binary_prec, n) / Float::with_val(binary_prec, d),
-                        Float::with_val(binary_prec, ni) / Float::with_val(binary_prec, di),
-                    )));
+                    let re = if n == 0 {
+                        ErrorPropagatingFloat::new_inf_prec(Float::with_val(binary_prec, 0))
+                    } else {
+                        ErrorPropagatingFloat::from(
+                            Float::with_val(binary_prec, n) / Float::with_val(binary_prec, d),
+                        )
+                    };
+
+                    let im = if ni == 0 {
+                        ErrorPropagatingFloat::new_inf_prec(Float::with_val(binary_prec, 0))
+                    } else {
+                        ErrorPropagatingFloat::from(
+                            Float::with_val(binary_prec, ni) / Float::with_val(binary_prec, di),
+                        )
+                    };
+
+                    out.to_num(Coefficient::Float(Complex::new(re, im)));
                 }
                 CoefficientView::Float(r, i) => {
-                    let mut f = r.to_float();
-                    let mut g = i.to_float();
-                    if f.prec() > binary_prec || g.prec() > binary_prec {
-                        f.set_prec(binary_prec);
-                        g.set_prec(binary_prec);
-                        out.to_num(Coefficient::Float(Complex::new(f, g)));
+                    let f = r.to_float();
+                    let g = i.to_float();
+
+                    if f.get_num().prec() > binary_prec || g.get_num().prec() > binary_prec {
+                        let mut fc = f.get_num().clone();
+                        let mut gc = g.get_num().clone();
+                        fc.set_prec(binary_prec);
+                        gc.set_prec(binary_prec);
+                        // TODO: shrink error propagation accordingly
+                        out.to_num(Coefficient::Float(Complex::new(
+                            ErrorPropagatingFloat::new(fc, f.get_accuracy()),
+                            ErrorPropagatingFloat::new(gc, g.get_accuracy()),
+                        )));
                     } else {
                         out.set_from_view(self);
                     }
                 }
                 CoefficientView::Large(r, d) => {
-                    out.to_num(Coefficient::Float(Complex::new(
-                        r.to_rat().to_multi_prec_float(binary_prec),
-                        d.to_rat().to_multi_prec_float(binary_prec),
-                    )));
+                    let r = r.to_rat();
+                    let i = d.to_rat();
+
+                    let re = if r.is_zero() {
+                        ErrorPropagatingFloat::new_inf_prec(Float::with_val(binary_prec, 0))
+                    } else {
+                        ErrorPropagatingFloat::from(r.to_multi_prec_float(binary_prec))
+                    };
+
+                    let im = if i.is_zero() {
+                        ErrorPropagatingFloat::new_inf_prec(Float::with_val(binary_prec, 0))
+                    } else {
+                        ErrorPropagatingFloat::from(ErrorPropagatingFloat::from(
+                            i.to_multi_prec_float(binary_prec),
+                        ))
+                    };
+
+                    out.to_num(Coefficient::Float(Complex::new(re, im)));
                 }
                 CoefficientView::FiniteField(_, _) => {
                     error!("Cannot convert finite field to float");
@@ -2917,12 +3021,17 @@ impl AtomView<'_> {
                 match s {
                     Symbol::PI => {
                         out.to_num(Coefficient::Float(
-                            Float::with_val(binary_prec, rug::float::Constant::Pi).into(),
+                            ErrorPropagatingFloat::from(Float::with_val(
+                                binary_prec,
+                                rug::float::Constant::Pi,
+                            ))
+                            .into(),
                         ));
                     }
                     Symbol::E => {
                         out.to_num(Coefficient::Float(
-                            Float::with_val(binary_prec, 1).exp().into(),
+                            ErrorPropagatingFloat::from(Float::with_val(binary_prec, 1).exp())
+                                .into(),
                         ));
                     }
                     _ => {
@@ -2999,8 +3108,14 @@ impl AtomView<'_> {
             self.map_coefficient_impl(
                 |c| match c {
                     CoefficientView::Float(r, i) => Coefficient::Complex(Complex::new(
-                        r.to_float().to_rational().round(relative_error),
-                        i.to_float().to_rational().round(relative_error),
+                        r.to_float()
+                            .into_value()
+                            .to_rational()
+                            .round(relative_error),
+                        i.to_float()
+                            .into_value()
+                            .to_rational()
+                            .round(relative_error),
                     )),
                     CoefficientView::Natural(n, d, ni, di) => {
                         let r = Rational::from_int_unchecked(n, d);
@@ -3136,6 +3251,8 @@ impl AtomView<'_> {
 mod test {
     use std::sync::Arc;
 
+    use numerica::domains::float::ErrorPropagatingFloat;
+
     use crate::{
         atom::{Atom, AtomCore},
         domains::float::Float,
@@ -3145,6 +3262,13 @@ mod test {
     };
 
     use super::Coefficient;
+
+    #[test]
+    fn fl_tst() {
+        let expr = parse!("sin(1/10)");
+        let expr = expr.to_float(60);
+        println!("{}", expr);
+    }
 
     #[test]
     fn rat_pow() {
@@ -3196,7 +3320,9 @@ mod test {
     #[test]
     fn float() {
         let expr = parse!("1/2 x + 5.8912734891723 + sin(1.2334)");
-        let c = Coefficient::Float(Float::with_val(200, rug::float::Constant::Pi).into());
+        let c = Coefficient::Float(
+            ErrorPropagatingFloat::from(Float::with_val(200, rug::float::Constant::Pi)).into(),
+        );
         let expr = expr * &Atom::num(c);
         let r = format!(
             "{}",

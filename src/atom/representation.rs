@@ -1382,6 +1382,7 @@ impl<'a> NumView<'a> {
         Num { data: buffer }
     }
 
+    /// Check if the number is exactly zero.
     #[inline]
     pub fn is_zero(&self) -> bool {
         if self.data.is_small_int() {
@@ -1391,6 +1392,18 @@ impl<'a> NumView<'a> {
         }
     }
 
+    /// Check if the number is zero, either exactly
+    /// or within the precision of the coefficient type.
+    #[inline]
+    pub fn is_zero_within_precision(&self) -> bool {
+        if self.data.is_small_int() {
+            self.data.is_zero_rat()
+        } else {
+            self.get_coeff_view().is_zero_within_precision()
+        }
+    }
+
+    /// Check if the number is exactly one.
     #[inline]
     pub fn is_one(&self) -> bool {
         if self.data.is_small_int() {

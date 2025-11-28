@@ -8455,8 +8455,8 @@ impl<'a> AtomView<'a> {
                 CoefficientView::Float(r, i) => {
                     // TODO: converting back to rational is slow
                     Ok(Expression::Const(Complex::new(
-                        r.to_float().to_rational(),
-                        i.to_float().to_rational(),
+                        r.to_float().get_num().to_rational(),
+                        i.to_float().get_num().to_rational(),
                     )))
                 }
                 CoefficientView::Indeterminate => {
@@ -8600,6 +8600,16 @@ impl<'a> AtomView<'a> {
                 let mut muls = vec![];
                 for arg in m.iter() {
                     let a = arg.to_eval_tree_impl(fn_map, params, args, funcs)?;
+
+                    // simplify multiplication by zero, can arise from rounding of floats
+                    if let Expression::Const(n) = &a {
+                        if n.is_zero() {
+                            return Ok(a);
+                        } else if n.is_one() {
+                            continue;
+                        }
+                    }
+
                     if let Expression::Mul(m) = a {
                         muls.extend(m);
                     } else {
@@ -8614,6 +8624,13 @@ impl<'a> AtomView<'a> {
             AtomView::Add(a) => {
                 let mut adds = vec![];
                 for arg in a.iter() {
+                    let a = arg.to_eval_tree_impl(fn_map, params, args, funcs)?;
+                    if let Expression::Const(n) = &a
+                        && n.is_zero()
+                    {
+                        continue;
+                    }
+
                     adds.push(arg.to_eval_tree_impl(fn_map, params, args, funcs)?);
                 }
 
@@ -8678,11 +8695,11 @@ impl<'a> AtomView<'a> {
                 }
                 CoefficientView::Float(r, i) => {
                     // TODO: converting back to rational is slow
-                    let rm = coeff_map(&r.to_float().to_rational());
+                    let rm = coeff_map(&r.to_float().get_num().to_rational());
                     if i.is_zero() {
                         Ok(rm)
                     } else {
-                        Ok(coeff_map(&i.to_float().to_rational())
+                        Ok(coeff_map(&i.to_float().get_num().to_rational())
                             * rm.i().ok_or_else(|| {
                                 "Numerical type does not support imaginary unit".to_string()
                             })?

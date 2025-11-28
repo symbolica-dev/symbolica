@@ -10,6 +10,7 @@ use std::{borrow::Cow, fmt::Write, string::String, sync::Arc};
 
 use ahash::HashMap;
 use bytes::Buf;
+use numerica::domains::float::ErrorPropagatingFloat;
 use rug::Integer as MultiPrecisionInteger;
 
 use smallvec::SmallVec;
@@ -640,13 +641,22 @@ impl Token {
                         out.to_num(x.into());
                     }
                 }
-                Err(_) => match Float::parse(n, None) {
+                Err(_) => match ErrorPropagatingFloat::parse(n, None) {
                     Ok(f) => {
                         // derive precision from string length, should be overestimate
                         if *is_imag {
-                            out.to_num(Complex::new(f.zero(), f).into());
+                            out.to_num(
+                                Complex::new(
+                                    ErrorPropagatingFloat::new_inf_prec(f.get_num().zero()),
+                                    f,
+                                )
+                                .into(),
+                            );
                         } else {
-                            out.to_num(Coefficient::Float(f.into()));
+                            out.to_num(Coefficient::Float(Complex::new(
+                                f.clone(), // FIXME
+                                ErrorPropagatingFloat::new_inf_prec(f.get_num().zero()),
+                            )));
                         }
                     }
                     Err(e) => Err(format!("Error parsing number: {e}"))?,
@@ -776,7 +786,7 @@ impl Token {
                         if *is_imag {
                             out.to_num(Complex::new(f.zero(), f).into());
                         } else {
-                            out.to_num(Coefficient::Float(f.into()));
+                            out.to_num(Coefficient::Float(ErrorPropagatingFloat::from(f).into()));
                         }
                     }
                     Err(e) => Err(format!("Error parsing number: {e}"))?,
@@ -2009,7 +2019,7 @@ mod test {
         assert_eq!(b, parse!("f_(x__, v___)"));
 
         let a = parse!("2*x+2*^5y + SetAccuracy[0, 10.]", Mathematica);
-        assert_eq!(a, parse!("2*x+2e5*y"));
+        assert_eq!(a, parse!("2*x+2e5*y+0.`10"));
 
         let a = parse!("\"a b $ * \\\" / // c\"", Mathematica);
         assert!(a.get_symbol().is_some());

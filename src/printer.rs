@@ -709,11 +709,11 @@ impl FormattedPrintNum for NumView<'_> {
                 print_complex_rational(real, imag, global_negative, i_str, print_state, f, opts)
             }
             CoefficientView::Float(r, i) => {
-                if i.is_zero() {
-                    r.to_float().format(opts, print_state, f)?;
-                } else {
-                    Complex::new(r.to_float(), i.to_float()).format(opts, print_state, f)?;
-                }
+                // if i.is_zero() {
+                //     r.to_float().format(opts, print_state, f)?;
+                // } else {
+                Complex::new(r.to_float(), i.to_float()).format(opts, print_state, f)?;
+                //   }
 
                 Ok(false)
             }

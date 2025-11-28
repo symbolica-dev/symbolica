@@ -444,6 +444,76 @@ impl SelfRing for Complex<Float> {
     }
 }
 
+impl SelfRing for Complex<ErrorPropagatingFloat<Float>> {
+    #[inline(always)]
+    fn is_zero(&self) -> bool {
+        SingleFloat::is_zero(&self.re) && SingleFloat::is_zero(&self.im)
+    }
+
+    #[inline(always)]
+    fn is_one(&self) -> bool {
+        SingleFloat::is_one(&self.re) && SingleFloat::is_zero(&self.im)
+    }
+
+    #[inline(always)]
+    fn format<W: std::fmt::Write>(
+        &self,
+        opts: &crate::printer::PrintOptions,
+        mut state: crate::printer::PrintState,
+        f: &mut W,
+    ) -> Result<bool, fmt::Error> {
+        let re_zero = self.re.is_exact_zero();
+        let im_zero = self.im.is_exact_zero();
+        let add_paren =
+            (state.in_product || state.in_exp || state.in_exp_base) && !re_zero && !im_zero
+                || (state.in_exp || state.in_exp_base) && !im_zero;
+        if add_paren {
+            f.write_char('(')?;
+            state.in_sum = false;
+        }
+
+        if !re_zero || im_zero {
+            self.re.get_num().format(opts, state, f)?;
+            if let Some(p) = self.re.get_precision() {
+                f.write_fmt(format_args!("`{p:.2}"))?;
+            } else if self.re.abs_err == 0. {
+                f.write_str("`")?;
+            } else {
+                f.write_fmt(format_args!("``{:.2}", -self.re.abs_err.log10()))?;
+            }
+        }
+
+        if !re_zero && !im_zero {
+            state.in_sum = true;
+        }
+
+        if !im_zero {
+            self.im.get_num().format(opts, state, f)?;
+            if let Some(p) = self.im.get_precision() {
+                f.write_fmt(format_args!("`{p:.2}"))?;
+            } else if self.re.abs_err == 0. {
+                f.write_str("`")?;
+            } else {
+                f.write_fmt(format_args!("``{:.2}", -self.im.abs_err.log10()))?;
+            }
+
+            if opts.mode.is_symbolica() && opts.color_builtin_symbols {
+                f.write_str("\u{1b}\u{5b}\u{33}\u{35}\u{6d}\u{1d456}\u{1b}\u{5b}\u{30}\u{6d}")?;
+            } else if opts.mode.is_mathematica() {
+                f.write_char('I')?;
+            } else {
+                f.write_char('𝑖')?;
+            }
+        }
+
+        if add_paren {
+            f.write_char(')')?;
+        }
+
+        Ok(false)
+    }
+}
+
 impl<T: SingleFloat + Hash + Eq + InternalOrdering> EuclideanDomain for FloatField<T> {
     #[inline(always)]
     fn rem(&self, a: &Self::Element, _: &Self::Element) -> Self::Element {
@@ -1406,17 +1476,23 @@ impl Display for Float {
                     "{0:+.1$}",
                     self.0,
                     (self.0.prec() as f64 * LOG10_2).floor() as usize
-                ))
+                ))?;
             } else {
                 f.write_fmt(format_args!(
                     "{0:.1$}",
                     self.0,
                     (self.0.prec() as f64 * LOG10_2).floor() as usize
-                ))
+                ))?;
             }
         } else {
-            Display::fmt(&self.0, f)
+            Display::fmt(&self.0, f)?;
         }
+
+        if self.0.is_zero() {
+            f.write_char('.')?;
+        }
+
+        Ok(())
     }
 }
 
@@ -1427,10 +1503,16 @@ impl LowerExp for Float {
                 "{0:.1$e}",
                 self.0,
                 (self.0.prec() as f64 * LOG10_2).floor() as usize
-            ))
+            ))?;
         } else {
-            LowerExp::fmt(&self.0, f)
+            LowerExp::fmt(&self.0, f)?;
         }
+
+        if self.0.is_zero() {
+            f.write_char('.')?;
+        }
+
+        Ok(())
     }
 }
 
@@ -1457,8 +1539,8 @@ impl Add<&Float> for Float {
     #[inline]
     fn add(mut self, rhs: &Self) -> Self::Output {
         let sp = self.prec();
-        if self.prec() < rhs.prec() {
-            self.set_prec(rhs.prec());
+        if self.prec() < rhs.prec() && rhs.0.is_normal() {
+            self.set_prec(rhs.prec()); // TODO: downgrade prec is self is not normal?
         }
 
         let e1 = self.0.get_exp();
@@ -1499,7 +1581,7 @@ impl Sub<&Float> for Float {
     #[inline]
     fn sub(mut self, rhs: &Self) -> Self::Output {
         let sp = self.prec();
-        if self.prec() < rhs.prec() {
+        if self.prec() < rhs.prec() && rhs.0.is_normal() {
             self.set_prec(rhs.prec());
         }
 
@@ -1588,7 +1670,7 @@ impl AddAssign<&Float> for Float {
     #[inline]
     fn add_assign(&mut self, rhs: &Float) {
         let sp = self.prec();
-        if self.prec() < rhs.prec() {
+        if self.prec() < rhs.prec() && rhs.0.is_normal() {
             self.set_prec(rhs.prec());
         }
 
@@ -1617,7 +1699,7 @@ impl SubAssign<&Float> for Float {
     #[inline]
     fn sub_assign(&mut self, rhs: &Float) {
         let sp = self.prec();
-        if self.prec() < rhs.prec() {
+        if self.prec() < rhs.prec() && rhs.0.is_normal() {
             self.set_prec(rhs.prec());
         }
 
@@ -2246,23 +2328,115 @@ impl Rational {
 }
 
 /// A float that does linear error propagation.
+///
+/// Equality and hashing is purely based on the value, ignoring the error.
 #[derive(Copy, Clone)]
 pub struct ErrorPropagatingFloat<T: FloatLike> {
-    value: T,
+    pub value: T,
     abs_err: f64,
 }
 
-impl<T: FloatLike + From<f64>> From<f64> for ErrorPropagatingFloat<T> {
+impl<T: FloatLike + InternalOrdering> InternalOrdering for ErrorPropagatingFloat<T> {
+    fn internal_cmp(&self, other: &Self) -> std::cmp::Ordering {
+        self.value.internal_cmp(&other.value)
+    }
+}
+
+impl<T: FloatLike + Hash> Hash for ErrorPropagatingFloat<T> {
+    fn hash<H: std::hash::Hasher>(&self, state: &mut H) {
+        self.value.hash(state);
+    }
+}
+
+impl<T: FloatLike + Eq> Eq for ErrorPropagatingFloat<T> {}
+
+impl ErrorPropagatingFloat<Float> {
+    pub fn is_negative(&self) -> bool {
+        self.value.is_negative()
+    }
+
+    /// Parse a float from a string.
+    /// Precision can be specified by a trailing backtick followed by the precision.
+    /// For example: ```1.234`20``` for a precision of 20 decimal digits.
+    /// The precision is allowed to be a floating point number.
+    ///  If `prec` is `None` and no precision is specified (either no backtick
+    /// or a backtick without a number following), the precision is derived from the string, with
+    /// a minimum of 53 bits (`f64` precision).
+    pub fn parse(s: &str, prec: Option<u32>) -> Result<Self, String> {
+        if let Some(prec) = prec {
+            Ok(ErrorPropagatingFloat::new(
+                Float(
+                    MultiPrecisionFloat::parse(s)
+                        .map_err(|e| e.to_string())?
+                        .complete(prec),
+                ),
+                LOG10_2 * prec as f64,
+            ))
+        } else if let Some((f, p)) = s.split_once('`') {
+            let dec_prec = if p.is_empty() {
+                15.954589770191001
+            } else {
+                p.parse::<f64>()
+                    .map_err(|e| format!("Invalid precision: {e}"))?
+            };
+
+            let prec = (dec_prec * LOG2_10).ceil() as u32;
+
+            let float = MultiPrecisionFloat::parse(f)
+                .map_err(|e| e.to_string())?
+                .complete(prec);
+
+            if p.is_empty() && (f == "0" || f == "0." || f == "-0" || f == "-0.") {
+                // set 0.` to exact 0
+                Ok(ErrorPropagatingFloat::new_inf_prec(Float(float)))
+            } else {
+                Ok(ErrorPropagatingFloat::new(Float(float), dec_prec))
+            }
+        } else {
+            // get the number of accurate digits
+            let digits = s
+                .chars()
+                .skip_while(|x| *x == '.' || *x == '0')
+                .take_while(|x| x.is_ascii_digit())
+                .count();
+
+            let prec = ((digits as f64 * LOG2_10).ceil() as u32).max(53);
+            Ok(ErrorPropagatingFloat::from(Float(
+                MultiPrecisionFloat::parse(s)
+                    .map_err(|e| e.to_string())?
+                    .complete(prec),
+            )))
+        }
+    }
+}
+
+impl From<f64> for ErrorPropagatingFloat<Float> {
     fn from(value: f64) -> Self {
-        if value == 0. {
+        if value.is_fully_zero() {
             ErrorPropagatingFloat {
+                abs_err: value.get_epsilon(),
                 value: value.into(),
-                abs_err: f64::EPSILON,
             }
         } else {
             ErrorPropagatingFloat {
+                abs_err: value.get_epsilon() * value.to_f64().abs(),
                 value: value.into(),
-                abs_err: f64::EPSILON * value.abs(),
+            }
+        }
+    }
+}
+
+impl<T: RealLike> From<T> for ErrorPropagatingFloat<T> {
+    fn from(value: T) -> Self {
+        if value.is_fully_zero() {
+            ErrorPropagatingFloat {
+                abs_err: value.get_epsilon(),
+                value,
+            }
+        } else {
+            ErrorPropagatingFloat {
+                abs_err: value.get_epsilon() * value.to_f64().abs(),
+                value,
             }
         }
     }
@@ -2399,21 +2573,21 @@ impl<T: RealLike + Div<Rational, Output = T>, R: Into<Rational>> Div<R>
     }
 }
 
-impl<T: FloatLike + From<f64>> Add<f64> for ErrorPropagatingFloat<T> {
+impl<T: RealLike + From<f64>> Add<f64> for ErrorPropagatingFloat<T> {
     type Output = Self;
 
     #[inline]
     fn add(self, rhs: f64) -> Self::Output {
-        self + Self::from(rhs)
+        self + &T::from(rhs).into()
     }
 }
 
-impl<T: FloatLike + From<f64>> Sub<f64> for ErrorPropagatingFloat<T> {
+impl<T: RealLike + From<f64>> Sub<f64> for ErrorPropagatingFloat<T> {
     type Output = Self;
 
     #[inline]
     fn sub(self, rhs: f64) -> Self::Output {
-        self - Self::from(rhs)
+        self - &T::from(rhs).into()
     }
 }
 
@@ -2422,7 +2596,7 @@ impl<T: RealLike + From<f64>> Mul<f64> for ErrorPropagatingFloat<T> {
 
     #[inline]
     fn mul(self, rhs: f64) -> Self::Output {
-        self * Self::from(rhs)
+        self * &T::from(rhs).into()
     }
 }
 
@@ -2431,7 +2605,7 @@ impl<T: RealLike + From<f64>> Div<f64> for ErrorPropagatingFloat<T> {
 
     #[inline]
     fn div(self, rhs: f64) -> Self::Output {
-        self / Self::from(rhs)
+        self / &T::from(rhs).into()
     }
 }
 
@@ -2544,6 +2718,24 @@ impl<T: RealLike> ErrorPropagatingFloat<T> {
         }
     }
 
+    /// Create a new precision tracking float with infinite precision (no error).
+    pub fn new_inf_prec(value: T) -> Self {
+        ErrorPropagatingFloat { abs_err: 0., value }
+    }
+
+    /// Check if the float is exact (no error).
+    pub fn is_exact(&self) -> bool {
+        self.abs_err == 0.
+    }
+
+    pub fn is_exact_zero(&self) -> bool {
+        self.is_exact() && self.value.is_fully_zero()
+    }
+
+    pub fn new_with_absolute_error(value: T, abs_err: f64) -> Self {
+        ErrorPropagatingFloat { abs_err, value }
+    }
+
     pub fn get_absolute_error(&self) -> f64 {
         self.abs_err
     }
@@ -2595,18 +2787,26 @@ impl<T: FloatLike> ErrorPropagatingFloat<T> {
     pub fn get_num(&self) -> &T {
         &self.value
     }
+
+    pub fn into_value(self) -> T {
+        self.value
+    }
 }
 
 impl<T: RealLike> fmt::Display for ErrorPropagatingFloat<T> {
     fn fmt(&self, f: &mut Formatter<'_>) -> fmt::Result {
         if let Some(p) = self.get_precision() {
             if p < 0. {
-                f.write_char('0')
+                f.write_str("0.")
             } else {
-                f.write_fmt(format_args!("{0:.1$}", self.value, p as usize))
+                if p.is_infinite() {
+                    return f.write_fmt(format_args!("{}", self.value));
+                } else {
+                    f.write_fmt(format_args!("{0:.1$}", self.value, p as usize))
+                }
             }
         } else {
-            f.write_char('0')
+            f.write_str("0.")
         }
     }
 }
@@ -2617,6 +2817,8 @@ impl<T: RealLike> Debug for ErrorPropagatingFloat<T> {
 
         if let Some(p) = self.get_precision() {
             f.write_fmt(format_args!("`{p:.2}"))
+        } else if self.abs_err == 0. {
+            f.write_fmt(format_args!("`"))
         } else {
             f.write_fmt(format_args!("``{:.2}", -self.abs_err.log10()))
         }
@@ -2654,14 +2856,14 @@ impl<T: RealLike> FloatLike for ErrorPropagatingFloat<T> {
     fn zero(&self) -> Self {
         ErrorPropagatingFloat {
             value: self.value.zero(),
-            abs_err: 2f64.pow(-(self.value.get_precision() as f64)),
+            abs_err: 0., // zero has no error
         }
     }
 
     fn new_zero() -> Self {
         ErrorPropagatingFloat {
             value: T::new_zero(),
-            abs_err: 2f64.powi(-53),
+            abs_err: 0.,
         }
     }
 
@@ -4284,6 +4486,15 @@ impl Complex<Rational> {
         let gcd_im = self.im.gcd(&other.im);
 
         Complex::new(gcd_re, gcd_im)
+    }
+}
+
+impl<T: RealLike> From<Complex<T>> for Complex<ErrorPropagatingFloat<T>> {
+    fn from(value: Complex<T>) -> Self {
+        Complex {
+            re: ErrorPropagatingFloat::from(value.re),
+            im: ErrorPropagatingFloat::from(value.im),
+        }
     }
 }
 
