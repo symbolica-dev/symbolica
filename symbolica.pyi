@@ -5315,9 +5315,13 @@ class NumericalIntegrator:
 
     def export_grid(
         self,
+        export_samples: bool = True,
     ) -> bytes:
         """Export the grid, so that it can be sent to another thread or machine.
-        Use `import_grid` to load the grid."""
+        If you are exporting your main grid, make sure to set `export_samples` to `False` to avoid copying unprocessed samples.
+
+        Use `import_grid` to load the grid.        
+        """
 
     def get_live_estimate(
         self,
