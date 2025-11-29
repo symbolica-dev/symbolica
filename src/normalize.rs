@@ -1018,7 +1018,14 @@ impl AtomView<'_> {
                                 out.set_from_view(&inner.as_view());
                             } else {
                                 let (b, e) = p.get_base_exp();
-                                if b.is_positive() {
+                                if e.is_integer() {
+                                    let mut new_base = workspace.new_atom();
+                                    let nb = new_base.to_fun(Symbol::CONJ);
+                                    nb.add_arg(b);
+                                    let mut new_pow = workspace.new_atom();
+                                    new_pow.to_pow(new_base.as_view(), e);
+                                    new_pow.as_view().normalize(workspace, out);
+                                } else if b.is_positive() {
                                     let mut new_exp = workspace.new_atom();
                                     let ne = new_exp.to_fun(Symbol::CONJ);
                                     ne.add_arg(e);
