@@ -1012,7 +1012,7 @@ impl AtomView<'_> {
                             }
                         }
                         AtomView::Pow(p) => {
-                            if self.is_real() {
+                            if arg.is_real() {
                                 let mut inner = workspace.new_atom();
                                 inner.set_from_view(&arg);
                                 out.set_from_view(&inner.as_view());

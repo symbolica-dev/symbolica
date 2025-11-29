@@ -383,7 +383,17 @@ fn is_licensed() -> bool {
 )]
 #[pyfunction]
 fn set_license_key(key: String) -> PyResult<()> {
-    LicenseManager::set_license_key(&key).map_err(exceptions::PyException::new_err)
+    Err(exceptions::PyDeprecationWarning::new_err(format!(
+        "This function no longer sets the license key.
+You can set the license key through the environment variable SYMBOLICA_LICENSE before importing Symbolica:
+
+import os  # noqa: E402
+os.environ['SYMBOLICA_LICENSE'] = '{}'  # noqa: E402
+
+from symbolica import *
+",
+        key
+    )))
 }
 
 /// Request a key for **non-professional** use for the user `name`, that will be sent to the e-mail address
