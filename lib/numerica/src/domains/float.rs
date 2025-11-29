@@ -474,12 +474,15 @@ impl SelfRing for Complex<ErrorPropagatingFloat<Float>> {
 
         if !re_zero || im_zero {
             self.re.get_num().format(opts, state, f)?;
-            if let Some(p) = self.re.get_precision() {
-                f.write_fmt(format_args!("`{p:.2}"))?;
-            } else if self.re.abs_err == 0. {
-                f.write_str("`")?;
-            } else {
-                f.write_fmt(format_args!("``{:.2}", -self.re.abs_err.log10()))?;
+
+            if opts.print_precision {
+                if let Some(p) = self.re.get_precision() {
+                    f.write_fmt(format_args!("`{p:.2}"))?;
+                } else if self.re.abs_err == 0. {
+                    f.write_str("`")?;
+                } else {
+                    f.write_fmt(format_args!("``{:.2}", -self.re.abs_err.log10()))?;
+                }
             }
         }
 
@@ -489,12 +492,15 @@ impl SelfRing for Complex<ErrorPropagatingFloat<Float>> {
 
         if !im_zero {
             self.im.get_num().format(opts, state, f)?;
-            if let Some(p) = self.im.get_precision() {
-                f.write_fmt(format_args!("`{p:.2}"))?;
-            } else if self.re.abs_err == 0. {
-                f.write_str("`")?;
-            } else {
-                f.write_fmt(format_args!("``{:.2}", -self.im.abs_err.log10()))?;
+
+            if opts.print_precision {
+                if let Some(p) = self.im.get_precision() {
+                    f.write_fmt(format_args!("`{p:.2}"))?;
+                } else if self.re.abs_err == 0. {
+                    f.write_str("`")?;
+                } else {
+                    f.write_fmt(format_args!("``{:.2}", -self.im.abs_err.log10()))?;
+                }
             }
 
             if opts.mode.is_symbolica() && opts.color_builtin_symbols {
@@ -616,6 +622,7 @@ pub trait RealLike: SingleFloat {
     fn to_usize_clamped(&self) -> usize;
     fn to_f64(&self) -> f64;
     fn round_to_nearest_integer(&self) -> Integer;
+    fn zero_with_prec_hint(prec: u32) -> Self;
 }
 
 /// A float that can be constructed without any parameters, such as `f64` (excluding multi-precision floats).
@@ -774,6 +781,10 @@ impl RealLike for f64 {
         } else {
             Integer::from_f64(*self + 0.5)
         }
+    }
+
+    fn zero_with_prec_hint(_prec: u32) -> Self {
+        0.
     }
 }
 
@@ -1185,6 +1196,10 @@ impl RealLike for F64 {
     #[inline(always)]
     fn round_to_nearest_integer(&self) -> Integer {
         self.0.round_to_nearest_integer()
+    }
+
+    fn zero_with_prec_hint(_prec: u32) -> Self {
+        0f64.into()
     }
 }
 
@@ -2145,6 +2160,10 @@ impl RealLike for Float {
     fn round_to_nearest_integer(&self) -> Integer {
         self.0.to_integer().unwrap().into()
     }
+
+    fn zero_with_prec_hint(prec: u32) -> Self {
+        Float::with_val(prec, 0)
+    }
 }
 
 impl Real for Float {
@@ -2388,7 +2407,7 @@ impl ErrorPropagatingFloat<Float> {
 
             if p.is_empty() && (f == "0" || f == "0." || f == "-0" || f == "-0.") {
                 // set 0.` to exact 0
-                Ok(ErrorPropagatingFloat::new_inf_prec(Float(float)))
+                Ok(ErrorPropagatingFloat::exact_zero(prec))
             } else {
                 Ok(ErrorPropagatingFloat::new(Float(float), dec_prec))
             }
@@ -2718,9 +2737,14 @@ impl<T: RealLike> ErrorPropagatingFloat<T> {
         }
     }
 
-    /// Create a new precision tracking float with infinite precision (no error).
-    pub fn new_inf_prec(value: T) -> Self {
-        ErrorPropagatingFloat { abs_err: 0., value }
+    /// Create a new precision tracking float that represents an exact zero (no error).
+    /// Upon any unary operation such as `cos`, if the result is also not exactly zero,
+    /// the precision will be set to `prec`, which is the binary precision of the underlying float.
+    pub fn exact_zero(prec: u32) -> Self {
+        ErrorPropagatingFloat {
+            abs_err: 0.,
+            value: T::zero_with_prec_hint(prec),
+        }
     }
 
     /// Check if the float is exact (no error).
@@ -2765,7 +2789,7 @@ impl<T: RealLike> ErrorPropagatingFloat<T> {
     /// of the underlying float.
     #[inline(always)]
     pub fn truncate(mut self) -> Self {
-        if self.value.fixed_precision() {
+        if self.abs_err == 0. && !self.value.is_fully_zero() || self.value.fixed_precision() {
             self.abs_err = self
                 .abs_err
                 .max(self.value.get_epsilon() * self.value.to_f64());
@@ -3002,6 +3026,13 @@ impl<T: RealLike> RealLike for ErrorPropagatingFloat<T> {
     fn round_to_nearest_integer(&self) -> Integer {
         // TODO: what does this do with the error?
         self.value.round_to_nearest_integer()
+    }
+
+    fn zero_with_prec_hint(prec: u32) -> Self {
+        ErrorPropagatingFloat {
+            value: T::zero_with_prec_hint(prec),
+            abs_err: 0.,
+        }
     }
 }
 
@@ -3577,6 +3608,10 @@ impl RealLike for Rational {
     #[inline(always)]
     fn round_to_nearest_integer(&self) -> Integer {
         self.round_to_nearest_integer()
+    }
+
+    fn zero_with_prec_hint(_prec: u32) -> Self {
+        Rational::zero()
     }
 }
 

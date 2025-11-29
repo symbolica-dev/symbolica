@@ -643,20 +643,12 @@ impl Token {
                 }
                 Err(_) => match ErrorPropagatingFloat::parse(n, None) {
                     Ok(f) => {
+                        let zero = ErrorPropagatingFloat::exact_zero(f.get_num().prec());
                         // derive precision from string length, should be overestimate
                         if *is_imag {
-                            out.to_num(
-                                Complex::new(
-                                    ErrorPropagatingFloat::new_inf_prec(f.get_num().zero()),
-                                    f,
-                                )
-                                .into(),
-                            );
+                            out.to_num(Complex::new(zero, f).into());
                         } else {
-                            out.to_num(Coefficient::Float(Complex::new(
-                                f.clone(), // FIXME
-                                ErrorPropagatingFloat::new_inf_prec(f.get_num().zero()),
-                            )));
+                            out.to_num(Coefficient::Float(Complex::new(f, zero)));
                         }
                     }
                     Err(e) => Err(format!("Error parsing number: {e}"))?,
@@ -2094,7 +2086,10 @@ mod test {
         let input = parse!("1.2`20x+1e-5`20+1e+5 * 1.1234e23 +2exp(5)");
 
         let r = format!("{}", input.printer(PrintOptions::file_no_namespace()));
-        assert_eq!(r, "1.2000000000000000000*x+2*exp(5)+1.123400000000000e28");
+        assert_eq!(
+            r,
+            "1.2000000000000000000`20.00*x+2*exp(5)+1.123400000000000e28`15.65"
+        );
     }
 
     #[test]

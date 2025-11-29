@@ -2926,7 +2926,7 @@ impl AtomView<'_> {
             AtomView::Num(n) => match n.get_coeff_view() {
                 CoefficientView::Natural(n, d, ni, di) => {
                     let re = if n == 0 {
-                        ErrorPropagatingFloat::new_inf_prec(Float::with_val(binary_prec, 0))
+                        ErrorPropagatingFloat::exact_zero(binary_prec)
                     } else {
                         ErrorPropagatingFloat::from(
                             Float::with_val(binary_prec, n) / Float::with_val(binary_prec, d),
@@ -2934,7 +2934,7 @@ impl AtomView<'_> {
                     };
 
                     let im = if ni == 0 {
-                        ErrorPropagatingFloat::new_inf_prec(Float::with_val(binary_prec, 0))
+                        ErrorPropagatingFloat::exact_zero(binary_prec)
                     } else {
                         ErrorPropagatingFloat::from(
                             Float::with_val(binary_prec, ni) / Float::with_val(binary_prec, di),
@@ -2966,13 +2966,13 @@ impl AtomView<'_> {
                     let i = d.to_rat();
 
                     let re = if r.is_zero() {
-                        ErrorPropagatingFloat::new_inf_prec(Float::with_val(binary_prec, 0))
+                        ErrorPropagatingFloat::exact_zero(binary_prec)
                     } else {
                         ErrorPropagatingFloat::from(r.to_multi_prec_float(binary_prec))
                     };
 
                     let im = if i.is_zero() {
-                        ErrorPropagatingFloat::new_inf_prec(Float::with_val(binary_prec, 0))
+                        ErrorPropagatingFloat::exact_zero(binary_prec)
                     } else {
                         ErrorPropagatingFloat::from(ErrorPropagatingFloat::from(
                             i.to_multi_prec_float(binary_prec),
@@ -3333,7 +3333,7 @@ mod test {
         );
         assert_eq!(
             r,
-            "1.57079632679489661923132169163975144209858469968755291048747*x+21.4724504210349"
+            "1.57079632679489661923132169163975144209858469968755291048747`60.21*x+21.4724504210349`15.99"
         );
     }
 
@@ -3347,7 +3347,7 @@ mod test {
         );
         assert_eq!(
             r,
-            "5.00000000000000000000000000000000000000000000000000000000000e-1*x+6.81640613709185816359170669566511987261485697756222332885129e-1"
+            "5.00000000000000000000000000000000000000000000000000000000000e-1`60.21*x+6.81640613709185816359170669566511987261485697756222332885129e-1`60.30"
         );
     }
 
