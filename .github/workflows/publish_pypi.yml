@@ -70,9 +70,9 @@ jobs:
           path-type: inherit
           install: >-
             mingw-w64-x86_64-gcc
-            mingw-w64-x86_64-gmp
-            mingw-w64-x86_64-mpfr
             mingw-w64-x86_64-rust
+            mingw-w64-x86_64-make
+            m4
 
       - name: Build and Repair wheels
         shell: msys2 {0}
