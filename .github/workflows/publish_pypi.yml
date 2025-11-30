@@ -52,3 +52,37 @@ jobs:
         with:
           name: wheels-macos-${{ matrix.runner[1] }}
           path: dist
+  windows:
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+          architecture: "x64"
+
+      - name: Setup MSYS2
+        uses: msys2/setup-msys2@v2
+        with:
+          msystem: MINGW64
+          update: true
+          path-type: inherit
+          install: >-
+            mingw-w64-x86_64-gcc
+            mingw-w64-x86_64-rust
+            mingw-w64-x86_64-make
+            m4
+
+      - name: Build and Repair wheels
+        shell: msys2 {0}
+        run: |
+          pip install maturin delvewheel
+          maturin build --release --out dist
+          delvewheel repair dist/*.whl --wheel-dir wheelhouse
+
+      - name: Upload wheels
+        uses: actions/upload-artifact@v4
+        with:
+          name: wheels-windows-x86_64
+          path: wheelhouse
