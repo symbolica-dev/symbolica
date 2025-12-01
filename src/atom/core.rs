@@ -6,7 +6,10 @@ use ahash::{HashMap, HashSet};
 use rayon::ThreadPool;
 
 use crate::{
-    atom::{FunctionBuilder, Indeterminate, KeyLookup},
+    atom::{
+        AddView, FunctionBuilder, Indeterminate, KeyLookup, MulView, NumView, VarView,
+        representation::FunView,
+    },
     coefficient::{Coefficient, CoefficientView, ConvertToRing},
     domains::{
         EuclideanDomain, InternalOrdering,
@@ -52,6 +55,46 @@ use super::{
 pub trait AtomCore: private::Sealed {
     /// Take a view of the atom.
     fn as_atom_view(&self) -> AtomView<'_>;
+
+    /// Get a function view if the atom is a function.
+    fn as_fun_view(&self) -> Option<FunView<'_>> {
+        match self.as_atom_view() {
+            AtomView::Fun(f) => Some(f),
+            _ => None,
+        }
+    }
+
+    /// Get a variable view if the atom is a variable.
+    fn as_var_view(&self) -> Option<VarView<'_>> {
+        match self.as_atom_view() {
+            AtomView::Var(v) => Some(v),
+            _ => None,
+        }
+    }
+
+    /// Get a numerical view if the atom is a number.
+    fn as_num_view(&self) -> Option<NumView<'_>> {
+        match self.as_atom_view() {
+            AtomView::Num(n) => Some(n),
+            _ => None,
+        }
+    }
+
+    /// Get a multiplication view if the atom is a multiplication.
+    fn as_mul_view(&self) -> Option<MulView<'_>> {
+        match self.as_atom_view() {
+            AtomView::Mul(m) => Some(m),
+            _ => None,
+        }
+    }
+
+    /// Get an addition view if the atom is an addition.
+    fn as_add_view(&self) -> Option<AddView<'_>> {
+        match self.as_atom_view() {
+            AtomView::Add(a) => Some(a),
+            _ => None,
+        }
+    }
 
     /// Export the atom and state to a binary stream. It can be loaded
     /// with [Atom::import].

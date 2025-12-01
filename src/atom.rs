@@ -384,6 +384,7 @@ pub struct SymbolBuilder {
     normalization_function: Option<NormalizationFunction>,
     print_function: Option<PrintFunction>,
     derivative_function: Option<DerivativeFunction>,
+    generator: Option<Box<dyn Fn(&[Symbol], SymbolBuilder) -> SymbolBuilder + Send + Sync>>,
 }
 
 impl SymbolBuilder {
@@ -397,6 +398,7 @@ impl SymbolBuilder {
             normalization_function: None,
             print_function: None,
             derivative_function: None,
+            generator: None,
         }
     }
 
@@ -493,6 +495,65 @@ impl SymbolBuilder {
     ) -> Self {
         self.derivative_function = Some(Box::new(derivative_function));
         self
+    }
+
+    /// Add a custom generator function that receives the list of all jointly defined symbols.
+    /// Can be used to define custom normalization/derivative functions that depend on each other.
+    pub fn with_generator(
+        mut self,
+        f: impl Fn(&[Symbol], SymbolBuilder) -> SymbolBuilder + Send + Sync + 'static,
+    ) -> Self {
+        self.generator = Some(Box::new(f));
+        self
+    }
+
+    /// Create multiple symbols from a list of builders. The symbols can have interdependent generators.
+    pub fn build_group(
+        builders: Vec<SymbolBuilder>,
+    ) -> Result<Vec<Symbol>, SmartString<LazyCompact>> {
+        let state = &mut State::get_state_mut();
+
+        // now that the state is locked, we can build symbol representatives, knowing their index
+        // they are not yet inserted into the state
+        let mut next_index = state.get_next_symbol_index();
+        let mut symbols = vec![];
+        for b in &builders {
+            if state.fetch_symbol(&b.symbol.symbol).is_some() {
+                return Err(format!("Symbol {} is already defined.", b.symbol.symbol).into());
+            }
+
+            if let Some(attr) = b.attributes.as_ref() {
+                symbols.push(Symbol::raw_fn(
+                    next_index,
+                    State::get_wildcard_level(&b.symbol.symbol),
+                    attr.contains(&SymbolAttribute::Symmetric),
+                    attr.contains(&SymbolAttribute::Antisymmetric),
+                    attr.contains(&SymbolAttribute::Cyclesymmetric),
+                    attr.contains(&SymbolAttribute::Linear),
+                    attr.contains(&SymbolAttribute::Scalar),
+                    attr.contains(&SymbolAttribute::Real),
+                    attr.contains(&SymbolAttribute::Integer),
+                    attr.contains(&SymbolAttribute::Positive),
+                ));
+            } else {
+                symbols.push(Symbol::raw_var(
+                    next_index,
+                    State::get_wildcard_level(&b.symbol.symbol),
+                ));
+            }
+
+            next_index += 1;
+        }
+
+        let mut result = Vec::with_capacity(builders.len());
+        for mut b in builders {
+            if let Some(f) = b.generator.take() {
+                b = (f)(&symbols, b);
+            }
+
+            result.push(b.build_with_state(state)?);
+        }
+        Ok(result)
     }
 
     /// Create a new symbol or return the existing symbol with the same name.
@@ -2530,6 +2591,65 @@ macro_rules! get_symbol {
                     $crate::atom::Symbol::get_symbol($crate::wrap_symbol!($id)),
                 )+
             )
+        }
+    };
+}
+
+/// Define new symbols that depend on each other for their custom normalization/derivatives etc.
+/// For a fallible version, see [try_symbol_group!].
+///
+/// Each symbol specifies a generator function that receives the list of all newly defined symbols
+/// that can be used inside symbol functions (see [SymbolBuilder::with_generator]).
+///
+/// The structure is as follows:
+///
+/// ```no_run
+/// # use symbolica::symbol_group;
+/// symbol_group!("name1"; Linear; |symbols, b| { b },
+///               "name2";; |symbols, b| { b });
+/// ```
+///
+/// For example, to define `tan` and `sec` with custom derivatives that depend on each other:
+/// ```
+/// use symbolica::{atom::AtomCore, function, symbol_group};
+/// let _ = symbol_group!("tan";;
+///     |symbs, b| {
+///         let sec = symbs[1];
+///         b.with_derivative_function(move |f, index, out| {
+///             **out = function!(sec, f.as_fun_view().unwrap().get(index)).npow(2)
+///         })
+///     },
+///     "sec";;
+///     |symbs, b| {
+///         let tan = symbs[0];
+///         b.with_derivative_function(move |f, index, out| {
+///             let sec_f = f.as_fun_view().unwrap();
+///             let arg = sec_f.get(index);
+///             **out = function!(tan, arg) * function!(sec_f.get_symbol(), arg)
+///         })
+///     }
+/// );
+/// ```
+#[macro_export]
+macro_rules! symbol_group {
+    ($($id: expr; $($attr: ident),*; $gen: expr),+) => {
+        $crate::try_symbol_group!($($id; $($attr),*; $gen),+).unwrap()
+    };
+}
+
+/// A fallible version of the [symbol_group!] macro.
+#[macro_export]
+macro_rules! try_symbol_group {
+    ($($id: expr; $($attr: ident),*; $gen: expr),+) => {
+        {
+            let mut v = vec![];
+            $(
+                let b = $crate::atom::Symbol::new($crate::wrap_symbol!($id)).with_attributes(&[$($crate::atom::SymbolAttribute::$attr,)*]).
+                    with_generator($gen);
+                v.push(b);
+            )+
+
+            $crate::atom::SymbolBuilder::build_group(v)
         }
     };
 }

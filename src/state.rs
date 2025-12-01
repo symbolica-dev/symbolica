@@ -352,6 +352,24 @@ impl State {
         self.str_to_id.get(name).cloned()
     }
 
+    /// Get the next symbol index that will be assigned.
+    pub(crate) fn get_next_symbol_index(&self) -> u32 {
+        let offset = SYMBOL_OFFSET.load(Ordering::Relaxed);
+        (ID_TO_STR.len() - offset) as u32
+    }
+
+    /// Get the wildcard level of a symbol name.
+    pub(crate) fn get_wildcard_level(str: &str) -> u8 {
+        let mut wildcard_level = 0;
+        for x in str.chars().rev() {
+            if x != '_' {
+                break;
+            }
+            wildcard_level += 1;
+        }
+        wildcard_level
+    }
+
     /// Get the symbol for a certain name if the name is already registered,
     /// else register it and return a new symbol without attributes.
     pub(crate) fn get_symbol(&mut self, name: NamespacedSymbol) -> Result<Symbol, String> {
@@ -363,13 +381,7 @@ impl State {
                     panic!("Too many variables defined");
                 }
 
-                let mut wildcard_level = 0;
-                for x in v.key().chars().rev() {
-                    if x != '_' {
-                        break;
-                    }
-                    wildcard_level += 1;
-                }
+                let wildcard_level = State::get_wildcard_level(v.key());
 
                 // there is no synchronization issue since only one thread can insert at a time
                 // as the state itself is behind a mutex
@@ -535,13 +547,7 @@ impl State {
                 // as the state itself is behind a mutex
                 let id = ID_TO_STR.len() - offset;
 
-                let mut wildcard_level = 0;
-                for x in v.key().chars().rev() {
-                    if x != '_' {
-                        break;
-                    }
-                    wildcard_level += 1;
-                }
+                let wildcard_level = State::get_wildcard_level(v.key());
 
                 let new_symbol = Symbol::raw_fn(
                     id as u32,

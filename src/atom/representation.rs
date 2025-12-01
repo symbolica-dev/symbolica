@@ -1273,6 +1273,19 @@ impl<'a> FunView<'a> {
         )
     }
 
+    /// Get the argument at the given index.
+    pub fn get(&self, index: usize) -> AtomView<'a> {
+        if let Some(v) = self.iter().nth(index) {
+            v
+        } else {
+            panic!(
+                "Index {} out of bounds for function {}",
+                index,
+                self.as_view()
+            );
+        }
+    }
+
     #[inline(always)]
     pub fn is_symmetric(&self) -> bool {
         self.data[0] & SYM_CYCLESYMMETRIC_FLAG == SYM_SYMMETRIC_FLAG
