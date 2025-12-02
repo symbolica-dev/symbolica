@@ -4,8 +4,12 @@
 
 use std::{ops::Neg, sync::Arc};
 
+use ahash::HashSet;
+use numerica::domains::{Field, float::Complex, rational::Rational};
+
 use crate::{
     atom::{Atom, AtomCore, AtomView, Indeterminate},
+    coefficient::{Coefficient, ConvertToRing},
     domains::{
         InternalOrdering, SelfRing,
         float::{FloatField, Real, SingleFloat},
@@ -31,6 +35,8 @@ pub enum SolveError {
     },
     Other(String),
 }
+
+impl std::error::Error for SolveError {}
 
 impl std::fmt::Display for SolveError {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
@@ -65,8 +71,7 @@ impl AtomView<'_> {
 
         let v = x.clone().into();
         let f = self
-            .to_evaluation_tree(&FunctionMap::new(), std::slice::from_ref(&v))
-            .unwrap()
+            .to_evaluation_tree(&FunctionMap::new(), std::slice::from_ref(&v))?
             .optimize(&OptimizationSettings {
                 horner_iterations: 0,
                 n_cores: 0,
@@ -77,8 +82,7 @@ impl AtomView<'_> {
             });
         let df = self
             .derivative(x)
-            .to_evaluation_tree(&FunctionMap::new(), std::slice::from_ref(&v))
-            .unwrap()
+            .to_evaluation_tree(&FunctionMap::new(), std::slice::from_ref(&v))?
             .optimize(&OptimizationSettings {
                 horner_iterations: 0,
                 n_cores: 0,
@@ -164,8 +168,7 @@ impl AtomView<'_> {
         let mut fs = system
             .iter()
             .map(|a| {
-                a.to_evaluation_tree(&FunctionMap::new(), &avars)
-                    .unwrap()
+                Ok(a.to_evaluation_tree(&FunctionMap::new(), &avars)?
                     .optimize(&OptimizationSettings {
                         horner_iterations: 0,
                         n_cores: 0,
@@ -174,9 +177,9 @@ impl AtomView<'_> {
                         abort_check: None,
                         verbose: false,
                     })
-                    .map_coeff(&|x| init[0].from_rational(x.to_real().unwrap()))
+                    .map_coeff(&|x| init[0].from_rational(x.to_real().unwrap())))
             })
-            .collect::<Vec<_>>();
+            .collect::<Result<Vec<_>, String>>()?;
 
         let mut jacobian = Vec::with_capacity(vars.len() * system.len());
         for a in system {
@@ -185,8 +188,7 @@ impl AtomView<'_> {
                 let deriv = a.derivative(v);
 
                 let a = deriv
-                    .to_evaluation_tree(&FunctionMap::new(), &avars)
-                    .unwrap()
+                    .to_evaluation_tree(&FunctionMap::new(), &avars)?
                     .optimize(&OptimizationSettings {
                         horner_iterations: 0,
                         n_cores: 0,
@@ -273,13 +275,15 @@ impl AtomView<'_> {
             .iter()
             .map(|v| v.as_atom_view().to_owned().try_into())
             .collect::<Result<Vec<_>, _>>()?;
+        let params = Self::get_parameters(&system, &vars);
 
-        AtomView::system_to_matrix_impl::<E>(&system, &vars)
+        AtomView::system_to_matrix_impl::<E>(&system, &vars, params)
     }
 
     fn system_to_matrix_impl<E: PositiveExponent>(
         system: &[AtomView],
         vars: &[PolyVariable],
+        params: HashSet<AtomView>,
     ) -> Result<
         (
             Matrix<RationalPolynomialField<Z, E>>,
@@ -291,13 +295,20 @@ impl AtomView<'_> {
         let mut row = vec![RationalPolynomial::<_, E>::new(&Z, Arc::new(vec![])); vars.len()];
         let mut rhs = vec![RationalPolynomial::<_, E>::new(&Z, Arc::new(vec![])); system.len()];
 
+        let params = Arc::new(
+            params
+                .iter()
+                .map(|x| Ok(x.to_owned().try_into()?))
+                .collect::<Result<Vec<_>, String>>()?,
+        );
+
         for (si, a) in system.iter().enumerate() {
             let rat: RationalPolynomial<Z, E> = a.try_to_rational_polynomial(&Q, &Z, None)?;
 
             let poly = rat.to_polynomial(vars, true).map_err(|e| e.to_owned())?;
 
             for e in &mut row {
-                *e = RationalPolynomial::<_, E>::new(&Z, poly.variables.clone());
+                *e = RationalPolynomial::<_, E>::new(&Z, params.clone());
             }
 
             // get linear coefficients
@@ -342,11 +353,125 @@ impl AtomView<'_> {
         Ok((m, b))
     }
 
+    /// Get all parameters in the system that are not free variables.
+    fn get_parameters<'a>(system: &[AtomView<'a>], vars: &[PolyVariable]) -> HashSet<AtomView<'a>> {
+        let mut all_params = HashSet::default();
+        for s in system {
+            all_params.extend(s.get_all_indeterminates(false));
+        }
+
+        let v: Vec<_> = vars.iter().map(|x| x.to_atom()).collect();
+        let mut all_vars = HashSet::default();
+        for x in &v {
+            all_vars.insert(x.as_view());
+        }
+
+        all_params
+            .into_iter()
+            .filter(|x| !all_vars.contains(x))
+            .collect()
+    }
+
+    fn solve_linear_system_without_parameters<T: Field + ConvertToRing>(
+        system: &[AtomView],
+        vars: &[PolyVariable],
+        field: T,
+    ) -> Result<Vec<Atom>, SolveError>
+    where
+        T::Element: Into<Coefficient>,
+    {
+        let mut mat = vec![field.zero(); system.len() * vars.len()];
+        let mut rhs = vec![field.zero(); system.len()];
+
+        let vars = Arc::new(vars.to_vec());
+        for (row, s) in system.iter().enumerate() {
+            let poly = s
+                .try_to_polynomial::<_, u8>(&field, Some(vars.clone()))
+                .map_err(|e| SolveError::Other(e))?;
+
+            for e in &poly {
+                let mut found = false;
+                for j in 0..vars.len() {
+                    if e.exponents[j] != 0 {
+                        if found {
+                            return Err(SolveError::Other("Not a linear system".to_owned()));
+                        }
+                        mat[row * vars.len() + j] = e.coefficient.clone();
+                        found = true;
+                    }
+                }
+
+                if !found {
+                    rhs[row] = field.neg(e.coefficient);
+                }
+            }
+        }
+
+        let m = Matrix::from_linear(mat, system.len() as u32, vars.len() as u32, field.clone())
+            .map_err(|e| SolveError::Other(e))?;
+        let rhs = Matrix::new_vec(rhs, field.clone());
+
+        match m.solve(&rhs) {
+            Ok(sol) => Ok(sol.into_vec().into_iter().map(|s| Atom::num(s)).collect()),
+            Err(MatrixError::Underdetermined {
+                rank,
+                row_reduced_augmented_matrix,
+            }) => {
+                let mut sols = Vec::with_capacity(vars.len());
+
+                let mut var_index = 0;
+                for r in row_reduced_augmented_matrix.row_iter() {
+                    while var_index < vars.len() as u32 && field.is_zero(&r[var_index as usize]) {
+                        sols.push(vars[var_index as usize].to_atom());
+                        var_index += 1;
+                    }
+
+                    if var_index >= vars.len() as u32 {
+                        break;
+                    }
+
+                    if field.is_one(&r[var_index as usize]) {
+                        let mut sol = Atom::num(r.last().unwrap().clone());
+
+                        for (var, coeff) in vars.iter().zip(r).skip((var_index + 1) as usize) {
+                            if !field.is_zero(coeff) {
+                                sol -= Atom::num(coeff.clone()) * var.to_atom();
+                            }
+                        }
+
+                        sols.push(sol);
+                        var_index += 1;
+                    }
+                }
+
+                for i in var_index as usize..vars.len() {
+                    sols.push(vars[i].to_atom());
+                }
+
+                Err(SolveError::Underdetermined {
+                    rank,
+                    partial_solution: sols,
+                })
+            }
+            Err(e) => Err(SolveError::Other(format!("Could not solve {e:?}"))),
+        }
+    }
+
     fn solve_linear_system_impl<E: PositiveExponent>(
         system: &[AtomView],
         vars: &[PolyVariable],
     ) -> Result<Vec<Atom>, SolveError> {
-        let (m, b) = Self::system_to_matrix_impl::<E>(system, vars)
+        let params = Self::get_parameters(system, vars);
+        if params.is_empty() {
+            if system.iter().any(|a| a.has_complex_coefficients()) {
+                let f: FloatField<Complex<Rational>> = FloatField::from_rep(Complex::new_zero());
+                return Self::solve_linear_system_without_parameters(system, vars, f);
+            } else {
+                return Self::solve_linear_system_without_parameters::<Q>(system, vars, Q);
+            }
+        }
+
+        let (m, b) = Self::system_to_matrix_impl::<E>(system, vars, params)
             .map_err(|e| SolveError::Other(e.to_string()))?;
 
         match m.solve(&b) {

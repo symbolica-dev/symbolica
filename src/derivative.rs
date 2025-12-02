@@ -81,8 +81,14 @@ impl AtomView<'_> {
 
                 // derive special functions
                 if f.get_nargs() == 1
-                    && [Symbol::EXP, Symbol::LOG, Symbol::SIN, Symbol::COS]
-                        .contains(&f.get_symbol())
+                    && [
+                        Symbol::EXP,
+                        Symbol::LOG,
+                        Symbol::SIN,
+                        Symbol::COS,
+                        Symbol::SQRT,
+                    ]
+                    .contains(&f.get_symbol())
                 {
                     let mut fn_der = workspace.new_atom();
                     match f.get_symbol() {
@@ -110,6 +116,18 @@ impl AtomView<'_> {
                             let m = fn_der.to_mul();
                             m.extend(sin.as_view());
                             m.extend(n.as_view());
+                        }
+                        Symbol::SQRT => {
+                            let mut n = workspace.new_atom();
+                            n.to_num((1, 2).into());
+
+                            let mut base = workspace.new_atom();
+                            base.to_pow(f.iter().next().unwrap(), n.as_view());
+
+                            let mut exp = workspace.new_atom();
+                            exp.to_num((-1, 2).into());
+
+                            fn_der.to_pow(base.as_view(), exp.as_view());
                         }
                         _ => unreachable!(),
                     }

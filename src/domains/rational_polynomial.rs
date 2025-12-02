@@ -132,6 +132,10 @@ where
         assert_eq!(self.numerator.variables, self.denominator.variables);
         assert_eq!(other.numerator.variables, other.denominator.variables);
 
+        if self.numerator.variables == other.numerator.variables {
+            return;
+        }
+
         // this may require a new normalization of the denominator
         self.numerator.unify_variables(&mut other.numerator);
         self.denominator.unify_variables(&mut other.denominator);
@@ -549,6 +553,21 @@ where
             .map(|v| variables.iter().position(|vv| vv == v))
             .collect();
 
+        let coefficient_vars = Arc::new(
+            self.numerator
+                .variables
+                .iter()
+                .zip(&index_mask)
+                .filter_map(|(var, mask)| {
+                    if mask.is_none() {
+                        Some(var.clone())
+                    } else {
+                        None
+                    }
+                })
+                .collect::<Vec<_>>(),
+        );
+
         if self.denominator.nvars() > 0 {
             for e in self.denominator.exponents_iter() {
                 for (c, p) in index_mask.iter().zip(e) {
@@ -563,30 +582,28 @@ where
 
         let mut e_list = vec![E::zero(); variables.len()];
 
-        let mut e_list_coeff = vec![E::zero(); self.numerator.nvars()];
+        let mut e_list_coeff = vec![E::zero(); coefficient_vars.len()];
         for e in self.numerator.into_iter() {
             for ee in &mut e_list {
                 *ee = E::zero();
             }
 
-            for ((elc, ee), m) in e_list_coeff.iter_mut().zip(e.exponents).zip(&index_mask) {
+            let mut elc_index = 0;
+            for (ee, m) in e.exponents.iter().zip(&index_mask) {
                 if let Some(p) = m {
                     e_list[*p] = *ee;
-                    *elc = E::zero();
                 } else {
-                    *elc = *ee;
+                    e_list_coeff[elc_index] = *ee;
+                    elc_index += 1;
                 }
             }
 
-            // TODO: remove variables from the var_map of the coefficient
             if let Some(r) = hm.get_mut(e_list.as_slice()) {
                 r.numerator
                     .append_monomial(e.coefficient.clone(), &e_list_coeff);
             } else {
-                let mut r = RationalPolynomial::new(
-                    &self.numerator.ring.clone(),
-                    self.numerator.variables.clone(),
-                );
+                let mut r =
+                    RationalPolynomial::new(&self.numerator.ring.clone(), coefficient_vars.clone());
                 r.numerator
                     .append_monomial(e.coefficient.clone(), &e_list_coeff);
                 hm.insert(e_list.clone(), r);
