@@ -362,8 +362,8 @@ impl AtomView<'_> {
             depth.clone()
         };
 
-        // do not do an expensive statistical zero check during the series expansion
-        // TODO: do such a check on the result of the series expansion?
+        // do not do an expensive statistical zero check at all stages during the series expansion
+        // note that a statistical check will be used in the case of negative exponents in the expansion
         let field = AtomField {
             statistical_zero_test: false,
             ..Default::default()
@@ -507,14 +507,26 @@ impl AtomView<'_> {
                             );
                         }
 
-                        if n < 0 && base_series.is_zero() {
+                        if n < 0 {
                             // in case of 1/0, grow the expansion depth of the base series
                             // it could be that the base series is exactly zero,
                             // to prevent an infinite loop, we stop the loop at ep^-1000
                             let mut current_depth = info.relative_order();
-                            while base_series.is_zero() && current_depth < 1000 {
+                            let mut first_attempt = true;
+
+                            // make sure the trailing coefficient is not zero with a statistical test
+                            while first_attempt
+                                && !base_series
+                                    .get_trailing_coefficient()
+                                    .zero_test(10, 1e-5)
+                                    .is_false()
+                                || !first_attempt && base_series.is_zero() && current_depth < 1000
+                            {
                                 let info = Series::new(
-                                    info.get_field(),
+                                    &AtomField {
+                                        statistical_zero_test: true,
+                                        ..info.get_field().clone()
+                                    },
                                     None,
                                     info.get_variable().clone(),
                                     info.get_expansion_point().clone(),
@@ -524,6 +536,7 @@ impl AtomView<'_> {
 
                                 base_series = base.series_impl(x, expansion_point, &info)?;
                                 current_depth = &current_depth * &2.into();
+                                first_attempt = false;
                             }
                         }
 
