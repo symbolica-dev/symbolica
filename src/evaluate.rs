@@ -21,6 +21,7 @@ use crate::{
     combinatorics::unique_permutations,
     domains::{
         InternalOrdering,
+        dual::DualNumberStructure,
         float::{
             Complex, Constructible, ErrorPropagatingFloat, F64, Float, FloatLike, Real, RealLike,
             SingleFloat,
@@ -1147,6 +1148,8 @@ impl<T: Default> ExpressionEvaluator<T> {
         (add_count, mul_count)
     }
 
+    /// Remove common pairs of instructions. Assumes that the arguments
+    /// of the instructions are sorted.
     fn remove_common_pairs(&mut self) -> usize {
         #[derive(Debug, Clone, PartialEq, Eq, Hash, PartialOrd, Ord)]
         enum CommonInstruction {
@@ -1724,68 +1727,7 @@ impl<T: Default + Clone + Eq + Hash> ExpressionEvaluator<T> {
         self.result_indices.append(&mut other.result_indices);
         self.reserved_indices = new_reserved_indices;
 
-        // undo the stack optimization
-        let mut unfold = HashMap::default();
-        for (index, i) in &mut self.instructions.iter_mut().enumerate() {
-            match i {
-                Instr::Add(r, a) | Instr::Mul(r, a) | Instr::ExternalFun(r, _, a) => {
-                    for aa in a {
-                        if *aa >= self.reserved_indices {
-                            *aa = unfold[aa];
-                        }
-                    }
-
-                    unfold.insert(*r, index + self.reserved_indices);
-                    *r = index + self.reserved_indices;
-                }
-                Instr::Pow(r, b, _) | Instr::BuiltinFun(r, _, b) => {
-                    if *b >= self.reserved_indices {
-                        *b = unfold[b];
-                    }
-                    unfold.insert(*r, index + self.reserved_indices);
-                    *r = index + self.reserved_indices;
-                }
-                Instr::Powf(r, b, e) => {
-                    if *b >= self.reserved_indices {
-                        *b = unfold[b];
-                    }
-                    if *e >= self.reserved_indices {
-                        *e = unfold[e];
-                    }
-                    unfold.insert(*r, index + self.reserved_indices);
-                    *r = index + self.reserved_indices;
-                }
-                Instr::IfElse(r, _) => {
-                    if *r >= self.reserved_indices {
-                        *r = unfold[r];
-                    }
-                }
-                Instr::Join(r, c, t, f) => {
-                    if *c >= self.reserved_indices {
-                        *c = unfold[c];
-                    }
-                    if *t >= self.reserved_indices {
-                        *t = unfold[t];
-                    }
-                    if *f >= self.reserved_indices {
-                        *f = unfold[f];
-                    }
-                    unfold.insert(*r, index + self.reserved_indices);
-                    *r = index + self.reserved_indices;
-                }
-                Instr::Goto(..) | Instr::Label(..) => {}
-            }
-        }
-
-        for i in &mut self.result_indices {
-            if *i >= self.reserved_indices {
-                *i = unfold[i];
-            }
-        }
-
-        for _ in 0..self.instructions.len() {
-            self.stack.push(T::default());
-        }
+        self.undo_stack_optimization();
 
         for _ in 0..cpe_rounds.unwrap_or(usize::MAX) {
             if self.remove_common_pairs() == 0 {
@@ -1908,6 +1850,73 @@ impl<T> ExpressionEvaluator<T> {
 
         for i in &mut self.result_indices {
             *i = rename_map[*i];
+        }
+    }
+}
+
+impl<T: Default> ExpressionEvaluator<T> {
+    fn undo_stack_optimization(&mut self) {
+        // undo the stack optimization
+        let mut unfold = HashMap::default();
+        for (index, i) in &mut self.instructions.iter_mut().enumerate() {
+            match i {
+                Instr::Add(r, a) | Instr::Mul(r, a) | Instr::ExternalFun(r, _, a) => {
+                    for aa in a {
+                        if *aa >= self.reserved_indices {
+                            *aa = unfold[aa];
+                        }
+                    }
+
+                    unfold.insert(*r, index + self.reserved_indices);
+                    *r = index + self.reserved_indices;
+                }
+                Instr::Pow(r, b, _) | Instr::BuiltinFun(r, _, b) => {
+                    if *b >= self.reserved_indices {
+                        *b = unfold[b];
+                    }
+                    unfold.insert(*r, index + self.reserved_indices);
+                    *r = index + self.reserved_indices;
+                }
+                Instr::Powf(r, b, e) => {
+                    if *b >= self.reserved_indices {
+                        *b = unfold[b];
+                    }
+                    if *e >= self.reserved_indices {
+                        *e = unfold[e];
+                    }
+                    unfold.insert(*r, index + self.reserved_indices);
+                    *r = index + self.reserved_indices;
+                }
+                Instr::IfElse(r, _) => {
+                    if *r >= self.reserved_indices {
+                        *r = unfold[r];
+                    }
+                }
+                Instr::Join(r, c, t, f) => {
+                    if *c >= self.reserved_indices {
+                        *c = unfold[c];
+                    }
+                    if *t >= self.reserved_indices {
+                        *t = unfold[t];
+                    }
+                    if *f >= self.reserved_indices {
+                        *f = unfold[f];
+                    }
+                    unfold.insert(*r, index + self.reserved_indices);
+                    *r = index + self.reserved_indices;
+                }
+                Instr::Goto(..) | Instr::Label(..) => {}
+            }
+        }
+
+        for i in &mut self.result_indices {
+            if *i >= self.reserved_indices {
+                *i = unfold[i];
+            }
+        }
+
+        for _ in 0..self.instructions.len() {
+            self.stack.push(T::default());
         }
     }
 }
@@ -2248,7 +2257,7 @@ struct {name}_EvaluationData {{
 #define gpuErrchk(ans, data, context) gpuAssert((ans), data, __FILE__, __LINE__, context)
 inline int gpuAssert(cudaError_t code, {name}_EvaluationData* data, const char *file, int line, const char *context)
 {{
-   if (code != cudaSuccess) 
+   if (code != cudaSuccess)
    {{
        const char* msg = cudaGetErrorString(code);
        if (msg) {{
@@ -4472,7 +4481,7 @@ impl<T: Real> ExpressionEvaluatorWithExternalFunctions<T> {
 /// A slot in a list that contains a numerical value.
 #[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
 #[cfg_attr(feature = "bincode", derive(bincode::Encode, bincode::Decode))]
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub enum Slot {
     /// An entry in the list of parameters.
     Param(usize),
@@ -4491,6 +4500,17 @@ impl std::fmt::Display for Slot {
             Slot::Const(i) => write!(f, "c{i}"),
             Slot::Temp(i) => write!(f, "t{i}"),
             Slot::Out(i) => write!(f, "o{i}"),
+        }
+    }
+}
+
+impl Slot {
+    pub fn index(&self, index: usize) -> Slot {
+        match self {
+            Slot::Param(i) => Slot::Param(*i + index),
+            Slot::Const(i) => Slot::Const(*i + index),
+            Slot::Temp(i) => Slot::Temp(*i + index),
+            Slot::Out(i) => Slot::Out(*i + index),
         }
     }
 }
@@ -4677,10 +4697,743 @@ impl<T: Clone> ExpressionEvaluator<T> {
     }
 }
 
+impl<T: Default + Clone + std::fmt::Debug> ExpressionEvaluator<T> {
+    /// Redefine every operation to take `n` components in and
+    /// yield `n` components. This can be used to define efficient
+    /// evaluation over dual numbers.
+    ///
+    /// # Example
+    ///
+    /// Create a dual number and evaluate an expression over it:
+    /// ```
+    /// use symbolica::{
+    ///     atom::{Atom, AtomCore},
+    ///     create_hyperdual_single_derivative,
+    ///     domains::{
+    ///         float::{Complex, Float, FloatLike},
+    ///         rational::Rational,
+    ///     },
+    ///     evaluate::{FunctionMap, OptimizationSettings},
+    ///     parse,
+    /// };
+    ///
+    /// create_hyperdual_single_derivative!(Dual2, 2);
+    ///
+    /// let ev = parse!("sin(x+y)^2+cos(x+y)^2 - 1")
+    ///     .evaluator(
+    ///         &FunctionMap::new(),
+    ///         &[parse!("x"), parse!("y")],
+    ///         OptimizationSettings::default(),
+    ///    )
+    ///    .unwrap();
+    ///
+    /// let vec_ev = ev.vectorize(&Dual2::<Complex<Rational>>::new_zero());
+    ///
+    /// let mut vec_f = vec_ev.map_coeff(&|x| x.re.to_f64());
+    /// let mut dest = vec![0.; 3];
+    /// vec_f.evaluate(&[2.0, 1.0, 0., 3.0, 1.0, 1.], &mut dest);
+    ///
+    /// assert!(dest.iter().all(|x| x.abs() < 1e-10));
+    /// ```
+    pub fn vectorize<V: Vectorize<T>>(mut self, v: &V) -> ExpressionEvaluator<T> {
+        self.undo_stack_optimization();
+
+        // unfold every instruction to a single operation
+        let mut new_instr = vec![];
+        for x in &mut self.instructions {
+            match x {
+                Instr::Add(o, a) => {
+                    new_instr.push(Instr::Add(*o, vec![a[0], a[1]]));
+                    for x in a.iter().skip(2) {
+                        new_instr.push(Instr::Add(*o, vec![*o, *x]));
+                    }
+                }
+                Instr::Mul(o, a) => {
+                    new_instr.push(Instr::Mul(*o, vec![a[0], a[1]]));
+                    for x in a.iter().skip(2) {
+                        new_instr.push(Instr::Mul(*o, vec![*o, *x]));
+                    }
+                }
+                _ => new_instr.push(x.clone()),
+            }
+        }
+
+        self.instructions = new_instr;
+
+        let mut constants = vec![];
+        for c in &self.stack[self.param_count..self.reserved_indices] {
+            constants.extend(v.map_coeff(c.clone()));
+        }
+        let old_constants_num = constants.len();
+
+        let mut slot_map = HashMap::default();
+        for x in 0..self.reserved_indices {
+            slot_map.insert(x, x * v.get_dimension()); // set the start of the vector
+        }
+
+        self.param_count *= v.get_dimension();
+        self.reserved_indices *= v.get_dimension();
+        macro_rules! get_slot {
+            ($i:expr) => {
+                if $i < self.param_count {
+                    Slot::Param($i)
+                } else if $i < self.reserved_indices {
+                    Slot::Const($i - self.param_count)
+                } else {
+                    Slot::Temp($i - self.reserved_indices)
+                }
+            };
+        }
+
+        macro_rules! from_slot {
+            ($i:expr) => {
+                match $i {
+                    Slot::Param(x) => x,
+                    Slot::Const(x) => x + self.param_count,
+                    Slot::Temp(x) => x + self.reserved_indices,
+                    Slot::Out(_) => unreachable!(),
+                }
+            };
+        }
+
+        let mut ins = InstructionList {
+            instructions: vec![],
+            constants,
+            dim: v.get_dimension(),
+        };
+
+        for i in self.instructions.drain(..) {
+            let (o, instr) = match i {
+                Instr::Add(o, a) => (
+                    o,
+                    VectorInstruction::Add(get_slot!(slot_map[&a[0]]), get_slot!(slot_map[&a[1]])),
+                ),
+                Instr::Mul(o, a) => (
+                    o,
+                    VectorInstruction::Mul(get_slot!(slot_map[&a[0]]), get_slot!(slot_map[&a[1]])),
+                ),
+                Instr::Pow(o, a, e) => (o, VectorInstruction::Pow(get_slot!(slot_map[&a]), e)),
+                Instr::Powf(o, b, e) => (
+                    o,
+                    VectorInstruction::Powf(get_slot!(slot_map[&b]), get_slot!(slot_map[&e])),
+                ),
+                Instr::BuiltinFun(o, f, a) => {
+                    (o, VectorInstruction::BuiltinFun(f, get_slot!(slot_map[&a])))
+                }
+                Instr::ExternalFun(o, f, a) => (
+                    o,
+                    VectorInstruction::ExternalFun(
+                        f,
+                        a.iter().map(|x| get_slot!(slot_map[x])).collect(),
+                    ),
+                ),
+                Instr::Goto(l) => {
+                    ins.instructions.push(VectorInstruction::Goto(l));
+                    continue;
+                }
+                Instr::Label(l) => {
+                    ins.instructions.push(VectorInstruction::Label(l));
+                    continue;
+                }
+                Instr::IfElse(c, l) => {
+                    ins.instructions
+                        .push(VectorInstruction::IfElse(get_slot!(slot_map[&c]), l));
+                    continue;
+                }
+                Instr::Join(o, c, t, f) => (
+                    o,
+                    VectorInstruction::Join(
+                        get_slot!(slot_map[&c]),
+                        get_slot!(slot_map[&t]),
+                        get_slot!(slot_map[&f]),
+                    ),
+                ),
+            };
+
+            let r = v.map_instruction(&instr, &mut ins);
+            assert_eq!(r.len(), v.get_dimension());
+            for ii in r {
+                ins.add(ii);
+            }
+
+            slot_map.insert(
+                o,
+                ins.instructions.len() + self.reserved_indices - v.get_dimension(),
+            );
+        }
+
+        self.stack.clear();
+        self.stack.resize(self.param_count, T::default());
+        self.stack.extend(ins.constants);
+
+        let stack_shift = self.stack.len() - old_constants_num - self.param_count;
+
+        let mut new_result_indices = vec![];
+        for x in 0..self.result_indices.len() {
+            let mut p = slot_map[&self.result_indices[x]];
+            if p >= self.reserved_indices {
+                p += stack_shift;
+            }
+
+            for i in 0..v.get_dimension() {
+                new_result_indices.push(p + i);
+            }
+        }
+
+        self.reserved_indices += stack_shift;
+        self.result_indices = new_result_indices;
+
+        for i in ins.instructions {
+            let out = self.instructions.len() + self.reserved_indices;
+            match i {
+                VectorInstruction::Add(slot, slot1) => {
+                    let mut s1 = from_slot!(slot);
+                    let mut s2 = from_slot!(slot1);
+                    if s1 > s2 {
+                        (s1, s2) = (s2, s1);
+                    }
+
+                    self.instructions.push(Instr::Add(out, vec![s1, s2]));
+                }
+                VectorInstruction::Assign(slot) => {
+                    self.instructions
+                        .push(Instr::Add(out, vec![from_slot!(slot)]));
+                }
+                VectorInstruction::Mul(slot, slot1) => {
+                    let mut s1 = from_slot!(slot);
+                    let mut s2 = from_slot!(slot1);
+                    if s1 > s2 {
+                        (s1, s2) = (s2, s1);
+                    }
+
+                    self.instructions.push(Instr::Mul(out, vec![s1, s2]));
+                }
+                VectorInstruction::Pow(slot, e) => {
+                    self.instructions.push(Instr::Pow(out, from_slot!(slot), e));
+                }
+                VectorInstruction::Powf(slot, slot1) => {
+                    self.instructions
+                        .push(Instr::Powf(out, from_slot!(slot), from_slot!(slot1)));
+                }
+                VectorInstruction::BuiltinFun(builtin_symbol, slot) => {
+                    self.instructions.push(Instr::BuiltinFun(
+                        out,
+                        builtin_symbol,
+                        from_slot!(slot),
+                    ));
+                }
+                VectorInstruction::ExternalFun(f, args) => {
+                    self.instructions.push(Instr::ExternalFun(
+                        out,
+                        f,
+                        args.iter().map(|x| from_slot!(*x)).collect(),
+                    ));
+                }
+                VectorInstruction::IfElse(cond, label) => {
+                    self.instructions
+                        .push(Instr::IfElse(from_slot!(cond), label));
+                }
+                VectorInstruction::Goto(label) => {
+                    self.instructions.push(Instr::Goto(label));
+                }
+                VectorInstruction::Label(label) => {
+                    self.instructions.push(Instr::Label(label));
+                }
+                VectorInstruction::Join(cond, t, f) => {
+                    self.instructions.push(Instr::Join(
+                        out,
+                        from_slot!(cond),
+                        from_slot!(t),
+                        from_slot!(f),
+                    ));
+                }
+            }
+        }
+
+        self.stack.resize(
+            self.reserved_indices + self.instructions.len(),
+            T::default(),
+        );
+
+        self.remove_common_pairs();
+        self.optimize_stack();
+
+        self
+    }
+}
+
+/// A trait to define how to vectorize coefficients and instructions.
+/// Every slot is mapped to `n` slots and every instruction is mapped to `n` instructions, where `n` is the dimension.
+pub trait Vectorize<T> {
+    /// Map a coefficient to a vector of coefficients of [Vectorize::get_dimension] length.
+    fn map_coeff(&self, coeff: T) -> Vec<T>;
+
+    /// Map an instruction applied to a vector of slots (components accessible with [Slot::index])
+    /// to a vector of instructions of [Vectorize::get_dimension] length.
+    fn map_instruction(
+        &self,
+        instr: &VectorInstruction,
+        instr_addr: &mut InstructionList<T>,
+    ) -> Vec<VectorInstruction>;
+
+    /// Get the dimension of the vectorization.
+    fn get_dimension(&self) -> usize;
+}
+
+impl<T: DualNumberStructure> Vectorize<Complex<Rational>> for T {
+    fn map_coeff(&self, coeff: Complex<Rational>) -> Vec<Complex<Rational>> {
+        let mut r = vec![coeff.clone()];
+        for _ in 1..self.get_len() {
+            r.push(Complex::new_zero());
+        }
+        r
+    }
+
+    fn map_instruction(
+        &self,
+        i: &VectorInstruction,
+        instrs: &mut InstructionList<Complex<Rational>>,
+    ) -> Vec<VectorInstruction> {
+        fn scalar_add(a: &Slot, b: &Slot, instrs: &mut InstructionList<Complex<Rational>>) -> Slot {
+            if instrs.is_zero(a) {
+                *b
+            } else if instrs.is_zero(b) {
+                *a
+            } else {
+                instrs.add(VectorInstruction::Add(*a, *b))
+            }
+        }
+
+        fn scalar_yield_add(
+            a: &Slot,
+            b: &Slot,
+            instrs: &mut InstructionList<Complex<Rational>>,
+        ) -> VectorInstruction {
+            if instrs.is_zero(a) {
+                VectorInstruction::Assign(*b)
+            } else if instrs.is_zero(b) {
+                VectorInstruction::Assign(*a)
+            } else {
+                VectorInstruction::Add(*a, *b)
+            }
+        }
+
+        fn scalar_mul(a: &Slot, b: &Slot, instrs: &mut InstructionList<Complex<Rational>>) -> Slot {
+            if instrs.is_zero(a) || instrs.is_one(b) {
+                *a
+            } else if instrs.is_zero(b) || instrs.is_one(a) {
+                *b
+            } else {
+                instrs.add(VectorInstruction::Mul(*a, *b))
+            }
+        }
+
+        fn scalar_yield_mul(
+            a: &Slot,
+            b: &Slot,
+            instrs: &mut InstructionList<Complex<Rational>>,
+        ) -> VectorInstruction {
+            if instrs.is_zero(a) || instrs.is_one(b) {
+                VectorInstruction::Assign(*a)
+            } else if instrs.is_zero(b) || instrs.is_one(a) {
+                VectorInstruction::Assign(*b)
+            } else {
+                VectorInstruction::Mul(*a, *b)
+            }
+        }
+
+        fn rescale(
+            a: &[Slot],
+            c: &Slot,
+            instrs: &mut InstructionList<Complex<Rational>>,
+        ) -> Vec<Slot> {
+            a.iter().map(|x| scalar_mul(x, c, instrs)).collect()
+        }
+
+        fn add(
+            a: &[Slot],
+            b: &[Slot],
+            instrs: &mut InstructionList<Complex<Rational>>,
+        ) -> Vec<Slot> {
+            a.iter()
+                .zip(b.iter())
+                .map(|(x, y)| scalar_add(x, y, instrs))
+                .collect()
+        }
+
+        fn mul(
+            a: &[Slot],
+            b: &[Slot],
+            table: &[(usize, usize, usize)],
+            instrs: &mut InstructionList<Complex<Rational>>,
+        ) -> Vec<Slot> {
+            let mut current_index = vec![];
+            for j in 0..a.len() {
+                current_index.push(scalar_mul(&a[j], &b[0], instrs));
+            }
+
+            for (si, oi, index) in table.iter() {
+                let tmp = scalar_mul(&a[*si], &b[*oi], instrs);
+                current_index[*index] = scalar_add(&current_index[*index], &tmp, instrs);
+            }
+            current_index
+        }
+
+        let mult_table = self.get_multiplication_table();
+
+        match i {
+            VectorInstruction::Add(a, b) => (0..self.get_len())
+                .map(|j| scalar_yield_add(&a.index(j), &b.index(j), instrs))
+                .collect(),
+            VectorInstruction::Mul(a, b) => {
+                let mut current_index = vec![];
+                for j in 0..self.get_len() {
+                    current_index.push(scalar_mul(&a.index(j), b, instrs));
+                }
+
+                for (si, oi, index) in self.get_multiplication_table().iter() {
+                    let tmp = scalar_mul(&a.index(*si), &b.index(*oi), instrs);
+                    current_index[*index] = scalar_add(&current_index[*index], &tmp, instrs);
+                }
+
+                current_index
+                    .iter()
+                    .map(|x| VectorInstruction::Assign(*x))
+                    .collect()
+            }
+            VectorInstruction::BuiltinFun(f, a) => match f.get_symbol() {
+                Symbol::SQRT => {
+                    let e = instrs.add(VectorInstruction::BuiltinFun(*f, *a));
+                    let norm = instrs.add(VectorInstruction::Pow(*a, -1)); // TODO: check 0?
+
+                    let zero = instrs.add_repeated_constant(Complex::new_zero());
+                    let mut r = vec![zero];
+                    r.extend((1..self.get_len()).map(|j| scalar_mul(&a.index(j), &norm, instrs)));
+
+                    let one =
+                        instrs.add_constant_in_first_component(Complex::from(Rational::one()));
+
+                    let mut accum = (0..self.get_len())
+                        .map(|j| one.index(j))
+                        .collect::<Vec<_>>();
+                    let mut res = (0..self.get_len())
+                        .map(|j| one.index(j))
+                        .collect::<Vec<_>>();
+                    let mut num = Complex::from(Rational::one());
+
+                    let mut scale = 1;
+                    for p in 1..self.get_max_depth() + 1 {
+                        scale *= p;
+                        num = num.clone()
+                            * (num.from_usize(2).inv() - &num.from_usize(p as usize - 1));
+                        accum = mul(&accum, &r, mult_table, instrs);
+
+                        let c = instrs
+                            .add_constant_in_first_component(&num * &num.from_usize(scale).inv());
+
+                        res = add(&res, &rescale(&accum, &c, instrs), instrs);
+                    }
+
+                    res.iter()
+                        .map(|x| scalar_yield_mul(x, &e, instrs))
+                        .collect()
+                }
+                Symbol::EXP => {
+                    let e = instrs.add(VectorInstruction::BuiltinFun(*f, *a));
+
+                    let one =
+                        instrs.add_constant_in_first_component(Complex::from(Rational::one()));
+
+                    let mut accum = (0..self.get_len())
+                        .map(|j| one.index(j))
+                        .collect::<Vec<_>>();
+                    let mut res = (0..self.get_len())
+                        .map(|j| one.index(j))
+                        .collect::<Vec<_>>();
+
+                    let zero = instrs.add_repeated_constant(Complex::new_zero());
+                    let mut r = vec![zero];
+                    r.extend((1..self.get_len()).map(|j| a.index(j)));
+
+                    let mut scale = Complex::from(Rational::one());
+                    for p in 0..self.get_max_depth() {
+                        scale *= Rational::from(p + 1);
+                        accum = mul(&accum, &r, mult_table, instrs);
+
+                        let c = instrs.add_constant_in_first_component(scale.inv());
+
+                        res = add(&res, &rescale(&accum, &c, instrs), instrs);
+                    }
+
+                    res.iter()
+                        .map(|x| scalar_yield_mul(x, &e, instrs))
+                        .collect()
+                }
+                Symbol::LOG => {
+                    let e = instrs.add(VectorInstruction::BuiltinFun(*f, *a));
+
+                    let norm = instrs.add(VectorInstruction::Pow(*a, -1)); // TODO: check 0?
+
+                    let zero = instrs.add_repeated_constant(Complex::new_zero());
+                    let mut r = vec![zero];
+                    r.extend((1..self.get_len()).map(|j| scalar_mul(&a.index(j), &norm, instrs)));
+
+                    let mut accum = r.clone();
+
+                    let mut res = (0..self.get_len()).map(|_| zero).collect::<Vec<_>>();
+                    res[0] = e;
+
+                    let mut scale = Complex::from(Rational::from(-1));
+                    for p in 1..self.get_max_depth() + 1 {
+                        scale *= Rational::from(-1);
+
+                        let c = instrs
+                            .add_constant_in_first_component((&scale * Rational::from(p)).inv());
+
+                        res = add(&res, &rescale(&accum, &c, instrs), instrs);
+                        accum = mul(&accum, &r, mult_table, instrs);
+                    }
+
+                    res.iter().map(|x| VectorInstruction::Assign(*x)).collect()
+                }
+                Symbol::SIN => {
+                    let s = instrs.add(VectorInstruction::BuiltinFun(*f, *a));
+                    let c = instrs.add(VectorInstruction::BuiltinFun(
+                        BuiltinSymbol(Symbol::COS),
+                        *a,
+                    ));
+
+                    let zero = instrs.add_repeated_constant(Complex::new_zero());
+                    let mut p = vec![zero];
+                    p.extend((1..self.get_len()).map(|j| a.index(j)));
+
+                    let mut e = (0..self.get_len()).map(|_| zero).collect::<Vec<_>>();
+                    e[0] = s;
+
+                    let mut sp = p.clone();
+                    let mut scale = Complex::from(Rational::one());
+                    for i in 1..self.get_max_depth() + 1 {
+                        scale *= Rational::from(i);
+                        let b = if i % 2 == 1 { c.clone() } else { s.clone() };
+
+                        let sc = instrs.add_constant_in_first_component(if i % 4 >= 2 {
+                            -scale.inv()
+                        } else {
+                            scale.inv()
+                        });
+
+                        let s = rescale(&sp, &scalar_mul(&b, &sc, instrs), instrs);
+
+                        sp = mul(&sp, &p, mult_table, instrs);
+
+                        e = add(&e, &s, instrs);
+                    }
+
+                    e.iter().map(|x| VectorInstruction::Assign(*x)).collect()
+                }
+                Symbol::COS => {
+                    let s = instrs.add(VectorInstruction::BuiltinFun(
+                        BuiltinSymbol(Symbol::SIN),
+                        *a,
+                    ));
+                    let c = instrs.add(VectorInstruction::BuiltinFun(*f, *a));
+
+                    let zero = instrs.add_repeated_constant(Complex::new_zero());
+                    let mut p = vec![zero];
+                    p.extend((1..self.get_len()).map(|j| a.index(j)));
+
+                    let mut e = (0..self.get_len()).map(|_| zero).collect::<Vec<_>>();
+                    e[0] = c;
+
+                    let mut sp = p.clone();
+                    let mut scale = Complex::from(Rational::one());
+                    for i in 1..self.get_max_depth() + 1 {
+                        scale *= Rational::from(i);
+                        let b = if i % 2 == 1 { s.clone() } else { c.clone() };
+
+                        let sc =
+                            instrs.add_constant_in_first_component(if (i % 2 == 0) ^ (i % 4 < 2) {
+                                -scale.inv()
+                            } else {
+                                scale.inv()
+                            });
+
+                        let s = rescale(&sp, &scalar_mul(&b, &sc, instrs), instrs);
+
+                        sp = mul(&sp, &p, mult_table, instrs);
+
+                        e = add(&e, &s, instrs);
+                    }
+
+                    e.iter().map(|x| VectorInstruction::Assign(*x)).collect()
+                }
+                Symbol::CONJ => {
+                    // assume variables are real
+                    (0..self.get_len())
+                        .map(|j| VectorInstruction::BuiltinFun(*f, a.index(j)))
+                        .collect()
+                }
+                _ => unimplemented!(
+                    "Vectorization not implemented for built-in function {}",
+                    f.get_symbol().get_name()
+                ),
+            },
+            VectorInstruction::Pow(a, b) => {
+                assert_eq!(*b, -1); // only b = -1 is used in practice
+                let a_inv = instrs.add(VectorInstruction::Pow(*a, -1));
+
+                let zero = instrs.add_repeated_constant(Complex::new_zero());
+                let mut r = vec![zero];
+                r.extend((1..self.get_len()).map(|j| scalar_mul(&a.index(j), &a_inv, instrs)));
+
+                let one = instrs.add_constant_in_first_component(Complex::from(Rational::one()));
+
+                let neg_one = instrs.add_repeated_constant(Complex::from(Rational::from(-1)));
+                let neg_one_v = (0..self.get_len())
+                    .map(|j| neg_one.index(j))
+                    .collect::<Vec<_>>();
+
+                let mut accum = (0..self.get_len())
+                    .map(|j| one.index(j))
+                    .collect::<Vec<_>>();
+                let mut res = (0..self.get_len())
+                    .map(|j| one.index(j))
+                    .collect::<Vec<_>>();
+
+                for i in 1..self.get_max_depth() + 1 {
+                    accum = mul(&accum, &r, mult_table, instrs);
+                    if i % 2 == 0 {
+                        res = add(&res, &accum, instrs);
+                    } else {
+                        res = add(&res, &mul(&accum, &neg_one_v, mult_table, instrs), instrs);
+                    }
+                }
+
+                res.iter()
+                    .map(|x| scalar_yield_mul(x, &a_inv, instrs))
+                    .collect()
+            }
+            VectorInstruction::Powf(b, e) => {
+                let input = VectorInstruction::BuiltinFun(BuiltinSymbol(Symbol::LOG), *b);
+                let log: Vec<_> = self
+                    .map_instruction(&input, instrs)
+                    .into_iter()
+                    .map(|x| instrs.add(x))
+                    .collect();
+                let e = (0..self.get_len()).map(|j| e.index(j)).collect::<Vec<_>>();
+                let r = mul(&log, &e, mult_table, instrs);
+
+                // exp needs adjacent slots
+                let adjacent: Vec<_> = r
+                    .into_iter()
+                    .map(|x| instrs.add(VectorInstruction::Assign(x)))
+                    .collect();
+                let exp_in = VectorInstruction::BuiltinFun(BuiltinSymbol(Symbol::EXP), adjacent[0]);
+                self.map_instruction(&exp_in, instrs)
+            }
+            VectorInstruction::ExternalFun(_, _) => {
+                todo!("External functions not supported as they return a single value")
+            }
+            VectorInstruction::Join(c, a, b) => (0..self.get_len())
+                .map(|j| VectorInstruction::Join(c.index(j), a.index(j), b.index(j)))
+                .collect(),
+            VectorInstruction::Assign(a) => (0..self.get_len())
+                .map(|j| VectorInstruction::Assign(a.index(j)))
+                .collect(),
+            VectorInstruction::Goto(_)
+            | VectorInstruction::Label(_)
+            | VectorInstruction::IfElse(..) => {
+                unreachable!()
+            }
+        }
+    }
+
+    fn get_dimension(&self) -> usize {
+        self.get_len()
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
+pub enum VectorInstruction {
+    Add(Slot, Slot),
+    Assign(Slot),
+    Mul(Slot, Slot),
+    Pow(Slot, i64),
+    Powf(Slot, Slot),
+    BuiltinFun(BuiltinSymbol, Slot),
+    ExternalFun(usize, Vec<Slot>),
+    IfElse(Slot, Label),
+    Goto(Label),
+    Label(Label),
+    Join(Slot, Slot, Slot),
+}
+
+pub struct InstructionList<T> {
+    instructions: Vec<VectorInstruction>,
+    constants: Vec<T>,
+    dim: usize,
+}
+
+impl<T> InstructionList<T> {
+    pub fn add(&mut self, instr: VectorInstruction) -> Slot {
+        self.instructions.push(instr);
+        Slot::Temp(self.instructions.len() - 1)
+    }
+}
+
+impl<T: PartialEq + Clone + std::fmt::Debug> InstructionList<T> {
+    pub fn add_constant(&mut self, value: Vec<T>) -> Slot {
+        assert_eq!(value.len(), self.dim);
+        if let Some(c) = self.constants.chunks(self.dim).position(|x| x == &value) {
+            Slot::Const(c * self.dim)
+        } else {
+            self.constants.extend(value);
+            Slot::Const(self.constants.len() - self.dim)
+        }
+    }
+
+    pub fn add_repeated_constant(&mut self, value: T) -> Slot {
+        if let Some(c) = self
+            .constants
+            .chunks(self.dim)
+            .position(|x| x.iter().all(|x| *x == value))
+        {
+            Slot::Const(c * self.dim)
+        } else {
+            for _ in 0..self.dim {
+                self.constants.push(value.clone());
+            }
+            Slot::Const(self.constants.len() - self.dim)
+        }
+    }
+}
+
+impl<T: SingleFloat> InstructionList<T> {
+    pub fn is_zero(&self, slot: &Slot) -> bool {
+        match slot {
+            Slot::Const(c) => self.constants[*c].is_zero(),
+            _ => false,
+        }
+    }
+
+    pub fn is_one(&self, slot: &Slot) -> bool {
+        match slot {
+            Slot::Const(c) => self.constants[*c].is_one(),
+            _ => false,
+        }
+    }
+
+    pub fn add_constant_in_first_component(&mut self, value: T) -> Slot {
+        let mut v = vec![value.clone()];
+        v.extend((1..self.dim).map(|_| value.zero()));
+        self.add_constant(v)
+    }
+}
+
 /// A label in the instruction list [Instr].
 #[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
 #[cfg_attr(feature = "bincode", derive(bincode::Encode, bincode::Decode))]
-#[derive(Debug, Copy, Clone, PartialEq)]
+#[derive(Debug, Copy, Clone, PartialEq, Eq, Hash)]
 pub struct Label(usize);
 
 /// An evaluation instruction.
@@ -8958,8 +9711,9 @@ mod test {
 
     use crate::{
         atom::{Atom, AtomCore},
+        create_hyperdual_from_components,
         domains::{
-            float::{Complex, Float},
+            float::{Complex, Float, FloatLike},
             rational::Rational,
         },
         evaluate::{EvaluationFn, FunctionMap, OptimizationSettings},
@@ -9120,5 +9874,45 @@ mod test {
             let res = eval.evaluate_single(&[3., 0., 2.]);
             assert_eq!(res, false_res);
         }
+    }
+
+    #[test]
+    fn vectorize_dual() {
+        create_hyperdual_from_components!(
+            Dual,
+            [
+                [0, 0, 0],
+                [1, 0, 0],
+                [0, 1, 0],
+                [0, 0, 1],
+                [1, 1, 0],
+                [1, 0, 1],
+                [0, 1, 1],
+                [1, 1, 1],
+                [2, 0, 0]
+            ]
+        );
+
+        let ev = parse!("sin(x+y)^2+cos(x+y)^2 - 1")
+            .evaluator(
+                &FunctionMap::new(),
+                &[parse!("x"), parse!("y")],
+                OptimizationSettings::default(),
+            )
+            .unwrap();
+
+        let dual = Dual::<Complex<Rational>>::new_zero();
+        let vec_ev = ev.vectorize(&dual);
+
+        let mut vec_f = vec_ev.map_coeff(&|x| x.re.to_f64());
+        let mut dest = vec![0.; 9];
+        vec_f.evaluate(
+            &[
+                2.0, 1.0, 2., 3., 4., 5., 6., 7., 8., 9., 10., 11., 12., 13., 14., 15., 16., 17.,
+            ],
+            &mut dest,
+        );
+
+        assert!(dest.iter().all(|x| x.abs() < 1e-10));
     }
 }
