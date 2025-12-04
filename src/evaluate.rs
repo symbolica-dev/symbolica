@@ -1147,6 +1147,8 @@ impl<T: Default> ExpressionEvaluator<T> {
         (add_count, mul_count)
     }
 
+    /// Remove common pairs of instructions. Assumes that the arguments
+    /// of the instructions are sorted.
     fn remove_common_pairs(&mut self) -> usize {
         #[derive(Debug, Clone, PartialEq, Eq, Hash, PartialOrd, Ord)]
         enum CommonInstruction {
@@ -1724,68 +1726,7 @@ impl<T: Default + Clone + Eq + Hash> ExpressionEvaluator<T> {
         self.result_indices.append(&mut other.result_indices);
         self.reserved_indices = new_reserved_indices;
 
-        // undo the stack optimization
-        let mut unfold = HashMap::default();
-        for (index, i) in &mut self.instructions.iter_mut().enumerate() {
-            match i {
-                Instr::Add(r, a) | Instr::Mul(r, a) | Instr::ExternalFun(r, _, a) => {
-                    for aa in a {
-                        if *aa >= self.reserved_indices {
-                            *aa = unfold[aa];
-                        }
-                    }
-
-                    unfold.insert(*r, index + self.reserved_indices);
-                    *r = index + self.reserved_indices;
-                }
-                Instr::Pow(r, b, _) | Instr::BuiltinFun(r, _, b) => {
-                    if *b >= self.reserved_indices {
-                        *b = unfold[b];
-                    }
-                    unfold.insert(*r, index + self.reserved_indices);
-                    *r = index + self.reserved_indices;
-                }
-                Instr::Powf(r, b, e) => {
-                    if *b >= self.reserved_indices {
-                        *b = unfold[b];
-                    }
-                    if *e >= self.reserved_indices {
-                        *e = unfold[e];
-                    }
-                    unfold.insert(*r, index + self.reserved_indices);
-                    *r = index + self.reserved_indices;
-                }
-                Instr::IfElse(r, _) => {
-                    if *r >= self.reserved_indices {
-                        *r = unfold[r];
-                    }
-                }
-                Instr::Join(r, c, t, f) => {
-                    if *c >= self.reserved_indices {
-                        *c = unfold[c];
-                    }
-                    if *t >= self.reserved_indices {
-                        *t = unfold[t];
-                    }
-                    if *f >= self.reserved_indices {
-                        *f = unfold[f];
-                    }
-                    unfold.insert(*r, index + self.reserved_indices);
-                    *r = index + self.reserved_indices;
-                }
-                Instr::Goto(..) | Instr::Label(..) => {}
-            }
-        }
-
-        for i in &mut self.result_indices {
-            if *i >= self.reserved_indices {
-                *i = unfold[i];
-            }
-        }
-
-        for _ in 0..self.instructions.len() {
-            self.stack.push(T::default());
-        }
+        self.undo_stack_optimization();
 
         for _ in 0..cpe_rounds.unwrap_or(usize::MAX) {
             if self.remove_common_pairs() == 0 {
@@ -1908,6 +1849,73 @@ impl<T> ExpressionEvaluator<T> {
 
         for i in &mut self.result_indices {
             *i = rename_map[*i];
+        }
+    }
+}
+
+impl<T: Default> ExpressionEvaluator<T> {
+    fn undo_stack_optimization(&mut self) {
+        // undo the stack optimization
+        let mut unfold = HashMap::default();
+        for (index, i) in &mut self.instructions.iter_mut().enumerate() {
+            match i {
+                Instr::Add(r, a) | Instr::Mul(r, a) | Instr::ExternalFun(r, _, a) => {
+                    for aa in a {
+                        if *aa >= self.reserved_indices {
+                            *aa = unfold[aa];
+                        }
+                    }
+
+                    unfold.insert(*r, index + self.reserved_indices);
+                    *r = index + self.reserved_indices;
+                }
+                Instr::Pow(r, b, _) | Instr::BuiltinFun(r, _, b) => {
+                    if *b >= self.reserved_indices {
+                        *b = unfold[b];
+                    }
+                    unfold.insert(*r, index + self.reserved_indices);
+                    *r = index + self.reserved_indices;
+                }
+                Instr::Powf(r, b, e) => {
+                    if *b >= self.reserved_indices {
+                        *b = unfold[b];
+                    }
+                    if *e >= self.reserved_indices {
+                        *e = unfold[e];
+                    }
+                    unfold.insert(*r, index + self.reserved_indices);
+                    *r = index + self.reserved_indices;
+                }
+                Instr::IfElse(r, _) => {
+                    if *r >= self.reserved_indices {
+                        *r = unfold[r];
+                    }
+                }
+                Instr::Join(r, c, t, f) => {
+                    if *c >= self.reserved_indices {
+                        *c = unfold[c];
+                    }
+                    if *t >= self.reserved_indices {
+                        *t = unfold[t];
+                    }
+                    if *f >= self.reserved_indices {
+                        *f = unfold[f];
+                    }
+                    unfold.insert(*r, index + self.reserved_indices);
+                    *r = index + self.reserved_indices;
+                }
+                Instr::Goto(..) | Instr::Label(..) => {}
+            }
+        }
+
+        for i in &mut self.result_indices {
+            if *i >= self.reserved_indices {
+                *i = unfold[i];
+            }
+        }
+
+        for _ in 0..self.instructions.len() {
+            self.stack.push(T::default());
         }
     }
 }
@@ -2248,7 +2256,7 @@ struct {name}_EvaluationData {{
 #define gpuErrchk(ans, data, context) gpuAssert((ans), data, __FILE__, __LINE__, context)
 inline int gpuAssert(cudaError_t code, {name}_EvaluationData* data, const char *file, int line, const char *context)
 {{
-   if (code != cudaSuccess) 
+   if (code != cudaSuccess)
    {{
        const char* msg = cudaGetErrorString(code);
        if (msg) {{
@@ -4472,7 +4480,7 @@ impl<T: Real> ExpressionEvaluatorWithExternalFunctions<T> {
 /// A slot in a list that contains a numerical value.
 #[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
 #[cfg_attr(feature = "bincode", derive(bincode::Encode, bincode::Decode))]
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub enum Slot {
     /// An entry in the list of parameters.
     Param(usize),
@@ -4491,6 +4499,17 @@ impl std::fmt::Display for Slot {
             Slot::Const(i) => write!(f, "c{i}"),
             Slot::Temp(i) => write!(f, "t{i}"),
             Slot::Out(i) => write!(f, "o{i}"),
+        }
+    }
+}
+
+impl Slot {
+    pub fn index(&self, index: usize) -> Slot {
+        match self {
+            Slot::Param(i) => Slot::Param(*i + index),
+            Slot::Const(i) => Slot::Const(*i + index),
+            Slot::Temp(i) => Slot::Temp(*i + index),
+            Slot::Out(i) => Slot::Out(*i + index),
         }
     }
 }
@@ -4677,10 +4696,396 @@ impl<T: Clone> ExpressionEvaluator<T> {
     }
 }
 
+impl<T: Default + Clone + std::fmt::Debug> ExpressionEvaluator<T> {
+    /// Redefine every operator to take `n` components in and
+    /// yield `n` components. This can be used for example to define dual numbers.
+    pub fn vectorize<
+        C: Fn(T) -> Vec<T>,
+        F: Fn(&VectorInstruction, &mut InstructionAdder<T>) -> Vec<VectorInstruction>,
+    >(
+        mut self,
+        coeff_map: C,
+        map: F,
+        dim: usize,
+    ) -> ExpressionEvaluator<T> {
+        // unfold every instruction to a single operation
+        let mut new_instr = vec![];
+        for x in &mut self.instructions {
+            match x {
+                Instr::Add(o, a) => {
+                    new_instr.push(Instr::Add(*o, vec![a[0], a[1]]));
+                    for x in a.iter().skip(2) {
+                        new_instr.push(Instr::Add(*o, vec![*o, *x]));
+                    }
+                }
+                Instr::Mul(o, a) => {
+                    new_instr.push(Instr::Mul(*o, vec![a[0], a[1]]));
+                    for x in a.iter().skip(2) {
+                        new_instr.push(Instr::Mul(*o, vec![*o, *x]));
+                    }
+                }
+                _ => new_instr.push(x.clone()),
+            }
+        }
+
+        self.instructions = new_instr;
+
+        self.undo_stack_optimization();
+
+        let mut constants = vec![];
+        for c in &self.stack[self.param_count..self.reserved_indices] {
+            constants.extend(coeff_map(c.clone()));
+        }
+        let old_constants_num = constants.len();
+
+        let mut slot_map = HashMap::default();
+        for x in 0..self.reserved_indices {
+            slot_map.insert(x, x * dim); // set the start of the vector
+        }
+
+        self.param_count *= dim;
+        self.reserved_indices *= dim;
+
+        macro_rules! get_slot {
+            ($i:expr) => {
+                if $i < self.param_count {
+                    Slot::Param($i)
+                } else if $i < self.reserved_indices {
+                    Slot::Const($i - self.param_count)
+                } else {
+                    Slot::Temp($i - self.reserved_indices)
+                }
+            };
+        }
+
+        macro_rules! from_slot {
+            ($i:expr) => {
+                match $i {
+                    Slot::Param(x) => x,
+                    Slot::Const(x) => x + self.param_count,
+                    Slot::Temp(x) => x + self.reserved_indices,
+                    Slot::Out(_) => unreachable!(),
+                }
+            };
+        }
+
+        let mut ins = InstructionAdder {
+            instructions: vec![],
+            constants,
+            dim,
+        };
+
+        for i in self.instructions.drain(..) {
+            let (o, instr) = match i {
+                Instr::Add(o, a) => (
+                    o,
+                    VectorInstruction::Add(get_slot!(slot_map[&a[0]]), get_slot!(slot_map[&a[1]])),
+                ),
+                Instr::Mul(o, a) => (
+                    o,
+                    VectorInstruction::Mul(get_slot!(slot_map[&a[0]]), get_slot!(slot_map[&a[1]])),
+                ),
+                Instr::Pow(o, a, e) => (o, VectorInstruction::Pow(get_slot!(slot_map[&a]), e)),
+                Instr::Powf(o, b, e) => (
+                    o,
+                    VectorInstruction::Powf(get_slot!(slot_map[&b]), get_slot!(slot_map[&e])),
+                ),
+                Instr::BuiltinFun(o, f, a) => {
+                    (o, VectorInstruction::BuiltinFun(f, get_slot!(slot_map[&a])))
+                }
+                Instr::ExternalFun(o, f, a) => (
+                    o,
+                    VectorInstruction::ExternalFun(
+                        f,
+                        a.iter().map(|x| get_slot!(slot_map[x])).collect(),
+                    ),
+                ),
+                Instr::Goto(l) => {
+                    ins.instructions.push(VectorInstruction::Goto(l));
+                    continue;
+                }
+                Instr::Label(l) => {
+                    ins.instructions.push(VectorInstruction::Label(l));
+                    continue;
+                }
+                Instr::IfElse(c, l) => {
+                    ins.instructions
+                        .push(VectorInstruction::IfElse(get_slot!(slot_map[&c]), l));
+                    continue;
+                }
+                Instr::Join(o, c, t, f) => (
+                    o,
+                    VectorInstruction::Join(
+                        get_slot!(slot_map[&c]),
+                        get_slot!(slot_map[&t]),
+                        get_slot!(slot_map[&f]),
+                    ),
+                ),
+            };
+
+            let r = map(&instr, &mut ins);
+            assert_eq!(r.len(), dim);
+            for ii in r {
+                ins.add(ii);
+            }
+
+            slot_map.insert(o, ins.instructions.len() + self.reserved_indices - dim);
+        }
+
+        self.stack.clear();
+        self.stack.resize(self.param_count, T::default());
+        self.stack.extend(ins.constants);
+
+        let stack_shift = self.stack.len() - old_constants_num - self.param_count;
+
+        let mut new_result_indices = vec![];
+        for x in 0..self.result_indices.len() {
+            let mut p = slot_map[&self.result_indices[x]];
+            if p >= self.reserved_indices {
+                p += stack_shift;
+            }
+
+            for i in 0..dim {
+                new_result_indices.push(p + i);
+            }
+        }
+
+        self.reserved_indices += stack_shift;
+        self.result_indices = new_result_indices;
+
+        for i in ins.instructions {
+            let out = self.instructions.len() + self.reserved_indices;
+            match i {
+                VectorInstruction::Add(slot, slot1) => {
+                    let mut s1 = from_slot!(slot);
+                    let mut s2 = from_slot!(slot1);
+                    if s1 > s2 {
+                        (s1, s2) = (s2, s1);
+                    }
+
+                    self.instructions.push(Instr::Add(out, vec![s1, s2]));
+                }
+                VectorInstruction::Assign(slot) => {
+                    self.instructions
+                        .push(Instr::Add(out, vec![from_slot!(slot)]));
+                }
+                VectorInstruction::Mul(slot, slot1) => {
+                    let mut s1 = from_slot!(slot);
+                    let mut s2 = from_slot!(slot1);
+                    if s1 > s2 {
+                        (s1, s2) = (s2, s1);
+                    }
+
+                    self.instructions.push(Instr::Mul(out, vec![s1, s2]));
+                }
+                VectorInstruction::Pow(slot, e) => {
+                    self.instructions.push(Instr::Pow(out, from_slot!(slot), e));
+                }
+                VectorInstruction::Powf(slot, slot1) => {
+                    self.instructions
+                        .push(Instr::Powf(out, from_slot!(slot), from_slot!(slot1)));
+                }
+                VectorInstruction::BuiltinFun(builtin_symbol, slot) => {
+                    self.instructions.push(Instr::BuiltinFun(
+                        out,
+                        builtin_symbol,
+                        from_slot!(slot),
+                    ));
+                }
+                VectorInstruction::ExternalFun(f, args) => {
+                    self.instructions.push(Instr::ExternalFun(
+                        out,
+                        f,
+                        args.iter().map(|x| from_slot!(*x)).collect(),
+                    ));
+                }
+                VectorInstruction::IfElse(cond, label) => {
+                    self.instructions
+                        .push(Instr::IfElse(from_slot!(cond), label));
+                }
+                VectorInstruction::Goto(label) => {
+                    self.instructions.push(Instr::Goto(label));
+                }
+                VectorInstruction::Label(label) => {
+                    self.instructions.push(Instr::Label(label));
+                }
+                VectorInstruction::Join(cond, t, f) => {
+                    self.instructions.push(Instr::Join(
+                        out,
+                        from_slot!(cond),
+                        from_slot!(t),
+                        from_slot!(f),
+                    ));
+                }
+            }
+        }
+
+        self.stack.resize(
+            self.reserved_indices + self.instructions.len(),
+            T::default(),
+        );
+
+        self
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
+pub enum VectorInstruction {
+    Add(Slot, Slot),
+    Assign(Slot),
+    Mul(Slot, Slot),
+    Pow(Slot, i64),
+    Powf(Slot, Slot),
+    BuiltinFun(BuiltinSymbol, Slot),
+    ExternalFun(usize, Vec<Slot>),
+    IfElse(Slot, Label),
+    Goto(Label),
+    Label(Label),
+    Join(Slot, Slot, Slot),
+}
+
+pub struct InstructionAdder<T> {
+    instructions: Vec<VectorInstruction>,
+    constants: Vec<T>,
+    dim: usize,
+}
+
+impl<T> InstructionAdder<T> {
+    pub fn add(&mut self, instr: VectorInstruction) -> Slot {
+        self.instructions.push(instr);
+        Slot::Temp(self.instructions.len() - 1)
+    }
+}
+
+impl<T: PartialEq + Clone> InstructionAdder<T> {
+    pub fn add_constant(&mut self, value: Vec<T>) -> Slot {
+        assert_eq!(value.len(), self.dim);
+        if let Some(c) = self.constants.chunks(self.dim).position(|x| x == &value) {
+            Slot::Const(c)
+        } else {
+            self.constants.extend(value);
+            Slot::Const(self.constants.len() - self.dim)
+        }
+    }
+
+    pub fn add_repeated_constant(&mut self, value: T) -> Slot {
+        if let Some(c) = self
+            .constants
+            .chunks(self.dim)
+            .position(|x| x.iter().all(|x| *x == value))
+        {
+            Slot::Const(c)
+        } else {
+            for _ in 0..self.dim {
+                self.constants.push(value.clone());
+            }
+            Slot::Const(self.constants.len() - 1)
+        }
+    }
+}
+
+#[cfg(test)]
+pub mod tests {
+    use numerica::domains::rational::Rational;
+
+    use crate::{
+        atom::{AtomCore, Symbol},
+        evaluate::{FunctionMap, OptimizationSettings, VectorInstruction},
+        parse,
+    };
+
+    #[test]
+    fn vectorize() {
+        let ev = parse!("x^2 + x*y + sqrt(x^2) + 3/x")
+            .evaluator(
+                &FunctionMap::new(),
+                &[parse!("x"), parse!("y")],
+                OptimizationSettings::default(),
+            )
+            .unwrap();
+
+        let mut vec_ev = ev.vectorize(
+            |c| vec![c.clone(), c.zero()],
+            |i, instrs| match i {
+                VectorInstruction::Add(a, b) => {
+                    vec![i.clone(), VectorInstruction::Add(a.index(1), b.index(1))]
+                }
+                VectorInstruction::Mul(a, b) => {
+                    let ab_ = instrs.add(VectorInstruction::Mul(*a, b.index(1))); // a + b'
+                    let a_b = instrs.add(VectorInstruction::Mul(a.index(1), *b)); // a + b'
+                    vec![i.clone(), VectorInstruction::Add(ab_, a_b)] // a * b, // a * b' + a' * b
+                }
+                VectorInstruction::BuiltinFun(f, a) => match f.get_symbol() {
+                    Symbol::SQRT => {
+                        let sqrt_a = instrs.add(VectorInstruction::BuiltinFun(*f, *a)); // sqrt(a)
+                        let two_sqrt_a = instrs.add(VectorInstruction::Add(sqrt_a, sqrt_a)); // 2*sqrt(a)
+                        let one_over_two_sqrt_a =
+                            instrs.add(VectorInstruction::Pow(two_sqrt_a, -1)); // 1/(2*sqrt(a))
+                        vec![
+                            VectorInstruction::Assign(sqrt_a),
+                            VectorInstruction::Mul(a.index(1), one_over_two_sqrt_a),
+                        ] // a' * 1/(2*sqrt(a))
+                    }
+                    _ => unimplemented!(),
+                },
+                VectorInstruction::Pow(a, b) => {
+                    assert_eq!(*b, -1); // only b = -1 is used in practice
+
+                    let min_one = instrs.add_repeated_constant(Rational::from(-1).into());
+                    let inv_a = instrs.add(VectorInstruction::Pow(*a, -1));
+                    let a_inv_sq = instrs.add(VectorInstruction::Mul(inv_a, inv_a));
+                    let min_a = instrs.add(VectorInstruction::Mul(min_one, a_inv_sq));
+
+                    vec![
+                        VectorInstruction::Assign(inv_a),
+                        VectorInstruction::Mul(min_a, a.index(1)),
+                    ]
+                }
+                VectorInstruction::Powf(_, _) => {
+                    todo!()
+                }
+                VectorInstruction::ExternalFun(_, _) => {
+                    todo!("External functions not fully supported as it returns a single value")
+                }
+                VectorInstruction::Join(c, a, b) => {
+                    vec![
+                        i.clone(),
+                        VectorInstruction::Join(c.index(1), a.index(1), b.index(1)),
+                    ]
+                }
+                VectorInstruction::Assign(a) => {
+                    vec![i.clone(), VectorInstruction::Assign(a.index(1))]
+                }
+                VectorInstruction::Goto(_)
+                | VectorInstruction::Label(_)
+                | VectorInstruction::IfElse(..) => {
+                    unreachable!()
+                }
+            },
+            2,
+        );
+
+        vec_ev.remove_common_pairs();
+        vec_ev.optimize_stack();
+
+        let (instr, _a, _constants) = vec_ev.export_instructions();
+        //println!("constants: {:?}", constants);
+        for x in instr {
+            println!("{}", x);
+        }
+
+        let mut vec_f = vec_ev.map_coeff(&|x| x.re.to_f64());
+
+        let mut dest = vec![0.; 2];
+        vec_f.evaluate(&[2.0, 1.0, 3.0, 2.0], &mut dest);
+        println!("{:?}", dest)
+    }
+}
+
 /// A label in the instruction list [Instr].
 #[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
 #[cfg_attr(feature = "bincode", derive(bincode::Encode, bincode::Decode))]
-#[derive(Debug, Copy, Clone, PartialEq)]
+#[derive(Debug, Copy, Clone, PartialEq, Eq, Hash)]
 pub struct Label(usize);
 
 /// An evaluation instruction.
