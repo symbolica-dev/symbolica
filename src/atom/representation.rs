@@ -1,6 +1,7 @@
 //! Low-level representation of expressions.
 
-use byteorder::{LittleEndian, WriteBytesExt};
+use ahash::HashMap;
+use byteorder::{LittleEndian, ReadBytesExt, WriteBytesExt};
 use bytes::{Buf, BufMut};
 use smartstring::alias::String;
 use std::{
@@ -11,6 +12,7 @@ use std::{
 };
 
 use crate::{
+    atom::{ExtendedSymbolData, ExtendedSymbolDataKey},
     coefficient::{Coefficient, CoefficientView},
     state::{State, StateMap, Workspace},
 };
@@ -142,6 +144,147 @@ impl Symbol {
             is_integer,
             is_positive,
             wildcard_level,
+        }
+    }
+}
+
+impl ExtendedSymbolDataKey {
+    pub fn read<R: Read>(source: &mut R) -> Result<ExtendedSymbolDataKey, std::io::Error> {
+        let tag = source.read_u8()?;
+        match tag {
+            1 => {
+                let value = source.read_i64::<LittleEndian>()?;
+                Ok(ExtendedSymbolDataKey::Integer(value))
+            }
+            2 => {
+                let len = source.read_u32::<LittleEndian>()? as usize;
+                let mut buf = vec![0u8; len];
+                source.read_exact(&mut buf)?;
+                let s = std::string::String::from_utf8(buf)
+                    .map_err(|e| std::io::Error::new(std::io::ErrorKind::InvalidData, e))?;
+                Ok(ExtendedSymbolDataKey::String(s))
+            }
+            3 => {
+                let data = Atom::import(source, None)?;
+                Ok(ExtendedSymbolDataKey::Atom(data))
+            }
+            _ => Err(std::io::Error::new(
+                std::io::ErrorKind::InvalidData,
+                "Invalid ExtendedSymbolDataKey tag",
+            )),
+        }
+    }
+
+    pub fn write<W: std::io::Write>(&self, target: &mut W) -> Result<(), std::io::Error> {
+        match self {
+            ExtendedSymbolDataKey::Integer(value) => {
+                target.write_u8(1)?;
+                target.write_i64::<LittleEndian>(*value)
+            }
+            ExtendedSymbolDataKey::String(s) => {
+                target.write_u8(2)?;
+                target.write_u32::<LittleEndian>(s.len() as u32)?;
+                target.write_all(s.as_bytes())
+            }
+            ExtendedSymbolDataKey::Atom(a) => {
+                target.write_u8(3)?;
+                a.as_view().write(target) // export without the state
+            }
+        }
+    }
+}
+
+impl ExtendedSymbolData {
+    pub fn read<R: Read>(source: &mut R) -> Result<ExtendedSymbolData, std::io::Error> {
+        let tag = source.read_u8()?;
+        match tag {
+            0 => Ok(ExtendedSymbolData::None),
+            1 => {
+                let value = source.read_i64::<LittleEndian>()?;
+                Ok(ExtendedSymbolData::Integer(value))
+            }
+            2 => {
+                let len = source.read_u32::<LittleEndian>()? as usize;
+                let mut buf = vec![0u8; len];
+                source.read_exact(&mut buf)?;
+                let s = std::string::String::from_utf8(buf)
+                    .map_err(|e| std::io::Error::new(std::io::ErrorKind::InvalidData, e))?;
+                Ok(ExtendedSymbolData::String(s))
+            }
+            3 => {
+                let mut a = Atom::Zero;
+                a.read(source)?;
+                Ok(ExtendedSymbolData::Atom(a))
+            }
+            4 => {
+                let len = source.read_u32::<LittleEndian>()? as usize;
+                let mut list = Vec::with_capacity(len);
+                for _ in 0..len {
+                    list.push(ExtendedSymbolData::read(source)?);
+                }
+                Ok(ExtendedSymbolData::List(list))
+            }
+            5 => {
+                let len = source.read_u32::<LittleEndian>()? as usize;
+                let mut map = HashMap::default();
+                for _ in 0..len {
+                    let key = ExtendedSymbolDataKey::read(source)?;
+                    let value = ExtendedSymbolData::read(source)?;
+                    map.insert(key, value);
+                }
+                Ok(ExtendedSymbolData::Map(map))
+            }
+            6 => {
+                let len = source.read_u32::<LittleEndian>()? as usize;
+                let mut buf = vec![0u8; len];
+                source.read_exact(&mut buf)?;
+                Ok(ExtendedSymbolData::Serialized(buf))
+            }
+            _ => Err(std::io::Error::new(
+                std::io::ErrorKind::InvalidData,
+                "Invalid ExtendedSymbolData tag",
+            )),
+        }
+    }
+
+    pub fn write<W: std::io::Write>(&self, target: &mut W) -> Result<(), std::io::Error> {
+        match self {
+            ExtendedSymbolData::None => target.write_u8(0),
+            ExtendedSymbolData::Integer(value) => {
+                target.write_u8(1)?;
+                target.write_i64::<LittleEndian>(*value)
+            }
+            ExtendedSymbolData::String(s) => {
+                target.write_u8(2)?;
+                target.write_u32::<LittleEndian>(s.len() as u32)?;
+                target.write_all(s.as_bytes())
+            }
+            ExtendedSymbolData::Atom(a) => {
+                target.write_u8(3)?;
+                a.as_view().write(target) // export without the state
+            }
+            ExtendedSymbolData::List(list) => {
+                target.write_u8(4)?;
+                target.write_u32::<LittleEndian>(list.len() as u32)?;
+                for item in list {
+                    item.write(target)?;
+                }
+                Ok(())
+            }
+            ExtendedSymbolData::Map(map) => {
+                target.write_u8(5)?;
+                target.write_u32::<LittleEndian>(map.len() as u32)?;
+                for (key, value) in map {
+                    key.write(target)?;
+                    value.write(target)?;
+                }
+                Ok(())
+            }
+            ExtendedSymbolData::Serialized(buf) => {
+                target.write_u8(6)?;
+                target.write_u32::<LittleEndian>(buf.len() as u32)?;
+                target.write_all(buf)
+            }
         }
     }
 }
@@ -383,7 +526,7 @@ impl<C: crate::state::HasStateMap> bincode::Decode<C> for Atom {
 impl Atom {
     /// Read from a binary stream. The format is the byte-length first
     /// followed by the data.
-    pub(crate) fn read<R: Read>(&mut self, mut source: R) -> Result<(), std::io::Error> {
+    pub(crate) fn read<R: Read>(&mut self, source: &mut R) -> Result<(), std::io::Error> {
         let mut dest = std::mem::replace(self, Atom::Zero).into_raw();
 
         // should also set whether rat poly coefficient needs to be converted
@@ -420,10 +563,10 @@ impl Atom {
     ///
     /// Expressions can be exported using [Atom::export](crate::atom::core::AtomCore::export).
     pub fn import<R: Read>(
-        mut source: R,
+        source: &mut R,
         conflict_fn: Option<Box<dyn Fn(&str) -> String>>,
     ) -> Result<Atom, std::io::Error> {
-        let state_map = State::import(&mut source, conflict_fn)?;
+        let state_map = State::import(source, conflict_fn)?;
 
         let mut n_terms_buf = [0; 8];
         source.read_exact(&mut n_terms_buf)?;
@@ -440,7 +583,7 @@ impl Atom {
             let mut tmp = Atom::new();
 
             for _ in 0..n_terms {
-                tmp.read(&mut source)?;
+                tmp.read(&mut *source)?;
                 a.extend(tmp.as_view());
             }
 
@@ -450,7 +593,7 @@ impl Atom {
 
     /// Read a stateless expression from a binary stream, renaming the symbols using the provided state map.
     pub fn import_with_map<R: Read>(
-        source: R,
+        source: &mut R,
         state_map: &StateMap,
     ) -> Result<Atom, std::io::Error> {
         let mut a = Atom::new();
@@ -1722,8 +1865,8 @@ impl<'a> AtomView<'a> {
     /// Export the atom and state to a binary stream. It can be loaded
     /// with [Atom::import].
     #[inline(always)]
-    pub fn export<W: Write>(&self, mut dest: W) -> Result<(), std::io::Error> {
-        State::export(&mut dest)?;
+    pub fn export<W: Write>(&self, dest: &mut W) -> Result<(), std::io::Error> {
+        State::export(dest)?;
 
         dest.write_u64::<LittleEndian>(1)?; // export a single expression
 
@@ -1738,7 +1881,7 @@ impl<'a> AtomView<'a> {
     ///
     /// Most users will want to use [AtomView::export] instead.
     #[inline(always)]
-    pub fn write<W: Write>(&self, mut dest: W) -> Result<(), std::io::Error> {
+    pub fn write<W: Write>(&self, dest: &mut W) -> Result<(), std::io::Error> {
         let d = self.get_data();
         dest.write_u8(0)?;
         dest.write_u64::<LittleEndian>(d.len() as u64)?;

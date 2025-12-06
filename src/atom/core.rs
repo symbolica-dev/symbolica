@@ -55,7 +55,7 @@ pub trait AtomCore: private::Sealed {
 
     /// Export the atom and state to a binary stream. It can be loaded
     /// with [Atom::import].
-    fn export<W: std::io::Write>(&self, dest: W) -> Result<(), std::io::Error> {
+    fn export<W: std::io::Write>(&self, dest: &mut W) -> Result<(), std::io::Error> {
         self.as_atom_view().export(dest)
     }
 

@@ -287,6 +287,39 @@ pub type NormalizationFunction = Box<dyn Fn(AtomView, &mut Settable<Atom>) + Sen
 /// ```
 pub type DerivativeFunction = Box<dyn Fn(AtomView, usize, &mut Settable<Atom>) + Send + Sync>;
 
+/// Keys for the extended symbol data map.
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
+pub enum ExtendedSymbolDataKey {
+    /// A small integer value.
+    Integer(i64),
+    /// A string value.
+    String(String),
+    /// An expression.
+    Atom(Atom),
+}
+
+/// Structured data associated with a symbol that can be used for custom behavior.
+/// For example, for a symbol representing an index, the structure can store the dimension
+/// or representation of the index.
+#[non_exhaustive]
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum ExtendedSymbolData {
+    /// No additional data.
+    None,
+    /// A small integer value.
+    Integer(i64),
+    /// A string value.
+    String(String),
+    /// An expression.
+    Atom(Atom),
+    /// A list of extended symbol data.
+    List(Vec<ExtendedSymbolData>),
+    /// A map from extended symbol data to extended symbol data.
+    Map(HashMap<ExtendedSymbolDataKey, ExtendedSymbolData>),
+    /// A serialized byte array.
+    Serialized(Vec<u8>),
+}
+
 /// Attributes that can be assigned to symbols.
 #[derive(Debug, Clone, PartialEq)]
 pub enum SymbolAttribute {
@@ -384,6 +417,7 @@ pub struct SymbolBuilder {
     normalization_function: Option<NormalizationFunction>,
     print_function: Option<PrintFunction>,
     derivative_function: Option<DerivativeFunction>,
+    extra: Option<ExtendedSymbolData>,
 }
 
 impl SymbolBuilder {
@@ -397,6 +431,7 @@ impl SymbolBuilder {
             normalization_function: None,
             print_function: None,
             derivative_function: None,
+            extra: None,
         }
     }
 
@@ -495,6 +530,12 @@ impl SymbolBuilder {
         self
     }
 
+    /// Add extended structured symbol data.
+    pub fn with_extra(mut self, extra: ExtendedSymbolData) -> Self {
+        self.extra = Some(extra);
+        self
+    }
+
     /// Create a new symbol or return the existing symbol with the same name.
     ///
     /// This function will return an error when an existing symbol is redefined
@@ -529,6 +570,7 @@ impl SymbolBuilder {
             && self.print_function.is_none()
             && self.derivative_function.is_none()
             && self.tags.is_empty()
+            && self.extra.is_none()
         {
             state.get_symbol(self.symbol)
         } else {
@@ -539,9 +581,17 @@ impl SymbolBuilder {
                 self.print_function,
                 self.derivative_function,
                 self.tags,
+                self.extra,
             )
         }
     }
+}
+
+#[test]
+fn extra() {
+    let s = crate::symbol!("test", extra = ExtendedSymbolData::Integer(42));
+
+    println!("{:?}", s.get_extra_data());
 }
 
 impl Symbol {
@@ -883,6 +933,11 @@ impl Symbol {
             && (!s.is_integer() || self.is_integer())
             && (!s.is_real() || self.is_real())
             && (!s.is_scalar() || self.is_scalar())
+    }
+
+    /// Get the extended symbol data associated with the symbol.
+    pub fn get_extra_data(&self) -> &ExtendedSymbolData {
+        &self.get_data().extra
     }
 
     /// Expert use: create a new variable symbol. This constructor should be used with care as there are no checks
@@ -2440,6 +2495,9 @@ macro_rules! symbol_set_attr {
     };
     ($b: expr, der = $der: expr) => {
         $b.with_derivative_function($der)
+    };
+    ($b: expr, extra = $extra: expr) => {
+        $b.with_extra($extra)
     };
     ($b: expr, tag = $tag: expr) => {
         $b.with_tags(std::slice::from_ref(&$tag))

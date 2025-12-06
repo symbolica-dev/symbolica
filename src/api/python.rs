@@ -8103,11 +8103,11 @@ impl PythonTermStreamer {
     ) -> PyResult<u64> {
         let f = File::open(filename)
             .map_err(|e| exceptions::PyIOError::new_err(format!("Could not read file: {e}")))?;
-        let reader = brotli::Decompressor::new(BufReader::new(f), 4096);
+        let mut reader = brotli::Decompressor::new(BufReader::new(f), 4096);
 
         self.stream
             .import(
-                reader,
+                &mut reader,
                 match conflict_fn {
                     Some(f) => Some(Box::new(move |name: &str| -> SmartString<LazyCompact> {
                         Python::attach(|py| {
@@ -8129,9 +8129,9 @@ impl PythonTermStreamer {
     pub fn save(&mut self, filename: &str, compression_level: u32) -> PyResult<()> {
         let f = File::create(filename)
             .map_err(|e| exceptions::PyIOError::new_err(format!("Could not create file: {e}")))?;
-        let writer = CompressorWriter::new(BufWriter::new(f), 4096, compression_level, 22);
+        let mut writer = CompressorWriter::new(BufWriter::new(f), 4096, compression_level, 22);
         self.stream
-            .export(writer)
+            .export(&mut writer)
             .map_err(exceptions::PyIOError::new_err)
     }
 
