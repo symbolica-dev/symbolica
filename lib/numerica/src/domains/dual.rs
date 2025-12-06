@@ -223,6 +223,18 @@ macro_rules! create_hyperdual_from_depths {
     };
 }
 
+/// Describes the shape of dual numbers.
+pub trait DualNumberStructure {
+    // Get the length of the dual number.
+    fn get_len(&self) -> usize;
+    /// Get the shape of the dual number.
+    fn get_shape(&self) -> Vec<&[usize]>;
+    /// Get the multiplication table of the dual number.
+    fn get_multiplication_table(&self) -> &[(usize, usize, usize)];
+    /// Get the maximum derivative depth of the dual number.
+    fn get_max_depth(&self) -> usize;
+}
+
 /// Create a new hyperdual number, from a specification of the components.
 /// The first components must be the real value and the single derivatives of the variables in order.
 ///
@@ -284,6 +296,24 @@ macro_rules! create_hyperdual_from_components {
             const MULT_TABLE: [(usize, usize, usize); {
                 $crate::domains::dual::get_mult_table_size(&$var)
             }] = $crate::domains::dual::get_mult_table(&$var);
+        }
+
+        impl<T> $crate::domains::dual::DualNumberStructure for $t<T> {
+            fn get_len(&self) -> usize {
+                self.values.len()
+            }
+
+            fn get_shape(&self) -> Vec<&[usize]> {
+                Self::SHAPE.iter().map(|s| s.as_slice()).collect()
+            }
+
+            fn get_multiplication_table(&self) -> &[(usize, usize, usize)] {
+                &Self::MULT_TABLE
+            }
+
+            fn get_max_depth(&self) -> usize {
+                Self::MAX_POW
+            }
         }
 
         impl<T: $crate::domains::float::FloatLike> $t<T> {
