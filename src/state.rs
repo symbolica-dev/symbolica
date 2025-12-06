@@ -19,7 +19,9 @@ use byteorder::LittleEndian;
 use once_cell::sync::Lazy;
 use smartstring::alias::String;
 
-use crate::atom::{DerivativeFunction, NamespacedSymbol, NormalizationFunction, SymbolAttribute};
+use crate::atom::{
+    DerivativeFunction, NamespacedSymbol, NormalizationFunction, SymbolAttribute, UserData,
+};
 use crate::domains::finite_field::Zp64;
 use crate::poly::PolyVariable;
 use crate::printer::PrintFunction;
@@ -32,7 +34,7 @@ use crate::{
 };
 
 pub(crate) const SYMBOLICA_MAGIC: u32 = 0x37871367;
-pub(crate) const EXPORT_FORMAT_VERSION: u16 = 1;
+pub(crate) const EXPORT_FORMAT_VERSION: u16 = 2;
 
 /// An id for a given finite field in a registry.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
@@ -75,6 +77,7 @@ pub(crate) struct SymbolData {
     pub(crate) custom_print: Option<PrintFunction>,
     pub(crate) custom_derivative: Option<DerivativeFunction>,
     pub(crate) tags: Vec<std::string::String>,
+    pub(crate) user_data: UserData,
 }
 
 static STATE: Lazy<RwLock<State>> = Lazy::new(|| RwLock::new(State::new()));
@@ -185,6 +188,7 @@ impl State {
                     custom_print: None,
                     custom_derivative: None,
                     tags: vec![],
+                    user_data: UserData::None,
                 },
             ));
             assert_eq!(symbol.get_id() as usize, index);
@@ -227,6 +231,7 @@ impl State {
                 None,
                 None,
                 vec![],
+                None,
             );
         }
         for i in 0..5 {
@@ -237,6 +242,7 @@ impl State {
                 None,
                 None,
                 vec![],
+                None,
             );
         }
         for i in 0..5 {
@@ -247,6 +253,7 @@ impl State {
                 None,
                 None,
                 vec![],
+                None,
             );
         }
         for i in 0..5 {
@@ -257,6 +264,7 @@ impl State {
                 None,
                 None,
                 vec![],
+                None,
             );
         }
         for i in 0..5 {
@@ -267,6 +275,7 @@ impl State {
                 None,
                 None,
                 vec![],
+                None,
             );
         }
     }
@@ -307,6 +316,7 @@ impl State {
                     custom_print: None,
                     custom_derivative: None,
                     tags: vec![],
+                    user_data: UserData::None,
                 },
             ));
             assert_eq!(symbol.get_id() as usize, index - offset);
@@ -398,6 +408,7 @@ impl State {
                         custom_print: None,
                         custom_derivative: None,
                         tags: vec![],
+                        user_data: UserData::None,
                     },
                 )) - offset;
                 assert_eq!(id, id_ret);
@@ -426,6 +437,7 @@ impl State {
         print_function: Option<PrintFunction>,
         derivative_function: Option<DerivativeFunction>,
         tags: Vec<std::string::String>,
+        user_data: Option<UserData>,
     ) -> Result<Symbol, String> {
         match self.str_to_id.entry(name.symbol.into()) {
             Entry::Occupied(o) => {
@@ -449,6 +461,8 @@ impl State {
                     && print_function.is_none()
                     && derivative_function.is_none()
                     && tags == r.get_tags()
+                    && user_data.as_ref().unwrap_or(&UserData::None)
+                        == &ID_TO_STR[r.get_id() as usize].1.user_data
                 {
                     Ok(r)
                 } else {
@@ -526,6 +540,13 @@ impl State {
                         diff_attr.push_str("\tNew derivative function specified.\n");
                     }
 
+                    if user_data.as_ref().unwrap_or(&UserData::None) != &data.user_data {
+                        diff_attr.push_str(&format!(
+                            "\tNew user data specified: {:?} vs {:?}\n",
+                            data.user_data, user_data
+                        ));
+                    }
+
                     if data.file.is_empty() {
                         Err(format!(
                             "Symbol {} redefined with new attributes:\n{}",
@@ -573,6 +594,7 @@ impl State {
                         custom_print: print_function,
                         custom_derivative: derivative_function,
                         tags,
+                        user_data: user_data.unwrap_or(UserData::None),
                     },
                 )) - offset;
                 assert_eq!(id, id_ret);
@@ -704,6 +726,8 @@ impl State {
                 dest.write_u32::<LittleEndian>(t.len() as u32)?;
                 dest.write_all(t.as_bytes())?;
             }
+
+            s.get_data().write(dest)?;
         }
 
         dest.write_u64::<LittleEndian>(FINITE_FIELDS.len() as u64)?;
@@ -814,6 +838,8 @@ impl State {
                 tags.push(tag);
             }
 
+            let extra_data = UserData::read(&mut *source)?;
+
             attributes.clear();
             if s.is_antisymmetric() {
                 attributes.push(SymbolAttribute::Antisymmetric);
@@ -849,6 +875,7 @@ impl State {
                 })
                 .with_attributes(attributes.clone())
                 .with_tags(tags.clone())
+                .with_user_data(extra_data.clone())
                 .build()
                 {
                     Ok(id) => {
@@ -1118,10 +1145,8 @@ impl Drop for RecycledAtom {
 
 #[cfg(test)]
 mod tests {
-    use std::io::Cursor;
-
     use crate::{
-        atom::{AtomView, Symbol},
+        atom::{Atom, AtomCore, AtomView, Symbol},
         parse, symbol,
     };
 
@@ -1132,8 +1157,26 @@ mod tests {
         let mut export = vec![];
         State::export(&mut export).unwrap();
 
-        let i = State::import(&mut Cursor::new(&export), None).unwrap();
+        let i = State::import(&mut export.as_slice(), None).unwrap();
         assert!(i.is_empty());
+    }
+
+    #[test]
+    fn export_symbol_data() {
+        let s = symbol!(
+            "symbolica::symbol_data::a",
+            data = crate::state::UserData::Atom(parse!("z"))
+        );
+
+        let s1 = s.to_atom();
+        let mut export = vec![];
+        s1.export(&mut export).unwrap();
+
+        let a = Atom::import(&mut export.as_slice(), None)
+            .unwrap()
+            .get_symbol()
+            .unwrap();
+        assert_eq!(a.get_data(), &crate::state::UserData::Atom(parse!("z")));
     }
 
     #[test]

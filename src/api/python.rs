@@ -22,8 +22,8 @@ use pyo3::{
     pyclass::CompareOp,
     pyfunction, pymethods,
     types::{
-        PyAnyMethods, PyBytes, PyComplex, PyDict, PyInt, PyModule, PyTuple, PyTupleMethods, PyType,
-        PyTypeMethods,
+        PyAnyMethods, PyBytes, PyComplex, PyDict, PyInt, PyModule, PyNone, PyTuple, PyTupleMethods,
+        PyType, PyTypeMethods,
     },
     wrap_pyfunction,
 };
@@ -54,7 +54,8 @@ use pyo3::pymodule;
 use crate::{
     LicenseManager,
     atom::{
-        Atom, AtomCore, AtomType, AtomView, DefaultNamespace, ListIterator, Symbol, SymbolAttribute,
+        Atom, AtomCore, AtomType, AtomView, DefaultNamespace, ListIterator, Symbol,
+        SymbolAttribute, UserData, UserDataKey,
     },
     coefficient::{Coefficient, CoefficientView, ConvertToRing},
     domains::{
@@ -446,7 +447,7 @@ fn get_license_key(email: String) -> PyResult<()> {
         .map_err(exceptions::PyConnectionError::new_err)
 }
 
-#[pyfunction(name = "S", signature = (*names,is_symmetric=None,is_antisymmetric=None,is_cyclesymmetric=None,is_linear=None,is_scalar=None,is_real=None,is_integer=None,is_positive=None,tags=None,custom_normalization=None,custom_print=None,custom_derivative=None))]
+#[pyfunction(name = "S", signature = (*names,is_symmetric=None,is_antisymmetric=None,is_cyclesymmetric=None,is_linear=None,is_scalar=None,is_real=None,is_integer=None,is_positive=None,tags=None,custom_normalization=None,custom_print=None,custom_derivative=None,data=None))]
 /// Shorthand notation for :func:`Expression.symbol`.
 fn symbol_shorthand(
     names: &Bound<'_, PyTuple>,
@@ -462,6 +463,7 @@ fn symbol_shorthand(
     custom_normalization: Option<PythonTransformer>,
     custom_print: Option<Py<PyAny>>,
     custom_derivative: Option<Py<PyAny>>,
+    data: Option<PythonUserData>,
     py: Python<'_>,
 ) -> PyResult<Py<PyAny>> {
     PythonExpression::symbol(
@@ -480,6 +482,7 @@ fn symbol_shorthand(
         custom_normalization,
         custom_print,
         custom_derivative,
+        data,
     )
 }
 
@@ -700,6 +703,12 @@ PyFunctionInfo {
                     kind: ParameterKind::PositionalOrKeyword,
                     default: ParameterDefault::Expr(NONE_ARG),
                     type_info: || TypeInfo::unqualified("typing.Optional[typing.Callable[[Expression, int], Expression]]"),
+                },
+                ParameterInfo {
+                    name: "data",
+                    kind: ParameterKind::PositionalOrKeyword,
+                    default: ParameterDefault::Expr(NONE_ARG),
+                    type_info: || TypeInfo::unqualified("typing.Optional[str | int | Expression | bytes | list | dict]"),
                 },
             ],
             r#return: || PythonExpression::type_output(),
@@ -1191,6 +1200,153 @@ impl<'a> From<AtomView<'a>> for PyResult<PythonAtomTree> {
         };
 
         Ok(tree)
+    }
+}
+
+#[derive(Clone, PartialEq, Eq, Hash)]
+pub struct PythonUserDataKey(UserDataKey);
+
+impl<'py> IntoPyObject<'py> for &PythonUserDataKey {
+    type Target = PyAny;
+    type Output = Bound<'py, Self::Target>;
+    type Error = PyErr;
+
+    fn into_pyobject(self, py: Python<'py>) -> Result<Self::Output, Self::Error> {
+        match &self.0 {
+            UserDataKey::Integer(i) => i.into_bound_py_any(py),
+            UserDataKey::Atom(a) => {
+                let expr: PythonExpression = a.clone().into();
+                expr.into_bound_py_any(py)
+            }
+            UserDataKey::String(s) => s.into_bound_py_any(py),
+        }
+    }
+}
+
+impl<'py> FromPyObject<'_, 'py> for PythonUserDataKey {
+    type Error = PyErr;
+
+    fn extract(ob: Borrowed<'_, 'py, pyo3::PyAny>) -> PyResult<Self> {
+        // TODO: allow list as key
+        if let Ok(num) = ob.extract::<i64>() {
+            Ok(PythonUserDataKey(UserDataKey::Integer(num)))
+        } else if let Ok(a) = ob.extract::<ConvertibleToExpression>() {
+            Ok(PythonUserDataKey(UserDataKey::Atom(a.to_expression().expr)))
+        } else if let Ok(s) = ob.extract::<PyBackedStr>() {
+            Ok(PythonUserDataKey(UserDataKey::String(s.to_string())))
+        } else {
+            Err(exceptions::PyTypeError::new_err(
+                "Cannot convert to ExtendedUserDataKey",
+            ))
+        }
+    }
+}
+
+pub struct PythonUserData(UserData);
+
+#[cfg(feature = "python_stubgen")]
+impl_stub_type!(PythonUserData = ConvertibleToExpression | PyBackedStr | PyDict | PyList | PyBytes);
+
+impl<'py> FromPyObject<'_, 'py> for PythonUserData {
+    type Error = PyErr;
+
+    fn extract(ob: Borrowed<'_, 'py, pyo3::PyAny>) -> PyResult<Self> {
+        if ob.extract::<Py<PyNone>>().is_ok() {
+            Ok(PythonUserData(UserData::None))
+        } else if let Ok(num) = ob.extract::<i64>() {
+            Ok(PythonUserData(UserData::Integer(num)))
+        } else if let Ok(a) = ob.extract::<ConvertibleToExpression>() {
+            Ok(PythonUserData(UserData::Atom(a.to_expression().expr)))
+        } else if let Ok(s) = ob.extract::<PyBackedStr>() {
+            Ok(PythonUserData(UserData::String(s.to_string())))
+        } else if let Ok(list) = ob.extract::<Vec<PythonUserData>>() {
+            Ok(PythonUserData(UserData::List(
+                list.into_iter().map(|x| x.0).collect(),
+            )))
+        } else if let Ok(map) = ob.extract::<HashMap<PythonUserDataKey, PythonUserData>>() {
+            Ok(PythonUserData(UserData::Map(
+                map.into_iter().map(|(k, v)| (k.0, v.0)).collect(),
+            )))
+        } else if let Ok(bytes) = ob.extract::<&[u8]>() {
+            Ok(PythonUserData(UserData::Serialized(bytes.to_vec())))
+        } else {
+            Err(exceptions::PyTypeError::new_err(
+                "Cannot convert to ExtendedUserData",
+            ))
+        }
+    }
+}
+
+// impl<'py> IntoPyObject<'py> for PythonUserData {
+//     type Target = PyObject;
+//     type Output = Bound<'py, Self::Target>;
+//     type Error = std::convert::Infallible;
+
+//     fn into_pyobject(self, py: Python<'py>) -> Result<Self::Output, Self::Error> {
+//         match self {
+//             PythonUserData(ExtendedUserData::None) => Ok(None.into_py(py).into()),
+//             PythonUserData(ExtendedUserData::Integer(i)) => Ok(i.into_py(py).into()),
+//             PythonUserData(ExtendedUserData::Atom(a)) => {
+//                 let expr: PythonExpression = a.into();
+//                 Ok(expr.into_py(py).into())
+//             }
+//             PythonUserData(ExtendedUserData::String(s)) => {
+//                 let ps: PyBackedStr = PyBackedStr::new(s);
+//                 Ok(ps.into_py(py).into())
+//             }
+//             PythonUserData(ExtendedUserData::List(l)) => {
+//                 let pl: Vec<PythonUserData> =
+//                     l.into_iter().map(|x| PythonUserData(x)).collect();
+//                 Ok(pl.into_py(py).into())
+//             }
+//             PythonUserData(ExtendedUserData::Map(m)) => {
+//                 let pm: HashMap<PythonExtendedUserDataKey, PythonUserData> = m
+//                     .into_iter()
+//                     .map(|(k, v)| (k, PythonUserData(v)))
+//                     .collect();
+//                 Ok(pm.into_py(py).into())
+//             }
+//             PythonUserData(ExtendedUserData::Serialized(b)) => Ok(b.into_py(py).into()),
+//         }
+//     }
+// }
+
+struct PythonBorrowedUserData<'a>(&'a UserData);
+
+impl<'a, 'py> IntoPyObject<'py> for PythonBorrowedUserData<'a> {
+    type Target = PyAny;
+    type Output = Bound<'py, Self::Target>;
+    type Error = PyErr;
+
+    fn into_pyobject(self, py: Python<'py>) -> Result<Self::Output, Self::Error> {
+        match self {
+            PythonBorrowedUserData(UserData::None) => PyNone::get(py).into_bound_py_any(py),
+            PythonBorrowedUserData(UserData::Integer(i)) => i.into_bound_py_any(py),
+            PythonBorrowedUserData(UserData::Atom(a)) => {
+                let expr: PythonExpression = a.clone().into();
+                expr.into_bound_py_any(py)
+            }
+            PythonBorrowedUserData(UserData::String(s)) => s.into_bound_py_any(py),
+            PythonBorrowedUserData(UserData::List(l)) => {
+                let pl: Vec<PythonBorrowedUserData> =
+                    l.into_iter().map(|x| PythonBorrowedUserData(x)).collect();
+                pl.into_bound_py_any(py)
+            }
+            PythonBorrowedUserData(UserData::Map(m)) => {
+                let pm: HashMap<_, _> = m
+                    .into_iter()
+                    .map(|(k, v)| {
+                        Ok((
+                            PythonUserDataKey(k.clone()),
+                            PythonBorrowedUserData(v).into_pyobject(py)?,
+                        ))
+                    })
+                    .collect::<Result<_, PyErr>>()?;
+
+                pm.into_bound_py_any(py)
+            }
+            PythonBorrowedUserData(UserData::Serialized(b)) => b.into_bound_py_any(py),
+        }
     }
 }
 
@@ -3390,7 +3546,7 @@ impl PythonExpression {
     /// >>> e = S('real_log', custom_normalization=Transformer().replace(E("x_(exp(x1_))"), E("x1_")))
     /// >>> E("real_log(exp(x)) + real_log(5)")
     #[gen_stub(skip)]
-    #[pyo3(signature = (*names,is_symmetric=None,is_antisymmetric=None,is_cyclesymmetric=None,is_linear=None,is_scalar=None,is_real=None,is_integer=None,is_positive=None,tags=None,custom_normalization=None, custom_print=None, custom_derivative=None))]
+    #[pyo3(signature = (*names,is_symmetric=None,is_antisymmetric=None,is_cyclesymmetric=None,is_linear=None,is_scalar=None,is_real=None,is_integer=None,is_positive=None,tags=None,custom_normalization=None, custom_print=None, custom_derivative=None, data=None))]
     #[classmethod]
     pub fn symbol(
         _cls: &Bound<'_, PyType>,
@@ -3408,6 +3564,7 @@ impl PythonExpression {
         custom_normalization: Option<PythonTransformer>,
         custom_print: Option<Py<PyAny>>,
         custom_derivative: Option<Py<PyAny>>,
+        data: Option<PythonUserData>,
     ) -> PyResult<Py<PyAny>> {
         if names.is_empty() {
             return Err(exceptions::PyValueError::new_err(
@@ -3434,6 +3591,7 @@ impl PythonExpression {
             && custom_normalization.is_none()
             && custom_print.is_none()
             && custom_derivative.is_none()
+            && data.is_none()
         {
             if names.len() == 1 {
                 let name = names.get_item(0).unwrap().extract::<PyBackedStr>()?;
@@ -3571,6 +3729,10 @@ impl PythonExpression {
                         })
                         .collect::<Vec<_>>(),
                 );
+            }
+
+            if let Some(t) = data {
+                symbol = symbol.with_user_data(t.0);
             }
 
             let symbol = symbol
@@ -4158,7 +4320,7 @@ impl PythonExpression {
             Atom::Var(v) => Ok(v.get_symbol().get_name().to_string()),
             Atom::Fun(f) => Ok(f.get_symbol().get_name().to_string()),
             _ => Err(exceptions::PyTypeError::new_err(format!(
-                "The exxpression {} is not a symbol or atom",
+                "The expression {} is not a variable or function",
                 self.expr
             ))),
         }
@@ -4181,9 +4343,49 @@ impl PythonExpression {
                 .map(|a| a.into())
                 .collect()),
             _ => Err(exceptions::PyTypeError::new_err(format!(
-                "The exxpression {} is not a symbol or atom",
+                "The expression {} is not a variable or function",
                 self.expr
             ))),
+        }
+    }
+
+    /// Get the data of a variable or function if the current atom
+    /// is a variable or function, otherwise throw an error.
+    /// Optionally, provide a key to access a specific entry in the data map, if
+    /// the data is a map.
+    #[gen_stub(override_return_type(
+        type_repr = "Expression | int | float | complex | str | bytes | dict[Expression | int | float | complex | str, Any] | list[Any]"
+    ))]
+    #[pyo3(signature = (key=None))]
+    pub fn get_symbol_data(
+        &self,
+        #[gen_stub(override_type(type_repr = "Expression | int | float | complex | str"))]
+        key: Option<Py<PyAny>>,
+        py: Python<'_>,
+    ) -> PyResult<Py<PyAny>> {
+        let data = match self.expr.as_ref() {
+            Atom::Var(v) => v.get_symbol().get_data(),
+            Atom::Fun(f) => f.get_symbol().get_data(),
+            _ => Err(exceptions::PyTypeError::new_err(format!(
+                "The expression {} is not a variable or function",
+                self.expr
+            )))?,
+        };
+
+        if let Some(key) = key
+            && let UserData::Map(map) = data
+        {
+            let key = key.extract::<PythonUserDataKey>(py)?;
+            if let Some(value) = map.get(&key.0) {
+                return PythonBorrowedUserData(value).into_py_any(py);
+            } else {
+                return Err(exceptions::PyKeyError::new_err(format!(
+                    "The symbol data does not contain the key '{:?}'",
+                    key.0
+                )));
+            }
+        } else {
+            PythonBorrowedUserData(data).into_py_any(py)
         }
     }
 
@@ -4194,7 +4396,7 @@ impl PythonExpression {
             Atom::Var(v) => Ok(v.get_symbol().get_tags().to_vec()),
             Atom::Fun(f) => Ok(f.get_symbol().get_tags().to_vec()),
             _ => Err(exceptions::PyTypeError::new_err(format!(
-                "The exxpression {} is not a symbol or atom",
+                "The expression {} is not a variable or function",
                 self.expr
             ))),
         }
@@ -7309,6 +7511,12 @@ PyMethodsInfo {
                     default: ParameterDefault::Expr(NONE_ARG),
                     type_info: || TypeInfo::unqualified("typing.Optional[typing.Callable[[Expression, int], Expression]]"),
                 },
+                ParameterInfo {
+                    name: "data",
+                    kind: ParameterKind::PositionalOrKeyword,
+                    default: ParameterDefault::Expr(NONE_ARG),
+                    type_info: || TypeInfo::unqualified("typing.Optional[str | int | Expression | bytes | list | dict]"),
+                },
             ],
             r#type: MethodType::Class,
             r#return: || PythonExpression::type_output(),
@@ -8105,11 +8313,11 @@ impl PythonTermStreamer {
     ) -> PyResult<u64> {
         let f = File::open(filename)
             .map_err(|e| exceptions::PyIOError::new_err(format!("Could not read file: {e}")))?;
-        let reader = brotli::Decompressor::new(BufReader::new(f), 4096);
+        let mut reader = brotli::Decompressor::new(BufReader::new(f), 4096);
 
         self.stream
             .import(
-                reader,
+                &mut reader,
                 match conflict_fn {
                     Some(f) => Some(Box::new(move |name: &str| -> SmartString<LazyCompact> {
                         Python::attach(|py| {
@@ -8131,9 +8339,9 @@ impl PythonTermStreamer {
     pub fn save(&mut self, filename: &str, compression_level: u32) -> PyResult<()> {
         let f = File::create(filename)
             .map_err(|e| exceptions::PyIOError::new_err(format!("Could not create file: {e}")))?;
-        let writer = CompressorWriter::new(BufWriter::new(f), 4096, compression_level, 22);
+        let mut writer = CompressorWriter::new(BufWriter::new(f), 4096, compression_level, 22);
         self.stream
-            .export(writer)
+            .export(&mut writer)
             .map_err(exceptions::PyIOError::new_err)
     }
 

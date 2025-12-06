@@ -287,6 +287,39 @@ pub type NormalizationFunction = Box<dyn Fn(AtomView, &mut Settable<Atom>) + Sen
 /// ```
 pub type DerivativeFunction = Box<dyn Fn(AtomView, usize, &mut Settable<Atom>) + Send + Sync>;
 
+/// Keys for the extended symbol data map.
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
+pub enum UserDataKey {
+    /// A small integer value.
+    Integer(i64),
+    /// A string value.
+    String(String),
+    /// An expression.
+    Atom(Atom),
+}
+
+/// Structured data associated with a symbol that can be used for custom behavior.
+/// For example, for a symbol representing an index, the structure can store the dimension
+/// or representation of the index.
+#[non_exhaustive]
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum UserData {
+    /// No additional data.
+    None,
+    /// A small integer value.
+    Integer(i64),
+    /// A string value.
+    String(String),
+    /// An expression.
+    Atom(Atom),
+    /// A list of extended symbol data.
+    List(Vec<UserData>),
+    /// A map from extended symbol data to extended symbol data.
+    Map(HashMap<UserDataKey, UserData>),
+    /// A serialized byte array.
+    Serialized(Vec<u8>),
+}
+
 /// Attributes that can be assigned to symbols.
 #[derive(Debug, Clone, PartialEq)]
 pub enum SymbolAttribute {
@@ -346,7 +379,7 @@ pub struct Symbol {
 impl std::fmt::Debug for Symbol {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         if f.alternate() {
-            let data = self.get_data();
+            let data = self.get_global_data();
             write!(
                 f,
                 "Symbol(name: {}, id: {}, attributes: {:?}, tags: {:?})",
@@ -385,6 +418,7 @@ pub struct SymbolBuilder {
     print_function: Option<PrintFunction>,
     derivative_function: Option<DerivativeFunction>,
     generator: Option<Box<dyn Fn(&[Symbol], SymbolBuilder) -> SymbolBuilder + Send + Sync>>,
+    user_data: Option<UserData>,
 }
 
 impl SymbolBuilder {
@@ -399,6 +433,7 @@ impl SymbolBuilder {
             print_function: None,
             derivative_function: None,
             generator: None,
+            user_data: None,
         }
     }
 
@@ -556,6 +591,12 @@ impl SymbolBuilder {
         Ok(result)
     }
 
+    /// Add extended structured symbol data.
+    pub fn with_user_data(mut self, data: UserData) -> Self {
+        self.user_data = Some(data);
+        self
+    }
+
     /// Create a new symbol or return the existing symbol with the same name.
     ///
     /// This function will return an error when an existing symbol is redefined
@@ -590,6 +631,7 @@ impl SymbolBuilder {
             && self.print_function.is_none()
             && self.derivative_function.is_none()
             && self.tags.is_empty()
+            && self.user_data.is_none()
         {
             state.get_symbol(self.symbol)
         } else {
@@ -600,6 +642,7 @@ impl SymbolBuilder {
                 self.print_function,
                 self.derivative_function,
                 self.tags,
+                self.user_data,
             )
         }
     }
@@ -695,7 +738,7 @@ impl Symbol {
     /// assert_eq!(x.get_stripped_name(), "x");
     /// ```
     pub fn get_stripped_name(&self) -> &str {
-        let d = self.get_data();
+        let d = self.get_global_data();
         &d.name[d.namespace.len() + 2..]
     }
 
@@ -866,28 +909,28 @@ impl Symbol {
 
     /// Get all tags of the symbol.
     pub fn get_tags(&self) -> &[String] {
-        &self.get_data().tags
+        &self.get_global_data().tags
     }
 
     /// Check if the symbol has the tag `tag`.
     pub fn has_tag(&self, tag: impl AsRef<str>) -> bool {
         let r = tag.as_ref();
-        self.get_data().tags.iter().any(|x| x == r)
+        self.get_global_data().tags.iter().any(|x| x == r)
     }
 
     /// Get the custom normalization function of the symbol, if any.
-    pub fn get_normalization_function(&self) -> Option<&NormalizationFunction> {
-        self.get_data().custom_normalization.as_ref()
+    pub fn get_normalization_function(&self) -> Option<&'static NormalizationFunction> {
+        self.get_global_data().custom_normalization.as_ref()
     }
 
     /// Get the custom derivative function of the symbol, if any.
-    pub fn get_derivative_function(&self) -> Option<&DerivativeFunction> {
-        self.get_data().custom_derivative.as_ref()
+    pub fn get_derivative_function(&self) -> Option<&'static DerivativeFunction> {
+        self.get_global_data().custom_derivative.as_ref()
     }
 
     /// Get the custom print function of the symbol, if any.
-    pub fn get_print_function(&self) -> Option<&PrintFunction> {
-        self.get_data().custom_print.as_ref()
+    pub fn get_print_function(&self) -> Option<&'static PrintFunction> {
+        self.get_global_data().custom_print.as_ref()
     }
 
     /// Get all tags of the symbol.
@@ -944,6 +987,11 @@ impl Symbol {
             && (!s.is_integer() || self.is_integer())
             && (!s.is_real() || self.is_real())
             && (!s.is_scalar() || self.is_scalar())
+    }
+
+    /// Get the user data associated with the symbol.
+    pub fn get_data(&self) -> &'static UserData {
+        &self.get_global_data().user_data
     }
 
     /// Expert use: create a new variable symbol. This constructor should be used with care as there are no checks
@@ -1025,7 +1073,7 @@ impl Symbol {
         opts: &PrintOptions,
         f: &mut W,
     ) -> Result<(), std::fmt::Error> {
-        let data = self.get_data();
+        let data = self.get_global_data();
         let (namespace, name) = (&data.namespace, &data.name[data.namespace.len() + 2..]);
 
         if let Some(custom_print) = &data.custom_print
@@ -1174,7 +1222,7 @@ impl Symbol {
     }
 
     /// Get data related to the symbol.
-    pub(crate) fn get_data(self) -> &'static SymbolData {
+    pub(crate) fn get_global_data(self) -> &'static SymbolData {
         State::get_symbol_data(self)
     }
 }
@@ -2378,6 +2426,15 @@ macro_rules! tag {
 /// ```
 /// See [DerivativeFunction] for more details.
 ///
+/// ### User data
+///
+/// You can attach custom user data to the symbol using the `data` flag:
+/// ```no_run
+/// use symbolica::{symbol, atom::UserData};
+/// let _ = symbol!("my_symbol", data = UserData::String("custom user data".to_owned()));
+/// ```
+/// It can be retrieved later using [Symbol::get_data]. See [UserData] for more details.
+///
 /// To set special settings together with attributes, separate the attributes with another
 /// `;`:
 ///
@@ -2501,6 +2558,9 @@ macro_rules! symbol_set_attr {
     };
     ($b: expr, der = $der: expr) => {
         $b.with_derivative_function($der)
+    };
+    ($b: expr, data = $user_data: expr) => {
+        $b.with_user_data($user_data)
     };
     ($b: expr, tag = $tag: expr) => {
         $b.with_tags(std::slice::from_ref(&$tag))
@@ -2885,7 +2945,7 @@ impl AsRef<Atom> for Atom {
 #[cfg(test)]
 mod test {
     use crate::{
-        atom::{Atom, AtomCore},
+        atom::{Atom, AtomCore, UserData},
         function,
     };
 
@@ -2938,5 +2998,11 @@ mod test {
             .add_arg(parse!("a"))
             .add_arg(parse!("a").as_view())
             .finish();
+    }
+
+    #[test]
+    fn user_data() {
+        let s = crate::symbol!("user_data::test", data = UserData::Integer(42));
+        assert_eq!(s.get_data(), &UserData::Integer(42));
     }
 }

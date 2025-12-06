@@ -308,10 +308,10 @@ impl<W: WriteableNamedStream> TermStreamer<W> {
     /// A term stream can be exported using [TermStreamer::export].
     pub fn import<R: Read>(
         &mut self,
-        mut source: R,
+        source: &mut R,
         conflict_fn: Option<Box<dyn Fn(&str) -> SmartString<LazyCompact>>>,
     ) -> Result<u64, std::io::Error> {
-        let state_map = State::import(&mut source, conflict_fn)?;
+        let state_map = State::import(source, conflict_fn)?;
 
         let mut n_terms_buf = [0; 8];
         source.read_exact(&mut n_terms_buf)?;
@@ -319,7 +319,7 @@ impl<W: WriteableNamedStream> TermStreamer<W> {
 
         for _ in 0..n_terms {
             let mut tmp = Atom::new();
-            tmp.read(&mut source)?;
+            tmp.read(&mut *source)?;
             self.push(tmp.as_view().rename(&state_map));
         }
 
@@ -332,15 +332,15 @@ impl<W: WriteableNamedStream> TermStreamer<W> {
     /// The resulting file can be read back using [TermStreamer::import] or
     /// by using [Atom::import]. In the latter case, the whole term stream will be read into memory
     /// as a single expression.
-    pub fn export<S: std::io::Write>(&mut self, mut dest: S) -> Result<(), std::io::Error> {
+    pub fn export<S: std::io::Write>(&mut self, dest: &mut S) -> Result<(), std::io::Error> {
         self.normalize();
 
-        State::export(&mut dest)?;
+        State::export(dest)?;
 
         dest.write_u64::<LittleEndian>(self.num_terms as u64)?;
 
         for t in &self.mem_buf {
-            t.as_view().write(&mut dest)?;
+            t.as_view().write(&mut *dest)?;
         }
 
         for x in &mut self.file_buf {
@@ -353,7 +353,7 @@ impl<W: WriteableNamedStream> TermStreamer<W> {
 
             // note that we cannot use read_to_end as the file may still be opened by a writer
             while let Ok(()) = tmp.read(&mut r) {
-                tmp.as_view().write(&mut dest)?;
+                tmp.as_view().write(&mut *dest)?;
             }
         }
 
@@ -701,10 +701,7 @@ impl AtomView<'_> {
 
 #[cfg(test)]
 mod test {
-    use std::{
-        fs::File,
-        io::{BufWriter, Cursor},
-    };
+    use std::{fs::File, io::BufWriter};
 
     use brotli::CompressorWriter;
 
@@ -733,12 +730,11 @@ mod test {
         let mut r = vec![];
         streamer.export(&mut r).unwrap();
 
-        let b = Atom::import(Cursor::new(&r), None).unwrap();
+        let b = Atom::import(&mut r.as_slice(), None).unwrap();
 
         streamer.clear();
 
-        streamer.import(Cursor::new(&r), None).unwrap();
-
+        streamer.import(&mut r.as_slice(), None).unwrap();
         let c = streamer.to_expression();
         assert_eq!(b, c);
     }
