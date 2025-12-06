@@ -504,6 +504,8 @@ impl<'a> AtomView<'a> {
                 let mut den_changed = vec![];
                 let mut rest = vec![];
 
+                let complex = AlgebraicExtension::new_complex(Q);
+
                 for a in m {
                     if let AtomView::Pow(p) = a {
                         let (b, e) = p.get_base_exp();
@@ -513,13 +515,13 @@ impl<'a> AtomView<'a> {
                         {
                             if n < 0 && d == 1 {
                                 denominators.push(
-                                    b.to_polynomial::<_, u16>(&Q, None)
+                                    b.to_polynomial::<_, u16>(&complex, None)
                                         .pow(n.unsigned_abs() as usize),
                                 );
                                 den_changed.push((a, false));
                                 continue;
                             } else if n > 0 && d == 1 {
-                                numerators.push(a.to_polynomial::<_, u16>(&Q, None));
+                                numerators.push(a.to_polynomial::<_, u16>(&complex, None));
                                 num_changed.push((a, false));
                                 continue;
                             }
@@ -527,7 +529,7 @@ impl<'a> AtomView<'a> {
 
                         rest.push(a);
                     } else {
-                        numerators.push(a.to_polynomial(&Q, None));
+                        numerators.push(a.to_polynomial(&complex, None));
                         num_changed.push((a, false));
                     }
                 }
@@ -565,9 +567,21 @@ impl<'a> AtomView<'a> {
                 let mut mul = ws.new_atom();
                 let mul_view = mul.to_mul();
 
+                let f2 = FloatField::from_rep(Complex::new(Rational::zero(), Rational::one()));
+
                 let mut tmp = ws.new_atom();
                 for (n, (orig, changed)) in numerators.iter().zip(num_changed) {
                     if changed {
+                        let n = n.map_coeff(
+                            |c| {
+                                Complex::new(
+                                    c.poly.get_constant(),
+                                    c.poly.coefficient(&[1]).unwrap_or(Rational::zero()),
+                                )
+                            },
+                            f2.clone(),
+                        );
+
                         n.to_expression_into(&mut tmp);
                         mul_view.extend(tmp.as_view());
                     } else {
@@ -577,6 +591,16 @@ impl<'a> AtomView<'a> {
 
                 for (d, (orig, changed)) in denominators.iter().zip(den_changed) {
                     if changed {
+                        let d = d.map_coeff(
+                            |c| {
+                                Complex::new(
+                                    c.poly.get_constant(),
+                                    c.poly.coefficient(&[1]).unwrap_or(Rational::zero()),
+                                )
+                            },
+                            f2.clone(),
+                        );
+
                         d.to_expression_into(&mut tmp);
 
                         let mut pow = ws.new_atom();
