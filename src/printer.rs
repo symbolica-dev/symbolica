@@ -877,7 +877,7 @@ impl FormattedPrintFn for FunView<'_> {
         }
 
         let id = self.get_symbol();
-        if let Some(custom_print) = &id.get_data().custom_print
+        if let Some(custom_print) = &id.get_global_data().custom_print
             && let Some(s) = custom_print(self.as_view(), opts)
         {
             f.write_str(&s)?;

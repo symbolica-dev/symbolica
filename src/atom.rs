@@ -289,7 +289,7 @@ pub type DerivativeFunction = Box<dyn Fn(AtomView, usize, &mut Settable<Atom>) +
 
 /// Keys for the extended symbol data map.
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
-pub enum ExtendedSymbolDataKey {
+pub enum UserDataKey {
     /// A small integer value.
     Integer(i64),
     /// A string value.
@@ -303,7 +303,7 @@ pub enum ExtendedSymbolDataKey {
 /// or representation of the index.
 #[non_exhaustive]
 #[derive(Debug, Clone, PartialEq, Eq)]
-pub enum ExtendedSymbolData {
+pub enum UserData {
     /// No additional data.
     None,
     /// A small integer value.
@@ -313,9 +313,9 @@ pub enum ExtendedSymbolData {
     /// An expression.
     Atom(Atom),
     /// A list of extended symbol data.
-    List(Vec<ExtendedSymbolData>),
+    List(Vec<UserData>),
     /// A map from extended symbol data to extended symbol data.
-    Map(HashMap<ExtendedSymbolDataKey, ExtendedSymbolData>),
+    Map(HashMap<UserDataKey, UserData>),
     /// A serialized byte array.
     Serialized(Vec<u8>),
 }
@@ -379,7 +379,7 @@ pub struct Symbol {
 impl std::fmt::Debug for Symbol {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         if f.alternate() {
-            let data = self.get_data();
+            let data = self.get_global_data();
             write!(
                 f,
                 "Symbol(name: {}, id: {}, attributes: {:?}, tags: {:?})",
@@ -417,7 +417,7 @@ pub struct SymbolBuilder {
     normalization_function: Option<NormalizationFunction>,
     print_function: Option<PrintFunction>,
     derivative_function: Option<DerivativeFunction>,
-    extra: Option<ExtendedSymbolData>,
+    user_data: Option<UserData>,
 }
 
 impl SymbolBuilder {
@@ -431,7 +431,7 @@ impl SymbolBuilder {
             normalization_function: None,
             print_function: None,
             derivative_function: None,
-            extra: None,
+            user_data: None,
         }
     }
 
@@ -531,8 +531,8 @@ impl SymbolBuilder {
     }
 
     /// Add extended structured symbol data.
-    pub fn with_extra(mut self, extra: ExtendedSymbolData) -> Self {
-        self.extra = Some(extra);
+    pub fn with_user_data(mut self, data: UserData) -> Self {
+        self.user_data = Some(data);
         self
     }
 
@@ -570,7 +570,7 @@ impl SymbolBuilder {
             && self.print_function.is_none()
             && self.derivative_function.is_none()
             && self.tags.is_empty()
-            && self.extra.is_none()
+            && self.user_data.is_none()
         {
             state.get_symbol(self.symbol)
         } else {
@@ -581,7 +581,7 @@ impl SymbolBuilder {
                 self.print_function,
                 self.derivative_function,
                 self.tags,
-                self.extra,
+                self.user_data,
             )
         }
     }
@@ -589,9 +589,9 @@ impl SymbolBuilder {
 
 #[test]
 fn extra() {
-    let s = crate::symbol!("test", extra = ExtendedSymbolData::Integer(42));
+    let s = crate::symbol!("test", data = UserData::Integer(42));
 
-    println!("{:?}", s.get_extra_data());
+    println!("{:?}", s.get_data());
 }
 
 impl Symbol {
@@ -684,7 +684,7 @@ impl Symbol {
     /// assert_eq!(x.get_stripped_name(), "x");
     /// ```
     pub fn get_stripped_name(&self) -> &str {
-        let d = self.get_data();
+        let d = self.get_global_data();
         &d.name[d.namespace.len() + 2..]
     }
 
@@ -855,28 +855,28 @@ impl Symbol {
 
     /// Get all tags of the symbol.
     pub fn get_tags(&self) -> &[String] {
-        &self.get_data().tags
+        &self.get_global_data().tags
     }
 
     /// Check if the symbol has the tag `tag`.
     pub fn has_tag(&self, tag: impl AsRef<str>) -> bool {
         let r = tag.as_ref();
-        self.get_data().tags.iter().any(|x| x == r)
+        self.get_global_data().tags.iter().any(|x| x == r)
     }
 
     /// Get the custom normalization function of the symbol, if any.
-    pub fn get_normalization_function(&self) -> Option<&NormalizationFunction> {
-        self.get_data().custom_normalization.as_ref()
+    pub fn get_normalization_function(&self) -> Option<&'static NormalizationFunction> {
+        self.get_global_data().custom_normalization.as_ref()
     }
 
     /// Get the custom derivative function of the symbol, if any.
-    pub fn get_derivative_function(&self) -> Option<&DerivativeFunction> {
-        self.get_data().custom_derivative.as_ref()
+    pub fn get_derivative_function(&self) -> Option<&'static DerivativeFunction> {
+        self.get_global_data().custom_derivative.as_ref()
     }
 
     /// Get the custom print function of the symbol, if any.
-    pub fn get_print_function(&self) -> Option<&PrintFunction> {
-        self.get_data().custom_print.as_ref()
+    pub fn get_print_function(&self) -> Option<&'static PrintFunction> {
+        self.get_global_data().custom_print.as_ref()
     }
 
     /// Get all tags of the symbol.
@@ -935,9 +935,9 @@ impl Symbol {
             && (!s.is_scalar() || self.is_scalar())
     }
 
-    /// Get the extended symbol data associated with the symbol.
-    pub fn get_extra_data(&self) -> &ExtendedSymbolData {
-        &self.get_data().extra
+    /// Get the user data associated with the symbol.
+    pub fn get_data(&self) -> &'static UserData {
+        &self.get_global_data().extra
     }
 
     /// Expert use: create a new variable symbol. This constructor should be used with care as there are no checks
@@ -1019,7 +1019,7 @@ impl Symbol {
         opts: &PrintOptions,
         f: &mut W,
     ) -> Result<(), std::fmt::Error> {
-        let data = self.get_data();
+        let data = self.get_global_data();
         let (namespace, name) = (&data.namespace, &data.name[data.namespace.len() + 2..]);
 
         if let Some(custom_print) = &data.custom_print
@@ -1168,7 +1168,7 @@ impl Symbol {
     }
 
     /// Get data related to the symbol.
-    pub(crate) fn get_data(self) -> &'static SymbolData {
+    pub(crate) fn get_global_data(self) -> &'static SymbolData {
         State::get_symbol_data(self)
     }
 }
@@ -2496,8 +2496,8 @@ macro_rules! symbol_set_attr {
     ($b: expr, der = $der: expr) => {
         $b.with_derivative_function($der)
     };
-    ($b: expr, extra = $extra: expr) => {
-        $b.with_extra($extra)
+    ($b: expr, data = $user_data: expr) => {
+        $b.with_user_data($user_data)
     };
     ($b: expr, tag = $tag: expr) => {
         $b.with_tags(std::slice::from_ref(&$tag))

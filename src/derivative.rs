@@ -154,7 +154,7 @@ impl AtomView<'_> {
                 let mut n = workspace.new_atom();
                 let mut mul = workspace.new_atom();
                 for (index, arg_der) in args_der {
-                    if let Some(custom_der) = &f.get_symbol().get_data().custom_derivative {
+                    if let Some(custom_der) = &f.get_symbol().get_global_data().custom_derivative {
                         let mut setter = fn_der.deref_mut().into();
                         custom_der(*self, index, &mut setter);
                         if setter.is_set() {

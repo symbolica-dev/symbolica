@@ -12,7 +12,7 @@ use std::{
 };
 
 use crate::{
-    atom::{ExtendedSymbolData, ExtendedSymbolDataKey},
+    atom::{UserData, UserDataKey},
     coefficient::{Coefficient, CoefficientView},
     state::{State, StateMap, Workspace},
 };
@@ -148,13 +148,13 @@ impl Symbol {
     }
 }
 
-impl ExtendedSymbolDataKey {
-    pub fn read<R: Read>(source: &mut R) -> Result<ExtendedSymbolDataKey, std::io::Error> {
+impl UserDataKey {
+    pub fn read<R: Read>(source: &mut R) -> Result<UserDataKey, std::io::Error> {
         let tag = source.read_u8()?;
         match tag {
             1 => {
                 let value = source.read_i64::<LittleEndian>()?;
-                Ok(ExtendedSymbolDataKey::Integer(value))
+                Ok(UserDataKey::Integer(value))
             }
             2 => {
                 let len = source.read_u32::<LittleEndian>()? as usize;
@@ -162,31 +162,31 @@ impl ExtendedSymbolDataKey {
                 source.read_exact(&mut buf)?;
                 let s = std::string::String::from_utf8(buf)
                     .map_err(|e| std::io::Error::new(std::io::ErrorKind::InvalidData, e))?;
-                Ok(ExtendedSymbolDataKey::String(s))
+                Ok(UserDataKey::String(s))
             }
             3 => {
                 let data = Atom::import(source, None)?;
-                Ok(ExtendedSymbolDataKey::Atom(data))
+                Ok(UserDataKey::Atom(data))
             }
             _ => Err(std::io::Error::new(
                 std::io::ErrorKind::InvalidData,
-                "Invalid ExtendedSymbolDataKey tag",
+                "Invalid UserDataKey tag",
             )),
         }
     }
 
     pub fn write<W: std::io::Write>(&self, target: &mut W) -> Result<(), std::io::Error> {
         match self {
-            ExtendedSymbolDataKey::Integer(value) => {
+            UserDataKey::Integer(value) => {
                 target.write_u8(1)?;
                 target.write_i64::<LittleEndian>(*value)
             }
-            ExtendedSymbolDataKey::String(s) => {
+            UserDataKey::String(s) => {
                 target.write_u8(2)?;
                 target.write_u32::<LittleEndian>(s.len() as u32)?;
                 target.write_all(s.as_bytes())
             }
-            ExtendedSymbolDataKey::Atom(a) => {
+            UserDataKey::Atom(a) => {
                 target.write_u8(3)?;
                 a.as_view().write(target) // export without the state
             }
@@ -194,14 +194,14 @@ impl ExtendedSymbolDataKey {
     }
 }
 
-impl ExtendedSymbolData {
-    pub fn read<R: Read>(source: &mut R) -> Result<ExtendedSymbolData, std::io::Error> {
+impl UserData {
+    pub fn read<R: Read>(source: &mut R) -> Result<UserData, std::io::Error> {
         let tag = source.read_u8()?;
         match tag {
-            0 => Ok(ExtendedSymbolData::None),
+            0 => Ok(UserData::None),
             1 => {
                 let value = source.read_i64::<LittleEndian>()?;
-                Ok(ExtendedSymbolData::Integer(value))
+                Ok(UserData::Integer(value))
             }
             2 => {
                 let len = source.read_u32::<LittleEndian>()? as usize;
@@ -209,61 +209,61 @@ impl ExtendedSymbolData {
                 source.read_exact(&mut buf)?;
                 let s = std::string::String::from_utf8(buf)
                     .map_err(|e| std::io::Error::new(std::io::ErrorKind::InvalidData, e))?;
-                Ok(ExtendedSymbolData::String(s))
+                Ok(UserData::String(s))
             }
             3 => {
                 let mut a = Atom::Zero;
                 a.read(source)?;
-                Ok(ExtendedSymbolData::Atom(a))
+                Ok(UserData::Atom(a))
             }
             4 => {
                 let len = source.read_u32::<LittleEndian>()? as usize;
                 let mut list = Vec::with_capacity(len);
                 for _ in 0..len {
-                    list.push(ExtendedSymbolData::read(source)?);
+                    list.push(UserData::read(source)?);
                 }
-                Ok(ExtendedSymbolData::List(list))
+                Ok(UserData::List(list))
             }
             5 => {
                 let len = source.read_u32::<LittleEndian>()? as usize;
                 let mut map = HashMap::default();
                 for _ in 0..len {
-                    let key = ExtendedSymbolDataKey::read(source)?;
-                    let value = ExtendedSymbolData::read(source)?;
+                    let key = UserDataKey::read(source)?;
+                    let value = UserData::read(source)?;
                     map.insert(key, value);
                 }
-                Ok(ExtendedSymbolData::Map(map))
+                Ok(UserData::Map(map))
             }
             6 => {
                 let len = source.read_u32::<LittleEndian>()? as usize;
                 let mut buf = vec![0u8; len];
                 source.read_exact(&mut buf)?;
-                Ok(ExtendedSymbolData::Serialized(buf))
+                Ok(UserData::Serialized(buf))
             }
             _ => Err(std::io::Error::new(
                 std::io::ErrorKind::InvalidData,
-                "Invalid ExtendedSymbolData tag",
+                "Invalid ExtendedUserData tag",
             )),
         }
     }
 
     pub fn write<W: std::io::Write>(&self, target: &mut W) -> Result<(), std::io::Error> {
         match self {
-            ExtendedSymbolData::None => target.write_u8(0),
-            ExtendedSymbolData::Integer(value) => {
+            UserData::None => target.write_u8(0),
+            UserData::Integer(value) => {
                 target.write_u8(1)?;
                 target.write_i64::<LittleEndian>(*value)
             }
-            ExtendedSymbolData::String(s) => {
+            UserData::String(s) => {
                 target.write_u8(2)?;
                 target.write_u32::<LittleEndian>(s.len() as u32)?;
                 target.write_all(s.as_bytes())
             }
-            ExtendedSymbolData::Atom(a) => {
+            UserData::Atom(a) => {
                 target.write_u8(3)?;
                 a.as_view().write(target) // export without the state
             }
-            ExtendedSymbolData::List(list) => {
+            UserData::List(list) => {
                 target.write_u8(4)?;
                 target.write_u32::<LittleEndian>(list.len() as u32)?;
                 for item in list {
@@ -271,7 +271,7 @@ impl ExtendedSymbolData {
                 }
                 Ok(())
             }
-            ExtendedSymbolData::Map(map) => {
+            UserData::Map(map) => {
                 target.write_u8(5)?;
                 target.write_u32::<LittleEndian>(map.len() as u32)?;
                 for (key, value) in map {
@@ -280,7 +280,7 @@ impl ExtendedSymbolData {
                 }
                 Ok(())
             }
-            ExtendedSymbolData::Serialized(buf) => {
+            UserData::Serialized(buf) => {
                 target.write_u8(6)?;
                 target.write_u32::<LittleEndian>(buf.len() as u32)?;
                 target.write_all(buf)

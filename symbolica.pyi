@@ -79,7 +79,9 @@ def S(name: str,
       tags: Optional[Sequence[str]] = None,
       custom_normalization: Optional[Transformer] = None,
       custom_print: Optional[Callable[..., Optional[str]]] = None,
-      custom_derivative: Optional[Callable[[Expression, int], Expression]] = None) -> Expression:
+      custom_derivative: Optional[Callable[[
+          Expression, int], Expression]] = None,
+      data: Optional[str | int | Expression | list | dict] = None) -> Expression:
     """
     Create new symbols from `names`. Symbols can have attributes,
     such as symmetries. If no attributes
@@ -168,6 +170,8 @@ def S(name: str,
         The custom print function takes in keyword arguments that are the same as the arguments of the `format` function.
     custom_derivative: Optional[Callable[[Expression, int], Expression]]:
         A function that is called when computing the derivative of a function in a given argument.
+    data: Optional[str | int | Expression | list | dict] = None
+        Custom user data to associate with the symbol.
     """
 
 
@@ -475,7 +479,9 @@ class Expression:
                tags: Optional[Sequence[str]] = None,
                custom_normalization: Optional[Transformer] = None,
                custom_print: Optional[Callable[..., Optional[str]]] = None,
-               custom_derivative: Optional[Callable[[Expression, int], Expression]] = None) -> Expression:
+               custom_derivative: Optional[Callable[[
+                   Expression, int], Expression]] = None,
+               data: Optional[str | int | Expression | list | dict] = None) -> Expression:
         """
         Create new symbols from `names`. Symbols can have attributes,
         such as symmetries. If no attributes
@@ -564,6 +570,8 @@ class Expression:
             The custom print function takes in keyword arguments that are the same as the arguments of the `format` function.
         custom_derivative: Optional[Callable[[Expression, int], Expression]]:
             A function that is called when computing the derivative of a function in a given argument.
+        data: Optional[str | int | Expression | list | dict] = None
+            Custom user data to associate with the symbol.
         """
 
     @overload
@@ -891,6 +899,14 @@ class Expression:
         """
         Get the attributes of a variable or function if the current atom
         is a variable or function, otherwise throw an error.
+        """
+
+    def get_symbol_data(self, key: Optional[str | int | Expression] = None) -> str | int | Expression | dict | list:
+        """
+        Get the data of a variable or function if the current atom
+        is a variable or function, otherwise throw an error.
+        Optionally, provide a key to access a specific entry in the data map, if
+        the data is a map.
         """
 
     def is_scalar(self) -> bool:

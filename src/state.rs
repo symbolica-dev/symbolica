@@ -20,8 +20,7 @@ use once_cell::sync::Lazy;
 use smartstring::alias::String;
 
 use crate::atom::{
-    DerivativeFunction, ExtendedSymbolData, NamespacedSymbol, NormalizationFunction,
-    SymbolAttribute,
+    DerivativeFunction, NamespacedSymbol, NormalizationFunction, SymbolAttribute, UserData,
 };
 use crate::domains::finite_field::Zp64;
 use crate::poly::PolyVariable;
@@ -78,7 +77,7 @@ pub(crate) struct SymbolData {
     pub(crate) custom_print: Option<PrintFunction>,
     pub(crate) custom_derivative: Option<DerivativeFunction>,
     pub(crate) tags: Vec<std::string::String>,
-    pub(crate) extra: ExtendedSymbolData,
+    pub(crate) extra: UserData,
 }
 
 static STATE: Lazy<RwLock<State>> = Lazy::new(|| RwLock::new(State::new()));
@@ -189,7 +188,7 @@ impl State {
                     custom_print: None,
                     custom_derivative: None,
                     tags: vec![],
-                    extra: ExtendedSymbolData::None,
+                    extra: UserData::None,
                 },
             ));
             assert_eq!(symbol.get_id() as usize, index);
@@ -317,7 +316,7 @@ impl State {
                     custom_print: None,
                     custom_derivative: None,
                     tags: vec![],
-                    extra: ExtendedSymbolData::None,
+                    extra: UserData::None,
                 },
             ));
             assert_eq!(symbol.get_id() as usize, index - offset);
@@ -397,7 +396,7 @@ impl State {
                         custom_print: None,
                         custom_derivative: None,
                         tags: vec![],
-                        extra: ExtendedSymbolData::None,
+                        extra: UserData::None,
                     },
                 )) - offset;
                 assert_eq!(id, id_ret);
@@ -426,7 +425,7 @@ impl State {
         print_function: Option<PrintFunction>,
         derivative_function: Option<DerivativeFunction>,
         tags: Vec<std::string::String>,
-        extra: Option<ExtendedSymbolData>,
+        extra: Option<UserData>,
     ) -> Result<Symbol, String> {
         match self.str_to_id.entry(name.symbol.into()) {
             Entry::Occupied(o) => {
@@ -584,7 +583,7 @@ impl State {
                         custom_print: print_function,
                         custom_derivative: derivative_function,
                         tags,
-                        extra: extra.unwrap_or(ExtendedSymbolData::None),
+                        extra: extra.unwrap_or(UserData::None),
                     },
                 )) - offset;
                 assert_eq!(id, id_ret);
@@ -717,7 +716,7 @@ impl State {
                 dest.write_all(t.as_bytes())?;
             }
 
-            s.get_extra_data().write(dest)?;
+            s.get_data().write(dest)?;
         }
 
         dest.write_u64::<LittleEndian>(FINITE_FIELDS.len() as u64)?;
@@ -828,7 +827,7 @@ impl State {
                 tags.push(tag);
             }
 
-            let extra_data = ExtendedSymbolData::read(&mut *source)?;
+            let extra_data = UserData::read(&mut *source)?;
 
             attributes.clear();
             if s.is_antisymmetric() {
@@ -865,7 +864,7 @@ impl State {
                 })
                 .with_attributes(attributes.clone())
                 .with_tags(tags.clone())
-                .with_extra(extra_data.clone())
+                .with_user_data(extra_data.clone())
                 .build()
                 {
                     Ok(id) => {
@@ -1155,7 +1154,7 @@ mod tests {
     fn export_symbol_data() {
         let s = symbol!(
             "symbolica::symbol_data::a",
-            extra = crate::state::ExtendedSymbolData::Atom(parse!("z"))
+            data = crate::state::UserData::Atom(parse!("z"))
         );
 
         let s1 = s.to_atom();
@@ -1166,10 +1165,7 @@ mod tests {
             .unwrap()
             .get_symbol()
             .unwrap();
-        assert_eq!(
-            a.get_extra_data(),
-            &crate::state::ExtendedSymbolData::Atom(parse!("z"))
-        );
+        assert_eq!(a.get_data(), &crate::state::UserData::Atom(parse!("z")));
     }
 
     #[test]
