@@ -81,7 +81,7 @@ def S(name: str,
       custom_print: Optional[Callable[..., Optional[str]]] = None,
       custom_derivative: Optional[Callable[[
           Expression, int], Expression]] = None,
-      data: Optional[str | int | Expression | list | dict] = None) -> Expression:
+      data: Optional[str | int | Expression | bytes | list[Any] | dict[str | int | Expression, Any]] = None) -> Expression:
     """
     Create new symbols from `names`. Symbols can have attributes,
     such as symmetries. If no attributes
@@ -138,6 +138,10 @@ def S(name: str,
     >>> x = S('x')
     >>> tag(3, x).derivative(x)
 
+    Add custom data to a symbol:
+    >>> x = S('x', data={'my_tag': 'my_value'})
+    >>> r = x.get_symbol_data('my_tag')
+
     Parameters
     ----------
     name : str
@@ -170,8 +174,8 @@ def S(name: str,
         The custom print function takes in keyword arguments that are the same as the arguments of the `format` function.
     custom_derivative: Optional[Callable[[Expression, int], Expression]]:
         A function that is called when computing the derivative of a function in a given argument.
-    data: Optional[str | int | Expression | list | dict] = None
-        Custom user data to associate with the symbol.
+    data: Optional[str | int | Expression | bytes | list | dict] = None
+        Custom user data to associate with the symbol.  
     """
 
 
@@ -481,7 +485,7 @@ class Expression:
                custom_print: Optional[Callable[..., Optional[str]]] = None,
                custom_derivative: Optional[Callable[[
                    Expression, int], Expression]] = None,
-               data: Optional[str | int | Expression | list | dict] = None) -> Expression:
+               data: Optional[str | int | Expression | bytes | list[Any] | dict[str | int | Expression, Any]] = None) -> Expression:
         """
         Create new symbols from `names`. Symbols can have attributes,
         such as symmetries. If no attributes
@@ -538,6 +542,10 @@ class Expression:
         >>> x = S('x')
         >>> tag(3, x).derivative(x)
 
+        Add custom data to a symbol:
+        >>> x = S('x', data={'my_tag': 'my_value'})
+        >>> r = x.get_symbol_data('my_tag')
+
         Parameters
         ----------
         name : str
@@ -570,7 +578,7 @@ class Expression:
             The custom print function takes in keyword arguments that are the same as the arguments of the `format` function.
         custom_derivative: Optional[Callable[[Expression, int], Expression]]:
             A function that is called when computing the derivative of a function in a given argument.
-        data: Optional[str | int | Expression | list | dict] = None
+        data: Optional[str | int | Expression | bytes | list | dict] = None
             Custom user data to associate with the symbol.
         """
 
@@ -901,12 +909,24 @@ class Expression:
         is a variable or function, otherwise throw an error.
         """
 
-    def get_symbol_data(self, key: Optional[str | int | Expression] = None) -> str | int | Expression | dict | list:
+    def get_symbol_data(self, key: Optional[str | int | Expression] = None) -> str | int | Expression | bytes | dict[str | int | Expression, Any] | list[Any]:
         """
         Get the data of a variable or function if the current atom
         is a variable or function, otherwise throw an error.
         Optionally, provide a key to access a specific entry in the data map, if
         the data is a map.
+
+        Examples
+        --------
+        >>> x = S('x', data={'my_tag': 'my_value'})
+        >>> print(x.get_symbol_data('my_tag'))
+
+        Yields `my_value`.
+
+        >>> y = S('y', data=3)
+        >>> print(y.get_symbol_data())
+
+        Yields `3`.
         """
 
     def is_scalar(self) -> bool:

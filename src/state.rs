@@ -77,7 +77,7 @@ pub(crate) struct SymbolData {
     pub(crate) custom_print: Option<PrintFunction>,
     pub(crate) custom_derivative: Option<DerivativeFunction>,
     pub(crate) tags: Vec<std::string::String>,
-    pub(crate) extra: UserData,
+    pub(crate) user_data: UserData,
 }
 
 static STATE: Lazy<RwLock<State>> = Lazy::new(|| RwLock::new(State::new()));
@@ -188,7 +188,7 @@ impl State {
                     custom_print: None,
                     custom_derivative: None,
                     tags: vec![],
-                    extra: UserData::None,
+                    user_data: UserData::None,
                 },
             ));
             assert_eq!(symbol.get_id() as usize, index);
@@ -316,7 +316,7 @@ impl State {
                     custom_print: None,
                     custom_derivative: None,
                     tags: vec![],
-                    extra: UserData::None,
+                    user_data: UserData::None,
                 },
             ));
             assert_eq!(symbol.get_id() as usize, index - offset);
@@ -396,7 +396,7 @@ impl State {
                         custom_print: None,
                         custom_derivative: None,
                         tags: vec![],
-                        extra: UserData::None,
+                        user_data: UserData::None,
                     },
                 )) - offset;
                 assert_eq!(id, id_ret);
@@ -425,7 +425,7 @@ impl State {
         print_function: Option<PrintFunction>,
         derivative_function: Option<DerivativeFunction>,
         tags: Vec<std::string::String>,
-        extra: Option<UserData>,
+        user_data: Option<UserData>,
     ) -> Result<Symbol, String> {
         match self.str_to_id.entry(name.symbol.into()) {
             Entry::Occupied(o) => {
@@ -449,6 +449,8 @@ impl State {
                     && print_function.is_none()
                     && derivative_function.is_none()
                     && tags == r.get_tags()
+                    && user_data.as_ref().unwrap_or(&UserData::None)
+                        == &ID_TO_STR[r.get_id() as usize].1.user_data
                 {
                     Ok(r)
                 } else {
@@ -526,8 +528,11 @@ impl State {
                         diff_attr.push_str("\tNew derivative function specified.\n");
                     }
 
-                    if extra.as_ref() != Some(&data.extra) {
-                        diff_attr.push_str("\tNew extra symbol data specified.\n");
+                    if user_data.as_ref().unwrap_or(&UserData::None) != &data.user_data {
+                        diff_attr.push_str(&format!(
+                            "\tNew user data specified: {:?} vs {:?}\n",
+                            data.user_data, user_data
+                        ));
                     }
 
                     if data.file.is_empty() {
@@ -583,7 +588,7 @@ impl State {
                         custom_print: print_function,
                         custom_derivative: derivative_function,
                         tags,
-                        extra: extra.unwrap_or(UserData::None),
+                        user_data: user_data.unwrap_or(UserData::None),
                     },
                 )) - offset;
                 assert_eq!(id, id_ret);

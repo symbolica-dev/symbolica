@@ -705,6 +705,12 @@ PyFunctionInfo {
                     default: ParameterDefault::Expr(NONE_ARG),
                     type_info: || TypeInfo::unqualified("typing.Optional[typing.Callable[[Expression, int], Expression]]"),
                 },
+                ParameterInfo {
+                    name: "data",
+                    kind: ParameterKind::PositionalOrKeyword,
+                    default: ParameterDefault::Expr(NONE_ARG),
+                    type_info: || TypeInfo::unqualified("typing.Optional[str | int | Expression | bytes | list | dict]"),
+                },
             ],
             r#return: || PythonExpression::type_output(),
             doc:
@@ -4353,7 +4359,7 @@ impl PythonExpression {
     /// Optionally, provide a key to access a specific entry in the data map, if
     /// the data is a map.
     #[gen_stub(override_return_type(
-        type_repr = "Expression | int | float | complex | str | dict | list"
+        type_repr = "Expression | int | float | complex | str | bytes | dict[Expression | int | float | complex | str, Any] | list[Any]"
     ))]
     #[pyo3(signature = (key=None))]
     pub fn get_symbol_data(
@@ -7509,6 +7515,12 @@ PyMethodsInfo {
                     kind: ParameterKind::PositionalOrKeyword,
                     default: ParameterDefault::Expr(NONE_ARG),
                     type_info: || TypeInfo::unqualified("typing.Optional[typing.Callable[[Expression, int], Expression]]"),
+                },
+                ParameterInfo {
+                    name: "data",
+                    kind: ParameterKind::PositionalOrKeyword,
+                    default: ParameterDefault::Expr(NONE_ARG),
+                    type_info: || TypeInfo::unqualified("typing.Optional[str | int | Expression | bytes | list | dict]"),
                 },
             ],
             r#type: MethodType::Class,

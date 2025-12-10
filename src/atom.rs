@@ -587,13 +587,6 @@ impl SymbolBuilder {
     }
 }
 
-#[test]
-fn extra() {
-    let s = crate::symbol!("test", data = UserData::Integer(42));
-
-    println!("{:?}", s.get_data());
-}
-
 impl Symbol {
     /// The built-in function represents a list of function arguments.
     pub const ARG: Symbol = State::ARG;
@@ -937,7 +930,7 @@ impl Symbol {
 
     /// Get the user data associated with the symbol.
     pub fn get_data(&self) -> &'static UserData {
-        &self.get_global_data().extra
+        &self.get_global_data().user_data
     }
 
     /// Expert use: create a new variable symbol. This constructor should be used with care as there are no checks
@@ -2372,6 +2365,15 @@ macro_rules! tag {
 /// ```
 /// See [DerivativeFunction] for more details.
 ///
+/// ### User data
+///
+/// You can attach custom user data to the symbol using the `data` flag:
+/// ```no_run
+/// use symbolica::{symbol, atom::UserData};
+/// let _ = symbol!("my_symbol", data = UserData::String("custom user data".to_owned()));
+/// ```
+/// It can be retrieved later using [Symbol::get_data]. See [UserData] for more details.
+///
 /// To set special settings together with attributes, separate the attributes with another
 /// `;`:
 ///
@@ -2823,7 +2825,7 @@ impl AsRef<Atom> for Atom {
 #[cfg(test)]
 mod test {
     use crate::{
-        atom::{Atom, AtomCore},
+        atom::{Atom, AtomCore, UserData},
         function,
     };
 
@@ -2876,5 +2878,11 @@ mod test {
             .add_arg(parse!("a"))
             .add_arg(parse!("a").as_view())
             .finish();
+    }
+
+    #[test]
+    fn user_data() {
+        let s = crate::symbol!("user_data::test", data = UserData::Integer(42));
+        assert_eq!(s.get_data(), &UserData::Integer(42));
     }
 }
