@@ -877,17 +877,17 @@ impl Rational {
         self.denominator.is_one()
     }
 
-    pub fn zero() -> Rational {
+    pub const fn zero() -> Rational {
         Rational {
-            numerator: 0.into(),
-            denominator: 1.into(),
+            numerator: Integer::zero(),
+            denominator: Integer::one(),
         }
     }
 
-    pub fn one() -> Rational {
+    pub const fn one() -> Rational {
         Rational {
-            numerator: 1.into(),
-            denominator: 1.into(),
+            numerator: Integer::one(),
+            denominator: Integer::one(),
         }
     }
 

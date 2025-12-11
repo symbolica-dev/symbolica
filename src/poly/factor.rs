@@ -4,6 +4,7 @@
 use std::{cmp::Reverse, sync::Arc};
 
 use ahash::{HashMap, HashSet, HashSetExt};
+use numerica::domains::float::C;
 use rand::{Rng, rng};
 use tracing::debug;
 
@@ -802,6 +803,50 @@ impl<E: PositiveExponent> Factorize
         }
 
         full_factors
+    }
+
+    fn is_irreducible(&self) -> bool {
+        // TODO: improve
+        self.factor().len() == 1
+    }
+}
+
+impl<E: PositiveExponent> Factorize for MultivariatePolynomial<C, E, LexOrder> {
+    fn square_free_factorization(&self) -> Vec<(Self, usize)> {
+        if self.is_zero() {
+            return vec![];
+        }
+
+        let c = self.content();
+        let stripped = self.clone().div_coeff(&c);
+
+        let mut factors = vec![];
+
+        if !self.ring.is_one(&c) {
+            factors.push((self.constant(c), 1));
+        }
+
+        let fs = stripped.factor_separable();
+
+        for f in fs {
+            let mut nf = f.square_free_factorization_0_char();
+            factors.append(&mut nf);
+        }
+
+        if factors.is_empty() {
+            factors.push((self.one(), 1))
+        }
+
+        factors
+    }
+
+    /// Perform Trager's algorithm for factorization.
+    fn factor(&self) -> Vec<(Self, usize)> {
+        self.to_extension()
+            .factor()
+            .into_iter()
+            .map(|(f, p)| (f.to_complex(), p))
+            .collect()
     }
 
     fn is_irreducible(&self) -> bool {

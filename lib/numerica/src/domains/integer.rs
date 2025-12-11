@@ -708,7 +708,7 @@ impl Integer {
     }
 
     #[inline]
-    pub fn is_zero(&self) -> bool {
+    pub const fn is_zero(&self) -> bool {
         match self {
             Integer::Single(n) => *n == 0,
             _ => false,
@@ -716,7 +716,7 @@ impl Integer {
     }
 
     #[inline]
-    pub fn is_one(&self) -> bool {
+    pub const fn is_one(&self) -> bool {
         match self {
             Integer::Single(n) => *n == 1,
             _ => false,
@@ -733,12 +733,12 @@ impl Integer {
     }
 
     #[inline]
-    pub fn zero() -> Integer {
+    pub const fn zero() -> Integer {
         Integer::Single(0)
     }
 
     #[inline]
-    pub fn one() -> Integer {
+    pub const fn one() -> Integer {
         Integer::Single(1)
     }
 
@@ -1182,7 +1182,8 @@ impl Integer {
     ///
     /// If the procedure runs out of iterations, the current best solution is returned.
     pub fn solve_integer_relation<
-        T: FloatLike
+        T: SelfRing
+            + FloatLike
             + RealLike
             + Real
             + SingleFloat
@@ -1235,7 +1236,7 @@ impl Integer {
 
         macro_rules! hermite_reduction {
             ($i: expr, $j: expr) => {
-                if h[($j, $j)].is_zero() {
+                if SelfRing::is_zero(&h[($j, $j)]) {
                     return Err(IntegerRelationError::PrecisionLimit);
                 }
 
@@ -1295,7 +1296,7 @@ impl Integer {
                 let t0 = (h[(m, m)].clone() * &h[(m, m)] + h[(m, m + 1)].clone() * &h[(m, m + 1)])
                     .sqrt();
 
-                if t0.is_zero() {
+                if SelfRing::is_zero(&t0) {
                     return Err(IntegerRelationError::PrecisionLimit);
                 }
 

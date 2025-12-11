@@ -882,7 +882,7 @@ impl UnivariatePolynomial<RationalField> {
     /// Returns `Ok(roots)` when all roots were found up to the tolerance, and `Err(roots)` when the number of iterations ran out.
     /// In that case, the current-best estimate for each root is returned.
     pub fn approximate_roots<
-        F: Real + SingleFloat + std::hash::Hash + Eq + PartialOrd + InternalOrdering,
+        F: Real + SelfRing + SingleFloat + std::hash::Hash + Eq + PartialOrd + InternalOrdering,
     >(
         &self,
         max_iterations: usize,
@@ -926,7 +926,7 @@ impl UnivariatePolynomial<IntegerRing> {
     /// Returns `Ok(roots)` when all roots were found up to the tolerance, and `Err(roots)` when the number of iterations ran out.
     /// In that case, the current-best estimate for each root is returned.
     pub fn approximate_roots<
-        F: Real + SingleFloat + std::hash::Hash + Eq + PartialOrd + InternalOrdering,
+        F: Real + SelfRing + SingleFloat + std::hash::Hash + Eq + PartialOrd + InternalOrdering,
     >(
         &self,
         max_iterations: usize,
@@ -1239,7 +1239,7 @@ impl UnivariatePolynomial<IntegerRing> {
     }
 }
 
-impl<R: Real + SingleFloat + std::hash::Hash + Eq + PartialOrd + InternalOrdering>
+impl<R: Real + SelfRing + SingleFloat + std::hash::Hash + Eq + PartialOrd + InternalOrdering>
     UnivariatePolynomial<FloatField<Complex<R>>>
 {
     /// Get an upper bound on the norm of all (complex) roots.
@@ -1288,7 +1288,7 @@ impl<R: Real + SingleFloat + std::hash::Hash + Eq + PartialOrd + InternalOrderin
         max_iterations: usize,
         tolerance: &R,
     ) -> Result<Vec<Complex<R>>, Vec<Complex<R>>> {
-        if self.get_constant().is_zero() {
+        if SelfRing::is_zero(&self.get_constant()) {
             match self.div_exp(1).roots(max_iterations, tolerance) {
                 Ok(mut roots) => {
                     roots.push(self.ring.zero());

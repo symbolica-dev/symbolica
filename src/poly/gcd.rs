@@ -15,10 +15,10 @@ use crate::domains::finite_field::{
     FiniteField, FiniteFieldCore, FiniteFieldElement, FiniteFieldWorkspace, PrimeIteratorU64,
     SMOOTH_PRIME_BASE, SMOOTH_PRIMES, ToFiniteField, Zp, Zp64,
 };
-use crate::domains::float::{FloatField, SingleFloat};
+use crate::domains::float::{C, Complex, F64, Float, FloatField, SingleFloat};
 use crate::domains::integer::{FromFiniteField, Integer, IntegerRing, SMALL_PRIMES, Z};
 use crate::domains::rational::{Q, Rational, RationalField};
-use crate::domains::{EuclideanDomain, Field, InternalOrdering, Ring, RingOps, Set};
+use crate::domains::{EuclideanDomain, Field, InternalOrdering, Ring, RingOps, SelfRing, Set};
 use crate::poly::INLINED_EXPONENTS;
 use crate::poly::factor::Factorize;
 use crate::tensors::matrix::{Matrix, MatrixError};
@@ -3654,6 +3654,44 @@ where
     }
 }
 
+impl<E: PositiveExponent> PolynomialGCD<E> for C {
+    fn heuristic_gcd(
+        _a: &MultivariatePolynomial<Self, E>,
+        _b: &MultivariatePolynomial<Self, E>,
+    ) -> Option<(
+        MultivariatePolynomial<Self, E>,
+        MultivariatePolynomial<Self, E>,
+        MultivariatePolynomial<Self, E>,
+    )> {
+        None
+    }
+
+    fn gcd_multiple(f: Vec<MultivariatePolynomial<Self, E>>) -> MultivariatePolynomial<Self, E> {
+        MultivariatePolynomial::repeated_gcd(f)
+    }
+
+    fn gcd(
+        a: &MultivariatePolynomial<Self, E>,
+        b: &MultivariatePolynomial<Self, E>,
+        vars: &[usize],
+        bounds: &mut [E],
+    ) -> MultivariatePolynomial<Self, E> {
+        PolynomialGCD::gcd(&a.to_extension(), &b.to_extension(), vars, bounds).to_complex()
+    }
+
+    fn get_gcd_var_bounds(
+        a: &MultivariatePolynomial<Self, E>,
+        b: &MultivariatePolynomial<Self, E>,
+        vars: &[usize],
+    ) -> SmallVec<[E; INLINED_EXPONENTS]> {
+        PolynomialGCD::get_gcd_var_bounds(&a.to_extension(), &b.to_extension(), vars)
+    }
+
+    fn normalize(a: MultivariatePolynomial<Self, E>) -> MultivariatePolynomial<Self, E> {
+        a.make_monic()
+    }
+}
+
 impl<E: PositiveExponent> PolynomialGCD<E> for AlgebraicExtension<RationalField> {
     fn heuristic_gcd(
         _a: &MultivariatePolynomial<Self, E>,
@@ -4024,17 +4062,22 @@ impl<E: PositiveExponent> PolynomialGCD<E> for AlgebraicExtension<RationalField>
     }
 
     fn normalize(a: MultivariatePolynomial<Self, E>) -> MultivariatePolynomial<Self, E> {
-        if a.lcoeff().poly.lcoeff().is_negative() {
-            -a
-        } else {
-            a
-        }
+        a.make_monic()
     }
 }
 
+pub trait InexactCoefficient {}
+
+impl InexactCoefficient for Float {}
+impl InexactCoefficient for F64 {}
+impl InexactCoefficient for Complex<Float> {}
+impl InexactCoefficient for Complex<F64> {}
+
 /// Polynomial GCD functions for floating point coefficient return 1 (for now).
-impl<T: SingleFloat + std::hash::Hash + Eq + InternalOrdering, E: PositiveExponent> PolynomialGCD<E>
-    for FloatField<T>
+impl<
+    T: InexactCoefficient + SelfRing + SingleFloat + std::hash::Hash + Eq + InternalOrdering,
+    E: PositiveExponent,
+> PolynomialGCD<E> for FloatField<T>
 {
     fn heuristic_gcd(
         _a: &MultivariatePolynomial<Self, E>,

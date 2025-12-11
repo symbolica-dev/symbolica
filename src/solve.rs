@@ -116,7 +116,7 @@ impl AtomView<'_> {
 
     /// Solve a non-linear system numerically over the reals using Newton's method.
     pub(crate) fn nsolve_system<
-        N: SingleFloat + Real + PartialOrd + InternalOrdering + Eq + std::hash::Hash,
+        N: SelfRing + SingleFloat + Real + PartialOrd + InternalOrdering + Eq + std::hash::Hash,
         T: AtomCore,
     >(
         system: &[T],
@@ -130,7 +130,7 @@ impl AtomView<'_> {
     }
 
     fn nsolve_system_impl<
-        N: SingleFloat + Real + PartialOrd + InternalOrdering + Eq + std::hash::Hash,
+        N: SelfRing + SingleFloat + Real + PartialOrd + InternalOrdering + Eq + std::hash::Hash,
     >(
         system: &[AtomView],
         vars: &[Indeterminate],

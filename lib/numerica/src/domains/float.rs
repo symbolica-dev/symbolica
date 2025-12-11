@@ -183,7 +183,7 @@ impl<T: SingleFloat + Hash + Eq + InternalOrdering> RingOps<&T> for FloatField<T
     }
 }
 
-impl<T: SingleFloat + Hash + Eq + InternalOrdering> Ring for FloatField<T> {
+impl<T: SelfRing + SingleFloat + Hash + Eq + InternalOrdering> Ring for FloatField<T> {
     #[inline(always)]
     fn zero(&self) -> Self::Element {
         self.rep.zero()
@@ -206,12 +206,12 @@ impl<T: SingleFloat + Hash + Eq + InternalOrdering> Ring for FloatField<T> {
 
     #[inline(always)]
     fn is_zero(&self, a: &Self::Element) -> bool {
-        a.is_zero()
+        SingleFloat::is_zero(a)
     }
 
     #[inline(always)]
     fn is_one(&self, a: &Self::Element) -> bool {
-        a.is_one()
+        SingleFloat::is_one(a)
     }
 
     #[inline(always)]
@@ -225,7 +225,11 @@ impl<T: SingleFloat + Hash + Eq + InternalOrdering> Ring for FloatField<T> {
     }
 
     fn try_inv(&self, a: &Self::Element) -> Option<Self::Element> {
-        if a.is_zero() { None } else { Some(a.inv()) }
+        if SingleFloat::is_zero(a) {
+            None
+        } else {
+            Some(a.inv())
+        }
     }
 
     fn try_div(&self, a: &Self::Element, b: &Self::Element) -> Option<Self::Element> {
@@ -245,42 +249,16 @@ impl<T: SingleFloat + Hash + Eq + InternalOrdering> Ring for FloatField<T> {
         state: crate::printer::PrintState,
         f: &mut W,
     ) -> Result<bool, fmt::Error> {
-        if opts.mode.is_mathematica() {
-            let mut s = String::new();
-            if let Some(p) = opts.precision {
-                if state.in_sum {
-                    s.write_fmt(format_args!("{self:+.p$}"))?
-                } else {
-                    s.write_fmt(format_args!("{self:.p$}"))?
-                }
-            } else if state.in_sum {
-                s.write_fmt(format_args!("{self:+}"))?
-            } else {
-                s.write_fmt(format_args!("{self}"))?
-            }
-
-            f.write_str(&s.replace('e', "*^"))?;
-            return Ok(false);
-        }
-
-        if let Some(p) = opts.precision {
-            if state.in_sum {
-                f.write_fmt(format_args!("{element:+.p$}"))?
-            } else {
-                f.write_fmt(format_args!("{element:.p$}"))?
-            }
-        } else if state.in_sum {
-            f.write_fmt(format_args!("{element:+}"))?
-        } else {
-            f.write_fmt(format_args!("{element}"))?
-        }
-
-        Ok(false)
+        element.format(opts, state, f)
     }
 
     #[inline(always)]
     fn printer<'a>(&'a self, element: &'a Self::Element) -> super::RingPrinter<'a, Self> {
         super::RingPrinter::new(self, element)
+    }
+
+    fn has_independent_elements(&self) -> bool {
+        true
     }
 }
 
@@ -388,7 +366,7 @@ impl SelfRing for Float {
     }
 }
 
-impl SelfRing for Complex<Float> {
+impl<T: SelfRing + SingleFloat> SelfRing for Complex<T> {
     #[inline(always)]
     fn is_zero(&self) -> bool {
         SingleFloat::is_zero(&self.re) && SingleFloat::is_zero(&self.im)
@@ -408,12 +386,24 @@ impl SelfRing for Complex<Float> {
     ) -> Result<bool, fmt::Error> {
         let re_zero = SingleFloat::is_zero(&self.re);
         let im_zero = SingleFloat::is_zero(&self.im);
+
+        if im_zero {
+            return self.re.format(opts, state, f);
+        }
+
         let add_paren =
             (state.in_product || state.in_exp || state.in_exp_base) && !re_zero && !im_zero
                 || (state.in_exp || state.in_exp_base) && !im_zero;
         if add_paren {
+            if state.in_sum {
+                f.write_char('+')?;
+            }
+
             f.write_char('(')?;
             state.in_sum = false;
+            state.in_product = false;
+            state.in_exp = false;
+            state.in_exp_base = false;
         }
 
         if !re_zero || im_zero {
@@ -444,7 +434,7 @@ impl SelfRing for Complex<Float> {
     }
 }
 
-impl<T: SingleFloat + Hash + Eq + InternalOrdering> EuclideanDomain for FloatField<T> {
+impl<T: SelfRing + SingleFloat + Hash + Eq + InternalOrdering> EuclideanDomain for FloatField<T> {
     #[inline(always)]
     fn rem(&self, a: &Self::Element, _: &Self::Element) -> Self::Element {
         a.zero()
@@ -461,7 +451,7 @@ impl<T: SingleFloat + Hash + Eq + InternalOrdering> EuclideanDomain for FloatFie
     }
 }
 
-impl<T: SingleFloat + Hash + Eq + InternalOrdering> Field for FloatField<T> {
+impl<T: SelfRing + SingleFloat + Hash + Eq + InternalOrdering> Field for FloatField<T> {
     #[inline(always)]
     fn div(&self, a: &Self::Element, b: &Self::Element) -> Self::Element {
         a.clone() / b
@@ -3378,6 +3368,17 @@ impl RealLike for Rational {
     }
 }
 
+/// The field of complex numbers with rational real and imaginary parts.
+pub type C = FloatField<Complex<Rational>>;
+
+/// The field of complex numbers with rational real and imaginary parts.
+pub const C: FloatField<Complex<Rational>> = FloatField {
+    rep: Complex {
+        re: Rational::one(),
+        im: Rational::zero(),
+    },
+};
+
 /// A complex number, `re + i * im`, where `i` is the imaginary unit.
 #[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
 #[cfg_attr(feature = "bincode", derive(bincode::Encode, bincode::Decode))]
@@ -4273,10 +4274,10 @@ impl<'a, T: FloatLike + From<&'a Rational>> From<&'a Rational> for Complex<T> {
 
 impl Complex<Rational> {
     pub fn gcd(&self, other: &Self) -> Self {
-        if self.is_zero() {
+        if SelfRing::is_zero(self) {
             return other.clone();
         }
-        if other.is_zero() {
+        if SelfRing::is_zero(other) {
             return self.clone();
         }
 

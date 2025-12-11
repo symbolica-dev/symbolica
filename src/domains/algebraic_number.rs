@@ -1,6 +1,6 @@
 //! Algebraic number fields, e.g. fields supporting sqrt(2).
 
-use std::sync::Arc;
+use std::{marker::PhantomData, sync::Arc};
 
 use rand::Rng;
 
@@ -609,13 +609,13 @@ impl<R: Ring> AlgebraicExtension<R> {
     /// assert_eq!(poly.factor().len(), 3);
     /// ```
     pub fn new_complex(ring: R) -> Self {
-        let poly = MultivariatePolynomial::new(
-            &ring,
-            Some(2),
-            Arc::new(vec![symbol!(Atom::I_STR).into()]),
-        );
-
-        let poly = poly.monomial(ring.one(), vec![2]) + poly.constant(ring.one());
+        let poly = MultivariatePolynomial {
+            coefficients: vec![ring.one(), ring.one()],
+            exponents: vec![0, 2],
+            ring: ring,
+            variables: Arc::new(vec![symbol!(Atom::I_STR).into()]),
+            _phantom: PhantomData,
+        };
 
         AlgebraicExtension {
             poly: Arc::new(poly),

@@ -9,7 +9,7 @@ use crate::{
     atom::{FunctionBuilder, Indeterminate, KeyLookup},
     coefficient::{Coefficient, CoefficientView, ConvertToRing},
     domains::{
-        EuclideanDomain, InternalOrdering,
+        EuclideanDomain, InternalOrdering, SelfRing,
         atom::AtomField,
         factorized_rational_polynomial::{
             FactorizedRationalPolynomial, FromNumeratorAndFactorizedDenominator,
@@ -502,7 +502,7 @@ pub trait AtomCore: private::Sealed {
     /// ```
     fn nsolve<
         'a,
-        N: SingleFloat + Real + PartialOrd,
+        N: SelfRing + SingleFloat + Real + PartialOrd,
         V: Into<BorrowedOrOwned<'a, Indeterminate>>,
     >(
         &self,
@@ -532,7 +532,7 @@ pub trait AtomCore: private::Sealed {
     /// assert!((roots[1].into_inner() - 0.6180339887498941).abs() < 1e-7);
     /// ```
     fn nsolve_system<
-        N: SingleFloat + Real + PartialOrd + InternalOrdering + Eq + std::hash::Hash,
+        N: SelfRing + SingleFloat + Real + PartialOrd + InternalOrdering + Eq + std::hash::Hash,
         T: AtomCore,
     >(
         system: &[T],

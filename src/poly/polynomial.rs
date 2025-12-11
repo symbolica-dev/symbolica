@@ -10,8 +10,8 @@ use std::mem;
 use std::ops::{Add, Div, Mul, Neg, Sub};
 use std::sync::Arc;
 
-use crate::domains::algebraic_number::AlgebraicExtension;
-use crate::domains::float::FloatLike;
+use crate::domains::algebraic_number::{AlgebraicExtension, AlgebraicNumber};
+use crate::domains::float::{C, Complex, FloatLike};
 use crate::domains::integer::{Integer, IntegerRing};
 use crate::domains::rational::{Fraction, FractionField, FractionNormalization, Q, RationalField};
 use crate::domains::{
@@ -4506,6 +4506,83 @@ impl<R: Ring + FractionNormalization + EuclideanDomain, E: Exponent, O: Monomial
     #[inline]
     fn eq(&self, other: &Fraction<R>) -> bool {
         self.is_constant() && self.get_constant() == *other
+    }
+}
+
+impl<E: Exponent> MultivariatePolynomial<C, E> {
+    /// Convert the polynomial to a multivariate polynomial over rationals.
+    pub fn to_extension(&self) -> MultivariatePolynomial<AlgebraicExtension<Q>, E> {
+        let extension = AlgebraicExtension::new_complex(Q);
+        let var = extension.poly().variables.clone();
+        self.map_coeff(
+            move |c| AlgebraicNumber {
+                poly: if c.re.is_zero() {
+                    MultivariatePolynomial {
+                        coefficients: vec![c.im.clone()],
+                        exponents: vec![1],
+                        ring: Q,
+                        variables: var.clone(),
+                        _phantom: PhantomData,
+                    }
+                } else if c.im.is_zero() {
+                    MultivariatePolynomial {
+                        coefficients: vec![c.re.clone()],
+                        exponents: vec![0],
+                        ring: Q,
+                        variables: var.clone(),
+                        _phantom: PhantomData,
+                    }
+                } else {
+                    MultivariatePolynomial {
+                        coefficients: vec![c.re.clone(), c.im.clone()],
+                        exponents: vec![0, 1],
+                        ring: Q,
+                        variables: var.clone(),
+                        _phantom: PhantomData,
+                    }
+                },
+            },
+            extension,
+        )
+    }
+}
+
+impl<E: Exponent> MultivariatePolynomial<AlgebraicExtension<Q>, E> {
+    /// Convert the polynomial to a multivariate polynomial over complex numbers.
+    pub fn to_complex(&self) -> MultivariatePolynomial<C, E> {
+        if self.ring.poly().nterms() != 2 || self.ring.poly().get_constant() != Q.one() {
+            panic!(
+                "Cannot convert to complex polynomial: the coefficient field is not complex numbers"
+            );
+        }
+
+        self.map_coeff(
+            |c| match c.poly.coefficients.len() {
+                0 => Complex {
+                    re: Q.zero(),
+                    im: Q.zero(),
+                },
+                1 => {
+                    if c.poly.exponents[0] == 0 {
+                        Complex {
+                            re: c.poly.coefficients[0].clone(),
+                            im: Q.zero(),
+                        }
+                    } else {
+                        Complex {
+                            re: Q.zero(),
+                            im: c.poly.coefficients[0].clone(),
+                        }
+                    }
+                }
+                2 => Complex {
+                    re: c.poly.coefficients[0].clone(),
+                    im: c.poly.coefficients[1].clone(),
+                },
+                _ => unreachable!(),
+            },
+            C,
+        )
     }
 }
 
