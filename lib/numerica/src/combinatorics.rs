@@ -282,7 +282,7 @@ fn unique_permutations_impl<T: Clone>(
 /// ```
 ///
 /// This generates all possible ways to partition the elements into the specified bins.
-pub fn partitions<T: Ord + Hash + Copy, B: Ord + Hash + Copy>(
+pub fn partitions<T: Ord + Hash + Clone, B: Ord + Hash + Clone>(
     elements: &[T],
     bins: &[(B, usize)],
     fill_last: bool,
@@ -308,7 +308,7 @@ pub fn partitions<T: Ord + Hash + Copy, B: Ord + Hash + Copy>(
     // create groups of equal elements
     let mut element_groups: HashMap<T, usize> = HashMap::default();
     for e in elements {
-        *element_groups.entry(*e).or_insert(0) += 1;
+        *element_groups.entry(e.clone()).or_insert(0) += 1;
     }
 
     let mut element_sorted: Vec<(T, usize)> = element_groups.into_iter().collect();
@@ -331,7 +331,7 @@ pub fn partitions<T: Ord + Hash + Copy, B: Ord + Hash + Copy>(
     // sort the bins from largest to smallest and based on the bin id
     sorted_bins.sort_by(|a, b| a.1.cmp(&b.1).then(a.0.cmp(&b.0)));
 
-    fn fill_bin<T: Copy>(
+    fn fill_bin<T: Clone>(
         len: usize,
         elems: &mut [(T, usize)],
         accum: &mut Vec<T>,
@@ -346,7 +346,7 @@ pub fn partitions<T: Ord + Hash + Copy, B: Ord + Hash + Copy>(
             let (name, count) = &mut elems[i];
             if *count > 0 {
                 *count -= 1;
-                accum.push(*name);
+                accum.push(name.clone());
                 fill_bin(len - 1, &mut elems[i..], accum, result);
                 accum.pop();
                 elems[i].1 += 1;
@@ -354,7 +354,7 @@ pub fn partitions<T: Ord + Hash + Copy, B: Ord + Hash + Copy>(
         }
     }
 
-    fn fill_rec<T: Ord + Copy, B: Copy + Eq>(
+    fn fill_rec<T: Ord + Clone, B: Clone + Eq>(
         bins: &[(B, usize)],
         elems: &mut [(T, usize)],
         single_bin_accum: &mut Vec<T>,
@@ -391,7 +391,7 @@ pub fn partitions<T: Ord + Hash + Copy, B: Ord + Hash + Copy>(
                 elems.iter_mut().find(|e| e.0 == *x).unwrap().1 -= 1;
             }
 
-            accum.push((*bin_id, a.clone()));
+            accum.push((bin_id.clone(), a.clone()));
             fill_rec(
                 &bins[1..],
                 elems,
