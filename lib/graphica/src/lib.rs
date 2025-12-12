@@ -27,11 +27,7 @@ use std::{
     hash::Hash,
 };
 
-use numerica::{
-    combinatorics::{CombinationIterator, unique_permutations},
-    domains::integer::Integer,
-    utils::AbortCheck,
-};
+use numerica::{combinatorics::partitions, domains::integer::Integer, utils::AbortCheck};
 
 /// A node in a graph, with arbitrary data.
 #[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Hash)]
@@ -676,7 +672,17 @@ struct GenerationSettingsAndInput<'a, N, E> {
     allowed_structures: &'a HashSet<Vec<HalfEdge<E>>>,
     min_degree: usize,
     max_degree: usize,
+    current_structure: Vec<HalfEdge<E>>,
     settings: &'a mut GenerationSettings<N, E>,
+}
+
+impl<N, E: Clone + Ord + Hash> GenerationSettingsAndInput<'_, N, E> {
+    pub fn is_structure_allowed(&mut self, vertex: &[HalfEdge<E>]) -> bool {
+        self.current_structure.clear();
+        self.current_structure.extend_from_slice(vertex);
+        self.current_structure.sort_unstable();
+        self.allowed_structures.contains(&self.current_structure)
+    }
 }
 
 pub trait FilterFn<N, E>: Fn(&Graph<N, E>, usize) -> bool + DynClone + Send + Sync {}
@@ -885,12 +891,11 @@ impl<N: Default + Clone + Eq + Hash + Ord, E: Clone + Ord + Eq + Hash> Graph<N, 
 
         let mut allowed_structures = HashSet::default();
         for e in &vertex_sorted {
-            for k in 0..=e.len() {
-                let mut it = CombinationIterator::new(e.len(), k);
-                while let Some(c) = it.next() {
-                    for p in unique_permutations(c).1 {
-                        allowed_structures
-                            .insert(p.iter().map(|&x| e[x].clone()).collect::<Vec<_>>());
+            for i in 0..=e.len() / 2 {
+                let r = partitions(e, &[(0, i), (1, 0)], true, false);
+                for (_, pp) in r {
+                    for (_, v) in pp {
+                        allowed_structures.insert(v);
                     }
                 }
             }
@@ -901,6 +906,7 @@ impl<N: Default + Clone + Eq + Hash + Ord, E: Clone + Ord + Eq + Hash> Graph<N, 
             allowed_structures: &allowed_structures,
             min_degree: vertex_sorted.iter().map(|x| x.len()).min().unwrap_or(0),
             max_degree: vertex_sorted.iter().map(|x| x.len()).max().unwrap_or(0),
+            current_structure: vec![],
             settings: &mut settings,
         };
 
@@ -1311,10 +1317,7 @@ impl<N: Default + Clone + Eq + Hash + Ord, E: Clone + Ord + Eq + Hash> Graph<N, 
             // check if the target edge signature is allowed
             edge_signatures[cur_target].push(e.flip());
 
-            if !settings
-                .allowed_structures
-                .contains(&edge_signatures[cur_target])
-            {
+            if !settings.is_structure_allowed(&edge_signatures[cur_target]) {
                 edge_signatures[cur_target].pop();
                 continue;
             }
