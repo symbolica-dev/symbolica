@@ -4296,6 +4296,8 @@ use pyo3::{
     sync::PyOnceLock,
     types::{PyAny, PyAnyMethods, PyComplex, PyComplexMethods, PyType},
 };
+#[cfg(feature = "python_stubgen")]
+use pyo3_stub_gen::{PyStubType, TypeInfo, impl_stub_type};
 
 #[cfg(feature = "python")]
 /// A multi-precision floating point number for Python.
@@ -4401,9 +4403,6 @@ impl<'py> FromPyObject<'_, 'py> for PythonMultiPrecisionFloat {
         }
     }
 }
-
-#[cfg(feature = "python_stubgen")]
-impl_stub_type!(Complex<Float> = Complex64);
 
 #[cfg(feature = "python")]
 impl<'py> FromPyObject<'_, 'py> for Complex<f64> {

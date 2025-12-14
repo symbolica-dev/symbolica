@@ -84,7 +84,7 @@ use pyo3::{
 };
 
 #[cfg(feature = "python_stubgen")]
-impl_stub_type!(Integer = PyInt);
+pyo3_stub_gen::impl_stub_type!(Integer = PyInt);
 
 #[cfg(feature = "python")]
 impl<'py> FromPyObject<'_, 'py> for Integer {
