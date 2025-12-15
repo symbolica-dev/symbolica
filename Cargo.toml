@@ -82,10 +82,10 @@ libloading = "0.9"
 once_cell = "1.19"
 rand = "0.9"
 rand_xoshiro = "0.7"
-pyo3-stub-gen = { version = "0.16", default-features = false, features = [
+pyo3-stub-gen = { version = "0.17", default-features = false, features = [
     "numpy",
 ], optional = true }
-pyo3-stub-gen-derive = { version = "0.16", optional = true }
+pyo3-stub-gen-derive = { version = "0.17", optional = true }
 rayon = "1.8"
 rug = "1.27.0"
 numpy = { version = "0.27", optional = true }
