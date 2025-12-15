@@ -280,23 +280,45 @@ impl<N: Display, E: Display> Graph<N, E> {
     }
 }
 
+/// An edge that is not part of the spanning tree, as it would form a loop.
+#[derive(Clone, Copy, Debug)]
+pub struct BackEdge {
+    /// The target of the back-edge is the node
+    /// that is furthest from the root of the spanning tree.
+    pub target: usize,
+    /// The id of the chain that is created by this back-edge.
+    /// It is the global index of this back-edge.
+    /// Make sure to call [SpanningTree::chain_decomposition] first.
+    pub chain_id: Option<usize>,
+}
+
 /// Information about a node in a spanning tree.
 #[derive(Clone, Debug)]
 pub struct NodeInfo {
+    /// The position of the node in the DFS order (`None` if not visited)
     pub position: Option<usize>,
     // The index of the edge from the node going to the parent (`None` for root)
     pub edge_id: Option<usize>,
+    /// The parent node. For the root, this is the node itself.
     pub parent: usize,
+    /// The chain id this node belongs to (`None` if it is a bridge).
+    /// Make sure to call [SpanningTree::chain_decomposition] first.
     pub chain_id: Option<usize>,
+    /// If `true`, this node is an external node (valence 1 in the original graph).
     pub external: bool,
-    pub back_edges: Vec<usize>, // back edges starting from this node
+    /// The back-edges starting from this node.
+    /// The start of a back-edge is always the node that is closest
+    /// to the root in the spanning tree.
+    pub back_edges: Vec<BackEdge>,
 }
 
 /// A spanning tree representation of a graph.
 /// Parts of the graph may not be in the tree.
 #[derive(Clone, Debug)]
 pub struct SpanningTree {
+    /// Information about the nodes in the spanning tree.
     pub nodes: Vec<NodeInfo>,
+    /// The order in which the nodes were visited in the DFS.
     pub order: Vec<usize>,
 }
 
@@ -305,36 +327,40 @@ impl SpanningTree {
         self.nodes.iter().all(|x| x.position.is_some())
     }
 
+    /// Assign chain ids to the nodes and back-edges in the spanning tree.
     pub fn chain_decomposition(&mut self) {
-        // now build the chains, starting from the DFS root
+        let mut chain_id = 0;
         for &n in &self.order {
             let mut back_edge_index = 0;
-
             while back_edge_index < self.nodes[n].back_edges.len() {
-                let node = self.nodes[n].back_edges[back_edge_index];
+                let back_edge = &mut self.nodes[n].back_edges[back_edge_index];
+                back_edge.chain_id = Some(chain_id);
+                chain_id += 1;
+
+                let back_edge = back_edge.clone();
                 back_edge_index += 1;
 
-                if node == n {
+                if back_edge.target == n {
                     // self-loop
                     continue;
                 }
 
-                // set blocker
+                // set temporary blocker
                 if self.nodes[n].chain_id.is_none() {
-                    self.nodes[n].chain_id = Some(n);
+                    self.nodes[n].chain_id = back_edge.chain_id;
                 }
 
-                let mut target = node;
+                let mut target = back_edge.target;
                 while self.nodes[target].chain_id.is_none() {
                     let nn = &mut self.nodes[target];
-                    nn.chain_id = Some(n);
+                    nn.chain_id = back_edge.chain_id;
                     target = nn.parent;
                 }
 
                 // the start node is always excluded from the chain,
                 // as we define the chain to contain the edges
                 // that connect the node to its parent
-                if self.nodes[n].chain_id == Some(n) {
+                if self.nodes[n].chain_id == back_edge.chain_id {
                     self.nodes[n].chain_id = None;
                 }
             }
@@ -352,7 +378,7 @@ impl SpanningTree {
                 && !self.nodes[x.parent].external
                 && !x.external
                 && x.parent != *n // exclude the root
-                && !self.nodes[x.parent].back_edges.iter().any(|end| n == end)
+                && !self.nodes[x.parent].back_edges.iter().any(|end| *n == end.target)
         })
     }
 
@@ -535,7 +561,10 @@ impl<N, E> Graph<N, E> {
             if let Some(p) = tree_nodes[n].position {
                 let par = &mut tree_nodes[parent];
                 if par.position.unwrap() < p {
-                    par.back_edges.push(n);
+                    par.back_edges.push(BackEdge {
+                        target: n,
+                        chain_id: None,
+                    });
                 }
                 continue;
             }
@@ -555,7 +584,10 @@ impl<N, E> Graph<N, E> {
                 };
 
                 if n == target {
-                    tree_nodes[n].back_edges.push(n);
+                    tree_nodes[n].back_edges.push(BackEdge {
+                        target,
+                        chain_id: None,
+                    });
                 }
 
                 if tree_nodes[target].position.is_none() {
