@@ -159,10 +159,7 @@ pub trait SymbolicaCommunityModule {
 }
 
 /// Specifies the print mode.
-#[cfg_attr(
-    feature = "python_stubgen",
-    gen_stub_pyclass_enum(module = "symbolica.core")
-)]
+#[cfg_attr(feature = "python_stubgen", gen_stub_pyclass_enum)]
 #[pyclass(name = "ParseMode", eq, eq_int, module = "symbolica.core")]
 #[derive(Clone, Copy, PartialEq, Eq, Hash)]
 pub enum PythonParseMode {
@@ -182,10 +179,7 @@ impl From<PythonParseMode> for ParseMode {
 }
 
 /// Specifies the print mode.
-#[cfg_attr(
-    feature = "python_stubgen",
-    gen_stub_pyclass_enum(module = "symbolica.core")
-)]
+#[cfg_attr(feature = "python_stubgen", gen_stub_pyclass_enum)]
 #[pyclass(name = "PrintMode", eq, eq_int, module = "symbolica.core")]
 #[derive(Clone, Copy, PartialEq, Eq, Hash)]
 pub enum PythonPrintMode {
@@ -606,6 +600,11 @@ tags: Optional[Sequence[str]]
             is_async: false,
             deprecated: None,
             type_ignored: None,
+            is_overload: true,
+            file: "symbolica.rs",
+            line: line!(),
+            column: column!(),
+            index: 0,
         }
 }
 
@@ -786,6 +785,11 @@ custom_derivative: Optional[Callable[[Expression, int], Expression]]:
             is_async: false,
             deprecated: None,
             type_ignored: None,
+            is_overload: true,
+            file: "symbolica.rs",
+            line: line!(),
+            column: column!(),
+            index: 1,
         }
 }
 
@@ -928,6 +932,11 @@ All non-polynomial parts will be converted to new, independent variables.",
         is_async: false,
         deprecated: None,
         type_ignored: None,
+        is_overload: true,
+        file: "symbolica.rs",
+        line: line!(),
+        column: column!(),
+        index: 0,
         }
     }
 
@@ -972,6 +981,11 @@ The minimal polynomial must be a monic, irreducible univariate polynomial.",
         is_async: false,
         deprecated: None,
         type_ignored: None,
+        is_overload: true,
+        file: "symbolica.rs",
+        line: line!(),
+        column: column!(),
+        index: 1,
     }
 }
 
@@ -1031,13 +1045,15 @@ If a `minimal_poly` is provided, the Galois field will be created with `minimal_
         is_async: false,
         deprecated: None,
         type_ignored: None,
+        is_overload: true,
+        file: "symbolica.rs",
+        line: line!(),
+        column: column!(),
+        index: 2,
     }
 }
 
-#[cfg_attr(
-    feature = "python_stubgen",
-    gen_stub_pyclass_enum(module = "symbolica.core")
-)]
+#[cfg_attr(feature = "python_stubgen", gen_stub_pyclass_enum)]
 #[pyclass(name = "AtomType", eq, eq_int, module = "symbolica.core")]
 #[derive(Clone, Copy, PartialEq, Eq, Hash)]
 /// Specifies the type of the atom.
@@ -1056,10 +1072,7 @@ pub enum PythonAtomType {
     Pow,
 }
 
-#[cfg_attr(
-    feature = "python_stubgen",
-    gen_stub_pyclass_enum(module = "symbolica.core")
-)]
+#[cfg_attr(feature = "python_stubgen", gen_stub_pyclass_enum)]
 #[pyclass(name = "SymbolAttribute", eq, eq_int, module = "symbolica.core")]
 #[derive(Clone, Copy, PartialEq, Eq, Hash)]
 /// Specifies the attributes of a symbol.
@@ -1112,10 +1125,7 @@ impl From<SymbolAttribute> for PythonSymbolAttribute {
 /// - the base and exponent for type `Pow`
 /// - the function arguments for type `Fn`
 #[derive(Clone)]
-#[cfg_attr(
-    feature = "python_stubgen",
-    gen_stub_pyclass(module = "symbolica.core")
-)]
+#[cfg_attr(feature = "python_stubgen", gen_stub_pyclass)]
 #[pyclass(name = "AtomTree", module = "symbolica.core")]
 pub struct PythonAtomTree {
     /// The type of this atom.
@@ -1276,10 +1286,7 @@ impl<T> OneOrMultiple<T> {
 }
 
 /// Operations that transform an expression.
-#[cfg_attr(
-    feature = "python_stubgen",
-    gen_stub_pyclass(module = "symbolica.core")
-)]
+#[cfg_attr(feature = "python_stubgen", gen_stub_pyclass)]
 #[pyclass(name = "HeldExpression", subclass, module = "symbolica.core")]
 #[derive(Clone)]
 pub struct PythonHeldExpression {
@@ -1520,10 +1527,7 @@ impl PythonHeldExpression {
 }
 
 /// Operations that transform an expression.
-#[cfg_attr(
-    feature = "python_stubgen",
-    gen_stub_pyclass(module = "symbolica.core")
-)]
+#[cfg_attr(feature = "python_stubgen", gen_stub_pyclass)]
 #[pyclass(name = "Transformer", subclass, module = "symbolica.core")]
 #[derive(Clone)]
 pub struct PythonTransformer {
@@ -2774,10 +2778,7 @@ impl PythonTransformer {
 ///     The built-in square root function.
 /// CONJ: Expression
 ///     The built-in complex conjugate function.
-#[cfg_attr(
-    feature = "python_stubgen",
-    gen_stub_pyclass(module = "symbolica.core")
-)]
+#[cfg_attr(feature = "python_stubgen", gen_stub_pyclass)]
 #[pyclass(name = "Expression", subclass, module = "symbolica.core")]
 #[derive(Clone, PartialEq, Eq, Hash)]
 pub struct PythonExpression {
@@ -2799,10 +2800,7 @@ impl Deref for PythonExpression {
 }
 
 /// A restriction on wildcards.
-#[cfg_attr(
-    feature = "python_stubgen",
-    gen_stub_pyclass(module = "symbolica.core")
-)]
+#[cfg_attr(feature = "python_stubgen", gen_stub_pyclass)]
 #[pyclass(name = "PatternRestriction", module = "symbolica.core")]
 #[derive(Clone)]
 pub struct PythonPatternRestriction {
@@ -2900,10 +2898,7 @@ impl PythonPatternRestriction {
 }
 
 /// A restriction on wildcards.
-#[cfg_attr(
-    feature = "python_stubgen",
-    gen_stub_pyclass(module = "symbolica.core")
-)]
+#[cfg_attr(feature = "python_stubgen", gen_stub_pyclass)]
 #[pyclass(name = "Condition", module = "symbolica.core")]
 #[derive(Clone)]
 pub struct PythonCondition {
@@ -7082,10 +7077,7 @@ impl PythonExpression {
 }
 
 /// A raplacement, which is a pattern and a right-hand side, with optional conditions and settings.
-#[cfg_attr(
-    feature = "python_stubgen",
-    gen_stub_pyclass(module = "symbolica.core")
-)]
+#[cfg_attr(feature = "python_stubgen", gen_stub_pyclass)]
 #[pyclass(name = "Replacement", module = "symbolica.core")]
 #[derive(Clone)]
 pub struct PythonReplacement {
@@ -7172,6 +7164,9 @@ PyMethodsInfo {
         attrs: &[],
         getters: &[],
         setters: &[],
+        file: "python.rs",
+        line: line!(),
+        column: column!(),
         methods: &[
             MethodInfo {
             name: "symbol",
@@ -7348,6 +7343,7 @@ custom_derivative: Optional[Callable[[Expression, int], Expression]]:
             is_async: false,
             deprecated: None,
             type_ignored: None,
+            is_overload: true,
         },
             MethodInfo {
             name: "symbol",
@@ -7474,6 +7470,7 @@ tags: Optional[Sequence[str]]
             is_async: false,
             deprecated: None,
             type_ignored: None,
+            is_overload: true,
         }
 
           ],
@@ -7487,6 +7484,9 @@ submit! {
         attrs: &[],
         getters: &[],
         setters: &[],
+        file: "python.rs",
+        line: line!(),
+        column: column!(),
         methods: &[
             MethodInfo {
                 name: "to_polynomial",
@@ -7506,6 +7506,7 @@ All non-polynomial parts will be converted to new, independent variables.",
                 is_async: false,
                 deprecated: None,
                 type_ignored: None,
+                is_overload: true,
             },
             MethodInfo {
                 name: "to_polynomial",
@@ -7534,6 +7535,7 @@ The minimal polynomial must be a monic, irreducible univariate polynomial.",
                 is_async: false,
                 deprecated: None,
                 type_ignored: None,
+                is_overload: true,
             },
              MethodInfo {
                 name: "to_polynomial",
@@ -7577,6 +7579,7 @@ If a `minimal_poly` is provided, the Galois field will be created with `minimal_
                 is_async: false,
                 deprecated: None,
                 type_ignored: None,
+                is_overload: true,
             }
         ],
     }
@@ -7589,6 +7592,9 @@ submit! {
         attrs: &[],
         getters: &[],
         setters: &[],
+        file: "python.rs",
+        line: line!(),
+        column: column!(),
         methods: &[
             MethodInfo {
                 name: "__call__",
@@ -7614,6 +7620,7 @@ f(3,x)",
                 is_async: false,
                 deprecated: None,
                 type_ignored: None,
+                is_overload: true,
             },
             MethodInfo {
                 name: "__call__",
@@ -7639,6 +7646,7 @@ f(3,x)",
                 is_async: false,
                 deprecated: None,
                 type_ignored: None,
+                is_overload: true,
             }
         ],
     }
@@ -7663,10 +7671,7 @@ impl_stub_type!(SeriesOrExpression = PythonSeries | PythonExpression);
 /// >>> x = S('x')
 /// >>> s = E("(1-cos(x))/sin(x)").series(x, 0, 4)
 /// >>> print(s)
-#[cfg_attr(
-    feature = "python_stubgen",
-    gen_stub_pyclass(module = "symbolica.core")
-)]
+#[cfg_attr(feature = "python_stubgen", gen_stub_pyclass)]
 #[pyclass(name = "Series", module = "symbolica.core")]
 #[derive(Clone)]
 pub struct PythonSeries {
@@ -7975,10 +7980,7 @@ impl PythonSeries {
 
 /// A term streamer that can handle large expressions, by
 /// streaming terms to and from disk.
-#[cfg_attr(
-    feature = "python_stubgen",
-    gen_stub_pyclass(module = "symbolica.core")
-)]
+#[cfg_attr(feature = "python_stubgen", gen_stub_pyclass)]
 #[pyclass(name = "TermStreamer", subclass, module = "symbolica.core")]
 pub struct PythonTermStreamer {
     pub stream: TermStreamer<CompressorWriter<BufWriter<File>>>,
@@ -8191,10 +8193,7 @@ impl PythonTermStreamer {
 }
 
 self_cell!(
-    #[cfg_attr(
-        feature = "python_stubgen",
-        gen_stub_pyclass(module = "symbolica.core")
-    )]
+    #[cfg_attr(feature = "python_stubgen", gen_stub_pyclass)]
     #[pyclass(name = "AtomIterator", module = "symbolica.core")]
     pub struct PythonAtomIterator {
         owner: Atom,
@@ -8241,10 +8240,7 @@ type MatchIterator<'a> = PatternAtomTreeIterator<'a, 'a>;
 
 self_cell!(
     /// An iterator over matches.
-    #[cfg_attr(
-        feature = "python_stubgen",
-        gen_stub_pyclass(module = "symbolica.core")
-    )]
+    #[cfg_attr(feature = "python_stubgen", gen_stub_pyclass)]
     #[pyclass(name = "MatchIterator", module = "symbolica.core")]
     pub struct PythonMatchIterator {
         owner: OwnedMatch,
@@ -8286,10 +8282,7 @@ type ReplaceIteratorOne<'a> = ReplaceIterator<'a, 'a>;
 
 self_cell!(
     /// An iterator over all single replacements.
-    #[cfg_attr(
-        feature = "python_stubgen",
-        gen_stub_pyclass(module = "symbolica.core")
-    )]
+    #[cfg_attr(feature = "python_stubgen", gen_stub_pyclass)]
     #[pyclass(name = "ReplaceIterator", module = "symbolica.core")]
     pub struct PythonReplaceIterator {
         owner: OwnedReplace,
@@ -8330,10 +8323,7 @@ impl<T: PyStubType> PyStubType for PolynomialOrInteger<T> {
     }
 }
 
-#[cfg_attr(
-    feature = "python_stubgen",
-    gen_stub_pyclass(module = "symbolica.core")
-)]
+#[cfg_attr(feature = "python_stubgen", gen_stub_pyclass)]
 #[pyclass(name = "Polynomial", subclass, module = "symbolica.core")]
 #[derive(Clone)]
 pub struct PythonPolynomial {
@@ -9654,10 +9644,7 @@ impl PythonPolynomial {
 }
 
 /// A Symbolica polynomial over finite fields.
-#[cfg_attr(
-    feature = "python_stubgen",
-    gen_stub_pyclass(module = "symbolica.core")
-)]
+#[cfg_attr(feature = "python_stubgen", gen_stub_pyclass)]
 #[pyclass(name = "FiniteFieldPolynomial", subclass, module = "symbolica.core")]
 #[derive(Clone)]
 pub struct PythonFiniteFieldPolynomial {
@@ -10722,10 +10709,7 @@ impl PythonFiniteFieldPolynomial {
 }
 
 /// A Symbolica polynomial over Galois fields.
-#[cfg_attr(
-    feature = "python_stubgen",
-    gen_stub_pyclass(module = "symbolica.core")
-)]
+#[cfg_attr(feature = "python_stubgen", gen_stub_pyclass)]
 #[pyclass(name = "PrimeTwoPolynomial", subclass, module = "symbolica.core")]
 #[derive(Clone)]
 pub struct PythonPrimeTwoPolynomial {
@@ -11576,10 +11560,7 @@ impl PythonPrimeTwoPolynomial {
 }
 
 /// A Symbolica polynomial over Z2 Galois fields.
-#[cfg_attr(
-    feature = "python_stubgen",
-    gen_stub_pyclass(module = "symbolica.core")
-)]
+#[cfg_attr(feature = "python_stubgen", gen_stub_pyclass)]
 #[pyclass(
     name = "GaloisFieldPrimeTwoPolynomial",
     subclass,
@@ -12538,10 +12519,7 @@ impl PythonGaloisFieldPrimeTwoPolynomial {
 }
 
 /// A Symbolica polynomial over Galois fields.
-#[cfg_attr(
-    feature = "python_stubgen",
-    gen_stub_pyclass(module = "symbolica.core")
-)]
+#[cfg_attr(feature = "python_stubgen", gen_stub_pyclass)]
 #[pyclass(name = "GaloisFieldPolynomial", subclass, module = "symbolica.core")]
 #[derive(Clone)]
 pub struct PythonGaloisFieldPolynomial {
@@ -13441,10 +13419,7 @@ impl PythonGaloisFieldPolynomial {
 }
 
 /// A Symbolica polynomial over number fields.
-#[cfg_attr(
-    feature = "python_stubgen",
-    gen_stub_pyclass(module = "symbolica.core")
-)]
+#[cfg_attr(feature = "python_stubgen", gen_stub_pyclass)]
 #[pyclass(name = "NumberFieldPolynomial", subclass, module = "symbolica.core")]
 #[derive(Clone)]
 pub struct PythonNumberFieldPolynomial {
@@ -14333,10 +14308,7 @@ impl PythonNumberFieldPolynomial {
 }
 
 /// A Symbolica rational polynomial.
-#[cfg_attr(
-    feature = "python_stubgen",
-    gen_stub_pyclass(module = "symbolica.core")
-)]
+#[cfg_attr(feature = "python_stubgen", gen_stub_pyclass)]
 #[pyclass(name = "RationalPolynomial", subclass, module = "symbolica.core")]
 #[derive(Clone)]
 pub struct PythonRationalPolynomial {
@@ -14698,10 +14670,7 @@ impl PythonRationalPolynomial {
 }
 
 /// A Symbolica rational polynomial over finite fields.
-#[cfg_attr(
-    feature = "python_stubgen",
-    gen_stub_pyclass(module = "symbolica.core")
-)]
+#[cfg_attr(feature = "python_stubgen", gen_stub_pyclass)]
 #[pyclass(
     name = "FiniteFieldRationalPolynomial",
     subclass,
@@ -15046,10 +15015,7 @@ impl ConvertibleToRationalPolynomial {
 }
 
 /// An optimized evaluator for expressions.
-#[cfg_attr(
-    feature = "python_stubgen",
-    gen_stub_pyclass(module = "symbolica.core")
-)]
+#[cfg_attr(feature = "python_stubgen", gen_stub_pyclass)]
 #[pyclass(name = "Evaluator", module = "symbolica.core")]
 pub struct PythonExpressionEvaluator {
     pub eval_rat: ExpressionEvaluator<Complex<Rational>>,
@@ -15651,6 +15617,9 @@ PyMethodsInfo {
         attrs: &[],
         getters: &[],
         setters: &[],
+        file: "python.rs",
+        line: line!(),
+        column: column!(),
         methods: &[
             MethodInfo {
             name: "compile",
@@ -15711,6 +15680,7 @@ PyMethodsInfo {
                 },
 
             ],
+            is_overload: true,
             r#type: MethodType::Class,
             r#return: || PythonCompiledRealExpressionEvaluator::type_output(),
             doc:
@@ -15831,6 +15801,7 @@ custom_header : Optional[str]
             is_async: false,
             deprecated: None,
             type_ignored: None,
+            is_overload: true,
         },
         MethodInfo {
             name: "compile",
@@ -15921,6 +15892,7 @@ custom_header : Optional[str]
             is_async: false,
             deprecated: None,
             type_ignored: None,
+            is_overload: true,
         },
         MethodInfo {
             name: "compile",
@@ -16011,6 +15983,7 @@ custom_header : Optional[str]
             is_async: false,
             deprecated: None,
             type_ignored: None,
+            is_overload: true,
         },
         MethodInfo {
             name: "compile",
@@ -16120,6 +16093,7 @@ cuda_block_size: Optional[int]
             is_async: false,
             deprecated: None,
             type_ignored: None,
+            is_overload: true,
         },
         MethodInfo {
             name: "compile",
@@ -16229,6 +16203,7 @@ cuda_block_size: Optional[int]
             is_async: false,
             deprecated: None,
             type_ignored: None,
+            is_overload: true,
         }
 
           ],
@@ -16236,10 +16211,7 @@ cuda_block_size: Optional[int]
 }
 
 /// A compiled and optimized evaluator for expressions.
-#[cfg_attr(
-    feature = "python_stubgen",
-    gen_stub_pyclass(module = "symbolica.core")
-)]
+#[cfg_attr(feature = "python_stubgen", gen_stub_pyclass)]
 #[pyclass(name = "CompiledRealEvaluator", module = "symbolica.core")]
 #[derive(Clone)]
 pub struct PythonCompiledRealExpressionEvaluator {
@@ -16308,10 +16280,7 @@ impl PythonCompiledRealExpressionEvaluator {
 }
 
 /// A compiled and optimized evaluator for expressions.
-#[cfg_attr(
-    feature = "python_stubgen",
-    gen_stub_pyclass(module = "symbolica.core")
-)]
+#[cfg_attr(feature = "python_stubgen", gen_stub_pyclass)]
 #[pyclass(name = "CompiledSimdRealEvaluator", module = "symbolica.core")]
 #[derive(Clone)]
 pub struct PythonCompiledSimdRealExpressionEvaluator {
@@ -16382,10 +16351,7 @@ impl PythonCompiledSimdRealExpressionEvaluator {
 }
 
 /// A compiled and optimized evaluator for expressions.
-#[cfg_attr(
-    feature = "python_stubgen",
-    gen_stub_pyclass(module = "symbolica.core")
-)]
+#[cfg_attr(feature = "python_stubgen", gen_stub_pyclass)]
 #[pyclass(name = "CompiledCudaRealEvaluator", module = "symbolica.core")]
 #[derive(Clone)]
 pub struct PythonCompiledCudaRealExpressionEvaluator {
@@ -16466,10 +16432,7 @@ impl PythonCompiledCudaRealExpressionEvaluator {
 }
 
 /// A compiled and optimized evaluator for expressions.
-#[cfg_attr(
-    feature = "python_stubgen",
-    gen_stub_pyclass(module = "symbolica.core")
-)]
+#[cfg_attr(feature = "python_stubgen", gen_stub_pyclass)]
 #[pyclass(name = "CompiledCudaComplexEvaluator", module = "symbolica.core")]
 #[derive(Clone)]
 pub struct PythonCompiledCudaComplexExpressionEvaluator {
@@ -16556,10 +16519,7 @@ impl PythonCompiledCudaComplexExpressionEvaluator {
 }
 
 /// A compiled and optimized evaluator for expressions.
-#[cfg_attr(
-    feature = "python_stubgen",
-    gen_stub_pyclass(module = "symbolica.core")
-)]
+#[cfg_attr(feature = "python_stubgen", gen_stub_pyclass)]
 #[pyclass(name = "CompiledComplexEvaluator", module = "symbolica.core")]
 #[derive(Clone)]
 pub struct PythonCompiledComplexExpressionEvaluator {
@@ -16632,10 +16592,7 @@ impl PythonCompiledComplexExpressionEvaluator {
 }
 
 /// A compiled and optimized evaluator for expressions.
-#[cfg_attr(
-    feature = "python_stubgen",
-    gen_stub_pyclass(module = "symbolica.core")
-)]
+#[cfg_attr(feature = "python_stubgen", gen_stub_pyclass)]
 #[pyclass(name = "CompiledSimdComplexEvaluator", module = "symbolica.core")]
 #[derive(Clone)]
 pub struct PythonCompiledSimdComplexExpressionEvaluator {
@@ -16720,10 +16677,7 @@ pub enum ScalarOrMatrix {
 impl_stub_type!(ScalarOrMatrix = ConvertibleToRationalPolynomial | PythonMatrix);
 
 /// A Symbolica matrix with rational polynomial coefficients.
-#[cfg_attr(
-    feature = "python_stubgen",
-    gen_stub_pyclass(module = "symbolica.core")
-)]
+#[cfg_attr(feature = "python_stubgen", gen_stub_pyclass)]
 #[pyclass(name = "Matrix", subclass, module = "symbolica.core")]
 #[derive(Clone)]
 pub struct PythonMatrix {
@@ -17320,10 +17274,7 @@ impl PythonMatrix {
 
 /// A sample from the Symbolica integrator. It could consist of discrete layers,
 /// accessible with `d` (empty when there are no discrete layers), and the final continuous layer `c` if it is present.
-#[cfg_attr(
-    feature = "python_stubgen",
-    gen_stub_pyclass(module = "symbolica.core")
-)]
+#[cfg_attr(feature = "python_stubgen", gen_stub_pyclass)]
 #[pyclass(name = "Sample", module = "symbolica.core")]
 #[derive(Clone)]
 pub struct PythonSample {
@@ -17416,10 +17367,7 @@ impl PythonSample {
 ///
 /// Each thread or instance generating samples should use the same `seed` but a different `stream_id`,
 /// which is an instance counter starting at 0.
-#[cfg_attr(
-    feature = "python_stubgen",
-    gen_stub_pyclass(module = "symbolica.core")
-)]
+#[cfg_attr(feature = "python_stubgen", gen_stub_pyclass)]
 #[pyclass(name = "RandomNumberGenerator", module = "symbolica.core")]
 pub struct PythonRandomNumberGenerator {
     state: MonteCarloRng,
@@ -17439,10 +17387,7 @@ impl PythonRandomNumberGenerator {
     }
 }
 
-#[cfg_attr(
-    feature = "python_stubgen",
-    gen_stub_pyclass(module = "symbolica.core")
-)]
+#[cfg_attr(feature = "python_stubgen", gen_stub_pyclass)]
 #[pyclass(name = "NumericalIntegrator", module = "symbolica.core")]
 #[derive(Clone)]
 pub struct PythonNumericalIntegrator {
@@ -17794,10 +17739,7 @@ impl PythonNumericalIntegrator {
 }
 
 /// Represents a part of an edge that connects to one vertex. It can be directed or undirected.
-#[cfg_attr(
-    feature = "python_stubgen",
-    gen_stub_pyclass(module = "symbolica.core")
-)]
+#[cfg_attr(feature = "python_stubgen", gen_stub_pyclass)]
 #[pyclass(name = "HalfEdge", module = "symbolica.core")]
 #[derive(Clone, PartialEq, Eq, Hash)]
 pub struct PythonHalfEdge {
@@ -17843,10 +17785,7 @@ impl PythonHalfEdge {
 /// A graph that supported directional edges, parallel edges, self-edges and custom data on the nodes and edges.
 ///
 /// Warning: modifying the graph if it is contained in a `dict` or `set` will invalidate the hash.
-#[cfg_attr(
-    feature = "python_stubgen",
-    gen_stub_pyclass(module = "symbolica.core")
-)]
+#[cfg_attr(feature = "python_stubgen", gen_stub_pyclass)]
 #[pyclass(name = "Graph", module = "symbolica.core")]
 #[derive(Clone, PartialEq, Eq, Hash)]
 pub struct PythonGraph {
@@ -18279,10 +18218,7 @@ impl PythonGraph {
     }
 }
 
-#[cfg_attr(
-    feature = "python_stubgen",
-    gen_stub_pyclass(module = "symbolica.core")
-)]
+#[cfg_attr(feature = "python_stubgen", gen_stub_pyclass)]
 #[pyclass(name = "Integer", module = "symbolica.core")]
 #[derive(Clone, PartialEq, Eq, Hash)]
 pub struct PythonInteger {}
@@ -18417,10 +18353,7 @@ impl PythonInteger {
     }
 }
 
-#[cfg_attr(
-    feature = "python_stubgen",
-    gen_stub_pyclass(module = "symbolica.core")
-)]
+#[cfg_attr(feature = "python_stubgen", gen_stub_pyclass)]
 #[pyclass(name = "PrimeIterator", module = "symbolica.core")]
 #[derive(Clone, PartialEq, Eq, Hash)]
 pub struct PythonPrimeIterator {
