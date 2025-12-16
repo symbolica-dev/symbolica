@@ -30,6 +30,9 @@ use pyo3::{
 use pyo3::{pyclass, types::PyModuleMethods};
 
 #[cfg(feature = "python_stubgen")]
+use pyo3::types::PyList;
+
+#[cfg(feature = "python_stubgen")]
 use pyo3_stub_gen::{
     PyStubType, TypeInfo,
     derive::{gen_stub_pyclass, gen_stub_pyclass_enum, gen_stub_pyfunction, gen_stub_pymethods},
@@ -62,6 +65,7 @@ use crate::{
         Ring, RingOps, SelfRing,
         algebraic_number::AlgebraicExtension,
         atom::AtomField,
+        dual::HyperDual,
         finite_field::{FiniteFieldCore, PrimeIteratorU64, ToFiniteField, Z2, Zp64, is_prime_u64},
         float::{Complex, F64, Float, PythonMultiPrecisionFloat, RealLike},
         integer::{FromFiniteField, Integer, IntegerRelationError, IntegerRing, Z},
@@ -15502,8 +15506,8 @@ impl PythonExpressionEvaluator {
     /// >>> from symbolica import *
     /// >>> e1 = E('x').evaluator({}, {}, [S('x')])
     /// >>> e2 = E('x+1').evaluator({}, {}, [S('x')])
-    /// >>> e = e1.merge(e2)
-    /// >>> e.evaluate([2])
+    /// >>> e1.merge(e2)
+    /// >>> e1.evaluate([[2.]])
     ///
     /// yields `[2, 3]`.
     #[pyo3(signature = (other, cpe_iterations = None))]
@@ -15624,6 +15628,50 @@ impl PythonExpressionEvaluator {
         }
 
         Ok(out.into_pyarray(py))
+    }
+
+    /// Dualize the evaluator to support hyper-dual numbers with the given shape,
+    /// indicating the number of derivatives in every variable per term.
+    /// This allows for efficient computation of derivatives.
+    ///
+    /// For example, to compute first derivatives in two variables `x` and `y`,
+    /// use `dual_shape = [[0, 0], [1, 0], [0, 1]]`.
+    ///
+    /// Examples
+    /// --------
+    ///
+    /// >>> from symbolica import *
+    /// >>> e1 = E('x^2 + y*x').evaluator({}, {}, [S('x'), S('y')])
+    /// >>> e1.dualize([[0, 0], [1, 0], [0, 1]])
+    /// >>> r = e1.evaluate([[2., 1., 0., 3., 0., 1.]])
+    /// >>> print(r)  # [10, 7, 2]
+    fn dualize(&mut self, dual_shape: Vec<Vec<usize>>) {
+        let zero = (0..dual_shape.len())
+            .map(|_| Complex::new(Q.zero(), Q.zero()))
+            .collect();
+        let dual = HyperDual::from_values(dual_shape, zero);
+        self.eval_rat = self.eval_rat.clone().vectorize(&dual);
+
+        if self.eval_rat.is_real()
+            && let Some(old_eval) = &mut self.eval
+        {
+            let new_eval_rat = self
+                .eval_rat
+                .clone()
+                .map_coeff(&|x| x.to_real().unwrap().to_f64());
+
+            old_eval.update_stack(new_eval_rat);
+        } else {
+            self.eval = None;
+        };
+
+        self.eval_complex = self
+            .eval_rat
+            .clone()
+            .map_coeff(&|x| Complex::new(x.re.to_f64(), x.im.to_f64()));
+
+        self.eval_complex_ext
+            .update_stack(self.eval_complex.clone());
     }
 
     /// Compile the evaluator to a shared library using C++ and optionally inline assembly and load it.

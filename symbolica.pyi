@@ -4835,7 +4835,7 @@ class Evaluator:
         ```
         """
 
-    def merge(self, other: Evaluator, cpe_rounds: Optional[int] = None) -> Evaluator:
+    def merge(self, other: Evaluator, cpe_rounds: Optional[int] = None) -> None:
         """
         Merge evaluator `other` into `self`. The parameters must be the same, and
         the outputs will be concatenated.
@@ -4849,10 +4849,29 @@ class Evaluator:
         >>> from symbolica import *
         >>> e1 = E('x').evaluator({}, {}, [S('x')])
         >>> e2 = E('x+1').evaluator({}, {}, [S('x')])
-        >>> e = e1.merge(e2)
-        >>> e.evaluate([2])
+        >>> e1.merge(e2)
+        >>> e1.evaluate([[2.]])
 
         yields `[2, 3]`.
+        """
+
+    def dualize(self, dual_shape: list[list[int]]) -> None:
+        """
+        Dualize the evaluator to support hyper-dual numbers with the given shape,
+        indicating the number of derivatives in every variable per term.
+        This allows for efficient computation of derivatives.
+
+        For example, to compute first derivatives in two variables `x` and `y`,
+        use `dual_shape = [[0, 0], [1, 0], [0, 1]]`.
+
+        Examples
+        --------
+
+        >>> from symbolica import *
+        >>> e1 = E('x^2 + y*x').evaluator({}, {}, [S('x'), S('y')])
+        >>> e1.dualize([[0, 0], [1, 0], [0, 1]])
+        >>> r = e1.evaluate([[2., 1., 0., 3., 0., 1.]])
+        >>> print(r)  # [10, 7, 2]
         """
 
     @overload
