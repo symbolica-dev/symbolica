@@ -7,7 +7,7 @@ use std::{
     sync::{Arc, Mutex},
 };
 
-use ahash::HashMap;
+use ahash::{HashMap, HashSet};
 use brotli::CompressorWriter;
 use numpy::{
     Complex64, IntoPyArray, PyArrayDyn, PyArrayLike1, PyArrayLike2, PyUntypedArrayMethods,
@@ -275,6 +275,8 @@ pub fn create_symbolica_module<'a, 'b>(
     m.add_function(wrap_pyfunction!(request_sublicense, m)?)?;
     m.add_function(wrap_pyfunction!(get_license_key, m)?)?;
     m.add_function(wrap_pyfunction!(use_custom_logger, m)?)?;
+    m.add_function(wrap_pyfunction!(get_namespace, m)?)?;
+    m.add_function(wrap_pyfunction!(set_namespace, m)?)?;
 
     m.add("__version__", env!("CARGO_PKG_VERSION"))?;
 
@@ -323,6 +325,69 @@ fn print_options_to_dict<'py>(
     Ok(dict)
 }
 
+/// Set the Symbolica namespace for the calling module.
+/// All subsequently created symbols in the calling module will be defined within this namespace.
+///
+/// This function sets the `SYMBOLICA_NAMESPACE` variable in the global scope of the calling module.
+#[cfg_attr(
+    feature = "python_stubgen",
+    gen_stub_pyfunction(module = "symbolica.core")
+)]
+#[pyfunction]
+pub fn set_namespace(py: Python, namespace: String) -> PyResult<()> {
+    let ptr = unsafe { pyo3::ffi::PyEval_GetGlobals() };
+
+    if ptr.is_null() {
+        return Err(PyErr::new::<pyo3::exceptions::PyRuntimeError, _>(
+            "No active Python frame found to inject globals into.",
+        ));
+    }
+
+    let globals = unsafe { Bound::from_borrowed_ptr(py, ptr) };
+
+    globals.set_item("SYMBOLICA_NAMESPACE", namespace)?;
+
+    Ok(())
+}
+
+static INTERNED_STRINGS: std::sync::LazyLock<Mutex<HashSet<&'static str>>> =
+    std::sync::LazyLock::new(|| Mutex::new(HashSet::default()));
+
+fn intern_string(string: &str) -> &'static str {
+    let mut ns = INTERNED_STRINGS.lock().unwrap();
+    if let Some(s) = ns.get::<str>(&string) {
+        s
+    } else {
+        let b = Box::leak(string.to_string().into_boxed_str()) as &'static str;
+        ns.insert(b);
+        b
+    }
+}
+
+/// Get the Symbolica namespace for the calling module.
+#[cfg_attr(
+    feature = "python_stubgen",
+    gen_stub_pyfunction(module = "symbolica.core")
+)]
+#[pyfunction]
+pub fn get_namespace(py: Python) -> PyResult<&'static str> {
+    let ptr = unsafe { pyo3::ffi::PyEval_GetGlobals() };
+
+    if ptr.is_null() {
+        return Err(PyErr::new::<pyo3::exceptions::PyRuntimeError, _>(
+            "No active Python frame found",
+        ));
+    }
+
+    let globals = unsafe { Bound::from_borrowed_ptr(py, ptr) };
+    Ok(
+        match globals.cast::<PyDict>()?.get_item("SYMBOLICA_NAMESPACE") {
+            Ok(val) => intern_string(val.extract::<&str>()?),
+            Err(_) => "python",
+        },
+    )
+}
+
 /// Symbolica is a blazing fast computer algebra system.
 ///
 /// It can be used to perform mathematical operations,
@@ -348,7 +413,7 @@ fn symbolica(m: &Bound<'_, PyModule>) -> PyResult<()> {
 /// where stdout is not easily accessible.
 ///
 /// This function must be called before any Symbolica logging events are emitted.
-#[pyfunction()]
+#[pyfunction]
 fn use_custom_logger() {
     crate::GLOBAL_SETTINGS
         .initialize_tracing
@@ -468,7 +533,7 @@ fn symbol_shorthand(
     custom_print: Option<Py<PyAny>>,
     custom_derivative: Option<Py<PyAny>>,
     data: Option<PythonUserData>,
-    py: Python<'_>,
+    py: Python,
 ) -> PyResult<Py<PyAny>> {
     PythonExpression::symbol(
         &PythonExpression::type_object(py),
@@ -844,7 +909,7 @@ fn number_shorthand(
     #[gen_stub(override_type(type_repr = "int | float | complex | str | decimal.Decimal", imports = ("decimal")))]
     num: Py<PyAny>,
     relative_error: Option<f64>,
-    py: Python<'_>,
+    py: Python,
 ) -> PyResult<PythonExpression> {
     PythonExpression::num(&PythonExpression::type_object(py), py, num, relative_error)
 }
@@ -879,15 +944,16 @@ fn number_shorthand(
     feature = "python_stubgen",
     gen_stub_pyfunction(module = "symbolica.core")
 )]
-#[pyfunction(name = "E", signature = (expr, mode=PythonParseMode::Symbolica, default_namespace="python"))]
+#[pyfunction(name = "E", signature = (expr, mode=PythonParseMode::Symbolica, default_namespace=None))]
 fn expression_shorthand(
     expr: &str,
     mode: PythonParseMode,
-    default_namespace: &str,
+    default_namespace: Option<String>,
     py: Python,
 ) -> PyResult<PythonExpression> {
     PythonExpression::parse(
         &PythonExpression::type_object(py),
+        py,
         expr,
         mode,
         default_namespace,
@@ -904,10 +970,10 @@ fn transformer_shorthand() -> PythonTransformer {
     PythonTransformer::new()
 }
 
-#[pyfunction(name = "P", signature = (expr, default_namespace="python", modulus = None, power = None, minimal_poly = None, vars = None))]
+#[pyfunction(name = "P", signature = (expr, default_namespace=None, modulus = None, power = None, minimal_poly = None, vars = None))]
 pub fn poly_shorthand(
     expr: &str,
-    default_namespace: &str,
+    default_namespace: Option<String>,
     modulus: Option<u64>,
     power: Option<(u16, Symbol)>,
     minimal_poly: Option<PythonPolynomial>,
@@ -916,6 +982,7 @@ pub fn poly_shorthand(
 ) -> PyResult<Py<PyAny>> {
     PythonExpression::parse(
         &PythonExpression::type_object(py),
+        py,
         expr,
         PythonParseMode::Symbolica,
         default_namespace,
@@ -2839,6 +2906,7 @@ impl PythonTransformer {
             num_exp_as_superscript = true,
             precision = None,
             show_namespaces = false,
+            hide_namespace = None,
             include_attributes = false,
             max_terms = None,
             custom_print_mode = None)
@@ -2859,6 +2927,7 @@ impl PythonTransformer {
         num_exp_as_superscript: bool,
         precision: Option<usize>,
         show_namespaces: bool,
+        hide_namespace: Option<&str>,
         include_attributes: bool,
         max_terms: Option<usize>,
         custom_print_mode: Option<usize>,
@@ -2880,7 +2949,11 @@ impl PythonTransformer {
             pretty_matrix: false,
             hide_all_namespaces: !show_namespaces,
             color_namespace: true,
-            hide_namespace: Some("python"),
+            hide_namespace: if show_namespaces {
+                hide_namespace.map(intern_string)
+            } else {
+                None
+            },
             include_attributes,
             max_terms,
             custom_print_mode: custom_print_mode.map(|x| ("default", x)),
@@ -3577,7 +3650,7 @@ impl PythonExpression {
         }
 
         let namespace = DefaultNamespace {
-            namespace: "python".into(),
+            namespace: get_namespace(py)?.into(),
             data: "",
             file: "".into(),
             line: 0,
@@ -3830,7 +3903,7 @@ impl PythonExpression {
             Ok(Atom::num(num).into())
         } else if let Ok(num) = num.cast_bound::<PyInt>(py) {
             let a = format!("{num}");
-            PythonExpression::parse(_cls, &a, PythonParseMode::Symbolica, "python")
+            PythonExpression::parse(_cls, py, &a, PythonParseMode::Symbolica, None)
         } else if let Ok(f) = num.extract::<PythonMultiPrecisionFloat>(py) {
             if let Some(relative_error) = relative_error {
                 let err = relative_error
@@ -3986,21 +4059,28 @@ impl PythonExpression {
     /// ------
     /// ValueError
     ///     If the input is not a valid expression.
-    #[pyo3(signature = (input, mode = PythonParseMode::Symbolica, default_namespace = "python"))]
+    #[pyo3(signature = (input, mode = PythonParseMode::Symbolica, default_namespace = None))]
     #[classmethod]
     pub fn parse(
         _cls: &Bound<'_, PyType>,
+        py: Python,
         input: &str,
         mode: PythonParseMode,
-        default_namespace: &str,
+        default_namespace: Option<String>,
     ) -> PyResult<PythonExpression> {
+        let namespace = if let Some(ns) = default_namespace {
+            intern_string(&ns)
+        } else {
+            get_namespace(py)?
+        };
+
         let e = try_parse!(
             input,
             settings = ParseSettings {
                 mode: mode.into(),
                 ..ParseSettings::default()
             },
-            default_namespace = default_namespace.to_string()
+            default_namespace = namespace
         )
         .map_err(exceptions::PyValueError::new_err)?;
         Ok(e.into())
@@ -4090,6 +4170,7 @@ impl PythonExpression {
             num_exp_as_superscript = true,
             precision = None,
             show_namespaces = false,
+            hide_namespace = None,
             include_attributes = false,
             max_terms = Some(100),
             custom_print_mode = None)
@@ -4110,6 +4191,7 @@ impl PythonExpression {
         num_exp_as_superscript: bool,
         precision: Option<usize>,
         show_namespaces: bool,
+        hide_namespace: Option<&str>,
         include_attributes: bool,
         max_terms: Option<usize>,
         custom_print_mode: Option<usize>,
@@ -4135,7 +4217,11 @@ impl PythonExpression {
                     pretty_matrix: false,
                     hide_all_namespaces: !show_namespaces,
                     color_namespace: true,
-                    hide_namespace: Some("python"),
+                    hide_namespace: if show_namespaces {
+                        hide_namespace.map(intern_string)
+                    } else {
+                        None
+                    },
                     include_attributes,
                     max_terms,
                     custom_print_mode: custom_print_mode.map(|x| ("default", x)),
@@ -4197,7 +4283,7 @@ impl PythonExpression {
             "{}",
             self.expr.printer(PrintOptions {
                 hide_all_namespaces: !show_namespaces,
-                hide_namespace: Some("python"),
+                hide_namespace: None,
                 ..PrintOptions::mathematica()
             })
         ))
@@ -4365,7 +4451,7 @@ impl PythonExpression {
         &self,
         #[gen_stub(override_type(type_repr = "Expression | int | float | complex | str"))]
         key: Option<Py<PyAny>>,
-        py: Python<'_>,
+        py: Python,
     ) -> PyResult<Py<PyAny>> {
         let data = match self.expr.as_ref() {
             Atom::Var(v) => v.get_symbol().get_data(),
@@ -6952,7 +7038,7 @@ impl PythonExpression {
         ))]
         external_functions: Option<HashMap<(PolyVariable, String), Py<PyAny>>>,
         conditionals: Option<Vec<PolyVariable>>,
-        py: Python<'_>,
+        py: Python,
     ) -> PyResult<PythonExpressionEvaluator> {
         let mut fn_map = FunctionMap::new();
 
@@ -8088,6 +8174,7 @@ impl PythonSeries {
             num_exp_as_superscript = true,
             precision = None,
             show_namespaces = false,
+            hide_namespace = None,
             include_attributes = false,
             max_terms = None,
             custom_print_mode = None)
@@ -8108,6 +8195,7 @@ impl PythonSeries {
         num_exp_as_superscript: bool,
         precision: Option<usize>,
         show_namespaces: bool,
+        hide_namespace: Option<&str>,
         include_attributes: bool,
         max_terms: Option<usize>,
         custom_print_mode: Option<usize>,
@@ -8132,7 +8220,11 @@ impl PythonSeries {
                     pretty_matrix: false,
                     hide_all_namespaces: !show_namespaces,
                     color_namespace: true,
-                    hide_namespace: Some("python"),
+                    hide_namespace: if show_namespaces {
+                        hide_namespace.map(intern_string)
+                    } else {
+                        None
+                    },
                     include_attributes,
                     max_terms,
                     custom_print_mode: custom_print_mode.map(|x| ("default", x)),
@@ -8709,6 +8801,7 @@ impl PythonPolynomial {
             num_exp_as_superscript = true,
             precision = None,
             show_namespaces = false,
+            hide_namespace = None,
             include_attributes = false,
             max_terms = None,
             custom_print_mode = None)
@@ -8729,6 +8822,7 @@ impl PythonPolynomial {
         num_exp_as_superscript: bool,
         precision: Option<usize>,
         show_namespaces: bool,
+        hide_namespace: Option<&str>,
         include_attributes: bool,
         max_terms: Option<usize>,
         custom_print_mode: Option<usize>,
@@ -8751,7 +8845,11 @@ impl PythonPolynomial {
                 pretty_matrix: false,
                 hide_all_namespaces: !show_namespaces,
                 color_namespace: true,
-                hide_namespace: Some("python"),
+                hide_namespace: if show_namespaces {
+                    hide_namespace.map(intern_string)
+                } else {
+                    None
+                },
                 include_attributes,
                 max_terms,
                 custom_print_mode: custom_print_mode.map(|x| ("default", x)),
@@ -9501,20 +9599,25 @@ impl PythonPolynomial {
     /// ------
     /// ValueError
     ///     If the input is not a valid Symbolica polynomial.
-    #[pyo3(signature = (arg, vars, default_namespace = "python"))]
+    #[pyo3(signature = (arg, vars, default_namespace = None))]
     #[classmethod]
     pub fn parse(
         _cls: &Bound<'_, PyType>,
+        py: Python,
         arg: &str,
         vars: Vec<PyBackedStr>,
-        default_namespace: &str,
+        default_namespace: Option<String>,
     ) -> PyResult<Self> {
         let mut var_map = vec![];
         let mut var_name_map: SmallVec<[SmartString<LazyCompact>; INLINED_EXPONENTS]> =
             SmallVec::new();
 
         let namespace = DefaultNamespace {
-            namespace: default_namespace.to_string().into(),
+            namespace: if let Some(ns) = default_namespace {
+                ns.into()
+            } else {
+                get_namespace(py)?.into()
+            },
             data: "",
             file: "".into(),
             line: 0,
@@ -9995,6 +10098,7 @@ impl PythonFiniteFieldPolynomial {
             num_exp_as_superscript = true,
             precision = None,
             show_namespaces = false,
+            hide_namespace = None,
             include_attributes = false,
             max_terms = None,
             custom_print_mode = None)
@@ -10015,6 +10119,7 @@ impl PythonFiniteFieldPolynomial {
         num_exp_as_superscript: bool,
         precision: Option<usize>,
         show_namespaces: bool,
+        hide_namespace: Option<&str>,
         include_attributes: bool,
         max_terms: Option<usize>,
         custom_print_mode: Option<usize>,
@@ -10037,7 +10142,11 @@ impl PythonFiniteFieldPolynomial {
                 pretty_matrix: false,
                 hide_all_namespaces: !show_namespaces,
                 color_namespace: true,
-                hide_namespace: Some("python"),
+                hide_namespace: if show_namespaces {
+                    hide_namespace.map(intern_string)
+                } else {
+                    None
+                },
                 include_attributes,
                 max_terms,
                 custom_print_mode: custom_print_mode.map(|x| ("default", x)),
@@ -10857,20 +10966,25 @@ impl PythonFiniteFieldPolynomial {
     /// ------
     /// ValueError
     ///     If the input is not a valid Symbolica polynomial.
-    #[pyo3(signature = (arg, vars, prime, default_namespace = "python"))]
+    #[pyo3(signature = (arg, vars, prime, default_namespace = None))]
     #[classmethod]
     pub fn parse(
         _cls: &Bound<'_, PyType>,
+        py: Python,
         arg: &str,
         vars: Vec<PyBackedStr>,
         prime: u64,
-        default_namespace: &str,
+        default_namespace: Option<String>,
     ) -> PyResult<Self> {
         let mut var_map = vec![];
         let mut var_name_map = vec![];
 
         let namespace = DefaultNamespace {
-            namespace: default_namespace.to_string().into(),
+            namespace: if let Some(ns) = default_namespace {
+                ns.into()
+            } else {
+                get_namespace(py)?.into()
+            },
             data: "",
             file: "".into(),
             line: 0,
@@ -11060,10 +11174,11 @@ impl PythonPrimeTwoPolynomial {
             num_exp_as_superscript = true,
             precision = None,
             show_namespaces = false,
+            hide_namespace = None,
             include_attributes = false,
             max_terms = None,
             custom_print_mode = None)
-        )]
+    )]
     pub fn format(
         &self,
         mode: PythonPrintMode,
@@ -11080,6 +11195,7 @@ impl PythonPrimeTwoPolynomial {
         num_exp_as_superscript: bool,
         precision: Option<usize>,
         show_namespaces: bool,
+        hide_namespace: Option<&str>,
         include_attributes: bool,
         max_terms: Option<usize>,
         custom_print_mode: Option<usize>,
@@ -11102,7 +11218,11 @@ impl PythonPrimeTwoPolynomial {
                 pretty_matrix: false,
                 hide_all_namespaces: !show_namespaces,
                 color_namespace: true,
-                hide_namespace: Some("python"),
+                hide_namespace: if show_namespaces {
+                    hide_namespace.map(intern_string)
+                } else {
+                    None
+                },
                 include_attributes,
                 max_terms,
                 custom_print_mode: custom_print_mode.map(|x| ("default", x)),
@@ -11902,23 +12022,24 @@ impl PythonGaloisFieldPrimeTwoPolynomial {
     /// >>> p = FiniteFieldPolynomial.parse("3*x^2+2*x+7*x^3", ['x'], 11)
     /// >>> print(p.format(symmetric_representation_for_finite_field=True))
     #[pyo3(signature =
-    (mode = PythonPrintMode::Symbolica,
-        terms_on_new_line = false,
-        color_top_level_sum = true,
-        color_builtin_symbols = true,
-        print_ring = true,
-        symmetric_representation_for_finite_field = false,
-        explicit_rational_polynomial = false,
-        number_thousands_separator = None,
-        multiplication_operator = '*',
-        double_star_for_exponentiation = false,
-        square_brackets_for_function = false,
-        num_exp_as_superscript = true,
-        precision = None,
-        show_namespaces = false,
+        (mode = PythonPrintMode::Symbolica,
+            terms_on_new_line = false,
+            color_top_level_sum = true,
+            color_builtin_symbols = true,
+            print_ring = true,
+            symmetric_representation_for_finite_field = false,
+            explicit_rational_polynomial = false,
+            number_thousands_separator = None,
+            multiplication_operator = '*',
+            double_star_for_exponentiation = false,
+            square_brackets_for_function = false,
+            num_exp_as_superscript = true,
+            precision = None,
+            show_namespaces = false,
+            hide_namespace = None,
             include_attributes = false,
-        max_terms = None,
-        custom_print_mode = None)
+            max_terms = None,
+            custom_print_mode = None)
     )]
     pub fn format(
         &self,
@@ -11936,6 +12057,7 @@ impl PythonGaloisFieldPrimeTwoPolynomial {
         num_exp_as_superscript: bool,
         precision: Option<usize>,
         show_namespaces: bool,
+        hide_namespace: Option<&str>,
         include_attributes: bool,
         max_terms: Option<usize>,
         custom_print_mode: Option<usize>,
@@ -11958,7 +12080,11 @@ impl PythonGaloisFieldPrimeTwoPolynomial {
                 pretty_matrix: false,
                 hide_all_namespaces: !show_namespaces,
                 color_namespace: true,
-                hide_namespace: Some("python"),
+                hide_namespace: if show_namespaces {
+                    hide_namespace.map(intern_string)
+                } else {
+                    None
+                },
                 include_attributes,
                 max_terms,
                 custom_print_mode: custom_print_mode.map(|x| ("default", x)),
@@ -12870,10 +12996,11 @@ impl PythonGaloisFieldPolynomial {
             num_exp_as_superscript = true,
             precision = None,
             show_namespaces = false,
+            hide_namespace = None,
             include_attributes = false,
             max_terms = None,
             custom_print_mode = None)
-        )]
+    )]
     pub fn format(
         &self,
         mode: PythonPrintMode,
@@ -12890,6 +13017,7 @@ impl PythonGaloisFieldPolynomial {
         num_exp_as_superscript: bool,
         precision: Option<usize>,
         show_namespaces: bool,
+        hide_namespace: Option<&str>,
         include_attributes: bool,
         max_terms: Option<usize>,
         custom_print_mode: Option<usize>,
@@ -12912,7 +13040,11 @@ impl PythonGaloisFieldPolynomial {
                 pretty_matrix: false,
                 hide_all_namespaces: !show_namespaces,
                 color_namespace: true,
-                hide_namespace: Some("python"),
+                hide_namespace: if show_namespaces {
+                    hide_namespace.map(intern_string)
+                } else {
+                    None
+                },
                 include_attributes,
                 max_terms,
                 custom_print_mode: custom_print_mode.map(|x| ("default", x)),
@@ -13756,23 +13888,24 @@ impl PythonNumberFieldPolynomial {
     /// >>> p = FiniteFieldPolynomial.parse("3*x^2+2*x+7*x^3", ['x'], 11)
     /// >>> print(p.format(symmetric_representation_for_finite_field=True))
     #[pyo3(signature =
-    (mode = PythonPrintMode::Symbolica,
-        terms_on_new_line = false,
-        color_top_level_sum = true,
-        color_builtin_symbols = true,
-        print_ring = true,
-        symmetric_representation_for_finite_field = false,
-        explicit_rational_polynomial = false,
-        number_thousands_separator = None,
-        multiplication_operator = '*',
-        double_star_for_exponentiation = false,
-        square_brackets_for_function = false,
-        num_exp_as_superscript = true,
-        precision = None,
-        show_namespaces = false,
+        (mode = PythonPrintMode::Symbolica,
+            terms_on_new_line = false,
+            color_top_level_sum = true,
+            color_builtin_symbols = true,
+            print_ring = true,
+            symmetric_representation_for_finite_field = false,
+            explicit_rational_polynomial = false,
+            number_thousands_separator = None,
+            multiplication_operator = '*',
+            double_star_for_exponentiation = false,
+            square_brackets_for_function = false,
+            num_exp_as_superscript = true,
+            precision = None,
+            show_namespaces = false,
+            hide_namespace = None,
             include_attributes = false,
-        max_terms = None,
-        custom_print_mode = None)
+            max_terms = None,
+            custom_print_mode = None)
     )]
     pub fn format(
         &self,
@@ -13790,6 +13923,7 @@ impl PythonNumberFieldPolynomial {
         num_exp_as_superscript: bool,
         precision: Option<usize>,
         show_namespaces: bool,
+        hide_namespace: Option<&str>,
         include_attributes: bool,
         max_terms: Option<usize>,
         custom_print_mode: Option<usize>,
@@ -13812,7 +13946,11 @@ impl PythonNumberFieldPolynomial {
                 pretty_matrix: false,
                 hide_all_namespaces: !show_namespaces,
                 color_namespace: true,
-                hide_namespace: Some("python"),
+                hide_namespace: if show_namespaces {
+                    hide_namespace.map(intern_string)
+                } else {
+                    None
+                },
                 include_attributes,
                 max_terms,
                 custom_print_mode: custom_print_mode.map(|x| ("default", x)),
@@ -14895,19 +15033,24 @@ impl PythonRationalPolynomial {
     /// ------
     /// ValueError
     ///     If the input is not a valid Symbolica rational polynomial.
-    #[pyo3(signature = (arg, vars, default_namespace = "python"))]
+    #[pyo3(signature = (arg, vars, default_namespace = None))]
     #[classmethod]
     pub fn parse(
         _cls: &Bound<'_, PyType>,
+        py: Python,
         arg: &str,
         vars: Vec<PyBackedStr>,
-        default_namespace: &str,
+        default_namespace: Option<String>,
     ) -> PyResult<Self> {
         let mut var_map = vec![];
         let mut var_name_map = vec![];
 
         let namespace = DefaultNamespace {
-            namespace: default_namespace.to_string().into(),
+            namespace: if let Some(ns) = default_namespace {
+                intern_string(&ns).into()
+            } else {
+                get_namespace(py)?.into()
+            },
             data: "",
             file: "".into(),
             line: 0,
@@ -15227,20 +15370,25 @@ impl PythonFiniteFieldRationalPolynomial {
     /// ------
     /// ValueError
     ///     If the input is not a valid Symbolica rational polynomial.
-    #[pyo3(signature = (arg, vars, prime, default_namespace = "python"))]
+    #[pyo3(signature = (arg, vars, prime, default_namespace = None))]
     #[classmethod]
     pub fn parse(
         _cls: &Bound<'_, PyType>,
+        py: Python,
         arg: &str,
         vars: Vec<PyBackedStr>,
         prime: u64,
-        default_namespace: &str,
+        default_namespace: Option<String>,
     ) -> PyResult<Self> {
         let mut var_map = vec![];
         let mut var_name_map = vec![];
 
         let namespace = DefaultNamespace {
-            namespace: default_namespace.to_string().into(),
+            namespace: if let Some(ns) = default_namespace {
+                intern_string(&ns).into()
+            } else {
+                get_namespace(py)?.into()
+            },
             data: "",
             file: "".into(),
             line: 0,
@@ -15704,7 +15852,7 @@ impl PythonExpressionEvaluator {
         custom_header: Option<String>,
         cuda_number_of_evaluations: usize,
         cuda_block_size: usize,
-        py: Python<'_>,
+        py: Python,
     ) -> PyResult<Py<PyAny>> {
         let mut options = match number_type {
             "real" | "complex" => CompileOptions {
@@ -17429,6 +17577,7 @@ impl PythonMatrix {
             num_exp_as_superscript = true,
             precision = None,
             show_namespaces = false,
+            hide_namespace = None,
             include_attributes = false,
             max_terms = None,
             custom_print_mode = None)
@@ -17444,11 +17593,12 @@ impl PythonMatrix {
         num_exp_as_superscript: bool,
         precision: Option<usize>,
         show_namespaces: bool,
+        hide_namespace: Option<&str>,
         include_attributes: bool,
         max_terms: Option<usize>,
         custom_print_mode: Option<usize>,
-    ) -> String {
-        self.matrix.format_string(
+    ) -> PyResult<String> {
+        Ok(self.matrix.format_string(
             &PrintOptions {
                 terms_on_new_line: false,
                 color_top_level_sum: false,
@@ -17466,13 +17616,17 @@ impl PythonMatrix {
                 pretty_matrix,
                 hide_all_namespaces: !show_namespaces,
                 color_namespace: true,
-                hide_namespace: Some("python"),
+                hide_namespace: if show_namespaces {
+                    hide_namespace.map(intern_string)
+                } else {
+                    None
+                },
                 include_attributes,
                 max_terms,
                 custom_print_mode: custom_print_mode.map(|x| ("default", x)),
             },
             PrintState::default(),
-        )
+        ))
     }
 
     /// Convert the matrix into a LaTeX string.

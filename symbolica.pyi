@@ -31,6 +31,18 @@ def use_custom_logger() -> None:
     """
 
 
+def get_namespace() -> str:
+    """Get the Symbolica namespace for the calling module. Use `set_namespace` to set a namespace."""
+
+
+def set_namespace(namespace: str) -> None:
+    """Set the Symbolica namespace for the calling module.
+    All subsequently created symbols in the calling module will be defined within this namespace.
+
+    This function sets the `SYMBOLICA_NAMESPACE` variable in the global scope of the calling module.
+    """
+
+
 def get_version() -> str:
     """Get the current Symbolica version."""
 
@@ -254,7 +266,7 @@ def N(num: int | float | complex | str | Decimal, relative_error: Optional[float
     """
 
 
-def E(input: str, mode: ParseMode = ParseMode.Symbolica, default_namespace: str = "python") -> Expression:
+def E(input: str, mode: ParseMode = ParseMode.Symbolica, default_namespace: str | None = None) -> Expression:
     """
     Parse a Symbolica expression from a string.
 
@@ -264,7 +276,7 @@ def E(input: str, mode: ParseMode = ParseMode.Symbolica, default_namespace: str 
         An input string. UTF-8 characters are allowed.
     mode: ParseMode
         The parsing mode to use. Use `ParseMode.Mathematica` to parse Mathematica expressions.
-    default_namespace: str
+    default_namespace: Optional[str]
         The default namespace to use when parsing symbols.
 
     Examples
@@ -293,14 +305,14 @@ def T() -> Transformer:
 
 
 @overload
-def P(poly: str, default_namespace: str = "python", vars: Optional[Sequence[Expression]] = None) -> Polynomial:
+def P(poly: str, default_namespace: str | None = None, vars: Optional[Sequence[Expression]] = None) -> Polynomial:
     """Parse a string a polynomial, optionally, with the variable ordering specified in `vars`.
     All non-polynomial parts will be converted to new, independent variables.
     """
 
 
 @overload
-def P(poly: str,  minimal_poly: Polynomial, default_namespace: str = "python", vars: Optional[Sequence[Expression]] = None,
+def P(poly: str,  minimal_poly: Polynomial, default_namespace: str | None = None, vars: Optional[Sequence[Expression]] = None,
       ) -> NumberFieldPolynomial:
     """Parse string to a polynomial, optionally, with the variables and the ordering specified in `vars`.
     All non-polynomial elements will be converted to new independent variables.
@@ -313,7 +325,7 @@ def P(poly: str,  minimal_poly: Polynomial, default_namespace: str = "python", v
 @overload
 def P(poly: str,
       modulus: int,
-      default_namespace: str = "python",
+      default_namespace: str | None = None,
       power: Optional[Tuple[int, Expression]] = None,
       minimal_poly: Optional[Polynomial] = None,
       vars: Optional[Sequence[Expression]] = None,
@@ -689,7 +701,7 @@ class Expression:
         """Return all defined symbol names (function names and variables)."""
 
     @classmethod
-    def parse(_cls, input: str, mode: ParseMode = ParseMode.Symbolica, default_namespace: str = "python") -> Expression:
+    def parse(_cls, input: str, mode: ParseMode = ParseMode.Symbolica, default_namespace: str | None = None) -> Expression:
         """
         Parse a Symbolica expression from a string.
 
@@ -812,6 +824,7 @@ class Expression:
         square_brackets_for_function: bool = False,
         num_exp_as_superscript: bool = True,
         show_namespaces: bool = False,
+        hide_namespace: Optional[str] = None,
         include_attributes: bool = False,
         max_terms: Optional[int] = 100,
         custom_print_mode: Optional[int] = None,
@@ -3046,6 +3059,7 @@ class Transformer:
         square_brackets_for_function: bool = False,
         num_exp_as_superscript: bool = True,
         show_namespaces: bool = False,
+        hide_namespace: Optional[str] = None,
         include_attributes: bool = False,
         max_terms: Optional[int] = None,
         custom_print_mode: Optional[int] = None,
@@ -3174,6 +3188,7 @@ class Series:
         num_exp_as_superscript: bool = True,
         precision: Optional[int] = None,
         show_namespaces: bool = False,
+        hide_namespace: Optional[str] = None,
         include_attributes: bool = False,
         max_terms: Optional[int] = None,
         custom_print_mode: Optional[int] = None,
@@ -3352,7 +3367,7 @@ class Polynomial:
     """A Symbolica polynomial with rational coefficients."""
 
     @classmethod
-    def parse(_cls, input: str, vars: Sequence[str], default_namespace: str = "python") -> Polynomial:
+    def parse(_cls, input: str, vars: Sequence[str], default_namespace: str | None = None) -> Polynomial:
         """
         Parse a polynomial with integer coefficients from a string.
         The input must be written in an expanded format and a list of all
@@ -3396,6 +3411,7 @@ class Polynomial:
         num_exp_as_superscript: bool = True,
         precision: Optional[int] = None,
         show_namespaces: bool = False,
+        hide_namespace: Optional[str] = None,
         include_attributes: bool = False,
         max_terms: Optional[int] = None,
         custom_print_mode: Optional[int] = None,
@@ -3830,6 +3846,7 @@ class NumberFieldPolynomial:
         num_exp_as_superscript: bool = True,
         precision: Optional[int] = None,
         show_namespaces: bool = False,
+        hide_namespace: Optional[str] = None,
         include_attributes: bool = False,
         max_terms: Optional[int] = None,
         custom_print_mode: Optional[int] = None,
@@ -4102,7 +4119,7 @@ class FiniteFieldPolynomial:
     """A Symbolica polynomial with finite field coefficients."""
 
     @classmethod
-    def parse(_cls, input: str, vars: Sequence[str], prime: int, default_namespace: str = "python") -> FiniteFieldPolynomial:
+    def parse(_cls, input: str, vars: Sequence[str], prime: int, default_namespace: str | None = None) -> FiniteFieldPolynomial:
         """
         Parse a polynomial with integer coefficients from a string.
         The input must be written in an expanded format and a list of all
@@ -4146,6 +4163,7 @@ class FiniteFieldPolynomial:
         num_exp_as_superscript: bool = True,
         precision: Optional[int] = None,
         show_namespaces: bool = False,
+        hide_namespace: Optional[str] = None,
         include_attributes: bool = False,
         max_terms: Optional[int] = None,
         custom_print_mode: Optional[int] = None,
@@ -4433,7 +4451,7 @@ class RationalPolynomial:
         """Create a new rational polynomial from a numerator and denominator polynomial."""
 
     @classmethod
-    def parse(_cls, input: str, vars: Sequence[str], default_namespace: str = "python") -> RationalPolynomial:
+    def parse(_cls, input: str, vars: Sequence[str], default_namespace: str | None = None) -> RationalPolynomial:
         """
         Parse a rational polynomial from a string.
         The list of all the variables must be provided.
@@ -4558,7 +4576,7 @@ class FiniteFieldRationalPolynomial:
         """Create a new rational polynomial from a numerator and denominator polynomial."""
 
     @classmethod
-    def parse(_cls, input: str, vars: Sequence[str], prime: int, default_namespace: str = "python") -> FiniteFieldRationalPolynomial:
+    def parse(_cls, input: str, vars: Sequence[str], prime: int, default_namespace: str | None = None) -> FiniteFieldRationalPolynomial:
         """
         Parse a rational polynomial from a string.
         The list of all the variables must be provided.
@@ -4736,6 +4754,7 @@ class Matrix:
         num_exp_as_superscript: bool = True,
         precision: Optional[int] = None,
         show_namespaces: bool = False,
+        hide_namespace: Optional[str] = None,
         include_attributes: bool = False,
         max_terms: Optional[int] = None,
         custom_print_mode: Optional[int] = None,
