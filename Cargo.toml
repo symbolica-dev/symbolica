@@ -71,7 +71,7 @@ optional = true
 version = "0.27"
 
 [dependencies]
-numerica = "1.1"
+numerica = "1.2"
 graphica = "1.1"
 
 ahash = "0.8.7"

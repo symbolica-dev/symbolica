@@ -393,7 +393,7 @@ pub fn get_namespace(py: Python) -> PyResult<&'static str> {
     let globals = unsafe { Bound::from_borrowed_ptr(py, ptr) };
     Ok(
         match globals.cast::<PyDict>()?.get_item("SYMBOLICA_NAMESPACE") {
-            Ok(val) => intern_string(val.extract::<&str>()?),
+            Ok(val) => intern_string(&val.extract::<PyBackedStr>()?),
             Err(_) => "python",
         },
     )
