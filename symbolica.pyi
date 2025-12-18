@@ -52,12 +52,8 @@ def is_licensed() -> bool:
 
 
 def set_license_key(key: str) -> None:
-    """This function is deprecated and no longer sets the license key.
-    You can set the license key through the environment variable `SYMBOLICA_LICENSE` before importing Symbolica:
-
-    >>> import os  # noqa: E402
-    >>> os.environ['SYMBOLICA_LICENSE'] = 'YOURKEY'  # noqa: E402
-    >>> from symbolica import *
+    """Set the Symbolica license key for this computer. Can only be called before calling any other Symbolica functions
+    and before importing any community modules.
     """
 
 

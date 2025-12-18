@@ -160,7 +160,14 @@ pub trait SymbolicaCommunityModule {
     fn get_name() -> String;
 
     /// Register all classes, functions and methods in the submodule `m`.
+    /// This function must not register any Symbolica symbols. All initialization
+    /// should be performed in the [SymbolicaCommunityModule::initialize] function.
     fn register_module(m: &Bound<'_, PyModule>) -> PyResult<()>;
+
+    /// Initialize the community module. Called when the submodule is imported.
+    fn initialize(py: Python) -> PyResult<()> {
+        Ok(())
+    }
 }
 
 /// Specifies the print mode.
@@ -440,24 +447,15 @@ fn is_licensed() -> bool {
     LicenseManager::is_licensed()
 }
 
-/// Set the Symbolica license key for this computer. Can only be called before calling any other Symbolica functions.
+/// Set the Symbolica license key for this computer. Can only be called before calling any other Symbolica functions
+/// and before importing any community modules.
 #[cfg_attr(
     feature = "python_stubgen",
     gen_stub_pyfunction(module = "symbolica.core")
 )]
 #[pyfunction]
 fn set_license_key(key: String) -> PyResult<()> {
-    Err(exceptions::PyDeprecationWarning::new_err(format!(
-        "This function no longer sets the license key.
-You can set the license key through the environment variable SYMBOLICA_LICENSE before importing Symbolica:
-
-import os  # noqa: E402
-os.environ['SYMBOLICA_LICENSE'] = '{}'  # noqa: E402
-
-from symbolica import *
-",
-        key
-    )))
+    LicenseManager::set_license_key(&key).map_err(exceptions::PyException::new_err)
 }
 
 /// Request a key for **non-professional** use for the user `name`, that will be sent to the e-mail address
