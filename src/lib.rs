@@ -35,6 +35,8 @@
 //! Check out the [guide](https://symbolica.io/docs/get_started.html) for more information, examples,
 //! and additional documentation.
 
+#![cfg_attr(docsrs, feature(doc_cfg))]
+
 use std::{
     collections::HashMap,
     env,

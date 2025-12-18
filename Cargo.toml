@@ -13,10 +13,11 @@ name = "symbolica"
 readme = "Readme.md"
 repository = "https://github.com/symbolica-dev/symbolica"
 rust-version = "1.88"
-version = "1.2.0"
+version = "1.2.1"
 
 [package.metadata.docs.rs]
 features = ["python_export", "serde", "bincode", "python_stubgen"]
+rustdoc-args = ["--cfg", "docsrs"]
 
 [profile.release]
 codegen-units = 1
