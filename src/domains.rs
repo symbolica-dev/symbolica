@@ -3,7 +3,7 @@
 //! The core trait is [Ring], which has two binary operations, addition and multiplication.
 //! Each ring has an associated element type, that should not be confused with the ring type itself.
 //! For example:
-//! - The ring of integers [Z](type@integer::Z) has elements of type [Integer].
+//! - The ring of integers [Z](type@integer::Z) has elements of type [Integer](integer::Integer).
 //! - The ring of rational numbers [Q](type@rational::Q) has elements of type [Rational](rational::Rational).
 //! - The ring of finite fields [FiniteField](finite_field::FiniteField) has elements of type [FiniteField](finite_field::FiniteFieldElement).
 //! - The ring of polynomials [PolynomialRing](super::poly::polynomial::PolynomialRing) has elements of type [MultivariatePolynomial](super::poly::polynomial::MultivariatePolynomial).

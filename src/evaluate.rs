@@ -5430,7 +5430,7 @@ impl<T: SingleFloat> InstructionList<T> {
     }
 }
 
-/// A label in the instruction list [Instr].
+/// A label in the instruction list.
 #[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
 #[cfg_attr(feature = "bincode", derive(bincode::Encode, bincode::Decode))]
 #[derive(Debug, Copy, Clone, PartialEq, Eq, Hash)]
@@ -7343,7 +7343,7 @@ pub trait EvaluatorLoader<T: CompiledNumber>: Sized {
     ) -> Result<Self, String>;
 }
 
-/// Batch-evaluate the compiled code with basic types such as [f64] or [Complex<f64>],
+/// Batch-evaluate the compiled code with basic types such as [f64] or [`Complex<f64>`],
 /// automatically reorganizing the batches if necessary.
 pub trait BatchEvaluator<T: CompiledNumber> {
     /// Evaluate the compiled code with batched input with the given input parameters, writing the results to `out`.

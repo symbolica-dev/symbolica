@@ -2163,7 +2163,7 @@ impl Atom {
     }
 }
 
-/// A constructor of a function. Consider using the [crate::fun!] macro instead.
+/// A constructor of a function. Consider using the [function!](crate::function) macro instead.
 ///
 /// For example:
 /// ```
@@ -2326,7 +2326,7 @@ macro_rules! tag {
 
 /// Create a new symbol or fetch the existing one with the same name.
 /// If no namespace is specified, the symbol is created in the
-/// current namespace. Use [get_symbol!] to only fetch existing symbols.
+/// current namespace. Use [get_symbol!](crate::get_symbol) to only fetch existing symbols.
 ///
 /// For example:
 /// ```no_run
@@ -2355,7 +2355,7 @@ macro_rules! tag {
 /// let x = symbol!("x";);
 /// ```
 /// will panic if the symbol was previously defined with attributes. Use
-/// [try_symbol!] for a fallible version.
+/// [try_symbol!](crate::try_symbol) for a fallible version.
 ///
 /// Special settings can be defined for a single symbol by following
 /// the symbol name with a `,` as shown next.
@@ -2571,7 +2571,7 @@ macro_rules! symbol_set_attr {
 }
 
 /// Try to create a new symbol or fetch the existing one with the same name.
-/// This is a fallible version of the [symbol!] macro.
+/// This is a fallible version of the [symbol!](crate::symbol) macro.
 #[macro_export]
 macro_rules! try_symbol {
     ($id: expr) => {
@@ -2629,7 +2629,7 @@ macro_rules! try_symbol {
 }
 
 /// Looks up a symbol by its name without creating it.
-/// Use [symbol!] to define new symbols.
+/// Use [symbol!](crate::symbol) to define new symbols.
 ///
 /// Returns `None` if the symbol has not been defined yet.
 /// ```
@@ -2656,7 +2656,7 @@ macro_rules! get_symbol {
 }
 
 /// Define new symbols that depend on each other for their custom normalization/derivatives etc.
-/// For a fallible version, see [try_symbol_group!].
+/// For a fallible version, see [try_symbol_group!](crate::try_symbol_group).
 ///
 /// Each symbol specifies a generator function that receives the list of all newly defined symbols
 /// that can be used inside symbol functions (see [SymbolBuilder::with_generator]).

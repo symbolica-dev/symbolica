@@ -1673,7 +1673,7 @@ pub trait AtomCore: private::Sealed {
     }
 
     /// Replace all occurrences of the patterns, where replacements are tested in the order that they are given.
-    /// To repeatedly replace multiple patterns, wrap the call in [Atom::replace_map].
+    /// To repeatedly replace multiple patterns, wrap the call in [AtomCore::replace_map].
     ///
     /// # Example
     ///

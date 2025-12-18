@@ -15,6 +15,9 @@ repository = "https://github.com/symbolica-dev/symbolica"
 rust-version = "1.88"
 version = "1.1.0"
 
+[package.metadata.docs.rs]
+features = ["python_export", "serde", "bincode", "python_stubgen"]
+
 [profile.release]
 codegen-units = 1
 lto = true

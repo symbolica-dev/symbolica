@@ -1,3 +1,7 @@
+//! Python API bindings.
+//!
+//! All Symbolica community extensions must implement the [SymbolicaCommunityModule] trait.
+
 use std::{
     borrow::Borrow,
     fs::File,
@@ -969,7 +973,7 @@ fn transformer_shorthand() -> PythonTransformer {
 }
 
 #[pyfunction(name = "P", signature = (expr, default_namespace=None, modulus = None, power = None, minimal_poly = None, vars = None))]
-pub fn poly_shorthand(
+fn poly_shorthand(
     expr: &str,
     default_namespace: Option<String>,
     modulus: Option<u64>,
@@ -1272,6 +1276,7 @@ impl<'a> From<AtomView<'a>> for PyResult<PythonAtomTree> {
     }
 }
 
+/// A Python representation of Symbolica user data that can be used as a key in a map.
 #[derive(Clone, PartialEq, Eq, Hash)]
 pub struct PythonUserDataKey(UserDataKey);
 
@@ -1311,6 +1316,7 @@ impl<'py> FromPyObject<'_, 'py> for PythonUserDataKey {
     }
 }
 
+/// A Python representation of Symbolica user data.
 pub struct PythonUserData(UserData);
 
 #[cfg(feature = "python_stubgen")]
@@ -1419,6 +1425,7 @@ impl<'a, 'py> IntoPyObject<'py> for PythonBorrowedUserData<'a> {
     }
 }
 
+/// A pattern that is either a literal expression or a held expression.
 #[derive(FromPyObject)]
 pub enum ConvertibleToPattern {
     Literal(ConvertibleToExpression),
@@ -1456,6 +1463,7 @@ impl ConvertibleToOpenPattern {
     }
 }
 
+/// A replacement pattern or a mapping function.
 #[derive(FromPyObject)]
 pub enum ConvertibleToReplaceWith {
     Pattern(ConvertibleToPattern),
@@ -1505,6 +1513,7 @@ impl ConvertibleToReplaceWith {
     }
 }
 
+/// A value that is either a single item or multiple items.
 #[derive(FromPyObject)]
 pub enum OneOrMultiple<T> {
     One(T),
@@ -3362,6 +3371,7 @@ impl TryFrom<Condition<Relation>> for Condition<PatternRestriction> {
     }
 }
 
+/// An object that can be converted to a pattern restriction.
 pub struct ConvertibleToPatternRestriction(Condition<PatternRestriction>);
 
 impl<'py> FromPyObject<'_, 'py> for ConvertibleToPatternRestriction {
@@ -3455,6 +3465,7 @@ impl<'py> FromPyObject<'_, 'py> for PolyVariable {
 #[cfg(feature = "python_stubgen")]
 impl_stub_type!(PolyVariable = PythonExpression);
 
+/// An object that can be converted to an expression.
 pub struct ConvertibleToExpression(PythonExpression);
 
 impl ConvertibleToExpression {
@@ -8008,6 +8019,7 @@ f(3,x)",
     }
 }
 
+/// An enum that can be either a series or an expression.
 #[derive(FromPyObject)]
 pub enum SeriesOrExpression {
     Series(PythonSeries),
@@ -8669,6 +8681,7 @@ impl PythonReplaceIterator {
     }
 }
 
+/// A helper enum to extract either a polynomial or an integer.
 #[derive(FromPyObject)]
 pub enum PolynomialOrInteger<T> {
     Polynomial(T),
@@ -8685,6 +8698,7 @@ impl<T: PyStubType> PyStubType for PolynomialOrInteger<T> {
     }
 }
 
+/// A multivariate polynomial with rational coefficients.
 #[cfg_attr(feature = "python_stubgen", gen_stub_pyclass)]
 #[pyclass(name = "Polynomial", subclass, module = "symbolica.core")]
 #[derive(Clone)]
@@ -15408,6 +15422,7 @@ impl PythonFiniteFieldRationalPolynomial {
     }
 }
 
+/// A type that can be converted to a rational polynomial.
 #[derive(FromPyObject)]
 pub enum ConvertibleToRationalPolynomial {
     Literal(PythonRationalPolynomial),
@@ -17133,6 +17148,7 @@ impl PythonCompiledSimdComplexExpressionEvaluator {
     }
 }
 
+/// A scalar or a matrix.
 #[derive(FromPyObject)]
 pub enum ScalarOrMatrix {
     Scalar(ConvertibleToRationalPolynomial),
@@ -18701,6 +18717,7 @@ impl PythonGraph {
     }
 }
 
+/// Operations on integers.
 #[cfg_attr(feature = "python_stubgen", gen_stub_pyclass)]
 #[pyclass(name = "Integer", module = "symbolica.core")]
 #[derive(Clone, PartialEq, Eq, Hash)]
@@ -18836,6 +18853,7 @@ impl PythonInteger {
     }
 }
 
+/// An iterator over all 64-bit prime numbers.
 #[cfg_attr(feature = "python_stubgen", gen_stub_pyclass)]
 #[pyclass(name = "PrimeIterator", module = "symbolica.core")]
 #[derive(Clone, PartialEq, Eq, Hash)]
