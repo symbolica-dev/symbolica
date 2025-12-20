@@ -4,6 +4,7 @@
 
 use std::{
     borrow::Borrow,
+    collections::BTreeMap,
     fs::File,
     hash::{Hash, Hasher},
     io::{BufReader, BufWriter},
@@ -7045,7 +7046,7 @@ impl PythonExpression {
             type_repr = "typing.Optional[dict[tuple[Expression, str], typing.Callable[[
             typing.Sequence[float | complex]], float | complex]]]"
         ))]
-        external_functions: Option<HashMap<(PolyVariable, String), Py<PyAny>>>,
+        external_functions: Option<BTreeMap<(PolyVariable, String), Py<PyAny>>>,
         conditionals: Option<Vec<PolyVariable>>,
         py: Python,
     ) -> PyResult<PythonExpressionEvaluator> {
