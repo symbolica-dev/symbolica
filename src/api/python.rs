@@ -7019,7 +7019,8 @@ impl PythonExpression {
     ///     Print the progress of the optimization.
     /// external_functions: Optional[dict[Tuple[Expression, str], Callable[[Sequence[float | complex]], float | complex]]]
     ///     A dictionary of external functions that can be called during evaluation.
-    ///     The key is the function name and the value is a callable that takes a list of arguments and returns a float.
+    ///     The key is a tuple of the function symbol and a printable function name.
+    ///     The value is a callable that takes a list of arguments and returns a float.
     ///     This is useful for functions that are not defined in Symbolica but are available in Python.
     /// conditionals: Optional[Sequence[Expression]], optional
     ///     A list of conditional functions. These functions should take three argument: a condition that is tested for
@@ -15786,7 +15787,7 @@ impl PythonExpressionEvaluator {
                 )
             };
 
-            self.eval_complex.evaluate(sc, os);
+            self.eval_complex_ext.evaluate(sc, os);
         }
 
         Ok(out.into_pyarray(py))
@@ -15799,6 +15800,11 @@ impl PythonExpressionEvaluator {
     /// For example, to compute first derivatives in two variables `x` and `y`,
     /// use `dual_shape = [[0, 0], [1, 0], [0, 1]]`.
     ///
+    /// External functions must be mapped to `len(dual_shape)` different functions
+    /// that compute a single component each. The input to the functions
+    /// is the flattened vector of all components of all parameters,
+    /// followed by all previously computed output components.
+    ///
     /// Examples
     /// --------
     ///
@@ -15807,24 +15813,73 @@ impl PythonExpressionEvaluator {
     /// >>> e1.dualize([[0, 0], [1, 0], [0, 1]])
     /// >>> r = e1.evaluate([[2., 1., 0., 3., 0., 1.]])
     /// >>> print(r)  # [10, 7, 2]
-    fn dualize(&mut self, dual_shape: Vec<Vec<usize>>) {
+    ///
+    /// Mapping external functions:
+    ///
+    /// >>> ev = E('f(x + 1)').evaluator({}, {}, [S('x')], external_functions={(S('f'), 'f'): lambda args: args[0]})
+    /// >>> ev.dualize([[0], [1]], {('f', 'f0', 0): lambda args: args[0], ('f', 'f1', 1): lambda args: args[1]})
+    /// >>> print(ev.evaluate([[2., 1.]]))  # [[3. 1.]]
+    ///
+    /// Parameters
+    /// ----------
+    /// dual_shape : list[list[int]]
+    ///     The shape of the dual numbers, indicating the number of derivatives
+    ///     in every variable per term.
+    /// external_functions : Optional[dict[tuple[str, str, int], Callable[[Sequence[float | complex]], float | complex]]]
+    ///     A mapping from external function identifiers to functions that compute a single component each.
+    ///     The key is a tuple of function name, unique printable name, and component index.
+    ///     The value is a function that takes the flattened parameters and returns a component.
+    #[pyo3(signature = (dual_shape, external_functions = HashMap::default()))]
+    fn dualize(
+        &mut self,
+        dual_shape: Vec<Vec<usize>>,
+        external_functions: HashMap<(String, String, usize), Py<PyAny>>,
+    ) -> PyResult<()> {
+        let external_fn_map = external_functions
+            .keys()
+            .map(|(name, new_name, index)| ((name.clone(), *index), new_name.clone()))
+            .collect();
+
         let zero = (0..dual_shape.len())
             .map(|_| Complex::new(Q.zero(), Q.zero()))
             .collect();
         let dual = HyperDual::from_values(dual_shape, zero);
-        self.eval_rat = self.eval_rat.clone().vectorize(&dual);
+        self.eval_rat = self
+            .eval_rat
+            .clone()
+            .vectorize(&dual, external_fn_map)
+            .map_err(|e| {
+                exceptions::PyValueError::new_err(format!("Could not dualize evaluator: {}", e))
+            })?;
 
-        if self.eval_rat.is_real()
-            && let Some(old_eval) = &mut self.eval
-        {
-            let new_eval_rat = self
-                .eval_rat
+        self.eval = if self.eval_rat.is_real() {
+            let external_functions_f64 = external_functions
                 .clone()
-                .map_coeff(&|x| x.to_real().unwrap().to_f64());
+                .into_iter()
+                .map(move |((_, name, _), f)| {
+                    let ff: Box<dyn Fn(&[f64]) -> f64 + Send + Sync> = Box::new(move |args| {
+                        Python::attach(|py| {
+                            f.call1(py, (args,)).unwrap().extract::<f64>(py).unwrap()
+                        })
+                    });
 
-            old_eval.update_stack(new_eval_rat);
+                    (name.clone(), ff)
+                })
+                .collect();
+
+            Some(
+                self.eval_rat
+                    .clone()
+                    .map_coeff(&|x| x.to_real().unwrap().to_f64())
+                    .with_external_functions(external_functions_f64)
+                    .map_err(|e| {
+                        exceptions::PyValueError::new_err(format!(
+                            "Could not create complex evaluator: {e}",
+                        ))
+                    })?,
+            )
         } else {
-            self.eval = None;
+            None
         };
 
         self.eval_complex = self
@@ -15832,8 +15887,38 @@ impl PythonExpressionEvaluator {
             .clone()
             .map_coeff(&|x| Complex::new(x.re.to_f64(), x.im.to_f64()));
 
-        self.eval_complex_ext
-            .update_stack(self.eval_complex.clone());
+        let external_functions_complex = external_functions
+            .into_iter()
+            .map(move |((_, name, _), f)| {
+                let ff: Box<dyn Fn(&[Complex<f64>]) -> Complex<f64> + Send + Sync> =
+                    Box::new(move |args| {
+                        Python::attach(|py| {
+                            let arg_map: Vec<_> = args
+                                .iter()
+                                .map(|x| PyComplex::from_doubles(py, x.re, x.im))
+                                .collect();
+
+                            f.call1(py, (arg_map,))
+                                .unwrap()
+                                .extract::<Complex<f64>>(py)
+                                .unwrap()
+                        })
+                    });
+
+                (name.clone(), ff)
+            })
+            .collect();
+
+        self.eval_complex_ext = self
+            .eval_complex
+            .with_external_functions(external_functions_complex)
+            .map_err(|e| {
+                exceptions::PyValueError::new_err(format!(
+                    "Could not create complex evaluator: {e}",
+                ))
+            })?;
+
+        Ok(())
     }
 
     /// Compile the evaluator to a shared library using C++ and optionally inline assembly and load it.

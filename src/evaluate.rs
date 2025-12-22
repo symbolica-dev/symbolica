@@ -1568,6 +1568,12 @@ impl<T: Default + Clone + Eq + Hash> ExpressionEvaluator<T> {
                 self.param_count, other.param_count
             ));
         }
+        if self.external_fns != other.external_fns {
+            return Err(format!(
+                "External functions do not match: {:?} vs {:?}",
+                self.external_fns, other.external_fns
+            ));
+        }
 
         let mut constants = HashMap::default();
 
@@ -4702,10 +4708,16 @@ impl<T: Default + Clone + std::fmt::Debug> ExpressionEvaluator<T> {
     /// yield `n` components. This can be used to define efficient
     /// evaluation over dual numbers.
     ///
+    /// External functions must be mapped to `n` different functions
+    /// that compute a single component each. The input to the functions
+    /// is the flattened vector of all components of all parameters,
+    /// followed by all previously computed output components.
+    ///
     /// # Example
     ///
     /// Create a dual number and evaluate an expression over it:
     /// ```
+    /// use ahash::HashMap;
     /// use symbolica::{
     ///     atom::{Atom, AtomCore},
     ///     create_hyperdual_single_derivative,
@@ -4727,7 +4739,7 @@ impl<T: Default + Clone + std::fmt::Debug> ExpressionEvaluator<T> {
     ///    )
     ///    .unwrap();
     ///
-    /// let vec_ev = ev.vectorize(&Dual2::<Complex<Rational>>::new_zero());
+    /// let vec_ev = ev.vectorize(&Dual2::<Complex<Rational>>::new_zero(), HashMap::default()).unwrap();
     ///
     /// let mut vec_f = vec_ev.map_coeff(&|x| x.re.to_f64());
     /// let mut dest = vec![0.; 3];
@@ -4735,7 +4747,28 @@ impl<T: Default + Clone + std::fmt::Debug> ExpressionEvaluator<T> {
     ///
     /// assert!(dest.iter().all(|x| x.abs() < 1e-10));
     /// ```
-    pub fn vectorize<V: Vectorize<T>>(mut self, v: &V) -> ExpressionEvaluator<T> {
+    pub fn vectorize<V: Vectorize<T>>(
+        mut self,
+        v: &V,
+        mut external_fn_map: HashMap<(String, usize), String>,
+    ) -> Result<ExpressionEvaluator<T>, String> {
+        let mut new_external_fns = vec![];
+        let mut external_fn_index_map = HashMap::default();
+        for external_fn in &self.external_fns {
+            for i in 0..v.get_dimension() {
+                if let Some(index) = external_fn_map.remove(&(external_fn.clone(), i)) {
+                    new_external_fns.push(index);
+                    external_fn_index_map
+                        .insert((external_fn.clone(), i), new_external_fns.len() - 1);
+                } else {
+                    return Err(format!(
+                        "No external function mapping found for function '{}' with index {}",
+                        external_fn, i
+                    ));
+                }
+            }
+        }
+
         self.undo_stack_optimization();
 
         // unfold every instruction to a single operation
@@ -4820,13 +4853,37 @@ impl<T: Default + Clone + std::fmt::Debug> ExpressionEvaluator<T> {
                 Instr::BuiltinFun(o, f, a) => {
                     (o, VectorInstruction::BuiltinFun(f, get_slot!(slot_map[&a])))
                 }
-                Instr::ExternalFun(o, f, a) => (
-                    o,
-                    VectorInstruction::ExternalFun(
-                        f,
-                        a.iter().map(|x| get_slot!(slot_map[x])).collect(),
-                    ),
-                ),
+                Instr::ExternalFun(o, f, a) => {
+                    let mut results = vec![];
+                    for j in 0..v.get_dimension() {
+                        let Some(index) =
+                            external_fn_index_map.get(&(self.external_fns[f].clone(), j))
+                        else {
+                            return Err(format!(
+                                "No external function mapping found for function '{}' with index {}",
+                                self.external_fns[f], j
+                            ));
+                        };
+
+                        // call with flattened arguments and pass all previously computed components
+                        let r = ins.add(VectorInstruction::ExternalFun(
+                            *index,
+                            a.iter()
+                                .map(|x| get_slot!(slot_map[&x]))
+                                .map(|x| (0..v.get_dimension()).map(move |k| x.index(k)))
+                                .flatten()
+                                .chain(results.iter().cloned())
+                                .collect(),
+                        ));
+                        results.push(r);
+                    }
+
+                    slot_map.insert(
+                        o,
+                        ins.instructions.len() + self.reserved_indices - v.get_dimension(),
+                    );
+                    continue;
+                }
                 Instr::Goto(l) => {
                     ins.instructions.push(VectorInstruction::Goto(l));
                     continue;
@@ -4954,11 +5011,12 @@ impl<T: Default + Clone + std::fmt::Debug> ExpressionEvaluator<T> {
             self.reserved_indices + self.instructions.len(),
             T::default(),
         );
+        self.external_fns = new_external_fns;
 
         self.remove_common_pairs();
         self.optimize_stack();
 
-        self
+        Ok(self)
     }
 }
 
@@ -5331,19 +5389,20 @@ impl<T: DualNumberStructure> Vectorize<Complex<Rational>> for T {
                 let exp_in = VectorInstruction::BuiltinFun(BuiltinSymbol(Symbol::EXP), adjacent[0]);
                 self.map_instruction(&exp_in, instrs)
             }
-            VectorInstruction::ExternalFun(_, _) => {
-                todo!("External functions not supported as they return a single value")
-            }
             VectorInstruction::Join(c, a, b) => (0..self.get_len())
                 .map(|j| VectorInstruction::Join(c.index(j), a.index(j), b.index(j)))
                 .collect(),
             VectorInstruction::Assign(a) => (0..self.get_len())
                 .map(|j| VectorInstruction::Assign(a.index(j)))
                 .collect(),
-            VectorInstruction::Goto(_)
+            VectorInstruction::ExternalFun(_, _)
+            | VectorInstruction::Goto(_)
             | VectorInstruction::Label(_)
             | VectorInstruction::IfElse(..) => {
-                unreachable!()
+                unreachable!(
+                    "Instruction {:?} should not appear inside vectorized instructions",
+                    i
+                )
             }
         }
     }
@@ -9708,6 +9767,7 @@ impl<'a> AtomView<'a> {
 #[cfg(test)]
 mod test {
     use ahash::HashMap;
+    use numerica::domains::dual::HyperDual;
 
     use crate::{
         atom::{Atom, AtomCore},
@@ -9902,7 +9962,7 @@ mod test {
             .unwrap();
 
         let dual = Dual::<Complex<Rational>>::new_zero();
-        let vec_ev = ev.vectorize(&dual);
+        let vec_ev = ev.vectorize(&dual, HashMap::default()).unwrap();
 
         let mut vec_f = vec_ev.map_coeff(&|x| x.re.to_f64());
         let mut dest = vec![0.; 9];
@@ -9914,5 +9974,38 @@ mod test {
         );
 
         assert!(dest.iter().all(|x| x.abs() < 1e-10));
+    }
+
+    #[test]
+    fn vectorize_dual_with_external() {
+        let test = HyperDual::from_values(
+            vec![vec![0], vec![1]],
+            vec![Complex::<Rational>::new_zero(); 2],
+        );
+
+        let mut f = FunctionMap::new();
+        f.add_external_function(symbol!("f"), "f".to_owned())
+            .unwrap();
+        let ev = parse!("f(x + 1)")
+            .evaluator(&f, &[parse!("x")], OptimizationSettings::default())
+            .unwrap();
+
+        let mut vec_ext = HashMap::default();
+        vec_ext.insert(("f".to_owned(), 0), "f0".to_owned());
+        vec_ext.insert(("f".to_owned(), 1), "f1".to_owned());
+
+        let vec_ev = ev
+            .vectorize(&test, vec_ext)
+            .unwrap()
+            .map_coeff(&|c| c.re.to_f64());
+
+        let mut fns: HashMap<String, Box<dyn Fn(&[f64]) -> f64 + Send + Sync>> = HashMap::default();
+        fns.insert("f0".to_owned(), Box::new(|a: &[f64]| a[0]));
+        fns.insert("f1".to_owned(), Box::new(|a: &[f64]| a[1]));
+
+        let mut evr = vec_ev.with_external_functions(fns).unwrap();
+        let mut out = vec![0.; 2];
+        evr.evaluate(&[1., 2.], &mut out);
+        assert_eq!(out, vec![2., 2.]);
     }
 }

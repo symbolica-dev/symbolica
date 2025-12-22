@@ -2176,7 +2176,8 @@ class Expression:
             Print the progress of the optimization.
         external_functions: Optional[dict[Tuple[Expression, str], Callable[[Sequence[float | complex]], float | complex]]]
             A dictionary of external functions that can be called during evaluation.
-            The key is the function name and the value is a callable that takes a list of arguments and returns a float.
+            The key is a tuple of the function symbol and a printable function name. 
+            The value is a callable that takes a list of arguments and returns a float.
             This is useful for functions that are not defined in Symbolica but are available in Python.
         conditionals: Optional[Sequence[Expression]], optional
             A list of conditional functions. These functions should take three argument: a condition that is tested for
@@ -4870,7 +4871,8 @@ class Evaluator:
         yields `[2, 3]`.
         """
 
-    def dualize(self, dual_shape: list[list[int]]) -> None:
+    def dualize(self, dual_shape: list[list[int]], external_functions: Optional[dict[tuple[str, str, int], Callable[[
+            Sequence[float | complex]], float | complex]]] = None) -> None:
         """
         Dualize the evaluator to support hyper-dual numbers with the given shape,
         indicating the number of derivatives in every variable per term.
@@ -4878,6 +4880,11 @@ class Evaluator:
 
         For example, to compute first derivatives in two variables `x` and `y`,
         use `dual_shape = [[0, 0], [1, 0], [0, 1]]`.
+
+        External functions must be mapped to `len(dual_shape)` different functions
+        that compute a single component each. The input to the functions
+        is the flattened vector of all components of all parameters,
+        followed by all previously computed output components.
 
         Examples
         --------
@@ -4887,6 +4894,22 @@ class Evaluator:
         >>> e1.dualize([[0, 0], [1, 0], [0, 1]])
         >>> r = e1.evaluate([[2., 1., 0., 3., 0., 1.]])
         >>> print(r)  # [10, 7, 2]
+
+        Mapping external functions:
+
+        >>> ev = E('f(x + 1)').evaluator({}, {}, [S('x')], external_functions={(S('f'), 'f'): lambda args: args[0]})
+        >>> ev.dualize([[0], [1]], {('f', 'f0', 0): lambda args: args[0], ('f', 'f1', 1): lambda args: args[1]})
+        >>> print(ev.evaluate([[2., 1.]]))  # [[3. 1.]]
+
+        Parameters
+        ----------
+        dual_shape : list[list[int]]
+            The shape of the dual numbers, indicating the number of derivatives
+            in every variable per term.
+        external_functions : Optional[dict[tuple[str, str, int], Callable[[Sequence[float | complex]], float | complex]]]
+            A mapping from external function identifiers to functions that compute a single component each.
+            The key is a tuple of function name, unique printable name, and component index.
+            The value is a function that takes the flattened parameters and returns a component.
         """
 
     @overload
