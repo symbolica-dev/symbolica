@@ -15,9 +15,8 @@ use std::{
 use ahash::{HashMap, HashSet};
 use brotli::CompressorWriter;
 use numpy::{
-    Complex64, IntoPyArray, PyArrayDyn, PyArrayLike1, PyArrayLike2, PyUntypedArrayMethods,
-    TypeMustMatch,
-    ndarray::{ArrayD, Axis},
+    AllowTypeChange, Complex64, IntoPyArray, PyArrayDyn, PyArrayLike1, PyArrayLikeDyn,
+    ndarray::{ArrayD, Axis, CowArray},
 };
 use pyo3::{
     Borrowed, Bound, FromPyObject, IntoPyObject, IntoPyObjectExt, Py, PyAny, PyErr, PyRef,
@@ -9500,7 +9499,7 @@ impl PythonPolynomial {
             type_repr = "numpy.typing.ArrayLike",
             imports = ("numpy.typing",),
         ))]
-        inputs: PyArrayLike1<'py, f64, TypeMustMatch>,
+        inputs: PyArrayLike1<'py, f64, AllowTypeChange>,
     ) -> PyResult<f64> {
         let input = inputs.as_slice().map_err(|e| {
             exceptions::PyValueError::new_err(format!("Could not convert input to slice: {}", e))
@@ -9532,7 +9531,7 @@ impl PythonPolynomial {
             type_repr = "numpy.typing.ArrayLike",
             imports = ("numpy.typing",),
         ))]
-        inputs: PyArrayLike1<'py, Complex64, TypeMustMatch>,
+        inputs: PyArrayLike1<'py, Complex64, AllowTypeChange>,
     ) -> PyResult<Complex64> {
         let input = inputs.as_slice().map_err(|e| {
             exceptions::PyValueError::new_err(format!("Could not convert input to slice: {}", e))
@@ -15721,23 +15720,40 @@ impl PythonExpressionEvaluator {
             type_repr = "numpy.typing.ArrayLike",
             imports = ("numpy.typing",),
         ))]
-        inputs: PyArrayLike2<'py, f64, TypeMustMatch>,
+        inputs: PyArrayLikeDyn<'py, f64, AllowTypeChange>,
         py: Python<'py>,
     ) -> PyResult<Bound<'py, PyArrayDyn<f64>>> {
         let eval = self.eval.as_mut().ok_or(exceptions::PyValueError::new_err(
             "Evaluator contains complex coefficients. Use evaluate_complex_flat instead.",
         ))?;
 
-        let arr = inputs.as_array();
-
-        if inputs.shape()[1] != self.eval_rat.get_input_len() {
-            return Err(exceptions::PyValueError::new_err(format!(
-                "Input length mismatch: expected {}, got {}",
+        let arr = CowArray::from(inputs.as_array());
+        let arr = if arr.shape().len() == 1 {
+            arr.to_shape((
+                arr.len() / self.eval_rat.get_input_len(),
                 self.eval_rat.get_input_len(),
-                inputs.shape()[1]
+            ))
+            .map_err(|_| {
+                exceptions::PyValueError::new_err(format!(
+                    "Failed to reshape input array. Expected (_, {}), but got {:?}",
+                    self.eval_rat.get_input_len(),
+                    arr.shape(),
+                ))
+            })?
+            .into_dyn()
+        } else {
+            arr
+        };
+
+        if arr.shape().len() != 2 || arr.shape()[1] != self.eval_rat.get_input_len() {
+            return Err(exceptions::PyValueError::new_err(format!(
+                "Input length mismatch: expected (_, {}), but got {:?}",
+                self.eval_rat.get_input_len(),
+                arr.shape(),
             )));
         }
-        let n_inputs = inputs.shape()[0];
+
+        let n_inputs = arr.shape()[0];
         let mut out = ArrayD::zeros(&[n_inputs, self.eval_rat.get_output_len()][..]);
         for (i, mut o) in arr.axis_iter(Axis(0)).zip(out.axis_iter_mut(Axis(0))) {
             eval.evaluate(
@@ -15764,18 +15780,35 @@ impl PythonExpressionEvaluator {
             type_repr = "numpy.typing.ArrayLike",
             imports = ("numpy.typing",),
         ))]
-        inputs: PyArrayLike2<'py, Complex64, TypeMustMatch>,
+        inputs: PyArrayLikeDyn<'py, Complex64, AllowTypeChange>,
     ) -> PyResult<Bound<'py, PyArrayDyn<Complex64>>> {
-        let arr = inputs.as_array();
-
-        if inputs.shape()[1] != self.eval_rat.get_input_len() {
-            return Err(exceptions::PyValueError::new_err(format!(
-                "Input length mismatch: expected {}, got {}",
+        let arr = CowArray::from(inputs.as_array());
+        let arr = if arr.shape().len() == 1 {
+            arr.to_shape((
+                arr.len() / self.eval_rat.get_input_len(),
                 self.eval_rat.get_input_len(),
-                inputs.shape()[1]
+            ))
+            .map_err(|_| {
+                exceptions::PyValueError::new_err(format!(
+                    "Failed to reshape input array. Expected (_, {}), but got {:?}",
+                    self.eval_rat.get_input_len(),
+                    arr.shape(),
+                ))
+            })?
+            .into_dyn()
+        } else {
+            arr
+        };
+
+        if arr.shape().len() != 2 || arr.shape()[1] != self.eval_rat.get_input_len() {
+            return Err(exceptions::PyValueError::new_err(format!(
+                "Input length mismatch: expected (_, {}), but got {:?}",
+                self.eval_rat.get_input_len(),
+                arr.shape(),
             )));
         }
-        let n_inputs = inputs.shape()[0];
+
+        let n_inputs = arr.shape()[0];
         let mut out = ArrayD::zeros(&[n_inputs, self.eval_rat.get_output_len()][..]);
         for (i, mut o) in arr.axis_iter(Axis(0)).zip(out.axis_iter_mut(Axis(0))) {
             let sc = unsafe {
@@ -16819,19 +16852,33 @@ impl PythonCompiledRealExpressionEvaluator {
             type_repr = "numpy.typing.ArrayLike",
             imports = ("numpy.typing",),
         ))]
-        inputs: PyArrayLike2<'py, f64, TypeMustMatch>,
+        inputs: PyArrayLikeDyn<'py, f64, AllowTypeChange>,
         py: Python<'py>,
     ) -> PyResult<Bound<'py, PyArrayDyn<f64>>> {
-        let arr = inputs.as_array();
+        let arr = CowArray::from(inputs.as_array());
+        let arr = if arr.shape().len() == 1 {
+            arr.to_shape((arr.len() / self.input_len, self.input_len))
+                .map_err(|_| {
+                    exceptions::PyValueError::new_err(format!(
+                        "Failed to reshape input array. Expected (_, {}), but got {:?}",
+                        self.input_len,
+                        arr.shape(),
+                    ))
+                })?
+                .into_dyn()
+        } else {
+            arr
+        };
 
-        if inputs.shape()[1] != self.input_len {
+        if arr.shape().len() != 2 || arr.shape()[1] != self.input_len {
             return Err(exceptions::PyValueError::new_err(format!(
-                "Input length mismatch: expected {}, got {}",
+                "Input length mismatch: expected (_, {}), but got {:?}",
                 self.input_len,
-                inputs.shape()[1]
+                arr.shape(),
             )));
         }
-        let n_inputs = inputs.shape()[0];
+
+        let n_inputs = arr.shape()[0];
         let mut out = ArrayD::zeros(&[n_inputs, self.output_len][..]);
         for (i, mut o) in arr.axis_iter(Axis(0)).zip(out.axis_iter_mut(Axis(0))) {
             self.eval.evaluate(
@@ -16888,19 +16935,33 @@ impl PythonCompiledSimdRealExpressionEvaluator {
             type_repr = "numpy.typing.ArrayLike",
             imports = ("numpy.typing",),
         ))]
-        inputs: PyArrayLike2<'py, f64, TypeMustMatch>,
+        inputs: PyArrayLikeDyn<'py, f64, AllowTypeChange>,
         py: Python<'py>,
     ) -> PyResult<Bound<'py, PyArrayDyn<f64>>> {
-        let arr = inputs.as_array();
+        let arr = CowArray::from(inputs.as_array());
+        let arr = if arr.shape().len() == 1 {
+            arr.to_shape((arr.len() / self.input_len, self.input_len))
+                .map_err(|_| {
+                    exceptions::PyValueError::new_err(format!(
+                        "Failed to reshape input array. Expected (_, {}), but got {:?}",
+                        self.input_len,
+                        arr.shape(),
+                    ))
+                })?
+                .into_dyn()
+        } else {
+            arr
+        };
 
-        if inputs.shape()[1] != self.input_len {
+        if arr.shape().len() != 2 || arr.shape()[1] != self.input_len {
             return Err(exceptions::PyValueError::new_err(format!(
-                "Input length mismatch: expected {}, got {}",
+                "Input length mismatch: expected (_, {}), but got {:?}",
                 self.input_len,
-                inputs.shape()[1]
+                arr.shape(),
             )));
         }
-        let n_inputs = inputs.shape()[0];
+
+        let n_inputs = arr.shape()[0];
         let mut out = ArrayD::zeros(&[n_inputs, self.output_len][..]);
 
         self.eval
@@ -16970,19 +17031,33 @@ impl PythonCompiledCudaRealExpressionEvaluator {
             type_repr = "numpy.typing.ArrayLike",
             imports = ("numpy.typing",),
         ))]
-        inputs: PyArrayLike2<'py, f64, TypeMustMatch>,
+        inputs: PyArrayLikeDyn<'py, f64, AllowTypeChange>,
         py: Python<'py>,
     ) -> PyResult<Bound<'py, PyArrayDyn<f64>>> {
-        let arr = inputs.as_array();
+        let arr = CowArray::from(inputs.as_array());
+        let arr = if arr.shape().len() == 1 {
+            arr.to_shape((arr.len() / self.input_len, self.input_len))
+                .map_err(|_| {
+                    exceptions::PyValueError::new_err(format!(
+                        "Failed to reshape input array. Expected (_, {}), but got {:?}",
+                        self.input_len,
+                        arr.shape(),
+                    ))
+                })?
+                .into_dyn()
+        } else {
+            arr
+        };
 
-        if inputs.shape()[1] != self.input_len {
+        if arr.shape().len() != 2 || arr.shape()[1] != self.input_len {
             return Err(exceptions::PyValueError::new_err(format!(
-                "Input length mismatch: expected {}, got {}",
+                "Input length mismatch: expected (_, {}), but got {:?}",
                 self.input_len,
-                inputs.shape()[1]
+                arr.shape(),
             )));
         }
-        let n_inputs = inputs.shape()[0];
+
+        let n_inputs = arr.shape()[0];
         let mut out = ArrayD::zeros(&[n_inputs, self.output_len][..]);
 
         self.eval
@@ -17051,19 +17126,33 @@ impl PythonCompiledCudaComplexExpressionEvaluator {
             type_repr = "numpy.typing.ArrayLike",
             imports = ("numpy.typing",),
         ))]
-        inputs: PyArrayLike2<'py, Complex64, TypeMustMatch>,
+        inputs: PyArrayLikeDyn<'py, Complex64, AllowTypeChange>,
         py: Python<'py>,
     ) -> PyResult<Bound<'py, PyArrayDyn<Complex64>>> {
-        let arr = inputs.as_array();
+        let arr = CowArray::from(inputs.as_array());
+        let arr = if arr.shape().len() == 1 {
+            arr.to_shape((arr.len() / self.input_len, self.input_len))
+                .map_err(|_| {
+                    exceptions::PyValueError::new_err(format!(
+                        "Failed to reshape input array. Expected (_, {}), but got {:?}",
+                        self.input_len,
+                        arr.shape(),
+                    ))
+                })?
+                .into_dyn()
+        } else {
+            arr
+        };
 
-        if inputs.shape()[1] != self.input_len {
+        if arr.shape().len() != 2 || arr.shape()[1] != self.input_len {
             return Err(exceptions::PyValueError::new_err(format!(
-                "Input length mismatch: expected {}, got {}",
+                "Input length mismatch: expected (_, {}), but got {:?}",
                 self.input_len,
-                inputs.shape()[1]
+                arr.shape(),
             )));
         }
-        let n_inputs = inputs.shape()[0];
+
+        let n_inputs = arr.shape()[0];
         let mut out = ArrayD::zeros(&[n_inputs, self.output_len][..]);
 
         let sc = unsafe {
@@ -17127,19 +17216,33 @@ impl PythonCompiledComplexExpressionEvaluator {
             type_repr = "numpy.typing.ArrayLike",
             imports = ("numpy.typing",),
         ))]
-        inputs: PyArrayLike2<'py, Complex64, TypeMustMatch>,
+        inputs: PyArrayLikeDyn<'py, Complex64, AllowTypeChange>,
         py: Python<'py>,
     ) -> PyResult<Bound<'py, PyArrayDyn<Complex64>>> {
-        let arr = inputs.as_array();
+        let arr = CowArray::from(inputs.as_array());
+        let arr = if arr.shape().len() == 1 {
+            arr.to_shape((arr.len() / self.input_len, self.input_len))
+                .map_err(|_| {
+                    exceptions::PyValueError::new_err(format!(
+                        "Failed to reshape input array. Expected (_, {}), but got {:?}",
+                        self.input_len,
+                        arr.shape(),
+                    ))
+                })?
+                .into_dyn()
+        } else {
+            arr
+        };
 
-        if inputs.shape()[1] != self.input_len {
+        if arr.shape().len() != 2 || arr.shape()[1] != self.input_len {
             return Err(exceptions::PyValueError::new_err(format!(
-                "Input length mismatch: expected {}, got {}",
+                "Input length mismatch: expected (_, {}), but got {:?}",
                 self.input_len,
-                inputs.shape()[1]
+                arr.shape(),
             )));
         }
-        let n_inputs = inputs.shape()[0];
+
+        let n_inputs = arr.shape()[0];
         let mut out = ArrayD::zeros(&[n_inputs, self.output_len][..]);
         for (i, mut o) in arr.axis_iter(Axis(0)).zip(out.axis_iter_mut(Axis(0))) {
             let sc = unsafe {
@@ -17200,19 +17303,33 @@ impl PythonCompiledSimdComplexExpressionEvaluator {
             type_repr = "numpy.typing.ArrayLike",
             imports = ("numpy.typing",),
         ))]
-        inputs: PyArrayLike2<'py, Complex64, TypeMustMatch>,
+        inputs: PyArrayLikeDyn<'py, Complex64, AllowTypeChange>,
         py: Python<'py>,
     ) -> PyResult<Bound<'py, PyArrayDyn<Complex64>>> {
-        let arr = inputs.as_array();
+        let arr = CowArray::from(inputs.as_array());
+        let arr = if arr.shape().len() == 1 {
+            arr.to_shape((arr.len() / self.input_len, self.input_len))
+                .map_err(|_| {
+                    exceptions::PyValueError::new_err(format!(
+                        "Failed to reshape input array. Expected (_, {}), but got {:?}",
+                        self.input_len,
+                        arr.shape(),
+                    ))
+                })?
+                .into_dyn()
+        } else {
+            arr
+        };
 
-        if inputs.shape()[1] != self.input_len {
+        if arr.shape().len() != 2 || arr.shape()[1] != self.input_len {
             return Err(exceptions::PyValueError::new_err(format!(
-                "Input length mismatch: expected {}, got {}",
+                "Input length mismatch: expected (_, {}), but got {:?}",
                 self.input_len,
-                inputs.shape()[1]
+                arr.shape(),
             )));
         }
-        let n_inputs = inputs.shape()[0];
+
+        let n_inputs = arr.shape()[0];
         let mut out = ArrayD::zeros(&[n_inputs, self.output_len][..]);
 
         let sc = unsafe {
