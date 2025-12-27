@@ -23,7 +23,7 @@ use dyn_clone::DynClone;
 
 use crate::{
     atom::{
-        Atom, AtomCore, AtomType, AtomView, Indeterminate, Num, SliceType, Symbol,
+        Atom, AtomCore, AtomType, AtomView, Indeterminate, SliceType, Symbol,
         representation::{InlineVar, ListSlice},
     },
     coefficient::{Coefficient, CoefficientView},
@@ -604,9 +604,11 @@ impl<'a> AtomView<'a> {
                 // base negative is also possible if exp is an even integer
                 if let AtomView::Num(_) = exp
                     && let Ok(k) = Rational::try_from(exp)
-                        && k.is_integer() && k.numerator_ref() % 2 == 0 {
-                            return base.is_real();
-                        }
+                    && k.is_integer()
+                    && k.numerator_ref() % 2 == 0
+                {
+                    return base.is_real();
+                }
 
                 base.is_positive()
             }
@@ -884,9 +886,10 @@ impl<'a> AtomView<'a> {
         let mut has_complex_coefficient = false;
         self.visitor(&mut |a| {
             if let AtomView::Num(n) = a
-                && !n.get_coeff_view().is_real() {
-                    has_complex_coefficient = true;
-                }
+                && !n.get_coeff_view().is_real()
+            {
+                has_complex_coefficient = true;
+            }
             !has_complex_coefficient
         });
 
@@ -1019,15 +1022,14 @@ impl<'a> AtomView<'a> {
             }
             AtomView::Mul(mul_view) => {
                 for child in mul_view {
-                    if !allow_not_expanded
-                        && let AtomView::Add(_) = child {
-                            if variables.get(&child) == Some(&true) {
-                                continue;
-                            }
-
-                            block_check!(&child);
+                    if !allow_not_expanded && let AtomView::Add(_) = child {
+                        if variables.get(&child) == Some(&true) {
                             continue;
                         }
+
+                        block_check!(&child);
+                        continue;
+                    }
 
                     if !child.is_polynomial_impl(
                         allow_not_expanded,
@@ -1262,9 +1264,9 @@ impl<'a> AtomView<'a> {
             if let Some(max_level) = settings.level_range.1
                 && (settings.level_is_tree_depth && tree_level > max_level
                     || !settings.level_is_tree_depth && fn_level > max_level)
-                {
-                    continue;
-                }
+            {
+                continue;
+            }
 
             beyond_max_level = false;
 
@@ -1584,19 +1586,20 @@ impl Pattern {
 
     pub fn add(&self, rhs: &Self, workspace: &Workspace) -> Self {
         if let Pattern::Literal(l1) = self
-            && let Pattern::Literal(l2) = rhs {
-                // create new literal
-                let mut e = workspace.new_atom();
-                let a = e.to_add();
+            && let Pattern::Literal(l2) = rhs
+        {
+            // create new literal
+            let mut e = workspace.new_atom();
+            let a = e.to_add();
 
-                a.extend(l1.as_view());
-                a.extend(l2.as_view());
+            a.extend(l1.as_view());
+            a.extend(l2.as_view());
 
-                let mut b = Atom::default();
-                e.as_view().normalize(workspace, &mut b);
+            let mut b = Atom::default();
+            e.as_view().normalize(workspace, &mut b);
 
-                return Pattern::Literal(b);
-            }
+            return Pattern::Literal(b);
+        }
 
         let mut new_args = vec![];
         if let Pattern::Add(l1) = self {
@@ -1616,18 +1619,19 @@ impl Pattern {
 
     pub fn mul(&self, rhs: &Self, workspace: &Workspace) -> Self {
         if let Pattern::Literal(l1) = self
-            && let Pattern::Literal(l2) = rhs {
-                let mut e = workspace.new_atom();
-                let a = e.to_mul();
+            && let Pattern::Literal(l2) = rhs
+        {
+            let mut e = workspace.new_atom();
+            let a = e.to_mul();
 
-                a.extend(l1.as_view());
-                a.extend(l2.as_view());
+            a.extend(l1.as_view());
+            a.extend(l2.as_view());
 
-                let mut b = Atom::default();
-                e.as_view().normalize(workspace, &mut b);
+            let mut b = Atom::default();
+            e.as_view().normalize(workspace, &mut b);
 
-                return Pattern::Literal(b);
-            }
+            return Pattern::Literal(b);
+        }
 
         let mut new_args = vec![];
         if let Pattern::Mul(l1) = self {
@@ -1676,12 +1680,7 @@ impl Pattern {
                 _ => Pattern::Mul(vec![self.clone(), Pattern::Literal(b)]),
             }
         } else {
-            let exp = Num::new((-1).into()).into();
-
-            let rhs = Pattern::Mul(vec![
-                self.clone(),
-                Pattern::Pow(Box::new([rhs.clone(), Pattern::Literal(exp)])),
-            ]);
+            let rhs = Pattern::Pow(Box::new([rhs.clone(), Pattern::Literal(Atom::num(-1))]));
 
             match self {
                 Pattern::Mul(m) => {
@@ -1696,15 +1695,16 @@ impl Pattern {
 
     pub fn pow(&self, rhs: &Self, workspace: &Workspace) -> Self {
         if let Pattern::Literal(l1) = self
-            && let Pattern::Literal(l2) = rhs {
-                let mut e = workspace.new_atom();
-                e.to_pow(l1.as_view(), l2.as_view());
+            && let Pattern::Literal(l2) = rhs
+        {
+            let mut e = workspace.new_atom();
+            e.to_pow(l1.as_view(), l2.as_view());
 
-                let mut b = Atom::default();
-                e.as_view().normalize(workspace, &mut b);
+            let mut b = Atom::default();
+            e.as_view().normalize(workspace, &mut b);
 
-                return Pattern::Literal(b);
-            }
+            return Pattern::Literal(b);
+        }
 
         Pattern::Pow(Box::new([self.clone(), rhs.clone()]))
     }
@@ -1725,10 +1725,8 @@ impl Pattern {
 
             Pattern::Literal(b)
         } else {
-            let sign = Num::new((-1).into()).into();
-
             // TODO: simplify if a literal is already present
-            Pattern::Mul(vec![self.clone(), Pattern::Literal(sign)])
+            Pattern::Mul(vec![self.clone(), Pattern::Literal(Atom::num(-1))])
         }
     }
 }
@@ -3441,9 +3439,10 @@ impl<'a, 'b> AtomMatchIterator<'a, 'b> {
                     }
                 }
             } else if let Pattern::Literal(w) = self.pattern
-                && w.as_view() == self.target {
-                    return Some((match_stack.len(), &[]));
-                }
+                && w.as_view() == self.target
+            {
+                return Some((match_stack.len(), &[]));
+            }
             // TODO: also do type matches, Fn Fn, etc?
         }
 
@@ -4183,9 +4182,10 @@ impl<'a> Iterator for AtomTreeIterator<'a> {
     fn next(&mut self) -> Option<Self::Item> {
         while let Some((ind, level, atom)) = self.stack.pop() {
             if let Some(max_level) = self.settings.level_range.1
-                && level > max_level {
-                    continue;
-                }
+                && level > max_level
+            {
+                continue;
+            }
 
             if let Some(ind) = ind {
                 let slice = match atom {
