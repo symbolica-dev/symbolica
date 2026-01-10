@@ -1576,6 +1576,26 @@ pub struct PowView<'a> {
     data: &'a [u8],
 }
 
+impl<'a> IntoIterator for PowView<'a> {
+    type Item = AtomView<'a>;
+    type IntoIter = ListIterator<'a>;
+
+    #[inline]
+    fn into_iter(self) -> Self::IntoIter {
+        self.iter()
+    }
+}
+
+impl<'a> IntoIterator for &PowView<'a> {
+    type Item = AtomView<'a>;
+    type IntoIter = ListIterator<'a>;
+
+    #[inline]
+    fn into_iter(self) -> Self::IntoIter {
+        self.iter()
+    }
+}
+
 impl<'b> PartialEq<PowView<'b>> for PowView<'_> {
     #[inline]
     fn eq(&self, other: &PowView<'b>) -> bool {
@@ -1620,12 +1640,17 @@ impl<'a> PowView<'a> {
 
     #[inline]
     pub fn get_base_exp(&self) -> (AtomView<'a>, AtomView<'a>) {
-        let mut it = ListIterator {
-            data: &self.data[1..],
-            length: 2,
-        };
+        let mut it = self.iter();
 
         (it.next().unwrap(), it.next().unwrap())
+    }
+
+    #[inline]
+    pub fn iter(&self) -> ListIterator<'a> {
+        ListIterator {
+            data: &self.data[1..],
+            length: 2,
+        }
     }
 
     #[inline]

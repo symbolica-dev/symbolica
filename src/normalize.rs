@@ -559,7 +559,8 @@ impl Atom {
 
                     let len = slice.len();
 
-                    if new_coeff == 1.into() {
+                    // strip coefficient if it is 1 (can be float)
+                    if new_coeff.is_one() {
                         assert!(has_coeff);
 
                         if len == 2 {
@@ -1597,7 +1598,10 @@ impl AtomView<'_> {
                                         a.extend(b.as_view());
                                     }
                                 } else {
-                                    unreachable!("Equal terms do not merge:{}\n{}", ss, tt);
+                                    unreachable!(
+                                        "Equal terms do not merge:\n{}\n{}\n{:#?}\n{:#?}",
+                                        ss, tt, ss, tt
+                                    );
                                 }
 
                                 curst = t.next();
@@ -1664,7 +1668,10 @@ impl AtomView<'_> {
                                     a.extend(b.as_view());
                                 }
                             } else {
-                                unreachable!("Equal terms do not merge");
+                                unreachable!(
+                                    "Equal terms do not merge:\n{}\n{}\n{:#?}\n{:#?}",
+                                    x, rhs, x, rhs
+                                );
                             }
                         }
                         Ordering::Greater => {
@@ -1696,7 +1703,10 @@ impl AtomView<'_> {
                                 a.extend(b.as_view());
                             }
                         } else {
-                            unreachable!("Equal terms do not merge");
+                            unreachable!(
+                                "Equal terms do not merge:\n{}\n{}\n{:#?}\n{:#?}",
+                                b, rhs, b, rhs
+                            );
                         }
 
                         for x in v.iter().skip(p + 1) {
