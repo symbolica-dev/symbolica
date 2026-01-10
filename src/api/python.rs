@@ -5465,7 +5465,7 @@ impl PythonExpression {
         })
     }
 
-    /// Create an iterator over all atoms in the expression.
+    /// Create an iterator over all sub-atoms in the expression.
     fn __iter__(&self) -> PyResult<PythonAtomIterator> {
         match self.expr.as_view() {
             AtomView::Add(_) | AtomView::Mul(_) | AtomView::Fun(_) | AtomView::Pow(_) => {}
@@ -8584,6 +8584,7 @@ impl PythonAtomIterator {
             AtomView::Add(a) => a.iter(),
             AtomView::Mul(m) => m.iter(),
             AtomView::Fun(f) => f.iter(),
+            AtomView::Pow(p) => p.iter(),
             _ => unreachable!(),
         })
     }

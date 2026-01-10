@@ -1430,7 +1430,7 @@ class Expression:
 
     def __iter__(self) -> Iterator[Expression]:
         """
-        Create an iterator over all atoms in the expression.
+        Create an iterator over all subexpressions of the expression.
         """
 
     def __getitem__(self, idx: int) -> Expression:
