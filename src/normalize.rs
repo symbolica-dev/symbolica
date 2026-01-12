@@ -53,7 +53,10 @@ impl AtomView<'_> {
                     }
                 }
 
-                Ordering::Equal
+                unreachable!(
+                    "Expression is equal but not binary equal: {};\n{:?}\n{:?}",
+                    self, m1, m2
+                );
             }
             (AtomView::Mul(_), _) => Ordering::Less,
             (_, AtomView::Mul(_)) => Ordering::Greater,
@@ -73,7 +76,10 @@ impl AtomView<'_> {
                     }
                 }
 
-                Ordering::Equal
+                unreachable!(
+                    "Expression is equal but not binary equal: {};\n{:?}\n{:?}",
+                    self, a1, a2
+                );
             }
             (AtomView::Add(_), _) => Ordering::Less,
             (_, AtomView::Add(_)) => Ordering::Greater,
@@ -97,7 +103,10 @@ impl AtomView<'_> {
                         }
                     }
 
-                    Ordering::Equal
+                    unreachable!(
+                        "Expression is equal but not binary equal: {};\n{:?}\n{:?}",
+                        self, f1, f2
+                    );
                 } else {
                     f1.fast_cmp(*f2)
                 }
@@ -212,14 +221,7 @@ impl AtomView<'_> {
                     return len_cmp;
                 }
 
-                for (t1, t2) in m1.iter().zip(m2.iter()) {
-                    if let AtomView::Num(_) = t1 {
-                        break;
-                    }
-                    if let AtomView::Num(_) = t2 {
-                        break;
-                    }
-
+                for (t1, t2) in m1.iter().zip(m2.iter()).take(actual_len1) {
                     let argcmp = t1.cmp(&t2);
                     if argcmp != Ordering::Equal {
                         return argcmp;

@@ -13,7 +13,7 @@ name = "symbolica"
 readme = "Readme.md"
 repository = "https://github.com/symbolica-dev/symbolica"
 rust-version = "1.88"
-version = "1.2.1"
+version = "1.2.2"
 
 [package.metadata.docs.rs]
 features = ["python_export", "serde", "bincode", "python_stubgen"]
@@ -71,7 +71,7 @@ optional = true
 version = "0.27"
 
 [dependencies]
-numerica = "1.1"
+numerica = "1.1.1"
 graphica = "1.1"
 
 ahash = "0.8.7"
