@@ -2,7 +2,7 @@
 name = "numerica"
 authors = ["Ben Ruijl <ben@symbolica.io>"]
 keywords = ["algebra", "mathematics", "integer", "float", "rational"]
-version = "1.1.0"
+version = "1.1.1"
 edition = "2024"
 license = "MIT"
 description = "Open-source math library for exact and floating point computations"

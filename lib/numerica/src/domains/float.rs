@@ -1923,7 +1923,12 @@ impl Float {
     }
 
     pub fn serialize(&self) -> Vec<u8> {
-        self.0.to_string_radix(16, None).into_bytes()
+        if self.0 == 0 {
+            // serialize 0 and -0 as '0'
+            vec![48]
+        } else {
+            self.0.to_string_radix(16, None).into_bytes()
+        }
     }
 
     pub fn deserialize(d: &[u8], prec: u32) -> Float {
