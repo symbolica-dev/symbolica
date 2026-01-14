@@ -55,6 +55,31 @@ const U16_NUM_U64_DEN: u8 = U16_NUM | U64_DEN;
 const U32_NUM_U64_DEN: u8 = U32_NUM | U64_DEN;
 const U64_NUM_U64_DEN: u8 = U64_NUM | U64_DEN;
 
+const SKIP_TABLE: [u8; (NUM_MASK | DEN_MASK) as usize + 1] = {
+    let mut dest = [0u8; (NUM_MASK | DEN_MASK) as usize + 1];
+    dest[U8_NUM as usize] = 1;
+    dest[U16_NUM as usize] = 2;
+    dest[U8_NUM_U8_DEN as usize] = 2;
+    dest[U16_NUM_U8_DEN as usize] = 3;
+    dest[U8_NUM_U16_DEN as usize] = 3;
+    dest[U32_NUM as usize] = 4;
+    dest[U16_NUM_U16_DEN as usize] = 4;
+    dest[U32_NUM_U8_DEN as usize] = 5;
+    dest[U8_NUM_U32_DEN as usize] = 5;
+    dest[U32_NUM_U16_DEN as usize] = 6;
+    dest[U16_NUM_U32_DEN as usize] = 6;
+    dest[U64_NUM as usize] = 8;
+    dest[U32_NUM_U32_DEN as usize] = 8;
+    dest[U64_NUM_U8_DEN as usize] = 9;
+    dest[U8_NUM_U64_DEN as usize] = 9;
+    dest[U64_NUM_U16_DEN as usize] = 10;
+    dest[U16_NUM_U64_DEN as usize] = 10;
+    dest[U64_NUM_U32_DEN as usize] = 12;
+    dest[U32_NUM_U64_DEN as usize] = 12;
+    dest[U64_NUM_U64_DEN as usize] = 16;
+    dest
+};
+
 #[inline(always)]
 const fn get_size_of_natural(num_type: u8) -> u8 {
     match num_type {
@@ -648,75 +673,43 @@ impl PackedRationalNumberReader for [u8] {
     #[inline(always)]
     fn skip_rational(&self) -> &[u8] {
         let mut dest = self;
-        let disc = dest.get_u8();
+        let disc = dest.get_u8() & (NUM_MASK | DEN_MASK);
 
-        match disc & (NUM_MASK | DEN_MASK) {
-            U8_NUM => {
-                dest.advance(1);
-            }
-            U16_NUM | U8_NUM_U8_DEN => {
-                dest.advance(2);
-            }
-            U16_NUM_U8_DEN | U8_NUM_U16_DEN => {
-                dest.advance(3);
-            }
-            U32_NUM | U16_NUM_U16_DEN => {
-                dest.advance(4);
-            }
-            U32_NUM_U8_DEN | U8_NUM_U32_DEN => {
-                dest.advance(5);
-            }
-            U32_NUM_U16_DEN | U16_NUM_U32_DEN => {
-                dest.advance(6);
-            }
-            U64_NUM | U32_NUM_U32_DEN => {
-                dest.advance(8);
-            }
-            U64_NUM_U8_DEN | U8_NUM_U64_DEN => {
-                dest.advance(9);
-            }
-            U64_NUM_U16_DEN | U16_NUM_U64_DEN => {
-                dest.advance(10);
-            }
-            U64_NUM_U32_DEN | U32_NUM_U64_DEN => {
-                dest.advance(12);
-            }
-            U64_NUM_U64_DEN => {
-                dest.advance(16);
-            }
-            x => {
-                let v_num = x & NUM_MASK;
-                if v_num == COMPLEX {
-                    dest = dest.skip_rational();
-                    dest = dest.skip_rational();
-                } else if v_num == ARB_NUM {
-                    let (num_size, den_size);
-                    (num_size, den_size, dest) = dest.get_frac_i64();
-                    let num_size = num_size.unsigned_abs() as usize;
-                    let den_size = den_size.unsigned_abs() as usize;
-                    dest.advance(num_size + den_size);
-                } else if v_num == RAT_POLY {
-                    let size = dest.get_u32_le() as usize;
-                    dest.advance(size);
-                } else if v_num == FIN_NUM {
-                    let var_size = dest.get_u8();
-                    let size = get_size_of_natural(var_size & NUM_MASK)
-                        + get_size_of_natural((var_size & DEN_MASK) >> 4);
-                    dest.advance(size as usize);
-                } else if v_num == FLOAT {
-                    let size = dest.get_u64_le() as usize;
-                    dest.advance(size);
-                    let size = dest.get_u64_le() as usize;
-                    dest.advance(size);
-                } else if v_num == INDETERMINATE || v_num == COMPLEX_INFINITY {
-                    // nothing to do
-                } else if v_num == DIRECTED_INFINITY {
-                    dest = dest.skip_rational();
-                    dest = dest.skip_rational();
-                } else {
-                    unreachable!("Unsupported numerator/denominator type {}", disc)
-                }
-            }
+        let d = unsafe { *SKIP_TABLE.get_unchecked(disc as usize) };
+        if d != 0 {
+            return unsafe { dest.get_unchecked(d as usize..) };
+        }
+
+        let v_num = disc & NUM_MASK;
+        if v_num == COMPLEX {
+            dest = dest.skip_rational();
+            dest = dest.skip_rational();
+        } else if v_num == ARB_NUM {
+            let (num_size, den_size);
+            (num_size, den_size, dest) = dest.get_frac_i64();
+            let num_size = num_size.unsigned_abs() as usize;
+            let den_size = den_size.unsigned_abs() as usize;
+            dest.advance(num_size + den_size);
+        } else if v_num == RAT_POLY {
+            let size = dest.get_u32_le() as usize;
+            dest.advance(size);
+        } else if v_num == FIN_NUM {
+            let var_size = dest.get_u8();
+            let size = get_size_of_natural(var_size & NUM_MASK)
+                + get_size_of_natural((var_size & DEN_MASK) >> 4);
+            dest.advance(size as usize);
+        } else if v_num == FLOAT {
+            let size = dest.get_u64_le() as usize;
+            dest.advance(size);
+            let size = dest.get_u64_le() as usize;
+            dest.advance(size);
+        } else if v_num == INDETERMINATE || v_num == COMPLEX_INFINITY {
+            // nothing to do
+        } else if v_num == DIRECTED_INFINITY {
+            dest = dest.skip_rational();
+            dest = dest.skip_rational();
+        } else {
+            unreachable!("Unsupported numerator/denominator type {}", disc)
         }
 
         dest

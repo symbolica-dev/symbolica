@@ -566,6 +566,7 @@ impl<'a> AtomView<'a> {
     }
 
     /// Test if the attributes and tags of `s` are shared by `self`.
+    #[inline]
     pub fn has_attributes_of(&self, s: Symbol) -> bool {
         if let Some(ss) = self.get_symbol() {
             return ss.has_attributes_of(s);
@@ -1106,10 +1107,9 @@ impl<'a> AtomView<'a> {
                 context.parent_type = Some(AtomType::Fun);
                 context.function_level += 1;
 
+                let mut arg_h = ws.new_atom();
                 for (i, arg) in f.iter().enumerate() {
                     context.index = i;
-
-                    let mut arg_h = ws.new_atom();
                     changed |= arg.replace_map_impl(ws, m, context, &mut arg_h);
                     fun.add_arg(arg_h.as_view());
                 }
@@ -1147,9 +1147,9 @@ impl<'a> AtomView<'a> {
 
                 context.parent_type = Some(AtomType::Mul);
 
+                let mut child_h = ws.new_atom();
                 for (i, child) in mm.iter().enumerate() {
                     context.index = i;
-                    let mut child_h = ws.new_atom();
                     changed |= child.replace_map_impl(ws, m, context, &mut child_h);
                     mul.extend(child_h.as_view());
                 }
@@ -1166,9 +1166,9 @@ impl<'a> AtomView<'a> {
 
                 context.parent_type = Some(AtomType::Add);
 
+                let mut child_h = ws.new_atom();
                 for (i, child) in a.iter().enumerate() {
                     context.index = i;
-                    let mut child_h = ws.new_atom();
                     changed |= child.replace_map_impl(ws, m, context, &mut child_h);
                     add.extend(child_h.as_view());
                 }
@@ -1221,15 +1221,18 @@ impl<'a> AtomView<'a> {
     ) -> bool {
         Workspace::get_local().with(|ws| {
             let mut rhs_cache = HashMap::default();
-            let matched = self.replace_no_norm(replacements, ws, 0, 0, &mut rhs_cache, out);
+            let mut set = Settable::from(&mut *out);
+            self.replace_no_norm(replacements, ws, 0, 0, &mut rhs_cache, &mut set);
 
-            if matched {
+            if set.is_set() {
                 let mut norm = ws.new_atom();
-                out.as_view().normalize(ws, &mut norm);
+                set.as_view().normalize(ws, &mut norm);
                 std::mem::swap(out, &mut norm);
+                true
+            } else {
+                out.set_from_view(self);
+                false
             }
-
-            matched
         })
     }
 
@@ -1241,8 +1244,8 @@ impl<'a> AtomView<'a> {
         tree_level: usize,
         fn_level: usize,
         rhs_cache: &mut HashMap<(usize, Vec<(Symbol, Match<'a>)>), Atom>,
-        out: &mut Atom,
-    ) -> bool {
+        out: &mut Settable<Atom>,
+    ) {
         let mut beyond_max_level = true;
         let mut fits = false;
         for (rep_id, r) in replacements.iter().enumerate() {
@@ -1330,7 +1333,7 @@ impl<'a> AtomView<'a> {
                     if used_flags.iter().all(|x| *x) {
                         // all used, return rhs
                         out.set_from_view(&rhs_subs.as_view());
-                        return true;
+                        return;
                     }
 
                     match self {
@@ -1361,112 +1364,151 @@ impl<'a> AtomView<'a> {
                         }
                     }
 
-                    return true;
+                    return;
                 }
             }
         }
 
         if beyond_max_level || !fits {
-            out.set_from_view(self);
-            return false;
+            return;
         }
 
         // no match found at this level, so check the children
         match self {
             AtomView::Fun(f) => {
-                let out = out.to_fun(f.get_symbol());
-
-                let mut submatch = false;
+                let mut fun = None;
 
                 let mut child_buf = workspace.new_atom();
-                for child in f {
-                    submatch |= child.replace_no_norm(
+                for (i, arg) in f.iter().enumerate() {
+                    let mut set = Settable::from(child_buf.deref_mut());
+                    arg.replace_no_norm(
                         replacements,
                         workspace,
                         tree_level + 1,
                         fn_level + 1,
                         rhs_cache,
-                        &mut child_buf,
+                        &mut set,
                     );
 
-                    out.add_arg(child_buf.as_view());
-                }
+                    if fun.is_none() && set.is_set() {
+                        let fun_o = out.to_fun(f.get_symbol());
+                        for child in f.iter().take(i) {
+                            fun_o.add_arg(child);
+                        }
 
-                out.set_normalized(!submatch && f.is_normalized());
-                submatch
+                        fun_o.add_arg(set.as_view());
+                        fun = Some(fun_o);
+                    } else if let Some(fun) = &mut fun {
+                        if set.is_set() {
+                            fun.add_arg(set.as_view());
+                        } else {
+                            fun.add_arg(arg);
+                        }
+                    }
+                }
             }
             AtomView::Pow(p) => {
                 let (base, exp) = p.get_base_exp();
 
                 let mut base_out = workspace.new_atom();
-                let mut submatch = base.replace_no_norm(
+                let mut base_set = Settable::from(base_out.deref_mut());
+                base.replace_no_norm(
                     replacements,
                     workspace,
                     tree_level + 1,
                     fn_level,
                     rhs_cache,
-                    &mut base_out,
+                    &mut base_set,
                 );
 
                 let mut exp_out = workspace.new_atom();
-                submatch |= exp.replace_no_norm(
+                let mut exp_set = Settable::from(exp_out.deref_mut());
+                exp.replace_no_norm(
                     replacements,
                     workspace,
                     tree_level + 1,
                     fn_level,
                     rhs_cache,
-                    &mut exp_out,
+                    &mut exp_set,
                 );
 
-                let out = out.to_pow(base_out.as_view(), exp_out.as_view());
-                out.set_normalized(!submatch && p.is_normalized());
-                submatch
+                if base_set.is_set() && exp_set.is_set() {
+                    out.to_pow(base_set.as_view(), exp_set.as_view());
+                } else if base_set.is_set() {
+                    out.to_pow(base_set.as_view(), exp);
+                } else if exp_set.is_set() {
+                    out.to_pow(base, exp_set.as_view());
+                }
             }
             AtomView::Mul(m) => {
-                let mul = out.to_mul();
+                let mut mul = None;
 
-                let mut submatch = false;
                 let mut child_buf = workspace.new_atom();
-                for child in m {
-                    submatch |= child.replace_no_norm(
+                for (i, child) in m.iter().enumerate() {
+                    let mut set = Settable::from(child_buf.deref_mut());
+                    child.replace_no_norm(
                         replacements,
                         workspace,
                         tree_level + 1,
                         fn_level,
                         rhs_cache,
-                        &mut child_buf,
+                        &mut set,
                     );
 
-                    mul.extend(child_buf.as_view());
+                    if mul.is_none() && set.is_set() {
+                        let mul_o = out.to_mul();
+
+                        for child in m.iter().take(i) {
+                            mul_o.extend(child);
+                        }
+                        mul_o.extend(set.as_view());
+                        mul = Some(mul_o);
+                    } else if let Some(mul_o) = &mut mul {
+                        if set.is_set() {
+                            mul_o.extend(set.as_view());
+                        } else {
+                            mul_o.extend(child);
+                        }
+                    }
                 }
 
-                mul.set_has_coefficient(m.has_coefficient());
-                mul.set_normalized(!submatch && m.is_normalized());
-                submatch
+                if let Some(mul) = &mut mul {
+                    mul.set_has_coefficient(m.has_coefficient());
+                }
             }
             AtomView::Add(a) => {
-                let out = out.to_add();
-                let mut submatch = false;
+                let mut add = None;
+
                 let mut child_buf = workspace.new_atom();
-                for child in a {
-                    submatch |= child.replace_no_norm(
+                for (i, child) in a.iter().enumerate() {
+                    let mut set = Settable::from(child_buf.deref_mut());
+                    child.replace_no_norm(
                         replacements,
                         workspace,
                         tree_level + 1,
                         fn_level,
                         rhs_cache,
-                        &mut child_buf,
+                        &mut set,
                     );
 
-                    out.extend(child_buf.as_view());
+                    if add.is_none() && set.is_set() {
+                        let add_o = out.to_add();
+
+                        for child in a.iter().take(i) {
+                            add_o.extend(child);
+                        }
+                        add_o.extend(set.as_view());
+                        add = Some(add_o);
+                    } else if let Some(add_o) = &mut add {
+                        if set.is_set() {
+                            add_o.extend(set.as_view());
+                        } else {
+                            add_o.extend(child);
+                        }
+                    }
                 }
-                out.set_normalized(!submatch && a.is_normalized());
-                submatch
             }
-            _ => {
-                out.set_from_view(self); // no children
-                false
-            }
+            _ => {}
         }
     }
 
@@ -1489,22 +1531,25 @@ impl<'a> AtomView<'a> {
         };
 
         let mut rhs_cache = HashMap::default();
-        let matched = self.replace_no_norm(
+        let mut set = Settable::from(&mut *out);
+        self.replace_no_norm(
             std::slice::from_ref(&rep),
             workspace,
             0,
             0,
             &mut rhs_cache,
-            out,
+            &mut set,
         );
 
-        if matched {
+        if set.is_set() {
             let mut norm = workspace.new_atom();
             out.as_view().normalize(workspace, &mut norm);
             std::mem::swap(out, &mut norm);
+            true
+        } else {
+            out.set_from_view(self);
+            false
         }
-
-        matched
     }
 }
 
@@ -1535,8 +1580,8 @@ impl Pattern {
                 let mut f = ws.new_atom();
                 let fun = f.to_fun(*s);
 
+                let mut arg_h = ws.new_atom();
                 for arg in a {
-                    let mut arg_h = ws.new_atom();
                     arg.to_atom_impl(ws, &mut arg_h)?;
                     fun.add_arg(arg_h.as_view());
                 }
@@ -1558,8 +1603,8 @@ impl Pattern {
                 let mut mul_h = ws.new_atom();
                 let mul = mul_h.to_mul();
 
+                let mut arg_h = ws.new_atom();
                 for arg in m {
-                    let mut arg_h = ws.new_atom();
                     arg.to_atom_impl(ws, &mut arg_h)?;
                     mul.extend(arg_h.as_view());
                 }
@@ -1570,8 +1615,8 @@ impl Pattern {
                 let mut add_h = ws.new_atom();
                 let add = add_h.to_add();
 
+                let mut arg_h = ws.new_atom();
                 for arg in a {
-                    let mut arg_h = ws.new_atom();
                     arg.to_atom_impl(ws, &mut arg_h)?;
                     add.extend(arg_h.as_view());
                 }
@@ -1737,8 +1782,8 @@ impl Pattern {
     fn could_match(&self, target: AtomView) -> bool {
         match (self, target) {
             (Pattern::Fn(f1, _), AtomView::Fun(f2)) => {
-                f1.get_wildcard_level() > 0 && target.has_attributes_of(*f1)
-                    || *f1 == f2.get_symbol()
+                let s = f2.get_symbol();
+                f1.get_wildcard_level() > 0 && s.has_attributes_of(*f1) || *f1 == s
             }
             (Pattern::Mul(_), AtomView::Mul(_)) => true,
             (Pattern::Add(_), AtomView::Add(_)) => true,
@@ -2021,9 +2066,7 @@ impl Pattern {
                                 Match::Single(s) => func.add_arg(*s),
                                 Match::Multiple(t, wargs) => match t {
                                     SliceType::Arg | SliceType::Empty | SliceType::One => {
-                                        for arg in wargs {
-                                            func.add_arg(*arg);
-                                        }
+                                        func.add_args(wargs);
                                     }
                                     _ => {
                                         let mut handle = workspace.new_atom();
@@ -3073,9 +3116,7 @@ impl Match<'_> {
                 }
                 SliceType::Arg => {
                     let fun = out.to_fun(Symbol::ARG);
-                    for arg in wargs {
-                        fun.add_arg(*arg);
-                    }
+                    fun.add_args(wargs);
 
                     fun.set_normalized(true);
                 }
@@ -3275,22 +3316,24 @@ impl<'a, 'b> WrappedMatchStack<'a, 'b> {
         }
 
         // check if all attributes of the wildcard are shared by the matched value
-        match &value {
-            Match::Single(s) => {
-                if !s.has_attributes_of(key) {
-                    return None;
-                }
-            }
-            Match::Multiple(_, list) => {
-                for s in list {
+        if key.has_attributes() {
+            match &value {
+                Match::Single(s) => {
                     if !s.has_attributes_of(key) {
                         return None;
                     }
                 }
-            }
-            Match::FunctionName(n) => {
-                if !n.has_attributes_of(key) {
-                    return None;
+                Match::Multiple(_, list) => {
+                    for s in list {
+                        if !s.has_attributes_of(key) {
+                            return None;
+                        }
+                    }
+                }
+                Match::FunctionName(n) => {
+                    if !n.has_attributes_of(key) {
+                        return None;
+                    }
                 }
             }
         }
@@ -4379,9 +4422,9 @@ impl<'a: 'b, 'b> ReplaceIterator<'a, 'b> {
 
                     let out = out.to_fun(f.get_symbol());
 
+                    let mut oa = workspace.new_atom();
                     for (index, arg) in slice.iter().enumerate() {
                         if index == *first {
-                            let mut oa = workspace.new_atom();
                             Self::copy_and_replace(&mut oa, rest, used_flags, arg, rhs, workspace);
                             out.add_arg(oa.as_view());
                         } else {
@@ -4420,10 +4463,9 @@ impl<'a: 'b, 'b> ReplaceIterator<'a, 'b> {
                     let slice = m.to_slice();
 
                     let out = out.to_mul();
-
+                    let mut oa = workspace.new_atom();
                     for (index, arg) in slice.iter().enumerate() {
                         if index == *first {
-                            let mut oa = workspace.new_atom();
                             Self::copy_and_replace(&mut oa, rest, used_flags, arg, rhs, workspace);
 
                             // TODO: do type check or just extend? could be that we get x*y*z -> x*(w*u)*z
@@ -4437,10 +4479,9 @@ impl<'a: 'b, 'b> ReplaceIterator<'a, 'b> {
                     let slice = a.to_slice();
 
                     let out = out.to_add();
-
+                    let mut oa = workspace.new_atom();
                     for (index, arg) in slice.iter().enumerate() {
                         if index == *first {
-                            let mut oa = workspace.new_atom();
                             Self::copy_and_replace(&mut oa, rest, used_flags, arg, rhs, workspace);
 
                             out.extend(oa.as_view());

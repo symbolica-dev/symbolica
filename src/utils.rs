@@ -16,6 +16,9 @@ impl<T> Deref for Settable<'_, T> {
     type Target = T;
 
     fn deref(&self) -> &Self::Target {
+        if !self.is_set {
+            panic!("Attempted to deref a Settable that was not set");
+        }
         self.value
     }
 }
