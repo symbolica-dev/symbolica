@@ -828,9 +828,7 @@ impl Fun {
 
         let new_buf_pos = self.data.len();
         let mut cursor = &mut self.data[1..];
-        cursor
-            .write_u32::<LittleEndian>((new_buf_pos - buf_pos) as u32)
-            .unwrap();
+        cursor.put_u32_le((new_buf_pos - buf_pos) as u32);
     }
 
     #[inline]
@@ -882,9 +880,52 @@ impl Fun {
         let new_buf_pos = self.data.len();
 
         let mut cursor = &mut self.data[1..];
-        cursor
-            .write_u32::<LittleEndian>((new_buf_pos - buf_pos) as u32)
-            .unwrap();
+        cursor.put_u32_le((new_buf_pos - buf_pos) as u32);
+    }
+
+    pub(crate) fn add_args<'a>(&mut self, other: &[AtomView<'a>]) {
+        self.data[0] |= NOT_NORMALIZED;
+
+        // may increase size of the num of args
+        let mut c = &self.data[1 + 4..];
+
+        let buf_pos = 1 + 4;
+
+        let name;
+        let mut n_args;
+        (name, n_args, c) = c.get_frac_u64();
+
+        let old_size = unsafe { c.as_ptr().offset_from(self.data.as_ptr()) } as usize - 1 - 4;
+
+        n_args += other.len() as u64;
+
+        let new_size = (name, n_args).get_packed_size() as usize;
+
+        match new_size.cmp(&old_size) {
+            Ordering::Equal => {}
+            Ordering::Less => {
+                self.data.copy_within(1 + 4 + old_size.., 1 + 4 + new_size);
+                self.data.resize(self.data.len() - old_size + new_size, 0);
+            }
+            Ordering::Greater => {
+                let old_len = self.data.len();
+                self.data.resize(old_len + new_size - old_size, 0);
+                self.data
+                    .copy_within(1 + 4 + old_size..old_len, 1 + 4 + new_size);
+            }
+        }
+
+        // size should be ok now
+        (name, n_args).write_packed_fixed(&mut self.data[1 + 4..1 + 4 + new_size]);
+
+        for item in other {
+            self.data.extend(item.get_data());
+        }
+
+        let new_buf_pos = self.data.len();
+
+        let mut cursor = &mut self.data[1..];
+        cursor.put_u32_le((new_buf_pos - buf_pos) as u32);
     }
 
     #[inline(always)]
@@ -1093,9 +1134,7 @@ impl Mul {
         let new_buf_pos = self.data.len();
 
         let mut cursor = &mut self.data[1..];
-        cursor
-            .write_u32::<LittleEndian>((new_buf_pos - buf_pos) as u32)
-            .unwrap();
+        cursor.put_u32_le((new_buf_pos - buf_pos) as u32);
     }
 
     pub(crate) fn replace_last(&mut self, other: AtomView) {
@@ -1138,9 +1177,7 @@ impl Mul {
         let new_buf_pos = self.data.len();
 
         let mut cursor = &mut self.data[1..];
-        cursor
-            .write_u32::<LittleEndian>((new_buf_pos - buf_pos) as u32)
-            .unwrap();
+        cursor.put_u32_le((new_buf_pos - buf_pos) as u32);
     }
 
     #[inline]
@@ -2106,18 +2143,29 @@ impl<'a> ListSlice<'a> {
         while skip_count > 0 {
             skip_count -= 1;
 
-            match pos.get_u8() & TYPE_MASK {
+            let atom_type = unsafe { *pos.get_unchecked(0) & TYPE_MASK };
+            pos = unsafe { pos.get_unchecked(1..) };
+            match atom_type {
                 NUM_ID | VAR_ID => {
                     pos = pos.skip_rational();
                 }
                 FUN_ID | MUL_ID => {
-                    let n_size = pos.get_u32_le();
-                    pos.advance(n_size as usize);
+                    let n_size = unsafe {
+                        u32::from_le_bytes([
+                            *pos.get_unchecked(0),
+                            *pos.get_unchecked(1),
+                            *pos.get_unchecked(2),
+                            *pos.get_unchecked(3),
+                        ])
+                    };
+
+                    pos = unsafe { pos.get_unchecked(n_size as usize + 4..) };
                 }
                 ADD_ID => {
                     let (_, size, np) = pos.get_frac_u64();
                     pos = np;
-                    pos.advance(size as usize);
+
+                    pos = unsafe { pos.get_unchecked(size as usize..) };
                 }
                 POW_ID => {
                     skip_count += 2;
@@ -2128,6 +2176,7 @@ impl<'a> ListSlice<'a> {
         pos
     }
 
+    #[inline]
     fn fast_forward(&self, index: usize) -> ListSlice<'a> {
         let mut pos = self.data;
 

@@ -994,6 +994,20 @@ impl Symbol {
         &self.get_global_data().user_data
     }
 
+    /// Check if the symbol has attributes or tags.
+    #[inline(always)]
+    pub fn has_attributes(&self) -> bool {
+        self.is_antisymmetric()
+            || self.is_symmetric()
+            || self.is_cyclesymmetric()
+            || self.is_linear()
+            || self.is_positive()
+            || self.is_integer()
+            || self.is_real()
+            || self.is_scalar()
+            || !self.get_tags().is_empty()
+    }
+
     /// Expert use: create a new variable symbol. This constructor should be used with care as there are no checks
     /// about the validity of the identifier.
     pub const fn raw_var(id: u32, wildcard_level: u8) -> Self {
