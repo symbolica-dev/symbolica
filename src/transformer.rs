@@ -316,14 +316,15 @@ impl FunView<'_> {
         #[inline(always)]
         fn add_arg(f: &mut Fun, a: AtomView) {
             if let AtomView::Fun(fa) = a
-                && fa.get_symbol() == Symbol::ARG {
-                    // flatten f(arg(...)) = f(...)
-                    for aa in fa.iter() {
-                        f.add_arg(aa);
-                    }
-
-                    return;
+                && fa.get_symbol_id() == Symbol::ARG_ID
+            {
+                // flatten f(arg(...)) = f(...)
+                for aa in fa.iter() {
+                    f.add_arg(aa);
                 }
+
+                return;
+            }
 
             f.add_arg(a);
         }
@@ -594,19 +595,20 @@ impl Transformer {
                 }
                 Transformer::ForEach(t) => {
                     if let AtomView::Fun(f) = cur_input
-                        && f.get_symbol() == Symbol::ARG {
-                            let mut ff = workspace.new_atom();
-                            let ff = ff.to_fun(Symbol::ARG);
+                        && f.get_symbol_id() == Symbol::ARG_ID
+                    {
+                        let mut ff = workspace.new_atom();
+                        let ff = ff.to_fun(Symbol::ARG);
 
-                            let mut a = workspace.new_atom();
-                            for arg in f {
-                                let _ = Self::execute_chain(arg, t, workspace, state, &mut a)?;
-                                ff.add_arg(a.as_view());
-                            }
-
-                            ff.as_view().normalize(workspace, out);
-                            continue;
+                        let mut a = workspace.new_atom();
+                        for arg in f {
+                            let _ = Self::execute_chain(arg, t, workspace, state, &mut a)?;
+                            ff.add_arg(a.as_view());
                         }
+
+                        ff.as_view().normalize(workspace, out);
+                        continue;
+                    }
 
                     let _ = Self::execute_chain(cur_input, t, workspace, state, out);
                 }
@@ -720,39 +722,41 @@ impl Transformer {
                 }
                 Transformer::Product => {
                     if let AtomView::Fun(f) = cur_input
-                        && f.get_symbol() == Symbol::ARG {
-                            let mut mul_h = workspace.new_atom();
-                            let mul = mul_h.to_mul();
+                        && f.get_symbol_id() == Symbol::ARG_ID
+                    {
+                        let mut mul_h = workspace.new_atom();
+                        let mul = mul_h.to_mul();
 
-                            for arg in f {
-                                mul.extend(arg);
-                            }
-
-                            mul_h.as_view().normalize(workspace, out);
-                            continue;
+                        for arg in f {
+                            mul.extend(arg);
                         }
+
+                        mul_h.as_view().normalize(workspace, out);
+                        continue;
+                    }
 
                     std::mem::swap(out, &mut tmp);
                 }
                 Transformer::Sum => {
                     if let AtomView::Fun(f) = cur_input
-                        && f.get_symbol() == Symbol::ARG {
-                            let mut add_h = workspace.new_atom();
-                            let add = add_h.to_add();
+                        && f.get_symbol_id() == Symbol::ARG_ID
+                    {
+                        let mut add_h = workspace.new_atom();
+                        let add = add_h.to_add();
 
-                            for arg in f {
-                                add.extend(arg);
-                            }
-
-                            add_h.as_view().normalize(workspace, out);
-                            continue;
+                        for arg in f {
+                            add.extend(arg);
                         }
+
+                        add_h.as_view().normalize(workspace, out);
+                        continue;
+                    }
 
                     std::mem::swap(out, &mut tmp);
                 }
                 Transformer::ArgCount(only_for_arg_fun) => {
                     if let AtomView::Fun(f) = cur_input {
-                        if !*only_for_arg_fun || f.get_symbol() == Symbol::ARG {
+                        if !*only_for_arg_fun || f.get_symbol_id() == Symbol::ARG_ID {
                             let n_args = f.get_nargs();
                             out.to_num((n_args as i64).into());
                         } else {
@@ -798,62 +802,64 @@ impl Transformer {
                 },
                 Transformer::Partition(bins, fill_last, repeat) => {
                     if let AtomView::Fun(f) = cur_input
-                        && f.get_symbol() == Symbol::ARG {
-                            let args: Vec<_> = f.iter().collect();
+                        && f.get_symbol_id() == Symbol::ARG_ID
+                    {
+                        let args: Vec<_> = f.iter().collect();
 
-                            let mut sum_h = workspace.new_atom();
-                            let sum = sum_h.to_add();
+                        let mut sum_h = workspace.new_atom();
+                        let sum = sum_h.to_add();
 
-                            let partitions = partitions(&args, bins, *fill_last, *repeat);
+                        let partitions = partitions(&args, bins, *fill_last, *repeat);
 
-                            if partitions.is_empty() {
-                                out.set_from_view(&workspace.new_num(0).as_view());
-                                continue;
-                            }
-
-                            for (p, args) in partitions {
-                                let mut mul_h = workspace.new_atom();
-                                let mul = mul_h.to_mul();
-
-                                if !p.is_one() {
-                                    mul.extend(workspace.new_num(p).as_view());
-                                }
-
-                                for (name, f_args) in args {
-                                    let mut fun_h = workspace.new_atom();
-                                    let fun = fun_h.to_fun(name);
-                                    for x in f_args {
-                                        fun.add_arg(x);
-                                    }
-
-                                    mul.extend(fun_h.as_view());
-                                }
-
-                                sum.extend(mul_h.as_view());
-                            }
-
-                            sum_h.as_view().normalize(workspace, out);
+                        if partitions.is_empty() {
+                            out.set_from_view(&workspace.new_num(0).as_view());
                             continue;
                         }
+
+                        for (p, args) in partitions {
+                            let mut mul_h = workspace.new_atom();
+                            let mul = mul_h.to_mul();
+
+                            if !p.is_one() {
+                                mul.extend(workspace.new_num(p).as_view());
+                            }
+
+                            for (name, f_args) in args {
+                                let mut fun_h = workspace.new_atom();
+                                let fun = fun_h.to_fun(name);
+                                for x in f_args {
+                                    fun.add_arg(x);
+                                }
+
+                                mul.extend(fun_h.as_view());
+                            }
+
+                            sum.extend(mul_h.as_view());
+                        }
+
+                        sum_h.as_view().normalize(workspace, out);
+                        continue;
+                    }
 
                     std::mem::swap(out, &mut tmp);
                 }
                 Transformer::Sort => {
                     if let AtomView::Fun(f) = cur_input
-                        && f.get_symbol() == Symbol::ARG {
-                            let mut args: Vec<_> = f.iter().collect();
-                            args.sort();
+                        && f.get_symbol_id() == Symbol::ARG_ID
+                    {
+                        let mut args: Vec<_> = f.iter().collect();
+                        args.sort();
 
-                            let mut fun_h = workspace.new_atom();
-                            let fun = fun_h.to_fun(Symbol::ARG);
+                        let mut fun_h = workspace.new_atom();
+                        let fun = fun_h.to_fun(Symbol::ARG);
 
-                            for arg in args {
-                                fun.add_arg(arg);
-                            }
-
-                            fun_h.as_view().normalize(workspace, out);
-                            continue;
+                        for arg in args {
+                            fun.add_arg(arg);
                         }
+
+                        fun_h.as_view().normalize(workspace, out);
+                        continue;
+                    }
 
                     std::mem::swap(out, &mut tmp);
                 }
@@ -892,66 +898,68 @@ impl Transformer {
                 }
                 Transformer::Deduplicate => {
                     if let AtomView::Fun(f) = cur_input
-                        && f.get_symbol() == Symbol::ARG {
-                            let args: Vec<_> = f.iter().collect();
-                            let mut args_dedup: Vec<_> = Vec::with_capacity(args.len());
+                        && f.get_symbol_id() == Symbol::ARG_ID
+                    {
+                        let args: Vec<_> = f.iter().collect();
+                        let mut args_dedup: Vec<_> = Vec::with_capacity(args.len());
 
-                            for a in args {
-                                // check last argument first, so that the sorted list case is fast
-                                if args_dedup.last() != Some(&a) && !args_dedup.contains(&a) {
-                                    args_dedup.push(a);
-                                }
+                        for a in args {
+                            // check last argument first, so that the sorted list case is fast
+                            if args_dedup.last() != Some(&a) && !args_dedup.contains(&a) {
+                                args_dedup.push(a);
                             }
-
-                            let mut fun_h = workspace.new_atom();
-                            let fun = fun_h.to_fun(Symbol::ARG);
-
-                            for arg in args_dedup {
-                                fun.add_arg(arg);
-                            }
-
-                            fun_h.as_view().normalize(workspace, out);
-                            continue;
                         }
+
+                        let mut fun_h = workspace.new_atom();
+                        let fun = fun_h.to_fun(Symbol::ARG);
+
+                        for arg in args_dedup {
+                            fun.add_arg(arg);
+                        }
+
+                        fun_h.as_view().normalize(workspace, out);
+                        continue;
+                    }
 
                     std::mem::swap(out, &mut tmp);
                 }
                 Transformer::Permutations(f_name) => {
                     if let AtomView::Fun(f) = cur_input
-                        && f.get_symbol() == Symbol::ARG {
-                            let args: Vec<_> = f.iter().collect();
+                        && f.get_symbol_id() == Symbol::ARG_ID
+                    {
+                        let args: Vec<_> = f.iter().collect();
 
-                            let mut sum_h = workspace.new_atom();
-                            let sum = sum_h.to_add();
+                        let mut sum_h = workspace.new_atom();
+                        let sum = sum_h.to_add();
 
-                            let (prefactor, permutations) = unique_permutations(&args);
+                        let (prefactor, permutations) = unique_permutations(&args);
 
-                            if permutations.is_empty() {
-                                out.set_from_view(&workspace.new_num(0).as_view());
-                                continue;
-                            }
-
-                            for a in permutations {
-                                let mut fun_h = workspace.new_atom();
-                                let fun = fun_h.to_fun(*f_name);
-                                for x in a {
-                                    fun.add_arg(x);
-                                }
-
-                                if !prefactor.is_one() {
-                                    let mut mul_h = workspace.new_atom();
-                                    let mul = mul_h.to_mul();
-                                    mul.extend(fun_h.as_view());
-                                    mul.extend(workspace.new_num(prefactor.clone()).as_view());
-                                    sum.extend(mul_h.as_view());
-                                } else {
-                                    sum.extend(fun_h.as_view());
-                                }
-                            }
-
-                            sum_h.as_view().normalize(workspace, out);
+                        if permutations.is_empty() {
+                            out.set_from_view(&workspace.new_num(0).as_view());
                             continue;
                         }
+
+                        for a in permutations {
+                            let mut fun_h = workspace.new_atom();
+                            let fun = fun_h.to_fun(*f_name);
+                            for x in a {
+                                fun.add_arg(x);
+                            }
+
+                            if !prefactor.is_one() {
+                                let mut mul_h = workspace.new_atom();
+                                let mul = mul_h.to_mul();
+                                mul.extend(fun_h.as_view());
+                                mul.extend(workspace.new_num(prefactor.clone()).as_view());
+                                sum.extend(mul_h.as_view());
+                            } else {
+                                sum.extend(fun_h.as_view());
+                            }
+                        }
+
+                        sum_h.as_view().normalize(workspace, out);
+                        continue;
+                    }
 
                     std::mem::swap(out, &mut tmp);
                 }
@@ -990,14 +998,12 @@ impl Transformer {
                 }
                 Transformer::FromNumber => {
                     if let AtomView::Num(n) = cur_input
-                        && let CoefficientView::RationalPolynomial(r) = n.get_coeff_view() {
-                            r.deserialize().to_expression_with_map(
-                                workspace,
-                                &HashMap::default(),
-                                out,
-                            );
-                            continue;
-                        }
+                        && let CoefficientView::RationalPolynomial(r) = n.get_coeff_view()
+                    {
+                        r.deserialize()
+                            .to_expression_with_map(workspace, &HashMap::default(), out);
+                        continue;
+                    }
                     std::mem::swap(out, &mut tmp);
                 }
             }

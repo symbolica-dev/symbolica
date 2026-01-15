@@ -456,7 +456,15 @@ impl State {
                     attributes.contains(&SymbolAttribute::Positive),
                 );
 
-                if r == new_id
+                if r.get_wildcard_level() == new_id.get_wildcard_level()
+                    && r.is_symmetric() == new_id.is_symmetric()
+                    && r.is_antisymmetric() == new_id.is_antisymmetric()
+                    && r.is_cyclesymmetric() == new_id.is_cyclesymmetric()
+                    && r.is_linear() == new_id.is_linear()
+                    && r.is_scalar() == new_id.is_scalar()
+                    && r.is_real() == new_id.is_real()
+                    && r.is_integer() == new_id.is_integer()
+                    && r.is_positive() == new_id.is_positive()
                     && normalization_function.is_none()
                     && print_function.is_none()
                     && derivative_function.is_none()

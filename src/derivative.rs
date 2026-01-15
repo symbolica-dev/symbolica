@@ -91,21 +91,21 @@ impl AtomView<'_> {
                     .contains(&f.get_symbol())
                 {
                     let mut fn_der = workspace.new_atom();
-                    match f.get_symbol() {
-                        Symbol::EXP => {
+                    match f.get_symbol_id() {
+                        Symbol::EXP_ID => {
                             fn_der.set_from_view(self);
                         }
-                        Symbol::LOG => {
+                        Symbol::LOG_ID => {
                             let mut n = workspace.new_atom();
                             n.to_num((-1).into());
 
                             fn_der.to_pow(f.iter().next().unwrap(), n.as_view());
                         }
-                        Symbol::SIN => {
+                        Symbol::SIN_ID => {
                             let p = fn_der.to_fun(Symbol::COS);
                             p.add_arg(f.iter().next().unwrap());
                         }
-                        Symbol::COS => {
+                        Symbol::COS_ID => {
                             let mut n = workspace.new_atom();
                             n.to_num((-1).into());
 
@@ -117,7 +117,7 @@ impl AtomView<'_> {
                             m.extend(sin.as_view());
                             m.extend(n.as_view());
                         }
-                        Symbol::SQRT => {
+                        Symbol::SQRT_ID => {
                             let mut n = workspace.new_atom();
                             n.to_num((1, 2).into());
 
@@ -439,12 +439,12 @@ impl AtomView<'_> {
                     }
                 }
 
-                match f.get_symbol() {
-                    Symbol::COS => args_series[0].cos(),
-                    Symbol::SIN => args_series[0].sin(),
-                    Symbol::EXP => args_series[0].exp(),
-                    Symbol::LOG => args_series[0].log(),
-                    Symbol::SQRT => args_series[0].rpow((1, 2).into()),
+                match f.get_symbol_id() {
+                    Symbol::COS_ID => args_series[0].cos(),
+                    Symbol::SIN_ID => args_series[0].sin(),
+                    Symbol::EXP_ID => args_series[0].exp(),
+                    Symbol::LOG_ID => args_series[0].log(),
+                    Symbol::SQRT_ID => args_series[0].rpow((1, 2).into()),
                     _ => {
                         // TODO: also check for log(x)
                         if args_series

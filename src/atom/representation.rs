@@ -1370,6 +1370,12 @@ impl<'a> VarView<'a> {
     }
 
     #[inline(always)]
+    pub fn get_symbol_id(&self) -> u32 {
+        let (id_and_attrs, _, _) = self.data[1..].get_frac_u64();
+        id_and_attrs as u32
+    }
+
+    #[inline(always)]
     pub fn get_wildcard_level(&self) -> u8 {
         self.get_symbol().get_wildcard_level()
     }
@@ -1451,6 +1457,13 @@ impl<'a> FunView<'a> {
             self.data[0],
             (id_and_attrs >> 32) as u32,
         )
+    }
+
+    /// Get the symbol ID of the function. Slightly faster than [get_symbol](Self::get_symbol) if only the ID is needed.
+    #[inline(always)]
+    pub fn get_symbol_id(&self) -> u32 {
+        let (id_and_attrs, _, _) = self.data[1 + 4..].get_frac_u64();
+        id_and_attrs as u32
     }
 
     /// Get the argument at the given index.
@@ -1998,14 +2011,14 @@ impl<'a> AtomView<'a> {
                 _ => out.set_from_view(self),
             },
             AtomView::Var(v) => {
-                if let Some(s) = state_map.symbols.get(&v.get_symbol().get_id()) {
+                if let Some(s) = state_map.symbols.get(&v.get_symbol_id()) {
                     out.to_var(*s);
                 } else {
                     out.set_from_view(self);
                 }
             }
             AtomView::Fun(f) => {
-                if let Some(s) = state_map.symbols.get(&f.get_symbol().get_id()) {
+                if let Some(s) = state_map.symbols.get(&f.get_symbol_id()) {
                     let nf = out.to_fun(*s);
 
                     let mut na = ws.new_atom();

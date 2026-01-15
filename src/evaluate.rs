@@ -1066,13 +1066,13 @@ impl<T: Real> ExpressionEvaluator<T> {
                 Instr::Powf(r, b, e) => {
                     self.stack[*r] = self.stack[*b].powf(&self.stack[*e]);
                 }
-                Instr::BuiltinFun(r, s, arg) => match s.0 {
-                    Symbol::EXP => self.stack[*r] = self.stack[*arg].exp(),
-                    Symbol::LOG => self.stack[*r] = self.stack[*arg].log(),
-                    Symbol::SIN => self.stack[*r] = self.stack[*arg].sin(),
-                    Symbol::COS => self.stack[*r] = self.stack[*arg].cos(),
-                    Symbol::SQRT => self.stack[*r] = self.stack[*arg].sqrt(),
-                    Symbol::CONJ => self.stack[*r] = self.stack[*arg].conj(),
+                Instr::BuiltinFun(r, s, arg) => match s.0.get_id() {
+                    Symbol::EXP_ID => self.stack[*r] = self.stack[*arg].exp(),
+                    Symbol::LOG_ID => self.stack[*r] = self.stack[*arg].log(),
+                    Symbol::SIN_ID => self.stack[*r] = self.stack[*arg].sin(),
+                    Symbol::COS_ID => self.stack[*r] = self.stack[*arg].cos(),
+                    Symbol::SQRT_ID => self.stack[*r] = self.stack[*arg].sqrt(),
+                    Symbol::CONJ_ID => self.stack[*r] = self.stack[*arg].conj(),
                     _ => unreachable!(),
                 },
                 Instr::ExternalFun(_, s, _) => {
@@ -2510,28 +2510,28 @@ extern "C" {{
                     let exp = get_input!(*e);
                     *out += format!("\t{} = pow({base}, {exp});\n", get_output!(o)).as_str();
                 }
-                Instr::BuiltinFun(o, s, a) => match s.0 {
-                    Symbol::EXP => {
+                Instr::BuiltinFun(o, s, a) => match s.0.get_id() {
+                    Symbol::EXP_ID => {
                         let arg = get_input!(*a);
                         *out += format!("\t{} = exp({arg});\n", get_output!(o)).as_str();
                     }
-                    Symbol::LOG => {
+                    Symbol::LOG_ID => {
                         let arg = get_input!(*a);
                         *out += format!("\t{} = log({arg});\n", get_output!(o)).as_str();
                     }
-                    Symbol::SIN => {
+                    Symbol::SIN_ID => {
                         let arg = get_input!(*a);
                         *out += format!("\t{} = sin({arg});\n", get_output!(o)).as_str();
                     }
-                    Symbol::COS => {
+                    Symbol::COS_ID => {
                         let arg = get_input!(*a);
                         *out += format!("\t{} = cos({arg});\n", get_output!(o)).as_str();
                     }
-                    Symbol::SQRT => {
+                    Symbol::SQRT_ID => {
                         let arg = get_input!(*a);
                         *out += format!("\t{} = sqrt({arg});\n", get_output!(o)).as_str();
                     }
-                    Symbol::CONJ => {
+                    Symbol::CONJ_ID => {
                         let arg = get_input!(*a);
                         *out += format!("\t{} = conj({arg});\n", get_output!(o)).as_str();
                     }
@@ -3611,23 +3611,23 @@ extern "C" {{
 
                     let arg = get_input!(*a);
 
-                    match s.0 {
-                        Symbol::EXP => {
+                    match s.0.get_id() {
+                        Symbol::EXP_ID => {
                             *out += format!("\tZ[{o}] = exp({arg});\n").as_str();
                         }
-                        Symbol::LOG => {
+                        Symbol::LOG_ID => {
                             *out += format!("\tZ[{o}] = log({arg});\n").as_str();
                         }
-                        Symbol::SIN => {
+                        Symbol::SIN_ID => {
                             *out += format!("\tZ[{o}] = sin({arg});\n").as_str();
                         }
-                        Symbol::COS => {
+                        Symbol::COS_ID => {
                             *out += format!("\tZ[{o}] = cos({arg});\n").as_str();
                         }
-                        Symbol::SQRT => {
+                        Symbol::SQRT_ID => {
                             *out += format!("\tZ[{o}] = sqrt({arg});\n").as_str();
                         }
-                        Symbol::CONJ => {
+                        Symbol::CONJ_ID => {
                             *out += format!("\tZ[{o}] = {arg};\n").as_str();
                         }
                         _ => unreachable!(),
@@ -4186,23 +4186,23 @@ extern "C" {{
 
                     let arg = get_input!(*a);
 
-                    match s.0 {
-                        Symbol::EXP => {
+                    match s.0.get_id() {
+                        Symbol::EXP_ID => {
                             *out += format!("\tZ[{o}] = exp({arg});\n").as_str();
                         }
-                        Symbol::LOG => {
+                        Symbol::LOG_ID => {
                             *out += format!("\tZ[{o}] = log({arg});\n").as_str();
                         }
-                        Symbol::SIN => {
+                        Symbol::SIN_ID => {
                             *out += format!("\tZ[{o}] = sin({arg});\n").as_str();
                         }
-                        Symbol::COS => {
+                        Symbol::COS_ID => {
                             *out += format!("\tZ[{o}] = cos({arg});\n").as_str();
                         }
-                        Symbol::SQRT => {
+                        Symbol::SQRT_ID => {
                             *out += format!("\tZ[{o}] = sqrt({arg});\n").as_str();
                         }
-                        Symbol::CONJ => {
+                        Symbol::CONJ_ID => {
                             *out += format!("\tZ[{o}] = conj({arg});\n").as_str();
                         }
                         _ => unreachable!(),
@@ -4432,13 +4432,13 @@ impl<T: Real> ExpressionEvaluatorWithExternalFunctions<T> {
                 Instr::Powf(r, b, e) => {
                     self.stack[*r] = self.stack[*b].powf(&self.stack[*e]);
                 }
-                Instr::BuiltinFun(r, s, arg) => match s.0 {
-                    Symbol::EXP => self.stack[*r] = self.stack[*arg].exp(),
-                    Symbol::LOG => self.stack[*r] = self.stack[*arg].log(),
-                    Symbol::SIN => self.stack[*r] = self.stack[*arg].sin(),
-                    Symbol::COS => self.stack[*r] = self.stack[*arg].cos(),
-                    Symbol::SQRT => self.stack[*r] = self.stack[*arg].sqrt(),
-                    Symbol::CONJ => self.stack[*r] = self.stack[*arg].conj(),
+                Instr::BuiltinFun(r, s, arg) => match s.0.get_id() {
+                    Symbol::EXP_ID => self.stack[*r] = self.stack[*arg].exp(),
+                    Symbol::LOG_ID => self.stack[*r] = self.stack[*arg].log(),
+                    Symbol::SIN_ID => self.stack[*r] = self.stack[*arg].sin(),
+                    Symbol::COS_ID => self.stack[*r] = self.stack[*arg].cos(),
+                    Symbol::SQRT_ID => self.stack[*r] = self.stack[*arg].sqrt(),
+                    Symbol::CONJ_ID => self.stack[*r] = self.stack[*arg].conj(),
                     _ => unreachable!(),
                 },
                 Instr::ExternalFun(r, s, args) => {
@@ -5159,8 +5159,8 @@ impl<T: DualNumberStructure> Vectorize<Complex<Rational>> for T {
                     .map(|x| VectorInstruction::Assign(*x))
                     .collect()
             }
-            VectorInstruction::BuiltinFun(f, a) => match f.get_symbol() {
-                Symbol::SQRT => {
+            VectorInstruction::BuiltinFun(f, a) => match f.get_symbol().get_id() {
+                Symbol::SQRT_ID => {
                     let e = instrs.add(VectorInstruction::BuiltinFun(*f, *a));
                     let norm = instrs.add(VectorInstruction::Pow(*a, -1)); // TODO: check 0?
 
@@ -5196,7 +5196,7 @@ impl<T: DualNumberStructure> Vectorize<Complex<Rational>> for T {
                         .map(|x| scalar_yield_mul(x, &e, instrs))
                         .collect()
                 }
-                Symbol::EXP => {
+                Symbol::EXP_ID => {
                     let e = instrs.add(VectorInstruction::BuiltinFun(*f, *a));
 
                     let one =
@@ -5227,7 +5227,7 @@ impl<T: DualNumberStructure> Vectorize<Complex<Rational>> for T {
                         .map(|x| scalar_yield_mul(x, &e, instrs))
                         .collect()
                 }
-                Symbol::LOG => {
+                Symbol::LOG_ID => {
                     let e = instrs.add(VectorInstruction::BuiltinFun(*f, *a));
 
                     let norm = instrs.add(VectorInstruction::Pow(*a, -1)); // TODO: check 0?
@@ -5254,7 +5254,7 @@ impl<T: DualNumberStructure> Vectorize<Complex<Rational>> for T {
 
                     res.iter().map(|x| VectorInstruction::Assign(*x)).collect()
                 }
-                Symbol::SIN => {
+                Symbol::SIN_ID => {
                     let s = instrs.add(VectorInstruction::BuiltinFun(*f, *a));
                     let c = instrs.add(VectorInstruction::BuiltinFun(
                         BuiltinSymbol(Symbol::COS),
@@ -5289,7 +5289,7 @@ impl<T: DualNumberStructure> Vectorize<Complex<Rational>> for T {
 
                     e.iter().map(|x| VectorInstruction::Assign(*x)).collect()
                 }
-                Symbol::COS => {
+                Symbol::COS_ID => {
                     let s = instrs.add(VectorInstruction::BuiltinFun(
                         BuiltinSymbol(Symbol::SIN),
                         *a,
@@ -5325,7 +5325,7 @@ impl<T: DualNumberStructure> Vectorize<Complex<Rational>> for T {
 
                     e.iter().map(|x| VectorInstruction::Assign(*x)).collect()
                 }
-                Symbol::CONJ => {
+                Symbol::CONJ_ID => {
                     // assume variables are real
                     (0..self.get_len())
                         .map(|j| VectorInstruction::BuiltinFun(*f, a.index(j)))
@@ -7035,13 +7035,13 @@ impl<T: Real> EvalTree<T> {
             Expression::ReadArg(i) => args[*i].clone(),
             Expression::BuiltinFun(s, a) => {
                 let arg = self.evaluate_impl(a, subexpressions, params, args);
-                match s.0 {
-                    Symbol::EXP => arg.exp(),
-                    Symbol::LOG => arg.log(),
-                    Symbol::SIN => arg.sin(),
-                    Symbol::COS => arg.cos(),
-                    Symbol::SQRT => arg.sqrt(),
-                    Symbol::CONJ => arg.conj(),
+                match s.0.get_id() {
+                    Symbol::EXP_ID => arg.exp(),
+                    Symbol::LOG_ID => arg.log(),
+                    Symbol::SIN_ID => arg.sin(),
+                    Symbol::COS_ID => arg.cos(),
+                    Symbol::SQRT_ID => arg.sqrt(),
+                    Symbol::CONJ_ID => arg.conj(),
                     _ => unreachable!(),
                 }
             }
@@ -9124,38 +9124,38 @@ impl<T: FloatLike> EvalTree<T> {
                 r
             }
             Expression::ReadArg(s) => args[*s].to_string(),
-            Expression::BuiltinFun(s, a) => match s.0 {
-                Symbol::EXP => {
+            Expression::BuiltinFun(s, a) => match s.0.get_id() {
+                Symbol::EXP_ID => {
                     let mut r = "exp(".to_string();
                     r += &self.export_cpp_impl(a, args);
                     r.push(')');
                     r
                 }
-                Symbol::LOG => {
+                Symbol::LOG_ID => {
                     let mut r = "log(".to_string();
                     r += &self.export_cpp_impl(a, args);
                     r.push(')');
                     r
                 }
-                Symbol::SIN => {
+                Symbol::SIN_ID => {
                     let mut r = "sin(".to_string();
                     r += &self.export_cpp_impl(a, args);
                     r.push(')');
                     r
                 }
-                Symbol::COS => {
+                Symbol::COS_ID => {
                     let mut r = "cos(".to_string();
                     r += &self.export_cpp_impl(a, args);
                     r.push(')');
                     r
                 }
-                Symbol::SQRT => {
+                Symbol::SQRT_ID => {
                     let mut r = "sqrt(".to_string();
                     r += &self.export_cpp_impl(a, args);
                     r.push(')');
                     r
                 }
-                Symbol::CONJ => {
+                Symbol::CONJ_ID => {
                     let mut r = "conj(".to_string();
                     r += &self.export_cpp_impl(a, args);
                     r.push(')');
@@ -9296,14 +9296,14 @@ impl<'a> AtomView<'a> {
             AtomView::Fun(f) => {
                 let name = f.get_symbol();
                 if [
-                    Symbol::EXP,
-                    Symbol::LOG,
-                    Symbol::SIN,
-                    Symbol::COS,
-                    Symbol::SQRT,
-                    Symbol::CONJ,
+                    Symbol::EXP_ID,
+                    Symbol::LOG_ID,
+                    Symbol::SIN_ID,
+                    Symbol::COS_ID,
+                    Symbol::SQRT_ID,
+                    Symbol::CONJ_ID,
                 ]
-                .contains(&name)
+                .contains(&name.get_id())
                 {
                     assert!(f.get_nargs() == 1);
                     let arg = f.iter().next().unwrap();
@@ -9510,49 +9510,52 @@ impl<'a> AtomView<'a> {
                     "Rational polynomial coefficient not yet supported for evaluation".to_string(),
                 ),
             },
-            AtomView::Var(v) => match v.get_symbol() {
-                Symbol::E => Ok(coeff_map(&1.into()).e()),
-                Symbol::PI => Ok(coeff_map(&1.into()).pi()),
-                s => {
-                    if let Some(fun) = function_map.get(&s) {
-                        if let Some(eval) = cache.get(self) {
-                            return Ok(eval.clone());
-                        }
+            AtomView::Var(v) => {
+                let s = v.get_symbol();
+                match s.get_id() {
+                    Symbol::E_ID => Ok(coeff_map(&1.into()).e()),
+                    Symbol::PI_ID => Ok(coeff_map(&1.into()).pi()),
+                    _ => {
+                        if let Some(fun) = function_map.get(&s) {
+                            if let Some(eval) = cache.get(self) {
+                                return Ok(eval.clone());
+                            }
 
-                        let eval = fun.get()(&[], const_map, function_map, cache);
-                        cache.insert(*self, eval.clone());
-                        Ok(eval)
-                    } else {
-                        Err(format!(
-                            "Variable {} not in constant map or function map",
-                            v.get_symbol().get_name()
-                        ))
+                            let eval = fun.get()(&[], const_map, function_map, cache);
+                            cache.insert(*self, eval.clone());
+                            Ok(eval)
+                        } else {
+                            Err(format!(
+                                "Variable {} not in constant map or function map",
+                                v.get_symbol().get_name()
+                            ))
+                        }
                     }
                 }
-            },
+            }
             AtomView::Fun(f) => {
                 let name = f.get_symbol();
                 if [
-                    Symbol::EXP,
-                    Symbol::LOG,
-                    Symbol::SIN,
-                    Symbol::COS,
-                    Symbol::SQRT,
-                    Symbol::CONJ,
+                    Symbol::EXP_ID,
+                    Symbol::LOG_ID,
+                    Symbol::SIN_ID,
+                    Symbol::COS_ID,
+                    Symbol::SQRT_ID,
+                    Symbol::CONJ_ID,
                 ]
-                .contains(&name)
+                .contains(&name.get_id())
                 {
                     assert!(f.get_nargs() == 1);
                     let arg = f.iter().next().unwrap();
                     let arg_eval = arg.evaluate_impl(coeff_map, const_map, function_map, cache)?;
 
-                    return Ok(match f.get_symbol() {
-                        Symbol::EXP => arg_eval.exp(),
-                        Symbol::LOG => arg_eval.log(),
-                        Symbol::SIN => arg_eval.sin(),
-                        Symbol::COS => arg_eval.cos(),
-                        Symbol::SQRT => arg_eval.sqrt(),
-                        Symbol::CONJ => arg_eval.conj(),
+                    return Ok(match f.get_symbol_id() {
+                        Symbol::EXP_ID => arg_eval.exp(),
+                        Symbol::LOG_ID => arg_eval.log(),
+                        Symbol::SIN_ID => arg_eval.sin(),
+                        Symbol::COS_ID => arg_eval.cos(),
+                        Symbol::SQRT_ID => arg_eval.sqrt(),
+                        Symbol::CONJ_ID => arg_eval.conj(),
                         _ => unreachable!(),
                     });
                 }
