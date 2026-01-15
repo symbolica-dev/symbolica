@@ -27,7 +27,7 @@ impl AtomView<'_> {
             (AtomView::Num(n1), AtomView::Num(n2)) => n1.get_coeff_view().cmp(&n2.get_coeff_view()),
             (AtomView::Num(_), _) => Ordering::Greater,
             (_, AtomView::Num(_)) => Ordering::Less,
-            (AtomView::Var(v1), AtomView::Var(v2)) => v1.get_symbol().cmp(&v2.get_symbol()),
+            (AtomView::Var(v1), AtomView::Var(v2)) => v1.get_symbol_id().cmp(&v2.get_symbol_id()),
             (AtomView::Var(_), _) => Ordering::Less,
             (_, AtomView::Var(_)) => Ordering::Greater,
             (AtomView::Pow(p1), AtomView::Pow(p2)) => {
@@ -85,7 +85,7 @@ impl AtomView<'_> {
             (_, AtomView::Add(_)) => Ordering::Greater,
 
             (AtomView::Fun(f1), AtomView::Fun(f2)) => {
-                let name_comp = f1.get_symbol().cmp(&f2.get_symbol());
+                let name_comp = f1.get_symbol_id().cmp(&f2.get_symbol_id());
                 if name_comp != Ordering::Equal {
                     return name_comp;
                 }
@@ -121,7 +121,7 @@ impl AtomView<'_> {
             (AtomView::Num(_), _) => Ordering::Greater,
             (_, AtomView::Num(_)) => Ordering::Less,
 
-            (AtomView::Var(v1), AtomView::Var(v2)) => v1.get_symbol().cmp(&v2.get_symbol()),
+            (AtomView::Var(v1), AtomView::Var(v2)) => v1.get_symbol_id().cmp(&v2.get_symbol_id()),
             (AtomView::Pow(p1), AtomView::Pow(p2)) => {
                 // TODO: inline partial_cmp call by creating an inlined version
                 p1.get_base().cmp(&p2.get_base())
@@ -162,7 +162,7 @@ impl AtomView<'_> {
             (_, AtomView::Add(_)) => Ordering::Greater,
 
             (AtomView::Fun(f1), AtomView::Fun(f2)) => {
-                let name_comp = f1.get_symbol().cmp(&f2.get_symbol());
+                let name_comp = f1.get_symbol_id().cmp(&f2.get_symbol_id());
                 if name_comp != Ordering::Equal {
                     return name_comp;
                 }
@@ -197,7 +197,7 @@ impl AtomView<'_> {
             (AtomView::Num(_), _) => Ordering::Greater,
             (_, AtomView::Num(_)) => Ordering::Less,
 
-            (AtomView::Var(v1), AtomView::Var(v2)) => v1.get_symbol().cmp(&v2.get_symbol()),
+            (AtomView::Var(v1), AtomView::Var(v2)) => v1.get_symbol_id().cmp(&v2.get_symbol_id()),
             (AtomView::Pow(p1), AtomView::Pow(p2)) => {
                 let (b1, e1) = p1.get_base_exp();
                 let (b2, e2) = p2.get_base_exp();
@@ -252,7 +252,7 @@ impl AtomView<'_> {
             (AtomView::Pow(_), _) => Ordering::Less,
 
             (AtomView::Fun(f1), AtomView::Fun(f2)) => {
-                let name_comp = f1.get_symbol().cmp(&f2.get_symbol());
+                let name_comp = f1.get_symbol_id().cmp(&f2.get_symbol_id());
                 if name_comp != Ordering::Equal {
                     return name_comp;
                 }
@@ -282,7 +282,7 @@ impl AtomView<'_> {
     /// Simplify logs in the argument of the exponential function.
     fn simplify_exp_log(&self, ws: &Workspace, out: &mut Atom) -> bool {
         if let AtomView::Fun(f) = self
-            && f.get_symbol() == Symbol::LOG
+            && f.get_symbol_id() == Symbol::LOG_ID
             && f.get_nargs() == 1
         {
             out.set_from_view(&f.iter().next().unwrap());
@@ -844,7 +844,7 @@ impl AtomView<'_> {
                 #[inline(always)]
                 fn add_arg(f: &mut Fun, a: AtomView) {
                     if let AtomView::Fun(fa) = a
-                        && fa.get_symbol() == Symbol::ARG
+                        && fa.get_symbol_id() == Symbol::ARG_ID
                     {
                         // flatten f(arg(...)) = f(...)
                         for aa in fa.iter() {
@@ -896,13 +896,13 @@ impl AtomView<'_> {
                 out_f.set_normalized(true);
 
                 if [
-                    Symbol::COS,
-                    Symbol::SIN,
-                    Symbol::EXP,
-                    Symbol::LOG,
-                    Symbol::SQRT,
+                    Symbol::COS_ID,
+                    Symbol::SIN_ID,
+                    Symbol::EXP_ID,
+                    Symbol::LOG_ID,
+                    Symbol::SQRT_ID,
                 ]
-                .contains(&id)
+                .contains(&id.get_id())
                     && out_f.to_fun_view().get_nargs() == 1
                 {
                     let arg = out_f.to_fun_view().iter().next().unwrap();
@@ -924,8 +924,8 @@ impl AtomView<'_> {
                         }
 
                         if let CoefficientView::Float(r, i) = n.get_coeff_view() {
-                            match id {
-                                Symbol::COS => {
+                            match id.get_id() {
+                                Symbol::COS_ID => {
                                     let r = if i.is_zero() {
                                         r.to_float().cos().into()
                                     } else {
@@ -934,7 +934,7 @@ impl AtomView<'_> {
                                     out.to_num(Coefficient::Float(r));
                                     return;
                                 }
-                                Symbol::SIN => {
+                                Symbol::SIN_ID => {
                                     let r = if i.is_zero() {
                                         r.to_float().sin().into()
                                     } else {
@@ -943,7 +943,7 @@ impl AtomView<'_> {
                                     out.to_num(Coefficient::Float(r));
                                     return;
                                 }
-                                Symbol::EXP => {
+                                Symbol::EXP_ID => {
                                     let r = if i.is_zero() {
                                         r.to_float().exp().into()
                                     } else {
@@ -952,7 +952,7 @@ impl AtomView<'_> {
                                     out.to_num(Coefficient::Float(r));
                                     return;
                                 }
-                                Symbol::LOG => {
+                                Symbol::LOG_ID => {
                                     let r = if i.is_zero() {
                                         r.to_float().log().into()
                                     } else {
@@ -961,7 +961,7 @@ impl AtomView<'_> {
                                     out.to_num(Coefficient::Float(r));
                                     return;
                                 }
-                                Symbol::SQRT => {
+                                Symbol::SQRT_ID => {
                                     let r = if i.is_zero() {
                                         let r = r.to_float();
                                         Complex::new(r.sqrt(), r.zero())
@@ -1374,7 +1374,7 @@ impl AtomView<'_> {
                             base_handle.to_num(new_base_num);
                             exp_handle.to_num(new_exp_num);
                         } else if let AtomView::Pow(p_base) = base_handle.as_view() {
-                            if exp_num.is_integer() {
+                            if exp_num.is_integer() || base_handle.is_positive() {
                                 // rewrite (x^y)^3 as x^(3*y)
                                 let (p_base_base, p_base_exp) = p_base.get_base_exp();
 

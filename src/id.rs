@@ -551,11 +551,14 @@ impl<'a> AtomView<'a> {
         match self {
             AtomView::Num(n) => n.get_coeff_view().is_real(),
             AtomView::Var(v) => v.get_symbol().is_real(),
-            AtomView::Fun(f) => match f.get_symbol() {
-                Symbol::EXP => f.iter().next().is_some_and(|arg| arg.is_real()),
-                Symbol::SQRT => f.iter().next().is_some_and(|arg| arg.is_positive()),
-                x => x.is_real(),
-            },
+            AtomView::Fun(f) => {
+                let s = f.get_symbol();
+                match s.get_id() {
+                    Symbol::EXP_ID => f.iter().next().is_some_and(|arg| arg.is_real()),
+                    Symbol::SQRT_ID => f.iter().next().is_some_and(|arg| arg.is_positive()),
+                    _ => s.is_real(),
+                }
+            }
             AtomView::Pow(p) => {
                 let (base, exp) = p.get_base_exp();
                 base.is_real() && (exp.is_integer() || base.is_positive() && exp.is_real())
@@ -594,11 +597,14 @@ impl<'a> AtomView<'a> {
                 }
             }
             AtomView::Var(v) => v.get_symbol().is_positive(),
-            AtomView::Fun(f) => match f.get_symbol() {
-                Symbol::EXP => f.iter().next().is_some_and(|arg| arg.is_real()),
-                Symbol::SQRT => f.iter().next().is_some_and(|arg| arg.is_positive()),
-                x => x.is_positive(),
-            },
+            AtomView::Fun(f) => {
+                let s = f.get_symbol();
+                match s.get_id() {
+                    Symbol::EXP_ID => f.iter().next().is_some_and(|arg| arg.is_real()),
+                    Symbol::SQRT_ID => f.iter().next().is_some_and(|arg| arg.is_positive()),
+                    _ => s.is_positive(),
+                }
+            }
             AtomView::Pow(p) => {
                 let (base, exp) = p.get_base_exp();
 
@@ -611,7 +617,7 @@ impl<'a> AtomView<'a> {
                     return base.is_real();
                 }
 
-                base.is_positive()
+                base.is_positive() && exp.is_real()
             }
             AtomView::Mul(m) => m.iter().all(|child| child.is_positive()),
             AtomView::Add(a) => a.iter().all(|child| child.is_positive()),
@@ -643,12 +649,16 @@ impl<'a> AtomView<'a> {
                 CoefficientView::RationalPolynomial(r) => r.deserialize().is_constant(),
                 _ => true,
             },
-            AtomView::Var(v) => match v.get_symbol() {
-                Symbol::PI | Symbol::E => true,
+            AtomView::Var(v) => match v.get_symbol_id() {
+                Symbol::PI_ID | Symbol::E_ID => true,
                 _ => false,
             },
-            AtomView::Fun(f) => match f.get_symbol() {
-                Symbol::EXP | Symbol::LOG | Symbol::SQRT | Symbol::SIN | Symbol::COS => {
+            AtomView::Fun(f) => match f.get_symbol_id() {
+                Symbol::EXP_ID
+                | Symbol::LOG_ID
+                | Symbol::SQRT_ID
+                | Symbol::SIN_ID
+                | Symbol::COS_ID => {
                     f.get_nargs() == 1 && f.iter().next().is_some_and(|arg| arg.is_constant())
                 }
                 _ => false,
@@ -1221,7 +1231,15 @@ impl<'a> AtomView<'a> {
     ) -> bool {
         let mut atom_iter = replacements
             .iter()
-            .map(|x| AtomMatchIterator::new(x.borrow().pattern, *self))
+            .map(|r| {
+                (
+                    AtomMatchIterator::new(r.borrow().pattern, *self),
+                    WrappedMatchStack::new(
+                        r.borrow().conditions.unwrap_or(&DEFAULT_PATTERN_CONDITION),
+                        r.borrow().settings.unwrap_or(&DEFAULT_MATCH_SETTINGS),
+                    ),
+                )
+            })
             .collect::<Vec<_>>();
 
         Workspace::get_local().with(|ws| {
@@ -1253,7 +1271,7 @@ impl<'a> AtomView<'a> {
     fn replace_no_norm<'b, T: BorrowReplacement>(
         &self,
         replacements: &'b [T],
-        atom_match_iterators: &mut [AtomMatchIterator<'a, 'b>],
+        atom_match_iterators: &mut [(AtomMatchIterator<'a, 'b>, WrappedMatchStack<'a, 'b>)],
         workspace: &Workspace,
         tree_level: usize,
         fn_level: usize,
@@ -1273,7 +1291,6 @@ impl<'a> AtomView<'a> {
                 fits = true;
             }
 
-            let conditions = r.conditions.unwrap_or(&DEFAULT_PATTERN_CONDITION);
             let settings = r.settings.unwrap_or(&DEFAULT_MATCH_SETTINGS);
 
             if let Some(max_level) = settings.level_range.1
@@ -1292,11 +1309,11 @@ impl<'a> AtomView<'a> {
             }
 
             if r.pattern.could_match(*self) {
-                let mut match_stack = WrappedMatchStack::new(conditions, settings);
-
-                atom_match_iterators[rep_id].set_new_target(*self);
-                let it = &mut atom_match_iterators[rep_id];
-                if let Some((_, used_flags)) = it.next(&mut match_stack) {
+                let (match_iter, match_stack) = &mut atom_match_iterators[rep_id];
+                match_iter.set_new_target(*self);
+                match_stack.truncate(0);
+                let it = match_iter;
+                if let Some((_, used_flags)) = it.next(match_stack) {
                     let mut rhs_subs = workspace.new_atom();
 
                     let key = (rep_id, std::mem::take(&mut match_stack.stack.stack));
@@ -1550,7 +1567,15 @@ impl<'a> AtomView<'a> {
 
         let mut atom_iter = std::slice::from_ref(&rep)
             .iter()
-            .map(|x| AtomMatchIterator::new(x.borrow().pattern, *self))
+            .map(|r| {
+                (
+                    AtomMatchIterator::new(r.pattern, *self),
+                    WrappedMatchStack::new(
+                        r.conditions.unwrap_or(&DEFAULT_PATTERN_CONDITION),
+                        r.settings.unwrap_or(&DEFAULT_MATCH_SETTINGS),
+                    ),
+                )
+            })
             .collect::<Vec<_>>();
 
         let mut rhs_cache = HashMap::default();
@@ -3407,7 +3432,7 @@ impl<'a, 'b> WrappedMatchStack<'a, 'b> {
         }
 
         for (rk, rv) in self.stack.stack.iter() {
-            if rk == &identifier {
+            if *rk == identifier {
                 return match rv {
                     Match::Single(_) => (1, Some(1)),
                     Match::Multiple(slice_type, slice) => {
@@ -3428,7 +3453,7 @@ impl<'a, 'b> WrappedMatchStack<'a, 'b> {
             }
         }
 
-        let (minimal, maximal) = self.conditions.get_range_hint(identifier);
+        let (minimal, maximal) = self.conditions.get_range_hint(identifier); // TODO: precompute and store?
 
         match identifier.get_wildcard_level() {
             1 => (minimal.unwrap_or(1), Some(maximal.unwrap_or(1))), // x_
@@ -3489,6 +3514,7 @@ impl<'a, 'b> AtomMatchIterator<'a, 'b> {
     }
 
     /// Reuse the iterator for a new target atom.
+    #[inline]
     pub fn set_new_target(&mut self, target: AtomView<'a>) {
         self.target = target;
         self.try_match_atom = matches!(self.pattern, Pattern::Wildcard(_) | Pattern::Literal(_));
@@ -3579,10 +3605,8 @@ impl<'a> TypedSlice<'a> {
                 self.slice_type = SliceType::Add;
             }
             AtomView::Pow(p) => {
-                let (b, e) = p.get_base_exp();
                 self.data.clear();
-                self.data.push(b);
-                self.data.push(e);
+                self.data.extend(p.iter());
                 self.slice_type = SliceType::Pow;
             }
             AtomView::Fun(f) => {
@@ -4176,7 +4200,6 @@ impl<'a, 'b> SubSliceIterator<'a, 'b> {
 
                                 if let Some((x, _)) = s.next(match_stack) {
                                     *index = Some(ii);
-                                    //**s = Some(it); // overwrites existing iterator! FIXME!
                                     self.matches.push(x);
                                     self.used_flag[ii] = true;
 

@@ -357,7 +357,7 @@ pub enum SymbolAttribute {
 /// let (x, y) = symbol!("x", "y");
 /// let f = symbol!("f"; Symmetric);
 /// ```
-#[derive(Copy, Clone, Hash, PartialEq, Eq, PartialOrd, Ord)]
+#[derive(Copy, Clone, Eq)]
 #[cfg_attr(
     feature = "bincode",
     derive(bincode_trait_derive::BorrowDecodeFromDecode),
@@ -374,6 +374,31 @@ pub struct Symbol {
     is_real: bool,
     is_integer: bool,
     is_positive: bool,
+}
+
+impl Ord for Symbol {
+    fn cmp(&self, other: &Self) -> Ordering {
+        self.id.cmp(&other.id)
+    }
+}
+
+impl PartialOrd for Symbol {
+    fn partial_cmp(&self, other: &Self) -> Option<Ordering> {
+        Some(self.cmp(other))
+    }
+}
+
+impl std::hash::Hash for Symbol {
+    fn hash<H: std::hash::Hasher>(&self, state: &mut H) {
+        self.id.hash(state);
+    }
+}
+
+impl PartialEq for Symbol {
+    #[inline(always)]
+    fn eq(&self, other: &Self) -> bool {
+        self.id == other.id
+    }
 }
 
 impl std::fmt::Debug for Symbol {
@@ -403,7 +428,7 @@ impl std::fmt::Display for Symbol {
 impl<T: AtomCore> PartialEq<T> for Symbol {
     fn eq(&self, other: &T) -> bool {
         match other.as_atom_view() {
-            AtomView::Var(v) => *self == v.get_symbol(),
+            AtomView::Var(v) => self.get_id() == v.get_symbol_id(),
             _ => false,
         }
     }
@@ -680,6 +705,17 @@ impl Symbol {
     /// The string representation of [Symbol::SEP].
     pub const SEP_STR: &'static str = "‖";
 
+    pub(crate) const ARG_ID: u32 = State::ARG.id;
+    pub(crate) const EXP_ID: u32 = State::EXP.id;
+    pub(crate) const LOG_ID: u32 = State::LOG.id;
+    pub(crate) const SIN_ID: u32 = State::SIN.id;
+    pub(crate) const COS_ID: u32 = State::COS.id;
+    pub(crate) const SQRT_ID: u32 = State::SQRT.id;
+    pub(crate) const CONJ_ID: u32 = State::CONJ.id;
+    pub(crate) const DERIVATIVE_ID: u32 = State::DERIVATIVE.id;
+    pub(crate) const E_ID: u32 = State::E.id;
+    pub(crate) const PI_ID: u32 = State::PI.id;
+
     /// Create a builder for a new symbol with the given name and namespace.
     ///
     /// Use the [symbol!](crate::symbol) macro instead to define symbols in the current namespace.
@@ -752,6 +788,7 @@ impl Symbol {
     /// let x = symbol!("x");
     /// println!("id = {}", x.get_id());
     /// ```
+    #[inline(always)]
     pub fn get_id(&self) -> u32 {
         self.id
     }
@@ -1098,13 +1135,13 @@ impl Symbol {
         }
 
         if opts.mode.is_latex() {
-            match *self {
-                Symbol::E => f.write_char('e'),
-                Symbol::PI => f.write_str("\\pi"),
-                Symbol::COS => f.write_str("\\cos"),
-                Symbol::SIN => f.write_str("\\sin"),
-                Symbol::EXP => f.write_str("\\exp"),
-                Symbol::LOG => f.write_str("\\log"),
+            match self.get_id() {
+                Symbol::E_ID => f.write_char('e'),
+                Symbol::PI_ID => f.write_str("\\pi"),
+                Symbol::COS_ID => f.write_str("\\cos"),
+                Symbol::SIN_ID => f.write_str("\\sin"),
+                Symbol::EXP_ID => f.write_str("\\exp"),
+                Symbol::LOG_ID => f.write_str("\\log"),
                 _ => {
                     f.write_str(name)?;
                     if !opts.hide_all_namespaces {
@@ -1205,16 +1242,16 @@ impl Symbol {
                 f.write_fmt(format_args!("{}", name.purple()))
             } else if opts.mode.is_mathematica() {
                 if State::is_builtin(*self) {
-                    match *self {
-                        Symbol::E => f.write_str("E"),
-                        Symbol::PI => f.write_str("Pi"),
-                        Symbol::COS => f.write_str("Cos"),
-                        Symbol::SIN => f.write_str("Sin"),
-                        Symbol::EXP => f.write_str("Exp"),
-                        Symbol::LOG => f.write_str("Log"),
-                        Symbol::SQRT => f.write_str("Sqrt"),
-                        Symbol::CONJ => f.write_str("Conjugate"),
-                        Symbol::DERIVATIVE => f.write_str("Derivative"),
+                    match self.get_id() {
+                        Symbol::E_ID => f.write_str("E"),
+                        Symbol::PI_ID => f.write_str("Pi"),
+                        Symbol::COS_ID => f.write_str("Cos"),
+                        Symbol::SIN_ID => f.write_str("Sin"),
+                        Symbol::EXP_ID => f.write_str("Exp"),
+                        Symbol::LOG_ID => f.write_str("Log"),
+                        Symbol::SQRT_ID => f.write_str("Sqrt"),
+                        Symbol::CONJ_ID => f.write_str("Conjugate"),
+                        Symbol::DERIVATIVE_ID => f.write_str("Derivative"),
                         _ => f.write_str(name),
                     }
                 } else {

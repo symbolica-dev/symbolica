@@ -2937,13 +2937,13 @@ impl AtomView<'_> {
             AtomView::Var(v) => {
                 let s = v.get_symbol();
 
-                match s {
-                    Symbol::PI => {
+                match s.get_id() {
+                    Symbol::PI_ID => {
                         out.to_num(Coefficient::Float(
                             Float::with_val(binary_prec, rug::float::Constant::Pi).into(),
                         ));
                     }
-                    Symbol::E => {
+                    Symbol::E_ID => {
                         out.to_num(Coefficient::Float(
                             Float::with_val(binary_prec, 1).exp().into(),
                         ));
@@ -3214,6 +3214,33 @@ mod test {
         let a = a.replace(v2).with(Atom::num(3)).expand();
 
         assert_eq!(a, expr);
+    }
+
+    #[test]
+    fn bug() {
+        let expr = parse!("v1*v3+v1*(v2+2)^-1");
+
+        let v2 = symbol!("v2");
+        let expr_yz = expr.set_coefficient_ring(&Arc::new(vec![v2.into(), symbol!("v3").into()]));
+
+        let a = expr_yz.set_coefficient_ring(&Arc::new(vec![]));
+
+        let expr = expr.replace(v2).with(Atom::num(3)).expand();
+
+        println!("expr: {}", expr);
+        println!("a: {}", a);
+
+        let a = a.replace(v2).with(Atom::num(3)).expand();
+        println!("a: {}", a);
+
+        assert_eq!(a, expr);
+    }
+
+    #[test]
+    fn bug2() {
+        let e = parse!("v1*v2*(1+v2)");
+        let a = e.replace(symbol!("v2")).with(Atom::num(1));
+        println!("a: {}", a);
     }
 
     #[test]
