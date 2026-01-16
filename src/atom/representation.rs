@@ -2139,6 +2139,21 @@ impl<'a> Iterator for ListIterator<'a> {
     }
 }
 
+impl<'a> ListIterator<'a> {
+    #[inline]
+    pub fn len(&self) -> usize {
+        self.length as usize
+    }
+
+    #[inline]
+    pub fn from_one(atom: AtomView<'a>) -> Self {
+        ListIterator {
+            data: atom.get_data(),
+            length: 1,
+        }
+    }
+}
+
 /// A slice of a list of atoms.
 #[derive(Debug, Copy, Clone, PartialEq, Eq)]
 pub struct ListSlice<'a> {
@@ -2221,9 +2236,7 @@ impl<'a> ListSlice<'a> {
             end,
         )
     }
-}
 
-impl<'a> ListSlice<'a> {
     #[inline]
     pub fn len(&self) -> usize {
         self.length

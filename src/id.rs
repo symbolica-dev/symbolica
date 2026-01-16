@@ -23,7 +23,7 @@ use dyn_clone::DynClone;
 
 use crate::{
     atom::{
-        Atom, AtomCore, AtomType, AtomView, Indeterminate, SliceType, Symbol,
+        Atom, AtomCore, AtomType, AtomView, Indeterminate, ListIterator, SliceType, Symbol,
         representation::InlineVar,
     },
     coefficient::{Coefficient, CoefficientView},
@@ -4359,25 +4359,28 @@ impl<'a, 'b> SubSliceIterator<'a, 'b> {
 
 /// Iterator over the atoms of an expression tree.
 pub struct AtomTreeIterator<'a> {
-    stack: Vec<(Option<usize>, usize, AtomView<'a>)>,
+    stack: Vec<(Option<usize>, usize, ListIterator<'a>)>,
     settings: MatchSettings,
 }
 
 impl<'a> AtomTreeIterator<'a> {
+    /// Create a new iterator over the atom tree of `target`.
     pub fn new(target: AtomView<'a>, settings: MatchSettings) -> AtomTreeIterator<'a> {
         AtomTreeIterator {
-            stack: vec![(None, 0, target)],
+            stack: vec![(None, 0, ListIterator::from_one(target))],
             settings,
         }
     }
-}
 
-impl<'a> Iterator for AtomTreeIterator<'a> {
-    type Item = (Vec<usize>, AtomView<'a>);
+    /// Reset the iterator to a new target.
+    pub fn reset(&mut self, target: AtomView<'a>) {
+        self.stack.clear();
+        self.stack.push((None, 0, ListIterator::from_one(target)));
+    }
 
-    /// Return the next position and atom in the tree.
-    fn next(&mut self) -> Option<Self::Item> {
-        while let Some((ind, level, atom)) = self.stack.pop() {
+    /// Return the next atom in the tree, writing the position into `position` if provided.
+    pub fn next_into(&mut self, mut position: Option<&mut Vec<usize>>) -> Option<AtomView<'a>> {
+        while let Some((ind, level, mut slice)) = self.stack.pop() {
             if let Some(max_level) = self.settings.level_range.1
                 && level > max_level
             {
@@ -4385,42 +4388,37 @@ impl<'a> Iterator for AtomTreeIterator<'a> {
             }
 
             if let Some(ind) = ind {
-                let slice = match atom {
-                    AtomView::Fun(f) => f.to_slice(),
-                    AtomView::Pow(p) => p.to_slice(),
-                    AtomView::Mul(m) => m.to_slice(),
-                    AtomView::Add(a) => a.to_slice(),
-                    _ => {
-                        continue; // not iterable
-                    }
-                };
-
-                if ind < slice.len() {
-                    let new_atom = slice.get(ind);
-
-                    self.stack.push((Some(ind + 1), level, atom));
-                    self.stack.push((None, level, new_atom)); // push the new element on the stack
+                if let Some(sub_atom) = slice.next() {
+                    self.stack.push((Some(ind + 1), level, slice)); // push back the current slice
+                    self.stack
+                        .push((None, level, ListIterator::from_one(sub_atom))); // push the new element on the stack
                 }
             } else {
-                // return full match and set the position to the first sub element
-                let location = self
-                    .stack
-                    .iter()
-                    .map(|(ind, _, _)| ind.unwrap() - 1)
-                    .collect::<Vec<_>>();
+                if let Some(position) = position.as_mut() {
+                    position.clear();
+                    for s in &self.stack {
+                        position.push(s.0.unwrap() - 1);
+                    }
+                }
 
-                let new_level = if let AtomView::Fun(_) = atom {
-                    level + 1
-                } else if self.settings.level_is_tree_depth {
+                let atom = slice.next().unwrap();
+
+                let new_level = if self.settings.level_is_tree_depth {
                     level + 1
                 } else {
                     level
                 };
 
-                self.stack.push((Some(0), new_level, atom));
+                match atom {
+                    AtomView::Fun(f) => self.stack.push((Some(0), level + 1, f.iter())),
+                    AtomView::Pow(p) => self.stack.push((Some(0), new_level, p.iter())),
+                    AtomView::Mul(m) => self.stack.push((Some(0), new_level, m.iter())),
+                    AtomView::Add(a) => self.stack.push((Some(0), new_level, a.iter())),
+                    _ => {}
+                }
 
                 if level >= self.settings.level_range.0 {
-                    return Some((location, atom));
+                    return Some(atom);
                 }
             }
         }
@@ -4429,14 +4427,26 @@ impl<'a> Iterator for AtomTreeIterator<'a> {
     }
 }
 
+impl<'a> Iterator for AtomTreeIterator<'a> {
+    type Item = (Vec<usize>, AtomView<'a>);
+
+    /// Return the next position and atom in the tree.
+    fn next(&mut self) -> Option<Self::Item> {
+        let mut location = Vec::new();
+        match self.next_into(Some(&mut location)) {
+            Some(atom) => Some((location, atom)),
+            None => None,
+        }
+    }
+}
+
 /// Match a pattern to any subexpression of a target expression.
 pub struct PatternAtomTreeIterator<'a, 'b> {
-    pattern: &'b Pattern,
     atom_tree_iterator: AtomTreeIterator<'a>,
-    current_target: Option<AtomView<'a>>,
-    pattern_iter: Option<AtomMatchIterator<'a, 'b>>,
+    pattern_iter: AtomMatchIterator<'a, 'b>,
     match_stack: WrappedMatchStack<'a, 'b>,
     tree_pos: Vec<usize>,
+    used_flags: Vec<bool>,
     first_match: bool,
 }
 
@@ -4445,7 +4455,7 @@ pub struct PatternMatch<'a, 'b> {
     /// The position (branch) of the match in the tree.
     pub position: &'b [usize],
     /// Flags which subexpressions are matched in case of matching a range.
-    pub used_flags: Vec<bool>,
+    pub used_flags: &'b [bool],
     /// The matched target.
     pub target: AtomView<'a>,
     /// The list of identifications of matched wildcards.
@@ -4459,59 +4469,45 @@ impl<'a: 'b, 'b> PatternAtomTreeIterator<'a, 'b> {
         conditions: Option<&'b Condition<PatternRestriction>>,
         settings: Option<&'b MatchSettings>,
     ) -> PatternAtomTreeIterator<'a, 'b> {
+        let mut it =
+            AtomTreeIterator::new(target, settings.unwrap_or(&DEFAULT_MATCH_SETTINGS).clone());
+        it.next(); // prevent a repeated match attempt on the entire target
+
         PatternAtomTreeIterator {
-            pattern,
-            atom_tree_iterator: AtomTreeIterator::new(
-                target,
-                settings.unwrap_or(&DEFAULT_MATCH_SETTINGS).clone(),
-            ),
-            current_target: None,
-            pattern_iter: None,
+            atom_tree_iterator: it,
+            pattern_iter: AtomMatchIterator::new(pattern, target),
             match_stack: WrappedMatchStack::new(
                 conditions.unwrap_or(&DEFAULT_PATTERN_CONDITION),
                 settings.unwrap_or(&DEFAULT_MATCH_SETTINGS),
             ),
             tree_pos: Vec::new(),
+            used_flags: Vec::new(),
             first_match: false,
         }
     }
 
     /// Generate the next match if it exists, with detailed information about the
-    /// matched position. Use the iterator [Self::next] to a map of wildcard matches.
+    /// matched position. Use the iterator [Self::next] to obtain a map of wildcard matches.
     pub fn next_detailed(&mut self) -> Option<PatternMatch<'a, '_>> {
         loop {
-            if let Some(ct) = self.current_target {
-                if let Some(it) = self.pattern_iter.as_mut() {
-                    if let Some((_, used_flags)) = it.next(&mut self.match_stack) {
-                        let a = used_flags.to_vec();
+            if let Some((_, used_flags)) = self.pattern_iter.next(&mut self.match_stack) {
+                // duplicate matches are prevented because the atom match iterator does not match to single atoms in a list
+                self.used_flags.clear();
+                self.used_flags.extend_from_slice(used_flags);
 
-                        self.first_match = true;
-                        return Some(PatternMatch {
-                            position: &self.tree_pos,
-                            used_flags: a,
-                            target: ct,
-                            match_stack: &self.match_stack.stack,
-                        });
-                    } else {
-                        // no match: bail
-                        self.current_target = None;
-                        self.pattern_iter = None;
-                        continue;
-                    }
-                } else {
-                    // prevent duplicate matches by not matching to single atoms in a list as they will
-                    // be tested at a later stage in the atom tree iterator, as we want to store the position
-                    self.pattern_iter = Some(AtomMatchIterator::new(self.pattern, ct));
-                }
+                self.first_match = true;
+                return Some(PatternMatch {
+                    position: &self.tree_pos,
+                    used_flags: &self.used_flags,
+                    target: self.pattern_iter.target,
+                    match_stack: &self.match_stack.stack,
+                });
+            }
+
+            if let Some(cur_target) = self.atom_tree_iterator.next_into(Some(&mut self.tree_pos)) {
+                self.pattern_iter.set_new_target(cur_target);
             } else {
-                let res = self.atom_tree_iterator.next();
-
-                if let Some((tree_pos, cur_target)) = res {
-                    self.tree_pos = tree_pos;
-                    self.current_target = Some(cur_target);
-                } else {
-                    return None;
-                }
+                return None;
             }
         }
     }
@@ -4737,11 +4733,47 @@ impl<'a: 'b, 'b> Iterator for ReplaceIterator<'a, 'b> {
 mod test {
     use crate::{
         atom::{Atom, AtomCore},
-        id::{Condition, ConditionResult, Match, Replacement},
+        id::{AtomTreeIterator, Condition, ConditionResult, Match, MatchSettings, Replacement},
         parse,
         printer::PrintOptions,
         symbol,
     };
+
+    #[test]
+    fn atom_tree_iterator() {
+        let a = parse!("v1*f1(v2 + v3, v3^2, f1(v1))");
+        let mut it = AtomTreeIterator::new(a.as_view(), MatchSettings::default());
+        assert_eq!(it.next().unwrap(), (vec![], a.as_view()));
+        assert_eq!(it.next().unwrap(), (vec![0], parse!("v1").as_view()));
+        assert_eq!(
+            it.next().unwrap(),
+            (vec![1], parse!("f1(v2+v3,v3^2,f1(v1))").as_view()),
+        );
+        assert_eq!(it.next().unwrap(), (vec![1, 0], parse!("v2+v3").as_view()),);
+        assert_eq!(it.next().unwrap(), (vec![1, 0, 0], parse!("v2").as_view()));
+        assert_eq!(it.next().unwrap(), (vec![1, 0, 1], parse!("v3").as_view()));
+        assert_eq!(it.next().unwrap(), (vec![1, 1], parse!("v3^2").as_view()));
+        assert_eq!(it.next().unwrap(), (vec![1, 1, 0], parse!("v3").as_view()));
+        assert_eq!(it.next().unwrap(), (vec![1, 1, 1], parse!("2").as_view()));
+        assert_eq!(it.next().unwrap(), (vec![1, 2], parse!("f1(v1)").as_view()));
+        assert_eq!(it.next().unwrap(), (vec![1, 2, 0], parse!("v1").as_view()));
+        assert!(it.next().is_none());
+    }
+
+    #[test]
+    fn replace_iter() {
+        let a = parse!("v1*v2*v3*f1(v4)");
+        let pat = a.replace(parse!("x_"));
+        let mut it = pat.iter(parse!("v5"));
+
+        assert_eq!(it.next().unwrap(), parse!("v5"));
+        assert_eq!(it.next().unwrap(), parse!("v2*v3*v5*f1(v4)"));
+        assert_eq!(it.next().unwrap(), parse!("v1*v3*v5*f1(v4)"));
+        assert_eq!(it.next().unwrap(), parse!("v1*v2*v5*f1(v4)"));
+        assert_eq!(it.next().unwrap(), parse!("v1*v2*v3*v5"));
+        assert_eq!(it.next().unwrap(), parse!("v1*v2*v3*f1(v5)"));
+        assert!(it.next().is_none());
+    }
 
     #[test]
     fn replace_wildcards_with_map() {
