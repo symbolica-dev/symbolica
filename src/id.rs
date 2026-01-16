@@ -248,6 +248,7 @@ pub struct ReplaceBuilder<'a, 'b> {
     conditions: Option<BorrowedOrOwned<'b, Condition<PatternRestriction>>>,
     settings: MatchSettings,
     repeat: bool,
+    once: bool,
 }
 
 impl<'a, 'b> ReplaceBuilder<'a, 'b> {
@@ -261,6 +262,7 @@ impl<'a, 'b> ReplaceBuilder<'a, 'b> {
             conditions: None,
             settings: MatchSettings::default(),
             repeat: false,
+            once: false,
         }
     }
 
@@ -308,6 +310,12 @@ impl<'a, 'b> ReplaceBuilder<'a, 'b> {
         self
     }
 
+    /// Perform one replacement instead of replacing all non-overlapping occurrences.
+    pub fn once(mut self) -> Self {
+        self.once = true;
+        self
+    }
+
     /// Execute the replacement by specifying the right-hand side.
     ///
     /// To use a map as a right-hand side, use [ReplaceBuilder::with_map].
@@ -321,6 +329,7 @@ impl<'a, 'b> ReplaceBuilder<'a, 'b> {
             &rhs,
             self.conditions.as_ref().map(|x| x.borrow()),
             Some(&self.settings),
+            self.once,
             &mut out,
         ) {
             if !self.repeat || expr_ref == out.as_view() {
@@ -350,6 +359,7 @@ impl<'a, 'b> ReplaceBuilder<'a, 'b> {
             &rhs,
             self.conditions.as_ref().map(|x| x.borrow()),
             Some(&self.settings),
+            self.once,
             out,
         ) {
             replaced = true;
@@ -403,6 +413,7 @@ impl<'a, 'b> ReplaceBuilder<'a, 'b> {
             &rhs,
             self.conditions.as_ref().map(|x| x.borrow()),
             Some(&self.settings),
+            self.once,
             &mut out,
         ) {
             if !self.repeat {
@@ -1208,17 +1219,26 @@ impl<'a> AtomView<'a> {
         rhs: R,
         conditions: Option<&Condition<PatternRestriction>>,
         settings: Option<&MatchSettings>,
+        replace_once: bool,
         out: &mut Atom,
     ) -> bool {
         Workspace::get_local().with(|ws| {
-            self.replace_with_ws_into(pattern, rhs.into(), ws, conditions, settings, out)
+            self.replace_with_ws_into(
+                pattern,
+                rhs.into(),
+                ws,
+                conditions,
+                settings,
+                replace_once,
+                out,
+            )
         })
     }
 
     /// Replace all occurrences of the patterns, where replacements are tested in the order that they are given.
     pub(crate) fn replace_multiple<T: BorrowReplacement>(&self, replacements: &[T]) -> Atom {
         let mut out = Atom::new();
-        self.replace_multiple_into(replacements, &mut out);
+        self.replace_multiple_into(replacements, false, &mut out);
         out
     }
 
@@ -1227,6 +1247,7 @@ impl<'a> AtomView<'a> {
     pub(crate) fn replace_multiple_into<T: BorrowReplacement>(
         &self,
         replacements: &[T],
+        replace_once: bool,
         out: &mut Atom,
     ) -> bool {
         let mut atom_iter = replacements
@@ -1252,6 +1273,7 @@ impl<'a> AtomView<'a> {
                 0,
                 0,
                 &mut rhs_cache,
+                replace_once,
                 &mut set,
             );
 
@@ -1276,6 +1298,7 @@ impl<'a> AtomView<'a> {
         tree_level: usize,
         fn_level: usize,
         rhs_cache: &mut HashMap<(usize, Vec<(Symbol, Match<'a>)>), Atom>,
+        replace_once: bool,
         out: &mut Settable<Atom>,
     ) {
         let mut beyond_max_level = true;
@@ -1418,11 +1441,24 @@ impl<'a> AtomView<'a> {
                         tree_level + 1,
                         fn_level + 1,
                         rhs_cache,
+                        replace_once,
                         &mut set,
                     );
 
                     if fun.is_none() && set.is_set() {
                         let fun_o = out.to_fun(f.get_symbol());
+
+                        if replace_once {
+                            for (index, child) in f.iter().enumerate() {
+                                if index == i {
+                                    fun_o.add_arg(set.as_view());
+                                } else {
+                                    fun_o.add_arg(child);
+                                }
+                            }
+                            return;
+                        }
+
                         for child in f.iter().take(i) {
                             fun_o.add_arg(child);
                         }
@@ -1450,8 +1486,14 @@ impl<'a> AtomView<'a> {
                     tree_level + 1,
                     fn_level,
                     rhs_cache,
+                    replace_once,
                     &mut base_set,
                 );
+
+                if base_set.is_set() && replace_once {
+                    out.to_pow(base_set.as_view(), exp);
+                    return;
+                }
 
                 let mut exp_out = workspace.new_atom();
                 let mut exp_set = Settable::from(exp_out.deref_mut());
@@ -1462,6 +1504,7 @@ impl<'a> AtomView<'a> {
                     tree_level + 1,
                     fn_level,
                     rhs_cache,
+                    replace_once,
                     &mut exp_set,
                 );
 
@@ -1486,11 +1529,23 @@ impl<'a> AtomView<'a> {
                         tree_level + 1,
                         fn_level,
                         rhs_cache,
+                        replace_once,
                         &mut set,
                     );
 
                     if mul.is_none() && set.is_set() {
                         let mul_o = out.to_mul();
+
+                        if replace_once {
+                            for (index, child) in m.iter().enumerate() {
+                                if index == i {
+                                    mul_o.extend(set.as_view());
+                                } else {
+                                    mul_o.extend(child);
+                                }
+                            }
+                            return;
+                        }
 
                         for child in m.iter().take(i) {
                             mul_o.extend(child);
@@ -1523,11 +1578,23 @@ impl<'a> AtomView<'a> {
                         tree_level + 1,
                         fn_level,
                         rhs_cache,
+                        replace_once,
                         &mut set,
                     );
 
                     if add.is_none() && set.is_set() {
                         let add_o = out.to_add();
+
+                        if replace_once {
+                            for (index, child) in a.iter().enumerate() {
+                                if index == i {
+                                    add_o.extend(set.as_view());
+                                } else {
+                                    add_o.extend(child);
+                                }
+                            }
+                            return;
+                        }
 
                         for child in a.iter().take(i) {
                             add_o.extend(child);
@@ -1556,6 +1623,7 @@ impl<'a> AtomView<'a> {
         workspace: &Workspace,
         conditions: Option<&Condition<PatternRestriction>>,
         settings: Option<&MatchSettings>,
+        replace_once: bool,
         out: &mut Atom,
     ) -> bool {
         let rep = BorrowedReplacement {
@@ -1587,6 +1655,7 @@ impl<'a> AtomView<'a> {
             0,
             0,
             &mut rhs_cache,
+            replace_once,
             &mut set,
         );
 

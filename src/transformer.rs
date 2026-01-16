@@ -207,6 +207,7 @@ pub enum Transformer {
         ReplaceWith<'static>,
         Condition<PatternRestriction>,
         MatchSettings,
+        bool,
     ),
     /// Apply multiple find-and-replace on the lhs.
     ReplaceAllMultiple(Vec<Replacement>),
@@ -707,18 +708,19 @@ impl Transformer {
                         std::mem::swap(out, &mut tmp);
                     }
                 }
-                Transformer::ReplaceAll(pat, rhs, cond, settings) => {
+                Transformer::ReplaceAll(pat, rhs, cond, settings, once) => {
                     cur_input.replace_with_ws_into(
                         pat,
                         rhs,
                         workspace,
                         cond.into(),
                         settings.into(),
+                        *once,
                         out,
                     );
                 }
                 Transformer::ReplaceAllMultiple(replacements) => {
-                    cur_input.replace_multiple_into(replacements, out);
+                    cur_input.replace_multiple_into(replacements, false, out);
                 }
                 Transformer::Product => {
                     if let AtomView::Fun(f) = cur_input
@@ -1107,6 +1109,7 @@ mod test {
                         parse!("x__").to_pattern().into(),
                         Condition::default(),
                         MatchSettings::default(),
+                        false,
                     ),
                     Transformer::Sort,
                     Transformer::Deduplicate,
@@ -1155,6 +1158,7 @@ mod test {
                             )
                                 .into(),
                             MatchSettings::default(),
+                            false,
                         ),
                     ])],
                 )])],
