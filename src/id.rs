@@ -1263,6 +1263,17 @@ impl<'a> AtomView<'a> {
             })
             .collect::<Vec<_>>();
 
+        let max_level = atom_iter.iter().fold(Some((0, true)), |acc, (_, stack)| {
+            acc.and_then(|(max_level, tree)| {
+                stack.settings.level_range.1.map(|level| {
+                    (
+                        max_level.max(level),
+                        tree && stack.settings.level_is_tree_depth,
+                    )
+                })
+            })
+        });
+
         Workspace::get_local().with(|ws| {
             let mut rhs_cache = HashMap::default();
             let mut set = Settable::from(&mut *out);
@@ -1272,6 +1283,7 @@ impl<'a> AtomView<'a> {
                 ws,
                 0,
                 0,
+                max_level,
                 &mut rhs_cache,
                 replace_once,
                 &mut set,
@@ -1297,11 +1309,11 @@ impl<'a> AtomView<'a> {
         workspace: &Workspace,
         tree_level: usize,
         fn_level: usize,
+        max_level: Option<(usize, bool)>,
         rhs_cache: &mut HashMap<(usize, Vec<(Symbol, Match<'a>)>), Atom>,
         replace_once: bool,
         out: &mut Settable<Atom>,
     ) {
-        let mut beyond_max_level = true;
         let mut fits = false;
         for (rep_id, r) in replacements.iter().enumerate() {
             let r = r.borrow();
@@ -1322,8 +1334,6 @@ impl<'a> AtomView<'a> {
             {
                 continue;
             }
-
-            beyond_max_level = false;
 
             if settings.level_is_tree_depth && tree_level < settings.level_range.0
                 || !settings.level_is_tree_depth && fn_level < settings.level_range.0
@@ -1422,13 +1432,19 @@ impl<'a> AtomView<'a> {
             }
         }
 
-        if beyond_max_level || !fits {
+        if !fits {
             return;
         }
 
         // no match found at this level, so check the children
         match self {
             AtomView::Fun(f) => {
+                if let Some((max_level, _)) = max_level
+                    && fn_level >= max_level
+                {
+                    return;
+                }
+
                 let mut fun = None;
 
                 let mut child_buf = workspace.new_atom();
@@ -1440,6 +1456,7 @@ impl<'a> AtomView<'a> {
                         workspace,
                         tree_level + 1,
                         fn_level + 1,
+                        max_level,
                         rhs_cache,
                         replace_once,
                         &mut set,
@@ -1475,6 +1492,12 @@ impl<'a> AtomView<'a> {
                 }
             }
             AtomView::Pow(p) => {
+                if let Some((max_level, true)) = max_level
+                    && tree_level >= max_level
+                {
+                    return;
+                }
+
                 let (base, exp) = p.get_base_exp();
 
                 let mut base_out = workspace.new_atom();
@@ -1485,6 +1508,7 @@ impl<'a> AtomView<'a> {
                     workspace,
                     tree_level + 1,
                     fn_level,
+                    max_level,
                     rhs_cache,
                     replace_once,
                     &mut base_set,
@@ -1503,6 +1527,7 @@ impl<'a> AtomView<'a> {
                     workspace,
                     tree_level + 1,
                     fn_level,
+                    max_level,
                     rhs_cache,
                     replace_once,
                     &mut exp_set,
@@ -1517,6 +1542,12 @@ impl<'a> AtomView<'a> {
                 }
             }
             AtomView::Mul(m) => {
+                if let Some((max_level, true)) = max_level
+                    && tree_level >= max_level
+                {
+                    return;
+                }
+
                 let mut mul = None;
 
                 let mut child_buf = workspace.new_atom();
@@ -1528,6 +1559,7 @@ impl<'a> AtomView<'a> {
                         workspace,
                         tree_level + 1,
                         fn_level,
+                        max_level,
                         rhs_cache,
                         replace_once,
                         &mut set,
@@ -1566,6 +1598,11 @@ impl<'a> AtomView<'a> {
                 }
             }
             AtomView::Add(a) => {
+                if let Some((max_level, true)) = max_level
+                    && tree_level >= max_level
+                {
+                    return;
+                }
                 let mut add = None;
 
                 let mut child_buf = workspace.new_atom();
@@ -1577,6 +1614,7 @@ impl<'a> AtomView<'a> {
                         workspace,
                         tree_level + 1,
                         fn_level,
+                        max_level,
                         rhs_cache,
                         replace_once,
                         &mut set,
@@ -1646,6 +1684,17 @@ impl<'a> AtomView<'a> {
             })
             .collect::<Vec<_>>();
 
+        let max_level = atom_iter.iter().fold(Some((0, true)), |acc, (_, stack)| {
+            acc.and_then(|(max_level, tree)| {
+                stack.settings.level_range.1.map(|level| {
+                    (
+                        max_level.max(level),
+                        tree && stack.settings.level_is_tree_depth,
+                    )
+                })
+            })
+        });
+
         let mut rhs_cache = HashMap::default();
         let mut set = Settable::from(&mut *out);
         self.replace_no_norm(
@@ -1654,6 +1703,7 @@ impl<'a> AtomView<'a> {
             workspace,
             0,
             0,
+            max_level,
             &mut rhs_cache,
             replace_once,
             &mut set,
