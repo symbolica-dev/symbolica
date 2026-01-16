@@ -2822,7 +2822,7 @@ impl PythonTransformer {
     /// rhs_cache_size: int, optional
     ///     Cache the first `rhs_cache_size` substituted patterns. If set to `None`, an internally determined cache size is used.
     ///     **Warning**: caching should be disabled (`rhs_cache_size=0`) if the right-hand side contains side effects, such as updating a global variable.
-    #[pyo3(signature = (lhs, rhs, cond = None, non_greedy_wildcards = None, level_range = None, level_is_tree_depth = None, allow_new_wildcards_on_rhs = None, rhs_cache_size = None))]
+    #[pyo3(signature = (lhs, rhs, cond = None, non_greedy_wildcards = None, level_range = None, level_is_tree_depth = None, allow_new_wildcards_on_rhs = None, rhs_cache_size = None, once = false))]
     pub fn replace(
         &self,
         lhs: ConvertibleToExpression,
@@ -2833,6 +2833,7 @@ impl PythonTransformer {
         level_is_tree_depth: Option<bool>,
         allow_new_wildcards_on_rhs: Option<bool>,
         rhs_cache_size: Option<usize>,
+        once: bool,
     ) -> PyResult<PythonTransformer> {
         let mut settings = MatchSettings::cached();
 
@@ -2873,6 +2874,7 @@ impl PythonTransformer {
             rhs.to_replace_with()?,
             cond.map(|r| r.0).unwrap_or_default(),
             settings,
+            once,
         ))
     }
 
@@ -6454,7 +6456,7 @@ impl PythonExpression {
     ///      Warning: caching should be disabled (`rhs_cache_size=0`) if the right-hand side contains side effects, such as updating a global variable.
     /// repeat: bool, optional
     ///     If set to `True`, the entire operation will be repeated until there are no more matches.
-    #[pyo3(signature = (pattern, rhs, cond = None, non_greedy_wildcards = None, level_range = None, level_is_tree_depth = None, allow_new_wildcards_on_rhs = None, rhs_cache_size = None, repeat = None))]
+    #[pyo3(signature = (pattern, rhs, cond = None, non_greedy_wildcards = None, level_range = None, level_is_tree_depth = None, allow_new_wildcards_on_rhs = None, rhs_cache_size = None, repeat = false, once = false))]
     pub fn replace(
         &self,
         pattern: ConvertibleToExpression,
@@ -6465,7 +6467,8 @@ impl PythonExpression {
         level_is_tree_depth: Option<bool>,
         allow_new_wildcards_on_rhs: Option<bool>,
         rhs_cache_size: Option<usize>,
-        repeat: Option<bool>,
+        repeat: bool,
+        once: bool,
     ) -> PyResult<PythonExpression> {
         let pattern = pattern.to_expression().expr.to_pattern();
         let rhs = &rhs.to_replace_with()?;
@@ -6510,8 +6513,15 @@ impl PythonExpression {
 
         let mut out = RecycledAtom::new();
         let mut out2 = RecycledAtom::new();
-        while expr_ref.replace_into(&pattern, rhs, cond.as_ref(), Some(&settings), &mut out) {
-            if !repeat.unwrap_or(false) {
+        while expr_ref.replace_into(
+            &pattern,
+            rhs,
+            cond.as_ref(),
+            Some(&settings),
+            once,
+            &mut out,
+        ) {
+            if !repeat {
                 break;
             }
 
@@ -6556,7 +6566,7 @@ impl PythonExpression {
 
         let mut out = RecycledAtom::new();
         let mut out2 = RecycledAtom::new();
-        while expr_ref.replace_multiple_into(&reps, &mut out) {
+        while expr_ref.replace_multiple_into(&reps, false, &mut out) {
             if !repeat.unwrap_or(false) {
                 break;
             }

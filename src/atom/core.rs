@@ -1722,7 +1722,8 @@ pub trait AtomCore: private::Sealed {
         replacements: &[T],
         out: &mut Atom,
     ) -> bool {
-        self.as_atom_view().replace_multiple_into(replacements, out)
+        self.as_atom_view()
+            .replace_multiple_into(replacements, false, out)
     }
 
     /// Replace part of an expression by calling the map `m` on each subexpression.

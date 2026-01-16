@@ -1876,7 +1876,8 @@ class Expression:
         level_is_tree_depth: Optional[bool] = False,
         allow_new_wildcards_on_rhs: Optional[bool] = False,
         rhs_cache_size: Optional[int] = None,
-        repeat: Optional[bool] = False,
+        repeat: bool = False,
+        once: bool = False,
     ) -> Expression:
         """
         Replace all subexpressions matching the pattern `pattern` by the right-hand side `rhs`.
@@ -1915,6 +1916,8 @@ class Expression:
             **Warning**: caching should be disabled (`rhs_cache_size=0`) if the right-hand side contains side effects, such as updating a global variable.
         repeat: bool, optional
             If set to `True`, the entire operation will be repeated until there are no more matches.
+        once: bool, optional
+            If set to `True`, only the first match will be replaced, instead of all non-overlapping matches.
         """
 
     def replace_multiple(self, replacements: Sequence[Replacement],  repeat: Optional[bool] = False) -> Expression:
@@ -2994,6 +2997,7 @@ class Transformer:
         level_is_tree_depth: Optional[bool] = False,
         allow_new_wildcards_on_rhs: Optional[bool] = False,
         rhs_cache_size: Optional[int] = None,
+        once: bool = False,
     ) -> Transformer:
         """
         Create a transformer that replaces all subexpressions matching the pattern `pat` by the right-hand side `rhs`.
@@ -3026,6 +3030,8 @@ class Transformer:
         rhs_cache_size: int, optional
             Cache the first `rhs_cache_size` substituted patterns. If set to `None`, an internally determined cache size is used.
             **Warning**: caching should be disabled (`rhs_cache_size=0`) if the right-hand side contains side effects, such as updating a global variable.
+        once: bool, optional
+            If set to `True`, only the first match will be replaced, instead of all non-overlapping matches.
         """
 
     def replace_multiple(self, replacements: Sequence[Replacement]) -> Transformer:
