@@ -818,7 +818,7 @@ impl FormattedPrintMul for MulView<'_> {
         // write the coefficient first
         let mut first = true;
         let mut skip_num = false;
-        if let Some(AtomView::Num(n)) = self.iter().last() {
+        if let Some(AtomView::Num(n)) = self.iter().next() {
             print_state.suppress_one = true;
             first = n.fmt_output(f, opts, print_state)?;
             print_state.suppress_one = false;
@@ -838,11 +838,7 @@ impl FormattedPrintMul for MulView<'_> {
         print_state.level += 1;
         print_state.in_sum = false;
 
-        for x in self.iter().take(if skip_num {
-            self.get_nargs() - 1
-        } else {
-            self.get_nargs()
-        }) {
+        for x in self.iter().skip(if skip_num { 1 } else { 0 }) {
             if !first {
                 if opts.mode.is_latex() {
                     f.write_char(' ')?;
@@ -1161,7 +1157,7 @@ mod test {
         if ShouldColorize::from_env().should_colorize() {
             assert_eq!(
                 format!("{}", a.printer(PrintOptions::short())),
-                "1/5*f(x,y^2)^(x+z)\u{1b}[33m+\u{1b}[0m3"
+                "3\u{1b}[33m+\u{1b}[0m1/5*f(x,y^2)^(x+z)"
             );
         } else {
             assert_eq!(
@@ -1175,7 +1171,7 @@ mod test {
                 "{}",
                 AtomPrinter::new_with_options(a.as_view(), PrintOptions::latex())
             ),
-            "\\frac{1}{5} f\\!\\left(x,y^{2}\\right)^{x+z}+3"
+            "3+\\frac{1}{5} f\\!\\left(x,y^{2}\\right)^{x+z}"
         );
 
         assert_eq!(
@@ -1183,7 +1179,7 @@ mod test {
                 "{}",
                 AtomPrinter::new_with_options(a.as_view(), PrintOptions::mathematica())
             ),
-            "1/5 f[x,y^2]^(x+z)+3"
+            "3+1/5 f[x,y^2]^(x+z)"
         );
 
         let a = parse!("8127389217 x^2");
@@ -1256,13 +1252,13 @@ mod test {
 
     #[test]
     fn base_parentheses() {
-        let a = parse!("(-1)^(x+1)-(1/2)^x");
+        let a = parse!("(-1)^(1+x)-(1/2)^x");
         assert_eq!(
             format!(
                 "{}",
                 AtomPrinter::new_with_options(a.as_view(), PrintOptions::file_no_namespace())
             ),
-            "(-1)^(x+1)-(1/2)^x"
+            "(-1)^(1+x)-(1/2)^x"
         )
     }
 
