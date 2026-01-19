@@ -1137,47 +1137,40 @@ impl Mul {
         cursor.put_u32_le((new_buf_pos - buf_pos) as u32);
     }
 
-    pub(crate) fn replace_last(&mut self, other: AtomView) {
+    pub(crate) fn replace_first(&mut self, other: AtomView) {
         let mut c = &self.data[1 + 4..];
 
-        let buf_pos = 1 + 4;
+        (_, _, c) = c.get_frac_u64(); // TODO: pack size and n_args
 
-        let n_args;
-        (n_args, _, c) = c.get_frac_u64(); // TODO: pack size and n_args
+        let first_arg_start = unsafe { c.as_ptr().offset_from(self.data.as_ptr()) } as usize;
 
-        let old_size = unsafe { c.as_ptr().offset_from(self.data.as_ptr()) } as usize - 1 - 4;
+        // get size of first arg
+        let aa = self.to_mul_view().to_slice().get(0);
 
-        let new_size = (n_args, 1).get_packed_size() as usize;
+        let old_first_len = aa.get_data().len();
+        let new_first_len = other.get_data().len();
 
-        match new_size.cmp(&old_size) {
+        match new_first_len.cmp(&old_first_len) {
             Ordering::Equal => {}
             Ordering::Less => {
-                self.data.copy_within(1 + 4 + old_size.., 1 + 4 + new_size);
-                self.data.resize(self.data.len() - old_size + new_size, 0);
+                self.data
+                    .copy_within(1 + 4 + old_first_len.., 1 + 4 + new_first_len);
+                let new_len = self.data.len() - old_first_len + new_first_len;
+                self.data.truncate(new_len);
+                (&mut self.data[1..]).put_u32_le((new_len - 1 - 4) as u32);
             }
             Ordering::Greater => {
                 let old_len = self.data.len();
-                self.data.resize(old_len + new_size - old_size, 0);
+                self.data.resize(old_len + new_first_len - old_first_len, 0);
                 self.data
-                    .copy_within(1 + 4 + old_size..old_len, 1 + 4 + new_size);
+                    .copy_within(1 + 4 + old_first_len..old_len, 1 + 4 + new_first_len);
+                (&mut self.data[1..])
+                    .put_u32_le((old_len - 1 - 4 + new_first_len - old_first_len) as u32);
             }
         }
 
-        // size should be ok now
-        (n_args, 1).write_packed_fixed(&mut self.data[1 + 4..1 + 4 + new_size]);
-
-        // remove the last entry
-        let s = self.to_mul_view().to_slice();
-        let last_index = s.get(s.len() - 1);
-        let start_pointer_of_last = last_index.get_data().as_ptr();
-        let dist = unsafe { start_pointer_of_last.offset_from(self.data.as_ptr()) } as usize;
-        self.data.drain(dist..);
-        self.data.extend_from_slice(other.get_data());
-
-        let new_buf_pos = self.data.len();
-
-        let mut cursor = &mut self.data[1..];
-        cursor.put_u32_le((new_buf_pos - buf_pos) as u32);
+        self.data[first_arg_start..first_arg_start + new_first_len]
+            .copy_from_slice(other.get_data());
     }
 
     #[inline]
@@ -2205,7 +2198,11 @@ impl<'a> ListSlice<'a> {
     }
 
     #[inline]
-    fn fast_forward(&self, index: usize) -> ListSlice<'a> {
+    pub fn fast_forward(&self, index: usize) -> ListSlice<'a> {
+        if index == 0 {
+            return *self;
+        }
+
         let mut pos = self.data;
 
         pos = Self::skip(pos, index as u32);
@@ -2235,6 +2232,19 @@ impl<'a> ListSlice<'a> {
             },
             end,
         )
+    }
+
+    #[inline]
+    pub fn pop_first(&self) -> (AtomView<'a>, ListSlice<'a>) {
+        let (res, end) = Self::get_entry(self.data);
+
+        let slice = ListSlice {
+            data: end,
+            length: self.length - 1,
+            slice_type: self.slice_type,
+        };
+
+        (res, slice)
     }
 
     #[inline]
@@ -2288,6 +2298,11 @@ impl<'a> ListSlice<'a> {
     #[inline]
     pub fn iter(&self) -> ListSliceIterator<'a> {
         ListSliceIterator { data: *self }
+    }
+
+    #[inline]
+    pub(crate) fn get_data(&self) -> &'a [u8] {
+        self.data
     }
 }
 

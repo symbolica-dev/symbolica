@@ -15,8 +15,29 @@ use crate::{
     warn,
 };
 
+impl<'a> AtomView<'a> {
+    /// Get a slice that can be used to compare terms.
+    /// The coefficients are not included in the slice.
+    #[inline(always)]
+    pub(crate) fn get_term_cmp_slice(&self) -> &'a [u8] {
+        if let AtomView::Mul(m1) = self {
+            let mut it1 = m1.to_slice();
+
+            if m1.has_coefficient() {
+                it1 = it1.fast_forward(1);
+            }
+
+            it1.get_data()
+        } else {
+            self.get_data()
+        }
+    }
+}
+
 impl AtomView<'_> {
-    /// Compare two atoms.
+    /// Compare two atoms in an ordering that sorts by type.
+    ///
+    /// This is not the ordering used for sorting terms or factors.
     pub fn cmp(&self, other: &AtomView<'_>) -> Ordering {
         if self == other {
             // equality comparison is a fast check
@@ -25,8 +46,8 @@ impl AtomView<'_> {
 
         match (&self, other) {
             (AtomView::Num(n1), AtomView::Num(n2)) => n1.get_coeff_view().cmp(&n2.get_coeff_view()),
-            (AtomView::Num(_), _) => Ordering::Greater,
-            (_, AtomView::Num(_)) => Ordering::Less,
+            (AtomView::Num(_), _) => Ordering::Less,
+            (_, AtomView::Num(_)) => Ordering::Greater,
             (AtomView::Var(v1), AtomView::Var(v2)) => v1.get_symbol_id().cmp(&v2.get_symbol_id()),
             (AtomView::Var(_), _) => Ordering::Less,
             (_, AtomView::Var(_)) => Ordering::Greater,
@@ -118,8 +139,8 @@ impl AtomView<'_> {
     pub(crate) fn cmp_factors(&self, other: &AtomView<'_>) -> Ordering {
         match (&self, other) {
             (AtomView::Num(_), AtomView::Num(_)) => Ordering::Equal,
-            (AtomView::Num(_), _) => Ordering::Greater,
-            (_, AtomView::Num(_)) => Ordering::Less,
+            (AtomView::Num(_), _) => Ordering::Less,
+            (_, AtomView::Num(_)) => Ordering::Greater,
 
             (AtomView::Var(v1), AtomView::Var(v2)) => v1.get_symbol_id().cmp(&v2.get_symbol_id()),
             (AtomView::Pow(p1), AtomView::Pow(p2)) => {
@@ -188,95 +209,12 @@ impl AtomView<'_> {
         }
     }
 
-    /// Compare terms in an expression. `x` and `x*2` are placed next to each other.
+    /// Compare terms in an expression. `x` and `2*x` are placed next to each other.
+    #[inline]
     pub(crate) fn cmp_terms(&self, other: &AtomView<'_>) -> Ordering {
         debug_assert!(!matches!(self, AtomView::Add(_)));
         debug_assert!(!matches!(other, AtomView::Add(_)));
-        match (self, other) {
-            (AtomView::Num(_), AtomView::Num(_)) => Ordering::Equal,
-            (AtomView::Num(_), _) => Ordering::Greater,
-            (_, AtomView::Num(_)) => Ordering::Less,
-
-            (AtomView::Var(v1), AtomView::Var(v2)) => v1.get_symbol_id().cmp(&v2.get_symbol_id()),
-            (AtomView::Pow(p1), AtomView::Pow(p2)) => {
-                let (b1, e1) = p1.get_base_exp();
-                let (b2, e2) = p2.get_base_exp();
-                b1.cmp(&b2).then_with(|| e1.cmp(&e2))
-            }
-            (AtomView::Mul(m1), AtomView::Mul(m2)) => {
-                let actual_len1 = if m1.has_coefficient() {
-                    m1.get_nargs() - 1
-                } else {
-                    m1.get_nargs()
-                };
-
-                let actual_len2 = if m2.has_coefficient() {
-                    m2.get_nargs() - 1
-                } else {
-                    m2.get_nargs()
-                };
-
-                let len_cmp = actual_len1.cmp(&actual_len2);
-                if len_cmp != Ordering::Equal {
-                    return len_cmp;
-                }
-
-                for (t1, t2) in m1.iter().zip(m2.iter()).take(actual_len1) {
-                    let argcmp = t1.cmp(&t2);
-                    if argcmp != Ordering::Equal {
-                        return argcmp;
-                    }
-                }
-
-                Ordering::Equal
-            }
-            (AtomView::Mul(m1), a2) => {
-                if !m1.has_coefficient() || m1.get_nargs() != 2 {
-                    return Ordering::Greater;
-                }
-
-                let it1 = m1.to_slice();
-                it1.get(0).cmp(a2)
-            }
-            (a1, AtomView::Mul(m2)) => {
-                if !m2.has_coefficient() || m2.get_nargs() != 2 {
-                    return Ordering::Less;
-                }
-
-                let it2 = m2.to_slice();
-                a1.cmp(&it2.get(0))
-            }
-            (AtomView::Var(_), _) => Ordering::Less,
-            (_, AtomView::Var(_)) => Ordering::Greater,
-            (_, AtomView::Pow(_)) => Ordering::Greater,
-            (AtomView::Pow(_), _) => Ordering::Less,
-
-            (AtomView::Fun(f1), AtomView::Fun(f2)) => {
-                let name_comp = f1.get_symbol_id().cmp(&f2.get_symbol_id());
-                if name_comp != Ordering::Equal {
-                    return name_comp;
-                }
-
-                if cfg!(feature = "full_fn_cmp") {
-                    let len_cmp = f1.get_nargs().cmp(&f2.get_nargs());
-                    if len_cmp != Ordering::Equal {
-                        return len_cmp;
-                    }
-
-                    for (arg1, arg2) in f1.iter().zip(f2.iter()) {
-                        let argcmp = arg1.cmp(&arg2);
-                        if argcmp != Ordering::Equal {
-                            return argcmp;
-                        }
-                    }
-
-                    Ordering::Equal
-                } else {
-                    f1.fast_cmp(*f2)
-                }
-            }
-            (AtomView::Add(_), _) | (_, AtomView::Add(_)) => unreachable!("Cannot have nested add"),
-        }
+        self.get_term_cmp_slice().cmp(other.get_term_cmp_slice())
     }
 
     /// Simplify logs in the argument of the exponential function.
@@ -525,35 +463,32 @@ impl Atom {
 
         // compare the non-coefficient part of terms and add the coefficients if they are the same
         if let Atom::Mul(m) = self {
-            let slice = m.to_mul_view().to_slice();
+            let mv = m.to_mul_view();
+            let mut slice = m.to_mul_view().to_slice();
 
-            let last_elem = slice.get(slice.len() - 1);
-
-            let (non_coeff1, has_coeff) = if let AtomView::Num(_) = &last_elem {
-                (slice.get_subslice(0..slice.len() - 1), true)
-            } else {
-                (m.to_mul_view().to_slice(), false)
-            };
+            let has_coeff = mv.has_coefficient();
+            let mut coeff = other; // stub, should not be of type num
+            if has_coeff {
+                (coeff, slice) = slice.pop_first();
+            }
 
             if let AtomView::Mul(m2) = other {
-                let slice2 = m2.to_slice();
-                let last_elem2 = slice2.get(slice2.len() - 1);
+                let mut slice2 = m2.to_slice();
 
-                let non_coeff2 = if let AtomView::Num(_) = &last_elem2 {
-                    slice2.get_subslice(0..slice2.len() - 1)
-                } else {
-                    m2.to_slice()
-                };
+                let mut coeff2 = other; // stub, should not be of type num
+                if m2.has_coefficient() {
+                    (coeff2, slice2) = slice2.pop_first();
+                }
 
-                if non_coeff1.eq(&non_coeff2) {
+                if slice.eq(&slice2) {
                     // TODO: not correct for finite fields!
-                    let num = if let AtomView::Num(n) = &last_elem {
+                    let num = if let AtomView::Num(n) = coeff {
                         n.get_coeff_view()
                     } else {
                         CoefficientView::Natural(1, 1, 0, 1)
                     };
 
-                    let new_coeff = if let AtomView::Num(n) = &last_elem2 {
+                    let new_coeff = if let AtomView::Num(n) = coeff2 {
                         num + n.get_coeff_view()
                     } else {
                         num + 1
@@ -563,16 +498,14 @@ impl Atom {
 
                     // strip coefficient if it is 1 (can be float)
                     if new_coeff.is_one() {
-                        assert!(has_coeff);
-
                         if len == 2 {
                             // downgrade
                             self.set_from_view(&slice2.get(0));
                         } else {
                             // remove coefficient
                             let m = self.to_mul();
-                            for a in non_coeff2.iter() {
-                                m.extend(a);
+                            for a in slice2.iter() {
+                                m.extend(a); // TODO: modifying self instead
                             }
                             m.set_has_coefficient(false);
                             m.set_normalized(true);
@@ -589,21 +522,29 @@ impl Atom {
                     let on = helper.to_num(new_coeff);
 
                     if has_coeff {
-                        m.replace_last(on.to_num_view().as_view());
+                        m.replace_first(on.to_num_view().as_view());
+                        m.set_has_coefficient(true);
+                        m.set_normalized(true);
                     } else {
+                        let m = self.to_mul();
                         m.extend(on.to_num_view().as_view());
+
+                        for a in slice2.iter() {
+                            m.extend(a);
+                        }
+
+                        m.set_has_coefficient(true);
+                        m.set_normalized(true);
                     }
 
-                    m.set_has_coefficient(true);
-                    m.set_normalized(true);
                     return true;
                 }
             } else {
-                if non_coeff1.len() != 1 || other != slice.get(0) {
+                if slice.len() != 1 || other != slice.get(0) {
                     return false;
                 }
 
-                let new_coeff = if let AtomView::Num(n) = &last_elem {
+                let new_coeff = if let AtomView::Num(n) = coeff {
                     n.get_coeff_view() + 1
                 } else {
                     return false;
@@ -617,7 +558,7 @@ impl Atom {
 
                 let on = helper.to_num(new_coeff);
 
-                m.replace_last(on.to_num_view().as_view());
+                m.replace_first(on.to_num_view().as_view());
                 m.set_normalized(true);
 
                 return true;
@@ -629,10 +570,11 @@ impl Atom {
                 return false; // no match
             }
 
-            let last_elem = slice.get(slice.len() - 1);
+            let (coeff, slice) = slice.pop_first();
+            let (term, _) = slice.pop_first();
 
-            if self.as_view() == slice.get(0) {
-                let (new_coeff, has_num) = if let AtomView::Num(n) = &last_elem {
+            if self.as_view() == term {
+                let (new_coeff, has_num) = if let AtomView::Num(n) = &coeff {
                     (n.get_coeff_view() + 1, true)
                 } else {
                     return false; // last elem is not a coefficient
@@ -650,9 +592,15 @@ impl Atom {
 
                 if let Atom::Mul(m) = self {
                     if has_num {
-                        m.replace_last(on.to_num_view().as_view());
+                        m.replace_first(on.to_num_view().as_view());
                     } else {
+                        let m = self.to_mul();
                         m.extend(on.to_num_view().as_view());
+                        m.extend(term);
+
+                        m.set_has_coefficient(true);
+                        m.set_normalized(true);
+                        return true;
                     }
 
                     m.set_has_coefficient(true);
@@ -663,9 +611,9 @@ impl Atom {
             }
         } else if self.as_view() == other {
             let mul = helper.to_mul();
-            mul.extend(self.as_view());
             self.to_num((2, 1).into());
             mul.extend(self.as_view());
+            mul.extend(other);
             mul.set_has_coefficient(true);
             mul.set_normalized(true);
 
@@ -767,9 +715,11 @@ impl AtomView<'_> {
                                     }
 
                                     if !n.is_one() {
-                                        // the number is not in the final position, which only happens when i*i merges to -1
-                                        // add it to the first position in the reversed buffer
-                                        atom_test_buf.insert(0, last_buf);
+                                        out_mul.set_has_coefficient(true);
+                                        out_mul.extend(v);
+                                        cur_len += 1;
+                                    } else {
+                                        out_mul.set_has_coefficient(false);
                                     }
                                 } else {
                                     out_mul.extend(v);
@@ -794,6 +744,7 @@ impl AtomView<'_> {
                             return;
                         }
 
+                        // TODO: should not be reached anymore!
                         let v = last_buf.as_view();
                         if let AtomView::Num(n) = v {
                             if matches!(
@@ -1474,10 +1425,10 @@ impl AtomView<'_> {
                 }
 
                 for x in ns.to_add_view().iter() {
-                    atom_sort_buf.push(x);
+                    atom_sort_buf.push((x, x.get_term_cmp_slice()));
                 }
 
-                atom_sort_buf.sort_by(|a, b| a.cmp_terms(b));
+                atom_sort_buf.sort_unstable_by(|a, b| a.1.cmp(&b.1));
 
                 if atom_sort_buf.is_empty() {
                     out.to_num(Coefficient::zero());
@@ -1486,12 +1437,12 @@ impl AtomView<'_> {
                 let out_add = out.to_add();
 
                 let mut last_buf = workspace.new_atom();
-                last_buf.set_from_view(&atom_sort_buf[0]);
+                last_buf.set_from_view(&atom_sort_buf[0].0);
 
                 let mut helper = workspace.new_atom();
                 let mut cur_len = 0;
 
-                for cur in atom_sort_buf.iter().skip(1) {
+                for (cur, _) in atom_sort_buf.iter().skip(1) {
                     if !last_buf.merge_terms(*cur, &mut helper) {
                         // we are done merging
                         let v = last_buf.as_view();

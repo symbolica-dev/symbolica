@@ -2084,7 +2084,7 @@ mod test {
         let input = parse!("1.2`20x+1e-5`20+1e+5 * 1.1234e23 +2exp(5)");
 
         let r = format!("{}", input.printer(PrintOptions::file_no_namespace()));
-        assert_eq!(r, "1.2000000000000000000*x+2*exp(5)+1.123400000000000e28");
+        assert_eq!(r, "1.123400000000000e28+1.2000000000000000000*x+2*exp(5)");
     }
 
     #[test]

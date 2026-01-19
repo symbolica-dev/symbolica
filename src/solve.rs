@@ -593,9 +593,9 @@ mod test {
         let sol = AtomView::solve_linear_system::<u8, _, InlineVar>(&system, &[x, y, z]).unwrap();
 
         let res = [
-            "(v4^3-2*v4^2*f1(v4))*(v4^2-v4^3+v4^4-f1(v4)+v4*f1(v4)-v4^2*f1(v4))^-1",
-            "(v4^2-f1(v4))^-1*(2*v4-1)",
-            "(v4^2-v4^3-2*v4*f1(v4)+2*v4^2*f1(v4))*(v4^2-v4^3+v4^4-f1(v4)+v4*f1(v4)-v4^2*f1(v4))^-1",
+            "(v4^3-2*v4^2*f1(v4))*(v4^2-f1(v4)-v4^3+v4^4+v4*f1(v4)-v4^2*f1(v4))^-1",
+            "(-1+2*v4)*(v4^2-f1(v4))^-1",
+            "(v4^2-v4^3-2*v4*f1(v4)+2*v4^2*f1(v4))*(v4^2-f1(v4)-v4^3+v4^4+v4*f1(v4)-v4^2*f1(v4))^-1",
         ];
         let res = res.iter().map(|x| parse!(x)).collect::<Vec<_>>();
 
