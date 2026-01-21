@@ -15,8 +15,29 @@ use crate::{
     warn,
 };
 
+impl<'a> AtomView<'a> {
+    /// Get a slice that can be used to compare terms.
+    /// The coefficients are not included in the slice.
+    #[inline(always)]
+    pub(crate) fn get_term_cmp_slice(&self) -> &'a [u8] {
+        if let AtomView::Mul(m1) = self {
+            let mut it1 = m1.to_slice();
+
+            if m1.has_coefficient() {
+                it1 = it1.fast_forward(1);
+            }
+
+            it1.get_data()
+        } else {
+            self.get_data()
+        }
+    }
+}
+
 impl AtomView<'_> {
-    /// Compare two atoms.
+    /// Compare two atoms in an ordering that sorts by type.
+    ///
+    /// This is not the ordering used for sorting terms or factors.
     pub fn cmp(&self, other: &AtomView<'_>) -> Ordering {
         if self == other {
             // equality comparison is a fast check
@@ -188,87 +209,12 @@ impl AtomView<'_> {
         }
     }
 
-    /// Compare terms in an expression. `x` and `x*2` are placed next to each other.
+    /// Compare terms in an expression. `x` and `2*x` are placed next to each other.
+    #[inline]
     pub(crate) fn cmp_terms(&self, other: &AtomView<'_>) -> Ordering {
         debug_assert!(!matches!(self, AtomView::Add(_)));
         debug_assert!(!matches!(other, AtomView::Add(_)));
-        match (self, other) {
-            (AtomView::Num(_), AtomView::Num(_)) => Ordering::Equal,
-            (AtomView::Num(_), _) => Ordering::Less,
-            (_, AtomView::Num(_)) => Ordering::Greater,
-
-            (AtomView::Var(v1), AtomView::Var(v2)) => v1.get_symbol_id().cmp(&v2.get_symbol_id()),
-            (AtomView::Pow(p1), AtomView::Pow(p2)) => {
-                // TODO: compare bytes instead?
-                let (b1, e1) = p1.get_base_exp();
-                let (b2, e2) = p2.get_base_exp();
-                b1.cmp(&b2).then_with(|| e1.cmp(&e2))
-            }
-            (AtomView::Mul(m1), AtomView::Mul(m2)) => {
-                let mut it1 = m1.to_slice();
-                let mut it2 = m2.to_slice();
-
-                if m1.has_coefficient() {
-                    it1 = it1.fast_forward(1);
-                }
-
-                if m2.has_coefficient() {
-                    it2 = it2.fast_forward(1);
-                }
-
-                let len_cmp = it1.len().cmp(&it2.len());
-                if len_cmp != Ordering::Equal {
-                    return len_cmp;
-                }
-
-                it1.get_data().cmp(it2.get_data())
-            }
-            (AtomView::Mul(m1), a2) => {
-                if !m1.has_coefficient() || m1.get_nargs() != 2 {
-                    return Ordering::Greater;
-                }
-
-                let it1 = m1.to_slice();
-                it1.get(1).cmp(a2)
-            }
-            (a1, AtomView::Mul(m2)) => {
-                if !m2.has_coefficient() || m2.get_nargs() != 2 {
-                    return Ordering::Less;
-                }
-
-                let it2 = m2.to_slice();
-                a1.cmp(&it2.get(1))
-            }
-            (AtomView::Var(_), _) => Ordering::Less,
-            (_, AtomView::Var(_)) => Ordering::Greater,
-            (_, AtomView::Pow(_)) => Ordering::Greater,
-            (AtomView::Pow(_), _) => Ordering::Less,
-            (AtomView::Fun(f1), AtomView::Fun(f2)) => {
-                let name_comp = f1.get_symbol_id().cmp(&f2.get_symbol_id());
-                if name_comp != Ordering::Equal {
-                    return name_comp;
-                }
-
-                if cfg!(feature = "full_fn_cmp") {
-                    let len_cmp = f1.get_nargs().cmp(&f2.get_nargs());
-                    if len_cmp != Ordering::Equal {
-                        return len_cmp;
-                    }
-
-                    for (arg1, arg2) in f1.iter().zip(f2.iter()) {
-                        let argcmp = arg1.cmp(&arg2);
-                        if argcmp != Ordering::Equal {
-                            return argcmp;
-                        }
-                    }
-
-                    Ordering::Equal
-                } else {
-                    f1.fast_cmp(*f2)
-                }
-            }
-            (AtomView::Add(_), _) | (_, AtomView::Add(_)) => unreachable!("Cannot have nested add"),
-        }
+        self.get_term_cmp_slice().cmp(other.get_term_cmp_slice())
     }
 
     /// Simplify logs in the argument of the exponential function.
@@ -1479,10 +1425,10 @@ impl AtomView<'_> {
                 }
 
                 for x in ns.to_add_view().iter() {
-                    atom_sort_buf.push(x);
+                    atom_sort_buf.push((x, x.get_term_cmp_slice()));
                 }
 
-                atom_sort_buf.sort_by(|a, b| a.cmp_terms(b));
+                atom_sort_buf.sort_unstable_by(|a, b| a.1.cmp(&b.1));
 
                 if atom_sort_buf.is_empty() {
                     out.to_num(Coefficient::zero());
@@ -1491,12 +1437,12 @@ impl AtomView<'_> {
                 let out_add = out.to_add();
 
                 let mut last_buf = workspace.new_atom();
-                last_buf.set_from_view(&atom_sort_buf[0]);
+                last_buf.set_from_view(&atom_sort_buf[0].0);
 
                 let mut helper = workspace.new_atom();
                 let mut cur_len = 0;
 
-                for cur in atom_sort_buf.iter().skip(1) {
+                for (cur, _) in atom_sort_buf.iter().skip(1) {
                     if !last_buf.merge_terms(*cur, &mut helper) {
                         // we are done merging
                         let v = last_buf.as_view();

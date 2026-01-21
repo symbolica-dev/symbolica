@@ -1252,13 +1252,13 @@ mod test {
 
     #[test]
     fn base_parentheses() {
-        let a = parse!("(-1)^(1+x)-(1/2)^x");
+        let a = parse!("-(1/2)^x+(-1)^(1+x)");
         assert_eq!(
             format!(
                 "{}",
                 AtomPrinter::new_with_options(a.as_view(), PrintOptions::file_no_namespace())
             ),
-            "(-1)^(1+x)-(1/2)^x"
+            "-(1/2)^x+(-1)^(1+x)"
         )
     }
 
@@ -1329,6 +1329,6 @@ mod test {
 
         let e = crate::parse!("mu^2 + mu(1) + mu(1,2)");
         let s = format!("{}", e.printer(PrintOptions::latex()));
-        assert_eq!(s, "\\mu^{2}+\\mu_{1}+\\mu_{1,2}");
+        assert_eq!(s, "\\mu_{1}+\\mu_{1,2}+\\mu^{2}");
     }
 }
