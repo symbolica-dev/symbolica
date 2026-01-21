@@ -1096,49 +1096,64 @@ impl<'a> AtomView<'a> {
         };
 
         Workspace::get_local().with(|ws| {
-            self.replace_map_impl(ws, &mut m, context, &mut out);
+            let mut set = Settable::from(&mut out);
+            self.replace_map_no_norm(ws, &mut m, context, &mut set);
+
+            if set.is_set() {
+                let mut a = ws.new_atom();
+                set.as_view().normalize(ws, &mut a);
+                std::mem::swap(&mut out, &mut a);
+            } else {
+                out.set_from_view(self);
+            }
         });
 
         out
     }
 
-    fn replace_map_impl<F: FnMut(AtomView, &Context, &mut Settable<'_, Atom>)>(
+    pub(crate) fn replace_map_no_norm<F: FnMut(AtomView, &Context, &mut Settable<'_, Atom>)>(
         &self,
         ws: &Workspace,
         m: &mut F,
         mut context: Context,
-        out: &mut Atom,
-    ) -> bool {
-        let mut settable = Settable::from(&mut *out);
-        m(*self, &context, &mut settable);
+        out: &mut Settable<'_, Atom>,
+    ) {
+        m(*self, &context, out);
 
-        if settable.is_set() {
-            return true;
+        if out.is_set() {
+            return;
         }
 
-        let mut changed = false;
         match self {
-            AtomView::Num(_) | AtomView::Var(_) => {
-                out.set_from_view(self);
-            }
+            AtomView::Num(_) | AtomView::Var(_) => {}
             AtomView::Fun(f) => {
-                let mut fun = ws.new_atom();
-                let fun = fun.to_fun(f.get_symbol());
+                let mut fun = None;
 
                 context.parent_type = Some(AtomType::Fun);
                 context.function_level += 1;
 
                 let mut arg_h = ws.new_atom();
                 for (i, arg) in f.iter().enumerate() {
+                    let mut set = Settable::from(arg_h.deref_mut());
                     context.index = i;
-                    changed |= arg.replace_map_impl(ws, m, context, &mut arg_h);
-                    fun.add_arg(arg_h.as_view());
-                }
+                    arg.replace_map_no_norm(ws, m, context, &mut set);
 
-                if changed {
-                    fun.as_view().normalize(ws, out);
-                } else {
-                    out.set_from_view(self);
+                    if fun.is_none() && set.is_set() {
+                        let fun_o = out.to_fun(f.get_symbol());
+
+                        for child in f.iter().take(i) {
+                            fun_o.add_arg(child);
+                        }
+
+                        fun_o.add_arg(set.as_view());
+                        fun = Some(fun_o);
+                    } else if let Some(fun) = &mut fun {
+                        if set.is_set() {
+                            fun.add_arg(set.as_view());
+                        } else {
+                            fun.add_arg(arg);
+                        }
+                    }
                 }
             }
             AtomView::Pow(p) => {
@@ -1148,61 +1163,79 @@ impl<'a> AtomView<'a> {
                 context.index = 0;
 
                 let mut base_h = ws.new_atom();
-                changed |= base.replace_map_impl(ws, m, context, &mut base_h);
+                let mut base_set = Settable::from(base_h.deref_mut());
+                base.replace_map_no_norm(ws, m, context, &mut base_set);
 
                 context.index = 1;
                 let mut exp_h = ws.new_atom();
-                changed |= exp.replace_map_impl(ws, m, context, &mut exp_h);
+                let mut exp_set = Settable::from(exp_h.deref_mut());
+                exp.replace_map_no_norm(ws, m, context, &mut exp_set);
 
-                if changed {
-                    let mut pow_h = ws.new_atom();
-                    pow_h.to_pow(base_h.as_view(), exp_h.as_view());
-                    pow_h.as_view().normalize(ws, out);
-                } else {
-                    out.set_from_view(self);
+                if base_set.is_set() && exp_set.is_set() {
+                    out.to_pow(base_set.as_view(), exp_set.as_view());
+                } else if base_set.is_set() {
+                    out.to_pow(base_set.as_view(), exp);
+                } else if exp_set.is_set() {
+                    out.to_pow(base, exp_set.as_view());
                 }
             }
             AtomView::Mul(mm) => {
-                let mut mul_h = ws.new_atom();
-                let mul = mul_h.to_mul();
+                let mut mul = None;
 
                 context.parent_type = Some(AtomType::Mul);
 
                 let mut child_h = ws.new_atom();
                 for (i, child) in mm.iter().enumerate() {
+                    let mut set = Settable::from(child_h.deref_mut());
                     context.index = i;
-                    changed |= child.replace_map_impl(ws, m, context, &mut child_h);
-                    mul.extend(child_h.as_view());
-                }
+                    child.replace_map_no_norm(ws, m, context, &mut set);
 
-                if changed {
-                    mul_h.as_view().normalize(ws, out);
-                } else {
-                    out.set_from_view(self);
+                    if mul.is_none() && set.is_set() {
+                        let mul_o = out.to_mul();
+
+                        for child in mm.iter().take(i) {
+                            mul_o.extend(child);
+                        }
+                        mul_o.extend(set.as_view());
+                        mul = Some(mul_o);
+                    } else if let Some(mul_o) = &mut mul {
+                        if set.is_set() {
+                            mul_o.extend(set.as_view());
+                        } else {
+                            mul_o.extend(child);
+                        }
+                    }
                 }
             }
             AtomView::Add(a) => {
-                let mut add_h = ws.new_atom();
-                let add = add_h.to_add();
+                let mut add = None;
 
                 context.parent_type = Some(AtomType::Add);
 
                 let mut child_h = ws.new_atom();
                 for (i, child) in a.iter().enumerate() {
+                    let mut set = Settable::from(child_h.deref_mut());
                     context.index = i;
-                    changed |= child.replace_map_impl(ws, m, context, &mut child_h);
-                    add.extend(child_h.as_view());
-                }
+                    child.replace_map_no_norm(ws, m, context, &mut set);
 
-                if changed {
-                    add_h.as_view().normalize(ws, out);
-                } else {
-                    out.set_from_view(self);
+                    if add.is_none() && set.is_set() {
+                        let add_o = out.to_add();
+
+                        for child in a.iter().take(i) {
+                            add_o.extend(child);
+                        }
+                        add_o.extend(set.as_view());
+                        add = Some(add_o);
+                    } else if let Some(mul_o) = &mut add {
+                        if set.is_set() {
+                            mul_o.extend(set.as_view());
+                        } else {
+                            mul_o.extend(child);
+                        }
+                    }
                 }
             }
         }
-
-        changed
     }
 
     pub(crate) fn replace<'b, P: Into<BorrowedOrOwned<'b, Pattern>>>(
