@@ -2785,6 +2785,7 @@ extern "C" {{
                         }
                         InlineASM::AArch64 => {
                             *out += &format!("\t\t:\n\t\t: \"r\"(Z), \"r\"({}_CONSTANTS_double), \"r\"(params)\n\t\t: \"memory\", \"x8\", \"d0\", \"d1\", \"d2\", \"d3\", \"d4\", \"d5\", \"d6\", \"d7\", \"d8\", \"d9\", \"d10\", \"d11\", \"d12\", \"d13\", \"d14\", \"d15\", \"d16\", \"d17\", \"d18\", \"d19\", \"d20\", \"d21\", \"d22\", \"d23\", \"d24\", \"d25\", \"d26\", \"d27\", \"d28\", \"d29\", \"d30\", \"d31\");\n",  function_name);
+                            #[allow(unused_assignments)] { second_index = 0;}; // the second index in x8 will be lost after the block, so reset it
                         }
                         InlineASM::None => unreachable!(),
                     }
@@ -3908,6 +3909,7 @@ extern "C" {{
                         }
                         InlineASM::AArch64 => {
                             *out += &format!("\t\t:\n\t\t: \"r\"(Z), \"r\"({}_CONSTANTS_complex), \"r\"(params)\n\t\t: \"memory\", \"x8\", \"d0\", \"d1\", \"d2\", \"d3\", \"d4\", \"d5\", \"d6\", \"d7\", \"d8\", \"d9\", \"d10\", \"d11\", \"d12\", \"d13\", \"d14\", \"d15\", \"d16\", \"d17\", \"d18\", \"d19\", \"d20\", \"d21\", \"d22\", \"d23\", \"d24\", \"d25\", \"d26\", \"d27\", \"d28\", \"d29\", \"d30\", \"d31\");\n",  function_name);
+                            #[allow(unused_assignments)] { second_index = 0;} // the second index in x8 will be lost after the block, so reset it
                         }
                         InlineASM::None => unreachable!(),
                     }
