@@ -1163,10 +1163,11 @@ impl<T: Default> ExpressionEvaluator<T> {
 
         let mut affected_lines = vec![false; self.instructions.len()];
 
-        let mut line_usage_zone = vec![0; self.instructions.len()];
+        // store the global branch a line belongs to
+        let mut branch_id = vec![0; self.instructions.len()];
+        let mut dag_nodes = vec![0]; // store index to parent node
+        let mut current_node = 0;
 
-        let mut current_zone = 0;
-        let mut current_zone_depth = 0;
         for (p, i) in self.instructions.iter().enumerate() {
             match i {
                 Instr::Add(_, a) | Instr::Mul(_, a) => {
@@ -1200,21 +1201,22 @@ impl<T: Default> ExpressionEvaluator<T> {
                         .push(p);
                 }
                 Instr::IfElse(_, _) => {
-                    line_usage_zone[p] = current_zone;
-                    current_zone_depth += 1;
-                    current_zone += 3_usize.pow(current_zone_depth);
+                    branch_id[p] = current_node;
+                    dag_nodes.push(current_node); // enter if block
+                    current_node = dag_nodes.len() - 1;
                     continue;
                 }
                 Instr::Goto(_) => {
-                    current_zone += 3_usize.pow(current_zone_depth);
+                    let parent = dag_nodes[current_node];
+                    dag_nodes.push(parent); // enter else block (included goto and labels)
+                    current_node = dag_nodes.len() - 1;
                 }
                 Instr::Join(..) => {
-                    current_zone %= 3_usize.pow(current_zone_depth);
-                    current_zone_depth -= 1;
+                    current_node = dag_nodes[current_node];
                 }
                 _ => {}
             }
-            line_usage_zone[p] = current_zone;
+            branch_id[p] = current_node;
         }
 
         let mut to_remove: Vec<_> = common_ops.clone().into_iter().collect();
@@ -1231,7 +1233,7 @@ impl<T: Default> ExpressionEvaluator<T> {
 
         let old_len = self.instructions.len();
 
-        let mut new_symb_usage_zone = vec![];
+        let mut new_symb_branch = vec![];
 
         while let Some((common, lines)) = to_remove.pop() {
             match common {
@@ -1252,15 +1254,17 @@ impl<T: Default> ExpressionEvaluator<T> {
                     self.stack.push(T::default());
                     self.instructions.push(new_op);
 
-                    let mut usage_zone = line_usage_zone[lines[0]];
+                    let mut branch = branch_id[lines[0]];
                     for &line in &lines {
                         affected_lines[line] = true;
 
-                        let lu = line_usage_zone[line];
-                        for pow in 1..32 {
-                            if lu % 3usize.pow(pow) != usage_zone % 3usize.pow(pow) {
-                                usage_zone %= 3usize.pow(pow - 1);
-                                break;
+                        let mut new_branch = branch_id[line];
+                        // find common root
+                        while branch != new_branch {
+                            if branch > new_branch {
+                                branch = dag_nodes[branch];
+                            } else {
+                                new_branch = dag_nodes[new_branch];
                             }
                         }
 
@@ -1339,7 +1343,7 @@ impl<T: Default> ExpressionEvaluator<T> {
                         }
                     }
 
-                    new_symb_usage_zone.push((lines[0], usage_zone));
+                    new_symb_branch.push((lines[0], branch));
                 }
                 CommonInstruction::BuiltinFun(_, _) | CommonInstruction::ExternalFun(_, _) => {
                     if lines.iter().any(|x| affected_lines[*x]) {
@@ -1358,15 +1362,17 @@ impl<T: Default> ExpressionEvaluator<T> {
                     self.stack.push(T::default());
                     self.instructions.push(new_op);
 
-                    let mut usage_zone = line_usage_zone[lines[0]];
+                    let mut branch = branch_id[lines[0]];
                     for &line in &lines {
                         affected_lines[line] = true;
 
-                        let lu = line_usage_zone[line];
-                        for pow in 1..32 {
-                            if lu % 3usize.pow(pow) != usage_zone % 3usize.pow(pow) {
-                                usage_zone %= 3usize.pow(pow - 1);
-                                break;
+                        let mut new_branch = branch_id[line];
+                        // find common root
+                        while branch != new_branch {
+                            if branch > new_branch {
+                                branch = dag_nodes[branch];
+                            } else {
+                                new_branch = dag_nodes[new_branch];
                             }
                         }
 
@@ -1381,7 +1387,7 @@ impl<T: Default> ExpressionEvaluator<T> {
                         }
                     }
 
-                    new_symb_usage_zone.push((lines[0], usage_zone));
+                    new_symb_branch.push((lines[0], branch));
                 }
             }
         }
@@ -1390,8 +1396,7 @@ impl<T: Default> ExpressionEvaluator<T> {
         // earliest point: after last dependency
         // latest point: before first usage in the correct usage zone
         let mut placement_bounds = vec![];
-        for (i, (first_usage, zone)) in self.instructions.drain(old_len..).zip(new_symb_usage_zone)
-        {
+        for (i, (first_usage, branch)) in self.instructions.drain(old_len..).zip(new_symb_branch) {
             let deps = match &i {
                 Instr::BuiltinFun(_, _, a) => std::slice::from_ref(a),
                 Instr::Add(_, a) | Instr::Mul(_, a) | Instr::ExternalFun(_, _, a) => a.as_slice(),
@@ -1411,7 +1416,7 @@ impl<T: Default> ExpressionEvaluator<T> {
 
             let mut latest_pos = ins;
             for j in (ins..first_usage + 1).rev() {
-                if line_usage_zone[j] == zone {
+                if branch_id[j] == branch {
                     latest_pos = j;
                     break;
                 }
@@ -9922,6 +9927,8 @@ mod test {
             ("if(y, x*x + z*z + x*z*z, 3)", 25., 3.),
             ("if(x + z, if(y, 1 + x, 1+x+y), 0)", 4., 4.),
             ("if(y, x * z, 0) + x * z", 12., 6.),
+            ("if(y, x + 1, 2)*if(y+1, x + 1, 3)", 12., 8.),
+            ("if(y, if(z, x + 1, 3)*if(z-2, x + 1, 4), 2)", 16., 2.),
         ];
 
         for (input, true_res, false_res) in tests {
