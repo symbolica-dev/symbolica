@@ -1524,7 +1524,7 @@ class Expression:
 
         >>> from symbolica import *
         >>> x, y = S('x', 'y')
-        >>> var, coeff = Expression.funs('var', 'coeff')
+        >>> var, coeff = S('var', 'coeff')
         >>> e = 5*x + x * y + x**2 + 5
         >>>
         >>> print(e.collect(x, key_map=lambda x: var(x), coeff_map=lambda x: coeff(x)))
@@ -2064,7 +2064,7 @@ class Expression:
         """
 
     def evaluate(
-        self, constants: dict[Expression, float], funs: dict[Expression, Callable[[Sequence[float]], float]]
+        self, constants: dict[Expression, float], functions: dict[Expression, Callable[[Sequence[float]], float]]
     ) -> float:
         """Evaluate the expression, using a map of all the variables and
         user functions to a float.
@@ -2081,7 +2081,7 @@ class Expression:
     def evaluate_with_prec(
         self,
         constants: dict[Expression, float | str | Decimal],
-        funs: dict[Expression, Callable[[Sequence[Decimal]], float | str | Decimal]],
+        functions: dict[Expression, Callable[[Sequence[Decimal]], float | str | Decimal]],
         decimal_digit_precision: int
     ) -> Decimal:
         """Evaluate the expression, using a map of all the constants and
@@ -2101,7 +2101,7 @@ class Expression:
         """
 
     def evaluate_complex(
-        self, constants: dict[Expression, float | complex], funs: dict[Expression, Callable[[Sequence[complex]], float | complex]]
+        self, constants: dict[Expression, float | complex], functions: dict[Expression, Callable[[Sequence[complex]], float | complex]]
     ) -> complex:
         """Evaluate the expression, using a map of all the variables and
         user functions to a complex number.
@@ -2117,7 +2117,7 @@ class Expression:
     def evaluator(
         self,
         constants: dict[Expression, Expression],
-        funs: dict[Tuple[Expression, str, Sequence[Expression]], Expression],
+        functions: dict[Tuple[Expression, str, Sequence[Expression]], Expression],
         params: Sequence[Expression],
         iterations: int = 100,
         n_cores: int = 4,
@@ -2166,7 +2166,7 @@ class Expression:
         ----------
         constants: dict[Expression, Expression]
             A map of expressions to constants. The constants should be numerical expressions.
-        funs: dict[Tuple[Expression, str, Sequence[Expression]], Expression]
+        functions: dict[Tuple[Expression, str, Sequence[Expression]], Expression]
             A dictionary of functions. The key is a tuple of the function name, printable name and the argument variables.
             The value is the function body.
         params: Sequence[Expression]
@@ -2192,11 +2192,14 @@ class Expression:
         _cls,
         exprs: Sequence[Expression],
         constants: dict[Expression, Expression],
-        funs: dict[Tuple[Expression, str, Sequence[Expression]], Expression],
+        functions: dict[Tuple[Expression, str, Sequence[Expression]], Expression],
         params: Sequence[Expression],
         iterations: int = 100,
         n_cores: int = 4,
         verbose: bool = False,
+        external_functions: Optional[dict[Tuple[Expression, str], Callable[[
+            Sequence[float | complex]], float | complex]]] = None,
+        conditionals: Optional[Sequence[Expression]] = None,
     ) -> Evaluator:
         """Create an evaluator that can jointly evaluate (nested) expressions in an optimized fashion.
         See `Expression.evaluator()` for more information.
@@ -2206,7 +2209,7 @@ class Expression:
         >>> from symbolica import *
         >>> x = S('x')
         >>> e1 = E("x^2 + 1")
-        >>> e2 = E("x^2 + 2)
+        >>> e2 = E("x^2 + 2")
         >>> ev = Expression.evaluator_multiple([e1, e2], {}, {}, [x])
 
         will recycle the `x^2`
