@@ -278,6 +278,23 @@ impl<'a, 'b> ReplaceBuilder<'a, 'b> {
         self.settings.level_range = level_range;
         self
     }
+
+    /// Set the minimum level at which the pattern is allowed to match.
+    /// The first level is 0 and the level is increased when entering a function, or going one level deeper in the expression tree,
+    /// depending on `level_is_tree_depth`.
+    pub fn min_level(mut self, min_level: usize) -> Self {
+        self.settings.level_range.0 = min_level;
+        self
+    }
+
+    /// Set the maximum level at which the pattern is allowed to match.
+    /// The first level is 0 and the level is increased when entering a function, or going one level deeper in the expression tree,
+    /// depending on `level_is_tree_depth`.
+    pub fn max_level(mut self, max_level: usize) -> Self {
+        self.settings.level_range.1 = Some(max_level);
+        self
+    }
+
     /// Determine whether a level reflects the expression tree depth or the function depth.
     pub fn level_is_tree_depth(mut self, level_is_tree_depth: bool) -> Self {
         self.settings.level_is_tree_depth = level_is_tree_depth;
@@ -319,6 +336,14 @@ impl<'a, 'b> ReplaceBuilder<'a, 'b> {
     /// Execute the replacement by specifying the right-hand side.
     ///
     /// To use a map as a right-hand side, use [ReplaceBuilder::with_map].
+    ///
+    /// # Example
+    ///
+    /// ```
+    /// use symbolica::{atom::AtomCore, parse, symbol};
+    ///
+    /// let r = parse!("f(2)").replace(parse!("f(x_)")).with(parse!("f(x_+1)"));
+    /// assert_eq!(r, parse!("f(3)"));
     pub fn with<'c, R: Into<BorrowedOrOwned<'c, Pattern>>>(&self, rhs: R) -> Atom {
         let rhs = ReplaceWith::Pattern(rhs.into());
         let mut expr_ref = self.target;
@@ -1428,7 +1453,7 @@ impl<'a> AtomView<'a> {
 
                     if used_flags.iter().all(|x| *x) {
                         // all used, return rhs
-                        out.set_from_view(&rhs_subs.as_view());
+                        std::mem::swap(&mut *rhs_subs, out.deref_mut());
                         return;
                     }
 
@@ -1456,7 +1481,7 @@ impl<'a> AtomView<'a> {
                             out.extend(rhs_subs.as_view());
                         }
                         _ => {
-                            out.set_from_view(&rhs_subs.as_view());
+                            std::mem::swap(&mut *rhs_subs, out.deref_mut());
                         }
                     }
 
@@ -3297,36 +3322,39 @@ impl Match<'_> {
             Self::Single(v) => {
                 out.set_from_view(v);
             }
-            Self::Multiple(t, wargs) => match t {
+            // No normalization is needed, as a sorted subslice is already normalized
+            Self::Multiple(t, args) => match t {
                 SliceType::Add => {
                     let add = out.to_add();
-                    for arg in wargs {
+                    for arg in args {
                         add.extend(*arg);
                     }
 
                     add.set_normalized(true);
                 }
                 SliceType::Mul => {
+                    let mut has_coefficient = false;
                     let mul = out.to_mul();
-                    for arg in wargs {
+                    for arg in args {
+                        has_coefficient |= matches!(arg, AtomView::Num(_));
                         mul.extend(*arg);
                     }
 
-                    // normalization may be needed, for example
-                    // to update the coefficient flag
+                    mul.set_has_coefficient(has_coefficient);
+                    mul.set_normalized(true);
                 }
                 SliceType::Arg => {
                     let fun = out.to_fun(Symbol::ARG);
-                    fun.add_args(wargs);
+                    fun.add_args(args);
 
                     fun.set_normalized(true);
                 }
                 SliceType::Pow => {
-                    let p = out.to_pow(wargs[0], wargs[1]);
+                    let p = out.to_pow(args[0], args[1]);
                     p.set_normalized(true);
                 }
                 SliceType::One => {
-                    out.set_from_view(&wargs[0]);
+                    out.set_from_view(&args[0]);
                 }
                 SliceType::Empty => {
                     let f = out.to_fun(Symbol::ARG);

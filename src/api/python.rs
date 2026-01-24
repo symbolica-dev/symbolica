@@ -5621,7 +5621,7 @@ impl PythonExpression {
     /// Examples
     /// --------
     ///
-    /// >>> from symbolica import Expression
+    /// >>> from symbolica import *
     /// >>> x, y = S('x', 'y')
     /// >>> e = 5*x + x * y + x**2 + 5
     /// >>>
@@ -5629,9 +5629,9 @@ impl PythonExpression {
     ///
     /// yields `x^2+x*(y+5)+5`.
     ///
-    /// >>> from symbolica import Expression
+    /// >>> from symbolica import *
     /// >>> x, y = S('x', 'y')
-    /// >>> exp, coeff = Expression.funs('var', 'coeff')
+    /// >>> exp, coeff = S('var', 'coeff')
     /// >>> e = 5*x + x * y + x**2 + 5
     /// >>>
     /// >>> print(e.collect(x, key_map=lambda x: exp(x), coeff_map=lambda x: coeff(x)))
@@ -7015,7 +7015,7 @@ impl PythonExpression {
     /// ----------
     /// constants: dict[Expression, Expression]
     ///     A map of expressions to constants. The constants should be numerical expressions.
-    /// funs: dict[Tuple[Expression, str, Sequence[Expression]], Expression]
+    /// functions: dict[Tuple[Expression, str, Sequence[Expression]], Expression]
     ///     A dictionary of functions. The key is a tuple of the function name, printable name and the argument variables.
     ///     The value is the function body.
     /// params: Sequence[Expression]
@@ -7225,7 +7225,7 @@ impl PythonExpression {
     /// >>> from symbolica import *
     /// >>> x = S('x')
     /// >>> e1 = E("x^2 + 1")
-    /// >>> e2 = E("x^2 + 2)
+    /// >>> e2 = E("x^2 + 2")
     /// >>> ev = Expression.evaluator_multiple([e1, e2], {}, {}, [x])
     ///
     /// will recycle the `x^2`
@@ -7238,7 +7238,8 @@ impl PythonExpression {
         iterations = 100,
         n_cores = 4,
         verbose = false,
-        external_functions = None),
+        external_functions = None,
+        conditionals = None),
         )]
     pub fn evaluator_multiple(
         _cls: &Bound<'_, PyType>,
@@ -7254,6 +7255,7 @@ impl PythonExpression {
             typing.Sequence[float | complex]], float | complex]]]"
         ))]
         external_functions: Option<HashMap<(PolyVariable, String), Py<PyAny>>>,
+        conditionals: Option<Vec<PolyVariable>>,
     ) -> PyResult<PythonExpressionEvaluator> {
         let mut fn_map = FunctionMap::new();
 
@@ -7295,6 +7297,20 @@ impl PythonExpression {
 
                 fn_map
                     .add_external_function(symbol, name.clone())
+                    .map_err(|e| exceptions::PyValueError::new_err(e.to_string()))?;
+            }
+        }
+
+        if let Some(ef) = &conditionals {
+            for symbol in ef {
+                let symbol = symbol
+                    .get_id()
+                    .ok_or(exceptions::PyValueError::new_err(format!(
+                        "Bad function name {symbol}",
+                    )))?;
+
+                fn_map
+                    .add_conditional(symbol)
                     .map_err(|e| exceptions::PyValueError::new_err(e.to_string()))?;
             }
         }

@@ -605,7 +605,11 @@ impl FormattedPrintNum for NumView<'_> {
             {
                 if !real.is_zero() {
                     if !global_negative && real.is_negative() {
-                        f.write_char('-')?;
+                        if print_state.superscript {
+                            f.write_char('⁻')?;
+                        } else {
+                            f.write_char('-')?;
+                        }
                     }
 
                     format_num(
