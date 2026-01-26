@@ -3533,36 +3533,36 @@ impl<'a, 'b> WrappedMatchStack<'a, 'b> {
     /// Add a new map of identifier `key` to value `value` to the stack and return the size the stack had before inserting this new entry.
     /// If the entry `(key, value)` already exists, it is not inserted again and therefore the returned size is the actual size.
     /// If the `key` exists in the map, but the `value` is different, the insertion is ignored and `None` is returned.
-    pub fn insert(&mut self, key: Symbol, value: Match<'a>) -> Option<usize> {
-        for (rk, rv) in self.stack.stack.iter() {
-            if rk == &key {
-                if rv == &value {
-                    return Some(self.stack.stack.len());
-                } else {
-                    return None;
-                }
-            }
-        }
-
+    pub fn insert(&mut self, key: Symbol, value: Match<'a>) -> Result<usize, MatchError> {
         // check if all attributes of the wildcard are shared by the matched value
         if key.has_attributes() {
             match &value {
                 Match::Single(s) => {
                     if !s.has_attributes_of(key) {
-                        return None;
+                        return Err(MatchError::StructurallyImpossible);
                     }
                 }
                 Match::Multiple(_, list) => {
                     for s in list {
                         if !s.has_attributes_of(key) {
-                            return None;
+                            return Err(MatchError::StructurallyImpossible);
                         }
                     }
                 }
                 Match::FunctionName(n) => {
                     if !n.has_attributes_of(key) {
-                        return None;
+                        return Err(MatchError::StructurallyImpossible);
                     }
+                }
+            }
+        }
+
+        for (rk, rv) in self.stack.stack.iter() {
+            if rk == &key {
+                if rv == &value {
+                    return Ok(self.stack.stack.len());
+                } else {
+                    return Err(MatchError::ImpossibleDueToConstraints);
                 }
             }
         }
@@ -3576,9 +3576,9 @@ impl<'a, 'b> WrappedMatchStack<'a, 'b> {
             == ConditionResult::False
         {
             self.stack.stack.pop();
-            None
+            Err(MatchError::ImpossibleDueToConstraints)
         } else {
-            Some(self.stack.stack.len() - 1)
+            Ok(self.stack.stack.len() - 1)
         }
     }
 
@@ -3713,7 +3713,8 @@ impl<'a, 'b> AtomMatchIterator<'a, 'b> {
                 let range = match_stack.get_range(*w);
                 if range.0 <= 1 && range.1.map(|w| w >= 1).unwrap_or(true) {
                     // TODO: any problems with matching Single vs a list?
-                    if let Some(new_stack_len) = match_stack.insert(*w, Match::Single(self.target))
+                    if let Some(new_stack_len) =
+                        match_stack.insert(*w, Match::Single(self.target)).ok()
                     {
                         self.old_match_stack_len = Some(new_stack_len);
                         return Some((new_stack_len, &[]));
@@ -3747,7 +3748,7 @@ impl<'a, 'b> AtomMatchIterator<'a, 'b> {
             );
         }
 
-        self.subslice_iter.next(match_stack)
+        self.subslice_iter.next(match_stack).ok()
     }
 }
 
@@ -3828,6 +3829,7 @@ pub struct SubSliceIterator<'a, 'b> {
     target: TypedSlice<'a>,
     iterators: Vec<PatternIter<'a, 'b>>,
     used_flag: Vec<bool>,
+    compatibility_flag: Vec<u64>, // track which iterators are compatible with which index
     initialized: bool,
     processed_iterators: usize,
     matches: Vec<usize>,   // track match stack length
@@ -3837,6 +3839,14 @@ pub struct SubSliceIterator<'a, 'b> {
     do_not_match_to_single_atom_in_list: bool,
     do_not_match_entire_slice: bool,
     slice_type: SliceType,
+}
+
+/// Errors that can occur during iteration over matches.
+/// A match could be structurally impossible or impossible due to mismatches on wildcards.
+pub enum MatchError {
+    StructurallyImpossible,
+    ImpossibleDueToConstraints,
+    NoMoreMatches,
 }
 
 impl<'a, 'b> SubSliceIterator<'a, 'b> {
@@ -3882,6 +3892,7 @@ impl<'a, 'b> SubSliceIterator<'a, 'b> {
             iterators,
             matches: Vec::with_capacity(pattern.len()),
             used_flag: Vec::with_capacity(pattern.len()),
+            compatibility_flag: Vec::with_capacity(pattern.len()),
             target: TypedSlice::empty(),
             initialized: false,
             processed_iterators: 0,
@@ -3951,8 +3962,10 @@ impl<'a, 'b> SubSliceIterator<'a, 'b> {
 
         self.matches.clear();
         self.used_flag.clear();
+        self.compatibility_flag.clear();
         if !shortcut_done {
             self.used_flag.resize(self.target.len(), false);
+            self.compatibility_flag.resize(self.target.len(), 0);
         }
 
         self.initialized = shortcut_done;
@@ -4006,7 +4019,9 @@ impl<'a, 'b> SubSliceIterator<'a, 'b> {
 
         self.matches.clear();
         self.used_flag.clear();
+        self.compatibility_flag.clear();
         self.used_flag.resize(self.target.len(), false);
+        self.compatibility_flag.resize(self.target.len(), 0);
         self.initialized = shortcut_done;
         self.processed_iterators = 0;
         self.complete = complete;
@@ -4024,13 +4039,20 @@ impl<'a, 'b> SubSliceIterator<'a, 'b> {
     pub fn next(
         &mut self,
         match_stack: &mut WrappedMatchStack<'a, 'b>,
-    ) -> Option<(usize, &[bool])> {
+    ) -> Result<(usize, &[bool]), MatchError> {
         let mut forward_pass = !self.initialized;
         self.initialized = true;
 
+        // track if the iterators is failing due to a structural mismatch instead of due to wildcard matching
+        let mut structural_mismatch = forward_pass;
+
         'next_match: loop {
             if !forward_pass && self.processed_iterators == 0 {
-                return None; // done as all options have been exhausted
+                if structural_mismatch {
+                    return Err(MatchError::StructurallyImpossible);
+                } else {
+                    return Err(MatchError::NoMoreMatches); // done as all options have been exhausted
+                }
             }
 
             if forward_pass && self.processed_iterators == self.pattern.len() {
@@ -4044,7 +4066,7 @@ impl<'a, 'b> SubSliceIterator<'a, 'b> {
                     forward_pass = false;
                 } else {
                     // yield the current match
-                    return Some((*self.matches.last().unwrap(), &self.used_flag));
+                    return Ok((*self.matches.last().unwrap(), &self.used_flag));
                 }
             }
 
@@ -4054,6 +4076,12 @@ impl<'a, 'b> SubSliceIterator<'a, 'b> {
                     (Pattern::Wildcard(name), PatternIter::Wildcard(w)) => {
                         let mut size_left = self.used_flag.iter().filter(|x| !*x).count();
                         let range = match_stack.get_range(*name);
+
+                        if name.get_wildcard_level() > 1 && match_stack.stack.get(*name).is_some() {
+                            // a previously matched ranged wildcard will constrain the slice matching
+                            // so it is hard to conclude if there is a structural mismatch
+                            structural_mismatch = false;
+                        }
 
                         if self.do_not_match_entire_slice {
                             size_left -= 1;
@@ -4205,15 +4233,21 @@ impl<'a, 'b> SubSliceIterator<'a, 'b> {
 
                         // check for an empty slice match
                         if w.size_target == 0 && w.indices.is_empty() {
-                            if let Some(new_stack_len) = match_stack
+                            match match_stack
                                 .insert(w.name, Match::Multiple(SliceType::Empty, Vec::new()))
                             {
-                                self.matches.push(new_stack_len);
-                                continue 'next_match;
-                            } else {
-                                wildcard_forward_pass = false;
-                                continue 'next_wildcard_match;
+                                Ok(new_stack_len) => {
+                                    self.matches.push(new_stack_len);
+                                    continue 'next_match;
+                                }
+                                Err(MatchError::StructurallyImpossible) => {}
+                                Err(_) => {
+                                    structural_mismatch = false;
+                                }
                             }
+
+                            wildcard_forward_pass = false;
+                            continue 'next_wildcard_match;
                         }
 
                         let mut tried_first_option = false;
@@ -4232,7 +4266,13 @@ impl<'a, 'b> SubSliceIterator<'a, 'b> {
                                 break;
                             }
 
-                            if self.used_flag[k] {
+                            if self.used_flag[k]
+                                || w.name.get_wildcard_level() == 1
+                                    && self.processed_iterators < 64
+                                    && self.compatibility_flag[k]
+                                        & (1 << (self.processed_iterators - 1))
+                                        != 0
+                            {
                                 if self.cyclic {
                                     break;
                                 }
@@ -4249,7 +4289,7 @@ impl<'a, 'b> SubSliceIterator<'a, 'b> {
 
                                 // simplify case of 1 argument, this is important for matching to work, since mul(x) = add(x) = arg(x) for any x
                                 let matched = if w.indices.len() == 1 {
-                                    match self.target.get(w.indices[0] as usize) {
+                                    match self.target.get(k) {
                                         AtomView::Mul(m) => Match::Multiple(SliceType::Mul, {
                                             let mut v = Vec::new();
                                             for x in m {
@@ -4276,14 +4316,27 @@ impl<'a, 'b> SubSliceIterator<'a, 'b> {
                                 };
 
                                 // add the match to the stack if it is compatible
-                                if let Some(new_stack_len) = match_stack.insert(w.name, matched) {
-                                    self.matches.push(new_stack_len);
-                                    continue 'next_match;
-                                } else {
-                                    // no match
-                                    w.indices.pop();
-                                    self.used_flag[k] = false;
+                                match match_stack.insert(w.name, matched) {
+                                    Ok(new_stack_len) => {
+                                        self.matches.push(new_stack_len);
+                                        continue 'next_match;
+                                    }
+                                    Err(MatchError::StructurallyImpossible) => {
+                                        if self.processed_iterators < 64 {
+                                            if w.name.get_wildcard_level() == 1 {
+                                                self.compatibility_flag[k] |=
+                                                    1 << (self.processed_iterators - 1) as u64;
+                                            }
+                                        }
+                                    }
+                                    Err(_) => {
+                                        structural_mismatch = false;
+                                    }
                                 }
+
+                                // no match
+                                w.indices.pop();
+                                self.used_flag[k] = false;
                             }
 
                             k += 1;
@@ -4300,21 +4353,37 @@ impl<'a, 'b> SubSliceIterator<'a, 'b> {
                     let mut ii = match index {
                         Some(jj) => {
                             // get the next iteration of the function
-                            if let Some((x, _)) = s.next(match_stack) {
-                                self.matches.push(x);
-                                continue 'next_match;
-                            } else {
-                                if name.get_wildcard_level() > 0 {
-                                    // pop the matched name and truncate the stack
-                                    // we cannot wait until the truncation at the start of 'next_match
-                                    // as we will try to match this iterator to a new index
-                                    match_stack.truncate(self.matches.pop().unwrap());
+                            if !structural_mismatch {
+                                match s.next(match_stack) {
+                                    Ok((x, _)) => {
+                                        self.matches.push(x);
+                                        continue 'next_match;
+                                    }
+                                    Err(MatchError::StructurallyImpossible) => {
+                                        unreachable!(
+                                            "Structural mismatch after successful match of subiterator {:?}",
+                                            s.pattern
+                                        );
+                                    }
+                                    _ => {}
                                 }
-
-                                self.used_flag[*jj] = false;
-                                tried_first_option = true;
-                                *jj + 1
+                            } else {
+                                // there is a structural mismatch for a future iterator, so
+                                // this iterator needs to move its position in the target list
+                                // clear all matches from this iterator
+                                match_stack.truncate(s.matches[0]);
                             }
+
+                            if name.get_wildcard_level() > 0 {
+                                // pop the matched name and truncate the stack
+                                // we cannot wait until the truncation at the start of 'next_match
+                                // as we will try to match this iterator to a new index
+                                match_stack.truncate(self.matches.pop().unwrap());
+                            }
+
+                            self.used_flag[*jj] = false;
+                            tried_first_option = true;
+                            *jj + 1
                         }
                         None => {
                             if self.cyclic && !self.used_flag.iter().all(|u| *u) {
@@ -4332,7 +4401,12 @@ impl<'a, 'b> SubSliceIterator<'a, 'b> {
 
                     // find a new match and create a new iterator
                     while ii < self.target.len() {
-                        if self.used_flag[ii] {
+                        if self.used_flag[ii]
+                            || self.processed_iterators < 64
+                                && self.compatibility_flag[ii]
+                                    & (1 << (self.processed_iterators - 1))
+                                    != 0
+                        {
                             if self.cyclic {
                                 break;
                             }
@@ -4354,14 +4428,21 @@ impl<'a, 'b> SubSliceIterator<'a, 'b> {
                         if let AtomView::Fun(f) = new_target {
                             let target_name = f.get_symbol();
                             let name_match = if name.get_wildcard_level() > 0 {
-                                if let Some(new_stack_len) =
-                                    match_stack.insert(*name, Match::FunctionName(target_name))
-                                {
-                                    self.matches.push(new_stack_len);
-                                    true
-                                } else {
-                                    ii += 1;
-                                    continue;
+                                match match_stack.insert(*name, Match::FunctionName(target_name)) {
+                                    Ok(new_stack_len) => {
+                                        self.matches.push(new_stack_len);
+                                        true
+                                    }
+                                    Err(MatchError::StructurallyImpossible) => {
+                                        ii += 1;
+                                        continue;
+                                    }
+                                    Err(_) => {
+                                        // skipping based on previous match means we cannot prove structural mismatch
+                                        structural_mismatch = false;
+                                        ii += 1;
+                                        continue;
+                                    }
                                 }
                             } else {
                                 target_name == *name
@@ -4378,12 +4459,22 @@ impl<'a, 'b> SubSliceIterator<'a, 'b> {
                                     target_name.is_cyclesymmetric(),
                                 );
 
-                                if let Some((x, _)) = s.next(match_stack) {
-                                    *index = Some(ii);
-                                    self.matches.push(x);
-                                    self.used_flag[ii] = true;
-
-                                    continue 'next_match;
+                                match s.next(match_stack) {
+                                    Ok((x, _)) => {
+                                        *index = Some(ii);
+                                        self.matches.push(x);
+                                        self.used_flag[ii] = true;
+                                        continue 'next_match;
+                                    }
+                                    Err(MatchError::StructurallyImpossible) => {
+                                        if self.processed_iterators < 64 {
+                                            self.compatibility_flag[ii] |=
+                                                1 << (self.processed_iterators - 1) as u64;
+                                        }
+                                    }
+                                    _ => {
+                                        structural_mismatch = false;
+                                    }
                                 }
 
                                 if name.get_wildcard_level() > 0 {
@@ -4455,14 +4546,30 @@ impl<'a, 'b> SubSliceIterator<'a, 'b> {
                     let mut ii = match index {
                         Some(jj) => {
                             // get the next iteration of the function
-                            if let Some((x, _)) = s.next(match_stack) {
-                                self.matches.push(x);
-                                continue 'next_match;
+                            if !structural_mismatch {
+                                match s.next(match_stack) {
+                                    Ok((x, _)) => {
+                                        self.matches.push(x);
+                                        continue 'next_match;
+                                    }
+                                    Err(MatchError::StructurallyImpossible) => {
+                                        unreachable!(
+                                            "Structural mismatch after successful match of subiterator {:?}",
+                                            s.pattern
+                                        );
+                                    }
+                                    _ => {}
+                                }
                             } else {
-                                self.used_flag[*jj] = false;
-                                tried_first_option = true;
-                                *jj + 1
+                                // there is a structural mismatch for a future iterator, so
+                                // this iterator needs to move its position in the target list
+                                // clear all matches from this iterator
+                                match_stack.truncate(s.matches[0]);
                             }
+
+                            self.used_flag[*jj] = false;
+                            tried_first_option = true;
+                            *jj + 1
                         }
                         None => {
                             if self.cyclic && !self.used_flag.iter().all(|u| *u) {
@@ -4480,7 +4587,12 @@ impl<'a, 'b> SubSliceIterator<'a, 'b> {
 
                     // find a new match and create a new iterator
                     while ii < self.target.len() {
-                        if self.used_flag[ii] {
+                        if self.used_flag[ii]
+                            || self.processed_iterators < 64
+                                && self.compatibility_flag[ii]
+                                    & (1 << (self.processed_iterators - 1))
+                                    != 0
+                        {
                             if self.cyclic {
                                 break;
                             }
@@ -4517,12 +4629,23 @@ impl<'a, 'b> SubSliceIterator<'a, 'b> {
 
                         s.set_list_target(new_target, match_stack, true, ordered, false);
 
-                        if let Some((x, _)) = s.next(match_stack) {
-                            *index = Some(ii);
-                            self.matches.push(x);
-                            self.used_flag[ii] = true;
+                        match s.next(match_stack) {
+                            Ok((x, _)) => {
+                                *index = Some(ii);
+                                self.matches.push(x);
+                                self.used_flag[ii] = true;
 
-                            continue 'next_match;
+                                continue 'next_match;
+                            }
+                            Err(MatchError::StructurallyImpossible) => {
+                                if self.processed_iterators < 64 {
+                                    self.compatibility_flag[ii] |=
+                                        1 << (self.processed_iterators - 1) as u64;
+                                };
+                            }
+                            _ => {
+                                structural_mismatch = false;
+                            }
                         }
 
                         ii += 1;
