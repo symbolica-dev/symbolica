@@ -2064,21 +2064,57 @@ impl Pattern {
 
     /// Create a pattern from an atom view.
     pub(crate) fn from_view(atom: AtomView<'_>, is_top_layer: bool) -> Pattern {
-        #[inline]
-        fn sort_wildcard_last(args: &mut [Pattern]) {
-            args.sort_by(|a, b| {
-                let wildcard_level_a = if let Pattern::Wildcard(aa) = a {
-                    aa.get_wildcard_level()
-                } else {
-                    0
-                };
-                let wildcard_level_b = if let Pattern::Wildcard(bb) = b {
-                    bb.get_wildcard_level()
-                } else {
-                    0
-                };
-                wildcard_level_a.cmp(&wildcard_level_b)
-            });
+        /// Sort patterns based on their specificity, so that more specific patterns (with fewer wildcards) are tried first.
+        fn sort_on_specificity(arg1: &Pattern, arg2: &Pattern) -> std::cmp::Ordering {
+            match (arg1, arg2) {
+                (Pattern::Literal(_), Pattern::Literal(_)) => std::cmp::Ordering::Equal,
+                (Pattern::Literal(_), _) => std::cmp::Ordering::Less,
+                (_, Pattern::Literal(_)) => std::cmp::Ordering::Greater,
+                (Pattern::Wildcard(w1), Pattern::Wildcard(w2)) => w1
+                    .get_wildcard_level()
+                    .cmp(&w2.get_wildcard_level())
+                    .then_with(|| w2.has_attributes().cmp(&w1.has_attributes())), // sort more attributes first
+                (Pattern::Wildcard(_), _) => std::cmp::Ordering::Greater, // move wildcards to the end
+                (_, Pattern::Wildcard(_)) => std::cmp::Ordering::Less,
+                (Pattern::Pow(p1), Pattern::Pow(p2)) => sort_on_specificity(&p1[0], &p2[0])
+                    .then_with(|| sort_on_specificity(&p1[1], &p2[1])),
+                (Pattern::Pow(_), _) => std::cmp::Ordering::Less,
+                (_, Pattern::Pow(_)) => std::cmp::Ordering::Greater,
+                (Pattern::Fn(n1, arg1), Pattern::Fn(n2, arg2)) => n1
+                    .get_wildcard_level()
+                    .cmp(&n2.get_wildcard_level())
+                    .then_with(|| arg1.len().cmp(&arg2.len()))
+                    .then_with(|| {
+                        arg1.iter()
+                            .zip(arg2)
+                            .fold(std::cmp::Ordering::Equal, |acc, (a1, a2)| {
+                                acc.then_with(|| sort_on_specificity(a1, a2))
+                            })
+                    }),
+                (Pattern::Fn(_, _), _) => std::cmp::Ordering::Less,
+                (_, Pattern::Fn(_, _)) => std::cmp::Ordering::Greater,
+                (Pattern::Mul(m1), Pattern::Mul(m2)) => m1.len().cmp(&m2.len()).then_with(|| {
+                    m1.iter()
+                        .zip(m2)
+                        .fold(std::cmp::Ordering::Equal, |acc, (a1, a2)| {
+                            acc.then_with(|| sort_on_specificity(a1, a2))
+                        })
+                        .then_with(|| m1.len().cmp(&m2.len()))
+                }),
+                (Pattern::Mul(_), _) => std::cmp::Ordering::Less,
+                (_, Pattern::Mul(_)) => std::cmp::Ordering::Greater,
+                (Pattern::Add(a1), Pattern::Add(a2)) => a1.len().cmp(&a2.len()).then_with(|| {
+                    a1.iter()
+                        .zip(a2)
+                        .fold(std::cmp::Ordering::Equal, |acc, (a1, a2)| {
+                            acc.then_with(|| sort_on_specificity(a1, a2))
+                        })
+                        .then_with(|| a1.len().cmp(&a2.len()))
+                }),
+                (Pattern::Add(_), _) => std::cmp::Ordering::Less,
+                (_, Pattern::Add(_)) => std::cmp::Ordering::Greater,
+                (Pattern::Transformer(_), Pattern::Transformer(_)) => std::cmp::Ordering::Equal,
+            }
         }
 
         // split up Add and Mul for literal patterns as well so that x+y can match to x+y+z
@@ -2097,7 +2133,7 @@ impl Pattern {
 
                     if name.is_symmetric() {
                         // sort the arguments so that wildcards are last for efficiency
-                        sort_wildcard_last(&mut args);
+                        args.sort_unstable_by(sort_on_specificity);
                     }
 
                     Pattern::Fn(name, args)
@@ -2117,7 +2153,7 @@ impl Pattern {
                         args.push(Self::from_view(child, false));
                     }
 
-                    sort_wildcard_last(&mut args);
+                    args.sort_unstable_by(sort_on_specificity);
 
                     Pattern::Mul(args)
                 }
@@ -2127,8 +2163,8 @@ impl Pattern {
                         args.push(Self::from_view(child, false));
                     }
 
-                    // sort the arguments so that wildcards are last for efficiecy
-                    sort_wildcard_last(&mut args);
+                    // sort the arguments so that wildcards are last for efficiency
+                    args.sort_unstable_by(sort_on_specificity);
 
                     Pattern::Add(args)
                 }
