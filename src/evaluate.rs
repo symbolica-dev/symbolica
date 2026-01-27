@@ -3696,14 +3696,15 @@ extern "C" {{
             if *r < self.param_count {
                 match asm_flavour {
                     InlineASM::X64 => {
-                        *out += &format!("\t\t\"movsd {}(%3), %%xmm{}\\n\\t\"\n", r * 8, regcount);
+                        *out += &format!("\t\t\"movsd {}(%2), %%xmm{}\\n\\t\"\n", r * 8, regcount);
                     }
                     InlineASM::AVX2 => {
                         *out +=
-                            &format!("\t\t\"vmovupd {}(%3), %%ymm{}\\n\\t\"\n", r * 32, regcount);
+                            &format!("\t\t\"vmovupd {}(%2), %%ymm{}\\n\\t\"\n", r * 32, regcount);
                     }
                     InlineASM::AArch64 => {
-                        *out += &format!("\t\t\"ldr d{}, [%3, {}]\\n\\t\"\n", regcount, r * 8);
+                        let addr = asm_load!(*r);
+                        *out += &format!("\t\t\"ldr d{}, {}\\n\\t\"\n", regcount, addr);
                     }
                     InlineASM::None => unreachable!(),
                 }
@@ -3711,38 +3712,36 @@ extern "C" {{
                 match asm_flavour {
                     InlineASM::X64 => {
                         *out += &format!(
-                            "\t\t\"movsd {}(%2), %%xmm{}\\n\\t\"\n",
+                            "\t\t\"movsd {}(%1), %%xmm{}\\n\\t\"\n",
                             (r - self.param_count) * 8,
                             regcount
                         );
                     }
                     InlineASM::AVX2 => {
                         *out += &format!(
-                            "\t\t\"vmovupd {}(%2), %%ymm{}\\n\\t\"\n",
+                            "\t\t\"vmovupd {}(%1), %%ymm{}\\n\\t\"\n",
                             (r - self.param_count) * 32,
                             regcount
                         );
                     }
                     InlineASM::AArch64 => {
-                        *out += &format!(
-                            "\t\t\"ldr d{}, [%2, {}]\\n\\t\"\n",
-                            regcount,
-                            (r - self.param_count) * 8
-                        );
+                        let addr = asm_load!(*r);
+                        *out += &format!("\t\t\"ldr d{}, {}\\n\\t\"\n", regcount, addr);
                     }
                     InlineASM::None => unreachable!(),
                 }
             } else {
                 match asm_flavour {
                     InlineASM::X64 => {
-                        *out += &format!("\t\t\"movsd {}(%1), %%xmm{}\\n\\t\"\n", r * 8, regcount);
+                        *out += &format!("\t\t\"movsd {}(%0), %%xmm{}\\n\\t\"\n", r * 8, regcount);
                     }
                     InlineASM::AVX2 => {
                         *out +=
-                            &format!("\t\t\"vmovupd {}(%1), %%ymm{}\\n\\t\"\n", r * 32, regcount);
+                            &format!("\t\t\"vmovupd {}(%0), %%ymm{}\\n\\t\"\n", r * 32, regcount);
                     }
                     InlineASM::AArch64 => {
-                        *out += &format!("\t\t\"ldr d{}, [%1, {}]\\n\\t\"\n", regcount, r * 8);
+                        let addr = asm_load!(*r);
+                        *out += &format!("\t\t\"ldr d{}, {}\\n\\t\"\n", regcount, addr);
                     }
                     InlineASM::None => unreachable!(),
                 }
@@ -3750,13 +3749,24 @@ extern "C" {{
 
             match asm_flavour {
                 InlineASM::X64 => {
-                    *out += &format!("\t\t\"movsd %%xmm{}, {}(%0)\\n\\t\"\n", regcount, i * 8);
+                    *out += &format!("\t\t\"movsd %%xmm{}, {}(%3)\\n\\t\"\n", regcount, i * 8);
                 }
                 InlineASM::AVX2 => {
-                    *out += &format!("\t\t\"vmovupd %%ymm{}, {}(%0)\\n\\t\"\n", regcount, i * 32);
+                    *out += &format!("\t\t\"vmovupd %%ymm{}, {}(%3)\\n\\t\"\n", regcount, i * 32);
                 }
                 InlineASM::AArch64 => {
-                    *out += &format!("\t\t\"str d{}, [%0, {}]\\n\\t\"\n", regcount, i * 8);
+                    let dest = i * 8;
+                    if dest > 32760 {
+                        let d = dest.ilog2();
+                        let shift = d.min(12);
+                        let coeff = dest / (1 << shift);
+                        let rest = dest - (coeff << shift);
+                        second_index = 0;
+                        *out += &format!("\t\t\"add x8, %3, {}, lsl {}\\n\\t\"\n", coeff, shift);
+                        *out += &format!("\t\t\"str d{}, [x8, {}]\\n\\t\"\n", regcount, rest);
+                    } else {
+                        *out += &format!("\t\t\"str d{}, [%3, {}]\\n\\t\"\n", regcount, i * 8);
+                    }
                 }
                 InlineASM::None => unreachable!(),
             }
@@ -3766,17 +3776,17 @@ extern "C" {{
         match asm_flavour {
             InlineASM::X64 => {
                 *out += &format!(
-                    "\t\t:\n\t\t: \"r\"(out), \"r\"(Z), \"r\"({function_name}_CONSTANTS_double), \"r\"(params)\n\t\t: \"memory\", \"xmm0\", \"xmm1\", \"xmm2\", \"xmm3\", \"xmm4\", \"xmm5\", \"xmm6\", \"xmm7\", \"xmm8\", \"xmm9\", \"xmm10\", \"xmm11\", \"xmm12\", \"xmm13\", \"xmm14\", \"xmm15\");\n"
+                    "\t\t:\n\t\t: \"r\"(Z), \"r\"({function_name}_CONSTANTS_double), \"r\"(params), \"r\"(out)\n\t\t: \"memory\", \"xmm0\", \"xmm1\", \"xmm2\", \"xmm3\", \"xmm4\", \"xmm5\", \"xmm6\", \"xmm7\", \"xmm8\", \"xmm9\", \"xmm10\", \"xmm11\", \"xmm12\", \"xmm13\", \"xmm14\", \"xmm15\");\n"
                 );
             }
             InlineASM::AVX2 => {
                 *out += &format!(
-                    "\t\t:\n\t\t: \"r\"(out), \"r\"(Z), \"r\"({function_name}_CONSTANTS_double), \"r\"(params)\n\t\t: \"memory\", \"ymm0\", \"ymm1\", \"ymm2\", \"ymm3\", \"ymm4\", \"ymm5\", \"ymm6\", \"ymm7\", \"ymm8\", \"ymm9\", \"ymm10\", \"ymm11\", \"ymm12\", \"ymm13\", \"ymm14\", \"ymm15\");\n"
+                    "\t\t:\n\t\t: \"r\"(Z), \"r\"({function_name}_CONSTANTS_double), \"r\"(params), \"r\"(out)\n\t\t: \"memory\", \"ymm0\", \"ymm1\", \"ymm2\", \"ymm3\", \"ymm4\", \"ymm5\", \"ymm6\", \"ymm7\", \"ymm8\", \"ymm9\", \"ymm10\", \"ymm11\", \"ymm12\", \"ymm13\", \"ymm14\", \"ymm15\");\n"
                 );
             }
             InlineASM::AArch64 => {
                 *out += &format!(
-                    "\t\t:\n\t\t: \"r\"(out), \"r\"(Z), \"r\"({function_name}_CONSTANTS_double), \"r\"(params)\n\t\t: \"memory\", \"d0\", \"d1\", \"d2\", \"d3\", \"d4\", \"d5\", \"d6\", \"d7\", \"d8\", \"d9\", \"d10\", \"d11\", \"d12\", \"d13\", \"d14\", \"d15\", \"d16\", \"d17\", \"d18\", \"d19\", \"d20\", \"d21\", \"d22\", \"d23\", \"d24\", \"d25\", \"d26\", \"d27\", \"d28\", \"d29\", \"d30\", \"d31\");\n"
+                    "\t\t:\n\t\t: \"r\"(Z), \"r\"({function_name}_CONSTANTS_double), \"r\"(params), \"r\"(out)\n\t\t: \"memory\", \"x8\", \"d0\", \"d1\", \"d2\", \"d3\", \"d4\", \"d5\", \"d6\", \"d7\", \"d8\", \"d9\", \"d10\", \"d11\", \"d12\", \"d13\", \"d14\", \"d15\", \"d16\", \"d17\", \"d18\", \"d19\", \"d20\", \"d21\", \"d22\", \"d23\", \"d24\", \"d25\", \"d26\", \"d27\", \"d28\", \"d29\", \"d30\", \"d31\");\n"
                 );
             }
             InlineASM::None => unreachable!(),
@@ -4271,14 +4281,15 @@ extern "C" {{
             if *r < self.param_count {
                 match asm_flavour {
                     InlineASM::X64 => {
-                        *out += &format!("\t\t\"movupd {}(%3), %%xmm0\\n\\t\"\n", r * 16);
+                        *out += &format!("\t\t\"movupd {}(%2), %%xmm0\\n\\t\"\n", r * 16);
                     }
                     InlineASM::AVX2 => {
-                        *out += &format!("\t\t\"vmovupd {}(%3), %%ymm0\\n\\t\"\n", r * 64);
-                        *out += &format!("\t\t\"vmovupd {}(%3), %%ymm1\\n\\t\"\n", r * 64 + 32);
+                        *out += &format!("\t\t\"vmovupd {}(%2), %%ymm0\\n\\t\"\n", r * 64);
+                        *out += &format!("\t\t\"vmovupd {}(%2), %%ymm1\\n\\t\"\n", r * 64 + 32);
                     }
                     InlineASM::AArch64 => {
-                        *out += &format!("\t\t\"ldr q0, [%3, {}]\\n\\t\"\n", r * 16);
+                        let (addr_re, _) = asm_load!(*r);
+                        *out += &format!("\t\t\"ldr q0, {}\\n\\t\"\n", addr_re);
                     }
                     InlineASM::None => unreachable!(),
                 }
@@ -4286,25 +4297,23 @@ extern "C" {{
                 match asm_flavour {
                     InlineASM::X64 => {
                         *out += &format!(
-                            "\t\t\"movupd {}(%2), %%xmm0\\n\\t\"\n",
+                            "\t\t\"movupd {}(%1), %%xmm0\\n\\t\"\n",
                             (r - self.param_count) * 16
                         );
                     }
                     InlineASM::AVX2 => {
                         *out += &format!(
-                            "\t\t\"vmovupd {}(%2), %%ymm0\\n\\t\"\n",
+                            "\t\t\"vmovupd {}(%1), %%ymm0\\n\\t\"\n",
                             (r - self.param_count) * 64
                         );
                         *out += &format!(
-                            "\t\t\"vmovupd {}(%2), %%ymm1\\n\\t\"\n",
+                            "\t\t\"vmovupd {}(%1), %%ymm1\\n\\t\"\n",
                             (r - self.param_count) * 64 + 32
                         );
                     }
                     InlineASM::AArch64 => {
-                        *out += &format!(
-                            "\t\t\"ldr q0, [%2, {}]\\n\\t\"\n",
-                            (r - self.param_count) * 16
-                        );
+                        let (addr_re, _) = asm_load!(*r);
+                        *out += &format!("\t\t\"ldr q0, {}\\n\\t\"\n", addr_re);
                     }
 
                     InlineASM::None => unreachable!(),
@@ -4312,14 +4321,15 @@ extern "C" {{
             } else {
                 match asm_flavour {
                     InlineASM::X64 => {
-                        *out += &format!("\t\t\"movupd {}(%1), %%xmm0\\n\\t\"\n", r * 16);
+                        *out += &format!("\t\t\"movupd {}(%0), %%xmm0\\n\\t\"\n", r * 16);
                     }
                     InlineASM::AVX2 => {
-                        *out += &format!("\t\t\"vmovupd {}(%1), %%ymm0\\n\\t\"\n", r * 64);
-                        *out += &format!("\t\t\"vmovupd {}(%1), %%ymm1\\n\\t\"\n", r * 64 + 32);
+                        *out += &format!("\t\t\"vmovupd {}(%0), %%ymm0\\n\\t\"\n", r * 64);
+                        *out += &format!("\t\t\"vmovupd {}(%0), %%ymm1\\n\\t\"\n", r * 64 + 32);
                     }
                     InlineASM::AArch64 => {
-                        *out += &format!("\t\t\"ldr q0, [%1, {}]\\n\\t\"\n", r * 16);
+                        let (addr_re, _) = asm_load!(*r);
+                        *out += &format!("\t\t\"ldr q0, {}\\n\\t\"\n", addr_re);
                     }
                     InlineASM::None => unreachable!(),
                 }
@@ -4327,14 +4337,25 @@ extern "C" {{
 
             match asm_flavour {
                 InlineASM::X64 => {
-                    *out += &format!("\t\t\"movupd %%xmm0, {}(%0)\\n\\t\"\n", i * 16);
+                    *out += &format!("\t\t\"movupd %%xmm0, {}(%3)\\n\\t\"\n", i * 16);
                 }
                 InlineASM::AVX2 => {
-                    *out += &format!("\t\t\"vmovupd %%ymm0, {}(%0)\\n\\t\"\n", i * 64);
-                    *out += &format!("\t\t\"vmovupd %%ymm1, {}(%0)\\n\\t\"\n", i * 64 + 32);
+                    *out += &format!("\t\t\"vmovupd %%ymm0, {}(%3)\\n\\t\"\n", i * 64);
+                    *out += &format!("\t\t\"vmovupd %%ymm1, {}(%3)\\n\\t\"\n", i * 64 + 32);
                 }
                 InlineASM::AArch64 => {
-                    *out += &format!("\t\t\"str q0, [%0, {}]\\n\\t\"\n", i * 16);
+                    let dest = i * 16;
+                    if dest > 32760 {
+                        let d = dest.ilog2();
+                        let shift = d.min(12);
+                        let coeff = dest / (1 << shift);
+                        let rest = dest - (coeff << shift);
+                        second_index = 0;
+                        *out += &format!("\t\t\"add x8, %3, {}, lsl {}\\n\\t\"\n", coeff, shift);
+                        *out += &format!("\t\t\"str q0, [x8, {}]\\n\\t\"\n", rest);
+                    } else {
+                        *out += &format!("\t\t\"str q0, [%3, {}]\\n\\t\"\n", dest);
+                    }
                 }
                 InlineASM::None => unreachable!(),
             }
@@ -4343,17 +4364,17 @@ extern "C" {{
         match asm_flavour {
             InlineASM::X64 => {
                 *out += &format!(
-                    "\t\t:\n\t\t: \"r\"(out), \"r\"(Z), \"r\"({function_name}_CONSTANTS_complex), \"r\"(params)\n\t\t: \"memory\", \"xmm0\", \"xmm1\", \"xmm2\", \"xmm3\", \"xmm4\", \"xmm5\", \"xmm6\", \"xmm7\", \"xmm8\", \"xmm9\", \"xmm10\", \"xmm11\", \"xmm12\", \"xmm13\", \"xmm14\", \"xmm15\");\n"
+                    "\t\t:\n\t\t: \"r\"(Z), \"r\"({function_name}_CONSTANTS_complex), \"r\"(params), \"r\"(out)\n\t\t: \"memory\", \"xmm0\", \"xmm1\", \"xmm2\", \"xmm3\", \"xmm4\", \"xmm5\", \"xmm6\", \"xmm7\", \"xmm8\", \"xmm9\", \"xmm10\", \"xmm11\", \"xmm12\", \"xmm13\", \"xmm14\", \"xmm15\");\n"
                 );
             }
             InlineASM::AVX2 => {
                 *out += &format!(
-                    "\t\t:\n\t\t: \"r\"(out), \"r\"(Z), \"r\"({function_name}_CONSTANTS_complex), \"r\"(params)\n\t\t: \"memory\", \"ymm0\", \"ymm1\", \"ymm2\", \"ymm3\", \"ymm4\", \"ymm5\", \"ymm6\", \"ymm7\", \"ymm8\", \"ymm9\", \"ymm10\", \"ymm11\", \"ymm12\", \"ymm13\", \"ymm14\", \"ymm15\");\n"
+                    "\t\t:\n\t\t: \"r\"(Z), \"r\"({function_name}_CONSTANTS_complex), \"r\"(params), \"r\"(out)\n\t\t: \"memory\", \"ymm0\", \"ymm1\", \"ymm2\", \"ymm3\", \"ymm4\", \"ymm5\", \"ymm6\", \"ymm7\", \"ymm8\", \"ymm9\", \"ymm10\", \"ymm11\", \"ymm12\", \"ymm13\", \"ymm14\", \"ymm15\");\n"
                 );
             }
             InlineASM::AArch64 => {
                 *out += &format!(
-                    "\t\t:\n\t\t: \"r\"(out), \"r\"(Z), \"r\"({function_name}_CONSTANTS_complex), \"r\"(params)\n\t\t: \"memory\", \"d0\", \"d1\", \"d2\", \"d3\", \"d4\", \"d5\", \"d6\", \"d7\", \"d8\", \"d9\", \"d10\", \"d11\", \"d12\", \"d13\", \"d14\", \"d15\", \"d16\", \"d17\", \"d18\", \"d19\", \"d20\", \"d21\", \"d22\", \"d23\", \"d24\", \"d25\", \"d26\", \"d27\", \"d28\", \"d29\", \"d30\", \"d31\");\n"
+                    "\t\t:\n\t\t: \"r\"(Z), \"r\"({function_name}_CONSTANTS_complex), \"r\"(params), \"r\"(out)\n\t\t: \"memory\", \"x8\", \"d0\", \"d1\", \"d2\", \"d3\", \"d4\", \"d5\", \"d6\", \"d7\", \"d8\", \"d9\", \"d10\", \"d11\", \"d12\", \"d13\", \"d14\", \"d15\", \"d16\", \"d17\", \"d18\", \"d19\", \"d20\", \"d21\", \"d22\", \"d23\", \"d24\", \"d25\", \"d26\", \"d27\", \"d28\", \"d29\", \"d30\", \"d31\");\n"
                 );
             }
             InlineASM::None => unreachable!(),
@@ -9387,6 +9408,24 @@ impl<'a> AtomView<'a> {
                             .next()
                             .unwrap()
                             .to_eval_tree_impl(fn_map, params, args, funcs)?;
+
+                        if let Expression::Const(c) = &cond_eval {
+                            if !c.is_zero() {
+                                let t_eval = arg_iter
+                                    .next()
+                                    .unwrap()
+                                    .to_eval_tree_impl(fn_map, params, args, funcs)?;
+                                return Ok(t_eval);
+                            } else {
+                                let _ = arg_iter.next().unwrap();
+                                let f_eval = arg_iter
+                                    .next()
+                                    .unwrap()
+                                    .to_eval_tree_impl(fn_map, params, args, funcs)?;
+                                return Ok(f_eval);
+                            }
+                        }
+
                         let t_eval = arg_iter
                             .next()
                             .unwrap()

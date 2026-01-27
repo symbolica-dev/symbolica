@@ -4860,12 +4860,12 @@ class Evaluator:
         ```
         """
 
-    def merge(self, other: Evaluator, cpe_rounds: Optional[int] = None) -> None:
+    def merge(self, other: Evaluator, cpe_iterations: Optional[int] = None) -> None:
         """
         Merge evaluator `other` into `self`. The parameters must be the same, and
         the outputs will be concatenated.
 
-        The optional `cpe_rounds` parameter can be used to limit the number of common
+        The optional `cpe_iterations` parameter can be used to limit the number of common
         pair elimination rounds after the merge.
 
         Examples
