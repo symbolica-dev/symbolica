@@ -6059,7 +6059,8 @@ impl EvalTree<Complex<Rational>> {
     ) -> ExpressionEvaluator<Complex<Rational>> {
         let _ = self.optimize_horner_scheme(settings);
         self.common_subexpression_elimination();
-        self.clone().linearize(None, settings.verbose)
+        self.clone()
+            .linearize(settings.cpe_iterations, settings.verbose)
     }
 
     /// Write the expressions in a Horner scheme where the variables

@@ -7039,6 +7039,7 @@ impl PythonExpression {
         functions,
         params,
         iterations = 100,
+        cpe_iterations = None,
         n_cores = 4,
         verbose = false,
         external_functions = None,
@@ -7050,6 +7051,7 @@ impl PythonExpression {
         functions: HashMap<(PolyVariable, String, Vec<PolyVariable>), PythonExpression>,
         params: Vec<PythonExpression>,
         iterations: usize,
+        cpe_iterations: Option<usize>,
         n_cores: usize,
         verbose: bool,
         #[gen_stub(override_type(
@@ -7126,6 +7128,7 @@ impl PythonExpression {
 
         let settings = OptimizationSettings {
             horner_iterations: iterations,
+            cpe_iterations,
             n_cores,
             verbose: verbose.into(),
             abort_check: Some(abort_check),
@@ -7236,6 +7239,7 @@ impl PythonExpression {
         functions,
         params,
         iterations = 100,
+        cpe_iterations = None,
         n_cores = 4,
         verbose = false,
         external_functions = None,
@@ -7248,6 +7252,7 @@ impl PythonExpression {
         functions: HashMap<(PolyVariable, String, Vec<PolyVariable>), PythonExpression>,
         params: Vec<PythonExpression>,
         iterations: usize,
+        cpe_iterations: Option<usize>,
         n_cores: usize,
         verbose: bool,
         #[gen_stub(override_type(
@@ -7317,6 +7322,7 @@ impl PythonExpression {
 
         let settings = OptimizationSettings {
             horner_iterations: iterations,
+            cpe_iterations,
             n_cores,
             verbose: verbose.into(),
             ..OptimizationSettings::default()

@@ -2120,6 +2120,7 @@ class Expression:
         functions: dict[Tuple[Expression, str, Sequence[Expression]], Expression],
         params: Sequence[Expression],
         iterations: int = 100,
+        cpe_iterations: Optional[int] = None,
         n_cores: int = 4,
         verbose: bool = False,
         external_functions: Optional[dict[Tuple[Expression, str], Callable[[
@@ -2172,7 +2173,9 @@ class Expression:
         params: Sequence[Expression]
             A list of free parameters.
         iterations: int, optional
-            The number of optimization iterations to perform.
+            The number of Horner schemes to try.
+        cpe_iterations: Optional[int], optional
+            The number of CPE iterations to perform. The number if unbounded if `None`.
         n_cores: int, optional
             The number of cores to use for the optimization.
         verbose: bool, optional
@@ -2195,6 +2198,7 @@ class Expression:
         functions: dict[Tuple[Expression, str, Sequence[Expression]], Expression],
         params: Sequence[Expression],
         iterations: int = 100,
+        cpe_iterations: Optional[int] = None,
         n_cores: int = 4,
         verbose: bool = False,
         external_functions: Optional[dict[Tuple[Expression, str], Callable[[
