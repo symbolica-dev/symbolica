@@ -5689,6 +5689,7 @@ impl<T: Clone + Default + PartialEq> EvalTree<T> {
                 &mut sub_expr_pos,
                 &[],
                 false,
+                reserved_indices,
             );
             result_indices.push(result_index);
         }
@@ -5750,6 +5751,7 @@ impl<T: Clone + Default + PartialEq> EvalTree<T> {
         sub_expr_pos: &mut HashMap<usize, usize>,
         args: &[usize],
         in_branch: bool,
+        reserved_indices: usize,
     ) -> usize {
         match tree {
             Expression::Const(t) => {
@@ -5770,6 +5772,7 @@ impl<T: Clone + Default + PartialEq> EvalTree<T> {
                             sub_expr_pos,
                             args,
                             in_branch,
+                            reserved_indices,
                         )
                     })
                     .collect();
@@ -5784,6 +5787,7 @@ impl<T: Clone + Default + PartialEq> EvalTree<T> {
                     &mut sub_expr_pos,
                     &new_args,
                     in_branch,
+                    reserved_indices,
                 )
             }
             Expression::Add(a) => {
@@ -5798,6 +5802,7 @@ impl<T: Clone + Default + PartialEq> EvalTree<T> {
                             sub_expr_pos,
                             args,
                             in_branch,
+                            reserved_indices,
                         )
                     })
                     .collect();
@@ -5823,6 +5828,7 @@ impl<T: Clone + Default + PartialEq> EvalTree<T> {
                             sub_expr_pos,
                             args,
                             in_branch,
+                            reserved_indices,
                         )
                     })
                     .collect();
@@ -5845,6 +5851,7 @@ impl<T: Clone + Default + PartialEq> EvalTree<T> {
                     sub_expr_pos,
                     args,
                     in_branch,
+                    reserved_indices,
                 );
                 stack.push(T::default());
                 let mut res = stack.len() - 1;
@@ -5870,6 +5877,7 @@ impl<T: Clone + Default + PartialEq> EvalTree<T> {
                     sub_expr_pos,
                     args,
                     in_branch,
+                    reserved_indices,
                 );
                 let e = self.linearize_impl(
                     &p.1,
@@ -5879,6 +5887,7 @@ impl<T: Clone + Default + PartialEq> EvalTree<T> {
                     sub_expr_pos,
                     args,
                     in_branch,
+                    reserved_indices,
                 );
                 stack.push(T::default());
                 let res = stack.len() - 1;
@@ -5896,6 +5905,7 @@ impl<T: Clone + Default + PartialEq> EvalTree<T> {
                     sub_expr_pos,
                     args,
                     in_branch,
+                    reserved_indices,
                 );
                 stack.push(T::default());
                 let c = Instr::BuiltinFun(stack.len() - 1, *s, arg);
@@ -5914,6 +5924,7 @@ impl<T: Clone + Default + PartialEq> EvalTree<T> {
                         sub_expr_pos,
                         args,
                         in_branch,
+                        reserved_indices,
                     );
 
                     // only register the subexpression as computed when it is not
@@ -5938,6 +5949,7 @@ impl<T: Clone + Default + PartialEq> EvalTree<T> {
                             sub_expr_pos,
                             args,
                             in_branch,
+                            reserved_indices,
                         )
                     })
                     .collect();
@@ -5951,6 +5963,35 @@ impl<T: Clone + Default + PartialEq> EvalTree<T> {
                 res
             }
             Expression::IfElse(b) => {
+                // evaluate the condition if the argument is a constant
+                if let Expression::ReadArg(p) = &b.0 {
+                    if args[*p] >= self.param_count && args[*p] < reserved_indices {
+                        if stack[args[*p]] != T::default() {
+                            return self.linearize_impl(
+                                &b.1,
+                                subexpressions,
+                                stack,
+                                instr,
+                                sub_expr_pos,
+                                args,
+                                in_branch,
+                                reserved_indices,
+                            );
+                        } else {
+                            return self.linearize_impl(
+                                &b.2,
+                                subexpressions,
+                                stack,
+                                instr,
+                                sub_expr_pos,
+                                args,
+                                in_branch,
+                                reserved_indices,
+                            );
+                        }
+                    }
+                }
+
                 let cond = self.linearize_impl(
                     &b.0,
                     subexpressions,
@@ -5959,6 +6000,7 @@ impl<T: Clone + Default + PartialEq> EvalTree<T> {
                     sub_expr_pos,
                     args,
                     in_branch,
+                    reserved_indices,
                 );
 
                 let label_else = Label(instr.len());
@@ -5973,6 +6015,7 @@ impl<T: Clone + Default + PartialEq> EvalTree<T> {
                     sub_expr_pos,
                     args,
                     true,
+                    reserved_indices,
                 );
 
                 let label_end = Label(instr.len());
@@ -5989,6 +6032,7 @@ impl<T: Clone + Default + PartialEq> EvalTree<T> {
                     sub_expr_pos,
                     args,
                     true,
+                    reserved_indices,
                 );
 
                 stack.push(T::default());
@@ -9275,6 +9319,12 @@ impl<'a> AtomView<'a> {
         args: &[Symbol],
         funcs: &mut Vec<(String, Vec<Symbol>, SplitExpression<Complex<Rational>>)>,
     ) -> Result<Expression<Complex<Rational>>, String> {
+        if let AtomView::Var(v) = self {
+            if let Some(p) = args.iter().position(|s| *s == v.get_symbol()) {
+                return Ok(Expression::ReadArg(p));
+            }
+        }
+
         if let Some(p) = params.iter().position(|a| a.as_view() == *self) {
             return Ok(Expression::Parameter(p));
         }
@@ -9312,15 +9362,10 @@ impl<'a> AtomView<'a> {
                     "Rational polynomial coefficient not yet supported for evaluation".to_string(),
                 ),
             },
-            AtomView::Var(v) => {
-                let name = v.get_symbol();
-
-                if let Some(p) = args.iter().position(|s| *s == name) {
-                    return Ok(Expression::ReadArg(p));
-                }
-
-                Err(format!("Variable {} not in constant map", name.get_name()))
-            }
+            AtomView::Var(v) => Err(format!(
+                "Variable {} not in constant map",
+                v.get_symbol().get_name()
+            )),
             AtomView::Fun(f) => {
                 let name = f.get_symbol();
                 if [
