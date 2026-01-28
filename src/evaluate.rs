@@ -3993,61 +3993,62 @@ extern "C" {{
                     }
                 }
                 Instr::Mul(o, a) => {
-                    if !matches!(asm_flavour, InlineASM::AVX2) && a.len() < 15 || a.len() < 8 {
                         if !in_asm_block {
                             *out += "\t__asm__(\n";
                             in_asm_block = true;
                         }
 
-                        // optimized complex multiplication
-                        for (i, r) in a.iter().enumerate() {
-                            let (addr_re, addr_im) = asm_load!(*r);
+                    macro_rules! load_complex {
+                        ($i: expr, $r: expr) => {
+                            let (addr_re, addr_im) = asm_load!($r);
                             match asm_flavour {
                                 InlineASM::X64 => {
                                     *out += &format!(
                                         "\t\t\"movupd {}, %%xmm{}\\n\\t\"\n",
                                         addr_re,
-                                        i + 1,
+                                        $i + 1,
                                     );
                                 }
                                 InlineASM::AVX2 => {
                                     *out += &format!(
                                         "\t\t\"vmovupd {}, %%ymm{}\\n\\t\"\n",
                                         addr_re,
-                                        2 * i,
+                                        2 * $i,
                                     );
                                     *out += &format!(
                                         "\t\t\"vmovupd {}, %%ymm{}\\n\\t\"\n",
                                         addr_im,
-                                        2 * i + 1,
+                                        2 * $i + 1,
                                     );
                                 }
                                 InlineASM::AArch64 => {
-                                    if *r * 16 < 450 {
+                                    if $r * 16 < 450 {
                                         *out += &format!(
                                             "\t\t\"ldp d{}, d{}, {}\\n\\t\"\n",
-                                            2 * (i + 1),
-                                            2 * (i + 1) + 1,
+                                            2 * ($i + 1),
+                                            2 * ($i + 1) + 1,
                                             addr_re,
                                         );
                                     } else {
                                         *out += &format!(
                                             "\t\t\"ldr d{}, {}\\n\\t\"\n",
-                                            2 * (i + 1),
+                                            2 * ($i + 1),
                                             addr_re,
                                         );
                                         *out += &format!(
                                             "\t\t\"ldr d{}, {}\\n\\t\"\n",
-                                            2 * (i + 1) + 1,
+                                            2 * ($i + 1) + 1,
                                             addr_im,
                                         );
                                     }
                                 }
                                 InlineASM::None => unreachable!(),
                             }
+                        };
                         }
 
-                        for i in 1..a.len() {
+                    macro_rules! mul_complex {
+                        ($i: expr) => {
                             match asm_flavour {
                                 InlineASM::X64 => {
                                     *out += &format!(
@@ -4058,7 +4059,7 @@ extern "C" {{
 \t\t\"mulpd %%xmm{0}, %%xmm1\\n\\t\"
 \t\t\"shufpd $1, %%xmm0, %%xmm0\\n\\t\"
 \t\t\"addsubpd %%xmm0, %%xmm1\\n\\t\"\n",
-                                        i + 1
+                                        $i + 1
                                     );
                                 }
                                 InlineASM::AVX2 => {
@@ -4069,8 +4070,8 @@ extern "C" {{
 \t\t\"vmulpd %%ymm1, %%ymm{0}, %%ymm{1}\\n\\t\"
 \t\t\"vsubpd %%ymm0, %%ymm14, %%ymm0\\n\\t\"
 \t\t\"vaddpd %%ymm15, %%ymm{1}, %%ymm1\\n\\t\"\n",
-                                        2 * i,
-                                        2 * i + 1,
+                                        2 * $i,
+                                        2 * $i + 1,
                                     );
                                 }
                                 InlineASM::AArch64 => {
@@ -4080,12 +4081,32 @@ extern "C" {{
 \t\t\"fmul    d1, d{1}, d3\\n\\t\"
 \t\t\"fmadd   d3, d{0}, d2, d1\\n\\t\"
 \t\t\"fnmsub  d2, d{1}, d2, d0\\n\\t\"\n",
-                                        2 * (i + 1) + 1,
-                                        2 * (i + 1),
+                                        2 * ($i + 1) + 1,
+                                        2 * ($i + 1),
                                     )
                                 }
                                 InlineASM::None => unreachable!(),
                             }
+                        };
+                    }
+
+                    if !matches!(asm_flavour, InlineASM::AVX2) && a.len() < 15 || a.len() < 8 {
+                        for (i, r) in a.iter().enumerate() {
+                            load_complex!(i, *r);
+                        }
+
+                        for i in 1..a.len() {
+                            // optimized complex multiplication
+                            mul_complex!(i);
+                        }
+                    } else {
+                        load_complex!(0, a[0]);
+
+                        // load multiplications one after the other
+                        for r in a.iter().skip(1) {
+                            load_complex!(1, *r);
+                            mul_complex!(1);
+                        }
                         }
 
                         let (addr_re, addr_im) = asm_load!(*o);
@@ -4106,20 +4127,7 @@ extern "C" {{
                                 }
                             }
                             InlineASM::None => unreachable!(),
-                        }
-                    } else {
-                        // TODO: reuse registers
-
-                        end_asm_block!(in_asm_block);
-
-                        let args = a
-                            .iter()
-                            .map(|x| get_input!(*x))
-                            .collect::<Vec<_>>()
-                            .join("*");
-
-                        *out += format!("\tZ[{o}] = {args};\n").as_str();
-                    }
+                    };
                 }
                 Instr::Pow(o, b, e) => {
                     if *e == -1 {
