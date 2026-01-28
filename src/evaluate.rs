@@ -4,6 +4,7 @@
 use ahash::{AHasher, HashMap};
 use rand::Rng;
 use self_cell::self_cell;
+use smallvec::SmallVec;
 use std::{
     hash::{Hash, Hasher},
     os::raw::{c_ulong, c_void},
@@ -1156,10 +1157,10 @@ impl<T: Default> ExpressionEvaluator<T> {
             Add(usize, usize),
             Mul(usize, usize),
             BuiltinFun(Symbol, usize),
-            ExternalFun(usize, Vec<usize>),
+            ExternalFun(usize, Box<SmallVec<[usize; 1]>>),
         }
 
-        let mut common_ops: HashMap<_, Vec<usize>> = HashMap::default();
+        let mut common_ops: HashMap<_, SmallVec<[usize; 1]>> = HashMap::default();
 
         let mut affected_lines = vec![false; self.instructions.len()];
 
@@ -1196,7 +1197,10 @@ impl<T: Default> ExpressionEvaluator<T> {
                 }
                 Instr::ExternalFun(_, f, args) => {
                     common_ops
-                        .entry(CommonInstruction::ExternalFun(*f, args.clone()))
+                        .entry(CommonInstruction::ExternalFun(
+                            *f,
+                            Box::new(SmallVec::from_slice(args)),
+                        ))
                         .or_default()
                         .push(p);
                 }
@@ -1355,7 +1359,9 @@ impl<T: Default> ExpressionEvaluator<T> {
                         CommonInstruction::BuiltinFun(s, a) => {
                             Instr::BuiltinFun(new_idx, BuiltinSymbol(s), a)
                         }
-                        CommonInstruction::ExternalFun(s, a) => Instr::ExternalFun(new_idx, s, a),
+                        CommonInstruction::ExternalFun(s, a) => {
+                            Instr::ExternalFun(new_idx, s, a.to_vec())
+                        }
                         _ => unreachable!(),
                     };
 
