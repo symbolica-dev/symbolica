@@ -5668,7 +5668,7 @@ impl<T: Clone + PartialEq> EvalTree<T> {
 
 impl<T: Clone + Default + PartialEq> EvalTree<T> {
     /// Create a linear version of the tree that can be evaluated more efficiently.
-    pub fn linearize(mut self, cpe_rounds: Option<usize>, verbose: bool) -> ExpressionEvaluator<T> {
+    pub fn linearize(mut self, settings: &OptimizationSettings) -> ExpressionEvaluator<T> {
         let mut stack = vec![T::default(); self.param_count];
 
         // strip every constant and move them into the stack after the params
@@ -5703,17 +5703,23 @@ impl<T: Clone + Default + PartialEq> EvalTree<T> {
             external_fns: self.external_functions.clone(),
         };
 
-        for _ in 0..cpe_rounds.unwrap_or(usize::MAX) {
+        for _ in 0..settings.cpe_iterations.unwrap_or(usize::MAX) {
             let r = e.remove_common_pairs();
             if r == 0 {
                 break;
             }
-            if verbose {
+            if settings.verbose {
                 let (add_count, mul_count) = e.count_operations();
                 info!(
                     "Removed {} common pairs: {} + and {} ×",
                     r, add_count, mul_count
                 );
+            }
+
+            if let Some(abort_check) = &settings.abort_check {
+                if abort_check() {
+                    break;
+                }
             }
         }
 
@@ -6059,8 +6065,7 @@ impl EvalTree<Complex<Rational>> {
     ) -> ExpressionEvaluator<Complex<Rational>> {
         let _ = self.optimize_horner_scheme(settings);
         self.common_subexpression_elimination();
-        self.clone()
-            .linearize(settings.cpe_iterations, settings.verbose)
+        self.clone().linearize(settings)
     }
 
     /// Write the expressions in a Horner scheme where the variables
@@ -6106,9 +6111,6 @@ impl EvalTree<Complex<Rational>> {
                 }
 
                 let mut v: Vec<_> = v.into_iter().collect();
-
-                // for now, limit for parameters only
-                v.retain(|(x, _)| matches!(x, Expression::Parameter(_)));
                 v.sort_by(|a, b| b.1.cmp(&a.1).then_with(|| a.0.cmp(&b.0)));
                 v.into_iter().map(|(k, _)| k).collect::<Vec<_>>()
             }
@@ -6132,7 +6134,6 @@ impl EvalTree<Complex<Rational>> {
             }
 
             let mut v: Vec<_> = v.into_iter().collect();
-            v.retain(|(x, _)| matches!(x, Expression::Parameter(_)));
             v.sort_by_key(|k| std::cmp::Reverse(k.1));
             let v = v.into_iter().map(|(k, _)| k).collect::<Vec<_>>();
 
@@ -6366,12 +6367,14 @@ impl Expression<Complex<Rational>> {
                     match arg {
                         Expression::Mul(m) => {
                             for aa in m {
-                                if let Expression::Pow(p) = aa {
+                                if let Expression::Pow(p) = aa
+                                    && !matches!(p.0, Expression::Const(_))
+                                {
                                     occurrence
                                         .entry(p.0.clone())
                                         .and_modify(|x| *x += 1)
                                         .or_insert(1);
-                                } else {
+                                } else if !matches!(aa, Expression::Const(_)) {
                                     occurrence
                                         .entry(aa.clone())
                                         .and_modify(|x| *x += 1)
@@ -6380,12 +6383,14 @@ impl Expression<Complex<Rational>> {
                             }
                         }
                         x => {
-                            if let Expression::Pow(p) = x {
+                            if let Expression::Pow(p) = x
+                                && !matches!(p.0, Expression::Const(_))
+                            {
                                 occurrence
                                     .entry(p.0.clone())
                                     .and_modify(|x| *x += 1)
                                     .or_insert(1);
-                            } else {
+                            } else if !matches!(x, Expression::Const(_)) {
                                 occurrence
                                     .entry(x.clone())
                                     .and_modify(|x| *x += 1)
@@ -6645,17 +6650,21 @@ impl Expression<Complex<Rational>> {
                     match arg {
                         Expression::Mul(m) => {
                             for aa in m {
-                                if let Expression::Pow(p) = aa {
+                                if let Expression::Pow(p) = aa
+                                    && !matches!(p.0, Expression::Const(_))
+                                {
                                     vars.entry(p.0.clone()).and_modify(|x| *x += 1).or_insert(1);
-                                } else {
+                                } else if !matches!(aa, Expression::Const(_)) {
                                     vars.entry(aa.clone()).and_modify(|x| *x += 1).or_insert(1);
                                 }
                             }
                         }
                         x => {
-                            if let Expression::Pow(p) = x {
+                            if let Expression::Pow(p) = x
+                                && !matches!(p.0, Expression::Const(_))
+                            {
                                 vars.entry(p.0.clone()).and_modify(|x| *x += 1).or_insert(1);
-                            } else {
+                            } else if !matches!(x, Expression::Const(_)) {
                                 vars.entry(x.clone()).and_modify(|x| *x += 1).or_insert(1);
                             }
                         }
