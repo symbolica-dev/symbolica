@@ -2488,6 +2488,7 @@ extern "C" {{
             };
         }
 
+        let mut close_else_branch = false;
         for ins in &self.instructions {
             match ins {
                 Instr::Add(o, a) => {
@@ -2560,10 +2561,14 @@ extern "C" {{
                 }
                 Instr::Goto(..) => {
                     *out += "\t} else {\n";
+                    close_else_branch = true;
                 }
                 Instr::Label(..) => {}
                 Instr::Join(o, cond, a, b) => {
-                    *out += "\t}\n";
+                    if close_else_branch {
+                        close_else_branch = false;
+                        *out += "\t}\n";
+                    }
                     let arg_a = get_input!(*a);
                     let arg_b = get_input!(*b);
                     *out += format!(
@@ -2582,7 +2587,7 @@ extern "C" {{
     fn export_asm_real_str(&self, function_name: &str, settings: &ExportSettings) -> String {
         let mut res = String::new();
         if settings.include_header {
-            res += "#include <iostream>\n#include <cmath>\n\n";
+            res += "#include <iostream>\n#include <cmath>\n\n#include <complex>\n";
         };
 
         if let Some(header) = &settings.custom_header {
@@ -3021,6 +3026,7 @@ extern "C" {{
         }
 
         let mut in_asm_block = false;
+        let mut close_else_branch = false;
         for ins in &new_instr {
             match ins {
                 RegInstr::Add(o, free, a) | RegInstr::Mul(o, free, a) => {
@@ -3665,11 +3671,15 @@ extern "C" {{
                 RegInstr::Goto => {
                     end_asm_block!(in_asm_block);
                     *out += "\t} else {\n";
+                    close_else_branch = true;
                 }
                 RegInstr::Label => {}
                 RegInstr::Join(o, cond, a, b) => {
                     end_asm_block!(in_asm_block);
-                    *out += "\t}\n";
+                    if close_else_branch {
+                        close_else_branch = false;
+                        *out += "\t}\n";
+                    }
                     let arg_a = get_input!(*a);
                     let arg_b = get_input!(*b);
 
@@ -3940,6 +3950,7 @@ extern "C" {{
         }
 
         let mut in_asm_block = false;
+        let mut close_else_branch = false;
         for ins in instr {
             match ins {
                 Instr::Add(o, a) => {
@@ -3993,10 +4004,10 @@ extern "C" {{
                     }
                 }
                 Instr::Mul(o, a) => {
-                        if !in_asm_block {
-                            *out += "\t__asm__(\n";
-                            in_asm_block = true;
-                        }
+                    if !in_asm_block {
+                        *out += "\t__asm__(\n";
+                        in_asm_block = true;
+                    }
 
                     macro_rules! load_complex {
                         ($i: expr, $r: expr) => {
@@ -4045,7 +4056,7 @@ extern "C" {{
                                 InlineASM::None => unreachable!(),
                             }
                         };
-                        }
+                    }
 
                     macro_rules! mul_complex {
                         ($i: expr) => {
@@ -4107,26 +4118,26 @@ extern "C" {{
                             load_complex!(1, *r);
                             mul_complex!(1);
                         }
-                        }
+                    }
 
-                        let (addr_re, addr_im) = asm_load!(*o);
-                        match asm_flavour {
-                            InlineASM::X64 => {
-                                *out += &format!("\t\t\"movupd %%xmm1, {addr_re}\\n\\t\"\n");
+                    let (addr_re, addr_im) = asm_load!(*o);
+                    match asm_flavour {
+                        InlineASM::X64 => {
+                            *out += &format!("\t\t\"movupd %%xmm1, {addr_re}\\n\\t\"\n");
+                        }
+                        InlineASM::AVX2 => {
+                            *out += &format!("\t\t\"vmovupd %%ymm0, {addr_re}\\n\\t\"\n");
+                            *out += &format!("\t\t\"vmovupd %%ymm1, {addr_im}\\n\\t\"\n");
+                        }
+                        InlineASM::AArch64 => {
+                            if *o * 16 < 450 {
+                                *out += &format!("\t\t\"stp d2, d3, {addr_re}\\n\\t\"\n");
+                            } else {
+                                *out += &format!("\t\t\"str d2, {addr_re}\\n\\t\"\n");
+                                *out += &format!("\t\t\"str d3, {addr_im}\\n\\t\"\n");
                             }
-                            InlineASM::AVX2 => {
-                                *out += &format!("\t\t\"vmovupd %%ymm0, {addr_re}\\n\\t\"\n");
-                                *out += &format!("\t\t\"vmovupd %%ymm1, {addr_im}\\n\\t\"\n");
-                            }
-                            InlineASM::AArch64 => {
-                                if *o * 16 < 450 {
-                                    *out += &format!("\t\t\"stp d2, d3, {addr_re}\\n\\t\"\n");
-                                } else {
-                                    *out += &format!("\t\t\"str d2, {addr_re}\\n\\t\"\n");
-                                    *out += &format!("\t\t\"str d3, {addr_im}\\n\\t\"\n");
-                                }
-                            }
-                            InlineASM::None => unreachable!(),
+                        }
+                        InlineASM::None => unreachable!(),
                     };
                 }
                 Instr::Pow(o, b, e) => {
@@ -4259,11 +4270,15 @@ extern "C" {{
                 Instr::Goto(_) => {
                     end_asm_block!(in_asm_block);
                     *out += "\t} else {\n";
+                    close_else_branch = true;
                 }
                 Instr::Label(_) => {}
                 Instr::Join(o, cond, a, b) => {
                     end_asm_block!(in_asm_block);
-                    *out += "\t}\n";
+                    if close_else_branch {
+                        close_else_branch = false;
+                        *out += "\t}\n";
+                    }
                     let arg_a = get_input!(*a);
                     let arg_b = get_input!(*b);
 
@@ -5503,7 +5518,7 @@ impl<T: DualNumberStructure> Vectorize<Complex<Rational>> for Dualizer<T> {
                 self.map_instruction(&exp_in, instrs)
             }
             VectorInstruction::Join(c, a, b) => (0..self.dual.get_len())
-                .map(|j| VectorInstruction::Join(c.index(j), a.index(j), b.index(j)))
+                .map(|j| VectorInstruction::Join(c.index(0), a.index(j), b.index(j)))
                 .collect(),
             VectorInstruction::Assign(a) => (0..self.dual.get_len())
                 .map(|j| VectorInstruction::Assign(a.index(j)))
