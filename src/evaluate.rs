@@ -1,7 +1,7 @@
 //! Evaluation of expressions.
 //!
 //! The main entry point is through [AtomCore::evaluator].
-use ahash::{AHasher, HashMap};
+use ahash::{AHasher, HashMap, HashSet};
 use rand::Rng;
 use self_cell::self_cell;
 use smallvec::SmallVec;
@@ -4745,7 +4745,7 @@ impl<T: Clone> ExpressionEvaluator<T> {
     }
 }
 
-impl<T: Default + Clone + std::fmt::Debug> ExpressionEvaluator<T> {
+impl<T: Default + Clone> ExpressionEvaluator<T> {
     /// Redefine every operation to take `n` components in and
     /// yield `n` components. This can be used to define efficient
     /// evaluation over dual numbers.
@@ -4767,7 +4767,7 @@ impl<T: Default + Clone + std::fmt::Debug> ExpressionEvaluator<T> {
     ///         float::{Complex, Float, FloatLike},
     ///         rational::Rational,
     ///     },
-    ///     evaluate::{FunctionMap, OptimizationSettings},
+    ///     evaluate::{FunctionMap, OptimizationSettings, Dualizer},
     ///     parse,
     /// };
     ///
@@ -4781,7 +4781,8 @@ impl<T: Default + Clone + std::fmt::Debug> ExpressionEvaluator<T> {
     ///    )
     ///    .unwrap();
     ///
-    /// let vec_ev = ev.vectorize(&Dual2::<Complex<Rational>>::new_zero(), HashMap::default()).unwrap();
+    /// let dualizer = Dualizer::new(Dual2::<Complex<Rational>>::new_zero(), vec![]);
+    /// let vec_ev = ev.vectorize(&dualizer, HashMap::default()).unwrap();
     ///
     /// let mut vec_f = vec_ev.map_coeff(&|x| x.re.to_f64());
     /// let mut dest = vec![0.; 3];
@@ -5080,10 +5081,31 @@ pub trait Vectorize<T> {
     fn get_dimension(&self) -> usize;
 }
 
-impl<T: DualNumberStructure> Vectorize<Complex<Rational>> for T {
+/// A dualizer that maps coefficients and instructions to dual number components.
+///
+/// You can specify which components of the dual numbers are always zero
+/// by providing a list of `(component index, dual index)` pairs in the constructor.
+pub struct Dualizer<T: DualNumberStructure> {
+    dual: T,
+    zero_components: HashSet<(usize, usize)>, // component, index
+}
+
+impl<T: DualNumberStructure> Dualizer<T> {
+    /// Create a new dualizer for the given dual number structure.
+    /// You can specify which components are always zero
+    /// by providing a list of `(component index, dual index)` pairs.
+    pub fn new(dual: T, zero_components_per_parameter: Vec<(usize, usize)>) -> Self {
+        Self {
+            dual,
+            zero_components: zero_components_per_parameter.into_iter().collect(),
+        }
+    }
+}
+
+impl<T: DualNumberStructure> Vectorize<Complex<Rational>> for Dualizer<T> {
     fn map_coeff(&self, coeff: Complex<Rational>) -> Vec<Complex<Rational>> {
         let mut r = vec![coeff.clone()];
-        for _ in 1..self.get_len() {
+        for _ in 1..self.dual.get_len() {
             r.push(Complex::new_zero());
         }
         r
@@ -5094,8 +5116,31 @@ impl<T: DualNumberStructure> Vectorize<Complex<Rational>> for T {
         i: &VectorInstruction,
         instrs: &mut InstructionList<Complex<Rational>>,
     ) -> Vec<VectorInstruction> {
-        fn scalar_add(a: &Slot, b: &Slot, instrs: &mut InstructionList<Complex<Rational>>) -> Slot {
+        fn is_zero<T: DualNumberStructure>(
+            a: &Slot,
+            dualizer: &Dualizer<T>,
+            instrs: &InstructionList<Complex<Rational>>,
+        ) -> bool {
             if instrs.is_zero(a) {
+                return true;
+            }
+
+            if let Slot::Param(x) = a {
+                dualizer
+                    .zero_components
+                    .contains(&(*x / dualizer.get_dimension(), *x % dualizer.get_dimension()))
+            } else {
+                false
+            }
+        }
+
+        fn scalar_add<T: DualNumberStructure>(
+            a: &Slot,
+            b: &Slot,
+            dualizer: &Dualizer<T>,
+            instrs: &mut InstructionList<Complex<Rational>>,
+        ) -> Slot {
+            if is_zero(a, dualizer, instrs) {
                 *b
             } else if instrs.is_zero(b) {
                 *a
@@ -5104,96 +5149,108 @@ impl<T: DualNumberStructure> Vectorize<Complex<Rational>> for T {
             }
         }
 
-        fn scalar_yield_add(
+        fn scalar_yield_add<T: DualNumberStructure>(
             a: &Slot,
             b: &Slot,
+            dualizer: &Dualizer<T>,
             instrs: &mut InstructionList<Complex<Rational>>,
         ) -> VectorInstruction {
-            if instrs.is_zero(a) {
+            if is_zero(a, dualizer, instrs) {
                 VectorInstruction::Assign(*b)
-            } else if instrs.is_zero(b) {
+            } else if is_zero(b, dualizer, instrs) {
                 VectorInstruction::Assign(*a)
             } else {
                 VectorInstruction::Add(*a, *b)
             }
         }
 
-        fn scalar_mul(a: &Slot, b: &Slot, instrs: &mut InstructionList<Complex<Rational>>) -> Slot {
-            if instrs.is_zero(a) || instrs.is_one(b) {
+        fn scalar_mul<T: DualNumberStructure>(
+            a: &Slot,
+            b: &Slot,
+            dualizer: &Dualizer<T>,
+            instrs: &mut InstructionList<Complex<Rational>>,
+        ) -> Slot {
+            if is_zero(a, dualizer, instrs) || instrs.is_one(b) {
                 *a
-            } else if instrs.is_zero(b) || instrs.is_one(a) {
+            } else if is_zero(b, dualizer, instrs) || instrs.is_one(a) {
                 *b
             } else {
                 instrs.add(VectorInstruction::Mul(*a, *b))
             }
         }
 
-        fn scalar_yield_mul(
+        fn scalar_yield_mul<T: DualNumberStructure>(
             a: &Slot,
             b: &Slot,
+            dualizer: &Dualizer<T>,
             instrs: &mut InstructionList<Complex<Rational>>,
         ) -> VectorInstruction {
-            if instrs.is_zero(a) || instrs.is_one(b) {
+            if is_zero(a, dualizer, instrs) || instrs.is_one(b) {
                 VectorInstruction::Assign(*a)
-            } else if instrs.is_zero(b) || instrs.is_one(a) {
+            } else if is_zero(b, dualizer, instrs) || instrs.is_one(a) {
                 VectorInstruction::Assign(*b)
             } else {
                 VectorInstruction::Mul(*a, *b)
             }
         }
 
-        fn rescale(
+        fn rescale<T: DualNumberStructure>(
             a: &[Slot],
             c: &Slot,
+            dualizer: &Dualizer<T>,
             instrs: &mut InstructionList<Complex<Rational>>,
         ) -> Vec<Slot> {
-            a.iter().map(|x| scalar_mul(x, c, instrs)).collect()
+            a.iter()
+                .map(|x| scalar_mul(x, c, dualizer, instrs))
+                .collect()
         }
 
-        fn add(
+        fn add<T: DualNumberStructure>(
             a: &[Slot],
             b: &[Slot],
+            dualizer: &Dualizer<T>,
             instrs: &mut InstructionList<Complex<Rational>>,
         ) -> Vec<Slot> {
             a.iter()
                 .zip(b.iter())
-                .map(|(x, y)| scalar_add(x, y, instrs))
+                .map(|(x, y)| scalar_add(x, y, dualizer, instrs))
                 .collect()
         }
 
-        fn mul(
+        fn mul<T: DualNumberStructure>(
             a: &[Slot],
             b: &[Slot],
             table: &[(usize, usize, usize)],
+            dualizer: &Dualizer<T>,
             instrs: &mut InstructionList<Complex<Rational>>,
         ) -> Vec<Slot> {
             let mut current_index = vec![];
             for j in 0..a.len() {
-                current_index.push(scalar_mul(&a[j], &b[0], instrs));
+                current_index.push(scalar_mul(&a[j], &b[0], dualizer, instrs));
             }
 
             for (si, oi, index) in table.iter() {
-                let tmp = scalar_mul(&a[*si], &b[*oi], instrs);
-                current_index[*index] = scalar_add(&current_index[*index], &tmp, instrs);
+                let tmp = scalar_mul(&a[*si], &b[*oi], dualizer, instrs);
+                current_index[*index] = scalar_add(&current_index[*index], &tmp, dualizer, instrs);
             }
             current_index
         }
 
-        let mult_table = self.get_multiplication_table();
+        let mult_table = self.dual.get_multiplication_table();
 
         match i {
-            VectorInstruction::Add(a, b) => (0..self.get_len())
-                .map(|j| scalar_yield_add(&a.index(j), &b.index(j), instrs))
+            VectorInstruction::Add(a, b) => (0..self.dual.get_len())
+                .map(|j| scalar_yield_add(&a.index(j), &b.index(j), self, instrs))
                 .collect(),
             VectorInstruction::Mul(a, b) => {
                 let mut current_index = vec![];
-                for j in 0..self.get_len() {
-                    current_index.push(scalar_mul(&a.index(j), b, instrs));
+                for j in 0..self.dual.get_len() {
+                    current_index.push(scalar_mul(&a.index(j), b, self, instrs));
                 }
 
-                for (si, oi, index) in self.get_multiplication_table().iter() {
-                    let tmp = scalar_mul(&a.index(*si), &b.index(*oi), instrs);
-                    current_index[*index] = scalar_add(&current_index[*index], &tmp, instrs);
+                for (si, oi, index) in self.dual.get_multiplication_table().iter() {
+                    let tmp = scalar_mul(&a.index(*si), &b.index(*oi), self, instrs);
+                    current_index[*index] = scalar_add(&current_index[*index], &tmp, self, instrs);
                 }
 
                 current_index
@@ -5208,34 +5265,37 @@ impl<T: DualNumberStructure> Vectorize<Complex<Rational>> for T {
 
                     let zero = instrs.add_repeated_constant(Complex::new_zero());
                     let mut r = vec![zero];
-                    r.extend((1..self.get_len()).map(|j| scalar_mul(&a.index(j), &norm, instrs)));
+                    r.extend(
+                        (1..self.dual.get_len())
+                            .map(|j| scalar_mul(&a.index(j), &norm, self, instrs)),
+                    );
 
                     let one =
                         instrs.add_constant_in_first_component(Complex::from(Rational::one()));
 
-                    let mut accum = (0..self.get_len())
+                    let mut accum = (0..self.dual.get_len())
                         .map(|j| one.index(j))
                         .collect::<Vec<_>>();
-                    let mut res = (0..self.get_len())
+                    let mut res = (0..self.dual.get_len())
                         .map(|j| one.index(j))
                         .collect::<Vec<_>>();
                     let mut num = Complex::from(Rational::one());
 
                     let mut scale = 1;
-                    for p in 1..self.get_max_depth() + 1 {
+                    for p in 1..self.dual.get_max_depth() + 1 {
                         scale *= p;
                         num = num.clone()
                             * (num.from_usize(2).inv() - &num.from_usize(p as usize - 1));
-                        accum = mul(&accum, &r, mult_table, instrs);
+                        accum = mul(&accum, &r, mult_table, self, instrs);
 
                         let c = instrs
                             .add_constant_in_first_component(&num * &num.from_usize(scale).inv());
 
-                        res = add(&res, &rescale(&accum, &c, instrs), instrs);
+                        res = add(&res, &rescale(&accum, &c, self, instrs), self, instrs);
                     }
 
                     res.iter()
-                        .map(|x| scalar_yield_mul(x, &e, instrs))
+                        .map(|x| scalar_yield_mul(x, &e, self, instrs))
                         .collect()
                 }
                 Symbol::EXP_ID => {
@@ -5244,29 +5304,28 @@ impl<T: DualNumberStructure> Vectorize<Complex<Rational>> for T {
                     let one =
                         instrs.add_constant_in_first_component(Complex::from(Rational::one()));
 
-                    let mut accum = (0..self.get_len())
+                    let mut accum = (0..self.dual.get_len())
                         .map(|j| one.index(j))
                         .collect::<Vec<_>>();
-                    let mut res = (0..self.get_len())
+                    let mut res = (0..self.dual.get_len())
                         .map(|j| one.index(j))
                         .collect::<Vec<_>>();
 
                     let zero = instrs.add_repeated_constant(Complex::new_zero());
                     let mut r = vec![zero];
-                    r.extend((1..self.get_len()).map(|j| a.index(j)));
-
+                    r.extend((1..self.dual.get_len()).map(|j| a.index(j)));
                     let mut scale = Complex::from(Rational::one());
-                    for p in 0..self.get_max_depth() {
+                    for p in 0..self.dual.get_max_depth() {
                         scale *= Rational::from(p + 1);
-                        accum = mul(&accum, &r, mult_table, instrs);
+                        accum = mul(&accum, &r, mult_table, self, instrs);
 
                         let c = instrs.add_constant_in_first_component(scale.inv());
 
-                        res = add(&res, &rescale(&accum, &c, instrs), instrs);
+                        res = add(&res, &rescale(&accum, &c, self, instrs), self, instrs);
                     }
 
                     res.iter()
-                        .map(|x| scalar_yield_mul(x, &e, instrs))
+                        .map(|x| scalar_yield_mul(x, &e, self, instrs))
                         .collect()
                 }
                 Symbol::LOG_ID => {
@@ -5276,22 +5335,25 @@ impl<T: DualNumberStructure> Vectorize<Complex<Rational>> for T {
 
                     let zero = instrs.add_repeated_constant(Complex::new_zero());
                     let mut r = vec![zero];
-                    r.extend((1..self.get_len()).map(|j| scalar_mul(&a.index(j), &norm, instrs)));
+                    r.extend(
+                        (1..self.dual.get_len())
+                            .map(|j| scalar_mul(&a.index(j), &norm, self, instrs)),
+                    );
 
                     let mut accum = r.clone();
 
-                    let mut res = (0..self.get_len()).map(|_| zero).collect::<Vec<_>>();
+                    let mut res = (0..self.dual.get_len()).map(|_| zero).collect::<Vec<_>>();
                     res[0] = e;
 
                     let mut scale = Complex::from(Rational::from(-1));
-                    for p in 1..self.get_max_depth() + 1 {
+                    for p in 1..self.dual.get_max_depth() + 1 {
                         scale *= Rational::from(-1);
 
                         let c = instrs
                             .add_constant_in_first_component((&scale * Rational::from(p)).inv());
 
-                        res = add(&res, &rescale(&accum, &c, instrs), instrs);
-                        accum = mul(&accum, &r, mult_table, instrs);
+                        res = add(&res, &rescale(&accum, &c, self, instrs), self, instrs);
+                        accum = mul(&accum, &r, mult_table, self, instrs);
                     }
 
                     res.iter().map(|x| VectorInstruction::Assign(*x)).collect()
@@ -5305,14 +5367,14 @@ impl<T: DualNumberStructure> Vectorize<Complex<Rational>> for T {
 
                     let zero = instrs.add_repeated_constant(Complex::new_zero());
                     let mut p = vec![zero];
-                    p.extend((1..self.get_len()).map(|j| a.index(j)));
+                    p.extend((1..self.dual.get_len()).map(|j| a.index(j)));
 
-                    let mut e = (0..self.get_len()).map(|_| zero).collect::<Vec<_>>();
+                    let mut e = (0..self.dual.get_len()).map(|_| zero).collect::<Vec<_>>();
                     e[0] = s;
 
                     let mut sp = p.clone();
                     let mut scale = Complex::from(Rational::one());
-                    for i in 1..self.get_max_depth() + 1 {
+                    for i in 1..self.dual.get_max_depth() + 1 {
                         scale *= Rational::from(i);
                         let b = if i % 2 == 1 { c.clone() } else { s.clone() };
 
@@ -5322,11 +5384,11 @@ impl<T: DualNumberStructure> Vectorize<Complex<Rational>> for T {
                             scale.inv()
                         });
 
-                        let s = rescale(&sp, &scalar_mul(&b, &sc, instrs), instrs);
+                        let s = rescale(&sp, &scalar_mul(&b, &sc, self, instrs), self, instrs);
 
-                        sp = mul(&sp, &p, mult_table, instrs);
+                        sp = mul(&sp, &p, mult_table, self, instrs);
 
-                        e = add(&e, &s, instrs);
+                        e = add(&e, &s, self, instrs);
                     }
 
                     e.iter().map(|x| VectorInstruction::Assign(*x)).collect()
@@ -5340,14 +5402,14 @@ impl<T: DualNumberStructure> Vectorize<Complex<Rational>> for T {
 
                     let zero = instrs.add_repeated_constant(Complex::new_zero());
                     let mut p = vec![zero];
-                    p.extend((1..self.get_len()).map(|j| a.index(j)));
+                    p.extend((1..self.dual.get_len()).map(|j| a.index(j)));
 
-                    let mut e = (0..self.get_len()).map(|_| zero).collect::<Vec<_>>();
+                    let mut e = (0..self.dual.get_len()).map(|_| zero).collect::<Vec<_>>();
                     e[0] = c;
 
                     let mut sp = p.clone();
                     let mut scale = Complex::from(Rational::one());
-                    for i in 1..self.get_max_depth() + 1 {
+                    for i in 1..self.dual.get_max_depth() + 1 {
                         scale *= Rational::from(i);
                         let b = if i % 2 == 1 { s.clone() } else { c.clone() };
 
@@ -5358,18 +5420,18 @@ impl<T: DualNumberStructure> Vectorize<Complex<Rational>> for T {
                                 scale.inv()
                             });
 
-                        let s = rescale(&sp, &scalar_mul(&b, &sc, instrs), instrs);
+                        let s = rescale(&sp, &scalar_mul(&b, &sc, self, instrs), self, instrs);
 
-                        sp = mul(&sp, &p, mult_table, instrs);
+                        sp = mul(&sp, &p, mult_table, self, instrs);
 
-                        e = add(&e, &s, instrs);
+                        e = add(&e, &s, self, instrs);
                     }
 
                     e.iter().map(|x| VectorInstruction::Assign(*x)).collect()
                 }
                 Symbol::CONJ_ID => {
                     // assume variables are real
-                    (0..self.get_len())
+                    (0..self.dual.get_len())
                         .map(|j| VectorInstruction::BuiltinFun(*f, a.index(j)))
                         .collect()
                 }
@@ -5384,33 +5446,40 @@ impl<T: DualNumberStructure> Vectorize<Complex<Rational>> for T {
 
                 let zero = instrs.add_repeated_constant(Complex::new_zero());
                 let mut r = vec![zero];
-                r.extend((1..self.get_len()).map(|j| scalar_mul(&a.index(j), &a_inv, instrs)));
+                r.extend(
+                    (1..self.dual.get_len()).map(|j| scalar_mul(&a.index(j), &a_inv, self, instrs)),
+                );
 
                 let one = instrs.add_constant_in_first_component(Complex::from(Rational::one()));
 
                 let neg_one = instrs.add_repeated_constant(Complex::from(Rational::from(-1)));
-                let neg_one_v = (0..self.get_len())
+                let neg_one_v = (0..self.dual.get_len())
                     .map(|j| neg_one.index(j))
                     .collect::<Vec<_>>();
 
-                let mut accum = (0..self.get_len())
+                let mut accum = (0..self.dual.get_len())
                     .map(|j| one.index(j))
                     .collect::<Vec<_>>();
-                let mut res = (0..self.get_len())
+                let mut res = (0..self.dual.get_len())
                     .map(|j| one.index(j))
                     .collect::<Vec<_>>();
 
-                for i in 1..self.get_max_depth() + 1 {
-                    accum = mul(&accum, &r, mult_table, instrs);
+                for i in 1..self.dual.get_max_depth() + 1 {
+                    accum = mul(&accum, &r, mult_table, self, instrs);
                     if i % 2 == 0 {
-                        res = add(&res, &accum, instrs);
+                        res = add(&res, &accum, self, instrs);
                     } else {
-                        res = add(&res, &mul(&accum, &neg_one_v, mult_table, instrs), instrs);
+                        res = add(
+                            &res,
+                            &mul(&accum, &neg_one_v, mult_table, self, instrs),
+                            self,
+                            instrs,
+                        );
                     }
                 }
 
                 res.iter()
-                    .map(|x| scalar_yield_mul(x, &a_inv, instrs))
+                    .map(|x| scalar_yield_mul(x, &a_inv, self, instrs))
                     .collect()
             }
             VectorInstruction::Powf(b, e) => {
@@ -5420,8 +5489,10 @@ impl<T: DualNumberStructure> Vectorize<Complex<Rational>> for T {
                     .into_iter()
                     .map(|x| instrs.add(x))
                     .collect();
-                let e = (0..self.get_len()).map(|j| e.index(j)).collect::<Vec<_>>();
-                let r = mul(&log, &e, mult_table, instrs);
+                let e = (0..self.dual.get_len())
+                    .map(|j| e.index(j))
+                    .collect::<Vec<_>>();
+                let r = mul(&log, &e, mult_table, self, instrs);
 
                 // exp needs adjacent slots
                 let adjacent: Vec<_> = r
@@ -5431,10 +5502,10 @@ impl<T: DualNumberStructure> Vectorize<Complex<Rational>> for T {
                 let exp_in = VectorInstruction::BuiltinFun(BuiltinSymbol(Symbol::EXP), adjacent[0]);
                 self.map_instruction(&exp_in, instrs)
             }
-            VectorInstruction::Join(c, a, b) => (0..self.get_len())
+            VectorInstruction::Join(c, a, b) => (0..self.dual.get_len())
                 .map(|j| VectorInstruction::Join(c.index(j), a.index(j), b.index(j)))
                 .collect(),
-            VectorInstruction::Assign(a) => (0..self.get_len())
+            VectorInstruction::Assign(a) => (0..self.dual.get_len())
                 .map(|j| VectorInstruction::Assign(a.index(j)))
                 .collect(),
             VectorInstruction::ExternalFun(_, _)
@@ -5450,7 +5521,7 @@ impl<T: DualNumberStructure> Vectorize<Complex<Rational>> for T {
     }
 
     fn get_dimension(&self) -> usize {
-        self.get_len()
+        self.dual.get_len()
     }
 }
 
@@ -9894,7 +9965,7 @@ mod test {
             float::{Complex, Float, FloatLike},
             rational::Rational,
         },
-        evaluate::{EvaluationFn, FunctionMap, OptimizationSettings},
+        evaluate::{Dualizer, EvaluationFn, FunctionMap, OptimizationSettings},
         id::ConditionResult,
         parse, symbol,
     };
@@ -10081,7 +10152,7 @@ mod test {
             )
             .unwrap();
 
-        let dual = Dual::<Complex<Rational>>::new_zero();
+        let dual = Dualizer::new(Dual::<Complex<Rational>>::new_zero(), vec![]);
         let vec_ev = ev.vectorize(&dual, HashMap::default()).unwrap();
 
         let mut vec_f = vec_ev.map_coeff(&|x| x.re.to_f64());
@@ -10098,9 +10169,12 @@ mod test {
 
     #[test]
     fn vectorize_dual_with_external() {
-        let test = HyperDual::from_values(
-            vec![vec![0], vec![1]],
-            vec![Complex::<Rational>::new_zero(); 2],
+        let dual = Dualizer::new(
+            HyperDual::from_values(
+                vec![vec![0], vec![1]],
+                vec![Complex::<Rational>::new_zero(); 2],
+            ),
+            vec![],
         );
 
         let mut f = FunctionMap::new();
@@ -10115,7 +10189,7 @@ mod test {
         vec_ext.insert(("f".to_owned(), 1), "f1".to_owned());
 
         let vec_ev = ev
-            .vectorize(&test, vec_ext)
+            .vectorize(&dual, vec_ext)
             .unwrap()
             .map_coeff(&|c| c.re.to_f64());
 

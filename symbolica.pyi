@@ -4885,7 +4885,8 @@ class Evaluator:
         """
 
     def dualize(self, dual_shape: list[list[int]], external_functions: Optional[dict[tuple[str, str, int], Callable[[
-            Sequence[float | complex]], float | complex]]] = None) -> None:
+            Sequence[float | complex]], float | complex]]] = None,
+            zero_components: Optional[list[tuple[int, int]]] = None) -> None:
         """
         Dualize the evaluator to support hyper-dual numbers with the given shape,
         indicating the number of derivatives in every variable per term.
@@ -4923,6 +4924,9 @@ class Evaluator:
             A mapping from external function identifiers to functions that compute a single component each.
             The key is a tuple of function name, unique printable name, and component index.
             The value is a function that takes the flattened parameters and returns a component.
+        zero_components : Optional[list[tuple[int, int]]]
+            A list of components that are known to be zero and can be skipped in the dualization.
+            Each component is specified as a tuple of (parameter index, dual index).
         """
 
     @overload

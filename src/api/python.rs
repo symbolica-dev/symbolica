@@ -83,7 +83,7 @@ use crate::{
         BatchEvaluator, CompileOptions, CompiledComplexEvaluator, CompiledCudaComplexEvaluator,
         CompiledCudaRealEvaluator, CompiledNumber, CompiledRealEvaluator,
         CompiledSimdComplexEvaluator, CompiledSimdRealEvaluator, CudaComplexf64, CudaLoadSettings,
-        CudaRealf64, EvaluationFn, EvaluatorLoader, ExportSettings, ExpressionEvaluator,
+        CudaRealf64, Dualizer, EvaluationFn, EvaluatorLoader, ExportSettings, ExpressionEvaluator,
         ExpressionEvaluatorWithExternalFunctions, FunctionMap, InlineASM, Instruction,
         OptimizationSettings, Slot,
     },
@@ -15895,11 +15895,15 @@ impl PythonExpressionEvaluator {
     ///     A mapping from external function identifiers to functions that compute a single component each.
     ///     The key is a tuple of function name, unique printable name, and component index.
     ///     The value is a function that takes the flattened parameters and returns a component.
-    #[pyo3(signature = (dual_shape, external_functions = HashMap::default()))]
+    /// zero_components : Optional[list[tuple[int, int]]]
+    ///     A list of components that are known to be zero and can be skipped in the dualization.
+    ///     Each component is specified as a tuple of (parameter index, dual index).
+    #[pyo3(signature = (dual_shape, external_functions = HashMap::default(), zero_components = Vec::new()))]
     fn dualize(
         &mut self,
         dual_shape: Vec<Vec<usize>>,
         external_functions: HashMap<(String, String, usize), Py<PyAny>>,
+        zero_components: Vec<(usize, usize)>,
     ) -> PyResult<()> {
         let external_fn_map = external_functions
             .keys()
@@ -15909,7 +15913,7 @@ impl PythonExpressionEvaluator {
         let zero = (0..dual_shape.len())
             .map(|_| Complex::new(Q.zero(), Q.zero()))
             .collect();
-        let dual = HyperDual::from_values(dual_shape, zero);
+        let dual = Dualizer::new(HyperDual::from_values(dual_shape, zero), zero_components);
         self.eval_rat = self
             .eval_rat
             .clone()
