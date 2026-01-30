@@ -297,14 +297,61 @@ struct Expr {
 }
 
 /// Settings for optimizing the evaluation of expressions.
+#[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
 #[derive(Clone)]
 pub struct OptimizationSettings {
     pub horner_iterations: usize,
     pub n_cores: usize,
     pub cpe_iterations: Option<usize>,
     pub hot_start: Option<Vec<Expression<Complex<Rational>>>>,
+    #[cfg_attr(feature = "serde", serde(skip))]
     pub abort_check: Option<Box<dyn AbortCheck>>,
+    pub abort_level: usize,
+    pub max_horner_scheme_variables: usize,
+    pub max_common_pair_cache_entries: usize,
+    pub max_common_pair_distance: usize,
     pub verbose: bool,
+}
+
+#[cfg(feature = "bincode")]
+bincode::impl_borrow_decode!(OptimizationSettings);
+
+#[cfg(feature = "bincode")]
+impl bincode::Encode for OptimizationSettings {
+    fn encode<E: bincode::enc::Encoder>(
+        &self,
+        encoder: &mut E,
+    ) -> core::result::Result<(), bincode::error::EncodeError> {
+        bincode::Encode::encode(&self.horner_iterations, encoder)?;
+        bincode::Encode::encode(&self.n_cores, encoder)?;
+        bincode::Encode::encode(&self.cpe_iterations, encoder)?;
+        bincode::Encode::encode(&self.hot_start, encoder)?;
+        bincode::Encode::encode(&self.max_horner_scheme_variables, encoder)?;
+        bincode::Encode::encode(&self.max_common_pair_cache_entries, encoder)?;
+        bincode::Encode::encode(&self.max_common_pair_distance, encoder)?;
+        bincode::Encode::encode(&self.verbose, encoder)?;
+        Ok(())
+    }
+}
+
+#[cfg(feature = "bincode")]
+impl<Context> bincode::Decode<Context> for OptimizationSettings {
+    fn decode<D: bincode::de::Decoder<Context = Context>>(
+        decoder: &mut D,
+    ) -> core::result::Result<Self, bincode::error::DecodeError> {
+        Ok(Self {
+            horner_iterations: bincode::Decode::decode(decoder)?,
+            n_cores: bincode::Decode::decode(decoder)?,
+            cpe_iterations: bincode::Decode::decode(decoder)?,
+            hot_start: bincode::Decode::decode(decoder)?,
+            abort_check: None,
+            abort_level: 0,
+            max_horner_scheme_variables: bincode::Decode::decode(decoder)?,
+            max_common_pair_cache_entries: bincode::Decode::decode(decoder)?,
+            max_common_pair_distance: bincode::Decode::decode(decoder)?,
+            verbose: bincode::Decode::decode(decoder)?,
+        })
+    }
 }
 
 impl std::fmt::Debug for OptimizationSettings {
@@ -315,6 +362,7 @@ impl std::fmt::Debug for OptimizationSettings {
             .field("cpe_iterations", &self.cpe_iterations)
             .field("hot_start", &self.hot_start)
             .field("abort_check", &self.abort_check.is_some())
+            .field("abort_level", &self.abort_level)
             .field("verbose", &self.verbose)
             .finish()
     }
@@ -328,6 +376,10 @@ impl Default for OptimizationSettings {
             cpe_iterations: None,
             hot_start: None,
             abort_check: None,
+            abort_level: 0,
+            max_horner_scheme_variables: 500,
+            max_common_pair_cache_entries: 1_000_000,
+            max_common_pair_distance: 1000,
             verbose: false,
         }
     }
@@ -942,7 +994,7 @@ impl<T: std::hash::Hash + Clone> Expression<T> {
 /// register implementation for them.
 #[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
 #[cfg_attr(feature = "bincode", derive(bincode::Encode, bincode::Decode))]
-#[derive(Clone, PartialEq, Debug)]
+#[derive(Clone, Debug)]
 
 pub struct ExpressionEvaluator<T> {
     stack: Vec<T>,
@@ -951,6 +1003,7 @@ pub struct ExpressionEvaluator<T> {
     instructions: Vec<Instr>,
     result_indices: Vec<usize>,
     external_fns: Vec<String>,
+    settings: OptimizationSettings,
 }
 
 impl<T: Clone> ExpressionEvaluator<T> {
@@ -1122,6 +1175,7 @@ impl<T: Default> ExpressionEvaluator<T> {
             instructions: self.instructions,
             result_indices: self.result_indices,
             external_fns: self.external_fns.clone(),
+            settings: self.settings.clone(),
         }
     }
 
@@ -1170,6 +1224,25 @@ impl<T: Default> ExpressionEvaluator<T> {
         let mut current_node = 0;
 
         for (p, i) in self.instructions.iter().enumerate() {
+            if common_ops.len() > self.settings.max_common_pair_cache_entries {
+                common_ops.retain(|_, v| {
+                    v.len() > 1 || p - v[0] < self.settings.max_common_pair_distance
+                });
+
+                if common_ops.len() > self.settings.max_common_pair_cache_entries {
+                    break;
+                }
+            }
+
+            if p % 10000 == 0 {
+                if let Some(abort_check) = &self.settings.abort_check {
+                    if abort_check() {
+                        self.settings.abort_level = 1;
+                        break;
+                    }
+                }
+            }
+
             match i {
                 Instr::Add(_, a) | Instr::Mul(_, a) => {
                     let is_add = matches!(i, Instr::Add(_, _));
@@ -1747,7 +1820,8 @@ impl<T: Default + Clone + Eq + Hash> ExpressionEvaluator<T> {
         self.undo_stack_optimization();
 
         for _ in 0..cpe_rounds.unwrap_or(usize::MAX) {
-            if self.remove_common_pairs() == 0 {
+            if self.settings.abort_level > 0 || self.remove_common_pairs() == 0 {
+                self.settings.abort_level = 0;
                 break;
             }
         }
@@ -5801,25 +5875,22 @@ impl<T: Clone + Default + PartialEq> EvalTree<T> {
             instructions,
             result_indices,
             external_fns: self.external_functions.clone(),
+            settings: settings.clone(),
         };
 
         for _ in 0..settings.cpe_iterations.unwrap_or(usize::MAX) {
             let r = e.remove_common_pairs();
-            if r == 0 {
+            if r == 0 || e.settings.abort_level > 0 {
+                e.settings.abort_level = 0;
                 break;
             }
+
             if settings.verbose {
                 let (add_count, mul_count) = e.count_operations();
                 info!(
                     "Removed {} common pairs: {} + and {} ×",
                     r, add_count, mul_count
                 );
-            }
-
-            if let Some(abort_check) = &settings.abort_check {
-                if abort_check() {
-                    break;
-                }
             }
         }
 
@@ -6211,7 +6282,9 @@ impl EvalTree<Complex<Rational>> {
                 }
 
                 let mut v: Vec<_> = v.into_iter().collect();
+                v.retain(|(_, vv)| *vv > 1);
                 v.sort_by(|a, b| b.1.cmp(&a.1).then_with(|| a.0.cmp(&b.0)));
+                v.truncate(settings.max_horner_scheme_variables);
                 v.into_iter().map(|(k, _)| k).collect::<Vec<_>>()
             }
         };
@@ -6226,16 +6299,30 @@ impl EvalTree<Complex<Rational>> {
             e.apply_horner_scheme(&scheme);
         }
 
-        for (_, _, e) in &mut self.functions {
+        for (name, _, e) in &mut self.functions {
             let mut v = HashMap::default();
+
+            for t in &mut e.tree {
+                t.find_all_variables(&mut v);
+            }
 
             for e in &mut e.subexpressions {
                 e.find_all_variables(&mut v);
             }
 
             let mut v: Vec<_> = v.into_iter().collect();
+            v.retain(|(_, vv)| *vv > 1);
             v.sort_by_key(|k| std::cmp::Reverse(k.1));
+            v.truncate(settings.max_horner_scheme_variables);
             let v = v.into_iter().map(|(k, _)| k).collect::<Vec<_>>();
+
+            if settings.verbose {
+                info!(
+                    "Optimizing Horner scheme for function {} with {} variables",
+                    name,
+                    v.len()
+                );
+            }
 
             let scheme = Expression::optimize_horner_scheme_multiple(&e.tree, &v, settings);
 

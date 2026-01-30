@@ -7022,10 +7022,18 @@ impl PythonExpression {
     ///     A list of free parameters.
     /// iterations: int, optional
     ///     The number of optimization iterations to perform.
+    /// cpe_iterations: Optional[int], optional
+    ///     The number of common subexpression elimination iterations to perform.
     /// n_cores: int, optional
     ///     The number of cores to use for the optimization.
     /// verbose: bool, optional
     ///     Print the progress of the optimization.
+    /// max_horner_scheme_variables: int, optional
+    ///     The maximum number of variables in a Horner scheme.
+    /// max_common_pair_cache_entries: int, optional
+    ///     The maximum number of entries in the common pair cache.
+    /// max_common_pair_distance: int, optional
+    ///     The maximum distance between common pairs. Used when clearing cache entries.
     /// external_functions: Optional[dict[Tuple[Expression, str], Callable[[Sequence[float | complex]], float | complex]]]
     ///     A dictionary of external functions that can be called during evaluation.
     ///     The key is a tuple of the function symbol and a printable function name.
@@ -7042,6 +7050,9 @@ impl PythonExpression {
         cpe_iterations = None,
         n_cores = 4,
         verbose = false,
+        max_horner_scheme_variables = 500,
+        max_common_pair_cache_entries = 1_000_000,
+        max_common_pair_distance = 100,
         external_functions = None,
         conditionals = None),
         )]
@@ -7054,6 +7065,9 @@ impl PythonExpression {
         cpe_iterations: Option<usize>,
         n_cores: usize,
         verbose: bool,
+        max_horner_scheme_variables: usize,
+        max_common_pair_cache_entries: usize,
+        max_common_pair_distance: usize,
         #[gen_stub(override_type(
             type_repr = "typing.Optional[dict[tuple[Expression, str], typing.Callable[[
             typing.Sequence[float | complex]], float | complex]]]"
@@ -7121,9 +7135,23 @@ impl PythonExpression {
         }
 
         let abort_check = Box::new(move || {
-            Python::attach(|py| py.check_signals())
-                .map(|_| false)
-                .unwrap_or(true)
+            Python::attach(|py| {
+                py.check_signals().map_err(|e| {
+                    if verbose {
+                        if e.is_instance_of::<pyo3::exceptions::PyKeyboardInterrupt>(py) {
+                            crate::info!("Ctrl-c detected. Continuing to next optimization step.");
+                        } else {
+                            crate::warn!(
+                                "Signal received: {:?}.  Continuing to next optimization step.",
+                                e
+                            );
+                        }
+                    }
+                    ()
+                })
+            })
+            .map(|_| false)
+            .unwrap_or(true)
         });
 
         let settings = OptimizationSettings {
@@ -7132,6 +7160,9 @@ impl PythonExpression {
             n_cores,
             verbose: verbose.into(),
             abort_check: Some(abort_check),
+            max_horner_scheme_variables,
+            max_common_pair_cache_entries,
+            max_common_pair_distance,
             ..OptimizationSettings::default()
         };
 
@@ -7242,6 +7273,9 @@ impl PythonExpression {
         cpe_iterations = None,
         n_cores = 4,
         verbose = false,
+        max_horner_scheme_variables = 500,
+        max_common_pair_cache_entries = 1_000_000,
+        max_common_pair_distance = 100,
         external_functions = None,
         conditionals = None),
         )]
@@ -7255,6 +7289,9 @@ impl PythonExpression {
         cpe_iterations: Option<usize>,
         n_cores: usize,
         verbose: bool,
+        max_horner_scheme_variables: usize,
+        max_common_pair_cache_entries: usize,
+        max_common_pair_distance: usize,
         #[gen_stub(override_type(
             type_repr = "typing.Optional[dict[tuple[Expression, str], typing.Callable[[
             typing.Sequence[float | complex]], float | complex]]]"
@@ -7320,11 +7357,35 @@ impl PythonExpression {
             }
         }
 
+        let abort_check = Box::new(move || {
+            Python::attach(|py| {
+                py.check_signals().map_err(|e| {
+                    if verbose {
+                        if e.is_instance_of::<pyo3::exceptions::PyKeyboardInterrupt>(py) {
+                            crate::info!("Ctrl-c detected. Continuing to next optimization step.");
+                        } else {
+                            crate::warn!(
+                                "Signal received: {:?}. Continuing to next optimization step.",
+                                e
+                            );
+                        }
+                    }
+                    ()
+                })
+            })
+            .map(|_| false)
+            .unwrap_or(true)
+        });
+
         let settings = OptimizationSettings {
             horner_iterations: iterations,
             cpe_iterations,
             n_cores,
             verbose: verbose.into(),
+            abort_check: Some(abort_check),
+            max_horner_scheme_variables,
+            max_common_pair_cache_entries,
+            max_common_pair_distance,
             ..OptimizationSettings::default()
         };
 

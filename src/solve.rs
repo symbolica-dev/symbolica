@@ -79,6 +79,7 @@ impl AtomView<'_> {
                 hot_start: None,
                 abort_check: None,
                 verbose: false,
+                ..Default::default()
             });
         let df = self
             .derivative(x)
@@ -90,6 +91,7 @@ impl AtomView<'_> {
                 hot_start: None,
                 abort_check: None,
                 verbose: false,
+                ..Default::default()
             });
 
         let mut f_e = f.map_coeff(&|x| init.from_rational(x.to_real().unwrap()));
@@ -176,6 +178,7 @@ impl AtomView<'_> {
                         hot_start: None,
                         abort_check: None,
                         verbose: false,
+                        ..Default::default()
                     })
                     .map_coeff(&|x| init[0].from_rational(x.to_real().unwrap())))
             })
@@ -196,6 +199,7 @@ impl AtomView<'_> {
                         hot_start: None,
                         abort_check: None,
                         verbose: false,
+                        ..Default::default()
                     })
                     .map_coeff(&|x| init[0].from_rational(x.to_real().unwrap()));
 

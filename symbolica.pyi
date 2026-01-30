@@ -2123,6 +2123,9 @@ class Expression:
         cpe_iterations: Optional[int] = None,
         n_cores: int = 4,
         verbose: bool = False,
+        max_horner_scheme_variables: int = 500,
+        max_common_pair_cache_entries: int = 1000000,
+        max_common_pair_distance: int = 100,
         external_functions: Optional[dict[Tuple[Expression, str], Callable[[
             Sequence[float | complex]], float | complex]]] = None,
         conditionals: Optional[Sequence[Expression]] = None,
@@ -2180,6 +2183,12 @@ class Expression:
             The number of cores to use for the optimization.
         verbose: bool, optional
             Print the progress of the optimization.
+        max_horner_scheme_variables: int, optional
+            The maximum number of variables in a Horner scheme.
+        max_common_pair_cache_entries: int, optional
+            The maximum number of entries in the common pair cache.
+        max_common_pair_distance: int, optional
+            The maximum distance between common pairs. Used when clearing cache entries.
         external_functions: Optional[dict[Tuple[Expression, str], Callable[[Sequence[float | complex]], float | complex]]]
             A dictionary of external functions that can be called during evaluation.
             The key is a tuple of the function symbol and a printable function name. 
@@ -2201,6 +2210,9 @@ class Expression:
         cpe_iterations: Optional[int] = None,
         n_cores: int = 4,
         verbose: bool = False,
+        max_horner_scheme_variables: int = 500,
+        max_common_pair_cache_entries: int = 1000000,
+        max_common_pair_distance: int = 100,
         external_functions: Optional[dict[Tuple[Expression, str], Callable[[
             Sequence[float | complex]], float | complex]]] = None,
         conditionals: Optional[Sequence[Expression]] = None,
