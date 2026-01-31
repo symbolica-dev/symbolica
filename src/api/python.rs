@@ -82,10 +82,10 @@ use crate::{
     evaluate::{
         BatchEvaluator, CompileOptions, CompiledComplexEvaluator, CompiledCudaComplexEvaluator,
         CompiledCudaRealEvaluator, CompiledNumber, CompiledRealEvaluator,
-        CompiledSimdComplexEvaluator, CompiledSimdRealEvaluator, CudaComplexf64, CudaLoadSettings,
-        CudaRealf64, Dualizer, EvaluationFn, EvaluatorLoader, ExportSettings, ExpressionEvaluator,
-        ExpressionEvaluatorWithExternalFunctions, FunctionMap, InlineASM, Instruction,
-        OptimizationSettings, Slot,
+        CompiledSimdComplexEvaluator, CompiledSimdRealEvaluator, ComplexEvaluatorSettings,
+        CudaComplexf64, CudaLoadSettings, CudaRealf64, Dualizer, EvaluationFn, EvaluatorLoader,
+        ExportSettings, ExpressionEvaluator, ExpressionEvaluatorWithExternalFunctions, FunctionMap,
+        InlineASM, Instruction, OptimizationSettings, Slot,
     },
     graph::{GenerationSettings, Graph, HalfEdge},
     id::{
@@ -15571,14 +15571,14 @@ impl PythonExpressionEvaluator {
     /// - `out`: the list of outputs.
     ///
     /// The instructions are of the form:
-    /// - `('add', ('out', 0), [('const', 1), ('param', 0)])` which means `out[0] = const[1] + param[0]`.
-    /// - `('mul', ('out', 0), [('temp', 0), ('param', 0)])` which means `out[0] = temp[0] * param[0]`.
-    /// - `('pow', ('out', 0), ('param', 0), -1)` which means `out[0] = param[0]^-1`.
-    /// - `('powf', ('out', 0), ('param', 0), ('param', 1))` which means `out[0] = param[0]^param[1]`.
-    /// - `('fun', ('temp', 1), cos, ('param', 0))` which means `temp[1] = cos(param[0])`.
+    /// - `('add', ('out', 0), [('const', 1), ('param', 0)], 0)` which means `out[0] = const[1] + param[0]`, where the first `0` arguments are real.
+    /// - `('mul', ('out', 0), [('temp', 0), ('param', 0)], 1)` which means `out[0] = temp[0] * param[0]`, where the first `1` arguments are real.
+    /// - `('pow', ('out', 0), ('param', 0), -1, true)` which means `out[0] = param[0]^-1` and the output is real (`true`).
+    /// - `('powf', ('out', 0), ('param', 0), ('param', 1), false)` which means `out[0] = param[0]^param[1]`.
+    /// - `('fun', ('temp', 1), cos, ('param', 0), true)` which means `temp[1] = cos(param[0])` and the output is real (`true`).
     /// - `('external_fun', ('temp', 1), f, [('param', 0)])` which means `temp[1] = f(param[0])`.
     /// - `('assign', ('out', 1), ('const', 2))` which means `out[1] = const[2]`.
-    /// - `('if_else', ('temp', 0), 5)` which means `if temp[0] != 0 goto label 5`.
+    /// - `('if_else', ('temp', 0), 5)` which means `if temp[0] == 0 goto label 5` (false branch).
     /// - `('goto', 10)` which means `goto label 10`.
     /// - `('label', 3)` which means `label 3`.
     /// - `('join', ('out', 0), ('temp', 0), 3, 7)` which means `out[0] = (temp[0] != 0) ? label 3 : label 7`.
@@ -15597,8 +15597,8 @@ impl PythonExpressionEvaluator {
     /// yields
     ///
     /// ```log
-    /// ('mul', ('out', 0), [('param', 0), ('param', 0)])
-    /// ('fun', ('temp', 1), cos, ('param', 0))
+    /// ('mul', ('out', 0), [('param', 0), ('param', 0), 0])
+    /// ('fun', ('temp', 1), cos, ('param', 0), false)
     /// ('add', ('out', 0), [('const', 0), ('out', 0), ('temp', 1)])
     /// temp list length: 2
     /// constants: [5/3]
@@ -15621,11 +15621,11 @@ impl PythonExpressionEvaluator {
         let mut v = vec![];
         for i in &instr {
             match i {
-                Instruction::Add(o, s) | Instruction::Mul(o, s) => {
+                Instruction::Add(o, s, real_args) | Instruction::Mul(o, s, real_args) => {
                     v.push(PyTuple::new(
                         py,
                         [
-                            if matches!(i, Instruction::Add(_, _)) {
+                            if matches!(i, Instruction::Add(_, _, _)) {
                                 "add"
                             } else {
                                 "mul"
@@ -15638,10 +15638,11 @@ impl PythonExpressionEvaluator {
                                 .collect::<Vec<_>>()
                                 .into_pyobject(py)?
                                 .as_any(),
+                            real_args.into_pyobject(py)?.as_any(),
                         ],
                     )?);
                 }
-                Instruction::Pow(o, b, e) => {
+                Instruction::Pow(o, b, e, is_real) => {
                     v.push(PyTuple::new(
                         py,
                         [
@@ -15649,10 +15650,11 @@ impl PythonExpressionEvaluator {
                             slot_to_object(o).into_pyobject(py)?.as_any(),
                             slot_to_object(b).into_pyobject(py)?.as_any(),
                             e.into_pyobject(py)?.as_any(),
+                            is_real.into_pyobject(py)?.as_any(),
                         ],
                     )?);
                 }
-                Instruction::Powf(o, b, e) => {
+                Instruction::Powf(o, b, e, is_real) => {
                     v.push(PyTuple::new(
                         py,
                         [
@@ -15660,10 +15662,11 @@ impl PythonExpressionEvaluator {
                             slot_to_object(o).into_pyobject(py)?.as_any(),
                             slot_to_object(b).into_pyobject(py)?.as_any(),
                             slot_to_object(e).into_pyobject(py)?.as_any(),
+                            is_real.into_pyobject(py)?.as_any(),
                         ],
                     )?);
                 }
-                Instruction::Fun(o, f, s) => {
+                Instruction::Fun(o, f, s, is_real) => {
                     v.push(PyTuple::new(
                         py,
                         [
@@ -15673,6 +15676,7 @@ impl PythonExpressionEvaluator {
                                 .into_pyobject(py)?
                                 .as_any(),
                             slot_to_object(s).into_pyobject(py)?.as_any(),
+                            is_real.into_pyobject(py)?.as_any(),
                         ],
                     )?);
                 }
@@ -16050,6 +16054,32 @@ impl PythonExpressionEvaluator {
             })?;
 
         Ok(())
+    }
+
+    /// Set which parameters are fully real. This allows for more optimal
+    /// assembly output that uses real arithmetic instead of complex arithmetic
+    /// where possible.
+    ///
+    /// You can also set if all encountered sqrt, log, and powf operations with real
+    /// arguments are expected to yield real results.
+    ///
+    /// Must be called after all optimization functions and merging are performed
+    /// on the evaluator, or the registration will be lost.
+    #[pyo3(signature = (real_params, sqrt_real = false, log_real = false, powf_real = false, verbose = false))]
+    fn set_real_params(
+        &mut self,
+        real_params: Vec<usize>,
+        sqrt_real: bool,
+        log_real: bool,
+        powf_real: bool,
+        verbose: bool,
+    ) -> PyResult<()> {
+        self.eval_complex
+            .set_real_params(
+                &real_params,
+                ComplexEvaluatorSettings::new(sqrt_real, log_real, powf_real, verbose),
+            )
+            .map_err(|e| exceptions::PyValueError::new_err(e))
     }
 
     /// Compile the evaluator to a shared library using C++ and optionally inline assembly and load it.

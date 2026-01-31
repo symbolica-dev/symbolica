@@ -4843,13 +4843,13 @@ class Evaluator:
         - `out`: the list of outputs.
 
         The instructions are of the form:
-        - `('add', ('out', 0), [('const', 1), ('param', 0)])` which means `out[0] = const[1] + param[0]`.
-        - `('mul', ('out', 0), [('temp', 0), ('param', 0)])` which means `out[0] = temp[0] * param[0]`.
-        - `('pow', ('out', 0), ('param', 0), -1)` which means `out[0] = param[0]^-1`.
-        - `('powf', ('out', 0), ('param', 0), ('param', 1))` which means `out[0] = param[0]^param[1]`.
-        - `('fun', ('temp', 1), cos, ('param', 0))` which means `temp[1] = cos(param[0])`.
+        - `('add', ('out', 0), [('const', 1), ('param', 0)], 0)` which means `out[0] = const[1] + param[0]` where the first `0` arguments are real.
+        - `('mul', ('out', 0), [('temp', 0), ('param', 0)], 1)` which means `out[0] = temp[0] * param[0]`, where the first `1` arguments are real.
+        - `('pow', ('out', 0), ('param', 0), -1, true)` which means `out[0] = param[0]^-1` and the output is real (`true`).
+        - `('powf', ('out', 0), ('param', 0), ('param', 1), false)` which means `out[0] = param[0]^param[1]`.
+        - `('fun', ('temp', 1), cos, ('param', 0), true)` which means `temp[1] = cos(param[0])` and the output is real (`true`).
         - `('external_fun', ('temp', 1), f, [('param', 0)])` which means `temp[1] = f(param[0])`.
-        - `('if_else', ('temp', 0), 5)` which means `if temp[0] != 0 goto label 5`.
+        - `('if_else', ('temp', 0), 5)` which means `if temp[0] == 0 goto label 5` (false branch).
         - `('goto', 10)` which means `goto label 10`.
         - `('label', 3)` which means `label 3`.
         - `('join', ('out', 0), ('temp', 0), 3, 7)` which means `out[0] = (temp[0] != 0) ? label 3 : label 7`.
@@ -4868,8 +4868,8 @@ class Evaluator:
         yields
 
         ```
-        ('mul', ('out', 0), [('param', 0), ('param', 0)])
-        ('fun', ('temp', 1), cos, ('param', 0))
+        ('mul', ('out', 0), [('param', 0), ('param', 0)], 0)
+        ('fun', ('temp', 1), cos, ('param', 0), false)
         ('add', ('out', 0), [('const', 0), ('out', 0), ('temp', 1)])
         temp list length: 2
         constants: [5/3]
@@ -4939,6 +4939,18 @@ class Evaluator:
         zero_components : Optional[list[tuple[int, int]]]
             A list of components that are known to be zero and can be skipped in the dualization.
             Each component is specified as a tuple of (parameter index, dual index).
+        """
+
+    def set_real_params(self, real_params: list[int], sqrt_real=False, log_real=False, powf_real=False, verbose=False) -> None:
+        """Set which parameters are fully real. This allows for more optimal
+        assembly output that uses real arithmetic instead of complex arithmetic
+        where possible.
+
+        You can also set if all encountered sqrt, log, and powf operations with real
+        arguments are expected to yield real results.
+
+        Must be called after all optimization functions and merging are performed
+        on the evaluator, or the registration will be lost.
         """
 
     @overload

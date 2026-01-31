@@ -1000,7 +1000,7 @@ pub struct ExpressionEvaluator<T> {
     stack: Vec<T>,
     param_count: usize,
     reserved_indices: usize,
-    instructions: Vec<Instr>,
+    instructions: Vec<(Instr, ComplexPhase)>,
     result_indices: Vec<usize>,
     external_fns: Vec<String>,
     settings: OptimizationSettings,
@@ -1092,7 +1092,7 @@ impl<T: Real> ExpressionEvaluator<T> {
         let mut tmp;
         let mut i = 0;
         while i < self.instructions.len() {
-            let instr = unsafe { &self.instructions.get_unchecked(i) };
+            let (instr, _) = unsafe { &self.instructions.get_unchecked(i) };
             match instr {
                 Instr::Add(r, v) => {
                     tmp = self.stack[v[0]].clone();
@@ -1192,7 +1192,7 @@ impl<T: Default> ExpressionEvaluator<T> {
         let mut add_count = 0;
         let mut mul_count = 0;
 
-        for instr in &self.instructions {
+        for (instr, _) in &self.instructions {
             match instr {
                 Instr::Add(_, s) => add_count += s.len() - 1,
                 Instr::Mul(_, s) => mul_count += s.len() - 1,
@@ -1223,7 +1223,7 @@ impl<T: Default> ExpressionEvaluator<T> {
         let mut dag_nodes = vec![0]; // store index to parent node
         let mut current_node = 0;
 
-        for (p, i) in self.instructions.iter().enumerate() {
+        for (p, (i, _)) in self.instructions.iter().enumerate() {
             if common_ops.len() > self.settings.max_common_pair_cache_entries {
                 common_ops.retain(|_, v| {
                     v.len() > 1 || p - v[0] < self.settings.max_common_pair_distance
@@ -1329,7 +1329,7 @@ impl<T: Default> ExpressionEvaluator<T> {
                     };
 
                     self.stack.push(T::default());
-                    self.instructions.push(new_op);
+                    self.instructions.push((new_op, ComplexPhase::Any));
 
                     let mut branch = branch_id[lines[0]];
                     for &line in &lines {
@@ -1345,9 +1345,10 @@ impl<T: Default> ExpressionEvaluator<T> {
                             }
                         }
 
-                        let is_add = matches!(self.instructions[line], Instr::Add(_, _));
+                        let is_add = matches!(self.instructions[line].0, Instr::Add(_, _));
 
-                        if let Instr::Add(_, a) | Instr::Mul(_, a) = &mut self.instructions[line] {
+                        if let Instr::Add(_, a) | Instr::Mul(_, a) = &mut self.instructions[line].0
+                        {
                             for (li, l) in a.iter().enumerate() {
                                 for r in &a[li + 1..] {
                                     let pp = common_ops
@@ -1439,7 +1440,7 @@ impl<T: Default> ExpressionEvaluator<T> {
                     };
 
                     self.stack.push(T::default());
-                    self.instructions.push(new_op);
+                    self.instructions.push((new_op, ComplexPhase::Any));
 
                     let mut branch = branch_id[lines[0]];
                     for &line in &lines {
@@ -1455,12 +1456,14 @@ impl<T: Default> ExpressionEvaluator<T> {
                             }
                         }
 
-                        match &self.instructions[line] {
+                        match &self.instructions[line].0 {
                             Instr::BuiltinFun(r, _, _) => {
-                                self.instructions[line] = Instr::Add(*r, vec![new_idx]);
+                                self.instructions[line] =
+                                    (Instr::Add(*r, vec![new_idx]), ComplexPhase::Any);
                             }
                             Instr::ExternalFun(r, _, _) => {
-                                self.instructions[line] = Instr::Add(*r, vec![new_idx]);
+                                self.instructions[line] =
+                                    (Instr::Add(*r, vec![new_idx]), ComplexPhase::Any);
                             }
                             _ => panic!("Expected BuiltinFun or ExternalFun instruction"),
                         }
@@ -1475,7 +1478,9 @@ impl<T: Default> ExpressionEvaluator<T> {
         // earliest point: after last dependency
         // latest point: before first usage in the correct usage zone
         let mut placement_bounds = vec![];
-        for (i, (first_usage, branch)) in self.instructions.drain(old_len..).zip(new_symb_branch) {
+        for ((i, _), (first_usage, branch)) in
+            self.instructions.drain(old_len..).zip(new_symb_branch)
+        {
             let deps = match &i {
                 Instr::BuiltinFun(_, _, a) => std::slice::from_ref(a),
                 Instr::Add(_, a) | Instr::Mul(_, a) | Instr::ExternalFun(_, _, a) => a.as_slice(),
@@ -1540,16 +1545,17 @@ impl<T: Default> ExpressionEvaluator<T> {
 
                 match placement_bounds[j].2 {
                     Instr::Add(_, _) => {
-                        new_instr.push(Instr::Add(new_pos, new_a));
+                        new_instr.push((Instr::Add(new_pos, new_a), ComplexPhase::Any));
                     }
                     Instr::Mul(_, _) => {
-                        new_instr.push(Instr::Mul(new_pos, new_a));
+                        new_instr.push((Instr::Mul(new_pos, new_a), ComplexPhase::Any));
                     }
                     Instr::BuiltinFun(_, b, _) => {
-                        new_instr.push(Instr::BuiltinFun(new_pos, b, new_a[0]));
+                        new_instr
+                            .push((Instr::BuiltinFun(new_pos, b, new_a[0]), ComplexPhase::Any));
                     }
                     Instr::ExternalFun(_, fi, _) => {
-                        new_instr.push(Instr::ExternalFun(new_pos, fi, new_a));
+                        new_instr.push((Instr::ExternalFun(new_pos, fi, new_a), ComplexPhase::Any));
                     }
                     _ => unreachable!(),
                 }
@@ -1558,7 +1564,7 @@ impl<T: Default> ExpressionEvaluator<T> {
 
                 j += 1;
             } else {
-                let mut s = self.instructions[i].clone();
+                let (mut s, sc) = self.instructions[i].clone();
 
                 match &mut s {
                     Instr::Add(p, a) | Instr::Mul(p, a) => {
@@ -1603,7 +1609,7 @@ impl<T: Default> ExpressionEvaluator<T> {
                     Instr::Goto(_) | Instr::Label(_) => {}
                 }
 
-                new_instr.push(s);
+                new_instr.push((s, sc));
                 rename_map.push(new_pos);
                 i += 1;
             }
@@ -1611,7 +1617,7 @@ impl<T: Default> ExpressionEvaluator<T> {
 
         // fix labels
         let mut label_map: HashMap<usize, usize> = HashMap::default();
-        for (i, x) in new_instr.iter_mut().enumerate().rev() {
+        for (i, (x, _)) in new_instr.iter_mut().enumerate().rev() {
             match x {
                 Instr::Label(l) => {
                     label_map.insert(l.0, i);
@@ -1636,6 +1642,212 @@ impl<T: Default> ExpressionEvaluator<T> {
         self.instructions = new_instr;
 
         total_remove
+    }
+}
+
+/// Settings for operation realness of complex evaluators, used in [ExpressionEvaluator::set_real_params].
+#[derive(Clone, Debug)]
+pub struct ComplexEvaluatorSettings {
+    /// Whether sqrt with real arguments yields real results.
+    pub sqrt_real: bool,
+    /// Whether log with real arguments yields real results.
+    pub log_real: bool,
+    /// Whether powf with real arguments yields real results.
+    pub powf_real: bool,
+    /// Report on the number of converted operations.
+    pub verbose: bool,
+}
+
+impl ComplexEvaluatorSettings {
+    /// Create complex evaluator settings, used for [ExpressionEvaluator::set_real_params].
+    pub fn new(sqrt_real: bool, log_real: bool, powf_real: bool, verbose: bool) -> Self {
+        ComplexEvaluatorSettings {
+            sqrt_real,
+            log_real,
+            powf_real,
+            verbose,
+        }
+    }
+
+    /// Set that all square roots with real arguments yield real results.
+    pub fn sqrt_real(mut self) -> Self {
+        self.sqrt_real = true;
+        self
+    }
+
+    /// Set that all logarithms with real arguments yield real results.
+    pub fn log_real(mut self) -> Self {
+        self.log_real = true;
+        self
+    }
+
+    /// Set that all powf with real arguments yield real results.
+    pub fn powf_real(mut self) -> Self {
+        self.powf_real = true;
+        self
+    }
+
+    /// Set verbose reporting.
+    pub fn verbose(mut self) -> Self {
+        self.verbose = true;
+        self
+    }
+}
+
+impl Default for ComplexEvaluatorSettings {
+    /// Create default complex evaluator settings.
+    fn default() -> Self {
+        ComplexEvaluatorSettings {
+            sqrt_real: false,
+            log_real: false,
+            powf_real: false,
+            verbose: false,
+        }
+    }
+}
+
+impl<T: Default + PartialEq> ExpressionEvaluator<Complex<T>> {
+    /// Set which parameters are fully real. This allows for more optimal
+    /// assembly output that uses real arithmetic instead of complex arithmetic
+    /// where possible.
+    ///
+    /// You can also set if all encountered sqrt, log, and powf operations with real
+    /// arguments are expected to yield real results.
+    ///
+    /// Must be called after all optimization functions and merging are performed
+    /// on the evaluator, or the registration will be lost.
+    pub fn set_real_params(
+        &mut self,
+        real_params: &[usize],
+        settings: ComplexEvaluatorSettings,
+    ) -> Result<(), String> {
+        let mut subcomponents = vec![ComplexPhase::Any; self.stack.len()];
+
+        for i in real_params {
+            if *i >= self.param_count {
+                return Err(format!(
+                    "Real parameter index {} out of bounds (parameter count {})",
+                    i, self.param_count
+                ));
+            }
+
+            subcomponents[*i] = ComplexPhase::Real;
+        }
+
+        for (s, c) in subcomponents
+            .iter_mut()
+            .zip(self.stack.iter())
+            .skip(self.param_count)
+            .take(self.reserved_indices - self.param_count)
+        {
+            if c.im == T::default() {
+                *s = ComplexPhase::Real;
+            } else if c.re == T::default() {
+                *s = ComplexPhase::Imag;
+            }
+        }
+
+        let mut div_components = 0;
+        let mut mul_components = 0;
+
+        for (instr, sc) in &mut self.instructions {
+            let is_add = matches!(instr, Instr::Add(_, _));
+            match instr {
+                Instr::Add(r, args) | Instr::Mul(r, args) => {
+                    let real_parts = args
+                        .iter()
+                        .filter(|x| subcomponents[**x] == ComplexPhase::Real)
+                        .count();
+
+                    if real_parts > 0 && real_parts != args.len() {
+                        args.sort_by_key(|x| !matches!(subcomponents[*x], ComplexPhase::Real)); // sort real components first
+                    }
+
+                    if !is_add && real_parts > 1 {
+                        mul_components += real_parts - 1;
+                    }
+
+                    if real_parts == args.len() {
+                        *sc = ComplexPhase::Real;
+                    } else if args.iter().all(|x| subcomponents[*x] == ComplexPhase::Imag) {
+                        *sc = ComplexPhase::Imag;
+                    } else if real_parts > 0 {
+                        *sc = ComplexPhase::PartialReal(real_parts);
+                    } else {
+                        *sc = ComplexPhase::Any;
+                    }
+
+                    subcomponents[*r] = *sc;
+                }
+                Instr::Pow(r, b, _) => {
+                    if subcomponents[*b] == ComplexPhase::Real {
+                        *sc = ComplexPhase::Real;
+                        div_components += 1;
+                    } else {
+                        *sc = ComplexPhase::Any;
+                    }
+                    subcomponents[*r] = *sc;
+                }
+                Instr::BuiltinFun(r, s, a) => {
+                    if subcomponents[*a] != ComplexPhase::Real {
+                        subcomponents[*r] = ComplexPhase::Any;
+                        *sc = ComplexPhase::Any;
+                        continue;
+                    }
+                    match s.0.get_id() {
+                        Symbol::EXP_ID | Symbol::CONJ_ID | Symbol::SIN_ID | Symbol::COS_ID => {
+                            *sc = ComplexPhase::Real;
+                        }
+                        Symbol::SQRT_ID if settings.sqrt_real => {
+                            *sc = ComplexPhase::Real;
+                        }
+                        Symbol::LOG_ID if settings.log_real => {
+                            *sc = ComplexPhase::Real;
+                        }
+                        _ => {
+                            *sc = ComplexPhase::Any;
+                        }
+                    }
+
+                    subcomponents[*r] = *sc;
+                }
+                Instr::Join(r, _, t, f) => {
+                    if subcomponents[*t] == subcomponents[*f] {
+                        *sc = subcomponents[*t];
+                    } else {
+                        *sc = ComplexPhase::Any;
+                    }
+                    subcomponents[*r] = *sc;
+                }
+                Instr::Powf(r, b, e) => {
+                    if settings.powf_real
+                        && subcomponents[*b] == ComplexPhase::Real
+                        && subcomponents[*e] == ComplexPhase::Real
+                    {
+                        *sc = ComplexPhase::Real;
+                    } else {
+                        *sc = ComplexPhase::Any;
+                    }
+                    subcomponents[*r] = *sc;
+                }
+                Instr::ExternalFun(r, ..) => {
+                    *sc = ComplexPhase::Any;
+                    subcomponents[*r] = *sc;
+                }
+                Instr::IfElse(..) | Instr::Goto(..) | Instr::Label(..) => {
+                    *sc = ComplexPhase::Any;
+                }
+            }
+        }
+
+        if settings.verbose {
+            info!(
+                "Changed {} mul ops and {} div ops from complex to double",
+                mul_components, div_components
+            );
+        }
+
+        Ok(())
     }
 }
 
@@ -1685,7 +1897,7 @@ impl<T: Default + Clone + Eq + Hash> ExpressionEvaluator<T> {
 
         // shift stack indices
         if delta > 0 {
-            for i in &mut self.instructions {
+            for (i, _) in &mut self.instructions {
                 match i {
                     Instr::Add(r, a) | Instr::Mul(r, a) | Instr::ExternalFun(r, _, a) => {
                         *r += delta;
@@ -1739,7 +1951,7 @@ impl<T: Default + Clone + Eq + Hash> ExpressionEvaluator<T> {
         }
 
         delta = old_len + new_reserved_indices - other.reserved_indices;
-        for i in &mut other.instructions {
+        for (i, _) in &mut other.instructions {
             match i {
                 Instr::Add(r, a) | Instr::Mul(r, a) | Instr::ExternalFun(r, _, a) => {
                     *r += delta;
@@ -1836,7 +2048,7 @@ impl<T> ExpressionEvaluator<T> {
     pub fn optimize_stack(&mut self) {
         let mut last_use: Vec<usize> = vec![0; self.stack.len()];
 
-        for (i, x) in self.instructions.iter().enumerate() {
+        for (i, (x, _)) in self.instructions.iter().enumerate() {
             match x {
                 Instr::Add(_, a) | Instr::Mul(_, a) | Instr::ExternalFun(_, _, a) => {
                     for v in a {
@@ -1875,7 +2087,7 @@ impl<T> ExpressionEvaluator<T> {
         let mut rename_map: Vec<_> = (0..self.stack.len()).collect(); // identity map
 
         let mut max_reg = self.reserved_indices;
-        for (i, x) in self.instructions.iter_mut().enumerate() {
+        for (i, (x, _)) in self.instructions.iter_mut().enumerate() {
             let cur_reg = match x {
                 Instr::Add(r, _)
                 | Instr::Mul(r, _)
@@ -1949,7 +2161,7 @@ impl<T: Default> ExpressionEvaluator<T> {
     fn undo_stack_optimization(&mut self) {
         // undo the stack optimization
         let mut unfold = HashMap::default();
-        for (index, i) in &mut self.instructions.iter_mut().enumerate() {
+        for (index, (i, _c)) in &mut self.instructions.iter_mut().enumerate() {
             match i {
                 Instr::Add(r, a) | Instr::Mul(r, a) | Instr::ExternalFun(r, _, a) => {
                     for aa in a {
@@ -2215,12 +2427,13 @@ impl<T: ExportNumber + SingleFloat> ExpressionEvaluator<T> {
                     res += &format!(
                         "static const simd {}_CONSTANTS_complex[{}] = {{{}}};\n\n",
                         function_name,
-                        self.reserved_indices - self.param_count + 1,
+                        self.reserved_indices - self.param_count + 2,
                         {
                             let mut nums = (self.param_count..self.reserved_indices)
                                 .map(|i| format!("simd({})", self.stack[i].export()))
                                 .collect::<Vec<_>>();
                             nums.push("-0.".to_string()); // used for inversion
+                            nums.push("1".to_string()); // used for real inversion
                             nums.join(",")
                         }
                     );
@@ -2563,7 +2776,7 @@ extern "C" {{
         }
 
         let mut close_else_branch = false;
-        for ins in &self.instructions {
+        for (ins, _c) in &self.instructions {
             match ins {
                 Instr::Add(o, a) => {
                     let args = a
@@ -2727,12 +2940,13 @@ extern "C" {{
         res += &format!(
             "static const std::complex<double> {}_CONSTANTS_complex[{}] = {{{}}};\n\n",
             function_name,
-            self.reserved_indices - self.param_count + 1,
+            self.reserved_indices - self.param_count + 2,
             {
                 let mut nums = (self.param_count..self.reserved_indices)
                     .map(|i| format!("std::complex<double>({})", self.stack[i].export()))
                     .collect::<Vec<_>>();
-                nums.push("std::complex<double>(0, -0.)".to_string()); // used for inversion
+                nums.push("std::complex<double>(0, -0.)".to_string()); // used for complex inversion
+                nums.push("1".to_string()); // used for real inversion
                 nums.join(",")
             }
         );
@@ -2753,7 +2967,7 @@ extern "C" {{
 
     fn export_asm_double_impl(
         &self,
-        instr: &[Instr],
+        instr: &[(Instr, ComplexPhase)],
         function_name: &str,
         asm_flavour: InlineASM,
         out: &mut String,
@@ -2887,7 +3101,7 @@ extern "C" {{
         let mut reg_last_use = vec![self.instructions.len(); self.instructions.len()];
         let mut stack_to_reg = HashMap::default();
 
-        for (i, ins) in instr.iter().enumerate() {
+        for (i, (ins, _)) in instr.iter().enumerate() {
             match ins {
                 Instr::Add(r, a) | Instr::Mul(r, a) | Instr::ExternalFun(r, _, a) => {
                     for x in a {
@@ -2968,7 +3182,7 @@ extern "C" {{
 
         let mut new_instr: Vec<RegInstr> = instr
             .iter()
-            .map(|i| match i {
+            .map(|(i, _)| match i {
                 Instr::Add(r, a) => RegInstr::Add(
                     MemOrReg::Mem(*r),
                     u16::MAX,
@@ -3886,7 +4100,7 @@ extern "C" {{
 
     fn export_asm_complex_impl(
         &self,
-        instr: &[Instr],
+        instr: &[(Instr, ComplexPhase)],
         function_name: &str,
         asm_flavour: InlineASM,
         out: &mut String,
@@ -4025,7 +4239,7 @@ extern "C" {{
 
         let mut in_asm_block = false;
         let mut close_else_branch = false;
-        for ins in instr {
+        for (ins, c) in instr {
             match ins {
                 Instr::Add(o, a) => {
                     if !in_asm_block {
@@ -4050,7 +4264,6 @@ extern "C" {{
                             *out += &format!("\t\t\"vmovupd {addr}, %%ymm0\\n\\t\"\n");
                             *out += &format!("\t\t\"vmovupd {comp_addr}, %%ymm1\\n\\t\"\n");
 
-                            // TODO: try loading in multiple registers for better instruction-level parallelism?
                             for i in &a[1..] {
                                 let (addr, imag_addr) = asm_load!(*i);
                                 *out += &format!("\t\t\"vaddpd {addr}, %%ymm0, %%ymm0\\n\\t\"\n");
@@ -4133,47 +4346,77 @@ extern "C" {{
                     }
 
                     macro_rules! mul_complex {
-                        ($i: expr) => {
+                        ($i: expr, $real: expr) => {
                             match asm_flavour {
                                 InlineASM::X64 => {
-                                    *out += &format!(
-                                        "\t\t\"movapd %%xmm1, %%xmm0\\n\\t\"
+                                    if $real {
+                                        *out += &format!(
+                                            "\t\t\"mulpd %%xmm{0}, %%xmm1\\n\\t\"\n",
+                                            $i + 1
+                                        );
+                                    } else {
+                                        *out += &format!(
+                                            "\t\t\"movapd %%xmm1, %%xmm0\\n\\t\"
 \t\t\"unpckhpd %%xmm0, %%xmm0\\n\\t\"
 \t\t\"unpcklpd %%xmm1, %%xmm1\\n\\t\"
 \t\t\"mulpd %%xmm{0}, %%xmm0\\n\\t\"
 \t\t\"mulpd %%xmm{0}, %%xmm1\\n\\t\"
 \t\t\"shufpd $1, %%xmm0, %%xmm0\\n\\t\"
 \t\t\"addsubpd %%xmm0, %%xmm1\\n\\t\"\n",
-                                        $i + 1
-                                    );
+                                            $i + 1
+                                        );
+                                    }
                                 }
                                 InlineASM::AVX2 => {
-                                    *out += &format!(
-                                        "\t\t\"vmulpd %%ymm0, %%ymm{0}, %%ymm14\\n\\t\"
+                                    if $real {
+                                        *out += &format!(
+                                            "\t\t\"vmulpd %%ymm{0}, %%ymm0\\n\\t\"\n",
+                                            $i + 1
+                                        );
+                                        *out +=
+                                            &format!("\t\t\"vxorpd %%ymm1, %%ymm1, %%ymm1\\n\\t\""); // im = 0
+                                    } else {
+                                        *out += &format!(
+                                            "\t\t\"vmulpd %%ymm0, %%ymm{0}, %%ymm14\\n\\t\"
 \t\t\"vmulpd %%ymm0, %%ymm{1}, %%ymm15\\n\\t\"
 \t\t\"vmulpd %%ymm1, %%ymm{1}, %%ymm0\\n\\t\"
 \t\t\"vmulpd %%ymm1, %%ymm{0}, %%ymm{1}\\n\\t\"
 \t\t\"vsubpd %%ymm0, %%ymm14, %%ymm0\\n\\t\"
 \t\t\"vaddpd %%ymm15, %%ymm{1}, %%ymm1\\n\\t\"\n",
-                                        2 * $i,
-                                        2 * $i + 1,
-                                    );
+                                            2 * $i,
+                                            2 * $i + 1,
+                                        );
+                                    }
                                 }
                                 InlineASM::AArch64 => {
-                                    *out += &format!(
-                                        "
+                                    if $real {
+                                        *out += &format!(
+                                            "\t\t\"fmul d2, d{}, d2\\n\\t\"\n",
+                                            2 * ($i + 1)
+                                        );
+                                        *out += &format!("\t\t\"fmov d3, xzr\\n\\t\""); // im = 0
+                                    } else {
+                                        *out += &format!(
+                                            "
 \t\t\"fmul    d0, d{0}, d3\\n\\t\"
 \t\t\"fmul    d1, d{1}, d3\\n\\t\"
 \t\t\"fmadd   d3, d{0}, d2, d1\\n\\t\"
 \t\t\"fnmsub  d2, d{1}, d2, d0\\n\\t\"\n",
-                                        2 * ($i + 1) + 1,
-                                        2 * ($i + 1),
-                                    )
+                                            2 * ($i + 1) + 1,
+                                            2 * ($i + 1),
+                                        )
+                                    }
                                 }
                                 InlineASM::None => unreachable!(),
                             }
                         };
                     }
+
+                    let num_real_args = match c {
+                        ComplexPhase::Real => a.len(),
+                        ComplexPhase::PartialReal(n) => *n,
+                        ComplexPhase::Imag | ComplexPhase::Any => 0,
+                    };
 
                     if !matches!(asm_flavour, InlineASM::AVX2) && a.len() < 15 || a.len() < 8 {
                         for (i, r) in a.iter().enumerate() {
@@ -4182,15 +4425,15 @@ extern "C" {{
 
                         for i in 1..a.len() {
                             // optimized complex multiplication
-                            mul_complex!(i);
+                            mul_complex!(i, i < num_real_args);
                         }
                     } else {
                         load_complex!(0, a[0]);
 
                         // load multiplications one after the other
-                        for r in a.iter().skip(1) {
+                        for (i, r) in a.iter().enumerate().skip(1) {
                             load_complex!(1, *r);
-                            mul_complex!(1);
+                            mul_complex!(1, i < num_real_args);
                         }
                     }
 
@@ -4225,8 +4468,19 @@ extern "C" {{
                         let addr_o = asm_load!(*o);
                         match asm_flavour {
                             InlineASM::X64 => {
-                                *out += &format!(
-                                    "\t\t\"movupd {}, %%xmm0\\n\\t\"
+                                if let ComplexPhase::Real = *c {
+                                    *out += &format!(
+                                        "\t\t\"movupd {}, %%xmm0\\n\\t\"
+\t\t\"movupd {}(%1), %%xmm1\\n\\t\"
+\t\t\"divsd %%xmm0, %%xmm1\\n\\t\"
+\t\t\"movupd %%xmm1, {}\\n\\t\"\n",
+                                        addr_b.0,
+                                        (self.reserved_indices - self.param_count + 1) * 16,
+                                        addr_o.0
+                                    );
+                                } else {
+                                    *out += &format!(
+                                        "\t\t\"movupd {}, %%xmm0\\n\\t\"
 \t\t\"movupd {}(%1), %%xmm1\\n\\t\"
 \t\t\"movapd %%xmm0, %%xmm2\\n\\t\"
 \t\t\"xorpd %%xmm1, %%xmm0\\n\\t\"
@@ -4234,15 +4488,30 @@ extern "C" {{
 \t\t\"haddpd %%xmm2, %%xmm2\\n\\t\"
 \t\t\"divpd %%xmm2, %%xmm0\\n\\t\"
 \t\t\"movupd %%xmm0, {}\\n\\t\"\n",
-                                    addr_b.0,
-                                    (self.reserved_indices - self.param_count) * 16,
-                                    addr_o.0
-                                );
+                                        addr_b.0,
+                                        (self.reserved_indices - self.param_count) * 16,
+                                        addr_o.0
+                                    );
+                                }
                             }
                             InlineASM::AVX2 => {
-                                // TODO: do FMA on top?
-                                *out += &format!(
-                                    "\t\t\"vmovupd {0}, %%ymm0\\n\\t\"
+                                if let ComplexPhase::Real = *c {
+                                    *out += &format!(
+                                        "\t\t\"vmovupd {0}, %%ymm0\\n\\t\"
+\t\t\"vmovupd {1}(%1), %%ymm1\\n\\t\"
+\t\t\"vdivpd  %%ymm0, %%ymm1, %%ymm0\\n\\t\"
+\t\t\"vmovupd %%ymm0, {2}\\n\\t\"
+\t\t\"vxorpd %%ymm1, %%ymm1, %%ymm1\\n\\t\"
+\t\t\"vmovupd %%ymm1, {3}\\n\\t\"\n",
+                                        addr_b.0,
+                                        (self.reserved_indices - self.param_count + 1) * 64,
+                                        addr_o.0,
+                                        addr_o.1
+                                    );
+                                } else {
+                                    // TODO: do FMA on top?
+                                    *out += &format!(
+                                        "\t\t\"vmovupd {0}, %%ymm0\\n\\t\"
 \t\t\"vmovupd {1}, %%ymm1\\n\\t\"
 \t\t\"vmulpd %%ymm0, %%ymm0, %%ymm3\\n\\t\"
 \t\t\"vmulpd %%ymm1, %%ymm1, %%ymm4\\n\\t\"
@@ -4253,32 +4522,41 @@ extern "C" {{
 \t\t\"vdivpd %%ymm3, %%ymm1, %%ymm1\\n\\t\"
 \t\t\"vmovupd %%ymm0, {3}\\n\\t\"
 \t\t\"vmovupd %%ymm1, {4}\\n\\t\"\n",
-                                    addr_b.0,
-                                    addr_b.1,
-                                    (self.reserved_indices - self.param_count) * 64,
-                                    addr_o.0,
-                                    addr_o.1
-                                );
+                                        addr_b.0,
+                                        addr_b.1,
+                                        (self.reserved_indices - self.param_count) * 64,
+                                        addr_o.0,
+                                        addr_o.1
+                                    );
+                                }
                             }
                             InlineASM::AArch64 => {
                                 if *b * 16 < 450 {
-                                    *out += &format!("\t\t\"ldp d0, d1, {}\\n\\t\"", addr_b.0);
+                                    *out += &format!("\t\t\"ldp d0, d1, {}\\n\\t\"\n", addr_b.0);
                                 } else {
-                                    *out += &format!("\t\t\"ldr d0, {}\\n\\t\"", addr_b.0);
-                                    *out += &format!("\t\t\"ldr d1, {}\\n\\t\"", addr_b.1);
+                                    *out += &format!("\t\t\"ldr d0, {}\\n\\t\"\n", addr_b.0);
+                                    *out += &format!("\t\t\"ldr d1, {}\\n\\t\"\n", addr_b.1);
                                 }
 
-                                *out += "
+                                if let ComplexPhase::Real = *c {
+                                    *out += &format!(
+                                        "\t\t\"ldr    d2, [%1, {}]\\n\\t\"
+\t\t\"fdiv    d0, d2, d0\\n\\t\"\n",
+                                        (self.reserved_indices - self.param_count + 1) * 16
+                                    );
+                                } else {
+                                    *out += "
 \t\t\"fmul    d2, d0, d0\\n\\t\"
 \t\t\"fmadd   d2, d1, d1, d2\\n\\t\"
 \t\t\"fneg    d1, d1\\n\\t\"
 \t\t\"fdiv    d0, d0, d2\\n\\t\"
 \t\t\"fdiv    d1, d1, d2\\n\\t\"\n";
+                                }
 
                                 if *o * 16 < 450 {
                                     *out += &format!("\t\t\"stp d0, d1, {}\\n\\t\"\n", addr_o.0);
                                 } else {
-                                    *out += &format!("\t\t\"str d0, {}\\n\\t\"", addr_o.0);
+                                    *out += &format!("\t\t\"str d0, {}\\n\\t\"\n", addr_o.0);
                                     *out += &format!("\t\t\"str d1, {}\\n\\t\"\n", addr_o.1);
                                 }
                             }
@@ -4492,7 +4770,7 @@ extern "C" {{
 pub struct ExpressionEvaluatorWithExternalFunctions<T> {
     stack: Vec<T>,
     param_count: usize,
-    instructions: Vec<Instr>,
+    instructions: Vec<(Instr, ComplexPhase)>,
     result_indices: Vec<usize>,
     external_fns: Vec<(Vec<T>, Box<dyn Fn(&[T]) -> T + Send + Sync>)>,
 }
@@ -4535,7 +4813,7 @@ impl<T: Real> ExpressionEvaluatorWithExternalFunctions<T> {
         let mut tmp;
         let mut i = 0;
         while i < self.instructions.len() {
-            let instr = unsafe { self.instructions.get_unchecked(i) };
+            let (instr, _) = unsafe { self.instructions.get_unchecked(i) };
             match instr {
                 Instr::Add(r, v) => {
                     tmp = self.stack[v[0]].clone();
@@ -4657,17 +4935,22 @@ impl Slot {
 #[cfg_attr(feature = "bincode", derive(bincode::Encode, bincode::Decode))]
 #[derive(Debug, Clone)]
 pub enum Instruction {
-    /// `Add(o, [i0,...,i_n])` means `o = i0 + ... + i_n`.
-    Add(Slot, Vec<Slot>),
-    /// `Mul(o, [i0,...,i_n])` means `o = i0 * ... * i_n`.
-    Mul(Slot, Vec<Slot>),
-    /// `Pow(o, b, e)` means `o = b^e`.
-    Pow(Slot, Slot, i64),
-    /// `Powf(o, b, e)` means `o = b^e`.
-    Powf(Slot, Slot, Slot),
-    /// `Fun(o, s, a)` means `o = s(a)`, where `s` is assumed to
-    /// be a built-in function such as `sin`.
-    Fun(Slot, BuiltinSymbol, Slot),
+    /// `Add(o, [i0,...,i_n])` means `o = i0 + ... + i_n`, where the first
+    /// `n_real` arguments are real.
+    Add(Slot, Vec<Slot>, usize),
+    /// `Mul(o, [i0,...,i_n], n_real)` means `o = i0 * ... * i_n`, where the first
+    /// `n_real` arguments are real.
+    Mul(Slot, Vec<Slot>, usize),
+    /// `Pow(o, b, e, is_real)` means `o = b^e`. The `is_real` flag indicates
+    /// whether the exponentiation is expected to yield a real number.
+    Pow(Slot, Slot, i64, bool),
+    /// `Powf(o, b, e, is_real)` means `o = b^e`. The `is_real` flag indicates
+    /// whether the exponentiation is expected to yield a real number.
+    Powf(Slot, Slot, Slot, bool),
+    /// `Fun(o, s, a, is_real)` means `o = s(a)`, where `s` is assumed to
+    /// be a built-in function such as `sin`. The `is_real` flag indicates
+    /// whether the function is expected to yield a real number.
+    Fun(Slot, BuiltinSymbol, Slot, bool),
     /// `ExternalFun(o, s, a,...)` means `o = s(a, ...)`, where `s` is an external function.
     ExternalFun(Slot, String, Vec<Slot>),
     /// `Assign(o, v)` means `o = v`.
@@ -4685,7 +4968,7 @@ pub enum Instruction {
 impl std::fmt::Display for Instruction {
     fn fmt(&self, f: &mut std::fmt::Formatter) -> std::fmt::Result {
         match self {
-            Instruction::Add(o, a) => {
+            Instruction::Add(o, a, _) => {
                 write!(
                     f,
                     "{} = {}",
@@ -4696,7 +4979,7 @@ impl std::fmt::Display for Instruction {
                         .join("+")
                 )
             }
-            Instruction::Mul(o, a) => {
+            Instruction::Mul(o, a, _) => {
                 write!(
                     f,
                     "{} = {}",
@@ -4707,13 +4990,13 @@ impl std::fmt::Display for Instruction {
                         .join("*")
                 )
             }
-            Instruction::Pow(o, b, e) => {
+            Instruction::Pow(o, b, e, _) => {
                 write!(f, "{o} = {b}^{e}")
             }
-            Instruction::Powf(o, b, e) => {
+            Instruction::Powf(o, b, e, _) => {
                 write!(f, "{o} = {b}^{e}")
             }
-            Instruction::Fun(o, s, a) => {
+            Instruction::Fun(o, s, a, _) => {
                 write!(f, "{} = {}({})", o, s.0, a)
             }
             Instruction::ExternalFun(o, s, a) => {
@@ -4770,32 +5053,57 @@ impl<T: Clone> ExpressionEvaluator<T> {
             };
         }
 
-        for i in &self.instructions {
+        for (i, sc) in &self.instructions {
             match i {
                 Instr::Add(o, a) => {
+                    let n_real_args = match sc {
+                        ComplexPhase::Real => a.len(),
+                        ComplexPhase::PartialReal(n) => *n,
+                        _ => 0,
+                    };
+
                     instr.push(Instruction::Add(
                         get_slot!(*o),
                         a.iter().map(|x| get_slot!(*x)).collect(),
+                        n_real_args,
                     ));
                 }
                 Instr::Mul(o, a) => {
+                    let n_real_args = match sc {
+                        ComplexPhase::Real => a.len(),
+                        ComplexPhase::PartialReal(n) => *n,
+                        _ => 0,
+                    };
+
                     instr.push(Instruction::Mul(
                         get_slot!(*o),
                         a.iter().map(|x| get_slot!(*x)).collect(),
+                        n_real_args,
                     ));
                 }
                 Instr::Pow(o, b, e) => {
-                    instr.push(Instruction::Pow(get_slot!(*o), get_slot!(*b), *e));
+                    instr.push(Instruction::Pow(
+                        get_slot!(*o),
+                        get_slot!(*b),
+                        *e,
+                        *sc == ComplexPhase::Real,
+                    ));
                 }
                 Instr::Powf(o, b, e) => {
                     instr.push(Instruction::Powf(
                         get_slot!(*o),
                         get_slot!(*b),
                         get_slot!(*e),
+                        *sc == ComplexPhase::Real,
                     ));
                 }
                 Instr::BuiltinFun(o, s, a) => {
-                    instr.push(Instruction::Fun(get_slot!(*o), *s, get_slot!(*a)));
+                    instr.push(Instruction::Fun(
+                        get_slot!(*o),
+                        *s,
+                        get_slot!(*a),
+                        *sc == ComplexPhase::Real,
+                    ));
                 }
                 Instr::ExternalFun(o, f, a) => {
                     instr.push(Instruction::ExternalFun(
@@ -4905,21 +5213,21 @@ impl<T: Default + Clone> ExpressionEvaluator<T> {
 
         // unfold every instruction to a single operation
         let mut new_instr = vec![];
-        for x in &mut self.instructions {
+        for (x, c) in &mut self.instructions {
             match x {
                 Instr::Add(o, a) => {
-                    new_instr.push(Instr::Add(*o, vec![a[0], a[1]]));
+                    new_instr.push((Instr::Add(*o, vec![a[0], a[1]]), *c));
                     for x in a.iter().skip(2) {
-                        new_instr.push(Instr::Add(*o, vec![*o, *x]));
+                        new_instr.push((Instr::Add(*o, vec![*o, *x]), *c));
                     }
                 }
                 Instr::Mul(o, a) => {
-                    new_instr.push(Instr::Mul(*o, vec![a[0], a[1]]));
+                    new_instr.push((Instr::Mul(*o, vec![a[0], a[1]]), *c));
                     for x in a.iter().skip(2) {
-                        new_instr.push(Instr::Mul(*o, vec![*o, *x]));
+                        new_instr.push((Instr::Mul(*o, vec![*o, *x]), *c));
                     }
                 }
-                _ => new_instr.push(x.clone()),
+                _ => new_instr.push((x.clone(), *c)),
             }
         }
 
@@ -4967,7 +5275,7 @@ impl<T: Default + Clone> ExpressionEvaluator<T> {
             dim: v.get_dimension(),
         };
 
-        for i in self.instructions.drain(..) {
+        for (i, _sc) in self.instructions.drain(..) {
             let (o, instr) = match i {
                 Instr::Add(o, a) => (
                     o,
@@ -5082,11 +5390,12 @@ impl<T: Default + Clone> ExpressionEvaluator<T> {
                         (s1, s2) = (s2, s1);
                     }
 
-                    self.instructions.push(Instr::Add(out, vec![s1, s2]));
+                    self.instructions
+                        .push((Instr::Add(out, vec![s1, s2]), ComplexPhase::Any));
                 }
                 VectorInstruction::Assign(slot) => {
                     self.instructions
-                        .push(Instr::Add(out, vec![from_slot!(slot)]));
+                        .push((Instr::Add(out, vec![from_slot!(slot)]), ComplexPhase::Any));
                 }
                 VectorInstruction::Mul(slot, slot1) => {
                     let mut s1 = from_slot!(slot);
@@ -5095,45 +5404,47 @@ impl<T: Default + Clone> ExpressionEvaluator<T> {
                         (s1, s2) = (s2, s1);
                     }
 
-                    self.instructions.push(Instr::Mul(out, vec![s1, s2]));
+                    self.instructions
+                        .push((Instr::Mul(out, vec![s1, s2]), ComplexPhase::Any));
                 }
                 VectorInstruction::Pow(slot, e) => {
-                    self.instructions.push(Instr::Pow(out, from_slot!(slot), e));
+                    self.instructions
+                        .push((Instr::Pow(out, from_slot!(slot), e), ComplexPhase::Any));
                 }
                 VectorInstruction::Powf(slot, slot1) => {
-                    self.instructions
-                        .push(Instr::Powf(out, from_slot!(slot), from_slot!(slot1)));
+                    self.instructions.push((
+                        Instr::Powf(out, from_slot!(slot), from_slot!(slot1)),
+                        ComplexPhase::Any,
+                    ));
                 }
                 VectorInstruction::BuiltinFun(builtin_symbol, slot) => {
-                    self.instructions.push(Instr::BuiltinFun(
-                        out,
-                        builtin_symbol,
-                        from_slot!(slot),
+                    self.instructions.push((
+                        Instr::BuiltinFun(out, builtin_symbol, from_slot!(slot)),
+                        ComplexPhase::Any,
                     ));
                 }
                 VectorInstruction::ExternalFun(f, args) => {
-                    self.instructions.push(Instr::ExternalFun(
-                        out,
-                        f,
-                        args.iter().map(|x| from_slot!(*x)).collect(),
+                    self.instructions.push((
+                        Instr::ExternalFun(out, f, args.iter().map(|x| from_slot!(*x)).collect()),
+                        ComplexPhase::Any,
                     ));
                 }
                 VectorInstruction::IfElse(cond, label) => {
                     self.instructions
-                        .push(Instr::IfElse(from_slot!(cond), label));
+                        .push((Instr::IfElse(from_slot!(cond), label), ComplexPhase::Any));
                 }
                 VectorInstruction::Goto(label) => {
-                    self.instructions.push(Instr::Goto(label));
+                    self.instructions
+                        .push((Instr::Goto(label), ComplexPhase::Any));
                 }
                 VectorInstruction::Label(label) => {
-                    self.instructions.push(Instr::Label(label));
+                    self.instructions
+                        .push((Instr::Label(label), ComplexPhase::Any));
                 }
                 VectorInstruction::Join(cond, t, f) => {
-                    self.instructions.push(Instr::Join(
-                        out,
-                        from_slot!(cond),
-                        from_slot!(t),
-                        from_slot!(f),
+                    self.instructions.push((
+                        Instr::Join(out, from_slot!(cond), from_slot!(t), from_slot!(f)),
+                        ComplexPhase::Any,
                     ));
                 }
             }
@@ -5714,6 +6025,18 @@ enum Instr {
     Join(usize, usize, usize, usize),
 }
 
+/// The phase of an operation in a complex evaluator.
+#[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
+#[cfg_attr(feature = "bincode", derive(bincode::Encode, bincode::Decode))]
+#[derive(Debug, Copy, Clone, PartialEq, Default, Hash)]
+pub enum ComplexPhase {
+    Real,
+    Imag,
+    PartialReal(usize),
+    #[default]
+    Any,
+}
+
 impl<T: Clone + PartialEq> SplitExpression<T> {
     pub fn map_coeff<T2, F: Fn(&T) -> T2>(&self, f: &F) -> SplitExpression<T2> {
         SplitExpression {
@@ -5924,7 +6247,7 @@ impl<T: Clone + Default + PartialEq> EvalTree<T> {
         tree: &Expression<T>,
         subexpressions: &[Expression<T>],
         stack: &mut Vec<T>,
-        instr: &mut Vec<Instr>,
+        instr: &mut Vec<(Instr, ComplexPhase)>,
         sub_expr_pos: &mut HashMap<usize, usize>,
         args: &[usize],
         in_branch: bool,
@@ -5989,7 +6312,7 @@ impl<T: Clone + Default + PartialEq> EvalTree<T> {
                 let res = stack.len() - 1;
 
                 let add = Instr::Add(res, args);
-                instr.push(add);
+                instr.push((add, ComplexPhase::Any));
 
                 res
             }
@@ -6015,7 +6338,7 @@ impl<T: Clone + Default + PartialEq> EvalTree<T> {
                 let res = stack.len() - 1;
 
                 let mul = Instr::Mul(res, args);
-                instr.push(mul);
+                instr.push((mul, ComplexPhase::Any));
 
                 res
             }
@@ -6034,14 +6357,14 @@ impl<T: Clone + Default + PartialEq> EvalTree<T> {
                 let mut res = stack.len() - 1;
 
                 if p.1 > 1 {
-                    instr.push(Instr::Mul(res, vec![b; p.1 as usize]));
+                    instr.push((Instr::Mul(res, vec![b; p.1 as usize]), ComplexPhase::Any));
                 } else if p.1 < -1 {
-                    instr.push(Instr::Mul(res, vec![b; -p.1 as usize]));
+                    instr.push((Instr::Mul(res, vec![b; -p.1 as usize]), ComplexPhase::Any));
                     stack.push(T::default());
                     res += 1;
-                    instr.push(Instr::Pow(res, res - 1, -1));
+                    instr.push((Instr::Pow(res, res - 1, -1), ComplexPhase::Any));
                 } else {
-                    instr.push(Instr::Pow(res, b, p.1));
+                    instr.push((Instr::Pow(res, b, p.1), ComplexPhase::Any));
                 }
                 res
             }
@@ -6069,7 +6392,7 @@ impl<T: Clone + Default + PartialEq> EvalTree<T> {
                 stack.push(T::default());
                 let res = stack.len() - 1;
 
-                instr.push(Instr::Powf(res, b, e));
+                instr.push((Instr::Powf(res, b, e), ComplexPhase::Any));
                 res
             }
             Expression::ReadArg(a) => args[*a],
@@ -6086,7 +6409,7 @@ impl<T: Clone + Default + PartialEq> EvalTree<T> {
                 );
                 stack.push(T::default());
                 let c = Instr::BuiltinFun(stack.len() - 1, *s, arg);
-                instr.push(c);
+                instr.push((c, ComplexPhase::Any));
                 stack.len() - 1
             }
             Expression::SubExpression(id) => {
@@ -6135,7 +6458,7 @@ impl<T: Clone + Default + PartialEq> EvalTree<T> {
                 let res = stack.len() - 1;
 
                 let f = Instr::ExternalFun(res, *s, args);
-                instr.push(f);
+                instr.push((f, ComplexPhase::Any));
 
                 res
             }
@@ -6182,7 +6505,7 @@ impl<T: Clone + Default + PartialEq> EvalTree<T> {
 
                 let label_else = Label(instr.len());
                 stack.push(T::default());
-                instr.push(Instr::IfElse(cond, label_else));
+                instr.push((Instr::IfElse(cond, label_else), ComplexPhase::Any));
 
                 let then_branch = self.linearize_impl(
                     &b.1,
@@ -6197,9 +6520,9 @@ impl<T: Clone + Default + PartialEq> EvalTree<T> {
 
                 let label_end = Label(instr.len());
                 stack.push(T::default());
-                instr.push(Instr::Goto(label_end));
+                instr.push((Instr::Goto(label_end), ComplexPhase::Any));
                 stack.push(T::default());
-                instr.push(Instr::Label(label_else));
+                instr.push((Instr::Label(label_else), ComplexPhase::Any));
 
                 let else_branch = self.linearize_impl(
                     &b.2,
@@ -6213,12 +6536,15 @@ impl<T: Clone + Default + PartialEq> EvalTree<T> {
                 );
 
                 stack.push(T::default());
-                instr.push(Instr::Label(label_end));
+                instr.push((Instr::Label(label_end), ComplexPhase::Any));
 
                 stack.push(T::default());
                 let res = stack.len() - 1;
 
-                instr.push(Instr::Join(res, cond, then_branch, else_branch));
+                instr.push((
+                    Instr::Join(res, cond, then_branch, else_branch),
+                    ComplexPhase::Any,
+                ));
 
                 res
             }
