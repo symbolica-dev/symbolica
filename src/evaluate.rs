@@ -103,6 +103,63 @@ impl From<bool> for VerboseMode {
     }
 }
 
+#[derive(Clone, Copy, Debug, Default)]
+struct CpePassStats {
+    cache_entries_peak: usize,
+    cache_entries_final: usize,
+    cache_pruned: bool,
+    cache_scan_truncated: bool,
+    scan_aborted: bool,
+}
+
+fn format_bytes(bytes: u64) -> String {
+    const UNITS: [&str; 5] = ["B", "KiB", "MiB", "GiB", "TiB"];
+    let mut unit = 0usize;
+    let mut v = bytes as f64;
+    while v >= 1024.0 && unit + 1 < UNITS.len() {
+        v /= 1024.0;
+        unit += 1;
+    }
+    if unit == 0 {
+        format!("{bytes} {}", UNITS[unit])
+    } else {
+        format!("{:.2} {}", v, UNITS[unit])
+    }
+}
+
+#[cfg(target_os = "linux")]
+fn linux_rss_bytes() -> Option<u64> {
+    let status = std::fs::read_to_string("/proc/self/status").ok()?;
+    for line in status.lines() {
+        if let Some(rest) = line.strip_prefix("VmRSS:") {
+            let kb = rest.split_whitespace().next()?.parse::<u64>().ok()?;
+            return Some(kb * 1024);
+        }
+    }
+    None
+}
+
+#[cfg(not(target_os = "linux"))]
+fn linux_rss_bytes() -> Option<u64> {
+    None
+}
+
+fn progress_bar(done: usize, total: usize, width: usize) -> String {
+    if total == 0 {
+        return "[--------------------] 0%".to_string();
+    }
+    let ratio = (done as f64 / total as f64).clamp(0.0, 1.0);
+    let filled = ((ratio * width as f64).round() as usize).min(width);
+    let empty = width - filled;
+    let pct = (ratio * 100.0).round() as usize;
+    format!(
+        "[{}{}] {:>3}%",
+        "#".repeat(filled),
+        "-".repeat(empty),
+        pct
+    )
+}
+
 #[cfg_attr(
     feature = "bincode",
     derive(bincode_trait_derive::Encode),
@@ -1251,7 +1308,7 @@ impl<T: Default> ExpressionEvaluator<T> {
 
     /// Remove common pairs of instructions. Assumes that the arguments
     /// of the instructions are sorted.
-    fn remove_common_pairs(&mut self) -> usize {
+    fn remove_common_pairs_with_stats(&mut self) -> (usize, CpePassStats) {
         #[derive(Debug, Clone, PartialEq, Eq, Hash, PartialOrd, Ord)]
         enum CommonInstruction {
             Add(usize, usize),
@@ -1261,6 +1318,7 @@ impl<T: Default> ExpressionEvaluator<T> {
         }
 
         let mut common_ops: HashMap<_, SmallVec<[usize; 1]>> = HashMap::default();
+        let mut stats = CpePassStats::default();
 
         let mut affected_lines = vec![false; self.instructions.len()];
 
@@ -1269,13 +1327,19 @@ impl<T: Default> ExpressionEvaluator<T> {
         let mut dag_nodes = vec![0]; // store index to parent node
         let mut current_node = 0;
 
+        let progress = self.settings.is_progress();
+        let mut last_report = Instant::now();
+        let total_instr = self.instructions.len().max(1);
+
         for (p, (i, _)) in self.instructions.iter().enumerate() {
             if common_ops.len() > self.settings.max_common_pair_cache_entries {
                 common_ops.retain(|_, v| {
                     v.len() > 1 || p - v[0] < self.settings.max_common_pair_distance
                 });
+                stats.cache_pruned = true;
 
                 if common_ops.len() > self.settings.max_common_pair_cache_entries {
+                    stats.cache_scan_truncated = true;
                     break;
                 }
             }
@@ -1284,6 +1348,7 @@ impl<T: Default> ExpressionEvaluator<T> {
                 if let Some(abort_check) = &self.settings.abort_check {
                     if abort_check() {
                         self.settings.abort_level = 1;
+                        stats.scan_aborted = true;
                         break;
                     }
                 }
@@ -1340,7 +1405,43 @@ impl<T: Default> ExpressionEvaluator<T> {
                 _ => {}
             }
             branch_id[p] = current_node;
+
+            if progress {
+                stats.cache_entries_peak = stats.cache_entries_peak.max(common_ops.len());
+                // Currently I am thinking of keeping a progress of 2Hz
+                if last_report.elapsed().as_millis() >= 500 {
+                    last_report = Instant::now();
+                    let bar = progress_bar(p, total_instr, 20);
+                    let rss = linux_rss_bytes().map(format_bytes);
+                    if let Some(rss) = rss {
+                        info!(
+                            "[CPE] Scanning {} | instr {}/{} | cache {} (peak {}) / cap {} | max_dist {} | rss {}",
+                            bar,
+                            p,
+                            total_instr,
+                            common_ops.len(),
+                            stats.cache_entries_peak,
+                            self.settings.max_common_pair_cache_entries,
+                            self.settings.max_common_pair_distance,
+                            rss
+                        );
+                    } else {
+                        info!(
+                            "[CPE] Scanning {} | instr {}/{} | cache {} (peak {}) / cap {} | max_dist {}",
+                            bar,
+                            p,
+                            total_instr,
+                            common_ops.len(),
+                            stats.cache_entries_peak,
+                            self.settings.max_common_pair_cache_entries,
+                            self.settings.max_common_pair_distance
+                        );
+                    }
+                }
+            }
         }
+
+        stats.cache_entries_final = common_ops.len();
 
         let mut to_remove: Vec<_> = common_ops.clone().into_iter().collect();
         to_remove.retain_mut(|(_, v)| {
@@ -1687,7 +1788,11 @@ impl<T: Default> ExpressionEvaluator<T> {
 
         self.instructions = new_instr;
 
-        total_remove
+        (total_remove, stats)
+    }
+
+    fn remove_common_pairs(&mut self) -> usize {
+        self.remove_common_pairs_with_stats().0
     }
 }
 
@@ -6254,8 +6359,14 @@ impl<T: Clone + Default + PartialEq> EvalTree<T> {
             None
         };
 
+        let (cpe_start_add, cpe_start_mul) = if settings.is_verbose() {
+            e.count_operations()
+        } else {
+            (0, 0)
+        };
+
         for cpe_iteration in 0..settings.cpe_iterations.unwrap_or(usize::MAX) {
-            let r = e.remove_common_pairs();
+            let (r, cpe_stats) = e.remove_common_pairs_with_stats();
             if r == 0 || e.settings.abort_level > 0 {
                 e.settings.abort_level = 0;
                 break;
@@ -6264,16 +6375,60 @@ impl<T: Clone + Default + PartialEq> EvalTree<T> {
             if settings.is_verbose() {
                 let (add_count, mul_count) = e.count_operations();
                 if settings.is_progress() {
+                    let target = settings.cpe_iterations;
+                    let iter_msg = if let Some(t) = target {
+                        format!(
+                            "{} {}/{}",
+                            progress_bar(cpe_iteration + 1, t, 20),
+                            cpe_iteration + 1,
+                            t
+                        )
+                    } else {
+                        format!("target None (iter {})", cpe_iteration + 1)
+                    };
+
                     let elapsed = cpe_start_time.unwrap().elapsed();
+                    let rss = linux_rss_bytes().map(format_bytes);
+
+                    let add_pct = if cpe_start_add > 0 {
+                        Some(add_count as f64 * 100.0 / cpe_start_add as f64)
+                    } else {
+                        None
+                    };
+                    let mul_pct = if cpe_start_mul > 0 {
+                        Some(mul_count as f64 * 100.0 / cpe_start_mul as f64)
+                    } else {
+                        None
+                    };
+
+                    let add_pct_s = add_pct
+                        .map(|p| format!("{:.1}%", p))
+                        .unwrap_or_else(|| "n/a".to_string());
+                    let mul_pct_s = mul_pct
+                        .map(|p| format!("{:.1}%", p))
+                        .unwrap_or_else(|| "n/a".to_string());
+
                     info!(
-                        "[CPE] Iteration {}: Removed {} common pairs | Ops: {} + and {} × | Cache limit: {} | Max distance: {} | Time: {:.2}s",
-                        cpe_iteration + 1,
+                        "[CPE] {} | removed {} | ops {} + ({} of start), {} × ({} of start) | cache {} (peak {}) / cap {} | max_dist {} | rss {} | time {:.2}s{}{}{}",
+                        iter_msg,
                         r,
                         add_count,
                         mul_count,
+                        add_pct_s,
+                        mul_pct_s,
+                        cpe_stats.cache_entries_final,
+                        cpe_stats.cache_entries_peak,
                         settings.max_common_pair_cache_entries,
                         settings.max_common_pair_distance,
-                        elapsed.as_secs_f64()
+                        rss.unwrap_or_else(|| "n/a".to_string()),
+                        elapsed.as_secs_f64(),
+                        if cpe_stats.cache_pruned { " | pruned" } else { "" },
+                        if cpe_stats.cache_scan_truncated {
+                            " | scan_truncated(cache cap)"
+                        } else {
+                            ""
+                        },
+                        if cpe_stats.scan_aborted { " | aborted" } else { "" }
                     );
                 } else {
                     info!(
