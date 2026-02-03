@@ -13,6 +13,7 @@ use std::{
         Arc, Mutex,
         atomic::{AtomicBool, AtomicUsize, Ordering},
     },
+    time::Instant,
 };
 
 use crate::{
@@ -77,6 +78,31 @@ impl<A, T> EvaluationFn<A, T> {
 ///     .unwrap().map_coeff(&|x| x.re.to_f64());
 /// assert_eq!(evaluator.evaluate_single(&[2.0]), 5.0);
 /// ```
+#[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
+#[cfg_attr(feature = "bincode", derive(bincode::Encode, bincode::Decode))]
+#[derive(Clone, Debug, PartialEq)]
+pub enum VerboseMode {
+    None,
+    Simple,
+    Progress,
+}
+
+impl Default for VerboseMode {
+    fn default() -> Self {
+        VerboseMode::None
+    }
+}
+
+impl From<bool> for VerboseMode {
+    fn from(verbose: bool) -> Self {
+        if verbose {
+            VerboseMode::Simple
+        } else {
+            VerboseMode::None
+        }
+    }
+}
+
 #[cfg_attr(
     feature = "bincode",
     derive(bincode_trait_derive::Encode),
@@ -310,7 +336,7 @@ pub struct OptimizationSettings {
     pub max_horner_scheme_variables: usize,
     pub max_common_pair_cache_entries: usize,
     pub max_common_pair_distance: usize,
-    pub verbose: bool,
+    pub verbose: VerboseMode,
 }
 
 #[cfg(feature = "bincode")]
@@ -368,6 +394,26 @@ impl std::fmt::Debug for OptimizationSettings {
     }
 }
 
+impl OptimizationSettings {
+    pub fn is_verbose(&self) -> bool {
+        self.verbose != VerboseMode::None
+    }
+
+    pub fn is_progress(&self) -> bool {
+        self.verbose == VerboseMode::Progress
+    }
+
+    pub fn verbose(mut self) -> Self {
+        self.verbose = VerboseMode::Simple;
+        self
+    }
+
+    pub fn progress(mut self) -> Self {
+        self.verbose = VerboseMode::Progress;
+        self
+    }
+}
+
 impl Default for OptimizationSettings {
     fn default() -> Self {
         OptimizationSettings {
@@ -380,7 +426,7 @@ impl Default for OptimizationSettings {
             max_horner_scheme_variables: 500,
             max_common_pair_cache_entries: 1_000_000,
             max_common_pair_distance: 1000,
-            verbose: false,
+            verbose: VerboseMode::None,
         }
     }
 }
@@ -6202,19 +6248,39 @@ impl<T: Clone + Default + PartialEq> EvalTree<T> {
             settings: settings.clone(),
         };
 
-        for _ in 0..settings.cpe_iterations.unwrap_or(usize::MAX) {
+        let cpe_start_time = if settings.is_progress() {
+            Some(Instant::now())
+        } else {
+            None
+        };
+
+        for cpe_iteration in 0..settings.cpe_iterations.unwrap_or(usize::MAX) {
             let r = e.remove_common_pairs();
             if r == 0 || e.settings.abort_level > 0 {
                 e.settings.abort_level = 0;
                 break;
             }
 
-            if settings.verbose {
+            if settings.is_verbose() {
                 let (add_count, mul_count) = e.count_operations();
-                info!(
-                    "Removed {} common pairs: {} + and {} ×",
-                    r, add_count, mul_count
-                );
+                if settings.is_progress() {
+                    let elapsed = cpe_start_time.unwrap().elapsed();
+                    info!(
+                        "[CPE] Iteration {}: Removed {} common pairs | Ops: {} + and {} × | Cache limit: {} | Max distance: {} | Time: {:.2}s",
+                        cpe_iteration + 1,
+                        r,
+                        add_count,
+                        mul_count,
+                        settings.max_common_pair_cache_entries,
+                        settings.max_common_pair_distance,
+                        elapsed.as_secs_f64()
+                    );
+                } else {
+                    info!(
+                        "Removed {} common pairs: {} + and {} ×",
+                        r, add_count, mul_count
+                    );
+                }
             }
         }
 
@@ -6643,12 +6709,21 @@ impl EvalTree<Complex<Rational>> {
             v.truncate(settings.max_horner_scheme_variables);
             let v = v.into_iter().map(|(k, _)| k).collect::<Vec<_>>();
 
-            if settings.verbose {
-                info!(
-                    "Optimizing Horner scheme for function {} with {} variables",
-                    name,
-                    v.len()
-                );
+            if settings.is_verbose() {
+                if settings.is_progress() {
+                    info!(
+                        "[Horner] Optimizing scheme for function {} | Variables: {} | Max vars: {}",
+                        name,
+                        v.len(),
+                        settings.max_horner_scheme_variables
+                    );
+                } else {
+                    info!(
+                        "Optimizing Horner scheme for function {} with {} variables",
+                        name,
+                        v.len()
+                    );
+                }
             }
 
             let scheme = Expression::optimize_horner_scheme_multiple(&e.tree, &v, settings);
@@ -7055,11 +7130,27 @@ impl Expression<Complex<Rational>> {
             best_ops = (best_ops.0 + ops.0, best_ops.1 + ops.1);
         }
 
-        if settings.verbose {
-            info!(
-                "Initial ops: {} additions and {} multiplications",
-                best_ops.0, best_ops.1
-            );
+        let horner_start_time = Arc::new(if settings.is_progress() {
+            Some(Instant::now())
+        } else {
+            None
+        });
+
+        if settings.is_verbose() {
+            if settings.is_progress() {
+                info!(
+                    "[Horner] Starting optimization | Initial ops: {} additions, {} multiplications | Iterations: {} | Cores: {}",
+                    best_ops.0,
+                    best_ops.1,
+                    settings.horner_iterations,
+                    settings.n_cores
+                );
+            } else {
+                info!(
+                    "Initial ops: {} additions and {} multiplications",
+                    best_ops.0, best_ops.1
+                );
+            }
         }
 
         let best_mul = Arc::new(AtomicUsize::new(best_ops.1));
@@ -7092,6 +7183,7 @@ impl Expression<Complex<Rational>> {
                 let best_scheme = best_scheme.clone();
                 let best_mul = best_mul.clone();
                 let best_add = best_add.clone();
+                let horner_start_time_clone = horner_start_time.clone();
                 let mut last_mul = usize::MAX;
                 let mut last_add = usize::MAX;
                 let abort = abort.clone();
@@ -7108,12 +7200,22 @@ impl Expression<Complex<Rational>> {
                         {
                             abort.store(true, Ordering::Relaxed);
 
-                            if settings.verbose {
-                                info!(
-                                    "Aborting Horner optimization at step {}/{}.",
-                                    j,
-                                    settings.horner_iterations / n_cores
-                                );
+                            if settings.is_verbose() {
+                                if settings.is_progress() {
+                                    info!(
+                                        "[Horner] Abort requested at iteration {}/{} | Best: {} +, {} ×",
+                                        j,
+                                        settings.horner_iterations / n_cores,
+                                        best_add.load(Ordering::Relaxed),
+                                        best_mul.load(Ordering::Relaxed)
+                                    );
+                                } else {
+                                    info!(
+                                        "Aborting Horner optimization at step {}/{}.",
+                                        j,
+                                        settings.horner_iterations / n_cores
+                                    );
+                                }
                             }
 
                             return;
@@ -7155,14 +7257,26 @@ impl Expression<Complex<Rational>> {
 
                         // prefer fewer multiplications
                         if cur_ops.1 <= last_mul || cur_ops.1 == last_mul && cur_ops.0 <= last_add {
-                            if settings.verbose {
-                                info!(
-                                    "Accept move at step {}/{}: {} + and {} ×",
-                                    j,
-                                    settings.horner_iterations / n_cores,
-                                    cur_ops.0,
-                                    cur_ops.1
-                                );
+                            if settings.is_verbose() {
+                                if settings.is_progress() {
+                                    let elapsed = horner_start_time_clone.as_ref().unwrap().elapsed();
+                                    info!(
+                                        "[Horner] Step {}/{} | Accepted: {} +, {} × | Time: {:.2}s",
+                                        j,
+                                        settings.horner_iterations / n_cores,
+                                        cur_ops.0,
+                                        cur_ops.1,
+                                        elapsed.as_secs_f64()
+                                    );
+                                } else {
+                                    info!(
+                                        "Accept move at step {}/{}: {} + and {} ×",
+                                        j,
+                                        settings.horner_iterations / n_cores,
+                                        cur_ops.0,
+                                        cur_ops.1
+                                    );
+                                }
                             }
 
                             last_add = cur_ops.0;
@@ -7209,12 +7323,22 @@ impl Expression<Complex<Rational>> {
             }
         });
 
-        if settings.verbose {
-            info!(
-                "Final scheme: {} + and {} ×",
-                best_add.load(Ordering::Relaxed),
-                best_mul.load(Ordering::Relaxed)
-            );
+        if settings.is_verbose() {
+            if settings.is_progress() {
+                let elapsed = horner_start_time.as_ref().unwrap().elapsed();
+                info!(
+                    "[Horner] Optimization complete | Final: {} + and {} × | Total time: {:.2}s",
+                    best_add.load(Ordering::Relaxed),
+                    best_mul.load(Ordering::Relaxed),
+                    elapsed.as_secs_f64()
+                );
+            } else {
+                info!(
+                    "Final scheme: {} + and {} ×",
+                    best_add.load(Ordering::Relaxed),
+                    best_mul.load(Ordering::Relaxed)
+                );
+            }
         }
 
         Arc::try_unwrap(best_scheme).unwrap().into_inner().unwrap()

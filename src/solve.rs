@@ -78,7 +78,7 @@ impl AtomView<'_> {
                 cpe_iterations: None,
                 hot_start: None,
                 abort_check: None,
-                verbose: false,
+                verbose: false.into(),
                 ..Default::default()
             });
         let df = self
@@ -90,7 +90,7 @@ impl AtomView<'_> {
                 cpe_iterations: None,
                 hot_start: None,
                 abort_check: None,
-                verbose: false,
+                verbose: false.into(),
                 ..Default::default()
             });
 
@@ -177,7 +177,7 @@ impl AtomView<'_> {
                         cpe_iterations: None,
                         hot_start: None,
                         abort_check: None,
-                        verbose: false,
+                        verbose: false.into(),
                         ..Default::default()
                     })
                     .map_coeff(&|x| init[0].from_rational(x.to_real().unwrap())))
@@ -198,7 +198,7 @@ impl AtomView<'_> {
                         cpe_iterations: None,
                         hot_start: None,
                         abort_check: None,
-                        verbose: false,
+                        verbose: false.into(),
                         ..Default::default()
                     })
                     .map_coeff(&|x| init[0].from_rational(x.to_real().unwrap()));
