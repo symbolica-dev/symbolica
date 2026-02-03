@@ -33,6 +33,7 @@ use crate::{
         rational::{Q, Rational},
     },
     printer::{PrintOptions, PrintState},
+    tensors::sparse::SparseMatrix,
 };
 
 /// An n-dimensional vector.
@@ -955,6 +956,32 @@ impl<F: Ring> Matrix<F> {
             data: self.data,
             field: self.field,
         }
+    }
+
+    /// Convert the matrix into a sparse matrix in CSR format.
+    pub fn to_sparse(&self) -> SparseMatrix<F> {
+        let mut values = vec![];
+        let mut col_idcs = vec![];
+        let mut row_idcs = vec![0];
+
+        for row in self.row_iter() {
+            for (col, val) in row.iter().enumerate() {
+                if !self.field.is_zero(val) {
+                    values.push(val.clone());
+                    col_idcs.push(col as u32);
+                }
+            }
+            row_idcs.push(values.len());
+        }
+
+        SparseMatrix::from_csr(
+            self.nrows,
+            self.ncols,
+            values,
+            row_idcs,
+            col_idcs,
+            self.field.clone(),
+        )
     }
 
     /// Augment the matrix with another matrix, e.g. create `[A B]` from matrix `A` and `B`.

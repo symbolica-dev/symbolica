@@ -1923,7 +1923,12 @@ impl Float {
     }
 
     pub fn serialize(&self) -> Vec<u8> {
-        self.0.to_string_radix(16, None).into_bytes()
+        if self.0 == 0 {
+            // serialize 0 and -0 as '0'
+            vec![48]
+        } else {
+            self.0.to_string_radix(16, None).into_bytes()
+        }
     }
 
     pub fn deserialize(d: &[u8], prec: u32) -> Float {
@@ -3441,12 +3446,14 @@ impl<T: Constructible> Constructible for Complex<T> {
     }
 }
 
-impl<T: FloatLike> Complex<T> {
+impl<T> Complex<T> {
     #[inline]
     pub const fn new(re: T, im: T) -> Complex<T> {
         Complex { re, im }
     }
+}
 
+impl<T: FloatLike> Complex<T> {
     #[inline]
     pub fn new_zero() -> Self
     where
@@ -4271,6 +4278,62 @@ impl<'a, T: FloatLike + From<&'a Rational>> From<&'a Rational> for Complex<T> {
     }
 }
 
+impl Add<&Complex<Integer>> for &Complex<Integer> {
+    type Output = Complex<Integer>;
+
+    fn add(self, rhs: &Complex<Integer>) -> Self::Output {
+        Complex::new(&self.re + &rhs.re, &self.im + &rhs.im)
+    }
+}
+
+impl Sub<&Complex<Integer>> for &Complex<Integer> {
+    type Output = Complex<Integer>;
+
+    fn sub(self, rhs: &Complex<Integer>) -> Self::Output {
+        Complex::new(&self.re - &rhs.re, &self.im - &rhs.im)
+    }
+}
+
+impl Mul<&Complex<Integer>> for &Complex<Integer> {
+    type Output = Complex<Integer>;
+
+    fn mul(self, rhs: &Complex<Integer>) -> Self::Output {
+        Complex::new(
+            &self.re * &rhs.re - &self.im * &rhs.im,
+            &self.re * &rhs.im + &self.im * &rhs.re,
+        )
+    }
+}
+
+impl Div<&Complex<Integer>> for &Complex<Integer> {
+    type Output = Complex<Integer>;
+
+    fn div(self, rhs: &Complex<Integer>) -> Self::Output {
+        let n = &rhs.re * &rhs.re + &rhs.im * &rhs.im;
+        let re = &self.re * &rhs.re + &self.im * &rhs.im;
+        let im = &self.im * &rhs.re - &self.re * &rhs.im;
+        Complex::new(&re / &n, &im / &n)
+    }
+}
+
+impl Complex<Integer> {
+    pub fn gcd(mut self, mut other: Self) -> Self {
+        if self.re.is_zero() && self.im.is_zero() {
+            return other.clone();
+        }
+        if other.re.is_zero() && other.im.is_zero() {
+            return self.clone();
+        }
+
+        while !other.re.is_zero() || !other.im.is_zero() {
+            let q = &self / &other;
+            let r = &self - &(&q * &other);
+            (self, other) = (other, r);
+        }
+        self
+    }
+}
+
 impl Complex<Rational> {
     pub fn gcd(&self, other: &Self) -> Self {
         if self.is_zero() {
@@ -4280,10 +4343,30 @@ impl Complex<Rational> {
             return self.clone();
         }
 
-        let gcd_re = self.re.gcd(&other.re);
-        let gcd_im = self.im.gcd(&other.im);
+        let scaling = Rational::from(
+            self.re
+                .denominator_ref()
+                .lcm(&other.re.denominator_ref())
+                .lcm(&self.im.denominator_ref())
+                .lcm(other.im.denominator_ref()),
+        );
 
-        Complex::new(gcd_re, gcd_im)
+        let c1_i = Complex {
+            re: (&self.re * &scaling).numerator(),
+            im: (&self.im * &scaling).numerator(),
+        };
+
+        let c2_i = Complex {
+            re: (&other.re * &scaling).numerator(),
+            im: (&other.im * &scaling).numerator(),
+        };
+
+        let gcd = c1_i.gcd(c2_i);
+
+        Complex {
+            re: Rational::from(gcd.re) / &scaling,
+            im: Rational::from(gcd.im) / &scaling,
+        }
     }
 }
 
@@ -4651,5 +4734,12 @@ mod test {
             .unwrap()
             .0;
         assert_eq!(a, b);
+    }
+
+    #[test]
+    fn complex_gcd() {
+        let gcd = Complex::new(Rational::new(3, 2), Rational::new(1, 2))
+            .gcd(&Complex::new(Rational::new(1, 1), Rational::new(-1, 1)));
+        assert_eq!(gcd, Complex::new((1, 2).into(), (-1, 2).into()));
     }
 }
