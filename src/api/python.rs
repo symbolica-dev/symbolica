@@ -15607,7 +15607,8 @@ impl PythonExpressionEvaluator {
         &self,
         py: Python<'py>,
     ) -> PyResult<(Vec<Bound<'py, PyTuple>>, usize, Vec<PythonExpression>)> {
-        let (instr, max, consts) = self.eval_rat.export_instructions();
+        let (_, _, consts) = self.eval_rat.export_instructions();
+        let (instr, max, _) = self.eval_complex.export_instructions();
 
         fn slot_to_object(slot: &Slot) -> (&str, usize) {
             match slot {
