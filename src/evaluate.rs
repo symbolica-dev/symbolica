@@ -6738,6 +6738,62 @@ impl Expression<Complex<Rational>> {
             return self.apply_horner_scheme(&scheme[1..]);
         };
 
+        // extract GCD and phase of integer coefficients
+        // keep rational coefficients untouched to avoid numerical precision issues
+        let mut gcd = Complex::new(Rational::zero(), Rational::zero());
+        for x in &*a {
+            let mut num = None;
+
+            if let Expression::Mul(m) = x {
+                for y in m {
+                    if let Expression::Const(c) = y
+                        && c.re.is_integer()
+                        && c.im.is_integer()
+                    {
+                        num = Some(c);
+                    }
+                }
+            } else if let Expression::Const(c) = x
+                && c.re.is_integer()
+                && c.im.is_integer()
+            {
+                num = Some(c);
+            }
+
+            if let Some(n) = num {
+                if n.im.is_zero() && gcd.im.is_zero() {
+                    gcd = Complex::new(gcd.re.gcd(&n.re), Rational::zero());
+                } else if n.re.is_zero() && gcd.re.is_zero() {
+                    gcd = Complex::new(Rational::zero(), gcd.im.gcd(&n.im));
+                } else {
+                    gcd = Complex::new_one();
+                }
+            } else {
+                gcd = Complex::new_one();
+            }
+        }
+
+        if !gcd.is_zero() && !gcd.is_one() {
+            for x in &mut *a {
+                match x {
+                    Expression::Mul(m) => {
+                        for y in m {
+                            if let Expression::Const(c) = y {
+                                *c /= &gcd;
+                                break;
+                            }
+                        }
+                    }
+                    Expression::Const(c) => {
+                        *c /= &gcd;
+                    }
+                    _ => {
+                        unreachable!()
+                    }
+                }
+            }
+        }
+
         let mut contains = vec![];
         let mut rest = vec![];
 
@@ -6830,14 +6886,24 @@ impl Expression<Complex<Rational>> {
         v.retain(|x| *x != Expression::Const(Rational::one().into()));
         v.sort();
 
-        let c = if v.len() == 1 {
+        let mut c = if v.len() == 1 {
             v.pop().unwrap()
         } else {
             Expression::Mul(v)
         };
 
         if rest.is_empty() {
-            *self = c;
+            if !gcd.is_zero() && !gcd.is_one() {
+                if let Expression::Mul(v) = &mut c {
+                    v.push(Expression::Const(gcd));
+                    v.sort();
+                    *self = c;
+                } else {
+                    *self = Expression::Mul(vec![Expression::Const(gcd), c]);
+                }
+            } else {
+                *self = c;
+            }
         } else {
             let mut r = if rest.len() == 1 {
                 rest.pop().unwrap()
@@ -6857,6 +6923,13 @@ impl Expression<Complex<Rational>> {
             }
 
             a.sort();
+
+            if !gcd.is_zero() && !gcd.is_one() {
+                *self = Expression::Mul(vec![
+                    Expression::Const(gcd),
+                    Expression::Add(std::mem::take(a)),
+                ]);
+            }
         }
     }
 
