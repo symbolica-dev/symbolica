@@ -2,7 +2,7 @@
 name = "numerica"
 authors = ["Ben Ruijl <ben@symbolica.io>"]
 keywords = ["algebra", "mathematics", "integer", "float", "rational"]
-version = "1.1.0"
+version = "1.2.0"
 edition = "2024"
 license = "MIT"
 description = "Open-source math library for exact and floating point computations"
@@ -35,3 +35,5 @@ bincode-trait-derive = { version = "0.1.0", optional = true }
 pyo3-stub-gen = { version = "0.17", default-features = false, features = [
     "numpy",
 ], optional = true }
+itertools = "0.14.0"
+rayon = "1.11"
