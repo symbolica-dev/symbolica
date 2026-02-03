@@ -4249,12 +4249,13 @@ extern "C" {{
 
                     match asm_flavour {
                         InlineASM::X64 => {
-                            *out += "\t\t\"xorpd %%xmm0, %%xmm0\\n\\t\"\n";
+                            let (addr, _) = asm_load!(a[0]);
+                            *out += &format!("\t\t\"movupd {addr}, %%xmm0\\n\\t\"\n");
 
-                            // TODO: try loading in multiple registers for better instruction-level parallelism?
-                            for i in a {
+                            for i in &a[1..] {
                                 let (addr, _) = asm_load!(*i);
-                                *out += &format!("\t\t\"addpd {addr}, %%xmm0\\n\\t\"\n");
+                                *out += &format!("\t\t\"movupd {addr}, %%xmm1\\n\\t\"\n");
+                                *out += &format!("\t\t\"addpd %%xmm1, %%xmm0\\n\\t\"\n");
                             }
                             let (addr, _) = asm_load!(*o);
                             *out += &format!("\t\t\"movupd %%xmm0, {addr}\\n\\t\"\n");
