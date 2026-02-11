@@ -26,8 +26,8 @@ use pyo3::{
     pyclass::CompareOp,
     pyfunction, pymethods,
     types::{
-        PyAnyMethods, PyBytes, PyComplex, PyDict, PyInt, PyModule, PyNone, PyTuple, PyTupleMethods,
-        PyType, PyTypeMethods,
+        PyAnyMethods, PyBytes, PyComplex, PyDict, PyInt, PyIterator, PyModule, PyNone, PyTuple,
+        PyTupleMethods, PyType, PyTypeMethods,
     },
     wrap_pyfunction,
 };
@@ -8219,6 +8219,32 @@ pub struct PythonSeries {
 #[cfg_attr(not(feature = "python_stubgen"), remove_gen_stub)]
 #[pymethods]
 impl PythonSeries {
+    /// Get the coefficient of the `exp`th power of the expansion variable.
+    pub fn __getitem__(&self, exp: ConvertibleToExpression) -> PyResult<PythonExpression> {
+        self.get_coefficient(exp)
+    }
+
+    /// Get the coefficient of the term with exponent `exp`. Alternatively, use `series[exp]`.
+    pub fn get_coefficient(&self, exp: ConvertibleToExpression) -> PyResult<PythonExpression> {
+        let idx = exp.to_expression().expr;
+        let r: Rational = idx
+            .try_into()
+            .map_err(|e| exceptions::PyTypeError::new_err(e))?;
+
+        Ok(self.series.coefficient(r).into())
+    }
+
+    /// Iterate over the terms of the series, yielding pairs of exponent and coefficient.
+    #[gen_stub(override_return_type(type_repr = "typing.Iterator[tuple[Expression, Expression]]"))]
+    pub fn __iter__<'py>(&self, py: Python<'py>) -> PyResult<Bound<'py, PyIterator>> {
+        let v: Vec<(PythonExpression, PythonExpression)> = (&self.series)
+            .into_iter()
+            .map(|(c, a)| (Atom::num(c).into(), a.clone().into()))
+            .collect();
+
+        v.into_pyobject(py)?.try_iter()
+    }
+
     /// Add this series to `rhs`, returning the result.
     pub fn __add__(&self, rhs: SeriesOrExpression) -> PyResult<Self> {
         match rhs {

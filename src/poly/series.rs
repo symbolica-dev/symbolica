@@ -233,8 +233,12 @@ impl<F: Ring> Series<F> {
     // Map an index in the coefficient array to its power.
     #[inline]
     fn get_exponent(&self, index: usize) -> Rational {
-        (Rational::from(index as i64) + Rational::from(self.shift as i64))
-            / Rational::from(self.ramification as i64)
+        Self::get_exponent_from_shift_ram(index, self.shift, self.ramification)
+    }
+
+    /// Map an index in the coefficient array to its power, given a shift and ramification.
+    fn get_exponent_from_shift_ram(index: usize, shift: isize, ram: usize) -> Rational {
+        (Rational::from(index as i64) + Rational::from(shift as i64)) / Rational::from(ram as i64)
     }
 
     // Map a power to an index in the coefficient array.
@@ -540,6 +544,42 @@ impl<F: Ring> Series<F> {
 
         s.truncate();
         s
+    }
+}
+
+impl<'a, R: Ring> IntoIterator for Series<R> {
+    type Item = (Rational, R::Element);
+    type IntoIter = std::vec::IntoIter<(Rational, R::Element)>;
+
+    /// Create an iterator over the terms of the series, yielding the exponent and its coefficient.
+    fn into_iter(self) -> Self::IntoIter {
+        let shift = self.shift;
+        let ram = self.ramification;
+        let v: Vec<_> = self
+            .coefficients
+            .into_iter()
+            .enumerate()
+            .map(|(i, c)| (Self::get_exponent_from_shift_ram(i, shift, ram), c))
+            .collect();
+
+        v.into_iter()
+    }
+}
+
+impl<'a, R: Ring> IntoIterator for &'a Series<R> {
+    type Item = (Rational, &'a R::Element);
+    type IntoIter = std::vec::IntoIter<(Rational, &'a R::Element)>;
+
+    /// Create an iterator over the terms of the series, yielding the exponent and its coefficient.
+    fn into_iter(self) -> Self::IntoIter {
+        let v: Vec<_> = self
+            .coefficients
+            .iter()
+            .enumerate()
+            .map(|(i, c)| (self.get_exponent(i), c))
+            .collect();
+
+        v.into_iter()
     }
 }
 

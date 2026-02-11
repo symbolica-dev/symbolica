@@ -3237,6 +3237,15 @@ class Series:
     >>> print(s)
     """
 
+    def __getitem__(self, expr: Expression | int) -> Expression:
+        """Get the coefficient of the term with exponent `exp`"""
+
+    def get_coefficient(self, exp:  Expression | int) -> Expression:
+        """Get the coefficient of the term with exponent `exp`.  Alternatively, use `series[exp]`."""
+
+    def __iter__(self) -> Iterator[Tuple[Expression, Expression]]:
+        """Iterate over the terms of the series, yielding pairs of exponent and coefficient."""
+
     def __str__(self) -> str:
         """Print the series in a human-readable format."""
 
