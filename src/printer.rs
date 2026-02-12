@@ -75,6 +75,25 @@ impl<'a> AtomPrinter<'a> {
     pub fn new_with_options(atom: AtomView<'a>, print_opts: PrintOptions) -> AtomPrinter<'a> {
         AtomPrinter { atom, print_opts }
     }
+
+    fn format_bracket<W: std::fmt::Write>(
+        bracket: char,
+        f: &mut W,
+        opts: &PrintOptions,
+        print_state: PrintState,
+    ) -> fmt::Result {
+        if let Some(bracket_colors) = opts.bracket_level_colors {
+            f.write_fmt(format_args!(
+                "{}",
+                bracket
+                    .encode_utf8(&mut [0; 4])
+                    .ansi_color(bracket_colors[print_state.bracket_level.min(15) as usize])
+            ))?;
+        } else {
+            f.write_char(bracket)?;
+        }
+        Ok(())
+    }
 }
 
 impl fmt::Display for AtomPrinter<'_> {
@@ -597,7 +616,7 @@ impl FormattedPrintNum for NumView<'_> {
                     || print_state.in_exp && (!real.is_integer() || !imag.is_zero());
 
             if need_paren {
-                f.write_char('(')?;
+                AtomPrinter::format_bracket('(', f, opts, print_state)?;
             }
 
             if !opts.mode.is_latex()
@@ -699,7 +718,7 @@ impl FormattedPrintNum for NumView<'_> {
             }
 
             if need_paren {
-                f.write_char(')')?;
+                AtomPrinter::format_bracket(')', f, opts, print_state)?;
             }
 
             Ok(false)
@@ -808,9 +827,10 @@ impl FormattedPrintMul for MulView<'_> {
                 f.write_char('+')?;
             }
 
-            f.write_char('(')?;
+            AtomPrinter::format_bracket('(', f, opts, print_state)?;
             print_state.in_exp = false;
             print_state.in_exp_base = false;
+            print_state.bracket_level += 1;
         }
 
         print_state.in_product = true;
@@ -852,7 +872,8 @@ impl FormattedPrintMul for MulView<'_> {
         }
 
         if add_paren {
-            f.write_char(')')?;
+            print_state.bracket_level -= 1;
+            AtomPrinter::format_bracket(')', f, opts, print_state)?;
         }
         Ok(false)
     }
@@ -886,13 +907,27 @@ impl FormattedPrintFn for FunView<'_> {
 
         id.format(opts, f)?;
 
+        if print_state.bracket_level == 0 {
+            // the first level is only for top level products
+            print_state.bracket_level = 1;
+        }
+
+        #[allow(deprecated)]
+        let brackets = if opts.square_brackets_for_function {
+            ('[', ']')
+        } else {
+            opts.function_brackets
+        };
+
         if opts.mode.is_latex() {
             f.write_str("\\!\\left(")?;
-        } else if opts.square_brackets_for_function || opts.mode.is_mathematica() {
+        } else if opts.mode.is_mathematica() {
             f.write_char('[')?;
         } else {
-            f.write_char('(')?;
+            AtomPrinter::format_bracket(brackets.0, f, opts, print_state)?;
         }
+
+        print_state.bracket_level += 1;
 
         print_state.top_level_add_child = false;
         print_state.level += 1;
@@ -942,12 +977,13 @@ impl FormattedPrintFn for FunView<'_> {
             x.format(f, opts, print_state)?;
         }
 
+        print_state.bracket_level -= 1;
         if opts.mode.is_latex() {
             f.write_str("\\right)")?;
-        } else if opts.square_brackets_for_function || opts.mode.is_mathematica() {
+        } else if opts.mode.is_mathematica() {
             f.write_char(']')?;
         } else {
-            f.write_char(')')?;
+            AtomPrinter::format_bracket(brackets.1, f, opts, print_state)?;
         }
 
         Ok(false)
@@ -978,9 +1014,10 @@ impl FormattedPrintPow for PowView<'_> {
 
         let add_paren = print_state.in_exp_base; // right associative
         if add_paren {
-            f.write_char('(')?;
+            AtomPrinter::format_bracket('(', f, opts, print_state)?;
             print_state.in_exp = false;
             print_state.in_exp_base = false;
+            print_state.bracket_level += 1;
         }
 
         let b = self.get_base();
@@ -1042,7 +1079,8 @@ impl FormattedPrintPow for PowView<'_> {
         }
 
         if add_paren {
-            f.write_char(')')?;
+            print_state.bracket_level -= 1;
+            AtomPrinter::format_bracket(')', f, opts, print_state)?;
         }
 
         Ok(false)
@@ -1086,8 +1124,10 @@ impl FormattedPrintAdd for AddView<'_> {
             if opts.mode.is_latex() {
                 f.write_str("\\left(")?;
             } else {
-                f.write_char('(')?;
+                AtomPrinter::format_bracket('(', f, opts, print_state)?;
             }
+
+            print_state.bracket_level += 1;
         }
 
         let mut count = 0;
@@ -1124,10 +1164,11 @@ impl FormattedPrintAdd for AddView<'_> {
         }
 
         if add_paren {
+            print_state.bracket_level -= 1;
             if opts.mode.is_latex() {
                 f.write_str("\\right)")?;
             } else {
-                f.write_char(')')?;
+                AtomPrinter::format_bracket(')', f, opts, print_state)?;
             }
         }
         Ok(false)
@@ -1157,7 +1198,7 @@ mod test {
         if ShouldColorize::from_env().should_colorize() {
             assert_eq!(
                 format!("{}", a.printer(PrintOptions::short())),
-                "3\u{1b}[33m+\u{1b}[0m1/5*f(x,y^2)^(x+z)"
+                "3\u{1b}[33m+\u{1b}[0m1/5*f\u{1b}[38;5;25m(\u{1b}[0mx,y^2\u{1b}[38;5;25m)\u{1b}[0m^\u{1b}[38;5;244m(\u{1b}[0mx+z\u{1b}[38;5;244m)\u{1b}[0m"
             );
         } else {
             assert_eq!(
