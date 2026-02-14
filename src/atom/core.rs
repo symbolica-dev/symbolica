@@ -410,16 +410,20 @@ pub trait AtomCore: private::Sealed {
             .expand_via_poly::<E>(var.into().as_ref().map(|x| x.as_atom_view()))
     }
 
-    /// Expand an expression in the variable `var`. The function [AtomCore::expand_via_poly] may be faster.
+    /// Expand an expression in the variable or function `var`.
+    /// If it is a variable, any function with that variable name is also expanded in.
+    /// To expand in multiple functions at the same time, wrap them in a function with the same symbol first,
+    /// using a match and replace, and then expand in that function.
+    ///
+    /// The function [AtomCore::expand_via_poly] may be faster.
     ///
     /// # Example
     ///
     /// ```
     /// use symbolica::{atom::AtomCore, parse};
-    /// let expr = parse!("(x + 1)^2");
-    /// let x = parse!("x");
-    /// let expanded = expr.expand_in(x);
-    /// let r = parse!("x^2 + 2 * x + 1");
+    /// let expr = parse!("(1+x)*(1+y)^2");
+    /// let expanded = expr.expand_in(parse!("x"));
+    /// let r = parse!("(1+y)^2 + (1+y)^2*x");
     /// assert_eq!(expanded, r);
     /// ```
     fn expand_in<'a, T: Into<AtomOrView<'a>>>(&self, var: T) -> Atom {
@@ -432,11 +436,15 @@ pub trait AtomCore: private::Sealed {
     ///
     /// ```
     /// use symbolica::{atom::{Atom, AtomCore}, parse, symbol};
-    /// let expr = parse!("(x + 1)^2");
+    /// let expr = parse!("(1+x)*(1+y)^2");
     /// let expanded = expr.expand_in_symbol(symbol!("x"));
-    /// let r = parse!("x^2 + 2 * x + 1");
+    /// let r = parse!("(1+y)^2 + (1+y)^2*x");
     /// assert_eq!(expanded, r);
     /// ```
+    #[deprecated(
+        since = "1.4.0",
+        note = "Use `expand_in` instead, which can expand in both variables and functions."
+    )]
     fn expand_in_symbol(&self, var: Symbol) -> Atom {
         self.as_atom_view()
             .expand_in(InlineVar::from(var).as_view())

@@ -174,7 +174,7 @@ impl AtomView<'_> {
     /// Expand an expression, but do not normalize the result.
     fn expand_no_norm(&self, workspace: &Workspace, var: Option<AtomView>, out: &mut Atom) -> bool {
         if let Some(s) = var
-            && !self.contains(s)
+            && !self.contains_literally_or_as_symbol(s)
         {
             out.set_from_view(self);
             return false;
@@ -207,9 +207,28 @@ impl AtomView<'_> {
 
                 if let AtomView::Add(a) = new_base.as_view() {
                     // expand (a+b+c+..)^n
+                    let mut rest_buffer = workspace.new_atom();
                     let mut args: SmallVec<[AtomView; 10]> = SmallVec::with_capacity(a.get_nargs());
+                    let mut rest_args: SmallVec<[AtomView; 10]> = SmallVec::new();
                     for arg in a {
-                        args.push(arg);
+                        if let Some(s) = var
+                            && !arg.contains_literally_or_as_symbol(s)
+                        {
+                            rest_args.push(arg);
+                        } else {
+                            args.push(arg);
+                        }
+                    }
+
+                    if rest_args.len() == 1 {
+                        args.push(rest_args[0]);
+                    } else if rest_args.len() > 1 {
+                        let add = rest_buffer.to_add();
+                        for arg in rest_args {
+                            add.extend(arg);
+                        }
+                        add.set_normalized(true); // ordered subset of terms is normalized
+                        args.push(rest_buffer.as_view());
                     }
 
                     let mut add_h = workspace.new_atom();
@@ -312,8 +331,18 @@ impl AtomView<'_> {
                     let mut new_arg = workspace.new_atom();
                     changed |= arg.expand_with_ws_into(workspace, var, &mut new_arg);
 
+                    let contains_var = if let Some(s) = var
+                        && !new_arg.as_view().contains_literally_or_as_symbol(s)
+                    {
+                        false
+                    } else {
+                        true
+                    };
+
                     // expand (1+x)*y
-                    if let AtomView::Add(a) = new_arg.as_view() {
+                    if let AtomView::Add(a) = new_arg.as_view()
+                        && contains_var
+                    {
                         changed = true;
 
                         for child in a {
@@ -576,14 +605,14 @@ mod test {
 
     #[test]
     fn expand_in_var() {
-        let exp = parse!("(1+v1)^2+(1+v2)^100").expand_in_symbol(symbol!("v1"));
+        let exp = parse!("(1+v1)^2+(1+v2)^100").expand_in(symbol!("v1"));
         let res = parse!("1+2*v1+v1^2+(v2+1)^100");
         assert_eq!(exp, res);
     }
 
     #[test]
     fn expand_with_poly() {
-        let exp = parse!("(1+v1)^2+(1+v2)^100").expand_in_symbol(symbol!("v1"));
+        let exp = parse!("(1+v1)^2+(1+v2)^100").expand_via_poly::<u16, _>(parse!("v1"));
         let res = parse!("1+2*v1+v1^2+(v2+1)^100");
         assert_eq!(exp, res);
     }

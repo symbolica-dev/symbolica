@@ -813,6 +813,14 @@ impl<'a> AtomView<'a> {
         }
     }
 
+    /// Returns true iff `self` contains `a` literally or contains the symbol of `a` if `a` is a variable.
+    pub(crate) fn contains_literally_or_as_symbol(&self, a: AtomView) -> bool {
+        match a {
+            AtomView::Var(v) => self.contains_symbol(v.get_symbol()),
+            _ => self.contains(a),
+        }
+    }
+
     /// Returns true iff `self` contains `a` literally.
     pub(crate) fn contains(&self, a: AtomView) -> bool {
         let mut stack = Vec::with_capacity(20);

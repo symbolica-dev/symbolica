@@ -1479,9 +1479,21 @@ class Expression:
 
     def expand(self, var: Optional[Expression] = None, via_poly: Optional[bool] = None) -> Expression:
         """
-        Expand the expression. Optionally, expand in `var` only.
+        Expand the expression. Optionally, expand in `var` only. `var` can be a variable or a function.
+        If it is a variable, any function with that variable name is also expanded in.
+        To expand in multiple functions at the same time, wrap them in a function with the same symbol first,
+        using a match and replace, and then expand in that function.
 
         Using `via_poly=True` may give a significant speedup for large expressions.
+
+        Examples
+        --------
+        >>> from symbolica import *
+        >>> x, y, f, g = S('x', 'y', 'f', 'g')
+        >>> e = (f(1) + g(2))*(f(3) + (y+1)**2)
+        >>> print(e.expand(f))
+
+        yields `f(1)*f(3)+f(3)*g(2)+(1+y)^2*f(1)+(1+y)^2*g(2)`.
         """
 
     def expand_num(self) -> Expression:
