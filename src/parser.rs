@@ -10,7 +10,6 @@ use std::{borrow::Cow, fmt::Write, str::Chars, string::String, sync::Arc};
 
 use ahash::HashMap;
 use bytes::Buf;
-use colored::{Color, Colorize, control::ShouldColorize};
 use rug::Integer as MultiPrecisionInteger;
 
 use smallvec::SmallVec;
@@ -27,6 +26,7 @@ use crate::{
         rational::Rational,
     },
     poly::{PolyVariable, PositiveExponent, polynomial::MultivariatePolynomial},
+    printer::AnsiWrap,
     state::{RecycledAtom, State, Workspace},
 };
 
@@ -1118,19 +1118,11 @@ impl Token {
         let mut caret_line = String::new();
         caret_line.push_str(&" ".repeat(num_before.saturating_sub(1)));
 
-        if ShouldColorize::from_env().should_colorize() {
-            caret_line.push_str(&"^".color(Color::Red).to_string());
-        } else {
-            caret_line.push('^');
-        }
+        caret_line.push_str(&AnsiWrap::red("^").to_string());
 
         let remaining_len = context.chars().count().saturating_sub(num_before);
         if remaining_len > 0 {
-            if ShouldColorize::from_env().should_colorize() {
-                caret_line.push_str(&"~".repeat(remaining_len).color(Color::Red).to_string());
-            } else {
-                caret_line.push_str(&"~".repeat(remaining_len));
-            }
+            caret_line.push_str(&AnsiWrap::red("~".repeat(remaining_len)).to_string());
         }
 
         format!("Error at line {line}, column {column}: {message}\n{context}\n{caret_line}\n",)

@@ -17,11 +17,10 @@ use crate::{
         Condition, Evaluate, MatchSettings, Pattern, PatternRestriction, Relation, ReplaceWith,
         Replacement,
     },
-    printer::{AtomPrinter, PrintOptions},
+    printer::{AnsiWrap, AtomPrinter, PrintOptions},
     state::{RecycledAtom, Workspace},
 };
 use ahash::HashMap;
-use colored::Colorize;
 use dyn_clone::DynClone;
 use rayon::ThreadPool;
 
@@ -142,12 +141,13 @@ impl StatsOptions {
 
         let in_nterms_s = self.format_count(in_nterms);
         let out_nterms_s = self.format_count(out_nterms);
+        let out_nterms_s_len = out_nterms_s.len();
 
         println!(
             "Stats for {}[{}]:
 \tIn  │ {:>width$} │ {:>8} │
 \tOut │ {:>width$} │ {:>8} │ ⧗ {:#.2?}",
-            self.tag.bold(),
+            AnsiWrap::new(&self.tag).bold(),
             Self::get_thread_id(),
             in_nterms_s,
             self.format_size(in_size),
@@ -157,16 +157,16 @@ impl StatsOptions {
                 if out_nterms as f64 / in_nterms as f64
                     > self.color_large_change_threshold.unwrap_or(f64::INFINITY)
                 {
-                    out_nterms_s.red()
+                    AnsiWrap::red(out_nterms_s)
                 } else {
-                    out_nterms_s.bright_magenta()
+                    AnsiWrap::bright_magenta(out_nterms_s)
                 }
             } else {
-                out_nterms_s.as_str().into()
+                AnsiWrap::new(out_nterms_s)
             },
             self.format_size(out_size),
             dt,
-            width = in_nterms_s.len().max(out_nterms_s.len()).min(6),
+            width = in_nterms_s.len().max(out_nterms_s_len).min(6),
         );
     }
 }

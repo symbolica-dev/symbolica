@@ -1,8 +1,10 @@
 //! Methods for printing atoms and polynomials.
 
-use std::fmt::{self, Error, Write};
-
-use colored::Colorize;
+use std::{
+    fmt::{self, Error, Write},
+    io::IsTerminal,
+    sync::LazyLock,
+};
 
 use crate::{
     atom::{
@@ -15,6 +17,114 @@ use crate::{
 };
 
 pub use numerica::printer::*;
+
+/// Track if Symbolica should colorize output, based on the `SYMBOLICA_COLOR` environment variable or if stdout is a terminal.
+static SHOULD_COLORIZE: LazyLock<bool> = LazyLock::new(|| {
+    std::env::var("SYMBOLICA_COLOR")
+        .map(|v| v != "0")
+        .unwrap_or_else(|_| std::io::stdout().is_terminal())
+});
+
+/// Wrap a printable object with ANSI escape codes for coloring and styling in terminal output.
+pub struct AnsiWrap<T> {
+    pub value: T,
+    pub mode: u8,
+    pub color: u8,
+}
+
+impl<T: fmt::Display> From<T> for AnsiWrap<T> {
+    fn from(value: T) -> Self {
+        AnsiWrap::new(value)
+    }
+}
+
+impl<T> AnsiWrap<T> {
+    pub const fn new(value: T) -> Self {
+        Self {
+            value,
+            mode: 0,
+            color: 0,
+        }
+    }
+
+    pub const fn red(value: T) -> Self {
+        Self::new(value).color(1)
+    }
+
+    pub const fn yellow(value: T) -> Self {
+        Self::new(value).color(3)
+    }
+
+    pub const fn purple(value: T) -> Self {
+        Self::new(value).color(5)
+    }
+
+    pub const fn cyan(value: T) -> Self {
+        Self::new(value).color(6)
+    }
+
+    pub const fn bright_magenta(value: T) -> Self {
+        Self::new(value).color(13)
+    }
+
+    pub const fn color(mut self, color: u8) -> Self {
+        self.color = color;
+        self
+    }
+
+    pub const fn bold(mut self) -> Self {
+        self.mode |= 1;
+        self
+    }
+
+    pub const fn dimmed(mut self) -> Self {
+        self.mode |= 2;
+        self
+    }
+
+    pub const fn italic(mut self) -> Self {
+        self.mode |= 4;
+        self
+    }
+
+    pub fn should_colorize() -> bool {
+        *SHOULD_COLORIZE
+    }
+
+    /// Calculate the character length after stripping ANSI escape codes, for use in alignment and formatting decisions.
+    pub fn ansi_stripped_len(a: T) -> usize
+    where
+        T: AsRef<str>,
+    {
+        let s = a.as_ref();
+        let mut in_ansi = false;
+        let mut len = 0;
+        for c in s.chars() {
+            if c == '\x1b' {
+                in_ansi = true;
+            } else if in_ansi && c == 'm' {
+                in_ansi = false;
+            } else if !in_ansi {
+                len += 1;
+            }
+        }
+        len
+    }
+}
+
+impl<T: fmt::Display> fmt::Display for AnsiWrap<T> {
+    fn fmt(&self, f: &mut fmt::Formatter) -> fmt::Result {
+        if *SHOULD_COLORIZE {
+            write!(
+                f,
+                "\u{1b}[{};38;5;{}m{}\u{1b}[0m",
+                self.mode, self.color, self.value
+            )
+        } else {
+            write!(f, "{}", self.value)
+        }
+    }
+}
 
 /// A function that takes an atom and prints it in a custom way.
 /// If the function returns `None`, the default printing is used.
@@ -85,9 +195,8 @@ impl<'a> AtomPrinter<'a> {
         if let Some(bracket_colors) = opts.bracket_level_colors {
             f.write_fmt(format_args!(
                 "{}",
-                bracket
-                    .encode_utf8(&mut [0; 4])
-                    .ansi_color(bracket_colors[print_state.bracket_level.min(15) as usize])
+                AnsiWrap::new(bracket.encode_utf8(&mut [0; 4]))
+                    .color(bracket_colors[print_state.bracket_level.min(15) as usize])
             ))?;
         } else {
             f.write_char(bracket)?;
@@ -477,7 +586,7 @@ impl FormattedPrintVar for VarView<'_> {
                 && opts.mode.is_symbolica()
                 && opts.color_top_level_sum
             {
-                f.write_fmt(format_args!("{}", "+".yellow()))?;
+                f.write_fmt(format_args!("{}", AnsiWrap::yellow("+")))?;
             } else {
                 f.write_char('+')?;
             }
@@ -559,7 +668,7 @@ impl FormattedPrintNum for NumView<'_> {
                 && opts.mode.is_symbolica()
                 && opts.color_top_level_sum
             {
-                f.write_fmt(format_args!("{}", "-".yellow()))?;
+                f.write_fmt(format_args!("{}", AnsiWrap::yellow("-")))?;
             } else if print_state.superscript {
                 f.write_char('⁻')?;
             } else {
@@ -572,7 +681,7 @@ impl FormattedPrintNum for NumView<'_> {
                 && opts.mode.is_symbolica()
                 && opts.color_top_level_sum
             {
-                f.write_fmt(format_args!("{}", "+".yellow()))?;
+                f.write_fmt(format_args!("{}", AnsiWrap::yellow("+")))?;
             } else {
                 f.write_char('+')?;
             }
@@ -848,7 +957,7 @@ impl FormattedPrintMul for MulView<'_> {
                 && opts.mode.is_symbolica()
                 && opts.color_top_level_sum
             {
-                f.write_fmt(format_args!("{}", "+".yellow()))?;
+                f.write_fmt(format_args!("{}", AnsiWrap::yellow("+")))?;
             } else {
                 f.write_char('+')?;
             }
@@ -891,7 +1000,7 @@ impl FormattedPrintFn for FunView<'_> {
                 && opts.mode.is_symbolica()
                 && opts.color_top_level_sum
             {
-                f.write_fmt(format_args!("{}", "+".yellow()))?;
+                f.write_fmt(format_args!("{}", AnsiWrap::yellow("+")))?;
             } else {
                 f.write_char('+')?;
             }
@@ -1006,7 +1115,7 @@ impl FormattedPrintPow for PowView<'_> {
                 && print_state.top_level_add_child
                 && opts.color_top_level_sum
             {
-                f.write_fmt(format_args!("{}", "+".yellow()))?;
+                f.write_fmt(format_args!("{}", AnsiWrap::yellow("+")))?;
             } else {
                 f.write_char('+')?;
             }
@@ -1110,7 +1219,7 @@ impl FormattedPrintAdd for AddView<'_> {
                     && print_state.top_level_add_child
                     && opts.color_top_level_sum
                 {
-                    f.write_fmt(format_args!("{}", "+".yellow()))?;
+                    f.write_fmt(format_args!("{}", AnsiWrap::yellow("+")))?;
                 } else {
                     f.write_char('+')?;
                 }
@@ -1157,7 +1266,7 @@ impl FormattedPrintAdd for AddView<'_> {
                 && opts.mode.is_symbolica()
                 && opts.color_top_level_sum
             {
-                f.write_fmt(format_args!("{0}...", "+".yellow()))?;
+                f.write_fmt(format_args!("{0}...", AnsiWrap::yellow("+")))?;
             } else {
                 f.write_str("+...")?;
             }
@@ -1181,13 +1290,11 @@ impl FormattedPrintAdd for AddView<'_> {
 
 #[cfg(test)]
 mod test {
-    use colored::control::ShouldColorize;
-
     use crate::{
         atom::{AtomCore, AtomView},
         domains::{SelfRing, finite_field::Zp, integer::Z},
         function, parse,
-        printer::{AtomPrinter, PrintOptions, PrintState},
+        printer::{AnsiWrap, AtomPrinter, PrintOptions, PrintState},
         symbol,
     };
 
@@ -1195,10 +1302,10 @@ mod test {
     fn atoms() {
         let a = parse!("f(x,y^2)^(x+z)/5+3");
 
-        if ShouldColorize::from_env().should_colorize() {
+        if AnsiWrap::<&str>::should_colorize() {
             assert_eq!(
                 format!("{}", a.printer(PrintOptions::short())),
-                "3\u{1b}[33m+\u{1b}[0m1/5*f\u{1b}[38;5;25m(\u{1b}[0mx,y^2\u{1b}[38;5;25m)\u{1b}[0m^\u{1b}[38;5;244m(\u{1b}[0mx+z\u{1b}[38;5;244m)\u{1b}[0m"
+                "3\u{1b}[0;38;5;3m+\u{1b}[0m1/5*f\u{1b}[0;38;5;25m(\u{1b}[0mx,y^2\u{1b}[0;38;5;25m)\u{1b}[0m^\u{1b}[0;38;5;244m(\u{1b}[0mx+z\u{1b}[0;38;5;244m)\u{1b}[0m"
             );
         } else {
             assert_eq!(

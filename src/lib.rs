@@ -48,7 +48,6 @@ use std::{
     time::{Duration, SystemTime},
 };
 
-use colored::Colorize;
 use once_cell::sync::OnceCell;
 use tinyjson::JsonValue;
 
@@ -77,6 +76,8 @@ pub mod utils;
 
 pub use graphica as graph; // re-export graphica
 pub use numerica::*; // re-export numerica
+
+use crate::printer::AnsiWrap;
 
 #[cfg(feature = "faster_alloc")]
 #[global_allocator]
@@ -275,8 +276,8 @@ impl LicenseManager {
 │                                                        │
 │ See https://symbolica.io/docs/get_started.html#license │
 └────────────────────────────────────────────────────────┘",
-                "Hobbyists".bold(),
-                "free".bold(),
+                AnsiWrap::new("Hobbyists").bold(),
+                AnsiWrap::new("free").bold(),
             );
         }
 

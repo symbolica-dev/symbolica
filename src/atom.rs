@@ -44,14 +44,13 @@ mod core;
 pub mod representation;
 
 use ahash::HashMap;
-use colored::Colorize;
 use smartstring::{LazyCompact, SmartString};
 
 use crate::{
     coefficient::Coefficient,
     domains::{float::Complex, rational::Rational},
     parser::{ParseSettings, Token},
-    printer::{AtomPrinter, PrintFunction, PrintOptions},
+    printer::{AnsiWrap, AtomPrinter, PrintFunction, PrintOptions},
     state::{RecycledAtom, State, SymbolData, Workspace},
     transformer::StatsOptions,
     utils::{BorrowedOrOwned, Settable},
@@ -1157,35 +1156,38 @@ impl Symbol {
                 && (opts.hide_namespace != Some(namespace) || opts.include_attributes)
             {
                 if opts.color_namespace && opts.mode.is_symbolica() {
-                    f.write_fmt(format_args!("{}", namespace.dimmed().italic()))?;
+                    f.write_fmt(format_args!(
+                        "{}",
+                        AnsiWrap::new(namespace).dimmed().italic()
+                    ))?;
 
                     if opts.include_attributes {
-                        f.write_fmt(format_args!("{}", "::{".dimmed()))?;
+                        f.write_fmt(format_args!("{}", AnsiWrap::new("::{").dimmed()))?;
                         let mut first = true;
                         for (x, t) in self.get_attributes_tuple_str() {
                             if t {
                                 if !first {
-                                    f.write_fmt(format_args!("{}", ",".dimmed()))?;
+                                    f.write_fmt(format_args!("{}", AnsiWrap::new(",").dimmed()))?;
                                 }
                                 first = false;
-                                f.write_fmt(format_args!("{}", x.dimmed()))?;
+                                f.write_fmt(format_args!("{}", AnsiWrap::new(x).dimmed()))?;
                             }
                         }
 
                         if !self.get_tags().is_empty() {
                             for tag in self.get_tags() {
                                 if !first {
-                                    f.write_fmt(format_args!("{}", ",".dimmed()))?;
+                                    f.write_fmt(format_args!("{}", AnsiWrap::new(",").dimmed()))?;
                                 }
                                 first = false;
-                                f.write_fmt(format_args!("{}", tag.dimmed()))?;
+                                f.write_fmt(format_args!("{}", AnsiWrap::new(tag).dimmed()))?;
                             }
                         }
 
-                        f.write_fmt(format_args!("{}", "}".dimmed()))?;
+                        f.write_fmt(format_args!("{}", AnsiWrap::new("}").dimmed()))?;
                     }
 
-                    f.write_fmt(format_args!("{}", "::".dimmed()))?;
+                    f.write_fmt(format_args!("{}", AnsiWrap::new("::").dimmed()))?;
                 } else {
                     if opts.mode.is_mathematica() {
                         for part in namespace.split("::") {
@@ -1234,12 +1236,12 @@ impl Symbol {
             }
 
             if opts.mode.is_symbolica() && opts.color_builtin_symbols && name.ends_with('_') {
-                f.write_fmt(format_args!("{}", name.cyan().italic()))
+                f.write_fmt(format_args!("{}", AnsiWrap::cyan(name).italic()))
             } else if opts.mode.is_symbolica()
                 && opts.color_builtin_symbols
                 && State::is_builtin(*self)
             {
-                f.write_fmt(format_args!("{}", name.purple()))
+                f.write_fmt(format_args!("{}", AnsiWrap::purple(name)))
             } else if opts.mode.is_mathematica() {
                 if State::is_builtin(*self) {
                     match self.get_id() {
