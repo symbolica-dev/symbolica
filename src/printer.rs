@@ -203,6 +203,40 @@ impl<'a> AtomPrinter<'a> {
         }
         Ok(())
     }
+
+    /// Format an integer. Input must be digits only.
+    fn format_digits<W: std::fmt::Write>(
+        mut s: String,
+        opts: &PrintOptions,
+        print_state: &PrintState,
+        f: &mut W,
+    ) -> fmt::Result {
+        if print_state.superscript && opts.mode.is_symbolica() {
+            let map = ['⁰', '¹', '²', '³', '⁴', '⁵', '⁶', '⁷', '⁸', '⁹'];
+            s = s
+                .as_bytes()
+                .iter()
+                .map(|x| map[(x - b'0') as usize])
+                .collect();
+
+            return f.write_str(&s);
+        }
+
+        if let Some(c) = opts.number_thousands_separator {
+            let mut first = true;
+            for triplet in s.as_bytes().chunks(3) {
+                if !first {
+                    f.write_char(c)?;
+                }
+                f.write_str(std::str::from_utf8(triplet).unwrap())?;
+                first = false;
+            }
+
+            Ok(())
+        } else {
+            f.write_str(&s)
+        }
+    }
 }
 
 impl fmt::Display for AtomPrinter<'_> {
@@ -613,40 +647,6 @@ impl FormattedPrintNum for NumView<'_> {
         opts: &PrintOptions,
         mut print_state: PrintState,
     ) -> Result<bool, Error> {
-        /// Input must be digits only.
-        fn format_num<W: std::fmt::Write>(
-            mut s: String,
-            opts: &PrintOptions,
-            print_state: &PrintState,
-            f: &mut W,
-        ) -> fmt::Result {
-            if print_state.superscript && opts.mode.is_symbolica() {
-                let map = ['⁰', '¹', '²', '³', '⁴', '⁵', '⁶', '⁷', '⁸', '⁹'];
-                s = s
-                    .as_bytes()
-                    .iter()
-                    .map(|x| map[(x - b'0') as usize])
-                    .collect();
-
-                return f.write_str(&s);
-            }
-
-            if let Some(c) = opts.number_thousands_separator {
-                let mut first = true;
-                for triplet in s.as_bytes().chunks(3) {
-                    if !first {
-                        f.write_char(c)?;
-                    }
-                    f.write_str(std::str::from_utf8(triplet).unwrap())?;
-                    first = false;
-                }
-
-                Ok(())
-            } else {
-                f.write_str(&s)
-            }
-        }
-
         let d = self.get_coeff_view();
 
         let global_negative = match d {
@@ -740,7 +740,7 @@ impl FormattedPrintNum for NumView<'_> {
                         }
                     }
 
-                    format_num(
+                    AtomPrinter::format_digits(
                         real.numerator_ref().abs().to_string(),
                         opts,
                         &print_state,
@@ -748,7 +748,12 @@ impl FormattedPrintNum for NumView<'_> {
                     )?;
                     if !real.is_integer() {
                         f.write_char('/')?;
-                        format_num(real.denominator_ref().to_string(), opts, &print_state, f)?;
+                        AtomPrinter::format_digits(
+                            real.denominator_ref().to_string(),
+                            opts,
+                            &print_state,
+                            f,
+                        )?;
                     }
                 }
 
@@ -760,7 +765,7 @@ impl FormattedPrintNum for NumView<'_> {
                     if !global_negative && imag.is_negative() {
                         f.write_char('-')?;
                     }
-                    format_num(
+                    AtomPrinter::format_digits(
                         imag.numerator_ref().abs().to_string(),
                         opts,
                         &print_state,
@@ -769,7 +774,12 @@ impl FormattedPrintNum for NumView<'_> {
                     f.write_str(i_str)?;
                     if !imag.is_integer() {
                         f.write_char('/')?;
-                        format_num(imag.denominator_ref().to_string(), opts, &print_state, f)?;
+                        AtomPrinter::format_digits(
+                            imag.denominator_ref().to_string(),
+                            opts,
+                            &print_state,
+                            f,
+                        )?;
                     }
                 }
             } else {
@@ -944,6 +954,9 @@ impl FormattedPrintMul for MulView<'_> {
 
         print_state.in_product = true;
 
+        let mut num_count = 0;
+        let mut den_count = 0;
+
         // write the coefficient first
         let mut first = true;
         let mut skip_num = false;
@@ -952,6 +965,7 @@ impl FormattedPrintMul for MulView<'_> {
             first = n.fmt_output(f, opts, print_state)?;
             print_state.suppress_one = false;
             skip_num = true;
+            num_count += 1;
         } else if print_state.in_sum {
             if print_state.top_level_add_child
                 && opts.mode.is_symbolica()
@@ -968,6 +982,21 @@ impl FormattedPrintMul for MulView<'_> {
         print_state.in_sum = false;
 
         for x in self.iter().skip(if skip_num { 1 } else { 0 }) {
+            // count and skip denominators
+            if let AtomView::Pow(p) = x {
+                let (_, e) = p.get_base_exp();
+                if let AtomView::Num(n) = e {
+                    if let CoefficientView::Natural(num, _, 0, 1) = n.get_coeff_view() {
+                        if num < 0 {
+                            den_count += 1;
+                            continue;
+                        }
+                    }
+                }
+            }
+
+            num_count += 1;
+
             if !first {
                 if opts.mode.is_latex() {
                     f.write_char(' ')?;
@@ -978,6 +1007,87 @@ impl FormattedPrintMul for MulView<'_> {
             first = false;
 
             x.format(f, opts, print_state)?;
+        }
+
+        if den_count > 0 {
+            if num_count == 0 {
+                f.write_char('1')?;
+            }
+            f.write_char('/')?;
+
+            if den_count > 1 {
+                AtomPrinter::format_bracket('(', f, opts, print_state)?;
+                print_state.bracket_level += 1;
+            }
+
+            let mut first = true;
+            for x in self.iter() {
+                if let AtomView::Pow(p) = x {
+                    let (b, e) = p.get_base_exp();
+                    if let AtomView::Num(n) = e
+                        && let CoefficientView::Natural(num, den, 0, 1) = n.get_coeff_view()
+                        && num < 0
+                    {
+                        if !first {
+                            if opts.mode.is_latex() {
+                                f.write_char(' ')?;
+                            } else {
+                                f.write_char(opts.multiplication_operator)?;
+                            }
+                        }
+                        first = false;
+
+                        let mut new_print_state = print_state;
+                        new_print_state.in_exp_base = true;
+                        b.format(f, opts, new_print_state)?;
+
+                        let exp = Rational::new(num, den).neg();
+                        if exp.is_one() {
+                            continue;
+                        }
+
+                        new_print_state.in_exp = true;
+                        new_print_state.in_exp_base = false;
+
+                        let superscript_exponent = opts.num_exp_as_superscript && den == 1;
+
+                        if !superscript_exponent {
+                            if opts.mode.is_sympy()
+                                || (!opts.mode.is_latex() && opts.double_star_for_exponentiation)
+                            {
+                                f.write_str("**")?;
+                            } else {
+                                f.write_char('^')?;
+                            }
+                        }
+
+                        if opts.mode.is_latex() {
+                            f.write_char('{')?;
+                            new_print_state.in_exp = false;
+                            exp.format(opts, new_print_state, f)?;
+                            f.write_char('}')?;
+                        } else {
+                            if superscript_exponent {
+                                new_print_state.in_exp = false;
+                                new_print_state.superscript = true;
+                                AtomPrinter::format_digits(
+                                    num.unsigned_abs().to_string(),
+                                    opts,
+                                    &new_print_state,
+                                    f,
+                                )?;
+                            } else {
+                                exp.format(opts, new_print_state, f)?;
+                            }
+                        }
+                    }
+                }
+            }
+
+            if den_count > 1 {
+                print_state.bracket_level -= 1;
+                AtomPrinter::format_bracket(')', f, opts, print_state)?;
+            }
         }
 
         if add_paren {
@@ -1158,33 +1268,79 @@ impl FormattedPrintPow for PowView<'_> {
 
         print_state.in_exp_base = true;
 
-        b.format(f, opts, print_state)?;
+        // detect denominator
+        if let AtomView::Num(n) = e
+            && let CoefficientView::Natural(num, den, 0, 1) = n.get_coeff_view()
+            && num < 0
+        {
+            f.write_str("1/")?;
+            b.format(f, opts, print_state)?;
 
-        print_state.in_exp_base = false;
-        print_state.in_exp = true;
+            print_state.in_exp_base = false;
 
-        if !superscript_exponent {
-            if opts.mode.is_sympy()
-                || (!opts.mode.is_latex() && opts.double_star_for_exponentiation)
-            {
-                f.write_str("**")?;
-            } else {
-                f.write_char('^')?;
+            let exp = Rational::new(num, den).neg();
+            if !exp.is_one() {
+                print_state.in_exp = true;
+
+                let superscript_exponent = opts.num_exp_as_superscript && den == 1;
+
+                if !superscript_exponent {
+                    if opts.mode.is_sympy()
+                        || (!opts.mode.is_latex() && opts.double_star_for_exponentiation)
+                    {
+                        f.write_str("**")?;
+                    } else {
+                        f.write_char('^')?;
+                    }
+                }
+
+                if opts.mode.is_latex() {
+                    f.write_char('{')?;
+                    print_state.in_exp = false;
+                    exp.format(opts, print_state, f)?;
+                    f.write_char('}')?;
+                } else if superscript_exponent {
+                    print_state.in_exp = false;
+                    print_state.superscript = true;
+                    AtomPrinter::format_digits(
+                        num.unsigned_abs().to_string(),
+                        opts,
+                        &print_state,
+                        f,
+                    )?;
+                } else {
+                    exp.format(opts, print_state, f)?;
+                }
             }
-        }
-
-        if opts.mode.is_latex() {
-            f.write_char('{')?;
-            print_state.in_exp = false;
-            e.format(f, opts, print_state)?;
-            f.write_char('}')?;
         } else {
-            if superscript_exponent {
-                print_state.in_exp = false;
-                print_state.superscript = true;
+            b.format(f, opts, print_state)?;
+
+            print_state.in_exp_base = false;
+            print_state.in_exp = true;
+
+            if !superscript_exponent {
+                if opts.mode.is_sympy()
+                    || (!opts.mode.is_latex() && opts.double_star_for_exponentiation)
+                {
+                    f.write_str("**")?;
+                } else {
+                    f.write_char('^')?;
+                }
             }
 
-            e.format(f, opts, print_state)?;
+            if opts.mode.is_latex() {
+                f.write_char('{')?;
+                print_state.in_exp = false;
+                e.format(f, opts, print_state)?;
+                f.write_char('}')?;
+            } else {
+                if superscript_exponent {
+                    print_state.in_exp = false;
+                    print_state.superscript = true;
+                }
+
+                e.format(f, opts, print_state)?;
+            }
         }
 
         if add_paren {
