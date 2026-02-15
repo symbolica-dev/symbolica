@@ -8,8 +8,8 @@ use std::{
 
 use crate::{
     atom::{
-        AddView, Atom, AtomCore, AtomView, FunctionBuilder, MulView, NumView, PowView, Symbol,
-        VarView, representation::FunView,
+        AddView, Atom, AtomCore, AtomView, FunctionBuilder, InlineVar, MulView, NumView, PowView,
+        Symbol, VarView, representation::FunView,
     },
     coefficient::CoefficientView,
     domains::{SelfRing, finite_field::FiniteFieldCore, float::Complex, rational::Rational},
@@ -593,6 +593,96 @@ impl AtomView<'_> {
             }
         }
     }
+
+    /// Estimate the length of the string representation of the atom, for use in deciding when to split terms onto new lines.
+    fn estimate_char_length(&self, opts: &PrintOptions) -> usize {
+        match self {
+            AtomView::Num(n) => match n.get_coeff_view() {
+                CoefficientView::Natural(num, den, num_i, den_i) => {
+                    let mut len = 0;
+                    if num <= 0 {
+                        len += 1;
+                    }
+                    if num_i < 0 {
+                        len += 1;
+                    }
+                    if num != 0 && num_i != 1 {
+                        len += 1;
+                    }
+
+                    if num != 0 {
+                        len += num.unsigned_abs().ilog10();
+                    }
+                    if num_i != 0 {
+                        len += num_i.unsigned_abs().ilog10();
+                    }
+                    if den != 1 {
+                        len += 1 + den.unsigned_abs().ilog10();
+                    }
+                    if den_i != 1 {
+                        len += 1 + den_i.unsigned_abs().ilog10();
+                    }
+
+                    len as usize
+                }
+                CoefficientView::Large(_, _) => {
+                    (self.get_byte_size() as f64 * 1.6) as usize // stored in hex
+                }
+                CoefficientView::Indeterminate | CoefficientView::Infinity(None) => 1,
+                _ => self.get_byte_size(),
+            },
+            AtomView::Var(v) => {
+                if !opts.hide_all_namespaces {
+                    v.get_symbol().get_name().len()
+                } else {
+                    v.get_symbol().get_stripped_name().len()
+                }
+            }
+            AtomView::Fun(f) => {
+                let mut len = 2;
+                if !opts.hide_all_namespaces {
+                    len += f.get_symbol().get_name().len();
+                } else {
+                    len += f.get_symbol().get_stripped_name().len();
+                }
+
+                let iter = f.iter();
+                if iter.len() > 0 {
+                    len += iter.len() - 1;
+                }
+                for x in iter {
+                    len += x.estimate_char_length(opts);
+                }
+                len
+            }
+            AtomView::Pow(p) => {
+                let (b, e) = p.get_base_exp();
+                b.estimate_char_length(opts) + e.estimate_char_length(opts) + 1
+            }
+            AtomView::Mul(m) => {
+                let mut len = 0;
+                let iter = m.iter();
+                if iter.len() > 0 {
+                    len += iter.len() - 1;
+                }
+                for x in iter {
+                    len += x.estimate_char_length(opts);
+                }
+                len
+            }
+            AtomView::Add(a) => {
+                let mut len = 0;
+                let iter = a.iter();
+                if iter.len() > 0 {
+                    len += iter.len() - 1;
+                }
+                for x in iter {
+                    len += x.estimate_char_length(opts);
+                }
+                len
+            }
+        }
+    }
 }
 
 impl fmt::Debug for AtomView<'_> {
@@ -981,6 +1071,23 @@ impl FormattedPrintMul for MulView<'_> {
         print_state.level += 1;
         print_state.in_sum = false;
 
+        let global_split = if !opts.fill_indented_lines
+            && let Some(max) = opts.max_line_length
+        {
+            self.get_byte_size() > max + max / 2
+                || self.as_view().estimate_char_length(opts)
+                    + print_state.indentation_level as usize * opts.indentation
+                    > max
+        } else {
+            false
+        };
+
+        let mut last_factor_has_brackets = false;
+        let old_ident_level = print_state.indentation_level;
+        let mut char_count = print_state.indentation_level as usize * opts.indentation;
+        let mut den_char_count = 0;
+        let mut count = 0; //if skip_num { 1 } else { 0 };
+        let mut was_split = false;
         for x in self.iter().skip(if skip_num { 1 } else { 0 }) {
             // count and skip denominators
             if let AtomView::Pow(p) = x {
@@ -989,6 +1096,10 @@ impl FormattedPrintMul for MulView<'_> {
                     if let CoefficientView::Natural(num, _, 0, 1) = n.get_coeff_view() {
                         if num < 0 {
                             den_count += 1;
+
+                            if opts.fill_indented_lines && opts.max_line_length.is_some() {
+                                den_char_count += x.estimate_char_length(opts);
+                            }
                             continue;
                         }
                     }
@@ -997,6 +1108,46 @@ impl FormattedPrintMul for MulView<'_> {
 
             num_count += 1;
 
+            let (local_split, arg_char_len, arg_splits_with_brackets) = if opts.fill_indented_lines
+                && let Some(max) = opts.max_line_length
+            {
+                let arg_char_len = x.estimate_char_length(opts);
+                (
+                    char_count + arg_char_len > max,
+                    arg_char_len,
+                    matches!(x, AtomView::Fun(_) | AtomView::Add(_))
+                        && arg_char_len + print_state.indentation_level as usize * opts.indentation
+                            > max,
+                )
+            } else {
+                (false, 0, false)
+            };
+
+            if global_split || local_split {
+                if count >= 1 {
+                    print_state.indentation_level = old_ident_level + 1;
+                }
+
+                if count > 0 && !last_factor_has_brackets {
+                    f.write_char('\n')?;
+
+                    for _ in 0..print_state.indentation_level as usize * opts.indentation {
+                        f.write_char(' ')?;
+                    }
+
+                    was_split = true;
+                    char_count = print_state.indentation_level as usize * opts.indentation + 1;
+                }
+            }
+
+            // if the current arg ends with a bracket on a new line, reset the char count of the current line
+            last_factor_has_brackets = arg_splits_with_brackets;
+            if last_factor_has_brackets {
+                char_count = print_state.indentation_level as usize * opts.indentation + 1;
+            } else {
+                char_count += arg_char_len;
+            }
+
             if !first {
                 if opts.mode.is_latex() {
                     f.write_char(' ')?;
@@ -1004,15 +1155,41 @@ impl FormattedPrintMul for MulView<'_> {
                     f.write_char(opts.multiplication_operator)?;
                 }
             }
-            first = false;
 
             x.format(f, opts, print_state)?;
+
+            first = false;
+            count += 1;
         }
 
         if den_count > 0 {
             if num_count == 0 {
                 f.write_char('1')?;
             }
+
+            // always do a global check on the args to see if we need to put
+            // the division on a new line
+            if (global_split
+                || opts.fill_indented_lines
+                    && if let Some(max) = opts.max_line_length {
+                        char_count + den_char_count > max
+                    } else {
+                        false
+                    })
+                && count >= 1
+            {
+                print_state.indentation_level = old_ident_level + 1;
+
+                f.write_char('\n')?;
+                for _ in 0..print_state.indentation_level as usize * opts.indentation {
+                    f.write_char(' ')?;
+                }
+
+                char_count = print_state.indentation_level as usize * opts.indentation + 2;
+            } else {
+                char_count += 2;
+            }
+
             f.write_char('/')?;
 
             if den_count > 1 {
@@ -1020,7 +1197,9 @@ impl FormattedPrintMul for MulView<'_> {
                 print_state.bracket_level += 1;
             }
 
-            let mut first = true;
+            count = 0;
+            first = true;
+            last_factor_has_brackets = false;
             for x in self.iter() {
                 if let AtomView::Pow(p) = x {
                     let (b, e) = p.get_base_exp();
@@ -1028,6 +1207,52 @@ impl FormattedPrintMul for MulView<'_> {
                         && let CoefficientView::Natural(num, den, 0, 1) = n.get_coeff_view()
                         && num < 0
                     {
+                        let (local_split, arg_char_len, arg_splits_with_brackets) = if opts
+                            .fill_indented_lines
+                            && let Some(max) = opts.max_line_length
+                        {
+                            let arg_char_len = x.estimate_char_length(opts);
+                            (
+                                char_count + arg_char_len > max,
+                                arg_char_len,
+                                matches!(x, AtomView::Fun(_) | AtomView::Add(_))
+                                    && arg_char_len
+                                        + print_state.indentation_level as usize * opts.indentation
+                                        > max,
+                            )
+                        } else {
+                            (false, 0, false)
+                        };
+
+                        if global_split || local_split {
+                            if count >= 1 {
+                                print_state.indentation_level = old_ident_level + 2;
+                            }
+
+                            if count > 0 && !last_factor_has_brackets {
+                                f.write_char('\n')?;
+
+                                for _ in
+                                    0..print_state.indentation_level as usize * opts.indentation
+                                {
+                                    f.write_char(' ')?;
+                                }
+
+                                was_split = true;
+                                char_count =
+                                    print_state.indentation_level as usize * opts.indentation + 1;
+                            }
+                        }
+
+                        // if the current arg ends with a bracket on a new line, reset the char count of the current line
+                        last_factor_has_brackets = arg_splits_with_brackets;
+                        if last_factor_has_brackets {
+                            char_count =
+                                print_state.indentation_level as usize * opts.indentation + 1;
+                        } else {
+                            char_count += arg_char_len;
+                        }
+
                         if !first {
                             if opts.mode.is_latex() {
                                 f.write_char(' ')?;
@@ -1035,6 +1260,8 @@ impl FormattedPrintMul for MulView<'_> {
                                 f.write_char(opts.multiplication_operator)?;
                             }
                         }
+
+                        count += 1;
                         first = false;
 
                         let mut new_print_state = print_state;
@@ -1091,6 +1318,14 @@ impl FormattedPrintMul for MulView<'_> {
         }
 
         if add_paren {
+            if was_split {
+                print_state.indentation_level -= 1;
+                f.write_char('\n')?;
+                for _ in 0..print_state.indentation_level as usize * opts.indentation {
+                    f.write_char(' ')?;
+                }
+            }
+
             print_state.bracket_level -= 1;
             AtomPrinter::format_bracket(')', f, opts, print_state)?;
         }
@@ -1155,8 +1390,32 @@ impl FormattedPrintFn for FunView<'_> {
         print_state.in_exp = false;
         print_state.in_exp_base = false;
         print_state.suppress_one = false;
+
+        let iter = self.iter();
+
+        let global_split = if !opts.fill_indented_lines
+            && let Some(max) = opts.max_line_length
+        {
+            self.get_byte_size() > max + max / 2
+                || self.as_view().estimate_char_length(opts)
+                    + print_state.indentation_level as usize * opts.indentation
+                    > max
+        } else {
+            false
+        };
+
+        let old_ident_level = print_state.indentation_level;
+
+        let mut char_count = print_state.indentation_level as usize * opts.indentation
+            + InlineVar::new(id).as_view().estimate_char_length(opts);
+
+        if global_split {
+            print_state.indentation_level += 1;
+        }
+
+        let mut was_split = false;
         let mut first = true;
-        for x in self.iter() {
+        for x in iter {
             if opts.mode.is_mathematica() {
                 if let AtomView::Var(s) = x
                     && s.get_symbol() == Symbol::SEP
@@ -1191,9 +1450,58 @@ impl FormattedPrintFn for FunView<'_> {
             if !first {
                 f.write_char(',')?;
             }
+
+            let (local_split, arg_char_len, arg_split) = if opts.fill_indented_lines
+                && let Some(max) = opts.max_line_length
+            {
+                let arg_char_len = x.estimate_char_length(opts);
+                (
+                    char_count + arg_char_len > max,
+                    arg_char_len,
+                    print_state.indentation_level as usize * opts.indentation + arg_char_len > max,
+                )
+            } else {
+                (false, 0, false)
+            };
+
+            if !opts.mode.is_mathematica() {
+                if !global_split && local_split {
+                    print_state.indentation_level = old_ident_level + 1;
+                }
+
+                if local_split && first {
+                    // the first argument splits, so move the closing
+                    // bracket of a function to a new line
+                    was_split = true;
+                }
+
+                if global_split || (local_split && (!first || !arg_split)) {
+                    f.write_char('\n')?;
+                    for _ in 0..print_state.indentation_level {
+                        for _ in 0..opts.indentation {
+                            f.write_char(' ')?;
+                        }
+                    }
+
+                    was_split = true;
+
+                    char_count = print_state.indentation_level as usize * opts.indentation;
+                }
+
+                char_count += arg_char_len;
+            }
+
             first = false;
 
             x.format(f, opts, print_state)?;
+        }
+
+        if was_split {
+            print_state.indentation_level -= 1;
+            f.write_char('\n')?;
+            for _ in 0..print_state.indentation_level as usize * opts.indentation {
+                f.write_char(' ')?;
+            }
         }
 
         print_state.bracket_level -= 1;
@@ -1363,7 +1671,6 @@ impl FormattedPrintAdd for AddView<'_> {
         opts: &PrintOptions,
         mut print_state: PrintState,
     ) -> Result<bool, Error> {
-        let mut first = true;
         print_state.top_level_add_child = print_state.level == 0;
         print_state.level += 1;
         print_state.suppress_one = false;
@@ -1395,7 +1702,23 @@ impl FormattedPrintAdd for AddView<'_> {
             print_state.bracket_level += 1;
         }
 
+        let global_split = print_state.top_level_add_child && opts.terms_on_new_line
+            || if !opts.fill_indented_lines
+                && let Some(max) = opts.max_line_length
+            {
+                self.get_byte_size() > max + max / 2
+                    || self.as_view().estimate_char_length(opts)
+                        + print_state.indentation_level as usize * opts.indentation
+                        > max
+            } else {
+                false
+            };
+
+        let old_ident_level = print_state.indentation_level;
+        let mut last_arg_splits_with_brackets = false;
         let mut count = 0;
+        let mut char_count = print_state.indentation_level as usize * opts.indentation;
+        let mut was_split = false;
         for x in self.iter() {
             if let Some(max_terms) = opts.max_terms
                 && opts.mode.is_symbolica()
@@ -1404,18 +1727,58 @@ impl FormattedPrintAdd for AddView<'_> {
                 break;
             }
 
-            if !first && print_state.top_level_add_child && opts.terms_on_new_line {
-                f.write_char('\n')?;
+            let (local_split, arg_char_len, arg_splits_with_brackets) = if opts.fill_indented_lines
+                && let Some(max) = opts.max_line_length
+            {
+                let arg_char_len = x.estimate_char_length(opts);
+                (
+                    char_count + arg_char_len > max,
+                    arg_char_len,
+                    matches!(x, AtomView::Fun(_))
+                        && arg_char_len + print_state.indentation_level as usize * opts.indentation
+                            > max,
+                )
+            } else {
+                (false, 0, false)
+            };
+
+            if global_split || local_split {
+                if count >= 1 {
+                    print_state.indentation_level = old_ident_level + 1;
+                }
+
+                if count > 0 && !last_arg_splits_with_brackets {
+                    f.write_char('\n')?;
+
+                    if print_state.top_level_add_child && opts.terms_on_new_line {
+                        char_count = 0; // do not indent top-level sum
+                    } else {
+                        for _ in 0..print_state.indentation_level as usize * opts.indentation {
+                            f.write_char(' ')?;
+                        }
+
+                        char_count = print_state.indentation_level as usize * opts.indentation;
+                    }
+
+                    was_split = true;
+                }
             }
-            first = false;
 
             x.format(f, opts, print_state)?;
+
+            last_arg_splits_with_brackets = arg_splits_with_brackets;
+            if last_arg_splits_with_brackets {
+                char_count = print_state.indentation_level as usize * opts.indentation + 1;
+            } else {
+                char_count += arg_char_len;
+            }
+
             print_state.in_sum = true;
             count += 1;
         }
 
         if opts.max_terms.is_some() && count < self.get_nargs() {
-            if print_state.top_level_add_child && opts.terms_on_new_line {
+            if was_split || print_state.top_level_add_child && opts.terms_on_new_line {
                 f.write_char('\n')?;
             }
             if print_state.top_level_add_child
@@ -1430,6 +1793,14 @@ impl FormattedPrintAdd for AddView<'_> {
 
         if add_paren {
             print_state.bracket_level -= 1;
+            if was_split {
+                print_state.indentation_level -= 1;
+                f.write_char('\n')?;
+                for _ in 0..print_state.indentation_level as usize * opts.indentation {
+                    f.write_char(' ')?;
+                }
+            }
+
             if opts.mode.is_latex() {
                 f.write_str("\\right)")?;
             } else {
@@ -1449,10 +1820,48 @@ mod test {
     use crate::{
         atom::{AtomCore, AtomView},
         domains::{SelfRing, finite_field::Zp, integer::Z},
-        function, parse,
+        function, parse, parse_lit,
         printer::{AnsiWrap, AtomPrinter, PrintOptions, PrintState},
         symbol,
     };
+
+    #[test]
+    fn nested() {
+        let b = parse_lit!(
+            3 + v1
+                * v2
+                * v3
+                * f(
+                    87238723, sda98as9d8, dsdjsdjsd, dskdjaskj, sdkjsdksd, djksdskdj
+                )
+                / (f(x, y, z, a, b, c, e, f, g, g(x), h(x, y, z))
+                    * g(x, y, z, a, b, c, e, f, g, g(x), h(x, y, z))
+                    * h(x, y, z, a, b, c, e, f, g, g(x), h(x, y, z)))
+                + h(4)
+        );
+
+        let out = b.format_string(
+            &PrintOptions {
+                max_line_length: Some(40),
+                hide_all_namespaces: true,
+                ..PrintOptions::file()
+            },
+            PrintState::default(),
+        );
+
+        assert_eq!(
+            out,
+            "3
+    +v1*v2*v3
+        *f(87238723,sda98as9d8,dsdjsdjsd,
+            dskdjaskj,sdkjsdksd,djksdskdj
+        )
+        /(f(x,y,z,a,b,c,e,f,g,g(x),h(x,y,z))
+            *g(x,y,z,a,b,c,e,f,g,g(x),h(x,y,z))
+            *h(x,y,z,a,b,c,e,f,g,g(x),h(x,y,z)))
+    +h(4)"
+        );
+    }
 
     #[test]
     fn atoms() {

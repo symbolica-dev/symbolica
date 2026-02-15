@@ -1887,6 +1887,7 @@ impl AtomView<'_> {
 /// ```
 /// use symbolica::{hide_namespace, parse};
 /// let a = parse!("x^2+cos(x)");
+/// println!("{:80}", a); // print the expression with indentation and line breaks to fit within 80 characters
 /// println!("{:+}", a); // print with a leading sign
 /// println!("{:#}", a); // print the namespace in front of every variable (e.g. `test::x`)
 /// println!("{}", hide_namespace!(a)); // hide the current namespace

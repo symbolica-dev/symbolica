@@ -808,6 +808,9 @@ class Expression:
     def format(
         self,
         mode: PrintMode = PrintMode.Symbolica,
+        max_line_length: int | None = 80,
+        indentation: int = 4,
+        fill_indented_lines: bool = True,
         terms_on_new_line: bool = False,
         color_top_level_sum: bool = True,
         color_builtin_symbols: bool = True,
@@ -3130,6 +3133,9 @@ class Transformer:
     def print(
         self,
         mode: PrintMode = PrintMode.Symbolica,
+        max_line_length: int | None = 80,
+        indentation: int = 4,
+        fill_indented_lines: bool = True,
         terms_on_new_line: bool = False,
         color_top_level_sum: bool = True,
         color_builtin_symbols: bool = True,
@@ -3273,6 +3279,9 @@ class Series:
     def format(
         self,
         mode: PrintMode = PrintMode.Symbolica,
+        max_line_length: int | None = 80,
+        indentation: int = 4,
+        fill_indented_lines: bool = True,
         terms_on_new_line: bool = False,
         color_top_level_sum: bool = True,
         color_builtin_symbols: bool = True,
@@ -3499,6 +3508,9 @@ class Polynomial:
     def format(
         self,
         mode: PrintMode = PrintMode.Symbolica,
+        max_line_length: int | None = 80,
+        indentation: int = 4,
+        fill_indented_lines: bool = True,
         terms_on_new_line: bool = False,
         color_top_level_sum: bool = True,
         color_builtin_symbols: bool = True,
@@ -3937,6 +3949,9 @@ class NumberFieldPolynomial:
     def format(
         self,
         mode: PrintMode = PrintMode.Symbolica,
+        max_line_length: int | None = 80,
+        indentation: int = 4,
+        fill_indented_lines: bool = True,
         terms_on_new_line: bool = False,
         color_top_level_sum: bool = True,
         color_builtin_symbols: bool = True,
@@ -4257,6 +4272,9 @@ class FiniteFieldPolynomial:
     def format(
         self,
         mode: PrintMode = PrintMode.Symbolica,
+        max_line_length: int | None = 80,
+        indentation: int = 4,
+        fill_indented_lines: bool = True,
         terms_on_new_line: bool = False,
         color_top_level_sum: bool = True,
         color_builtin_symbols: bool = True,
@@ -4856,6 +4874,9 @@ class Matrix:
     def format(
         self,
         mode: PrintMode = PrintMode.Symbolica,
+        max_line_length: int | None = 80,
+        indentation: int = 4,
+        fill_indented_lines: bool = True,
         pretty_matrix=True,
         number_thousands_separator: Optional[str] = None,
         multiplication_operator: str = "*",
