@@ -423,6 +423,17 @@ class PrintMode(Enum):
     """Print using Sympy notation."""
 
 
+class EvaluatorMonitoring(Enum):
+    """Monitoring mode for evaluator construction."""
+
+    Silent = 1
+    """Disable evaluator build monitoring."""
+    Verbose = 2
+    """Report major optimization events."""
+    Progress = 3
+    """Report periodic progress updates."""
+
+
 class Expression:
     """
     A Symbolica expression.
@@ -2129,6 +2140,7 @@ class Expression:
         external_functions: Optional[dict[Tuple[Expression, str], Callable[[
             Sequence[float | complex]], float | complex]]] = None,
         conditionals: Optional[Sequence[Expression]] = None,
+        monitoring: Optional[EvaluatorMonitoring] = None,
     ) -> Evaluator:
         """Create an evaluator that can evaluate (nested) expressions in an optimized fashion.
         All constants and functions should be provided as dictionaries, where the function
@@ -2183,6 +2195,8 @@ class Expression:
             The number of cores to use for the optimization.
         verbose: bool, optional
             Print the progress of the optimization.
+        monitoring: Optional[EvaluatorMonitoring], optional
+            Monitoring mode for evaluator construction. If set, overrides `verbose`.
         max_horner_scheme_variables: int, optional
             The maximum number of variables in a Horner scheme.
         max_common_pair_cache_entries: int, optional
@@ -2216,6 +2230,7 @@ class Expression:
         external_functions: Optional[dict[Tuple[Expression, str], Callable[[
             Sequence[float | complex]], float | complex]]] = None,
         conditionals: Optional[Sequence[Expression]] = None,
+        monitoring: Optional[EvaluatorMonitoring] = None,
     ) -> Evaluator:
         """Create an evaluator that can jointly evaluate (nested) expressions in an optimized fashion.
         See `Expression.evaluator()` for more information.
