@@ -16,6 +16,9 @@ use std::{
     time::Instant,
 };
 
+use indicatif::{HumanBytes, MultiProgress, ProgressBar, ProgressStyle};
+use memory_stats::memory_stats;
+
 use crate::{
     LicenseManager,
     atom::{Atom, AtomCore, AtomView, KeyLookup, Symbol},
@@ -127,37 +130,8 @@ fn format_bytes(bytes: u64) -> String {
     }
 }
 
-#[cfg(target_os = "linux")]
-fn linux_rss_bytes() -> Option<u64> {
-    let status = std::fs::read_to_string("/proc/self/status").ok()?;
-    for line in status.lines() {
-        if let Some(rest) = line.strip_prefix("VmRSS:") {
-            let kb = rest.split_whitespace().next()?.parse::<u64>().ok()?;
-            return Some(kb * 1024);
-        }
-    }
-    None
-}
-
-#[cfg(not(target_os = "linux"))]
-fn linux_rss_bytes() -> Option<u64> {
-    None
-}
-
-fn progress_bar(done: usize, total: usize, width: usize) -> String {
-    if total == 0 {
-        return "[--------------------] 0%".to_string();
-    }
-    let ratio = (done as f64 / total as f64).clamp(0.0, 1.0);
-    let filled = ((ratio * width as f64).round() as usize).min(width);
-    let empty = width - filled;
-    let pct = (ratio * 100.0).round() as usize;
-    format!(
-        "[{}{}] {:>3}%",
-        "#".repeat(filled),
-        "-".repeat(empty),
-        pct
-    )
+fn memory_usage_bytes() -> Option<u64> {
+    memory_stats().map(|m| m.physical_mem as u64)
 }
 
 #[cfg_attr(
@@ -1308,7 +1282,10 @@ impl<T: Default> ExpressionEvaluator<T> {
 
     /// Remove common pairs of instructions. Assumes that the arguments
     /// of the instructions are sorted.
-    fn remove_common_pairs_with_stats(&mut self) -> (usize, CpePassStats) {
+    fn remove_common_pairs_with_stats(
+        &mut self,
+        scan_bar: Option<&ProgressBar>,
+    ) -> (usize, CpePassStats) {
         #[derive(Debug, Clone, PartialEq, Eq, Hash, PartialOrd, Ord)]
         enum CommonInstruction {
             Add(usize, usize),
@@ -1408,34 +1385,29 @@ impl<T: Default> ExpressionEvaluator<T> {
 
             if progress {
                 stats.cache_entries_peak = stats.cache_entries_peak.max(common_ops.len());
-                // Currently I am thinking of keeping a progress of 2Hz
                 if last_report.elapsed().as_millis() >= 500 {
                     last_report = Instant::now();
-                    let bar = progress_bar(p, total_instr, 20);
-                    let rss = linux_rss_bytes().map(format_bytes);
-                    if let Some(rss) = rss {
-                        info!(
-                            "[CPE] Scanning {} | instr {}/{} | cache {} (peak {}) / cap {} | max_dist {} | rss {}",
-                            bar,
-                            p,
-                            total_instr,
-                            common_ops.len(),
-                            stats.cache_entries_peak,
-                            self.settings.max_common_pair_cache_entries,
-                            self.settings.max_common_pair_distance,
-                            rss
-                        );
-                    } else {
-                        info!(
-                            "[CPE] Scanning {} | instr {}/{} | cache {} (peak {}) / cap {} | max_dist {}",
-                            bar,
-                            p,
-                            total_instr,
-                            common_ops.len(),
-                            stats.cache_entries_peak,
-                            self.settings.max_common_pair_cache_entries,
-                            self.settings.max_common_pair_distance
-                        );
+                    if let Some(bar) = scan_bar {
+                        bar.set_position(p as u64);
+                        let rss = memory_usage_bytes();
+                        let msg = match rss {
+                            Some(b) => format!(
+                                "cache {} (peak {}) / cap {} | max_dist {} | rss {}",
+                                common_ops.len(),
+                                stats.cache_entries_peak,
+                                self.settings.max_common_pair_cache_entries,
+                                self.settings.max_common_pair_distance,
+                                HumanBytes(b)
+                            ),
+                            None => format!(
+                                "cache {} (peak {}) / cap {} | max_dist {}",
+                                common_ops.len(),
+                                stats.cache_entries_peak,
+                                self.settings.max_common_pair_cache_entries,
+                                self.settings.max_common_pair_distance
+                            ),
+                        };
+                        bar.set_message(msg);
                     }
                 }
             }
@@ -1792,7 +1764,7 @@ impl<T: Default> ExpressionEvaluator<T> {
     }
 
     fn remove_common_pairs(&mut self) -> usize {
-        self.remove_common_pairs_with_stats().0
+        self.remove_common_pairs_with_stats(None).0
     }
 }
 
@@ -6365,71 +6337,122 @@ impl<T: Clone + Default + PartialEq> EvalTree<T> {
             (0, 0)
         };
 
-        for cpe_iteration in 0..settings.cpe_iterations.unwrap_or(usize::MAX) {
-            let (r, cpe_stats) = e.remove_common_pairs_with_stats();
+        let cpe_max_iter = settings.cpe_iterations.unwrap_or(usize::MAX);
+        let (mp, mut cpe_iter_bar) = if settings.is_progress() {
+            let mp = MultiProgress::new();
+            let iter_bar = if cpe_max_iter != usize::MAX {
+                let pb = mp.add(ProgressBar::new(cpe_max_iter as u64));
+                pb.set_style(
+                    ProgressStyle::default_bar()
+                        .template("[{elapsed_precise}] [{bar:40.cyan/blue}] {pos}/{len} {msg}")
+                        .unwrap()
+                        .progress_chars("█▌▎ "),
+                );
+                pb.set_message("CPE optimization");
+                pb
+            } else {
+                let pb = mp.add(ProgressBar::new_spinner());
+                pb.set_style(
+                    ProgressStyle::default_spinner()
+                        .template("[{elapsed_precise}] {spinner} CPE iter {pos} {msg}")
+                        .unwrap(),
+                );
+                pb
+            };
+            (Some(mp), Some(iter_bar))
+        } else {
+            (None, None)
+        };
+
+        for cpe_iteration in 0..cpe_max_iter {
+            let total_instr = e.instructions.len().max(1);
+            let (scan_bar, scan_bar_opt) = if settings.is_progress() {
+                let pb = mp.as_ref().unwrap().add(ProgressBar::new(total_instr as u64));
+                pb.set_style(
+                    ProgressStyle::default_bar()
+                        .template("  {bar:30.dim} {pos}/{len} {msg}")
+                        .unwrap()
+                        .progress_chars("░▒▓"),
+                );
+                pb.set_message("Scanning...");
+                let r = pb.clone();
+                (Some(pb), Some(r))
+            } else {
+                (None, None)
+            };
+
+            let (r, cpe_stats) = e.remove_common_pairs_with_stats(scan_bar_opt.as_ref());
+            if let Some(bar) = scan_bar {
+                bar.finish_and_clear();
+            }
             if r == 0 || e.settings.abort_level > 0 {
                 e.settings.abort_level = 0;
+                if settings.is_progress() {
+                    if let Some(bar) = cpe_iter_bar.take() {
+                        let elapsed = cpe_start_time.as_ref().unwrap().elapsed();
+                        bar.finish_with_message(format!(
+                            "CPE converged after {} iteration(s) in {:.2}s",
+                            cpe_iteration + 1,
+                            elapsed.as_secs_f64()
+                        ));
+                    }
+                } else if settings.is_verbose() {
+                    info!("CPE converged after {} iteration(s)", cpe_iteration + 1);
+                }
                 break;
             }
 
             if settings.is_verbose() {
                 let (add_count, mul_count) = e.count_operations();
                 if settings.is_progress() {
-                    let target = settings.cpe_iterations;
-                    let iter_msg = if let Some(t) = target {
-                        format!(
-                            "{} {}/{}",
-                            progress_bar(cpe_iteration + 1, t, 20),
-                            cpe_iteration + 1,
-                            t
-                        )
-                    } else {
-                        format!("target None (iter {})", cpe_iteration + 1)
-                    };
-
-                    let elapsed = cpe_start_time.unwrap().elapsed();
-                    let rss = linux_rss_bytes().map(format_bytes);
-
-                    let add_pct = if cpe_start_add > 0 {
-                        Some(add_count as f64 * 100.0 / cpe_start_add as f64)
-                    } else {
-                        None
-                    };
-                    let mul_pct = if cpe_start_mul > 0 {
-                        Some(mul_count as f64 * 100.0 / cpe_start_mul as f64)
-                    } else {
-                        None
-                    };
-
-                    let add_pct_s = add_pct
-                        .map(|p| format!("{:.1}%", p))
-                        .unwrap_or_else(|| "n/a".to_string());
-                    let mul_pct_s = mul_pct
-                        .map(|p| format!("{:.1}%", p))
-                        .unwrap_or_else(|| "n/a".to_string());
-
-                    info!(
-                        "[CPE] {} | removed {} | ops {} + ({} of start), {} × ({} of start) | cache {} (peak {}) / cap {} | max_dist {} | rss {} | time {:.2}s{}{}{}",
-                        iter_msg,
-                        r,
-                        add_count,
-                        mul_count,
-                        add_pct_s,
-                        mul_pct_s,
-                        cpe_stats.cache_entries_final,
-                        cpe_stats.cache_entries_peak,
-                        settings.max_common_pair_cache_entries,
-                        settings.max_common_pair_distance,
-                        rss.unwrap_or_else(|| "n/a".to_string()),
-                        elapsed.as_secs_f64(),
-                        if cpe_stats.cache_pruned { " | pruned" } else { "" },
-                        if cpe_stats.cache_scan_truncated {
-                            " | scan_truncated(cache cap)"
+                    if let Some(ref bar) = cpe_iter_bar {
+                        bar.inc(1);
+                        let elapsed = cpe_start_time.as_ref().unwrap().elapsed();
+                        let rss = memory_usage_bytes()
+                            .map(|b| HumanBytes(b).to_string())
+                            .unwrap_or_else(|| "n/a".to_string());
+                        let add_pct = if cpe_start_add > 0 {
+                            format!("{:.1}%", add_count as f64 * 100.0 / cpe_start_add as f64)
                         } else {
-                            ""
-                        },
-                        if cpe_stats.scan_aborted { " | aborted" } else { "" }
-                    );
+                            "n/a".to_string()
+                        };
+                        let mul_pct = if cpe_start_mul > 0 {
+                            format!("{:.1}%", mul_count as f64 * 100.0 / cpe_start_mul as f64)
+                        } else {
+                            "n/a".to_string()
+                        };
+                        let extras = [
+                            if cpe_stats.cache_pruned { "pruned" } else { "" },
+                            if cpe_stats.cache_scan_truncated {
+                                "scan_truncated"
+                            } else {
+                                ""
+                            },
+                            if cpe_stats.scan_aborted { "aborted" } else { "" },
+                        ]
+                        .iter()
+                        .filter(|s| !s.is_empty())
+                        .cloned()
+                        .collect::<Vec<_>>()
+                        .join(" | ");
+                        let msg = format!(
+                            "removed {} | {} + ({}), {} × ({}) | cache {}/{} | {} | {}",
+                            r,
+                            add_count,
+                            add_pct,
+                            mul_count,
+                            mul_pct,
+                            cpe_stats.cache_entries_final,
+                            cpe_stats.cache_entries_peak,
+                            rss,
+                            if extras.is_empty() {
+                                format!("{:.1}s", elapsed.as_secs_f64())
+                            } else {
+                                format!("{:.1}s | {}", elapsed.as_secs_f64(), extras)
+                            }
+                        );
+                        bar.set_message(msg);
+                    }
                 } else {
                     info!(
                         "Removed {} common pairs: {} + and {} ×",
@@ -6437,6 +6460,10 @@ impl<T: Clone + Default + PartialEq> EvalTree<T> {
                     );
                 }
             }
+        }
+
+        if let Some(bar) = cpe_iter_bar.take() {
+            bar.finish_with_message("CPE complete");
         }
 
         e.optimize_stack();
@@ -7291,16 +7318,32 @@ impl Expression<Complex<Rational>> {
             None
         });
 
-        if settings.is_verbose() {
-            if settings.is_progress() {
-                info!(
-                    "[Horner] Starting optimization | Initial ops: {} additions, {} multiplications | Iterations: {} | Cores: {}",
-                    best_ops.0,
-                    best_ops.1,
-                    settings.horner_iterations,
+        let (_horner_mp, horner_bar) = if settings.is_progress() {
+            let mp = MultiProgress::new();
+            let pb = mp.add(ProgressBar::new(settings.horner_iterations as u64));
+            pb.set_style(
+                ProgressStyle::default_bar()
+                    .template("[{elapsed_precise}] [{bar:40.cyan/blue}] {pos}/{len} {msg}")
+                    .unwrap()
+                    .progress_chars("█▌▎ "),
+            );
+            pb.set_message(format!(
+                "Horner optimization | Initial: {} +, {} × | {} cores",
+                best_ops.0,
+                best_ops.1,
+                if LicenseManager::is_licensed() {
                     settings.n_cores
-                );
-            } else {
+                } else {
+                    1
+                }
+            ));
+            (Some(mp), Some(pb))
+        } else {
+            (None, None)
+        };
+
+        if settings.is_verbose() {
+            if !settings.is_progress() {
                 info!(
                     "Initial ops: {} additions and {} multiplications",
                     best_ops.0, best_ops.1
@@ -7330,6 +7373,7 @@ impl Expression<Complex<Rational>> {
 
         std::thread::scope(|s| {
             let abort = Arc::new(AtomicBool::new(false));
+            let horner_bar_clone = horner_bar.clone();
 
             for i in 0..n_cores {
                 let mut rng = MonteCarloRng::new(0, i);
@@ -7339,12 +7383,14 @@ impl Expression<Complex<Rational>> {
                 let best_mul = best_mul.clone();
                 let best_add = best_add.clone();
                 let horner_start_time_clone = horner_start_time.clone();
+                let horner_bar_thread = horner_bar_clone.clone();
                 let mut last_mul = usize::MAX;
                 let mut last_add = usize::MAX;
                 let abort = abort.clone();
 
                 let mut op = move || {
-                    for j in 0..settings.horner_iterations / n_cores {
+                    let iterations_per_thread = settings.horner_iterations / n_cores;
+                    for j in 0..iterations_per_thread {
                         if abort.load(Ordering::Relaxed) {
                             return;
                         }
@@ -7410,24 +7456,39 @@ impl Expression<Complex<Rational>> {
                             cur_ops = (cur_ops.0 + ops.0, cur_ops.1 + ops.1);
                         }
 
+                        // Update progress bar for this iteration
+                        if settings.is_progress() {
+                            if let Some(ref bar) = horner_bar_thread {
+                                bar.inc(1);
+                            }
+                        }
+
                         // prefer fewer multiplications
                         if cur_ops.1 <= last_mul || cur_ops.1 == last_mul && cur_ops.0 <= last_add {
                             if settings.is_verbose() {
                                 if settings.is_progress() {
-                                    let elapsed = horner_start_time_clone.as_ref().unwrap().elapsed();
-                                    info!(
-                                        "[Horner] Step {}/{} | Accepted: {} +, {} × | Time: {:.2}s",
-                                        j,
-                                        settings.horner_iterations / n_cores,
-                                        cur_ops.0,
-                                        cur_ops.1,
-                                        elapsed.as_secs_f64()
-                                    );
+                                    if let Some(ref bar) = horner_bar_thread {
+                                        let elapsed = horner_start_time_clone.as_ref().unwrap().elapsed();
+                                        let best_add_val = best_add.load(Ordering::Relaxed);
+                                        let best_mul_val = best_mul.load(Ordering::Relaxed);
+                                        let rss = memory_usage_bytes()
+                                            .map(|b| HumanBytes(b).to_string())
+                                            .unwrap_or_else(|| "n/a".to_string());
+                                        bar.set_message(format!(
+                                            "Best: {} +, {} × | Current: {} +, {} × | {} | {:.1}s",
+                                            best_add_val,
+                                            best_mul_val,
+                                            cur_ops.0,
+                                            cur_ops.1,
+                                            rss,
+                                            elapsed.as_secs_f64()
+                                        ));
+                                    }
                                 } else {
                                     info!(
                                         "Accept move at step {}/{}: {} + and {} ×",
                                         j,
-                                        settings.horner_iterations / n_cores,
+                                        iterations_per_thread,
                                         cur_ops.0,
                                         cur_ops.1
                                     );
@@ -7480,13 +7541,17 @@ impl Expression<Complex<Rational>> {
 
         if settings.is_verbose() {
             if settings.is_progress() {
-                let elapsed = horner_start_time.as_ref().unwrap().elapsed();
-                info!(
-                    "[Horner] Optimization complete | Final: {} + and {} × | Total time: {:.2}s",
-                    best_add.load(Ordering::Relaxed),
-                    best_mul.load(Ordering::Relaxed),
-                    elapsed.as_secs_f64()
-                );
+                if let Some(bar) = horner_bar {
+                    let elapsed = horner_start_time.as_ref().unwrap().elapsed();
+                    let final_add = best_add.load(Ordering::Relaxed);
+                    let final_mul = best_mul.load(Ordering::Relaxed);
+                    bar.finish_with_message(format!(
+                        "Horner complete | Final: {} +, {} × | {:.2}s",
+                        final_add,
+                        final_mul,
+                        elapsed.as_secs_f64()
+                    ));
+                }
             } else {
                 info!(
                     "Final scheme: {} + and {} ×",
