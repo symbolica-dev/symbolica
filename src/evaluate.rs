@@ -13,7 +13,10 @@ use std::{
         Arc, Mutex,
         atomic::{AtomicBool, AtomicUsize, Ordering},
     },
+    time::Instant,
 };
+
+use indicatif::{ProgressBar, ProgressStyle};
 
 use crate::{
     LicenseManager,
@@ -46,6 +49,12 @@ type EvalFnType<A, T> = Box<
         &mut HashMap<AtomView<'_>, T>,
     ) -> T,
 >;
+
+fn format_memory() -> String {
+    memory_stats::memory_stats()
+        .map(|s| format!("{:.1}MB", s.physical_mem as f64 / 1_048_576.0))
+        .unwrap_or_else(|| "N/A".into())
+}
 
 /// A closure that can be called to evaluate a function called with arguments of type `T`.
 pub struct EvaluationFn<A, T>(EvalFnType<A, T>);
@@ -298,6 +307,37 @@ struct Expr {
 
 /// Settings for optimizing the evaluation of expressions.
 #[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
+#[cfg_attr(feature = "bincode", derive(bincode::Encode, bincode::Decode))]
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Hash)]
+pub enum EvaluatorMonitoring {
+    #[default]
+    Silent,
+    Verbose,
+    Progress,
+}
+
+impl EvaluatorMonitoring {
+    pub fn is_enabled(self) -> bool {
+        !matches!(self, EvaluatorMonitoring::Silent)
+    }
+
+    pub fn is_progress(self) -> bool {
+        matches!(self, EvaluatorMonitoring::Progress)
+    }
+}
+
+impl From<bool> for EvaluatorMonitoring {
+    fn from(verbose: bool) -> Self {
+        if verbose {
+            EvaluatorMonitoring::Verbose
+        } else {
+            EvaluatorMonitoring::Silent
+        }
+    }
+}
+
+/// Settings for optimizing the evaluation of expressions.
+#[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
 #[derive(Clone)]
 pub struct OptimizationSettings {
     pub horner_iterations: usize,
@@ -310,7 +350,10 @@ pub struct OptimizationSettings {
     pub max_horner_scheme_variables: usize,
     pub max_common_pair_cache_entries: usize,
     pub max_common_pair_distance: usize,
+    /// Legacy boolean for backwards compatibility. New code should use `monitoring`.
     pub verbose: bool,
+    #[cfg_attr(feature = "serde", serde(default))]
+    pub monitoring: EvaluatorMonitoring,
 }
 
 #[cfg(feature = "bincode")]
@@ -330,6 +373,7 @@ impl bincode::Encode for OptimizationSettings {
         bincode::Encode::encode(&self.max_common_pair_cache_entries, encoder)?;
         bincode::Encode::encode(&self.max_common_pair_distance, encoder)?;
         bincode::Encode::encode(&self.verbose, encoder)?;
+        bincode::Encode::encode(&self.monitoring, encoder)?;
         Ok(())
     }
 }
@@ -339,17 +383,28 @@ impl<Context> bincode::Decode<Context> for OptimizationSettings {
     fn decode<D: bincode::de::Decoder<Context = Context>>(
         decoder: &mut D,
     ) -> core::result::Result<Self, bincode::error::DecodeError> {
+        let horner_iterations = bincode::Decode::decode(decoder)?;
+        let n_cores = bincode::Decode::decode(decoder)?;
+        let cpe_iterations = bincode::Decode::decode(decoder)?;
+        let hot_start = bincode::Decode::decode(decoder)?;
+        let max_horner_scheme_variables = bincode::Decode::decode(decoder)?;
+        let max_common_pair_cache_entries = bincode::Decode::decode(decoder)?;
+        let max_common_pair_distance = bincode::Decode::decode(decoder)?;
+        let verbose: bool = bincode::Decode::decode(decoder)?;
+        let monitoring = bincode::Decode::decode(decoder).unwrap_or_else(|_| verbose.into());
+
         Ok(Self {
-            horner_iterations: bincode::Decode::decode(decoder)?,
-            n_cores: bincode::Decode::decode(decoder)?,
-            cpe_iterations: bincode::Decode::decode(decoder)?,
-            hot_start: bincode::Decode::decode(decoder)?,
+            horner_iterations,
+            n_cores,
+            cpe_iterations,
+            hot_start,
             abort_check: None,
             abort_level: 0,
-            max_horner_scheme_variables: bincode::Decode::decode(decoder)?,
-            max_common_pair_cache_entries: bincode::Decode::decode(decoder)?,
-            max_common_pair_distance: bincode::Decode::decode(decoder)?,
-            verbose: bincode::Decode::decode(decoder)?,
+            max_horner_scheme_variables,
+            max_common_pair_cache_entries,
+            max_common_pair_distance,
+            verbose,
+            monitoring,
         })
     }
 }
@@ -364,6 +419,7 @@ impl std::fmt::Debug for OptimizationSettings {
             .field("abort_check", &self.abort_check.is_some())
             .field("abort_level", &self.abort_level)
             .field("verbose", &self.verbose)
+            .field("monitoring", &self.monitoring)
             .finish()
     }
 }
@@ -381,6 +437,17 @@ impl Default for OptimizationSettings {
             max_common_pair_cache_entries: 1_000_000,
             max_common_pair_distance: 1000,
             verbose: false,
+            monitoring: EvaluatorMonitoring::Silent,
+        }
+    }
+}
+
+impl OptimizationSettings {
+    pub fn monitoring_mode(&self) -> EvaluatorMonitoring {
+        if !matches!(self.monitoring, EvaluatorMonitoring::Silent) {
+            self.monitoring
+        } else {
+            self.verbose.into()
         }
     }
 }
@@ -1214,6 +1281,24 @@ impl<T: Default> ExpressionEvaluator<T> {
             ExternalFun(usize, Box<SmallVec<[usize; 1]>>),
         }
 
+        let monitor = self.settings.monitoring_mode();
+        let scan_start = Instant::now();
+        let instruction_count = self.instructions.len().max(1);
+
+        let pb = if monitor.is_progress() {
+            let pb = ProgressBar::new(instruction_count as u64);
+            pb.set_style(
+                ProgressStyle::with_template(
+                    "  CPE scan [{bar:30.cyan/blue}] {pos}/{len} ({percent}%) {msg} [{elapsed_precise}]",
+                )
+                .unwrap()
+                .progress_chars("##-"),
+            );
+            pb
+        } else {
+            ProgressBar::hidden()
+        };
+
         let mut common_ops: HashMap<_, SmallVec<[usize; 1]>> = HashMap::default();
 
         let mut affected_lines = vec![false; self.instructions.len()];
@@ -1225,19 +1310,70 @@ impl<T: Default> ExpressionEvaluator<T> {
 
         for (p, (i, _)) in self.instructions.iter().enumerate() {
             if common_ops.len() > self.settings.max_common_pair_cache_entries {
+                let before = common_ops.len();
                 common_ops.retain(|_, v| {
                     v.len() > 1 || p - v[0] < self.settings.max_common_pair_distance
                 });
 
+                if monitor.is_enabled() && before != common_ops.len() {
+                    if monitor.is_progress() {
+                        pb.println(format!(
+                            "  CPE cache prune at line {}: {} -> {} entries (limit {}, distance {})",
+                            p,
+                            before,
+                            common_ops.len(),
+                            self.settings.max_common_pair_cache_entries,
+                            self.settings.max_common_pair_distance
+                        ));
+                    } else {
+                        info!(
+                            "CPE cache prune at line {}: {} -> {} entries (limit {}, distance {})",
+                            p,
+                            before,
+                            common_ops.len(),
+                            self.settings.max_common_pair_cache_entries,
+                            self.settings.max_common_pair_distance
+                        );
+                    }
+                }
+
                 if common_ops.len() > self.settings.max_common_pair_cache_entries {
+                    if monitor.is_enabled() {
+                        if monitor.is_progress() {
+                            pb.abandon_with_message(format!(
+                                "stopped: cache above limit ({}/{})",
+                                common_ops.len(),
+                                self.settings.max_common_pair_cache_entries
+                            ));
+                        } else {
+                            info!(
+                                "Stopping CPE scan at line {}: cache remained above limit ({}/{})",
+                                p,
+                                common_ops.len(),
+                                self.settings.max_common_pair_cache_entries
+                            );
+                        }
+                    }
                     break;
                 }
             }
 
             if p % 10000 == 0 {
+                if monitor.is_progress() {
+                    pb.set_position(p as u64);
+                    pb.set_message(format!(
+                        "cache {}/{} dist {} | RSS {}",
+                        common_ops.len(),
+                        self.settings.max_common_pair_cache_entries,
+                        self.settings.max_common_pair_distance,
+                        format_memory()
+                    ));
+                }
+
                 if let Some(abort_check) = &self.settings.abort_check {
                     if abort_check() {
                         self.settings.abort_level = 1;
+                        pb.abandon_with_message("aborted");
                         break;
                     }
                 }
@@ -1640,6 +1776,25 @@ impl<T: Default> ExpressionEvaluator<T> {
         assert!(j == placement_bounds.len());
 
         self.instructions = new_instr;
+
+        if !pb.is_hidden() && !pb.is_finished() {
+            pb.finish_and_clear();
+        }
+
+        if monitor.is_enabled() {
+            if monitor.is_progress() {
+                // handled by caller's round-level reporting
+            } else {
+                info!(
+                    "CPE round summary: candidates={} removed={} instructions={} stack={} elapsed {:.2}s",
+                    common_ops.len(),
+                    total_remove,
+                    self.instructions.len(),
+                    self.stack.len(),
+                    scan_start.elapsed().as_secs_f64()
+                );
+            }
+        }
 
         total_remove
     }
@@ -6218,23 +6373,112 @@ impl<T: Clone + Default + PartialEq> EvalTree<T> {
             settings: settings.clone(),
         };
 
-        for _ in 0..settings.cpe_iterations.unwrap_or(usize::MAX) {
+        let monitor = settings.monitoring_mode();
+        let cpe_total_start = Instant::now();
+        let cpe_limit = settings.cpe_iterations.unwrap_or(usize::MAX);
+
+        let (start_add, start_mul) = e.count_operations();
+
+        // bounded vs unbounded CPE rounds progress bar
+        let cpe_pb = if monitor.is_progress() {
+            if cpe_limit < usize::MAX {
+                let pb = ProgressBar::new(cpe_limit as u64);
+                pb.set_style(
+                    ProgressStyle::with_template(
+                        "  CPE rounds [{bar:30.cyan/blue}] {pos}/{len} {msg} [{elapsed_precise}]",
+                    )
+                    .unwrap()
+                    .progress_chars("##-"),
+                );
+                pb
+            } else {
+                let pb = ProgressBar::new_spinner();
+                pb.set_style(
+                    ProgressStyle::with_template("  CPE rounds {spinner} round {pos} {msg} [{elapsed_precise}]")
+                        .unwrap(),
+                );
+                pb
+            }
+        } else {
+            ProgressBar::hidden()
+        };
+
+        for cpe_round in 0..cpe_limit {
+            let cpe_round_start = Instant::now();
             let r = e.remove_common_pairs();
             if r == 0 || e.settings.abort_level > 0 {
                 e.settings.abort_level = 0;
+                if monitor.is_progress() {
+                    cpe_pb.finish_with_message(if r == 0 {
+                        "converged".to_string()
+                    } else {
+                        "aborted".to_string()
+                    });
+                } else if monitor.is_enabled() {
+                    info!(
+                        "CPE stopped at round {} after {:.2}s (removed {})",
+                        cpe_round + 1,
+                        cpe_round_start.elapsed().as_secs_f64(),
+                        r
+                    );
+                }
                 break;
             }
 
-            if settings.verbose {
+            if monitor.is_enabled() {
                 let (add_count, mul_count) = e.count_operations();
-                info!(
-                    "Removed {} common pairs: {} + and {} ×",
-                    r, add_count, mul_count
-                );
+                let add_pct = if start_add > 0 {
+                    add_count as f64 * 100.0 / start_add as f64
+                } else {
+                    100.0
+                };
+                let mul_pct = if start_mul > 0 {
+                    mul_count as f64 * 100.0 / start_mul as f64
+                } else {
+                    100.0
+                };
+
+                if monitor.is_progress() {
+                    cpe_pb.set_position((cpe_round + 1) as u64);
+                    cpe_pb.set_message(format!(
+                        "removed {} -> {} + ({:.1}%) {} x ({:.1}%) | RSS {} | {:.2}s",
+                        r, add_count, add_pct, mul_count, mul_pct,
+                        format_memory(),
+                        cpe_round_start.elapsed().as_secs_f64()
+                    ));
+                } else if cpe_limit == usize::MAX {
+                    info!(
+                        "CPE round {} removed {} common pairs: {} + ({:.1}%) and {} x ({:.1}%) (elapsed {:.2}s)",
+                        cpe_round + 1, r, add_count, add_pct, mul_count, mul_pct,
+                        cpe_round_start.elapsed().as_secs_f64()
+                    );
+                } else {
+                    info!(
+                        "CPE round {}/{} removed {} common pairs: {} + ({:.1}%) and {} x ({:.1}%) (elapsed {:.2}s)",
+                        cpe_round + 1, cpe_limit, r, add_count, add_pct, mul_count, mul_pct,
+                        cpe_round_start.elapsed().as_secs_f64()
+                    );
+                }
             }
         }
 
+        if !cpe_pb.is_hidden() && !cpe_pb.is_finished() {
+            cpe_pb.finish_and_clear();
+        }
+
         e.optimize_stack();
+
+        if monitor.is_enabled() {
+            info!(
+                "Linearization complete: instructions={} stack={} outputs={} elapsed {:.2}s | RSS {}",
+                e.instructions.len(),
+                e.stack.len(),
+                e.result_indices.len(),
+                cpe_total_start.elapsed().as_secs_f64(),
+                format_memory()
+            );
+        }
+
         e
     }
 
@@ -6577,9 +6821,68 @@ impl EvalTree<Complex<Rational>> {
         &mut self,
         settings: &OptimizationSettings,
     ) -> ExpressionEvaluator<Complex<Rational>> {
+        let monitor = settings.monitoring_mode();
+        let optimize_start = Instant::now();
+
+        if monitor.is_enabled() {
+            info!(
+                "Evaluator build started: outputs={} functions={} monitor={:?} horner_iterations={} cpe_iterations={:?} n_cores={} | RSS {}",
+                self.expressions.tree.len(),
+                self.functions.len(),
+                monitor,
+                settings.horner_iterations,
+                settings.cpe_iterations,
+                settings.n_cores,
+                format_memory()
+            );
+        }
+
+        let horner_start = Instant::now();
         let _ = self.optimize_horner_scheme(settings);
+        if monitor.is_enabled() {
+            let (add_count, mul_count) = self.count_operations();
+            info!(
+                "Step 1/3 Horner optimization finished in {:.2}s: {} + and {} x | RSS {}",
+                horner_start.elapsed().as_secs_f64(),
+                add_count,
+                mul_count,
+                format_memory()
+            );
+        }
+
+        let cse_start = Instant::now();
         self.common_subexpression_elimination();
-        self.clone().linearize(settings)
+        if monitor.is_enabled() {
+            let (add_count, mul_count) = self.count_operations();
+            info!(
+                "Step 2/3 CSE finished in {:.2}s: {} + and {} x | RSS {}",
+                cse_start.elapsed().as_secs_f64(),
+                add_count,
+                mul_count,
+                format_memory()
+            );
+        }
+
+        let linearize_start = Instant::now();
+        let evaluator = self.clone().linearize(settings);
+
+        if monitor.is_enabled() {
+            let (add_count, mul_count) = evaluator.count_operations();
+            info!(
+                "Step 3/3 Linearization finished in {:.2}s: {} + and {} x | RSS {}",
+                linearize_start.elapsed().as_secs_f64(),
+                add_count,
+                mul_count,
+                format_memory()
+            );
+            info!(
+                "Evaluator build completed in {:.2}s | RSS {}",
+                optimize_start.elapsed().as_secs_f64(),
+                format_memory()
+            );
+        }
+
+        evaluator
     }
 
     /// Write the expressions in a Horner scheme where the variables
@@ -6611,6 +6914,9 @@ impl EvalTree<Complex<Rational>> {
         &mut self,
         settings: &OptimizationSettings,
     ) -> Vec<Expression<Complex<Rational>>> {
+        let monitor = settings.monitoring_mode();
+        let horner_total_start = Instant::now();
+
         let v = match &settings.hot_start {
             Some(a) => a.clone(),
             None => {
@@ -6632,6 +6938,14 @@ impl EvalTree<Complex<Rational>> {
             }
         };
 
+        if monitor.is_enabled() {
+            info!(
+                "Horner optimization: main expression set with {} candidate variables",
+                v.len()
+            );
+        }
+
+        let main_horner_start = Instant::now();
         let scheme =
             Expression::optimize_horner_scheme_multiple(&self.expressions.tree, &v, settings);
         for e in &mut self.expressions.tree {
@@ -6642,7 +6956,15 @@ impl EvalTree<Complex<Rational>> {
             e.apply_horner_scheme(&scheme);
         }
 
-        for (name, _, e) in &mut self.functions {
+        if monitor.is_enabled() {
+            info!(
+                "Horner optimization: main expression set completed in {:.2}s",
+                main_horner_start.elapsed().as_secs_f64()
+            );
+        }
+
+        let function_count = self.functions.len();
+        for (function_index, (name, _, e)) in self.functions.iter_mut().enumerate() {
             let mut v = HashMap::default();
 
             for t in &mut e.tree {
@@ -6659,23 +6981,44 @@ impl EvalTree<Complex<Rational>> {
             v.truncate(settings.max_horner_scheme_variables);
             let v = v.into_iter().map(|(k, _)| k).collect::<Vec<_>>();
 
-            if settings.verbose {
+            if monitor.is_enabled() {
                 info!(
-                    "Optimizing Horner scheme for function {} with {} variables",
+                    "Horner optimization: function {}/{} ({}) with {} variables",
+                    function_index + 1,
+                    function_count,
                     name,
                     v.len()
                 );
             }
 
-            let scheme = Expression::optimize_horner_scheme_multiple(&e.tree, &v, settings);
+            let function_horner_start = Instant::now();
+            let function_scheme = Expression::optimize_horner_scheme_multiple(&e.tree, &v, settings);
 
             for t in &mut e.tree {
-                t.apply_horner_scheme(&scheme);
+                t.apply_horner_scheme(&function_scheme);
             }
 
             for e in &mut e.subexpressions {
-                e.apply_horner_scheme(&scheme);
+                e.apply_horner_scheme(&function_scheme);
             }
+
+            if monitor.is_enabled() {
+                info!(
+                    "Horner optimization: function {}/{} ({}) completed in {:.2}s",
+                    function_index + 1,
+                    function_count,
+                    name,
+                    function_horner_start.elapsed().as_secs_f64()
+                );
+            }
+        }
+
+        if monitor.is_enabled() {
+            info!(
+                "Horner optimization finished in {:.2}s | RSS {}",
+                horner_total_start.elapsed().as_secs_f64(),
+                format_memory()
+            );
         }
 
         scheme
@@ -7056,6 +7399,9 @@ impl Expression<Complex<Rational>> {
             return vars.to_vec();
         }
 
+        let monitor = settings.monitoring_mode();
+        let total_start = Instant::now();
+
         let horner: Vec<_> = expressions
             .iter()
             .map(|x| {
@@ -7071,7 +7417,7 @@ impl Expression<Complex<Rational>> {
             best_ops = (best_ops.0 + ops.0, best_ops.1 + ops.1);
         }
 
-        if settings.verbose {
+        if monitor.is_enabled() {
             info!(
                 "Initial ops: {} additions and {} multiplications",
                 best_ops.0, best_ops.1
@@ -7093,9 +7439,42 @@ impl Expression<Complex<Rational>> {
         let p_ref = &permutations;
 
         let n_cores = if LicenseManager::is_licensed() {
-            settings.n_cores
+            settings.n_cores.max(1)
         } else {
             1
+        };
+
+        let iterations_per_core = settings.horner_iterations / n_cores;
+        let total_iterations = if let Some(p) = p_ref {
+            let permutations_per_core = p.len() / n_cores;
+            iterations_per_core.min(permutations_per_core) * n_cores
+        } else {
+            iterations_per_core * n_cores
+        };
+        let completed_iterations = Arc::new(AtomicUsize::new(0));
+        let next_progress_report = Arc::new(AtomicUsize::new((total_iterations / 20).max(1)));
+
+        let horner_pb = if monitor.is_progress() {
+            let pb = ProgressBar::new(total_iterations.max(1) as u64);
+            pb.set_style(
+                ProgressStyle::with_template(
+                    "  Horner [{bar:30.cyan/blue}] {pos}/{len} ({percent}%) {msg} [{elapsed_precise}]",
+                )
+                .unwrap()
+                .progress_chars("##-"),
+            );
+            if total_iterations == 0 {
+                pb.set_position(1);
+                pb.finish_with_message(format!(
+                    "best {} + and {} x | RSS {}",
+                    best_add.load(Ordering::Relaxed),
+                    best_mul.load(Ordering::Relaxed),
+                    format_memory()
+                ));
+            }
+            pb
+        } else {
+            ProgressBar::hidden()
         };
 
         std::thread::scope(|s| {
@@ -7111,9 +7490,12 @@ impl Expression<Complex<Rational>> {
                 let mut last_mul = usize::MAX;
                 let mut last_add = usize::MAX;
                 let abort = abort.clone();
+                let completed_iterations = completed_iterations.clone();
+                let next_progress_report = next_progress_report.clone();
+                let horner_pb = horner_pb.clone();
 
                 let mut op = move || {
-                    for j in 0..settings.horner_iterations / n_cores {
+                    for j in 0..iterations_per_core {
                         if abort.load(Ordering::Relaxed) {
                             return;
                         }
@@ -7124,11 +7506,13 @@ impl Expression<Complex<Rational>> {
                         {
                             abort.store(true, Ordering::Relaxed);
 
-                            if settings.verbose {
+                            if monitor.is_progress() {
+                                horner_pb.abandon_with_message("aborted");
+                            } else if monitor.is_enabled() {
                                 info!(
                                     "Aborting Horner optimization at step {}/{}.",
                                     j,
-                                    settings.horner_iterations / n_cores
+                                    iterations_per_core
                                 );
                             }
 
@@ -7171,11 +7555,11 @@ impl Expression<Complex<Rational>> {
 
                         // prefer fewer multiplications
                         if cur_ops.1 <= last_mul || cur_ops.1 == last_mul && cur_ops.0 <= last_add {
-                            if settings.verbose {
+                            if matches!(monitor, EvaluatorMonitoring::Verbose) {
                                 info!(
-                                    "Accept move at step {}/{}: {} + and {} ×",
+                                    "Accept move at step {}/{}: {} + and {} x",
                                     j,
-                                    settings.horner_iterations / n_cores,
+                                    iterations_per_core,
                                     cur_ops.0,
                                     cur_ops.1
                                 );
@@ -7212,6 +7596,31 @@ impl Expression<Complex<Rational>> {
                         } else {
                             cvars.swap(t1, t2);
                         }
+
+                        if monitor.is_progress() {
+                            let done = completed_iterations.fetch_add(1, Ordering::Relaxed) + 1;
+                            let next = next_progress_report.load(Ordering::Relaxed);
+
+                            if done >= next || done == total_iterations {
+                                if next_progress_report
+                                    .compare_exchange(
+                                        next,
+                                        next.saturating_add((total_iterations / 20).max(1)),
+                                        Ordering::Relaxed,
+                                        Ordering::Relaxed,
+                                    )
+                                    .is_ok()
+                                {
+                                    horner_pb.set_position(done as u64);
+                                    horner_pb.set_message(format!(
+                                        "best {} + {} x | RSS {}",
+                                        best_add.load(Ordering::Relaxed),
+                                        best_mul.load(Ordering::Relaxed),
+                                        format_memory()
+                                    ));
+                                }
+                            }
+                        }
                     }
                 };
 
@@ -7225,9 +7634,18 @@ impl Expression<Complex<Rational>> {
             }
         });
 
-        if settings.verbose {
+        if !horner_pb.is_hidden() && !horner_pb.is_finished() {
+            horner_pb.finish_with_message(format!(
+                "best {} + {} x | RSS {}",
+                best_add.load(Ordering::Relaxed),
+                best_mul.load(Ordering::Relaxed),
+                format_memory()
+            ));
+        }
+
+        if monitor.is_enabled() {
             info!(
-                "Final scheme: {} + and {} ×",
+                "Final scheme: {} + and {} x",
                 best_add.load(Ordering::Relaxed),
                 best_mul.load(Ordering::Relaxed)
             );
@@ -10483,10 +10901,34 @@ mod test {
             float::{Complex, Float, FloatLike},
             rational::Rational,
         },
-        evaluate::{Dualizer, EvaluationFn, FunctionMap, OptimizationSettings},
+        evaluate::{Dualizer, EvaluationFn, EvaluatorMonitoring, FunctionMap, OptimizationSettings},
         id::ConditionResult,
         parse, symbol,
     };
+
+    #[test]
+    fn format_memory_returns_value() {
+        let mem = super::format_memory();
+        assert!(!mem.is_empty());
+        // Should either be "N/A" or contain "MB"
+        assert!(mem == "N/A" || mem.contains("MB"));
+    }
+
+    #[test]
+    fn monitoring_mode_compatibility() {
+        let legacy = OptimizationSettings {
+            verbose: true,
+            ..OptimizationSettings::default()
+        };
+        assert_eq!(legacy.monitoring_mode(), EvaluatorMonitoring::Verbose);
+
+        let explicit = OptimizationSettings {
+            verbose: false,
+            monitoring: EvaluatorMonitoring::Progress,
+            ..OptimizationSettings::default()
+        };
+        assert_eq!(explicit.monitoring_mode(), EvaluatorMonitoring::Progress);
+    }
 
     #[test]
     fn evaluate() {

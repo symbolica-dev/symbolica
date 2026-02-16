@@ -84,8 +84,9 @@ use crate::{
         CompiledCudaRealEvaluator, CompiledNumber, CompiledRealEvaluator,
         CompiledSimdComplexEvaluator, CompiledSimdRealEvaluator, ComplexEvaluatorSettings,
         CudaComplexf64, CudaLoadSettings, CudaRealf64, Dualizer, EvaluationFn, EvaluatorLoader,
-        ExportSettings, ExpressionEvaluator, ExpressionEvaluatorWithExternalFunctions, FunctionMap,
-        InlineASM, Instruction, OptimizationSettings, Slot,
+        EvaluatorMonitoring, ExportSettings, ExpressionEvaluator,
+        ExpressionEvaluatorWithExternalFunctions, FunctionMap, InlineASM, Instruction,
+        OptimizationSettings, Slot,
     },
     graph::{GenerationSettings, Graph, HalfEdge},
     id::{
@@ -235,6 +236,29 @@ impl From<PythonPrintMode> for PrintMode {
     }
 }
 
+/// Specifies the monitoring mode for evaluator construction.
+#[cfg_attr(feature = "python_stubgen", gen_stub_pyclass_enum)]
+#[pyclass(name = "EvaluatorMonitoring", eq, eq_int, module = "symbolica.core")]
+#[derive(Clone, Copy, PartialEq, Eq, Hash)]
+pub enum PythonEvaluatorMonitoring {
+    /// Disable evaluator build monitoring.
+    Silent,
+    /// Report major optimization events.
+    Verbose,
+    /// Report periodic progress updates for long-running steps.
+    Progress,
+}
+
+impl From<PythonEvaluatorMonitoring> for EvaluatorMonitoring {
+    fn from(mode: PythonEvaluatorMonitoring) -> Self {
+        match mode {
+            PythonEvaluatorMonitoring::Silent => EvaluatorMonitoring::Silent,
+            PythonEvaluatorMonitoring::Verbose => EvaluatorMonitoring::Verbose,
+            PythonEvaluatorMonitoring::Progress => EvaluatorMonitoring::Progress,
+        }
+    }
+}
+
 /// Create a Symbolica Python module.
 pub fn create_symbolica_module<'a, 'b>(
     m: &'b Bound<'a, PyModule>,
@@ -255,6 +279,7 @@ pub fn create_symbolica_module<'a, 'b>(
     m.add_class::<PythonSymbolAttribute>()?;
     m.add_class::<PythonParseMode>()?;
     m.add_class::<PythonPrintMode>()?;
+    m.add_class::<PythonEvaluatorMonitoring>()?;
     m.add_class::<PythonCondition>()?;
     m.add_class::<PythonReplacement>()?;
     m.add_class::<PythonExpressionEvaluator>()?;
@@ -7028,6 +7053,8 @@ impl PythonExpression {
     ///     The number of cores to use for the optimization.
     /// verbose: bool, optional
     ///     Print the progress of the optimization.
+    /// monitoring: Optional[EvaluatorMonitoring], optional
+    ///     Monitoring mode for evaluator construction. If set, overrides `verbose`.
     /// max_horner_scheme_variables: int, optional
     ///     The maximum number of variables in a Horner scheme.
     /// max_common_pair_cache_entries: int, optional
@@ -7054,7 +7081,8 @@ impl PythonExpression {
         max_common_pair_cache_entries = 1_000_000,
         max_common_pair_distance = 100,
         external_functions = None,
-        conditionals = None),
+        conditionals = None,
+        monitoring = None),
         )]
     pub fn evaluator(
         &self,
@@ -7074,6 +7102,7 @@ impl PythonExpression {
         ))]
         external_functions: Option<BTreeMap<(PolyVariable, String), Py<PyAny>>>,
         conditionals: Option<Vec<PolyVariable>>,
+        monitoring: Option<PythonEvaluatorMonitoring>,
         py: Python,
     ) -> PyResult<PythonExpressionEvaluator> {
         let mut fn_map = FunctionMap::new();
@@ -7134,10 +7163,14 @@ impl PythonExpression {
             }
         }
 
+        let monitoring = monitoring
+            .map(EvaluatorMonitoring::from)
+            .unwrap_or_else(|| verbose.into());
+
         let abort_check = Box::new(move || {
             Python::attach(|py| {
                 py.check_signals().map_err(|e| {
-                    if verbose {
+                    if monitoring.is_enabled() {
                         if e.is_instance_of::<pyo3::exceptions::PyKeyboardInterrupt>(py) {
                             crate::info!("Ctrl-c detected. Continuing to next optimization step.");
                         } else {
@@ -7158,7 +7191,8 @@ impl PythonExpression {
             horner_iterations: iterations,
             cpe_iterations,
             n_cores,
-            verbose: verbose.into(),
+            verbose: monitoring.is_enabled(),
+            monitoring,
             abort_check: Some(abort_check),
             max_horner_scheme_variables,
             max_common_pair_cache_entries,
@@ -7277,7 +7311,8 @@ impl PythonExpression {
         max_common_pair_cache_entries = 1_000_000,
         max_common_pair_distance = 100,
         external_functions = None,
-        conditionals = None),
+        conditionals = None,
+        monitoring = None),
         )]
     pub fn evaluator_multiple(
         _cls: &Bound<'_, PyType>,
@@ -7298,6 +7333,7 @@ impl PythonExpression {
         ))]
         external_functions: Option<HashMap<(PolyVariable, String), Py<PyAny>>>,
         conditionals: Option<Vec<PolyVariable>>,
+        monitoring: Option<PythonEvaluatorMonitoring>,
     ) -> PyResult<PythonExpressionEvaluator> {
         let mut fn_map = FunctionMap::new();
 
@@ -7357,10 +7393,14 @@ impl PythonExpression {
             }
         }
 
+        let monitoring = monitoring
+            .map(EvaluatorMonitoring::from)
+            .unwrap_or_else(|| verbose.into());
+
         let abort_check = Box::new(move || {
             Python::attach(|py| {
                 py.check_signals().map_err(|e| {
-                    if verbose {
+                    if monitoring.is_enabled() {
                         if e.is_instance_of::<pyo3::exceptions::PyKeyboardInterrupt>(py) {
                             crate::info!("Ctrl-c detected. Continuing to next optimization step.");
                         } else {
@@ -7381,7 +7421,8 @@ impl PythonExpression {
             horner_iterations: iterations,
             cpe_iterations,
             n_cores,
-            verbose: verbose.into(),
+            verbose: monitoring.is_enabled(),
+            monitoring,
             abort_check: Some(abort_check),
             max_horner_scheme_variables,
             max_common_pair_cache_entries,
