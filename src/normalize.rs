@@ -45,7 +45,13 @@ impl AtomView<'_> {
         }
 
         match (&self, other) {
-            (AtomView::Num(n1), AtomView::Num(n2)) => n1.get_coeff_view().cmp(&n2.get_coeff_view()),
+            // comparisons on floating points may yield Equal even if the binary data is not the same
+            // for example when the precision is different. To stay consistent with the PartialEq implementation,
+            // tie break on binary data comparison
+            (AtomView::Num(n1), AtomView::Num(n2)) => n1
+                .get_coeff_view()
+                .cmp(&n2.get_coeff_view())
+                .then_with(|| self.get_data().cmp(other.get_data())),
             (AtomView::Num(_), _) => Ordering::Less,
             (_, AtomView::Num(_)) => Ordering::Greater,
             (AtomView::Var(v1), AtomView::Var(v2)) => v1.get_symbol_id().cmp(&v2.get_symbol_id()),
