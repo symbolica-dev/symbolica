@@ -85,7 +85,7 @@ use crate::{
         CompiledSimdComplexEvaluator, CompiledSimdRealEvaluator, ComplexEvaluatorSettings,
         CudaComplexf64, CudaLoadSettings, CudaRealf64, Dualizer, EvaluationFn, EvaluatorLoader,
         ExportSettings, ExpressionEvaluator, ExpressionEvaluatorWithExternalFunctions, FunctionMap,
-        InlineASM, Instruction, OptimizationSettings, Slot,
+        InlineASM, Instruction, OptimizationReporting, OptimizationSettings, Slot,
     },
     graph::{GenerationSettings, Graph, HalfEdge},
     id::{
@@ -128,6 +128,26 @@ const LATEX_PRINT_OPTIONS: PrintOptions = PrintOptions {
     hide_namespace: Some("python"),
     ..PrintOptions::latex()
 };
+
+fn parse_optimization_reporting(
+    verbose: bool,
+    reporting: Option<String>,
+) -> PyResult<OptimizationReporting> {
+    if let Some(mode) = reporting {
+        match mode.trim().to_ascii_lowercase().as_str() {
+            "silent" | "off" | "none" => Ok(OptimizationReporting::Silent),
+            "verbose" | "log" | "logs" => Ok(OptimizationReporting::Verbose),
+            "progress" | "progressbar" | "progress_bar" | "dashboard" => {
+                Ok(OptimizationReporting::ProgressBar)
+            }
+            _ => Err(exceptions::PyValueError::new_err(format!(
+                "Invalid reporting mode '{mode}'. Expected one of: silent, verbose, progress"
+            ))),
+        }
+    } else {
+        Ok(verbose.into())
+    }
+}
 
 /// Trait for registering Python submodules for Symbolica, which enables
 /// multiple crates to use the same Symbolica kernel.
@@ -7027,7 +7047,13 @@ impl PythonExpression {
     /// n_cores: int, optional
     ///     The number of cores to use for the optimization.
     /// verbose: bool, optional
-    ///     Print the progress of the optimization.
+    ///     Legacy flag for optimization reporting. If `True`, reporting mode is `verbose`
+    ///     unless `reporting` is provided.
+    /// reporting: Optional[str], optional
+    ///     Reporting mode for evaluator generation. One of:
+    ///     - `"silent"`: no optimization progress output
+    ///     - `"verbose"`: detailed step logs
+    ///     - `"progress"`: live progress bar and stage updates
     /// max_horner_scheme_variables: int, optional
     ///     The maximum number of variables in a Horner scheme.
     /// max_common_pair_cache_entries: int, optional
@@ -7054,7 +7080,8 @@ impl PythonExpression {
         max_common_pair_cache_entries = 1_000_000,
         max_common_pair_distance = 100,
         external_functions = None,
-        conditionals = None),
+        conditionals = None,
+        reporting = None),
         )]
     pub fn evaluator(
         &self,
@@ -7074,8 +7101,12 @@ impl PythonExpression {
         ))]
         external_functions: Option<BTreeMap<(PolyVariable, String), Py<PyAny>>>,
         conditionals: Option<Vec<PolyVariable>>,
+        reporting: Option<String>,
         py: Python,
     ) -> PyResult<PythonExpressionEvaluator> {
+        let reporting = parse_optimization_reporting(verbose, reporting)?;
+        let report_enabled = reporting.is_enabled();
+
         let mut fn_map = FunctionMap::new();
 
         for (k, v) in constants {
@@ -7137,7 +7168,7 @@ impl PythonExpression {
         let abort_check = Box::new(move || {
             Python::attach(|py| {
                 py.check_signals().map_err(|e| {
-                    if verbose {
+                    if report_enabled {
                         if e.is_instance_of::<pyo3::exceptions::PyKeyboardInterrupt>(py) {
                             crate::info!("Ctrl-c detected. Continuing to next optimization step.");
                         } else {
@@ -7158,7 +7189,7 @@ impl PythonExpression {
             horner_iterations: iterations,
             cpe_iterations,
             n_cores,
-            verbose: verbose.into(),
+            verbose: reporting,
             abort_check: Some(abort_check),
             max_horner_scheme_variables,
             max_common_pair_cache_entries,
@@ -7277,7 +7308,8 @@ impl PythonExpression {
         max_common_pair_cache_entries = 1_000_000,
         max_common_pair_distance = 100,
         external_functions = None,
-        conditionals = None),
+        conditionals = None,
+        reporting = None),
         )]
     pub fn evaluator_multiple(
         _cls: &Bound<'_, PyType>,
@@ -7298,7 +7330,11 @@ impl PythonExpression {
         ))]
         external_functions: Option<HashMap<(PolyVariable, String), Py<PyAny>>>,
         conditionals: Option<Vec<PolyVariable>>,
+        reporting: Option<String>,
     ) -> PyResult<PythonExpressionEvaluator> {
+        let reporting = parse_optimization_reporting(verbose, reporting)?;
+        let report_enabled = reporting.is_enabled();
+
         let mut fn_map = FunctionMap::new();
 
         for (k, v) in constants {
@@ -7360,7 +7396,7 @@ impl PythonExpression {
         let abort_check = Box::new(move || {
             Python::attach(|py| {
                 py.check_signals().map_err(|e| {
-                    if verbose {
+                    if report_enabled {
                         if e.is_instance_of::<pyo3::exceptions::PyKeyboardInterrupt>(py) {
                             crate::info!("Ctrl-c detected. Continuing to next optimization step.");
                         } else {
@@ -7381,7 +7417,7 @@ impl PythonExpression {
             horner_iterations: iterations,
             cpe_iterations,
             n_cores,
-            verbose: verbose.into(),
+            verbose: reporting,
             abort_check: Some(abort_check),
             max_horner_scheme_variables,
             max_common_pair_cache_entries,

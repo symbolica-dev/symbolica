@@ -13,6 +13,7 @@ use std::{
         Arc, Mutex,
         atomic::{AtomicBool, AtomicUsize, Ordering},
     },
+    time::{Duration, Instant},
 };
 
 use crate::{
@@ -298,6 +299,107 @@ struct Expr {
 
 /// Settings for optimizing the evaluation of expressions.
 #[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Default)]
+#[repr(u8)]
+pub enum OptimizationReporting {
+    #[default]
+    Silent = 0,
+    Verbose = 1,
+    ProgressBar = 2,
+}
+
+impl OptimizationReporting {
+    #[inline]
+    pub const fn is_enabled(self) -> bool {
+        !matches!(self, Self::Silent)
+    }
+
+    #[inline]
+    pub const fn is_verbose(self) -> bool {
+        matches!(self, Self::Verbose)
+    }
+
+    #[inline]
+    pub const fn is_progress_bar(self) -> bool {
+        matches!(self, Self::ProgressBar)
+    }
+}
+
+impl From<bool> for OptimizationReporting {
+    fn from(value: bool) -> Self {
+        if value { Self::Verbose } else { Self::Silent }
+    }
+}
+
+impl From<u8> for OptimizationReporting {
+    fn from(value: u8) -> Self {
+        match value {
+            1 => Self::Verbose,
+            2 => Self::ProgressBar,
+            _ => Self::Silent,
+        }
+    }
+}
+
+fn format_progress_time(duration: Duration) -> String {
+    if duration.as_secs() < 60 {
+        format!("{:.1}s", duration.as_secs_f64())
+    } else if duration.as_secs() < 3600 {
+        format!(
+            "{:02}:{:04.1}",
+            duration.as_secs() / 60,
+            duration.as_secs_f64() % 60.0
+        )
+    } else {
+        format!(
+            "{:02}:{:02}:{:04.1}",
+            duration.as_secs() / 3600,
+            (duration.as_secs() % 3600) / 60,
+            duration.as_secs_f64() % 60.0
+        )
+    }
+}
+
+fn progress_bar(step: usize, total_steps: usize, width: usize) -> String {
+    if total_steps == 0 {
+        return format!("[{}]", "-".repeat(width));
+    }
+
+    let filled =
+        ((step.min(total_steps) as f64 / total_steps as f64) * width as f64).round() as usize;
+    let filled = filled.min(width);
+    format!(
+        "[{}{}]",
+        "=".repeat(filled),
+        "-".repeat(width.saturating_sub(filled))
+    )
+}
+
+fn render_horner_progress_line(
+    step: usize,
+    total_steps: usize,
+    elapsed: Duration,
+    best_add: usize,
+    best_mul: usize,
+) -> String {
+    let percentage = if total_steps == 0 {
+        100.0
+    } else {
+        (step.min(total_steps) as f64 * 100.0) / total_steps as f64
+    };
+    format!(
+        "Horner {:>5.1}% {} {}/{} | best: {} + {} × | elapsed: {}",
+        percentage,
+        progress_bar(step, total_steps, 28),
+        step.min(total_steps),
+        total_steps.max(1),
+        best_add,
+        best_mul,
+        format_progress_time(elapsed)
+    )
+}
+
+#[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
 #[derive(Clone)]
 pub struct OptimizationSettings {
     pub horner_iterations: usize,
@@ -310,7 +412,7 @@ pub struct OptimizationSettings {
     pub max_horner_scheme_variables: usize,
     pub max_common_pair_cache_entries: usize,
     pub max_common_pair_distance: usize,
-    pub verbose: bool,
+    pub verbose: OptimizationReporting,
 }
 
 #[cfg(feature = "bincode")]
@@ -329,7 +431,8 @@ impl bincode::Encode for OptimizationSettings {
         bincode::Encode::encode(&self.max_horner_scheme_variables, encoder)?;
         bincode::Encode::encode(&self.max_common_pair_cache_entries, encoder)?;
         bincode::Encode::encode(&self.max_common_pair_distance, encoder)?;
-        bincode::Encode::encode(&self.verbose, encoder)?;
+        let reporting: u8 = self.verbose as u8;
+        bincode::Encode::encode(&reporting, encoder)?;
         Ok(())
     }
 }
@@ -339,17 +442,25 @@ impl<Context> bincode::Decode<Context> for OptimizationSettings {
     fn decode<D: bincode::de::Decoder<Context = Context>>(
         decoder: &mut D,
     ) -> core::result::Result<Self, bincode::error::DecodeError> {
+        let horner_iterations = bincode::Decode::decode(decoder)?;
+        let n_cores = bincode::Decode::decode(decoder)?;
+        let cpe_iterations = bincode::Decode::decode(decoder)?;
+        let hot_start = bincode::Decode::decode(decoder)?;
+        let max_horner_scheme_variables = bincode::Decode::decode(decoder)?;
+        let max_common_pair_cache_entries = bincode::Decode::decode(decoder)?;
+        let max_common_pair_distance = bincode::Decode::decode(decoder)?;
+        let reporting: u8 = bincode::Decode::decode(decoder)?;
         Ok(Self {
-            horner_iterations: bincode::Decode::decode(decoder)?,
-            n_cores: bincode::Decode::decode(decoder)?,
-            cpe_iterations: bincode::Decode::decode(decoder)?,
-            hot_start: bincode::Decode::decode(decoder)?,
+            horner_iterations,
+            n_cores,
+            cpe_iterations,
+            hot_start,
             abort_check: None,
             abort_level: 0,
-            max_horner_scheme_variables: bincode::Decode::decode(decoder)?,
-            max_common_pair_cache_entries: bincode::Decode::decode(decoder)?,
-            max_common_pair_distance: bincode::Decode::decode(decoder)?,
-            verbose: bincode::Decode::decode(decoder)?,
+            max_horner_scheme_variables,
+            max_common_pair_cache_entries,
+            max_common_pair_distance,
+            verbose: OptimizationReporting::from(reporting),
         })
     }
 }
@@ -380,8 +491,25 @@ impl Default for OptimizationSettings {
             max_horner_scheme_variables: 500,
             max_common_pair_cache_entries: 1_000_000,
             max_common_pair_distance: 1000,
-            verbose: false,
+            verbose: OptimizationReporting::Silent,
         }
+    }
+}
+
+impl OptimizationSettings {
+    pub fn silent(mut self) -> Self {
+        self.verbose = OptimizationReporting::Silent;
+        self
+    }
+
+    pub fn verbose(mut self) -> Self {
+        self.verbose = OptimizationReporting::Verbose;
+        self
+    }
+
+    pub fn progress_bar(mut self) -> Self {
+        self.verbose = OptimizationReporting::ProgressBar;
+        self
     }
 }
 
@@ -6218,20 +6346,55 @@ impl<T: Clone + Default + PartialEq> EvalTree<T> {
             settings: settings.clone(),
         };
 
-        for _ in 0..settings.cpe_iterations.unwrap_or(usize::MAX) {
+        let cpe_start = Instant::now();
+        let mut cpe_rounds = 0usize;
+        for round in 0..settings.cpe_iterations.unwrap_or(usize::MAX) {
+            cpe_rounds = round + 1;
+            let round_start = Instant::now();
             let r = e.remove_common_pairs();
             if r == 0 || e.settings.abort_level > 0 {
                 e.settings.abort_level = 0;
                 break;
             }
 
-            if settings.verbose {
+            if settings.verbose.is_verbose() {
                 let (add_count, mul_count) = e.count_operations();
                 info!(
-                    "Removed {} common pairs: {} + and {} ×",
-                    r, add_count, mul_count
+                    "CPE round {} removed {} common pairs in {}: {} + and {} ×",
+                    round + 1,
+                    r,
+                    format_progress_time(round_start.elapsed()),
+                    add_count,
+                    mul_count
+                );
+            } else if settings.verbose.is_progress_bar() {
+                let (add_count, mul_count) = e.count_operations();
+                let total_rounds = settings
+                    .cpe_iterations
+                    .map_or("inf".to_string(), |n| n.to_string());
+                eprint!(
+                    "\rCPE {}/{} | removed={} | ops={} + {} × | elapsed={} | cache_limit={} max_dist={}",
+                    round + 1,
+                    total_rounds,
+                    r,
+                    add_count,
+                    mul_count,
+                    format_progress_time(cpe_start.elapsed()),
+                    settings.max_common_pair_cache_entries,
+                    settings.max_common_pair_distance
                 );
             }
+        }
+
+        if settings.verbose.is_progress_bar() && cpe_rounds > 0 {
+            eprintln!();
+        }
+        if settings.verbose.is_enabled() {
+            info!(
+                "CPE stage complete in {} (rounds={})",
+                format_progress_time(cpe_start.elapsed()),
+                cpe_rounds
+            );
         }
 
         e.optimize_stack();
@@ -6577,9 +6740,54 @@ impl EvalTree<Complex<Rational>> {
         &mut self,
         settings: &OptimizationSettings,
     ) -> ExpressionEvaluator<Complex<Rational>> {
+        let optimization_start = Instant::now();
+        if settings.verbose.is_enabled() {
+            info!(
+                "Evaluator optimization started (reporting={:?}, cpe_cache_limit={}, max_pair_distance={})",
+                settings.verbose,
+                settings.max_common_pair_cache_entries,
+                settings.max_common_pair_distance
+            );
+        }
+
+        let horner_start = Instant::now();
         let _ = self.optimize_horner_scheme(settings);
+        if settings.verbose.is_enabled() {
+            info!(
+                "Stage complete: Horner scheme optimization ({})",
+                format_progress_time(horner_start.elapsed())
+            );
+        }
+
+        let cse_start = Instant::now();
+        let before_cse = self.count_operations();
         self.common_subexpression_elimination();
-        self.clone().linearize(settings)
+        if settings.verbose.is_enabled() {
+            let after_cse = self.count_operations();
+            info!(
+                "Stage complete: CSE simplification ({}) | ops: {} + {} × -> {} + {} ×",
+                format_progress_time(cse_start.elapsed()),
+                before_cse.0,
+                before_cse.1,
+                after_cse.0,
+                after_cse.1
+            );
+        }
+
+        let linearize_start = Instant::now();
+        let evaluator = self.clone().linearize(settings);
+        if settings.verbose.is_enabled() {
+            info!(
+                "Stage complete: linearization ({})",
+                format_progress_time(linearize_start.elapsed())
+            );
+            info!(
+                "Evaluator optimization completed in {}",
+                format_progress_time(optimization_start.elapsed())
+            );
+        }
+
+        evaluator
     }
 
     /// Write the expressions in a Horner scheme where the variables
@@ -6659,7 +6867,7 @@ impl EvalTree<Complex<Rational>> {
             v.truncate(settings.max_horner_scheme_variables);
             let v = v.into_iter().map(|(k, _)| k).collect::<Vec<_>>();
 
-            if settings.verbose {
+            if settings.verbose.is_enabled() {
                 info!(
                     "Optimizing Horner scheme for function {} with {} variables",
                     name,
@@ -7071,7 +7279,7 @@ impl Expression<Complex<Rational>> {
             best_ops = (best_ops.0 + ops.0, best_ops.1 + ops.1);
         }
 
-        if settings.verbose {
+        if settings.verbose.is_enabled() {
             info!(
                 "Initial ops: {} additions and {} multiplications",
                 best_ops.0, best_ops.1
@@ -7097,6 +7305,30 @@ impl Expression<Complex<Rational>> {
         } else {
             1
         };
+        let n_cores = n_cores.max(1);
+
+        let permutation_chunk = permutations
+            .as_ref()
+            .map(|p| p.len() / n_cores)
+            .unwrap_or(0);
+        let iterations_per_core = if permutations.is_some() {
+            (settings.horner_iterations / n_cores).min(permutation_chunk)
+        } else {
+            settings.horner_iterations / n_cores
+        };
+        let total_steps = iterations_per_core * n_cores;
+        let progress_tick = (total_steps / 100).max(1);
+        let completed_steps = Arc::new(AtomicUsize::new(0));
+        let horner_start = Instant::now();
+
+        if settings.verbose.is_enabled() {
+            info!(
+                "Stage start: Horner scheme optimization (vars={}, total_steps={}, cores={})",
+                vars.len(),
+                total_steps,
+                n_cores
+            );
+        }
 
         std::thread::scope(|s| {
             let abort = Arc::new(AtomicBool::new(false));
@@ -7111,9 +7343,10 @@ impl Expression<Complex<Rational>> {
                 let mut last_mul = usize::MAX;
                 let mut last_add = usize::MAX;
                 let abort = abort.clone();
+                let completed_steps = completed_steps.clone();
 
                 let mut op = move || {
-                    for j in 0..settings.horner_iterations / n_cores {
+                    for j in 0..iterations_per_core {
                         if abort.load(Ordering::Relaxed) {
                             return;
                         }
@@ -7124,15 +7357,33 @@ impl Expression<Complex<Rational>> {
                         {
                             abort.store(true, Ordering::Relaxed);
 
-                            if settings.verbose {
+                            if settings.verbose.is_enabled() {
                                 info!(
                                     "Aborting Horner optimization at step {}/{}.",
-                                    j,
-                                    settings.horner_iterations / n_cores
+                                    j, iterations_per_core
                                 );
                             }
 
                             return;
+                        }
+
+                        let completed = completed_steps.fetch_add(1, Ordering::Relaxed) + 1;
+                        if i == n_cores - 1
+                            && settings.verbose.is_progress_bar()
+                            && (completed <= 2
+                                || completed >= total_steps
+                                || completed % progress_tick == 0)
+                        {
+                            eprint!(
+                                "\r{}",
+                                render_horner_progress_line(
+                                    completed,
+                                    total_steps,
+                                    horner_start.elapsed(),
+                                    best_add.load(Ordering::Relaxed),
+                                    best_mul.load(Ordering::Relaxed),
+                                )
+                            );
                         }
 
                         // try a random swap
@@ -7140,11 +7391,7 @@ impl Expression<Complex<Rational>> {
                         let mut t2 = 0;
 
                         if let Some(p) = p_ref {
-                            if j >= p.len() / n_cores {
-                                break;
-                            }
-
-                            let perm = &p[i * (p.len() / n_cores) + j];
+                            let perm = &p[i * permutation_chunk + j];
                             cvars = perm.iter().map(|x| vars[*x].clone()).collect();
                         } else {
                             t1 = rng.random_range(0..cvars.len());
@@ -7171,13 +7418,10 @@ impl Expression<Complex<Rational>> {
 
                         // prefer fewer multiplications
                         if cur_ops.1 <= last_mul || cur_ops.1 == last_mul && cur_ops.0 <= last_add {
-                            if settings.verbose {
+                            if settings.verbose.is_verbose() {
                                 info!(
                                     "Accept move at step {}/{}: {} + and {} ×",
-                                    j,
-                                    settings.horner_iterations / n_cores,
-                                    cur_ops.0,
-                                    cur_ops.1
+                                    j, iterations_per_core, cur_ops.0, cur_ops.1
                                 );
                             }
 
@@ -7225,11 +7469,26 @@ impl Expression<Complex<Rational>> {
             }
         });
 
-        if settings.verbose {
+        if settings.verbose.is_progress_bar() {
+            eprint!(
+                "\r{}",
+                render_horner_progress_line(
+                    total_steps,
+                    total_steps,
+                    horner_start.elapsed(),
+                    best_add.load(Ordering::Relaxed),
+                    best_mul.load(Ordering::Relaxed),
+                )
+            );
+            eprintln!();
+        }
+
+        if settings.verbose.is_enabled() {
             info!(
-                "Final scheme: {} + and {} ×",
+                "Final scheme: {} + and {} × (stage time: {})",
                 best_add.load(Ordering::Relaxed),
-                best_mul.load(Ordering::Relaxed)
+                best_mul.load(Ordering::Relaxed),
+                format_progress_time(horner_start.elapsed())
             );
         }
 
