@@ -6289,10 +6289,13 @@ impl<T: Clone + PartialEq> EvalTree<T> {
     }
 }
 
-impl<T: Clone + Default + PartialEq> EvalTree<T> {
+impl EvalTree<Complex<Rational>> {
     /// Create a linear version of the tree that can be evaluated more efficiently.
-    pub fn linearize(mut self, settings: &OptimizationSettings) -> ExpressionEvaluator<T> {
-        let mut stack = vec![T::default(); self.param_count];
+    pub fn linearize(
+        mut self,
+        settings: &OptimizationSettings,
+    ) -> ExpressionEvaluator<Complex<Rational>> {
+        let mut stack = vec![Complex::<Rational>::default(); self.param_count];
 
         // strip every constant and move them into the stack after the params
         self.strip_constants(&mut stack);
@@ -6364,7 +6367,7 @@ impl<T: Clone + Default + PartialEq> EvalTree<T> {
         e
     }
 
-    fn strip_constants(&mut self, stack: &mut Vec<T>) {
+    fn strip_constants(&mut self, stack: &mut Vec<Complex<Rational>>) {
         for t in &mut self.expressions.tree {
             t.strip_constants(stack, self.param_count);
         }
@@ -6387,9 +6390,9 @@ impl<T: Clone + Default + PartialEq> EvalTree<T> {
     // Yields the stack index that contains the output.
     fn linearize_impl(
         &self,
-        tree: &Expression<T>,
-        subexpressions: &[Expression<T>],
-        stack: &mut Vec<T>,
+        tree: &Expression<Complex<Rational>>,
+        subexpressions: &[Expression<Complex<Rational>>],
+        stack: &mut Vec<Complex<Rational>>,
         instr: &mut Vec<(Instr, ComplexPhase)>,
         sub_expr_pos: &mut HashMap<usize, usize>,
         args: &[usize],
@@ -6398,8 +6401,10 @@ impl<T: Clone + Default + PartialEq> EvalTree<T> {
     ) -> usize {
         match tree {
             Expression::Const(t) => {
-                stack.push(t.clone()); // TODO: do once and recycle, this messes with the logic as there is no associated instruction
-                stack.len() - 1
+                unreachable!(
+                    "Constants should have been stripped from the expression tree. Found constant {}",
+                    t
+                );
             }
             Expression::Parameter(i) => *i,
             Expression::Eval(id, e_args) => {
@@ -6451,7 +6456,7 @@ impl<T: Clone + Default + PartialEq> EvalTree<T> {
                     .collect();
                 args.sort();
 
-                stack.push(T::default());
+                stack.push(Complex::default());
                 let res = stack.len() - 1;
 
                 let add = Instr::Add(res, args);
@@ -6477,7 +6482,7 @@ impl<T: Clone + Default + PartialEq> EvalTree<T> {
                     .collect();
                 args.sort();
 
-                stack.push(T::default());
+                stack.push(Complex::default());
                 let res = stack.len() - 1;
 
                 let mul = Instr::Mul(res, args);
@@ -6496,14 +6501,14 @@ impl<T: Clone + Default + PartialEq> EvalTree<T> {
                     in_branch,
                     reserved_indices,
                 );
-                stack.push(T::default());
+                stack.push(Complex::default());
                 let mut res = stack.len() - 1;
 
                 if p.1 > 1 {
                     instr.push((Instr::Mul(res, vec![b; p.1 as usize]), ComplexPhase::Any));
                 } else if p.1 < -1 {
                     instr.push((Instr::Mul(res, vec![b; -p.1 as usize]), ComplexPhase::Any));
-                    stack.push(T::default());
+                    stack.push(Complex::default());
                     res += 1;
                     instr.push((Instr::Pow(res, res - 1, -1), ComplexPhase::Any));
                 } else {
@@ -6532,7 +6537,7 @@ impl<T: Clone + Default + PartialEq> EvalTree<T> {
                     in_branch,
                     reserved_indices,
                 );
-                stack.push(T::default());
+                stack.push(Complex::default());
                 let res = stack.len() - 1;
 
                 instr.push((Instr::Powf(res, b, e), ComplexPhase::Any));
@@ -6550,7 +6555,7 @@ impl<T: Clone + Default + PartialEq> EvalTree<T> {
                     in_branch,
                     reserved_indices,
                 );
-                stack.push(T::default());
+                stack.push(Complex::default());
                 let c = Instr::BuiltinFun(stack.len() - 1, *s, arg);
                 instr.push((c, ComplexPhase::Any));
                 stack.len() - 1
@@ -6597,7 +6602,7 @@ impl<T: Clone + Default + PartialEq> EvalTree<T> {
                     })
                     .collect();
 
-                stack.push(T::default());
+                stack.push(Complex::default());
                 let res = stack.len() - 1;
 
                 let f = Instr::ExternalFun(res, *s, args);
@@ -6606,35 +6611,9 @@ impl<T: Clone + Default + PartialEq> EvalTree<T> {
                 res
             }
             Expression::IfElse(b) => {
-                // evaluate the condition if the argument is a constant
-                if let Expression::ReadArg(p) = &b.0 {
-                    if args[*p] >= self.param_count && args[*p] < reserved_indices {
-                        if stack[args[*p]] != T::default() {
-                            return self.linearize_impl(
-                                &b.1,
-                                subexpressions,
-                                stack,
-                                instr,
-                                sub_expr_pos,
-                                args,
-                                in_branch,
-                                reserved_indices,
-                            );
-                        } else {
-                            return self.linearize_impl(
-                                &b.2,
-                                subexpressions,
-                                stack,
-                                instr,
-                                sub_expr_pos,
-                                args,
-                                in_branch,
-                                reserved_indices,
-                            );
-                        }
-                    }
-                }
-
+                let instr_len = instr.len();
+                let stack_len = stack.len();
+                let subexpression_len = sub_expr_pos.len();
                 let cond = self.linearize_impl(
                     &b.0,
                     subexpressions,
@@ -6646,8 +6625,99 @@ impl<T: Clone + Default + PartialEq> EvalTree<T> {
                     reserved_indices,
                 );
 
+                // try to resolve the condition if it is fully numeric
+                fn resolve(
+                    instr: &[(Instr, ComplexPhase)],
+                    stack: &[Complex<Rational>],
+                    cond: usize,
+                    param_count: usize,
+                    reserved_indices: usize,
+                ) -> Option<Complex<Rational>> {
+                    if cond < param_count {
+                        return None;
+                    }
+                    if cond < reserved_indices {
+                        return Some(stack[cond].clone());
+                    }
+
+                    match &instr[cond - reserved_indices].0 {
+                        Instr::Add(_, args) => {
+                            let mut res = Complex::default();
+                            for x in args {
+                                match resolve(instr, stack, *x, param_count, reserved_indices) {
+                                    Some(v) => res += v,
+                                    None => return None,
+                                }
+                            }
+
+                            Some(res)
+                        }
+                        Instr::Mul(_, args) => {
+                            let mut res = Complex::new(Rational::one(), Rational::zero());
+                            for x in args {
+                                match resolve(instr, stack, *x, param_count, reserved_indices) {
+                                    Some(v) => res *= v,
+                                    None => return None,
+                                }
+                            }
+
+                            Some(res)
+                        }
+                        Instr::Pow(_, base, exp) => {
+                            if let Some(base_val) =
+                                resolve(instr, stack, *base, param_count, reserved_indices)
+                            {
+                                if *exp < 0 {
+                                    Some(base_val.pow(exp.unsigned_abs()).inv())
+                                } else {
+                                    Some(base_val.pow(exp.unsigned_abs()))
+                                }
+                            } else {
+                                None
+                            }
+                        }
+                        _ => None,
+                    }
+                }
+
+                if let Some(cond_res) =
+                    resolve(instr, stack, cond, self.param_count, reserved_indices)
+                {
+                    // remove dead code
+                    instr.truncate(instr_len);
+                    stack.truncate(stack_len);
+                    if subexpression_len != sub_expr_pos.len() {
+                        // remove subexpressions that are created as part of the conditions
+                        sub_expr_pos.retain(|_, &mut v| v < reserved_indices + instr_len);
+                    }
+
+                    return if !cond_res.is_zero() {
+                        self.linearize_impl(
+                            &b.1,
+                            subexpressions,
+                            stack,
+                            instr,
+                            sub_expr_pos,
+                            args,
+                            in_branch,
+                            reserved_indices,
+                        )
+                    } else {
+                        self.linearize_impl(
+                            &b.2,
+                            subexpressions,
+                            stack,
+                            instr,
+                            sub_expr_pos,
+                            args,
+                            in_branch,
+                            reserved_indices,
+                        )
+                    };
+                }
+
                 let label_else = Label(instr.len());
-                stack.push(T::default());
+                stack.push(Complex::default());
                 instr.push((Instr::IfElse(cond, label_else), ComplexPhase::Any));
 
                 let then_branch = self.linearize_impl(
@@ -6662,9 +6732,9 @@ impl<T: Clone + Default + PartialEq> EvalTree<T> {
                 );
 
                 let label_end = Label(instr.len());
-                stack.push(T::default());
+                stack.push(Complex::default());
                 instr.push((Instr::Goto(label_end), ComplexPhase::Any));
-                stack.push(T::default());
+                stack.push(Complex::default());
                 instr.push((Instr::Label(label_else), ComplexPhase::Any));
 
                 let else_branch = self.linearize_impl(
@@ -6678,10 +6748,10 @@ impl<T: Clone + Default + PartialEq> EvalTree<T> {
                     reserved_indices,
                 );
 
-                stack.push(T::default());
+                stack.push(Complex::default());
                 instr.push((Instr::Label(label_end), ComplexPhase::Any));
 
-                stack.push(T::default());
+                stack.push(Complex::default());
                 let res = stack.len() - 1;
 
                 instr.push((
@@ -6693,9 +6763,7 @@ impl<T: Clone + Default + PartialEq> EvalTree<T> {
             }
         }
     }
-}
 
-impl EvalTree<Complex<Rational>> {
     /// Find a near-optimal Horner scheme that minimizes the number of multiplications
     /// and additions, using `iterations` iterations of the optimization algorithm
     /// and `n_cores` cores. Optionally, a starting scheme can be provided.
