@@ -803,9 +803,9 @@ pub trait AtomCore: private::Sealed {
     /// An evaluation with externally defined functions:
     /// ```rust
     /// use ahash::HashMap;
-    /// use symbolica::{atom::AtomCore, evaluate::{FunctionMap, OptimizationSettings}, parse, symbol};
+    /// use symbolica::{atom::AtomCore, evaluate::{FunctionMap, OptimizationSettings, ExternalFunction}, parse, symbol};
     ///
-    /// let mut ext: HashMap<String, Box<dyn Fn(&[f64]) -> f64 + Send + Sync>> = HashMap::default();
+    /// let mut ext: HashMap<String, Box<dyn ExternalFunction<f64>>> = HashMap::default();
     /// ext.insert("f".to_string(), Box::new(|a| a[0] * a[0] + a[1]));
     ///
     /// let mut f = FunctionMap::new();

@@ -2,6 +2,7 @@
 //!
 //! The main entry point is through [AtomCore::evaluator].
 use ahash::{AHasher, HashMap, HashMapExt, HashSet};
+use dyn_clone::DynClone;
 use rand::Rng;
 use self_cell::self_cell;
 use std::{
@@ -1018,9 +1019,9 @@ impl<T: Clone> ExpressionEvaluator<T> {
     /// --------
     /// ```rust
     /// use ahash::HashMap;
-    /// use symbolica::{atom::AtomCore, evaluate::{FunctionMap, OptimizationSettings}, parse, symbol};
+    /// use symbolica::{atom::AtomCore, evaluate::{FunctionMap, OptimizationSettings, ExternalFunction}, parse, symbol};
     ///
-    /// let mut ext: HashMap<String, Box<dyn Fn(&[f64]) -> f64 + Send + Sync>> = HashMap::default();
+    /// let mut ext: HashMap<String, Box<dyn ExternalFunction<f64>>> = HashMap::default();
     /// ext.insert("f".to_string(), Box::new(|a| a[0] * a[0] + a[1]));
     ///
     ///
@@ -1037,7 +1038,7 @@ impl<T: Clone> ExpressionEvaluator<T> {
     /// ```
     pub fn with_external_functions(
         &self,
-        mut external_fns: HashMap<String, Box<dyn Fn(&[T]) -> T + Send + Sync>>,
+        mut external_fns: HashMap<String, Box<dyn ExternalFunction<T>>>,
     ) -> Result<ExpressionEvaluatorWithExternalFunctions<T>, String> {
         let mut external = vec![];
         for e in &self.external_fns {
@@ -4885,14 +4886,20 @@ extern "C" {{
     }
 }
 
+/// An external function that can be called by [ExpressionEvaluatorWithExternalFunctions].
+pub trait ExternalFunction<T>: Fn(&[T]) -> T + Send + Sync + DynClone + Send + Sync {}
+dyn_clone::clone_trait_object!(<T> ExternalFunction<T>);
+impl<T, F: Clone + Send + Sync + Fn(&[T]) -> T + Send + Sync> ExternalFunction<T> for F {}
+
 /// An optimized evaluator for expressions that can evaluate expressions with parameters
 /// and some registered external functions.
+#[derive(Clone)]
 pub struct ExpressionEvaluatorWithExternalFunctions<T> {
     stack: Vec<T>,
     param_count: usize,
     instructions: Vec<(Instr, ComplexPhase)>,
     result_indices: Vec<usize>,
-    external_fns: Vec<(Vec<T>, Box<dyn Fn(&[T]) -> T + Send + Sync>)>,
+    external_fns: Vec<(Vec<T>, Box<dyn ExternalFunction<T>>)>,
 }
 
 impl<T: Real> ExpressionEvaluatorWithExternalFunctions<T> {
@@ -10560,7 +10567,7 @@ mod test {
             float::{Complex, Float, FloatLike},
             rational::Rational,
         },
-        evaluate::{Dualizer, EvaluationFn, FunctionMap, OptimizationSettings},
+        evaluate::{Dualizer, EvaluationFn, ExternalFunction, FunctionMap, OptimizationSettings},
         id::ConditionResult,
         parse, symbol,
     };
@@ -10789,7 +10796,7 @@ mod test {
             .unwrap()
             .map_coeff(&|c| c.re.to_f64());
 
-        let mut fns: HashMap<String, Box<dyn Fn(&[f64]) -> f64 + Send + Sync>> = HashMap::default();
+        let mut fns: HashMap<String, Box<dyn ExternalFunction<f64>>> = HashMap::default();
         fns.insert("f0".to_owned(), Box::new(|a: &[f64]| a[0]));
         fns.insert("f1".to_owned(), Box::new(|a: &[f64]| a[1]));
 

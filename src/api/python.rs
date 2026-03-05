@@ -84,8 +84,8 @@ use crate::{
         CompiledCudaRealEvaluator, CompiledNumber, CompiledRealEvaluator,
         CompiledSimdComplexEvaluator, CompiledSimdRealEvaluator, ComplexEvaluatorSettings,
         CudaComplexf64, CudaLoadSettings, CudaRealf64, Dualizer, EvaluationFn, EvaluatorLoader,
-        ExportSettings, ExpressionEvaluator, ExpressionEvaluatorWithExternalFunctions, FunctionMap,
-        InlineASM, Instruction, OptimizationSettings, Slot,
+        ExportSettings, ExpressionEvaluator, ExpressionEvaluatorWithExternalFunctions,
+        ExternalFunction, FunctionMap, InlineASM, Instruction, OptimizationSettings, Slot,
     },
     graph::{GenerationSettings, Graph, HalfEdge},
     id::{
@@ -7378,7 +7378,7 @@ impl PythonExpression {
                 ef.clone()
                     .into_iter()
                     .map(move |((_, name), f)| {
-                        let ff: Box<dyn Fn(&[f64]) -> f64 + Send + Sync> = Box::new(move |args| {
+                        let ff: Box<dyn ExternalFunction<f64>> = Box::new(move |args| {
                             Python::attach(|py| {
                                 f.call1(py, (args,)).unwrap().extract::<f64>(py).unwrap()
                             })
@@ -7412,20 +7412,19 @@ impl PythonExpression {
             ef.clone()
                 .into_iter()
                 .map(move |((_, name), f)| {
-                    let ff: Box<dyn Fn(&[Complex<f64>]) -> Complex<f64> + Send + Sync> =
-                        Box::new(move |args| {
-                            Python::attach(|py| {
-                                let arg_map: Vec<_> = args
-                                    .iter()
-                                    .map(|x| PyComplex::from_doubles(py, x.re, x.im))
-                                    .collect();
+                    let ff: Box<dyn ExternalFunction<Complex<f64>>> = Box::new(move |args| {
+                        Python::attach(|py| {
+                            let arg_map: Vec<_> = args
+                                .iter()
+                                .map(|x| PyComplex::from_doubles(py, x.re, x.im))
+                                .collect();
 
-                                f.call1(py, (arg_map,))
-                                    .unwrap()
-                                    .extract::<Complex<f64>>(py)
-                                    .unwrap()
-                            })
-                        });
+                            f.call1(py, (arg_map,))
+                                .unwrap()
+                                .extract::<Complex<f64>>(py)
+                                .unwrap()
+                        })
+                    });
 
                     (name.clone(), ff)
                 })
@@ -7617,7 +7616,7 @@ impl PythonExpression {
                 ef.clone()
                     .into_iter()
                     .map(move |((_, name), f)| {
-                        let ff: Box<dyn Fn(&[f64]) -> f64 + Send + Sync> = Box::new(move |args| {
+                        let ff: Box<dyn ExternalFunction<f64>> = Box::new(move |args| {
                             Python::attach(|py| {
                                 f.call1(py, (args,)).unwrap().extract::<f64>(py).unwrap()
                             })
@@ -7651,20 +7650,19 @@ impl PythonExpression {
             ef.clone()
                 .into_iter()
                 .map(move |((_, name), f)| {
-                    let ff: Box<dyn Fn(&[Complex<f64>]) -> Complex<f64> + Send + Sync> =
-                        Box::new(move |args| {
-                            Python::attach(|py| {
-                                let arg_map: Vec<_> = args
-                                    .into_iter()
-                                    .map(|x| PyComplex::from_doubles(py, x.re, x.im))
-                                    .collect();
+                    let ff: Box<dyn ExternalFunction<Complex<f64>>> = Box::new(move |args| {
+                        Python::attach(|py| {
+                            let arg_map: Vec<_> = args
+                                .into_iter()
+                                .map(|x| PyComplex::from_doubles(py, x.re, x.im))
+                                .collect();
 
-                                f.call1(py, (arg_map,))
-                                    .unwrap()
-                                    .extract::<Complex<f64>>(py)
-                                    .unwrap()
-                            })
-                        });
+                            f.call1(py, (arg_map,))
+                                .unwrap()
+                                .extract::<Complex<f64>>(py)
+                                .unwrap()
+                        })
+                    });
 
                     (name.clone(), ff)
                 })
@@ -15960,6 +15958,109 @@ pub struct PythonExpressionEvaluator {
 #[cfg_attr(not(feature = "python_stubgen"), remove_gen_stub)]
 #[pymethods]
 impl PythonExpressionEvaluator {
+    /// Copy the evaluator.
+    pub fn __copy__(&self) -> PythonExpressionEvaluator {
+        PythonExpressionEvaluator {
+            eval_rat: self.eval_rat.clone(),
+            eval: self.eval.clone(),
+            eval_complex: self.eval_complex.clone(),
+            eval_complex_ext: self.eval_complex_ext.clone(),
+        }
+    }
+
+    /// Import an exported evaluator from another thread or machine.
+    /// Use `save` to export the evaluator.
+    #[pyo3(signature = (evaluator, external_functions = BTreeMap::default()))]
+    #[classmethod]
+    fn load(
+        _cls: &Bound<'_, PyType>,
+        evaluator: Bound<'_, PyBytes>,
+        external_functions: BTreeMap<(PolyVariable, String), Py<PyAny>>,
+    ) -> PyResult<Self> {
+        let eval: ExpressionEvaluator<Complex<Rational>> =
+            bincode::decode_from_slice(evaluator.extract()?, bincode::config::standard())
+                .map_err(|e| pyo3::exceptions::PyIOError::new_err(e.to_string()))?
+                .0;
+
+        let eval_f64 = if eval.is_real() {
+            let external_functions_f64 = external_functions
+                .clone()
+                .into_iter()
+                .map(move |((_, name), f)| {
+                    let ff: Box<dyn ExternalFunction<f64>> = Box::new(move |args| {
+                        Python::attach(|py| {
+                            f.call1(py, (args,)).unwrap().extract::<f64>(py).unwrap()
+                        })
+                    });
+
+                    (name.clone(), ff)
+                })
+                .collect();
+
+            Some(
+                eval.clone()
+                    .map_coeff(&|x| x.to_real().unwrap().to_f64())
+                    .with_external_functions(external_functions_f64)
+                    .map_err(|e| {
+                        exceptions::PyValueError::new_err(format!(
+                            "Could not create complex evaluator: {e}",
+                        ))
+                    })?,
+            )
+        } else {
+            None
+        };
+        let eval_complex = eval
+            .clone()
+            .map_coeff(&|x| Complex::new(x.re.to_f64(), x.im.to_f64()));
+
+        let external_functions_complex = external_functions
+            .clone()
+            .into_iter()
+            .map(move |((_, name), f)| {
+                let ff: Box<dyn ExternalFunction<Complex<f64>>> = Box::new(move |args| {
+                    Python::attach(|py| {
+                        let arg_map: Vec<_> = args
+                            .iter()
+                            .map(|x| PyComplex::from_doubles(py, x.re, x.im))
+                            .collect();
+
+                        f.call1(py, (arg_map,))
+                            .unwrap()
+                            .extract::<Complex<f64>>(py)
+                            .unwrap()
+                    })
+                });
+
+                (name.clone(), ff)
+            })
+            .collect();
+
+        let eval_complex_ext = eval_complex
+            .with_external_functions(external_functions_complex)
+            .map_err(|e| {
+                exceptions::PyValueError::new_err(format!(
+                    "Could not create complex evaluator: {e}",
+                ))
+            })?;
+
+        Ok(PythonExpressionEvaluator {
+            eval_rat: eval,
+            eval: eval_f64,
+            eval_complex,
+            eval_complex_ext,
+        })
+    }
+
+    /// Save the evaluator to a byte string that can be imported in another thread or machine.
+    /// The external functions are not exported, so they need to be provided separately when importing.
+    /// Use `load` to import the evaluator.
+    fn save<'p>(&self, py: Python<'p>) -> PyResult<Bound<'p, PyBytes>> {
+        bincode::encode_to_vec(&self.eval_rat, bincode::config::standard())
+            .map(|a| PyBytes::new(py, &a))
+            .map_err(|e| pyo3::exceptions::PyIOError::new_err(e.to_string()))
+    }
+
     /// Return the instructions for efficiently evaluating the expression, the length of the list
     /// of temporary variables, and the list of constants. This can be used to generate
     /// code for the expression evaluation in any programming language.
@@ -16393,7 +16494,7 @@ impl PythonExpressionEvaluator {
                 .clone()
                 .into_iter()
                 .map(move |((_, name, _), f)| {
-                    let ff: Box<dyn Fn(&[f64]) -> f64 + Send + Sync> = Box::new(move |args| {
+                    let ff: Box<dyn ExternalFunction<f64>> = Box::new(move |args| {
                         Python::attach(|py| {
                             f.call1(py, (args,)).unwrap().extract::<f64>(py).unwrap()
                         })
@@ -16426,20 +16527,19 @@ impl PythonExpressionEvaluator {
         let external_functions_complex = external_functions
             .into_iter()
             .map(move |((_, name, _), f)| {
-                let ff: Box<dyn Fn(&[Complex<f64>]) -> Complex<f64> + Send + Sync> =
-                    Box::new(move |args| {
-                        Python::attach(|py| {
-                            let arg_map: Vec<_> = args
-                                .iter()
-                                .map(|x| PyComplex::from_doubles(py, x.re, x.im))
-                                .collect();
+                let ff: Box<dyn ExternalFunction<Complex<f64>>> = Box::new(move |args| {
+                    Python::attach(|py| {
+                        let arg_map: Vec<_> = args
+                            .iter()
+                            .map(|x| PyComplex::from_doubles(py, x.re, x.im))
+                            .collect();
 
-                            f.call1(py, (arg_map,))
-                                .unwrap()
-                                .extract::<Complex<f64>>(py)
-                                .unwrap()
-                        })
-                    });
+                        f.call1(py, (arg_map,))
+                            .unwrap()
+                            .extract::<Complex<f64>>(py)
+                            .unwrap()
+                    })
+                });
 
                 (name.clone(), ff)
             })

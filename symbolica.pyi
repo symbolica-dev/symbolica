@@ -4971,6 +4971,17 @@ class Matrix:
 class Evaluator:
     """An optimized evaluator of an expression."""
 
+    def __copy__(self) -> Evaluator:
+        """Copy the evaluator."""
+
+    @classmethod
+    def load(cls, evaluator: bytes, external_functions: dict[Tuple[Expression, str], Callable[[
+            Sequence[float | complex]], float | complex]] = {}) -> Evaluator:
+        """Load the evaluator into memory, preparing it for evaluation."""
+
+    def save(self) -> bytes:
+        """Save the evaluator to a byte string."""
+
     def get_instructions(self) -> Tuple[List[Tuple[str, Tuple[str, int], List[Tuple[str, int]]]], int, List[Expression]]:
         """Return the instructions for efficiently evaluating the expression, the length of the list
         of temporary variables, and the list of constants. This can be used to generate
