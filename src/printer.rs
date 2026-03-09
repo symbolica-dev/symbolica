@@ -1047,17 +1047,33 @@ impl FormattedPrintMul for MulView<'_> {
         let mut num_count = 0;
         let mut den_count = 0;
 
-        let add_num_paren = opts.mode.is_typst()
-            && self.iter().any(|x| {
-                if let AtomView::Pow(p) = x
-                    && let AtomView::Num(n) = p.get_exp()
-                    && let CoefficientView::Natural(num, _, 0, 1) = n.get_coeff_view()
-                {
-                    num < 0
-                } else {
-                    false
+        let add_num_paren = if opts.mode.is_latex() || opts.mode.is_typst() {
+            let den_count = self
+                .iter()
+                .filter(|x| {
+                    if let AtomView::Pow(p) = x
+                        && let AtomView::Num(n) = p.get_exp()
+                        && let CoefficientView::Natural(num, _, 0, 1) = n.get_coeff_view()
+                    {
+                        num < 0
+                    } else {
+                        false
+                    }
+                })
+                .count();
+
+            if den_count > 0 {
+                if self.get_nargs() - den_count == 1 {
+                    print_state.in_product = false;
                 }
-            });
+
+                true
+            } else {
+                false
+            }
+        } else {
+            false
+        };
 
         if add_num_paren {
             if print_state.in_sum {
@@ -1065,7 +1081,11 @@ impl FormattedPrintMul for MulView<'_> {
                 f.write_char('+')?;
             }
 
-            f.write_char('(')?;
+            if opts.mode.is_latex() {
+                f.write_fmt(format_args!("\\frac{{"))?;
+            } else {
+                f.write_char('(')?;
+            }
         }
 
         // write the coefficient first
@@ -1188,8 +1208,18 @@ impl FormattedPrintMul for MulView<'_> {
                 f.write_char('1')?;
             }
 
+            print_state.in_product = true;
+
             if add_num_paren {
-                f.write_char(')')?;
+                if opts.mode.is_latex() {
+                    f.write_str("}{")?;
+
+                    if den_count == 1 {
+                        print_state.in_product = false;
+                    }
+                } else {
+                    f.write_char(')')?;
+                }
             }
 
             // always do a global check on the args to see if we need to put
@@ -1215,9 +1245,11 @@ impl FormattedPrintMul for MulView<'_> {
                 char_count += 2;
             }
 
-            f.write_char('/')?;
+            if !opts.mode.is_latex() {
+                f.write_char('/')?;
+            }
 
-            if den_count > 1 {
+            if !opts.mode.is_latex() && den_count > 1 {
                 AtomPrinter::format_bracket('(', f, opts, print_state)?;
                 print_state.bracket_level += 1;
             }
@@ -1289,11 +1321,12 @@ impl FormattedPrintMul for MulView<'_> {
                         count += 1;
                         first = false;
 
+                        let exp = Rational::new(num, den).neg();
+
                         let mut new_print_state = print_state;
-                        new_print_state.in_exp_base = true;
+                        new_print_state.in_exp_base = !exp.is_one();
                         b.format(f, opts, new_print_state)?;
 
-                        let exp = Rational::new(num, den).neg();
                         if exp.is_one() {
                             continue;
                         }
@@ -1336,9 +1369,13 @@ impl FormattedPrintMul for MulView<'_> {
                 }
             }
 
-            if den_count > 1 {
+            if !opts.mode.is_latex() && den_count > 1 {
                 print_state.bracket_level -= 1;
                 AtomPrinter::format_bracket(')', f, opts, print_state)?;
+            }
+
+            if opts.mode.is_latex() {
+                f.write_str("}")?;
             }
         }
 
@@ -1588,17 +1625,7 @@ impl FormattedPrintPow for PowView<'_> {
         print_state.suppress_one = false;
 
         let mut superscript_exponent = false;
-        if opts.mode.is_latex() {
-            if let AtomView::Num(n) = e
-                && n.get_coeff_view() == CoefficientView::Natural(-1, 1, 0, 1)
-            {
-                // TODO: construct the numerator
-                f.write_str("\\frac{1}{")?;
-                b.format(f, opts, print_state)?;
-                f.write_char('}')?;
-                return Ok(false);
-            }
-        } else if opts.mode.is_symbolica()
+        if opts.mode.is_symbolica()
             && opts.num_exp_as_superscript
             && let AtomView::Num(n) = e
         {
@@ -1612,12 +1639,19 @@ impl FormattedPrintPow for PowView<'_> {
             && let CoefficientView::Natural(num, den, 0, 1) = n.get_coeff_view()
             && num < 0
         {
-            f.write_str("1/")?;
+            let exp = Rational::new(num, den).neg();
+
+            if opts.mode.is_latex() {
+                print_state.in_exp_base = !exp.is_one();
+                f.write_str("\\frac{1}{")?;
+            } else {
+                f.write_str("1/")?;
+            }
+
             b.format(f, opts, print_state)?;
 
             print_state.in_exp_base = false;
 
-            let exp = Rational::new(num, den).neg();
             if !exp.is_one() {
                 print_state.in_exp = true;
 
@@ -1650,6 +1684,10 @@ impl FormattedPrintPow for PowView<'_> {
                 } else {
                     exp.format(opts, print_state, f)?;
                 }
+            }
+
+            if opts.mode.is_latex() {
+                f.write_str("}")?;
             }
         } else {
             b.format(f, opts, print_state)?;
