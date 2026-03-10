@@ -569,6 +569,64 @@ pub struct Context {
     pub index: usize,
 }
 
+/// An atom that contains aliases, together with a map from the aliases to their original atoms.
+/// An aliased atom may have a lower memory footprint than the original atom if it contains many repeated subexpressions.
+#[derive(Clone, Debug)]
+pub struct AliasedAtom {
+    pub(crate) root: Atom,
+    pub(crate) aliases: HashMap<Atom, Atom>, // TODO: Rc?
+}
+
+impl AliasedAtom {
+    /// Get the root atom, which may contain aliases.
+    pub fn get_root(&self) -> &Atom {
+        &self.root
+    }
+
+    /// Get the map from aliases to their original atoms. These atoms may contain aliases themselves.
+    pub fn get_aliases(&self) -> &HashMap<Atom, Atom> {
+        &self.aliases
+    }
+
+    /// Undo the common subexpression extraction and return the original atom.
+    pub fn into_inner(mut self) -> Atom {
+        // TODO: this can be a one-pass if unfolded in reverse insertion order
+        loop {
+            let out = self.root.replace_map(|a, _, out| {
+                if let Some(replacement) = self.aliases.get::<[u8]>(a.get_data()) {
+                    out.set_from_view(&replacement.as_view());
+                }
+            });
+
+            if out != self.root {
+                self.root = out;
+            } else {
+                break;
+            }
+        }
+
+        self.root
+    }
+
+    /// Extract common subexpressions from the root atom and replace them with aliases, which are returned in the map.
+    pub fn alias_subexpressions(
+        self,
+        f: impl FnMut(AtomView, usize, usize) -> Option<Atom>,
+    ) -> Self {
+        // FIXME: do in one pass
+        self.into_inner().as_atom_view().alias_subexpressions(f)
+    }
+}
+
+impl From<Atom> for AliasedAtom {
+    fn from(atom: Atom) -> Self {
+        AliasedAtom {
+            root: atom,
+            aliases: HashMap::default(),
+        }
+    }
+}
+
 impl<'a> AtomView<'a> {
     pub(crate) fn to_pattern(self) -> Pattern {
         Pattern::from_view(self, true)
@@ -974,10 +1032,10 @@ impl<'a> AtomView<'a> {
         }
     }
 
-    pub(crate) fn extract_subexpressions(
+    pub(crate) fn alias_subexpressions(
         &self,
         mut f: impl FnMut(AtomView, usize, usize) -> Option<Atom>,
-    ) -> (Atom, Vec<Atom>) {
+    ) -> AliasedAtom {
         let mut subexpressions = HashMap::default();
         self.count_subexpressions(&mut subexpressions);
         let mut subexpr_vec: Vec<_> = subexpressions.into_iter().collect(); // .filter(|(_, v)| *v > 1)
@@ -986,7 +1044,7 @@ impl<'a> AtomView<'a> {
         let mut subexpr_corrections = HashMap::default();
 
         let mut replaced_atom = self.to_owned();
-        let mut subs: Vec<Atom> = vec![];
+        let mut subs: HashMap<Atom, Atom> = HashMap::default();
         for (subexpr, mut count) in subexpr_vec.drain(..) {
             count += subexpr_corrections.get(&subexpr).cloned().unwrap_or(0);
 
@@ -999,11 +1057,11 @@ impl<'a> AtomView<'a> {
                 let new_rhs = replacement.to_pattern();
                 replaced_atom = replaced_atom.replace(&pat).with(&new_rhs);
 
-                for s in &mut subs {
-                    *s = s.replace(&pat).with(&new_rhs);
+                for value in subs.values_mut() {
+                    *value = value.replace(&pat).with(&new_rhs);
                 }
 
-                subs.push(subexpr.to_owned());
+                subs.insert(replacement, subexpr.to_owned());
             } else {
                 // increase the subexpression counter
                 let mut subexpr_correction = HashMap::default();
@@ -1014,7 +1072,10 @@ impl<'a> AtomView<'a> {
             }
         }
 
-        (replaced_atom, subs)
+        AliasedAtom {
+            root: replaced_atom,
+            aliases: subs,
+        }
     }
 
     pub(crate) fn count_subexpressions(&self, subexpressions: &mut HashMap<AtomView<'a>, usize>) {

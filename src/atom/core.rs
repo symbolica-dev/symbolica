@@ -26,8 +26,8 @@ use crate::{
     },
     evaluate::{EvalTree, EvaluationFn, ExpressionEvaluator, FunctionMap, OptimizationSettings},
     id::{
-        BorrowReplacement, Condition, ConditionResult, Context, MatchSettings, Pattern,
-        PatternAtomTreeIterator, PatternRestriction, ReplaceBuilder,
+        AliasedAtom, BorrowReplacement, Condition, ConditionResult, Context, MatchSettings,
+        Pattern, PatternAtomTreeIterator, PatternRestriction, ReplaceBuilder,
     },
     poly::{
         Exponent, PolyVariable, PositiveExponent, factor::Factorize, gcd::PolynomialGCD,
@@ -46,15 +46,26 @@ use super::{
     representation::{InlineNum, InlineVar},
 };
 
+impl Atom {
+    #[inline(always)]
+    fn wrap<A: AtomCore>(self, state: &A) -> A::Output {
+        state.atom_to_output(self)
+    }
+}
+
 /// All core features of expressions, such as expansion and
 /// pattern matching that leave the expression unchanged.
 ///
 ///
 /// This trait is sealed, such that new methods can be added
 /// without breaking existing implementations.
-pub trait AtomCore: private::Sealed {
+pub trait AtomCore: private::Sealed + Sized {
+    type Output;
+
     /// Take a view of the atom.
     fn as_atom_view(&self) -> AtomView<'_>;
+
+    fn atom_to_output(&self, atom: Atom) -> Self::Output;
 
     /// Get a function view if the atom is a function.
     fn as_fun_view(&self) -> Option<FunView<'_>> {
@@ -121,19 +132,19 @@ pub trait AtomCore: private::Sealed {
     }
 
     /// Take the `self` to the power `exp`. Use [`Atom::rpow()`] for the reverse operation.
-    fn pow<'a, T: Into<AtomOrView<'a>>>(&self, exp: T) -> Atom {
+    fn pow<'a, T: Into<AtomOrView<'a>>>(&self, exp: T) -> Self::Output {
         Workspace::get_local().with(|ws| {
             let mut t = ws.new_atom();
             self.as_atom_view()
                 .pow_no_norm(ws, exp.into().as_atom_view())
                 .as_view()
                 .normalize(ws, &mut t);
-            t.into_inner()
+            t.into_inner().wrap(self)
         })
     }
 
     /// Take `base` to the power `self`.
-    fn rpow<'a, T: Into<AtomOrView<'a>>>(&self, base: T) -> Atom {
+    fn rpow<'a, T: Into<AtomOrView<'a>>>(&self, base: T) -> Self::Output {
         Workspace::get_local().with(|ws| {
             let mut t = ws.new_atom();
             base.into()
@@ -141,7 +152,7 @@ pub trait AtomCore: private::Sealed {
                 .pow_no_norm(ws, self.as_atom_view())
                 .as_view()
                 .normalize(ws, &mut t);
-            t.into_inner()
+            t.into_inner().wrap(self)
         })
     }
 
@@ -170,8 +181,10 @@ pub trait AtomCore: private::Sealed {
         x: impl Into<AtomOrView<'a>>,
         key_map: Option<Box<dyn Fn(AtomView, &mut Atom)>>,
         coeff_map: Option<Box<dyn Fn(AtomView, &mut Atom)>>,
-    ) -> Atom {
-        self.as_atom_view().collect::<E, _>(x, key_map, coeff_map)
+    ) -> Self::Output {
+        self.as_atom_view()
+            .collect::<E, _>(x, key_map, coeff_map)
+            .wrap(self)
     }
 
     /// Collect terms involving the same power of variables or functions with the name `x`, e.g.
@@ -197,9 +210,10 @@ pub trait AtomCore: private::Sealed {
         x: Symbol,
         key_map: Option<Box<dyn Fn(AtomView, &mut Atom)>>,
         coeff_map: Option<Box<dyn Fn(AtomView, &mut Atom)>>,
-    ) -> Atom {
+    ) -> Self::Output {
         self.as_atom_view()
             .collect_symbol::<E>(x, key_map, coeff_map)
+            .wrap(self)
     }
 
     /// Collect terms involving the same power of `x`, where `x` is a variable or function, e.g.
@@ -226,9 +240,10 @@ pub trait AtomCore: private::Sealed {
         xs: &[impl AtomCore],
         key_map: Option<Box<dyn Fn(AtomView, &mut Atom)>>,
         coeff_map: Option<Box<dyn Fn(AtomView, &mut Atom)>>,
-    ) -> Atom {
+    ) -> Self::Output {
         self.as_atom_view()
             .collect_multiple::<E, _>(xs, key_map, coeff_map)
+            .wrap(self)
     }
 
     /// Collect common factors from (nested) sums.
@@ -241,8 +256,8 @@ pub trait AtomCore: private::Sealed {
     /// let collected = expr.collect_factors();
     /// assert_eq!(collected, parse!("x^2*(1+x+y+y*(1+x))"));
     /// ```
-    fn collect_factors(&self) -> Atom {
-        self.as_atom_view().collect_factors()
+    fn collect_factors(&self) -> Self::Output {
+        self.as_atom_view().collect_factors().wrap(self)
     }
 
     /// Iteratively extract the minimal common powers of an indeterminate `v` for every term that contains `v`
@@ -256,16 +271,18 @@ pub trait AtomCore: private::Sealed {
     /// let collected = expr.collect_horner(&[symbol!("v1"), symbol!("v2")]);
     /// assert_eq!(collected, parse!("v1*(1+v1*(1+v1*(v1*z+y))+v2*(1+2*v3))"));
     /// ```
-    fn collect_horner<'a, V: Into<Indeterminate> + Clone>(&self, variables: &[V]) -> Atom {
-        Workspace::get_local().with(|ws| {
-            self.as_atom_view().horner_scheme_impl(
-                ws,
-                &variables
-                    .iter()
-                    .map(|v| v.clone().into())
-                    .collect::<Vec<_>>(),
-            )
-        })
+    fn collect_horner<'a, V: Into<Indeterminate> + Clone>(&self, variables: &[V]) -> Self::Output {
+        Workspace::get_local()
+            .with(|ws| {
+                self.as_atom_view().horner_scheme_impl(
+                    ws,
+                    &variables
+                        .iter()
+                        .map(|v| v.clone().into())
+                        .collect::<Vec<_>>(),
+                )
+            })
+            .wrap(self)
     }
 
     /// Count the number of occurrences of each non-constant and non-variable subexpression in the expression.
@@ -294,16 +311,18 @@ pub trait AtomCore: private::Sealed {
     ///
     /// ```
     /// use symbolica::{atom::AtomCore, function, parse, symbol};
-    /// let (a, subs) = parse!("f(1+x) + x*f(1+x) + z*(1+x)")
+    /// let a = parse!("f(1+x) + x*f(1+x) + z*(1+x)")
     ///     .extract_subexpressions(|_a, _count, i| Some(function!(symbol!("se"), i)));
-    /// assert_eq!(a, parse!("se(0) + x*se(0) + z*se(1)"));
-    /// assert_eq!(subs, vec![parse!("f(se(1))"), parse!("1+x")]);
-    //// ```
-    fn extract_subexpressions(
+    /// assert_eq!(a.get_root(), &parse!("se(0) + x*se(0) + z*se(1)"));
+    ///
+    /// assert_eq!(a.get_aliases()[&parse!("se(0)")], parse!("f(se(1))"));
+    /// assert_eq!(a.get_aliases()[&parse!("se(1)")], parse!("1+x"));
+    /// ```
+    fn alias_subexpressions(
         &self,
         f: impl FnMut(AtomView, usize, usize) -> Option<Atom>,
-    ) -> (Atom, Vec<Atom>) {
-        self.as_atom_view().extract_subexpressions(f)
+    ) -> AliasedAtom {
+        self.as_atom_view().alias_subexpressions(f)
     }
 
     /// Collect terms involving the same power of `x` in `xs`, where `xs` is a list of indeterminates.
@@ -335,10 +354,11 @@ pub trait AtomCore: private::Sealed {
     /// let r = parse!("1+y");
     /// assert_eq!(coeff, coeff);
     /// ```
-    fn coefficient<'a, T: Into<AtomOrView<'a>>>(&self, x: T) -> Atom {
+    fn coefficient<'a, T: Into<AtomOrView<'a>>>(&self, x: T) -> Self::Output {
         Workspace::get_local().with(|ws| {
             self.as_atom_view()
                 .coefficient_with_ws(x.into().as_atom_view(), ws)
+                .wrap(self)
         })
     }
 
@@ -353,8 +373,8 @@ pub trait AtomCore: private::Sealed {
     /// let r = parse!("(x + y) / (x * y)");
     /// assert_eq!(together, r);
     /// ```
-    fn together(&self) -> Atom {
-        self.as_atom_view().together()
+    fn together(&self) -> Self::Output {
+        self.as_atom_view().together().wrap(self)
     }
 
     /// Write the expression as a sum of terms with minimal denominators in `x`.
@@ -368,8 +388,8 @@ pub trait AtomCore: private::Sealed {
     /// let r = parse!("1 / y + 1 / x");
     /// assert_eq!(apart, r);
     /// ```
-    fn apart<'a, V: Into<BorrowedOrOwned<'a, Indeterminate>>>(&self, x: V) -> Atom {
-        self.as_atom_view().apart(x.into().borrow())
+    fn apart<'a, V: Into<BorrowedOrOwned<'a, Indeterminate>>>(&self, x: V) -> Self::Output {
+        self.as_atom_view().apart(x.into().borrow()).wrap(self)
     }
 
     /// Write the expression as a sum of terms with minimal denominators in all variables.
@@ -384,8 +404,8 @@ pub trait AtomCore: private::Sealed {
     /// let r = parse!("3/(2*y*x+2*y^2)+1/(2*y^2-2*x*y)");
     /// assert_eq!(apart, r);
     /// ```
-    fn apart_multivariate(&self) -> Atom {
-        self.as_atom_view().apart_multivariate()
+    fn apart_multivariate(&self) -> Self::Output {
+        self.as_atom_view().apart_multivariate().wrap(self)
     }
 
     /// Cancel all common factors between numerators and denominators.
@@ -400,8 +420,8 @@ pub trait AtomCore: private::Sealed {
     /// let r = parse!("x+1");
     /// assert_eq!(canceled, r);
     /// ```
-    fn cancel(&self) -> Atom {
-        self.as_atom_view().cancel()
+    fn cancel(&self) -> Self::Output {
+        self.as_atom_view().cancel().wrap(self)
     }
 
     /// Factor the expression over the rationals.
@@ -415,8 +435,8 @@ pub trait AtomCore: private::Sealed {
     /// let r = parse!("(x - 1) * (x + 1)");
     /// assert_eq!(factored, r);
     /// ```
-    fn factor(&self) -> Atom {
-        self.as_atom_view().factor()
+    fn factor(&self) -> Self::Output {
+        self.as_atom_view().factor().wrap(self)
     }
 
     /// Collect numerical factors by removing the numerical content from additions.
@@ -433,8 +453,8 @@ pub trait AtomCore: private::Sealed {
     /// let r = parse!("-2 * (x - 2 * x^2 - 3 * x^3)");
     /// assert_eq!(collected_num, r);
     /// ```
-    fn collect_num(&self) -> Atom {
-        self.as_atom_view().collect_num()
+    fn collect_num(&self) -> Self::Output {
+        self.as_atom_view().collect_num().wrap(self)
     }
 
     /// Expand an expression. The function [AtomCore::expand_via_poly] may be faster.
@@ -448,8 +468,8 @@ pub trait AtomCore: private::Sealed {
     /// let r = parse!("x^2 + 2 * x + 1");
     /// assert_eq!(expanded, r);
     /// ```
-    fn expand(&self) -> Atom {
-        self.as_atom_view().expand()
+    fn expand(&self) -> Self::Output {
+        self.as_atom_view().expand().wrap(self)
     }
 
     /// Expand the expression by converting it to a polynomial, optionally
@@ -466,9 +486,10 @@ pub trait AtomCore: private::Sealed {
     /// let r = parse!("x^2 + 2 * x + 1");
     /// assert_eq!(expanded, r);
     /// ```
-    fn expand_via_poly<E: Exponent, T: AtomCore>(&self, var: impl Into<Option<T>>) -> Atom {
+    fn expand_via_poly<E: Exponent, T: AtomCore>(&self, var: impl Into<Option<T>>) -> Self::Output {
         self.as_atom_view()
             .expand_via_poly::<E>(var.into().as_ref().map(|x| x.as_atom_view()))
+            .wrap(self)
     }
 
     /// Expand an expression in the variable or function `var`.
@@ -487,8 +508,10 @@ pub trait AtomCore: private::Sealed {
     /// let r = parse!("(1+y)^2 + (1+y)^2*x");
     /// assert_eq!(expanded, r);
     /// ```
-    fn expand_in<'a, T: Into<AtomOrView<'a>>>(&self, var: T) -> Atom {
-        self.as_atom_view().expand_in(var.into().as_atom_view())
+    fn expand_in<'a, T: Into<AtomOrView<'a>>>(&self, var: T) -> Self::Output {
+        self.as_atom_view()
+            .expand_in(var.into().as_atom_view())
+            .wrap(self)
     }
 
     /// Expand an expression in the variable `var`.
@@ -506,9 +529,10 @@ pub trait AtomCore: private::Sealed {
         since = "1.4.0",
         note = "Use `expand_in` instead, which can expand in both variables and functions."
     )]
-    fn expand_in_symbol(&self, var: Symbol) -> Atom {
+    fn expand_in_symbol(&self, var: Symbol) -> Self::Output {
         self.as_atom_view()
             .expand_in(InlineVar::from(var).as_view())
+            .wrap(self)
     }
 
     /// Expand an expression, returning `true` iff the expression changed.
@@ -541,8 +565,8 @@ pub trait AtomCore: private::Sealed {
     /// let r = parse!("2 * x + 2 * y");
     /// assert_eq!(expanded_num, r);
     /// ```
-    fn expand_num(&self) -> Atom {
-        self.as_atom_view().expand_num()
+    fn expand_num(&self) -> Self::Output {
+        self.as_atom_view().expand_num().wrap(self)
     }
 
     /// Check if the expression is expanded, optionally in only the variable or function `var`.
@@ -571,8 +595,8 @@ pub trait AtomCore: private::Sealed {
     /// let r = parse!("2 * x + 2");
     /// assert_eq!(derivative, r);
     /// ```
-    fn derivative<'a, V: Into<BorrowedOrOwned<'a, Indeterminate>>>(&self, x: V) -> Atom {
-        self.as_atom_view().derivative(x.into().borrow())
+    fn derivative<'a, V: Into<BorrowedOrOwned<'a, Indeterminate>>>(&self, x: V) -> Self::Output {
+        self.as_atom_view().derivative(x.into().borrow()).wrap(self)
     }
 
     /// Take a derivative of the expression with respect to `x` and
@@ -955,8 +979,8 @@ pub trait AtomCore: private::Sealed {
     /// let r = result.set_coefficient_ring(&Arc::new(vec![]));
     /// assert_eq!(r, parse!("y*(x+1)^-1*(x+2*x^2+x^3+1)"));
     /// ```
-    fn set_coefficient_ring(&self, vars: &Arc<Vec<PolyVariable>>) -> Atom {
-        self.as_atom_view().set_coefficient_ring(vars)
+    fn set_coefficient_ring(&self, vars: &Arc<Vec<PolyVariable>>) -> Self::Output {
+        self.as_atom_view().set_coefficient_ring(vars).wrap(self)
     }
 
     /// Convert all coefficients and built-in functions to floats with a given precision `decimal_prec`.
@@ -970,10 +994,10 @@ pub trait AtomCore: private::Sealed {
     /// let result = expr.to_float(2);
     /// assert_eq!(result.to_string(), "1.4");
     /// ```
-    fn to_float(&self, decimal_prec: u32) -> Atom {
+    fn to_float(&self, decimal_prec: u32) -> Self::Output {
         let mut a = Atom::new();
         self.as_atom_view().to_float_into(decimal_prec, &mut a);
-        a
+        a.wrap(self)
     }
 
     /// Convert all coefficients and built-in functions to floats with a given precision `decimal_prec`.
@@ -1013,8 +1037,8 @@ pub trait AtomCore: private::Sealed {
     ///     parse!("3.30000000000000e-1*x+3.00000000000000")
     /// );
     /// ```
-    fn map_coefficient<F: Fn(CoefficientView) -> Coefficient + Copy>(&self, f: F) -> Atom {
-        self.as_atom_view().map_coefficient(f)
+    fn map_coefficient<F: Fn(CoefficientView) -> Coefficient + Copy>(&self, f: F) -> Self::Output {
+        self.as_atom_view().map_coefficient(f).wrap(self)
     }
 
     /// Map all coefficients using a given function.
@@ -1058,8 +1082,10 @@ pub trait AtomCore: private::Sealed {
     /// let result = expr.rationalize(&(1, 100).into());
     /// assert_eq!(result, Atom::num((1, 3)));
     /// ```
-    fn rationalize(&self, relative_error: &Rational) -> Atom {
-        self.as_atom_view().rationalize_coefficients(relative_error)
+    fn rationalize(&self, relative_error: &Rational) -> Self::Output {
+        self.as_atom_view()
+            .rationalize_coefficients(relative_error)
+            .wrap(self)
     }
 
     /// Convert the atom to a polynomial, optionally in the variable ordering
@@ -1383,8 +1409,8 @@ pub trait AtomCore: private::Sealed {
     /// let result = expr.map_terms_single_core(|term| term.expand());
     /// assert_eq!(result, parse!("x + y"));
     /// ```
-    fn map_terms_single_core(&self, f: impl Fn(AtomView) -> Atom) -> Atom {
-        self.as_atom_view().map_terms_single_core(f)
+    fn map_terms_single_core(&self, f: impl Fn(AtomView) -> Atom) -> Self::Output {
+        self.as_atom_view().map_terms_single_core(f).wrap(self)
     }
 
     /// Map the function `f` over all terms, using parallel execution with `n_cores` cores.
@@ -1397,8 +1423,12 @@ pub trait AtomCore: private::Sealed {
     /// let result = expr.map_terms(|term| term.expand(), 4);
     /// assert_eq!(result, parse!("x + y"));
     /// ```
-    fn map_terms(&self, f: impl Fn(AtomView) -> Atom + Send + Sync, n_cores: usize) -> Atom {
-        self.as_atom_view().map_terms(f, n_cores)
+    fn map_terms(
+        &self,
+        f: impl Fn(AtomView) -> Atom + Send + Sync,
+        n_cores: usize,
+    ) -> Self::Output {
+        self.as_atom_view().map_terms(f, n_cores).wrap(self)
     }
 
     /// Map the function `f` over all terms, using parallel execution with `n_cores` cores.
@@ -1416,8 +1446,8 @@ pub trait AtomCore: private::Sealed {
         &self,
         f: impl Fn(AtomView) -> Atom + Send + Sync,
         p: &ThreadPool,
-    ) -> Atom {
-        self.as_atom_view().map_terms_with_pool(f, p)
+    ) -> Self::Output {
+        self.as_atom_view().map_terms_with_pool(f, p).wrap(self)
     }
 
     /// Canonize (products of) tensors in the expression by relabeling repeated indices.
@@ -1631,45 +1661,51 @@ pub trait AtomCore: private::Sealed {
     }
 
     /// Exponentiate the atom.
-    fn exp(&self) -> Atom {
+    fn exp(&self) -> Self::Output {
         FunctionBuilder::new(Symbol::EXP)
             .add_arg(self.as_atom_view())
             .finish()
+            .wrap(self)
     }
 
     /// Take the logarithm of the atom.
-    fn log(&self) -> Atom {
+    fn log(&self) -> Self::Output {
         FunctionBuilder::new(Symbol::LOG)
             .add_arg(self.as_atom_view())
             .finish()
+            .wrap(self)
     }
 
     /// Take the sine of the atom.
-    fn sin(&self) -> Atom {
+    fn sin(&self) -> Self::Output {
         FunctionBuilder::new(Symbol::SIN)
             .add_arg(self.as_atom_view())
             .finish()
+            .wrap(self)
     }
 
     /// Take the cosine of the atom.
-    fn cos(&self) -> Atom {
+    fn cos(&self) -> Self::Output {
         FunctionBuilder::new(Symbol::COS)
             .add_arg(self.as_atom_view())
             .finish()
+            .wrap(self)
     }
 
     /// Take the square root of the atom.
-    fn sqrt(&self) -> Atom {
+    fn sqrt(&self) -> Self::Output {
         FunctionBuilder::new(Symbol::SQRT)
             .add_arg(self.as_atom_view())
             .finish()
+            .wrap(self)
     }
 
     /// Take the absolute value of the atom.
-    fn abs(&self) -> Atom {
+    fn abs(&self) -> Self::Output {
         FunctionBuilder::new(Symbol::ABS)
             .add_arg(self.as_atom_view())
             .finish()
+            .wrap(self)
     }
 
     /// Take the complex conjugate of the atom.
@@ -1682,10 +1718,11 @@ pub trait AtomCore: private::Sealed {
     /// let result = expr.conj();
     /// assert_eq!(result, parse!("(5-2𝑖)*test::real+3^conj(x)+conj(x)+conj((-2)^x)+2"));
     /// ```
-    fn conj(&self) -> Atom {
+    fn conj(&self) -> Self::Output {
         FunctionBuilder::new(Symbol::CONJ)
             .add_arg(self.as_atom_view())
             .finish()
+            .wrap(self)
     }
 
     /// Replace all occurrences of the pattern. The right-hand side is
@@ -1792,8 +1829,10 @@ pub trait AtomCore: private::Sealed {
     /// ]);
     /// assert_eq!(result, parse!("x + y"));
     /// ```
-    fn replace_multiple<T: BorrowReplacement>(&self, replacements: &[T]) -> Atom {
-        self.as_atom_view().replace_multiple(replacements)
+    fn replace_multiple<T: BorrowReplacement>(&self, replacements: &[T]) -> Self::Output {
+        self.as_atom_view()
+            .replace_multiple(replacements)
+            .wrap(self)
     }
 
     /// Replace all occurrences of the patterns, where replacements are tested in the order that they are given.
@@ -1844,8 +1883,11 @@ pub trait AtomCore: private::Sealed {
     /// });
     /// assert_eq!(result, Atom::var(y) + z);
     /// ```
-    fn replace_map<F: FnMut(AtomView, &Context, &mut Settable<'_, Atom>)>(&self, m: F) -> Atom {
-        self.as_atom_view().replace_map(m)
+    fn replace_map<F: FnMut(AtomView, &Context, &mut Settable<'_, Atom>)>(
+        &self,
+        m: F,
+    ) -> Self::Output {
+        self.as_atom_view().replace_map(m).wrap(self)
     }
 
     /// Call the function `v` for every subexpression. If `v` returns `true`, the
@@ -1951,38 +1993,100 @@ pub trait AtomCore: private::Sealed {
 }
 
 impl AtomCore for InlineVar {
+    type Output = Atom;
+
     fn as_atom_view(&self) -> AtomView<'_> {
         self.as_view()
+    }
+
+    fn atom_to_output(&self, atom: Atom) -> Self::Output {
+        atom
     }
 }
 
 impl AtomCore for InlineNum {
+    type Output = Atom;
     fn as_atom_view(&self) -> AtomView<'_> {
         self.as_view()
+    }
+
+    fn atom_to_output(&self, atom: Atom) -> Self::Output {
+        atom
     }
 }
 
 impl AtomCore for Indeterminate {
+    type Output = Atom;
     fn as_atom_view(&self) -> AtomView<'_> {
         self.as_view()
+    }
+
+    fn atom_to_output(&self, atom: Atom) -> Self::Output {
+        atom
     }
 }
 
 impl<'a> AtomCore for AtomView<'a> {
+    type Output = Atom;
     fn as_atom_view(&self) -> AtomView<'a> {
         *self
+    }
+
+    fn atom_to_output(&self, atom: Atom) -> Self::Output {
+        atom
     }
 }
 
 impl<T: AsRef<Atom>> AtomCore for T {
+    type Output = Atom;
     fn as_atom_view(&self) -> AtomView<'_> {
         self.as_ref().as_view()
+    }
+
+    fn atom_to_output(&self, atom: Atom) -> Self::Output {
+        atom
     }
 }
 
 impl AtomCore for AtomOrView<'_> {
+    type Output = Atom;
     fn as_atom_view(&self) -> AtomView<'_> {
         self.as_view()
+    }
+
+    fn atom_to_output(&self, atom: Atom) -> Self::Output {
+        atom
+    }
+}
+
+impl AtomCore for AliasedAtom {
+    type Output = AliasedAtom;
+
+    fn as_atom_view(&self) -> AtomView<'_> {
+        self.root.as_view()
+    }
+
+    fn atom_to_output(&self, atom: Atom) -> Self::Output {
+        AliasedAtom {
+            root: atom,
+            aliases: self.aliases.clone(),
+        }
+    }
+
+    fn count_subexpressions<'a>(&'a self) -> HashMap<AtomView<'a>, usize> {
+        let mut count = HashMap::default();
+        self.root.as_atom_view().count_subexpressions(&mut count);
+        for e in &self.aliases {
+            e.1.as_atom_view().count_subexpressions(&mut count);
+        }
+        count
+    }
+
+    fn alias_subexpressions(
+        &self,
+        f: impl FnMut(AtomView, usize, usize) -> Option<Atom>,
+    ) -> AliasedAtom {
+        self.clone().alias_subexpressions(f)
     }
 }
 
@@ -1997,4 +2101,5 @@ mod private {
     impl<'a> Sealed for AtomView<'a> {}
     impl<T: AsRef<super::Atom>> Sealed for T {}
     impl Sealed for super::AtomOrView<'_> {}
+    impl Sealed for super::AliasedAtom {}
 }
