@@ -1,6 +1,7 @@
 use ahash::{HashMap, HashSet};
 use numerica::domains::{
     float::{Complex, FloatField},
+    integer::Integer,
     rational::Rational,
 };
 
@@ -1058,6 +1059,249 @@ impl<'a> AtomView<'a> {
             }
         }
     }
+
+    /// Get the lowest power of `x` in all the terms in which `x` appears.
+    /// Returns 0 if `x` does not appear in the expression.
+    fn get_lowest_power(&self, x: &Indeterminate) -> Integer {
+        if *self == x.as_view() {
+            return 1.into();
+        }
+
+        match self {
+            AtomView::Num(_) | AtomView::Var(_) | AtomView::Fun(_) => 0.into(),
+            AtomView::Add(a) => {
+                let mut lowest_power = 0.into();
+                for arg in a {
+                    let p = arg.get_lowest_power(x);
+                    if p > 0 && lowest_power == 0 || p < lowest_power {
+                        lowest_power = p;
+
+                        if lowest_power == 1 {
+                            return lowest_power;
+                        }
+                    }
+                }
+
+                lowest_power
+            }
+            AtomView::Mul(m) => {
+                for arg in m {
+                    if arg == x.as_view() {
+                        return 1.into();
+                    }
+
+                    if let AtomView::Pow(p) = arg
+                        && let (b, e) = p.get_base_exp()
+                        && b == x.as_view()
+                        && let AtomView::Num(n) = e
+                        && let CoefficientView::Natural(n, d, ni, _di) = n.get_coeff_view()
+                        && ni == 0
+                        && d == 1
+                    {
+                        return n.into();
+                    }
+                }
+
+                0.into()
+            }
+            AtomView::Pow(p) => {
+                let (b, e) = p.get_base_exp();
+                if b == x.as_view()
+                    && let AtomView::Num(n) = e
+                    && let CoefficientView::Natural(n, d, ni, _di) = n.get_coeff_view()
+                    && ni == 0
+                    && d == 1
+                {
+                    n.into()
+                } else {
+                    0.into()
+                }
+            }
+        }
+    }
+
+    /// Collect the minimal power of `x` that is contained in all terms in which `x` appears, and the rest of the expression separately.
+    fn partial_collect_factors_impl(
+        &self,
+        ws: &Workspace,
+        x: &Indeterminate,
+    ) -> (Integer, Atom, Atom) {
+        if *self == x.as_view() {
+            return (1.into(), Atom::num(1), Atom::Zero);
+        }
+
+        match self {
+            AtomView::Num(_) | AtomView::Var(_) | AtomView::Fun(_) => {
+                (0.into(), Atom::Zero, self.to_owned())
+            }
+            AtomView::Add(a) => {
+                let min_power = self.get_lowest_power(x);
+
+                if min_power == 0 {
+                    return (0.into(), Atom::Zero, self.to_owned());
+                }
+
+                let mut coeff = ws.new_atom();
+                let mc = coeff.to_add();
+
+                let mut rest = ws.new_atom();
+                let rc = rest.to_add();
+
+                for arg in a {
+                    if arg == x.as_view() {
+                        mc.extend(ws.new_num(1).as_view());
+                        continue;
+                    } else if let AtomView::Pow(p) = arg
+                        && let (b, e) = p.get_base_exp()
+                        && b == x.as_view()
+                        && let AtomView::Num(n) = e
+                        && let CoefficientView::Natural(n, d, ni, _di) = n.get_coeff_view()
+                        && ni == 0
+                        && d == 1
+                        && n > 0
+                    {
+                        let mut pow = ws.new_atom();
+                        let exp = ws.new_num(n - &min_power);
+                        pow.to_pow(x.as_view(), exp.as_view());
+                        mc.extend(pow.as_view());
+                    } else if let AtomView::Mul(m) = arg {
+                        let mut new_m = ws.new_atom();
+                        let new_mul = new_m.to_mul();
+
+                        let mut found = false;
+                        for arg in m {
+                            if arg == x.as_view() {
+                                found = true;
+                                continue;
+                            }
+
+                            if let AtomView::Pow(p) = arg
+                                && let (b, e) = p.get_base_exp()
+                                && b == x.as_view()
+                                && let AtomView::Num(n) = e
+                                && let CoefficientView::Natural(n, d, ni, _di) = n.get_coeff_view()
+                                && ni == 0
+                                && d == 1
+                                && n > 0
+                            // TODO: check
+                            {
+                                let mut pow = ws.new_atom();
+                                let exp = ws.new_num(n - &min_power);
+                                pow.to_pow(x.as_view(), exp.as_view());
+                                new_mul.extend(pow.as_view());
+                                found = true;
+                            } else {
+                                new_mul.extend(arg);
+                            }
+                        }
+
+                        if found {
+                            mc.extend(new_m.as_view());
+                        } else {
+                            rc.extend(arg);
+                        }
+                    } else {
+                        rc.extend(arg);
+                    }
+                }
+
+                let mut out = Atom::new();
+                coeff.as_view().normalize(ws, &mut out);
+
+                let mut rest_out = Atom::new();
+                rc.as_view().normalize(ws, &mut rest_out);
+
+                (min_power, out, rest_out)
+            }
+            AtomView::Mul(m) => {
+                let min_power = self.get_lowest_power(x);
+
+                if min_power == 0 {
+                    return (0.into(), Atom::Zero, self.to_owned());
+                }
+
+                let mut coeff = ws.new_atom();
+                let mc = coeff.to_mul();
+
+                for arg in m {
+                    if arg == x.as_view() {
+                        continue;
+                    }
+
+                    if let AtomView::Pow(p) = arg
+                        && let (b, e) = p.get_base_exp()
+                        && b == x.as_view()
+                        && let AtomView::Num(n) = e
+                        && let CoefficientView::Natural(n, d, ni, _di) = n.get_coeff_view()
+                        && ni == 0
+                        && d == 1
+                        && n > 0
+                    // TODO: check
+                    {
+                        let mut pow = ws.new_atom();
+                        let exp = ws.new_num(n - &min_power);
+                        pow.to_pow(x.as_view(), exp.as_view());
+                        mc.extend(pow.as_view());
+                    } else {
+                        mc.extend(arg);
+                    }
+                }
+
+                let mut out = Atom::new();
+                coeff.as_view().normalize(ws, &mut out);
+
+                (min_power, out, Atom::Zero)
+            }
+            AtomView::Pow(p) => {
+                let (b, e) = p.get_base_exp();
+
+                if b == x.as_view()
+                    && let AtomView::Num(n) = e
+                    && let CoefficientView::Natural(n, d, ni, _di) = n.get_coeff_view()
+                    && ni == 0
+                    && d == 1
+                {
+                    (n.into(), Atom::num(1), Atom::Zero)
+                } else {
+                    (0.into(), Atom::Zero, self.to_owned())
+                }
+            }
+        }
+    }
+
+    pub(crate) fn horner_scheme_impl<'b>(&self, ws: &Workspace, xs: &[Indeterminate]) -> Atom {
+        if xs.is_empty() {
+            return self.to_owned();
+        }
+
+        match self {
+            AtomView::Num(_) | AtomView::Var(_) | AtomView::Fun(_) | AtomView::Pow(_) => {
+                return self.to_owned();
+            }
+            AtomView::Mul(m) => {
+                let mut tmp = ws.new_atom();
+                let mul = tmp.to_mul();
+
+                for arg in m {
+                    mul.extend(arg.horner_scheme_impl(ws, xs).as_view());
+                }
+
+                let mut res = Atom::new();
+                tmp.as_view().normalize(ws, &mut res);
+                return res;
+            }
+            AtomView::Add(_) => {
+                let (power, key, rest) = self.partial_collect_factors_impl(ws, &xs[0]);
+
+                let mut res = rest.as_view().horner_scheme_impl(ws, &xs[1..]);
+                if power > 0 {
+                    res += key.as_view().horner_scheme_impl(ws, &xs) * xs[0].pow(power);
+                }
+
+                res
+            }
+        }
+    }
 }
 
 #[cfg(test)]
@@ -1066,6 +1310,13 @@ mod test {
         atom::{Atom, AtomCore, representation::InlineVar},
         function, parse, symbol,
     };
+
+    #[test]
+    fn collect_horner() {
+        let expr = parse!("1 + v1*v2 + 2 v1*v2*v3 + v1^2 + v1^3*y + v1^4*z + v1^10");
+        let collected = expr.collect_horner(&[symbol!("v1"), symbol!("v2")]);
+        assert_eq!(collected.expand(), expr);
+    }
 
     #[test]
     fn collect_factors() {

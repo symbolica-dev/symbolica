@@ -245,6 +245,29 @@ pub trait AtomCore: private::Sealed {
         self.as_atom_view().collect_factors()
     }
 
+    /// Iteratively extract the minimal common powers of an indeterminate `v` for every term that contains `v`
+    /// and continue to the next indeterminate in `variables`.
+    /// This is a generalization of Horner's method for polynomials.
+    ///
+    /// # Example
+    /// ```
+    /// use symbolica::{atom::AtomCore, parse, symbol};
+    /// let expr = parse!("v1 + v1*v2 + 2 v1*v2*v3 + v1^2 + v1^3*y + v1^4*z");
+    /// let collected = expr.collect_horner(&[symbol!("v1"), symbol!("v2")]);
+    /// assert_eq!(collected, parse!("v1*(1+v1*(1+v1*(v1*z+y))+v2*(1+2*v3))"));
+    /// ```
+    fn collect_horner<'a, V: Into<Indeterminate> + Clone>(&self, variables: &[V]) -> Atom {
+        Workspace::get_local().with(|ws| {
+            self.as_atom_view().horner_scheme_impl(
+                ws,
+                &variables
+                    .iter()
+                    .map(|v| v.clone().into())
+                    .collect::<Vec<_>>(),
+            )
+        })
+    }
+
     /// Collect terms involving the same power of `x` in `xs`, where `xs` is a list of indeterminates.
     /// Return the list of key-coefficient pairs
     ///
