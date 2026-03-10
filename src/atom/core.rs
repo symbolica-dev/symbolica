@@ -268,6 +268,44 @@ pub trait AtomCore: private::Sealed {
         })
     }
 
+    /// Count the number of occurrences of each non-constant and non-variable subexpression in the expression.
+    /// Subexpressions that occur inside other subexpressions will only be counted once.
+    ///
+    /// # Example
+    /// ```
+    /// use symbolica::{atom::AtomCore, parse};
+    /// let expr = parse!("f(1+x) + x*f(1+x) + z*(1+x)");
+    /// let count = expr.count_subexpressions();
+    /// assert_eq!(count.get(&parse!("f(1+x)").as_view()).unwrap(), &2);
+    /// assert_eq!(count.get(&parse!("1+x").as_view()).unwrap(), &2);
+    //// ```
+    fn count_subexpressions<'a>(&'a self) -> HashMap<AtomView<'a>, usize> {
+        let mut subexpressions: HashMap<AtomView, usize> = HashMap::default();
+        self.as_atom_view()
+            .count_subexpressions(&mut subexpressions);
+        subexpressions
+    }
+
+    /// Extract subexpressions and replace the subexpressions with
+    /// a mapped value given by `f`. The arguments of `f` are the subexpression, the number of occurrences of the subexpression
+    /// and the index of the subexpression in the list of subexpressions. `f` should return `None` if the subexpression should not be replaced, and `Some(replacement)` if it should be replaced with `replacement`.
+    ///
+    /// # Example
+    ///
+    /// ```
+    /// use symbolica::{atom::AtomCore, function, parse, symbol};
+    /// let (a, subs) = parse!("f(1+x) + x*f(1+x) + z*(1+x)")
+    ///     .extract_subexpressions(|_a, _count, i| Some(function!(symbol!("se"), i)));
+    /// assert_eq!(a, parse!("se(0) + x*se(0) + z*se(1)"));
+    /// assert_eq!(subs, vec![parse!("f(se(1))"), parse!("1+x")]);
+    //// ```
+    fn extract_subexpressions(
+        &self,
+        f: impl FnMut(AtomView, usize, usize) -> Option<Atom>,
+    ) -> (Atom, Vec<Atom>) {
+        self.as_atom_view().extract_subexpressions(f)
+    }
+
     /// Collect terms involving the same power of `x` in `xs`, where `xs` is a list of indeterminates.
     /// Return the list of key-coefficient pairs
     ///

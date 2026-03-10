@@ -974,6 +974,86 @@ impl<'a> AtomView<'a> {
         }
     }
 
+    pub(crate) fn extract_subexpressions(
+        &self,
+        mut f: impl FnMut(AtomView, usize, usize) -> Option<Atom>,
+    ) -> (Atom, Vec<Atom>) {
+        let mut subexpressions = HashMap::default();
+        self.count_subexpressions(&mut subexpressions);
+        let mut subexpr_vec: Vec<_> = subexpressions.into_iter().collect(); // .filter(|(_, v)| *v > 1)
+        subexpr_vec.sort_by(|(k1, _), (k2, _)| k2.get_byte_size().cmp(&k1.get_byte_size())); // largest first
+
+        let mut subexpr_corrections = HashMap::default();
+
+        let mut replaced_atom = self.to_owned();
+        let mut subs: Vec<Atom> = vec![];
+        for (subexpr, mut count) in subexpr_vec.drain(..) {
+            count += subexpr_corrections.get(&subexpr).cloned().unwrap_or(0);
+
+            if count == 1 {
+                continue;
+            }
+
+            if let Some(replacement) = f(subexpr, count, subs.len()) {
+                let pat = subexpr.to_pattern();
+                let new_rhs = replacement.to_pattern();
+                replaced_atom = replaced_atom.replace(&pat).with(&new_rhs);
+
+                for s in &mut subs {
+                    *s = s.replace(&pat).with(&new_rhs);
+                }
+
+                subs.push(subexpr.to_owned());
+            } else {
+                // increase the subexpression counter
+                let mut subexpr_correction = HashMap::default();
+                subexpr.count_subexpressions(&mut subexpr_correction);
+                for (k, v) in subexpr_correction {
+                    *subexpr_corrections.entry(k).or_insert(0) += v * (count - 1);
+                }
+            }
+        }
+
+        (replaced_atom, subs)
+    }
+
+    pub(crate) fn count_subexpressions(&self, subexpressions: &mut HashMap<AtomView<'a>, usize>) {
+        if subexpressions.contains_key(self) {
+            *subexpressions.entry(*self).or_insert(0) += 1;
+            return;
+        }
+
+        match self {
+            AtomView::Num(_) | AtomView::Var(_) => {}
+            AtomView::Fun(f) => {
+                *subexpressions.entry(*self).or_insert(0) += 1;
+
+                for arg in f {
+                    arg.count_subexpressions(subexpressions);
+                }
+            }
+            AtomView::Pow(p) => {
+                *subexpressions.entry(*self).or_insert(0) += 1;
+
+                let (base, exp) = p.get_base_exp();
+                base.count_subexpressions(subexpressions);
+                exp.count_subexpressions(subexpressions);
+            }
+            AtomView::Mul(m) => {
+                *subexpressions.entry(*self).or_insert(0) += 1;
+                for child in m {
+                    child.count_subexpressions(subexpressions);
+                }
+            }
+            AtomView::Add(a) => {
+                *subexpressions.entry(*self).or_insert(0) += 1;
+                for child in a {
+                    child.count_subexpressions(subexpressions);
+                }
+            }
+        }
+    }
+
     /// Check if the expression has complex coefficients.
     pub fn has_complex_coefficients(&self) -> bool {
         let mut has_complex_coefficient = false;
