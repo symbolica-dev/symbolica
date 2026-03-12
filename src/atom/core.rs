@@ -312,7 +312,7 @@ pub trait AtomCore: private::Sealed + Sized {
     /// ```
     /// use symbolica::{atom::AtomCore, function, parse, symbol};
     /// let a = parse!("f(1+x) + x*f(1+x) + z*(1+x)")
-    ///     .extract_subexpressions(|_a, _count, i| Some(function!(symbol!("se"), i)));
+    ///     .alias_subexpressions(|_a, _count, i| Some(function!(symbol!("se"), i)));
     /// assert_eq!(a.get_root(), &parse!("se(0) + x*se(0) + z*se(1)"));
     ///
     /// assert_eq!(a.get_aliases()[&parse!("se(0)")], parse!("f(se(1))"));

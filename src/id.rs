@@ -616,6 +616,43 @@ impl AliasedAtom {
         // FIXME: do in one pass
         self.into_inner().as_atom_view().alias_subexpressions(f)
     }
+
+    /// Register an alias for an atom. The alias can be used in the root atom and in other aliases.
+    pub fn add_alias(mut self, alias: Atom, original: Atom) -> Self {
+        self.aliases.insert(alias, original);
+        self
+    }
+
+    /// Return the number of additions and multiplications needed to evaluate the aliased atom.
+    pub fn count_operations(&self) -> (usize, usize) {
+        let (mut add, mut mul) = (0, 0);
+
+        let mut counter = |a: AtomView<'_>| match a {
+            AtomView::Mul(m) => {
+                mul += m.get_nargs() - 1;
+                true
+            }
+            AtomView::Add(a) => {
+                add += a.get_nargs() - 1;
+                true
+            }
+            AtomView::Pow(p) => {
+                if let Ok(i) = isize::try_from(p.get_exp()) {
+                    mul += i.unsigned_abs() - 1;
+                }
+                true
+            }
+            _ => true,
+        };
+
+        self.root.visitor(&mut counter);
+
+        for x in self.aliases.values() {
+            x.visitor(&mut counter);
+        }
+
+        (add, mul)
+    }
 }
 
 impl From<Atom> for AliasedAtom {
@@ -1038,13 +1075,15 @@ impl<'a> AtomView<'a> {
     ) -> AliasedAtom {
         let mut subexpressions = HashMap::default();
         self.count_subexpressions(&mut subexpressions);
-        let mut subexpr_vec: Vec<_> = subexpressions.into_iter().collect(); // .filter(|(_, v)| *v > 1)
+        let mut subexpr_vec: Vec<_> = subexpressions.into_iter().collect();
         subexpr_vec.sort_by(|(k1, _), (k2, _)| k2.get_byte_size().cmp(&k1.get_byte_size())); // largest first
 
         let mut subexpr_corrections = HashMap::default();
 
-        let mut replaced_atom = self.to_owned();
         let mut subs: HashMap<Atom, Atom> = HashMap::default();
+
+        let mut inv_subs = HashMap::default();
+
         for (subexpr, mut count) in subexpr_vec.drain(..) {
             count += subexpr_corrections.get(&subexpr).cloned().unwrap_or(0);
 
@@ -1053,15 +1092,8 @@ impl<'a> AtomView<'a> {
             }
 
             if let Some(replacement) = f(subexpr, count, subs.len()) {
-                let pat = subexpr.to_pattern();
-                let new_rhs = replacement.to_pattern();
-                replaced_atom = replaced_atom.replace(&pat).with(&new_rhs);
-
-                for value in subs.values_mut() {
-                    *value = value.replace(&pat).with(&new_rhs);
-                }
-
-                subs.insert(replacement, subexpr.to_owned());
+                subs.insert(replacement.clone(), subexpr.to_owned());
+                inv_subs.insert(subexpr, replacement);
             } else {
                 // increase the subexpression counter
                 let mut subexpr_correction = HashMap::default();
@@ -1070,6 +1102,22 @@ impl<'a> AtomView<'a> {
                     *subexpr_corrections.entry(k).or_insert(0) += v * (count - 1);
                 }
             }
+        }
+
+        let replaced_atom = self.replace_map(|a, _, out| {
+            if let Some(replacement) = inv_subs.get(&a) {
+                out.set_from_view(&replacement.as_view());
+            }
+        });
+
+        for x in subs.values_mut() {
+            *x = x.replace_map(|a, _, out| {
+                if a != x.as_view()
+                    && let Some(replacement) = inv_subs.get(&a)
+                {
+                    out.set_from_view(&replacement.as_view());
+                }
+            });
         }
 
         AliasedAtom {

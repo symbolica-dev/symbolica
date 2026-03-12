@@ -1062,8 +1062,8 @@ impl<'a> AtomView<'a> {
 
     /// Get the lowest power of `x` in all the terms in which `x` appears.
     /// Returns 0 if `x` does not appear in the expression.
-    fn get_lowest_power(&self, x: &Indeterminate) -> Integer {
-        if *self == x.as_view() {
+    fn get_lowest_power(&self, x: AtomView) -> Integer {
+        if *self == x {
             return 1.into();
         }
 
@@ -1086,13 +1086,13 @@ impl<'a> AtomView<'a> {
             }
             AtomView::Mul(m) => {
                 for arg in m {
-                    if arg == x.as_view() {
+                    if arg == x {
                         return 1.into();
                     }
 
                     if let AtomView::Pow(p) = arg
                         && let (b, e) = p.get_base_exp()
-                        && b == x.as_view()
+                        && b == x
                         && let AtomView::Num(n) = e
                         && let CoefficientView::Natural(n, d, ni, _di) = n.get_coeff_view()
                         && ni == 0
@@ -1106,7 +1106,7 @@ impl<'a> AtomView<'a> {
             }
             AtomView::Pow(p) => {
                 let (b, e) = p.get_base_exp();
-                if b == x.as_view()
+                if b == x
                     && let AtomView::Num(n) = e
                     && let CoefficientView::Natural(n, d, ni, _di) = n.get_coeff_view()
                     && ni == 0
@@ -1124,60 +1124,61 @@ impl<'a> AtomView<'a> {
     fn partial_collect_factors_impl(
         &self,
         ws: &Workspace,
-        x: &Indeterminate,
-    ) -> (Integer, Atom, Atom) {
-        if *self == x.as_view() {
-            return (1.into(), Atom::num(1), Atom::Zero);
+        x: AtomView,
+    ) -> (Integer, AtomOrView<'_>, AtomOrView<'_>) {
+        if *self == x {
+            return (1.into(), Atom::num(1).into(), Atom::Zero.into());
         }
 
         match self {
             AtomView::Num(_) | AtomView::Var(_) | AtomView::Fun(_) => {
-                (0.into(), Atom::Zero, self.to_owned())
+                (0.into(), Atom::Zero.into(), self.into())
             }
             AtomView::Add(a) => {
                 let min_power = self.get_lowest_power(x);
 
                 if min_power == 0 {
-                    return (0.into(), Atom::Zero, self.to_owned());
+                    return (0.into(), Atom::Zero.into(), self.into());
                 }
 
                 let mut coeff = ws.new_atom();
                 let mc = coeff.to_add();
 
-                let mut rest = ws.new_atom();
+                let mut rest = Atom::new();
                 let rc = rest.to_add();
 
+                let mut new_arg = ws.new_atom();
+
                 for arg in a {
-                    if arg == x.as_view() {
+                    if arg == x {
                         mc.extend(ws.new_num(1).as_view());
                         continue;
                     } else if let AtomView::Pow(p) = arg
                         && let (b, e) = p.get_base_exp()
-                        && b == x.as_view()
+                        && b == x
                         && let AtomView::Num(n) = e
                         && let CoefficientView::Natural(n, d, ni, _di) = n.get_coeff_view()
                         && ni == 0
                         && d == 1
                         && n > 0
                     {
-                        let mut pow = ws.new_atom();
                         let exp = ws.new_num(n - &min_power);
-                        pow.to_pow(x.as_view(), exp.as_view());
-                        mc.extend(pow.as_view());
+                        new_arg.to_pow(x, exp.as_view());
+                        mc.extend(new_arg.as_view());
                     } else if let AtomView::Mul(m) = arg {
-                        let mut new_m = ws.new_atom();
-                        let new_mul = new_m.to_mul();
+                        let new_mul = new_arg.to_mul();
 
                         let mut found = false;
+                        let mut pow = ws.new_atom();
                         for arg in m {
-                            if arg == x.as_view() {
+                            if arg == x {
                                 found = true;
                                 continue;
                             }
 
                             if let AtomView::Pow(p) = arg
                                 && let (b, e) = p.get_base_exp()
-                                && b == x.as_view()
+                                && b == x
                                 && let AtomView::Num(n) = e
                                 && let CoefficientView::Natural(n, d, ni, _di) = n.get_coeff_view()
                                 && ni == 0
@@ -1185,9 +1186,8 @@ impl<'a> AtomView<'a> {
                                 && n > 0
                             // TODO: check
                             {
-                                let mut pow = ws.new_atom();
                                 let exp = ws.new_num(n - &min_power);
-                                pow.to_pow(x.as_view(), exp.as_view());
+                                pow.to_pow(x, exp.as_view());
                                 new_mul.extend(pow.as_view());
                                 found = true;
                             } else {
@@ -1196,7 +1196,7 @@ impl<'a> AtomView<'a> {
                         }
 
                         if found {
-                            mc.extend(new_m.as_view());
+                            mc.extend(new_arg.as_view());
                         } else {
                             rc.extend(arg);
                         }
@@ -1208,29 +1208,29 @@ impl<'a> AtomView<'a> {
                 let mut out = Atom::new();
                 coeff.as_view().normalize(ws, &mut out);
 
-                let mut rest_out = Atom::new();
-                rc.as_view().normalize(ws, &mut rest_out);
+                rc.set_normalized(true); // a sorted subset of a sum is also sorted
 
-                (min_power, out, rest_out)
+                (min_power, out.into(), rest.into())
             }
             AtomView::Mul(m) => {
                 let min_power = self.get_lowest_power(x);
 
                 if min_power == 0 {
-                    return (0.into(), Atom::Zero, self.to_owned());
+                    return (0.into(), Atom::Zero.into(), self.into());
                 }
 
                 let mut coeff = ws.new_atom();
                 let mc = coeff.to_mul();
 
+                let mut new_arg = ws.new_atom();
                 for arg in m {
-                    if arg == x.as_view() {
+                    if arg == x {
                         continue;
                     }
 
                     if let AtomView::Pow(p) = arg
                         && let (b, e) = p.get_base_exp()
-                        && b == x.as_view()
+                        && b == x
                         && let AtomView::Num(n) = e
                         && let CoefficientView::Natural(n, d, ni, _di) = n.get_coeff_view()
                         && ni == 0
@@ -1238,10 +1238,9 @@ impl<'a> AtomView<'a> {
                         && n > 0
                     // TODO: check
                     {
-                        let mut pow = ws.new_atom();
                         let exp = ws.new_num(n - &min_power);
-                        pow.to_pow(x.as_view(), exp.as_view());
-                        mc.extend(pow.as_view());
+                        new_arg.to_pow(x, exp.as_view());
+                        mc.extend(new_arg.as_view());
                     } else {
                         mc.extend(arg);
                     }
@@ -1250,20 +1249,20 @@ impl<'a> AtomView<'a> {
                 let mut out = Atom::new();
                 coeff.as_view().normalize(ws, &mut out);
 
-                (min_power, out, Atom::Zero)
+                (min_power, out.into(), Atom::Zero.into())
             }
             AtomView::Pow(p) => {
                 let (b, e) = p.get_base_exp();
 
-                if b == x.as_view()
+                if b == x
                     && let AtomView::Num(n) = e
                     && let CoefficientView::Natural(n, d, ni, _di) = n.get_coeff_view()
                     && ni == 0
                     && d == 1
                 {
-                    (n.into(), Atom::num(1), Atom::Zero)
+                    (n.into(), Atom::num(1).into(), Atom::Zero.into())
                 } else {
-                    (0.into(), Atom::Zero, self.to_owned())
+                    (0.into(), Atom::Zero.into(), self.into())
                 }
             }
         }
@@ -1291,7 +1290,7 @@ impl<'a> AtomView<'a> {
                 return res;
             }
             AtomView::Add(_) => {
-                let (power, key, rest) = self.partial_collect_factors_impl(ws, &xs[0]);
+                let (power, key, rest) = self.partial_collect_factors_impl(ws, xs[0].as_view());
 
                 let mut res = rest.as_view().horner_scheme_impl(ws, &xs[1..]);
                 if power > 0 {
