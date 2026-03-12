@@ -15,6 +15,7 @@ use std::{
         atomic::{AtomicBool, AtomicUsize, Ordering},
     },
 };
+use symjit::{Application, Config, Defuns, Translator};
 
 use crate::{
     LicenseManager,
@@ -9109,6 +9110,214 @@ self_cell!(
         dependent: EvaluatorFunctionsCudaComplexf64,
     }
 );
+
+#[test]
+fn test_jit_compile() {
+    use crate::parse;
+    let eval = parse!("x^2 * cos(x)")
+        .evaluator(
+            &FunctionMap::new(),
+            &[parse!("x")],
+            OptimizationSettings::default(),
+        )
+        .unwrap();
+
+    let mut res = [0.; 1];
+    let mut eval_re = eval.clone().map_coeff(&|x| x.re.to_f64());
+    eval_re.evaluate(&[0.5], &mut res);
+
+    let mut jit_eval_re = eval.jit_compile::<f64>().unwrap();
+    let mut jit_res = [0.; 1];
+    jit_eval_re.evaluate(&[0.5], &mut jit_res);
+    assert_eq!(res[0], jit_res[0]);
+
+    let mut res = [Complex::new(0., 0.); 1];
+    let mut eval_c = eval
+        .clone()
+        .map_coeff(&|x| Complex::new(x.re.to_f64(), x.im.to_f64()));
+    eval_c.evaluate(&[Complex::new(0.5, 1.2)], &mut res);
+
+    let mut jit_eval_c = eval.jit_compile::<Complex<f64>>().unwrap();
+    let mut jit_res = [Complex::new(0., 0.); 1];
+    jit_eval_c.evaluate(&[Complex::new(0.5, 1.2)], &mut jit_res);
+    assert_eq!(res[0], jit_res[0]);
+}
+
+impl ExpressionEvaluator<Complex<Rational>> {
+    pub fn jit_compile<T: JITCompiledNumber>(&self) -> Result<T::Evaluator, String> {
+        T::jit_compile(self, &Defuns::new())
+    }
+}
+
+impl ExpressionEvaluatorWithExternalFunctions<Complex<Rational>> {
+    pub fn jit_compile<T: JITCompiledNumber>(&self) -> Result<T::Evaluator, String> {
+        // TODO: register functions!
+        let mut external_functions = Defuns::new();
+
+        for (arg_cache, fn_ptr) in &self.external_fns {
+            if arg_cache.len() != 1 && arg_cache.len() != 2 {
+                Err("Only functions with 1 or 2 arguments are supported at the moment")?;
+            }
+
+            //external_functions.
+        }
+
+        todo!()
+    }
+}
+
+pub trait JITCompiledNumber: Sized {
+    type Evaluator;
+    type Settings: Default;
+
+    fn translate(
+        instructions: Vec<Instruction>,
+        constants: Vec<Complex<Rational>>,
+        config: Config,
+        defuns: &Defuns,
+    ) -> Result<Translator, String> {
+        let mut translator = Translator::new(config, defuns);
+
+        for z in constants {
+            translator
+                .append_constant(num_complex::Complex::new(z.re.to_f64(), z.im.to_f64()))
+                .unwrap();
+        }
+
+        fn slot(s: Slot) -> symjit::compiler::Slot {
+            match s {
+                Slot::Param(id) => symjit::compiler::Slot::Param(id),
+                Slot::Out(id) => symjit::compiler::Slot::Out(id),
+                Slot::Const(id) => symjit::compiler::Slot::Const(id),
+                Slot::Temp(id) => symjit::compiler::Slot::Temp(id),
+            }
+        }
+
+        fn slot_list(v: &[Slot]) -> Vec<symjit::compiler::Slot> {
+            v.iter()
+                .map(|s| slot(*s))
+                .collect::<Vec<symjit::compiler::Slot>>()
+        }
+
+        fn builtin_symbol(s: BuiltinSymbol) -> symjit::compiler::BuiltinSymbol {
+            symjit::compiler::BuiltinSymbol(s.get_symbol().get_id())
+        }
+
+        for q in instructions {
+            match q {
+                Instruction::Add(lhs, args, num_reals) => translator
+                    .append_add(&slot(lhs), &slot_list(&args), num_reals)
+                    .unwrap(),
+                Instruction::Mul(lhs, args, num_reals) => translator
+                    .append_mul(&slot(lhs), &slot_list(&args), num_reals)
+                    .unwrap(),
+                Instruction::Pow(lhs, arg, p, is_real) => translator
+                    .append_pow(&slot(lhs), &slot(arg), p, is_real)
+                    .unwrap(),
+                Instruction::Powf(lhs, arg, p, is_real) => translator
+                    .append_powf(&slot(lhs), &slot(arg), &slot(p), is_real)
+                    .unwrap(),
+                Instruction::Assign(lhs, rhs) => {
+                    translator.append_assign(&slot(lhs), &slot(rhs)).unwrap()
+                }
+                Instruction::Fun(lhs, fun, arg, is_real) => translator
+                    .append_fun(&slot(lhs), &builtin_symbol(fun), &slot(arg), is_real)
+                    .unwrap(),
+                Instruction::Join(lhs, cond, true_val, false_val) => translator
+                    .append_join(&slot(lhs), &slot(cond), &slot(true_val), &slot(false_val))
+                    .unwrap(),
+                Instruction::Label(id) => translator.append_label(id).unwrap(),
+                Instruction::IfElse(cond, id) => {
+                    translator.append_if_else(&slot(cond), id).unwrap()
+                }
+                Instruction::Goto(id) => translator.append_goto(id).unwrap(),
+                Instruction::ExternalFun(lhs, op, args) => translator
+                    .append_external_fun(&slot(lhs), &op, &slot_list(&args))
+                    .unwrap(),
+            }
+        }
+
+        Ok(translator)
+    }
+
+    /// Export an evaluator to C++ code for this number type.
+    fn jit_compile(
+        eval: &ExpressionEvaluator<Complex<Rational>>,
+        external_functions: &Defuns,
+    ) -> Result<Self::Evaluator, String>;
+}
+
+impl JITCompiledNumber for f64 {
+    type Evaluator = JITCompiledRealEvaluator;
+    type Settings = ();
+
+    fn jit_compile(
+        eval: &ExpressionEvaluator<Complex<Rational>>,
+        external_functions: &Defuns,
+    ) -> Result<Self::Evaluator, String> {
+        let (instructions, _, constants) = eval.export_instructions();
+
+        let mut config = Config::default();
+        config.set_complex(false);
+        config.set_simd(false);
+
+        let mut translator = Self::translate(instructions, constants, config, external_functions)?;
+
+        Ok(JITCompiledRealEvaluator {
+            code: translator.compile().map_err(|e| e.to_string())?,
+        })
+    }
+}
+
+pub struct JITCompiledRealEvaluator {
+    code: Application,
+}
+
+impl JITCompiledRealEvaluator {
+    /// Evaluate the compiled code with double-precision floating point numbers.
+    #[inline(always)]
+    pub fn evaluate(&mut self, args: &[f64], out: &mut [f64]) {
+        self.code.evaluate(args, out);
+    }
+}
+
+impl JITCompiledNumber for Complex<f64> {
+    type Evaluator = JITCompiledComplexEvaluator;
+    type Settings = ();
+
+    fn jit_compile(
+        eval: &ExpressionEvaluator<Complex<Rational>>,
+        external_functions: &Defuns,
+    ) -> Result<Self::Evaluator, String> {
+        let (instructions, _, constants) = eval.export_instructions();
+
+        let mut config = Config::default();
+        config.set_complex(true);
+        config.set_simd(false);
+
+        let mut translator = Self::translate(instructions, constants, config, external_functions)?;
+
+        Ok(JITCompiledComplexEvaluator {
+            code: translator.compile().map_err(|e| e.to_string())?,
+        })
+    }
+}
+
+pub struct JITCompiledComplexEvaluator {
+    code: Application,
+}
+
+impl JITCompiledComplexEvaluator {
+    /// Evaluate the compiled code with double-precision floating point numbers.
+    #[inline(always)]
+    pub fn evaluate(&mut self, args: &[Complex<f64>], out: &mut [Complex<f64>]) {
+        let flat_args: &[f64] =
+            unsafe { std::slice::from_raw_parts(args.as_ptr() as *const f64, args.len() * 2) };
+        let flat_out: &mut [f64] =
+            unsafe { std::slice::from_raw_parts_mut(out.as_mut_ptr() as *mut f64, out.len() * 2) };
+        self.code.evaluate(flat_args, flat_out);
+    }
+}
 
 /// A number type that can be used to call a compiled evaluator.
 pub trait CompiledNumber: Sized {
