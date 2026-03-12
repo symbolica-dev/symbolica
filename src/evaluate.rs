@@ -15,7 +15,7 @@ use std::{
         atomic::{AtomicBool, AtomicUsize, Ordering},
     },
 };
-use symjit::{Application, Config, Defuns, Translator};
+use symjit::{Application, Config, Defuns, Storage, Translator};
 
 use crate::{
     LicenseManager,
@@ -9126,7 +9126,11 @@ fn test_jit_compile() {
     let mut eval_re = eval.clone().map_coeff(&|x| x.re.to_f64());
     eval_re.evaluate(&[0.5], &mut res);
 
-    let mut jit_eval_re = eval.jit_compile::<f64>().unwrap();
+    let jit_eval_re = eval.jit_compile::<f64>().unwrap();
+
+    jit_eval_re.save("test.jit").unwrap();
+    let mut jit_eval_re = JITCompiledRealEvaluator::load("test.jit").unwrap();
+
     let mut jit_res = [0.; 1];
     jit_eval_re.evaluate(&[0.5], &mut jit_res);
     assert_eq!(res[0], jit_res[0]);
@@ -9279,6 +9283,101 @@ impl JITCompiledRealEvaluator {
     pub fn evaluate(&mut self, args: &[f64], out: &mut [f64]) {
         self.code.evaluate(args, out);
     }
+
+    pub fn save(&self, filename: impl AsRef<Path>) -> Result<(), std::io::Error> {
+        let mut file = std::fs::File::create(filename)?;
+        self.code
+            .save(&mut file)
+            .map_err(|e| std::io::Error::new(std::io::ErrorKind::Other, e.to_string()))
+    }
+
+    pub fn load(filename: impl AsRef<Path>) -> Result<Self, std::io::Error> {
+        let mut file = std::fs::File::open(filename)?;
+        let code = Application::load(&mut file)
+            .map_err(|e| std::io::Error::new(std::io::ErrorKind::Other, e.to_string()))?;
+        Ok(JITCompiledRealEvaluator { code })
+    }
+}
+
+#[cfg(feature = "serde")]
+impl serde::Serialize for JITCompiledRealEvaluator {
+    fn serialize<S: serde::Serializer>(&self, serializer: S) -> Result<S::Ok, S::Error> {
+        let mut data = Vec::new();
+        self.code
+            .save(&mut data)
+            .map_err(|e| serde::ser::Error::custom(e.to_string()))?;
+        serializer.serialize_bytes(&data)
+    }
+}
+
+#[cfg(feature = "serde")]
+impl<'de> serde::Deserialize<'de> for JITCompiledRealEvaluator {
+    fn deserialize<D: serde::Deserializer<'de>>(deserializer: D) -> Result<Self, D::Error> {
+        let data: Vec<u8> = serde::Deserialize::deserialize(deserializer)?;
+        let code = Application::load(&mut std::io::Cursor::new(data))
+            .map_err(|e| serde::de::Error::custom(e.to_string()))?;
+        Ok(JITCompiledRealEvaluator { code })
+    }
+}
+
+#[cfg(feature = "bincode")]
+impl bincode::Encode for JITCompiledRealEvaluator {
+    fn encode<E: bincode::enc::Encoder>(
+        &self,
+        encoder: &mut E,
+    ) -> core::result::Result<(), bincode::error::EncodeError> {
+        let mut data = Vec::new();
+        self.code
+            .save(&mut data)
+            .map_err(|e| bincode::error::EncodeError::OtherString(e.to_string()))?;
+        bincode::Encode::encode(&data, encoder)
+    }
+}
+
+#[cfg(feature = "bincode")]
+bincode::impl_borrow_decode!(JITCompiledRealEvaluator);
+#[cfg(feature = "bincode")]
+impl<Context> bincode::Decode<Context> for JITCompiledRealEvaluator {
+    fn decode<D: bincode::de::Decoder<Context = Context>>(
+        decoder: &mut D,
+    ) -> Result<Self, bincode::error::DecodeError> {
+        let data: Vec<u8> = bincode::Decode::decode(decoder)?;
+        let code = Application::load(&mut std::io::Cursor::new(data))
+            .map_err(|e| bincode::error::DecodeError::OtherString(e.to_string()))?;
+        Ok(JITCompiledRealEvaluator { code })
+    }
+}
+
+impl BatchEvaluator<f64> for JITCompiledRealEvaluator {
+    fn evaluate_batch(
+        &mut self,
+        batch_size: usize,
+        params: &[f64],
+        out: &mut [f64],
+    ) -> Result<(), String> {
+        if !params.len().is_multiple_of(batch_size) {
+            return Err(format!(
+                "Parameter length {} not divisible by batch size {}",
+                params.len(),
+                batch_size
+            ));
+        }
+        if !out.len().is_multiple_of(batch_size) {
+            return Err(format!(
+                "Output length {} not divisible by batch size {}",
+                out.len(),
+                batch_size
+            ));
+        }
+
+        let n_params = params.len() / batch_size;
+        let n_out = out.len() / batch_size;
+        for (o, i) in out.chunks_mut(n_out).zip(params.chunks(n_params)) {
+            self.evaluate(i, o);
+        }
+
+        Ok(())
+    }
 }
 
 impl JITCompiledNumber for Complex<f64> {
@@ -9316,6 +9415,101 @@ impl JITCompiledComplexEvaluator {
         let flat_out: &mut [f64] =
             unsafe { std::slice::from_raw_parts_mut(out.as_mut_ptr() as *mut f64, out.len() * 2) };
         self.code.evaluate(flat_args, flat_out);
+    }
+
+    pub fn save(&self, filename: impl AsRef<Path>) -> Result<(), std::io::Error> {
+        let mut file = std::fs::File::create(filename)?;
+        self.code
+            .save(&mut file)
+            .map_err(|e| std::io::Error::new(std::io::ErrorKind::Other, e.to_string()))
+    }
+
+    pub fn load(filename: impl AsRef<Path>) -> Result<Self, std::io::Error> {
+        let mut file = std::fs::File::open(filename)?;
+        let code = Application::load(&mut file)
+            .map_err(|e| std::io::Error::new(std::io::ErrorKind::Other, e.to_string()))?;
+        Ok(JITCompiledComplexEvaluator { code })
+    }
+}
+
+#[cfg(feature = "serde")]
+impl serde::Serialize for JITCompiledComplexEvaluator {
+    fn serialize<S: serde::Serializer>(&self, serializer: S) -> Result<S::Ok, S::Error> {
+        let mut data = Vec::new();
+        self.code
+            .save(&mut data)
+            .map_err(|e| serde::ser::Error::custom(e.to_string()))?;
+        serializer.serialize_bytes(&data)
+    }
+}
+
+#[cfg(feature = "serde")]
+impl<'de> serde::Deserialize<'de> for JITCompiledComplexEvaluator {
+    fn deserialize<D: serde::Deserializer<'de>>(deserializer: D) -> Result<Self, D::Error> {
+        let data: Vec<u8> = serde::Deserialize::deserialize(deserializer)?;
+        let code = Application::load(&mut std::io::Cursor::new(data))
+            .map_err(|e| serde::de::Error::custom(e.to_string()))?;
+        Ok(JITCompiledComplexEvaluator { code })
+    }
+}
+
+#[cfg(feature = "bincode")]
+impl bincode::Encode for JITCompiledComplexEvaluator {
+    fn encode<E: bincode::enc::Encoder>(
+        &self,
+        encoder: &mut E,
+    ) -> core::result::Result<(), bincode::error::EncodeError> {
+        let mut data = Vec::new();
+        self.code
+            .save(&mut data)
+            .map_err(|e| bincode::error::EncodeError::OtherString(e.to_string()))?;
+        bincode::Encode::encode(&data, encoder)
+    }
+}
+
+#[cfg(feature = "bincode")]
+bincode::impl_borrow_decode!(JITCompiledComplexEvaluator);
+#[cfg(feature = "bincode")]
+impl<Context> bincode::Decode<Context> for JITCompiledComplexEvaluator {
+    fn decode<D: bincode::de::Decoder<Context = Context>>(
+        decoder: &mut D,
+    ) -> Result<Self, bincode::error::DecodeError> {
+        let data: Vec<u8> = bincode::Decode::decode(decoder)?;
+        let code = Application::load(&mut std::io::Cursor::new(data))
+            .map_err(|e| bincode::error::DecodeError::OtherString(e.to_string()))?;
+        Ok(JITCompiledComplexEvaluator { code })
+    }
+}
+
+impl BatchEvaluator<Complex<f64>> for JITCompiledComplexEvaluator {
+    fn evaluate_batch(
+        &mut self,
+        batch_size: usize,
+        params: &[Complex<f64>],
+        out: &mut [Complex<f64>],
+    ) -> Result<(), String> {
+        if !params.len().is_multiple_of(batch_size) {
+            return Err(format!(
+                "Parameter length {} not divisible by batch size {}",
+                params.len(),
+                batch_size
+            ));
+        }
+        if !out.len().is_multiple_of(batch_size) {
+            return Err(format!(
+                "Output length {} not divisible by batch size {}",
+                out.len(),
+                batch_size
+            ));
+        }
+
+        let n_params = params.len() / batch_size;
+        let n_out = out.len() / batch_size;
+        for (o, i) in out.chunks_mut(n_out).zip(params.chunks(n_params)) {
+            self.evaluate(i, o);
+        }
+
+        Ok(())
     }
 }
 
