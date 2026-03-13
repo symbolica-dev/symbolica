@@ -9153,23 +9153,6 @@ impl ExpressionEvaluator<Complex<Rational>> {
     }
 }
 
-impl ExpressionEvaluatorWithExternalFunctions<Complex<Rational>> {
-    pub fn jit_compile<T: JITCompiledNumber>(&self) -> Result<T::Evaluator, String> {
-        // TODO: register functions!
-        let mut external_functions = Defuns::new();
-
-        for (arg_cache, fn_ptr) in &self.external_fns {
-            if arg_cache.len() != 1 && arg_cache.len() != 2 {
-                Err("Only functions with 1 or 2 arguments are supported at the moment")?;
-            }
-
-            //external_functions.
-        }
-
-        todo!()
-    }
-}
-
 pub trait JITCompiledNumber: Sized {
     type Evaluator;
     type Settings: Default;
@@ -9184,7 +9167,7 @@ pub trait JITCompiledNumber: Sized {
 
         for z in constants {
             translator
-                .append_constant(num_complex::Complex::new(z.re.to_f64(), z.im.to_f64()))
+                .append_constant(symjit::Complex::new(z.re.to_f64(), z.im.to_f64()))
                 .unwrap();
         }
 
