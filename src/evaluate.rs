@@ -9363,6 +9363,209 @@ impl BatchEvaluator<f64> for JITCompiledRealEvaluator {
     }
 }
 
+impl JITCompiledNumber for wide::f64x4 {
+    type Evaluator = JITCompiledRealSimdEvaluator;
+    type Settings = ();
+
+    fn jit_compile(
+        eval: &ExpressionEvaluator<Complex<Rational>>,
+        external_functions: &Defuns,
+    ) -> Result<Self::Evaluator, String> {
+        let (instructions, _, constants) = eval.export_instructions();
+
+        let mut config = Config::default();
+        config.set_complex(false);
+        config.set_simd(true);
+
+        let mut translator = Self::translate(instructions, constants, config, external_functions)?;
+
+        Ok(JITCompiledRealSimdEvaluator {
+            code: translator.compile().map_err(|e| e.to_string())?,
+            batch_input_buffer: Vec::new(),
+            batch_output_buffer: Vec::new(),
+        })
+    }
+}
+
+pub struct JITCompiledRealSimdEvaluator {
+    code: Application,
+    batch_input_buffer: Vec<wide::f64x4>,
+    batch_output_buffer: Vec<wide::f64x4>,
+}
+
+impl JITCompiledRealSimdEvaluator {
+    /// Evaluate the compiled code with double-precision floating point simd numbers.
+    #[inline(always)]
+    pub fn evaluate(&mut self, args: &[wide::f64x4], out: &mut [wide::f64x4]) {
+        self.code.evaluate_simd(args, out);
+    }
+
+    pub fn save(&self, filename: impl AsRef<Path>) -> Result<(), std::io::Error> {
+        let mut file = std::fs::File::create(filename)?;
+        self.code
+            .save(&mut file)
+            .map_err(|e| std::io::Error::new(std::io::ErrorKind::Other, e.to_string()))
+    }
+
+    pub fn load(filename: impl AsRef<Path>) -> Result<Self, std::io::Error> {
+        let mut file = std::fs::File::open(filename)?;
+        let code = Application::load(&mut file)
+            .map_err(|e| std::io::Error::new(std::io::ErrorKind::Other, e.to_string()))?;
+        Ok(JITCompiledRealSimdEvaluator {
+            code,
+            batch_input_buffer: Vec::new(),
+            batch_output_buffer: Vec::new(),
+        })
+    }
+}
+
+#[cfg(feature = "serde")]
+impl serde::Serialize for JITCompiledRealSimdEvaluator {
+    fn serialize<S: serde::Serializer>(&self, serializer: S) -> Result<S::Ok, S::Error> {
+        let mut data = Vec::new();
+        self.code
+            .save(&mut data)
+            .map_err(|e| serde::ser::Error::custom(e.to_string()))?;
+        serializer.serialize_bytes(&data)
+    }
+}
+
+#[cfg(feature = "serde")]
+impl<'de> serde::Deserialize<'de> for JITCompiledRealSimdEvaluator {
+    fn deserialize<D: serde::Deserializer<'de>>(deserializer: D) -> Result<Self, D::Error> {
+        let data: Vec<u8> = serde::Deserialize::deserialize(deserializer)?;
+        let code = Application::load(&mut std::io::Cursor::new(data))
+            .map_err(|e| serde::de::Error::custom(e.to_string()))?;
+        Ok(JITCompiledRealSimdEvaluator {
+            code,
+            batch_input_buffer: Vec::new(),
+            batch_output_buffer: Vec::new(),
+        })
+    }
+}
+
+#[cfg(feature = "bincode")]
+impl bincode::Encode for JITCompiledRealSimdEvaluator {
+    fn encode<E: bincode::enc::Encoder>(
+        &self,
+        encoder: &mut E,
+    ) -> core::result::Result<(), bincode::error::EncodeError> {
+        let mut data = Vec::new();
+        self.code
+            .save(&mut data)
+            .map_err(|e| bincode::error::EncodeError::OtherString(e.to_string()))?;
+        bincode::Encode::encode(&data, encoder)
+    }
+}
+
+#[cfg(feature = "bincode")]
+bincode::impl_borrow_decode!(JITCompiledRealSimdEvaluator);
+#[cfg(feature = "bincode")]
+impl<Context> bincode::Decode<Context> for JITCompiledRealSimdEvaluator {
+    fn decode<D: bincode::de::Decoder<Context = Context>>(
+        decoder: &mut D,
+    ) -> Result<Self, bincode::error::DecodeError> {
+        let data: Vec<u8> = bincode::Decode::decode(decoder)?;
+        let code = Application::load(&mut std::io::Cursor::new(data))
+            .map_err(|e| bincode::error::DecodeError::OtherString(e.to_string()))?;
+        Ok(JITCompiledRealSimdEvaluator {
+            code,
+            batch_input_buffer: Vec::new(),
+            batch_output_buffer: Vec::new(),
+        })
+    }
+}
+
+impl BatchEvaluator<f64> for JITCompiledRealSimdEvaluator {
+    fn evaluate_batch(
+        &mut self,
+        batch_size: usize,
+        params: &[f64],
+        out: &mut [f64],
+    ) -> Result<(), String> {
+        if !params.len().is_multiple_of(batch_size) {
+            return Err(format!(
+                "Parameter length {} not divisible by batch size {}",
+                params.len(),
+                batch_size
+            ));
+        }
+        if !out.len().is_multiple_of(batch_size) {
+            return Err(format!(
+                "Output length {} not divisible by batch size {}",
+                out.len(),
+                batch_size
+            ));
+        }
+
+        let n_params = params.len() / batch_size;
+        let n_out = out.len() / batch_size;
+
+        self.batch_input_buffer
+            .resize(batch_size.div_ceil(4) * n_params, wide::f64x4::ZERO);
+
+        for (dest, i) in self
+            .batch_input_buffer
+            .chunks_mut(n_params)
+            .zip(params.chunks(4 * n_params))
+        {
+            if i.len() / n_params == 4 {
+                for (j, d) in dest.iter_mut().enumerate() {
+                    *d = wide::f64x4::from([
+                        i[j],
+                        i[j + n_params],
+                        i[j + 2 * n_params],
+                        i[j + 3 * n_params],
+                    ]);
+                }
+            } else {
+                for (j, d) in dest.iter_mut().enumerate() {
+                    *d = wide::f64x4::from([
+                        i[j],
+                        if j + n_params < i.len() {
+                            i[j + n_params]
+                        } else {
+                            0.0
+                        },
+                        if j + 2 * n_params < i.len() {
+                            i[j + 2 * n_params]
+                        } else {
+                            0.0
+                        },
+                        if j + 3 * n_params < i.len() {
+                            i[j + 3 * n_params]
+                        } else {
+                            0.0
+                        },
+                    ]);
+                }
+            }
+        }
+
+        self.batch_output_buffer
+            .resize(batch_size.div_ceil(4) * n_out, wide::f64x4::ZERO);
+
+        let param_buffer = std::mem::take(&mut self.batch_input_buffer);
+        let mut output_buffer = std::mem::take(&mut self.batch_output_buffer);
+
+        for (o, i) in output_buffer
+            .chunks_mut(n_out)
+            .zip(param_buffer.chunks(n_params))
+        {
+            self.evaluate(i, o);
+        }
+
+        for (o, i) in out.chunks_mut(4 * n_out).zip(&output_buffer) {
+            o.copy_from_slice(&i.as_array()[..o.len()]);
+        }
+
+        self.batch_input_buffer = param_buffer;
+        self.batch_output_buffer = output_buffer;
+
+        Ok(())
+    }
+}
+
 impl JITCompiledNumber for Complex<f64> {
     type Evaluator = JITCompiledComplexEvaluator;
     type Settings = ();
@@ -9491,6 +9694,239 @@ impl BatchEvaluator<Complex<f64>> for JITCompiledComplexEvaluator {
         for (o, i) in out.chunks_mut(n_out).zip(params.chunks(n_params)) {
             self.evaluate(i, o);
         }
+
+        Ok(())
+    }
+}
+
+impl JITCompiledNumber for Complex<wide::f64x4> {
+    type Evaluator = JITCompiledComplexSimdEvaluator;
+    type Settings = ();
+
+    fn jit_compile(
+        eval: &ExpressionEvaluator<Complex<Rational>>,
+        external_functions: &Defuns,
+    ) -> Result<Self::Evaluator, String> {
+        let (instructions, _, constants) = eval.export_instructions();
+
+        let mut config = Config::default();
+        config.set_complex(true);
+        config.set_simd(true);
+
+        let mut translator = Self::translate(instructions, constants, config, external_functions)?;
+
+        Ok(JITCompiledComplexSimdEvaluator {
+            code: translator.compile().map_err(|e| e.to_string())?,
+            batch_input_buffer: Vec::new(),
+            batch_output_buffer: Vec::new(),
+        })
+    }
+}
+
+pub struct JITCompiledComplexSimdEvaluator {
+    code: Application,
+    batch_input_buffer: Vec<Complex<wide::f64x4>>,
+    batch_output_buffer: Vec<Complex<wide::f64x4>>,
+}
+
+impl JITCompiledComplexSimdEvaluator {
+    #[inline(always)]
+    pub fn evaluate(&mut self, args: &[Complex<wide::f64x4>], out: &mut [Complex<wide::f64x4>]) {
+        self.code.evaluate_simd(args, out);
+    }
+
+    pub fn save(&self, filename: impl AsRef<Path>) -> Result<(), std::io::Error> {
+        let mut file = std::fs::File::create(filename)?;
+        self.code
+            .save(&mut file)
+            .map_err(|e| std::io::Error::new(std::io::ErrorKind::Other, e.to_string()))
+    }
+
+    pub fn load(filename: impl AsRef<Path>) -> Result<Self, std::io::Error> {
+        let mut file = std::fs::File::open(filename)?;
+        let code = Application::load(&mut file)
+            .map_err(|e| std::io::Error::new(std::io::ErrorKind::Other, e.to_string()))?;
+        Ok(JITCompiledComplexSimdEvaluator {
+            code,
+            batch_input_buffer: Vec::new(),
+            batch_output_buffer: Vec::new(),
+        })
+    }
+}
+
+#[cfg(feature = "serde")]
+impl serde::Serialize for JITCompiledComplexSimdEvaluator {
+    fn serialize<S: serde::Serializer>(&self, serializer: S) -> Result<S::Ok, S::Error> {
+        let mut data = Vec::new();
+        self.code
+            .save(&mut data)
+            .map_err(|e| serde::ser::Error::custom(e.to_string()))?;
+        serializer.serialize_bytes(&data)
+    }
+}
+
+#[cfg(feature = "serde")]
+impl<'de> serde::Deserialize<'de> for JITCompiledComplexSimdEvaluator {
+    fn deserialize<D: serde::Deserializer<'de>>(deserializer: D) -> Result<Self, D::Error> {
+        let data: Vec<u8> = serde::Deserialize::deserialize(deserializer)?;
+        let code = Application::load(&mut std::io::Cursor::new(data))
+            .map_err(|e| serde::de::Error::custom(e.to_string()))?;
+        Ok(JITCompiledComplexSimdEvaluator {
+            code,
+            batch_input_buffer: Vec::new(),
+            batch_output_buffer: Vec::new(),
+        })
+    }
+}
+
+#[cfg(feature = "bincode")]
+impl bincode::Encode for JITCompiledComplexSimdEvaluator {
+    fn encode<E: bincode::enc::Encoder>(
+        &self,
+        encoder: &mut E,
+    ) -> core::result::Result<(), bincode::error::EncodeError> {
+        let mut data = Vec::new();
+        self.code
+            .save(&mut data)
+            .map_err(|e| bincode::error::EncodeError::OtherString(e.to_string()))?;
+        bincode::Encode::encode(&data, encoder)
+    }
+}
+
+#[cfg(feature = "bincode")]
+bincode::impl_borrow_decode!(JITCompiledComplexSimdEvaluator);
+#[cfg(feature = "bincode")]
+impl<Context> bincode::Decode<Context> for JITCompiledComplexSimdEvaluator {
+    fn decode<D: bincode::de::Decoder<Context = Context>>(
+        decoder: &mut D,
+    ) -> Result<Self, bincode::error::DecodeError> {
+        let data: Vec<u8> = bincode::Decode::decode(decoder)?;
+        let code = Application::load(&mut std::io::Cursor::new(data))
+            .map_err(|e| bincode::error::DecodeError::OtherString(e.to_string()))?;
+        Ok(JITCompiledComplexSimdEvaluator {
+            code,
+            batch_input_buffer: Vec::new(),
+            batch_output_buffer: Vec::new(),
+        })
+    }
+}
+
+impl BatchEvaluator<Complex<f64>> for JITCompiledComplexSimdEvaluator {
+    fn evaluate_batch(
+        &mut self,
+        batch_size: usize,
+        params: &[Complex<f64>],
+        out: &mut [Complex<f64>],
+    ) -> Result<(), String> {
+        if !params.len().is_multiple_of(batch_size) {
+            return Err(format!(
+                "Parameter length {} not divisible by batch size {}",
+                params.len(),
+                batch_size
+            ));
+        }
+        if !out.len().is_multiple_of(batch_size) {
+            return Err(format!(
+                "Output length {} not divisible by batch size {}",
+                out.len(),
+                batch_size
+            ));
+        }
+
+        let n_params = params.len() / batch_size;
+        let n_out = out.len() / batch_size;
+
+        self.batch_input_buffer.resize(
+            batch_size.div_ceil(4) * n_params,
+            Complex::new(wide::f64x4::ZERO, wide::f64x4::ZERO),
+        );
+
+        for (dest, i) in self
+            .batch_input_buffer
+            .chunks_mut(n_params)
+            .zip(params.chunks(4 * n_params))
+        {
+            if i.len() / n_params == 4 {
+                for (j, d) in dest.iter_mut().enumerate() {
+                    d.re = wide::f64x4::from([
+                        i[j].re,
+                        i[j + n_params].re,
+                        i[j + 2 * n_params].re,
+                        i[j + 3 * n_params].re,
+                    ]);
+                    d.im = wide::f64x4::from([
+                        i[j].im,
+                        i[j + n_params].im,
+                        i[j + 2 * n_params].im,
+                        i[j + 3 * n_params].im,
+                    ]);
+                }
+            } else {
+                for (j, d) in dest.iter_mut().enumerate() {
+                    d.re = wide::f64x4::from([
+                        i[j].re,
+                        if j + n_params < i.len() {
+                            i[j + n_params].re
+                        } else {
+                            0.0
+                        },
+                        if j + 2 * n_params < i.len() {
+                            i[j + 2 * n_params].re
+                        } else {
+                            0.0
+                        },
+                        if j + 3 * n_params < i.len() {
+                            i[j + 3 * n_params].re
+                        } else {
+                            0.0
+                        },
+                    ]);
+                    d.im = wide::f64x4::from([
+                        i[j].im,
+                        if j + n_params < i.len() {
+                            i[j + n_params].im
+                        } else {
+                            0.0
+                        },
+                        if j + 2 * n_params < i.len() {
+                            i[j + 2 * n_params].im
+                        } else {
+                            0.0
+                        },
+                        if j + 3 * n_params < i.len() {
+                            i[j + 3 * n_params].im
+                        } else {
+                            0.0
+                        },
+                    ]);
+                }
+            }
+        }
+
+        self.batch_output_buffer.resize(
+            batch_size.div_ceil(4) * n_out,
+            Complex::new(wide::f64x4::ZERO, wide::f64x4::ZERO),
+        );
+
+        let param_buffer = std::mem::take(&mut self.batch_input_buffer);
+        let mut output_buffer = std::mem::take(&mut self.batch_output_buffer);
+
+        for (o, i) in output_buffer
+            .chunks_mut(n_out)
+            .zip(param_buffer.chunks(n_params))
+        {
+            self.evaluate(i, o);
+        }
+
+        for (o, i) in out.chunks_mut(4 * n_out).zip(&output_buffer) {
+            for (j, d) in o.iter_mut().enumerate() {
+                d.re = i.re.as_array()[j];
+                d.im = i.im.as_array()[j];
+            }
+        }
+
+        self.batch_input_buffer = param_buffer;
+        self.batch_output_buffer = output_buffer;
 
         Ok(())
     }
