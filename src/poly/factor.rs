@@ -652,6 +652,10 @@ impl<E: PositiveExponent> Factorize for MultivariatePolynomial<IntegerRing, E, L
 
 impl<E: PositiveExponent> Factorize for MultivariatePolynomial<RationalField, E, LexOrder> {
     fn square_free_factorization(&self) -> Vec<(Self, usize)> {
+        if self.is_zero() {
+            return vec![];
+        }
+
         let c = self.content();
 
         let stripped = self.map_coeff(
@@ -678,6 +682,10 @@ impl<E: PositiveExponent> Factorize for MultivariatePolynomial<RationalField, E,
     }
 
     fn factor(&self) -> Vec<(Self, usize)> {
+        if self.is_zero() {
+            return vec![];
+        }
+
         let c = self.content();
 
         let stripped = self.map_coeff(
@@ -751,6 +759,10 @@ impl<E: PositiveExponent> Factorize
 
     /// Perform Trager's algorithm for factorization.
     fn factor(&self) -> Vec<(Self, usize)> {
+        if self.is_zero() {
+            return vec![];
+        }
+
         let sf = self.square_free_factorization();
 
         let mut constant = self.ring.one();
@@ -840,6 +852,10 @@ where
     }
 
     fn factor(&self) -> Vec<(Self, usize)> {
+        if self.is_zero() {
+            return vec![];
+        }
+
         let sf = self.square_free_factorization();
 
         let mut factors = vec![];
