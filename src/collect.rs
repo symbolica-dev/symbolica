@@ -656,12 +656,12 @@ impl<'a> AtomView<'a> {
                 return self.to_owned();
             };
 
-            let f_n = r.numerator.factor();
-            let f_d = r.denominator.factor();
-
-            if f_n.is_empty() {
+            if r.is_zero() {
                 return Atom::num(0);
             }
+
+            let f_n = r.numerator.factor();
+            let f_d = r.denominator.factor();
 
             let mut out = Atom::new();
             let mul = out.to_mul();
@@ -712,12 +712,12 @@ impl<'a> AtomView<'a> {
                 return self.to_owned();
             };
 
-            let f_n = r.numerator.factor();
-            let f_d = r.denominator.factor();
-
-            if f_n.is_empty() {
+            if r.is_zero() {
                 return Atom::num(0);
             }
+
+            let f_n = r.numerator.factor();
+            let f_d = r.denominator.factor();
 
             let mut out = Atom::new();
             let mul = out.to_mul();
@@ -1162,9 +1162,9 @@ impl<'a> AtomView<'a> {
                         && d == 1
                         && n > 0
                     {
-                        let exp = ws.new_num(n - &min_power);
-                        new_arg.to_pow(x, exp.as_view());
-                        mc.extend(new_arg.as_view());
+                            let exp = ws.new_num(n - &min_power);
+                            new_arg.to_pow(x, exp.as_view());
+                            mc.extend(new_arg.as_view());
                     } else if let AtomView::Mul(m) = arg {
                         let new_mul = new_arg.to_mul();
 
@@ -1186,9 +1186,9 @@ impl<'a> AtomView<'a> {
                                 && n > 0
                             // TODO: check
                             {
-                                let exp = ws.new_num(n - &min_power);
-                                pow.to_pow(x, exp.as_view());
-                                new_mul.extend(pow.as_view());
+                                    let exp = ws.new_num(n - &min_power);
+                                    pow.to_pow(x, exp.as_view());
+                                    new_mul.extend(pow.as_view());
                                 found = true;
                             } else {
                                 new_mul.extend(arg);
