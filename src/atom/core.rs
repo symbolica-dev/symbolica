@@ -272,16 +272,13 @@ pub trait AtomCore: private::Sealed + Sized {
     /// assert_eq!(collected, parse!("v1*(1+v1*(1+v1*(v1*z+y))+v2*(1+2*v3))"));
     /// ```
     fn collect_horner<'a, V: Into<Indeterminate> + Clone>(&self, variables: &[V]) -> Self::Output {
-        Workspace::get_local()
-            .with(|ws| {
-                self.as_atom_view().horner_scheme_impl(
-                    ws,
-                    &variables
-                        .iter()
-                        .map(|v| v.clone().into())
-                        .collect::<Vec<_>>(),
-                )
-            })
+        self.as_atom_view()
+            .horner_scheme_impl(
+                &variables
+                    .iter()
+                    .map(|v| v.clone().into())
+                    .collect::<Vec<_>>(),
+            )
             .wrap(self)
     }
 
@@ -1909,7 +1906,7 @@ pub trait AtomCore: private::Sealed + Sized {
     /// });
     /// assert!(has_complex_coefficient);
     /// ```
-    fn visitor<F: FnMut(AtomView) -> bool>(&self, v: &mut F) {
+    fn visitor<'a, F: FnMut(AtomView<'a>) -> bool>(&'a self, v: &mut F) {
         self.as_atom_view().visitor(v)
     }
 

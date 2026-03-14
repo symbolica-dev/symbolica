@@ -1796,8 +1796,19 @@ impl AtomView<'_> {
         }
     }
 
+    /// Add two atoms and return the buffer that contains the unnormalized result.
+    pub(crate) fn add_no_norm(&self, workspace: &Workspace, rhs: AtomView<'_>) -> RecycledAtom {
+        let mut e = workspace.new_atom();
+        let a = e.to_add();
+
+        // TODO: check if self or rhs is add
+        a.extend(*self);
+        a.extend(rhs);
+        e
+    }
+
     /// Subtract two atoms and return the buffer that contains the unnormalized result.
-    fn sub_no_norm(&self, workspace: &Workspace, rhs: AtomView<'_>) -> RecycledAtom {
+    pub(crate) fn sub_no_norm(&self, workspace: &Workspace, rhs: AtomView<'_>) -> RecycledAtom {
         let mut e = workspace.new_atom();
         let a = e.to_add();
 
@@ -1808,7 +1819,7 @@ impl AtomView<'_> {
     }
 
     /// Multiply two atoms and return the buffer that contains the unnormalized result.
-    fn mul_no_norm(&self, workspace: &Workspace, rhs: AtomView<'_>) -> RecycledAtom {
+    pub(crate) fn mul_no_norm(&self, workspace: &Workspace, rhs: AtomView<'_>) -> RecycledAtom {
         let mut e = workspace.new_atom();
         let a = e.to_mul();
 
@@ -1819,14 +1830,14 @@ impl AtomView<'_> {
     }
 
     /// Construct `self^exp` and return the buffer that contains the unnormalized result.
-    fn pow_no_norm(&self, workspace: &Workspace, exp: AtomView<'_>) -> RecycledAtom {
+    pub(crate) fn pow_no_norm(&self, workspace: &Workspace, exp: AtomView<'_>) -> RecycledAtom {
         let mut e = workspace.new_atom();
         e.to_pow(*self, exp);
         e
     }
 
     /// Divide `self` by `div` and return the buffer that contains the unnormalized result.
-    fn div_no_norm(&self, workspace: &Workspace, div: AtomView<'_>) -> RecycledAtom {
+    pub(crate) fn div_no_norm(&self, workspace: &Workspace, div: AtomView<'_>) -> RecycledAtom {
         self.mul_no_norm(
             workspace,
             div.pow_no_norm(workspace, workspace.new_num(-1).as_view())
@@ -1835,7 +1846,7 @@ impl AtomView<'_> {
     }
 
     /// Negate `self` and return the buffer that contains the unnormalized result.
-    fn neg_no_norm(&self, workspace: &Workspace) -> RecycledAtom {
+    pub(crate) fn neg_no_norm(&self, workspace: &Workspace) -> RecycledAtom {
         self.mul_no_norm(workspace, workspace.new_num(-1).as_view())
     }
 

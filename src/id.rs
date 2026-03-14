@@ -1025,7 +1025,7 @@ impl<'a> AtomView<'a> {
         false
     }
 
-    pub(crate) fn visitor<F: FnMut(AtomView) -> bool>(&self, v: &mut F) {
+    pub(crate) fn visitor<F: FnMut(AtomView<'a>) -> bool>(&self, v: &mut F) {
         match self {
             AtomView::Num(_) | AtomView::Var(_) => {
                 v(*self);
