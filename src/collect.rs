@@ -1121,11 +1121,13 @@ impl<'a> AtomView<'a> {
     }
 
     /// Collect the minimal power of `x` that is contained in all terms in which `x` appears, and the rest of the expression separately.
-    fn partial_collect_factors_impl(
+    ///
+    /// No normalization is needed, as this function works on summand and factors in any order.
+    fn partial_collect_factors_no_norm_impl(
         &self,
         ws: &Workspace,
         x: AtomView,
-    ) -> (Integer, AtomOrView<'_>, AtomOrView<'_>) {
+    ) -> (Integer, AtomOrView<'a>, AtomOrView<'a>) {
         if *self == x {
             return (1.into(), Atom::num(1).into(), Atom::Zero.into());
         }
@@ -1162,9 +1164,13 @@ impl<'a> AtomView<'a> {
                         && d == 1
                         && n > 0
                     {
+                        if n == min_power {
+                            mc.extend(ws.new_num(1).as_view());
+                        } else {
                             let exp = ws.new_num(n - &min_power);
                             new_arg.to_pow(x, exp.as_view());
                             mc.extend(new_arg.as_view());
+                        }
                     } else if let AtomView::Mul(m) = arg {
                         let new_mul = new_arg.to_mul();
 
@@ -1186,9 +1192,13 @@ impl<'a> AtomView<'a> {
                                 && n > 0
                             // TODO: check
                             {
+                                if n == min_power {
+                                    new_mul.extend(ws.new_num(1).as_view());
+                                } else {
                                     let exp = ws.new_num(n - &min_power);
                                     pow.to_pow(x, exp.as_view());
                                     new_mul.extend(pow.as_view());
+                                }
                                 found = true;
                             } else {
                                 new_mul.extend(arg);
@@ -1205,12 +1215,9 @@ impl<'a> AtomView<'a> {
                     }
                 }
 
-                let mut out = Atom::new();
-                coeff.as_view().normalize(ws, &mut out);
-
                 rc.set_normalized(true); // a sorted subset of a sum is also sorted
 
-                (min_power, out.into(), rest.into())
+                (min_power, coeff.into_inner().into(), rest.into())
             }
             AtomView::Mul(m) => {
                 let min_power = self.get_lowest_power(x);
@@ -1246,10 +1253,7 @@ impl<'a> AtomView<'a> {
                     }
                 }
 
-                let mut out = Atom::new();
-                coeff.as_view().normalize(ws, &mut out);
-
-                (min_power, out.into(), Atom::Zero.into())
+                (min_power, coeff.into_inner().into(), Atom::Zero.into())
             }
             AtomView::Pow(p) => {
                 let (b, e) = p.get_base_exp();
@@ -1268,36 +1272,87 @@ impl<'a> AtomView<'a> {
         }
     }
 
-    pub(crate) fn horner_scheme_impl<'b>(&self, ws: &Workspace, xs: &[Indeterminate]) -> Atom {
+    pub(crate) fn horner_scheme_impl<'b>(&self, xs: &[Indeterminate]) -> Atom {
+        Workspace::get_local().with(|ws| {
+            let mut out = Atom::new();
+            let r = self.horner_scheme_impl_no_norm(ws, xs);
+            r.as_view().normalize(ws, &mut out);
+            out
+        })
+    }
+
+    pub(crate) fn horner_scheme_impl_no_norm(
+        &self,
+        ws: &Workspace,
+        xs: &[Indeterminate],
+    ) -> AtomOrView<'a> {
         if xs.is_empty() {
-            return self.to_owned();
+            return self.into();
         }
 
         match self {
-            AtomView::Num(_) | AtomView::Var(_) | AtomView::Fun(_) | AtomView::Pow(_) => {
-                return self.to_owned();
+            AtomView::Num(_) | AtomView::Var(_) | AtomView::Fun(_) => self.into(),
+            AtomView::Pow(p) => {
+                let (b, e) = p.get_base_exp();
+
+                let bb = b.horner_scheme_impl_no_norm(ws, xs);
+                let ee = e.horner_scheme_impl_no_norm(ws, xs);
+
+                if matches!(bb, AtomOrView::Atom(_)) || matches!(ee, AtomOrView::Atom(_)) {
+                    let mut pow = Atom::new();
+                    pow.to_pow(bb.as_view(), ee.as_view());
+                    pow.into()
+                } else {
+                    self.into()
+                }
             }
             AtomView::Mul(m) => {
                 let mut tmp = ws.new_atom();
                 let mul = tmp.to_mul();
 
+                let mut changed = false;
                 for arg in m {
-                    mul.extend(arg.horner_scheme_impl(ws, xs).as_view());
+                    let r = arg.horner_scheme_impl_no_norm(ws, xs);
+                    changed |= matches!(r, AtomOrView::Atom(_));
+                    mul.extend(r.as_view());
                 }
 
-                let mut res = Atom::new();
-                tmp.as_view().normalize(ws, &mut res);
-                return res;
+                if changed {
+                    tmp.into_inner().into()
+                } else {
+                    self.into()
+                }
             }
             AtomView::Add(_) => {
-                let (power, key, rest) = self.partial_collect_factors_impl(ws, xs[0].as_view());
+                let (power, key, rest) =
+                    self.partial_collect_factors_no_norm_impl(ws, xs[0].as_view());
 
-                let mut res = rest.as_view().horner_scheme_impl(ws, &xs[1..]);
+                let mut res = rest
+                    .as_view()
+                    .horner_scheme_impl_no_norm(ws, &xs[1..])
+                    .into_owned();
                 if power > 0 {
-                    res += key.as_view().horner_scheme_impl(ws, &xs) * xs[0].pow(power);
+                    let new_key = key.as_view().horner_scheme_impl_no_norm(ws, &xs);
+                    let v = if power == 1 {
+                        new_key.as_view().mul_no_norm(ws, xs[0].as_view())
+                    } else {
+                        new_key
+                            .as_view()
+                            .mul_no_norm(ws, xs[0].pow(power).as_view())
+                    };
+
+                    if let Atom::Add(a) = &mut res {
+                        a.extend(v.as_view());
+                    } else {
+                        res = res
+                            .as_view()
+                            .add_no_norm(ws, v.as_view())
+                            .into_inner()
+                            .into();
+                    }
                 }
 
-                res
+                res.into()
             }
         }
     }
