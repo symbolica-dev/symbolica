@@ -23,6 +23,9 @@ rustdoc-args = ["--cfg", "docsrs"]
 codegen-units = 1
 lto = true
 
+[profile.dev.package."*"]
+opt-level = 3
+
 [profile.dev-optim]
 inherits = "dev"
 opt-level = 3

@@ -854,6 +854,9 @@ pub trait AtomCore: private::Sealed + Sized {
     /// and user functions in the expression must occur in the function map.
     /// The function map may have nested expressions.
     ///
+    /// For the best performance, the evaluator should be JIT-compiled ([ExpressionEvaluator::jit_compile])
+    /// or compiled to C++ with inline ASM using [ExpressionEvaluator::export_cpp].
+    ///
     /// # Examples
     ///
     /// A simple evaluation without nested expressions:
