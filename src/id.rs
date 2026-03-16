@@ -924,6 +924,79 @@ impl<'a> AtomView<'a> {
         }
     }
 
+    pub(crate) fn count_indeterminates(
+        &self,
+        enter_functions: bool,
+        out: &mut HashMap<AtomView<'a>, usize>,
+    ) {
+        match self {
+            AtomView::Num(_) => {}
+            AtomView::Var(_) => {
+                *out.entry(*self).or_insert(0) += 1;
+            }
+            AtomView::Fun(f) => {
+                *out.entry(*self).or_insert(0) += 1;
+
+                if enter_functions {
+                    for arg in f {
+                        arg.count_indeterminates(enter_functions, out);
+                    }
+                }
+            }
+            AtomView::Pow(p) => {
+                let (base, exp) = p.get_base_exp();
+                base.count_indeterminates(enter_functions, out);
+                exp.count_indeterminates(enter_functions, out);
+            }
+            AtomView::Mul(m) => {
+                for child in m {
+                    child.count_indeterminates(enter_functions, out);
+                }
+            }
+            AtomView::Add(a) => {
+                for child in a {
+                    child.count_indeterminates(enter_functions, out);
+                }
+            }
+        }
+    }
+
+    /// Return the number of additions and multiplications needed to evaluate the aliased atom.
+    pub fn count_operations_with_subexpressions(
+        &self,
+        cses: &mut HashSet<AtomView<'a>>,
+    ) -> (usize, usize) {
+        let (mut add, mut mul) = (0, 0);
+
+        let mut counter = |a: AtomView<'a>| {
+            if !cses.insert(a) {
+                return false;
+            }
+
+            match a {
+                AtomView::Mul(m) => {
+                    mul += m.get_nargs() - 1;
+                    true
+                }
+                AtomView::Add(a) => {
+                    add += a.get_nargs() - 1;
+                    true
+                }
+                AtomView::Pow(p) => {
+                    if let Ok(i) = isize::try_from(p.get_exp()) {
+                        mul += i.unsigned_abs() - 1;
+                    }
+                    true
+                }
+                _ => true,
+            }
+        };
+
+        self.visitor(&mut counter);
+
+        (add, mul)
+    }
+
     /// Returns true iff `self` contains `a` literally or contains the symbol of `a` if `a` is a variable.
     pub(crate) fn contains_literally_or_as_symbol(&self, a: AtomView) -> bool {
         match a {

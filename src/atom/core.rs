@@ -906,8 +906,17 @@ pub trait AtomCore: private::Sealed + Sized {
         params: &[Atom],
         optimization_settings: OptimizationSettings,
     ) -> Result<ExpressionEvaluator<Complex<Rational>>, String> {
-        let tree = self.to_evaluation_tree(fn_map, params)?;
-        Ok(tree.optimize(&optimization_settings))
+        if optimization_settings.direct_translation {
+            AtomView::to_evaluator(
+                std::slice::from_ref(&self.as_atom_view()),
+                fn_map,
+                params,
+                optimization_settings,
+            )
+        } else {
+            let tree = self.to_evaluation_tree(fn_map, params)?;
+            Ok(tree.optimize(&optimization_settings))
+        }
     }
 
     /// Convert nested expressions to a tree suitable for repeated evaluations with
@@ -943,8 +952,13 @@ pub trait AtomCore: private::Sealed + Sized {
         params: &[Atom],
         optimization_settings: OptimizationSettings,
     ) -> Result<ExpressionEvaluator<Complex<Rational>>, String> {
-        let tree = AtomView::to_eval_tree_multiple(exprs, fn_map, params)?;
-        Ok(tree.optimize(&optimization_settings))
+        if optimization_settings.direct_translation {
+            let exprs = exprs.iter().map(|e| e.as_atom_view()).collect::<Vec<_>>();
+            AtomView::to_evaluator(&exprs, fn_map, params, optimization_settings)
+        } else {
+            let tree = AtomView::to_eval_tree_multiple(exprs, fn_map, params)?;
+            Ok(tree.optimize(&optimization_settings))
+        }
     }
 
     /// Check if the expression could be 0, using (potentially) numerical sampling with

@@ -317,6 +317,7 @@ pub struct OptimizationSettings {
     pub max_common_pair_cache_entries: usize,
     pub max_common_pair_distance: usize,
     pub verbose: bool,
+    pub direct_translation: bool,
 }
 
 #[cfg(feature = "bincode")]
@@ -336,6 +337,7 @@ impl bincode::Encode for OptimizationSettings {
         bincode::Encode::encode(&self.max_common_pair_cache_entries, encoder)?;
         bincode::Encode::encode(&self.max_common_pair_distance, encoder)?;
         bincode::Encode::encode(&self.verbose, encoder)?;
+        bincode::Encode::encode(&self.direct_translation, encoder)?;
         Ok(())
     }
 }
@@ -356,6 +358,7 @@ impl<Context> bincode::Decode<Context> for OptimizationSettings {
             max_common_pair_cache_entries: bincode::Decode::decode(decoder)?,
             max_common_pair_distance: bincode::Decode::decode(decoder)?,
             verbose: bincode::Decode::decode(decoder)?,
+            direct_translation: bincode::Decode::decode(decoder)?,
         })
     }
 }
@@ -387,6 +390,7 @@ impl Default for OptimizationSettings {
             max_common_pair_cache_entries: 1_000_000,
             max_common_pair_distance: 1000,
             verbose: false,
+            direct_translation: false,
         }
     }
 }
@@ -450,6 +454,901 @@ impl<Context> bincode::Decode<Context> for BuiltinSymbol {
 impl BuiltinSymbol {
     pub fn get_symbol(&self) -> Symbol {
         self.0
+    }
+}
+
+impl<'a> AtomView<'a> {
+    pub(crate) fn to_evaluator(
+        expressions: &[Self],
+        fn_map: &FunctionMap<Complex<Rational>>,
+        params: &[Atom],
+        settings: OptimizationSettings,
+    ) -> Result<ExpressionEvaluator<Complex<Rational>>, String> {
+        if settings.verbose {
+            let mut cse = HashSet::default();
+            let (mut n_add, mut n_mul) = (0, 0);
+            for e in expressions {
+                let (add, mul) = e.count_operations_with_subexpressions(&mut cse);
+                n_add += add;
+                n_mul += mul;
+            }
+            info!(
+                "Initial ops: {} additions and {} multiplications",
+                n_add, n_mul
+            );
+        }
+
+        if settings.horner_iterations == 0 {
+            return Self::linearize_multiple(expressions, fn_map, params, settings);
+        }
+
+        let v = match &settings.hot_start {
+            Some(_) => {
+                unimplemented!("Hot start not supported before the deprecation of Expression")
+            }
+            None => {
+                let mut v = HashMap::default();
+
+                for t in expressions {
+                    t.count_indeterminates(true, &mut v);
+                }
+
+                let mut v: Vec<_> = v.into_iter().collect();
+                v.retain(|(_, vv)| *vv > 1);
+                v.sort_by(|a, b| b.1.cmp(&a.1).then_with(|| a.0.cmp(&b.0)));
+                v.truncate(settings.max_horner_scheme_variables);
+                v.into_iter()
+                    .map(|(k, _)| Indeterminate::try_from(k.to_owned()).unwrap())
+                    .collect::<Vec<_>>()
+            }
+        };
+
+        let scheme = Self::optimize_horner_scheme_multiple(expressions, &v, &settings);
+
+        let hornered_expressions = expressions
+            .iter()
+            .map(|x| x.collect_horner(&scheme))
+            .collect::<Vec<_>>();
+
+        let mut f = fn_map.clone();
+        for expr in f.tagged_fn_map.values_mut() {
+            if let ConstOrExpr::Expr(Expr { body, .. }) = expr {
+                *body = body.collect_horner(&scheme);
+            }
+        }
+
+        Self::linearize_multiple(&hornered_expressions, fn_map, params, settings)
+    }
+
+    pub fn optimize_horner_scheme_multiple(
+        expressions: &[Self],
+        vars: &[Indeterminate],
+        settings: &OptimizationSettings,
+    ) -> Vec<Indeterminate> {
+        if vars.is_empty() {
+            return vars.to_vec();
+        }
+
+        let horner: Vec<_> = expressions
+            .iter()
+            .map(|x| x.collect_horner(&vars))
+            .collect();
+        let mut subexpr = HashSet::default();
+        let mut best_ops = (0, 0);
+        for h in &horner {
+            let ops = h
+                .as_view()
+                .count_operations_with_subexpressions(&mut subexpr);
+            best_ops = (best_ops.0 + ops.0, best_ops.1 + ops.1);
+        }
+
+        if settings.verbose {
+            info!(
+                "Initial Horner scheme ops: {} additions and {} multiplications",
+                best_ops.0, best_ops.1
+            );
+        }
+
+        let best_mul = Arc::new(AtomicUsize::new(best_ops.1));
+        let best_add = Arc::new(AtomicUsize::new(best_ops.0));
+        let best_scheme = Arc::new(Mutex::new(vars.to_vec()));
+
+        let n_iterations = settings.horner_iterations.max(1) - 1;
+
+        let permutations = if vars.len() < 10
+            && Integer::factorial(vars.len() as u32) <= settings.horner_iterations.max(1)
+        {
+            let v: Vec<_> = (0..vars.len()).collect();
+            Some(unique_permutations(&v).1)
+        } else {
+            None
+        };
+        let p_ref = &permutations;
+
+        let n_cores = if LicenseManager::is_licensed() {
+            settings.n_cores
+        } else {
+            1
+        }
+        .min(n_iterations);
+
+        std::thread::scope(|s| {
+            let abort = Arc::new(AtomicBool::new(false));
+
+            for i in 0..n_cores {
+                let mut rng = MonteCarloRng::new(0, i);
+
+                let mut cvars = vars.to_vec();
+                let best_scheme = best_scheme.clone();
+                let best_mul = best_mul.clone();
+                let best_add = best_add.clone();
+                let mut last_mul = usize::MAX;
+                let mut last_add = usize::MAX;
+                let abort = abort.clone();
+
+                let mut op = move || {
+                    for j in 0..n_iterations / n_cores {
+                        if abort.load(Ordering::Relaxed) {
+                            return;
+                        }
+
+                        if i == n_cores - 1
+                            && let Some(a) = &settings.abort_check
+                            && a()
+                        {
+                            abort.store(true, Ordering::Relaxed);
+
+                            if settings.verbose {
+                                info!(
+                                    "Aborting Horner optimization at step {}/{}.",
+                                    j,
+                                    settings.horner_iterations / n_cores
+                                );
+                            }
+
+                            return;
+                        }
+
+                        // try a random swap
+                        let mut t1 = 0;
+                        let mut t2 = 0;
+
+                        if let Some(p) = p_ref {
+                            if j >= p.len() / n_cores {
+                                break;
+                            }
+
+                            let perm = &p[i * (p.len() / n_cores) + j];
+                            cvars = perm.iter().map(|x| vars[*x].clone()).collect();
+                        } else {
+                            t1 = rng.random_range(0..cvars.len());
+                            t2 = rng.random_range(0..cvars.len() - 1);
+
+                            cvars.swap(t1, t2);
+                        }
+
+                        let horner: Vec<_> = expressions
+                            .iter()
+                            .map(|x| x.collect_horner(&cvars))
+                            .collect();
+                        let mut subexpr = HashSet::default();
+                        let mut cur_ops = (0, 0);
+
+                        for h in &horner {
+                            let ops = h
+                                .as_view()
+                                .count_operations_with_subexpressions(&mut subexpr);
+                            cur_ops = (cur_ops.0 + ops.0, cur_ops.1 + ops.1);
+                        }
+
+                        // prefer fewer multiplications
+                        if cur_ops.1 <= last_mul || cur_ops.1 == last_mul && cur_ops.0 <= last_add {
+                            if settings.verbose {
+                                info!(
+                                    "Accept move at step {}/{}: {} + and {} ×",
+                                    j,
+                                    settings.horner_iterations / n_cores,
+                                    cur_ops.0,
+                                    cur_ops.1
+                                );
+                            }
+
+                            last_add = cur_ops.0;
+                            last_mul = cur_ops.1;
+
+                            if cur_ops.1 <= best_mul.load(Ordering::Relaxed)
+                                || cur_ops.1 == best_mul.load(Ordering::Relaxed)
+                                    && cur_ops.0 <= best_add.load(Ordering::Relaxed)
+                            {
+                                let mut best_scheme = best_scheme.lock().unwrap();
+
+                                // check again if it is the best now that we have locked
+                                let best_mul_l = best_mul.load(Ordering::Relaxed);
+                                let best_add_l = best_add.load(Ordering::Relaxed);
+                                if cur_ops.1 <= best_mul_l
+                                    || cur_ops.1 == best_mul_l && cur_ops.0 <= best_add_l
+                                {
+                                    if cur_ops.0 == best_add_l && cur_ops.1 == best_mul_l {
+                                        if *best_scheme < cvars {
+                                            // on a draw, accept the lexicographical minimum
+                                            // to get a deterministic scheme
+                                            *best_scheme = cvars.clone();
+                                        }
+                                    } else {
+                                        best_mul.store(cur_ops.1, Ordering::Relaxed);
+                                        best_add.store(cur_ops.0, Ordering::Relaxed);
+                                        *best_scheme = cvars.clone();
+                                    }
+                                }
+                            }
+                        } else {
+                            cvars.swap(t1, t2);
+                        }
+                    }
+                };
+
+                if i + 1 < n_cores {
+                    s.spawn(op);
+                } else {
+                    // execute in the main thread and do the abort check on the main thread
+                    // this helps with catching ctrl-c
+                    op()
+                }
+            }
+        });
+
+        if settings.verbose {
+            info!(
+                "Final scheme: {} + and {} ×",
+                best_add.load(Ordering::Relaxed),
+                best_mul.load(Ordering::Relaxed)
+            );
+        }
+
+        Arc::try_unwrap(best_scheme).unwrap().into_inner().unwrap()
+    }
+
+    pub(crate) fn linearize_multiple<T: AtomCore>(
+        expressions: &[T],
+        fn_map: &FunctionMap<Complex<Rational>>,
+        params: &[Atom],
+        settings: OptimizationSettings,
+    ) -> Result<ExpressionEvaluator<Complex<Rational>>, String> {
+        let mut constants = Vec::new();
+        let mut constant_map = HashMap::new();
+        let mut instr = Vec::new();
+
+        // we can only safely remove entries that don't depend on any of the function arguments
+        let mut subexpression: HashMap<AtomView, Slot> = HashMap::default();
+
+        let mut external_functions = fn_map
+            .external_fn
+            .values()
+            .map(|v| {
+                if let ConstOrExpr::External(id, name) = v {
+                    (*id, name.clone())
+                } else {
+                    unreachable!()
+                }
+            })
+            .collect::<Vec<_>>();
+        external_functions.sort_by_key(|(id, _)| *id);
+        let external_functions = external_functions
+            .into_iter()
+            .map(|(_, name)| name)
+            .collect::<Vec<_>>();
+
+        let mut result_indices = vec![];
+        for expr in expressions {
+            let res = expr.as_atom_view().linearize_impl(
+                fn_map,
+                params,
+                &mut constants,
+                &mut constant_map,
+                &mut instr,
+                &mut subexpression,
+                &[],
+            )?;
+            result_indices.push(res);
+        }
+
+        let reserved_indices = params.len() + constants.len();
+
+        let mut stack = vec![Complex::default(); params.len() + constants.len() + instr.len()];
+        for (s, c) in stack.iter_mut().skip(params.len()).zip(constants) {
+            *s = c;
+        }
+
+        macro_rules! slot_map {
+            ($s: expr) => {
+                match $s {
+                    Slot::Param(i) => i,
+                    Slot::Const(i) => params.len() + i,
+                    Slot::Temp(i) => reserved_indices + i,
+                    Slot::Out(_) => unreachable!(),
+                }
+            };
+        }
+
+        let mut instructions = vec![];
+        for i in instr {
+            match i {
+                Instruction::Add(o, args, _) => {
+                    instructions.push((
+                        Instr::Add(
+                            slot_map!(o),
+                            args.clone().into_iter().map(|x| slot_map!(x)).collect(),
+                        ),
+                        ComplexPhase::default(),
+                    ));
+                }
+                Instruction::Mul(o, args, _) => {
+                    instructions.push((
+                        Instr::Mul(
+                            slot_map!(o),
+                            args.clone().into_iter().map(|x| slot_map!(x)).collect(),
+                        ),
+                        ComplexPhase::default(),
+                    ));
+                }
+                Instruction::Pow(o, base, exp, _) => {
+                    instructions.push((
+                        Instr::Pow(slot_map!(o), slot_map!(base), exp),
+                        ComplexPhase::default(),
+                    ));
+                }
+                Instruction::Powf(o, base, exp, _) => {
+                    instructions.push((
+                        Instr::Powf(slot_map!(o), slot_map!(base), slot_map!(exp)),
+                        ComplexPhase::default(),
+                    ));
+                }
+                Instruction::Fun(o, sym, arg, _) => {
+                    instructions.push((
+                        Instr::BuiltinFun(slot_map!(o), sym.clone(), slot_map!(arg)),
+                        ComplexPhase::default(),
+                    ));
+                }
+                Instruction::ExternalFun(o, name, args) => {
+                    instructions.push((
+                        Instr::ExternalFun(
+                            slot_map!(o),
+                            external_functions.iter().position(|x| x == &name).unwrap(),
+                            args.clone().into_iter().map(|x| slot_map!(x)).collect(),
+                        ),
+                        ComplexPhase::default(),
+                    ));
+                }
+                Instruction::Assign(_, _) => {
+                    unimplemented!("Assign should not occur in input")
+                }
+                Instruction::IfElse(cond, l) => {
+                    instructions.push((
+                        Instr::IfElse(slot_map!(cond), Label(l)),
+                        ComplexPhase::default(),
+                    ));
+                }
+                Instruction::Goto(label) => {
+                    instructions.push((Instr::Goto(Label(label)), ComplexPhase::default()));
+                }
+                Instruction::Label(label) => {
+                    instructions.push((Instr::Label(Label(label)), ComplexPhase::default()));
+                }
+                Instruction::Join(o, cond, t, f) => {
+                    instructions.push((
+                        Instr::Join(slot_map!(o), slot_map!(cond), slot_map!(t), slot_map!(f)),
+                        ComplexPhase::default(),
+                    ));
+                }
+            }
+        }
+
+        let mut e = ExpressionEvaluator {
+            stack,
+            param_count: params.len(),
+            reserved_indices,
+            instructions: instructions,
+            result_indices: result_indices.iter().map(|s| slot_map!(*s)).collect(),
+            external_fns: external_functions,
+            settings: settings.clone(),
+        };
+
+        loop {
+            let r = e.remove_common_instructions();
+
+            if r == 0 || e.settings.abort_level > 0 {
+                e.settings.abort_level = 0;
+                break;
+            }
+
+            if settings.verbose {
+                let (add_count, mul_count) = e.count_operations();
+                info!(
+                    "Removed {} common instructions: {} + and {} ×",
+                    r, add_count, mul_count
+                );
+            }
+        }
+
+        for _ in 0..settings.cpe_iterations.unwrap_or(usize::MAX) {
+            let r = e.remove_common_pairs();
+            if r == 0 || e.settings.abort_level > 0 {
+                e.settings.abort_level = 0;
+                break;
+            }
+
+            if settings.verbose {
+                let (add_count, mul_count) = e.count_operations();
+                info!(
+                    "Removed {} common pairs: {} + and {} ×",
+                    r, add_count, mul_count
+                );
+            }
+        }
+
+        e.optimize_stack();
+        Ok(e)
+    }
+
+    // Yields the stack index that contains the output.
+    fn linearize_impl(
+        &self,
+        fn_map: &'a FunctionMap<Complex<Rational>>,
+        params: &[Atom],
+        constants: &mut Vec<Complex<Rational>>,
+        constant_map: &mut HashMap<Complex<Rational>, usize>,
+        instr: &mut Vec<Instruction>,
+        subexpressions: &mut HashMap<AtomView<'a>, Slot>,
+        args: &[(AtomView, Slot)],
+    ) -> Result<Slot, String> {
+        if matches!(*self, AtomView::Var(_) | AtomView::Fun(_)) {
+            if let Some(p) = args.iter().find(|s| *self == s.0) {
+                return Ok(p.1);
+            }
+
+            if let Some(p) = params.iter().position(|a| a.as_view() == *self) {
+                return Ok(Slot::Param(p));
+            }
+        }
+
+        if let Some(c) = fn_map.get_constant(*self) {
+            if let Some(&i) = constant_map.get(&c) {
+                return Ok(Slot::Const(i));
+            }
+
+            let i = constants.len();
+            constants.push(c.clone());
+            constant_map.insert(c.clone(), i);
+            return Ok(Slot::Const(i));
+        }
+
+        if let Some(s) = subexpressions.get(self) {
+            return Ok(*s);
+        }
+
+        let res = match self {
+            AtomView::Num(n) => {
+                let c = match n.get_coeff_view() {
+                    CoefficientView::Natural(n, d, ni, di) => {
+                        Complex::new(Rational::from((n, d)), Rational::from((ni, di)))
+                    }
+                    CoefficientView::Large(l, i) => Complex::new(l.to_rat(), i.to_rat()),
+                    CoefficientView::Float(r, i) => {
+                        // TODO: converting back to rational is slow
+                        Complex::new(r.to_float().to_rational(), i.to_float().to_rational())
+                    }
+                    CoefficientView::Indeterminate => Err("Cannot convert indeterminate")?,
+                    CoefficientView::Infinity(_) => Err("Cannot convert infinity")?,
+                    CoefficientView::FiniteField(_, _) => {
+                        Err("Finite field not yet supported for evaluation".to_string())?
+                    }
+                    CoefficientView::RationalPolynomial(_) => Err(
+                        "Rational polynomial coefficient not yet supported for evaluation"
+                            .to_string(),
+                    )?,
+                };
+
+                if let Some(&i) = constant_map.get(&c) {
+                    return Ok(Slot::Const(i));
+                }
+
+                let i = constants.len();
+                constants.push(c.clone());
+                constant_map.insert(c, i);
+                Slot::Const(i)
+            }
+            AtomView::Var(v) => Err(format!(
+                "Variable {} not in constant map",
+                v.get_symbol().get_name()
+            ))?,
+            AtomView::Fun(f) => {
+                let name = f.get_symbol();
+                if [
+                    Symbol::EXP_ID,
+                    Symbol::LOG_ID,
+                    Symbol::SIN_ID,
+                    Symbol::COS_ID,
+                    Symbol::SQRT_ID,
+                    Symbol::ABS_ID,
+                    Symbol::CONJ_ID,
+                ]
+                .contains(&name.get_id())
+                {
+                    assert!(f.get_nargs() == 1);
+                    let arg = f.iter().next().unwrap();
+                    let arg_eval = arg.linearize_impl(
+                        fn_map,
+                        params,
+                        constants,
+                        constant_map,
+                        instr,
+                        subexpressions,
+                        args,
+                    )?;
+
+                    let temp = Slot::Temp(instr.len());
+                    let c = Instruction::Fun(temp, BuiltinSymbol(name), arg_eval, false);
+                    instr.push(c);
+
+                    subexpressions.insert(*self, temp);
+                    return Ok(temp);
+                }
+
+                let fun = if name == Symbol::IF {
+                    &ConstOrExpr::Condition
+                } else if let Some(fun) = fn_map.get(*self) {
+                    fun
+                } else {
+                    return Err(format!("Undefined function {}", self.to_plain_string()));
+                };
+
+                match fun {
+                    ConstOrExpr::Const(c) => {
+                        if let Some(&i) = constant_map.get(&c) {
+                            return Ok(Slot::Const(i));
+                        }
+
+                        let i = constants.len();
+                        constants.push(c.clone());
+                        constant_map.insert(c.clone(), i);
+                        Slot::Const(i)
+                    }
+                    ConstOrExpr::External(_e, name) => {
+                        let eval_args = f
+                            .iter()
+                            .map(|arg| {
+                                arg.linearize_impl(
+                                    fn_map,
+                                    params,
+                                    constants,
+                                    constant_map,
+                                    instr,
+                                    subexpressions,
+                                    args,
+                                )
+                            })
+                            .collect::<Result<_, _>>()?;
+
+                        let temp = Slot::Temp(instr.len());
+                        instr.push(Instruction::ExternalFun(temp, name.clone(), eval_args));
+                        temp
+                    }
+                    ConstOrExpr::Expr(Expr {
+                        tag_len,
+                        args: arg_spec,
+                        body: e,
+                        ..
+                    }) => {
+                        if f.get_nargs() != arg_spec.len() + tag_len {
+                            return Err(format!(
+                                "Function {} called with wrong number of arguments: {} vs {}",
+                                f.get_symbol().get_name(),
+                                f.get_nargs(),
+                                arg_spec.len() + tag_len
+                            ));
+                        }
+
+                        let eval_args = f
+                            .iter()
+                            .skip(*tag_len)
+                            .zip(arg_spec)
+                            .map(|(eval_arg, arg_spec)| {
+                                eval_arg
+                                    .linearize_impl(
+                                        fn_map,
+                                        params,
+                                        constants,
+                                        constant_map,
+                                        instr,
+                                        subexpressions,
+                                        args,
+                                    )
+                                    .map(|r| (arg_spec.as_view(), r))
+                            })
+                            .collect::<Result<Vec<_>, _>>()?;
+
+                        // inline function call
+                        // we have to use a new subexpression list as the function has arguments that may be different per call
+                        // this means that not all subexpressions will be shared across calls
+                        let mut sub_expr_pos_child = HashMap::default();
+                        let r = e.as_view().linearize_impl(
+                            fn_map,
+                            params,
+                            constants,
+                            constant_map,
+                            instr,
+                            if eval_args.is_empty() {
+                                subexpressions
+                            } else {
+                                sub_expr_pos_child.clone_from(subexpressions);
+                                &mut sub_expr_pos_child
+                            },
+                            &eval_args,
+                        )?;
+
+                        r
+                    }
+                    ConstOrExpr::Condition => {
+                        if f.get_nargs() != 3 {
+                            return Err(format!(
+                                "Condition function called with wrong number of arguments: {} vs 3",
+                                f.get_nargs(),
+                            ));
+                        }
+
+                        let mut arg_iter = f.iter();
+                        let cond = arg_iter.next().unwrap();
+                        let then_branch = arg_iter.next().unwrap();
+                        let else_branch = arg_iter.next().unwrap();
+
+                        let instr_len = instr.len();
+                        let subexpression_len = subexpressions.len();
+                        let cond = cond.linearize_impl(
+                            fn_map,
+                            params,
+                            constants,
+                            constant_map,
+                            instr,
+                            subexpressions,
+                            args,
+                        )?;
+
+                        // try to resolve the condition if it is fully numeric
+                        fn resolve(
+                            cond: Slot,
+                            instr: &[Instruction],
+                            constants: &[Complex<Rational>],
+                        ) -> Option<Complex<Rational>> {
+                            let i = match cond {
+                                Slot::Param(_) => {
+                                    return None;
+                                }
+                                Slot::Const(i) => {
+                                    return Some(constants[i].clone());
+                                }
+                                Slot::Temp(t) => t,
+                                Slot::Out(_) => {
+                                    unreachable!()
+                                }
+                            };
+
+                            match &instr[i] {
+                                Instruction::Add(_, args, _) => {
+                                    let mut res = Complex::default();
+                                    for x in args {
+                                        match resolve(*x, instr, constants) {
+                                            Some(v) => res += v,
+                                            None => return None,
+                                        }
+                                    }
+
+                                    Some(res)
+                                }
+                                Instruction::Mul(_, args, _) => {
+                                    let mut res = Complex::new(Rational::one(), Rational::zero());
+                                    for x in args {
+                                        match resolve(*x, instr, constants) {
+                                            Some(v) => res *= v,
+                                            None => return None,
+                                        }
+                                    }
+
+                                    Some(res)
+                                }
+                                Instruction::Pow(_, base, exp, _) => {
+                                    if let Some(base_val) = resolve(*base, instr, constants) {
+                                        if *exp < 0 {
+                                            Some(base_val.pow(exp.unsigned_abs()).inv())
+                                        } else {
+                                            Some(base_val.pow(exp.unsigned_abs()))
+                                        }
+                                    } else {
+                                        None
+                                    }
+                                }
+                                _ => None,
+                            }
+                        }
+
+                        if let Some(cond_res) = resolve(cond, instr, constants) {
+                            // remove dead code
+                            instr.truncate(instr_len);
+                            if subexpression_len != subexpressions.len() {
+                                // remove subexpressions that are created as part of the conditions
+                                subexpressions.retain(|_, &mut v| {
+                                    if let Slot::Temp(v) = v {
+                                        v < instr_len
+                                    } else {
+                                        true
+                                    }
+                                });
+                            }
+
+                            let res = if !cond_res.is_zero() {
+                                then_branch.linearize_impl(
+                                    fn_map,
+                                    params,
+                                    constants,
+                                    constant_map,
+                                    instr,
+                                    subexpressions,
+                                    args,
+                                )?
+                            } else {
+                                else_branch.linearize_impl(
+                                    fn_map,
+                                    params,
+                                    constants,
+                                    constant_map,
+                                    instr,
+                                    subexpressions,
+                                    args,
+                                )?
+                            };
+
+                            subexpressions.insert(*self, res);
+                            return Ok(res);
+                        }
+
+                        let if_instr_pos = instr.len();
+                        instr.push(Instruction::IfElse(cond, 0));
+
+                        let mut sub_expr_pos_child = subexpressions.clone(); // TODO: prevent clone?
+                        let then_branch = then_branch.linearize_impl(
+                            fn_map,
+                            params,
+                            constants,
+                            constant_map,
+                            instr,
+                            &mut sub_expr_pos_child,
+                            args,
+                        )?;
+
+                        let label_end_pos = instr.len();
+                        instr.push(Instruction::Goto(0));
+                        instr[if_instr_pos] = Instruction::IfElse(cond, instr.len());
+                        instr.push(Instruction::Label(instr.len()));
+
+                        sub_expr_pos_child.clone_from(&subexpressions);
+                        let else_branch = else_branch.linearize_impl(
+                            fn_map,
+                            params,
+                            constants,
+                            constant_map,
+                            instr,
+                            &mut sub_expr_pos_child,
+                            args,
+                        )?;
+
+                        instr[label_end_pos] = Instruction::Goto(instr.len());
+                        instr.push(Instruction::Label(instr.len()));
+
+                        let temp = Slot::Temp(instr.len());
+                        instr.push(Instruction::Join(temp, cond, then_branch, else_branch));
+                        temp
+                    }
+                }
+            }
+            AtomView::Pow(p) => {
+                let (b, e) = p.get_base_exp();
+                let b_eval = b.linearize_impl(
+                    fn_map,
+                    params,
+                    constants,
+                    constant_map,
+                    instr,
+                    subexpressions,
+                    args,
+                )?;
+
+                if let AtomView::Num(n) = e
+                    && let CoefficientView::Natural(num, den, num_i, _den_i) = n.get_coeff_view()
+                    && den == 1
+                    && num_i == 0
+                {
+                    let new_base = if num.unsigned_abs() > 1 {
+                        let temp = Slot::Temp(instr.len());
+                        instr.push(Instruction::Mul(
+                            temp,
+                            vec![b_eval; num.unsigned_abs() as usize],
+                            0,
+                        ));
+                        temp
+                    } else {
+                        b_eval
+                    };
+
+                    let res = if num > 0 {
+                        new_base
+                    } else {
+                        let temp = Slot::Temp(instr.len());
+                        instr.push(Instruction::Pow(temp, new_base, -1, false));
+                        temp
+                    };
+
+                    subexpressions.insert(*self, res);
+                    return Ok(res);
+                }
+
+                let e_eval = e.linearize_impl(
+                    fn_map,
+                    params,
+                    constants,
+                    constant_map,
+                    instr,
+                    subexpressions,
+                    args,
+                )?;
+
+                let temp = Slot::Temp(instr.len());
+                instr.push(Instruction::Powf(temp, b_eval, e_eval, false));
+                temp
+            }
+            AtomView::Mul(m) => {
+                let mut muls = vec![];
+                for arg in m.iter() {
+                    let a = arg.linearize_impl(
+                        fn_map,
+                        params,
+                        constants,
+                        constant_map,
+                        instr,
+                        subexpressions,
+                        args,
+                    )?;
+                    muls.push(a);
+                }
+
+                muls.sort();
+
+                let temp = Slot::Temp(instr.len());
+                instr.push(Instruction::Mul(temp, muls, 0));
+                temp
+            }
+            AtomView::Add(a) => {
+                let mut adds = vec![];
+                for arg in a.iter() {
+                    adds.push(arg.linearize_impl(
+                        fn_map,
+                        params,
+                        constants,
+                        constant_map,
+                        instr,
+                        subexpressions,
+                        args,
+                    )?);
+                }
+
+                adds.sort();
+
+                let temp = Slot::Temp(instr.len());
+                instr.push(Instruction::Add(temp, adds, 0));
+                temp
+            }
+        };
+
+        subexpressions.insert(*self, res);
+        Ok(res)
     }
 }
 
@@ -1291,11 +2190,9 @@ impl<T: Default> ExpressionEvaluator<T> {
             return 0;
         }
 
-        for (p, (i, _)) in self.instructions.iter().enumerate() {
+        'instr_loop: for (p, (i, _)) in self.instructions.iter().enumerate() {
             if common_ops_simple.len() > self.settings.max_common_pair_cache_entries {
-                if common_ops_simple.len() > self.settings.max_common_pair_cache_entries {
-                    break;
-                }
+                break;
             }
 
             if p % 10000 == 0 {
@@ -1321,6 +2218,11 @@ impl<T: Default> ExpressionEvaluator<T> {
                                 .entry(key)
                                 .and_modify(|x| *x += 1)
                                 .or_insert(1);
+
+                            if common_ops_simple.len() > self.settings.max_common_pair_cache_entries
+                            {
+                                break 'instr_loop;
+                            }
                         }
                     }
                 }
@@ -4979,7 +5881,7 @@ impl<T: Real> ExpressionEvaluatorWithExternalFunctions<T> {
 /// A slot in a list that contains a numerical value.
 #[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
 #[cfg_attr(feature = "bincode", derive(bincode::Encode, bincode::Decode))]
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
 pub enum Slot {
     /// An entry in the list of parameters.
     Param(usize),
