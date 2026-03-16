@@ -517,7 +517,46 @@ impl<'a> AtomView<'a> {
             }
         }
 
-        Self::linearize_multiple(&hornered_expressions, fn_map, params, settings)
+        let mut e = Self::linearize_multiple(&hornered_expressions, fn_map, params, settings)?;
+
+        drop(f);
+        drop(hornered_expressions);
+
+        loop {
+            let r = e.remove_common_instructions();
+
+            if r == 0 || e.settings.abort_level > 0 {
+                e.settings.abort_level = 0;
+                break;
+            }
+
+            if e.settings.verbose {
+                let (add_count, mul_count) = e.count_operations();
+                info!(
+                    "Removed {} common instructions: {} + and {} ×",
+                    r, add_count, mul_count
+                );
+            }
+        }
+
+        for _ in 0..e.settings.cpe_iterations.unwrap_or(usize::MAX) {
+            let r = e.remove_common_pairs();
+            if r == 0 || e.settings.abort_level > 0 {
+                e.settings.abort_level = 0;
+                break;
+            }
+
+            if e.settings.verbose {
+                let (add_count, mul_count) = e.count_operations();
+                info!(
+                    "Removed {} common pairs: {} + and {} ×",
+                    r, add_count, mul_count
+                );
+            }
+        }
+
+        e.optimize_stack();
+        Ok(e)
     }
 
     pub fn optimize_horner_scheme_multiple(
@@ -843,7 +882,7 @@ impl<'a> AtomView<'a> {
             }
         }
 
-        let mut e = ExpressionEvaluator {
+        Ok(ExpressionEvaluator {
             stack,
             param_count: params.len(),
             reserved_indices,
@@ -851,43 +890,7 @@ impl<'a> AtomView<'a> {
             result_indices: result_indices.iter().map(|s| slot_map!(*s)).collect(),
             external_fns: external_functions,
             settings: settings.clone(),
-        };
-
-        loop {
-            let r = e.remove_common_instructions();
-
-            if r == 0 || e.settings.abort_level > 0 {
-                e.settings.abort_level = 0;
-                break;
-            }
-
-            if settings.verbose {
-                let (add_count, mul_count) = e.count_operations();
-                info!(
-                    "Removed {} common instructions: {} + and {} ×",
-                    r, add_count, mul_count
-                );
-            }
-        }
-
-        for _ in 0..settings.cpe_iterations.unwrap_or(usize::MAX) {
-            let r = e.remove_common_pairs();
-            if r == 0 || e.settings.abort_level > 0 {
-                e.settings.abort_level = 0;
-                break;
-            }
-
-            if settings.verbose {
-                let (add_count, mul_count) = e.count_operations();
-                info!(
-                    "Removed {} common pairs: {} + and {} ×",
-                    r, add_count, mul_count
-                );
-            }
-        }
-
-        e.optimize_stack();
-        Ok(e)
+        })
     }
 
     // Yields the stack index that contains the output.
