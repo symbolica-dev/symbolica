@@ -150,7 +150,7 @@ const LATEX_PRINT_OPTIONS: PrintOptions = PrintOptions {
 ///
 /// And you must set the modules of your functions and classes to
 /// `symbolica.community.NAME`, .i.e,
-/// ```  
+/// ```
 /// #[pyclass(module = "symbolica.community.NAME")]
 /// struct MyPythonStruct {}
 /// ```
@@ -2695,6 +2695,40 @@ impl PythonTransformer {
     /// ```
     pub fn collect_factors(&self) -> PyResult<PythonTransformer> {
         self.append_transformer(Transformer::CollectFactors)
+    }
+
+    /// Iteratively extract the minimal common powers of an indeterminate `v` for every term that contains `v`
+    /// and continue to the next indeterminate in `variables`.
+    /// This is a generalization of Horner's method for polynomials.
+    ///
+    /// If no variables are provided, a heuristically determined variable ordering is used
+    /// that minimizes the number of operations.
+    ///
+    /// Examples
+    /// --------
+    ///
+    /// >>> from symbolica import *
+    /// >>> expr = E('v1 + v1*v2 + 2 v1*v2*v3 + v1^2 + v1^3*y + v1^4*z')
+    /// >>> collected = expr.hold(T().collect_horner([S('v1'), S('v2')]))()
+    ///
+    /// yields `v1*(1+v1*(1+v1*(v1*z+y))+v2*(1+2*v3))`.
+    #[pyo3(signature = (vars=None))]
+    pub fn collect_horner(
+        &self,
+        vars: Option<Vec<PythonExpression>>,
+    ) -> PyResult<PythonTransformer> {
+        let vars = if let Some(vars) = vars {
+            let vars: Vec<_> = vars
+                .into_iter()
+                .map(|e| Indeterminate::try_from(e.expr))
+                .collect::<Result<Vec<_>, _>>()
+                .map_err(|e| pyo3::exceptions::PyValueError::new_err(e))?;
+            Some(vars)
+        } else {
+            None
+        };
+
+        self.append_transformer(Transformer::CollectHorner(vars))
     }
 
     /// Create a transformer that collects numerical factors by removing the numerical content from additions.
@@ -5985,6 +6019,38 @@ impl PythonExpression {
     /// ```
     pub fn collect_factors(&self) -> PythonExpression {
         self.expr.collect_factors().into()
+    }
+
+    /// Iteratively extract the minimal common powers of an indeterminate `v` for every term that contains `v`
+    /// and continue to the next indeterminate in `variables`.
+    /// This is a generalization of Horner's method for polynomials.
+    ///
+    /// If no variables are provided, a heuristically determined variable ordering is used
+    /// that minimizes the number of operations.
+    ///
+    /// Examples
+    /// --------
+    ///
+    /// >>> from symbolica import *
+    /// >>> expr = E('v1 + v1*v2 + 2 v1*v2*v3 + v1^2 + v1^3*y + v1^4*z')
+    /// >>> collected = expr.collect_horner([S('v1'), S('v2')])
+    ///
+    /// yields `v1*(1+v1*(1+v1*(v1*z+y))+v2*(1+2*v3))`.
+    #[pyo3(signature = (vars=None))]
+    pub fn collect_horner(
+        &self,
+        vars: Option<Vec<PythonExpression>>,
+    ) -> PyResult<PythonExpression> {
+        if let Some(vars) = vars {
+            let vars: Vec<_> = vars
+                .into_iter()
+                .map(|e| Indeterminate::try_from(e.expr))
+                .collect::<Result<Vec<_>, _>>()
+                .map_err(|e| pyo3::exceptions::PyValueError::new_err(e))?;
+            Ok(self.expr.collect_horner(Some(&vars)).into())
+        } else {
+            Ok(self.expr.collect_horner::<Indeterminate>(None).into())
+        }
     }
 
     /// Collect numerical factors by removing the numerical content from additions.
@@ -17518,7 +17584,7 @@ compiler_flags : Optional[Sequence[str]]
 custom_header : Optional[str]
     The custom header to include in the generated code.
 cuda_number_of_evaluations: Optional[int]
-    The number of parallel evaluations to perform on the CUDA device. The input to evaluate must 
+    The number of parallel evaluations to perform on the CUDA device. The input to evaluate must
     have the length `cuda_number_of_evaluations * arg_len`.
 cuda_block_size: Optional[int]
     The block size to use for CUDA kernel launches."#,
@@ -17628,7 +17694,7 @@ compiler_flags : Optional[Sequence[str]]
 custom_header : Optional[str]
     The custom header to include in the generated code.
 cuda_number_of_evaluations: Optional[int]
-    The number of parallel evaluations to perform on the CUDA device. The input to evaluate must 
+    The number of parallel evaluations to perform on the CUDA device. The input to evaluate must
     have the length `cuda_number_of_evaluations * arg_len`.
 cuda_block_size: Optional[int]
     The block size to use for CUDA kernel launches."#,

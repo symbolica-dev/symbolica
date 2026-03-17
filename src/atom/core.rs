@@ -264,21 +264,24 @@ pub trait AtomCore: private::Sealed + Sized {
     /// and continue to the next indeterminate in `variables`.
     /// This is a generalization of Horner's method for polynomials.
     ///
+    /// If no variables are provided, a heuristically determined variable ordering is used
+    /// that minimizes the number of operations.
+    ///
     /// # Example
     /// ```
     /// use symbolica::{atom::AtomCore, parse, symbol};
     /// let expr = parse!("v1 + v1*v2 + 2 v1*v2*v3 + v1^2 + v1^3*y + v1^4*z");
-    /// let collected = expr.collect_horner(&[symbol!("v1"), symbol!("v2")]);
+    /// let collected = expr.collect_horner(Some(&[symbol!("v1"), symbol!("v2")]));
     /// assert_eq!(collected, parse!("v1*(1+v1*(1+v1*(v1*z+y))+v2*(1+2*v3))"));
     /// ```
-    fn collect_horner<'a, V: Into<Indeterminate> + Clone>(&self, variables: &[V]) -> Self::Output {
+    fn collect_horner<'a, V: Into<Indeterminate> + Clone>(
+        &self,
+        variables: Option<&[V]>,
+    ) -> Self::Output {
+        let vs = variables.map(|v| v.iter().map(|x| x.clone().into()).collect::<Vec<_>>());
+
         self.as_atom_view()
-            .horner_scheme_impl(
-                &variables
-                    .iter()
-                    .map(|v| v.clone().into())
-                    .collect::<Vec<_>>(),
-            )
+            .horner_scheme(vs.as_ref().map(|x| x.as_slice()))
             .wrap(self)
     }
 

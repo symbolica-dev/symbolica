@@ -1639,6 +1639,24 @@ class Expression:
         ```
         """
 
+    def collect_horner(self, vars: Sequence[Expression] | None = None) -> Expression:
+        """Iteratively extract the minimal common powers of an indeterminate `v` for every term that contains `v`
+        and continue to the next indeterminate in `variables`.
+        This is a generalization of Horner's method for polynomials.
+
+        If no variables are provided, a heuristically determined variable ordering is used
+        that minimizes the number of operations.
+
+        Examples
+        --------
+
+        >>> from symbolica import *
+        >>> expr = E('v1 + v1*v2 + 2 v1*v2*v3 + v1^2 + v1^3*y + v1^4*z')
+        >>> collected = expr.collect_horner([S('v1'), S('v2')])
+
+        yields `v1*(1+v1*(1+v1*(v1*z+y))+v2*(1+2*v3))`.
+        """
+
     def collect_num(self) -> Expression:
         """Collect numerical factors by removing the content from additions.
         For example, `-2*x + 4*x^2 + 6*x^3` will be transformed into `-2*(x - 2*x^2 - 3*x^3)`.
@@ -3016,6 +3034,24 @@ class Transformer:
         ```
         v1^2*(1+v1+v2+v2*(1+v1))
         ```
+        """
+
+    def collect_horner(self, vars: Sequence[Expression] | None = None) -> Transformer:
+        """Create a transformer that iteratively extracts the minimal common powers of an indeterminate `v` for every term that contains `v`
+        and continues to the next indeterminate in `variables`.
+        This is a generalization of Horner's method for polynomials.
+
+        If no variables are provided, a heuristically determined variable ordering is used
+        that minimizes the number of operations.
+
+        Examples
+        --------
+
+        >>> from symbolica import *
+        >>> expr = E('v1 + v1*v2 + 2 v1*v2*v3 + v1^2 + v1^3*y + v1^4*z')
+        >>> collected = expr.hold(T().collect_horner([S('v1'), S('v2')]))()
+
+        yields `v1*(1+v1*(1+v1*(v1*z+y))+v2*(1+2*v3))`.
         """
 
     def collect_num(self) -> Transformer:

@@ -198,6 +198,8 @@ pub enum Transformer {
     CollectSymbol(Symbol, Vec<Transformer>, Vec<Transformer>),
     /// Collect common factors from (nested) sums.
     CollectFactors,
+    /// Construct a Horner form.
+    CollectHorner(Option<Vec<Indeterminate>>),
     /// Collect numbers.
     CollectNum,
     Conjugate,
@@ -255,6 +257,7 @@ impl std::fmt::Debug for Transformer {
                 f.debug_tuple("Collect").field(x).field(a).field(b).finish()
             }
             Transformer::CollectFactors => f.debug_tuple("CollectFactors").finish(),
+            Transformer::CollectHorner(x) => f.debug_tuple("CollectHorner").field(x).finish(),
             Transformer::CollectSymbol(x, a, b) => f
                 .debug_tuple("CollectSymbol")
                 .field(x)
@@ -689,6 +692,9 @@ impl Transformer {
                 }
                 Transformer::CollectFactors => {
                     *out = cur_input.collect_factors();
+                }
+                Transformer::CollectHorner(x) => {
+                    *out = cur_input.collect_horner(x.as_ref().map(|v| v.as_slice()));
                 }
                 Transformer::CollectNum => {
                     *out = cur_input.collect_num();

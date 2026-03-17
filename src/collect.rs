@@ -1272,6 +1272,27 @@ impl<'a> AtomView<'a> {
         }
     }
 
+    /// Construct a Horner scheme for the given variables. If no variables are provided,
+    /// a heuristically determined near-optimal ordering is used.
+    pub(crate) fn horner_scheme<'b>(&self, xs: Option<&[Indeterminate]>) -> Atom {
+        if let Some(xs) = xs {
+            self.horner_scheme_impl(xs)
+        } else {
+            // sort variables by their occurrence count
+            let mut v = HashMap::default();
+            self.count_indeterminates(false, &mut v);
+            let mut v: Vec<_> = v.into_iter().collect();
+            v.retain(|(_, vv)| *vv > 1);
+            v.sort_by(|a, b| b.1.cmp(&a.1).then_with(|| a.0.cmp(&b.0)));
+            let res = v
+                .into_iter()
+                .map(|(x, _)| Indeterminate::try_from(x.to_owned()).unwrap())
+                .collect::<Vec<_>>();
+
+            self.horner_scheme_impl(&res)
+        }
+    }
+
     pub(crate) fn horner_scheme_impl<'b>(&self, xs: &[Indeterminate]) -> Atom {
         Workspace::get_local().with(|ws| {
             let mut out = Atom::new();
@@ -1368,7 +1389,7 @@ mod test {
     #[test]
     fn collect_horner() {
         let expr = parse!("1 + v1*v2 + 2 v1*v2*v3 + v1^2 + v1^3*y + v1^4*z + v1^10");
-        let collected = expr.collect_horner(&[symbol!("v1"), symbol!("v2")]);
+        let collected = expr.collect_horner(Some(&[symbol!("v1"), symbol!("v2")]));
         assert_eq!(collected.expand(), expr);
     }
 
