@@ -3100,10 +3100,7 @@ impl AsRef<Atom> for Atom {
 
 #[cfg(test)]
 mod test {
-    use crate::{
-        atom::{Atom, AtomCore, UserData},
-        function,
-    };
+    use crate::atom::{Atom, AtomCore, UserData};
 
     use super::FunctionBuilder;
 

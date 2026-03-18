@@ -1274,9 +1274,13 @@ impl<'a> AtomView<'a> {
 
     /// Construct a Horner scheme for the given variables. If no variables are provided,
     /// a heuristically determined near-optimal ordering is used.
-    pub(crate) fn horner_scheme<'b>(&self, xs: Option<&[Indeterminate]>) -> Atom {
+    pub(crate) fn horner_scheme<'b>(
+        &self,
+        xs: Option<&[Indeterminate]>,
+        enter_functions: bool,
+    ) -> Atom {
         if let Some(xs) = xs {
-            self.horner_scheme_impl(xs)
+            self.horner_scheme_impl(xs, enter_functions)
         } else {
             // sort variables by their occurrence count
             let mut v = HashMap::default();
@@ -1289,14 +1293,19 @@ impl<'a> AtomView<'a> {
                 .map(|(x, _)| Indeterminate::try_from(x.to_owned()).unwrap())
                 .collect::<Vec<_>>();
 
-            self.horner_scheme_impl(&res)
+            self.horner_scheme_impl(&res, enter_functions)
         }
     }
 
-    pub(crate) fn horner_scheme_impl<'b>(&self, xs: &[Indeterminate]) -> Atom {
+    pub(crate) fn horner_scheme_impl<'b>(
+        &self,
+        xs: &[Indeterminate],
+        enter_functions: bool,
+    ) -> Atom {
         Workspace::get_local().with(|ws| {
+            let r = self.horner_scheme_impl_no_norm(ws, xs, enter_functions);
+
             let mut out = Atom::new();
-            let r = self.horner_scheme_impl_no_norm(ws, xs);
             r.as_view().normalize(ws, &mut out);
             out
         })
@@ -1306,18 +1315,34 @@ impl<'a> AtomView<'a> {
         &self,
         ws: &Workspace,
         xs: &[Indeterminate],
+        enter_functions: bool,
     ) -> AtomOrView<'a> {
         if xs.is_empty() {
             return self.into();
         }
 
         match self {
-            AtomView::Num(_) | AtomView::Var(_) | AtomView::Fun(_) => self.into(),
+            AtomView::Num(_) | AtomView::Var(_) => self.into(),
+            AtomView::Fun(f) => {
+                if enter_functions {
+                    let mut tmp = ws.new_atom();
+                    let fun = tmp.to_fun(f.get_symbol());
+
+                    for arg in f {
+                        let r = arg.horner_scheme_impl_no_norm(ws, xs, enter_functions);
+                        fun.add_arg(r.as_view());
+                    }
+
+                    tmp.into_inner().into()
+                } else {
+                    self.into()
+                }
+            }
             AtomView::Pow(p) => {
                 let (b, e) = p.get_base_exp();
 
-                let bb = b.horner_scheme_impl_no_norm(ws, xs);
-                let ee = e.horner_scheme_impl_no_norm(ws, xs);
+                let bb = b.horner_scheme_impl_no_norm(ws, xs, enter_functions);
+                let ee = e.horner_scheme_impl_no_norm(ws, xs, enter_functions);
 
                 if matches!(bb, AtomOrView::Atom(_)) || matches!(ee, AtomOrView::Atom(_)) {
                     let mut pow = Atom::new();
@@ -1333,7 +1358,7 @@ impl<'a> AtomView<'a> {
 
                 let mut changed = false;
                 for arg in m {
-                    let r = arg.horner_scheme_impl_no_norm(ws, xs);
+                    let r = arg.horner_scheme_impl_no_norm(ws, xs, enter_functions);
                     changed |= matches!(r, AtomOrView::Atom(_));
                     mul.extend(r.as_view());
                 }
@@ -1350,10 +1375,12 @@ impl<'a> AtomView<'a> {
 
                 let mut res = rest
                     .as_view()
-                    .horner_scheme_impl_no_norm(ws, &xs[1..])
+                    .horner_scheme_impl_no_norm(ws, &xs[1..], enter_functions)
                     .into_owned();
                 if power > 0 {
-                    let new_key = key.as_view().horner_scheme_impl_no_norm(ws, &xs);
+                    let new_key =
+                        key.as_view()
+                            .horner_scheme_impl_no_norm(ws, &xs, enter_functions);
                     let v = if power == 1 {
                         new_key.as_view().mul_no_norm(ws, xs[0].as_view())
                     } else {

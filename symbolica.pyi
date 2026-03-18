@@ -1963,6 +1963,8 @@ class Expression:
         rhs_cache_size: Optional[int] = None,
         repeat: bool = False,
         once: bool = False,
+        bottom_up: bool = False,
+        nested: bool = False,
     ) -> Expression:
         """
         Replace all subexpressions matching the pattern `pattern` by the right-hand side `rhs`.
@@ -2010,9 +2012,15 @@ class Expression:
             If set to `True`, the entire operation will be repeated until there are no more matches.
         once: bool, optional
             If set to `True`, only the first match will be replaced, instead of all non-overlapping matches.
+        bottom_up: bool, optional
+            Replace deepest nested matches first instead of replacing the outermost matches first.
+            For example, replacing `f(x_)` with `x_^2` in `f(f(x))` would yield `f(x)^2` with the default settings and `f(x^2)` with bottom-up replacement.
+        nested: bool, optional
+            Replace nested matches, starting from the deepest first and acting on the result of that replacement.
+            For example, replacing `f(x_)` with `x_^2` in `f(f(x))` would yield `f(x)^2` with the default settings and `f(x^2)^2` with nested replacement.
         """
 
-    def replace_multiple(self, replacements: Sequence[Replacement],  repeat: Optional[bool] = False) -> Expression:
+    def replace_multiple(self, replacements: Sequence[Replacement],  repeat: bool = False, once: bool = False, bottom_up: bool = False, nested: bool = False) -> Expression:
         """
         Replace all atoms matching the patterns. See `replace` for more information.
 
@@ -3136,6 +3144,8 @@ class Transformer:
         allow_new_wildcards_on_rhs: bool = False,
         rhs_cache_size: Optional[int] = None,
         once: bool = False,
+        bottom_up: bool = False,
+        nested: bool = False
     ) -> Transformer:
         """
         Create a transformer that replaces all subexpressions matching the pattern `pat` by the right-hand side `rhs`.
@@ -3181,9 +3191,15 @@ class Transformer:
             **Warning**: caching should be disabled (`rhs_cache_size=0`) if the right-hand side contains side effects, such as updating a global variable.
         once: bool, optional
             If set to `True`, only the first match will be replaced, instead of all non-overlapping matches.
+        bottom_up: bool, optional
+            Replace deepest nested matches first instead of replacing the outermost matches first.
+            For example, replacing `f(x_)` with `x_^2` in `f(f(x))` would yield `f(x)^2` with the default settings and `f(x^2)` with bottom-up replacement.
+        nested: bool, optional
+            Replace nested matches, starting from the deepest first and acting on the result of that replacement.
+            For example, replacing `f(x_)` with `x_^2` in `f(f(x))` would yield `f(x)^2` with the default settings and `f(x^2)^2` with nested replacement.
         """
 
-    def replace_multiple(self, replacements: Sequence[Replacement]) -> Transformer:
+    def replace_multiple(self, replacements: Sequence[Replacement], once: bool = False, bottom_up: bool = False, nested: bool = False) -> Transformer:
         """
         Create a transformer that replaces all atoms matching the patterns. See `replace` for more information.
 

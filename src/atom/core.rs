@@ -27,7 +27,7 @@ use crate::{
     evaluate::{EvalTree, EvaluationFn, ExpressionEvaluator, FunctionMap, OptimizationSettings},
     id::{
         AliasedAtom, BorrowReplacement, Condition, ConditionResult, Context, MatchSettings,
-        Pattern, PatternAtomTreeIterator, PatternRestriction, ReplaceBuilder,
+        Pattern, PatternAtomTreeIterator, PatternRestriction, ReplaceBuilder, ReplaceSettings,
     },
     poly::{
         Exponent, PolyVariable, PositiveExponent, factor::Factorize, gcd::PolynomialGCD,
@@ -281,7 +281,7 @@ pub trait AtomCore: private::Sealed + Sized {
         let vs = variables.map(|v| v.iter().map(|x| x.clone().into()).collect::<Vec<_>>());
 
         self.as_atom_view()
-            .horner_scheme(vs.as_ref().map(|x| x.as_slice()))
+            .horner_scheme(vs.as_ref().map(|x| x.as_slice()), false)
             .wrap(self)
     }
 
@@ -1845,7 +1845,36 @@ pub trait AtomCore: private::Sealed + Sized {
     /// ```
     fn replace_multiple<T: BorrowReplacement>(&self, replacements: &[T]) -> Self::Output {
         self.as_atom_view()
-            .replace_multiple(replacements)
+            .replace_multiple(replacements, ReplaceSettings::default())
+            .wrap(self)
+    }
+
+    /// Replace all occurrences of the patterns, where replacements are tested in the order that they are given.
+    /// To repeatedly replace multiple patterns, wrap the call in [AtomCore::replace_map].
+    ///
+    /// # Example
+    ///
+    /// ```
+    /// use symbolica::{atom::AtomCore, parse};
+    /// use symbolica::id::{Pattern, Replacement, ReplaceSettings};
+    /// let expr = parse!("x + y");
+    /// let pattern1 = parse!("x").to_pattern();
+    /// let replacement1 = parse!("y").to_pattern();
+    /// let pattern2 = parse!("y").to_pattern();
+    /// let replacement2 = parse!("x").to_pattern();
+    /// let result = expr.replace_multiple_with_settings(&[
+    ///     Replacement::new(pattern1, replacement1),
+    ///     Replacement::new(pattern2, replacement2),
+    /// ], ReplaceSettings::default());
+    /// assert_eq!(result, parse!("x + y"));
+    /// ```
+    fn replace_multiple_with_settings<T: BorrowReplacement>(
+        &self,
+        replacements: &[T],
+        settings: ReplaceSettings,
+    ) -> Self::Output {
+        self.as_atom_view()
+            .replace_multiple(replacements, settings)
             .wrap(self)
     }
 
@@ -1877,11 +1906,11 @@ pub trait AtomCore: private::Sealed + Sized {
         out: &mut Atom,
     ) -> bool {
         self.as_atom_view()
-            .replace_multiple_into(replacements, false, out)
+            .replace_multiple_into(replacements, ReplaceSettings::default(), out)
     }
 
     /// Replace part of an expression by calling the map `m` on each subexpression.
-    /// The function `m`  must return `true` if the expression was replaced and must write the new expression to `out`.
+    /// The function `m` must write the new expression to `out`, or leave it unchanged if no replacement is needed.
     /// A [Context] object is passed to the function, which contains information about the current position in the expression.
     ///
     /// # Example
@@ -1902,6 +1931,20 @@ pub trait AtomCore: private::Sealed + Sized {
         m: F,
     ) -> Self::Output {
         self.as_atom_view().replace_map(m).wrap(self)
+    }
+
+    /// Replace part of an expression by calling the map `m` on each subexpression.
+    /// The expressions are visited in depth-first order, starting with the deepest subexpressions.
+    /// The function `m` must write the new expression into `out`, or leave it unchanged if no replacement is needed.
+    /// A [Context] object is passed to the function, which contains information about the current position in the expression and
+    /// also whether any child of the current expression was changed by the map.
+    fn replace_map_bottom_up<F: FnMut(AtomView, &Context, &mut Settable<'_, Atom>)>(
+        &self,
+        m: F,
+    ) -> Self::Output {
+        self.as_atom_view()
+            .replace_map_bottom_up(m, true)
+            .wrap(self)
     }
 
     /// Call the function `v` for every subexpression. If `v` returns `true`, the

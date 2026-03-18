@@ -90,8 +90,8 @@ use crate::{
     graph::{GenerationSettings, Graph, HalfEdge},
     id::{
         Condition, ConditionResult, Evaluate, Match, MatchSettings, MatchStack, Pattern,
-        PatternAtomTreeIterator, PatternRestriction, Relation, ReplaceIterator, ReplaceWith,
-        Replacement, WildcardRestriction,
+        PatternAtomTreeIterator, PatternRestriction, Relation, ReplaceIterator, ReplaceSettings,
+        ReplaceWith, Replacement, WildcardRestriction,
     },
     numerical_integration::{ContinuousGrid, DiscreteGrid, Grid, MonteCarloRng, Sample},
     parser::{ParseMode, ParseSettings, Token},
@@ -2918,7 +2918,7 @@ impl PythonTransformer {
     /// rhs_cache_size: int, optional
     ///     Cache the first `rhs_cache_size` substituted patterns. If set to `None`, an internally determined cache size is used.
     ///     **Warning**: caching should be disabled (`rhs_cache_size=0`) if the right-hand side contains side effects, such as updating a global variable.
-    #[pyo3(signature = (lhs, rhs, cond = None, non_greedy_wildcards = None, min_level=0, max_level=None, level_range = None, level_is_tree_depth = false, partial=true, allow_new_wildcards_on_rhs = false, rhs_cache_size = None, once = false))]
+    #[pyo3(signature = (lhs, rhs, cond = None, non_greedy_wildcards = None, min_level=0, max_level=None, level_range = None, level_is_tree_depth = false, partial=true, allow_new_wildcards_on_rhs = false, rhs_cache_size = None, once = false, bottom_up = false, nested = false))]
     pub fn replace(
         &self,
         lhs: ConvertibleToExpression,
@@ -2933,6 +2933,8 @@ impl PythonTransformer {
         allow_new_wildcards_on_rhs: bool,
         rhs_cache_size: Option<usize>,
         once: bool,
+        bottom_up: bool,
+        nested: bool,
     ) -> PyResult<PythonTransformer> {
         let mut settings = MatchSettings::cached();
 
@@ -2970,7 +2972,11 @@ impl PythonTransformer {
             rhs.to_replace_with()?,
             cond.map(|r| r.0).unwrap_or_default(),
             settings,
-            once,
+            ReplaceSettings {
+                once,
+                bottom_up,
+                nested,
+            },
         ))
     }
 
@@ -2982,12 +2988,21 @@ impl PythonTransformer {
     /// >>> x, y, f = S('x', 'y', 'f')
     /// >>> e = f(x,y)
     /// >>> r = e.hold(T().replace_multiple([Replacement(x, y), Replacement(y, x)]))
+    #[pyo3(signature = (replacements, once = false, bottom_up = false, nested = false))]
     pub fn replace_multiple(
         &self,
         replacements: Vec<PythonReplacement>,
+        once: bool,
+        bottom_up: bool,
+        nested: bool,
     ) -> PyResult<PythonTransformer> {
         self.append_transformer(Transformer::ReplaceAllMultiple(
             replacements.into_iter().map(|r| r.replacement).collect(),
+            ReplaceSettings {
+                once,
+                bottom_up,
+                nested,
+            },
         ))
     }
 
@@ -6705,7 +6720,13 @@ impl PythonExpression {
     ///      Warning: caching should be disabled (`rhs_cache_size=0`) if the right-hand side contains side effects, such as updating a global variable.
     /// repeat: bool, optional
     ///     If set to `True`, the entire operation will be repeated until there are no more matches.
-    #[pyo3(signature = (pattern, rhs, cond = None, non_greedy_wildcards = None, min_level=0, max_level=None, level_range = None, level_is_tree_depth = false, partial=true, allow_new_wildcards_on_rhs = false, rhs_cache_size = None, repeat = false, once = false))]
+    /// once: bool, optional
+    ///     If set to `True`, only the first match will be replaced.
+    /// bottom_up: bool, optional
+    ///     If set to `True`, the replacement will be applied from the bottom of the expression tree upwards.
+    /// nested: bool, optional
+    ///     If set to `True`, nested replacements will be allowed.
+    #[pyo3(signature = (pattern, rhs, cond = None, non_greedy_wildcards = None, min_level=0, max_level=None, level_range = None, level_is_tree_depth = false, partial=true, allow_new_wildcards_on_rhs = false, rhs_cache_size = None, repeat = false, once = false, bottom_up = false, nested = false))]
     pub fn replace(
         &self,
         pattern: ConvertibleToExpression,
@@ -6721,6 +6742,8 @@ impl PythonExpression {
         rhs_cache_size: Option<usize>,
         repeat: bool,
         once: bool,
+        bottom_up: bool,
+        nested: bool,
     ) -> PyResult<PythonExpression> {
         let pattern = pattern.to_expression().expr.to_pattern();
         let rhs = &rhs.to_replace_with()?;
@@ -6767,7 +6790,11 @@ impl PythonExpression {
             rhs,
             cond.as_ref(),
             Some(&settings),
-            once,
+            ReplaceSettings {
+                once,
+                bottom_up,
+                nested,
+            },
             &mut out,
         ) {
             if !repeat {
@@ -6800,11 +6827,14 @@ impl PythonExpression {
     ///     The list of replacements to apply.
     /// repeat: bool, optional
     ///     If set to `True`, the entire operation will be repeated until there are no more matches.
-    #[pyo3(signature = (replacements, repeat = None))]
+    #[pyo3(signature = (replacements, repeat = false, once = false, bottom_up = false, nested = false))]
     pub fn replace_multiple(
         &self,
         replacements: Vec<PythonReplacement>,
-        repeat: Option<bool>,
+        repeat: bool,
+        once: bool,
+        bottom_up: bool,
+        nested: bool,
     ) -> PyResult<PythonExpression> {
         let reps = replacements
             .iter()
@@ -6813,10 +6843,15 @@ impl PythonExpression {
 
         let mut expr_ref = self.expr.as_view();
 
+        let settings = ReplaceSettings {
+            once,
+            bottom_up,
+            nested,
+        };
         let mut out = RecycledAtom::new();
         let mut out2 = RecycledAtom::new();
-        while expr_ref.replace_multiple_into(&reps, false, &mut out) {
-            if !repeat.unwrap_or(false) {
+        while expr_ref.replace_multiple_into(&reps, settings, &mut out) {
+            if !repeat {
                 break;
             }
 

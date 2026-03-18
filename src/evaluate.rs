@@ -514,7 +514,7 @@ impl<'a> AtomView<'a> {
 
         let hornered_expressions = expressions
             .iter()
-            .map(|x| x.collect_horner(Some(&scheme)))
+            .map(|x| x.horner_scheme(Some(&scheme), true))
             .collect::<Vec<_>>();
 
         if settings.horner_iterations == 1 && settings.verbose {
@@ -534,7 +534,7 @@ impl<'a> AtomView<'a> {
         let mut f = fn_map.clone();
         for expr in f.tagged_fn_map.values_mut() {
             if let ConstOrExpr::Expr(Expr { body, .. }) = expr {
-                *body = body.collect_horner(Some(&scheme));
+                *body = body.as_view().horner_scheme(Some(&scheme), true);
             }
         }
 
@@ -591,7 +591,7 @@ impl<'a> AtomView<'a> {
 
         let horner: Vec<_> = expressions
             .iter()
-            .map(|x| x.collect_horner(Some(&vars)))
+            .map(|x| x.horner_scheme(Some(&vars), true))
             .collect();
         let mut subexpr = HashSet::default();
         let mut best_ops = (0, 0);
@@ -689,7 +689,7 @@ impl<'a> AtomView<'a> {
 
                         let horner: Vec<_> = expressions
                             .iter()
-                            .map(|x| x.collect_horner(Some(&cvars)))
+                            .map(|x| x.horner_scheme(Some(&cvars), true))
                             .collect();
                         let mut subexpr = HashSet::default();
                         let mut cur_ops = (0, 0);

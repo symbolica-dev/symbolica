@@ -14,8 +14,8 @@ use crate::{
     combinatorics::{partitions, unique_permutations},
     domains::rational::Rational,
     id::{
-        Condition, Evaluate, MatchSettings, Pattern, PatternRestriction, Relation, ReplaceWith,
-        Replacement,
+        Condition, Evaluate, MatchSettings, Pattern, PatternRestriction, Relation, ReplaceSettings,
+        ReplaceWith, Replacement,
     },
     printer::{AnsiWrap, AtomPrinter, PrintOptions},
     state::{RecycledAtom, Workspace},
@@ -209,10 +209,10 @@ pub enum Transformer {
         ReplaceWith<'static>,
         Condition<PatternRestriction>,
         MatchSettings,
-        bool,
+        ReplaceSettings,
     ),
     /// Apply multiple find-and-replace on the lhs.
-    ReplaceAllMultiple(Vec<Replacement>),
+    ReplaceAllMultiple(Vec<Replacement>, ReplaceSettings),
     /// Take the product of a list of arguments in the rhs.
     Product,
     /// Take the sum of a list of arguments in the rhs.
@@ -269,9 +269,11 @@ impl std::fmt::Debug for Transformer {
             Transformer::ReplaceAll(pat, rhs, ..) => {
                 f.debug_tuple("ReplaceAll").field(pat).field(rhs).finish()
             }
-            Transformer::ReplaceAllMultiple(pats) => {
-                f.debug_tuple("ReplaceAllMultiple").field(pats).finish()
-            }
+            Transformer::ReplaceAllMultiple(pats, settings) => f
+                .debug_tuple("ReplaceAllMultiple")
+                .field(pats)
+                .field(settings)
+                .finish(),
             Transformer::Product => f.debug_tuple("Product").finish(),
             Transformer::Sum => f.debug_tuple("Sum").finish(),
             Transformer::ArgCount(p) => f.debug_tuple("ArgCount").field(p).finish(),
@@ -725,8 +727,8 @@ impl Transformer {
                         out,
                     );
                 }
-                Transformer::ReplaceAllMultiple(replacements) => {
-                    cur_input.replace_multiple_into(replacements, false, out);
+                Transformer::ReplaceAllMultiple(replacements, replace_settings) => {
+                    cur_input.replace_multiple_into(replacements, *replace_settings, out);
                 }
                 Transformer::Product => {
                     if let AtomView::Fun(f) = cur_input
@@ -1025,7 +1027,7 @@ impl Transformer {
 mod test {
     use crate::{
         atom::{Atom, AtomCore, FunctionBuilder},
-        id::{Condition, Match, MatchSettings, WildcardRestriction},
+        id::{Condition, Match, MatchSettings, ReplaceSettings, WildcardRestriction},
         parse,
         printer::PrintOptions,
         state::Workspace,
@@ -1115,7 +1117,7 @@ mod test {
                         parse!("x__").to_pattern().into(),
                         Condition::default(),
                         MatchSettings::default(),
-                        false,
+                        ReplaceSettings::default(),
                     ),
                     Transformer::Sort,
                     Transformer::Deduplicate,
@@ -1164,7 +1166,7 @@ mod test {
                             )
                                 .into(),
                             MatchSettings::default(),
-                            false,
+                            ReplaceSettings::default(),
                         ),
                     ])],
                 )])],

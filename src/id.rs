@@ -239,6 +239,14 @@ impl BorrowReplacement for BorrowedReplacement<'_> {
     }
 }
 
+/// Settings for the replacement strategy and tree traversal.
+#[derive(Debug, Default, Copy, Clone)]
+pub struct ReplaceSettings {
+    pub once: bool,
+    pub bottom_up: bool,
+    pub nested: bool,
+}
+
 /// Construct a replacement by specifying the pattern and finishing it with the right-hand side
 /// using [ReplaceBuilder::with], [ReplaceBuilder::with_into], or [ReplaceBuilder::iter].
 #[derive(Debug, Clone)]
@@ -246,9 +254,9 @@ pub struct ReplaceBuilder<'a, 'b> {
     target: AtomView<'a>,
     pattern: BorrowedOrOwned<'b, Pattern>,
     conditions: Option<BorrowedOrOwned<'b, Condition<PatternRestriction>>>,
-    settings: MatchSettings,
+    match_settings: MatchSettings,
+    replace_settings: ReplaceSettings,
     repeat: bool,
-    once: bool,
 }
 
 impl<'a, 'b> ReplaceBuilder<'a, 'b> {
@@ -260,22 +268,22 @@ impl<'a, 'b> ReplaceBuilder<'a, 'b> {
             target,
             pattern: replacement.into(),
             conditions: None,
-            settings: MatchSettings::default(),
+            match_settings: MatchSettings::default(),
             repeat: false,
-            once: false,
+            replace_settings: ReplaceSettings::default(),
         }
     }
 
     /// Specifies wildcards that try to match as little as possible.
     pub fn non_greedy_wildcards(mut self, non_greedy_wildcards: Vec<Symbol>) -> Self {
-        self.settings.non_greedy_wildcards = non_greedy_wildcards;
+        self.match_settings.non_greedy_wildcards = non_greedy_wildcards;
         self
     }
     /// Specifies the `[min,max]` level at which the pattern is allowed to match.
     /// The first level is 0 and the level is increased when entering a function, or going one level deeper in the expression tree,
     /// depending on `level_is_tree_depth`.
     pub fn level_range(mut self, level_range: (usize, Option<usize>)) -> Self {
-        self.settings.level_range = level_range;
+        self.match_settings.level_range = level_range;
         self
     }
 
@@ -283,7 +291,7 @@ impl<'a, 'b> ReplaceBuilder<'a, 'b> {
     /// The first level is 0 and the level is increased when entering a function, or going one level deeper in the expression tree,
     /// depending on `level_is_tree_depth`.
     pub fn min_level(mut self, min_level: usize) -> Self {
-        self.settings.level_range.0 = min_level;
+        self.match_settings.level_range.0 = min_level;
         self
     }
 
@@ -291,31 +299,31 @@ impl<'a, 'b> ReplaceBuilder<'a, 'b> {
     /// The first level is 0 and the level is increased when entering a function, or going one level deeper in the expression tree,
     /// depending on `level_is_tree_depth`.
     pub fn max_level(mut self, max_level: usize) -> Self {
-        self.settings.level_range.1 = Some(max_level);
+        self.match_settings.level_range.1 = Some(max_level);
         self
     }
 
     /// Determine whether a level reflects the expression tree depth or the function depth.
     pub fn level_is_tree_depth(mut self, level_is_tree_depth: bool) -> Self {
-        self.settings.level_is_tree_depth = level_is_tree_depth;
+        self.match_settings.level_is_tree_depth = level_is_tree_depth;
         self
     }
 
     /// If true, the pattern may match a subexpression. If false, it must match the entire expression.
     pub fn partial(mut self, partial: bool) -> Self {
-        self.settings.partial = partial;
+        self.match_settings.partial = partial;
         self
     }
 
     /// Allow wildcards on the right-hand side that do not appear in the pattern.
     pub fn allow_new_wildcards_on_rhs(mut self, allow: bool) -> Self {
-        self.settings.allow_new_wildcards_on_rhs = allow;
+        self.match_settings.allow_new_wildcards_on_rhs = allow;
         self
     }
     /// The maximum size of the cache for the right-hand side of a replacement.
     /// This can be used to prevent expensive recomputations.
     pub fn rhs_cache_size(mut self, rhs_cache_size: usize) -> Self {
-        self.settings.rhs_cache_size = rhs_cache_size;
+        self.match_settings.rhs_cache_size = rhs_cache_size;
         self
     }
 
@@ -336,8 +344,22 @@ impl<'a, 'b> ReplaceBuilder<'a, 'b> {
 
     /// Perform one replacement instead of replacing all non-overlapping occurrences.
     pub fn once(mut self) -> Self {
-        self.once = true;
+        self.replace_settings.once = true;
         self
+    }
+
+    /// Replace deepest nested matches first instead of replacing the outermost matches first.
+    /// For example, replacing `f(x_)` with `x_^2` in `f(f(x))` would yield `f(x)^2` with the default settings and `f(x^2)` with bottom-up replacement.
+    pub fn bottom_up(mut self) -> Self {
+        self.replace_settings.bottom_up = true;
+        self
+    }
+
+    /// Replace nested matches, starting from the deepest first and acting on the result of that replacement.
+    /// For example, replacing `f(x_)` with `x_^2` in `f(f(x))` would yield `f(x)^2` with the default settings and `f(x^2)^2` with nested replacement.
+    pub fn nested(mut self) -> Self {
+        self.replace_settings.nested = true;
+        self.bottom_up()
     }
 
     /// Execute the replacement by specifying the right-hand side.
@@ -360,8 +382,8 @@ impl<'a, 'b> ReplaceBuilder<'a, 'b> {
             self.pattern.borrow(),
             &rhs,
             self.conditions.as_ref().map(|x| x.borrow()),
-            Some(&self.settings),
-            self.once,
+            Some(&self.match_settings),
+            self.replace_settings,
             &mut out,
         ) {
             if !self.repeat || expr_ref == out.as_view() {
@@ -390,8 +412,8 @@ impl<'a, 'b> ReplaceBuilder<'a, 'b> {
             self.pattern.borrow(),
             &rhs,
             self.conditions.as_ref().map(|x| x.borrow()),
-            Some(&self.settings),
-            self.once,
+            Some(&self.match_settings),
+            self.replace_settings,
             out,
         ) {
             replaced = true;
@@ -444,8 +466,8 @@ impl<'a, 'b> ReplaceBuilder<'a, 'b> {
             self.pattern.borrow(),
             &rhs,
             self.conditions.as_ref().map(|x| x.borrow()),
-            Some(&self.settings),
-            self.once,
+            Some(&self.match_settings),
+            self.replace_settings,
             &mut out,
         ) {
             if !self.repeat {
@@ -483,7 +505,7 @@ impl<'a, 'b> ReplaceBuilder<'a, 'b> {
             self.target,
             ReplaceWith::Pattern(rhs.into()),
             self.conditions.as_ref().map(|x| x.borrow()),
-            Some(&self.settings),
+            Some(&self.match_settings),
         )
     }
 
@@ -494,7 +516,7 @@ impl<'a, 'b> ReplaceBuilder<'a, 'b> {
             self.target,
             ReplaceWith::Map(Box::new(rhs)),
             self.conditions.as_ref().map(|x| x.borrow()),
-            Some(&self.settings),
+            Some(&self.match_settings),
         )
     }
 
@@ -514,7 +536,7 @@ impl<'a, 'b> ReplaceBuilder<'a, 'b> {
             &self.pattern,
             self.target,
             self.conditions.as_ref().map(|x| x.borrow()),
-            Some(&self.settings),
+            Some(&self.match_settings),
         )
     }
 }
@@ -529,7 +551,7 @@ impl<'a: 'b, 'b> IntoIterator for &'a ReplaceBuilder<'a, 'b> {
             &self.pattern,
             self.target,
             self.conditions.as_ref().map(|x| x.borrow()),
-            Some(&self.settings),
+            Some(&self.match_settings),
         )
     }
 }
@@ -567,6 +589,8 @@ pub struct Context {
     pub parent_type: Option<AtomType>,
     /// The index of the atom in the parent.
     pub index: usize,
+    /// Whether any of the children of the parent have changed.
+    pub child_changed: bool,
 }
 
 /// An atom that contains aliases, together with a map from the aliases to their original atoms.
@@ -1431,6 +1455,7 @@ impl<'a> AtomView<'a> {
             function_level: 0,
             parent_type: None,
             index: 0,
+            child_changed: false,
         };
 
         Workspace::get_local().with(|ws| {
@@ -1576,6 +1601,185 @@ impl<'a> AtomView<'a> {
         }
     }
 
+    /// Replace part of an expression by calling the map `m` on each subexpression.
+    /// The expressions are visited in depth-first order, starting with the deepest subexpressions.
+    /// The function `m` must write the new expression into `out`, or leave it unchanged if no replacement is needed.
+    /// A [Context] object is passed to the function, which contains information about the current position in the expression and
+    /// also whether any child of the current expression was changed by the map.
+    pub(crate) fn replace_map_bottom_up<F: FnMut(AtomView, &Context, &mut Settable<'_, Atom>)>(
+        &self,
+        mut m: F,
+        nested: bool, // an optimization to avoid unnecessary normalization
+    ) -> Atom {
+        let mut out = Atom::new();
+
+        let context = Context {
+            function_level: 0,
+            parent_type: None,
+            index: 0,
+            child_changed: false,
+        };
+
+        Workspace::get_local().with(|ws| {
+            let mut set = Settable::from(&mut out);
+            self.replace_map_bottom_up_impl(ws, &mut m, context, nested, &mut set);
+
+            if set.is_set() {
+                let mut a = ws.new_atom();
+                set.as_view().normalize(ws, &mut a);
+                std::mem::swap(&mut out, &mut a);
+            } else {
+                out.set_from_view(self);
+            }
+        });
+
+        out
+    }
+
+    pub(crate) fn replace_map_bottom_up_impl<
+        F: FnMut(AtomView, &Context, &mut Settable<'_, Atom>),
+    >(
+        &self,
+        ws: &Workspace,
+        m: &mut F,
+        mut parent_context: Context,
+        nested: bool,
+        out: &mut Settable<'_, Atom>,
+    ) {
+        let mut context = parent_context;
+
+        match self {
+            AtomView::Num(_) | AtomView::Var(_) => {}
+            AtomView::Fun(f) => {
+                let mut fun = None;
+
+                context.parent_type = Some(AtomType::Fun);
+                context.function_level += 1;
+
+                let mut arg_h = ws.new_atom();
+                for (i, arg) in f.iter().enumerate() {
+                    let mut set = Settable::from(arg_h.deref_mut());
+                    context.index = i;
+                    arg.replace_map_bottom_up_impl(ws, m, context, nested, &mut set);
+
+                    if fun.is_none() && set.is_set() {
+                        parent_context.child_changed = true;
+                        let fun_o = out.to_fun(f.get_symbol());
+
+                        for child in f.iter().take(i) {
+                            fun_o.add_arg(child);
+                        }
+
+                        fun_o.add_arg(set.as_view());
+                        fun = Some(fun_o);
+                    } else if let Some(fun) = &mut fun {
+                        if set.is_set() {
+                            fun.add_arg(set.as_view());
+                        } else {
+                            fun.add_arg(arg);
+                        }
+                    }
+                }
+            }
+            AtomView::Pow(p) => {
+                let (base, exp) = p.get_base_exp();
+
+                context.parent_type = Some(AtomType::Pow);
+                context.index = 0;
+
+                let mut base_h = ws.new_atom();
+                let mut base_set = Settable::from(base_h.deref_mut());
+                base.replace_map_bottom_up_impl(ws, m, context, nested, &mut base_set);
+
+                context.index = 1;
+                let mut exp_h = ws.new_atom();
+                let mut exp_set = Settable::from(exp_h.deref_mut());
+                exp.replace_map_bottom_up_impl(ws, m, context, nested, &mut exp_set);
+
+                if base_set.is_set() && exp_set.is_set() {
+                    parent_context.child_changed = true;
+                    out.to_pow(base_set.as_view(), exp_set.as_view());
+                } else if base_set.is_set() {
+                    parent_context.child_changed = true;
+                    out.to_pow(base_set.as_view(), exp);
+                } else if exp_set.is_set() {
+                    parent_context.child_changed = true;
+                    out.to_pow(base, exp_set.as_view());
+                }
+            }
+            AtomView::Mul(mm) => {
+                let mut mul = None;
+
+                context.parent_type = Some(AtomType::Mul);
+
+                let mut child_h = ws.new_atom();
+                for (i, child) in mm.iter().enumerate() {
+                    let mut set = Settable::from(child_h.deref_mut());
+                    context.index = i;
+                    child.replace_map_bottom_up_impl(ws, m, context, nested, &mut set);
+
+                    if mul.is_none() && set.is_set() {
+                        parent_context.child_changed = true;
+                        let mul_o = out.to_mul();
+
+                        for child in mm.iter().take(i) {
+                            mul_o.extend(child);
+                        }
+                        mul_o.extend(set.as_view());
+                        mul = Some(mul_o);
+                    } else if let Some(mul_o) = &mut mul {
+                        if set.is_set() {
+                            mul_o.extend(set.as_view());
+                        } else {
+                            mul_o.extend(child);
+                        }
+                    }
+                }
+            }
+            AtomView::Add(a) => {
+                let mut add = None;
+
+                context.parent_type = Some(AtomType::Add);
+
+                let mut child_h = ws.new_atom();
+                for (i, child) in a.iter().enumerate() {
+                    let mut set = Settable::from(child_h.deref_mut());
+                    context.index = i;
+                    child.replace_map_bottom_up_impl(ws, m, context, nested, &mut set);
+
+                    if add.is_none() && set.is_set() {
+                        parent_context.child_changed = true;
+                        let add_o = out.to_add();
+
+                        for child in a.iter().take(i) {
+                            add_o.extend(child);
+                        }
+                        add_o.extend(set.as_view());
+                        add = Some(add_o);
+                    } else if let Some(mul_o) = &mut add {
+                        if set.is_set() {
+                            mul_o.extend(set.as_view());
+                        } else {
+                            mul_o.extend(child);
+                        }
+                    }
+                }
+            }
+        }
+
+        if !parent_context.child_changed {
+            m(*self, &parent_context, out);
+        } else if nested {
+            let mut child_h = ws.new_atom();
+            let mut set = Settable::from(child_h.deref_mut());
+            m(out.as_view(), &parent_context, &mut set);
+
+            if set.is_set() {
+                std::mem::swap(out.deref_mut(), child_h.deref_mut());
+            }
+        }
+    }
+
     pub(crate) fn replace<'b, P: Into<BorrowedOrOwned<'b, Pattern>>>(
         &self,
         pattern: P,
@@ -1590,7 +1794,7 @@ impl<'a> AtomView<'a> {
         rhs: R,
         conditions: Option<&Condition<PatternRestriction>>,
         settings: Option<&MatchSettings>,
-        replace_once: bool,
+        replace_settings: ReplaceSettings,
         out: &mut Atom,
     ) -> bool {
         Workspace::get_local().with(|ws| {
@@ -1600,16 +1804,20 @@ impl<'a> AtomView<'a> {
                 ws,
                 conditions,
                 settings,
-                replace_once,
+                replace_settings,
                 out,
             )
         })
     }
 
     /// Replace all occurrences of the patterns, where replacements are tested in the order that they are given.
-    pub(crate) fn replace_multiple<T: BorrowReplacement>(&self, replacements: &[T]) -> Atom {
+    pub(crate) fn replace_multiple<T: BorrowReplacement>(
+        &self,
+        replacements: &[T],
+        replace_settings: ReplaceSettings,
+    ) -> Atom {
         let mut out = Atom::new();
-        self.replace_multiple_into(replacements, false, &mut out);
+        self.replace_multiple_into(replacements, replace_settings, &mut out);
         out
     }
 
@@ -1618,7 +1826,7 @@ impl<'a> AtomView<'a> {
     pub(crate) fn replace_multiple_into<T: BorrowReplacement>(
         &self,
         replacements: &[T],
-        replace_once: bool,
+        replace_settings: ReplaceSettings,
         out: &mut Atom,
     ) -> bool {
         let mut atom_iter = replacements
@@ -1656,7 +1864,7 @@ impl<'a> AtomView<'a> {
                 0,
                 max_level,
                 &mut rhs_cache,
-                replace_once,
+                replace_settings,
                 &mut set,
             );
 
@@ -1672,19 +1880,19 @@ impl<'a> AtomView<'a> {
         })
     }
 
-    /// Replace all occurrences of the patterns in the target, without normalizing the output.
-    fn replace_no_norm<'b, T: BorrowReplacement>(
+    /// Replace the node if it matches any of the patterns, without normalizing the output.
+    /// Returns `true` if the node could have matched with respect to its size.
+    /// Whether the node was actually replaced is indicated by whether `out` was set or not.
+    fn replace_node<'b, T: BorrowReplacement>(
         &self,
         replacements: &'b [T],
         atom_match_iterators: &mut [(AtomMatchIterator<'a, 'b>, WrappedMatchStack<'a, 'b>)],
         workspace: &Workspace,
         tree_level: usize,
         fn_level: usize,
-        max_level: Option<(usize, bool)>,
         rhs_cache: &mut HashMap<(usize, Vec<(Symbol, Match<'a>)>), Atom>,
-        replace_once: bool,
         out: &mut Settable<Atom>,
-    ) {
+    ) -> bool {
         let mut fits = false;
         for (rep_id, r) in replacements.iter().enumerate() {
             let r = r.borrow();
@@ -1771,7 +1979,7 @@ impl<'a> AtomView<'a> {
                     if used_flags.iter().all(|x| *x) {
                         // all used, return rhs
                         std::mem::swap(&mut *rhs_subs, out.deref_mut());
-                        return;
+                        return fits;
                     }
 
                     match self {
@@ -1802,13 +2010,40 @@ impl<'a> AtomView<'a> {
                         }
                     }
 
-                    return;
+                    return fits;
                 }
             }
         }
 
-        if !fits {
-            return;
+        fits
+    }
+
+    /// Replace all occurrences of the patterns in the target, without normalizing the output.
+    fn replace_no_norm<'b, T: BorrowReplacement>(
+        &self,
+        replacements: &'b [T],
+        atom_match_iterators: &mut [(AtomMatchIterator<'a, 'b>, WrappedMatchStack<'a, 'b>)],
+        workspace: &Workspace,
+        tree_level: usize,
+        fn_level: usize,
+        max_level: Option<(usize, bool)>,
+        rhs_cache: &mut HashMap<(usize, Vec<(Symbol, Match<'a>)>), Atom>,
+        replace_settings: ReplaceSettings,
+        out: &mut Settable<Atom>,
+    ) {
+        if !replace_settings.bottom_up && !replace_settings.nested {
+            if !self.replace_node(
+                replacements,
+                atom_match_iterators,
+                workspace,
+                tree_level,
+                fn_level,
+                rhs_cache,
+                out,
+            ) || out.is_set()
+            {
+                return;
+            }
         }
 
         // no match found at this level, so check the children
@@ -1833,14 +2068,14 @@ impl<'a> AtomView<'a> {
                         fn_level + 1,
                         max_level,
                         rhs_cache,
-                        replace_once,
+                        replace_settings,
                         &mut set,
                     );
 
                     if fun.is_none() && set.is_set() {
                         let fun_o = out.to_fun(f.get_symbol());
 
-                        if replace_once {
+                        if replace_settings.once {
                             for (index, child) in f.iter().enumerate() {
                                 if index == i {
                                     fun_o.add_arg(set.as_view());
@@ -1885,11 +2120,11 @@ impl<'a> AtomView<'a> {
                     fn_level,
                     max_level,
                     rhs_cache,
-                    replace_once,
+                    replace_settings,
                     &mut base_set,
                 );
 
-                if base_set.is_set() && replace_once {
+                if base_set.is_set() && replace_settings.once {
                     out.to_pow(base_set.as_view(), exp);
                     return;
                 }
@@ -1904,7 +2139,7 @@ impl<'a> AtomView<'a> {
                     fn_level,
                     max_level,
                     rhs_cache,
-                    replace_once,
+                    replace_settings,
                     &mut exp_set,
                 );
 
@@ -1936,14 +2171,14 @@ impl<'a> AtomView<'a> {
                         fn_level,
                         max_level,
                         rhs_cache,
-                        replace_once,
+                        replace_settings,
                         &mut set,
                     );
 
                     if mul.is_none() && set.is_set() {
                         let mul_o = out.to_mul();
 
-                        if replace_once {
+                        if replace_settings.once {
                             for (index, child) in m.iter().enumerate() {
                                 if index == i {
                                     mul_o.extend(set.as_view());
@@ -1991,14 +2226,14 @@ impl<'a> AtomView<'a> {
                         fn_level,
                         max_level,
                         rhs_cache,
-                        replace_once,
+                        replace_settings,
                         &mut set,
                     );
 
                     if add.is_none() && set.is_set() {
                         let add_o = out.to_add();
 
-                        if replace_once {
+                        if replace_settings.once {
                             for (index, child) in a.iter().enumerate() {
                                 if index == i {
                                     add_o.extend(set.as_view());
@@ -2025,6 +2260,51 @@ impl<'a> AtomView<'a> {
             }
             _ => {}
         }
+
+        if replace_settings.bottom_up && !out.is_set() || replace_settings.nested {
+            if out.is_set() {
+                let mut buf = workspace.new_atom();
+                let mut set = Settable::from(buf.deref_mut());
+
+                // create new atom match iterator
+                let mut atom_iter = replacements
+                    .iter()
+                    .map(|r| {
+                        (
+                            AtomMatchIterator::new(r.borrow().pattern, out.as_view()),
+                            WrappedMatchStack::new(
+                                r.borrow().conditions.unwrap_or(&DEFAULT_PATTERN_CONDITION),
+                                r.borrow().settings.unwrap_or(&DEFAULT_MATCH_SETTINGS),
+                            ),
+                        )
+                    })
+                    .collect::<Vec<_>>();
+
+                out.as_view().replace_node(
+                    replacements,
+                    &mut atom_iter,
+                    workspace,
+                    tree_level,
+                    fn_level,
+                    &mut HashMap::default(),
+                    &mut set,
+                );
+
+                if set.is_set() {
+                    std::mem::swap(out.deref_mut(), buf.deref_mut());
+                }
+            } else {
+                self.replace_node(
+                    replacements,
+                    atom_match_iterators,
+                    workspace,
+                    tree_level,
+                    fn_level,
+                    rhs_cache,
+                    out,
+                );
+            }
+        }
     }
 
     /// Replace all occurrences of the pattern in the target, returning `true` iff a match was found.
@@ -2036,7 +2316,7 @@ impl<'a> AtomView<'a> {
         workspace: &Workspace,
         conditions: Option<&Condition<PatternRestriction>>,
         settings: Option<&MatchSettings>,
-        replace_once: bool,
+        replace_settings: ReplaceSettings,
         out: &mut Atom,
     ) -> bool {
         let rep = BorrowedReplacement {
@@ -2080,7 +2360,7 @@ impl<'a> AtomView<'a> {
             0,
             max_level,
             &mut rhs_cache,
-            replace_once,
+            replace_settings,
             &mut set,
         );
 
@@ -5439,7 +5719,7 @@ impl<'a: 'b, 'b> Iterator for ReplaceIterator<'a, 'b> {
 #[cfg(test)]
 mod test {
     use crate::{
-        atom::{Atom, AtomCore},
+        atom::{Atom, AtomCore, AtomType},
         id::{AtomTreeIterator, Condition, ConditionResult, Match, MatchSettings, Replacement},
         parse,
         printer::PrintOptions,
@@ -5747,5 +6027,19 @@ mod test {
             .replace(parse!("f(symbolica::symbol_attribute_filter::xscal__)"))
             .with(1);
         assert_eq!(r, parse!("f(1,x,2)"));
+    }
+
+    #[test]
+    fn nested() {
+        let res = parse!("f(x+x*y+f(x+x^2),x,f(x+x^2))").replace_map_bottom_up(|a, c, o| {
+            if c.parent_type == Some(AtomType::Fun) {
+                let r = a.horner_scheme(None, false);
+                if r.as_view() != a {
+                    **o = r;
+                }
+            }
+        });
+
+        assert_eq!(res, parse!("f(x*(1+y)+f(x*(1+x)),x,f(x*(1+x)))"));
     }
 }
