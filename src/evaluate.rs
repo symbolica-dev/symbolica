@@ -1897,17 +1897,14 @@ impl<T: Clone> ExpressionEvaluator<T> {
         let mut external = vec![];
         for e in &self.external_fns {
             if let Some(f) = external_fns.remove(e) {
-                external.push((vec![], f));
+                external.push((vec![], e.clone(), f));
             } else {
                 return Err(format!("External function '{e}' not found"));
             }
         }
 
         Ok(ExpressionEvaluatorWithExternalFunctions {
-            stack: self.stack.clone(),
-            param_count: self.param_count,
-            instructions: self.instructions.clone(),
-            result_indices: self.result_indices.clone(),
+            eval: self.clone(),
             external_fns: external,
         })
     }
@@ -5800,29 +5797,27 @@ impl<T, F: Clone + Send + Sync + Fn(&[T]) -> T + Send + Sync> ExternalFunction<T
 
 /// An optimized evaluator for expressions that can evaluate expressions with parameters
 /// and some registered external functions.
+// TODO: deprecate
 #[derive(Clone)]
 pub struct ExpressionEvaluatorWithExternalFunctions<T> {
-    stack: Vec<T>,
-    param_count: usize,
-    instructions: Vec<(Instr, ComplexPhase)>,
-    result_indices: Vec<usize>,
-    external_fns: Vec<(Vec<T>, Box<dyn ExternalFunction<T>>)>,
+    eval: ExpressionEvaluator<T>,
+    external_fns: Vec<(Vec<T>, String, Box<dyn ExternalFunction<T>>)>,
 }
 
 impl<T: Real> ExpressionEvaluatorWithExternalFunctions<T> {
     #[allow(dead_code)]
     pub(crate) fn update_stack(&mut self, e: ExpressionEvaluator<T>) {
-        self.stack = e.stack;
-        self.param_count = e.param_count;
-        self.instructions = e.instructions;
-        self.result_indices = e.result_indices;
+        self.eval.stack = e.stack;
+        self.eval.param_count = e.param_count;
+        self.eval.instructions = e.instructions;
+        self.eval.result_indices = e.result_indices;
     }
 
     pub fn evaluate_single(&mut self, params: &[T]) -> T {
-        if self.result_indices.len() != 1 {
+        if self.eval.result_indices.len() != 1 {
             panic!(
                 "Evaluator does not return a single result but {} results",
-                self.result_indices.len()
+                self.eval.result_indices.len()
             );
         }
 
@@ -5832,75 +5827,75 @@ impl<T: Real> ExpressionEvaluatorWithExternalFunctions<T> {
     }
 
     pub fn evaluate(&mut self, params: &[T], out: &mut [T]) {
-        if self.param_count != params.len() {
+        if self.eval.param_count != params.len() {
             panic!(
                 "Parameter count mismatch: expected {}, got {}",
-                self.param_count,
+                self.eval.param_count,
                 params.len()
             );
         }
 
-        for (t, p) in self.stack.iter_mut().zip(params) {
+        for (t, p) in self.eval.stack.iter_mut().zip(params) {
             *t = p.clone();
         }
 
         let mut tmp;
         let mut i = 0;
-        while i < self.instructions.len() {
-            let (instr, _) = unsafe { self.instructions.get_unchecked(i) };
+        while i < self.eval.instructions.len() {
+            let (instr, _) = unsafe { self.eval.instructions.get_unchecked(i) };
             match instr {
                 Instr::Add(r, v) => {
-                    tmp = self.stack[v[0]].clone();
+                    tmp = self.eval.stack[v[0]].clone();
                     for x in &v[1..] {
-                        let e = self.stack[*x].clone();
+                        let e = self.eval.stack[*x].clone();
                         tmp += e;
                     }
-                    std::mem::swap(&mut self.stack[*r], &mut tmp);
+                    std::mem::swap(&mut self.eval.stack[*r], &mut tmp);
                 }
                 Instr::Mul(r, v) => {
-                    tmp = self.stack[v[0]].clone();
+                    tmp = self.eval.stack[v[0]].clone();
                     for x in &v[1..] {
-                        let e = self.stack[*x].clone();
+                        let e = self.eval.stack[*x].clone();
                         tmp *= e;
                     }
-                    std::mem::swap(&mut self.stack[*r], &mut tmp);
+                    std::mem::swap(&mut self.eval.stack[*r], &mut tmp);
                 }
                 Instr::Pow(r, b, e) => {
                     if *e >= 0 {
-                        self.stack[*r] = self.stack[*b].pow(*e as u64);
+                        self.eval.stack[*r] = self.eval.stack[*b].pow(*e as u64);
                     } else {
-                        self.stack[*r] = self.stack[*b].pow(e.unsigned_abs()).inv();
+                        self.eval.stack[*r] = self.eval.stack[*b].pow(e.unsigned_abs()).inv();
                     }
                 }
                 Instr::Powf(r, b, e) => {
-                    self.stack[*r] = self.stack[*b].powf(&self.stack[*e]);
+                    self.eval.stack[*r] = self.eval.stack[*b].powf(&self.eval.stack[*e]);
                 }
                 Instr::BuiltinFun(r, s, arg) => match s.0.get_id() {
-                    Symbol::EXP_ID => self.stack[*r] = self.stack[*arg].exp(),
-                    Symbol::LOG_ID => self.stack[*r] = self.stack[*arg].log(),
-                    Symbol::SIN_ID => self.stack[*r] = self.stack[*arg].sin(),
-                    Symbol::COS_ID => self.stack[*r] = self.stack[*arg].cos(),
-                    Symbol::SQRT_ID => self.stack[*r] = self.stack[*arg].sqrt(),
-                    Symbol::ABS_ID => self.stack[*r] = self.stack[*arg].norm(),
-                    Symbol::CONJ_ID => self.stack[*r] = self.stack[*arg].conj(),
+                    Symbol::EXP_ID => self.eval.stack[*r] = self.eval.stack[*arg].exp(),
+                    Symbol::LOG_ID => self.eval.stack[*r] = self.eval.stack[*arg].log(),
+                    Symbol::SIN_ID => self.eval.stack[*r] = self.eval.stack[*arg].sin(),
+                    Symbol::COS_ID => self.eval.stack[*r] = self.eval.stack[*arg].cos(),
+                    Symbol::SQRT_ID => self.eval.stack[*r] = self.eval.stack[*arg].sqrt(),
+                    Symbol::ABS_ID => self.eval.stack[*r] = self.eval.stack[*arg].norm(),
+                    Symbol::CONJ_ID => self.eval.stack[*r] = self.eval.stack[*arg].conj(),
                     _ => unreachable!(),
                 },
                 Instr::ExternalFun(r, s, args) => {
-                    let (cache, f) = &mut self.external_fns[*s];
+                    let (cache, _, f) = &mut self.external_fns[*s];
 
                     if cache.len() < args.len() {
-                        cache.resize(args.len(), self.stack[0].clone());
+                        cache.resize(args.len(), self.eval.stack[0].clone());
                     }
 
                     for (i, v) in cache.iter_mut().zip(args) {
-                        *i = self.stack[*v].clone();
+                        *i = self.eval.stack[*v].clone();
                     }
 
-                    self.stack[*r] = (f)(&cache[..args.len()]);
+                    self.eval.stack[*r] = (f)(&cache[..args.len()]);
                 }
                 Instr::IfElse(n, label) => {
                     // jump to else block
-                    if self.stack[*n].is_fully_zero() {
+                    if self.eval.stack[*n].is_fully_zero() {
                         i = label.0;
                         continue;
                     }
@@ -5911,10 +5906,10 @@ impl<T: Real> ExpressionEvaluatorWithExternalFunctions<T> {
                 }
                 Instr::Label(_) => {}
                 Instr::Join(r, c, a, b) => {
-                    if !self.stack[*c].is_fully_zero() {
-                        self.stack[*r] = self.stack[*a].clone();
+                    if !self.eval.stack[*c].is_fully_zero() {
+                        self.eval.stack[*r] = self.eval.stack[*a].clone();
                     } else {
-                        self.stack[*r] = self.stack[*b].clone();
+                        self.eval.stack[*r] = self.eval.stack[*b].clone();
                     }
                 }
             }
@@ -5922,8 +5917,8 @@ impl<T: Real> ExpressionEvaluatorWithExternalFunctions<T> {
             i += 1;
         }
 
-        for (o, i) in out.iter_mut().zip(&self.result_indices) {
-            *o = self.stack[*i].clone();
+        for (o, i) in out.iter_mut().zip(&self.eval.result_indices) {
+            *o = self.eval.stack[*i].clone();
         }
     }
 }
@@ -9123,10 +9118,11 @@ impl ExpressionEvaluator<Complex<Rational>> {
     /// # use symbolica::{atom::AtomCore, parse};
     /// # use symbolica::evaluate::{FunctionMap, OptimizationSettings};
     /// let params = vec![parse!("x"), parse!("y")];
-    /// let evaluator = parse!("x + y")
+    /// let mut evaluator = parse!("x + y")
     ///     .evaluator(&FunctionMap::new(), &params, OptimizationSettings::default())
     ///     .unwrap()
-    ///     .jit_compile::<f64>();
+    ///     .jit_compile::<f64>()
+    ///     .unwrap();
     ///
     /// let mut res = [0.];
     /// evaluator.evaluate(&[1., 2.], &mut res);
@@ -9137,14 +9133,12 @@ impl ExpressionEvaluator<Complex<Rational>> {
             .into_iter()
             .map(|c| symjit::Complex::new(c.re.to_f64(), c.im.to_f64()))
             .collect::<Vec<_>>();
-        T::jit_compile(instructions, constants, &Defuns::new())
+        T::jit_compile(instructions, constants, HashMap::default())
     }
 }
 
-impl ExpressionEvaluator<f64> {
+impl<T: JITCompiledNumber + Clone> ExpressionEvaluator<T> {
     /// JIT-compiles the evaluator using SymJIT.
-    ///
-    /// You can supply the types [f64] and [wide::f64x4] for SIMD.
     ///
     /// # Examples
     ///
@@ -9153,28 +9147,27 @@ impl ExpressionEvaluator<f64> {
     /// # use symbolica::{atom::AtomCore, parse};
     /// # use symbolica::evaluate::{FunctionMap, OptimizationSettings};
     /// let params = vec![parse!("x"), parse!("y")];
-    /// let evaluator = parse!("x + y")
+    /// let mut evaluator = parse!("x + y")
     ///     .evaluator(&FunctionMap::new(), &params, OptimizationSettings::default())
     ///     .unwrap()
-    ///     .jit_compile::<f64>();
+    ///     .jit_compile::<f64>()
+    ///     .unwrap();
     ///
     /// let mut res = [0.];
     /// evaluator.evaluate(&[1., 2.], &mut res);
     /// assert_eq!(res, [3.]);
-    pub fn jit_compile<T: JITCompiledNumber>(&self) -> Result<T::Evaluator, String> {
+    pub fn jit_compile(&self) -> Result<T::Evaluator, String> {
         let (instructions, _, constants) = self.export_instructions();
         let constants = constants
             .into_iter()
-            .map(|c| symjit::Complex::new(c, 0.))
-            .collect::<Vec<_>>();
-        T::jit_compile(instructions, constants, &Defuns::new())
+            .map(|c| c.to_complex_f64())
+            .collect::<Result<Vec<_>, _>>()?;
+        T::jit_compile(instructions, constants, HashMap::default())
     }
 }
 
-impl ExpressionEvaluator<Complex<f64>> {
+impl<T: JITCompiledNumber + Clone> ExpressionEvaluatorWithExternalFunctions<T> {
     /// JIT-compiles the evaluator using SymJIT.
-    ///
-    /// You can supply the types [Complex<f64>] and [Complex<wide::f64x4>] for SIMD.
     ///
     /// # Examples
     ///
@@ -9183,21 +9176,28 @@ impl ExpressionEvaluator<Complex<f64>> {
     /// # use symbolica::{atom::AtomCore, parse};
     /// # use symbolica::evaluate::{FunctionMap, OptimizationSettings};
     /// let params = vec![parse!("x"), parse!("y")];
-    /// let evaluator = parse!("x + y")
+    /// let mut evaluator = parse!("x + y")
     ///     .evaluator(&FunctionMap::new(), &params, OptimizationSettings::default())
     ///     .unwrap()
-    ///     .jit_compile::<f64>();
+    ///     .jit_compile::<f64>()
+    ///     .unwrap();
     ///
     /// let mut res = [0.];
     /// evaluator.evaluate(&[1., 2.], &mut res);
     /// assert_eq!(res, [3.]);
-    pub fn jit_compile<T: JITCompiledNumber>(&self) -> Result<T::Evaluator, String> {
-        let (instructions, _, constants) = self.export_instructions();
+    pub fn jit_compile(&self) -> Result<T::Evaluator, String> {
+        let (instructions, _, constants) = self.eval.export_instructions();
         let constants = constants
             .into_iter()
-            .map(|c| symjit::Complex::new(c.re, c.im))
-            .collect::<Vec<_>>();
-        T::jit_compile(instructions, constants, &Defuns::new())
+            .map(|c| c.to_complex_f64())
+            .collect::<Result<Vec<_>, _>>()?;
+
+        let external_fns = self
+            .external_fns
+            .iter()
+            .map(|(_, name, f)| (name.clone(), f.clone()))
+            .collect::<HashMap<_, _>>();
+        T::jit_compile(instructions, constants, external_fns)
     }
 }
 
@@ -9205,7 +9205,7 @@ fn translate_to_symjit(
     instructions: Vec<Instruction>,
     constants: Vec<symjit::Complex<f64>>,
     config: Config,
-    defuns: &Defuns,
+    defuns: Defuns,
 ) -> Result<Translator, String> {
     let mut translator = Translator::new(config, defuns);
 
@@ -9271,11 +9271,13 @@ pub trait JITCompiledNumber: Sized {
     type Evaluator;
     type Settings: Default;
 
+    fn to_complex_f64(&self) -> Result<symjit::Complex<f64>, String>;
+
     /// Create a JIT-compiled evaluator for this number type.
     fn jit_compile(
         instructions: Vec<Instruction>,
         constants: Vec<symjit::Complex<f64>>,
-        external_functions: &Defuns,
+        external_functions: HashMap<String, Box<dyn ExternalFunction<Self>>>,
     ) -> Result<Self::Evaluator, String>;
 }
 
@@ -9283,10 +9285,14 @@ impl JITCompiledNumber for f64 {
     type Evaluator = JITCompiledRealEvaluator;
     type Settings = ();
 
+    fn to_complex_f64(&self) -> Result<symjit::Complex<f64>, String> {
+        Ok(symjit::Complex::new(*self, 0.))
+    }
+
     fn jit_compile(
         instructions: Vec<Instruction>,
         constants: Vec<symjit::Complex<f64>>,
-        external_functions: &Defuns,
+        external_functions: HashMap<String, Box<dyn ExternalFunction<f64>>>,
     ) -> Result<Self::Evaluator, String> {
         if constants.iter().any(|x| x.im != 0.) {
             return Err("complex constants are not supported for f64 JIT export".to_string());
@@ -9296,8 +9302,17 @@ impl JITCompiledNumber for f64 {
         config.set_complex(false);
         config.set_simd(false);
 
-        let mut translator =
-            translate_to_symjit(instructions, constants, config, external_functions)?;
+        let mut defuns = Defuns::new();
+
+        for (name, f) in external_functions {
+            let r: Box<Box<dyn Fn(&[Self]) -> Self + Send + Sync>> = Box::new(f);
+
+            defuns
+                .add_sliced_func(&name, r)
+                .map_err(|e| e.to_string())?;
+        }
+
+        let mut translator = translate_to_symjit(instructions, constants, config, defuns)?;
 
         Ok(JITCompiledRealEvaluator {
             code: translator.compile().map_err(|e| e.to_string())?,
@@ -9318,6 +9333,7 @@ impl JITCompiledRealEvaluator {
         self.code.evaluate(args, out);
     }
 
+    /// Save the compiled code to a file. External functions are not saved.
     pub fn save(&self, filename: impl AsRef<Path>) -> Result<(), std::io::Error> {
         let mut file = std::fs::File::create(filename)?;
         self.code
@@ -9325,6 +9341,7 @@ impl JITCompiledRealEvaluator {
             .map_err(|e| std::io::Error::new(std::io::ErrorKind::Other, e.to_string()))
     }
 
+    /// Load a compiled code from a file.
     pub fn load(filename: impl AsRef<Path>) -> Result<Self, std::io::Error> {
         let mut file = std::fs::File::open(filename)?;
         let code = Application::load(&mut file)
@@ -9418,17 +9435,35 @@ impl JITCompiledNumber for wide::f64x4 {
     type Evaluator = JITCompiledRealSimdEvaluator;
     type Settings = ();
 
+    fn to_complex_f64(&self) -> Result<symjit::Complex<f64>, String> {
+        let a = self.as_array();
+        if !a.iter().all(|x| *x == a[0]) {
+            return Err(format!("SIMD value {:?} is not a scalar", self));
+        }
+
+        Ok(symjit::Complex::new(a[0], 0.))
+    }
+
     fn jit_compile(
         instructions: Vec<Instruction>,
         constants: Vec<symjit::Complex<f64>>,
-        external_functions: &Defuns,
+        external_functions: HashMap<String, Box<dyn ExternalFunction<Self>>>,
     ) -> Result<Self::Evaluator, String> {
         let mut config = Config::default();
         config.set_complex(false);
         config.set_simd(true);
 
-        let mut translator =
-            translate_to_symjit(instructions, constants, config, external_functions)?;
+        let mut defuns = Defuns::new();
+
+        for (name, f) in external_functions {
+            let r: Box<Box<dyn Fn(&[Self]) -> Self + Send + Sync>> = Box::new(f.clone());
+
+            defuns
+                .add_sliced_func(&name, r)
+                .map_err(|e| e.to_string())?;
+        }
+
+        let mut translator = translate_to_symjit(instructions, constants, config, defuns)?;
 
         Ok(JITCompiledRealSimdEvaluator {
             code: translator.compile().map_err(|e| e.to_string())?,
@@ -9450,9 +9485,10 @@ impl JITCompiledRealSimdEvaluator {
     /// Evaluate the compiled code with double-precision floating point simd numbers.
     #[inline(always)]
     pub fn evaluate(&mut self, args: &[wide::f64x4], out: &mut [wide::f64x4]) {
-        self.code.evaluate_simd(args, out);
+        self.code.evaluate(args, out);
     }
 
+    /// Save the compiled code to a file. External functions are not saved.
     pub fn save(&self, filename: impl AsRef<Path>) -> Result<(), std::io::Error> {
         let mut file = std::fs::File::create(filename)?;
         self.code
@@ -9460,6 +9496,7 @@ impl JITCompiledRealSimdEvaluator {
             .map_err(|e| std::io::Error::new(std::io::ErrorKind::Other, e.to_string()))
     }
 
+    /// Load a compiled code from a file.
     pub fn load(filename: impl AsRef<Path>) -> Result<Self, std::io::Error> {
         let mut file = std::fs::File::open(filename)?;
         let code = Application::load(&mut file)
@@ -9623,17 +9660,37 @@ impl JITCompiledNumber for Complex<f64> {
     type Evaluator = JITCompiledComplexEvaluator;
     type Settings = ();
 
+    fn to_complex_f64(&self) -> Result<symjit::Complex<f64>, String> {
+        Ok(symjit::Complex::new(self.re, self.im))
+    }
+
     fn jit_compile(
         instructions: Vec<Instruction>,
         constants: Vec<symjit::Complex<f64>>,
-        external_functions: &Defuns,
+        external_functions: HashMap<String, Box<dyn ExternalFunction<Self>>>,
     ) -> Result<Self::Evaluator, String> {
         let mut config = Config::default();
         config.set_complex(true);
         config.set_simd(false);
 
-        let mut translator =
-            translate_to_symjit(instructions, constants, config, external_functions)?;
+        let mut defuns = Defuns::new();
+
+        for (name, f) in external_functions {
+            let r: Box<Box<dyn Fn(&[Self]) -> Self + Send + Sync>> = Box::new(f.clone());
+
+            // TODO: implement symjit::Element on numeric::Complex
+            let k = Box::new(move |x: &[symjit::Complex<f64>]| {
+                let ars = unsafe { std::mem::transmute(x) };
+                let res = f(ars);
+                symjit::Complex::new(res.re, res.im)
+            });
+
+            defuns
+                .add_sliced_func(&name, k)
+                .map_err(|e| e.to_string())?;
+        }
+
+        let mut translator = translate_to_symjit(instructions, constants, config, defuns)?;
 
         Ok(JITCompiledComplexEvaluator {
             code: translator.compile().map_err(|e| e.to_string())?,
@@ -9651,13 +9708,12 @@ impl JITCompiledComplexEvaluator {
     /// Evaluate the compiled code with double-precision floating point numbers.
     #[inline(always)]
     pub fn evaluate(&mut self, args: &[Complex<f64>], out: &mut [Complex<f64>]) {
-        let flat_args: &[f64] =
-            unsafe { std::slice::from_raw_parts(args.as_ptr() as *const f64, args.len() * 2) };
-        let flat_out: &mut [f64] =
-            unsafe { std::slice::from_raw_parts_mut(out.as_mut_ptr() as *mut f64, out.len() * 2) };
-        self.code.evaluate(flat_args, flat_out);
+        let args: &[symjit::Complex<f64>] = unsafe { std::mem::transmute(args) };
+        let out: &mut [symjit::Complex<f64>] = unsafe { std::mem::transmute(out) };
+        self.code.evaluate(args, out);
     }
 
+    /// Save the compiled code to a file. External functions are not saved.
     pub fn save(&self, filename: impl AsRef<Path>) -> Result<(), std::io::Error> {
         let mut file = std::fs::File::create(filename)?;
         self.code
@@ -9665,6 +9721,7 @@ impl JITCompiledComplexEvaluator {
             .map_err(|e| std::io::Error::new(std::io::ErrorKind::Other, e.to_string()))
     }
 
+    /// Load a compiled code from a file.
     pub fn load(filename: impl AsRef<Path>) -> Result<Self, std::io::Error> {
         let mut file = std::fs::File::open(filename)?;
         let code = Application::load(&mut file)
@@ -9758,29 +9815,46 @@ impl JITCompiledNumber for Complex<wide::f64x4> {
     type Evaluator = JITCompiledComplexSimdEvaluator;
     type Settings = ();
 
+    fn to_complex_f64(&self) -> Result<symjit::Complex<f64>, String> {
+        let re = self.re.as_array();
+        if !re.iter().all(|x| *x == re[0]) {
+            return Err(format!("SIMD value {:?} is not a scalar", self));
+        }
+
+        let im = self.im.as_array();
+        if !im.iter().all(|x| *x == im[0]) {
+            return Err(format!("SIMD value {:?} is not a scalar", self));
+        }
+
+        Ok(symjit::Complex::new(re[0], im[0]))
+    }
+
     /// JIT-compiles the evaluator using SymJIT.
-    ///
-    /// # Example
-    ///
-    /// ```
-    /// # use symbolica::*;
-    /// # let expr = Expr::var("x");
-    /// # let params = vec![1.0];
-    /// # let out = vec![0.0];
-    /// # let eval = ExpressionEvaluator::new(&expr);
-    /// let evaluator = eval.jit_compile::<f64x4e>(&Defuns::default())?;
-    /// ```
     fn jit_compile(
         instructions: Vec<Instruction>,
         constants: Vec<symjit::Complex<f64>>,
-        external_functions: &Defuns,
+        external_functions: HashMap<String, Box<dyn ExternalFunction<Self>>>,
     ) -> Result<Self::Evaluator, String> {
         let mut config = Config::default();
         config.set_complex(true);
         config.set_simd(true);
 
-        let mut translator =
-            translate_to_symjit(instructions, constants, config, external_functions)?;
+        let mut defuns = Defuns::new();
+
+        for (name, f) in external_functions {
+            // TODO: implement symjit::Element on numeric::Complex
+            let k = Box::new(move |x: &[symjit::Complex<wide::f64x4>]| {
+                let ars = unsafe { std::mem::transmute(x) };
+                let res = f(ars);
+                symjit::Complex::new(res.re, res.im)
+            });
+
+            defuns
+                .add_sliced_func(&name, k)
+                .map_err(|e| e.to_string())?;
+        }
+
+        let mut translator = translate_to_symjit(instructions, constants, config, defuns)?;
 
         Ok(JITCompiledComplexSimdEvaluator {
             code: translator.compile().map_err(|e| e.to_string())?,
@@ -9801,9 +9875,13 @@ pub struct JITCompiledComplexSimdEvaluator {
 impl JITCompiledComplexSimdEvaluator {
     #[inline(always)]
     pub fn evaluate(&mut self, args: &[Complex<wide::f64x4>], out: &mut [Complex<wide::f64x4>]) {
-        self.code.evaluate_simd(args, out);
+        let args: &[symjit::Complex<wide::f64x4>] = unsafe { std::mem::transmute(args) };
+        let out: &mut [symjit::Complex<wide::f64x4>] = unsafe { std::mem::transmute(out) };
+
+        self.code.evaluate(args, out);
     }
 
+    /// Save the compiled code to a file. External functions are not saved.
     pub fn save(&self, filename: impl AsRef<Path>) -> Result<(), std::io::Error> {
         let mut file = std::fs::File::create(filename)?;
         self.code
@@ -9811,6 +9889,7 @@ impl JITCompiledComplexSimdEvaluator {
             .map_err(|e| std::io::Error::new(std::io::ErrorKind::Other, e.to_string()))
     }
 
+    /// Load a compiled code from a file.
     pub fn load(filename: impl AsRef<Path>) -> Result<Self, std::io::Error> {
         let mut file = std::fs::File::open(filename)?;
         let code = Application::load(&mut file)
@@ -12575,7 +12654,7 @@ mod test {
         let mut eval_re = eval.clone().map_coeff(&|x| x.re.to_f64());
         eval_re.evaluate(&[0.5], &mut res);
 
-        let mut jit_eval_re = eval_re.jit_compile::<f64>().unwrap();
+        let mut jit_eval_re = eval_re.jit_compile().unwrap();
 
         let mut jit_res = [0.; 1];
         jit_eval_re.evaluate(&[0.5], &mut jit_res);
