@@ -9127,7 +9127,7 @@ impl ExpressionEvaluator<Complex<Rational>> {
     /// let mut res = [0.];
     /// evaluator.evaluate(&[1., 2.], &mut res);
     /// assert_eq!(res, [3.]);
-    pub fn jit_compile<T: JITCompiledNumber>(&self) -> Result<T::Evaluator, String> {
+    pub fn jit_compile<T: JITCompiledNumber>(&self) -> Result<JITCompiledEvaluator<T>, String> {
         let (instructions, _, constants) = self.export_instructions();
         let constants = constants
             .into_iter()
@@ -9156,7 +9156,7 @@ impl<T: JITCompiledNumber + Clone> ExpressionEvaluator<T> {
     /// let mut res = [0.];
     /// evaluator.evaluate(&[1., 2.], &mut res);
     /// assert_eq!(res, [3.]);
-    pub fn jit_compile(&self) -> Result<T::Evaluator, String> {
+    pub fn jit_compile(&self) -> Result<JITCompiledEvaluator<T>, String> {
         let (instructions, _, constants) = self.export_instructions();
         let constants = constants
             .into_iter()
@@ -9185,7 +9185,7 @@ impl<T: JITCompiledNumber + Clone> ExpressionEvaluatorWithExternalFunctions<T> {
     /// let mut res = [0.];
     /// evaluator.evaluate(&[1., 2.], &mut res);
     /// assert_eq!(res, [3.]);
-    pub fn jit_compile(&self) -> Result<T::Evaluator, String> {
+    pub fn jit_compile(&self) -> Result<JITCompiledEvaluator<T>, String> {
         let (instructions, _, constants) = self.eval.export_instructions();
         let constants = constants
             .into_iter()
@@ -9268,9 +9268,6 @@ fn translate_to_symjit(
 }
 
 pub trait JITCompiledNumber: Sized {
-    type Evaluator;
-    type Settings: Default;
-
     fn to_complex_f64(&self) -> Result<symjit::Complex<f64>, String>;
 
     /// Create a JIT-compiled evaluator for this number type.
@@ -9278,13 +9275,12 @@ pub trait JITCompiledNumber: Sized {
         instructions: Vec<Instruction>,
         constants: Vec<symjit::Complex<f64>>,
         external_functions: HashMap<String, Box<dyn ExternalFunction<Self>>>,
-    ) -> Result<Self::Evaluator, String>;
+    ) -> Result<JITCompiledEvaluator<Self>, String>;
+
+    fn evaluate(eval: &mut JITCompiledEvaluator<Self>, args: &[Self], out: &mut [Self]);
 }
 
 impl JITCompiledNumber for f64 {
-    type Evaluator = JITCompiledRealEvaluator;
-    type Settings = ();
-
     fn to_complex_f64(&self) -> Result<symjit::Complex<f64>, String> {
         Ok(symjit::Complex::new(*self, 0.))
     }
@@ -9293,7 +9289,7 @@ impl JITCompiledNumber for f64 {
         instructions: Vec<Instruction>,
         constants: Vec<symjit::Complex<f64>>,
         external_functions: HashMap<String, Box<dyn ExternalFunction<f64>>>,
-    ) -> Result<Self::Evaluator, String> {
+    ) -> Result<JITCompiledEvaluator<Self>, String> {
         if constants.iter().any(|x| x.im != 0.) {
             return Err("complex constants are not supported for f64 JIT export".to_string());
         }
@@ -9314,23 +9310,32 @@ impl JITCompiledNumber for f64 {
 
         let mut translator = translate_to_symjit(instructions, constants, config, defuns)?;
 
-        Ok(JITCompiledRealEvaluator {
+        Ok(JITCompiledEvaluator {
             code: translator.compile().map_err(|e| e.to_string())?,
+            batch_input_buffer: Vec::new(),
+            batch_output_buffer: Vec::new(),
         })
+    }
+
+    #[inline(always)]
+    fn evaluate(eval: &mut JITCompiledEvaluator<Self>, args: &[Self], out: &mut [Self]) {
+        eval.code.evaluate(args, out);
     }
 }
 
 /// A JIT-compiled evaluator for real-valued expressions, using the SymJIT compiler.
 #[derive(Clone)]
-pub struct JITCompiledRealEvaluator {
+pub struct JITCompiledEvaluator<T> {
     code: Application,
+    batch_input_buffer: Vec<T>,
+    batch_output_buffer: Vec<T>,
 }
 
-impl JITCompiledRealEvaluator {
-    /// Evaluate the compiled code with double-precision floating point numbers.
+impl<T: JITCompiledNumber> JITCompiledEvaluator<T> {
+    /// Evaluate the JIT compiled code.
     #[inline(always)]
-    pub fn evaluate(&mut self, args: &[f64], out: &mut [f64]) {
-        self.code.evaluate(args, out);
+    pub fn evaluate(&mut self, args: &[T], out: &mut [T]) {
+        T::evaluate(self, args, out);
     }
 
     /// Save the compiled code to a file. External functions are not saved.
@@ -9346,12 +9351,16 @@ impl JITCompiledRealEvaluator {
         let mut file = std::fs::File::open(filename)?;
         let code = Application::load(&mut file)
             .map_err(|e| std::io::Error::new(std::io::ErrorKind::Other, e.to_string()))?;
-        Ok(JITCompiledRealEvaluator { code })
+        Ok(JITCompiledEvaluator {
+            code,
+            batch_input_buffer: Vec::new(),
+            batch_output_buffer: Vec::new(),
+        })
     }
 }
 
 #[cfg(feature = "serde")]
-impl serde::Serialize for JITCompiledRealEvaluator {
+impl<T> serde::Serialize for JITCompiledEvaluator<T> {
     fn serialize<S: serde::Serializer>(&self, serializer: S) -> Result<S::Ok, S::Error> {
         let mut data = Vec::new();
         self.code
@@ -9362,17 +9371,21 @@ impl serde::Serialize for JITCompiledRealEvaluator {
 }
 
 #[cfg(feature = "serde")]
-impl<'de> serde::Deserialize<'de> for JITCompiledRealEvaluator {
+impl<'de, T> serde::Deserialize<'de> for JITCompiledEvaluator<T> {
     fn deserialize<D: serde::Deserializer<'de>>(deserializer: D) -> Result<Self, D::Error> {
         let data: Vec<u8> = serde::Deserialize::deserialize(deserializer)?;
         let code = Application::load(&mut std::io::Cursor::new(data))
             .map_err(|e| serde::de::Error::custom(e.to_string()))?;
-        Ok(JITCompiledRealEvaluator { code })
+        Ok(JITCompiledEvaluator {
+            code,
+            batch_input_buffer: Vec::new(),
+            batch_output_buffer: Vec::new(),
+        })
     }
 }
 
 #[cfg(feature = "bincode")]
-impl bincode::Encode for JITCompiledRealEvaluator {
+impl<T> bincode::Encode for JITCompiledEvaluator<T> {
     fn encode<E: bincode::enc::Encoder>(
         &self,
         encoder: &mut E,
@@ -9388,18 +9401,22 @@ impl bincode::Encode for JITCompiledRealEvaluator {
 #[cfg(feature = "bincode")]
 bincode::impl_borrow_decode!(JITCompiledRealEvaluator);
 #[cfg(feature = "bincode")]
-impl<Context> bincode::Decode<Context> for JITCompiledRealEvaluator {
+impl<T, Context> bincode::Decode<Context> for JITCompiledEvaluator<T> {
     fn decode<D: bincode::de::Decoder<Context = Context>>(
         decoder: &mut D,
     ) -> Result<Self, bincode::error::DecodeError> {
         let data: Vec<u8> = bincode::Decode::decode(decoder)?;
         let code = Application::load(&mut std::io::Cursor::new(data))
             .map_err(|e| bincode::error::DecodeError::OtherString(e.to_string()))?;
-        Ok(JITCompiledRealEvaluator { code })
+        Ok(JITCompiledEvaluator {
+            code,
+            batch_input_buffer: Vec::new(),
+            batch_output_buffer: Vec::new(),
+        })
     }
 }
 
-impl BatchEvaluator<f64> for JITCompiledRealEvaluator {
+impl BatchEvaluator<f64> for JITCompiledEvaluator<f64> {
     fn evaluate_batch(
         &mut self,
         batch_size: usize,
@@ -9432,9 +9449,6 @@ impl BatchEvaluator<f64> for JITCompiledRealEvaluator {
 }
 
 impl JITCompiledNumber for wide::f64x4 {
-    type Evaluator = JITCompiledRealSimdEvaluator;
-    type Settings = ();
-
     fn to_complex_f64(&self) -> Result<symjit::Complex<f64>, String> {
         let a = self.as_array();
         if !a.iter().all(|x| *x == a[0]) {
@@ -9448,7 +9462,7 @@ impl JITCompiledNumber for wide::f64x4 {
         instructions: Vec<Instruction>,
         constants: Vec<symjit::Complex<f64>>,
         external_functions: HashMap<String, Box<dyn ExternalFunction<Self>>>,
-    ) -> Result<Self::Evaluator, String> {
+    ) -> Result<JITCompiledEvaluator<Self>, String> {
         let mut config = Config::default();
         config.set_complex(false);
         config.set_simd(true);
@@ -9465,108 +9479,24 @@ impl JITCompiledNumber for wide::f64x4 {
 
         let mut translator = translate_to_symjit(instructions, constants, config, defuns)?;
 
-        Ok(JITCompiledRealSimdEvaluator {
+        Ok(JITCompiledEvaluator {
             code: translator.compile().map_err(|e| e.to_string())?,
             batch_input_buffer: Vec::new(),
             batch_output_buffer: Vec::new(),
         })
     }
-}
 
-/// A JIT-compiled SIMD evaluator for real-valued expressions, using the SymJIT compiler.
-#[derive(Clone)]
-pub struct JITCompiledRealSimdEvaluator {
-    code: Application,
-    batch_input_buffer: Vec<wide::f64x4>,
-    batch_output_buffer: Vec<wide::f64x4>,
-}
-
-impl JITCompiledRealSimdEvaluator {
-    /// Evaluate the compiled code with double-precision floating point simd numbers.
     #[inline(always)]
-    pub fn evaluate(&mut self, args: &[wide::f64x4], out: &mut [wide::f64x4]) {
-        self.code.evaluate(args, out);
-    }
-
-    /// Save the compiled code to a file. External functions are not saved.
-    pub fn save(&self, filename: impl AsRef<Path>) -> Result<(), std::io::Error> {
-        let mut file = std::fs::File::create(filename)?;
-        self.code
-            .save(&mut file)
-            .map_err(|e| std::io::Error::new(std::io::ErrorKind::Other, e.to_string()))
-    }
-
-    /// Load a compiled code from a file.
-    pub fn load(filename: impl AsRef<Path>) -> Result<Self, std::io::Error> {
-        let mut file = std::fs::File::open(filename)?;
-        let code = Application::load(&mut file)
-            .map_err(|e| std::io::Error::new(std::io::ErrorKind::Other, e.to_string()))?;
-        Ok(JITCompiledRealSimdEvaluator {
-            code,
-            batch_input_buffer: Vec::new(),
-            batch_output_buffer: Vec::new(),
-        })
+    fn evaluate(
+        eval: &mut JITCompiledEvaluator<wide::f64x4>,
+        args: &[wide::f64x4],
+        out: &mut [wide::f64x4],
+    ) {
+        eval.code.evaluate(args, out);
     }
 }
 
-#[cfg(feature = "serde")]
-impl serde::Serialize for JITCompiledRealSimdEvaluator {
-    fn serialize<S: serde::Serializer>(&self, serializer: S) -> Result<S::Ok, S::Error> {
-        let mut data = Vec::new();
-        self.code
-            .save(&mut data)
-            .map_err(|e| serde::ser::Error::custom(e.to_string()))?;
-        serializer.serialize_bytes(&data)
-    }
-}
-
-#[cfg(feature = "serde")]
-impl<'de> serde::Deserialize<'de> for JITCompiledRealSimdEvaluator {
-    fn deserialize<D: serde::Deserializer<'de>>(deserializer: D) -> Result<Self, D::Error> {
-        let data: Vec<u8> = serde::Deserialize::deserialize(deserializer)?;
-        let code = Application::load(&mut std::io::Cursor::new(data))
-            .map_err(|e| serde::de::Error::custom(e.to_string()))?;
-        Ok(JITCompiledRealSimdEvaluator {
-            code,
-            batch_input_buffer: Vec::new(),
-            batch_output_buffer: Vec::new(),
-        })
-    }
-}
-
-#[cfg(feature = "bincode")]
-impl bincode::Encode for JITCompiledRealSimdEvaluator {
-    fn encode<E: bincode::enc::Encoder>(
-        &self,
-        encoder: &mut E,
-    ) -> core::result::Result<(), bincode::error::EncodeError> {
-        let mut data = Vec::new();
-        self.code
-            .save(&mut data)
-            .map_err(|e| bincode::error::EncodeError::OtherString(e.to_string()))?;
-        bincode::Encode::encode(&data, encoder)
-    }
-}
-
-#[cfg(feature = "bincode")]
-bincode::impl_borrow_decode!(JITCompiledRealSimdEvaluator);
-#[cfg(feature = "bincode")]
-impl<Context> bincode::Decode<Context> for JITCompiledRealSimdEvaluator {
-    fn decode<D: bincode::de::Decoder<Context = Context>>(
-        decoder: &mut D,
-    ) -> Result<Self, bincode::error::DecodeError> {
-        let data: Vec<u8> = bincode::Decode::decode(decoder)?;
-        let code = Application::load(&mut std::io::Cursor::new(data))
-            .map_err(|e| bincode::error::DecodeError::OtherString(e.to_string()))?;
-        Ok(JITCompiledRealSimdEvaluator {
-            code,
-            batch_input_buffer: Vec::new(),
-            batch_output_buffer: Vec::new(),
-        })
-    }
-}
-
-impl BatchEvaluator<f64> for JITCompiledRealSimdEvaluator {
+impl BatchEvaluator<f64> for JITCompiledEvaluator<wide::f64x4> {
     fn evaluate_batch(
         &mut self,
         batch_size: usize,
@@ -9657,9 +9587,6 @@ impl BatchEvaluator<f64> for JITCompiledRealSimdEvaluator {
 }
 
 impl JITCompiledNumber for Complex<f64> {
-    type Evaluator = JITCompiledComplexEvaluator;
-    type Settings = ();
-
     fn to_complex_f64(&self) -> Result<symjit::Complex<f64>, String> {
         Ok(symjit::Complex::new(self.re, self.im))
     }
@@ -9668,7 +9595,7 @@ impl JITCompiledNumber for Complex<f64> {
         instructions: Vec<Instruction>,
         constants: Vec<symjit::Complex<f64>>,
         external_functions: HashMap<String, Box<dyn ExternalFunction<Self>>>,
-    ) -> Result<Self::Evaluator, String> {
+    ) -> Result<JITCompiledEvaluator<Complex<f64>>, String> {
         let mut config = Config::default();
         config.set_complex(true);
         config.set_simd(false);
@@ -9692,94 +9619,27 @@ impl JITCompiledNumber for Complex<f64> {
 
         let mut translator = translate_to_symjit(instructions, constants, config, defuns)?;
 
-        Ok(JITCompiledComplexEvaluator {
+        Ok(JITCompiledEvaluator {
             code: translator.compile().map_err(|e| e.to_string())?,
+            batch_input_buffer: Vec::new(),
+            batch_output_buffer: Vec::new(),
         })
     }
-}
 
-/// A JIT-compiled evaluator for complex-valued expressions, using the SymJIT compiler.
-#[derive(Clone)]
-pub struct JITCompiledComplexEvaluator {
-    code: Application,
-}
-
-impl JITCompiledComplexEvaluator {
     /// Evaluate the compiled code with double-precision floating point numbers.
     #[inline(always)]
-    pub fn evaluate(&mut self, args: &[Complex<f64>], out: &mut [Complex<f64>]) {
+    fn evaluate(
+        eval: &mut JITCompiledEvaluator<Complex<f64>>,
+        args: &[Complex<f64>],
+        out: &mut [Complex<f64>],
+    ) {
         let args: &[symjit::Complex<f64>] = unsafe { std::mem::transmute(args) };
         let out: &mut [symjit::Complex<f64>] = unsafe { std::mem::transmute(out) };
-        self.code.evaluate(args, out);
-    }
-
-    /// Save the compiled code to a file. External functions are not saved.
-    pub fn save(&self, filename: impl AsRef<Path>) -> Result<(), std::io::Error> {
-        let mut file = std::fs::File::create(filename)?;
-        self.code
-            .save(&mut file)
-            .map_err(|e| std::io::Error::new(std::io::ErrorKind::Other, e.to_string()))
-    }
-
-    /// Load a compiled code from a file.
-    pub fn load(filename: impl AsRef<Path>) -> Result<Self, std::io::Error> {
-        let mut file = std::fs::File::open(filename)?;
-        let code = Application::load(&mut file)
-            .map_err(|e| std::io::Error::new(std::io::ErrorKind::Other, e.to_string()))?;
-        Ok(JITCompiledComplexEvaluator { code })
+        eval.code.evaluate(args, out);
     }
 }
 
-#[cfg(feature = "serde")]
-impl serde::Serialize for JITCompiledComplexEvaluator {
-    fn serialize<S: serde::Serializer>(&self, serializer: S) -> Result<S::Ok, S::Error> {
-        let mut data = Vec::new();
-        self.code
-            .save(&mut data)
-            .map_err(|e| serde::ser::Error::custom(e.to_string()))?;
-        serializer.serialize_bytes(&data)
-    }
-}
-
-#[cfg(feature = "serde")]
-impl<'de> serde::Deserialize<'de> for JITCompiledComplexEvaluator {
-    fn deserialize<D: serde::Deserializer<'de>>(deserializer: D) -> Result<Self, D::Error> {
-        let data: Vec<u8> = serde::Deserialize::deserialize(deserializer)?;
-        let code = Application::load(&mut std::io::Cursor::new(data))
-            .map_err(|e| serde::de::Error::custom(e.to_string()))?;
-        Ok(JITCompiledComplexEvaluator { code })
-    }
-}
-
-#[cfg(feature = "bincode")]
-impl bincode::Encode for JITCompiledComplexEvaluator {
-    fn encode<E: bincode::enc::Encoder>(
-        &self,
-        encoder: &mut E,
-    ) -> core::result::Result<(), bincode::error::EncodeError> {
-        let mut data = Vec::new();
-        self.code
-            .save(&mut data)
-            .map_err(|e| bincode::error::EncodeError::OtherString(e.to_string()))?;
-        bincode::Encode::encode(&data, encoder)
-    }
-}
-
-#[cfg(feature = "bincode")]
-bincode::impl_borrow_decode!(JITCompiledComplexEvaluator);
-#[cfg(feature = "bincode")]
-impl<Context> bincode::Decode<Context> for JITCompiledComplexEvaluator {
-    fn decode<D: bincode::de::Decoder<Context = Context>>(
-        decoder: &mut D,
-    ) -> Result<Self, bincode::error::DecodeError> {
-        let data: Vec<u8> = bincode::Decode::decode(decoder)?;
-        let code = Application::load(&mut std::io::Cursor::new(data))
-            .map_err(|e| bincode::error::DecodeError::OtherString(e.to_string()))?;
-        Ok(JITCompiledComplexEvaluator { code })
-    }
-}
-
-impl BatchEvaluator<Complex<f64>> for JITCompiledComplexEvaluator {
+impl BatchEvaluator<Complex<f64>> for JITCompiledEvaluator<Complex<f64>> {
     fn evaluate_batch(
         &mut self,
         batch_size: usize,
@@ -9812,9 +9672,6 @@ impl BatchEvaluator<Complex<f64>> for JITCompiledComplexEvaluator {
 }
 
 impl JITCompiledNumber for Complex<wide::f64x4> {
-    type Evaluator = JITCompiledComplexSimdEvaluator;
-    type Settings = ();
-
     fn to_complex_f64(&self) -> Result<symjit::Complex<f64>, String> {
         let re = self.re.as_array();
         if !re.iter().all(|x| *x == re[0]) {
@@ -9834,7 +9691,7 @@ impl JITCompiledNumber for Complex<wide::f64x4> {
         instructions: Vec<Instruction>,
         constants: Vec<symjit::Complex<f64>>,
         external_functions: HashMap<String, Box<dyn ExternalFunction<Self>>>,
-    ) -> Result<Self::Evaluator, String> {
+    ) -> Result<JITCompiledEvaluator<Self>, String> {
         let mut config = Config::default();
         config.set_complex(true);
         config.set_simd(true);
@@ -9856,110 +9713,27 @@ impl JITCompiledNumber for Complex<wide::f64x4> {
 
         let mut translator = translate_to_symjit(instructions, constants, config, defuns)?;
 
-        Ok(JITCompiledComplexSimdEvaluator {
+        Ok(JITCompiledEvaluator {
             code: translator.compile().map_err(|e| e.to_string())?,
             batch_input_buffer: Vec::new(),
             batch_output_buffer: Vec::new(),
         })
     }
-}
 
-/// A JIT-compiled SIMD evaluator for complex-valued expressions, using the SymJIT compiler.
-#[derive(Clone)]
-pub struct JITCompiledComplexSimdEvaluator {
-    code: Application,
-    batch_input_buffer: Vec<Complex<wide::f64x4>>,
-    batch_output_buffer: Vec<Complex<wide::f64x4>>,
-}
-
-impl JITCompiledComplexSimdEvaluator {
     #[inline(always)]
-    pub fn evaluate(&mut self, args: &[Complex<wide::f64x4>], out: &mut [Complex<wide::f64x4>]) {
+    fn evaluate(
+        eval: &mut JITCompiledEvaluator<Self>,
+        args: &[Complex<wide::f64x4>],
+        out: &mut [Complex<wide::f64x4>],
+    ) {
         let args: &[symjit::Complex<wide::f64x4>] = unsafe { std::mem::transmute(args) };
         let out: &mut [symjit::Complex<wide::f64x4>] = unsafe { std::mem::transmute(out) };
 
-        self.code.evaluate(args, out);
-    }
-
-    /// Save the compiled code to a file. External functions are not saved.
-    pub fn save(&self, filename: impl AsRef<Path>) -> Result<(), std::io::Error> {
-        let mut file = std::fs::File::create(filename)?;
-        self.code
-            .save(&mut file)
-            .map_err(|e| std::io::Error::new(std::io::ErrorKind::Other, e.to_string()))
-    }
-
-    /// Load a compiled code from a file.
-    pub fn load(filename: impl AsRef<Path>) -> Result<Self, std::io::Error> {
-        let mut file = std::fs::File::open(filename)?;
-        let code = Application::load(&mut file)
-            .map_err(|e| std::io::Error::new(std::io::ErrorKind::Other, e.to_string()))?;
-        Ok(JITCompiledComplexSimdEvaluator {
-            code,
-            batch_input_buffer: Vec::new(),
-            batch_output_buffer: Vec::new(),
-        })
+        eval.code.evaluate(args, out);
     }
 }
 
-#[cfg(feature = "serde")]
-impl serde::Serialize for JITCompiledComplexSimdEvaluator {
-    fn serialize<S: serde::Serializer>(&self, serializer: S) -> Result<S::Ok, S::Error> {
-        let mut data = Vec::new();
-        self.code
-            .save(&mut data)
-            .map_err(|e| serde::ser::Error::custom(e.to_string()))?;
-        serializer.serialize_bytes(&data)
-    }
-}
-
-#[cfg(feature = "serde")]
-impl<'de> serde::Deserialize<'de> for JITCompiledComplexSimdEvaluator {
-    fn deserialize<D: serde::Deserializer<'de>>(deserializer: D) -> Result<Self, D::Error> {
-        let data: Vec<u8> = serde::Deserialize::deserialize(deserializer)?;
-        let code = Application::load(&mut std::io::Cursor::new(data))
-            .map_err(|e| serde::de::Error::custom(e.to_string()))?;
-        Ok(JITCompiledComplexSimdEvaluator {
-            code,
-            batch_input_buffer: Vec::new(),
-            batch_output_buffer: Vec::new(),
-        })
-    }
-}
-
-#[cfg(feature = "bincode")]
-impl bincode::Encode for JITCompiledComplexSimdEvaluator {
-    fn encode<E: bincode::enc::Encoder>(
-        &self,
-        encoder: &mut E,
-    ) -> core::result::Result<(), bincode::error::EncodeError> {
-        let mut data = Vec::new();
-        self.code
-            .save(&mut data)
-            .map_err(|e| bincode::error::EncodeError::OtherString(e.to_string()))?;
-        bincode::Encode::encode(&data, encoder)
-    }
-}
-
-#[cfg(feature = "bincode")]
-bincode::impl_borrow_decode!(JITCompiledComplexSimdEvaluator);
-#[cfg(feature = "bincode")]
-impl<Context> bincode::Decode<Context> for JITCompiledComplexSimdEvaluator {
-    fn decode<D: bincode::de::Decoder<Context = Context>>(
-        decoder: &mut D,
-    ) -> Result<Self, bincode::error::DecodeError> {
-        let data: Vec<u8> = bincode::Decode::decode(decoder)?;
-        let code = Application::load(&mut std::io::Cursor::new(data))
-            .map_err(|e| bincode::error::DecodeError::OtherString(e.to_string()))?;
-        Ok(JITCompiledComplexSimdEvaluator {
-            code,
-            batch_input_buffer: Vec::new(),
-            batch_output_buffer: Vec::new(),
-        })
-    }
-}
-
-impl BatchEvaluator<Complex<f64>> for JITCompiledComplexSimdEvaluator {
+impl BatchEvaluator<Complex<f64>> for JITCompiledEvaluator<Complex<wide::f64x4>> {
     fn evaluate_batch(
         &mut self,
         batch_size: usize,
