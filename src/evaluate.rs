@@ -15,7 +15,7 @@ use std::{
         atomic::{AtomicBool, AtomicUsize, Ordering},
     },
 };
-use symjit::{Application, Config, Defuns, Storage, Translator};
+use symjit::{Applet, Config, Defuns, Translator};
 
 use crate::{
     LicenseManager,
@@ -2037,12 +2037,42 @@ impl<T: Default> ExpressionEvaluator<T> {
         }
     }
 
+    #[allow(dead_code)]
+    pub(crate) fn set_coeff<T2: Default + Clone>(self, coeffs: &[T2]) -> ExpressionEvaluator<T2> {
+        if coeffs.len() != self.reserved_indices - self.param_count {
+            panic!(
+                "Wrong number of coefficients: {} vs {}",
+                coeffs.len(),
+                self.reserved_indices - self.param_count
+            )
+        }
+
+        let mut stack = vec![T2::default(); self.reserved_indices];
+        for (s, coeff) in stack.iter_mut().skip(self.param_count).zip(coeffs) {
+            *s = coeff.clone();
+        }
+
+        ExpressionEvaluator {
+            stack,
+            param_count: self.param_count,
+            reserved_indices: self.reserved_indices,
+            instructions: self.instructions,
+            result_indices: self.result_indices,
+            external_fns: self.external_fns.clone(),
+            settings: self.settings.clone(),
+        }
+    }
+
     pub fn get_input_len(&self) -> usize {
         self.param_count
     }
 
     pub fn get_output_len(&self) -> usize {
         self.result_indices.len()
+    }
+
+    pub fn get_constants(&self) -> &[T] {
+        &self.stack[self.param_count..self.reserved_indices]
     }
 
     /// Return the total number of additions and multiplications.
@@ -5813,6 +5843,10 @@ impl<T: Real> ExpressionEvaluatorWithExternalFunctions<T> {
         self.eval.result_indices = e.result_indices;
     }
 
+    pub fn get_evaluator(&self) -> &ExpressionEvaluator<T> {
+        &self.eval
+    }
+
     pub fn evaluate_single(&mut self, params: &[T]) -> T {
         if self.eval.result_indices.len() != 1 {
             panic!(
@@ -9311,7 +9345,11 @@ impl JITCompiledNumber for f64 {
         let mut translator = translate_to_symjit(instructions, constants, config, defuns)?;
 
         Ok(JITCompiledEvaluator {
-            code: translator.compile().map_err(|e| e.to_string())?,
+            code: translator
+                .compile()
+                .map_err(|e| e.to_string())?
+                .seal()
+                .map_err(|e| e.to_string())?,
             batch_input_buffer: Vec::new(),
             batch_output_buffer: Vec::new(),
         })
@@ -9323,10 +9361,10 @@ impl JITCompiledNumber for f64 {
     }
 }
 
-/// A JIT-compiled evaluator for real-valued expressions, using the SymJIT compiler.
+/// A JIT-compiled evaluator for expressions, using the SymJIT compiler.
 #[derive(Clone)]
 pub struct JITCompiledEvaluator<T> {
-    code: Application,
+    code: Applet,
     batch_input_buffer: Vec<T>,
     batch_output_buffer: Vec<T>,
 }
@@ -9336,83 +9374,6 @@ impl<T: JITCompiledNumber> JITCompiledEvaluator<T> {
     #[inline(always)]
     pub fn evaluate(&mut self, args: &[T], out: &mut [T]) {
         T::evaluate(self, args, out);
-    }
-
-    /// Save the compiled code to a file. External functions are not saved.
-    pub fn save(&self, filename: impl AsRef<Path>) -> Result<(), std::io::Error> {
-        let mut file = std::fs::File::create(filename)?;
-        self.code
-            .save(&mut file)
-            .map_err(|e| std::io::Error::new(std::io::ErrorKind::Other, e.to_string()))
-    }
-
-    /// Load a compiled code from a file.
-    pub fn load(filename: impl AsRef<Path>) -> Result<Self, std::io::Error> {
-        let mut file = std::fs::File::open(filename)?;
-        let code = Application::load(&mut file)
-            .map_err(|e| std::io::Error::new(std::io::ErrorKind::Other, e.to_string()))?;
-        Ok(JITCompiledEvaluator {
-            code,
-            batch_input_buffer: Vec::new(),
-            batch_output_buffer: Vec::new(),
-        })
-    }
-}
-
-#[cfg(feature = "serde")]
-impl<T> serde::Serialize for JITCompiledEvaluator<T> {
-    fn serialize<S: serde::Serializer>(&self, serializer: S) -> Result<S::Ok, S::Error> {
-        let mut data = Vec::new();
-        self.code
-            .save(&mut data)
-            .map_err(|e| serde::ser::Error::custom(e.to_string()))?;
-        serializer.serialize_bytes(&data)
-    }
-}
-
-#[cfg(feature = "serde")]
-impl<'de, T> serde::Deserialize<'de> for JITCompiledEvaluator<T> {
-    fn deserialize<D: serde::Deserializer<'de>>(deserializer: D) -> Result<Self, D::Error> {
-        let data: Vec<u8> = serde::Deserialize::deserialize(deserializer)?;
-        let code = Application::load(&mut std::io::Cursor::new(data))
-            .map_err(|e| serde::de::Error::custom(e.to_string()))?;
-        Ok(JITCompiledEvaluator {
-            code,
-            batch_input_buffer: Vec::new(),
-            batch_output_buffer: Vec::new(),
-        })
-    }
-}
-
-#[cfg(feature = "bincode")]
-impl<T> bincode::Encode for JITCompiledEvaluator<T> {
-    fn encode<E: bincode::enc::Encoder>(
-        &self,
-        encoder: &mut E,
-    ) -> core::result::Result<(), bincode::error::EncodeError> {
-        let mut data = Vec::new();
-        self.code
-            .save(&mut data)
-            .map_err(|e| bincode::error::EncodeError::OtherString(e.to_string()))?;
-        bincode::Encode::encode(&data, encoder)
-    }
-}
-
-#[cfg(feature = "bincode")]
-bincode::impl_borrow_decode!(JITCompiledEvaluator<T>, T);
-#[cfg(feature = "bincode")]
-impl<T, Context> bincode::Decode<Context> for JITCompiledEvaluator<T> {
-    fn decode<D: bincode::de::Decoder<Context = Context>>(
-        decoder: &mut D,
-    ) -> Result<Self, bincode::error::DecodeError> {
-        let data: Vec<u8> = bincode::Decode::decode(decoder)?;
-        let code = Application::load(&mut std::io::Cursor::new(data))
-            .map_err(|e| bincode::error::DecodeError::OtherString(e.to_string()))?;
-        Ok(JITCompiledEvaluator {
-            code,
-            batch_input_buffer: Vec::new(),
-            batch_output_buffer: Vec::new(),
-        })
     }
 }
 
@@ -9480,7 +9441,11 @@ impl JITCompiledNumber for wide::f64x4 {
         let mut translator = translate_to_symjit(instructions, constants, config, defuns)?;
 
         Ok(JITCompiledEvaluator {
-            code: translator.compile().map_err(|e| e.to_string())?,
+            code: translator
+                .compile()
+                .map_err(|e| e.to_string())?
+                .seal()
+                .map_err(|e| e.to_string())?,
             batch_input_buffer: Vec::new(),
             batch_output_buffer: Vec::new(),
         })
@@ -9603,8 +9568,6 @@ impl JITCompiledNumber for Complex<f64> {
         let mut defuns = Defuns::new();
 
         for (name, f) in external_functions {
-            let r: Box<Box<dyn Fn(&[Self]) -> Self + Send + Sync>> = Box::new(f.clone());
-
             // TODO: implement symjit::Element on numeric::Complex
             let k = Box::new(move |x: &[symjit::Complex<f64>]| {
                 let ars = unsafe { std::mem::transmute(x) };
@@ -9620,7 +9583,11 @@ impl JITCompiledNumber for Complex<f64> {
         let mut translator = translate_to_symjit(instructions, constants, config, defuns)?;
 
         Ok(JITCompiledEvaluator {
-            code: translator.compile().map_err(|e| e.to_string())?,
+            code: translator
+                .compile()
+                .map_err(|e| e.to_string())?
+                .seal()
+                .map_err(|e| e.to_string())?,
             batch_input_buffer: Vec::new(),
             batch_output_buffer: Vec::new(),
         })
@@ -9714,7 +9681,11 @@ impl JITCompiledNumber for Complex<wide::f64x4> {
         let mut translator = translate_to_symjit(instructions, constants, config, defuns)?;
 
         Ok(JITCompiledEvaluator {
-            code: translator.compile().map_err(|e| e.to_string())?,
+            code: translator
+                .compile()
+                .map_err(|e| e.to_string())?
+                .seal()
+                .map_err(|e| e.to_string())?,
             batch_input_buffer: Vec::new(),
             batch_output_buffer: Vec::new(),
         })

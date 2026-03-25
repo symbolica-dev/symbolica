@@ -5432,6 +5432,8 @@ class Evaluator:
         """Evaluate the expression for multiple inputs and return the result.
         For best performance, use `numpy` arrays instead of lists.
 
+        On the first call, the expression is JIT compiled using SymJIT.
+
         Examples
         --------
         Evaluate the function for three sets of inputs:
@@ -5462,6 +5464,8 @@ class Evaluator:
         """Evaluate the expression for multiple inputs and return the result.
         For best performance, use `numpy` arrays and `np.complex128` instead of lists and
         `complex`.
+
+        On the first call, the expression is JIT compiled using SymJIT.
 
         Examples
         --------
