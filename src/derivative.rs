@@ -119,15 +119,16 @@ impl AtomView<'_> {
                         }
                         Symbol::SQRT_ID => {
                             let mut n = workspace.new_atom();
+                            n.to_num((-1, 1).into());
+
+                            let mut sqrt = workspace.new_atom();
+                            sqrt.to_pow(*self, n.as_view());
+
                             n.to_num((1, 2).into());
 
-                            let mut base = workspace.new_atom();
-                            base.to_pow(f.iter().next().unwrap(), n.as_view());
-
-                            let mut exp = workspace.new_atom();
-                            exp.to_num((-1, 2).into());
-
-                            fn_der.to_pow(base.as_view(), exp.as_view());
+                            let m = fn_der.to_mul();
+                            m.extend(n.as_view());
+                            m.extend(sqrt.as_view());
                         }
                         _ => unreachable!(),
                     }
