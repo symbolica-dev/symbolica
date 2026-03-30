@@ -5705,6 +5705,9 @@ class NumericalIntegrator:
         """Get the estamate of the average, error, chi-squared, maximum negative and positive evaluations, and the number of processed samples
         for the current iteration, including the points submitted in the current iteration."""
 
+    def probe(self, probe: Probe) -> float:
+        """Probe the Jacobian weight for a region in the grid."""
+
     def sample(self, num_samples: int, rng: RandomNumberGenerator) -> List[Sample]:
         """Sample `num_samples` points from the grid using the random number generator
         `rng`. See `rng()` for how to create a random number generator."""
@@ -5783,6 +5786,46 @@ class Sample:
     c: List[float]
     """ A sample in the continuous layer. Empty if not present."""
 
+class Probe:
+    """A probe that is used to access the Jacobian weight of a point or region
+    of interest.
+
+    For continuous probes, `None` skips that dimension and includes the full
+    range of the dimension (Jacobian weight of 1).
+
+    For discrete probes, the first vector specifies a path through nested
+    discrete grids, and the second vector specifies the final continuous probe.
+    The path may stop before the full grid depth, in which case the remaining
+    sub-Jacobian weight is 1 and the continuous probe must be empty.
+
+    For uniform probes, `None` in the discrete indices skips that discrete
+    dimension and includes its full range (Jacobian weight of 1)."""
+
+    d: List[int]
+    """ A sample point per (nested) discrete layer. Empty if not present."""
+    c: List[float | None]
+    """ A sample in the continuous layer. Empty if not present."""
+    u: List[int | None]
+    """ A sample in the uniform layer. Empty if not present."""
+
+    @classmethod
+    def discrete(_cls, d: List[int], c: List[float | None] | None = None) -> Probe:
+        """Create a probe with the given discrete indices and optional continuous sample.
+        The discrete indices are allowed to be less deep than the grid depth.
+        """
+
+    @classmethod
+    def continuous(_cls, c: List[float | None]) -> Probe:
+        """Create a probe with the given continuous sample. Entering `None` skips that dimension and includes the full
+        range of the dimension (Jacobian weight of 1)."""
+
+    @classmethod
+    def uniform(
+        _cls, u: List[int | None], c: List[float | None] | None = None
+    ) -> Probe:
+        """Create a probe with the given uniform indices and optional continuous sample.
+        Entering `None` skips that dimension and includes the full
+        range of the dimension (Jacobian weight of 1)."""
 
 class RandomNumberGenerator:
     """A reproducible, fast, non-cryptographic random number generator suitable for parallel Monte Carlo simulations.

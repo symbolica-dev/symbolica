@@ -94,7 +94,7 @@ use crate::{
         PatternAtomTreeIterator, PatternRestriction, Relation, ReplaceIterator, ReplaceSettings,
         ReplaceWith, Replacement, WildcardRestriction,
     },
-    numerical_integration::{ContinuousGrid, DiscreteGrid, Grid, MonteCarloRng, Sample},
+    numerical_integration::{ContinuousGrid, DiscreteGrid, Grid, MonteCarloRng, Probe, Sample},
     parser::{ParseMode, ParseSettings, Token},
     poly::{
         GrevLexOrder, INLINED_EXPONENTS, LexOrder, PolyVariable, factor::Factorize,
@@ -267,6 +267,7 @@ pub fn create_symbolica_module<'a, 'b>(
     m.add_class::<PythonMatrix>()?;
     m.add_class::<PythonNumericalIntegrator>()?;
     m.add_class::<PythonSample>()?;
+    m.add_class::<PythonProbe>()?;
     m.add_class::<PythonAtomType>()?;
     m.add_class::<PythonAtomTree>()?;
     m.add_class::<PythonSymbolAttribute>()?;
@@ -18841,6 +18842,89 @@ impl PythonSample {
     }
 }
 
+/// A probe that is used to access the Jacobian weight of a point or region
+/// of interest.
+///
+/// For continuous probes, `None` skips that dimension and includes the full
+/// range of the dimension (Jacobian weight of 1).
+///
+/// For discrete probes, the first vector specifies a path through nested
+/// discrete grids, and the second vector specifies the final continuous probe.
+/// The path may stop before the full grid depth, in which case the remaining
+/// sub-Jacobian weight is 1 and the continuous probe must be empty.
+///
+/// For uniform probes, `None` in the discrete indices skips that discrete
+/// dimension and includes its full range (Jacobian weight of 1).
+#[cfg_attr(feature = "python_stubgen", gen_stub_pyclass)]
+#[pyclass(from_py_object, name = "Probe", module = "symbolica.core")]
+#[derive(Clone)]
+pub struct PythonProbe {
+    #[pyo3(get)]
+    /// A sample point per (nested) discrete layer. Empty if not present.
+    d: Vec<usize>,
+    #[pyo3(get)]
+    /// A sample in the continuous layer. Empty if not present.
+    c: Vec<Option<f64>>,
+    /// A uniform sample. Empty if not present.
+    u: Vec<Option<usize>>,
+}
+
+impl PythonProbe {
+    pub fn into_probe(self) -> Probe<f64> {
+        if self.u.is_empty() {
+            if self.d.is_empty() {
+                Probe::Continuous(self.c)
+            } else {
+                Probe::Discrete(self.d, self.c)
+            }
+        } else {
+            Probe::Uniform(self.u, self.c)
+        }
+    }
+}
+
+#[cfg_attr(feature = "python_stubgen", gen_stub_pymethods)]
+#[cfg_attr(not(feature = "python_stubgen"), remove_gen_stub)]
+#[pymethods]
+impl PythonProbe {
+    #[pyo3(signature = (disc, cont=None))]
+    #[classmethod]
+    pub fn discrete(
+        _cls: &Bound<'_, PyType>,
+        disc: Vec<usize>,
+        cont: Option<Vec<Option<f64>>>,
+    ) -> Self {
+        Self {
+            d: disc,
+            c: cont.unwrap_or_default(),
+            u: Vec::new(),
+        }
+    }
+
+    #[classmethod]
+    pub fn continuous(_cls: &Bound<'_, PyType>, cont: Vec<Option<f64>>) -> Self {
+        Self {
+            d: Vec::new(),
+            c: cont,
+            u: Vec::new(),
+        }
+    }
+
+    #[pyo3(signature = (uni, cont=None))]
+    #[classmethod]
+    pub fn uniform(
+        _cls: &Bound<'_, PyType>,
+        uni: Vec<Option<usize>>,
+        cont: Option<Vec<Option<f64>>>,
+    ) -> Self {
+        Self {
+            d: Vec::new(),
+            c: cont.unwrap_or_default(),
+            u: uni,
+        }
+    }
+}
+
 /// A reproducible, fast, non-cryptographic random number generator suitable for parallel Monte Carlo simulations.
 /// A `seed` has to be set, which can be any `u64` number (small numbers work just as well as large numbers).
 ///
@@ -19004,6 +19088,13 @@ impl PythonNumericalIntegrator {
         Self {
             grid: self.grid.clone_without_samples(),
         }
+    }
+
+    /// Probe the weight of a region in the grid.
+    pub fn probe(&self, probe: PythonProbe) -> PyResult<f64> {
+        self.grid
+            .probe(&probe.into_probe())
+            .map_err(|e| exceptions::PyValueError::new_err(e))
     }
 
     /// Sample `num_samples` points from the grid using the random number generator
