@@ -104,6 +104,7 @@ wolfram-library-link = { version = "0.2.9", optional = true }
 bincode-trait-derive = { version = "0.1.0", optional = true }
 pyo3-log = { version = "0.13", optional = true }
 tracing-subscriber = { version = "0.3.18", features = ["env-filter"] }
+indicatif = "0.18.4"
 
 [patch.crates-io]
 numerica = { path = "lib/numerica" }

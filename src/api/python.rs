@@ -246,10 +246,42 @@ impl From<PythonPrintMode> for PrintMode {
             PythonPrintMode::Latex => PrintMode::Latex,
             PythonPrintMode::Mathematica => PrintMode::Mathematica,
             PythonPrintMode::Sympy => PrintMode::Sympy,
-            PythonPrintMode::Typst => PrintMode::Typst,
         }
     }
 }
+
+/// Specifies the verbosity of the evaluator.
+#[cfg_attr(feature = "python_stubgen", gen_stub_pyclass_enum)]
+#[pyclass(
+    from_py_object,
+    name = "EvaluatorVerbosity",
+    eq,
+    eq_int,
+    module = "symbolica.core"
+)]
+#[derive(Clone, Copy, PartialEq, Eq, Hash)]
+pub enum PyEvaluatorVerbosity {
+    /// No output.
+    None,
+    /// Basic progress info.
+    Basic,
+    /// A progress bar.
+    ProgressBar,
+    /// An updatable dashboard canvas with step counts, time spent, etc.
+    Dashboard,
+}
+
+impl From<PyEvaluatorVerbosity> for EvaluatorVerbosity {
+    fn from(mode: PyEvaluatorVerbosity) -> Self {
+        match mode {
+            PyEvaluatorVerbosity::None => EvaluatorVerbosity::None,
+            PyEvaluatorVerbosity::Basic => EvaluatorVerbosity::Basic,
+            PyEvaluatorVerbosity::ProgressBar => EvaluatorVerbosity::ProgressBar,
+            PyEvaluatorVerbosity::Dashboard => EvaluatorVerbosity::Dashboard,
+        }
+    }
+}
+
 
 /// Create a Symbolica Python module.
 pub fn create_symbolica_module<'a, 'b>(
@@ -287,6 +319,7 @@ pub fn create_symbolica_module<'a, 'b>(
     m.add_class::<PythonHalfEdge>()?;
     m.add_class::<PythonGraph>()?;
     m.add_class::<PythonInteger>()?;
+    m.add_class::<PyEvaluatorVerbosity>()?;
 
     m.add_function(wrap_pyfunction!(symbol_shorthand, m)?)?;
     m.add_function(wrap_pyfunction!(number_shorthand, m)?)?;
@@ -7232,7 +7265,7 @@ impl PythonExpression {
         iterations = 1,
         cpe_iterations = None,
         n_cores = 4,
-        verbose = false,
+        verbose = None,
         max_horner_scheme_variables = 500,
         max_common_pair_cache_entries = 1_000_000,
         max_common_pair_distance = 100,
@@ -7247,7 +7280,8 @@ impl PythonExpression {
         iterations: usize,
         cpe_iterations: Option<usize>,
         n_cores: usize,
-        verbose: bool,
+        #[gen_stub(override_type(type_repr = "bool | EvaluatorVerbosity | None"))]
+        verbose: Option<Bound<'_, PyAny>>,
         max_horner_scheme_variables: usize,
         max_common_pair_cache_entries: usize,
         max_common_pair_distance: usize,
@@ -7259,6 +7293,17 @@ impl PythonExpression {
         conditionals: Option<Vec<PolyVariable>>,
         py: Python,
     ) -> PyResult<PythonExpressionEvaluator> {
+        let verbose: EvaluatorVerbosity = if let Some(ref v) = verbose {
+            if let Ok(b) = v.extract::<bool>() {
+                if b { EvaluatorVerbosity::Basic } else { EvaluatorVerbosity::None }
+            } else if let Ok(e) = v.extract::<PyEvaluatorVerbosity>() {
+                e.into()
+            } else {
+                return Err(exceptions::PyValueError::new_err("verbose must be bool or EvaluatorVerbosity"));
+            }
+        } else {
+            EvaluatorVerbosity::None
+        };
         let mut fn_map = FunctionMap::new();
 
         for (k, v) in constants {
@@ -7336,7 +7381,7 @@ impl PythonExpression {
         let abort_check = Box::new(move || {
             Python::attach(|py| {
                 py.check_signals().map_err(|e| {
-                    if verbose {
+                    if verbose.is_verbose() {
                         if e.is_instance_of::<pyo3::exceptions::PyKeyboardInterrupt>(py) {
                             crate::info!("Ctrl-c detected. Continuing to next optimization step.");
                         } else {
@@ -7357,7 +7402,7 @@ impl PythonExpression {
             horner_iterations: iterations,
             cpe_iterations,
             n_cores,
-            verbose: verbose.into(),
+            verbose,
             abort_check: Some(abort_check),
             max_horner_scheme_variables,
             max_common_pair_cache_entries,
@@ -7473,7 +7518,7 @@ impl PythonExpression {
         iterations = 1,
         cpe_iterations = None,
         n_cores = 4,
-        verbose = false,
+        verbose = None,
         max_horner_scheme_variables = 500,
         max_common_pair_cache_entries = 1_000_000,
         max_common_pair_distance = 100,
@@ -7489,7 +7534,8 @@ impl PythonExpression {
         iterations: usize,
         cpe_iterations: Option<usize>,
         n_cores: usize,
-        verbose: bool,
+        #[gen_stub(override_type(type_repr = "bool | EvaluatorVerbosity | None"))]
+        verbose: Option<Bound<'_, PyAny>>,
         max_horner_scheme_variables: usize,
         max_common_pair_cache_entries: usize,
         max_common_pair_distance: usize,
@@ -7500,6 +7546,17 @@ impl PythonExpression {
         external_functions: Option<BTreeMap<(PolyVariable, String), Py<PyAny>>>,
         conditionals: Option<Vec<PolyVariable>>,
     ) -> PyResult<PythonExpressionEvaluator> {
+        let verbose: EvaluatorVerbosity = if let Some(ref v) = verbose {
+            if let Ok(b) = v.extract::<bool>() {
+                if b { EvaluatorVerbosity::Basic } else { EvaluatorVerbosity::None }
+            } else if let Ok(e) = v.extract::<PyEvaluatorVerbosity>() {
+                e.into()
+            } else {
+                return Err(exceptions::PyValueError::new_err("verbose must be bool or EvaluatorVerbosity"));
+            }
+        } else {
+            EvaluatorVerbosity::None
+        };
         let mut fn_map = FunctionMap::new();
 
         for (k, v) in constants {
@@ -7577,7 +7634,7 @@ impl PythonExpression {
         let abort_check = Box::new(move || {
             Python::attach(|py| {
                 py.check_signals().map_err(|e| {
-                    if verbose {
+                    if verbose.is_verbose() {
                         if e.is_instance_of::<pyo3::exceptions::PyKeyboardInterrupt>(py) {
                             crate::info!("Ctrl-c detected. Continuing to next optimization step.");
                         } else {
@@ -7598,7 +7655,7 @@ impl PythonExpression {
             horner_iterations: iterations,
             cpe_iterations,
             n_cores,
-            verbose: verbose.into(),
+            verbose,
             abort_check: Some(abort_check),
             max_horner_scheme_variables,
             max_common_pair_cache_entries,
@@ -16768,16 +16825,29 @@ impl PythonExpressionEvaluator {
     /// arguments are expected to yield real results.
     ///
     /// Must be called after all optimization functions and merging are performed
-    /// on the evaluator, or the registration will be lost.
-    #[pyo3(signature = (real_params, sqrt_real = false, log_real = false, powf_real = false, verbose = false))]
+    /// on the evaluator.
+    #[pyo3(signature = (real_params, sqrt_real = false, log_real = false, powf_real = false, verbose = None))]
     fn set_real_params(
         &mut self,
         real_params: Vec<usize>,
         sqrt_real: bool,
         log_real: bool,
         powf_real: bool,
-        verbose: bool,
+        #[gen_stub(override_type(type_repr = "bool | EvaluatorVerbosity | None"))]
+        verbose: Option<Bound<'_, PyAny>>,
     ) -> PyResult<()> {
+        let verbose: EvaluatorVerbosity = if let Some(ref v) = verbose {
+            if let Ok(b) = v.extract::<bool>() {
+                if b { EvaluatorVerbosity::Basic } else { EvaluatorVerbosity::None }
+            } else if let Ok(e) = v.extract::<PyEvaluatorVerbosity>() {
+                e.into()
+            } else {
+                return Err(exceptions::PyValueError::new_err("verbose must be bool or EvaluatorVerbosity"));
+            }
+        } else {
+            EvaluatorVerbosity::None
+        };
+
         self.eval_complex
             .set_real_params(
                 &real_params,

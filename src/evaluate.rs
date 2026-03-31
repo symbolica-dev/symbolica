@@ -302,6 +302,24 @@ struct Expr {
     body: Atom,
 }
 
+#[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
+#[cfg_attr(feature = "bincode", derive(bincode::Encode, bincode::Decode))]
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Default)]
+pub enum EvaluatorVerbosity {
+    #[default]
+    None,
+    Basic,
+    ProgressBar,
+    Dashboard,
+}
+
+impl EvaluatorVerbosity {
+    #[inline]
+    pub fn is_verbose(&self) -> bool {
+        *self != EvaluatorVerbosity::None
+    }
+}
+
 /// Settings for optimizing the evaluation of expressions.
 #[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
 #[derive(Clone)]
@@ -316,7 +334,7 @@ pub struct OptimizationSettings {
     pub max_horner_scheme_variables: usize,
     pub max_common_pair_cache_entries: usize,
     pub max_common_pair_distance: usize,
-    pub verbose: bool,
+    pub verbose: EvaluatorVerbosity,
 }
 
 #[cfg(feature = "bincode")]
@@ -386,7 +404,7 @@ impl Default for OptimizationSettings {
             max_horner_scheme_variables: 500,
             max_common_pair_cache_entries: 1_000_000,
             max_common_pair_distance: 1000,
-            verbose: false,
+            verbose: EvaluatorVerbosity::None,
         }
     }
 }
@@ -1627,12 +1645,12 @@ pub struct ComplexEvaluatorSettings {
     /// Whether powf with real arguments yields real results.
     pub powf_real: bool,
     /// Report on the number of converted operations.
-    pub verbose: bool,
+    pub verbose: EvaluatorVerbosity,
 }
 
 impl ComplexEvaluatorSettings {
     /// Create complex evaluator settings, used for [ExpressionEvaluator::set_real_params].
-    pub fn new(sqrt_real: bool, log_real: bool, powf_real: bool, verbose: bool) -> Self {
+    pub fn new(sqrt_real: bool, log_real: bool, powf_real: bool, verbose: EvaluatorVerbosity) -> Self {
         ComplexEvaluatorSettings {
             sqrt_real,
             log_real,
@@ -1661,7 +1679,7 @@ impl ComplexEvaluatorSettings {
 
     /// Set verbose reporting.
     pub fn verbose(mut self) -> Self {
-        self.verbose = true;
+        self.verbose = EvaluatorVerbosity::Basic;
         self
     }
 }
@@ -1673,7 +1691,7 @@ impl Default for ComplexEvaluatorSettings {
             sqrt_real: false,
             log_real: false,
             powf_real: false,
-            verbose: false,
+            verbose: EvaluatorVerbosity::None,
         }
     }
 }
@@ -1819,7 +1837,7 @@ impl<T: Default + PartialEq> ExpressionEvaluator<Complex<T>> {
             }
         }
 
-        if settings.verbose {
+        if settings.verbose.is_verbose() {
             info!(
                 "Changed {} mul ops and {} div ops from complex to double",
                 mul_components, div_components
@@ -6301,6 +6319,20 @@ impl EvalTree<Complex<Rational>> {
             settings: settings.clone(),
         };
 
+        let pb = match settings.verbose {
+            EvaluatorVerbosity::ProgressBar | EvaluatorVerbosity::Dashboard => {
+                let pb = indicatif::ProgressBar::new_spinner();
+                pb.set_style(
+                    indicatif::ProgressStyle::with_template("{spinner:.green} [{elapsed_precise}] {msg}")
+                        .unwrap()
+                        .tick_chars("/|\\- "),
+                );
+                pb.set_message("Removing common instructions");
+                Some(pb)
+            }
+            _ => None,
+        };
+
         loop {
             let r = e.remove_common_instructions();
 
@@ -6309,7 +6341,14 @@ impl EvalTree<Complex<Rational>> {
                 break;
             }
 
-            if settings.verbose {
+            if let Some(ref pb) = pb {
+                let (add_count, mul_count) = e.count_operations();
+                pb.set_message(format!(
+                    "Removed {} common instructions: {} + and {} ×",
+                    r, add_count, mul_count
+                ));
+                pb.tick();
+            } else if settings.verbose.is_verbose() {
                 let (add_count, mul_count) = e.count_operations();
                 info!(
                     "Removed {} common instructions: {} + and {} ×",
@@ -6318,20 +6357,59 @@ impl EvalTree<Complex<Rational>> {
             }
         }
 
-        for _ in 0..settings.cpe_iterations.unwrap_or(usize::MAX) {
+        if let Some(pb) = pb {
+            pb.finish_with_message("Common instructions removed");
+        }
+
+        let max_iters = settings.cpe_iterations.unwrap_or(usize::MAX);
+        let pb_cpe = match settings.verbose {
+            EvaluatorVerbosity::ProgressBar | EvaluatorVerbosity::Dashboard => {
+                let pb = if max_iters != usize::MAX {
+                    indicatif::ProgressBar::new(max_iters as u64)
+                } else {
+                    indicatif::ProgressBar::new_spinner()
+                };
+                let style = if max_iters != usize::MAX {
+                    "[{elapsed_precise}] {bar:40.cyan/blue} {pos:>7}/{len:7} {msg}"
+                } else {
+                    "{spinner:.green} [{elapsed_precise}] {msg}"
+                };
+                pb.set_style(indicatif::ProgressStyle::with_template(style).unwrap());
+                pb.set_message("Removing common pairs");
+                Some(pb)
+            }
+            _ => None,
+        };
+
+        for _ in 0..max_iters {
             let r = e.remove_common_pairs();
             if r == 0 || e.settings.abort_level > 0 {
                 e.settings.abort_level = 0;
                 break;
             }
 
-            if settings.verbose {
+            if let Some(ref pb) = pb_cpe {
+                let (add_count, mul_count) = e.count_operations();
+                pb.set_message(format!(
+                    "Removed {} common pairs: {} + and {} ×",
+                    r, add_count, mul_count
+                ));
+                if max_iters != usize::MAX {
+                    pb.inc(1);
+                } else {
+                    pb.tick();
+                }
+            } else if settings.verbose.is_verbose() {
                 let (add_count, mul_count) = e.count_operations();
                 info!(
                     "Removed {} common pairs: {} + and {} ×",
                     r, add_count, mul_count
                 );
             }
+        }
+
+        if let Some(pb) = pb_cpe {
+            pb.finish_with_message("Common pairs removed");
         }
 
         e.optimize_stack();
@@ -6742,7 +6820,7 @@ impl EvalTree<Complex<Rational>> {
         mut self,
         settings: &OptimizationSettings,
     ) -> ExpressionEvaluator<Complex<Rational>> {
-        if settings.verbose {
+        if settings.verbose.is_verbose() {
             let (n_add, n_mul) = self.count_operations();
             info!(
                 "Initial ops: {} additions and {} multiplications",
@@ -6835,7 +6913,7 @@ impl EvalTree<Complex<Rational>> {
             v.truncate(settings.max_horner_scheme_variables);
             let v = v.into_iter().map(|(k, _)| k).collect::<Vec<_>>();
 
-            if settings.verbose {
+            if settings.verbose.is_verbose() {
                 info!(
                     "Optimizing Horner scheme for function {} with {} variables",
                     name,
@@ -7263,7 +7341,7 @@ impl Expression<Complex<Rational>> {
             best_ops = (best_ops.0 + ops.0, best_ops.1 + ops.1);
         }
 
-        if settings.verbose {
+        if settings.verbose.is_verbose() {
             info!(
                 "Initial Horner scheme ops: {} additions and {} multiplications",
                 best_ops.0, best_ops.1
@@ -7293,6 +7371,22 @@ impl Expression<Complex<Rational>> {
         }
         .min(n_iterations);
 
+        let pb = match settings.verbose {
+            EvaluatorVerbosity::ProgressBar | EvaluatorVerbosity::Dashboard => {
+                let total_steps = (n_iterations / n_cores * n_cores) as u64;
+                let pb = indicatif::ProgressBar::new(total_steps);
+                pb.set_style(
+                    indicatif::ProgressStyle::with_template(
+                        "[{elapsed_precise}] {bar:40.cyan/blue} {pos:>7}/{len:7} {msg}",
+                    )
+                    .unwrap(),
+                );
+                pb.set_message("Optimizing Horner scheme");
+                Some(pb)
+            }
+            _ => None,
+        };
+
         std::thread::scope(|s| {
             let abort = Arc::new(AtomicBool::new(false));
 
@@ -7306,6 +7400,7 @@ impl Expression<Complex<Rational>> {
                 let mut last_mul = usize::MAX;
                 let mut last_add = usize::MAX;
                 let abort = abort.clone();
+                let pb = pb.clone();
 
                 let mut op = move || {
                     for j in 0..n_iterations / n_cores {
@@ -7319,11 +7414,17 @@ impl Expression<Complex<Rational>> {
                         {
                             abort.store(true, Ordering::Relaxed);
 
-                            if settings.verbose {
+                            if let Some(ref pb) = pb {
+                                pb.set_message(format!(
+                                    "Aborting Horner optimization at step {}/{}.",
+                                    j,
+                                    n_iterations / n_cores
+                                ));
+                            } else if settings.verbose.is_verbose() {
                                 info!(
                                     "Aborting Horner optimization at step {}/{}.",
                                     j,
-                                    settings.horner_iterations / n_cores
+                                    n_iterations / n_cores
                                 );
                             }
 
@@ -7367,7 +7468,15 @@ impl Expression<Complex<Rational>> {
 
                         // prefer fewer multiplications
                         if cur_ops.1 <= last_mul || cur_ops.1 == last_mul && cur_ops.0 <= last_add {
-                            if settings.verbose {
+                            if let Some(ref pb) = pb {
+                                pb.set_message(format!(
+                                    "Accept move at step {}/{}: {} + and {} ×",
+                                    j,
+                                    n_iterations / n_cores,
+                                    cur_ops.0,
+                                    cur_ops.1
+                                ));
+                            } else if settings.verbose.is_verbose() {
                                 info!(
                                     "Accept move at step {}/{}: {} + and {} ×",
                                     j,
@@ -7408,6 +7517,10 @@ impl Expression<Complex<Rational>> {
                         } else {
                             cvars.swap(t1, t2);
                         }
+                        
+                        if let Some(ref pb) = pb {
+                            pb.inc(1);
+                        }
                     }
                 };
 
@@ -7421,7 +7534,13 @@ impl Expression<Complex<Rational>> {
             }
         });
 
-        if settings.verbose {
+        if let Some(pb) = pb {
+            pb.finish_with_message(format!(
+                "Final scheme: {} + and {} ×",
+                best_add.load(Ordering::Relaxed),
+                best_mul.load(Ordering::Relaxed)
+            ));
+        } else if settings.verbose.is_verbose() {
             info!(
                 "Final scheme: {} + and {} ×",
                 best_add.load(Ordering::Relaxed),
