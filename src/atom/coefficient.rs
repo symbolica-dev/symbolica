@@ -384,7 +384,7 @@ impl PackedRationalNumberWriter for Coefficient {
 pub trait PackedRationalNumberReader {
     fn get_coeff_view(&self) -> (CoefficientView<'_>, &[u8]);
     fn get_frac_u64(&self) -> (u64, u64, &[u8]);
-    fn get_frac_i64(&self) -> (i64, i64, &[u8]);
+    fn get_frac_i64(&self) -> (i64, u64, &[u8]);
     fn skip_rational(&self) -> &[u8];
     fn is_small_int(&self) -> bool;
     fn is_zero_rat(&self) -> bool;
@@ -467,17 +467,18 @@ impl PackedRationalNumberReader for [u8] {
                 unreachable!()
             }
         } else if (disc & NUM_MASK) == ARB_NUM {
+            let is_negative = unsafe { source.get_unchecked(0) & SIGN != 0 };
             let (num, den);
-            (num, den, source) = source.get_frac_i64();
-            let num_len = num.unsigned_abs() as usize;
-            let den_len = den.unsigned_abs() as usize;
+            (num, den, source) = source.get_frac_u64();
+            let num_len = num as usize;
+            let den_len = den as usize;
             let num_limbs = &source[..num_len];
             let den_limbs = &source[num_len..num_len + den_len];
 
             (
                 CoefficientView::Large(
                     SerializedRational::Large(SerializedLargeRational {
-                        is_negative: num < 0,
+                        is_negative,
                         num_digits: num_limbs,
                         den_digits: den_limbs,
                     }),
@@ -501,7 +502,7 @@ impl PackedRationalNumberReader for [u8] {
             )
         } else {
             let (num, den, source) = self.get_frac_i64();
-            (CoefficientView::Natural(num, den, 0, 1), source)
+            (CoefficientView::Natural(num, den as i64, 0, 1), source)
         }
     }
 
@@ -613,26 +614,26 @@ impl PackedRationalNumberReader for [u8] {
     }
 
     #[inline(always)]
-    fn get_frac_i64(&self) -> (i64, i64, &[u8]) {
+    fn get_frac_i64(&self) -> (i64, u64, &[u8]) {
         let mut source = self;
         let disc = source.get_u8();
         let num;
         (num, source) = match disc & NUM_MASK {
             U8_NUM => {
                 let v = source.get_u8();
-                (v as i64, source)
+                (v as u64, source)
             }
             U16_NUM => {
                 let v = source.get_u16_le();
-                (v as i64, source)
+                (v as u64, source)
             }
             U32_NUM => {
                 let v = source.get_u32_le();
-                (v as i64, source)
+                (v as u64, source)
             }
             U64_NUM => {
                 let v = source.get_u64_le();
-                (v as i64, source)
+                (v as u64, source)
             }
             x => {
                 unreachable!("Unsupported numerator type {}", x)
@@ -641,33 +642,39 @@ impl PackedRationalNumberReader for [u8] {
 
         let den;
         (den, source) = match disc & DEN_MASK {
-            0 => (1i64, source),
+            0 => (1u64, source),
             U8_DEN => {
                 let v = source.get_u8();
-                (v as i64, source)
+                (v as u64, source)
             }
             U16_DEN => {
                 let v = source.get_u16_le();
-                (v as i64, source)
+                (v as u64, source)
             }
             U32_DEN => {
                 let v = source.get_u32_le();
-                (v as i64, source)
+                (v as u64, source)
             }
             U64_DEN => {
                 let v = source.get_u64_le();
-                (v as i64, source)
+                (v as u64, source)
             }
             x => {
                 unreachable!("Unsupported denominator type {}", x)
             }
         };
 
-        if disc & SIGN != 0 {
-            (-num, den, source)
+        let num = if disc & SIGN != 0 {
+            if num == (1u64 << 63) {
+                i64::MIN
+            } else {
+                -(num as i64)
+            }
         } else {
-            (num, den, source)
-        }
+            num as i64
+        };
+
+        (num, den, source)
     }
 
     #[inline(always)]
@@ -686,9 +693,9 @@ impl PackedRationalNumberReader for [u8] {
             dest = dest.skip_rational();
         } else if v_num == ARB_NUM {
             let (num_size, den_size);
-            (num_size, den_size, dest) = dest.get_frac_i64();
-            let num_size = num_size.unsigned_abs() as usize;
-            let den_size = den_size.unsigned_abs() as usize;
+            (num_size, den_size, dest) = dest.get_frac_u64();
+            let num_size = num_size as usize;
+            let den_size = den_size as usize;
             dest.advance(num_size + den_size);
         } else if v_num == RAT_POLY {
             let size = dest.get_u32_le() as usize;
