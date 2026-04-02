@@ -3205,7 +3205,7 @@ pub trait ExportNumber {
 
 impl ExportNumber for f64 {
     fn export(&self) -> String {
-        self.to_string()
+        format!("{:e}", self)
     }
 
     fn is_real(&self) -> bool {
@@ -3215,7 +3215,7 @@ impl ExportNumber for f64 {
 
 impl ExportNumber for F64 {
     fn export(&self) -> String {
-        self.to_string()
+        format!("{:e}", self)
     }
 
     fn is_real(&self) -> bool {
@@ -3225,7 +3225,7 @@ impl ExportNumber for F64 {
 
 impl ExportNumber for Float {
     fn export(&self) -> String {
-        self.to_string()
+        format!("{:e}", self)
     }
 
     fn is_real(&self) -> bool {
