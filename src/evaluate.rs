@@ -6,7 +6,8 @@ use dyn_clone::DynClone;
 use rand::Rng;
 use self_cell::self_cell;
 use std::{
-    collections::hash_map::Entry,
+    cmp::Reverse,
+    collections::{BinaryHeap, hash_map::Entry},
     hash::{Hash, Hasher},
     os::raw::{c_ulong, c_void},
     path::{Path, PathBuf},
@@ -2267,7 +2268,7 @@ impl<T: Default> ExpressionEvaluator<T> {
             return 0;
         }
 
-        'instr_loop: for (p, (i, _)) in self.instructions.iter().enumerate() {
+        for (p, (i, _)) in self.instructions.iter().enumerate() {
             if common_ops_simple.len() > self.settings.max_common_pair_cache_entries {
                 break;
             }
@@ -2284,22 +2285,22 @@ impl<T: Default> ExpressionEvaluator<T> {
             match i {
                 Instr::Add(_, a) | Instr::Mul(_, a) => {
                     let is_add = matches!(i, Instr::Add(_, _));
-                    for (li, l) in a.iter().enumerate() {
+                    'add_loop: for (li, l) in a.iter().enumerate() {
                         for r in &a[li + 1..] {
                             let mut key = (*l as u64) << 32 | (*r as u64) << 1;
                             if !is_add {
                                 key |= 1;
                             }
 
+                            if common_ops_simple.len() > self.settings.max_common_pair_cache_entries
+                            {
+                                break 'add_loop;
+                            }
+
                             common_ops_simple
                                 .entry(key)
                                 .and_modify(|x| *x += 1)
                                 .or_insert(1);
-
-                            if common_ops_simple.len() > self.settings.max_common_pair_cache_entries
-                            {
-                                break 'instr_loop;
-                            }
                         }
                     }
                 }
@@ -3051,6 +3052,8 @@ impl<T> ExpressionEvaluator<T> {
 
         let mut rename_map: Vec<_> = (0..self.stack.len()).collect(); // identity map
 
+        let mut free_indices = BinaryHeap::<Reverse<(usize, usize)>>::new();
+
         let mut max_reg = self.reserved_indices;
         for (i, (x, _)) in self.instructions.iter_mut().enumerate() {
             let cur_reg = match x {
@@ -3068,23 +3071,18 @@ impl<T> ExpressionEvaluator<T> {
                 Instr::Goto(..) | Instr::Label(..) => continue,
             };
 
-            let cur_last_use = last_use[cur_reg];
-
-            let new_reg = if let Some((new_v, lu)) = last_use[..cur_reg]
-                .iter_mut()
-                .enumerate()
-                .find(|(_, r)| **r <= i)
-            // <= is ok because we store intermediate results in temp values
+            let new_reg = if let Some(Reverse((last_pos, _))) = free_indices.peek()
+                 // <= is ok because we store intermediate results in temp values
+                && *last_pos <= i
             {
-                *lu = cur_last_use; // set the last use to the current variable last use
-                last_use[cur_reg] = 0; // make the current index available
-                rename_map[cur_reg] = new_v; // set the rename map so that every occurrence on the rhs is replaced
-                new_v
+                free_indices.pop().unwrap().0.1
             } else {
-                cur_reg
+                max_reg += 1;
+                max_reg - 1
             };
 
-            max_reg = max_reg.max(new_reg);
+            free_indices.push(Reverse((last_use[cur_reg], new_reg)));
+            rename_map[cur_reg] = new_reg;
 
             match x {
                 Instr::Add(r, a) | Instr::Mul(r, a) | Instr::ExternalFun(r, _, a) => {
@@ -7812,7 +7810,7 @@ impl EvalTree<Complex<Rational>> {
 
             let mut v: Vec<_> = v.into_iter().collect();
             v.retain(|(_, vv)| *vv > 1);
-            v.sort_by_key(|k| std::cmp::Reverse(k.1));
+            v.sort_by_key(|k| Reverse(k.1));
             v.truncate(settings.max_horner_scheme_variables);
             let v = v.into_iter().map(|(k, _)| k).collect::<Vec<_>>();
 
@@ -8178,7 +8176,7 @@ impl Expression<Complex<Rational>> {
 
                 occurrence.retain(|_, v| *v > 1);
                 let mut order: Vec<_> = occurrence.into_iter().collect();
-                order.sort_by_key(|k| std::cmp::Reverse(k.1)); // occurrence order
+                order.sort_by_key(|k| Reverse(k.1)); // occurrence order
                 let scheme = order.into_iter().map(|(k, _)| k).collect::<Vec<_>>();
 
                 self.apply_horner_scheme(&scheme);
