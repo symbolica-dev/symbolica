@@ -2047,7 +2047,7 @@ impl<T: Default> ExpressionEvaluator<T> {
             )
         }
 
-        let mut stack = vec![T2::default(); self.reserved_indices];
+        let mut stack = vec![T2::default(); self.stack.len()];
         for (s, coeff) in stack.iter_mut().skip(self.param_count).zip(coeffs) {
             *s = coeff.clone();
         }
@@ -2058,8 +2058,8 @@ impl<T: Default> ExpressionEvaluator<T> {
             reserved_indices: self.reserved_indices,
             instructions: self.instructions,
             result_indices: self.result_indices,
-            external_fns: self.external_fns.clone(),
-            settings: self.settings.clone(),
+            external_fns: self.external_fns,
+            settings: self.settings,
         }
     }
 
