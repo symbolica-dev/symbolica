@@ -4147,6 +4147,7 @@ extern "C" {{
             Add(MemOrReg, u16, Vec<MemOrReg>),
             Mul(MemOrReg, u16, Vec<MemOrReg>),
             Pow(MemOrReg, u16, MemOrReg, i64),
+            Sqrt(MemOrReg, u16, MemOrReg),
             Powf(usize, usize, usize),
             BuiltinFun(usize, BuiltinSymbol, usize),
             ExternalFun(usize, usize, Vec<usize>),
@@ -4173,7 +4174,13 @@ extern "C" {{
                     RegInstr::Pow(MemOrReg::Mem(*r), u16::MAX, MemOrReg::Mem(*b), *e)
                 }
                 Instr::Powf(r, b, e) => RegInstr::Powf(*r, *b, *e),
-                Instr::BuiltinFun(r, s, a) => RegInstr::BuiltinFun(*r, *s, *a),
+                Instr::BuiltinFun(r, s, a) => {
+                    if s.0 == Symbol::SQRT {
+                        RegInstr::Sqrt(MemOrReg::Mem(*r), u16::MAX, MemOrReg::Mem(*a))
+                    } else {
+                        RegInstr::BuiltinFun(*r, *s, *a)
+                    }
+                }
                 Instr::ExternalFun(r, s, a) => RegInstr::ExternalFun(*r, *s, a.clone()),
                 Instr::IfElse(c, _) => RegInstr::IfElse(*c),
                 Instr::Goto(_) => RegInstr::Goto,
@@ -4243,7 +4250,7 @@ extern "C" {{
                                 }
                             }
                         }
-                        RegInstr::Pow(_, f, a, -1) => {
+                        RegInstr::Pow(_, f, a, -1) | RegInstr::Sqrt(_, f, a) => {
                             *f &= !(1 << k); // FIXME: do not set on last use?
                             if *a == MemOrReg::Mem(old_reg) {
                                 *a = MemOrReg::Reg(k);
@@ -4922,6 +4929,78 @@ extern "C" {{
                         );
                     }
                 }
+                RegInstr::Sqrt(o, free, b) => {
+                    if !in_asm_block {
+                        *out += "\t__asm__(\n";
+                        in_asm_block = true;
+                    }
+
+                    let out_reg = match o {
+                        MemOrReg::Reg(out_reg) => *out_reg,
+                        MemOrReg::Mem(_) => {
+                            let Some(out_reg) = (0..16).position(|k| free & (1 << k) != 0) else {
+                                unreachable!("No free registers for sqrt output")
+                            };
+                            out_reg
+                        }
+                    };
+
+                    let b_reg = match b {
+                        MemOrReg::Reg(b_reg) => *b_reg,
+                        MemOrReg::Mem(k) => {
+                            match asm_flavour {
+                                InlineASM::X64 => {
+                                    let addr = asm_load!(*k);
+                                    *out +=
+                                        &format!("\t\t\"movsd {addr}, %%xmm{out_reg}\\n\\t\"\n",);
+                                }
+                                InlineASM::AVX2 => {
+                                    let addr = asm_load!(*k);
+                                    *out +=
+                                        &format!("\t\t\"vmovupd {addr}, %%ymm{out_reg}\\n\\t\"\n",);
+                                }
+                                InlineASM::AArch64 => {
+                                    let addr = asm_load!(*k);
+                                    *out += &format!("\t\t\"ldr d{out_reg}, {addr}\\n\\t\"\n",);
+                                }
+                                InlineASM::None => unreachable!(),
+                            }
+
+                            out_reg
+                        }
+                    };
+
+                    match asm_flavour {
+                        InlineASM::X64 => {
+                            *out += &format!("\t\t\"sqrtsd %%xmm{b_reg}, %%xmm{out_reg}\\n\\t\"\n");
+                        }
+                        InlineASM::AVX2 => {
+                            *out +=
+                                &format!("\t\t\"vsqrtpd %%ymm{b_reg}, %%ymm{out_reg}\\n\\t\"\n");
+                        }
+                        InlineASM::AArch64 => {
+                            *out += &format!("\t\t\"fsqrt d{out_reg}, d{b_reg}\\n\\t\"\n");
+                        }
+                        InlineASM::None => unreachable!(),
+                    }
+
+                    if let MemOrReg::Mem(out_mem) = o {
+                        let out_mem = asm_load!(*out_mem);
+                        match asm_flavour {
+                            InlineASM::X64 => {
+                                *out += &format!("\t\t\"movsd %%xmm{out_reg}, {out_mem}\\n\\t\"\n");
+                            }
+                            InlineASM::AVX2 => {
+                                *out +=
+                                    &format!("\t\t\"vmovupd %%ymm{out_reg}, {out_mem}\\n\\t\"\n");
+                            }
+                            InlineASM::AArch64 => {
+                                *out += &format!("\t\t\"str d{out_reg}, {out_mem}\\n\\t\"\n",);
+                            }
+                            InlineASM::None => unreachable!(),
+                        }
+                    }
+                }
                 RegInstr::Powf(o, b, e) => {
                     end_asm_block!(in_asm_block);
 
@@ -4946,9 +5025,6 @@ extern "C" {{
                         }
                         Symbol::COS_ID => {
                             *out += format!("\tZ[{o}] = cos({arg});\n").as_str();
-                        }
-                        Symbol::SQRT_ID => {
-                            *out += format!("\tZ[{o}] = sqrt({arg});\n").as_str();
                         }
                         Symbol::ABS_ID => {
                             *out += format!("\tZ[{o}] = std::abs({arg});\n").as_str();
@@ -5631,6 +5707,46 @@ extern "C" {{
                     *out += format!("\tZ[{o}] = pow({base}{suffix}, {exp}{suffix});\n").as_str();
                 }
                 Instr::BuiltinFun(o, s, a) => {
+                    if in_asm_block
+                        && s.0.get_id() == Symbol::SQRT_ID
+                        && let ComplexPhase::Real = *c
+                    {
+                        let addr_a = asm_load!(*a);
+                        let addr_o = asm_load!(*o);
+
+                        match asm_flavour {
+                            InlineASM::X64 => {
+                                *out += &format!(
+                                    "\t\t\"movupd {}, %%xmm0\\n\\t\"
+\t\t\"sqrtsd %%xmm0, %%xmm0\\n\\t\"
+\t\t\"movupd %%xmm0, {}\\n\\t\"\n",
+                                    addr_a.0, addr_o.0
+                                );
+                            }
+                            InlineASM::AVX2 => {
+                                *out += &format!(
+                                    "\t\t\"vmovupd {}, %%ymm0\\n\\t\"
+\t\t\"vsqrtpd %%ymm0, %%ymm0\\n\\t\"
+\t\t\"vxorpd %%ymm1, %%ymm1, %%ymm1\\n\\t\"
+\t\t\"vmovupd %%ymm0, {}\\n\\t\"
+\t\t\"vmovupd %%ymm1, {}\\n\\t\"\n",
+                                    addr_a.0, addr_o.0, addr_o.1
+                                );
+                            }
+                            InlineASM::AArch64 => {
+                                *out += &format!(
+                                    "\t\t\"ldr d0, {}\\n\\t\"
+\t\t\"fsqrt d0, d0\\n\\t\"
+\t\t\"str d0, {}\\n\\t\"\n",
+                                    addr_a.0, addr_o.0
+                                );
+                            }
+                            InlineASM::None => unreachable!(),
+                        }
+
+                        continue;
+                    }
+
                     end_asm_block!(in_asm_block);
 
                     let arg = if let ComplexPhase::Real = *c {
