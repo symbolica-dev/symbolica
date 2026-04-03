@@ -2223,6 +2223,7 @@ class Expression:
         cpe_iterations: Optional[int] = None,
         n_cores: int = 4,
         verbose: bool = False,
+        jit_compile: bool = True,
         max_horner_scheme_variables: int = 500,
         max_common_pair_cache_entries: int = 1000000,
         max_common_pair_distance: int = 100,
@@ -2283,6 +2284,9 @@ class Expression:
             The number of cores to use for the optimization.
         verbose: bool, optional
             Print the progress of the optimization.
+        jit_compile: bool, optional
+            Just-in-time compile the evaluator upon first use with SymJIT. This can provide
+            significant performance improvements.
         max_horner_scheme_variables: int, optional
             The maximum number of variables in a Horner scheme.
         max_common_pair_cache_entries: int, optional
@@ -2310,6 +2314,7 @@ class Expression:
         cpe_iterations: Optional[int] = None,
         n_cores: int = 4,
         verbose: bool = False,
+        jit_compile: bool = True,
         max_horner_scheme_variables: int = 500,
         max_common_pair_cache_entries: int = 1000000,
         max_common_pair_distance: int = 100,
@@ -5030,6 +5035,9 @@ class Evaluator:
     def load(cls, evaluator: bytes, external_functions: dict[Tuple[Expression, str], Callable[[
             Sequence[float | complex]], float | complex]] = {}) -> Evaluator:
         """Load the evaluator into memory, preparing it for evaluation."""
+
+    def jit_compile(self, jit_compile: bool) -> None:
+        """JIT compile the evaluator for faster evaluation. This may take some time, but will speed up subsequent evaluations."""
 
     def save(self) -> bytes:
         """Save the evaluator to a byte string."""

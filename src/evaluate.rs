@@ -5845,6 +5845,10 @@ impl<T: Real> ExpressionEvaluatorWithExternalFunctions<T> {
         &self.eval
     }
 
+    pub fn get_evaluator_mut(&mut self) -> &mut ExpressionEvaluator<T> {
+        &mut self.eval
+    }
+
     pub fn evaluate_single(&mut self, params: &[T]) -> T {
         if self.eval.result_indices.len() != 1 {
             panic!(
