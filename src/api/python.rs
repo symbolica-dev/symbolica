@@ -16053,8 +16053,8 @@ impl PythonExpressionEvaluator {
                 self.jit_compile,
                 self.eval_complex
                     .get_evaluator()
-                .clone()
-                .set_coeff(&self.rational_constants),
+                    .clone()
+                    .set_coeff(&self.rational_constants),
             ),
             bincode::config::standard(),
         )
@@ -16863,6 +16863,7 @@ impl PythonExpressionEvaluator {
         compiler_path = None,
         compiler_flags = None,
         custom_header = None,
+        split_asm = false,
         cuda_number_of_evaluations = 1,
         cuda_block_size = 512
     ))]
@@ -16878,6 +16879,7 @@ impl PythonExpressionEvaluator {
         compiler_path: Option<&str>,
         compiler_flags: Option<Vec<String>>,
         custom_header: Option<String>,
+        split_asm: bool,
         cuda_number_of_evaluations: usize,
         cuda_block_size: usize,
         py: Python,
@@ -16937,6 +16939,7 @@ impl PythonExpressionEvaluator {
                         ExportSettings {
                             include_header: true,
                             inline_asm,
+                            split_asm,
                             custom_header,
                             ..Default::default()
                         },
@@ -16964,6 +16967,7 @@ impl PythonExpressionEvaluator {
                         ExportSettings {
                             include_header: true,
                             inline_asm,
+                            split_asm,
                             custom_header,
                             ..Default::default()
                         },
@@ -16991,6 +16995,7 @@ impl PythonExpressionEvaluator {
                         ExportSettings {
                             include_header: true,
                             inline_asm,
+                            split_asm,
                             custom_header,
                             ..Default::default()
                         },
@@ -17018,6 +17023,7 @@ impl PythonExpressionEvaluator {
                         ExportSettings {
                             include_header: true,
                             inline_asm,
+                            split_asm,
                             custom_header,
                             ..Default::default()
                         },
@@ -17045,6 +17051,7 @@ impl PythonExpressionEvaluator {
                         ExportSettings {
                             include_header: true,
                             inline_asm,
+                            split_asm,
                             custom_header,
                             ..Default::default()
                         },
@@ -17075,6 +17082,7 @@ impl PythonExpressionEvaluator {
                         ExportSettings {
                             include_header: true,
                             inline_asm,
+                            split_asm,
                             custom_header,
                             ..Default::default()
                         },
@@ -17111,6 +17119,8 @@ static THREE: fn() -> String = || "3".into();
 static CUDA_BLOCK_DEFAULT: fn() -> String = || "256".into();
 #[cfg(feature = "python_stubgen")]
 static DEFAULT: fn() -> String = || "\"default\"".into();
+#[cfg(feature = "python_stubgen")]
+static FALSE: fn() -> String = || "False".into();
 
 #[cfg(feature = "python_stubgen")]
 submit! {
@@ -17180,6 +17190,12 @@ PyMethodsInfo {
                     default: ParameterDefault::Expr(NONE_ARG),
                     type_info: || Option::<String>::type_input(),
                 },
+                ParameterInfo {
+                    name: "split_asm",
+                    kind: ParameterKind::PositionalOrKeyword,
+                    default: ParameterDefault::Expr(FALSE),
+                    type_info: || bool::type_input(),
+                },
 
             ],
             is_overload: true,
@@ -17209,7 +17225,9 @@ compiler_path : Optional[str]
 compiler_flags : Optional[Sequence[str]]
     The custom flags to pass to the compiler.
 custom_header : Optional[str]
-    The custom header to include in the generated code."#,
+    The custom header to include in the generated code.
+split_asm : bool
+    Split ASM-heavy exports into an additional generated assembly sidecar file."#,
             is_async: false,
             deprecated: None,
             type_ignored: None,
@@ -17271,6 +17289,12 @@ custom_header : Optional[str]
                     default: ParameterDefault::Expr(NONE_ARG),
                     type_info: || Option::<String>::type_input(),
                 },
+                ParameterInfo {
+                    name: "split_asm",
+                    kind: ParameterKind::PositionalOrKeyword,
+                    default: ParameterDefault::Expr(FALSE),
+                    type_info: || bool::type_input(),
+                },
 
             ],
             r#type: MethodType::Class,
@@ -17299,7 +17323,9 @@ compiler_path : Optional[str]
 compiler_flags : Optional[Sequence[str]]
     The custom flags to pass to the compiler.
 custom_header : Optional[str]
-    The custom header to include in the generated code."#,
+    The custom header to include in the generated code.
+split_asm : bool
+    Split ASM-heavy exports into an additional generated assembly sidecar file."#,
             is_async: false,
             deprecated: None,
             type_ignored: None,
@@ -17362,6 +17388,12 @@ custom_header : Optional[str]
                     default: ParameterDefault::Expr(NONE_ARG),
                     type_info: || Option::<String>::type_input(),
                 },
+                ParameterInfo {
+                    name: "split_asm",
+                    kind: ParameterKind::PositionalOrKeyword,
+                    default: ParameterDefault::Expr(FALSE),
+                    type_info: || bool::type_input(),
+                },
 
             ],
             r#type: MethodType::Class,
@@ -17390,7 +17422,9 @@ compiler_path : Optional[str]
 compiler_flags : Optional[Sequence[str]]
     The custom flags to pass to the compiler.
 custom_header : Optional[str]
-    The custom header to include in the generated code."#,
+    The custom header to include in the generated code.
+split_asm : bool
+    Split ASM-heavy exports into an additional generated assembly sidecar file."#,
             is_async: false,
             deprecated: None,
             type_ignored: None,
@@ -17453,6 +17487,12 @@ custom_header : Optional[str]
                     default: ParameterDefault::Expr(NONE_ARG),
                     type_info: || Option::<String>::type_input(),
                 },
+                ParameterInfo {
+                    name: "split_asm",
+                    kind: ParameterKind::PositionalOrKeyword,
+                    default: ParameterDefault::Expr(FALSE),
+                    type_info: || bool::type_input(),
+                },
 
             ],
             r#type: MethodType::Class,
@@ -17481,7 +17521,9 @@ compiler_path : Optional[str]
 compiler_flags : Optional[Sequence[str]]
     The custom flags to pass to the compiler.
 custom_header : Optional[str]
-    The custom header to include in the generated code."#,
+    The custom header to include in the generated code.
+split_asm : bool
+    Split ASM-heavy exports into an additional generated assembly sidecar file."#,
             is_async: false,
             deprecated: None,
             type_ignored: None,
@@ -17545,6 +17587,12 @@ custom_header : Optional[str]
                     type_info: || Option::<String>::type_input(),
                 },
                 ParameterInfo {
+                    name: "split_asm",
+                    kind: ParameterKind::PositionalOrKeyword,
+                    default: ParameterDefault::Expr(FALSE),
+                    type_info: || bool::type_input(),
+                },
+                ParameterInfo {
                     name: "cuda_number_of_evaluations",
                     kind: ParameterKind::PositionalOrKeyword,
                     default: ParameterDefault::Expr(ONE),
@@ -17587,6 +17635,8 @@ compiler_flags : Optional[Sequence[str]]
     The custom flags to pass to the compiler.
 custom_header : Optional[str]
     The custom header to include in the generated code.
+split_asm : bool
+    Split ASM-heavy exports into an additional generated assembly sidecar file.
 cuda_number_of_evaluations: Optional[int]
     The number of parallel evaluations to perform on the CUDA device. The input to evaluate must
     have the length `cuda_number_of_evaluations * arg_len`.
@@ -17655,6 +17705,12 @@ cuda_block_size: Optional[int]
                     type_info: || Option::<String>::type_input(),
                 },
                 ParameterInfo {
+                    name: "split_asm",
+                    kind: ParameterKind::PositionalOrKeyword,
+                    default: ParameterDefault::Expr(FALSE),
+                    type_info: || bool::type_input(),
+                },
+                ParameterInfo {
                     name: "cuda_number_of_evaluations",
                     kind: ParameterKind::PositionalOrKeyword,
                     default: ParameterDefault::Expr(ONE),
@@ -17697,6 +17753,8 @@ compiler_flags : Optional[Sequence[str]]
     The custom flags to pass to the compiler.
 custom_header : Optional[str]
     The custom header to include in the generated code.
+split_asm : bool
+    Split ASM-heavy exports into an additional generated assembly sidecar file.
 cuda_number_of_evaluations: Optional[int]
     The number of parallel evaluations to perform on the CUDA device. The input to evaluate must
     have the length `cuda_number_of_evaluations * arg_len`.

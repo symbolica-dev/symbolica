@@ -5177,6 +5177,7 @@ class Evaluator:
         compiler_path: Optional[str] = None,
         compiler_flags: Optional[Sequence[str]] = None,
         custom_header: Optional[str] = None,
+        split_asm: bool = False,
     ) -> CompiledRealEvaluator:
         """Compile the evaluator to a shared library using C++ and optionally inline assembly and load it.
 
@@ -5204,6 +5205,8 @@ class Evaluator:
             The custom flags to pass to the compiler.
         custom_header : Optional[str]
             The custom header to include in the generated code.
+        split_asm : bool
+            Split ASM-heavy exports into an additional generated assembly sidecar file.
         """
 
     @overload
@@ -5219,6 +5222,7 @@ class Evaluator:
         compiler_path: Optional[str] = None,
         compiler_flags: Optional[Sequence[str]] = None,
         custom_header: Optional[str] = None,
+        split_asm: bool = False,
     ) -> CompiledComplexEvaluator:
         """Compile the evaluator to a shared library using C++ and optionally inline assembly and load it.
 
@@ -5246,6 +5250,8 @@ class Evaluator:
             The custom flags to pass to the compiler.
         custom_header : Optional[str]
             The custom header to include in the generated code.
+        split_asm : bool
+            Split ASM-heavy exports into an additional generated assembly sidecar file.
         """
 
     @overload
@@ -5261,6 +5267,7 @@ class Evaluator:
         compiler_path: Optional[str] = None,
         compiler_flags: Optional[Sequence[str]] = None,
         custom_header: Optional[str] = None,
+        split_asm: bool = False,
     ) -> CompiledSimdRealEvaluator:
         """Compile the evaluator to a shared library with 4x SIMD using C++ and optionally inline assembly and load it.
 
@@ -5288,6 +5295,8 @@ class Evaluator:
             The custom flags to pass to the compiler.
         custom_header : Optional[str]
             The custom header to include in the generated code.
+        split_asm : bool
+            Split ASM-heavy exports into an additional generated assembly sidecar file.
         """
 
     @overload
@@ -5303,6 +5312,7 @@ class Evaluator:
         compiler_path: Optional[str] = None,
         compiler_flags: Optional[Sequence[str]] = None,
         custom_header: Optional[str] = None,
+        split_asm: bool = False,
     ) -> CompiledSimdComplexEvaluator:
         """Compile the evaluator to a shared library with 4x SIMD using C++ and optionally inline assembly and load it.
 
@@ -5330,6 +5340,8 @@ class Evaluator:
             The custom flags to pass to the compiler.
         custom_header : Optional[str]
             The custom header to include in the generated code.
+        split_asm : bool
+            Split ASM-heavy exports into an additional generated assembly sidecar file.
         """
 
     @overload
@@ -5377,8 +5389,10 @@ class Evaluator:
             The custom flags to pass to the compiler.
         custom_header : Optional[str]
             The custom header to include in the generated code.
+        split_asm : bool
+            Split ASM-heavy exports into an additional generated assembly sidecar file.
         cuda_number_of_evaluations: Optional[int]
-            The number of parallel evaluations to perform on the CUDA device. The input to evaluate must 
+            The number of parallel evaluations to perform on the CUDA device. The input to evaluate must
             have the length `cuda_number_of_evaluations * arg_len`.
         cuda_block_size: Optional[int]
             The block size to use for CUDA kernel launches.

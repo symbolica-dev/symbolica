@@ -1,11 +1,12 @@
+use std::path::Path;
 use symbolica::{
     atom::AtomCore,
     domains::{float::Complex, rational::Rational},
     evaluate::{
-        CompileOptions, CudaComplexf64, CudaLoadSettings, CudaRealf64, ExportSettings,
-        ExpressionEvaluator, FunctionMap, InlineASM, OptimizationSettings,
+        BatchEvaluator, CompileOptions, CudaComplexf64, CudaLoadSettings, CudaRealf64,
+        ExportSettings, ExpressionEvaluator, FunctionMap, InlineASM, OptimizationSettings,
     },
-    parse,
+    parse, symbol,
 };
 
 const F13: &'static str = "-48*ammu*amuq*ammu2*amuq2*x6*xcp4*e1234-48*ammu*amuq*ammu2*amuq2*x6*xcp3*e1234+48*ammu*amuq*ammu2*amuq2*x6*xcp2*e1234+48*ammu*amuq*ammu2*amuq2*x6*xcp1*e1234+48*ammu*amuq*ammu2*amuq2*x6^2*xcp3*e1234-48*ammu*amuq*ammu2*amuq2*x6^2*xcp2*e1234-144*ammu*
@@ -1121,6 +1122,304 @@ fn gcc_compiled_evaluator_real() {
     let mut out = vec![0.];
     compiled_evaluator.evaluate(&INPUT_REAL, &mut out);
     assert!((out[0] - OUT_REAL).abs() / OUT_REAL < 1e-10, "{}", out[0]);
+}
+
+#[test]
+fn gcc_compiled_evaluator_real_split_asm_blocks() {
+    if cfg!(target_os = "windows") || InlineASM::default() == InlineASM::None {
+        return;
+    }
+
+    let mut fn_map = FunctionMap::new();
+    fn_map.add_conditional(symbol!("if")).unwrap();
+    fn_map
+        .add_external_function(symbol!("ext"), "ext".to_owned())
+        .unwrap();
+
+    let evaluator = parse!("if(y, ext(x) + z*z, x*x + 3)")
+        .evaluator(
+            &fn_map,
+            &[parse!("x"), parse!("y"), parse!("z")],
+            OptimizationSettings::default(),
+        )
+        .unwrap()
+        .map_coeff(&|x| x.re.to_f64());
+
+    let exported = evaluator
+        .export_cpp::<f64>(
+            "gcc_compiled_evaluator_real_split.cpp",
+            "gcc_compiled_evaluator_real_split",
+            ExportSettings {
+                include_header: true,
+                inline_asm: InlineASM::default(),
+                split_asm: true,
+                custom_header: Some(
+                    "extern \"C\" double ext(double x) { return x + 5.; }".to_string(),
+                ),
+                ..Default::default()
+            },
+        )
+        .unwrap();
+
+    assert!(Path::new("gcc_compiled_evaluator_real_split.double_asm.s").exists());
+    assert!(Path::new("gcc_compiled_evaluator_real_split.double_asm.bin").exists());
+
+    let mut compiled_evaluator = exported
+        .compile(
+            "gcc_compiled_evaluator_real_split",
+            CompileOptions::default(),
+        )
+        .unwrap()
+        .load()
+        .unwrap();
+
+    let mut out = vec![0.];
+    compiled_evaluator.evaluate(&[3., 1., 2.], &mut out);
+    assert!((out[0] - 12.).abs() < 1e-10, "{}", out[0]);
+
+    compiled_evaluator.evaluate(&[3., 0., 2.], &mut out);
+    assert!((out[0] - 12.).abs() < 1e-10, "{}", out[0]);
+}
+
+#[test]
+fn gcc_compiled_evaluator_complex_split_asm_blocks() {
+    if cfg!(target_os = "windows") || InlineASM::default() == InlineASM::None {
+        return;
+    }
+
+    let evaluator = generate_evaluator().map_coeff(&|x| Complex::new(x.re.to_f64(), x.im.to_f64()));
+    let exported = evaluator
+        .export_cpp::<Complex<f64>>(
+            "gcc_compiled_evaluator_complex_split.cpp",
+            "gcc_compiled_evaluator_complex_split",
+            ExportSettings {
+                include_header: true,
+                inline_asm: InlineASM::default(),
+                split_asm: true,
+                ..Default::default()
+            },
+        )
+        .unwrap();
+
+    assert!(Path::new("gcc_compiled_evaluator_complex_split.complex_asm.s").exists());
+    assert!(Path::new("gcc_compiled_evaluator_complex_split.complex_asm.bin").exists());
+
+    let mut compiled_evaluator = exported
+        .compile(
+            "gcc_compiled_evaluator_complex_split",
+            CompileOptions::default(),
+        )
+        .unwrap()
+        .load()
+        .unwrap();
+    let mut out = vec![Complex::new(0., 0.)];
+    compiled_evaluator.evaluate(&INPUT_COMPLEX, &mut out);
+    assert!(
+        (out[0] - OUT_COMPLEX).re.abs() / OUT_COMPLEX.re.abs() < 1e-10,
+        "re: {}",
+        out[0].re
+    );
+    assert!(
+        (out[0] - OUT_COMPLEX).im.abs() / OUT_COMPLEX.im.abs() < 1e-10,
+        "im: {}",
+        out[0].im
+    );
+}
+
+#[test]
+fn gcc_compiled_evaluator_real_simd_split_asm_blocks() {
+    if cfg!(target_os = "windows")
+        || !cfg!(target_arch = "x86_64")
+        || !std::is_x86_feature_detected!("avx2")
+    {
+        return;
+    }
+
+    let mut fn_map = FunctionMap::new();
+    fn_map.add_conditional(symbol!("if")).unwrap();
+
+    let mut evaluator = parse!("if(y, x + z*z + 2, x*x + z + 3)")
+        .evaluator(
+            &fn_map,
+            &[parse!("x"), parse!("y"), parse!("z")],
+            OptimizationSettings::default(),
+        )
+        .unwrap()
+        .map_coeff(&|x| x.re.to_f64());
+
+    let exported = evaluator
+        .export_cpp::<wide::f64x4>(
+            "gcc_compiled_evaluator_real_simd_split.cpp",
+            "gcc_compiled_evaluator_real_simd_split",
+            ExportSettings {
+                include_header: true,
+                inline_asm: InlineASM::AVX2,
+                split_asm: true,
+                ..Default::default()
+            },
+        )
+        .unwrap();
+
+    assert!(Path::new("gcc_compiled_evaluator_real_simd_split.double_asm.s").exists());
+    assert!(Path::new("gcc_compiled_evaluator_real_simd_split.double_asm.bin").exists());
+
+    let mut compiled_evaluator = exported
+        .compile(
+            "gcc_compiled_evaluator_real_simd_split",
+            CompileOptions::default(),
+        )
+        .unwrap()
+        .load()
+        .unwrap();
+
+    let params_true = vec![3., 1., 2., 4., 1., 3., 5., 1., 4., 6., 1., 5.];
+    let mut out_true = vec![0.; 4];
+    compiled_evaluator
+        .evaluate_batch(4, &params_true, &mut out_true)
+        .unwrap();
+    for lane in 0..4 {
+        let mut expected = vec![0.];
+        evaluator.evaluate(&params_true[3 * lane..3 * lane + 3], &mut expected);
+        assert!(
+            (out_true[lane] - expected[0]).abs() < 1e-10,
+            "lane {lane}: {} != {}",
+            out_true[lane],
+            expected[0]
+        );
+    }
+
+    let params_false = vec![3., 0., 2., 4., 0., 3., 5., 0., 4., 6., 0., 5.];
+    let mut out_false = vec![0.; 4];
+    compiled_evaluator
+        .evaluate_batch(4, &params_false, &mut out_false)
+        .unwrap();
+    for lane in 0..4 {
+        let mut expected = vec![0.];
+        evaluator.evaluate(&params_false[3 * lane..3 * lane + 3], &mut expected);
+        assert!(
+            (out_false[lane] - expected[0]).abs() < 1e-10,
+            "lane {lane}: {} != {}",
+            out_false[lane],
+            expected[0]
+        );
+    }
+}
+
+#[test]
+fn gcc_compiled_evaluator_complex_simd_split_asm_blocks() {
+    if cfg!(target_os = "windows")
+        || !cfg!(target_arch = "x86_64")
+        || !std::is_x86_feature_detected!("avx2")
+    {
+        return;
+    }
+
+    let mut fn_map = FunctionMap::new();
+    fn_map.add_conditional(symbol!("if")).unwrap();
+
+    let mut evaluator = parse!("if(c, x*z + 1, x*x + z)")
+        .evaluator(
+            &fn_map,
+            &[parse!("c"), parse!("x"), parse!("z")],
+            OptimizationSettings::default(),
+        )
+        .unwrap()
+        .map_coeff(&|x| Complex::new(x.re.to_f64(), x.im.to_f64()));
+
+    let exported = evaluator
+        .export_cpp::<Complex<wide::f64x4>>(
+            "gcc_compiled_evaluator_complex_simd_split.cpp",
+            "gcc_compiled_evaluator_complex_simd_split",
+            ExportSettings {
+                include_header: true,
+                inline_asm: InlineASM::AVX2,
+                split_asm: true,
+                ..Default::default()
+            },
+        )
+        .unwrap();
+
+    assert!(Path::new("gcc_compiled_evaluator_complex_simd_split.complex_asm.s").exists());
+    assert!(Path::new("gcc_compiled_evaluator_complex_simd_split.complex_asm.bin").exists());
+
+    let mut compiled_evaluator = exported
+        .compile(
+            "gcc_compiled_evaluator_complex_simd_split",
+            CompileOptions::default(),
+        )
+        .unwrap()
+        .load()
+        .unwrap();
+
+    let params_true = vec![
+        Complex::new(1., 0.),
+        Complex::new(1., 2.),
+        Complex::new(3., -1.),
+        Complex::new(1., 0.),
+        Complex::new(2., -1.),
+        Complex::new(-1., 0.5),
+        Complex::new(1., 0.),
+        Complex::new(0.5, 1.5),
+        Complex::new(2., 2.),
+        Complex::new(1., 0.),
+        Complex::new(-2., 1.),
+        Complex::new(0.25, -0.75),
+    ];
+    let mut out_true = vec![Complex::new(0., 0.); 4];
+    compiled_evaluator
+        .evaluate_batch(4, &params_true, &mut out_true)
+        .unwrap();
+    for lane in 0..4 {
+        let mut expected = vec![Complex::new(0., 0.)];
+        evaluator.evaluate(&params_true[3 * lane..3 * lane + 3], &mut expected);
+        assert!(
+            (out_true[lane] - expected[0]).re.abs() < 1e-10,
+            "lane {lane} re: {} != {}",
+            out_true[lane].re,
+            expected[0].re
+        );
+        assert!(
+            (out_true[lane] - expected[0]).im.abs() < 1e-10,
+            "lane {lane} im: {} != {}",
+            out_true[lane].im,
+            expected[0].im
+        );
+    }
+
+    let params_false = vec![
+        Complex::new(0., 0.),
+        Complex::new(1., 2.),
+        Complex::new(3., -1.),
+        Complex::new(0., 0.),
+        Complex::new(2., -1.),
+        Complex::new(-1., 0.5),
+        Complex::new(0., 0.),
+        Complex::new(0.5, 1.5),
+        Complex::new(2., 2.),
+        Complex::new(0., 0.),
+        Complex::new(-2., 1.),
+        Complex::new(0.25, -0.75),
+    ];
+    let mut out_false = vec![Complex::new(0., 0.); 4];
+    compiled_evaluator
+        .evaluate_batch(4, &params_false, &mut out_false)
+        .unwrap();
+    for lane in 0..4 {
+        let mut expected = vec![Complex::new(0., 0.)];
+        evaluator.evaluate(&params_false[3 * lane..3 * lane + 3], &mut expected);
+        assert!(
+            (out_false[lane] - expected[0]).re.abs() < 1e-10,
+            "lane {lane} re: {} != {}",
+            out_false[lane].re,
+            expected[0].re
+        );
+        assert!(
+            (out_false[lane] - expected[0]).im.abs() < 1e-10,
+            "lane {lane} im: {} != {}",
+            out_false[lane].im,
+            expected[0].im
+        );
+    }
 }
 
 #[test]

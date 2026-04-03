@@ -3275,6 +3275,8 @@ pub struct ExportSettings {
     /// evaluation instructions. This often gives better performance than
     /// the `O3` optimization level and results in very fast compilation.
     pub inline_asm: InlineASM,
+    /// Split inline ASM exports across multiple generated source files.
+    pub split_asm: bool,
     /// Custom header to include in the generated code.
     /// This can be used to include additional libraries or custom functions.
     pub custom_header: Option<String>,
@@ -3285,12 +3287,473 @@ impl Default for ExportSettings {
         ExportSettings {
             include_header: true,
             inline_asm: InlineASM::default(),
+            split_asm: false,
             custom_header: None,
         }
     }
 }
 
+#[derive(Debug, Default)]
+struct DoubleAsmBlockBuilder {
+    asm_flavour: InlineASM,
+    declaration_signature: String,
+    constants_name: String,
+    declarations: String,
+    wrapper: String,
+    asm: String,
+    current_block: String,
+    block_index: usize,
+}
+
+impl DoubleAsmBlockBuilder {
+    fn new(asm_flavour: InlineASM, declaration_signature: String, constants_name: String) -> Self {
+        DoubleAsmBlockBuilder {
+            asm_flavour,
+            declaration_signature,
+            constants_name,
+            asm: ".text\n".to_string(),
+            ..Default::default()
+        }
+    }
+
+    fn symbol_name(name: &str) -> String {
+        if cfg!(target_vendor = "apple") {
+            format!("_{name}")
+        } else {
+            name.to_string()
+        }
+    }
+
+    fn rodata_section() -> &'static str {
+        if cfg!(target_vendor = "apple") {
+            ".section __TEXT,__const"
+        } else {
+            ".section .rodata"
+        }
+    }
+
+    fn path_literal(path: &Path) -> String {
+        path.to_string_lossy()
+            .replace('\\', "\\\\")
+            .replace('"', "\\\"")
+    }
+
+    fn incbin_prefix(symbol_name: &str, blob_path: &Path, alignment: usize) -> String {
+        let symbol_name = Self::symbol_name(symbol_name);
+        format!(
+            "{}\n.p2align {alignment}\n.globl {symbol_name}\n{symbol_name}:\n.incbin \"{}\"\n\n",
+            Self::rodata_section(),
+            Self::path_literal(blob_path)
+        )
+    }
+
+    fn emit_wrapper(&mut self, line: &str) {
+        self.wrapper.push_str(line);
+    }
+
+    fn emit_asm_line(&mut self, line: &str) {
+        self.current_block.push('\t');
+        self.current_block.push_str(line);
+        self.current_block.push('\n');
+    }
+
+    fn finish_block(&mut self, function_name: &str) {
+        if self.current_block.is_empty() {
+            return;
+        }
+
+        let block_name = format!("{function_name}_asm_block_{}", self.block_index);
+        self.declarations.push_str(&format!(
+            "extern \"C\" void {block_name}({});\n",
+            self.declaration_signature
+        ));
+        self.emit_wrapper(&format!(
+            "\t{block_name}(params, {}, Z, out);\n",
+            self.constants_name
+        ));
+        let symbol_name = Self::symbol_name(&block_name);
+        self.asm.push_str(&format!(
+            "\n.p2align 4\n.globl {symbol_name}\n{symbol_name}:\n"
+        ));
+        self.asm.push_str(&self.current_block);
+        self.asm.push_str("\tret\n");
+        self.current_block.clear();
+        self.block_index += 1;
+    }
+
+    fn finish(mut self) -> (String, String, String) {
+        if cfg!(target_os = "linux") && matches!(self.asm_flavour, InlineASM::X64 | InlineASM::AVX2)
+        {
+            self.asm
+                .push_str("\n.section .note.GNU-stack,\"\",@progbits\n");
+        }
+
+        (self.declarations, self.wrapper, self.asm)
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum AsmBackendKind {
+    Inline,
+    Split,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum AsmRegion {
+    Params,
+    Constants,
+    Buffer,
+    Output,
+}
+
+trait AsmBlockBackend {
+    fn kind(&self) -> AsmBackendKind;
+    fn asm_flavour(&self) -> InlineASM;
+    fn emit_wrapper(&mut self, line: &str);
+    fn emit_asm_line(&mut self, line: &str);
+    fn finish_block(&mut self, function_name: &str, include_out: bool);
+
+    fn operand(&self, region: AsmRegion) -> &'static str {
+        match (self.asm_flavour(), self.kind(), region) {
+            (InlineASM::X64 | InlineASM::AVX2, AsmBackendKind::Inline, AsmRegion::Buffer) => "%0",
+            (InlineASM::X64 | InlineASM::AVX2, AsmBackendKind::Inline, AsmRegion::Constants) => {
+                "%1"
+            }
+            (InlineASM::X64 | InlineASM::AVX2, AsmBackendKind::Inline, AsmRegion::Params) => "%2",
+            (InlineASM::X64 | InlineASM::AVX2, AsmBackendKind::Inline, AsmRegion::Output) => "%3",
+            (InlineASM::X64 | InlineASM::AVX2, AsmBackendKind::Split, AsmRegion::Params) => "%rdi",
+            (InlineASM::X64 | InlineASM::AVX2, AsmBackendKind::Split, AsmRegion::Constants) => {
+                "%rsi"
+            }
+            (InlineASM::X64 | InlineASM::AVX2, AsmBackendKind::Split, AsmRegion::Buffer) => "%rdx",
+            (InlineASM::X64 | InlineASM::AVX2, AsmBackendKind::Split, AsmRegion::Output) => "%rcx",
+            (InlineASM::AArch64, AsmBackendKind::Inline, AsmRegion::Buffer) => "%0",
+            (InlineASM::AArch64, AsmBackendKind::Inline, AsmRegion::Constants) => "%1",
+            (InlineASM::AArch64, AsmBackendKind::Inline, AsmRegion::Params) => "%2",
+            (InlineASM::AArch64, AsmBackendKind::Inline, AsmRegion::Output) => "%3",
+            (InlineASM::AArch64, AsmBackendKind::Split, AsmRegion::Params) => "x0",
+            (InlineASM::AArch64, AsmBackendKind::Split, AsmRegion::Constants) => "x1",
+            (InlineASM::AArch64, AsmBackendKind::Split, AsmRegion::Buffer) => "x2",
+            (InlineASM::AArch64, AsmBackendKind::Split, AsmRegion::Output) => "x3",
+            (InlineASM::None, _, _) => unreachable!(),
+        }
+    }
+
+    fn scalar_addr(
+        &mut self,
+        region: AsmRegion,
+        offset: usize,
+        second_index: &mut usize,
+        allow_cache: bool,
+    ) -> String {
+        match self.asm_flavour() {
+            InlineASM::X64 | InlineASM::AVX2 => {
+                format!("{}({})", offset, self.operand(region))
+            }
+            InlineASM::AArch64 => {
+                let base = self.operand(region);
+                if allow_cache && offset > 32760 {
+                    if offset < *second_index || offset > 32760 + *second_index {
+                        let d = offset.ilog2();
+                        let shift = d.min(12);
+                        let coeff = offset / (1 << shift);
+                        *second_index = coeff << shift;
+                        let rest = offset - *second_index;
+                        self.emit_asm_line(&format!("add x8, {base}, {}, lsl {}", coeff, shift));
+                        format!("[x8, {}]", rest)
+                    } else {
+                        format!("[x8, {}]", offset - *second_index)
+                    }
+                } else if offset > 32760 {
+                    let d = offset.ilog2();
+                    let shift = d.min(12);
+                    let coeff = offset / (1 << shift);
+                    let rest = offset - (coeff << shift);
+                    *second_index = 0;
+                    self.emit_asm_line(&format!("add x8, {base}, {}, lsl {}", coeff, shift));
+                    format!("[x8, {}]", rest)
+                } else {
+                    format!("[{base}, {}]", offset)
+                }
+            }
+            InlineASM::None => unreachable!(),
+        }
+    }
+
+    fn complex_addr(
+        &mut self,
+        region: AsmRegion,
+        offset: usize,
+        second_index: &mut usize,
+        allow_cache: bool,
+    ) -> (String, String) {
+        match self.asm_flavour() {
+            InlineASM::X64 => (
+                format!("{}({})", offset, self.operand(region)),
+                String::new(),
+            ),
+            InlineASM::AVX2 => (
+                format!("{}({})", offset, self.operand(region)),
+                format!("{}({})", offset + 32, self.operand(region)),
+            ),
+            InlineASM::AArch64 => {
+                let base = self.operand(region);
+                if allow_cache && offset > 32760 {
+                    if offset < *second_index || offset > 32760 + *second_index {
+                        let d = offset.ilog2();
+                        let shift = d.min(12);
+                        let coeff = offset / (1 << shift);
+                        *second_index = coeff << shift;
+                        let rest = offset - *second_index;
+                        self.emit_asm_line(&format!("add x8, {base}, {}, lsl {}", coeff, shift));
+                        (format!("[x8, {}]", rest), format!("[x8, {}]", rest + 8))
+                    } else {
+                        let base_offset = offset - *second_index;
+                        (
+                            format!("[x8, {}]", base_offset),
+                            format!("[x8, {}]", base_offset + 8),
+                        )
+                    }
+                } else if offset > 32760 {
+                    let d = offset.ilog2();
+                    let shift = d.min(12);
+                    let coeff = offset / (1 << shift);
+                    let rest = offset - (coeff << shift);
+                    *second_index = 0;
+                    self.emit_asm_line(&format!("add x8, {base}, {}, lsl {}", coeff, shift));
+                    (format!("[x8, {}]", rest), format!("[x8, {}]", rest + 8))
+                } else {
+                    (
+                        format!("[{base}, {}]", offset),
+                        format!("[{base}, {}]", offset + 8),
+                    )
+                }
+            }
+            InlineASM::None => unreachable!(),
+        }
+    }
+}
+
+struct InlineAsmBlockBuilder<'a> {
+    asm_flavour: InlineASM,
+    constants_name: String,
+    out: &'a mut String,
+    in_block: bool,
+}
+
+impl<'a> InlineAsmBlockBuilder<'a> {
+    fn new(asm_flavour: InlineASM, constants_name: String, out: &'a mut String) -> Self {
+        InlineAsmBlockBuilder {
+            asm_flavour,
+            constants_name,
+            out,
+            in_block: false,
+        }
+    }
+}
+
+impl AsmBlockBackend for InlineAsmBlockBuilder<'_> {
+    fn kind(&self) -> AsmBackendKind {
+        AsmBackendKind::Inline
+    }
+
+    fn asm_flavour(&self) -> InlineASM {
+        self.asm_flavour
+    }
+
+    fn emit_wrapper(&mut self, line: &str) {
+        self.out.push_str(line);
+    }
+
+    fn emit_asm_line(&mut self, line: &str) {
+        if !self.in_block {
+            self.out.push_str("\t__asm__(\n");
+            self.in_block = true;
+        }
+        let escaped = line
+            .replace('%', "%%")
+            .replace("%%0", "%0")
+            .replace("%%1", "%1")
+            .replace("%%2", "%2")
+            .replace("%%3", "%3");
+        self.out.push_str(&format!("\t\t\"{escaped}\\n\\t\"\n"));
+    }
+
+    fn finish_block(&mut self, _function_name: &str, include_out: bool) {
+        if !self.in_block {
+            return;
+        }
+
+        match self.asm_flavour {
+            InlineASM::X64 => {
+                if include_out {
+                    self.out.push_str(&format!(
+                        "\t\t:\n\t\t: \"r\"(Z), \"r\"({}), \"r\"(params), \"r\"(out)\n\t\t: \"memory\", \"xmm0\", \"xmm1\", \"xmm2\", \"xmm3\", \"xmm4\", \"xmm5\", \"xmm6\", \"xmm7\", \"xmm8\", \"xmm9\", \"xmm10\", \"xmm11\", \"xmm12\", \"xmm13\", \"xmm14\", \"xmm15\");\n",
+                        self.constants_name
+                    ));
+                } else {
+                    self.out.push_str(&format!(
+                        "\t\t:\n\t\t: \"r\"(Z), \"r\"({}), \"r\"(params)\n\t\t: \"memory\", \"xmm0\", \"xmm1\", \"xmm2\", \"xmm3\", \"xmm4\", \"xmm5\", \"xmm6\", \"xmm7\", \"xmm8\", \"xmm9\", \"xmm10\", \"xmm11\", \"xmm12\", \"xmm13\", \"xmm14\", \"xmm15\");\n",
+                        self.constants_name
+                    ));
+                }
+            }
+            InlineASM::AVX2 => {
+                if include_out {
+                    self.out.push_str(&format!(
+                        "\t\t:\n\t\t: \"r\"(Z), \"r\"({}), \"r\"(params), \"r\"(out)\n\t\t: \"memory\", \"ymm0\", \"ymm1\", \"ymm2\", \"ymm3\", \"ymm4\", \"ymm5\", \"ymm6\", \"ymm7\", \"ymm8\", \"ymm9\", \"ymm10\", \"ymm11\", \"ymm12\", \"ymm13\", \"ymm14\", \"ymm15\");\n",
+                        self.constants_name
+                    ));
+                } else {
+                    self.out.push_str(&format!(
+                        "\t\t:\n\t\t: \"r\"(Z), \"r\"({}), \"r\"(params)\n\t\t: \"memory\", \"ymm0\", \"ymm1\", \"ymm2\", \"ymm3\", \"ymm4\", \"ymm5\", \"ymm6\", \"ymm7\", \"ymm8\", \"ymm9\", \"ymm10\", \"ymm11\", \"ymm12\", \"ymm13\", \"ymm14\", \"ymm15\");\n",
+                        self.constants_name
+                    ));
+                }
+            }
+            InlineASM::AArch64 => {
+                if include_out {
+                    self.out.push_str(&format!(
+                        "\t\t:\n\t\t: \"r\"(Z), \"r\"({}), \"r\"(params), \"r\"(out)\n\t\t: \"memory\", \"x8\", \"d0\", \"d1\", \"d2\", \"d3\", \"d4\", \"d5\", \"d6\", \"d7\", \"d8\", \"d9\", \"d10\", \"d11\", \"d12\", \"d13\", \"d14\", \"d15\", \"d16\", \"d17\", \"d18\", \"d19\", \"d20\", \"d21\", \"d22\", \"d23\", \"d24\", \"d25\", \"d26\", \"d27\", \"d28\", \"d29\", \"d30\", \"d31\");\n",
+                        self.constants_name
+                    ));
+                } else {
+                    self.out.push_str(&format!(
+                        "\t\t:\n\t\t: \"r\"(Z), \"r\"({}), \"r\"(params)\n\t\t: \"memory\", \"x8\", \"d0\", \"d1\", \"d2\", \"d3\", \"d4\", \"d5\", \"d6\", \"d7\", \"d8\", \"d9\", \"d10\", \"d11\", \"d12\", \"d13\", \"d14\", \"d15\", \"d16\", \"d17\", \"d18\", \"d19\", \"d20\", \"d21\", \"d22\", \"d23\", \"d24\", \"d25\", \"d26\", \"d27\", \"d28\", \"d29\", \"d30\", \"d31\");\n",
+                        self.constants_name
+                    ));
+                }
+            }
+            InlineASM::None => unreachable!(),
+        }
+
+        self.in_block = false;
+    }
+}
+
+impl AsmBlockBackend for DoubleAsmBlockBuilder {
+    fn kind(&self) -> AsmBackendKind {
+        AsmBackendKind::Split
+    }
+
+    fn asm_flavour(&self) -> InlineASM {
+        self.asm_flavour
+    }
+
+    fn emit_wrapper(&mut self, line: &str) {
+        DoubleAsmBlockBuilder::emit_wrapper(self, line);
+    }
+
+    fn emit_asm_line(&mut self, line: &str) {
+        DoubleAsmBlockBuilder::emit_asm_line(self, line);
+    }
+
+    fn finish_block(&mut self, function_name: &str, _include_out: bool) {
+        DoubleAsmBlockBuilder::finish_block(self, function_name);
+    }
+}
+
 impl<T: ExportNumber + SingleFloat> ExpressionEvaluator<T> {
+    fn parse_f64_constant(encoded: &str) -> f64 {
+        encoded
+            .parse::<f64>()
+            .unwrap_or_else(|_| panic!("Failed to serialize constant {encoded} as f64"))
+    }
+
+    fn parse_complex_f64_constant(encoded: &str) -> (f64, f64) {
+        let mut parts = encoded.split(',').map(|x| x.trim());
+        let re = parts
+            .next()
+            .unwrap()
+            .parse::<f64>()
+            .unwrap_or_else(|_| panic!("Failed to serialize real part of {encoded} as f64"));
+        let im = parts
+            .next()
+            .map(|x| {
+                x.parse::<f64>().unwrap_or_else(|_| {
+                    panic!("Failed to serialize imaginary part of {encoded} as f64")
+                })
+            })
+            .unwrap_or(0.0);
+        assert!(
+            parts.next().is_none(),
+            "Failed to serialize constant {encoded} as Complex<f64>"
+        );
+        (re, im)
+    }
+
+    fn double_constants_blob(&self) -> Vec<u8> {
+        let mut blob = Vec::with_capacity(
+            (self.reserved_indices - self.param_count + 1) * std::mem::size_of::<f64>(),
+        );
+        for value in &self.stack[self.param_count..self.reserved_indices] {
+            let encoded = value.export();
+            let parsed = Self::parse_f64_constant(&encoded);
+            blob.extend_from_slice(&parsed.to_bits().to_le_bytes());
+        }
+        blob.extend_from_slice(&1f64.to_bits().to_le_bytes());
+        blob
+    }
+
+    fn complex_constants_blob(&self) -> Vec<u8> {
+        let mut blob = Vec::with_capacity(
+            (self.reserved_indices - self.param_count + 2) * 2 * std::mem::size_of::<f64>(),
+        );
+        for value in &self.stack[self.param_count..self.reserved_indices] {
+            let encoded = value.export();
+            let (re, im) = Self::parse_complex_f64_constant(&encoded);
+            blob.extend_from_slice(&re.to_bits().to_le_bytes());
+            blob.extend_from_slice(&im.to_bits().to_le_bytes());
+        }
+        blob.extend_from_slice(&0f64.to_bits().to_le_bytes());
+        blob.extend_from_slice(&(-0.0f64).to_bits().to_le_bytes());
+        blob.extend_from_slice(&1f64.to_bits().to_le_bytes());
+        blob.extend_from_slice(&0f64.to_bits().to_le_bytes());
+        blob
+    }
+
+    fn simd_double_constants_blob(&self) -> Vec<u8> {
+        let mut blob = Vec::with_capacity((self.reserved_indices - self.param_count + 1) * 32);
+        for value in &self.stack[self.param_count..self.reserved_indices] {
+            let encoded = value.export();
+            let parsed = Self::parse_f64_constant(&encoded);
+            for _ in 0..4 {
+                blob.extend_from_slice(&parsed.to_bits().to_le_bytes());
+            }
+        }
+        for _ in 0..4 {
+            blob.extend_from_slice(&1f64.to_bits().to_le_bytes());
+        }
+        blob
+    }
+
+    fn simd_complex_constants_blob(&self) -> Vec<u8> {
+        let mut blob = Vec::with_capacity((self.reserved_indices - self.param_count + 2) * 64);
+        for value in &self.stack[self.param_count..self.reserved_indices] {
+            let encoded = value.export();
+            let (re, im) = Self::parse_complex_f64_constant(&encoded);
+            for _ in 0..4 {
+                blob.extend_from_slice(&re.to_bits().to_le_bytes());
+            }
+            for _ in 0..4 {
+                blob.extend_from_slice(&im.to_bits().to_le_bytes());
+            }
+        }
+        for _ in 0..4 {
+            blob.extend_from_slice(&(-0.0f64).to_bits().to_le_bytes());
+        }
+        for _ in 0..4 {
+            blob.extend_from_slice(&0f64.to_bits().to_le_bytes());
+        }
+        for _ in 0..4 {
+            blob.extend_from_slice(&1f64.to_bits().to_le_bytes());
+        }
+        for _ in 0..4 {
+            blob.extend_from_slice(&0f64.to_bits().to_le_bytes());
+        }
+        blob
+    }
+
     /// Create a C++ code representation of the evaluation tree.
     /// The resulting source code can be compiled and loaded.
     ///
@@ -3325,9 +3788,175 @@ impl<T: ExportNumber + SingleFloat> ExpressionEvaluator<T> {
         function_name: &str,
         settings: ExportSettings,
     ) -> Result<ExportedCode<F>, std::io::Error> {
+        fn asm_sidecar_path(path: &Path, suffix: &str) -> Option<PathBuf> {
+            let stem = path.file_stem()?.to_string_lossy();
+            Some(path.with_file_name(format!("{stem}.{suffix}.s")))
+        }
+
+        fn asm_constants_blob_path(path: &Path, suffix: &str) -> Option<PathBuf> {
+            let stem = path.file_stem()?.to_string_lossy();
+            Some(path.with_file_name(format!("{stem}.{suffix}.bin")))
+        }
+
         let mut filename = path.as_ref().to_path_buf();
         if filename.extension().map(|x| x != ".cpp").unwrap_or(false) {
             filename.set_extension("cpp");
+        }
+
+        if settings.split_asm && settings.inline_asm != InlineASM::None {
+            let constructed_function_name = F::construct_function_name(function_name);
+            let split = if F::SUFFIX == f64::SUFFIX {
+                if !self.stack.iter().all(|x| x.is_real()) {
+                    return Err(std::io::Error::new(
+                        std::io::ErrorKind::InvalidInput,
+                        "Cannot create real evaluator with complex coefficients. Use Complex<f64>",
+                    ));
+                }
+
+                match settings.inline_asm {
+                    InlineASM::X64 | InlineASM::AArch64 => Some((
+                        asm_sidecar_path(&filename, "double_asm"),
+                        asm_constants_blob_path(&filename, "double_asm"),
+                        self.export_asm_real_split_str(
+                            &constructed_function_name,
+                            &settings,
+                            &asm_constants_blob_path(&filename, "double_asm").ok_or_else(|| {
+                                std::io::Error::new(
+                                    std::io::ErrorKind::InvalidInput,
+                                    format!(
+                                        "Cannot derive constants blob filename from {}",
+                                        filename.to_string_lossy()
+                                    ),
+                                )
+                            })?,
+                        ),
+                        self.double_constants_blob(),
+                    )),
+                    InlineASM::AVX2 | InlineASM::None => None,
+                }
+            } else if F::SUFFIX == Complex::<f64>::SUFFIX {
+                match settings.inline_asm {
+                    InlineASM::X64 | InlineASM::AArch64 => Some((
+                        asm_sidecar_path(&filename, "complex_asm"),
+                        asm_constants_blob_path(&filename, "complex_asm"),
+                        self.export_asm_complex_split_str(
+                            &constructed_function_name,
+                            &settings,
+                            &asm_constants_blob_path(&filename, "complex_asm").ok_or_else(
+                                || {
+                                    std::io::Error::new(
+                                        std::io::ErrorKind::InvalidInput,
+                                        format!(
+                                            "Cannot derive constants blob filename from {}",
+                                            filename.to_string_lossy()
+                                        ),
+                                    )
+                                },
+                            )?,
+                        ),
+                        self.complex_constants_blob(),
+                    )),
+                    InlineASM::AVX2 | InlineASM::None => None,
+                }
+            } else if F::SUFFIX == wide::f64x4::SUFFIX {
+                if !self.stack.iter().all(|x| x.is_real()) {
+                    return Err(std::io::Error::new(
+                        std::io::ErrorKind::InvalidInput,
+                        "Cannot create real evaluator with complex coefficients. Use Complex<f64>",
+                    ));
+                }
+
+                match settings.inline_asm {
+                    InlineASM::X64 | InlineASM::AVX2 => Some((
+                        asm_sidecar_path(&filename, "double_asm"),
+                        asm_constants_blob_path(&filename, "double_asm"),
+                        self.export_simd_split_str(
+                            &constructed_function_name,
+                            &settings,
+                            false,
+                            InlineASM::AVX2,
+                            &asm_constants_blob_path(&filename, "double_asm").ok_or_else(|| {
+                                std::io::Error::new(
+                                    std::io::ErrorKind::InvalidInput,
+                                    format!(
+                                        "Cannot derive constants blob filename from {}",
+                                        filename.to_string_lossy()
+                                    ),
+                                )
+                            })?,
+                        ),
+                        self.simd_double_constants_blob(),
+                    )),
+                    InlineASM::AArch64 | InlineASM::None => None,
+                }
+            } else if F::SUFFIX == Complex::<wide::f64x4>::SUFFIX {
+                match settings.inline_asm {
+                    InlineASM::X64 | InlineASM::AVX2 => Some((
+                        asm_sidecar_path(&filename, "complex_asm"),
+                        asm_constants_blob_path(&filename, "complex_asm"),
+                        self.export_simd_split_str(
+                            &constructed_function_name,
+                            &settings,
+                            true,
+                            InlineASM::AVX2,
+                            &asm_constants_blob_path(&filename, "complex_asm").ok_or_else(
+                                || {
+                                    std::io::Error::new(
+                                        std::io::ErrorKind::InvalidInput,
+                                        format!(
+                                            "Cannot derive constants blob filename from {}",
+                                            filename.to_string_lossy()
+                                        ),
+                                    )
+                                },
+                            )?,
+                        ),
+                        self.simd_complex_constants_blob(),
+                    )),
+                    InlineASM::AArch64 | InlineASM::None => None,
+                }
+            } else {
+                None
+            };
+
+            if let Some((sidecar, constants_blob, (wrapper, sidecar_source), blob)) = split {
+                let sidecar = sidecar.ok_or_else(|| {
+                    std::io::Error::new(
+                        std::io::ErrorKind::InvalidInput,
+                        format!(
+                            "Cannot derive sidecar assembly filename from {}",
+                            filename.to_string_lossy()
+                        ),
+                    )
+                })?;
+                let constants_blob = constants_blob.ok_or_else(|| {
+                    std::io::Error::new(
+                        std::io::ErrorKind::InvalidInput,
+                        format!(
+                            "Cannot derive constants blob filename from {}",
+                            filename.to_string_lossy()
+                        ),
+                    )
+                })?;
+                let mut source_code = format!(
+                    "// Auto-generated with Symbolica {}\n// Default build instructions: {} {} {}\n\n",
+                    env!("CARGO_PKG_VERSION"),
+                    F::get_default_compile_options().to_string(),
+                    filename.to_string_lossy(),
+                    sidecar.to_string_lossy(),
+                );
+                source_code += &wrapper;
+
+                std::fs::write(&filename, source_code)?;
+                std::fs::write(&sidecar, sidecar_source)?;
+                std::fs::write(&constants_blob, blob)?;
+
+                return Ok(ExportedCode::<F> {
+                    path: filename,
+                    function_name: function_name.to_string(),
+                    _phantom: std::marker::PhantomData,
+                });
+            }
         }
 
         let mut source_code = format!(
@@ -3420,9 +4049,19 @@ impl<T: ExportNumber + SingleFloat> ExpressionEvaluator<T> {
                 );
 
                 if complex {
-                    self.export_asm_complex_impl(&self.instructions, function_name, asm, &mut res);
+                    let mut builder = InlineAsmBlockBuilder::new(
+                        asm,
+                        format!("{function_name}_CONSTANTS_complex"),
+                        &mut res,
+                    );
+                    self.export_asm_complex_impl(&self.instructions, function_name, &mut builder);
                 } else {
-                    self.export_asm_double_impl(&self.instructions, function_name, asm, &mut res);
+                    let mut builder = InlineAsmBlockBuilder::new(
+                        asm,
+                        format!("{function_name}_CONSTANTS_double"),
+                        &mut res,
+                    );
+                    self.export_asm_real_impl(&self.instructions, function_name, &mut builder);
                 }
 
                 res += "\treturn;\n}\n";
@@ -3438,6 +4077,90 @@ impl<T: ExportNumber + SingleFloat> ExpressionEvaluator<T> {
         }
 
         res
+    }
+
+    pub fn export_simd_split_str(
+        &self,
+        function_name: &str,
+        settings: &ExportSettings,
+        complex: bool,
+        asm: InlineASM,
+        constants_blob_path: &Path,
+    ) -> (String, String) {
+        let mut wrapper = self.export_get_buffer_len_str(function_name);
+        if settings.include_header {
+            wrapper += "#include \"xsimd/xsimd.hpp\"\n";
+        }
+
+        if let Some(header) = &settings.custom_header {
+            wrapper += header;
+            wrapper += "\n";
+        }
+
+        if complex {
+            wrapper += "#include <complex>\n";
+            wrapper += "using simd = xsimd::batch<std::complex<double>, xsimd::best_arch>;\n";
+        } else {
+            wrapper += "using simd = xsimd::batch<double, xsimd::best_arch>;\n";
+        }
+
+        match asm {
+            InlineASM::AVX2 => {
+                let constants_name = if complex {
+                    format!("{function_name}_CONSTANTS_complex")
+                } else {
+                    format!("{function_name}_CONSTANTS_double")
+                };
+
+                if complex {
+                    wrapper += &format!(
+                        "extern \"C\" const simd {}[{}];\n\n",
+                        constants_name,
+                        self.reserved_indices - self.param_count + 2,
+                    );
+                } else {
+                    wrapper += &format!(
+                        "extern \"C\" const simd {}[{}];\n\n",
+                        constants_name,
+                        self.reserved_indices - self.param_count + 1,
+                    );
+                }
+                let mut builder = DoubleAsmBlockBuilder::new(
+                    InlineASM::AVX2,
+                    "simd *params, const simd *constants, simd *Z, simd *out".to_string(),
+                    constants_name.clone(),
+                );
+                if complex {
+                    self.export_asm_complex_impl(&self.instructions, function_name, &mut builder);
+                } else {
+                    self.export_asm_real_impl(&self.instructions, function_name, &mut builder);
+                }
+                let (declarations, wrapper_body, asm_body) = builder.finish();
+
+                wrapper += &declarations;
+                wrapper += "\n";
+                wrapper += &format!(
+                    "extern \"C\" void {function_name}(simd *params, simd *Z, simd *out) {{\n"
+                );
+                wrapper += &wrapper_body;
+                wrapper += "\treturn;\n}\n";
+
+                (
+                    wrapper,
+                    format!(
+                        "{}.text\n{}",
+                        DoubleAsmBlockBuilder::incbin_prefix(
+                            &constants_name,
+                            constants_blob_path,
+                            5,
+                        ),
+                        asm_body.trim_start_matches(".text\n")
+                    ),
+                )
+            }
+            InlineASM::None => unreachable!(),
+            _ => panic!("Bad inline ASM option: {:?}", asm),
+        }
     }
 
     pub fn export_cuda_str(
@@ -3844,6 +4567,14 @@ extern "C" {{
         }
     }
 
+    fn export_get_buffer_len_str(&self, function_name: &str) -> String {
+        format!(
+            "extern \"C\" unsigned long {}_get_buffer_len()\n{{\n\treturn {};\n}}\n\n",
+            function_name,
+            self.stack.len()
+        )
+    }
+
     fn export_asm_real_str(&self, function_name: &str, settings: &ExportSettings) -> String {
         let mut res = String::new();
         if settings.include_header {
@@ -3855,11 +4586,7 @@ extern "C" {{
             res += "\n";
         }
 
-        res += &format!(
-            "extern \"C\" unsigned long {}_get_buffer_len()\n{{\n\treturn {};\n}}\n\n",
-            function_name,
-            self.stack.len()
-        );
+        res += &self.export_get_buffer_len_str(function_name);
 
         if self.stack.iter().all(|x| x.is_real()) {
             res += &format!(
@@ -3879,12 +4606,12 @@ extern "C" {{
                 "extern \"C\" void {function_name}(const double *params, double* Z, double *out)\n{{\n"
             );
 
-            self.export_asm_double_impl(
-                &self.instructions,
-                function_name,
+            let mut builder = InlineAsmBlockBuilder::new(
                 settings.inline_asm,
+                format!("{function_name}_CONSTANTS_double"),
                 &mut res,
             );
+            self.export_asm_real_impl(&self.instructions, function_name, &mut builder);
 
             res += "\treturn;\n}\n";
         } else {
@@ -3895,58 +4622,75 @@ extern "C" {{
         res
     }
 
-    fn export_asm_complex_str(&self, function_name: &str, settings: &ExportSettings) -> String {
+    fn export_asm_real_split_str(
+        &self,
+        function_name: &str,
+        settings: &ExportSettings,
+        constants_blob_path: &Path,
+    ) -> (String, String) {
+        let mut wrapper = String::new();
         let mut res = String::new();
         if settings.include_header {
-            res += "#include <iostream>\n#include <complex>\n#include <cmath>\n\n";
+            wrapper += "#include <iostream>\n#include <cmath>\n\n#include <complex>\n";
         };
 
         if let Some(header) = &settings.custom_header {
-            res += header;
+            wrapper += header;
+            wrapper += "\n";
+        }
+        wrapper += &self.export_get_buffer_len_str(function_name);
+
+        if self.stack.iter().all(|x| x.is_real()) {
+            res += &format!(
+                "extern \"C\" const double {}_CONSTANTS_double[{}];\n\n",
+                function_name,
+                self.reserved_indices - self.param_count + 1,
+            );
+
+            let mut builder = DoubleAsmBlockBuilder::new(
+                settings.inline_asm,
+                "const double *params, const double *constants, double *Z, double *out".to_string(),
+                format!("{function_name}_CONSTANTS_double"),
+            );
+            self.export_asm_real_impl(&self.instructions, function_name, &mut builder);
+            let (declarations, wrapper_body, asm) = builder.finish();
+            res += &declarations;
             res += "\n";
+            wrapper += &res;
+            wrapper += &format!(
+                "extern \"C\" void {function_name}(const double *params, double* Z, double *out)\n{{\n"
+            );
+            wrapper += &wrapper_body;
+            wrapper += "\treturn;\n}\n";
+            return (
+                wrapper,
+                format!(
+                    "{}.text\n{}",
+                    DoubleAsmBlockBuilder::incbin_prefix(
+                        &format!("{function_name}_CONSTANTS_double"),
+                        constants_blob_path,
+                        4,
+                    ),
+                    asm.trim_start_matches(".text\n")
+                ),
+            );
+        } else {
+            res += &format!(
+                "extern \"C\" void {function_name}(const double *params, double* Z, double *out)\n{{\n\tstd::cout << \"Cannot evaluate complex function with doubles\" << std::endl;\n\treturn; \n}}",
+            );
         }
 
-        res += &format!(
-            "extern \"C\" unsigned long {}_get_buffer_len()\n{{\n\treturn {};\n}}\n\n",
-            function_name,
-            self.stack.len()
-        );
-
-        res += &format!(
-            "static const std::complex<double> {}_CONSTANTS_complex[{}] = {{{}}};\n\n",
-            function_name,
-            self.reserved_indices - self.param_count + 2,
-            {
-                let mut nums = (self.param_count..self.reserved_indices)
-                    .map(|i| format!("std::complex<double>({})", self.stack[i].export()))
-                    .collect::<Vec<_>>();
-                nums.push("std::complex<double>(0, -0.)".to_string()); // used for complex inversion
-                nums.push("1".to_string()); // used for real inversion
-                nums.join(",")
-            }
-        );
-
-        res += &format!(
-            "extern \"C\" void {function_name}(const std::complex<double> *params, std::complex<double> *Z, std::complex<double> *out)\n{{\n"
-        );
-
-        self.export_asm_complex_impl(
-            &self.instructions,
-            function_name,
-            settings.inline_asm,
-            &mut res,
-        );
-
-        res + "\treturn;\n}\n\n"
+        wrapper += &res;
+        (wrapper, String::new())
     }
 
-    fn export_asm_double_impl(
+    fn export_asm_real_impl<B: AsmBlockBackend>(
         &self,
         instr: &[(Instr, ComplexPhase)],
         function_name: &str,
-        asm_flavour: InlineASM,
-        out: &mut String,
-    ) -> bool {
+        out: &mut B,
+    ) {
+        let asm_flavour = out.asm_flavour();
         let mut second_index = 0;
 
         macro_rules! get_input {
@@ -3960,7 +4704,6 @@ extern "C" {{
                         $i - self.param_count
                     )
                 } else {
-                    // TODO: subtract reserved indices
                     format!("Z[{}]", $i)
                 }
             };
@@ -3968,107 +4711,176 @@ extern "C" {{
 
         macro_rules! asm_load {
             ($i:expr) => {
+                if $i < self.param_count {
+                    out.scalar_addr(
+                        AsmRegion::Params,
+                        $i * if asm_flavour == InlineASM::AVX2 {
+                            32
+                        } else {
+                            8
+                        },
+                        &mut second_index,
+                        false,
+                    )
+                } else if $i < self.reserved_indices {
+                    out.scalar_addr(
+                        AsmRegion::Constants,
+                        ($i - self.param_count)
+                            * if asm_flavour == InlineASM::AVX2 {
+                                32
+                            } else {
+                                8
+                            },
+                        &mut second_index,
+                        false,
+                    )
+                } else {
+                    out.scalar_addr(
+                        AsmRegion::Buffer,
+                        $i * if asm_flavour == InlineASM::AVX2 {
+                            32
+                        } else {
+                            8
+                        },
+                        &mut second_index,
+                        true,
+                    )
+                }
+            };
+        }
+
+        macro_rules! asm_constants_addr {
+            ($offset:expr) => {
+                out.scalar_addr(AsmRegion::Constants, $offset, &mut second_index, false)
+            };
+        }
+
+        macro_rules! emit_reg_binary {
+            ($oper:expr, $dst:expr, $src:expr) => {
                 match asm_flavour {
                     InlineASM::X64 => {
-                        if $i < self.param_count {
-                            format!("{}(%2)", $i * 8)
-                        } else if $i < self.reserved_indices {
-                            format!("{}(%1)", ($i - self.param_count) * 8)
-                        } else {
-                            // TODO: subtract reserved indices
-                            format!("{}(%0)", $i * 8)
-                        }
+                        out.emit_asm_line(&format!("{}sd %xmm{}, %xmm{}", $oper, $src, $dst));
                     }
                     InlineASM::AVX2 => {
-                        if $i < self.param_count {
-                            format!("{}(%2)", $i * 32)
-                        } else if $i < self.reserved_indices {
-                            format!("{}(%1)", ($i - self.param_count) * 32)
-                        } else {
-                            // TODO: subtract reserved indices
-                            format!("{}(%0)", $i * 32)
-                        }
+                        out.emit_asm_line(&format!(
+                            "v{}pd %ymm{}, %ymm{}, %ymm{}",
+                            $oper, $src, $dst, $dst
+                        ));
                     }
                     InlineASM::AArch64 => {
-                        if $i < self.param_count {
-                            let dest = $i * 8;
-
-                            if dest > 32760 {
-                                // maximum allowed shift is 12 bits
-                                let d = dest.ilog2();
-                                let shift = d.min(12);
-                                let coeff = dest / (1 << shift);
-                                let rest = dest - (coeff << shift);
-                                second_index = 0;
-                                *out += &format!(
-                                    "\t\t\"add x8, %2, {}, lsl {}\\n\\t\"\n",
-                                    coeff, shift
-                                );
-                                format!("[x8, {}]", rest)
-                            } else {
-                                format!("[%2, {}]", dest)
-                            }
-                        } else if $i < self.reserved_indices {
-                            let dest = ($i - self.param_count) * 8;
-                            if dest > 32760 {
-                                let d = dest.ilog2();
-                                let shift = d.min(12);
-                                let coeff = dest / (1 << shift);
-                                let rest = dest - (coeff << shift);
-                                second_index = 0;
-                                *out += &format!(
-                                    "\t\t\"add x8, %1, {}, lsl {}\\n\\t\"\n",
-                                    coeff, shift
-                                );
-                                format!("[x8, {}]", rest)
-                            } else {
-                                format!("[%1, {}]", dest)
-                            }
-                        } else {
-                            // TODO: subtract reserved indices
-                            let dest = $i * 8;
-                            if dest > 32760 && (dest < second_index || dest > 32760 + second_index)
-                            {
-                                let d = dest.ilog2();
-                                let shift = d.min(12);
-                                let coeff = dest / (1 << shift);
-                                second_index = coeff << shift;
-                                let rest = dest - second_index;
-                                *out += &format!(
-                                    "\t\t\"add x8, %0, {}, lsl {}\\n\\t\"\n",
-                                    coeff, shift
-                                );
-                                format!("[x8, {}]", rest)
-                            } else if dest <= 32760 {
-                                format!("[%0, {}]", dest)
-                            } else {
-                                let offset = dest - second_index;
-                                format!("[x8, {}]", offset)
-                            }
-                        }
+                        out.emit_asm_line(&format!("f{} d{}, d{}, d{}", $oper, $dst, $src, $dst));
                     }
                     InlineASM::None => unreachable!(),
                 }
             };
         }
 
-        macro_rules! end_asm_block {
-            ($in_block: expr) => {
-                if $in_block {
-                    match asm_flavour {
-                        InlineASM::X64 => {
-                            *out += &format!("\t\t:\n\t\t: \"r\"(Z), \"r\"({}_CONSTANTS_double), \"r\"(params)\n\t\t: \"memory\", \"xmm0\", \"xmm1\", \"xmm2\", \"xmm3\", \"xmm4\", \"xmm5\", \"xmm6\", \"xmm7\", \"xmm8\", \"xmm9\", \"xmm10\", \"xmm11\", \"xmm12\", \"xmm13\", \"xmm14\", \"xmm15\");\n",  function_name);
-                        }
-                        InlineASM::AVX2 => {
-                            *out += &format!("\t\t:\n\t\t: \"r\"(Z), \"r\"({}_CONSTANTS_double), \"r\"(params)\n\t\t: \"memory\", \"ymm0\", \"ymm1\", \"ymm2\", \"ymm3\", \"ymm4\", \"ymm5\", \"ymm6\", \"ymm7\", \"ymm8\", \"ymm9\", \"ymm10\", \"ymm11\", \"ymm12\", \"ymm13\", \"ymm14\", \"ymm15\");\n",  function_name);
-                        }
-                        InlineASM::AArch64 => {
-                            *out += &format!("\t\t:\n\t\t: \"r\"(Z), \"r\"({}_CONSTANTS_double), \"r\"(params)\n\t\t: \"memory\", \"x8\", \"d0\", \"d1\", \"d2\", \"d3\", \"d4\", \"d5\", \"d6\", \"d7\", \"d8\", \"d9\", \"d10\", \"d11\", \"d12\", \"d13\", \"d14\", \"d15\", \"d16\", \"d17\", \"d18\", \"d19\", \"d20\", \"d21\", \"d22\", \"d23\", \"d24\", \"d25\", \"d26\", \"d27\", \"d28\", \"d29\", \"d30\", \"d31\");\n",  function_name);
-                            #[allow(unused_assignments)] { second_index = 0;}; // the second index in x8 will be lost after the block, so reset it
-                        }
-                        InlineASM::None => unreachable!(),
+        macro_rules! emit_mem_binary {
+            ($oper:expr, $dst:expr, $addr:expr) => {
+                match asm_flavour {
+                    InlineASM::X64 => {
+                        out.emit_asm_line(&format!("{}sd {}, %xmm{}", $oper, $addr, $dst));
                     }
-                    $in_block = false;
+                    InlineASM::AVX2 => {
+                        out.emit_asm_line(&format!(
+                            "v{}pd {}, %ymm{}, %ymm{}",
+                            $oper, $addr, $dst, $dst
+                        ));
+                    }
+                    InlineASM::AArch64 => {
+                        out.emit_asm_line(&format!("ldr d31, {}", $addr));
+                        out.emit_asm_line(&format!("f{} d{}, d31, d{}", $oper, $dst, $dst));
+                    }
+                    InlineASM::None => unreachable!(),
+                }
+            };
+        }
+
+        macro_rules! emit_copy_reg {
+            ($dst:expr, $src:expr) => {
+                match asm_flavour {
+                    InlineASM::X64 => {
+                        out.emit_asm_line(&format!("movapd %xmm{}, %xmm{}", $src, $dst));
+                    }
+                    InlineASM::AVX2 => {
+                        out.emit_asm_line(&format!("vmovapd %ymm{}, %ymm{}", $src, $dst));
+                    }
+                    InlineASM::AArch64 => {
+                        out.emit_asm_line(&format!("fmov d{}, d{}", $dst, $src));
+                    }
+                    InlineASM::None => unreachable!(),
+                }
+            };
+        }
+
+        macro_rules! emit_load_reg {
+            ($dst:expr, $addr:expr) => {
+                match asm_flavour {
+                    InlineASM::X64 => {
+                        out.emit_asm_line(&format!("movsd {}, %xmm{}", $addr, $dst));
+                    }
+                    InlineASM::AVX2 => {
+                        out.emit_asm_line(&format!("vmovapd {}, %ymm{}", $addr, $dst));
+                    }
+                    InlineASM::AArch64 => {
+                        out.emit_asm_line(&format!("ldr d{}, {}", $dst, $addr));
+                    }
+                    InlineASM::None => unreachable!(),
+                }
+            };
+        }
+
+        macro_rules! emit_store_reg {
+            ($src:expr, $addr:expr) => {
+                match asm_flavour {
+                    InlineASM::X64 => {
+                        out.emit_asm_line(&format!("movsd %xmm{}, {}", $src, $addr));
+                    }
+                    InlineASM::AVX2 => {
+                        out.emit_asm_line(&format!("vmovupd %ymm{}, {}", $src, $addr));
+                    }
+                    InlineASM::AArch64 => {
+                        out.emit_asm_line(&format!("str d{}, {}", $src, $addr));
+                    }
+                    InlineASM::None => unreachable!(),
+                }
+            };
+        }
+
+        macro_rules! emit_div_reg {
+            ($dst:expr, $src:expr) => {
+                match asm_flavour {
+                    InlineASM::X64 => {
+                        out.emit_asm_line(&format!("divsd %xmm{}, %xmm{}", $src, $dst));
+                    }
+                    InlineASM::AVX2 => {
+                        out.emit_asm_line(&format!(
+                            "vdivpd %ymm{}, %ymm{}, %ymm{}",
+                            $src, $dst, $dst
+                        ));
+                    }
+                    InlineASM::AArch64 => {
+                        out.emit_asm_line(&format!("fdiv d{}, d{}, d{}", $dst, $dst, $src));
+                    }
+                    InlineASM::None => unreachable!(),
+                }
+            };
+        }
+
+        macro_rules! emit_div_mem {
+            ($dst:expr, $addr:expr) => {
+                match asm_flavour {
+                    InlineASM::X64 => {
+                        out.emit_asm_line(&format!("divsd {}, %xmm{}", $addr, $dst));
+                    }
+                    InlineASM::AVX2 => {
+                        out.emit_asm_line(&format!("vdivpd {}, %ymm{}, %ymm{}", $addr, $dst, $dst));
+                    }
+                    InlineASM::AArch64 => {
+                        out.emit_asm_line(&format!("ldr d31, {}", $addr));
+                        out.emit_asm_line(&format!("fdiv d{}, d{}, d31", $dst, $dst));
+                    }
+                    InlineASM::None => unreachable!(),
                 }
             };
         }
@@ -4135,6 +4947,7 @@ extern "C" {{
             }
         }
 
+        #[allow(dead_code)]
         #[derive(Debug, Clone, Copy, PartialEq, Eq)]
         enum MemOrReg {
             Mem(usize),
@@ -4182,7 +4995,6 @@ extern "C" {{
             })
             .collect();
 
-        // sort the list of instructions based on the distance
         let mut reg_list = reg_last_use.iter().enumerate().collect::<Vec<_>>();
         reg_list.sort_by_key(|x| (*x.1 - x.0, x.0));
 
@@ -4204,9 +5016,7 @@ extern "C" {{
                 continue;
             };
 
-            // find free registers in the range
-            // start at j+1 as we can recycle registers that are last used in iteration j
-            let mut free_regs = u16::MAX & !(1 << 15); // leave xmmm15 open
+            let mut free_regs = u16::MAX & !(1 << 15);
 
             for k in &new_instr[j + 1..=*last_use] {
                 match k {
@@ -4215,9 +5025,8 @@ extern "C" {{
                     | RegInstr::Pow(_, f, _, -1) => {
                         free_regs &= f;
                     }
-
                     _ => {
-                        free_regs = 0; // the current instruction is not allowed to be used outside of ASM blocks
+                        free_regs = 0;
                     }
                 }
 
@@ -4236,7 +5045,7 @@ extern "C" {{
                 for l in &mut new_instr[j + 1..=*last_use] {
                     match l {
                         RegInstr::Add(_, f, a) | RegInstr::Mul(_, f, a) => {
-                            *f &= !(1 << k); // FIXME: do not set on last use?
+                            *f &= !(1 << k);
                             for x in a {
                                 if *x == MemOrReg::Mem(old_reg) {
                                     *x = MemOrReg::Reg(k);
@@ -4244,19 +5053,14 @@ extern "C" {{
                             }
                         }
                         RegInstr::Pow(_, f, a, -1) => {
-                            *f &= !(1 << k); // FIXME: do not set on last use?
+                            *f &= !(1 << k);
                             if *a == MemOrReg::Mem(old_reg) {
                                 *a = MemOrReg::Reg(k);
                             }
                         }
-                        RegInstr::Pow(_, _, _, _) => {
-                            panic!("use outside of ASM block");
-                        }
+                        RegInstr::Pow(_, _, _, _) => panic!("use outside of ASM block"),
                         RegInstr::Powf(_, a, b) => {
-                            if *a == old_reg {
-                                panic!("use outside of ASM block");
-                            }
-                            if *b == old_reg {
+                            if *a == old_reg || *b == old_reg {
                                 panic!("use outside of ASM block");
                             }
                         }
@@ -4275,8 +5079,7 @@ extern "C" {{
                                 panic!("use outside of ASM block");
                             }
                         }
-                        RegInstr::Label(_) => {}
-                        RegInstr::Goto => {}
+                        RegInstr::Label(_) | RegInstr::Goto => {}
                         RegInstr::Join(_, c, a, b) => {
                             if *c == old_reg || *a == old_reg || *b == old_reg {
                                 panic!("use outside of ASM block");
@@ -4284,9 +5087,6 @@ extern "C" {{
                         }
                     }
                 }
-
-                // TODO: if last use is not already set to a register, we can set it to the current one
-                // this prevents a copy
             }
         }
 
@@ -4300,16 +5100,14 @@ extern "C" {{
             }
 
             match ins {
-                Instr::IfElse(_, label) => {
-                    label_stack.push((*label, None));
-                }
+                Instr::IfElse(_, label) => label_stack.push((*label, None)),
                 Instr::Goto(l) => {
                     if let Some(last) = label_stack.last_mut() {
                         last.1 = Some(*l);
                     }
                 }
                 Instr::Join(o, _, a, b) => {
-                    in_join_section = true; // could be more than one join if vectorized
+                    in_join_section = true;
 
                     if let Some((label, label_2)) = label_stack.last() {
                         label_join_info
@@ -4324,22 +5122,14 @@ extern "C" {{
                         unreachable!("Goto without matching IfElse");
                     }
                 }
-                _ => {
-                    in_join_section = false;
-                }
+                _ => in_join_section = false,
             }
         }
 
-        let mut in_asm_block = false;
         let mut next_label_is_true_branch_end = false;
         for ins in &new_instr {
             match ins {
                 RegInstr::Add(o, free, a) | RegInstr::Mul(o, free, a) => {
-                    if !in_asm_block {
-                        *out += "\t__asm__(\n";
-                        in_asm_block = true;
-                    }
-
                     let oper = if matches!(ins, RegInstr::Add(_, _, _)) {
                         "add"
                     } else {
@@ -4349,54 +5139,17 @@ extern "C" {{
                     match o {
                         MemOrReg::Reg(out_reg) => {
                             if let Some(j) = a.iter().find(|x| **x == MemOrReg::Reg(*out_reg)) {
-                                // we can recycle the register completely
                                 let mut first_skipped = false;
                                 for i in a {
                                     if first_skipped || i != j {
                                         match i {
-                                            MemOrReg::Reg(k) => match asm_flavour {
-                                                InlineASM::X64 => {
-                                                    *out += &format!(
-                                                        "\t\t\"{oper}sd %%xmm{k}, %%xmm{out_reg}\\n\\t\"\n",
-                                                    );
-                                                }
-                                                InlineASM::AVX2 => {
-                                                    *out += &format!(
-                                                        "\t\t\"v{oper}pd %%ymm{k}, %%ymm{out_reg}, %%ymm{out_reg}\\n\\t\"\n",
-                                                    );
-                                                }
-                                                InlineASM::AArch64 => {
-                                                    *out += &format!(
-                                                        "\t\t\"f{oper} d{out_reg}, d{k}, d{out_reg}\\n\\t\"\n",
-                                                    );
-                                                }
-                                                InlineASM::None => unreachable!(),
-                                            },
-                                            MemOrReg::Mem(k) => match asm_flavour {
-                                                InlineASM::X64 => {
-                                                    let addr = asm_load!(*k);
-                                                    *out += &format!(
-                                                        "\t\t\"{oper}sd {addr}, %%xmm{out_reg}\\n\\t\"\n"
-                                                    );
-                                                }
-                                                InlineASM::AVX2 => {
-                                                    let addr = asm_load!(*k);
-                                                    *out += &format!(
-                                                        "\t\t\"v{oper}pd {addr}, %%ymm{out_reg}, %%ymm{out_reg}\\n\\t\"\n"
-                                                    );
-                                                }
-                                                InlineASM::AArch64 => {
-                                                    let addr = asm_load!(*k);
-                                                    *out += &format!(
-                                                        "\t\t\"ldr d31, {addr}\\n\\t\"\n",
-                                                    );
-
-                                                    *out += &format!(
-                                                        "\t\t\"f{oper} d{out_reg}, d31, d{out_reg}\\n\\t\"\n"
-                                                    );
-                                                }
-                                                InlineASM::None => unreachable!(),
-                                            },
+                                            MemOrReg::Reg(k) => {
+                                                emit_reg_binary!(oper, *out_reg, *k)
+                                            }
+                                            MemOrReg::Mem(k) => {
+                                                let addr = asm_load!(*k);
+                                                emit_mem_binary!(oper, *out_reg, addr);
+                                            }
                                         }
                                     }
                                     first_skipped |= i == j;
@@ -4404,201 +5157,57 @@ extern "C" {{
                             } else if let Some(MemOrReg::Reg(j)) =
                                 a.iter().find(|x| matches!(x, MemOrReg::Reg(_)))
                             {
-                                match asm_flavour {
-                                    InlineASM::X64 => {
-                                        *out += &format!(
-                                            "\t\t\"movapd %%xmm{j}, %%xmm{out_reg}\\n\\t\"\n"
-                                        );
-                                    }
-                                    InlineASM::AVX2 => {
-                                        *out += &format!(
-                                            "\t\t\"vmovapd %%ymm{j}, %%ymm{out_reg}\\n\\t\"\n"
-                                        );
-                                    }
-                                    InlineASM::AArch64 => {
-                                        *out += &format!("\t\t\"fmov d{out_reg}, d{j}\\n\\t\"\n");
-                                    }
-                                    InlineASM::None => unreachable!(),
-                                }
+                                emit_copy_reg!(*out_reg, *j);
 
                                 let mut first_skipped = false;
                                 for i in a {
                                     if first_skipped || *i != MemOrReg::Reg(*j) {
                                         match i {
-                                            MemOrReg::Reg(k) => match asm_flavour {
-                                                InlineASM::X64 => {
-                                                    *out += &format!(
-                                                        "\t\t\"{oper}sd %%xmm{k}, %%xmm{out_reg}\\n\\t\"\n",
-                                                    );
-                                                }
-                                                InlineASM::AVX2 => {
-                                                    *out += &format!(
-                                                        "\t\t\"v{oper}pd %%ymm{k}, %%ymm{out_reg}, %%ymm{out_reg}\\n\\t\"\n",
-                                                    );
-                                                }
-                                                InlineASM::AArch64 => {
-                                                    *out += &format!(
-                                                        "\t\t\"f{oper} d{out_reg}, d{k}, d{out_reg}\\n\\t\"\n",
-                                                    );
-                                                }
-                                                InlineASM::None => unreachable!(),
-                                            },
-                                            MemOrReg::Mem(k) => match asm_flavour {
-                                                InlineASM::X64 => {
-                                                    let addr = asm_load!(*k);
-                                                    *out += &format!(
-                                                        "\t\t\"{oper}sd {addr}, %%xmm{out_reg}\\n\\t\"\n"
-                                                    );
-                                                }
-                                                InlineASM::AVX2 => {
-                                                    let addr = asm_load!(*k);
-                                                    *out += &format!(
-                                                        "\t\t\"v{oper}pd {addr}, %%ymm{out_reg}, %%ymm{out_reg}\\n\\t\"\n"
-                                                    );
-                                                }
-                                                InlineASM::AArch64 => {
-                                                    let addr = asm_load!(*k);
-                                                    *out += &format!(
-                                                        "\t\t\"ldr d31, {addr}\\n\\t\"\n",
-                                                    );
-
-                                                    *out += &format!(
-                                                        "\t\t\"f{oper} d{out_reg}, d31, d{out_reg}\\n\\t\"\n"
-                                                    );
-                                                }
-                                                InlineASM::None => unreachable!(),
-                                            },
+                                            MemOrReg::Reg(k) => {
+                                                emit_reg_binary!(oper, *out_reg, *k)
+                                            }
+                                            MemOrReg::Mem(k) => {
+                                                let addr = asm_load!(*k);
+                                                emit_mem_binary!(oper, *out_reg, addr);
+                                            }
                                         }
                                     }
                                     first_skipped |= *i == MemOrReg::Reg(*j);
                                 }
                             } else {
                                 if let MemOrReg::Mem(k) = &a[0] {
-                                    match asm_flavour {
-                                        InlineASM::X64 => {
-                                            let addr = asm_load!(*k);
-                                            *out += &format!(
-                                                "\t\t\"movsd {addr}, %%xmm{out_reg}\\n\\t\"\n"
-                                            );
-                                        }
-                                        InlineASM::AVX2 => {
-                                            let addr = asm_load!(*k);
-                                            *out += &format!(
-                                                "\t\t\"vmovapd {addr}, %%ymm{out_reg}\\n\\t\"\n"
-                                            );
-                                        }
-                                        InlineASM::AArch64 => {
-                                            let addr = asm_load!(*k);
-                                            *out +=
-                                                &format!("\t\t\"ldr d{out_reg}, {addr}\\n\\t\"\n",);
-                                        }
-                                        InlineASM::None => unreachable!(),
-                                    }
+                                    let addr = asm_load!(*k);
+                                    emit_load_reg!(*out_reg, addr);
                                 } else {
                                     unreachable!();
                                 }
 
                                 for i in &a[1..] {
                                     if let MemOrReg::Mem(k) = i {
-                                        match asm_flavour {
-                                            InlineASM::X64 => {
-                                                let addr = asm_load!(*k);
-                                                *out += &format!(
-                                                    "\t\t\"{oper}sd {addr}, %%xmm{out_reg}\\n\\t\"\n"
-                                                );
-                                            }
-                                            InlineASM::AVX2 => {
-                                                let addr = asm_load!(*k);
-                                                *out += &format!(
-                                                    "\t\t\"v{oper}pd {addr}, %%ymm{out_reg}, %%ymm{out_reg}\\n\\t\"\n"
-                                                );
-                                            }
-                                            InlineASM::AArch64 => {
-                                                let addr = asm_load!(*k);
-                                                *out +=
-                                                    &format!("\t\t\"ldr d31, {addr}\\n\\t\"\n",);
-
-                                                *out += &format!(
-                                                    "\t\t\"f{oper} d{out_reg}, d31, d{out_reg}\\n\\t\"\n"
-                                                );
-                                            }
-                                            InlineASM::None => unreachable!(),
-                                        }
+                                        let addr = asm_load!(*k);
+                                        emit_mem_binary!(oper, *out_reg, addr);
                                     }
                                 }
                             }
                         }
                         MemOrReg::Mem(out_mem) => {
-                            // TODO: we would like a last-use check of the free here. Now we need to move
                             if let Some(out_reg) = (0..16).position(|k| free & (1 << k) != 0) {
                                 if let Some(MemOrReg::Reg(j)) =
                                     a.iter().find(|x| matches!(x, MemOrReg::Reg(_)))
                                 {
-                                    match asm_flavour {
-                                        InlineASM::X64 => {
-                                            *out += &format!(
-                                                "\t\t\"movapd %%xmm{j}, %%xmm{out_reg}\\n\\t\"\n"
-                                            );
-                                        }
-                                        InlineASM::AVX2 => {
-                                            *out += &format!(
-                                                "\t\t\"vmovapd %%ymm{j}, %%ymm{out_reg}\\n\\t\"\n"
-                                            );
-                                        }
-                                        InlineASM::AArch64 => {
-                                            *out +=
-                                                &format!("\t\t\"fmov d{out_reg}, d{j}\\n\\t\"\n");
-                                        }
-                                        InlineASM::None => unreachable!(),
-                                    }
+                                    emit_copy_reg!(out_reg, *j);
 
                                     let mut first_skipped = false;
                                     for i in a {
                                         if first_skipped || *i != MemOrReg::Reg(*j) {
                                             match i {
-                                                MemOrReg::Reg(k) => match asm_flavour {
-                                                    InlineASM::X64 => {
-                                                        *out += &format!(
-                                                            "\t\t\"{oper}sd %%xmm{k}, %%xmm{out_reg}\\n\\t\"\n"
-                                                        );
-                                                    }
-                                                    InlineASM::AVX2 => {
-                                                        *out += &format!(
-                                                            "\t\t\"v{oper}pd %%ymm{k}, %%ymm{out_reg}, %%ymm{out_reg}\\n\\t\"\n"
-                                                        );
-                                                    }
-                                                    InlineASM::AArch64 => {
-                                                        *out += &format!(
-                                                            "\t\t\"f{oper} d{out_reg}, d{k}, d{out_reg}\\n\\t\"\n"
-                                                        );
-                                                    }
-                                                    InlineASM::None => unreachable!(),
-                                                },
-                                                MemOrReg::Mem(k) => match asm_flavour {
-                                                    InlineASM::X64 => {
-                                                        let addr = asm_load!(*k);
-                                                        *out += &format!(
-                                                            "\t\t\"{oper}sd {addr}, %%xmm{out_reg}\\n\\t\"\n"
-                                                        );
-                                                    }
-                                                    InlineASM::AVX2 => {
-                                                        let addr = asm_load!(*k);
-                                                        *out += &format!(
-                                                            "\t\t\"v{oper}pd {addr}, %%ymm{out_reg}, %%ymm{out_reg}\\n\\t\"\n"
-                                                        );
-                                                    }
-                                                    InlineASM::AArch64 => {
-                                                        let addr = asm_load!(*k);
-                                                        *out += &format!(
-                                                            "\t\t\"ldr d31, {addr}\\n\\t\"\n",
-                                                        );
-
-                                                        *out += &format!(
-                                                            "\t\t\"f{oper} d{out_reg}, d31, d{out_reg}\\n\\t\"\n"
-                                                        );
-                                                    }
-                                                    InlineASM::None => unreachable!(),
-                                                },
+                                                MemOrReg::Reg(k) => {
+                                                    emit_reg_binary!(oper, out_reg, *k)
+                                                }
+                                                MemOrReg::Mem(k) => {
+                                                    let addr = asm_load!(*k);
+                                                    emit_mem_binary!(oper, out_reg, addr);
+                                                }
                                             }
                                         }
 
@@ -4607,24 +5216,7 @@ extern "C" {{
                                 } else {
                                     if let MemOrReg::Mem(k) = &a[0] {
                                         let addr = asm_load!(*k);
-                                        match asm_flavour {
-                                            InlineASM::X64 => {
-                                                *out += &format!(
-                                                    "\t\t\"movsd {addr}, %%xmm{out_reg}\\n\\t\"\n"
-                                                );
-                                            }
-                                            InlineASM::AVX2 => {
-                                                *out += &format!(
-                                                    "\t\t\"vmovapd {addr}, %%ymm{out_reg}\\n\\t\"\n"
-                                                );
-                                            }
-                                            InlineASM::AArch64 => {
-                                                *out += &format!(
-                                                    "\t\t\"ldr d{out_reg}, {addr}\\n\\t\"\n",
-                                                );
-                                            }
-                                            InlineASM::None => unreachable!(),
-                                        }
+                                        emit_load_reg!(out_reg, addr);
                                     } else {
                                         unreachable!();
                                     }
@@ -4632,486 +5224,303 @@ extern "C" {{
                                     for i in &a[1..] {
                                         if let MemOrReg::Mem(k) = i {
                                             let addr = asm_load!(*k);
-                                            match asm_flavour {
-                                                InlineASM::X64 => {
-                                                    *out += &format!(
-                                                        "\t\t\"{oper}sd {addr}, %%xmm{out_reg}\\n\\t\"\n"
-                                                    );
-                                                }
-                                                InlineASM::AVX2 => {
-                                                    *out += &format!(
-                                                        "\t\t\"v{oper}pd {addr}, %%ymm{out_reg}, %%ymm{out_reg}\\n\\t\"\n"
-                                                    );
-                                                }
-                                                InlineASM::AArch64 => {
-                                                    *out += &format!(
-                                                        "\t\t\"ldr d31, {addr}\\n\\t\"\n",
-                                                    );
-
-                                                    *out += &format!(
-                                                        "\t\t\"f{oper} d{out_reg}, d31, d{out_reg}\\n\\t\"\n",
-                                                    );
-                                                }
-                                                InlineASM::None => unreachable!(),
-                                            }
+                                            emit_mem_binary!(oper, out_reg, addr);
                                         }
                                     }
                                 }
 
                                 let addr = asm_load!(*out_mem);
-                                match asm_flavour {
-                                    InlineASM::X64 => {
-                                        *out += &format!(
-                                            "\t\t\"movsd %%xmm{out_reg}, {addr}\\n\\t\"\n"
-                                        );
-                                    }
-                                    InlineASM::AVX2 => {
-                                        *out += &format!(
-                                            "\t\t\"vmovupd %%ymm{out_reg}, {addr}\\n\\t\"\n"
-                                        );
-                                    }
-                                    InlineASM::AArch64 => {
-                                        *out += &format!("\t\t\"str d{out_reg}, {addr}\\n\\t\"\n",);
-                                    }
-                                    InlineASM::None => unreachable!(),
-                                }
+                                emit_store_reg!(out_reg, addr);
                             } else {
                                 unreachable!("No free registers");
-                                // move the value of xmm0 into the memory location of the output register
-                                // and then swap later?
                             }
                         }
                     }
                 }
                 RegInstr::Pow(o, free, b, e) => {
-                    if *e == -1 {
-                        if !in_asm_block {
-                            *out += "\t__asm__(\n";
-                            in_asm_block = true;
-                        }
-
-                        match o {
-                            MemOrReg::Reg(out_reg) => {
-                                if *b == MemOrReg::Reg(*out_reg) {
-                                    match asm_flavour {
-                                        InlineASM::X64 => {
-                                            if let Some(tmp_reg) =
-                                                (0..16).position(|k| free & (1 << k) != 0)
-                                            {
-                                                *out += &format!(
-                                                    "\t\t\"movapd %%xmm{out_reg}, %%xmm{tmp_reg}\\n\\t\"\n"
-                                                );
-
-                                                *out += &format!(
-                                                    "\t\t\"movsd {}(%1), %%xmm{}\\n\\t\"\n",
-                                                    (self.reserved_indices - self.param_count) * 8,
-                                                    out_reg
-                                                );
-
-                                                *out += &format!(
-                                                    "\t\t\"divsd %%xmm{tmp_reg}, %%xmm{out_reg}\\n\\t\"\n"
-                                                );
-                                            } else {
-                                                panic!("No free registers for division")
-                                            }
-                                        }
-                                        InlineASM::AVX2 => {
-                                            if let Some(tmp_reg) =
-                                                (0..16).position(|k| free & (1 << k) != 0)
-                                            {
-                                                *out += &format!(
-                                                    "\t\t\"vmovapd %%ymm{out_reg}, %%ymm{tmp_reg}\\n\\t\"\n"
-                                                );
-
-                                                *out += &format!(
-                                                    "\t\t\"vmovupd {}(%1), %%ymm{}\\n\\t\"\n",
-                                                    (self.reserved_indices - self.param_count) * 32,
-                                                    out_reg
-                                                );
-
-                                                *out += &format!(
-                                                    "\t\t\"vdivsd %%ymm{tmp_reg}, %%ymm{out_reg}, %%ymm{out_reg}\\n\\t\"\n"
-                                                );
-                                            } else {
-                                                panic!("No free registers for division")
-                                            }
-                                        }
-                                        InlineASM::AArch64 => {
-                                            *out += &format!(
-                                                "\t\t\"ldr d31, [%1, {}]\\n\\t\"\n",
-                                                (self.reserved_indices - self.param_count) * 8
-                                            );
-                                            *out += &format!(
-                                                "\t\t\"fdiv d{out_reg}, d31, d{out_reg}\\n\\t\"\n"
-                                            );
-                                        }
-                                        InlineASM::None => unreachable!(),
-                                    }
-                                } else {
-                                    // load 1 into out_reg
-                                    match asm_flavour {
-                                        InlineASM::X64 => {
-                                            *out += &format!(
-                                                "\t\t\"movsd {}(%1), %%xmm{}\\n\\t\"\n",
-                                                (self.reserved_indices - self.param_count) * 8,
-                                                out_reg,
-                                            );
-                                        }
-                                        InlineASM::AVX2 => {
-                                            *out += &format!(
-                                                "\t\t\"vmovupd {}(%1), %%ymm{}\\n\\t\"\n",
-                                                (self.reserved_indices - self.param_count) * 32,
-                                                out_reg,
-                                            );
-                                        }
-                                        InlineASM::AArch64 => {
-                                            *out += &format!(
-                                                "\t\t\"ldr d{}, [%1, {}]\\n\\t\"\n",
-                                                out_reg,
-                                                (self.reserved_indices - self.param_count) * 8
-                                            );
-                                        }
-                                        InlineASM::None => unreachable!(),
-                                    }
-
-                                    match b {
-                                        MemOrReg::Reg(j) => match asm_flavour {
-                                            InlineASM::X64 => {
-                                                *out += &format!(
-                                                    "\t\t\"divsd %%xmm{j}, %%xmm{out_reg}\\n\\t\"\n"
-                                                );
-                                            }
-                                            InlineASM::AVX2 => {
-                                                *out += &format!(
-                                                    "\t\t\"vdivpd %%ymm{j}, %%ymm{out_reg}, %%ymm{out_reg}\\n\\t\"\n"
-                                                );
-                                            }
-                                            InlineASM::AArch64 => {
-                                                *out += &format!(
-                                                    "\t\t\"fdiv d{out_reg}, d{out_reg}, d{j}\\n\\t\"\n"
-                                                );
-                                            }
-                                            InlineASM::None => unreachable!(),
-                                        },
-                                        MemOrReg::Mem(k) => match asm_flavour {
-                                            InlineASM::X64 => {
-                                                let addr = asm_load!(*k);
-                                                *out += &format!(
-                                                    "\t\t\"divsd {addr}, %%xmm{out_reg}\\n\\t\"\n",
-                                                );
-                                            }
-                                            InlineASM::AVX2 => {
-                                                let addr = asm_load!(*k);
-                                                *out += &format!(
-                                                    "\t\t\"vdivpd {addr}, %%ymm{out_reg}, %%ymm{out_reg}\\n\\t\"\n",
-                                                );
-                                            }
-                                            InlineASM::AArch64 => {
-                                                let addr = asm_load!(*k);
-                                                *out += &format!("\t\t\"ldr d31, {addr}\\n\\t\"\n");
-
-                                                *out += &format!(
-                                                    "\t\t\"fdiv d{out_reg}, d{out_reg}, d31\\n\\t\"\n"
-                                                );
-                                            }
-                                            InlineASM::None => unreachable!(),
-                                        },
-                                    }
-                                }
-                            }
-                            MemOrReg::Mem(out_mem) => {
-                                if let Some(out_reg) = (0..16).position(|k| free & (1 << k) != 0) {
-                                    match asm_flavour {
-                                        InlineASM::X64 => {
-                                            *out += &format!(
-                                                "\t\t\"movsd {}(%1), %%xmm{}\\n\\t\"\n",
-                                                (self.reserved_indices - self.param_count) * 8,
-                                                out_reg
-                                            );
-                                        }
-                                        InlineASM::AVX2 => {
-                                            *out += &format!(
-                                                "\t\t\"vmovupd {}(%1), %%ymm{}\\n\\t\"\n",
-                                                (self.reserved_indices - self.param_count) * 32,
-                                                out_reg
-                                            );
-                                        }
-                                        InlineASM::AArch64 => {
-                                            *out += &format!(
-                                                "\t\t\"ldr d{}, [%1, {}]\\n\\t\"\n",
-                                                out_reg,
-                                                (self.reserved_indices - self.param_count) * 8
-                                            );
-                                        }
-                                        InlineASM::None => unreachable!(),
-                                    }
-
-                                    match b {
-                                        MemOrReg::Reg(j) => match asm_flavour {
-                                            InlineASM::X64 => {
-                                                *out += &format!(
-                                                    "\t\t\"divsd %%xmm{j}, %%xmm{out_reg}\\n\\t\"\n"
-                                                );
-                                            }
-                                            InlineASM::AVX2 => {
-                                                *out += &format!(
-                                                    "\t\t\"vdivpd %%ymm{j}, %%ymm{out_reg}, %%ymm{out_reg}\\n\\t\"\n"
-                                                );
-                                            }
-                                            InlineASM::AArch64 => {
-                                                *out += &format!(
-                                                    "\t\t\"fdiv d{out_reg}, d{out_reg}, d{j}\\n\\t\"\n"
-                                                );
-                                            }
-                                            InlineASM::None => unreachable!(),
-                                        },
-                                        MemOrReg::Mem(k) => match asm_flavour {
-                                            InlineASM::X64 => {
-                                                let addr = asm_load!(*k);
-                                                *out += &format!(
-                                                    "\t\t\"divsd {addr}, %%xmm{out_reg}\\n\\t\"\n"
-                                                );
-                                            }
-                                            InlineASM::AVX2 => {
-                                                let addr = asm_load!(*k);
-                                                *out += &format!(
-                                                    "\t\t\"vdivpd {addr}, %%ymm{out_reg}, %%ymm{out_reg}\\n\\t\"\n"
-                                                );
-                                            }
-                                            InlineASM::AArch64 => {
-                                                let addr = asm_load!(*k);
-                                                *out +=
-                                                    &format!("\t\t\"ldr d31, {addr}\\n\\t\"\n",);
-
-                                                *out += &format!(
-                                                    "\t\t\"fdiv d{out_reg}, d{out_reg}, d31\\n\\t\"\n"
-                                                );
-                                            }
-                                            InlineASM::None => unreachable!(),
-                                        },
-                                    }
-
-                                    let addr = asm_load!(*out_mem);
-                                    match asm_flavour {
-                                        InlineASM::X64 => {
-                                            *out += &format!(
-                                                "\t\t\"movsd %%xmm{out_reg}, {addr}\\n\\t\"\n"
-                                            );
-                                        }
-                                        InlineASM::AVX2 => {
-                                            *out += &format!(
-                                                "\t\t\"vmovupd %%ymm{out_reg}, {addr}\\n\\t\"\n"
-                                            );
-                                        }
-                                        InlineASM::AArch64 => {
-                                            *out +=
-                                                &format!("\t\t\"str d{out_reg}, {addr}\\n\\t\"\n",);
-                                        }
-                                        InlineASM::None => unreachable!(),
-                                    }
-                                } else {
-                                    unreachable!("No free registers");
-                                    // move the value of xmm0 into the memory location of the output register
-                                    // and then swap later?
-                                }
-                            }
-                        }
-                    } else {
+                    if *e != -1 {
                         unreachable!(
                             "Powers other than -1 should have been removed at an earlier stage"
                         );
                     }
+
+                    match o {
+                        MemOrReg::Reg(out_reg) => {
+                            if *b == MemOrReg::Reg(*out_reg) {
+                                match asm_flavour {
+                                    InlineASM::X64 => {
+                                        if let Some(tmp_reg) =
+                                            (0..16).position(|k| free & (1 << k) != 0)
+                                        {
+                                            emit_copy_reg!(tmp_reg, *out_reg);
+                                            let one_addr = asm_constants_addr!(
+                                                (self.reserved_indices - self.param_count) * 8
+                                            );
+                                            emit_load_reg!(*out_reg, one_addr);
+                                            emit_div_reg!(*out_reg, tmp_reg);
+                                        } else {
+                                            panic!("No free registers for division");
+                                        }
+                                    }
+                                    InlineASM::AVX2 => {
+                                        let one_addr = asm_constants_addr!(
+                                            (self.reserved_indices - self.param_count) * 32
+                                        );
+                                        out.emit_asm_line(&format!("vmovapd {}, %ymm15", one_addr));
+                                        out.emit_asm_line(&format!(
+                                            "vdivpd %ymm{}, %ymm15, %ymm{}",
+                                            out_reg, out_reg
+                                        ));
+                                    }
+                                    InlineASM::AArch64 => {
+                                        let one_addr = asm_constants_addr!(
+                                            (self.reserved_indices - self.param_count) * 8
+                                        );
+                                        out.emit_asm_line(&format!("ldr d31, {}", one_addr));
+                                        out.emit_asm_line(&format!(
+                                            "fdiv d{}, d31, d{}",
+                                            out_reg, out_reg
+                                        ));
+                                    }
+                                    InlineASM::None => unreachable!(),
+                                }
+                            } else {
+                                let one_addr = asm_constants_addr!(
+                                    (self.reserved_indices - self.param_count)
+                                        * if asm_flavour == InlineASM::AVX2 {
+                                            32
+                                        } else {
+                                            8
+                                        }
+                                );
+                                emit_load_reg!(*out_reg, one_addr);
+
+                                match b {
+                                    MemOrReg::Reg(j) => emit_div_reg!(*out_reg, *j),
+                                    MemOrReg::Mem(k) => {
+                                        let addr = asm_load!(*k);
+                                        emit_div_mem!(*out_reg, addr);
+                                    }
+                                }
+                            }
+                        }
+                        MemOrReg::Mem(out_mem) => {
+                            if let Some(out_reg) = (0..16).position(|k| free & (1 << k) != 0) {
+                                let one_addr = asm_constants_addr!(
+                                    (self.reserved_indices - self.param_count)
+                                        * if asm_flavour == InlineASM::AVX2 {
+                                            32
+                                        } else {
+                                            8
+                                        }
+                                );
+                                emit_load_reg!(out_reg, one_addr);
+
+                                match b {
+                                    MemOrReg::Reg(j) => emit_div_reg!(out_reg, *j),
+                                    MemOrReg::Mem(k) => {
+                                        let addr = asm_load!(*k);
+                                        emit_div_mem!(out_reg, addr);
+                                    }
+                                }
+
+                                let addr = asm_load!(*out_mem);
+                                emit_store_reg!(out_reg, addr);
+                            } else {
+                                unreachable!("No free registers");
+                            }
+                        }
+                    }
                 }
                 RegInstr::Powf(o, b, e) => {
-                    end_asm_block!(in_asm_block);
-
+                    out.finish_block(function_name, false);
+                    second_index = 0;
                     let base = get_input!(*b);
                     let exp = get_input!(*e);
-                    *out += format!("\tZ[{o}] = pow({base}, {exp});\n").as_str();
+                    out.emit_wrapper(&format!("\tZ[{o}] = pow({base}, {exp});\n"));
                 }
                 RegInstr::BuiltinFun(o, s, a) => {
-                    end_asm_block!(in_asm_block);
-
+                    out.finish_block(function_name, false);
+                    second_index = 0;
                     let arg = get_input!(*a);
 
                     match s.0.get_id() {
-                        Symbol::EXP_ID => {
-                            *out += format!("\tZ[{o}] = exp({arg});\n").as_str();
-                        }
-                        Symbol::LOG_ID => {
-                            *out += format!("\tZ[{o}] = log({arg});\n").as_str();
-                        }
-                        Symbol::SIN_ID => {
-                            *out += format!("\tZ[{o}] = sin({arg});\n").as_str();
-                        }
-                        Symbol::COS_ID => {
-                            *out += format!("\tZ[{o}] = cos({arg});\n").as_str();
-                        }
-                        Symbol::SQRT_ID => {
-                            *out += format!("\tZ[{o}] = sqrt({arg});\n").as_str();
-                        }
+                        Symbol::EXP_ID => out.emit_wrapper(&format!("\tZ[{o}] = exp({arg});\n")),
+                        Symbol::LOG_ID => out.emit_wrapper(&format!("\tZ[{o}] = log({arg});\n")),
+                        Symbol::SIN_ID => out.emit_wrapper(&format!("\tZ[{o}] = sin({arg});\n")),
+                        Symbol::COS_ID => out.emit_wrapper(&format!("\tZ[{o}] = cos({arg});\n")),
+                        Symbol::SQRT_ID => out.emit_wrapper(&format!("\tZ[{o}] = sqrt({arg});\n")),
                         Symbol::ABS_ID => {
-                            *out += format!("\tZ[{o}] = std::abs({arg});\n").as_str();
+                            out.emit_wrapper(&format!("\tZ[{o}] = std::abs({arg});\n"))
                         }
-                        Symbol::CONJ_ID => {
-                            *out += format!("\tZ[{o}] = {arg};\n").as_str();
-                        }
+                        Symbol::CONJ_ID => out.emit_wrapper(&format!("\tZ[{o}] = {arg};\n")),
                         _ => unreachable!(),
                     }
                 }
                 RegInstr::ExternalFun(o, s, a) => {
-                    end_asm_block!(in_asm_block);
-
+                    out.finish_block(function_name, false);
+                    second_index = 0;
                     let name = &self.external_fns[*s];
                     let args = a.iter().map(|x| get_input!(*x)).collect::<Vec<_>>();
-
-                    *out += format!("\tZ[{}] = {}({});\n", o, name, args.join(", ")).as_str();
+                    out.emit_wrapper(&format!("\tZ[{}] = {}({});\n", o, name, args.join(", ")));
                 }
                 RegInstr::IfElse(cond) => {
-                    end_asm_block!(in_asm_block);
-
+                    out.finish_block(function_name, false);
+                    second_index = 0;
                     if asm_flavour == InlineASM::AVX2 {
-                        *out += &format!("\tif (all({} != 0.)) {{\n", get_input!(*cond));
+                        out.emit_wrapper(&format!("\tif (all({} != 0.)) {{\n", get_input!(*cond)));
                     } else {
-                        *out += &format!("\tif ({} != 0.) {{\n", get_input!(*cond));
+                        out.emit_wrapper(&format!("\tif ({} != 0.) {{\n", get_input!(*cond)));
                     }
                 }
                 RegInstr::Goto => {
                     next_label_is_true_branch_end = true;
                 }
                 RegInstr::Label(l) => {
-                    end_asm_block!(in_asm_block);
-
+                    out.finish_block(function_name, false);
+                    second_index = 0;
                     for (o, b) in label_join_info.get(l).unwrap() {
                         let arg_a = get_input!(*o);
                         let arg_b = get_input!(*b);
-                        *out += &format!("\t{} = {};\n", arg_a, arg_b);
+                        out.emit_wrapper(&format!("\t{} = {};\n", arg_a, arg_b));
                     }
 
                     if next_label_is_true_branch_end {
-                        *out += "\t} else {\n";
+                        out.emit_wrapper("\t} else {\n");
                         next_label_is_true_branch_end = false;
                     } else {
-                        *out += "\t}\n";
+                        out.emit_wrapper("\t}\n");
                     }
                 }
                 RegInstr::Join(_, _, _, _) => {}
             }
         }
 
-        end_asm_block!(in_asm_block);
-
         let mut regcount = 0;
-        *out += "\t__asm__(\n";
         for (i, r) in self.result_indices.iter().enumerate() {
-            if *r < self.param_count {
-                match asm_flavour {
-                    InlineASM::X64 => {
-                        *out += &format!("\t\t\"movsd {}(%2), %%xmm{}\\n\\t\"\n", r * 8, regcount);
-                    }
-                    InlineASM::AVX2 => {
-                        *out +=
-                            &format!("\t\t\"vmovupd {}(%2), %%ymm{}\\n\\t\"\n", r * 32, regcount);
-                    }
-                    InlineASM::AArch64 => {
-                        let addr = asm_load!(*r);
-                        *out += &format!("\t\t\"ldr d{}, {}\\n\\t\"\n", regcount, addr);
-                    }
-                    InlineASM::None => unreachable!(),
-                }
-            } else if *r < self.reserved_indices {
-                match asm_flavour {
-                    InlineASM::X64 => {
-                        *out += &format!(
-                            "\t\t\"movsd {}(%1), %%xmm{}\\n\\t\"\n",
-                            (r - self.param_count) * 8,
-                            regcount
-                        );
-                    }
-                    InlineASM::AVX2 => {
-                        *out += &format!(
-                            "\t\t\"vmovupd {}(%1), %%ymm{}\\n\\t\"\n",
-                            (r - self.param_count) * 32,
-                            regcount
-                        );
-                    }
-                    InlineASM::AArch64 => {
-                        let addr = asm_load!(*r);
-                        *out += &format!("\t\t\"ldr d{}, {}\\n\\t\"\n", regcount, addr);
-                    }
-                    InlineASM::None => unreachable!(),
-                }
-            } else {
-                match asm_flavour {
-                    InlineASM::X64 => {
-                        *out += &format!("\t\t\"movsd {}(%0), %%xmm{}\\n\\t\"\n", r * 8, regcount);
-                    }
-                    InlineASM::AVX2 => {
-                        *out +=
-                            &format!("\t\t\"vmovupd {}(%0), %%ymm{}\\n\\t\"\n", r * 32, regcount);
-                    }
-                    InlineASM::AArch64 => {
-                        let addr = asm_load!(*r);
-                        *out += &format!("\t\t\"ldr d{}, {}\\n\\t\"\n", regcount, addr);
-                    }
-                    InlineASM::None => unreachable!(),
-                }
-            }
-
-            match asm_flavour {
-                InlineASM::X64 => {
-                    *out += &format!("\t\t\"movsd %%xmm{}, {}(%3)\\n\\t\"\n", regcount, i * 8);
-                }
-                InlineASM::AVX2 => {
-                    *out += &format!("\t\t\"vmovupd %%ymm{}, {}(%3)\\n\\t\"\n", regcount, i * 32);
-                }
-                InlineASM::AArch64 => {
-                    let dest = i * 8;
-                    if dest > 32760 {
-                        let d = dest.ilog2();
-                        let shift = d.min(12);
-                        let coeff = dest / (1 << shift);
-                        let rest = dest - (coeff << shift);
-                        second_index = 0;
-                        *out += &format!("\t\t\"add x8, %3, {}, lsl {}\\n\\t\"\n", coeff, shift);
-                        *out += &format!("\t\t\"str d{}, [x8, {}]\\n\\t\"\n", regcount, rest);
-                    } else {
-                        *out += &format!("\t\t\"str d{}, [%3, {}]\\n\\t\"\n", regcount, i * 8);
-                    }
-                }
-                InlineASM::None => unreachable!(),
-            }
+            let addr = asm_load!(*r);
+            emit_load_reg!(regcount, addr);
+            let dest = out.scalar_addr(
+                AsmRegion::Output,
+                i * if asm_flavour == InlineASM::AVX2 {
+                    32
+                } else {
+                    8
+                },
+                &mut second_index,
+                false,
+            );
+            emit_store_reg!(regcount, dest);
             regcount = (regcount + 1) % 16;
         }
 
-        match asm_flavour {
-            InlineASM::X64 => {
-                *out += &format!(
-                    "\t\t:\n\t\t: \"r\"(Z), \"r\"({function_name}_CONSTANTS_double), \"r\"(params), \"r\"(out)\n\t\t: \"memory\", \"xmm0\", \"xmm1\", \"xmm2\", \"xmm3\", \"xmm4\", \"xmm5\", \"xmm6\", \"xmm7\", \"xmm8\", \"xmm9\", \"xmm10\", \"xmm11\", \"xmm12\", \"xmm13\", \"xmm14\", \"xmm15\");\n"
-                );
-            }
-            InlineASM::AVX2 => {
-                *out += &format!(
-                    "\t\t:\n\t\t: \"r\"(Z), \"r\"({function_name}_CONSTANTS_double), \"r\"(params), \"r\"(out)\n\t\t: \"memory\", \"ymm0\", \"ymm1\", \"ymm2\", \"ymm3\", \"ymm4\", \"ymm5\", \"ymm6\", \"ymm7\", \"ymm8\", \"ymm9\", \"ymm10\", \"ymm11\", \"ymm12\", \"ymm13\", \"ymm14\", \"ymm15\");\n"
-                );
-            }
-            InlineASM::AArch64 => {
-                *out += &format!(
-                    "\t\t:\n\t\t: \"r\"(Z), \"r\"({function_name}_CONSTANTS_double), \"r\"(params), \"r\"(out)\n\t\t: \"memory\", \"x8\", \"d0\", \"d1\", \"d2\", \"d3\", \"d4\", \"d5\", \"d6\", \"d7\", \"d8\", \"d9\", \"d10\", \"d11\", \"d12\", \"d13\", \"d14\", \"d15\", \"d16\", \"d17\", \"d18\", \"d19\", \"d20\", \"d21\", \"d22\", \"d23\", \"d24\", \"d25\", \"d26\", \"d27\", \"d28\", \"d29\", \"d30\", \"d31\");\n"
-                );
-            }
-            InlineASM::None => unreachable!(),
-        }
-        in_asm_block
+        out.finish_block(function_name, true);
     }
 
-    fn export_asm_complex_impl(
+    fn export_asm_complex_str(&self, function_name: &str, settings: &ExportSettings) -> String {
+        let mut res = String::new();
+        if settings.include_header {
+            res += "#include <iostream>\n#include <complex>\n#include <cmath>\n\n";
+        };
+
+        if let Some(header) = &settings.custom_header {
+            res += header;
+            res += "\n";
+        }
+
+        res += &self.export_get_buffer_len_str(function_name);
+
+        res += &format!(
+            "static const std::complex<double> {}_CONSTANTS_complex[{}] = {{{}}};\n\n",
+            function_name,
+            self.reserved_indices - self.param_count + 2,
+            {
+                let mut nums = (self.param_count..self.reserved_indices)
+                    .map(|i| format!("std::complex<double>({})", self.stack[i].export()))
+                    .collect::<Vec<_>>();
+                nums.push("std::complex<double>(0, -0.)".to_string()); // used for complex inversion
+                nums.push("1".to_string()); // used for real inversion
+                nums.join(",")
+            }
+        );
+
+        res += &format!(
+            "extern \"C\" void {function_name}(const std::complex<double> *params, std::complex<double> *Z, std::complex<double> *out)\n{{\n"
+        );
+
+        let mut builder = InlineAsmBlockBuilder::new(
+            settings.inline_asm,
+            format!("{function_name}_CONSTANTS_complex"),
+            &mut res,
+        );
+        self.export_asm_complex_impl(&self.instructions, function_name, &mut builder);
+
+        res + "\treturn;\n}\n\n"
+    }
+
+    fn export_asm_complex_split_str(
+        &self,
+        function_name: &str,
+        settings: &ExportSettings,
+        constants_blob_path: &Path,
+    ) -> (String, String) {
+        let mut wrapper = String::new();
+
+        let mut res = String::new();
+        if settings.include_header {
+            wrapper += "#include <iostream>\n#include <complex>\n#include <cmath>\n\n";
+        };
+
+        if let Some(header) = &settings.custom_header {
+            wrapper += header;
+            wrapper += "\n";
+        }
+        wrapper += &self.export_get_buffer_len_str(function_name);
+
+        res += &format!(
+            "extern \"C\" const std::complex<double> {}_CONSTANTS_complex[{}];\n\n",
+            function_name,
+            self.reserved_indices - self.param_count + 2,
+        );
+
+        let mut builder = DoubleAsmBlockBuilder::new(
+            settings.inline_asm,
+            "const std::complex<double> *params, const std::complex<double> *constants, std::complex<double> *Z, std::complex<double> *out"
+                .to_string(),
+            format!("{function_name}_CONSTANTS_complex"),
+        );
+        self.export_asm_complex_impl(&self.instructions, function_name, &mut builder);
+        let (declarations, wrapper_body, asm) = builder.finish();
+        res += &declarations;
+        res += "\n";
+        wrapper += &res;
+        wrapper += &format!(
+            "extern \"C\" void {function_name}(const std::complex<double> *params, std::complex<double> *Z, std::complex<double> *out)\n{{\n"
+        );
+        wrapper += &wrapper_body;
+        wrapper += "\treturn;\n}\n\n";
+
+        (
+            wrapper,
+            format!(
+                "{}.text\n{}",
+                DoubleAsmBlockBuilder::incbin_prefix(
+                    &format!("{function_name}_CONSTANTS_complex"),
+                    constants_blob_path,
+                    4,
+                ),
+                asm.trim_start_matches(".text\n")
+            ),
+        )
+    }
+
+    fn export_asm_complex_impl<B: AsmBlockBackend>(
         &self,
         instr: &[(Instr, ComplexPhase)],
         function_name: &str,
-        asm_flavour: InlineASM,
-        out: &mut String,
-    ) -> bool {
+        out: &mut B,
+    ) {
+        let asm_flavour = out.asm_flavour();
         let mut second_index = 0;
 
         macro_rules! get_input {
@@ -5125,7 +5534,6 @@ extern "C" {{
                         $i - self.param_count
                     )
                 } else {
-                    // TODO: subtract reserved indices
                     format!("Z[{}]", $i)
                 }
             };
@@ -5133,89 +5541,81 @@ extern "C" {{
 
         macro_rules! asm_load {
             ($i:expr) => {
+                if $i < self.param_count {
+                    out.complex_addr(
+                        AsmRegion::Params,
+                        $i * if asm_flavour == InlineASM::AVX2 {
+                            64
+                        } else {
+                            16
+                        },
+                        &mut second_index,
+                        false,
+                    )
+                } else if $i < self.reserved_indices {
+                    out.complex_addr(
+                        AsmRegion::Constants,
+                        ($i - self.param_count)
+                            * if asm_flavour == InlineASM::AVX2 {
+                                64
+                            } else {
+                                16
+                            },
+                        &mut second_index,
+                        false,
+                    )
+                } else {
+                    out.complex_addr(
+                        AsmRegion::Buffer,
+                        $i * if asm_flavour == InlineASM::AVX2 {
+                            64
+                        } else {
+                            16
+                        },
+                        &mut second_index,
+                        true,
+                    )
+                }
+            };
+        }
+
+        macro_rules! output_addr {
+            ($i:expr) => {
+                out.scalar_addr(
+                    AsmRegion::Output,
+                    $i * if asm_flavour == InlineASM::AVX2 {
+                        64
+                    } else {
+                        16
+                    },
+                    &mut second_index,
+                    false,
+                )
+            };
+        }
+
+        macro_rules! load_complex {
+            ($i:expr, $r:expr) => {
+                let (addr_re, addr_im) = asm_load!($r);
                 match asm_flavour {
                     InlineASM::X64 => {
-                        if $i < self.param_count {
-                            (format!("{}(%2)", $i * 16), String::new())
-                        } else if $i < self.reserved_indices {
-                            (
-                                format!("{}(%1)", ($i - self.param_count) * 16),
-                                "NA".to_owned(),
-                            )
-                        } else {
-                            // TODO: subtract reserved indices
-                            (format!("{}(%0)", $i * 16), String::new())
-                        }
+                        out.emit_asm_line(&format!("movupd {}, %xmm{}", addr_re, $i + 1));
                     }
                     InlineASM::AVX2 => {
-                        if $i < self.param_count {
-                            (format!("{}(%2)", $i * 64), format!("{}(%2)", $i * 64 + 32))
-                        } else if $i < self.reserved_indices {
-                            (
-                                format!("{}(%1)", ($i - self.param_count) * 64),
-                                format!("{}(%1)", ($i - self.param_count) * 64 + 32),
-                            )
-                        } else {
-                            // TODO: subtract reserved indices
-                            (format!("{}(%0)", $i * 64), format!("{}(%0)", $i * 64 + 32))
-                        }
+                        out.emit_asm_line(&format!("vmovupd {}, %ymm{}", addr_re, 2 * $i));
+                        out.emit_asm_line(&format!("vmovupd {}, %ymm{}", addr_im, 2 * $i + 1));
                     }
                     InlineASM::AArch64 => {
-                        if $i < self.param_count {
-                            let dest = $i * 16;
-
-                            if dest > 32760 {
-                                // maximum allowed shift is 12 bits
-                                let d = dest.ilog2();
-                                let shift = d.min(12);
-                                let coeff = dest / (1 << shift);
-                                let rest = dest - (coeff << shift);
-                                second_index = 0;
-                                *out += &format!(
-                                    "\t\t\"add x8, %2, {}, lsl {}\\n\\t\"\n",
-                                    coeff, shift
-                                );
-                                (format!("[x8, {}]", rest), format!("[x8, {}]", rest + 8))
-                            } else {
-                                (format!("[%2, {}]", dest), format!("[%2, {}]", dest + 8))
-                            }
-                        } else if $i < self.reserved_indices {
-                            let dest = ($i - self.param_count) * 16;
-                            if dest > 32760 {
-                                let d = dest.ilog2();
-                                let shift = d.min(12);
-                                let coeff = dest / (1 << shift);
-                                let rest = dest - (coeff << shift);
-                                second_index = 0;
-                                *out += &format!(
-                                    "\t\t\"add x8, %1, {}, lsl {}\\n\\t\"\n",
-                                    coeff, shift
-                                );
-                                (format!("[x8, {}]", rest), format!("[x8, {}]", rest + 8))
-                            } else {
-                                (format!("[%1, {}]", dest), format!("[%1, {}]", dest + 8))
-                            }
+                        if $r * 16 < 450 {
+                            out.emit_asm_line(&format!(
+                                "ldp d{}, d{}, {}",
+                                2 * ($i + 1),
+                                2 * ($i + 1) + 1,
+                                addr_re
+                            ));
                         } else {
-                            // TODO: subtract reserved indices
-                            let dest = $i * 16;
-                            if dest > 32760 && (dest < second_index || dest > 32760 + second_index)
-                            {
-                                let d = dest.ilog2();
-                                let shift = d.min(12);
-                                let coeff = dest / (1 << shift);
-                                second_index = coeff << shift;
-                                let rest = dest - second_index;
-                                *out += &format!(
-                                    "\t\t\"add x8, %0, {}, lsl {}\\n\\t\"\n",
-                                    coeff, shift
-                                );
-                                (format!("[x8, {}]", rest), format!("[x8, {}]", rest + 8))
-                            } else if dest <= 32760 {
-                                (format!("[%0, {}]", dest), format!("[%0, {}]", dest + 8))
-                            } else {
-                                let offset = dest - second_index;
-                                (format!("[x8, {}]", offset), format!("[x8, {}]", offset + 8))
-                            }
+                            out.emit_asm_line(&format!("ldr d{}, {}", 2 * ($i + 1), addr_re));
+                            out.emit_asm_line(&format!("ldr d{}, {}", 2 * ($i + 1) + 1, addr_im));
                         }
                     }
                     InlineASM::None => unreachable!(),
@@ -5223,23 +5623,47 @@ extern "C" {{
             };
         }
 
-        macro_rules! end_asm_block {
-            ($in_block: expr) => {
-                if $in_block {
-                    match asm_flavour {
-                        InlineASM::X64 => {
-                            *out += &format!("\t\t:\n\t\t: \"r\"(Z), \"r\"({}_CONSTANTS_complex), \"r\"(params)\n\t\t: \"memory\", \"xmm0\", \"xmm1\", \"xmm2\", \"xmm3\", \"xmm4\", \"xmm5\", \"xmm6\", \"xmm7\", \"xmm8\", \"xmm9\", \"xmm10\", \"xmm11\", \"xmm12\", \"xmm13\", \"xmm14\", \"xmm15\");\n",  function_name);
+        macro_rules! mul_complex {
+            ($i:expr, $real:expr) => {
+                match asm_flavour {
+                    InlineASM::X64 => {
+                        if $real {
+                            out.emit_asm_line(&format!("mulpd %xmm{}, %xmm1", $i + 1));
+                        } else {
+                            out.emit_asm_line("movapd %xmm1, %xmm0");
+                            out.emit_asm_line("unpckhpd %xmm0, %xmm0");
+                            out.emit_asm_line("unpcklpd %xmm1, %xmm1");
+                            out.emit_asm_line(&format!("mulpd %xmm{}, %xmm0", $i + 1));
+                            out.emit_asm_line(&format!("mulpd %xmm{}, %xmm1", $i + 1));
+                            out.emit_asm_line("shufpd $1, %xmm0, %xmm0");
+                            out.emit_asm_line("addsubpd %xmm0, %xmm1");
                         }
-                        InlineASM::AVX2 => {
-                            *out += &format!("\t\t:\n\t\t: \"r\"(Z), \"r\"({}_CONSTANTS_complex), \"r\"(params)\n\t\t: \"memory\", \"ymm0\", \"ymm1\", \"ymm2\", \"ymm3\", \"ymm4\", \"ymm5\", \"ymm6\", \"ymm7\", \"ymm8\", \"ymm9\", \"ymm10\", \"ymm11\", \"ymm12\", \"ymm13\", \"ymm14\", \"ymm15\");\n",  function_name);
-                        }
-                        InlineASM::AArch64 => {
-                            *out += &format!("\t\t:\n\t\t: \"r\"(Z), \"r\"({}_CONSTANTS_complex), \"r\"(params)\n\t\t: \"memory\", \"x8\", \"d0\", \"d1\", \"d2\", \"d3\", \"d4\", \"d5\", \"d6\", \"d7\", \"d8\", \"d9\", \"d10\", \"d11\", \"d12\", \"d13\", \"d14\", \"d15\", \"d16\", \"d17\", \"d18\", \"d19\", \"d20\", \"d21\", \"d22\", \"d23\", \"d24\", \"d25\", \"d26\", \"d27\", \"d28\", \"d29\", \"d30\", \"d31\");\n",  function_name);
-                            #[allow(unused_assignments)] { second_index = 0;} // the second index in x8 will be lost after the block, so reset it
-                        }
-                        InlineASM::None => unreachable!(),
                     }
-                    $in_block = false;
+                    InlineASM::AArch64 => {
+                        if $real {
+                            out.emit_asm_line(&format!("fmul d2, d{}, d2", 2 * ($i + 1)));
+                            out.emit_asm_line("fmov d3, xzr");
+                        } else {
+                            out.emit_asm_line(&format!("fmul d0, d{}, d3", 2 * ($i + 1) + 1));
+                            out.emit_asm_line(&format!("fmul d1, d{}, d3", 2 * ($i + 1)));
+                            out.emit_asm_line(&format!("fmadd d3, d{}, d2, d1", 2 * ($i + 1) + 1));
+                            out.emit_asm_line(&format!("fnmsub d2, d{}, d2, d0", 2 * ($i + 1)));
+                        }
+                    }
+                    InlineASM::AVX2 => {
+                        if $real {
+                            out.emit_asm_line(&format!("vmulpd %ymm{}, %ymm0, %ymm0", 2 * $i));
+                            out.emit_asm_line("vxorpd %ymm1, %ymm1, %ymm1");
+                        } else {
+                            out.emit_asm_line(&format!("vmulpd %ymm0, %ymm{}, %ymm14", 2 * $i));
+                            out.emit_asm_line(&format!("vmulpd %ymm0, %ymm{}, %ymm15", 2 * $i + 1));
+                            out.emit_asm_line(&format!("vmulpd %ymm1, %ymm{}, %ymm0", 2 * $i + 1));
+                            out.emit_asm_line(&format!("vmulpd %ymm1, %ymm{}, %ymm1", 2 * $i));
+                            out.emit_asm_line("vsubpd %ymm0, %ymm14, %ymm0");
+                            out.emit_asm_line("vaddpd %ymm15, %ymm1, %ymm1");
+                        }
+                    }
+                    InlineASM::None => unreachable!(),
                 }
             };
         }
@@ -5254,17 +5678,14 @@ extern "C" {{
             }
 
             match ins {
-                Instr::IfElse(_, label) => {
-                    label_stack.push((*label, None));
-                }
+                Instr::IfElse(_, label) => label_stack.push((*label, None)),
                 Instr::Goto(l) => {
                     if let Some(last) = label_stack.last_mut() {
                         last.1 = Some(*l);
                     }
                 }
                 Instr::Join(o, _, a, b) => {
-                    in_join_section = true; // could be more than one join if vectorized
-
+                    in_join_section = true;
                     if let Some((label, label_2)) = label_stack.last() {
                         label_join_info
                             .entry(*label)
@@ -5278,207 +5699,68 @@ extern "C" {{
                         unreachable!("Goto without matching IfElse");
                     }
                 }
-                _ => {
-                    in_join_section = false;
-                }
+                _ => in_join_section = false,
             }
         }
 
-        let mut in_asm_block = false;
         let mut next_label_is_true_branch_end = false;
         for (ins, c) in instr {
             match ins {
-                Instr::Add(o, a) => {
-                    if !in_asm_block {
-                        *out += "\t__asm__(\n";
-                        in_asm_block = true;
+                Instr::Add(o, a) => match asm_flavour {
+                    InlineASM::X64 => {
+                        let (addr, _) = asm_load!(a[0]);
+                        out.emit_asm_line(&format!("movupd {}, %xmm0", addr));
+                        for i in &a[1..] {
+                            let (addr, _) = asm_load!(*i);
+                            out.emit_asm_line(&format!("movupd {}, %xmm1", addr));
+                            out.emit_asm_line("addpd %xmm1, %xmm0");
+                        }
+                        let addr = asm_load!(*o).0;
+                        out.emit_asm_line(&format!("movupd %xmm0, {}", addr));
                     }
-
-                    match asm_flavour {
-                        InlineASM::X64 => {
-                            let (addr, _) = asm_load!(a[0]);
-                            *out += &format!("\t\t\"movupd {addr}, %%xmm0\\n\\t\"\n");
-
-                            for i in &a[1..] {
-                                let (addr, _) = asm_load!(*i);
-                                *out += &format!("\t\t\"movupd {addr}, %%xmm1\\n\\t\"\n");
-                                *out += &format!("\t\t\"addpd %%xmm1, %%xmm0\\n\\t\"\n");
-                            }
-                            let (addr, _) = asm_load!(*o);
-                            *out += &format!("\t\t\"movupd %%xmm0, {addr}\\n\\t\"\n");
+                    InlineASM::AArch64 => {
+                        let (addr, _) = asm_load!(a[0]);
+                        out.emit_asm_line(&format!("ldr q0, {}", addr));
+                        for i in &a[1..] {
+                            let (addr, _) = asm_load!(*i);
+                            out.emit_asm_line(&format!("ldr q1, {}", addr));
+                            out.emit_asm_line("fadd v0.2d, v1.2d, v0.2d");
                         }
-                        InlineASM::AVX2 => {
-                            let (addr, comp_addr) = asm_load!(a[0]);
-                            *out += &format!("\t\t\"vmovupd {addr}, %%ymm0\\n\\t\"\n");
-                            *out += &format!("\t\t\"vmovupd {comp_addr}, %%ymm1\\n\\t\"\n");
-
-                            for i in &a[1..] {
-                                let (addr, imag_addr) = asm_load!(*i);
-                                *out += &format!("\t\t\"vaddpd {addr}, %%ymm0, %%ymm0\\n\\t\"\n");
-                                *out +=
-                                    &format!("\t\t\"vaddpd {imag_addr}, %%ymm1, %%ymm1\\n\\t\"\n");
-                            }
-                            let (addr, imag_addr) = asm_load!(*o);
-                            *out += &format!("\t\t\"vmovupd %%ymm0, {addr}\\n\\t\"\n");
-                            *out += &format!("\t\t\"vmovupd %%ymm1, {imag_addr}\\n\\t\"\n");
-                        }
-                        InlineASM::AArch64 => {
-                            let (addr, _) = asm_load!(a[0]);
-                            *out += &format!("\t\t\"ldr q0, {addr}\\n\\t\"\n");
-
-                            for i in &a[1..] {
-                                let (addr, _) = asm_load!(*i);
-                                *out += &format!("\t\t\"ldr q1, {addr}\\n\\t\"\n");
-                                *out += "\t\t\"fadd v0.2d, v1.2d, v0.2d\\n\\t\"\n";
-                            }
-
-                            let (addr, _) = asm_load!(*o);
-                            *out += &format!("\t\t\"str q0, {addr}\\n\\t\"\n");
-                        }
-                        InlineASM::None => unreachable!(),
+                        let addr = asm_load!(*o).0;
+                        out.emit_asm_line(&format!("str q0, {}", addr));
                     }
-                }
+                    InlineASM::AVX2 => {
+                        let (addr, comp_addr) = asm_load!(a[0]);
+                        out.emit_asm_line(&format!("vmovupd {}, %ymm0", addr));
+                        out.emit_asm_line(&format!("vmovupd {}, %ymm1", comp_addr));
+                        for i in &a[1..] {
+                            let (addr, imag_addr) = asm_load!(*i);
+                            out.emit_asm_line(&format!("vaddpd {}, %ymm0, %ymm0", addr));
+                            out.emit_asm_line(&format!("vaddpd {}, %ymm1, %ymm1", imag_addr));
+                        }
+                        let (addr, imag_addr) = asm_load!(*o);
+                        out.emit_asm_line(&format!("vmovupd %ymm0, {}", addr));
+                        out.emit_asm_line(&format!("vmovupd %ymm1, {}", imag_addr));
+                    }
+                    InlineASM::None => unreachable!(),
+                },
                 Instr::Mul(o, a) => {
-                    if !in_asm_block {
-                        *out += "\t__asm__(\n";
-                        in_asm_block = true;
-                    }
-
-                    macro_rules! load_complex {
-                        ($i: expr, $r: expr) => {
-                            let (addr_re, addr_im) = asm_load!($r);
-                            match asm_flavour {
-                                InlineASM::X64 => {
-                                    *out += &format!(
-                                        "\t\t\"movupd {}, %%xmm{}\\n\\t\"\n",
-                                        addr_re,
-                                        $i + 1,
-                                    );
-                                }
-                                InlineASM::AVX2 => {
-                                    *out += &format!(
-                                        "\t\t\"vmovupd {}, %%ymm{}\\n\\t\"\n",
-                                        addr_re,
-                                        2 * $i,
-                                    );
-                                    *out += &format!(
-                                        "\t\t\"vmovupd {}, %%ymm{}\\n\\t\"\n",
-                                        addr_im,
-                                        2 * $i + 1,
-                                    );
-                                }
-                                InlineASM::AArch64 => {
-                                    if $r * 16 < 450 {
-                                        *out += &format!(
-                                            "\t\t\"ldp d{}, d{}, {}\\n\\t\"\n",
-                                            2 * ($i + 1),
-                                            2 * ($i + 1) + 1,
-                                            addr_re,
-                                        );
-                                    } else {
-                                        *out += &format!(
-                                            "\t\t\"ldr d{}, {}\\n\\t\"\n",
-                                            2 * ($i + 1),
-                                            addr_re,
-                                        );
-                                        *out += &format!(
-                                            "\t\t\"ldr d{}, {}\\n\\t\"\n",
-                                            2 * ($i + 1) + 1,
-                                            addr_im,
-                                        );
-                                    }
-                                }
-                                InlineASM::None => unreachable!(),
-                            }
-                        };
-                    }
-
-                    macro_rules! mul_complex {
-                        ($i: expr, $real: expr) => {
-                            match asm_flavour {
-                                InlineASM::X64 => {
-                                    if $real {
-                                        *out += &format!(
-                                            "\t\t\"mulpd %%xmm{0}, %%xmm1\\n\\t\"\n",
-                                            $i + 1
-                                        );
-                                    } else {
-                                        *out += &format!(
-                                            "\t\t\"movapd %%xmm1, %%xmm0\\n\\t\"
-\t\t\"unpckhpd %%xmm0, %%xmm0\\n\\t\"
-\t\t\"unpcklpd %%xmm1, %%xmm1\\n\\t\"
-\t\t\"mulpd %%xmm{0}, %%xmm0\\n\\t\"
-\t\t\"mulpd %%xmm{0}, %%xmm1\\n\\t\"
-\t\t\"shufpd $1, %%xmm0, %%xmm0\\n\\t\"
-\t\t\"addsubpd %%xmm0, %%xmm1\\n\\t\"\n",
-                                            $i + 1
-                                        );
-                                    }
-                                }
-                                InlineASM::AVX2 => {
-                                    if $real {
-                                        *out += &format!(
-                                            "\t\t\"vmulpd %%ymm{0}, %%ymm0\\n\\t\"\n",
-                                            $i + 1
-                                        );
-                                        *out +=
-                                            &format!("\t\t\"vxorpd %%ymm1, %%ymm1, %%ymm1\\n\\t\""); // im = 0
-                                    } else {
-                                        *out += &format!(
-                                            "\t\t\"vmulpd %%ymm0, %%ymm{0}, %%ymm14\\n\\t\"
-\t\t\"vmulpd %%ymm0, %%ymm{1}, %%ymm15\\n\\t\"
-\t\t\"vmulpd %%ymm1, %%ymm{1}, %%ymm0\\n\\t\"
-\t\t\"vmulpd %%ymm1, %%ymm{0}, %%ymm{1}\\n\\t\"
-\t\t\"vsubpd %%ymm0, %%ymm14, %%ymm0\\n\\t\"
-\t\t\"vaddpd %%ymm15, %%ymm{1}, %%ymm1\\n\\t\"\n",
-                                            2 * $i,
-                                            2 * $i + 1,
-                                        );
-                                    }
-                                }
-                                InlineASM::AArch64 => {
-                                    if $real {
-                                        *out += &format!(
-                                            "\t\t\"fmul d2, d{}, d2\\n\\t\"\n",
-                                            2 * ($i + 1)
-                                        );
-                                        *out += &format!("\t\t\"fmov d3, xzr\\n\\t\""); // im = 0
-                                    } else {
-                                        *out += &format!(
-                                            "
-\t\t\"fmul    d0, d{0}, d3\\n\\t\"
-\t\t\"fmul    d1, d{1}, d3\\n\\t\"
-\t\t\"fmadd   d3, d{0}, d2, d1\\n\\t\"
-\t\t\"fnmsub  d2, d{1}, d2, d0\\n\\t\"\n",
-                                            2 * ($i + 1) + 1,
-                                            2 * ($i + 1),
-                                        )
-                                    }
-                                }
-                                InlineASM::None => unreachable!(),
-                            }
-                        };
-                    }
-
                     let num_real_args = match c {
                         ComplexPhase::Real => a.len(),
                         ComplexPhase::PartialReal(n) => *n,
                         ComplexPhase::Imag | ComplexPhase::Any => 0,
                     };
 
-                    if !matches!(asm_flavour, InlineASM::AVX2) && a.len() < 15 || a.len() < 8 {
+                    if (!matches!(asm_flavour, InlineASM::AVX2) && a.len() < 15) || a.len() < 8 {
                         for (i, r) in a.iter().enumerate() {
                             load_complex!(i, *r);
                         }
 
                         for i in 1..a.len() {
-                            // optimized complex multiplication
                             mul_complex!(i, i < num_real_args);
                         }
                     } else {
                         load_complex!(0, a[0]);
-
-                        // load multiplications one after the other
                         for (i, r) in a.iter().enumerate().skip(1) {
                             load_complex!(1, *r);
                             mul_complex!(1, i < num_real_args);
@@ -5487,152 +5769,157 @@ extern "C" {{
 
                     let (addr_re, addr_im) = asm_load!(*o);
                     match asm_flavour {
-                        InlineASM::X64 => {
-                            *out += &format!("\t\t\"movupd %%xmm1, {addr_re}\\n\\t\"\n");
-                        }
+                        InlineASM::X64 => out.emit_asm_line(&format!("movupd %xmm1, {}", addr_re)),
                         InlineASM::AVX2 => {
-                            *out += &format!("\t\t\"vmovupd %%ymm0, {addr_re}\\n\\t\"\n");
-                            *out += &format!("\t\t\"vmovupd %%ymm1, {addr_im}\\n\\t\"\n");
+                            out.emit_asm_line(&format!("vmovupd %ymm0, {}", addr_re));
+                            out.emit_asm_line(&format!("vmovupd %ymm1, {}", addr_im));
                         }
                         InlineASM::AArch64 => {
                             if *o * 16 < 450 {
-                                *out += &format!("\t\t\"stp d2, d3, {addr_re}\\n\\t\"\n");
+                                out.emit_asm_line(&format!("stp d2, d3, {}", addr_re));
                             } else {
-                                *out += &format!("\t\t\"str d2, {addr_re}\\n\\t\"\n");
-                                *out += &format!("\t\t\"str d3, {addr_im}\\n\\t\"\n");
+                                out.emit_asm_line(&format!("str d2, {}", addr_re));
+                                out.emit_asm_line(&format!("str d3, {}", addr_im));
                             }
                         }
                         InlineASM::None => unreachable!(),
-                    };
+                    }
                 }
                 Instr::Pow(o, b, e) => {
                     if *e == -1 {
-                        if !in_asm_block {
-                            *out += "\t__asm__(\n";
-                            in_asm_block = true;
-                        }
-
                         let addr_b = asm_load!(*b);
                         let addr_o = asm_load!(*o);
                         match asm_flavour {
                             InlineASM::X64 => {
                                 if let ComplexPhase::Real = *c {
-                                    *out += &format!(
-                                        "\t\t\"movupd {}, %%xmm0\\n\\t\"
-\t\t\"movupd {}(%1), %%xmm1\\n\\t\"
-\t\t\"divsd %%xmm0, %%xmm1\\n\\t\"
-\t\t\"movupd %%xmm1, {}\\n\\t\"\n",
-                                        addr_b.0,
-                                        (self.reserved_indices - self.param_count + 1) * 16,
-                                        addr_o.0
-                                    );
+                                    let one_addr = out
+                                        .complex_addr(
+                                            AsmRegion::Constants,
+                                            (self.reserved_indices - self.param_count + 1) * 16,
+                                            &mut second_index,
+                                            false,
+                                        )
+                                        .0;
+                                    out.emit_asm_line(&format!("movupd {}, %xmm0", addr_b.0));
+                                    out.emit_asm_line(&format!("movupd {}, %xmm1", one_addr));
+                                    out.emit_asm_line("divsd %xmm0, %xmm1");
+                                    out.emit_asm_line(&format!("movupd %xmm1, {}", addr_o.0));
                                 } else {
-                                    *out += &format!(
-                                        "\t\t\"movupd {}, %%xmm0\\n\\t\"
-\t\t\"movupd {}(%1), %%xmm1\\n\\t\"
-\t\t\"movapd %%xmm0, %%xmm2\\n\\t\"
-\t\t\"xorpd %%xmm1, %%xmm0\\n\\t\"
-\t\t\"mulpd %%xmm2, %%xmm2\\n\\t\"
-\t\t\"haddpd %%xmm2, %%xmm2\\n\\t\"
-\t\t\"divpd %%xmm2, %%xmm0\\n\\t\"
-\t\t\"movupd %%xmm0, {}\\n\\t\"\n",
-                                        addr_b.0,
-                                        (self.reserved_indices - self.param_count) * 16,
-                                        addr_o.0
-                                    );
+                                    let one_addr = out
+                                        .complex_addr(
+                                            AsmRegion::Constants,
+                                            (self.reserved_indices - self.param_count) * 16,
+                                            &mut second_index,
+                                            false,
+                                        )
+                                        .0;
+                                    out.emit_asm_line(&format!("movupd {}, %xmm0", addr_b.0));
+                                    out.emit_asm_line(&format!("movupd {}, %xmm1", one_addr));
+                                    out.emit_asm_line("movapd %xmm0, %xmm2");
+                                    out.emit_asm_line("xorpd %xmm1, %xmm0");
+                                    out.emit_asm_line("mulpd %xmm2, %xmm2");
+                                    out.emit_asm_line("haddpd %xmm2, %xmm2");
+                                    out.emit_asm_line("divpd %xmm2, %xmm0");
+                                    out.emit_asm_line(&format!("movupd %xmm0, {}", addr_o.0));
                                 }
                             }
                             InlineASM::AVX2 => {
                                 if let ComplexPhase::Real = *c {
-                                    *out += &format!(
-                                        "\t\t\"vmovupd {0}, %%ymm0\\n\\t\"
-\t\t\"vmovupd {1}(%1), %%ymm1\\n\\t\"
-\t\t\"vdivpd  %%ymm0, %%ymm1, %%ymm0\\n\\t\"
-\t\t\"vmovupd %%ymm0, {2}\\n\\t\"
-\t\t\"vxorpd %%ymm1, %%ymm1, %%ymm1\\n\\t\"
-\t\t\"vmovupd %%ymm1, {3}\\n\\t\"\n",
-                                        addr_b.0,
-                                        (self.reserved_indices - self.param_count + 1) * 64,
-                                        addr_o.0,
-                                        addr_o.1
-                                    );
+                                    let one_addr = out
+                                        .complex_addr(
+                                            AsmRegion::Constants,
+                                            (self.reserved_indices - self.param_count + 1) * 64,
+                                            &mut second_index,
+                                            false,
+                                        )
+                                        .0;
+                                    out.emit_asm_line(&format!("vmovupd {}, %ymm0", addr_b.0));
+                                    out.emit_asm_line(&format!("vmovupd {}, %ymm1", one_addr));
+                                    out.emit_asm_line("vdivpd %ymm0, %ymm1, %ymm0");
+                                    out.emit_asm_line(&format!("vmovupd %ymm0, {}", addr_o.0));
+                                    out.emit_asm_line("vxorpd %ymm1, %ymm1, %ymm1");
+                                    out.emit_asm_line(&format!("vmovupd %ymm1, {}", addr_o.1));
                                 } else {
-                                    // TODO: do FMA on top?
-                                    *out += &format!(
-                                        "\t\t\"vmovupd {0}, %%ymm0\\n\\t\"
-\t\t\"vmovupd {1}, %%ymm1\\n\\t\"
-\t\t\"vmulpd %%ymm0, %%ymm0, %%ymm3\\n\\t\"
-\t\t\"vmulpd %%ymm1, %%ymm1, %%ymm4\\n\\t\"
-\t\t\"vaddpd %%ymm3, %%ymm4, %%ymm3\\n\\t\"
-\t\t\"vdivpd %%ymm3, %%ymm0, %%ymm0\\n\\t\"
-\t\t\"vbroadcastsd {2}(%1), %%ymm4\\n\\t\"
-\t\t\"vxorpd %%ymm4, %%ymm1, %%ymm1\\n\\t\"
-\t\t\"vdivpd %%ymm3, %%ymm1, %%ymm1\\n\\t\"
-\t\t\"vmovupd %%ymm0, {3}\\n\\t\"
-\t\t\"vmovupd %%ymm1, {4}\\n\\t\"\n",
-                                        addr_b.0,
-                                        addr_b.1,
-                                        (self.reserved_indices - self.param_count) * 64,
-                                        addr_o.0,
-                                        addr_o.1
-                                    );
+                                    let sign_addr = out
+                                        .complex_addr(
+                                            AsmRegion::Constants,
+                                            (self.reserved_indices - self.param_count) * 64,
+                                            &mut second_index,
+                                            false,
+                                        )
+                                        .0;
+                                    out.emit_asm_line(&format!("vmovupd {}, %ymm0", addr_b.0));
+                                    out.emit_asm_line(&format!("vmovupd {}, %ymm1", addr_b.1));
+                                    out.emit_asm_line("vmulpd %ymm0, %ymm0, %ymm3");
+                                    out.emit_asm_line("vmulpd %ymm1, %ymm1, %ymm4");
+                                    out.emit_asm_line("vaddpd %ymm3, %ymm4, %ymm3");
+                                    out.emit_asm_line("vdivpd %ymm3, %ymm0, %ymm0");
+                                    out.emit_asm_line(&format!(
+                                        "vbroadcastsd {}, %ymm4",
+                                        sign_addr
+                                    ));
+                                    out.emit_asm_line("vxorpd %ymm4, %ymm1, %ymm1");
+                                    out.emit_asm_line("vdivpd %ymm3, %ymm1, %ymm1");
+                                    out.emit_asm_line(&format!("vmovupd %ymm0, {}", addr_o.0));
+                                    out.emit_asm_line(&format!("vmovupd %ymm1, {}", addr_o.1));
                                 }
                             }
                             InlineASM::AArch64 => {
                                 if *b * 16 < 450 {
-                                    *out += &format!("\t\t\"ldp d0, d1, {}\\n\\t\"\n", addr_b.0);
+                                    out.emit_asm_line(&format!("ldp d0, d1, {}", addr_b.0));
                                 } else {
-                                    *out += &format!("\t\t\"ldr d0, {}\\n\\t\"\n", addr_b.0);
-                                    *out += &format!("\t\t\"ldr d1, {}\\n\\t\"\n", addr_b.1);
+                                    out.emit_asm_line(&format!("ldr d0, {}", addr_b.0));
+                                    out.emit_asm_line(&format!("ldr d1, {}", addr_b.1));
                                 }
 
                                 if let ComplexPhase::Real = *c {
-                                    *out += &format!(
-                                        "\t\t\"ldr    d2, [%1, {}]\\n\\t\"
-\t\t\"fdiv    d0, d2, d0\\n\\t\"\n",
-                                        (self.reserved_indices - self.param_count + 1) * 16
+                                    let one_addr = out.scalar_addr(
+                                        AsmRegion::Constants,
+                                        (self.reserved_indices - self.param_count + 1) * 16,
+                                        &mut second_index,
+                                        false,
                                     );
+                                    out.emit_asm_line(&format!("ldr d2, {}", one_addr));
+                                    out.emit_asm_line("fdiv d0, d2, d0");
                                 } else {
-                                    *out += "
-\t\t\"fmul    d2, d0, d0\\n\\t\"
-\t\t\"fmadd   d2, d1, d1, d2\\n\\t\"
-\t\t\"fneg    d1, d1\\n\\t\"
-\t\t\"fdiv    d0, d0, d2\\n\\t\"
-\t\t\"fdiv    d1, d1, d2\\n\\t\"\n";
+                                    out.emit_asm_line("fmul d2, d0, d0");
+                                    out.emit_asm_line("fmadd d2, d1, d1, d2");
+                                    out.emit_asm_line("fneg d1, d1");
+                                    out.emit_asm_line("fdiv d0, d0, d2");
+                                    out.emit_asm_line("fdiv d1, d1, d2");
                                 }
 
                                 if *o * 16 < 450 {
-                                    *out += &format!("\t\t\"stp d0, d1, {}\\n\\t\"\n", addr_o.0);
+                                    out.emit_asm_line(&format!("stp d0, d1, {}", addr_o.0));
                                 } else {
-                                    *out += &format!("\t\t\"str d0, {}\\n\\t\"\n", addr_o.0);
-                                    *out += &format!("\t\t\"str d1, {}\\n\\t\"\n", addr_o.1);
+                                    out.emit_asm_line(&format!("str d0, {}", addr_o.0));
+                                    out.emit_asm_line(&format!("str d1, {}", addr_o.1));
                                 }
                             }
                             InlineASM::None => unreachable!(),
                         }
                     } else {
-                        end_asm_block!(in_asm_block);
-
+                        out.finish_block(function_name, false);
+                        second_index = 0;
                         let base = get_input!(*b);
-                        *out += format!("\tZ[{o}] = pow({base}, {e});\n").as_str();
+                        out.emit_wrapper(&format!("\tZ[{o}] = pow({base}, {e});\n"));
                     }
                 }
                 Instr::Powf(o, b, e) => {
-                    end_asm_block!(in_asm_block);
+                    out.finish_block(function_name, false);
+                    second_index = 0;
                     let base = get_input!(*b);
                     let exp = get_input!(*e);
-
                     let suffix = if let ComplexPhase::Real = *c {
                         ".real()"
                     } else {
                         ""
                     };
-
-                    *out += format!("\tZ[{o}] = pow({base}{suffix}, {exp}{suffix});\n").as_str();
+                    out.emit_wrapper(&format!("\tZ[{o}] = pow({base}{suffix}, {exp}{suffix});\n"));
                 }
                 Instr::BuiltinFun(o, s, a) => {
-                    end_asm_block!(in_asm_block);
-
+                    out.finish_block(function_name, false);
+                    second_index = 0;
                     let arg = if let ComplexPhase::Real = *c {
                         get_input!(*a) + ".real()"
                     } else {
@@ -5640,185 +5927,93 @@ extern "C" {{
                     };
 
                     match s.0.get_id() {
-                        Symbol::EXP_ID => {
-                            *out += format!("\tZ[{o}] = exp({arg});\n").as_str();
-                        }
-                        Symbol::LOG_ID => {
-                            *out += format!("\tZ[{o}] = log({arg});\n").as_str();
-                        }
-                        Symbol::SIN_ID => {
-                            *out += format!("\tZ[{o}] = sin({arg});\n").as_str();
-                        }
-                        Symbol::COS_ID => {
-                            *out += format!("\tZ[{o}] = cos({arg});\n").as_str();
-                        }
-                        Symbol::SQRT_ID => {
-                            *out += format!("\tZ[{o}] = sqrt({arg});\n").as_str();
-                        }
+                        Symbol::EXP_ID => out.emit_wrapper(&format!("\tZ[{o}] = exp({arg});\n")),
+                        Symbol::LOG_ID => out.emit_wrapper(&format!("\tZ[{o}] = log({arg});\n")),
+                        Symbol::SIN_ID => out.emit_wrapper(&format!("\tZ[{o}] = sin({arg});\n")),
+                        Symbol::COS_ID => out.emit_wrapper(&format!("\tZ[{o}] = cos({arg});\n")),
+                        Symbol::SQRT_ID => out.emit_wrapper(&format!("\tZ[{o}] = sqrt({arg});\n")),
                         Symbol::ABS_ID => {
-                            *out += format!("\tZ[{o}] = std::abs({arg});\n").as_str();
+                            out.emit_wrapper(&format!("\tZ[{o}] = std::abs({arg});\n"))
                         }
                         Symbol::CONJ_ID => {
                             if let ComplexPhase::Real = *c {
-                                *out += format!("\tZ[{o}] = {arg};\n").as_str();
+                                out.emit_wrapper(&format!("\tZ[{o}] = {arg};\n"))
                             } else {
-                                *out += format!("\tZ[{o}] = conj({arg});\n").as_str();
+                                out.emit_wrapper(&format!("\tZ[{o}] = conj({arg});\n"))
                             }
                         }
                         _ => unreachable!(),
                     }
                 }
                 Instr::ExternalFun(o, s, a) => {
-                    end_asm_block!(in_asm_block);
-
+                    out.finish_block(function_name, false);
+                    second_index = 0;
                     let name = &self.external_fns[*s];
                     let args = a.iter().map(|x| get_input!(*x)).collect::<Vec<_>>();
-
-                    *out += format!("\tZ[{}] = {}({});\n", o, name, args.join(", ")).as_str();
+                    out.emit_wrapper(&format!("\tZ[{}] = {}({});\n", o, name, args.join(", ")));
                 }
                 Instr::IfElse(cond, _) => {
-                    end_asm_block!(in_asm_block);
-
+                    out.finish_block(function_name, false);
+                    second_index = 0;
                     if asm_flavour == InlineASM::AVX2 {
-                        *out += &format!("\tif (all({} != 0.)) {{\n", get_input!(*cond));
+                        out.emit_wrapper(&format!("\tif (all({} != 0.)) {{\n", get_input!(*cond)));
                     } else {
-                        *out += &format!("\tif ({} != 0.) {{\n", get_input!(*cond));
+                        out.emit_wrapper(&format!("\tif ({} != 0.) {{\n", get_input!(*cond)));
                     }
                 }
-                Instr::Goto(_) => {
-                    next_label_is_true_branch_end = true;
-                }
+                Instr::Goto(_) => next_label_is_true_branch_end = true,
                 Instr::Label(l) => {
-                    end_asm_block!(in_asm_block);
-
+                    out.finish_block(function_name, false);
+                    second_index = 0;
                     for (o, b) in label_join_info.get(l).unwrap() {
                         let arg_a = get_input!(*o);
                         let arg_b = get_input!(*b);
-                        *out += &format!("\t{} = {};\n", arg_a, arg_b);
+                        out.emit_wrapper(&format!("\t{} = {};\n", arg_a, arg_b));
                     }
 
                     if next_label_is_true_branch_end {
-                        *out += "\t} else {\n";
+                        out.emit_wrapper("\t} else {\n");
                         next_label_is_true_branch_end = false;
                     } else {
-                        *out += "\t}\n";
+                        out.emit_wrapper("\t}\n");
                     }
                 }
                 Instr::Join(_, _, _, _) => {}
             }
         }
 
-        end_asm_block!(in_asm_block);
-
-        *out += "\t__asm__(\n";
-        for (i, r) in &mut self.result_indices.iter().enumerate() {
-            if *r < self.param_count {
-                match asm_flavour {
-                    InlineASM::X64 => {
-                        *out += &format!("\t\t\"movupd {}(%2), %%xmm0\\n\\t\"\n", r * 16);
-                    }
-                    InlineASM::AVX2 => {
-                        *out += &format!("\t\t\"vmovupd {}(%2), %%ymm0\\n\\t\"\n", r * 64);
-                        *out += &format!("\t\t\"vmovupd {}(%2), %%ymm1\\n\\t\"\n", r * 64 + 32);
-                    }
-                    InlineASM::AArch64 => {
-                        let (addr_re, _) = asm_load!(*r);
-                        *out += &format!("\t\t\"ldr q0, {}\\n\\t\"\n", addr_re);
-                    }
-                    InlineASM::None => unreachable!(),
-                }
-            } else if *r < self.reserved_indices {
-                match asm_flavour {
-                    InlineASM::X64 => {
-                        *out += &format!(
-                            "\t\t\"movupd {}(%1), %%xmm0\\n\\t\"\n",
-                            (r - self.param_count) * 16
-                        );
-                    }
-                    InlineASM::AVX2 => {
-                        *out += &format!(
-                            "\t\t\"vmovupd {}(%1), %%ymm0\\n\\t\"\n",
-                            (r - self.param_count) * 64
-                        );
-                        *out += &format!(
-                            "\t\t\"vmovupd {}(%1), %%ymm1\\n\\t\"\n",
-                            (r - self.param_count) * 64 + 32
-                        );
-                    }
-                    InlineASM::AArch64 => {
-                        let (addr_re, _) = asm_load!(*r);
-                        *out += &format!("\t\t\"ldr q0, {}\\n\\t\"\n", addr_re);
-                    }
-
-                    InlineASM::None => unreachable!(),
-                }
-            } else {
-                match asm_flavour {
-                    InlineASM::X64 => {
-                        *out += &format!("\t\t\"movupd {}(%0), %%xmm0\\n\\t\"\n", r * 16);
-                    }
-                    InlineASM::AVX2 => {
-                        *out += &format!("\t\t\"vmovupd {}(%0), %%ymm0\\n\\t\"\n", r * 64);
-                        *out += &format!("\t\t\"vmovupd {}(%0), %%ymm1\\n\\t\"\n", r * 64 + 32);
-                    }
-                    InlineASM::AArch64 => {
-                        let (addr_re, _) = asm_load!(*r);
-                        *out += &format!("\t\t\"ldr q0, {}\\n\\t\"\n", addr_re);
-                    }
-                    InlineASM::None => unreachable!(),
-                }
-            }
-
+        for (i, r) in self.result_indices.iter().enumerate() {
             match asm_flavour {
                 InlineASM::X64 => {
-                    *out += &format!("\t\t\"movupd %%xmm0, {}(%3)\\n\\t\"\n", i * 16);
+                    let (addr_re, _) = asm_load!(*r);
+                    out.emit_asm_line(&format!("movupd {}, %xmm0", addr_re));
+                    let dest = output_addr!(i);
+                    out.emit_asm_line(&format!("movupd %xmm0, {}", dest));
                 }
                 InlineASM::AVX2 => {
-                    *out += &format!("\t\t\"vmovupd %%ymm0, {}(%3)\\n\\t\"\n", i * 64);
-                    *out += &format!("\t\t\"vmovupd %%ymm1, {}(%3)\\n\\t\"\n", i * 64 + 32);
+                    let (addr_re, addr_im) = asm_load!(*r);
+                    out.emit_asm_line(&format!("vmovupd {}, %ymm0", addr_re));
+                    out.emit_asm_line(&format!("vmovupd {}, %ymm1", addr_im));
+                    let dest = output_addr!(i);
+                    let dest_im =
+                        out.scalar_addr(AsmRegion::Output, i * 64 + 32, &mut second_index, false);
+                    out.emit_asm_line(&format!("vmovupd %ymm0, {}", dest));
+                    out.emit_asm_line(&format!("vmovupd %ymm1, {}", dest_im));
                 }
                 InlineASM::AArch64 => {
-                    let dest = i * 16;
-                    if dest > 32760 {
-                        let d = dest.ilog2();
-                        let shift = d.min(12);
-                        let coeff = dest / (1 << shift);
-                        let rest = dest - (coeff << shift);
-                        second_index = 0;
-                        *out += &format!("\t\t\"add x8, %3, {}, lsl {}\\n\\t\"\n", coeff, shift);
-                        *out += &format!("\t\t\"str q0, [x8, {}]\\n\\t\"\n", rest);
-                    } else {
-                        *out += &format!("\t\t\"str q0, [%3, {}]\\n\\t\"\n", dest);
-                    }
+                    let (addr_re, _) = asm_load!(*r);
+                    out.emit_asm_line(&format!("ldr q0, {}", addr_re));
+                    let dest = output_addr!(i);
+                    out.emit_asm_line(&format!("str q0, {}", dest));
                 }
                 InlineASM::None => unreachable!(),
             }
         }
 
-        match asm_flavour {
-            InlineASM::X64 => {
-                *out += &format!(
-                    "\t\t:\n\t\t: \"r\"(Z), \"r\"({function_name}_CONSTANTS_complex), \"r\"(params), \"r\"(out)\n\t\t: \"memory\", \"xmm0\", \"xmm1\", \"xmm2\", \"xmm3\", \"xmm4\", \"xmm5\", \"xmm6\", \"xmm7\", \"xmm8\", \"xmm9\", \"xmm10\", \"xmm11\", \"xmm12\", \"xmm13\", \"xmm14\", \"xmm15\");\n"
-                );
-            }
-            InlineASM::AVX2 => {
-                *out += &format!(
-                    "\t\t:\n\t\t: \"r\"(Z), \"r\"({function_name}_CONSTANTS_complex), \"r\"(params), \"r\"(out)\n\t\t: \"memory\", \"ymm0\", \"ymm1\", \"ymm2\", \"ymm3\", \"ymm4\", \"ymm5\", \"ymm6\", \"ymm7\", \"ymm8\", \"ymm9\", \"ymm10\", \"ymm11\", \"ymm12\", \"ymm13\", \"ymm14\", \"ymm15\");\n"
-                );
-            }
-            InlineASM::AArch64 => {
-                *out += &format!(
-                    "\t\t:\n\t\t: \"r\"(Z), \"r\"({function_name}_CONSTANTS_complex), \"r\"(params), \"r\"(out)\n\t\t: \"memory\", \"x8\", \"d0\", \"d1\", \"d2\", \"d3\", \"d4\", \"d5\", \"d6\", \"d7\", \"d8\", \"d9\", \"d10\", \"d11\", \"d12\", \"d13\", \"d14\", \"d15\", \"d16\", \"d17\", \"d18\", \"d19\", \"d20\", \"d21\", \"d22\", \"d23\", \"d24\", \"d25\", \"d26\", \"d27\", \"d28\", \"d29\", \"d30\", \"d31\");\n"
-                );
-            }
-            InlineASM::None => unreachable!(),
-        }
-
-        in_asm_block
+        out.finish_block(function_name, true);
     }
 }
 
-/// An external function that can be called by [ExpressionEvaluatorWithExternalFunctions].
 pub trait ExternalFunction<T>: Fn(&[T]) -> T + Send + Sync + DynClone + Send + Sync {}
 dyn_clone::clone_trait_object!(<T> ExternalFunction<T>);
 impl<T, F: Clone + Send + Sync + Fn(&[T]) -> T + Send + Sync> ExternalFunction<T> for F {}
@@ -11418,11 +11613,22 @@ impl<T: CompiledNumber> ExportedCode<T> {
             builder.arg(c);
         }
 
-        let r = builder
-            .arg("-o")
-            .arg(out.as_ref())
-            .arg(&self.path)
-            .output()?;
+        builder.arg("-o").arg(out.as_ref()).arg(&self.path);
+
+        let asm_sidecar_path = |suffix: &str| {
+            let stem = self.path.file_stem()?.to_string_lossy();
+            Some(self.path.with_file_name(format!("{stem}.{suffix}.s")))
+        };
+
+        if let Some(sidecar) = asm_sidecar_path("double_asm").filter(|p| p.exists()) {
+            builder.arg(sidecar);
+        }
+
+        if let Some(sidecar) = asm_sidecar_path("complex_asm").filter(|p| p.exists()) {
+            builder.arg(sidecar);
+        }
+
+        let r = builder.output()?;
 
         if !r.status.success() {
             return Err(std::io::Error::other(format!(
