@@ -71,7 +71,7 @@ use crate::{
         atom::AtomField,
         dual::HyperDual,
         finite_field::{FiniteFieldCore, PrimeIteratorU64, ToFiniteField, Z2, Zp64, is_prime_u64},
-        float::{Complex, F64, Float, PythonMultiPrecisionFloat, RealLike},
+        float::{Complex, DoubleFloat, F64, Float, PythonMultiPrecisionFloat, RealLike},
         integer::{FromFiniteField, Integer, IntegerRelationError, IntegerRing, Z},
         rational::{Q, Rational, RationalField},
         rational_polynomial::{
@@ -7499,6 +7499,8 @@ impl PythonExpression {
             eval_real: None,
             jit_real: None,
             jit_complex: None,
+            eval_double_float: None,
+            eval_double_float_complex: None,
             eval_arb_prec: None,
             eval_arb_prec_complex: None,
             external_functions,
@@ -7687,6 +7689,8 @@ impl PythonExpression {
             eval_real: None,
             jit_real: None,
             jit_complex: None,
+            eval_double_float: None,
+            eval_double_float_complex: None,
             eval_arb_prec: None,
             eval_arb_prec_complex: None,
             external_functions,
@@ -15960,6 +15964,9 @@ pub struct PythonExpressionEvaluator {
     pub eval_real: Option<ExpressionEvaluatorWithExternalFunctions<f64>>,
     pub jit_real: Option<JITCompiledEvaluator<f64>>,
     pub jit_complex: Option<JITCompiledEvaluator<Complex<f64>>>,
+    pub eval_double_float: Option<ExpressionEvaluatorWithExternalFunctions<DoubleFloat>>,
+    pub eval_double_float_complex:
+        Option<ExpressionEvaluatorWithExternalFunctions<Complex<DoubleFloat>>>,
     pub eval_arb_prec: Option<(u32, ExpressionEvaluatorWithExternalFunctions<Float>)>,
     pub eval_arb_prec_complex: Option<(
         u32,
@@ -15997,6 +16004,134 @@ impl PythonExpressionEvaluator {
 
         complex_eval.with_external_functions(external_functions_complex)
     }
+
+    fn evaluate_double_float<'py>(
+        &mut self,
+        inputs: Vec<PythonMultiPrecisionFloat>,
+    ) -> PyResult<Vec<PythonMultiPrecisionFloat>> {
+        if self.rational_constants.iter().any(|c| !c.is_real()) {
+            return Err(exceptions::PyValueError::new_err(
+                "Evaluator contains complex coefficients. Use evaluate_complex instead.",
+            ));
+        }
+
+        if self.eval_double_float.is_none() {
+            // build a new arb prec evaluator with the desired precision
+            let external_functions_float = self
+                .external_functions
+                .clone()
+                .into_iter()
+                .map(move |((_, name), f)| {
+                    let ff: Box<dyn ExternalFunction<DoubleFloat>> = Box::new(move |args| {
+                        let args_wrap: Vec<PythonMultiPrecisionFloat> =
+                            args.iter().map(|x| Float::from(x).into()).collect();
+                        Python::attach(|py| {
+                            f.call1(py, (args_wrap,))
+                                .unwrap()
+                                .extract::<PythonMultiPrecisionFloat>(py)
+                                .unwrap()
+                                .0
+                                .to_double_float()
+                        })
+                    });
+
+                    (name.clone(), ff)
+                })
+                .collect();
+
+            self.eval_double_float = Some(
+                self.eval_complex
+                    .get_evaluator()
+                    .clone()
+                    .set_coeff(&self.rational_constants)
+                    .map_coeff(&|x| (&x.re).into())
+                    .with_external_functions(external_functions_float)
+                    .map_err(|e| {
+                        exceptions::PyValueError::new_err(format!(
+                            "Could not create complex evaluator: {e}",
+                        ))
+                    })?,
+            );
+        }
+
+        let eval = &mut self.eval_double_float.as_mut().unwrap();
+
+        let inputs = inputs
+            .into_iter()
+            .map(|x| x.0.to_double_float())
+            .collect::<Vec<_>>();
+        let mut out = vec![0f64.into(); self.eval_complex.get_evaluator().get_output_len()];
+        eval.evaluate(&inputs, &mut out);
+        Ok(out.into_iter().map(|x| Float::from(x).into()).collect())
+    }
+
+    fn evaluate_double_float_complex(
+        &mut self,
+        inputs: Vec<(PythonMultiPrecisionFloat, PythonMultiPrecisionFloat)>,
+    ) -> PyResult<Vec<(PythonMultiPrecisionFloat, PythonMultiPrecisionFloat)>> {
+        if self.eval_double_float_complex.is_none() {
+            // build a new arb prec evaluator with the desired precision
+            let external_functions_float = self
+                .external_functions
+                .clone()
+                .into_iter()
+                .map(move |((_, name), f)| {
+                    let ff: Box<dyn ExternalFunction<Complex<DoubleFloat>>> =
+                        Box::new(move |args| {
+                            let args_wrap: Vec<(
+                                PythonMultiPrecisionFloat,
+                                PythonMultiPrecisionFloat,
+                            )> = args
+                                .iter()
+                                .map(|x| (Float::from(x.re).into(), Float::from(x.im).into()))
+                                .collect();
+                            Python::attach(|py| {
+                                let (re, im) = f
+                                .call1(py, (args_wrap,))
+                                .unwrap()
+                                .extract::<(PythonMultiPrecisionFloat, PythonMultiPrecisionFloat)>(
+                                    py,
+                                )
+                                .unwrap();
+                                Complex::new(re.0.to_double_float(), im.0.to_double_float())
+                            })
+                        });
+
+                    (name.clone(), ff)
+                })
+                .collect();
+
+            self.eval_double_float_complex = Some(
+                self.eval_complex
+                    .get_evaluator()
+                    .clone()
+                    .set_coeff(&self.rational_constants)
+                    .map_coeff(&|x| Complex::new((&x.re).into(), (&x.im).into()))
+                    .with_external_functions(external_functions_float)
+                    .map_err(|e| {
+                        exceptions::PyValueError::new_err(format!(
+                            "Could not create complex evaluator: {e}",
+                        ))
+                    })?,
+            );
+        }
+
+        let eval = &mut self.eval_double_float_complex.as_mut().unwrap();
+
+        let inputs = inputs
+            .into_iter()
+            .map(|x| Complex::new(x.0.0.to_double_float(), x.1.0.to_double_float()))
+            .collect::<Vec<_>>();
+        let mut out = vec![
+            Complex::from(DoubleFloat::from(0.));
+            self.eval_complex.get_evaluator().get_output_len()
+        ];
+        eval.evaluate(&inputs, &mut out);
+        Ok(out
+            .into_iter()
+            .map(|x| (Float::from(x.re).into(), Float::from(x.im).into()))
+            .collect())
+    }
 }
 
 #[cfg_attr(feature = "python_stubgen", gen_stub_pymethods)]
@@ -16011,6 +16146,8 @@ impl PythonExpressionEvaluator {
             eval_real: self.eval_real.clone(),
             jit_real: self.jit_real.clone(),
             jit_complex: self.jit_complex.clone(),
+            eval_double_float: self.eval_double_float.clone(),
+            eval_double_float_complex: self.eval_double_float_complex.clone(),
             eval_arb_prec: self.eval_arb_prec.clone(),
             eval_arb_prec_complex: self.eval_arb_prec_complex.clone(),
             external_functions: self.external_functions.clone(),
@@ -16047,6 +16184,8 @@ impl PythonExpressionEvaluator {
             eval_real: None,
             jit_real: None,
             jit_complex: None,
+            eval_double_float: None,
+            eval_double_float_complex: None,
             eval_arb_prec: None,
             eval_arb_prec_complex: None,
             external_functions,
@@ -16456,7 +16595,10 @@ impl PythonExpressionEvaluator {
         Ok(out.into_pyarray(py))
     }
 
-    /// Evaluate the expression for a single input with the given decimal digit precision and return the result.
+    /// Evaluate the expression for a single input. The precision of the input parameters is honored, and
+    /// all constants are converted to a float with a decimal precision set by `decimal_digit_precision`.
+    ///
+    /// If `decimal_digit_precision` is set to 32, a much faster evaluation using double-float arithmetic is performed.
     ///
     /// Examples
     /// --------
@@ -16473,6 +16615,10 @@ impl PythonExpressionEvaluator {
         inputs: Vec<PythonMultiPrecisionFloat>,
         decimal_digit_precision: u32,
     ) -> PyResult<Vec<PythonMultiPrecisionFloat>> {
+        if decimal_digit_precision == 32 {
+            return self.evaluate_double_float(inputs);
+        }
+
         let prec = (decimal_digit_precision as f64 * std::f64::consts::LOG2_10).ceil() as u32;
 
         if self.rational_constants.iter().any(|c| !c.is_real()) {
@@ -16656,7 +16802,10 @@ impl PythonExpressionEvaluator {
         Ok(out.into_pyarray(py))
     }
 
-    /// Evaluate the expression for a single complex input, represented as a tuple of real and imaginary parts, with the given decimal digit precision and return the result.
+    /// Evaluate the expression for a single complex input, represented as a tuple of real and imaginary parts.
+    /// The precision of the input parameter is honored, and all constants are converted to a float with a decimal precision set by `decimal_digit_precision`.
+    ///
+    /// If `decimal_digit_precision` is set to 32, a much faster evaluation using double-float arithmetic is performed.
     ///
     /// Examples
     /// --------
@@ -16674,6 +16823,10 @@ impl PythonExpressionEvaluator {
         inputs: Vec<(PythonMultiPrecisionFloat, PythonMultiPrecisionFloat)>,
         decimal_digit_precision: u32,
     ) -> PyResult<Vec<(PythonMultiPrecisionFloat, PythonMultiPrecisionFloat)>> {
+        if decimal_digit_precision == 32 {
+            return self.evaluate_double_float_complex(inputs);
+        }
+
         let prec = (decimal_digit_precision as f64 * std::f64::consts::LOG2_10).ceil() as u32;
 
         if self.eval_arb_prec_complex.is_none()

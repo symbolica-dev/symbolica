@@ -5458,8 +5458,13 @@ class Evaluator:
         Yields`[[ 4.] [ 8.] [14.]]` 
         """
 
-    def evaluate_with_prec(self, inputs: Sequence[float | str | Decimal], decimal_digit_precision: int) -> list[Decimal]:
-        """Evaluate the expression for a single input with the given decimal digit precision and return the result.
+    def evaluate_with_prec(
+        self, inputs: Sequence[float | str | Decimal], decimal_digit_precision: int
+    ) -> list[Decimal]:
+        """Evaluate the expression for a single input. The precision of the input parameters is honored, and
+        all constants are converted to a float with a decimal precision set by `decimal_digit_precision`.
+
+        If `decimal_digit_precision` is set to 32, a much faster evaluation using double-float arithmetic is performed.
 
         Examples
         --------
@@ -5491,8 +5496,15 @@ class Evaluator:
         Yields`[[ 4.+4.j] [14.+0.j] [32.+0.j]]` 
         """
 
-    def evaluate_complex_with_prec(self, inputs: Sequence[tuple[float | str | Decimal, float | str | Decimal]], decimal_digit_precision: int) -> list[tuple[Decimal]]:
-        """Evaluate the expression for a single complex input, represented as a tuple of real and imaginary parts, with the given decimal digit precision and return the result.
+    def evaluate_complex_with_prec(
+        self,
+        inputs: Sequence[tuple[float | str | Decimal, float | str | Decimal]],
+        decimal_digit_precision: int,
+    ) -> list[tuple[Decimal]]:
+        """Evaluate the expression for a single complex input, represented as a tuple of real and imaginary parts.
+        The precision of the input parameters is honored, and all constants are converted to a float with a decimal precision set by `decimal_digit_precision`.
+
+        If `decimal_digit_precision` is set to 32, a much faster evaluation using double-float arithmetic is performed.
 
         Examples
         --------
