@@ -26,8 +26,8 @@ use pyo3::{
     pyclass::CompareOp,
     pyfunction, pymethods,
     types::{
-        PyAnyMethods, PyBytes, PyComplex, PyDict, PyInt, PyIterator, PyModule, PyNone, PyTuple,
-        PyTupleMethods, PyType, PyTypeMethods,
+        PyAnyMethods, PyBytes, PyBytesMethods, PyComplex, PyDict, PyInt, PyIterator, PyModule,
+        PyNone, PyTuple, PyTupleMethods, PyType, PyTypeMethods,
     },
     wrap_pyfunction,
 };
@@ -50,6 +50,7 @@ use pyo3_stub_gen::{
 #[cfg(not(feature = "python_stubgen"))]
 use pyo3_stub_gen_derive::remove_gen_stub;
 
+use rand::{Rng, RngCore};
 use rug::Complete;
 use self_cell::self_cell;
 use smallvec::SmallVec;
@@ -19246,10 +19247,11 @@ impl PythonProbe {
 /// which is an instance counter starting at 0.
 #[cfg_attr(feature = "python_stubgen", gen_stub_pyclass)]
 #[pyclass(
-    skip_from_py_object,
+    from_py_object,
     name = "RandomNumberGenerator",
     module = "symbolica.core"
 )]
+#[derive(Clone)]
 pub struct PythonRandomNumberGenerator {
     state: MonteCarloRng,
 }
@@ -19265,6 +19267,39 @@ impl PythonRandomNumberGenerator {
         Self {
             state: MonteCarloRng::new(seed, stream_id),
         }
+    }
+
+    /// Clone the random number generator, creating a new instance with the same state. The cloned instance will generate the same sequence of random numbers as the original instance.
+    fn __copy__(&self) -> Self {
+        self.clone()
+    }
+
+    /// Generate the next random unsigned 64-bit number in the sequence.
+    fn next(&mut self) -> u64 {
+        self.state.next_u64()
+    }
+
+    /// Generate the next random floating-point number in the sequence, uniformly distributed in the range [0, 1).
+    fn next_float(&mut self) -> f64 {
+        self.state.random()
+    }
+
+    /// Import a random number generator from a previously exported state. The state should be a bytes object of length 32.
+    #[classmethod]
+    fn load(_cls: &Bound<'_, PyType>, state: Bound<'_, PyBytes>) -> PyResult<Self> {
+        let state: [u8; 32] = state.as_bytes().try_into().map_err(|_| {
+            exceptions::PyValueError::new_err("Invalid state size: expected 32 bytes")
+        })?;
+
+        Ok(PythonRandomNumberGenerator {
+            state: MonteCarloRng::import(state),
+        })
+    }
+
+    /// Export the random number generator state as a bytes object of length 32, which can be imported again to restore the state.
+    fn save<'py>(&self, py: Python<'py>) -> Bound<'py, PyBytes> {
+        let state = self.state.export();
+        PyBytes::new(py, &state).into()
     }
 }
 

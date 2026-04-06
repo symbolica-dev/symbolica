@@ -87,7 +87,6 @@ dyn-clone = "1.0"
 libloading = "0.9"
 once_cell = "1.19"
 rand = "0.9"
-rand_xoshiro = "0.7"
 pyo3-stub-gen = { version = "0.17", default-features = false, features = [
     "numpy",
 ], optional = true }

@@ -5864,6 +5864,21 @@ class RandomNumberGenerator:
         """Create a new random number generator with a given `seed` and `stream_id`. For parallel runs,
         each thread or instance generating samples should use the same `seed` but a different `stream_id`."""
 
+    def __copy__(self) -> RandomNumberGenerator:
+        """Copy the random number generator, so that the copy will generate the same sequence of random numbers."""
+
+    def next(self) -> int:
+        """Generate the next random unsigned 64-bit integer in the sequence."""
+
+    def next_float(self) -> float:
+        """Generate the next random floating-point number in the sequence, uniformly distributed in the range [0, 1)."""
+
+    @classmethod
+    def load(_cls, state: bytes) -> RandomNumberGenerator:
+        """Import a random number generator from a previously exported state. The state should be a bytes object of length 32."""
+
+    def save(self) -> bytes:
+        """Export the random number generator state as a bytes object of length 32, which can be imported again to restore the state."""
 
 class HalfEdge:
     """A half-edge in a graph that connects to one vertex, consisting of a direction (or `None` if undirected) and edge data."""
