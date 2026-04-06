@@ -12,7 +12,7 @@ use std::{
 use crate::{
     domains::{RingOps, Set, algebraic_number::AlgebraicExtension},
     poly::{
-        PositiveExponent, PolyVariable, factor::Factorize, gcd::PolynomialGCD,
+        PolyVariable, PositiveExponent, factor::Factorize, gcd::PolynomialGCD,
         polynomial::MultivariatePolynomial,
     },
     printer::{PrintOptions, PrintState},

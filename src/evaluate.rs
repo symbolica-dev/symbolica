@@ -1934,7 +1934,77 @@ impl<T: Real> ExpressionEvaluator<T> {
     }
 
     /// Evaluate the expression evaluator and write the results in `out`.
+    #[inline]
     pub fn evaluate(&mut self, params: &[T], out: &mut [T]) {
+        self.evaluate_impl(params, &mut [], out);
+    }
+
+    #[cold]
+    #[inline(never)]
+    fn evaluate_impl_no_ops(
+        stack: &mut [T],
+        instr: &Instr,
+        external_fns: &mut [(Vec<T>, String, Box<dyn ExternalFunction<T>>)],
+    ) -> Option<usize> {
+        match instr {
+            Instr::Powf(r, b, e) => {
+                stack[*r] = stack[*b].powf(&stack[*e]);
+            }
+            Instr::BuiltinFun(r, s, arg) => match s.0.get_id() {
+                Symbol::EXP_ID => stack[*r] = stack[*arg].exp(),
+                Symbol::LOG_ID => stack[*r] = stack[*arg].log(),
+                Symbol::SIN_ID => stack[*r] = stack[*arg].sin(),
+                Symbol::COS_ID => stack[*r] = stack[*arg].cos(),
+                Symbol::SQRT_ID => stack[*r] = stack[*arg].sqrt(),
+                Symbol::ABS_ID => stack[*r] = stack[*arg].norm(),
+                Symbol::CONJ_ID => stack[*r] = stack[*arg].conj(),
+                _ => unreachable!(),
+            },
+            Instr::ExternalFun(r, s, args) => {
+                let (cache, _, f) = &mut external_fns[*s];
+
+                if cache.len() < args.len() {
+                    cache.resize(args.len(), T::new_zero());
+                }
+
+                for (i, v) in cache.iter_mut().zip(args) {
+                    i.set_from(&stack[*v]);
+                }
+
+                stack[*r] = (f)(&cache[..args.len()]);
+            }
+            Instr::IfElse(n, label) => {
+                // jump to else block
+                if stack[*n].is_fully_zero() {
+                    return Some(label.0);
+                }
+            }
+            Instr::Goto(label) => {
+                return Some(label.0);
+            }
+            Instr::Label(_) => {}
+            Instr::Join(r, c, a, b) => {
+                if !stack[*c].is_fully_zero() {
+                    stack[*r] = stack[*a].clone();
+                } else {
+                    stack[*r] = stack[*b].clone();
+                }
+            }
+            Instr::Add(..) | Instr::Mul(..) | Instr::Pow(..) => {
+                unreachable!()
+            }
+        }
+
+        None
+    }
+
+    /// Evaluate the expression evaluator and write the results in `out`.
+    fn evaluate_impl(
+        &mut self,
+        params: &[T],
+        external_fns: &mut [(Vec<T>, String, Box<dyn ExternalFunction<T>>)],
+        out: &mut [T],
+    ) {
         if self.param_count != params.len() {
             panic!(
                 "Parameter count mismatch: expected {}, got {}",
@@ -1953,17 +2023,43 @@ impl<T: Real> ExpressionEvaluator<T> {
             let (instr, _) = unsafe { &self.instructions.get_unchecked(i) };
             match instr {
                 Instr::Add(r, v) => unsafe {
-                    tmp.set_from(self.stack.get_unchecked(*v.get_unchecked(0)));
-                    for x in v.get_unchecked(1..) {
-                        tmp += self.stack.get_unchecked(*x);
+                    match v.len() {
+                        2 => {
+                            tmp.set_from(self.stack.get_unchecked(*v.get_unchecked(0)));
+                            tmp += self.stack.get_unchecked(*v.get_unchecked(1));
+                        }
+                        3 => {
+                            tmp.set_from(self.stack.get_unchecked(*v.get_unchecked(0)));
+                            tmp += self.stack.get_unchecked(*v.get_unchecked(1));
+                            tmp += self.stack.get_unchecked(*v.get_unchecked(2));
+                        }
+                        _ => {
+                            tmp.set_from(self.stack.get_unchecked(*v.get_unchecked(0)));
+                            for x in v.get_unchecked(1..) {
+                                tmp += self.stack.get_unchecked(*x);
+                            }
+                        }
                     }
 
                     std::mem::swap(self.stack.get_unchecked_mut(*r), &mut tmp);
                 },
                 Instr::Mul(r, v) => unsafe {
-                    tmp.set_from(self.stack.get_unchecked(*v.get_unchecked(0)));
-                    for x in v.get_unchecked(1..) {
-                        tmp *= self.stack.get_unchecked(*x);
+                    match v.len() {
+                        2 => {
+                            tmp.set_from(self.stack.get_unchecked(*v.get_unchecked(0)));
+                            tmp *= self.stack.get_unchecked(*v.get_unchecked(1));
+                        }
+                        3 => {
+                            tmp.set_from(self.stack.get_unchecked(*v.get_unchecked(0)));
+                            tmp *= self.stack.get_unchecked(*v.get_unchecked(1));
+                            tmp *= self.stack.get_unchecked(*v.get_unchecked(2));
+                        }
+                        _ => {
+                            tmp.set_from(self.stack.get_unchecked(*v.get_unchecked(0)));
+                            for x in v.get_unchecked(1..) {
+                                tmp *= self.stack.get_unchecked(*x);
+                            }
+                        }
                     }
 
                     std::mem::swap(self.stack.get_unchecked_mut(*r), &mut tmp);
@@ -1975,42 +2071,12 @@ impl<T: Real> ExpressionEvaluator<T> {
                         self.stack[*r] = self.stack[*b].pow(e.unsigned_abs()).inv();
                     }
                 }
-                Instr::Powf(r, b, e) => {
-                    self.stack[*r] = self.stack[*b].powf(&self.stack[*e]);
-                }
-                Instr::BuiltinFun(r, s, arg) => match s.0.get_id() {
-                    Symbol::EXP_ID => self.stack[*r] = self.stack[*arg].exp(),
-                    Symbol::LOG_ID => self.stack[*r] = self.stack[*arg].log(),
-                    Symbol::SIN_ID => self.stack[*r] = self.stack[*arg].sin(),
-                    Symbol::COS_ID => self.stack[*r] = self.stack[*arg].cos(),
-                    Symbol::SQRT_ID => self.stack[*r] = self.stack[*arg].sqrt(),
-                    Symbol::ABS_ID => self.stack[*r] = self.stack[*arg].norm(),
-                    Symbol::CONJ_ID => self.stack[*r] = self.stack[*arg].conj(),
-                    _ => unreachable!(),
-                },
-                Instr::ExternalFun(_, s, _) => {
-                    panic!(
-                        "External function {} is not set. Call `with_external_functions` first.",
-                        self.external_fns[*s]
-                    );
-                }
-                Instr::IfElse(n, label) => {
-                    // jump to else block
-                    if self.stack[*n].is_fully_zero() {
-                        i = label.0;
+                _ => {
+                    if let Some(idx) =
+                        Self::evaluate_impl_no_ops(&mut self.stack, instr, external_fns)
+                    {
+                        i = idx;
                         continue;
-                    }
-                }
-                Instr::Goto(label) => {
-                    i = label.0;
-                    continue;
-                }
-                Instr::Label(_) => {}
-                Instr::Join(r, c, a, b) => {
-                    if !self.stack[*c].is_fully_zero() {
-                        self.stack[*r] = self.stack[*a].clone();
-                    } else {
-                        self.stack[*r] = self.stack[*b].clone();
                     }
                 }
             }
@@ -5979,99 +6045,7 @@ impl<T: Real> ExpressionEvaluatorWithExternalFunctions<T> {
     }
 
     pub fn evaluate(&mut self, params: &[T], out: &mut [T]) {
-        if self.eval.param_count != params.len() {
-            panic!(
-                "Parameter count mismatch: expected {}, got {}",
-                self.eval.param_count,
-                params.len()
-            );
-        }
-
-        for (t, p) in self.eval.stack.iter_mut().zip(params) {
-            t.set_from(p);
-        }
-
-        let mut tmp = T::new_zero();
-        let mut i = 0;
-        while i < self.eval.instructions.len() {
-            let (instr, _) = unsafe { self.eval.instructions.get_unchecked(i) };
-            match instr {
-                Instr::Add(r, v) => unsafe {
-                    tmp.set_from(self.eval.stack.get_unchecked(*v.get_unchecked(0)));
-                    for x in v.get_unchecked(1..) {
-                        tmp += self.eval.stack.get_unchecked(*x);
-                    }
-
-                    std::mem::swap(self.eval.stack.get_unchecked_mut(*r), &mut tmp);
-                },
-                Instr::Mul(r, v) => unsafe {
-                    tmp.set_from(self.eval.stack.get_unchecked(*v.get_unchecked(0)));
-                    for x in v.get_unchecked(1..) {
-                        tmp *= self.eval.stack.get_unchecked(*x);
-                    }
-
-                    std::mem::swap(self.eval.stack.get_unchecked_mut(*r), &mut tmp);
-                },
-                Instr::Pow(r, b, e) => {
-                    if *e >= 0 {
-                        self.eval.stack[*r] = self.eval.stack[*b].pow(*e as u64);
-                    } else {
-                        self.eval.stack[*r] = self.eval.stack[*b].pow(e.unsigned_abs()).inv();
-                    }
-                }
-                Instr::Powf(r, b, e) => {
-                    self.eval.stack[*r] = self.eval.stack[*b].powf(&self.eval.stack[*e]);
-                }
-                Instr::BuiltinFun(r, s, arg) => match s.0.get_id() {
-                    Symbol::EXP_ID => self.eval.stack[*r] = self.eval.stack[*arg].exp(),
-                    Symbol::LOG_ID => self.eval.stack[*r] = self.eval.stack[*arg].log(),
-                    Symbol::SIN_ID => self.eval.stack[*r] = self.eval.stack[*arg].sin(),
-                    Symbol::COS_ID => self.eval.stack[*r] = self.eval.stack[*arg].cos(),
-                    Symbol::SQRT_ID => self.eval.stack[*r] = self.eval.stack[*arg].sqrt(),
-                    Symbol::ABS_ID => self.eval.stack[*r] = self.eval.stack[*arg].norm(),
-                    Symbol::CONJ_ID => self.eval.stack[*r] = self.eval.stack[*arg].conj(),
-                    _ => unreachable!(),
-                },
-                Instr::ExternalFun(r, s, args) => {
-                    let (cache, _, f) = &mut self.external_fns[*s];
-
-                    if cache.len() < args.len() {
-                        cache.resize(args.len(), self.eval.stack[0].clone());
-                    }
-
-                    for (i, v) in cache.iter_mut().zip(args) {
-                        *i = self.eval.stack[*v].clone();
-                    }
-
-                    self.eval.stack[*r] = (f)(&cache[..args.len()]);
-                }
-                Instr::IfElse(n, label) => {
-                    // jump to else block
-                    if self.eval.stack[*n].is_fully_zero() {
-                        i = label.0;
-                        continue;
-                    }
-                }
-                Instr::Goto(label) => {
-                    i = label.0;
-                    continue;
-                }
-                Instr::Label(_) => {}
-                Instr::Join(r, c, a, b) => {
-                    if !self.eval.stack[*c].is_fully_zero() {
-                        self.eval.stack[*r] = self.eval.stack[*a].clone();
-                    } else {
-                        self.eval.stack[*r] = self.eval.stack[*b].clone();
-                    }
-                }
-            }
-
-            i += 1;
-        }
-
-        for (o, i) in out.iter_mut().zip(&self.eval.result_indices) {
-            o.set_from(&self.eval.stack[*i]);
-        }
+        self.eval.evaluate_impl(params, &mut self.external_fns, out);
     }
 }
 
