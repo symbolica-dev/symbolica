@@ -1510,7 +1510,13 @@ impl FloatLike for DoubleFloat {
     #[inline]
     fn pow(&self, e: u64) -> Self {
         debug_assert!(e <= i32::MAX as u64);
-        self.0.powi(e as i32).into()
+
+        if self.0.is_sign_negative() {
+            let r = (-self.0).powi(e as i32).into(); // prevent log of negative number in Df64::powi
+            if e % 2 == 0 { r } else { -r }
+        } else {
+            self.0.powi(e as i32).into()
+        }
     }
 
     #[inline(always)]
