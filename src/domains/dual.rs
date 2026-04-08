@@ -682,6 +682,13 @@ macro_rules! create_hyperdual_from_components {
         }
 
         impl<T: $crate::domains::float::FloatLike> $crate::domains::float::FloatLike for $t<T> {
+            #[inline]
+            fn set_from(&mut self, other: &Self) {
+                for (a, b) in self.values.iter_mut().zip(&other.values) {
+                    a.set_from(b);
+                }
+            }
+
             #[inline(always)]
             fn mul_add(&self, a: &Self, b: &Self) -> Self {
                 self.clone() * a + b
@@ -1678,6 +1685,13 @@ impl<T: FloatLike> std::ops::DivAssign<HyperDual<T>> for HyperDual<T> {
 }
 
 impl<T: FloatLike> FloatLike for HyperDual<T> {
+    #[inline]
+    fn set_from(&mut self, other: &Self) {
+        for (a, b) in self.values.iter_mut().zip(&other.values) {
+            a.set_from(b);
+        }
+    }
+
     #[inline(always)]
     fn mul_add(&self, a: &Self, b: &Self) -> Self {
         self.clone() * a + b

@@ -1,8 +1,6 @@
 use std::f64::consts::PI;
 
-use numerica::numerical_integration::{
-    ContinuousGrid, DiscreteGrid, Grid, MonteCarloRng, Sample,
-};
+use numerica::numerical_integration::{ContinuousGrid, DiscreteGrid, Grid, MonteCarloRng, Sample};
 
 fn main() {
     // Integrate x*pi + x^2 using multi-channeling:
