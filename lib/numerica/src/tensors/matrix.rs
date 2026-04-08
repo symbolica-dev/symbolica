@@ -171,16 +171,12 @@ impl<F: Ring> SelfRing for Vector<F> {
     fn format<W: std::fmt::Write>(
         &self,
         opts: &PrintOptions,
-        mut state: PrintState,
+        state: PrintState,
         f: &mut W,
     ) -> Result<bool, std::fmt::Error> {
         if state.in_sum {
             f.write_char('+')?;
         }
-        state.in_sum = false;
-        state.in_product = false;
-        state.in_exp = false;
-        state.in_exp_base = false;
 
         if opts.mode.is_latex() {
             f.write_str("\\begin{pvector}")?;
@@ -700,9 +696,9 @@ impl<F: Ring> Neg for Vector<F> {
 ///
 /// # Examples
 ///
-/// ```    
+/// ```
 /// # use numerica::domains::rational::Q;
-/// # use numerica::tensors::matrix::Matrix;    
+/// # use numerica::tensors::matrix::Matrix;
 /// let a = Matrix::from_linear(vec![3.into(), 2.into(), 15.into(), 4.into()], 2, 2, Q).unwrap();
 /// let inv = a.inv().unwrap();
 /// assert_eq!(&a * &inv, Matrix::identity(2, Q));

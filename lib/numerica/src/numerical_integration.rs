@@ -23,14 +23,14 @@
 //!      // sample 10_000 times per iteration
 //!      for _ in 0..10_000 {
 //!          grid.sample(&mut rng, &mut sample);
-//!     
+//!
 //!          if let Sample::Continuous(_cont_weight, xs) = &sample {
 //!              grid.add_training_sample(&sample, f(xs)).unwrap();
 //!          }
 //!      }
-//!     
+//!
 //!      grid.update(1.5, 1.5);
-//!     
+//!
 //!      println!(
 //!          "Integral at iteration {}: {}",
 //!          iteration,
@@ -40,7 +40,6 @@
 //! ```
 
 use rand::{Rng, RngCore, SeedableRng};
-use rand_xoshiro::Xoshiro256StarStar;
 
 use crate::domains::float::{Constructible, Real, RealLike};
 
@@ -395,7 +394,7 @@ impl<T: Real + Constructible + Copy + RealLike + PartialOrd> StatisticsAccumulat
 #[derive(Debug, Clone)]
 pub enum Sample<T: Real + Constructible + Copy + RealLike + PartialOrd> {
     Continuous(T, Vec<T>),
-    Discrete(T, usize, Option<Box<Sample<T>>>),
+    Discrete(T, usize, Option<Box<Sample<T>>>), // TODO: flatten
     Uniform(T, Vec<usize>, Vec<T>),
 }
 
@@ -465,6 +464,26 @@ impl<T: Real + Constructible + Copy + RealLike + PartialOrd> Sample<T> {
     }
 }
 
+/// A probe that is used to access the Jacobian weight of a point or region
+/// of interest.
+///
+/// For continuous probes, `None` skips that dimension and includes the full
+/// range of the dimension (Jacobian weight of 1).
+///
+/// For discrete probes, the first vector specifies a path through nested
+/// discrete grids, and the second vector specifies the final continuous probe.
+/// The path may stop before the full grid depth, in which case the remaining
+/// sub-Jacobian weight is 1 and the continuous probe must be empty.
+///
+/// For uniform probes, `None` in the discrete indices skips that discrete
+/// dimension and includes its full range (Jacobian weight of 1).
+#[derive(Debug, Clone)]
+pub enum Probe<T: Real + Constructible + Copy + RealLike + PartialOrd> {
+    Continuous(Vec<Option<T>>),
+    Discrete(Vec<usize>, Vec<Option<T>>),
+    Uniform(Vec<Option<usize>>, Vec<Option<T>>),
+}
+
 /// An adapting grid that captures the enhancements of an integrand.
 /// It supports discrete and continuous dimensions. The discrete dimensions
 /// can have a nested grid.
@@ -491,14 +510,14 @@ impl<T: Real + Constructible + Copy + RealLike + PartialOrd> Sample<T> {
 ///      // sample 10_000 times per iteration
 ///      for _ in 0..10_000 {
 ///          grid.sample(&mut rng, &mut sample);
-///     
+///
 ///          if let Sample::Continuous(_cont_weight, xs) = &sample {
 ///              grid.add_training_sample(&sample, f(xs)).unwrap();
 ///          }
 ///      }
-///     
+///
 ///      grid.update(1.5, 1.5);
-///     
+///
 ///      println!(
 ///          "Integral at iteration {}: {}",
 ///          iteration,
@@ -547,6 +566,52 @@ impl<T: Real + Constructible + Copy + RealLike + PartialOrd> Grid<T> {
                     unreachable!()
                 }
             }
+        }
+    }
+
+    /// Probe the Jacobian weight of a point or region in the grid.
+    ///
+    /// In continuous probes, `None` skips a dimension. In discrete probes,
+    /// the discrete path may stop before the full grid depth. In uniform probes,
+    /// `None` skips the corresponding discrete dimension.
+    pub fn probe(&self, probe: &Probe<T>) -> Result<T, String> {
+        match (self, probe) {
+            (Grid::Continuous(g), Probe::Continuous(xs)) => g.probe(xs),
+            (Grid::Discrete(g), Probe::Discrete(indices, xs)) => g.probe(indices, xs),
+            (Grid::Uniform(discrete_dimensions, continuous_grid), Probe::Uniform(indices, xs)) => {
+                if indices.len() != discrete_dimensions.len() {
+                    return Err(format!(
+                        "Uniform probe discrete dimension mismatch: expected {}, got {}",
+                        discrete_dimensions.len(),
+                        indices.len()
+                    ));
+                }
+
+                if xs.len() != continuous_grid.continuous_dimensions.len() {
+                    return Err(format!(
+                        "Uniform probe continuous dimension mismatch: expected {}, got {}",
+                        continuous_grid.continuous_dimensions.len(),
+                        xs.len()
+                    ));
+                }
+
+                let mut weight = continuous_grid.probe(xs)?;
+                for (dimension, index) in discrete_dimensions.iter().zip(indices) {
+                    if let Some(index) = index {
+                        if *index >= *dimension {
+                            return Err(format!(
+                                "Uniform probe index {} out of bounds for dimension with {} bins",
+                                index, dimension
+                            ));
+                        }
+
+                        weight *= T::new_from_usize(*dimension);
+                    }
+                }
+
+                Ok(weight)
+            }
+            _ => Err("Probe does not match the grid shape".to_owned()),
         }
     }
 
@@ -717,6 +782,64 @@ impl<T: Real + Constructible + Copy + RealLike + PartialOrd> DiscreteGrid<T> {
             "Could not sample discrete dimension: {:?} at point {}",
             self, r
         );
+    }
+
+    /// Probe the Jacobian weight of a point or prefix region in the discrete grid.
+    pub fn probe(&self, indices: &[usize], xs: &[Option<T>]) -> Result<T, String> {
+        let Some((&index, rest)) = indices.split_first() else {
+            return Err("Discrete probe path cannot be empty".to_owned());
+        };
+
+        let bin = self.bins.get(index).ok_or_else(|| {
+            format!(
+                "Discrete probe index {} out of bounds for grid with {} bins",
+                index,
+                self.bins.len()
+            )
+        })?;
+
+        let mut weight = bin.pdf.inv();
+        if rest.is_empty() {
+            if xs.is_empty() {
+                return Ok(weight);
+            }
+
+            let sub_grid = bin.sub_grid.as_ref().ok_or_else(|| {
+                format!("Discrete probe index {} does not have a sub-grid", index)
+            })?;
+            match sub_grid {
+                Grid::Continuous(g) => weight *= g.probe(xs)?,
+                Grid::Discrete(_) => {
+                    return Err(
+                        "Discrete probe path ended before reaching a continuous sub-grid"
+                            .to_owned(),
+                    );
+                }
+                Grid::Uniform(_, _) => {
+                    return Err(
+                        "Discrete probe cannot target a uniform sub-grid directly".to_owned()
+                    );
+                }
+            }
+
+            return Ok(weight);
+        }
+
+        let sub_grid = bin
+            .sub_grid
+            .as_ref()
+            .ok_or_else(|| format!("Discrete probe index {} does not have a sub-grid", index))?;
+        match sub_grid {
+            Grid::Discrete(g) => weight *= g.probe(rest, xs)?,
+            Grid::Continuous(_) => {
+                return Err("Discrete probe path continues past a continuous sub-grid".to_owned());
+            }
+            Grid::Uniform(_, _) => {
+                return Err("Discrete probe path continues past a uniform sub-grid".to_owned());
+            }
+        }
+
+        Ok(weight)
     }
 
     /// Update the discrete grid probabilities of landing in a particular bin when sampling,
@@ -950,6 +1073,26 @@ impl<T: Real + Constructible + Copy + RealLike + PartialOrd> ContinuousGrid<T> {
         }
     }
 
+    /// Probe the Jacobian weight of a point or region in the continuous grid.
+    pub fn probe(&self, probe: &[Option<T>]) -> Result<T, String> {
+        if probe.len() != self.continuous_dimensions.len() {
+            return Err(format!(
+                "Continuous probe dimension mismatch: expected {}, got {}",
+                self.continuous_dimensions.len(),
+                probe.len()
+            ));
+        }
+
+        let mut weight = T::new_one();
+        for (x, dimension) in probe.iter().zip(&self.continuous_dimensions) {
+            if let Some(x) = x {
+                weight *= dimension.probe(*x)?;
+            }
+        }
+
+        Ok(weight)
+    }
+
     /// Add a training sample with its corresponding evaluation, i.e. `f(sample)`, to the grid.
     pub fn add_training_sample(&mut self, sample: &Sample<T>, eval: T) -> Result<(), String> {
         if !eval.is_finite() {
@@ -1097,9 +1240,29 @@ impl<T: Real + Constructible + Copy + RealLike + PartialOrd> ContinuousDimension
         // rescale the point in the bin
         let sample =
             self.partitioning[bin_index] + (n_bins * r - T::new_from_usize(bin_index)) * bin_width;
-        let weight = n_bins as T * bin_width; // d_sample / d_r
+        let weight = n_bins * bin_width; // d_sample / d_r
 
         (sample, weight)
+    }
+
+    /// Probe the Jacobian weight at a point in this dimension.
+    fn probe(&self, sample: T) -> Result<T, String> {
+        if sample < T::new_zero() || sample > T::new_one() {
+            return Err(format!(
+                "Continuous probe point must lie in [0, 1], got {}",
+                sample
+            ));
+        }
+
+        let mut index = self
+            .partitioning
+            .binary_search_by(|v| v.partial_cmp(&sample).unwrap())
+            .unwrap_or_else(|e| e);
+        index = index.saturating_sub(1);
+
+        let n_bins = T::new_from_usize(self.partitioning.len() - 1);
+        let bin_width = self.partitioning[index + 1] - self.partitioning[index];
+        Ok(n_bins * bin_width)
     }
 
     /// Add a training sample with its corresponding evaluation, i.e. `f(sample)`, to the proper bin.
@@ -1293,37 +1456,158 @@ impl<T: Real + Constructible + Copy + RealLike + PartialOrd> ContinuousDimension
 ///
 /// Each thread or instance generating samples should use the same `seed` but a different `stream_id`,
 /// which is an instance counter starting at 0.
+///
+/// Adapted from [rand_xoshiro](https://crates.io/crates/rand_xoshiro)'s `Xoshiro256StarStar`.
+#[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
+#[cfg_attr(feature = "bincode", derive(bincode::Encode, bincode::Decode))]
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub struct MonteCarloRng {
-    state: Xoshiro256StarStar,
+    state: [u64; 4],
+}
+
+impl SeedableRng for MonteCarloRng {
+    type Seed = [u8; 32];
+
+    /// Create a new random number generator.  If `seed` is entirely 0, it will be
+    /// mapped to a different seed.
+    #[inline]
+    fn from_seed(seed: [u8; 32]) -> MonteCarloRng {
+        if seed.iter().all(|&x| x == 0) {
+            return Self::new(0, 0);
+        }
+
+        let mut state = [0; 4];
+        for (word, chunk) in state.iter_mut().zip(seed.chunks_exact(8)) {
+            *word = u64::from_le_bytes(chunk.try_into().unwrap());
+        }
+
+        MonteCarloRng { state }
+    }
+
+    fn seed_from_u64(seed: u64) -> MonteCarloRng {
+        Self::new(seed, 0)
+    }
 }
 
 impl RngCore for MonteCarloRng {
     #[inline]
     fn next_u32(&mut self) -> u32 {
-        self.state.next_u32()
+        (self.next_u64() >> 32) as u32
     }
 
     #[inline]
     fn next_u64(&mut self) -> u64 {
-        self.state.next_u64()
+        let result = self.state[1].wrapping_mul(5).rotate_left(7).wrapping_mul(9);
+        let t = self.state[1] << 17;
+
+        self.state[2] ^= self.state[0];
+        self.state[3] ^= self.state[1];
+        self.state[1] ^= self.state[2];
+        self.state[0] ^= self.state[3];
+        self.state[2] ^= t;
+        self.state[3] = self.state[3].rotate_left(45);
+
+        result
     }
 
     #[inline]
     fn fill_bytes(&mut self, dest: &mut [u8]) {
-        self.state.fill_bytes(dest)
+        let mut filled = 0;
+        while filled + 8 <= dest.len() {
+            dest[filled..filled + 8].copy_from_slice(&self.next_u64().to_le_bytes());
+            filled += 8;
+        }
+
+        if filled < dest.len() {
+            let tail = self.next_u64().to_le_bytes();
+            let remaining = dest.len() - filled;
+            dest[filled..].copy_from_slice(&tail[..remaining]);
+        }
     }
 }
 
 impl MonteCarloRng {
+    const SPLITMIX64_GAMMA: u64 = 0x9e3779b97f4a7c15;
+    const JUMP: [u64; 4] = [
+        0x180ec6d33cfd0aba,
+        0xd5a61266f0c9392c,
+        0xa9582618e03fc9aa,
+        0x39abdc4529b1661c,
+    ];
+    const LONG_JUMP: [u64; 4] = [
+        0x76e15d3efefdcbbf,
+        0xc5004e441c522fb3,
+        0x77710069854ee241,
+        0x39109bb02acbe635,
+    ];
+
+    #[inline]
+    fn splitmix64_next(seed: &mut u64) -> u64 {
+        *seed = seed.wrapping_add(Self::SPLITMIX64_GAMMA);
+        let mut z = *seed;
+        z = (z ^ (z >> 30)).wrapping_mul(0xbf58476d1ce4e5b9);
+        z = (z ^ (z >> 27)).wrapping_mul(0x94d049bb133111eb);
+        z ^ (z >> 31)
+    }
+
     /// Create a new random number generator with a given `seed` and `stream_id`. For parallel runs,
     /// each thread or instance generating samples should use the same `seed` but a different `stream_id`.
-    pub fn new(seed: u64, stream_id: usize) -> Self {
-        let mut state = Xoshiro256StarStar::seed_from_u64(seed);
+    pub fn new(mut seed: u64, stream_id: usize) -> Self {
+        let mut state = Self {
+            state: [
+                Self::splitmix64_next(&mut seed),
+                Self::splitmix64_next(&mut seed),
+                Self::splitmix64_next(&mut seed),
+                Self::splitmix64_next(&mut seed),
+            ],
+        };
         for _ in 0..stream_id {
             state.jump();
         }
 
-        Self { state }
+        state
+    }
+
+    /// Export the RNG state in a byte-stable format.
+    pub fn export(&self) -> [u8; 32] {
+        let mut bytes = [0; 32];
+        for (chunk, word) in bytes.chunks_exact_mut(8).zip(self.state) {
+            chunk.copy_from_slice(&word.to_le_bytes());
+        }
+
+        bytes
+    }
+
+    /// Restore an RNG from bytes produced by [`Self::export`].
+    pub fn import(state: [u8; 32]) -> Self {
+        Self::from_seed(state)
+    }
+
+    /// Jump forward, equivalently to `2^128` calls to [`Self::next_u64`].
+    pub fn jump(&mut self) {
+        self.apply_jump(Self::JUMP);
+    }
+
+    /// Jump forward, equivalently to `2^192` calls to [`Self::next_u64`].
+    pub fn long_jump(&mut self) {
+        self.apply_jump(Self::LONG_JUMP);
+    }
+
+    fn apply_jump(&mut self, jump: [u64; 4]) {
+        let mut next_state = [0; 4];
+        for word in jump {
+            for bit in 0..64 {
+                if (word & (1_u64 << bit)) != 0 {
+                    next_state[0] ^= self.state[0];
+                    next_state[1] ^= self.state[1];
+                    next_state[2] ^= self.state[2];
+                    next_state[3] ^= self.state[3];
+                }
+                self.next_u64();
+            }
+        }
+
+        self.state = next_state;
     }
 }
 
@@ -1331,7 +1615,11 @@ impl MonteCarloRng {
 mod test {
     use std::f64::consts::PI;
 
-    use super::{ContinuousGrid, DiscreteGrid, Grid, MonteCarloRng, Sample};
+    use rand::RngCore;
+    use rand::SeedableRng;
+    use rand_xoshiro::Xoshiro256StarStar;
+
+    use super::{ContinuousGrid, DiscreteGrid, Grid, MonteCarloRng, Probe, Sample};
 
     #[test]
     fn multichannel() {
@@ -1404,5 +1692,121 @@ mod test {
         let r = grid.get_statistics();
         assert_eq!(r.avg, 1.4679742806412577);
         assert_eq!(r.err, 0.0018395594908128354);
+    }
+
+    #[test]
+    fn probe() {
+        let mut channel0 = ContinuousGrid::new(3, 3, 1, None, false);
+        channel0.continuous_dimensions[0].partitioning = vec![0.0, 0.1, 0.5, 1.0];
+        channel0.continuous_dimensions[1].partitioning = vec![0.0, 0.3, 0.8, 1.0];
+        channel0.continuous_dimensions[2].partitioning = vec![0.0, 0.2, 0.6, 1.0];
+
+        let mut channel1 = ContinuousGrid::new(3, 3, 1, None, false);
+        channel1.continuous_dimensions[0].partitioning = vec![0.0, 0.25, 0.4, 1.0];
+        channel1.continuous_dimensions[1].partitioning = vec![0.0, 0.15, 0.7, 1.0];
+        channel1.continuous_dimensions[2].partitioning = vec![0.0, 0.05, 0.9, 1.0];
+
+        let mut channel2 = ContinuousGrid::new(3, 3, 1, None, false);
+        channel2.continuous_dimensions[0].partitioning = vec![0.0, 0.35, 0.65, 1.0];
+        channel2.continuous_dimensions[1].partitioning = vec![0.0, 0.2, 0.45, 1.0];
+        channel2.continuous_dimensions[2].partitioning = vec![0.0, 0.4, 0.75, 1.0];
+
+        let mut grid = Grid::Discrete(DiscreteGrid::new(
+            vec![
+                Some(Grid::Continuous(channel0)),
+                Some(Grid::Continuous(channel1)),
+                Some(Grid::Continuous(channel2)),
+            ],
+            0.01,
+            false,
+        ));
+
+        let Grid::Discrete(discrete) = &mut grid else {
+            unreachable!()
+        };
+        discrete.bins[0].pdf = 0.2;
+        discrete.bins[1].pdf = 0.5;
+        discrete.bins[2].pdf = 0.3;
+
+        let mut rng = MonteCarloRng::new(1234, 0);
+        let mut sample = Sample::new();
+
+        for _ in 0..1000 {
+            grid.sample(&mut rng, &mut sample);
+
+            let Sample::Discrete(sample_weight, index, sub_sample) = &sample else {
+                panic!("expected discrete sample")
+            };
+            let Some(sub_sample) = sub_sample.as_ref() else {
+                panic!("expected continuous sub-sample")
+            };
+            let Sample::Continuous(_, xs) = sub_sample.as_ref() else {
+                panic!("expected continuous sub-sample")
+            };
+
+            let probe = Probe::Discrete(vec![*index], xs.iter().copied().map(Some).collect());
+            let probe_weight = grid.probe(&probe).unwrap();
+
+            assert!(
+                (sample_weight - probe_weight).abs() < 1e-12,
+                "left={sample_weight}, right={probe_weight}"
+            );
+        }
+    }
+
+    #[test]
+    fn rng_export_roundtrip() {
+        let mut rng = MonteCarloRng::new(1234, 7);
+        let _ = rng.next_u64();
+        let _ = rng.next_u64();
+
+        let exported = rng.export();
+        let mut restored = MonteCarloRng::import(exported);
+
+        assert_eq!(rng.next_u64(), restored.next_u64());
+        assert_eq!(rng.next_u64(), restored.next_u64());
+        assert_eq!(rng.next_u64(), restored.next_u64());
+    }
+
+    #[test]
+    fn xoshiro_compare() {
+        let seed_u64 = 1234;
+        let seed_bytes = [
+            1, 0, 0, 0, 0, 0, 0, 0, 2, 0, 0, 0, 0, 0, 0, 0, 3, 0, 0, 0, 0, 0, 0, 0, 4, 0, 0, 0, 0,
+            0, 0, 0,
+        ];
+
+        let mut local = MonteCarloRng::seed_from_u64(seed_u64);
+        let mut upstream = Xoshiro256StarStar::seed_from_u64(seed_u64);
+        for _ in 0..32 {
+            assert_eq!(local.next_u64(), upstream.next_u64());
+            assert_eq!(local.next_u32(), upstream.next_u32());
+        }
+
+        let mut local = MonteCarloRng::from_seed(seed_bytes);
+        let mut upstream = Xoshiro256StarStar::from_seed(seed_bytes);
+        for _ in 0..32 {
+            assert_eq!(local.next_u64(), upstream.next_u64());
+        }
+
+        let mut local = MonteCarloRng::from_seed([0; 32]);
+        let mut upstream = Xoshiro256StarStar::from_seed([0; 32]);
+        for _ in 0..32 {
+            assert_eq!(local.next_u64(), upstream.next_u64());
+        }
+
+        let mut local = MonteCarloRng::seed_from_u64(seed_u64);
+        let mut upstream = Xoshiro256StarStar::seed_from_u64(seed_u64);
+        local.jump();
+        upstream.jump();
+        for _ in 0..32 {
+            assert_eq!(local.next_u64(), upstream.next_u64());
+        }
+
+        local.long_jump();
+        upstream.long_jump();
+        for _ in 0..32 {
+            assert_eq!(local.next_u64(), upstream.next_u64());
+        }
     }
 }
