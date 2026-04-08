@@ -1200,7 +1200,9 @@ impl<'a> AtomView<'a> {
                                 }
                                 Instruction::Pow(_, base, exp, _) => {
                                     if let Some(base_val) = resolve(*base, instr, constants) {
-                                        if *exp < 0 {
+                                        if *exp == -1 {
+                                            Some(base_val.inv())
+                                        } else if *exp < 0 {
                                             Some(base_val.pow(exp.unsigned_abs()).inv())
                                         } else {
                                             Some(base_val.pow(exp.unsigned_abs()))
@@ -2065,7 +2067,9 @@ impl<T: Real> ExpressionEvaluator<T> {
                     std::mem::swap(self.stack.get_unchecked_mut(*r), &mut tmp);
                 },
                 Instr::Pow(r, b, e) => {
-                    if *e >= 0 {
+                    if *e == -1 {
+                        self.stack[*r] = self.stack[*b].inv();
+                    } else if *e >= 0 {
                         self.stack[*r] = self.stack[*b].pow(*e as u64);
                     } else {
                         self.stack[*r] = self.stack[*b].pow(e.unsigned_abs()).inv();
@@ -7711,7 +7715,9 @@ impl EvalTree<Complex<Rational>> {
                             if let Some(base_val) =
                                 resolve(instr, stack, *base, param_count, reserved_indices)
                             {
-                                if *exp < 0 {
+                                if *exp == -1 {
+                                    Some(base_val.inv())
+                                } else if *exp < 0 {
                                     Some(base_val.pow(exp.unsigned_abs()).inv())
                                 } else {
                                     Some(base_val.pow(exp.unsigned_abs()))
@@ -8886,7 +8892,9 @@ impl<T: Real> EvalTree<T> {
                 let (b, e) = &**p;
                 let b_eval = self.evaluate_impl(b, subexpressions, params, args);
 
-                if *e >= 0 {
+                if *e == -1 {
+                    b_eval.inv()
+                } else if *e >= 0 {
                     b_eval.pow(*e as u64)
                 } else {
                     b_eval.pow(e.unsigned_abs()).inv()
@@ -12044,7 +12052,9 @@ impl<'a> AtomView<'a> {
                     && den == 1
                     && ni == 0
                 {
-                    if num >= 0 {
+                    if num == -1 {
+                        return Ok(b_eval.inv());
+                    } else if num >= 0 {
                         return Ok(b_eval.pow(num as u64));
                     } else {
                         return Ok(b_eval.pow(num.unsigned_abs()).inv());
