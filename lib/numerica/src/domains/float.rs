@@ -5174,6 +5174,26 @@ impl<'py> FromPyObject<'_, 'py> for PythonMultiPrecisionFloat {
                 .unwrap()
                 .extract::<PyBackedStr>()?;
 
+            if a == "NaN" {
+                return Ok(Float::from(MultiPrecisionFloat::with_val(
+                    53,
+                    rug::float::Special::Nan,
+                ))
+                .into());
+            } else if a == "Infinity" {
+                return Ok(Float::from(MultiPrecisionFloat::with_val(
+                    53,
+                    rug::float::Special::Infinity,
+                ))
+                .into());
+            } else if a == "-Infinity" {
+                return Ok(Float::from(MultiPrecisionFloat::with_val(
+                    53,
+                    rug::float::Special::NegInfinity,
+                ))
+                .into());
+            }
+
             // get the number of accurate digits
             let mut digits = a
                 .chars()
@@ -5184,18 +5204,32 @@ impl<'py> FromPyObject<'_, 'py> for PythonMultiPrecisionFloat {
 
             // the input is 0, determine accuracy
             if digits == 0 {
-                digits = a
-                    .chars()
-                    .filter(|x| *x != '.' && *x != '-')
-                    .take_while(|x| x.is_ascii_digit())
-                    .count()
+                if let Some((_pre, exp)) = a.split_once('E') {
+                    if let Ok(exp) = exp.parse::<isize>() {
+                        digits = exp.unsigned_abs();
+                    }
+                } else {
+                    digits = a
+                        .chars()
+                        .filter(|x| *x != '.' && *x != '-')
+                        .take_while(|x| x.is_ascii_digit())
+                        .count()
+                }
+
+                if digits == 0 {
+                    return Err(exceptions::PyValueError::new_err(format!(
+                        "Could not parse {a}",
+                    )));
+                }
             }
 
             Ok(Float::parse(
                 &a,
                 Some((digits as f64 * std::f64::consts::LOG2_10).ceil() as u32),
             )
-            .map_err(|_| exceptions::PyValueError::new_err("Not a floating point number"))?
+            .map_err(|_| {
+                exceptions::PyValueError::new_err(format!("Not a floating point number: {a}"))
+            })?
             .into())
         } else if let Ok(a) = ob.extract::<PyBackedStr>() {
             Ok(Float::parse(&a, None)
