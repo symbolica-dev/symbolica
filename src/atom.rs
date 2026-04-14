@@ -3170,14 +3170,14 @@ macro_rules! get_symbol {
 /// For example, to define `tan` and `sec` with custom derivatives that depend on each other:
 /// ```
 /// use symbolica::{atom::AtomCore, function, symbol_group};
-/// let _ = symbol_group!("tan";;
+/// let _ = symbol_group!("test::tan";;
 ///     |symbs, b| {
 ///         let sec = symbs[1];
 ///         b.with_derivative_function(move |f, index, out| {
 ///             **out = function!(sec, f.as_fun_view().unwrap().get(index)).npow(2)
 ///         })
 ///     },
-///     "sec";;
+///     "test::sec";;
 ///     |symbs, b| {
 ///         let tan = symbs[0];
 ///         b.with_derivative_function(move |f, index, out| {

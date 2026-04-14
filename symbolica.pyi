@@ -1362,6 +1362,116 @@ class Expression:
         Take the sine of this expression, returning the result.
         """
 
+    def tan(self) -> Expression:
+        """
+        Take the tangent of this expression, returning the result.
+        """
+
+    def cot(self) -> Expression:
+        """
+        Take the cotangent of this expression, returning the result.
+        """
+
+    def sec(self) -> Expression:
+        """
+        Take the secant of this expression, returning the result.
+        """
+
+    def csc(self) -> Expression:
+        """
+        Take the cosecant of this expression, returning the result.
+        """
+
+    def asin(self) -> Expression:
+        """
+        Take the inverse sine of this expression, returning the result.
+        """
+
+    def acos(self) -> Expression:
+        """
+        Take the inverse cosine of this expression, returning the result.
+        """
+
+    def atan(self) -> Expression:
+        """
+        Take the inverse tangent of this expression, returning the result.
+        """
+
+    def acot(self) -> Expression:
+        """
+        Take the inverse cotangent of this expression, returning the result.
+        """
+
+    def asec(self) -> Expression:
+        """
+        Take the inverse secant of this expression, returning the result.
+        """
+
+    def acsc(self) -> Expression:
+        """
+        Take the inverse cosecant of this expression, returning the result.
+        """
+
+    def sinh(self) -> Expression:
+        """
+        Take the hyperbolic sine of this expression, returning the result.
+        """
+
+    def cosh(self) -> Expression:
+        """
+        Take the hyperbolic cosine of this expression, returning the result.
+        """
+
+    def tanh(self) -> Expression:
+        """
+        Take the hyperbolic tangent of this expression, returning the result.
+        """
+
+    def coth(self) -> Expression:
+        """
+        Take the hyperbolic cotangent of this expression, returning the result.
+        """
+
+    def sech(self) -> Expression:
+        """
+        Take the hyperbolic secant of this expression, returning the result.
+        """
+
+    def csch(self) -> Expression:
+        """
+        Take the hyperbolic cosecant of this expression, returning the result.
+        """
+
+    def asinh(self) -> Expression:
+        """
+        Take the inverse hyperbolic sine of this expression, returning the result.
+        """
+
+    def acosh(self) -> Expression:
+        """
+        Take the inverse hyperbolic cosine of this expression, returning the result.
+        """
+
+    def atanh(self) -> Expression:
+        """
+        Take the inverse hyperbolic tangent of this expression, returning the result.
+        """
+
+    def acoth(self) -> Expression:
+        """
+        Take the inverse hyperbolic cotangent of this expression, returning the result.
+        """
+
+    def asech(self) -> Expression:
+        """
+        Take the inverse hyperbolic secant of this expression, returning the result.
+        """
+
+    def acsch(self) -> Expression:
+        """
+        Take the inverse hyperbolic cosecant of this expression, returning the result.
+        """
+
     def exp(self) -> Expression:
         """
         Take the exponential of this expression, returning the result.
@@ -1380,6 +1490,46 @@ class Expression:
     def abs(self) -> Expression:
         """
         Take the absolute value of this expression, returning the result.
+        """
+
+    def gamma(self) -> Expression:
+        """
+        Apply the gamma function to this expression.
+        """
+
+    def digamma(self) -> Expression:
+        """
+        Apply the digamma function to this expression.
+        """
+
+    def polygamma(self, n: Expression | int | float | Decimal) -> Expression:
+        """
+        Apply the polygamma function of order `n` to this expression.
+        """
+
+    def polylog(self, s: Expression | int | float | Decimal) -> Expression:
+        """
+        Apply the polylogarithm of order `s` to this expression.
+        """
+
+    def bessel_j(self, nu: Expression | int | float | Decimal) -> Expression:
+        """
+        Apply the cylindrical Bessel function of the first kind of order `nu` to this expression.
+        """
+
+    def bessel_y(self, nu: Expression | int | float | Decimal) -> Expression:
+        """
+        Apply the cylindrical Bessel function of the second kind of order `nu` to this expression.
+        """
+
+    def bessel_i(self, nu: Expression | int | float | Decimal) -> Expression:
+        """
+        Apply the modified Bessel function of the first kind of order `nu` to this expression.
+        """
+
+    def bessel_k(self, nu: Expression | int | float | Decimal) -> Expression:
+        """
+        Apply the modified Bessel function of the second kind of order `nu` to this expression.
         """
 
     def conj(self) -> Expression:
