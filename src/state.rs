@@ -25,16 +25,16 @@ use crate::atom::{
 use crate::domains::finite_field::Zp64;
 use crate::poly::PolyVariable;
 use crate::printer::PrintFunction;
-use crate::wrap_symbol;
 use crate::{
     LicenseManager,
     atom::{Atom, Symbol},
     coefficient::Coefficient,
     domains::finite_field::FiniteFieldCore,
 };
+use crate::{warn, wrap_symbol};
 
 pub(crate) const SYMBOLICA_MAGIC: u32 = 0x37871367;
-pub(crate) const EXPORT_FORMAT_VERSION: u16 = 3;
+pub(crate) const EXPORT_FORMAT_VERSION: u16 = 4;
 
 /// An id for a given finite field in a registry.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
@@ -1007,31 +1007,8 @@ impl State {
             ID_TO_STR.len() as u64 - SYMBOL_OFFSET.load(Ordering::Relaxed) as u64,
         )?;
 
-        for (s, n) in State::symbol_iter() {
-            dest.write_u32::<LittleEndian>(n.len() as u32)?;
-            dest.write_all(n.as_bytes())?;
-
-            let namespace = s.get_namespace();
-            dest.write_u32::<LittleEndian>(namespace.len() as u32)?;
-            dest.write_all(namespace.as_bytes())?;
-
-            let (flags, extra_flags) = s.encode_flags();
-            dest.write_u8(flags)?;
-            dest.write_u32::<LittleEndian>(extra_flags)?;
-
-            dest.write_u16::<LittleEndian>(s.get_tags().len() as u16)?;
-            for t in s.get_tags() {
-                dest.write_u32::<LittleEndian>(t.len() as u32)?;
-                dest.write_all(t.as_bytes())?;
-            }
-
-            dest.write_u16::<LittleEndian>(s.get_aliases().len() as u16)?;
-            for t in s.get_aliases() {
-                dest.write_u32::<LittleEndian>(t.len() as u32)?;
-                dest.write_all(t.as_bytes())?;
-            }
-
-            s.get_data().write(dest)?;
+        for (s, _) in State::symbol_iter() {
+            s.export(dest)?;
         }
 
         dest.write_u64::<LittleEndian>(FINITE_FIELDS.len() as u64)?;
@@ -1104,90 +1081,13 @@ impl State {
         };
 
         let n_symbols = source.read_u64::<LittleEndian>()?;
-        let mut attributes = vec![];
         for x in 0..n_symbols {
-            let l = source.read_u32::<LittleEndian>()?;
-            let mut v = vec![0; l as usize];
-            source.read_exact(&mut v)?;
-
-            let mut str: String = std::string::String::from_utf8(v)
-                .map_err(|e| std::io::Error::new(std::io::ErrorKind::InvalidData, e))?
-                .into();
-
-            let l = source.read_u32::<LittleEndian>()?;
-            let mut v = vec![0; l as usize];
-            source.read_exact(&mut v)?;
-
-            let namespace: String = std::string::String::from_utf8(v)
-                .map_err(|e| std::io::Error::new(std::io::ErrorKind::InvalidData, e))?
-                .into();
-
-            let flags = source.read_u8()?;
-            let extra_flags = source.read_u32::<LittleEndian>()?;
-
-            let s = Symbol::decode_flags(0, flags, extra_flags);
-
-            let mut tags = vec![];
-            let num_tags = source.read_u16::<LittleEndian>()?;
-
-            for _ in 0..num_tags {
-                let l = source.read_u32::<LittleEndian>()?;
-                let mut v = vec![0; l as usize];
-                source.read_exact(&mut v)?;
-
-                let tag: String = std::string::String::from_utf8(v)
-                    .map_err(|e| std::io::Error::new(std::io::ErrorKind::InvalidData, e))?
-                    .into();
-
-                tags.push(tag);
-            }
-
-            let mut aliases = vec![];
-            let num_aliases = source.read_u16::<LittleEndian>()?;
-
-            for _ in 0..num_aliases {
-                let l = source.read_u32::<LittleEndian>()?;
-                let mut v = vec![0; l as usize];
-                source.read_exact(&mut v)?;
-
-                let alias: String = std::string::String::from_utf8(v)
-                    .map_err(|e| std::io::Error::new(std::io::ErrorKind::InvalidData, e))?
-                    .into();
-
-                aliases.push(alias);
-            }
-
-            let extra_data = UserData::read(&mut *source)?;
-
-            attributes.clear();
-            if s.is_antisymmetric() {
-                attributes.push(SymbolAttribute::Antisymmetric);
-            }
-            if s.is_symmetric() {
-                attributes.push(SymbolAttribute::Symmetric);
-            }
-            if s.is_cyclesymmetric() {
-                attributes.push(SymbolAttribute::Cyclesymmetric);
-            }
-            if s.is_linear() {
-                attributes.push(SymbolAttribute::Linear);
-            }
-            if s.is_scalar() {
-                attributes.push(SymbolAttribute::Scalar);
-            }
-            if s.is_real() {
-                attributes.push(SymbolAttribute::Real);
-            }
-            if s.is_integer() {
-                attributes.push(SymbolAttribute::Integer);
-            }
-            if s.is_positive() {
-                attributes.push(SymbolAttribute::Positive);
-            }
+            let (mut name, namespace, attributes, tags, extra_data, aliases, is_exportable) =
+                Symbol::import_impl(source)?;
 
             loop {
                 match Symbol::new(NamespacedSymbol {
-                    symbol: str.to_string().into(),
+                    symbol: name.clone().into(),
                     namespace: namespace.to_string().into(),
                     file: "".into(),
                     line: 0,
@@ -1200,13 +1100,27 @@ impl State {
                 {
                     Ok(id) => {
                         if x as u32 != id.get_id() {
+                            if !is_exportable {
+                                warn!(
+                                    "Imported symbol {name} was previously defined with user-defined functions, but the imported version does not have any."
+                                );
+                            }
+
                             state_map.symbols.insert(x as u32, id);
                         }
                         break;
                     }
                     Err(e) => {
                         if let Some(f) = &conflict_fn {
-                            let new_name = f(&str);
+                            let new_name = f(&name);
+
+                            let mut old_wildcard_level = 0;
+                            for x in name.chars().rev() {
+                                if x != '_' {
+                                    break;
+                                }
+                                old_wildcard_level += 1;
+                            }
 
                             let mut new_wildcard_level = 0;
                             for x in new_name.chars().rev() {
@@ -1216,8 +1130,8 @@ impl State {
                                 new_wildcard_level += 1;
                             }
 
-                            if s.get_wildcard_level() == new_wildcard_level {
-                                str = new_name;
+                            if old_wildcard_level == new_wildcard_level {
+                                name = new_name.to_string();
                             }
                         } else {
                             return Err(std::io::Error::new(

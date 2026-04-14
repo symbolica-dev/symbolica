@@ -445,30 +445,6 @@ impl InlineNum {
 }
 
 #[cfg(feature = "bincode")]
-impl bincode::Encode for Symbol {
-    fn encode<E: bincode::enc::Encoder>(
-        &self,
-        encoder: &mut E,
-    ) -> Result<(), bincode::error::EncodeError> {
-        Atom::var(*self).encode(encoder)
-    }
-}
-
-#[cfg(feature = "bincode")]
-impl<C: crate::state::HasStateMap> bincode::Decode<C> for Symbol {
-    fn decode<D: bincode::de::Decoder<Context = C>>(
-        decoder: &mut D,
-    ) -> Result<Self, bincode::error::DecodeError> {
-        let atom = Atom::decode(decoder)?;
-        if let Atom::Var(v) = atom {
-            Ok(v.get_symbol())
-        } else {
-            Err(bincode::error::DecodeError::Other("Expected a variable"))
-        }
-    }
-}
-
-#[cfg(feature = "bincode")]
 impl bincode::Encode for Atom {
     fn encode<E: bincode::enc::Encoder>(
         &self,

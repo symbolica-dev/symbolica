@@ -413,59 +413,6 @@ pub struct EvalTree<T> {
     param_count: usize,
 }
 
-/// A built-in symbol.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, PartialOrd, Ord)]
-pub struct BuiltinSymbol(Symbol);
-
-#[cfg(feature = "serde")]
-impl serde::Serialize for BuiltinSymbol {
-    fn serialize<S: serde::Serializer>(&self, serializer: S) -> Result<S::Ok, S::Error> {
-        self.0.get_name().serialize(serializer)
-    }
-}
-
-#[cfg(feature = "serde")]
-impl<'de> serde::Deserialize<'de> for BuiltinSymbol {
-    fn deserialize<D: serde::Deserializer<'de>>(deserializer: D) -> Result<Self, D::Error> {
-        let name: String = String::deserialize(deserializer)?;
-        crate::get_symbol!(&name)
-            .ok_or_else(|| serde::de::Error::custom(format!("Unknown symbol: {name}")))
-            .map(|s| BuiltinSymbol(s))
-    }
-}
-
-#[cfg(feature = "bincode")]
-impl bincode::Encode for BuiltinSymbol {
-    fn encode<E: bincode::enc::Encoder>(
-        &self,
-        encoder: &mut E,
-    ) -> core::result::Result<(), bincode::error::EncodeError> {
-        str::encode(self.0.get_name(), encoder)
-    }
-}
-
-#[cfg(feature = "bincode")]
-bincode::impl_borrow_decode!(BuiltinSymbol);
-#[cfg(feature = "bincode")]
-impl<Context> bincode::Decode<Context> for BuiltinSymbol {
-    fn decode<D: bincode::de::Decoder<Context = Context>>(
-        decoder: &mut D,
-    ) -> Result<Self, bincode::error::DecodeError> {
-        let name: String = bincode::Decode::decode(decoder)?;
-        crate::get_symbol!(&name)
-            .ok_or_else(|| {
-                bincode::error::DecodeError::OtherString(format!("Unknown symbol: {name}"))
-            })
-            .map(|s| BuiltinSymbol(s))
-    }
-}
-
-impl BuiltinSymbol {
-    pub fn get_symbol(&self) -> Symbol {
-        self.0
-    }
-}
-
 fn external_export_name(fn_map: &FunctionMap<Complex<Rational>>, symbol: Symbol) -> String {
     match fn_map.external_fn.get(&symbol) {
         Some(ConstOrExpr::External(_, rename)) => rename.clone(),
@@ -482,7 +429,7 @@ fn register_constant_external_container<T>(
 ) -> usize {
     let index = if let Some(index) = external_functions
         .iter()
-        .position(|x| x.eval_symbol() == symbol && x.tags == tags)
+        .position(|x| x.eval_name == symbol && x.tags == tags)
     {
         index
     } else {
@@ -920,11 +867,11 @@ impl<'a> AtomView<'a> {
                 Instruction::Fun(o, b, _) => {
                     let (sym, tags, args) = &*b;
 
-                    if sym.0.is_builtin() {
+                    if sym.is_builtin() {
                         if args.len() != 1 {
                             return Err(format!(
                                 "Builtin function {} must have exactly one argument",
-                                sym.0.get_name()
+                                sym.get_name()
                             ));
                         }
                         instructions.push((
@@ -934,18 +881,17 @@ impl<'a> AtomView<'a> {
                         continue;
                     }
 
-                    let symbol = sym.get_symbol();
                     let tags = tags.iter().map(|x| crate::parse!(x)).collect::<Vec<_>>();
                     let index = if let Some(index) = external_functions
                         .iter()
-                        .position(|x| x.eval_symbol() == symbol && x.tags == tags)
+                        .position(|x| x.eval_name == *sym && x.tags == tags)
                     {
                         index
                     } else {
-                        let export_name = external_export_name(fn_map, symbol);
+                        let export_name = external_export_name(fn_map, *sym);
                         external_functions.push(ExternalFunctionContainer::new(
                             export_name,
-                            symbol,
+                            *sym,
                             tags,
                         ));
                         external_functions.len() - 1
@@ -1110,11 +1056,7 @@ impl<'a> AtomView<'a> {
                     )?;
 
                     let temp = Slot::Temp(instr.len());
-                    let c = Instruction::Fun(
-                        temp,
-                        Box::new((BuiltinSymbol(name), vec![], vec![arg_eval])),
-                        false,
-                    );
+                    let c = Instruction::Fun(temp, Box::new((name, vec![], vec![arg_eval])), false);
                     instr.push(c);
 
                     subexpressions.insert(*self, temp);
@@ -1166,7 +1108,7 @@ impl<'a> AtomView<'a> {
                     instr.push(Instruction::Fun(
                         temp,
                         Box::new((
-                            BuiltinSymbol(name),
+                            name,
                             tags.iter().map(|x| x.to_canonical_string()).collect(),
                             eval_args,
                         )),
@@ -1209,7 +1151,7 @@ impl<'a> AtomView<'a> {
                         let temp = Slot::Temp(instr.len());
                         instr.push(Instruction::Fun(
                             temp,
-                            Box::new((BuiltinSymbol(f.get_symbol()), vec![], eval_args)),
+                            Box::new((f.get_symbol(), vec![], eval_args)),
                             false,
                         ));
                         temp
@@ -1583,7 +1525,7 @@ pub enum Expression<T> {
     Pow(ExpressionHash, Box<(Expression<T>, i64)>),
     Powf(ExpressionHash, Box<(Expression<T>, Expression<T>)>),
     ReadArg(ExpressionHash, usize), // read nth function argument
-    BuiltinFun(ExpressionHash, BuiltinSymbol, Box<Expression<T>>),
+    BuiltinFun(ExpressionHash, Symbol, Box<Expression<T>>),
     ExternalFun(ExpressionHash, u32, Vec<Expression<T>>),
     IfElse(
         ExpressionHash,
@@ -2012,9 +1954,9 @@ impl<T: std::hash::Hash + Clone> Expression<T> {
 }
 
 pub struct ExternalFunctionContainer<T> {
-    name: BuiltinSymbol,
+    name: Symbol,
     export_name: String,
-    eval_name: BuiltinSymbol,
+    eval_name: Symbol,
     tags: Vec<Atom>,
     imp: Option<Box<dyn ExternalFunction<T>>>,
     cache: Vec<T>,
@@ -2042,9 +1984,9 @@ impl<T> serde::Serialize for ExternalFunctionContainer<T> {
 impl<'de, T: EvaluationDomain> serde::Deserialize<'de> for ExternalFunctionContainer<T> {
     fn deserialize<D: serde::Deserializer<'de>>(deserializer: D) -> Result<Self, D::Error> {
         let (name, export_name, eval_name, tags, constant_index): (
-            BuiltinSymbol,
+            Symbol,
             String,
-            BuiltinSymbol,
+            Symbol,
             Vec<String>,
             Option<usize>,
         ) = serde::Deserialize::deserialize(deserializer)?;
@@ -2089,9 +2031,9 @@ impl<Context, T: EvaluationDomain> bincode::Decode<Context> for ExternalFunction
     fn decode<D: bincode::de::Decoder<Context = Context>>(
         decoder: &mut D,
     ) -> Result<Self, bincode::error::DecodeError> {
-        let name: BuiltinSymbol = bincode::Decode::decode(decoder)?;
+        let name: Symbol = bincode::Decode::decode(decoder)?;
         let export_name: String = bincode::Decode::decode(decoder)?;
-        let eval_name: BuiltinSymbol = bincode::Decode::decode(decoder)?;
+        let eval_name: Symbol = bincode::Decode::decode(decoder)?;
         let tags: Vec<String> = bincode::Decode::decode(decoder)?;
         let constant_index: Option<usize> = bincode::Decode::decode(decoder)?;
 
@@ -2174,9 +2116,9 @@ impl<T> Eq for ExternalFunctionContainer<T> {}
 impl<T> ExternalFunctionContainer<T> {
     fn new(export_name: String, eval_name: Symbol, tags: Vec<Atom>) -> Self {
         Self {
-            name: BuiltinSymbol(crate::symbol!(export_name.clone())),
+            name: crate::symbol!(&export_name),
             export_name,
-            eval_name: BuiltinSymbol(eval_name),
+            eval_name,
             tags,
             imp: None,
             cache: vec![],
@@ -2186,10 +2128,6 @@ impl<T> ExternalFunctionContainer<T> {
 
     fn export_name(&self) -> &str {
         &self.export_name
-    }
-
-    fn eval_symbol(&self) -> Symbol {
-        self.eval_name.get_symbol()
     }
 
     fn tag_views(&self) -> Vec<AtomView<'_>> {
@@ -2209,7 +2147,7 @@ impl<T> ExternalFunctionContainer<T> {
     }
 
     fn fetch_impl_for<T2: EvaluationDomain>(&self) -> Option<Box<dyn ExternalFunction<T2>>> {
-        let info = self.eval_symbol().get_evaluation_info()?;
+        let info = self.eval_name.get_evaluation_info()?;
         let tags = self.tag_views();
         T2::resolve_function(&tags, info)
     }
@@ -2602,7 +2540,7 @@ impl<T: Clone + EvaluationDomain> ExpressionEvaluator<T> {
                 continue;
             }
 
-            let lookup_name = e.eval_name.0.get_name().to_owned();
+            let lookup_name = e.eval_name.get_name().to_owned();
             if lookup_name != e.export_name()
                 && let Some(f) = external_fns.remove(lookup_name.as_str())
             {
@@ -2656,7 +2594,7 @@ impl<T: Real> ExpressionEvaluator<T> {
             Instr::Powf(r, b, e) => {
                 stack[*r] = stack[*b].powf(&stack[*e]);
             }
-            Instr::BuiltinFun(r, s, arg) => match s.0.get_id() {
+            Instr::BuiltinFun(r, s, arg) => match s.get_id() {
                 Symbol::EXP_ID => stack[*r] = stack[*arg].exp(),
                 Symbol::LOG_ID => stack[*r] = stack[*arg].log(),
                 Symbol::SIN_ID => stack[*r] = stack[*arg].sin(),
@@ -2816,10 +2754,10 @@ impl<T: Default> ExpressionEvaluator<T> {
             .collect::<Vec<_>>();
         for external in &mut external_fns {
             if let Some(i) = external.constant_index {
-                let Some(eval) = external.eval_symbol().get_evaluation_info() else {
+                let Some(eval) = external.eval_name.get_evaluation_info() else {
                     panic!(
                         "Symbol '{}' does not have evaluation info",
-                        external.eval_symbol().get_name()
+                        external.eval_name.get_name()
                     );
                 };
                 let tags = external.tag_views();
@@ -2942,7 +2880,7 @@ impl<T: Default> ExpressionEvaluator<T> {
                 Instr::Mul(_, a) => Some(CSE::Mul(a)),
                 Instr::Pow(_, b, e) => Some(CSE::Pow(*b, *e)),
                 Instr::Powf(_, b, e) => Some(CSE::Powf(*b, *e)),
-                Instr::BuiltinFun(_, s, a) => Some(CSE::BuiltinFun(s.0.get_id(), *a)),
+                Instr::BuiltinFun(_, s, a) => Some(CSE::BuiltinFun(s.get_id(), *a)),
                 Instr::ExternalFun(_, s, a) => Some(CSE::ExternalFun(*s as u32, a)),
                 _ => None,
             };
@@ -3561,7 +3499,7 @@ impl<T: Default + PartialEq> ExpressionEvaluator<Complex<T>> {
                     subcomponents[*r] = *sc;
                 }
                 Instr::BuiltinFun(r, s, a) => {
-                    if s.0.is_real() {
+                    if s.is_real() {
                         *sc = ComplexPhase::Real;
                         subcomponents[*r] = *sc;
                         continue;
@@ -3573,7 +3511,7 @@ impl<T: Default + PartialEq> ExpressionEvaluator<Complex<T>> {
                         continue;
                     }
 
-                    match s.0.get_id() {
+                    match s.get_id() {
                         Symbol::EXP_ID | Symbol::CONJ_ID | Symbol::SIN_ID | Symbol::COS_ID => {
                             *sc = ComplexPhase::Real;
                         }
@@ -4598,7 +4536,7 @@ extern "C" {{
                     let exp = get_input!(*e);
                     *out += format!("\t{} = pow({base}, {exp});\n", get_output!(o)).as_str();
                 }
-                Instr::BuiltinFun(o, s, a) => match s.0.get_id() {
+                Instr::BuiltinFun(o, s, a) => match s.get_id() {
                     Symbol::EXP_ID => {
                         let arg = get_input!(*a);
                         *out += format!("\t{} = exp({arg});\n", get_output!(o)).as_str();
@@ -4969,7 +4907,7 @@ extern "C" {{
             Pow(MemOrReg, u16, MemOrReg, i64),
             Sqrt(MemOrReg, u16, MemOrReg),
             Powf(usize, usize, usize),
-            BuiltinFun(usize, BuiltinSymbol, usize),
+            BuiltinFun(usize, Symbol, usize),
             ExternalFun(usize, usize, Vec<usize>),
             IfElse(usize),
             Goto,
@@ -4995,7 +4933,7 @@ extern "C" {{
                 }
                 Instr::Powf(r, b, e) => RegInstr::Powf(*r, *b, *e),
                 Instr::BuiltinFun(r, s, a) => {
-                    if s.0 == Symbol::SQRT {
+                    if *s == Symbol::SQRT {
                         RegInstr::Sqrt(MemOrReg::Mem(*r), u16::MAX, MemOrReg::Mem(*a))
                     } else {
                         RegInstr::BuiltinFun(*r, *s, *a)
@@ -5833,7 +5771,7 @@ extern "C" {{
 
                     let arg = get_input!(*a);
 
-                    match s.0.get_id() {
+                    match s.get_id() {
                         Symbol::EXP_ID => {
                             *out += format!("\tZ[{o}] = exp({arg});\n").as_str();
                         }
@@ -6528,7 +6466,7 @@ extern "C" {{
                 }
                 Instr::BuiltinFun(o, s, a) => {
                     if in_asm_block
-                        && s.0.get_id() == Symbol::SQRT_ID
+                        && s.get_id() == Symbol::SQRT_ID
                         && let ComplexPhase::Real = *c
                     {
                         let addr_a = asm_load!(*a);
@@ -6575,7 +6513,7 @@ extern "C" {{
                         get_input!(*a)
                     };
 
-                    match s.0.get_id() {
+                    match s.get_id() {
                         Symbol::EXP_ID => {
                             *out += format!("\tZ[{o}] = exp({arg});\n").as_str();
                         }
@@ -6856,7 +6794,7 @@ pub enum Instruction {
     /// A function that has a known evaluator or is external, given a symbol name, tags, and arguments.
     /// `Fun(o, (s, t, a), is_real)` means `o = s(t, a)`.
     /// The `is_real` flag indicates whether the function is expected to yield a real number.
-    Fun(Slot, Box<(BuiltinSymbol, Vec<String>, Vec<Slot>)>, bool),
+    Fun(Slot, Box<(Symbol, Vec<String>, Vec<Slot>)>, bool),
     /// `Assign(o, v)` means `o = v`.
     Assign(Slot, Slot),
     /// `IfElse(cond, label)` means jump to `label` if `cond` is zero.
@@ -6908,7 +6846,7 @@ impl std::fmt::Display for Instruction {
                     f,
                     "{} = {}({})",
                     o,
-                    name.0.get_stripped_name(),
+                    name.get_stripped_name(),
                     values.join(", ")
                 )
             }
@@ -7573,7 +7511,7 @@ impl<T: DualNumberStructure> Vectorize<Complex<Rational>> for Dualizer<T> {
                     .map(|x| VectorInstruction::Assign(*x))
                     .collect()
             }
-            VectorInstruction::BuiltinFun(f, a) => match f.get_symbol().get_id() {
+            VectorInstruction::BuiltinFun(f, a) => match f.get_id() {
                 Symbol::SQRT_ID => {
                     let e = instrs.add(VectorInstruction::BuiltinFun(*f, *a));
                     let norm = instrs.add(VectorInstruction::Pow(*a, -1)); // TODO: check 0?
@@ -7675,10 +7613,7 @@ impl<T: DualNumberStructure> Vectorize<Complex<Rational>> for Dualizer<T> {
                 }
                 Symbol::SIN_ID => {
                     let s = instrs.add(VectorInstruction::BuiltinFun(*f, *a));
-                    let c = instrs.add(VectorInstruction::BuiltinFun(
-                        BuiltinSymbol(Symbol::COS),
-                        *a,
-                    ));
+                    let c = instrs.add(VectorInstruction::BuiltinFun(Symbol::COS, *a));
 
                     let zero = instrs.add_repeated_constant(Complex::new_zero());
                     let mut p = vec![zero];
@@ -7709,10 +7644,7 @@ impl<T: DualNumberStructure> Vectorize<Complex<Rational>> for Dualizer<T> {
                     e.iter().map(|x| VectorInstruction::Assign(*x)).collect()
                 }
                 Symbol::COS_ID => {
-                    let s = instrs.add(VectorInstruction::BuiltinFun(
-                        BuiltinSymbol(Symbol::SIN),
-                        *a,
-                    ));
+                    let s = instrs.add(VectorInstruction::BuiltinFun(Symbol::SIN, *a));
                     let c = instrs.add(VectorInstruction::BuiltinFun(*f, *a));
 
                     let zero = instrs.add_repeated_constant(Complex::new_zero());
@@ -7745,10 +7677,7 @@ impl<T: DualNumberStructure> Vectorize<Complex<Rational>> for Dualizer<T> {
                     e.iter().map(|x| VectorInstruction::Assign(*x)).collect()
                 }
                 Symbol::ABS_ID => {
-                    let n = instrs.add(VectorInstruction::BuiltinFun(
-                        BuiltinSymbol(Symbol::ABS),
-                        *a,
-                    ));
+                    let n = instrs.add(VectorInstruction::BuiltinFun(Symbol::ABS, *a));
 
                     let inv_val = instrs.add(VectorInstruction::Pow(*a, -1));
                     let scale = instrs.add(VectorInstruction::Mul(n, inv_val));
@@ -7765,7 +7694,7 @@ impl<T: DualNumberStructure> Vectorize<Complex<Rational>> for Dualizer<T> {
                 }
                 _ => unimplemented!(
                     "Vectorization not implemented for built-in function {}",
-                    f.get_symbol().get_name()
+                    f.get_name()
                 ),
             },
             VectorInstruction::Pow(a, b) => {
@@ -7803,7 +7732,7 @@ impl<T: DualNumberStructure> Vectorize<Complex<Rational>> for Dualizer<T> {
                     .collect()
             }
             VectorInstruction::Powf(b, e) => {
-                let input = VectorInstruction::BuiltinFun(BuiltinSymbol(Symbol::LOG), *b);
+                let input = VectorInstruction::BuiltinFun(Symbol::LOG, *b);
                 let log: Vec<_> = self
                     .map_instruction(&input, instrs)
                     .into_iter()
@@ -7819,7 +7748,7 @@ impl<T: DualNumberStructure> Vectorize<Complex<Rational>> for Dualizer<T> {
                     .into_iter()
                     .map(|x| instrs.add(VectorInstruction::Assign(x)))
                     .collect();
-                let exp_in = VectorInstruction::BuiltinFun(BuiltinSymbol(Symbol::EXP), adjacent[0]);
+                let exp_in = VectorInstruction::BuiltinFun(Symbol::EXP, adjacent[0]);
                 self.map_instruction(&exp_in, instrs)
             }
             VectorInstruction::Join(c, a, b) => (0..self.dual.get_len())
@@ -7852,7 +7781,7 @@ pub enum VectorInstruction {
     Mul(Slot, Slot),
     Pow(Slot, i64),
     Powf(Slot, Slot),
-    BuiltinFun(BuiltinSymbol, Slot),
+    BuiltinFun(Symbol, Slot),
     ExternalFun(usize, Vec<Slot>),
     IfElse(Slot, Label),
     Goto(Label),
@@ -7937,7 +7866,7 @@ enum Instr {
     Mul(usize, Vec<usize>),
     Pow(usize, usize, i64),
     Powf(usize, usize, usize),
-    BuiltinFun(usize, BuiltinSymbol, usize),
+    BuiltinFun(usize, Symbol, usize),
     ExternalFun(usize, usize, Vec<usize>),
     IfElse(usize, Label),
     Goto(Label),
@@ -9663,7 +9592,7 @@ impl<T: Real> EvalTree<T> {
             Expression::ReadArg(_, i) => args[*i].clone(),
             Expression::BuiltinFun(_, s, a) => {
                 let arg = self.evaluate_impl(a, subexpressions, params, args);
-                match s.0.get_id() {
+                match s.get_id() {
                     Symbol::EXP_ID => arg.exp(),
                     Symbol::LOG_ID => arg.log(),
                     Symbol::SIN_ID => arg.sin(),
@@ -10137,10 +10066,6 @@ fn translate_to_symjit(
             .collect::<Vec<symjit::compiler::Slot>>()
     }
 
-    fn builtin_symbol(s: BuiltinSymbol) -> symjit::compiler::BuiltinSymbol {
-        symjit::compiler::BuiltinSymbol(s.get_symbol().get_id())
-    }
-
     for q in instructions {
         match q {
             Instruction::Add(lhs, args, num_reals) => translator
@@ -10160,29 +10085,34 @@ fn translate_to_symjit(
             }
             Instruction::Fun(lhs, fun, is_real) => {
                 let (name, tags, args) = *fun;
-                if name.get_symbol().is_builtin() {
+                if name.is_builtin() {
                     if args.len() != 1 || !tags.is_empty() {
                         return Err(format!(
                             "Builtin function '{}' requires exactly one argument and no tags",
-                            name.get_symbol().get_name(),
+                            name.get_name()
                         ));
                     }
 
                     translator
-                        .append_fun(&slot(lhs), &builtin_symbol(name), &slot(args[0]), is_real)
+                        .append_fun(
+                            &slot(lhs),
+                            &symjit::BuiltinSymbol(name.get_id()),
+                            &slot(args[0]),
+                            is_real,
+                        )
                         .unwrap();
                 } else {
                     if !tags.is_empty() {
                         return Err(format!(
                             "JIT compilation does not support tagged external function '{}'",
-                            name.get_symbol().get_name(),
+                            name.get_name()
                         ));
                     }
 
                     translator
                         .append_external_fun(
                             &slot(lhs),
-                            name.get_symbol().get_stripped_name(),
+                            name.get_stripped_name(),
                             &slot_list(&args),
                         )
                         .unwrap();
@@ -12515,7 +12445,7 @@ impl<'a> AtomView<'a> {
 
                     return Ok(Expression::BuiltinFun(
                         0,
-                        BuiltinSymbol(f.get_symbol()),
+                        f.get_symbol(),
                         Box::new(arg_eval),
                     ));
                 }

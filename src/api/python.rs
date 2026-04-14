@@ -16383,7 +16383,7 @@ impl PythonExpressionEvaluator {
                         [
                             "fun".into_pyobject(py)?.as_any(),
                             slot_to_object(o).into_pyobject(py)?.as_any(),
-                            PythonExpression::from(Atom::var(name.get_symbol()))
+                            PythonExpression::from(Atom::var(*name))
                                 .into_pyobject(py)?
                                 .as_any(),
                             tags.into_pyobject(py)?.as_any(),

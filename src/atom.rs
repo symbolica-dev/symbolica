@@ -44,6 +44,7 @@ mod core;
 pub mod representation;
 
 use ahash::HashMap;
+use byteorder::{LittleEndian, ReadBytesExt, WriteBytesExt};
 use numerica::domains::float::Float;
 use smartstring::{LazyCompact, SmartString};
 
@@ -56,6 +57,7 @@ use crate::{
     state::{RecycledAtom, State, SymbolData, Workspace},
     transformer::StatsOptions,
     utils::{BorrowedOrOwned, Settable},
+    warn,
 };
 
 use std::{
@@ -63,6 +65,7 @@ use std::{
     borrow::Cow,
     cmp::Ordering,
     hash::Hash,
+    io::{Read, Write},
     ops::DerefMut,
 };
 
@@ -432,11 +435,6 @@ pub enum SymbolAttribute {
 /// let f = symbol!("f"; Symmetric);
 /// ```
 #[derive(Copy, Clone, Eq)]
-#[cfg_attr(
-    feature = "bincode",
-    derive(bincode_trait_derive::BorrowDecodeFromDecode),
-    trait_decode(trait = crate::state::HasStateMap),
-)]
 pub struct Symbol {
     id: u32,
     wildcard_level: u8,
@@ -448,6 +446,59 @@ pub struct Symbol {
     is_real: bool,
     is_integer: bool,
     is_positive: bool,
+}
+
+#[cfg(feature = "serde")]
+impl serde::Serialize for Symbol {
+    fn serialize<S: serde::Serializer>(&self, serializer: S) -> Result<S::Ok, S::Error> {
+        let mut data = vec![];
+        self.export(&mut data);
+        data.serialize(serializer)
+    }
+}
+
+#[cfg(feature = "serde")]
+impl<'de> serde::Deserialize<'de> for Symbol {
+    fn deserialize<D: serde::Deserializer<'de>>(deserializer: D) -> Result<Self, D::Error> {
+        let mut v = <&[u8]>::deserialize(deserializer)?;
+        Symbol::import(&mut v)
+            .map_err(|e| serde::de::Error::custom(format!("Failed to deserialize Symbol: {e}")))
+    }
+}
+
+#[cfg(feature = "bincode")]
+impl bincode::Encode for Symbol {
+    fn encode<E: bincode::enc::Encoder>(
+        &self,
+        encoder: &mut E,
+    ) -> Result<(), bincode::error::EncodeError> {
+        let mut data = vec![];
+        self.export(&mut data)
+            .map_err(|e| bincode::error::EncodeError::OtherString(e.to_string()))?;
+        bincode::Encode::encode(&data, encoder)
+    }
+}
+
+#[cfg(feature = "bincode")]
+impl<Context> bincode::Decode<Context> for Symbol {
+    fn decode<D: bincode::de::Decoder<Context = Context>>(
+        decoder: &mut D,
+    ) -> Result<Self, bincode::error::DecodeError> {
+        let v: Vec<u8> = bincode::Decode::decode(decoder)?;
+        Symbol::import(&mut v.as_slice())
+            .map_err(|e| bincode::error::DecodeError::OtherString(e.to_string()))
+    }
+}
+
+#[cfg(feature = "bincode")]
+impl<'de, C> bincode::de::BorrowDecode<'de, C> for Symbol {
+    fn borrow_decode<D: bincode::de::BorrowDecoder<'de, Context = C>>(
+        decoder: &mut D,
+    ) -> Result<Self, bincode::error::DecodeError> {
+        let v: Vec<u8> = bincode::Decode::decode(decoder)?;
+        Symbol::import(&mut v.as_slice())
+            .map_err(|e| bincode::error::DecodeError::OtherString(e.to_string()))
+    }
 }
 
 impl Ord for Symbol {
@@ -1070,6 +1121,15 @@ impl Symbol {
         self.get_global_data().tags.iter().any(|x| x == r)
     }
 
+    /// Check if the symbol is exportable, i.e., it does not have any user-defined functions
+    /// associated with it.
+    pub fn is_exportable(&self) -> bool {
+        self.get_normalization_function().is_none()
+            && self.get_derivative_function().is_none()
+            && self.get_print_function().is_none()
+            && self.get_evaluation_info().is_none()
+    }
+
     /// Get the custom normalization function of the symbol, if any.
     pub fn get_normalization_function(&self) -> Option<&'static NormalizationFunction> {
         self.get_global_data().custom_normalization.as_ref()
@@ -1163,6 +1223,175 @@ impl Symbol {
             || self.is_real()
             || self.is_scalar()
             || !self.get_tags().is_empty()
+    }
+
+    pub(crate) fn import_impl<R: Read>(
+        source: &mut R,
+    ) -> Result<
+        (
+            String,
+            String,
+            Vec<SymbolAttribute>,
+            Vec<String>,
+            UserData,
+            Vec<String>,
+            bool,
+        ),
+        std::io::Error,
+    > {
+        let l = source.read_u32::<LittleEndian>()?;
+        let mut v = vec![0; l as usize];
+        source.read_exact(&mut v)?;
+
+        let str: String = std::string::String::from_utf8(v)
+            .map_err(|e| std::io::Error::new(std::io::ErrorKind::InvalidData, e))?
+            .into();
+
+        let l = source.read_u32::<LittleEndian>()?;
+        let mut v = vec![0; l as usize];
+        source.read_exact(&mut v)?;
+
+        let namespace: String = std::string::String::from_utf8(v)
+            .map_err(|e| std::io::Error::new(std::io::ErrorKind::InvalidData, e))?
+            .into();
+
+        let flags = source.read_u8()?;
+        let extra_flags = source.read_u32::<LittleEndian>()?;
+
+        let s = Symbol::decode_flags(0, flags, extra_flags);
+
+        let mut tags = vec![];
+        let num_tags = source.read_u16::<LittleEndian>()?;
+
+        for _ in 0..num_tags {
+            let l = source.read_u32::<LittleEndian>()?;
+            let mut v = vec![0; l as usize];
+            source.read_exact(&mut v)?;
+
+            let tag: String = std::string::String::from_utf8(v)
+                .map_err(|e| std::io::Error::new(std::io::ErrorKind::InvalidData, e))?
+                .into();
+
+            tags.push(tag);
+        }
+
+        let mut aliases = vec![];
+        let num_aliases = source.read_u16::<LittleEndian>()?;
+
+        for _ in 0..num_aliases {
+            let l = source.read_u32::<LittleEndian>()?;
+            let mut v = vec![0; l as usize];
+            source.read_exact(&mut v)?;
+
+            let alias: String = std::string::String::from_utf8(v)
+                .map_err(|e| std::io::Error::new(std::io::ErrorKind::InvalidData, e))?
+                .into();
+
+            aliases.push(alias);
+        }
+
+        let extra_data = UserData::read(&mut *source)?;
+
+        let is_exportable = source.read_u8()? != 0;
+
+        let mut attributes = vec![];
+        if s.is_antisymmetric() {
+            attributes.push(SymbolAttribute::Antisymmetric);
+        }
+        if s.is_symmetric() {
+            attributes.push(SymbolAttribute::Symmetric);
+        }
+        if s.is_cyclesymmetric() {
+            attributes.push(SymbolAttribute::Cyclesymmetric);
+        }
+        if s.is_linear() {
+            attributes.push(SymbolAttribute::Linear);
+        }
+        if s.is_scalar() {
+            attributes.push(SymbolAttribute::Scalar);
+        }
+        if s.is_real() {
+            attributes.push(SymbolAttribute::Real);
+        }
+        if s.is_integer() {
+            attributes.push(SymbolAttribute::Integer);
+        }
+        if s.is_positive() {
+            attributes.push(SymbolAttribute::Positive);
+        }
+
+        Ok((
+            str.to_string(),
+            namespace.to_string(),
+            attributes,
+            tags,
+            extra_data,
+            aliases,
+            is_exportable,
+        ))
+    }
+
+    /// Import a symbol from a binary format. The symbol must have been exported with the [export](Self::export) function.
+    pub fn import<R: Read>(source: &mut R) -> Result<Symbol, std::io::Error> {
+        let (name, namespace, attributes, tags, extra_data, aliases, is_exportable) =
+            Self::import_impl(source)?;
+
+        match Symbol::new(NamespacedSymbol {
+            symbol: name.clone().into(),
+            namespace: namespace.into(),
+            file: "Imported".into(),
+            line: 0,
+        })
+        .with_attributes(attributes.clone())
+        .with_tags(tags.clone())
+        .with_user_data(extra_data.clone())
+        .with_aliases(aliases.clone())
+        .build()
+        {
+            Ok(symbol) => {
+                if !is_exportable && symbol.is_exportable() {
+                    warn!(
+                        "Imported symbol {name} was previously defined with user-defined functions, but the imported version does not have any."
+                    );
+                }
+                Ok(symbol)
+            }
+            Err(e) => Err(std::io::Error::new(
+                std::io::ErrorKind::InvalidData,
+                e.to_string(),
+            )),
+        }
+    }
+
+    /// Export the symbol to a binary format. Any user registered functions cannot be exported.
+    pub fn export<W: Write>(&self, dest: &mut W) -> Result<(), std::io::Error> {
+        let n = self.get_name();
+        dest.write_u32::<LittleEndian>(n.len() as u32)?;
+        dest.write_all(n.as_bytes())?;
+
+        let namespace = self.get_namespace();
+        dest.write_u32::<LittleEndian>(namespace.len() as u32)?;
+        dest.write_all(namespace.as_bytes())?;
+
+        let (flags, extra_flags) = self.encode_flags();
+        dest.write_u8(flags)?;
+        dest.write_u32::<LittleEndian>(extra_flags)?;
+
+        dest.write_u16::<LittleEndian>(self.get_tags().len() as u16)?;
+        for t in self.get_tags() {
+            dest.write_u32::<LittleEndian>(t.len() as u32)?;
+            dest.write_all(t.as_bytes())?;
+        }
+
+        dest.write_u16::<LittleEndian>(self.get_aliases().len() as u16)?;
+        for t in self.get_aliases() {
+            dest.write_u32::<LittleEndian>(t.len() as u32)?;
+            dest.write_all(t.as_bytes())?;
+        }
+
+        self.get_data().write(dest)?;
+
+        dest.write_u8(self.is_exportable() as u8)
     }
 
     /// Expert use: create a new variable symbol. This constructor should be used with care as there are no checks
@@ -3193,7 +3422,7 @@ impl AsRef<Atom> for Atom {
 
 #[cfg(test)]
 mod test {
-    use crate::atom::{Atom, AtomCore, UserData};
+    use crate::atom::{Atom, AtomCore, Symbol, UserData};
 
     use super::FunctionBuilder;
 
@@ -3257,5 +3486,15 @@ mod test {
     fn user_data() {
         let s = crate::symbol!("user_data::test", data = UserData::Integer(42));
         assert_eq!(s.get_data(), &UserData::Integer(42));
+    }
+
+    #[test]
+    fn symbol_import_export() {
+        let s = crate::symbol!("export_test::s", data = UserData::String("test".to_owned()));
+        let mut e = vec![];
+        s.export(&mut e).unwrap();
+        let imported = Symbol::import(&mut e.as_slice()).unwrap();
+        assert_eq!(s, imported);
+        assert_eq!(s.get_data(), imported.get_data());
     }
 }
