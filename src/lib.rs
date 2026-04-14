@@ -75,6 +75,8 @@ pub mod transformer;
 pub mod utils;
 
 pub use graphica as graph; // re-export graphica
+#[doc(hidden)]
+pub use inventory as _inventory;
 pub use numerica::*; // re-export numerica
 
 use crate::printer::AnsiWrap;
