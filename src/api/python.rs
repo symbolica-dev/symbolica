@@ -16,7 +16,7 @@ use ahash::{HashMap, HashSet};
 use brotli::CompressorWriter;
 use numpy::{
     AllowTypeChange, Complex64, IntoPyArray, PyArrayDyn, PyArrayLike1, PyArrayLikeDyn,
-    ndarray::{ArrayD, Axis, CowArray},
+    ndarray::{ArrayD, Axis, CowArray, IxDyn},
 };
 use pyo3::{
     Borrowed, Bound, FromPyObject, IntoPyObject, IntoPyObjectExt, Py, PyAny, PyErr, PyRef,
@@ -16135,6 +16135,65 @@ impl PythonExpressionEvaluator {
     }
 }
 
+fn reshape_evaluator_inputs<T: Clone>(
+    arr: CowArray<'_, T, IxDyn>,
+    input_len: usize,
+) -> PyResult<CowArray<'_, T, IxDyn>> {
+    let arr = if arr.shape().len() == 1 {
+        let orig_len = arr.len();
+
+        if input_len == 0 {
+            if arr.is_empty() {
+                arr.into_shape_with_order((1, 0))
+                    .map_err(|_| {
+                        exceptions::PyValueError::new_err(format!(
+                            "Failed to reshape input array. Expected (_, {}), but got {:?}",
+                            input_len,
+                            [orig_len],
+                        ))
+                    })?
+                    .into_dyn()
+            } else {
+                return Err(exceptions::PyValueError::new_err(format!(
+                    "Input length mismatch: expected (_, {}), but got {:?}",
+                    input_len,
+                    [orig_len],
+                )));
+            }
+        } else {
+            let target_shape = (orig_len / input_len, input_len);
+
+            let arr = if !arr.is_standard_layout() {
+                CowArray::from(arr.as_standard_layout().into_owned())
+            } else {
+                arr
+            };
+
+            arr.into_shape_with_order(target_shape)
+                .map_err(|_| {
+                    exceptions::PyValueError::new_err(format!(
+                        "Failed to reshape input array. Expected (_, {}), but got {:?}",
+                        input_len,
+                        [orig_len],
+                    ))
+                })?
+                .into_dyn()
+        }
+    } else {
+        arr
+    };
+
+    if arr.shape().len() != 2 || arr.shape()[1] != input_len {
+        return Err(exceptions::PyValueError::new_err(format!(
+            "Input length mismatch: expected (_, {}), but got {:?}",
+            input_len,
+            arr.shape(),
+        )));
+    }
+
+    Ok(arr)
+}
+
 #[cfg_attr(feature = "python_stubgen", gen_stub_pymethods)]
 #[cfg_attr(not(feature = "python_stubgen"), remove_gen_stub)]
 #[pymethods]
@@ -16537,33 +16596,10 @@ impl PythonExpressionEvaluator {
             }
         }
 
-        let arr = CowArray::from(inputs.as_array());
-        let arr = if arr.shape().len() == 1 {
-            arr.to_shape((
-                arr.len() / self.eval_complex.get_evaluator().get_input_len(),
-                self.eval_complex.get_evaluator().get_input_len(),
-            ))
-            .map_err(|_| {
-                exceptions::PyValueError::new_err(format!(
-                    "Failed to reshape input array. Expected (_, {}), but got {:?}",
-                    self.eval_complex.get_evaluator().get_input_len(),
-                    arr.shape(),
-                ))
-            })?
-            .into_dyn()
-        } else {
-            arr
-        };
-
-        if arr.shape().len() != 2
-            || arr.shape()[1] != self.eval_complex.get_evaluator().get_input_len()
-        {
-            return Err(exceptions::PyValueError::new_err(format!(
-                "Input length mismatch: expected (_, {}), but got {:?}",
-                self.eval_complex.get_evaluator().get_input_len(),
-                arr.shape(),
-            )));
-        }
+        let arr = reshape_evaluator_inputs(
+            CowArray::from(inputs.as_array()),
+            self.eval_complex.get_evaluator().get_input_len(),
+        )?;
 
         let n_inputs = arr.shape()[0];
         let mut out =
@@ -16739,33 +16775,10 @@ impl PythonExpressionEvaluator {
             );
         }
 
-        let arr = CowArray::from(inputs.as_array());
-        let arr = if arr.shape().len() == 1 {
-            arr.to_shape((
-                arr.len() / self.eval_complex.get_evaluator().get_input_len(),
-                self.eval_complex.get_evaluator().get_input_len(),
-            ))
-            .map_err(|_| {
-                exceptions::PyValueError::new_err(format!(
-                    "Failed to reshape input array. Expected (_, {}), but got {:?}",
-                    self.eval_complex.get_evaluator().get_input_len(),
-                    arr.shape(),
-                ))
-            })?
-            .into_dyn()
-        } else {
-            arr
-        };
-
-        if arr.shape().len() != 2
-            || arr.shape()[1] != self.eval_complex.get_evaluator().get_input_len()
-        {
-            return Err(exceptions::PyValueError::new_err(format!(
-                "Input length mismatch: expected (_, {}), but got {:?}",
-                self.eval_complex.get_evaluator().get_input_len(),
-                arr.shape(),
-            )));
-        }
+        let arr = reshape_evaluator_inputs(
+            CowArray::from(inputs.as_array()),
+            self.eval_complex.get_evaluator().get_input_len(),
+        )?;
 
         let n_inputs = arr.shape()[0];
         let mut out =
@@ -17925,28 +17938,7 @@ impl PythonCompiledRealExpressionEvaluator {
         inputs: PyArrayLikeDyn<'py, f64, AllowTypeChange>,
         py: Python<'py>,
     ) -> PyResult<Bound<'py, PyArrayDyn<f64>>> {
-        let arr = CowArray::from(inputs.as_array());
-        let arr = if arr.shape().len() == 1 {
-            arr.to_shape((arr.len() / self.input_len, self.input_len))
-                .map_err(|_| {
-                    exceptions::PyValueError::new_err(format!(
-                        "Failed to reshape input array. Expected (_, {}), but got {:?}",
-                        self.input_len,
-                        arr.shape(),
-                    ))
-                })?
-                .into_dyn()
-        } else {
-            arr
-        };
-
-        if arr.shape().len() != 2 || arr.shape()[1] != self.input_len {
-            return Err(exceptions::PyValueError::new_err(format!(
-                "Input length mismatch: expected (_, {}), but got {:?}",
-                self.input_len,
-                arr.shape(),
-            )));
-        }
+        let arr = reshape_evaluator_inputs(CowArray::from(inputs.as_array()), self.input_len)?;
 
         let n_inputs = arr.shape()[0];
         let mut out = ArrayD::zeros(&[n_inputs, self.output_len][..]);
@@ -18012,28 +18004,7 @@ impl PythonCompiledSimdRealExpressionEvaluator {
         inputs: PyArrayLikeDyn<'py, f64, AllowTypeChange>,
         py: Python<'py>,
     ) -> PyResult<Bound<'py, PyArrayDyn<f64>>> {
-        let arr = CowArray::from(inputs.as_array());
-        let arr = if arr.shape().len() == 1 {
-            arr.to_shape((arr.len() / self.input_len, self.input_len))
-                .map_err(|_| {
-                    exceptions::PyValueError::new_err(format!(
-                        "Failed to reshape input array. Expected (_, {}), but got {:?}",
-                        self.input_len,
-                        arr.shape(),
-                    ))
-                })?
-                .into_dyn()
-        } else {
-            arr
-        };
-
-        if arr.shape().len() != 2 || arr.shape()[1] != self.input_len {
-            return Err(exceptions::PyValueError::new_err(format!(
-                "Input length mismatch: expected (_, {}), but got {:?}",
-                self.input_len,
-                arr.shape(),
-            )));
-        }
+        let arr = reshape_evaluator_inputs(CowArray::from(inputs.as_array()), self.input_len)?;
 
         let n_inputs = arr.shape()[0];
         let mut out = ArrayD::zeros(&[n_inputs, self.output_len][..]);
@@ -18112,28 +18083,7 @@ impl PythonCompiledCudaRealExpressionEvaluator {
         inputs: PyArrayLikeDyn<'py, f64, AllowTypeChange>,
         py: Python<'py>,
     ) -> PyResult<Bound<'py, PyArrayDyn<f64>>> {
-        let arr = CowArray::from(inputs.as_array());
-        let arr = if arr.shape().len() == 1 {
-            arr.to_shape((arr.len() / self.input_len, self.input_len))
-                .map_err(|_| {
-                    exceptions::PyValueError::new_err(format!(
-                        "Failed to reshape input array. Expected (_, {}), but got {:?}",
-                        self.input_len,
-                        arr.shape(),
-                    ))
-                })?
-                .into_dyn()
-        } else {
-            arr
-        };
-
-        if arr.shape().len() != 2 || arr.shape()[1] != self.input_len {
-            return Err(exceptions::PyValueError::new_err(format!(
-                "Input length mismatch: expected (_, {}), but got {:?}",
-                self.input_len,
-                arr.shape(),
-            )));
-        }
+        let arr = reshape_evaluator_inputs(CowArray::from(inputs.as_array()), self.input_len)?;
 
         let n_inputs = arr.shape()[0];
         let mut out = ArrayD::zeros(&[n_inputs, self.output_len][..]);
@@ -18211,28 +18161,7 @@ impl PythonCompiledCudaComplexExpressionEvaluator {
         inputs: PyArrayLikeDyn<'py, Complex64, AllowTypeChange>,
         py: Python<'py>,
     ) -> PyResult<Bound<'py, PyArrayDyn<Complex64>>> {
-        let arr = CowArray::from(inputs.as_array());
-        let arr = if arr.shape().len() == 1 {
-            arr.to_shape((arr.len() / self.input_len, self.input_len))
-                .map_err(|_| {
-                    exceptions::PyValueError::new_err(format!(
-                        "Failed to reshape input array. Expected (_, {}), but got {:?}",
-                        self.input_len,
-                        arr.shape(),
-                    ))
-                })?
-                .into_dyn()
-        } else {
-            arr
-        };
-
-        if arr.shape().len() != 2 || arr.shape()[1] != self.input_len {
-            return Err(exceptions::PyValueError::new_err(format!(
-                "Input length mismatch: expected (_, {}), but got {:?}",
-                self.input_len,
-                arr.shape(),
-            )));
-        }
+        let arr = reshape_evaluator_inputs(CowArray::from(inputs.as_array()), self.input_len)?;
 
         let n_inputs = arr.shape()[0];
         let mut out = ArrayD::zeros(&[n_inputs, self.output_len][..]);
@@ -18305,28 +18234,7 @@ impl PythonCompiledComplexExpressionEvaluator {
         inputs: PyArrayLikeDyn<'py, Complex64, AllowTypeChange>,
         py: Python<'py>,
     ) -> PyResult<Bound<'py, PyArrayDyn<Complex64>>> {
-        let arr = CowArray::from(inputs.as_array());
-        let arr = if arr.shape().len() == 1 {
-            arr.to_shape((arr.len() / self.input_len, self.input_len))
-                .map_err(|_| {
-                    exceptions::PyValueError::new_err(format!(
-                        "Failed to reshape input array. Expected (_, {}), but got {:?}",
-                        self.input_len,
-                        arr.shape(),
-                    ))
-                })?
-                .into_dyn()
-        } else {
-            arr
-        };
-
-        if arr.shape().len() != 2 || arr.shape()[1] != self.input_len {
-            return Err(exceptions::PyValueError::new_err(format!(
-                "Input length mismatch: expected (_, {}), but got {:?}",
-                self.input_len,
-                arr.shape(),
-            )));
-        }
+        let arr = reshape_evaluator_inputs(CowArray::from(inputs.as_array()), self.input_len)?;
 
         let n_inputs = arr.shape()[0];
         let mut out = ArrayD::zeros(&[n_inputs, self.output_len][..]);
@@ -18396,28 +18304,7 @@ impl PythonCompiledSimdComplexExpressionEvaluator {
         inputs: PyArrayLikeDyn<'py, Complex64, AllowTypeChange>,
         py: Python<'py>,
     ) -> PyResult<Bound<'py, PyArrayDyn<Complex64>>> {
-        let arr = CowArray::from(inputs.as_array());
-        let arr = if arr.shape().len() == 1 {
-            arr.to_shape((arr.len() / self.input_len, self.input_len))
-                .map_err(|_| {
-                    exceptions::PyValueError::new_err(format!(
-                        "Failed to reshape input array. Expected (_, {}), but got {:?}",
-                        self.input_len,
-                        arr.shape(),
-                    ))
-                })?
-                .into_dyn()
-        } else {
-            arr
-        };
-
-        if arr.shape().len() != 2 || arr.shape()[1] != self.input_len {
-            return Err(exceptions::PyValueError::new_err(format!(
-                "Input length mismatch: expected (_, {}), but got {:?}",
-                self.input_len,
-                arr.shape(),
-            )));
-        }
+        let arr = reshape_evaluator_inputs(CowArray::from(inputs.as_array()), self.input_len)?;
 
         let n_inputs = arr.shape()[0];
         let mut out = ArrayD::zeros(&[n_inputs, self.output_len][..]);
