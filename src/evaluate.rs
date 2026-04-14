@@ -7041,6 +7041,23 @@ impl<T: Default + Clone> ExpressionEvaluator<T> {
         let mut new_external_fns = vec![];
         let mut external_fn_index_map = HashMap::default();
         for external_fn in &self.external_fns {
+            // constant functions are vectorized by repeating the same function for each component
+            if let Some(c_index) = external_fn.constant_index {
+                for i in 0..v.get_dimension() {
+                    let mut e = external_fn.clone();
+                    e.constant_index = Some(c_index * v.get_dimension() + i);
+                    new_external_fns.push(e);
+                }
+                continue;
+            }
+
+            if !external_fn.tags.is_empty() {
+                return Err(format!(
+                    "Cannot vectorize external function '{}' with tags {:?}",
+                    external_fn, external_fn.tags
+                ));
+            }
+
             for i in 0..v.get_dimension() {
                 if let Some(name) =
                     external_fn_map.remove(&(external_fn.export_name().to_owned(), i))
