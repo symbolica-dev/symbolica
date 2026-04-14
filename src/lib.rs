@@ -68,6 +68,7 @@ pub mod parser;
 pub mod poly;
 pub mod printer;
 pub mod solve;
+pub mod transcendental;
 pub mod state;
 pub mod streaming;
 pub mod tensors;

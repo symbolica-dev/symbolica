@@ -4975,6 +4975,116 @@ impl PythonExpression {
         self.expr.sin().into()
     }
 
+    /// Compute the tangent of the expression.
+    pub fn tan(&self) -> PythonExpression {
+        crate::function!(crate::transcendental::tan(), self.expr.clone()).into()
+    }
+
+    /// Compute the cotangent of the expression.
+    pub fn cot(&self) -> PythonExpression {
+        crate::function!(crate::transcendental::cot(), self.expr.clone()).into()
+    }
+
+    /// Compute the secant of the expression.
+    pub fn sec(&self) -> PythonExpression {
+        crate::function!(crate::transcendental::sec(), self.expr.clone()).into()
+    }
+
+    /// Compute the cosecant of the expression.
+    pub fn csc(&self) -> PythonExpression {
+        crate::function!(crate::transcendental::csc(), self.expr.clone()).into()
+    }
+
+    /// Compute the inverse sine of the expression.
+    pub fn asin(&self) -> PythonExpression {
+        crate::function!(crate::transcendental::asin(), self.expr.clone()).into()
+    }
+
+    /// Compute the inverse cosine of the expression.
+    pub fn acos(&self) -> PythonExpression {
+        crate::function!(crate::transcendental::acos(), self.expr.clone()).into()
+    }
+
+    /// Compute the inverse tangent of the expression.
+    pub fn atan(&self) -> PythonExpression {
+        crate::function!(crate::transcendental::atan(), self.expr.clone()).into()
+    }
+
+    /// Compute the inverse cotangent of the expression.
+    pub fn acot(&self) -> PythonExpression {
+        crate::function!(crate::transcendental::acot(), self.expr.clone()).into()
+    }
+
+    /// Compute the inverse secant of the expression.
+    pub fn asec(&self) -> PythonExpression {
+        crate::function!(crate::transcendental::asec(), self.expr.clone()).into()
+    }
+
+    /// Compute the inverse cosecant of the expression.
+    pub fn acsc(&self) -> PythonExpression {
+        crate::function!(crate::transcendental::acsc(), self.expr.clone()).into()
+    }
+
+    /// Compute the hyperbolic sine of the expression.
+    pub fn sinh(&self) -> PythonExpression {
+        crate::function!(crate::transcendental::sinh(), self.expr.clone()).into()
+    }
+
+    /// Compute the hyperbolic cosine of the expression.
+    pub fn cosh(&self) -> PythonExpression {
+        crate::function!(crate::transcendental::cosh(), self.expr.clone()).into()
+    }
+
+    /// Compute the hyperbolic tangent of the expression.
+    pub fn tanh(&self) -> PythonExpression {
+        crate::function!(crate::transcendental::tanh(), self.expr.clone()).into()
+    }
+
+    /// Compute the hyperbolic cotangent of the expression.
+    pub fn coth(&self) -> PythonExpression {
+        crate::function!(crate::transcendental::coth(), self.expr.clone()).into()
+    }
+
+    /// Compute the hyperbolic secant of the expression.
+    pub fn sech(&self) -> PythonExpression {
+        crate::function!(crate::transcendental::sech(), self.expr.clone()).into()
+    }
+
+    /// Compute the hyperbolic cosecant of the expression.
+    pub fn csch(&self) -> PythonExpression {
+        crate::function!(crate::transcendental::csch(), self.expr.clone()).into()
+    }
+
+    /// Compute the inverse hyperbolic sine of the expression.
+    pub fn asinh(&self) -> PythonExpression {
+        crate::function!(crate::transcendental::asinh(), self.expr.clone()).into()
+    }
+
+    /// Compute the inverse hyperbolic cosine of the expression.
+    pub fn acosh(&self) -> PythonExpression {
+        crate::function!(crate::transcendental::acosh(), self.expr.clone()).into()
+    }
+
+    /// Compute the inverse hyperbolic tangent of the expression.
+    pub fn atanh(&self) -> PythonExpression {
+        crate::function!(crate::transcendental::atanh(), self.expr.clone()).into()
+    }
+
+    /// Compute the inverse hyperbolic cotangent of the expression.
+    pub fn acoth(&self) -> PythonExpression {
+        crate::function!(crate::transcendental::acoth(), self.expr.clone()).into()
+    }
+
+    /// Compute the inverse hyperbolic secant of the expression.
+    pub fn asech(&self) -> PythonExpression {
+        crate::function!(crate::transcendental::asech(), self.expr.clone()).into()
+    }
+
+    /// Compute the inverse hyperbolic cosecant of the expression.
+    pub fn acsch(&self) -> PythonExpression {
+        crate::function!(crate::transcendental::acsch(), self.expr.clone()).into()
+    }
+
     /// Compute the exponential of the expression.
     pub fn exp(&self) -> PythonExpression {
         self.expr.exp().into()
@@ -4993,6 +5103,72 @@ impl PythonExpression {
     /// Compute the absolute value of the expression.
     pub fn abs(&self) -> PythonExpression {
         self.expr.abs().into()
+    }
+
+    /// Compute the gamma function of the expression.
+    pub fn gamma(&self) -> PythonExpression {
+        crate::function!(crate::transcendental::gamma(), self.expr.clone()).into()
+    }
+
+    /// Compute the digamma function of the expression.
+    pub fn digamma(&self) -> PythonExpression {
+        crate::function!(crate::transcendental::digamma(), self.expr.clone()).into()
+    }
+
+    /// Compute the polygamma function of order `n` at the expression.
+    pub fn polygamma(&self, n: ConvertibleToExpression) -> PythonExpression {
+        crate::function!(
+            crate::transcendental::polygamma(),
+            n.to_expression().expr,
+            self.expr.clone()
+        )
+        .into()
+    }
+
+    /// Compute the polylogarithm of order `s` at the expression.
+    pub fn polylog(&self, s: ConvertibleToExpression) -> PythonExpression {
+        crate::function!(
+            crate::transcendental::polylog(),
+            s.to_expression().expr,
+            self.expr.clone()
+        )
+        .into()
+    }
+
+    /// Compute the cylindrical Bessel function of the first kind of order `nu` at the expression.
+    pub fn bessel_j(&self, nu: ConvertibleToExpression) -> PythonExpression {
+        let a = nu.to_expression().expr;
+        crate::function!(crate::transcendental::bessel_j(), a, self.expr.clone()).into()
+    }
+
+    /// Compute the cylindrical Bessel function of the second kind of order `nu` at the expression.
+    pub fn bessel_y(&self, nu: ConvertibleToExpression) -> PythonExpression {
+        crate::function!(
+            crate::transcendental::bessel_y(),
+            nu.to_expression().expr,
+            self.expr.clone()
+        )
+        .into()
+    }
+
+    /// Compute the modified Bessel function of the first kind of order `nu` at the expression.
+    pub fn bessel_i(&self, nu: ConvertibleToExpression) -> PythonExpression {
+        crate::function!(
+            crate::transcendental::bessel_i(),
+            nu.to_expression().expr,
+            self.expr.clone()
+        )
+        .into()
+    }
+
+    /// Compute the modified Bessel function of the second kind of order `nu` at the expression.
+    pub fn bessel_k(&self, nu: ConvertibleToExpression) -> PythonExpression {
+        crate::function!(
+            crate::transcendental::bessel_k(),
+            nu.to_expression().expr,
+            self.expr.clone()
+        )
+        .into()
     }
 
     /// Take the complex conjugate of this expression, returning the result.
