@@ -5,10 +5,10 @@ use std::borrow::Cow;
 use std::hash::Hash;
 use std::io::{Read, Write};
 use std::sync::atomic::{AtomicUsize, Ordering};
-use std::sync::{Arc, RwLock, RwLockWriteGuard};
+use std::sync::{Arc, Once, OnceLock, RwLock, RwLockWriteGuard};
 use std::thread::LocalKey;
 use std::{
-    cell::RefCell,
+    cell::{Cell, RefCell},
     collections::hash_map::Entry,
     ops::{Deref, DerefMut},
 };
@@ -16,7 +16,6 @@ use std::{
 use ahash::{HashMap, HashMapExt};
 use append_only_vec::AppendOnlyVec;
 use byteorder::LittleEndian;
-use once_cell::sync::Lazy;
 use smartstring::alias::String;
 
 use crate::atom::{
@@ -81,7 +80,71 @@ pub(crate) struct SymbolData {
     pub(crate) user_data: UserData,
 }
 
-static STATE: Lazy<RwLock<State>> = Lazy::new(|| RwLock::new(State::new()));
+/// An initializer called when the Symbolica global state is initialized.
+/// Use [`initialize!`](crate::initialize) to register state initializers.
+pub struct StateInitializer {
+    init: fn(),
+    name: &'static str,
+    dependencies: &'static [&'static str],
+}
+
+impl StateInitializer {
+    /// Creates a new state initializer with the given initialization function.
+    pub const fn new(
+        name: &'static str,
+        init: fn(),
+        dependencies: &'static [&'static str],
+    ) -> Self {
+        Self {
+            init,
+            name,
+            dependencies,
+        }
+    }
+}
+
+/// An initializer called when the Symbolica global state is initialized.
+/// It can be used to register symbols before any other use.
+/// If the intialization depends on other initializations, provide
+/// the crate names of the dependencies as additional arguments.
+///
+/// This macro should be called outside of any functions.
+///
+/// ```ignore
+/// use symbolica::{initialize, symbol};
+///
+/// initialize!(|| {
+///     symbol!("your_symbol"; Linear);
+/// });
+///
+/// fn main() { }
+/// ```
+#[macro_export]
+macro_rules! initialize {
+    ($init:expr $(, $deps:expr)* $(,)?) => {
+        $crate::_inventory::submit! {
+            $crate::state::StateInitializer::new(
+                env!("CARGO_CRATE_NAME"),
+                $init,
+                &["symbolica", $($deps),*],
+            )
+        }
+    };
+}
+
+#[cfg(not(doctest))]
+inventory::submit! {
+    StateInitializer::new(
+        "symbolica",
+        || { },
+        &[]
+    )
+}
+
+inventory::collect!(StateInitializer);
+
+static STATE: OnceLock<RwLock<State>> = OnceLock::new();
+static STATE_INITIALIZER: Once = Once::new();
 static ID_TO_STR: AppendOnlyVec<(Symbol, SymbolData)> = AppendOnlyVec::new();
 static FINITE_FIELDS: AppendOnlyVec<Zp64> = AppendOnlyVec::new();
 static VARIABLE_LISTS: AppendOnlyVec<Arc<Vec<PolyVariable>>> = AppendOnlyVec::new();
@@ -90,6 +153,10 @@ static SYMBOL_OFFSET: AtomicUsize = AtomicUsize::new(0);
 thread_local!(
     /// A thread-local workspace, that stores recyclable atoms.
     static WORKSPACE: Workspace = const { Workspace::new() }
+);
+
+thread_local!(
+    static RUNNING_STATE_INITIALIZER: Cell<bool> = const { Cell::new(false) }
 );
 
 /// A global state, that stores mappings from variable and function names to ids.
@@ -210,12 +277,8 @@ impl State {
         Self::BUILTIN_SYMBOL_NAMES.contains(&str.as_ref())
     }
 
-    fn new() -> State {
-        LicenseManager::check();
-
-        let mut state = State {
-            str_to_id: HashMap::new(),
-        };
+    fn initialize_builtin_symbols(&mut self) {
+        let offset = SYMBOL_OFFSET.load(Ordering::Relaxed);
 
         for ((name, symbol), alias) in Self::BUILTIN_SYMBOL_NAMES
             .iter()
@@ -239,27 +302,151 @@ impl State {
                     user_data: UserData::None,
                 },
             ));
-            assert_eq!(symbol.get_id() as usize, index);
+            assert_eq!(symbol.get_id() as usize, index - offset);
 
-            state.str_to_id.insert(r.symbol.into(), *symbol);
+            self.str_to_id.insert(r.symbol.into(), *symbol);
 
             if let Some(alias) = alias {
-                state.str_to_id.insert((*alias).into(), *symbol);
+                self.str_to_id.insert((*alias).into(), *symbol);
+            }
+        }
+    }
+
+    fn new() -> State {
+        LicenseManager::check();
+
+        let mut state = State {
+            str_to_id: HashMap::new(),
+        };
+
+        state.initialize_builtin_symbols();
+
+        state
+    }
+
+    /// Initializes the state by running all registered state initializers in a topological order.
+    /// This function is re-entry safe.
+    fn initialize_state() {
+        struct ReentryGuard;
+
+        impl ReentryGuard {
+            fn enter(running: &'static LocalKey<Cell<bool>>) -> Self {
+                running.with(|running| {
+                    assert!(
+                        !running.replace(true),
+                        "nested state initializer execution is not supported"
+                    );
+                });
+
+                Self
             }
         }
 
-        #[cfg(test)]
-        {
-            state.initialize_test();
+        impl Drop for ReentryGuard {
+            fn drop(&mut self) {
+                RUNNING_STATE_INITIALIZER.with(|running| running.set(false));
+            }
         }
 
-        state
+        STATE.get_or_init(|| RwLock::new(State::new()));
+
+        if RUNNING_STATE_INITIALIZER.with(|running| running.get()) {
+            return;
+        }
+
+        STATE_INITIALIZER.call_once(|| {
+            let _guard = ReentryGuard::enter(&RUNNING_STATE_INITIALIZER);
+
+            #[cfg(test)]
+            {
+                STATE.get().unwrap().write().unwrap().initialize_test();
+            }
+
+            // topologically sort the initializers based on their dependencies, and run them in order
+            let mut initializers: Vec<_> =
+                inventory::iter::<StateInitializer>.into_iter().collect();
+            initializers.sort_by_key(|initializer| initializer.name);
+
+            let mut initializers_by_name = HashMap::with_capacity(initializers.len());
+            for initializer in &initializers {
+                if initializers_by_name
+                    .insert(initializer.name, *initializer)
+                    .is_some()
+                {
+                    panic!(
+                        "Multiple state initializers registered for crate `{}`",
+                        initializer.name
+                    );
+                }
+            }
+
+            #[derive(Clone, Copy, PartialEq, Eq)]
+            enum VisitState {
+                Visiting,
+                Visited,
+            }
+
+            // depth first visit to sort the initializers based on their dependencies
+            fn visit_initializer<'a>(
+                current: &'a StateInitializer,
+                initializer: &HashMap<&'static str, &'a StateInitializer>,
+                visit_state: &mut HashMap<&'static str, VisitState>,
+                ordered_initializers: &mut Vec<&'a StateInitializer>,
+            ) {
+                match visit_state.get(current.name) {
+                    Some(VisitState::Visited) => return,
+                    Some(VisitState::Visiting) => {
+                        panic!(
+                            "Cyclic state initializer dependency involving crate `{}`",
+                            current.name
+                        );
+                    }
+                    None => {}
+                }
+
+                visit_state.insert(current.name, VisitState::Visiting);
+
+                for dependency in current.dependencies {
+                    let dependency_initializer = initializer.get(dependency).unwrap_or_else(|| {
+                        panic!(
+                            "State initializer for crate `{}` depends on missing crate `{}`",
+                            current.name, dependency
+                        )
+                    });
+                    visit_initializer(
+                        dependency_initializer,
+                        initializer,
+                        visit_state,
+                        ordered_initializers,
+                    );
+                }
+
+                visit_state.insert(current.name, VisitState::Visited);
+                ordered_initializers.push(current);
+            }
+
+            let mut ordered_initializers = Vec::with_capacity(initializers.len());
+            let mut visit_state = HashMap::with_capacity(initializers.len());
+            for initializer in &initializers {
+                visit_initializer(
+                    initializer,
+                    &initializers_by_name,
+                    &mut visit_state,
+                    &mut ordered_initializers,
+                );
+            }
+
+            for initializer in ordered_initializers {
+                (initializer.init)();
+            }
+        });
     }
 
     /// Get the global state.
     #[inline]
     pub(crate) fn get_global_state() -> &'static RwLock<State> {
-        &STATE
+        Self::initialize_state();
+        STATE.get().unwrap()
     }
 
     /// Initialize the global state for testing purposes by allocating
@@ -349,43 +536,12 @@ impl State {
     /// symbol!("f"; Antisymmetric);
     /// ```
     pub unsafe fn reset() {
-        let mut state = STATE.write().unwrap();
+        let mut state = Self::get_global_state().write().unwrap();
 
         state.str_to_id.clear();
         SYMBOL_OFFSET.store(ID_TO_STR.len(), Ordering::Relaxed);
 
-        let offset = SYMBOL_OFFSET.load(Ordering::Relaxed);
-
-        for ((name, symbol), alias) in Self::BUILTIN_SYMBOL_NAMES
-            .iter()
-            .zip(&Self::BUILTIN_SYMBOLS)
-            .zip(&Self::BUILTIN_SYMBOL_ALIASES)
-        {
-            let r = wrap_symbol!(name);
-
-            let index = ID_TO_STR.push((
-                *symbol,
-                SymbolData {
-                    name: r.symbol.clone().into(),
-                    file: r.file,
-                    namespace: r.namespace,
-                    line: r.line,
-                    custom_normalization: None,
-                    custom_print: None,
-                    custom_derivative: None,
-                    tags: vec![],
-                    aliases: alias.map(|a| vec![a.to_string()]).unwrap_or_default(),
-                    user_data: UserData::None,
-                },
-            ));
-            assert_eq!(symbol.get_id() as usize, index - offset);
-
-            state.str_to_id.insert(r.symbol.into(), *symbol);
-
-            if let Some(alias) = alias {
-                state.str_to_id.insert((*alias).into(), *symbol);
-            }
-        }
+        state.initialize_builtin_symbols();
 
         #[cfg(test)]
         {
@@ -397,7 +553,7 @@ impl State {
     #[allow(dead_code)]
     pub(crate) unsafe fn symbol_from_id(id: u32) -> Symbol {
         if ID_TO_STR.len() == 0 {
-            let _ = *STATE; // initialize the state
+            Self::initialize_state();
         }
 
         ID_TO_STR[id as usize].0
@@ -406,7 +562,7 @@ impl State {
     /// Iterate over all defined symbols.
     pub fn symbol_iter() -> impl Iterator<Item = (Symbol, &'static str)> {
         if ID_TO_STR.len() == 0 {
-            let _ = *STATE; // initialize the state
+            Self::initialize_state();
         }
 
         ID_TO_STR
@@ -484,7 +640,8 @@ impl State {
     }
 
     pub(crate) fn get_state_mut() -> RwLockWriteGuard<'static, State> {
-        STATE.write().unwrap()
+        Self::initialize_state();
+        STATE.get().unwrap().write().unwrap()
     }
 
     /// Register a new symbol with the given attributes and a specific function
@@ -730,7 +887,7 @@ impl State {
     #[inline]
     pub(crate) fn get_name(id: Symbol) -> &'static str {
         if ID_TO_STR.len() == 0 {
-            let _ = *STATE; // initialize the state
+            Self::initialize_state();
         }
 
         &ID_TO_STR[id.get_id() as usize + SYMBOL_OFFSET.load(Ordering::Relaxed)]
@@ -742,7 +899,7 @@ impl State {
     #[inline]
     pub(crate) fn get_symbol_namespace(id: Symbol) -> &'static str {
         if ID_TO_STR.len() == 0 {
-            let _ = *STATE; // initialize the state
+            Self::initialize_state();
         }
 
         ID_TO_STR[id.get_id() as usize + SYMBOL_OFFSET.load(Ordering::Relaxed)]
@@ -755,7 +912,7 @@ impl State {
     #[inline]
     pub(crate) fn get_symbol_data(id: Symbol) -> &'static SymbolData {
         if ID_TO_STR.len() == 0 {
-            let _ = *STATE; // initialize the state
+            Self::initialize_state();
         }
 
         &ID_TO_STR[id.get_id() as usize + SYMBOL_OFFSET.load(Ordering::Relaxed)].1
@@ -765,7 +922,7 @@ impl State {
     #[inline]
     pub(crate) fn get_normalization_function(id: Symbol) -> Option<&'static NormalizationFunction> {
         if ID_TO_STR.len() == 0 {
-            let _ = *STATE; // initialize the state
+            Self::initialize_state();
         }
 
         ID_TO_STR[id.get_id() as usize + SYMBOL_OFFSET.load(Ordering::Relaxed)]
@@ -779,7 +936,10 @@ impl State {
     }
 
     pub(crate) fn get_or_insert_finite_field(f: Zp64) -> FiniteFieldIndex {
-        STATE.write().unwrap().get_or_insert_finite_field_impl(f)
+        Self::get_global_state()
+            .write()
+            .unwrap()
+            .get_or_insert_finite_field_impl(f)
     }
 
     pub(crate) fn get_or_insert_finite_field_impl(&mut self, f: Zp64) -> FiniteFieldIndex {
@@ -798,7 +958,10 @@ impl State {
     }
 
     pub(crate) fn get_or_insert_variable_list(f: Arc<Vec<PolyVariable>>) -> VariableListIndex {
-        STATE.write().unwrap().get_or_insert_variable_list_impl(f)
+        Self::get_global_state()
+            .write()
+            .unwrap()
+            .get_or_insert_variable_list_impl(f)
     }
 
     pub(crate) fn get_or_insert_variable_list_impl(
@@ -819,7 +982,7 @@ impl State {
     #[inline(always)]
     pub fn export<W: Write>(dest: &mut W) -> Result<(), std::io::Error> {
         if ID_TO_STR.len() == 0 {
-            let _ = *STATE; // initialize the state
+            Self::initialize_state();
         }
 
         dest.write_u32::<LittleEndian>(SYMBOLICA_MAGIC)?;
