@@ -17,7 +17,7 @@ use crate::{
         rational::Q,
         rational_polynomial::{RationalPolynomial, RationalPolynomialField},
     },
-    evaluate::{FunctionMap, OptimizationSettings},
+    evaluate::{EvaluationDomain, FunctionMap, OptimizationSettings},
     poly::{PolyVariable, PositiveExponent},
     tensors::matrix::{Matrix, MatrixError},
 };
@@ -58,7 +58,7 @@ impl std::fmt::Display for SolveError {
 
 impl AtomView<'_> {
     /// Find the root of a function in `x` numerically over the reals using Newton's method.
-    pub(crate) fn nsolve<N: SingleFloat + Real + PartialOrd>(
+    pub(crate) fn nsolve<N: SingleFloat + Real + EvaluationDomain + PartialOrd>(
         &self,
         x: &Indeterminate,
         init: N,
@@ -118,7 +118,13 @@ impl AtomView<'_> {
 
     /// Solve a non-linear system numerically over the reals using Newton's method.
     pub(crate) fn nsolve_system<
-        N: SingleFloat + Real + PartialOrd + InternalOrdering + Eq + std::hash::Hash,
+        N: SingleFloat
+            + Real
+            + EvaluationDomain
+            + PartialOrd
+            + InternalOrdering
+            + Eq
+            + std::hash::Hash,
         T: AtomCore,
     >(
         system: &[T],
@@ -132,7 +138,13 @@ impl AtomView<'_> {
     }
 
     fn nsolve_system_impl<
-        N: SingleFloat + Real + PartialOrd + InternalOrdering + Eq + std::hash::Hash,
+        N: SingleFloat
+            + Real
+            + EvaluationDomain
+            + PartialOrd
+            + InternalOrdering
+            + Eq
+            + std::hash::Hash,
     >(
         system: &[AtomView],
         vars: &[Indeterminate],

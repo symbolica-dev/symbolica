@@ -10,6 +10,7 @@ use std::{
     collections::{BinaryHeap, hash_map::Entry},
     hash::{Hash, Hasher},
     os::raw::{c_ulong, c_void},
+    panic,
     path::{Path, PathBuf},
     sync::{
         Arc, Mutex,
@@ -20,15 +21,15 @@ use symjit::{Applet, Config, Defuns, Translator};
 
 use crate::{
     LicenseManager,
-    atom::{Atom, AtomCore, AtomView, Indeterminate, KeyLookup, Symbol},
+    atom::{Atom, AtomCore, AtomView, EvaluationInfo, Indeterminate, KeyLookup, Symbol},
     coefficient::CoefficientView,
     combinatorics::unique_permutations,
     domains::{
         InternalOrdering,
         dual::DualNumberStructure,
         float::{
-            Complex, Constructible, ErrorPropagatingFloat, F64, Float, FloatLike, Real, RealLike,
-            SingleFloat,
+            Complex, Constructible, DoubleFloat, ErrorPropagatingFloat, F64, Float, FloatLike,
+            Real, RealLike, SingleFloat,
         },
         integer::Integer,
         rational::Rational,
@@ -407,7 +408,7 @@ struct SplitExpression<T> {
 #[derive(Debug, Clone)]
 pub struct EvalTree<T> {
     functions: Vec<(String, Vec<Indeterminate>, SplitExpression<T>)>,
-    external_functions: Vec<String>,
+    external_functions: Vec<ExternalFunctionContainer<T>>,
     expressions: SplitExpression<T>,
     param_count: usize,
 }
@@ -419,15 +420,17 @@ pub struct BuiltinSymbol(Symbol);
 #[cfg(feature = "serde")]
 impl serde::Serialize for BuiltinSymbol {
     fn serialize<S: serde::Serializer>(&self, serializer: S) -> Result<S::Ok, S::Error> {
-        self.0.get_id().serialize(serializer)
+        self.0.get_name().serialize(serializer)
     }
 }
 
 #[cfg(feature = "serde")]
 impl<'de> serde::Deserialize<'de> for BuiltinSymbol {
     fn deserialize<D: serde::Deserializer<'de>>(deserializer: D) -> Result<Self, D::Error> {
-        let id: u32 = u32::deserialize(deserializer)?;
-        Ok(BuiltinSymbol(unsafe { State::symbol_from_id(id) }))
+        let name: String = String::deserialize(deserializer)?;
+        crate::get_symbol!(&name)
+            .ok_or_else(|| serde::de::Error::custom(format!("Unknown symbol: {name}")))
+            .map(|s| BuiltinSymbol(s))
     }
 }
 
@@ -437,7 +440,7 @@ impl bincode::Encode for BuiltinSymbol {
         &self,
         encoder: &mut E,
     ) -> core::result::Result<(), bincode::error::EncodeError> {
-        u32::encode(&self.0.get_id(), encoder)
+        str::encode(self.0.get_name(), encoder)
     }
 }
 
@@ -448,8 +451,12 @@ impl<Context> bincode::Decode<Context> for BuiltinSymbol {
     fn decode<D: bincode::de::Decoder<Context = Context>>(
         decoder: &mut D,
     ) -> Result<Self, bincode::error::DecodeError> {
-        let id: u32 = u32::decode(decoder)?;
-        Ok(BuiltinSymbol(unsafe { State::symbol_from_id(id) }))
+        let name: String = bincode::Decode::decode(decoder)?;
+        crate::get_symbol!(&name)
+            .ok_or_else(|| {
+                bincode::error::DecodeError::OtherString(format!("Unknown symbol: {name}"))
+            })
+            .map(|s| BuiltinSymbol(s))
     }
 }
 
@@ -457,6 +464,41 @@ impl BuiltinSymbol {
     pub fn get_symbol(&self) -> Symbol {
         self.0
     }
+}
+
+fn external_export_name(fn_map: &FunctionMap<Complex<Rational>>, symbol: Symbol) -> String {
+    match fn_map.external_fn.get(&symbol) {
+        Some(ConstOrExpr::External(_, rename)) => rename.clone(),
+        _ => symbol.get_stripped_name().to_owned(),
+    }
+}
+
+fn register_constant_external_container<T>(
+    external_functions: &mut Vec<ExternalFunctionContainer<T>>,
+    fn_map: &FunctionMap<Complex<Rational>>,
+    symbol: Symbol,
+    tags: Vec<Atom>,
+    constants: &mut Vec<Complex<Rational>>,
+) -> usize {
+    let index = if let Some(index) = external_functions
+        .iter()
+        .position(|x| x.eval_symbol() == symbol && x.tags == tags)
+    {
+        index
+    } else {
+        let export_name = external_export_name(fn_map, symbol);
+        external_functions.push(ExternalFunctionContainer::new(export_name, symbol, tags));
+        external_functions.len() - 1
+    };
+
+    if let Some(constant_index) = external_functions[index].constant_index {
+        return constant_index;
+    }
+
+    let constant_index = constants.len();
+    constants.push(Complex::default());
+    external_functions[index].constant_index = Some(constant_index);
+    constant_index
 }
 
 impl<'a> AtomView<'a> {
@@ -785,19 +827,26 @@ impl<'a> AtomView<'a> {
 
         let mut external_functions = fn_map
             .external_fn
-            .values()
-            .map(|v| {
-                if let ConstOrExpr::External(id, name) = v {
-                    (*id, name.clone())
+            .iter()
+            .map(|(symbol, v)| {
+                if let ConstOrExpr::External(id, _) = v {
+                    (
+                        *id,
+                        ExternalFunctionContainer::new(
+                            external_export_name(fn_map, *symbol),
+                            *symbol,
+                            vec![],
+                        ),
+                    )
                 } else {
                     unreachable!()
                 }
             })
             .collect::<Vec<_>>();
         external_functions.sort_by_key(|(id, _)| *id);
-        let external_functions = external_functions
+        let mut external_functions = external_functions
             .into_iter()
-            .map(|(_, name)| name)
+            .map(|(_, container)| container)
             .collect::<Vec<_>>();
 
         let mut result_indices = vec![];
@@ -808,6 +857,7 @@ impl<'a> AtomView<'a> {
                 params,
                 &mut constants,
                 &mut constant_map,
+                &mut external_functions,
                 &mut instr,
                 &mut subexpression,
                 &mut arg_stack,
@@ -867,17 +917,44 @@ impl<'a> AtomView<'a> {
                         ComplexPhase::default(),
                     ));
                 }
-                Instruction::Fun(o, sym, arg, _) => {
-                    instructions.push((
-                        Instr::BuiltinFun(slot_map!(o), sym.clone(), slot_map!(arg)),
-                        ComplexPhase::default(),
-                    ));
-                }
-                Instruction::ExternalFun(o, name, args) => {
+                Instruction::Fun(o, b, _) => {
+                    let (sym, tags, args) = &*b;
+
+                    if sym.0.is_builtin() {
+                        if args.len() != 1 {
+                            return Err(format!(
+                                "Builtin function {} must have exactly one argument",
+                                sym.0.get_name()
+                            ));
+                        }
+                        instructions.push((
+                            Instr::BuiltinFun(slot_map!(o), sym.clone(), slot_map!(args[0])),
+                            ComplexPhase::default(),
+                        ));
+                        continue;
+                    }
+
+                    let symbol = sym.get_symbol();
+                    let tags = tags.iter().map(|x| crate::parse!(x)).collect::<Vec<_>>();
+                    let index = if let Some(index) = external_functions
+                        .iter()
+                        .position(|x| x.eval_symbol() == symbol && x.tags == tags)
+                    {
+                        index
+                    } else {
+                        let export_name = external_export_name(fn_map, symbol);
+                        external_functions.push(ExternalFunctionContainer::new(
+                            export_name,
+                            symbol,
+                            tags,
+                        ));
+                        external_functions.len() - 1
+                    };
+
                     instructions.push((
                         Instr::ExternalFun(
                             slot_map!(o),
-                            external_functions.iter().position(|x| x == &name).unwrap(),
+                            index,
                             args.clone().into_iter().map(|x| slot_map!(x)).collect(),
                         ),
                         ComplexPhase::default(),
@@ -925,6 +1002,7 @@ impl<'a> AtomView<'a> {
         params: &[Atom],
         constants: &mut Vec<Complex<Rational>>,
         constant_map: &mut HashMap<Complex<Rational>, usize>,
+        external_functions: &mut Vec<ExternalFunctionContainer<Complex<Rational>>>,
         instr: &mut Vec<Instruction>,
         subexpressions: &mut HashMap<AtomView<'a>, Slot>,
         args: &mut Vec<(AtomView<'a>, Slot)>,
@@ -986,10 +1064,24 @@ impl<'a> AtomView<'a> {
                 constant_map.insert(c, i);
                 Slot::Const(i)
             }
-            AtomView::Var(v) => Err(format!(
-                "Variable {} not in constant map",
-                v.get_symbol().get_name()
-            ))?,
+            AtomView::Var(v) => {
+                let s = v.get_symbol();
+                if s.get_evaluation_info().is_some() {
+                    let i = register_constant_external_container(
+                        external_functions,
+                        fn_map,
+                        s,
+                        vec![],
+                        constants,
+                    );
+                    return Ok(Slot::Const(i));
+                }
+
+                Err(format!(
+                    "Variable {} not in constant map",
+                    v.get_symbol().get_name()
+                ))?
+            }
             AtomView::Fun(f) => {
                 let name = f.get_symbol();
                 if [
@@ -1010,6 +1102,7 @@ impl<'a> AtomView<'a> {
                         params,
                         constants,
                         constant_map,
+                        external_functions,
                         instr,
                         subexpressions,
                         args,
@@ -1017,7 +1110,11 @@ impl<'a> AtomView<'a> {
                     )?;
 
                     let temp = Slot::Temp(instr.len());
-                    let c = Instruction::Fun(temp, BuiltinSymbol(name), arg_eval, false);
+                    let c = Instruction::Fun(
+                        temp,
+                        Box::new((BuiltinSymbol(name), vec![], vec![arg_eval])),
+                        false,
+                    );
                     instr.push(c);
 
                     subexpressions.insert(*self, temp);
@@ -1028,6 +1125,54 @@ impl<'a> AtomView<'a> {
                     &ConstOrExpr::Condition
                 } else if let Some(fun) = fn_map.get(*self) {
                     fun
+                } else if let Some(eval_info) = name.get_evaluation_info() {
+                    let tags = f
+                        .iter()
+                        .take(eval_info.get_tag_count())
+                        .map(|x| x.to_owned())
+                        .collect::<Vec<_>>();
+
+                    // check if it a constant external function
+                    if f.get_nargs() == eval_info.get_tag_count() {
+                        let i = register_constant_external_container(
+                            external_functions,
+                            fn_map,
+                            name,
+                            tags,
+                            constants,
+                        );
+                        return Ok(Slot::Const(i));
+                    };
+
+                    let eval_args = f
+                        .iter()
+                        .skip(eval_info.get_tag_count())
+                        .map(|arg| {
+                            arg.linearize_impl(
+                                fn_map,
+                                params,
+                                constants,
+                                constant_map,
+                                external_functions,
+                                instr,
+                                subexpressions,
+                                args,
+                                arg_start,
+                            )
+                        })
+                        .collect::<Result<_, _>>()?;
+
+                    let temp = Slot::Temp(instr.len());
+                    instr.push(Instruction::Fun(
+                        temp,
+                        Box::new((
+                            BuiltinSymbol(name),
+                            tags.iter().map(|x| x.to_canonical_string()).collect(),
+                            eval_args,
+                        )),
+                        false,
+                    ));
+                    return Ok(temp);
                 } else {
                     return Err(format!("Undefined function {}", self.to_plain_string()));
                 };
@@ -1043,7 +1188,7 @@ impl<'a> AtomView<'a> {
                         constant_map.insert(c.clone(), i);
                         Slot::Const(i)
                     }
-                    ConstOrExpr::External(_e, name) => {
+                    ConstOrExpr::External(_e, _name) => {
                         let eval_args = f
                             .iter()
                             .map(|arg| {
@@ -1052,6 +1197,7 @@ impl<'a> AtomView<'a> {
                                     params,
                                     constants,
                                     constant_map,
+                                    external_functions,
                                     instr,
                                     subexpressions,
                                     args,
@@ -1061,7 +1207,11 @@ impl<'a> AtomView<'a> {
                             .collect::<Result<_, _>>()?;
 
                         let temp = Slot::Temp(instr.len());
-                        instr.push(Instruction::ExternalFun(temp, name.clone(), eval_args));
+                        instr.push(Instruction::Fun(
+                            temp,
+                            Box::new((BuiltinSymbol(f.get_symbol()), vec![], eval_args)),
+                            false,
+                        ));
                         temp
                     }
                     ConstOrExpr::Expr(Expr {
@@ -1088,6 +1238,7 @@ impl<'a> AtomView<'a> {
                                 params,
                                 constants,
                                 constant_map,
+                                external_functions,
                                 instr,
                                 subexpressions,
                                 args,
@@ -1110,6 +1261,7 @@ impl<'a> AtomView<'a> {
                             params,
                             constants,
                             constant_map,
+                            external_functions,
                             instr,
                             if old_arg_stack_len == args.len() {
                                 subexpressions
@@ -1150,6 +1302,7 @@ impl<'a> AtomView<'a> {
                             params,
                             constants,
                             constant_map,
+                            external_functions,
                             instr,
                             subexpressions,
                             args,
@@ -1167,6 +1320,7 @@ impl<'a> AtomView<'a> {
                                     return None;
                                 }
                                 Slot::Const(i) => {
+                                    // TODO: check that this constant is not an external function evaluation slot!
                                     return Some(constants[i].clone());
                                 }
                                 Slot::Temp(t) => t,
@@ -1235,6 +1389,7 @@ impl<'a> AtomView<'a> {
                                     params,
                                     constants,
                                     constant_map,
+                                    external_functions,
                                     instr,
                                     subexpressions,
                                     args,
@@ -1246,6 +1401,7 @@ impl<'a> AtomView<'a> {
                                     params,
                                     constants,
                                     constant_map,
+                                    external_functions,
                                     instr,
                                     subexpressions,
                                     args,
@@ -1266,6 +1422,7 @@ impl<'a> AtomView<'a> {
                             params,
                             constants,
                             constant_map,
+                            external_functions,
                             instr,
                             &mut sub_expr_pos_child,
                             args,
@@ -1283,6 +1440,7 @@ impl<'a> AtomView<'a> {
                             params,
                             constants,
                             constant_map,
+                            external_functions,
                             instr,
                             &mut sub_expr_pos_child,
                             args,
@@ -1305,6 +1463,7 @@ impl<'a> AtomView<'a> {
                     params,
                     constants,
                     constant_map,
+                    external_functions,
                     instr,
                     subexpressions,
                     args,
@@ -1345,6 +1504,7 @@ impl<'a> AtomView<'a> {
                     params,
                     constants,
                     constant_map,
+                    external_functions,
                     instr,
                     subexpressions,
                     args,
@@ -1363,6 +1523,7 @@ impl<'a> AtomView<'a> {
                         params,
                         constants,
                         constant_map,
+                        external_functions,
                         instr,
                         subexpressions,
                         args,
@@ -1385,6 +1546,7 @@ impl<'a> AtomView<'a> {
                         params,
                         constants,
                         constant_map,
+                        external_functions,
                         instr,
                         subexpressions,
                         args,
@@ -1849,27 +2011,558 @@ impl<T: std::hash::Hash + Clone> Expression<T> {
     }
 }
 
+pub struct ExternalFunctionContainer<T> {
+    name: BuiltinSymbol,
+    export_name: String,
+    eval_name: BuiltinSymbol,
+    tags: Vec<Atom>,
+    imp: Option<Box<dyn ExternalFunction<T>>>,
+    cache: Vec<T>,
+    constant_index: Option<usize>,
+}
+
+#[cfg(feature = "serde")]
+impl<T> serde::Serialize for ExternalFunctionContainer<T> {
+    fn serialize<S: serde::Serializer>(&self, serializer: S) -> Result<S::Ok, S::Error> {
+        (
+            &self.name,
+            &self.export_name,
+            &self.eval_name,
+            self.tags
+                .iter()
+                .map(|x| x.to_canonical_string())
+                .collect::<Vec<_>>(),
+            &self.constant_index,
+        )
+            .serialize(serializer)
+    }
+}
+
+#[cfg(feature = "serde")]
+impl<'de, T: EvaluationDomain> serde::Deserialize<'de> for ExternalFunctionContainer<T> {
+    fn deserialize<D: serde::Deserializer<'de>>(deserializer: D) -> Result<Self, D::Error> {
+        let (name, export_name, eval_name, tags, constant_index): (
+            BuiltinSymbol,
+            String,
+            BuiltinSymbol,
+            Vec<String>,
+            Option<usize>,
+        ) = serde::Deserialize::deserialize(deserializer)?;
+
+        let mut external = Self {
+            name,
+            export_name,
+            eval_name,
+            tags: tags.iter().map(|s| crate::parse!(s)).collect(),
+            imp: None,
+            cache: vec![],
+            constant_index,
+        };
+        external.imp = external.fetch_impl_for::<T>();
+        Ok(external)
+    }
+}
+
+#[cfg(feature = "bincode")]
+impl<T> bincode::Encode for ExternalFunctionContainer<T> {
+    fn encode<E: bincode::enc::Encoder>(
+        &self,
+        encoder: &mut E,
+    ) -> core::result::Result<(), bincode::error::EncodeError> {
+        bincode::Encode::encode(&self.name, encoder)?;
+        bincode::Encode::encode(&self.export_name, encoder)?;
+        bincode::Encode::encode(&self.eval_name, encoder)?;
+        bincode::Encode::encode(
+            &self
+                .tags
+                .iter()
+                .map(|x| x.to_canonical_string())
+                .collect::<Vec<_>>(),
+            encoder,
+        )?;
+        bincode::Encode::encode(&self.constant_index, encoder)
+    }
+}
+
+#[cfg(feature = "bincode")]
+impl<Context, T: EvaluationDomain> bincode::Decode<Context> for ExternalFunctionContainer<T> {
+    fn decode<D: bincode::de::Decoder<Context = Context>>(
+        decoder: &mut D,
+    ) -> Result<Self, bincode::error::DecodeError> {
+        let name: BuiltinSymbol = bincode::Decode::decode(decoder)?;
+        let export_name: String = bincode::Decode::decode(decoder)?;
+        let eval_name: BuiltinSymbol = bincode::Decode::decode(decoder)?;
+        let tags: Vec<String> = bincode::Decode::decode(decoder)?;
+        let constant_index: Option<usize> = bincode::Decode::decode(decoder)?;
+
+        let mut external = Self {
+            name,
+            export_name,
+            eval_name,
+            tags: tags.iter().map(|s| crate::parse!(s)).collect(),
+            imp: None,
+            cache: vec![],
+            constant_index,
+        };
+        external.imp = external.fetch_impl_for::<T>();
+
+        Ok(external)
+    }
+}
+
+#[cfg(feature = "bincode")]
+impl<'de, Context, T: EvaluationDomain> bincode::BorrowDecode<'de, Context>
+    for ExternalFunctionContainer<T>
+{
+    fn borrow_decode<D: bincode::de::BorrowDecoder<'de, Context = Context>>(
+        decoder: &mut D,
+    ) -> Result<Self, bincode::error::DecodeError> {
+        <Self as bincode::Decode<Context>>::decode(decoder)
+    }
+}
+
+impl<T> Clone for ExternalFunctionContainer<T> {
+    fn clone(&self) -> Self {
+        Self {
+            name: self.name.clone(),
+            export_name: self.export_name.clone(),
+            eval_name: self.eval_name.clone(),
+            tags: self.tags.clone(),
+            imp: self.imp.clone(),
+            cache: vec![],
+            constant_index: self.constant_index,
+        }
+    }
+}
+
+impl<T> std::fmt::Debug for ExternalFunctionContainer<T> {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("ExternalFunctionContainer")
+            .field("name", &self.name)
+            .field("export_name", &self.export_name)
+            .field("eval_name", &self.eval_name)
+            .field("tags", &self.tags)
+            .field("imp", &self.imp.is_some())
+            .field("cache_len", &self.cache.len())
+            .field("constant_index", &self.constant_index)
+            .finish()
+    }
+}
+
+impl<T> std::hash::Hash for ExternalFunctionContainer<T> {
+    fn hash<H: std::hash::Hasher>(&self, state: &mut H) {
+        self.name.hash(state);
+        self.export_name.hash(state);
+        self.eval_name.hash(state);
+        for tag in &self.tags {
+            tag.hash(state);
+        }
+    }
+}
+
+impl<T> PartialEq for ExternalFunctionContainer<T> {
+    fn eq(&self, other: &Self) -> bool {
+        self.name == other.name
+            && self.export_name == other.export_name
+            && self.eval_name == other.eval_name
+            && self.tags == other.tags
+    }
+}
+
+impl<T> Eq for ExternalFunctionContainer<T> {}
+
+impl<T> ExternalFunctionContainer<T> {
+    fn new(export_name: String, eval_name: Symbol, tags: Vec<Atom>) -> Self {
+        Self {
+            name: BuiltinSymbol(crate::symbol!(export_name.clone())),
+            export_name,
+            eval_name: BuiltinSymbol(eval_name),
+            tags,
+            imp: None,
+            cache: vec![],
+            constant_index: None,
+        }
+    }
+
+    fn export_name(&self) -> &str {
+        &self.export_name
+    }
+
+    fn eval_symbol(&self) -> Symbol {
+        self.eval_name.get_symbol()
+    }
+
+    fn tag_views(&self) -> Vec<AtomView<'_>> {
+        self.tags.iter().map(|x| x.as_view()).collect()
+    }
+
+    fn map<T2: EvaluationDomain>(&self) -> ExternalFunctionContainer<T2> {
+        ExternalFunctionContainer {
+            name: self.name,
+            export_name: self.export_name.clone(),
+            eval_name: self.eval_name,
+            tags: self.tags.clone(),
+            imp: self.fetch_impl_for::<T2>(),
+            cache: vec![],
+            constant_index: self.constant_index,
+        }
+    }
+
+    fn fetch_impl_for<T2: EvaluationDomain>(&self) -> Option<Box<dyn ExternalFunction<T2>>> {
+        let info = self.eval_symbol().get_evaluation_info()?;
+        let tags = self.tag_views();
+        T2::resolve_function(&tags, info)
+    }
+}
+
+impl<T> std::fmt::Display for ExternalFunctionContainer<T> {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(f, "{}", self.export_name())
+    }
+}
+
 /// An optimized evaluator for expressions that can evaluate expressions with parameters.
 /// The evaluator can be called directly using [Self::evaluate] or it can be exported
 /// to high-performance C++ code using [Self::export_cpp].
 ///
 /// To call the evaluator with external functions, use [Self::with_external_functions] to
 /// register implementation for them.
-#[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
-#[cfg_attr(feature = "bincode", derive(bincode::Encode, bincode::Decode))]
-#[derive(Clone, Debug)]
-
+#[derive(Clone)]
 pub struct ExpressionEvaluator<T> {
     stack: Vec<T>,
     param_count: usize,
     reserved_indices: usize,
     instructions: Vec<(Instr, ComplexPhase)>,
     result_indices: Vec<usize>,
-    external_fns: Vec<String>,
+    external_fns: Vec<ExternalFunctionContainer<T>>,
     settings: OptimizationSettings,
 }
 
-impl<T: Clone> ExpressionEvaluator<T> {
+#[cfg(feature = "serde")]
+impl<T: serde::Serialize> serde::Serialize for ExpressionEvaluator<T> {
+    fn serialize<S: serde::Serializer>(&self, serializer: S) -> Result<S::Ok, S::Error> {
+        (
+            &self.stack,
+            &self.param_count,
+            &self.reserved_indices,
+            &self.instructions,
+            &self.result_indices,
+            &self.external_fns,
+            &self.settings,
+        )
+            .serialize(serializer)
+    }
+}
+
+#[cfg(feature = "serde")]
+impl<'de, T: serde::Deserialize<'de> + EvaluationDomain> serde::Deserialize<'de>
+    for ExpressionEvaluator<T>
+{
+    fn deserialize<D: serde::Deserializer<'de>>(deserializer: D) -> Result<Self, D::Error> {
+        let (
+            stack,
+            param_count,
+            reserved_indices,
+            instructions,
+            result_indices,
+            external_fns,
+            settings,
+        ): (
+            Vec<T>,
+            usize,
+            usize,
+            Vec<(Instr, ComplexPhase)>,
+            Vec<usize>,
+            Vec<ExternalFunctionContainer<T>>,
+            OptimizationSettings,
+        ) = serde::Deserialize::deserialize(deserializer)?;
+
+        Ok(Self {
+            stack,
+            param_count,
+            reserved_indices,
+            instructions,
+            result_indices,
+            external_fns,
+            settings,
+        })
+    }
+}
+
+#[cfg(feature = "bincode")]
+impl<T: bincode::Encode> bincode::Encode for ExpressionEvaluator<T> {
+    fn encode<E: bincode::enc::Encoder>(
+        &self,
+        encoder: &mut E,
+    ) -> core::result::Result<(), bincode::error::EncodeError> {
+        bincode::Encode::encode(&self.stack, encoder)?;
+        bincode::Encode::encode(&self.param_count, encoder)?;
+        bincode::Encode::encode(&self.reserved_indices, encoder)?;
+        bincode::Encode::encode(&self.instructions, encoder)?;
+        bincode::Encode::encode(&self.result_indices, encoder)?;
+        bincode::Encode::encode(&self.external_fns, encoder)?;
+        bincode::Encode::encode(&self.settings, encoder)
+    }
+}
+
+#[cfg(feature = "bincode")]
+impl<Context, T: bincode::Decode<Context> + EvaluationDomain> bincode::Decode<Context>
+    for ExpressionEvaluator<T>
+{
+    fn decode<D: bincode::de::Decoder<Context = Context>>(
+        decoder: &mut D,
+    ) -> Result<Self, bincode::error::DecodeError> {
+        Ok(Self {
+            stack: bincode::Decode::decode(decoder)?,
+            param_count: bincode::Decode::decode(decoder)?,
+            reserved_indices: bincode::Decode::decode(decoder)?,
+            instructions: bincode::Decode::decode(decoder)?,
+            result_indices: bincode::Decode::decode(decoder)?,
+            external_fns: bincode::Decode::decode(decoder)?,
+            settings: bincode::Decode::decode(decoder)?,
+        })
+    }
+}
+
+#[cfg(feature = "bincode")]
+impl<'de, Context, T: bincode::BorrowDecode<'de, Context> + EvaluationDomain>
+    bincode::BorrowDecode<'de, Context> for ExpressionEvaluator<T>
+{
+    fn borrow_decode<D: bincode::de::BorrowDecoder<'de, Context = Context>>(
+        decoder: &mut D,
+    ) -> Result<Self, bincode::error::DecodeError> {
+        Ok(Self {
+            stack: bincode::BorrowDecode::borrow_decode(decoder)?,
+            param_count: bincode::BorrowDecode::borrow_decode(decoder)?,
+            reserved_indices: bincode::BorrowDecode::borrow_decode(decoder)?,
+            instructions: bincode::BorrowDecode::borrow_decode(decoder)?,
+            result_indices: bincode::BorrowDecode::borrow_decode(decoder)?,
+            external_fns: bincode::BorrowDecode::borrow_decode(decoder)?,
+            settings: bincode::BorrowDecode::borrow_decode(decoder)?,
+        })
+    }
+}
+
+impl<T: std::fmt::Debug> std::fmt::Debug for ExpressionEvaluator<T> {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("ExpressionEvaluator")
+            .field("stack", &self.stack)
+            .field("param_count", &self.param_count)
+            .field("reserved_indices", &self.reserved_indices)
+            .field("instructions", &self.instructions)
+            .field("result_indices", &self.result_indices)
+            .field("external_fns", &self.external_fns)
+            .finish()
+    }
+}
+
+/// A numeric domain supported by the expression evaluator.
+///
+/// It finds the best implementation to numericaly evaluate a function.
+pub trait EvaluationDomain: Sized + 'static {
+    /// The single supported binary precision for fixed-precision domains.
+    ///
+    /// Use `None` for variable-precision domains such as `Float` and `Complex<Float>`.
+    const FIXED_PRECISION: Option<u32>;
+
+    /// Evalaute a constant function with the given precision, if supported by the type.
+    fn evaluate_constant_with_prec(
+        tags: &[AtomView],
+        info: &EvaluationInfo,
+        prec: u32,
+    ) -> Result<Self, String> {
+        if Some(prec) == Self::FIXED_PRECISION {
+            let eval = Self::resolve_function(tags, info).ok_or_else(|| {
+                format!(
+                    "No fixed-precision implementation available for type {}",
+                    std::any::type_name::<Self>()
+                )
+            })?;
+            Ok(eval(&[]))
+        } else {
+            Err(format!(
+                "No fixed-precision implementation for precision {} available for type {}",
+                prec,
+                std::any::type_name::<Self>()
+            ))
+        }
+    }
+
+    /// Resolve a function implementation for the given tags, if available for the type.
+    /// If no implementation exists for the type, a conversion from a 'larger' type may
+    /// be used instead.
+    fn resolve_function(
+        tags: &[AtomView],
+        info: &EvaluationInfo,
+    ) -> Option<Box<dyn ExternalFunction<Self>>> {
+        info.get_evaluator(tags)
+    }
+}
+
+impl EvaluationDomain for Complex<Rational> {
+    const FIXED_PRECISION: Option<u32> = None;
+
+    fn evaluate_constant_with_prec(
+        _: &[AtomView],
+        _: &EvaluationInfo,
+        _: u32,
+    ) -> Result<Self, String> {
+        Err(format!("Cannot evaluate with Complex<Rational>"))
+    }
+
+    fn resolve_function(
+        _: &[AtomView],
+        _: &EvaluationInfo,
+    ) -> Option<Box<dyn ExternalFunction<Self>>> {
+        None
+    }
+}
+
+impl EvaluationDomain for f64 {
+    const FIXED_PRECISION: Option<u32> = Some(53);
+}
+
+impl EvaluationDomain for F64 {
+    const FIXED_PRECISION: Option<u32> = Some(53);
+
+    fn resolve_function(
+        tags: &[AtomView],
+        info: &EvaluationInfo,
+    ) -> Option<Box<dyn ExternalFunction<Self>>> {
+        if let Some(f) = info.get_evaluator::<F64>(tags) {
+            return Some(f);
+        }
+
+        if let Some(f) = f64::resolve_function(tags, info) {
+            Some(Box::new(move |args| {
+                let args: &[f64] = unsafe { std::mem::transmute(args) };
+                f(args).into()
+            }))
+        } else {
+            None
+        }
+    }
+}
+
+impl EvaluationDomain for Complex<f64> {
+    const FIXED_PRECISION: Option<u32> = Some(53);
+}
+
+impl EvaluationDomain for wide::f64x4 {
+    const FIXED_PRECISION: Option<u32> = Some(53);
+
+    fn resolve_function(
+        tags: &[AtomView],
+        info: &EvaluationInfo,
+    ) -> Option<Box<dyn ExternalFunction<Self>>> {
+        if let Some(f) = info.get_evaluator::<wide::f64x4>(tags) {
+            return Some(f);
+        }
+
+        // create a vectorized version of the scalar function if it exists
+        if let Some(f) = f64::resolve_function(tags, info) {
+            Some(Box::new(move |args| {
+                let mut buffer = smallvec::SmallVec::<[f64; 4]>::from([0.; 4]);
+                let mut res = [0.; 4];
+
+                for i in 0..4 {
+                    for (b, v) in buffer.iter_mut().zip(args) {
+                        *b = v.as_array()[i];
+                    }
+
+                    res[i] = f(&buffer);
+                }
+
+                res.into()
+            }))
+        } else {
+            None
+        }
+    }
+}
+
+impl EvaluationDomain for DoubleFloat {
+    const FIXED_PRECISION: Option<u32> = Some(106);
+    fn resolve_function(
+        tags: &[AtomView],
+        info: &EvaluationInfo,
+    ) -> Option<Box<dyn ExternalFunction<Self>>> {
+        if let Some(f) = info.get_evaluator::<DoubleFloat>(tags) {
+            return Some(f);
+        }
+
+        // use arbitrary precision evaluation if double-float implementation is missing
+        if let Some(f) = Float::resolve_function(tags, info) {
+            Some(Box::new(move |args| {
+                let args_float = args
+                    .iter()
+                    .map(|x| x.into())
+                    .collect::<smallvec::SmallVec<[Float; 4]>>();
+                f(&args_float).to_double_float()
+            }))
+        } else {
+            None
+        }
+    }
+}
+
+impl EvaluationDomain for Complex<DoubleFloat> {
+    const FIXED_PRECISION: Option<u32> = Some(106);
+    fn resolve_function(
+        tags: &[AtomView],
+        info: &EvaluationInfo,
+    ) -> Option<Box<dyn ExternalFunction<Self>>> {
+        if let Some(f) = info.get_evaluator::<Complex<DoubleFloat>>(tags) {
+            return Some(f);
+        }
+
+        // use arbitrary precision evaluation if double-float implementation is missing
+        if let Some(f) = Complex::<Float>::resolve_function(tags, info) {
+            Some(Box::new(move |args| {
+                let args_float = args
+                    .iter()
+                    .map(|x| Complex::new(x.re.into(), x.im.into()))
+                    .collect::<smallvec::SmallVec<[Complex<Float>; 4]>>();
+                let r = f(&args_float);
+                Complex::new(r.re.to_double_float(), r.im.to_double_float())
+            }))
+        } else {
+            None
+        }
+    }
+}
+
+impl EvaluationDomain for Float {
+    const FIXED_PRECISION: Option<u32> = None;
+
+    fn evaluate_constant_with_prec(
+        tags: &[AtomView],
+        info: &EvaluationInfo,
+        prec: u32,
+    ) -> Result<Self, String> {
+        let r = info.evaluate(tags, &[], prec)?;
+        if r.is_real() {
+            Ok(r.re)
+        } else {
+            Err(format!(
+                "Cannot evaluate to Float with precision {prec} because the result {r} is not real"
+            ))
+        }
+    }
+}
+impl EvaluationDomain for Complex<Float> {
+    const FIXED_PRECISION: Option<u32> = None;
+
+    fn evaluate_constant_with_prec(
+        tags: &[AtomView],
+        info: &EvaluationInfo,
+        prec: u32,
+    ) -> Result<Self, String> {
+        info.evaluate(tags, &[], prec)
+    }
+}
+
+impl<T: Clone + EvaluationDomain> ExpressionEvaluator<T> {
     /// Register external functions for the evaluator.
     ///
     /// Examples
@@ -1897,19 +2590,30 @@ impl<T: Clone> ExpressionEvaluator<T> {
         &self,
         mut external_fns: HashMap<String, Box<dyn ExternalFunction<T>>>,
     ) -> Result<ExpressionEvaluatorWithExternalFunctions<T>, String> {
-        let mut external = vec![];
-        for e in &self.external_fns {
-            if let Some(f) = external_fns.remove(e) {
-                external.push((vec![], e.clone(), f));
-            } else {
-                return Err(format!("External function '{e}' not found"));
+        let mut eval = self.clone();
+
+        for e in &mut eval.external_fns {
+            if e.imp.is_some() {
+                continue;
             }
+
+            if let Some(f) = external_fns.remove(e.export_name()) {
+                e.imp = Some(f);
+                continue;
+            }
+
+            let lookup_name = e.eval_name.0.get_name().to_owned();
+            if lookup_name != e.export_name()
+                && let Some(f) = external_fns.remove(lookup_name.as_str())
+            {
+                e.imp = Some(f);
+                continue;
+            }
+
+            return Err(format!("External function '{e}' not found"));
         }
 
-        Ok(ExpressionEvaluatorWithExternalFunctions {
-            eval: self.clone(),
-            external_fns: external,
-        })
+        Ok(ExpressionEvaluatorWithExternalFunctions { eval })
     }
 }
 
@@ -1938,7 +2642,7 @@ impl<T: Real> ExpressionEvaluator<T> {
     /// Evaluate the expression evaluator and write the results in `out`.
     #[inline]
     pub fn evaluate(&mut self, params: &[T], out: &mut [T]) {
-        self.evaluate_impl(params, &mut [], out);
+        self.evaluate_impl(params, out);
     }
 
     #[cold]
@@ -1946,7 +2650,7 @@ impl<T: Real> ExpressionEvaluator<T> {
     fn evaluate_impl_no_ops(
         stack: &mut [T],
         instr: &Instr,
-        external_fns: &mut [(Vec<T>, String, Box<dyn ExternalFunction<T>>)],
+        external_fns: &mut [ExternalFunctionContainer<T>],
     ) -> Option<usize> {
         match instr {
             Instr::Powf(r, b, e) => {
@@ -1963,17 +2667,23 @@ impl<T: Real> ExpressionEvaluator<T> {
                 _ => unreachable!(),
             },
             Instr::ExternalFun(r, s, args) => {
-                let (cache, _, f) = &mut external_fns[*s];
+                let external = &mut external_fns[*s];
+                let Some(f) = external.imp.as_ref() else {
+                    panic!(
+                        "External function '{external}' does not have an implementation for {}",
+                        std::any::type_name::<T>()
+                    );
+                };
 
-                if cache.len() < args.len() {
-                    cache.resize(args.len(), T::new_zero());
+                if external.cache.len() < args.len() {
+                    external.cache.resize(args.len(), T::new_zero());
                 }
 
-                for (i, v) in cache.iter_mut().zip(args) {
-                    i.set_from(&stack[*v]);
+                for (dst, src) in external.cache.iter_mut().zip(args) {
+                    dst.set_from(&stack[*src]);
                 }
 
-                stack[*r] = (f)(&cache[..args.len()]);
+                stack[*r] = (f)(&external.cache[..args.len()]);
             }
             Instr::IfElse(n, label) => {
                 // jump to else block
@@ -2001,12 +2711,7 @@ impl<T: Real> ExpressionEvaluator<T> {
     }
 
     /// Evaluate the expression evaluator and write the results in `out`.
-    fn evaluate_impl(
-        &mut self,
-        params: &[T],
-        external_fns: &mut [(Vec<T>, String, Box<dyn ExternalFunction<T>>)],
-        out: &mut [T],
-    ) {
+    fn evaluate_impl(&mut self, params: &[T], out: &mut [T]) {
         if self.param_count != params.len() {
             panic!(
                 "Parameter count mismatch: expected {}, got {}",
@@ -2021,64 +2726,63 @@ impl<T: Real> ExpressionEvaluator<T> {
 
         let mut tmp = T::new_zero();
         let mut i = 0;
+        let (stack, external_fns) = (&mut self.stack, &mut self.external_fns);
         while i < self.instructions.len() {
             let (instr, _) = unsafe { &self.instructions.get_unchecked(i) };
             match instr {
                 Instr::Add(r, v) => unsafe {
                     match v.len() {
                         2 => {
-                            tmp.set_from(self.stack.get_unchecked(*v.get_unchecked(0)));
-                            tmp += self.stack.get_unchecked(*v.get_unchecked(1));
+                            tmp.set_from(stack.get_unchecked(*v.get_unchecked(0)));
+                            tmp += stack.get_unchecked(*v.get_unchecked(1));
                         }
                         3 => {
-                            tmp.set_from(self.stack.get_unchecked(*v.get_unchecked(0)));
-                            tmp += self.stack.get_unchecked(*v.get_unchecked(1));
-                            tmp += self.stack.get_unchecked(*v.get_unchecked(2));
+                            tmp.set_from(stack.get_unchecked(*v.get_unchecked(0)));
+                            tmp += stack.get_unchecked(*v.get_unchecked(1));
+                            tmp += stack.get_unchecked(*v.get_unchecked(2));
                         }
                         _ => {
-                            tmp.set_from(self.stack.get_unchecked(*v.get_unchecked(0)));
+                            tmp.set_from(stack.get_unchecked(*v.get_unchecked(0)));
                             for x in v.get_unchecked(1..) {
-                                tmp += self.stack.get_unchecked(*x);
+                                tmp += stack.get_unchecked(*x);
                             }
                         }
                     }
 
-                    std::mem::swap(self.stack.get_unchecked_mut(*r), &mut tmp);
+                    std::mem::swap(stack.get_unchecked_mut(*r), &mut tmp);
                 },
                 Instr::Mul(r, v) => unsafe {
                     match v.len() {
                         2 => {
-                            tmp.set_from(self.stack.get_unchecked(*v.get_unchecked(0)));
-                            tmp *= self.stack.get_unchecked(*v.get_unchecked(1));
+                            tmp.set_from(stack.get_unchecked(*v.get_unchecked(0)));
+                            tmp *= stack.get_unchecked(*v.get_unchecked(1));
                         }
                         3 => {
-                            tmp.set_from(self.stack.get_unchecked(*v.get_unchecked(0)));
-                            tmp *= self.stack.get_unchecked(*v.get_unchecked(1));
-                            tmp *= self.stack.get_unchecked(*v.get_unchecked(2));
+                            tmp.set_from(stack.get_unchecked(*v.get_unchecked(0)));
+                            tmp *= stack.get_unchecked(*v.get_unchecked(1));
+                            tmp *= stack.get_unchecked(*v.get_unchecked(2));
                         }
                         _ => {
-                            tmp.set_from(self.stack.get_unchecked(*v.get_unchecked(0)));
+                            tmp.set_from(stack.get_unchecked(*v.get_unchecked(0)));
                             for x in v.get_unchecked(1..) {
-                                tmp *= self.stack.get_unchecked(*x);
+                                tmp *= stack.get_unchecked(*x);
                             }
                         }
                     }
 
-                    std::mem::swap(self.stack.get_unchecked_mut(*r), &mut tmp);
+                    std::mem::swap(stack.get_unchecked_mut(*r), &mut tmp);
                 },
                 Instr::Pow(r, b, e) => {
                     if *e == -1 {
-                        self.stack[*r] = self.stack[*b].inv();
+                        stack[*r] = stack[*b].inv();
                     } else if *e >= 0 {
-                        self.stack[*r] = self.stack[*b].pow(*e as u64);
+                        stack[*r] = stack[*b].pow(*e as u64);
                     } else {
-                        self.stack[*r] = self.stack[*b].pow(e.unsigned_abs()).inv();
+                        stack[*r] = stack[*b].pow(e.unsigned_abs()).inv();
                     }
                 }
                 _ => {
-                    if let Some(idx) =
-                        Self::evaluate_impl_no_ops(&mut self.stack, instr, external_fns)
-                    {
+                    if let Some(idx) = Self::evaluate_impl_no_ops(stack, instr, external_fns) {
                         i = idx;
                         continue;
                     }
@@ -2089,27 +2793,73 @@ impl<T: Real> ExpressionEvaluator<T> {
         }
 
         for (o, i) in out.iter_mut().zip(&self.result_indices) {
-            o.set_from(&self.stack[*i]);
+            o.set_from(&stack[*i]);
         }
     }
 }
 
+impl ExpressionEvaluator<Complex<Rational>> {}
+
 impl<T: Default> ExpressionEvaluator<T> {
     /// Map the coefficients to a different type.
-    pub fn map_coeff<T2, F: Fn(&T) -> T2>(self, f: &F) -> ExpressionEvaluator<T2> {
+    pub fn map_coeff_with_prec<T2: EvaluationDomain, F: Fn(&T) -> T2>(
+        self,
+        f: &F,
+        binary_prec: u32,
+    ) -> ExpressionEvaluator<T2> {
+        let mut stack: Vec<_> = self.stack.iter().map(f).collect();
+
+        let mut external_fns = self
+            .external_fns
+            .iter()
+            .map(|x| x.map())
+            .collect::<Vec<_>>();
+        for external in &mut external_fns {
+            if let Some(i) = external.constant_index {
+                let Some(eval) = external.eval_symbol().get_evaluation_info() else {
+                    panic!(
+                        "Symbol '{}' does not have evaluation info",
+                        external.eval_symbol().get_name()
+                    );
+                };
+                let tags = external.tag_views();
+                stack[self.param_count + i] =
+                    T2::evaluate_constant_with_prec(&tags, eval, binary_prec).unwrap();
+            }
+        }
+
         ExpressionEvaluator {
-            stack: self.stack.iter().map(f).collect(),
+            stack,
             param_count: self.param_count,
             reserved_indices: self.reserved_indices,
             instructions: self.instructions,
             result_indices: self.result_indices,
-            external_fns: self.external_fns.clone(),
+            external_fns,
             settings: self.settings.clone(),
         }
     }
 
+    /// Map the coefficients to a different type.
+    pub fn map_coeff<T2: EvaluationDomain, F: Fn(&T) -> T2>(
+        self,
+        f: &F,
+    ) -> ExpressionEvaluator<T2> {
+        if self.external_fns.iter().any(|x| x.constant_index.is_some())
+            && T2::FIXED_PRECISION.is_none()
+        {
+            panic!(
+                "Cannot evaluate constants since the target precision is not specified. Use map_coeff_with_prec."
+            );
+        }
+
+        self.map_coeff_with_prec(f, T2::FIXED_PRECISION.unwrap_or(53))
+    }
+
     #[allow(dead_code)]
-    pub(crate) fn set_coeff<T2: Default + Clone>(self, coeffs: &[T2]) -> ExpressionEvaluator<T2> {
+    pub(crate) fn set_coeff<T2: Default + Clone + EvaluationDomain>(
+        self,
+        coeffs: &[T2],
+    ) -> ExpressionEvaluator<T2> {
         if coeffs.len() != self.reserved_indices - self.param_count {
             panic!(
                 "Wrong number of coefficients: {} vs {}",
@@ -2129,7 +2879,7 @@ impl<T: Default> ExpressionEvaluator<T> {
             reserved_indices: self.reserved_indices,
             instructions: self.instructions,
             result_indices: self.result_indices,
-            external_fns: self.external_fns,
+            external_fns: self.external_fns.into_iter().map(|x| x.map()).collect(),
             settings: self.settings,
         }
     }
@@ -6015,16 +6765,12 @@ impl<T, F: Clone + Send + Sync + Fn(&[T]) -> T + Send + Sync> ExternalFunction<T
 #[derive(Clone)]
 pub struct ExpressionEvaluatorWithExternalFunctions<T> {
     eval: ExpressionEvaluator<T>,
-    external_fns: Vec<(Vec<T>, String, Box<dyn ExternalFunction<T>>)>,
 }
 
 impl<T: Real> ExpressionEvaluatorWithExternalFunctions<T> {
     #[allow(dead_code)]
     pub(crate) fn update_stack(&mut self, e: ExpressionEvaluator<T>) {
-        self.eval.stack = e.stack;
-        self.eval.param_count = e.param_count;
-        self.eval.instructions = e.instructions;
-        self.eval.result_indices = e.result_indices;
+        self.eval = e;
     }
 
     pub fn get_evaluator(&self) -> &ExpressionEvaluator<T> {
@@ -6049,7 +6795,7 @@ impl<T: Real> ExpressionEvaluatorWithExternalFunctions<T> {
     }
 
     pub fn evaluate(&mut self, params: &[T], out: &mut [T]) {
-        self.eval.evaluate_impl(params, &mut self.external_fns, out);
+        self.eval.evaluate(params, out);
     }
 }
 
@@ -6107,12 +6853,10 @@ pub enum Instruction {
     /// `Powf(o, b, e, is_real)` means `o = b^e`. The `is_real` flag indicates
     /// whether the exponentiation is expected to yield a real number.
     Powf(Slot, Slot, Slot, bool),
-    /// `Fun(o, s, a, is_real)` means `o = s(a)`, where `s` is assumed to
-    /// be a built-in function such as `sin`. The `is_real` flag indicates
-    /// whether the function is expected to yield a real number.
-    Fun(Slot, BuiltinSymbol, Slot, bool),
-    /// `ExternalFun(o, s, a,...)` means `o = s(a, ...)`, where `s` is an external function.
-    ExternalFun(Slot, String, Vec<Slot>),
+    /// A function that has a known evaluator or is external, given a symbol name, tags, and arguments.
+    /// `Fun(o, (s, t, a), is_real)` means `o = s(t, a)`.
+    /// The `is_real` flag indicates whether the function is expected to yield a real number.
+    Fun(Slot, Box<(BuiltinSymbol, Vec<String>, Vec<Slot>)>, bool),
     /// `Assign(o, v)` means `o = v`.
     Assign(Slot, Slot),
     /// `IfElse(cond, label)` means jump to `label` if `cond` is zero.
@@ -6156,19 +6900,16 @@ impl std::fmt::Display for Instruction {
             Instruction::Powf(o, b, e, _) => {
                 write!(f, "{o} = {b}^{e}")
             }
-            Instruction::Fun(o, s, a, _) => {
-                write!(f, "{} = {}({})", o, s.0, a)
-            }
-            Instruction::ExternalFun(o, s, a) => {
+            Instruction::Fun(o, b, _) => {
+                let (name, tags, args) = &**b;
+                let mut values = tags.iter().map(|x| x.to_string()).collect::<Vec<_>>();
+                values.extend(args.iter().map(|x| x.to_string()));
                 write!(
                     f,
                     "{} = {}({})",
                     o,
-                    s,
-                    a.iter()
-                        .map(|x| x.to_string())
-                        .collect::<Vec<_>>()
-                        .join(", ")
+                    name.0.get_stripped_name(),
+                    values.join(", ")
                 )
             }
             Instruction::Assign(o, v) => {
@@ -6260,16 +7001,23 @@ impl<T: Clone> ExpressionEvaluator<T> {
                 Instr::BuiltinFun(o, s, a) => {
                     instr.push(Instruction::Fun(
                         get_slot!(*o),
-                        *s,
-                        get_slot!(*a),
+                        Box::new((*s, vec![], vec![get_slot!(*a)])),
                         *sc == ComplexPhase::Real,
                     ));
                 }
                 Instr::ExternalFun(o, f, a) => {
-                    instr.push(Instruction::ExternalFun(
+                    instr.push(Instruction::Fun(
                         get_slot!(*o),
-                        self.external_fns[*f].clone(),
-                        a.iter().map(|x| get_slot!(*x)).collect(),
+                        Box::new((
+                            self.external_fns[*f].name,
+                            self.external_fns[*f]
+                                .tags
+                                .iter()
+                                .map(|x| x.to_canonical_string())
+                                .collect(),
+                            a.iter().map(|x| get_slot!(*x)).collect(),
+                        )),
+                        *sc == ComplexPhase::Real,
                     ));
                 }
                 Instr::IfElse(cond, label) => {
@@ -6356,8 +7104,14 @@ impl<T: Default + Clone> ExpressionEvaluator<T> {
         let mut external_fn_index_map = HashMap::default();
         for external_fn in &self.external_fns {
             for i in 0..v.get_dimension() {
-                if let Some(index) = external_fn_map.remove(&(external_fn.clone(), i)) {
-                    new_external_fns.push(index);
+                if let Some(name) =
+                    external_fn_map.remove(&(external_fn.export_name().to_owned(), i))
+                {
+                    new_external_fns.push(ExternalFunctionContainer::new(
+                        name.clone(),
+                        crate::symbol!(name.clone()),
+                        vec![],
+                    ));
                     external_fn_index_map
                         .insert((external_fn.clone(), i), new_external_fns.len() - 1);
                 } else {
@@ -7310,7 +8064,7 @@ impl<T: Clone + PartialEq> Expression<T> {
 }
 
 impl<T: Clone + PartialEq> EvalTree<T> {
-    pub fn map_coeff<T2, F: Fn(&T) -> T2>(&self, f: &F) -> EvalTree<T2> {
+    pub fn map_coeff<T2: EvaluationDomain, F: Fn(&T) -> T2>(&self, f: &F) -> EvalTree<T2> {
         EvalTree {
             expressions: SplitExpression {
                 tree: self
@@ -7331,7 +8085,7 @@ impl<T: Clone + PartialEq> EvalTree<T> {
                 .iter()
                 .map(|(s, a, e)| (s.clone(), a.clone(), e.map_coeff(f)))
                 .collect(),
-            external_functions: self.external_functions.clone(),
+            external_functions: self.external_functions.iter().map(|x| x.map()).collect(),
             param_count: self.param_count,
         }
     }
@@ -9261,13 +10015,30 @@ impl ExpressionEvaluator<Complex<Rational>> {
     /// let mut res = [0.];
     /// evaluator.evaluate(&[1., 2.], &mut res);
     /// assert_eq!(res, [3.]);
-    pub fn jit_compile<T: JITCompiledNumber>(&self) -> Result<JITCompiledEvaluator<T>, String> {
+    pub fn jit_compile<T: JITCompiledNumber + EvaluationDomain>(
+        &self,
+    ) -> Result<JITCompiledEvaluator<T>, String> {
         let (instructions, _, constants) = self.export_instructions();
         let constants = constants
             .into_iter()
             .map(|c| symjit::Complex::new(c.re.to_f64(), c.im.to_f64()))
             .collect::<Vec<_>>();
-        T::jit_compile(instructions, constants, HashMap::default())
+
+        let external_fns = self
+            .external_fns
+            .iter()
+            .map(|f| {
+                let Some(imp) = f.fetch_impl_for::<T>() else {
+                    return Err(format!(
+                        "External function '{}' does not have an implementation",
+                        f
+                    ));
+                };
+
+                Ok((f.export_name().to_owned(), imp))
+            })
+            .collect::<Result<HashMap<_, _>, _>>()?;
+        T::jit_compile(instructions, constants, external_fns)
     }
 }
 
@@ -9296,7 +10067,22 @@ impl<T: JITCompiledNumber + Clone> ExpressionEvaluator<T> {
             .into_iter()
             .map(|c| c.to_complex_f64())
             .collect::<Result<Vec<_>, _>>()?;
-        T::jit_compile(instructions, constants, HashMap::default())
+
+        let external_fns = self
+            .external_fns
+            .iter()
+            .map(|f| {
+                let Some(imp) = f.imp.clone() else {
+                    return Err(format!(
+                        "External function '{}' does not have an implementation",
+                        f
+                    ));
+                };
+
+                Ok((f.export_name().to_owned(), imp))
+            })
+            .collect::<Result<HashMap<_, _>, _>>()?;
+        T::jit_compile(instructions, constants, external_fns)
     }
 }
 
@@ -9320,18 +10106,7 @@ impl<T: JITCompiledNumber + Clone> ExpressionEvaluatorWithExternalFunctions<T> {
     /// evaluator.evaluate(&[1., 2.], &mut res);
     /// assert_eq!(res, [3.]);
     pub fn jit_compile(&self) -> Result<JITCompiledEvaluator<T>, String> {
-        let (instructions, _, constants) = self.eval.export_instructions();
-        let constants = constants
-            .into_iter()
-            .map(|c| c.to_complex_f64())
-            .collect::<Result<Vec<_>, _>>()?;
-
-        let external_fns = self
-            .external_fns
-            .iter()
-            .map(|(_, name, f)| (name.clone(), f.clone()))
-            .collect::<HashMap<_, _>>();
-        T::jit_compile(instructions, constants, external_fns)
+        self.eval.jit_compile()
     }
 }
 
@@ -9383,18 +10158,42 @@ fn translate_to_symjit(
             Instruction::Assign(lhs, rhs) => {
                 translator.append_assign(&slot(lhs), &slot(rhs)).unwrap()
             }
-            Instruction::Fun(lhs, fun, arg, is_real) => translator
-                .append_fun(&slot(lhs), &builtin_symbol(fun), &slot(arg), is_real)
-                .unwrap(),
+            Instruction::Fun(lhs, fun, is_real) => {
+                let (name, tags, args) = *fun;
+                if name.get_symbol().is_builtin() {
+                    if args.len() != 1 || !tags.is_empty() {
+                        return Err(format!(
+                            "Builtin function '{}' requires exactly one argument and no tags",
+                            name.get_symbol().get_name(),
+                        ));
+                    }
+
+                    translator
+                        .append_fun(&slot(lhs), &builtin_symbol(name), &slot(args[0]), is_real)
+                        .unwrap();
+                } else {
+                    if !tags.is_empty() {
+                        return Err(format!(
+                            "JIT compilation does not support tagged external function '{}'",
+                            name.get_symbol().get_name(),
+                        ));
+                    }
+
+                    translator
+                        .append_external_fun(
+                            &slot(lhs),
+                            name.get_symbol().get_stripped_name(),
+                            &slot_list(&args),
+                        )
+                        .unwrap();
+                }
+            }
             Instruction::Join(lhs, cond, true_val, false_val) => translator
                 .append_join(&slot(lhs), &slot(cond), &slot(true_val), &slot(false_val))
                 .unwrap(),
             Instruction::Label(id) => translator.append_label(id).unwrap(),
             Instruction::IfElse(cond, id) => translator.append_if_else(&slot(cond), id).unwrap(),
             Instruction::Goto(id) => translator.append_goto(id).unwrap(),
-            Instruction::ExternalFun(lhs, op, args) => translator
-                .append_external_fun(&slot(lhs), &op, &slot_list(&args))
-                .unwrap(),
         }
     }
 
@@ -11602,13 +12401,20 @@ impl<'a> AtomView<'a> {
 
         let mut external_fns: Vec<_> = fn_map
             .external_fn
-            .values()
-            .map(|x| {
-                let ConstOrExpr::External(e, name) = x else {
+            .iter()
+            .map(|(symbol, x)| {
+                let ConstOrExpr::External(e, _) = x else {
                     panic!("Expected external function");
                 };
 
-                (*e, name.clone())
+                (
+                    *e,
+                    ExternalFunctionContainer::new(
+                        external_export_name(fn_map, *symbol),
+                        *symbol,
+                        vec![],
+                    ),
+                )
             })
             .collect();
         external_fns.sort_by_key(|x| x.0);
@@ -12238,19 +13044,75 @@ impl<'a> AtomView<'a> {
 #[cfg(test)]
 mod test {
     use ahash::HashMap;
-    use numerica::domains::dual::HyperDual;
+    use numerica::domains::{dual::HyperDual, float::Real};
 
     use crate::{
-        atom::{Atom, AtomCore},
+        atom::{Atom, AtomCore, EvaluationInfo},
         create_hyperdual_from_components,
         domains::{
-            float::{Complex, Float, FloatLike},
+            float::{Complex, F64, Float, FloatLike},
             rational::Rational,
         },
         evaluate::{Dualizer, EvaluationFn, ExternalFunction, FunctionMap, OptimizationSettings},
         id::ConditionResult,
         parse, symbol,
     };
+
+    #[test]
+    fn eval_fun() {
+        let _ = symbol!(
+            "e",
+            eval = EvaluationInfo::new(0, |_tags, _args, prec| { Ok(Float::new(prec).e().into()) })
+                .register(|_tags| { Box::new(|_args: &[f64]| F64(0.).e().0) })
+                .register(|_tags| { Box::new(|_args: &[Complex<f64>]| F64(0.).e().0.into()) })
+        );
+
+        let _ = symbol!(
+            "symbolica::eval_fun::atanh",
+            eval = EvaluationInfo::new(0, |_tags, args, _prec| { Ok(args[0].atanh().into()) })
+                .register(|_tags| { Box::new(|args: &[f64]| args[0].atanh()) })
+        );
+
+        let a = parse!("e*symbolica::eval_fun::atanh(x)");
+
+        assert!(
+            (parse!("e*symbolica::eval_fun::atanh(0.1`32)").to_float(32)
+                - parse!("2.7273975248950224505081204947890e-1`32"))
+            .abs()
+                < parse!("1e-30`32")
+        );
+
+        let fn_map = FunctionMap::new();
+
+        let r = a
+            .evaluator(&fn_map, &[parse!("x")], OptimizationSettings::default())
+            .unwrap();
+
+        let mut r_f64 = r.clone().map_coeff(&|x| x.re.to_f64());
+
+        let mut res = [0.];
+        r_f64.evaluate(&[0.1], &mut res);
+        assert_eq!(res[0], 0.2727397524895022);
+
+        let mut jit_compiled = r_f64.jit_compile().unwrap();
+
+        jit_compiled.evaluate(&[0.1], &mut res);
+        assert_eq!(res[0], 0.2727397524895022);
+
+        let mut r_wide = r_f64.map_coeff(&|x| (*x).into());
+
+        let mut res = [wide::f64x4::new([0., 0., 0., 0.])];
+        r_wide.evaluate(&[wide::f64x4::new([0.1, 0.2, 0.3, 0.4])], &mut res);
+        assert_eq!(
+            res[0].to_array(),
+            [
+                0.2727397524895022,
+                0.5510842177223028,
+                0.8413615156571546,
+                1.1515971885913823
+            ]
+        );
+    }
 
     #[test]
     fn evaluate() {

@@ -747,6 +747,106 @@ impl<'a> AtomView<'a> {
         }
     }
 
+    /// Square-free factor the expression over the rationals.
+    pub fn factor_square_free(&self) -> Atom {
+        if self.has_complex_coefficients() {
+            let f = AlgebraicExtension::new_complex(Q);
+            let f2 = FloatField::from_rep(Complex::new(Rational::zero(), Rational::one()));
+            let Ok(r) = self.try_to_rational_polynomial::<_, _, u32>(&f, &f, None) else {
+                return self.to_owned();
+            };
+
+            if r.is_zero() {
+                return Atom::num(0);
+            }
+
+            let f_n = r.numerator.square_free_factorization();
+            let f_d = r.denominator.square_free_factorization();
+
+            let mut out = Atom::new();
+            let mul = out.to_mul();
+
+            let mut pow = Atom::new();
+            for (k, v) in f_n {
+                let k = k.map_coeff(
+                    |c| {
+                        Complex::new(
+                            c.poly.get_constant(),
+                            c.poly.coefficient(&[1]).unwrap_or(Rational::zero()),
+                        )
+                    },
+                    f2.clone(),
+                );
+                if v > 1 {
+                    let exp = Atom::num(v as i64);
+                    pow.to_pow(k.to_expression().as_view(), exp.as_view());
+                    mul.extend(pow.as_view());
+                } else {
+                    mul.extend(k.to_expression().as_view());
+                }
+            }
+
+            for (k, v) in f_d {
+                let k = k.map_coeff(
+                    |c| {
+                        Complex::new(
+                            c.poly.get_constant(),
+                            c.poly.coefficient(&[1]).unwrap_or(Rational::zero()),
+                        )
+                    },
+                    f2.clone(),
+                );
+
+                let exp = Atom::num(-(v as i64));
+                pow.to_pow(k.to_expression().as_view(), exp.as_view());
+                mul.extend(pow.as_view());
+            }
+
+            Workspace::get_local().with(|ws| {
+                out.as_view().normalize(ws, &mut pow);
+            });
+
+            pow
+        } else {
+            let Ok(r) = self.try_to_rational_polynomial::<_, _, u32>(&Q, &Z, None) else {
+                return self.to_owned();
+            };
+
+            if r.is_zero() {
+                return Atom::num(0);
+            }
+
+            let f_n = r.numerator.square_free_factorization();
+            let f_d = r.denominator.square_free_factorization();
+
+            let mut out = Atom::new();
+            let mul = out.to_mul();
+
+            let mut pow = Atom::new();
+            for (k, v) in f_n {
+                if v > 1 {
+                    let exp = Atom::num(v as i64);
+                    pow.to_pow(k.to_expression().as_view(), exp.as_view());
+                    mul.extend(pow.as_view());
+                } else {
+                    mul.extend(k.to_expression().as_view());
+                }
+            }
+
+            for (k, v) in f_d {
+                let exp = Atom::num(-(v as i64));
+                pow.to_pow(k.to_expression().as_view(), exp.as_view());
+                mul.extend(pow.as_view());
+            }
+
+            Workspace::get_local().with(|ws| {
+                out.as_view().normalize(ws, &mut pow);
+            });
+
+            pow
+        }
+    }
+
     /// Collect numerical factors by removing the numerical content from additions.
     /// For example, `-2*x + 4*x^2 + 6*x^3` will be transformed into `-2*(x - 2*x^2 - 3*x^3)`.
     ///

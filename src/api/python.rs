@@ -16286,8 +16286,7 @@ impl PythonExpressionEvaluator {
     /// - `('mul', ('out', 0), [('temp', 0), ('param', 0)], 1)` which means `out[0] = temp[0] * param[0]`, where the first `1` arguments are real.
     /// - `('pow', ('out', 0), ('param', 0), -1, true)` which means `out[0] = param[0]^-1` and the output is real (`true`).
     /// - `('powf', ('out', 0), ('param', 0), ('param', 1), false)` which means `out[0] = param[0]^param[1]`.
-    /// - `('fun', ('temp', 1), cos, ('param', 0), true)` which means `temp[1] = cos(param[0])` and the output is real (`true`).
-    /// - `('external_fun', ('temp', 1), f, [('param', 0)])` which means `temp[1] = f(param[0])`.
+    /// - `('fun', ('temp', 1), f, ["0"], [('param', 0)], true)` which means `temp[1] = f(0, param[0])` and the output is real (`true`).
     /// - `('assign', ('out', 1), ('const', 2))` which means `out[1] = const[2]`.
     /// - `('if_else', ('temp', 0), 5)` which means `if temp[0] == 0 goto label 5` (false branch).
     /// - `('goto', 10)` which means `goto label 10`.
@@ -16377,32 +16376,23 @@ impl PythonExpressionEvaluator {
                         ],
                     )?);
                 }
-                Instruction::Fun(o, f, s, is_real) => {
+                Instruction::Fun(o, b, is_real) => {
+                    let (name, tags, s) = &**b;
                     v.push(PyTuple::new(
                         py,
                         [
                             "fun".into_pyobject(py)?.as_any(),
                             slot_to_object(o).into_pyobject(py)?.as_any(),
-                            PythonExpression::from(Atom::var(f.get_symbol()))
+                            PythonExpression::from(Atom::var(name.get_symbol()))
                                 .into_pyobject(py)?
                                 .as_any(),
-                            slot_to_object(s).into_pyobject(py)?.as_any(),
-                            is_real.into_pyobject(py)?.as_any(),
-                        ],
-                    )?);
-                }
-                Instruction::ExternalFun(o, f, s) => {
-                    v.push(PyTuple::new(
-                        py,
-                        [
-                            "external_fun".into_pyobject(py)?.as_any(),
-                            slot_to_object(o).into_pyobject(py)?.as_any(),
-                            f.into_pyobject(py)?.as_any(),
+                            tags.into_pyobject(py)?.as_any(),
                             s.iter()
                                 .map(slot_to_object)
                                 .collect::<Vec<_>>()
                                 .into_pyobject(py)?
                                 .as_any(),
+                            is_real.into_pyobject(py)?.as_any(),
                         ],
                     )?);
                 }

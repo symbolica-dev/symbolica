@@ -2870,7 +2870,7 @@ impl AtomView<'_> {
     pub(crate) fn to_float_into(&self, decimal_prec: u32, out: &mut Atom) {
         let binary_prec = (decimal_prec as f64 * LOG2_10).ceil() as u32;
 
-        Workspace::get_local().with(|ws| self.to_float_impl(binary_prec, true, false, ws, out))
+        Workspace::get_local().with(|ws| self.to_float_impl(binary_prec, false, false, ws, out))
     }
 
     fn to_float_impl(
@@ -2955,14 +2955,43 @@ impl AtomView<'_> {
                         ));
                     }
                     _ => {
+                        if let Some(eval) = s.get_evaluation_info() {
+                            if let Ok(v) = eval.evaluate(&[], &[], binary_prec) {
+                                out.to_num(v.into());
+                                return;
+                            }
+                        }
+
                         out.set_from_view(self);
                     }
                 }
             }
             AtomView::Fun(f) => {
-                if enter_function {
+                let s = f.get_symbol();
+
+                if let Some(eval) = s.get_evaluation_info() {
+                    let mut args = f.into_iter();
+                    let tags = (&mut args).take(eval.get_tag_count()).collect::<Vec<_>>();
+                    let mut arg_float = vec![];
+                    for a in args {
+                        a.to_float_impl(binary_prec, enter_function, enter_exponent, ws, out);
+                        if let Ok(a) = Complex::<Float>::try_from(out.as_view()) {
+                            arg_float.push(a);
+                        } else {
+                            out.set_from_view(self);
+                            return;
+                        }
+                    }
+
+                    if let Ok(result) = eval.evaluate(&tags, &arg_float, binary_prec) {
+                        out.to_num(result.into());
+                        return;
+                    }
+                }
+
+                if s.is_builtin() || enter_function {
                     let mut o = ws.new_atom();
-                    let ff = o.to_fun(f.get_symbol());
+                    let ff = o.to_fun(s);
 
                     let mut na = ws.new_atom();
                     for a in f.iter() {
@@ -2971,9 +3000,10 @@ impl AtomView<'_> {
                     }
 
                     o.as_view().normalize(ws, out);
-                } else {
-                    out.set_from_view(self);
+                    return;
                 }
+
+                out.set_from_view(self);
             }
             AtomView::Pow(p) => {
                 let (base, exp) = p.get_base_exp();

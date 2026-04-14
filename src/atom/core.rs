@@ -24,7 +24,10 @@ use crate::{
             FromNumeratorAndDenominator, RationalPolynomial, RationalPolynomialField,
         },
     },
-    evaluate::{EvalTree, EvaluationFn, ExpressionEvaluator, FunctionMap, OptimizationSettings},
+    evaluate::{
+        EvalTree, EvaluationDomain, EvaluationFn, ExpressionEvaluator, FunctionMap,
+        OptimizationSettings,
+    },
     id::{
         AliasedAtom, BorrowReplacement, Condition, ConditionResult, Context, MatchSettings,
         Pattern, PatternAtomTreeIterator, PatternRestriction, ReplaceBuilder, ReplaceSettings,
@@ -663,7 +666,7 @@ pub trait AtomCore: private::Sealed + Sized {
     /// ```
     fn nsolve<
         'a,
-        N: SingleFloat + Real + PartialOrd,
+        N: SingleFloat + EvaluationDomain + Real + PartialOrd,
         V: Into<BorrowedOrOwned<'a, Indeterminate>>,
     >(
         &self,
@@ -693,7 +696,13 @@ pub trait AtomCore: private::Sealed + Sized {
     /// assert!((roots[1].into_inner() - 0.6180339887498941).abs() < 1e-7);
     /// ```
     fn nsolve_system<
-        N: SingleFloat + Real + PartialOrd + InternalOrdering + Eq + std::hash::Hash,
+        N: SingleFloat
+            + Real
+            + EvaluationDomain
+            + PartialOrd
+            + InternalOrdering
+            + Eq
+            + std::hash::Hash,
         T: AtomCore,
     >(
         system: &[T],

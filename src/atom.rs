@@ -44,11 +44,13 @@ mod core;
 pub mod representation;
 
 use ahash::HashMap;
+use numerica::domains::float::Float;
 use smartstring::{LazyCompact, SmartString};
 
 use crate::{
     coefficient::Coefficient,
     domains::{float::Complex, rational::Rational},
+    evaluate::ExternalFunction,
     parser::{ParseSettings, Token},
     printer::{AnsiWrap, AtomPrinter, PrintFunction, PrintOptions},
     state::{RecycledAtom, State, SymbolData, Workspace},
@@ -56,7 +58,13 @@ use crate::{
     utils::{BorrowedOrOwned, Settable},
 };
 
-use std::{borrow::Cow, cmp::Ordering, hash::Hash, ops::DerefMut};
+use std::{
+    any::{Any, TypeId},
+    borrow::Cow,
+    cmp::Ordering,
+    hash::Hash,
+    ops::DerefMut,
+};
 
 pub use self::core::AtomCore;
 pub use self::representation::{
@@ -286,6 +294,73 @@ pub type NormalizationFunction = Box<dyn Fn(AtomView, &mut Settable<Atom>) + Sen
 /// ```
 pub type DerivativeFunction = Box<dyn Fn(AtomView, usize, &mut Settable<Atom>) + Send + Sync>;
 
+/// A function that can be called to evaluate an expression with given argument values.
+/// The first `tag_count` arguments are the tags.
+pub struct EvaluationInfo {
+    /// The number of tags that the evaluator expects. The tags are passed as the first arguments to the evaluation function.
+    tag_count: usize,
+    /// A function that can be called to evaluate the expression as a float, given the tags and the argument values as floats.
+    to_float: Box<
+        dyn Fn(&[AtomView], &[Complex<Float>], u32) -> Result<Complex<Float>, String> + Send + Sync,
+    >,
+    /// A map from the type of the evaluation result to a function that can be called to generate an evaluation function for that type, given the tags.
+    eval_gen: HashMap<TypeId, ErasedEvalGen>,
+}
+
+pub type EvalFn<T> = Box<dyn ExternalFunction<T>>;
+type ErasedEvalGen = Box<dyn Fn(&[AtomView]) -> Box<dyn Any> + Send + Sync>;
+
+impl EvaluationInfo {
+    pub fn new(
+        tag_count: usize,
+        to_float: impl Fn(&[AtomView], &[Complex<Float>], u32) -> Result<Complex<Float>, String>
+        + Send
+        + Sync
+        + 'static,
+    ) -> Self {
+        Self {
+            tag_count,
+            to_float: Box::new(to_float),
+            eval_gen: HashMap::default(),
+        }
+    }
+
+    pub fn get_tag_count(&self) -> usize {
+        self.tag_count
+    }
+
+    pub fn register<T: 'static>(
+        mut self,
+        f: impl Fn(&[AtomView]) -> EvalFn<T> + Send + Sync + 'static,
+    ) -> Self {
+        self.eval_gen.insert(
+            TypeId::of::<T>(),
+            Box::new(move |tags| Box::new(f(tags)) as Box<dyn Any>),
+        );
+        self
+    }
+
+    pub fn evaluate(
+        &self,
+        tags: &[AtomView],
+        args: &[Complex<Float>],
+        precision: u32,
+    ) -> Result<Complex<Float>, String> {
+        (self.to_float)(tags, args, precision)
+    }
+
+    pub fn get_evaluator<T: 'static>(&self, tags: &[AtomView]) -> Option<EvalFn<T>> {
+        let erased = self.eval_gen.get(&TypeId::of::<T>())?;
+        let boxed = erased(tags);
+
+        Some(
+            *boxed
+                .downcast::<EvalFn<T>>()
+                .expect("stored eval generator had the wrong concrete type"),
+        )
+    }
+}
+
 /// Keys for the extended symbol data map.
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
 pub enum UserDataKey {
@@ -442,6 +517,7 @@ pub struct SymbolBuilder {
     normalization_function: Option<NormalizationFunction>,
     print_function: Option<PrintFunction>,
     derivative_function: Option<DerivativeFunction>,
+    evaluation_function: Option<EvaluationInfo>,
     generator: Option<Box<dyn Fn(&[Symbol], SymbolBuilder) -> SymbolBuilder + Send + Sync>>,
     user_data: Option<UserData>,
 }
@@ -458,6 +534,7 @@ impl SymbolBuilder {
             normalization_function: None,
             print_function: None,
             derivative_function: None,
+            evaluation_function: None,
             generator: None,
             user_data: None,
         }
@@ -572,6 +649,12 @@ impl SymbolBuilder {
         self
     }
 
+    /// Add evaluation info.
+    pub fn with_evaluation_info(mut self, evaluation_info: EvaluationInfo) -> Self {
+        self.evaluation_function = Some(evaluation_info);
+        self
+    }
+
     /// Add a custom generator function that receives the list of all jointly defined symbols.
     /// Can be used to define custom normalization/derivative functions that depend on each other.
     pub fn with_generator(
@@ -670,6 +753,7 @@ impl SymbolBuilder {
             && self.normalization_function.is_none()
             && self.print_function.is_none()
             && self.derivative_function.is_none()
+            && self.evaluation_function.is_none()
             && self.tags.is_empty()
             && self.aliases.is_empty()
             && self.user_data.is_none()
@@ -682,6 +766,7 @@ impl SymbolBuilder {
                 self.normalization_function,
                 self.print_function,
                 self.derivative_function,
+                self.evaluation_function,
                 self.tags,
                 self.aliases,
                 self.user_data,
@@ -998,6 +1083,11 @@ impl Symbol {
     /// Get the custom print function of the symbol, if any.
     pub fn get_print_function(&self) -> Option<&'static PrintFunction> {
         self.get_global_data().custom_print.as_ref()
+    }
+
+    /// Get the custom evaluation function of the symbol, if any.
+    pub fn get_evaluation_info(&self) -> Option<&'static EvaluationInfo> {
+        self.get_global_data().custom_evaluation.as_ref()
     }
 
     /// Get all tags of the symbol.
@@ -2743,6 +2833,9 @@ macro_rules! symbol_set_attr {
     };
     ($b: expr, aliases = $aliases: expr) => {
         $b.with_aliases($aliases)
+    };
+    ($b: expr, eval = $eval: expr) => {
+        $b.with_evaluation_info($eval)
     };
 }
 

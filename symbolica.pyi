@@ -7831,8 +7831,7 @@ class Evaluator:
         - `('mul', ('out', 0), [('temp', 0), ('param', 0)], 1)` which means `out[0] = temp[0] * param[0]`, where the first `1` arguments are real.
         - `('pow', ('out', 0), ('param', 0), -1, true)` which means `out[0] = param[0]^-1` and the output is real (`true`).
         - `('powf', ('out', 0), ('param', 0), ('param', 1), false)` which means `out[0] = param[0]^param[1]`.
-        - `('fun', ('temp', 1), cos, ('param', 0), true)` which means `temp[1] = cos(param[0])` and the output is real (`true`).
-        - `('external_fun', ('temp', 1), f, [('param', 0)])` which means `temp[1] = f(param[0])`.
+        - `('fun', ('temp', 1), f, ["0"], [('param', 0)], true)` which means `temp[1] = f(0, param[0])` and the output is real (`true`).
         - `('if_else', ('temp', 0), 5)` which means `if temp[0] == 0 goto label 5` (false branch).
         - `('goto', 10)` which means `goto label 10`.
         - `('label', 3)` which means `label 3`.
