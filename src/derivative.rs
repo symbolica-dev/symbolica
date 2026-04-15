@@ -475,6 +475,19 @@ impl AtomView<'_> {
                     Symbol::LOG_ID => args_series[0].log(),
                     Symbol::SQRT_ID => args_series[0].rpow((1, 2).into()),
                     _ => {
+                        if let Some(custom_series) = &f.get_symbol().get_series_function() {
+                            if let Some((singular, regularized)) = custom_series(&args_series) {
+                                let singular_series =
+                                    singular.as_view().series_impl(x, expansion_point, info)?;
+                                // TODO: expand deeper?
+                                let regularized_series =
+                                    regularized
+                                        .as_view()
+                                        .series_impl(x, expansion_point, info)?;
+                                return Ok(&singular_series * &regularized_series);
+                            }
+                        }
+
                         // TODO: also check for log(x)
                         if args_series
                             .iter()
@@ -973,6 +986,27 @@ mod test {
             "f(1,0)+v1*(der(0,1,f(1,0))+der(1,0,f(1,0)))+1/2*v1^2*(der(0,2,f(1,0))+der(1,0,f(1,0))+2*der(1,1,f(1,0))+der(2,0,f(1,0)))"
         );
         assert_eq!(t, res);
+    }
+
+    #[test]
+    fn series_custom_function() {
+        let v1 = symbol!("v1");
+        let _ = symbol!(
+            "series_custom_function::f",
+            series = |args| {
+                let [arg] = args else { unreachable!() };
+                let point = arg.coefficient(0.into());
+                let delta = arg.to_atom() - &point;
+                Some((Atom::num(1), Atom::num(1) / (Atom::num(1) - &delta)))
+            }
+        );
+
+        let t = parse!("series_custom_function::f(v1)")
+            .series(v1, Atom::num(0).as_view(), 3.into(), true)
+            .unwrap()
+            .to_atom();
+
+        assert_eq!(t, parse!("1+v1+v1^2+v1^3"));
     }
 
     #[test]
