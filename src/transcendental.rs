@@ -137,7 +137,8 @@ fn digamma_eval_f64(mut x: f64) -> f64 {
 impl SpecialSymbols {
     fn new() -> Self {
         let euler_gamma = symbol!(
-            "euler_gamma",
+            "γ",
+            aliases = ["euler_gamma"],
             der = |_x, _i, out| {
                 out.to_num(Coefficient::zero());
             },
@@ -163,9 +164,10 @@ impl SpecialSymbols {
 
         let mut symbols = crate::symbol_group!(
             "digamma";;
-            |_symbols, b| {
+            |symbols, b| {
+                let polygamma_symbol = symbols[2];
                 b.with_normalization_function(|x, out| {
-                    if let Some(arg) = unary_argument(x) {
+                    if let Some([arg]) = function_arguments::<1>(x) {
                         if maybe_eval_unary_float_in_norm(arg, out, digamma_numeric_eval) {
                             return;
                         }
@@ -175,6 +177,13 @@ impl SpecialSymbols {
                         {
                             **out = exact;
                         }
+                    }
+                })
+                .with_derivative_function(move |x, i, out| {
+                    if i == 0
+                        && let Some([arg]) = function_arguments::<1>(x)
+                    {
+                        **out = function!(polygamma_symbol, 1, arg);
                     }
                 })
                 .with_evaluation_info(
@@ -203,7 +212,7 @@ impl SpecialSymbols {
                 let digamma_symbol = symbols[0];
 
                 b.with_normalization_function(|x, out| {
-                    if let Some(arg) = unary_argument(x) {
+                    if let Some([arg]) = function_arguments::<1>(x) {
                         if maybe_eval_unary_float_in_norm(arg, out, gamma_numeric_eval) {
                             return;
                         }
@@ -217,11 +226,33 @@ impl SpecialSymbols {
                 })
                 .with_derivative_function(move |x, i, out| {
                     if i == 0
-                        && let Some(arg) = unary_argument(x)
+                        && let Some([arg]) = function_arguments::<1>(x)
                     {
                         **out = function!(gamma_symbol, arg) * function!(digamma_symbol, arg);
                     }
                 })
+                .with_series_function(
+                    move |args| {
+                        let [arg] = args else { return None; };
+                        let point = arg.coefficient(0.into());
+                        let Ok(pole) = Integer::try_from(&point) else {
+                            return None;
+                        };
+
+                        if pole > 0 {
+                            return None;
+                        }
+
+                        let arg = arg.to_atom();
+                        let shift = (-pole).to_i64().unwrap();
+                        let mut regularized = function!(gamma_symbol, arg.to_owned() + shift + 1);
+                        for k in 0..shift {
+                            regularized = regularized / (arg.to_owned() + k);
+                        }
+
+                        Some((Atom::num(1) / (arg + shift), regularized))
+                    },
+                )
                 .with_evaluation_info(
                     EvaluationInfo::new(0, |_tags, args, prec| {
                         let [arg] = args else {
@@ -248,7 +279,7 @@ impl SpecialSymbols {
                 let polygamma_symbol = symbols[2];
 
                 b.with_normalization_function(move |x, out| {
-                    if let Some((n, z)) = binary_arguments(x) {
+                    if let Some([n, z]) = function_arguments::<2>(x) {
                         if let Ok(order) = u32::try_from(n) {
                             if maybe_eval_polygamma_float_in_norm(order, z, out) {
                                 return;
@@ -256,6 +287,13 @@ impl SpecialSymbols {
 
                             if order == 0 {
                                 **out = function!(digamma_symbol, z);
+                                return;
+                            }
+
+                            if let Ok(rat) = Rational::try_from(z)
+                                && let Some(exact) = polygamma_exact_rational(order, &rat)
+                            {
+                                **out = exact;
                                 return;
                             }
 
@@ -270,7 +308,7 @@ impl SpecialSymbols {
                 })
                 .with_derivative_function(move |x, i, out| {
                     if i == 1
-                        && let Some((n, z)) = binary_arguments(x)
+                        && let Some([n, z]) = function_arguments::<2>(x)
                         && let Ok(order) = u32::try_from(n)
                     {
                         **out = function!(polygamma_symbol, Atom::num(order + 1), z);
@@ -300,7 +338,7 @@ impl SpecialSymbols {
                 let polylog_symbol = symbols[3];
 
                 b.with_normalization_function(|x, out| {
-                    if let Some((s, z)) = binary_arguments(x) {
+                    if let Some([s, z]) = function_arguments::<2>(x) {
                         if let Some(exact) = polylog_exact(s, z) {
                             **out = exact;
                             return;
@@ -313,7 +351,7 @@ impl SpecialSymbols {
                 })
                 .with_derivative_function(move |x, i, out| {
                     if i == 1
-                        && let Some((s, z)) = binary_arguments(x)
+                        && let Some([s, z]) = function_arguments::<2>(x)
                         && let Some(order) = atom_to_integer(s)
                     {
                         if order == 1 {
@@ -362,9 +400,10 @@ impl GeometricSymbols {
         let mut symbols = crate::symbol_group!(
             "tan";;
             |symbols, b| {
+                let tan = symbols[0];
                 let sec = symbols[2];
                 b.with_normalization_function(|x, out| {
-                    if let Some(arg) = unary_argument(x) {
+                    if let Some([arg]) = function_arguments::<1>(x) {
                         if arg.is_zero() {
                             out.to_num(Coefficient::zero());
                             return;
@@ -373,9 +412,18 @@ impl GeometricSymbols {
                     }
                 })
                 .with_derivative_function(move |x, i, out| {
-                    if i == 0 && let Some(arg) = unary_argument(x) {
+                    if i == 0 && let Some([arg]) = function_arguments::<1>(x) {
                         **out = function!(sec, arg).pow(Atom::num(2));
                     }
+                })
+                .with_series_function(move |args| {
+                    let [arg] = args else { return None; };
+                    let point = arg.coefficient(0.into());
+                    if !is_tan_pole(point.as_view()) {
+                        return None;
+                    }
+                    let delta = arg.to_atom() - &point;
+                    Some((Atom::num(1) / delta.clone(), -delta.clone() / function!(tan, delta)))
                 })
                 .with_evaluation_info(
                     EvaluationInfo::new(0, |_tags, args, prec| {
@@ -387,9 +435,10 @@ impl GeometricSymbols {
             },
             "cot";;
             |symbols, b| {
+                let tan = symbols[0];
                 let csc = symbols[3];
                 b.with_normalization_function(|x, out| {
-                    if let Some(arg) = unary_argument(x) {
+                    if let Some([arg]) = function_arguments::<1>(x) {
                         if arg.is_zero() {
                             out.to_num(Coefficient::complex_infinity());
                             return;
@@ -398,9 +447,18 @@ impl GeometricSymbols {
                     }
                 })
                 .with_derivative_function(move |x, i, out| {
-                    if i == 0 && let Some(arg) = unary_argument(x) {
+                    if i == 0 && let Some([arg]) = function_arguments::<1>(x) {
                         **out = -function!(csc, arg).pow(Atom::num(2));
                     }
+                })
+                .with_series_function(move |args| {
+                    let [arg] = args else { return None; };
+                    let point = arg.coefficient(0.into());
+                    if !is_cot_csc_pole(point.as_view()) {
+                        return None;
+                    }
+                    let delta = arg.to_atom() - &point;
+                    Some((Atom::num(1) / delta.clone(), delta.clone() / function!(tan, delta)))
                 })
                 .with_evaluation_info(
                     EvaluationInfo::new(0, |_tags, args, prec| {
@@ -415,7 +473,7 @@ impl GeometricSymbols {
                 let tan = symbols[0];
                 let sec = symbols[2];
                 b.with_normalization_function(|x, out| {
-                    if let Some(arg) = unary_argument(x) {
+                    if let Some([arg]) = function_arguments::<1>(x) {
                         if arg.is_zero() {
                             out.to_num(Coefficient::one());
                             return;
@@ -424,9 +482,21 @@ impl GeometricSymbols {
                     }
                 })
                 .with_derivative_function(move |x, i, out| {
-                    if i == 0 && let Some(arg) = unary_argument(x) {
+                    if i == 0 && let Some([arg]) = function_arguments::<1>(x) {
                         **out = function!(sec, arg) * function!(tan, arg);
                     }
+                })
+                .with_series_function(move |args| {
+                    let [arg] = args else { return None; };
+                    let point = arg.coefficient(0.into());
+                    if !is_tan_pole(point.as_view()) {
+                        return None;
+                    }
+                    let delta = arg.to_atom() - &point;
+                    Some((
+                        Atom::num(1) / delta.clone(),
+                        -delta.clone() / function!(State::SIN, delta),
+                    ))
                 })
                 .with_evaluation_info(
                     EvaluationInfo::new(0, |_tags, args, prec| {
@@ -441,7 +511,7 @@ impl GeometricSymbols {
                 let cot = symbols[1];
                 let csc = symbols[3];
                 b.with_normalization_function(|x, out| {
-                    if let Some(arg) = unary_argument(x) {
+                    if let Some([arg]) = function_arguments::<1>(x) {
                         if arg.is_zero() {
                             out.to_num(Coefficient::complex_infinity());
                             return;
@@ -450,9 +520,21 @@ impl GeometricSymbols {
                     }
                 })
                 .with_derivative_function(move |x, i, out| {
-                    if i == 0 && let Some(arg) = unary_argument(x) {
+                    if i == 0 && let Some([arg]) = function_arguments::<1>(x) {
                         **out = -function!(csc, arg) * function!(cot, arg);
                     }
+                })
+                .with_series_function(move |args| {
+                    let [arg] = args else { return None; };
+                    let point = arg.coefficient(0.into());
+                    if !is_cot_csc_pole(point.as_view()) {
+                        return None;
+                    }
+                    let delta = arg.to_atom() - &point;
+                    Some((
+                        Atom::num(1) / delta.clone(),
+                        delta.clone() / function!(State::SIN, delta),
+                    ))
                 })
                 .with_evaluation_info(
                     EvaluationInfo::new(0, |_tags, args, prec| {
@@ -466,7 +548,7 @@ impl GeometricSymbols {
             |symbols, b| {
                 let cosh = symbols[5];
                 b.with_normalization_function(|x, out| {
-                    if let Some(arg) = unary_argument(x) {
+                    if let Some([arg]) = function_arguments::<1>(x) {
                         if arg.is_zero() {
                             out.to_num(Coefficient::zero());
                             return;
@@ -475,7 +557,7 @@ impl GeometricSymbols {
                     }
                 })
                 .with_derivative_function(move |x, i, out| {
-                    if i == 0 && let Some(arg) = unary_argument(x) {
+                    if i == 0 && let Some([arg]) = function_arguments::<1>(x) {
                         **out = function!(cosh, arg);
                     }
                 })
@@ -491,7 +573,7 @@ impl GeometricSymbols {
             |symbols, b| {
                 let sinh = symbols[4];
                 b.with_normalization_function(|x, out| {
-                    if let Some(arg) = unary_argument(x) {
+                    if let Some([arg]) = function_arguments::<1>(x) {
                         if arg.is_zero() {
                             out.to_num(Coefficient::one());
                             return;
@@ -500,7 +582,7 @@ impl GeometricSymbols {
                     }
                 })
                 .with_derivative_function(move |x, i, out| {
-                    if i == 0 && let Some(arg) = unary_argument(x) {
+                    if i == 0 && let Some([arg]) = function_arguments::<1>(x) {
                         **out = function!(sinh, arg);
                     }
                 })
@@ -516,7 +598,7 @@ impl GeometricSymbols {
             |symbols, b| {
                 let sech = symbols[8];
                 b.with_normalization_function(|x, out| {
-                    if let Some(arg) = unary_argument(x) {
+                    if let Some([arg]) = function_arguments::<1>(x) {
                         if arg.is_zero() {
                             out.to_num(Coefficient::zero());
                             return;
@@ -525,7 +607,7 @@ impl GeometricSymbols {
                     }
                 })
                 .with_derivative_function(move |x, i, out| {
-                    if i == 0 && let Some(arg) = unary_argument(x) {
+                    if i == 0 && let Some([arg]) = function_arguments::<1>(x) {
                         **out = function!(sech, arg).pow(Atom::num(2));
                     }
                 })
@@ -541,7 +623,7 @@ impl GeometricSymbols {
             |symbols, b| {
                 let csch = symbols[9];
                 b.with_normalization_function(|x, out| {
-                    if let Some(arg) = unary_argument(x) {
+                    if let Some([arg]) = function_arguments::<1>(x) {
                         if arg.is_zero() {
                             out.to_num(Coefficient::complex_infinity());
                             return;
@@ -550,7 +632,7 @@ impl GeometricSymbols {
                     }
                 })
                 .with_derivative_function(move |x, i, out| {
-                    if i == 0 && let Some(arg) = unary_argument(x) {
+                    if i == 0 && let Some([arg]) = function_arguments::<1>(x) {
                         **out = -function!(csch, arg).pow(Atom::num(2));
                     }
                 })
@@ -567,7 +649,7 @@ impl GeometricSymbols {
                 let sech = symbols[8];
                 let tanh = symbols[6];
                 b.with_normalization_function(|x, out| {
-                    if let Some(arg) = unary_argument(x) {
+                    if let Some([arg]) = function_arguments::<1>(x) {
                         if arg.is_zero() {
                             out.to_num(Coefficient::one());
                             return;
@@ -576,7 +658,7 @@ impl GeometricSymbols {
                     }
                 })
                 .with_derivative_function(move |x, i, out| {
-                    if i == 0 && let Some(arg) = unary_argument(x) {
+                    if i == 0 && let Some([arg]) = function_arguments::<1>(x) {
                         **out = -function!(sech, arg) * function!(tanh, arg);
                     }
                 })
@@ -593,7 +675,7 @@ impl GeometricSymbols {
                 let csch = symbols[9];
                 let coth = symbols[7];
                 b.with_normalization_function(|x, out| {
-                    if let Some(arg) = unary_argument(x) {
+                    if let Some([arg]) = function_arguments::<1>(x) {
                         if arg.is_zero() {
                             out.to_num(Coefficient::complex_infinity());
                             return;
@@ -602,7 +684,7 @@ impl GeometricSymbols {
                     }
                 })
                 .with_derivative_function(move |x, i, out| {
-                    if i == 0 && let Some(arg) = unary_argument(x) {
+                    if i == 0 && let Some([arg]) = function_arguments::<1>(x) {
                         **out = -function!(csch, arg) * function!(coth, arg);
                     }
                 })
@@ -630,7 +712,7 @@ impl GeometricSymbols {
         let asin = symbol!(
             "asin",
             norm = |x, out| {
-                if let Some(arg) = unary_argument(x) {
+                if let Some([arg]) = function_arguments::<1>(x) {
                     if arg.is_zero() {
                         out.to_num(Coefficient::zero());
                         return;
@@ -640,7 +722,7 @@ impl GeometricSymbols {
             },
             der = move |x, i, out| {
                 if i == 0
-                    && let Some(arg) = unary_argument(x)
+                    && let Some([arg]) = function_arguments::<1>(x)
                 {
                     let arg = arg.to_owned();
                     **out = Atom::num(1)
@@ -659,7 +741,7 @@ impl GeometricSymbols {
         let acos = symbol!(
             "acos",
             norm = |x, out| {
-                if let Some(arg) = unary_argument(x) {
+                if let Some([arg]) = function_arguments::<1>(x) {
                     if arg.is_one() {
                         out.to_num(Coefficient::zero());
                         return;
@@ -669,7 +751,7 @@ impl GeometricSymbols {
             },
             der = move |x, i, out| {
                 if i == 0
-                    && let Some(arg) = unary_argument(x)
+                    && let Some([arg]) = function_arguments::<1>(x)
                 {
                     let arg = arg.to_owned();
                     **out = -Atom::num(1)
@@ -688,7 +770,7 @@ impl GeometricSymbols {
         let atan = symbol!(
             "atan",
             norm = |x, out| {
-                if let Some(arg) = unary_argument(x) {
+                if let Some([arg]) = function_arguments::<1>(x) {
                     if arg.is_zero() {
                         out.to_num(Coefficient::zero());
                         return;
@@ -698,7 +780,7 @@ impl GeometricSymbols {
             },
             der = move |x, i, out| {
                 if i == 0
-                    && let Some(arg) = unary_argument(x)
+                    && let Some([arg]) = function_arguments::<1>(x)
                 {
                     let arg = arg.to_owned();
                     **out = Atom::num(1) / (Atom::num(1) + arg.pow(Atom::num(2)));
@@ -718,13 +800,13 @@ impl GeometricSymbols {
         let acot = symbol!(
             "acot",
             norm = |x, out| {
-                if let Some(arg) = unary_argument(x) {
+                if let Some([arg]) = function_arguments::<1>(x) {
                     let _ = maybe_eval_unary_float_in_norm(arg, out, acot_numeric_eval);
                 }
             },
             der = move |x, i, out| {
                 if i == 0
-                    && let Some(arg) = unary_argument(x)
+                    && let Some([arg]) = function_arguments::<1>(x)
                 {
                     let arg = arg.to_owned();
                     **out = -Atom::num(1) / (Atom::num(1) + arg.pow(Atom::num(2)));
@@ -746,7 +828,7 @@ impl GeometricSymbols {
         let asec = symbol!(
             "asec",
             norm = |x, out| {
-                if let Some(arg) = unary_argument(x) {
+                if let Some([arg]) = function_arguments::<1>(x) {
                     if arg.is_one() {
                         out.to_num(Coefficient::zero());
                         return;
@@ -756,7 +838,7 @@ impl GeometricSymbols {
             },
             der = move |x, i, out| {
                 if i == 0
-                    && let Some(arg) = unary_argument(x)
+                    && let Some([arg]) = function_arguments::<1>(x)
                 {
                     let inv = Atom::num(1) / arg;
                     **out = Atom::num(1)
@@ -778,13 +860,13 @@ impl GeometricSymbols {
         let acsc = symbol!(
             "acsc",
             norm = |x, out| {
-                if let Some(arg) = unary_argument(x) {
+                if let Some([arg]) = function_arguments::<1>(x) {
                     let _ = maybe_eval_unary_float_in_norm(arg, out, acsc_numeric_eval);
                 }
             },
             der = move |x, i, out| {
                 if i == 0
-                    && let Some(arg) = unary_argument(x)
+                    && let Some([arg]) = function_arguments::<1>(x)
                 {
                     let inv = Atom::num(1) / arg;
                     **out = -Atom::num(1)
@@ -806,7 +888,7 @@ impl GeometricSymbols {
         let asinh = symbol!(
             "asinh",
             norm = |x, out| {
-                if let Some(arg) = unary_argument(x) {
+                if let Some([arg]) = function_arguments::<1>(x) {
                     if arg.is_zero() {
                         out.to_num(Coefficient::zero());
                         return;
@@ -816,7 +898,7 @@ impl GeometricSymbols {
             },
             der = move |x, i, out| {
                 if i == 0
-                    && let Some(arg) = unary_argument(x)
+                    && let Some([arg]) = function_arguments::<1>(x)
                 {
                     let arg = arg.to_owned();
                     **out =
@@ -835,7 +917,7 @@ impl GeometricSymbols {
         let acosh = symbol!(
             "acosh",
             norm = |x, out| {
-                if let Some(arg) = unary_argument(x) {
+                if let Some([arg]) = function_arguments::<1>(x) {
                     if arg.is_one() {
                         out.to_num(Coefficient::zero());
                         return;
@@ -845,7 +927,7 @@ impl GeometricSymbols {
             },
             der = move |x, i, out| {
                 if i == 0
-                    && let Some(arg) = unary_argument(x)
+                    && let Some([arg]) = function_arguments::<1>(x)
                 {
                     let arg = arg.to_owned();
                     **out = Atom::num(1)
@@ -865,7 +947,7 @@ impl GeometricSymbols {
         let atanh = symbol!(
             "atanh",
             norm = |x, out| {
-                if let Some(arg) = unary_argument(x) {
+                if let Some([arg]) = function_arguments::<1>(x) {
                     if arg.is_zero() {
                         out.to_num(Coefficient::zero());
                         return;
@@ -875,7 +957,7 @@ impl GeometricSymbols {
             },
             der = move |x, i, out| {
                 if i == 0
-                    && let Some(arg) = unary_argument(x)
+                    && let Some([arg]) = function_arguments::<1>(x)
                 {
                     let arg = arg.to_owned();
                     **out = Atom::num(1) / (Atom::num(1) - arg.pow(Atom::num(2)));
@@ -893,13 +975,13 @@ impl GeometricSymbols {
         let acoth = symbol!(
             "acoth",
             norm = |x, out| {
-                if let Some(arg) = unary_argument(x) {
+                if let Some([arg]) = function_arguments::<1>(x) {
                     let _ = maybe_eval_unary_float_in_norm(arg, out, acoth_numeric_eval);
                 }
             },
             der = move |x, i, out| {
                 if i == 0
-                    && let Some(arg) = unary_argument(x)
+                    && let Some([arg]) = function_arguments::<1>(x)
                 {
                     let arg = arg.to_owned();
                     **out = Atom::num(1) / (Atom::num(1) - arg.pow(Atom::num(2)));
@@ -921,7 +1003,7 @@ impl GeometricSymbols {
         let asech = symbol!(
             "asech",
             norm = |x, out| {
-                if let Some(arg) = unary_argument(x) {
+                if let Some([arg]) = function_arguments::<1>(x) {
                     if arg.is_one() {
                         out.to_num(Coefficient::zero());
                         return;
@@ -931,7 +1013,7 @@ impl GeometricSymbols {
             },
             der = move |x, i, out| {
                 if i == 0
-                    && let Some(arg) = unary_argument(x)
+                    && let Some([arg]) = function_arguments::<1>(x)
                 {
                     let arg = arg.to_owned();
                     let inv = Atom::num(1) / arg.clone();
@@ -957,13 +1039,13 @@ impl GeometricSymbols {
         let acsch = symbol!(
             "acsch",
             norm = |x, out| {
-                if let Some(arg) = unary_argument(x) {
+                if let Some([arg]) = function_arguments::<1>(x) {
                     let _ = maybe_eval_unary_float_in_norm(arg, out, acsch_numeric_eval);
                 }
             },
             der = move |x, i, out| {
                 if i == 0
-                    && let Some(arg) = unary_argument(x)
+                    && let Some([arg]) = function_arguments::<1>(x)
                 {
                     let arg = arg.to_owned();
                     let inv = Atom::num(1) / arg.clone();
@@ -1017,7 +1099,7 @@ impl BesselSymbols {
         let bessel_j = symbol!(
             "bessel_j",
             norm = |x, out| {
-                if let Some((nu, z)) = binary_arguments(x) {
+                if let Some([nu, z]) = function_arguments::<2>(x) {
                     if z.is_zero()
                         && let Some(n) = atom_to_integer(nu)
                     {
@@ -1033,7 +1115,7 @@ impl BesselSymbols {
             },
             der = move |x, i, out| {
                 if i == 1
-                    && let Some((nu, z)) = binary_arguments(x)
+                    && let Some([nu, z]) = function_arguments::<2>(x)
                 {
                     let symbol = x.as_fun_view().unwrap().get_symbol();
                     let nu = nu.to_owned();
@@ -1058,7 +1140,7 @@ impl BesselSymbols {
         let bessel_y = symbol!(
             "bessel_y",
             norm = |x, out| {
-                if let Some((nu, z)) = binary_arguments(x) {
+                if let Some([nu, z]) = function_arguments::<2>(x) {
                     if z.is_zero() {
                         out.to_num(Coefficient::complex_infinity());
                         return;
@@ -1068,7 +1150,7 @@ impl BesselSymbols {
             },
             der = move |x, i, out| {
                 if i == 1
-                    && let Some((nu, z)) = binary_arguments(x)
+                    && let Some([nu, z]) = function_arguments::<2>(x)
                 {
                     let symbol = x.as_fun_view().unwrap().get_symbol();
                     let nu = nu.to_owned();
@@ -1093,7 +1175,7 @@ impl BesselSymbols {
         let bessel_i = symbol!(
             "bessel_i",
             norm = |x, out| {
-                if let Some((nu, z)) = binary_arguments(x) {
+                if let Some([nu, z]) = function_arguments::<2>(x) {
                     if z.is_zero()
                         && let Some(n) = atom_to_integer(nu)
                         && n >= 0
@@ -1110,7 +1192,7 @@ impl BesselSymbols {
             },
             der = move |x, i, out| {
                 if i == 1
-                    && let Some((nu, z)) = binary_arguments(x)
+                    && let Some([nu, z]) = function_arguments::<2>(x)
                 {
                     let symbol = x.as_fun_view().unwrap().get_symbol();
                     let nu = nu.to_owned();
@@ -1135,7 +1217,7 @@ impl BesselSymbols {
         let bessel_k = symbol!(
             "bessel_k",
             norm = |x, out| {
-                if let Some((nu, z)) = binary_arguments(x) {
+                if let Some([nu, z]) = function_arguments::<2>(x) {
                     if z.is_zero() {
                         out.to_num(Coefficient::complex_infinity());
                         return;
@@ -1145,7 +1227,7 @@ impl BesselSymbols {
             },
             der = move |x, i, out| {
                 if i == 1
-                    && let Some((nu, z)) = binary_arguments(x)
+                    && let Some([nu, z]) = function_arguments::<2>(x)
                 {
                     let symbol = x.as_fun_view().unwrap().get_symbol();
                     let nu = nu.to_owned();
@@ -1185,157 +1267,227 @@ crate::_inventory::submit! {
     }, &["symbolica"])
 }
 
-/// Return the built-in `gamma` function symbol.
+/// Return the built-in Euler gamma function symbol `gamma`.
+///
+/// `gamma(z)` is meromorphic with simple poles at the non-positive integers and no branch cuts.
 pub fn gamma() -> Symbol {
     SPECIALS.gamma
 }
 
-/// Return the built-in `digamma` function symbol.
+/// Return the built-in digamma function symbol `digamma`.
+///
+/// `digamma(z)` is the logarithmic derivative of `gamma(z)`. It is meromorphic with simple poles
+/// at the non-positive integers and no branch cuts.
 pub fn digamma() -> Symbol {
     SPECIALS.digamma
 }
 
 /// Return the built-in Euler-Mascheroni constant symbol `euler_gamma`.
+///
+/// This is the constant `gamma_E`, used in expansions of `gamma`, `digamma`, and related special functions.
 pub fn euler_gamma() -> Symbol {
     SPECIALS.euler_gamma
 }
 
-/// Return the built-in `polygamma` function symbol.
+/// Return the built-in polygamma function symbol `polygamma`.
+///
+/// The first argument is the non-negative integer order. For fixed order, `polygamma(n, z)` is
+/// meromorphic in `z` with poles at the non-positive integers and no branch cuts.
 pub fn polygamma() -> Symbol {
     SPECIALS.polygamma
 }
 
-/// Return the built-in `polylog` function symbol.
+/// Return the built-in polylogarithm symbol `polylog`.
+///
+/// `polylog(s, z)` uses the principal branch in `z`; for generic `s` it has the standard branch cut
+/// along the real interval `[1, +infinity)`.
 pub fn polylog() -> Symbol {
     SPECIALS.polylog
 }
 
-/// Return the built-in `tan` function symbol.
+/// Return the built-in tangent function symbol `tan`.
+///
+/// `tan(z)` is meromorphic with simple poles at `pi/2 + k pi`.
 pub fn tan() -> Symbol {
     GEOMETRICS.tan
 }
 
-/// Return the built-in `cot` function symbol.
+/// Return the built-in cotangent function symbol `cot`.
+///
+/// `cot(z)` is meromorphic with simple poles at `k pi`.
 pub fn cot() -> Symbol {
     GEOMETRICS.cot
 }
 
-/// Return the built-in `sec` function symbol.
+/// Return the built-in secant function symbol `sec`.
+///
+/// `sec(z)` is meromorphic with simple poles at `pi/2 + k pi`.
 pub fn sec() -> Symbol {
     GEOMETRICS.sec
 }
 
-/// Return the built-in `csc` function symbol.
+/// Return the built-in cosecant function symbol `csc`.
+///
+/// `csc(z)` is meromorphic with simple poles at `k pi`.
 pub fn csc() -> Symbol {
     GEOMETRICS.csc
 }
 
-/// Return the built-in `asin` function symbol.
+/// Return the built-in inverse sine symbol `asin`.
+///
+/// `asin(z)` uses the principal branch with branch cuts on `(-infinity, -1]` and `[1, +infinity)`.
 pub fn asin() -> Symbol {
     GEOMETRICS.asin
 }
 
-/// Return the built-in `acos` function symbol.
+/// Return the built-in inverse cosine symbol `acos`.
+///
+/// `acos(z)` uses the principal branch with branch cuts on `(-infinity, -1]` and `[1, +infinity)`.
 pub fn acos() -> Symbol {
     GEOMETRICS.acos
 }
 
-/// Return the built-in `atan` function symbol.
+/// Return the built-in inverse tangent symbol `atan`.
+///
+/// `atan(z)` uses the principal branch with branch cuts on the imaginary axis:
+/// `(-i infinity, -i]` and `[i, i infinity)`.
 pub fn atan() -> Symbol {
     GEOMETRICS.atan
 }
 
-/// Return the built-in `acot` function symbol.
+/// Return the built-in inverse cotangent symbol `acot`.
+///
+/// `acot(z)` uses the principal branch with branch cuts on the imaginary axis:
+/// `(-i infinity, -i]` and `[i, i infinity)`.
 pub fn acot() -> Symbol {
     GEOMETRICS.acot
 }
 
-/// Return the built-in `asec` function symbol.
+/// Return the built-in inverse secant symbol `asec`.
+///
+/// `asec(z)` uses the principal branch with branch cuts on `[-1, 1]`.
 pub fn asec() -> Symbol {
     GEOMETRICS.asec
 }
 
-/// Return the built-in `acsc` function symbol.
+/// Return the built-in inverse cosecant symbol `acsc`.
+///
+/// `acsc(z)` uses the principal branch with branch cuts on `[-1, 1]`.
 pub fn acsc() -> Symbol {
     GEOMETRICS.acsc
 }
 
-/// Return the built-in `sinh` function symbol.
+/// Return the built-in hyperbolic sine symbol `sinh`.
+///
+/// `sinh(z)` is entire.
 pub fn sinh() -> Symbol {
     GEOMETRICS.sinh
 }
 
-/// Return the built-in `cosh` function symbol.
+/// Return the built-in hyperbolic cosine symbol `cosh`.
+///
+/// `cosh(z)` is entire.
 pub fn cosh() -> Symbol {
     GEOMETRICS.cosh
 }
 
-/// Return the built-in `tanh` function symbol.
+/// Return the built-in hyperbolic tangent symbol `tanh`.
+///
+/// `tanh(z)` is meromorphic with simple poles at `i (pi/2 + k pi)`.
 pub fn tanh() -> Symbol {
     GEOMETRICS.tanh
 }
 
-/// Return the built-in `coth` function symbol.
+/// Return the built-in hyperbolic cotangent symbol `coth`.
+///
+/// `coth(z)` is meromorphic with simple poles at `i k pi`.
 pub fn coth() -> Symbol {
     GEOMETRICS.coth
 }
 
-/// Return the built-in `sech` function symbol.
+/// Return the built-in hyperbolic secant symbol `sech`.
+///
+/// `sech(z)` is meromorphic with simple poles at `i (pi/2 + k pi)`.
 pub fn sech() -> Symbol {
     GEOMETRICS.sech
 }
 
-/// Return the built-in `csch` function symbol.
+/// Return the built-in hyperbolic cosecant symbol `csch`.
+///
+/// `csch(z)` is meromorphic with simple poles at `i k pi`.
 pub fn csch() -> Symbol {
     GEOMETRICS.csch
 }
 
-/// Return the built-in `asinh` function symbol.
+/// Return the built-in inverse hyperbolic sine symbol `asinh`.
+///
+/// `asinh(z)` uses the principal branch with branch cuts on the imaginary axis:
+/// `(-i infinity, -i]` and `[i, i infinity)`.
 pub fn asinh() -> Symbol {
     GEOMETRICS.asinh
 }
 
-/// Return the built-in `acosh` function symbol.
+/// Return the built-in inverse hyperbolic cosine symbol `acosh`.
+///
+/// `acosh(z)` uses the principal branch with branch cut `(-infinity, 1]`.
 pub fn acosh() -> Symbol {
     GEOMETRICS.acosh
 }
 
-/// Return the built-in `atanh` function symbol.
+/// Return the built-in inverse hyperbolic tangent symbol `atanh`.
+///
+/// `atanh(z)` uses the principal branch with branch cuts on `(-infinity, -1]` and `[1, +infinity)`.
 pub fn atanh() -> Symbol {
     GEOMETRICS.atanh
 }
 
-/// Return the built-in `acoth` function symbol.
+/// Return the built-in inverse hyperbolic cotangent symbol `acoth`.
+///
+/// `acoth(z)` uses the principal branch with branch cut `[-1, 1]`.
 pub fn acoth() -> Symbol {
     GEOMETRICS.acoth
 }
 
-/// Return the built-in `asech` function symbol.
+/// Return the built-in inverse hyperbolic secant symbol `asech`.
+///
+/// `asech(z)` uses the principal branch with branch cuts on `(-infinity, 0]` and `[1, +infinity)`.
 pub fn asech() -> Symbol {
     GEOMETRICS.asech
 }
 
-/// Return the built-in `acsch` function symbol.
+/// Return the built-in inverse hyperbolic cosecant symbol `acsch`.
+///
+/// `acsch(z)` uses the principal branch with branch cuts on the imaginary interval `[-i, i]`.
 pub fn acsch() -> Symbol {
     GEOMETRICS.acsch
 }
 
 /// Return the built-in cylindrical Bessel function of the first kind symbol `bessel_j`.
+///
+/// For fixed order `nu`, `bessel_j(nu, z)` is entire in `z`.
 pub fn bessel_j() -> Symbol {
     BESSELS.bessel_j
 }
 
 /// Return the built-in cylindrical Bessel function of the second kind symbol `bessel_y`.
+///
+/// For fixed order `nu`, `bessel_y(nu, z)` uses the principal branch in `z` with branch cut
+/// on `(-infinity, 0]`.
 pub fn bessel_y() -> Symbol {
     BESSELS.bessel_y
 }
 
 /// Return the built-in modified Bessel function of the first kind symbol `bessel_i`.
+///
+/// For fixed order `nu`, `bessel_i(nu, z)` is entire in `z`.
 pub fn bessel_i() -> Symbol {
     BESSELS.bessel_i
 }
 
 /// Return the built-in modified Bessel function of the second kind symbol `bessel_k`.
+///
+/// For fixed order `nu`, `bessel_k(nu, z)` uses the principal branch in `z` with branch cut
+/// on `(-infinity, 0]`.
 pub fn bessel_k() -> Symbol {
     BESSELS.bessel_k
 }
@@ -1867,21 +2019,12 @@ fn complex_float_to_integer(value: &Complex<Float>) -> Option<i64> {
     Some(rounded as i64)
 }
 
-fn unary_argument(view: AtomView) -> Option<AtomView> {
-    match view {
-        AtomView::Fun(fun) if fun.get_nargs() == 1 => fun.iter().next(),
-        _ => None,
-    }
-}
+fn function_arguments<'a, const N: usize>(view: AtomView<'a>) -> Option<[AtomView<'a>; N]> {
+    let AtomView::Fun(fun) = view else {
+        return None;
+    };
 
-fn binary_arguments(view: AtomView) -> Option<(AtomView, AtomView)> {
-    match view {
-        AtomView::Fun(fun) if fun.get_nargs() == 2 => {
-            let mut iter = fun.iter();
-            Some((iter.next()?, iter.next()?))
-        }
-        _ => None,
-    }
+    fun.iter().try_into().ok()
 }
 
 fn gamma_exact_rational(rat: &Rational) -> Option<Atom> {
@@ -1945,6 +2088,18 @@ fn digamma_exact_rational(rat: &Rational) -> Option<Atom> {
     None
 }
 
+fn polygamma_exact_rational(order: u32, rat: &Rational) -> Option<Atom> {
+    if *rat != Rational::one() {
+        return None;
+    }
+
+    match order {
+        1 => Some(Atom::from(State::PI).pow(2) / 6),
+        3 => Some(Atom::from(State::PI).pow(4) / 15),
+        _ => None,
+    }
+}
+
 fn gamma_half_integer_prefactor(numerator: i64) -> Rational {
     let one = Rational::from((1, 1));
     let target = Rational::from((numerator, 2));
@@ -1996,6 +2151,69 @@ fn digamma_half_integer_shift(numerator: i64) -> Rational {
     }
 
     correction
+}
+
+fn is_tan_pole(point: AtomView) -> bool {
+    let Some(ratio) = rational_multiple_of_pi(point) else {
+        return false;
+    };
+
+    ratio.denominator() == 2 && ratio.numerator().to_i64().is_some_and(|n| n % 2 != 0)
+}
+
+fn is_cot_csc_pole(point: AtomView) -> bool {
+    rational_multiple_of_pi(point).is_some_and(|r| r.denominator() == 1)
+}
+
+fn rational_multiple_of_pi(point: AtomView) -> Option<Rational> {
+    match point {
+        AtomView::Num(_) => {
+            let r = Rational::try_from(point).ok()?;
+            if r.is_zero() {
+                Some(Rational::zero())
+            } else {
+                None
+            }
+        }
+        AtomView::Var(v) => {
+            if v.get_symbol() == State::PI {
+                Some(Rational::one())
+            } else {
+                None
+            }
+        }
+        AtomView::Mul(m) => {
+            let mut coeff = Rational::one();
+            let mut has_pi = false;
+
+            for factor in m {
+                if let Ok(r) = Rational::try_from(factor) {
+                    coeff *= &r;
+                    continue;
+                }
+
+                if let AtomView::Var(v) = factor
+                    && v.get_symbol() == State::PI
+                    && !has_pi
+                {
+                    has_pi = true;
+                    continue;
+                }
+
+                return None;
+            }
+
+            if has_pi { Some(coeff) } else { None }
+        }
+        AtomView::Add(a) => {
+            let mut sum = Rational::zero();
+            for term in a {
+                sum += &rational_multiple_of_pi(term)?;
+            }
+            Some(sum)
+        }
+        _ => None,
+    }
 }
 
 fn atom_float_precision(value: AtomView) -> Option<u32> {
@@ -2350,6 +2568,35 @@ mod tests {
     }
 
     #[test]
+    fn gamma_laurent_series() {
+        let x = symbol!("x");
+        assert_eq!(
+            parse!("gamma(x)")
+                .series(x, Atom::num(0).as_view(), 3.into(), true)
+                .unwrap()
+                .to_atom(),
+            parse!(
+                "x^-1-euler_gamma+1/2*(euler_gamma^2+1/6*pi^2)*x+1/6*(-euler_gamma^3-1/2*euler_gamma*pi^2+polygamma(2,1))*x^2+1/24*(euler_gamma^4+euler_gamma^2*pi^2-4*euler_gamma*polygamma(2,1)+3/20*pi^4)*x^3"
+            )
+        );
+        assert_eq!(
+            parse!("gamma(x)")
+                .series(x, Atom::num(0).as_view(), 0.into(), true)
+                .unwrap()
+                .to_atom(),
+            parse!("x^-1-euler_gamma")
+        );
+
+        assert_eq!(
+            parse!("gamma(x-1)")
+                .series(x, Atom::num(1).as_view(), 0.into(), true)
+                .unwrap()
+                .to_atom(),
+            parse!("(x-1)^-1-euler_gamma")
+        );
+    }
+
+    #[test]
     fn gamma_matches_ginac() {
         if Command::new("ginsh").arg("--help").output().is_err() {
             return;
@@ -2501,6 +2748,39 @@ mod tests {
         assert_eq!(
             parse!("atanh(x)").derivative(symbol!("x")),
             parse!("1/(1-x^2)")
+        );
+    }
+
+    #[test]
+    fn tan_laurent_series() {
+        let x = symbol!("x");
+        assert_eq!(
+            parse!("tan(x)")
+                .series(x, parse!("pi/2").as_view(), 0.into(), true)
+                .unwrap()
+                .to_atom(),
+            parse!("-(x-pi/2)^-1")
+        );
+        assert_eq!(
+            parse!("sec(x)")
+                .series(x, parse!("pi/2").as_view(), 0.into(), true)
+                .unwrap()
+                .to_atom(),
+            parse!("-(x-pi/2)^-1")
+        );
+        assert_eq!(
+            parse!("cot(x)")
+                .series(x, Atom::num(0).as_view(), 0.into(), true)
+                .unwrap()
+                .to_atom(),
+            parse!("x^-1")
+        );
+        assert_eq!(
+            parse!("csc(x)")
+                .series(x, Atom::num(0).as_view(), 0.into(), true)
+                .unwrap()
+                .to_atom(),
+            parse!("x^-1")
         );
     }
 

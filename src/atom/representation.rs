@@ -2105,6 +2105,29 @@ impl<'a> Iterator for ListIterator<'a> {
     }
 }
 
+impl<'a> ExactSizeIterator for ListIterator<'a> {
+    #[inline]
+    fn len(&self) -> usize {
+        self.length as usize
+    }
+}
+
+impl<'a, const N: usize> TryInto<[AtomView<'a>; N]> for ListIterator<'a> {
+    type Error = &'static str;
+
+    fn try_into(self) -> Result<[AtomView<'a>; N], Self::Error> {
+        if self.len() != N {
+            return Err("Iterator does not contain the expected number of atoms");
+        }
+
+        let mut it = self;
+        Ok(std::array::from_fn(|_| {
+            it.next()
+                .expect("ListIterator length was checked before array conversion")
+        }))
+    }
+}
+
 impl<'a> ListIterator<'a> {
     #[inline]
     pub fn len(&self) -> usize {
@@ -2301,5 +2324,26 @@ impl<'a> Iterator for ListSliceIterator<'a> {
         } else {
             None
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use crate::{atom::AtomView, parse};
+
+    #[test]
+    fn list_iterator_try_into_array() {
+        let expr = parse!("f(a,b,c)");
+        let AtomView::Fun(f) = expr.as_view() else {
+            panic!("expected function");
+        };
+
+        let [a, b, c]: [AtomView<'_>; 3] = f.iter().try_into().unwrap();
+        assert_eq!(a.to_owned(), parse!("a"));
+        assert_eq!(b.to_owned(), parse!("b"));
+        assert_eq!(c.to_owned(), parse!("c"));
+
+        let err: Result<[AtomView<'_>; 2], _> = f.iter().try_into();
+        assert!(err.is_err());
     }
 }

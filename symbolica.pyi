@@ -1365,111 +1365,133 @@ class Expression:
     def tan(self) -> Expression:
         """
         Take the tangent of this expression, returning the result.
+        `tan(z)` is meromorphic with simple poles at `pi/2 + k pi`.
         """
 
     def cot(self) -> Expression:
         """
         Take the cotangent of this expression, returning the result.
+        `cot(z)` is meromorphic with simple poles at `k pi`.
         """
 
     def sec(self) -> Expression:
         """
         Take the secant of this expression, returning the result.
+        `sec(z)` is meromorphic with simple poles at `pi/2 + k pi`.
         """
 
     def csc(self) -> Expression:
         """
         Take the cosecant of this expression, returning the result.
+        `csc(z)` is meromorphic with simple poles at `k pi`.
         """
 
     def asin(self) -> Expression:
         """
         Take the inverse sine of this expression, returning the result.
+        Uses the principal branch with cuts on `(-infinity, -1]` and `[1, +infinity)`.
         """
 
     def acos(self) -> Expression:
         """
         Take the inverse cosine of this expression, returning the result.
+        Uses the principal branch with cuts on `(-infinity, -1]` and `[1, +infinity)`.
         """
 
     def atan(self) -> Expression:
         """
         Take the inverse tangent of this expression, returning the result.
+        Uses the principal branch with cuts on `(-i infinity, -i]` and `[i, i infinity)`.
         """
 
     def acot(self) -> Expression:
         """
         Take the inverse cotangent of this expression, returning the result.
+        Uses the principal branch with cuts on `(-i infinity, -i]` and `[i, i infinity)`.
         """
 
     def asec(self) -> Expression:
         """
         Take the inverse secant of this expression, returning the result.
+        Uses the principal branch with branch cut on `[-1, 1]`.
         """
 
     def acsc(self) -> Expression:
         """
         Take the inverse cosecant of this expression, returning the result.
+        Uses the principal branch with branch cut on `[-1, 1]`.
         """
 
     def sinh(self) -> Expression:
         """
         Take the hyperbolic sine of this expression, returning the result.
+        `sinh(z)` is entire.
         """
 
     def cosh(self) -> Expression:
         """
         Take the hyperbolic cosine of this expression, returning the result.
+        `cosh(z)` is entire.
         """
 
     def tanh(self) -> Expression:
         """
         Take the hyperbolic tangent of this expression, returning the result.
+        `tanh(z)` is meromorphic with simple poles at `i (pi/2 + k pi)`.
         """
 
     def coth(self) -> Expression:
         """
         Take the hyperbolic cotangent of this expression, returning the result.
+        `coth(z)` is meromorphic with simple poles at `i k pi`.
         """
 
     def sech(self) -> Expression:
         """
         Take the hyperbolic secant of this expression, returning the result.
+        `sech(z)` is meromorphic with simple poles at `i (pi/2 + k pi)`.
         """
 
     def csch(self) -> Expression:
         """
         Take the hyperbolic cosecant of this expression, returning the result.
+        `csch(z)` is meromorphic with simple poles at `i k pi`.
         """
 
     def asinh(self) -> Expression:
         """
         Take the inverse hyperbolic sine of this expression, returning the result.
+        Uses the principal branch with cuts on `(-i infinity, -i]` and `[i, i infinity)`.
         """
 
     def acosh(self) -> Expression:
         """
         Take the inverse hyperbolic cosine of this expression, returning the result.
+        Uses the principal branch with branch cut on `(-infinity, 1]`.
         """
 
     def atanh(self) -> Expression:
         """
         Take the inverse hyperbolic tangent of this expression, returning the result.
+        Uses the principal branch with cuts on `(-infinity, -1]` and `[1, +infinity)`.
         """
 
     def acoth(self) -> Expression:
         """
         Take the inverse hyperbolic cotangent of this expression, returning the result.
+        Uses the principal branch with branch cut on `[-1, 1]`.
         """
 
     def asech(self) -> Expression:
         """
         Take the inverse hyperbolic secant of this expression, returning the result.
+        Uses the principal branch with cuts on `(-infinity, 0]` and `[1, +infinity)`.
         """
 
     def acsch(self) -> Expression:
         """
         Take the inverse hyperbolic cosecant of this expression, returning the result.
+        Uses the principal branch with branch cut on the imaginary interval `[-i, i]`.
         """
 
     def exp(self) -> Expression:
@@ -1495,41 +1517,49 @@ class Expression:
     def gamma(self) -> Expression:
         """
         Apply the gamma function to this expression.
+        `gamma(z)` is meromorphic with simple poles at the non-positive integers.
         """
 
     def digamma(self) -> Expression:
         """
         Apply the digamma function to this expression.
+        `digamma(z)` is meromorphic with simple poles at the non-positive integers.
         """
 
     def polygamma(self, n: Expression | int | float | Decimal) -> Expression:
         """
         Apply the polygamma function of order `n` to this expression.
+        For fixed non-negative integer `n`, this is meromorphic with poles at the non-positive integers.
         """
 
     def polylog(self, s: Expression | int | float | Decimal) -> Expression:
         """
         Apply the polylogarithm of order `s` to this expression.
+        Uses the principal branch in `z`, with the standard branch cut on `[1, +infinity)`.
         """
 
     def bessel_j(self, nu: Expression | int | float | Decimal) -> Expression:
         """
         Apply the cylindrical Bessel function of the first kind of order `nu` to this expression.
+        For fixed `nu`, `bessel_j(nu, z)` is entire in `z`.
         """
 
     def bessel_y(self, nu: Expression | int | float | Decimal) -> Expression:
         """
         Apply the cylindrical Bessel function of the second kind of order `nu` to this expression.
+        Uses the principal branch in `z`, with branch cut on `(-infinity, 0]`.
         """
 
     def bessel_i(self, nu: Expression | int | float | Decimal) -> Expression:
         """
         Apply the modified Bessel function of the first kind of order `nu` to this expression.
+        For fixed `nu`, `bessel_i(nu, z)` is entire in `z`.
         """
 
     def bessel_k(self, nu: Expression | int | float | Decimal) -> Expression:
         """
         Apply the modified Bessel function of the second kind of order `nu` to this expression.
+        Uses the principal branch in `z`, with branch cut on `(-infinity, 0]`.
         """
 
     def conj(self) -> Expression:

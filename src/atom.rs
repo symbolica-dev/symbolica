@@ -50,9 +50,10 @@ use smartstring::{LazyCompact, SmartString};
 
 use crate::{
     coefficient::Coefficient,
-    domains::{float::Complex, rational::Rational},
+    domains::{atom::AtomField, float::Complex, rational::Rational},
     evaluate::ExternalFunction,
     parser::{ParseSettings, Token},
+    poly::series::Series,
     printer::{AnsiWrap, AtomPrinter, PrintFunction, PrintOptions},
     state::{RecycledAtom, State, SymbolData, Workspace},
     transformer::StatsOptions,
@@ -296,6 +297,14 @@ pub type NormalizationFunction = Box<dyn Fn(AtomView, &mut Settable<Atom>) + Sen
 /// });
 /// ```
 pub type DerivativeFunction = Box<dyn Fn(AtomView, usize, &mut Settable<Atom>) + Send + Sync>;
+
+/// A custom Laurent-series transform for a function near a singular argument value.
+/// The callback receives the local Puiseux series of the function arguments.
+/// It should return a pair `(singular_factor, regularized_expression)` where the singular factor
+/// captures the full local divergence and the regularized expression can be Taylor expanded.
+/// If the default expansion should be used, return `None`.
+pub type SeriesExpansionFunction =
+    dyn for<'a> Fn(&'a [Series<AtomField>]) -> Option<(Atom, Atom)> + Send + Sync;
 
 /// A function that can be called to evaluate an expression with given argument values.
 /// The first `tag_count` arguments are the tags.
@@ -568,6 +577,7 @@ pub struct SymbolBuilder {
     normalization_function: Option<NormalizationFunction>,
     print_function: Option<PrintFunction>,
     derivative_function: Option<DerivativeFunction>,
+    series_function: Option<Box<SeriesExpansionFunction>>,
     evaluation_function: Option<EvaluationInfo>,
     generator: Option<Box<dyn Fn(&[Symbol], SymbolBuilder) -> SymbolBuilder + Send + Sync>>,
     user_data: Option<UserData>,
@@ -585,6 +595,7 @@ impl SymbolBuilder {
             normalization_function: None,
             print_function: None,
             derivative_function: None,
+            series_function: None,
             evaluation_function: None,
             generator: None,
             user_data: None,
@@ -700,6 +711,18 @@ impl SymbolBuilder {
         self
     }
 
+    /// Add a custom Laurent-series transform for singular expansions of this symbol.
+    pub fn with_series_function(
+        mut self,
+        series_function: impl for<'a> Fn(&'a [Series<AtomField>]) -> Option<(Atom, Atom)>
+            + Send
+            + Sync
+            + 'static,
+    ) -> Self {
+        self.series_function = Some(Box::new(series_function));
+        self
+    }
+
     /// Add evaluation info.
     pub fn with_evaluation_info(mut self, evaluation_info: EvaluationInfo) -> Self {
         self.evaluation_function = Some(evaluation_info);
@@ -804,6 +827,7 @@ impl SymbolBuilder {
             && self.normalization_function.is_none()
             && self.print_function.is_none()
             && self.derivative_function.is_none()
+            && self.series_function.is_none()
             && self.evaluation_function.is_none()
             && self.tags.is_empty()
             && self.aliases.is_empty()
@@ -817,6 +841,7 @@ impl SymbolBuilder {
                 self.normalization_function,
                 self.print_function,
                 self.derivative_function,
+                self.series_function,
                 self.evaluation_function,
                 self.tags,
                 self.aliases,
@@ -1126,6 +1151,7 @@ impl Symbol {
     pub fn is_exportable(&self) -> bool {
         self.get_normalization_function().is_none()
             && self.get_derivative_function().is_none()
+            && self.get_series_function().is_none()
             && self.get_print_function().is_none()
             && self.get_evaluation_info().is_none()
     }
@@ -1138,6 +1164,11 @@ impl Symbol {
     /// Get the custom derivative function of the symbol, if any.
     pub fn get_derivative_function(&self) -> Option<&'static DerivativeFunction> {
         self.get_global_data().custom_derivative.as_ref()
+    }
+
+    /// Get the custom Laurent-series transform of the symbol, if any.
+    pub fn get_series_function(&self) -> Option<&'static SeriesExpansionFunction> {
+        self.get_global_data().custom_series.as_ref().map(|v| &**v)
     }
 
     /// Get the custom print function of the symbol, if any.
@@ -3050,6 +3081,9 @@ macro_rules! symbol_set_attr {
     };
     ($b: expr, der = $der: expr) => {
         $b.with_derivative_function($der)
+    };
+    ($b: expr, series = $series: expr) => {
+        $b.with_series_function($series)
     };
     ($b: expr, data = $user_data: expr) => {
         $b.with_user_data($user_data)

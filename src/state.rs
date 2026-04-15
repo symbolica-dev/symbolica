@@ -19,8 +19,8 @@ use byteorder::LittleEndian;
 use smartstring::alias::String;
 
 use crate::atom::{
-    DerivativeFunction, EvaluationInfo, NamespacedSymbol, NormalizationFunction, SymbolAttribute,
-    UserData,
+    DerivativeFunction, EvaluationInfo, NamespacedSymbol, NormalizationFunction,
+    SeriesExpansionFunction, SymbolAttribute, UserData,
 };
 use crate::domains::finite_field::Zp64;
 use crate::poly::PolyVariable;
@@ -76,6 +76,7 @@ pub(crate) struct SymbolData {
     pub(crate) custom_normalization: Option<NormalizationFunction>,
     pub(crate) custom_print: Option<PrintFunction>,
     pub(crate) custom_derivative: Option<DerivativeFunction>,
+    pub(crate) custom_series: Option<Box<SeriesExpansionFunction>>,
     pub(crate) custom_evaluation: Option<EvaluationInfo>,
     pub(crate) aliases: Vec<std::string::String>,
     pub(crate) tags: Vec<std::string::String>,
@@ -299,6 +300,7 @@ impl State {
                     custom_normalization: None,
                     custom_print: None,
                     custom_derivative: None,
+                    custom_series: None,
                     custom_evaluation: None,
                     tags: vec![],
                     aliases: alias.map(|a| vec![a.to_string()]).unwrap_or_default(),
@@ -473,6 +475,7 @@ impl State {
                 None,
                 None,
                 None,
+                None,
                 vec![],
                 vec![],
                 None,
@@ -482,6 +485,7 @@ impl State {
             let _ = self.get_symbol_with_attributes(
                 wrap_symbol!(format!("fc{}", i)),
                 &[SymbolAttribute::Cyclesymmetric],
+                None,
                 None,
                 None,
                 None,
@@ -499,6 +503,7 @@ impl State {
                 None,
                 None,
                 None,
+                None,
                 vec![],
                 vec![],
                 None,
@@ -512,6 +517,7 @@ impl State {
                 None,
                 None,
                 None,
+                None,
                 vec![],
                 vec![],
                 None,
@@ -521,6 +527,7 @@ impl State {
             let _ = self.get_symbol_with_attributes(
                 wrap_symbol!(format!("fsl{}", i)),
                 &[SymbolAttribute::Symmetric, SymbolAttribute::Linear],
+                None,
                 None,
                 None,
                 None,
@@ -635,6 +642,7 @@ impl State {
                         custom_normalization: None,
                         custom_print: None,
                         custom_derivative: None,
+                        custom_series: None,
                         custom_evaluation: None,
                         tags: vec![],
                         user_data: UserData::None,
@@ -666,6 +674,7 @@ impl State {
         normalization_function: Option<NormalizationFunction>,
         print_function: Option<PrintFunction>,
         derivative_function: Option<DerivativeFunction>,
+        series_function: Option<Box<SeriesExpansionFunction>>,
         evaluation_function: Option<EvaluationInfo>,
         tags: Vec<std::string::String>,
         aliases: Vec<std::string::String>,
@@ -700,6 +709,7 @@ impl State {
                     && normalization_function.is_none()
                     && print_function.is_none()
                     && derivative_function.is_none()
+                    && series_function.is_none()
                     && evaluation_function.is_none()
                     && tags == r.get_tags()
                     && aliases == r.get_aliases()
@@ -793,6 +803,9 @@ impl State {
                     if derivative_function.is_some() {
                         diff_attr.push_str("\t- new derivative function specified.\n");
                     }
+                    if series_function.is_some() {
+                        diff_attr.push_str("\t- new series function specified.\n");
+                    }
                     if evaluation_function.is_some() {
                         diff_attr.push_str("\t- new evaluation function specified.\n");
                     }
@@ -850,6 +863,7 @@ impl State {
                         custom_normalization: normalization_function,
                         custom_print: print_function,
                         custom_derivative: derivative_function,
+                        custom_series: series_function,
                         custom_evaluation: evaluation_function,
                         tags,
                         aliases: aliases.clone(),
