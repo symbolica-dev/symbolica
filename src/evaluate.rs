@@ -413,10 +413,25 @@ pub struct EvalTree<T> {
     param_count: usize,
 }
 
-fn external_export_name(fn_map: &FunctionMap<Complex<Rational>>, symbol: Symbol) -> String {
+fn external_export_name(
+    fn_map: &FunctionMap<Complex<Rational>>,
+    symbol: Symbol,
+    tags: &[Atom],
+) -> Result<String, String> {
     match fn_map.external_fn.get(&symbol) {
-        Some(ConstOrExpr::External(_, rename)) => rename.clone(),
-        _ => symbol.get_stripped_name().to_owned(),
+        Some(ConstOrExpr::External(_, rename)) => Ok(rename.clone()),
+        _ => {
+            let mut name = symbol.get_ascii_name().ok_or_else(|| {
+                format!(
+                    "No ASCII name for symbol {symbol} available, which is needed for exporting"
+                )
+            })?;
+
+            for t in tags {
+                name += &t.to_canonical_string();
+            }
+            Ok(name)
+        }
     }
 }
 
@@ -433,7 +448,7 @@ fn register_constant_external_container<T>(
     {
         index
     } else {
-        let export_name = external_export_name(fn_map, symbol);
+        let export_name = external_export_name(fn_map, symbol, &tags).unwrap();
         external_functions.push(ExternalFunctionContainer::new(export_name, symbol, tags));
         external_functions.len() - 1
     };
@@ -780,7 +795,7 @@ impl<'a> AtomView<'a> {
                     (
                         *id,
                         ExternalFunctionContainer::new(
-                            external_export_name(fn_map, *symbol),
+                            external_export_name(fn_map, *symbol, &[]).unwrap(),
                             *symbol,
                             vec![],
                         ),
@@ -888,7 +903,7 @@ impl<'a> AtomView<'a> {
                     {
                         index
                     } else {
-                        let export_name = external_export_name(fn_map, *sym);
+                        let export_name = external_export_name(fn_map, *sym, &tags).unwrap();
                         external_functions.push(ExternalFunctionContainer::new(
                             export_name,
                             *sym,
@@ -1954,7 +1969,6 @@ impl<T: std::hash::Hash + Clone> Expression<T> {
 }
 
 pub struct ExternalFunctionContainer<T> {
-    name: Symbol,
     export_name: String,
     eval_name: Symbol,
     tags: Vec<Atom>,
@@ -1967,7 +1981,6 @@ pub struct ExternalFunctionContainer<T> {
 impl<T> serde::Serialize for ExternalFunctionContainer<T> {
     fn serialize<S: serde::Serializer>(&self, serializer: S) -> Result<S::Ok, S::Error> {
         (
-            &self.name,
             &self.export_name,
             &self.eval_name,
             self.tags
@@ -1983,8 +1996,7 @@ impl<T> serde::Serialize for ExternalFunctionContainer<T> {
 #[cfg(feature = "serde")]
 impl<'de, T: EvaluationDomain> serde::Deserialize<'de> for ExternalFunctionContainer<T> {
     fn deserialize<D: serde::Deserializer<'de>>(deserializer: D) -> Result<Self, D::Error> {
-        let (name, export_name, eval_name, tags, constant_index): (
-            Symbol,
+        let (export_name, eval_name, tags, constant_index): (
             String,
             Symbol,
             Vec<String>,
@@ -1992,7 +2004,6 @@ impl<'de, T: EvaluationDomain> serde::Deserialize<'de> for ExternalFunctionConta
         ) = serde::Deserialize::deserialize(deserializer)?;
 
         let mut external = Self {
-            name,
             export_name,
             eval_name,
             tags: tags.iter().map(|s| crate::parse!(s)).collect(),
@@ -2011,7 +2022,6 @@ impl<T> bincode::Encode for ExternalFunctionContainer<T> {
         &self,
         encoder: &mut E,
     ) -> core::result::Result<(), bincode::error::EncodeError> {
-        bincode::Encode::encode(&self.name, encoder)?;
         bincode::Encode::encode(&self.export_name, encoder)?;
         bincode::Encode::encode(&self.eval_name, encoder)?;
         bincode::Encode::encode(
@@ -2031,14 +2041,12 @@ impl<Context, T: EvaluationDomain> bincode::Decode<Context> for ExternalFunction
     fn decode<D: bincode::de::Decoder<Context = Context>>(
         decoder: &mut D,
     ) -> Result<Self, bincode::error::DecodeError> {
-        let name: Symbol = bincode::Decode::decode(decoder)?;
         let export_name: String = bincode::Decode::decode(decoder)?;
         let eval_name: Symbol = bincode::Decode::decode(decoder)?;
         let tags: Vec<String> = bincode::Decode::decode(decoder)?;
         let constant_index: Option<usize> = bincode::Decode::decode(decoder)?;
 
         let mut external = Self {
-            name,
             export_name,
             eval_name,
             tags: tags.iter().map(|s| crate::parse!(s)).collect(),
@@ -2066,7 +2074,6 @@ impl<'de, Context, T: EvaluationDomain> bincode::BorrowDecode<'de, Context>
 impl<T> Clone for ExternalFunctionContainer<T> {
     fn clone(&self) -> Self {
         Self {
-            name: self.name.clone(),
             export_name: self.export_name.clone(),
             eval_name: self.eval_name.clone(),
             tags: self.tags.clone(),
@@ -2080,7 +2087,6 @@ impl<T> Clone for ExternalFunctionContainer<T> {
 impl<T> std::fmt::Debug for ExternalFunctionContainer<T> {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         f.debug_struct("ExternalFunctionContainer")
-            .field("name", &self.name)
             .field("export_name", &self.export_name)
             .field("eval_name", &self.eval_name)
             .field("tags", &self.tags)
@@ -2093,7 +2099,6 @@ impl<T> std::fmt::Debug for ExternalFunctionContainer<T> {
 
 impl<T> std::hash::Hash for ExternalFunctionContainer<T> {
     fn hash<H: std::hash::Hasher>(&self, state: &mut H) {
-        self.name.hash(state);
         self.export_name.hash(state);
         self.eval_name.hash(state);
         for tag in &self.tags {
@@ -2104,8 +2109,7 @@ impl<T> std::hash::Hash for ExternalFunctionContainer<T> {
 
 impl<T> PartialEq for ExternalFunctionContainer<T> {
     fn eq(&self, other: &Self) -> bool {
-        self.name == other.name
-            && self.export_name == other.export_name
+        self.export_name == other.export_name
             && self.eval_name == other.eval_name
             && self.tags == other.tags
     }
@@ -2116,7 +2120,6 @@ impl<T> Eq for ExternalFunctionContainer<T> {}
 impl<T> ExternalFunctionContainer<T> {
     fn new(export_name: String, eval_name: Symbol, tags: Vec<Atom>) -> Self {
         Self {
-            name: crate::symbol!(&export_name),
             export_name,
             eval_name,
             tags,
@@ -2136,7 +2139,6 @@ impl<T> ExternalFunctionContainer<T> {
 
     fn map<T2: EvaluationDomain>(&self) -> ExternalFunctionContainer<T2> {
         ExternalFunctionContainer {
-            name: self.name,
             export_name: self.export_name.clone(),
             eval_name: self.eval_name,
             tags: self.tags.clone(),
@@ -6846,7 +6848,8 @@ impl std::fmt::Display for Instruction {
                     f,
                     "{} = {}({})",
                     o,
-                    name.get_stripped_name(),
+                    name.get_ascii_name()
+                        .unwrap_or_else(|| name.get_name().replace("::", "_")),
                     values.join(", ")
                 )
             }
@@ -6947,7 +6950,7 @@ impl<T: Clone> ExpressionEvaluator<T> {
                     instr.push(Instruction::Fun(
                         get_slot!(*o),
                         Box::new((
-                            self.external_fns[*f].name,
+                            self.external_fns[*f].eval_name,
                             self.external_fns[*f]
                                 .tags
                                 .iter()
@@ -10119,19 +10122,16 @@ fn translate_to_symjit(
                         )
                         .unwrap();
                 } else {
-                    if !tags.is_empty() {
-                        return Err(format!(
-                            "JIT compilation does not support tagged external function '{}'",
-                            name.get_name()
-                        ));
+                    let mut name = name.get_ascii_name().ok_or_else(|| {
+                        format!("No ASCII name for symbol {name} available, which is needed for exporting")
+                    })?;
+
+                    for t in tags {
+                        name += &format!("_{}", t);
                     }
 
                     translator
-                        .append_external_fun(
-                            &slot(lhs),
-                            name.get_stripped_name(),
-                            &slot_list(&args),
-                        )
+                        .append_external_fun(&slot(lhs), &name, &slot_list(&args))
                         .unwrap();
                 }
             }
@@ -12357,7 +12357,7 @@ impl<'a> AtomView<'a> {
                 (
                     *e,
                     ExternalFunctionContainer::new(
-                        external_export_name(fn_map, *symbol),
+                        external_export_name(fn_map, *symbol, &[]).unwrap(),
                         *symbol,
                         vec![],
                     ),

@@ -677,9 +677,21 @@ impl State {
         series_function: Option<Box<SeriesExpansionFunction>>,
         evaluation_function: Option<EvaluationInfo>,
         tags: Vec<std::string::String>,
-        aliases: Vec<std::string::String>,
+        mut aliases: Vec<std::string::String>,
         user_data: Option<UserData>,
     ) -> Result<Symbol, String> {
+        for alias in &mut aliases {
+            if !alias.contains("::") {
+                *alias = format!("{}::{}", name.namespace, alias);
+            } else if !alias.starts_with(name.namespace.as_ref()) {
+                return Err(format!(
+                    "Alias {alias} defined in different namespace from main symbol namespace {}",
+                    name.namespace
+                )
+                .into());
+            }
+        }
+
         match self.str_to_id.entry(name.symbol.into()) {
             Entry::Occupied(o) => {
                 let r = *o.get();
@@ -874,17 +886,7 @@ impl State {
 
                 v.insert(new_symbol);
 
-                for mut alias in aliases {
-                    if !alias.contains("::") {
-                        alias = format!("{}::{}", name.namespace, alias);
-                    } else if !alias.starts_with(name.namespace.as_ref()) {
-                        return Err(format!(
-                            "Alias {alias} defined in different namespace from main symbol namespace {}",
-                            name.namespace
-                        )
-                        .into());
-                    }
-
+                for alias in aliases {
                     match self.str_to_id.entry(alias.into()) {
                         Entry::Occupied(o) => {
                             let old_symbol = o.get();

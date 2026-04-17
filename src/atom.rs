@@ -715,9 +715,9 @@ impl SymbolBuilder {
     pub fn with_series_function(
         mut self,
         series_function: impl for<'a> Fn(&'a [Series<AtomField>]) -> Option<(Atom, Atom)>
-            + Send
-            + Sync
-            + 'static,
+        + Send
+        + Sync
+        + 'static,
     ) -> Self {
         self.series_function = Some(Box::new(series_function));
         self
@@ -948,6 +948,60 @@ impl Symbol {
     /// ```
     pub fn get_name(&self) -> &str {
         State::get_name(*self)
+    }
+
+    /// Get the name of the symbol with ASCII-only characters, replacing `::` with `_`.
+    /// If the name is not ASCII, it will try to convert its aliases to ASCII.
+    ///
+    /// # Examples
+    ///
+    /// ```
+    /// use symbolica::symbol;
+    ///
+    /// let x = symbol!("test::γ", aliases = ["gamma"]);
+    /// assert_eq!(x.get_ascii_name(), Some("test_gamma".to_string()));
+    /// ```
+    pub fn get_ascii_name(&self) -> Option<String> {
+        if self.get_name().is_ascii() {
+            return Some(self.get_name().replace("::", "_"));
+        } else {
+            for x in self.get_aliases() {
+                if x.is_ascii() {
+                    return Some(x.replace("::", "_"));
+                }
+            }
+        }
+
+        None
+    }
+
+    /// Get the name of the symbol with ASCII-only characters, without the namespace.
+    /// If the name is not ASCII, it will try to convert its aliases to ASCII.
+    ///
+    /// # Examples
+    ///
+    /// ```
+    /// use symbolica::symbol;
+    ///
+    /// let x = symbol!("test::γ", aliases = ["gamma"]);
+    /// assert_eq!(x.get_stripped_ascii_name(), Some("gamma"));
+    /// ```
+    pub fn get_stripped_ascii_name(&self) -> Option<&str> {
+        if self.get_stripped_name().is_ascii() {
+            return Some(self.get_stripped_name());
+        } else {
+            for x in self.get_aliases() {
+                if let Some((_, name)) = x.rsplit_once("::")
+                    && name.is_ascii()
+                {
+                    return Some(name);
+                } else if x.is_ascii() {
+                    return Some(x);
+                }
+            }
+        }
+
+        None
     }
 
     /// Get the name of the symbol without the namespace.
