@@ -303,6 +303,17 @@ pub type DerivativeFunction = Box<dyn Fn(AtomView, usize, &mut Settable<Atom>) +
 /// It should return a pair `(singular_factor, regularized_expression)` where the singular factor
 /// captures the full local divergence and the regularized expression can be Taylor expanded.
 /// If the default expansion should be used, return `None`.
+///
+/// # Examples
+///
+/// ```
+/// use symbolica::{atom::{Atom, AtomCore}, parse, symbol};
+/// let inv = symbol!("inv", series = |args| {
+///     Some((Atom::Zero, args[0].rpow((-1).into()).unwrap().to_atom()))
+/// });
+/// let s = parse!("inv(1/t)").series(symbol!("t"), Atom::Zero, 0.into(), true).unwrap();
+/// assert_eq!(s.to_atom(), 0);
+/// ```
 pub type SeriesExpansionFunction =
     dyn for<'a> Fn(&'a [Series<AtomField>]) -> Option<(Atom, Atom)> + Send + Sync;
 
@@ -3002,6 +3013,20 @@ macro_rules! tag {
 /// });
 /// ```
 /// See [DerivativeFunction] for more details.
+///
+/// ### Series
+/// You can define a function that returns the principal part and the regular part
+/// when evaluated at a pole using the `series` flag:
+/// ```no_run
+/// use symbolica::{atom::{Atom, AtomCore}, parse, symbol};
+/// let inv = symbol!("inv", series = |args| {
+///     Some((Atom::Zero, args[0].rpow((-1).into()).unwrap().to_atom()))
+/// });
+/// let s = parse!("inv(1/t)").series(symbol!("t"), Atom::Zero, 0.into(), true).unwrap();
+/// assert_eq!(s.to_atom(), 0);
+/// ```
+/// If the arguments (which are of type [Series]) are not centered around a pole, you can also return `None`.
+/// See [SeriesExpansionFunction] for more details.
 ///
 /// ### User data
 ///
