@@ -3155,9 +3155,11 @@ impl PythonTransformer {
 /// Attributes
 /// ----------
 /// E: Expression
-///     Euler's number `e`.
+///     Euler's number `e`, approximately `2.7182`.
 /// PI: Expression
-///     The mathematical constant `π`.
+///     The mathematical constant `π`, approximately `3.1415`.
+/// EULER_GAMMA: Expression
+///     The Euler-Mascheroni constant `γ`, approximately `0.57721`.
 /// I: Expression
 ///     The mathematical constant `i`, where `i^2 = -1`.
 /// COEFF: Expression
@@ -4106,18 +4108,25 @@ impl PythonExpression {
         }
     }
 
-    /// Euler's number `e`.
+    /// Euler's number `e`, approximately `2.7182`.
     #[classattr]
     #[pyo3(name = "E")]
     pub fn e() -> PythonExpression {
         Atom::var(Symbol::E).into()
     }
 
-    /// The mathematical constant `π`.
+    /// The mathematical constant `π`, approximately `3.1415`.
     #[classattr]
     #[pyo3(name = "PI")]
     pub fn pi() -> PythonExpression {
         Atom::var(Symbol::PI).into()
+    }
+
+    /// The Euler-Mascheroni constant `γ`, approximately `0.57721`.
+    #[classattr]
+    #[pyo3(name = "EULER_GAMMA")]
+    pub fn euler_gamma() -> PythonExpression {
+        Atom::from(crate::transcendental::euler_gamma()).into()
     }
 
     /// The mathematical constant `i`, where
@@ -5131,12 +5140,6 @@ impl PythonExpression {
     /// `gamma(z)` is meromorphic with simple poles at the non-positive integers.
     pub fn gamma(&self) -> PythonExpression {
         crate::function!(crate::transcendental::gamma(), self.expr.clone()).into()
-    }
-
-    /// Compute the digamma function of the expression.
-    /// `digamma(z)` is meromorphic with simple poles at the non-positive integers.
-    pub fn digamma(&self) -> PythonExpression {
-        crate::function!(crate::transcendental::digamma(), self.expr.clone()).into()
     }
 
     /// Compute the polygamma function of order `n` at the expression.
