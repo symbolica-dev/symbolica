@@ -543,7 +543,7 @@ fn get_license_key(email: String) -> PyResult<()> {
         .map_err(exceptions::PyConnectionError::new_err)
 }
 
-#[pyfunction(name = "S", signature = (*names,is_symmetric=None,is_antisymmetric=None,is_cyclesymmetric=None,is_linear=None,is_scalar=None,is_real=None,is_integer=None,is_positive=None,tags=None,aliases=None,custom_normalization=None,custom_print=None,custom_derivative=None,data=None))]
+#[pyfunction(name = "S", signature = (*names,is_symmetric=None,is_antisymmetric=None,is_cyclesymmetric=None,is_linear=None,is_scalar=None,is_real=None,is_integer=None,is_positive=None,tags=None,aliases=None,custom_normalization=None,custom_print=None,custom_derivative=None,series=None,data=None))]
 /// Shorthand notation for :func:`Expression.symbol`.
 fn symbol_shorthand(
     names: &Bound<'_, PyTuple>,
@@ -560,6 +560,7 @@ fn symbol_shorthand(
     custom_normalization: Option<PythonTransformer>,
     custom_print: Option<Py<PyAny>>,
     custom_derivative: Option<Py<PyAny>>,
+    series: Option<Py<PyAny>>,
     data: Option<PythonUserData>,
     py: Python,
 ) -> PyResult<Py<PyAny>> {
@@ -580,6 +581,7 @@ fn symbol_shorthand(
         custom_normalization,
         custom_print,
         custom_derivative,
+        series,
         data,
     )
 }
@@ -809,6 +811,12 @@ PyFunctionInfo {
                     type_info: || TypeInfo::unqualified("typing.Optional[typing.Callable[[Expression, int], Expression]]"),
                 },
                 ParameterInfo {
+                    name: "series",
+                    kind: ParameterKind::PositionalOrKeyword,
+                    default: ParameterDefault::Expr(NONE_ARG),
+                    type_info: || TypeInfo::unqualified("typing.Optional[typing.Callable[[typing.Sequence[Series]], typing.Optional[tuple[Expression, Expression]]]]"),
+                },
+                ParameterInfo {
                     name: "data",
                     kind: ParameterKind::PositionalOrKeyword,
                     default: ParameterDefault::Expr(NONE_ARG),
@@ -872,6 +880,11 @@ Define a custom derivative function:
 >>> x = S('x')
 >>> tag(3, x).derivative(x)
 
+Define a custom series function:
+>>> def expand_tag(args: Sequence[Series]) -> tuple[Expression, Expression] | None:
+>>>     return E("1/x"), args[0].to_expression()
+>>> tag = S("tag", series=expand_tag)
+
 Parameters
 ----------
 name : str
@@ -905,7 +918,10 @@ custom_print : Optional[Callable[..., Optional[str]]]:
     This function should return a string, or `None` if the default print function should be used.
     The custom print function takes in keyword arguments that are the same as the arguments of the `format` function.
 custom_derivative: Optional[Callable[[Expression, int], Expression]]:
-    A function that is called when computing the derivative of a function in a given argument."#,
+    A function that is called when computing the derivative of a function in a given argument.
+series: Optional[Callable[[Sequence[Series]], Optional[tuple[Expression, Expression]]]]:
+    A function that is called for custom series expansion. It receives the argument series and can return
+    the singular factor and regularized expression, or `None` to use the default series expansion."#,
             module: Some("symbolica.core"),
             is_async: false,
             deprecated: None,
@@ -3790,7 +3806,7 @@ impl PythonExpression {
     /// >>> e = S('real_log', custom_normalization=Transformer().replace(E("x_(exp(x1_))"), E("x1_")))
     /// >>> E("real_log(exp(x)) + real_log(5)")
     #[gen_stub(skip)]
-    #[pyo3(signature = (*names,is_symmetric=None,is_antisymmetric=None,is_cyclesymmetric=None,is_linear=None,is_scalar=None,is_real=None,is_integer=None,is_positive=None,tags=None,aliases=None,custom_normalization=None, custom_print=None, custom_derivative=None, data=None))]
+    #[pyo3(signature = (*names,is_symmetric=None,is_antisymmetric=None,is_cyclesymmetric=None,is_linear=None,is_scalar=None,is_real=None,is_integer=None,is_positive=None,tags=None,aliases=None,custom_normalization=None, custom_print=None, custom_derivative=None, series=None, data=None))]
     #[classmethod]
     pub fn symbol(
         _cls: &Bound<'_, PyType>,
@@ -3809,6 +3825,7 @@ impl PythonExpression {
         custom_normalization: Option<PythonTransformer>,
         custom_print: Option<Py<PyAny>>,
         custom_derivative: Option<Py<PyAny>>,
+        series: Option<Py<PyAny>>,
         data: Option<PythonUserData>,
     ) -> PyResult<Py<PyAny>> {
         if names.is_empty() {
@@ -3837,6 +3854,7 @@ impl PythonExpression {
             && custom_normalization.is_none()
             && custom_print.is_none()
             && custom_derivative.is_none()
+            && series.is_none()
             && data.is_none()
         {
             if names.len() == 1 {
@@ -3961,6 +3979,24 @@ impl PythonExpression {
                         .expr;
                     },
                 ))
+            }
+
+            if let Some(f) = series {
+                symbol =
+                    symbol.with_series_function(Box::new(move |args: &[Series<AtomField>]| {
+                        Python::attach(|py| {
+                            let args = args
+                                .iter()
+                                .cloned()
+                                .map(|series| PythonSeries { series })
+                                .collect::<Vec<_>>();
+                            f.call1(py, (args,))
+                                .unwrap()
+                                .extract::<Option<(PythonExpression, PythonExpression)>>(py)
+                                .unwrap()
+                                .map(|(singular, regularized)| (singular.expr, regularized.expr))
+                        })
+                    }))
             }
 
             if let Some(t) = tags {
@@ -8145,6 +8181,12 @@ PyMethodsInfo {
                     type_info: || TypeInfo::unqualified("typing.Optional[typing.Callable[[Expression, int], Expression]]"),
                 },
                 ParameterInfo {
+                    name: "series",
+                    kind: ParameterKind::PositionalOrKeyword,
+                    default: ParameterDefault::Expr(NONE_ARG),
+                    type_info: || TypeInfo::unqualified("typing.Optional[typing.Callable[[typing.Sequence[Series]], typing.Optional[tuple[Expression, Expression]]]]"),
+                },
+                ParameterInfo {
                     name: "data",
                     kind: ParameterKind::PositionalOrKeyword,
                     default: ParameterDefault::Expr(NONE_ARG),
@@ -8209,6 +8251,11 @@ Define a custom derivative function:
 >>> x = S('x')
 >>> tag(3, x).derivative(x)
 
+Define a custom series function:
+>>> def expand_tag(args: Sequence[Series]) -> tuple[Expression, Expression] | None:
+>>>     return E("1/x"), args[0].to_expression()
+>>> tag = S("tag", series=expand_tag)
+
 Parameters
 ----------
 name : str
@@ -8242,7 +8289,10 @@ custom_print : Optional[Callable[..., Optional[str]]]:
     This function should return a string, or `None` if the default print function should be used.
     The custom print function takes in keyword arguments that are the same as the arguments of the `format` function.
 custom_derivative: Optional[Callable[[Expression, int], Expression]]:
-    A function that is called when computing the derivative of a function in a given argument."#,
+    A function that is called when computing the derivative of a function in a given argument.
+series: Optional[Callable[[Sequence[Series]], Optional[tuple[Expression, Expression]]]]:
+    A function that is called for custom series expansion. It receives the argument series and can return
+    the singular factor and regularized expression, or `None` to use the default series expansion."#,
             is_async: false,
             deprecated: None,
             type_ignored: None,
@@ -8860,6 +8910,7 @@ impl PythonSeries {
         })
     }
 
+    #[pyo3(signature=(num, den = 1))]
     pub fn pow(&self, num: i64, den: i64) -> PyResult<Self> {
         Ok(Self {
             series: self

@@ -149,6 +149,8 @@ def S(name: str,
       custom_print: Callable[..., str | None] | None = None,
       custom_derivative: Callable[[
           Expression, int], Expression] | None = None,
+      series: Callable[[
+          Sequence[Series]], tuple[Expression, Expression] | None] | None = None,
       data: str | int | Expression | bytes | list[Any] | dict[str | int | Expression, Any] | None = None) -> Expression:
     """
     Create new symbols from `names`. Symbols can have attributes,
@@ -203,6 +205,14 @@ def S(name: str,
     >>> x = S('x')
     >>> tag(3, x).derivative(x)
 
+    Define a custom series function that returns the principal part and the regular part,
+    or `None` if a standard construction through the derivative can be used:
+    >>> def inv_series(args: Sequence[Series]) -> tuple[Expression, Expression] | None:
+    >>>     return (N(0), args[0].pow(-1).to_expression())
+    >>>
+    >>> t = S('t')
+    >>> inv = S('inv', series=inv_series)
+
     Add custom data to a symbol:
     >>> x = S('x', data={'my_tag': 'my_value'})
     >>> r = x.get_symbol_data('my_tag')
@@ -241,6 +251,9 @@ def S(name: str,
         The custom print function takes in keyword arguments that are the same as the arguments of the `format` function.
     custom_derivative: Callable[[Expression, int], Expression] | None:
         A function that is called when computing the derivative of a function in a given argument.
+    series: Callable[[Sequence[Series]], tuple[Expression, Expression] | None] | None:
+        A function that is called for custom series expansion. It receives the argument series and can return
+        the singular factor and regularized expression, or `None` to use the default series expansion.
     data: str | int | Expression | bytes | list | dict | None = None
         Custom user data to associate with the symbol.
     """
@@ -605,6 +618,8 @@ class Expression:
                custom_print: Callable[..., str | None] | None = None,
                custom_derivative: Callable[[
                    Expression, int], Expression] | None = None,
+               series: Callable[[
+                   Sequence[Series]], tuple[Expression, Expression] | None] | None = None,
                data: str | int | Expression | bytes | list[Any] | dict[str | int | Expression, Any] | None = None) -> Expression:
         """
         Create new symbols from `names`. Symbols can have attributes,
@@ -659,6 +674,14 @@ class Expression:
         >>> x = S('x')
         >>> tag(3, x).derivative(x)
 
+        Define a custom series function that returns the principal part and the regular part,
+        or `None` if a standard construction through the derivative can be used:
+        >>> def inv_series(args: Sequence[Series]) -> tuple[Expression, Expression] | None:
+        >>>     return (N(0), args[0].pow(-1).to_expression())
+        >>>
+        >>> t = S('t')
+        >>> inv = S('inv', series=inv_series)
+
         Add custom data to a symbol:
         >>> x = S('x', data={'my_tag': 'my_value'})
         >>> r = x.get_symbol_data('my_tag')
@@ -697,6 +720,9 @@ class Expression:
             The custom print function takes in keyword arguments that are the same as the arguments of the `format` function.
         custom_derivative: Callable[[Expression, int], Expression] | None:
             A function that is called when computing the derivative of a function in a given argument.
+        series: Callable[[Sequence[Series]], tuple[Expression, Expression] | None] | None:
+            A function that is called for custom series expansion. It receives the argument series and can return
+            the singular factor and regularized expression, or `None` to use the default series expansion.
         data: str | int | Expression | bytes | list | dict | None = None
             Custom user data to associate with the symbol.
         """
@@ -4891,7 +4917,7 @@ class Series:
         Compute the natural logarithm of the series, returning the result.
         """
 
-    def pow(self, num: int, den: int) -> Series:
+    def pow(self, num: int, den: int = 1) -> Series:
         """
         Raise the series to the power of `num/den`, returning the result.
 

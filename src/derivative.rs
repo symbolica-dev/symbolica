@@ -493,8 +493,9 @@ impl AtomView<'_> {
                             .iter()
                             .any(|x| x.get_trailing_exponent().is_negative())
                         {
-                            return Err("Cannot series expand custom function with poles. If the function is linear in the expansion variable,
-                            you can add a custom normalization function that extracts the poles.".to_owned());
+                            return Err(format!(
+                                "Cannot series expand {self} since an argument has poles. Define a 'series' attribute on the symbol that extracts the principal part."
+                            ));
                         }
 
                         let mut f_eval = FunctionBuilder::new(f.get_symbol());
