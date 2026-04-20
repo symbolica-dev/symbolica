@@ -540,10 +540,13 @@ class Expression:
     """
 
     E: Expression
-    """Euler's number `e`."""
+    """Euler's number `e`, approximately `2.7182`."""
 
     PI: Expression
-    """The mathematical constant `π`."""
+    """The mathematical constant `π`, approximately `3.1415`."""
+
+    EULER_GAMMA: Expression
+    """The Euler-Mascheroni constant `γ`, approximately `0.57721`."""
 
     I: Expression
     """The mathematical constant `i`, where `i^2 = -1`."""
@@ -1518,12 +1521,6 @@ class Expression:
         """
         Apply the gamma function to this expression.
         `gamma(z)` is meromorphic with simple poles at the non-positive integers.
-        """
-
-    def digamma(self) -> Expression:
-        """
-        Apply the digamma function to this expression.
-        `digamma(z)` is meromorphic with simple poles at the non-positive integers.
         """
 
     def polygamma(self, n: Expression | int | float | Decimal) -> Expression:

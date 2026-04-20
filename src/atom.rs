@@ -879,9 +879,9 @@ impl Symbol {
     pub const SEP: Symbol = State::SEP;
     /// The built-in function that represents an abstract derivative.
     pub const DERIVATIVE: Symbol = State::DERIVATIVE;
-    /// The constant `𝑒`, the base of the natural logarithm.
+    /// The constant `𝑒`, the base of the natural logarithm, approximately `2.7182`.
     pub const E: Symbol = State::E;
-    /// The mathematical constant `π`.
+    /// The mathematical constant `π`, approximately `3.1415`.
     pub const PI: Symbol = State::PI;
     /// The string representation of the constant `π`.
     pub const PI_STR: &'static str = "𝜋";

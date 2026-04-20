@@ -428,6 +428,7 @@ fn external_export_name(
             })?;
 
             for t in tags {
+                name += "_";
                 name += &t.to_canonical_string();
             }
             Ok(name)

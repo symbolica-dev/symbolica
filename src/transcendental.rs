@@ -18,7 +18,6 @@ use crate::{
 
 static SPECIALS: LazyLock<SpecialSymbols> = LazyLock::new(|| SpecialSymbols {
     euler_gamma: get_symbol!("euler_gamma").expect("Euler gamma not defined"),
-    digamma: get_symbol!("digamma").expect("digamma not defined"),
     gamma: get_symbol!("gamma").expect("gamma not defined"),
     polygamma: get_symbol!("polygamma").expect("polygamma not defined"),
     polylog: get_symbol!("polylog").expect("polylog not defined"),
@@ -56,7 +55,6 @@ static BESSELS: LazyLock<BesselSymbols> = LazyLock::new(|| BesselSymbols {
 
 struct SpecialSymbols {
     euler_gamma: Symbol,
-    digamma: Symbol,
     gamma: Symbol,
     polygamma: Symbol,
     polylog: Symbol,
@@ -94,46 +92,6 @@ struct BesselSymbols {
     bessel_k: Symbol,
 }
 
-#[cfg(test)]
-fn digamma_eval(args: &[f64]) -> Result<f64, String> {
-    if args.len() != 1 {
-        return Err(format!(
-            "digamma requires exactly one argument, got {}",
-            args.len()
-        ));
-    }
-
-    Ok(digamma_eval_f64(args[0]))
-}
-
-#[cfg(test)]
-fn digamma_eval_f64(mut x: f64) -> f64 {
-    if x.is_nan() || x == f64::INFINITY {
-        return x;
-    }
-
-    if x <= 0.0 && x == x.trunc() {
-        return f64::INFINITY;
-    }
-
-    if x < 0.5 {
-        return digamma_eval_f64(1.0 - x) - std::f64::consts::PI / (std::f64::consts::PI * x).tan();
-    }
-
-    let mut correction = 0.0;
-    while x < 8.0 {
-        correction -= 1.0 / x;
-        x += 1.0;
-    }
-
-    let inv = 1.0 / x;
-    let inv2 = inv * inv;
-    let series = 1.0 / 12.0
-        - inv2 * (1.0 / 120.0 - inv2 * (1.0 / 252.0 - inv2 * (1.0 / 240.0 - inv2 * (5.0 / 660.0))));
-
-    correction + x.ln() - 0.5 * inv - inv2 * series
-}
-
 impl SpecialSymbols {
     fn new() -> Self {
         let euler_gamma = symbol!(
@@ -163,53 +121,10 @@ impl SpecialSymbols {
         );
 
         let mut symbols = crate::symbol_group!(
-            "digamma";;
-            |symbols, b| {
-                let polygamma_symbol = symbols[2];
-                b.with_normalization_function(|x, out| {
-                    if let Some([arg]) = function_arguments::<1>(x) {
-                        if maybe_eval_unary_float_in_norm(arg, out, digamma_numeric_eval) {
-                            return;
-                        }
-
-                        if let Ok(rat) = Rational::try_from(arg)
-                            && let Some(exact) = digamma_exact_rational(&rat)
-                        {
-                            **out = exact;
-                        }
-                    }
-                })
-                .with_derivative_function(move |x, i, out| {
-                    if i == 0
-                        && let Some([arg]) = function_arguments::<1>(x)
-                    {
-                        **out = function!(polygamma_symbol, 1, arg);
-                    }
-                })
-                .with_evaluation_info(
-                    EvaluationInfo::new(0, |_tags, args, prec| {
-                        let [arg] = args else {
-                            return Err(format!(
-                                "digamma expects exactly one argument, got {}",
-                                args.len()
-                            ));
-                        };
-                        Ok(digamma_numeric_eval(arg, prec))
-                    })
-                    .register(|_tags| {
-                        Box::new(|args: &[f64]| unary_eval_f64(args, digamma_numeric_eval))
-                    })
-                    .register(|_tags| {
-                        Box::new(|args: &[Complex<f64>]| {
-                            unary_eval_complex_f64(args, digamma_numeric_eval)
-                        })
-                    }),
-                )
-            },
             "gamma";;
             |symbols, b| {
-                let gamma_symbol = symbols[1];
-                let digamma_symbol = symbols[0];
+                let gamma_symbol = symbols[0];
+                let polygamma_symbol = symbols[1];
 
                 b.with_normalization_function(|x, out| {
                     if let Some([arg]) = function_arguments::<1>(x) {
@@ -228,7 +143,7 @@ impl SpecialSymbols {
                     if i == 0
                         && let Some([arg]) = function_arguments::<1>(x)
                     {
-                        **out = function!(gamma_symbol, arg) * function!(digamma_symbol, arg);
+                        **out = function!(gamma_symbol, arg) * function!(polygamma_symbol, 0, arg);
                     }
                 })
                 .with_series_function(
@@ -275,18 +190,12 @@ impl SpecialSymbols {
             },
             "polygamma";;
             |symbols, b| {
-                let digamma_symbol = symbols[0];
-                let polygamma_symbol = symbols[2];
+                let polygamma_symbol = symbols[1];
 
                 b.with_normalization_function(move |x, out| {
                     if let Some([n, z]) = function_arguments::<2>(x) {
                         if let Ok(order) = u32::try_from(n) {
                             if maybe_eval_polygamma_float_in_norm(order, z, out) {
-                                return;
-                            }
-
-                            if order == 0 {
-                                **out = function!(digamma_symbol, z);
                                 return;
                             }
 
@@ -314,28 +223,67 @@ impl SpecialSymbols {
                         **out = function!(polygamma_symbol, Atom::num(order + 1), z);
                     }
                 })
+                .with_series_function(move |args| {
+                    let [n, arg] = args else { return None; };
+                    let order = u32::try_from(n.coefficient(0.into())).ok()?;
+                    let point = arg.coefficient(0.into());
+                    let Ok(pole) = Integer::try_from(&point) else {
+                        return None;
+                    };
+
+                    if pole > 0 {
+                        return None;
+                    }
+
+                    let arg = arg.to_atom();
+                    let shift = (-pole).to_i64().unwrap();
+                    let pole = arg.to_owned() + shift;
+                    let pole_power = pole.pow(Atom::num(order + 1));
+
+                    let sign = if order % 2 == 0 {
+                        Atom::num(Integer::factorial(order))
+                    } else {
+                        -Atom::num(Integer::factorial(order))
+                    };
+
+                    let mut recurrence_sum = Atom::new();
+                    for k in 0..=shift {
+                        recurrence_sum +=
+                            Atom::num(1) / (arg.to_owned() + k).pow(Atom::num(order + 1));
+                    }
+
+                    let regularized = pole_power.clone()
+                        * (function!(polygamma_symbol, Atom::num(order), arg + shift + 1)
+                            - sign * recurrence_sum);
+
+                    Some((Atom::num(1) / pole_power, regularized))
+                })
                 .with_evaluation_info(
-                    EvaluationInfo::new(0, |_tags, args, prec| {
-                        let [order, arg] = args else {
+                    EvaluationInfo::new(1, |tags, args, prec| {
+                        let order = nonnegative_integer_tag("polygamma", tags)?;
+                        let [arg] = args else {
                             return Err(format!(
-                                "polygamma expects exactly two arguments, got {}",
+                                "polygamma expects exactly one argument after its order tag, got {}",
                                 args.len()
                             ));
                         };
-                        let Some(order) = complex_float_to_nonnegative_integer(order) else {
-                            return Err("polygamma order must be a nonnegative integer".to_owned());
-                        };
                         Ok(polygamma_numeric_eval(order, arg, prec))
                     })
-                    .register(|_tags| Box::new(|args: &[f64]| polygamma_eval_f64(args)))
-                    .register(|_tags| {
-                        Box::new(|args: &[Complex<f64>]| polygamma_eval_complex_f64(args))
+                    .register(|tags| {
+                        let order = nonnegative_integer_tag("polygamma", tags).ok();
+                        Box::new(move |args: &[f64]| polygamma_eval_f64(order, args))
+                    })
+                    .register(|tags| {
+                        let order = nonnegative_integer_tag("polygamma", tags).ok();
+                        Box::new(move |args: &[Complex<f64>]| {
+                            polygamma_eval_complex_f64(order, args)
+                        })
                     }),
                 )
             },
             "polylog";;
             |symbols, b| {
-                let polylog_symbol = symbols[3];
+                let polylog_symbol = symbols[2];
 
                 b.with_normalization_function(|x, out| {
                     if let Some([s, z]) = function_arguments::<2>(x) {
@@ -362,19 +310,26 @@ impl SpecialSymbols {
                     }
                 })
                 .with_evaluation_info(
-                    EvaluationInfo::new(0, |_tags, args, prec| {
-                        let [order, arg] = args else {
+                    EvaluationInfo::new(1, |tags, args, prec| {
+                        let order = complex_float_tag("polylog", tags, prec)?;
+                        let [arg] = args else {
                             return Err(format!(
-                                "polylog expects exactly two arguments, got {}",
+                                "polylog expects exactly one argument after its order tag, got {}",
                                 args.len()
                             ));
                         };
-                        polylog_numeric_eval(order, arg, prec)
+                        polylog_numeric_eval(&order, arg, prec)
                             .ok_or_else(|| "polylog numeric evaluation did not converge".to_owned())
                     })
-                    .register(|_tags| Box::new(|args: &[f64]| polylog_eval_f64(args)))
-                    .register(|_tags| {
-                        Box::new(|args: &[Complex<f64>]| polylog_eval_complex_f64(args))
+                    .register(|tags| {
+                        let order = complex_float_tag("polylog", tags, 53).ok();
+                        Box::new(move |args: &[f64]| polylog_eval_f64(order.clone(), args))
+                    })
+                    .register(|tags| {
+                        let order = complex_float_tag("polylog", tags, 53).ok();
+                        Box::new(move |args: &[Complex<f64>]| {
+                            polylog_eval_complex_f64(order.clone(), args)
+                        })
                     }),
                 )
             }
@@ -383,11 +338,9 @@ impl SpecialSymbols {
         let polylog = symbols.pop().unwrap();
         let polygamma = symbols.pop().unwrap();
         let gamma = symbols.pop().unwrap();
-        let digamma = symbols.pop().unwrap();
 
         Self {
             euler_gamma,
-            digamma,
             gamma,
             polygamma,
             polylog,
@@ -1124,15 +1077,19 @@ impl BesselSymbols {
                         / Atom::num(2);
                 }
             },
-            eval = EvaluationInfo::new(0, |_tags, args, prec| {
-                binary_eval_to_float("bessel_j", args, prec, bessel_j_numeric_eval)
+            eval = EvaluationInfo::new(1, |tags, args, prec| {
+                tagged_unary_eval_to_float("bessel_j", tags, args, prec, bessel_j_numeric_eval)
             })
-            .register(|_tags| {
-                Box::new(|args: &[f64]| binary_eval_real_f64(args, bessel_j_numeric_eval))
+            .register(|tags| {
+                let order = complex_float_tag("bessel_j", tags, 53).ok();
+                Box::new(move |args: &[f64]| {
+                    tagged_unary_eval_real_f64(order.clone(), args, bessel_j_numeric_eval)
+                })
             })
-            .register(|_tags| {
-                Box::new(|args: &[Complex<f64>]| {
-                    binary_eval_complex_f64(args, bessel_j_numeric_eval)
+            .register(|tags| {
+                let order = complex_float_tag("bessel_j", tags, 53).ok();
+                Box::new(move |args: &[Complex<f64>]| {
+                    tagged_unary_eval_complex_f64(order.clone(), args, bessel_j_numeric_eval)
                 })
             })
         );
@@ -1159,15 +1116,19 @@ impl BesselSymbols {
                         / Atom::num(2);
                 }
             },
-            eval = EvaluationInfo::new(0, |_tags, args, prec| {
-                binary_eval_to_float("bessel_y", args, prec, bessel_y_numeric_eval)
+            eval = EvaluationInfo::new(1, |tags, args, prec| {
+                tagged_unary_eval_to_float("bessel_y", tags, args, prec, bessel_y_numeric_eval)
             })
-            .register(|_tags| {
-                Box::new(|args: &[f64]| binary_eval_real_f64(args, bessel_y_numeric_eval))
+            .register(|tags| {
+                let order = complex_float_tag("bessel_y", tags, 53).ok();
+                Box::new(move |args: &[f64]| {
+                    tagged_unary_eval_real_f64(order.clone(), args, bessel_y_numeric_eval)
+                })
             })
-            .register(|_tags| {
-                Box::new(|args: &[Complex<f64>]| {
-                    binary_eval_complex_f64(args, bessel_y_numeric_eval)
+            .register(|tags| {
+                let order = complex_float_tag("bessel_y", tags, 53).ok();
+                Box::new(move |args: &[Complex<f64>]| {
+                    tagged_unary_eval_complex_f64(order.clone(), args, bessel_y_numeric_eval)
                 })
             })
         );
@@ -1201,15 +1162,19 @@ impl BesselSymbols {
                         / Atom::num(2);
                 }
             },
-            eval = EvaluationInfo::new(0, |_tags, args, prec| {
-                binary_eval_to_float("bessel_i", args, prec, bessel_i_numeric_eval)
+            eval = EvaluationInfo::new(1, |tags, args, prec| {
+                tagged_unary_eval_to_float("bessel_i", tags, args, prec, bessel_i_numeric_eval)
             })
-            .register(|_tags| {
-                Box::new(|args: &[f64]| binary_eval_real_f64(args, bessel_i_numeric_eval))
+            .register(|tags| {
+                let order = complex_float_tag("bessel_i", tags, 53).ok();
+                Box::new(move |args: &[f64]| {
+                    tagged_unary_eval_real_f64(order.clone(), args, bessel_i_numeric_eval)
+                })
             })
-            .register(|_tags| {
-                Box::new(|args: &[Complex<f64>]| {
-                    binary_eval_complex_f64(args, bessel_i_numeric_eval)
+            .register(|tags| {
+                let order = complex_float_tag("bessel_i", tags, 53).ok();
+                Box::new(move |args: &[Complex<f64>]| {
+                    tagged_unary_eval_complex_f64(order.clone(), args, bessel_i_numeric_eval)
                 })
             })
         );
@@ -1236,15 +1201,19 @@ impl BesselSymbols {
                         / Atom::num(2);
                 }
             },
-            eval = EvaluationInfo::new(0, |_tags, args, prec| {
-                binary_eval_to_float("bessel_k", args, prec, bessel_k_numeric_eval)
+            eval = EvaluationInfo::new(1, |tags, args, prec| {
+                tagged_unary_eval_to_float("bessel_k", tags, args, prec, bessel_k_numeric_eval)
             })
-            .register(|_tags| {
-                Box::new(|args: &[f64]| binary_eval_real_f64(args, bessel_k_numeric_eval))
+            .register(|tags| {
+                let order = complex_float_tag("bessel_k", tags, 53).ok();
+                Box::new(move |args: &[f64]| {
+                    tagged_unary_eval_real_f64(order.clone(), args, bessel_k_numeric_eval)
+                })
             })
-            .register(|_tags| {
-                Box::new(|args: &[Complex<f64>]| {
-                    binary_eval_complex_f64(args, bessel_k_numeric_eval)
+            .register(|tags| {
+                let order = complex_float_tag("bessel_k", tags, 53).ok();
+                Box::new(move |args: &[Complex<f64>]| {
+                    tagged_unary_eval_complex_f64(order.clone(), args, bessel_k_numeric_eval)
                 })
             })
         );
@@ -1274,17 +1243,10 @@ pub fn gamma() -> Symbol {
     SPECIALS.gamma
 }
 
-/// Return the built-in digamma function symbol `digamma`.
-///
-/// `digamma(z)` is the logarithmic derivative of `gamma(z)`. It is meromorphic with simple poles
-/// at the non-positive integers and no branch cuts.
-pub fn digamma() -> Symbol {
-    SPECIALS.digamma
-}
-
 /// Return the built-in Euler-Mascheroni constant symbol `euler_gamma`.
 ///
-/// This is the constant `gamma_E`, used in expansions of `gamma`, `digamma`, and related special functions.
+/// This is the constant `gamma_E`, approximately `0.57721`, used in expansions of `gamma`,
+/// `polygamma`, and related special functions.
 pub fn euler_gamma() -> Symbol {
     SPECIALS.euler_gamma
 }
@@ -1507,19 +1469,62 @@ fn unary_eval_to_float(
     Ok(evaluator(arg, prec))
 }
 
-fn binary_eval_to_float(
+fn tagged_unary_eval_to_float(
     name: &str,
+    tags: &[AtomView],
     args: &[Complex<Float>],
     prec: u32,
     evaluator: fn(&Complex<Float>, &Complex<Float>, u32) -> Option<Complex<Float>>,
 ) -> Result<Complex<Float>, String> {
-    let [lhs, rhs] = args else {
+    let order = complex_float_tag(name, tags, prec)?;
+    let [arg] = args else {
         return Err(format!(
-            "{name} expects exactly two arguments, got {}",
+            "{name} expects exactly one argument after its order tag, got {}",
             args.len()
         ));
     };
-    evaluator(lhs, rhs, prec).ok_or_else(|| format!("{name} numeric evaluation failed"))
+    evaluator(&order, arg, prec).ok_or_else(|| format!("{name} numeric evaluation failed"))
+}
+
+fn nonnegative_integer_tag(name: &str, tags: &[AtomView]) -> Result<u32, String> {
+    let [tag] = tags else {
+        return Err(format!(
+            "{name} expects exactly one order tag, got {}",
+            tags.len()
+        ));
+    };
+
+    let Some(order) = atom_to_integer(*tag) else {
+        return Err(format!("{name} order tag must be an integer"));
+    };
+
+    if order < 0 || order > u32::MAX as i64 {
+        return Err(format!("{name} order tag must be a nonnegative integer"));
+    }
+
+    Ok(order as u32)
+}
+
+fn complex_float_tag(name: &str, tags: &[AtomView], prec: u32) -> Result<Complex<Float>, String> {
+    let [tag] = tags else {
+        return Err(format!(
+            "{name} expects exactly one order tag, got {}",
+            tags.len()
+        ));
+    };
+
+    if let Ok(value) = Complex::<Float>::try_from(*tag) {
+        return Ok(value);
+    }
+
+    if let Ok(value) = Complex::<Rational>::try_from(*tag) {
+        return Ok(Complex::new(
+            value.re.to_multi_prec_float(prec),
+            value.im.to_multi_prec_float(prec),
+        ));
+    }
+
+    Err(format!("{name} order tag must be numeric"))
 }
 
 fn unary_eval_real_f64(args: &[f64], evaluator: fn(f64) -> f64) -> f64 {
@@ -1558,36 +1563,40 @@ where
     evaluator(arg.clone())
 }
 
-fn binary_eval_real_f64(
+fn tagged_unary_eval_real_f64(
+    order: Option<Complex<Float>>,
     args: &[f64],
     evaluator: fn(&Complex<Float>, &Complex<Float>, u32) -> Option<Complex<Float>>,
 ) -> f64 {
-    let [lhs, rhs] = args else {
+    let Some(order) = order else {
+        return f64::NAN;
+    };
+    let [arg] = args else {
         return f64::NAN;
     };
     evaluator(
-        &Complex::new(Float::with_val(53, *lhs), Float::new(53)),
-        &Complex::new(Float::with_val(53, *rhs), Float::new(53)),
+        &order,
+        &Complex::new(Float::with_val(53, *arg), Float::new(53)),
         53,
     )
     .map(|z| z.re.to_f64())
     .unwrap_or(f64::NAN)
 }
 
-fn binary_eval_complex_f64(
+fn tagged_unary_eval_complex_f64(
+    order: Option<Complex<Float>>,
     args: &[Complex<f64>],
     evaluator: fn(&Complex<Float>, &Complex<Float>, u32) -> Option<Complex<Float>>,
 ) -> Complex<f64> {
-    let [lhs, rhs] = args else {
+    let Some(order) = order else {
         return Complex::new(f64::NAN, f64::NAN);
     };
-    evaluator(
-        &complex_f64_to_float(lhs, 53),
-        &complex_f64_to_float(rhs, 53),
-        53,
-    )
-    .map(|c| c.to_f64())
-    .unwrap_or_else(|| Complex::new(f64::NAN, f64::NAN))
+    let [arg] = args else {
+        return Complex::new(f64::NAN, f64::NAN);
+    };
+    evaluator(&order, &complex_f64_to_float(arg, 53), 53)
+        .map(|z| z.to_f64())
+        .unwrap_or_else(|| Complex::new(f64::NAN, f64::NAN))
 }
 
 fn tan_numeric_eval(z: &Complex<Float>, _binary_prec: u32) -> Complex<Float> {
@@ -1922,11 +1931,11 @@ fn complex_pi(prec: u32) -> Complex<Float> {
     Complex::new(Float::with_val(prec, Constant::Pi), Float::new(prec))
 }
 
-fn polygamma_eval_f64(args: &[f64]) -> f64 {
-    let [order, arg] = args else {
+fn polygamma_eval_f64(order: Option<u32>, args: &[f64]) -> f64 {
+    let Some(order) = order else {
         return f64::NAN;
     };
-    let Some(order) = f64_to_nonnegative_integer(*order) else {
+    let [arg] = args else {
         return f64::NAN;
     };
     polygamma_numeric_eval(
@@ -1938,38 +1947,39 @@ fn polygamma_eval_f64(args: &[f64]) -> f64 {
     .to_f64()
 }
 
-fn polygamma_eval_complex_f64(args: &[Complex<f64>]) -> Complex<f64> {
-    let [order, arg] = args else {
+fn polygamma_eval_complex_f64(order: Option<u32>, args: &[Complex<f64>]) -> Complex<f64> {
+    let Some(order) = order else {
         return Complex::new(f64::NAN, f64::NAN);
     };
-    let Some(order) = complex_f64_to_nonnegative_integer(order) else {
+    let [arg] = args else {
         return Complex::new(f64::NAN, f64::NAN);
     };
     polygamma_numeric_eval(order, &complex_f64_to_float(arg, 53), 53).to_f64()
 }
 
-fn polylog_eval_f64(args: &[f64]) -> f64 {
-    let [order, arg] = args else {
+fn polylog_eval_f64(order: Option<Complex<Float>>, args: &[f64]) -> f64 {
+    let Some(order) = order else {
         return f64::NAN;
     };
-    let order = Complex::new(Float::with_val(53, *order), Float::new(53));
+    let [arg] = args else {
+        return f64::NAN;
+    };
     let arg = Complex::new(Float::with_val(53, *arg), Float::new(53));
     polylog_numeric_eval(&order, &arg, 53)
         .map(|x| x.re.to_f64())
         .unwrap_or(f64::NAN)
 }
 
-fn polylog_eval_complex_f64(args: &[Complex<f64>]) -> Complex<f64> {
-    let [order, arg] = args else {
+fn polylog_eval_complex_f64(order: Option<Complex<Float>>, args: &[Complex<f64>]) -> Complex<f64> {
+    let Some(order) = order else {
         return Complex::new(f64::NAN, f64::NAN);
     };
-    polylog_numeric_eval(
-        &complex_f64_to_float(order, 53),
-        &complex_f64_to_float(arg, 53),
-        53,
-    )
-    .map(|x| x.to_f64())
-    .unwrap_or_else(|| Complex::new(f64::NAN, f64::NAN))
+    let [arg] = args else {
+        return Complex::new(f64::NAN, f64::NAN);
+    };
+    polylog_numeric_eval(&order, &complex_f64_to_float(arg, 53), 53)
+        .map(|x| x.to_f64())
+        .unwrap_or_else(|| Complex::new(f64::NAN, f64::NAN))
 }
 
 fn complex_f64_to_float(value: &Complex<f64>, prec: u32) -> Complex<Float> {
@@ -1977,31 +1987,6 @@ fn complex_f64_to_float(value: &Complex<f64>, prec: u32) -> Complex<Float> {
         Float::with_val(prec, value.re),
         Float::with_val(prec, value.im),
     )
-}
-
-fn f64_to_nonnegative_integer(value: f64) -> Option<u32> {
-    if !value.is_finite() || value < 0.0 {
-        return None;
-    }
-    let rounded = value.round();
-    if (value - rounded).abs() > 1e-12 || rounded > u32::MAX as f64 {
-        return None;
-    }
-    Some(rounded as u32)
-}
-
-fn complex_f64_to_nonnegative_integer(value: &Complex<f64>) -> Option<u32> {
-    if value.im.abs() > 1e-12 {
-        return None;
-    }
-    f64_to_nonnegative_integer(value.re)
-}
-
-fn complex_float_to_nonnegative_integer(value: &Complex<Float>) -> Option<u32> {
-    if value.im.to_f64().abs() > 1e-12 {
-        return None;
-    }
-    f64_to_nonnegative_integer(value.re.to_f64())
 }
 
 fn complex_float_to_integer(value: &Complex<Float>) -> Option<i64> {
@@ -2057,7 +2042,7 @@ fn gamma_exact_rational(rat: &Rational) -> Option<Atom> {
     None
 }
 
-fn digamma_exact_rational(rat: &Rational) -> Option<Atom> {
+fn polygamma_order_zero_exact_rational(rat: &Rational) -> Option<Atom> {
     let denominator = rat.denominator();
 
     if denominator == 1 {
@@ -2081,7 +2066,8 @@ fn digamma_exact_rational(rat: &Rational) -> Option<Atom> {
         }
 
         return Some(
-            digamma_half_integer_base() + Atom::num(digamma_half_integer_shift(numerator)),
+            polygamma_order_zero_half_integer_base()
+                + Atom::num(polygamma_order_zero_half_integer_shift(numerator)),
         );
     }
 
@@ -2089,6 +2075,10 @@ fn digamma_exact_rational(rat: &Rational) -> Option<Atom> {
 }
 
 fn polygamma_exact_rational(order: u32, rat: &Rational) -> Option<Atom> {
+    if order == 0 {
+        return polygamma_order_zero_exact_rational(rat);
+    }
+
     if *rat != Rational::one() {
         return None;
     }
@@ -2130,11 +2120,11 @@ fn harmonic_rational(n: u32) -> Rational {
     sum
 }
 
-fn digamma_half_integer_base() -> Atom {
+fn polygamma_order_zero_half_integer_base() -> Atom {
     -Atom::from(euler_gamma()) - Atom::num(2) * function!(State::LOG, Atom::num(2))
 }
 
-fn digamma_half_integer_shift(numerator: i64) -> Rational {
+fn polygamma_order_zero_half_integer_shift(numerator: i64) -> Rational {
     let one = Rational::from((1, 1));
     let target = Rational::from((numerator, 2));
     let mut current = Rational::from((1, 2));
@@ -2326,20 +2316,20 @@ fn gamma_numeric_eval(z: &Complex<Float>, binary_prec: u32) -> Complex<Float> {
     }
 }
 
-fn digamma_numeric_eval(z: &Complex<Float>, binary_prec: u32) -> Complex<Float> {
+fn polygamma_order_zero_numeric_eval(z: &Complex<Float>, binary_prec: u32) -> Complex<Float> {
     if z.im.to_f64() == 0.0 {
         Complex::new(
             z.re.clone().into_inner().digamma().into(),
             Float::new(binary_prec),
         )
     } else {
-        digamma_complex(z, binary_prec)
+        polygamma_order_zero_complex(z, binary_prec)
     }
 }
 
 fn polygamma_numeric_eval(order: u32, z: &Complex<Float>, binary_prec: u32) -> Complex<Float> {
     if order == 0 {
-        return digamma_numeric_eval(z, binary_prec);
+        return polygamma_order_zero_numeric_eval(z, binary_prec);
     }
 
     let zero = Float::new(binary_prec);
@@ -2475,7 +2465,7 @@ fn gamma_complex_spouge(z: &Complex<Float>, binary_prec: u32) -> Complex<Float> 
     t.powf(&exponent) * (-t).exp() * sum
 }
 
-fn digamma_complex(z: &Complex<Float>, binary_prec: u32) -> Complex<Float> {
+fn polygamma_order_zero_complex(z: &Complex<Float>, binary_prec: u32) -> Complex<Float> {
     let zero = Float::new(binary_prec);
     let one = Float::with_val(binary_prec, 1);
     let pi = Float::with_val(binary_prec, Constant::Pi);
@@ -2483,7 +2473,7 @@ fn digamma_complex(z: &Complex<Float>, binary_prec: u32) -> Complex<Float> {
     if z.re.to_f64() < 0.5 {
         let pi_z = Complex::new(pi.clone(), zero.clone()) * z.clone();
         let reflected = Complex::new(one.clone(), zero.clone()) - z.clone();
-        return digamma_complex(&reflected, binary_prec)
+        return polygamma_order_zero_complex(&reflected, binary_prec)
             - Complex::new(pi, zero.clone()) / pi_z.tan();
     }
 
@@ -2545,8 +2535,6 @@ mod tests {
         parse, symbol,
     };
 
-    use super::digamma_eval;
-
     #[test]
     fn gamma_exact_normalization() {
         assert_eq!(parse!("gamma(5)"), Atom::num(24));
@@ -2563,7 +2551,7 @@ mod tests {
     fn gamma_derivative() {
         assert_eq!(
             parse!("gamma(x)").derivative(symbol!("x")),
-            parse!("gamma(x)*digamma(x)")
+            parse!("gamma(x)*polygamma(0,x)")
         );
     }
 
@@ -2613,20 +2601,23 @@ mod tests {
     }
 
     #[test]
-    fn digamma_exact_normalization() {
-        assert_eq!(parse!("digamma(1)"), parse!("-euler_gamma"));
-        assert_eq!(parse!("digamma(1/2)"), parse!("-euler_gamma-2*log(2)"));
-        assert_eq!(parse!("digamma(5/2)"), parse!("8/3-euler_gamma-2*log(2)"));
+    fn polygamma_order_zero_exact_normalization() {
+        assert_eq!(parse!("polygamma(0,1)"), parse!("-euler_gamma"));
+        assert_eq!(parse!("polygamma(0,1/2)"), parse!("-euler_gamma-2*log(2)"));
         assert_eq!(
-            parse!("digamma(0)"),
+            parse!("polygamma(0,5/2)"),
+            parse!("8/3-euler_gamma-2*log(2)")
+        );
+        assert_eq!(
+            parse!("polygamma(0,0)"),
             Atom::num(Coefficient::complex_infinity())
         );
     }
 
     #[test]
-    fn digamma_numeric_recurrence() {
+    fn polygamma_order_zero_numeric_recurrence() {
         let lhs = Complex::<Float>::try_from(
-            (parse!("digamma(3/2+1i/4)") - parse!("digamma(1/2+1i/4)")).to_float(50),
+            (parse!("polygamma(0,3/2+1i/4)") - parse!("polygamma(0,1/2+1i/4)")).to_float(50),
         )
         .unwrap();
         let rhs = Complex::<Float>::try_from(parse!("1/(1/2+1i/4)").to_float(50)).unwrap();
@@ -2635,30 +2626,21 @@ mod tests {
     }
 
     #[test]
-    fn digamma_eval_f64_matches_known_values() {
-        let euler_gamma = 0.577_215_664_901_532_9_f64;
-        let at_one = digamma_eval(&[1.0]).unwrap();
-        let at_half = digamma_eval(&[0.5]).unwrap();
-
-        assert!((at_one + euler_gamma).abs() < 1e-10);
-        assert!((at_half + euler_gamma + 2.0 * 2.0_f64.ln()).abs() < 1e-10);
-        assert!(digamma_eval(&[0.0]).unwrap().is_infinite());
-    }
-
-    #[test]
     fn special_float_inputs_normalize_immediately() {
         assert!(Complex::<Float>::try_from(parse!("gamma(1.25)")).is_ok());
-        assert!(Complex::<Float>::try_from(parse!("digamma(1.25)")).is_ok());
+        assert!(Complex::<Float>::try_from(parse!("polygamma(0,1.25)")).is_ok());
         assert!(Complex::<Float>::try_from(parse!("polygamma(1,1.25)")).is_ok());
-        assert_eq!(parse!("polygamma(0,1.25)"), parse!("digamma(1.25)"));
     }
 
     #[test]
     fn polygamma_basic_normalization() {
-        assert_eq!(parse!("polygamma(0,x)"), parse!("digamma(x)"));
         assert_eq!(
             parse!("polygamma(1,0)"),
             Atom::num(Coefficient::complex_infinity())
+        );
+        assert_eq!(
+            parse!("polygamma(0,x)").derivative(symbol!("x")),
+            parse!("polygamma(1,x)")
         );
         assert_eq!(
             parse!("polygamma(3,x)").derivative(symbol!("x")),
@@ -2675,6 +2657,25 @@ mod tests {
         let rhs = Complex::<Float>::try_from(parse!("-1/(1/2+1i/4)^2").to_float(50)).unwrap();
 
         assert_close_complex(&lhs, &rhs, "1e-28");
+    }
+
+    #[test]
+    fn polygamma_laurent_series() {
+        let x = symbol!("x");
+        assert_eq!(
+            parse!("polygamma(0,x)")
+                .series(x, Atom::num(0).as_view(), 2.into(), true)
+                .unwrap()
+                .to_atom(),
+            parse!("-x^-1-euler_gamma+1/6*pi^2*x+1/2*polygamma(2,1)*x^2")
+        );
+        assert_eq!(
+            parse!("polygamma(1,x)")
+                .series(x, Atom::num(0).as_view(), 2.into(), true)
+                .unwrap()
+                .to_atom(),
+            parse!("x^-2+1/6*pi^2+polygamma(2,1)*x+1/30*pi^4*x^2")
+        );
     }
 
     #[test]
@@ -2706,14 +2707,15 @@ mod tests {
 
     #[test]
     fn special_functions_register_eval_info() {
-        let mut evaluator = parse!("gamma(x)+digamma(x)+polygamma(1,x)+polylog(2,x)+euler_gamma")
-            .evaluator(
-                &FunctionMap::new(),
-                &[parse!("x")],
-                OptimizationSettings::default(),
-            )
-            .unwrap()
-            .map_coeff(&|x| x.re.to_f64());
+        let mut evaluator =
+            parse!("gamma(x)+polygamma(0,x)+polygamma(1,x)+polylog(2,x)+euler_gamma")
+                .evaluator(
+                    &FunctionMap::new(),
+                    &[parse!("x")],
+                    OptimizationSettings::default(),
+                )
+                .unwrap()
+                .map_coeff(&|x| x.re.to_f64());
 
         let mut out = [0.0];
         evaluator.evaluate(&[0.25], &mut out);
