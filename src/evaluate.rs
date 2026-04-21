@@ -2306,27 +2306,12 @@ pub trait EvaluationDomain: Sized + 'static {
     /// Use `None` for variable-precision domains such as `Float` and `Complex<Float>`.
     const FIXED_PRECISION: Option<u32>;
 
-    /// Evalaute a constant function with the given precision, if supported by the type.
-    fn evaluate_constant_with_prec(
-        tags: &[AtomView],
-        info: &EvaluationInfo,
-        prec: u32,
-    ) -> Result<Self, String> {
-        if Some(prec) == Self::FIXED_PRECISION {
-            let eval = Self::resolve_function(tags, info).ok_or_else(|| {
-                format!(
-                    "No fixed-precision implementation available for type {}",
-                    std::any::type_name::<Self>()
-                )
-            })?;
-            Ok(eval(&[]))
-        } else {
-            Err(format!(
-                "No fixed-precision implementation for precision {} available for type {}",
-                prec,
-                std::any::type_name::<Self>()
-            ))
-        }
+    /// Try to convert a `Complex<Float>` to the type.
+    fn try_from_complex_float(_: Complex<Float>) -> Result<Self, String> {
+        Err(format!(
+            "Cannot convert from Complex<Float> to {}",
+            std::any::type_name::<Self>()
+        ))
     }
 
     /// Resolve a function implementation for the given tags, if available for the type.
@@ -2343,14 +2328,6 @@ pub trait EvaluationDomain: Sized + 'static {
 impl EvaluationDomain for Complex<Rational> {
     const FIXED_PRECISION: Option<u32> = None;
 
-    fn evaluate_constant_with_prec(
-        _: &[AtomView],
-        _: &EvaluationInfo,
-        _: u32,
-    ) -> Result<Self, String> {
-        Err(format!("Cannot evaluate with Complex<Rational>"))
-    }
-
     fn resolve_function(
         _: &[AtomView],
         _: &EvaluationInfo,
@@ -2361,10 +2338,30 @@ impl EvaluationDomain for Complex<Rational> {
 
 impl EvaluationDomain for f64 {
     const FIXED_PRECISION: Option<u32> = Some(53);
+
+    fn try_from_complex_float(f: Complex<Float>) -> Result<Self, String> {
+        if f.is_real() {
+            Ok(f.re.to_f64())
+        } else {
+            Err(format!(
+                "Cannot convert from Complex<Float> to f64 because the result {f} is not real"
+            ))
+        }
+    }
 }
 
 impl EvaluationDomain for F64 {
     const FIXED_PRECISION: Option<u32> = Some(53);
+
+    fn try_from_complex_float(f: Complex<Float>) -> Result<Self, String> {
+        if f.is_real() {
+            Ok(f.re.to_f64().into())
+        } else {
+            Err(format!(
+                "Cannot convert from Complex<Float> to f64 because the result {f} is not real"
+            ))
+        }
+    }
 
     fn resolve_function(
         tags: &[AtomView],
@@ -2387,10 +2384,25 @@ impl EvaluationDomain for F64 {
 
 impl EvaluationDomain for Complex<f64> {
     const FIXED_PRECISION: Option<u32> = Some(53);
+
+    fn try_from_complex_float(f: Complex<Float>) -> Result<Self, String> {
+        Ok(Complex::new(f.re.to_f64(), f.im.to_f64()))
+    }
 }
 
 impl EvaluationDomain for wide::f64x4 {
     const FIXED_PRECISION: Option<u32> = Some(53);
+
+    fn try_from_complex_float(f: Complex<Float>) -> Result<Self, String> {
+        if f.is_real() {
+            let r = f.re.to_f64();
+            Ok(wide::f64x4::new([r; 4]))
+        } else {
+            Err(format!(
+                "Cannot convert from Complex<Float> to f64 because the result {f} is not real"
+            ))
+        }
+    }
 
     fn resolve_function(
         tags: &[AtomView],
@@ -2424,6 +2436,17 @@ impl EvaluationDomain for wide::f64x4 {
 
 impl EvaluationDomain for DoubleFloat {
     const FIXED_PRECISION: Option<u32> = Some(106);
+
+    fn try_from_complex_float(f: Complex<Float>) -> Result<Self, String> {
+        if f.is_real() {
+            Ok(f.re.to_double_float())
+        } else {
+            Err(format!(
+                "Cannot convert from Complex<Float> to DoubleFloat because the result {f} is not real"
+            ))
+        }
+    }
+
     fn resolve_function(
         tags: &[AtomView],
         info: &EvaluationInfo,
@@ -2449,6 +2472,11 @@ impl EvaluationDomain for DoubleFloat {
 
 impl EvaluationDomain for Complex<DoubleFloat> {
     const FIXED_PRECISION: Option<u32> = Some(106);
+
+    fn try_from_complex_float(f: Complex<Float>) -> Result<Self, String> {
+        Ok(f.to_double_float())
+    }
+
     fn resolve_function(
         tags: &[AtomView],
         info: &EvaluationInfo,
@@ -2476,17 +2504,12 @@ impl EvaluationDomain for Complex<DoubleFloat> {
 impl EvaluationDomain for Float {
     const FIXED_PRECISION: Option<u32> = None;
 
-    fn evaluate_constant_with_prec(
-        tags: &[AtomView],
-        info: &EvaluationInfo,
-        prec: u32,
-    ) -> Result<Self, String> {
-        let r = info.evaluate(tags, &[], prec)?;
-        if r.is_real() {
-            Ok(r.re)
+    fn try_from_complex_float(f: Complex<Float>) -> Result<Self, String> {
+        if f.is_real() {
+            Ok(f.re)
         } else {
             Err(format!(
-                "Cannot evaluate to Float with precision {prec} because the result {r} is not real"
+                "Cannot convert from Complex<Float> to Float because the result {f} is not real"
             ))
         }
     }
@@ -2494,12 +2517,8 @@ impl EvaluationDomain for Float {
 impl EvaluationDomain for Complex<Float> {
     const FIXED_PRECISION: Option<u32> = None;
 
-    fn evaluate_constant_with_prec(
-        tags: &[AtomView],
-        info: &EvaluationInfo,
-        prec: u32,
-    ) -> Result<Self, String> {
-        info.evaluate(tags, &[], prec)
+    fn try_from_complex_float(f: Complex<Float>) -> Result<Self, String> {
+        Ok(f)
     }
 }
 
@@ -2534,7 +2553,7 @@ impl<T: Clone + EvaluationDomain> ExpressionEvaluator<T> {
         let mut eval = self.clone();
 
         for e in &mut eval.external_fns {
-            if e.imp.is_some() {
+            if e.imp.is_some() || e.constant_index.is_some() {
                 continue;
             }
 
@@ -2551,7 +2570,10 @@ impl<T: Clone + EvaluationDomain> ExpressionEvaluator<T> {
                 continue;
             }
 
-            return Err(format!("External function '{e}' not found"));
+            return Err(format!(
+                "External function '{e}' not found for type {}",
+                std::any::type_name::<T>()
+            ));
         }
 
         Ok(ExpressionEvaluatorWithExternalFunctions { eval })
@@ -2764,8 +2786,8 @@ impl<T: Default> ExpressionEvaluator<T> {
                     );
                 };
                 let tags = external.tag_views();
-                stack[self.param_count + i] =
-                    T2::evaluate_constant_with_prec(&tags, eval, binary_prec).unwrap();
+                let c = eval.evaluate_constant(&tags, binary_prec).unwrap();
+                stack[self.param_count + i] = T2::try_from_complex_float(c).unwrap();
             }
         }
 
@@ -9977,6 +9999,7 @@ impl ExpressionEvaluator<Complex<Rational>> {
         let external_fns = self
             .external_fns
             .iter()
+            .filter(|f| f.constant_index.is_none())
             .map(|f| {
                 let Some(imp) = f.fetch_impl_for::<T>() else {
                     return Err(format!(
@@ -10021,6 +10044,7 @@ impl<T: JITCompiledNumber + Clone> ExpressionEvaluator<T> {
         let external_fns = self
             .external_fns
             .iter()
+            .filter(|f| f.constant_index.is_none())
             .map(|f| {
                 let Some(imp) = f.imp.clone() else {
                     return Err(format!(
@@ -12998,7 +13022,7 @@ mod test {
         atom::{Atom, AtomCore, EvaluationInfo},
         create_hyperdual_from_components,
         domains::{
-            float::{Complex, F64, Float, FloatLike},
+            float::{Complex, Float, FloatLike},
             rational::Rational,
         },
         evaluate::{Dualizer, EvaluationFn, ExternalFunction, FunctionMap, OptimizationSettings},
@@ -13010,15 +13034,14 @@ mod test {
     fn eval_fun() {
         let _ = symbol!(
             "e",
-            eval = EvaluationInfo::new(0, |_tags, _args, prec| { Ok(Float::new(prec).e().into()) })
-                .register(|_tags| { Box::new(|_args: &[f64]| F64(0.).e().0) })
-                .register(|_tags| { Box::new(|_args: &[Complex<f64>]| F64(0.).e().0.into()) })
+            eval = EvaluationInfo::constant(|_tags, prec| { Ok(Float::new(prec).e().into()) })
         );
 
         let _ = symbol!(
             "symbolica::eval_fun::atanh",
-            eval = EvaluationInfo::new(0, |_tags, args, _prec| { Ok(args[0].atanh().into()) })
-                .register(|_tags| { Box::new(|args: &[f64]| args[0].atanh()) })
+            eval = EvaluationInfo::new()
+                .register(|args: &[Complex<Float>]| args[0].atanh())
+                .register(|args: &[f64]| args[0].atanh())
         );
 
         let a = parse!("e*symbolica::eval_fun::atanh(x)");
