@@ -22,7 +22,7 @@ use rug::{integer::Order, ops::NegAssign};
 use smallvec::{SmallVec, smallvec};
 
 use crate::{
-    atom::{Atom, AtomView, Symbol},
+    atom::{Atom, AtomCore, AtomView, Symbol},
     domains::{
         EuclideanDomain, Field, InternalOrdering, Ring, RingOps, Set,
         algebraic_number::AlgebraicExtension,
@@ -3073,7 +3073,7 @@ impl AtomView<'_> {
                     }
                     _ => {
                         if let Some(eval) = s.get_evaluation_info() {
-                            if let Ok(v) = eval.evaluate(&[], &[], binary_prec) {
+                            if let Ok(v) = eval.evaluate_constant(&[], binary_prec) {
                                 out.to_num(v.into());
                                 return;
                             }
@@ -3100,7 +3100,26 @@ impl AtomView<'_> {
                         }
                     }
 
-                    if let Ok(result) = eval.evaluate(&tags, &arg_float, binary_prec) {
+                    if arg_float.is_empty() {
+                        if let Ok(result) = eval.evaluate_constant(&tags, binary_prec) {
+                            out.to_num(result.into());
+                            return;
+                        }
+                    } else if binary_prec <= 54
+                        && let Some(ev) = eval.get_evaluator::<Complex<f64>>(&tags)
+                    {
+                        let arg_double: Vec<_> = arg_float.iter().map(|x| x.to_f64()).collect();
+                        let result = ev(&arg_double);
+                        out.to_num(
+                            Complex::new(
+                                Float::with_val(53, result.re),
+                                Float::with_val(53, result.im),
+                            )
+                            .into(),
+                        );
+                        return;
+                    } else if let Some(ev) = eval.get_evaluator::<Complex<Float>>(&tags) {
+                        let result = ev(&arg_float);
                         out.to_num(result.into());
                         return;
                     }

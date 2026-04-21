@@ -100,23 +100,11 @@ impl SpecialSymbols {
             der = |_x, _i, out| {
                 out.to_num(Coefficient::zero());
             },
-            eval = EvaluationInfo::new(0, |_tags, args, prec| {
-                if !args.is_empty() {
-                    return Err(format!(
-                        "euler_gamma expects zero arguments, got {}",
-                        args.len()
-                    ));
-                }
+            eval = EvaluationInfo::constant(|_tags, prec| {
                 Ok(Complex::new(
                     Float::with_val(prec, Constant::Euler),
                     Float::new(prec),
                 ))
-            })
-            .register(|_tags| Box::new(|_args: &[f64]| Float::new(53).euler().to_f64()))
-            .register(|_tags| {
-                Box::new(|_args: &[Complex<f64>]| {
-                    Complex::new(Float::new(53).euler().to_f64(), 0.0)
-                })
             })
         );
 
@@ -169,22 +157,13 @@ impl SpecialSymbols {
                     },
                 )
                 .with_evaluation_info(
-                    EvaluationInfo::new(0, |_tags, args, prec| {
-                        let [arg] = args else {
-                            return Err(format!(
-                                "gamma expects exactly one argument, got {}",
-                                args.len()
-                            ));
-                        };
-                        Ok(gamma_numeric_eval(arg, prec))
+                    EvaluationInfo::new()
+                    .register(|args: &[Complex<Float>]| {
+                        unary_eval_complex_float(args, gamma_numeric_eval)
                     })
-                    .register(|_tags| {
-                        Box::new(|args: &[f64]| unary_eval_f64(args, gamma_numeric_eval))
-                    })
-                    .register(|_tags| {
-                        Box::new(|args: &[Complex<f64>]| {
-                            unary_eval_complex_f64(args, gamma_numeric_eval)
-                        })
+                    .register(|args: &[f64]| unary_eval_f64(args, gamma_numeric_eval))
+                    .register(|args: &[Complex<f64>]| {
+                        unary_eval_complex_f64(args, gamma_numeric_eval)
                     }),
                 )
             },
@@ -259,21 +238,26 @@ impl SpecialSymbols {
                     Some((Atom::num(1) / pole_power, regularized))
                 })
                 .with_evaluation_info(
-                    EvaluationInfo::new(1, |tags, args, prec| {
-                        let order = nonnegative_integer_tag("polygamma", tags)?;
-                        let [arg] = args else {
-                            return Err(format!(
-                                "polygamma expects exactly one argument after its order tag, got {}",
-                                args.len()
-                            ));
-                        };
-                        Ok(polygamma_numeric_eval(order, arg, prec))
+                    EvaluationInfo::new().with_tags(1)
+                    .register_tagged(|tags| {
+                        let order = nonnegative_integer_tag("polygamma", tags).ok();
+                        Box::new(move |args: &[Complex<Float>]| {
+                            let Some(order) = order else {
+                                return Complex::new(
+                                    Float::with_val(53, rug::float::Special::Nan),
+                                    Float::with_val(53, rug::float::Special::Nan),
+                                );
+                            };
+                            unary_eval_complex_float(args, |arg, prec| {
+                                polygamma_numeric_eval(order, arg, prec)
+                            })
+                        })
                     })
-                    .register(|tags| {
+                    .register_tagged(|tags| {
                         let order = nonnegative_integer_tag("polygamma", tags).ok();
                         Box::new(move |args: &[f64]| polygamma_eval_f64(order, args))
                     })
-                    .register(|tags| {
+                    .register_tagged(|tags| {
                         let order = nonnegative_integer_tag("polygamma", tags).ok();
                         Box::new(move |args: &[Complex<f64>]| {
                             polygamma_eval_complex_f64(order, args)
@@ -310,22 +294,40 @@ impl SpecialSymbols {
                     }
                 })
                 .with_evaluation_info(
-                    EvaluationInfo::new(1, |tags, args, prec| {
-                        let order = complex_float_tag("polylog", tags, prec)?;
-                        let [arg] = args else {
-                            return Err(format!(
-                                "polylog expects exactly one argument after its order tag, got {}",
-                                args.len()
-                            ));
-                        };
-                        polylog_numeric_eval(&order, arg, prec)
-                            .ok_or_else(|| "polylog numeric evaluation did not converge".to_owned())
+                    EvaluationInfo::new().with_tags(1)
+                    .register_tagged(|tags| {
+                        let tags = tags.iter().map(|x| x.to_owned()).collect::<Vec<_>>();
+                        Box::new(move |args: &[Complex<Float>]| {
+                            let prec = args
+                                .first()
+                                .map(|x| x.re.prec().max(x.im.prec()))
+                                .unwrap_or(53);
+                            let tag_views = tags.iter().map(|x| x.as_view()).collect::<Vec<_>>();
+                            let Ok(order) = complex_float_tag("polylog", &tag_views, prec) else {
+                                return Complex::new(
+                                    Float::with_val(53, rug::float::Special::Nan),
+                                    Float::with_val(53, rug::float::Special::Nan),
+                                );
+                            };
+                            let [arg] = args else {
+                                return Complex::new(
+                                    Float::with_val(53, rug::float::Special::Nan),
+                                    Float::with_val(53, rug::float::Special::Nan),
+                                );
+                            };
+                            polylog_numeric_eval(&order, arg, prec).unwrap_or_else(|| {
+                                Complex::new(
+                                    Float::with_val(53, rug::float::Special::Nan),
+                                    Float::with_val(53, rug::float::Special::Nan),
+                                )
+                            })
+                        })
                     })
-                    .register(|tags| {
+                    .register_tagged(|tags| {
                         let order = complex_float_tag("polylog", tags, 53).ok();
                         Box::new(move |args: &[f64]| polylog_eval_f64(order.clone(), args))
                     })
-                    .register(|tags| {
+                    .register_tagged(|tags| {
                         let order = complex_float_tag("polylog", tags, 53).ok();
                         Box::new(move |args: &[Complex<f64>]| {
                             polylog_eval_complex_f64(order.clone(), args)
@@ -379,11 +381,11 @@ impl GeometricSymbols {
                     Some((Atom::num(1) / delta.clone(), -delta.clone() / function!(tan, delta)))
                 })
                 .with_evaluation_info(
-                    EvaluationInfo::new(0, |_tags, args, prec| {
-                        unary_eval_to_float("tan", args, prec, tan_numeric_eval)
+                    EvaluationInfo::new().register(|args: &[Complex<Float>]| {
+                        unary_eval_complex_float(args, tan_numeric_eval)
                     })
-                    .register(|_tags| Box::new(|args: &[f64]| unary_eval_real_f64(args, f64::tan)))
-                    .register(|_tags| Box::new(|args: &[Complex<f64>]| unary_eval_complex_real_f64(args, |z| z.tan()))),
+                    .register(|args: &[f64]| unary_eval_real_f64(args, f64::tan))
+                    .register(|args: &[Complex<f64>]| unary_eval_complex_real_f64(args, |z| z.tan())),
                 )
             },
             "cot";;
@@ -414,11 +416,11 @@ impl GeometricSymbols {
                     Some((Atom::num(1) / delta.clone(), delta.clone() / function!(tan, delta)))
                 })
                 .with_evaluation_info(
-                    EvaluationInfo::new(0, |_tags, args, prec| {
-                        unary_eval_to_float("cot", args, prec, cot_numeric_eval)
+                    EvaluationInfo::new().register(|args: &[Complex<Float>]| {
+                        unary_eval_complex_float(args, cot_numeric_eval)
                     })
-                    .register(|_tags| Box::new(|args: &[f64]| unary_eval_real_f64(args, cot_eval_f64)))
-                    .register(|_tags| Box::new(|args: &[Complex<f64>]| unary_eval_complex_real_f64(args, |z| Complex::new(1.0, 0.0) / z.tan()))),
+                    .register(|args: &[f64]| unary_eval_real_f64(args, cot_eval_f64))
+                    .register(|args: &[Complex<f64>]| unary_eval_complex_real_f64(args, |z| Complex::new(1.0, 0.0) / z.tan())),
                 )
             },
             "sec";;
@@ -452,11 +454,11 @@ impl GeometricSymbols {
                     ))
                 })
                 .with_evaluation_info(
-                    EvaluationInfo::new(0, |_tags, args, prec| {
-                        unary_eval_to_float("sec", args, prec, sec_numeric_eval)
+                    EvaluationInfo::new().register(|args: &[Complex<Float>]| {
+                        unary_eval_complex_float(args, sec_numeric_eval)
                     })
-                    .register(|_tags| Box::new(|args: &[f64]| unary_eval_real_f64(args, sec_eval_f64)))
-                    .register(|_tags| Box::new(|args: &[Complex<f64>]| unary_eval_complex_real_f64(args, |z| Complex::new(1.0, 0.0) / z.cos()))),
+                    .register(|args: &[f64]| unary_eval_real_f64(args, sec_eval_f64))
+                    .register(|args: &[Complex<f64>]| unary_eval_complex_real_f64(args, |z| Complex::new(1.0, 0.0) / z.cos())),
                 )
             },
             "csc";;
@@ -490,11 +492,11 @@ impl GeometricSymbols {
                     ))
                 })
                 .with_evaluation_info(
-                    EvaluationInfo::new(0, |_tags, args, prec| {
-                        unary_eval_to_float("csc", args, prec, csc_numeric_eval)
+                    EvaluationInfo::new().register(|args: &[Complex<Float>]| {
+                        unary_eval_complex_float(args, csc_numeric_eval)
                     })
-                    .register(|_tags| Box::new(|args: &[f64]| unary_eval_real_f64(args, csc_eval_f64)))
-                    .register(|_tags| Box::new(|args: &[Complex<f64>]| unary_eval_complex_real_f64(args, |z| Complex::new(1.0, 0.0) / z.sin()))),
+                    .register(|args: &[f64]| unary_eval_real_f64(args, csc_eval_f64))
+                    .register(|args: &[Complex<f64>]| unary_eval_complex_real_f64(args, |z| Complex::new(1.0, 0.0) / z.sin())),
                 )
             },
             "sinh";;
@@ -515,11 +517,11 @@ impl GeometricSymbols {
                     }
                 })
                 .with_evaluation_info(
-                    EvaluationInfo::new(0, |_tags, args, prec| {
-                        unary_eval_to_float("sinh", args, prec, sinh_numeric_eval)
+                    EvaluationInfo::new().register(|args: &[Complex<Float>]| {
+                        unary_eval_complex_float(args, sinh_numeric_eval)
                     })
-                    .register(|_tags| Box::new(|args: &[f64]| unary_eval_real_f64(args, f64::sinh)))
-                    .register(|_tags| Box::new(|args: &[Complex<f64>]| unary_eval_complex_real_f64(args, |z| z.sinh()))),
+                    .register(|args: &[f64]| unary_eval_real_f64(args, f64::sinh))
+                    .register(|args: &[Complex<f64>]| unary_eval_complex_real_f64(args, |z| z.sinh())),
                 )
             },
             "cosh";;
@@ -540,11 +542,11 @@ impl GeometricSymbols {
                     }
                 })
                 .with_evaluation_info(
-                    EvaluationInfo::new(0, |_tags, args, prec| {
-                        unary_eval_to_float("cosh", args, prec, cosh_numeric_eval)
+                    EvaluationInfo::new().register(|args: &[Complex<Float>]| {
+                        unary_eval_complex_float(args, cosh_numeric_eval)
                     })
-                    .register(|_tags| Box::new(|args: &[f64]| unary_eval_real_f64(args, f64::cosh)))
-                    .register(|_tags| Box::new(|args: &[Complex<f64>]| unary_eval_complex_real_f64(args, |z| z.cosh()))),
+                    .register(|args: &[f64]| unary_eval_real_f64(args, f64::cosh))
+                    .register(|args: &[Complex<f64>]| unary_eval_complex_real_f64(args, |z| z.cosh())),
                 )
             },
             "tanh";;
@@ -565,11 +567,11 @@ impl GeometricSymbols {
                     }
                 })
                 .with_evaluation_info(
-                    EvaluationInfo::new(0, |_tags, args, prec| {
-                        unary_eval_to_float("tanh", args, prec, tanh_numeric_eval)
+                    EvaluationInfo::new().register(|args: &[Complex<Float>]| {
+                        unary_eval_complex_float(args, tanh_numeric_eval)
                     })
-                    .register(|_tags| Box::new(|args: &[f64]| unary_eval_real_f64(args, f64::tanh)))
-                    .register(|_tags| Box::new(|args: &[Complex<f64>]| unary_eval_complex_real_f64(args, |z| z.tanh()))),
+                    .register(|args: &[f64]| unary_eval_real_f64(args, f64::tanh))
+                    .register(|args: &[Complex<f64>]| unary_eval_complex_real_f64(args, |z| z.tanh())),
                 )
             },
             "coth";;
@@ -590,11 +592,11 @@ impl GeometricSymbols {
                     }
                 })
                 .with_evaluation_info(
-                    EvaluationInfo::new(0, |_tags, args, prec| {
-                        unary_eval_to_float("coth", args, prec, coth_numeric_eval)
+                    EvaluationInfo::new().register(|args: &[Complex<Float>]| {
+                        unary_eval_complex_float(args, coth_numeric_eval)
                     })
-                    .register(|_tags| Box::new(|args: &[f64]| unary_eval_real_f64(args, coth_eval_f64)))
-                    .register(|_tags| Box::new(|args: &[Complex<f64>]| unary_eval_complex_real_f64(args, |z| Complex::new(1.0, 0.0) / z.tanh()))),
+                    .register(|args: &[f64]| unary_eval_real_f64(args, coth_eval_f64))
+                    .register(|args: &[Complex<f64>]| unary_eval_complex_real_f64(args, |z| Complex::new(1.0, 0.0) / z.tanh())),
                 )
             },
             "sech";;
@@ -616,11 +618,11 @@ impl GeometricSymbols {
                     }
                 })
                 .with_evaluation_info(
-                    EvaluationInfo::new(0, |_tags, args, prec| {
-                        unary_eval_to_float("sech", args, prec, sech_numeric_eval)
+                    EvaluationInfo::new().register(|args: &[Complex<Float>]| {
+                        unary_eval_complex_float(args, sech_numeric_eval)
                     })
-                    .register(|_tags| Box::new(|args: &[f64]| unary_eval_real_f64(args, sech_eval_f64)))
-                    .register(|_tags| Box::new(|args: &[Complex<f64>]| unary_eval_complex_real_f64(args, |z| Complex::new(1.0, 0.0) / z.cosh()))),
+                    .register(|args: &[f64]| unary_eval_real_f64(args, sech_eval_f64))
+                    .register(|args: &[Complex<f64>]| unary_eval_complex_real_f64(args, |z| Complex::new(1.0, 0.0) / z.cosh())),
                 )
             },
             "csch";;
@@ -642,11 +644,11 @@ impl GeometricSymbols {
                     }
                 })
                 .with_evaluation_info(
-                    EvaluationInfo::new(0, |_tags, args, prec| {
-                        unary_eval_to_float("csch", args, prec, csch_numeric_eval)
+                    EvaluationInfo::new().register(|args: &[Complex<Float>]| {
+                        unary_eval_complex_float(args, csch_numeric_eval)
                     })
-                    .register(|_tags| Box::new(|args: &[f64]| unary_eval_real_f64(args, csch_eval_f64)))
-                    .register(|_tags| Box::new(|args: &[Complex<f64>]| unary_eval_complex_real_f64(args, |z| Complex::new(1.0, 0.0) / z.sinh()))),
+                    .register(|args: &[f64]| unary_eval_real_f64(args, csch_eval_f64))
+                    .register(|args: &[Complex<f64>]| unary_eval_complex_real_f64(args, |z| Complex::new(1.0, 0.0) / z.sinh())),
                 )
             }
         );
@@ -682,13 +684,14 @@ impl GeometricSymbols {
                         / function!(State::SQRT, Atom::num(1) - arg.clone().pow(Atom::num(2)));
                 }
             },
-            eval = EvaluationInfo::new(0, |_tags, args, prec| {
-                unary_eval_to_float("asin", args, prec, asin_numeric_eval)
-            })
-            .register(|_tags| Box::new(|args: &[f64]| unary_eval_real_f64(args, f64::asin)))
-            .register(|_tags| {
-                Box::new(|args: &[Complex<f64>]| unary_eval_complex_real_f64(args, |z| z.asin()))
-            })
+            eval = EvaluationInfo::new()
+                .register(|args: &[Complex<Float>]| {
+                    unary_eval_complex_float(args, asin_numeric_eval)
+                })
+                .register(|args: &[f64]| unary_eval_real_f64(args, f64::asin))
+                .register(|args: &[Complex<f64>]| {
+                    unary_eval_complex_real_f64(args, |z| z.asin())
+                })
         );
 
         let acos = symbol!(
@@ -711,13 +714,14 @@ impl GeometricSymbols {
                         / function!(State::SQRT, Atom::num(1) - arg.clone().pow(Atom::num(2)));
                 }
             },
-            eval = EvaluationInfo::new(0, |_tags, args, prec| {
-                unary_eval_to_float("acos", args, prec, acos_numeric_eval)
-            })
-            .register(|_tags| Box::new(|args: &[f64]| unary_eval_real_f64(args, f64::acos)))
-            .register(|_tags| {
-                Box::new(|args: &[Complex<f64>]| unary_eval_complex_real_f64(args, |z| z.acos()))
-            })
+            eval = EvaluationInfo::new()
+                .register(|args: &[Complex<Float>]| {
+                    unary_eval_complex_float(args, acos_numeric_eval)
+                })
+                .register(|args: &[f64]| unary_eval_real_f64(args, f64::acos))
+                .register(|args: &[Complex<f64>]| {
+                    unary_eval_complex_real_f64(args, |z| z.acos())
+                })
         );
 
         let atan = symbol!(
@@ -739,15 +743,14 @@ impl GeometricSymbols {
                     **out = Atom::num(1) / (Atom::num(1) + arg.pow(Atom::num(2)));
                 }
             },
-            eval = EvaluationInfo::new(0, |_tags, args, prec| {
-                unary_eval_to_float("atan", args, prec, atan_numeric_eval)
-            })
-            .register(|_tags| Box::new(|args: &[f64]| unary_eval_real_f64(args, f64::atan)))
-            .register(|_tags| {
-                Box::new(|args: &[Complex<f64>]| {
+            eval = EvaluationInfo::new()
+                .register(|args: &[Complex<Float>]| {
+                    unary_eval_complex_float(args, atan_numeric_eval)
+                })
+                .register(|args: &[f64]| unary_eval_real_f64(args, f64::atan))
+                .register(|args: &[Complex<f64>]| {
                     unary_eval_complex_real_f64(args, atan_eval_complex_f64)
                 })
-            })
         );
 
         let acot = symbol!(
@@ -765,17 +768,16 @@ impl GeometricSymbols {
                     **out = -Atom::num(1) / (Atom::num(1) + arg.pow(Atom::num(2)));
                 }
             },
-            eval = EvaluationInfo::new(0, |_tags, args, prec| {
-                unary_eval_to_float("acot", args, prec, acot_numeric_eval)
-            })
-            .register(|_tags| Box::new(|args: &[f64]| unary_eval_real_f64(args, acot_eval_f64)))
-            .register(|_tags| {
-                Box::new(|args: &[Complex<f64>]| {
+            eval = EvaluationInfo::new()
+                .register(|args: &[Complex<Float>]| {
+                    unary_eval_complex_float(args, acot_numeric_eval)
+                })
+                .register(|args: &[f64]| unary_eval_real_f64(args, acot_eval_f64))
+                .register(|args: &[Complex<f64>]| {
                     unary_eval_complex_real_f64(args, |z| {
                         atan_eval_complex_f64(Complex::new(1.0, 0.0) / z)
                     })
                 })
-            })
         );
 
         let asec = symbol!(
@@ -799,15 +801,14 @@ impl GeometricSymbols {
                             * function!(State::SQRT, Atom::num(1) - inv.pow(Atom::num(2))));
                 }
             },
-            eval = EvaluationInfo::new(0, |_tags, args, prec| {
-                unary_eval_to_float("asec", args, prec, asec_numeric_eval)
-            })
-            .register(|_tags| Box::new(|args: &[f64]| unary_eval_real_f64(args, asec_eval_f64)))
-            .register(|_tags| {
-                Box::new(|args: &[Complex<f64>]| {
+            eval = EvaluationInfo::new()
+                .register(|args: &[Complex<Float>]| {
+                    unary_eval_complex_float(args, asec_numeric_eval)
+                })
+                .register(|args: &[f64]| unary_eval_real_f64(args, asec_eval_f64))
+                .register(|args: &[Complex<f64>]| {
                     unary_eval_complex_real_f64(args, |z| (Complex::new(1.0, 0.0) / z).acos())
                 })
-            })
         );
 
         let acsc = symbol!(
@@ -827,15 +828,14 @@ impl GeometricSymbols {
                             * function!(State::SQRT, Atom::num(1) - inv.pow(Atom::num(2))));
                 }
             },
-            eval = EvaluationInfo::new(0, |_tags, args, prec| {
-                unary_eval_to_float("acsc", args, prec, acsc_numeric_eval)
-            })
-            .register(|_tags| Box::new(|args: &[f64]| unary_eval_real_f64(args, acsc_eval_f64)))
-            .register(|_tags| {
-                Box::new(|args: &[Complex<f64>]| {
+            eval = EvaluationInfo::new()
+                .register(|args: &[Complex<Float>]| {
+                    unary_eval_complex_float(args, acsc_numeric_eval)
+                })
+                .register(|args: &[f64]| unary_eval_real_f64(args, acsc_eval_f64))
+                .register(|args: &[Complex<f64>]| {
                     unary_eval_complex_real_f64(args, |z| (Complex::new(1.0, 0.0) / z).asin())
                 })
-            })
         );
 
         let asinh = symbol!(
@@ -858,13 +858,14 @@ impl GeometricSymbols {
                         Atom::num(1) / function!(State::SQRT, Atom::num(1) + arg.pow(Atom::num(2)));
                 }
             },
-            eval = EvaluationInfo::new(0, |_tags, args, prec| {
-                unary_eval_to_float("asinh", args, prec, asinh_numeric_eval)
-            })
-            .register(|_tags| Box::new(|args: &[f64]| unary_eval_real_f64(args, f64::asinh)))
-            .register(|_tags| {
-                Box::new(|args: &[Complex<f64>]| unary_eval_complex_real_f64(args, |z| z.asinh()))
-            })
+            eval = EvaluationInfo::new()
+                .register(|args: &[Complex<Float>]| {
+                    unary_eval_complex_float(args, asinh_numeric_eval)
+                })
+                .register(|args: &[f64]| unary_eval_real_f64(args, f64::asinh))
+                .register(|args: &[Complex<f64>]| {
+                    unary_eval_complex_real_f64(args, |z| z.asinh())
+                })
         );
 
         let acosh = symbol!(
@@ -888,13 +889,14 @@ impl GeometricSymbols {
                             * function!(State::SQRT, arg + Atom::num(1)));
                 }
             },
-            eval = EvaluationInfo::new(0, |_tags, args, prec| {
-                unary_eval_to_float("acosh", args, prec, acosh_numeric_eval)
-            })
-            .register(|_tags| Box::new(|args: &[f64]| unary_eval_real_f64(args, f64::acosh)))
-            .register(|_tags| {
-                Box::new(|args: &[Complex<f64>]| unary_eval_complex_real_f64(args, |z| z.acosh()))
-            })
+            eval = EvaluationInfo::new()
+                .register(|args: &[Complex<Float>]| {
+                    unary_eval_complex_float(args, acosh_numeric_eval)
+                })
+                .register(|args: &[f64]| unary_eval_real_f64(args, f64::acosh))
+                .register(|args: &[Complex<f64>]| {
+                    unary_eval_complex_real_f64(args, |z| z.acosh())
+                })
         );
 
         let atanh = symbol!(
@@ -916,13 +918,14 @@ impl GeometricSymbols {
                     **out = Atom::num(1) / (Atom::num(1) - arg.pow(Atom::num(2)));
                 }
             },
-            eval = EvaluationInfo::new(0, |_tags, args, prec| {
-                unary_eval_to_float("atanh", args, prec, atanh_numeric_eval)
-            })
-            .register(|_tags| Box::new(|args: &[f64]| unary_eval_real_f64(args, f64::atanh)))
-            .register(|_tags| {
-                Box::new(|args: &[Complex<f64>]| unary_eval_complex_real_f64(args, |z| z.atanh()))
-            })
+            eval = EvaluationInfo::new()
+                .register(|args: &[Complex<Float>]| {
+                    unary_eval_complex_float(args, atanh_numeric_eval)
+                })
+                .register(|args: &[f64]| unary_eval_real_f64(args, f64::atanh))
+                .register(|args: &[Complex<f64>]| {
+                    unary_eval_complex_real_f64(args, |z| z.atanh())
+                })
         );
 
         let acoth = symbol!(
@@ -940,17 +943,14 @@ impl GeometricSymbols {
                     **out = Atom::num(1) / (Atom::num(1) - arg.pow(Atom::num(2)));
                 }
             },
-            eval = EvaluationInfo::new(0, |_tags, args, prec| {
-                unary_eval_to_float("acoth", args, prec, acoth_numeric_eval)
-            })
-            .register(|_tags| {
-                Box::new(|args: &[f64]| unary_eval_real_f64(args, acoth_eval_f64))
-            })
-            .register(|_tags| {
-                Box::new(|args: &[Complex<f64>]| {
+            eval = EvaluationInfo::new()
+                .register(|args: &[Complex<Float>]| {
+                    unary_eval_complex_float(args, acoth_numeric_eval)
+                })
+                .register(|args: &[f64]| unary_eval_real_f64(args, acoth_eval_f64))
+                .register(|args: &[Complex<f64>]| {
                     unary_eval_complex_real_f64(args, |z| (Complex::new(1.0, 0.0) / z).atanh())
                 })
-            })
         );
 
         let asech = symbol!(
@@ -976,17 +976,14 @@ impl GeometricSymbols {
                             * function!(State::SQRT, inv + Atom::num(1)));
                 }
             },
-            eval = EvaluationInfo::new(0, |_tags, args, prec| {
-                unary_eval_to_float("asech", args, prec, asech_numeric_eval)
-            })
-            .register(|_tags| {
-                Box::new(|args: &[f64]| unary_eval_real_f64(args, asech_eval_f64))
-            })
-            .register(|_tags| {
-                Box::new(|args: &[Complex<f64>]| {
+            eval = EvaluationInfo::new()
+                .register(|args: &[Complex<Float>]| {
+                    unary_eval_complex_float(args, asech_numeric_eval)
+                })
+                .register(|args: &[f64]| unary_eval_real_f64(args, asech_eval_f64))
+                .register(|args: &[Complex<f64>]| {
                     unary_eval_complex_real_f64(args, |z| (Complex::new(1.0, 0.0) / z).acosh())
                 })
-            })
         );
 
         let acsch = symbol!(
@@ -1007,17 +1004,14 @@ impl GeometricSymbols {
                             * function!(State::SQRT, Atom::num(1) + inv.pow(Atom::num(2))));
                 }
             },
-            eval = EvaluationInfo::new(0, |_tags, args, prec| {
-                unary_eval_to_float("acsch", args, prec, acsch_numeric_eval)
-            })
-            .register(|_tags| {
-                Box::new(|args: &[f64]| unary_eval_real_f64(args, acsch_eval_f64))
-            })
-            .register(|_tags| {
-                Box::new(|args: &[Complex<f64>]| {
+            eval = EvaluationInfo::new()
+                .register(|args: &[Complex<Float>]| {
+                    unary_eval_complex_float(args, acsch_numeric_eval)
+                })
+                .register(|args: &[f64]| unary_eval_real_f64(args, acsch_eval_f64))
+                .register(|args: &[Complex<f64>]| {
                     unary_eval_complex_real_f64(args, |z| (Complex::new(1.0, 0.0) / z).asinh())
                 })
-            })
         );
 
         Self {
@@ -1077,21 +1071,31 @@ impl BesselSymbols {
                         / Atom::num(2);
                 }
             },
-            eval = EvaluationInfo::new(1, |tags, args, prec| {
-                tagged_unary_eval_to_float("bessel_j", tags, args, prec, bessel_j_numeric_eval)
-            })
-            .register(|tags| {
-                let order = complex_float_tag("bessel_j", tags, 53).ok();
-                Box::new(move |args: &[f64]| {
-                    tagged_unary_eval_real_f64(order.clone(), args, bessel_j_numeric_eval)
+            eval = EvaluationInfo::new()
+                .with_tags(1)
+                .register_tagged(|tags| {
+                    let tags = tags.iter().map(|x| x.to_owned()).collect::<Vec<_>>();
+                    Box::new(move |args: &[Complex<Float>]| {
+                        tagged_unary_eval_complex_float(
+                            "bessel_j",
+                            &tags,
+                            args,
+                            bessel_j_numeric_eval,
+                        )
+                    })
                 })
-            })
-            .register(|tags| {
-                let order = complex_float_tag("bessel_j", tags, 53).ok();
-                Box::new(move |args: &[Complex<f64>]| {
-                    tagged_unary_eval_complex_f64(order.clone(), args, bessel_j_numeric_eval)
+                .register_tagged(|tags| {
+                    let order = complex_float_tag("bessel_j", tags, 53).ok();
+                    Box::new(move |args: &[f64]| {
+                        tagged_unary_eval_real_f64(order.clone(), args, bessel_j_numeric_eval)
+                    })
                 })
-            })
+                .register_tagged(|tags| {
+                    let order = complex_float_tag("bessel_j", tags, 53).ok();
+                    Box::new(move |args: &[Complex<f64>]| {
+                        tagged_unary_eval_complex_f64(order.clone(), args, bessel_j_numeric_eval)
+                    })
+                })
         );
 
         let bessel_y = symbol!(
@@ -1116,21 +1120,31 @@ impl BesselSymbols {
                         / Atom::num(2);
                 }
             },
-            eval = EvaluationInfo::new(1, |tags, args, prec| {
-                tagged_unary_eval_to_float("bessel_y", tags, args, prec, bessel_y_numeric_eval)
-            })
-            .register(|tags| {
-                let order = complex_float_tag("bessel_y", tags, 53).ok();
-                Box::new(move |args: &[f64]| {
-                    tagged_unary_eval_real_f64(order.clone(), args, bessel_y_numeric_eval)
+            eval = EvaluationInfo::new()
+                .with_tags(1)
+                .register_tagged(|tags| {
+                    let tags = tags.iter().map(|x| x.to_owned()).collect::<Vec<_>>();
+                    Box::new(move |args: &[Complex<Float>]| {
+                        tagged_unary_eval_complex_float(
+                            "bessel_y",
+                            &tags,
+                            args,
+                            bessel_y_numeric_eval,
+                        )
+                    })
                 })
-            })
-            .register(|tags| {
-                let order = complex_float_tag("bessel_y", tags, 53).ok();
-                Box::new(move |args: &[Complex<f64>]| {
-                    tagged_unary_eval_complex_f64(order.clone(), args, bessel_y_numeric_eval)
+                .register_tagged(|tags| {
+                    let order = complex_float_tag("bessel_y", tags, 53).ok();
+                    Box::new(move |args: &[f64]| {
+                        tagged_unary_eval_real_f64(order.clone(), args, bessel_y_numeric_eval)
+                    })
                 })
-            })
+                .register_tagged(|tags| {
+                    let order = complex_float_tag("bessel_y", tags, 53).ok();
+                    Box::new(move |args: &[Complex<f64>]| {
+                        tagged_unary_eval_complex_f64(order.clone(), args, bessel_y_numeric_eval)
+                    })
+                })
         );
 
         let bessel_i = symbol!(
@@ -1162,21 +1176,31 @@ impl BesselSymbols {
                         / Atom::num(2);
                 }
             },
-            eval = EvaluationInfo::new(1, |tags, args, prec| {
-                tagged_unary_eval_to_float("bessel_i", tags, args, prec, bessel_i_numeric_eval)
-            })
-            .register(|tags| {
-                let order = complex_float_tag("bessel_i", tags, 53).ok();
-                Box::new(move |args: &[f64]| {
-                    tagged_unary_eval_real_f64(order.clone(), args, bessel_i_numeric_eval)
+            eval = EvaluationInfo::new()
+                .with_tags(1)
+                .register_tagged(|tags| {
+                    let tags = tags.iter().map(|x| x.to_owned()).collect::<Vec<_>>();
+                    Box::new(move |args: &[Complex<Float>]| {
+                        tagged_unary_eval_complex_float(
+                            "bessel_i",
+                            &tags,
+                            args,
+                            bessel_i_numeric_eval,
+                        )
+                    })
                 })
-            })
-            .register(|tags| {
-                let order = complex_float_tag("bessel_i", tags, 53).ok();
-                Box::new(move |args: &[Complex<f64>]| {
-                    tagged_unary_eval_complex_f64(order.clone(), args, bessel_i_numeric_eval)
+                .register_tagged(|tags| {
+                    let order = complex_float_tag("bessel_i", tags, 53).ok();
+                    Box::new(move |args: &[f64]| {
+                        tagged_unary_eval_real_f64(order.clone(), args, bessel_i_numeric_eval)
+                    })
                 })
-            })
+                .register_tagged(|tags| {
+                    let order = complex_float_tag("bessel_i", tags, 53).ok();
+                    Box::new(move |args: &[Complex<f64>]| {
+                        tagged_unary_eval_complex_f64(order.clone(), args, bessel_i_numeric_eval)
+                    })
+                })
         );
 
         let bessel_k = symbol!(
@@ -1201,21 +1225,31 @@ impl BesselSymbols {
                         / Atom::num(2);
                 }
             },
-            eval = EvaluationInfo::new(1, |tags, args, prec| {
-                tagged_unary_eval_to_float("bessel_k", tags, args, prec, bessel_k_numeric_eval)
-            })
-            .register(|tags| {
-                let order = complex_float_tag("bessel_k", tags, 53).ok();
-                Box::new(move |args: &[f64]| {
-                    tagged_unary_eval_real_f64(order.clone(), args, bessel_k_numeric_eval)
+            eval = EvaluationInfo::new()
+                .with_tags(1)
+                .register_tagged(|tags| {
+                    let tags = tags.iter().map(|x| x.to_owned()).collect::<Vec<_>>();
+                    Box::new(move |args: &[Complex<Float>]| {
+                        tagged_unary_eval_complex_float(
+                            "bessel_k",
+                            &tags,
+                            args,
+                            bessel_k_numeric_eval,
+                        )
+                    })
                 })
-            })
-            .register(|tags| {
-                let order = complex_float_tag("bessel_k", tags, 53).ok();
-                Box::new(move |args: &[Complex<f64>]| {
-                    tagged_unary_eval_complex_f64(order.clone(), args, bessel_k_numeric_eval)
+                .register_tagged(|tags| {
+                    let order = complex_float_tag("bessel_k", tags, 53).ok();
+                    Box::new(move |args: &[f64]| {
+                        tagged_unary_eval_real_f64(order.clone(), args, bessel_k_numeric_eval)
+                    })
                 })
-            })
+                .register_tagged(|tags| {
+                    let order = complex_float_tag("bessel_k", tags, 53).ok();
+                    Box::new(move |args: &[Complex<f64>]| {
+                        tagged_unary_eval_complex_f64(order.clone(), args, bessel_k_numeric_eval)
+                    })
+                })
         );
 
         Self {
@@ -1454,19 +1488,21 @@ pub fn bessel_k() -> Symbol {
     BESSELS.bessel_k
 }
 
-fn unary_eval_to_float(
-    name: &str,
-    args: &[Complex<Float>],
-    prec: u32,
-    evaluator: fn(&Complex<Float>, u32) -> Complex<Float>,
-) -> Result<Complex<Float>, String> {
+fn unary_eval_complex_float<F>(args: &[Complex<Float>], evaluator: F) -> Complex<Float>
+where
+    F: FnOnce(&Complex<Float>, u32) -> Complex<Float>,
+{
+    let prec = args
+        .first()
+        .map(|x| x.re.prec().max(x.im.prec()))
+        .unwrap_or(53);
     let [arg] = args else {
-        return Err(format!(
-            "{name} expects exactly one argument, got {}",
-            args.len()
-        ));
+        return Complex::new(
+            Float::with_val(53, rug::float::Special::Nan),
+            Float::with_val(53, rug::float::Special::Nan),
+        );
     };
-    Ok(evaluator(arg, prec))
+    evaluator(arg, prec)
 }
 
 fn tagged_unary_eval_to_float(
@@ -1484,6 +1520,25 @@ fn tagged_unary_eval_to_float(
         ));
     };
     evaluator(&order, arg, prec).ok_or_else(|| format!("{name} numeric evaluation failed"))
+}
+
+fn tagged_unary_eval_complex_float(
+    name: &str,
+    tags: &[Atom],
+    args: &[Complex<Float>],
+    evaluator: fn(&Complex<Float>, &Complex<Float>, u32) -> Option<Complex<Float>>,
+) -> Complex<Float> {
+    let prec = args
+        .first()
+        .map(|x| x.re.prec().max(x.im.prec()))
+        .unwrap_or(53);
+    let tag_views = tags.iter().map(|x| x.as_view()).collect::<Vec<_>>();
+    tagged_unary_eval_to_float(name, &tag_views, args, prec, evaluator).unwrap_or_else(|_| {
+        Complex::new(
+            Float::with_val(53, rug::float::Special::Nan),
+            Float::with_val(53, rug::float::Special::Nan),
+        )
+    })
 }
 
 fn nonnegative_integer_tag(name: &str, tags: &[AtomView]) -> Result<u32, String> {
