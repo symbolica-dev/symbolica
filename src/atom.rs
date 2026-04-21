@@ -68,6 +68,7 @@ use std::{
     hash::Hash,
     io::{Read, Write},
     ops::DerefMut,
+    sync::OnceLock,
 };
 
 pub use self::core::AtomCore;
@@ -317,70 +318,221 @@ pub type DerivativeFunction = Box<dyn Fn(AtomView, usize, &mut Settable<Atom>) +
 pub type SeriesExpansionFunction =
     dyn for<'a> Fn(&'a [Series<AtomField>]) -> Option<(Atom, Atom)> + Send + Sync;
 
-/// A function that can be called to evaluate an expression with given argument values.
-/// The first `tag_count` arguments are the tags.
+/// Numeric evaluation implementations for a symbol.
+///
+/// It can hold implementations for multiple numeric domains, such as `f64`,
+/// `Complex<f64>`, `Float`, or `Complex<Float>` an will automatically try to losslessly cast
+/// values from other domains if an implementation is not provided.
+///
+/// Leading arguments can be flagged as tags. For example, `bessel_j(2, x)`
+/// has `2` as a tag.
+///
+/// Register tagless implementations with [`EvaluationInfo::register`], and register tagged implementations with
+/// [`EvaluationInfo::register_tagged`].
+///
+/// Constants that do not have numeric arguments should use [`EvaluationInfo::constant`]
+/// so the requested arbitrary precision can be passed explicitly.
+///
+/// # Examples
+///
+/// Register a tagless function:
+/// ```
+/// use symbolica::{atom::EvaluationInfo, symbol};
+///
+/// let _ = symbol!(
+///     "double",
+///     eval = EvaluationInfo::new().register(|args: &[f64]| 2.0 * args[0])
+/// );
+/// ```
+///
+/// Register a tagged function. Here the first symbolic argument is interpreted as a
+/// tag when creating the numeric callable:
+/// ```
+/// use symbolica::{atom::{AtomCore, AtomView, EvaluationInfo, EvalFn}, symbol};
+///
+/// let _ = symbol!(
+///     "scale",
+///     eval = EvaluationInfo::new().with_tags(1).register_tagged(
+///         |tags: &[AtomView]| -> EvalFn<f64> {
+///             if tags[0] == 1 {
+///                 Box::new(move |args: &[f64]| args[0]) // meters
+///             } else {
+///                 Box::new(move |args: &[f64]| args[0] * 1.093613) //yards
+///             }
+///         }
+///     )
+/// );
+/// ```
+///
+/// Register an arbitrary-precision constant:
+/// ```
+/// use symbolica::{atom::EvaluationInfo, domains::float::{Float, Real}, symbol};
+///
+/// let _ = symbol!(
+///     "e",
+///     eval = EvaluationInfo::constant(|_tags, prec| Ok(Float::new(prec).e().into()))
+/// );
+/// ```
 pub struct EvaluationInfo {
-    /// The number of tags that the evaluator expects. The tags are passed as the first arguments to the evaluation function.
+    /// The number of symbolic arguments that are interpreted as tags.
     tag_count: usize,
-    /// A function that can be called to evaluate the expression as a float, given the tags and the argument values as floats.
-    to_float: Box<
-        dyn Fn(&[AtomView], &[Complex<Float>], u32) -> Result<Complex<Float>, String> + Send + Sync,
-    >,
-    /// A map from the type of the evaluation result to a function that can be called to generate an evaluation function for that type, given the tags.
-    eval_gen: HashMap<TypeId, ErasedEvalGen>,
+    /// A precision-aware evaluator for constants, where no numeric arguments exist to carry precision.
+    constant_eval: Option<ErasedConstantEval>,
+    /// A cached double-precision value for the constant evaluation, if the symbol has no tags.
+    constant_eval_cache: OnceLock<Result<Complex<Float>, String>>,
+    /// A map from the evaluation result type to either a direct tagless implementation or a tagged generator.
+    eval_fns: HashMap<TypeId, ErasedEvalFn>,
 }
 
 pub type EvalFn<T> = Box<dyn ExternalFunction<T>>;
-type ErasedEvalGen = Box<dyn Fn(&[AtomView]) -> Box<dyn Any> + Send + Sync>;
+type ErasedConstantEval =
+    Box<dyn Fn(&[AtomView], u32) -> Result<Complex<Float>, String> + Send + Sync>;
+type ErasedTaggedEvalGen = Box<dyn Fn(&[AtomView]) -> Box<dyn Any> + Send + Sync>;
+
+enum ErasedEvalFn {
+    Direct(Box<dyn Any + Send + Sync>),
+    Tagged(ErasedTaggedEvalGen),
+}
 
 impl EvaluationInfo {
-    pub fn new(
-        tag_count: usize,
-        to_float: impl Fn(&[AtomView], &[Complex<Float>], u32) -> Result<Complex<Float>, String>
-        + Send
-        + Sync
-        + 'static,
-    ) -> Self {
+    /// Create a new tagless `EvaluationInfo` with no evaluators.
+    ///
+    /// This is the starting point for ordinary functions. Register direct tagless
+    /// implementations with [`EvaluationInfo::register`]. If the function has
+    /// leading symbolic tags, call [`EvaluationInfo::with_tags`] and then use
+    /// [`EvaluationInfo::register_tagged`].
+    ///
+    /// For constants, prefer [`EvaluationInfo::constant`] instead.
+    pub fn new() -> Self {
         Self {
-            tag_count,
-            to_float: Box::new(to_float),
-            eval_gen: HashMap::default(),
+            tag_count: 0,
+            constant_eval: None,
+            constant_eval_cache: OnceLock::new(),
+            eval_fns: HashMap::default(),
         }
     }
 
+    /// Create a new tagless `EvaluationInfo` with a precision-aware constant evaluator.
+    ///
+    /// The callback receives the symbolic tags, if any, and the requested binary
+    /// precision. For tagless constants, the double-precision value is cached after
+    /// the first request at precision 53.
+    ///
+    /// Use [`EvaluationInfo::with_tags`] after this constructor for tagged constants.
+    pub fn constant(
+        f: impl Fn(&[AtomView], u32) -> Result<Complex<Float>, String> + Send + Sync + 'static,
+    ) -> Self {
+        Self {
+            tag_count: 0,
+            constant_eval: Some(Box::new(f)),
+            constant_eval_cache: OnceLock::new(),
+            eval_fns: HashMap::default(),
+        }
+    }
+
+    /// Set the number of leading symbolic function arguments that are interpreted as tags.
+    ///
+    /// Tagged arguments are not passed to the numeric evaluator as numeric values.
+    /// Instead, they are passed once to a [`EvaluationInfo::register_tagged`] generator,
+    /// which returns the numeric callable for the remaining arguments.
+    ///
+    /// `EvaluationInfo::new()` defaults to zero tags.
+    pub fn with_tags(mut self, num_tags: usize) -> Self {
+        self.tag_count = num_tags;
+        if num_tags > 0 {
+            self.constant_eval_cache = OnceLock::new();
+        }
+        self
+    }
+
+    /// Return the number of leading symbolic arguments interpreted as tags.
     pub fn get_tag_count(&self) -> usize {
         self.tag_count
     }
 
-    pub fn register<T: 'static>(
-        mut self,
-        f: impl Fn(&[AtomView]) -> EvalFn<T> + Send + Sync + 'static,
-    ) -> Self {
-        self.eval_gen.insert(
+    /// Register a tagless numeric implementation for type `T`.
+    ///
+    /// The callable receives only numeric arguments and returns a value of the same
+    /// numeric domain. Use this for ordinary functions whose implementation does
+    /// not depend on symbolic tags.
+    ///
+    /// Multiple implementations for different numeric domains may be registered on
+    /// the same `EvaluationInfo`.
+    pub fn register<T: 'static>(mut self, f: impl ExternalFunction<T> + 'static) -> Self {
+        let f: EvalFn<T> = Box::new(f);
+        self.eval_fns.insert(
             TypeId::of::<T>(),
-            Box::new(move |tags| Box::new(f(tags)) as Box<dyn Any>),
+            ErasedEvalFn::Direct(Box::new(f) as Box<dyn Any + Send + Sync>),
         );
         self
     }
 
-    pub fn evaluate(
-        &self,
-        tags: &[AtomView],
-        args: &[Complex<Float>],
-        precision: u32,
-    ) -> Result<Complex<Float>, String> {
-        (self.to_float)(tags, args, precision)
+    /// Register a tagged numeric implementation generator for type `T`.
+    ///
+    /// The generator receives the symbolic tags and must return the numeric callable
+    /// for the non-tag arguments. Use this when the function has leading symbolic
+    /// arguments that specialize the evaluator, such as an integer order.
+    ///
+    /// Set the number of tags with [`EvaluationInfo::with_tags`].
+    pub fn register_tagged<T: 'static>(
+        mut self,
+        f: impl Fn(&[AtomView]) -> EvalFn<T> + Send + Sync + 'static,
+    ) -> Self {
+        self.eval_fns.insert(
+            TypeId::of::<T>(),
+            ErasedEvalFn::Tagged(Box::new(move |tags| Box::new(f(tags)) as Box<dyn Any>)),
+        );
+        self
     }
 
-    pub fn get_evaluator<T: 'static>(&self, tags: &[AtomView]) -> Option<EvalFn<T>> {
-        let erased = self.eval_gen.get(&TypeId::of::<T>())?;
-        let boxed = erased(tags);
+    /// Evaluate a precision-aware constant.
+    ///
+    /// This is used internally by numeric evaluation. It calls the evaluator installed
+    /// by [`EvaluationInfo::constant`], passing the symbolic tags and requested binary
+    /// precision.
+    pub fn evaluate_constant(
+        &self,
+        tags: &[AtomView],
+        precision: u32,
+    ) -> Result<Complex<Float>, String> {
+        if precision == 53 && self.tag_count == 0 {
+            if let Some(eval) = &self.constant_eval {
+                return self
+                    .constant_eval_cache
+                    .get_or_init(|| eval(&[], 53))
+                    .clone();
+            }
+        }
 
-        Some(
-            *boxed
-                .downcast::<EvalFn<T>>()
-                .expect("stored eval generator had the wrong concrete type"),
-        )
+        if let Some(eval) = &self.constant_eval {
+            return eval(tags, precision);
+        };
+
+        Err("No precision-aware constant evaluator registered".to_owned())
+    }
+
+    /// Resolve the numeric evaluator for type `T` and the given symbolic tags.
+    ///
+    /// For tagless registrations, the direct callable is returned. For tagged
+    /// registrations, this calls the registered generator with `tags` and returns
+    /// the generated callable.
+    pub fn get_evaluator<T: 'static>(&self, tags: &[AtomView]) -> Option<EvalFn<T>> {
+        match self.eval_fns.get(&TypeId::of::<T>())? {
+            ErasedEvalFn::Direct(boxed) => Some(
+                boxed
+                    .downcast_ref::<EvalFn<T>>()
+                    .expect("stored eval function had the wrong concrete type")
+                    .clone(),
+            ),
+            ErasedEvalFn::Tagged(erased) => {
+                let boxed = erased(tags);
+                Some(
+                    *boxed
+                        .downcast::<EvalFn<T>>()
+                        .expect("stored eval generator had the wrong concrete type"),
+                )
+            }
+        }
     }
 }
 
@@ -3027,6 +3179,27 @@ macro_rules! tag {
 /// ```
 /// If the arguments (which are of type [Series]) are not centered around a pole, you can also return `None`.
 /// See [SeriesExpansionFunction] for more details.
+///
+/// ### Evaluation
+/// You can attach numeric evaluation implementations using the `eval` flag:
+/// ```no_run
+/// use symbolica::{atom::EvaluationInfo, symbol};
+///
+/// let _ = symbol!(
+///     "double",
+///     eval = EvaluationInfo::new().register(|args: &[f64]| 2.0 * args[0])
+/// );
+/// ```
+/// Constants that need arbitrary-precision evaluation can use [EvaluationInfo::constant]:
+/// ```no_run
+/// use symbolica::{atom::EvaluationInfo, domains::float::{Float, Real}, symbol};
+///
+/// let _ = symbol!(
+///     "e",
+///     eval = EvaluationInfo::constant(|_tags, prec| Ok(Float::new(prec).e().into()))
+/// );
+/// ```
+/// See [EvaluationInfo] for registering implementations for other numeric types and tagged functions.
 ///
 /// ### User data
 ///
