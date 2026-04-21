@@ -26,8 +26,8 @@ use pyo3::{
     pyclass::CompareOp,
     pyfunction, pymethods,
     types::{
-        PyAnyMethods, PyBytes, PyBytesMethods, PyComplex, PyDict, PyInt, PyIterator, PyModule,
-        PyNone, PyTuple, PyTupleMethods, PyType, PyTypeMethods,
+        PyAnyMethods, PyBytes, PyBytesMethods, PyComplex, PyDict, PyDictMethods, PyInt, PyIterator,
+        PyModule, PyNone, PyTuple, PyTupleMethods, PyType, PyTypeMethods,
     },
     wrap_pyfunction,
 };
@@ -62,8 +62,8 @@ use pyo3::pymodule;
 use crate::{
     LicenseManager,
     atom::{
-        Atom, AtomCore, AtomType, AtomView, DefaultNamespace, Indeterminate, ListIterator, Symbol,
-        SymbolAttribute, UserData, UserDataKey,
+        Atom, AtomCore, AtomType, AtomView, DefaultNamespace, EvaluationInfo, Indeterminate,
+        ListIterator, Symbol, SymbolAttribute, UserData, UserDataKey,
     },
     coefficient::{Coefficient, CoefficientView, ConvertToRing},
     domains::{
@@ -418,8 +418,9 @@ pub fn get_namespace(py: Python) -> PyResult<&'static str> {
     let globals = unsafe { Bound::from_borrowed_ptr(py, ptr) };
     Ok(
         match globals.cast::<PyDict>()?.get_item("SYMBOLICA_NAMESPACE") {
-            Ok(val) => intern_string(&val.extract::<PyBackedStr>()?),
+            Ok(Some(val)) => intern_string(&val.extract::<PyBackedStr>()?),
             Err(_) => "python",
+            Ok(None) => "python",
         },
     )
 }
@@ -543,7 +544,7 @@ fn get_license_key(email: String) -> PyResult<()> {
         .map_err(exceptions::PyConnectionError::new_err)
 }
 
-#[pyfunction(name = "S", signature = (*names,is_symmetric=None,is_antisymmetric=None,is_cyclesymmetric=None,is_linear=None,is_scalar=None,is_real=None,is_integer=None,is_positive=None,tags=None,aliases=None,custom_normalization=None,custom_print=None,custom_derivative=None,series=None,data=None))]
+#[pyfunction(name = "S", signature = (*names,is_symmetric=None,is_antisymmetric=None,is_cyclesymmetric=None,is_linear=None,is_scalar=None,is_real=None,is_integer=None,is_positive=None,tags=None,aliases=None,custom_normalization=None,custom_print=None,custom_derivative=None,series=None,eval=None,data=None))]
 /// Shorthand notation for :func:`Expression.symbol`.
 fn symbol_shorthand(
     names: &Bound<'_, PyTuple>,
@@ -561,6 +562,7 @@ fn symbol_shorthand(
     custom_print: Option<Py<PyAny>>,
     custom_derivative: Option<Py<PyAny>>,
     series: Option<Py<PyAny>>,
+    eval: Option<Py<PyAny>>,
     data: Option<PythonUserData>,
     py: Python,
 ) -> PyResult<Py<PyAny>> {
@@ -582,8 +584,331 @@ fn symbol_shorthand(
         custom_print,
         custom_derivative,
         series,
+        eval,
         data,
     )
+}
+
+#[derive(Clone)]
+struct PythonEvalSpec {
+    tag_count: usize,
+    float: Option<Py<PyAny>>,
+    complex: Option<Py<PyAny>>,
+    decimal: Option<Py<PyAny>>,
+    decimal_complex: Option<Py<PyAny>>,
+    constant: Option<Py<PyAny>>,
+}
+
+impl PythonEvalSpec {
+    const ALLOWED_KEYS: &[&str] = &[
+        "tag_count",
+        "float",
+        "complex",
+        "decimal",
+        "decimal_complex",
+        "constant",
+    ];
+
+    fn from_py(py: Python, eval: Py<PyAny>) -> PyResult<Self> {
+        let eval_bound = eval.bind(py);
+
+        let dict = eval_bound
+            .cast::<PyDict>()
+            .map_err(|_| exceptions::PyTypeError::new_err("eval must be a dictionary"))?;
+        Self::validate_eval_dict_keys(dict)?;
+
+        let tag_count = match dict.get_item("tag_count") {
+            Ok(Some(t)) => t.extract::<usize>()?,
+            Ok(None) => 0,
+            Err(_) => 0,
+        };
+
+        let spec = Self {
+            tag_count,
+            float: Self::get_eval_callable(dict, "float")?,
+            complex: Self::get_eval_callable(dict, "complex")?,
+            decimal: Self::get_eval_callable(dict, "decimal")?,
+            decimal_complex: Self::get_eval_callable(dict, "decimal_complex")?,
+            constant: Self::get_eval_callable(dict, "constant")?,
+        };
+
+        if spec.constant.is_some()
+            && (spec.float.is_some()
+                || spec.complex.is_some()
+                || spec.decimal.is_some()
+                || spec.decimal_complex.is_some())
+        {
+            return Err(exceptions::PyValueError::new_err(
+                "eval['constant'] cannot be combined with other eval callbacks",
+            ));
+        }
+
+        Ok(spec)
+    }
+
+    fn validate_eval_dict_keys(dict: &Bound<'_, PyDict>) -> PyResult<()> {
+        for key in dict.keys() {
+            let key = key.extract::<String>().map_err(|_| {
+                exceptions::PyTypeError::new_err("eval dictionary keys must be strings")
+            })?;
+
+            if !Self::ALLOWED_KEYS.contains(&key.as_str()) {
+                return Err(exceptions::PyValueError::new_err(format!(
+                    "Unknown eval dictionary entry '{key}'. Allowed entries are: {}",
+                    Self::ALLOWED_KEYS.join(", ")
+                )));
+            }
+        }
+
+        Ok(())
+    }
+
+    fn into_evaluation_info(self) -> EvaluationInfo {
+        let tag_count = self.tag_count;
+        let mut info = if let Some(f) = self.constant {
+            EvaluationInfo::constant(move |tags, prec| {
+                if tags.len() != tag_count {
+                    return Err(format!(
+                        "Python eval expected {tag_count} tags, got {}",
+                        tags.len()
+                    ));
+                }
+
+                Python::attach(|py| {
+                    let f = Self::python_eval_callable(py, &f, tags, tag_count)?;
+                    let decimal_prec = Self::decimal_digits_from_binary_prec(prec);
+                    let args = Vec::<(PythonMultiPrecisionFloat, PythonMultiPrecisionFloat)>::new();
+                    let value = f.call1(py, (args.into_py_any(py)?, decimal_prec))?;
+                    Self::extract_python_constant(py, value)
+                })
+                .map_err(|e| e.to_string())
+            })
+            .with_tags(tag_count)
+        } else {
+            EvaluationInfo::new().with_tags(tag_count)
+        };
+
+        if let Some(f) = self.float {
+            if tag_count == 0 {
+                info = info.register(move |args: &[f64]| {
+                    Python::attach(|py| {
+                        f.call1(py, (args.to_vec().into_py_any(py)?,))?
+                            .extract::<f64>(py)
+                    })
+                    .expect("Python eval callback for f64 failed")
+                });
+            } else {
+                info = info.register_tagged(move |tags| {
+                    let f =
+                        Python::attach(|py| Self::python_eval_callable(py, &f, tags, tag_count))
+                            .expect("Python tagged eval callback for f64 failed");
+                    Box::new(move |args: &[f64]| {
+                        Python::attach(|py| {
+                            f.call1(py, (args.to_vec().into_py_any(py)?,))?
+                                .extract::<f64>(py)
+                        })
+                        .expect("Python eval callback for f64 failed")
+                    })
+                });
+            }
+        }
+
+        if let Some(f) = self.complex {
+            if tag_count == 0 {
+                info = info.register(move |args: &[Complex<f64>]| {
+                    Python::attach(|py| {
+                        let args = args
+                            .iter()
+                            .map(|x| PyComplex::from_doubles(py, x.re, x.im))
+                            .collect::<Vec<_>>();
+                        f.call1(py, (args.into_py_any(py)?,))?
+                            .extract::<Complex<f64>>(py)
+                    })
+                    .expect("Python eval callback for complex f64 failed")
+                });
+            } else {
+                info = info.register_tagged(move |tags| {
+                    let f =
+                        Python::attach(|py| Self::python_eval_callable(py, &f, tags, tag_count))
+                            .expect("Python tagged eval callback for complex f64 failed");
+                    Box::new(move |args: &[Complex<f64>]| {
+                        Python::attach(|py| {
+                            let args = args
+                                .iter()
+                                .map(|x| PyComplex::from_doubles(py, x.re, x.im))
+                                .collect::<Vec<_>>();
+                            f.call1(py, (args.into_py_any(py)?,))?
+                                .extract::<Complex<f64>>(py)
+                        })
+                        .expect("Python eval callback for complex f64 failed")
+                    })
+                });
+            }
+        }
+
+        if let Some(f) = self.decimal {
+            if tag_count == 0 {
+                info = info.register(move |args: &[Float]| {
+                    Python::attach(|py| {
+                        let args = args
+                            .iter()
+                            .cloned()
+                            .map(PythonMultiPrecisionFloat)
+                            .collect::<Vec<_>>();
+                        f.call1(py, (args.into_py_any(py)?,))?
+                            .extract::<PythonMultiPrecisionFloat>(py)
+                            .map(|x| x.0)
+                    })
+                    .expect("Python eval callback for decimal failed")
+                });
+            } else {
+                info = info.register_tagged(move |tags| {
+                    let f =
+                        Python::attach(|py| Self::python_eval_callable(py, &f, tags, tag_count))
+                            .expect("Python tagged eval callback for decimal failed");
+                    Box::new(move |args: &[Float]| {
+                        Python::attach(|py| {
+                            let args = args
+                                .iter()
+                                .cloned()
+                                .map(PythonMultiPrecisionFloat)
+                                .collect::<Vec<_>>();
+                            f.call1(py, (args.into_py_any(py)?,))?
+                                .extract::<PythonMultiPrecisionFloat>(py)
+                                .map(|x| x.0)
+                        })
+                        .expect("Python eval callback for decimal failed")
+                    })
+                });
+            }
+        }
+
+        if let Some(f) = self.decimal_complex {
+            if tag_count == 0 {
+                info = info.register(move |args: &[Complex<Float>]| {
+                    Python::attach(|py| {
+                        let args = args
+                            .iter()
+                            .map(|x| (x.re.clone().into(), x.im.clone().into()))
+                            .collect::<Vec<(PythonMultiPrecisionFloat, PythonMultiPrecisionFloat)>>(
+                            );
+                        let (re, im) = f.call1(py, (args.into_py_any(py)?,))?.extract::<(
+                            PythonMultiPrecisionFloat,
+                            PythonMultiPrecisionFloat,
+                        )>(
+                            py
+                        )?;
+                        Ok::<Complex<Float>, PyErr>(Complex::new(re.0, im.0))
+                    })
+                    .expect("Python eval callback for decimal complex failed")
+                });
+            } else {
+                info = info.register_tagged(move |tags| {
+                    let f =
+                        Python::attach(|py| Self::python_eval_callable(py, &f, tags, tag_count))
+                            .expect("Python tagged eval callback for decimal complex failed");
+                    Box::new(move |args: &[Complex<Float>]| {
+                        Python::attach(|py| {
+                            let args = args
+                                .iter()
+                                .map(|x| (x.re.clone().into(), x.im.clone().into()))
+                                .collect::<Vec<(
+                                    PythonMultiPrecisionFloat,
+                                    PythonMultiPrecisionFloat,
+                                )>>();
+                            let (re, im) = f.call1(py, (args.into_py_any(py)?,))?.extract::<(
+                                PythonMultiPrecisionFloat,
+                                PythonMultiPrecisionFloat,
+                            )>(
+                                py
+                            )?;
+                            Ok::<Complex<Float>, PyErr>(Complex::new(re.0, im.0))
+                        })
+                        .expect("Python eval callback for decimal complex failed")
+                    })
+                });
+            }
+        }
+
+        info
+    }
+
+    fn get_eval_callable(dict: &Bound<'_, PyDict>, key: &str) -> PyResult<Option<Py<PyAny>>> {
+        if let Ok(Some(value)) = dict.get_item(key) {
+            if !value.is_callable() {
+                return Err(exceptions::PyTypeError::new_err(format!(
+                    "eval['{key}'] must be callable"
+                )));
+            }
+
+            return Ok(Some(value.unbind()));
+        }
+
+        Ok(None)
+    }
+
+    fn decimal_digits_from_binary_prec(prec: u32) -> u32 {
+        ((prec as f64 / std::f64::consts::LOG2_10).ceil() as u32).max(1)
+    }
+
+    fn extract_python_constant(py: Python, value: Py<PyAny>) -> PyResult<Complex<Float>> {
+        if let Ok((re, im)) = value.extract::<(PythonExpression, PythonExpression)>(py)
+            && let Ok(re_f) = Float::try_from(&re.expr)
+            && let Ok(im_f) = Float::try_from(&im.expr)
+        {
+            Ok(Complex::new(re_f, im_f))
+        } else if let Ok(re) = value.extract::<PythonExpression>(py)
+            && let Ok(re_f) = Float::try_from(&re.expr)
+        {
+            Ok(re_f.into())
+        } else if let Ok((re, im)) =
+            value.extract::<(PythonMultiPrecisionFloat, PythonMultiPrecisionFloat)>(py)
+        {
+            Ok(Complex::new(re.0, im.0))
+        } else if let Ok(re) = value.extract::<PythonMultiPrecisionFloat>(py) {
+            Ok(re.0.into())
+        } else if let Ok(value) = value.extract::<Complex<f64>>(py) {
+            Ok(Complex::new(value.re.into(), value.im.into()))
+        } else {
+            Err(exceptions::PyTypeError::new_err(
+                "eval['constant'] must return a number or a (real, imag) tuple",
+            ))
+        }
+    }
+
+    fn atom_view_tags_to_python(py: Python, tags: &[AtomView]) -> PyResult<Py<PyAny>> {
+        tags.iter()
+            .map(|x| PythonExpression::from(x.to_owned()))
+            .collect::<Vec<_>>()
+            .into_py_any(py)
+    }
+
+    fn python_eval_callable(
+        py: Python,
+        f: &Py<PyAny>,
+        tags: &[AtomView],
+        tag_count: usize,
+    ) -> PyResult<Py<PyAny>> {
+        if tags.len() != tag_count {
+            return Err(exceptions::PyValueError::new_err(format!(
+                "Python eval expected {tag_count} tags, got {}",
+                tags.len()
+            )));
+        }
+
+        if tag_count == 0 {
+            Ok(f.clone_ref(py))
+        } else {
+            let tagged = f.call1(py, (Self::atom_view_tags_to_python(py, tags)?,))?;
+            if tagged.bind(py).is_callable() {
+                Ok(tagged)
+            } else {
+                Err(exceptions::PyTypeError::new_err(
+                    "tagged Python eval callback must return a callable",
+                ))
+            }
+        }
+    }
 }
 
 #[cfg(feature = "python_stubgen")]
@@ -817,6 +1142,12 @@ PyFunctionInfo {
                     type_info: || TypeInfo::unqualified("typing.Optional[typing.Callable[[typing.Sequence[Series]], typing.Optional[tuple[Expression, Expression]]]]"),
                 },
                 ParameterInfo {
+                    name: "eval",
+                    kind: ParameterKind::PositionalOrKeyword,
+                    default: ParameterDefault::Expr(NONE_ARG),
+                    type_info: || TypeInfo::unqualified("typing.Optional[dict[str, typing.Any]]"),
+                },
+                ParameterInfo {
                     name: "data",
                     kind: ParameterKind::PositionalOrKeyword,
                     default: ParameterDefault::Expr(NONE_ARG),
@@ -885,6 +1216,12 @@ Define a custom series function:
 >>>     return E("1/x"), args[0].to_expression()
 >>> tag = S("tag", series=expand_tag)
 
+Define a numeric evaluation function:
+>>> sq = S("sq", eval={"complex": lambda args: args[0] * args[0]})
+>>> x = S("x")
+>>> ev = sq(x).evaluator({}, {}, [x])
+>>> ev.evaluate_complex([2+0j])
+
 Parameters
 ----------
 name : str
@@ -921,7 +1258,28 @@ custom_derivative: Optional[Callable[[Expression, int], Expression]]:
     A function that is called when computing the derivative of a function in a given argument.
 series: Optional[Callable[[Sequence[Series]], Optional[tuple[Expression, Expression]]]]:
     A function that is called for custom series expansion. It receives the argument series and can return
-    the singular factor and regularized expression, or `None` to use the default series expansion."#,
+    the singular factor and regularized expression, or `None` to use the default series expansion.
+eval: dict[str, Any] | None:
+    Numeric evaluation function(s). The dictionary may contain:
+    - `tag_count: int`: the number of leading symbolic tag arguments.
+
+    For arbitrary precision evaluation of constant functions, register a function that
+    maps the tags and the requested decimal precision to a number:
+    - `constant`: (Sequence[Expression], int) -> Decimal | float | complex | tuple[Decimal, Decimal]]
+
+    Evaluators for non-constant functions when `tag_count = 0`:
+    - `float`: Sequence[float] -> float
+    - `complex`: Sequence[complex] -> complex
+    - `decimal`: Sequence[Decimal] -> Decimal
+    - `decimal_complex`: Sequence[tuple[Decimal, Decimal]] -> tuple[Decimal, Decimal]
+
+    Evaluators for non-constant functions when `tag_count > 0` are generators:
+    - `float`: Sequence[Expression] -> (Sequence[float] -> float)
+    - `complex`: Sequence[Expression] -> (Sequence[complex] -> complex)
+    - `decimal`: Sequence[Expression] -> (Sequence[Decimal] -> Decimal)
+    - `decimal_complex`: Sequence[Expression] -> (Sequence[tuple[Decimal, Decimal]] -> tuple[Decimal, Decimal])
+data: str | int | Expression | bytes | list | dict | None = None
+    Custom user data to associate with the symbol."#,
             module: Some("symbolica.core"),
             is_async: false,
             deprecated: None,
@@ -3806,7 +4164,7 @@ impl PythonExpression {
     /// >>> e = S('real_log', custom_normalization=Transformer().replace(E("x_(exp(x1_))"), E("x1_")))
     /// >>> E("real_log(exp(x)) + real_log(5)")
     #[gen_stub(skip)]
-    #[pyo3(signature = (*names,is_symmetric=None,is_antisymmetric=None,is_cyclesymmetric=None,is_linear=None,is_scalar=None,is_real=None,is_integer=None,is_positive=None,tags=None,aliases=None,custom_normalization=None, custom_print=None, custom_derivative=None, series=None, data=None))]
+    #[pyo3(signature = (*names,is_symmetric=None,is_antisymmetric=None,is_cyclesymmetric=None,is_linear=None,is_scalar=None,is_real=None,is_integer=None,is_positive=None,tags=None,aliases=None,custom_normalization=None, custom_print=None, custom_derivative=None, series=None, eval=None, data=None))]
     #[classmethod]
     pub fn symbol(
         _cls: &Bound<'_, PyType>,
@@ -3826,6 +4184,7 @@ impl PythonExpression {
         custom_print: Option<Py<PyAny>>,
         custom_derivative: Option<Py<PyAny>>,
         series: Option<Py<PyAny>>,
+        eval: Option<Py<PyAny>>,
         data: Option<PythonUserData>,
     ) -> PyResult<Py<PyAny>> {
         if names.is_empty() {
@@ -3855,6 +4214,7 @@ impl PythonExpression {
             && custom_print.is_none()
             && custom_derivative.is_none()
             && series.is_none()
+            && eval.is_none()
             && data.is_none()
         {
             if names.len() == 1 {
@@ -3997,6 +4357,12 @@ impl PythonExpression {
                                 .map(|(singular, regularized)| (singular.expr, regularized.expr))
                         })
                     }))
+            }
+
+            if let Some(eval) = eval {
+                symbol = symbol.with_evaluation_info(
+                    PythonEvalSpec::from_py(py, eval)?.into_evaluation_info(),
+                );
             }
 
             if let Some(t) = tags {
@@ -8207,6 +8573,12 @@ PyMethodsInfo {
                     type_info: || TypeInfo::unqualified("typing.Optional[typing.Callable[[typing.Sequence[Series]], typing.Optional[tuple[Expression, Expression]]]]"),
                 },
                 ParameterInfo {
+                    name: "eval",
+                    kind: ParameterKind::PositionalOrKeyword,
+                    default: ParameterDefault::Expr(NONE_ARG),
+                    type_info: || TypeInfo::unqualified("typing.Optional[typing.Callable[[typing.Sequence[complex]], complex] | dict[str, typing.Any]]"),
+                },
+                ParameterInfo {
                     name: "data",
                     kind: ParameterKind::PositionalOrKeyword,
                     default: ParameterDefault::Expr(NONE_ARG),
@@ -8276,6 +8648,12 @@ Define a custom series function:
 >>>     return E("1/x"), args[0].to_expression()
 >>> tag = S("tag", series=expand_tag)
 
+Define a numeric evaluation function:
+>>> sq = S("sq", eval={"complex": lambda args: args[0] * args[0]})
+>>> x = S("x")
+>>> ev = sq(x).evaluator({}, {}, [x])
+>>> ev.evaluate_complex([2+0j])
+
 Parameters
 ----------
 name : str
@@ -8312,7 +8690,28 @@ custom_derivative: Optional[Callable[[Expression, int], Expression]]:
     A function that is called when computing the derivative of a function in a given argument.
 series: Optional[Callable[[Sequence[Series]], Optional[tuple[Expression, Expression]]]]:
     A function that is called for custom series expansion. It receives the argument series and can return
-    the singular factor and regularized expression, or `None` to use the default series expansion."#,
+    the singular factor and regularized expression, or `None` to use the default series expansion.
+eval: dict[str, Any] | None:
+    Numeric evaluation function(s). The dictionary may contain:
+    - `tag_count: int`: the number of leading symbolic tag arguments.
+
+    For arbitrary precision evaluation of constant functions, register a function that
+    maps the tags and the requested decimal precision to a number:
+    - `constant`: (Sequence[Expression], int) -> Decimal | float | complex | tuple[Decimal, Decimal]]
+
+    Evaluators for non-constant functions when `tag_count = 0`:
+    - `float`: Sequence[float] -> float
+    - `complex`: Sequence[complex] -> complex
+    - `decimal`: Sequence[Decimal] -> Decimal
+    - `decimal_complex`: Sequence[tuple[Decimal, Decimal]] -> tuple[Decimal, Decimal]
+
+    Evaluators for non-constant functions when `tag_count > 0` are generators:
+    - `float`: Sequence[Expression] -> (Sequence[float] -> float)
+    - `complex`: Sequence[Expression] -> (Sequence[complex] -> complex)
+    - `decimal`: Sequence[Expression] -> (Sequence[Decimal] -> Decimal)
+    - `decimal_complex`: Sequence[Expression] -> (Sequence[tuple[Decimal, Decimal]] -> tuple[Decimal, Decimal])
+data: str | int | Expression | bytes | list | dict | None = None
+    Custom user data to associate with the symbol."#,
             is_async: false,
             deprecated: None,
             type_ignored: None,

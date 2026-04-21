@@ -151,6 +151,7 @@ def S(name: str,
           Expression, int], Expression] | None = None,
       series: Callable[[
           Sequence[Series]], tuple[Expression, Expression] | None] | None = None,
+      eval: dict[str, Any] | None = None,
       data: str | int | Expression | bytes | list[Any] | dict[str | int | Expression, Any] | None = None) -> Expression:
     """
     Create new symbols from `names`. Symbols can have attributes,
@@ -254,6 +255,25 @@ def S(name: str,
     series: Callable[[Sequence[Series]], tuple[Expression, Expression] | None] | None:
         A function that is called for custom series expansion. It receives the argument series and can return
         the singular factor and regularized expression, or `None` to use the default series expansion.
+    eval: dict[str, Any] | None:
+        Numeric evaluation function(s). The dictionary may contain:
+        - `tag_count: int`: the number of leading symbolic tag arguments.
+
+        For arbitrary precision evaluation of constant functions, register a function that
+        maps the tags and the requested decimal precision to a number:
+        - `constant`: (Sequence[Expression], int) -> Decimal | float | complex | tuple[Decimal, Decimal]]
+
+        Evaluators for non-constant functions when `tag_count = 0`:
+        - `float`: Sequence[float] -> float
+        - `complex`: Sequence[complex] -> complex
+        - `decimal`: Sequence[Decimal] -> Decimal
+        - `decimal_complex`: Sequence[tuple[Decimal, Decimal]] -> tuple[Decimal, Decimal]
+
+        Evaluators for non-constant functions when `tag_count > 0` are generators:
+        - `float`: Sequence[Expression] -> (Sequence[float] -> float)
+        - `complex`: Sequence[Expression] -> (Sequence[complex] -> complex)
+        - `decimal`: Sequence[Expression] -> (Sequence[Decimal] -> Decimal)
+        - `decimal_complex`: Sequence[Expression] -> (Sequence[tuple[Decimal, Decimal]] -> tuple[Decimal, Decimal])
     data: str | int | Expression | bytes | list | dict | None = None
         Custom user data to associate with the symbol.
     """
@@ -620,6 +640,7 @@ class Expression:
                    Expression, int], Expression] | None = None,
                series: Callable[[
                    Sequence[Series]], tuple[Expression, Expression] | None] | None = None,
+               eval: dict[str, Any] | None = None,
                data: str | int | Expression | bytes | list[Any] | dict[str | int | Expression, Any] | None = None) -> Expression:
         """
         Create new symbols from `names`. Symbols can have attributes,
@@ -723,6 +744,25 @@ class Expression:
         series: Callable[[Sequence[Series]], tuple[Expression, Expression] | None] | None:
             A function that is called for custom series expansion. It receives the argument series and can return
             the singular factor and regularized expression, or `None` to use the default series expansion.
+        eval: dict[str, Any] | None:
+            Numeric evaluation function(s). The dictionary may contain:
+            - `tag_count: int`: the number of leading symbolic tag arguments.
+
+            For arbitrary precision evaluation of constant functions, register a function that
+            maps the tags and the requested decimal precision to a number:
+            - `constant`: (Sequence[Expression], int) -> Decimal | float | complex | tuple[Decimal, Decimal]]
+
+            Evaluators for non-constant functions when `tag_count = 0`:
+            - `float`: Sequence[float] -> float
+            - `complex`: Sequence[complex] -> complex
+            - `decimal`: Sequence[Decimal] -> Decimal
+            - `decimal_complex`: Sequence[tuple[Decimal, Decimal]] -> tuple[Decimal, Decimal]
+
+            Evaluators for non-constant functions when `tag_count > 0` are generators:
+            - `float`: Sequence[Expression] -> (Sequence[float] -> float)
+            - `complex`: Sequence[Expression] -> (Sequence[complex] -> complex)
+            - `decimal`: Sequence[Expression] -> (Sequence[Decimal] -> Decimal)
+            - `decimal_complex`: Sequence[Expression] -> (Sequence[tuple[Decimal, Decimal]] -> tuple[Decimal, Decimal])
         data: str | int | Expression | bytes | list | dict | None = None
             Custom user data to associate with the symbol.
         """
