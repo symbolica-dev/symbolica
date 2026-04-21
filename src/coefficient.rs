@@ -2694,6 +2694,123 @@ impl<'a> TryFrom<AtomView<'a>> for Coefficient {
     }
 }
 
+impl TryFrom<Atom> for f64 {
+    type Error = &'static str;
+
+    fn try_from(value: Atom) -> Result<Self, Self::Error> {
+        value.as_view().try_into()
+    }
+}
+
+impl TryFrom<&Atom> for f64 {
+    type Error = &'static str;
+
+    fn try_from(value: &Atom) -> Result<Self, Self::Error> {
+        value.as_view().try_into()
+    }
+}
+
+impl<'a> TryFrom<AtomView<'a>> for f64 {
+    type Error = &'static str;
+
+    fn try_from(value: AtomView<'a>) -> Result<Self, Self::Error> {
+        if let AtomView::Num(n) = value {
+            match n.get_coeff_view() {
+                CoefficientView::Natural(n, d, ni, _di) => {
+                    if ni == 0 {
+                        return Ok(Rational::from_int_unchecked(n, d).to_f64());
+                    } else {
+                        return Err("Cannot convert complex number to float");
+                    }
+                }
+                CoefficientView::Large(r, i) => {
+                    if i.is_zero() {
+                        return Ok(r.to_rat().to_f64());
+                    } else {
+                        return Err("Cannot convert complex number to float");
+                    }
+                }
+                CoefficientView::Float(r, i) => {
+                    if i.is_zero() {
+                        return Ok(r.to_float().to_f64());
+                    } else {
+                        return Err("Cannot convert complex number to float");
+                    }
+                }
+                _ => {
+                    return Err("Cannot convert number to float");
+                }
+            }
+        }
+
+        let f = value.to_float(16);
+
+        if let AtomView::Num(n) = f.as_view() {
+            if let CoefficientView::Float(r, i) = n.get_coeff_view() {
+                if i.is_zero() {
+                    return Ok(r.to_float().to_f64());
+                } else {
+                    return Err("Cannot convert complex number to float");
+                }
+            }
+        }
+
+        Err("Not a number")
+    }
+}
+
+impl TryFrom<Atom> for Complex<f64> {
+    type Error = &'static str;
+
+    fn try_from(value: Atom) -> Result<Self, Self::Error> {
+        value.as_view().try_into()
+    }
+}
+
+impl TryFrom<&Atom> for Complex<f64> {
+    type Error = &'static str;
+
+    fn try_from(value: &Atom) -> Result<Self, Self::Error> {
+        value.as_view().try_into()
+    }
+}
+
+impl<'a> TryFrom<AtomView<'a>> for Complex<f64> {
+    type Error = &'static str;
+
+    fn try_from(value: AtomView<'a>) -> Result<Self, Self::Error> {
+        if let AtomView::Num(n) = value {
+            match n.get_coeff_view() {
+                CoefficientView::Natural(n, d, ni, di) => {
+                    return Ok(Complex::new(
+                        Rational::from_int_unchecked(n, d).to_f64(),
+                        Rational::from_int_unchecked(ni, di).to_f64(),
+                    ));
+                }
+                CoefficientView::Large(r, i) => {
+                    return Ok(Complex::new(r.to_rat().to_f64(), i.to_rat().to_f64()));
+                }
+                CoefficientView::Float(r, i) => {
+                    return Ok(Complex::new(r.to_float().to_f64(), i.to_float().to_f64()));
+                }
+                _ => {
+                    return Err("Cannot convert number to float");
+                }
+            }
+        }
+
+        let f = value.to_float(16);
+
+        if let AtomView::Num(n) = f.as_view() {
+            if let CoefficientView::Float(r, i) = n.get_coeff_view() {
+                return Ok(Complex::new(r.to_float().to_f64(), i.to_float().to_f64()));
+            }
+        }
+
+        Err("Not a number")
+    }
+}
+
 impl AtomView<'_> {
     /// Set the coefficient ring to the multivariate rational polynomial with `vars` variables.
     pub(crate) fn set_coefficient_ring(&self, vars: &Arc<Vec<PolyVariable>>) -> Atom {

@@ -780,6 +780,24 @@ class Expression:
             A list of tags to associate with the symbol.
         """
 
+    def __int__(self) -> int:
+        """
+        Convert the expression to an integer if possible.
+        Raises a `ValueError` if the expression cannot be converted to an integer.
+        """
+
+    def __float__(self) -> float:
+        """
+        Convert the expression to a float if possible.
+        Raises a `ValueError` if the expression cannot be converted to a float.
+        """
+
+    def __complex__(self) -> complex:
+        """
+        Convert the expression to a complex number if possible.
+        Raises a `ValueError` if the expression cannot be converted to a complex number.
+        """
+
     @overload
     def __call__(self, *args: Expression | int | float | complex | Decimal) -> Expression:
         """
@@ -898,17 +916,6 @@ class Expression:
         Convert the expression into a canonical string that
         is independent on the order of the variables and other
         implementation details.
-        """
-
-    def to_int(self) -> int:
-        """
-        Convert the expression to an integer if possible.
-        Raises a `ValueError` if the expression is not an integer.
-
-        Examples
-        --------
-        >>> e = E('7')
-        >>> n = e.to_int()
         """
 
     @classmethod

@@ -4557,19 +4557,6 @@ impl PythonExpression {
         ))
     }
 
-    /// Convert the expression into an integer if possible.
-    /// Raises a `ValueError` if the expression cannot be converted to an integer.
-    ///
-    /// Examples
-    /// --------
-    /// >>> e = E('7').to_int()
-    pub fn to_int(&self) -> PyResult<Integer> {
-        self.expr
-            .clone()
-            .try_into()
-            .map_err(|e| exceptions::PyValueError::new_err(format!("Cannot convert to int: {e}")))
-    }
-
     /// Hash the expression.
     pub fn __hash__(&self) -> u64 {
         let mut hasher = ahash::AHasher::default();
@@ -4930,6 +4917,39 @@ impl PythonExpression {
             AtomView::Fun(a) => a.get_nargs(),
             _ => 1,
         }
+    }
+
+    fn __int__(&self) -> PyResult<Integer> {
+        if let Ok(f) = Integer::try_from(&self.expr) {
+            return Ok(f);
+        }
+
+        Err(exceptions::PyTypeError::new_err(format!(
+            "Cannot convert {} to float",
+            self.expr
+        )))
+    }
+
+    fn __float__(&self) -> PyResult<f64> {
+        if let Ok(f) = f64::try_from(&self.expr) {
+            return Ok(f);
+        }
+
+        Err(exceptions::PyTypeError::new_err(format!(
+            "Cannot convert {} to float",
+            self.expr
+        )))
+    }
+
+    fn __complex__<'py>(&self, py: Python<'py>) -> PyResult<Bound<'py, PyComplex>> {
+        if let Ok(c) = Complex::<f64>::try_from(&self.expr) {
+            return Ok(PyComplex::from_doubles(py, c.re, c.im));
+        }
+
+        Err(exceptions::PyTypeError::new_err(format!(
+            "Cannot convert {} to complex",
+            self.expr
+        )))
     }
 
     /// Create a Symbolica expression or transformer by calling the function with appropriate arguments.
