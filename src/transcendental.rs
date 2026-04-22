@@ -21,6 +21,7 @@ static SPECIALS: LazyLock<SpecialSymbols> = LazyLock::new(|| SpecialSymbols {
     gamma: get_symbol!("gamma").expect("gamma not defined"),
     polygamma: get_symbol!("polygamma").expect("polygamma not defined"),
     polylog: get_symbol!("polylog").expect("polylog not defined"),
+    zeta: get_symbol!("zeta").expect("zeta not defined"),
 });
 static GEOMETRICS: LazyLock<GeometricSymbols> = LazyLock::new(|| GeometricSymbols {
     tan: get_symbol!("tan").expect("tan not defined"),
@@ -58,6 +59,7 @@ struct SpecialSymbols {
     gamma: Symbol,
     polygamma: Symbol,
     polylog: Symbol,
+    zeta: Symbol,
 }
 
 struct GeometricSymbols {
@@ -334,9 +336,57 @@ impl SpecialSymbols {
                         })
                     }),
                 )
+            },
+            "zeta";;
+            |symbols, b| {
+                let gamma = symbols[0];
+                let zeta_symbol = symbols[3];
+
+                b.with_normalization_function(|x, out| {
+                    if let Some([arg]) = function_arguments::<1>(x) {
+                        if maybe_eval_unary_float_in_norm(arg, out, zeta_numeric_eval) {
+                            return;
+                        }
+
+                        if let Ok(rat) = Rational::try_from(arg)
+                            && let Some(exact) = zeta_exact_rational(&rat)
+                        {
+                            **out = exact;
+                        }
+                    }
+                })
+                .with_derivative_function(move |x, _, out| {
+                    if let Some([arg]) = function_arguments::<1>(x)
+                    {
+                        // TODO: add Stieltjes constants
+                        **out = function!(symbol!("dzeta"), arg);
+                    }
+                })
+                .with_series_function(move |args| {
+                    let [arg] = args else { return None; };
+                    let point = arg.coefficient(0.into());
+                    if point != Coefficient::one() {
+                        return None;
+                    }
+
+                    let arg = arg.to_atom();
+                    let pole = arg.to_owned() - 1;
+                    let regularized = (Symbol::PI.to_atom() * 2).pow(&pole) * -2 * (pole.clone() * Symbol::PI / 2).cos() * function!(gamma, -&pole + 1) * function!(zeta_symbol, -&pole);
+
+                    Some((Atom::num(1) / pole, regularized))
+                })
+                .with_evaluation_info(
+                    EvaluationInfo::new()
+                    .register(|args: &[Complex<Float>]| {
+                        unary_eval_complex_float(args, zeta_numeric_eval)
+                    })
+                    .register(|args: &[f64]| zeta_eval_f64(args))
+                    .register(|args: &[Complex<f64>]| zeta_eval_complex_f64(args)),
+                )
             }
         );
 
+        let zeta = symbols.pop().unwrap();
         let polylog = symbols.pop().unwrap();
         let polygamma = symbols.pop().unwrap();
         let gamma = symbols.pop().unwrap();
@@ -346,6 +396,7 @@ impl SpecialSymbols {
             gamma,
             polygamma,
             polylog,
+            zeta,
         }
     }
 }
@@ -1301,6 +1352,13 @@ pub fn polylog() -> Symbol {
     SPECIALS.polylog
 }
 
+/// Return the built-in Riemann zeta function symbol `zeta`.
+///
+/// `zeta(s)` is meromorphic with a simple pole at `s = 1` and no branch cuts.
+pub fn zeta() -> Symbol {
+    SPECIALS.zeta
+}
+
 /// Return the built-in tangent function symbol `tan`.
 ///
 /// `tan(z)` is meromorphic with simple poles at `pi/2 + k pi`.
@@ -2037,6 +2095,22 @@ fn polylog_eval_complex_f64(order: Option<Complex<Float>>, args: &[Complex<f64>]
         .unwrap_or_else(|| Complex::new(f64::NAN, f64::NAN))
 }
 
+fn zeta_eval_f64(args: &[f64]) -> f64 {
+    let [arg] = args else {
+        return f64::NAN;
+    };
+    zeta_numeric_eval(&Complex::new(Float::with_val(53, *arg), Float::new(53)), 53)
+        .re
+        .to_f64()
+}
+
+fn zeta_eval_complex_f64(args: &[Complex<f64>]) -> Complex<f64> {
+    let [arg] = args else {
+        return Complex::new(f64::NAN, f64::NAN);
+    };
+    zeta_numeric_eval(&complex_f64_to_float(arg, 53), 53).to_f64()
+}
+
 fn complex_f64_to_float(value: &Complex<f64>, prec: u32) -> Complex<Float> {
     Complex::new(
         Float::with_val(prec, value.re),
@@ -2095,6 +2169,67 @@ fn gamma_exact_rational(rat: &Rational) -> Option<Atom> {
     }
 
     None
+}
+
+fn zeta_exact_rational(rat: &Rational) -> Option<Atom> {
+    if rat.denominator() != 1 {
+        return None;
+    }
+
+    let n = rat.numerator().to_i64()?;
+    match n {
+        0 => return Some(Atom::num((-1, 2))),
+        1 => return Some(Atom::num(Coefficient::complex_infinity())),
+        -1 => return Some(Atom::num((-1, 12))),
+        _ => {}
+    }
+
+    if n < 0 {
+        let Some(bernoulli_index) = n.checked_neg().and_then(|x| x.checked_add(1)) else {
+            return None;
+        };
+        if bernoulli_index > u32::MAX as i64 {
+            return None;
+        }
+
+        let bernoulli_index = bernoulli_index as u32;
+        let value = bernoulli_number(bernoulli_index) / Rational::from((n - 1, 1));
+        if value.is_zero() {
+            return Some(Atom::new());
+        }
+
+        return Some(Atom::num(value));
+    }
+
+    if n % 2 != 0 {
+        return None;
+    }
+    if n > u32::MAX as i64 {
+        return None;
+    }
+
+    let half_order = n as u32 / 2;
+    let mut bernoulli = bernoulli_number(n as u32);
+    if half_order % 2 == 0 {
+        bernoulli = -bernoulli;
+    }
+
+    let pi_power = (Atom::num(2) * Atom::from(State::PI)).pow(Atom::num(n));
+    Some(Atom::num(bernoulli) * pi_power / (Atom::num(2) * Atom::num(Integer::factorial(n as u32))))
+}
+
+fn bernoulli_number(n: u32) -> Rational {
+    let mut a = vec![Rational::zero(); n as usize + 1];
+
+    for m in 0..=n as usize {
+        a[m] = Rational::from((1, m as i64 + 1));
+
+        for j in (1..=m).rev() {
+            a[j - 1] = (a[j - 1].clone() - a[j].clone()) * Rational::from((j as i64, 1));
+        }
+    }
+
+    a[0].clone()
 }
 
 fn polygamma_order_zero_exact_rational(rat: &Rational) -> Option<Atom> {
@@ -2490,6 +2625,120 @@ fn polylog_numeric_eval(
     Some(sum)
 }
 
+fn zeta_numeric_eval(s: &Complex<Float>, binary_prec: u32) -> Complex<Float> {
+    let zero = Float::new(binary_prec);
+
+    if s.is_real() {
+        if s.re.to_f64() == 1.0 {
+            return Complex::new(
+                Float::with_val(binary_prec, rug::float::Special::Infinity),
+                zero,
+            );
+        }
+
+        return Complex::new(s.re.clone().into_inner().zeta().into(), zero);
+    }
+
+    if (s.re.to_f64() - 1.0).abs() < 1e-14 && s.im.to_f64().abs() < 1e-14 {
+        return Complex::new(
+            Float::with_val(binary_prec, rug::float::Special::Infinity),
+            zero,
+        );
+    }
+
+    let work_prec = binary_prec
+        .saturating_mul(4)
+        .max(binary_prec.saturating_add(64));
+    let mut s_re = s.re.clone();
+    let mut s_im = s.im.clone();
+    s_re.set_prec(work_prec);
+    s_im.set_prec(work_prec);
+    let s = Complex::new(s_re, s_im);
+
+    let result = if s.re.to_f64() < 0.0 {
+        zeta_complex_reflection(&s, work_prec)
+    } else {
+        zeta_complex_hasse(&s, work_prec)
+    };
+
+    let mut re = result.re;
+    let mut im = result.im;
+    re.set_prec(binary_prec);
+    im.set_prec(binary_prec);
+    Complex::new(re, im)
+}
+
+fn zeta_complex_reflection(s: &Complex<Float>, binary_prec: u32) -> Complex<Float> {
+    let zero = Float::new(binary_prec);
+    let one = Float::with_val(binary_prec, 1);
+    let two = Float::with_val(binary_prec, 2);
+    let pi = Float::with_val(binary_prec, Constant::Pi);
+
+    let one_c = Complex::new(one.clone(), zero.clone());
+    let two_c = Complex::new(two, zero.clone());
+    let pi_c = Complex::new(pi.clone(), zero.clone());
+    let reflected = one_c.clone() - s.clone();
+
+    let two_power = two_c.powf(s);
+    let pi_power = pi_c.clone().powf(&(s.clone() - one_c));
+    let sine =
+        (pi_c * s.clone() / Complex::new(Float::with_val(binary_prec, 2), zero.clone())).sin();
+    let gamma = gamma_numeric_eval(&reflected, binary_prec);
+    let zeta = if reflected.im.to_f64() == 0.0 {
+        Complex::new(
+            reflected.re.clone().into_inner().zeta().into(),
+            zero.clone(),
+        )
+    } else {
+        zeta_complex_hasse(&reflected, binary_prec)
+    };
+
+    two_power * pi_power * sine * gamma * zeta
+}
+
+fn zeta_complex_hasse(s: &Complex<Float>, binary_prec: u32) -> Complex<Float> {
+    let zero = Float::new(binary_prec);
+    let one = Float::with_val(binary_prec, 1);
+    let two = Float::with_val(binary_prec, 2);
+    let one_c = Complex::new(one.clone(), zero.clone());
+    let two_c = Complex::new(two.clone(), zero.clone());
+
+    let denominator = one_c.clone() - two_c.powf(&(one_c - s.clone()));
+    let threshold = 2f64.powi(-(binary_prec.min(900) as i32));
+    let mut outer = Complex::new(zero.clone(), zero.clone());
+    let mut two_power = Float::with_val(binary_prec, 2);
+
+    for n in 0..(8 * binary_prec.max(16)) {
+        let mut inner = Complex::new(zero.clone(), zero.clone());
+        let mut binom = Float::with_val(binary_prec, 1);
+
+        for k in 0..=n {
+            let base = Complex::new(Float::with_val(binary_prec, k + 1), zero.clone());
+            let mut term = Complex::new(binom.clone(), zero.clone()) / base.powf(s);
+            if k % 2 == 1 {
+                term = -term;
+            }
+            inner += term;
+
+            if k < n {
+                binom *= Float::with_val(binary_prec, n - k);
+                binom /= Float::with_val(binary_prec, k + 1);
+            }
+        }
+
+        let term = inner / Complex::new(two_power.clone(), zero.clone());
+        let term_size = term.norm().re.to_f64().abs();
+        outer += term;
+        if n > 16 && (term_size == 0.0 || term_size < threshold) {
+            break;
+        }
+
+        two_power *= Float::with_val(binary_prec, 2);
+    }
+
+    outer / denominator
+}
+
 fn gamma_complex_spouge(z: &Complex<Float>, binary_prec: u32) -> Complex<Float> {
     let zero = Float::new(binary_prec);
     let one = Float::with_val(binary_prec, 1);
@@ -2685,6 +2934,7 @@ mod tests {
         assert!(Complex::<Float>::try_from(parse!("gamma(1.25)")).is_ok());
         assert!(Complex::<Float>::try_from(parse!("polygamma(0,1.25)")).is_ok());
         assert!(Complex::<Float>::try_from(parse!("polygamma(1,1.25)")).is_ok());
+        assert!(Complex::<Float>::try_from(parse!("zeta(1.25)")).is_ok());
     }
 
     #[test]
@@ -2761,9 +3011,28 @@ mod tests {
     }
 
     #[test]
+    fn zeta_exact_normalization() {
+        assert_eq!(parse!("zeta(0)"), parse!("-1/2"));
+        assert_eq!(parse!("zeta(-1)"), parse!("-1/12"));
+        assert_eq!(parse!("zeta(-2)"), Atom::new());
+        assert_eq!(parse!("zeta(2)"), parse!("1/6*pi^2"));
+        assert_eq!(parse!("zeta(4)"), parse!("1/90*pi^4"));
+        assert_eq!(
+            parse!("zeta(1)"),
+            Atom::num(Coefficient::complex_infinity())
+        );
+    }
+
+    #[test]
+    fn zeta_float_normalization() {
+        assert!(Complex::<Float>::try_from(parse!("zeta(1.25)")).is_ok());
+        assert!(Complex::<Float>::try_from(parse!("zeta(1/2+1i/4)").to_float(50)).is_ok());
+    }
+
+    #[test]
     fn special_functions_register_eval_info() {
         let mut evaluator =
-            parse!("gamma(x)+polygamma(0,x)+polygamma(1,x)+polylog(2,x)+euler_gamma")
+            parse!("gamma(x)+polygamma(0,x)+polygamma(1,x)+polylog(2,x)+zeta(x)+euler_gamma")
                 .evaluator(
                     &FunctionMap::new(),
                     &[parse!("x")],
