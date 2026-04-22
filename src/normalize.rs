@@ -28,6 +28,8 @@ impl<'a> AtomView<'a> {
             }
 
             it1.get_data()
+        } else if let AtomView::Num(_) = self {
+            &[]
         } else {
             self.get_data()
         }

@@ -1092,7 +1092,20 @@ impl FormattedPrintMul for MulView<'_> {
         let mut first = true;
         let mut skip_num = false;
         if let Some(AtomView::Num(n)) = self.iter().next() {
-            print_state.suppress_one = true;
+            // suppress one if there is another factor in the numerator
+            print_state.suppress_one = self.iter().skip(1).any(|x| {
+                if let AtomView::Pow(p) = x {
+                    let (_, e) = p.get_base_exp();
+                    if let AtomView::Num(n) = e {
+                        if let CoefficientView::Natural(num, _, 0, 1) = n.get_coeff_view() {
+                            if num < 0 {
+                                return false;
+                            }
+                        }
+                    }
+                }
+                true
+            });
             first = n.fmt_output(f, opts, print_state)?;
             print_state.suppress_one = false;
             skip_num = true;
