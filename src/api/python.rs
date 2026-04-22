@@ -3962,7 +3962,7 @@ impl PythonExpression {
             }
 
             if let Some(t) = tags {
-                symbol = symbol.with_aliases(
+                symbol = symbol.with_tags(
                     t.into_iter()
                         .map(|x| {
                             if x.contains("::") {

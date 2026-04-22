@@ -1,6 +1,5 @@
 use symbolica::{
-    atom::{Atom, AtomCore, AtomView},
-    id::Match,
+    atom::{Atom, AtomCore},
     parse, symbol,
 };
 
@@ -14,10 +13,7 @@ fn fibonacci() {
     let rhs_one = Atom::num(1).to_pattern();
 
     // prepare the pattern restriction `x_ > 1`
-    let restrictions = symbol!("x_").filter(|v: &Match| match v {
-        Match::Single(AtomView::Num(n)) => !n.is_one() && !n.is_zero(),
-        _ => false,
-    });
+    let restrictions = symbol!("x_").filter_single(|n| !n.is_one() && !n.is_zero());
 
     let mut target = parse!("f(10)");
 

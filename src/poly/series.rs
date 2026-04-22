@@ -598,13 +598,24 @@ impl<F: Ring> SelfRing for Series<F> {
         mut state: PrintState,
         f: &mut W,
     ) -> Result<bool, std::fmt::Error> {
-        let v = self.variable.format_string(
-            opts,
-            PrintState {
-                in_exp: true,
-                ..state
-            },
-        );
+        let v = if self.field.is_zero(&self.expansion_point) {
+            self.variable.format_string(
+                opts,
+                PrintState {
+                    in_exp_base: true,
+                    ..state
+                },
+            )
+        } else {
+            let v = self.variable.format_string(
+                opts,
+                PrintState {
+                    in_sum: true,
+                    ..state
+                },
+            );
+            format!("({}-{})", v, self.field.printer(&self.expansion_point))
+        };
 
         if self.coefficients.is_empty() {
             let o = self.absolute_order();
