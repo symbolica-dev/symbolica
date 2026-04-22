@@ -5558,6 +5558,12 @@ impl PythonExpression {
         self.expr.abs().into()
     }
 
+    /// Compute the Riemann zeta function symbol `zeta`.
+    /// `zeta(s)` is meromorphic with a simple pole at `s = 1` and no branch cuts.
+    pub fn zeta(&self) -> PythonExpression {
+        crate::function!(crate::transcendental::zeta(), self.expr.clone()).into()
+    }
+
     /// Compute the gamma function of the expression.
     /// `gamma(z)` is meromorphic with simple poles at the non-positive integers.
     pub fn gamma(&self) -> PythonExpression {

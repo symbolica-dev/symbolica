@@ -1590,6 +1590,12 @@ class Expression:
         Take the absolute value of this expression, returning the result.
         """
 
+    def zeta(self) -> Expression:
+        """
+        Compute the Riemann zeta function symbol `zeta`.
+        `zeta(s)` is meromorphic with a simple pole at `s = 1` and no branch cuts.
+        """
+
     def gamma(self) -> Expression:
         """
         Apply the gamma function to this expression.
