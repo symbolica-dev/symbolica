@@ -3125,7 +3125,7 @@ impl AtomView<'_> {
                     }
                 }
 
-                if s.is_builtin() || enter_function {
+                if s.is_fixed_builtin() || enter_function {
                     let mut o = ws.new_atom();
                     let ff = o.to_fun(s);
 

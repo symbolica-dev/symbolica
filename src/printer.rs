@@ -1952,7 +1952,7 @@ mod test {
         if AnsiWrap::<&str>::should_colorize() {
             assert_eq!(
                 format!("{}", a.printer(PrintOptions::short())),
-                "3\u{1b}[0;38;5;3m+\u{1b}[0m1/5*f\u{1b}[0;38;5;25m(\u{1b}[0mx,y^2\u{1b}[0;38;5;25m)\u{1b}[0m^\u{1b}[0;38;5;244m(\u{1b}[0mx+z\u{1b}[0;38;5;244m)\u{1b}[0m"
+                "3\u{1b}[0;38;5;3m+\u{1b}[0m1/5*\u{1b}[0;38;5;5mf\u{1b}[0m\u{1b}[0;38;5;25m(\u{1b}[0m\u{1b}[0;38;5;5mx\u{1b}[0m,\u{1b}[0;38;5;5my\u{1b}[0m^2\u{1b}[0;38;5;25m)\u{1b}[0m^\u{1b}[0;38;5;244m(\u{1b}[0m\u{1b}[0;38;5;5mx\u{1b}[0m+\u{1b}[0;38;5;5mz\u{1b}[0m\u{1b}[0;38;5;244m)\u{1b}[0m"
             );
         } else {
             assert_eq!(

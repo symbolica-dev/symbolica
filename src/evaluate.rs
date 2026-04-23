@@ -883,7 +883,7 @@ impl<'a> AtomView<'a> {
                 Instruction::Fun(o, b, _) => {
                     let (sym, tags, args) = &*b;
 
-                    if sym.is_builtin() {
+                    if sym.is_fixed_builtin() {
                         if args.len() != 1 {
                             return Err(format!(
                                 "Builtin function {} must have exactly one argument",
@@ -10130,7 +10130,7 @@ fn translate_to_symjit(
             }
             Instruction::Fun(lhs, fun, is_real) => {
                 let (name, tags, args) = *fun;
-                if name.is_builtin() {
+                if name.is_fixed_builtin() {
                     if args.len() != 1 || !tags.is_empty() {
                         return Err(format!(
                             "Builtin function '{}' requires exactly one argument and no tags",
@@ -12910,7 +12910,7 @@ impl<'a> AtomView<'a> {
                 .into_iter()
                 .filter_map(|x| {
                     let s = x.get_symbol().unwrap();
-                    if !State::is_builtin(s) || s == Symbol::DERIVATIVE {
+                    if !State::is_fixed_builtin(s) || s == Symbol::DERIVATIVE {
                         Some((x, Complex::new(0f64.into(), 0f64.into())))
                     } else {
                         None
@@ -12966,7 +12966,7 @@ impl<'a> AtomView<'a> {
                 .into_iter()
                 .filter_map(|x| {
                     let s = x.get_symbol().unwrap();
-                    if !State::is_builtin(s) || s == Symbol::DERIVATIVE {
+                    if !State::is_fixed_builtin(s) || s == Symbol::DERIVATIVE {
                         Some((x, 0f64.into()))
                     } else {
                         None

@@ -17,7 +17,7 @@ use smartstring::{LazyCompact, SmartString};
 
 use crate::{
     LicenseManager,
-    atom::{Atom, DefaultNamespace, Symbol, SymbolAttribute, SymbolBuilder},
+    atom::{Atom, DefaultNamespace, NamespacedSymbol, Symbol, SymbolAttribute, SymbolBuilder},
     coefficient::{Coefficient, ConvertToRing},
     domains::{
         Ring,
@@ -607,6 +607,15 @@ impl Token {
             } else {
                 Err(format!("Malformatted attribute section in {}", x))
             }
+        } else if state.is_builtin_name(x) {
+            SymbolBuilder::new(NamespacedSymbol {
+                symbol: format!("symbolica::{x}").into(),
+                namespace: "symbolica".into(),
+                file: namespace.file.clone(),
+                line: namespace.line,
+            })
+            .build_with_state(state)
+            .map_err(|e| e.to_string())
         } else {
             SymbolBuilder::new(namespace.attach_namespace(x))
                 .build_with_state(state)
@@ -2104,7 +2113,7 @@ mod test {
     #[test]
     fn liberal() {
         let input = parse!(
-            "89233_21837281 x   
+            "89233_21837281 x   \
             ^2 / y + 5 + 5x"
         );
         let res = parse!("8923321837281*x^2*y^-1+5+5x");
