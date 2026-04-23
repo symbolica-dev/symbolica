@@ -938,7 +938,7 @@ impl AtomView<'_> {
             factor: &AtomView<'_>,
             vars: &[PolyVariable],
             coefficient: &mut R::Element,
-            exponents: &mut SmallVec<[E; INLINED_EXPONENTS]>,
+            exponents: &mut [E],
             field: &R,
         ) -> Result<(), &'static str> {
             match factor {
@@ -995,7 +995,7 @@ impl AtomView<'_> {
             field: &R,
         ) -> Result<(), &'static str> {
             let mut coefficient = poly.ring.one();
-            let mut exponents = smallvec![E::zero(); vars.len()];
+            let mut exponents = vec![E::zero(); vars.len()];
 
             match term {
                 AtomView::Mul(m) => {
@@ -1010,19 +1010,45 @@ impl AtomView<'_> {
             Ok(())
         }
 
-        let mut poly =
-            MultivariatePolynomial::<R, E>::new(field, Some(n_terms), Arc::new(vars.clone()));
-
         match self {
             AtomView::Add(a) => {
-                for term in a {
-                    parse_term(&term, &vars, &mut poly, field)?;
+                let mut coefficients = vec![field.one(); n_terms];
+                let mut exponents = vec![E::zero(); vars.len() * n_terms];
+                for ((term, coefficient), exponent) in a
+                    .iter()
+                    .zip(coefficients.iter_mut())
+                    .zip(exponents.chunks_mut(vars.len()))
+                {
+                    match term {
+                        AtomView::Mul(m) => {
+                            for factor in m {
+                                parse_factor(&factor, &vars, coefficient, exponent, field)?;
+                            }
+                        }
+                        _ => {
+                            parse_factor(&term, &vars, coefficient, exponent, field)?;
+                        }
+                    }
                 }
-            }
-            _ => parse_term(self, &vars, &mut poly, field)?,
-        }
 
-        Ok(poly)
+                Ok(MultivariatePolynomial::from_coefficient_list(
+                    coefficients,
+                    exponents,
+                    Arc::new(vars),
+                    field,
+                ))
+            }
+            _ => {
+                let mut poly = MultivariatePolynomial::<R, E>::new(
+                    field,
+                    Some(n_terms),
+                    Arc::new(vars.clone()),
+                );
+
+                parse_term(self, &vars, &mut poly, field)?;
+                Ok(poly)
+            }
+        }
     }
 
     /// Convert the atom to a polynomial, optionally in the variable ordering

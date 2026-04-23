@@ -1657,6 +1657,35 @@ impl<F: Ring, E: Exponent, O: MonomialOrder> MultivariatePolynomial<F, E, O> {
         }
         res
     }
+
+    /// Create a polynomial from an unordered list of coefficients and flattened exponents.
+    pub fn from_coefficient_list(
+        mut coefficients: Vec<F::Element>,
+        exponents: Vec<E>,
+        vars: Arc<Vec<PolyVariable>>,
+        ring: &F,
+    ) -> Self {
+        let nterms = coefficients.len();
+        let nvars = exponents.len() / coefficients.len();
+        let mut indices = (0..nterms).collect::<Vec<_>>();
+        indices.sort_unstable_by(|&i, &j| {
+            O::cmp(
+                &exponents[i * nvars..(i + 1) * nvars],
+                &exponents[j * nvars..(j + 1) * nvars],
+            )
+        });
+
+        let mut poly = MultivariatePolynomial::new(ring, Some(nterms), vars);
+
+        for i in indices {
+            poly.append_monomial_back(
+                std::mem::replace(&mut coefficients[i], ring.zero()),
+                &exponents[i * nvars..(i + 1) * nvars],
+            );
+        }
+
+        poly
+    }
 }
 
 impl<F: Ring, E: PositiveExponent> MultivariatePolynomial<F, E, LexOrder> {
@@ -1703,27 +1732,24 @@ impl<F: Ring, E: PositiveExponent> MultivariatePolynomial<F, E, LexOrder> {
             return self.replace_last(n, v);
         }
 
-        let mut res = self.zero_with_capacity(self.nterms());
-        let mut e: SmallVec<[E; INLINED_EXPONENTS]> = smallvec![E::zero(); self.nvars()];
+        let mut coefficients = self.coefficients.clone();
+        let mut exponents = self.exponents.clone();
 
         // TODO: cache power taking?
-        for t in self {
-            if t.exponents[n] == E::zero() {
-                res.append_monomial(t.coefficient.clone(), t.exponents);
+        for (coefficient, exponent) in coefficients
+            .iter_mut()
+            .zip(exponents.chunks_mut(self.nvars()))
+        {
+            if exponent[n] == E::zero() {
                 continue;
             }
 
-            let c = self.ring.mul(
-                t.coefficient,
-                &self.ring.pow(v, t.exponents[n].to_i32() as u64),
-            );
-
-            e.copy_from_slice(t.exponents);
-            e[n] = E::zero();
-            res.append_monomial(c, &e);
+            self.ring
+                .mul_assign(coefficient, &self.ring.pow(v, exponent[n].to_i32() as u64));
+            exponent[n] = E::zero();
         }
 
-        res
+        Self::from_coefficient_list(coefficients, exponents, self.variables.clone(), &self.ring)
     }
 
     /// Replace the last variable `n` in the polynomial by an element from

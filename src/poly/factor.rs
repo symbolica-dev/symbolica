@@ -1881,10 +1881,10 @@ where
                 && biv_f.gcd(&biv_df).is_constant()
                 && uni_f.gcd(&uni_df).is_constant()
             {
-                if !biv_f.univariate_content(order[0]).is_one() {
+                if !biv_f.univariate_content(order[0]).is_constant() {
                     content_fail_count += 1;
 
-                    debug!("Univariate content is not one");
+                    debug!("Univariate content is not constant");
                     if content_fail_count == 4 {
                         // it is likely that we will always find content for this variable ordering, so change the
                         // second variable
@@ -3378,11 +3378,11 @@ impl<E: PositiveExponent> MultivariatePolynomial<IntegerRing, E, LexOrder> {
                 && cur_biv_f.gcd(&biv_df).is_constant()
                 && cur_uni_f.gcd(&uni_df).is_constant()
             {
-                if !cur_biv_f.univariate_content(order[0]).is_one() {
+                if !cur_biv_f.univariate_content(order[0]).is_constant() {
                     content_fail_count += 1;
                     coefficient_upper_bound += 10;
 
-                    debug!("Univariate content is not one");
+                    debug!("Univariate content is not constant");
                     if content_fail_count == 4 {
                         // it is likely that we will always find content for this variable ordering, so change the
                         // second variable
