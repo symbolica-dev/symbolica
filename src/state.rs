@@ -13,7 +13,7 @@ use std::{
     ops::{Deref, DerefMut},
 };
 
-use ahash::{HashMap, HashMapExt};
+use ahash::{HashMap, HashMapExt, HashSet, HashSetExt};
 use append_only_vec::AppendOnlyVec;
 use byteorder::LittleEndian;
 use smartstring::alias::String;
@@ -25,13 +25,16 @@ use crate::atom::{
 use crate::domains::finite_field::Zp64;
 use crate::poly::PolyVariable;
 use crate::printer::PrintFunction;
+use crate::warn;
 use crate::{
     LicenseManager,
     atom::{Atom, Symbol},
     coefficient::Coefficient,
-    domains::finite_field::FiniteFieldCore,
+    domains::{
+        finite_field::FiniteFieldCore,
+        float::{Complex, Float, Real},
+    },
 };
-use crate::{warn, wrap_symbol};
 
 pub(crate) const SYMBOLICA_MAGIC: u32 = 0x37871367;
 pub(crate) const EXPORT_FORMAT_VERSION: u16 = 4;
@@ -81,6 +84,43 @@ pub(crate) struct SymbolData {
     pub(crate) aliases: Vec<std::string::String>,
     pub(crate) tags: Vec<std::string::String>,
     pub(crate) user_data: UserData,
+}
+
+fn builtin_constant_evaluation(symbol: Symbol) -> Option<EvaluationInfo> {
+    match symbol.get_id() {
+        Symbol::E_ID => Some(EvaluationInfo::constant(|_tags, prec| {
+            Ok(Complex::new(
+                Float::with_val(prec, 1).exp(),
+                Float::new(prec),
+            ))
+        })),
+        Symbol::PI_ID => Some(EvaluationInfo::constant(|_tags, prec| {
+            Ok(Complex::new(
+                Float::with_val(prec, rug::float::Constant::Pi),
+                Float::new(prec),
+            ))
+        })),
+        _ => None,
+    }
+}
+
+impl SymbolData {
+    fn default_from_symbol(name: &str) -> Self {
+        Self {
+            name: format!("symbolica::{}", name).into(),
+            file: file!().into(),
+            namespace: "symbolica".into(),
+            line: line!() as usize,
+            custom_normalization: None,
+            custom_print: None,
+            custom_derivative: None,
+            custom_series: None,
+            custom_evaluation: None,
+            aliases: vec![],
+            tags: vec![],
+            user_data: UserData::None,
+        }
+    }
 }
 
 /// An initializer called when the Symbolica global state is initialized.
@@ -165,6 +205,7 @@ thread_local!(
 /// A global state, that stores mappings from variable and function names to ids.
 pub struct State {
     str_to_id: HashMap<String, Symbol>,
+    builtin_symbols: HashSet<String>,
 }
 
 impl Default for State {
@@ -222,23 +263,6 @@ impl State {
         Symbol::SEP_STR,
     ];
 
-    const BUILTIN_SYMBOL_ALIASES: [Option<&'static str>; 14] = [
-        None,
-        None,
-        None,
-        None,
-        None,
-        None,
-        None,
-        None,
-        None,
-        None,
-        None,
-        None,
-        Some("symbolica::pi"),
-        None,
-    ];
-
     /// The list of built-in symbol names and their aliases.
     pub const BUILTIN_NAMES_AND_ALIASES: [&'static str; 15] = [
         "arg",
@@ -276,43 +300,40 @@ impl State {
         Self::SEP,
     ];
 
-    pub fn is_builtin_name<S: AsRef<str>>(str: S) -> bool {
-        Self::BUILTIN_SYMBOL_NAMES.contains(&str.as_ref())
+    pub(crate) fn is_builtin_name<S: AsRef<str>>(&self, str: S) -> bool {
+        self.builtin_symbols.contains(str.as_ref())
+    }
+
+    /// Returns `true` iff the given string is the name of a built-in symbol.
+    pub fn is_builtin<S: AsRef<str>>(str: S) -> bool {
+        Self::get_global_state()
+            .read()
+            .unwrap()
+            .builtin_symbols
+            .contains(str.as_ref())
     }
 
     fn initialize_builtin_symbols(&mut self) {
         let offset = SYMBOL_OFFSET.load(Ordering::Relaxed);
 
-        for ((name, symbol), alias) in Self::BUILTIN_SYMBOL_NAMES
-            .iter()
-            .zip(&Self::BUILTIN_SYMBOLS)
-            .zip(&Self::BUILTIN_SYMBOL_ALIASES)
-        {
-            let r = wrap_symbol!(name);
+        for (name, symbol) in Self::BUILTIN_SYMBOL_NAMES.iter().zip(Self::BUILTIN_SYMBOLS) {
+            let mut data = SymbolData::default_from_symbol(name);
+            data.custom_evaluation = builtin_constant_evaluation(symbol);
 
-            let index = ID_TO_STR.push((
-                *symbol,
-                SymbolData {
-                    name: r.symbol.clone().into(),
-                    file: r.file,
-                    namespace: r.namespace,
-                    line: r.line,
-                    custom_normalization: None,
-                    custom_print: None,
-                    custom_derivative: None,
-                    custom_series: None,
-                    custom_evaluation: None,
-                    tags: vec![],
-                    aliases: alias.map(|a| vec![a.to_string()]).unwrap_or_default(),
-                    user_data: UserData::None,
-                },
-            ));
-            assert_eq!(symbol.get_id() as usize, index - offset);
+            self.builtin_symbols.insert((*name).into());
+            if symbol == Self::PI {
+                data.aliases = vec!["symbolica::pi".to_owned()];
+                self.builtin_symbols.insert("pi".into());
+            }
 
-            self.str_to_id.insert(r.symbol.into(), *symbol);
+            let id = ID_TO_STR.push((symbol, data)) - offset;
+            assert_eq!(symbol.get_id() as usize, id);
 
-            if let Some(alias) = alias {
-                self.str_to_id.insert((*alias).into(), *symbol);
+            let data = &ID_TO_STR[id + offset].1;
+            self.str_to_id.insert(data.name.clone(), symbol);
+
+            for alias in &data.aliases {
+                self.str_to_id.insert(alias.clone().into(), symbol);
             }
         }
     }
@@ -322,6 +343,7 @@ impl State {
 
         let mut state = State {
             str_to_id: HashMap::new(),
+            builtin_symbols: HashSet::new(),
         };
 
         state.initialize_builtin_symbols();
@@ -459,17 +481,17 @@ impl State {
     /// that can be used in concurrently run unit tests without interference.
     #[cfg(test)]
     fn initialize_test(&mut self) {
-        use crate::atom::SymbolAttribute;
+        use crate::{atom::SymbolAttribute, wrap_symbol};
 
         for i in 0..30 {
-            let _ = self.get_symbol(wrap_symbol!(format!("v{}", i)));
+            let _ = self.get_symbol(wrap_symbol!(format!("symbolica::v{}", i)));
         }
         for i in 0..30 {
-            let _ = self.get_symbol(wrap_symbol!(format!("f{}", i)));
+            let _ = self.get_symbol(wrap_symbol!(format!("symbolica::f{}", i)));
         }
         for i in 0..5 {
             let _ = self.get_symbol_with_attributes(
-                wrap_symbol!(format!("fs{}", i)),
+                wrap_symbol!(format!("symbolica::fs{}", i)),
                 &[SymbolAttribute::Symmetric],
                 None,
                 None,
@@ -483,7 +505,7 @@ impl State {
         }
         for i in 0..5 {
             let _ = self.get_symbol_with_attributes(
-                wrap_symbol!(format!("fc{}", i)),
+                wrap_symbol!(format!("symbolica::fc{}", i)),
                 &[SymbolAttribute::Cyclesymmetric],
                 None,
                 None,
@@ -497,7 +519,7 @@ impl State {
         }
         for i in 0..5 {
             let _ = self.get_symbol_with_attributes(
-                wrap_symbol!(format!("fa{}", i)),
+                wrap_symbol!(format!("symbolica::fa{}", i)),
                 &[SymbolAttribute::Antisymmetric],
                 None,
                 None,
@@ -511,7 +533,7 @@ impl State {
         }
         for i in 0..5 {
             let _ = self.get_symbol_with_attributes(
-                wrap_symbol!(format!("fl{}", i)),
+                wrap_symbol!(format!("symbolica::fl{}", i)),
                 &[SymbolAttribute::Linear],
                 None,
                 None,
@@ -525,7 +547,7 @@ impl State {
         }
         for i in 0..5 {
             let _ = self.get_symbol_with_attributes(
-                wrap_symbol!(format!("fsl{}", i)),
+                wrap_symbol!(format!("symbolica::fsl{}", i)),
                 &[SymbolAttribute::Symmetric, SymbolAttribute::Linear],
                 None,
                 None,
@@ -587,7 +609,7 @@ impl State {
     }
 
     /// Returns `true` iff this identifier is defined by Symbolica.
-    pub(crate) fn is_builtin(id: Symbol) -> bool {
+    pub(crate) fn is_fixed_builtin(id: Symbol) -> bool {
         id.get_id() < Self::BUILTIN_SYMBOL_NAMES.len() as u32
     }
 
@@ -886,6 +908,11 @@ impl State {
 
                 v.insert(new_symbol);
 
+                if new_symbol.get_namespace() == "symbolica" {
+                    self.builtin_symbols
+                        .insert(new_symbol.get_stripped_name().into());
+                }
+
                 for alias in aliases {
                     match self.str_to_id.entry(alias.into()) {
                         Entry::Occupied(o) => {
@@ -904,6 +931,10 @@ impl State {
                             }
                         }
                         Entry::Vacant(v) => {
+                            if new_symbol.get_namespace() == "symbolica" {
+                                self.builtin_symbols.insert(v.key()[11..].into());
+                            }
+
                             v.insert(new_symbol);
                         }
                     }

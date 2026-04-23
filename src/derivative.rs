@@ -450,7 +450,7 @@ impl AtomView<'_> {
                     return Err("Cannot series expand non-constant if function".to_owned());
                 }
 
-                if !f.get_symbol().is_builtin()
+                if !f.get_symbol().is_fixed_builtin()
                     && args_series
                         .iter()
                         .any(|x| x.get_trailing_exponent().is_negative())

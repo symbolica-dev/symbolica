@@ -149,7 +149,7 @@ macro_rules! wrap_symbol {
             s.line = line!() as usize;
             s
         } else {
-            let ns = if $crate::state::State::BUILTIN_NAMES_AND_ALIASES.contains(&$e) {
+            let ns = if $crate::state::State::is_builtin(&$e) {
                 "symbolica"
             } else {
                 $crate::namespace!()
@@ -168,7 +168,7 @@ macro_rules! wrap_symbol {
             s.line = line!() as usize;
             s
         } else {
-            let ns = if $crate::state::State::is_builtin_name(&$e) {
+            let ns = if $crate::state::State::is_builtin(&$e) {
                 "symbolica"
             } else {
                 $crate::namespace!()
@@ -193,19 +193,12 @@ pub struct DefaultNamespace<T> {
 }
 
 impl<T> DefaultNamespace<T> {
-    /// Parse a string into a namespaced string.
+    /// Parse a string into a namespaced string, not checking if the name is built-in.
     pub fn attach_namespace(&self, s: &str) -> NamespacedSymbol {
         if let Some(mut s) = NamespacedSymbol::try_parse(s) {
             s.file = self.file.clone();
             s.line = self.line;
             s
-        } else if State::BUILTIN_NAMES_AND_ALIASES.contains(&s) {
-            NamespacedSymbol {
-                symbol: format!("symbolica::{s}").into(),
-                namespace: "symbolica".into(),
-                file: "".into(),
-                line: 0,
-            }
         } else {
             NamespacedSymbol {
                 symbol: format!("{}::{}", self.namespace, s).into(),
@@ -1343,9 +1336,14 @@ impl Symbol {
         self.is_positive
     }
 
+    /// Returns `true` iff this identifier is a hardcoded definition by Symbolica.
+    pub(crate) fn is_fixed_builtin(self) -> bool {
+        State::is_fixed_builtin(self)
+    }
+
     /// Returns `true` iff this identifier is defined by Symbolica.
     pub fn is_builtin(self) -> bool {
-        State::is_builtin(self)
+        State::is_fixed_builtin(self) || self.get_namespace() == "symbolica"
     }
 
     /// Get all tags of the symbol.
@@ -1644,7 +1642,7 @@ impl Symbol {
 
     /// Expert use: create a new variable symbol. This constructor should be used with care as there are no checks
     /// about the validity of the identifier.
-    pub const fn raw_var(id: u32, wildcard_level: u8) -> Self {
+    pub(crate) const fn raw_var(id: u32, wildcard_level: u8) -> Self {
         Symbol {
             id,
             wildcard_level,
@@ -1663,7 +1661,7 @@ impl Symbol {
     /// about the validity of the identifier.
     ///
     /// Sets related attributes automatically, e.g., a symbol that is marked as `integer` is also marked as `real`.
-    pub const fn raw_fn(
+    pub(crate) const fn raw_fn(
         id: u32,
         wildcard_level: u8,
         is_symmetric: bool,
@@ -1769,7 +1767,7 @@ impl Symbol {
             }
         } else {
             if (!opts.hide_all_namespaces || opts.include_attributes)
-                && !State::is_builtin(*self)
+                && !State::is_fixed_builtin(*self)
                 && (opts.hide_namespace != Some(namespace) || opts.include_attributes)
             {
                 if opts.color_namespace && opts.mode.is_symbolica() {
@@ -1854,13 +1852,10 @@ impl Symbol {
 
             if opts.mode.is_symbolica() && opts.color_builtin_symbols && name.ends_with('_') {
                 f.write_fmt(format_args!("{}", AnsiWrap::cyan(name).italic()))
-            } else if opts.mode.is_symbolica()
-                && opts.color_builtin_symbols
-                && State::is_builtin(*self)
-            {
+            } else if opts.mode.is_symbolica() && opts.color_builtin_symbols && self.is_builtin() {
                 f.write_fmt(format_args!("{}", AnsiWrap::purple(name)))
             } else if opts.mode.is_mathematica() {
-                if State::is_builtin(*self) {
+                if self.is_fixed_builtin() {
                     match self.get_id() {
                         Symbol::E_ID => f.write_str("E"),
                         Symbol::PI_ID => f.write_str("Pi"),

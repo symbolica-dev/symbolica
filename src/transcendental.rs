@@ -1315,8 +1315,8 @@ impl BesselSymbols {
 #[cfg(not(doctest))]
 crate::_inventory::submit! {
     StateInitializer::new("symbolica::special_functions", || {
-        let _ = SpecialSymbols::new();
         let _ = GeometricSymbols::new();
+        let _ = SpecialSymbols::new();
         let _ = BesselSymbols::new();
     }, &["symbolica"])
 }
