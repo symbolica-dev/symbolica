@@ -1474,6 +1474,51 @@ impl DoubleFloat {
     fn is_nan(&self) -> bool {
         self.0.hi().is_nan() || self.0.lo().is_nan()
     }
+
+    #[inline]
+    fn binary_exp(mut base: Df64, mut exp: u64) -> Df64 {
+        let mut result = Df64::ONE;
+
+        while exp != 0 {
+            if exp & 1 == 1 {
+                result *= base;
+            }
+            exp >>= 1;
+            if exp != 0 {
+                base *= base;
+            }
+        }
+
+        result
+    }
+
+    #[inline]
+    fn powi(base: Df64, exp: i64) -> Df64 {
+        if exp >= 0 {
+            Self::binary_exp(base, exp as u64)
+        } else {
+            Self::binary_exp(base, exp.unsigned_abs()).recip()
+        }
+    }
+
+    #[inline]
+    fn get_integer_exponent(exp: Df64) -> Option<i64> {
+        if !exp.hi().is_finite() {
+            return None;
+        }
+
+        let truncated = exp.trunc();
+        if exp != truncated {
+            return None;
+        }
+
+        let hi = truncated.hi();
+        if !(i64::MIN as f64..=i64::MAX as f64).contains(&hi) {
+            return None;
+        }
+
+        Some(hi as i64)
+    }
 }
 
 impl FloatLike for DoubleFloat {
@@ -1510,7 +1555,17 @@ impl FloatLike for DoubleFloat {
     #[inline]
     fn pow(&self, e: u64) -> Self {
         debug_assert!(e <= i32::MAX as u64);
-        self.0.powi(e as i32).into()
+
+        // `Df64::powi` is implemented as `exp(e * log(self))` and does not handle base <= 0
+        if e == 0 {
+            return 1f64.into();
+        }
+
+        if !self.0.hi().is_finite() {
+            return self.0.hi().powi(e as i32).into();
+        }
+
+        Self::binary_exp(self.0, e).into()
     }
 
     #[inline(always)]
@@ -1741,6 +1796,15 @@ impl RealLike for DoubleFloat {
 
     #[inline(always)]
     fn round_to_nearest_integer(&self) -> Integer {
+        // TODO: change API to Result<Integer, _>
+        if !self.0.is_finite() {
+            return if self.0.hi().is_sign_negative() {
+                i64::MIN.into()
+            } else {
+                i64::MAX.into()
+            };
+        }
+
         Integer::from_f64((self.0.round()).hi())
     }
 }
@@ -1805,11 +1869,25 @@ impl Real for DoubleFloat {
 
     #[inline(always)]
     fn sqrt(&self) -> Self {
+        let hi = self.0.hi();
+        if hi == 0. {
+            // avoid relying on subnormals inside the compensated sqrt path,
+            // as DAZ (Denormals Are Zero) may be enabled
+            return hi.into();
+        }
+        if hi < 0.0 || !hi.is_finite() {
+            return hi.sqrt().into();
+        }
+
         self.0.sqrt().into()
     }
 
     #[inline(always)]
     fn log(&self) -> Self {
+        if !self.0.hi().is_finite() {
+            return self.0.hi().ln().into();
+        }
+
         self.0.ln().into()
     }
 
@@ -1820,16 +1898,28 @@ impl Real for DoubleFloat {
 
     #[inline(always)]
     fn sin(&self) -> Self {
+        if !self.0.hi().is_finite() {
+            return self.0.hi().sin().into();
+        }
+
         self.0.sin().into()
     }
 
     #[inline(always)]
     fn cos(&self) -> Self {
+        if !self.0.hi().is_finite() {
+            return self.0.hi().cos().into();
+        }
+
         self.0.cos().into()
     }
 
     #[inline(always)]
     fn tan(&self) -> Self {
+        if !self.0.hi().is_finite() {
+            return self.0.hi().tan().into();
+        }
+
         self.0.tan().into()
     }
 
@@ -1880,6 +1970,30 @@ impl Real for DoubleFloat {
 
     #[inline(always)]
     fn powf(&self, e: &Self) -> Self {
+        if e.0 == Df64::ZERO || self.0 == Df64::ONE {
+            return 1f64.into();
+        }
+
+        if self.0 == Df64::from(-1.0) && e.0.hi().is_infinite() {
+            return 1f64.into();
+        }
+
+        if self.is_nan() || e.is_nan() {
+            return Df64::NAN.into();
+        }
+
+        if self.0.hi() == 0.0 {
+            return self.0.hi().powf(e.0.hi()).into();
+        }
+
+        if let Some(integer_exponent) = Self::get_integer_exponent(e.0) {
+            return Self::powi(self.0, integer_exponent).into();
+        }
+
+        if self.0.hi().is_sign_negative() || !self.0.hi().is_finite() || !e.0.hi().is_finite() {
+            return self.0.hi().powf(e.0.hi()).into();
+        }
+
         self.0.powf(e.0).into()
     }
 }
@@ -5164,6 +5278,26 @@ impl<'py> FromPyObject<'_, 'py> for PythonMultiPrecisionFloat {
                 .unwrap()
                 .extract::<PyBackedStr>()?;
 
+            if a == "NaN" {
+                return Ok(Float::from(MultiPrecisionFloat::with_val(
+                    53,
+                    rug::float::Special::Nan,
+                ))
+                .into());
+            } else if a == "Infinity" {
+                return Ok(Float::from(MultiPrecisionFloat::with_val(
+                    53,
+                    rug::float::Special::Infinity,
+                ))
+                .into());
+            } else if a == "-Infinity" {
+                return Ok(Float::from(MultiPrecisionFloat::with_val(
+                    53,
+                    rug::float::Special::NegInfinity,
+                ))
+                .into());
+            }
+
             // get the number of accurate digits
             let mut digits = a
                 .chars()
@@ -5174,18 +5308,32 @@ impl<'py> FromPyObject<'_, 'py> for PythonMultiPrecisionFloat {
 
             // the input is 0, determine accuracy
             if digits == 0 {
-                digits = a
-                    .chars()
-                    .filter(|x| *x != '.' && *x != '-')
-                    .take_while(|x| x.is_ascii_digit())
-                    .count()
+                if let Some((_pre, exp)) = a.split_once('E') {
+                    if let Ok(exp) = exp.parse::<isize>() {
+                        digits = exp.unsigned_abs();
+                    }
+                } else {
+                    digits = a
+                        .chars()
+                        .filter(|x| *x != '.' && *x != '-')
+                        .take_while(|x| x.is_ascii_digit())
+                        .count()
+                }
+
+                if digits == 0 {
+                    return Err(exceptions::PyValueError::new_err(format!(
+                        "Could not parse {a}",
+                    )));
+                }
             }
 
             Ok(Float::parse(
                 &a,
                 Some((digits as f64 * std::f64::consts::LOG2_10).ceil() as u32),
             )
-            .map_err(|_| exceptions::PyValueError::new_err("Not a floating point number"))?
+            .map_err(|_| {
+                exceptions::PyValueError::new_err(format!("Not a floating point number: {a}"))
+            })?
             .into())
         } else if let Ok(a) = ob.extract::<PyBackedStr>() {
             Ok(Float::parse(&a, None)
@@ -5243,11 +5391,23 @@ impl<'py> FromPyObject<'_, 'py> for Complex<Float> {
 #[cfg(feature = "python_stubgen")]
 impl_stub_type!(Complex<Float> = Complex64);
 
+impl Complex<Float> {
+    pub fn to_f64(&self) -> Complex<f64> {
+        Complex::new(self.re.to_f64(), self.im.to_f64())
+    }
+
+    pub fn to_double_float(&self) -> Complex<DoubleFloat> {
+        Complex::new(self.re.to_double_float(), self.im.to_double_float())
+    }
+}
+
 #[cfg(test)]
 mod test {
     use rug::Complete;
 
-    use super::{Complex, DoubleFloat, ErrorPropagatingFloat, Float, FloatLike, Rational, Real};
+    use super::{
+        Complex, DoubleFloat, ErrorPropagatingFloat, Float, FloatLike, Rational, Real, RealLike,
+    };
 
     fn eval_test<T: Real>(v: &[T]) -> T {
         v[0].sqrt() + v[1].log() + v[1].sin() - v[0].cos() + v[1].tan() - v[2].asin() + v[3].acos()
