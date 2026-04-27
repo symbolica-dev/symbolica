@@ -6,7 +6,7 @@ use crate::{
     atom::{Atom, AtomCore, AtomView, EvaluationInfo, Symbol},
     coefficient::{Coefficient, CoefficientView},
     domains::{
-        float::{Complex, Float, Real, RealLike},
+        float::{Complex, Float, FloatLike, Real, RealLike},
         integer::Integer,
         rational::Rational,
     },
@@ -2563,6 +2563,10 @@ fn polylog_exact(s: AtomView, z: AtomView) -> Option<Atom> {
     }
 
     if let Some(order) = atom_to_integer(s) {
+        if order < 0 {
+            return polylog_negative_integer_exact(order, z);
+        }
+
         if order == 0 {
             return Some(z.to_owned() / (Atom::num(1) - z));
         }
@@ -2570,6 +2574,35 @@ fn polylog_exact(s: AtomView, z: AtomView) -> Option<Atom> {
         if order == 1 {
             return Some(-function!(State::LOG, Atom::num(1) - z));
         }
+    }
+
+    if z.is_one() {
+        if let Some(order) = atom_to_integer(s) && order == 1 {
+            return Some(Atom::num(Coefficient::complex_infinity()));
+        }
+
+        if let Ok(rat) = Rational::try_from(s) && let Some(exact) = zeta_exact_rational(&rat) {
+            return Some(exact);
+        }
+
+        return Some(function!(SPECIALS.zeta, s.to_owned()));
+    }
+
+    if let Ok(rat) = Rational::try_from(z) && rat == Rational::from((-1, 1)) {
+        if let Some(order) = atom_to_integer(s) && order == 1 {
+            return Some(-function!(State::LOG, Atom::num(2)));
+        }
+
+        if let Ok(s_rat) = Rational::try_from(s)
+            && let Some(exact) = polylog_minus_one_exact_rational(&s_rat)
+        {
+            return Some(exact);
+        }
+
+        return Some(
+            -(Atom::num(1) - Atom::num(2).pow(Atom::num(1) - s.to_owned()))
+                * function!(SPECIALS.zeta, s.to_owned()),
+        );
     }
 
     None
@@ -2595,11 +2628,14 @@ fn polylog_numeric_eval(
         return Some(-(Complex::new(one.clone(), zero.clone()) - z.clone()).log());
     }
 
-    if s.im.to_f64() == 0.0 && s.re.to_f64() == 2.0 && z.im.to_f64() == 0.0 {
-        return Some(Complex::new(
-            z.re.clone().into_inner().li2().into(),
-            zero.clone(),
-        ));
+    if s.im.to_f64() == 0.0 {
+        let rounded = s.re.to_f64().round();
+        if (s.re.to_f64() - rounded).abs() < 1e-14
+            && rounded >= i64::MIN as f64
+            && rounded <= i64::MAX as f64
+        {
+            return polylog_integer_numeric_eval(rounded as i64, z, binary_prec, 0);
+        }
     }
 
     if z.norm().re.to_f64() >= 0.95 {
@@ -2623,6 +2659,298 @@ fn polylog_numeric_eval(
     }
 
     Some(sum)
+}
+
+fn polylog_minus_one_exact_rational(s: &Rational) -> Option<Atom> {
+    if *s == Rational::one() {
+        return Some(-function!(State::LOG, Atom::num(2)));
+    }
+
+    let zeta_term = if let Some(exact) = zeta_exact_rational(s) {
+        exact
+    } else {
+        function!(SPECIALS.zeta, Atom::num(s.clone()))
+    };
+
+    Some(
+        -(Atom::num(1) - Atom::num(2).pow(Atom::num(1) - Atom::num(s.clone()))) * zeta_term,
+    )
+}
+
+fn polylog_negative_integer_exact(order: i64, z: AtomView) -> Option<Atom> {
+    let n = order.checked_neg()? as u32;
+    let coeffs = eulerian_row(n);
+    let mut numerator = Atom::new();
+
+    for (k, coeff) in coeffs.into_iter().enumerate() {
+        numerator += Atom::num(coeff) * z.to_owned().pow(Atom::num((k + 1) as i64));
+    }
+
+    Some(numerator / (Atom::num(1) - z).pow(Atom::num((n + 1) as i64)))
+}
+
+fn eulerian_row(n: u32) -> Vec<Integer> {
+    if n == 0 {
+        return vec![Integer::from(1)];
+    }
+
+    let mut row = vec![Integer::from(1)];
+    for m in 2..=n {
+        let mut next = vec![Integer::from(0); m as usize];
+        for k in 0..m as usize {
+            let mut value = Integer::from(0);
+            if k > 0 {
+                value += Integer::from(m - k as u32) * row[k - 1].clone();
+            }
+            if k < row.len() {
+                value += Integer::from(k as u32 + 1) * row[k].clone();
+            }
+            next[k] = value;
+        }
+        row = next;
+    }
+
+    row
+}
+
+fn polylog_integer_numeric_eval(
+    order: i64,
+    z: &Complex<Float>,
+    binary_prec: u32,
+    depth: u32,
+) -> Option<Complex<Float>> {
+    if depth > 8 {
+        return None;
+    }
+
+    let zero = Float::new(binary_prec);
+    if order <= 0 {
+        return Some(polylog_negative_integer_numeric_eval(order, z, binary_prec));
+    }
+
+    if z.im.to_f64() == 0.0 && z.re.to_f64() == 1.0 {
+        return Some(zeta_integer_numeric_eval(order, binary_prec));
+    }
+
+    if z.im.to_f64() == 0.0 && z.re.to_f64() == -1.0 {
+        let zeta = zeta_integer_numeric_eval(order, binary_prec);
+        let exponent = Complex::new(Float::with_val(binary_prec, 1 - order), zero.clone());
+        let factor = complex_one(binary_prec)
+            - Complex::new(Float::with_val(binary_prec, 2), zero.clone()).powf(&exponent);
+        return Some(-factor * zeta);
+    }
+
+    if order == 1 {
+        return Some(-(complex_one(binary_prec) - z.clone()).log());
+    }
+
+    if order == 2 && z.im.to_f64() == 0.0 && z.re.to_f64() <= 1.0 {
+        return Some(Complex::new(
+            z.re.clone().into_inner().li2().into(),
+            zero.clone(),
+        ));
+    }
+
+    let abs_z = z.norm().re.to_f64().abs();
+    if abs_z < 0.95 {
+        return polylog_series_integer(order as u32, z, binary_prec, 64);
+    }
+
+    let log_z = z.clone().log();
+    if log_z.norm().re.to_f64().abs() < 1.0 {
+        return Some(polylog_real_branch_fix(
+            z,
+            polylog_jonquiere_integer(order as u32, &log_z, binary_prec),
+        ));
+    }
+
+    if abs_z <= 1.0 + 1e-14 {
+        return polylog_series_integer(order as u32, z, binary_prec, 64);
+    }
+
+    let inv = complex_one(binary_prec) / z.clone();
+    if order == 2 {
+        let continued = polylog_integer_numeric_eval(order, &inv, binary_prec, depth + 1)?;
+        let log_minus_z = polylog_log_minus(z, binary_prec);
+        let pi_sq_over_six = Complex::new(
+            Float::with_val(binary_prec, Constant::Pi).pow(2) / Float::with_val(binary_prec, 6),
+            zero.clone(),
+        );
+        return Some(polylog_real_branch_fix(
+            z,
+            -continued
+                - pi_sq_over_six
+                - log_minus_z.clone() * log_minus_z
+                    / Complex::new(Float::with_val(binary_prec, 2), zero.clone()),
+        ));
+    }
+
+    let continued = polylog_integer_numeric_eval(order, &inv, binary_prec, depth + 1)?;
+    let log_minus_z = polylog_log_minus(z, binary_prec);
+    let bernoulli = bernoulli_polynomial(
+        order as u32,
+        &(Complex::new(Float::with_val(binary_prec, 1), zero.clone())
+            / Complex::new(Float::with_val(binary_prec, 2), zero.clone())
+            + log_minus_z.clone()
+                / (Complex::new(Float::with_val(binary_prec, 2), zero.clone())
+                    * Complex::new(Float::with_val(binary_prec, Constant::Pi), zero.clone())
+                    * complex_i(binary_prec))),
+        binary_prec,
+    );
+    let two_pi_i = Complex::new(
+        Float::with_val(binary_prec, 2) * Float::with_val(binary_prec, Constant::Pi),
+        zero.clone(),
+    ) * complex_i(binary_prec);
+    let prefactor = -pow_complex_u32(&two_pi_i, order as u32)
+        / Complex::new(factorial_float(order as u32, binary_prec), zero.clone());
+
+    if order % 2 == 0 {
+        Some(polylog_real_branch_fix(z, prefactor * bernoulli - continued))
+    } else {
+        Some(polylog_real_branch_fix(z, prefactor * bernoulli + continued))
+    }
+}
+
+fn polylog_negative_integer_numeric_eval(
+    order: i64,
+    z: &Complex<Float>,
+    binary_prec: u32,
+) -> Complex<Float> {
+    let n = order.checked_neg().unwrap_or_default() as u32;
+    let coeffs = eulerian_row(n);
+    let mut poly = Complex::new(Float::new(binary_prec), Float::new(binary_prec));
+
+    for coeff in coeffs.iter().rev() {
+        poly = z.clone()
+            * (poly
+                + Complex::new(
+                    Float::with_val(binary_prec, coeff.clone().to_multi_prec()),
+                    Float::new(binary_prec),
+                ));
+    }
+
+    poly / pow_complex_u32(&(complex_one(binary_prec) - z.clone()), n + 1)
+}
+
+fn polylog_series_integer(
+    order: u32,
+    z: &Complex<Float>,
+    binary_prec: u32,
+    max_terms_factor: u32,
+) -> Option<Complex<Float>> {
+    let zero = Float::new(binary_prec);
+    let threshold = 2f64.powi(-(binary_prec.min(900) as i32));
+    let mut z_pow = z.clone();
+    let mut sum = Complex::new(zero.clone(), zero.clone());
+
+    for k in 1..(max_terms_factor * binary_prec.max(16)) {
+        let denom = Float::with_val(binary_prec, k).pow(order as u64);
+        let term = z_pow.clone() / Complex::new(denom, zero.clone());
+        let term_size = term.norm().re.to_f64().abs();
+        sum += term;
+        if k > 16 && (term_size == 0.0 || term_size < threshold) {
+            return Some(sum);
+        }
+        z_pow *= z.clone();
+    }
+
+    Some(sum)
+}
+
+fn polylog_jonquiere_integer(order: u32, mu: &Complex<Float>, binary_prec: u32) -> Complex<Float> {
+    let zero = Float::new(binary_prec);
+    let threshold = 2f64.powi(-(binary_prec.min(900) as i32));
+    let mut sum = Complex::new(zero.clone(), zero.clone());
+    let mut mu_pow = Complex::new(Float::with_val(binary_prec, 1), zero.clone());
+    let mut factorial = Float::with_val(binary_prec, 1);
+
+    for k in 0u32..(32 * binary_prec.max(16)) {
+        let term = if k + 1 == order {
+            mu_pow.clone()
+                / Complex::new(factorial.clone(), zero.clone())
+                * Complex::new(
+                    harmonic_rational(order - 1).to_multi_prec_float(binary_prec),
+                    zero.clone(),
+                )
+                - mu_pow.clone() / Complex::new(factorial.clone(), zero.clone()) * (-mu.clone()).log()
+        } else {
+            mu_pow.clone() / Complex::new(factorial.clone(), zero.clone())
+                * zeta_integer_numeric_eval(order as i64 - k as i64, binary_prec)
+        };
+
+        let term_size = term.norm().re.to_f64().abs();
+        sum += term;
+        if k > order + 8 && (term_size == 0.0 || term_size < threshold) {
+            return sum;
+        }
+
+        mu_pow *= mu.clone();
+        factorial *= Float::with_val(binary_prec, k + 1);
+    }
+
+    sum
+}
+
+fn zeta_integer_numeric_eval(order: i64, binary_prec: u32) -> Complex<Float> {
+    zeta_numeric_eval(
+        &Complex::new(Float::with_val(binary_prec, order), Float::new(binary_prec)),
+        binary_prec,
+    )
+}
+
+fn bernoulli_polynomial(n: u32, x: &Complex<Float>, binary_prec: u32) -> Complex<Float> {
+    let zero = Float::new(binary_prec);
+    let mut sum = Complex::new(zero.clone(), zero.clone());
+
+    for k in 0..=n {
+        let coeff = Float::with_val(binary_prec, Integer::binom(n.into(), k.into()).to_multi_prec())
+            * bernoulli_number(n - k).to_multi_prec_float(binary_prec);
+        sum += Complex::new(coeff, zero.clone()) * pow_complex_u32(x, k);
+    }
+
+    sum
+}
+
+fn polylog_log_minus(z: &Complex<Float>, binary_prec: u32) -> Complex<Float> {
+    if z.im.to_f64() == 0.0 && z.re.to_f64() > 0.0 {
+        return z.clone().log()
+            + Complex::new(Float::new(binary_prec), Float::with_val(binary_prec, Constant::Pi));
+    }
+
+    (-z.clone()).log()
+}
+
+fn polylog_real_branch_fix(z: &Complex<Float>, value: Complex<Float>) -> Complex<Float> {
+    if z.im.to_f64() == 0.0 && z.re.to_f64() > 1.0 && value.im.to_f64() > 0.0 {
+        return Complex::new(value.re, -value.im);
+    }
+
+    value
+}
+
+fn pow_complex_u32(z: &Complex<Float>, n: u32) -> Complex<Float> {
+    if n == 0 {
+        return complex_one(z.re.prec().max(z.im.prec()));
+    }
+
+    let prec = z.re.prec().max(z.im.prec());
+    let mut base = z.clone();
+    let mut exp = n;
+    let mut out = complex_one(prec);
+    while exp > 0 {
+        if exp % 2 == 1 {
+            out *= base.clone();
+        }
+        exp /= 2;
+        if exp > 0 {
+            base *= base.clone();
+        }
+    }
+    out
+}
+
+fn factorial_float(n: u32, binary_prec: u32) -> Float {
+    Float::with_val(binary_prec, Integer::factorial(n).to_multi_prec())
 }
 
 fn zeta_numeric_eval(s: &Complex<Float>, binary_prec: u32) -> Complex<Float> {
@@ -2987,7 +3315,13 @@ mod tests {
     fn polylog_basic_normalization() {
         assert_eq!(parse!("polylog(s,0)"), Atom::new());
         assert_eq!(parse!("polylog(0,x)"), parse!("x/(1-x)"));
+        assert_eq!(parse!("polylog(-1,x)"), parse!("x/(1-x)^2"));
+        assert_eq!(parse!("polylog(-2,x)"), parse!("(x+x^2)/(1-x)^3"));
         assert_eq!(parse!("polylog(1,x)"), parse!("-log(1-x)"));
+        assert_eq!(parse!("polylog(2,1)"), parse!("1/6*pi^2"));
+        assert_eq!(parse!("polylog(3,1)"), parse!("zeta(3)"));
+        assert_eq!(parse!("polylog(1,-1)"), parse!("-log(2)"));
+        assert_eq!(parse!("polylog(2,-1)"), parse!("-1/12*pi^2"));
         assert_eq!(
             parse!("polylog(3,x)").derivative(symbol!("x")),
             parse!("polylog(2,x)/x")
@@ -3008,6 +3342,21 @@ mod tests {
         let expected = ginsh_polylog("2", "0.5", 50);
         let actual = Complex::<Float>::try_from(parse!("polylog(2,1/2)").to_float(50)).unwrap();
         assert_close_complex(&actual, &expected, "1e-40");
+    }
+
+    #[test]
+    fn polylog_matches_ginac_off_series_region() {
+        if Command::new("ginsh").arg("--help").output().is_err() {
+            return;
+        }
+
+        let expected = ginsh_polylog("2", "2", 50);
+        let actual = Complex::<Float>::try_from(parse!("polylog(2,2)").to_float(50)).unwrap();
+        assert_close_complex(&actual, &expected, "1e-12");
+
+        let expected = ginsh_polylog("3", "11/10", 50);
+        let actual = Complex::<Float>::try_from(parse!("polylog(3,11/10)").to_float(50)).unwrap();
+        assert_close_complex(&actual, &expected, "1e-24");
     }
 
     #[test]
