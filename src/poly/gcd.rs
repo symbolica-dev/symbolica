@@ -259,58 +259,14 @@ impl<F: Field, E: PositiveExponent> MultivariatePolynomial<F, E> {
     ) -> MultivariatePolynomial<F, E> {
         let mut gp = self.zero();
 
-        // solve the transposed Vandermonde system
-        for (((c, ex), sample), rhs) in shape.iter().zip(&row_sample_values).zip(&samples) {
-            if c.nterms() == 1 {
-                let coeff = self.ring.div(&rhs[0], &sample[0]);
-                let mut ee: SmallVec<[E; INLINED_EXPONENTS]> = c.exponents(0).into();
+        for (((shape_part, ex), sample_powers), rhs) in
+            shape.iter().zip(&row_sample_values).zip(&samples)
+        {
+            let coeffs = self.solve_shifted_transposed_vandermonde(sample_powers, rhs);
+
+            for (coeff, term) in coeffs.into_iter().zip(shape_part) {
+                let mut ee: SmallVec<[E; INLINED_EXPONENTS]> = term.exponents.into();
                 ee[main_var] = *ex;
-                gp.append_monomial(coeff, &ee);
-                continue;
-            }
-
-            // construct the master polynomial (1-s1)*(1-s2)*... efficiently
-            let mut master = vec![self.ring.zero(); sample.len() + 1];
-            master[0] = self.ring.one();
-
-            for (i, x) in sample.iter().take(c.nterms()).enumerate() {
-                let first = &mut master[0];
-                let mut old_last = first.clone();
-                self.ring.mul_assign(first, &self.ring.neg(x));
-                for m in &mut master[1..=i] {
-                    let ov = m.clone();
-                    self.ring.mul_assign(m, &self.ring.neg(x));
-                    self.ring.add_assign(m, &old_last);
-                    old_last = ov;
-                }
-                master[i + 1] = self.ring.one();
-            }
-
-            for (i, s) in sample.iter().take(c.nterms()).enumerate() {
-                let mut norm = self.ring.one();
-
-                // sample master/(1-s_i) by using the factorized form
-                for (j, l) in sample.iter().enumerate() {
-                    if j != i {
-                        self.ring.mul_assign(&mut norm, &self.ring.sub(s, l))
-                    }
-                }
-
-                // divide out 1-s_i
-                let mut coeff = self.ring.zero();
-                let mut last_q = self.ring.zero();
-                for (m, rhs) in master.iter().skip(1).zip(rhs).rev() {
-                    last_q = self.ring.add(m, &self.ring.mul(s, &last_q));
-                    self.ring.add_mul_assign(&mut coeff, &last_q, rhs);
-                }
-                self.ring.div_assign(&mut coeff, &norm);
-
-                // divide by the Vandermonde row since the Vandermonde matrices should start with a 1
-                self.ring.div_assign(&mut coeff, s);
-
-                let mut ee: SmallVec<[E; INLINED_EXPONENTS]> = c.exponents(i).into();
-                ee[main_var] = *ex;
-
                 gp.append_monomial(coeff, &ee);
             }
         }
@@ -318,15 +274,68 @@ impl<F: Field, E: PositiveExponent> MultivariatePolynomial<F, E> {
         gp
     }
 
-    fn solve_vandermonde_matrix(
+    /// Solve `rhs[k] = sum_i c_i * x[i]^(k+1)`.
+    fn solve_shifted_transposed_vandermonde(
         &self,
-        matrix: Vec<Vec<F::Element>>,
-        rhs: Vec<F::Element>,
+        x: &[F::Element],
+        rhs: &[F::Element],
     ) -> Vec<F::Element> {
-        let m = Matrix::from_nested_vec(matrix, self.ring.clone()).unwrap();
-        m.solve(&Matrix::new_vec(rhs, self.ring.clone()))
-            .unwrap()
-            .into_vec()
+        debug_assert_eq!(x.len(), rhs.len());
+
+        match x.len() {
+            0 => vec![],
+            1 => vec![self.ring.div(&rhs[0], &x[0])],
+            len => {
+                let mut master = vec![self.ring.zero(); len + 1];
+                master[0] = self.ring.one();
+
+                for (i, x) in x.iter().enumerate() {
+                    let first = &mut master[0];
+                    let mut old_last = first.clone();
+                    self.ring.mul_assign(first, &self.ring.neg(x));
+                    for m in &mut master[1..=i] {
+                        let ov = m.clone();
+                        self.ring.mul_assign(m, &self.ring.neg(x));
+                        self.ring.add_assign(m, &old_last);
+                        old_last = ov;
+                    }
+                    master[i + 1] = self.ring.one();
+                }
+
+                let mut sol = Vec::with_capacity(len);
+                for (i, s) in x.iter().enumerate() {
+                    // sample master/(1-s_i) by using the factorized form
+                    let mut norm = self.ring.one();
+                    for (j, l) in x.iter().enumerate() {
+                        if j != i {
+                            let diff = self.ring.sub(s, l);
+                            if self.ring.is_zero(&diff) {
+                                panic!("Vandermonde matrix has duplicate entries");
+                            }
+                            self.ring.mul_assign(&mut norm, &diff);
+                        }
+                    }
+
+                    // divide out 1-s_i
+                    let mut coeff = self.ring.zero();
+                    let mut last_q = self.ring.zero();
+                    for (m, rhs) in master.iter().skip(1).zip(rhs).rev() {
+                        last_q = self.ring.add(m, &self.ring.mul(s, &last_q));
+                        self.ring.add_mul_assign(&mut coeff, &last_q, rhs);
+                    }
+
+                    self.ring.div_assign(&mut coeff, &norm);
+
+                    // Convert from the ordinary transposed Vandermonde basis
+                    // sample_generators[i]^k to the shifted basis sample_generators[i]^(k+1).
+                    self.ring.div_assign(&mut coeff, &x[i]);
+
+                    sol.push(coeff);
+                }
+
+                sol
+            }
+        }
     }
 
     /// Perform Newton interpolation in the variable `x`, by providing
@@ -2704,7 +2713,7 @@ impl<E: PositiveExponent> MultivariatePolynomial<IntegerRing, E> {
                     continue 'new_image;
                 }
 
-                // solve system to find coefficients
+                // solve shifted Vandermonde system to find coefficients
                 let mut h_p = kr_a_p.zero();
                 for i in 0..=d_0.to_u32() {
                     if missing_terms && coeffs[i as usize].iter().all(|x| p.is_zero(x)) {
@@ -2716,12 +2725,24 @@ impl<E: PositiveExponent> MultivariatePolynomial<IntegerRing, E> {
                     }
 
                     let monomials: Vec<_> = sigma[i as usize].iter().cloned().collect();
-                    let mat = sample_points
+                    let solve_rows = monomials.len();
+                    debug_assert_eq!(solve_rows, tau[i as usize]);
+                    let sample_generators = monomials
                         .iter()
-                        .map(|x| monomials.iter().map(|e| p.pow(x, *e)).collect())
+                        .map(|e| p.pow(&alpha, *e))
                         .collect::<Vec<_>>();
 
-                    let sol = gs[0].solve_vandermonde_matrix(mat, coeffs[i as usize].clone());
+                    let mut sol = gs[0].solve_shifted_transposed_vandermonde(
+                        &sample_generators,
+                        &coeffs[i as usize][..solve_rows],
+                    );
+                    for ((coeff, sample_generator), e) in
+                        sol.iter_mut().zip(&sample_generators).zip(&monomials)
+                    {
+                        p.mul_assign(coeff, sample_generator);
+                        let initial_power = p.pow(&sample_points[0], *e);
+                        p.div_assign(coeff, &initial_power);
+                    }
 
                     let mut exp = vec![0; self.nvars()];
                     let mut h_p_e = kr_a_p.zero();
@@ -2731,12 +2752,13 @@ impl<E: PositiveExponent> MultivariatePolynomial<IntegerRing, E> {
                         h_p_e.append_monomial(coeff, &exp);
                     }
 
-                    if !missing_terms {
-                        let aa = h_p_e.replace(
-                            1,
-                            &p.pow(&alpha, p.from_element(&s) as u64 + tau[i as usize] as u64),
-                        );
-                        if aa.get_constant() != coeffs[i as usize][tau[i as usize]] {
+                    for (sample_point, expected) in sample_points
+                        .iter()
+                        .zip(&coeffs[i as usize])
+                        .skip(solve_rows)
+                    {
+                        let aa = h_p_e.replace(1, sample_point);
+                        if aa.get_constant() != *expected {
                             debug!("Missing terms in h_p_e: {}", h_p_e);
 
                             missing_terms = true;
@@ -3206,17 +3228,24 @@ impl<E: PositiveExponent> MultivariatePolynomial<IntegerRing, E> {
                     }
 
                     let monomials: Vec<_> = sigma[&e_x_y].iter().cloned().collect();
-                    let mat = sample_points
+                    let solve_rows = monomials.len();
+                    debug_assert_eq!(solve_rows, tau[&e_x_y]);
+                    let sample_generators = monomials
                         .iter()
-                        .map(|x| monomials.iter().map(|e| p.pow(x, *e)).collect())
+                        .map(|e| p.pow(&alpha, *e))
                         .collect::<Vec<_>>();
 
-                    let missing_terms_check = if !missing_terms {
-                        Some(row[tau[&e_x_y]])
-                    } else {
-                        None
-                    };
-                    let sol = gs[0].solve_vandermonde_matrix(mat, row);
+                    let mut sol = gs[0].solve_shifted_transposed_vandermonde(
+                        &sample_generators,
+                        &row[..solve_rows],
+                    );
+                    for ((coeff, sample_generator), e) in
+                        sol.iter_mut().zip(&sample_generators).zip(&monomials)
+                    {
+                        p.mul_assign(coeff, sample_generator);
+                        let initial_power = p.pow(&sample_points[0], *e);
+                        p.div_assign(coeff, &initial_power);
+                    }
 
                     let mut exp = vec![0; self.nvars()];
                     let mut h_p_e = kr_a_p.zero();
@@ -3226,14 +3255,10 @@ impl<E: PositiveExponent> MultivariatePolynomial<IntegerRing, E> {
                         h_p_e.append_monomial(coeff, &exp);
                     }
 
-                    if !missing_terms {
-                        let max = tau[&e_x_y];
-                        let aa = h_p_e.replace(
-                            start_exp,
-                            &p.pow(&alpha, p.from_element(&s) as u64 + max as u64),
-                        );
-
-                        if aa.get_constant() != missing_terms_check.unwrap() {
+                    for (sample_point, expected) in sample_points.iter().zip(&row).skip(solve_rows)
+                    {
+                        let aa = h_p_e.replace(start_exp, sample_point);
+                        if aa.get_constant() != *expected {
                             debug!("Missing terms in h_p2 for {:?}: {}; {}", e_x_y, h_p_e, aa);
 
                             missing_terms = true;
