@@ -258,6 +258,7 @@ def S(name: str,
     eval: dict[str, Any] | None:
         Numeric evaluation function(s). The dictionary may contain:
         - `tag_count: int`: the number of leading symbolic tag arguments.
+        - `cpp: str`: a C++ function definition inserted into exported C++ code for this symbol.
 
         For arbitrary precision evaluation of constant functions, register a function that
         maps the tags and the requested decimal precision to a number:
@@ -747,6 +748,7 @@ class Expression:
         eval: dict[str, Any] | None:
             Numeric evaluation function(s). The dictionary may contain:
             - `tag_count: int`: the number of leading symbolic tag arguments.
+            - `cpp: str`: a C++ function definition inserted into exported C++ code for this symbol.
 
             For arbitrary precision evaluation of constant functions, register a function that
             maps the tags and the requested decimal precision to a number:

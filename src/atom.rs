@@ -375,6 +375,8 @@ pub struct EvaluationInfo {
     constant_eval_cache: OnceLock<Result<Complex<Float>, String>>,
     /// A map from the evaluation result type to either a direct tagless implementation or a tagged generator.
     eval_fns: HashMap<TypeId, ErasedEvalFn>,
+    /// A C++ snippet that defines this external function for exported code.
+    cpp: Option<String>,
 }
 
 pub type EvalFn<T> = Box<dyn ExternalFunction<T>>;
@@ -402,6 +404,7 @@ impl EvaluationInfo {
             constant_eval: None,
             constant_eval_cache: OnceLock::new(),
             eval_fns: HashMap::default(),
+            cpp: None,
         }
     }
 
@@ -420,6 +423,7 @@ impl EvaluationInfo {
             constant_eval: Some(Box::new(f)),
             constant_eval_cache: OnceLock::new(),
             eval_fns: HashMap::default(),
+            cpp: None,
         }
     }
 
@@ -441,6 +445,22 @@ impl EvaluationInfo {
     /// Return the number of leading symbolic arguments interpreted as tags.
     pub fn get_tag_count(&self) -> usize {
         self.tag_count
+    }
+
+    /// Attach a C++ snippet that defines this external function for exported code.
+    ///
+    /// The snippet is inserted verbatim into C++ output when an evaluator exports a
+    /// call to this symbol as an external function. It should define a function
+    /// with the exported name, which is the symbol's ASCII name by default or the
+    /// rename configured in [`crate::evaluate::FunctionMap::add_external_function`].
+    pub fn with_cpp(mut self, snippet: impl Into<String>) -> Self {
+        self.cpp = Some(snippet.into());
+        self
+    }
+
+    /// Return the attached C++ snippet, if any.
+    pub fn get_cpp(&self) -> Option<&str> {
+        self.cpp.as_deref()
     }
 
     /// Register a tagless numeric implementation for type `T`.
