@@ -2154,6 +2154,10 @@ impl<T> ExternalFunctionContainer<T> {
         let tags = self.tag_views();
         T2::resolve_function(&tags, info)
     }
+
+    fn cpp(&self) -> Option<&str> {
+        self.symbol.get_evaluation_info()?.get_cpp()
+    }
 }
 
 impl<T> std::fmt::Display for ExternalFunctionContainer<T> {
@@ -4163,6 +4167,8 @@ impl<T: ExportNumber + SingleFloat> ExpressionEvaluator<T> {
 
         match asm {
             InlineASM::AVX2 => {
+                res += &self.export_external_cpps();
+
                 res += &format!(
                     "extern \"C\" unsigned long {}_get_buffer_len()\n{{\n\treturn {};\n}}\n\n",
                     function_name,
@@ -4247,6 +4253,7 @@ impl<T: ExportNumber + SingleFloat> ExpressionEvaluator<T> {
             res += header;
             res += "\n\n";
         }
+
         if number_class == NumberClass::ComplexF64 {
             res += "typedef cuda::std::complex<double> CudaNumber;\n";
             res += "typedef std::complex<double> Number;\n";
@@ -4254,6 +4261,7 @@ impl<T: ExportNumber + SingleFloat> ExpressionEvaluator<T> {
             res += "typedef double CudaNumber;\n";
             res += "typedef double Number;\n";
         }
+        res += &self.export_external_cpps();
 
         res += &format!(
             "\n__device__ void {}(CudaNumber* params, CudaNumber* out, size_t index) {{\n",
@@ -4455,6 +4463,7 @@ extern "C" {{
             res += header;
             res += "\n";
         }
+        res += &self.export_external_cpps();
 
         res += &format!(
             "extern \"C\" unsigned long {}_get_buffer_len()\n{{\n\treturn {};\n}}\n\n",
@@ -4637,6 +4646,7 @@ extern "C" {{
             res += header;
             res += "\n";
         }
+        res += &self.export_external_cpps();
 
         res += &format!(
             "extern \"C\" unsigned long {}_get_buffer_len()\n{{\n\treturn {};\n}}\n\n",
@@ -4688,6 +4698,7 @@ extern "C" {{
             res += header;
             res += "\n";
         }
+        res += &self.export_external_cpps();
 
         res += &format!(
             "extern \"C\" unsigned long {}_get_buffer_len()\n{{\n\treturn {};\n}}\n\n",
@@ -6759,6 +6770,33 @@ impl<T: Real> ExpressionEvaluatorWithExternalFunctions<T> {
 
     pub fn evaluate(&mut self, params: &[T], out: &mut [T]) {
         self.eval.evaluate(params, out);
+    }
+}
+
+impl<T> ExpressionEvaluator<T> {
+    fn export_external_cpps(&self) -> String {
+        let mut seen = HashSet::default();
+        let mut res = String::new();
+
+        for external in &self.external_fns {
+            if external.constant_index.is_some() {
+                continue;
+            }
+
+            let Some(snippet) = external.cpp() else {
+                continue;
+            };
+
+            if seen.insert(snippet.to_owned()) {
+                res += snippet;
+                if !snippet.ends_with('\n') {
+                    res += "\n";
+                }
+                res += "\n";
+            }
+        }
+
+        res
     }
 }
 
@@ -13175,7 +13213,10 @@ mod test {
             float::{Complex, Float, FloatLike},
             rational::Rational,
         },
-        evaluate::{Dualizer, EvaluationFn, ExternalFunction, FunctionMap, OptimizationSettings},
+        evaluate::{
+            Dualizer, EvaluationFn, ExportSettings, ExternalFunction, FunctionMap,
+            OptimizationSettings,
+        },
         id::ConditionResult,
         parse, symbol,
     };
@@ -13467,6 +13508,31 @@ mod test {
         let mut out = vec![0.; 2];
         evr.evaluate(&[1., 2.], &mut out);
         assert_eq!(out, vec![2., 2.]);
+    }
+
+    #[test]
+    fn export_cpp_includes_evaluation_info_snippet() {
+        let _ = symbol!(
+            "cpp_external",
+            eval = EvaluationInfo::new()
+                .with_cpp("inline double cpp_external(double x) { return x + 1.; }")
+        );
+
+        let ev = parse!("cpp_external(x)")
+            .evaluator(
+                &FunctionMap::new(),
+                &[parse!("x")],
+                OptimizationSettings::default(),
+            )
+            .unwrap()
+            .map_coeff(&|x| x.re.to_f64());
+
+        let code = ev
+            .export_cpp_str::<f64>("snippet_test", ExportSettings::default())
+            .unwrap();
+
+        assert!(code.contains("inline double cpp_external(double x)"));
+        assert!(code.contains("cpp_external(params[0])"));
     }
 
     #[test]

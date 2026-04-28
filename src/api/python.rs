@@ -597,6 +597,7 @@ struct PythonEvalSpec {
     decimal: Option<Py<PyAny>>,
     decimal_complex: Option<Py<PyAny>>,
     constant: Option<Py<PyAny>>,
+    cpp: Option<String>,
 }
 
 impl PythonEvalSpec {
@@ -607,6 +608,7 @@ impl PythonEvalSpec {
         "decimal",
         "decimal_complex",
         "constant",
+        "cpp",
     ];
 
     fn from_py(py: Python, eval: Py<PyAny>) -> PyResult<Self> {
@@ -630,6 +632,7 @@ impl PythonEvalSpec {
             decimal: Self::get_eval_callable(dict, "decimal")?,
             decimal_complex: Self::get_eval_callable(dict, "decimal_complex")?,
             constant: Self::get_eval_callable(dict, "constant")?,
+            cpp: Self::get_eval_string(dict, "cpp")?,
         };
 
         if spec.constant.is_some()
@@ -830,7 +833,11 @@ impl PythonEvalSpec {
             }
         }
 
-        info
+        if let Some(snippet) = self.cpp {
+            info.with_cpp(snippet)
+        } else {
+            info
+        }
     }
 
     fn get_eval_callable(dict: &Bound<'_, PyDict>, key: &str) -> PyResult<Option<Py<PyAny>>> {
@@ -842,6 +849,16 @@ impl PythonEvalSpec {
             }
 
             return Ok(Some(value.unbind()));
+        }
+
+        Ok(None)
+    }
+
+    fn get_eval_string(dict: &Bound<'_, PyDict>, key: &str) -> PyResult<Option<String>> {
+        if let Ok(Some(value)) = dict.get_item(key) {
+            return value.extract::<String>().map(Some).map_err(|_| {
+                exceptions::PyTypeError::new_err(format!("eval['{key}'] must be a string"))
+            });
         }
 
         Ok(None)
@@ -1262,6 +1279,7 @@ series: Optional[Callable[[Sequence[Series]], Optional[tuple[Expression, Express
 eval: dict[str, Any] | None:
     Numeric evaluation function(s). The dictionary may contain:
     - `tag_count: int`: the number of leading symbolic tag arguments.
+    - `cpp: str`: a C++ function definition inserted into exported C++ code for this symbol.
 
     For arbitrary precision evaluation of constant functions, register a function that
     maps the tags and the requested decimal precision to a number:
@@ -8700,6 +8718,7 @@ series: Optional[Callable[[Sequence[Series]], Optional[tuple[Expression, Express
 eval: dict[str, Any] | None:
     Numeric evaluation function(s). The dictionary may contain:
     - `tag_count: int`: the number of leading symbolic tag arguments.
+    - `cpp: str`: a C++ function definition inserted into exported C++ code for this symbol.
 
     For arbitrary precision evaluation of constant functions, register a function that
     maps the tags and the requested decimal precision to a number:
