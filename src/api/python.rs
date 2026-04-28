@@ -16914,10 +16914,14 @@ impl PythonExpressionEvaluator {
         evaluator: Bound<'_, PyBytes>,
         external_functions: BTreeMap<(PolyVariable, String), Py<PyAny>>,
     ) -> PyResult<Self> {
-        let (jit_compile, eval): (bool, ExpressionEvaluator<Complex<Rational>>) =
-            bincode::decode_from_slice(evaluator.extract()?, bincode::config::standard())
-                .map_err(|e| pyo3::exceptions::PyIOError::new_err(e.to_string()))?
-                .0;
+        let (jit_compile, eval, jit_real, jit_complex): (
+            bool,
+            ExpressionEvaluator<Complex<Rational>>,
+            Option<JITCompiledEvaluator<f64>>,
+            Option<JITCompiledEvaluator<Complex<f64>>>,
+        ) = bincode::decode_from_slice(evaluator.extract()?, bincode::config::standard())
+            .map_err(|e| pyo3::exceptions::PyIOError::new_err(e.to_string()))?
+            .0;
 
         Ok(PythonExpressionEvaluator {
             rational_constants: eval.get_constants().to_vec(),
@@ -16927,8 +16931,8 @@ impl PythonExpressionEvaluator {
             )
             .map_err(|e| exceptions::PyValueError::new_err(e))?,
             eval_real: None,
-            jit_real: None,
-            jit_complex: None,
+            jit_real,
+            jit_complex,
             eval_double_float: None,
             eval_double_float_complex: None,
             eval_arb_prec: None,
@@ -16949,6 +16953,8 @@ impl PythonExpressionEvaluator {
                     .get_evaluator()
                     .clone()
                     .set_coeff(&self.rational_constants),
+                &self.jit_real,
+                &self.jit_complex,
             ),
             bincode::config::standard(),
         )
