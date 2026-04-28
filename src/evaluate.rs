@@ -17,7 +17,7 @@ use std::{
         atomic::{AtomicBool, AtomicUsize, Ordering},
     },
 };
-use symjit::{Applet, Config, Defuns, Translator};
+use symjit::{Applet, Composer, Config, Defuns, Storage, Translator};
 
 use crate::{
     LicenseManager,
@@ -445,7 +445,7 @@ fn register_constant_external_container<T>(
 ) -> usize {
     let index = if let Some(index) = external_functions
         .iter()
-        .position(|x| x.eval_name == symbol && x.tags == tags)
+        .position(|x| x.symbol == symbol && x.tags == tags)
     {
         index
     } else {
@@ -900,7 +900,7 @@ impl<'a> AtomView<'a> {
                     let tags = tags.iter().map(|x| crate::parse!(x)).collect::<Vec<_>>();
                     let index = if let Some(index) = external_functions
                         .iter()
-                        .position(|x| x.eval_name == *sym && x.tags == tags)
+                        .position(|x| x.symbol == *sym && x.tags == tags)
                     {
                         index
                     } else {
@@ -1971,7 +1971,7 @@ impl<T: std::hash::Hash + Clone> Expression<T> {
 
 pub struct ExternalFunctionContainer<T> {
     export_name: String,
-    eval_name: Symbol,
+    symbol: Symbol,
     tags: Vec<Atom>,
     imp: Option<Box<dyn ExternalFunction<T>>>,
     cache: Vec<T>,
@@ -1983,7 +1983,7 @@ impl<T> serde::Serialize for ExternalFunctionContainer<T> {
     fn serialize<S: serde::Serializer>(&self, serializer: S) -> Result<S::Ok, S::Error> {
         (
             &self.export_name,
-            &self.eval_name,
+            &self.symbol,
             self.tags
                 .iter()
                 .map(|x| x.to_canonical_string())
@@ -1997,7 +1997,7 @@ impl<T> serde::Serialize for ExternalFunctionContainer<T> {
 #[cfg(feature = "serde")]
 impl<'de, T: EvaluationDomain> serde::Deserialize<'de> for ExternalFunctionContainer<T> {
     fn deserialize<D: serde::Deserializer<'de>>(deserializer: D) -> Result<Self, D::Error> {
-        let (export_name, eval_name, tags, constant_index): (
+        let (export_name, symbol, tags, constant_index): (
             String,
             Symbol,
             Vec<String>,
@@ -2006,7 +2006,7 @@ impl<'de, T: EvaluationDomain> serde::Deserialize<'de> for ExternalFunctionConta
 
         let mut external = Self {
             export_name,
-            eval_name,
+            symbol,
             tags: tags.iter().map(|s| crate::parse!(s)).collect(),
             imp: None,
             cache: vec![],
@@ -2024,7 +2024,7 @@ impl<T> bincode::Encode for ExternalFunctionContainer<T> {
         encoder: &mut E,
     ) -> core::result::Result<(), bincode::error::EncodeError> {
         bincode::Encode::encode(&self.export_name, encoder)?;
-        bincode::Encode::encode(&self.eval_name, encoder)?;
+        bincode::Encode::encode(&self.symbol, encoder)?;
         bincode::Encode::encode(
             &self
                 .tags
@@ -2043,13 +2043,13 @@ impl<Context, T: EvaluationDomain> bincode::Decode<Context> for ExternalFunction
         decoder: &mut D,
     ) -> Result<Self, bincode::error::DecodeError> {
         let export_name: String = bincode::Decode::decode(decoder)?;
-        let eval_name: Symbol = bincode::Decode::decode(decoder)?;
+        let symbol: Symbol = bincode::Decode::decode(decoder)?;
         let tags: Vec<String> = bincode::Decode::decode(decoder)?;
         let constant_index: Option<usize> = bincode::Decode::decode(decoder)?;
 
         let mut external = Self {
             export_name,
-            eval_name,
+            symbol,
             tags: tags.iter().map(|s| crate::parse!(s)).collect(),
             imp: None,
             cache: vec![],
@@ -2076,7 +2076,7 @@ impl<T> Clone for ExternalFunctionContainer<T> {
     fn clone(&self) -> Self {
         Self {
             export_name: self.export_name.clone(),
-            eval_name: self.eval_name.clone(),
+            symbol: self.symbol.clone(),
             tags: self.tags.clone(),
             imp: self.imp.clone(),
             cache: vec![],
@@ -2089,7 +2089,7 @@ impl<T> std::fmt::Debug for ExternalFunctionContainer<T> {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         f.debug_struct("ExternalFunctionContainer")
             .field("export_name", &self.export_name)
-            .field("eval_name", &self.eval_name)
+            .field("eval_name", &self.symbol)
             .field("tags", &self.tags)
             .field("imp", &self.imp.is_some())
             .field("cache_len", &self.cache.len())
@@ -2101,7 +2101,7 @@ impl<T> std::fmt::Debug for ExternalFunctionContainer<T> {
 impl<T> std::hash::Hash for ExternalFunctionContainer<T> {
     fn hash<H: std::hash::Hasher>(&self, state: &mut H) {
         self.export_name.hash(state);
-        self.eval_name.hash(state);
+        self.symbol.hash(state);
         for tag in &self.tags {
             tag.hash(state);
         }
@@ -2111,7 +2111,7 @@ impl<T> std::hash::Hash for ExternalFunctionContainer<T> {
 impl<T> PartialEq for ExternalFunctionContainer<T> {
     fn eq(&self, other: &Self) -> bool {
         self.export_name == other.export_name
-            && self.eval_name == other.eval_name
+            && self.symbol == other.symbol
             && self.tags == other.tags
     }
 }
@@ -2119,10 +2119,10 @@ impl<T> PartialEq for ExternalFunctionContainer<T> {
 impl<T> Eq for ExternalFunctionContainer<T> {}
 
 impl<T> ExternalFunctionContainer<T> {
-    fn new(export_name: String, eval_name: Symbol, tags: Vec<Atom>) -> Self {
+    fn new(export_name: String, symbol: Symbol, tags: Vec<Atom>) -> Self {
         Self {
             export_name,
-            eval_name,
+            symbol,
             tags,
             imp: None,
             cache: vec![],
@@ -2141,7 +2141,7 @@ impl<T> ExternalFunctionContainer<T> {
     fn map<T2: EvaluationDomain>(&self) -> ExternalFunctionContainer<T2> {
         ExternalFunctionContainer {
             export_name: self.export_name.clone(),
-            eval_name: self.eval_name,
+            symbol: self.symbol,
             tags: self.tags.clone(),
             imp: self.fetch_impl_for::<T2>(),
             cache: vec![],
@@ -2150,7 +2150,7 @@ impl<T> ExternalFunctionContainer<T> {
     }
 
     fn fetch_impl_for<T2: EvaluationDomain>(&self) -> Option<Box<dyn ExternalFunction<T2>>> {
-        let info = self.eval_name.get_evaluation_info()?;
+        let info = self.symbol.get_evaluation_info()?;
         let tags = self.tag_views();
         T2::resolve_function(&tags, info)
     }
@@ -2562,7 +2562,7 @@ impl<T: Clone + EvaluationDomain> ExpressionEvaluator<T> {
                 continue;
             }
 
-            let lookup_name = e.eval_name.get_name().to_owned();
+            let lookup_name = e.symbol.get_name().to_owned();
             if lookup_name != e.export_name()
                 && let Some(f) = external_fns.remove(lookup_name.as_str())
             {
@@ -2779,10 +2779,10 @@ impl<T: Default> ExpressionEvaluator<T> {
             .collect::<Vec<_>>();
         for external in &mut external_fns {
             if let Some(i) = external.constant_index {
-                let Some(eval) = external.eval_name.get_evaluation_info() else {
+                let Some(eval) = external.symbol.get_evaluation_info() else {
                     panic!(
                         "Symbol '{}' does not have evaluation info",
-                        external.eval_name.get_name()
+                        external.symbol.get_name()
                     );
                 };
                 let tags = external.tag_views();
@@ -6973,7 +6973,7 @@ impl<T: Clone> ExpressionEvaluator<T> {
                     instr.push(Instruction::Fun(
                         get_slot!(*o),
                         Box::new((
-                            self.external_fns[*f].eval_name,
+                            self.external_fns[*f].symbol,
                             self.external_fns[*f]
                                 .tags
                                 .iter()
@@ -9999,19 +9999,19 @@ impl ExpressionEvaluator<Complex<Rational>> {
         let external_fns = self
             .external_fns
             .iter()
-            .filter(|f| f.constant_index.is_none())
             .map(|f| {
-                let Some(imp) = f.fetch_impl_for::<T>() else {
+                let mapped = f.map::<T>();
+                if mapped.constant_index.is_none() && mapped.imp.is_none() {
                     return Err(format!(
                         "External function '{}' does not have an implementation",
                         f
                     ));
-                };
+                }
 
-                Ok((f.export_name().to_owned(), imp))
+                Ok(mapped)
             })
-            .collect::<Result<HashMap<_, _>, _>>()?;
-        T::jit_compile(instructions, constants, external_fns)
+            .collect::<Result<Vec<_>, _>>()?;
+        T::jit_compile(instructions, constants, &external_fns)
     }
 }
 
@@ -10044,19 +10044,18 @@ impl<T: JITCompiledNumber + Clone> ExpressionEvaluator<T> {
         let external_fns = self
             .external_fns
             .iter()
-            .filter(|f| f.constant_index.is_none())
             .map(|f| {
-                let Some(imp) = f.imp.clone() else {
+                if f.constant_index.is_none() && f.imp.is_none() {
                     return Err(format!(
                         "External function '{}' does not have an implementation",
                         f
                     ));
-                };
+                }
 
-                Ok((f.export_name().to_owned(), imp))
+                Ok(f.clone())
             })
-            .collect::<Result<HashMap<_, _>, _>>()?;
-        T::jit_compile(instructions, constants, external_fns)
+            .collect::<Result<Vec<_>, _>>()?;
+        T::jit_compile(instructions, constants, &external_fns)
     }
 }
 
@@ -10088,27 +10087,24 @@ fn translate_to_symjit(
     instructions: Vec<Instruction>,
     constants: Vec<symjit::Complex<f64>>,
     config: Config,
-    defuns: Defuns,
 ) -> Result<Translator, String> {
-    let mut translator = Translator::new(config, defuns);
+    let mut translator = Translator::new(config);
 
     for z in constants {
         translator.append_constant(z).unwrap();
     }
 
-    fn slot(s: Slot) -> symjit::compiler::Slot {
+    fn slot(s: Slot) -> symjit::Slot {
         match s {
-            Slot::Param(id) => symjit::compiler::Slot::Param(id),
-            Slot::Out(id) => symjit::compiler::Slot::Out(id),
-            Slot::Const(id) => symjit::compiler::Slot::Const(id),
-            Slot::Temp(id) => symjit::compiler::Slot::Temp(id),
+            Slot::Param(id) => symjit::Slot::Param(id),
+            Slot::Out(id) => symjit::Slot::Out(id),
+            Slot::Const(id) => symjit::Slot::Const(id),
+            Slot::Temp(id) => symjit::Slot::Temp(id),
         }
     }
 
-    fn slot_list(v: &[Slot]) -> Vec<symjit::compiler::Slot> {
-        v.iter()
-            .map(|s| slot(*s))
-            .collect::<Vec<symjit::compiler::Slot>>()
+    fn slot_list(v: &[Slot]) -> Vec<symjit::Slot> {
+        v.iter().map(|s| slot(*s)).collect::<Vec<symjit::Slot>>()
     }
 
     for q in instructions {
@@ -10130,35 +10126,20 @@ fn translate_to_symjit(
             }
             Instruction::Fun(lhs, fun, is_real) => {
                 let (name, tags, args) = *fun;
-                if name.is_fixed_builtin() {
-                    if args.len() != 1 || !tags.is_empty() {
-                        return Err(format!(
-                            "Builtin function '{}' requires exactly one argument and no tags",
-                            name.get_name()
-                        ));
-                    }
 
-                    translator
-                        .append_fun(
-                            &slot(lhs),
-                            &symjit::BuiltinSymbol(name.get_id()),
-                            &slot(args[0]),
-                            is_real,
-                        )
-                        .unwrap();
-                } else {
-                    let mut name = name.get_ascii_name().ok_or_else(|| {
-                        format!("No ASCII name for symbol {name} available, which is needed for exporting")
-                    })?;
+                let mut name = name.get_ascii_name().ok_or_else(|| {
+                    format!(
+                        "No ASCII name for symbol {name} available, which is needed for exporting"
+                    )
+                })?;
 
-                    for t in tags {
-                        name += &format!("_{}", t);
-                    }
-
-                    translator
-                        .append_external_fun(&slot(lhs), &name, &slot_list(&args))
-                        .unwrap();
+                for t in tags {
+                    name += &format!("_{}", t);
                 }
+
+                translator
+                    .append_fun(&slot(lhs), &name, &slot_list(&args), is_real)
+                    .map_err(|e| e.to_string())?;
             }
             Instruction::Join(lhs, cond, true_val, false_val) => translator
                 .append_join(&slot(lhs), &slot(cond), &slot(true_val), &slot(false_val))
@@ -10175,11 +10156,15 @@ fn translate_to_symjit(
 pub trait JITCompiledNumber: Sized {
     fn to_complex_f64(&self) -> Result<symjit::Complex<f64>, String>;
 
+    fn convert_external_functions(
+        external_functions: &[ExternalFunctionContainer<Self>],
+    ) -> Result<symjit::Defuns, String>;
+
     /// Create a JIT-compiled evaluator for this number type.
     fn jit_compile(
         instructions: Vec<Instruction>,
         constants: Vec<symjit::Complex<f64>>,
-        external_functions: HashMap<String, Box<dyn ExternalFunction<Self>>>,
+        external_functions: &[ExternalFunctionContainer<Self>],
     ) -> Result<JITCompiledEvaluator<Self>, String>;
 
     fn evaluate(eval: &mut JITCompiledEvaluator<Self>, args: &[Self], out: &mut [Self]);
@@ -10190,10 +10175,37 @@ impl JITCompiledNumber for f64 {
         Ok(symjit::Complex::new(*self, 0.))
     }
 
+    fn convert_external_functions(
+        external_functions: &[ExternalFunctionContainer<Self>],
+    ) -> Result<symjit::Defuns, String> {
+        let mut defuns = Defuns::new();
+
+        for f in external_functions {
+            if f.constant_index.is_some() {
+                continue;
+            }
+
+            let Some(imp) = f.imp.clone() else {
+                return Err(format!(
+                    "External function '{}' does not have an implementation",
+                    f
+                ));
+            };
+
+            let r: Box<Box<dyn Fn(&[Self]) -> Self + Send + Sync>> = Box::new(imp);
+
+            defuns
+                .add_sliced_func(f.export_name(), r)
+                .map_err(|e| e.to_string())?;
+        }
+
+        Ok(defuns)
+    }
+
     fn jit_compile(
         instructions: Vec<Instruction>,
         constants: Vec<symjit::Complex<f64>>,
-        external_functions: HashMap<String, Box<dyn ExternalFunction<f64>>>,
+        external_functions: &[ExternalFunctionContainer<f64>],
     ) -> Result<JITCompiledEvaluator<Self>, String> {
         if constants.iter().any(|x| x.im != 0.) {
             return Err("complex constants are not supported for f64 JIT export".to_string());
@@ -10202,25 +10214,18 @@ impl JITCompiledNumber for f64 {
         let mut config = Config::default();
         config.set_complex(false);
         config.set_simd(false);
+        config.set_defuns(Self::convert_external_functions(external_functions)?);
 
-        let mut defuns = Defuns::new();
+        let mut translator = translate_to_symjit(instructions, constants, config)?;
 
-        for (name, f) in external_functions {
-            let r: Box<Box<dyn Fn(&[Self]) -> Self + Send + Sync>> = Box::new(f);
-
-            defuns
-                .add_sliced_func(&name, r)
-                .map_err(|e| e.to_string())?;
-        }
-
-        let mut translator = translate_to_symjit(instructions, constants, config, defuns)?;
+        let app = translator.compile().map_err(|e| e.to_string())?;
+        let mut compressed_ir = Vec::new();
+        app.save(&mut compressed_ir).map_err(|e| e.to_string())?;
 
         Ok(JITCompiledEvaluator {
-            code: translator
-                .compile()
-                .map_err(|e| e.to_string())?
-                .seal()
-                .map_err(|e| e.to_string())?,
+            code: app.seal().map_err(|e| e.to_string())?,
+            external_functions: external_functions.to_vec(),
+            compressed_ir,
             batch_input_buffer: Vec::new(),
             batch_output_buffer: Vec::new(),
         })
@@ -10236,8 +10241,66 @@ impl JITCompiledNumber for f64 {
 #[derive(Clone)]
 pub struct JITCompiledEvaluator<T> {
     code: Applet,
+    #[allow(dead_code)]
+    external_functions: Vec<ExternalFunctionContainer<T>>,
+    #[allow(dead_code)]
+    compressed_ir: Vec<u8>,
     batch_input_buffer: Vec<T>,
     batch_output_buffer: Vec<T>,
+}
+
+#[cfg(feature = "serde")]
+impl<T> serde::Serialize for JITCompiledEvaluator<T> {
+    fn serialize<S: serde::Serializer>(&self, serializer: S) -> Result<S::Ok, S::Error> {
+        (&self.external_functions, &self.compressed_ir).serialize(serializer)
+    }
+}
+
+#[cfg(feature = "serde")]
+impl<'de, T: JITCompiledNumber + EvaluationDomain + symjit::Element + Copy> serde::Deserialize<'de>
+    for JITCompiledEvaluator<T>
+{
+    fn deserialize<D: serde::Deserializer<'de>>(deserializer: D) -> Result<Self, D::Error> {
+        let (fs, compressed_ir): (Vec<ExternalFunctionContainer<T>>, Vec<u8>) =
+            serde::Deserialize::deserialize(deserializer)?;
+        Self::load(compressed_ir, fs).map_err(serde::de::Error::custom)
+    }
+}
+
+#[cfg(feature = "bincode")]
+impl<T> bincode::Encode for JITCompiledEvaluator<T> {
+    fn encode<E: bincode::enc::Encoder>(
+        &self,
+        encoder: &mut E,
+    ) -> core::result::Result<(), bincode::error::EncodeError> {
+        bincode::Encode::encode(&self.external_functions, encoder)?;
+        bincode::Encode::encode(&self.compressed_ir, encoder)?;
+        Ok(())
+    }
+}
+
+#[cfg(feature = "bincode")]
+impl<Context, T: JITCompiledNumber + EvaluationDomain> bincode::Decode<Context>
+    for JITCompiledEvaluator<T>
+{
+    fn decode<D: bincode::de::Decoder<Context = Context>>(
+        decoder: &mut D,
+    ) -> Result<Self, bincode::error::DecodeError> {
+        let fs: Vec<ExternalFunctionContainer<T>> = bincode::Decode::decode(decoder)?;
+        let compressed_ir: Vec<u8> = bincode::Decode::decode(decoder)?;
+        Self::load(compressed_ir, fs).map_err(|e| bincode::error::DecodeError::OtherString(e))
+    }
+}
+
+#[cfg(feature = "bincode")]
+impl<'de, Context, T: JITCompiledNumber + EvaluationDomain> bincode::BorrowDecode<'de, Context>
+    for JITCompiledEvaluator<T>
+{
+    fn borrow_decode<D: bincode::de::BorrowDecoder<'de, Context = Context>>(
+        decoder: &mut D,
+    ) -> Result<Self, bincode::error::DecodeError> {
+        <Self as bincode::Decode<Context>>::decode(decoder)
+    }
 }
 
 impl<T: JITCompiledNumber> JITCompiledEvaluator<T> {
@@ -10245,6 +10308,29 @@ impl<T: JITCompiledNumber> JITCompiledEvaluator<T> {
     #[inline(always)]
     pub fn evaluate(&mut self, args: &[T], out: &mut [T]) {
         T::evaluate(self, args, out);
+    }
+}
+
+impl<T: JITCompiledNumber> JITCompiledEvaluator<T> {
+    #[allow(dead_code)]
+    fn load(
+        compressed_ir: Vec<u8>,
+        external_functions: Vec<ExternalFunctionContainer<T>>,
+    ) -> Result<Self, String> {
+        let mut config = Config::default();
+        config.set_defuns(T::convert_external_functions(&external_functions)?);
+
+        let app = symjit::Application::load(&mut compressed_ir.as_slice(), &config)
+            .map_err(|e| e.to_string())?
+            .seal()
+            .map_err(|e| e.to_string())?;
+        Ok(JITCompiledEvaluator {
+            code: app,
+            external_functions,
+            compressed_ir,
+            batch_input_buffer: Vec::new(),
+            batch_output_buffer: Vec::new(),
+        })
     }
 }
 
@@ -10290,33 +10376,53 @@ impl JITCompiledNumber for wide::f64x4 {
         Ok(symjit::Complex::new(a[0], 0.))
     }
 
+    fn convert_external_functions(
+        external_functions: &[ExternalFunctionContainer<Self>],
+    ) -> Result<symjit::Defuns, String> {
+        let mut defuns = Defuns::new();
+        for f in external_functions {
+            if f.constant_index.is_some()
+                || f.symbol.is_builtin() && f.symbol.get_evaluation_info().is_none()
+            {
+                continue;
+            }
+
+            let Some(imp) = f.imp.clone() else {
+                return Err(format!(
+                    "External function '{}' does not have an implementation",
+                    f
+                ));
+            };
+
+            let r: Box<Box<dyn Fn(&[Self]) -> Self + Send + Sync>> = Box::new(imp);
+
+            defuns
+                .add_sliced_func(f.export_name(), r)
+                .map_err(|e| e.to_string())?;
+        }
+        Ok(defuns)
+    }
+
     fn jit_compile(
         instructions: Vec<Instruction>,
         constants: Vec<symjit::Complex<f64>>,
-        external_functions: HashMap<String, Box<dyn ExternalFunction<Self>>>,
+        external_functions: &[ExternalFunctionContainer<Self>],
     ) -> Result<JITCompiledEvaluator<Self>, String> {
         let mut config = Config::default();
         config.set_complex(false);
         config.set_simd(true);
+        config.set_defuns(Self::convert_external_functions(external_functions)?);
 
-        let mut defuns = Defuns::new();
+        let mut translator = translate_to_symjit(instructions, constants, config)?;
 
-        for (name, f) in external_functions {
-            let r: Box<Box<dyn Fn(&[Self]) -> Self + Send + Sync>> = Box::new(f.clone());
-
-            defuns
-                .add_sliced_func(&name, r)
-                .map_err(|e| e.to_string())?;
-        }
-
-        let mut translator = translate_to_symjit(instructions, constants, config, defuns)?;
+        let app = translator.compile().map_err(|e| e.to_string())?;
+        let mut compressed_ir = Vec::new();
+        app.save(&mut compressed_ir).map_err(|e| e.to_string())?;
 
         Ok(JITCompiledEvaluator {
-            code: translator
-                .compile()
-                .map_err(|e| e.to_string())?
-                .seal()
-                .map_err(|e| e.to_string())?,
+            code: app.seal().map_err(|e| e.to_string())?,
+            external_functions: external_functions.to_vec(),
+            compressed_ir,
             batch_input_buffer: Vec::new(),
             batch_output_buffer: Vec::new(),
         })
@@ -10427,38 +10533,60 @@ impl JITCompiledNumber for Complex<f64> {
         Ok(symjit::Complex::new(self.re, self.im))
     }
 
-    fn jit_compile(
-        instructions: Vec<Instruction>,
-        constants: Vec<symjit::Complex<f64>>,
-        external_functions: HashMap<String, Box<dyn ExternalFunction<Self>>>,
-    ) -> Result<JITCompiledEvaluator<Complex<f64>>, String> {
-        let mut config = Config::default();
-        config.set_complex(true);
-        config.set_simd(false);
-
+    fn convert_external_functions(
+        external_functions: &[ExternalFunctionContainer<Self>],
+    ) -> Result<symjit::Defuns, String> {
         let mut defuns = Defuns::new();
 
-        for (name, f) in external_functions {
+        for f in external_functions {
+            if f.constant_index.is_some()
+                || f.symbol.is_builtin() && f.symbol.get_evaluation_info().is_none()
+            {
+                continue;
+            }
+
+            let Some(imp) = f.imp.clone() else {
+                return Err(format!(
+                    "External function '{}' does not have an implementation",
+                    f
+                ));
+            };
+
             // TODO: implement symjit::Element on numeric::Complex
             let k = Box::new(move |x: &[symjit::Complex<f64>]| {
                 let ars = unsafe { std::mem::transmute(x) };
-                let res = f(ars);
+                let res = imp(ars);
                 symjit::Complex::new(res.re, res.im)
             });
 
             defuns
-                .add_sliced_func(&name, k)
+                .add_sliced_func(f.export_name(), k)
                 .map_err(|e| e.to_string())?;
         }
 
-        let mut translator = translate_to_symjit(instructions, constants, config, defuns)?;
+        Ok(defuns)
+    }
+
+    fn jit_compile(
+        instructions: Vec<Instruction>,
+        constants: Vec<symjit::Complex<f64>>,
+        external_functions: &[ExternalFunctionContainer<Self>],
+    ) -> Result<JITCompiledEvaluator<Complex<f64>>, String> {
+        let mut config = Config::default();
+        config.set_complex(true);
+        config.set_simd(false);
+        config.set_defuns(Self::convert_external_functions(external_functions)?);
+
+        let mut translator = translate_to_symjit(instructions, constants, config)?;
+
+        let app = translator.compile().map_err(|e| e.to_string())?;
+        let mut compressed_ir = Vec::new();
+        app.save(&mut compressed_ir).map_err(|e| e.to_string())?;
 
         Ok(JITCompiledEvaluator {
-            code: translator
-                .compile()
-                .map_err(|e| e.to_string())?
-                .seal()
-                .map_err(|e| e.to_string())?,
+            code: app.seal().map_err(|e| e.to_string())?,
+            external_functions: external_functions.to_vec(),
+            compressed_ir,
             batch_input_buffer: Vec::new(),
             batch_output_buffer: Vec::new(),
         })
@@ -10524,39 +10652,61 @@ impl JITCompiledNumber for Complex<wide::f64x4> {
         Ok(symjit::Complex::new(re[0], im[0]))
     }
 
-    /// JIT-compiles the evaluator using SymJIT.
-    fn jit_compile(
-        instructions: Vec<Instruction>,
-        constants: Vec<symjit::Complex<f64>>,
-        external_functions: HashMap<String, Box<dyn ExternalFunction<Self>>>,
-    ) -> Result<JITCompiledEvaluator<Self>, String> {
-        let mut config = Config::default();
-        config.set_complex(true);
-        config.set_simd(true);
-
+    fn convert_external_functions(
+        external_functions: &[ExternalFunctionContainer<Self>],
+    ) -> Result<symjit::Defuns, String> {
         let mut defuns = Defuns::new();
 
-        for (name, f) in external_functions {
+        for f in external_functions {
+            if f.constant_index.is_some()
+                || f.symbol.is_builtin() && f.symbol.get_evaluation_info().is_none()
+            {
+                continue;
+            }
+
+            let Some(imp) = f.imp.clone() else {
+                return Err(format!(
+                    "External function '{}' does not have an implementation",
+                    f
+                ));
+            };
+
             // TODO: implement symjit::Element on numeric::Complex
             let k = Box::new(move |x: &[symjit::Complex<wide::f64x4>]| {
                 let ars = unsafe { std::mem::transmute(x) };
-                let res = f(ars);
+                let res = imp(ars);
                 symjit::Complex::new(res.re, res.im)
             });
 
             defuns
-                .add_sliced_func(&name, k)
+                .add_sliced_func(f.export_name(), k)
                 .map_err(|e| e.to_string())?;
         }
 
-        let mut translator = translate_to_symjit(instructions, constants, config, defuns)?;
+        Ok(defuns)
+    }
+
+    /// JIT-compiles the evaluator using SymJIT.
+    fn jit_compile(
+        instructions: Vec<Instruction>,
+        constants: Vec<symjit::Complex<f64>>,
+        external_functions: &[ExternalFunctionContainer<Self>],
+    ) -> Result<JITCompiledEvaluator<Self>, String> {
+        let mut config = Config::default();
+        config.set_complex(true);
+        config.set_simd(true);
+        config.set_defuns(Self::convert_external_functions(external_functions)?);
+
+        let mut translator = translate_to_symjit(instructions, constants, config)?;
+
+        let app = translator.compile().map_err(|e| e.to_string())?;
+        let mut compressed_ir = Vec::new();
+        app.save(&mut compressed_ir).map_err(|e| e.to_string())?;
 
         Ok(JITCompiledEvaluator {
-            code: translator
-                .compile()
-                .map_err(|e| e.to_string())?
-                .seal()
-                .map_err(|e| e.to_string())?,
+            code: app.seal().map_err(|e| e.to_string())?,
+            external_functions: external_functions.to_vec(),
+            compressed_ir,
             batch_input_buffer: Vec::new(),
             batch_output_buffer: Vec::new(),
         })
