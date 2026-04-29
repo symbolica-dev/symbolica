@@ -4385,7 +4385,7 @@ class Transformer:
         >>>
         >>> print(e)
 
-        yields `f(0)+x*der(1,f(0))+1/2*x^2*(der(2,f(0))+4*y)`.
+        yields `f(0)+x*der(1,f,0)+1/2*x^2*(der(2,f,0)+4*y)`.
 
         Parameters
         ----------

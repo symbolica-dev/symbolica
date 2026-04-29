@@ -4,7 +4,7 @@ use std::{
 };
 
 use crate::{
-    atom::{Atom, AtomCore, AtomView, FunctionBuilder, Indeterminate, Symbol},
+    atom::{Atom, AtomCore, AtomView, FunctionBuilder, Indeterminate, InlineVar, Symbol},
     coefficient::{Coefficient, CoefficientView},
     domains::{Ring, atom::AtomField, integer::Integer, rational::Rational},
     poly::{PolyVariable, series::Series},
@@ -48,21 +48,37 @@ impl AtomView<'_> {
                 false
             }
             AtomView::Fun(f_orig) => {
-                // detect if the function to derive is the derivative function itself
-                // if so, derive the last argument of the derivative function and set
-                // a flag to later accumulate previous derivatives
-                let (to_derive, f, is_der) = if f_orig.get_symbol() == Symbol::DERIVATIVE {
-                    let to_derive = f_orig.iter().last().unwrap();
+                // detect if the function to derive is the derivative function itself.
+                // der stores: der(depth_1, ..., depth_n, f, arg_1, ..., arg_n).
+                let mut der_function_call = workspace.new_atom();
+                let (f, is_der, arg_count) = if f_orig.get_symbol() == Symbol::DERIVATIVE {
+                    if f_orig.get_nargs() < 3 || f_orig.get_nargs() % 2 == 0 {
+                        panic!(
+                            "Derivative function must contain n depths, a function symbol, and n arguments"
+                        );
+                    }
+
+                    let der_depth_count = (f_orig.get_nargs() - 1) / 2;
+                    let function_symbol = match f_orig.iter().nth(der_depth_count).unwrap() {
+                        AtomView::Var(v) => v.get_symbol(),
+                        _ => panic!("Derivative function argument must be a function symbol"),
+                    };
+
+                    let function_call = der_function_call.to_fun(function_symbol);
+                    for arg in f_orig.iter().skip(der_depth_count + 1) {
+                        function_call.add_arg(arg);
+                    }
+
                     (
-                        to_derive,
-                        match to_derive {
+                        match der_function_call.as_view() {
                             AtomView::Fun(f) => f,
-                            _ => panic!("Last argument of der function must be a function"),
+                            _ => unreachable!(),
                         },
                         true,
+                        der_depth_count,
                     )
                 } else {
-                    (*self, *f_orig, false)
+                    (*f_orig, false, f_orig.get_nargs())
                 };
 
                 // take derivative of all the arguments and store it in a list
@@ -191,14 +207,14 @@ impl AtomView<'_> {
                     let p = fn_der.to_fun(Symbol::DERIVATIVE);
 
                     if is_der {
-                        for (i, x_orig) in f_orig.iter().take(f.get_nargs()).enumerate() {
+                        for (i, x_orig) in f_orig.iter().take(arg_count).enumerate() {
                             if let AtomView::Num(nn) = x_orig {
                                 let num = nn.get_coeff_view() + (if i == index { 1 } else { 0 });
                                 n.to_num(num);
                                 p.add_arg(n.as_view());
                             } else {
                                 panic!(
-                                    "Derivative function must contain numbers for all but the last position"
+                                    "Derivative function must contain numbers for argument derivative counters"
                                 );
                             }
                         }
@@ -209,7 +225,11 @@ impl AtomView<'_> {
                         }
                     }
 
-                    p.add_arg(to_derive);
+                    let function_symbol = InlineVar::new(f.get_symbol());
+                    p.add_arg(function_symbol.as_view());
+                    for arg in f.iter() {
+                        p.add_arg(arg);
+                    }
 
                     let m = mul.to_mul();
                     m.extend(fn_der.as_view());
@@ -840,7 +860,7 @@ impl Sub<&Atom> for &Series<AtomField> {
 #[cfg(test)]
 mod test {
     use crate::{
-        atom::{Atom, AtomCore},
+        atom::{Atom, AtomCore, AtomView},
         parse, symbol,
     };
 
@@ -851,15 +871,15 @@ mod test {
             "(1+2*v1)^(5+v1)",
             "log(2*v1) + exp(3*v1) + sin(4*v1) + cos(y*v1)",
             "f(v1^2,v1)",
-            "der(0,1,f(v1,v1^3))",
+            "der(0,1,f,v1,v1^3)",
         ];
         let r = inputs.map(|input| parse!(input).derivative(v1));
 
         let res = [
             "(2*v1+1)^(v1+5)*log(2*v1+1)+2*(v1+5)*(2*v1+1)^(v1+4)",
             "2*(2*v1)^-1+3*exp(3*v1)+4*cos(4*v1)-y*sin(v1*y)",
-            "der(0,1,f(v1^2,v1))+2*v1*der(1,0,f(v1^2,v1))",
-            "der(1,1,f(v1,v1^3))+3*v1^2*der(0,2,f(v1,v1^3))",
+            "der(0,1,f,v1^2,v1)+2*v1*der(1,0,f,v1^2,v1)",
+            "der(1,1,f,v1,v1^3)+3*v1^2*der(0,2,f,v1,v1^3)",
         ];
         let res = res.map(|input| parse!(input));
 
@@ -984,7 +1004,34 @@ mod test {
             .to_atom();
 
         let res = parse!(
-            "f(1,0)+v1*(der(0,1,f(1,0))+der(1,0,f(1,0)))+1/2*v1^2*(der(0,2,f(1,0))+der(1,0,f(1,0))+2*der(1,1,f(1,0))+der(2,0,f(1,0)))"
+            "f(1,0)+v1*(der(0,1,f,1,0)+der(1,0,f,1,0))+1/2*v1^2*(der(0,2,f,1,0)+der(1,0,f,1,0)+2*der(1,1,f,1,0)+der(2,0,f,1,0))"
+        );
+        assert_eq!(t, res);
+    }
+
+    #[test]
+    fn series_derivative_keeps_function_unevaluated() {
+        let v1 = symbol!("v1");
+        let _ = symbol!(
+            "series_derivative_keeps_function_unevaluated::f",
+            norm = |input, out| {
+                if let AtomView::Fun(f) = input
+                    && f.get_nargs() == 1
+                    && f.iter().next().unwrap() == Atom::num(2).as_view()
+                {
+                    out.to_num(1.into());
+                }
+            }
+        );
+
+        let input = parse!("series_derivative_keeps_function_unevaluated::f(v1)");
+        let t = input
+            .series(v1, Atom::num(2).as_view(), 2.into(), true)
+            .unwrap()
+            .to_atom();
+
+        let res = parse!(
+            "1+(-2+v1)*der(1,series_derivative_keeps_function_unevaluated::f,2)+1/2*(-2+v1)^2*der(2,series_derivative_keeps_function_unevaluated::f,2)"
         );
         assert_eq!(t, res);
     }
