@@ -337,10 +337,37 @@ impl SpecialSymbols {
                     }),
                 )
             },
+            "dzeta";;
+            |symbols, b| {
+                let dzeta = symbols[3];
+                let zeta = symbols[4];
+                b.with_normalization_function(move |x, out| {
+                    if let Some([depth, arg]) = function_arguments::<2>(x) {
+                        if depth == 0 {
+                            **out = function!(zeta, arg);
+                            return;
+                        }
+
+                        // TODO: add Stieltjes constants
+                        if depth == 1 && arg == 0 {
+                            **out = -(Atom::var(Symbol::PI) * 2).log() / 2;
+                            return;
+                        }
+                    }
+                })
+                .with_derivative_function(move |x, _, out| {
+                    if let Some([depth, arg]) = function_arguments::<2>(x)
+                    {
+                        **out = function!(dzeta, depth.to_owned() + 1, arg);
+                    }
+                })
+            }
+            ,
             "zeta";;
             |symbols, b| {
                 let gamma = symbols[0];
-                let zeta_symbol = symbols[3];
+                let dzeta = symbols[3];
+                let zeta_symbol = symbols[4];
 
                 b.with_normalization_function(|x, out| {
                     if let Some([arg]) = function_arguments::<1>(x) {
@@ -358,8 +385,8 @@ impl SpecialSymbols {
                 .with_derivative_function(move |x, _, out| {
                     if let Some([arg]) = function_arguments::<1>(x)
                     {
-                        // TODO: add Stieltjes constants
-                        **out = function!(symbol!("dzeta"), arg);
+
+                        **out = function!(dzeta, 1, arg);
                     }
                 })
                 .with_series_function(move |args| {
@@ -387,6 +414,7 @@ impl SpecialSymbols {
         );
 
         let zeta = symbols.pop().unwrap();
+        let _dzeta = symbols.pop().unwrap();
         let polylog = symbols.pop().unwrap();
         let polygamma = symbols.pop().unwrap();
         let gamma = symbols.pop().unwrap();
@@ -2577,19 +2605,27 @@ fn polylog_exact(s: AtomView, z: AtomView) -> Option<Atom> {
     }
 
     if z.is_one() {
-        if let Some(order) = atom_to_integer(s) && order == 1 {
+        if let Some(order) = atom_to_integer(s)
+            && order == 1
+        {
             return Some(Atom::num(Coefficient::complex_infinity()));
         }
 
-        if let Ok(rat) = Rational::try_from(s) && let Some(exact) = zeta_exact_rational(&rat) {
+        if let Ok(rat) = Rational::try_from(s)
+            && let Some(exact) = zeta_exact_rational(&rat)
+        {
             return Some(exact);
         }
 
         return Some(function!(SPECIALS.zeta, s.to_owned()));
     }
 
-    if let Ok(rat) = Rational::try_from(z) && rat == Rational::from((-1, 1)) {
-        if let Some(order) = atom_to_integer(s) && order == 1 {
+    if let Ok(rat) = Rational::try_from(z)
+        && rat == Rational::from((-1, 1))
+    {
+        if let Some(order) = atom_to_integer(s)
+            && order == 1
+        {
             return Some(-function!(State::LOG, Atom::num(2)));
         }
 
@@ -2672,9 +2708,7 @@ fn polylog_minus_one_exact_rational(s: &Rational) -> Option<Atom> {
         function!(SPECIALS.zeta, Atom::num(s.clone()))
     };
 
-    Some(
-        -(Atom::num(1) - Atom::num(2).pow(Atom::num(1) - Atom::num(s.clone()))) * zeta_term,
-    )
+    Some(-(Atom::num(1) - Atom::num(2).pow(Atom::num(1) - Atom::num(s.clone()))) * zeta_term)
 }
 
 fn polylog_negative_integer_exact(order: i64, z: AtomView) -> Option<Atom> {
@@ -2805,9 +2839,15 @@ fn polylog_integer_numeric_eval(
         / Complex::new(factorial_float(order as u32, binary_prec), zero.clone());
 
     if order % 2 == 0 {
-        Some(polylog_real_branch_fix(z, prefactor * bernoulli - continued))
+        Some(polylog_real_branch_fix(
+            z,
+            prefactor * bernoulli - continued,
+        ))
     } else {
-        Some(polylog_real_branch_fix(z, prefactor * bernoulli + continued))
+        Some(polylog_real_branch_fix(
+            z,
+            prefactor * bernoulli + continued,
+        ))
     }
 }
 
@@ -2866,13 +2906,13 @@ fn polylog_jonquiere_integer(order: u32, mu: &Complex<Float>, binary_prec: u32) 
 
     for k in 0u32..(32 * binary_prec.max(16)) {
         let term = if k + 1 == order {
-            mu_pow.clone()
-                / Complex::new(factorial.clone(), zero.clone())
+            mu_pow.clone() / Complex::new(factorial.clone(), zero.clone())
                 * Complex::new(
                     harmonic_rational(order - 1).to_multi_prec_float(binary_prec),
                     zero.clone(),
                 )
-                - mu_pow.clone() / Complex::new(factorial.clone(), zero.clone()) * (-mu.clone()).log()
+                - mu_pow.clone() / Complex::new(factorial.clone(), zero.clone())
+                    * (-mu.clone()).log()
         } else {
             mu_pow.clone() / Complex::new(factorial.clone(), zero.clone())
                 * zeta_integer_numeric_eval(order as i64 - k as i64, binary_prec)
@@ -2903,8 +2943,10 @@ fn bernoulli_polynomial(n: u32, x: &Complex<Float>, binary_prec: u32) -> Complex
     let mut sum = Complex::new(zero.clone(), zero.clone());
 
     for k in 0..=n {
-        let coeff = Float::with_val(binary_prec, Integer::binom(n.into(), k.into()).to_multi_prec())
-            * bernoulli_number(n - k).to_multi_prec_float(binary_prec);
+        let coeff = Float::with_val(
+            binary_prec,
+            Integer::binom(n.into(), k.into()).to_multi_prec(),
+        ) * bernoulli_number(n - k).to_multi_prec_float(binary_prec);
         sum += Complex::new(coeff, zero.clone()) * pow_complex_u32(x, k);
     }
 
@@ -2914,7 +2956,10 @@ fn bernoulli_polynomial(n: u32, x: &Complex<Float>, binary_prec: u32) -> Complex
 fn polylog_log_minus(z: &Complex<Float>, binary_prec: u32) -> Complex<Float> {
     if z.im.to_f64() == 0.0 && z.re.to_f64() > 0.0 {
         return z.clone().log()
-            + Complex::new(Float::new(binary_prec), Float::with_val(binary_prec, Constant::Pi));
+            + Complex::new(
+                Float::new(binary_prec),
+                Float::with_val(binary_prec, Constant::Pi),
+            );
     }
 
     (-z.clone()).log()
