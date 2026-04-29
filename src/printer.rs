@@ -1424,6 +1424,8 @@ impl FormattedPrintFn for FunView<'_> {
             } else {
                 f.write_char('+')?;
             }
+
+            print_state.in_sum = false;
         }
 
         let id = self.get_symbol();
@@ -1431,6 +1433,73 @@ impl FormattedPrintFn for FunView<'_> {
             && let Some(s) = custom_print(self.as_view(), opts)
         {
             f.write_str(&s)?;
+            return Ok(false);
+        }
+
+        let n_args = self.get_nargs();
+        if id == Symbol::DERIVATIVE
+            && opts.mode.is_symbolica()
+            && opts.num_exp_as_superscript
+            && n_args >= 3
+            && n_args % 2 == 1
+        {
+            let function_symbol = self
+                .get(n_args / 2)
+                .get_symbol()
+                .expect("No symbol for derivative function");
+            function_symbol.format(opts, f)?;
+
+            let mut arg_iter = self.iter();
+
+            f.write_char('⁽')?;
+
+            let mut superscript_state = print_state;
+            superscript_state.in_sum = false;
+            superscript_state.superscript = true;
+            for (i, depth) in arg_iter.by_ref().take(n_args / 2).enumerate() {
+                if i > 0 {
+                    f.write_char('˒')?;
+                }
+
+                let d = depth.to_string();
+                AtomPrinter::format_digits(d, opts, &superscript_state, f)?;
+            }
+            f.write_char('⁾')?;
+
+            arg_iter.next(); // skip function name
+
+            if print_state.bracket_level == 0 {
+                print_state.bracket_level = 1;
+            }
+
+            #[allow(deprecated)]
+            let brackets = if opts.square_brackets_for_function {
+                ('[', ']')
+            } else {
+                opts.function_brackets
+            };
+
+            AtomPrinter::format_bracket(brackets.0, f, opts, print_state)?;
+            print_state.bracket_level += 1;
+            print_state.top_level_add_child = false;
+            print_state.level += 1;
+            print_state.in_sum = false;
+            print_state.in_product = false;
+            print_state.in_exp = false;
+            print_state.in_exp_base = false;
+            print_state.suppress_one = false;
+
+            let mut first = true;
+            for arg in arg_iter {
+                if !first {
+                    f.write_char(',')?;
+                }
+                first = false;
+                arg.format(f, opts, print_state)?;
+            }
+
+            print_state.bracket_level -= 1;
+            AtomPrinter::format_bracket(brackets.1, f, opts, print_state)?;
             return Ok(false);
         }
 
@@ -1496,7 +1565,7 @@ impl FormattedPrintFn for FunView<'_> {
 
         let mut was_split = false;
         let mut first = true;
-        for x in iter {
+        for (arg_index, x) in iter.enumerate() {
             if opts.mode.is_mathematica() {
                 if let AtomView::Var(s) = x
                     && s.get_symbol() == Symbol::SEP
@@ -1507,6 +1576,18 @@ impl FormattedPrintFn for FunView<'_> {
                 }
 
                 // curry the derivative function
+                if id == Symbol::DERIVATIVE
+                    && self.get_nargs() >= 3
+                    && self.get_nargs() % 2 == 1
+                    && arg_index == (self.get_nargs() - 1) / 2
+                {
+                    f.write_str("][")?;
+                    x.format(f, opts, print_state)?;
+                    f.write_str("][")?;
+                    first = true;
+                    continue;
+                }
+
                 if id == Symbol::DERIVATIVE
                     && let AtomView::Fun(fun) = x
                 {
@@ -1992,6 +2073,21 @@ mod test {
                 )
             ),
             "812_738_921_7 symbolica::x²"
+        );
+
+        let a = parse!("der(3,5,f,x,y)");
+        assert_eq!(
+            format!(
+                "{}",
+                AtomPrinter::new_with_options(
+                    a.as_view(),
+                    PrintOptions {
+                        num_exp_as_superscript: true,
+                        ..PrintOptions::file_no_namespace()
+                    }
+                )
+            ),
+            "f⁽³˒⁵⁾(x,y)"
         );
     }
 

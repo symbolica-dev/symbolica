@@ -1011,39 +1011,10 @@ impl Token {
                     }
                 }
                 "Derivative" | "der" => {
-                    // will be called for every curried argument
+                    // strip separator: Derivative[1, 0][f][x,y] => der(1,0,f,x,y)
                     args[0] = Token::ID("der".into());
-
                     let sep = Token::ID(Symbol::SEP_STR.into());
                     args.retain(|x| *x != sep);
-
-                    let mut function_index = 1;
-                    for x in &args[1..] {
-                        if let Token::Number(_, _) = x {
-                            function_index += 1;
-                        }
-                    }
-
-                    if function_index == args.len() {
-                        return Ok(None);
-                    }
-
-                    // merge curried arguments into one function
-                    // Derivative[2][f][x,y] => der(2,f(x,y))
-                    if let Token::ID(_) = &args[function_index] {
-                        // upgrade argument to function
-                        let fn_arg = args.split_off(function_index);
-                        args.push(Token::Fn(false, false, fn_arg));
-                    } else {
-                        let new_fn_arg = args.split_off(function_index + 1);
-
-                        if let Token::Fn(false, false, fn_arg) = &mut args[function_index] {
-                            fn_arg.extend(new_fn_arg);
-                        } else {
-                            return Err("Derivative function argument is not a function".into());
-                        }
-                    }
-
                     Ok(None)
                 }
                 "Pattern" => {

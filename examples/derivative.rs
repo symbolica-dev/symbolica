@@ -6,7 +6,7 @@ fn main() {
         "(1+2*x)^(5+x)",
         "log(2*x) + exp(3*x) + sin(4*x) + cos(y*x)",
         "f(x^2,x)",
-        "der(0,1,f(x,x^3))",
+        "der(0,1,f,x,x^3)",
     ];
 
     for input in inputs {

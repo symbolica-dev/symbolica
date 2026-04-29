@@ -3259,7 +3259,7 @@ impl PythonTransformer {
     /// >>>
     /// >>> print(e)
     ///
-    /// yields `f(0)+x*der(1,f(0))+1/2*x^2*(der(2,f(0))+4*y)`.
+    /// yields `f(0)+x*der(1,f,0)+1/2*x^2*(der(2,f,0)+4*y)`.
     #[pyo3(signature = (x, expansion_point, depth, depth_denom = 1, depth_is_absolute = true))]
     pub fn series(
         &self,
@@ -6857,7 +6857,7 @@ impl PythonExpression {
     /// >>>
     /// >>> print(e)
     ///
-    /// yields `f(0)+x*der(1,f(0))+1/2*x^2*(der(2,f(0))+4*y)`.
+    /// yields `f(0)+x*der(1,f,0)+1/2*x^2*(der(2,f,0)+4*y)`.
     #[pyo3(signature = (x, expansion_point, depth, depth_denom = 1, depth_is_absolute = true))]
     pub fn series(
         &self,
