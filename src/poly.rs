@@ -1,6 +1,5 @@
 //! Defines polynomials and series.
 
-pub mod evaluate;
 pub mod factor;
 pub mod gcd;
 pub mod groebner;
