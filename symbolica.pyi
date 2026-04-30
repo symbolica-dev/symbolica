@@ -134,25 +134,32 @@ def get_license_key(email: str) -> str:
 
 
 @overload
-def S(name: str,
-      is_symmetric: bool | None = None,
-      is_antisymmetric: bool | None = None,
-      is_cyclesymmetric: bool | None = None,
-      is_linear: bool | None = None,
-      is_scalar: bool | None = None,
-      is_real: bool | None = None,
-      is_integer: bool | None = None,
-      is_positive: bool | None = None,
-      tags: Sequence[str] | None = None,
-      aliases: Sequence[str] | None = None,
-      custom_normalization: Transformer | None = None,
-      custom_print: Callable[..., str | None] | None = None,
-      custom_derivative: Callable[[
-          Expression, int], Expression] | None = None,
-      series: Callable[[
-          Sequence[Series]], tuple[Expression, Expression] | None] | None = None,
-      eval: dict[str, Any] | None = None,
-      data: str | int | Expression | bytes | list[Any] | dict[str | int | Expression, Any] | None = None) -> Expression:
+def S(
+    name: str,
+    is_symmetric: bool | None = None,
+    is_antisymmetric: bool | None = None,
+    is_cyclesymmetric: bool | None = None,
+    is_linear: bool | None = None,
+    is_scalar: bool | None = None,
+    is_real: bool | None = None,
+    is_integer: bool | None = None,
+    is_positive: bool | None = None,
+    tags: Sequence[str] | None = None,
+    aliases: Sequence[str] | None = None,
+    normalization: Transformer | None = None,
+    print: Callable[..., str | None] | None = None,
+    derivative: Callable[[Expression, int], Expression] | None = None,
+    series: Callable[[Sequence[Series]], tuple[Expression, Expression] | None]
+    | None = None,
+    eval: dict[str, Any] | None = None,
+    data: str
+    | int
+    | Expression
+    | bytes
+    | list[Any]
+    | dict[str | int | Expression, Any]
+    | None = None,
+) -> Expression:
     """
     Create new symbols from `names`. Symbols can have attributes,
     such as symmetries. If no attributes
@@ -185,7 +192,7 @@ def S(name: str,
     dot(p1,p2)+2*dot(p1,p3)+3*dot(p2,p2)-dot(p2,p3)+6*dot(p2,p3)-2*dot(p3,p3)
 
     Define a custom normalization function:
-    >>> e = S('real_log', custom_normalization=T().replace(E("x_(exp(x1_))"), E("x1_")))
+    >>> e = S('real_log', normalization=T().replace(E("x_(exp(x1_))"), E("x1_")))
     >>> E("real_log(exp(x)) + real_log(5)")
 
     Define a custom print function:
@@ -195,14 +202,14 @@ def S(name: str,
     >>>             return "\\mu_{" + ",".join(a.format() for a in mu) + "}"
     >>>         else:
     >>>             return "\\mu"
-    >>> mu = S("mu", custom_print=print_mu)
+    >>> mu = S("mu", print=print_mu)
     >>> expr = E("mu + mu(1,2)")
     >>> print(expr.to_latex())
 
     If the function returns `None`, the default print function is used.
 
     Define a custom derivative function:
-    >>> tag = S('tag', custom_derivative=lambda f, index: f)
+    >>> tag = S('tag', derivative=lambda f, index: f)
     >>> x = S('x')
     >>> tag(3, x).derivative(x)
 
@@ -242,15 +249,15 @@ def S(name: str,
         A list of tags to associate with the symbol.
     aliases: Sequence[str] | None = None
         A list of aliases to associate with the symbol.
-    custom_normalization : Transformer | None
+    normalization : Transformer | None
         A transformer that is called after every normalization. Note that the symbol
         name cannot be used in the transformer as this will lead to a definition of the
         symbol. Use a wildcard with the same attributes instead.
-    custom_print : Callable[..., str | None] | None:
+    print : Callable[..., str | None] | None:
         A function that is called when printing the variable/function, which is provided as its first argument.
         This function should return a string, or `None` if the default print function should be used.
         The custom print function takes in keyword arguments that are the same as the arguments of the `format` function.
-    custom_derivative: Callable[[Expression, int], Expression] | None:
+    derivative: Callable[[Expression, int], Expression] | None:
         A function that is called when computing the derivative of a function in a given argument.
     series: Callable[[Sequence[Series]], tuple[Expression, Expression] | None] | None:
         A function that is called for custom series expansion. It receives the argument series and can return
@@ -623,26 +630,33 @@ class Expression:
 
     @overload
     @classmethod
-    def symbol(_cls,
-               name: str,
-               is_symmetric: bool | None = None,
-               is_antisymmetric: bool | None = None,
-               is_cyclesymmetric: bool | None = None,
-               is_linear: bool | None = None,
-               is_scalar: bool | None = None,
-               is_real: bool | None = None,
-               is_integer: bool | None = None,
-               is_positive: bool | None = None,
-               tags: Sequence[str] | None = None,
-               aliases: Sequence[str] | None = None,
-               custom_normalization: Transformer | None = None,
-               custom_print: Callable[..., str | None] | None = None,
-               custom_derivative: Callable[[
-                   Expression, int], Expression] | None = None,
-               series: Callable[[
-                   Sequence[Series]], tuple[Expression, Expression] | None] | None = None,
-               eval: dict[str, Any] | None = None,
-               data: str | int | Expression | bytes | list[Any] | dict[str | int | Expression, Any] | None = None) -> Expression:
+    def symbol(
+        _cls,
+        name: str,
+        is_symmetric: bool | None = None,
+        is_antisymmetric: bool | None = None,
+        is_cyclesymmetric: bool | None = None,
+        is_linear: bool | None = None,
+        is_scalar: bool | None = None,
+        is_real: bool | None = None,
+        is_integer: bool | None = None,
+        is_positive: bool | None = None,
+        tags: Sequence[str] | None = None,
+        aliases: Sequence[str] | None = None,
+        normalization: Transformer | None = None,
+        print: Callable[..., str | None] | None = None,
+        derivative: Callable[[Expression, int], Expression] | None = None,
+        series: Callable[[Sequence[Series]], tuple[Expression, Expression] | None]
+        | None = None,
+        eval: dict[str, Any] | None = None,
+        data: str
+        | int
+        | Expression
+        | bytes
+        | list[Any]
+        | dict[str | int | Expression, Any]
+        | None = None,
+    ) -> Expression:
         """
         Create new symbols from `names`. Symbols can have attributes,
         such as symmetries. If no attributes
@@ -675,7 +689,7 @@ class Expression:
         dot(p1,p2)+2*dot(p1,p3)+3*dot(p2,p2)-dot(p2,p3)+6*dot(p2,p3)-2*dot(p3,p3)
 
         Define a custom normalization function:
-        >>> e = S('real_log', custom_normalization=T().replace(E("x_(exp(x1_))"), E("x1_")))
+        >>> e = S('real_log', normalization=T().replace(E("x_(exp(x1_))"), E("x1_")))
         >>> E("real_log(exp(x)) + real_log(5)")
 
         Define a custom print function:
@@ -685,14 +699,14 @@ class Expression:
         >>>             return "\\mu_{" + ",".join(a.format() for a in mu) + "}"
         >>>         else:
         >>>             return "\\mu"
-        >>> mu = S("mu", custom_print=print_mu)
+        >>> mu = S("mu", print=print_mu)
         >>> expr = E("mu + mu(1,2)")
         >>> print(expr.to_latex())
 
         If the function returns `None`, the default print function is used.
 
         Define a custom derivative function:
-        >>> tag = S('tag', custom_derivative=lambda f, index: f)
+        >>> tag = S('tag', derivative=lambda f, index: f)
         >>> x = S('x')
         >>> tag(3, x).derivative(x)
 
@@ -732,15 +746,15 @@ class Expression:
             A list of tags to associate with the symbol.
         aliases: Sequence[str] | None
             A list of aliases to associate with the symbol.
-        custom_normalization : Transformer | None
+        normalization : Transformer | None
             A transformer that is called after every normalization. Note that the symbol
             name cannot be used in the transformer as this will lead to a definition of the
             symbol. Use a wildcard with the same attributes instead.
-        custom_print : Callable[..., str | None] | None:
+        print : Callable[..., str | None] | None:
             A function that is called when printing the variable/function, which is provided as its first argument.
             This function should return a string, or `None` if the default print function should be used.
             The custom print function takes in keyword arguments that are the same as the arguments of the `format` function.
-        custom_derivative: Callable[[Expression, int], Expression] | None:
+        derivative: Callable[[Expression, int], Expression] | None:
             A function that is called when computing the derivative of a function in a given argument.
         series: Callable[[Sequence[Series]], tuple[Expression, Expression] | None] | None:
             A function that is called for custom series expansion. It receives the argument series and can return
