@@ -1,7 +1,7 @@
+use numerica::domains::integer::Integer;
 use symbolica::{
     atom::{AtomCore, AtomView},
     coefficient::CoefficientView,
-    domains::finite_field,
     id::{Match, MatchSettings, WildcardRestriction},
     parse, symbol,
 };
@@ -32,7 +32,7 @@ fn main() {
         & z.restrict(WildcardRestriction::filter(|x: &Match| {
             if let Match::Single(AtomView::Num(num)) = x {
                 if let CoefficientView::Natural(x, y, n, _) = num.get_coeff_view() {
-                    n == 0 && y == 1 && x > 0 && finite_field::is_prime_u64(x as u64)
+                    n == 0 && y == 1 && x > 0 && Integer::from(x as u64).is_prime(0)
                 } else {
                     false
                 }

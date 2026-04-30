@@ -2807,10 +2807,10 @@ impl<E: PositiveExponent> MultivariatePolynomial<IntegerRing, E, LexOrder> {
             .collect();
 
         let mut f_mod =
-            shifted_poly.map_coeff(|c| c.clone().symmetric_mod(&max_p), mod_field.clone());
+            shifted_poly.map_coeff(|c| mod_field.to_element(c.clone()), mod_field.clone());
 
         // make sure the lcoeff is monic at y=0
-        let inv_coeff = mod_field.inv(&uni_f.lcoeff());
+        let inv_coeff = mod_field.inv(&mod_field.to_element(uni_f.lcoeff().clone()));
         let f_mod_monic = f_mod.clone().mul_coeff(inv_coeff);
         let lcoeff_monic = f_mod_monic.lcoeff_last_varorder(&[main_var, interpolation_var]);
 
@@ -2893,9 +2893,17 @@ impl<E: PositiveExponent> MultivariatePolynomial<IntegerRing, E, LexOrder> {
 
         let mut f_p: Vec<_> = factors
             .iter()
-            .map(|f| f.map_coeff(|c| c.to_finite_field(&field), field.clone()))
+            .map(|f| {
+                f.map_coeff(
+                    |c| rhs.ring.to_symmetric_integer(c).to_finite_field(&field),
+                    field.clone(),
+                )
+            })
             .collect();
-        let rhs_p = rhs.map_coeff(|c| c.to_finite_field(&field), field.clone());
+        let rhs_p = rhs.map_coeff(
+            |c| rhs.ring.to_symmetric_integer(c).to_finite_field(&field),
+            field.clone(),
+        );
 
         // TODO: recycle from finite field computation that must have happened earlier
         let mut delta =
@@ -2934,7 +2942,10 @@ impl<E: PositiveExponent> MultivariatePolynomial<IntegerRing, E, LexOrder> {
                 e = &e - &(&*dd * pp);
             }
 
-            let e_m = e.map_coeff(|c| (c / &m).to_finite_field(&field), field.clone());
+            let e_m = e.map_coeff(
+                |c| (&rhs.ring.to_symmetric_integer(c) / &m).to_finite_field(&field),
+                field.clone(),
+            );
 
             for ((p, d_m), d) in f_p.iter_mut().zip(&mut delta).zip(deltas.iter_mut()) {
                 let new_delta = (&e_m * &*d_m).quot_rem_univariate(p).1;
@@ -3248,6 +3259,10 @@ impl<E: PositiveExponent> MultivariatePolynomial<IntegerRing, E, LexOrder> {
             .iter()
             .map(|f| f.map_coeff(|c| modulus.to_element(c.clone()), modulus.clone()))
             .collect();
+        let sample_points_ff: Vec<_> = sample_points
+            .iter()
+            .map(|(v, p)| (*v, modulus.to_element(p.clone())))
+            .collect();
         let lcoeff = ff.univariate_lcoeff(order[0]);
 
         if lcoeff.is_constant() {
@@ -3263,7 +3278,7 @@ impl<E: PositiveExponent> MultivariatePolynomial<IntegerRing, E, LexOrder> {
                 &factors_ff,
                 &mut uni,
                 &delta,
-                sample_points,
+                &sample_points_ff,
                 None,
                 order,
                 1,
@@ -3287,7 +3302,7 @@ impl<E: PositiveExponent> MultivariatePolynomial<IntegerRing, E, LexOrder> {
         let mut lc_var_eval = lcoeff.clone();
         for (v, p) in sample_points {
             if *v != order[0] {
-                lc_var_eval = lc_var_eval.replace(*v, p);
+                lc_var_eval = lc_var_eval.replace(*v, &lc_var_eval.ring.to_element(p.clone()));
             }
         }
 
@@ -3307,7 +3322,7 @@ impl<E: PositiveExponent> MultivariatePolynomial<IntegerRing, E, LexOrder> {
             &adjusted_factors,
             &mut uni,
             &delta,
-            sample_points,
+            &sample_points_ff,
             Some(&padded_lcoeffs),
             order,
             1,
@@ -3680,6 +3695,10 @@ impl<E: PositiveExponent> MultivariatePolynomial<IntegerRing, E, LexOrder> {
             let field_mod = FiniteField::<Integer>::new(max_p.clone());
 
             let poly_ff = self.map_coeff(|c| field_mod.to_element(c.clone()), field_mod.clone());
+            let sample_points_ff: Vec<_> = sample_points
+                .iter()
+                .map(|(v, p)| (*v, field_mod.to_element(p.clone())))
+                .collect();
 
             let true_lcoeffs_ff: Vec<_> = true_lcoeffs
                 .into_iter()
@@ -3690,7 +3709,7 @@ impl<E: PositiveExponent> MultivariatePolynomial<IntegerRing, E, LexOrder> {
                 &sorted_biv_factors_ff,
                 &mut uni,
                 &delta,
-                &sample_points,
+                &sample_points_ff,
                 Some(&true_lcoeffs_ff),
                 order,
                 2,
@@ -3738,7 +3757,7 @@ impl<E: PositiveExponent> MultivariatePolynomial<FiniteField<Integer>, E, LexOrd
         for f in &mut univariate_factors {
             for (v, s) in sample_points {
                 if order[0] != *v {
-                    *f = f.replace(*v, s);
+                    *f = f.replace(*v, &f.ring.nth(s.clone()));
                 }
             }
         }
