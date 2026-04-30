@@ -542,7 +542,7 @@ fn get_license_key(email: String) -> PyResult<()> {
         .map_err(exceptions::PyConnectionError::new_err)
 }
 
-#[pyfunction(name = "S", signature = (*names,is_symmetric=None,is_antisymmetric=None,is_cyclesymmetric=None,is_linear=None,is_scalar=None,is_real=None,is_integer=None,is_positive=None,tags=None,aliases=None,custom_normalization=None,custom_print=None,custom_derivative=None,series=None,eval=None,data=None))]
+#[pyfunction(name = "S", signature = (*names,is_symmetric=None,is_antisymmetric=None,is_cyclesymmetric=None,is_linear=None,is_scalar=None,is_real=None,is_integer=None,is_positive=None,tags=None,aliases=None,normalization=None,print=None,derivative=None,series=None,eval=None,data=None))]
 /// Shorthand notation for :func:`Expression.symbol`.
 fn symbol_shorthand(
     names: &Bound<'_, PyTuple>,
@@ -556,9 +556,9 @@ fn symbol_shorthand(
     is_positive: Option<bool>,
     tags: Option<Vec<String>>,
     aliases: Option<Vec<String>>,
-    custom_normalization: Option<PythonTransformer>,
-    custom_print: Option<Py<PyAny>>,
-    custom_derivative: Option<Py<PyAny>>,
+    normalization: Option<PythonTransformer>,
+    print: Option<Py<PyAny>>,
+    derivative: Option<Py<PyAny>>,
     series: Option<Py<PyAny>>,
     eval: Option<Py<PyAny>>,
     data: Option<PythonUserData>,
@@ -578,9 +578,9 @@ fn symbol_shorthand(
         is_positive,
         tags,
         aliases,
-        custom_normalization,
-        custom_print,
-        custom_derivative,
+        normalization,
+        print,
+        derivative,
         series,
         eval,
         data,
@@ -1133,19 +1133,19 @@ PyFunctionInfo {
                     type_info: || Option::<Vec<String>>::type_input(),
                 },
                 ParameterInfo {
-                    name: "custom_normalization",
+                    name: "normalization",
                     kind: ParameterKind::PositionalOrKeyword,
                     default: ParameterDefault::Expr(NONE_ARG),
                     type_info: || Option::<PythonTransformer>::type_input(),
                 },
                 ParameterInfo {
-                    name: "custom_print",
+                    name: "print",
                     kind: ParameterKind::PositionalOrKeyword,
                     default: ParameterDefault::Expr(NONE_ARG),
                     type_info: || TypeInfo::unqualified("typing.Optional[typing.Callable[..., typing.Optional[str]]]"),
                 },
                 ParameterInfo {
-                    name: "custom_derivative",
+                    name: "derivative",
                     kind: ParameterKind::PositionalOrKeyword,
                     default: ParameterDefault::Expr(NONE_ARG),
                     type_info: || TypeInfo::unqualified("typing.Optional[typing.Callable[[Expression, int], Expression]]"),
@@ -1205,7 +1205,7 @@ Define a linear and symmetric function:
 dot(p1,p2)+2*dot(p1,p3)+3*dot(p2,p2)-dot(p2,p3)+6*dot(p2,p3)-2*dot(p3,p3)
 
 Define a custom normalization function:
->>> e = S('real_log', custom_normalization=T().replace(E("x_(exp(x1_))"), E("x1_")))
+>>> e = S('real_log', normalization=T().replace(E("x_(exp(x1_))"), E("x1_")))
 >>> E("real_log(exp(x)) + real_log(5)")
 
 Define a custom print function:
@@ -1215,14 +1215,14 @@ Define a custom print function:
 >>>             return "\\mu_{" + ",".join(a.format() for a in mu) + "}"
 >>>         else:
 >>>             return "\\mu"
->>> mu = S("mu", custom_print=print_mu)
+>>> mu = S("mu", print=print_mu)
 >>> expr = E("mu + mu(1,2)")
 >>> print(expr.to_latex())
 
 If the function returns `None`, the default print function is used.
 
 Define a custom derivative function:
->>> tag = S('tag', custom_derivative=lambda f, index: f)
+>>> tag = S('tag', derivative=lambda f, index: f)
 >>> x = S('x')
 >>> tag(3, x).derivative(x)
 
@@ -1261,15 +1261,15 @@ tags: Optional[Sequence[str]]
     A list of tags to associate with the symbol.
 aliases: Optional[Sequence[str]]
     A list of aliases for the symbol.
-custom_normalization : Optional[Transformer]
+normalization : Optional[Transformer]
     A transformer that is called after every normalization. Note that the symbol
     name cannot be used in the transformer as this will lead to a definition of the
     symbol. Use a wildcard with the same attributes instead.
-custom_print : Optional[Callable[..., Optional[str]]]:
+print : Optional[Callable[..., Optional[str]]]:
     A function that is called when printing the variable/function, which is provided as its first argument.
     This function should return a string, or `None` if the default print function should be used.
     The custom print function takes in keyword arguments that are the same as the arguments of the `format` function.
-custom_derivative: Optional[Callable[[Expression, int], Expression]]:
+derivative: Optional[Callable[[Expression, int], Expression]]:
     A function that is called when computing the derivative of a function in a given argument.
 series: Optional[Callable[[Sequence[Series]], Optional[tuple[Expression, Expression]]]]:
     A function that is called for custom series expansion. It receives the argument series and can return
@@ -4145,7 +4145,7 @@ impl PythonExpression {
     /// multilinear using `is_linear=True`. If no attributes
     /// are specified, the attributes are inherited from the symbol if it was already defined,
     /// otherwise all attributes are set to `false`.  A transformer that is executed
-    /// after normalization can be defined with `custom_normalization`.
+    /// after normalization can be defined with `normalization`.
     ///
     /// Once attributes are defined on a symbol, they cannot be redefined later.
     ///
@@ -4177,10 +4177,10 @@ impl PythonExpression {
     ///
     ///
     /// Define a custom normalization function:
-    /// >>> e = S('real_log', custom_normalization=Transformer().replace(E("x_(exp(x1_))"), E("x1_")))
+    /// >>> e = S('real_log', normalization=Transformer().replace(E("x_(exp(x1_))"), E("x1_")))
     /// >>> E("real_log(exp(x)) + real_log(5)")
     #[gen_stub(skip)]
-    #[pyo3(signature = (*names,is_symmetric=None,is_antisymmetric=None,is_cyclesymmetric=None,is_linear=None,is_scalar=None,is_real=None,is_integer=None,is_positive=None,tags=None,aliases=None,custom_normalization=None, custom_print=None, custom_derivative=None, series=None, eval=None, data=None))]
+    #[pyo3(signature = (*names,is_symmetric=None,is_antisymmetric=None,is_cyclesymmetric=None,is_linear=None,is_scalar=None,is_real=None,is_integer=None,is_positive=None,tags=None,aliases=None,normalization=None, print=None, derivative=None, series=None, eval=None, data=None))]
     #[classmethod]
     pub fn symbol(
         _cls: &Bound<'_, PyType>,
@@ -4196,9 +4196,9 @@ impl PythonExpression {
         is_positive: Option<bool>,
         tags: Option<Vec<String>>,
         aliases: Option<Vec<String>>,
-        custom_normalization: Option<PythonTransformer>,
-        custom_print: Option<Py<PyAny>>,
-        custom_derivative: Option<Py<PyAny>>,
+        normalization: Option<PythonTransformer>,
+        print: Option<Py<PyAny>>,
+        derivative: Option<Py<PyAny>>,
         series: Option<Py<PyAny>>,
         eval: Option<Py<PyAny>>,
         data: Option<PythonUserData>,
@@ -4226,9 +4226,9 @@ impl PythonExpression {
             && is_positive.is_none()
             && tags.is_none()
             && aliases.is_none()
-            && custom_normalization.is_none()
-            && custom_print.is_none()
-            && custom_derivative.is_none()
+            && normalization.is_none()
+            && print.is_none()
+            && derivative.is_none()
             && series.is_none()
             && eval.is_none()
             && data.is_none()
@@ -4307,7 +4307,7 @@ impl PythonExpression {
 
             let mut symbol = Symbol::new(name).with_attributes(opts);
 
-            if let Some(f) = custom_normalization {
+            if let Some(f) = normalization {
                 symbol = symbol.with_normalization_function(Box::new(
                     move |input: AtomView<'_>, out: &mut Settable<Atom>| {
                         let _ = Workspace::get_local()
@@ -4325,7 +4325,7 @@ impl PythonExpression {
                 ))
             }
 
-            if let Some(f) = custom_print {
+            if let Some(f) = print {
                 symbol = symbol.with_print_function(Box::new(
                     move |input: AtomView<'_>, opts: &PrintOptions| {
                         Python::attach(|py| {
@@ -4343,7 +4343,7 @@ impl PythonExpression {
                 ))
             }
 
-            if let Some(f) = custom_derivative {
+            if let Some(f) = derivative {
                 symbol = symbol.with_derivative_function(Box::new(
                     move |input: AtomView<'_>, arg: usize, out: &mut Settable<Atom>| {
                         **out = Python::attach(|py| {
@@ -4416,7 +4416,7 @@ impl PythonExpression {
                 let name = namespace.attach_namespace(&name);
                 let mut symbol = Symbol::new(name).with_attributes(opts.clone());
 
-                if let Some(f) = &custom_normalization {
+                if let Some(f) = &normalization {
                     let t = f.chain.clone();
                     symbol = symbol.with_normalization_function(Box::new(
                         move |input: AtomView<'_>, out: &mut Settable<Atom>| {
@@ -8452,19 +8452,19 @@ PyMethodsInfo {
                     type_info: || Option::<Vec<String>>::type_input(),
                 },
                 ParameterInfo {
-                    name: "custom_normalization",
+                    name: "normalization",
                     kind: ParameterKind::PositionalOrKeyword,
                     default: ParameterDefault::Expr(NONE_ARG),
                     type_info: || Option::<PythonTransformer>::type_input(),
                 },
                 ParameterInfo {
-                    name: "custom_print",
+                    name: "print",
                     kind: ParameterKind::PositionalOrKeyword,
                     default: ParameterDefault::Expr(NONE_ARG),
                     type_info: || TypeInfo::unqualified("typing.Optional[typing.Callable[..., typing.Optional[str]]]"),
                 },
                 ParameterInfo {
-                    name: "custom_derivative",
+                    name: "derivative",
                     kind: ParameterKind::PositionalOrKeyword,
                     default: ParameterDefault::Expr(NONE_ARG),
                     type_info: || TypeInfo::unqualified("typing.Optional[typing.Callable[[Expression, int], Expression]]"),
@@ -8525,7 +8525,7 @@ Define a linear and symmetric function:
 dot(p1,p2)+2*dot(p1,p3)+3*dot(p2,p2)-dot(p2,p3)+6*dot(p2,p3)-2*dot(p3,p3)
 
 Define a custom normalization function:
->>> e = S('real_log', custom_normalization=T().replace(E("x_(exp(x1_))"), E("x1_")))
+>>> e = S('real_log', normalization=T().replace(E("x_(exp(x1_))"), E("x1_")))
 >>> E("real_log(exp(x)) + real_log(5)")
 
 Define a custom print function:
@@ -8535,14 +8535,14 @@ Define a custom print function:
 >>>             return "\\mu_{" + ",".join(a.format() for a in mu) + "}"
 >>>         else:
 >>>             return "\\mu"
->>> mu = S("mu", custom_print=print_mu)
+>>> mu = S("mu", print=print_mu)
 >>> expr = E("mu + mu(1,2)")
 >>> print(expr.to_latex())
 
 If the function returns `None`, the default print function is used.
 
 Define a custom derivative function:
->>> tag = S('tag', custom_derivative=lambda f, index: f)
+>>> tag = S('tag', derivative=lambda f, index: f)
 >>> x = S('x')
 >>> tag(3, x).derivative(x)
 
@@ -8581,15 +8581,15 @@ tags: Optional[Sequence[str]]
     A list of tags to associate with the symbol.
 aliases: Optional[Sequence[str]]
     A list of aliases for the symbol.
-custom_normalization : Optional[Transformer]
+normalization : Optional[Transformer]
     A transformer that is called after every normalization. Note that the symbol
     name cannot be used in the transformer as this will lead to a definition of the
     symbol. Use a wildcard with the same attributes instead.
-custom_print : Optional[Callable[..., Optional[str]]]:
+print : Optional[Callable[..., Optional[str]]]:
     A function that is called when printing the variable/function, which is provided as its first argument.
     This function should return a string, or `None` if the default print function should be used.
     The custom print function takes in keyword arguments that are the same as the arguments of the `format` function.
-custom_derivative: Optional[Callable[[Expression, int], Expression]]:
+derivative: Optional[Callable[[Expression, int], Expression]]:
     A function that is called when computing the derivative of a function in a given argument.
 series: Optional[Callable[[Sequence[Series]], Optional[tuple[Expression, Expression]]]]:
     A function that is called for custom series expansion. It receives the argument series and can return
