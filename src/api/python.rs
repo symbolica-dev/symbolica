@@ -313,6 +313,7 @@ pub fn create_symbolica_module<'a, 'b>(
 
 fn print_options_to_dict<'py>(
     options: &PrintOptions,
+    state: &PrintState,
     py: Python<'py>,
 ) -> PyResult<Bound<'py, PyDict>> {
     let dict = PyDict::new(py);
@@ -356,6 +357,11 @@ fn print_options_to_dict<'py>(
     dict.set_item("color_namespace", options.color_namespace)?;
     dict.set_item("max_terms", options.max_terms)?;
     dict.set_item("custom_print_mode", options.custom_print_mode.map(|x| x.1))?;
+
+    dict.set_item("level", state.level)?;
+    dict.set_item("bracket_level", state.bracket_level)?;
+    dict.set_item("indentation_level", state.indentation_level)?;
+
     Ok(dict)
 }
 
@@ -4327,9 +4333,9 @@ impl PythonExpression {
 
             if let Some(f) = print {
                 symbol = symbol.with_print_function(Box::new(
-                    move |input: AtomView<'_>, opts: &PrintOptions| {
+                    move |input: AtomView<'_>, opts: &PrintOptions, state: &PrintState| {
                         Python::attach(|py| {
-                            let kwargs = print_options_to_dict(opts, py).unwrap();
+                            let kwargs = print_options_to_dict(opts, state, py).unwrap();
                             f.call(
                                 py,
                                 (PythonExpression::from(input.to_owned()),),

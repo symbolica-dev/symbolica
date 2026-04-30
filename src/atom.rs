@@ -54,7 +54,7 @@ use crate::{
     evaluate::ExternalFunction,
     parser::{ParseSettings, Token},
     poly::series::Series,
-    printer::{AnsiWrap, AtomPrinter, PrintFunction, PrintOptions},
+    printer::{AnsiWrap, AtomPrinter, PrintFunction, PrintOptions, PrintState},
     state::{RecycledAtom, State, SymbolData, Workspace},
     transformer::StatsOptions,
     utils::{BorrowedOrOwned, Settable},
@@ -724,14 +724,14 @@ impl std::fmt::Debug for Symbol {
                 data.tags
             )
         } else {
-            self.format(&PrintOptions::file(), f)
+            self.format(&PrintOptions::file(), PrintState::default(), f)
         }
     }
 }
 
 impl std::fmt::Display for Symbol {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        self.format(&PrintOptions::from_fmt(f), f)
+        self.format(&PrintOptions::from_fmt(f), PrintState::default(), f)
     }
 }
 
@@ -848,7 +848,7 @@ impl SymbolBuilder {
     /// ```
     /// use symbolica::{atom::Symbol, wrap_symbol};
     ///
-    /// let f = Symbol::new(wrap_symbol!("mu")).with_print_function(|view, opt| {
+    /// let f = Symbol::new(wrap_symbol!("mu")).with_print_function(|view, opt, _state| {
     ///     if !opt.mode.is_latex() {
     ///       None
     ///     } else {
@@ -858,7 +858,10 @@ impl SymbolBuilder {
     /// ```
     pub fn with_print_function(
         mut self,
-        print_function: impl Fn(AtomView, &PrintOptions) -> Option<String> + Send + Sync + 'static,
+        print_function: impl Fn(AtomView, &PrintOptions, &PrintState) -> Option<String>
+        + Send
+        + Sync
+        + 'static,
     ) -> Self {
         self.print_function = Some(Box::new(print_function));
         self
@@ -1737,13 +1740,14 @@ impl Symbol {
     pub fn format<W: std::fmt::Write>(
         &self,
         opts: &PrintOptions,
+        state: PrintState,
         f: &mut W,
     ) -> Result<(), std::fmt::Error> {
         let data = self.get_global_data();
         let (namespace, name) = (&data.namespace, &data.name[data.namespace.len() + 2..]);
 
         if let Some(custom_print) = &data.custom_print
-            && let Some(s) = custom_print(InlineVar::new(*self).as_view(), opts)
+            && let Some(s) = custom_print(InlineVar::new(*self).as_view(), opts, &state)
         {
             f.write_str(&s)?;
             return Ok(());
@@ -3147,7 +3151,7 @@ macro_rules! tag {
 /// use symbolica::symbol;
 /// use symbolica::atom::{AtomCore, AtomView};
 /// use symbolica::printer::PrintState;
-/// let _ = symbol!("mu", print = |a, opt| {
+/// let _ = symbol!("mu", print = |a, opt, _state| {
 ///     if !opt.mode.is_latex() {
 ///         return None; // use default printer
 ///     }
@@ -3230,7 +3234,7 @@ macro_rules! tag {
 ///
 /// ```no_run
 /// use symbolica::symbol;
-/// let _ = symbol!("gamma"; Symmetric, Linear; print = |_, _| { None });
+/// let _ = symbol!("gamma"; Symmetric, Linear; print = |_, _, _| { None });
 /// ```
 #[macro_export]
 macro_rules! symbol {

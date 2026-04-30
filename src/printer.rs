@@ -128,7 +128,8 @@ impl<T: fmt::Display> fmt::Display for AnsiWrap<T> {
 
 /// A function that takes an atom and prints it in a custom way.
 /// If the function returns `None`, the default printing is used.
-pub type PrintFunction = Box<dyn Fn(AtomView, &PrintOptions) -> Option<String> + Send + Sync>;
+pub type PrintFunction =
+    Box<dyn Fn(AtomView, &PrintOptions, &PrintState) -> Option<String> + Send + Sync>;
 
 macro_rules! define_formatters {
     ($($a:ident),*) => {
@@ -186,7 +187,8 @@ impl<'a> AtomPrinter<'a> {
         AtomPrinter { atom, print_opts }
     }
 
-    fn format_bracket<W: std::fmt::Write>(
+    /// Format a bracket based on the current bracket level and print options.
+    pub fn format_bracket<W: std::fmt::Write>(
         bracket: char,
         f: &mut W,
         opts: &PrintOptions,
@@ -205,7 +207,7 @@ impl<'a> AtomPrinter<'a> {
     }
 
     /// Format an integer. Input must be digits only.
-    fn format_digits<W: std::fmt::Write>(
+    pub fn format_digits<W: std::fmt::Write>(
         mut s: String,
         opts: &PrintOptions,
         print_state: &PrintState,
@@ -454,7 +456,9 @@ impl AtomView<'_> {
             AtomView::Num(_) => write!(out, "{}", self.printer(PrintOptions::file())).unwrap(),
             AtomView::Var(v) => {
                 if settings.include_attributes {
-                    v.get_symbol().format(&PrintOptions::full(), out).unwrap();
+                    v.get_symbol()
+                        .format(&PrintOptions::full(), PrintState::default(), out)
+                        .unwrap();
                 } else if settings.include_namespace {
                     v.get_symbol()
                         .format(
@@ -462,18 +466,25 @@ impl AtomView<'_> {
                                 hide_namespace: settings.hide_namespace,
                                 ..PrintOptions::file()
                             },
+                            PrintState::default(),
                             out,
                         )
                         .unwrap();
                 } else {
                     v.get_symbol()
-                        .format(&PrintOptions::file_no_namespace(), out)
+                        .format(
+                            &PrintOptions::file_no_namespace(),
+                            PrintState::default(),
+                            out,
+                        )
                         .unwrap();
                 }
             }
             AtomView::Fun(f) => {
                 if settings.include_attributes {
-                    f.get_symbol().format(&PrintOptions::full(), out).unwrap();
+                    f.get_symbol()
+                        .format(&PrintOptions::full(), PrintState::default(), out)
+                        .unwrap();
                 } else if settings.include_namespace {
                     f.get_symbol()
                         .format(
@@ -481,12 +492,17 @@ impl AtomView<'_> {
                                 hide_namespace: settings.hide_namespace,
                                 ..PrintOptions::file()
                             },
+                            PrintState::default(),
                             out,
                         )
                         .unwrap();
                 } else {
                     f.get_symbol()
-                        .format(&PrintOptions::file_no_namespace(), out)
+                        .format(
+                            &PrintOptions::file_no_namespace(),
+                            PrintState::default(),
+                            out,
+                        )
                         .unwrap();
                 }
                 out.push('(');
@@ -717,7 +733,7 @@ impl FormattedPrintVar for VarView<'_> {
         }
 
         let id = self.get_symbol();
-        id.format(opts, f)?;
+        id.format(opts, print_state, f)?;
         Ok(false)
     }
 
@@ -1430,7 +1446,7 @@ impl FormattedPrintFn for FunView<'_> {
 
         let id = self.get_symbol();
         if let Some(custom_print) = &id.get_global_data().custom_print
-            && let Some(s) = custom_print(self.as_view(), opts)
+            && let Some(s) = custom_print(self.as_view(), opts, &print_state)
         {
             f.write_str(&s)?;
             return Ok(false);
@@ -1447,7 +1463,7 @@ impl FormattedPrintFn for FunView<'_> {
                 .get(n_args / 2)
                 .get_symbol()
                 .expect("No symbol for derivative function");
-            function_symbol.format(opts, f)?;
+            function_symbol.format(opts, print_state, f)?;
 
             let mut arg_iter = self.iter();
 
@@ -1505,10 +1521,10 @@ impl FormattedPrintFn for FunView<'_> {
 
         if opts.mode.is_typst() {
             f.write_str("op(")?;
-            id.format(opts, f)?;
+            id.format(opts, print_state, f)?;
             f.write_str(")")?;
         } else {
-            id.format(opts, f)?;
+            id.format(opts, print_state, f)?;
         }
 
         if print_state.bracket_level == 0 {
@@ -1592,7 +1608,7 @@ impl FormattedPrintFn for FunView<'_> {
                     && let AtomView::Fun(fun) = x
                 {
                     f.write_str("][")?;
-                    fun.get_symbol().format(opts, f)?;
+                    fun.get_symbol().format(opts, print_state, f)?;
                     f.write_str("][")?;
 
                     first = true;
@@ -2193,7 +2209,7 @@ mod test {
     fn custom_print() {
         let _ = symbol!(
             "mu",
-            print = |a, opt| {
+            print = |a, opt, _state| {
                 if !opt.mode.is_latex() {
                     return None; // use default printer
                 }
