@@ -3107,9 +3107,8 @@ class Expression:
 
     def evaluator(
         self,
-        constants: dict[Expression, Expression],
-        functions: dict[tuple[Expression, str, Sequence[Expression]], Expression],
         params: Sequence[Expression],
+        functions: dict[tuple[Expression, Sequence[Expression]], Expression] = {},
         iterations: int = 1,
         cpe_iterations: int | None = None,
         n_cores: int = 4,
@@ -3119,9 +3118,6 @@ class Expression:
         max_horner_scheme_variables: int = 500,
         max_common_pair_cache_entries: int = 1000000,
         max_common_pair_distance: int = 100,
-        external_functions: dict[tuple[Expression, str], Callable[[
-            Sequence[float | complex]], float | complex]] | None = None,
-        conditionals: Sequence[Expression] | None = None,
     ) -> Evaluator:
         """
         Create an evaluator that can evaluate (nested) expressions in an optimized fashion.
@@ -3156,16 +3152,16 @@ class Expression:
         >>> E("f(x)").evaluator({}, {}, [S("x")],
                     external_functions={(S("f"), "F"): lambda args: args[0]**2 + 1})
 
-        Define an conditional function which yields `x+1` when `y != 0` and `x+2` when `y == 0`:
+        The built-in `if` yields `x+1` when `y != 0` and `x+2` when `y == 0`:
 
-        >>> E("if(y, x + 1, x + 2)").evaluator({}, {}, [S("x"), S("y")], conditional=[S("if")])
+        >>> E("if(y, x + 1, x + 2)").evaluator({}, {}, [S("x"), S("y")])
 
         Parameters
         ----------
         constants: dict[Expression, Expression]
             A map of expressions to constants. The constants should be numerical expressions.
-        functions: dict[tuple[Expression, str, Sequence[Expression]], Expression]
-            A dictionary of functions. The key is a tuple of the function name, printable name and the argument variables.
+        functions: dict[tuple[Expression, Sequence[Expression]], Expression]
+            A dictionary of functions. The key is a tuple of the function name and the argument variables.
             The value is the function body. If the function name entry contains arguments, these are considered tags.
         params: Sequence[Expression]
             A list of free parameters.
@@ -3188,23 +3184,14 @@ class Expression:
             The maximum number of entries in the common pair cache.
         max_common_pair_distance: int, optional
             The maximum distance between common pairs. Used when clearing cache entries.
-        external_functions: dict[tuple[Expression, str], Callable[[Sequence[float | complex]], float | complex]] | None
-            A dictionary of external functions that can be called during evaluation.
-            The key is a tuple of the function symbol and a printable function name.
-            The value is a callable that takes a list of arguments and returns a float or complex number.
-            This is useful for functions that are not defined in Symbolica but are available in Python.
-        conditionals: Sequence[Expression] | None, optional
-            A list of conditional functions. These functions should take three argument: a condition that is tested for
-            inequality with 0, the true branch and the false branch.
         """
 
     @classmethod
     def evaluator_multiple(
         _cls,
         exprs: Sequence[Expression],
-        constants: dict[Expression, Expression],
-        functions: dict[tuple[Expression, str, Sequence[Expression]], Expression],
         params: Sequence[Expression],
+        functions: dict[tuple[Expression, Sequence[Expression]], Expression] = {},
         iterations: int = 1,
         cpe_iterations: int | None = None,
         n_cores: int = 4,
@@ -3214,9 +3201,6 @@ class Expression:
         max_horner_scheme_variables: int = 500,
         max_common_pair_cache_entries: int = 1000000,
         max_common_pair_distance: int = 100,
-        external_functions: dict[tuple[Expression, str], Callable[[
-            Sequence[float | complex]], float | complex]] | None = None,
-        conditionals: Sequence[Expression] | None = None,
     ) -> Evaluator:
         """
         Create an evaluator that can jointly evaluate (nested) expressions in an optimized fashion.
@@ -3238,8 +3222,9 @@ class Expression:
             The expressions to compile into a joint evaluator.
         constants: dict[Expression, Expression]
             The symbolic substitutions applied to constant symbols when building the evaluator.
-        functions: dict[tuple[Expression, str, Sequence[Expression]], Expression]
-            The symbolic function implementations applied when building the evaluator.
+        functions: dict[tuple[Expression, Sequence[Expression]], Expression]
+            A dictionary of functions. The key is a tuple of the function name and the argument variables.
+            The value is the function body. If the function name entry contains arguments, these are considered tags.
         params: Sequence[Expression]
             The evaluator parameters, in input order.
         iterations: int
@@ -3260,10 +3245,6 @@ class Expression:
             The maximum number of common-subexpression pairs to cache.
         max_common_pair_distance: int
             The maximum distance between factors when searching for common pairs.
-        external_functions: dict[tuple[Expression, str], Callable[[ Sequence[float | complex]], float | complex]] | None
-            The external functions to register.
-        conditionals: Sequence[Expression] | None
-            Expressions that should be treated as conditional branches during evaluator construction.
         """
 
     def canonize_tensors(self,

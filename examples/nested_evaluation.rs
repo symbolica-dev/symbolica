@@ -16,32 +16,20 @@ fn main() {
 
     let mut fn_map = FunctionMap::new();
 
-    fn_map.add_constant(symbol!("pi").into(), Complex::from(Rational::from((22, 7))));
     fn_map
-        .add_tagged_function(
-            symbol!("p"),
-            vec![Atom::num(1)],
-            "p1".to_string(),
-            vec![symbol!("z")],
-            p1,
-        )
+        .add_tagged_function(symbol!("p"), vec![Atom::num(1)], vec![symbol!("z")], p1)
         .unwrap();
     fn_map
-        .add_function(
-            symbol!("f"),
-            "f".to_string(),
-            vec![symbol!("y"), symbol!("z")],
-            f,
-        )
+        .add_function(symbol!("f"), vec![symbol!("y"), symbol!("z")], f)
         .unwrap();
     fn_map
-        .add_function(symbol!("g"), "g".to_string(), vec![symbol!("y")], g)
+        .add_function(symbol!("g"), vec![symbol!("y")], g)
         .unwrap();
     fn_map
-        .add_function(symbol!("h"), "h".to_string(), vec![symbol!("y")], h)
+        .add_function(symbol!("h"), vec![symbol!("y")], h)
         .unwrap();
     fn_map
-        .add_function(symbol!("i"), "i".to_string(), vec![symbol!("y")], i)
+        .add_function(symbol!("i"), vec![symbol!("y")], i)
         .unwrap();
 
     let params = vec![parse!("x")];
