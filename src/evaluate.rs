@@ -1,24 +1,6 @@
 //! Evaluation of expressions.
 //!
 //! The main entry point is through [AtomCore::evaluator].
-use ahash::{AHasher, HashMap, HashMapExt, HashSet};
-use dyn_clone::DynClone;
-use rand::Rng;
-use self_cell::self_cell;
-use std::{
-    cmp::Reverse,
-    collections::{BinaryHeap, hash_map::Entry},
-    hash::{Hash, Hasher},
-    os::raw::{c_ulong, c_void},
-    panic,
-    path::{Path, PathBuf},
-    sync::{
-        Arc, Mutex,
-        atomic::{AtomicBool, AtomicUsize, Ordering},
-    },
-};
-use symjit::{Applet, Composer, Config, Defuns, Storage, Translator};
-
 use crate::{
     LicenseManager,
     atom::{Atom, AtomCore, AtomView, EvaluationInfo, Indeterminate, KeyLookup, Symbol},
@@ -41,6 +23,23 @@ use crate::{
     state::State,
     utils::AbortCheck,
 };
+use ahash::{AHasher, HashMap, HashMapExt, HashSet};
+use dyn_clone::DynClone;
+use rand::Rng;
+use self_cell::self_cell;
+use std::{
+    cmp::Reverse,
+    collections::{BinaryHeap, hash_map::Entry},
+    hash::{Hash, Hasher},
+    os::raw::{c_ulong, c_void},
+    panic,
+    path::{Path, PathBuf},
+    sync::{
+        Arc, Mutex,
+        atomic::{AtomicBool, AtomicUsize, Ordering},
+    },
+};
+use symjit::{Applet, Composer, Config, Defuns, Storage, Translator};
 
 type EvalFnType<A, T> = Box<
     dyn Fn(
@@ -73,7 +72,7 @@ impl<A, T> EvaluationFn<A, T> {
 /// use symbolica::{atom::AtomCore, parse, symbol};
 /// use symbolica::evaluate::{FunctionMap, OptimizationSettings};
 /// let mut fn_map = FunctionMap::new();
-/// fn_map.add_function(symbol!("f"), "f".to_string(), vec![symbol!("x")], parse!("x^2 + 1")).unwrap();
+/// fn_map.add_function(symbol!("f"), vec![symbol!("x")], parse!("x^2 + 1")).unwrap();
 ///
 /// let optimization_settings = OptimizationSettings::default();
 /// let mut evaluator = parse!("f(x)")
@@ -89,94 +88,66 @@ impl<A, T> EvaluationFn<A, T> {
     trait_decode(trait = crate::state::HasStateMap)
 )]
 #[derive(Clone, Debug)]
-pub struct FunctionMap<T = Complex<Rational>> {
-    map: HashMap<Atom, ConstOrExpr<T>>,
-    tagged_fn_map: HashMap<(Symbol, Vec<Atom>), ConstOrExpr<T>>,
-    external_fn: HashMap<Symbol, ConstOrExpr<T>>,
+pub struct FunctionMap {
+    map: HashMap<Atom, Expr>,
+    tagged_fn_map: HashMap<(Symbol, Vec<Atom>), Expr>,
     tag: HashMap<Symbol, usize>,
 }
 
-impl<T> Default for FunctionMap<T> {
+impl Default for FunctionMap {
     fn default() -> Self {
         Self::new()
     }
 }
 
-impl<T> FunctionMap<T> {
+impl FunctionMap {
     /// Create a new, empty function map.
     pub fn new() -> Self {
         FunctionMap {
             map: HashMap::default(),
             tagged_fn_map: HashMap::default(),
             tag: HashMap::default(),
-            external_fn: HashMap::default(),
         }
     }
 
-    /// Register a constant.
-    pub fn add_constant(&mut self, key: Atom, value: T) {
-        self.map.insert(key, ConstOrExpr::Const(value));
-    }
-
-    /// Register a function without tags. `rename` is the name used in exported code.
-    pub fn add_function<A: Into<Indeterminate>>(
+    /// Register a function. If `name` is a symbol, it will be treated as a regular function; if it is a function, its arguments will be treated as tags.
+    pub fn add_function<S: Into<Indeterminate>, A: Into<Indeterminate>>(
         &mut self,
-        name: Symbol,
-        rename: String,
+        name: S,
         args: Vec<A>,
         body: Atom,
     ) -> Result<(), String> {
-        if self.external_fn.contains_key(&name) {
-            return Err(format!(
-                "Cannot add function {}, as it is also an external function",
-                name.get_name()
-            ));
-        }
+        let name = name.into();
 
-        if let Some(t) = self.tag.insert(name, 0)
-            && t != 0
-        {
-            return Err(format!(
-                "Cannot add the same function {} with a different number of parameters",
-                name.get_name()
-            ));
-        }
+        let (name, tags) = match name {
+            Indeterminate::Symbol(name, _) => (name, vec![]),
+            Indeterminate::Function(name, f) => {
+                let tags = f
+                    .as_fun_view()
+                    .unwrap()
+                    .iter()
+                    .map(|x| x.to_owned())
+                    .collect();
+                (name, tags)
+            }
+        };
 
-        let id = self.tagged_fn_map.len();
-        self.tagged_fn_map.entry((name, vec![])).or_insert_with(|| {
-            ConstOrExpr::Expr(Expr {
-                id,
-                name: rename,
-                tag_len: 0,
-                args: args.into_iter().map(|x| x.into()).collect(),
-                body,
-            })
-        });
-
-        Ok(())
+        self.add_tagged_function(name, tags, args, body)
     }
 
-    /// Register a function, where the first arguments are `tags` instead of arguments. `rename` is the name used in exported code.
+    /// Register a function, where the first arguments are `tags` instead of arguments.
     pub fn add_tagged_function<A: Into<Indeterminate>>(
         &mut self,
         name: Symbol,
         tags: Vec<Atom>,
-        rename: String,
         args: Vec<A>,
         body: Atom,
     ) -> Result<(), String> {
-        if self.external_fn.contains_key(&name) {
-            return Err(format!(
-                "Cannot add function {}, as it is also an external function",
-                name.get_name()
-            ));
-        }
-
         if let Some(t) = self.tag.insert(name, tags.len())
             && t != tags.len()
         {
             return Err(format!(
-                "Cannot add the same function {} with a different number of parameters",
+                "Cannot add the same function {} with a different number of tags",
                 name.get_name()
             ));
         }
@@ -185,57 +156,12 @@ impl<T> FunctionMap<T> {
         let tag_len = tags.len();
         self.tagged_fn_map
             .entry((name, tags.clone()))
-            .or_insert_with(|| {
-                ConstOrExpr::Expr(Expr {
-                    id,
-                    name: rename,
-                    tag_len,
-                    args: args.into_iter().map(|x| x.into()).collect(),
-                    body,
-                })
+            .or_insert_with(|| Expr {
+                id,
+                tag_len,
+                args: args.into_iter().map(|x| x.into()).collect(),
+                body,
             });
-
-        Ok(())
-    }
-
-    /// Register an external function that can later be linked with [ExpressionEvaluator::with_external_functions].
-    pub fn add_external_function(&mut self, name: Symbol, rename: String) -> Result<(), String> {
-        if self.tag.contains_key(&name) || self.external_fn.contains_key(&name) {
-            return Err(format!(
-                "Cannot add external function {}, as it is also a tagged function",
-                name.get_name()
-            ));
-        }
-
-        self.external_fn
-            .insert(name, ConstOrExpr::External(self.external_fn.len(), rename));
-
-        Ok(())
-    }
-
-    /// Register a conditional function that consists of three arguments:
-    /// - the condition that should be non-zero
-    /// - the true branch
-    /// - the false branch
-    pub fn add_conditional(&mut self, name: Symbol) -> Result<(), String> {
-        if self.external_fn.contains_key(&name) {
-            return Err(format!(
-                "Cannot add function {}, as it is also an external function",
-                name.get_name()
-            ));
-        }
-
-        if let Some(t) = self.tag.insert(name, 0)
-            && t != 0
-        {
-            return Err(format!(
-                "Cannot add the same function {} with a different number of parameters",
-                name.get_name()
-            ));
-        }
-
-        self.tagged_fn_map
-            .insert((name, vec![]), ConstOrExpr::Condition);
 
         Ok(())
     }
@@ -244,14 +170,7 @@ impl<T> FunctionMap<T> {
         self.tag.get(symbol).cloned().unwrap_or(0)
     }
 
-    fn get_constant(&self, a: AtomView) -> Option<&T> {
-        match self.map.get(a.get_data()) {
-            Some(ConstOrExpr::Const(c)) => Some(c),
-            _ => None,
-        }
-    }
-
-    fn get(&self, a: AtomView) -> Option<&ConstOrExpr<T>> {
+    fn get(&self, a: AtomView) -> Option<&Expr> {
         if let Some(c) = self.map.get(a.get_data()) {
             return Some(c);
         }
@@ -259,10 +178,6 @@ impl<T> FunctionMap<T> {
         if let AtomView::Fun(aa) = a {
             let s = aa.get_symbol();
             let tag_len = self.get_tag_len(&s);
-
-            if let Some(s) = self.external_fn.get(&s) {
-                return Some(s);
-            }
 
             if aa.get_nargs() >= tag_len {
                 let tag = aa.iter().take(tag_len).map(|x| x.to_owned()).collect();
@@ -273,22 +188,6 @@ impl<T> FunctionMap<T> {
         None
     }
 }
-
-#[cfg_attr(
-    feature = "bincode",
-    derive(bincode_trait_derive::Encode),
-    derive(bincode_trait_derive::Decode),
-    derive(bincode_trait_derive::BorrowDecodeFromDecode),
-    trait_decode(trait = crate::state::HasStateMap)
-)]
-#[derive(Clone, Debug)]
-enum ConstOrExpr<T> {
-    Const(T),
-    Expr(Expr),
-    External(usize, String),
-    Condition,
-}
-
 #[cfg_attr(
     feature = "bincode",
     derive(bincode_trait_derive::Encode),
@@ -299,7 +198,6 @@ enum ConstOrExpr<T> {
 #[derive(Clone, Debug)]
 struct Expr {
     id: usize,
-    name: String,
     tag_len: usize,
     args: Vec<Indeterminate>,
     body: Atom,
@@ -413,32 +311,8 @@ pub struct EvalTree<T> {
     param_count: usize,
 }
 
-fn external_export_name(
-    fn_map: &FunctionMap<Complex<Rational>>,
-    symbol: Symbol,
-    tags: &[Atom],
-) -> Result<String, String> {
-    match fn_map.external_fn.get(&symbol) {
-        Some(ConstOrExpr::External(_, rename)) => Ok(rename.clone()),
-        _ => {
-            let mut name = symbol.get_ascii_name().ok_or_else(|| {
-                format!(
-                    "No ASCII name for symbol {symbol} available, which is needed for exporting"
-                )
-            })?;
-
-            for t in tags {
-                name += "_";
-                name += &t.to_canonical_string();
-            }
-            Ok(name)
-        }
-    }
-}
-
 fn register_constant_external_container<T>(
     external_functions: &mut Vec<ExternalFunctionContainer<T>>,
-    fn_map: &FunctionMap<Complex<Rational>>,
     symbol: Symbol,
     tags: Vec<Atom>,
     constants: &mut Vec<Complex<Rational>>,
@@ -449,8 +323,7 @@ fn register_constant_external_container<T>(
     {
         index
     } else {
-        let export_name = external_export_name(fn_map, symbol, &tags).unwrap();
-        external_functions.push(ExternalFunctionContainer::new(export_name, symbol, tags));
+        external_functions.push(ExternalFunctionContainer::new(symbol, tags));
         external_functions.len() - 1
     };
 
@@ -467,7 +340,7 @@ fn register_constant_external_container<T>(
 impl<'a> AtomView<'a> {
     pub(crate) fn to_evaluator(
         expressions: &[Self],
-        fn_map: &FunctionMap<Complex<Rational>>,
+        fn_map: &FunctionMap,
         params: &[Atom],
         settings: OptimizationSettings,
     ) -> Result<ExpressionEvaluator<Complex<Rational>>, String> {
@@ -539,10 +412,8 @@ impl<'a> AtomView<'a> {
         }
 
         let mut f = fn_map.clone();
-        for expr in f.tagged_fn_map.values_mut() {
-            if let ConstOrExpr::Expr(Expr { body, .. }) = expr {
-                *body = body.as_view().horner_scheme(Some(&scheme), true);
-            }
+        for Expr { body, .. } in f.tagged_fn_map.values_mut() {
+            *body = body.as_view().horner_scheme(Some(&scheme), true);
         }
 
         let mut e = Self::linearize_multiple(&hornered_expressions, fn_map, params, settings)?;
@@ -777,7 +648,7 @@ impl<'a> AtomView<'a> {
 
     pub(crate) fn linearize_multiple<T: AtomCore>(
         expressions: &[T],
-        fn_map: &FunctionMap<Complex<Rational>>,
+        fn_map: &FunctionMap,
         params: &[Atom],
         settings: OptimizationSettings,
     ) -> Result<ExpressionEvaluator<Complex<Rational>>, String> {
@@ -788,29 +659,7 @@ impl<'a> AtomView<'a> {
         // we can only safely remove entries that don't depend on any of the function arguments
         let mut subexpression: HashMap<AtomView, Slot> = HashMap::default();
 
-        let mut external_functions = fn_map
-            .external_fn
-            .iter()
-            .map(|(symbol, v)| {
-                if let ConstOrExpr::External(id, _) = v {
-                    (
-                        *id,
-                        ExternalFunctionContainer::new(
-                            external_export_name(fn_map, *symbol, &[]).unwrap(),
-                            *symbol,
-                            vec![],
-                        ),
-                    )
-                } else {
-                    unreachable!()
-                }
-            })
-            .collect::<Vec<_>>();
-        external_functions.sort_by_key(|(id, _)| *id);
-        let mut external_functions = external_functions
-            .into_iter()
-            .map(|(_, container)| container)
-            .collect::<Vec<_>>();
+        let mut external_functions = vec![];
 
         let mut result_indices = vec![];
         let mut arg_stack = vec![];
@@ -904,12 +753,7 @@ impl<'a> AtomView<'a> {
                     {
                         index
                     } else {
-                        let export_name = external_export_name(fn_map, *sym, &tags).unwrap();
-                        external_functions.push(ExternalFunctionContainer::new(
-                            export_name,
-                            *sym,
-                            tags,
-                        ));
+                        external_functions.push(ExternalFunctionContainer::new(*sym, tags));
                         external_functions.len() - 1
                     };
 
@@ -960,7 +804,7 @@ impl<'a> AtomView<'a> {
     // Yields the stack index that contains the output.
     fn linearize_impl(
         &self,
-        fn_map: &'a FunctionMap<Complex<Rational>>,
+        fn_map: &'a FunctionMap,
         params: &[Atom],
         constants: &mut Vec<Complex<Rational>>,
         constant_map: &mut HashMap<Complex<Rational>, usize>,
@@ -978,17 +822,6 @@ impl<'a> AtomView<'a> {
             if let Some(p) = params.iter().position(|a| a.as_view() == *self) {
                 return Ok(Slot::Param(p));
             }
-        }
-
-        if let Some(c) = fn_map.get_constant(*self) {
-            if let Some(&i) = constant_map.get(&c) {
-                return Ok(Slot::Const(i));
-            }
-
-            let i = constants.len();
-            constants.push(c.clone());
-            constant_map.insert(c.clone(), i);
-            return Ok(Slot::Const(i));
         }
 
         if let Some(s) = subexpressions.get(self) {
@@ -1031,7 +864,6 @@ impl<'a> AtomView<'a> {
                 if s.get_evaluation_info().is_some() {
                     let i = register_constant_external_container(
                         external_functions,
-                        fn_map,
                         s,
                         vec![],
                         constants,
@@ -1080,7 +912,176 @@ impl<'a> AtomView<'a> {
                 }
 
                 let fun = if name == Symbol::IF {
-                    &ConstOrExpr::Condition
+                    if f.get_nargs() != 3 {
+                        return Err(format!(
+                            "Condition function called with wrong number of arguments: {} vs 3",
+                            f.get_nargs(),
+                        ));
+                    }
+
+                    let mut arg_iter = f.iter();
+                    let cond = arg_iter.next().unwrap();
+                    let then_branch = arg_iter.next().unwrap();
+                    let else_branch = arg_iter.next().unwrap();
+
+                    let instr_len = instr.len();
+                    let subexpression_len = subexpressions.len();
+                    let cond = cond.linearize_impl(
+                        fn_map,
+                        params,
+                        constants,
+                        constant_map,
+                        external_functions,
+                        instr,
+                        subexpressions,
+                        args,
+                        arg_start,
+                    )?;
+
+                    // try to resolve the condition if it is fully numeric
+                    fn resolve(
+                        cond: Slot,
+                        instr: &[Instruction],
+                        constants: &[Complex<Rational>],
+                    ) -> Option<Complex<Rational>> {
+                        let i = match cond {
+                            Slot::Param(_) => {
+                                return None;
+                            }
+                            Slot::Const(i) => {
+                                // TODO: check that this constant is not an external function evaluation slot!
+                                return Some(constants[i].clone());
+                            }
+                            Slot::Temp(t) => t,
+                            Slot::Out(_) => {
+                                unreachable!()
+                            }
+                        };
+
+                        match &instr[i] {
+                            Instruction::Add(_, args, _) => {
+                                let mut res = Complex::default();
+                                for x in args {
+                                    match resolve(*x, instr, constants) {
+                                        Some(v) => res += v,
+                                        None => return None,
+                                    }
+                                }
+
+                                Some(res)
+                            }
+                            Instruction::Mul(_, args, _) => {
+                                let mut res = Complex::new(Rational::one(), Rational::zero());
+                                for x in args {
+                                    match resolve(*x, instr, constants) {
+                                        Some(v) => res *= v,
+                                        None => return None,
+                                    }
+                                }
+
+                                Some(res)
+                            }
+                            Instruction::Pow(_, base, exp, _) => {
+                                if let Some(base_val) = resolve(*base, instr, constants) {
+                                    if *exp == -1 {
+                                        Some(base_val.inv())
+                                    } else if *exp < 0 {
+                                        Some(base_val.pow(exp.unsigned_abs()).inv())
+                                    } else {
+                                        Some(base_val.pow(exp.unsigned_abs()))
+                                    }
+                                } else {
+                                    None
+                                }
+                            }
+                            _ => None,
+                        }
+                    }
+
+                    if let Some(cond_res) = resolve(cond, instr, constants) {
+                        // remove dead code
+                        instr.truncate(instr_len);
+                        if subexpression_len != subexpressions.len() {
+                            // remove subexpressions that are created as part of the conditions
+                            subexpressions.retain(|_, &mut v| {
+                                if let Slot::Temp(v) = v {
+                                    v < instr_len
+                                } else {
+                                    true
+                                }
+                            });
+                        }
+
+                        let res = if !cond_res.is_zero() {
+                            then_branch.linearize_impl(
+                                fn_map,
+                                params,
+                                constants,
+                                constant_map,
+                                external_functions,
+                                instr,
+                                subexpressions,
+                                args,
+                                arg_start,
+                            )?
+                        } else {
+                            else_branch.linearize_impl(
+                                fn_map,
+                                params,
+                                constants,
+                                constant_map,
+                                external_functions,
+                                instr,
+                                subexpressions,
+                                args,
+                                arg_start,
+                            )?
+                        };
+
+                        subexpressions.insert(*self, res);
+                        return Ok(res);
+                    }
+
+                    let if_instr_pos = instr.len();
+                    instr.push(Instruction::IfElse(cond, 0));
+
+                    let mut sub_expr_pos_child = subexpressions.clone(); // TODO: prevent clone?
+                    let then_branch = then_branch.linearize_impl(
+                        fn_map,
+                        params,
+                        constants,
+                        constant_map,
+                        external_functions,
+                        instr,
+                        &mut sub_expr_pos_child,
+                        args,
+                        arg_start,
+                    )?;
+
+                    let label_end_pos = instr.len();
+                    instr.push(Instruction::Goto(0));
+                    instr[if_instr_pos] = Instruction::IfElse(cond, instr.len());
+                    instr.push(Instruction::Label(instr.len()));
+
+                    sub_expr_pos_child.clone_from(&subexpressions);
+                    let else_branch = else_branch.linearize_impl(
+                        fn_map,
+                        params,
+                        constants,
+                        constant_map,
+                        external_functions,
+                        instr,
+                        &mut sub_expr_pos_child,
+                        args,
+                        arg_start,
+                    )?;
+
+                    instr[label_end_pos] = Instruction::Goto(instr.len());
+                    instr.push(Instruction::Label(instr.len()));
+
+                    let temp = Slot::Temp(instr.len());
+                    instr.push(Instruction::Join(temp, cond, then_branch, else_branch));
+                    return Ok(temp);
                 } else if let Some(fun) = fn_map.get(*self) {
                     fun
                 } else if let Some(eval_info) = name.get_evaluation_info() {
@@ -1094,7 +1095,6 @@ impl<'a> AtomView<'a> {
                     if f.get_nargs() == eval_info.get_tag_count() {
                         let i = register_constant_external_container(
                             external_functions,
-                            fn_map,
                             name,
                             tags,
                             constants,
@@ -1135,127 +1135,28 @@ impl<'a> AtomView<'a> {
                     return Err(format!("Undefined function {}", self.to_plain_string()));
                 };
 
-                match fun {
-                    ConstOrExpr::Const(c) => {
-                        if let Some(&i) = constant_map.get(&c) {
-                            return Ok(Slot::Const(i));
-                        }
-
-                        let i = constants.len();
-                        constants.push(c.clone());
-                        constant_map.insert(c.clone(), i);
-                        Slot::Const(i)
-                    }
-                    ConstOrExpr::External(_e, _name) => {
-                        let eval_args = f
-                            .iter()
-                            .map(|arg| {
-                                arg.linearize_impl(
-                                    fn_map,
-                                    params,
-                                    constants,
-                                    constant_map,
-                                    external_functions,
-                                    instr,
-                                    subexpressions,
-                                    args,
-                                    arg_start,
-                                )
-                            })
-                            .collect::<Result<_, _>>()?;
-
-                        let temp = Slot::Temp(instr.len());
-                        instr.push(Instruction::Fun(
-                            temp,
-                            Box::new((f.get_symbol(), vec![], eval_args)),
-                            false,
-                        ));
-                        temp
-                    }
-                    ConstOrExpr::Expr(Expr {
+                {
+                    let Expr {
                         tag_len,
                         args: arg_spec,
                         body: e,
                         ..
-                    }) => {
-                        if f.get_nargs() != arg_spec.len() + tag_len {
-                            return Err(format!(
-                                "Function {} called with wrong number of arguments: {} vs {}",
-                                f.get_symbol().get_name(),
-                                f.get_nargs(),
-                                arg_spec.len() + tag_len
-                            ));
-                        }
+                    } = fun;
 
-                        let old_arg_stack_len = args.len();
-
-                        let mut arg_shadowed = false;
-                        for (eval_arg, arg_spec) in f.iter().skip(*tag_len).zip(arg_spec) {
-                            let slot = eval_arg.linearize_impl(
-                                fn_map,
-                                params,
-                                constants,
-                                constant_map,
-                                external_functions,
-                                instr,
-                                subexpressions,
-                                args,
-                                arg_start,
-                            )?;
-
-                            if args.iter().any(|(a, _)| *a == arg_spec.as_view()) {
-                                arg_shadowed = true;
-                            }
-
-                            args.push((arg_spec.as_view(), slot));
-                        }
-
-                        // inline function call
-                        // we have to use a new subexpression list as the function has arguments that may be different per call
-                        // this means that not all subexpressions will be shared across calls
-                        let mut sub_expr_pos_child = HashMap::default();
-                        let r = e.as_view().linearize_impl(
-                            fn_map,
-                            params,
-                            constants,
-                            constant_map,
-                            external_functions,
-                            instr,
-                            if old_arg_stack_len == args.len() {
-                                subexpressions
-                            } else {
-                                // we can only inherit the subexpressions if the new function argument symbols
-                                // have not been used earlier
-                                if !arg_shadowed {
-                                    sub_expr_pos_child.clone_from(subexpressions);
-                                }
-
-                                &mut sub_expr_pos_child
-                            },
-                            args,
-                            old_arg_stack_len,
-                        )?;
-
-                        args.truncate(old_arg_stack_len);
-
-                        r
+                    if f.get_nargs() != arg_spec.len() + tag_len {
+                        return Err(format!(
+                            "Function {} called with wrong number of arguments: {} vs {}",
+                            f.get_symbol().get_name(),
+                            f.get_nargs(),
+                            arg_spec.len() + tag_len
+                        ));
                     }
-                    ConstOrExpr::Condition => {
-                        if f.get_nargs() != 3 {
-                            return Err(format!(
-                                "Condition function called with wrong number of arguments: {} vs 3",
-                                f.get_nargs(),
-                            ));
-                        }
 
-                        let mut arg_iter = f.iter();
-                        let cond = arg_iter.next().unwrap();
-                        let then_branch = arg_iter.next().unwrap();
-                        let else_branch = arg_iter.next().unwrap();
+                    let old_arg_stack_len = args.len();
 
-                        let instr_len = instr.len();
-                        let subexpression_len = subexpressions.len();
-                        let cond = cond.linearize_impl(
+                    let mut arg_shadowed = false;
+                    for (eval_arg, arg_spec) in f.iter().skip(*tag_len).zip(arg_spec) {
+                        let slot = eval_arg.linearize_impl(
                             fn_map,
                             params,
                             constants,
@@ -1267,151 +1168,42 @@ impl<'a> AtomView<'a> {
                             arg_start,
                         )?;
 
-                        // try to resolve the condition if it is fully numeric
-                        fn resolve(
-                            cond: Slot,
-                            instr: &[Instruction],
-                            constants: &[Complex<Rational>],
-                        ) -> Option<Complex<Rational>> {
-                            let i = match cond {
-                                Slot::Param(_) => {
-                                    return None;
-                                }
-                                Slot::Const(i) => {
-                                    // TODO: check that this constant is not an external function evaluation slot!
-                                    return Some(constants[i].clone());
-                                }
-                                Slot::Temp(t) => t,
-                                Slot::Out(_) => {
-                                    unreachable!()
-                                }
-                            };
-
-                            match &instr[i] {
-                                Instruction::Add(_, args, _) => {
-                                    let mut res = Complex::default();
-                                    for x in args {
-                                        match resolve(*x, instr, constants) {
-                                            Some(v) => res += v,
-                                            None => return None,
-                                        }
-                                    }
-
-                                    Some(res)
-                                }
-                                Instruction::Mul(_, args, _) => {
-                                    let mut res = Complex::new(Rational::one(), Rational::zero());
-                                    for x in args {
-                                        match resolve(*x, instr, constants) {
-                                            Some(v) => res *= v,
-                                            None => return None,
-                                        }
-                                    }
-
-                                    Some(res)
-                                }
-                                Instruction::Pow(_, base, exp, _) => {
-                                    if let Some(base_val) = resolve(*base, instr, constants) {
-                                        if *exp == -1 {
-                                            Some(base_val.inv())
-                                        } else if *exp < 0 {
-                                            Some(base_val.pow(exp.unsigned_abs()).inv())
-                                        } else {
-                                            Some(base_val.pow(exp.unsigned_abs()))
-                                        }
-                                    } else {
-                                        None
-                                    }
-                                }
-                                _ => None,
-                            }
+                        if args.iter().any(|(a, _)| *a == arg_spec.as_view()) {
+                            arg_shadowed = true;
                         }
 
-                        if let Some(cond_res) = resolve(cond, instr, constants) {
-                            // remove dead code
-                            instr.truncate(instr_len);
-                            if subexpression_len != subexpressions.len() {
-                                // remove subexpressions that are created as part of the conditions
-                                subexpressions.retain(|_, &mut v| {
-                                    if let Slot::Temp(v) = v {
-                                        v < instr_len
-                                    } else {
-                                        true
-                                    }
-                                });
-                            }
-
-                            let res = if !cond_res.is_zero() {
-                                then_branch.linearize_impl(
-                                    fn_map,
-                                    params,
-                                    constants,
-                                    constant_map,
-                                    external_functions,
-                                    instr,
-                                    subexpressions,
-                                    args,
-                                    arg_start,
-                                )?
-                            } else {
-                                else_branch.linearize_impl(
-                                    fn_map,
-                                    params,
-                                    constants,
-                                    constant_map,
-                                    external_functions,
-                                    instr,
-                                    subexpressions,
-                                    args,
-                                    arg_start,
-                                )?
-                            };
-
-                            subexpressions.insert(*self, res);
-                            return Ok(res);
-                        }
-
-                        let if_instr_pos = instr.len();
-                        instr.push(Instruction::IfElse(cond, 0));
-
-                        let mut sub_expr_pos_child = subexpressions.clone(); // TODO: prevent clone?
-                        let then_branch = then_branch.linearize_impl(
-                            fn_map,
-                            params,
-                            constants,
-                            constant_map,
-                            external_functions,
-                            instr,
-                            &mut sub_expr_pos_child,
-                            args,
-                            arg_start,
-                        )?;
-
-                        let label_end_pos = instr.len();
-                        instr.push(Instruction::Goto(0));
-                        instr[if_instr_pos] = Instruction::IfElse(cond, instr.len());
-                        instr.push(Instruction::Label(instr.len()));
-
-                        sub_expr_pos_child.clone_from(&subexpressions);
-                        let else_branch = else_branch.linearize_impl(
-                            fn_map,
-                            params,
-                            constants,
-                            constant_map,
-                            external_functions,
-                            instr,
-                            &mut sub_expr_pos_child,
-                            args,
-                            arg_start,
-                        )?;
-
-                        instr[label_end_pos] = Instruction::Goto(instr.len());
-                        instr.push(Instruction::Label(instr.len()));
-
-                        let temp = Slot::Temp(instr.len());
-                        instr.push(Instruction::Join(temp, cond, then_branch, else_branch));
-                        temp
+                        args.push((arg_spec.as_view(), slot));
                     }
+
+                    // inline function call
+                    // we have to use a new subexpression list as the function has arguments that may be different per call
+                    // this means that not all subexpressions will be shared across calls
+                    let mut sub_expr_pos_child = HashMap::default();
+                    let r = e.as_view().linearize_impl(
+                        fn_map,
+                        params,
+                        constants,
+                        constant_map,
+                        external_functions,
+                        instr,
+                        if old_arg_stack_len == args.len() {
+                            subexpressions
+                        } else {
+                            // we can only inherit the subexpressions if the new function argument symbols
+                            // have not been used earlier
+                            if !arg_shadowed {
+                                sub_expr_pos_child.clone_from(subexpressions);
+                            }
+
+                            &mut sub_expr_pos_child
+                        },
+                        args,
+                        old_arg_stack_len,
+                    )?;
+
+                    args.truncate(old_arg_stack_len);
+
+                    r
                 }
             }
             AtomView::Pow(p) => {
@@ -1542,7 +1334,7 @@ pub enum Expression<T> {
     Powf(ExpressionHash, Box<(Expression<T>, Expression<T>)>),
     ReadArg(ExpressionHash, usize), // read nth function argument
     BuiltinFun(ExpressionHash, Symbol, Box<Expression<T>>),
-    ExternalFun(ExpressionHash, u32, Vec<Expression<T>>),
+    Fun(ExpressionHash, Symbol, Vec<String>, Vec<Expression<T>>),
     IfElse(
         ExpressionHash,
         Box<(Expression<T>, Expression<T>, Expression<T>)>,
@@ -1563,7 +1355,7 @@ impl<T> Expression<T> {
             Expression::ReadArg(h, _) => *h,
             Expression::BuiltinFun(h, _, _) => *h,
             Expression::SubExpression(h, _) => *h,
-            Expression::ExternalFun(h, _, _) => *h,
+            Expression::Fun(h, _, _, _) => *h,
             Expression::IfElse(h, _) => *h,
         }
     }
@@ -1592,8 +1384,8 @@ impl<T: Eq + InternalOrdering> Ord for Expression<T> {
                 a.cmp(c).then_with(|| b.cmp(d))
             }
             (Expression::SubExpression(_, s1), Expression::SubExpression(_, s2)) => s1.cmp(s2),
-            (Expression::ExternalFun(_, a, b), Expression::ExternalFun(_, c, d)) => {
-                a.cmp(c).then_with(|| b.cmp(d))
+            (Expression::Fun(_, a, b, c), Expression::Fun(_, d, e, f)) => {
+                a.cmp(d).then_with(|| b.cmp(e)).then_with(|| c.cmp(f))
             }
             (Expression::IfElse(_, a), Expression::IfElse(_, b)) => a.cmp(b),
             (Expression::Const(_, _), _) => std::cmp::Ordering::Less,
@@ -1614,8 +1406,8 @@ impl<T: Eq + InternalOrdering> Ord for Expression<T> {
             (_, Expression::ReadArg(_, _)) => std::cmp::Ordering::Greater,
             (Expression::BuiltinFun(_, _, _), _) => std::cmp::Ordering::Less,
             (_, Expression::BuiltinFun(_, _, _)) => std::cmp::Ordering::Greater,
-            (Expression::ExternalFun(_, _, _), _) => std::cmp::Ordering::Less,
-            (_, Expression::ExternalFun(_, _, _)) => std::cmp::Ordering::Greater,
+            (Expression::Fun(_, _, _, _), _) => std::cmp::Ordering::Less,
+            (_, Expression::Fun(_, _, _, _)) => std::cmp::Ordering::Greater,
             (Expression::IfElse(_, _), _) => std::cmp::Ordering::Greater,
             (_, Expression::IfElse(_, _)) => std::cmp::Ordering::Less, // sort last so that parent common subexpressions can be used inside both branches
         }
@@ -1651,7 +1443,7 @@ impl<T: Eq + Hash + Clone + InternalOrdering> Expression<T> {
                     arg.find_subexpression(subexp);
                 }
             }
-            Expression::Add(_, a) | Expression::Mul(_, a) | Expression::ExternalFun(_, _, a) => {
+            Expression::Add(_, a) | Expression::Mul(_, a) | Expression::Fun(_, _, _, a) => {
                 for arg in a {
                     arg.find_subexpression(subexp);
                 }
@@ -1690,7 +1482,7 @@ impl<T: Eq + Hash + Clone + InternalOrdering> Expression<T> {
                     arg.replace_subexpression(subexp, false);
                 }
             }
-            Expression::Add(_, a) | Expression::Mul(_, a) | Expression::ExternalFun(_, _, a) => {
+            Expression::Add(_, a) | Expression::Mul(_, a) | Expression::Fun(_, _, _, a) => {
                 for arg in a {
                     arg.replace_subexpression(subexp, false);
                 }
@@ -1778,7 +1570,7 @@ impl<T: Eq + Hash + Clone + InternalOrdering> Expression<T> {
             Expression::ReadArg(_, _) => (0, 0),
             Expression::BuiltinFun(_, _, b) => b.count_operations_with_subexpression(sub_expr), // not clear how to count this, third arg?
             Expression::SubExpression(_, _) => (0, 0),
-            Expression::ExternalFun(_, _, a) => {
+            Expression::Fun(_, _, _, a) => {
                 let mut add = 0;
                 let mut mul = 0;
                 for arg in a {
@@ -1938,7 +1730,7 @@ impl<T: std::hash::Hash + Clone> Expression<T> {
                 *h = hasher.finish();
                 *h
             }
-            Expression::ExternalFun(h, s, a) => {
+            Expression::Fun(h, s, tags, a) => {
                 if partial && *h != 0 {
                     return *h;
                 }
@@ -1946,6 +1738,7 @@ impl<T: std::hash::Hash + Clone> Expression<T> {
                 let mut hasher = AHasher::default();
                 hasher.write_u8(10);
                 s.hash(&mut hasher);
+                tags.hash(&mut hasher);
                 for x in a {
                     hasher.write_u64(x.rehash(partial));
                 }
@@ -2119,7 +1912,22 @@ impl<T> PartialEq for ExternalFunctionContainer<T> {
 impl<T> Eq for ExternalFunctionContainer<T> {}
 
 impl<T> ExternalFunctionContainer<T> {
-    fn new(export_name: String, symbol: Symbol, tags: Vec<Atom>) -> Self {
+    fn new(symbol: Symbol, tags: Vec<Atom>) -> Self {
+        let mut export_name = symbol
+            .get_ascii_name()
+            .ok_or_else(|| {
+                format!(
+                    "No ASCII name for symbol {symbol} available, which is needed for exporting"
+                )
+            })
+            .unwrap();
+
+        // TODO: escape minus signs, etc
+        for t in &tags {
+            export_name += "_";
+            export_name += &t.to_canonical_string();
+        }
+
         Self {
             export_name,
             symbol,
@@ -2523,64 +2331,6 @@ impl EvaluationDomain for Complex<Float> {
 
     fn try_from_complex_float(f: Complex<Float>) -> Result<Self, String> {
         Ok(f)
-    }
-}
-
-impl<T: Clone + EvaluationDomain> ExpressionEvaluator<T> {
-    /// Register external functions for the evaluator.
-    ///
-    /// Examples
-    /// --------
-    /// ```rust
-    /// use ahash::HashMap;
-    /// use symbolica::{atom::AtomCore, evaluate::{FunctionMap, OptimizationSettings, ExternalFunction}, parse, symbol};
-    ///
-    /// let mut ext: HashMap<String, Box<dyn ExternalFunction<f64>>> = HashMap::default();
-    /// ext.insert("f".to_string(), Box::new(|a| a[0] * a[0] + a[1]));
-    ///
-    ///
-    /// let mut f = FunctionMap::new();
-    /// f.add_external_function(symbol!("f"), "f".to_string())
-    ///     .unwrap();
-    ///
-    /// let params = vec![parse!("x"), parse!("y")];
-    /// let optimization_settings = OptimizationSettings::default();
-    /// let evaluator = parse!("f(x,y)").evaluator(&f, &params, optimization_settings).unwrap().map_coeff(&|x| x.re.to_f64());
-    ///
-    /// let mut ev = evaluator.with_external_functions(ext).unwrap();
-    /// assert_eq!(ev.evaluate_single(&[2.0, 3.0]), 7.0);
-    /// ```
-    pub fn with_external_functions(
-        &self,
-        mut external_fns: HashMap<String, Box<dyn ExternalFunction<T>>>,
-    ) -> Result<ExpressionEvaluatorWithExternalFunctions<T>, String> {
-        let mut eval = self.clone();
-
-        for e in &mut eval.external_fns {
-            if e.imp.is_some() || e.constant_index.is_some() {
-                continue;
-            }
-
-            if let Some(f) = external_fns.remove(e.export_name()) {
-                e.imp = Some(f);
-                continue;
-            }
-
-            let lookup_name = e.symbol.get_name().to_owned();
-            if lookup_name != e.export_name()
-                && let Some(f) = external_fns.remove(lookup_name.as_str())
-            {
-                e.imp = Some(f);
-                continue;
-            }
-
-            return Err(format!(
-                "External function '{e}' not found for type {}",
-                std::any::type_name::<T>()
-            ));
-        }
-
-        Ok(ExpressionEvaluatorWithExternalFunctions { eval })
     }
 }
 
@@ -6728,50 +6478,10 @@ extern "C" {{
     }
 }
 
-/// An external function that can be called by [ExpressionEvaluatorWithExternalFunctions].
+/// An external function that can be called by an evaluator.
 pub trait ExternalFunction<T>: Fn(&[T]) -> T + Send + Sync + DynClone + Send + Sync {}
 dyn_clone::clone_trait_object!(<T> ExternalFunction<T>);
 impl<T, F: Clone + Send + Sync + Fn(&[T]) -> T + Send + Sync> ExternalFunction<T> for F {}
-
-/// An optimized evaluator for expressions that can evaluate expressions with parameters
-/// and some registered external functions.
-// TODO: deprecate
-#[derive(Clone)]
-pub struct ExpressionEvaluatorWithExternalFunctions<T> {
-    eval: ExpressionEvaluator<T>,
-}
-
-impl<T: Real> ExpressionEvaluatorWithExternalFunctions<T> {
-    #[allow(dead_code)]
-    pub(crate) fn update_stack(&mut self, e: ExpressionEvaluator<T>) {
-        self.eval = e;
-    }
-
-    pub fn get_evaluator(&self) -> &ExpressionEvaluator<T> {
-        &self.eval
-    }
-
-    pub fn get_evaluator_mut(&mut self) -> &mut ExpressionEvaluator<T> {
-        &mut self.eval
-    }
-
-    pub fn evaluate_single(&mut self, params: &[T]) -> T {
-        if self.eval.result_indices.len() != 1 {
-            panic!(
-                "Evaluator does not return a single result but {} results",
-                self.eval.result_indices.len()
-            );
-        }
-
-        let mut res = T::new_zero();
-        self.evaluate(params, std::slice::from_mut(&mut res));
-        res
-    }
-
-    pub fn evaluate(&mut self, params: &[T], out: &mut [T]) {
-        self.eval.evaluate(params, out);
-    }
-}
 
 impl<T> ExpressionEvaluator<T> {
     fn export_external_cpps(&self) -> String {
@@ -7126,11 +6836,12 @@ impl<T: Default + Clone> ExpressionEvaluator<T> {
                 if let Some(name) =
                     external_fn_map.remove(&(external_fn.export_name().to_owned(), i))
                 {
-                    new_external_fns.push(ExternalFunctionContainer::new(
-                        name.clone(),
-                        crate::symbol!(name.clone()),
-                        vec![],
-                    ));
+                    todo!();
+                    // new_external_fns.push(ExternalFunctionContainer::new(
+                    //     name.clone(),
+                    //     crate::symbol!(name.clone()),
+                    //     vec![],
+                    // ));
                     external_fn_index_map
                         .insert((external_fn.clone(), i), new_external_fns.len() - 1);
                 } else {
@@ -8008,9 +7719,9 @@ impl<T: Clone + PartialEq> Expression<T> {
                 Expression::BuiltinFun(*h, *s, Box::new(a.map_coeff(f)))
             }
             Expression::SubExpression(h, i) => Expression::SubExpression(*h, *i),
-            Expression::ExternalFun(h, s, a) => {
+            Expression::Fun(h, s, tags, a) => {
                 let new_args = a.iter().map(|x| x.map_coeff(f)).collect();
-                Expression::ExternalFun(*h, *s, new_args)
+                Expression::Fun(*h, *s, tags.clone(), new_args)
             }
             Expression::IfElse(h, b) => {
                 let (cond, then_expr, else_expr) = &**b;
@@ -8059,7 +7770,7 @@ impl<T: Clone + PartialEq> Expression<T> {
                 a.strip_constants(stack, param_len);
             }
             Expression::SubExpression(_, _) => {}
-            Expression::ExternalFun(_, _, a) => {
+            Expression::Fun(_, _, _, a) => {
                 for arg in a {
                     arg.strip_constants(stack, param_len);
                 }
@@ -8397,7 +8108,7 @@ impl EvalTree<Complex<Rational>> {
                     res
                 }
             }
-            Expression::ExternalFun(_, s, v) => {
+            Expression::Fun(_, s, tags, v) => {
                 let args: Vec<_> = v
                     .iter()
                     .map(|x| {
@@ -8417,7 +8128,14 @@ impl EvalTree<Complex<Rational>> {
                 stack.push(Complex::default());
                 let res = stack.len() - 1;
 
-                let f = Instr::ExternalFun(res, *s as usize, args);
+                let tag_atoms = tags.iter().map(|x| crate::parse!(x)).collect::<Vec<_>>();
+                let index = self
+                    .external_functions
+                    .iter()
+                    .position(|x| x.symbol == *s && x.tags == tag_atoms)
+                    .expect("missing external function container");
+
+                let f = Instr::ExternalFun(res, index, args);
                 instr.push((f, ComplexPhase::Any));
 
                 res
@@ -9061,7 +8779,7 @@ impl Expression<Complex<Rational>> {
                 a.occurrence_order_horner_scheme();
             }
             Expression::SubExpression(_, _) => {}
-            Expression::ExternalFun(_, _, a) => {
+            Expression::Fun(_, _, _, a) => {
                 for arg in a {
                     arg.occurrence_order_horner_scheme();
                 }
@@ -9329,7 +9047,7 @@ impl Expression<Complex<Rational>> {
                 a.find_all_variables(vars);
             }
             Expression::SubExpression(_, _) => {}
-            Expression::ExternalFun(_, _, a) => {
+            Expression::Fun(_, _, _, a) => {
                 for arg in a {
                     arg.find_all_variables(vars);
                 }
@@ -9468,7 +9186,7 @@ impl<T: Clone + Default + std::fmt::Debug + Eq + std::hash::Hash + InternalOrder
             Expression::SubExpression(h, i) => {
                 *self = Expression::SubExpression(*h, *subexp.get(i).unwrap());
             }
-            Expression::ExternalFun(_, _, a) => {
+            Expression::Fun(_, _, _, a) => {
                 for arg in a {
                     arg.rename_subexpression(subexp);
                 }
@@ -9507,7 +9225,7 @@ impl<T: Clone + Default + std::fmt::Debug + Eq + std::hash::Hash + InternalOrder
             Expression::SubExpression(_, i) => {
                 dep.push(*i);
             }
-            Expression::ExternalFun(_, _, a) => {
+            Expression::Fun(_, _, _, a) => {
                 for arg in a {
                     arg.get_dependent_subexpressions(dep);
                 }
@@ -9591,7 +9309,7 @@ impl<T: Clone + Default + std::fmt::Debug + Eq + std::hash::Hash + InternalOrder
             Expression::ReadArg(_, _) => (0, 0),
             Expression::BuiltinFun(_, _, b) => b.count_operations(), // not clear how to count this, third arg?
             Expression::SubExpression(_, _) => (0, 0),
-            Expression::ExternalFun(_, _, args) => {
+            Expression::Fun(_, _, _, args) => {
                 let mut add = 0;
                 let mut mul = 0;
                 for arg in args {
@@ -9688,7 +9406,7 @@ impl<T: Real> EvalTree<T> {
                 // TODO: cache
                 self.evaluate_impl(&subexpressions[*s], subexpressions, params, args)
             }
-            Expression::ExternalFun(_, name, _args) => {
+            Expression::Fun(_, name, _, _args) => {
                 unimplemented!(
                     "External function calls not implemented for EvalTree: {}",
                     name
@@ -10094,30 +9812,6 @@ impl<T: JITCompiledNumber + Clone> ExpressionEvaluator<T> {
             })
             .collect::<Result<Vec<_>, _>>()?;
         T::jit_compile(instructions, constants, &external_fns)
-    }
-}
-
-impl<T: JITCompiledNumber + Clone> ExpressionEvaluatorWithExternalFunctions<T> {
-    /// JIT-compiles the evaluator using SymJIT.
-    ///
-    /// # Examples
-    ///
-    /// Compile and evaluate the function `x + y` for `f64` inputs:
-    /// ```rust
-    /// # use symbolica::{atom::AtomCore, parse};
-    /// # use symbolica::evaluate::{FunctionMap, OptimizationSettings};
-    /// let params = vec![parse!("x"), parse!("y")];
-    /// let mut evaluator = parse!("x + y")
-    ///     .evaluator(&FunctionMap::new(), &params, OptimizationSettings::default())
-    ///     .unwrap()
-    ///     .jit_compile::<f64>()
-    ///     .unwrap();
-    ///
-    /// let mut res = [0.];
-    /// evaluator.evaluate(&[1., 2.], &mut res);
-    /// assert_eq!(res, [3.]);
-    pub fn jit_compile(&self) -> Result<JITCompiledEvaluator<T>, String> {
-        self.eval.jit_compile()
     }
 }
 
@@ -12535,7 +12229,7 @@ impl<'a> AtomView<'a> {
     /// Convert nested expressions to a tree.
     pub fn to_evaluation_tree(
         &self,
-        fn_map: &FunctionMap<Complex<Rational>>,
+        fn_map: &FunctionMap,
         params: &[Atom],
     ) -> Result<EvalTree<Complex<Rational>>, String> {
         Self::to_eval_tree_multiple(std::slice::from_ref(self), fn_map, params)
@@ -12544,40 +12238,28 @@ impl<'a> AtomView<'a> {
     /// Convert nested expressions to a tree.
     pub fn to_eval_tree_multiple<A: AtomCore>(
         exprs: &[A],
-        fn_map: &FunctionMap<Complex<Rational>>,
+        fn_map: &FunctionMap,
         params: &[Atom],
     ) -> Result<EvalTree<Complex<Rational>>, String> {
         let mut funcs = vec![];
         let mut func_id_to_index = HashMap::default();
+        let mut external_functions = vec![];
 
         let tree = exprs
             .iter()
             .map(|t| {
                 t.as_atom_view()
-                    .to_eval_tree_impl(fn_map, params, &[], &mut func_id_to_index, &mut funcs)
+                    .to_eval_tree_impl(
+                        fn_map,
+                        params,
+                        &[],
+                        &mut func_id_to_index,
+                        &mut funcs,
+                        &mut external_functions,
+                    )
                     .map(|x| x.rehashed(true))
             })
             .collect::<Result<_, _>>()?;
-
-        let mut external_fns: Vec<_> = fn_map
-            .external_fn
-            .iter()
-            .map(|(symbol, x)| {
-                let ConstOrExpr::External(e, _) = x else {
-                    panic!("Expected external function");
-                };
-
-                (
-                    *e,
-                    ExternalFunctionContainer::new(
-                        external_export_name(fn_map, *symbol, &[]).unwrap(),
-                        *symbol,
-                        vec![],
-                    ),
-                )
-            })
-            .collect();
-        external_fns.sort_by_key(|x| x.0);
 
         Ok(EvalTree {
             expressions: SplitExpression {
@@ -12585,14 +12267,14 @@ impl<'a> AtomView<'a> {
                 subexpressions: vec![],
             },
             functions: funcs,
-            external_functions: external_fns.into_iter().map(|x| x.1).collect(),
+            external_functions,
             param_count: params.len(),
         })
     }
 
     fn to_eval_tree_impl(
         &self,
-        fn_map: &FunctionMap<Complex<Rational>>,
+        fn_map: &FunctionMap,
         params: &[Atom],
         args: &[Indeterminate],
         fn_id_map: &mut HashMap<usize, usize>,
@@ -12601,6 +12283,7 @@ impl<'a> AtomView<'a> {
             Vec<Indeterminate>,
             SplitExpression<Complex<Rational>>,
         )>,
+        external_functions: &mut Vec<ExternalFunctionContainer<Complex<Rational>>>,
     ) -> Result<Expression<Complex<Rational>>, String> {
         if matches!(self, AtomView::Var(_) | AtomView::Fun(_)) {
             if let Some(p) = args.iter().position(|s| *self == s.as_view()) {
@@ -12610,10 +12293,6 @@ impl<'a> AtomView<'a> {
             if let Some(p) = params.iter().position(|a| a.as_view() == *self) {
                 return Ok(Expression::Parameter(0, p));
             }
-        }
-
-        if let Some(c) = fn_map.get_constant(*self) {
-            return Ok(Expression::Const(0, Box::new(c.clone())));
         }
 
         match self {
@@ -12671,7 +12350,14 @@ impl<'a> AtomView<'a> {
                 {
                     assert!(f.get_nargs() == 1);
                     let arg = f.iter().next().unwrap();
-                    let arg_eval = arg.to_eval_tree_impl(fn_map, params, args, fn_id_map, funcs)?;
+                    let arg_eval = arg.to_eval_tree_impl(
+                        fn_map,
+                        params,
+                        args,
+                        fn_id_map,
+                        funcs,
+                        external_functions,
+                    )?;
 
                     return Ok(Expression::BuiltinFun(
                         0,
@@ -12680,32 +12366,75 @@ impl<'a> AtomView<'a> {
                     ));
                 }
 
-                let fun = if name == Symbol::IF {
-                    &ConstOrExpr::Condition
-                } else if let Some(fun) = fn_map.get(*self) {
-                    fun
-                } else {
-                    return Err(format!("Undefined function {}", self.to_plain_string()));
-                };
-
-                match fun {
-                    ConstOrExpr::Const(t) => Ok(Expression::Const(0, Box::new(t.clone()))),
-                    ConstOrExpr::External(e, _name) => {
-                        let eval_args = f
-                            .iter()
-                            .map(|arg| {
-                                arg.to_eval_tree_impl(fn_map, params, args, fn_id_map, funcs)
-                            })
-                            .collect::<Result<_, _>>()?;
-                        Ok(Expression::ExternalFun(0, *e as u32, eval_args))
+                if name == Symbol::IF {
+                    if f.get_nargs() != 3 {
+                        return Err(format!(
+                            "Condition function called with wrong number of arguments: {} vs 3",
+                            f.get_nargs(),
+                        ));
                     }
-                    ConstOrExpr::Expr(Expr {
-                        id,
-                        name,
-                        tag_len,
-                        args: arg_spec,
-                        body: e,
-                    }) => {
+
+                    let mut arg_iter = f.iter();
+                    let cond_eval = arg_iter.next().unwrap().to_eval_tree_impl(
+                        fn_map,
+                        params,
+                        args,
+                        fn_id_map,
+                        funcs,
+                        external_functions,
+                    )?;
+
+                    if let Expression::Const(0, c) = &cond_eval {
+                        if !c.is_zero() {
+                            return arg_iter.next().unwrap().to_eval_tree_impl(
+                                fn_map,
+                                params,
+                                args,
+                                fn_id_map,
+                                funcs,
+                                external_functions,
+                            );
+                        }
+
+                        let _ = arg_iter.next().unwrap();
+                        return arg_iter.next().unwrap().to_eval_tree_impl(
+                            fn_map,
+                            params,
+                            args,
+                            fn_id_map,
+                            funcs,
+                            external_functions,
+                        );
+                    }
+
+                    let t_eval = arg_iter.next().unwrap().to_eval_tree_impl(
+                        fn_map,
+                        params,
+                        args,
+                        fn_id_map,
+                        funcs,
+                        external_functions,
+                    )?;
+                    let f_eval = arg_iter.next().unwrap().to_eval_tree_impl(
+                        fn_map,
+                        params,
+                        args,
+                        fn_id_map,
+                        funcs,
+                        external_functions,
+                    )?;
+
+                    return Ok(Expression::IfElse(0, Box::new((cond_eval, t_eval, f_eval))));
+                }
+
+                if let Some(Expr {
+                    id,
+                    tag_len,
+                    args: arg_spec,
+                    body: e,
+                }) = fn_map.get(*self)
+                {
+                    return {
                         if f.get_nargs() != arg_spec.len() + tag_len {
                             return Err(format!(
                                 "Function {} called with wrong number of arguments: {} vs {}",
@@ -12719,18 +12448,30 @@ impl<'a> AtomView<'a> {
                             .iter()
                             .skip(*tag_len)
                             .map(|arg| {
-                                arg.to_eval_tree_impl(fn_map, params, args, fn_id_map, funcs)
+                                arg.to_eval_tree_impl(
+                                    fn_map,
+                                    params,
+                                    args,
+                                    fn_id_map,
+                                    funcs,
+                                    external_functions,
+                                )
                             })
                             .collect::<Result<_, _>>()?;
 
                         if let Some(pos) = fn_id_map.get(id) {
                             Ok(Expression::Eval(0, *pos as u32, eval_args))
                         } else {
-                            let r = e
-                                .as_view()
-                                .to_eval_tree_impl(fn_map, params, arg_spec, fn_id_map, funcs)?;
+                            let r = e.as_view().to_eval_tree_impl(
+                                fn_map,
+                                params,
+                                arg_spec,
+                                fn_id_map,
+                                funcs,
+                                external_functions,
+                            )?;
                             funcs.push((
-                                name.clone(),
+                                name.get_name().to_owned(),
                                 arg_spec.clone(),
                                 SplitExpression {
                                     tree: vec![r.clone()],
@@ -12740,55 +12481,53 @@ impl<'a> AtomView<'a> {
                             fn_id_map.insert(*id, funcs.len() - 1);
                             Ok(Expression::Eval(0, funcs.len() as u32 - 1, eval_args))
                         }
-                    }
-                    ConstOrExpr::Condition => {
-                        if f.get_nargs() != 3 {
-                            return Err(format!(
-                                "Condition function called with wrong number of arguments: {} vs 3",
-                                f.get_nargs(),
-                            ));
-                        }
-
-                        let mut arg_iter = f.iter();
-
-                        let cond_eval = arg_iter
-                            .next()
-                            .unwrap()
-                            .to_eval_tree_impl(fn_map, params, args, fn_id_map, funcs)?;
-
-                        if let Expression::Const(0, c) = &cond_eval {
-                            if !c.is_zero() {
-                                let t_eval = arg_iter
-                                    .next()
-                                    .unwrap()
-                                    .to_eval_tree_impl(fn_map, params, args, fn_id_map, funcs)?;
-                                return Ok(t_eval);
-                            } else {
-                                let _ = arg_iter.next().unwrap();
-                                let f_eval = arg_iter
-                                    .next()
-                                    .unwrap()
-                                    .to_eval_tree_impl(fn_map, params, args, fn_id_map, funcs)?;
-                                return Ok(f_eval);
-                            }
-                        }
-
-                        let t_eval = arg_iter
-                            .next()
-                            .unwrap()
-                            .to_eval_tree_impl(fn_map, params, args, fn_id_map, funcs)?;
-                        let f_eval = arg_iter
-                            .next()
-                            .unwrap()
-                            .to_eval_tree_impl(fn_map, params, args, fn_id_map, funcs)?;
-
-                        Ok(Expression::IfElse(0, Box::new((cond_eval, t_eval, f_eval))))
-                    }
+                    };
                 }
+
+                if let Some(eval_info) = name.get_evaluation_info() {
+                    let tags = f
+                        .iter()
+                        .take(eval_info.get_tag_count())
+                        .map(|x| x.to_canonical_string())
+                        .collect::<Vec<_>>();
+                    let tag_atoms = tags.iter().map(|x| crate::parse!(x)).collect::<Vec<_>>();
+
+                    if external_functions
+                        .iter()
+                        .all(|x| x.symbol != name || x.tags != tag_atoms)
+                    {
+                        external_functions.push(ExternalFunctionContainer::new(name, tag_atoms));
+                    }
+
+                    let eval_args = f
+                        .iter()
+                        .skip(eval_info.get_tag_count())
+                        .map(|arg| {
+                            arg.to_eval_tree_impl(
+                                fn_map,
+                                params,
+                                args,
+                                fn_id_map,
+                                funcs,
+                                external_functions,
+                            )
+                        })
+                        .collect::<Result<_, _>>()?;
+                    return Ok(Expression::Fun(0, name, tags, eval_args));
+                }
+
+                Err(format!("Undefined function {}", self.to_plain_string()))
             }
             AtomView::Pow(p) => {
                 let (b, e) = p.get_base_exp();
-                let b_eval = b.to_eval_tree_impl(fn_map, params, args, fn_id_map, funcs)?;
+                let b_eval = b.to_eval_tree_impl(
+                    fn_map,
+                    params,
+                    args,
+                    fn_id_map,
+                    funcs,
+                    external_functions,
+                )?;
 
                 if let AtomView::Num(n) = e
                     && let CoefficientView::Natural(num, den, num_i, _den_i) = n.get_coeff_view()
@@ -12798,13 +12537,27 @@ impl<'a> AtomView<'a> {
                     return Ok(Expression::Pow(0, Box::new((b_eval.clone(), num))));
                 }
 
-                let e_eval = e.to_eval_tree_impl(fn_map, params, args, fn_id_map, funcs)?;
+                let e_eval = e.to_eval_tree_impl(
+                    fn_map,
+                    params,
+                    args,
+                    fn_id_map,
+                    funcs,
+                    external_functions,
+                )?;
                 Ok(Expression::Powf(0, Box::new((b_eval, e_eval))))
             }
             AtomView::Mul(m) => {
                 let mut muls = vec![];
                 for arg in m.iter() {
-                    let a = arg.to_eval_tree_impl(fn_map, params, args, fn_id_map, funcs)?;
+                    let a = arg.to_eval_tree_impl(
+                        fn_map,
+                        params,
+                        args,
+                        fn_id_map,
+                        funcs,
+                        external_functions,
+                    )?;
                     if let Expression::Mul(0, m) = a {
                         muls.extend(m);
                     } else {
@@ -12819,7 +12572,14 @@ impl<'a> AtomView<'a> {
             AtomView::Add(a) => {
                 let mut adds = vec![];
                 for arg in a.iter() {
-                    adds.push(arg.to_eval_tree_impl(fn_map, params, args, fn_id_map, funcs)?);
+                    adds.push(arg.to_eval_tree_impl(
+                        fn_map,
+                        params,
+                        args,
+                        fn_id_map,
+                        funcs,
+                        external_functions,
+                    )?);
                 }
 
                 adds.sort();
@@ -13350,32 +13110,20 @@ mod test {
 
         let mut fn_map = FunctionMap::new();
 
-        fn_map.add_constant(symbol!("pi").into(), Complex::from(Rational::from((22, 7))));
         fn_map
-            .add_tagged_function(
-                symbol!("p"),
-                vec![Atom::num(1)],
-                "p1".to_string(),
-                vec![symbol!("z")],
-                p1,
-            )
+            .add_tagged_function(symbol!("p"), vec![Atom::num(1)], vec![symbol!("z")], p1)
             .unwrap();
         fn_map
-            .add_function(
-                symbol!("f"),
-                "f".to_string(),
-                vec![symbol!("y"), symbol!("z")],
-                f,
-            )
+            .add_function(symbol!("f"), vec![symbol!("y"), symbol!("z")], f)
             .unwrap();
         fn_map
-            .add_function(symbol!("g"), "g".to_string(), vec![symbol!("y")], g)
+            .add_function(symbol!("g"), vec![symbol!("y")], g)
             .unwrap();
         fn_map
-            .add_function(symbol!("h"), "h".to_string(), vec![symbol!("y")], h)
+            .add_function(symbol!("h"), vec![symbol!("y")], h)
             .unwrap();
         fn_map
-            .add_function(symbol!("i"), "i".to_string(), vec![symbol!("y")], i)
+            .add_function(symbol!("i"), vec![symbol!("y")], i)
             .unwrap();
 
         let params = vec![parse!("x")];
@@ -13387,7 +13135,7 @@ mod test {
         let mut e_f64 = evaluator.map_coeff(&|x| x.clone().to_real().unwrap().into());
         let mut res = [0., 0.];
         e_f64.evaluate(&[1.1], &mut res);
-        assert!((res[0] - 1622709.2254269677).abs() / 1622709.2254269677 < 1e-10);
+        assert!((res[0] - 1622709.2241624785).abs() / 1622709.2241624785 < 1e-10);
     }
 
     #[test]
@@ -13403,9 +13151,6 @@ mod test {
 
     #[test]
     fn branching() {
-        let mut f = FunctionMap::new();
-        f.add_conditional(symbol!("if")).unwrap();
-
         let tests = vec![
             ("if(y, x*x + z*z + x*z*z, x * x + 3)", 25., 12.),
             ("if(y+1, x*x + z*z + x*z*z, x * x + 3)", 12., 25.),
@@ -13419,7 +13164,7 @@ mod test {
         for (input, true_res, false_res) in tests {
             let mut eval = parse!(input)
                 .evaluator(
-                    &f,
+                    &FunctionMap::new(),
                     &vec![crate::parse!("x"), crate::parse!("y"), crate::parse!("z")],
                     Default::default(),
                 )
@@ -13476,38 +13221,39 @@ mod test {
 
     #[test]
     fn vectorize_dual_with_external() {
-        let dual = Dualizer::new(
-            HyperDual::from_values(
-                vec![vec![0], vec![1]],
-                vec![Complex::<Rational>::new_zero(); 2],
-            ),
-            vec![],
-        );
+        todo!()
+        // let dual = Dualizer::new(
+        //     HyperDual::from_values(
+        //         vec![vec![0], vec![1]],
+        //         vec![Complex::<Rational>::new_zero(); 2],
+        //     ),
+        //     vec![],
+        // );
 
-        let mut f = FunctionMap::new();
-        f.add_external_function(symbol!("f"), "f".to_owned())
-            .unwrap();
-        let ev = parse!("f(x + 1)")
-            .evaluator(&f, &[parse!("x")], OptimizationSettings::default())
-            .unwrap();
+        // let mut f = FunctionMap::new();
+        // f.add_external_function(symbol!("f"), "f".to_owned())
+        //     .unwrap();
+        // let ev = parse!("f(x + 1)")
+        //     .evaluator(&f, &[parse!("x")], OptimizationSettings::default())
+        //     .unwrap();
 
-        let mut vec_ext = HashMap::default();
-        vec_ext.insert(("f".to_owned(), 0), "f0".to_owned());
-        vec_ext.insert(("f".to_owned(), 1), "f1".to_owned());
+        // let mut vec_ext = HashMap::default();
+        // vec_ext.insert(("f".to_owned(), 0), "f0".to_owned());
+        // vec_ext.insert(("f".to_owned(), 1), "f1".to_owned());
 
-        let vec_ev = ev
-            .vectorize(&dual, vec_ext)
-            .unwrap()
-            .map_coeff(&|c| c.re.to_f64());
+        // let vec_ev = ev
+        //     .vectorize(&dual, vec_ext)
+        //     .unwrap()
+        //     .map_coeff(&|c| c.re.to_f64());
 
-        let mut fns: HashMap<String, Box<dyn ExternalFunction<f64>>> = HashMap::default();
-        fns.insert("f0".to_owned(), Box::new(|a: &[f64]| a[0]));
-        fns.insert("f1".to_owned(), Box::new(|a: &[f64]| a[1]));
+        // let mut fns: HashMap<String, Box<dyn ExternalFunction<f64>>> = HashMap::default();
+        // fns.insert("f0".to_owned(), Box::new(|a: &[f64]| a[0]));
+        // fns.insert("f1".to_owned(), Box::new(|a: &[f64]| a[1]));
 
-        let mut evr = vec_ev.with_external_functions(fns).unwrap();
-        let mut out = vec![0.; 2];
-        evr.evaluate(&[1., 2.], &mut out);
-        assert_eq!(out, vec![2., 2.]);
+        // let mut evr = vec_ev.with_external_functions(fns).unwrap();
+        // let mut out = vec![0.; 2];
+        // evr.evaluate(&[1., 2.], &mut out);
+        // assert_eq!(out, vec![2., 2.]);
     }
 
     #[test]
