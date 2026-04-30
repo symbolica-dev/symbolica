@@ -339,8 +339,6 @@ impl State {
     }
 
     fn new() -> State {
-        LicenseManager::check();
-
         let mut state = State {
             str_to_id: HashMap::new(),
             builtin_symbols: HashSet::new(),
@@ -381,8 +379,10 @@ impl State {
             return;
         }
 
+        let mut initializing = false;
         STATE_INITIALIZER.call_once(|| {
             let _guard = ReentryGuard::enter(&RUNNING_STATE_INITIALIZER);
+            initializing = true;
 
             #[cfg(test)]
             {
@@ -467,6 +467,10 @@ impl State {
                 (initializer.init)();
             }
         });
+
+        if !initializing {
+            LicenseManager::check();
+        }
     }
 
     /// Get the global state.
