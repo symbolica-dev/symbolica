@@ -1649,7 +1649,12 @@ impl<F: Ring, E: Exponent, O: MonomialOrder> MultivariatePolynomial<F, E, O> {
             let mut total = a.exponents[start_index];
             new_exponents[start_index] = total % powers[0];
             for i in (start_index + 1)..self.nvars() {
-                total = total - new_exponents[i - 1];
+                let previous_power = if i == start_index + 1 {
+                    E::one()
+                } else {
+                    powers[i - start_index - 2]
+                };
+                total = total - new_exponents[i - 1] * previous_power;
                 new_exponents[i] = total % powers[i - start_index];
                 new_exponents[i] = new_exponents[i] / powers[i - start_index - 1];
             }
