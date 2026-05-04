@@ -1495,13 +1495,14 @@ impl<F: Ring, E: Exponent, O: MonomialOrder> MultivariatePolynomial<F, E, O> {
             return E::zero();
         }
 
-        let mut max = None;
-        for e in self.exponents.iter().skip(x).step_by(self.nvars()) {
-            if max.map(|max| max < *e).unwrap_or(true) {
-                max = Some(*e);
+        let mut max = self.exponents[x];
+        for t in 1..self.nterms() {
+            let e = self.exponents[x + t * self.nvars()];
+            if max < e {
+                max = e;
             }
         }
-        max.unwrap_or(E::zero())
+        max
     }
 
     /// Get the lowest and highest exponent of the variable `x`.
@@ -2074,13 +2075,38 @@ impl<F: Ring, E: Exponent> MultivariatePolynomial<F, E, LexOrder> {
         lcoeff
     }
 
+    /// Count the number of terms that have the maximum degree in the given variable.
+    pub fn terms_with_max_degree(&self, x: usize) -> usize {
+        let mut max_degree = self.exponents[x];
+        let mut count = 0;
+        for t in 1..self.nterms() {
+            let e = self.exponents[t * self.nvars() + x];
+            if e == max_degree {
+                count += 1;
+            } else if e > max_degree {
+                max_degree = e;
+                count = 1;
+            }
+        }
+        count
+    }
+
     /// Get the bivariate degree of a multivariate polynomial viewed as a bivariate polynomial in the first two variables.
     pub fn bivariate_deg(&self) -> (E, E) {
-        let d = self.degree(0);
-        let mut d1 = E::zero();
-        for t in self {
-            if t.exponents[0] == d && t.exponents[1] > d1 {
-                d1 = t.exponents[1];
+        if self.is_zero() {
+            return (E::zero(), E::zero());
+        }
+
+        let mut d = self.exponents[0];
+        let mut d1 = self.exponents[1];
+        let nvars = self.nvars();
+        assert!(self.exponents.len() == self.nterms() * nvars);
+        for e in 0..self.nterms() {
+            if self.exponents[e * nvars] > d {
+                d = self.exponents[e * nvars];
+                d1 = self.exponents[e * nvars + 1];
+            } else if self.exponents[e * nvars] == d && self.exponents[e * nvars + 1] > d1 {
+                d1 = self.exponents[e * nvars + 1];
             }
         }
         (d, d1)
