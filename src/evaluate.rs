@@ -16,7 +16,7 @@ use crate::{
         integer::Integer,
         rational::Rational,
     },
-    error,
+    error, get_symbol,
     id::ConditionResult,
     info,
     numerical_integration::MonteCarloRng,
@@ -6767,8 +6767,9 @@ impl<T: Default + Clone> ExpressionEvaluator<T> {
     /// yield `n` components. This can be used to define efficient
     /// evaluation over dual numbers.
     ///
-    /// External functions must be mapped to `n` different functions
-    /// that compute a single component each. The input to the functions
+    /// Non built-in functions will be rewritten to functions with the suffix `_v`
+    /// that take the vector index as an additional tag.
+    /// The input to the functions
     /// is the flattened vector of all components of all parameters,
     /// followed by all previously computed output components.
     ///
@@ -6799,7 +6800,7 @@ impl<T: Default + Clone> ExpressionEvaluator<T> {
     ///    .unwrap();
     ///
     /// let dualizer = Dualizer::new(Dual2::<Complex<Rational>>::new_zero(), vec![]);
-    /// let vec_ev = ev.vectorize(&dualizer, HashMap::default()).unwrap();
+    /// let vec_ev = ev.vectorize(&dualizer).unwrap();
     ///
     /// let mut vec_f = vec_ev.map_coeff(&|x| x.re.to_f64());
     /// let mut dest = vec![0.; 3];
@@ -6807,11 +6808,7 @@ impl<T: Default + Clone> ExpressionEvaluator<T> {
     ///
     /// assert!(dest.iter().all(|x| x.abs() < 1e-10));
     /// ```
-    pub fn vectorize<V: Vectorize<T>>(
-        mut self,
-        v: &V,
-        mut external_fn_map: HashMap<(String, usize), String>,
-    ) -> Result<ExpressionEvaluator<T>, String> {
+    pub fn vectorize<V: Vectorize<T>>(mut self, v: &V) -> Result<ExpressionEvaluator<T>, String> {
         let mut new_external_fns = vec![];
         let mut external_fn_index_map = HashMap::default();
         for external_fn in &self.external_fns {
@@ -6825,31 +6822,19 @@ impl<T: Default + Clone> ExpressionEvaluator<T> {
                 continue;
             }
 
-            if !external_fn.tags.is_empty() {
-                return Err(format!(
-                    "Cannot vectorize external function '{}' with tags {:?}",
-                    external_fn, external_fn.tags
-                ));
-            }
+            let Some(s) = get_symbol!(format!("{}_v", external_fn.symbol.get_name())) else {
+                Err(format!(
+                    "To vectorize the function '{0}', the symbol '{0}_v' must be defined that takes the vector index as an additional tag",
+                    external_fn.symbol.get_name()
+                ))?;
+                continue;
+            };
 
             for i in 0..v.get_dimension() {
-                if let Some(name) =
-                    external_fn_map.remove(&(external_fn.export_name().to_owned(), i))
-                {
-                    todo!();
-                    // new_external_fns.push(ExternalFunctionContainer::new(
-                    //     name.clone(),
-                    //     crate::symbol!(name.clone()),
-                    //     vec![],
-                    // ));
-                    external_fn_index_map
-                        .insert((external_fn.clone(), i), new_external_fns.len() - 1);
-                } else {
-                    return Err(format!(
-                        "No external function mapping found for function '{}' with index {}",
-                        external_fn, i
-                    ));
-                }
+                let mut tags = external_fn.tags.clone();
+                tags.push(i.into());
+                new_external_fns.push(ExternalFunctionContainer::new(s, tags));
+                external_fn_index_map.insert((external_fn.clone(), i), new_external_fns.len() - 1);
             }
         }
 
@@ -12973,10 +12958,7 @@ mod test {
             float::{Complex, Float, FloatLike},
             rational::Rational,
         },
-        evaluate::{
-            Dualizer, EvaluationFn, ExportSettings, ExternalFunction, FunctionMap,
-            OptimizationSettings,
-        },
+        evaluate::{Dualizer, EvaluationFn, ExportSettings, FunctionMap, OptimizationSettings},
         id::ConditionResult,
         parse, symbol,
     };
@@ -13204,7 +13186,7 @@ mod test {
             .unwrap();
 
         let dual = Dualizer::new(Dual::<Complex<Rational>>::new_zero(), vec![]);
-        let vec_ev = ev.vectorize(&dual, HashMap::default()).unwrap();
+        let vec_ev = ev.vectorize(&dual).unwrap();
 
         let mut vec_f = vec_ev.map_coeff(&|x| x.re.to_f64());
         let mut dest = vec![0.; 9];
@@ -13221,39 +13203,40 @@ mod test {
 
     #[test]
     fn vectorize_dual_with_external() {
-        todo!()
-        // let dual = Dualizer::new(
-        //     HyperDual::from_values(
-        //         vec![vec![0], vec![1]],
-        //         vec![Complex::<Rational>::new_zero(); 2],
-        //     ),
-        //     vec![],
-        // );
+        let dual = Dualizer::new(
+            HyperDual::from_values(
+                vec![vec![0], vec![1]],
+                vec![Complex::<Rational>::new_zero(); 2],
+            ),
+            vec![],
+        );
 
-        // let mut f = FunctionMap::new();
-        // f.add_external_function(symbol!("f"), "f".to_owned())
-        //     .unwrap();
-        // let ev = parse!("f(x + 1)")
-        //     .evaluator(&f, &[parse!("x")], OptimizationSettings::default())
-        //     .unwrap();
+        let _ = symbol!(
+            "symbolica::vec::f",
+            eval = EvaluationInfo::new().register(|args: &[f64]| args[0])
+        );
+        let _ = symbol!(
+            "symbolica::vec::f_v",
+            eval = EvaluationInfo::new().register_tagged(|tags| if tags[0] == 0 {
+                Box::new(|args: &[f64]| args[0])
+            } else {
+                Box::new(|args: &[f64]| args[1])
+            })
+        );
 
-        // let mut vec_ext = HashMap::default();
-        // vec_ext.insert(("f".to_owned(), 0), "f0".to_owned());
-        // vec_ext.insert(("f".to_owned(), 1), "f1".to_owned());
+        let ev = parse!("symbolica::vec::f(x + 1)")
+            .evaluator(
+                &FunctionMap::new(),
+                &[parse!("x")],
+                OptimizationSettings::default(),
+            )
+            .unwrap();
 
-        // let vec_ev = ev
-        //     .vectorize(&dual, vec_ext)
-        //     .unwrap()
-        //     .map_coeff(&|c| c.re.to_f64());
+        let mut vec_ev = ev.vectorize(&dual).unwrap().map_coeff(&|c| c.re.to_f64());
 
-        // let mut fns: HashMap<String, Box<dyn ExternalFunction<f64>>> = HashMap::default();
-        // fns.insert("f0".to_owned(), Box::new(|a: &[f64]| a[0]));
-        // fns.insert("f1".to_owned(), Box::new(|a: &[f64]| a[1]));
-
-        // let mut evr = vec_ev.with_external_functions(fns).unwrap();
-        // let mut out = vec![0.; 2];
-        // evr.evaluate(&[1., 2.], &mut out);
-        // assert_eq!(out, vec![2., 2.]);
+        let mut out = vec![0.; 2];
+        vec_ev.evaluate(&[1., 2.], &mut out);
+        assert_eq!(out, vec![2., 2.]);
     }
 
     #[test]

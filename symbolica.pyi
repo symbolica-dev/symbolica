@@ -8150,9 +8150,9 @@ class Evaluator:
         For example, to compute first derivatives in two variables `x` and `y`,
         use `dual_shape = [[0, 0], [1, 0], [0, 1]]`.
 
-        External functions must be mapped to `len(dual_shape)` different functions
-        that compute a single component each. The input to the functions
-        is the flattened vector of all components of all parameters,
+        Non built-in functions will be rewritten to functions with the suffix `_v`
+        that take the vector index as an additional tag.
+        The input to the functions is the flattened vector of all components of all parameters,
         followed by all previously computed output components.
 
         Examples
