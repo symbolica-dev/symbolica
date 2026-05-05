@@ -17293,25 +17293,15 @@ impl PythonExpressionEvaluator {
     /// dual_shape : list[list[int]]
     ///     The shape of the dual numbers, indicating the number of derivatives
     ///     in every variable per term.
-    /// external_functions : Optional[dict[tuple[str, str, int], Callable[[Sequence[float | complex]], float | complex]]]
-    ///     A mapping from external function identifiers to functions that compute a single component each.
-    ///     The key is a tuple of function name, unique printable name, and component index.
-    ///     The value is a function that takes the flattened parameters and returns a component.
     /// zero_components : Optional[list[tuple[int, int]]]
     ///     A list of components that are known to be zero and can be skipped in the dualization.
     ///     Each component is specified as a tuple of (parameter index, dual index).
-    #[pyo3(signature = (dual_shape, external_functions = HashMap::default(), zero_components = Vec::new()))]
+    #[pyo3(signature = (dual_shape, zero_components = Vec::new()))]
     fn dualize(
         &mut self,
         dual_shape: Vec<Vec<usize>>,
-        external_functions: HashMap<(String, String, usize), Py<PyAny>>,
         zero_components: Vec<(usize, usize)>,
     ) -> PyResult<()> {
-        let external_fn_map = external_functions
-            .keys()
-            .map(|(name, new_name, index)| ((name.clone(), *index), new_name.clone()))
-            .collect();
-
         let zero = (0..dual_shape.len())
             .map(|_| Complex::new(Q.zero(), Q.zero()))
             .collect();
@@ -17321,7 +17311,7 @@ impl PythonExpressionEvaluator {
             .eval_complex
             .clone()
             .set_coeff(&self.rational_constants)
-            .vectorize(&dual, external_fn_map)
+            .vectorize(&dual)
             .map_err(|e| {
                 exceptions::PyValueError::new_err(format!("Could not dualize evaluator: {}", e))
             })?;
