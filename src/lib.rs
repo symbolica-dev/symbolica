@@ -93,12 +93,15 @@ pub struct GlobalSettings {
     pub initialize_tracing: AtomicBool,
     /// Use an experimental implementation of the Hu-Monagan polynomial GCD algorithm.
     pub use_hu_monagan_poly_gcd: AtomicBool,
+    /// Force the use of the Hu-Monagan polynomial GCD algorithm.
+    pub force_hu_monagan_poly_gcd: AtomicBool,
 }
 
 /// Global settings for Symbolica.
 pub static GLOBAL_SETTINGS: GlobalSettings = GlobalSettings {
     initialize_tracing: AtomicBool::new(true),
-    use_hu_monagan_poly_gcd: AtomicBool::new(false),
+    use_hu_monagan_poly_gcd: AtomicBool::new(true),
+    force_hu_monagan_poly_gcd: AtomicBool::new(false),
 };
 
 /// Write an error messages using `tracing`. Initializes a default tracing subscriber on the first call if [GlobalSettings::initialize_tracing] is `true`.

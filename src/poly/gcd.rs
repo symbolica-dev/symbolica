@@ -3633,24 +3633,32 @@ impl<E: PositiveExponent> PolynomialGCD<E> for IntegerRing {
                 }
             }
 
-            let sparse_threshold = box_size / 20;
-            cofactor_box_size < sparse_threshold || nterms < sparse_threshold
+            cofactor_box_size * 12 < box_size || Integer::from(nterms) < box_size
         }
 
         if GLOBAL_SETTINGS
-            .use_hu_monagan_poly_gcd
+            .force_hu_monagan_poly_gcd
             .load(std::sync::atomic::Ordering::Relaxed)
-            && should_use_hu_monagan(a, b, vars, bounds)
+            || (GLOBAL_SETTINGS
+                .use_hu_monagan_poly_gcd
+                .load(std::sync::atomic::Ordering::Relaxed)
+                && should_use_hu_monagan(a, b, vars, bounds))
         {
-            if a.nvars() > 3
-                && vars[1] == 1
-                && bounds.get(1).is_some_and(|b| *b > E::zero())
-                && bounds.get(vars[2]).is_some_and(|b| *b > E::zero())
-            {
-                if let Some(g) = a.gcd_hu_monagan_bivariate(b, bounds) {
-                    return g;
-                }
-            } else if let Some(g) = a.gcd_hu_monagan(b, bounds) {
+            // TODO: find out when the bivariate case is faster
+            // currently it can be much slower due to the call to bivariate Zippel,
+            // that may involve a costly Newton interpolation that has to be called
+            // for every sample. Full Zippel would only call it once, since it stores
+            // the shape of the polynomial and can reuse it for all samples.
+            // if a.nvars() > 3
+            //     && vars[1] == 1
+            //     && bounds.get(1).is_some_and(|b| *b > E::zero())
+            //     && bounds.get(vars[2]).is_some_and(|b| *b > E::zero())
+            // {
+            //     // if let Some(g) = a.gcd_hu_monagan_bivariate(b, bounds) {
+            //     //     return g;
+            //     // }
+            // } else
+            if let Some(g) = a.gcd_hu_monagan(b, bounds) {
                 return g;
             }
         }
