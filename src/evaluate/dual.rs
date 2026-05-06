@@ -71,7 +71,7 @@ impl<T: Default + Clone> ExpressionEvaluator<T> {
             for i in 0..v.get_dimension() {
                 let mut tags = external_fn.tags.clone();
                 tags.push(i.into());
-                new_external_fns.push(ExternalFunctionContainer::new(s, tags));
+                new_external_fns.push(ExternalFunctionContainer::new(s, tags, vec![]));
                 external_fn_index_map.insert((external_fn.clone(), i), new_external_fns.len() - 1);
             }
         }
