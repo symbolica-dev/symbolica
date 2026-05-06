@@ -1,9 +1,12 @@
-use std::{cmp::Ordering, ops::DerefMut};
+use std::{cmp::Ordering, collections::BinaryHeap, ops::DerefMut};
 
 use smallvec::SmallVec;
 
 use crate::{
-    atom::{Atom, AtomCore, AtomView, Fun, Symbol, representation::InlineNum},
+    atom::{
+        Atom, AtomCore, AtomView, Fun, Symbol,
+        representation::{InlineNum, ListIterator},
+    },
     coefficient::{Coefficient, CoefficientView},
     domains::{
         float::{Complex, FloatLike, Real},
@@ -1794,14 +1797,170 @@ impl AtomView<'_> {
             e.as_view().normalize(ws, out);
         }
     }
+
+    /// Add normalized atoms and normalize the result using an n-way merge over their terms.
+    pub(crate) fn add_normalized_slice<'a, T: AtomCore>(
+        args: &[T],
+        ws: &Workspace,
+        out: &mut Atom,
+    ) {
+        struct MergeCursor<'a> {
+            atom: AtomView<'a>,
+            term: &'a [u8],
+            rest: Option<ListIterator<'a>>,
+            index: usize,
+        }
+
+        impl Eq for MergeCursor<'_> {}
+
+        impl PartialEq for MergeCursor<'_> {
+            fn eq(&self, other: &Self) -> bool {
+                self.index == other.index && self.term == other.term
+            }
+        }
+
+        impl Ord for MergeCursor<'_> {
+            fn cmp(&self, other: &Self) -> Ordering {
+                other
+                    .term
+                    .cmp(self.term)
+                    .then_with(|| other.index.cmp(&self.index))
+            }
+        }
+
+        impl PartialOrd for MergeCursor<'_> {
+            fn partial_cmp(&self, other: &Self) -> Option<Ordering> {
+                Some(self.cmp(other))
+            }
+        }
+
+        let mut heap = BinaryHeap::with_capacity(args.len());
+        let mut byte_size = 0;
+
+        for (index, arg) in args.iter().enumerate() {
+            let view = arg.as_atom_view();
+            byte_size += view.get_byte_size();
+
+            match view {
+                AtomView::Add(a) => {
+                    let mut iter = a.iter();
+                    if let Some(term) = iter.next() {
+                        heap.push(MergeCursor {
+                            atom: term,
+                            term: term.get_term_cmp_slice(),
+                            rest: Some(iter),
+                            index,
+                        });
+                    }
+                }
+                AtomView::Num(n) if n.is_zero() => {}
+                term => {
+                    heap.push(MergeCursor {
+                        atom: term,
+                        term: term.get_term_cmp_slice(),
+                        rest: None,
+                        index,
+                    });
+                }
+            }
+        }
+
+        let Some(mut cursor) = heap.pop() else {
+            out.to_num(Coefficient::zero());
+            return;
+        };
+
+        let out_add = out.to_add();
+        out_add.grow_capacity(byte_size);
+
+        let mut last_buf = ws.new_atom();
+        last_buf.set_from_view(&cursor.atom);
+
+        if let Some(rest) = cursor.rest.as_mut()
+            && let Some(term) = rest.next()
+        {
+            cursor.atom = term;
+            cursor.term = term.get_term_cmp_slice();
+            heap.push(cursor);
+        }
+
+        let mut helper = ws.new_atom();
+        let mut cur_len = 0;
+
+        while let Some(mut cursor) = heap.pop() {
+            let cur = cursor.atom;
+
+            if !last_buf.merge_terms(cur, &mut helper) {
+                let v = last_buf.as_view();
+                if let AtomView::Num(n) = v {
+                    let coeff = n.get_coeff_view();
+                    if matches!(
+                        coeff,
+                        CoefficientView::Indeterminate | CoefficientView::Infinity(_)
+                    ) {
+                        out.set_from_view(&v);
+                        return;
+                    }
+
+                    if !n.is_zero() {
+                        out_add.extend(v);
+                        cur_len += 1;
+                    }
+                } else {
+                    out_add.extend(v);
+                    cur_len += 1;
+                }
+
+                last_buf.set_from_view(&cur);
+            }
+
+            if let Some(rest) = cursor.rest.as_mut()
+                && let Some(term) = rest.next()
+            {
+                cursor.atom = term;
+                cursor.term = term.get_term_cmp_slice();
+                heap.push(cursor);
+            }
+        }
+
+        if cur_len == 0 {
+            out.set_from_view(&last_buf.as_view());
+        } else {
+            let v = last_buf.as_view();
+            if let AtomView::Num(n) = v {
+                let coeff = n.get_coeff_view();
+                if matches!(
+                    coeff,
+                    CoefficientView::Indeterminate | CoefficientView::Infinity(_)
+                ) {
+                    out.set_from_view(&v);
+                    return;
+                }
+
+                if !n.is_zero() {
+                    out_add.extend(v);
+                    out_add.set_normalized(true);
+                } else if cur_len == 1 {
+                    last_buf.set_from_view(&out_add.to_add_view().to_slice().get(0));
+                    out.set_from_view(&last_buf.as_view());
+                } else {
+                    out_add.set_normalized(true);
+                }
+            } else {
+                out_add.extend(v);
+                out_add.set_normalized(true);
+            }
+        }
+    }
 }
 
 #[cfg(test)]
 mod test {
     use crate::{
-        atom::{Atom, AtomCore},
+        atom::{Atom, AtomCore, AtomView},
         parse,
         printer::PrintOptions,
+        state::Workspace,
     };
 
     #[test]
@@ -1870,5 +2029,22 @@ mod test {
         let a = parse!("v2 + v3 + v4");
         let b = parse!("v1");
         assert_eq!(a + b, parse!("v1+v2+v3+v4"));
+    }
+
+    #[test]
+    fn add_normalized_slice() {
+        let args = [
+            parse!("v1 + v3 + 1"),
+            parse!("v2 + v3 + 2"),
+            parse!("-v1 + v4 - 3"),
+            parse!("v3"),
+            parse!("0"),
+        ];
+        let views: Vec<_> = args.iter().map(|x| x.as_view()).collect();
+
+        let mut out = Atom::new();
+        Workspace::get_local().with(|ws| AtomView::add_normalized_slice(&views, ws, &mut out));
+
+        assert_eq!(out, parse!("v2 + 3*v3 + v4"));
     }
 }

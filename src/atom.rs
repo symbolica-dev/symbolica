@@ -3686,17 +3686,13 @@ impl Atom {
         })
     }
 
-    /// Add the atoms in `args`.
+    /// Add the atoms in `args`, using a fast n-way merge sort.
+    ///
+    /// This method should be preferred over repeated addition when adding many atoms.
     pub fn add_many<T: AtomCore>(args: &[T]) -> Atom {
         let mut out = Atom::new();
         Workspace::get_local().with(|ws| {
-            let mut t = ws.new_atom();
-            let add = t.to_add();
-            for a in args {
-                add.extend(a.as_atom_view());
-            }
-
-            t.as_view().normalize(ws, &mut out);
+            AtomView::add_normalized_slice(args, ws, &mut out);
         });
         out
     }
