@@ -335,8 +335,28 @@ impl<T: Default> ExpressionEvaluator<T> {
                     );
                 };
                 let tags = external.tag_views();
-                let c = eval.evaluate_constant(&tags, binary_prec).unwrap();
-                stack[self.param_count + i] = T2::try_from_complex_float(c).unwrap();
+
+                let res = if external.fixed_args.is_empty() {
+                    let c = eval.evaluate_constant(&tags, binary_prec).unwrap();
+                    T2::try_from_complex_float(c).unwrap()
+                } else {
+                    let fixed_args = external
+                        .fixed_args
+                        .iter()
+                        .map(|c| {
+                            T2::try_from_complex_float(Complex::new(
+                                c.re.to_multi_prec_float(binary_prec),
+                                c.im.to_multi_prec_float(binary_prec),
+                            ))
+                            .unwrap()
+                        })
+                        .collect::<Vec<_>>();
+
+                    let eval = T2::resolve_function(&tags, eval).unwrap();
+                    eval(&fixed_args)
+                };
+
+                stack[self.param_count + i] = res;
             }
         }
 

@@ -4,6 +4,7 @@ pub struct ExternalFunctionContainer<T> {
     pub(super) export_name: String,
     pub(super) symbol: Symbol,
     pub(super) tags: Vec<Atom>,
+    pub(super) fixed_args: Vec<Complex<Rational>>,
     pub(super) imp: Option<Box<dyn ExternalFunction<T>>>,
     pub(super) cache: Vec<T>,
     pub(super) constant_index: Option<usize>,
@@ -19,6 +20,7 @@ impl<T> serde::Serialize for ExternalFunctionContainer<T> {
                 .iter()
                 .map(|x| x.to_canonical_string())
                 .collect::<Vec<_>>(),
+            &self.fixed_args,
             &self.constant_index,
         )
             .serialize(serializer)
@@ -28,10 +30,11 @@ impl<T> serde::Serialize for ExternalFunctionContainer<T> {
 #[cfg(feature = "serde")]
 impl<'de, T: EvaluationDomain> serde::Deserialize<'de> for ExternalFunctionContainer<T> {
     fn deserialize<D: serde::Deserializer<'de>>(deserializer: D) -> Result<Self, D::Error> {
-        let (export_name, symbol, tags, constant_index): (
+        let (export_name, symbol, tags, fixed_args, constant_index): (
             String,
             Symbol,
             Vec<String>,
+            Vec<Complex<Rational>>,
             Option<usize>,
         ) = serde::Deserialize::deserialize(deserializer)?;
 
@@ -39,6 +42,7 @@ impl<'de, T: EvaluationDomain> serde::Deserialize<'de> for ExternalFunctionConta
             export_name,
             symbol,
             tags: tags.iter().map(|s| crate::parse!(s)).collect(),
+            fixed_args,
             imp: None,
             cache: vec![],
             constant_index,
@@ -64,6 +68,7 @@ impl<T> bincode::Encode for ExternalFunctionContainer<T> {
                 .collect::<Vec<_>>(),
             encoder,
         )?;
+        bincode::Encode::encode(&self.fixed_args, encoder)?;
         bincode::Encode::encode(&self.constant_index, encoder)
     }
 }
@@ -76,12 +81,14 @@ impl<Context, T: EvaluationDomain> bincode::Decode<Context> for ExternalFunction
         let export_name: String = bincode::Decode::decode(decoder)?;
         let symbol: Symbol = bincode::Decode::decode(decoder)?;
         let tags: Vec<String> = bincode::Decode::decode(decoder)?;
+        let fixed_args: Vec<Complex<Rational>> = bincode::Decode::decode(decoder)?;
         let constant_index: Option<usize> = bincode::Decode::decode(decoder)?;
 
         let mut external = Self {
             export_name,
             symbol,
             tags: tags.iter().map(|s| crate::parse!(s)).collect(),
+            fixed_args,
             imp: None,
             cache: vec![],
             constant_index,
@@ -109,6 +116,7 @@ impl<T> Clone for ExternalFunctionContainer<T> {
             export_name: self.export_name.clone(),
             symbol: self.symbol.clone(),
             tags: self.tags.clone(),
+            fixed_args: self.fixed_args.clone(),
             imp: self.imp.clone(),
             cache: vec![],
             constant_index: self.constant_index,
@@ -122,6 +130,7 @@ impl<T> std::fmt::Debug for ExternalFunctionContainer<T> {
             .field("export_name", &self.export_name)
             .field("eval_name", &self.symbol)
             .field("tags", &self.tags)
+            .field("fixed_args", &self.fixed_args)
             .field("imp", &self.imp.is_some())
             .field("cache_len", &self.cache.len())
             .field("constant_index", &self.constant_index)
@@ -144,13 +153,14 @@ impl<T> PartialEq for ExternalFunctionContainer<T> {
         self.export_name == other.export_name
             && self.symbol == other.symbol
             && self.tags == other.tags
+            && self.fixed_args == other.fixed_args
     }
 }
 
 impl<T> Eq for ExternalFunctionContainer<T> {}
 
 impl<T> ExternalFunctionContainer<T> {
-    pub(super) fn new(symbol: Symbol, tags: Vec<Atom>) -> Self {
+    pub(super) fn new(symbol: Symbol, tags: Vec<Atom>, fixed_args: Vec<Complex<Rational>>) -> Self {
         let mut export_name = symbol
             .get_ascii_name()
             .ok_or_else(|| {
@@ -170,6 +180,7 @@ impl<T> ExternalFunctionContainer<T> {
             export_name,
             symbol,
             tags,
+            fixed_args,
             imp: None,
             cache: vec![],
             constant_index: None,
@@ -189,6 +200,7 @@ impl<T> ExternalFunctionContainer<T> {
             export_name: self.export_name.clone(),
             symbol: self.symbol,
             tags: self.tags.clone(),
+            fixed_args: self.fixed_args.clone(),
             imp: self.fetch_impl_for::<T2>(),
             cache: vec![],
             constant_index: self.constant_index,

@@ -79,7 +79,9 @@ mod test {
             float::{Complex, Float, FloatLike},
             rational::Rational,
         },
-        evaluate::{Dualizer, EvaluationFn, ExportSettings, FunctionMap, OptimizationSettings},
+        evaluate::{
+            Dualizer, EvaluationFn, ExportSettings, FunctionMap, Instruction, OptimizationSettings,
+        },
         id::ConditionResult,
         parse, symbol,
     };
@@ -354,6 +356,19 @@ mod test {
         let mut out = vec![0.; 2];
         vec_ev.evaluate(&[1., 2.], &mut out);
         assert_eq!(out, vec![2., 2.]);
+    }
+
+    #[test]
+    fn constant_with_args() {
+        let r = parse!("zeta(5/6)");
+        let numerical = f64::try_from(r.to_float(53)).unwrap();
+        let ev = r
+            .evaluator(&FunctionMap::new(), &[], OptimizationSettings::default())
+            .unwrap();
+        let ev2 = ev.map_coeff(&|c| c.re.to_f64());
+        let (instr, _, constants) = ev2.export_instructions();
+        assert!(matches!(instr[0], Instruction::Assign(_, _)));
+        assert!((constants[0] - numerical).abs() / numerical < f64::EPSILON);
     }
 
     #[test]
