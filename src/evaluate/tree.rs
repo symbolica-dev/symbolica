@@ -19,6 +19,7 @@ fn register_constant_external_container<T>(
     external_functions: &mut Vec<ExternalFunctionContainer<T>>,
     symbol: Symbol,
     tags: Vec<Atom>,
+    fixed_args: Vec<Complex<Rational>>,
     constants: &mut Vec<Complex<Rational>>,
 ) -> usize {
     let index = if let Some(index) = external_functions
@@ -27,7 +28,7 @@ fn register_constant_external_container<T>(
     {
         index
     } else {
-        external_functions.push(ExternalFunctionContainer::new(symbol, tags));
+        external_functions.push(ExternalFunctionContainer::new(symbol, tags, fixed_args));
         external_functions.len() - 1
     };
 
@@ -457,7 +458,7 @@ impl<'a> AtomView<'a> {
                     {
                         index
                     } else {
-                        external_functions.push(ExternalFunctionContainer::new(*sym, tags));
+                        external_functions.push(ExternalFunctionContainer::new(*sym, tags, vec![]));
                         external_functions.len() - 1
                     };
 
@@ -569,6 +570,7 @@ impl<'a> AtomView<'a> {
                     let i = register_constant_external_container(
                         external_functions,
                         s,
+                        vec![],
                         vec![],
                         constants,
                     );
@@ -795,12 +797,20 @@ impl<'a> AtomView<'a> {
                         .map(|x| x.to_owned())
                         .collect::<Vec<_>>();
 
+                    let mut fixed_args = vec![];
+                    for x in f.iter().skip(eval_info.get_tag_count()) {
+                        if let Ok(n) = Complex::<Rational>::try_from(x) {
+                            fixed_args.push(n);
+                        }
+                    }
+
                     // check if it a constant external function
-                    if f.get_nargs() == eval_info.get_tag_count() {
+                    if f.get_nargs() == eval_info.get_tag_count() + fixed_args.len() {
                         let i = register_constant_external_container(
                             external_functions,
                             name,
                             tags,
+                            fixed_args,
                             constants,
                         );
                         return Ok(Slot::Const(i));
@@ -3511,7 +3521,11 @@ impl<'a> AtomView<'a> {
                         .iter()
                         .all(|x| x.symbol != name || x.tags != tag_atoms)
                     {
-                        external_functions.push(ExternalFunctionContainer::new(name, tag_atoms));
+                        external_functions.push(ExternalFunctionContainer::new(
+                            name,
+                            tag_atoms,
+                            vec![],
+                        ));
                     }
 
                     let eval_args = f
