@@ -106,7 +106,6 @@ impl NamespacedSymbol {
     }
 
     /// Parse a string into a namespaced symbol.
-    /// Panics if input does not contain a symbol in the format `namespace::symbol`.
     pub fn try_parse<S: AsRef<str>>(s: S) -> Option<NamespacedSymbol> {
         let (namespace, _partial_symbol) = s.as_ref().rsplit_once("::")?;
         Some(NamespacedSymbol {
@@ -118,7 +117,6 @@ impl NamespacedSymbol {
     }
 
     /// Parse a string into a namespaced symbol.
-    /// Panics if input does not contain a symbol in the format `namespace::symbol`.
     pub fn try_parse_lit(s: &'static str) -> Option<NamespacedSymbol> {
         let (namespace, _partial_symbol) = s.rsplit_once("::")?;
         Some(NamespacedSymbol {
@@ -131,10 +129,12 @@ impl NamespacedSymbol {
 }
 
 impl TryFrom<&str> for NamespacedSymbol {
-    type Error = &'static str;
+    type Error = String;
 
     fn try_from(value: &str) -> Result<Self, Self::Error> {
-        Ok(NamespacedSymbol::parse(value))
+        NamespacedSymbol::try_parse(value).ok_or_else(|| {
+            format!("Input {value} does not contain a symbol in the format `namespace::symbol`.")
+        })
     }
 }
 
@@ -1974,22 +1974,11 @@ impl<T: AtomCore> PartialEq<T> for Indeterminate {
     }
 }
 
-macro_rules! from_int {
-    ($($t:ty),*) => {
-        $(
-            impl From<$t> for Atom {
-                /// Convert an integer type to an atom. This will allocate memory.
-                fn from(n: $t) -> Atom {
-                    Atom::num(n as u64)
-                }
-            }
-        )*
-    };
+impl<T: Into<Coefficient>> From<T> for Atom {
+    fn from(t: T) -> Self {
+        Atom::num(t)
+    }
 }
-
-from_int!(
-    i8, i16, i32, i64, i128, isize, u8, u16, u32, u64, u128, usize
-);
 
 impl TryFrom<Atom> for Indeterminate {
     type Error = String;
