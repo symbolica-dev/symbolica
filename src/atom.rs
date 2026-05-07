@@ -305,7 +305,7 @@ pub type DerivativeFunction = Box<dyn Fn(AtomView, usize, &mut Settable<Atom>) +
 /// let inv = symbol!("inv", series = |args| {
 ///     Some((Atom::Zero, args[0].rpow((-1).into()).unwrap().to_atom()))
 /// });
-/// let s = parse!("inv(1/t)").series(symbol!("t"), Atom::Zero, 0.into(), true).unwrap();
+/// let s = parse!("inv(1/t)").series(symbol!("t"), 0, 0).unwrap();
 /// assert_eq!(s.to_atom(), 0);
 /// ```
 pub type SeriesExpansionFunction =
@@ -3182,7 +3182,7 @@ macro_rules! tag {
 /// let inv = symbol!("inv", series = |args| {
 ///     Some((Atom::Zero, args[0].rpow((-1).into()).unwrap().to_atom()))
 /// });
-/// let s = parse!("inv(1/t)").series(symbol!("t"), Atom::Zero, 0.into(), true).unwrap();
+/// let s = parse!("inv(1/t)").series(symbol!("t"), 0, 0).unwrap();
 /// assert_eq!(s.to_atom(), 0);
 /// ```
 /// If the arguments (which are of type [Series]) are not centered around a pole, you can also return `None`.

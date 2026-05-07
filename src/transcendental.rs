@@ -3236,27 +3236,18 @@ mod tests {
     fn gamma_laurent_series() {
         let x = symbol!("x");
         assert_eq!(
-            parse!("gamma(x)")
-                .series(x, Atom::num(0).as_view(), 3.into(), true)
-                .unwrap()
-                .to_atom(),
+            parse!("gamma(x)").series(x, 0, 3).unwrap().to_atom(),
             parse!(
                 "x^-1-euler_gamma+1/2*(euler_gamma^2+1/6*pi^2)*x+1/6*(-euler_gamma^3-1/2*euler_gamma*pi^2+polygamma(2,1))*x^2+1/24*(euler_gamma^4+euler_gamma^2*pi^2-4*euler_gamma*polygamma(2,1)+3/20*pi^4)*x^3"
             )
         );
         assert_eq!(
-            parse!("gamma(x)")
-                .series(x, Atom::num(0).as_view(), 0.into(), true)
-                .unwrap()
-                .to_atom(),
+            parse!("gamma(x)").series(x, 0, 0).unwrap().to_atom(),
             parse!("x^-1-euler_gamma")
         );
 
         assert_eq!(
-            parse!("gamma(x-1)")
-                .series(x, Atom::num(1).as_view(), 0.into(), true)
-                .unwrap()
-                .to_atom(),
+            parse!("gamma(x-1)").series(x, 1, 0).unwrap().to_atom(),
             parse!("(x-1)^-1-euler_gamma")
         );
     }
@@ -3341,17 +3332,11 @@ mod tests {
     fn polygamma_laurent_series() {
         let x = symbol!("x");
         assert_eq!(
-            parse!("polygamma(0,x)")
-                .series(x, Atom::num(0).as_view(), 2.into(), true)
-                .unwrap()
-                .to_atom(),
+            parse!("polygamma(0,x)").series(x, 0, 2).unwrap().to_atom(),
             parse!("-x^-1-euler_gamma+1/6*pi^2*x+1/2*polygamma(2,1)*x^2")
         );
         assert_eq!(
-            parse!("polygamma(1,x)")
-                .series(x, Atom::num(0).as_view(), 2.into(), true)
-                .unwrap()
-                .to_atom(),
+            parse!("polygamma(1,x)").series(x, 0, 2).unwrap().to_atom(),
             parse!("x^-2+1/6*pi^2+polygamma(2,1)*x+1/30*pi^4*x^2")
         );
     }
@@ -3476,30 +3461,24 @@ mod tests {
         let x = symbol!("x");
         assert_eq!(
             parse!("tan(x)")
-                .series(x, parse!("pi/2").as_view(), 0.into(), true)
+                .series(x, parse!("pi/2"), 0)
                 .unwrap()
                 .to_atom(),
             parse!("-(x-pi/2)^-1")
         );
         assert_eq!(
             parse!("sec(x)")
-                .series(x, parse!("pi/2").as_view(), 0.into(), true)
+                .series(x, parse!("pi/2"), 0)
                 .unwrap()
                 .to_atom(),
             parse!("-(x-pi/2)^-1")
         );
         assert_eq!(
-            parse!("cot(x)")
-                .series(x, Atom::num(0).as_view(), 0.into(), true)
-                .unwrap()
-                .to_atom(),
+            parse!("cot(x)").series(x, 0, 0).unwrap().to_atom(),
             parse!("x^-1")
         );
         assert_eq!(
-            parse!("csc(x)")
-                .series(x, Atom::num(0).as_view(), 0.into(), true)
-                .unwrap()
-                .to_atom(),
+            parse!("csc(x)").series(x, 0, 0).unwrap().to_atom(),
             parse!("x^-1")
         );
     }

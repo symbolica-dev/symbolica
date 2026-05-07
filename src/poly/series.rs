@@ -2,14 +2,12 @@
 //!
 //! # Examples
 //! ```
-//! use symbolica::{atom::{Atom, AtomCore}, parse, symbol};
+//! use symbolica::{atom::AtomCore, parse, symbol};
 //!
 //! let x = symbol!("x");
 //! let a = parse!("(1-cos(x))/sin(x)");
 //!
-//! let out = a
-//!     .series(x, Atom::num(0), 4.into(), true)
-//!     .unwrap();
+//! let out = a.series(x, 0, 4).unwrap();
 //! println!("{}", out);
 //! assert_eq!(out.to_atom(), parse!("1/2*x+1/24*x^3"));
 //! ```
@@ -34,6 +32,43 @@ use crate::{
 
 use super::PolyVariable;
 
+/// The requested truncation depth of a series expansion.
+#[derive(Clone, Debug, PartialEq, Eq, Hash)]
+pub enum SeriesDepth {
+    /// Truncate at an absolute power of the expansion variable.
+    Absolute(Rational),
+    /// Truncate relative to the lowest order that appears in the expansion.
+    Relative(Rational),
+}
+
+impl SeriesDepth {
+    /// Truncate at an absolute power of the expansion variable.
+    pub fn absolute<T: Into<Rational>>(depth: T) -> Self {
+        Self::Absolute(depth.into())
+    }
+
+    /// Truncate relative to the lowest order that appears in the expansion.
+    pub fn relative<T: Into<Rational>>(depth: T) -> Self {
+        Self::Relative(depth.into())
+    }
+
+    pub(crate) fn order(&self) -> &Rational {
+        match self {
+            SeriesDepth::Absolute(depth) | SeriesDepth::Relative(depth) => depth,
+        }
+    }
+
+    pub(crate) fn is_absolute(&self) -> bool {
+        matches!(self, SeriesDepth::Absolute(_))
+    }
+}
+
+impl<T: Into<Rational>> From<T> for SeriesDepth {
+    fn from(depth: T) -> Self {
+        Self::absolute(depth.into())
+    }
+}
+
 /// A Puiseux series. The truncation order is
 /// relative to the lowest degree: i.e., a series in `x` with depth `d` is viewed as
 /// `a*x^n*(1+bx+.. + O(x^(d+1)))`.
@@ -42,14 +77,12 @@ use super::PolyVariable;
 ///
 /// A series can be constructed from an [Atom]:
 /// ```
-/// use symbolica::{atom::{Atom, AtomCore}, parse, symbol};
+/// use symbolica::{atom::AtomCore, parse, symbol};
 ///
 /// let x = symbol!("x");
 /// let a = parse!("(1-cos(x))/sin(x)");
 ///
-/// let out = a
-///     .series(x, Atom::num(0), 4.into(), true)
-///     .unwrap();
+/// let out = a.series(x, 0, 4).unwrap();
 /// println!("{}", out);
 /// assert_eq!(out.to_atom(), parse!("1/2*x+1/24*x^3"));
 /// ```
@@ -1314,13 +1347,15 @@ impl Series<AtomField> {
 mod tests {
     use crate::{
         atom::{Atom, AtomCore},
-        parse, symbol,
+        parse,
+        poly::series::SeriesDepth,
+        symbol,
     };
 
     #[test]
     fn map_coeff() {
         let a = parse!("((v1+1)^2 - (v1^2 + 2v1 + 1))/v2")
-            .series(symbol!("v2"), Atom::Zero, 0.into(), true)
+            .series(symbol!("v2"), Atom::Zero, SeriesDepth::absolute(0))
             .unwrap();
         assert_eq!(a.get_trailing_exponent(), -1);
 

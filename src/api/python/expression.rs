@@ -1,4 +1,5 @@
 use super::*;
+use crate::utils::Settable;
 
 /// Operations that transform an expression.
 #[cfg_attr(feature = "python_stubgen", gen_stub_pyclass)]
@@ -1310,8 +1311,11 @@ impl PythonTransformer {
         self.append_transformer(Transformer::Series(
             id,
             expansion_point.to_expression().expr.clone(),
-            (depth, depth_denom).into(),
-            depth_is_absolute,
+            if depth_is_absolute {
+                crate::poly::series::SeriesDepth::absolute((depth, depth_denom))
+            } else {
+                crate::poly::series::SeriesDepth::relative((depth, depth_denom))
+            },
         ))
     }
 
@@ -4579,47 +4583,52 @@ impl PythonExpression {
             }
         }
 
-        let b = self.expr.collect_multiple::<i16>(
-            &Arc::new(xs),
-            if let Some(key_map) = key_map {
-                Some(Box::new(move |key, out| {
-                    Python::attach(|py| {
-                        let key: PythonExpression = key.to_owned().into();
+        let xs = Arc::new(xs);
+        let b = if key_map.is_none() && coeff_map.is_none() {
+            self.expr.collect_multiple::<i16>(&xs)
+        } else {
+            let key_map_fn: Box<dyn Fn(AtomView, &mut Settable<'_, Atom>)> =
+                if let Some(key_map) = key_map {
+                    Box::new(move |key, out| {
+                        Python::attach(|py| {
+                            let key: PythonExpression = key.to_owned().into();
 
-                        out.set_from_view(
-                            &key_map
+                            **out = key_map
                                 .call(py, (key,), None)
                                 .expect("Bad callback function")
                                 .extract::<PythonExpression>(py)
                                 .expect("Key map should return an expression")
-                                .expr
-                                .as_view(),
-                        )
-                    });
-                }))
-            } else {
-                None
-            },
-            if let Some(coeff_map) = coeff_map {
-                Some(Box::new(move |coeff, out| {
-                    Python::attach(|py| {
-                        let coeff: PythonExpression = coeff.to_owned().into();
+                                .expr;
+                        });
+                    })
+                } else {
+                    Box::new(|_, _| {})
+                };
 
-                        out.set_from_view(
-                            &coeff_map
+            let coeff_map_fn: Box<dyn Fn(AtomView, &mut Settable<'_, Atom>)> =
+                if let Some(coeff_map) = coeff_map {
+                    Box::new(move |coeff, out| {
+                        Python::attach(|py| {
+                            let coeff: PythonExpression = coeff.to_owned().into();
+
+                            **out = coeff_map
                                 .call(py, (coeff,), None)
                                 .expect("Bad callback function")
                                 .extract::<PythonExpression>(py)
                                 .expect("Coeff map should return an expression")
-                                .expr
-                                .as_view(),
-                        )
-                    });
-                }))
-            } else {
-                None
-            },
-        );
+                                .expr;
+                        });
+                    })
+                } else {
+                    Box::new(|_, _| {})
+                };
+
+            self.expr.collect_multiple_mapped::<i16>(
+                &xs,
+                key_map_fn.as_ref(),
+                coeff_map_fn.as_ref(),
+            )
+        };
 
         Ok(b.into())
     }
@@ -4663,47 +4672,48 @@ impl PythonExpression {
             ));
         };
 
-        let b = self.expr.collect_symbol::<i16>(
-            x,
-            if let Some(key_map) = key_map {
-                Some(Box::new(move |key, out| {
-                    Python::attach(|py| {
-                        let key: PythonExpression = key.to_owned().into();
+        let b = if key_map.is_none() && coeff_map.is_none() {
+            self.expr.collect_symbol::<i16>(x)
+        } else {
+            let key_map_fn: Box<dyn Fn(AtomView, &mut Settable<'_, Atom>)> =
+                if let Some(key_map) = key_map {
+                    Box::new(move |key, out| {
+                        Python::attach(|py| {
+                            let key: PythonExpression = key.to_owned().into();
 
-                        out.set_from_view(
-                            &key_map
+                            **out = key_map
                                 .call(py, (key,), None)
                                 .expect("Bad callback function")
                                 .extract::<PythonExpression>(py)
                                 .expect("Key map should return an expression")
-                                .expr
-                                .as_view(),
-                        )
-                    });
-                }))
-            } else {
-                None
-            },
-            if let Some(coeff_map) = coeff_map {
-                Some(Box::new(move |coeff, out| {
-                    Python::attach(|py| {
-                        let coeff: PythonExpression = coeff.to_owned().into();
+                                .expr;
+                        });
+                    })
+                } else {
+                    Box::new(|_, _| {})
+                };
 
-                        out.set_from_view(
-                            &coeff_map
+            let coeff_map_fn: Box<dyn Fn(AtomView, &mut Settable<'_, Atom>)> =
+                if let Some(coeff_map) = coeff_map {
+                    Box::new(move |coeff, out| {
+                        Python::attach(|py| {
+                            let coeff: PythonExpression = coeff.to_owned().into();
+
+                            **out = coeff_map
                                 .call(py, (coeff,), None)
                                 .expect("Bad callback function")
                                 .extract::<PythonExpression>(py)
                                 .expect("Coeff map should return an expression")
-                                .expr
-                                .as_view(),
-                        )
-                    });
-                }))
-            } else {
-                None
-            },
-        );
+                                .expr;
+                        });
+                    })
+                } else {
+                    Box::new(|_, _| {})
+                };
+
+            self.expr
+                .collect_symbol_mapped::<i16>(x, key_map_fn.as_ref(), coeff_map_fn.as_ref())
+        };
 
         Ok(b.into())
     }
@@ -4905,12 +4915,16 @@ impl PythonExpression {
             ))
         })?;
 
-        match self.expr.series(
-            id,
-            expansion_point.to_expression().expr.as_view(),
-            (depth, depth_denom).into(),
-            depth_is_absolute,
-        ) {
+        let depth = if depth_is_absolute {
+            crate::poly::series::SeriesDepth::absolute((depth, depth_denom))
+        } else {
+            crate::poly::series::SeriesDepth::relative((depth, depth_denom))
+        };
+
+        match self
+            .expr
+            .series(id, expansion_point.to_expression().expr.as_view(), depth)
+        {
             Ok(s) => Ok(PythonSeries { series: s }),
             Err(e) => Err(exceptions::PyValueError::new_err(e.to_string())),
         }
