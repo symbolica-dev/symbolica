@@ -184,18 +184,26 @@ macro_rules! from_via_rational {
     };
 }
 
+from_via_rational!(i8);
+from_via_rational!(i16);
 from_via_rational!(i32);
 from_via_rational!(i64);
 from_via_rational!(i128);
 from_via_rational!(isize);
+from_via_rational!(u8);
+from_via_rational!(u16);
 from_via_rational!(u32);
 from_via_rational!(u64);
 from_via_rational!(u128);
 from_via_rational!(usize);
+from_via_rational!((i8, i8));
+from_via_rational!((i16, i16));
 from_via_rational!((i32, i32));
 from_via_rational!((i64, i64));
 from_via_rational!((i128, i128));
 from_via_rational!((isize, isize));
+from_via_rational!((u8, u8));
+from_via_rational!((u16, u16));
 from_via_rational!((u32, u32));
 from_via_rational!((u64, u64));
 from_via_rational!((u128, u128));
