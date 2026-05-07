@@ -1863,13 +1863,17 @@ pub trait AtomCore: private::Sealed + Sized {
     /// let replacement1 = parse!("y").to_pattern();
     /// let pattern2 = parse!("y").to_pattern();
     /// let replacement2 = parse!("x").to_pattern();
-    /// let result = expr.replace_multiple(&[
+    /// let result = expr.replace_multiple([
     ///     Replacement::new(pattern1, replacement1),
     ///     Replacement::new(pattern2, replacement2),
     /// ]);
     /// assert_eq!(result, parse!("x + y"));
     /// ```
-    fn replace_multiple<T: BorrowReplacement>(&self, replacements: &[T]) -> Self::Output {
+    fn replace_multiple<I, T>(&self, replacements: I) -> Self::Output
+    where
+        I: IntoIterator<Item = T>,
+        T: BorrowReplacement,
+    {
         self.as_atom_view()
             .replace_multiple(replacements, ReplaceSettings::default())
             .wrap(self)
@@ -1888,17 +1892,21 @@ pub trait AtomCore: private::Sealed + Sized {
     /// let replacement1 = parse!("y").to_pattern();
     /// let pattern2 = parse!("y").to_pattern();
     /// let replacement2 = parse!("x").to_pattern();
-    /// let result = expr.replace_multiple_with_settings(&[
+    /// let result = expr.replace_multiple_with_settings([
     ///     Replacement::new(pattern1, replacement1),
     ///     Replacement::new(pattern2, replacement2),
     /// ], ReplaceSettings::default());
     /// assert_eq!(result, parse!("x + y"));
     /// ```
-    fn replace_multiple_with_settings<T: BorrowReplacement>(
+    fn replace_multiple_with_settings<I, T>(
         &self,
-        replacements: &[T],
+        replacements: I,
         settings: ReplaceSettings,
-    ) -> Self::Output {
+    ) -> Self::Output
+    where
+        I: IntoIterator<Item = T>,
+        T: BorrowReplacement,
+    {
         self.as_atom_view()
             .replace_multiple(replacements, settings)
             .wrap(self)
@@ -1926,11 +1934,11 @@ pub trait AtomCore: private::Sealed + Sized {
     /// assert!(changed);
     /// assert_eq!(out, parse!("x + y"));
     /// ```
-    fn replace_multiple_into<T: BorrowReplacement>(
-        &self,
-        replacements: &[T],
-        out: &mut Atom,
-    ) -> bool {
+    fn replace_multiple_into<I, T>(&self, replacements: I, out: &mut Atom) -> bool
+    where
+        I: IntoIterator<Item = T>,
+        T: BorrowReplacement,
+    {
         self.as_atom_view()
             .replace_multiple_into(replacements, ReplaceSettings::default(), out)
     }

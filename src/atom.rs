@@ -2983,9 +2983,10 @@ impl FunctionBuilder {
     }
 
     /// Add multiple arguments to the function.
-    pub fn add_args<'a, T>(mut self, args: &'a [T]) -> FunctionBuilder
+    pub fn add_args<'a, I, T>(mut self, args: I) -> FunctionBuilder
     where
-        &'a T: Into<AtomOrView<'a>>,
+        I: IntoIterator<Item = T>,
+        T: Into<AtomOrView<'a>>,
     {
         if let Atom::Fun(f) = self.handle.deref_mut() {
             for a in args {
@@ -3726,22 +3727,31 @@ impl Atom {
     /// Add the atoms in `args`, using a fast n-way merge sort.
     ///
     /// This method should be preferred over repeated addition when adding many atoms.
-    pub fn add_many<T: AtomCore>(args: &[T]) -> Atom {
+    pub fn add_many<'a, I, T>(args: I) -> Atom
+    where
+        I: IntoIterator<Item = T>,
+        T: Into<AtomOrView<'a>>,
+    {
+        let args = args.into_iter().map(Into::into).collect::<Vec<_>>();
         let mut out = Atom::new();
         Workspace::get_local().with(|ws| {
-            AtomView::add_normalized_slice(args, ws, &mut out);
+            AtomView::add_normalized_slice(&args, ws, &mut out);
         });
         out
     }
 
     /// Multiply the atoms in `args`.
-    pub fn mul_many<T: AtomCore>(args: &[T]) -> Atom {
+    pub fn mul_many<'a, I, T>(args: I) -> Atom
+    where
+        I: IntoIterator<Item = T>,
+        T: Into<AtomOrView<'a>>,
+    {
         let mut out = Atom::new();
         Workspace::get_local().with(|ws| {
             let mut t = ws.new_atom();
             let add = t.to_mul();
             for a in args {
-                add.extend(a.as_atom_view());
+                add.extend(a.into().as_atom_view());
             }
 
             t.as_view().normalize(ws, &mut out);
@@ -3810,10 +3820,10 @@ mod test {
     fn building() {
         let _ = FunctionBuilder::new(symbol!("a"))
             .add_arg(1)
-            .add_args(&[1, 2])
+            .add_args([1, 2])
             .add_arg(symbol!("a"))
-            .add_args(&[symbol!("b")])
-            .add_args(&[parse!("a")])
+            .add_args([symbol!("b")])
+            .add_args([parse!("a")])
             .add_arg(parse!("a"))
             .add_arg(parse!("a"))
             .add_arg(parse!("a").as_view())

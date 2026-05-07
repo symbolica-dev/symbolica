@@ -178,9 +178,9 @@ impl std::fmt::Display for Replacement {
 }
 
 impl Replacement {
-    pub fn new<R: Into<ReplaceWith<'static>>>(pat: Pattern, rhs: R) -> Self {
+    pub fn new<P: Into<Pattern>, R: Into<ReplaceWith<'static>>>(pat: P, rhs: R) -> Self {
         Replacement {
-            pat,
+            pat: pat.into(),
             rhs: rhs.into(),
             conditions: None,
             settings: None,
@@ -1811,11 +1811,15 @@ impl<'a> AtomView<'a> {
     }
 
     /// Replace all occurrences of the patterns, where replacements are tested in the order that they are given.
-    pub(crate) fn replace_multiple<T: BorrowReplacement>(
+    pub(crate) fn replace_multiple<I, T>(
         &self,
-        replacements: &[T],
+        replacements: I,
         replace_settings: ReplaceSettings,
-    ) -> Atom {
+    ) -> Atom
+    where
+        I: IntoIterator<Item = T>,
+        T: BorrowReplacement,
+    {
         let mut out = Atom::new();
         self.replace_multiple_into(replacements, replace_settings, &mut out);
         out
@@ -1823,12 +1827,17 @@ impl<'a> AtomView<'a> {
 
     /// Replace all occurrences of the patterns, where replacements are tested in the order that they are given.
     /// Returns `true` iff a match was found.
-    pub(crate) fn replace_multiple_into<T: BorrowReplacement>(
+    pub(crate) fn replace_multiple_into<I, T>(
         &self,
-        replacements: &[T],
+        replacements: I,
         replace_settings: ReplaceSettings,
         out: &mut Atom,
-    ) -> bool {
+    ) -> bool
+    where
+        I: IntoIterator<Item = T>,
+        T: BorrowReplacement,
+    {
+        let replacements = replacements.into_iter().collect::<Vec<_>>();
         let mut atom_iter = replacements
             .iter()
             .map(|r| {
@@ -1857,7 +1866,7 @@ impl<'a> AtomView<'a> {
             let mut rhs_cache = HashMap::default();
             let mut set = Settable::from(&mut *out);
             self.replace_no_norm(
-                replacements,
+                &replacements,
                 &mut atom_iter,
                 ws,
                 0,
@@ -3982,13 +3991,21 @@ impl std::fmt::Debug for Match<'_> {
     }
 }
 
-impl Match<'_> {
+impl<'a> Match<'a> {
     /// Create a new atom from a matched subexpression.
     /// Arguments lists are wrapped in the function `arg`.
     pub fn to_atom(&self) -> Atom {
         let mut out = Atom::default();
         self.to_atom_into(&mut out);
         out
+    }
+
+    /// Returns a single atom if this is a single atom match, `None` otherwise.
+    pub fn as_single(&self) -> Option<AtomView<'a>> {
+        match self {
+            Self::Single(v) => Some(*v),
+            _ => None,
+        }
     }
 
     /// Create a new atom from a matched subexpression.
@@ -4117,13 +4134,17 @@ impl Default for MatchStack<'_> {
 }
 
 impl<'a> MatchStack<'a> {
+    /// Create a new empty `MatchStack`.
     pub fn new() -> Self {
         MatchStack { stack: Vec::new() }
     }
 
+    /// Get the single atom matched for the wildcard `key`.
+    pub fn get_atom(&self, key: Symbol) -> Option<AtomView<'a>> {
+        self.get(key)?.as_single()
+    }
+
     /// Get a match for the wildcard `key`.
-    ///
-    /// Panics if `key` is not a wildcard symbol.
     pub fn get(&self, key: Symbol) -> Option<&Match<'a>> {
         if key.get_wildcard_level() == 0 {
             panic!(
@@ -5863,9 +5884,9 @@ mod test {
     fn multiple() {
         let a = parse!("f(v1,v2)");
 
-        let r = a.replace_multiple(&[
-            Replacement::new(parse!("v1").to_pattern(), parse!("v2").to_pattern()),
-            Replacement::new(parse!("v2").to_pattern(), parse!("v1").to_pattern()),
+        let r = a.replace_multiple([
+            Replacement::new(parse!("v1"), parse!("v2")),
+            Replacement::new(parse!("v2"), parse!("v1")),
         ]);
 
         let res = parse!("f(v2,v1)");
@@ -5882,9 +5903,9 @@ mod test {
             let s = format!(
                 "{}(mu{})*{}(mu{})",
                 m.get(v1).unwrap().to_atom().printer(PrintOptions::file()),
-                m.get(v2).unwrap().to_atom().printer(PrintOptions::file()),
+                m.get_atom(v2).unwrap().printer(PrintOptions::file()),
                 m.get(v4).unwrap().to_atom().printer(PrintOptions::file()),
-                m.get(v5).unwrap().to_atom().printer(PrintOptions::file())
+                m.get_atom(v5).unwrap().printer(PrintOptions::file())
             );
             parse!(&s)
         });
