@@ -12,13 +12,14 @@ use crate::{
     atom::{Atom, AtomCore, AtomView, Fun, Indeterminate, Symbol, representation::FunView},
     coefficient::{Coefficient, CoefficientView},
     combinatorics::{partitions, unique_permutations},
-    domains::rational::Rational,
     id::{
         Condition, Evaluate, MatchSettings, Pattern, PatternRestriction, Relation, ReplaceSettings,
         ReplaceWith, Replacement,
     },
+    poly::series::SeriesDepth,
     printer::{AnsiWrap, AtomPrinter, PrintOptions},
     state::{RecycledAtom, Workspace},
+    utils::Settable,
 };
 use ahash::HashMap;
 use dyn_clone::DynClone;
@@ -191,7 +192,7 @@ pub enum Transformer {
     /// Derive the rhs w.r.t a variable.
     Derivative(Indeterminate),
     /// Perform a series expansion.
-    Series(Indeterminate, Atom, Rational, bool),
+    Series(Indeterminate, Atom, SeriesDepth),
     ///Collect all terms in powers of a variable.
     Collect(Vec<Atom>, Vec<Transformer>, Vec<Transformer>),
     ///Collect all terms in powers of a variable name.
@@ -292,12 +293,11 @@ impl std::fmt::Debug for Transformer {
             Transformer::CycleSymmetrize => f.debug_tuple("CycleSymmetrize").finish(),
             Transformer::Deduplicate => f.debug_tuple("Deduplicate").finish(),
             Transformer::Permutations(i) => f.debug_tuple("Permutations").field(i).finish(),
-            Transformer::Series(x, point, d, depth_is_absolute) => f
+            Transformer::Series(x, point, d) => f
                 .debug_tuple("TaylorSeries")
                 .field(x)
                 .field(point)
                 .field(d)
-                .field(depth_is_absolute)
                 .finish(),
             Transformer::Repeat(r) => f.debug_tuple("Repeat").field(r).finish(),
             Transformer::Print(p) => f.debug_tuple("Print").field(p).finish(),
@@ -635,62 +635,70 @@ impl Transformer {
                 Transformer::Derivative(x) => {
                     cur_input.derivative_with_ws_into(x, workspace, out);
                 }
-                Transformer::Collect(x, key_map, coeff_map) => cur_input
-                    .collect_multiple_impl::<i16, _>(
+                Transformer::Collect(x, key_map, coeff_map) => {
+                    let key_map_fn: Option<Box<dyn Fn(AtomView, &mut Settable<'_, Atom>)>> =
+                        if key_map.is_empty() {
+                            None
+                        } else {
+                            let key_map = key_map.clone();
+                            let state = state.clone();
+                            Some(Box::new(move |i, o| {
+                                let _ = Workspace::get_local()
+                                    .with(|ws| Self::execute_chain(i, &key_map, ws, &state, o));
+                            }))
+                        };
+                    let coeff_map_fn: Option<Box<dyn Fn(AtomView, &mut Settable<'_, Atom>)>> =
+                        if coeff_map.is_empty() {
+                            None
+                        } else {
+                            let coeff_map = coeff_map.clone();
+                            let state = state.clone();
+                            Some(Box::new(move |i, o| {
+                                let _ = Workspace::get_local()
+                                    .with(|ws| Self::execute_chain(i, &coeff_map, ws, &state, o));
+                            }))
+                        };
+                    cur_input.collect_multiple_impl::<i16, _>(
                         x,
                         workspace,
-                        if key_map.is_empty() {
-                            None
-                        } else {
-                            let key_map = key_map.clone();
-                            let state = state.clone();
-                            Some(Box::new(move |i, o| {
-                                Workspace::get_local().with(|ws| {
-                                    let _ =
-                                        Self::execute_chain(i, &key_map, ws, &state, o).unwrap();
-                                });
-                            }))
-                        },
-                        if coeff_map.is_empty() {
-                            None
-                        } else {
-                            let coeff_map = coeff_map.clone();
-                            let state = state.clone();
-                            Some(Box::new(move |i, o| {
-                                Workspace::get_local().with(|ws| {
-                                    let _ =
-                                        Self::execute_chain(i, &coeff_map, ws, &state, o).unwrap();
-                                });
-                            }))
-                        },
+                        key_map_fn.as_deref(),
+                        coeff_map_fn.as_deref(),
                         out,
-                    ),
+                    )
+                }
                 Transformer::CollectSymbol(x, key_map, coeff_map) => {
-                    *out = cur_input.collect_symbol::<i16>(
-                        *x,
-                        if key_map.is_empty() {
-                            None
-                        } else {
-                            let key_map = key_map.clone();
-                            let state = state.clone();
-                            Some(Box::new(move |i, o| {
-                                let _ = Workspace::get_local().with(|ws| {
-                                    Self::execute_chain(i, &key_map, ws, &state, o).unwrap()
-                                });
-                            }))
-                        },
-                        if coeff_map.is_empty() {
-                            None
-                        } else {
-                            let coeff_map = coeff_map.clone();
-                            let state = state.clone();
-                            Some(Box::new(move |i, o| {
-                                let _ = Workspace::get_local().with(|ws| {
-                                    Self::execute_chain(i, &coeff_map, ws, &state, o).unwrap()
-                                });
-                            }))
-                        },
-                    );
+                    if key_map.is_empty() && coeff_map.is_empty() {
+                        *out = cur_input.collect_symbol::<i16>(*x);
+                    } else {
+                        let key_map_fn: Box<dyn Fn(AtomView, &mut Settable<'_, Atom>)> =
+                            if key_map.is_empty() {
+                                Box::new(|_, _| {})
+                            } else {
+                                let key_map = key_map.clone();
+                                let state = state.clone();
+                                Box::new(move |i, o| {
+                                    let _ = Workspace::get_local()
+                                        .with(|ws| Self::execute_chain(i, &key_map, ws, &state, o));
+                                })
+                            };
+                        let coeff_map_fn: Box<dyn Fn(AtomView, &mut Settable<'_, Atom>)> =
+                            if coeff_map.is_empty() {
+                                Box::new(|_, _| {})
+                            } else {
+                                let coeff_map = coeff_map.clone();
+                                let state = state.clone();
+                                Box::new(move |i, o| {
+                                    let _ = Workspace::get_local().with(|ws| {
+                                        Self::execute_chain(i, &coeff_map, ws, &state, o)
+                                    });
+                                })
+                            };
+                        *out = cur_input.collect_symbol_mapped::<i16>(
+                            *x,
+                            key_map_fn.as_ref(),
+                            coeff_map_fn.as_ref(),
+                        );
+                    }
                 }
                 Transformer::CollectFactors => {
                     *out = cur_input.collect_factors();
@@ -704,26 +712,21 @@ impl Transformer {
                 Transformer::Conjugate => {
                     *out = cur_input.conj();
                 }
-                Transformer::Series(x, expansion_point, depth, depth_is_absolute) => {
-                    if let Ok(s) = cur_input.series(
-                        x,
-                        expansion_point.as_view(),
-                        depth.clone(),
-                        *depth_is_absolute,
-                    ) {
+                Transformer::Series(x, expansion_point, depth) => {
+                    if let Ok(s) = cur_input.series(x, expansion_point.as_view(), depth.clone()) {
                         s.to_atom_into(out);
                     } else {
                         std::mem::swap(out, &mut tmp);
                     }
                 }
-                Transformer::ReplaceAll(pat, rhs, cond, settings, once) => {
+                Transformer::ReplaceAll(pat, rhs, cond, settings, replace_settings) => {
                     cur_input.replace_with_ws_into(
                         pat,
                         rhs,
                         workspace,
-                        cond.into(),
-                        settings.into(),
-                        *once,
+                        Some(cond),
+                        Some(settings),
+                        *replace_settings,
                         out,
                     );
                 }
@@ -1029,6 +1032,7 @@ mod test {
         atom::{Atom, AtomCore, FunctionBuilder},
         id::{Condition, Match, MatchSettings, ReplaceSettings, WildcardRestriction},
         parse,
+        poly::series::SeriesDepth,
         printer::PrintOptions,
         state::Workspace,
         symbol,
@@ -1090,7 +1094,11 @@ mod test {
                 p.as_view(),
                 &[
                     Transformer::Product,
-                    Transformer::Series(symbol!("v1").into(), Atom::num(1), 3.into(), true),
+                    Transformer::Series(
+                        symbol!("v1").into(),
+                        Atom::num(1),
+                        SeriesDepth::absolute(3),
+                    ),
                 ],
                 ws,
                 &TransformerState::default(),

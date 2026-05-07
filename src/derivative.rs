@@ -7,7 +7,10 @@ use crate::{
     atom::{Atom, AtomCore, AtomView, FunctionBuilder, Indeterminate, InlineVar, Symbol},
     coefficient::{Coefficient, CoefficientView},
     domains::{Ring, atom::AtomField, integer::Integer, rational::Rational},
-    poly::{PolyVariable, series::Series},
+    poly::{
+        PolyVariable,
+        series::{Series, SeriesDepth},
+    },
     state::Workspace,
 };
 
@@ -390,18 +393,18 @@ impl AtomView<'_> {
         &self,
         x: &Indeterminate,
         expansion_point: AtomView,
-        depth: Rational,
-        depth_is_absolute: bool,
+        depth: SeriesDepth,
     ) -> Result<Series<AtomField>, String> {
-        if !depth_is_absolute && (depth.is_negative() || depth.is_zero()) {
+        let order = depth.order();
+        if !depth.is_absolute() && (order.is_negative() || order.is_zero()) {
             return Err("Cannot series expand to negative or zero depth".to_owned());
         }
 
         // heuristic current depth
-        let mut current_depth = if depth.is_negative() || depth.is_zero() {
+        let mut current_depth = if order.is_negative() || order.is_zero() {
             Rational::one()
         } else {
-            depth.clone()
+            order.clone()
         };
 
         // do not do an expensive statistical zero check at all stages during the series expansion
@@ -421,11 +424,11 @@ impl AtomView<'_> {
             );
 
             let mut series = self.series_impl(x, expansion_point, &info)?;
-            if !depth_is_absolute && series.relative_order() >= depth {
-                series.truncate_relative_order(depth);
+            if !depth.is_absolute() && series.relative_order() >= *order {
+                series.truncate_relative_order(order.clone());
                 break Ok(series);
-            } else if depth_is_absolute && series.absolute_order() > depth {
-                series.truncate_absolute_order(&depth + &(1.into(), depth.denominator()).into());
+            } else if depth.is_absolute() && series.absolute_order() > *order {
+                series.truncate_absolute_order(order + &(1.into(), order.denominator()).into());
                 break Ok(series);
             } else {
                 // increase the expansion depth
@@ -861,7 +864,9 @@ impl Sub<&Atom> for &Series<AtomField> {
 mod test {
     use crate::{
         atom::{Atom, AtomCore, AtomView},
-        parse, symbol,
+        parse,
+        poly::series::SeriesDepth,
+        symbol,
     };
 
     #[test]
@@ -892,7 +897,7 @@ mod test {
 
         let input = parse!("exp(v1^2+1)*log(v1+3)/v1/(v1+1)");
         let t = input
-            .series(v1, Atom::num(0).as_view(), 2.into(), true)
+            .series(v1, Atom::num(0).as_view(), SeriesDepth::absolute(2))
             .unwrap()
             .to_atom();
 
@@ -907,7 +912,7 @@ mod test {
         let v1 = symbol!("v1");
         let input = parse!("1/(v1+1)");
         let t = input
-            .series(v1, Atom::num(-1).as_view(), 5.into(), true)
+            .series(v1, Atom::num(-1).as_view(), SeriesDepth::absolute(5))
             .unwrap()
             .to_atom();
 
@@ -920,7 +925,7 @@ mod test {
         let v1 = symbol!("v1");
         let input = parse!("(1-cos(v1))/sin(v1)");
         let t = input
-            .series(v1, Atom::num(0).as_view(), 5.into(), true)
+            .series(v1, Atom::num(0).as_view(), SeriesDepth::absolute(5))
             .unwrap()
             .to_atom();
 
@@ -933,7 +938,7 @@ mod test {
         let v1 = symbol!("v1");
         let input = parse!("log(v1)*(1+v1)");
         let t = input
-            .series(v1, Atom::num(0).as_view(), 4.into(), true)
+            .series(v1, Atom::num(0).as_view(), SeriesDepth::absolute(4))
             .unwrap()
             .to_atom();
 
@@ -946,7 +951,7 @@ mod test {
         let v1 = symbol!("v1");
         let input = parse!("(v1^3+v1+1)^(1/2)");
         let t = input
-            .series(v1, Atom::num(0).as_view(), 4.into(), true)
+            .series(v1, Atom::num(0).as_view(), SeriesDepth::absolute(4))
             .unwrap()
             .to_atom();
 
@@ -960,7 +965,7 @@ mod test {
         let input = parse!("1/v1^5");
 
         let t = input
-            .series(v1, Atom::num(0).as_view(), 3.into(), true)
+            .series(v1, Atom::num(0).as_view(), SeriesDepth::absolute(3))
             .unwrap();
 
         let t2 = t.rpow((1, 3).into()).unwrap();
@@ -974,7 +979,7 @@ mod test {
 
         let input = parse!("1/v1^2+1/v1+v1");
         let t = input
-            .series(v1, Atom::num(0).as_view(), 0.into(), true)
+            .series(v1, Atom::num(0).as_view(), SeriesDepth::absolute(0))
             .unwrap();
 
         assert_eq!(t.to_atom().expand(), parse!("v1^-2+v1^-1"));
@@ -986,7 +991,7 @@ mod test {
         let input = parse!("1/(v1^10+v1^20)");
 
         let t = input
-            .series(v1, Atom::num(0).as_view(), (-1).into(), true)
+            .series(v1, Atom::num(0).as_view(), SeriesDepth::absolute(-1))
             .unwrap()
             .to_atom();
 
@@ -999,7 +1004,7 @@ mod test {
 
         let input = parse!("f(exp(v1),sin(v1))");
         let t = input
-            .series(v1, Atom::num(0).as_view(), 2.into(), true)
+            .series(v1, Atom::num(0).as_view(), SeriesDepth::absolute(2))
             .unwrap()
             .to_atom();
 
@@ -1026,7 +1031,7 @@ mod test {
 
         let input = parse!("series_derivative_keeps_function_unevaluated::f(v1)");
         let t = input
-            .series(v1, Atom::num(2).as_view(), 2.into(), true)
+            .series(v1, Atom::num(2).as_view(), SeriesDepth::absolute(2))
             .unwrap()
             .to_atom();
 
@@ -1050,7 +1055,7 @@ mod test {
         );
 
         let t = parse!("series_custom_function::f(v1)")
-            .series(v1, Atom::num(0).as_view(), 3.into(), true)
+            .series(v1, Atom::num(0).as_view(), SeriesDepth::absolute(3))
             .unwrap()
             .to_atom();
 
@@ -1063,7 +1068,7 @@ mod test {
 
         let input = parse!("1+2*log(v1^4)");
         let t = input
-            .series(v1, Atom::num(0).as_view(), 4.into(), true)
+            .series(v1, Atom::num(0).as_view(), SeriesDepth::absolute(4))
             .unwrap()
             .exp()
             .unwrap();
@@ -1077,7 +1082,7 @@ mod test {
 
         let input = parse!("1/(1-v1)");
         let t = input
-            .series(v1, Atom::num(0).as_view(), 4.into(), true)
+            .series(v1, Atom::num(0).as_view(), SeriesDepth::absolute(4))
             .unwrap();
 
         let r = (t - &parse!("1/v1+1")).unwrap();
@@ -1092,7 +1097,7 @@ mod test {
 
         let input = parse!("v1");
         let t = input
-            .series(v1, Atom::num(0).as_view(), 4.into(), true)
+            .series(v1, Atom::num(0).as_view(), SeriesDepth::absolute(4))
             .unwrap();
 
         let r = ((t / &parse!("exp(v1)-1")).unwrap() * &parse!("v1")).unwrap();
@@ -1107,7 +1112,7 @@ mod test {
 
         let input = parse!("exp(v1)/v1-1/6*v1^2");
         let t = input
-            .series(v1, Atom::num(0).as_view(), 4.into(), false)
+            .series(v1, Atom::num(0).as_view(), SeriesDepth::relative(4))
             .unwrap();
 
         assert_eq!(t.relative_order(), (4, 1));
@@ -1120,7 +1125,7 @@ mod test {
 
         let input = parse!("v1^10");
         let t = input
-            .series(v1, Atom::num(0).as_view(), 4.into(), true)
+            .series(v1, Atom::num(0).as_view(), SeriesDepth::absolute(4))
             .unwrap();
         assert_eq!(t.absolute_order(), (10, 1));
         assert_eq!(t.relative_order(), (0, 1));
@@ -1136,13 +1141,13 @@ mod test {
 
         let input = parse!("v1");
         let t = input
-            .series(v1, Atom::num(0).as_view(), 4.into(), true)
+            .series(v1, Atom::num(0).as_view(), SeriesDepth::absolute(4))
             .unwrap();
 
         let r = &t - &t;
 
         let t2 = parse!("v1^6")
-            .series(v1, Atom::num(0).as_view(), 4.into(), false)
+            .series(v1, Atom::num(0).as_view(), SeriesDepth::relative(4))
             .unwrap();
 
         let x = (&r + &parse!("v1^6")).unwrap();

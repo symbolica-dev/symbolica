@@ -105,9 +105,7 @@ use crate::{
     streaming::{TermStreamer, TermStreamerConfig},
     tensors::matrix::Matrix,
     transformer::{StatsOptions, Transformer, TransformerError, TransformerState},
-    try_parse,
-    utils::Settable,
-    warn,
+    try_parse, warn,
 };
 
 #[cfg(feature = "python_stubgen")]

@@ -11,8 +11,12 @@ use crate::{
     domains::{algebraic_number::AlgebraicExtension, float::FloatLike, integer::Z, rational::Q},
     poly::{Exponent, factor::Factorize, polynomial::MultivariatePolynomial},
     state::Workspace,
+    utils::Settable,
 };
-use std::{ops::Div, sync::Arc};
+use std::{
+    ops::{DerefMut, Div},
+    sync::Arc,
+};
 
 impl<'a> AtomView<'a> {
     /// Collect terms involving the same power of `x`, where `x` is an indeterminate, e.g.
@@ -21,22 +25,37 @@ impl<'a> AtomView<'a> {
     /// collect(x + x * y + x^2, x) = x * (1+y) + x^2
     /// ```
     ///
-    /// Both the *key* (the quantity collected in) and its coefficient can be mapped using
-    /// `key_map` and `coeff_map` respectively.
-    pub(crate) fn collect<'b, E: Exponent, T: Into<AtomOrView<'b>>>(
-        &self,
-        x: T,
-        key_map: Option<Box<dyn Fn(AtomView, &mut Atom)>>,
-        coeff_map: Option<Box<dyn Fn(AtomView, &mut Atom)>>,
-    ) -> Atom {
-        self.collect_multiple::<E, _>(std::slice::from_ref(&x.into()), key_map, coeff_map)
+    pub(crate) fn collect<'b, E: Exponent, T: Into<AtomOrView<'b>>>(&self, x: T) -> Atom {
+        self.collect_multiple::<E, _>(std::slice::from_ref(&x.into()))
     }
 
-    pub(crate) fn collect_symbol<E: Exponent>(
+    pub(crate) fn collect_mapped<'b, E: Exponent, T>(
+        &self,
+        x: T,
+        key_map: &dyn Fn(AtomView, &mut Settable<'_, Atom>),
+        coeff_map: &dyn Fn(AtomView, &mut Settable<'_, Atom>),
+    ) -> Atom
+    where
+        T: Into<AtomOrView<'b>>,
+    {
+        self.collect_multiple_mapped::<E, _>(std::slice::from_ref(&x.into()), key_map, coeff_map)
+    }
+
+    pub(crate) fn collect_symbol<E: Exponent>(&self, x: Symbol) -> Atom {
+        let vars: Vec<_> = self
+            .get_all_indeterminates(false)
+            .into_iter()
+            .filter(|v| v.get_symbol().unwrap() == x)
+            .collect();
+
+        self.collect_multiple::<E, AtomView>(&vars)
+    }
+
+    pub(crate) fn collect_symbol_mapped<E: Exponent>(
         &self,
         x: Symbol,
-        key_map: Option<Box<dyn Fn(AtomView, &mut Atom)>>,
-        coeff_map: Option<Box<dyn Fn(AtomView, &mut Atom)>>,
+        key_map: &dyn Fn(AtomView, &mut Settable<'_, Atom>),
+        coeff_map: &dyn Fn(AtomView, &mut Settable<'_, Atom>),
     ) -> Atom {
         let vars: Vec<_> = self
             .get_all_indeterminates(false)
@@ -44,18 +63,29 @@ impl<'a> AtomView<'a> {
             .filter(|v| v.get_symbol().unwrap() == x)
             .collect();
 
-        self.collect_multiple::<E, AtomView>(&vars, key_map, coeff_map)
+        self.collect_multiple_mapped::<E, AtomView>(&vars, key_map, coeff_map)
     }
 
-    pub(crate) fn collect_multiple<E: Exponent, T: AtomCore>(
-        &self,
-        xs: &[T],
-        key_map: Option<Box<dyn Fn(AtomView, &mut Atom)>>,
-        coeff_map: Option<Box<dyn Fn(AtomView, &mut Atom)>>,
-    ) -> Atom {
+    pub(crate) fn collect_multiple<E: Exponent, T: AtomCore>(&self, xs: &[T]) -> Atom {
         let mut out = Atom::new();
         Workspace::get_local()
-            .with(|ws| self.collect_multiple_impl::<E, T>(xs, ws, key_map, coeff_map, &mut out));
+            .with(|ws| self.collect_multiple_impl::<E, T>(xs, ws, None, None, &mut out));
+        out
+    }
+
+    pub(crate) fn collect_multiple_mapped<E: Exponent, T>(
+        &self,
+        xs: &[T],
+        key_map: &dyn Fn(AtomView, &mut Settable<'_, Atom>),
+        coeff_map: &dyn Fn(AtomView, &mut Settable<'_, Atom>),
+    ) -> Atom
+    where
+        T: AtomCore,
+    {
+        let mut out = Atom::new();
+        Workspace::get_local().with(|ws| {
+            self.collect_multiple_impl::<E, T>(xs, ws, Some(key_map), Some(coeff_map), &mut out)
+        });
         out
     }
 
@@ -63,8 +93,8 @@ impl<'a> AtomView<'a> {
         &self,
         xs: &[T],
         ws: &Workspace,
-        key_map: Option<Box<dyn Fn(AtomView, &mut Atom)>>,
-        coeff_map: Option<Box<dyn Fn(AtomView, &mut Atom)>>,
+        key_map: Option<&dyn Fn(AtomView, &mut Settable<'_, Atom>)>,
+        coeff_map: Option<&dyn Fn(AtomView, &mut Settable<'_, Atom>)>,
         out: &mut Atom,
     ) {
         let r = self.coefficient_list::<E, T>(xs);
@@ -76,25 +106,35 @@ impl<'a> AtomView<'a> {
             key: AtomView,
             coeff: Atom,
             workspace: &Workspace,
-            key_map: &Option<Box<dyn Fn(AtomView, &mut Atom)>>,
-            coeff_map: &Option<Box<dyn Fn(AtomView, &mut Atom)>>,
+            key_map: Option<&dyn Fn(AtomView, &mut Settable<'_, Atom>)>,
+            coeff_map: Option<&dyn Fn(AtomView, &mut Settable<'_, Atom>)>,
             add: &mut Add,
         ) {
             let mut mul_h = workspace.new_atom();
             let mul = mul_h.to_mul();
 
-            if let Some(key_map) = &key_map {
+            if let Some(key_map) = key_map {
                 let mut handle = workspace.new_atom();
-                key_map(key, &mut handle);
-                mul.extend(handle.as_view());
+                let mut set = Settable::from(handle.deref_mut());
+                key_map(key, &mut set);
+                if set.is_set() {
+                    mul.extend(handle.as_view());
+                } else {
+                    mul.extend(key);
+                }
             } else {
                 mul.extend(key);
             }
 
-            if let Some(coeff_map) = &coeff_map {
+            if let Some(coeff_map) = coeff_map {
                 let mut handle = workspace.new_atom();
-                coeff_map(coeff.as_view(), &mut handle);
-                mul.extend(handle.as_view());
+                let mut set = Settable::from(handle.deref_mut());
+                coeff_map(coeff.as_view(), &mut set);
+                if set.is_set() {
+                    mul.extend(handle.as_view());
+                } else {
+                    mul.extend(coeff.as_view());
+                }
             } else {
                 mul.extend(coeff.as_view());
             }
@@ -103,7 +143,7 @@ impl<'a> AtomView<'a> {
         }
 
         for (key, coeff) in r {
-            map_key_coeff(key.as_view(), coeff, ws, &key_map, &coeff_map, add);
+            map_key_coeff(key.as_view(), coeff, ws, key_map, coeff_map, add);
         }
 
         add_h.as_view().normalize(ws, out);
@@ -1468,7 +1508,7 @@ mod test {
         let input = parse!("f1 + v1*f1 + f1(5,3)*v1 + f1(5,3)*v2 + f1(5,3)*f1(7,5)");
         let x = symbol!("f1");
 
-        let r = input.collect_symbol::<i8>(x, None, None);
+        let r = input.collect_symbol::<i8>(x);
         let res = parse!("f1*(v1+1)+(v1+v2)*f1(5,3)+f1(5,3)*f1(7,5)");
         assert_eq!(r, res);
     }
@@ -1513,7 +1553,7 @@ mod test {
         let input = parse!("v1*(1+v3)+v1*5*v2+f1(5,v1)+2+v2^2+v1^2+v1^3");
         let x = symbol!("v1");
 
-        let out = input.collect::<i8>(x, None, None);
+        let out = input.collect::<i8>(x);
 
         let ref_out = parse!("v1^2+v1^3+v2^2+f1(5,v1)+v1*(5*v2+v3+1)+2");
         assert_eq!(out, ref_out)
@@ -1524,7 +1564,7 @@ mod test {
         let input = parse!("(1+v1)^2*v1+(1+v2)^100");
         let x = symbol!("v1");
 
-        let out = input.collect::<i8>(InlineVar::new(x), None, None);
+        let out = input.collect::<i8>(InlineVar::new(x));
 
         let ref_out = parse!("v1+2*v1^2+v1^3+(v2+1)^100");
         assert_eq!(out, ref_out)
@@ -1537,16 +1577,16 @@ mod test {
         let key = symbol!("f3");
         let coeff = symbol!("f4");
         println!("> Collect in x with wrapping:");
-        let out = input.collect::<i8>(
+        let out = input.collect_mapped::<i8>(
             InlineVar::new(x),
-            Some(Box::new(move |a, out| {
+            move |a, out| {
                 out.set_from_view(&a);
-                *out = function!(key, out);
-            })),
-            Some(Box::new(move |a, out| {
+                **out = function!(key, out.as_view());
+            },
+            move |a, out| {
                 out.set_from_view(&a);
-                *out = function!(coeff, out);
-            })),
+                **out = function!(coeff, out.as_view());
+            },
         );
 
         let ref_out =

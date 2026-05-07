@@ -33,8 +33,11 @@ use crate::{
         Pattern, PatternAtomTreeIterator, PatternRestriction, ReplaceBuilder, ReplaceSettings,
     },
     poly::{
-        Exponent, PolyVariable, PositiveExponent, factor::Factorize, gcd::PolynomialGCD,
-        polynomial::MultivariatePolynomial, series::Series,
+        Exponent, PolyVariable, PositiveExponent,
+        factor::Factorize,
+        gcd::PolynomialGCD,
+        polynomial::MultivariatePolynomial,
+        series::{Series, SeriesDepth},
     },
     printer::{AtomPrinter, CanonicalOrderingSettings, PrintOptions, PrintState},
     solve::SolveError,
@@ -167,26 +170,31 @@ pub trait AtomCore: private::Sealed + Sized {
     ///
     /// Use [collect_symbol](AtomCore::collect_symbol) to collect using the name of a function only.
     ///
-    /// Both the *key* (the quantity collected in) and its coefficient can be mapped using
-    /// `key_map` and `coeff_map` respectively.
-    ///
     /// # Example
     ///
     /// ```
     /// use symbolica::{atom::AtomCore, parse};
     /// let expr = parse!("x + x * y + x^2");
     /// let x = parse!("x");
-    /// let collected = expr.collect::<u8>(x, None, None);
+    /// let collected = expr.collect::<u8>(x);
     /// assert_eq!(collected, parse!("x * (1 + y) + x^2"));
     /// ```
-    fn collect<'a, E: Exponent>(
+    fn collect<'a, E: Exponent>(&self, x: impl Into<AtomOrView<'a>>) -> Self::Output {
+        self.as_atom_view().collect::<E, _>(x).wrap(self)
+    }
+
+    /// Collect terms involving the same power of `x` and map both the collected key and its coefficient.
+    ///
+    /// The first map is applied to the *key* (the quantity collected in), and the second map is
+    /// applied to the coefficient.
+    fn collect_mapped<'a, E: Exponent>(
         &self,
         x: impl Into<AtomOrView<'a>>,
-        key_map: Option<Box<dyn Fn(AtomView, &mut Atom)>>,
-        coeff_map: Option<Box<dyn Fn(AtomView, &mut Atom)>>,
+        key_map: impl Fn(AtomView, &mut Settable<'_, Atom>),
+        coeff_map: impl Fn(AtomView, &mut Settable<'_, Atom>),
     ) -> Self::Output {
         self.as_atom_view()
-            .collect::<E, _>(x, key_map, coeff_map)
+            .collect_mapped::<E, _>(x, &key_map, &coeff_map)
             .wrap(self)
     }
 
@@ -196,26 +204,28 @@ pub trait AtomCore: private::Sealed + Sized {
     /// collect_symbol(f(1,2) + x*f*(1,2), f) = (1+x)*f(1,2)
     /// ```
     ///
-    ///
-    /// Both the *key* (the quantity collected in) and its coefficient can be mapped using
-    /// `key_map` and `coeff_map` respectively.
-    ///
     /// # Example
     ///
     /// ```
     /// use symbolica::{atom::AtomCore, parse, symbol};
     /// let expr = parse!("f(1,2) + x*f(1,2)");
-    /// let collected = expr.collect_symbol::<u8>(symbol!("f"), None, None);
+    /// let collected = expr.collect_symbol::<u8>(symbol!("f"));
     /// assert_eq!(collected, parse!("(1+x)*f(1,2)"));
     /// ```
-    fn collect_symbol<E: Exponent>(
+    fn collect_symbol<E: Exponent>(&self, x: Symbol) -> Self::Output {
+        self.as_atom_view().collect_symbol::<E>(x).wrap(self)
+    }
+
+    /// Collect terms involving the same power of variables or functions with the name `x`,
+    /// and map both the collected key and its coefficient.
+    fn collect_symbol_mapped<E: Exponent>(
         &self,
         x: Symbol,
-        key_map: Option<Box<dyn Fn(AtomView, &mut Atom)>>,
-        coeff_map: Option<Box<dyn Fn(AtomView, &mut Atom)>>,
+        key_map: impl Fn(AtomView, &mut Settable<'_, Atom>),
+        coeff_map: impl Fn(AtomView, &mut Settable<'_, Atom>),
     ) -> Self::Output {
         self.as_atom_view()
-            .collect_symbol::<E>(x, key_map, coeff_map)
+            .collect_symbol_mapped::<E>(x, &key_map, &coeff_map)
             .wrap(self)
     }
 
@@ -225,9 +235,6 @@ pub trait AtomCore: private::Sealed + Sized {
     /// collect(x + x * y + x^2, x) = x * (1+y) + x^2
     /// ```
     ///
-    /// Both the *key* (the quantity collected in) and its coefficient can be mapped using
-    /// `key_map` and `coeff_map` respectively.
-    ///
     /// # Example
     ///
     /// ```
@@ -235,17 +242,23 @@ pub trait AtomCore: private::Sealed + Sized {
     /// let expr = parse!("x + x * y + x^2 + z + z^2");
     /// let x = parse!("x");
     /// let z = parse!("z");
-    /// let collected = expr.collect_multiple::<u8>(&[x, z], None, None);
+    /// let collected = expr.collect_multiple::<u8>(&[x, z]);
     /// assert_eq!(collected, parse!("x * (1 + y) + x^2 + z + z^2"));
     /// ```
-    fn collect_multiple<E: Exponent>(
+    fn collect_multiple<E: Exponent>(&self, xs: &[impl AtomCore]) -> Self::Output {
+        self.as_atom_view().collect_multiple::<E, _>(xs).wrap(self)
+    }
+
+    /// Collect terms involving the same power of `x` in `xs`,
+    /// and map both the collected key and its coefficient.
+    fn collect_multiple_mapped<E: Exponent>(
         &self,
         xs: &[impl AtomCore],
-        key_map: Option<Box<dyn Fn(AtomView, &mut Atom)>>,
-        coeff_map: Option<Box<dyn Fn(AtomView, &mut Atom)>>,
+        key_map: impl Fn(AtomView, &mut Settable<'_, Atom>),
+        coeff_map: impl Fn(AtomView, &mut Settable<'_, Atom>),
     ) -> Self::Output {
         self.as_atom_view()
-            .collect_multiple::<E, _>(xs, key_map, coeff_map)
+            .collect_multiple_mapped::<E, _>(xs, &key_map, &coeff_map)
             .wrap(self)
     }
 
@@ -625,32 +638,35 @@ pub trait AtomCore: private::Sealed + Sized {
     }
 
     /// Series expand in `x` around `expansion_point` to depth `depth`.
+    /// To expand to a relative depth, use [SeriesDepth::Relative].
     ///
     /// # Example
     ///
     /// ```
-    /// use symbolica::{atom::{Atom, AtomCore}, parse, symbol};
+    /// use symbolica::{atom::AtomCore, parse, symbol};
     /// let expr = parse!("exp(x)");
-    /// let series = expr
-    ///     .series(symbol!("x"), Atom::num(0), (4, 1).into(), true)
-    ///     .unwrap();
+    /// let series = expr.series(symbol!("x"), 0, 4).unwrap();
     /// assert_eq!(
     ///     series.to_atom(),
     ///     parse!("1 + x + x^2 / 2 + x^3 / 6 + x^4 / 24")
     /// );
     /// ```
-    fn series<'a, T: AtomCore, V: Into<BorrowedOrOwned<'a, Indeterminate>>>(
+    fn series<'a, 'b, T, V, D>(
         &self,
         x: V,
         expansion_point: T,
-        depth: Rational,
-        depth_is_absolute: bool,
-    ) -> Result<Series<AtomField>, String> {
+        depth: D,
+    ) -> Result<Series<AtomField>, String>
+    where
+        T: Into<AtomOrView<'b>>,
+        V: Into<BorrowedOrOwned<'a, Indeterminate>>,
+        D: Into<SeriesDepth>,
+    {
+        let expansion_point = expansion_point.into();
         self.as_atom_view().series(
             x.into().borrow(),
             expansion_point.as_atom_view(),
-            depth,
-            depth_is_absolute,
+            depth.into(),
         )
     }
 

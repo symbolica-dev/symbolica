@@ -17,26 +17,20 @@ fn main() {
     }
 
     println!("> Collect in x:");
-    let out = input.collect::<i8>(
-        &x,
-        Some(Box::new(|x, out| {
-            out.set_from_view(&x);
-        })),
-        None,
-    );
+    let out = input.collect::<i8>(&x);
     println!("\t{out}");
 
     println!("> Collect in x with wrapping:");
-    let out = input.collect::<i8>(
+    let out = input.collect_mapped::<i8>(
         &x,
-        Some(Box::new(move |a, out| {
+        move |a, out| {
             out.set_from_view(&a);
-            *out = function!(key, out);
-        })),
-        Some(Box::new(move |a, out| {
+            **out = function!(key, out.as_view());
+        },
+        move |a, out| {
             out.set_from_view(&a);
-            *out = function!(coeff, out);
-        })),
+            **out = function!(coeff, out.as_view());
+        },
     );
     println!("\t{out}");
 }
