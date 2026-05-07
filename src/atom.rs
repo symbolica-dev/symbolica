@@ -1092,7 +1092,29 @@ impl Symbol {
     /// Parse a symbol from a string with optional namespace and attributes.
     ///
     /// Use the [symbol!](crate::symbol) macro instead to define symbols in the current namespace.
-    pub fn parse<T: AsRef<str>>(name: DefaultNamespace<T>) -> Result<Self, String> {
+    pub fn parse<T: AsRef<str>>(
+        name: T,
+        namespace: impl Into<Cow<'static, str>>,
+    ) -> Result<Self, String> {
+        Token::parse_symbol(
+            name.as_ref(),
+            &DefaultNamespace {
+                namespace: namespace.into(),
+                data: name.as_ref(),
+                file: Cow::default(),
+                line: 0,
+            },
+            &mut HashMap::default(),
+            &mut State::get_state_mut(),
+        )
+    }
+
+    /// Parse a symbol from a string with optional namespace and attributes.
+    ///
+    /// Use the [symbol!](crate::symbol) macro instead to define symbols in the current namespace.
+    pub fn parse_with_default_namespace<T: AsRef<str>>(
+        name: DefaultNamespace<T>,
+    ) -> Result<Self, String> {
         Token::parse_symbol(
             name.data.as_ref(),
             &name,
@@ -2661,16 +2683,42 @@ impl Atom {
         Atom::default()
     }
 
+    /// Parse an atom from a string, using `namespace` if no explicit namespace is provided.
+    /// Prefer to use [parse!](crate::parse) instead, as this attaches positional information
+    /// for new symbol definitions.
+    ///
+    /// # Examples
+    /// ```rust
+    /// use symbolica::atom::{Atom, AtomCore};
+    /// let x = Atom::parse("x", "test", Default::default()).unwrap();
+    /// assert_eq!(x.to_canonical_string(), "test::{}::x");
+    /// ```
+    pub fn parse<T: AsRef<str>, U: Into<Cow<'static, str>>>(
+        input: T,
+        namespace: U,
+        settings: ParseSettings,
+    ) -> Result<Atom, String> {
+        Self::parse_with_default_namespace(
+            DefaultNamespace {
+                namespace: namespace.into(),
+                data: input.as_ref(),
+                file: "".into(),
+                line: 0,
+            },
+            settings,
+        )
+    }
+
     /// Parse an atom from a namespaced string. Prefer to use [parse!](crate::parse) instead.
     ///
     /// # Examples
     /// ```rust
     /// use symbolica::{atom::Atom, wrap_input, with_default_namespace, parser::ParseSettings};
-    /// let x = Atom::parse(wrap_input!("x"), ParseSettings::default()).unwrap();
-    /// let x_2 = Atom::parse(with_default_namespace!("x_2", "b"), ParseSettings::default()).unwrap();
+    /// let x = Atom::parse_with_default_namespace(wrap_input!("x"), ParseSettings::default()).unwrap();
+    /// let x_2 = Atom::parse_with_default_namespace(with_default_namespace!("x_2", "b"), ParseSettings::default()).unwrap();
     /// assert!(x != x_2);
     /// ```
-    pub fn parse<T: AsRef<str>>(
+    pub fn parse_with_default_namespace<T: AsRef<str>>(
         input: DefaultNamespace<T>,
         settings: ParseSettings,
     ) -> Result<Atom, String> {
@@ -3578,27 +3626,27 @@ macro_rules! parse {
 #[macro_export]
 macro_rules! try_parse {
     ($s: expr) => {
-        $crate::atom::Atom::parse(
+        $crate::atom::Atom::parse_with_default_namespace(
             $crate::wrap_input!($s),
             $crate::parser::ParseSettings::symbolica(),
         )
     };
     ($s: expr, Mathematica) => {{
-        $crate::atom::Atom::parse(
+        $crate::atom::Atom::parse_with_default_namespace(
             $crate::wrap_input!($s),
             $crate::parser::ParseSettings::mathematica(),
         )
     }};
-    ($s: expr, settings = $settings: expr) => {{ $crate::atom::Atom::parse($crate::wrap_input!($s), $settings) }};
+    ($s: expr, settings = $settings: expr) => {{ $crate::atom::Atom::parse_with_default_namespace($crate::wrap_input!($s), $settings) }};
 
     ($s: expr, default_namespace = $ns: expr) => {
-        $crate::atom::Atom::parse(
+        $crate::atom::Atom::parse_with_default_namespace(
             $crate::with_default_namespace!($s, $ns),
             $crate::parser::ParseSettings::symbolica(),
         )
     };
     ($s: expr, Mathematica, default_namespace = $ns: expr) => {{
-        $crate::atom::Atom::parse(
+        $crate::atom::Atom::parse_with_default_namespace(
             $crate::with_default_namespace!($s, $ns),
             $crate::parser::ParseSettings::mathematica(),
         )
@@ -3625,14 +3673,14 @@ macro_rules! try_parse {
 #[macro_export]
 macro_rules! parse_lit {
     ($s: expr) => {{
-        $crate::atom::Atom::parse(
+        $crate::atom::Atom::parse_with_default_namespace(
             $crate::wrap_input!(stringify!($s)),
             $crate::parser::ParseSettings::symbolica(),
         )
         .unwrap_or_else(|e| panic!("{}", e))
     }};
     ($s: expr, default_namespace = $ns: expr) => {{
-        $crate::atom::Atom::parse(
+        $crate::atom::Atom::parse_with_default_namespace(
             $crate::with_default_namespace!(stringify!($s), $ns),
             $crate::parser::ParseSettings::symbolica(),
         )
@@ -3644,13 +3692,13 @@ macro_rules! parse_lit {
 #[macro_export]
 macro_rules! try_parse_lit {
     ($s: expr) => {{
-        $crate::atom::Atom::parse(
+        $crate::atom::Atom::parse_with_default_namespace(
             $crate::wrap_input!(stringify!($s)),
             $crate::parser::ParseSettings::symbolica(),
         )
     }};
     ($s: expr, default_namespace = $ns: expr) => {{
-        $crate::atom::Atom::parse(
+        $crate::atom::Atom::parse_with_default_namespace(
             $crate::with_default_namespace!(stringify!($s), $ns),
             $crate::parser::ParseSettings::symbolica(),
         )
