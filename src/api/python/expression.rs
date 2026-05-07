@@ -5541,8 +5541,8 @@ impl PythonExpression {
         nested: bool,
     ) -> PyResult<PythonExpression> {
         let reps = replacements
-            .iter()
-            .map(|x| x.replacement.borrow())
+            .into_iter()
+            .map(|x| x.replacement)
             .collect::<Vec<_>>();
 
         let mut expr_ref = self.expr.as_view();

@@ -3,7 +3,6 @@
 //! All Symbolica community extensions must implement the [SymbolicaCommunityModule] trait.
 
 use std::{
-    borrow::Borrow,
     fs::File,
     hash::{Hash, Hasher},
     io::{BufReader, BufWriter},
