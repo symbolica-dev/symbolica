@@ -49,10 +49,16 @@ impl<T: Default + Clone> ExpressionEvaluator<T> {
     pub fn vectorize<V: Vectorize<T>>(mut self, v: &V) -> Result<ExpressionEvaluator<T>, String> {
         let mut new_external_fns = vec![];
         let mut external_fn_index_map = HashMap::default();
+        let mut unknown_constants = vec![false; self.reserved_indices - self.param_count];
         for external_fn in &self.external_fns {
-            // constant functions are vectorized by repeating the same function for each component
             if let Some(c_index) = external_fn.constant_index {
-                for i in 0..v.get_dimension() {
+                unknown_constants[c_index] = true;
+                let d = if v.duplicate_constants() {
+                    v.get_dimension()
+                } else {
+                    1
+                };
+                for i in 0..d {
                     let mut e = external_fn.clone();
                     e.constant_index = Some(c_index * v.get_dimension() + i);
                     new_external_fns.push(e);
@@ -102,7 +108,16 @@ impl<T: Default + Clone> ExpressionEvaluator<T> {
 
         let mut constants = vec![];
         for c in &self.stack[self.param_count..self.reserved_indices] {
-            constants.extend(v.map_coeff(c.clone()));
+            if v.duplicate_constants() {
+                for _ in 0..v.get_dimension() {
+                    constants.push(c.clone());
+                }
+            } else {
+                constants.push(c.clone());
+                for _ in 1..v.get_dimension() {
+                    constants.push(T::default());
+                }
+            }
         }
         let old_constants_num = constants.len();
 
@@ -139,6 +154,7 @@ impl<T: Default + Clone> ExpressionEvaluator<T> {
         let mut ins = InstructionList {
             instructions: vec![],
             constants,
+            unknown_constants,
             dim: v.get_dimension(),
         };
 
@@ -334,8 +350,9 @@ impl<T: Default + Clone> ExpressionEvaluator<T> {
 /// A trait to define how to vectorize coefficients and instructions.
 /// Every slot is mapped to `n` slots and every instruction is mapped to `n` instructions, where `n` is the dimension.
 pub trait Vectorize<T> {
-    /// Map a coefficient to a vector of coefficients of [Vectorize::get_dimension] length.
-    fn map_coeff(&self, coeff: T) -> Vec<T>;
+    /// Return `true` if the constants are duplicated across the vector dimension, and
+    /// `false` if each constant only appears in the first slot and has zeros for all other slots.
+    fn duplicate_constants(&self) -> bool;
 
     /// Map an instruction applied to a vector of slots (components accessible with [Slot::index])
     /// to a vector of instructions of [Vectorize::get_dimension] length.
@@ -371,12 +388,8 @@ impl<T: DualNumberStructure> Dualizer<T> {
 }
 
 impl<T: DualNumberStructure> Vectorize<Complex<Rational>> for Dualizer<T> {
-    fn map_coeff(&self, coeff: Complex<Rational>) -> Vec<Complex<Rational>> {
-        let mut r = vec![coeff.clone()];
-        for _ in 1..self.dual.get_len() {
-            r.push(Complex::new_zero());
-        }
-        r
+    fn duplicate_constants(&self) -> bool {
+        false
     }
 
     fn map_instruction(
@@ -786,5 +799,38 @@ impl<T: DualNumberStructure> Vectorize<Complex<Rational>> for Dualizer<T> {
 
     fn get_dimension(&self) -> usize {
         self.dual.get_len()
+    }
+}
+
+#[cfg(test)]
+mod test {
+    use numerica::domains::{dual::HyperDual, float::Complex, rational::Rational};
+
+    use crate::{
+        atom::AtomCore,
+        evaluate::{Dualizer, FunctionMap, OptimizationSettings},
+        parse,
+    };
+
+    #[test]
+    fn unknown_constant() {
+        let expr = parse!("2*pi*x^2");
+
+        let mut evaluator = expr
+            .evaluator(
+                &FunctionMap::new(),
+                &[parse!("x")],
+                OptimizationSettings::default(),
+            )
+            .unwrap();
+        let dual = HyperDual::<Complex<Rational>>::new(vec![vec![0], vec![1]]);
+        let dualizer = Dualizer::new(dual, vec![]);
+        evaluator = evaluator.vectorize(&dualizer).unwrap();
+
+        let mut evaluator = evaluator.map_coeff(&|r| r.re.to_f64());
+
+        let mut out = vec![0.; 2];
+        evaluator.evaluate(&[2., 1.], &mut out);
+        assert_eq!(out, [25.132741228718345, 25.132741228718345]);
     }
 }
