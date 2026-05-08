@@ -226,31 +226,77 @@ impl<T: Default + Clone + Eq + Hash> ExpressionEvaluator<T> {
                 self.param_count, other.param_count
             ));
         }
-        if self.external_fns != other.external_fns {
-            return Err(format!(
-                "External functions do not match: {:?} vs {:?}",
-                self.external_fns, other.external_fns
-            ));
-        }
 
         let mut constants = HashMap::default();
+
+        #[derive(Clone, PartialEq, Eq, Hash)]
+        enum Constant<T: Default + Clone + Eq + Hash> {
+            Literal(T),
+            Function(String),
+        }
 
         for (i, c) in self.stack[self.param_count..self.reserved_indices]
             .iter()
             .enumerate()
         {
-            constants.insert(c.clone(), i);
+            if let Some(ext) = self
+                .external_fns
+                .iter()
+                .find(|f| f.constant_index == Some(i))
+            {
+                constants.insert(Constant::Function(ext.export_name().to_owned()), i);
+            } else {
+                constants.insert(Constant::Literal(c.clone()), i);
+            }
         }
 
         let old_len = self.stack.len() - self.reserved_indices;
 
         self.stack.truncate(self.reserved_indices);
 
-        for c in &other.stack[self.param_count..other.reserved_indices] {
-            if constants.get(c).is_none() {
-                let i = constants.len();
-                constants.insert(c.clone(), i);
-                self.stack.push(c.clone());
+        // define new constants or update external function indices if they already exist
+        let mut constant_indices = Vec::with_capacity(other.reserved_indices - other.param_count);
+        for (i, c) in other.stack[self.param_count..other.reserved_indices]
+            .iter()
+            .enumerate()
+        {
+            if let Some(ext) = other
+                .external_fns
+                .iter_mut()
+                .find(|f| f.constant_index == Some(i))
+            {
+                let key = Constant::Function(ext.export_name().to_owned());
+                if !constants.contains_key(&key) {
+                    let new_i = constants.len();
+                    constants.insert(key.clone(), new_i);
+                    self.stack.push(T::default());
+                    ext.constant_index = Some(new_i);
+                    self.external_fns.push(ext.clone());
+                }
+                constant_indices.push(self.param_count + constants[&key]);
+            } else {
+                let key = Constant::Literal(c.clone());
+                if !constants.contains_key(&key) {
+                    let new_i = constants.len();
+                    constants.insert(key.clone(), new_i);
+                    self.stack.push(c.clone());
+                }
+                constant_indices.push(self.param_count + constants[&key]);
+            }
+        }
+
+        // add new external functions
+        let mut external_fn_indices = Vec::with_capacity(other.external_fns.len());
+        for e in &other.external_fns {
+            if let Some(i) = self
+                .external_fns
+                .iter()
+                .position(|f| f.export_name == e.export_name)
+            {
+                external_fn_indices.push(i);
+            } else {
+                external_fn_indices.push(self.external_fns.len());
+                self.external_fns.push(e.clone());
             }
         }
 
@@ -315,13 +361,24 @@ impl<T: Default + Clone + Eq + Hash> ExpressionEvaluator<T> {
         delta = old_len + new_reserved_indices - other.reserved_indices;
         for (i, _) in &mut other.instructions {
             match i {
-                Instr::Add(r, a) | Instr::Mul(r, a) | Instr::ExternalFun(r, _, a) => {
+                Instr::Add(r, a) | Instr::Mul(r, a) => {
                     *r += delta;
                     for aa in a {
                         if *aa >= other.reserved_indices {
                             *aa += delta;
                         } else if *aa >= other.param_count {
-                            *aa = self.param_count + constants[&other.stack[*aa]];
+                            *aa = constant_indices[*aa - other.param_count];
+                        }
+                    }
+                }
+                Instr::ExternalFun(r, s, a) => {
+                    *r += delta;
+                    *s = external_fn_indices[*s];
+                    for aa in a {
+                        if *aa >= other.reserved_indices {
+                            *aa += delta;
+                        } else if *aa >= other.param_count {
+                            *aa = constant_indices[*aa - other.param_count];
                         }
                     }
                 }
@@ -330,7 +387,7 @@ impl<T: Default + Clone + Eq + Hash> ExpressionEvaluator<T> {
                     if *b >= other.reserved_indices {
                         *b += delta;
                     } else if *b >= other.param_count {
-                        *b = self.param_count + constants[&other.stack[*b]];
+                        *b = constant_indices[*b - other.param_count];
                     }
                 }
                 Instr::Powf(r, b, e) => {
@@ -338,19 +395,19 @@ impl<T: Default + Clone + Eq + Hash> ExpressionEvaluator<T> {
                     if *b >= other.reserved_indices {
                         *b += delta;
                     } else if *b >= other.param_count {
-                        *b = self.param_count + constants[&other.stack[*b]];
+                        *b = constant_indices[*b - other.param_count];
                     }
                     if *e >= other.reserved_indices {
                         *e += delta;
                     } else if *e >= other.param_count {
-                        *e = self.param_count + constants[&other.stack[*e]];
+                        *e = constant_indices[*e - other.param_count];
                     }
                 }
                 Instr::IfElse(c, l) => {
                     if *c >= other.reserved_indices {
                         *c += delta;
                     } else if *c >= other.param_count {
-                        *c = self.param_count + constants[&other.stack[*c]];
+                        *c = constant_indices[*c - other.param_count];
                     }
 
                     l.0 += self.instructions.len();
@@ -360,17 +417,17 @@ impl<T: Default + Clone + Eq + Hash> ExpressionEvaluator<T> {
                     if *c >= other.reserved_indices {
                         *c += delta;
                     } else if *c >= other.param_count {
-                        *c = self.param_count + constants[&other.stack[*c]];
+                        *c = constant_indices[*c - other.param_count];
                     }
                     if *t >= other.reserved_indices {
                         *t += delta;
                     } else if *t >= other.param_count {
-                        *t = self.param_count + constants[&other.stack[*t]];
+                        *t = constant_indices[*t - other.param_count];
                     }
                     if *f >= other.reserved_indices {
                         *f += delta;
                     } else if *f >= other.param_count {
-                        *f = self.param_count + constants[&other.stack[*f]];
+                        *f = constant_indices[*f - other.param_count];
                     }
                 }
                 Instr::Goto(l) | Instr::Label(l) => {
@@ -383,7 +440,7 @@ impl<T: Default + Clone + Eq + Hash> ExpressionEvaluator<T> {
             if *x >= other.reserved_indices {
                 *x += delta;
             } else if *x >= other.param_count {
-                *x = self.param_count + constants[&other.stack[*x]];
+                *x = constant_indices[*x - other.param_count];
             }
         }
 

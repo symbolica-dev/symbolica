@@ -1,12 +1,60 @@
 use symbolica::{
-    atom::AtomCore,
-    domains::{float::Complex, rational::Rational},
+    atom::{AtomCore, EvaluationInfo},
+    domains::{
+        float::{Complex, Float},
+        rational::Rational,
+    },
     evaluate::{
         CompileOptions, CudaComplexf64, CudaLoadSettings, CudaRealf64, ExportSettings,
         ExpressionEvaluator, FunctionMap, InlineASM, OptimizationSettings,
     },
-    parse,
+    parse, symbol,
 };
+
+#[test]
+fn merge_evaluator_with_external_functions() {
+    let _double = symbol!(
+        "symbolica::test::merge_external_double",
+        eval = EvaluationInfo::new().register(|args: &[f64]| 2.0 * args[0])
+    );
+    let _shift = symbol!(
+        "symbolica::test::merge_external_shift",
+        eval = EvaluationInfo::new().register(|args: &[f64]| args[0] + 10.0)
+    );
+    let _left_constant = symbol!(
+        "symbolica::test::merge_external_left_constant",
+        eval = EvaluationInfo::constant(|_, prec| Ok(Float::with_val(prec, 1.0).into()))
+    );
+    let _right_constant = symbol!(
+        "symbolica::test::merge_external_right_constant",
+        eval = EvaluationInfo::constant(|_, prec| Ok(Float::with_val(prec, 5.0).into()))
+    );
+
+    let params = vec![parse!("x")];
+    let settings = OptimizationSettings {
+        horner_iterations: 0,
+        ..Default::default()
+    };
+
+    let mut left = parse!(
+        "symbolica::test::merge_external_double(x) + symbolica::test::merge_external_left_constant"
+    )
+    .evaluator(&FunctionMap::new(), &params, settings.clone())
+    .unwrap();
+    let right = parse!(
+        "symbolica::test::merge_external_shift(x) + symbolica::test::merge_external_right_constant"
+    )
+    .evaluator(&FunctionMap::new(), &params, settings)
+    .unwrap();
+
+    left.merge(right, Some(0)).unwrap();
+
+    let mut evaluator = left.map_coeff(&|x| x.re.to_f64());
+    let mut out = vec![0.0; 2];
+    evaluator.evaluate(&[3.0], &mut out);
+
+    assert_eq!(out, vec![7.0, 18.0]);
+}
 
 const F13: &'static str = "-48*ammu*amuq*ammu2*amuq2*x6*xcp4*e1234-48*ammu*amuq*ammu2*amuq2*x6*xcp3*e1234+48*ammu*amuq*ammu2*amuq2*x6*xcp2*e1234+48*ammu*amuq*ammu2*amuq2*x6*xcp1*e1234+48*ammu*amuq*ammu2*amuq2*x6^2*xcp3*e1234-48*ammu*amuq*ammu2*amuq2*x6^2*xcp2*e1234-144*ammu*
 amuq*ammu2*amuq2*x5*xcp4*e1234-48*ammu*amuq*ammu2*amuq2*x5*xcp3*e1234+48*ammu*amuq*ammu2*amuq2*x5*xcp2*e1234+144*ammu*amuq*ammu2*amuq2*x5*xcp1*e1234+96*ammu*amuq*ammu2*amuq2*x5*x6*xcp3*e1234-96*ammu*amuq*ammu2*amuq2*x5*x6*xcp2*e1234+48*ammu*amuq*
