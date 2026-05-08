@@ -6,7 +6,7 @@ pub trait ExportNumber {
     fn export(&self) -> String;
     /// Export the number wrapped in a C++ type `T`.
     fn export_wrapped(&self) -> String {
-        format!("T({})", self.export())
+        self.export_wrapped_with("T")
     }
     /// Export the number wrapped in a C++ type `wrapper`.
     fn export_wrapped_with(&self, wrapper: &str) -> String {
@@ -14,6 +14,9 @@ pub trait ExportNumber {
     }
     /// Check if the number is real.
     fn is_real(&self) -> bool;
+
+    /// Convert the number to a complex double.
+    fn to_complex_double(&self) -> Complex<f64>;
 }
 
 impl ExportNumber for f64 {
@@ -23,6 +26,10 @@ impl ExportNumber for f64 {
 
     fn is_real(&self) -> bool {
         true
+    }
+
+    fn to_complex_double(&self) -> Complex<f64> {
+        Complex { re: *self, im: 0.0 }
     }
 }
 
@@ -34,6 +41,13 @@ impl ExportNumber for F64 {
     fn is_real(&self) -> bool {
         true
     }
+
+    fn to_complex_double(&self) -> Complex<f64> {
+        Complex {
+            re: self.0,
+            im: 0.0,
+        }
+    }
 }
 
 impl ExportNumber for Float {
@@ -44,6 +58,13 @@ impl ExportNumber for Float {
     fn is_real(&self) -> bool {
         true
     }
+
+    fn to_complex_double(&self) -> Complex<f64> {
+        Complex {
+            re: self.to_f64(),
+            im: 0.0,
+        }
+    }
 }
 
 impl ExportNumber for Rational {
@@ -51,8 +72,28 @@ impl ExportNumber for Rational {
         self.to_string()
     }
 
+    /// Export the number wrapped in a C++ type `wrapper`.
+    fn export_wrapped_with(&self, wrapper: &str) -> String {
+        if self.denominator().is_one() {
+            format!("{wrapper}({})", self.numerator())
+        } else {
+            format!(
+                "{wrapper}({})/{wrapper}({})",
+                self.numerator(),
+                self.denominator()
+            )
+        }
+    }
+
     fn is_real(&self) -> bool {
         true
+    }
+
+    fn to_complex_double(&self) -> Complex<f64> {
+        Complex {
+            re: self.to_f64(),
+            im: 0.,
+        }
     }
 }
 
@@ -65,8 +106,28 @@ impl<T: ExportNumber + SingleFloat> ExportNumber for Complex<T> {
         }
     }
 
+    /// Export the number wrapped in a C++ type `wrapper`.
+    fn export_wrapped_with(&self, wrapper: &str) -> String {
+        if self.im.is_zero() {
+            self.re.export_wrapped_with(wrapper)
+        } else {
+            format!(
+                "{}, {}",
+                self.re.export_wrapped_with(wrapper),
+                self.im.export_wrapped_with(wrapper)
+            )
+        }
+    }
+
     fn is_real(&self) -> bool {
         self.im.is_zero()
+    }
+
+    fn to_complex_double(&self) -> Complex<f64> {
+        Complex {
+            re: self.re.to_complex_double().re,
+            im: self.im.to_complex_double().im,
+        }
     }
 }
 
@@ -208,7 +269,13 @@ impl<T: ExportNumber + SingleFloat> ExpressionEvaluator<T> {
                         self.reserved_indices - self.param_count + 2,
                         {
                             let mut nums = (self.param_count..self.reserved_indices)
-                                .map(|i| format!("simd({})", self.stack[i].export()))
+                                .map(|i| {
+                                    format!(
+                                        "simd(std::complex<double>({:e}, {:e}))",
+                                        self.stack[i].to_complex_double().re,
+                                        self.stack[i].to_complex_double().im
+                                    )
+                                })
                                 .collect::<Vec<_>>();
                             nums.push("-0.".to_string()); // used for inversion
                             nums.push("1".to_string()); // used for real inversion
@@ -222,7 +289,9 @@ impl<T: ExportNumber + SingleFloat> ExpressionEvaluator<T> {
                         self.reserved_indices - self.param_count + 1,
                         {
                             let mut nums = (self.param_count..self.reserved_indices)
-                                .map(|i| format!("simd({})", self.stack[i].export()))
+                                .map(|i| {
+                                    format!("simd({:e})", self.stack[i].to_complex_double().re)
+                                })
                                 .collect::<Vec<_>>();
                             nums.push("1".to_string()); // used for inversion
                             nums.join(",")
@@ -691,7 +760,7 @@ extern "C" {{
                 self.reserved_indices - self.param_count + 1,
                 {
                     let mut nums = (self.param_count..self.reserved_indices)
-                        .map(|i| format!("double({})", self.stack[i].export()))
+                        .map(|i| self.stack[i].to_complex_double().re.export())
                         .collect::<Vec<_>>();
                     nums.push("1".to_string()); // used for inversion
                     nums.join(",")
@@ -746,7 +815,10 @@ extern "C" {{
             self.reserved_indices - self.param_count + 2,
             {
                 let mut nums = (self.param_count..self.reserved_indices)
-                    .map(|i| format!("std::complex<double>({})", self.stack[i].export()))
+                    .map(|i| {
+                        let c = self.stack[i].to_complex_double();
+                        format!("std::complex<double>({:e}, {:e})", c.re, c.im)
+                    })
                     .collect::<Vec<_>>();
                 nums.push("std::complex<double>(0, -0.)".to_string()); // used for complex inversion
                 nums.push("1".to_string()); // used for real inversion
