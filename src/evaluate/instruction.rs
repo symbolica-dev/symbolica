@@ -270,6 +270,7 @@ pub enum VectorInstruction {
 pub struct InstructionList<T> {
     pub(super) instructions: Vec<VectorInstruction>,
     pub(super) constants: Vec<T>,
+    pub(super) unknown_constants: Vec<bool>,
     pub(super) dim: usize,
 }
 
@@ -283,10 +284,16 @@ impl<T> InstructionList<T> {
 impl<T: PartialEq + Clone + std::fmt::Debug> InstructionList<T> {
     pub fn add_constant(&mut self, value: Vec<T>) -> Slot {
         assert_eq!(value.len(), self.dim);
-        if let Some(c) = self.constants.chunks(self.dim).position(|x| x == &value) {
+        if let Some(c) = self
+            .constants
+            .chunks(self.dim)
+            .zip(&self.unknown_constants)
+            .position(|(x, u)| x == &value && !u)
+        {
             Slot::Const(c * self.dim)
         } else {
             self.constants.extend(value);
+            self.unknown_constants.push(false);
             Slot::Const(self.constants.len() - self.dim)
         }
     }
@@ -295,13 +302,15 @@ impl<T: PartialEq + Clone + std::fmt::Debug> InstructionList<T> {
         if let Some(c) = self
             .constants
             .chunks(self.dim)
-            .position(|x| x.iter().all(|x| *x == value))
+            .zip(&self.unknown_constants)
+            .position(|(x, u)| x.iter().all(|x| *x == value) && !u)
         {
             Slot::Const(c * self.dim)
         } else {
             for _ in 0..self.dim {
                 self.constants.push(value.clone());
             }
+            self.unknown_constants.push(false);
             Slot::Const(self.constants.len() - self.dim)
         }
     }
@@ -310,14 +319,16 @@ impl<T: PartialEq + Clone + std::fmt::Debug> InstructionList<T> {
 impl<T: SingleFloat> InstructionList<T> {
     pub fn is_zero(&self, slot: &Slot) -> bool {
         match slot {
-            Slot::Const(c) => self.constants[*c].is_zero(),
+            Slot::Const(c) => {
+                self.constants[*c].is_zero() && !self.unknown_constants[*c / self.dim]
+            }
             _ => false,
         }
     }
 
     pub fn is_one(&self, slot: &Slot) -> bool {
         match slot {
-            Slot::Const(c) => self.constants[*c].is_one(),
+            Slot::Const(c) => self.constants[*c].is_one() && !self.unknown_constants[*c / self.dim],
             _ => false,
         }
     }
