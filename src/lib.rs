@@ -51,6 +51,7 @@ use std::{
 use once_cell::sync::OnceCell;
 use tinyjson::JsonValue;
 
+pub mod alias;
 #[cfg(feature = "python_export")]
 pub mod api;
 #[cfg(not(feature = "python_export"))]

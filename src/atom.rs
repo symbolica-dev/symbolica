@@ -1058,6 +1058,8 @@ impl Symbol {
     pub const SEP: Symbol = State::SEP;
     /// The built-in function that represents an abstract derivative.
     pub const DERIVATIVE: Symbol = State::DERIVATIVE;
+    /// The built-in function used for temporary global aliases.
+    pub const ALIAS: Symbol = State::ALIAS;
     /// The constant `𝑒`, the base of the natural logarithm, approximately `2.7182`.
     pub const E: Symbol = State::E;
     /// The mathematical constant `π`, approximately `3.1415`.

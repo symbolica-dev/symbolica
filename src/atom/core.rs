@@ -6,6 +6,7 @@ use ahash::{HashMap, HashSet};
 use rayon::ThreadPool;
 
 use crate::{
+    alias::AliasedAtom,
     atom::{
         AddView, FunctionBuilder, Indeterminate, KeyLookup, MulView, NumView, VarView,
         representation::FunView,
@@ -29,8 +30,8 @@ use crate::{
         OptimizationSettings,
     },
     id::{
-        AliasedAtom, BorrowReplacement, Condition, ConditionResult, Context, MatchSettings,
-        Pattern, PatternAtomTreeIterator, PatternRestriction, ReplaceBuilder, ReplaceSettings,
+        BorrowReplacement, Condition, ConditionResult, Context, MatchSettings, Pattern,
+        PatternAtomTreeIterator, PatternRestriction, ReplaceBuilder, ReplaceSettings,
     },
     poly::{
         Exponent, PolyVariable, PositiveExponent,
@@ -319,21 +320,10 @@ pub trait AtomCore: private::Sealed + Sized {
         subexpressions
     }
 
-    /// Extract subexpressions and replace the subexpressions with
-    /// a mapped value given by `f`. The arguments of `f` are the subexpression, the number of occurrences of the subexpression
-    /// and the index of the subexpression in the list of subexpressions. `f` should return `None` if the subexpression should not be replaced, and `Some(replacement)` if it should be replaced with `replacement`.
-    ///
-    /// # Example
-    ///
-    /// ```
-    /// use symbolica::{atom::AtomCore, function, parse, symbol};
-    /// let a = parse!("f(1+x) + x*f(1+x) + z*(1+x)")
-    ///     .alias_subexpressions(|_a, _count, i| Some(function!(symbol!("se"), i)));
-    /// assert_eq!(a.get_root(), &parse!("se(0) + x*se(0) + z*se(1)"));
-    ///
-    /// assert_eq!(a.get_aliases()[&parse!("se(0)")], parse!("f(se(1))"));
-    /// assert_eq!(a.get_aliases()[&parse!("se(1)")], parse!("1+x"));
-    /// ```
+    /// Extract subexpressions and replace selected subexpressions with aliases. The arguments of
+    /// `f` are the subexpression, the number of occurrences of the subexpression and the index of
+    /// the subexpression in the list of subexpressions. `f` should return `None` if the
+    /// subexpression should not be replaced, and `Some(_)` if it should be aliased.
     fn alias_subexpressions(
         &self,
         f: impl FnMut(AtomView, usize, usize) -> Option<Atom>,
@@ -2167,9 +2157,6 @@ impl AtomCore for AliasedAtom {
     fn count_subexpressions<'a>(&'a self) -> HashMap<AtomView<'a>, usize> {
         let mut count = HashMap::default();
         self.root.as_atom_view().count_subexpressions(&mut count);
-        for e in &self.aliases {
-            e.1.as_atom_view().count_subexpressions(&mut count);
-        }
         count
     }
 
@@ -2192,5 +2179,5 @@ mod private {
     impl<'a> Sealed for AtomView<'a> {}
     impl<T: AsRef<super::Atom>> Sealed for T {}
     impl Sealed for super::AtomOrView<'_> {}
-    impl Sealed for super::AliasedAtom {}
+    impl Sealed for crate::alias::AliasedAtom {}
 }
