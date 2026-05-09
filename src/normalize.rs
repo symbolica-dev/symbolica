@@ -310,6 +310,189 @@ impl AtomView<'_> {
     }
 }
 
+#[inline]
+fn resolve_alias(mut a: AtomView<'_>) -> AtomView<'_> {
+    while let AtomView::Alias(alias) = a {
+        a = alias.get_body();
+    }
+    a
+}
+
+fn semantic_children<'a>(a: AtomView<'a>, kind: SemanticListKind, out: &mut Vec<AtomView<'a>>) {
+    match (resolve_alias(a), kind) {
+        (AtomView::Add(add), SemanticListKind::Add) => {
+            for child in add {
+                semantic_children(child, kind, out);
+            }
+        }
+        (AtomView::Mul(mul), SemanticListKind::Mul) => {
+            for child in mul {
+                semantic_children(child, kind, out);
+            }
+        }
+        (resolved, _) => out.push(resolved),
+    }
+}
+
+#[derive(Clone, Copy)]
+enum SemanticListKind {
+    Add,
+    Mul,
+}
+
+fn semantic_cmp(a: AtomView<'_>, b: AtomView<'_>) -> Ordering {
+    let a = resolve_alias(a);
+    let b = resolve_alias(b);
+
+    match (a, b) {
+        (AtomView::Alias(_), _) | (_, AtomView::Alias(_)) => unreachable!(),
+        (AtomView::Num(n1), AtomView::Num(n2)) => n1
+            .get_coeff_view()
+            .cmp(&n2.get_coeff_view())
+            .then_with(|| a.get_data().cmp(b.get_data())),
+        (AtomView::Num(_), _) => Ordering::Less,
+        (_, AtomView::Num(_)) => Ordering::Greater,
+        (AtomView::Var(v1), AtomView::Var(v2)) => v1.get_symbol_id().cmp(&v2.get_symbol_id()),
+        (AtomView::Var(_), _) => Ordering::Less,
+        (_, AtomView::Var(_)) => Ordering::Greater,
+        (AtomView::Pow(p1), AtomView::Pow(p2)) => {
+            let (b1, e1) = p1.get_base_exp();
+            let (b2, e2) = p2.get_base_exp();
+            semantic_cmp(b1, b2).then_with(|| semantic_cmp(e1, e2))
+        }
+        (_, AtomView::Pow(_)) => Ordering::Greater,
+        (AtomView::Pow(_), _) => Ordering::Less,
+        (AtomView::Mul(_), AtomView::Mul(_)) => {
+            semantic_cmp_lists(a, b, SemanticListKind::Mul, semantic_cmp_factors)
+        }
+        (AtomView::Mul(_), _) => Ordering::Less,
+        (_, AtomView::Mul(_)) => Ordering::Greater,
+        (AtomView::Add(_), AtomView::Add(_)) => {
+            semantic_cmp_lists(a, b, SemanticListKind::Add, semantic_cmp)
+        }
+        (AtomView::Add(_), _) => Ordering::Less,
+        (_, AtomView::Add(_)) => Ordering::Greater,
+        (AtomView::Fun(f1), AtomView::Fun(f2)) => {
+            let name_cmp = f1.get_symbol_id().cmp(&f2.get_symbol_id());
+            if name_cmp != Ordering::Equal {
+                return name_cmp;
+            }
+
+            let len_cmp = f1.get_nargs().cmp(&f2.get_nargs());
+            if len_cmp != Ordering::Equal {
+                return len_cmp;
+            }
+
+            for (a1, a2) in f1.iter().zip(f2.iter()) {
+                let arg_cmp = semantic_cmp(a1, a2);
+                if arg_cmp != Ordering::Equal {
+                    return arg_cmp;
+                }
+            }
+
+            Ordering::Equal
+        }
+    }
+}
+
+fn semantic_cmp_lists(
+    a: AtomView<'_>,
+    b: AtomView<'_>,
+    kind: SemanticListKind,
+    cmp: fn(AtomView<'_>, AtomView<'_>) -> Ordering,
+) -> Ordering {
+    let mut a_children = Vec::new();
+    let mut b_children = Vec::new();
+    semantic_children(a, kind, &mut a_children);
+    semantic_children(b, kind, &mut b_children);
+
+    a_children.len().cmp(&b_children.len()).then_with(|| {
+        for (a, b) in a_children.into_iter().zip(b_children) {
+            let c = cmp(a, b);
+            if c != Ordering::Equal {
+                return c;
+            }
+        }
+        Ordering::Equal
+    })
+}
+
+fn semantic_cmp_factors(a: AtomView<'_>, b: AtomView<'_>) -> Ordering {
+    let a = resolve_alias(a);
+    let b = resolve_alias(b);
+
+    match (a, b) {
+        (AtomView::Pow(p1), AtomView::Pow(p2)) => semantic_cmp(p1.get_base(), p2.get_base()),
+        (_, AtomView::Pow(p2)) => semantic_cmp(a, p2.get_base()).then(Ordering::Less),
+        (AtomView::Pow(p1), _) => semantic_cmp(p1.get_base(), b).then(Ordering::Greater),
+        _ => semantic_cmp(a, b),
+    }
+}
+
+fn semantic_cmp_terms(a: AtomView<'_>, b: AtomView<'_>) -> Ordering {
+    let mut a_factors = Vec::new();
+    let mut b_factors = Vec::new();
+    semantic_term_factors(a, &mut a_factors);
+    semantic_term_factors(b, &mut b_factors);
+
+    a_factors.len().cmp(&b_factors.len()).then_with(|| {
+        for (a, b) in a_factors.into_iter().zip(b_factors) {
+            let c = semantic_cmp_factors(a, b);
+            if c != Ordering::Equal {
+                return c;
+            }
+        }
+        Ordering::Equal
+    })
+}
+
+fn semantic_term_factors<'a>(term: AtomView<'a>, out: &mut Vec<AtomView<'a>>) {
+    let resolved = resolve_alias(term);
+    match resolved {
+        AtomView::Num(_) => {}
+        AtomView::Mul(m) => {
+            let mut iter = m.iter();
+            if m.has_coefficient() {
+                iter.next();
+            }
+
+            for factor in iter {
+                semantic_children(factor, SemanticListKind::Mul, out);
+            }
+        }
+        _ => out.push(resolved),
+    }
+}
+
+fn semantic_term_coeff(term: AtomView<'_>) -> Coefficient {
+    match resolve_alias(term) {
+        AtomView::Num(n) => n.get_coeff_view().to_owned(),
+        AtomView::Mul(m) if m.has_coefficient() => {
+            if let AtomView::Num(n) = m.iter().next().unwrap() {
+                n.get_coeff_view().to_owned()
+            } else {
+                1.into()
+            }
+        }
+        _ => 1.into(),
+    }
+}
+
+fn representative_term_factors(term: AtomView<'_>) -> Vec<Atom> {
+    let resolved = resolve_alias(term);
+    if let AtomView::Mul(m) = resolved
+        && m.has_coefficient()
+    {
+        return m.iter().skip(1).map(|a| a.to_owned()).collect();
+    }
+
+    if matches!(resolved, AtomView::Num(_)) {
+        Vec::new()
+    } else {
+        vec![term.to_owned()]
+    }
+}
+
 impl Atom {
     /// Merge two factors if possible. If this function returns `true`, `self`
     /// will have been updated by the merge from `other` and `other` should be discarded.
@@ -463,6 +646,27 @@ impl Atom {
         }
 
         false
+    }
+
+    fn merge_factors_semantic(
+        &mut self,
+        other: &mut Self,
+        helper: &mut Self,
+        workspace: &Workspace,
+    ) -> bool {
+        if self.merge_factors(other, helper, workspace) {
+            return true;
+        }
+
+        if semantic_cmp(self.as_view(), other.as_view()) != Ordering::Equal {
+            return false;
+        }
+
+        let exp = other.to_num(2.into());
+        helper.to_pow(self.as_view(), AtomView::Num(exp.to_num_view()));
+        helper.set_normalized(true);
+        std::mem::swap(self, helper);
+        true
     }
 
     /// Merge two terms if possible. If this function returns `true`, `self`
@@ -640,6 +844,47 @@ impl Atom {
 
         false
     }
+
+    pub(crate) fn merge_terms_semantic(&mut self, other: AtomView, helper: &mut Self) -> bool {
+        if self.merge_terms(other, helper) {
+            return true;
+        }
+
+        if semantic_cmp_terms(self.as_view(), other) != Ordering::Equal {
+            return false;
+        }
+
+        let coeff = semantic_term_coeff(self.as_view()) + semantic_term_coeff(other);
+        let factors = representative_term_factors(self.as_view());
+
+        if coeff.is_zero() {
+            self.to_num(coeff);
+            return true;
+        }
+
+        if factors.is_empty() {
+            self.to_num(coeff);
+            return true;
+        }
+
+        if coeff.is_one() && factors.len() == 1 {
+            self.set_from_view(&factors[0].as_view());
+            return true;
+        }
+
+        let coeff_atom = helper.to_num(coeff);
+        let coeff_view = coeff_atom.to_num_view().as_view();
+
+        let mul = self.to_mul();
+        mul.extend(coeff_view);
+        for factor in &factors {
+            mul.extend(factor.as_view());
+        }
+        mul.set_has_coefficient(true);
+        mul.set_normalized(true);
+
+        true
+    }
 }
 
 impl AtomView<'_> {
@@ -664,12 +909,15 @@ impl AtomView<'_> {
         match self {
             AtomView::Alias(_) => out.set_from_view(self),
             AtomView::Mul(t) => {
+                let has_alias = t.has_alias();
                 let mut atom_test_buf: SmallVec<[_; 20]> = SmallVec::new();
 
                 for a in t.iter() {
                     let mut handle = workspace.new_atom();
                     let a = match a {
-                        AtomView::Alias(alias) => alias.get_body(),
+                        AtomView::Alias(alias) if matches!(alias.get_body(), AtomView::Mul(_)) => {
+                            alias.get_body()
+                        }
                         _ => a,
                     };
 
@@ -704,7 +952,11 @@ impl AtomView<'_> {
                     }
                 }
 
-                atom_test_buf.sort_by(|a, b| a.as_view().cmp_factors(&b.as_view()));
+                if has_alias {
+                    atom_test_buf.sort_by(|a, b| semantic_cmp_factors(a.as_view(), b.as_view()));
+                } else {
+                    atom_test_buf.sort_by(|a, b| a.as_view().cmp_factors(&b.as_view()));
+                }
 
                 let mut second_pass = false;
                 if !atom_test_buf.is_empty() {
@@ -717,7 +969,13 @@ impl AtomView<'_> {
                     let mut cur_len = 0;
 
                     while let Some(mut cur_buf) = atom_test_buf.pop() {
-                        if !last_buf.merge_factors(&mut cur_buf, &mut tmp, workspace) {
+                        let merged = if has_alias {
+                            last_buf.merge_factors_semantic(&mut cur_buf, &mut tmp, workspace)
+                        } else {
+                            last_buf.merge_factors(&mut cur_buf, &mut tmp, workspace)
+                        };
+
+                        if !merged {
                             // we are done merging
                             {
                                 let v = last_buf.as_view();
@@ -1498,6 +1756,7 @@ impl AtomView<'_> {
                 out.set_normalized(true);
             }
             AtomView::Add(a) => {
+                let has_alias = a.has_alias();
                 let mut new_sum = workspace.new_atom();
                 let ns = new_sum.to_add();
 
@@ -1506,7 +1765,9 @@ impl AtomView<'_> {
                 let mut norm_arg = workspace.new_atom();
                 for a in a {
                     let a = match a {
-                        AtomView::Alias(alias) => alias.get_body(),
+                        AtomView::Alias(alias) if matches!(alias.get_body(), AtomView::Add(_)) => {
+                            alias.get_body()
+                        }
                         _ => a,
                     };
 
@@ -1549,7 +1810,11 @@ impl AtomView<'_> {
                     atom_sort_buf.push((x, x.get_term_cmp_slice()));
                 }
 
-                atom_sort_buf.sort_unstable_by(|a, b| a.1.cmp(&b.1));
+                if has_alias {
+                    atom_sort_buf.sort_unstable_by(|a, b| semantic_cmp_terms(a.0, b.0));
+                } else {
+                    atom_sort_buf.sort_unstable_by(|a, b| a.1.cmp(&b.1));
+                }
 
                 if atom_sort_buf.is_empty() {
                     out.to_num(Coefficient::zero());
@@ -1564,7 +1829,13 @@ impl AtomView<'_> {
                 let mut cur_len = 0;
 
                 for (cur, _) in atom_sort_buf.iter().skip(1) {
-                    if !last_buf.merge_terms(*cur, &mut helper) {
+                    let merged = if has_alias {
+                        last_buf.merge_terms_semantic(*cur, &mut helper)
+                    } else {
+                        last_buf.merge_terms(*cur, &mut helper)
+                    };
+
+                    if !merged {
                         // we are done merging
                         let v = last_buf.as_view();
                         if let AtomView::Num(n) = v {
@@ -1626,7 +1897,7 @@ impl AtomView<'_> {
 
     /// Add two atoms and normalize the result.
     pub(crate) fn add_normalized(&self, rhs: AtomView, ws: &Workspace, out: &mut Atom) {
-        if matches!(self, AtomView::Alias(_)) || matches!(rhs, AtomView::Alias(_)) {
+        if self.has_alias() || rhs.has_alias() {
             let mut e = ws.new_atom();
             let a = e.to_add();
             a.extend(*self);
@@ -1834,10 +2105,7 @@ impl AtomView<'_> {
         ws: &Workspace,
         out: &mut Atom,
     ) {
-        if args
-            .iter()
-            .any(|arg| matches!(arg.as_atom_view(), AtomView::Alias(_)))
-        {
+        if args.iter().any(|arg| arg.as_atom_view().has_alias()) {
             let mut e = ws.new_atom();
             let a = e.to_add();
             for arg in args {

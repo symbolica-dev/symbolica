@@ -829,6 +829,48 @@ fn alias_normalization_resolves_mul_factors() {
 }
 
 #[test]
+fn alias_addition_preserves_non_add_alias() {
+    let huge_alias =
+        register_aliased_atom(AliasedAtom::new(crate::parse!("exp(x)*log(y)*sin(z)"))).0;
+    let sum = crate::parse!("x") + huge_alias.to_atom();
+
+    assert!(sum.as_view().has_alias());
+    assert_eq!(to_atom(&sum), crate::parse!("x+exp(x)*log(y)*sin(z)"));
+}
+
+#[test]
+fn alias_addition_merges_nested_alias_equivalent_terms() {
+    let x_alias = register_aliased_atom(AliasedAtom::new(crate::parse!("x"))).0;
+    let x_alias_atom = x_alias.to_atom();
+
+    let mut left = crate::atom::Atom::new();
+    left.to_fun(crate::atom::Symbol::EXP)
+        .add_arg(x_alias_atom.as_view());
+
+    let exp_alias = register_aliased_atom(AliasedAtom::new(crate::parse!("exp(x)"))).0;
+    let sum = left + exp_alias.to_atom();
+
+    assert!(sum.as_view().has_alias());
+    assert_eq!(to_atom(&sum), crate::parse!("2*exp(x)"));
+}
+
+#[test]
+fn alias_multiplication_merges_nested_alias_equivalent_factors() {
+    let x_alias = register_aliased_atom(AliasedAtom::new(crate::parse!("x"))).0;
+    let x_alias_atom = x_alias.to_atom();
+
+    let mut left = crate::atom::Atom::new();
+    left.to_fun(crate::atom::Symbol::EXP)
+        .add_arg(x_alias_atom.as_view());
+
+    let exp_alias = register_aliased_atom(AliasedAtom::new(crate::parse!("exp(x)"))).0;
+    let product = left * exp_alias.to_atom();
+
+    assert!(product.as_view().has_alias());
+    assert_eq!(to_atom(&product), crate::parse!("exp(x)^2"));
+}
+
+#[test]
 fn alias_pattern_match_flattens_same_type_children() {
     use crate::atom::AtomCore;
 

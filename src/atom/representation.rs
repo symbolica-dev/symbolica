@@ -33,7 +33,7 @@ const POW_ID: u8 = 6;
 const ALIAS_ID: u8 = 7;
 const TYPE_MASK: u8 = 0b00000_111;
 const NOT_NORMALIZED: u8 = 0b10000_000;
-const SYM_LINEAR_FLAG: u8 = 0b01000_000;
+const HAS_ALIAS_FLAG: u8 = 0b01000_000;
 const SYM_SYMMETRIC_FLAG: u8 = 0b00100_000;
 const SYM_ANTISYMMETRIC_FLAG: u8 = 0b00010_000;
 /// Coded as symmetric | antisymmetric
@@ -42,12 +42,14 @@ const SYM_SCALAR_FLAG: u8 = 0b00001_000;
 const SYM_EXTRA_REAL_FLAG: u32 = 0b01;
 const SYM_EXTRA_INTEGER_FLAG: u32 = 0b10;
 const SYM_EXTRA_POSITIVE_FLAG: u32 = 0b100;
+const SYM_EXTRA_LINEAR_FLAG: u32 = 0b100_000;
 const SYM_EXTRA_WILDCARD_LEVEL_MASK: u32 = 0b11_000;
 const SYM_EXTRA_WILDCARD_LEVEL_1: u32 = 0b01_000;
 const SYM_EXTRA_WILDCARD_LEVEL_2: u32 = 0b10_000;
 const SYM_EXTRA_WILDCARD_LEVEL_3: u32 = 0b11_000;
 
 const MUL_HAS_COEFF_FLAG: u8 = 0b01000000;
+const MUL_HAS_ALIAS_FLAG: u8 = 0b00100000;
 
 const ZERO_DATA: [u8; 3] = [NUM_ID, 1, 0];
 static NO_ALIASES: Vec<Arc<AliasHandle>> = Vec::new();
@@ -64,6 +66,20 @@ fn merge_aliases(dst: &mut Vec<Arc<AliasHandle>>, src: &[Arc<AliasHandle>]) {
 
 fn aliases_from_view(view: AtomView<'_>) -> Vec<Arc<AliasHandle>> {
     collect_alias_handles_in(view)
+}
+
+#[inline(always)]
+fn alias_flag_for(view: AtomView<'_>) -> u8 {
+    if view.has_alias() { HAS_ALIAS_FLAG } else { 0 }
+}
+
+#[inline(always)]
+fn mul_alias_flag_for(view: AtomView<'_>) -> u8 {
+    if view.has_alias() {
+        MUL_HAS_ALIAS_FLAG
+    } else {
+        0
+    }
 }
 
 /// The underlying slice of expression data.
@@ -96,9 +112,6 @@ impl Symbol {
         if self.is_symmetric {
             flags |= SYM_SYMMETRIC_FLAG;
         }
-        if self.is_linear {
-            flags |= SYM_LINEAR_FLAG;
-        }
         if self.is_cyclesymmetric {
             flags |= SYM_CYCLESYMMETRIC_FLAG;
         }
@@ -123,6 +136,10 @@ impl Symbol {
             extra |= SYM_EXTRA_POSITIVE_FLAG;
         }
 
+        if self.is_linear {
+            extra |= SYM_EXTRA_LINEAR_FLAG;
+        }
+
         match self.wildcard_level {
             0 => {}
             1 => extra |= SYM_EXTRA_WILDCARD_LEVEL_1,
@@ -138,7 +155,7 @@ impl Symbol {
         let is_cyclesymmetric = (flags & SYM_CYCLESYMMETRIC_FLAG) == SYM_CYCLESYMMETRIC_FLAG;
         let is_symmetric = !is_cyclesymmetric && (flags & SYM_SYMMETRIC_FLAG) != 0;
         let is_antisymmetric = !is_cyclesymmetric && (flags & SYM_ANTISYMMETRIC_FLAG) != 0;
-        let is_linear = (flags & SYM_LINEAR_FLAG) != 0;
+        let is_linear = (extra & SYM_EXTRA_LINEAR_FLAG) != 0;
         let is_scalar = (flags & SYM_SCALAR_FLAG) != 0;
 
         let is_real = (extra & SYM_EXTRA_REAL_FLAG) != 0;
@@ -1033,6 +1050,7 @@ impl Fun {
 
     pub(crate) fn add_arg(&mut self, other: AtomView) {
         self.data[0] |= NOT_NORMALIZED;
+        self.data[0] |= alias_flag_for(other);
         merge_aliases(&mut self.aliases, &aliases_from_view(other));
 
         // may increase size of the num of args
@@ -1077,6 +1095,9 @@ impl Fun {
 
     pub(crate) fn add_args<'a>(&mut self, other: &[AtomView<'a>]) {
         self.data[0] |= NOT_NORMALIZED;
+        if other.iter().any(|item| item.has_alias()) {
+            self.data[0] |= HAS_ALIAS_FLAG;
+        }
 
         // may increase size of the num of args
         let mut c = &self.data[1 + 4..];
@@ -1133,6 +1154,11 @@ impl Fun {
         self.data.clear();
         self.data.extend(view.data);
         self.aliases = aliases_from_view(AtomView::Fun(*view));
+        if self.aliases.is_empty() {
+            self.data[0] &= !HAS_ALIAS_FLAG;
+        } else {
+            self.data[0] |= HAS_ALIAS_FLAG;
+        }
     }
 
     #[inline(always)]
@@ -1332,11 +1358,17 @@ impl Mul {
         self.data.clear();
         self.data.extend(view.data);
         self.aliases = aliases_from_view(AtomView::Mul(*view));
+        if self.aliases.is_empty() {
+            self.data[0] &= !MUL_HAS_ALIAS_FLAG;
+        } else {
+            self.data[0] |= MUL_HAS_ALIAS_FLAG;
+        }
     }
 
     #[inline]
     pub(crate) fn extend(&mut self, other: AtomView<'_>) {
         self.data[0] |= NOT_NORMALIZED;
+        self.data[0] |= mul_alias_flag_for(other);
         merge_aliases(&mut self.aliases, &aliases_from_view(other));
 
         // may increase size of the num of args
@@ -1426,6 +1458,11 @@ impl Mul {
         self.data[first_arg_start..first_arg_start + new_first_len]
             .copy_from_slice(other.get_data());
         self.aliases = aliases_from_view(self.to_mul_view().as_view());
+        if self.aliases.is_empty() {
+            self.data[0] &= !MUL_HAS_ALIAS_FLAG;
+        } else {
+            self.data[0] |= MUL_HAS_ALIAS_FLAG;
+        }
     }
 
     #[inline]
@@ -1534,6 +1571,7 @@ impl Add {
     #[inline]
     pub(crate) fn extend(&mut self, other: AtomView<'_>) {
         self.data[0] |= NOT_NORMALIZED;
+        self.data[0] |= alias_flag_for(other);
         merge_aliases(&mut self.aliases, &aliases_from_view(other));
 
         let mut c = &self.data[1..];
@@ -1593,6 +1631,11 @@ impl Add {
         self.data.clear();
         self.data.extend(view.data);
         self.aliases = aliases_from_view(AtomView::Add(view));
+        if self.aliases.is_empty() {
+            self.data[0] &= !HAS_ALIAS_FLAG;
+        } else {
+            self.data[0] |= HAS_ALIAS_FLAG;
+        }
     }
 
     #[inline(always)]
@@ -1874,7 +1917,7 @@ impl<'a> FunView<'a> {
 
     #[inline(always)]
     pub fn is_linear(&self) -> bool {
-        self.data[0] & SYM_LINEAR_FLAG == SYM_LINEAR_FLAG
+        self.get_symbol().is_linear()
     }
 
     #[inline(always)]
@@ -1890,6 +1933,11 @@ impl<'a> FunView<'a> {
     #[inline(always)]
     pub(crate) fn is_normalized(&self) -> bool {
         (self.data[0] & NOT_NORMALIZED) == 0
+    }
+
+    #[inline(always)]
+    pub(crate) fn has_alias(&self) -> bool {
+        (self.data[0] & HAS_ALIAS_FLAG) != 0
     }
 
     #[inline]
@@ -2089,6 +2137,12 @@ impl<'a> PowView<'a> {
     }
 
     #[inline]
+    pub(crate) fn has_alias(&self) -> bool {
+        let (base, exp) = self.get_base_exp();
+        base.has_alias() || exp.has_alias()
+    }
+
+    #[inline]
     pub fn get_base_exp(&self) -> (AtomView<'a>, AtomView<'a>) {
         let mut it = self.iter();
 
@@ -2188,6 +2242,11 @@ impl<'a> MulView<'a> {
     #[inline]
     pub(crate) fn is_normalized(&self) -> bool {
         (self.data[0] & NOT_NORMALIZED) == 0
+    }
+
+    #[inline(always)]
+    pub(crate) fn has_alias(&self) -> bool {
+        (self.data[0] & MUL_HAS_ALIAS_FLAG) != 0
     }
 
     pub fn get_nargs(&self) -> usize {
@@ -2325,6 +2384,11 @@ impl<'a> AddView<'a> {
     }
 
     #[inline(always)]
+    pub(crate) fn has_alias(&self) -> bool {
+        (self.data[0] & HAS_ALIAS_FLAG) != 0
+    }
+
+    #[inline(always)]
     pub fn get_nargs(&self) -> usize {
         self.data[1..].get_frac_u64().0 as usize
     }
@@ -2432,6 +2496,18 @@ impl<'a> AtomView<'a> {
             AtomView::Pow(p) => p.aliases,
             AtomView::Mul(t) => t.aliases,
             AtomView::Add(e) => e.aliases,
+        }
+    }
+
+    #[inline(always)]
+    pub(crate) fn has_alias(&self) -> bool {
+        match self {
+            AtomView::Num(_) | AtomView::Var(_) => false,
+            AtomView::Alias(_) => true,
+            AtomView::Fun(f) => f.has_alias(),
+            AtomView::Pow(p) => p.has_alias(),
+            AtomView::Mul(m) => m.has_alias(),
+            AtomView::Add(a) => a.has_alias(),
         }
     }
 
