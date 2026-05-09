@@ -35,6 +35,18 @@ impl PrintMode {
     }
 }
 
+/// Controls whether aliases are expanded or printed as `alias(id)`.
+#[derive(Debug, Copy, Clone, PartialEq, Eq, Hash, Default)]
+pub enum AliasPrintMode {
+    /// Expand every alias to its body.
+    #[default]
+    Transparent,
+    /// Print every alias as `alias(id)`.
+    All,
+    /// Expand transparent aliases and print only opaque aliases as `alias(id)`.
+    OpaqueOnly,
+}
+
 /// Various options for printing expressions.
 #[derive(Debug, Copy, Clone)]
 pub struct PrintOptions {
@@ -90,6 +102,8 @@ pub struct PrintOptions {
     /// Provides a handle to set the behavior of the custom print function.
     /// Symbolica does not use this option for its own printing.
     pub custom_print_mode: Option<(&'static str, usize)>,
+    /// Controls whether aliases are expanded or printed as `alias(id)`.
+    pub alias_print_mode: AliasPrintMode,
 }
 
 impl PrintOptions {
@@ -123,6 +137,7 @@ impl PrintOptions {
             color_namespace: true,
             max_terms: None,
             custom_print_mode: None,
+            alias_print_mode: AliasPrintMode::Transparent,
         }
     }
 
@@ -155,6 +170,7 @@ impl PrintOptions {
             max_terms: None,
             bracket_level_colors: None,
             custom_print_mode: None,
+            alias_print_mode: AliasPrintMode::Transparent,
         }
     }
 
@@ -187,6 +203,7 @@ impl PrintOptions {
             max_terms: None,
             bracket_level_colors: None,
             custom_print_mode: None,
+            alias_print_mode: AliasPrintMode::Transparent,
         }
     }
 
@@ -219,6 +236,7 @@ impl PrintOptions {
             max_terms: None,
             bracket_level_colors: None,
             custom_print_mode: None,
+            alias_print_mode: AliasPrintMode::Transparent,
         }
     }
 
@@ -251,6 +269,7 @@ impl PrintOptions {
             max_terms: None,
             bracket_level_colors: None,
             custom_print_mode: None,
+            alias_print_mode: AliasPrintMode::Transparent,
         }
     }
 
