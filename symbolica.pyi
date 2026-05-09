@@ -485,13 +485,15 @@ class AtomType(Enum):
     """The expression is a number."""
     Var = 2
     """The expression is a variable."""
-    Fn = 3
+    Alias = 3
+    """The expression is an alias."""
+    Fn = 4
     """The expression is a function."""
-    Add = 4
+    Add = 5
     """The expression is a sum."""
-    Mul = 5
+    Mul = 6
     """The expression is a product."""
-    Pow = 6
+    Pow = 7
     """The expression is a power."""
 
 
@@ -524,6 +526,7 @@ class AtomTree:
     The `head` contains the string representation of:
     - a number if the type is `Num`
     - the variable if the type is `Var`
+    - the alias id if the type is `Alias`
     - the function name if the type is `Fn`
     - otherwise it is `None`.
 
@@ -532,6 +535,7 @@ class AtomTree:
     - the factors for type `Mul`
     - the base and exponent for type `Pow`
     - the function arguments for type `Fn`
+    - the alias body for type `Alias`
     """
 
     atom_type: AtomType
@@ -564,6 +568,17 @@ class PrintMode(Enum):
     """Print using Sympy notation."""
     Typst = 5
     """Print using Typst notation."""
+
+
+class AliasPrintMode(Enum):
+    """Specifies how aliases are printed."""
+
+    Transparent = 1
+    """Print all aliases transparently."""
+    All = 2
+    """Print all aliases as alias(id)."""
+    OpaqueOnly = 3
+    """Print only opaque aliases as alias(id)."""
 
 
 class Expression:
@@ -962,6 +977,11 @@ class Expression:
         Copy the expression.
         """
 
+    def remove_repeated_subexpressions(self) -> Expression:
+        """
+        Replace repeated non-variable subexpressions by transparent aliases.
+        """
+
     def __str__(self) -> str:
         """
         Convert the expression into a human-readable string.
@@ -1063,6 +1083,7 @@ class Expression:
         include_attributes: bool = False,
         max_terms: int | None = 100,
         custom_print_mode: int | None = None,
+        alias_print_mode: AliasPrintMode = AliasPrintMode.Transparent,
     ) -> str:
         """
         Convert the expression into a human-readable string, with tunable settings.
@@ -1128,6 +1149,8 @@ class Expression:
             The maximum number of terms to print before truncating the output.
         custom_print_mode: int | None
             A custom print-mode identifier passed through to custom print callbacks.
+        alias_print_mode: AliasPrintMode
+            Controls whether aliases are printed transparently or as alias(id).
         """
 
     def format_plain(self) -> str:
@@ -4066,6 +4089,11 @@ class Transformer:
             The callback or function to apply.
         """
 
+    def remove_repeated_subexpressions(self) -> Transformer:
+        """
+        Create a transformer that replaces repeated non-variable subexpressions by transparent aliases.
+        """
+
     def map_terms(self, *transformers: Transformer, n_cores: int = 1) -> Transformer:
         """
         Map a chain of transformer over the terms of the expression, optionally using multiple cores.
@@ -4514,6 +4542,7 @@ class Transformer:
         include_attributes: bool = False,
         max_terms: int | None = None,
         custom_print_mode: int | None = None,
+        alias_print_mode: AliasPrintMode = AliasPrintMode.Transparent,
     ) -> Transformer:
         """
         Create a transformer that prints the expression.
@@ -4568,6 +4597,8 @@ class Transformer:
             The maximum number of terms to print before truncating the output.
         custom_print_mode: int | None
             A custom print-mode identifier passed through to custom print callbacks.
+        alias_print_mode: AliasPrintMode
+            Controls whether aliases are printed transparently or as alias(id).
         """
 
     def stats(
@@ -4798,6 +4829,7 @@ class Series:
         include_attributes: bool = False,
         max_terms: int | None = None,
         custom_print_mode: int | None = None,
+        alias_print_mode: AliasPrintMode = AliasPrintMode.Transparent,
     ) -> str:
         """
         Convert the series into a human-readable string.
@@ -4850,6 +4882,8 @@ class Series:
             The maximum number of terms to print before truncating the output.
         custom_print_mode: int | None
             A custom print-mode identifier passed through to custom print callbacks.
+        alias_print_mode: AliasPrintMode
+            Controls whether aliases are printed transparently or as alias(id).
         """
 
     def __add__(self, other: Series | Expression) -> Series:
@@ -5266,6 +5300,7 @@ class Polynomial:
         include_attributes: bool = False,
         max_terms: int | None = None,
         custom_print_mode: int | None = None,
+        alias_print_mode: AliasPrintMode = AliasPrintMode.Transparent,
     ) -> str:
         """
         Convert the polynomial into a human-readable string, with tunable settings.
@@ -5325,6 +5360,8 @@ class Polynomial:
             The maximum number of terms to print before truncating the output.
         custom_print_mode: int | None
             A custom print-mode identifier passed through to custom print callbacks.
+        alias_print_mode: AliasPrintMode
+            Controls whether aliases are printed transparently or as alias(id).
         """
 
     def nterms(self) -> int:
@@ -6036,6 +6073,7 @@ class NumberFieldPolynomial:
         include_attributes: bool = False,
         max_terms: int | None = None,
         custom_print_mode: int | None = None,
+        alias_print_mode: AliasPrintMode = AliasPrintMode.Transparent,
     ) -> str:
         """
         Convert the polynomial into a human-readable string, with tunable settings.
@@ -6095,6 +6133,8 @@ class NumberFieldPolynomial:
             The maximum number of terms to print before truncating the output.
         custom_print_mode: int | None
             A custom print-mode identifier passed through to custom print callbacks.
+        alias_print_mode: AliasPrintMode
+            Controls whether aliases are printed transparently or as alias(id).
         """
 
     def nterms(self) -> int:
@@ -6646,6 +6686,7 @@ class FiniteFieldPolynomial:
         include_attributes: bool = False,
         max_terms: int | None = None,
         custom_print_mode: int | None = None,
+        alias_print_mode: AliasPrintMode = AliasPrintMode.Transparent,
     ) -> str:
         """
         Convert the polynomial into a human-readable string, with tunable settings.
@@ -6705,6 +6746,8 @@ class FiniteFieldPolynomial:
             The maximum number of terms to print before truncating the output.
         custom_print_mode: int | None
             A custom print-mode identifier passed through to custom print callbacks.
+        alias_print_mode: AliasPrintMode
+            Controls whether aliases are printed transparently or as alias(id).
         """
 
     def nterms(self) -> int:
@@ -7867,6 +7910,7 @@ class Matrix:
         include_attributes: bool = False,
         max_terms: int | None = None,
         custom_print_mode: int | None = None,
+        alias_print_mode: AliasPrintMode = AliasPrintMode.Transparent,
     ) -> str:
         """
         Convert the matrix into a human-readable string, with tunable settings.
@@ -7907,6 +7951,8 @@ class Matrix:
             The maximum number of terms to print before truncating the output.
         custom_print_mode: int | None
             A custom print-mode identifier passed through to custom print callbacks.
+        alias_print_mode: AliasPrintMode
+            Controls whether aliases are printed transparently or as alias(id).
         """
 
     def to_latex(self) -> str:
