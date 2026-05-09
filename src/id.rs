@@ -22,7 +22,6 @@ use ahash::{HashMap, HashSet};
 use dyn_clone::DynClone;
 
 use crate::{
-    alias::AliasedAtom,
     atom::{
         Atom, AtomCore, AtomType, AtomView, Indeterminate, ListIterator, SliceType, Symbol,
         representation::InlineVar,
@@ -1123,7 +1122,7 @@ impl<'a> AtomView<'a> {
     pub(crate) fn alias_subexpressions(
         &self,
         f: impl FnMut(AtomView, usize, usize) -> Option<Atom>,
-    ) -> AliasedAtom {
+    ) -> Atom {
         crate::alias::alias_subexpressions(*self, f)
     }
 

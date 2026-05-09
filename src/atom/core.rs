@@ -6,7 +6,7 @@ use ahash::{HashMap, HashSet};
 use rayon::ThreadPool;
 
 use crate::{
-    alias::AliasedAtom,
+    alias::collect_alias_handles_in,
     atom::{
         AddView, FunctionBuilder, Indeterminate, KeyLookup, MulView, NumView, VarView,
         representation::FunView,
@@ -46,6 +46,9 @@ use crate::{
     tensors::{CanonicalTensor, matrix::Matrix},
     utils::{BorrowedOrOwned, Settable},
 };
+
+#[allow(deprecated)]
+use crate::alias::AliasedAtom;
 use std::sync::Arc;
 
 use super::{
@@ -356,16 +359,17 @@ pub trait AtomCore: private::Sealed + Sized {
     fn alias_subexpressions(
         &self,
         f: impl FnMut(AtomView, usize, usize) -> Option<Atom>,
-    ) -> AliasedAtom {
-        self.as_atom_view().alias_subexpressions(f)
+    ) -> Self::Output {
+        let atom = self.as_atom_view().alias_subexpressions(f);
+        self.atom_to_output(atom)
     }
 
     /// Replace every repeated non-variable subexpression with an alias.
     ///
     /// Numerical atoms, variables, and existing alias atoms are not selected as new alias roots.
-    /// The returned [`AliasedAtom`] keeps the created aliases alive and can be used as a normal
-    /// expression through the rest of the [`AtomCore`] API.
-    fn alias_repeated_subexpressions(&self) -> AliasedAtom {
+    /// The returned atom keeps the created aliases alive and can be used as a normal expression
+    /// through the rest of the [`AtomCore`] API.
+    fn alias_repeated_subexpressions(&self) -> Self::Output {
         self.alias_subexpressions(|subexpr, _, _| match subexpr {
             AtomView::Num(_) | AtomView::Var(_) | AtomView::Alias(_) => None,
             _ => Some(Atom::new()),
@@ -2229,6 +2233,7 @@ impl AtomCore for AtomOrView<'_> {
     }
 }
 
+#[allow(deprecated)]
 impl AtomCore for AliasedAtom {
     type Output = AliasedAtom;
 
@@ -2244,9 +2249,13 @@ impl AtomCore for AliasedAtom {
     }
 
     fn atom_to_output(&self, atom: Atom) -> Self::Output {
+        let mut aliases: HashSet<_> = self.aliases.iter().cloned().collect();
+        aliases.extend(collect_alias_handles_in(atom.as_view()));
+        let mut aliases: Vec<_> = aliases.into_iter().collect();
+        aliases.sort_by_key(|handle| handle.id());
         AliasedAtom {
             root: atom,
-            aliases: self.aliases.clone(),
+            aliases,
         }
     }
 
@@ -2275,5 +2284,6 @@ mod private {
     impl<'a> Sealed for AtomView<'a> {}
     impl<T: AsRef<super::Atom>> Sealed for T {}
     impl Sealed for super::AtomOrView<'_> {}
+    #[allow(deprecated)]
     impl Sealed for crate::alias::AliasedAtom {}
 }

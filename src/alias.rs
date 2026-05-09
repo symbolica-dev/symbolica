@@ -1,3 +1,5 @@
+#![allow(deprecated)]
+
 use std::{
     borrow::Borrow,
     hash::Hash,
@@ -200,6 +202,9 @@ impl AliasStore {
 }
 
 #[derive(Clone, Debug)]
+#[deprecated(
+    note = "atoms now retain alias handles directly; use AtomCore::alias_repeated_subexpressions or AtomCore::alias_subexpressions on Atom/AtomView instead"
+)]
 pub struct AliasedAtom {
     pub(crate) root: Atom,
     pub(crate) aliases: Vec<Arc<AliasHandle>>,
@@ -535,10 +540,8 @@ impl_aliased_assign_ops!(DivAssign, div_assign, Div, div);
 impl AliasedAtom {
     pub fn new<'a, T: Into<AtomOrView<'a>>>(root: T) -> Self {
         let root = root.into().as_atom_view().to_owned();
-        Self {
-            root,
-            aliases: Vec::new(),
-        }
+        let aliases = get_alias_handles(root.as_view());
+        Self { root, aliases }
     }
 
     pub fn get_root(&self) -> &Atom {
@@ -558,7 +561,9 @@ impl AliasedAtom {
         self,
         f: impl FnMut(AtomView, usize, usize) -> Option<Atom>,
     ) -> Self {
-        alias_subexpressions(self.root.as_view(), f)
+        let root = alias_subexpressions(self.root.as_view(), f);
+        let aliases = get_alias_handles(root.as_view());
+        Self { root, aliases }
     }
 
     pub fn add_alias(self, original: Atom) -> Self {
@@ -695,7 +700,7 @@ fn register_aliased_atom(alias: AliasedAtom) -> (Arc<AliasHandle>, bool) {
 pub(crate) fn alias_subexpressions(
     root: AtomView<'_>,
     mut f: impl FnMut(AtomView, usize, usize) -> Option<Atom>,
-) -> AliasedAtom {
+) -> Atom {
     let mut subexpressions = HashMap::default();
     root.count_subexpressions(&mut subexpressions);
     let mut subexpr_vec: Vec<_> = subexpressions.into_iter().collect();
@@ -742,11 +747,7 @@ pub(crate) fn alias_subexpressions(
         });
     }
 
-    let aliases = get_alias_handles(replaced_atom.as_view());
-    AliasedAtom {
-        root: replaced_atom,
-        aliases,
-    }
+    replaced_atom
 }
 
 pub fn to_atom(root: &Atom) -> Atom {
@@ -1100,9 +1101,10 @@ fn atom_core_alias_repeated_subexpressions_skips_variables() {
     let expr = crate::parse!("exp(x+1)+log(x+1)+(x+1)^2+x+x");
     let aliased = expr.alias_repeated_subexpressions();
 
-    assert_eq!(to_atom(&aliased.root), expr);
-    assert_eq!(aliased.aliases.len(), 1);
-    assert_eq!(aliased.aliases[0].atom.as_ref(), &crate::parse!("1+x"));
+    assert_eq!(to_atom(&aliased), expr);
+    let aliases = collect_alias_handles_in(aliased.as_view());
+    assert_eq!(aliases.len(), 1);
+    assert_eq!(aliases[0].atom.as_ref(), &crate::parse!("1+x"));
 }
 
 #[test]

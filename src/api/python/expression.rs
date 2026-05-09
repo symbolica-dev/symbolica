@@ -767,6 +767,14 @@ impl PythonTransformer {
         self.append_transformer(transformer)
     }
 
+    /// Create a transformer that replaces repeated non-variable subexpressions by transparent aliases.
+    pub fn remove_repeated_subexpressions(&self) -> PyResult<PythonTransformer> {
+        self.append_transformer(Transformer::Map(Box::new(|expr, _state, out| {
+            out.set_from_view(&expr.alias_repeated_subexpressions().as_view());
+            Ok(())
+        })))
+    }
+
     /// Map a chain of transformers over the terms of the expression, optionally using multiple cores.
     ///
     /// Examples
@@ -2768,6 +2776,14 @@ impl PythonExpression {
     /// Copy the expression.
     pub fn __copy__(&self) -> PythonExpression {
         self.expr.clone().into()
+    }
+
+    /// Replace repeated non-variable subexpressions by transparent aliases.
+    ///
+    /// This keeps the expression algebraically equivalent, but stores each repeated
+    /// subexpression once and replaces its occurrences by an alias atom.
+    pub fn remove_repeated_subexpressions(&self) -> PyResult<PythonExpression> {
+        Ok(self.expr.alias_repeated_subexpressions().into())
     }
 
     /// Convert the expression into a portable string.
