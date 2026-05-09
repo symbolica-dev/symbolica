@@ -128,7 +128,8 @@ impl PythonPolynomial {
             hide_namespace = None,
             include_attributes = false,
             max_terms = None,
-            custom_print_mode = None)
+            custom_print_mode = None,
+            alias_print_mode = PythonAliasPrintMode::Transparent)
         )]
     pub fn format(
         &self,
@@ -155,6 +156,7 @@ impl PythonPolynomial {
         include_attributes: bool,
         max_terms: Option<usize>,
         custom_print_mode: Option<usize>,
+        alias_print_mode: PythonAliasPrintMode,
     ) -> PyResult<String> {
         Ok(self.poly.format_string(
             &PrintOptions {
@@ -187,6 +189,7 @@ impl PythonPolynomial {
                 },
                 include_attributes,
                 max_terms,
+                alias_print_mode: alias_print_mode.into(),
                 custom_print_mode: custom_print_mode.map(|x| ("default", x)),
             },
             PrintState::new(),
@@ -1446,7 +1449,8 @@ impl PythonFiniteFieldPolynomial {
             hide_namespace = None,
             include_attributes = false,
             max_terms = None,
-            custom_print_mode = None)
+            custom_print_mode = None,
+            alias_print_mode = PythonAliasPrintMode::Transparent)
         )]
     pub fn format(
         &self,
@@ -1473,6 +1477,7 @@ impl PythonFiniteFieldPolynomial {
         include_attributes: bool,
         max_terms: Option<usize>,
         custom_print_mode: Option<usize>,
+        alias_print_mode: PythonAliasPrintMode,
     ) -> PyResult<String> {
         Ok(self.poly.format_string(
             &PrintOptions {
@@ -1505,6 +1510,7 @@ impl PythonFiniteFieldPolynomial {
                 },
                 include_attributes,
                 max_terms,
+                alias_print_mode: alias_print_mode.into(),
                 custom_print_mode: custom_print_mode.map(|x| ("default", x)),
             },
             PrintState::new(),
@@ -2543,7 +2549,8 @@ impl PythonPrimeTwoPolynomial {
             hide_namespace = None,
             include_attributes = false,
             max_terms = None,
-            custom_print_mode = None)
+            custom_print_mode = None,
+            alias_print_mode = PythonAliasPrintMode::Transparent)
     )]
     pub fn format(
         &self,
@@ -2570,6 +2577,7 @@ impl PythonPrimeTwoPolynomial {
         include_attributes: bool,
         max_terms: Option<usize>,
         custom_print_mode: Option<usize>,
+        alias_print_mode: PythonAliasPrintMode,
     ) -> PyResult<String> {
         Ok(self.poly.format_string(
             &PrintOptions {
@@ -2602,6 +2610,7 @@ impl PythonPrimeTwoPolynomial {
                 },
                 include_attributes,
                 max_terms,
+                alias_print_mode: alias_print_mode.into(),
                 custom_print_mode: custom_print_mode.map(|x| ("default", x)),
             },
             PrintState::new(),
@@ -3422,7 +3431,8 @@ impl PythonGaloisFieldPrimeTwoPolynomial {
             hide_namespace = None,
             include_attributes = false,
             max_terms = None,
-            custom_print_mode = None)
+            custom_print_mode = None,
+            alias_print_mode = PythonAliasPrintMode::Transparent)
     )]
     pub fn format(
         &self,
@@ -3449,6 +3459,7 @@ impl PythonGaloisFieldPrimeTwoPolynomial {
         include_attributes: bool,
         max_terms: Option<usize>,
         custom_print_mode: Option<usize>,
+        alias_print_mode: PythonAliasPrintMode,
     ) -> PyResult<String> {
         Ok(self.poly.format_string(
             &PrintOptions {
@@ -3481,6 +3492,7 @@ impl PythonGaloisFieldPrimeTwoPolynomial {
                 },
                 include_attributes,
                 max_terms,
+                alias_print_mode: alias_print_mode.into(),
                 custom_print_mode: custom_print_mode.map(|x| ("default", x)),
             },
             PrintState::new(),
@@ -4403,7 +4415,8 @@ impl PythonGaloisFieldPolynomial {
             hide_namespace = None,
             include_attributes = false,
             max_terms = None,
-            custom_print_mode = None)
+            custom_print_mode = None,
+            alias_print_mode = PythonAliasPrintMode::Transparent)
     )]
     pub fn format(
         &self,
@@ -4430,6 +4443,7 @@ impl PythonGaloisFieldPolynomial {
         include_attributes: bool,
         max_terms: Option<usize>,
         custom_print_mode: Option<usize>,
+        alias_print_mode: PythonAliasPrintMode,
     ) -> PyResult<String> {
         Ok(self.poly.format_string(
             &PrintOptions {
@@ -4462,6 +4476,7 @@ impl PythonGaloisFieldPolynomial {
                 },
                 include_attributes,
                 max_terms,
+                alias_print_mode: alias_print_mode.into(),
                 custom_print_mode: custom_print_mode.map(|x| ("default", x)),
             },
             PrintState::new(),
@@ -5330,7 +5345,8 @@ impl PythonNumberFieldPolynomial {
             hide_namespace = None,
             include_attributes = false,
             max_terms = None,
-            custom_print_mode = None)
+            custom_print_mode = None,
+            alias_print_mode = PythonAliasPrintMode::Transparent)
     )]
     pub fn format(
         &self,
@@ -5357,6 +5373,7 @@ impl PythonNumberFieldPolynomial {
         include_attributes: bool,
         max_terms: Option<usize>,
         custom_print_mode: Option<usize>,
+        alias_print_mode: PythonAliasPrintMode,
     ) -> PyResult<String> {
         Ok(self.poly.format_string(
             &PrintOptions {
@@ -5389,6 +5406,7 @@ impl PythonNumberFieldPolynomial {
                 },
                 include_attributes,
                 max_terms,
+                alias_print_mode: alias_print_mode.into(),
                 custom_print_mode: custom_print_mode.map(|x| ("default", x)),
             },
             PrintState::new(),

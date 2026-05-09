@@ -915,6 +915,54 @@ fn opaque_alias_derivative_treats_alias_as_atom() {
 }
 
 #[test]
+fn alias_print_mode_renders_selected_aliases() {
+    use crate::{
+        atom::AtomCore,
+        printer::{AliasPrintMode, PrintOptions},
+    };
+
+    let x_alias = register_aliased_atom(AliasedAtom::new(crate::parse!("x"))).0;
+    let transparent = x_alias.to_atom();
+    let opaque = x_alias.to_opaque_atom();
+    let transparent_alias = format!("alias({})", x_alias.token());
+
+    assert_eq!(
+        format!("{}", transparent.printer(PrintOptions::file_no_namespace())),
+        "x"
+    );
+    assert_eq!(
+        format!(
+            "{}",
+            transparent.printer(PrintOptions {
+                alias_print_mode: AliasPrintMode::All,
+                ..PrintOptions::file_no_namespace()
+            })
+        ),
+        transparent_alias
+    );
+    assert_eq!(
+        format!(
+            "{}",
+            transparent.printer(PrintOptions {
+                alias_print_mode: AliasPrintMode::OpaqueOnly,
+                ..PrintOptions::file_no_namespace()
+            })
+        ),
+        "x"
+    );
+    assert_eq!(
+        format!(
+            "{}",
+            opaque.printer(PrintOptions {
+                alias_print_mode: AliasPrintMode::OpaqueOnly,
+                ..PrintOptions::file_no_namespace()
+            })
+        ),
+        transparent_alias
+    );
+}
+
+#[test]
 fn alias_normalization_resolves_mul_factors() {
     let x_alias = register_aliased_atom(AliasedAtom::new(crate::parse!("x"))).0;
     let product = crate::parse!("x") * x_alias.to_atom();

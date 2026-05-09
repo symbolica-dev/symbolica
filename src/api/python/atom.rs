@@ -15,6 +15,8 @@ pub enum PythonAtomType {
     Num,
     /// The expression is a variable.
     Var,
+    /// The expression is an alias.
+    Alias,
     /// The expression is a function.
     Fn,
     /// The expression is a sum.
@@ -75,6 +77,7 @@ impl From<SymbolAttribute> for PythonSymbolAttribute {
 /// The `head` contains the string representation of:
 /// - a number if the type is `Num`
 /// - the variable if the type is `Var`
+/// - the alias id if the type is `Alias`
 /// - the function name if the type is `Fn`
 /// - otherwise it is `None`.
 ///
@@ -83,6 +86,7 @@ impl From<SymbolAttribute> for PythonSymbolAttribute {
 /// - the factors for type `Mul`
 /// - the base and exponent for type `Pow`
 /// - the function arguments for type `Fn`
+/// - the alias body for type `Alias`
 #[derive(Clone)]
 #[cfg_attr(feature = "python_stubgen", gen_stub_pyclass)]
 #[pyclass(from_py_object, name = "AtomTree", module = "symbolica.core")]
@@ -110,6 +114,13 @@ impl<'a> From<AtomView<'a>> for PyResult<PythonAtomTree> {
                 atom_type: PythonAtomType::Var,
                 head: Some(v.get_symbol().get_name().to_string()),
                 tail: vec![],
+            },
+            AtomView::Alias(a) => PythonAtomTree {
+                atom_type: PythonAtomType::Alias,
+                head: Some(a.get_token().to_string()),
+                tail: vec![<AtomView as Into<PyResult<PythonAtomTree>>>::into(
+                    a.get_body(),
+                )?],
             },
             AtomView::Fun(f) => PythonAtomTree {
                 atom_type: PythonAtomType::Fn,

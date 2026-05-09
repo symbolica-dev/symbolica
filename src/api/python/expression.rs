@@ -93,6 +93,7 @@ impl PythonHeldExpression {
                 match atom_type {
                     PythonAtomType::Num => AtomType::Num,
                     PythonAtomType::Var => AtomType::Var,
+                    PythonAtomType::Alias => AtomType::Alias,
                     PythonAtomType::Add => AtomType::Add,
                     PythonAtomType::Mul => AtomType::Mul,
                     PythonAtomType::Pow => AtomType::Pow,
@@ -378,6 +379,7 @@ impl PythonTransformer {
                 match atom_type {
                     PythonAtomType::Num => AtomType::Num,
                     PythonAtomType::Var => AtomType::Var,
+                    PythonAtomType::Alias => AtomType::Alias,
                     PythonAtomType::Add => AtomType::Add,
                     PythonAtomType::Mul => AtomType::Mul,
                     PythonAtomType::Pow => AtomType::Pow,
@@ -1467,7 +1469,8 @@ impl PythonTransformer {
             hide_namespace = None,
             include_attributes = false,
             max_terms = None,
-            custom_print_mode = None)
+            custom_print_mode = None,
+            alias_print_mode = PythonAliasPrintMode::Transparent)
         )]
     pub fn print(
         &self,
@@ -1494,6 +1497,7 @@ impl PythonTransformer {
         include_attributes: bool,
         max_terms: Option<usize>,
         custom_print_mode: Option<usize>,
+        alias_print_mode: PythonAliasPrintMode,
     ) -> PyResult<PythonTransformer> {
         self.append_transformer(Transformer::Print(PrintOptions {
             max_line_length,
@@ -1525,6 +1529,7 @@ impl PythonTransformer {
             },
             include_attributes,
             max_terms,
+            alias_print_mode: alias_print_mode.into(),
             custom_print_mode: custom_print_mode.map(|x| ("default", x)),
         }))
     }
@@ -2830,7 +2835,8 @@ impl PythonExpression {
             hide_namespace = None,
             include_attributes = false,
             max_terms = Some(100),
-            custom_print_mode = None)
+            custom_print_mode = None,
+            alias_print_mode = PythonAliasPrintMode::Transparent)
         )]
     pub fn format(
         &self,
@@ -2857,6 +2863,7 @@ impl PythonExpression {
         include_attributes: bool,
         max_terms: Option<usize>,
         custom_print_mode: Option<usize>,
+        alias_print_mode: PythonAliasPrintMode,
     ) -> PyResult<String> {
         Ok(format!(
             "{}",
@@ -2892,6 +2899,7 @@ impl PythonExpression {
                     },
                     include_attributes,
                     max_terms,
+                    alias_print_mode: alias_print_mode.into(),
                     custom_print_mode: custom_print_mode.map(|x| ("default", x)),
                 },
             )
@@ -3065,6 +3073,7 @@ impl PythonExpression {
         match self.expr.as_ref() {
             Atom::Num(_) => PythonAtomType::Num,
             Atom::Var(_) => PythonAtomType::Var,
+            Atom::Alias(_) => PythonAtomType::Alias,
             Atom::Fun(_) => PythonAtomType::Fn,
             Atom::Add(_) => PythonAtomType::Add,
             Atom::Mul(_) => PythonAtomType::Mul,
@@ -3868,6 +3877,7 @@ impl PythonExpression {
                         WildcardRestriction::IsAtomType(match atom_type {
                             PythonAtomType::Num => AtomType::Num,
                             PythonAtomType::Var => AtomType::Var,
+                            PythonAtomType::Alias => AtomType::Alias,
                             PythonAtomType::Add => AtomType::Add,
                             PythonAtomType::Mul => AtomType::Mul,
                             PythonAtomType::Pow => AtomType::Pow,
@@ -4026,6 +4036,7 @@ impl PythonExpression {
                 match atom_type {
                     PythonAtomType::Num => AtomType::Num,
                     PythonAtomType::Var => AtomType::Var,
+                    PythonAtomType::Alias => AtomType::Alias,
                     PythonAtomType::Add => AtomType::Add,
                     PythonAtomType::Mul => AtomType::Mul,
                     PythonAtomType::Pow => AtomType::Pow,

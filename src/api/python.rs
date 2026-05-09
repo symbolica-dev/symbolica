@@ -99,7 +99,7 @@ use crate::{
         gcd::PolynomialGCD, groebner::GroebnerBasis, polynomial::MultivariatePolynomial,
         series::Series,
     },
-    printer::{AtomPrinter, PrintMode, PrintOptions, PrintState},
+    printer::{AliasPrintMode, AtomPrinter, PrintMode, PrintOptions, PrintState},
     solve::SolveError,
     state::{RecycledAtom, State, Workspace},
     streaming::{TermStreamer, TermStreamerConfig},
@@ -268,6 +268,45 @@ impl From<PythonPrintMode> for PrintMode {
     }
 }
 
+/// Specifies how aliases are printed.
+#[cfg_attr(feature = "python_stubgen", gen_stub_pyclass_enum)]
+#[pyclass(
+    from_py_object,
+    name = "AliasPrintMode",
+    eq,
+    eq_int,
+    module = "symbolica.core"
+)]
+#[derive(Clone, Copy, PartialEq, Eq, Hash)]
+pub enum PythonAliasPrintMode {
+    /// Print all aliases transparently.
+    Transparent,
+    /// Print all aliases as alias(id).
+    All,
+    /// Print only opaque aliases as alias(id).
+    OpaqueOnly,
+}
+
+impl From<AliasPrintMode> for PythonAliasPrintMode {
+    fn from(mode: AliasPrintMode) -> Self {
+        match mode {
+            AliasPrintMode::Transparent => PythonAliasPrintMode::Transparent,
+            AliasPrintMode::All => PythonAliasPrintMode::All,
+            AliasPrintMode::OpaqueOnly => PythonAliasPrintMode::OpaqueOnly,
+        }
+    }
+}
+
+impl From<PythonAliasPrintMode> for AliasPrintMode {
+    fn from(mode: PythonAliasPrintMode) -> Self {
+        match mode {
+            PythonAliasPrintMode::Transparent => AliasPrintMode::Transparent,
+            PythonAliasPrintMode::All => AliasPrintMode::All,
+            PythonAliasPrintMode::OpaqueOnly => AliasPrintMode::OpaqueOnly,
+        }
+    }
+}
+
 /// Create a Symbolica Python module.
 pub fn create_symbolica_module<'a, 'b>(
     m: &'b Bound<'a, PyModule>,
@@ -289,6 +328,7 @@ pub fn create_symbolica_module<'a, 'b>(
     m.add_class::<PythonSymbolAttribute>()?;
     m.add_class::<PythonParseMode>()?;
     m.add_class::<PythonPrintMode>()?;
+    m.add_class::<PythonAliasPrintMode>()?;
     m.add_class::<PythonCondition>()?;
     m.add_class::<PythonReplacement>()?;
     m.add_class::<PythonExpressionEvaluator>()?;
@@ -373,6 +413,10 @@ fn print_options_to_dict<'py>(
     dict.set_item("hide_all_namespaces", options.hide_all_namespaces)?;
     dict.set_item("color_namespace", options.color_namespace)?;
     dict.set_item("max_terms", options.max_terms)?;
+    dict.set_item(
+        "alias_print_mode",
+        PythonAliasPrintMode::from(options.alias_print_mode),
+    )?;
     dict.set_item("custom_print_mode", options.custom_print_mode.map(|x| x.1))?;
 
     dict.set_item("level", state.level)?;

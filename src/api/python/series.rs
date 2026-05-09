@@ -191,7 +191,8 @@ impl PythonSeries {
             hide_namespace = None,
             include_attributes = false,
             max_terms = None,
-            custom_print_mode = None)
+            custom_print_mode = None,
+            alias_print_mode = PythonAliasPrintMode::Transparent)
         )]
     pub fn format(
         &self,
@@ -218,6 +219,7 @@ impl PythonSeries {
         include_attributes: bool,
         max_terms: Option<usize>,
         custom_print_mode: Option<usize>,
+        alias_print_mode: PythonAliasPrintMode,
     ) -> PyResult<String> {
         Ok(self
             .series
@@ -252,6 +254,7 @@ impl PythonSeries {
                     },
                     include_attributes,
                     max_terms,
+                    alias_print_mode: alias_print_mode.into(),
                     custom_print_mode: custom_print_mode.map(|x| ("default", x)),
                 },
                 PrintState::new(),

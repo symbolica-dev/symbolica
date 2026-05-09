@@ -272,6 +272,13 @@ impl Default for CanonicalOrderingSettings {
 }
 
 impl AtomView<'_> {
+    fn format_alias<W: std::fmt::Write>(
+        alias: &crate::atom::AliasView<'_>,
+        fmt: &mut W,
+    ) -> fmt::Result {
+        write!(fmt, "alias({})", alias.get_token())
+    }
+
     fn fmt_debug(&self, fmt: &mut fmt::Formatter) -> fmt::Result {
         match self {
             AtomView::Num(n) => n.fmt_debug(fmt),
@@ -293,7 +300,21 @@ impl AtomView<'_> {
         match self {
             AtomView::Num(n) => n.fmt_output(fmt, opts, print_state),
             AtomView::Var(v) => v.fmt_output(fmt, opts, print_state),
-            AtomView::Alias(a) => a.get_body().format(fmt, opts, print_state),
+            AtomView::Alias(a) => match opts.alias_print_mode {
+                AliasPrintMode::Transparent => a.get_body().format(fmt, opts, print_state),
+                AliasPrintMode::All => {
+                    Self::format_alias(a, fmt)?;
+                    Ok(false)
+                }
+                AliasPrintMode::OpaqueOnly => {
+                    if a.is_opaque() {
+                        Self::format_alias(a, fmt)?;
+                        Ok(false)
+                    } else {
+                        a.get_body().format(fmt, opts, print_state)
+                    }
+                }
+            },
             AtomView::Fun(f) => f.fmt_output(fmt, opts, print_state),
             AtomView::Pow(p) => p.fmt_output(fmt, opts, print_state),
             AtomView::Mul(t) => t.fmt_output(fmt, opts, print_state),
@@ -617,7 +638,17 @@ impl AtomView<'_> {
     /// Estimate the length of the string representation of the atom, for use in deciding when to split terms onto new lines.
     fn estimate_char_length(&self, opts: &PrintOptions) -> usize {
         match self {
-            AtomView::Alias(a) => a.get_body().estimate_char_length(opts),
+            AtomView::Alias(a) => match opts.alias_print_mode {
+                AliasPrintMode::Transparent => a.get_body().estimate_char_length(opts),
+                AliasPrintMode::All => 7 + a.get_token().ilog10() as usize,
+                AliasPrintMode::OpaqueOnly => {
+                    if a.is_opaque() {
+                        7 + a.get_token().ilog10() as usize
+                    } else {
+                        a.get_body().estimate_char_length(opts)
+                    }
+                }
+            },
             AtomView::Num(n) => match n.get_coeff_view() {
                 CoefficientView::Natural(num, den, num_i, den_i) => {
                     let mut len = 0;
