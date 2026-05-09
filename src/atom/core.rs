@@ -72,6 +72,10 @@ pub trait AtomCore: private::Sealed + Sized {
     /// Take a view of the atom.
     fn as_atom_view(&self) -> AtomView<'_>;
 
+    fn alias_replacements<'a>(&'a self) -> Vec<(usize, AtomView<'a>)> {
+        Vec::new()
+    }
+
     fn atom_to_output(&self, atom: Atom) -> Self::Output;
 
     /// Get a function view if the atom is a function.
@@ -861,7 +865,13 @@ pub trait AtomCore: private::Sealed + Sized {
         fn_map: &FunctionMap,
         params: &[Atom],
     ) -> Result<EvalTree<Complex<Rational>>, String> {
-        self.as_atom_view().to_evaluation_tree(fn_map, params)
+        let aliases = self.alias_replacements();
+        if aliases.is_empty() {
+            AtomView::to_eval_tree_multiple(std::slice::from_ref(self), fn_map, params)
+        } else {
+            let f = fn_map.with_aliases(aliases);
+            AtomView::to_eval_tree_multiple(std::slice::from_ref(self), &f, params)
+        }
     }
 
     /// Create an efficient evaluator for a (nested) expression.
@@ -926,12 +936,24 @@ pub trait AtomCore: private::Sealed + Sized {
         optimization_settings: OptimizationSettings,
     ) -> Result<ExpressionEvaluator<Complex<Rational>>, String> {
         if optimization_settings.direct_translation {
-            AtomView::to_evaluator(
-                std::slice::from_ref(&self.as_atom_view()),
-                fn_map,
-                params,
-                optimization_settings,
-            )
+            let aliases = self.alias_replacements();
+            let expr = self.as_atom_view();
+            if aliases.is_empty() {
+                AtomView::to_evaluator(
+                    std::slice::from_ref(&expr),
+                    fn_map,
+                    params,
+                    optimization_settings,
+                )
+            } else {
+                AtomView::to_evaluator_with_aliases(
+                    std::slice::from_ref(&expr),
+                    &aliases,
+                    fn_map,
+                    params,
+                    optimization_settings,
+                )
+            }
         } else {
             let tree = self.to_evaluation_tree(fn_map, params)?;
             Ok(tree.optimize(&optimization_settings))
@@ -972,10 +994,33 @@ pub trait AtomCore: private::Sealed + Sized {
         optimization_settings: OptimizationSettings,
     ) -> Result<ExpressionEvaluator<Complex<Rational>>, String> {
         if optimization_settings.direct_translation {
-            let exprs = exprs.iter().map(|e| e.as_atom_view()).collect::<Vec<_>>();
-            AtomView::to_evaluator(&exprs, fn_map, params, optimization_settings)
+            let aliases = exprs
+                .iter()
+                .flat_map(|e| e.alias_replacements())
+                .collect::<Vec<_>>();
+            let expr_views = exprs.iter().map(|e| e.as_atom_view()).collect::<Vec<_>>();
+            if aliases.is_empty() {
+                AtomView::to_evaluator(&expr_views, fn_map, params, optimization_settings)
+            } else {
+                AtomView::to_evaluator_with_aliases(
+                    &expr_views,
+                    &aliases,
+                    fn_map,
+                    params,
+                    optimization_settings,
+                )
+            }
         } else {
-            let tree = AtomView::to_eval_tree_multiple(exprs, fn_map, params)?;
+            let aliases = exprs
+                .iter()
+                .flat_map(|e| e.alias_replacements())
+                .collect::<Vec<_>>();
+            let tree = if aliases.is_empty() {
+                AtomView::to_eval_tree_multiple(exprs, fn_map, params)?
+            } else {
+                let f = fn_map.with_aliases(aliases);
+                AtomView::to_eval_tree_multiple(exprs, &f, params)?
+            };
             Ok(tree.optimize(&optimization_settings))
         }
     }
@@ -2145,6 +2190,13 @@ impl AtomCore for AliasedAtom {
 
     fn as_atom_view(&self) -> AtomView<'_> {
         self.root.as_view()
+    }
+
+    fn alias_replacements<'a>(&'a self) -> Vec<(usize, AtomView<'a>)> {
+        self.aliases
+            .iter()
+            .map(|handle| (handle.token(), handle.atom().as_view()))
+            .collect()
     }
 
     fn atom_to_output(&self, atom: Atom) -> Self::Output {

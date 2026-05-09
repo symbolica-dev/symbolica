@@ -25,6 +25,7 @@ struct AliasEntry {
 pub struct AliasHandle {
     id: usize,
     generation: usize,
+    atom: Arc<Atom>,
 }
 
 impl AliasHandle {
@@ -38,6 +39,10 @@ impl AliasHandle {
 
     pub(crate) fn to_atom(&self) -> Atom {
         crate::function!(Symbol::ALIAS, self.token())
+    }
+
+    pub(crate) fn atom(&self) -> &Atom {
+        &self.atom
     }
 }
 
@@ -146,6 +151,7 @@ impl AliasStore {
         let handle = Arc::new(AliasHandle {
             id: index,
             generation,
+            atom: atom.clone(),
         });
         let dependencies = collect_alias_handles_in(atom.as_view());
         let entry = AliasEntry {
@@ -792,4 +798,140 @@ fn test_aliased_atom_arithmetic_merges_handles() {
     for token in expected {
         assert!(get_alias(token).is_none());
     }
+}
+
+#[test]
+fn test_aliased_atom_evaluator_reuses_alias_instruction() {
+    use crate::evaluate::{FunctionMap, OptimizationSettings};
+
+    let aliased =
+        AliasedAtom::new(crate::parse!("exp(x+y)+log(x+y)")).alias_literal(crate::parse!("x+y"));
+    let params = vec![crate::parse!("x"), crate::parse!("y")];
+    let direct_evaluator = aliased
+        .evaluator(
+            &FunctionMap::new(),
+            &params,
+            OptimizationSettings {
+                horner_iterations: 0,
+                cpe_iterations: Some(0),
+                ..OptimizationSettings::default()
+            },
+        )
+        .unwrap();
+    let tree_evaluator = aliased
+        .evaluator(
+            &FunctionMap::new(),
+            &params,
+            OptimizationSettings {
+                horner_iterations: 0,
+                cpe_iterations: Some(0),
+                direct_translation: false,
+                ..OptimizationSettings::default()
+            },
+        )
+        .unwrap();
+
+    assert_eq!(direct_evaluator.count_operations().0, 2);
+    assert_eq!(tree_evaluator.count_operations().0, 2);
+
+    drop(aliased);
+
+    let mut evaluator = direct_evaluator.map_coeff(&|x| x.re.to_f64());
+    let value = evaluator.evaluate_single(&[1., 2.]);
+    let expected = 3f64.exp() + 3f64.ln();
+    assert!((value - expected).abs() < 1e-12);
+
+    let mut evaluator = tree_evaluator.map_coeff(&|x| x.re.to_f64());
+    let value = evaluator.evaluate_single(&[1., 2.]);
+    assert!((value - expected).abs() < 1e-12);
+}
+
+#[test]
+fn test_aliased_atom_evaluator_horners_alias_body() {
+    use crate::evaluate::{FunctionMap, OptimizationSettings};
+
+    let poly = crate::parse!("x^3+x^2+x+1");
+    let aliased =
+        AliasedAtom::new(crate::parse!("exp(x^3+x^2+x+1)+log(x^3+x^2+x+1)")).alias_literal(poly);
+    let params = vec![crate::parse!("x")];
+    let without_horner = aliased
+        .evaluator(
+            &FunctionMap::new(),
+            &params,
+            OptimizationSettings {
+                horner_iterations: 0,
+                cpe_iterations: Some(0),
+                ..OptimizationSettings::default()
+            },
+        )
+        .unwrap();
+    let with_horner = aliased
+        .evaluator(
+            &FunctionMap::new(),
+            &params,
+            OptimizationSettings {
+                horner_iterations: 1,
+                cpe_iterations: Some(0),
+                ..OptimizationSettings::default()
+            },
+        )
+        .unwrap();
+
+    assert!(with_horner.count_operations().1 < without_horner.count_operations().1);
+
+    drop(aliased);
+
+    let mut evaluator = with_horner.map_coeff(&|x| x.re.to_f64());
+    let value = evaluator.evaluate_single(&[2.]);
+    let expected = 15f64.exp() + 15f64.ln();
+    assert!((value - expected).abs() < 1e-10);
+}
+
+#[test]
+fn test_alias_inside_function_map_uses_outer_arguments() {
+    use crate::evaluate::{FunctionMap, OptimizationSettings};
+    use crate::symbol;
+
+    let aliased_body = AliasedAtom::new(crate::parse!("x^2+4")).alias_literal(crate::parse!("x^2"));
+    let (body, aliases) = aliased_body.into_inner();
+    let mut fn_map = FunctionMap::new();
+    fn_map
+        .add_function(symbol!("f"), vec![symbol!("x")], body)
+        .unwrap();
+
+    let aliased = AliasedAtom {
+        root: crate::function!(symbol!("f"), crate::parse!("y")),
+        aliases,
+    };
+    let params = vec![crate::parse!("y")];
+
+    let direct_evaluator = aliased
+        .evaluator(
+            &fn_map,
+            &params,
+            OptimizationSettings {
+                horner_iterations: 0,
+                cpe_iterations: Some(0),
+                ..OptimizationSettings::default()
+            },
+        )
+        .unwrap();
+    let tree_evaluator = aliased
+        .evaluator(
+            &fn_map,
+            &params,
+            OptimizationSettings {
+                horner_iterations: 0,
+                cpe_iterations: Some(0),
+                direct_translation: false,
+                ..OptimizationSettings::default()
+            },
+        )
+        .unwrap();
+
+    let mut evaluator = direct_evaluator.map_coeff(&|x| x.re.to_f64());
+    assert_eq!(evaluator.evaluate_single(&[3.]), 13.);
+
+    let mut evaluator = tree_evaluator.map_coeff(&|x| x.re.to_f64());
+    assert_eq!(evaluator.evaluate_single(&[3.]), 13.);
 }

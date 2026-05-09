@@ -64,8 +64,18 @@ impl<'a> AtomView<'a> {
         }
 
         if settings.horner_iterations == 0 {
-            return Self::linearize_multiple(expressions, fn_map, params, settings);
+            return Self::linearize_views(expressions, fn_map, params, settings);
         }
+
+        let horner_inputs = expressions
+            .iter()
+            .map(|x| x.to_owned())
+            .chain(fn_map.bodies().map(|x| x.to_owned()))
+            .collect::<Vec<_>>();
+        let horner_input_views: Vec<AtomView<'_>> = horner_inputs
+            .iter()
+            .map(|x| x.as_view())
+            .collect::<Vec<_>>();
 
         let v = match &settings.hot_start {
             Some(_) => {
@@ -77,7 +87,7 @@ impl<'a> AtomView<'a> {
                 // start with an occurence order Horner scheme
                 let mut v = HashMap::default();
 
-                for t in expressions {
+                for t in &horner_input_views {
                     t.count_indeterminates(true, &mut v);
                 }
 
@@ -92,7 +102,7 @@ impl<'a> AtomView<'a> {
         };
 
         let scheme = if settings.horner_iterations > 1 {
-            Self::optimize_horner_scheme_multiple(expressions, &v, &settings)
+            AtomView::optimize_horner_scheme_multiple(&horner_input_views, &v, &settings)
         } else {
             v
         };
@@ -105,7 +115,7 @@ impl<'a> AtomView<'a> {
         if settings.horner_iterations == 1 && settings.verbose {
             let mut cse = HashSet::default();
             let (mut n_add, mut n_mul) = (0, 0);
-            for e in expressions {
+            for e in &horner_input_views {
                 let (add, mul) = e.count_operations_with_subexpressions(&mut cse);
                 n_add += add;
                 n_mul += mul;
@@ -117,15 +127,19 @@ impl<'a> AtomView<'a> {
         }
 
         let mut f = fn_map.clone();
-        for Expr { body, .. } in f.tagged_fn_map.values_mut() {
-            *body = body.as_view().horner_scheme(Some(&scheme), true);
-        }
+        f.apply_horner_scheme(&scheme);
 
-        let mut e = Self::linearize_multiple(&hornered_expressions, fn_map, params, settings)?;
+        let e = Self::linearize_multiple(&hornered_expressions, &f, params, settings)?;
 
         drop(f);
         drop(hornered_expressions);
 
+        Ok(Self::optimize_linearized_evaluator(e))
+    }
+
+    fn optimize_linearized_evaluator(
+        mut e: ExpressionEvaluator<Complex<Rational>>,
+    ) -> ExpressionEvaluator<Complex<Rational>> {
         loop {
             let r = e.remove_common_instructions();
 
@@ -160,7 +174,22 @@ impl<'a> AtomView<'a> {
         }
 
         e.optimize_stack();
-        Ok(e)
+        e
+    }
+
+    pub(crate) fn to_evaluator_with_aliases(
+        expressions: &[Self],
+        alias_replacements: &[(usize, Self)],
+        fn_map: &FunctionMap,
+        params: &[Atom],
+        settings: OptimizationSettings,
+    ) -> Result<ExpressionEvaluator<Complex<Rational>>, String> {
+        if alias_replacements.is_empty() {
+            return Self::to_evaluator(expressions, fn_map, params, settings);
+        }
+
+        let f = fn_map.with_aliases(alias_replacements.iter().copied());
+        Self::to_evaluator(expressions, &f, params, settings)
     }
 
     pub fn optimize_horner_scheme_multiple(
@@ -357,6 +386,20 @@ impl<'a> AtomView<'a> {
         params: &[Atom],
         settings: OptimizationSettings,
     ) -> Result<ExpressionEvaluator<Complex<Rational>>, String> {
+        let expression_views = expressions
+            .iter()
+            .map(|e| e.as_atom_view())
+            .collect::<Vec<_>>();
+
+        Self::linearize_views(&expression_views, fn_map, params, settings)
+    }
+
+    fn linearize_views<'b>(
+        expression_views: &[AtomView<'b>],
+        fn_map: &FunctionMap,
+        params: &[Atom],
+        settings: OptimizationSettings,
+    ) -> Result<ExpressionEvaluator<Complex<Rational>>, String> {
         let mut constants = Vec::new();
         let mut constant_map = HashMap::new();
         let mut instr = Vec::new();
@@ -368,8 +411,8 @@ impl<'a> AtomView<'a> {
 
         let mut result_indices = vec![];
         let mut arg_stack = vec![];
-        for expr in expressions {
-            let res = expr.as_atom_view().linearize_impl(
+        for expr in expression_views {
+            let res = expr.linearize_impl(
                 fn_map,
                 params,
                 &mut constants,
@@ -864,6 +907,20 @@ impl<'a> AtomView<'a> {
                             f.get_nargs(),
                             arg_spec.len() + tag_len
                         ));
+                    }
+
+                    if name == Symbol::ALIAS {
+                        return e.as_view().linearize_impl(
+                            fn_map,
+                            params,
+                            constants,
+                            constant_map,
+                            external_functions,
+                            instr,
+                            subexpressions,
+                            args,
+                            arg_start,
+                        );
                     }
 
                     let old_arg_stack_len = args.len();
@@ -3269,20 +3326,20 @@ impl<'a> AtomView<'a> {
         let mut funcs = vec![];
         let mut func_id_to_index = HashMap::default();
         let mut external_functions = vec![];
+        let expression_views = exprs.iter().map(|e| e.as_atom_view()).collect::<Vec<_>>();
 
-        let tree = exprs
+        let tree = expression_views
             .iter()
             .map(|t| {
-                t.as_atom_view()
-                    .to_eval_tree_impl(
-                        fn_map,
-                        params,
-                        &[],
-                        &mut func_id_to_index,
-                        &mut funcs,
-                        &mut external_functions,
-                    )
-                    .map(|x| x.rehashed(true))
+                t.to_eval_tree_impl(
+                    fn_map,
+                    params,
+                    &[],
+                    &mut func_id_to_index,
+                    &mut funcs,
+                    &mut external_functions,
+                )
+                .map(|x| x.rehashed(true))
             })
             .collect::<Result<_, _>>()?;
 
@@ -3467,6 +3524,17 @@ impl<'a> AtomView<'a> {
                                 f.get_nargs(),
                                 arg_spec.len() + tag_len
                             ));
+                        }
+
+                        if name == Symbol::ALIAS {
+                            return e.as_view().to_eval_tree_impl(
+                                fn_map,
+                                params,
+                                args,
+                                fn_id_map,
+                                funcs,
+                                external_functions,
+                            );
                         }
 
                         let eval_args = f

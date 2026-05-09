@@ -240,6 +240,46 @@ mod test {
     }
 
     #[test]
+    fn horner_scheme_uses_function_map_bodies() {
+        let mut fn_map = FunctionMap::new();
+        fn_map
+            .add_function(symbol!("f"), vec![symbol!("x")], parse!("x^3+x^2+x+1"))
+            .unwrap();
+
+        let expr = parse!("exp(f(y))+log(f(y))");
+        let params = vec![parse!("y")];
+        let without_horner = expr
+            .evaluator(
+                &fn_map,
+                &params,
+                OptimizationSettings {
+                    horner_iterations: 0,
+                    cpe_iterations: Some(0),
+                    ..OptimizationSettings::default()
+                },
+            )
+            .unwrap();
+        let with_horner = expr
+            .evaluator(
+                &fn_map,
+                &params,
+                OptimizationSettings {
+                    horner_iterations: 1,
+                    cpe_iterations: Some(0),
+                    ..OptimizationSettings::default()
+                },
+            )
+            .unwrap();
+
+        assert!(with_horner.count_operations().1 < without_horner.count_operations().1);
+
+        let mut evaluator = with_horner.map_coeff(&|x| x.re.to_f64());
+        let value = evaluator.evaluate_single(&[2.]);
+        let expected = 15f64.exp() + 15f64.ln();
+        assert!((value - expected).abs() < 1e-10);
+    }
+
+    #[test]
     fn zero_test() {
         let e = parse!(
             "(sin(v1)^2-sin(v1))(sin(v1)^2+sin(v1))^2 - (1/4 sin(2v1)^2-1/2 sin(2v1)cos(v1)-2 cos(v1)^2+1/2 sin(2v1)cos(v1)^3+3 cos(v1)^4-cos(v1)^6)"
