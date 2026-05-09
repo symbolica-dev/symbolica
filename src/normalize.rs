@@ -429,6 +429,17 @@ fn semantic_cmp_factors(a: AtomView<'_>, b: AtomView<'_>) -> Ordering {
     }
 }
 
+fn prefer_non_alias_cmp(a: AtomView<'_>, b: AtomView<'_>) -> Ordering {
+    match (
+        matches!(a, AtomView::Alias(_)),
+        matches!(b, AtomView::Alias(_)),
+    ) {
+        (true, false) => Ordering::Greater,
+        (false, true) => Ordering::Less,
+        _ => Ordering::Equal,
+    }
+}
+
 fn semantic_cmp_terms(a: AtomView<'_>, b: AtomView<'_>) -> Ordering {
     let mut a_factors = Vec::new();
     let mut b_factors = Vec::new();
@@ -437,7 +448,7 @@ fn semantic_cmp_terms(a: AtomView<'_>, b: AtomView<'_>) -> Ordering {
 
     a_factors.len().cmp(&b_factors.len()).then_with(|| {
         for (a, b) in a_factors.into_iter().zip(b_factors) {
-            let c = semantic_cmp_factors(a, b);
+            let c = semantic_cmp(a, b);
             if c != Ordering::Equal {
                 return c;
             }
@@ -480,10 +491,12 @@ fn semantic_term_coeff(term: AtomView<'_>) -> Coefficient {
 
 fn representative_term_factors(term: AtomView<'_>) -> Vec<Atom> {
     let resolved = resolve_alias(term);
-    if let AtomView::Mul(m) = resolved
-        && m.has_coefficient()
-    {
-        return m.iter().skip(1).map(|a| a.to_owned()).collect();
+    if let AtomView::Mul(m) = resolved {
+        if m.has_coefficient() {
+            return m.iter().skip(1).map(|a| a.to_owned()).collect();
+        }
+
+        return m.iter().map(|a| a.to_owned()).collect();
     }
 
     if matches!(resolved, AtomView::Num(_)) {
@@ -655,6 +668,52 @@ impl Atom {
         workspace: &Workspace,
     ) -> bool {
         if self.merge_factors(other, helper, workspace) {
+            return true;
+        }
+
+        let self_view = self.as_view();
+        let other_view = other.as_view();
+        let mut one = workspace.new_atom();
+        one.to_num(1.into());
+        let mut one2 = workspace.new_atom();
+        one2.to_num(1.into());
+
+        let (base1, exp1) = match resolve_alias(self_view) {
+            AtomView::Pow(p) => p.get_base_exp(),
+            AtomView::Num(_) => (self_view, one.as_view()),
+            _ => (self_view, one.as_view()),
+        };
+        let (base2, exp2) = match resolve_alias(other_view) {
+            AtomView::Pow(p) => p.get_base_exp(),
+            AtomView::Num(_) => (other_view, one2.as_view()),
+            _ => (other_view, one2.as_view()),
+        };
+
+        if !matches!(resolve_alias(base1), AtomView::Num(_))
+            && semantic_cmp(base1, base2) == Ordering::Equal
+        {
+            let mut base = workspace.new_atom();
+            base.set_from_view(&base1);
+
+            let add = helper.to_add();
+            add.extend(exp1);
+            add.extend(exp2);
+
+            let mut exp = workspace.new_atom();
+            helper.as_view().normalize(workspace, &mut exp);
+
+            if let AtomView::Num(n) = exp.as_view() {
+                if n.is_zero() {
+                    self.to_num(1.into());
+                    return true;
+                } else if n.is_one() {
+                    self.set_from_view(&base.as_view());
+                    return true;
+                }
+            }
+
+            self.to_pow(base.as_view(), exp.as_view());
+            self.set_normalized(true);
             return true;
         }
 
@@ -914,11 +973,12 @@ impl AtomView<'_> {
 
                 for a in t.iter() {
                     let mut handle = workspace.new_atom();
-                    let a = match a {
-                        AtomView::Alias(alias) if matches!(alias.get_body(), AtomView::Mul(_)) => {
-                            alias.get_body()
-                        }
-                        _ => a,
+                    let a = if matches!(a, AtomView::Alias(_))
+                        && matches!(resolve_alias(a), AtomView::Mul(_))
+                    {
+                        resolve_alias(a)
+                    } else {
+                        a
                     };
 
                     if a.needs_normalization() {
@@ -953,7 +1013,11 @@ impl AtomView<'_> {
                 }
 
                 if has_alias {
-                    atom_test_buf.sort_by(|a, b| semantic_cmp_factors(a.as_view(), b.as_view()));
+                    atom_test_buf.sort_by(|a, b| {
+                        semantic_cmp_factors(a.as_view(), b.as_view())
+                            .then_with(|| prefer_non_alias_cmp(a.as_view(), b.as_view()))
+                            .then_with(|| a.as_view().cmp_factors(&b.as_view()))
+                    });
                 } else {
                     atom_test_buf.sort_by(|a, b| a.as_view().cmp_factors(&b.as_view()));
                 }
@@ -1507,13 +1571,28 @@ impl AtomView<'_> {
                         arg_buf.push((i, handle));
                     }
 
-                    arg_buf.sort_by(|a, b| a.1.as_view().cmp(&b.1.as_view()));
+                    let has_alias = out_f.to_fun_view().has_alias();
+                    arg_buf.sort_by(|a, b| {
+                        if has_alias {
+                            semantic_cmp(a.1.as_view(), b.1.as_view())
+                                .then_with(|| a.1.as_view().cmp(&b.1.as_view()))
+                        } else {
+                            a.1.as_view().cmp(&b.1.as_view())
+                        }
+                    });
 
                     if id.is_antisymmetric() {
-                        if arg_buf
-                            .windows(2)
-                            .any(|w| w[0].1.as_view() == w[1].1.as_view())
-                        {
+                        let duplicate = if has_alias {
+                            arg_buf.windows(2).any(|w| {
+                                semantic_cmp(w[0].1.as_view(), w[1].1.as_view()) == Ordering::Equal
+                            })
+                        } else {
+                            arg_buf
+                                .windows(2)
+                                .any(|w| w[0].1.as_view() == w[1].1.as_view())
+                        };
+
+                        if duplicate {
                             out.to_num(Coefficient::zero());
                             return;
                         }
@@ -1571,12 +1650,19 @@ impl AtomView<'_> {
                         args.push(a);
                     }
 
+                    let has_alias = out_f.to_fun_view().has_alias();
                     let mut best_shift = 0;
                     'shift: for shift in 1..args.len() {
                         for i in 0..args.len() {
-                            match args[(i + best_shift) % args.len()]
-                                .cmp(&args[(i + shift) % args.len()])
-                            {
+                            let best = args[(i + best_shift) % args.len()];
+                            let candidate = args[(i + shift) % args.len()];
+                            let cmp = if has_alias {
+                                semantic_cmp(best, candidate).then_with(|| best.cmp(&candidate))
+                            } else {
+                                best.cmp(&candidate)
+                            };
+
+                            match cmp {
                                 std::cmp::Ordering::Equal => {}
                                 std::cmp::Ordering::Less => {
                                     continue 'shift;
@@ -1764,11 +1850,12 @@ impl AtomView<'_> {
 
                 let mut norm_arg = workspace.new_atom();
                 for a in a {
-                    let a = match a {
-                        AtomView::Alias(alias) if matches!(alias.get_body(), AtomView::Add(_)) => {
-                            alias.get_body()
-                        }
-                        _ => a,
+                    let a = if matches!(a, AtomView::Alias(_))
+                        && matches!(resolve_alias(a), AtomView::Add(_))
+                    {
+                        resolve_alias(a)
+                    } else {
+                        a
                     };
 
                     let r = if a.needs_normalization() {
@@ -1811,7 +1898,11 @@ impl AtomView<'_> {
                 }
 
                 if has_alias {
-                    atom_sort_buf.sort_unstable_by(|a, b| semantic_cmp_terms(a.0, b.0));
+                    atom_sort_buf.sort_unstable_by(|a, b| {
+                        semantic_cmp_terms(a.0, b.0)
+                            .then_with(|| prefer_non_alias_cmp(a.0, b.0))
+                            .then_with(|| a.1.cmp(&b.1))
+                    });
                 } else {
                     atom_sort_buf.sort_unstable_by(|a, b| a.1.cmp(&b.1));
                 }

@@ -68,6 +68,84 @@ fn aliases_from_view(view: AtomView<'_>) -> Vec<Arc<AliasHandle>> {
     collect_alias_handles_in(view)
 }
 
+fn aliases_from_raw_data(data: &[u8]) -> Vec<Arc<AliasHandle>> {
+    let mut handles = Vec::new();
+    collect_aliases_from_raw(data, &mut handles);
+    handles.sort_by_key(|handle| handle.token());
+    handles.dedup_by_key(|handle| handle.token());
+    handles
+}
+
+fn collect_aliases_from_raw(data: &[u8], handles: &mut Vec<Arc<AliasHandle>>) {
+    match data[0] & TYPE_MASK {
+        NUM_ID | VAR_ID => {}
+        ALIAS_ID => {
+            let token = data[1..].get_frac_u64().0 as usize;
+            if let Some(handle) = get_alias_handle(token) {
+                handles.push(handle);
+            }
+        }
+        FUN_ID => {
+            if data[0] & HAS_ALIAS_FLAG == 0 {
+                return;
+            }
+            let mut c = &data[1 + 4..];
+            let n_args;
+            (_, n_args, c) = c.get_frac_u64();
+            collect_aliases_from_raw_list(c, n_args as usize, handles);
+        }
+        POW_ID => collect_aliases_from_raw_list(&data[1..], 2, handles),
+        MUL_ID => {
+            if data[0] & MUL_HAS_ALIAS_FLAG == 0 {
+                return;
+            }
+            let mut c = &data[1 + 4..];
+            let n_args;
+            (n_args, _, c) = c.get_frac_u64();
+            collect_aliases_from_raw_list(c, n_args as usize, handles);
+        }
+        ADD_ID => {
+            if data[0] & HAS_ALIAS_FLAG == 0 {
+                return;
+            }
+            let mut c = &data[1..];
+            let n_args;
+            (n_args, _, c) = c.get_frac_u64();
+            collect_aliases_from_raw_list(c, n_args as usize, handles);
+        }
+        x => unreachable!("Bad id {}", x),
+    }
+}
+
+fn collect_aliases_from_raw_list(
+    mut data: &[u8],
+    n_args: usize,
+    handles: &mut Vec<Arc<AliasHandle>>,
+) {
+    for _ in 0..n_args {
+        collect_aliases_from_raw(data, handles);
+        data = skip_raw_atom(data);
+    }
+}
+
+fn skip_raw_atom(mut data: &[u8]) -> &[u8] {
+    let atom_type = data.get_u8() & TYPE_MASK;
+    match atom_type {
+        NUM_ID | VAR_ID | ALIAS_ID => data.skip_rational(),
+        FUN_ID | MUL_ID => {
+            let n_size = data.get_u32_le();
+            data.advance(n_size as usize);
+            data
+        }
+        ADD_ID => {
+            let (_, size, data) = data.get_frac_u64();
+            &data[size as usize..]
+        }
+        POW_ID => skip_raw_atom(skip_raw_atom(data)),
+        x => unreachable!("Bad id {}", x),
+    }
+}
+
 #[inline(always)]
 fn alias_flag_for(view: AtomView<'_>) -> u8 {
     if view.has_alias() { HAS_ALIAS_FLAG } else { 0 }
@@ -1183,10 +1261,8 @@ impl Fun {
 
     #[inline(always)]
     pub(crate) unsafe fn from_raw(raw: RawAtom) -> Fun {
-        Fun {
-            data: raw,
-            aliases: Vec::new(),
-        }
+        let aliases = aliases_from_raw_data(&raw);
+        Fun { data: raw, aliases }
     }
 }
 
@@ -1279,10 +1355,8 @@ impl Pow {
 
     #[inline(always)]
     pub(crate) unsafe fn from_raw(raw: RawAtom) -> Pow {
-        Pow {
-            data: raw,
-            aliases: Vec::new(),
-        }
+        let aliases = aliases_from_raw_data(&raw);
+        Pow { data: raw, aliases }
     }
 }
 
@@ -1498,10 +1572,8 @@ impl Mul {
 
     #[inline(always)]
     pub(crate) unsafe fn from_raw(raw: RawAtom) -> Mul {
-        Mul {
-            data: raw,
-            aliases: Vec::new(),
-        }
+        let aliases = aliases_from_raw_data(&raw);
+        Mul { data: raw, aliases }
     }
 }
 
@@ -1655,10 +1727,8 @@ impl Add {
 
     #[inline(always)]
     pub(crate) unsafe fn from_raw(raw: RawAtom) -> Add {
-        Add {
-            data: raw,
-            aliases: Vec::new(),
-        }
+        let aliases = aliases_from_raw_data(&raw);
+        Add { data: raw, aliases }
     }
 
     pub(crate) fn grow_capacity(&mut self, size: usize) {

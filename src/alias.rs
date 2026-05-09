@@ -813,9 +813,69 @@ fn alias_pattern_match_uses_body() {
 }
 
 #[test]
+fn alias_replacement_descends_into_body() {
+    use crate::atom::AtomCore;
+
+    let aliased = AliasedAtom::new(crate::parse!("f(x)")).alias_literal(crate::parse!("f(x)"));
+    let replaced = aliased
+        .root
+        .replace(crate::parse!("x"))
+        .with(crate::parse!("y"));
+
+    assert_eq!(replaced, crate::parse!("f(y)"));
+}
+
+#[test]
+fn alias_contains_descends_past_small_alias_token() {
+    use crate::atom::AtomCore;
+
+    let body = crate::parse!("f(1009,1013,1019,1021)");
+    let aliased = AliasedAtom::new(body.clone()).alias_literal(body.clone());
+
+    assert!(aliased.root.contains(body.as_view()));
+}
+
+#[test]
+fn alias_contains_descends_past_small_parent_with_alias() {
+    use crate::atom::AtomCore;
+
+    let body = crate::parse!("f(1009,1013,1019,1021)");
+    let root = crate::function!(crate::symbol!("alias_contains_parent::g"), body.clone());
+    let aliased = AliasedAtom::new(root).alias_literal(body.clone());
+
+    assert!(aliased.root.contains(body.as_view()));
+}
+
+#[test]
+fn alias_replacement_descends_past_small_parent_with_alias() {
+    use crate::atom::AtomCore;
+
+    let body = crate::parse!("f(1009,1013,1019,1021)");
+    let root = crate::function!(crate::symbol!("alias_replacement_parent::g"), body.clone());
+    let aliased = AliasedAtom::new(root).alias_literal(body.clone());
+    let replaced = aliased.root.replace(body).with(crate::parse!("y"));
+
+    assert_eq!(
+        replaced,
+        crate::function!(
+            crate::symbol!("alias_replacement_parent::g"),
+            crate::parse!("y")
+        )
+    );
+}
+
+#[test]
 fn alias_normalization_resolves_add_terms() {
     let y_alias = register_aliased_atom(AliasedAtom::new(crate::parse!("y"))).0;
     let sum = crate::parse!("y") + y_alias.to_atom();
+
+    assert_eq!(sum, crate::parse!("2*y"));
+}
+
+#[test]
+fn alias_normalization_resolves_add_terms_independent_of_order() {
+    let y_alias = register_aliased_atom(AliasedAtom::new(crate::parse!("y"))).0;
+    let sum = y_alias.to_atom() + crate::parse!("y");
 
     assert_eq!(sum, crate::parse!("2*y"));
 }
@@ -826,6 +886,34 @@ fn alias_normalization_resolves_mul_factors() {
     let product = crate::parse!("x") * x_alias.to_atom();
 
     assert_eq!(product, crate::parse!("x^2"));
+}
+
+#[test]
+fn alias_normalization_resolves_mul_factors_independent_of_order() {
+    let x_alias = register_aliased_atom(AliasedAtom::new(crate::parse!("x"))).0;
+    let product = x_alias.to_atom() * crate::parse!("x");
+
+    assert_eq!(product, crate::parse!("x^2"));
+}
+
+#[test]
+fn alias_addition_flattens_nested_alias_chain_with_add_body() {
+    let zw_alias = register_aliased_atom(AliasedAtom::new(crate::parse!("z+w"))).0;
+    let nested_alias = register_aliased_atom(AliasedAtom::new(zw_alias.to_atom())).0;
+    let sum = crate::parse!("x") + nested_alias.to_atom();
+
+    assert!(!sum.as_view().has_alias());
+    assert_eq!(sum, crate::parse!("w+x+z"));
+}
+
+#[test]
+fn alias_multiplication_flattens_nested_alias_chain_with_mul_body() {
+    let yz_alias = register_aliased_atom(AliasedAtom::new(crate::parse!("y*z"))).0;
+    let nested_alias = register_aliased_atom(AliasedAtom::new(yz_alias.to_atom())).0;
+    let product = crate::parse!("x") * nested_alias.to_atom();
+
+    assert!(!product.as_view().has_alias());
+    assert_eq!(product, crate::parse!("x*y*z"));
 }
 
 #[test]
@@ -855,6 +943,24 @@ fn alias_addition_merges_nested_alias_equivalent_terms() {
 }
 
 #[test]
+fn alias_addition_does_not_merge_different_powers() {
+    let x3_alias = register_aliased_atom(AliasedAtom::new(crate::parse!("x^3"))).0;
+    let sum = crate::parse!("x^2") + x3_alias.to_atom();
+
+    assert!(sum.as_view().has_alias());
+    assert_eq!(to_atom(&sum), crate::parse!("x^2+x^3"));
+}
+
+#[test]
+fn alias_addition_merges_mul_body_without_same_type_alias_factor() {
+    let xy_alias = register_aliased_atom(AliasedAtom::new(crate::parse!("x*y"))).0;
+    let sum = xy_alias.to_atom() + crate::parse!("x*y");
+
+    assert!(!sum.as_view().has_alias());
+    assert_eq!(sum, crate::parse!("2*x*y"));
+}
+
+#[test]
 fn alias_multiplication_merges_nested_alias_equivalent_factors() {
     let x_alias = register_aliased_atom(AliasedAtom::new(crate::parse!("x"))).0;
     let x_alias_atom = x_alias.to_atom();
@@ -868,6 +974,25 @@ fn alias_multiplication_merges_nested_alias_equivalent_factors() {
 
     assert!(product.as_view().has_alias());
     assert_eq!(to_atom(&product), crate::parse!("exp(x)^2"));
+}
+
+#[test]
+fn alias_multiplication_merges_semantic_power_bases() {
+    let x_alias = register_aliased_atom(AliasedAtom::new(crate::parse!("x"))).0;
+    let product = x_alias.to_atom() * crate::parse!("x^2");
+
+    assert!(product.as_view().has_alias());
+    assert_eq!(to_atom(&product), crate::parse!("x^3"));
+}
+
+#[test]
+fn alias_antisymmetric_function_detects_semantic_duplicate_args() {
+    let f = crate::symbol!("alias_antisymmetric_function_detects_semantic_duplicate_args::f"; Antisymmetric);
+    let x_alias = register_aliased_atom(AliasedAtom::new(crate::parse!("x"))).0;
+
+    let value = crate::function!(f, x_alias.to_atom(), crate::parse!("x"));
+
+    assert_eq!(value, crate::parse!("0"));
 }
 
 #[test]

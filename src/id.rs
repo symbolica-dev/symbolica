@@ -958,15 +958,18 @@ impl<'a> AtomView<'a> {
                 return true;
             }
 
-            if a.get_byte_size() > c.get_byte_size() {
+            if let AtomView::Alias(alias) = c {
+                stack.push(alias.get_body());
+                continue;
+            }
+
+            if !c.has_alias() && a.get_byte_size() > c.get_byte_size() {
                 continue;
             }
 
             match c {
                 AtomView::Num(_) | AtomView::Var(_) => {}
-                AtomView::Alias(a) => {
-                    stack.push(a.get_body());
-                }
+                AtomView::Alias(_) => unreachable!(),
                 AtomView::Fun(f) => {
                     for arg in f {
                         stack.push(arg);
@@ -1806,7 +1809,7 @@ impl<'a> AtomView<'a> {
             let r = r.borrow();
 
             if let Pattern::Literal(l) = &r.pattern {
-                if l.as_view().get_byte_size() <= self.get_byte_size() {
+                if self.has_alias() || l.as_view().get_byte_size() <= self.get_byte_size() {
                     fits = true;
                 }
             } else {
@@ -1956,6 +1959,19 @@ impl<'a> AtomView<'a> {
 
         // no match found at this level, so check the children
         match self {
+            AtomView::Alias(a) => {
+                a.get_body().replace_no_norm(
+                    replacements,
+                    atom_match_iterators,
+                    workspace,
+                    tree_level,
+                    fn_level,
+                    max_level,
+                    rhs_cache,
+                    replace_settings,
+                    out,
+                );
+            }
             AtomView::Fun(f) => {
                 if let Some((max_level, _)) = max_level
                     && fn_level >= max_level
