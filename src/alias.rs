@@ -41,6 +41,10 @@ impl AliasHandle {
         Atom::alias(self.clone())
     }
 
+    pub fn to_opaque_atom(self: &Arc<Self>) -> Atom {
+        Atom::opaque_alias(self.clone())
+    }
+
     pub(crate) fn atom(&self) -> &Atom {
         &self.atom
     }
@@ -878,6 +882,36 @@ fn alias_normalization_resolves_add_terms_independent_of_order() {
     let sum = y_alias.to_atom() + crate::parse!("y");
 
     assert_eq!(sum, crate::parse!("2*y"));
+}
+
+#[test]
+fn opaque_alias_addition_does_not_merge_with_body() {
+    let x_alias = register_aliased_atom(AliasedAtom::new(crate::parse!("x"))).0;
+    let sum = crate::parse!("x") + x_alias.to_opaque_atom();
+
+    assert!(sum.as_view().has_alias());
+    assert_ne!(sum, crate::parse!("2*x"));
+}
+
+#[test]
+fn opaque_alias_literal_pattern_does_not_match_body() {
+    use crate::atom::AtomCore;
+
+    let x_alias = register_aliased_atom(AliasedAtom::new(crate::parse!("x"))).0;
+    let opaque = x_alias.to_opaque_atom();
+    let pattern = crate::parse!("x").to_pattern();
+
+    assert!(opaque.pattern_match(&pattern, None, None).next().is_none());
+}
+
+#[test]
+fn opaque_alias_derivative_treats_alias_as_atom() {
+    use crate::atom::AtomCore;
+
+    let x_alias = register_aliased_atom(AliasedAtom::new(crate::parse!("x"))).0;
+    let expr = crate::parse!("x") + x_alias.to_opaque_atom();
+
+    assert_eq!(expr.derivative(crate::symbol!("x")), crate::parse!("1"));
 }
 
 #[test]

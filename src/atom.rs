@@ -2774,6 +2774,11 @@ impl Atom {
         Alias::new(handle).into()
     }
 
+    #[inline]
+    pub(crate) fn opaque_alias(handle: std::sync::Arc<crate::alias::AliasHandle>) -> Atom {
+        Alias::new_opaque(handle).into()
+    }
+
     /// Create a new atom that represents a number.
     #[inline]
     pub fn num<T: Into<Coefficient>>(num: T) -> Atom {

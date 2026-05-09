@@ -82,7 +82,7 @@ pub trait AtomCore: private::Sealed + Sized {
     fn as_fun_view(&self) -> Option<FunView<'_>> {
         match self.as_atom_view() {
             AtomView::Fun(f) => Some(f),
-            AtomView::Alias(a) => match a.get_body() {
+            AtomView::Alias(a) if !a.is_opaque() => match a.get_body() {
                 AtomView::Fun(f) => Some(f),
                 _ => None,
             },
@@ -94,7 +94,7 @@ pub trait AtomCore: private::Sealed + Sized {
     fn as_var_view(&self) -> Option<VarView<'_>> {
         match self.as_atom_view() {
             AtomView::Var(v) => Some(v),
-            AtomView::Alias(a) => match a.get_body() {
+            AtomView::Alias(a) if !a.is_opaque() => match a.get_body() {
                 AtomView::Var(v) => Some(v),
                 _ => None,
             },
@@ -106,7 +106,7 @@ pub trait AtomCore: private::Sealed + Sized {
     fn as_num_view(&self) -> Option<NumView<'_>> {
         match self.as_atom_view() {
             AtomView::Num(n) => Some(n),
-            AtomView::Alias(a) => match a.get_body() {
+            AtomView::Alias(a) if !a.is_opaque() => match a.get_body() {
                 AtomView::Num(n) => Some(n),
                 _ => None,
             },
@@ -118,7 +118,7 @@ pub trait AtomCore: private::Sealed + Sized {
     fn as_mul_view(&self) -> Option<MulView<'_>> {
         match self.as_atom_view() {
             AtomView::Mul(m) => Some(m),
-            AtomView::Alias(a) => match a.get_body() {
+            AtomView::Alias(a) if !a.is_opaque() => match a.get_body() {
                 AtomView::Mul(m) => Some(m),
                 _ => None,
             },
@@ -130,7 +130,7 @@ pub trait AtomCore: private::Sealed + Sized {
     fn as_add_view(&self) -> Option<AddView<'_>> {
         match self.as_atom_view() {
             AtomView::Add(a) => Some(a),
-            AtomView::Alias(alias) => match alias.get_body() {
+            AtomView::Alias(alias) if !alias.is_opaque() => match alias.get_body() {
                 AtomView::Add(a) => Some(a),
                 _ => None,
             },
@@ -158,7 +158,7 @@ pub trait AtomCore: private::Sealed + Sized {
         match self.as_atom_view() {
             AtomView::Var(v) => Some(v.get_symbol()),
             AtomView::Fun(f) => Some(f.get_symbol()),
-            AtomView::Alias(a) => match a.get_body() {
+            AtomView::Alias(a) if !a.is_opaque() => match a.get_body() {
                 AtomView::Var(v) => Some(v.get_symbol()),
                 AtomView::Fun(f) => Some(f.get_symbol()),
                 _ => None,
@@ -2126,7 +2126,7 @@ pub trait AtomCore: private::Sealed + Sized {
     /// ```
     fn terms(&self) -> impl Iterator<Item = AtomView<'_>> {
         let s = match self.as_atom_view() {
-            AtomView::Alias(a) => a.get_body(),
+            AtomView::Alias(a) if !a.is_opaque() => a.get_body(),
             a => a,
         };
         match s {
@@ -2149,7 +2149,7 @@ pub trait AtomCore: private::Sealed + Sized {
     /// return `x, y`
     fn children(&self) -> impl Iterator<Item = AtomView<'_>> {
         let s = match self.as_atom_view() {
-            AtomView::Alias(a) => a.get_body(),
+            AtomView::Alias(a) if !a.is_opaque() => a.get_body(),
             a => a,
         };
         match s {

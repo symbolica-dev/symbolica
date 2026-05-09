@@ -46,7 +46,13 @@ impl AtomView<'_> {
         }
 
         match self {
-            AtomView::Alias(a) => a.get_body().derivative_with_ws_into(x, workspace, out),
+            AtomView::Alias(a) if !a.is_opaque() => {
+                a.get_body().derivative_with_ws_into(x, workspace, out)
+            }
+            AtomView::Alias(_) => {
+                out.to_num(Coefficient::zero());
+                false
+            }
             AtomView::Num(_) | AtomView::Var(_) => {
                 out.to_num(Coefficient::zero());
                 false
@@ -456,7 +462,10 @@ impl AtomView<'_> {
 
         // TODO: optimize, appending a monomial using addition is slow
         match self {
-            AtomView::Alias(a) => a.get_body().series_impl(x, expansion_point, info),
+            AtomView::Alias(a) if !a.is_opaque() => {
+                a.get_body().series_impl(x, expansion_point, info)
+            }
+            AtomView::Alias(_) => Ok(info.constant(self.to_owned())),
             AtomView::Num(_) | AtomView::Var(_) => Ok(info.constant(self.to_owned())),
             AtomView::Fun(f) => {
                 let mut args_series = Vec::with_capacity(f.get_nargs());

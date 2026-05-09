@@ -50,6 +50,7 @@ const SYM_EXTRA_WILDCARD_LEVEL_3: u32 = 0b11_000;
 
 const MUL_HAS_COEFF_FLAG: u8 = 0b01000000;
 const MUL_HAS_ALIAS_FLAG: u8 = 0b00100000;
+const ALIAS_OPAQUE_FLAG: u8 = 0b00001_000;
 
 const ZERO_DATA: [u8; 3] = [NUM_ID, 1, 0];
 static NO_ALIASES: Vec<Arc<AliasHandle>> = Vec::new();
@@ -998,9 +999,19 @@ impl Alias {
     }
 
     #[inline]
-    pub(crate) fn new_into(handle: Arc<AliasHandle>, mut buffer: RawAtom) -> Alias {
+    pub(crate) fn new_opaque(handle: Arc<AliasHandle>) -> Alias {
+        Self::new_into_impl(handle, RawAtom::new(), true)
+    }
+
+    #[inline]
+    pub(crate) fn new_into(handle: Arc<AliasHandle>, buffer: RawAtom) -> Alias {
+        Self::new_into_impl(handle, buffer, false)
+    }
+
+    #[inline]
+    fn new_into_impl(handle: Arc<AliasHandle>, mut buffer: RawAtom, opaque: bool) -> Alias {
         buffer.clear();
-        buffer.put_u8(ALIAS_ID);
+        buffer.put_u8(ALIAS_ID | if opaque { ALIAS_OPAQUE_FLAG } else { 0 });
         (handle.token() as u64, 1).write_packed(&mut buffer);
         Alias {
             data: buffer,
@@ -1871,6 +1882,11 @@ impl<'a> AliasView<'a> {
             .expect("Alias handle was released before the alias atom")
             .atom()
             .as_view()
+    }
+
+    #[inline(always)]
+    pub fn is_opaque(&self) -> bool {
+        self.data[0] & ALIAS_OPAQUE_FLAG != 0
     }
 
     #[inline]

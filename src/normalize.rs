@@ -312,7 +312,9 @@ impl AtomView<'_> {
 
 #[inline]
 fn resolve_alias(mut a: AtomView<'_>) -> AtomView<'_> {
-    while let AtomView::Alias(alias) = a {
+    while let AtomView::Alias(alias) = a
+        && !alias.is_opaque()
+    {
         a = alias.get_body();
     }
     a
@@ -345,7 +347,9 @@ fn semantic_cmp(a: AtomView<'_>, b: AtomView<'_>) -> Ordering {
     let b = resolve_alias(b);
 
     match (a, b) {
-        (AtomView::Alias(_), _) | (_, AtomView::Alias(_)) => unreachable!(),
+        (AtomView::Alias(_), AtomView::Alias(_)) => a.get_data().cmp(b.get_data()),
+        (AtomView::Alias(_), _) => Ordering::Less,
+        (_, AtomView::Alias(_)) => Ordering::Greater,
         (AtomView::Num(n1), AtomView::Num(n2)) => n1
             .get_coeff_view()
             .cmp(&n2.get_coeff_view())
@@ -1329,11 +1333,12 @@ impl AtomView<'_> {
                     let arg = out_f.to_fun_view().iter().next().unwrap();
 
                     match arg {
-                        AtomView::Alias(a) => {
+                        AtomView::Alias(a) if !a.is_opaque() => {
                             let mut inner = workspace.new_atom();
                             inner.to_fun(Symbol::CONJ).add_arg(a.get_body());
                             inner.as_view().normalize(workspace, out);
                         }
+                        AtomView::Alias(_) => {}
                         AtomView::Num(n) => {
                             let conj_coeff = n.get_coeff_view().to_owned().conjugate();
                             out.to_num(conj_coeff);
