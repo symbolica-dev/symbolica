@@ -487,6 +487,7 @@ impl<'a> AtomView<'a> {
         }
 
         match self {
+            AtomView::Alias(a) => a.get_body().tensor_to_graph_impl(indices, connections, g),
             AtomView::Num(_) | AtomView::Var(_) => {
                 Err("Dummy index appears as variable instead of as a function argument".to_owned())
             }

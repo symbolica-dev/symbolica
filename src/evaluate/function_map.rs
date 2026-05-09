@@ -154,6 +154,12 @@ impl FunctionMap {
             .map(|e| e.body.as_view())
     }
 
+    pub(super) fn get_alias_body(&self, token: usize) -> Option<AtomView<'_>> {
+        self.tagged_fn_map
+            .get(&(Symbol::ALIAS, vec![Atom::num(token)]))
+            .map(|e| e.body.as_view())
+    }
+
     pub(super) fn apply_horner_scheme(&mut self, scheme: &[Indeterminate]) {
         for Expr { body, .. } in self.map.values_mut().chain(self.tagged_fn_map.values_mut()) {
             *body = body.as_view().horner_scheme(Some(scheme), true);

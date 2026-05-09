@@ -1329,7 +1329,8 @@ impl Workspace {
         owned
     }
 
-    pub fn return_atom(&self, atom: Atom) {
+    pub fn return_atom(&self, mut atom: Atom) {
+        atom.clear_alias_handles();
         if let Ok(mut a) = self.atom_buffer.try_borrow_mut() {
             a.push(atom);
         }
@@ -1429,6 +1430,7 @@ impl Drop for RecycledAtom {
                 if let Ok(mut a) = ws.atom_buffer.try_borrow_mut()
                     && a.len() < Workspace::ATOM_BUFFER_MAX
                 {
+                    self.0.clear_alias_handles();
                     a.push(std::mem::replace(&mut self.0, Atom::Zero));
                 }
             },

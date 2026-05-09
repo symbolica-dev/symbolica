@@ -2214,7 +2214,10 @@ impl FiniteFieldCore<MultiPrecisionInteger> for FiniteField<MultiPrecisionIntege
         self.p.clone()
     }
 
-    fn to_element(&self, mut a: MultiPrecisionInteger) -> FiniteFieldElement<MultiPrecisionInteger> {
+    fn to_element(
+        &self,
+        mut a: MultiPrecisionInteger,
+    ) -> FiniteFieldElement<MultiPrecisionInteger> {
         a %= &self.p;
         if a < 0 {
             a += &self.p;

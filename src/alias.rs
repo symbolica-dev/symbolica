@@ -11,7 +11,7 @@ use ahash::{HashMap, HashMapExt, HashSet};
 use append_only_vec::AppendOnlyVec;
 use arc_swap::ArcSwapOption;
 
-use crate::atom::{Atom, AtomCore, AtomOrView, AtomView, Symbol};
+use crate::atom::{Atom, AtomCore, AtomOrView, AtomView};
 
 #[derive(Debug)]
 struct AliasEntry {
@@ -37,8 +37,8 @@ impl AliasHandle {
         pack_alias_token(self.id, self.generation)
     }
 
-    pub(crate) fn to_atom(&self) -> Atom {
-        crate::function!(Symbol::ALIAS, self.token())
+    pub(crate) fn to_atom(self: &Arc<Self>) -> Atom {
+        Atom::alias(self.clone())
     }
 
     pub(crate) fn atom(&self) -> &Atom {
@@ -130,7 +130,7 @@ fn get_alias_entry(token: usize) -> Option<Arc<AliasEntry>> {
     (entry.generation == generation).then_some(entry)
 }
 
-fn get_alias_handle(token: usize) -> Option<Arc<AliasHandle>> {
+pub(crate) fn get_alias_handle(token: usize) -> Option<Arc<AliasHandle>> {
     get_alias_entry(token)?.handle.upgrade()
 }
 
@@ -207,22 +207,42 @@ impl AtomView<'_> {
     }
 }
 
-fn collect_alias_handles_in(root: AtomView<'_>) -> Vec<Arc<AliasHandle>> {
+pub(crate) fn collect_alias_handles_in(root: AtomView<'_>) -> Vec<Arc<AliasHandle>> {
     let mut handles = HashSet::default();
-    root.visitor(&mut |a| {
-        if let AtomView::Fun(f) = a
-            && f.get_symbol() == Symbol::ALIAS
-        {
-            let token: usize = f.iter().next().unwrap().try_into().unwrap();
-            handles.insert(get_alias_handle(token).unwrap());
-        }
-
-        true
-    });
+    collect_alias_handles_in_impl(root, &mut handles);
 
     let mut handles: Vec<_> = handles.into_iter().collect();
     handles.sort_by_key(|handle| handle.id());
     handles
+}
+
+fn collect_alias_handles_in_impl(root: AtomView<'_>, handles: &mut HashSet<Arc<AliasHandle>>) {
+    match root {
+        AtomView::Num(_) | AtomView::Var(_) => {}
+        AtomView::Alias(a) => {
+            handles.insert(a.get_handle());
+        }
+        AtomView::Fun(f) => {
+            for arg in f {
+                collect_alias_handles_in_impl(arg, handles);
+            }
+        }
+        AtomView::Pow(p) => {
+            let (base, exp) = p.get_base_exp();
+            collect_alias_handles_in_impl(base, handles);
+            collect_alias_handles_in_impl(exp, handles);
+        }
+        AtomView::Mul(m) => {
+            for child in m {
+                collect_alias_handles_in_impl(child, handles);
+            }
+        }
+        AtomView::Add(a) => {
+            for child in a {
+                collect_alias_handles_in_impl(child, handles);
+            }
+        }
+    }
 }
 
 fn get_alias_handles(root: AtomView<'_>) -> Vec<Arc<AliasHandle>> {
@@ -727,11 +747,8 @@ pub(crate) fn alias_subexpressions(
 
 pub fn to_atom(root: &Atom) -> Atom {
     root.replace_map(|x, _, out| {
-        if let AtomView::Fun(f) = x
-            && f.get_symbol() == Symbol::ALIAS
-        {
-            let token: usize = f.iter().next().unwrap().try_into().unwrap();
-            let nested = to_atom(&get_alias_entry(token).unwrap().atom);
+        if let AtomView::Alias(a) = x {
+            let nested = to_atom(get_alias_entry(a.get_token()).unwrap().atom.as_ref());
             out.set_from_view(&nested.as_view());
         }
     })
@@ -759,30 +776,114 @@ fn test_alias_cleanup() {
 }
 
 #[test]
+fn alias_view_to_owned_keeps_handle_alive() {
+    let aliased = AliasedAtom::new(crate::parse!("x+1")).alias_literal(crate::parse!("x+1"));
+    let owned = aliased.root.as_view().to_owned();
+    let aliases = aliased.aliases.clone();
+    drop(aliased);
+    drop(aliases);
+
+    assert_eq!(to_atom(&owned), crate::parse!("x+1"));
+}
+
+#[test]
+fn alias_derivative_acts_on_body() {
+    use crate::{atom::AtomCore, symbol};
+
+    let aliased = AliasedAtom::new(crate::parse!("x+1")).alias_literal(crate::parse!("x+1"));
+    let derivative = aliased.derivative(symbol!("x"));
+
+    assert_eq!(derivative.root, crate::parse!("1"));
+}
+
+#[test]
+fn alias_pattern_match_uses_body() {
+    use crate::atom::AtomCore;
+
+    let aliased = AliasedAtom::new(crate::parse!("x+1")).alias_literal(crate::parse!("x+1"));
+    let pattern = crate::parse!("x_+1").to_pattern();
+
+    assert!(
+        aliased
+            .root
+            .pattern_match(&pattern, None, None)
+            .next()
+            .is_some()
+    );
+}
+
+#[test]
+fn alias_normalization_resolves_add_terms() {
+    let y_alias = register_aliased_atom(AliasedAtom::new(crate::parse!("y"))).0;
+    let sum = crate::parse!("y") + y_alias.to_atom();
+
+    assert_eq!(sum, crate::parse!("2*y"));
+}
+
+#[test]
+fn alias_normalization_resolves_mul_factors() {
+    let x_alias = register_aliased_atom(AliasedAtom::new(crate::parse!("x"))).0;
+    let product = crate::parse!("x") * x_alias.to_atom();
+
+    assert_eq!(product, crate::parse!("x^2"));
+}
+
+#[test]
+fn alias_pattern_match_flattens_same_type_children() {
+    use crate::atom::AtomCore;
+
+    let zw_alias = register_aliased_atom(AliasedAtom::new(crate::parse!("z+w"))).0;
+    let zw_alias_atom = zw_alias.to_atom();
+    let mut target = crate::atom::Atom::new();
+    let add = target.to_add();
+    add.extend(crate::parse!("x").as_view());
+    add.extend(crate::parse!("y").as_view());
+    add.extend(zw_alias_atom.as_view());
+
+    let pattern = crate::parse!("a_+b_+c_+d_").to_pattern();
+    assert!(target.pattern_match(&pattern, None, None).next().is_some());
+}
+
+#[test]
+fn atom_core_alias_repeated_subexpressions_skips_variables() {
+    use crate::atom::AtomCore;
+
+    let expr = crate::parse!("exp(x+1)+log(x+1)+(x+1)^2+x+x");
+    let aliased = expr.alias_repeated_subexpressions();
+
+    assert_eq!(to_atom(&aliased.root), expr);
+    assert_eq!(aliased.aliases.len(), 1);
+    assert_eq!(aliased.aliases[0].atom.as_ref(), &crate::parse!("1+x"));
+}
+
+#[test]
 fn test_aliased_atom_arithmetic_merges_handles() {
-    let left = AliasedAtom::new(crate::parse!("x+f(1009)")).alias_literal(crate::parse!("f(1009)"));
+    let left =
+        AliasedAtom::new(crate::parse!("x+exp(f(1009))")).alias_literal(crate::parse!("f(1009)"));
     let right =
-        AliasedAtom::new(crate::parse!("y+g(1013)")).alias_literal(crate::parse!("g(1013)"));
+        AliasedAtom::new(crate::parse!("y+log(g(1013))")).alias_literal(crate::parse!("g(1013)"));
     let expected = merge_alias_handles(left.aliases.clone(), right.aliases.clone())
         .into_iter()
         .map(|handle| handle.token())
         .collect::<Vec<_>>();
 
     let sum = &left + &right;
-    let sum_tokens = sum
+    let mut sum_tokens = sum
         .aliases
         .iter()
         .map(|handle| handle.token())
         .collect::<Vec<_>>();
+    sum_tokens.sort();
     assert_eq!(sum_tokens, expected);
 
     let mut product = left.clone();
     product *= &right;
-    let product_tokens = product
+    let mut product_tokens = product
         .aliases
         .iter()
         .map(|handle| handle.token())
         .collect::<Vec<_>>();
+    product_tokens.sort();
     assert_eq!(product_tokens, expected);
 
     drop(left);

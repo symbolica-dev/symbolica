@@ -276,6 +276,7 @@ impl AtomView<'_> {
         match self {
             AtomView::Num(n) => n.fmt_debug(fmt),
             AtomView::Var(v) => v.fmt_debug(fmt),
+            AtomView::Alias(a) => a.get_body().fmt_debug(fmt),
             AtomView::Fun(f) => f.fmt_debug(fmt),
             AtomView::Pow(p) => p.fmt_debug(fmt),
             AtomView::Mul(m) => m.fmt_debug(fmt),
@@ -292,6 +293,7 @@ impl AtomView<'_> {
         match self {
             AtomView::Num(n) => n.fmt_output(fmt, opts, print_state),
             AtomView::Var(v) => v.fmt_output(fmt, opts, print_state),
+            AtomView::Alias(a) => a.get_body().format(fmt, opts, print_state),
             AtomView::Fun(f) => f.fmt_output(fmt, opts, print_state),
             AtomView::Pow(p) => p.fmt_output(fmt, opts, print_state),
             AtomView::Mul(t) => t.fmt_output(fmt, opts, print_state),
@@ -332,6 +334,7 @@ impl AtomView<'_> {
     fn canonical_string_sign_fix(&self, settings: &CanonicalOrderingSettings) -> Atom {
         match self {
             AtomView::Num(_) | AtomView::Var(_) => self.to_owned(),
+            AtomView::Alias(a) => a.get_body().canonical_string_sign_fix(settings),
             AtomView::Fun(f) => {
                 let mut fb = FunctionBuilder::new(f.get_symbol());
                 for aa in f.iter() {
@@ -454,6 +457,7 @@ impl AtomView<'_> {
 
         match self {
             AtomView::Num(_) => write!(out, "{}", self.printer(PrintOptions::file())).unwrap(),
+            AtomView::Alias(a) => a.get_body().to_canonical_view_impl(settings, out),
             AtomView::Var(v) => {
                 if settings.include_attributes {
                     v.get_symbol()
@@ -613,6 +617,7 @@ impl AtomView<'_> {
     /// Estimate the length of the string representation of the atom, for use in deciding when to split terms onto new lines.
     fn estimate_char_length(&self, opts: &PrintOptions) -> usize {
         match self {
+            AtomView::Alias(a) => a.get_body().estimate_char_length(opts),
             AtomView::Num(n) => match n.get_coeff_view() {
                 CoefficientView::Natural(num, den, num_i, den_i) => {
                     let mut len = 0;

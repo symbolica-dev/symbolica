@@ -2837,6 +2837,9 @@ impl AtomView<'_> {
         out: &mut Atom,
     ) -> bool {
         match self {
+            AtomView::Alias(a) => a
+                .get_body()
+                .set_coefficient_ring_with_ws_into(vars, workspace, out),
             AtomView::Num(n) => {
                 if let CoefficientView::RationalPolynomial(r) = n.get_coeff_view() {
                     let r = r.deserialize();
@@ -3007,6 +3010,10 @@ impl AtomView<'_> {
         out: &mut Atom,
     ) {
         match self {
+            AtomView::Alias(a) => {
+                a.get_body()
+                    .to_float_impl(binary_prec, enter_function, enter_exponent, ws, out);
+            }
             AtomView::Num(n) => match n.get_coeff_view() {
                 CoefficientView::Natural(n, d, ni, di) => {
                     out.to_num(Coefficient::Float(Complex::new(
@@ -3257,6 +3264,15 @@ impl AtomView<'_> {
         out: &mut Atom,
     ) {
         match self {
+            AtomView::Alias(a) => {
+                a.get_body().map_coefficient_impl(
+                    coeff_map,
+                    enter_function,
+                    enter_exponent,
+                    ws,
+                    out,
+                );
+            }
             AtomView::Num(n) => {
                 out.to_num(coeff_map(n.get_coeff_view()));
             }

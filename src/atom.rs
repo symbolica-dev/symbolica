@@ -73,8 +73,8 @@ use std::{
 
 pub use self::core::AtomCore;
 pub use self::representation::{
-    Add, AddView, Fun, InlineNum, InlineVar, KeyLookup, ListIterator, ListSlice, Mul, MulView, Num,
-    NumView, Pow, PowView, Var, VarView,
+    Add, AddView, Alias, AliasView, Fun, InlineNum, InlineVar, KeyLookup, ListIterator, ListSlice,
+    Mul, MulView, Num, NumView, Pow, PowView, Var, VarView,
 };
 use self::representation::{FunView, RawAtom};
 
@@ -2059,6 +2059,7 @@ impl Indeterminate {
 pub enum AtomType {
     Num,
     Var,
+    Alias,
     Add,
     Mul,
     Pow,
@@ -2070,6 +2071,7 @@ impl std::fmt::Display for AtomType {
         match self {
             AtomType::Num => write!(f, "Num"),
             AtomType::Var => write!(f, "Var"),
+            AtomType::Alias => write!(f, "Alias"),
             AtomType::Add => write!(f, "Add"),
             AtomType::Mul => write!(f, "Mul"),
             AtomType::Pow => write!(f, "Pow"),
@@ -2093,6 +2095,7 @@ pub enum SliceType {
 pub enum AtomView<'a> {
     Num(NumView<'a>),
     Var(VarView<'a>),
+    Alias(AliasView<'a>),
     Fun(FunView<'a>),
     Pow(PowView<'a>),
     Mul(MulView<'a>),
@@ -2139,6 +2142,7 @@ impl Hash for AtomView<'_> {
         match self {
             AtomView::Num(a) => a.hash(state),
             AtomView::Var(a) => a.hash(state),
+            AtomView::Alias(a) => a.hash(state),
             AtomView::Fun(a) => a.hash(state),
             AtomView::Pow(a) => a.hash(state),
             AtomView::Mul(a) => a.hash(state),
@@ -2176,6 +2180,12 @@ impl<'a> From<NumView<'a>> for AtomView<'a> {
 impl<'a> From<VarView<'a>> for AtomView<'a> {
     fn from(n: VarView<'a>) -> AtomView<'a> {
         AtomView::Var(n)
+    }
+}
+
+impl<'a> From<AliasView<'a>> for AtomView<'a> {
+    fn from(n: AliasView<'a>) -> AtomView<'a> {
+        AtomView::Alias(n)
     }
 }
 
@@ -2493,6 +2503,7 @@ impl AtomView<'_> {
         match self {
             AtomView::Num(n) => n.get_byte_size(),
             AtomView::Var(v) => v.get_byte_size(),
+            AtomView::Alias(a) => a.get_byte_size(),
             AtomView::Fun(f) => f.get_byte_size(),
             AtomView::Pow(p) => p.get_byte_size(),
             AtomView::Mul(m) => m.get_byte_size(),
@@ -2578,6 +2589,7 @@ impl AtomView<'_> {
 pub enum Atom {
     Num(Num),
     Var(Var),
+    Alias(Alias),
     Fun(Fun),
     Pow(Pow),
     Mul(Mul),
@@ -2625,6 +2637,12 @@ impl From<Num> for Atom {
 impl From<Var> for Atom {
     fn from(n: Var) -> Atom {
         Atom::Var(n)
+    }
+}
+
+impl From<Alias> for Atom {
+    fn from(n: Alias) -> Atom {
+        Atom::Alias(n)
     }
 }
 
@@ -2751,6 +2769,11 @@ impl Atom {
         Var::new(id).into()
     }
 
+    #[inline]
+    pub(crate) fn alias(handle: std::sync::Arc<crate::alias::AliasHandle>) -> Atom {
+        Alias::new(handle).into()
+    }
+
     /// Create a new atom that represents a number.
     #[inline]
     pub fn num<T: Into<Coefficient>>(num: T) -> Atom {
@@ -2870,6 +2893,7 @@ impl Atom {
         match self {
             Atom::Num(n) => n.into_raw(),
             Atom::Var(v) => v.into_raw(),
+            Atom::Alias(a) => a.into_raw(),
             Atom::Fun(f) => f.into_raw(),
             Atom::Pow(p) => p.into_raw(),
             Atom::Mul(m) => m.into_raw(),
@@ -2884,6 +2908,7 @@ impl Atom {
         match view {
             AtomView::Num(n) => *self = Atom::Num(Num::from_view_into(n, buffer)),
             AtomView::Var(v) => *self = Atom::Var(Var::from_view_into(v, buffer)),
+            AtomView::Alias(a) => *self = Atom::Alias(Alias::from_view_into(a, buffer)),
             AtomView::Fun(f) => *self = Atom::Fun(Fun::from_view_into(f, buffer)),
             AtomView::Pow(p) => *self = Atom::Pow(Pow::from_view_into(p, buffer)),
             AtomView::Mul(m) => *self = Atom::Mul(Mul::from_view_into(m, buffer)),
@@ -2896,6 +2921,7 @@ impl Atom {
         match self {
             Atom::Num(n) => AtomView::Num(n.to_num_view()),
             Atom::Var(v) => AtomView::Var(v.to_var_view()),
+            Atom::Alias(a) => AtomView::Alias(a.to_alias_view()),
             Atom::Fun(f) => AtomView::Fun(f.to_fun_view()),
             Atom::Pow(p) => AtomView::Pow(p.to_pow_view()),
             Atom::Mul(m) => AtomView::Mul(m.to_mul_view()),
@@ -2909,6 +2935,7 @@ impl Atom {
         match self {
             Atom::Num(_) => {}
             Atom::Var(_) => {}
+            Atom::Alias(_) => {}
             Atom::Fun(a) => a.set_normalized(normalized),
             Atom::Pow(a) => a.set_normalized(normalized),
             Atom::Mul(a) => a.set_normalized(normalized),

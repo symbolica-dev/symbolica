@@ -1062,7 +1062,13 @@ impl Integer {
         sigma: Integer,
         field: &FiniteField<MultiPrecisionInteger>,
         n: &Integer,
-    ) -> Result<(EcmMontgomeryPoint, FiniteFieldElement<MultiPrecisionInteger>), Integer> {
+    ) -> Result<
+        (
+            EcmMontgomeryPoint,
+            FiniteFieldElement<MultiPrecisionInteger>,
+        ),
+        Integer,
+    > {
         let sigma = field.to_element(sigma.to_multi_prec());
         let u = field.sub(
             &field.mul(&sigma, &sigma),

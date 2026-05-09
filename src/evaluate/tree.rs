@@ -577,6 +577,22 @@ impl<'a> AtomView<'a> {
         }
 
         let res = match self {
+            AtomView::Alias(a) => {
+                let body = fn_map
+                    .get_alias_body(a.get_token())
+                    .unwrap_or_else(|| a.get_body());
+                return body.linearize_impl(
+                    fn_map,
+                    params,
+                    constants,
+                    constant_map,
+                    external_functions,
+                    instr,
+                    subexpressions,
+                    args,
+                    arg_start,
+                );
+            }
             AtomView::Num(n) => {
                 let c = match n.get_coeff_view() {
                     CoefficientView::Natural(n, d, ni, di) => {
@@ -3378,6 +3394,12 @@ impl<'a> AtomView<'a> {
         }
 
         match self {
+            AtomView::Alias(a) => {
+                let body = fn_map
+                    .get_alias_body(a.get_token())
+                    .unwrap_or_else(|| a.get_body());
+                body.to_eval_tree_impl(fn_map, params, args, fn_id_map, funcs, external_functions)
+            }
             AtomView::Num(n) => match n.get_coeff_view() {
                 CoefficientView::Natural(n, d, ni, di) => Ok(Expression::Const(
                     0,
@@ -3713,6 +3735,10 @@ impl<'a> AtomView<'a> {
         }
 
         match self {
+            AtomView::Alias(a) => {
+                a.get_body()
+                    .evaluate_impl(coeff_map, const_map, function_map, cache)
+            }
             AtomView::Num(n) => match n.get_coeff_view() {
                 CoefficientView::Natural(n, d, ni, di) => {
                     if ni == 0 {
@@ -3916,6 +3942,7 @@ impl<'a> AtomView<'a> {
     /// a given tolerance and number of iterations.
     pub fn zero_test(&self, iterations: usize, tolerance: f64) -> ConditionResult {
         match self {
+            AtomView::Alias(a) => a.get_body().zero_test(iterations, tolerance),
             AtomView::Num(num_view) => {
                 if num_view.is_zero() {
                     ConditionResult::True

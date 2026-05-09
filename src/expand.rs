@@ -56,6 +56,7 @@ impl AtomView<'_> {
     /// Check if the expression is expanded, optionally in only the variable or function `var`.
     pub(crate) fn is_expanded(&self, var: Option<AtomView>) -> bool {
         match self {
+            AtomView::Alias(a) => a.get_body().is_expanded(var),
             AtomView::Num(_) | AtomView::Var(_) | AtomView::Fun(_) => true,
             AtomView::Pow(pow_view) => {
                 let (base, exp) = pow_view.get_base_exp();
@@ -132,6 +133,10 @@ impl AtomView<'_> {
         }
 
         match self {
+            AtomView::Alias(a) => {
+                a.get_body()
+                    .expand_via_poly_impl::<E>(ws, var, var_map, out);
+            }
             AtomView::Num(_) | AtomView::Var(_) | AtomView::Fun(_) => unreachable!(),
             AtomView::Pow(_) => {
                 if let Some(v) = var_map {
@@ -445,6 +450,7 @@ impl AtomView<'_> {
 
     pub(crate) fn expand_num_impl(&self, ws: &Workspace, out: &mut Atom) -> bool {
         match self {
+            AtomView::Alias(a) => a.get_body().expand_num_impl(ws, out),
             AtomView::Num(_) | AtomView::Var(_) | AtomView::Fun(_) => {
                 out.set_from_view(self);
                 false

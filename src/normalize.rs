@@ -62,6 +62,9 @@ impl AtomView<'_> {
             (AtomView::Var(v1), AtomView::Var(v2)) => v1.get_symbol_id().cmp(&v2.get_symbol_id()),
             (AtomView::Var(_), _) => Ordering::Less,
             (_, AtomView::Var(_)) => Ordering::Greater,
+            (AtomView::Alias(_), AtomView::Alias(_)) => self.get_data().cmp(other.get_data()),
+            (AtomView::Alias(_), _) => Ordering::Less,
+            (_, AtomView::Alias(_)) => Ordering::Greater,
             (AtomView::Pow(p1), AtomView::Pow(p2)) => {
                 let (b1, e1) = p1.get_base_exp();
                 let (b2, e2) = p2.get_base_exp();
@@ -154,6 +157,9 @@ impl AtomView<'_> {
             (_, AtomView::Num(_)) => Ordering::Greater,
 
             (AtomView::Var(v1), AtomView::Var(v2)) => v1.get_symbol_id().cmp(&v2.get_symbol_id()),
+            (AtomView::Alias(_), AtomView::Alias(_)) => self.get_data().cmp(other.get_data()),
+            (AtomView::Alias(_), _) => Ordering::Less,
+            (_, AtomView::Alias(_)) => Ordering::Greater,
             (AtomView::Pow(p1), AtomView::Pow(p2)) => {
                 // TODO: inline partial_cmp call by creating an inlined version
                 p1.get_base().cmp(&p2.get_base())
@@ -640,7 +646,7 @@ impl AtomView<'_> {
     #[inline(always)]
     pub fn needs_normalization(&self) -> bool {
         match self {
-            AtomView::Num(_) | AtomView::Var(_) => false,
+            AtomView::Num(_) | AtomView::Var(_) | AtomView::Alias(_) => false,
             AtomView::Fun(f) => !f.is_normalized(),
             AtomView::Pow(p) => !p.is_normalized(),
             AtomView::Mul(m) => !m.is_normalized(),
@@ -656,11 +662,16 @@ impl AtomView<'_> {
         }
 
         match self {
+            AtomView::Alias(_) => out.set_from_view(self),
             AtomView::Mul(t) => {
                 let mut atom_test_buf: SmallVec<[_; 20]> = SmallVec::new();
 
                 for a in t.iter() {
                     let mut handle = workspace.new_atom();
+                    let a = match a {
+                        AtomView::Alias(alias) => alias.get_body(),
+                        _ => a,
+                    };
 
                     if a.needs_normalization() {
                         a.normalize(workspace, &mut handle);
@@ -996,6 +1007,11 @@ impl AtomView<'_> {
                     let arg = out_f.to_fun_view().iter().next().unwrap();
 
                     match arg {
+                        AtomView::Alias(a) => {
+                            let mut inner = workspace.new_atom();
+                            inner.to_fun(Symbol::CONJ).add_arg(a.get_body());
+                            inner.as_view().normalize(workspace, out);
+                        }
                         AtomView::Num(n) => {
                             let conj_coeff = n.get_coeff_view().to_owned().conjugate();
                             out.to_num(conj_coeff);
@@ -1489,6 +1505,11 @@ impl AtomView<'_> {
 
                 let mut norm_arg = workspace.new_atom();
                 for a in a {
+                    let a = match a {
+                        AtomView::Alias(alias) => alias.get_body(),
+                        _ => a,
+                    };
+
                     let r = if a.needs_normalization() {
                         // TODO: if a is a nested addition, prevent a sort
                         a.normalize(workspace, &mut norm_arg);
@@ -1605,6 +1626,15 @@ impl AtomView<'_> {
 
     /// Add two atoms and normalize the result.
     pub(crate) fn add_normalized(&self, rhs: AtomView, ws: &Workspace, out: &mut Atom) {
+        if matches!(self, AtomView::Alias(_)) || matches!(rhs, AtomView::Alias(_)) {
+            let mut e = ws.new_atom();
+            let a = e.to_add();
+            a.extend(*self);
+            a.extend(rhs);
+            e.as_view().normalize(ws, out);
+            return;
+        }
+
         // write (a+b)+(a+b) as 2*(a+b)
         if *self == rhs {
             let mut a = ws.new_atom();
@@ -1804,6 +1834,19 @@ impl AtomView<'_> {
         ws: &Workspace,
         out: &mut Atom,
     ) {
+        if args
+            .iter()
+            .any(|arg| matches!(arg.as_atom_view(), AtomView::Alias(_)))
+        {
+            let mut e = ws.new_atom();
+            let a = e.to_add();
+            for arg in args {
+                a.extend(arg.as_atom_view());
+            }
+            e.as_view().normalize(ws, out);
+            return;
+        }
+
         struct MergeCursor<'a> {
             atom: AtomView<'a>,
             term: &'a [u8],

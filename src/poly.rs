@@ -824,6 +824,7 @@ impl AtomView<'_> {
             allow_new_vars: bool,
         ) -> Result<(), &'static str> {
             match factor {
+                AtomView::Alias(a) => check_factor(&a.get_body(), vars, allow_new_vars),
                 AtomView::Num(n) => match n.get_coeff_view() {
                     CoefficientView::FiniteField(_, _) => {
                         Err("Finite field not supported in conversion routine")
@@ -1073,6 +1074,7 @@ impl AtomView<'_> {
         }
 
         match self {
+            AtomView::Alias(a) => a.get_body().to_polynomial_impl(field, var_map),
             AtomView::Num(n) => {
                 field.try_element_from_coefficient_view(n.get_coeff_view())?; // must fail
                 unreachable!("This case should have been handled by the fast routine")
@@ -1223,6 +1225,7 @@ impl AtomView<'_> {
         }
 
         match self {
+            AtomView::Alias(a) => a.get_body().to_polynomial_in_vars_impl(var_map, poly),
             AtomView::Num(_) | AtomView::Var(_) => poly.constant(self.to_owned()),
             AtomView::Pow(p) => {
                 let (base, exp) = p.get_base_exp();
@@ -1340,6 +1343,9 @@ impl AtomView<'_> {
         }
 
         match self {
+            AtomView::Alias(a) => a
+                .get_body()
+                .to_rational_polynomial_impl(field, out_field, var_map),
             AtomView::Num(n) => {
                 field.try_element_from_coefficient_view(n.get_coeff_view())?; // must fail
                 unreachable!("This case should have been handled by the fast routine")
@@ -1489,6 +1495,9 @@ impl AtomView<'_> {
         }
 
         match self {
+            AtomView::Alias(a) => a
+                .get_body()
+                .to_factorized_rational_polynomial_impl(field, out_field, var_map),
             AtomView::Num(n) => {
                 field.try_element_from_coefficient_view(n.get_coeff_view())?; // must fail
                 unreachable!("This case should have been handled by the fast routine")

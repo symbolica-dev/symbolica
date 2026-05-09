@@ -532,6 +532,7 @@ impl<'a> AtomView<'a> {
 
     fn cancel_with_ws_into(&self, ws: &Workspace, out: &mut Atom) -> bool {
         match self {
+            AtomView::Alias(a) => a.get_body().cancel_with_ws_into(ws, out),
             AtomView::Num(_) | AtomView::Var(_) | AtomView::Fun(_) | AtomView::Pow(_) => {
                 out.set_from_view(self);
                 false
@@ -902,6 +903,7 @@ impl<'a> AtomView<'a> {
     fn collect_num_impl(&self, ws: &Workspace, out: &mut Atom) -> bool {
         fn get_num(a: AtomView) -> Option<Coefficient> {
             match a {
+                AtomView::Alias(alias) => get_num(alias.get_body()),
                 AtomView::Num(n) => Some(n.get_coeff_view().to_owned()),
                 AtomView::Add(add) => {
                     // perform GCD of all arguments
@@ -1078,6 +1080,7 @@ impl<'a> AtomView<'a> {
 
     fn collect_factors_impl(&self, ws: &Workspace, factors: &mut HashMap<AtomOrView<'a>, isize>) {
         match self {
+            AtomView::Alias(a) => a.get_body().collect_factors_impl(ws, factors),
             AtomView::Num(_) | AtomView::Var(_) | AtomView::Fun(_) => {
                 *factors.entry(self.into()).or_insert(0) += 1;
             }
@@ -1208,6 +1211,7 @@ impl<'a> AtomView<'a> {
         }
 
         match self {
+            AtomView::Alias(a) => a.get_body().get_lowest_power(x),
             AtomView::Num(_) | AtomView::Var(_) | AtomView::Fun(_) => 0.into(),
             AtomView::Add(a) => {
                 let mut lowest_power = 0.into();
@@ -1312,6 +1316,9 @@ impl<'a> AtomView<'a> {
         }
 
         match self {
+            AtomView::Alias(a) => a
+                .get_body()
+                .horner_scheme_impl_no_norm(ws, xs, enter_functions),
             AtomView::Num(_) | AtomView::Var(_) => self.into(),
             AtomView::Fun(f) => {
                 if enter_functions {

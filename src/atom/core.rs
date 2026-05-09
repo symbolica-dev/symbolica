@@ -82,6 +82,10 @@ pub trait AtomCore: private::Sealed + Sized {
     fn as_fun_view(&self) -> Option<FunView<'_>> {
         match self.as_atom_view() {
             AtomView::Fun(f) => Some(f),
+            AtomView::Alias(a) => match a.get_body() {
+                AtomView::Fun(f) => Some(f),
+                _ => None,
+            },
             _ => None,
         }
     }
@@ -90,6 +94,10 @@ pub trait AtomCore: private::Sealed + Sized {
     fn as_var_view(&self) -> Option<VarView<'_>> {
         match self.as_atom_view() {
             AtomView::Var(v) => Some(v),
+            AtomView::Alias(a) => match a.get_body() {
+                AtomView::Var(v) => Some(v),
+                _ => None,
+            },
             _ => None,
         }
     }
@@ -98,6 +106,10 @@ pub trait AtomCore: private::Sealed + Sized {
     fn as_num_view(&self) -> Option<NumView<'_>> {
         match self.as_atom_view() {
             AtomView::Num(n) => Some(n),
+            AtomView::Alias(a) => match a.get_body() {
+                AtomView::Num(n) => Some(n),
+                _ => None,
+            },
             _ => None,
         }
     }
@@ -106,6 +118,10 @@ pub trait AtomCore: private::Sealed + Sized {
     fn as_mul_view(&self) -> Option<MulView<'_>> {
         match self.as_atom_view() {
             AtomView::Mul(m) => Some(m),
+            AtomView::Alias(a) => match a.get_body() {
+                AtomView::Mul(m) => Some(m),
+                _ => None,
+            },
             _ => None,
         }
     }
@@ -114,6 +130,10 @@ pub trait AtomCore: private::Sealed + Sized {
     fn as_add_view(&self) -> Option<AddView<'_>> {
         match self.as_atom_view() {
             AtomView::Add(a) => Some(a),
+            AtomView::Alias(alias) => match alias.get_body() {
+                AtomView::Add(a) => Some(a),
+                _ => None,
+            },
             _ => None,
         }
     }
@@ -138,6 +158,11 @@ pub trait AtomCore: private::Sealed + Sized {
         match self.as_atom_view() {
             AtomView::Var(v) => Some(v.get_symbol()),
             AtomView::Fun(f) => Some(f.get_symbol()),
+            AtomView::Alias(a) => match a.get_body() {
+                AtomView::Var(v) => Some(v.get_symbol()),
+                AtomView::Fun(f) => Some(f.get_symbol()),
+                _ => None,
+            },
             _ => None,
         }
     }
@@ -333,6 +358,18 @@ pub trait AtomCore: private::Sealed + Sized {
         f: impl FnMut(AtomView, usize, usize) -> Option<Atom>,
     ) -> AliasedAtom {
         self.as_atom_view().alias_subexpressions(f)
+    }
+
+    /// Replace every repeated non-variable subexpression with an alias.
+    ///
+    /// Numerical atoms, variables, and existing alias atoms are not selected as new alias roots.
+    /// The returned [`AliasedAtom`] keeps the created aliases alive and can be used as a normal
+    /// expression through the rest of the [`AtomCore`] API.
+    fn alias_repeated_subexpressions(&self) -> AliasedAtom {
+        self.alias_subexpressions(|subexpr, _, _| match subexpr {
+            AtomView::Num(_) | AtomView::Var(_) | AtomView::Alias(_) => None,
+            _ => Some(Atom::new()),
+        })
     }
 
     /// Collect terms involving the same power of `x` in `xs`, where `xs` is a list of indeterminates.
@@ -2088,8 +2125,11 @@ pub trait AtomCore: private::Sealed + Sized {
     /// assert_eq!(iter.next(), None);
     /// ```
     fn terms(&self) -> impl Iterator<Item = AtomView<'_>> {
-        let s = self.as_atom_view();
-        match self.as_atom_view() {
+        let s = match self.as_atom_view() {
+            AtomView::Alias(a) => a.get_body(),
+            a => a,
+        };
+        match s {
             AtomView::Add(a) => a.to_slice().iter(),
             _ => ListSlice::from_one(s).iter(),
         }
@@ -2108,12 +2148,16 @@ pub trait AtomCore: private::Sealed + Sized {
     /// ```
     /// return `x, y`
     fn children(&self) -> impl Iterator<Item = AtomView<'_>> {
-        match self.as_atom_view() {
+        let s = match self.as_atom_view() {
+            AtomView::Alias(a) => a.get_body(),
+            a => a,
+        };
+        match s {
             AtomView::Add(a) => a.to_slice().iter(),
             AtomView::Mul(a) => a.to_slice().iter(),
             AtomView::Pow(a) => a.to_slice().iter(),
             AtomView::Fun(a) => a.to_slice().iter(),
-            AtomView::Num(_) | AtomView::Var(_) => ListSlice::empty().iter(),
+            AtomView::Num(_) | AtomView::Var(_) | AtomView::Alias(_) => ListSlice::empty().iter(),
         }
     }
 }

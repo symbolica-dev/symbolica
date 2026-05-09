@@ -603,6 +603,7 @@ impl<'a> AtomView<'a> {
     pub(crate) fn is_scalar(&self) -> bool {
         match self {
             AtomView::Num(_) => true,
+            AtomView::Alias(a) => a.get_body().is_scalar(),
             AtomView::Var(v) => v.get_symbol().is_scalar(),
             AtomView::Fun(f) => f.get_symbol().is_scalar(),
             AtomView::Pow(p) => {
@@ -618,6 +619,7 @@ impl<'a> AtomView<'a> {
     pub(crate) fn is_integer(&self) -> bool {
         match self {
             AtomView::Num(n) => n.get_coeff_view().is_integer(),
+            AtomView::Alias(a) => a.get_body().is_integer(),
             AtomView::Var(v) => v.get_symbol().is_integer(),
             AtomView::Fun(f) => f.get_symbol().is_integer(),
             AtomView::Pow(p) => {
@@ -633,6 +635,7 @@ impl<'a> AtomView<'a> {
     pub(crate) fn is_real(&self) -> bool {
         match self {
             AtomView::Num(n) => n.get_coeff_view().is_real(),
+            AtomView::Alias(a) => a.get_body().is_real(),
             AtomView::Var(v) => v.get_symbol().is_real(),
             AtomView::Fun(f) => {
                 let s = f.get_symbol();
@@ -689,6 +692,7 @@ impl<'a> AtomView<'a> {
                     false
                 }
             }
+            AtomView::Alias(a) => a.get_body().is_positive(),
             AtomView::Var(v) => v.get_symbol().is_positive(),
             AtomView::Fun(f) => {
                 let s = f.get_symbol();
@@ -730,6 +734,7 @@ impl<'a> AtomView<'a> {
                 n.get_coeff_view(),
                 CoefficientView::Infinity(_) | CoefficientView::Indeterminate
             ),
+            AtomView::Alias(a) => a.get_body().is_finite(),
             AtomView::Var(_) => true,
             AtomView::Fun(f) => f.iter().all(|arg| arg.is_finite()),
             AtomView::Pow(p) => {
@@ -748,6 +753,7 @@ impl<'a> AtomView<'a> {
                 CoefficientView::RationalPolynomial(r) => r.deserialize().is_constant(),
                 _ => true,
             },
+            AtomView::Alias(a) => a.get_body().is_constant(),
             AtomView::Var(v) => match v.get_symbol_id() {
                 Symbol::PI_ID | Symbol::E_ID => true,
                 _ => false,
@@ -785,6 +791,9 @@ impl<'a> AtomView<'a> {
     ) {
         match self {
             AtomView::Num(_) => {}
+            AtomView::Alias(a) => a
+                .get_body()
+                .get_all_symbols_impl(include_function_symbols, out),
             AtomView::Var(v) => {
                 out.insert(v.get_symbol());
             }
@@ -824,6 +833,9 @@ impl<'a> AtomView<'a> {
     fn get_all_indeterminates_impl(&self, enter_functions: bool, out: &mut HashSet<AtomView<'a>>) {
         match self {
             AtomView::Num(_) => {}
+            AtomView::Alias(a) => a
+                .get_body()
+                .get_all_indeterminates_impl(enter_functions, out),
             AtomView::Var(_) => {
                 out.insert(*self);
             }
@@ -861,6 +873,7 @@ impl<'a> AtomView<'a> {
     ) {
         match self {
             AtomView::Num(_) => {}
+            AtomView::Alias(a) => a.get_body().count_indeterminates(enter_functions, out),
             AtomView::Var(_) => {
                 *out.entry(*self).or_insert(0) += 1;
             }
@@ -951,6 +964,9 @@ impl<'a> AtomView<'a> {
 
             match c {
                 AtomView::Num(_) | AtomView::Var(_) => {}
+                AtomView::Alias(a) => {
+                    stack.push(a.get_body());
+                }
                 AtomView::Fun(f) => {
                     for arg in f {
                         stack.push(arg);
@@ -994,6 +1010,9 @@ impl<'a> AtomView<'a> {
         while let Some(c) = stack.pop() {
             match c {
                 AtomView::Num(_) => {}
+                AtomView::Alias(a) => {
+                    stack.push(a.get_body());
+                }
                 AtomView::Var(v) => {
                     if v.get_symbol() == s {
                         return true;
@@ -1032,6 +1051,13 @@ impl<'a> AtomView<'a> {
         match self {
             AtomView::Num(_) | AtomView::Var(_) => {
                 v(*self);
+            }
+            AtomView::Alias(a) => {
+                if !v(*self) {
+                    return;
+                }
+
+                a.get_body().visitor(v);
             }
             AtomView::Fun(f) => {
                 if !v(*self) {
@@ -1087,6 +1113,10 @@ impl<'a> AtomView<'a> {
 
         match self {
             AtomView::Num(_) | AtomView::Var(_) => {}
+            AtomView::Alias(a) => {
+                *subexpressions.entry(*self).or_insert(0) += 1;
+                a.get_body().count_subexpressions(subexpressions);
+            }
             AtomView::Fun(f) => {
                 *subexpressions.entry(*self).or_insert(0) += 1;
 
@@ -1217,6 +1247,12 @@ impl<'a> AtomView<'a> {
 
         match self {
             AtomView::Num(_) => true,
+            AtomView::Alias(a) => a.get_body().is_polynomial_impl(
+                allow_not_expanded,
+                allow_negative_powers,
+                variables,
+                symbol_cache,
+            ),
             AtomView::Var(_) => {
                 variables.insert(*self, true);
                 true
@@ -1345,6 +1381,9 @@ impl<'a> AtomView<'a> {
 
         match self {
             AtomView::Num(_) | AtomView::Var(_) => {}
+            AtomView::Alias(a) => {
+                a.get_body().replace_map_no_norm(ws, m, context, out);
+            }
             AtomView::Fun(f) => {
                 let mut fun = None;
 
@@ -1506,6 +1545,10 @@ impl<'a> AtomView<'a> {
 
         match self {
             AtomView::Num(_) | AtomView::Var(_) => {}
+            AtomView::Alias(a) => {
+                a.get_body()
+                    .replace_map_bottom_up_impl(ws, m, parent_context, nested, out);
+            }
             AtomView::Fun(f) => {
                 let mut fun = None;
 
@@ -2468,6 +2511,10 @@ impl Pattern {
     /// A quick check to see if a pattern can match.
     #[inline]
     fn could_match(&self, target: AtomView) -> bool {
+        if let AtomView::Alias(a) = target {
+            return self.could_match(a.get_body());
+        }
+
         match (self, target) {
             (Pattern::Fn(f1, _), AtomView::Fun(f2)) => {
                 let s = f2.get_symbol();
@@ -2486,6 +2533,7 @@ impl Pattern {
     /// Check if the expression `atom` contains a wildcard.
     fn has_wildcard(atom: AtomView<'_>) -> bool {
         match atom {
+            AtomView::Alias(a) => Self::has_wildcard(a.get_body()),
             AtomView::Num(_) => false,
             AtomView::Var(v) => v.get_wildcard_level() > 0,
             AtomView::Fun(f) => {
@@ -2526,6 +2574,10 @@ impl Pattern {
 
     /// Create a pattern from an atom view.
     pub(crate) fn from_view(atom: AtomView<'_>, is_top_layer: bool) -> Pattern {
+        if let AtomView::Alias(a) = atom {
+            return Self::from_view(a.get_body(), is_top_layer);
+        }
+
         /// Sort patterns based on their specificity, so that more specific patterns (with fewer wildcards) are tried first.
         fn sort_on_specificity(arg1: &Pattern, arg2: &Pattern) -> std::cmp::Ordering {
             match (arg1, arg2) {
@@ -2584,6 +2636,7 @@ impl Pattern {
             || is_top_layer && matches!(atom, AtomView::Mul(_) | AtomView::Add(_))
         {
             match atom {
+                AtomView::Alias(a) => Self::from_view(a.get_body(), is_top_layer),
                 AtomView::Var(v) => Pattern::Wildcard(v.get_symbol()),
                 AtomView::Fun(f) => {
                     let name = f.get_symbol();
@@ -3503,6 +3556,15 @@ impl Evaluate for Relation {
                         })?;
 
                     match out1.as_ref() {
+                        Atom::Alias(a) => match a.to_alias_view().get_body() {
+                            AtomView::Var(_) => *b == AtomType::Var,
+                            AtomView::Fun(_) => *b == AtomType::Fun,
+                            AtomView::Num(_) => *b == AtomType::Num,
+                            AtomView::Add(_) => *b == AtomType::Add,
+                            AtomView::Mul(_) => *b == AtomType::Mul,
+                            AtomView::Pow(_) => *b == AtomType::Pow,
+                            AtomView::Alias(_) => *b == AtomType::Alias,
+                        },
                         Atom::Var(_) => *b == AtomType::Var,
                         Atom::Fun(_) => *b == AtomType::Fun,
                         Atom::Num(_) => *b == AtomType::Num,
@@ -3636,6 +3698,7 @@ impl Condition<PatternRestriction> {
                                     | Match::Multiple(SliceType::Pow, _)
                             ),
                             AtomType::Fun => matches!(value, Match::Single(AtomView::Fun(_))),
+                            AtomType::Alias => matches!(value, Match::Single(AtomView::Alias(_))),
                         };
 
                         (is_type == matches!(r, WildcardRestriction::IsAtomType(_))).into()
@@ -4232,6 +4295,10 @@ pub struct AtomMatchIterator<'a, 'b> {
 
 impl<'a, 'b> AtomMatchIterator<'a, 'b> {
     pub fn new(pattern: &'b Pattern, target: AtomView<'a>) -> AtomMatchIterator<'a, 'b> {
+        let target = match target {
+            AtomView::Alias(a) => a.get_body(),
+            _ => target,
+        };
         let try_match_atom = matches!(pattern, Pattern::Wildcard(_) | Pattern::Literal(_));
 
         let (pat_list, slice_type) = match pattern {
@@ -4253,7 +4320,10 @@ impl<'a, 'b> AtomMatchIterator<'a, 'b> {
     /// Reuse the iterator for a new target atom.
     #[inline]
     pub fn set_new_target(&mut self, target: AtomView<'a>) {
-        self.target = target;
+        self.target = match target {
+            AtomView::Alias(a) => a.get_body(),
+            _ => target,
+        };
         self.try_match_atom = matches!(self.pattern, Pattern::Wildcard(_) | Pattern::Literal(_));
         self.reset_subslice_iter = true;
         self.old_match_stack_len = None;
@@ -4332,24 +4402,47 @@ impl<'a> TypedSlice<'a> {
 
     fn set_list(&mut self, a: AtomView<'a>) {
         match a {
+            AtomView::Alias(alias) => self.set_list(alias.get_body()),
             AtomView::Mul(m) => {
                 self.data.clear();
-                self.data.extend(m.iter());
+                for child in m.iter() {
+                    match child {
+                        AtomView::Alias(alias) => match alias.get_body() {
+                            AtomView::Mul(m) => self.data.extend(m.iter()),
+                            body => self.data.push(body),
+                        },
+                        _ => self.data.push(child),
+                    }
+                }
                 self.slice_type = SliceType::Mul;
             }
             AtomView::Add(a) => {
                 self.data.clear();
-                self.data.extend(a.iter());
+                for child in a.iter() {
+                    match child {
+                        AtomView::Alias(alias) => match alias.get_body() {
+                            AtomView::Add(a) => self.data.extend(a.iter()),
+                            body => self.data.push(body),
+                        },
+                        _ => self.data.push(child),
+                    }
+                }
                 self.slice_type = SliceType::Add;
             }
             AtomView::Pow(p) => {
                 self.data.clear();
-                self.data.extend(p.iter());
+                self.data.extend(p.iter().map(|child| match child {
+                    AtomView::Alias(alias) => alias.get_body(),
+                    _ => child,
+                }));
                 self.slice_type = SliceType::Pow;
             }
             AtomView::Fun(f) => {
                 self.data.clear();
-                self.data.extend(f.iter());
+                self.data.extend(f.iter().map(|child| match child {
+                    AtomView::Alias(alias) => alias.get_body(),
+                    _ => child,
+                }));
                 self.slice_type = SliceType::Arg;
             }
             AtomView::Var(_) | AtomView::Num(_) => {
@@ -5270,6 +5363,10 @@ impl<'a> AtomTreeIterator<'a> {
                 };
 
                 match atom {
+                    AtomView::Alias(a) => {
+                        self.stack
+                            .push((Some(0), new_level, ListIterator::from_one(a.get_body())))
+                    }
                     AtomView::Fun(f) => self.stack.push((Some(0), level + 1, f.iter())),
                     AtomView::Pow(p) => self.stack.push((Some(0), new_level, p.iter())),
                     AtomView::Mul(m) => self.stack.push((Some(0), new_level, m.iter())),
@@ -5503,6 +5600,10 @@ impl<'a: 'b, 'b> ReplaceIterator<'a, 'b> {
                             out.extend(arg);
                         }
                     }
+                }
+                AtomView::Alias(alias) => {
+                    assert_eq!(*first, 0, "Alias bodies are exposed as one logical child");
+                    Self::copy_and_replace(out, rest, used_flags, alias.get_body(), rhs, workspace);
                 }
                 _ => unreachable!("Atom does not have children"),
             }
