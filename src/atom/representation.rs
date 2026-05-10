@@ -1103,9 +1103,15 @@ impl Fun {
     pub fn from_view_into(a: &FunView<'_>, mut buffer: RawAtom) -> Fun {
         buffer.clear();
         buffer.extend(a.data);
+        let aliases = aliases_from_view(AtomView::Fun(*a));
+        if aliases.is_empty() {
+            buffer[0] &= !HAS_ALIAS_FLAG;
+        } else {
+            buffer[0] |= HAS_ALIAS_FLAG;
+        }
         Fun {
             data: buffer,
-            aliases: aliases_from_view(AtomView::Fun(*a)),
+            aliases,
         }
     }
 
@@ -1271,8 +1277,13 @@ impl Fun {
     }
 
     #[inline(always)]
-    pub(crate) unsafe fn from_raw(raw: RawAtom) -> Fun {
+    pub(crate) unsafe fn from_raw(mut raw: RawAtom) -> Fun {
         let aliases = aliases_from_raw_data(&raw);
+        if aliases.is_empty() {
+            raw[0] &= !HAS_ALIAS_FLAG;
+        } else {
+            raw[0] |= HAS_ALIAS_FLAG;
+        }
         Fun { data: raw, aliases }
     }
 }
@@ -1423,9 +1434,15 @@ impl Mul {
     pub fn from_view_into(a: &MulView<'_>, mut buffer: RawAtom) -> Mul {
         buffer.clear();
         buffer.extend(a.data);
+        let aliases = aliases_from_view(AtomView::Mul(*a));
+        if aliases.is_empty() {
+            buffer[0] &= !MUL_HAS_ALIAS_FLAG;
+        } else {
+            buffer[0] |= MUL_HAS_ALIAS_FLAG;
+        }
         Mul {
             data: buffer,
-            aliases: aliases_from_view(AtomView::Mul(*a)),
+            aliases,
         }
     }
 
@@ -1582,8 +1599,13 @@ impl Mul {
     }
 
     #[inline(always)]
-    pub(crate) unsafe fn from_raw(raw: RawAtom) -> Mul {
+    pub(crate) unsafe fn from_raw(mut raw: RawAtom) -> Mul {
         let aliases = aliases_from_raw_data(&raw);
+        if aliases.is_empty() {
+            raw[0] &= !MUL_HAS_ALIAS_FLAG;
+        } else {
+            raw[0] |= MUL_HAS_ALIAS_FLAG;
+        }
         Mul { data: raw, aliases }
     }
 }
@@ -1636,9 +1658,15 @@ impl Add {
     pub fn from_view_into(a: &AddView<'_>, mut buffer: RawAtom) -> Add {
         buffer.clear();
         buffer.extend(a.data);
+        let aliases = aliases_from_view(AtomView::Add(*a));
+        if aliases.is_empty() {
+            buffer[0] &= !HAS_ALIAS_FLAG;
+        } else {
+            buffer[0] |= HAS_ALIAS_FLAG;
+        }
         Add {
             data: buffer,
-            aliases: aliases_from_view(AtomView::Add(*a)),
+            aliases,
         }
     }
 
@@ -1737,8 +1765,13 @@ impl Add {
     }
 
     #[inline(always)]
-    pub(crate) unsafe fn from_raw(raw: RawAtom) -> Add {
+    pub(crate) unsafe fn from_raw(mut raw: RawAtom) -> Add {
         let aliases = aliases_from_raw_data(&raw);
+        if aliases.is_empty() {
+            raw[0] &= !HAS_ALIAS_FLAG;
+        } else {
+            raw[0] |= HAS_ALIAS_FLAG;
+        }
         Add { data: raw, aliases }
     }
 

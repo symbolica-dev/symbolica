@@ -972,7 +972,6 @@ impl AtomView<'_> {
         match self {
             AtomView::Alias(_) => out.set_from_view(self),
             AtomView::Mul(t) => {
-                let has_alias = t.has_alias();
                 let mut atom_test_buf: SmallVec<[_; 20]> = SmallVec::new();
 
                 for a in t.iter() {
@@ -1016,6 +1015,7 @@ impl AtomView<'_> {
                     }
                 }
 
+                let has_alias = atom_test_buf.iter().any(|a| a.as_view().has_alias());
                 if has_alias {
                     atom_test_buf.sort_by(|a, b| {
                         semantic_cmp_factors(a.as_view(), b.as_view())
@@ -1847,7 +1847,6 @@ impl AtomView<'_> {
                 out.set_normalized(true);
             }
             AtomView::Add(a) => {
-                let has_alias = a.has_alias();
                 let mut new_sum = workspace.new_atom();
                 let ns = new_sum.to_add();
 
@@ -1899,17 +1898,30 @@ impl AtomView<'_> {
                 }
 
                 for x in ns.to_add_view().iter() {
-                    atom_sort_buf.push((x, x.get_term_cmp_slice()));
+                    let term_slice = if x.has_alias() {
+                        None
+                    } else {
+                        Some(x.get_term_cmp_slice())
+                    };
+                    atom_sort_buf.push((x, term_slice));
                 }
 
+                let has_alias = ns.to_add_view().has_alias();
                 if has_alias {
-                    atom_sort_buf.sort_unstable_by(|a, b| {
-                        semantic_cmp_terms(a.0, b.0)
+                    atom_sort_buf.sort_unstable_by(|a, b| match (a.1, b.1) {
+                        (Some(a_term), Some(b_term)) => a_term.cmp(b_term),
+                        _ => semantic_cmp_terms(a.0, b.0)
                             .then_with(|| prefer_non_alias_cmp(a.0, b.0))
-                            .then_with(|| a.1.cmp(&b.1))
+                            .then_with(|| match (a.1, b.1) {
+                                (Some(a_term), Some(b_term)) => a_term.cmp(b_term),
+                                _ => a.0.get_data().cmp(b.0.get_data()),
+                            }),
                     });
                 } else {
-                    atom_sort_buf.sort_unstable_by(|a, b| a.1.cmp(&b.1));
+                    atom_sort_buf.sort_unstable_by(|a, b| {
+                        a.1.expect("non-alias term has no fast sort slice")
+                            .cmp(b.1.expect("non-alias term has no fast sort slice"))
+                    });
                 }
 
                 if atom_sort_buf.is_empty() {
