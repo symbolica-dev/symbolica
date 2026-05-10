@@ -878,6 +878,40 @@ fn alias_normalization_resolves_add_terms() {
 }
 
 #[test]
+fn alias_normalization_cleans_handles_when_alias_disappears() {
+    let x = Atom::var(crate::symbol!(
+        "alias_normalization_cleans_handles_when_alias_disappears::x"
+    ));
+    let x_alias = register_aliased_atom(AliasedAtom::new(x.clone())).0;
+    let token = x_alias.token();
+    let sum = x + x_alias.to_atom();
+
+    assert!(!sum.as_view().has_alias());
+
+    drop(x_alias);
+    assert!(get_alias(token).is_none());
+}
+
+#[test]
+fn alias_normalization_prunes_removed_alias_handles() {
+    let x = Atom::var(crate::symbol!(
+        "alias_normalization_prunes_removed_alias_handles::x"
+    ));
+    let z = Atom::var(crate::symbol!(
+        "alias_normalization_prunes_removed_alias_handles::z"
+    ));
+    let x_alias = register_aliased_atom(AliasedAtom::new(x.clone())).0;
+    let z_alias = register_aliased_atom(AliasedAtom::new(z.clone())).0;
+    let z_token = z_alias.token();
+    let sum = x_alias.to_atom() + z - z_alias.to_atom();
+
+    assert!(sum.as_view().has_alias());
+
+    drop(z_alias);
+    assert!(get_alias(z_token).is_none());
+}
+
+#[test]
 fn alias_normalization_resolves_add_terms_independent_of_order() {
     let y_alias = register_aliased_atom(AliasedAtom::new(crate::parse!("y"))).0;
     let sum = y_alias.to_atom() + crate::parse!("y");

@@ -2922,6 +2922,16 @@ impl Atom {
     }
 
     #[inline(always)]
+    pub(crate) fn refresh_alias_flags_from_tree(&mut self) {
+        match self {
+            Atom::Fun(f) => f.refresh_alias_flag_from_tree(),
+            Atom::Mul(m) => m.refresh_alias_flag_from_tree(),
+            Atom::Add(a) => a.refresh_alias_flag_from_tree(),
+            _ => {}
+        }
+    }
+
+    #[inline(always)]
     pub fn as_view(&self) -> AtomView<'_> {
         match self {
             Atom::Num(n) => AtomView::Num(n.to_num_view()),

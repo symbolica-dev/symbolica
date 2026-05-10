@@ -735,11 +735,43 @@ impl Atom {
         match self {
             Atom::Num(n) => n.aliases.clear(),
             Atom::Var(v) => v.aliases.clear(),
-            Atom::Fun(f) => f.aliases.clear(),
-            Atom::Mul(m) => m.aliases.clear(),
-            Atom::Add(a) => a.aliases.clear(),
+            Atom::Fun(f) => {
+                f.aliases.clear();
+                f.data[0] &= !HAS_ALIAS_FLAG;
+            }
+            Atom::Mul(m) => {
+                m.aliases.clear();
+                m.data[0] &= !MUL_HAS_ALIAS_FLAG;
+            }
+            Atom::Add(a) => {
+                a.aliases.clear();
+                a.data[0] &= !HAS_ALIAS_FLAG;
+            }
             Atom::Pow(p) => p.aliases.clear(),
-            Atom::Alias(a) => a.aliases.clear(),
+            Atom::Alias(_) => {}
+            Atom::Zero => {}
+        }
+    }
+
+    pub(crate) fn refresh_alias_handles_from_tree(&mut self) {
+        let aliases = aliases_from_view(self.as_view());
+        match self {
+            Atom::Num(n) => n.aliases.clear(),
+            Atom::Var(v) => v.aliases.clear(),
+            Atom::Fun(f) => {
+                f.aliases = aliases;
+                f.refresh_alias_flag_from_tree();
+            }
+            Atom::Mul(m) => {
+                m.aliases = aliases;
+                m.refresh_alias_flag_from_tree();
+            }
+            Atom::Add(a) => {
+                a.aliases = aliases;
+                a.refresh_alias_flag_from_tree();
+            }
+            Atom::Pow(p) => p.aliases = aliases,
+            Atom::Alias(a) => a.aliases = aliases,
             Atom::Zero => {}
         }
     }
@@ -1104,11 +1136,6 @@ impl Fun {
         buffer.clear();
         buffer.extend(a.data);
         let aliases = aliases_from_view(AtomView::Fun(*a));
-        if aliases.is_empty() {
-            buffer[0] &= !HAS_ALIAS_FLAG;
-        } else {
-            buffer[0] |= HAS_ALIAS_FLAG;
-        }
         Fun {
             data: buffer,
             aliases,
@@ -1249,11 +1276,6 @@ impl Fun {
         self.data.clear();
         self.data.extend(view.data);
         self.aliases = aliases_from_view(AtomView::Fun(*view));
-        if self.aliases.is_empty() {
-            self.data[0] &= !HAS_ALIAS_FLAG;
-        } else {
-            self.data[0] |= HAS_ALIAS_FLAG;
-        }
     }
 
     #[inline(always)]
@@ -1277,14 +1299,19 @@ impl Fun {
     }
 
     #[inline(always)]
-    pub(crate) unsafe fn from_raw(mut raw: RawAtom) -> Fun {
+    pub(crate) unsafe fn from_raw(raw: RawAtom) -> Fun {
         let aliases = aliases_from_raw_data(&raw);
-        if aliases.is_empty() {
-            raw[0] &= !HAS_ALIAS_FLAG;
-        } else {
-            raw[0] |= HAS_ALIAS_FLAG;
-        }
         Fun { data: raw, aliases }
+    }
+
+    #[inline(always)]
+    pub(crate) fn refresh_alias_flag_from_tree(&mut self) {
+        let has_alias = self.to_fun_view().iter().any(|arg| arg.has_alias());
+        if has_alias {
+            self.data[0] |= HAS_ALIAS_FLAG;
+        } else {
+            self.data[0] &= !HAS_ALIAS_FLAG;
+        }
     }
 }
 
@@ -1435,11 +1462,6 @@ impl Mul {
         buffer.clear();
         buffer.extend(a.data);
         let aliases = aliases_from_view(AtomView::Mul(*a));
-        if aliases.is_empty() {
-            buffer[0] &= !MUL_HAS_ALIAS_FLAG;
-        } else {
-            buffer[0] |= MUL_HAS_ALIAS_FLAG;
-        }
         Mul {
             data: buffer,
             aliases,
@@ -1460,11 +1482,6 @@ impl Mul {
         self.data.clear();
         self.data.extend(view.data);
         self.aliases = aliases_from_view(AtomView::Mul(*view));
-        if self.aliases.is_empty() {
-            self.data[0] &= !MUL_HAS_ALIAS_FLAG;
-        } else {
-            self.data[0] |= MUL_HAS_ALIAS_FLAG;
-        }
     }
 
     #[inline]
@@ -1560,10 +1577,11 @@ impl Mul {
         self.data[first_arg_start..first_arg_start + new_first_len]
             .copy_from_slice(other.get_data());
         self.aliases = aliases_from_view(self.to_mul_view().as_view());
-        if self.aliases.is_empty() {
-            self.data[0] &= !MUL_HAS_ALIAS_FLAG;
-        } else {
+        let has_alias = self.to_mul_view().iter().any(|x| x.has_alias());
+        if has_alias {
             self.data[0] |= MUL_HAS_ALIAS_FLAG;
+        } else {
+            self.data[0] &= !MUL_HAS_ALIAS_FLAG;
         }
     }
 
@@ -1599,14 +1617,19 @@ impl Mul {
     }
 
     #[inline(always)]
-    pub(crate) unsafe fn from_raw(mut raw: RawAtom) -> Mul {
+    pub(crate) unsafe fn from_raw(raw: RawAtom) -> Mul {
         let aliases = aliases_from_raw_data(&raw);
-        if aliases.is_empty() {
-            raw[0] &= !MUL_HAS_ALIAS_FLAG;
-        } else {
-            raw[0] |= MUL_HAS_ALIAS_FLAG;
-        }
         Mul { data: raw, aliases }
+    }
+
+    #[inline(always)]
+    pub(crate) fn refresh_alias_flag_from_tree(&mut self) {
+        let has_alias = self.to_mul_view().iter().any(|arg| arg.has_alias());
+        if has_alias {
+            self.data[0] |= MUL_HAS_ALIAS_FLAG;
+        } else {
+            self.data[0] &= !MUL_HAS_ALIAS_FLAG;
+        }
     }
 }
 
@@ -1659,11 +1682,6 @@ impl Add {
         buffer.clear();
         buffer.extend(a.data);
         let aliases = aliases_from_view(AtomView::Add(*a));
-        if aliases.is_empty() {
-            buffer[0] &= !HAS_ALIAS_FLAG;
-        } else {
-            buffer[0] |= HAS_ALIAS_FLAG;
-        }
         Add {
             data: buffer,
             aliases,
@@ -1742,11 +1760,6 @@ impl Add {
         self.data.clear();
         self.data.extend(view.data);
         self.aliases = aliases_from_view(AtomView::Add(view));
-        if self.aliases.is_empty() {
-            self.data[0] &= !HAS_ALIAS_FLAG;
-        } else {
-            self.data[0] |= HAS_ALIAS_FLAG;
-        }
     }
 
     #[inline(always)]
@@ -1765,14 +1778,19 @@ impl Add {
     }
 
     #[inline(always)]
-    pub(crate) unsafe fn from_raw(mut raw: RawAtom) -> Add {
+    pub(crate) unsafe fn from_raw(raw: RawAtom) -> Add {
         let aliases = aliases_from_raw_data(&raw);
-        if aliases.is_empty() {
-            raw[0] &= !HAS_ALIAS_FLAG;
-        } else {
-            raw[0] |= HAS_ALIAS_FLAG;
-        }
         Add { data: raw, aliases }
+    }
+
+    #[inline(always)]
+    pub(crate) fn refresh_alias_flag_from_tree(&mut self) {
+        let has_alias = self.to_add_view().iter().any(|arg| arg.has_alias());
+        if has_alias {
+            self.data[0] |= HAS_ALIAS_FLAG;
+        } else {
+            self.data[0] &= !HAS_ALIAS_FLAG;
+        }
     }
 
     pub(crate) fn grow_capacity(&mut self, size: usize) {

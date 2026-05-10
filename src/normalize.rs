@@ -969,6 +969,26 @@ impl AtomView<'_> {
             return;
         }
 
+        let mut cleanup_alias_handles =
+            self.has_alias() && !matches!(self, AtomView::Add(_) | AtomView::Mul(_));
+        self.normalize_impl(workspace, out, &mut cleanup_alias_handles);
+
+        if cleanup_alias_handles {
+            out.refresh_alias_flags_from_tree();
+            if !out.as_view().has_alias() {
+                out.clear_alias_handles();
+            } else {
+                out.refresh_alias_handles_from_tree();
+            }
+        }
+    }
+
+    fn normalize_impl(
+        &self,
+        workspace: &Workspace,
+        out: &mut Atom,
+        cleanup_alias_handles: &mut bool,
+    ) {
         match self {
             AtomView::Alias(_) => out.set_from_view(self),
             AtomView::Mul(t) => {
@@ -976,16 +996,22 @@ impl AtomView<'_> {
 
                 for a in t.iter() {
                     let mut handle = workspace.new_atom();
+                    let resolved_a = resolve_alias(a);
                     let a = if matches!(a, AtomView::Alias(_))
-                        && matches!(resolve_alias(a), AtomView::Mul(_))
+                        && matches!(resolved_a, AtomView::Mul(_))
                     {
-                        resolve_alias(a)
+                        *cleanup_alias_handles = true;
+                        resolved_a
                     } else {
                         a
                     };
 
                     if a.needs_normalization() {
+                        let had_alias = a.has_alias();
                         a.normalize(workspace, &mut handle);
+                        if had_alias && !handle.as_view().has_alias() {
+                            *cleanup_alias_handles = true;
+                        }
                     } else {
                         handle.set_from_view(&a);
                     }
@@ -1037,11 +1063,16 @@ impl AtomView<'_> {
                     let mut cur_len = 0;
 
                     while let Some(mut cur_buf) = atom_test_buf.pop() {
+                        let last_had_alias = last_buf.as_view().has_alias();
+                        let cur_had_alias = cur_buf.as_view().has_alias();
                         let merged = if has_alias {
                             last_buf.merge_factors_semantic(&mut cur_buf, &mut tmp, workspace)
                         } else {
                             last_buf.merge_factors(&mut cur_buf, &mut tmp, workspace)
                         };
+                        if merged && (last_had_alias || cur_had_alias) {
+                            *cleanup_alias_handles = true;
+                        }
 
                         if !merged {
                             // we are done merging
@@ -1854,17 +1885,23 @@ impl AtomView<'_> {
 
                 let mut norm_arg = workspace.new_atom();
                 for a in a {
+                    let resolved_a = resolve_alias(a);
                     let a = if matches!(a, AtomView::Alias(_))
-                        && matches!(resolve_alias(a), AtomView::Add(_))
+                        && matches!(resolved_a, AtomView::Add(_))
                     {
-                        resolve_alias(a)
+                        *cleanup_alias_handles = true;
+                        resolved_a
                     } else {
                         a
                     };
 
                     let r = if a.needs_normalization() {
                         // TODO: if a is a nested addition, prevent a sort
+                        let had_alias = a.has_alias();
                         a.normalize(workspace, &mut norm_arg);
+                        if had_alias && !norm_arg.as_view().has_alias() {
+                            *cleanup_alias_handles = true;
+                        }
                         norm_arg.as_view()
                     } else {
                         a
@@ -1937,11 +1974,16 @@ impl AtomView<'_> {
                 let mut cur_len = 0;
 
                 for (cur, _) in atom_sort_buf.iter().skip(1) {
+                    let last_had_alias = last_buf.as_view().has_alias();
+                    let cur_had_alias = cur.has_alias();
                     let merged = if has_alias {
                         last_buf.merge_terms_semantic(*cur, &mut helper)
                     } else {
                         last_buf.merge_terms(*cur, &mut helper)
                     };
+                    if merged && (last_had_alias || cur_had_alias) {
+                        *cleanup_alias_handles = true;
+                    }
 
                     if !merged {
                         // we are done merging
