@@ -272,11 +272,45 @@ impl Default for CanonicalOrderingSettings {
 }
 
 impl AtomView<'_> {
+    #[inline(always)]
+    fn alias_print_len(alias: &crate::atom::AliasView<'_>, opts: &PrintOptions) -> usize {
+        alias.get_body().estimate_char_length(opts) + 2
+    }
+
     fn format_alias<W: std::fmt::Write>(
         alias: &crate::atom::AliasView<'_>,
         fmt: &mut W,
+        opts: &PrintOptions,
+        mut print_state: PrintState,
     ) -> fmt::Result {
-        write!(fmt, "alias({})", alias.get_token())
+        if print_state.in_sum {
+            if print_state.top_level_add_child
+                && opts.mode.is_symbolica()
+                && opts.color_top_level_sum
+            {
+                fmt.write_fmt(format_args!("{}", AnsiWrap::yellow("+")))?;
+            } else {
+                fmt.write_char('+')?;
+            }
+        }
+
+        print_state.in_product = false;
+        print_state.in_exp = false;
+        print_state.in_exp_base = false;
+        print_state.in_sum = false;
+        print_state.top_level_add_child = false;
+        let (open, close) = if alias.is_opaque() {
+            ('⟪', '⟫')
+        } else {
+            ('⟨', '⟩')
+        };
+
+        AtomPrinter::format_bracket(open, fmt, opts, print_state)?;
+        print_state.bracket_level += 1;
+        alias.get_body().format(fmt, opts, print_state)?;
+        print_state.bracket_level -= 1;
+        AtomPrinter::format_bracket(close, fmt, opts, print_state)?;
+        Ok(())
     }
 
     fn fmt_debug(&self, fmt: &mut fmt::Formatter) -> fmt::Result {
@@ -303,12 +337,12 @@ impl AtomView<'_> {
             AtomView::Alias(a) => match opts.alias_print_mode {
                 AliasPrintMode::Transparent => a.get_body().format(fmt, opts, print_state),
                 AliasPrintMode::All => {
-                    Self::format_alias(a, fmt)?;
+                    Self::format_alias(a, fmt, opts, print_state)?;
                     Ok(false)
                 }
                 AliasPrintMode::OpaqueOnly => {
                     if a.is_opaque() {
-                        Self::format_alias(a, fmt)?;
+                        Self::format_alias(a, fmt, opts, print_state)?;
                         Ok(false)
                     } else {
                         a.get_body().format(fmt, opts, print_state)
@@ -640,10 +674,10 @@ impl AtomView<'_> {
         match self {
             AtomView::Alias(a) => match opts.alias_print_mode {
                 AliasPrintMode::Transparent => a.get_body().estimate_char_length(opts),
-                AliasPrintMode::All => 7 + a.get_token().ilog10() as usize,
+                AliasPrintMode::All => Self::alias_print_len(a, opts),
                 AliasPrintMode::OpaqueOnly => {
                     if a.is_opaque() {
-                        7 + a.get_token().ilog10() as usize
+                        Self::alias_print_len(a, opts)
                     } else {
                         a.get_body().estimate_char_length(opts)
                     }

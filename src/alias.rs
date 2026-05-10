@@ -925,7 +925,8 @@ fn alias_print_mode_renders_selected_aliases() {
     let x_alias = register_aliased_atom(AliasedAtom::new(crate::parse!("x"))).0;
     let transparent = x_alias.to_atom();
     let opaque = x_alias.to_opaque_atom();
-    let transparent_alias = format!("alias({})", x_alias.token());
+    let transparent_alias = "⟨x⟩";
+    let opaque_alias = "⟪x⟫";
 
     assert_eq!(
         format!("{}", transparent.printer(PrintOptions::file_no_namespace())),
@@ -959,7 +960,17 @@ fn alias_print_mode_renders_selected_aliases() {
                 ..PrintOptions::file_no_namespace()
             })
         ),
-        transparent_alias
+        opaque_alias
+    );
+    assert_eq!(
+        format!(
+            "{}",
+            (crate::parse!("x") + opaque).printer(PrintOptions {
+                alias_print_mode: AliasPrintMode::OpaqueOnly,
+                ..PrintOptions::file_no_namespace()
+            })
+        ),
+        "⟪x⟫+x"
     );
 }
 

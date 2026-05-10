@@ -576,9 +576,9 @@ class AliasPrintMode(Enum):
     Transparent = 1
     """Print all aliases transparently."""
     All = 2
-    """Print all aliases as alias(id)."""
+    """Print every alias body inside ⟨...⟩, or ⟪...⟫ for opaque aliases."""
     OpaqueOnly = 3
-    """Print only opaque aliases as alias(id)."""
+    """Print only opaque alias bodies inside ⟪...⟫."""
 
 
 class Expression:
@@ -1150,7 +1150,7 @@ class Expression:
         custom_print_mode: int | None
             A custom print-mode identifier passed through to custom print callbacks.
         alias_print_mode: AliasPrintMode
-            Controls whether aliases are printed transparently or as alias(id).
+            Controls whether aliases are printed transparently or as bracketed alias bodies.
         """
 
     def format_plain(self) -> str:
@@ -4598,7 +4598,7 @@ class Transformer:
         custom_print_mode: int | None
             A custom print-mode identifier passed through to custom print callbacks.
         alias_print_mode: AliasPrintMode
-            Controls whether aliases are printed transparently or as alias(id).
+            Controls whether aliases are printed transparently or as bracketed alias bodies.
         """
 
     def stats(
@@ -4883,7 +4883,7 @@ class Series:
         custom_print_mode: int | None
             A custom print-mode identifier passed through to custom print callbacks.
         alias_print_mode: AliasPrintMode
-            Controls whether aliases are printed transparently or as alias(id).
+            Controls whether aliases are printed transparently or as bracketed alias bodies.
         """
 
     def __add__(self, other: Series | Expression) -> Series:
@@ -5361,7 +5361,7 @@ class Polynomial:
         custom_print_mode: int | None
             A custom print-mode identifier passed through to custom print callbacks.
         alias_print_mode: AliasPrintMode
-            Controls whether aliases are printed transparently or as alias(id).
+            Controls whether aliases are printed transparently or as bracketed alias bodies.
         """
 
     def nterms(self) -> int:
@@ -6134,7 +6134,7 @@ class NumberFieldPolynomial:
         custom_print_mode: int | None
             A custom print-mode identifier passed through to custom print callbacks.
         alias_print_mode: AliasPrintMode
-            Controls whether aliases are printed transparently or as alias(id).
+            Controls whether aliases are printed transparently or as bracketed alias bodies.
         """
 
     def nterms(self) -> int:
@@ -6747,7 +6747,7 @@ class FiniteFieldPolynomial:
         custom_print_mode: int | None
             A custom print-mode identifier passed through to custom print callbacks.
         alias_print_mode: AliasPrintMode
-            Controls whether aliases are printed transparently or as alias(id).
+            Controls whether aliases are printed transparently or as bracketed alias bodies.
         """
 
     def nterms(self) -> int:
@@ -7952,7 +7952,7 @@ class Matrix:
         custom_print_mode: int | None
             A custom print-mode identifier passed through to custom print callbacks.
         alias_print_mode: AliasPrintMode
-            Controls whether aliases are printed transparently or as alias(id).
+            Controls whether aliases are printed transparently or as bracketed alias bodies.
         """
 
     def to_latex(self) -> str:

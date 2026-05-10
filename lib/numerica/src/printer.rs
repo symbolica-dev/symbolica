@@ -35,15 +35,15 @@ impl PrintMode {
     }
 }
 
-/// Controls whether aliases are expanded or printed as `alias(id)`.
+/// Controls whether aliases are expanded or printed as bracketed alias bodies.
 #[derive(Debug, Copy, Clone, PartialEq, Eq, Hash, Default)]
 pub enum AliasPrintMode {
     /// Expand every alias to its body.
     #[default]
     Transparent,
-    /// Print every alias as `alias(id)`.
+    /// Print every alias body inside `⟨...⟩`, or `⟪...⟫` for opaque aliases.
     All,
-    /// Expand transparent aliases and print only opaque aliases as `alias(id)`.
+    /// Expand transparent aliases and print only opaque alias bodies inside `⟪...⟫`.
     OpaqueOnly,
 }
 
@@ -102,7 +102,7 @@ pub struct PrintOptions {
     /// Provides a handle to set the behavior of the custom print function.
     /// Symbolica does not use this option for its own printing.
     pub custom_print_mode: Option<(&'static str, usize)>,
-    /// Controls whether aliases are expanded or printed as `alias(id)`.
+    /// Controls whether aliases are expanded or printed as bracketed alias bodies.
     pub alias_print_mode: AliasPrintMode,
 }
 
