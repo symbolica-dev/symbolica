@@ -960,6 +960,18 @@ fn test_alias_evaluator_horners_alias_body() {
 }
 
 #[test]
+fn alias_total_byte_size_counts_alias_body() {
+    let body = crate::parse!("x+y");
+    let aliased = alias_literal(crate::parse!("exp(x+y)+log(x+y)"), body.clone(), false);
+
+    assert_eq!(aliased.get_byte_size(), aliased.as_view().get_byte_size());
+    assert_eq!(
+        aliased.get_total_byte_size(),
+        aliased.get_byte_size() + 2 * body.get_total_byte_size()
+    );
+}
+
+#[test]
 fn test_alias_inside_function_map_uses_outer_arguments() {
     use crate::evaluate::{FunctionMap, OptimizationSettings};
     use crate::symbol;

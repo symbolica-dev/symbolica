@@ -1058,6 +1058,11 @@ class Expression:
         Get the number of bytes that this expression takes up in memory.
         """
 
+    def get_total_byte_size(self) -> int:
+        """
+        Get the number of bytes that this expression takes up in memory, including alias bodies.
+        """
+
     def format(
         self,
         mode: PrintMode = PrintMode.Symbolica,

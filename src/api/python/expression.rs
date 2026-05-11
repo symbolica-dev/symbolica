@@ -2820,6 +2820,11 @@ impl PythonExpression {
         self.expr.as_view().get_byte_size()
     }
 
+    /// Get the number of bytes that this expression takes up in memory, including alias bodies.
+    pub fn get_total_byte_size(&self) -> usize {
+        self.expr.as_view().get_total_byte_size()
+    }
+
     /// Convert the expression into a human-readable string, with tunable settings.
     ///
     /// Examples

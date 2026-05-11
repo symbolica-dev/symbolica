@@ -2508,6 +2508,25 @@ impl AtomView<'_> {
             AtomView::Add(a) => a.get_byte_size(),
         }
     }
+
+    /// Return the byte size of this atom, including the bodies referenced by aliases.
+    ///
+    /// Normal child atoms are already part of the compressed byte code returned by
+    /// [AtomView::get_byte_size], so this only adds the recursively expanded cost of alias bodies.
+    pub fn get_total_byte_size(&self) -> usize {
+        self.get_byte_size() + self.get_alias_body_byte_size()
+    }
+
+    fn get_alias_body_byte_size(&self) -> usize {
+        match self {
+            AtomView::Num(_) | AtomView::Var(_) => 0,
+            AtomView::Alias(a) => a.get_body().get_total_byte_size(),
+            AtomView::Fun(f) => f.iter().map(|x| x.get_alias_body_byte_size()).sum(),
+            AtomView::Pow(p) => p.iter().map(|x| x.get_alias_body_byte_size()).sum(),
+            AtomView::Mul(m) => m.iter().map(|x| x.get_alias_body_byte_size()).sum(),
+            AtomView::Add(a) => a.iter().map(|x| x.get_alias_body_byte_size()).sum(),
+        }
+    }
 }
 
 /// A mathematical expression.

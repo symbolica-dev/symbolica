@@ -73,6 +73,21 @@ pub trait AtomCore: private::Sealed + Sized {
     /// Take a view of the atom.
     fn as_atom_view(&self) -> AtomView<'_>;
 
+    /// Return the size of the compressed byte code for this atom.
+    ///
+    /// Alias bodies are not counted; only the alias node stored in this atom is counted.
+    fn get_byte_size(&self) -> usize {
+        self.as_atom_view().get_byte_size()
+    }
+
+    /// Return the size of the compressed byte code plus the bodies referenced by aliases.
+    ///
+    /// Every alias occurrence contributes its referenced body, recursively including aliases in
+    /// that body.
+    fn get_total_byte_size(&self) -> usize {
+        self.as_atom_view().get_total_byte_size()
+    }
+
     fn atom_to_output(&self, atom: Atom) -> Self::Output;
 
     /// Get a function view if the atom is a function.
