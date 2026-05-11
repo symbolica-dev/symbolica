@@ -281,10 +281,12 @@ impl From<PythonPrintMode> for PrintMode {
 pub enum PythonAliasPrintMode {
     /// Print all aliases transparently.
     Transparent,
-    /// Print all aliases as alias(id).
+    /// Print every alias body inside ⟨...⟩, or ⟪...⟫ for opaque aliases.
     All,
-    /// Print only opaque aliases as alias(id).
+    /// Expand transparent aliases and print only opaque alias bodies inside ⟪...⟫.
     OpaqueOnly,
+    /// Print all alias indices inside <...>, or <<...>> for opaque aliases.
+    Index,
 }
 
 impl From<AliasPrintMode> for PythonAliasPrintMode {
@@ -293,6 +295,7 @@ impl From<AliasPrintMode> for PythonAliasPrintMode {
             AliasPrintMode::Transparent => PythonAliasPrintMode::Transparent,
             AliasPrintMode::All => PythonAliasPrintMode::All,
             AliasPrintMode::OpaqueOnly => PythonAliasPrintMode::OpaqueOnly,
+            AliasPrintMode::Index => PythonAliasPrintMode::Index,
         }
     }
 }
@@ -303,6 +306,7 @@ impl From<PythonAliasPrintMode> for AliasPrintMode {
             PythonAliasPrintMode::Transparent => AliasPrintMode::Transparent,
             PythonAliasPrintMode::All => AliasPrintMode::All,
             PythonAliasPrintMode::OpaqueOnly => AliasPrintMode::OpaqueOnly,
+            PythonAliasPrintMode::Index => AliasPrintMode::Index,
         }
     }
 }

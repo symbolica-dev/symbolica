@@ -579,6 +579,8 @@ class AliasPrintMode(Enum):
     """Print every alias body inside ⟨...⟩, or ⟪...⟫ for opaque aliases."""
     OpaqueOnly = 3
     """Print only opaque alias bodies inside ⟪...⟫."""
+    Index = 4
+    """Print every alias index inside <...>, or <<...>> for opaque aliases."""
 
 
 class Expression:

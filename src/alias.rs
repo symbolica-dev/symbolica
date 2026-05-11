@@ -632,6 +632,8 @@ fn alias_print_mode_renders_selected_aliases() {
     let opaque = x_alias.to_opaque_atom();
     let transparent_alias = "⟨x⟩";
     let opaque_alias = "⟪x⟫";
+    let transparent_index_alias = format!("<{}>", x_alias.token());
+    let opaque_index_alias = format!("<<{}>>", x_alias.token());
 
     assert_eq!(
         format!("{}", transparent.printer(PrintOptions::file_no_namespace())),
@@ -646,6 +648,16 @@ fn alias_print_mode_renders_selected_aliases() {
             })
         ),
         transparent_alias
+    );
+    assert_eq!(
+        format!(
+            "{}",
+            transparent.printer(PrintOptions {
+                alias_print_mode: AliasPrintMode::Index,
+                ..PrintOptions::file_no_namespace()
+            })
+        ),
+        transparent_index_alias
     );
     assert_eq!(
         format!(
@@ -670,12 +682,32 @@ fn alias_print_mode_renders_selected_aliases() {
     assert_eq!(
         format!(
             "{}",
-            (crate::parse!("x") + opaque).printer(PrintOptions {
+            opaque.printer(PrintOptions {
+                alias_print_mode: AliasPrintMode::Index,
+                ..PrintOptions::file_no_namespace()
+            })
+        ),
+        opaque_index_alias
+    );
+    assert_eq!(
+        format!(
+            "{}",
+            (crate::parse!("x") + opaque.clone()).printer(PrintOptions {
                 alias_print_mode: AliasPrintMode::OpaqueOnly,
                 ..PrintOptions::file_no_namespace()
             })
         ),
         "⟪x⟫+x"
+    );
+    assert_eq!(
+        format!(
+            "{}",
+            (crate::parse!("x") + opaque).printer(PrintOptions {
+                alias_print_mode: AliasPrintMode::Index,
+                ..PrintOptions::file_no_namespace()
+            })
+        ),
+        format!("{opaque_index_alias}+x")
     );
 }
 

@@ -45,6 +45,8 @@ pub enum AliasPrintMode {
     All,
     /// Expand transparent aliases and print only opaque alias bodies inside `⟪...⟫`.
     OpaqueOnly,
+    /// Print every alias index inside `<...>`, or `<<...>>` for opaque aliases.
+    Index,
 }
 
 /// Various options for printing expressions.
