@@ -967,7 +967,7 @@ fn alias_total_byte_size_counts_alias_body() {
     assert_eq!(aliased.get_byte_size(), aliased.as_view().get_byte_size());
     assert_eq!(
         aliased.get_total_byte_size(),
-        aliased.get_byte_size() + 2 * body.get_total_byte_size()
+        aliased.get_byte_size() + body.get_total_byte_size()
     );
 }
 
@@ -979,6 +979,21 @@ fn inline_aliases_expands_transparent_aliases_only() {
     let opaque = crate::parse!("x+1").alias(true);
     assert_eq!(opaque.inline_aliases(false), opaque);
     assert_eq!(opaque.inline_aliases(true), crate::parse!("x+1"));
+}
+
+#[test]
+fn get_aliases_lists_unique_alias_bodies() {
+    let body = crate::parse!("x+y");
+    let aliased = alias_literal(crate::parse!("exp(x+y)+log(x+y)"), body.clone(), false);
+
+    assert_eq!(aliased.get_aliases(), vec![Arc::new(body)]);
+}
+
+#[test]
+fn alias_known_aliases_expands_opaque_aliases() {
+    let opaque = crate::parse!("x+1").alias(true);
+
+    assert_eq!(opaque.alias_known_aliases(), crate::parse!("x+1"));
 }
 
 #[test]

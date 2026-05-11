@@ -43,7 +43,7 @@ mod coefficient;
 mod core;
 pub mod representation;
 
-use ahash::HashMap;
+use ahash::{HashMap, HashSet};
 use byteorder::{LittleEndian, ReadBytesExt, WriteBytesExt};
 use numerica::domains::float::Float;
 use smartstring::{LazyCompact, SmartString};
@@ -2514,17 +2514,40 @@ impl AtomView<'_> {
     /// Normal child atoms are already part of the compressed byte code returned by
     /// [AtomView::get_byte_size], so this only adds the recursively expanded cost of alias bodies.
     pub fn get_total_byte_size(&self) -> usize {
-        self.get_byte_size() + self.get_alias_body_byte_size()
+        let mut seen_aliases = HashSet::default();
+        self.get_total_byte_size_impl(&mut seen_aliases)
     }
 
-    fn get_alias_body_byte_size(&self) -> usize {
+    fn get_total_byte_size_impl(&self, seen_aliases: &mut HashSet<usize>) -> usize {
+        self.get_byte_size() + self.get_alias_body_byte_size(seen_aliases)
+    }
+
+    fn get_alias_body_byte_size(&self, seen_aliases: &mut HashSet<usize>) -> usize {
         match self {
             AtomView::Num(_) | AtomView::Var(_) => 0,
-            AtomView::Alias(a) => a.get_body().get_total_byte_size(),
-            AtomView::Fun(f) => f.iter().map(|x| x.get_alias_body_byte_size()).sum(),
-            AtomView::Pow(p) => p.iter().map(|x| x.get_alias_body_byte_size()).sum(),
-            AtomView::Mul(m) => m.iter().map(|x| x.get_alias_body_byte_size()).sum(),
-            AtomView::Add(a) => a.iter().map(|x| x.get_alias_body_byte_size()).sum(),
+            AtomView::Alias(a) => {
+                if seen_aliases.insert(a.get_token()) {
+                    a.get_body().get_total_byte_size_impl(seen_aliases)
+                } else {
+                    0
+                }
+            }
+            AtomView::Fun(f) => f
+                .iter()
+                .map(|x| x.get_alias_body_byte_size(seen_aliases))
+                .sum(),
+            AtomView::Pow(p) => p
+                .iter()
+                .map(|x| x.get_alias_body_byte_size(seen_aliases))
+                .sum(),
+            AtomView::Mul(m) => m
+                .iter()
+                .map(|x| x.get_alias_body_byte_size(seen_aliases))
+                .sum(),
+            AtomView::Add(a) => a
+                .iter()
+                .map(|x| x.get_alias_body_byte_size(seen_aliases))
+                .sum(),
         }
     }
 }

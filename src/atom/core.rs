@@ -415,6 +415,16 @@ pub trait AtomCore: private::Sealed + Sized {
         })
     }
 
+    /// Return a list of all the aliases in the expression.
+    fn get_aliases(&self) -> Vec<Arc<Atom>> {
+        self.as_atom_view().get_aliases()
+    }
+
+    /// Return a new expression with all known aliases replaced by their values.
+    fn alias_known_aliases(&self) -> Self::Output {
+        self.as_atom_view().alias_known_aliases().wrap(self)
+    }
+
     /// Collect terms involving the same power of `x` in `xs`, where `xs` is a list of indeterminates.
     /// Return the list of key-coefficient pairs
     ///
