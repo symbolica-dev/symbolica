@@ -1412,6 +1412,7 @@ impl<'a> AtomView<'a> {
                 let rest_sum = rest.to_add();
 
                 let mut new_arg = ws.new_atom();
+                let mut tmp = ws.new_atom();
                 for sum_arg in a {
                     if sum_arg == x {
                         coeff_sum.extend(ws.new_num(1).as_view());
@@ -1430,7 +1431,8 @@ impl<'a> AtomView<'a> {
                         } else {
                             let exp = ws.new_num(n - &min_power);
                             new_arg.to_pow(x, exp.as_view());
-                            coeff_sum.extend(new_arg.as_view());
+                            new_arg.as_view().normalize(ws, &mut tmp);
+                            coeff_sum.extend(tmp.as_view());
                         }
                     } else if let AtomView::Mul(m) = sum_arg {
                         let new_mul = new_arg.to_mul();
@@ -1522,9 +1524,16 @@ mod test {
 
     #[test]
     fn collect_horner() {
-        let expr = parse!("1 + v1*v2 + 2 v1*v2*v3 + v1^2 + v1^3*y + v1^4*z + v1^10");
-        let collected = expr.collect_horner(Some(&[symbol!("v1"), symbol!("v2")]));
-        assert_eq!(collected.expand(), expr);
+        std::thread::Builder::new()
+            .stack_size(16 * 1024 * 1024)
+            .spawn(|| {
+                let expr = parse!("1 + v1*v2 + 2 v1*v2*v3 + v1^2 + v1^3*y + v1^4*z + v1^10");
+                let collected = expr.collect_horner(Some(&[symbol!("v1"), symbol!("v2")]));
+                assert_eq!(collected.expand(), expr);
+            })
+            .unwrap()
+            .join()
+            .unwrap();
     }
 
     #[test]
