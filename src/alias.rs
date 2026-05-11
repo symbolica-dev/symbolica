@@ -225,6 +225,28 @@ pub(crate) fn collect_alias_handles_in(root: AtomView<'_>) -> Vec<Arc<AliasHandl
     handles
 }
 
+pub(crate) fn collect_alias_handles_with_dependencies(root: AtomView<'_>) -> Vec<Arc<AliasHandle>> {
+    fn visit(handle: Arc<AliasHandle>, seen: &mut HashSet<usize>, out: &mut Vec<Arc<AliasHandle>>) {
+        if !seen.insert(handle.token()) {
+            return;
+        }
+
+        for dependency in collect_alias_handles_in(handle.atom().as_view()) {
+            visit(dependency, seen, out);
+        }
+
+        out.push(handle);
+    }
+
+    let mut seen = HashSet::default();
+    let mut out = Vec::new();
+    for handle in collect_alias_handles_in(root) {
+        visit(handle, &mut seen, &mut out);
+    }
+
+    out
+}
+
 fn collect_alias_handles_in_impl(root: AtomView<'_>, handles: &mut HashSet<Arc<AliasHandle>>) {
     match root {
         AtomView::Num(_) | AtomView::Var(_) => {}
@@ -662,7 +684,7 @@ impl From<Atom> for AliasedAtom {
     }
 }
 
-fn register_aliased_atom(alias: AliasedAtom) -> (Arc<AliasHandle>, bool) {
+pub(crate) fn register_aliased_atom(alias: AliasedAtom) -> (Arc<AliasHandle>, bool) {
     let AliasedAtom { root, aliases: _ } = alias;
     let atom = Arc::new(root);
 
@@ -695,6 +717,10 @@ fn register_aliased_atom(alias: AliasedAtom) -> (Arc<AliasHandle>, bool) {
     drop(stale_dependencies);
 
     (handle, is_new)
+}
+
+pub(crate) fn register_alias_atom(atom: Atom) -> Arc<AliasHandle> {
+    register_aliased_atom(AliasedAtom::new(atom)).0
 }
 
 pub(crate) fn alias_subexpressions(
@@ -926,6 +952,58 @@ fn raw_atom_keeps_alias_handles_alive() {
 
     drop(restored);
     assert!(get_alias(token).is_none());
+}
+
+#[test]
+fn export_import_keeps_used_alias() {
+    let x = Atom::var(crate::symbol!("export_import_keeps_used_alias::x"));
+    let x_alias = register_aliased_atom(AliasedAtom::new(x.clone())).0;
+    let old_token = x_alias.token();
+    let expr = x_alias.to_atom();
+
+    let mut data = Vec::new();
+    expr.export(&mut data).unwrap();
+    drop(expr);
+    drop(x_alias);
+    assert!(get_alias(old_token).is_none());
+
+    let imported = Atom::import(&mut std::io::Cursor::new(data), None).unwrap();
+    let AtomView::Alias(alias) = imported.as_view() else {
+        panic!("Expected imported alias");
+    };
+
+    assert_ne!(alias.get_token(), old_token);
+    assert_eq!(alias.get_body(), x.as_view());
+}
+
+#[test]
+fn export_import_keeps_alias_dependencies() {
+    let x = Atom::var(crate::symbol!("export_import_keeps_alias_dependencies::x"));
+    let inner_alias = register_aliased_atom(AliasedAtom::new(x.clone())).0;
+    let inner_token = inner_alias.token();
+    let outer_alias = register_aliased_atom(AliasedAtom::new(inner_alias.to_atom())).0;
+    let old_outer_token = outer_alias.token();
+    let expr = outer_alias.to_atom();
+
+    let mut data = Vec::new();
+    expr.export(&mut data).unwrap();
+    drop(expr);
+    drop(outer_alias);
+    drop(inner_alias);
+    assert!(get_alias(old_outer_token).is_none());
+    assert!(get_alias(inner_token).is_none());
+
+    let imported = Atom::import(&mut std::io::Cursor::new(data), None).unwrap();
+    let AtomView::Alias(outer) = imported.as_view() else {
+        panic!("Expected imported outer alias");
+    };
+    let AtomView::Alias(inner) = outer.get_body() else {
+        panic!("Expected imported inner alias");
+    };
+
+    assert_ne!(outer.get_token(), old_outer_token);
+    assert_ne!(inner.get_token(), inner_token);
+    assert_eq!(inner.get_body(), x.as_view());
 }
 
 #[test]

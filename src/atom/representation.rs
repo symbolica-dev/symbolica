@@ -13,7 +13,10 @@ use std::{
 };
 
 use crate::{
-    alias::{AliasHandle, collect_alias_handles_in, get_alias_handle},
+    alias::{
+        AliasHandle, collect_alias_handles_in, collect_alias_handles_with_dependencies,
+        get_alias_handle, register_alias_atom,
+    },
     atom::{UserData, UserDataKey},
     coefficient::{Coefficient, CoefficientView},
     state::{State, StateMap, Workspace},
@@ -51,6 +54,7 @@ const SYM_EXTRA_WILDCARD_LEVEL_3: u32 = 0b11_000;
 const MUL_HAS_COEFF_FLAG: u8 = 0b01000000;
 const MUL_HAS_ALIAS_FLAG: u8 = 0b00100000;
 const ALIAS_OPAQUE_FLAG: u8 = 0b00001_000;
+const ALIAS_EXPORT_SECTION_MAGIC: u64 = 0xA11A_5ECA_1100_0001;
 
 const ZERO_DATA: [u8; 3] = [NUM_ID, 1, 0];
 static NO_ALIASES: Vec<Arc<AliasHandle>> = Vec::new();
@@ -158,6 +162,137 @@ fn mul_alias_flag_for(view: AtomView<'_>) -> u8 {
         MUL_HAS_ALIAS_FLAG
     } else {
         0
+    }
+}
+
+fn read_raw_atom<R: Read>(source: &mut R) -> Result<RawAtom, std::io::Error> {
+    // should also set whether rat poly coefficient needs to be converted
+    let mut flags_buf = [0; 1];
+    let mut size_buf = [0; 8];
+
+    source.read_exact(&mut flags_buf)?;
+    source.read_exact(&mut size_buf)?;
+
+    let n_size = u64::from_le_bytes(size_buf);
+    let mut dest = RawAtom::new();
+    dest.resize(n_size as usize, 0);
+    source.read_exact(&mut dest)?;
+    Ok(dest)
+}
+
+fn remap_aliases_in_raw_atom(
+    raw: RawAtom,
+    aliases: &HashMap<usize, Arc<AliasHandle>>,
+) -> Result<RawAtom, std::io::Error> {
+    let mut out = RawAtom::new();
+    remap_aliases_in_raw_data(&raw, aliases, &mut out)?;
+    let handles = aliases_from_raw_data(&out);
+    out.sync_aliases_from(&handles);
+    Ok(out)
+}
+
+fn remap_aliases_in_raw_data(
+    data: &[u8],
+    aliases: &HashMap<usize, Arc<AliasHandle>>,
+    out: &mut RawAtom,
+) -> Result<bool, std::io::Error> {
+    match data[0] & TYPE_MASK {
+        NUM_ID | VAR_ID => {
+            let rest = skip_raw_atom(data);
+            let len = data.len() - rest.len();
+            out.extend_from_slice(&data[..len]);
+            Ok(false)
+        }
+        ALIAS_ID => {
+            let token = data[1..].get_frac_u64().0 as usize;
+            let Some(handle) = aliases.get(&token) else {
+                return Err(std::io::Error::new(
+                    std::io::ErrorKind::InvalidData,
+                    format!("Missing imported alias for token {}", token),
+                ));
+            };
+
+            out.put_u8(ALIAS_ID | (data[0] & ALIAS_OPAQUE_FLAG));
+            (handle.token() as u64, 1).write_packed(out);
+            Ok(true)
+        }
+        FUN_ID => {
+            let start = out.len();
+            out.put_u8(data[0] & !HAS_ALIAS_FLAG);
+            out.put_u32_le(0);
+
+            let args_start = out.len();
+            let mut c = &data[1 + 4..];
+            let id_and_attrs;
+            let n_args;
+            (id_and_attrs, n_args, c) = c.get_frac_u64();
+            (id_and_attrs, n_args).write_packed(out);
+
+            let mut has_alias = false;
+            for _ in 0..n_args {
+                has_alias |= remap_aliases_in_raw_data(c, aliases, out)?;
+                c = skip_raw_atom(c);
+            }
+
+            if has_alias {
+                out[start] |= HAS_ALIAS_FLAG;
+            }
+            let size = out.len() - args_start;
+            (&mut out[start + 1..start + 1 + 4]).put_u32_le(size as u32);
+            Ok(has_alias)
+        }
+        POW_ID => {
+            out.put_u8(data[0]);
+            let mut c = &data[1..];
+            let base_has_alias = remap_aliases_in_raw_data(c, aliases, out)?;
+            c = skip_raw_atom(c);
+            let exp_has_alias = remap_aliases_in_raw_data(c, aliases, out)?;
+            Ok(base_has_alias || exp_has_alias)
+        }
+        MUL_ID => {
+            let start = out.len();
+            out.put_u8(data[0] & !MUL_HAS_ALIAS_FLAG);
+            out.put_u32_le(0);
+
+            let args_start = out.len();
+            let mut c = &data[1 + 4..];
+            let n_args;
+            let one;
+            (n_args, one, c) = c.get_frac_u64();
+            (n_args, one).write_packed(out);
+
+            let mut has_alias = false;
+            for _ in 0..n_args {
+                has_alias |= remap_aliases_in_raw_data(c, aliases, out)?;
+                c = skip_raw_atom(c);
+            }
+
+            if has_alias {
+                out[start] |= MUL_HAS_ALIAS_FLAG;
+            }
+            let size = out.len() - args_start;
+            (&mut out[start + 1..start + 1 + 4]).put_u32_le(size as u32);
+            Ok(has_alias)
+        }
+        ADD_ID => {
+            let mut c = &data[1..];
+            let n_args;
+            let _size;
+            (n_args, _size, c) = c.get_frac_u64();
+
+            let mut children = RawAtom::new();
+            let mut has_alias = false;
+            for _ in 0..n_args {
+                has_alias |= remap_aliases_in_raw_data(c, aliases, &mut children)?;
+                c = skip_raw_atom(c);
+            }
+
+            out.put_u8((data[0] & !HAS_ALIAS_FLAG) | if has_alias { HAS_ALIAS_FLAG } else { 0 });
+            (n_args, children.len() as u64).write_packed(out);
+            out.extend_from_slice(&children);
+            Ok(has_alias)
+        }
+        x => unreachable!("Bad id {}", x),
     }
 }
 
@@ -711,21 +846,7 @@ impl Atom {
     /// Read from a binary stream. The format is the byte-length first
     /// followed by the data.
     pub(crate) fn read<R: Read>(&mut self, source: &mut R) -> Result<(), std::io::Error> {
-        let mut dest = std::mem::replace(self, Atom::Zero).into_raw();
-
-        // should also set whether rat poly coefficient needs to be converted
-        let mut flags_buf = [0; 1];
-        let mut size_buf = [0; 8];
-
-        source.read_exact(&mut flags_buf)?;
-        source.read_exact(&mut size_buf)?;
-
-        let n_size = u64::from_le_bytes(size_buf);
-
-        dest.extend(size_buf);
-        dest.resize(n_size as usize, 0);
-        source.read_exact(&mut dest)?;
-
+        let dest = read_raw_atom(source)?;
         unsafe {
             match dest[0] & TYPE_MASK {
                 NUM_ID => *self = Atom::Num(Num::from_raw(dest)),
@@ -753,22 +874,40 @@ impl Atom {
     ) -> Result<Atom, std::io::Error> {
         let state_map = State::import(source, conflict_fn)?;
 
-        let mut n_terms_buf = [0; 8];
-        source.read_exact(&mut n_terms_buf)?;
-        let n_terms = u64::from_le_bytes(n_terms_buf);
+        let mut marker_or_n_terms_buf = [0; 8];
+        source.read_exact(&mut marker_or_n_terms_buf)?;
+        let marker_or_n_terms = u64::from_le_bytes(marker_or_n_terms_buf);
+
+        let mut imported_aliases = HashMap::default();
+        let n_terms = if marker_or_n_terms == ALIAS_EXPORT_SECTION_MAGIC {
+            let n_aliases = source.read_u64::<LittleEndian>()?;
+            for _ in 0..n_aliases {
+                let old_token = source.read_u64::<LittleEndian>()? as usize;
+                let raw = read_raw_atom(source)?;
+                let raw = remap_aliases_in_raw_atom(raw, &imported_aliases)?;
+                let body = unsafe { Atom::from_raw(raw) }.as_view().rename(&state_map);
+                let handle = register_alias_atom(body);
+                imported_aliases.insert(old_token, handle);
+            }
+
+            source.read_u64::<LittleEndian>()?
+        } else {
+            marker_or_n_terms
+        };
 
         if n_terms == 1 {
-            let mut a = Atom::new();
-            a.read(source)?;
+            let raw = read_raw_atom(source)?;
+            let raw = remap_aliases_in_raw_atom(raw, &imported_aliases)?;
+            let a = unsafe { Atom::from_raw(raw) };
             Ok(a.as_view().rename(&state_map))
         } else {
             let mut res = Atom::new();
             let a = res.to_add();
 
-            let mut tmp = Atom::new();
-
             for _ in 0..n_terms {
-                tmp.read(&mut *source)?;
+                let raw = read_raw_atom(source)?;
+                let raw = remap_aliases_in_raw_atom(raw, &imported_aliases)?;
+                let tmp = unsafe { Atom::from_raw(raw) };
                 a.extend(tmp.as_view());
             }
 
@@ -2804,6 +2943,15 @@ impl<'a> AtomView<'a> {
     #[inline(always)]
     pub fn export<W: Write>(&self, dest: &mut W) -> Result<(), std::io::Error> {
         State::export(dest)?;
+
+        dest.write_u64::<LittleEndian>(ALIAS_EXPORT_SECTION_MAGIC)?;
+
+        let aliases = collect_alias_handles_with_dependencies(*self);
+        dest.write_u64::<LittleEndian>(aliases.len() as u64)?;
+        for alias in aliases {
+            dest.write_u64::<LittleEndian>(alias.token() as u64)?;
+            alias.atom().as_view().write(dest.by_ref())?;
+        }
 
         dest.write_u64::<LittleEndian>(1)?; // export a single expression
 
