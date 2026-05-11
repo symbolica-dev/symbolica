@@ -976,6 +976,39 @@ fn alias_total_byte_size_counts_alias_body() {
 }
 
 #[test]
+fn alias_expanded_byte_size_counts_substituted_expression() {
+    let body = crate::parse!("x+y");
+    let aliased = alias_literal(crate::parse!("exp(x+y)+log(x+y)"), body, false);
+    let expanded = aliased.alias_known_aliases();
+
+    assert_eq!(
+        aliased.get_alias_expanded_byte_size(),
+        expanded.get_byte_size()
+    );
+    assert_eq!(
+        aliased.get_alias_expanded_byte_size(),
+        crate::parse!("exp(x+y)+log(x+y)").get_byte_size()
+    );
+}
+
+#[test]
+fn alias_expanded_byte_size_expands_opaque_and_nested_aliases() {
+    let inner_alias = register_alias_atom(crate::parse!("x+y"));
+    let outer_body = crate::function!(
+        crate::symbol!("alias_expanded_byte_size_expands_opaque_and_nested_aliases::f"),
+        inner_alias.to_atom(),
+        inner_alias.to_atom()
+    );
+    let outer_alias = register_alias_atom(outer_body);
+    let aliased = outer_alias.to_opaque_atom();
+
+    assert_eq!(
+        aliased.get_alias_expanded_byte_size(),
+        aliased.alias_known_aliases().get_byte_size()
+    );
+}
+
+#[test]
 fn inline_aliases_expands_transparent_aliases_only() {
     let transparent = crate::parse!("x+1").alias(false);
     assert_eq!(transparent.inline_aliases(false), crate::parse!("x+1"));

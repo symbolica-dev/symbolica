@@ -2834,6 +2834,11 @@ impl PythonExpression {
         self.expr.as_view().get_total_byte_size()
     }
 
+    /// Get the number of bytes that this expression would take up if all aliases were substituted.
+    pub fn get_alias_expanded_byte_size(&self) -> usize {
+        self.expr.as_view().get_alias_expanded_byte_size()
+    }
+
     /// Convert the expression into a human-readable string, with tunable settings.
     ///
     /// Examples

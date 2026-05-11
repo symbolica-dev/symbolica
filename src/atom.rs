@@ -2529,10 +2529,16 @@ impl AtomView<'_> {
         })
     }
 
-    /// Return the byte size of this atom, including the bodies referenced by aliases.
-    ///
-    /// Normal child atoms are already part of the compressed byte code returned by
-    /// [AtomView::get_byte_size], so this only adds the recursively expanded cost of alias bodies.
+    /// Return the byte size this atom would have if all aliases were substituted.
+    pub fn get_alias_expanded_byte_size(&self) -> usize {
+        if !self.has_alias() {
+            return self.get_byte_size();
+        }
+
+        self.alias_known_aliases().as_view().get_byte_size()
+    }
+
+    /// Return the byte size of this atom, including distinct bodies referenced by aliases.
     pub fn get_total_byte_size(&self) -> usize {
         let mut seen_aliases = HashSet::default();
         self.get_total_byte_size_impl(&mut seen_aliases)

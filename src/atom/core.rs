@@ -80,12 +80,19 @@ pub trait AtomCore: private::Sealed + Sized {
         self.as_atom_view().get_byte_size()
     }
 
-    /// Return the size of the compressed byte code plus the bodies referenced by aliases.
+    /// Return the size of the compressed byte code plus the distinct bodies referenced by aliases.
+    ///
+    /// Each alias body is counted at most once, even if the alias occurs multiple times.
+    fn get_total_byte_size(&self) -> usize {
+        self.as_atom_view().get_total_byte_size()
+    }
+
+    /// Return the size of the compressed byte code after substituting all aliases.
     ///
     /// Every alias occurrence contributes its referenced body, recursively including aliases in
     /// that body.
-    fn get_total_byte_size(&self) -> usize {
-        self.as_atom_view().get_total_byte_size()
+    fn get_alias_expanded_byte_size(&self) -> usize {
+        self.as_atom_view().get_alias_expanded_byte_size()
     }
 
     fn atom_to_output(&self, atom: Atom) -> Self::Output;
