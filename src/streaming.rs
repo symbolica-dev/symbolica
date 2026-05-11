@@ -8,13 +8,20 @@ use std::{
 };
 
 use brotli::{CompressorWriter, Decompressor};
-use byteorder::{LittleEndian, WriteBytesExt};
+use byteorder::{LittleEndian, ReadBytesExt, WriteBytesExt};
 use rayon::{ThreadPool, prelude::*};
 use smartstring::{LazyCompact, SmartString};
 
 use crate::{
     LicenseManager,
-    atom::{Atom, AtomView},
+    alias::{
+        AliasHandle, collect_alias_handles_in, collect_alias_handles_with_dependencies,
+        register_alias_atom,
+    },
+    atom::{
+        Atom, AtomView,
+        representation::{ALIAS_EXPORT_SECTION_MAGIC, read_raw_atom, remap_aliases_in_raw_atom},
+    },
     state::{RecycledAtom, State, Workspace},
 };
 
@@ -83,6 +90,7 @@ impl Default for TermStreamerConfig {
 
 struct TermInputStream<'a, R: ReadableNamedStream> {
     mem_buf: &'a [Atom],
+    file_aliases: &'a [Vec<Arc<AliasHandle>>],
     file_buf: Vec<R>,
     pos: usize,
     mem_pos: usize,
@@ -103,6 +111,7 @@ impl<R: ReadableNamedStream> Iterator for TermInputStream<'_, R> {
 
         while self.pos <= self.file_buf.len() {
             let mut a = Atom::new();
+            let _aliases = &self.file_aliases[self.pos - 1];
             if let Ok(()) = a.read(&mut self.file_buf[self.pos - 1]) {
                 return Some(a);
             }
@@ -145,6 +154,7 @@ pub struct TermStreamer<W: WriteableNamedStream> {
     num_terms: usize,
     total_size: usize,
     file_buf: Vec<W>,
+    file_aliases: Vec<Vec<Arc<AliasHandle>>>,
     config: TermStreamerConfig,
     filename: String,
     thread_pool: Arc<rayon::ThreadPool>,
@@ -216,6 +226,7 @@ impl<W: WriteableNamedStream> TermStreamer<W> {
             num_terms: 0,
             total_size: 0,
             file_buf: vec![],
+            file_aliases: vec![],
             filename,
             thread_pool: Arc::new(
                 rayon::ThreadPoolBuilder::new()
@@ -239,6 +250,7 @@ impl<W: WriteableNamedStream> TermStreamer<W> {
             num_terms: 0,
             total_size: 0,
             file_buf: vec![],
+            file_aliases: vec![],
             filename: self.filename.clone(),
             config: self.config.clone(),
             thread_pool: self.thread_pool.clone(),
@@ -293,10 +305,36 @@ impl<W: WriteableNamedStream> TermStreamer<W> {
             .push(W::create(&self.get_filename(self.file_buf.len())));
 
         let f = self.file_buf.last_mut().unwrap();
+        let mut file_aliases = Vec::new();
         for x in self.mem_buf.drain(..) {
+            merge_alias_handles(&mut file_aliases, &collect_alias_handles_in(x.as_view()));
             x.as_view().write(&mut *f).unwrap();
         }
+        self.file_aliases.push(file_aliases);
         self.mem_size = 0;
+    }
+
+    fn collect_aliases(&self) -> Vec<Arc<AliasHandle>> {
+        let mut aliases = Vec::new();
+
+        for term in &self.mem_buf {
+            merge_alias_handles(
+                &mut aliases,
+                &collect_alias_handles_with_dependencies(term.as_view()),
+            );
+        }
+
+        for file_aliases in &self.file_aliases {
+            for handle in file_aliases {
+                let alias_atom = handle.to_atom();
+                merge_alias_handles(
+                    &mut aliases,
+                    &collect_alias_handles_with_dependencies(alias_atom.as_view()),
+                );
+            }
+        }
+
+        aliases
     }
 
     /// Import terms and their state from a binary stream into the term streamer.
@@ -313,13 +351,36 @@ impl<W: WriteableNamedStream> TermStreamer<W> {
     ) -> Result<u64, std::io::Error> {
         let state_map = State::import(source, conflict_fn)?;
 
-        let mut n_terms_buf = [0; 8];
-        source.read_exact(&mut n_terms_buf)?;
-        let n_terms = u64::from_le_bytes(n_terms_buf);
+        let mut marker_or_n_terms_buf = [0; 8];
+        source.read_exact(&mut marker_or_n_terms_buf)?;
+        let marker_or_n_terms = u64::from_le_bytes(marker_or_n_terms_buf);
+
+        let mut imported_aliases = ahash::HashMap::default();
+        let has_alias_section = marker_or_n_terms == ALIAS_EXPORT_SECTION_MAGIC;
+        let n_terms = if has_alias_section {
+            let n_aliases = source.read_u64::<LittleEndian>()?;
+            for _ in 0..n_aliases {
+                let old_token = source.read_u64::<LittleEndian>()? as usize;
+                let raw = read_raw_atom(source)?;
+                let raw = remap_aliases_in_raw_atom(raw, &imported_aliases)?;
+                let body = unsafe { Atom::from_raw(raw) }.as_view().rename(&state_map);
+                let handle = register_alias_atom(body);
+                imported_aliases.insert(old_token, handle);
+            }
+
+            source.read_u64::<LittleEndian>()?
+        } else {
+            marker_or_n_terms
+        };
 
         for _ in 0..n_terms {
-            let mut tmp = Atom::new();
-            tmp.read(&mut *source)?;
+            let raw = read_raw_atom(source)?;
+            let raw = if has_alias_section {
+                remap_aliases_in_raw_atom(raw, &imported_aliases)?
+            } else {
+                raw
+            };
+            let tmp = unsafe { Atom::from_raw(raw) };
             self.push(tmp.as_view().rename(&state_map));
         }
 
@@ -336,6 +397,15 @@ impl<W: WriteableNamedStream> TermStreamer<W> {
         self.normalize();
 
         State::export(dest)?;
+
+        dest.write_u64::<LittleEndian>(ALIAS_EXPORT_SECTION_MAGIC)?;
+
+        let aliases = self.collect_aliases();
+        dest.write_u64::<LittleEndian>(aliases.len() as u64)?;
+        for alias in aliases {
+            dest.write_u64::<LittleEndian>(alias.token() as u64)?;
+            alias.atom().as_view().write(dest.by_ref())?;
+        }
 
         dest.write_u64::<LittleEndian>(self.num_terms as u64)?;
 
@@ -538,6 +608,7 @@ impl<W: WriteableNamedStream> TermStreamer<W> {
 
         TermInputStream {
             mem_buf: &self.mem_buf,
+            file_aliases: &self.file_aliases,
             file_buf: (0..num_files)
                 .map(|i| W::Reader::open(&self.get_filename(i)))
                 .collect(),
@@ -613,7 +684,18 @@ impl<W: WriteableNamedStream> TermStreamer<W> {
         }
 
         self.file_buf.clear();
+        self.file_aliases.clear();
     }
+}
+
+fn merge_alias_handles(dst: &mut Vec<Arc<AliasHandle>>, src: &[Arc<AliasHandle>]) {
+    if src.is_empty() {
+        return;
+    }
+
+    dst.extend(src.iter().cloned());
+    dst.sort_by_key(|handle| handle.token());
+    dst.dedup_by_key(|handle| handle.token());
 }
 
 impl AtomView<'_> {
@@ -706,7 +788,8 @@ mod test {
     use brotli::CompressorWriter;
 
     use crate::{
-        atom::{Atom, AtomCore, AtomType},
+        alias::{get_alias, register_alias_atom},
+        atom::{Atom, AtomCore, AtomType, AtomView},
         function,
         id::WildcardRestriction,
         parse,
@@ -737,6 +820,65 @@ mod test {
         streamer.import(&mut r.as_slice(), None).unwrap();
         let c = streamer.to_expression();
         assert_eq!(b, c);
+    }
+
+    #[test]
+    fn file_stream_keeps_alias_handles_alive() {
+        let mut streamer = TermStreamer::<BufWriter<File>>::new(TermStreamerConfig {
+            n_cores: 1,
+            path: ".".to_owned(),
+            max_mem_bytes: 1,
+        });
+
+        let x = Atom::var(symbol!("file_stream_keeps_alias_handles_alive::x"));
+        let x_alias = register_alias_atom(x.clone());
+        let token = x_alias.token();
+
+        streamer.push(x_alias.to_atom());
+        drop(x_alias);
+
+        assert!(get_alias(token).is_some());
+        let restored = streamer.to_expression();
+        let AtomView::Alias(alias) = restored.as_view() else {
+            panic!("Expected alias after reading streamed term");
+        };
+        assert_eq!(alias.get_body(), x.as_view());
+    }
+
+    #[test]
+    fn import_export_keeps_aliases_after_original_stream_is_cleared() {
+        let mut streamer = TermStreamer::<BufWriter<File>>::new(TermStreamerConfig {
+            n_cores: 1,
+            path: ".".to_owned(),
+            max_mem_bytes: 1,
+        });
+
+        let x = Atom::var(symbol!(
+            "import_export_keeps_aliases_after_original_stream_is_cleared::x"
+        ));
+        let x_alias = register_alias_atom(x.clone());
+        let old_token = x_alias.token();
+        streamer.push(x_alias.to_atom());
+
+        let mut data = Vec::new();
+        streamer.export(&mut data).unwrap();
+        streamer.clear();
+        drop(x_alias);
+        assert!(get_alias(old_token).is_none());
+
+        let mut imported = TermStreamer::<BufWriter<File>>::new(TermStreamerConfig {
+            n_cores: 1,
+            path: ".".to_owned(),
+            max_mem_bytes: 1,
+        });
+        imported.import(&mut data.as_slice(), None).unwrap();
+        let restored = imported.to_expression();
+
+        let AtomView::Alias(alias) = restored.as_view() else {
+            panic!("Expected imported alias");
+        };
+        assert_ne!(alias.get_token(), old_token);
+        assert_eq!(alias.get_body(), x.as_view());
     }
 
     #[test]

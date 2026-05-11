@@ -54,7 +54,7 @@ const SYM_EXTRA_WILDCARD_LEVEL_3: u32 = 0b11_000;
 const MUL_HAS_COEFF_FLAG: u8 = 0b01000000;
 const MUL_HAS_ALIAS_FLAG: u8 = 0b00100000;
 const ALIAS_OPAQUE_FLAG: u8 = 0b00001_000;
-const ALIAS_EXPORT_SECTION_MAGIC: u64 = 0xA11A_5ECA_1100_0001;
+pub(crate) const ALIAS_EXPORT_SECTION_MAGIC: u64 = 0xA11A_5ECA_1100_0001;
 
 const ZERO_DATA: [u8; 3] = [NUM_ID, 1, 0];
 static NO_ALIASES: Vec<Arc<AliasHandle>> = Vec::new();
@@ -165,7 +165,7 @@ fn mul_alias_flag_for(view: AtomView<'_>) -> u8 {
     }
 }
 
-fn read_raw_atom<R: Read>(source: &mut R) -> Result<RawAtom, std::io::Error> {
+pub(crate) fn read_raw_atom<R: Read>(source: &mut R) -> Result<RawAtom, std::io::Error> {
     // should also set whether rat poly coefficient needs to be converted
     let mut flags_buf = [0; 1];
     let mut size_buf = [0; 8];
@@ -180,7 +180,7 @@ fn read_raw_atom<R: Read>(source: &mut R) -> Result<RawAtom, std::io::Error> {
     Ok(dest)
 }
 
-fn remap_aliases_in_raw_atom(
+pub(crate) fn remap_aliases_in_raw_atom(
     raw: RawAtom,
     aliases: &HashMap<usize, Arc<AliasHandle>>,
 ) -> Result<RawAtom, std::io::Error> {
@@ -879,7 +879,8 @@ impl Atom {
         let marker_or_n_terms = u64::from_le_bytes(marker_or_n_terms_buf);
 
         let mut imported_aliases = HashMap::default();
-        let n_terms = if marker_or_n_terms == ALIAS_EXPORT_SECTION_MAGIC {
+        let has_alias_section = marker_or_n_terms == ALIAS_EXPORT_SECTION_MAGIC;
+        let n_terms = if has_alias_section {
             let n_aliases = source.read_u64::<LittleEndian>()?;
             for _ in 0..n_aliases {
                 let old_token = source.read_u64::<LittleEndian>()? as usize;
@@ -897,7 +898,11 @@ impl Atom {
 
         if n_terms == 1 {
             let raw = read_raw_atom(source)?;
-            let raw = remap_aliases_in_raw_atom(raw, &imported_aliases)?;
+            let raw = if has_alias_section {
+                remap_aliases_in_raw_atom(raw, &imported_aliases)?
+            } else {
+                raw
+            };
             let a = unsafe { Atom::from_raw(raw) };
             Ok(a.as_view().rename(&state_map))
         } else {
@@ -906,7 +911,11 @@ impl Atom {
 
             for _ in 0..n_terms {
                 let raw = read_raw_atom(source)?;
-                let raw = remap_aliases_in_raw_atom(raw, &imported_aliases)?;
+                let raw = if has_alias_section {
+                    remap_aliases_in_raw_atom(raw, &imported_aliases)?
+                } else {
+                    raw
+                };
                 let tmp = unsafe { Atom::from_raw(raw) };
                 a.extend(tmp.as_view());
             }
