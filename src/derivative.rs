@@ -1011,18 +1011,25 @@ mod test {
 
     #[test]
     fn series_user_function() {
-        let v1 = symbol!("v1");
+        std::thread::Builder::new()
+            .stack_size(16 * 1024 * 1024)
+            .spawn(|| {
+                let v1 = symbol!("v1");
 
-        let input = parse!("f(exp(v1),sin(v1))");
-        let t = input
-            .series(v1, Atom::num(0).as_view(), SeriesDepth::absolute(2))
+                let input = parse!("f(exp(v1),sin(v1))");
+                let t = input
+                    .series(v1, Atom::num(0).as_view(), SeriesDepth::absolute(2))
+                    .unwrap()
+                    .to_atom();
+
+                let res = parse!(
+                    "f(1,0)+v1*(der(0,1,f,1,0)+der(1,0,f,1,0))+1/2*v1^2*(der(0,2,f,1,0)+der(1,0,f,1,0)+2*der(1,1,f,1,0)+der(2,0,f,1,0))"
+                );
+                assert_eq!(t, res);
+            })
             .unwrap()
-            .to_atom();
-
-        let res = parse!(
-            "f(1,0)+v1*(der(0,1,f,1,0)+der(1,0,f,1,0))+1/2*v1^2*(der(0,2,f,1,0)+der(1,0,f,1,0)+2*der(1,1,f,1,0)+der(2,0,f,1,0))"
-        );
-        assert_eq!(t, res);
+            .join()
+            .unwrap();
     }
 
     #[test]
