@@ -1297,60 +1297,74 @@ impl<'a> AtomView<'a> {
         xs: &[Indeterminate],
         enter_functions: bool,
     ) -> Atom {
-        Workspace::get_local().with(|ws| {
-            let r = self.horner_scheme_impl_no_norm(ws, xs, enter_functions);
+        let mut out = Workspace::get_local().with(|ws| {
+            let r = self.horner_scheme_impl_no_norm(ws, xs);
 
             let mut out = Atom::new();
             r.as_view().normalize(ws, &mut out);
             out
-        })
+        });
+
+        if enter_functions {
+            out = out
+                .as_view()
+                .replace_map(|atom, _, replacement| match atom {
+                    AtomView::Alias(a) if !a.is_opaque() => {
+                        let body = a.get_body().horner_scheme_impl(xs, true);
+                        let handle = register_alias_atom(body);
+                        let alias = Atom::alias(handle);
+
+                        if alias.as_view() != atom {
+                            replacement.set_from_view(&alias.as_view());
+                        }
+                    }
+                    AtomView::Fun(f) => {
+                        let mut fun_atom = Atom::new();
+                        let fun = fun_atom.to_fun(f.get_symbol());
+                        let mut changed = false;
+
+                        for arg in f {
+                            let hornered_arg = arg.horner_scheme_impl(xs, true);
+                            changed |= hornered_arg.as_view() != arg;
+                            fun.add_arg(hornered_arg.as_view());
+                        }
+
+                        if changed {
+                            replacement.set_from_view(&fun_atom.as_view());
+                        }
+                    }
+                    _ => {}
+                });
+        }
+
+        out
     }
 
     pub(crate) fn horner_scheme_impl_no_norm(
         &self,
         ws: &Workspace,
         mut xs: &[Indeterminate],
-        enter_functions: bool,
     ) -> AtomOrView<'a> {
         if xs.is_empty() {
             return self.into();
         }
 
         match self {
-            AtomView::Alias(a) => {
-                let body = a
-                    .get_body()
-                    .horner_scheme_impl_no_norm(ws, xs, enter_functions);
+            AtomView::Alias(a) if !a.is_opaque() => {
+                let body = a.get_body().horner_scheme_impl_no_norm(ws, xs);
                 let mut normalized_body = Atom::new();
                 body.as_view().normalize(ws, &mut normalized_body);
                 let handle = register_alias_atom(normalized_body);
-                if a.is_opaque() {
-                    Atom::opaque_alias(handle).into()
-                } else {
-                    Atom::alias(handle).into()
-                }
+                Atom::alias(handle).into()
             }
-            AtomView::Num(_) | AtomView::Var(_) => self.into(),
-            AtomView::Fun(f) => {
-                if enter_functions {
-                    let mut tmp = ws.new_atom();
-                    let fun = tmp.to_fun(f.get_symbol());
-
-                    for arg in f {
-                        let r = arg.horner_scheme_impl_no_norm(ws, xs, enter_functions);
-                        fun.add_arg(r.as_view());
-                    }
-
-                    tmp.into_inner().into()
-                } else {
-                    self.into()
-                }
+            AtomView::Num(_) | AtomView::Var(_) | AtomView::Alias(_) | AtomView::Fun(_) => {
+                self.into()
             }
             AtomView::Pow(p) => {
                 let (b, e) = p.get_base_exp();
 
-                let bb = b.horner_scheme_impl_no_norm(ws, xs, enter_functions);
-                let ee = e.horner_scheme_impl_no_norm(ws, xs, enter_functions);
+                let bb = b.horner_scheme_impl_no_norm(ws, xs);
+                let ee = e.horner_scheme_impl_no_norm(ws, xs);
 
                 if matches!(bb, AtomOrView::Atom(_)) || matches!(ee, AtomOrView::Atom(_)) {
                     let mut pow = Atom::new();
@@ -1366,7 +1380,7 @@ impl<'a> AtomView<'a> {
 
                 let mut changed = false;
                 for arg in m {
-                    let r = arg.horner_scheme_impl_no_norm(ws, xs, enter_functions);
+                    let r = arg.horner_scheme_impl_no_norm(ws, xs);
                     changed |= matches!(r, AtomOrView::Atom(_));
                     mul.extend(r.as_view());
                 }
@@ -1378,28 +1392,12 @@ impl<'a> AtomView<'a> {
                 }
             }
             AtomView::Add(a) => {
-                let original_xs = xs;
                 let mut min_power = self.get_lowest_power(xs[0].as_view());
                 while min_power == 0 {
                     xs = &xs[1..];
 
                     if xs.is_empty() {
-                        let mut tmp = ws.new_atom();
-                        let add = tmp.to_add();
-
-                        let mut changed = false;
-                        for arg in a {
-                            let r =
-                                arg.horner_scheme_impl_no_norm(ws, original_xs, enter_functions);
-                            changed |= matches!(r, AtomOrView::Atom(_));
-                            add.extend(r.as_view());
-                        }
-
-                        return if changed {
-                            tmp.into_inner().into()
-                        } else {
-                            self.into()
-                        };
+                        return self.into();
                     }
 
                     min_power = self.get_lowest_power(xs[0].as_view());
@@ -1474,7 +1472,7 @@ impl<'a> AtomView<'a> {
 
                 let mut res = rest
                     .as_view()
-                    .horner_scheme_impl_no_norm(ws, xs, enter_functions)
+                    .horner_scheme_impl_no_norm(ws, xs)
                     .into_owned();
                 if min_power > 0 {
                     let new_key = (if coeff_sum.get_nargs() == 1 {
@@ -1482,7 +1480,7 @@ impl<'a> AtomView<'a> {
                     } else {
                         coeff.as_view()
                     })
-                    .horner_scheme_impl_no_norm(ws, &xs, enter_functions);
+                    .horner_scheme_impl_no_norm(ws, &xs);
                     let v = if min_power == 1 {
                         new_key.as_view().mul_no_norm(ws, x)
                     } else {
