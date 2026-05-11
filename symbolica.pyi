@@ -982,6 +982,12 @@ class Expression:
         Replace repeated non-variable subexpressions by transparent aliases.
         """
 
+    def inline_aliases(self, expand_opaque: bool = False) -> Expression:
+        """
+        Inline aliases in the expression.
+        Opaque aliases are left unchanged unless `expand_opaque` is true.
+        """
+
     def __str__(self) -> str:
         """
         Convert the expression into a human-readable string.

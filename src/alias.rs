@@ -972,6 +972,16 @@ fn alias_total_byte_size_counts_alias_body() {
 }
 
 #[test]
+fn inline_aliases_expands_transparent_aliases_only() {
+    let transparent = crate::parse!("x+1").alias(false);
+    assert_eq!(transparent.inline_aliases(false), crate::parse!("x+1"));
+
+    let opaque = crate::parse!("x+1").alias(true);
+    assert_eq!(opaque.inline_aliases(false), opaque);
+    assert_eq!(opaque.inline_aliases(true), crate::parse!("x+1"));
+}
+
+#[test]
 fn test_alias_inside_function_map_uses_outer_arguments() {
     use crate::evaluate::{FunctionMap, OptimizationSettings};
     use crate::symbol;

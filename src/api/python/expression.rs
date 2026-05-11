@@ -2786,6 +2786,15 @@ impl PythonExpression {
         Ok(self.expr.alias_repeated_subexpressions().into())
     }
 
+    /// Inline aliases in the expression.
+    ///
+    /// This is useful before comparing or hashing expressions when transparent aliases should be
+    /// treated as their bodies. Opaque aliases are left unchanged unless `expand_opaque` is true.
+    #[pyo3(signature = (expand_opaque = false))]
+    pub fn inline_aliases(&self, expand_opaque: bool) -> PyResult<PythonExpression> {
+        Ok(self.expr.inline_aliases(expand_opaque).into())
+    }
+
     /// Convert the expression into a portable string.
     pub fn __repr__(&self) -> PyResult<String> {
         Ok(self

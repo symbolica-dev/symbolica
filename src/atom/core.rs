@@ -377,6 +377,23 @@ pub trait AtomCore: private::Sealed + Sized {
         self.atom_to_output(atom)
     }
 
+    /// Inline aliases in the expression.
+    ///
+    /// This can be used before comparing or hashing expressions when alias transparency is desired,
+    /// while leaving opaque aliases as explicit atoms unless `expand_opaque` is true.
+    fn inline_aliases(&self, expand_opaque: bool) -> Self::Output {
+        self.as_atom_view()
+            .replace_map(|a, _, out| {
+                if let AtomView::Alias(alias) = a
+                    && (expand_opaque || !alias.is_opaque())
+                {
+                    let inlined = alias.get_body().inline_aliases(expand_opaque);
+                    out.set_from_view(&inlined.as_view());
+                }
+            })
+            .wrap(self)
+    }
+
     /// Extract subexpressions and replace selected subexpressions with aliases. The arguments of
     /// `f` are the subexpression and the number of occurrences of the subexpression. `f` should
     /// return `None` if the subexpression should not be replaced. Return `Some(false)` to create a
