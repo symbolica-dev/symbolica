@@ -2758,14 +2758,14 @@ impl PythonExpression {
     /// Construct an expression from a serialized state.
     pub fn __setstate__(&mut self, state: Vec<u8>) -> PyResult<()> {
         unsafe {
-            self.expr = Atom::from_raw(state);
+            self.expr = Atom::from_raw(crate::atom::representation::RawAtom::from_data(state));
         }
         Ok(())
     }
 
     /// Get a serialized version of the expression.
     pub fn __getstate__(&self) -> PyResult<Vec<u8>> {
-        Ok(self.expr.clone().into_raw())
+        Ok(self.expr.clone().into_raw().into_data())
     }
 
     /// Get the default positional arguments for `__new__`.

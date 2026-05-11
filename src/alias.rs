@@ -912,6 +912,23 @@ fn alias_normalization_prunes_removed_alias_handles() {
 }
 
 #[test]
+fn raw_atom_keeps_alias_handles_alive() {
+    let x = Atom::var(crate::symbol!("raw_atom_keeps_alias_handles_alive::x"));
+    let x_alias = register_aliased_atom(AliasedAtom::new(x)).0;
+    let token = x_alias.token();
+    let raw = x_alias.to_atom().into_raw();
+
+    drop(x_alias);
+    assert!(get_alias(token).is_some());
+
+    let restored = unsafe { Atom::from_raw(raw) };
+    assert!(restored.as_view().has_alias());
+
+    drop(restored);
+    assert!(get_alias(token).is_none());
+}
+
+#[test]
 fn alias_normalization_resolves_add_terms_independent_of_order() {
     let y_alias = register_aliased_atom(AliasedAtom::new(crate::parse!("y"))).0;
     let sum = y_alias.to_atom() + crate::parse!("y");

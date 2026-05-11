@@ -164,7 +164,92 @@ fn mul_alias_flag_for(view: AtomView<'_>) -> u8 {
 /// The underlying slice of expression data.
 pub type BorrowedRawAtom = [u8];
 /// A raw atom that does not have explicit variant information.
-pub type RawAtom = Vec<u8>;
+#[derive(Debug, Clone, Default, Eq)]
+pub struct RawAtom {
+    data: Vec<u8>,
+    aliases: Vec<Arc<AliasHandle>>,
+}
+
+impl RawAtom {
+    #[inline]
+    pub fn new() -> Self {
+        Self {
+            data: Vec::new(),
+            aliases: Vec::new(),
+        }
+    }
+
+    #[inline]
+    pub fn from_data(data: Vec<u8>) -> Self {
+        Self {
+            data,
+            aliases: Vec::new(),
+        }
+    }
+
+    #[inline]
+    pub fn into_data(self) -> Vec<u8> {
+        self.data
+    }
+
+    #[inline]
+    pub fn clear(&mut self) {
+        self.data.clear();
+        self.aliases.clear();
+    }
+
+    #[inline]
+    pub(crate) fn sync_aliases_from(&mut self, aliases: &[Arc<AliasHandle>]) {
+        self.aliases.clear();
+        self.aliases.extend_from_slice(aliases);
+    }
+
+    #[inline]
+    pub(crate) fn take_aliases_or_collect(&self) -> Vec<Arc<AliasHandle>> {
+        if self.aliases.is_empty() {
+            aliases_from_raw_data(&self.data)
+        } else {
+            self.aliases.clone()
+        }
+    }
+}
+
+impl PartialEq for RawAtom {
+    #[inline]
+    fn eq(&self, other: &Self) -> bool {
+        self.data == other.data
+    }
+}
+
+impl Hash for RawAtom {
+    #[inline]
+    fn hash<H: std::hash::Hasher>(&self, state: &mut H) {
+        self.data.hash(state);
+    }
+}
+
+impl std::ops::Deref for RawAtom {
+    type Target = Vec<u8>;
+
+    #[inline]
+    fn deref(&self) -> &Self::Target {
+        &self.data
+    }
+}
+
+impl std::ops::DerefMut for RawAtom {
+    #[inline]
+    fn deref_mut(&mut self) -> &mut Self::Target {
+        &mut self.data
+    }
+}
+
+impl Borrow<BorrowedRawAtom> for RawAtom {
+    #[inline]
+    fn borrow(&self) -> &BorrowedRawAtom {
+        &self.data
+    }
+}
 
 impl Borrow<BorrowedRawAtom> for Atom {
     fn borrow(&self) -> &BorrowedRawAtom {
@@ -733,21 +818,33 @@ impl Atom {
 
     pub(crate) fn clear_alias_handles(&mut self) {
         match self {
-            Atom::Num(n) => n.aliases.clear(),
-            Atom::Var(v) => v.aliases.clear(),
+            Atom::Num(n) => {
+                n.aliases.clear();
+                n.data.sync_aliases_from(&n.aliases);
+            }
+            Atom::Var(v) => {
+                v.aliases.clear();
+                v.data.sync_aliases_from(&v.aliases);
+            }
             Atom::Fun(f) => {
                 f.aliases.clear();
+                f.data.sync_aliases_from(&f.aliases);
                 f.data[0] &= !HAS_ALIAS_FLAG;
             }
             Atom::Mul(m) => {
                 m.aliases.clear();
+                m.data.sync_aliases_from(&m.aliases);
                 m.data[0] &= !MUL_HAS_ALIAS_FLAG;
             }
             Atom::Add(a) => {
                 a.aliases.clear();
+                a.data.sync_aliases_from(&a.aliases);
                 a.data[0] &= !HAS_ALIAS_FLAG;
             }
-            Atom::Pow(p) => p.aliases.clear(),
+            Atom::Pow(p) => {
+                p.aliases.clear();
+                p.data.sync_aliases_from(&p.aliases);
+            }
             Atom::Alias(_) => {}
             Atom::Zero => {}
         }
@@ -756,22 +853,37 @@ impl Atom {
     pub(crate) fn refresh_alias_handles_from_tree(&mut self) {
         let aliases = aliases_from_view(self.as_view());
         match self {
-            Atom::Num(n) => n.aliases.clear(),
-            Atom::Var(v) => v.aliases.clear(),
+            Atom::Num(n) => {
+                n.aliases.clear();
+                n.data.sync_aliases_from(&n.aliases);
+            }
+            Atom::Var(v) => {
+                v.aliases.clear();
+                v.data.sync_aliases_from(&v.aliases);
+            }
             Atom::Fun(f) => {
                 f.aliases = aliases;
+                f.data.sync_aliases_from(&f.aliases);
                 f.refresh_alias_flag_from_tree();
             }
             Atom::Mul(m) => {
                 m.aliases = aliases;
+                m.data.sync_aliases_from(&m.aliases);
                 m.refresh_alias_flag_from_tree();
             }
             Atom::Add(a) => {
                 a.aliases = aliases;
+                a.data.sync_aliases_from(&a.aliases);
                 a.refresh_alias_flag_from_tree();
             }
-            Atom::Pow(p) => p.aliases = aliases,
-            Atom::Alias(a) => a.aliases = aliases,
+            Atom::Pow(p) => {
+                p.aliases = aliases;
+                p.data.sync_aliases_from(&p.aliases);
+            }
+            Atom::Alias(a) => {
+                a.aliases = aliases;
+                a.data.sync_aliases_from(&a.aliases);
+            }
             Atom::Zero => {}
         }
     }
@@ -813,7 +925,7 @@ impl Num {
 
     #[inline]
     pub fn new(num: Coefficient) -> Num {
-        let mut buffer = Vec::new();
+        let mut buffer = RawAtom::new();
         buffer.put_u8(NUM_ID);
         num.write_packed(&mut buffer);
         Num {
@@ -856,6 +968,7 @@ impl Num {
         self.data.clear();
         self.data.extend(a.data);
         self.aliases = aliases_from_view(AtomView::Num(*a));
+        self.data.sync_aliases_from(&self.aliases);
     }
 
     pub fn add(&mut self, other: &NumView<'_>) {
@@ -892,7 +1005,8 @@ impl Num {
     }
 
     #[inline(always)]
-    pub fn into_raw(self) -> RawAtom {
+    pub fn into_raw(mut self) -> RawAtom {
+        self.data.sync_aliases_from(&self.aliases);
         self.data
     }
 
@@ -977,6 +1091,7 @@ impl Var {
         self.data.clear();
         self.data.extend(view.data);
         self.aliases = aliases_from_view(AtomView::Var(*view));
+        self.data.sync_aliases_from(&self.aliases);
     }
 
     #[inline(always)]
@@ -990,7 +1105,8 @@ impl Var {
     }
 
     #[inline(always)]
-    pub fn into_raw(self) -> RawAtom {
+    pub fn into_raw(mut self) -> RawAtom {
+        self.data.sync_aliases_from(&self.aliases);
         self.data
     }
 
@@ -1045,6 +1161,7 @@ impl Alias {
         buffer.clear();
         buffer.put_u8(ALIAS_ID | if opaque { ALIAS_OPAQUE_FLAG } else { 0 });
         (handle.token() as u64, 1).write_packed(&mut buffer);
+        buffer.sync_aliases_from(std::slice::from_ref(&handle));
         Alias {
             data: buffer,
             aliases: vec![handle],
@@ -1055,9 +1172,11 @@ impl Alias {
     pub fn from_view_into(a: &AliasView<'_>, mut buffer: RawAtom) -> Alias {
         buffer.clear();
         buffer.extend(a.data);
+        let aliases = aliases_from_view(AtomView::Alias(*a));
+        buffer.sync_aliases_from(&aliases);
         Alias {
             data: buffer,
-            aliases: aliases_from_view(AtomView::Alias(*a)),
+            aliases,
         }
     }
 
@@ -1074,6 +1193,7 @@ impl Alias {
         self.data.clear();
         self.data.extend(view.data);
         self.aliases = aliases_from_view(AtomView::Alias(*view));
+        self.data.sync_aliases_from(&self.aliases);
     }
 
     #[inline(always)]
@@ -1082,20 +1202,15 @@ impl Alias {
     }
 
     #[inline(always)]
-    pub fn into_raw(self) -> RawAtom {
+    pub fn into_raw(mut self) -> RawAtom {
+        self.data.sync_aliases_from(&self.aliases);
         self.data
     }
 
     #[inline(always)]
     pub(crate) unsafe fn from_raw(raw: RawAtom) -> Alias {
-        let mut alias = Alias {
-            data: raw,
-            aliases: Vec::new(),
-        };
-        if let Some(handle) = get_alias_handle(alias.to_alias_view().get_token()) {
-            alias.aliases.push(handle);
-        }
-        alias
+        let aliases = raw.take_aliases_or_collect();
+        Alias { data: raw, aliases }
     }
 }
 
@@ -1136,6 +1251,7 @@ impl Fun {
         buffer.clear();
         buffer.extend(a.data);
         let aliases = aliases_from_view(AtomView::Fun(*a));
+        buffer.sync_aliases_from(&aliases);
         Fun {
             data: buffer,
             aliases,
@@ -1174,6 +1290,7 @@ impl Fun {
         self.data[0] |= NOT_NORMALIZED;
         self.data[0] |= alias_flag_for(other);
         merge_aliases(&mut self.aliases, &aliases_from_view(other));
+        self.data.sync_aliases_from(&self.aliases);
 
         // may increase size of the num of args
         let mut c = &self.data[1 + 4..];
@@ -1194,7 +1311,8 @@ impl Fun {
             Ordering::Equal => {}
             Ordering::Less => {
                 self.data.copy_within(1 + 4 + old_size.., 1 + 4 + new_size);
-                self.data.resize(self.data.len() - old_size + new_size, 0);
+                let new_len = self.data.len() - old_size + new_size;
+                self.data.resize(new_len, 0);
             }
             Ordering::Greater => {
                 let old_len = self.data.len();
@@ -1240,7 +1358,8 @@ impl Fun {
             Ordering::Equal => {}
             Ordering::Less => {
                 self.data.copy_within(1 + 4 + old_size.., 1 + 4 + new_size);
-                self.data.resize(self.data.len() - old_size + new_size, 0);
+                let new_len = self.data.len() - old_size + new_size;
+                self.data.resize(new_len, 0);
             }
             Ordering::Greater => {
                 let old_len = self.data.len();
@@ -1257,6 +1376,7 @@ impl Fun {
             merge_aliases(&mut self.aliases, &aliases_from_view(*item));
             self.data.extend(item.get_data());
         }
+        self.data.sync_aliases_from(&self.aliases);
 
         let new_buf_pos = self.data.len();
 
@@ -1276,6 +1396,7 @@ impl Fun {
         self.data.clear();
         self.data.extend(view.data);
         self.aliases = aliases_from_view(AtomView::Fun(*view));
+        self.data.sync_aliases_from(&self.aliases);
     }
 
     #[inline(always)]
@@ -1294,13 +1415,14 @@ impl Fun {
     }
 
     #[inline(always)]
-    pub fn into_raw(self) -> RawAtom {
+    pub fn into_raw(mut self) -> RawAtom {
+        self.data.sync_aliases_from(&self.aliases);
         self.data
     }
 
     #[inline(always)]
     pub(crate) unsafe fn from_raw(raw: RawAtom) -> Fun {
-        let aliases = aliases_from_raw_data(&raw);
+        let aliases = raw.take_aliases_or_collect();
         Fun { data: raw, aliases }
     }
 
@@ -1351,9 +1473,11 @@ impl Pow {
     pub fn from_view_into(a: &PowView<'_>, mut buffer: RawAtom) -> Pow {
         buffer.clear();
         buffer.extend(a.data);
+        let aliases = aliases_from_view(AtomView::Pow(*a));
+        buffer.sync_aliases_from(&aliases);
         Pow {
             data: buffer,
-            aliases: aliases_from_view(AtomView::Pow(*a)),
+            aliases,
         }
     }
 
@@ -1363,6 +1487,7 @@ impl Pow {
         self.aliases.clear();
         merge_aliases(&mut self.aliases, &aliases_from_view(base));
         merge_aliases(&mut self.aliases, &aliases_from_view(exp));
+        self.data.sync_aliases_from(&self.aliases);
         self.data.put_u8(POW_ID | NOT_NORMALIZED);
         self.data.extend(base.get_data());
         self.data.extend(exp.get_data());
@@ -1390,6 +1515,7 @@ impl Pow {
         self.data.clear();
         self.data.extend(view.data);
         self.aliases = aliases_from_view(AtomView::Pow(*view));
+        self.data.sync_aliases_from(&self.aliases);
     }
 
     #[inline(always)]
@@ -1398,13 +1524,14 @@ impl Pow {
     }
 
     #[inline(always)]
-    pub fn into_raw(self) -> RawAtom {
+    pub fn into_raw(mut self) -> RawAtom {
+        self.data.sync_aliases_from(&self.aliases);
         self.data
     }
 
     #[inline(always)]
     pub(crate) unsafe fn from_raw(raw: RawAtom) -> Pow {
-        let aliases = aliases_from_raw_data(&raw);
+        let aliases = raw.take_aliases_or_collect();
         Pow { data: raw, aliases }
     }
 }
@@ -1462,6 +1589,7 @@ impl Mul {
         buffer.clear();
         buffer.extend(a.data);
         let aliases = aliases_from_view(AtomView::Mul(*a));
+        buffer.sync_aliases_from(&aliases);
         Mul {
             data: buffer,
             aliases,
@@ -1482,6 +1610,7 @@ impl Mul {
         self.data.clear();
         self.data.extend(view.data);
         self.aliases = aliases_from_view(AtomView::Mul(*view));
+        self.data.sync_aliases_from(&self.aliases);
     }
 
     #[inline]
@@ -1489,6 +1618,7 @@ impl Mul {
         self.data[0] |= NOT_NORMALIZED;
         self.data[0] |= mul_alias_flag_for(other);
         merge_aliases(&mut self.aliases, &aliases_from_view(other));
+        self.data.sync_aliases_from(&self.aliases);
 
         // may increase size of the num of args
         let mut c = &self.data[1 + 4..];
@@ -1521,7 +1651,8 @@ impl Mul {
             Ordering::Equal => {}
             Ordering::Less => {
                 self.data.copy_within(1 + 4 + old_size.., 1 + 4 + new_size);
-                self.data.resize(self.data.len() - old_size + new_size, 0);
+                let new_len = self.data.len() - old_size + new_size;
+                self.data.resize(new_len, 0);
             }
             Ordering::Greater => {
                 let old_len = self.data.len();
@@ -1577,6 +1708,7 @@ impl Mul {
         self.data[first_arg_start..first_arg_start + new_first_len]
             .copy_from_slice(other.get_data());
         self.aliases = aliases_from_view(self.to_mul_view().as_view());
+        self.data.sync_aliases_from(&self.aliases);
         let has_alias = self.to_mul_view().iter().any(|x| x.has_alias());
         if has_alias {
             self.data[0] |= MUL_HAS_ALIAS_FLAG;
@@ -1612,13 +1744,14 @@ impl Mul {
     }
 
     #[inline(always)]
-    pub fn into_raw(self) -> RawAtom {
+    pub fn into_raw(mut self) -> RawAtom {
+        self.data.sync_aliases_from(&self.aliases);
         self.data
     }
 
     #[inline(always)]
     pub(crate) unsafe fn from_raw(raw: RawAtom) -> Mul {
-        let aliases = aliases_from_raw_data(&raw);
+        let aliases = raw.take_aliases_or_collect();
         Mul { data: raw, aliases }
     }
 
@@ -1682,6 +1815,7 @@ impl Add {
         buffer.clear();
         buffer.extend(a.data);
         let aliases = aliases_from_view(AtomView::Add(*a));
+        buffer.sync_aliases_from(&aliases);
         Add {
             data: buffer,
             aliases,
@@ -1702,6 +1836,7 @@ impl Add {
         self.data[0] |= NOT_NORMALIZED;
         self.data[0] |= alias_flag_for(other);
         merge_aliases(&mut self.aliases, &aliases_from_view(other));
+        self.data.sync_aliases_from(&self.aliases);
 
         let mut c = &self.data[1..];
 
@@ -1732,8 +1867,8 @@ impl Add {
             Ordering::Equal => {}
             Ordering::Less => {
                 self.data.copy_within(old_header_size.., new_header_size);
-                self.data
-                    .resize(self.data.len() - old_header_size + new_header_size, 0);
+                let resized_len = self.data.len() - old_header_size + new_header_size;
+                self.data.resize(resized_len, 0);
             }
             Ordering::Greater => {
                 let old_len = self.data.len();
@@ -1760,6 +1895,7 @@ impl Add {
         self.data.clear();
         self.data.extend(view.data);
         self.aliases = aliases_from_view(AtomView::Add(view));
+        self.data.sync_aliases_from(&self.aliases);
     }
 
     #[inline(always)]
@@ -1773,13 +1909,14 @@ impl Add {
     }
 
     #[inline(always)]
-    pub fn into_raw(self) -> RawAtom {
+    pub fn into_raw(mut self) -> RawAtom {
+        self.data.sync_aliases_from(&self.aliases);
         self.data
     }
 
     #[inline(always)]
     pub(crate) unsafe fn from_raw(raw: RawAtom) -> Add {
-        let aliases = aliases_from_raw_data(&raw);
+        let aliases = raw.take_aliases_or_collect();
         Add { data: raw, aliases }
     }
 
@@ -1804,7 +1941,7 @@ impl Add {
 impl<'a> VarView<'a> {
     #[inline]
     pub fn to_owned(&self) -> Var {
-        Var::from_view_into(self, Vec::new())
+        Var::from_view_into(self, RawAtom::new())
     }
 
     #[inline]
@@ -1816,9 +1953,11 @@ impl<'a> VarView<'a> {
     pub fn clone_into_raw(&self, mut buffer: RawAtom) -> Var {
         buffer.clear();
         buffer.extend(self.data);
+        let aliases = aliases_from_view(AtomView::Var(*self));
+        buffer.sync_aliases_from(&aliases);
         Var {
             data: buffer,
-            aliases: aliases_from_view(AtomView::Var(*self)),
+            aliases,
         }
     }
 
@@ -1892,7 +2031,7 @@ impl Hash for AliasView<'_> {
 impl<'a> AliasView<'a> {
     #[inline]
     pub fn to_owned(&self) -> Alias {
-        Alias::from_view_into(self, Vec::new())
+        Alias::from_view_into(self, RawAtom::new())
     }
 
     #[inline]
@@ -1904,9 +2043,11 @@ impl<'a> AliasView<'a> {
     pub fn clone_into_raw(&self, mut buffer: RawAtom) -> Alias {
         buffer.clear();
         buffer.extend(self.data);
+        let aliases = aliases_from_view(AtomView::Alias(*self));
+        buffer.sync_aliases_from(&aliases);
         Alias {
             data: buffer,
-            aliases: aliases_from_view(AtomView::Alias(*self)),
+            aliases,
         }
     }
 
@@ -1991,7 +2132,7 @@ impl<'a> IntoIterator for &FunView<'a> {
 
 impl<'a> FunView<'a> {
     pub fn to_owned(&self) -> Fun {
-        Fun::from_view_into(self, Vec::new())
+        Fun::from_view_into(self, RawAtom::new())
     }
 
     pub fn clone_into(&self, target: &mut Fun) {
@@ -2001,9 +2142,11 @@ impl<'a> FunView<'a> {
     pub fn clone_into_raw(&self, mut buffer: RawAtom) -> Fun {
         buffer.clear();
         buffer.extend(self.data);
+        let aliases = aliases_from_view(AtomView::Fun(*self));
+        buffer.sync_aliases_from(&aliases);
         Fun {
             data: buffer,
-            aliases: aliases_from_view(AtomView::Fun(*self)),
+            aliases,
         }
     }
 
@@ -2145,7 +2288,7 @@ impl Hash for NumView<'_> {
 impl<'a> NumView<'a> {
     #[inline]
     pub fn to_owned(&self) -> Num {
-        Num::from_view_into(self, Vec::new())
+        Num::from_view_into(self, RawAtom::new())
     }
 
     #[inline]
@@ -2157,9 +2300,11 @@ impl<'a> NumView<'a> {
     pub fn clone_into_raw(&self, mut buffer: RawAtom) -> Num {
         buffer.clear();
         buffer.extend(self.data);
+        let aliases = aliases_from_view(AtomView::Num(*self));
+        buffer.sync_aliases_from(&aliases);
         Num {
             data: buffer,
-            aliases: aliases_from_view(AtomView::Num(*self)),
+            aliases,
         }
     }
 
@@ -2238,7 +2383,7 @@ impl Hash for PowView<'_> {
 impl<'a> PowView<'a> {
     #[inline]
     pub fn to_owned(&self) -> Pow {
-        Pow::from_view_into(self, Vec::new())
+        Pow::from_view_into(self, RawAtom::new())
     }
 
     #[inline]
@@ -2250,9 +2395,11 @@ impl<'a> PowView<'a> {
     pub fn clone_into_raw(&self, mut buffer: RawAtom) -> Pow {
         buffer.clear();
         buffer.extend(self.data);
+        let aliases = aliases_from_view(AtomView::Pow(*self));
+        buffer.sync_aliases_from(&aliases);
         Pow {
             data: buffer,
-            aliases: aliases_from_view(AtomView::Pow(*self)),
+            aliases,
         }
     }
 
@@ -2358,7 +2505,7 @@ impl<'a> IntoIterator for &MulView<'a> {
 impl<'a> MulView<'a> {
     #[inline]
     pub fn to_owned(&self) -> Mul {
-        Mul::from_view_into(self, Vec::new())
+        Mul::from_view_into(self, RawAtom::new())
     }
 
     #[inline]
@@ -2370,9 +2517,11 @@ impl<'a> MulView<'a> {
     pub fn clone_into_raw(&self, mut buffer: RawAtom) -> Mul {
         buffer.clear();
         buffer.extend(self.data);
+        let aliases = aliases_from_view(AtomView::Mul(*self));
+        buffer.sync_aliases_from(&aliases);
         Mul {
             data: buffer,
-            aliases: aliases_from_view(AtomView::Mul(*self)),
+            aliases,
         }
     }
 
@@ -2499,7 +2648,7 @@ impl<'a> IntoIterator for &AddView<'a> {
 
 impl<'a> AddView<'a> {
     pub fn to_owned(&self) -> Add {
-        Add::from_view_into(self, Vec::new())
+        Add::from_view_into(self, RawAtom::new())
     }
 
     pub fn clone_into(&self, target: &mut Add) {
@@ -2509,9 +2658,11 @@ impl<'a> AddView<'a> {
     pub fn clone_into_raw(&self, mut buffer: RawAtom) -> Add {
         buffer.clear();
         buffer.extend(self.data);
+        let aliases = aliases_from_view(AtomView::Add(*self));
+        buffer.sync_aliases_from(&aliases);
         Add {
             data: buffer,
-            aliases: aliases_from_view(AtomView::Add(*self)),
+            aliases,
         }
     }
 
