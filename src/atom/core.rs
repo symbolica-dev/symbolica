@@ -6,7 +6,7 @@ use ahash::{HashMap, HashSet};
 use rayon::ThreadPool;
 
 use crate::{
-    alias::collect_alias_handles_in,
+    alias::register_alias_atom,
     atom::{
         AddView, FunctionBuilder, Indeterminate, KeyLookup, MulView, NumView, VarView,
         representation::FunView,
@@ -47,8 +47,6 @@ use crate::{
     utils::{BorrowedOrOwned, Settable},
 };
 
-#[allow(deprecated)]
-use crate::alias::AliasedAtom;
 use std::sync::Arc;
 
 use super::{
@@ -74,10 +72,6 @@ pub trait AtomCore: private::Sealed + Sized {
 
     /// Take a view of the atom.
     fn as_atom_view(&self) -> AtomView<'_>;
-
-    fn alias_replacements<'a>(&'a self) -> Vec<(usize, AtomView<'a>)> {
-        Vec::new()
-    }
 
     fn atom_to_output(&self, atom: Atom) -> Self::Output;
 
@@ -352,14 +346,27 @@ pub trait AtomCore: private::Sealed + Sized {
         subexpressions
     }
 
+    /// Create an alias of the current atom.
+    ///
+    /// If `opaque` is true, operations such as pattern matching and differentiation treat the
+    /// alias as an atom instead of transparently using its body. This can be used in
+    /// [`replace`](Self::replace) or [`replace_map`](Self::replace_map) to recycle selected
+    /// subexpressions.
+    fn alias(&self, opaque: bool) -> Self::Output {
+        let alias = register_alias_atom(self.as_atom_view().to_owned());
+        let atom = if opaque {
+            alias.to_opaque_atom()
+        } else {
+            alias.to_atom()
+        };
+        self.atom_to_output(atom)
+    }
+
     /// Extract subexpressions and replace selected subexpressions with aliases. The arguments of
-    /// `f` are the subexpression, the number of occurrences of the subexpression and the index of
-    /// the subexpression in the list of subexpressions. `f` should return `None` if the
-    /// subexpression should not be replaced, and `Some(_)` if it should be aliased.
-    fn alias_subexpressions(
-        &self,
-        f: impl FnMut(AtomView, usize, usize) -> Option<Atom>,
-    ) -> Self::Output {
+    /// `f` are the subexpression and the number of occurrences of the subexpression. `f` should
+    /// return `None` if the subexpression should not be replaced. Return `Some(false)` to create a
+    /// transparent alias and `Some(true)` to create an opaque alias.
+    fn alias_subexpressions(&self, f: impl FnMut(AtomView, usize) -> Option<bool>) -> Self::Output {
         let atom = self.as_atom_view().alias_subexpressions(f);
         self.atom_to_output(atom)
     }
@@ -370,9 +377,9 @@ pub trait AtomCore: private::Sealed + Sized {
     /// The returned atom keeps the created aliases alive and can be used as a normal expression
     /// through the rest of the [`AtomCore`] API.
     fn alias_repeated_subexpressions(&self) -> Self::Output {
-        self.alias_subexpressions(|subexpr, _, _| match subexpr {
+        self.alias_subexpressions(|subexpr, _| match subexpr {
             AtomView::Num(_) | AtomView::Var(_) | AtomView::Alias(_) => None,
-            _ => Some(Atom::new()),
+            _ => Some(false),
         })
     }
 
@@ -906,13 +913,7 @@ pub trait AtomCore: private::Sealed + Sized {
         fn_map: &FunctionMap,
         params: &[Atom],
     ) -> Result<EvalTree<Complex<Rational>>, String> {
-        let aliases = self.alias_replacements();
-        if aliases.is_empty() {
-            AtomView::to_eval_tree_multiple(std::slice::from_ref(self), fn_map, params)
-        } else {
-            let f = fn_map.with_aliases(aliases);
-            AtomView::to_eval_tree_multiple(std::slice::from_ref(self), &f, params)
-        }
+        AtomView::to_eval_tree_multiple(std::slice::from_ref(self), fn_map, params)
     }
 
     /// Create an efficient evaluator for a (nested) expression.
@@ -977,24 +978,13 @@ pub trait AtomCore: private::Sealed + Sized {
         optimization_settings: OptimizationSettings,
     ) -> Result<ExpressionEvaluator<Complex<Rational>>, String> {
         if optimization_settings.direct_translation {
-            let aliases = self.alias_replacements();
             let expr = self.as_atom_view();
-            if aliases.is_empty() {
-                AtomView::to_evaluator(
-                    std::slice::from_ref(&expr),
-                    fn_map,
-                    params,
-                    optimization_settings,
-                )
-            } else {
-                AtomView::to_evaluator_with_aliases(
-                    std::slice::from_ref(&expr),
-                    &aliases,
-                    fn_map,
-                    params,
-                    optimization_settings,
-                )
-            }
+            AtomView::to_evaluator(
+                std::slice::from_ref(&expr),
+                fn_map,
+                params,
+                optimization_settings,
+            )
         } else {
             let tree = self.to_evaluation_tree(fn_map, params)?;
             Ok(tree.optimize(&optimization_settings))
@@ -1035,33 +1025,10 @@ pub trait AtomCore: private::Sealed + Sized {
         optimization_settings: OptimizationSettings,
     ) -> Result<ExpressionEvaluator<Complex<Rational>>, String> {
         if optimization_settings.direct_translation {
-            let aliases = exprs
-                .iter()
-                .flat_map(|e| e.alias_replacements())
-                .collect::<Vec<_>>();
             let expr_views = exprs.iter().map(|e| e.as_atom_view()).collect::<Vec<_>>();
-            if aliases.is_empty() {
-                AtomView::to_evaluator(&expr_views, fn_map, params, optimization_settings)
-            } else {
-                AtomView::to_evaluator_with_aliases(
-                    &expr_views,
-                    &aliases,
-                    fn_map,
-                    params,
-                    optimization_settings,
-                )
-            }
+            AtomView::to_evaluator(&expr_views, fn_map, params, optimization_settings)
         } else {
-            let aliases = exprs
-                .iter()
-                .flat_map(|e| e.alias_replacements())
-                .collect::<Vec<_>>();
-            let tree = if aliases.is_empty() {
-                AtomView::to_eval_tree_multiple(exprs, fn_map, params)?
-            } else {
-                let f = fn_map.with_aliases(aliases);
-                AtomView::to_eval_tree_multiple(exprs, &f, params)?
-            };
+            let tree = AtomView::to_eval_tree_multiple(exprs, fn_map, params)?;
             Ok(tree.optimize(&optimization_settings))
         }
     }
@@ -2233,46 +2200,6 @@ impl AtomCore for AtomOrView<'_> {
     }
 }
 
-#[allow(deprecated)]
-impl AtomCore for AliasedAtom {
-    type Output = AliasedAtom;
-
-    fn as_atom_view(&self) -> AtomView<'_> {
-        self.root.as_view()
-    }
-
-    fn alias_replacements<'a>(&'a self) -> Vec<(usize, AtomView<'a>)> {
-        self.aliases
-            .iter()
-            .map(|handle| (handle.token(), handle.atom().as_view()))
-            .collect()
-    }
-
-    fn atom_to_output(&self, atom: Atom) -> Self::Output {
-        let mut aliases: HashSet<_> = self.aliases.iter().cloned().collect();
-        aliases.extend(collect_alias_handles_in(atom.as_view()));
-        let mut aliases: Vec<_> = aliases.into_iter().collect();
-        aliases.sort_by_key(|handle| handle.id());
-        AliasedAtom {
-            root: atom,
-            aliases,
-        }
-    }
-
-    fn count_subexpressions<'a>(&'a self) -> HashMap<AtomView<'a>, usize> {
-        let mut count = HashMap::default();
-        self.root.as_atom_view().count_subexpressions(&mut count);
-        count
-    }
-
-    fn alias_subexpressions(
-        &self,
-        f: impl FnMut(AtomView, usize, usize) -> Option<Atom>,
-    ) -> AliasedAtom {
-        self.clone().alias_subexpressions(f)
-    }
-}
-
 mod private {
     use crate::atom::{AtomView, Indeterminate, InlineNum, InlineVar};
 
@@ -2284,6 +2211,4 @@ mod private {
     impl<'a> Sealed for AtomView<'a> {}
     impl<T: AsRef<super::Atom>> Sealed for T {}
     impl Sealed for super::AtomOrView<'_> {}
-    #[allow(deprecated)]
-    impl Sealed for crate::alias::AliasedAtom {}
 }

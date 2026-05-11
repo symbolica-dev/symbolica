@@ -177,21 +177,6 @@ impl<'a> AtomView<'a> {
         e
     }
 
-    pub(crate) fn to_evaluator_with_aliases(
-        expressions: &[Self],
-        alias_replacements: &[(usize, Self)],
-        fn_map: &FunctionMap,
-        params: &[Atom],
-        settings: OptimizationSettings,
-    ) -> Result<ExpressionEvaluator<Complex<Rational>>, String> {
-        if alias_replacements.is_empty() {
-            return Self::to_evaluator(expressions, fn_map, params, settings);
-        }
-
-        let f = fn_map.with_aliases(alias_replacements.iter().copied());
-        Self::to_evaluator(expressions, &f, params, settings)
-    }
-
     pub fn optimize_horner_scheme_multiple(
         expressions: &[Self],
         vars: &[Indeterminate],
@@ -578,10 +563,7 @@ impl<'a> AtomView<'a> {
 
         let res = match self {
             AtomView::Alias(a) => {
-                let body = fn_map
-                    .get_alias_body(a.get_token())
-                    .unwrap_or_else(|| a.get_body());
-                return body.linearize_impl(
+                return a.get_body().linearize_impl(
                     fn_map,
                     params,
                     constants,
@@ -923,20 +905,6 @@ impl<'a> AtomView<'a> {
                             f.get_nargs(),
                             arg_spec.len() + tag_len
                         ));
-                    }
-
-                    if name == Symbol::ALIAS {
-                        return e.as_view().linearize_impl(
-                            fn_map,
-                            params,
-                            constants,
-                            constant_map,
-                            external_functions,
-                            instr,
-                            subexpressions,
-                            args,
-                            arg_start,
-                        );
                     }
 
                     let old_arg_stack_len = args.len();
@@ -3394,12 +3362,14 @@ impl<'a> AtomView<'a> {
         }
 
         match self {
-            AtomView::Alias(a) => {
-                let body = fn_map
-                    .get_alias_body(a.get_token())
-                    .unwrap_or_else(|| a.get_body());
-                body.to_eval_tree_impl(fn_map, params, args, fn_id_map, funcs, external_functions)
-            }
+            AtomView::Alias(a) => a.get_body().to_eval_tree_impl(
+                fn_map,
+                params,
+                args,
+                fn_id_map,
+                funcs,
+                external_functions,
+            ),
             AtomView::Num(n) => match n.get_coeff_view() {
                 CoefficientView::Natural(n, d, ni, di) => Ok(Expression::Const(
                     0,
@@ -3546,17 +3516,6 @@ impl<'a> AtomView<'a> {
                                 f.get_nargs(),
                                 arg_spec.len() + tag_len
                             ));
-                        }
-
-                        if name == Symbol::ALIAS {
-                            return e.as_view().to_eval_tree_impl(
-                                fn_map,
-                                params,
-                                args,
-                                fn_id_map,
-                                funcs,
-                                external_functions,
-                            );
                         }
 
                         let eval_args = f

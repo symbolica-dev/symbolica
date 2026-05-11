@@ -1058,8 +1058,6 @@ impl Symbol {
     pub const SEP: Symbol = State::SEP;
     /// The built-in function that represents an abstract derivative.
     pub const DERIVATIVE: Symbol = State::DERIVATIVE;
-    /// The built-in function used for temporary global aliases.
-    pub const ALIAS: Symbol = State::ALIAS;
     /// The constant `𝑒`, the base of the natural logarithm, approximately `2.7182`.
     pub const E: Symbol = State::E;
     /// The mathematical constant `π`, approximately `3.1415`.
@@ -3833,7 +3831,7 @@ mod test {
         let x = parse!("v1+f1(v2)");
         assert_eq!(
             format!("{x:#?}"),
-            "AddView { data: [5, 17, 2, 13, 2, 1, 16, 3, 5, 0, 0, 0, 1, 46, 2, 1, 17] }"
+            "AddView { data: [5, 17, 2, 13, 2, 1, 15, 3, 5, 0, 0, 0, 1, 45, 2, 1, 16] }"
         );
         assert_eq!(
             x.get_all_symbols(true),

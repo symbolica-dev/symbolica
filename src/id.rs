@@ -1121,7 +1121,7 @@ impl<'a> AtomView<'a> {
 
     pub(crate) fn alias_subexpressions(
         &self,
-        f: impl FnMut(AtomView, usize, usize) -> Option<Atom>,
+        f: impl FnMut(AtomView, usize) -> Option<bool>,
     ) -> Atom {
         crate::alias::alias_subexpressions(*self, f)
     }

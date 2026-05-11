@@ -6,6 +6,7 @@ use numerica::domains::{
 };
 
 use crate::{
+    alias::register_alias_atom,
     atom::{Add, Atom, AtomCore, AtomOrView, AtomView, Indeterminate, Symbol},
     coefficient::{Coefficient, CoefficientView},
     domains::{algebraic_number::AlgebraicExtension, float::FloatLike, integer::Z, rational::Q},
@@ -1316,9 +1317,19 @@ impl<'a> AtomView<'a> {
         }
 
         match self {
-            AtomView::Alias(a) => a
-                .get_body()
-                .horner_scheme_impl_no_norm(ws, xs, enter_functions),
+            AtomView::Alias(a) => {
+                let body = a
+                    .get_body()
+                    .horner_scheme_impl_no_norm(ws, xs, enter_functions);
+                let mut normalized_body = Atom::new();
+                body.as_view().normalize(ws, &mut normalized_body);
+                let handle = register_alias_atom(normalized_body);
+                if a.is_opaque() {
+                    Atom::opaque_alias(handle).into()
+                } else {
+                    Atom::alias(handle).into()
+                }
+            }
             AtomView::Num(_) | AtomView::Var(_) => self.into(),
             AtomView::Fun(f) => {
                 if enter_functions {
@@ -1367,12 +1378,28 @@ impl<'a> AtomView<'a> {
                 }
             }
             AtomView::Add(a) => {
+                let original_xs = xs;
                 let mut min_power = self.get_lowest_power(xs[0].as_view());
                 while min_power == 0 {
                     xs = &xs[1..];
 
                     if xs.is_empty() {
-                        return self.into();
+                        let mut tmp = ws.new_atom();
+                        let add = tmp.to_add();
+
+                        let mut changed = false;
+                        for arg in a {
+                            let r =
+                                arg.horner_scheme_impl_no_norm(ws, original_xs, enter_functions);
+                            changed |= matches!(r, AtomOrView::Atom(_));
+                            add.extend(r.as_view());
+                        }
+
+                        return if changed {
+                            tmp.into_inner().into()
+                        } else {
+                            self.into()
+                        };
                     }
 
                     min_power = self.get_lowest_power(xs[0].as_view());
@@ -1447,7 +1474,7 @@ impl<'a> AtomView<'a> {
 
                 let mut res = rest
                     .as_view()
-                    .horner_scheme_impl_no_norm(ws, &xs[1..], enter_functions)
+                    .horner_scheme_impl_no_norm(ws, xs, enter_functions)
                     .into_owned();
                 if min_power > 0 {
                     let new_key = (if coeff_sum.get_nargs() == 1 {

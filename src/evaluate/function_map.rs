@@ -154,48 +154,10 @@ impl FunctionMap {
             .map(|e| e.body.as_view())
     }
 
-    pub(super) fn get_alias_body(&self, token: usize) -> Option<AtomView<'_>> {
-        self.tagged_fn_map
-            .get(&(Symbol::ALIAS, vec![Atom::num(token)]))
-            .map(|e| e.body.as_view())
-    }
-
     pub(super) fn apply_horner_scheme(&mut self, scheme: &[Indeterminate]) {
         for Expr { body, .. } in self.map.values_mut().chain(self.tagged_fn_map.values_mut()) {
             *body = body.as_view().horner_scheme(Some(scheme), true);
         }
-    }
-
-    pub(super) fn add_aliases<'a>(
-        &mut self,
-        aliases: impl IntoIterator<Item = (usize, AtomView<'a>)>,
-    ) {
-        if let Some(t) = self.tag.insert(Symbol::ALIAS, 1)
-            && t != 1
-        {
-            panic!("Alias function registered with a different number of tags");
-        }
-
-        for (token, body) in aliases {
-            let id = self.tagged_fn_map.len();
-            self.tagged_fn_map
-                .entry((Symbol::ALIAS, vec![Atom::num(token)]))
-                .or_insert_with(|| Expr {
-                    id,
-                    tag_len: 1,
-                    args: vec![],
-                    body: body.to_owned(),
-                });
-        }
-    }
-
-    pub(crate) fn with_aliases<'a>(
-        &self,
-        aliases: impl IntoIterator<Item = (usize, AtomView<'a>)>,
-    ) -> Self {
-        let mut f = self.clone();
-        f.add_aliases(aliases);
-        f
     }
 }
 

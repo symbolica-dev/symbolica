@@ -2923,7 +2923,7 @@ impl<'a> AtomView<'a> {
     }
 
     #[inline(always)]
-    fn aliases_vec(&self) -> &'a Vec<Arc<AliasHandle>> {
+    pub(crate) fn aliases_vec(&self) -> &'a Vec<Arc<AliasHandle>> {
         match self {
             AtomView::Num(n) => n.aliases,
             AtomView::Var(v) => v.aliases,

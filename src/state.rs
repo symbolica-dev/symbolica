@@ -243,11 +243,9 @@ impl State {
         Symbol::raw_fn(12, 0, false, false, false, false, true, true, false, true);
     pub(crate) const SEP: Symbol =
         Symbol::raw_fn(13, 0, false, false, false, false, true, true, true, true);
-    pub(crate) const ALIAS: Symbol =
-        Symbol::raw_fn(14, 0, false, false, false, false, true, false, false, false);
 
     /// The list of built-in symbols.
-    pub const BUILTIN_SYMBOL_NAMES: [&'static str; 15] = [
+    pub const BUILTIN_SYMBOL_NAMES: [&'static str; 14] = [
         "arg",
         "coeff",
         "exp",
@@ -262,11 +260,10 @@ impl State {
         Symbol::E_STR,
         Symbol::PI_STR,
         Symbol::SEP_STR,
-        "alias",
     ];
 
     /// The list of built-in symbol names and their aliases.
-    pub const BUILTIN_NAMES_AND_ALIASES: [&'static str; 16] = [
+    pub const BUILTIN_NAMES_AND_ALIASES: [&'static str; 15] = [
         "arg",
         "coeff",
         "exp",
@@ -281,12 +278,11 @@ impl State {
         Symbol::E_STR,
         Symbol::PI_STR,
         Symbol::SEP_STR,
-        "alias",
         "pi",
     ];
 
     /// The list of built-in symbols.
-    pub const BUILTIN_SYMBOLS: [Symbol; 15] = [
+    pub const BUILTIN_SYMBOLS: [Symbol; 14] = [
         Self::ARG,
         Self::COEFF,
         Self::EXP,
@@ -301,7 +297,6 @@ impl State {
         Self::E,
         Self::PI,
         Self::SEP,
-        Self::ALIAS,
     ];
 
     pub(crate) fn is_builtin_name<S: AsRef<str>>(&self, str: S) -> bool {
