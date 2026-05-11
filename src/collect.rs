@@ -1524,16 +1524,9 @@ mod test {
 
     #[test]
     fn collect_horner() {
-        std::thread::Builder::new()
-            .stack_size(16 * 1024 * 1024)
-            .spawn(|| {
-                let expr = parse!("1 + v1*v2 + 2 v1*v2*v3 + v1^2 + v1^3*y + v1^4*z + v1^10");
-                let collected = expr.collect_horner(Some(&[symbol!("v1"), symbol!("v2")]));
-                assert_eq!(collected.expand(), expr);
-            })
-            .unwrap()
-            .join()
-            .unwrap();
+        let expr = parse!("1 + v1*v2 + 2 v1*v2*v3 + v1^2 + v1^3*y + v1^4*z + v1^10");
+        let collected = expr.collect_horner(Some(&[symbol!("v1"), symbol!("v2")]));
+        assert_eq!(collected.expand(), expr);
     }
 
     #[test]

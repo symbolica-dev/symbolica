@@ -1106,24 +1106,17 @@ fn generate_evaluator() -> ExpressionEvaluator<Complex<Rational>> {
 
     let params = params.iter().map(|s| parse!(s)).collect::<Vec<_>>();
 
-    std::thread::Builder::new()
-        .stack_size(16 * 1024 * 1024) // use a larger stack size as in debug mode the default stack size is too small
-        .spawn(move || {
-            parse!(F13)
-                .evaluator(
-                    &FunctionMap::new(),
-                    &params,
-                    OptimizationSettings {
-                        horner_iterations: 1,
-                        n_cores: 1,
-                        verbose: false,
-                        ..Default::default()
-                    },
-                )
-                .unwrap()
-        })
-        .unwrap()
-        .join()
+    parse!(F13)
+        .evaluator(
+            &FunctionMap::new(),
+            &params,
+            OptimizationSettings {
+                horner_iterations: 1,
+                n_cores: 1,
+                verbose: false,
+                ..Default::default()
+            },
+        )
         .unwrap()
 }
 

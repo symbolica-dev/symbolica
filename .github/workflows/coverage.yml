@@ -7,6 +7,7 @@ jobs:
     runs-on: ubuntu-latest
     env:
       CARGO_TERM_COLOR: always
+      RUST_MIN_STACK: "67108864"
     steps:
       - uses: actions/checkout@v5
       - name: Install Rust

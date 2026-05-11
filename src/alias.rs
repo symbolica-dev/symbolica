@@ -48,6 +48,10 @@ impl AliasHandle {
     pub(crate) fn atom(&self) -> &Atom {
         &self.atom
     }
+
+    pub(crate) fn atom_arc(&self) -> Arc<Atom> {
+        self.atom.clone()
+    }
 }
 
 impl Drop for AliasHandle {

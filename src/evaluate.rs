@@ -201,53 +201,42 @@ mod test {
 
     #[test]
     fn nested() {
-        std::thread::Builder::new()
-            .stack_size(16 * 1024 * 1024)
-            .spawn(|| {
-                let e1 = parse!("x + pi + cos(x) + f(g(x+1),h(x*2)) + p(1,x)");
-                let e2 = parse!("x + h(x*2) + cos(x)");
-                let f = parse!("y^2 + z^2*y^2");
-                let g = parse!("i(y+7)+x*i(y+7)*(y-1)");
-                let h = parse!("y*(1+x*(1+x^2)) + y^2*(1+x*(1+x^2))^2 + 3*(1+x^2)");
-                let i = parse!("y - 1");
-                let p1 = parse!("3*z^3 + 4*z^2 + 6*z +8");
+        let e1 = parse!("x + pi + cos(x) + f(g(x+1),h(x*2)) + p(1,x)");
+        let e2 = parse!("x + h(x*2) + cos(x)");
+        let f = parse!("y^2 + z^2*y^2");
+        let g = parse!("i(y+7)+x*i(y+7)*(y-1)");
+        let h = parse!("y*(1+x*(1+x^2)) + y^2*(1+x*(1+x^2))^2 + 3*(1+x^2)");
+        let i = parse!("y - 1");
+        let p1 = parse!("3*z^3 + 4*z^2 + 6*z +8");
 
-                let mut fn_map = FunctionMap::new();
+        let mut fn_map = FunctionMap::new();
 
-                fn_map
-                    .add_tagged_function(symbol!("p"), vec![Atom::num(1)], vec![symbol!("z")], p1)
-                    .unwrap();
-                fn_map
-                    .add_function(symbol!("f"), vec![symbol!("y"), symbol!("z")], f)
-                    .unwrap();
-                fn_map
-                    .add_function(symbol!("g"), vec![symbol!("y")], g)
-                    .unwrap();
-                fn_map
-                    .add_function(symbol!("h"), vec![symbol!("y")], h)
-                    .unwrap();
-                fn_map
-                    .add_function(symbol!("i"), vec![symbol!("y")], i)
-                    .unwrap();
+        fn_map
+            .add_tagged_function(symbol!("p"), vec![Atom::num(1)], vec![symbol!("z")], p1)
+            .unwrap();
+        fn_map
+            .add_function(symbol!("f"), vec![symbol!("y"), symbol!("z")], f)
+            .unwrap();
+        fn_map
+            .add_function(symbol!("g"), vec![symbol!("y")], g)
+            .unwrap();
+        fn_map
+            .add_function(symbol!("h"), vec![symbol!("y")], h)
+            .unwrap();
+        fn_map
+            .add_function(symbol!("i"), vec![symbol!("y")], i)
+            .unwrap();
 
-                let params = vec![parse!("x")];
+        let params = vec![parse!("x")];
 
-                let evaluator = Atom::evaluator_multiple(
-                    &[e1, e2],
-                    &fn_map,
-                    &params,
-                    OptimizationSettings::default(),
-                )
+        let evaluator =
+            Atom::evaluator_multiple(&[e1, e2], &fn_map, &params, OptimizationSettings::default())
                 .unwrap();
 
-                let mut e_f64 = evaluator.map_coeff(&|x| x.clone().to_real().unwrap().into());
-                let mut res = [0., 0.];
-                e_f64.evaluate(&[1.1], &mut res);
-                assert!((res[0] - 1622709.2241624785).abs() / 1622709.2241624785 < 1e-10);
-            })
-            .unwrap()
-            .join()
-            .unwrap();
+        let mut e_f64 = evaluator.map_coeff(&|x| x.clone().to_real().unwrap().into());
+        let mut res = [0., 0.];
+        e_f64.evaluate(&[1.1], &mut res);
+        assert!((res[0] - 1622709.2241624785).abs() / 1622709.2241624785 < 1e-10);
     }
 
     #[test]

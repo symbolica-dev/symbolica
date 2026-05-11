@@ -68,7 +68,7 @@ use std::{
     hash::Hash,
     io::{Read, Write},
     ops::DerefMut,
-    sync::OnceLock,
+    sync::{Arc, OnceLock},
 };
 
 pub use self::core::AtomCore;
@@ -77,6 +77,7 @@ pub use self::representation::{
     Mul, MulView, Num, NumView, Pow, PowView, Var, VarView,
 };
 use self::representation::{FunView, RawAtom};
+use crate::alias::collect_alias_handles_with_dependencies;
 
 /// A symbol with a namespace, and optional positional data (file and line) of its definition.
 /// Can be created with the [wrap_symbol!](crate::wrap_symbol) macro or by converting from a string that is
@@ -2507,6 +2508,25 @@ impl AtomView<'_> {
             AtomView::Mul(m) => m.get_byte_size(),
             AtomView::Add(a) => a.get_byte_size(),
         }
+    }
+
+    /// Return the bodies of all aliases used in the expression, including nested alias
+    /// dependencies. Each alias body is returned at most once.
+    pub fn get_aliases(&self) -> Vec<Arc<Atom>> {
+        collect_alias_handles_with_dependencies(*self)
+            .into_iter()
+            .map(|handle| handle.atom_arc())
+            .collect()
+    }
+
+    /// Return a new expression with all known aliases replaced by their values.
+    pub fn alias_known_aliases(&self) -> Atom {
+        self.replace_map(|a, _, out| {
+            if let AtomView::Alias(alias) = a {
+                let inlined = alias.get_body().alias_known_aliases();
+                out.set_from_view(&inlined.as_view());
+            }
+        })
     }
 
     /// Return the byte size of this atom, including the bodies referenced by aliases.
