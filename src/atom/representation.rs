@@ -59,14 +59,18 @@ pub(crate) const ALIAS_EXPORT_SECTION_MAGIC: u64 = 0xA11A_5ECA_1100_0001;
 const ZERO_DATA: [u8; 3] = [NUM_ID, 1, 0];
 static NO_ALIASES: Vec<Arc<AliasHandle>> = Vec::new();
 
-fn merge_aliases(dst: &mut Vec<Arc<AliasHandle>>, src: &[Arc<AliasHandle>]) {
-    if src.is_empty() {
+#[inline]
+fn merge_aliases_from_view(dst: &mut Vec<Arc<AliasHandle>>, view: AtomView<'_>) {
+    if !view.has_alias() {
         return;
     }
 
-    dst.extend(src.iter().cloned());
-    dst.sort_by_key(|handle| handle.token());
-    dst.dedup_by_key(|handle| handle.token());
+    let old_len = dst.len();
+    collect_aliases_from_data(view.get_data(), view.aliases_ref(), dst);
+    if dst.len() != old_len {
+        dst.sort_by_key(|handle| handle.token());
+        dst.dedup_by_key(|handle| handle.token());
+    }
 }
 
 fn aliases_from_view(view: AtomView<'_>) -> Vec<Arc<AliasHandle>> {
@@ -75,18 +79,27 @@ fn aliases_from_view(view: AtomView<'_>) -> Vec<Arc<AliasHandle>> {
 
 fn aliases_from_raw_data(data: &[u8]) -> Vec<Arc<AliasHandle>> {
     let mut handles = Vec::new();
-    collect_aliases_from_raw(data, &mut handles);
+    collect_aliases_from_data(data, &[], &mut handles);
     handles.sort_by_key(|handle| handle.token());
     handles.dedup_by_key(|handle| handle.token());
     handles
 }
 
-fn collect_aliases_from_raw(data: &[u8], handles: &mut Vec<Arc<AliasHandle>>) {
+fn collect_aliases_from_data(
+    data: &[u8],
+    aliases: &[Arc<AliasHandle>],
+    handles: &mut Vec<Arc<AliasHandle>>,
+) {
     match data[0] & TYPE_MASK {
         NUM_ID | VAR_ID => {}
         ALIAS_ID => {
             let token = data[1..].get_frac_u64().0 as usize;
-            if let Some(handle) = get_alias_handle(token) {
+            if let Some(handle) = aliases
+                .iter()
+                .find(|handle| handle.token() == token)
+                .cloned()
+                .or_else(|| get_alias_handle(token))
+            {
                 handles.push(handle);
             }
         }
@@ -97,9 +110,9 @@ fn collect_aliases_from_raw(data: &[u8], handles: &mut Vec<Arc<AliasHandle>>) {
             let mut c = &data[1 + 4..];
             let n_args;
             (_, n_args, c) = c.get_frac_u64();
-            collect_aliases_from_raw_list(c, n_args as usize, handles);
+            collect_aliases_from_data_list(c, n_args as usize, aliases, handles);
         }
-        POW_ID => collect_aliases_from_raw_list(&data[1..], 2, handles),
+        POW_ID => collect_aliases_from_data_list(&data[1..], 2, aliases, handles),
         MUL_ID => {
             if data[0] & MUL_HAS_ALIAS_FLAG == 0 {
                 return;
@@ -107,7 +120,7 @@ fn collect_aliases_from_raw(data: &[u8], handles: &mut Vec<Arc<AliasHandle>>) {
             let mut c = &data[1 + 4..];
             let n_args;
             (n_args, _, c) = c.get_frac_u64();
-            collect_aliases_from_raw_list(c, n_args as usize, handles);
+            collect_aliases_from_data_list(c, n_args as usize, aliases, handles);
         }
         ADD_ID => {
             if data[0] & HAS_ALIAS_FLAG == 0 {
@@ -116,19 +129,20 @@ fn collect_aliases_from_raw(data: &[u8], handles: &mut Vec<Arc<AliasHandle>>) {
             let mut c = &data[1..];
             let n_args;
             (n_args, _, c) = c.get_frac_u64();
-            collect_aliases_from_raw_list(c, n_args as usize, handles);
+            collect_aliases_from_data_list(c, n_args as usize, aliases, handles);
         }
         x => unreachable!("Bad id {}", x),
     }
 }
 
-fn collect_aliases_from_raw_list(
+fn collect_aliases_from_data_list(
     mut data: &[u8],
     n_args: usize,
+    aliases: &[Arc<AliasHandle>],
     handles: &mut Vec<Arc<AliasHandle>>,
 ) {
     for _ in 0..n_args {
-        collect_aliases_from_raw(data, handles);
+        collect_aliases_from_data(data, aliases, handles);
         data = skip_raw_atom(data);
     }
 }
@@ -340,11 +354,21 @@ impl RawAtom {
     }
 
     #[inline]
-    pub(crate) fn take_aliases_or_collect(&self) -> Vec<Arc<AliasHandle>> {
+    pub(crate) fn sync_aliases_from_view_data(
+        &mut self,
+        data: &[u8],
+        aliases: &[Arc<AliasHandle>],
+    ) {
+        self.aliases.clear();
+        collect_aliases_from_data(data, aliases, &mut self.aliases);
+        self.aliases.sort_by_key(|handle| handle.token());
+        self.aliases.dedup_by_key(|handle| handle.token());
+    }
+
+    #[inline]
+    pub(crate) fn ensure_aliases_from_data(&mut self) {
         if self.aliases.is_empty() {
-            aliases_from_raw_data(&self.data)
-        } else {
-            self.aliases.clone()
+            self.aliases = aliases_from_raw_data(&self.data);
         }
     }
 }
@@ -690,14 +714,12 @@ impl InlineVar {
     pub fn as_var_view(&self) -> VarView<'_> {
         VarView {
             data: &self.data[..self.size as usize],
-            aliases: &NO_ALIASES,
         }
     }
 
     pub fn as_view(&self) -> AtomView<'_> {
         AtomView::Var(VarView {
             data: &self.data[..self.size as usize],
-            aliases: &NO_ALIASES,
         })
     }
 }
@@ -770,14 +792,12 @@ impl InlineNum {
     pub fn as_num_view(&self) -> NumView<'_> {
         NumView {
             data: &self.data[..self.size as usize],
-            aliases: &NO_ALIASES,
         }
     }
 
     pub fn as_view(&self) -> AtomView<'_> {
         AtomView::Num(NumView {
             data: &self.data[..self.size as usize],
-            aliases: &NO_ALIASES,
         })
     }
 }
@@ -967,31 +987,25 @@ impl Atom {
     pub(crate) fn clear_alias_handles(&mut self) {
         match self {
             Atom::Num(n) => {
-                n.aliases.clear();
-                n.data.sync_aliases_from(&n.aliases);
+                n.data.aliases.clear();
             }
             Atom::Var(v) => {
-                v.aliases.clear();
-                v.data.sync_aliases_from(&v.aliases);
+                v.data.aliases.clear();
             }
             Atom::Fun(f) => {
-                f.aliases.clear();
-                f.data.sync_aliases_from(&f.aliases);
+                f.data.aliases.clear();
                 f.data[0] &= !HAS_ALIAS_FLAG;
             }
             Atom::Mul(m) => {
-                m.aliases.clear();
-                m.data.sync_aliases_from(&m.aliases);
+                m.data.aliases.clear();
                 m.data[0] &= !MUL_HAS_ALIAS_FLAG;
             }
             Atom::Add(a) => {
-                a.aliases.clear();
-                a.data.sync_aliases_from(&a.aliases);
+                a.data.aliases.clear();
                 a.data[0] &= !HAS_ALIAS_FLAG;
             }
             Atom::Pow(p) => {
-                p.aliases.clear();
-                p.data.sync_aliases_from(&p.aliases);
+                p.data.aliases.clear();
             }
             Atom::Alias(_) => {}
             Atom::Zero => {}
@@ -999,38 +1013,34 @@ impl Atom {
     }
 
     pub(crate) fn refresh_alias_handles_from_tree(&mut self) {
-        let aliases = aliases_from_view(self.as_view());
         match self {
             Atom::Num(n) => {
-                n.aliases.clear();
-                n.data.sync_aliases_from(&n.aliases);
+                n.data.aliases.clear();
             }
             Atom::Var(v) => {
-                v.aliases.clear();
-                v.data.sync_aliases_from(&v.aliases);
+                v.data.aliases.clear();
             }
             Atom::Fun(f) => {
-                f.aliases = aliases;
-                f.data.sync_aliases_from(&f.aliases);
+                let aliases = aliases_from_view(f.to_fun_view().as_view());
+                f.data.sync_aliases_from(&aliases);
                 f.refresh_alias_flag_from_tree();
             }
             Atom::Mul(m) => {
-                m.aliases = aliases;
-                m.data.sync_aliases_from(&m.aliases);
+                let aliases = aliases_from_view(m.to_mul_view().as_view());
+                m.data.sync_aliases_from(&aliases);
                 m.refresh_alias_flag_from_tree();
             }
             Atom::Add(a) => {
-                a.aliases = aliases;
-                a.data.sync_aliases_from(&a.aliases);
+                let aliases = aliases_from_view(a.to_add_view().as_view());
+                a.data.sync_aliases_from(&aliases);
                 a.refresh_alias_flag_from_tree();
             }
             Atom::Pow(p) => {
-                p.aliases = aliases;
-                p.data.sync_aliases_from(&p.aliases);
+                let aliases = aliases_from_view(p.to_pow_view().as_view());
+                p.data.sync_aliases_from(&aliases);
             }
             Atom::Alias(a) => {
-                a.aliases = aliases;
-                a.data.sync_aliases_from(&a.aliases);
+                a.data.ensure_aliases_from_data();
             }
             Atom::Zero => {}
         }
@@ -1041,7 +1051,6 @@ impl Atom {
 #[derive(Debug, Clone)]
 pub struct Num {
     data: RawAtom,
-    aliases: Vec<Arc<AliasHandle>>,
 }
 
 impl PartialEq for Num {
@@ -1065,10 +1074,7 @@ impl Num {
         buffer.put_u8(NUM_ID);
         buffer.put_u8(1);
         buffer.put_u8(0);
-        Num {
-            data: buffer,
-            aliases: Vec::new(),
-        }
+        Num { data: buffer }
     }
 
     #[inline]
@@ -1076,10 +1082,7 @@ impl Num {
         let mut buffer = RawAtom::new();
         buffer.put_u8(NUM_ID);
         num.write_packed(&mut buffer);
-        Num {
-            data: buffer,
-            aliases: Vec::new(),
-        }
+        Num { data: buffer }
     }
 
     #[inline(always)]
@@ -1087,26 +1090,19 @@ impl Num {
         buffer.clear();
         buffer.put_u8(NUM_ID);
         num.write_packed(&mut buffer);
-        Num {
-            data: buffer,
-            aliases: Vec::new(),
-        }
+        Num { data: buffer }
     }
 
     #[inline]
     pub fn from_view_into(a: &NumView<'_>, mut buffer: RawAtom) -> Num {
         buffer.clear();
         buffer.extend(a.data);
-        Num {
-            data: buffer,
-            aliases: aliases_from_view(AtomView::Num(*a)),
-        }
+        Num { data: buffer }
     }
 
     #[inline]
     pub fn set_from_coeff(&mut self, num: Coefficient) {
         self.data.clear();
-        self.aliases.clear();
         self.data.put_u8(NUM_ID);
         num.write_packed(&mut self.data);
     }
@@ -1115,8 +1111,6 @@ impl Num {
     pub fn set_from_view(&mut self, a: &NumView<'_>) {
         self.data.clear();
         self.data.extend(a.data);
-        self.aliases = aliases_from_view(AtomView::Num(*a));
-        self.data.sync_aliases_from(&self.aliases);
     }
 
     pub fn add(&mut self, other: &NumView<'_>) {
@@ -1141,10 +1135,7 @@ impl Num {
 
     #[inline]
     pub fn to_num_view(&self) -> NumView<'_> {
-        NumView {
-            data: &self.data,
-            aliases: &self.aliases,
-        }
+        NumView { data: &self.data }
     }
 
     #[inline(always)]
@@ -1153,17 +1144,13 @@ impl Num {
     }
 
     #[inline(always)]
-    pub fn into_raw(mut self) -> RawAtom {
-        self.data.sync_aliases_from(&self.aliases);
+    pub fn into_raw(self) -> RawAtom {
         self.data
     }
 
     #[inline(always)]
     pub(crate) unsafe fn from_raw(raw: RawAtom) -> Num {
-        Num {
-            data: raw,
-            aliases: Vec::new(),
-        }
+        Num { data: raw }
     }
 }
 
@@ -1171,7 +1158,6 @@ impl Num {
 #[derive(Debug, Clone)]
 pub struct Var {
     data: RawAtom,
-    aliases: Vec<Arc<AliasHandle>>,
 }
 
 impl PartialEq for Var {
@@ -1196,10 +1182,7 @@ impl Var {
 
     #[inline]
     pub fn new_into(symbol: Symbol, buffer: RawAtom) -> Var {
-        let mut f = Var {
-            data: buffer,
-            aliases: Vec::new(),
-        };
+        let mut f = Var { data: buffer };
         f.set_from_symbol(symbol);
         f
     }
@@ -1208,16 +1191,12 @@ impl Var {
     pub fn from_view_into(a: &VarView<'_>, mut buffer: RawAtom) -> Var {
         buffer.clear();
         buffer.extend(a.data);
-        Var {
-            data: buffer,
-            aliases: aliases_from_view(AtomView::Var(*a)),
-        }
+        Var { data: buffer }
     }
 
     #[inline]
     pub fn set_from_symbol(&mut self, symbol: Symbol) {
         self.data.clear();
-        self.aliases.clear();
 
         let (flags, extra) = symbol.encode_flags();
         self.data.put_u8(flags | VAR_ID);
@@ -1228,18 +1207,13 @@ impl Var {
 
     #[inline]
     pub fn to_var_view(&self) -> VarView<'_> {
-        VarView {
-            data: &self.data,
-            aliases: &self.aliases,
-        }
+        VarView { data: &self.data }
     }
 
     #[inline]
     pub fn set_from_view(&mut self, view: &VarView) {
         self.data.clear();
         self.data.extend(view.data);
-        self.aliases = aliases_from_view(AtomView::Var(*view));
-        self.data.sync_aliases_from(&self.aliases);
     }
 
     #[inline(always)]
@@ -1253,17 +1227,13 @@ impl Var {
     }
 
     #[inline(always)]
-    pub fn into_raw(mut self) -> RawAtom {
-        self.data.sync_aliases_from(&self.aliases);
+    pub fn into_raw(self) -> RawAtom {
         self.data
     }
 
     #[inline(always)]
     pub(crate) unsafe fn from_raw(raw: RawAtom) -> Var {
-        Var {
-            data: raw,
-            aliases: Vec::new(),
-        }
+        Var { data: raw }
     }
 }
 
@@ -1271,7 +1241,6 @@ impl Var {
 #[derive(Debug, Clone)]
 pub struct Alias {
     data: RawAtom,
-    aliases: Vec<Arc<AliasHandle>>,
 }
 
 impl PartialEq for Alias {
@@ -1310,29 +1279,22 @@ impl Alias {
         buffer.put_u8(ALIAS_ID | if opaque { ALIAS_OPAQUE_FLAG } else { 0 });
         (handle.token() as u64, 1).write_packed(&mut buffer);
         buffer.sync_aliases_from(std::slice::from_ref(&handle));
-        Alias {
-            data: buffer,
-            aliases: vec![handle],
-        }
+        Alias { data: buffer }
     }
 
     #[inline]
     pub fn from_view_into(a: &AliasView<'_>, mut buffer: RawAtom) -> Alias {
         buffer.clear();
         buffer.extend(a.data);
-        let aliases = aliases_from_view(AtomView::Alias(*a));
-        buffer.sync_aliases_from(&aliases);
-        Alias {
-            data: buffer,
-            aliases,
-        }
+        buffer.sync_aliases_from_view_data(a.data, a.aliases);
+        Alias { data: buffer }
     }
 
     #[inline]
     pub fn to_alias_view(&self) -> AliasView<'_> {
         AliasView {
             data: &self.data,
-            aliases: &self.aliases,
+            aliases: &self.data.aliases,
         }
     }
 
@@ -1340,8 +1302,8 @@ impl Alias {
     pub fn set_from_view(&mut self, view: &AliasView) {
         self.data.clear();
         self.data.extend(view.data);
-        self.aliases = aliases_from_view(AtomView::Alias(*view));
-        self.data.sync_aliases_from(&self.aliases);
+        self.data
+            .sync_aliases_from_view_data(view.data, view.aliases);
     }
 
     #[inline(always)]
@@ -1350,15 +1312,14 @@ impl Alias {
     }
 
     #[inline(always)]
-    pub fn into_raw(mut self) -> RawAtom {
-        self.data.sync_aliases_from(&self.aliases);
+    pub fn into_raw(self) -> RawAtom {
         self.data
     }
 
     #[inline(always)]
-    pub(crate) unsafe fn from_raw(raw: RawAtom) -> Alias {
-        let aliases = raw.take_aliases_or_collect();
-        Alias { data: raw, aliases }
+    pub(crate) unsafe fn from_raw(mut raw: RawAtom) -> Alias {
+        raw.ensure_aliases_from_data();
+        Alias { data: raw }
     }
 }
 
@@ -1366,7 +1327,6 @@ impl Alias {
 #[derive(Debug, Clone)]
 pub struct Fun {
     data: RawAtom,
-    aliases: Vec<Arc<AliasHandle>>,
 }
 
 impl PartialEq for Fun {
@@ -1386,10 +1346,7 @@ impl Hash for Fun {
 impl Fun {
     #[inline]
     pub(crate) fn new_into(id: Symbol, buffer: RawAtom) -> Fun {
-        let mut f = Fun {
-            data: buffer,
-            aliases: Vec::new(),
-        };
+        let mut f = Fun { data: buffer };
         f.set_from_symbol(id);
         f
     }
@@ -1398,18 +1355,13 @@ impl Fun {
     pub fn from_view_into(a: &FunView<'_>, mut buffer: RawAtom) -> Fun {
         buffer.clear();
         buffer.extend(a.data);
-        let aliases = aliases_from_view(AtomView::Fun(*a));
-        buffer.sync_aliases_from(&aliases);
-        Fun {
-            data: buffer,
-            aliases,
-        }
+        buffer.sync_aliases_from_view_data(a.data, a.aliases);
+        Fun { data: buffer }
     }
 
     #[inline]
     pub(crate) fn set_from_symbol(&mut self, symbol: Symbol) {
         self.data.clear();
-        self.aliases.clear();
 
         let (flags, extra) = symbol.encode_flags();
         self.data.put_u8(flags | FUN_ID | NOT_NORMALIZED);
@@ -1437,8 +1389,7 @@ impl Fun {
     pub(crate) fn add_arg(&mut self, other: AtomView) {
         self.data[0] |= NOT_NORMALIZED;
         self.data[0] |= alias_flag_for(other);
-        merge_aliases(&mut self.aliases, &aliases_from_view(other));
-        self.data.sync_aliases_from(&self.aliases);
+        merge_aliases_from_view(&mut self.data.aliases, other);
 
         // may increase size of the num of args
         let mut c = &self.data[1 + 4..];
@@ -1521,10 +1472,9 @@ impl Fun {
         (name, n_args).write_packed_fixed(&mut self.data[1 + 4..1 + 4 + new_size]);
 
         for item in other {
-            merge_aliases(&mut self.aliases, &aliases_from_view(*item));
+            merge_aliases_from_view(&mut self.data.aliases, *item);
             self.data.extend(item.get_data());
         }
-        self.data.sync_aliases_from(&self.aliases);
 
         let new_buf_pos = self.data.len();
 
@@ -1536,15 +1486,15 @@ impl Fun {
     pub fn to_fun_view(&self) -> FunView<'_> {
         FunView {
             data: &self.data,
-            aliases: &self.aliases,
+            aliases: &self.data.aliases,
         }
     }
 
     pub fn set_from_view(&mut self, view: &FunView) {
         self.data.clear();
         self.data.extend(view.data);
-        self.aliases = aliases_from_view(AtomView::Fun(*view));
-        self.data.sync_aliases_from(&self.aliases);
+        self.data
+            .sync_aliases_from_view_data(view.data, view.aliases);
     }
 
     #[inline(always)]
@@ -1563,15 +1513,14 @@ impl Fun {
     }
 
     #[inline(always)]
-    pub fn into_raw(mut self) -> RawAtom {
-        self.data.sync_aliases_from(&self.aliases);
+    pub fn into_raw(self) -> RawAtom {
         self.data
     }
 
     #[inline(always)]
-    pub(crate) unsafe fn from_raw(raw: RawAtom) -> Fun {
-        let aliases = raw.take_aliases_or_collect();
-        Fun { data: raw, aliases }
+    pub(crate) unsafe fn from_raw(mut raw: RawAtom) -> Fun {
+        raw.ensure_aliases_from_data();
+        Fun { data: raw }
     }
 
     #[inline(always)]
@@ -1589,7 +1538,6 @@ impl Fun {
 #[derive(Debug, Clone)]
 pub struct Pow {
     data: RawAtom,
-    aliases: Vec<Arc<AliasHandle>>,
 }
 
 impl PartialEq for Pow {
@@ -1609,10 +1557,7 @@ impl Hash for Pow {
 impl Pow {
     #[inline]
     pub(crate) fn new_into(base: AtomView, exp: AtomView, buffer: RawAtom) -> Pow {
-        let mut f = Pow {
-            data: buffer,
-            aliases: Vec::new(),
-        };
+        let mut f = Pow { data: buffer };
         f.set_from_base_and_exp(base, exp);
         f
     }
@@ -1621,21 +1566,15 @@ impl Pow {
     pub fn from_view_into(a: &PowView<'_>, mut buffer: RawAtom) -> Pow {
         buffer.clear();
         buffer.extend(a.data);
-        let aliases = aliases_from_view(AtomView::Pow(*a));
-        buffer.sync_aliases_from(&aliases);
-        Pow {
-            data: buffer,
-            aliases,
-        }
+        buffer.sync_aliases_from_view_data(a.data, a.aliases);
+        Pow { data: buffer }
     }
 
     #[inline]
     pub(crate) fn set_from_base_and_exp(&mut self, base: AtomView, exp: AtomView) {
         self.data.clear();
-        self.aliases.clear();
-        merge_aliases(&mut self.aliases, &aliases_from_view(base));
-        merge_aliases(&mut self.aliases, &aliases_from_view(exp));
-        self.data.sync_aliases_from(&self.aliases);
+        merge_aliases_from_view(&mut self.data.aliases, base);
+        merge_aliases_from_view(&mut self.data.aliases, exp);
         self.data.put_u8(POW_ID | NOT_NORMALIZED);
         self.data.extend(base.get_data());
         self.data.extend(exp.get_data());
@@ -1654,7 +1593,7 @@ impl Pow {
     pub fn to_pow_view(&self) -> PowView<'_> {
         PowView {
             data: &self.data,
-            aliases: &self.aliases,
+            aliases: &self.data.aliases,
         }
     }
 
@@ -1662,8 +1601,8 @@ impl Pow {
     pub fn set_from_view(&mut self, view: &PowView) {
         self.data.clear();
         self.data.extend(view.data);
-        self.aliases = aliases_from_view(AtomView::Pow(*view));
-        self.data.sync_aliases_from(&self.aliases);
+        self.data
+            .sync_aliases_from_view_data(view.data, view.aliases);
     }
 
     #[inline(always)]
@@ -1672,15 +1611,14 @@ impl Pow {
     }
 
     #[inline(always)]
-    pub fn into_raw(mut self) -> RawAtom {
-        self.data.sync_aliases_from(&self.aliases);
+    pub fn into_raw(self) -> RawAtom {
         self.data
     }
 
     #[inline(always)]
-    pub(crate) unsafe fn from_raw(raw: RawAtom) -> Pow {
-        let aliases = raw.take_aliases_or_collect();
-        Pow { data: raw, aliases }
+    pub(crate) unsafe fn from_raw(mut raw: RawAtom) -> Pow {
+        raw.ensure_aliases_from_data();
+        Pow { data: raw }
     }
 }
 
@@ -1688,7 +1626,6 @@ impl Pow {
 #[derive(Clone)]
 pub struct Mul {
     data: RawAtom,
-    aliases: Vec<Arc<AliasHandle>>,
 }
 
 impl PartialEq for Mul {
@@ -1726,22 +1663,15 @@ impl Mul {
         let len = buffer.len() as u32 - 1 - 4;
         (&mut buffer[1..]).put_u32_le(len);
 
-        Mul {
-            data: buffer,
-            aliases: Vec::new(),
-        }
+        Mul { data: buffer }
     }
 
     #[inline]
     pub fn from_view_into(a: &MulView<'_>, mut buffer: RawAtom) -> Mul {
         buffer.clear();
         buffer.extend(a.data);
-        let aliases = aliases_from_view(AtomView::Mul(*a));
-        buffer.sync_aliases_from(&aliases);
-        Mul {
-            data: buffer,
-            aliases,
-        }
+        buffer.sync_aliases_from_view_data(a.data, a.aliases);
+        Mul { data: buffer }
     }
 
     #[inline]
@@ -1757,16 +1687,16 @@ impl Mul {
     pub fn set_from_view(&mut self, view: &MulView) {
         self.data.clear();
         self.data.extend(view.data);
-        self.aliases = aliases_from_view(AtomView::Mul(*view));
-        self.data.sync_aliases_from(&self.aliases);
+        self.data
+            .sync_aliases_from_view_data(view.data, view.aliases);
     }
 
     #[inline]
     pub(crate) fn extend(&mut self, other: AtomView<'_>) {
         self.data[0] |= NOT_NORMALIZED;
         self.data[0] |= mul_alias_flag_for(other);
-        merge_aliases(&mut self.aliases, &aliases_from_view(other));
-        self.data.sync_aliases_from(&self.aliases);
+
+        merge_aliases_from_view(&mut self.data.aliases, other);
 
         // may increase size of the num of args
         let mut c = &self.data[1 + 4..];
@@ -1855,8 +1785,8 @@ impl Mul {
 
         self.data[first_arg_start..first_arg_start + new_first_len]
             .copy_from_slice(other.get_data());
-        self.aliases = aliases_from_view(self.to_mul_view().as_view());
-        self.data.sync_aliases_from(&self.aliases);
+        let aliases = aliases_from_view(self.to_mul_view().as_view());
+        self.data.sync_aliases_from(&aliases);
         let has_alias = self.to_mul_view().iter().any(|x| x.has_alias());
         if has_alias {
             self.data[0] |= MUL_HAS_ALIAS_FLAG;
@@ -1869,7 +1799,7 @@ impl Mul {
     pub fn to_mul_view(&self) -> MulView<'_> {
         MulView {
             data: &self.data,
-            aliases: &self.aliases,
+            aliases: &self.data.aliases,
         }
     }
 
@@ -1892,15 +1822,14 @@ impl Mul {
     }
 
     #[inline(always)]
-    pub fn into_raw(mut self) -> RawAtom {
-        self.data.sync_aliases_from(&self.aliases);
+    pub fn into_raw(self) -> RawAtom {
         self.data
     }
 
     #[inline(always)]
-    pub(crate) unsafe fn from_raw(raw: RawAtom) -> Mul {
-        let aliases = raw.take_aliases_or_collect();
-        Mul { data: raw, aliases }
+    pub(crate) unsafe fn from_raw(mut raw: RawAtom) -> Mul {
+        raw.ensure_aliases_from_data();
+        Mul { data: raw }
     }
 
     #[inline(always)]
@@ -1918,7 +1847,6 @@ impl Mul {
 #[derive(Clone)]
 pub struct Add {
     data: RawAtom,
-    aliases: Vec<Arc<AliasHandle>>,
 }
 
 impl PartialEq for Add {
@@ -1952,22 +1880,15 @@ impl Add {
         buffer.clear();
         buffer.put_u8(ADD_ID | NOT_NORMALIZED);
         (0u64, 0).write_packed(&mut buffer);
-        Add {
-            data: buffer,
-            aliases: Vec::new(),
-        }
+        Add { data: buffer }
     }
 
     #[inline]
     pub fn from_view_into(a: &AddView<'_>, mut buffer: RawAtom) -> Add {
         buffer.clear();
         buffer.extend(a.data);
-        let aliases = aliases_from_view(AtomView::Add(*a));
-        buffer.sync_aliases_from(&aliases);
-        Add {
-            data: buffer,
-            aliases,
-        }
+        buffer.sync_aliases_from_view_data(a.data, a.aliases);
+        Add { data: buffer }
     }
 
     #[inline]
@@ -1983,8 +1904,8 @@ impl Add {
     pub(crate) fn extend(&mut self, other: AtomView<'_>) {
         self.data[0] |= NOT_NORMALIZED;
         self.data[0] |= alias_flag_for(other);
-        merge_aliases(&mut self.aliases, &aliases_from_view(other));
-        self.data.sync_aliases_from(&self.aliases);
+
+        merge_aliases_from_view(&mut self.data.aliases, other);
 
         let mut c = &self.data[1..];
 
@@ -2034,7 +1955,7 @@ impl Add {
     pub fn to_add_view(&self) -> AddView<'_> {
         AddView {
             data: &self.data,
-            aliases: &self.aliases,
+            aliases: &self.data.aliases,
         }
     }
 
@@ -2042,8 +1963,8 @@ impl Add {
     pub fn set_from_view(&mut self, view: AddView) {
         self.data.clear();
         self.data.extend(view.data);
-        self.aliases = aliases_from_view(AtomView::Add(view));
-        self.data.sync_aliases_from(&self.aliases);
+        self.data
+            .sync_aliases_from_view_data(view.data, view.aliases);
     }
 
     #[inline(always)]
@@ -2057,15 +1978,14 @@ impl Add {
     }
 
     #[inline(always)]
-    pub fn into_raw(mut self) -> RawAtom {
-        self.data.sync_aliases_from(&self.aliases);
+    pub fn into_raw(self) -> RawAtom {
         self.data
     }
 
     #[inline(always)]
-    pub(crate) unsafe fn from_raw(raw: RawAtom) -> Add {
-        let aliases = raw.take_aliases_or_collect();
-        Add { data: raw, aliases }
+    pub(crate) unsafe fn from_raw(mut raw: RawAtom) -> Add {
+        raw.ensure_aliases_from_data();
+        Add { data: raw }
     }
 
     #[inline(always)]
@@ -2101,12 +2021,7 @@ impl<'a> VarView<'a> {
     pub fn clone_into_raw(&self, mut buffer: RawAtom) -> Var {
         buffer.clear();
         buffer.extend(self.data);
-        let aliases = aliases_from_view(AtomView::Var(*self));
-        buffer.sync_aliases_from(&aliases);
-        Var {
-            data: buffer,
-            aliases,
-        }
+        Var { data: buffer }
     }
 
     #[inline(always)]
@@ -2142,7 +2057,6 @@ impl<'a> VarView<'a> {
 #[derive(Copy, Clone, Eq)]
 pub struct VarView<'a> {
     data: &'a [u8],
-    aliases: &'a Vec<Arc<AliasHandle>>,
 }
 
 impl<'b> PartialEq<VarView<'b>> for VarView<'_> {
@@ -2161,7 +2075,7 @@ impl Hash for VarView<'_> {
 #[derive(Copy, Clone, Eq)]
 pub struct AliasView<'a> {
     data: &'a [u8],
-    aliases: &'a Vec<Arc<AliasHandle>>,
+    aliases: &'a [Arc<AliasHandle>],
 }
 
 impl<'b> PartialEq<AliasView<'b>> for AliasView<'_> {
@@ -2191,12 +2105,8 @@ impl<'a> AliasView<'a> {
     pub fn clone_into_raw(&self, mut buffer: RawAtom) -> Alias {
         buffer.clear();
         buffer.extend(self.data);
-        let aliases = aliases_from_view(AtomView::Alias(*self));
-        buffer.sync_aliases_from(&aliases);
-        Alias {
-            data: buffer,
-            aliases,
-        }
+        buffer.sync_aliases_from_view_data(self.data, self.aliases);
+        Alias { data: buffer }
     }
 
     #[inline(always)]
@@ -2243,7 +2153,7 @@ impl<'a> AliasView<'a> {
 #[derive(Copy, Clone, Eq)]
 pub struct FunView<'a> {
     data: &'a [u8],
-    aliases: &'a Vec<Arc<AliasHandle>>,
+    aliases: &'a [Arc<AliasHandle>],
 }
 
 impl<'b> PartialEq<FunView<'b>> for FunView<'_> {
@@ -2290,12 +2200,8 @@ impl<'a> FunView<'a> {
     pub fn clone_into_raw(&self, mut buffer: RawAtom) -> Fun {
         buffer.clear();
         buffer.extend(self.data);
-        let aliases = aliases_from_view(AtomView::Fun(*self));
-        buffer.sync_aliases_from(&aliases);
-        Fun {
-            data: buffer,
-            aliases,
-        }
+        buffer.sync_aliases_from_view_data(self.data, self.aliases);
+        Fun { data: buffer }
     }
 
     #[inline(always)]
@@ -2418,7 +2324,6 @@ impl<'a> FunView<'a> {
 #[derive(Copy, Clone, Eq)]
 pub struct NumView<'a> {
     data: &'a [u8],
-    aliases: &'a Vec<Arc<AliasHandle>>,
 }
 
 impl<'b> PartialEq<NumView<'b>> for NumView<'_> {
@@ -2449,12 +2354,7 @@ impl<'a> NumView<'a> {
     pub fn clone_into_raw(&self, mut buffer: RawAtom) -> Num {
         buffer.clear();
         buffer.extend(self.data);
-        let aliases = aliases_from_view(AtomView::Num(*self));
-        buffer.sync_aliases_from(&aliases);
-        Num {
-            data: buffer,
-            aliases,
-        }
+        Num { data: buffer }
     }
 
     #[inline]
@@ -2493,7 +2393,7 @@ impl<'a> NumView<'a> {
 #[derive(Copy, Clone, Eq)]
 pub struct PowView<'a> {
     data: &'a [u8],
-    aliases: &'a Vec<Arc<AliasHandle>>,
+    aliases: &'a [Arc<AliasHandle>],
 }
 
 impl<'a> IntoIterator for PowView<'a> {
@@ -2544,12 +2444,8 @@ impl<'a> PowView<'a> {
     pub fn clone_into_raw(&self, mut buffer: RawAtom) -> Pow {
         buffer.clear();
         buffer.extend(self.data);
-        let aliases = aliases_from_view(AtomView::Pow(*self));
-        buffer.sync_aliases_from(&aliases);
-        Pow {
-            data: buffer,
-            aliases,
-        }
+        buffer.sync_aliases_from_view_data(self.data, self.aliases);
+        Pow { data: buffer }
     }
 
     #[inline]
@@ -2615,7 +2511,7 @@ impl<'a> PowView<'a> {
 #[derive(Copy, Clone, Eq)]
 pub struct MulView<'a> {
     data: &'a [u8],
-    aliases: &'a Vec<Arc<AliasHandle>>,
+    aliases: &'a [Arc<AliasHandle>],
 }
 
 impl<'b> PartialEq<MulView<'b>> for MulView<'_> {
@@ -2666,12 +2562,8 @@ impl<'a> MulView<'a> {
     pub fn clone_into_raw(&self, mut buffer: RawAtom) -> Mul {
         buffer.clear();
         buffer.extend(self.data);
-        let aliases = aliases_from_view(AtomView::Mul(*self));
-        buffer.sync_aliases_from(&aliases);
-        Mul {
-            data: buffer,
-            aliases,
-        }
+        buffer.sync_aliases_from_view_data(self.data, self.aliases);
+        Mul { data: buffer }
     }
 
     #[inline]
@@ -2739,7 +2631,7 @@ impl<'a> MulView<'a> {
 #[derive(Copy, Clone, Eq)]
 pub struct AddView<'a> {
     data: &'a [u8],
-    aliases: &'a Vec<Arc<AliasHandle>>,
+    aliases: &'a [Arc<AliasHandle>],
 }
 
 impl<'b> PartialEq<AddView<'b>> for AddView<'_> {
@@ -2807,12 +2699,8 @@ impl<'a> AddView<'a> {
     pub fn clone_into_raw(&self, mut buffer: RawAtom) -> Add {
         buffer.clear();
         buffer.extend(self.data);
-        let aliases = aliases_from_view(AtomView::Add(*self));
-        buffer.sync_aliases_from(&aliases);
-        Add {
-            data: buffer,
-            aliases,
-        }
+        buffer.sync_aliases_from_view_data(self.data, self.aliases);
+        Add { data: buffer }
     }
 
     #[inline(always)]
@@ -2871,25 +2759,16 @@ impl<'a> AddView<'a> {
 }
 
 impl<'a> AtomView<'a> {
-    pub const ZERO: Self = Self::Num(NumView {
-        data: &ZERO_DATA,
-        aliases: &NO_ALIASES,
-    });
+    pub const ZERO: Self = Self::Num(NumView { data: &ZERO_DATA });
 
     pub fn from(source: &'a [u8]) -> AtomView<'a> {
         match source[0] & TYPE_MASK {
-            VAR_ID => AtomView::Var(VarView {
-                data: source,
-                aliases: &NO_ALIASES,
-            }),
+            VAR_ID => AtomView::Var(VarView { data: source }),
             FUN_ID => AtomView::Fun(FunView {
                 data: source,
                 aliases: &NO_ALIASES,
             }),
-            NUM_ID => AtomView::Num(NumView {
-                data: source,
-                aliases: &NO_ALIASES,
-            }),
+            NUM_ID => AtomView::Num(NumView { data: source }),
             POW_ID => AtomView::Pow(PowView {
                 data: source,
                 aliases: &NO_ALIASES,
@@ -2924,10 +2803,10 @@ impl<'a> AtomView<'a> {
     }
 
     #[inline(always)]
-    pub(crate) fn aliases_vec(&self) -> &'a Vec<Arc<AliasHandle>> {
+    pub(crate) fn aliases_ref(&self) -> &'a [Arc<AliasHandle>] {
         match self {
-            AtomView::Num(n) => n.aliases,
-            AtomView::Var(v) => v.aliases,
+            AtomView::Num(_) => &[],
+            AtomView::Var(_) => &[],
             AtomView::Fun(f) => f.aliases,
             AtomView::Alias(a) => a.aliases,
             AtomView::Pow(p) => p.aliases,
@@ -3077,7 +2956,7 @@ impl<'a> AtomView<'a> {
 pub struct ListIterator<'a> {
     data: &'a [u8],
     length: u32,
-    aliases: &'a Vec<Arc<AliasHandle>>,
+    aliases: &'a [Arc<AliasHandle>],
 }
 
 impl<'a> Iterator for ListIterator<'a> {
@@ -3132,14 +3011,8 @@ impl<'a> Iterator for ListIterator<'a> {
 
         let data = unsafe { start.get_unchecked(..len) };
         match start_id {
-            NUM_ID => Some(AtomView::Num(NumView {
-                data,
-                aliases: self.aliases,
-            })),
-            VAR_ID => Some(AtomView::Var(VarView {
-                data,
-                aliases: self.aliases,
-            })),
+            NUM_ID => Some(AtomView::Num(NumView { data })),
+            VAR_ID => Some(AtomView::Var(VarView { data })),
             FUN_ID => Some(AtomView::Fun(FunView {
                 data,
                 aliases: self.aliases,
@@ -3199,7 +3072,7 @@ impl<'a> ListIterator<'a> {
         ListIterator {
             data: atom.get_data(),
             length: 1,
-            aliases: atom.aliases_vec(),
+            aliases: atom.aliases_ref(),
         }
     }
 }
@@ -3210,7 +3083,7 @@ pub struct ListSlice<'a> {
     data: &'a [u8],
     length: usize,
     slice_type: SliceType,
-    aliases: &'a Vec<Arc<AliasHandle>>,
+    aliases: &'a [Arc<AliasHandle>],
 }
 
 impl<'a> ListSlice<'a> {
@@ -3273,10 +3146,7 @@ impl<'a> ListSlice<'a> {
         }
     }
 
-    fn get_entry<'b>(
-        start: &'b [u8],
-        aliases: &'b Vec<Arc<AliasHandle>>,
-    ) -> (AtomView<'b>, &'b [u8]) {
+    fn get_entry<'b>(start: &'b [u8], aliases: &'b [Arc<AliasHandle>]) -> (AtomView<'b>, &'b [u8]) {
         let start_id = start[0] & TYPE_MASK;
         let end = Self::skip(start, 1);
         let len = unsafe { end.as_ptr().offset_from(start.as_ptr()) } as usize;
@@ -3284,8 +3154,8 @@ impl<'a> ListSlice<'a> {
         let data = unsafe { start.get_unchecked(..len) };
         (
             match start_id {
-                NUM_ID => AtomView::Num(NumView { data, aliases }),
-                VAR_ID => AtomView::Var(VarView { data, aliases }),
+                NUM_ID => AtomView::Num(NumView { data }),
+                VAR_ID => AtomView::Var(VarView { data }),
                 FUN_ID => AtomView::Fun(FunView { data, aliases }),
                 MUL_ID => AtomView::Mul(MulView { data, aliases }),
                 ADD_ID => AtomView::Add(AddView { data, aliases }),
@@ -3348,7 +3218,7 @@ impl<'a> ListSlice<'a> {
             data: view.get_data(),
             length: 1,
             slice_type: SliceType::One,
-            aliases: view.aliases_vec(),
+            aliases: view.aliases_ref(),
         }
     }
 
