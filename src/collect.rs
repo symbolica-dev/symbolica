@@ -1351,11 +1351,17 @@ impl<'a> AtomView<'a> {
 
         match self {
             AtomView::Alias(a) if !a.is_opaque() => {
-                let body = a.get_body().horner_scheme_impl_no_norm(ws, xs);
-                let mut normalized_body = Atom::new();
-                body.as_view().normalize(ws, &mut normalized_body);
-                let handle = register_alias_atom(normalized_body);
-                Atom::alias(handle).into()
+                let b = a.get_body();
+                let body = b.horner_scheme_impl_no_norm(ws, xs);
+
+                if body.as_view() != b {
+                    let mut normalized_body = Atom::new();
+                    body.as_view().normalize(ws, &mut normalized_body);
+                    let handle = register_alias_atom(normalized_body);
+                    Atom::alias(handle).into()
+                } else {
+                    self.into()
+                }
             }
             AtomView::Num(_) | AtomView::Var(_) | AtomView::Alias(_) | AtomView::Fun(_) => {
                 self.into()
