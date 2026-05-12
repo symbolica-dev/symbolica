@@ -432,8 +432,9 @@ impl<W: WriteableNamedStream> TermStreamer<W> {
 
     /// Sort all the terms in the memory buffer.
     fn sort(&mut self) {
+        // TODO: use faster comparison when there are no aliases
         self.mem_buf
-            .par_sort_by(|a, b| a.as_view().cmp_terms(&b.as_view()));
+            .par_sort_by(|a, b| a.as_view().cmp_terms(&b.as_view(), false));
 
         let mut out = Vec::with_capacity(self.mem_buf.len());
         let old_size = self.mem_buf.len();
@@ -524,7 +525,7 @@ impl<W: WriteableNamedStream> TermStreamer<W> {
             smallest.sort_unstable_by(|a, b| {
                 if let Some(aa) = &head[*a] {
                     if let Some(bb) = &head[*b] {
-                        aa.as_view().cmp_terms(&bb.as_view())
+                        aa.as_view().cmp_terms(&bb.as_view(), false)
                     } else {
                         std::cmp::Ordering::Less
                     }
@@ -595,8 +596,17 @@ impl<W: WriteableNamedStream> TermStreamer<W> {
             return b;
         }
 
-        add.set_normalized(true);
-        a
+        if !add.to_add_view().has_alias() {
+            // sort order is wrong
+            let mut b = Atom::new();
+            Workspace::get_local().with(|ws| {
+                a.as_view().normalize(ws, &mut b);
+            });
+            b
+        } else {
+            add.set_normalized(true);
+            a
+        }
     }
 
     fn reader(&mut self) -> TermInputStream<'_, W::Reader> {

@@ -2408,6 +2408,7 @@ impl<'a> FunView<'a> {
         self.data.len()
     }
 
+    #[allow(dead_code)]
     pub(crate) fn fast_cmp(&self, other: FunView) -> Ordering {
         self.data.cmp(other.data)
     }
