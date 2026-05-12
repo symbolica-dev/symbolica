@@ -2075,7 +2075,7 @@ impl Hash for VarView<'_> {
 #[derive(Copy, Clone, Eq)]
 pub struct AliasView<'a> {
     data: &'a [u8],
-    aliases: &'a [Arc<AliasHandle>],
+    aliases: &'a Vec<Arc<AliasHandle>>,
 }
 
 impl<'b> PartialEq<AliasView<'b>> for AliasView<'_> {
@@ -2153,7 +2153,7 @@ impl<'a> AliasView<'a> {
 #[derive(Copy, Clone, Eq)]
 pub struct FunView<'a> {
     data: &'a [u8],
-    aliases: &'a [Arc<AliasHandle>],
+    aliases: &'a Vec<Arc<AliasHandle>>,
 }
 
 impl<'b> PartialEq<FunView<'b>> for FunView<'_> {
@@ -2393,7 +2393,7 @@ impl<'a> NumView<'a> {
 #[derive(Copy, Clone, Eq)]
 pub struct PowView<'a> {
     data: &'a [u8],
-    aliases: &'a [Arc<AliasHandle>],
+    aliases: &'a Vec<Arc<AliasHandle>>,
 }
 
 impl<'a> IntoIterator for PowView<'a> {
@@ -2511,7 +2511,7 @@ impl<'a> PowView<'a> {
 #[derive(Copy, Clone, Eq)]
 pub struct MulView<'a> {
     data: &'a [u8],
-    aliases: &'a [Arc<AliasHandle>],
+    aliases: &'a Vec<Arc<AliasHandle>>,
 }
 
 impl<'b> PartialEq<MulView<'b>> for MulView<'_> {
@@ -2631,7 +2631,7 @@ impl<'a> MulView<'a> {
 #[derive(Copy, Clone, Eq)]
 pub struct AddView<'a> {
     data: &'a [u8],
-    aliases: &'a [Arc<AliasHandle>],
+    aliases: &'a Vec<Arc<AliasHandle>>,
 }
 
 impl<'b> PartialEq<AddView<'b>> for AddView<'_> {
@@ -2803,16 +2803,21 @@ impl<'a> AtomView<'a> {
     }
 
     #[inline(always)]
-    pub(crate) fn aliases_ref(&self) -> &'a [Arc<AliasHandle>] {
+    pub(crate) fn aliases_vec(&self) -> &'a Vec<Arc<AliasHandle>> {
         match self {
-            AtomView::Num(_) => &[],
-            AtomView::Var(_) => &[],
+            AtomView::Num(_) => &NO_ALIASES,
+            AtomView::Var(_) => &NO_ALIASES,
             AtomView::Fun(f) => f.aliases,
             AtomView::Alias(a) => a.aliases,
             AtomView::Pow(p) => p.aliases,
             AtomView::Mul(t) => t.aliases,
             AtomView::Add(e) => e.aliases,
         }
+    }
+
+    #[inline(always)]
+    pub(crate) fn aliases_ref(&self) -> &'a [Arc<AliasHandle>] {
+        self.aliases_vec()
     }
 
     #[inline(always)]
@@ -2956,7 +2961,7 @@ impl<'a> AtomView<'a> {
 pub struct ListIterator<'a> {
     data: &'a [u8],
     length: u32,
-    aliases: &'a [Arc<AliasHandle>],
+    aliases: &'a Vec<Arc<AliasHandle>>,
 }
 
 impl<'a> Iterator for ListIterator<'a> {
@@ -3072,7 +3077,7 @@ impl<'a> ListIterator<'a> {
         ListIterator {
             data: atom.get_data(),
             length: 1,
-            aliases: atom.aliases_ref(),
+            aliases: atom.aliases_vec(),
         }
     }
 }
@@ -3083,7 +3088,7 @@ pub struct ListSlice<'a> {
     data: &'a [u8],
     length: usize,
     slice_type: SliceType,
-    aliases: &'a [Arc<AliasHandle>],
+    aliases: &'a Vec<Arc<AliasHandle>>,
 }
 
 impl<'a> ListSlice<'a> {
@@ -3146,7 +3151,10 @@ impl<'a> ListSlice<'a> {
         }
     }
 
-    fn get_entry<'b>(start: &'b [u8], aliases: &'b [Arc<AliasHandle>]) -> (AtomView<'b>, &'b [u8]) {
+    fn get_entry<'b>(
+        start: &'b [u8],
+        aliases: &'b Vec<Arc<AliasHandle>>,
+    ) -> (AtomView<'b>, &'b [u8]) {
         let start_id = start[0] & TYPE_MASK;
         let end = Self::skip(start, 1);
         let len = unsafe { end.as_ptr().offset_from(start.as_ptr()) } as usize;
@@ -3218,7 +3226,7 @@ impl<'a> ListSlice<'a> {
             data: view.get_data(),
             length: 1,
             slice_type: SliceType::One,
-            aliases: view.aliases_ref(),
+            aliases: view.aliases_vec(),
         }
     }
 
