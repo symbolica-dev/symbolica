@@ -49,6 +49,7 @@ use numerica::domains::float::Float;
 use smartstring::{LazyCompact, SmartString};
 
 use crate::{
+    alias::AliasStore,
     coefficient::Coefficient,
     domains::{atom::AtomField, float::Complex, rational::Rational},
     evaluate::ExternalFunction,
@@ -2519,14 +2520,32 @@ impl AtomView<'_> {
             .collect()
     }
 
-    /// Return a new expression with all known aliases replaced by their values.
+    /// Return a new expression with where all subexpressions that are registered in the alias store
+    /// are replaced by their alias.
     pub fn alias_known_aliases(&self) -> Atom {
-        self.replace_map(|a, _, out| {
-            if let AtomView::Alias(alias) = a {
-                let inlined = alias.get_body().alias_known_aliases();
-                out.set_from_view(&inlined.as_view());
+        let s = AliasStore::get_global_alias_store().read().unwrap();
+
+        let mut out = self.replace_map(|a, _, out| {
+            if let Some(alias) = s.get_existing(a) {
+                out.set_from_view(&alias.to_atom().as_view());
             }
-        })
+        });
+
+        loop {
+            let out2 = out.replace_map(|a, _, out| {
+                if let Some(alias) = s.get_existing(a) {
+                    out.set_from_view(&alias.to_atom().as_view());
+                }
+            });
+
+            if out2 == out {
+                break;
+            }
+
+            out = out2;
+        }
+
+        out
     }
 
     /// Return the byte size this atom would have if all aliases were substituted.

@@ -427,7 +427,8 @@ pub trait AtomCore: private::Sealed + Sized {
         self.as_atom_view().get_aliases()
     }
 
-    /// Return a new expression with all known aliases replaced by their values.
+    /// Return a new expression with where all subexpressions that are registered in the alias store
+    /// are replaced by their alias.
     fn alias_known_aliases(&self) -> Self::Output {
         self.as_atom_view().alias_known_aliases().wrap(self)
     }

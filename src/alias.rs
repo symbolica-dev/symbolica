@@ -89,8 +89,8 @@ impl Hash for AliasKey {
 }
 
 #[derive(Debug)]
-struct AliasStore {
-    alias_map: HashMap<AliasKey, usize>,
+pub(crate) struct AliasStore {
+    pub(crate) alias_map: HashMap<AliasKey, usize>,
     free: Vec<usize>,
 }
 
@@ -150,6 +150,10 @@ impl AliasStore {
         }
     }
 
+    pub fn get_global_alias_store() -> &'static RwLock<Self> {
+        &ALIAS_STORE
+    }
+
     fn insert(&mut self, atom: Arc<Atom>) -> Arc<AliasHandle> {
         let index = self
             .free
@@ -175,7 +179,7 @@ impl AliasStore {
         handle
     }
 
-    fn get_existing<'a, T: Into<crate::atom::AtomOrView<'a>>>(
+    pub fn get_existing<'a, T: Into<crate::atom::AtomOrView<'a>>>(
         &self,
         a: T,
     ) -> Option<Arc<AliasHandle>> {
