@@ -349,8 +349,17 @@ impl AtomView<'_> {
     }
 }
 
-#[inline]
-fn resolve_alias(mut a: AtomView<'_>) -> AtomView<'_> {
+#[inline(always)]
+fn resolve_alias(a: AtomView<'_>) -> AtomView<'_> {
+    if let AtomView::Alias(_) = a {
+        resolve_alias_loop(a)
+    } else {
+        a
+    }
+}
+
+#[cold]
+fn resolve_alias_loop(mut a: AtomView<'_>) -> AtomView<'_> {
     while let AtomView::Alias(alias) = a
         && !alias.is_opaque()
     {

@@ -36,7 +36,7 @@ use crate::{
 };
 
 pub(crate) const SYMBOLICA_MAGIC: u32 = 0x37871367;
-pub(crate) const EXPORT_FORMAT_VERSION: u16 = 4;
+pub(crate) const EXPORT_FORMAT_VERSION: u16 = 5;
 
 /// An id for a given finite field in a registry.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]

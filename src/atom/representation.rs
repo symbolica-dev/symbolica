@@ -51,8 +51,7 @@ const SYM_EXTRA_WILDCARD_LEVEL_1: u32 = 0b01_000;
 const SYM_EXTRA_WILDCARD_LEVEL_2: u32 = 0b10_000;
 const SYM_EXTRA_WILDCARD_LEVEL_3: u32 = 0b11_000;
 
-const MUL_HAS_COEFF_FLAG: u8 = 0b01000000;
-const MUL_HAS_ALIAS_FLAG: u8 = 0b00100000;
+const MUL_HAS_COEFF_FLAG: u8 = 0b00100000;
 const ALIAS_OPAQUE_FLAG: u8 = 0b00001_000;
 pub(crate) const ALIAS_EXPORT_SECTION_MAGIC: u64 = 0xA11A_5ECA_1100_0001;
 
@@ -114,7 +113,7 @@ fn collect_aliases_from_data(
         }
         POW_ID => collect_aliases_from_data_list(&data[1..], 2, aliases, handles),
         MUL_ID => {
-            if data[0] & MUL_HAS_ALIAS_FLAG == 0 {
+            if data[0] & HAS_ALIAS_FLAG == 0 {
                 return;
             }
             let mut c = &data[1 + 4..];
@@ -168,15 +167,6 @@ fn skip_raw_atom(mut data: &[u8]) -> &[u8] {
 #[inline(always)]
 fn alias_flag_for(view: AtomView<'_>) -> u8 {
     if view.has_alias() { HAS_ALIAS_FLAG } else { 0 }
-}
-
-#[inline(always)]
-fn mul_alias_flag_for(view: AtomView<'_>) -> u8 {
-    if view.has_alias() {
-        MUL_HAS_ALIAS_FLAG
-    } else {
-        0
-    }
 }
 
 pub(crate) fn read_raw_atom<R: Read>(source: &mut R) -> Result<RawAtom, std::io::Error> {
@@ -265,7 +255,7 @@ fn remap_aliases_in_raw_data(
         }
         MUL_ID => {
             let start = out.len();
-            out.put_u8(data[0] & !MUL_HAS_ALIAS_FLAG);
+            out.put_u8(data[0] & !HAS_ALIAS_FLAG);
             out.put_u32_le(0);
 
             let args_start = out.len();
@@ -282,7 +272,7 @@ fn remap_aliases_in_raw_data(
             }
 
             if has_alias {
-                out[start] |= MUL_HAS_ALIAS_FLAG;
+                out[start] |= HAS_ALIAS_FLAG;
             }
             let size = out.len() - args_start;
             (&mut out[start + 1..start + 1 + 4]).put_u32_le(size as u32);
@@ -360,6 +350,7 @@ impl RawAtom {
         aliases: &[Arc<AliasHandle>],
     ) {
         self.aliases.clear();
+
         collect_aliases_from_data(data, aliases, &mut self.aliases);
         self.aliases.sort_by_key(|handle| handle.token());
         self.aliases.dedup_by_key(|handle| handle.token());
@@ -998,7 +989,7 @@ impl Atom {
             }
             Atom::Mul(m) => {
                 m.data.aliases.clear();
-                m.data[0] &= !MUL_HAS_ALIAS_FLAG;
+                m.data[0] &= !HAS_ALIAS_FLAG;
             }
             Atom::Add(a) => {
                 a.data.aliases.clear();
@@ -1666,11 +1657,14 @@ impl Mul {
         Mul { data: buffer }
     }
 
-    #[inline]
+    #[inline(always)]
     pub fn from_view_into(a: &MulView<'_>, mut buffer: RawAtom) -> Mul {
         buffer.clear();
         buffer.extend(a.data);
-        buffer.sync_aliases_from_view_data(a.data, a.aliases);
+        buffer.aliases.clear();
+        if a.has_alias() {
+            buffer.sync_aliases_from_view_data(a.data, a.aliases);
+        }
         Mul { data: buffer }
     }
 
@@ -1694,7 +1688,7 @@ impl Mul {
     #[inline]
     pub(crate) fn extend(&mut self, other: AtomView<'_>) {
         self.data[0] |= NOT_NORMALIZED;
-        self.data[0] |= mul_alias_flag_for(other);
+        self.data[0] |= alias_flag_for(other);
 
         merge_aliases_from_view(&mut self.data.aliases, other);
 
@@ -1789,9 +1783,9 @@ impl Mul {
         self.data.sync_aliases_from(&aliases);
         let has_alias = self.to_mul_view().iter().any(|x| x.has_alias());
         if has_alias {
-            self.data[0] |= MUL_HAS_ALIAS_FLAG;
+            self.data[0] |= HAS_ALIAS_FLAG;
         } else {
-            self.data[0] &= !MUL_HAS_ALIAS_FLAG;
+            self.data[0] &= !HAS_ALIAS_FLAG;
         }
     }
 
@@ -1836,9 +1830,9 @@ impl Mul {
     pub(crate) fn refresh_alias_flag_from_tree(&mut self) {
         let has_alias = self.to_mul_view().iter().any(|arg| arg.has_alias());
         if has_alias {
-            self.data[0] |= MUL_HAS_ALIAS_FLAG;
+            self.data[0] |= HAS_ALIAS_FLAG;
         } else {
-            self.data[0] &= !MUL_HAS_ALIAS_FLAG;
+            self.data[0] &= !HAS_ALIAS_FLAG;
         }
     }
 }
@@ -1883,11 +1877,14 @@ impl Add {
         Add { data: buffer }
     }
 
-    #[inline]
+    #[inline(always)]
     pub fn from_view_into(a: &AddView<'_>, mut buffer: RawAtom) -> Add {
         buffer.clear();
         buffer.extend(a.data);
-        buffer.sync_aliases_from_view_data(a.data, a.aliases);
+        buffer.aliases.clear();
+        if a.has_alias() {
+            buffer.sync_aliases_from_view_data(a.data, a.aliases);
+        }
         Add { data: buffer }
     }
 
@@ -2116,6 +2113,7 @@ impl<'a> AliasView<'a> {
 
     #[inline(always)]
     pub fn get_handle(&self) -> Arc<AliasHandle> {
+        // TODO: query alias store instead
         self.aliases
             .iter()
             .find(|h| h.token() == self.get_token())
@@ -2126,6 +2124,7 @@ impl<'a> AliasView<'a> {
 
     #[inline(always)]
     pub fn get_body(&self) -> AtomView<'a> {
+        // TODO: query alias store instead
         self.aliases
             .iter()
             .find(|h| h.token() == self.get_token())
@@ -2573,7 +2572,7 @@ impl<'a> MulView<'a> {
 
     #[inline(always)]
     pub(crate) fn has_alias(&self) -> bool {
-        (self.data[0] & MUL_HAS_ALIAS_FLAG) != 0
+        (self.data[0] & HAS_ALIAS_FLAG) != 0
     }
 
     pub fn get_nargs(&self) -> usize {
