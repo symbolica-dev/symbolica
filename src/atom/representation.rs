@@ -164,11 +164,6 @@ fn skip_raw_atom(mut data: &[u8]) -> &[u8] {
     }
 }
 
-#[inline(always)]
-fn alias_flag_for(view: AtomView<'_>) -> u8 {
-    if view.has_alias() { HAS_ALIAS_FLAG } else { 0 }
-}
-
 pub(crate) fn read_raw_atom<R: Read>(source: &mut R) -> Result<RawAtom, std::io::Error> {
     // should also set whether rat poly coefficient needs to be converted
     let mut flags_buf = [0; 1];
@@ -1379,8 +1374,11 @@ impl Fun {
 
     pub(crate) fn add_arg(&mut self, other: AtomView) {
         self.data[0] |= NOT_NORMALIZED;
-        self.data[0] |= alias_flag_for(other);
-        merge_aliases_from_view(&mut self.data.aliases, other);
+
+        if other.has_alias() {
+            self.data[0] |= HAS_ALIAS_FLAG;
+            merge_aliases_from_view(&mut self.data.aliases, other);
+        }
 
         // may increase size of the num of args
         let mut c = &self.data[1 + 4..];
@@ -1688,9 +1686,11 @@ impl Mul {
     #[inline]
     pub(crate) fn extend(&mut self, other: AtomView<'_>) {
         self.data[0] |= NOT_NORMALIZED;
-        self.data[0] |= alias_flag_for(other);
 
-        merge_aliases_from_view(&mut self.data.aliases, other);
+        if other.has_alias() {
+            self.data[0] |= HAS_ALIAS_FLAG;
+            merge_aliases_from_view(&mut self.data.aliases, other);
+        }
 
         // may increase size of the num of args
         let mut c = &self.data[1 + 4..];
@@ -1900,9 +1900,11 @@ impl Add {
     #[inline]
     pub(crate) fn extend(&mut self, other: AtomView<'_>) {
         self.data[0] |= NOT_NORMALIZED;
-        self.data[0] |= alias_flag_for(other);
 
-        merge_aliases_from_view(&mut self.data.aliases, other);
+        if other.has_alias() {
+            self.data[0] |= HAS_ALIAS_FLAG;
+            merge_aliases_from_view(&mut self.data.aliases, other);
+        }
 
         let mut c = &self.data[1..];
 
