@@ -2573,36 +2573,21 @@ impl AtomView<'_> {
     }
 
     fn get_total_byte_size_impl(&self, seen_aliases: &mut HashSet<usize>) -> usize {
-        self.get_byte_size() + self.get_alias_body_byte_size(seen_aliases)
-    }
+        if !self.has_alias() {
+            return self.get_byte_size();
+        }
 
-    fn get_alias_body_byte_size(&self, seen_aliases: &mut HashSet<usize>) -> usize {
-        match self {
-            AtomView::Num(_) | AtomView::Var(_) => 0,
-            AtomView::Alias(a) => {
+        let mut size = self.get_byte_size();
+        self.visitor(&mut |a| {
+            if let AtomView::Alias(a) = a {
                 if seen_aliases.insert(a.get_token()) {
-                    a.get_body().get_total_byte_size_impl(seen_aliases)
-                } else {
-                    0
+                    size += a.get_body().get_total_byte_size_impl(seen_aliases);
                 }
             }
-            AtomView::Fun(f) => f
-                .iter()
-                .map(|x| x.get_alias_body_byte_size(seen_aliases))
-                .sum(),
-            AtomView::Pow(p) => p
-                .iter()
-                .map(|x| x.get_alias_body_byte_size(seen_aliases))
-                .sum(),
-            AtomView::Mul(m) => m
-                .iter()
-                .map(|x| x.get_alias_body_byte_size(seen_aliases))
-                .sum(),
-            AtomView::Add(a) => a
-                .iter()
-                .map(|x| x.get_alias_body_byte_size(seen_aliases))
-                .sum(),
-        }
+
+            true
+        });
+        size
     }
 }
 

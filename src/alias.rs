@@ -90,7 +90,7 @@ impl Hash for AliasKey {
 
 #[derive(Debug)]
 pub(crate) struct AliasStore {
-    pub(crate) alias_map: HashMap<AliasKey, usize>,
+    alias_map: HashMap<AliasKey, usize>,
     free: Vec<usize>,
 }
 
