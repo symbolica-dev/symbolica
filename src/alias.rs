@@ -115,7 +115,7 @@ impl AliasSlot {
 const ALIAS_GENERATION_BITS: u32 = usize::BITS / 2;
 const ALIAS_SLOT_MASK: usize = (1usize << ALIAS_GENERATION_BITS) - 1;
 
-fn pack_alias_token(slot: usize, generation: usize) -> usize {
+pub(crate) fn pack_alias_token(slot: usize, generation: usize) -> usize {
     assert!(slot <= ALIAS_SLOT_MASK, "Too many aliases allocated");
     assert!(
         generation <= ALIAS_SLOT_MASK,
@@ -124,7 +124,7 @@ fn pack_alias_token(slot: usize, generation: usize) -> usize {
     slot | (generation << ALIAS_GENERATION_BITS)
 }
 
-fn unpack_alias_token(token: usize) -> (usize, usize) {
+pub(crate) fn unpack_alias_token(token: usize) -> (usize, usize) {
     (token & ALIAS_SLOT_MASK, token >> ALIAS_GENERATION_BITS)
 }
 
@@ -1015,7 +1015,7 @@ fn alias_total_byte_size_counts_alias_body() {
 fn alias_expanded_byte_size_counts_substituted_expression() {
     let body = crate::parse!("x+y");
     let aliased = alias_literal(crate::parse!("exp(x+y)+log(x+y)"), body, false);
-    let expanded = aliased.alias_known_aliases();
+    let expanded = aliased.inline_aliases(true);
 
     assert_eq!(
         aliased.get_alias_expanded_byte_size(),
@@ -1066,7 +1066,7 @@ fn get_aliases_lists_unique_alias_bodies() {
 fn alias_known_aliases_expands_opaque_aliases() {
     let opaque = crate::parse!("x+1").alias(true);
 
-    assert_eq!(opaque.alias_known_aliases(), crate::parse!("x+1"));
+    assert_eq!(opaque.inline_aliases(true), crate::parse!("x+1"));
 }
 
 #[test]

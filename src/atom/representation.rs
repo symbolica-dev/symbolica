@@ -15,7 +15,7 @@ use std::{
 use crate::{
     alias::{
         AliasHandle, collect_alias_handles_in, collect_alias_handles_with_dependencies,
-        get_alias_handle, register_alias_atom,
+        get_alias_handle, pack_alias_token, register_alias_atom, unpack_alias_token,
     },
     atom::{UserData, UserDataKey},
     coefficient::{Coefficient, CoefficientView},
@@ -85,6 +85,18 @@ fn aliases_from_raw_data(data: &[u8]) -> Vec<Arc<AliasHandle>> {
     handles
 }
 
+#[inline]
+fn read_alias_token(data: &[u8]) -> usize {
+    let (slot, generation, _) = data.get_frac_u64();
+    pack_alias_token(slot as usize, generation as usize)
+}
+
+#[inline]
+fn write_alias_token(token: usize, dest: &mut Vec<u8>) {
+    let (slot, generation) = unpack_alias_token(token);
+    (slot as u64, generation as u64).write_packed(dest);
+}
+
 fn collect_aliases_from_data(
     data: &[u8],
     aliases: &[Arc<AliasHandle>],
@@ -93,7 +105,7 @@ fn collect_aliases_from_data(
     match data[0] & TYPE_MASK {
         NUM_ID | VAR_ID => {}
         ALIAS_ID => {
-            let token = data[1..].get_frac_u64().0 as usize;
+            let token = read_alias_token(&data[1..]);
             if let Some(handle) = aliases
                 .iter()
                 .find(|handle| handle.token() == token)
@@ -204,7 +216,7 @@ fn remap_aliases_in_raw_data(
             Ok(false)
         }
         ALIAS_ID => {
-            let token = data[1..].get_frac_u64().0 as usize;
+            let token = read_alias_token(&data[1..]);
             let Some(handle) = aliases.get(&token) else {
                 return Err(std::io::Error::new(
                     std::io::ErrorKind::InvalidData,
@@ -213,7 +225,7 @@ fn remap_aliases_in_raw_data(
             };
 
             out.put_u8(ALIAS_ID | (data[0] & ALIAS_OPAQUE_FLAG));
-            (handle.token() as u64, 1).write_packed(out);
+            write_alias_token(handle.token(), out);
             Ok(true)
         }
         FUN_ID => {
@@ -1300,7 +1312,7 @@ impl Alias {
     fn new_into_impl(handle: Arc<AliasHandle>, mut buffer: RawAtom, opaque: bool) -> Alias {
         buffer.clear();
         buffer.put_u8(ALIAS_ID | if opaque { ALIAS_OPAQUE_FLAG } else { 0 });
-        (handle.token() as u64, 1).write_packed(&mut buffer);
+        write_alias_token(handle.token(), &mut buffer);
         buffer.sync_aliases_from(std::slice::from_ref(&handle));
         Alias { data: buffer }
     }
@@ -2141,7 +2153,7 @@ impl<'a> AliasView<'a> {
 
     #[inline(always)]
     pub fn get_token(&self) -> usize {
-        self.data[1..].get_frac_u64().0 as usize
+        read_alias_token(&self.data[1..])
     }
 
     #[inline(always)]
