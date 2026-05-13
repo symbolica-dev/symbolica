@@ -121,7 +121,7 @@ impl<'a> AtomView<'a> {
             *body = body.as_view().horner_scheme(Some(&scheme), true);
         }
 
-        let mut e = Self::linearize_multiple(&hornered_expressions, fn_map, params, settings)?;
+        let mut e = Self::linearize_multiple(&hornered_expressions, &f, params, settings)?;
 
         drop(f);
         drop(hornered_expressions);
