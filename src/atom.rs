@@ -2554,7 +2554,16 @@ impl AtomView<'_> {
             return self.get_byte_size();
         }
 
-        self.alias_known_aliases().as_view().get_byte_size()
+        let mut size = self.get_byte_size();
+        self.visitor(&mut |a| {
+            if let AtomView::Alias(a) = a {
+                size -= a.get_byte_size();
+                size += a.get_body().get_alias_expanded_byte_size();
+            }
+
+            true
+        });
+        size
     }
 
     /// Return the byte size of this atom, including distinct bodies referenced by aliases.
