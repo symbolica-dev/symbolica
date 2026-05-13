@@ -3,7 +3,7 @@ use std::sync::LazyLock;
 use rug::float::Constant;
 
 use crate::{
-    atom::{Atom, AtomCore, AtomView, EvaluationInfo, Symbol},
+    atom::{Atom, AtomCore, AtomOrView, AtomView, EvaluationInfo, FunctionBuilder, Symbol},
     coefficient::{Coefficient, CoefficientView},
     domains::{
         float::{Complex, Float, FloatLike, Real, RealLike, SingleFloat},
@@ -1647,6 +1647,162 @@ pub fn bessel_i() -> Symbol {
 /// on `(-infinity, 0]`.
 pub fn bessel_k() -> Symbol {
     BESSELS.bessel_k
+}
+
+macro_rules! unary_transcendental_methods {
+    ($(
+        $(#[$meta:meta])*
+        $method:ident => $symbol:ident;
+    )*) => {
+        $(
+            $(#[$meta])*
+            fn $method(&self) -> Self::Output {
+                unary_transcendental_function(self, crate::transcendental::$symbol())
+            }
+        )*
+    };
+}
+
+/// Convenience methods for transcendental functions on expressions.
+///
+/// This extension trait is implemented for every type that implements [`AtomCore`].
+/// Import it to write `x.atan()`, `x.gamma()`, `x.polylog(2)`, and similar method
+/// calls without constructing the function symbols manually.
+///
+/// Functions already provided by [`AtomCore`] itself, such as `exp`, `log`, `sin`,
+/// `cos`, and `sqrt`, are not repeated here to avoid method-resolution ambiguity.
+pub trait TranscendentalFunctions: AtomCore {
+    unary_transcendental_methods! {
+        /// Take the tangent.
+        tan => tan;
+        /// Take the cotangent.
+        cot => cot;
+        /// Take the secant.
+        sec => sec;
+        /// Take the cosecant.
+        csc => csc;
+        /// Take the inverse sine.
+        asin => asin;
+        /// Take the inverse cosine.
+        acos => acos;
+        /// Take the inverse tangent.
+        atan => atan;
+        /// Take the inverse cotangent.
+        acot => acot;
+        /// Take the inverse secant.
+        asec => asec;
+        /// Take the inverse cosecant.
+        acsc => acsc;
+        /// Take the hyperbolic sine.
+        sinh => sinh;
+        /// Take the hyperbolic cosine.
+        cosh => cosh;
+        /// Take the hyperbolic tangent.
+        tanh => tanh;
+        /// Take the hyperbolic cotangent.
+        coth => coth;
+        /// Take the hyperbolic secant.
+        sech => sech;
+        /// Take the hyperbolic cosecant.
+        csch => csch;
+        /// Take the inverse hyperbolic sine.
+        asinh => asinh;
+        /// Take the inverse hyperbolic cosine.
+        acosh => acosh;
+        /// Take the inverse hyperbolic tangent.
+        atanh => atanh;
+        /// Take the inverse hyperbolic cotangent.
+        acoth => acoth;
+        /// Take the inverse hyperbolic secant.
+        asech => asech;
+        /// Take the inverse hyperbolic cosecant.
+        acsch => acsch;
+        /// Apply the gamma function.
+        gamma => gamma;
+        /// Apply the Riemann zeta function.
+        zeta => zeta;
+    }
+
+    /// Compute the quadrant-aware inverse tangent `atan(self, y)`.
+    ///
+    /// For real numeric inputs, this is equivalent to `atan2(y, self)`.
+    fn atan2<'a, T: Into<AtomOrView<'a>>>(&self, y: T) -> Self::Output {
+        receiver_first_transcendental_function(self, crate::transcendental::atan(), y)
+    }
+
+    /// Compute the polygamma function of order `n` at `self`.
+    fn polygamma<'a, T: Into<AtomOrView<'a>>>(&self, n: T) -> Self::Output {
+        receiver_last_transcendental_function(self, crate::transcendental::polygamma(), n)
+    }
+
+    /// Compute the polylogarithm of order `s` at `self`.
+    fn polylog<'a, T: Into<AtomOrView<'a>>>(&self, s: T) -> Self::Output {
+        receiver_last_transcendental_function(self, crate::transcendental::polylog(), s)
+    }
+
+    /// Compute the cylindrical Bessel function of the first kind of order `nu` at `self`.
+    fn bessel_j<'a, T: Into<AtomOrView<'a>>>(&self, nu: T) -> Self::Output {
+        receiver_last_transcendental_function(self, crate::transcendental::bessel_j(), nu)
+    }
+
+    /// Compute the cylindrical Bessel function of the second kind of order `nu` at `self`.
+    fn bessel_y<'a, T: Into<AtomOrView<'a>>>(&self, nu: T) -> Self::Output {
+        receiver_last_transcendental_function(self, crate::transcendental::bessel_y(), nu)
+    }
+
+    /// Compute the modified Bessel function of the first kind of order `nu` at `self`.
+    fn bessel_i<'a, T: Into<AtomOrView<'a>>>(&self, nu: T) -> Self::Output {
+        receiver_last_transcendental_function(self, crate::transcendental::bessel_i(), nu)
+    }
+
+    /// Compute the modified Bessel function of the second kind of order `nu` at `self`.
+    fn bessel_k<'a, T: Into<AtomOrView<'a>>>(&self, nu: T) -> Self::Output {
+        receiver_last_transcendental_function(self, crate::transcendental::bessel_k(), nu)
+    }
+}
+
+impl<T: AtomCore> TranscendentalFunctions for T {}
+
+fn unary_transcendental_function<T: AtomCore>(arg: &T, symbol: Symbol) -> T::Output {
+    arg.atom_to_output(
+        FunctionBuilder::new(symbol)
+            .add_arg(arg.as_atom_view())
+            .finish(),
+    )
+}
+
+fn receiver_last_transcendental_function<'a, T, U>(
+    arg: &T,
+    symbol: Symbol,
+    first_arg: U,
+) -> T::Output
+where
+    T: AtomCore,
+    U: Into<AtomOrView<'a>>,
+{
+    arg.atom_to_output(
+        FunctionBuilder::new(symbol)
+            .add_arg(first_arg)
+            .add_arg(arg.as_atom_view())
+            .finish(),
+    )
+}
+
+fn receiver_first_transcendental_function<'a, T, U>(
+    arg: &T,
+    symbol: Symbol,
+    second_arg: U,
+) -> T::Output
+where
+    T: AtomCore,
+    U: Into<AtomOrView<'a>>,
+{
+    arg.atom_to_output(
+        FunctionBuilder::new(symbol)
+            .add_arg(arg.as_atom_view())
+            .add_arg(second_arg)
+            .finish(),
+    )
 }
 
 fn unary_eval_complex_float<F>(args: &[Complex<Float>], evaluator: F) -> Complex<Float>
@@ -3471,6 +3627,20 @@ mod tests {
         let minus_one = Float::with_val(80, -1);
         let exact_expected = Complex::new(one.atan2(&minus_one), Float::new(80));
         assert_close_complex(&exact_actual, &exact_expected, "1e-23");
+    }
+
+    #[test]
+    fn transcendental_functions_extension_trait() {
+        use super::TranscendentalFunctions;
+
+        let x = parse!("x");
+        assert_eq!(x.atan(), parse!("atan(x)"));
+        assert_eq!(x.atan2(parse!("y")), parse!("atan(x,y)"));
+        assert_eq!(x.gamma(), parse!("gamma(x)"));
+        assert_eq!(x.zeta(), parse!("zeta(x)"));
+        assert_eq!(x.polylog(2), parse!("polylog(2,x)"));
+        assert_eq!(x.polygamma(1), parse!("polygamma(1,x)"));
+        assert_eq!(x.bessel_j(parse!("nu")), parse!("bessel_j(nu,x)"));
     }
 
     #[test]
