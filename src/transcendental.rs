@@ -6,7 +6,7 @@ use crate::{
     atom::{Atom, AtomCore, AtomView, EvaluationInfo, Symbol},
     coefficient::{Coefficient, CoefficientView},
     domains::{
-        float::{Complex, Float, FloatLike, Real, RealLike},
+        float::{Complex, Float, FloatLike, Real, RealLike, SingleFloat},
         integer::Integer,
         rational::Rational,
     },
@@ -442,7 +442,7 @@ impl GeometricSymbols {
                             out.to_num(Coefficient::zero());
                             return;
                         }
-                        let _ = maybe_eval_unary_float_in_norm(arg, out, tan_numeric_eval);
+                        let _ = maybe_eval_unary_float_in_norm(arg, out, |z, _| z.tan());
                     }
                 })
                 .with_derivative_function(move |x, i, out| {
@@ -457,11 +457,11 @@ impl GeometricSymbols {
                         return None;
                     }
                     let delta = arg.to_atom() - &point;
-                    Some((Atom::num(1) / delta.clone(), -delta.clone() / function!(tan, delta)))
+                    Some((Atom::num(1) / &delta, -&delta / function!(tan, delta)))
                 })
                 .with_evaluation_info(
                     EvaluationInfo::new().register(|args: &[Complex<Float>]| {
-                        unary_eval_complex_float(args, tan_numeric_eval)
+                        unary_eval_complex_float(args, |z, _| z.tan())
                     })
                     .register(|args: &[f64]| unary_eval_real_f64(args, f64::tan))
                     .register(|args: &[Complex<f64>]| unary_eval_complex_real_f64(args, |z| z.tan())),
@@ -477,7 +477,7 @@ impl GeometricSymbols {
                             out.to_num(Coefficient::complex_infinity());
                             return;
                         }
-                        let _ = maybe_eval_unary_float_in_norm(arg, out, cot_numeric_eval);
+                        let _ = maybe_eval_unary_float_in_norm(arg, out, |z, _| z.tan().inv());
                     }
                 })
                 .with_derivative_function(move |x, i, out| {
@@ -492,14 +492,14 @@ impl GeometricSymbols {
                         return None;
                     }
                     let delta = arg.to_atom() - &point;
-                    Some((Atom::num(1) / delta.clone(), delta.clone() / function!(tan, delta)))
+                    Some((Atom::num(1) / &delta, &delta / function!(tan, delta)))
                 })
                 .with_evaluation_info(
                     EvaluationInfo::new().register(|args: &[Complex<Float>]| {
-                        unary_eval_complex_float(args, cot_numeric_eval)
+                        unary_eval_complex_float(args, |z, _| z.tan().inv())
                     })
-                    .register(|args: &[f64]| unary_eval_real_f64(args, cot_eval_f64))
-                    .register(|args: &[Complex<f64>]| unary_eval_complex_real_f64(args, |z| Complex::new(1.0, 0.0) / z.tan())),
+                    .register(|args: &[f64]| unary_eval_real_f64(args, |x| x.tan().recip()))
+                    .register(|args: &[Complex<f64>]| unary_eval_complex_real_f64(args, |z| z.tan().inv())),
                 )
             },
             "sec";;
@@ -512,7 +512,7 @@ impl GeometricSymbols {
                             out.to_num(Coefficient::one());
                             return;
                         }
-                        let _ = maybe_eval_unary_float_in_norm(arg, out, sec_numeric_eval);
+                        let _ = maybe_eval_unary_float_in_norm(arg, out, |z, _| z.cos().inv());
                     }
                 })
                 .with_derivative_function(move |x, i, out| {
@@ -526,16 +526,16 @@ impl GeometricSymbols {
                     let residue = sec_residue(point.as_view())?;
                     let delta = arg.to_atom() - &point;
                     Some((
-                        Atom::num(1) / delta.clone(),
-                        residue * delta.clone() / function!(State::SIN, delta),
+                        Atom::num(1) / &delta,
+                        residue * &delta / function!(State::SIN, delta),
                     ))
                 })
                 .with_evaluation_info(
                     EvaluationInfo::new().register(|args: &[Complex<Float>]| {
-                        unary_eval_complex_float(args, sec_numeric_eval)
+                        unary_eval_complex_float(args, |z, _| z.cos().inv())
                     })
-                    .register(|args: &[f64]| unary_eval_real_f64(args, sec_eval_f64))
-                    .register(|args: &[Complex<f64>]| unary_eval_complex_real_f64(args, |z| Complex::new(1.0, 0.0) / z.cos())),
+                    .register(|args: &[f64]| unary_eval_real_f64(args, |x| x.cos().recip()))
+                    .register(|args: &[Complex<f64>]| unary_eval_complex_real_f64(args, |z| z.cos().inv())),
                 )
             },
             "csc";;
@@ -548,7 +548,7 @@ impl GeometricSymbols {
                             out.to_num(Coefficient::complex_infinity());
                             return;
                         }
-                        let _ = maybe_eval_unary_float_in_norm(arg, out, csc_numeric_eval);
+                        let _ = maybe_eval_unary_float_in_norm(arg, out, |z, _| z.sin().inv());
                     }
                 })
                 .with_derivative_function(move |x, i, out| {
@@ -562,16 +562,16 @@ impl GeometricSymbols {
                     let residue = csc_residue(point.as_view())?;
                     let delta = arg.to_atom() - &point;
                     Some((
-                        Atom::num(1) / delta.clone(),
-                        residue * delta.clone() / function!(State::SIN, delta),
+                        Atom::num(1) / &delta,
+                        residue * &delta / function!(State::SIN, delta),
                     ))
                 })
                 .with_evaluation_info(
                     EvaluationInfo::new().register(|args: &[Complex<Float>]| {
-                        unary_eval_complex_float(args, csc_numeric_eval)
+                        unary_eval_complex_float(args, |z, _| z.sin().inv())
                     })
-                    .register(|args: &[f64]| unary_eval_real_f64(args, csc_eval_f64))
-                    .register(|args: &[Complex<f64>]| unary_eval_complex_real_f64(args, |z| Complex::new(1.0, 0.0) / z.sin())),
+                    .register(|args: &[f64]| unary_eval_real_f64(args, |x| x.sin().recip()))
+                    .register(|args: &[Complex<f64>]| unary_eval_complex_real_f64(args, |z| z.sin().inv())),
                 )
             },
             "sinh";;
@@ -583,7 +583,7 @@ impl GeometricSymbols {
                             out.to_num(Coefficient::zero());
                             return;
                         }
-                        let _ = maybe_eval_unary_float_in_norm(arg, out, sinh_numeric_eval);
+                        let _ = maybe_eval_unary_float_in_norm(arg, out, |z, _| z.sinh());
                     }
                 })
                 .with_derivative_function(move |x, i, out| {
@@ -593,7 +593,7 @@ impl GeometricSymbols {
                 })
                 .with_evaluation_info(
                     EvaluationInfo::new().register(|args: &[Complex<Float>]| {
-                        unary_eval_complex_float(args, sinh_numeric_eval)
+                        unary_eval_complex_float(args, |z, _| z.sinh())
                     })
                     .register(|args: &[f64]| unary_eval_real_f64(args, f64::sinh))
                     .register(|args: &[Complex<f64>]| unary_eval_complex_real_f64(args, |z| z.sinh())),
@@ -608,7 +608,7 @@ impl GeometricSymbols {
                             out.to_num(Coefficient::one());
                             return;
                         }
-                        let _ = maybe_eval_unary_float_in_norm(arg, out, cosh_numeric_eval);
+                        let _ = maybe_eval_unary_float_in_norm(arg, out, |z, _| z.cosh());
                     }
                 })
                 .with_derivative_function(move |x, i, out| {
@@ -618,7 +618,7 @@ impl GeometricSymbols {
                 })
                 .with_evaluation_info(
                     EvaluationInfo::new().register(|args: &[Complex<Float>]| {
-                        unary_eval_complex_float(args, cosh_numeric_eval)
+                        unary_eval_complex_float(args, |z, _| z.cosh())
                     })
                     .register(|args: &[f64]| unary_eval_real_f64(args, f64::cosh))
                     .register(|args: &[Complex<f64>]| unary_eval_complex_real_f64(args, |z| z.cosh())),
@@ -634,7 +634,7 @@ impl GeometricSymbols {
                             out.to_num(Coefficient::zero());
                             return;
                         }
-                        let _ = maybe_eval_unary_float_in_norm(arg, out, tanh_numeric_eval);
+                        let _ = maybe_eval_unary_float_in_norm(arg, out, |z, _| z.tanh());
                     }
                 })
                 .with_derivative_function(move |x, i, out| {
@@ -649,11 +649,11 @@ impl GeometricSymbols {
                         return None;
                     }
                     let delta = arg.to_atom() - &point;
-                    Some((Atom::num(1) / delta.clone(), delta.clone() / function!(tanh, delta)))
+                    Some((Atom::num(1) / &delta, &delta / function!(tanh, delta)))
                 })
                 .with_evaluation_info(
                     EvaluationInfo::new().register(|args: &[Complex<Float>]| {
-                        unary_eval_complex_float(args, tanh_numeric_eval)
+                        unary_eval_complex_float(args, |z, _| z.tanh())
                     })
                     .register(|args: &[f64]| unary_eval_real_f64(args, f64::tanh))
                     .register(|args: &[Complex<f64>]| unary_eval_complex_real_f64(args, |z| z.tanh())),
@@ -669,7 +669,7 @@ impl GeometricSymbols {
                             out.to_num(Coefficient::complex_infinity());
                             return;
                         }
-                        let _ = maybe_eval_unary_float_in_norm(arg, out, coth_numeric_eval);
+                        let _ = maybe_eval_unary_float_in_norm(arg, out, |z, _| z.tanh().inv());
                     }
                 })
                 .with_derivative_function(move |x, i, out| {
@@ -684,14 +684,14 @@ impl GeometricSymbols {
                         return None;
                     }
                     let delta = arg.to_atom() - &point;
-                    Some((Atom::num(1) / delta.clone(), delta.clone() / function!(tanh, delta)))
+                    Some((Atom::num(1) / &delta, &delta / function!(tanh, delta)))
                 })
                 .with_evaluation_info(
                     EvaluationInfo::new().register(|args: &[Complex<Float>]| {
-                        unary_eval_complex_float(args, coth_numeric_eval)
+                        unary_eval_complex_float(args, |z, _| z.tanh().inv())
                     })
-                    .register(|args: &[f64]| unary_eval_real_f64(args, coth_eval_f64))
-                    .register(|args: &[Complex<f64>]| unary_eval_complex_real_f64(args, |z| Complex::new(1.0, 0.0) / z.tanh())),
+                    .register(|args: &[f64]| unary_eval_real_f64(args, |x| x.tanh().recip()))
+                    .register(|args: &[Complex<f64>]| unary_eval_complex_real_f64(args, |z| z.tanh().inv())),
                 )
             },
             "sech";;
@@ -705,7 +705,7 @@ impl GeometricSymbols {
                             out.to_num(Coefficient::one());
                             return;
                         }
-                        let _ = maybe_eval_unary_float_in_norm(arg, out, sech_numeric_eval);
+                        let _ = maybe_eval_unary_float_in_norm(arg, out, |z, _| z.cosh().inv());
                     }
                 })
                 .with_derivative_function(move |x, i, out| {
@@ -718,14 +718,14 @@ impl GeometricSymbols {
                     let point = arg.coefficient(0.into());
                     let residue = sech_residue(point.as_view())?;
                     let delta = arg.to_atom() - &point;
-                    Some((Atom::num(1) / delta.clone(), residue * delta.clone() / function!(sinh, delta)))
+                    Some((Atom::num(1) / &delta, residue * &delta / function!(sinh, delta)))
                 })
                 .with_evaluation_info(
                     EvaluationInfo::new().register(|args: &[Complex<Float>]| {
-                        unary_eval_complex_float(args, sech_numeric_eval)
+                        unary_eval_complex_float(args, |z, _| z.cosh().inv())
                     })
-                    .register(|args: &[f64]| unary_eval_real_f64(args, sech_eval_f64))
-                    .register(|args: &[Complex<f64>]| unary_eval_complex_real_f64(args, |z| Complex::new(1.0, 0.0) / z.cosh())),
+                    .register(|args: &[f64]| unary_eval_real_f64(args, |x| x.cosh().recip()))
+                    .register(|args: &[Complex<f64>]| unary_eval_complex_real_f64(args, |z| z.cosh().inv())),
                 )
             },
             "csch";;
@@ -739,7 +739,7 @@ impl GeometricSymbols {
                             out.to_num(Coefficient::complex_infinity());
                             return;
                         }
-                        let _ = maybe_eval_unary_float_in_norm(arg, out, csch_numeric_eval);
+                        let _ = maybe_eval_unary_float_in_norm(arg, out, |z, _| z.sinh().inv());
                     }
                 })
                 .with_derivative_function(move |x, i, out| {
@@ -752,14 +752,14 @@ impl GeometricSymbols {
                     let point = arg.coefficient(0.into());
                     let residue = csch_residue(point.as_view())?;
                     let delta = arg.to_atom() - &point;
-                    Some((Atom::num(1) / delta.clone(), residue * delta.clone() / function!(sinh, delta)))
+                    Some((Atom::num(1) / &delta, residue * &delta / function!(sinh, delta)))
                 })
                 .with_evaluation_info(
                     EvaluationInfo::new().register(|args: &[Complex<Float>]| {
-                        unary_eval_complex_float(args, csch_numeric_eval)
+                        unary_eval_complex_float(args, |z, _| z.sinh().inv())
                     })
-                    .register(|args: &[f64]| unary_eval_real_f64(args, csch_eval_f64))
-                    .register(|args: &[Complex<f64>]| unary_eval_complex_real_f64(args, |z| Complex::new(1.0, 0.0) / z.sinh())),
+                    .register(|args: &[f64]| unary_eval_real_f64(args, |x| x.sinh().recip()))
+                    .register(|args: &[Complex<f64>]| unary_eval_complex_real_f64(args, |z| z.sinh().inv())),
                 )
             }
         );
@@ -783,7 +783,7 @@ impl GeometricSymbols {
                         out.to_num(Coefficient::zero());
                         return;
                     }
-                    let _ = maybe_eval_unary_float_in_norm(arg, out, asin_numeric_eval);
+                    let _ = maybe_eval_unary_float_in_norm(arg, out, |z, _| z.asin());
                 }
             },
             der = move |x, i, out| {
@@ -791,13 +791,13 @@ impl GeometricSymbols {
                     && let Some([arg]) = function_arguments::<1>(x)
                 {
                     let arg = arg.to_owned();
-                    **out = Atom::num(1)
-                        / function!(State::SQRT, Atom::num(1) - arg.clone().pow(Atom::num(2)));
+                    **out =
+                        Atom::num(1) / function!(State::SQRT, Atom::num(1) - arg.pow(Atom::num(2)));
                 }
             },
             eval = EvaluationInfo::new()
                 .register(|args: &[Complex<Float>]| {
-                    unary_eval_complex_float(args, asin_numeric_eval)
+                    unary_eval_complex_float(args, |z, _| z.asin())
                 })
                 .register(|args: &[f64]| unary_eval_real_f64(args, f64::asin))
                 .register(|args: &[Complex<f64>]| {
@@ -813,7 +813,7 @@ impl GeometricSymbols {
                         out.to_num(Coefficient::zero());
                         return;
                     }
-                    let _ = maybe_eval_unary_float_in_norm(arg, out, acos_numeric_eval);
+                    let _ = maybe_eval_unary_float_in_norm(arg, out, |z, _| z.acos());
                 }
             },
             der = move |x, i, out| {
@@ -822,12 +822,12 @@ impl GeometricSymbols {
                 {
                     let arg = arg.to_owned();
                     **out = -Atom::num(1)
-                        / function!(State::SQRT, Atom::num(1) - arg.clone().pow(Atom::num(2)));
+                        / function!(State::SQRT, Atom::num(1) - arg.pow(Atom::num(2)));
                 }
             },
             eval = EvaluationInfo::new()
                 .register(|args: &[Complex<Float>]| {
-                    unary_eval_complex_float(args, acos_numeric_eval)
+                    unary_eval_complex_float(args, |z, _| z.acos())
                 })
                 .register(|args: &[f64]| unary_eval_real_f64(args, f64::acos))
                 .register(|args: &[Complex<f64>]| {
@@ -868,7 +868,9 @@ impl GeometricSymbols {
             "acot",
             norm = |x, out| {
                 if let Some([arg]) = function_arguments::<1>(x) {
-                    let _ = maybe_eval_unary_float_in_norm(arg, out, acot_numeric_eval);
+                    let _ = maybe_eval_unary_float_in_norm(arg, out, |z, prec| {
+                        atan_numeric_eval(&z.inv(), prec)
+                    });
                 }
             },
             der = move |x, i, out| {
@@ -881,13 +883,11 @@ impl GeometricSymbols {
             },
             eval = EvaluationInfo::new()
                 .register(|args: &[Complex<Float>]| {
-                    unary_eval_complex_float(args, acot_numeric_eval)
+                    unary_eval_complex_float(args, |z, prec| atan_numeric_eval(&z.inv(), prec))
                 })
-                .register(|args: &[f64]| unary_eval_real_f64(args, acot_eval_f64))
+                .register(|args: &[f64]| unary_eval_real_f64(args, |x| x.recip().atan()))
                 .register(|args: &[Complex<f64>]| {
-                    unary_eval_complex_real_f64(args, |z| {
-                        atan_eval_complex_f64(Complex::new(1.0, 0.0) / z)
-                    })
+                    unary_eval_complex_real_f64(args, |z| atan_eval_complex_f64(z.inv()))
                 })
         );
 
@@ -899,7 +899,7 @@ impl GeometricSymbols {
                         out.to_num(Coefficient::zero());
                         return;
                     }
-                    let _ = maybe_eval_unary_float_in_norm(arg, out, asec_numeric_eval);
+                    let _ = maybe_eval_unary_float_in_norm(arg, out, |z, _| z.inv().acos());
                 }
             },
             der = move |x, i, out| {
@@ -914,11 +914,11 @@ impl GeometricSymbols {
             },
             eval = EvaluationInfo::new()
                 .register(|args: &[Complex<Float>]| {
-                    unary_eval_complex_float(args, asec_numeric_eval)
+                    unary_eval_complex_float(args, |z, _| z.inv().acos())
                 })
-                .register(|args: &[f64]| unary_eval_real_f64(args, asec_eval_f64))
+                .register(|args: &[f64]| unary_eval_real_f64(args, |x| x.recip().acos()))
                 .register(|args: &[Complex<f64>]| {
-                    unary_eval_complex_real_f64(args, |z| (Complex::new(1.0, 0.0) / z).acos())
+                    unary_eval_complex_real_f64(args, |z| z.inv().acos())
                 })
         );
 
@@ -926,7 +926,7 @@ impl GeometricSymbols {
             "acsc",
             norm = |x, out| {
                 if let Some([arg]) = function_arguments::<1>(x) {
-                    let _ = maybe_eval_unary_float_in_norm(arg, out, acsc_numeric_eval);
+                    let _ = maybe_eval_unary_float_in_norm(arg, out, |z, _| z.inv().asin());
                 }
             },
             der = move |x, i, out| {
@@ -941,11 +941,11 @@ impl GeometricSymbols {
             },
             eval = EvaluationInfo::new()
                 .register(|args: &[Complex<Float>]| {
-                    unary_eval_complex_float(args, acsc_numeric_eval)
+                    unary_eval_complex_float(args, |z, _| z.inv().asin())
                 })
-                .register(|args: &[f64]| unary_eval_real_f64(args, acsc_eval_f64))
+                .register(|args: &[f64]| unary_eval_real_f64(args, |x| x.recip().asin()))
                 .register(|args: &[Complex<f64>]| {
-                    unary_eval_complex_real_f64(args, |z| (Complex::new(1.0, 0.0) / z).asin())
+                    unary_eval_complex_real_f64(args, |z| z.inv().asin())
                 })
         );
 
@@ -957,7 +957,7 @@ impl GeometricSymbols {
                         out.to_num(Coefficient::zero());
                         return;
                     }
-                    let _ = maybe_eval_unary_float_in_norm(arg, out, asinh_numeric_eval);
+                    let _ = maybe_eval_unary_float_in_norm(arg, out, |z, _| z.asinh());
                 }
             },
             der = move |x, i, out| {
@@ -971,7 +971,7 @@ impl GeometricSymbols {
             },
             eval = EvaluationInfo::new()
                 .register(|args: &[Complex<Float>]| {
-                    unary_eval_complex_float(args, asinh_numeric_eval)
+                    unary_eval_complex_float(args, |z, _| z.asinh())
                 })
                 .register(|args: &[f64]| unary_eval_real_f64(args, f64::asinh))
                 .register(|args: &[Complex<f64>]| {
@@ -987,7 +987,7 @@ impl GeometricSymbols {
                         out.to_num(Coefficient::zero());
                         return;
                     }
-                    let _ = maybe_eval_unary_float_in_norm(arg, out, acosh_numeric_eval);
+                    let _ = maybe_eval_unary_float_in_norm(arg, out, |z, _| z.acosh());
                 }
             },
             der = move |x, i, out| {
@@ -996,13 +996,13 @@ impl GeometricSymbols {
                 {
                     let arg = arg.to_owned();
                     **out = Atom::num(1)
-                        / (function!(State::SQRT, arg.clone() - Atom::num(1))
+                        / (function!(State::SQRT, &arg - Atom::num(1))
                             * function!(State::SQRT, arg + Atom::num(1)));
                 }
             },
             eval = EvaluationInfo::new()
                 .register(|args: &[Complex<Float>]| {
-                    unary_eval_complex_float(args, acosh_numeric_eval)
+                    unary_eval_complex_float(args, |z, _| z.acosh())
                 })
                 .register(|args: &[f64]| unary_eval_real_f64(args, f64::acosh))
                 .register(|args: &[Complex<f64>]| {
@@ -1018,7 +1018,7 @@ impl GeometricSymbols {
                         out.to_num(Coefficient::zero());
                         return;
                     }
-                    let _ = maybe_eval_unary_float_in_norm(arg, out, atanh_numeric_eval);
+                    let _ = maybe_eval_unary_float_in_norm(arg, out, |z, _| z.atanh());
                 }
             },
             der = move |x, i, out| {
@@ -1031,7 +1031,7 @@ impl GeometricSymbols {
             },
             eval = EvaluationInfo::new()
                 .register(|args: &[Complex<Float>]| {
-                    unary_eval_complex_float(args, atanh_numeric_eval)
+                    unary_eval_complex_float(args, |z, _| z.atanh())
                 })
                 .register(|args: &[f64]| unary_eval_real_f64(args, f64::atanh))
                 .register(|args: &[Complex<f64>]| {
@@ -1043,7 +1043,7 @@ impl GeometricSymbols {
             "acoth",
             norm = |x, out| {
                 if let Some([arg]) = function_arguments::<1>(x) {
-                    let _ = maybe_eval_unary_float_in_norm(arg, out, acoth_numeric_eval);
+                    let _ = maybe_eval_unary_float_in_norm(arg, out, |z, _| z.inv().atanh());
                 }
             },
             der = move |x, i, out| {
@@ -1056,11 +1056,11 @@ impl GeometricSymbols {
             },
             eval = EvaluationInfo::new()
                 .register(|args: &[Complex<Float>]| {
-                    unary_eval_complex_float(args, acoth_numeric_eval)
+                    unary_eval_complex_float(args, |z, _| z.inv().atanh())
                 })
-                .register(|args: &[f64]| unary_eval_real_f64(args, acoth_eval_f64))
+                .register(|args: &[f64]| unary_eval_real_f64(args, |x| x.recip().atanh()))
                 .register(|args: &[Complex<f64>]| {
-                    unary_eval_complex_real_f64(args, |z| (Complex::new(1.0, 0.0) / z).atanh())
+                    unary_eval_complex_real_f64(args, |z| z.inv().atanh())
                 })
         );
 
@@ -1072,7 +1072,7 @@ impl GeometricSymbols {
                         out.to_num(Coefficient::zero());
                         return;
                     }
-                    let _ = maybe_eval_unary_float_in_norm(arg, out, asech_numeric_eval);
+                    let _ = maybe_eval_unary_float_in_norm(arg, out, |z, _| z.inv().acosh());
                 }
             },
             der = move |x, i, out| {
@@ -1080,20 +1080,20 @@ impl GeometricSymbols {
                     && let Some([arg]) = function_arguments::<1>(x)
                 {
                     let arg = arg.to_owned();
-                    let inv = Atom::num(1) / arg.clone();
+                    let inv = Atom::num(1) / &arg;
                     **out = -Atom::num(1)
-                        / (arg.clone().pow(Atom::num(2))
-                            * function!(State::SQRT, inv.clone() - Atom::num(1))
+                        / (arg.pow(Atom::num(2))
+                            * function!(State::SQRT, &inv - Atom::num(1))
                             * function!(State::SQRT, inv + Atom::num(1)));
                 }
             },
             eval = EvaluationInfo::new()
                 .register(|args: &[Complex<Float>]| {
-                    unary_eval_complex_float(args, asech_numeric_eval)
+                    unary_eval_complex_float(args, |z, _| z.inv().acosh())
                 })
-                .register(|args: &[f64]| unary_eval_real_f64(args, asech_eval_f64))
+                .register(|args: &[f64]| unary_eval_real_f64(args, |x| x.recip().acosh()))
                 .register(|args: &[Complex<f64>]| {
-                    unary_eval_complex_real_f64(args, |z| (Complex::new(1.0, 0.0) / z).acosh())
+                    unary_eval_complex_real_f64(args, |z| z.inv().acosh())
                 })
         );
 
@@ -1101,7 +1101,7 @@ impl GeometricSymbols {
             "acsch",
             norm = |x, out| {
                 if let Some([arg]) = function_arguments::<1>(x) {
-                    let _ = maybe_eval_unary_float_in_norm(arg, out, acsch_numeric_eval);
+                    let _ = maybe_eval_unary_float_in_norm(arg, out, |z, _| z.inv().asinh());
                 }
             },
             der = move |x, i, out| {
@@ -1109,19 +1109,19 @@ impl GeometricSymbols {
                     && let Some([arg]) = function_arguments::<1>(x)
                 {
                     let arg = arg.to_owned();
-                    let inv = Atom::num(1) / arg.clone();
+                    let inv = Atom::num(1) / &arg;
                     **out = -Atom::num(1)
-                        / (arg.clone().pow(Atom::num(2))
+                        / (arg.pow(Atom::num(2))
                             * function!(State::SQRT, Atom::num(1) + inv.pow(Atom::num(2))));
                 }
             },
             eval = EvaluationInfo::new()
                 .register(|args: &[Complex<Float>]| {
-                    unary_eval_complex_float(args, acsch_numeric_eval)
+                    unary_eval_complex_float(args, |z, _| z.inv().asinh())
                 })
-                .register(|args: &[f64]| unary_eval_real_f64(args, acsch_eval_f64))
+                .register(|args: &[f64]| unary_eval_real_f64(args, |x| x.recip().asinh()))
                 .register(|args: &[Complex<f64>]| {
-                    unary_eval_complex_real_f64(args, |z| (Complex::new(1.0, 0.0) / z).asinh())
+                    unary_eval_complex_real_f64(args, |z| z.inv().asinh())
                 })
         );
 
@@ -1733,7 +1733,7 @@ where
     let [arg] = args else {
         return Complex::new(f64::NAN, f64::NAN);
     };
-    evaluator(arg.clone())
+    evaluator(*arg)
 }
 
 fn tagged_unary_eval_real_f64(
@@ -1772,167 +1772,25 @@ fn tagged_unary_eval_complex_f64(
         .unwrap_or_else(|| Complex::new(f64::NAN, f64::NAN))
 }
 
-fn tan_numeric_eval(z: &Complex<Float>, _binary_prec: u32) -> Complex<Float> {
-    z.tan()
-}
-
-fn cot_numeric_eval(z: &Complex<Float>, binary_prec: u32) -> Complex<Float> {
-    complex_one(binary_prec) / z.clone().tan()
-}
-
-fn sec_numeric_eval(z: &Complex<Float>, binary_prec: u32) -> Complex<Float> {
-    complex_one(binary_prec) / z.clone().cos()
-}
-
-fn csc_numeric_eval(z: &Complex<Float>, binary_prec: u32) -> Complex<Float> {
-    complex_one(binary_prec) / z.clone().sin()
-}
-
-fn asin_numeric_eval(z: &Complex<Float>, _binary_prec: u32) -> Complex<Float> {
-    z.asin()
-}
-
-fn acos_numeric_eval(z: &Complex<Float>, _binary_prec: u32) -> Complex<Float> {
-    z.acos()
-}
-
 fn atan_numeric_eval(z: &Complex<Float>, binary_prec: u32) -> Complex<Float> {
-    let i = complex_i(binary_prec);
+    let i = z.i();
     let one = complex_one(binary_prec);
     let two = Complex::new(Float::with_val(binary_prec, 2), Float::new(binary_prec));
+    let iz = i.clone() * z;
 
-    (i.clone() / two) * ((one.clone() - i.clone() * z.clone()).log() - (one + i * z.clone()).log())
-}
-
-fn acot_numeric_eval(z: &Complex<Float>, binary_prec: u32) -> Complex<Float> {
-    atan_numeric_eval(&(complex_one(binary_prec) / z.clone()), binary_prec)
-}
-
-fn asec_numeric_eval(z: &Complex<Float>, binary_prec: u32) -> Complex<Float> {
-    acos_numeric_eval(&(complex_one(binary_prec) / z.clone()), binary_prec)
-}
-
-fn acsc_numeric_eval(z: &Complex<Float>, binary_prec: u32) -> Complex<Float> {
-    asin_numeric_eval(&(complex_one(binary_prec) / z.clone()), binary_prec)
-}
-
-fn sinh_numeric_eval(z: &Complex<Float>, _binary_prec: u32) -> Complex<Float> {
-    z.clone().sinh()
-}
-
-fn cosh_numeric_eval(z: &Complex<Float>, _binary_prec: u32) -> Complex<Float> {
-    z.clone().cosh()
-}
-
-fn tanh_numeric_eval(z: &Complex<Float>, _binary_prec: u32) -> Complex<Float> {
-    z.clone().tanh()
-}
-
-fn coth_numeric_eval(z: &Complex<Float>, binary_prec: u32) -> Complex<Float> {
-    complex_one(binary_prec) / z.clone().tanh()
-}
-
-fn sech_numeric_eval(z: &Complex<Float>, binary_prec: u32) -> Complex<Float> {
-    complex_one(binary_prec) / z.clone().cosh()
-}
-
-fn csch_numeric_eval(z: &Complex<Float>, binary_prec: u32) -> Complex<Float> {
-    complex_one(binary_prec) / z.clone().sinh()
-}
-
-fn asinh_numeric_eval(z: &Complex<Float>, _binary_prec: u32) -> Complex<Float> {
-    z.clone().asinh()
-}
-
-fn acosh_numeric_eval(z: &Complex<Float>, _binary_prec: u32) -> Complex<Float> {
-    z.clone().acosh()
-}
-
-fn atanh_numeric_eval(z: &Complex<Float>, _binary_prec: u32) -> Complex<Float> {
-    z.clone().atanh()
-}
-
-fn acoth_numeric_eval(z: &Complex<Float>, binary_prec: u32) -> Complex<Float> {
-    atanh_numeric_eval(&(complex_one(binary_prec) / z.clone()), binary_prec)
-}
-
-fn asech_numeric_eval(z: &Complex<Float>, binary_prec: u32) -> Complex<Float> {
-    acosh_numeric_eval(&(complex_one(binary_prec) / z.clone()), binary_prec)
-}
-
-fn acsch_numeric_eval(z: &Complex<Float>, binary_prec: u32) -> Complex<Float> {
-    asinh_numeric_eval(&(complex_one(binary_prec) / z.clone()), binary_prec)
+    (i / two) * ((one.clone() - &iz).log() - (one + iz).log())
 }
 
 fn complex_one(prec: u32) -> Complex<Float> {
     Complex::new(Float::with_val(prec, 1), Float::new(prec))
 }
 
-fn complex_i(prec: u32) -> Complex<Float> {
-    Complex::new(Float::new(prec), Float::with_val(prec, 1))
-}
-
-fn complex_i_f64() -> Complex<f64> {
-    Complex::new(0.0, 1.0)
-}
-
 fn atan_eval_complex_f64(z: Complex<f64>) -> Complex<f64> {
-    let i = complex_i_f64();
+    let i = z.i();
     let one = Complex::new(1.0, 0.0);
     let two = Complex::new(2.0, 0.0);
-    (i / two) * ((one - i * z.clone()).log() - (one + i * z).log())
-}
-
-fn cot_eval_f64(x: f64) -> f64 {
-    1.0 / x.tan()
-}
-
-fn sec_eval_f64(x: f64) -> f64 {
-    1.0 / x.cos()
-}
-
-fn csc_eval_f64(x: f64) -> f64 {
-    1.0 / x.sin()
-}
-
-fn acot_eval_f64(x: f64) -> f64 {
-    (1.0 / x).atan()
-}
-
-fn asec_eval_f64(x: f64) -> f64 {
-    (1.0 / x).acos()
-}
-
-fn acsc_eval_f64(x: f64) -> f64 {
-    (1.0 / x).asin()
-}
-
-fn coth_eval_f64(x: f64) -> f64 {
-    1.0 / x.tanh()
-}
-
-fn sech_eval_f64(x: f64) -> f64 {
-    1.0 / x.cosh()
-}
-
-fn csch_eval_f64(x: f64) -> f64 {
-    1.0 / x.sinh()
-}
-
-fn acoth_eval_f64(x: f64) -> f64 {
-    (1.0 / x).atanh()
-}
-
-fn asech_eval_f64(x: f64) -> f64 {
-    (1.0 / x).acosh()
-}
-
-fn acsch_eval_f64(x: f64) -> f64 {
-    (1.0 / x).asinh()
-}
-
-fn complex_float_is_zero(value: &Complex<Float>) -> bool {
-    value.norm().re.to_f64() == 0.0
+    let iz = i * z;
+    (i / two) * ((one - iz).log() - (one + iz).log())
 }
 
 fn bessel_j_numeric_eval(
@@ -1940,7 +1798,7 @@ fn bessel_j_numeric_eval(
     z: &Complex<Float>,
     binary_prec: u32,
 ) -> Option<Complex<Float>> {
-    if complex_float_is_zero(z) {
+    if z.is_zero() {
         if let Some(n) = complex_float_to_integer(order)
             && n >= 0
         {
@@ -1968,7 +1826,7 @@ fn bessel_i_numeric_eval(
     z: &Complex<Float>,
     binary_prec: u32,
 ) -> Option<Complex<Float>> {
-    if complex_float_is_zero(z) {
+    if z.is_zero() {
         if let Some(n) = complex_float_to_integer(order)
             && n >= 0
         {
@@ -1995,7 +1853,7 @@ fn bessel_y_numeric_eval(
     z: &Complex<Float>,
     binary_prec: u32,
 ) -> Option<Complex<Float>> {
-    if complex_float_is_zero(z) {
+    if z.is_zero() {
         return Some(Complex::new(
             Float::with_val(binary_prec, f64::INFINITY),
             Float::new(binary_prec),
@@ -2022,7 +1880,7 @@ fn bessel_k_numeric_eval(
     z: &Complex<Float>,
     binary_prec: u32,
 ) -> Option<Complex<Float>> {
-    if complex_float_is_zero(z) {
+    if z.is_zero() {
         return Some(Complex::new(
             Float::with_val(binary_prec, f64::INFINITY),
             Float::new(binary_prec),
@@ -2903,7 +2761,7 @@ fn polylog_integer_numeric_eval(
         return polylog_series_integer(order as u32, z, binary_prec, 64);
     }
 
-    let log_z = z.clone().log();
+    let log_z = z.log();
     if log_z.norm().re.to_f64().abs() < 1.0 {
         return Some(polylog_real_branch_fix(
             z,
@@ -2915,7 +2773,7 @@ fn polylog_integer_numeric_eval(
         return polylog_series_integer(order as u32, z, binary_prec, 64);
     }
 
-    let inv = complex_one(binary_prec) / z.clone();
+    let inv = z.inv();
     if order == 2 {
         let continued = polylog_integer_numeric_eval(order, &inv, binary_prec, depth + 1)?;
         let log_minus_z = polylog_log_minus(z, binary_prec);
@@ -2934,6 +2792,7 @@ fn polylog_integer_numeric_eval(
 
     let continued = polylog_integer_numeric_eval(order, &inv, binary_prec, depth + 1)?;
     let log_minus_z = polylog_log_minus(z, binary_prec);
+    let i = log_minus_z.i();
     let bernoulli = bernoulli_polynomial(
         order as u32,
         &(Complex::new(Float::with_val(binary_prec, 1), zero.clone())
@@ -2941,13 +2800,13 @@ fn polylog_integer_numeric_eval(
             + log_minus_z.clone()
                 / (Complex::new(Float::with_val(binary_prec, 2), zero.clone())
                     * Complex::new(Float::with_val(binary_prec, Constant::Pi), zero.clone())
-                    * complex_i(binary_prec))),
+                    * i.clone())),
         binary_prec,
     );
     let two_pi_i = Complex::new(
         Float::with_val(binary_prec, 2) * Float::with_val(binary_prec, Constant::Pi),
         zero.clone(),
-    ) * complex_i(binary_prec);
+    ) * i;
     let prefactor = -pow_complex_u32(&two_pi_i, order as u32)
         / Complex::new(factorial_float(order as u32, binary_prec), zero.clone());
 
@@ -3068,7 +2927,7 @@ fn bernoulli_polynomial(n: u32, x: &Complex<Float>, binary_prec: u32) -> Complex
 
 fn polylog_log_minus(z: &Complex<Float>, binary_prec: u32) -> Complex<Float> {
     if z.im.to_f64() == 0.0 && z.re.to_f64() > 0.0 {
-        return z.clone().log()
+        return z.log()
             + Complex::new(
                 Float::new(binary_prec),
                 Float::with_val(binary_prec, Constant::Pi),
