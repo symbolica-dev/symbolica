@@ -3498,8 +3498,21 @@ impl PythonExpression {
 
     /// Compute the inverse tangent of the expression.
     /// Uses the principal branch with cuts on `(-i infinity, -i]` and `[i, i infinity)`.
-    pub fn atan(&self) -> PythonExpression {
-        crate::function!(crate::transcendental::atan(), self.expr.clone()).into()
+    ///
+    /// If `y` is provided, compute `atan(self, y)`, the quadrant-aware inverse tangent
+    /// equivalent to `atan2(y, self)` for real numeric inputs.
+    #[pyo3(signature = (y = None))]
+    pub fn atan(&self, y: Option<ConvertibleToExpression>) -> PythonExpression {
+        if let Some(y) = y {
+            crate::function!(
+                crate::transcendental::atan(),
+                self.expr.clone(),
+                y.to_expression().expr
+            )
+            .into()
+        } else {
+            crate::function!(crate::transcendental::atan(), self.expr.clone()).into()
+        }
     }
 
     /// Compute the inverse cotangent of the expression.

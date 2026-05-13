@@ -845,6 +845,13 @@ impl GeometricSymbols {
                     }
                     let _ = maybe_eval_unary_float_in_norm(arg, out, atan_numeric_eval);
                 }
+                if let Some([x, y]) = function_arguments::<2>(x)
+                    && maybe_eval_binary_float_in_norm(x, y, out, |x, y, prec| {
+                        Some(atan2_numeric_eval(x, y, prec))
+                    })
+                {
+                    return;
+                }
             },
             der = move |x, i, out| {
                 if i == 0
@@ -853,14 +860,47 @@ impl GeometricSymbols {
                     let arg = arg.to_owned();
                     **out = Atom::num(1) / (Atom::num(1) + arg.pow(Atom::num(2)));
                 }
+                if let Some([x, y]) = function_arguments::<2>(x) {
+                    let x = x.to_owned();
+                    let y = y.to_owned();
+                    let denom = x.clone().pow(Atom::num(2)) + y.clone().pow(Atom::num(2));
+                    if i == 0 {
+                        **out = -y / denom;
+                    } else if i == 1 {
+                        **out = x / denom;
+                    }
+                }
             },
             eval = EvaluationInfo::new()
-                .register(|args: &[Complex<Float>]| {
-                    unary_eval_complex_float(args, atan_numeric_eval)
+                .register(|args: &[Complex<Float>]| match args {
+                    [z] => atan_numeric_eval(z, z.re.prec().max(z.im.prec())),
+                    [x, y] => atan2_numeric_eval(
+                        x,
+                        y,
+                        y.re.prec()
+                            .max(y.im.prec())
+                            .max(x.re.prec().max(x.im.prec())),
+                    ),
+                    _ => Complex::new(
+                        Float::with_val(53, rug::float::Special::Nan),
+                        Float::with_val(53, rug::float::Special::Nan),
+                    ),
                 })
-                .register(|args: &[f64]| unary_eval_real_f64(args, f64::atan))
-                .register(|args: &[Complex<f64>]| {
-                    unary_eval_complex_real_f64(args, atan_eval_complex_f64)
+                .register(|args: &[f64]| match args {
+                    [z] => z.atan(),
+                    [x, y] => (*y).atan2(*x),
+                    _ => f64::NAN,
+                })
+                .register(|args: &[Complex<f64>]| match args {
+                    [z] => atan_eval_complex_f64(*z),
+                    [x, y] => {
+                        if y.im == 0.0 && x.im == 0.0 {
+                            Complex::new(y.re.atan2(x.re), 0.0)
+                        } else {
+                            y.atan2(x)
+                        }
+                    }
+                    _ => Complex::new(f64::NAN, f64::NAN),
                 })
         );
 
@@ -1465,6 +1505,9 @@ pub fn acos() -> Symbol {
 ///
 /// `atan(z)` uses the principal branch with branch cuts on the imaginary axis:
 /// `(-i infinity, -i]` and `[i, i infinity)`.
+///
+/// `atan(x, y)` is the quadrant-aware inverse tangent for real numeric inputs,
+/// equivalent to `atan2(y, x)`.
 pub fn atan() -> Symbol {
     GEOMETRICS.atan
 }
@@ -1779,6 +1822,14 @@ fn atan_numeric_eval(z: &Complex<Float>, binary_prec: u32) -> Complex<Float> {
     let iz = i.clone() * z;
 
     (i / two) * ((one.clone() - &iz).log() - (one + iz).log())
+}
+
+fn atan2_numeric_eval(x: &Complex<Float>, y: &Complex<Float>, binary_prec: u32) -> Complex<Float> {
+    if y.im.is_zero() && x.im.is_zero() {
+        Complex::new(y.re.atan2(&x.re), Float::new(binary_prec))
+    } else {
+        y.atan2(x)
+    }
 }
 
 fn complex_one(prec: u32) -> Complex<Float> {
@@ -3402,10 +3453,24 @@ mod tests {
     fn geometric_float_inputs_normalize_immediately() {
         assert!(Complex::<Float>::try_from(parse!("tan(0.25)")).is_ok());
         assert!(Complex::<Float>::try_from(parse!("atan(0.25)")).is_ok());
+        assert!(Complex::<Float>::try_from(parse!("atan(-1.0,1.0)")).is_ok());
         assert!(Complex::<Float>::try_from(parse!("sinh(0.25)")).is_ok());
         assert!(Complex::<Float>::try_from(parse!("atanh(0.25)")).is_ok());
         assert!(Complex::<Float>::try_from(parse!("sec(0.25)")).is_ok());
         assert!(Complex::<Float>::try_from(parse!("coth(1.25)")).is_ok());
+    }
+
+    #[test]
+    fn atan_two_argument_form_uses_quadrant() {
+        let actual = Complex::<Float>::try_from(parse!("atan(-1.0,1.0)")).unwrap();
+        let expected = Complex::new(Float::with_val(53, 1.0_f64.atan2(-1.0)), Float::new(53));
+        assert_close_complex(&actual, &expected, "1e-15");
+
+        let exact_actual = Complex::<Float>::try_from(parse!("atan(-1,1)").to_float(80)).unwrap();
+        let one = Float::with_val(80, 1);
+        let minus_one = Float::with_val(80, -1);
+        let exact_expected = Complex::new(one.atan2(&minus_one), Float::new(80));
+        assert_close_complex(&exact_actual, &exact_expected, "1e-23");
     }
 
     #[test]
@@ -3417,6 +3482,18 @@ mod tests {
         assert_eq!(
             parse!("atan(x)").derivative(symbol!("x")),
             parse!("1/(1+x^2)")
+        );
+        assert_eq!(
+            parse!("atan(x,y)").derivative(symbol!("x")),
+            parse!("-y/(x^2+y^2)")
+        );
+        assert_eq!(
+            parse!("atan(x,y)").derivative(symbol!("y")),
+            parse!("x/(x^2+y^2)")
+        );
+        assert_eq!(
+            parse!("atan(y,x)").derivative(symbol!("x")),
+            parse!("y/(x^2+y^2)")
         );
         assert_eq!(
             parse!("sech(x)").derivative(symbol!("x")),
@@ -3512,7 +3589,7 @@ mod tests {
 
     #[test]
     fn geometric_functions_register_eval_info() {
-        let mut evaluator = parse!("tan(x)+atan(x)+sinh(x)+atanh(x/2)+sec(x)+coth(x+2)")
+        let mut evaluator = parse!("tan(x)+atan(x)+atan(x,-1)+sinh(x)+atanh(x/2)+sec(x)+coth(x+2)")
             .evaluator(
                 &FunctionMap::new(),
                 &[parse!("x")],
