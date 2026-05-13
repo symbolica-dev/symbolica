@@ -1490,10 +1490,13 @@ class Expression:
         Uses the principal branch with cuts on `(-infinity, -1]` and `[1, +infinity)`.
         """
 
-    def atan(self) -> Expression:
+    def atan(self, y: Expression | int | float | complex | Decimal | None = None) -> Expression:
         """
         Take the inverse tangent of this expression, returning the result.
         Uses the principal branch with cuts on `(-i infinity, -i]` and `[i, i infinity)`.
+
+        If `y` is provided, compute `atan(self, y)`, the quadrant-aware inverse
+        tangent equivalent to `atan2(y, self)` for real numeric inputs.
         """
 
     def acot(self) -> Expression:
