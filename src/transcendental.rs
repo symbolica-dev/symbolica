@@ -523,13 +523,11 @@ impl GeometricSymbols {
                 .with_series_function(move |args| {
                     let [arg] = args else { return None; };
                     let point = arg.coefficient(0.into());
-                    if !is_tan_pole(point.as_view()) {
-                        return None;
-                    }
+                    let residue = sec_residue(point.as_view())?;
                     let delta = arg.to_atom() - &point;
                     Some((
                         Atom::num(1) / delta.clone(),
-                        -delta.clone() / function!(State::SIN, delta),
+                        residue * delta.clone() / function!(State::SIN, delta),
                     ))
                 })
                 .with_evaluation_info(
@@ -561,13 +559,11 @@ impl GeometricSymbols {
                 .with_series_function(move |args| {
                     let [arg] = args else { return None; };
                     let point = arg.coefficient(0.into());
-                    if !is_cot_csc_pole(point.as_view()) {
-                        return None;
-                    }
+                    let residue = csc_residue(point.as_view())?;
                     let delta = arg.to_atom() - &point;
                     Some((
                         Atom::num(1) / delta.clone(),
-                        delta.clone() / function!(State::SIN, delta),
+                        residue * delta.clone() / function!(State::SIN, delta),
                     ))
                 })
                 .with_evaluation_info(
@@ -630,6 +626,7 @@ impl GeometricSymbols {
             },
             "tanh";;
             |symbols, b| {
+                let tanh = symbols[6];
                 let sech = symbols[8];
                 b.with_normalization_function(|x, out| {
                     if let Some([arg]) = function_arguments::<1>(x) {
@@ -645,6 +642,15 @@ impl GeometricSymbols {
                         **out = function!(sech, arg).pow(Atom::num(2));
                     }
                 })
+                .with_series_function(move |args| {
+                    let [arg] = args else { return None; };
+                    let point = arg.coefficient(0.into());
+                    if !is_tanh_sech_pole(point.as_view()) {
+                        return None;
+                    }
+                    let delta = arg.to_atom() - &point;
+                    Some((Atom::num(1) / delta.clone(), delta.clone() / function!(tanh, delta)))
+                })
                 .with_evaluation_info(
                     EvaluationInfo::new().register(|args: &[Complex<Float>]| {
                         unary_eval_complex_float(args, tanh_numeric_eval)
@@ -655,6 +661,7 @@ impl GeometricSymbols {
             },
             "coth";;
             |symbols, b| {
+                let tanh = symbols[6];
                 let csch = symbols[9];
                 b.with_normalization_function(|x, out| {
                     if let Some([arg]) = function_arguments::<1>(x) {
@@ -670,6 +677,15 @@ impl GeometricSymbols {
                         **out = -function!(csch, arg).pow(Atom::num(2));
                     }
                 })
+                .with_series_function(move |args| {
+                    let [arg] = args else { return None; };
+                    let point = arg.coefficient(0.into());
+                    if !is_coth_csch_pole(point.as_view()) {
+                        return None;
+                    }
+                    let delta = arg.to_atom() - &point;
+                    Some((Atom::num(1) / delta.clone(), delta.clone() / function!(tanh, delta)))
+                })
                 .with_evaluation_info(
                     EvaluationInfo::new().register(|args: &[Complex<Float>]| {
                         unary_eval_complex_float(args, coth_numeric_eval)
@@ -680,6 +696,7 @@ impl GeometricSymbols {
             },
             "sech";;
             |symbols, b| {
+                let sinh = symbols[4];
                 let sech = symbols[8];
                 let tanh = symbols[6];
                 b.with_normalization_function(|x, out| {
@@ -696,6 +713,13 @@ impl GeometricSymbols {
                         **out = -function!(sech, arg) * function!(tanh, arg);
                     }
                 })
+                .with_series_function(move |args| {
+                    let [arg] = args else { return None; };
+                    let point = arg.coefficient(0.into());
+                    let residue = sech_residue(point.as_view())?;
+                    let delta = arg.to_atom() - &point;
+                    Some((Atom::num(1) / delta.clone(), residue * delta.clone() / function!(sinh, delta)))
+                })
                 .with_evaluation_info(
                     EvaluationInfo::new().register(|args: &[Complex<Float>]| {
                         unary_eval_complex_float(args, sech_numeric_eval)
@@ -706,6 +730,7 @@ impl GeometricSymbols {
             },
             "csch";;
             |symbols, b| {
+                let sinh = symbols[4];
                 let csch = symbols[9];
                 let coth = symbols[7];
                 b.with_normalization_function(|x, out| {
@@ -721,6 +746,13 @@ impl GeometricSymbols {
                     if i == 0 && let Some([arg]) = function_arguments::<1>(x) {
                         **out = -function!(csch, arg) * function!(coth, arg);
                     }
+                })
+                .with_series_function(move |args| {
+                    let [arg] = args else { return None; };
+                    let point = arg.coefficient(0.into());
+                    let residue = csch_residue(point.as_view())?;
+                    let delta = arg.to_atom() - &point;
+                    Some((Atom::num(1) / delta.clone(), residue * delta.clone() / function!(sinh, delta)))
                 })
                 .with_evaluation_info(
                     EvaluationInfo::new().register(|args: &[Complex<Float>]| {
@@ -2366,36 +2398,117 @@ fn is_tan_pole(point: AtomView) -> bool {
         return false;
     };
 
-    ratio.denominator() == 2 && ratio.numerator().to_i64().is_some_and(|n| n % 2 != 0)
+    ratio.denominator() == 2
 }
 
 fn is_cot_csc_pole(point: AtomView) -> bool {
     rational_multiple_of_pi(point).is_some_and(|r| r.denominator() == 1)
 }
 
+fn is_tanh_sech_pole(point: AtomView) -> bool {
+    let Some(ratio) = rational_multiple_of_i_pi(point) else {
+        return false;
+    };
+
+    ratio.denominator() == 2
+}
+
+fn is_coth_csch_pole(point: AtomView) -> bool {
+    rational_multiple_of_i_pi(point).is_some_and(|r| r.denominator() == 1)
+}
+
+fn sec_residue(point: AtomView) -> Option<Atom> {
+    let ratio = rational_multiple_of_pi(point)?;
+    let sin = half_integer_sin_sign(&ratio)?;
+    Some(Atom::num(-sin))
+}
+
+fn csc_residue(point: AtomView) -> Option<Atom> {
+    let ratio = rational_multiple_of_pi(point)?;
+    let cos = integer_cos_sign(&ratio)?;
+    Some(Atom::num(cos))
+}
+
+fn sech_residue(point: AtomView) -> Option<Atom> {
+    let ratio = rational_multiple_of_i_pi(point)?;
+    let sin = half_integer_sin_sign(&ratio)?;
+    Some(Atom::num(-sin) * Atom::i())
+}
+
+fn csch_residue(point: AtomView) -> Option<Atom> {
+    let ratio = rational_multiple_of_i_pi(point)?;
+    let cos = integer_cos_sign(&ratio)?;
+    Some(Atom::num(cos))
+}
+
+fn half_integer_sin_sign(ratio: &Rational) -> Option<i64> {
+    if ratio.denominator() != 2 {
+        return None;
+    }
+
+    let rem = ratio.numerator() % 4;
+    if rem == 1 {
+        Some(1)
+    } else if rem == 3 {
+        Some(-1)
+    } else {
+        None
+    }
+}
+
+fn integer_cos_sign(ratio: &Rational) -> Option<i64> {
+    if ratio.denominator() != 1 {
+        return None;
+    }
+
+    if ratio.numerator() % 2 == 0 {
+        Some(1)
+    } else {
+        Some(-1)
+    }
+}
+
+fn rational_multiple_of_i_pi(point: AtomView) -> Option<Rational> {
+    let ratio = complex_rational_multiple_of_pi(point)?;
+    if ratio.re.is_zero() {
+        Some(ratio.im)
+    } else {
+        None
+    }
+}
+
 fn rational_multiple_of_pi(point: AtomView) -> Option<Rational> {
+    let ratio = complex_rational_multiple_of_pi(point)?;
+    if ratio.im.is_zero() {
+        Some(ratio.re)
+    } else {
+        None
+    }
+}
+
+fn complex_rational_multiple_of_pi(point: AtomView) -> Option<Complex<Rational>> {
     match point {
         AtomView::Num(_) => {
-            let r = Rational::try_from(point).ok()?;
-            if r.is_zero() {
-                Some(Rational::zero())
+            let r = Complex::<Rational>::try_from(point).ok()?;
+            if r.re.is_zero() && r.im.is_zero() {
+                Some(Complex::new(Rational::zero(), Rational::zero()))
             } else {
                 None
             }
         }
         AtomView::Var(v) => {
             if v.get_symbol() == State::PI {
-                Some(Rational::one())
+                Some(Complex::new(Rational::one(), Rational::zero()))
             } else {
                 None
             }
         }
         AtomView::Mul(m) => {
-            let mut coeff = Rational::one();
+            let mut coeff = Complex::new(Rational::one(), Rational::zero());
             let mut has_pi = false;
 
             for factor in m {
-                if let Ok(r) = Rational::try_from(factor) {
+                if let Ok(r) = Complex::<Rational>::try_from(factor) {
                     coeff *= &r;
                     continue;
                 }
@@ -2414,9 +2527,9 @@ fn rational_multiple_of_pi(point: AtomView) -> Option<Rational> {
             if has_pi { Some(coeff) } else { None }
         }
         AtomView::Add(a) => {
-            let mut sum = Rational::zero();
+            let mut sum = Complex::new(Rational::zero(), Rational::zero());
             for term in a {
-                sum += &rational_multiple_of_pi(term)?;
+                sum += &complex_rational_multiple_of_pi(term)?;
             }
             Some(sum)
         }
@@ -3474,12 +3587,67 @@ mod tests {
             parse!("-(x-pi/2)^-1")
         );
         assert_eq!(
+            parse!("sec(x)")
+                .series(x, parse!("3*pi/2"), 0)
+                .unwrap()
+                .to_atom(),
+            parse!("(x-3/2*pi)^-1")
+        );
+        assert_eq!(
             parse!("cot(x)").series(x, 0, 0).unwrap().to_atom(),
             parse!("x^-1")
         );
         assert_eq!(
             parse!("csc(x)").series(x, 0, 0).unwrap().to_atom(),
             parse!("x^-1")
+        );
+        assert_eq!(
+            parse!("csc(x)")
+                .series(x, parse!("pi"), 0)
+                .unwrap()
+                .to_atom(),
+            parse!("-(x-pi)^-1")
+        );
+    }
+
+    #[test]
+    fn hyperbolic_laurent_series() {
+        let x = symbol!("x");
+        assert_eq!(
+            parse!("tanh(x)")
+                .series(x, parse!("1i*pi/2"), 0)
+                .unwrap()
+                .to_atom(),
+            parse!("(x-1i*pi/2)^-1")
+        );
+        assert_eq!(
+            parse!("coth(x)").series(x, 0, 0).unwrap().to_atom(),
+            parse!("x^-1")
+        );
+        assert_eq!(
+            parse!("sech(x)")
+                .series(x, parse!("1i*pi/2"), 0)
+                .unwrap()
+                .to_atom(),
+            parse!("-1i*(x-1i*pi/2)^-1")
+        );
+        assert_eq!(
+            parse!("sech(x)")
+                .series(x, parse!("3i*pi/2"), 0)
+                .unwrap()
+                .to_atom(),
+            parse!("1i*(x-3i*pi/2)^-1")
+        );
+        assert_eq!(
+            parse!("csch(x)").series(x, 0, 0).unwrap().to_atom(),
+            parse!("x^-1")
+        );
+        assert_eq!(
+            parse!("csch(x)")
+                .series(x, parse!("1i*pi"), 0)
+                .unwrap()
+                .to_atom(),
+            parse!("-(x-1i*pi)^-1")
         );
     }
 
