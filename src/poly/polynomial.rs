@@ -29,7 +29,7 @@ thread_local! { static DENSE_MUL_BUFFER: Cell<Vec<u32>> = const { Cell::new(Vec:
 
 /// A ring for multivariate polynomials.
 #[derive(Clone, PartialEq, Eq, Hash, Debug)]
-pub struct PolynomialRing<R: Ring, E: Exponent> {
+pub struct PolynomialRing<R: Ring, E: Exponent = u16> {
     pub(crate) ring: R,
     _phantom_exp: PhantomData<E>,
 }
@@ -1491,7 +1491,7 @@ impl<F: Ring, E: Exponent, O: MonomialOrder> MultivariatePolynomial<F, E, O> {
     /// Get the degree of the variable `x`.
     /// This operation is O(n).
     pub fn degree(&self, x: usize) -> E {
-        if self.nvars() == 0 {
+        if self.nvars() == 0 || self.is_zero() {
             return E::zero();
         }
 
@@ -1508,7 +1508,7 @@ impl<F: Ring, E: Exponent, O: MonomialOrder> MultivariatePolynomial<F, E, O> {
     /// Get the lowest and highest exponent of the variable `x`.
     /// This operation is O(n).
     pub fn degree_bounds(&self, x: usize) -> (E, E) {
-        if self.nvars() == 0 {
+        if self.nvars() == 0 || self.is_zero() {
             return (E::zero(), E::zero());
         }
 

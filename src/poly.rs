@@ -810,6 +810,180 @@ impl PolyVariable {
     }
 }
 
+/// Convert common variable-list shapes to the internal polynomial variable map.
+/// Use `None` if the list is unknown.
+///
+/// This accepts `Arc<Vec<PolyVariable>>` forms, as well as
+/// direct variable lists such as `vec![symbol!("x"), symbol!("y")]`, arrays, slices,
+/// tuples from `symbol!("x", "y")`, `Vec<PolyVariable>`, and `Vec<Atom>` when every
+/// atom can be used as one polynomial variable.
+pub trait IntoVariableMap {
+    fn into_var_map(self) -> Result<Option<Arc<Vec<PolyVariable>>>, String>;
+}
+
+impl IntoVariableMap for Option<Arc<Vec<PolyVariable>>> {
+    fn into_var_map(self) -> Result<Option<Arc<Vec<PolyVariable>>>, String> {
+        Ok(self)
+    }
+}
+
+impl IntoVariableMap for Arc<Vec<PolyVariable>> {
+    fn into_var_map(self) -> Result<Option<Arc<Vec<PolyVariable>>>, String> {
+        Ok(Some(self))
+    }
+}
+
+impl IntoVariableMap for &Arc<Vec<PolyVariable>> {
+    fn into_var_map(self) -> Result<Option<Arc<Vec<PolyVariable>>>, String> {
+        Ok(Some(self.clone()))
+    }
+}
+
+impl IntoVariableMap for () {
+    fn into_var_map(self) -> Result<Option<Arc<Vec<PolyVariable>>>, String> {
+        Ok(None)
+    }
+}
+
+impl IntoVariableMap for Symbol {
+    fn into_var_map(self) -> Result<Option<Arc<Vec<PolyVariable>>>, String> {
+        collect_variable_map([self])
+    }
+}
+
+impl IntoVariableMap for &Symbol {
+    fn into_var_map(self) -> Result<Option<Arc<Vec<PolyVariable>>>, String> {
+        collect_variable_map([*self])
+    }
+}
+
+impl IntoVariableMap for PolyVariable {
+    fn into_var_map(self) -> Result<Option<Arc<Vec<PolyVariable>>>, String> {
+        collect_variable_map([self])
+    }
+}
+
+impl IntoVariableMap for &PolyVariable {
+    fn into_var_map(self) -> Result<Option<Arc<Vec<PolyVariable>>>, String> {
+        collect_variable_map([self.clone()])
+    }
+}
+
+impl IntoVariableMap for Indeterminate {
+    fn into_var_map(self) -> Result<Option<Arc<Vec<PolyVariable>>>, String> {
+        collect_variable_map([self])
+    }
+}
+
+impl IntoVariableMap for Atom {
+    fn into_var_map(self) -> Result<Option<Arc<Vec<PolyVariable>>>, String> {
+        collect_variable_map([self])
+    }
+}
+
+impl IntoVariableMap for &Atom {
+    fn into_var_map(self) -> Result<Option<Arc<Vec<PolyVariable>>>, String> {
+        collect_variable_map([self.clone()])
+    }
+}
+
+fn collect_variable_map<I, V>(vars: I) -> Result<Option<Arc<Vec<PolyVariable>>>, String>
+where
+    I: IntoIterator<Item = V>,
+    V: TryInto<PolyVariable>,
+    V::Error: Display,
+{
+    let mut var_map = vec![];
+    for v in vars {
+        var_map.push(
+            v.try_into()
+                .map_err(|e| format!("Could not convert variable: {e}"))?,
+        );
+    }
+    Ok(Some(Arc::new(var_map)))
+}
+
+macro_rules! impl_into_variable_map_for_tuple {
+    ($($var:ident),+) => {
+        impl<$($var),+> IntoVariableMap for ($($var,)+)
+        where
+            $($var: TryInto<PolyVariable>, <$var as TryInto<PolyVariable>>::Error: Display),+
+        {
+            #[allow(non_snake_case)]
+            fn into_var_map(self) -> Result<Option<Arc<Vec<PolyVariable>>>, String> {
+                let ($($var,)+) = self;
+                let mut var_map = vec![];
+                $(
+                    var_map.push(
+                        $var.try_into()
+                            .map_err(|e| format!("Could not convert variable: {e}"))?,
+                    );
+                )+
+                Ok(Some(Arc::new(var_map)))
+            }
+        }
+    };
+}
+
+impl_into_variable_map_for_tuple!(A);
+impl_into_variable_map_for_tuple!(A, B);
+impl_into_variable_map_for_tuple!(A, B, C);
+impl_into_variable_map_for_tuple!(A, B, C, D);
+impl_into_variable_map_for_tuple!(A, B, C, D, E);
+impl_into_variable_map_for_tuple!(A, B, C, D, E, F);
+impl_into_variable_map_for_tuple!(A, B, C, D, E, F, G);
+impl_into_variable_map_for_tuple!(A, B, C, D, E, F, G, H);
+
+impl<V> IntoVariableMap for Vec<V>
+where
+    V: TryInto<PolyVariable>,
+    V::Error: Display,
+{
+    fn into_var_map(self) -> Result<Option<Arc<Vec<PolyVariable>>>, String> {
+        collect_variable_map(self)
+    }
+}
+
+impl<V> IntoVariableMap for &[V]
+where
+    V: Clone + TryInto<PolyVariable>,
+    V::Error: Display,
+{
+    fn into_var_map(self) -> Result<Option<Arc<Vec<PolyVariable>>>, String> {
+        collect_variable_map(self.iter().cloned())
+    }
+}
+
+impl<V> IntoVariableMap for &Vec<V>
+where
+    V: Clone + TryInto<PolyVariable>,
+    V::Error: Display,
+{
+    fn into_var_map(self) -> Result<Option<Arc<Vec<PolyVariable>>>, String> {
+        self.as_slice().into_var_map()
+    }
+}
+
+impl<V, const N: usize> IntoVariableMap for [V; N]
+where
+    V: TryInto<PolyVariable>,
+    V::Error: Display,
+{
+    fn into_var_map(self) -> Result<Option<Arc<Vec<PolyVariable>>>, String> {
+        collect_variable_map(self)
+    }
+}
+
+impl<V, const N: usize> IntoVariableMap for &[V; N]
+where
+    V: Clone + TryInto<PolyVariable>,
+    V::Error: Display,
+{
+    fn into_var_map(self) -> Result<Option<Arc<Vec<PolyVariable>>>, String> {
+        self.as_slice().into_var_map()
+    }
+}
+
 impl AtomView<'_> {
     /// Convert an expanded expression to a polynomial.
     fn to_polynomial_expanded<R: Ring + ConvertToRing, E: Exponent>(

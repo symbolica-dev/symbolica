@@ -27,7 +27,7 @@ use super::{
 
 /// A rational polynomial field with a factorized denominator.
 #[derive(Clone, PartialEq, Eq, Hash, Debug)]
-pub struct FactorizedRationalPolynomialField<R: Ring, E: PositiveExponent> {
+pub struct FactorizedRationalPolynomialField<R: Ring, E: PositiveExponent = u16> {
     ring: R,
     var_map: Arc<Vec<PolyVariable>>,
     _phantom_exp: PhantomData<E>,
@@ -69,7 +69,7 @@ pub trait FromNumeratorAndFactorizedDenominator<R: Ring, OR: Ring, E: PositiveEx
 
 /// A rational polynomial with a factorized denominator.
 #[derive(Clone, PartialEq, Eq, Hash, Debug)]
-pub struct FactorizedRationalPolynomial<R: Ring, E: PositiveExponent> {
+pub struct FactorizedRationalPolynomial<R: Ring, E: PositiveExponent = u16> {
     pub numerator: MultivariatePolynomial<R, E>,
     pub numer_coeff: R::Element,
     pub denom_coeff: R::Element,
