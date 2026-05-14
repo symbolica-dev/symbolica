@@ -1826,22 +1826,19 @@ pub trait AtomCore: private::Sealed + Sized {
     }
 
     /// Replace all occurrences of the patterns, where replacements are tested in the order that they are given.
-    /// To repeatedly replace multiple patterns, wrap the call in [AtomCore::replace_map].
+    /// To repeatedly replace multiple patterns, wrap the call in [Atom::repeat_map].
     ///
     /// # Example
     ///
     /// ```
     /// use symbolica::prelude::*;
-    /// let expr = parse!("x + y");
-    /// let pattern1 = parse!("x").to_pattern();
-    /// let replacement1 = parse!("y").to_pattern();
-    /// let pattern2 = parse!("y").to_pattern();
-    /// let replacement2 = parse!("x").to_pattern();
+    /// let (x, y) = (parse!("x"), parse!("y"));
+    /// let expr = &x + &y;
     /// let result = expr.replace_multiple([
-    ///     Replacement::new(pattern1, replacement1),
-    ///     Replacement::new(pattern2, replacement2),
+    ///     x.to_pattern().replace_with(y.clone()),
+    ///     Replacement::new(y.clone(), x.clone()),
     /// ]);
-    /// assert_eq!(result, parse!("x + y"));
+    /// assert_eq!(result, x + y);
     /// ```
     fn replace_multiple<I, T>(&self, replacements: I) -> Self::Output
     where
@@ -1854,22 +1851,19 @@ pub trait AtomCore: private::Sealed + Sized {
     }
 
     /// Replace all occurrences of the patterns, where replacements are tested in the order that they are given.
-    /// To repeatedly replace multiple patterns, wrap the call in [AtomCore::replace_map].
+    /// To repeatedly replace multiple patterns, wrap the call in [Atom::repeat_map].
     ///
     /// # Example
     ///
     /// ```
     /// use symbolica::prelude::*;
-    /// let expr = parse!("x + y");
-    /// let pattern1 = parse!("x").to_pattern();
-    /// let replacement1 = parse!("y").to_pattern();
-    /// let pattern2 = parse!("y").to_pattern();
-    /// let replacement2 = parse!("x").to_pattern();
+    /// let (x, y) = (parse!("x"), parse!("y"));
+    /// let expr = &x + &y;
     /// let result = expr.replace_multiple_with_settings([
-    ///     Replacement::new(pattern1, replacement1),
-    ///     Replacement::new(pattern2, replacement2),
+    ///     Replacement::new(x.clone(), y.clone()),
+    ///     Replacement::new(y.clone(), x.clone()),
     /// ], ReplaceSettings::default());
-    /// assert_eq!(result, parse!("x + y"));
+    /// assert_eq!(result, x + y);
     /// ```
     fn replace_multiple_with_settings<I, T>(
         &self,
