@@ -46,11 +46,9 @@ fn main() {
         .export_cpp::<f64>(
             "nested_evaluate.cpp",
             "nested",
-            ExportSettings {
-                include_header: true,
-                inline_asm: InlineASM::default(),
-                ..Default::default()
-            },
+            ExportSettings::new()
+                .include_header(true)
+                .inline_asm(InlineASM::default()),
         )
         .unwrap()
         .compile("nested", CompileOptions::default())

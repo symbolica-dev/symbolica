@@ -31,10 +31,7 @@ fn merge_evaluator_with_external_functions() {
     );
 
     let params = vec![parse!("x")];
-    let settings = OptimizationSettings {
-        horner_iterations: 0,
-        ..Default::default()
-    };
+    let settings = OptimizationSettings::new().horner_iterations(0);
 
     let mut left = parse!(
         "symbolica::test::merge_external_double(x) + symbolica::test::merge_external_left_constant"
@@ -1113,12 +1110,10 @@ fn generate_evaluator() -> ExpressionEvaluator<Complex<Rational>> {
                 .evaluator(
                     &FunctionMap::new(),
                     &params,
-                    OptimizationSettings {
-                        horner_iterations: 1,
-                        n_cores: 1,
-                        verbose: false,
-                        ..Default::default()
-                    },
+                    OptimizationSettings::new()
+                        .horner_iterations(1)
+                        .cores(1)
+                        .verbose(false),
                 )
                 .unwrap()
         })
@@ -1155,11 +1150,9 @@ fn gcc_compiled_evaluator_real() {
         .export_cpp::<f64>(
             "gcc_compiled_evaluator_real.cpp",
             "gcc_compiled_evaluator_real",
-            ExportSettings {
-                include_header: true,
-                inline_asm: InlineASM::default(),
-                ..Default::default()
-            },
+            ExportSettings::new()
+                .include_header(true)
+                .inline_asm(InlineASM::default()),
         )
         .unwrap()
         .compile("gcc_compiled_evaluator_real", CompileOptions::default())
@@ -1178,11 +1171,9 @@ fn gcc_compiled_evaluator_complex() {
         .export_cpp::<Complex<f64>>(
             "gcc_compiled_evaluator_complex.cpp",
             "gcc_compiled_evaluator_complex",
-            ExportSettings {
-                include_header: true,
-                inline_asm: InlineASM::default(),
-                ..Default::default()
-            },
+            ExportSettings::new()
+                .include_header(true)
+                .inline_asm(InlineASM::default()),
         )
         .unwrap()
         .compile("gcc_compiled_evaluator_complex", CompileOptions::default())
@@ -1220,10 +1211,7 @@ fn cuda_compiled_evaluator_real() {
         .unwrap()
         .compile("cuda_compiled_evaluator_real", CompileOptions::cuda())
         .unwrap()
-        .load_with_settings(CudaLoadSettings {
-            number_of_evaluations: 1,
-            ..Default::default()
-        })
+        .load_with_settings(CudaLoadSettings::new().number_of_evaluations(1))
         .unwrap();
     let mut out = vec![0.];
     compiled_evaluator.evaluate(&INPUT_REAL, &mut out).unwrap();
@@ -1247,10 +1235,7 @@ fn cuda_compiled_evaluator_complex() {
         .unwrap()
         .compile("cuda_compiled_evaluator_complex", CompileOptions::cuda())
         .unwrap()
-        .load_with_settings(CudaLoadSettings {
-            number_of_evaluations: 1,
-            ..Default::default()
-        })
+        .load_with_settings(CudaLoadSettings::new().number_of_evaluations(1))
         .unwrap();
     let mut out = vec![Complex::new(0., 0.)];
     compiled_evaluator

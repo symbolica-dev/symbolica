@@ -4,13 +4,13 @@ use super::*;
 #[derive(Clone, Debug)]
 pub struct ComplexEvaluatorSettings {
     /// Whether sqrt with real arguments yields real results.
-    pub sqrt_real: bool,
+    pub(crate) sqrt_real: bool,
     /// Whether log with real arguments yields real results.
-    pub log_real: bool,
+    pub(crate) log_real: bool,
     /// Whether powf with real arguments yields real results.
-    pub powf_real: bool,
+    pub(crate) powf_real: bool,
     /// Report on the number of converted operations.
-    pub verbose: bool,
+    pub(crate) verbose: bool,
 }
 
 impl ComplexEvaluatorSettings {

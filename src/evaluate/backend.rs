@@ -53,9 +53,9 @@ impl CudaEvaluationData {
 #[cfg_attr(feature = "bincode", derive(bincode::Encode, bincode::Decode))]
 #[derive(Debug, Clone)]
 pub struct CudaLoadSettings {
-    pub number_of_evaluations: usize,
+    pub(crate) number_of_evaluations: usize,
     /// The number of threads per block for CUDA evaluation.
-    pub block_size: usize,
+    pub(crate) block_size: usize,
 }
 
 impl Default for CudaLoadSettings {
@@ -64,6 +64,25 @@ impl Default for CudaLoadSettings {
             number_of_evaluations: 1,
             block_size: 256, // default CUDA block size
         }
+    }
+}
+
+impl CudaLoadSettings {
+    /// Create CUDA load settings with default values.
+    pub fn new() -> Self {
+        Self::default()
+    }
+
+    /// Set the number of evaluations.
+    pub fn number_of_evaluations(mut self, number_of_evaluations: usize) -> Self {
+        self.number_of_evaluations = number_of_evaluations;
+        self
+    }
+
+    /// Set the number of threads per CUDA block.
+    pub fn block_size(mut self, block_size: usize) -> Self {
+        self.block_size = block_size;
+        self
     }
 }
 
@@ -2619,17 +2638,17 @@ impl Clone for CompiledCudaComplexEvaluator {
 #[cfg_attr(feature = "bincode", derive(bincode::Encode, bincode::Decode))]
 #[derive(Clone)]
 pub struct CompileOptions {
-    pub optimization_level: usize,
-    pub fast_math: bool,
-    pub unsafe_math: bool,
+    pub(crate) optimization_level: usize,
+    pub(crate) fast_math: bool,
+    pub(crate) unsafe_math: bool,
     /// Compile for the native architecture.
-    pub native: bool,
-    pub compiler: String,
+    pub(crate) native: bool,
+    pub(crate) compiler: String,
     /// Arguments for the compiler call. Arguments with spaces
     /// must be split into a separate strings.
     ///
     /// For CUDA, the argument `-x cu` is required.
-    pub args: Vec<String>,
+    pub(crate) args: Vec<String>,
 }
 
 impl Default for CompileOptions {
@@ -2647,6 +2666,11 @@ impl Default for CompileOptions {
 }
 
 impl CompileOptions {
+    /// Create compile options with default values.
+    pub fn new() -> Self {
+        Self::default()
+    }
+
     /// Set the compiler to `nvcc`.
     pub fn cuda() -> Self {
         CompileOptions {
@@ -2657,6 +2681,48 @@ impl CompileOptions {
             compiler: "nvcc".to_string(),
             args: vec![],
         }
+    }
+
+    /// Set the compiler optimization level.
+    pub fn optimization_level(mut self, optimization_level: usize) -> Self {
+        self.optimization_level = optimization_level;
+        self
+    }
+
+    /// Enable or disable fast-math compiler flags.
+    pub fn fast_math(mut self, fast_math: bool) -> Self {
+        self.fast_math = fast_math;
+        self
+    }
+
+    /// Enable or disable unsafe-math compiler flags.
+    pub fn unsafe_math(mut self, unsafe_math: bool) -> Self {
+        self.unsafe_math = unsafe_math;
+        self
+    }
+
+    /// Enable or disable native architecture compiler flags.
+    pub fn native(mut self, native: bool) -> Self {
+        self.native = native;
+        self
+    }
+
+    /// Set the compiler executable.
+    pub fn compiler(mut self, compiler: impl Into<String>) -> Self {
+        self.compiler = compiler.into();
+        self
+    }
+
+    /// Replace the extra compiler arguments.
+    pub fn args(mut self, args: Vec<String>) -> Self {
+        self.args = args;
+        self
+    }
+
+    /// Append an extra compiler argument.
+    pub fn arg(mut self, arg: impl Into<String>) -> Self {
+        self.args.push(arg.into());
+        self
     }
 }
 

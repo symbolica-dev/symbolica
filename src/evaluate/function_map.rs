@@ -166,18 +166,18 @@ pub(super) struct Expr {
 #[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
 #[derive(Clone)]
 pub struct OptimizationSettings {
-    pub horner_iterations: usize,
-    pub n_cores: usize,
-    pub cpe_iterations: Option<usize>,
-    pub hot_start: Option<Vec<Expression<Complex<Rational>>>>,
+    pub(crate) horner_iterations: usize,
+    pub(crate) n_cores: usize,
+    pub(crate) cpe_iterations: Option<usize>,
+    pub(crate) hot_start: Option<Vec<Expression<Complex<Rational>>>>,
     #[cfg_attr(feature = "serde", serde(skip))]
-    pub abort_check: Option<Box<dyn AbortCheck>>,
-    pub abort_level: usize,
-    pub max_horner_scheme_variables: usize,
-    pub max_common_pair_cache_entries: usize,
-    pub max_common_pair_distance: usize,
-    pub verbose: bool,
-    pub direct_translation: bool,
+    pub(crate) abort_check: Option<Box<dyn AbortCheck>>,
+    pub(crate) abort_level: usize,
+    pub(crate) max_horner_scheme_variables: usize,
+    pub(crate) max_common_pair_cache_entries: usize,
+    pub(crate) max_common_pair_distance: usize,
+    pub(crate) verbose: bool,
+    pub(crate) direct_translation: bool,
 }
 
 #[cfg(feature = "bincode")]
@@ -252,5 +252,78 @@ impl Default for OptimizationSettings {
             verbose: false,
             direct_translation: true,
         }
+    }
+}
+
+impl OptimizationSettings {
+    /// Create optimization settings with default values.
+    pub fn new() -> Self {
+        Self::default()
+    }
+
+    /// Set the number of Horner scheme optimization iterations.
+    pub fn horner_iterations(mut self, horner_iterations: usize) -> Self {
+        self.horner_iterations = horner_iterations;
+        self
+    }
+
+    /// Set the number of CPU cores to use during optimization.
+    pub fn cores(mut self, n_cores: usize) -> Self {
+        self.n_cores = n_cores;
+        self
+    }
+
+    /// Set the number of common pair elimination iterations.
+    pub fn cpe_iterations(mut self, cpe_iterations: Option<usize>) -> Self {
+        self.cpe_iterations = cpe_iterations;
+        self
+    }
+
+    /// Set a hot-start expression list for optimization.
+    pub fn hot_start(mut self, hot_start: Option<Vec<Expression<Complex<Rational>>>>) -> Self {
+        self.hot_start = hot_start;
+        self
+    }
+
+    /// Set the abort check used during optimization.
+    pub fn abort_check(mut self, abort_check: Option<Box<dyn AbortCheck>>) -> Self {
+        self.abort_check = abort_check;
+        self
+    }
+
+    /// Set the abort polling level.
+    pub fn abort_level(mut self, abort_level: usize) -> Self {
+        self.abort_level = abort_level;
+        self
+    }
+
+    /// Set the maximum number of variables considered for a Horner scheme.
+    pub fn max_horner_scheme_variables(mut self, max_horner_scheme_variables: usize) -> Self {
+        self.max_horner_scheme_variables = max_horner_scheme_variables;
+        self
+    }
+
+    /// Set the maximum number of common-pair cache entries.
+    pub fn max_common_pair_cache_entries(mut self, max_common_pair_cache_entries: usize) -> Self {
+        self.max_common_pair_cache_entries = max_common_pair_cache_entries;
+        self
+    }
+
+    /// Set the maximum distance considered for common-pair elimination.
+    pub fn max_common_pair_distance(mut self, max_common_pair_distance: usize) -> Self {
+        self.max_common_pair_distance = max_common_pair_distance;
+        self
+    }
+
+    /// Enable or disable verbose optimization output.
+    pub fn verbose(mut self, verbose: bool) -> Self {
+        self.verbose = verbose;
+        self
+    }
+
+    /// Enable or disable direct translation.
+    pub fn direct_translation(mut self, direct_translation: bool) -> Self {
+        self.direct_translation = direct_translation;
+        self
     }
 }
