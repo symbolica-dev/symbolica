@@ -3776,6 +3776,8 @@ impl Atom {
     }
 
     /// Multiply the atoms in `args`.
+    ///
+    /// This method should be preferred over repeated multiplication when multiplying many atoms.
     pub fn mul_many<'a, I, T>(args: I) -> Atom
     where
         I: IntoIterator<Item = T>,
@@ -3792,6 +3794,36 @@ impl Atom {
             t.as_view().normalize(ws, &mut out);
         });
         out
+    }
+}
+
+impl<'a, T> std::iter::FromIterator<T> for Atom
+where
+    T: Into<AtomOrView<'a>>,
+{
+    /// Add atoms from an iterator using [`Atom::add_many`].
+    fn from_iter<I: IntoIterator<Item = T>>(iter: I) -> Self {
+        Atom::add_many(iter)
+    }
+}
+
+impl<'a, T> std::iter::Sum<T> for Atom
+where
+    T: Into<AtomOrView<'a>>,
+{
+    /// Add atoms from an iterator using [`Atom::add_many`].
+    fn sum<I: Iterator<Item = T>>(iter: I) -> Self {
+        Atom::add_many(iter)
+    }
+}
+
+impl<'a, T> std::iter::Product<T> for Atom
+where
+    T: Into<AtomOrView<'a>>,
+{
+    /// Multiply atoms from an iterator using [`Atom::mul_many`].
+    fn product<I: Iterator<Item = T>>(iter: I) -> Self {
+        Atom::mul_many(iter)
     }
 }
 
@@ -3812,6 +3844,30 @@ mod test {
     #[test]
     fn parse_macro() {
         assert_eq!(parse_lit!(x ^ 2 + 5 + f(x)), parse!("x ^ 2 + 5 + f(x)"));
+    }
+
+    #[test]
+    fn iterator_arithmetic() {
+        let (x, y, z) = symbol!("x", "y", "z");
+        let terms = [Atom::from(x), Atom::from(y), Atom::from(z)];
+
+        let collected: Atom = terms.iter().collect();
+        assert_eq!(collected, parse!("x+y+z"));
+
+        let sum: Atom = terms.iter().sum();
+        assert_eq!(sum, parse!("x+y+z"));
+
+        let product: Atom = terms.iter().product();
+        assert_eq!(product, parse!("x*y*z"));
+
+        let symbol_sum: Atom = [x, y, z].into_iter().sum();
+        assert_eq!(symbol_sum, parse!("x+y+z"));
+
+        let empty_sum: Atom = std::iter::empty::<Atom>().sum();
+        assert_eq!(empty_sum, Atom::Zero);
+
+        let empty_product: Atom = std::iter::empty::<Atom>().product();
+        assert_eq!(empty_product, Atom::num(1));
     }
 
     #[test]
