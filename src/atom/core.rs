@@ -33,7 +33,7 @@ use crate::{
         Pattern, PatternAtomTreeIterator, PatternRestriction, ReplaceBuilder, ReplaceSettings,
     },
     poly::{
-        Exponent, PolyVariable, PositiveExponent,
+        Exponent, IntoVariableMap, PolyVariable, PositiveExponent,
         factor::Factorize,
         gcd::PolynomialGCD,
         polynomial::MultivariatePolynomial,
@@ -1127,26 +1127,24 @@ pub trait AtomCore: private::Sealed + Sized {
     /// ```
     /// use symbolica::prelude::*;
     /// let expr = parse!("x^2 + 2*x + 1");
-    /// let poly = expr.to_polynomial::<_,u8>(&Q, None);
+    /// let poly: MultivariatePolynomial<_> = expr.to_polynomial(&Q, None);
     /// assert_eq!(poly.to_expression(), parse!("x^2 + 2 * x + 1"));
     /// ```
     ///
     /// With explicit variable ordering:
     ///
     /// ```
-    /// # use std::sync::Arc;
     /// use symbolica::prelude::*;
-    /// let expr = parse!("x^2 + 2*x + 1");
-    /// let var_map = Arc::new(vec![symbol!("x").into()]);
-    /// let poly = expr.to_polynomial::<_,u8>(&Q, Some(var_map));
-    /// assert_eq!(poly.to_expression(), parse!("x^2 + 2 * x + 1"));
+    /// let expr = parse!("x^2 +x*y + 3*y^2");
+    /// let poly: MultivariatePolynomial<_> = expr.to_polynomial(&Q, [symbol!("y"), symbol!("x")]);
+    /// assert_eq!(poly.lcoeff(), 3);
     /// ```
     fn to_polynomial<R: EuclideanDomain + ConvertToRing, E: Exponent>(
         &self,
         field: &R,
-        var_map: impl Into<Option<Arc<Vec<PolyVariable>>>>,
+        var_map: impl IntoVariableMap,
     ) -> MultivariatePolynomial<R, E> {
-        self.try_to_polynomial(field, var_map.into()).unwrap()
+        self.try_to_polynomial(field, var_map).unwrap()
     }
 
     /// Convert the atom to a polynomial, optionally in the variable ordering
@@ -1159,26 +1157,25 @@ pub trait AtomCore: private::Sealed + Sized {
     /// ```
     /// use symbolica::prelude::*;
     /// let expr = parse!("x^2 + 2*x + 1");
-    /// let poly = expr.to_polynomial::<_,u8>(&Q, None);
+    /// let poly: MultivariatePolynomial<_> = expr.try_to_polynomial(&Q, None).unwrap();
     /// assert_eq!(poly.to_expression(), parse!("x^2 + 2 * x + 1"));
     /// ```
     ///
     /// With explicit variable ordering:
     ///
     /// ```
-    /// # use std::sync::Arc;
     /// use symbolica::prelude::*;
     /// let expr = parse!("x^2 + 2*x + 1");
-    /// let var_map = Arc::new(vec![symbol!("x").into()]);
-    /// let poly = expr.to_polynomial::<_,u8>(&Q, Some(var_map));
+    /// let poly: MultivariatePolynomial<_> = expr.try_to_polynomial(&Q, symbol!("x")).unwrap();
     /// assert_eq!(poly.to_expression(), parse!("x^2 + 2 * x + 1"));
     /// ```
     fn try_to_polynomial<R: EuclideanDomain + ConvertToRing, E: Exponent>(
         &self,
         field: &R,
-        var_map: impl Into<Option<Arc<Vec<PolyVariable>>>>,
+        var_map: impl IntoVariableMap,
     ) -> Result<MultivariatePolynomial<R, E>, String> {
-        self.as_atom_view().try_to_polynomial(field, var_map.into())
+        self.as_atom_view()
+            .try_to_polynomial(field, var_map.into_var_map()?)
     }
 
     /// Convert the atom to a polynomial in specific variables.
@@ -1217,7 +1214,7 @@ pub trait AtomCore: private::Sealed + Sized {
     /// ```
     /// use symbolica::prelude::*;
     /// let expr = parse!("(x^2 + 2*x + 1) / (x + 1)");
-    /// let rat_poly = expr.to_rational_polynomial::<_, _, u8>(&Q, &Z, None);
+    /// let rat_poly: RationalPolynomial<_> = expr.to_rational_polynomial(&Q, &Z, None);
     /// assert_eq!(rat_poly.to_expression(), parse!("1+x"));
     /// ```
     fn to_rational_polynomial<
@@ -1228,7 +1225,7 @@ pub trait AtomCore: private::Sealed + Sized {
         &self,
         field: &R,
         out_field: &RO,
-        var_map: impl Into<Option<Arc<Vec<PolyVariable>>>>,
+        var_map: impl IntoVariableMap,
     ) -> RationalPolynomial<RO, E>
     where
         RationalPolynomial<RO, E>:
@@ -1248,7 +1245,8 @@ pub trait AtomCore: private::Sealed + Sized {
     /// ```
     /// use symbolica::prelude::*;
     /// let expr = parse!("(x^2 + 2*x + 1) / (x + 1)");
-    /// let rat_poly = expr.to_rational_polynomial::<_, _, u8>(&Q, &Z, None);
+    /// let rat_poly: RationalPolynomial<_> =
+    ///     expr.try_to_rational_polynomial(&Q, &Z, None).unwrap();
     /// assert_eq!(rat_poly.to_expression(), parse!("1+x"));
     /// ```
     fn try_to_rational_polynomial<
@@ -1259,14 +1257,14 @@ pub trait AtomCore: private::Sealed + Sized {
         &self,
         field: &R,
         out_field: &RO,
-        var_map: impl Into<Option<Arc<Vec<PolyVariable>>>>,
+        var_map: impl IntoVariableMap,
     ) -> Result<RationalPolynomial<RO, E>, String>
     where
         RationalPolynomial<RO, E>:
             FromNumeratorAndDenominator<R, RO, E> + FromNumeratorAndDenominator<RO, RO, E>,
     {
         self.as_atom_view()
-            .try_to_rational_polynomial(field, out_field, var_map.into())
+            .try_to_rational_polynomial(field, out_field, var_map.into_var_map()?)
     }
 
     /// Convert the atom to a rational polynomial with factorized denominators, optionally in the variable ordering
@@ -1279,7 +1277,8 @@ pub trait AtomCore: private::Sealed + Sized {
     /// ```
     /// use symbolica::prelude::*;
     /// let expr = parse!("(x^2 + 2*x + 1) / (x + 1)");
-    /// let fact_rat_poly = expr.to_factorized_rational_polynomial::<_, _, u8>(&Q, &Z, None);
+    /// let fact_rat_poly: FactorizedRationalPolynomial<_> =
+    ///     expr.to_factorized_rational_polynomial(&Q, &Z, None);
     /// assert_eq!(
     ///     fact_rat_poly.numerator.to_expression(),
     ///     parse!("x+1")
@@ -1293,14 +1292,14 @@ pub trait AtomCore: private::Sealed + Sized {
         &self,
         field: &R,
         out_field: &RO,
-        var_map: impl Into<Option<Arc<Vec<PolyVariable>>>>,
+        var_map: impl IntoVariableMap,
     ) -> FactorizedRationalPolynomial<RO, E>
     where
         FactorizedRationalPolynomial<RO, E>: FromNumeratorAndFactorizedDenominator<R, RO, E>
             + FromNumeratorAndFactorizedDenominator<RO, RO, E>,
         MultivariatePolynomial<RO, E>: Factorize,
     {
-        self.try_to_factorized_rational_polynomial(field, out_field, var_map.into())
+        self.try_to_factorized_rational_polynomial(field, out_field, var_map)
             .unwrap()
     }
 
@@ -1314,7 +1313,8 @@ pub trait AtomCore: private::Sealed + Sized {
     /// ```
     /// use symbolica::prelude::*;
     /// let expr = parse!("(x^2 + 2*x + 1) / (x + 1)");
-    /// let fact_rat_poly = expr.to_factorized_rational_polynomial::<_, _, u8>(&Q, &Z, None);
+    /// let fact_rat_poly: FactorizedRationalPolynomial<_> =
+    ///     expr.try_to_factorized_rational_polynomial(&Q, &Z, None).unwrap();
     /// assert_eq!(
     ///     fact_rat_poly.numerator.to_expression(),
     ///     parse!("x+1")
@@ -1328,15 +1328,18 @@ pub trait AtomCore: private::Sealed + Sized {
         &self,
         field: &R,
         out_field: &RO,
-        var_map: impl Into<Option<Arc<Vec<PolyVariable>>>>,
+        var_map: impl IntoVariableMap,
     ) -> Result<FactorizedRationalPolynomial<RO, E>, String>
     where
         FactorizedRationalPolynomial<RO, E>: FromNumeratorAndFactorizedDenominator<R, RO, E>
             + FromNumeratorAndFactorizedDenominator<RO, RO, E>,
         MultivariatePolynomial<RO, E>: Factorize,
     {
-        self.as_atom_view()
-            .try_to_factorized_rational_polynomial(field, out_field, var_map.into())
+        self.as_atom_view().try_to_factorized_rational_polynomial(
+            field,
+            out_field,
+            var_map.into_var_map()?,
+        )
     }
 
     /// Format the atom. See [AtomCore::printer] for more convenient printing.

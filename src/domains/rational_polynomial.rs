@@ -37,7 +37,7 @@ use super::{
 
 /// A rational polynomial field.
 #[derive(Clone, PartialEq, Eq, Hash, Debug)]
-pub struct RationalPolynomialField<R: Ring, E: PositiveExponent> {
+pub struct RationalPolynomialField<R: Ring, E: PositiveExponent = u16> {
     ring: R,
     _phantom_exp: PhantomData<E>,
 }
@@ -88,7 +88,7 @@ where
 }
 
 #[derive(Clone, PartialEq, Eq, Hash, Debug)]
-pub struct RationalPolynomial<R: Ring, E: PositiveExponent> {
+pub struct RationalPolynomial<R: Ring, E: PositiveExponent = u16> {
     pub numerator: MultivariatePolynomial<R, E>,
     pub denominator: MultivariatePolynomial<R, E>,
 }

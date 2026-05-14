@@ -138,7 +138,8 @@ pub mod prelude {
     pub use crate::parser::{ParseMode, ParseSettings, Token};
 
     pub use crate::poly::{
-        Exponent, GrevLexOrder, LexOrder, MonomialOrder, PolyVariable, PositiveExponent,
+        Exponent, GrevLexOrder, IntoVariableMap, LexOrder, MonomialOrder, PolyVariable,
+        PositiveExponent,
         factor::Factorize,
         gcd::PolynomialGCD,
         groebner::GroebnerBasis,
