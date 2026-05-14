@@ -157,12 +157,23 @@ impl std::fmt::Display for ReplaceWith<'_> {
 
 /// A replacement, specified by a pattern and the right-hand side,
 /// with optional conditions and settings.
+///
+/// # Example
+///
+/// ```
+/// use symbolica::prelude::*;
+///
+/// let expr = parse!("x+y");
+/// let result = expr.replace_multiple([Replacement::new(parse!("x"), 1),
+///                                     Replacement::new(parse!("y"), 2)]);
+/// assert_eq!(result, 3);
+/// ```
 #[derive(Debug, Clone)]
 pub struct Replacement {
     pub pat: Pattern,
     pub rhs: ReplaceWith<'static>,
     pub conditions: Option<Condition<PatternRestriction>>,
-    pub settings: Option<MatchSettings>,
+    pub match_settings: MatchSettings,
 }
 
 impl std::fmt::Display for Replacement {
@@ -178,22 +189,77 @@ impl std::fmt::Display for Replacement {
 }
 
 impl Replacement {
+    /// Creates a new replacement with the given pattern and right-hand side.
+    /// Can also be constructed using [`Pattern::replace_with`].
     pub fn new<P: Into<Pattern>, R: Into<ReplaceWith<'static>>>(pat: P, rhs: R) -> Self {
         Replacement {
             pat: pat.into(),
             rhs: rhs.into(),
             conditions: None,
-            settings: None,
+            match_settings: MatchSettings::default(),
         }
     }
 
-    pub fn with_conditions(mut self, conditions: Condition<PatternRestriction>) -> Self {
-        self.conditions = Some(conditions);
+    /// Specifies wildcards that try to match as little as possible.
+    pub fn non_greedy_wildcards(mut self, non_greedy_wildcards: Vec<Symbol>) -> Self {
+        self.match_settings.non_greedy_wildcards = non_greedy_wildcards;
         self
     }
 
-    pub fn with_settings(mut self, settings: MatchSettings) -> Self {
-        self.settings = Some(settings);
+    /// Specifies the `[min,max]` level at which the pattern is allowed to match.
+    /// The first level is 0 and the level is increased when entering a function, or going one level deeper in the expression tree,
+    /// depending on `level_is_tree_depth`.
+    pub fn level_range(mut self, level_range: (usize, Option<usize>)) -> Self {
+        self.match_settings.level_range = level_range;
+        self
+    }
+
+    /// Set the minimum level at which the pattern is allowed to match.
+    /// The first level is 0 and the level is increased when entering a function, or going one level deeper in the expression tree,
+    /// depending on `level_is_tree_depth`.
+    pub fn min_level(mut self, min_level: usize) -> Self {
+        self.match_settings.level_range.0 = min_level;
+        self
+    }
+
+    /// Set the maximum level at which the pattern is allowed to match.
+    /// The first level is 0 and the level is increased when entering a function, or going one level deeper in the expression tree,
+    /// depending on `level_is_tree_depth`.
+    pub fn max_level(mut self, max_level: usize) -> Self {
+        self.match_settings.level_range.1 = Some(max_level);
+        self
+    }
+
+    /// Determine whether a level reflects the expression tree depth or the function depth.
+    pub fn level_is_tree_depth(mut self, level_is_tree_depth: bool) -> Self {
+        self.match_settings.level_is_tree_depth = level_is_tree_depth;
+        self
+    }
+
+    /// If true, the pattern may match a subexpression. If false, it must match the entire expression.
+    pub fn partial(mut self, partial: bool) -> Self {
+        self.match_settings.partial = partial;
+        self
+    }
+
+    /// Allow wildcards on the right-hand side that do not appear in the pattern.
+    pub fn allow_new_wildcards_on_rhs(mut self, allow: bool) -> Self {
+        self.match_settings.allow_new_wildcards_on_rhs = allow;
+        self
+    }
+    /// The maximum size of the cache for the right-hand side of a replacement.
+    /// This can be used to prevent expensive recomputations.
+    pub fn rhs_cache_size(mut self, rhs_cache_size: usize) -> Self {
+        self.match_settings.rhs_cache_size = rhs_cache_size;
+        self
+    }
+
+    /// Add a condition to the replacement.
+    pub fn when<'b, R: Into<BorrowedOrOwned<'b, Condition<PatternRestriction>>>>(
+        mut self,
+        conditions: R,
+    ) -> Self {
+        self.conditions = Some(conditions.into().yield_owned());
         self
     }
 }
@@ -217,7 +283,7 @@ impl BorrowReplacement for Replacement {
             pattern: &self.pat,
             rhs: &self.rhs,
             conditions: self.conditions.as_ref(),
-            settings: self.settings.as_ref(),
+            settings: Some(&self.match_settings),
         }
     }
 }
@@ -228,7 +294,7 @@ impl BorrowReplacement for &Replacement {
             pattern: &self.pat,
             rhs: &self.rhs,
             conditions: self.conditions.as_ref(),
-            settings: self.settings.as_ref(),
+            settings: Some(&self.match_settings),
         }
     }
 }
@@ -2629,6 +2695,16 @@ impl Pattern {
             // TODO: simplify if a literal is already present
             Pattern::Mul(vec![self.clone(), Pattern::Literal(Atom::num(-1))])
         }
+    }
+
+    /// Create a replacement that replaces this pattern with a given value.
+    pub fn replace_with<'c, R: Into<BorrowedOrOwned<'c, Pattern>>>(self, rhs: R) -> Replacement {
+        Replacement::new(self, ReplaceWith::Pattern(rhs.into().into_owned()))
+    }
+
+    /// Create a replacement that replaces this pattern with a given map function.
+    pub fn replace_with_map<'c, R: MatchMap + 'static>(self, rhs: R) -> Replacement {
+        Replacement::new(self, ReplaceWith::Map(Box::new(rhs)))
     }
 }
 
