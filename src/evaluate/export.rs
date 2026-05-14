@@ -142,16 +142,16 @@ pub enum NumberClass {
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct ExportSettings {
     /// Include required `#include` statements in the generated code.
-    pub include_header: bool,
+    pub(crate) include_header: bool,
     /// Set the inline assembly mode.
     /// With `inline_asm` set to any value other than `None`,
     /// high-performance inline ASM code will be generated for most
     /// evaluation instructions. This often gives better performance than
     /// the `O3` optimization level and results in very fast compilation.
-    pub inline_asm: InlineASM,
+    pub(crate) inline_asm: InlineASM,
     /// Custom header to include in the generated code.
     /// This can be used to include additional libraries or custom functions.
-    pub custom_header: Option<String>,
+    pub(crate) custom_header: Option<String>,
 }
 
 impl Default for ExportSettings {
@@ -161,6 +161,31 @@ impl Default for ExportSettings {
             inline_asm: InlineASM::default(),
             custom_header: None,
         }
+    }
+}
+
+impl ExportSettings {
+    /// Create export settings with default values.
+    pub fn new() -> Self {
+        Self::default()
+    }
+
+    /// Enable or disable generated header includes.
+    pub fn include_header(mut self, include_header: bool) -> Self {
+        self.include_header = include_header;
+        self
+    }
+
+    /// Set the inline assembly mode.
+    pub fn inline_asm(mut self, inline_asm: InlineASM) -> Self {
+        self.inline_asm = inline_asm;
+        self
+    }
+
+    /// Set a custom header to include in generated code.
+    pub fn custom_header(mut self, custom_header: Option<String>) -> Self {
+        self.custom_header = custom_header;
+        self
     }
 }
 

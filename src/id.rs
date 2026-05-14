@@ -242,9 +242,34 @@ impl BorrowReplacement for BorrowedReplacement<'_> {
 /// Settings for the replacement strategy and tree traversal.
 #[derive(Debug, Default, Copy, Clone)]
 pub struct ReplaceSettings {
-    pub once: bool,
-    pub bottom_up: bool,
-    pub nested: bool,
+    pub(crate) once: bool,
+    pub(crate) bottom_up: bool,
+    pub(crate) nested: bool,
+}
+
+impl ReplaceSettings {
+    /// Create replacement settings with default values.
+    pub fn new() -> Self {
+        Self::default()
+    }
+
+    /// Replace only the first match.
+    pub fn once(mut self, once: bool) -> Self {
+        self.once = once;
+        self
+    }
+
+    /// Traverse the expression bottom-up during replacement.
+    pub fn bottom_up(mut self, bottom_up: bool) -> Self {
+        self.bottom_up = bottom_up;
+        self
+    }
+
+    /// Allow nested replacement matches.
+    pub fn nested(mut self, nested: bool) -> Self {
+        self.nested = nested;
+        self
+    }
 }
 
 /// Construct a replacement by specifying the pattern and finishing it with the right-hand side
@@ -4063,20 +4088,20 @@ impl<'a> Match<'a> {
 #[derive(Debug, Clone)]
 pub struct MatchSettings {
     /// Specifies wildcards that try to match as little as possible.
-    pub non_greedy_wildcards: Vec<Symbol>,
+    pub(crate) non_greedy_wildcards: Vec<Symbol>,
     /// Specifies the `[min,max]` level at which the pattern is allowed to match.
     /// The first level is 0 and the level is increased when entering a function, or going one level deeper in the expression tree,
     /// depending on `level_is_tree_depth`.
-    pub level_range: (usize, Option<usize>),
+    pub(crate) level_range: (usize, Option<usize>),
     /// Determine whether a level reflects the expression tree depth or the function depth.
-    pub level_is_tree_depth: bool,
+    pub(crate) level_is_tree_depth: bool,
     /// If true, the pattern may match a subexpression. If false, it must match the entire expression.
-    pub partial: bool,
+    pub(crate) partial: bool,
     /// Allow wildcards on the right-hand side that do not appear in the pattern.
-    pub allow_new_wildcards_on_rhs: bool,
+    pub(crate) allow_new_wildcards_on_rhs: bool,
     /// The maximum size of the cache for the right-hand side of a replacement.
     /// This can be used to prevent expensive recomputations.
-    pub rhs_cache_size: usize,
+    pub(crate) rhs_cache_size: usize,
 }
 
 static DEFAULT_MATCH_SETTINGS: MatchSettings = MatchSettings::new();
@@ -4103,6 +4128,42 @@ impl MatchSettings {
             allow_new_wildcards_on_rhs: false,
             rhs_cache_size: 100,
         }
+    }
+
+    /// Specify wildcards that try to match as little as possible.
+    pub fn non_greedy_wildcards(mut self, non_greedy_wildcards: Vec<Symbol>) -> Self {
+        self.non_greedy_wildcards = non_greedy_wildcards;
+        self
+    }
+
+    /// Specify the `[min,max]` level at which the pattern is allowed to match.
+    pub fn level_range(mut self, level_range: (usize, Option<usize>)) -> Self {
+        self.level_range = level_range;
+        self
+    }
+
+    /// Set whether a level reflects tree depth or function depth.
+    pub fn level_is_tree_depth(mut self, level_is_tree_depth: bool) -> Self {
+        self.level_is_tree_depth = level_is_tree_depth;
+        self
+    }
+
+    /// Set whether the pattern may match a subexpression.
+    pub fn partial(mut self, partial: bool) -> Self {
+        self.partial = partial;
+        self
+    }
+
+    /// Allow or disallow wildcards on the right-hand side that do not appear in the pattern.
+    pub fn allow_new_wildcards_on_rhs(mut self, allow_new_wildcards_on_rhs: bool) -> Self {
+        self.allow_new_wildcards_on_rhs = allow_new_wildcards_on_rhs;
+        self
+    }
+
+    /// Set the maximum size of the replacement right-hand-side cache.
+    pub fn rhs_cache_size(mut self, rhs_cache_size: usize) -> Self {
+        self.rhs_cache_size = rhs_cache_size;
+        self
     }
 }
 

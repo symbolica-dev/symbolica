@@ -1388,11 +1388,11 @@ pub trait AtomCore: private::Sealed + Sized {
     /// use symbolica::prelude::*;
     /// let (y, x) = symbol!("canon::y", "canon::x");
     /// let expr = x.to_atom() + y;
-    /// let canonical_str = expr.to_canonically_ordered_string(CanonicalOrderingSettings {
-    ///   include_namespace: false,
-    ///   include_attributes: false,
-    ///   ..Default::default()
-    /// });
+    /// let canonical_str = expr.to_canonically_ordered_string(
+    ///     CanonicalOrderingSettings::new()
+    ///         .include_namespace(false)
+    ///         .include_attributes(false),
+    /// );
     /// assert_eq!(canonical_str, "x+y");
     /// ```
     fn to_canonically_ordered_string(&self, settings: CanonicalOrderingSettings) -> String {
