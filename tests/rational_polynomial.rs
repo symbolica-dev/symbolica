@@ -4,7 +4,7 @@ use symbolica::{
     atom::AtomCore,
     domains::integer::Z,
     parse,
-    parser::{ParseMode, ParseSettings, Token},
+    parser::{ParseSettings, Token},
     poly::PolyVariable,
     symbol,
 };
@@ -64,11 +64,9 @@ fn factorized_rational_poly_large() {
 
     let p = Token::parse(
         input,
-        ParseSettings {
-            convert_mul_to_atom: false,
-            distribute_neg: true,
-            mode: ParseMode::Symbolica,
-        },
+        ParseSettings::symbolica()
+            .convert_mul_to_atom(false)
+            .distribute_neg(true),
     )
     .unwrap()
     .to_factorized_rational_polynomial::<_, _, u16>(&Z, &Z, &vars, &var_names)

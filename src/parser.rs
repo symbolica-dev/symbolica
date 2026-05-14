@@ -111,10 +111,10 @@ pub enum ParseMode {
 /// Settings for parsing.
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
 pub struct ParseSettings {
-    pub mode: ParseMode,
+    pub(crate) mode: ParseMode,
     /// Convert completed terms to atoms during parsing, to save memory
-    pub convert_mul_to_atom: bool,
-    pub distribute_neg: bool,
+    pub(crate) convert_mul_to_atom: bool,
+    pub(crate) distribute_neg: bool,
 }
 
 impl ParseMode {
@@ -150,6 +150,24 @@ impl ParseSettings {
             convert_mul_to_atom: false,
             distribute_neg: true,
         }
+    }
+
+    /// Set the parser mode.
+    pub fn mode(mut self, mode: ParseMode) -> Self {
+        self.mode = mode;
+        self
+    }
+
+    /// Enable or disable converting completed multiplications to atoms during parsing.
+    pub fn convert_mul_to_atom(mut self, convert_mul_to_atom: bool) -> Self {
+        self.convert_mul_to_atom = convert_mul_to_atom;
+        self
+    }
+
+    /// Enable or disable distributing a leading negative sign.
+    pub fn distribute_neg(mut self, distribute_neg: bool) -> Self {
+        self.distribute_neg = distribute_neg;
+        self
     }
 }
 

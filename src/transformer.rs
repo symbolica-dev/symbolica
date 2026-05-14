@@ -44,9 +44,9 @@ impl<
 /// [Transformer::Stats].
 #[derive(Clone, Debug)]
 pub struct StatsOptions {
-    pub tag: String,
-    pub color_medium_change_threshold: Option<f64>,
-    pub color_large_change_threshold: Option<f64>,
+    pub(crate) tag: String,
+    pub(crate) color_medium_change_threshold: Option<f64>,
+    pub(crate) color_large_change_threshold: Option<f64>,
 }
 
 #[derive(Clone, Default)]
@@ -55,6 +55,39 @@ pub struct TransformerState {
 }
 
 impl StatsOptions {
+    /// Create statistics options with default thresholds.
+    pub fn new(tag: impl Into<String>) -> Self {
+        Self {
+            tag: tag.into(),
+            color_medium_change_threshold: Some(1.),
+            color_large_change_threshold: Some(5.),
+        }
+    }
+
+    /// Set the tag printed with statistics events.
+    pub fn tag(mut self, tag: impl Into<String>) -> Self {
+        self.tag = tag.into();
+        self
+    }
+
+    /// Set the threshold for medium changes.
+    pub fn color_medium_change_threshold(
+        mut self,
+        color_medium_change_threshold: Option<f64>,
+    ) -> Self {
+        self.color_medium_change_threshold = color_medium_change_threshold;
+        self
+    }
+
+    /// Set the threshold for large changes.
+    pub fn color_large_change_threshold(
+        mut self,
+        color_large_change_threshold: Option<f64>,
+    ) -> Self {
+        self.color_large_change_threshold = color_large_change_threshold;
+        self
+    }
+
     pub fn format_size(&self, size: usize) -> String {
         let mut s = size as f64;
         let kb = 1024.;

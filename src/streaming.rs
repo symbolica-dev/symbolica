@@ -64,11 +64,11 @@ impl WriteableNamedStream for CompressorWriter<BufWriter<File>> {
 #[derive(Clone)]
 pub struct TermStreamerConfig {
     /// The number of cores to use.
-    pub n_cores: usize,
+    pub(crate) n_cores: usize,
     /// The path where expressions are written.
-    pub path: String,
+    pub(crate) path: String,
     /// The maximum size of the memory buffer.
-    pub max_mem_bytes: usize,
+    pub(crate) max_mem_bytes: usize,
 }
 
 impl Default for TermStreamerConfig {
@@ -78,6 +78,31 @@ impl Default for TermStreamerConfig {
             path: ".".to_owned(),
             max_mem_bytes: 1073741824, // 1 GB
         }
+    }
+}
+
+impl TermStreamerConfig {
+    /// Create term streamer configuration with default values.
+    pub fn new() -> Self {
+        Self::default()
+    }
+
+    /// Set the number of cores to use.
+    pub fn cores(mut self, n_cores: usize) -> Self {
+        self.n_cores = n_cores;
+        self
+    }
+
+    /// Set the path where expressions are written.
+    pub fn path(mut self, path: impl Into<String>) -> Self {
+        self.path = path.into();
+        self
+    }
+
+    /// Set the maximum size of the memory buffer.
+    pub fn max_mem_bytes(mut self, max_mem_bytes: usize) -> Self {
+        self.max_mem_bytes = max_mem_bytes;
+        self
     }
 }
 

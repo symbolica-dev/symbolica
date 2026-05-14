@@ -272,9 +272,9 @@ impl fmt::Display for AtomPrinter<'_> {
 /// Settings for canonical ordering of atoms when printing.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub struct CanonicalOrderingSettings {
-    pub include_namespace: bool,
-    pub include_attributes: bool,
-    pub hide_namespace: Option<&'static str>,
+    pub(crate) include_namespace: bool,
+    pub(crate) include_attributes: bool,
+    pub(crate) hide_namespace: Option<&'static str>,
 }
 
 impl Default for CanonicalOrderingSettings {
@@ -284,6 +284,31 @@ impl Default for CanonicalOrderingSettings {
             include_attributes: true,
             hide_namespace: None,
         }
+    }
+}
+
+impl CanonicalOrderingSettings {
+    /// Create canonical ordering settings with default values.
+    pub fn new() -> Self {
+        Self::default()
+    }
+
+    /// Enable or disable namespaces in the canonical ordering.
+    pub fn include_namespace(mut self, include_namespace: bool) -> Self {
+        self.include_namespace = include_namespace;
+        self
+    }
+
+    /// Enable or disable attributes in the canonical ordering.
+    pub fn include_attributes(mut self, include_attributes: bool) -> Self {
+        self.include_attributes = include_attributes;
+        self
+    }
+
+    /// Hide a namespace during canonical ordering.
+    pub fn hide_namespace(mut self, hide_namespace: Option<&'static str>) -> Self {
+        self.hide_namespace = hide_namespace;
+        self
     }
 }
 
