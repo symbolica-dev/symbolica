@@ -212,9 +212,19 @@ def S(
     >>> t = S('t')
     >>> inv = S('inv', series=inv_series)
 
+    Define a function with a custom evaluation:
+    >>> cosh = S(
+    >>>     "my_cosh",
+    >>>     eval={
+    >>>         "float": lambda args: math.cosh(args[0]),
+    >>>         "complex": lambda args: cmath.cosh(args[0]),
+    >>>         "cpp": "template<typename T> T python_my_cosh(T a) { return std::cosh(a); }",
+    >>>     },
+    >>> )
+
     Add custom data to a symbol:
     >>> x = S('x', data={'my_tag': 'my_value'})
-    >>> r = x.get_symbol_data('my_tag')
+    >>> r = x.get_symbol_data('my_tag')s
 
     Parameters
     ----------
@@ -712,6 +722,16 @@ class Expression:
         >>>
         >>> t = S('t')
         >>> inv = S('inv', series=inv_series)
+
+        Define a function with a custom evaluation:
+        >>> cosh = S(
+        >>>     "my_cosh",
+        >>>     eval={
+        >>>         "float": lambda args: math.cosh(args[0]),
+        >>>         "complex": lambda args: cmath.cosh(args[0]),
+        >>>         "cpp": "template<typename T> T python_my_cosh(T a) { return std::cosh(a); }",
+        >>>     },
+        >>> )
 
         Add custom data to a symbol:
         >>> x = S('x', data={'my_tag': 'my_value'})
@@ -2162,7 +2182,7 @@ class Expression:
             The other operand to combine or compare with.
         """
 
-    def __neq__(self, other: Expression | int | float | complex | Decimal) -> Condition:
+    def __ne__(self, other: Expression | int | float | complex | Decimal) -> Condition:
         """
         Compare two expressions.
 
@@ -3053,8 +3073,12 @@ class Expression:
         Examples
         --------
         >>> from symbolica import *
-        >>> a = E("x^2-2").nsolve(E("x"),
-                      Decimal("1.000000000000000000000000000000000000000000000000000000000000000000000000"), 1e-74, 1000000)
+        >>> a = E("x^2-2").nsolve(
+        ...     E("x"),
+        ...     Decimal("1.000000000000000000000000000000000000000000000000000000000000000000000000"),
+        ...     1e-74,
+        ...     1000000,
+        ... )
 
         Parameters
         ----------
@@ -3085,8 +3109,13 @@ class Expression:
         Examples
         --------
         >>> from symbolica import *
-        >>> a = Expression.nsolve_system([E("5x^2+x*y^2+sin(2y)^2 - 2"), E("exp(2x-y)+4y - 3")], [S("x"), S("y")],
-                             [1., 1.], 1e-20, 1000000)
+        >>> a = Expression.nsolve_system(
+        ...     [E("5x^2+x*y^2+sin(2y)^2 - 2"), E("exp(2x-y)+4y - 3")],
+        ...     [S("x"), S("y")],
+        ...     [1., 1.],
+        ...     1e-20,
+        ...     1000000,
+        ... )
 
         Parameters
         ----------
@@ -3119,8 +3148,13 @@ class Expression:
         Examples
         --------
         >>> from symbolica import *
-        >>> a = Expression.nsolve_system([E("5x^2+x*y^2+sin(2y)^2 - 2"), E("exp(2x-y)+4y - 3")], [S("x"), S("y")],
-                             [Decimal("1.00000000000000000"), Decimal("1.00000000000000000")], 1e-20, 1000000)
+        >>> a = Expression.nsolve_system(
+        ...     [E("5x^2+x*y^2+sin(2y)^2 - 2"), E("exp(2x-y)+4y - 3")],
+        ...     [S("x"), S("y")],
+        ...     [Decimal("1.00000000000000000"), Decimal("1.00000000000000000")],
+        ...     1e-20,
+        ...     1000000,
+        ... )
 
         Parameters
         ----------
@@ -3235,12 +3269,10 @@ class Expression:
     ) -> Evaluator:
         """
         Create an evaluator that can evaluate (nested) expressions in an optimized fashion.
-        All constants and functions should be provided as dictionaries, where the function
-        dictionary has a key `(name, printable name, arguments)` and the value is the function
-        body. For example the function `f(x,y)=x^2+y` should be provided as
-        `{(f, "f", (x, y)): x**2 + y}`. All free parameters should be provided in the `params` list.
-
-        Additionally, external functions can be registered that will call a Python function.
+        Function definitions can be provided with `functions`, where each key is
+        `(name, arguments)` and the value is the function body. For example the function
+        `f(x,y)=x^2+y` should be provided as `{(f, (x, y)): x**2 + y}`.
+        All free parameters should be provided in the `params` list.
 
         If `KeyboardInterrupt` is triggered during the optimization, the optimization will stop and will yield the
         current best result.
@@ -3248,37 +3280,27 @@ class Expression:
         Examples
         --------
         >>> from symbolica import *
-        >>> x, y, z, pi, f, g = S(
-        >>>     'x', 'y', 'z', 'pi', 'f', 'g')
+        >>> x, y, z, pi, f, g = S('x', 'y', 'z', 'pi', 'f', 'g')
         >>>
-        >>> e1 = E("x + pi + cos(x) + f(g(x+1),x*2)")
+        >>> e1 = E("x + pi + cos(x) + f(g(x+1), x*2)")
         >>> fd = E("y^2 + z^2*y^2")
         >>> gd = E("y + 5")
         >>>
-        >>> ev = e1.evaluator({pi: Expression.num(22)/7},
-        >>>              {(f, "f", (y, z)): fd, (g, "g", (y, )): gd}, [x])
+        >>> ev = e1.evaluator([x], functions={(f, (y, z)): fd, (g, (y,)): gd})
         >>> res = ev.evaluate([[1.], [2.], [3.]])  # evaluate at x=1, x=2, x=3
         >>> print(res)
 
-
-        Define an external function:
-
-        >>> E("f(x)").evaluator({}, {}, [S("x")],
-                    external_functions={(S("f"), "F"): lambda args: args[0]**2 + 1})
-
         The built-in `if` yields `x+1` when `y != 0` and `x+2` when `y == 0`:
 
-        >>> E("if(y, x + 1, x + 2)").evaluator({}, {}, [S("x"), S("y")])
+        >>> E("if(y, x + 1, x + 2)").evaluator([S("x"), S("y")])
 
         Parameters
         ----------
-        constants: dict[Expression, Expression]
-            A map of expressions to constants. The constants should be numerical expressions.
+        params: Sequence[Expression]
+            A list of free parameters.
         functions: dict[tuple[Expression, Sequence[Expression]], Expression]
             A dictionary of functions. The key is a tuple of the function name and the argument variables.
             The value is the function body. If the function name entry contains arguments, these are considered tags.
-        params: Sequence[Expression]
-            A list of free parameters.
         iterations: int, optional
             The number of Horner schemes to try.
         cpe_iterations: int | None, optional
@@ -3326,7 +3348,7 @@ class Expression:
         >>> x = S('x')
         >>> e1 = E("x^2 + 1")
         >>> e2 = E("x^2 + 2")
-        >>> ev = Expression.evaluator_multiple([e1, e2], {}, {}, [x])
+        >>> ev = Expression.evaluator_multiple([e1, e2], [x])
 
         will recycle the `x^2`
 
@@ -3334,13 +3356,11 @@ class Expression:
         ----------
         exprs: Sequence[Expression]
             The expressions to compile into a joint evaluator.
-        constants: dict[Expression, Expression]
-            The symbolic substitutions applied to constant symbols when building the evaluator.
+        params: Sequence[Expression]
+            The evaluator parameters, in input order.
         functions: dict[tuple[Expression, Sequence[Expression]], Expression]
             A dictionary of functions. The key is a tuple of the function name and the argument variables.
             The value is the function body. If the function name entry contains arguments, these are considered tags.
-        params: Sequence[Expression]
-            The evaluator parameters, in input order.
         iterations: int
             The number of optimization passes to run.
         cpe_iterations: int | None
@@ -3601,7 +3621,7 @@ class HeldExpression:
             The other operand to combine or compare with.
         """
 
-    def __neq__(
+    def __ne__(
         self, other: HeldExpression | Expression | int | float | complex | Decimal
     ) -> Condition:
         """
@@ -4106,8 +4126,8 @@ class Transformer:
 
         Examples
         --------
-        >>> from symbolica import *, Function
-        >>> e = Function.COEFF((x^2+1)/y^2).hold(T().from_coeff())
+        >>> from symbolica import *
+        >>> e = Expression.COEFF((x**2+1)/y**2).hold(T().from_coeff())
         >>> print(e)
         """
 
@@ -4368,8 +4388,11 @@ class Transformer:
         >>> from symbolica import *
         >>> x, y, x_, var, coeff = S('x', 'y', 'x_', 'var', 'coeff')
         >>> e = 5*x + x * y + x**2 + 5
-        >>> print(e.collect(x, key_map=T().replace(x_, var(x_)),
-                coeff_map=T().replace(x_, coeff(x_))))
+        >>> print(e.collect(
+        ...     x,
+        ...     key_map=T().replace(x_, var(x_)),
+        ...     coeff_map=T().replace(x_, coeff(x_)),
+        ... ))
 
         yields `var(1)*coeff(5)+var(x)*coeff(y+5)+var(x^2)*coeff(1)`.
 
@@ -4807,7 +4830,7 @@ class Transformer:
             The other operand to combine or compare with.
         """
 
-    def __neq__(
+    def __ne__(
         self, other: Transformer | Expression | int | float | Decimal
     ) -> Condition:
         """
@@ -6145,7 +6168,7 @@ class Polynomial:
         >>> from symbolica import *
         >>> x = S('x')
         >>> p = E('x*y+2*x+x^2').to_polynomial()
-        >>> r = E('y+1').to_polynomial())
+        >>> r = E('y+1').to_polynomial()
         >>> p.replace(x, r)
 
         Parameters
@@ -6839,7 +6862,7 @@ class NumberFieldPolynomial:
         >>> from symbolica import *
         >>> x = S('x')
         >>> p = E('x*y+2*x+x^2').to_polynomial()
-        >>> r = E('y+1').to_polynomial())
+        >>> r = E('y+1').to_polynomial()
         >>> p.replace(x, r)
 
         Parameters
@@ -7453,7 +7476,7 @@ class FiniteFieldPolynomial:
 
         >>> from symbolica import *
         >>> p = E('x*y+2*x+x^2').to_polynomial()
-        >>> r = E('y+1').to_polynomial())
+        >>> r = E('y+1').to_polynomial()
         >>> p.replace(S('x'), r)
 
         Parameters
@@ -7601,7 +7624,7 @@ class RationalPolynomial:
         Get the denominator.
         """
 
-    def __eq__(self, rhs: Polynomial | int) -> bool:
+    def __eq__(self, rhs: RationalPolynomial | int) -> bool:
         """
         Check if two rational polynomials are equal.
 
@@ -7611,7 +7634,7 @@ class RationalPolynomial:
             The right-hand-side operand.
         """
 
-    def __ne__(self, rhs: Polynomial | int) -> bool:
+    def __ne__(self, rhs: RationalPolynomial | int) -> bool:
         """
         Check if two rational polynomials are not equal.
 
@@ -8305,7 +8328,7 @@ class Matrix:
             The other operand to combine or compare with.
         """
 
-    def __neq__(self, other: Matrix) -> bool:
+    def __ne__(self, other: Matrix) -> bool:
         """
         Compare two matrices.
 
@@ -8474,7 +8497,7 @@ class Evaluator:
         --------
 
         >>> from symbolica import *
-        >>> (ins, m, c) = E('x^2+5/3+cos(x)').evaluator({}, {}, [S('x')]).get_instructions()
+        >>> (ins, m, c) = E('x^2+5/3+cos(x)').evaluator([S('x')]).get_instructions()
         >>>
         >>> for x in ins:
         >>>     print(x)
@@ -8504,8 +8527,8 @@ class Evaluator:
         --------
 
         >>> from symbolica import *
-        >>> e1 = E('x').evaluator({}, {}, [S('x')])
-        >>> e2 = E('x+1').evaluator({}, {}, [S('x')])
+        >>> e1 = E('x').evaluator([S('x')])
+        >>> e2 = E('x+1').evaluator([S('x')])
         >>> e1.merge(e2)
         >>> e1.evaluate([[2.]])
 
@@ -8522,10 +8545,6 @@ class Evaluator:
     def dualize(
         self,
         dual_shape: list[list[int]],
-        external_functions: dict[
-            tuple[str, str, int], Callable[[Sequence[float | complex]], float | complex]
-        ]
-        | None = None,
         zero_components: list[tuple[int, int]] | None = None,
     ) -> None:
         """
@@ -8545,26 +8564,16 @@ class Evaluator:
         --------
 
         >>> from symbolica import *
-        >>> e1 = E('x^2 + y*x').evaluator({}, {}, [S('x'), S('y')])
+        >>> e1 = E('x^2 + y*x').evaluator([S('x'), S('y')])
         >>> e1.dualize([[0, 0], [1, 0], [0, 1]])
         >>> r = e1.evaluate([[2., 1., 0., 3., 0., 1.]])
         >>> print(r)  # [10, 7, 2]
-
-        Mapping external functions:
-
-        >>> ev = E('f(x + 1)').evaluator({}, {}, [S('x')], external_functions={(S('f'), 'f'): lambda args: args[0]})
-        >>> ev.dualize([[0], [1]], {('f', 'f0', 0): lambda args: args[0], ('f', 'f1', 1): lambda args: args[1]})
-        >>> print(ev.evaluate([[2., 1.]]))  # [[3. 1.]]
 
         Parameters
         ----------
         dual_shape : list[list[int]]
             The shape of the dual numbers, indicating the number of derivatives
             in every variable per term.
-        external_functions : dict[tuple[str, str, int], Callable[[Sequence[float | complex]], float | complex]] | None
-            A mapping from external function identifiers to functions that compute a single component each.
-            The key is a tuple of function name, unique printable name, and component index.
-            The value is a function that takes the flattened parameters and returns a component.
         zero_components : list[tuple[int, int]] | None
             A list of components that are known to be zero and can be skipped in the dualization.
             Each component is specified as a tuple of (parameter index, dual index).
@@ -8894,7 +8903,7 @@ class Evaluator:
 
         >>> from symbolica import *
         >>> import numpy as np
-        >>> ev = E('x * y + 2').evaluator({}, {}, [S('x'), S('y')])
+        >>> ev = E('x * y + 2').evaluator([S('x'), S('y')])
         >>> print(ev.evaluate(np.array([1., 2., 3., 4., 5., 6.]).reshape((3, 2))))
 
         Yields`[[ 4.] [ 8.] [14.]]`
@@ -8919,7 +8928,7 @@ class Evaluator:
         Evaluate the function for a single input with 50 digits of precision:
 
         >>> from symbolica import *
-        >>> ev = E('x^2').evaluator({}, {}, [S('x')])
+        >>> ev = E('x^2').evaluator([S('x')])
         >>> print(ev.evaluate_with_prec([Decimal('1.234567890121223456789981273238947212312338947923')], 50))
 
         Yields `1.524157875318369274550121833760353508310334033629`
@@ -8946,7 +8955,7 @@ class Evaluator:
 
         >>> from symbolica import *
         >>> import numpy as np
-        >>> ev = E('x * y + 2').evaluator({}, {}, [S('x'), S('y')])
+        >>> ev = E('x * y + 2').evaluator([S('x'), S('y')])
         >>> print(ev.evaluate(np.array([1.+2j, 2., 3., 4., 5., 6.]).reshape((3, 2))))
 
         Yields`[[ 4.+4.j] [14.+0.j] [32.+0.j]]`
@@ -8973,7 +8982,7 @@ class Evaluator:
         Evaluate the function for a single input with 50 digits of precision:
 
         >>> from symbolica import *
-        >>> ev = E('x^2').evaluator({}, {}, [S('x')])
+        >>> ev = E('x^2').evaluator([S('x')])
         >>> print(ev.evaluate_complex_with_prec(
         >>>     [(Decimal('1.234567890121223456789981273238947212312338947923'), Decimal('3.434567890121223356789981273238947212312338947923'))], 50))
 
@@ -9699,7 +9708,7 @@ class Graph:
             The other operand to combine or compare with.
         """
 
-    def __neq__(self, other: Graph) -> bool:
+    def __ne__(self, other: Graph) -> bool:
         """
         Compare two graphs.
 

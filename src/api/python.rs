@@ -1257,7 +1257,7 @@ Define a custom series function:
 Define a numeric evaluation function:
 >>> sq = S("sq", eval={"complex": lambda args: args[0] * args[0]})
 >>> x = S("x")
->>> ev = sq(x).evaluator({}, {}, [x])
+>>> ev = sq(x).evaluator([x])
 >>> ev.evaluate_complex([2+0j])
 
 Parameters

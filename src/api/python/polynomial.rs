@@ -881,7 +881,7 @@ impl PythonPolynomial {
     /// >>> from symbolica import Expression
     /// >>> x = S('x')
     /// >>> p = E('x*y+2*x+x^2').to_polynomial()
-    /// >>> r = E('y+1').to_polynomial())
+    /// >>> r = E('y+1').to_polynomial()
     /// >>> p.replace(x, r)
     pub fn replace(&self, x: PythonExpression, v: PolynomialOrInteger<Self>) -> PyResult<Self> {
         let var: PolyVariable = x
@@ -2177,7 +2177,7 @@ impl PythonFiniteFieldPolynomial {
     /// >>> from symbolica import Expression
     /// >>> x = S('x')
     /// >>> p = E('x*y+2*x+x^2').to_polynomial()
-    /// >>> r = E('y+1').to_polynomial())
+    /// >>> r = E('y+1').to_polynomial()
     /// >>> p.replace(x, r)
     pub fn replace(&self, x: PythonExpression, v: PolynomialOrInteger<Self>) -> PyResult<Self> {
         let id = match x.expr.as_view() {
@@ -3190,7 +3190,7 @@ impl PythonPrimeTwoPolynomial {
     /// >>> from symbolica import Expression
     /// >>> x = S('x')
     /// >>> p = E('x*y+2*x+x^2').to_polynomial()
-    /// >>> r = E('y+1').to_polynomial())
+    /// >>> r = E('y+1').to_polynomial()
     /// >>> p.replace(x, r)
     pub fn replace(&self, x: PythonExpression, v: PolynomialOrInteger<Self>) -> PyResult<Self> {
         let id = match x.expr.as_view() {
@@ -4137,7 +4137,7 @@ impl PythonGaloisFieldPrimeTwoPolynomial {
     /// >>> from symbolica import Expression
     /// >>> x = S('x')
     /// >>> p = E('x*y+2*x+x^2').to_polynomial()
-    /// >>> r = E('y+1').to_polynomial())
+    /// >>> r = E('y+1').to_polynomial()
     /// >>> p.replace(x, r)
     pub fn replace(&self, x: PythonExpression, v: PolynomialOrInteger<Self>) -> PyResult<Self> {
         let id = match x.expr.as_view() {
@@ -5058,7 +5058,7 @@ impl PythonGaloisFieldPolynomial {
     /// >>> from symbolica import Expression
     /// >>> x = S('x')
     /// >>> p = E('x*y+2*x+x^2').to_polynomial()
-    /// >>> r = E('y+1').to_polynomial())
+    /// >>> r = E('y+1').to_polynomial()
     /// >>> p.replace(x, r)
     pub fn replace(&self, x: PythonExpression, v: PolynomialOrInteger<Self>) -> PyResult<Self> {
         let id = match x.expr.as_view() {
@@ -5987,7 +5987,7 @@ impl PythonNumberFieldPolynomial {
     /// >>> from symbolica import Expression
     /// >>> x = S('x')
     /// >>> p = E('x*y+2*x+x^2').to_polynomial()
-    /// >>> r = E('y+1').to_polynomial())
+    /// >>> r = E('y+1').to_polynomial()
     /// >>> p.replace(x, r)
     pub fn replace(&self, x: PythonExpression, v: PolynomialOrInteger<Self>) -> PyResult<Self> {
         let id = match x.expr.as_view() {
