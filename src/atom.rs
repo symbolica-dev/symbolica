@@ -76,6 +76,11 @@ pub use self::representation::{
     NumView, Pow, PowView, Var, VarView,
 };
 use self::representation::{FunView, RawAtom};
+pub use crate::{
+    evaluate::EvaluationError,
+    poly::{PolynomialConversionError, series::SeriesError},
+    tensors::TensorCanonicalizationError,
+};
 
 /// A symbol with a namespace, and optional positional data (file and line) of its definition.
 /// Can be created with the [wrap_symbol!](crate::wrap_symbol) macro or by converting from a string that is

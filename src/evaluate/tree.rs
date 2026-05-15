@@ -1,5 +1,118 @@
 use super::*;
 
+/// Errors that can occur while building or performing numerical expression evaluation.
+#[derive(Clone, Debug, PartialEq, Eq, Hash)]
+pub enum EvaluationError {
+    UnsupportedHotStart,
+    UnsupportedCoefficient {
+        coefficient: &'static str,
+    },
+    UndefinedVariable {
+        symbol: Symbol,
+    },
+    UndefinedFunction {
+        expression: Atom,
+    },
+    MissingFunction {
+        symbol: Symbol,
+    },
+    WrongNumberOfArguments {
+        function: Symbol,
+        expected: usize,
+        actual: usize,
+    },
+    UnsupportedBuiltinArity {
+        function: Symbol,
+        expected: usize,
+        actual: usize,
+    },
+    NumericalTypeDoesNotSupportImaginaryUnit,
+    EvaluationFailed {
+        expression: Atom,
+        reason: String,
+    },
+    EvaluationTreeConstructionFailed {
+        expression: Atom,
+        reason: String,
+    },
+    EvaluatorConstructionFailed {
+        expression: Atom,
+        reason: String,
+    },
+    MultiEvaluatorConstructionFailed {
+        expression_count: usize,
+        reason: String,
+    },
+}
+
+impl std::error::Error for EvaluationError {}
+
+impl std::fmt::Display for EvaluationError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            EvaluationError::UnsupportedHotStart => {
+                f.write_str("hot start is not supported before the deprecation of Expression")
+            }
+            EvaluationError::UnsupportedCoefficient { coefficient } => {
+                write!(
+                    f,
+                    "{coefficient} coefficients are not supported for evaluation"
+                )
+            }
+            EvaluationError::UndefinedVariable { symbol } => {
+                write!(
+                    f,
+                    "variable {symbol} is not in the constant map or function map"
+                )
+            }
+            EvaluationError::UndefinedFunction { expression } => {
+                write!(f, "undefined function {expression}")
+            }
+            EvaluationError::MissingFunction { symbol } => {
+                write!(f, "missing function {}", symbol.get_name())
+            }
+            EvaluationError::WrongNumberOfArguments {
+                function,
+                expected,
+                actual,
+            } => write!(
+                f,
+                "function {} called with wrong number of arguments: {actual} vs {expected}",
+                function.get_name()
+            ),
+            EvaluationError::UnsupportedBuiltinArity {
+                function,
+                expected,
+                actual,
+            } => write!(
+                f,
+                "builtin function {} must have exactly {expected} argument(s), got {actual}",
+                function.get_name()
+            ),
+            EvaluationError::NumericalTypeDoesNotSupportImaginaryUnit => {
+                f.write_str("numerical type does not support imaginary unit")
+            }
+            EvaluationError::EvaluationFailed { expression, reason } => {
+                write!(f, "could not evaluate {expression}: {reason}")
+            }
+            EvaluationError::EvaluationTreeConstructionFailed { expression, reason } => write!(
+                f,
+                "could not build an evaluation tree for {expression}: {reason}"
+            ),
+            EvaluationError::EvaluatorConstructionFailed { expression, reason } => {
+                write!(f, "could not build an evaluator for {expression}: {reason}")
+            }
+            EvaluationError::MultiEvaluatorConstructionFailed {
+                expression_count,
+                reason,
+            } => write!(
+                f,
+                "could not build an evaluator for {expression_count} expressions: {reason}"
+            ),
+        }
+    }
+}
+
 #[derive(Debug, Clone)]
 struct SplitExpression<T> {
     tree: Vec<Expression<T>>,
@@ -48,7 +161,7 @@ impl<'a> AtomView<'a> {
         fn_map: &FunctionMap,
         params: &[Atom],
         settings: OptimizationSettings,
-    ) -> Result<ExpressionEvaluator<Complex<Rational>>, String> {
+    ) -> Result<ExpressionEvaluator<Complex<Rational>>, EvaluationError> {
         if settings.verbose {
             let mut cse = HashSet::default();
             let (mut n_add, mut n_mul) = (0, 0);
@@ -69,9 +182,7 @@ impl<'a> AtomView<'a> {
 
         let v = match &settings.hot_start {
             Some(_) => {
-                return Err(
-                    "Hot start not supported before the deprecation of Expression".to_owned(),
-                );
+                return Err(EvaluationError::UnsupportedHotStart);
             }
             None => {
                 // start with an occurence order Horner scheme
@@ -356,7 +467,7 @@ impl<'a> AtomView<'a> {
         fn_map: &FunctionMap,
         params: &[Atom],
         settings: OptimizationSettings,
-    ) -> Result<ExpressionEvaluator<Complex<Rational>>, String> {
+    ) -> Result<ExpressionEvaluator<Complex<Rational>>, EvaluationError> {
         let mut constants = Vec::new();
         let mut constant_map = HashMap::new();
         let mut instr = Vec::new();
@@ -439,10 +550,11 @@ impl<'a> AtomView<'a> {
 
                     if sym.is_fixed_builtin() {
                         if args.len() != 1 {
-                            return Err(format!(
-                                "Builtin function {} must have exactly one argument",
-                                sym.get_name()
-                            ));
+                            return Err(EvaluationError::UnsupportedBuiltinArity {
+                                function: *sym,
+                                expected: 1,
+                                actual: args.len(),
+                            });
                         }
                         instructions.push((
                             Instr::BuiltinFun(slot_map!(o), sym.clone(), slot_map!(args[0])),
@@ -518,7 +630,7 @@ impl<'a> AtomView<'a> {
         subexpressions: &mut HashMap<AtomView<'a>, Slot>,
         args: &mut Vec<(AtomView<'a>, Slot)>,
         arg_start: usize,
-    ) -> Result<Slot, String> {
+    ) -> Result<Slot, EvaluationError> {
         if matches!(*self, AtomView::Var(_) | AtomView::Fun(_)) {
             if let Some(p) = args.iter().skip(arg_start).find(|s| *self == s.0) {
                 return Ok(p.1);
@@ -544,15 +656,26 @@ impl<'a> AtomView<'a> {
                         // TODO: converting back to rational is slow
                         Complex::new(r.to_float().to_rational(), i.to_float().to_rational())
                     }
-                    CoefficientView::Indeterminate => Err("Cannot convert indeterminate")?,
-                    CoefficientView::Infinity(_) => Err("Cannot convert infinity")?,
-                    CoefficientView::FiniteField(_, _) => {
-                        Err("Finite field not yet supported for evaluation".to_string())?
+                    CoefficientView::Indeterminate => {
+                        return Err(EvaluationError::UnsupportedCoefficient {
+                            coefficient: "indeterminate",
+                        });
                     }
-                    CoefficientView::RationalPolynomial(_) => Err(
-                        "Rational polynomial coefficient not yet supported for evaluation"
-                            .to_string(),
-                    )?,
+                    CoefficientView::Infinity(_) => {
+                        return Err(EvaluationError::UnsupportedCoefficient {
+                            coefficient: "infinity",
+                        });
+                    }
+                    CoefficientView::FiniteField(_, _) => {
+                        return Err(EvaluationError::UnsupportedCoefficient {
+                            coefficient: "finite field",
+                        });
+                    }
+                    CoefficientView::RationalPolynomial(_) => {
+                        return Err(EvaluationError::UnsupportedCoefficient {
+                            coefficient: "rational polynomial",
+                        });
+                    }
                 };
 
                 if let Some(&i) = constant_map.get(&c) {
@@ -577,10 +700,7 @@ impl<'a> AtomView<'a> {
                     return Ok(Slot::Const(i));
                 }
 
-                Err(format!(
-                    "Variable {} not in constant map",
-                    v.get_symbol().get_name()
-                ))?
+                return Err(EvaluationError::UndefinedVariable { symbol: s });
             }
             AtomView::Fun(f) => {
                 let name = f.get_symbol();
@@ -619,10 +739,11 @@ impl<'a> AtomView<'a> {
 
                 let fun = if name == Symbol::IF {
                     if f.get_nargs() != 3 {
-                        return Err(format!(
-                            "Condition function called with wrong number of arguments: {} vs 3",
-                            f.get_nargs(),
-                        ));
+                        return Err(EvaluationError::WrongNumberOfArguments {
+                            function: name,
+                            expected: 3,
+                            actual: f.get_nargs(),
+                        });
                     }
 
                     let mut arg_iter = f.iter();
@@ -846,7 +967,9 @@ impl<'a> AtomView<'a> {
                     ));
                     return Ok(temp);
                 } else {
-                    return Err(format!("Undefined function {}", self.to_plain_string()));
+                    return Err(EvaluationError::UndefinedFunction {
+                        expression: self.to_owned(),
+                    });
                 };
 
                 {
@@ -858,12 +981,11 @@ impl<'a> AtomView<'a> {
                     } = fun;
 
                     if f.get_nargs() != arg_spec.len() + tag_len {
-                        return Err(format!(
-                            "Function {} called with wrong number of arguments: {} vs {}",
-                            f.get_symbol().get_name(),
-                            f.get_nargs(),
-                            arg_spec.len() + tag_len
-                        ));
+                        return Err(EvaluationError::WrongNumberOfArguments {
+                            function: f.get_symbol(),
+                            expected: arg_spec.len() + tag_len,
+                            actual: f.get_nargs(),
+                        });
                     }
 
                     let old_arg_stack_len = args.len();
@@ -3256,7 +3378,7 @@ impl<'a> AtomView<'a> {
         &self,
         fn_map: &FunctionMap,
         params: &[Atom],
-    ) -> Result<EvalTree<Complex<Rational>>, String> {
+    ) -> Result<EvalTree<Complex<Rational>>, EvaluationError> {
         Self::to_eval_tree_multiple(std::slice::from_ref(self), fn_map, params)
     }
 
@@ -3265,7 +3387,7 @@ impl<'a> AtomView<'a> {
         exprs: &[A],
         fn_map: &FunctionMap,
         params: &[Atom],
-    ) -> Result<EvalTree<Complex<Rational>>, String> {
+    ) -> Result<EvalTree<Complex<Rational>>, EvaluationError> {
         let mut funcs = vec![];
         let mut func_id_to_index = HashMap::default();
         let mut external_functions = vec![];
@@ -3309,7 +3431,7 @@ impl<'a> AtomView<'a> {
             SplitExpression<Complex<Rational>>,
         )>,
         external_functions: &mut Vec<ExternalFunctionContainer<Complex<Rational>>>,
-    ) -> Result<Expression<Complex<Rational>>, String> {
+    ) -> Result<Expression<Complex<Rational>>, EvaluationError> {
         if matches!(self, AtomView::Var(_) | AtomView::Fun(_)) {
             if let Some(p) = args.iter().position(|s| *self == s.as_view()) {
                 return Ok(Expression::ReadArg(0, p));
@@ -3343,23 +3465,26 @@ impl<'a> AtomView<'a> {
                         )),
                     ))
                 }
-                CoefficientView::Indeterminate => {
-                    panic!("Cannot convert indeterminate")
-                }
-                CoefficientView::Infinity(_) => {
-                    panic!("Cannot convert infinity")
-                }
+                CoefficientView::Indeterminate => Err(EvaluationError::UnsupportedCoefficient {
+                    coefficient: "indeterminate",
+                }),
+                CoefficientView::Infinity(_) => Err(EvaluationError::UnsupportedCoefficient {
+                    coefficient: "infinity",
+                }),
                 CoefficientView::FiniteField(_, _) => {
-                    Err("Finite field not yet supported for evaluation".to_string())
+                    Err(EvaluationError::UnsupportedCoefficient {
+                        coefficient: "finite field",
+                    })
                 }
-                CoefficientView::RationalPolynomial(_) => Err(
-                    "Rational polynomial coefficient not yet supported for evaluation".to_string(),
-                ),
+                CoefficientView::RationalPolynomial(_) => {
+                    Err(EvaluationError::UnsupportedCoefficient {
+                        coefficient: "rational polynomial",
+                    })
+                }
             },
-            AtomView::Var(v) => Err(format!(
-                "Variable {} not in constant map",
-                v.get_symbol().get_name()
-            )),
+            AtomView::Var(v) => Err(EvaluationError::UndefinedVariable {
+                symbol: v.get_symbol(),
+            }),
             AtomView::Fun(f) => {
                 let name = f.get_symbol();
                 if [
@@ -3393,10 +3518,11 @@ impl<'a> AtomView<'a> {
 
                 if name == Symbol::IF {
                     if f.get_nargs() != 3 {
-                        return Err(format!(
-                            "Condition function called with wrong number of arguments: {} vs 3",
-                            f.get_nargs(),
-                        ));
+                        return Err(EvaluationError::WrongNumberOfArguments {
+                            function: name,
+                            expected: 3,
+                            actual: f.get_nargs(),
+                        });
                     }
 
                     let mut arg_iter = f.iter();
@@ -3461,12 +3587,11 @@ impl<'a> AtomView<'a> {
                 {
                     return {
                         if f.get_nargs() != arg_spec.len() + tag_len {
-                            return Err(format!(
-                                "Function {} called with wrong number of arguments: {} vs {}",
-                                f.get_symbol().get_name(),
-                                f.get_nargs(),
-                                arg_spec.len() + tag_len
-                            ));
+                            return Err(EvaluationError::WrongNumberOfArguments {
+                                function: f.get_symbol(),
+                                expected: arg_spec.len() + tag_len,
+                                actual: f.get_nargs(),
+                            });
                         }
 
                         let eval_args = f
@@ -3545,7 +3670,9 @@ impl<'a> AtomView<'a> {
                     return Ok(Expression::Fun(0, name, tags, eval_args));
                 }
 
-                Err(format!("Undefined function {}", self.to_plain_string()))
+                Err(EvaluationError::UndefinedFunction {
+                    expression: self.to_owned(),
+                })
             }
             AtomView::Pow(p) => {
                 let (b, e) = p.get_base_exp();
@@ -3628,7 +3755,7 @@ impl<'a> AtomView<'a> {
         coeff_map: F,
         const_map: &HashMap<A, T>,
         function_map: &HashMap<Symbol, EvaluationFn<A, T>>,
-    ) -> Result<T, String> {
+    ) -> Result<T, EvaluationError> {
         let mut cache = HashMap::default();
         self.evaluate_impl(coeff_map, const_map, function_map, &mut cache)
     }
@@ -3639,7 +3766,7 @@ impl<'a> AtomView<'a> {
         const_map: &HashMap<A, T>,
         function_map: &HashMap<Symbol, EvaluationFn<A, T>>,
         cache: &mut HashMap<AtomView<'a>, T>,
-    ) -> Result<T, String> {
+    ) -> Result<T, EvaluationError> {
         if let Some(c) = const_map.get(self.get_data()) {
             return Ok(c.clone());
         }
@@ -3652,9 +3779,9 @@ impl<'a> AtomView<'a> {
                     } else {
                         let num = coeff_map(&Rational::from_int_unchecked(n, d));
                         Ok(coeff_map(&Rational::from_int_unchecked(ni, di))
-                            * num.i().ok_or_else(|| {
-                                "Numerical type does not support imaginary unit".to_string()
-                            })?
+                            * num
+                                .i()
+                                .ok_or(EvaluationError::NumericalTypeDoesNotSupportImaginaryUnit)?
                             + num)
                     }
                 }
@@ -3664,9 +3791,9 @@ impl<'a> AtomView<'a> {
                     } else {
                         let num = coeff_map(&l.to_rat());
                         Ok(coeff_map(&i.to_rat())
-                            * num.i().ok_or_else(|| {
-                                "Numerical type does not support imaginary unit".to_string()
-                            })?
+                            * num
+                                .i()
+                                .ok_or(EvaluationError::NumericalTypeDoesNotSupportImaginaryUnit)?
                             + num)
                     }
                 }
@@ -3677,20 +3804,27 @@ impl<'a> AtomView<'a> {
                         Ok(rm)
                     } else {
                         Ok(coeff_map(&i.to_float().to_rational())
-                            * rm.i().ok_or_else(|| {
-                                "Numerical type does not support imaginary unit".to_string()
-                            })?
+                            * rm.i()
+                                .ok_or(EvaluationError::NumericalTypeDoesNotSupportImaginaryUnit)?
                             + rm)
                     }
                 }
-                CoefficientView::Indeterminate => Err("Cannot evaluate indeterminate".to_string()),
-                CoefficientView::Infinity(_) => Err("Cannot evaluate infinity".to_string()),
+                CoefficientView::Indeterminate => Err(EvaluationError::UnsupportedCoefficient {
+                    coefficient: "indeterminate",
+                }),
+                CoefficientView::Infinity(_) => Err(EvaluationError::UnsupportedCoefficient {
+                    coefficient: "infinity",
+                }),
                 CoefficientView::FiniteField(_, _) => {
-                    Err("Finite field not yet supported for evaluation".to_string())
+                    Err(EvaluationError::UnsupportedCoefficient {
+                        coefficient: "finite field",
+                    })
                 }
-                CoefficientView::RationalPolynomial(_) => Err(
-                    "Rational polynomial coefficient not yet supported for evaluation".to_string(),
-                ),
+                CoefficientView::RationalPolynomial(_) => {
+                    Err(EvaluationError::UnsupportedCoefficient {
+                        coefficient: "rational polynomial",
+                    })
+                }
             },
             AtomView::Var(v) => {
                 let s = v.get_symbol();
@@ -3707,10 +3841,7 @@ impl<'a> AtomView<'a> {
                             cache.insert(*self, eval.clone());
                             Ok(eval)
                         } else {
-                            Err(format!(
-                                "Variable {} not in constant map or function map",
-                                v.get_symbol().get_name()
-                            ))
+                            Err(EvaluationError::UndefinedVariable { symbol: s })
                         }
                     }
                 }
@@ -3746,10 +3877,11 @@ impl<'a> AtomView<'a> {
 
                 if name == Symbol::IF {
                     if f.get_nargs() != 3 {
-                        return Err(format!(
-                            "Condition function called with wrong number of arguments: {} vs 3",
-                            f.get_nargs(),
-                        ));
+                        return Err(EvaluationError::WrongNumberOfArguments {
+                            function: name,
+                            expected: 3,
+                            actual: f.get_nargs(),
+                        });
                     }
 
                     let mut arg_iter = f.iter();
@@ -3791,7 +3923,9 @@ impl<'a> AtomView<'a> {
                 }
 
                 let Some(fun) = function_map.get(&f.get_symbol()) else {
-                    Err(format!("Missing function {}", f.get_symbol().get_name()))?
+                    return Err(EvaluationError::MissingFunction {
+                        symbol: f.get_symbol(),
+                    });
                 };
                 let eval = fun.get()(&args, const_map, function_map, cache);
 

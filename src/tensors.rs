@@ -5,7 +5,6 @@ pub use numerica::tensors::*;
 use crate::{
     atom::{Atom, AtomCore, AtomView, FunctionBuilder, Symbol},
     graph::{Graph, HiddenData},
-    printer::PrintOptions,
     state::{RecycledAtom, Workspace},
 };
 
@@ -19,6 +18,46 @@ pub struct CanonicalTensor<T, G> {
     /// List of dummy indices and their group markers that occur in the canonical form.
     /// The order of the indices in this list reflects the assignment priority for the canonical labeling.
     pub dummy_indices: Vec<(T, G)>,
+}
+
+/// Errors that can occur while canonicalizing tensor expressions.
+#[derive(Clone, Debug, PartialEq, Eq, Hash)]
+pub enum TensorCanonicalizationError {
+    ExternalIndexMismatch { index: Atom, expression: Atom },
+    ContractedMoreThanOnce { index: Atom },
+    DummyIndexAsVariable { expression: Atom },
+    UnsupportedTensorPower { expression: Atom },
+    InconsistentOpenIndices { expression: Atom },
+}
+
+impl std::error::Error for TensorCanonicalizationError {}
+
+impl std::fmt::Display for TensorCanonicalizationError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            TensorCanonicalizationError::ExternalIndexMismatch { index, expression } => write!(
+                f,
+                "{index} is not an external index in every term of {expression}"
+            ),
+            TensorCanonicalizationError::ContractedMoreThanOnce { index } => {
+                write!(f, "index {index} is contracted more than once")
+            }
+            TensorCanonicalizationError::DummyIndexAsVariable { expression } => write!(
+                f,
+                "dummy index appears as variable instead of as a function argument in {expression}"
+            ),
+            TensorCanonicalizationError::UnsupportedTensorPower { expression } => write!(
+                f,
+                "only tensors raised to positive powers are supported, got {expression}"
+            ),
+            TensorCanonicalizationError::InconsistentOpenIndices { expression } => {
+                write!(
+                    f,
+                    "all components of {expression} must have the same open indices"
+                )
+            }
+        }
+    }
 }
 
 /// A node in a graph representation of a tensor network.
@@ -60,7 +99,7 @@ impl<'a> AtomView<'a> {
     pub(crate) fn canonize_tensors<I, T: AtomCore, G: Ord + std::hash::Hash>(
         &self,
         indices: I,
-    ) -> Result<CanonicalTensor<T, G>, String>
+    ) -> Result<CanonicalTensor<T, G>, TensorCanonicalizationError>
     where
         I: IntoIterator<Item = (T, G)>,
     {
@@ -97,11 +136,10 @@ impl<'a> AtomView<'a> {
                             i.0 |= a.0;
 
                             if a.1 == 1 && i.1 != 1 || i.1 == 1 && a.1 != 1 {
-                                return Err(format!(
-                                    "{} is not an external index in every term of {}",
-                                    indices[j].0.as_atom_view(),
-                                    self.printer(PrintOptions::file_no_namespace())
-                                ));
+                                return Err(TensorCanonicalizationError::ExternalIndexMismatch {
+                                    index: indices[j].0.as_atom_view().to_owned(),
+                                    expression: self.to_owned(),
+                                });
                             }
                         }
                     } else {
@@ -113,7 +151,7 @@ impl<'a> AtomView<'a> {
 
                 let mut out = Atom::new();
                 aa.as_view().normalize(ws, &mut out);
-                Ok::<_, String>((out, inds.unwrap()))
+                Ok::<_, TensorCanonicalizationError>((out, inds.unwrap()))
             } else {
                 let (r, ind) = self.canonize_tensor_product(&indices)?;
 
@@ -143,7 +181,7 @@ impl<'a> AtomView<'a> {
     fn canonize_tensor_product<T: AtomCore, G: Ord + std::hash::Hash>(
         &self,
         indices: &[(T, G)],
-    ) -> Result<(RecycledAtom, Vec<(bool, usize)>), String> {
+    ) -> Result<(RecycledAtom, Vec<(bool, usize)>), TensorCanonicalizationError> {
         // strip all top-level factors that do not have any indices, so that
         // they do not influence the canonization
         if let AtomView::Mul(m) = self
@@ -167,7 +205,7 @@ impl<'a> AtomView<'a> {
                     m.extend(res.as_view());
                     m.extend(constants.as_view());
                     p.as_view().normalize(ws, &mut res);
-                    Ok::<_, String>(Some((res, ind)))
+                    Ok::<_, TensorCanonicalizationError>(Some((res, ind)))
                 } else {
                     Ok(None)
                 }
@@ -188,10 +226,9 @@ impl<'a> AtomView<'a> {
 
         for (i, (ii, (f, used, _))) in indices.iter().zip(&connections).enumerate() {
             if !f.is_empty() && *used {
-                return Err(format!(
-                    "Index {} is contracted more than once",
-                    ii.0.as_atom_view()
-                ));
+                return Err(TensorCanonicalizationError::ContractedMoreThanOnce {
+                    index: ii.0.as_atom_view().to_owned(),
+                });
             } else if !f.is_empty() && !used {
                 used_indices[i] = (true, 1);
 
@@ -480,7 +517,7 @@ impl<'a> AtomView<'a> {
         indices: &'b [(T, G)],
         connections: &mut [(Vec<usize>, bool, usize)],
         g: &mut Graph<TensorGraphNode<'a>, HiddenData<(usize, Option<&'b G>), usize>>,
-    ) -> Result<usize, String> {
+    ) -> Result<usize, TensorCanonicalizationError> {
         if !indices.iter().any(|a| self.contains(a.0.as_atom_view())) {
             let node = g.add_node(TensorGraphNode::Slot(Some(*self)));
             return Ok(node);
@@ -488,7 +525,9 @@ impl<'a> AtomView<'a> {
 
         match self {
             AtomView::Num(_) | AtomView::Var(_) => {
-                Err("Dummy index appears as variable instead of as a function argument".to_owned())
+                Err(TensorCanonicalizationError::DummyIndexAsVariable {
+                    expression: self.to_owned(),
+                })
             }
             AtomView::Pow(p) => {
                 let (b, e) = p.get_base_exp();
@@ -509,10 +548,14 @@ impl<'a> AtomView<'a> {
 
                         Ok(node)
                     } else {
-                        Err("Only tensors raised to positive powers are supported".to_owned())
+                        Err(TensorCanonicalizationError::UnsupportedTensorPower {
+                            expression: self.to_owned(),
+                        })
                     }
                 } else {
-                    Err("Only tensors raised to positive powers are supported".to_owned())
+                    Err(TensorCanonicalizationError::UnsupportedTensorPower {
+                        expression: self.to_owned(),
+                    })
                 }
             }
             AtomView::Fun(f) => {
@@ -534,10 +577,9 @@ impl<'a> AtomView<'a> {
                         let new_node = g.add_node(TensorGraphNode::Slot(None));
 
                         if connections[p].1 {
-                            return Err(format!(
-                                "Index {} is contracted more than once",
-                                indices[p].0.as_atom_view()
-                            ));
+                            return Err(TensorCanonicalizationError::ContractedMoreThanOnce {
+                                index: indices[p].0.as_atom_view().to_owned(),
+                            });
                         }
 
                         if connections[p].0.is_empty() {
@@ -635,10 +677,9 @@ impl<'a> AtomView<'a> {
                         .zip(&subgraphs[0].1)
                         .any(|(a, b)| a.0.is_empty() != b.0.is_empty())
                 }) {
-                    return Err(format!(
-                        "All components of {} must have the same open indices",
-                        self.printer(PrintOptions::file())
-                    ));
+                    return Err(TensorCanonicalizationError::InconsistentOpenIndices {
+                        expression: self.to_owned(),
+                    });
                 }
 
                 let node = g.add_node(TensorGraphNode::Add);

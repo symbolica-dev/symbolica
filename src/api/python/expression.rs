@@ -5672,7 +5672,7 @@ impl PythonExpression {
 
                 Ok(partial_solution.into_iter().map(|x| x.into()).collect())
             }
-            Err(SolveError::Other(e)) => Err(exceptions::PyValueError::new_err(e)),
+            Err(e) => Err(exceptions::PyValueError::new_err(e.to_string())),
         }
     }
 

@@ -14,8 +14,7 @@ fn default_exponent_and_variable_inputs() {
     let x = symbol!("x");
     let y = symbol!("y");
 
-    let p: RationalPolynomial<_> =
-        parse!("(x^2-y^2)/(x-y)").to_rational_polynomial(&Z, &Z, (x, y));
+    let p: RationalPolynomial<_> = parse!("(x^2-y^2)/(x-y)").to_rational_polynomial(&Z, &Z, (x, y));
     assert_eq!(p.to_expression(), parse!("x+y"));
 
     let q: RationalPolynomial<_> = parse!("(x^2-y^2)/(x-y)")
@@ -24,7 +23,10 @@ fn default_exponent_and_variable_inputs() {
     assert_eq!(q, p);
 
     let poly: MultivariatePolynomial<_> = parse!("x+y").to_polynomial(&Z, &[x, y]);
-    assert_eq!(*poly.variables, vec![PolyVariable::from(x), PolyVariable::from(y)]);
+    assert_eq!(
+        *poly.variables,
+        vec![PolyVariable::from(x), PolyVariable::from(y)]
+    );
 
     let single_var_poly: MultivariatePolynomial<_> = parse!("x+1").to_polynomial(&Z, x);
     assert_eq!(*single_var_poly.variables, vec![PolyVariable::from(x)]);

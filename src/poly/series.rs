@@ -32,6 +32,105 @@ use crate::{
 
 use super::PolyVariable;
 
+/// Errors that can occur during series expansion.
+#[derive(Clone, Debug, PartialEq, Eq, Hash)]
+pub enum SeriesError {
+    NonPositiveRelativeDepth {
+        depth: SeriesDepth,
+    },
+    NonConstantIf {
+        expression: Atom,
+    },
+    FunctionArgumentPole {
+        expression: Atom,
+    },
+    UnsupportedComplexExponent {
+        expression: Atom,
+    },
+    UnsupportedLargeExponent {
+        expression: Atom,
+    },
+    NonRationalPower {
+        expression: Atom,
+    },
+    UnexpectedExpLogSimplification {
+        expression: Atom,
+    },
+    EssentialSingularity {
+        function: Symbol,
+    },
+    MissingLogCoefficient,
+    ConstantTermDependsOnExpansionVariable {
+        function: Symbol,
+        constant: Atom,
+        variable: PolyVariable,
+    },
+    ZeroPowerRequiresInfinitePrecision,
+    DivisionByZero,
+}
+
+impl std::error::Error for SeriesError {}
+
+impl std::fmt::Display for SeriesError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            SeriesError::NonPositiveRelativeDepth { depth } => {
+                write!(f, "relative series depth must be positive, got {depth:?}")
+            }
+            SeriesError::NonConstantIf { expression } => {
+                write!(
+                    f,
+                    "cannot series expand non-constant if function {expression}"
+                )
+            }
+            SeriesError::FunctionArgumentPole { expression } => write!(
+                f,
+                "cannot series expand {expression} since an argument has poles; define a 'series' attribute on the symbol that extracts the principal part"
+            ),
+            SeriesError::UnsupportedComplexExponent { expression } => {
+                write!(
+                    f,
+                    "cannot series expand {expression} with a complex exponent"
+                )
+            }
+            SeriesError::UnsupportedLargeExponent { expression } => {
+                write!(
+                    f,
+                    "cannot series expand {expression} with a large exponent yet"
+                )
+            }
+            SeriesError::NonRationalPower { expression } => {
+                write!(f, "power of variable in {expression} must be rational")
+            }
+            SeriesError::UnexpectedExpLogSimplification { expression } => write!(
+                f,
+                "unexpected term {expression} in exp-log series simplification"
+            ),
+            SeriesError::EssentialSingularity { function } => write!(
+                f,
+                "cannot series expand {function} of a series with poles; this would create an essential singularity"
+            ),
+            SeriesError::MissingLogCoefficient => {
+                f.write_str("log argument needs to have a coefficient")
+            }
+            SeriesError::ConstantTermDependsOnExpansionVariable {
+                function,
+                constant,
+                variable,
+            } => write!(
+                f,
+                "cannot compute {function} of a series whose constant term {constant} depends on {variable}"
+            ),
+            SeriesError::ZeroPowerRequiresInfinitePrecision => f.write_str(
+                "cannot raise series to the power of zero, as this generates infinite precision 1",
+            ),
+            SeriesError::DivisionByZero => {
+                f.write_str("cannot invert series with a zero constant term")
+            }
+        }
+    }
+}
+
 /// The requested truncation depth of a series expansion.
 #[derive(Clone, Debug, PartialEq, Eq, Hash)]
 pub enum SeriesDepth {
@@ -1025,7 +1124,7 @@ impl<F: EuclideanDomain> Series<F> {
 impl Series<AtomField> {
     /// Extract powers of `x` from an expression that comes from simplifying an exponential with logs
     /// i.e.: `exp(c + 3 log(x^5)) = exp(c)*x^15`.
-    fn extract_exp_log(&self, e: AtomView, s: AtomView) -> Result<Self, String> {
+    fn extract_exp_log(&self, e: AtomView, s: AtomView) -> Result<Self, SeriesError> {
         if !e.contains(s) {
             return Ok(self.constant(e.to_owned()));
         }
@@ -1040,16 +1139,24 @@ impl Series<AtomField> {
                             if ni == 0 {
                                 Ok(self.monomial(self.field.one(), (n, d).into()))
                             } else {
-                                Err("Cannot series expand with complex exponent".to_owned())
+                                Err(SeriesError::UnsupportedComplexExponent {
+                                    expression: e.to_owned(),
+                                })
                             }
                         } else {
-                            Err("Cannot series expand with large exponents yet".to_owned())
+                            Err(SeriesError::UnsupportedLargeExponent {
+                                expression: e.to_owned(),
+                            })
                         }
                     } else {
-                        Err("Power of variable must be rational".to_owned())
+                        Err(SeriesError::NonRationalPower {
+                            expression: e.to_owned(),
+                        })
                     }
                 } else {
-                    Err("Unexpected term in exp-log simplification".to_owned())
+                    Err(SeriesError::UnexpectedExpLogSimplification {
+                        expression: e.to_owned(),
+                    })
                 }
             }
             AtomView::Var(_) => Ok(self.monomial(self.field.one(), (1, 1).into())),
@@ -1061,13 +1168,17 @@ impl Series<AtomField> {
 
                 Ok(shift_series)
             }
-            _ => Err("Unexpected term in exp-log simplification".to_owned()),
+            _ => Err(SeriesError::UnexpectedExpLogSimplification {
+                expression: e.to_owned(),
+            }),
         }
     }
 
-    pub fn exp(&self) -> Result<Self, String> {
+    pub fn exp(&self) -> Result<Self, SeriesError> {
         if self.shift < 0 {
-            return Err("Cannot compute the exponential of a series with poles".to_owned());
+            return Err(SeriesError::EssentialSingularity {
+                function: Symbol::EXP,
+            });
         }
 
         if self.order == 0 {
@@ -1111,9 +1222,9 @@ impl Series<AtomField> {
         Ok(r * &shift_series)
     }
 
-    pub fn log(&self) -> Result<Self, String> {
+    pub fn log(&self) -> Result<Self, SeriesError> {
         if self.order == 0 {
-            return Err("Log argument needs to have a coefficient".to_owned());
+            return Err(SeriesError::MissingLogCoefficient);
         }
 
         // construct the log argument, which may contain x
@@ -1143,9 +1254,11 @@ impl Series<AtomField> {
         Ok(e)
     }
 
-    pub fn sin(&self) -> Result<Self, String> {
+    pub fn sin(&self) -> Result<Self, SeriesError> {
         if self.shift < 0 {
-            return Err("Cannot compute the sine of a series with poles".to_owned());
+            return Err(SeriesError::EssentialSingularity {
+                function: Symbol::SIN,
+            });
         }
 
         if self.order == 0 {
@@ -1165,10 +1278,11 @@ impl Series<AtomField> {
         };
 
         if c.contains(self.variable.to_atom()) {
-            return Err(
-                "Cannot compute the sine of a series with a constant term that depends on x"
-                    .to_owned(),
-            );
+            return Err(SeriesError::ConstantTermDependsOnExpansionVariable {
+                function: Symbol::SIN,
+                constant: c,
+                variable: self.variable.as_ref().clone(),
+            });
         }
 
         let p = self.clone().remove_constant();
@@ -1199,9 +1313,11 @@ impl Series<AtomField> {
         Ok(e)
     }
 
-    pub fn cos(&self) -> Result<Self, String> {
+    pub fn cos(&self) -> Result<Self, SeriesError> {
         if self.shift < 0 {
-            return Err("Cannot compute the sine of a series with poles".to_owned());
+            return Err(SeriesError::EssentialSingularity {
+                function: Symbol::COS,
+            });
         }
 
         if self.order == 0 {
@@ -1222,10 +1338,11 @@ impl Series<AtomField> {
         };
 
         if c.contains(self.variable.to_atom()) {
-            return Err(
-                "Cannot compute the cosine of a series with a constant term that depends on x"
-                    .to_owned(),
-            );
+            return Err(SeriesError::ConstantTermDependsOnExpansionVariable {
+                function: Symbol::COS,
+                constant: c,
+                variable: self.variable.as_ref().clone(),
+            });
         }
 
         let p = self.clone().remove_constant();
@@ -1257,16 +1374,14 @@ impl Series<AtomField> {
     }
 
     /// Take the series to the power of another series.
-    pub fn pow(&self, pow: &Self) -> Result<Self, String> {
+    pub fn pow(&self, pow: &Self) -> Result<Self, SeriesError> {
         (self.log()? * pow).exp()
     }
 
     /// Take the series to the power of a rational number.
-    pub fn rpow(&self, pow: Rational) -> Result<Self, String> {
+    pub fn rpow(&self, pow: Rational) -> Result<Self, SeriesError> {
         if pow.is_zero() {
-            Err(
-                "Cannot raise series to the power of zero, as this generates infinite precision 1",
-            )?;
+            return Err(SeriesError::ZeroPowerRequiresInfinitePrecision);
         }
 
         if pow.is_integer() && !pow.is_negative() {
@@ -1277,7 +1392,7 @@ impl Series<AtomField> {
 
         if c.is_zero() {
             if pow.is_negative() {
-                Err("Cannot invert series with a zero constant term")?;
+                return Err(SeriesError::DivisionByZero);
             }
 
             let mut r = self.clone();
