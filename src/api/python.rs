@@ -61,7 +61,7 @@ use crate::{
     LicenseManager,
     atom::{
         Atom, AtomCore, AtomType, AtomView, DefaultNamespace, EvaluationInfo, Indeterminate,
-        ListIterator, Symbol, SymbolAttribute, UserData, UserDataKey,
+        ListIterator, Symbol, SymbolAttribute, SymbolBuilder, UserData, UserDataKey,
     },
     coefficient::{Coefficient, CoefficientView, ConvertToRing},
     domains::{

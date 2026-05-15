@@ -782,9 +782,9 @@ impl SymbolBuilder {
     /// # Examples
     ///
     /// ```
-    /// use symbolica::{atom::{Symbol, SymbolAttribute}, wrap_symbol};
+    /// use symbolica::{atom::{SymbolBuilder, SymbolAttribute}, wrap_symbol};
     ///
-    /// let f = Symbol::new(wrap_symbol!("f")).with_attributes(&[SymbolAttribute::Symmetric]).build().unwrap();
+    /// let f = SymbolBuilder::new(wrap_symbol!("f")).with_attributes(&[SymbolAttribute::Symmetric]).build().unwrap();
     /// ```
     pub fn with_attributes(
         mut self,
@@ -799,9 +799,9 @@ impl SymbolBuilder {
     /// # Examples
     ///
     /// ```
-    /// use symbolica::{atom::{Symbol, SymbolAttribute}, wrap_symbol};
+    /// use symbolica::{atom::{SymbolBuilder, SymbolAttribute}, wrap_symbol};
     ///
-    /// let f = Symbol::new(wrap_symbol!("f")).with_tags(["tag::real"]).build().unwrap();
+    /// let f = SymbolBuilder::new(wrap_symbol!("f")).with_tags(["tag::real"]).build().unwrap();
     /// ```
     pub fn with_tags<T: AsRef<[U]>, U: AsRef<str>>(mut self, tags: T) -> Self {
         self.tags = tags.as_ref().iter().map(|x| x.as_ref().into()).collect();
@@ -813,9 +813,9 @@ impl SymbolBuilder {
     /// # Examples
     ///
     /// ```
-    /// use symbolica::{atom::{Symbol, SymbolAttribute}, wrap_symbol};
+    /// use symbolica::{atom::{SymbolBuilder, SymbolAttribute}, wrap_symbol};
     ///
-    /// let f = Symbol::new(wrap_symbol!("f")).with_aliases(["alias1", "alias2"]).build().unwrap();
+    /// let f = SymbolBuilder::new(wrap_symbol!("f")).with_aliases(["alias1", "alias2"]).build().unwrap();
     /// ```
     pub fn with_aliases<T: AsRef<[U]>, U: AsRef<str>>(mut self, aliases: T) -> Self {
         self.aliases = aliases.as_ref().iter().map(|x| x.as_ref().into()).collect();
@@ -823,9 +823,9 @@ impl SymbolBuilder {
     }
 
     /// ```
-    /// use symbolica::{atom::{AtomView, Symbol}, wrap_symbol};
+    /// use symbolica::{atom::{AtomView, SymbolBuilder}, wrap_symbol};
     ///
-    /// let f = Symbol::new(wrap_symbol!("f")).with_normalization_function(|view, out| {
+    /// let f = SymbolBuilder::new(wrap_symbol!("f")).with_normalization_function(|view, out| {
     ///     // Example normalization logic that sets odd-length function to 0
     ///     if let AtomView::Fun(f) = view {
     ///         if f.get_nargs() % 2 == 1 {
@@ -845,9 +845,9 @@ impl SymbolBuilder {
     }
 
     /// ```
-    /// use symbolica::{atom::Symbol, wrap_symbol};
+    /// use symbolica::{atom::SymbolBuilder, wrap_symbol};
     ///
-    /// let f = Symbol::new(wrap_symbol!("mu")).with_print_function(|view, opt, _state| {
+    /// let f = SymbolBuilder::new(wrap_symbol!("mu")).with_print_function(|view, opt, _state| {
     ///     if !opt.mode.is_latex() {
     ///       None
     ///     } else {
@@ -871,9 +871,9 @@ impl SymbolBuilder {
     /// # Example
     ///
     /// ```
-    /// use symbolica::{atom::{Atom, Symbol}, wrap_symbol};
+    /// use symbolica::{atom::{Atom, SymbolBuilder}, wrap_symbol};
     ///
-    /// let f = Symbol::new(wrap_symbol!("tag")).with_derivative_function(|view, arg, out| {
+    /// let f = SymbolBuilder::new(wrap_symbol!("tag")).with_derivative_function(|view, arg, out| {
     ///       if arg == 1 {
     ///          out.to_num(1.into());
     ///       } else {
@@ -1080,13 +1080,6 @@ impl Symbol {
     pub(crate) const DERIVATIVE_ID: u32 = State::DERIVATIVE.id;
     pub(crate) const E_ID: u32 = State::E.id;
     pub(crate) const PI_ID: u32 = State::PI.id;
-
-    /// Create a builder for a new symbol with the given name and namespace.
-    ///
-    /// Use the [symbol!](crate::symbol) macro instead to define symbols in the current namespace.
-    pub fn new(name: NamespacedSymbol) -> SymbolBuilder {
-        SymbolBuilder::new(name)
-    }
 
     /// Parse a symbol from a string with optional namespace and attributes.
     ///
@@ -1626,7 +1619,7 @@ impl Symbol {
         let (name, namespace, attributes, tags, extra_data, aliases, is_exportable) =
             Self::import_impl(source)?;
 
-        match Symbol::new(NamespacedSymbol {
+        match SymbolBuilder::new(NamespacedSymbol {
             symbol: name.clone().into(),
             namespace: namespace.into(),
             file: "Imported".into(),
@@ -3301,14 +3294,14 @@ macro_rules! tag {
 #[macro_export]
 macro_rules! symbol {
     ($id: expr) => {
-        $crate::atom::Symbol::new($crate::wrap_symbol!($id)).build().unwrap_or_else(|e| panic!("{}", e))
+        $crate::atom::SymbolBuilder::new($crate::wrap_symbol!($id)).build().unwrap_or_else(|e| panic!("{}", e))
     };
     ($id: expr; $($attr: ident),*) => {
-        $crate::atom::Symbol::new($crate::wrap_symbol!($id)).with_attributes(&[$($crate::atom::SymbolAttribute::$attr,)*]).build().unwrap_or_else(|e| panic!("{}", e))
+        $crate::atom::SymbolBuilder::new($crate::wrap_symbol!($id)).with_attributes(&[$($crate::atom::SymbolAttribute::$attr,)*]).build().unwrap_or_else(|e| panic!("{}", e))
     };
     ($id: expr, $($a: tt = $value: expr),*) => {
         {
-            let mut b =  $crate::atom::Symbol::new($crate::wrap_symbol!($id));
+            let mut b =  $crate::atom::SymbolBuilder::new($crate::wrap_symbol!($id));
 
             $(
                 b = $crate::symbol_set_attr!(b, $a = $value);
@@ -3319,7 +3312,7 @@ macro_rules! symbol {
     };
     ($id: expr; $($attr: ident),+; $($a: ident = $value: expr),*) => {
         {
-            let mut b =  $crate::atom::Symbol::new($crate::wrap_symbol!($id)).with_attributes(&[$($crate::atom::SymbolAttribute::$attr,)*]);
+            let mut b =  $crate::atom::SymbolBuilder::new($crate::wrap_symbol!($id)).with_attributes(&[$($crate::atom::SymbolAttribute::$attr,)*]);
 
             $(
                 b = $crate::symbol_set_attr!(b, $a = $value);
@@ -3332,7 +3325,7 @@ macro_rules! symbol {
         {
             (
                 $(
-                    $crate::atom::Symbol::new($crate::wrap_symbol!($id)).build().unwrap_or_else(|e| panic!("{}", e)),
+                    $crate::atom::SymbolBuilder::new($crate::wrap_symbol!($id)).build().unwrap_or_else(|e| panic!("{}", e)),
                 )+
             )
         }
@@ -3341,7 +3334,7 @@ macro_rules! symbol {
         {
                 (
                 $(
-                    $crate::atom::Symbol::new($crate::wrap_symbol!($id)).with_tags(std::slice::from_ref(&$tag)).build().unwrap_or_else(|e| panic!("{}", e)),
+                    $crate::atom::SymbolBuilder::new($crate::wrap_symbol!($id)).with_tags(std::slice::from_ref(&$tag)).build().unwrap_or_else(|e| panic!("{}", e)),
                 )+
             )
         }
@@ -3350,7 +3343,7 @@ macro_rules! symbol {
         {
                 (
                 $(
-                    $crate::atom::Symbol::new($crate::wrap_symbol!($id)).with_tags($tags).build().unwrap_or_else(|e| panic!("{}", e)),
+                    $crate::atom::SymbolBuilder::new($crate::wrap_symbol!($id)).with_tags($tags).build().unwrap_or_else(|e| panic!("{}", e)),
                 )+
             )
         }
@@ -3365,7 +3358,7 @@ macro_rules! symbol {
 
             (
                 $(
-                    $crate::atom::Symbol::new($crate::wrap_symbol!($id)).with_attributes(gen_attr!()).build().unwrap_or_else(|e| panic!("{}", e)),
+                    $crate::atom::SymbolBuilder::new($crate::wrap_symbol!($id)).with_attributes(gen_attr!()).build().unwrap_or_else(|e| panic!("{}", e)),
                 )+
             )
         }
@@ -3380,7 +3373,7 @@ macro_rules! symbol {
 
             (
                 $(
-                    $crate::atom::Symbol::new($crate::wrap_symbol!($id)).with_attributes(gen_attr!()).with_tags(std::slice::from_ref(&$tag)).build().unwrap_or_else(|e| panic!("{}", e)),
+                    $crate::atom::SymbolBuilder::new($crate::wrap_symbol!($id)).with_attributes(gen_attr!()).with_tags(std::slice::from_ref(&$tag)).build().unwrap_or_else(|e| panic!("{}", e)),
                 )+
             )
         }
@@ -3395,7 +3388,7 @@ macro_rules! symbol {
 
             (
                 $(
-                    $crate::atom::Symbol::new($crate::wrap_symbol!($id)).with_attributes(gen_attr!()).with_tags($tags).build().unwrap_or_else(|e| panic!("{}", e)),
+                    $crate::atom::SymbolBuilder::new($crate::wrap_symbol!($id)).with_attributes(gen_attr!()).with_tags($tags).build().unwrap_or_else(|e| panic!("{}", e)),
                 )+
             )
         }
@@ -3440,14 +3433,14 @@ macro_rules! symbol_set_attr {
 #[macro_export]
 macro_rules! try_symbol {
     ($id: expr) => {
-        $crate::atom::Symbol::new($crate::wrap_symbol!($id)).build()
+        $crate::atom::SymbolBuilder::new($crate::wrap_symbol!($id)).build()
     };
     ($id: expr; $($attr: ident),*) => {
-        $crate::atom::Symbol::new($crate::wrap_symbol!($id)).with_attributes(&[$($crate::atom::SymbolAttribute::$attr,)*]).build()
+        $crate::atom::SymbolBuilder::new($crate::wrap_symbol!($id)).with_attributes(&[$($crate::atom::SymbolAttribute::$attr,)*]).build()
     };
     ($id: expr, $($a: tt = $value: expr),*) => {
         {
-            let mut b =  $crate::atom::Symbol::new($crate::wrap_symbol!($id));
+            let mut b =  $crate::atom::SymbolBuilder::new($crate::wrap_symbol!($id));
 
             $(
                 b = $crate::symbol_set_attr!(b, $a = $value);
@@ -3458,7 +3451,7 @@ macro_rules! try_symbol {
     };
     ($id: expr; $($attr: ident),+; $($a: ident = $value: expr),*) => {
         {
-            let mut b =  $crate::atom::Symbol::new($crate::wrap_symbol!($id)).with_attributes(&[$($crate::atom::SymbolAttribute::$attr,)*]);
+            let mut b =  $crate::atom::SymbolBuilder::new($crate::wrap_symbol!($id)).with_attributes(&[$($crate::atom::SymbolAttribute::$attr,)*]);
 
             $(
                 b = $crate::symbol_set_attr!(b, $a = $value);
@@ -3471,7 +3464,7 @@ macro_rules! try_symbol {
         {
             (
                 $(
-                    $crate::atom::Symbol::new($crate::wrap_symbol!($id)).build(),
+                    $crate::atom::SymbolBuilder::new($crate::wrap_symbol!($id)).build(),
                 )+
             )
         }
@@ -3486,7 +3479,7 @@ macro_rules! try_symbol {
 
             (
                 $(
-                    $crate::atom::Symbol::new($crate::wrap_symbol!($id)).with_attributes(gen_attr!()).build(),
+                    $crate::atom::SymbolBuilder::new($crate::wrap_symbol!($id)).with_attributes(gen_attr!()).build(),
                 )+
             )
         }
@@ -3569,7 +3562,7 @@ macro_rules! try_symbol_group {
         {
             let mut v = vec![];
             $(
-                let b = $crate::atom::Symbol::new($crate::wrap_symbol!($id)).with_attributes(&[$($crate::atom::SymbolAttribute::$attr,)*]).
+                let b = $crate::atom::SymbolBuilder::new($crate::wrap_symbol!($id)).with_attributes(&[$($crate::atom::SymbolAttribute::$attr,)*]).
                     with_generator($gen);
                 v.push(b);
             )+

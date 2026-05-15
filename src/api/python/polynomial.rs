@@ -959,7 +959,9 @@ impl PythonPolynomial {
         };
 
         for v in vars {
-            let id = Symbol::new(namespace.attach_namespace(&v)).build().unwrap();
+            let id = SymbolBuilder::new(namespace.attach_namespace(&v))
+                .build()
+                .unwrap();
             var_map.push(id.into());
             var_name_map.push((*v).into());
         }
@@ -2347,7 +2349,9 @@ impl PythonFiniteFieldPolynomial {
         };
 
         for v in vars {
-            let id = Symbol::new(namespace.attach_namespace(&v)).build().unwrap();
+            let id = SymbolBuilder::new(namespace.attach_namespace(&v))
+                .build()
+                .unwrap();
             var_map.push(id.into());
             var_name_map.push((*v).into());
         }
@@ -6498,7 +6502,9 @@ impl PythonRationalPolynomial {
         };
 
         for v in vars {
-            let id = Symbol::new(namespace.attach_namespace(&v)).build().unwrap();
+            let id = SymbolBuilder::new(namespace.attach_namespace(&v))
+                .build()
+                .unwrap();
             var_map.push(id.into());
             var_name_map.push((*v).into());
         }
@@ -6837,7 +6843,9 @@ impl PythonFiniteFieldRationalPolynomial {
         };
 
         for v in vars {
-            let id = Symbol::new(namespace.attach_namespace(&v)).build().unwrap();
+            let id = SymbolBuilder::new(namespace.attach_namespace(&v))
+                .build()
+                .unwrap();
             var_map.push(id.into());
             var_name_map.push((*v).into());
         }

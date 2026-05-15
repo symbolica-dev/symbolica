@@ -20,7 +20,7 @@ use smartstring::alias::String;
 
 use crate::atom::{
     DerivativeFunction, EvaluationInfo, NamespacedSymbol, NormalizationFunction,
-    SeriesExpansionFunction, SymbolAttribute, UserData,
+    SeriesExpansionFunction, SymbolAttribute, SymbolBuilder, UserData,
 };
 use crate::domains::finite_field::Zp64;
 use crate::poly::PolyVariable;
@@ -1136,7 +1136,7 @@ impl State {
                 Symbol::import_impl(source)?;
 
             loop {
-                match Symbol::new(NamespacedSymbol {
+                match SymbolBuilder::new(NamespacedSymbol {
                     symbol: name.clone().into(),
                     namespace: namespace.to_string().into(),
                     file: "".into(),
