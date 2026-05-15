@@ -1,7 +1,7 @@
 use symbolica::{
     atom::{AtomCore, EvaluationInfo},
     domains::{
-        float::{Complex, Float},
+        float::{Complex, ErrorPropagatingFloat, Float, RealLike},
         rational::Rational,
     },
     evaluate::{
@@ -51,6 +51,50 @@ fn merge_evaluator_with_external_functions() {
     evaluator.evaluate(&[3.0], &mut out);
 
     assert_eq!(out, vec![7.0, 18.0]);
+}
+
+#[test]
+fn error_propagating_float_transcendental_evaluator() {
+    let params = vec![
+        parse!("x"),
+        parse!("y"),
+        parse!("z"),
+        parse!("a"),
+        parse!("b"),
+    ];
+    let expr = parse!(
+        "sqrt(y)+log(y)+exp(z)+sin(x)+cos(x)+tan(x)+asin(a)+acos(b)+atan(x)+atan(x,y)+sinh(x)+cosh(x)+tanh(x)+asinh(x)+acosh(y)+atanh(a)+x^y+abs(x)+conj(x)+cot(x)+sec(x)+csc(x)+acot(x)+asec(y)+acsc(y)+coth(x)+sech(x)+csch(x)+acoth(y)+asech(b)+acsch(x)"
+    );
+
+    let evaluator = expr
+        .evaluator(
+            &FunctionMap::new(),
+            &params,
+            OptimizationSettings::new().horner_iterations(0),
+        )
+        .unwrap();
+
+    let f64_params = [0.5, 2.0, 0.1, 0.3, 0.5];
+    let expected = evaluator
+        .clone()
+        .map_coeff(&|x| x.re.to_f64())
+        .evaluate_single(&f64_params);
+
+    let epf64_params = f64_params.map(|x| ErrorPropagatingFloat::new(x, 15.0));
+    let epf64 = evaluator
+        .clone()
+        .map_coeff(&|x| ErrorPropagatingFloat::new(x.re.to_f64(), 15.0))
+        .evaluate_single(&epf64_params);
+    assert!((*epf64.get_num() - expected).abs() < 1e-12);
+    assert!(epf64.get_precision().is_some());
+
+    let epfloat_params =
+        f64_params.map(|x| ErrorPropagatingFloat::new(Float::with_val(80, x), 20.0));
+    let epfloat = evaluator
+        .map_coeff(&|x| ErrorPropagatingFloat::new(Float::with_val(80, x.re.to_f64()), 20.0))
+        .evaluate_single(&epfloat_params);
+    assert!((epfloat.get_num().to_f64() - expected).abs() < 1e-12);
+    assert!(epfloat.get_precision().is_some());
 }
 
 const F13: &'static str = "-48*ammu*amuq*ammu2*amuq2*x6*xcp4*e1234-48*ammu*amuq*ammu2*amuq2*x6*xcp3*e1234+48*ammu*amuq*ammu2*amuq2*x6*xcp2*e1234+48*ammu*amuq*ammu2*amuq2*x6*xcp1*e1234+48*ammu*amuq*ammu2*amuq2*x6^2*xcp3*e1234-48*ammu*amuq*ammu2*amuq2*x6^2*xcp2*e1234-144*ammu*
