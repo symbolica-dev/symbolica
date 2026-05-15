@@ -6363,7 +6363,7 @@ pub struct PythonReplacement {
 #[cfg_attr(not(feature = "python_stubgen"), remove_gen_stub)]
 #[pymethods]
 impl PythonReplacement {
-    #[pyo3(signature = (pattern, rhs, cond=None, non_greedy_wildcards=None, min_level=0, max_level=None, level_range=None, level_is_tree_depth=false, partial=true, allow_new_wildcards_on_rhs=false, rhs_cache_size=None))]
+    #[pyo3(signature = (pattern, rhs, cond=None, non_greedy_wildcards=None, min_level=0, max_level=None, level_range=None, level_is_tree_depth=false, partial=true, allow_new_wildcards_on_rhs=false, rhs_cache_size=100))]
     #[new]
     pub fn new(
         pattern: ConvertibleToExpression,
@@ -6376,15 +6376,14 @@ impl PythonReplacement {
         level_is_tree_depth: bool,
         partial: bool,
         allow_new_wildcards_on_rhs: bool,
-        rhs_cache_size: Option<usize>,
+        rhs_cache_size: usize,
     ) -> PyResult<Self> {
         let pattern = pattern.to_expression().expr.to_pattern();
         let rhs = rhs.to_replace_with()?;
 
-        let mut settings = MatchSettings::cached();
-
+        let mut w = Vec::new();
         if let Some(ngw) = non_greedy_wildcards {
-            settings.non_greedy_wildcards = ngw
+            w = ngw
                 .iter()
                 .map(|x| match x.expr.as_view() {
                     AtomView::Var(v) => {
@@ -6403,19 +6402,15 @@ impl PythonReplacement {
                 .collect::<Result<_, _>>()?;
         }
 
-        settings.level_range = level_range.unwrap_or((min_level, max_level));
-        settings.partial = partial;
-        settings.level_is_tree_depth = level_is_tree_depth;
-        settings.allow_new_wildcards_on_rhs = allow_new_wildcards_on_rhs;
-
-        if let Some(rhs_cache_size) = rhs_cache_size {
-            settings.rhs_cache_size = rhs_cache_size;
-        }
-
         Ok(Self {
             replacement: Replacement::new(pattern, rhs)
-                .with_conditions(cond.map(|r| r.0).unwrap_or_default())
-                .with_settings(settings),
+                .when(cond.map(|r| r.0).unwrap_or_default())
+                .level_range(level_range.unwrap_or((min_level, max_level)))
+                .partial(partial)
+                .level_is_tree_depth(level_is_tree_depth)
+                .allow_new_wildcards_on_rhs(allow_new_wildcards_on_rhs)
+                .rhs_cache_size(rhs_cache_size)
+                .non_greedy_wildcards(w),
         })
     }
 
