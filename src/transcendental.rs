@@ -6,7 +6,7 @@ use crate::{
     atom::{Atom, AtomCore, AtomOrView, AtomView, EvaluationInfo, FunctionBuilder, Symbol},
     coefficient::{Coefficient, CoefficientView},
     domains::{
-        float::{Complex, Float, FloatLike, Real, RealLike, SingleFloat},
+        float::{Complex, ErrorPropagatingFloat, Float, FloatLike, Real, RealLike, SingleFloat},
         integer::Integer,
         rational::Rational,
     },
@@ -464,7 +464,13 @@ impl GeometricSymbols {
                         unary_eval_complex_float(args, |z, _| z.tan())
                     })
                     .register(|args: &[f64]| unary_eval_real_f64(args, f64::tan))
-                    .register(|args: &[Complex<f64>]| unary_eval_complex_real_f64(args, |z| z.tan())),
+                    .register(|args: &[Complex<f64>]| unary_eval_complex_real_f64(args, |z| z.tan()))
+                    .register(|args: &[ErrorPropagatingFloat<f64>]| {
+                        unary_eval_real(args, |x| x.tan())
+                    })
+                    .register(|args: &[ErrorPropagatingFloat<Float>]| {
+                        unary_eval_real(args, |x| x.tan())
+                    }),
                 )
             },
             "cot";;
@@ -499,7 +505,13 @@ impl GeometricSymbols {
                         unary_eval_complex_float(args, |z, _| z.tan().inv())
                     })
                     .register(|args: &[f64]| unary_eval_real_f64(args, |x| x.tan().recip()))
-                    .register(|args: &[Complex<f64>]| unary_eval_complex_real_f64(args, |z| z.tan().inv())),
+                    .register(|args: &[Complex<f64>]| unary_eval_complex_real_f64(args, |z| z.tan().inv()))
+                    .register(|args: &[ErrorPropagatingFloat<f64>]| {
+                        unary_eval_real(args, |x| x.tan().inv())
+                    })
+                    .register(|args: &[ErrorPropagatingFloat<Float>]| {
+                        unary_eval_real(args, |x| x.tan().inv())
+                    }),
                 )
             },
             "sec";;
@@ -535,7 +547,13 @@ impl GeometricSymbols {
                         unary_eval_complex_float(args, |z, _| z.cos().inv())
                     })
                     .register(|args: &[f64]| unary_eval_real_f64(args, |x| x.cos().recip()))
-                    .register(|args: &[Complex<f64>]| unary_eval_complex_real_f64(args, |z| z.cos().inv())),
+                    .register(|args: &[Complex<f64>]| unary_eval_complex_real_f64(args, |z| z.cos().inv()))
+                    .register(|args: &[ErrorPropagatingFloat<f64>]| {
+                        unary_eval_real(args, |x| x.cos().inv())
+                    })
+                    .register(|args: &[ErrorPropagatingFloat<Float>]| {
+                        unary_eval_real(args, |x| x.cos().inv())
+                    }),
                 )
             },
             "csc";;
@@ -571,7 +589,13 @@ impl GeometricSymbols {
                         unary_eval_complex_float(args, |z, _| z.sin().inv())
                     })
                     .register(|args: &[f64]| unary_eval_real_f64(args, |x| x.sin().recip()))
-                    .register(|args: &[Complex<f64>]| unary_eval_complex_real_f64(args, |z| z.sin().inv())),
+                    .register(|args: &[Complex<f64>]| unary_eval_complex_real_f64(args, |z| z.sin().inv()))
+                    .register(|args: &[ErrorPropagatingFloat<f64>]| {
+                        unary_eval_real(args, |x| x.sin().inv())
+                    })
+                    .register(|args: &[ErrorPropagatingFloat<Float>]| {
+                        unary_eval_real(args, |x| x.sin().inv())
+                    }),
                 )
             },
             "sinh";;
@@ -596,7 +620,13 @@ impl GeometricSymbols {
                         unary_eval_complex_float(args, |z, _| z.sinh())
                     })
                     .register(|args: &[f64]| unary_eval_real_f64(args, f64::sinh))
-                    .register(|args: &[Complex<f64>]| unary_eval_complex_real_f64(args, |z| z.sinh())),
+                    .register(|args: &[Complex<f64>]| unary_eval_complex_real_f64(args, |z| z.sinh()))
+                    .register(|args: &[ErrorPropagatingFloat<f64>]| {
+                        unary_eval_real(args, |x| x.sinh())
+                    })
+                    .register(|args: &[ErrorPropagatingFloat<Float>]| {
+                        unary_eval_real(args, |x| x.sinh())
+                    }),
                 )
             },
             "cosh";;
@@ -621,7 +651,13 @@ impl GeometricSymbols {
                         unary_eval_complex_float(args, |z, _| z.cosh())
                     })
                     .register(|args: &[f64]| unary_eval_real_f64(args, f64::cosh))
-                    .register(|args: &[Complex<f64>]| unary_eval_complex_real_f64(args, |z| z.cosh())),
+                    .register(|args: &[Complex<f64>]| unary_eval_complex_real_f64(args, |z| z.cosh()))
+                    .register(|args: &[ErrorPropagatingFloat<f64>]| {
+                        unary_eval_real(args, |x| x.cosh())
+                    })
+                    .register(|args: &[ErrorPropagatingFloat<Float>]| {
+                        unary_eval_real(args, |x| x.cosh())
+                    }),
                 )
             },
             "tanh";;
@@ -656,7 +692,13 @@ impl GeometricSymbols {
                         unary_eval_complex_float(args, |z, _| z.tanh())
                     })
                     .register(|args: &[f64]| unary_eval_real_f64(args, f64::tanh))
-                    .register(|args: &[Complex<f64>]| unary_eval_complex_real_f64(args, |z| z.tanh())),
+                    .register(|args: &[Complex<f64>]| unary_eval_complex_real_f64(args, |z| z.tanh()))
+                    .register(|args: &[ErrorPropagatingFloat<f64>]| {
+                        unary_eval_real(args, |x| x.tanh())
+                    })
+                    .register(|args: &[ErrorPropagatingFloat<Float>]| {
+                        unary_eval_real(args, |x| x.tanh())
+                    }),
                 )
             },
             "coth";;
@@ -691,7 +733,13 @@ impl GeometricSymbols {
                         unary_eval_complex_float(args, |z, _| z.tanh().inv())
                     })
                     .register(|args: &[f64]| unary_eval_real_f64(args, |x| x.tanh().recip()))
-                    .register(|args: &[Complex<f64>]| unary_eval_complex_real_f64(args, |z| z.tanh().inv())),
+                    .register(|args: &[Complex<f64>]| unary_eval_complex_real_f64(args, |z| z.tanh().inv()))
+                    .register(|args: &[ErrorPropagatingFloat<f64>]| {
+                        unary_eval_real(args, |x| x.tanh().inv())
+                    })
+                    .register(|args: &[ErrorPropagatingFloat<Float>]| {
+                        unary_eval_real(args, |x| x.tanh().inv())
+                    }),
                 )
             },
             "sech";;
@@ -725,7 +773,13 @@ impl GeometricSymbols {
                         unary_eval_complex_float(args, |z, _| z.cosh().inv())
                     })
                     .register(|args: &[f64]| unary_eval_real_f64(args, |x| x.cosh().recip()))
-                    .register(|args: &[Complex<f64>]| unary_eval_complex_real_f64(args, |z| z.cosh().inv())),
+                    .register(|args: &[Complex<f64>]| unary_eval_complex_real_f64(args, |z| z.cosh().inv()))
+                    .register(|args: &[ErrorPropagatingFloat<f64>]| {
+                        unary_eval_real(args, |x| x.cosh().inv())
+                    })
+                    .register(|args: &[ErrorPropagatingFloat<Float>]| {
+                        unary_eval_real(args, |x| x.cosh().inv())
+                    }),
                 )
             },
             "csch";;
@@ -759,7 +813,13 @@ impl GeometricSymbols {
                         unary_eval_complex_float(args, |z, _| z.sinh().inv())
                     })
                     .register(|args: &[f64]| unary_eval_real_f64(args, |x| x.sinh().recip()))
-                    .register(|args: &[Complex<f64>]| unary_eval_complex_real_f64(args, |z| z.sinh().inv())),
+                    .register(|args: &[Complex<f64>]| unary_eval_complex_real_f64(args, |z| z.sinh().inv()))
+                    .register(|args: &[ErrorPropagatingFloat<f64>]| {
+                        unary_eval_real(args, |x| x.sinh().inv())
+                    })
+                    .register(|args: &[ErrorPropagatingFloat<Float>]| {
+                        unary_eval_real(args, |x| x.sinh().inv())
+                    }),
                 )
             }
         );
@@ -803,6 +863,12 @@ impl GeometricSymbols {
                 .register(|args: &[Complex<f64>]| {
                     unary_eval_complex_real_f64(args, |z| z.asin())
                 })
+                .register(|args: &[ErrorPropagatingFloat<f64>]| {
+                    unary_eval_real(args, |x| x.asin())
+                })
+                .register(|args: &[ErrorPropagatingFloat<Float>]| {
+                    unary_eval_real(args, |x| x.asin())
+                })
         );
 
         let acos = symbol!(
@@ -832,6 +898,12 @@ impl GeometricSymbols {
                 .register(|args: &[f64]| unary_eval_real_f64(args, f64::acos))
                 .register(|args: &[Complex<f64>]| {
                     unary_eval_complex_real_f64(args, |z| z.acos())
+                })
+                .register(|args: &[ErrorPropagatingFloat<f64>]| {
+                    unary_eval_real(args, |x| x.acos())
+                })
+                .register(|args: &[ErrorPropagatingFloat<Float>]| {
+                    unary_eval_real(args, |x| x.acos())
                 })
         );
 
@@ -902,6 +974,8 @@ impl GeometricSymbols {
                     }
                     _ => Complex::new(f64::NAN, f64::NAN),
                 })
+                .register(|args: &[ErrorPropagatingFloat<f64>]| atan_eval_real(args))
+                .register(|args: &[ErrorPropagatingFloat<Float>]| atan_eval_real(args))
         );
 
         let acot = symbol!(
@@ -928,6 +1002,18 @@ impl GeometricSymbols {
                 .register(|args: &[f64]| unary_eval_real_f64(args, |x| x.recip().atan()))
                 .register(|args: &[Complex<f64>]| {
                     unary_eval_complex_real_f64(args, |z| atan_eval_complex_f64(z.inv()))
+                })
+                .register(|args: &[ErrorPropagatingFloat<f64>]| {
+                    unary_eval_real(args, |x| {
+                        let inv = x.inv();
+                        inv.atan2(&inv.one())
+                    })
+                })
+                .register(|args: &[ErrorPropagatingFloat<Float>]| {
+                    unary_eval_real(args, |x| {
+                        let inv = x.inv();
+                        inv.atan2(&inv.one())
+                    })
                 })
         );
 
@@ -960,6 +1046,12 @@ impl GeometricSymbols {
                 .register(|args: &[Complex<f64>]| {
                     unary_eval_complex_real_f64(args, |z| z.inv().acos())
                 })
+                .register(|args: &[ErrorPropagatingFloat<f64>]| {
+                    unary_eval_real(args, |x| x.inv().acos())
+                })
+                .register(|args: &[ErrorPropagatingFloat<Float>]| {
+                    unary_eval_real(args, |x| x.inv().acos())
+                })
         );
 
         let acsc = symbol!(
@@ -986,6 +1078,12 @@ impl GeometricSymbols {
                 .register(|args: &[f64]| unary_eval_real_f64(args, |x| x.recip().asin()))
                 .register(|args: &[Complex<f64>]| {
                     unary_eval_complex_real_f64(args, |z| z.inv().asin())
+                })
+                .register(|args: &[ErrorPropagatingFloat<f64>]| {
+                    unary_eval_real(args, |x| x.inv().asin())
+                })
+                .register(|args: &[ErrorPropagatingFloat<Float>]| {
+                    unary_eval_real(args, |x| x.inv().asin())
                 })
         );
 
@@ -1016,6 +1114,12 @@ impl GeometricSymbols {
                 .register(|args: &[f64]| unary_eval_real_f64(args, f64::asinh))
                 .register(|args: &[Complex<f64>]| {
                     unary_eval_complex_real_f64(args, |z| z.asinh())
+                })
+                .register(|args: &[ErrorPropagatingFloat<f64>]| {
+                    unary_eval_real(args, |x| x.asinh())
+                })
+                .register(|args: &[ErrorPropagatingFloat<Float>]| {
+                    unary_eval_real(args, |x| x.asinh())
                 })
         );
 
@@ -1048,6 +1152,12 @@ impl GeometricSymbols {
                 .register(|args: &[Complex<f64>]| {
                     unary_eval_complex_real_f64(args, |z| z.acosh())
                 })
+                .register(|args: &[ErrorPropagatingFloat<f64>]| {
+                    unary_eval_real(args, |x| x.acosh())
+                })
+                .register(|args: &[ErrorPropagatingFloat<Float>]| {
+                    unary_eval_real(args, |x| x.acosh())
+                })
         );
 
         let atanh = symbol!(
@@ -1077,6 +1187,12 @@ impl GeometricSymbols {
                 .register(|args: &[Complex<f64>]| {
                     unary_eval_complex_real_f64(args, |z| z.atanh())
                 })
+                .register(|args: &[ErrorPropagatingFloat<f64>]| {
+                    unary_eval_real(args, |x| x.atanh())
+                })
+                .register(|args: &[ErrorPropagatingFloat<Float>]| {
+                    unary_eval_real(args, |x| x.atanh())
+                })
         );
 
         let acoth = symbol!(
@@ -1101,6 +1217,12 @@ impl GeometricSymbols {
                 .register(|args: &[f64]| unary_eval_real_f64(args, |x| x.recip().atanh()))
                 .register(|args: &[Complex<f64>]| {
                     unary_eval_complex_real_f64(args, |z| z.inv().atanh())
+                })
+                .register(|args: &[ErrorPropagatingFloat<f64>]| {
+                    unary_eval_real(args, |x| x.inv().atanh())
+                })
+                .register(|args: &[ErrorPropagatingFloat<Float>]| {
+                    unary_eval_real(args, |x| x.inv().atanh())
                 })
         );
 
@@ -1135,6 +1257,12 @@ impl GeometricSymbols {
                 .register(|args: &[Complex<f64>]| {
                     unary_eval_complex_real_f64(args, |z| z.inv().acosh())
                 })
+                .register(|args: &[ErrorPropagatingFloat<f64>]| {
+                    unary_eval_real(args, |x| x.inv().acosh())
+                })
+                .register(|args: &[ErrorPropagatingFloat<Float>]| {
+                    unary_eval_real(args, |x| x.inv().acosh())
+                })
         );
 
         let acsch = symbol!(
@@ -1162,6 +1290,12 @@ impl GeometricSymbols {
                 .register(|args: &[f64]| unary_eval_real_f64(args, |x| x.recip().asinh()))
                 .register(|args: &[Complex<f64>]| {
                     unary_eval_complex_real_f64(args, |z| z.inv().asinh())
+                })
+                .register(|args: &[ErrorPropagatingFloat<f64>]| {
+                    unary_eval_real(args, |x| x.inv().asinh())
+                })
+                .register(|args: &[ErrorPropagatingFloat<Float>]| {
+                    unary_eval_real(args, |x| x.inv().asinh())
                 })
         );
 
@@ -1904,6 +2038,24 @@ fn unary_eval_real_f64(args: &[f64], evaluator: fn(f64) -> f64) -> f64 {
         return f64::NAN;
     };
     evaluator(*arg)
+}
+
+fn unary_eval_real<T: Real, F: FnOnce(&T) -> T>(args: &[T], evaluator: F) -> T {
+    let [arg] = args else {
+        panic!(
+            "Wrong number of arguments for unary function: {}",
+            args.len()
+        );
+    };
+    evaluator(arg)
+}
+
+fn atan_eval_real<T: Real>(args: &[T]) -> T {
+    match args {
+        [z] => z.atan2(&z.one()),
+        [x, y] => y.atan2(x),
+        _ => panic!("Wrong number of arguments for atan: {}", args.len()),
+    }
 }
 
 fn unary_eval_f64(args: &[f64], evaluator: fn(&Complex<Float>, u32) -> Complex<Float>) -> f64 {
