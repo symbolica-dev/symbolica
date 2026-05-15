@@ -3301,18 +3301,25 @@ class Replacement:
     """A replacement of a pattern by a right-hand side."""
 
     def __new__(
-            cls,
-            pattern: Expression | int | float | complex | Decimal,
-            rhs: HeldExpression | Expression | Callable[[dict[Expression, Expression]], Expression] | int | float | complex | Decimal,
-            cond: PatternRestriction | Condition | None = None,
-            non_greedy_wildcards: Sequence[Expression] | None = None,
-            min_level: int = 0,
-            max_level: int | None = None,
-            level_range: tuple[int, int | None] | None = None,
-            level_is_tree_depth: bool = False,
-            partial: bool = True,
-            allow_new_wildcards_on_rhs: bool = False,
-            rhs_cache_size: int | None = None) -> Replacement:
+        cls,
+        pattern: Expression | int | float | complex | Decimal,
+        rhs: HeldExpression
+        | Expression
+        | Callable[[dict[Expression, Expression]], Expression]
+        | int
+        | float
+        | complex
+        | Decimal,
+        cond: PatternRestriction | Condition | None = None,
+        non_greedy_wildcards: Sequence[Expression] | None = None,
+        min_level: int = 0,
+        max_level: int | None = None,
+        level_range: tuple[int, int | None] | None = None,
+        level_is_tree_depth: bool = False,
+        partial: bool = True,
+        allow_new_wildcards_on_rhs: bool = False,
+        rhs_cache_size: int = 100,
+    ) -> Replacement:
         """
         Create a new replacement. See `replace` for more information.
 
@@ -3338,7 +3345,7 @@ class Replacement:
             Whether matches are allowed inside larger expressions instead of only at the top level.
         allow_new_wildcards_on_rhs: bool
             Whether wildcards that appear only on the right-hand side are allowed.
-        rhs_cache_size: int | None
+        rhs_cache_size: int
             The cache size for memoizing right-hand-side evaluations.
         """
 
