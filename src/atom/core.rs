@@ -17,7 +17,7 @@ use crate::{
         factorized_rational_polynomial::{
             FactorizedRationalPolynomial, FromNumeratorAndFactorizedDenominator,
         },
-        float::{Complex, Real, SingleFloat},
+        float::{Complex, FixedPrecision, Real, SingleFloat},
         integer::Z,
         rational::Rational,
         rational_polynomial::{
@@ -25,8 +25,7 @@ use crate::{
         },
     },
     evaluate::{
-        EvalTree, EvaluationDomain, EvaluationFn, ExpressionEvaluator, FunctionMap,
-        OptimizationSettings,
+        EvalTree, EvaluationDomain, ExpressionEvaluator, FunctionMap, OptimizationSettings,
     },
     id::{
         AliasedAtom, BorrowReplacement, Condition, ConditionResult, Context, MatchSettings,
@@ -814,16 +813,16 @@ pub trait AtomCore: private::Sealed + Sized {
         AtomView::system_to_matrix::<E, T1, T2>(system, vars)
     }
 
-    /// Evaluate a (nested) expression a single time.
+    /// Evaluate an expression.
     /// For repeated evaluations, use [Self::evaluator()] and convert
     /// to an optimized version or generate a compiled version of your expression.
     ///
-    /// All variables and all user functions in the expression must occur in the map.
+    /// All variables and all user functions that do not have an evaluation hook,
+    /// must occur in the map.
     ///
     /// # Example
     ///
     /// ```
-    /// use ahash::HashMap;
     /// use symbolica::prelude::*;
     /// let expr = parse!("x + y");
     /// let x = parse!("x");
@@ -831,19 +830,41 @@ pub trait AtomCore: private::Sealed + Sized {
     /// let mut const_map = HashMap::default();
     /// const_map.insert(x.clone(), 1.0);
     /// const_map.insert(y.clone(), 2.0);
-    /// let result = expr
-    ///     .evaluate(|r| r.to_f64(), &const_map, &HashMap::default())
-    ///     .unwrap();
+    /// let result = expr.evaluate(&const_map).unwrap();
     /// assert_eq!(result, 3.0);
     /// ```
-    fn evaluate<A: AtomCore + KeyLookup, T: Real, F: Fn(&Rational) -> T + Copy>(
+    fn evaluate<A: AtomCore + KeyLookup, T: Real + EvaluationDomain + FixedPrecision>(
         &self,
-        coeff_map: F,
-        const_map: &HashMap<A, T>,
-        function_map: &HashMap<Symbol, EvaluationFn<A, T>>,
+        map: &HashMap<A, T>,
     ) -> Result<T, EvaluationError> {
         self.as_atom_view()
-            .evaluate(coeff_map, const_map, function_map)
+            .evaluate(map, T::BINARY_PRECISION as u32)
+    }
+
+    /// Evaluate an expression with a given precision.
+    /// For repeated evaluations, use [Self::evaluator()] and convert
+    /// to an optimized version or generate a compiled version of your expression.
+    ///
+    /// All variables and all user functions that do not have an evaluation hook,
+    /// must occur in the map..
+    ///
+    /// # Example
+    ///
+    /// ```
+    /// use symbolica::prelude::*;
+    /// let expr = parse!("2x");
+    /// let x = parse!("x");
+    /// let mut const_map = HashMap::default();
+    /// const_map.insert(x.clone(), Float::with_val(200, 3));
+    /// let result = expr.evaluate_with_prec(&const_map, 200).unwrap();
+    /// assert_eq!(result, Float::with_val(200, 6));
+    /// ```
+    fn evaluate_with_prec<A: AtomCore + KeyLookup, T: Real + EvaluationDomain>(
+        &self,
+        map: &HashMap<A, T>,
+        binary_prec: u32,
+    ) -> Result<T, EvaluationError> {
+        self.as_atom_view().evaluate(map, binary_prec)
     }
 
     /// Convert nested expressions to a tree suitable for repeated evaluations with

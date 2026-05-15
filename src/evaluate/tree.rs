@@ -5,7 +5,7 @@ use super::*;
 pub enum EvaluationError {
     UnsupportedHotStart,
     UnsupportedCoefficient {
-        coefficient: &'static str,
+        coefficient: String,
     },
     UndefinedVariable {
         symbol: Symbol,
@@ -658,22 +658,22 @@ impl<'a> AtomView<'a> {
                     }
                     CoefficientView::Indeterminate => {
                         return Err(EvaluationError::UnsupportedCoefficient {
-                            coefficient: "indeterminate",
+                            coefficient: "indeterminate".to_string(),
                         });
                     }
                     CoefficientView::Infinity(_) => {
                         return Err(EvaluationError::UnsupportedCoefficient {
-                            coefficient: "infinity",
+                            coefficient: "infinity".to_string(),
                         });
                     }
                     CoefficientView::FiniteField(_, _) => {
                         return Err(EvaluationError::UnsupportedCoefficient {
-                            coefficient: "finite field",
+                            coefficient: "finite field".to_string(),
                         });
                     }
                     CoefficientView::RationalPolynomial(_) => {
                         return Err(EvaluationError::UnsupportedCoefficient {
-                            coefficient: "rational polynomial",
+                            coefficient: "rational polynomial".to_string(),
                         });
                     }
                 };
@@ -3466,19 +3466,19 @@ impl<'a> AtomView<'a> {
                     ))
                 }
                 CoefficientView::Indeterminate => Err(EvaluationError::UnsupportedCoefficient {
-                    coefficient: "indeterminate",
+                    coefficient: "indeterminate".to_owned(),
                 }),
                 CoefficientView::Infinity(_) => Err(EvaluationError::UnsupportedCoefficient {
-                    coefficient: "infinity",
+                    coefficient: "infinity".to_owned(),
                 }),
                 CoefficientView::FiniteField(_, _) => {
                     Err(EvaluationError::UnsupportedCoefficient {
-                        coefficient: "finite field",
+                        coefficient: "finite field".to_owned(),
                     })
                 }
                 CoefficientView::RationalPolynomial(_) => {
                     Err(EvaluationError::UnsupportedCoefficient {
-                        coefficient: "rational polynomial",
+                        coefficient: "rational polynomial".to_owned(),
                     })
                 }
             },
@@ -3745,106 +3745,60 @@ impl<'a> AtomView<'a> {
         }
     }
 
-    /// Evaluate an expression using a constant map and a function map.
-    /// The constant map can map any literal expression to a value, for example
-    /// a variable or a function with fixed arguments.
-    ///
-    /// All variables and all user functions in the expression must occur in the map.
-    pub(crate) fn evaluate<A: AtomCore + KeyLookup, T: Real, F: Fn(&Rational) -> T + Copy>(
+    pub(crate) fn evaluate<A: AtomCore + KeyLookup, T: Real + EvaluationDomain>(
         &self,
-        coeff_map: F,
-        const_map: &HashMap<A, T>,
-        function_map: &HashMap<Symbol, EvaluationFn<A, T>>,
+        map: &HashMap<A, T>,
+        binary_prec: u32,
     ) -> Result<T, EvaluationError> {
         let mut cache = HashMap::default();
-        self.evaluate_impl(coeff_map, const_map, function_map, &mut cache)
+        self.evaluate_impl(map, &mut cache, binary_prec)
     }
 
-    fn evaluate_impl<A: AtomCore + KeyLookup, T: Real, F: Fn(&Rational) -> T + Copy>(
+    fn evaluate_impl<A: AtomCore + KeyLookup, T: Real + EvaluationDomain>(
         &self,
-        coeff_map: F,
-        const_map: &HashMap<A, T>,
-        function_map: &HashMap<Symbol, EvaluationFn<A, T>>,
+        map: &HashMap<A, T>,
         cache: &mut HashMap<AtomView<'a>, T>,
+        binary_prec: u32,
     ) -> Result<T, EvaluationError> {
-        if let Some(c) = const_map.get(self.get_data()) {
-            return Ok(c.clone());
-        }
-
         match self {
-            AtomView::Num(n) => match n.get_coeff_view() {
-                CoefficientView::Natural(n, d, ni, di) => {
-                    if ni == 0 {
-                        Ok(coeff_map(&Rational::from_int_unchecked(n, d)))
-                    } else {
-                        let num = coeff_map(&Rational::from_int_unchecked(n, d));
-                        Ok(coeff_map(&Rational::from_int_unchecked(ni, di))
-                            * num
-                                .i()
-                                .ok_or(EvaluationError::NumericalTypeDoesNotSupportImaginaryUnit)?
-                            + num)
-                    }
-                }
-                CoefficientView::Large(l, i) => {
-                    if i.is_zero() {
-                        Ok(coeff_map(&l.to_rat()))
-                    } else {
-                        let num = coeff_map(&l.to_rat());
-                        Ok(coeff_map(&i.to_rat())
-                            * num
-                                .i()
-                                .ok_or(EvaluationError::NumericalTypeDoesNotSupportImaginaryUnit)?
-                            + num)
-                    }
-                }
-                CoefficientView::Float(r, i) => {
-                    // TODO: converting back to rational is slow
-                    let rm = coeff_map(&r.to_float().to_rational());
-                    if i.is_zero() {
-                        Ok(rm)
-                    } else {
-                        Ok(coeff_map(&i.to_float().to_rational())
-                            * rm.i()
-                                .ok_or(EvaluationError::NumericalTypeDoesNotSupportImaginaryUnit)?
-                            + rm)
-                    }
-                }
-                CoefficientView::Indeterminate => Err(EvaluationError::UnsupportedCoefficient {
-                    coefficient: "indeterminate",
-                }),
-                CoefficientView::Infinity(_) => Err(EvaluationError::UnsupportedCoefficient {
-                    coefficient: "infinity",
-                }),
-                CoefficientView::FiniteField(_, _) => {
-                    Err(EvaluationError::UnsupportedCoefficient {
-                        coefficient: "finite field",
-                    })
-                }
-                CoefficientView::RationalPolynomial(_) => {
-                    Err(EvaluationError::UnsupportedCoefficient {
-                        coefficient: "rational polynomial",
-                    })
-                }
-            },
+            AtomView::Num(n) => {
+                let f = n
+                    .get_coeff_view()
+                    .to_float(binary_prec)
+                    .map_err(|e| EvaluationError::UnsupportedCoefficient { coefficient: e })?;
+                T::try_from_complex_float(f).map_err(|e| EvaluationError::EvaluationFailed {
+                    expression: self.to_owned(),
+                    reason: e,
+                })
+            }
             AtomView::Var(v) => {
                 let s = v.get_symbol();
-                match s.get_id() {
-                    Symbol::E_ID => Ok(coeff_map(&1.into()).e()),
-                    Symbol::PI_ID => Ok(coeff_map(&1.into()).pi()),
-                    _ => {
-                        if let Some(fun) = function_map.get(&s) {
-                            if let Some(eval) = cache.get(self) {
-                                return Ok(eval.clone());
-                            }
 
-                            let eval = fun.get()(&[], const_map, function_map, cache);
-                            cache.insert(*self, eval.clone());
-                            Ok(eval)
-                        } else {
-                            Err(EvaluationError::UndefinedVariable { symbol: s })
-                        }
+                if let Some(val) = map.get::<[u8]>(self.get_data()) {
+                    return Ok(val.clone());
+                }
+
+                if let Some(val) = cache.get(self) {
+                    return Ok(val.clone());
+                }
+
+                if let Some(eval) = s.get_evaluation_info() {
+                    if let Ok(val) = T::try_from_complex_float(
+                        eval.evaluate_constant(&[], binary_prec).map_err(|e| {
+                            EvaluationError::UnsupportedCoefficient { coefficient: e }
+                        })?,
+                    ) {
+                        cache.insert(*self, val.clone());
+                        return Ok(val);
                     }
                 }
+
+                Err(EvaluationError::UndefinedVariable { symbol: s })
+                // Err(format!(
+                //     "Variable {} does not have an evaluator for type {} and was not provided as a parameter",
+                //     v.get_symbol().get_name(),
+                //     std::any::type_name::<Self>()
+                // ))
             }
             AtomView::Fun(f) => {
                 let name = f.get_symbol();
@@ -3861,7 +3815,7 @@ impl<'a> AtomView<'a> {
                 {
                     assert!(f.get_nargs() == 1);
                     let arg = f.iter().next().unwrap();
-                    let arg_eval = arg.evaluate_impl(coeff_map, const_map, function_map, cache)?;
+                    let arg_eval = arg.evaluate_impl(map, cache, binary_prec)?;
 
                     return Ok(match f.get_symbol_id() {
                         Symbol::EXP_ID => arg_eval.exp(),
@@ -3886,55 +3840,78 @@ impl<'a> AtomView<'a> {
 
                     let mut arg_iter = f.iter();
 
-                    let cond_eval = arg_iter.next().unwrap().evaluate_impl(
-                        coeff_map,
-                        const_map,
-                        function_map,
-                        cache,
-                    )?;
+                    let cond_eval =
+                        arg_iter
+                            .next()
+                            .unwrap()
+                            .evaluate_impl(map, cache, binary_prec)?;
 
                     if !cond_eval.is_fully_zero() {
-                        let t_eval = arg_iter.next().unwrap().evaluate_impl(
-                            coeff_map,
-                            const_map,
-                            function_map,
-                            cache,
-                        )?;
+                        let t_eval =
+                            arg_iter
+                                .next()
+                                .unwrap()
+                                .evaluate_impl(map, cache, binary_prec)?;
                         return Ok(t_eval);
                     } else {
                         let _ = arg_iter.next().unwrap();
-                        let f_eval = arg_iter.next().unwrap().evaluate_impl(
-                            coeff_map,
-                            const_map,
-                            function_map,
-                            cache,
-                        )?;
+                        let f_eval =
+                            arg_iter
+                                .next()
+                                .unwrap()
+                                .evaluate_impl(map, cache, binary_prec)?;
                         return Ok(f_eval);
                     }
+                }
+
+                if let Some(val) = map.get::<[u8]>(self.get_data()) {
+                    return Ok(val.clone());
                 }
 
                 if let Some(eval) = cache.get(self) {
                     return Ok(eval.clone());
                 }
 
-                let mut args = Vec::with_capacity(f.get_nargs());
-                for arg in f {
-                    args.push(arg.evaluate_impl(coeff_map, const_map, function_map, cache)?);
+                if let Some(eval) = name.get_evaluation_info() {
+                    let tag_count = eval.get_tag_count();
+                    let mut iter = f.iter();
+                    let mut tags = Vec::with_capacity(tag_count);
+
+                    for i in 0..tag_count {
+                        if let Some(tag) = iter.next() {
+                            tags.push(tag);
+                        } else {
+                            return Err(EvaluationError::WrongNumberOfArguments {
+                                function: name,
+                                expected: tag_count,
+                                actual: i,
+                            });
+                        }
+                    }
+
+                    let mut args = Vec::with_capacity(f.get_nargs());
+                    for arg in iter {
+                        args.push(arg.evaluate_impl(map, cache, binary_prec)?);
+                    }
+
+                    if let Some(eval_fun) = T::resolve_function(&tags, eval) {
+                        let val = (eval_fun)(&args);
+                        cache.insert(*self, val);
+                    }
                 }
 
-                let Some(fun) = function_map.get(&f.get_symbol()) else {
-                    return Err(EvaluationError::MissingFunction {
-                        symbol: f.get_symbol(),
-                    });
-                };
-                let eval = fun.get()(&args, const_map, function_map, cache);
-
-                cache.insert(*self, eval.clone());
-                Ok(eval)
+                Err(EvaluationError::UndefinedFunction {
+                    expression: self.to_owned(),
+                })
+                // Err(format!(
+                //     "Function {} does not have an evaluator for type {} and was not provided as a parameter",
+                //     self,
+                //     std::any::type_name::<Self>()
+                // ))
             }
             AtomView::Pow(p) => {
                 let (b, e) = p.get_base_exp();
-                let b_eval = b.evaluate_impl(coeff_map, const_map, function_map, cache)?;
+                let b_eval = b.evaluate_impl(map, cache, binary_prec)?;
 
                 if let AtomView::Num(n) = e
                     && let CoefficientView::Natural(num, den, ni, _di) = n.get_coeff_view()
@@ -3950,34 +3927,27 @@ impl<'a> AtomView<'a> {
                     }
                 }
 
-                let e_eval = e.evaluate_impl(coeff_map, const_map, function_map, cache)?;
+                let e_eval = e.evaluate_impl(map, cache, binary_prec)?;
                 Ok(b_eval.powf(&e_eval))
             }
             AtomView::Mul(m) => {
                 let mut it = m.iter();
-                let mut r =
-                    it.next()
-                        .unwrap()
-                        .evaluate_impl(coeff_map, const_map, function_map, cache)?;
+                let mut r = it.next().unwrap().evaluate_impl(map, cache, binary_prec)?;
                 for arg in it {
-                    r *= arg.evaluate_impl(coeff_map, const_map, function_map, cache)?;
+                    r *= arg.evaluate_impl(map, cache, binary_prec)?;
                 }
                 Ok(r)
             }
             AtomView::Add(a) => {
                 let mut it = a.iter();
-                let mut r =
-                    it.next()
-                        .unwrap()
-                        .evaluate_impl(coeff_map, const_map, function_map, cache)?;
+                let mut r = it.next().unwrap().evaluate_impl(map, cache, binary_prec)?;
                 for arg in it {
-                    r += arg.evaluate_impl(coeff_map, const_map, function_map, cache)?;
+                    r += arg.evaluate_impl(map, cache, binary_prec)?;
                 }
                 Ok(r)
             }
         }
     }
-
     /// Check if the expression could be 0, using (potentially) numerical sampling with
     /// a given tolerance and number of iterations.
     pub fn zero_test(&self, iterations: usize, tolerance: f64) -> ConditionResult {
@@ -4015,6 +3985,7 @@ impl<'a> AtomView<'a> {
 
         let mut rng = MonteCarloRng::new(0, 0);
 
+        // TODO: actually check if the expression is real for any real input sample
         if !self.is_real() {
             let mut vars: HashMap<_, _> = self
                 .get_all_indeterminates(true)
@@ -4035,22 +4006,7 @@ impl<'a> AtomView<'a> {
                 }
 
                 let r = self
-                    .evaluate(
-                        |x| {
-                            Complex::new(
-                                ErrorPropagatingFloat::new(
-                                    0f64.from_rational(x),
-                                    -0f64.get_epsilon().log10(),
-                                ),
-                                ErrorPropagatingFloat::new(
-                                    0f64.zero(),
-                                    -0f64.get_epsilon().log10(),
-                                ),
-                            )
-                        },
-                        &vars,
-                        &HashMap::default(),
-                    )
+                    .evaluate::<_, Complex<ErrorPropagatingFloat<f64>>>(&vars, 53)
                     .unwrap();
 
                 let res_re = r.re.get_num().to_f64();
@@ -4090,18 +4046,7 @@ impl<'a> AtomView<'a> {
                     *x = x.sample_unit(&mut rng);
                 }
 
-                let r = self
-                    .evaluate(
-                        |x| {
-                            ErrorPropagatingFloat::new(
-                                0f64.from_rational(x),
-                                -0f64.get_epsilon().log10(),
-                            )
-                        },
-                        &vars,
-                        &HashMap::default(),
-                    )
-                    .unwrap();
+                let r = self.evaluate(&vars, 53).unwrap();
 
                 let res = r.get_num().to_f64();
 
