@@ -15,12 +15,13 @@ Examples
 """
 
 from __future__ import annotations
-from enum import Enum
-from typing import Any, Callable, Literal, overload, Iterator, Sequence
+
 from decimal import Decimal
+from enum import Enum
+from typing import Any, Callable, Iterator, Literal, Sequence, overload
+
 import numpy as np
 import numpy.typing as npt
-
 
 def use_custom_logger() -> None:
     """
@@ -31,12 +32,10 @@ def use_custom_logger() -> None:
     This function must be called before any Symbolica logging events are emitted.
     """
 
-
 def get_namespace() -> str:
     """
     Get the Symbolica namespace for the calling module. Use `set_namespace` to set a namespace.
     """
-
 
 def set_namespace(namespace: str) -> None:
     """
@@ -51,18 +50,15 @@ def set_namespace(namespace: str) -> None:
         The namespace to set for subsequently created symbols.
     """
 
-
 def get_version() -> str:
     """
     Get the current Symbolica version.
     """
 
-
 def is_licensed() -> bool:
     """
     Check if the current Symbolica instance has a valid license key set.
     """
-
 
 def set_license_key(key: str) -> None:
     """
@@ -75,7 +71,6 @@ def set_license_key(key: str) -> None:
         The license key to register for this machine.
     """
 
-
 def request_hobbyist_license(name: str, email: str) -> None:
     """
     Request a key for **non-professional** use for the user `name`, that will be sent to the e-mail address `email`.
@@ -87,7 +82,6 @@ def request_hobbyist_license(name: str, email: str) -> None:
     email: str
         The email address that should receive the license.
     """
-
 
 def request_trial_license(name: str, email: str, company: str) -> None:
     """
@@ -102,7 +96,6 @@ def request_trial_license(name: str, email: str, company: str) -> None:
     company: str
         The company of the user.
     """
-
 
 def request_sublicense(name: str, email: str, company: str, super_licence: str) -> None:
     """
@@ -121,7 +114,6 @@ def request_sublicense(name: str, email: str, company: str, super_licence: str) 
         The parent site-wide license key.
     """
 
-
 def get_license_key(email: str) -> str:
     """
     Get the license key for the account registered with the provided email address.
@@ -131,7 +123,6 @@ def get_license_key(email: str) -> str:
     email: str
         The email address of the licensed account.
     """
-
 
 @overload
 def S(
@@ -286,18 +277,19 @@ def S(
         Custom user data to associate with the symbol.
     """
 
-
 @overload
-def S(*names: str,
-      is_symmetric: bool | None = None,
-      is_antisymmetric: bool | None = None,
-      is_cyclesymmetric: bool | None = None,
-      is_linear: bool | None = None,
-      is_scalar: bool | None = None,
-      is_real: bool | None = None,
-      is_integer: bool | None = None,
-      is_positive: bool | None = None,
-      tags: Sequence[str] | None = None) -> Sequence[Expression]:
+def S(
+    *names: str,
+    is_symmetric: bool | None = None,
+    is_antisymmetric: bool | None = None,
+    is_cyclesymmetric: bool | None = None,
+    is_linear: bool | None = None,
+    is_scalar: bool | None = None,
+    is_real: bool | None = None,
+    is_integer: bool | None = None,
+    is_positive: bool | None = None,
+    tags: Sequence[str] | None = None,
+) -> Sequence[Expression]:
     """
     Create new symbols from `names`. Symbols can have attributes,
     such as symmetries. If no attributes
@@ -338,8 +330,9 @@ def S(*names: str,
         A list of tags to associate with the symbol.
     """
 
-
-def N(num: int | float | complex | str | Decimal, relative_error: float | None = None) -> Expression:
+def N(
+    num: int | float | complex | str | Decimal, relative_error: float | None = None
+) -> Expression:
     """
     Create a new Symbolica number from an int, a float, or a string.
     A floating point number is kept as a float with the same precision as the input,
@@ -367,8 +360,11 @@ def N(num: int | float | complex | str | Decimal, relative_error: float | None =
         The maximum relative error used when converting floating-point input to a rational number.
     """
 
-
-def E(input: str, mode: ParseMode = ParseMode.Symbolica, default_namespace: str | None = None) -> Expression:
+def E(
+    input: str,
+    mode: ParseMode = ParseMode.Symbolica,
+    default_namespace: str | None = None,
+) -> Expression:
     """
     Parse a Symbolica expression from a string.
 
@@ -396,15 +392,17 @@ def E(input: str, mode: ParseMode = ParseMode.Symbolica, default_namespace: str 
         If the input is not a valid expression.
     """
 
-
 def T() -> Transformer:
     """
     Create a new transformer that maps an expression.
     """
 
-
 @overload
-def P(poly: str, default_namespace: str | None = None, vars: Sequence[Expression] | None = None) -> Polynomial:
+def P(
+    poly: str,
+    default_namespace: str | None = None,
+    vars: Sequence[Expression] | None = None,
+) -> Polynomial:
     """
     Parse a string a polynomial, optionally, with the variable ordering specified in `vars`.
     All non-polynomial parts will be converted to new, independent variables.
@@ -419,10 +417,13 @@ def P(poly: str, default_namespace: str | None = None, vars: Sequence[Expression
         The variables to treat as polynomial variables, in the given order.
     """
 
-
 @overload
-def P(poly: str,  minimal_poly: Polynomial, default_namespace: str | None = None, vars: Sequence[Expression] | None = None,
-      ) -> NumberFieldPolynomial:
+def P(
+    poly: str,
+    minimal_poly: Polynomial,
+    default_namespace: str | None = None,
+    vars: Sequence[Expression] | None = None,
+) -> NumberFieldPolynomial:
     """
     Parse string to a polynomial, optionally, with the variables and the ordering specified in `vars`.
     All non-polynomial elements will be converted to new independent variables.
@@ -442,15 +443,15 @@ def P(poly: str,  minimal_poly: Polynomial, default_namespace: str | None = None
         The variables to treat as polynomial variables, in the given order.
     """
 
-
 @overload
-def P(poly: str,
-      modulus: int,
-      default_namespace: str | None = None,
-      power: tuple[int, Expression] | None = None,
-      minimal_poly: Polynomial | None = None,
-      vars: Sequence[Expression] | None = None,
-      ) -> FiniteFieldPolynomial:
+def P(
+    poly: str,
+    modulus: int,
+    default_namespace: str | None = None,
+    power: tuple[int, Expression] | None = None,
+    minimal_poly: Polynomial | None = None,
+    vars: Sequence[Expression] | None = None,
+) -> FiniteFieldPolynomial:
     """
     Parse a string to a polynomial, optionally, with the variables and the ordering specified in `vars`.
     All non-polynomial elements will be converted to new independent variables.
@@ -477,7 +478,6 @@ def P(poly: str,
         The variables to treat as polynomial variables, in the given order.
     """
 
-
 class AtomType(Enum):
     """Specifies the type of the atom."""
 
@@ -494,27 +494,25 @@ class AtomType(Enum):
     Pow = 6
     """The expression is a power."""
 
-
 class SymbolAttribute(Enum):
     """Specifies the attributes of a symbol."""
 
-    Symmetric = 1,
+    Symmetric = (1,)
     """ The function is symmetric. """
-    Antisymmetric = 2,
+    Antisymmetric = (2,)
     """ The function is antisymmetric."""
-    Cyclesymmetric = 3,
+    Cyclesymmetric = (3,)
     """ The function is cyclesymmetric."""
-    Linear = 4,
+    Linear = (4,)
     """The function is linear."""
-    Scalar = 5,
+    Scalar = (5,)
     """The symbol represents a scalar. It will be moved out of linear functions."""
-    Real = 6,
+    Real = (6,)
     """The symbol represents a real number."""
-    Integer = 7,
+    Integer = (7,)
     """The symbol represents an integer."""
-    Positive = 8,
+    Positive = (8,)
     """The symbol represents a positive number."""
-
 
 class AtomTree:
     """
@@ -541,7 +539,6 @@ class AtomTree:
     tail: list[AtomTree]
     """The list of child atoms of this atom."""
 
-
 class ParseMode(Enum):
     """Specifies the parse mode."""
 
@@ -549,7 +546,6 @@ class ParseMode(Enum):
     """Parse using Symbolica notation."""
     Mathematica = 2
     """Parse using Mathematica notation."""
-
 
 class PrintMode(Enum):
     """Specifies the print mode."""
@@ -564,7 +560,6 @@ class PrintMode(Enum):
     """Print using Sympy notation."""
     Typst = 5
     """Print using Typst notation."""
-
 
 class Expression:
     """
@@ -785,17 +780,19 @@ class Expression:
 
     @overload
     @classmethod
-    def symbol(_cls,
-               *names: str,
-               is_symmetric: bool | None = None,
-               is_antisymmetric: bool | None = None,
-               is_cyclesymmetric: bool | None = None,
-               is_linear: bool | None = None,
-               is_real: bool | None = None,
-               is_scalar: bool | None = None,
-               is_integer: bool | None = None,
-               is_positive: bool | None = None,
-               tags: Sequence[str] | None = None) -> Sequence[Expression]:
+    def symbol(
+        _cls,
+        *names: str,
+        is_symmetric: bool | None = None,
+        is_antisymmetric: bool | None = None,
+        is_cyclesymmetric: bool | None = None,
+        is_linear: bool | None = None,
+        is_real: bool | None = None,
+        is_scalar: bool | None = None,
+        is_integer: bool | None = None,
+        is_positive: bool | None = None,
+        tags: Sequence[str] | None = None,
+    ) -> Sequence[Expression]:
         """
         Create new symbols from `names`. Symbols can have attributes,
         such as symmetries. If no attributes
@@ -855,7 +852,9 @@ class Expression:
         """
 
     @overload
-    def __call__(self, *args: Expression | int | float | complex | Decimal) -> Expression:
+    def __call__(
+        self, *args: Expression | int | float | complex | Decimal
+    ) -> Expression:
         """
         Create a Symbolica expression or transformer by calling the function with appropriate arguments.
 
@@ -872,7 +871,9 @@ class Expression:
         """
 
     @overload
-    def __call__(self, *args: HeldExpression | Expression | int | float | complex | Decimal) -> HeldExpression:
+    def __call__(
+        self, *args: HeldExpression | Expression | int | float | complex | Decimal
+    ) -> HeldExpression:
         """
         Create a Symbolica expression or transformer by calling the function with appropriate arguments.
 
@@ -889,7 +890,11 @@ class Expression:
         """
 
     @classmethod
-    def num(_cls, num: int | float | complex | str | Decimal, relative_error: float | None = None) -> Expression:
+    def num(
+        _cls,
+        num: int | float | complex | str | Decimal,
+        relative_error: float | None = None,
+    ) -> Expression:
         """
         Create a new Symbolica number from an int, a float, or a string.
         A floating point number is kept as a float with the same precision as the input,
@@ -924,7 +929,12 @@ class Expression:
         """
 
     @classmethod
-    def parse(_cls, input: str, mode: ParseMode = ParseMode.Symbolica, default_namespace: str | None = None) -> Expression:
+    def parse(
+        _cls,
+        input: str,
+        mode: ParseMode = ParseMode.Symbolica,
+        default_namespace: str | None = None,
+    ) -> Expression:
         """
         Parse a Symbolica expression from a string.
 
@@ -975,7 +985,9 @@ class Expression:
         """
 
     @classmethod
-    def load(_cls, filename: str, conflict_fn: Callable[[str], str] | None = None) -> Expression:
+    def load(
+        _cls, filename: str, conflict_fn: Callable[[str], str] | None = None
+    ) -> Expression:
         """
         Load an expression and its state from a file. The state will be merged
         with the current one. If a symbol has conflicting attributes, the conflict
@@ -1048,7 +1060,23 @@ class Expression:
         color_top_level_sum: bool = True,
         color_builtin_symbols: bool = True,
         bracket_level_colors: Sequence[int] | None = [
-            244, 25, 97, 36, 38, 40, 42, 44, 46, 48, 50, 52, 54, 56, 58, 60],
+            244,
+            25,
+            97,
+            36,
+            38,
+            40,
+            42,
+            44,
+            46,
+            48,
+            50,
+            52,
+            54,
+            56,
+            58,
+            60,
+        ],
         print_ring: bool = True,
         symmetric_representation_for_finite_field: bool = False,
         explicit_rational_polynomial: bool = False,
@@ -1056,7 +1084,7 @@ class Expression:
         multiplication_operator: str = "*",
         double_star_for_exponentiation: bool = False,
         square_brackets_for_function: bool = False,
-        function_brackets: tuple[str, str] = ('(', ')'),
+        function_brackets: tuple[str, str] = ("(", ")"),
         num_exp_as_superscript: bool = True,
         show_namespaces: bool = False,
         hide_namespace: str | None = None,
@@ -1231,7 +1259,9 @@ class Expression:
         is a variable or function, otherwise throw an error.
         """
 
-    def get_symbol_data(self, key: str | int | Expression | None = None) -> str | int | Expression | bytes | dict[str | int | Expression, Any] | list[Any]:
+    def get_symbol_data(
+        self, key: str | int | Expression | None = None
+    ) -> str | int | Expression | bytes | dict[str | int | Expression, Any] | list[Any]:
         """
         Get the data of a variable or function if the current atom
         is a variable or function, otherwise throw an error.
@@ -1314,7 +1344,9 @@ class Expression:
         >>> print(e.is_constant())  # True
         """
 
-    def __add__(self, other: Expression | int | float | complex | Decimal) -> Expression:
+    def __add__(
+        self, other: Expression | int | float | complex | Decimal
+    ) -> Expression:
         """
         Add this expression to `other`, returning the result.
 
@@ -1324,7 +1356,9 @@ class Expression:
             The other operand to combine or compare with.
         """
 
-    def __radd__(self, other: Expression | int | float | complex | Decimal) -> Expression:
+    def __radd__(
+        self, other: Expression | int | float | complex | Decimal
+    ) -> Expression:
         """
         Add this expression to `other`, returning the result.
 
@@ -1334,7 +1368,9 @@ class Expression:
             The other operand to combine or compare with.
         """
 
-    def __sub__(self, other: Expression | int | float | complex | Decimal) -> Expression:
+    def __sub__(
+        self, other: Expression | int | float | complex | Decimal
+    ) -> Expression:
         """
         Subtract `other` from this expression, returning the result.
 
@@ -1344,7 +1380,9 @@ class Expression:
             The other operand to combine or compare with.
         """
 
-    def __rsub__(self, other: Expression | int | float | complex | Decimal) -> Expression:
+    def __rsub__(
+        self, other: Expression | int | float | complex | Decimal
+    ) -> Expression:
         """
         Subtract this expression from `other`, returning the result.
 
@@ -1354,7 +1392,9 @@ class Expression:
             The other operand to combine or compare with.
         """
 
-    def __mul__(self, other: Expression | int | float | complex | Decimal) -> Expression:
+    def __mul__(
+        self, other: Expression | int | float | complex | Decimal
+    ) -> Expression:
         """
         Multiply this expression with `other`, returning the result.
 
@@ -1364,7 +1404,9 @@ class Expression:
             The other operand to combine or compare with.
         """
 
-    def __rmul__(self, other: Expression | int | float | complex | Decimal) -> Expression:
+    def __rmul__(
+        self, other: Expression | int | float | complex | Decimal
+    ) -> Expression:
         """
         Multiply this expression with `other`, returning the result.
 
@@ -1374,7 +1416,9 @@ class Expression:
             The other operand to combine or compare with.
         """
 
-    def __truediv__(self, other: Expression | int | float | complex | Decimal) -> Expression:
+    def __truediv__(
+        self, other: Expression | int | float | complex | Decimal
+    ) -> Expression:
         """
         Divide this expression by `other`, returning the result.
 
@@ -1384,7 +1428,9 @@ class Expression:
             The other operand to combine or compare with.
         """
 
-    def __rtruediv__(self, other: Expression | int | float | complex | Decimal) -> Expression:
+    def __rtruediv__(
+        self, other: Expression | int | float | complex | Decimal
+    ) -> Expression:
         """
         Divide `other` by this expression, returning the result.
 
@@ -1404,7 +1450,9 @@ class Expression:
             The exponent.
         """
 
-    def __rpow__(self, base: Expression | int | float | complex | Decimal) -> Expression:
+    def __rpow__(
+        self, base: Expression | int | float | complex | Decimal
+    ) -> Expression:
         """
         Take `base` to power `self`, returning the result.
 
@@ -1490,7 +1538,9 @@ class Expression:
         Uses the principal branch with cuts on `(-infinity, -1]` and `[1, +infinity)`.
         """
 
-    def atan(self, y: Expression | int | float | complex | Decimal | None = None) -> Expression:
+    def atan(
+        self, y: Expression | int | float | complex | Decimal | None = None
+    ) -> Expression:
         """
         Take the inverse tangent of this expression, returning the result.
         Uses the principal branch with cuts on `(-i infinity, -i]` and `[i, i infinity)`.
@@ -1688,7 +1738,9 @@ class Expression:
             The transformer to bind to the expression.
         """
 
-    def contains(self, a: Transformer | HeldExpression | Expression | int | float | Decimal) -> Condition:
+    def contains(
+        self, a: Transformer | HeldExpression | Expression | int | float | Decimal
+    ) -> Condition:
         """
         Returns true iff `self` contains `a` literally.
 
@@ -1707,7 +1759,9 @@ class Expression:
             The subexpression or pattern that should be contained literally.
         """
 
-    def get_all_symbols(self, include_function_symbols: bool = True) -> Sequence[Expression]:
+    def get_all_symbols(
+        self, include_function_symbols: bool = True
+    ) -> Sequence[Expression]:
         """
         Get all symbols in the current expression, optionally including function symbols.
         The symbols are sorted in Symbolica's internal ordering.
@@ -1718,7 +1772,9 @@ class Expression:
             Whether function symbols should be included in the collected symbol set.
         """
 
-    def get_all_indeterminates(self, enter_functions: bool = True) -> Sequence[Expression]:
+    def get_all_indeterminates(
+        self, enter_functions: bool = True
+    ) -> Sequence[Expression]:
         """
         Get all symbols and functions in the current expression, optionally including function symbols.
         The symbols are sorted in Symbolica's internal ordering.
@@ -1888,7 +1944,9 @@ class Expression:
             The comparison callback applied to the matched values.
         """
 
-    def req_lt(self, num: Expression | int | float | complex | Decimal, cmp_any_atom=False) -> PatternRestriction:
+    def req_lt(
+        self, num: Expression | int | float | complex | Decimal, cmp_any_atom=False
+    ) -> PatternRestriction:
         """
         Create a pattern restriction that passes when the wildcard is smaller than a number `num`.
         If the matched wildcard is not a number, the pattern fails.
@@ -1913,7 +1971,9 @@ class Expression:
             Whether the comparison may be satisfied by any atom in the expression instead of only the whole match.
         """
 
-    def req_gt(self, num: Expression | int | float | complex | Decimal, cmp_any_atom=False) -> PatternRestriction:
+    def req_gt(
+        self, num: Expression | int | float | complex | Decimal, cmp_any_atom=False
+    ) -> PatternRestriction:
         """
         Create a pattern restriction that passes when the wildcard is greater than a number `num`.
         If the matched wildcard is not a number, the pattern fails.
@@ -1938,7 +1998,9 @@ class Expression:
             Whether the comparison may be satisfied by any atom in the expression instead of only the whole match.
         """
 
-    def req_le(self, num: Expression | int | float | complex | Decimal, cmp_any_atom=False) -> PatternRestriction:
+    def req_le(
+        self, num: Expression | int | float | complex | Decimal, cmp_any_atom=False
+    ) -> PatternRestriction:
         """
         Create a pattern restriction that passes when the wildcard is smaller than or equal to a number `num`.
         If the matched wildcard is not a number, the pattern fails.
@@ -1963,7 +2025,9 @@ class Expression:
             Whether the comparison may be satisfied by any atom in the expression instead of only the whole match.
         """
 
-    def req_ge(self, num: Expression | int | float | complex | Decimal, cmp_any_atom=False) -> PatternRestriction:
+    def req_ge(
+        self, num: Expression | int | float | complex | Decimal, cmp_any_atom=False
+    ) -> PatternRestriction:
         """
         Create a pattern restriction that passes when the wildcard is greater than or equal to a number `num`.
         If the matched wildcard is not a number, the pattern fails.
@@ -2201,7 +2265,9 @@ class Expression:
                 A list of variables
         """
 
-    def expand(self, var: Expression | None = None, via_poly: bool | None = None) -> Expression:
+    def expand(
+        self, var: Expression | None = None, via_poly: bool | None = None
+    ) -> Expression:
         """
         Expand the expression. Optionally, expand in `var` only. `var` can be a variable or a function.
         If it is a variable, any function with that variable name is also expanded in.
@@ -2449,7 +2515,7 @@ class Expression:
         expansion_point: Expression | int | float | complex | Decimal,
         depth: int,
         depth_denom: int = 1,
-        depth_is_absolute: bool = True
+        depth_is_absolute: bool = True,
     ) -> Series:
         """
         Series expand in `x` around `expansion_point` to depth `depth`.
@@ -2554,8 +2620,11 @@ class Expression:
         """
 
     @overload
-    def to_polynomial(self, minimal_poly: Polynomial, vars: Sequence[Expression] | None = None,
-                      ) -> NumberFieldPolynomial:
+    def to_polynomial(
+        self,
+        minimal_poly: Polynomial,
+        vars: Sequence[Expression] | None = None,
+    ) -> NumberFieldPolynomial:
         """
         Convert the expression to a polynomial, optionally, with the variables and the ordering specified in `vars`.
         All non-polynomial elements will be converted to new independent variables.
@@ -2572,12 +2641,13 @@ class Expression:
         """
 
     @overload
-    def to_polynomial(self,
-                      modulus: int,
-                      power: tuple[int, Expression] | None = None,
-                      minimal_poly: Polynomial | None = None,
-                      vars: Sequence[Expression] | None = None,
-                      ) -> FiniteFieldPolynomial:
+    def to_polynomial(
+        self,
+        modulus: int,
+        power: tuple[int, Expression] | None = None,
+        minimal_poly: Polynomial | None = None,
+        vars: Sequence[Expression] | None = None,
+    ) -> FiniteFieldPolynomial:
         """
         Convert the expression to a polynomial, optionally, with the variables and the ordering specified in `vars`.
         All non-polynomial elements will be converted to new independent variables.
@@ -2716,7 +2786,13 @@ class Expression:
     def replace_iter(
         self,
         lhs: Expression | int | float | complex | Decimal,
-        rhs: HeldExpression | Expression | Callable[[dict[Expression, Expression]], Expression] | int | float | complex | Decimal,
+        rhs: HeldExpression
+        | Expression
+        | Callable[[dict[Expression, Expression]], Expression]
+        | int
+        | float
+        | complex
+        | Decimal,
         cond: PatternRestriction | Condition | None = None,
         min_level: int = 0,
         max_level: int | None = None,
@@ -2772,7 +2848,13 @@ class Expression:
     def replace(
         self,
         pattern: Expression | int | float | complex | Decimal,
-        rhs: HeldExpression | Expression | Callable[[dict[Expression, Expression]], Expression] | int | float | complex | Decimal,
+        rhs: HeldExpression
+        | Expression
+        | Callable[[dict[Expression, Expression]], Expression]
+        | int
+        | float
+        | complex
+        | Decimal,
         cond: PatternRestriction | Condition | None = None,
         non_greedy_wildcards: Sequence[Expression] | None = None,
         min_level: int = 0,
@@ -2841,7 +2923,14 @@ class Expression:
             For example, replacing `f(x_)` with `x_^2` in `f(f(x))` would yield `f(x)^2` with the default settings and `f(x^2)^2` with nested replacement.
         """
 
-    def replace_multiple(self, replacements: Sequence[Replacement],  repeat: bool = False, once: bool = False, bottom_up: bool = False, nested: bool = False) -> Expression:
+    def replace_multiple(
+        self,
+        replacements: Sequence[Replacement],
+        repeat: bool = False,
+        once: bool = False,
+        bottom_up: bool = False,
+        nested: bool = False,
+    ) -> Expression:
         """
         Replace all atoms matching the patterns. See `replace` for more information.
 
@@ -2863,7 +2952,9 @@ class Expression:
             If set to `True`, the entire operation will be repeated until there are no more matches.
         """
 
-    def replace_wildcards(self, replacements: dict[Expression, Expression]) -> Expression:
+    def replace_wildcards(
+        self, replacements: dict[Expression, Expression]
+    ) -> Expression:
         """
         Replace all wildcards in the expression with the corresponding values in `replacements`.
         This function can be used to substitute the result from (see :meth:`Expression.match`)
@@ -3046,7 +3137,9 @@ class Expression:
         """
 
     def evaluate(
-        self, constants: dict[Expression, float], functions: dict[Expression, Callable[[Sequence[float]], float]]
+        self,
+        constants: dict[Expression, float],
+        functions: dict[Expression, Callable[[Sequence[float]], float]],
     ) -> float:
         """
         Evaluate the expression, using a map of all the variables and
@@ -3071,8 +3164,10 @@ class Expression:
     def evaluate_with_prec(
         self,
         constants: dict[Expression, float | str | Decimal],
-        functions: dict[Expression, Callable[[Sequence[Decimal]], float | str | Decimal]],
-        decimal_digit_precision: int
+        functions: dict[
+            Expression, Callable[[Sequence[Decimal]], float | str | Decimal]
+        ],
+        decimal_digit_precision: int,
     ) -> Decimal:
         """
         Evaluate the expression, using a map of all the constants and
@@ -3101,7 +3196,9 @@ class Expression:
         """
 
     def evaluate_complex(
-        self, constants: dict[Expression, float | complex], functions: dict[Expression, Callable[[Sequence[complex]], float | complex]]
+        self,
+        constants: dict[Expression, float | complex],
+        functions: dict[Expression, Callable[[Sequence[complex]], float | complex]],
     ) -> complex:
         """
         Evaluate the expression, using a map of all the variables and
@@ -3264,8 +3361,13 @@ class Expression:
             The maximum distance between factors when searching for common pairs.
         """
 
-    def canonize_tensors(self,
-                         contracted_indices: Sequence[tuple[Expression | int, Expression | int]]) -> tuple[Expression, list[tuple[Expression, Expression]], list[tuple[Expression, Expression]]]:
+    def canonize_tensors(
+        self, contracted_indices: Sequence[tuple[Expression | int, Expression | int]]
+    ) -> tuple[
+        Expression,
+        list[tuple[Expression, Expression]],
+        list[tuple[Expression, Expression]],
+    ]:
         """
         Canonize (products of) tensors in the expression by relabeling repeated indices.
         The tensors must be written as functions, with its indices as the arguments.
@@ -3295,7 +3397,6 @@ class Expression:
         contracted_indices: Sequence[tuple[Expression | int, Expression | int]]
             The index patterns that should be treated as contracted, optionally grouped by a marker.
         """
-
 
 class Replacement:
     """A replacement of a pattern by a right-hand side."""
@@ -3349,7 +3450,6 @@ class Replacement:
             The cache size for memoizing right-hand-side evaluations.
         """
 
-
 class PatternRestriction:
     """A restriction on wildcards."""
 
@@ -3379,7 +3479,9 @@ class PatternRestriction:
         """
 
     @classmethod
-    def req_matches(_cls, match_fn: Callable[[dict[Expression, Expression]], int]) -> PatternRestriction:
+    def req_matches(
+        _cls, match_fn: Callable[[dict[Expression, Expression]], int]
+    ) -> PatternRestriction:
         """
         Create a pattern restriction based on the current matched variables.
         `match_fn` is a Python function that takes a dictionary of wildcards and their matched values
@@ -3416,7 +3518,6 @@ class PatternRestriction:
             The callback evaluated on each match.
         """
 
-
 class Condition:
     """Relations that evaluate to booleans"""
 
@@ -3440,7 +3541,7 @@ class Condition:
         Return the boolean value of the condition.
         """
 
-    def __and__(self, other:  Condition) -> Condition:
+    def __and__(self, other: Condition) -> Condition:
         """
         Create a condition that is the logical and operation between two conditions (i.e., both should hold).
 
@@ -3450,7 +3551,7 @@ class Condition:
             The other operand to combine or compare with.
         """
 
-    def __or__(self, other:  Condition) -> Condition:
+    def __or__(self, other: Condition) -> Condition:
         """
         Create a condition that is the logical 'or' operation between two conditions (i.e., at least one of the two should hold).
 
@@ -3470,10 +3571,8 @@ class Condition:
         Convert the condition to a pattern restriction.
         """
 
-
 class CompareOp:
     """One of the following comparison operators: `<`,`>`,`<=`,`>=`,`==`,`!=`."""
-
 
 class HeldExpression:
     def __call__(self) -> Expression:
@@ -3490,7 +3589,9 @@ class HeldExpression:
         >>> print(e)
         """
 
-    def __eq__(self, other: HeldExpression | Expression | int | float | complex | Decimal) -> Condition:
+    def __eq__(
+        self, other: HeldExpression | Expression | int | float | complex | Decimal
+    ) -> Condition:
         """
         Compare two transformers.
 
@@ -3500,7 +3601,9 @@ class HeldExpression:
             The other operand to combine or compare with.
         """
 
-    def __neq__(self, other: HeldExpression | Expression | int | float | complex | Decimal) -> Condition:
+    def __neq__(
+        self, other: HeldExpression | Expression | int | float | complex | Decimal
+    ) -> Condition:
         """
         Compare two transformers.
 
@@ -3510,7 +3613,9 @@ class HeldExpression:
             The other operand to combine or compare with.
         """
 
-    def __lt__(self, other: HeldExpression | Expression | int | float | complex | Decimal) -> Condition:
+    def __lt__(
+        self, other: HeldExpression | Expression | int | float | complex | Decimal
+    ) -> Condition:
         """
         Compare two transformers. If any of the two expressions is not a rational number, an interal ordering is used.
 
@@ -3520,7 +3625,9 @@ class HeldExpression:
             The other operand to combine or compare with.
         """
 
-    def __le__(self, other: HeldExpression | Expression | int | float | complex | Decimal) -> Condition:
+    def __le__(
+        self, other: HeldExpression | Expression | int | float | complex | Decimal
+    ) -> Condition:
         """
         Compare two transformers. If any of the two expressions is not a rational number, an interal ordering is used.
 
@@ -3530,7 +3637,9 @@ class HeldExpression:
             The other operand to combine or compare with.
         """
 
-    def __gt__(self, other: HeldExpression | Expression | int | float | complex | Decimal) -> Condition:
+    def __gt__(
+        self, other: HeldExpression | Expression | int | float | complex | Decimal
+    ) -> Condition:
         """
         Compare two transformers. If any of the two expressions is not a rational number, an interal ordering is used.
 
@@ -3540,7 +3649,9 @@ class HeldExpression:
             The other operand to combine or compare with.
         """
 
-    def __ge__(self, other: HeldExpression | Expression | int | float | complex | Decimal) -> Condition:
+    def __ge__(
+        self, other: HeldExpression | Expression | int | float | complex | Decimal
+    ) -> Condition:
         """
         Compare two transformers. If any of the two expressions is not a rational number, an interal ordering is used.
 
@@ -3560,7 +3671,9 @@ class HeldExpression:
             The atom type to test or require.
         """
 
-    def contains(self, element: HeldExpression | Expression | int | float | complex | Decimal) -> Condition:
+    def contains(
+        self, element: HeldExpression | Expression | int | float | complex | Decimal
+    ) -> Condition:
         """
         Create a transformer that checks if the expression contains the given `element`.
 
@@ -3605,7 +3718,9 @@ class HeldExpression:
             Whether wildcards that appear only on the right-hand side are allowed.
         """
 
-    def __add__(self, other: HeldExpression | Expression | int | float | complex | Decimal) -> HeldExpression:
+    def __add__(
+        self, other: HeldExpression | Expression | int | float | complex | Decimal
+    ) -> HeldExpression:
         """
         Add this transformer to `other`, returning the result.
 
@@ -3615,7 +3730,9 @@ class HeldExpression:
             The other operand to combine or compare with.
         """
 
-    def __radd__(self, other: HeldExpression | Expression | int | float | complex | Decimal) -> HeldExpression:
+    def __radd__(
+        self, other: HeldExpression | Expression | int | float | complex | Decimal
+    ) -> HeldExpression:
         """
         Add this transformer to `other`, returning the result.
 
@@ -3625,7 +3742,9 @@ class HeldExpression:
             The other operand to combine or compare with.
         """
 
-    def __sub__(self, other: HeldExpression | Expression | int | float | complex | Decimal) -> HeldExpression:
+    def __sub__(
+        self, other: HeldExpression | Expression | int | float | complex | Decimal
+    ) -> HeldExpression:
         """
         Subtract `other` from this transformer, returning the result.
 
@@ -3635,7 +3754,9 @@ class HeldExpression:
             The other operand to combine or compare with.
         """
 
-    def __rsub__(self, other: HeldExpression | Expression | int | float | complex | Decimal) -> HeldExpression:
+    def __rsub__(
+        self, other: HeldExpression | Expression | int | float | complex | Decimal
+    ) -> HeldExpression:
         """
         Subtract this transformer from `other`, returning the result.
 
@@ -3645,7 +3766,9 @@ class HeldExpression:
             The other operand to combine or compare with.
         """
 
-    def __mul__(self, other: HeldExpression | Expression | int | float | complex | Decimal) -> HeldExpression:
+    def __mul__(
+        self, other: HeldExpression | Expression | int | float | complex | Decimal
+    ) -> HeldExpression:
         """
         Add this transformer to `other`, returning the result.
 
@@ -3655,7 +3778,9 @@ class HeldExpression:
             The other operand to combine or compare with.
         """
 
-    def __rmul__(self, other: HeldExpression | Expression | int | float | complex | Decimal) -> HeldExpression:
+    def __rmul__(
+        self, other: HeldExpression | Expression | int | float | complex | Decimal
+    ) -> HeldExpression:
         """
         Add this transformer to `other`, returning the result.
 
@@ -3665,7 +3790,9 @@ class HeldExpression:
             The other operand to combine or compare with.
         """
 
-    def __truediv__(self, other: HeldExpression | Expression | int | float | complex | Decimal) -> HeldExpression:
+    def __truediv__(
+        self, other: HeldExpression | Expression | int | float | complex | Decimal
+    ) -> HeldExpression:
         """
         Divide this transformer by `other`, returning the result.
 
@@ -3675,7 +3802,9 @@ class HeldExpression:
             The other operand to combine or compare with.
         """
 
-    def __rtruediv__(self, other: HeldExpression | Expression | int | float | complex | Decimal) -> HeldExpression:
+    def __rtruediv__(
+        self, other: HeldExpression | Expression | int | float | complex | Decimal
+    ) -> HeldExpression:
         """
         Divide `other` by this transformer, returning the result.
 
@@ -3685,7 +3814,9 @@ class HeldExpression:
             The other operand to combine or compare with.
         """
 
-    def __pow__(self, exp: HeldExpression | Expression | int | float | complex | Decimal) -> HeldExpression:
+    def __pow__(
+        self, exp: HeldExpression | Expression | int | float | complex | Decimal
+    ) -> HeldExpression:
         """
         Take `self` to power `exp`, returning the result.
 
@@ -3695,7 +3826,9 @@ class HeldExpression:
             The exponent.
         """
 
-    def __rpow__(self, base: HeldExpression | Expression | int | float | complex | Decimal) -> HeldExpression:
+    def __rpow__(
+        self, base: HeldExpression | Expression | int | float | complex | Decimal
+    ) -> HeldExpression:
         """
         Take `base` to power `self`, returning the result.
 
@@ -3730,7 +3863,6 @@ class HeldExpression:
         Negate the current transformer, returning the result.
         """
 
-
 class Transformer:
     """Operations that transform an expression."""
 
@@ -3739,7 +3871,11 @@ class Transformer:
         Create a new transformer for a term provided by `Expression.map`.
         """
 
-    def __call__(self, expr: Expression | int | float | complex | Decimal, stats_to_file: str | None = None) -> Expression:
+    def __call__(
+        self,
+        expr: Expression | int | float | complex | Decimal,
+        stats_to_file: str | None = None,
+    ) -> Expression:
         """
         Execute an unbound transformer on the given expression. If the transformer
         is bound, use `execute()` instead.
@@ -3757,7 +3893,12 @@ class Transformer:
             If set, the output of the `stats` transformer will be written to a file in JSON format.
         """
 
-    def if_then(self, condition: Condition, if_block: Transformer, else_block: Transformer | None = None) -> Transformer:
+    def if_then(
+        self,
+        condition: Condition,
+        if_block: Transformer,
+        else_block: Transformer | None = None,
+    ) -> Transformer:
         """
         Evaluate the condition and apply the `if_block` if the condition is true, otherwise apply the `else_block`.
         The expression that is the input of the transformer is the input for the condition, the `if_block` and the `else_block`.
@@ -3779,7 +3920,12 @@ class Transformer:
             The transformer to apply when the condition is false.
         """
 
-    def if_changed(self, condition: Transformer, if_block: Transformer, else_block: Transformer | None = None) -> Transformer:
+    def if_changed(
+        self,
+        condition: Transformer,
+        if_block: Transformer,
+        else_block: Transformer | None = None,
+    ) -> Transformer:
         """
         Execute the `condition` transformer. If the result of the `condition` transformer is different from the input expression,
         apply the `if_block`, otherwise apply the `else_block`. The input expression of the `if_block` is the output
@@ -3822,7 +3968,9 @@ class Transformer:
         >>> print(t(x))
         """
 
-    def expand(self, var: Expression | None = None, via_poly: bool | None = None) -> Transformer:
+    def expand(
+        self, var: Expression | None = None, via_poly: bool | None = None
+    ) -> Transformer:
         """
         Create a transformer that expands products and powers. Optionally, expand in `var` only.
 
@@ -4058,7 +4206,9 @@ class Transformer:
             The function symbol used to wrap each generated permutation.
         """
 
-    def map(self, f: Callable[[Expression], Expression | int | float | complex | Decimal]) -> Transformer:
+    def map(
+        self, f: Callable[[Expression], Expression | int | float | complex | Decimal]
+    ) -> Transformer:
         """
         Create a transformer that applies a Python function.
 
@@ -4374,7 +4524,7 @@ class Transformer:
         expansion_point: Expression | int | float | complex | Decimal,
         depth: int,
         depth_denom: int = 1,
-        depth_is_absolute: bool = True
+        depth_is_absolute: bool = True,
     ) -> Transformer:
         """
         Create a transformer that series expands in `x` around `expansion_point` to depth `depth`.
@@ -4409,7 +4559,13 @@ class Transformer:
     def replace(
         self,
         pat: HeldExpression | Expression | int | float | complex | Decimal,
-        rhs: HeldExpression | Expression | Callable[[dict[Expression, Expression]], Expression] | int | float | complex | Decimal,
+        rhs: HeldExpression
+        | Expression
+        | Callable[[dict[Expression, Expression]], Expression]
+        | int
+        | float
+        | complex
+        | Decimal,
         cond: PatternRestriction | Condition | None = None,
         non_greedy_wildcards: Sequence[Expression] | None = None,
         min_level: int = 0,
@@ -4421,7 +4577,7 @@ class Transformer:
         rhs_cache_size: int | None = None,
         once: bool = False,
         bottom_up: bool = False,
-        nested: bool = False
+        nested: bool = False,
     ) -> Transformer:
         """
         Create a transformer that replaces all subexpressions matching the pattern `pat` by the right-hand side `rhs`.
@@ -4475,7 +4631,13 @@ class Transformer:
             For example, replacing `f(x_)` with `x_^2` in `f(f(x))` would yield `f(x)^2` with the default settings and `f(x^2)^2` with nested replacement.
         """
 
-    def replace_multiple(self, replacements: Sequence[Replacement], once: bool = False, bottom_up: bool = False, nested: bool = False) -> Transformer:
+    def replace_multiple(
+        self,
+        replacements: Sequence[Replacement],
+        once: bool = False,
+        bottom_up: bool = False,
+        nested: bool = False,
+    ) -> Transformer:
         """
         Create a transformer that replaces all atoms matching the patterns. See `replace` for more information.
 
@@ -4509,7 +4671,23 @@ class Transformer:
         color_top_level_sum: bool = True,
         color_builtin_symbols: bool = True,
         bracket_level_colors: Sequence[int] | None = [
-            244, 25, 97, 36, 38, 40, 42, 44, 46, 48, 50, 52, 54, 56, 58, 60],
+            244,
+            25,
+            97,
+            36,
+            38,
+            40,
+            42,
+            44,
+            46,
+            48,
+            50,
+            52,
+            54,
+            56,
+            58,
+            60,
+        ],
         print_ring: bool = True,
         symmetric_representation_for_finite_field: bool = False,
         explicit_rational_polynomial: bool = False,
@@ -4517,7 +4695,7 @@ class Transformer:
         multiplication_operator: str = "*",
         double_star_for_exponentiation: bool = False,
         square_brackets_for_function: bool = False,
-        function_brackets: tuple[str, str] = ('(', ')'),
+        function_brackets: tuple[str, str] = ("(", ")"),
         num_exp_as_superscript: bool = True,
         show_namespaces: bool = False,
         hide_namespace: str | None = None,
@@ -4584,8 +4762,8 @@ class Transformer:
         self,
         tag: str,
         transformer: Transformer,
-        color_medium_change_threshold: float | None = 10.,
-        color_large_change_threshold: float | None = 100.,
+        color_medium_change_threshold: float | None = 10.0,
+        color_large_change_threshold: float | None = 100.0,
     ) -> Transformer:
         """
         Print statistics of a transformer, tagging it with `tag`.
@@ -4617,7 +4795,9 @@ class Transformer:
             The percentage change threshold that should be highlighted as a large change.
         """
 
-    def __eq__(self, other: Transformer | Expression | int | float | Decimal) -> Condition:
+    def __eq__(
+        self, other: Transformer | Expression | int | float | Decimal
+    ) -> Condition:
         """
         Compare two transformers.
 
@@ -4627,7 +4807,9 @@ class Transformer:
             The other operand to combine or compare with.
         """
 
-    def __neq__(self, other: Transformer | Expression | int | float | Decimal) -> Condition:
+    def __neq__(
+        self, other: Transformer | Expression | int | float | Decimal
+    ) -> Condition:
         """
         Compare two transformers.
 
@@ -4637,7 +4819,9 @@ class Transformer:
             The other operand to combine or compare with.
         """
 
-    def __lt__(self, other: Transformer | Expression | int | float | Decimal) -> Condition:
+    def __lt__(
+        self, other: Transformer | Expression | int | float | Decimal
+    ) -> Condition:
         """
         Compare two transformers. If any of the two expressions is not a rational number, an interal ordering is used.
 
@@ -4647,7 +4831,9 @@ class Transformer:
             The other operand to combine or compare with.
         """
 
-    def __le__(self, other: Transformer | Expression | int | float | Decimal) -> Condition:
+    def __le__(
+        self, other: Transformer | Expression | int | float | Decimal
+    ) -> Condition:
         """
         Compare two transformers. If any of the two expressions is not a rational number, an interal ordering is used.
 
@@ -4657,7 +4843,9 @@ class Transformer:
             The other operand to combine or compare with.
         """
 
-    def __gt__(self, other: Transformer | Expression | int | float | Decimal) -> Condition:
+    def __gt__(
+        self, other: Transformer | Expression | int | float | Decimal
+    ) -> Condition:
         """
         Compare two transformers. If any of the two expressions is not a rational number, an interal ordering is used.
 
@@ -4667,7 +4855,9 @@ class Transformer:
             The other operand to combine or compare with.
         """
 
-    def __ge__(self, other: Transformer | Expression | int | float | Decimal) -> Condition:
+    def __ge__(
+        self, other: Transformer | Expression | int | float | Decimal
+    ) -> Condition:
         """
         Compare two transformers. If any of the two expressions is not a rational number, an interal ordering is used.
 
@@ -4687,7 +4877,9 @@ class Transformer:
             The atom type to test or require.
         """
 
-    def contains(self, element: Transformer | HeldExpression | Expression | int | float | Decimal) -> Condition:
+    def contains(
+        self, element: Transformer | HeldExpression | Expression | int | float | Decimal
+    ) -> Condition:
         """
         Create a transformer that checks if the expression contains the given `element`.
 
@@ -4732,7 +4924,6 @@ class Transformer:
             Whether wildcards that appear only on the right-hand side are allowed.
         """
 
-
 class Series:
     """
     A series expansion class.
@@ -4757,7 +4948,7 @@ class Series:
             The expression to operate on.
         """
 
-    def get_coefficient(self, exp:  Expression | int) -> Expression:
+    def get_coefficient(self, exp: Expression | int) -> Expression:
         """
         Get the coefficient of the term with exponent `exp`.  Alternatively, use `series[exp]`.
 
@@ -4792,7 +4983,23 @@ class Series:
         color_top_level_sum: bool = True,
         color_builtin_symbols: bool = True,
         bracket_level_colors: Sequence[int] | None = [
-            244, 25, 97, 36, 38, 40, 42, 44, 46, 48, 50, 52, 54, 56, 58, 60],
+            244,
+            25,
+            97,
+            36,
+            38,
+            40,
+            42,
+            44,
+            46,
+            48,
+            50,
+            52,
+            54,
+            56,
+            58,
+            60,
+        ],
         print_ring: bool = True,
         symmetric_representation_for_finite_field: bool = False,
         explicit_rational_polynomial: bool = False,
@@ -4800,7 +5007,7 @@ class Series:
         multiplication_operator: str = "*",
         double_star_for_exponentiation: bool = False,
         square_brackets_for_function: bool = False,
-        function_brackets: tuple[str, str] = ('(', ')'),
+        function_brackets: tuple[str, str] = ("(", ")"),
         num_exp_as_superscript: bool = True,
         precision: int | None = None,
         show_namespaces: bool = False,
@@ -5034,16 +5241,18 @@ class Series:
         Convert the series to an expression
         """
 
-
 class TermStreamer:
     """
     A term streamer that can handle large expressions, by
     streaming terms to and from disk.
     """
 
-    def __new__(_cls, path: str | None = None,
-                max_mem_bytes: int | None = None,
-                n_cores: int | None = None) -> TermStreamer:
+    def __new__(
+        _cls,
+        path: str | None = None,
+        max_mem_bytes: int | None = None,
+        n_cores: int | None = None,
+    ) -> TermStreamer:
         """
         Create a new term streamer with a given path for its files,
         the maximum size of the memory buffer and the number of cores.
@@ -5083,7 +5292,9 @@ class TermStreamer:
         Clear the term streamer.
         """
 
-    def load(self, filename: str, conflict_fn: Callable[[str], str] | None = None) -> int:
+    def load(
+        self, filename: str, conflict_fn: Callable[[str], str] | None = None
+    ) -> int:
         """
         Load terms and their state from a binary file into the term streamer. The number of terms loaded is returned.
 
@@ -5162,7 +5373,9 @@ class TermStreamer:
             If set, the output of the `stats` transformer will be written to a file in JSON format.
         """
 
-    def map_single_thread(self, f: Transformer, stats_to_file: str | None = None) -> TermStreamer:
+    def map_single_thread(
+        self, f: Transformer, stats_to_file: str | None = None
+    ) -> TermStreamer:
         """
         Apply a transformer to all terms in the stream using a single thread.
 
@@ -5173,7 +5386,6 @@ class TermStreamer:
         stats_to_file: str, optional
             If set, the output of the `stats` transformer will be written to a file in JSON format.
         """
-
 
 class MatchIterator:
     """An iterator over matches."""
@@ -5188,7 +5400,6 @@ class MatchIterator:
         Return the next match.
         """
 
-
 class ReplaceIterator:
     """An iterator over single replacements."""
 
@@ -5202,12 +5413,13 @@ class ReplaceIterator:
         Return the next replacement.
         """
 
-
 class Polynomial:
     """A Symbolica polynomial with rational coefficients."""
 
     @classmethod
-    def parse(_cls, input: str, vars: Sequence[str], default_namespace: str | None = None) -> Polynomial:
+    def parse(
+        _cls, input: str, vars: Sequence[str], default_namespace: str | None = None
+    ) -> Polynomial:
         """
         Parse a polynomial with integer coefficients from a string.
         The input must be written in an expanded format and a list of all
@@ -5260,7 +5472,23 @@ class Polynomial:
         color_top_level_sum: bool = True,
         color_builtin_symbols: bool = True,
         bracket_level_colors: Sequence[int] | None = [
-            244, 25, 97, 36, 38, 40, 42, 44, 46, 48, 50, 52, 54, 56, 58, 60],
+            244,
+            25,
+            97,
+            36,
+            38,
+            40,
+            42,
+            44,
+            46,
+            48,
+            50,
+            52,
+            54,
+            56,
+            58,
+            60,
+        ],
         print_ring: bool = True,
         symmetric_representation_for_finite_field: bool = False,
         explicit_rational_polynomial: bool = False,
@@ -5268,7 +5496,7 @@ class Polynomial:
         multiplication_operator: str = "*",
         double_star_for_exponentiation: bool = False,
         square_brackets_for_function: bool = False,
-        function_brackets: tuple[str, str] = ('(', ')'),
+        function_brackets: tuple[str, str] = ("(", ")"),
         num_exp_as_superscript: bool = True,
         precision: int | None = None,
         show_namespaces: bool = False,
@@ -5572,7 +5800,9 @@ class Polynomial:
             The right-hand-side operand.
         """
 
-    def extended_gcd(self, rhs: Polynomial) -> tuple[Polynomial, Polynomial, Polynomial]:
+    def extended_gcd(
+        self, rhs: Polynomial
+    ) -> tuple[Polynomial, Polynomial, Polynomial]:
         """
         Compute the extended GCD of two polynomials, yielding the GCD and the Bezout coefficients `s` and `t`
         such that `self * s + rhs * t = gcd(self, rhs)`.
@@ -5613,7 +5843,9 @@ class Polynomial:
             The prime modulus of the target finite field.
         """
 
-    def isolate_roots(self, refine: float | Decimal | None = None) -> list[tuple[Expression, Expression, int]]:
+    def isolate_roots(
+        self, refine: float | Decimal | None = None
+    ) -> list[tuple[Expression, Expression, int]]:
         """
         Isolate the real roots of the polynomial. The result is a list of intervals with rational bounds that contain exactly one root,
         and the multiplicity of that root. Optionally, the intervals can be refined to a given precision.
@@ -5641,7 +5873,9 @@ class Polynomial:
             The optional interval refinement tolerance.
         """
 
-    def approximate_roots(self, max_iterations: int, tolerance: float) -> list[tuple[complex, int]]:
+    def approximate_roots(
+        self, max_iterations: int, tolerance: float
+    ) -> list[tuple[complex, int]]:
         """
         Approximate all complex roots of a univariate polynomial, given a maximal number of iterations
         and a given tolerance. Returns the roots and their multiplicity.
@@ -5772,7 +6006,9 @@ class Polynomial:
         >>> print(p)  # 3
         """
 
-    def coefficient_list(self, xs: Expression | Sequence[Expression] | None = None) -> list[tuple[list[int], Polynomial]]:
+    def coefficient_list(
+        self, xs: Expression | Sequence[Expression] | None = None
+    ) -> list[tuple[list[int], Polynomial]]:
         """
         Get the coefficient list, optionally in the variables `xs`.
 
@@ -5792,7 +6028,12 @@ class Polynomial:
         """
 
     @classmethod
-    def groebner_basis(_cls, system: Sequence[Polynomial], grevlex: bool = True, print_stats: bool = False) -> list[Polynomial]:
+    def groebner_basis(
+        _cls,
+        system: Sequence[Polynomial],
+        grevlex: bool = True,
+        print_stats: bool = False,
+    ) -> list[Polynomial]:
         """
         Compute the Groebner basis of a polynomial system.
 
@@ -5916,7 +6157,12 @@ class Polynomial:
         """
 
     @classmethod
-    def interpolate(_cls, x: Expression, sample_points: Sequence[Expression | int], values: Sequence[Polynomial]) -> Polynomial:
+    def interpolate(
+        _cls,
+        x: Expression,
+        sample_points: Sequence[Expression | int],
+        values: Sequence[Polynomial],
+    ) -> Polynomial:
         """
         Perform Newton interpolation in the variable `x` given the sample points
         `sample_points` and the values `values`.
@@ -5952,7 +6198,9 @@ class Polynomial:
             The minimal polynomial that defines the algebraic extension.
         """
 
-    def adjoin(self, min_poly: Polynomial, new_symbol: Expression | None = None) -> tuple[Polynomial, Polynomial, Polynomial]:
+    def adjoin(
+        self, min_poly: Polynomial, new_symbol: Expression | None = None
+    ) -> tuple[Polynomial, Polynomial, Polynomial]:
         """
         Adjoin the coefficient ring of this polynomial `R[a]` with `b`, whose minimal polynomial
         is `R[a][b]` and form `R[b]`. Also return the new representation of `a` and `b`.
@@ -6001,7 +6249,6 @@ class Polynomial:
             The minimal polynomial that defines the algebraic extension.
         """
 
-
 class NumberFieldPolynomial:
     """A Symbolica polynomial with rational coefficients."""
 
@@ -6030,7 +6277,23 @@ class NumberFieldPolynomial:
         color_top_level_sum: bool = True,
         color_builtin_symbols: bool = True,
         bracket_level_colors: Sequence[int] | None = [
-            244, 25, 97, 36, 38, 40, 42, 44, 46, 48, 50, 52, 54, 56, 58, 60],
+            244,
+            25,
+            97,
+            36,
+            38,
+            40,
+            42,
+            44,
+            46,
+            48,
+            50,
+            52,
+            54,
+            56,
+            58,
+            60,
+        ],
         print_ring: bool = True,
         symmetric_representation_for_finite_field: bool = False,
         explicit_rational_polynomial: bool = False,
@@ -6038,7 +6301,7 @@ class NumberFieldPolynomial:
         multiplication_operator: str = "*",
         double_star_for_exponentiation: bool = False,
         square_brackets_for_function: bool = False,
-        function_brackets: tuple[str, str] = ('(', ')'),
+        function_brackets: tuple[str, str] = ("(", ")"),
         num_exp_as_superscript: bool = True,
         precision: int | None = None,
         show_namespaces: bool = False,
@@ -6257,7 +6520,9 @@ class NumberFieldPolynomial:
             The right-hand-side operand.
         """
 
-    def quot_rem(self, rhs: NumberFieldPolynomial) -> tuple[NumberFieldPolynomial, NumberFieldPolynomial]:
+    def quot_rem(
+        self, rhs: NumberFieldPolynomial
+    ) -> tuple[NumberFieldPolynomial, NumberFieldPolynomial]:
         """
         Divide `self` by `rhs`, returning the quotient and remainder.
 
@@ -6342,7 +6607,9 @@ class NumberFieldPolynomial:
             The right-hand-side operand.
         """
 
-    def extended_gcd(self, rhs: NumberFieldPolynomial) -> tuple[NumberFieldPolynomial, NumberFieldPolynomial, NumberFieldPolynomial]:
+    def extended_gcd(
+        self, rhs: NumberFieldPolynomial
+    ) -> tuple[NumberFieldPolynomial, NumberFieldPolynomial, NumberFieldPolynomial]:
         """
         Compute the extended GCD of two polynomials, yielding the GCD and the Bezout coefficients `s` and `t`
         such that `self * s + rhs * t = gcd(self, rhs)`.
@@ -6353,7 +6620,9 @@ class NumberFieldPolynomial:
             The right-hand-side operand.
         """
 
-    def resultant(self, rhs: NumberFieldPolynomial, var: Expression) -> NumberFieldPolynomial:
+    def resultant(
+        self, rhs: NumberFieldPolynomial, var: Expression
+    ) -> NumberFieldPolynomial:
         """
         Compute the resultant of two polynomials with respect to the variable `var`.
 
@@ -6476,7 +6745,9 @@ class NumberFieldPolynomial:
         >>> print(p)  # 3
         """
 
-    def coefficient_list(self, xs: Expression | Sequence[Expression] | None = None) -> list[tuple[list[int], NumberFieldPolynomial]]:
+    def coefficient_list(
+        self, xs: Expression | Sequence[Expression] | None = None
+    ) -> list[tuple[list[int], NumberFieldPolynomial]]:
         """
         Get the coefficient list, optionally in the variables `xs`.
 
@@ -6496,7 +6767,12 @@ class NumberFieldPolynomial:
         """
 
     @classmethod
-    def groebner_basis(_cls, system: list[NumberFieldPolynomial], grevlex: bool = True, print_stats: bool = False) -> list[NumberFieldPolynomial]:
+    def groebner_basis(
+        _cls,
+        system: list[NumberFieldPolynomial],
+        grevlex: bool = True,
+        print_stats: bool = False,
+    ) -> list[NumberFieldPolynomial]:
         """
         Compute the Groebner basis of a polynomial system.
 
@@ -6515,7 +6791,9 @@ class NumberFieldPolynomial:
             Whether Groebner basis statistics should be printed during computation.
         """
 
-    def reduce(self, gs: Sequence[Polynomial], grevlex: bool = True) -> NumberFieldPolynomial:
+    def reduce(
+        self, gs: Sequence[Polynomial], grevlex: bool = True
+    ) -> NumberFieldPolynomial:
         """
         Completely reduce the polynomial w.r.t the polynomials `gs`.
 
@@ -6549,7 +6827,9 @@ class NumberFieldPolynomial:
         >>> print((e - p.to_expression()).expand())
         """
 
-    def replace(self, x: Expression, v: NumberFieldPolynomial | int) -> NumberFieldPolynomial:
+    def replace(
+        self, x: Expression, v: NumberFieldPolynomial | int
+    ) -> NumberFieldPolynomial:
         """
         Replace the variable `x` with a polynomial `v`.
 
@@ -6580,12 +6860,17 @@ class NumberFieldPolynomial:
         Convert the number field polynomial to a rational polynomial.
         """
 
-
 class FiniteFieldPolynomial:
     """A Symbolica polynomial with finite field coefficients."""
 
     @classmethod
-    def parse(_cls, input: str, vars: Sequence[str], prime: int, default_namespace: str | None = None) -> FiniteFieldPolynomial:
+    def parse(
+        _cls,
+        input: str,
+        vars: Sequence[str],
+        prime: int,
+        default_namespace: str | None = None,
+    ) -> FiniteFieldPolynomial:
         """
         Parse a polynomial with integer coefficients from a string.
         The input must be written in an expanded format and a list of all
@@ -6640,7 +6925,23 @@ class FiniteFieldPolynomial:
         color_top_level_sum: bool = True,
         color_builtin_symbols: bool = True,
         bracket_level_colors: Sequence[int] | None = [
-            244, 25, 97, 36, 38, 40, 42, 44, 46, 48, 50, 52, 54, 56, 58, 60],
+            244,
+            25,
+            97,
+            36,
+            38,
+            40,
+            42,
+            44,
+            46,
+            48,
+            50,
+            52,
+            54,
+            56,
+            58,
+            60,
+        ],
         print_ring: bool = True,
         symmetric_representation_for_finite_field: bool = False,
         explicit_rational_polynomial: bool = False,
@@ -6648,7 +6949,7 @@ class FiniteFieldPolynomial:
         multiplication_operator: str = "*",
         double_star_for_exponentiation: bool = False,
         square_brackets_for_function: bool = False,
-        function_brackets: tuple[str, str] = ('(', ')'),
+        function_brackets: tuple[str, str] = ("(", ")"),
         num_exp_as_superscript: bool = True,
         precision: int | None = None,
         show_namespaces: bool = False,
@@ -6827,7 +7128,9 @@ class FiniteFieldPolynomial:
             The right-hand-side operand.
         """
 
-    def quot_rem(self, rhs: FiniteFieldPolynomial) -> tuple[FiniteFieldPolynomial, FiniteFieldPolynomial]:
+    def quot_rem(
+        self, rhs: FiniteFieldPolynomial
+    ) -> tuple[FiniteFieldPolynomial, FiniteFieldPolynomial]:
         """
         Divide `self` by `rhs`, returning the quotient and remainder.
 
@@ -6912,7 +7215,9 @@ class FiniteFieldPolynomial:
             The right-hand-side operand.
         """
 
-    def extended_gcd(self, rhs: FiniteFieldPolynomial) -> tuple[FiniteFieldPolynomial, FiniteFieldPolynomial, FiniteFieldPolynomial]:
+    def extended_gcd(
+        self, rhs: FiniteFieldPolynomial
+    ) -> tuple[FiniteFieldPolynomial, FiniteFieldPolynomial, FiniteFieldPolynomial]:
         """
         Compute the extended GCD of two polynomials, yielding the GCD and the Bezout coefficients `s` and `t`
         such that `self * s + rhs * t = gcd(self, rhs)`.
@@ -6931,7 +7236,9 @@ class FiniteFieldPolynomial:
             The right-hand-side operand.
         """
 
-    def to_integer_polynomial(self, symmetric_representation: bool = True) -> Polynomial:
+    def to_integer_polynomial(
+        self, symmetric_representation: bool = True
+    ) -> Polynomial:
         """
         Convert the polynomial to a polynomial with integer coefficients.
 
@@ -6941,7 +7248,9 @@ class FiniteFieldPolynomial:
             Whether finite-field coefficients should use symmetric integer representatives.
         """
 
-    def resultant(self, rhs: FiniteFieldPolynomial, var: Expression) -> FiniteFieldPolynomial:
+    def resultant(
+        self, rhs: FiniteFieldPolynomial, var: Expression
+    ) -> FiniteFieldPolynomial:
         """
         Compute the resultant of two polynomials with respect to the variable `var`.
 
@@ -7040,7 +7349,9 @@ class FiniteFieldPolynomial:
         >>> print(p)  # 3
         """
 
-    def coefficient_list(self, xs: Expression | Sequence[Expression] | None = None) -> list[tuple[list[int], FiniteFieldPolynomial]]:
+    def coefficient_list(
+        self, xs: Expression | Sequence[Expression] | None = None
+    ) -> list[tuple[list[int], FiniteFieldPolynomial]]:
         """
         Get the coefficient list, optionally in the variables `xs`.
 
@@ -7060,7 +7371,12 @@ class FiniteFieldPolynomial:
         """
 
     @classmethod
-    def groebner_basis(_cls, system: list[FiniteFieldPolynomial], grevlex: bool = True, print_stats: bool = False) -> list[FiniteFieldPolynomial]:
+    def groebner_basis(
+        _cls,
+        system: list[FiniteFieldPolynomial],
+        grevlex: bool = True,
+        print_stats: bool = False,
+    ) -> list[FiniteFieldPolynomial]:
         """
         Compute the Groebner basis of a polynomial system.
 
@@ -7085,7 +7401,9 @@ class FiniteFieldPolynomial:
             If `True`, intermediate statistics will be printed.
         """
 
-    def reduce(self, gs: Sequence[Polynomial], grevlex: bool = True) -> FiniteFieldPolynomial:
+    def reduce(
+        self, gs: Sequence[Polynomial], grevlex: bool = True
+    ) -> FiniteFieldPolynomial:
         """
         Completely reduce the polynomial w.r.t the polynomials `gs`.
 
@@ -7124,7 +7442,9 @@ class FiniteFieldPolynomial:
             The input value.
         """
 
-    def replace(self, x: Expression, v: FiniteFieldPolynomial | int) -> FiniteFieldPolynomial:
+    def replace(
+        self, x: Expression, v: FiniteFieldPolynomial | int
+    ) -> FiniteFieldPolynomial:
         """
         Replace the variable `x` with a polynomial `v`.
 
@@ -7174,7 +7494,9 @@ class FiniteFieldPolynomial:
         Get the modulus of the finite field.
         """
 
-    def adjoin(self, b: FiniteFieldPolynomial, new_symbol: Expression | None = None) -> tuple[FiniteFieldPolynomial, FiniteFieldPolynomial, FiniteFieldPolynomial]:
+    def adjoin(
+        self, b: FiniteFieldPolynomial, new_symbol: Expression | None = None
+    ) -> tuple[FiniteFieldPolynomial, FiniteFieldPolynomial, FiniteFieldPolynomial]:
         """
         Adjoin the coefficient ring of this polynomial `R[a]` with `b`, whose minimal polynomial
         is `R[a][b]` and form `R[b]`. Also return the new representation of `a` and `b`.
@@ -7192,7 +7514,9 @@ class FiniteFieldPolynomial:
             The symbol chosen for the adjoined generator.
         """
 
-    def simplify_algebraic_number(self, min_poly: FiniteFieldPolynomial) -> FiniteFieldPolynomial:
+    def simplify_algebraic_number(
+        self, min_poly: FiniteFieldPolynomial
+    ) -> FiniteFieldPolynomial:
         """
         Find the minimal polynomial for the algebraic number represented by this polynomial
         expressed in the number field defined by `minimal_poly`.
@@ -7202,7 +7526,6 @@ class FiniteFieldPolynomial:
         min_poly: FiniteFieldPolynomial
             The minimal polynomial that defines the algebraic extension.
         """
-
 
 class RationalPolynomial:
     """A Symbolica rational polynomial."""
@@ -7220,7 +7543,9 @@ class RationalPolynomial:
         """
 
     @classmethod
-    def parse(_cls, input: str, vars: Sequence[str], default_namespace: str | None = None) -> RationalPolynomial:
+    def parse(
+        _cls, input: str, vars: Sequence[str], default_namespace: str | None = None
+    ) -> RationalPolynomial:
         """
         Parse a rational polynomial from a string.
         The list of all the variables must be provided.
@@ -7464,11 +7789,12 @@ class RationalPolynomial:
             The variable with respect to which to perform the partial-fraction decomposition.
         """
 
-
 class FiniteFieldRationalPolynomial:
     """A Symbolica rational polynomial."""
 
-    def __new__(_cls, num: FiniteFieldPolynomial, den: FiniteFieldPolynomial) -> FiniteFieldRationalPolynomial:
+    def __new__(
+        _cls, num: FiniteFieldPolynomial, den: FiniteFieldPolynomial
+    ) -> FiniteFieldRationalPolynomial:
         """
         Create a new rational polynomial from a numerator and denominator polynomial.
 
@@ -7481,7 +7807,13 @@ class FiniteFieldRationalPolynomial:
         """
 
     @classmethod
-    def parse(_cls, input: str, vars: Sequence[str], prime: int, default_namespace: str | None = None) -> FiniteFieldRationalPolynomial:
+    def parse(
+        _cls,
+        input: str,
+        vars: Sequence[str],
+        prime: int,
+        default_namespace: str | None = None,
+    ) -> FiniteFieldRationalPolynomial:
         """
         Parse a rational polynomial from a string.
         The list of all the variables must be provided.
@@ -7549,7 +7881,9 @@ class FiniteFieldRationalPolynomial:
         Get the list of variables in the internal ordering of the polynomial.
         """
 
-    def __add__(self, rhs: FiniteFieldRationalPolynomial) -> FiniteFieldRationalPolynomial:
+    def __add__(
+        self, rhs: FiniteFieldRationalPolynomial
+    ) -> FiniteFieldRationalPolynomial:
         """
         Add two rational polynomials `self` and `rhs`, returning the result.
 
@@ -7559,7 +7893,9 @@ class FiniteFieldRationalPolynomial:
             The right-hand-side operand.
         """
 
-    def __sub__(self, rhs: FiniteFieldRationalPolynomial) -> FiniteFieldRationalPolynomial:
+    def __sub__(
+        self, rhs: FiniteFieldRationalPolynomial
+    ) -> FiniteFieldRationalPolynomial:
         """
         Subtract rational polynomials `rhs` from `self`, returning the result.
 
@@ -7569,7 +7905,9 @@ class FiniteFieldRationalPolynomial:
             The right-hand-side operand.
         """
 
-    def __mul__(self, rhs: FiniteFieldRationalPolynomial) -> FiniteFieldRationalPolynomial:
+    def __mul__(
+        self, rhs: FiniteFieldRationalPolynomial
+    ) -> FiniteFieldRationalPolynomial:
         """
         Multiply two rational polynomials `self` and `rhs`, returning the result.
 
@@ -7579,7 +7917,9 @@ class FiniteFieldRationalPolynomial:
             The right-hand-side operand.
         """
 
-    def __truediv__(self, rhs: FiniteFieldRationalPolynomial) -> FiniteFieldRationalPolynomial:
+    def __truediv__(
+        self, rhs: FiniteFieldRationalPolynomial
+    ) -> FiniteFieldRationalPolynomial:
         """
         Divide the rational polynomial `self` by `rhs` if possible, returning the result.
 
@@ -7649,7 +7989,6 @@ class FiniteFieldRationalPolynomial:
             The variable with respect to which to perform the partial-fraction decomposition.
         """
 
-
 class Matrix:
     """A matrix with rational polynomial coefficients."""
 
@@ -7677,7 +8016,9 @@ class Matrix:
         """
 
     @classmethod
-    def eye(cls, diag: Sequence[RationalPolynomial | Polynomial | Expression | int]) -> Matrix:
+    def eye(
+        cls, diag: Sequence[RationalPolynomial | Polynomial | Expression | int]
+    ) -> Matrix:
         """
         Create a new matrix with the scalars `diag` on the main diagonal and zeroes elsewhere.
 
@@ -7688,7 +8029,9 @@ class Matrix:
         """
 
     @classmethod
-    def vec(cls, entries: Sequence[RationalPolynomial | Polynomial | Expression | int]) -> Matrix:
+    def vec(
+        cls, entries: Sequence[RationalPolynomial | Polynomial | Expression | int]
+    ) -> Matrix:
         """
         Create a new column vector from a list of scalars.
 
@@ -7699,7 +8042,12 @@ class Matrix:
         """
 
     @classmethod
-    def from_linear(cls, nrows: int, ncols: int, entries: Sequence[RationalPolynomial | Polynomial | Expression | int]) -> Matrix:
+    def from_linear(
+        cls,
+        nrows: int,
+        ncols: int,
+        entries: Sequence[RationalPolynomial | Polynomial | Expression | int],
+    ) -> Matrix:
         """
         Create a new matrix from a 1-dimensional vector of scalars.
 
@@ -7714,7 +8062,10 @@ class Matrix:
         """
 
     @classmethod
-    def from_nested(cls, entries: Sequence[Sequence[RationalPolynomial | Polynomial | Expression | int]]) -> Matrix:
+    def from_nested(
+        cls,
+        entries: Sequence[Sequence[RationalPolynomial | Polynomial | Expression | int]],
+    ) -> Matrix:
         """
         Create a new matrix from a 2-dimensional vector of scalars.
 
@@ -7869,7 +8220,7 @@ class Matrix:
         multiplication_operator: str = "*",
         double_star_for_exponentiation: bool = False,
         square_brackets_for_function: bool = False,
-        function_brackets: tuple[str, str] = ('(', ')'),
+        function_brackets: tuple[str, str] = ("(", ")"),
         num_exp_as_superscript: bool = True,
         precision: int | None = None,
         show_namespaces: bool = False,
@@ -7984,7 +8335,9 @@ class Matrix:
             The right-hand-side operand.
         """
 
-    def __mul__(self, rhs: Matrix | RationalPolynomial | Polynomial | Expression | int) -> Matrix:
+    def __mul__(
+        self, rhs: Matrix | RationalPolynomial | Polynomial | Expression | int
+    ) -> Matrix:
         """
         Matrix multiply `self` and `rhs`, returning the result.
 
@@ -7994,7 +8347,9 @@ class Matrix:
             The right-hand-side operand.
         """
 
-    def __rmul__(self, rhs: RationalPolynomial | Polynomial | Expression | int) -> Matrix:
+    def __rmul__(
+        self, rhs: RationalPolynomial | Polynomial | Expression | int
+    ) -> Matrix:
         """
         Matrix multiply  `rhs` and `self`, returning the result.
 
@@ -8004,7 +8359,9 @@ class Matrix:
             The right-hand-side operand.
         """
 
-    def __matmul__(self, rhs: Matrix | RationalPolynomial | Polynomial | Expression | int) -> Matrix:
+    def __matmul__(
+        self, rhs: Matrix | RationalPolynomial | Polynomial | Expression | int
+    ) -> Matrix:
         """
         Matrix multiply `self` and `rhs`, returning the result.
 
@@ -8014,7 +8371,9 @@ class Matrix:
             The right-hand-side operand.
         """
 
-    def __rmatmul__(self, rhs: RationalPolynomial | Polynomial | Expression | int) -> Matrix:
+    def __rmatmul__(
+        self, rhs: RationalPolynomial | Polynomial | Expression | int
+    ) -> Matrix:
         """
         Matrix multiply  `rhs` and `self`, returning the result.
 
@@ -8024,7 +8383,9 @@ class Matrix:
             The right-hand-side operand.
         """
 
-    def __truediv__(self, rhs: RationalPolynomial | Polynomial | Expression | int) -> Matrix:
+    def __truediv__(
+        self, rhs: RationalPolynomial | Polynomial | Expression | int
+    ) -> Matrix:
         """
         Divide this matrix by scalar `rhs` and return the result.
 
@@ -8039,7 +8400,6 @@ class Matrix:
         Negate the matrix, returning the result.
         """
 
-
 class Evaluator:
     """An optimized evaluator of an expression."""
 
@@ -8049,8 +8409,14 @@ class Evaluator:
         """
 
     @classmethod
-    def load(cls, evaluator: bytes, external_functions: dict[tuple[Expression, str], Callable[[
-            Sequence[float | complex]], float | complex]] = {}) -> Evaluator:
+    def load(
+        cls,
+        evaluator: bytes,
+        external_functions: dict[
+            tuple[Expression, str],
+            Callable[[Sequence[float | complex]], float | complex],
+        ] = {},
+    ) -> Evaluator:
         """
         Load the evaluator into memory, preparing it for evaluation.
 
@@ -8077,7 +8443,11 @@ class Evaluator:
         Save the evaluator to a byte string.
         """
 
-    def get_instructions(self) -> tuple[list[tuple[str, tuple[str, int], list[tuple[str, int]]]], int, list[Expression]]:
+    def get_instructions(
+        self,
+    ) -> tuple[
+        list[tuple[str, tuple[str, int], list[tuple[str, int]]]], int, list[Expression]
+    ]:
         """
         Return the instructions for efficiently evaluating the expression, the length of the list
         of temporary variables, and the list of constants. This can be used to generate
@@ -8149,9 +8519,15 @@ class Evaluator:
             The number of common subexpression elimination iterations to perform.
         """
 
-    def dualize(self, dual_shape: list[list[int]], external_functions: dict[tuple[str, str, int], Callable[[
-            Sequence[float | complex]], float | complex]] | None = None,
-            zero_components: list[tuple[int, int]] | None = None) -> None:
+    def dualize(
+        self,
+        dual_shape: list[list[int]],
+        external_functions: dict[
+            tuple[str, str, int], Callable[[Sequence[float | complex]], float | complex]
+        ]
+        | None = None,
+        zero_components: list[tuple[int, int]] | None = None,
+    ) -> None:
         """
         Dualize the evaluator to support hyper-dual numbers with the given shape,
         indicating the number of derivatives in every variable per term.
@@ -8194,7 +8570,14 @@ class Evaluator:
             Each component is specified as a tuple of (parameter index, dual index).
         """
 
-    def set_real_params(self, real_params: list[int], sqrt_real=False, log_real=False, powf_real=False, verbose=False) -> None:
+    def set_real_params(
+        self,
+        real_params: list[int],
+        sqrt_real=False,
+        log_real=False,
+        powf_real=False,
+        verbose=False,
+    ) -> None:
         """
         Set which parameters are fully real. This allows for more optimal
         assembly output that uses real arithmetic instead of complex arithmetic
@@ -8226,8 +8609,8 @@ class Evaluator:
         function_name: str,
         filename: str,
         library_name: str,
-        number_type: Literal['real'],
-        inline_asm: str = 'default',
+        number_type: Literal["real"],
+        inline_asm: str = "default",
         optimization_level: int = 3,
         native: bool = True,
         compiler_path: str | None = None,
@@ -8269,8 +8652,8 @@ class Evaluator:
         function_name: str,
         filename: str,
         library_name: str,
-        number_type: Literal['complex'],
-        inline_asm: str = 'default',
+        number_type: Literal["complex"],
+        inline_asm: str = "default",
         optimization_level: int = 3,
         native: bool = True,
         compiler_path: str | None = None,
@@ -8312,8 +8695,8 @@ class Evaluator:
         function_name: str,
         filename: str,
         library_name: str,
-        number_type: Literal['real_4x'],
-        inline_asm: str = 'default',
+        number_type: Literal["real_4x"],
+        inline_asm: str = "default",
         optimization_level: int = 3,
         native: bool = True,
         compiler_path: str | None = None,
@@ -8355,8 +8738,8 @@ class Evaluator:
         function_name: str,
         filename: str,
         library_name: str,
-        number_type: Literal['complex_4x'],
-        inline_asm: str = 'default',
+        number_type: Literal["complex_4x"],
+        inline_asm: str = "default",
         optimization_level: int = 3,
         native: bool = True,
         compiler_path: str | None = None,
@@ -8398,15 +8781,15 @@ class Evaluator:
         function_name: str,
         filename: str,
         library_name: str,
-        number_type: Literal['cuda_real'],
-        inline_asm: str = 'default',
+        number_type: Literal["cuda_real"],
+        inline_asm: str = "default",
         optimization_level: int = 3,
         native: bool = True,
         compiler_path: str | None = None,
         compiler_flags: Sequence[str] | None = None,
         custom_header: str | None = None,
         cuda_number_of_evaluations: int | None = None,
-        cuda_block_size: int | None = 256
+        cuda_block_size: int | None = 256,
     ) -> CompiledCudaRealEvaluator:
         """
         Compile the evaluator to a shared library using C++ and optionally inline assembly and load it.
@@ -8451,15 +8834,15 @@ class Evaluator:
         function_name: str,
         filename: str,
         library_name: str,
-        number_type: Literal['cuda_complex'],
-        inline_asm: str = 'default',
+        number_type: Literal["cuda_complex"],
+        inline_asm: str = "default",
         optimization_level: int = 3,
         native: bool = True,
         compiler_path: str | None = None,
         compiler_flags: Sequence[str] | None = None,
         custom_header: str | None = None,
         cuda_number_of_evaluations: int | None = None,
-        cuda_block_size: int | None = 256
+        cuda_block_size: int | None = 256,
     ) -> CompiledCudaComplexEvaluator:
         """
         Compile the evaluator to a shared library using C++ and optionally inline assembly and load it.
@@ -8604,7 +8987,6 @@ class Evaluator:
             The decimal precision used for arbitrary-precision evaluation.
         """
 
-
 class CompiledRealEvaluator:
     """A compiled evaluator of an expression."""
 
@@ -8640,7 +9022,6 @@ class CompiledRealEvaluator:
         inputs: npt.ArrayLike
             The input values or batches to evaluate.
         """
-
 
 class CompiledComplexEvaluator:
     """A compiled evaluator of an expression."""
@@ -8678,7 +9059,6 @@ class CompiledComplexEvaluator:
             The input values or batches to evaluate.
         """
 
-
 class CompiledSimdRealEvaluator:
     """A compiled evaluator of an expression that packs 4 double using SIMD."""
 
@@ -8714,7 +9094,6 @@ class CompiledSimdRealEvaluator:
         inputs: npt.ArrayLike
             The input values or batches to evaluate.
         """
-
 
 class CompiledSimdComplexEvaluator:
     """A compiled evaluator of an expression that packs 4 double using SIMD."""
@@ -8752,7 +9131,6 @@ class CompiledSimdComplexEvaluator:
             The input values or batches to evaluate.
         """
 
-
 class CompiledCudaRealEvaluator:
     """A compiled evaluator of an expression that uses CUDA for GPU acceleration."""
 
@@ -8764,7 +9142,7 @@ class CompiledCudaRealEvaluator:
         input_len: int,
         output_len: int,
         cuda_number_of_evaluations: int,
-        cuda_block_size: int | None = 256
+        cuda_block_size: int | None = 256,
     ) -> CompiledCudaRealEvaluator:
         """
         Load a compiled library, previously generated with `Evaluator.compile()`.
@@ -8795,7 +9173,6 @@ class CompiledCudaRealEvaluator:
             The input values or batches to evaluate.
         """
 
-
 class CompiledCudaComplexEvaluator:
     """A compiled evaluator of an expression that uses CUDA for GPU acceleration."""
 
@@ -8807,7 +9184,7 @@ class CompiledCudaComplexEvaluator:
         input_len: int,
         output_len: int,
         cuda_number_of_evaluations: int,
-        cuda_block_size: int | None = 256
+        cuda_block_size: int | None = 256,
     ) -> CompiledCudaComplexEvaluator:
         """
         Load a compiled library, previously generated with `Evaluator.compile()`.
@@ -8837,7 +9214,6 @@ class CompiledCudaComplexEvaluator:
         inputs: npt.ArrayLike
             The input values or batches to evaluate.
         """
-
 
 class NumericalIntegrator:
     """A numerical integrator for high-dimensional integrals."""
@@ -8945,11 +9321,7 @@ class NumericalIntegrator:
         """
 
     @classmethod
-    def rng(
-        _cls,
-        seed: int,
-        stream_id: int
-    ) -> RandomNumberGenerator:
+    def rng(_cls, seed: int, stream_id: int) -> RandomNumberGenerator:
         """
         Create a new random number generator, suitable for use with the integrator.
         Each thread of instance of the integrator should have its own random number generator,
@@ -8964,10 +9336,7 @@ class NumericalIntegrator:
         """
 
     @classmethod
-    def import_grid(
-        _cls,
-        grid: bytes
-    ) -> NumericalIntegrator:
+    def import_grid(_cls, grid: bytes) -> NumericalIntegrator:
         """
         Import an exported grid from another thread or machine.
         Use `export_grid` to export the grid.
@@ -9036,7 +9405,9 @@ class NumericalIntegrator:
             The other operand to combine or compare with.
         """
 
-    def add_training_samples(self, samples: Sequence[Sample], evals: Sequence[float]) -> None:
+    def add_training_samples(
+        self, samples: Sequence[Sample], evals: Sequence[float]
+    ) -> None:
         """
         Add the samples and their corresponding function evaluations to the grid.
         Call `update` after to update the grid and to obtain the new expected value for the integral.
@@ -9049,7 +9420,9 @@ class NumericalIntegrator:
             The function evaluations associated with the samples.
         """
 
-    def update(self, discrete_learning_rate: float, continous_learning_rate: float) -> tuple[float, float, float]:
+    def update(
+        self, discrete_learning_rate: float, continous_learning_rate: float
+    ) -> tuple[float, float, float]:
         """
         Update the grid using the `discrete_learning_rate` and `continuous_learning_rate`.
         Examples
@@ -9126,7 +9499,6 @@ class NumericalIntegrator:
             Whether intermediate integration statistics should be shown.
         """
 
-
 class Sample:
     """A sample from the Symbolica integrator. It could consist of discrete layers,
     accessible with `d` (empty when there are not discrete layers), and the final continuous layer `c` if it is present."""
@@ -9138,7 +9510,6 @@ class Sample:
     """ A sample point per (nested) discrete layer. Empty if not present."""
     c: list[float]
     """ A sample in the continuous layer. Empty if not present."""
-
 
 class Probe:
     """A probe that is used to access the Jacobian weight of a point or region
@@ -9205,7 +9576,6 @@ class Probe:
             The continuous probe coordinates; use `None` to include the full range of a dimension.
         """
 
-
 class RandomNumberGenerator:
     """A reproducible, fast, non-cryptographic random number generator suitable for parallel Monte Carlo simulations.
     A `seed` has to be set, which can be any `u64` number (small numbers work just as well as large numbers).
@@ -9257,7 +9627,6 @@ class RandomNumberGenerator:
         Export the random number generator state as a bytes object of length 32, which can be imported again to restore the state.
         """
 
-
 class HalfEdge:
     """A half-edge in a graph that connects to one vertex, consisting of a direction (or `None` if undirected) and edge data."""
 
@@ -9288,7 +9657,6 @@ class HalfEdge:
         """
         Get the data of the half-edge.
         """
-
 
 class Graph:
     """A graph that supported directional edges, parallel edges, self-edges and expression data on the nodes and edges.
@@ -9352,16 +9720,18 @@ class Graph:
         """
 
     @classmethod
-    def generate(_cls,
-                 external_nodes: Sequence[tuple[Expression | int, HalfEdge]],
-                 vertex_signatures: Sequence[Sequence[HalfEdge]],
-                 max_vertices: int | None = None,
-                 max_loops: int | None = None,
-                 max_bridges: int | None = None,
-                 allow_self_loops: bool = False,
-                 allow_zero_flow_edges: bool = False,
-                 filter_fn: Callable[[Graph, int], bool] | None = None,
-                 progress_fn: Callable[[Graph], bool] | None = None) -> dict[Graph, Expression]:
+    def generate(
+        _cls,
+        external_nodes: Sequence[tuple[Expression | int, HalfEdge]],
+        vertex_signatures: Sequence[Sequence[HalfEdge]],
+        max_vertices: int | None = None,
+        max_loops: int | None = None,
+        max_bridges: int | None = None,
+        allow_self_loops: bool = False,
+        allow_zero_flow_edges: bool = False,
+        filter_fn: Callable[[Graph, int], bool] | None = None,
+        progress_fn: Callable[[Graph], bool] | None = None,
+    ) -> dict[Graph, Expression]:
         """
         Generate all connected graphs with `external_edges` half-edges and the given allowed list
         of vertex connections. The vertex signatures are given in terms of an edge direction (or `None` if
@@ -9482,7 +9852,13 @@ class Graph:
             The data to associate with the object.
         """
 
-    def add_edge(self, source: int, target: int, directed: bool = False, data: Expression | int | None = None) -> int:
+    def add_edge(
+        self,
+        source: int,
+        target: int,
+        directed: bool = False,
+        data: Expression | int | None = None,
+    ) -> int:
         """
         Add an edge between the `source` and `target` nodes, returning the index of the edge.
 
@@ -9555,7 +9931,6 @@ class Graph:
         other: Graph
             The other operand to combine or compare with.
         """
-
 
 class Integer:
     @classmethod
@@ -9662,7 +10037,13 @@ class Integer:
         """
 
     @classmethod
-    def solve_integer_relation(_cls, x: Sequence[int | float | complex | Decimal], tolerance: float | Decimal, max_coeff: int | None = None, gamma: float | Decimal | None = None) -> Sequence[int]:
+    def solve_integer_relation(
+        _cls,
+        x: Sequence[int | float | complex | Decimal],
+        tolerance: float | Decimal,
+        max_coeff: int | None = None,
+        gamma: float | Decimal | None = None,
+    ) -> Sequence[int]:
         """
         Use the PSLQ algorithm to find a vector of integers `a` that satisfies `a.x = 0`,
         where every element of `a` is less than `max_coeff`, using a specified tolerance and number
