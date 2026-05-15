@@ -233,7 +233,7 @@ impl PythonExpressionEvaluator {
     /// --------
     ///
     /// >>> from symbolica import *
-    /// >>> (ins, m, c) = E('x^2+5/3+cos(x)').evaluator({}, {}, [S('x')]).get_instructions()
+    /// >>> (ins, m, c) = E('x^2+5/3+cos(x)').evaluator([S('x')]).get_instructions()
     /// >>>
     /// >>> for x in ins:
     /// >>>     print(x)
@@ -404,8 +404,8 @@ impl PythonExpressionEvaluator {
     /// --------
     ///
     /// >>> from symbolica import *
-    /// >>> e1 = E('x').evaluator({}, {}, [S('x')])
-    /// >>> e2 = E('x+1').evaluator({}, {}, [S('x')])
+    /// >>> e1 = E('x').evaluator([S('x')])
+    /// >>> e2 = E('x+1').evaluator([S('x')])
     /// >>> e1.merge(e2)
     /// >>> e1.evaluate([[2.]])
     ///
@@ -454,7 +454,7 @@ impl PythonExpressionEvaluator {
     ///
     /// >>> from symbolica import *
     /// >>> import numpy as np
-    /// >>> ev = E('x * y + 2').evaluator({}, {}, [S('x'), S('y')])
+    /// >>> ev = E('x * y + 2').evaluator([S('x'), S('y')])
     /// >>> print(ev.evaluate(np.array([1., 2., 3., 4., 5., 6.]).reshape((3, 2))))
     ///
     /// Yields`[[ 4.] [ 8.] [14.]]`
@@ -538,7 +538,7 @@ impl PythonExpressionEvaluator {
     /// Evaluate the function for a single input with 50 digits of precision:
     ///
     /// >>> from symbolica import *
-    /// >>> ev = E('x^2').evaluator({}, {}, [S('x')])
+    /// >>> ev = E('x^2').evaluator([S('x')])
     /// >>> print(ev.evaluate_with_prec([Decimal('1.234567890121223456789981273238947212312338947923')], 50))
     ///
     /// Yields `1.524157875318369274550121833760353508310334033629`
@@ -590,7 +590,7 @@ impl PythonExpressionEvaluator {
     ///
     /// >>> from symbolica import *
     /// >>> import numpy as np
-    /// >>> ev = E('x * y + 2').evaluator({}, {}, [S('x'), S('y')])
+    /// >>> ev = E('x * y + 2').evaluator([S('x'), S('y')])
     /// >>> print(ev.evaluate(np.array([1.+2j, 2., 3., 4., 5., 6.]).reshape((3, 2))))
     ///
     /// Yields`[[ 4.+4.j] [14.+0.j] [32.+0.j]]`
@@ -665,7 +665,7 @@ impl PythonExpressionEvaluator {
     /// Evaluate the function for a single input with 50 digits of precision:
     ///
     /// >>> from symbolica import *
-    /// >>> ev = E('x^2').evaluator({}, {}, [S('x')])
+    /// >>> ev = E('x^2').evaluator([S('x')])
     /// >>> print(ev.evaluate_complex_with_prec(
     /// >>>     [(Decimal('1.234567890121223456789981273238947212312338947923'), Decimal('3.434567890121223356789981273238947212312338947923'))], 50))
     ///
@@ -733,16 +733,10 @@ impl PythonExpressionEvaluator {
     /// --------
     ///
     /// >>> from symbolica import *
-    /// >>> e1 = E('x^2 + y*x').evaluator({}, {}, [S('x'), S('y')])
+    /// >>> e1 = E('x^2 + y*x').evaluator([S('x'), S('y')])
     /// >>> e1.dualize([[0, 0], [1, 0], [0, 1]])
     /// >>> r = e1.evaluate([[2., 1., 0., 3., 0., 1.]])
     /// >>> print(r)  # [10, 7, 2]
-    ///
-    /// Mapping external functions:
-    ///
-    /// >>> ev = E('f(x + 1)').evaluator({}, {}, [S('x')], external_functions={(S('f'), 'f'): lambda args: args[0]})
-    /// >>> ev.dualize([[0], [1]], {('f', 'f0', 0): lambda args: args[0], ('f', 'f1', 1): lambda args: args[1]})
-    /// >>> print(ev.evaluate([[2., 1.]]))  # [[3. 1.]]
     ///
     /// Parameters
     /// ----------

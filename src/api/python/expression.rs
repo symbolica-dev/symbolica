@@ -1004,8 +1004,11 @@ impl PythonTransformer {
     /// >>> from symbolica import Expression, T
     /// >>> x, y, x_, var, coeff = S('x', 'y', 'x_', 'var', 'coeff')
     /// >>> e = 5*x + x * y + x**2 + 5
-    /// >>> print(e.collect(x, key_map=T().replace(x_, var(x_)),
-    ///         coeff_map=T().replace(x_, coeff(x_))))
+    /// >>> print(e.collect(
+    /// >>>     x,
+    /// >>>     key_map=T().replace(x_, var(x_)),
+    /// >>>     coeff_map=T().replace(x_, coeff(x_)),
+    /// >>> ))
     ///
     /// yields `var(1)*coeff(5)+var(x)*coeff(y+5)+var(x^2)*coeff(1)`.
     ///
@@ -2217,6 +2220,28 @@ impl PythonExpression {
     /// Define a custom normalization function:
     /// >>> e = S('real_log', normalization=Transformer().replace(E("x_(exp(x1_))"), E("x1_")))
     /// >>> E("real_log(exp(x)) + real_log(5)")
+    ///
+    /// Define a custom series function that returns the principal part and the regular part,
+    /// or `None` if a standard construction through the derivative can be used:
+    /// >>> def inv_series(args: Sequence[Series]) -> tuple[Expression, Expression] | None:
+    /// >>>     return (N(0), args[0].pow(-1).to_expression())
+    /// >>>
+    /// >>> t = S('t')
+    /// >>> inv = S('inv', series=inv_series)
+
+    /// Define a function with a custom evaluation:
+    /// >>> cosh = S(
+    /// >>>     "my_cosh",
+    /// >>>     eval={
+    /// >>>         "float": lambda args: math.cosh(args[0]),
+    /// >>>         "complex": lambda args: cmath.cosh(args[0]),
+    /// >>>         "cpp": "template<typename T> T python_my_cosh(T a) { return std::cosh(a); }",
+    /// >>>     },
+    /// >>> )
+
+    /// Add custom data to a symbol:
+    /// >>> x = S('x', data={'my_tag': 'my_value'})
+    /// >>> r = x.get_symbol_data('my_tag')
     #[gen_stub(skip)]
     #[pyo3(signature = (*names,is_symmetric=None,is_antisymmetric=None,is_cyclesymmetric=None,is_linear=None,is_scalar=None,is_real=None,is_integer=None,is_positive=None,tags=None,aliases=None,normalization=None, print=None, derivative=None, series=None, eval=None, data=None))]
     #[classmethod]
@@ -5977,12 +6002,10 @@ impl PythonExpression {
     }
 
     /// Create an evaluator that can evaluate (nested) expressions in an optimized fashion.
-    /// All constants and functions should be provided as dictionaries, where the function
-    /// dictionary has a key `(name, printable name, arguments)` and the value is the function
-    /// body. For example the function `f(x,y)=x^2+y` should be provided as
-    /// `{(f, "f", (x, y)): x**2 + y}`. All free parameters should be provided in the `params` list.
-    ///
-    /// Additionally, external functions can be registered that will call a Python function.
+    /// Function definitions can be provided with `functions`, where each key is
+    /// `(name, arguments)` and the value is the function body. For example the function
+    /// `f(x,y)=x^2+y` should be provided as `{(f, (x, y)): x**2 + y}`.
+    /// All free parameters should be provided in the `params` list.
     ///
     /// If `KeyboardInterrupt` is triggered during the optimization, the optimization will stop and will yield the
     /// current best result.
@@ -5990,34 +6013,26 @@ impl PythonExpression {
     /// Examples
     /// --------
     /// >>> from symbolica import *
-    /// >>> x, y, z, pi, f, g = S(
-    /// >>>     'x', 'y', 'z', 'pi', 'f', 'g')
+    /// >>> x, y, z, pi, f, g = S('x', 'y', 'z', 'pi', 'f', 'g')
     /// >>>
-    /// >>> e1 = E("x + pi + cos(x) + f(g(x+1),x*2)")
+    /// >>> e1 = E("x + pi + cos(x) + f(g(x+1), x*2)")
     /// >>> fd = E("y^2 + z^2*y^2")
     /// >>> gd = E("y + 5")
     /// >>>
-    /// >>> ev = e1.evaluator({pi: Expression.num(22)/7},
-    /// >>>              {(f, "f", (y, z)): fd, (g, "g", (y, )): gd}, [x])
+    /// >>> ev = e1.evaluator([x], functions={(f, (y, z)): fd, (g, (y,)): gd})
     /// >>> res = ev.evaluate([[1.], [2.], [3.]])  # evaluate at x=1, x=2, x=3
     /// >>> print(res)
     ///
-    ///
-    /// Define an external function:
-    ///
-    /// >>> E("f(x)").evaluator({}, {}, [S("x")],
-    ///             external_functions={(S("f"), "F"): lambda args: args[0]**2 + 1})
-    ///
     /// The built-in `if` yields `x+1` when `y != 0` and `x+2` when `y == 0`:
     ///
-    /// >>> E("if(y, x + 1, x + 2)").evaluator({}, {}, [S("x"), S("y")])
+    /// >>> E("if(y, x + 1, x + 2)").evaluator([S("x"), S("y")])
     ///
     /// Parameters
     /// ----------
     /// params: Sequence[Expression]
     ///     A list of free parameters.
-    /// functions: dict[Tuple[Expression, str, Sequence[Expression]], Expression] = {}
-    ///     A dictionary of functions. The key is a tuple of the function name, printable name and the argument variables.
+    /// functions: dict[tuple[Expression, Sequence[Expression]], Expression] = {}
+    ///     A dictionary of functions. The key is a tuple of the function name and the argument variables.
     ///     The value is the function body. If the function name entry contains arguments, these are considered tags.
     /// iterations: int, optional
     ///     The number of optimization iterations to perform.
@@ -6168,7 +6183,7 @@ impl PythonExpression {
     /// >>> x = S('x')
     /// >>> e1 = E("x^2 + 1")
     /// >>> e2 = E("x^2 + 2")
-    /// >>> ev = Expression.evaluator_multiple([e1, e2], {}, {}, [x])
+    /// >>> ev = Expression.evaluator_multiple([e1, e2], [x])
     ///
     /// will recycle the `x^2`
     #[classmethod]
@@ -6610,7 +6625,7 @@ Define a custom series function:
 Define a numeric evaluation function:
 >>> sq = S("sq", eval={"complex": lambda args: args[0] * args[0]})
 >>> x = S("x")
->>> ev = sq(x).evaluator({}, {}, [x])
+>>> ev = sq(x).evaluator([x])
 >>> ev.evaluate_complex([2+0j])
 
 Parameters
