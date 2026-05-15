@@ -39,6 +39,47 @@ use self::polynomial::MultivariatePolynomial;
 
 pub(crate) const INLINED_EXPONENTS: usize = 6;
 
+/// Errors that can occur while converting expressions to polynomial representations.
+#[derive(Clone, Debug, PartialEq, Eq, Hash)]
+pub enum PolynomialConversionError {
+    InvalidVariableMap(String),
+    PolynomialConversionFailed { expression: Atom, reason: String },
+    RationalPolynomialConversionFailed { expression: Atom, reason: String },
+    FactorizedRationalPolynomialConversionFailed { expression: Atom, reason: String },
+}
+
+impl std::error::Error for PolynomialConversionError {}
+
+impl std::fmt::Display for PolynomialConversionError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            PolynomialConversionError::InvalidVariableMap(e) => {
+                write!(f, "invalid variable map: {e}")
+            }
+            PolynomialConversionError::PolynomialConversionFailed { expression, reason } => {
+                write!(
+                    f,
+                    "could not convert {expression} to a polynomial: {reason}"
+                )
+            }
+            PolynomialConversionError::RationalPolynomialConversionFailed {
+                expression,
+                reason,
+            } => write!(
+                f,
+                "could not convert {expression} to a rational polynomial: {reason}"
+            ),
+            PolynomialConversionError::FactorizedRationalPolynomialConversionFailed {
+                expression,
+                reason,
+            } => write!(
+                f,
+                "could not convert {expression} to a factorized rational polynomial: {reason}"
+            ),
+        }
+    }
+}
+
 /// Describes an exponent of a variable in a polynomial.
 ///
 /// The recommended type is `u16` for polynomials
@@ -1232,7 +1273,7 @@ impl AtomView<'_> {
         &self,
         field: &R,
         var_map: Option<Arc<Vec<PolyVariable>>>,
-    ) -> Result<MultivariatePolynomial<R, E>, String> {
+    ) -> Result<MultivariatePolynomial<R, E>, PolynomialConversionError> {
         self.to_polynomial_impl(field, var_map.as_ref().unwrap_or(&Arc::new(Vec::new())))
     }
 
@@ -1240,7 +1281,7 @@ impl AtomView<'_> {
         &self,
         field: &R,
         var_map: &Arc<Vec<PolyVariable>>,
-    ) -> Result<MultivariatePolynomial<R, E>, String> {
+    ) -> Result<MultivariatePolynomial<R, E>, PolynomialConversionError> {
         // see if the current term can be cast into a polynomial using a fast routine
         if let Ok(num) = self.to_polynomial_expanded(field, Some(var_map), true) {
             return Ok(num);
@@ -1248,7 +1289,14 @@ impl AtomView<'_> {
 
         match self {
             AtomView::Num(n) => {
-                field.try_element_from_coefficient_view(n.get_coeff_view())?; // must fail
+                field
+                    .try_element_from_coefficient_view(n.get_coeff_view())
+                    .map_err(
+                        |reason| PolynomialConversionError::PolynomialConversionFailed {
+                            expression: self.to_owned(),
+                            reason,
+                        },
+                    )?; // must fail
                 unreachable!("This case should have been handled by the fast routine")
             }
             AtomView::Var(_) => {
@@ -1481,7 +1529,7 @@ impl AtomView<'_> {
         field: &R,
         out_field: &RO,
         var_map: Option<Arc<Vec<PolyVariable>>>,
-    ) -> Result<RationalPolynomial<RO, E>, String>
+    ) -> Result<RationalPolynomial<RO, E>, PolynomialConversionError>
     where
         RationalPolynomial<RO, E>:
             FromNumeratorAndDenominator<R, RO, E> + FromNumeratorAndDenominator<RO, RO, E>,
@@ -1502,7 +1550,7 @@ impl AtomView<'_> {
         field: &R,
         out_field: &RO,
         var_map: &Arc<Vec<PolyVariable>>,
-    ) -> Result<RationalPolynomial<RO, E>, String>
+    ) -> Result<RationalPolynomial<RO, E>, PolynomialConversionError>
     where
         RationalPolynomial<RO, E>:
             FromNumeratorAndDenominator<R, RO, E> + FromNumeratorAndDenominator<RO, RO, E>,
@@ -1515,7 +1563,14 @@ impl AtomView<'_> {
 
         match self {
             AtomView::Num(n) => {
-                field.try_element_from_coefficient_view(n.get_coeff_view())?; // must fail
+                field
+                    .try_element_from_coefficient_view(n.get_coeff_view())
+                    .map_err(|reason| {
+                        PolynomialConversionError::RationalPolynomialConversionFailed {
+                            expression: self.to_owned(),
+                            reason,
+                        }
+                    })?; // must fail
                 unreachable!("This case should have been handled by the fast routine")
             }
             AtomView::Var(_) => {
@@ -1626,7 +1681,7 @@ impl AtomView<'_> {
         field: &R,
         out_field: &RO,
         var_map: Option<Arc<Vec<PolyVariable>>>,
-    ) -> Result<FactorizedRationalPolynomial<RO, E>, String>
+    ) -> Result<FactorizedRationalPolynomial<RO, E>, PolynomialConversionError>
     where
         FactorizedRationalPolynomial<RO, E>: FromNumeratorAndFactorizedDenominator<R, RO, E>
             + FromNumeratorAndFactorizedDenominator<RO, RO, E>,
@@ -1648,7 +1703,7 @@ impl AtomView<'_> {
         field: &R,
         out_field: &RO,
         var_map: &Arc<Vec<PolyVariable>>,
-    ) -> Result<FactorizedRationalPolynomial<RO, E>, String>
+    ) -> Result<FactorizedRationalPolynomial<RO, E>, PolynomialConversionError>
     where
         FactorizedRationalPolynomial<RO, E>: FromNumeratorAndFactorizedDenominator<R, RO, E>
             + FromNumeratorAndFactorizedDenominator<RO, RO, E>,
@@ -1664,7 +1719,14 @@ impl AtomView<'_> {
 
         match self {
             AtomView::Num(n) => {
-                field.try_element_from_coefficient_view(n.get_coeff_view())?; // must fail
+                field
+                    .try_element_from_coefficient_view(n.get_coeff_view())
+                    .map_err(|reason| {
+                        PolynomialConversionError::FactorizedRationalPolynomialConversionFailed {
+                            expression: self.to_owned(),
+                            reason,
+                        }
+                    })?; // must fail
                 unreachable!("This case should have been handled by the fast routine")
             }
             AtomView::Var(_) => {
@@ -2261,7 +2323,8 @@ impl Token {
                         self.to_atom_with_output_and_var_map(ws, var_map, var_name_map, &mut atom)?;
                         Ok(atom
                             .as_view()
-                            .to_rational_polynomial_impl(field, out_field, var_map)?)
+                            .to_rational_polynomial_impl(field, out_field, var_map)
+                            .map_err(|e| Cow::Owned(e.to_string()))?)
                     })
                 }
             }
@@ -2296,7 +2359,8 @@ impl Token {
                 self.to_atom_with_output_and_var_map(ws, var_map, var_name_map, &mut atom)?;
                 Ok(atom
                     .as_view()
-                    .to_rational_polynomial_impl(field, out_field, var_map)?)
+                    .to_rational_polynomial_impl(field, out_field, var_map)
+                    .map_err(|e| Cow::Owned(e.to_string()))?)
             }),
         }
     }
@@ -2412,7 +2476,8 @@ impl Token {
                         self.to_atom_with_output_and_var_map(ws, var_map, var_name_map, &mut atom)?;
                         Ok(atom
                             .as_view()
-                            .to_factorized_rational_polynomial_impl(field, out_field, var_map)?)
+                            .to_factorized_rational_polynomial_impl(field, out_field, var_map)
+                            .map_err(|e| Cow::Owned(e.to_string()))?)
                     })
                 }
             }
@@ -2490,7 +2555,8 @@ impl Token {
                 self.to_atom_with_output_and_var_map(ws, var_map, var_name_map, &mut atom)?;
                 Ok(atom
                     .as_view()
-                    .to_factorized_rational_polynomial_impl(field, out_field, var_map)?)
+                    .to_factorized_rational_polynomial_impl(field, out_field, var_map)
+                    .map_err(|e| Cow::Owned(e.to_string()))?)
             }),
         }
     }

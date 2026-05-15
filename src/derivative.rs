@@ -9,7 +9,7 @@ use crate::{
     domains::{Ring, atom::AtomField, integer::Integer, rational::Rational},
     poly::{
         PolyVariable,
-        series::{Series, SeriesDepth},
+        series::{Series, SeriesDepth, SeriesError},
     },
     state::Workspace,
 };
@@ -394,10 +394,10 @@ impl AtomView<'_> {
         x: &Indeterminate,
         expansion_point: AtomView,
         depth: SeriesDepth,
-    ) -> Result<Series<AtomField>, String> {
+    ) -> Result<Series<AtomField>, SeriesError> {
         let order = depth.order();
         if !depth.is_absolute() && (order.is_negative() || order.is_zero()) {
-            return Err("Cannot series expand to negative or zero depth".to_owned());
+            return Err(SeriesError::NonPositiveRelativeDepth { depth });
         }
 
         // heuristic current depth
@@ -444,7 +444,7 @@ impl AtomView<'_> {
         x: &Indeterminate,
         expansion_point: AtomView,
         info: &Series<AtomField>,
-    ) -> Result<Series<AtomField>, String> {
+    ) -> Result<Series<AtomField>, SeriesError> {
         if !self.contains_indeterminate(x) {
             return Ok(info.constant(self.to_owned()));
         }
@@ -470,7 +470,9 @@ impl AtomView<'_> {
 
                 if symbol == Symbol::IF && f.iter().skip(1).any(|arg| arg.contains_indeterminate(x))
                 {
-                    return Err("Cannot series expand non-constant if function".to_owned());
+                    return Err(SeriesError::NonConstantIf {
+                        expression: self.to_owned(),
+                    });
                 }
 
                 if !f.get_symbol().is_fixed_builtin()
@@ -516,9 +518,9 @@ impl AtomView<'_> {
                             .iter()
                             .any(|x| x.get_trailing_exponent().is_negative())
                         {
-                            return Err(format!(
-                                "Cannot series expand {self} since an argument has poles. Define a 'series' attribute on the symbol that extracts the principal part."
-                            ));
+                            return Err(SeriesError::FunctionArgumentPole {
+                                expression: self.to_owned(),
+                            });
                         }
 
                         let mut f_eval = FunctionBuilder::new(f.get_symbol());
@@ -570,9 +572,9 @@ impl AtomView<'_> {
                 if let AtomView::Num(n) = exp {
                     if let CoefficientView::Natural(n, d, ni, _) = n.get_coeff_view() {
                         if ni != 0 {
-                            return Err(
-                                "Cannot series expand with complex exponents or yet".to_owned()
-                            );
+                            return Err(SeriesError::UnsupportedComplexExponent {
+                                expression: self.to_owned(),
+                            });
                         }
 
                         if n < 0 {
@@ -610,10 +612,9 @@ impl AtomView<'_> {
 
                         base_series.rpow((n, d).into())
                     } else {
-                        Err(
-                            "Cannot series expand with large or complex exponents or yet"
-                                .to_owned(),
-                        )
+                        Err(SeriesError::UnsupportedLargeExponent {
+                            expression: self.to_owned(),
+                        })
                     }
                 } else {
                     let e = exp.series_impl(x, expansion_point, info)?;
@@ -643,33 +644,33 @@ impl AtomView<'_> {
 }
 
 impl Mul<&Atom> for Series<AtomField> {
-    type Output = Result<Series<AtomField>, String>;
+    type Output = Result<Series<AtomField>, SeriesError>;
 
-    fn mul(self, rhs: &Atom) -> Result<Series<AtomField>, String> {
+    fn mul(self, rhs: &Atom) -> Result<Series<AtomField>, SeriesError> {
         (&self) * rhs
     }
 }
 
 impl Mul<&Series<AtomField>> for &Atom {
-    type Output = Result<Series<AtomField>, String>;
+    type Output = Result<Series<AtomField>, SeriesError>;
 
-    fn mul(self, rhs: &Series<AtomField>) -> Result<Series<AtomField>, String> {
+    fn mul(self, rhs: &Series<AtomField>) -> Result<Series<AtomField>, SeriesError> {
         rhs * self
     }
 }
 
 impl Mul<&Series<AtomField>> for Atom {
-    type Output = Result<Series<AtomField>, String>;
+    type Output = Result<Series<AtomField>, SeriesError>;
 
-    fn mul(self, rhs: &Series<AtomField>) -> Result<Series<AtomField>, String> {
+    fn mul(self, rhs: &Series<AtomField>) -> Result<Series<AtomField>, SeriesError> {
         rhs * &self
     }
 }
 
 impl Mul<&Atom> for &Series<AtomField> {
-    type Output = Result<Series<AtomField>, String>;
+    type Output = Result<Series<AtomField>, SeriesError>;
 
-    fn mul(self, rhs: &Atom) -> Result<Series<AtomField>, String> {
+    fn mul(self, rhs: &Atom) -> Result<Series<AtomField>, SeriesError> {
         let PolyVariable::Symbol(x) = self.get_variable().as_ref().clone() else {
             panic!("Series variable is not a symbol");
         };
@@ -705,33 +706,33 @@ impl Mul<&Atom> for &Series<AtomField> {
 }
 
 impl Add<&Atom> for Series<AtomField> {
-    type Output = Result<Series<AtomField>, String>;
+    type Output = Result<Series<AtomField>, SeriesError>;
 
-    fn add(self, rhs: &Atom) -> Result<Series<AtomField>, String> {
+    fn add(self, rhs: &Atom) -> Result<Series<AtomField>, SeriesError> {
         (&self) + rhs
     }
 }
 
 impl Add<&Series<AtomField>> for &Atom {
-    type Output = Result<Series<AtomField>, String>;
+    type Output = Result<Series<AtomField>, SeriesError>;
 
-    fn add(self, rhs: &Series<AtomField>) -> Result<Series<AtomField>, String> {
+    fn add(self, rhs: &Series<AtomField>) -> Result<Series<AtomField>, SeriesError> {
         rhs + self
     }
 }
 
 impl Add<&Series<AtomField>> for Atom {
-    type Output = Result<Series<AtomField>, String>;
+    type Output = Result<Series<AtomField>, SeriesError>;
 
-    fn add(self, rhs: &Series<AtomField>) -> Result<Series<AtomField>, String> {
+    fn add(self, rhs: &Series<AtomField>) -> Result<Series<AtomField>, SeriesError> {
         rhs + &self
     }
 }
 
 impl Add<&Atom> for &Series<AtomField> {
-    type Output = Result<Series<AtomField>, String>;
+    type Output = Result<Series<AtomField>, SeriesError>;
 
-    fn add(self, rhs: &Atom) -> Result<Series<AtomField>, String> {
+    fn add(self, rhs: &Atom) -> Result<Series<AtomField>, SeriesError> {
         let PolyVariable::Symbol(x) = self.get_variable().as_ref().clone() else {
             panic!("Series variable is not a symbol");
         };
@@ -767,33 +768,33 @@ impl Add<&Atom> for &Series<AtomField> {
 }
 
 impl Div<&Atom> for Series<AtomField> {
-    type Output = Result<Series<AtomField>, String>;
+    type Output = Result<Series<AtomField>, SeriesError>;
 
-    fn div(self, rhs: &Atom) -> Result<Series<AtomField>, String> {
+    fn div(self, rhs: &Atom) -> Result<Series<AtomField>, SeriesError> {
         (&self) / rhs
     }
 }
 
 impl Div<&Series<AtomField>> for &Atom {
-    type Output = Result<Series<AtomField>, String>;
+    type Output = Result<Series<AtomField>, SeriesError>;
 
-    fn div(self, rhs: &Series<AtomField>) -> Result<Series<AtomField>, String> {
-        rhs.rpow((-1, 1).into()).unwrap() * self
+    fn div(self, rhs: &Series<AtomField>) -> Result<Series<AtomField>, SeriesError> {
+        rhs.rpow((-1, 1).into())? * self
     }
 }
 
 impl Div<&Series<AtomField>> for Atom {
-    type Output = Result<Series<AtomField>, String>;
+    type Output = Result<Series<AtomField>, SeriesError>;
 
-    fn div(self, rhs: &Series<AtomField>) -> Result<Series<AtomField>, String> {
-        rhs.rpow((-1, 1).into()).unwrap() * &self
+    fn div(self, rhs: &Series<AtomField>) -> Result<Series<AtomField>, SeriesError> {
+        rhs.rpow((-1, 1).into())? * &self
     }
 }
 
 impl Div<&Atom> for &Series<AtomField> {
-    type Output = Result<Series<AtomField>, String>;
+    type Output = Result<Series<AtomField>, SeriesError>;
 
-    fn div(self, rhs: &Atom) -> Result<Series<AtomField>, String> {
+    fn div(self, rhs: &Atom) -> Result<Series<AtomField>, SeriesError> {
         let PolyVariable::Symbol(x) = self.get_variable().as_ref().clone() else {
             panic!("Series variable is not a symbol");
         };
@@ -829,33 +830,33 @@ impl Div<&Atom> for &Series<AtomField> {
 }
 
 impl Sub<&Atom> for Series<AtomField> {
-    type Output = Result<Series<AtomField>, String>;
+    type Output = Result<Series<AtomField>, SeriesError>;
 
-    fn sub(self, rhs: &Atom) -> Result<Series<AtomField>, String> {
+    fn sub(self, rhs: &Atom) -> Result<Series<AtomField>, SeriesError> {
         (&self) + &(-rhs)
     }
 }
 
 impl Sub<&Series<AtomField>> for &Atom {
-    type Output = Result<Series<AtomField>, String>;
+    type Output = Result<Series<AtomField>, SeriesError>;
 
-    fn sub(self, rhs: &Series<AtomField>) -> Result<Series<AtomField>, String> {
+    fn sub(self, rhs: &Series<AtomField>) -> Result<Series<AtomField>, SeriesError> {
         -rhs.clone() + self
     }
 }
 
 impl Sub<&Series<AtomField>> for Atom {
-    type Output = Result<Series<AtomField>, String>;
+    type Output = Result<Series<AtomField>, SeriesError>;
 
-    fn sub(self, rhs: &Series<AtomField>) -> Result<Series<AtomField>, String> {
+    fn sub(self, rhs: &Series<AtomField>) -> Result<Series<AtomField>, SeriesError> {
         -rhs.clone() + &self
     }
 }
 
 impl Sub<&Atom> for &Series<AtomField> {
-    type Output = Result<Series<AtomField>, String>;
+    type Output = Result<Series<AtomField>, SeriesError>;
 
-    fn sub(self, rhs: &Atom) -> Result<Series<AtomField>, String> {
+    fn sub(self, rhs: &Atom) -> Result<Series<AtomField>, SeriesError> {
         self + &(-rhs)
     }
 }

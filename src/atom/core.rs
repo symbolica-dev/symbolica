@@ -51,6 +51,11 @@ use super::{
     Atom, AtomOrView, AtomView, ListSlice, Symbol,
     representation::{InlineNum, InlineVar},
 };
+use crate::{
+    evaluate::EvaluationError,
+    poly::{PolynomialConversionError, series::SeriesError},
+    tensors::TensorCanonicalizationError,
+};
 
 impl Atom {
     #[inline(always)]
@@ -656,18 +661,18 @@ pub trait AtomCore: private::Sealed + Sized {
         x: V,
         expansion_point: T,
         depth: D,
-    ) -> Result<Series<AtomField>, String>
+    ) -> Result<Series<AtomField>, SeriesError>
     where
         T: Into<AtomOrView<'b>>,
         V: Into<BorrowedOrOwned<'a, Indeterminate>>,
         D: Into<SeriesDepth>,
     {
         let expansion_point = expansion_point.into();
-        self.as_atom_view().series(
-            x.into().borrow(),
-            expansion_point.as_atom_view(),
-            depth.into(),
-        )
+        let x = x.into();
+        let x = x.borrow();
+        let depth = depth.into();
+        self.as_atom_view()
+            .series(x, expansion_point.as_atom_view(), depth)
     }
 
     /// Find the root of a function in `x` numerically over the reals using Newton's method.
@@ -690,7 +695,7 @@ pub trait AtomCore: private::Sealed + Sized {
         init: N,
         prec: N,
         max_iterations: usize,
-    ) -> Result<N, String> {
+    ) -> Result<N, SolveError> {
         self.as_atom_view()
             .nsolve(x.into().borrow(), init, prec, max_iterations)
     }
@@ -725,7 +730,7 @@ pub trait AtomCore: private::Sealed + Sized {
         init: &[N],
         prec: N,
         max_iterations: usize,
-    ) -> Result<Vec<N>, String> {
+    ) -> Result<Vec<N>, SolveError> {
         AtomView::nsolve_system(system, vars, init, prec, max_iterations)
     }
 
@@ -804,7 +809,7 @@ pub trait AtomCore: private::Sealed + Sized {
             Matrix<RationalPolynomialField<Z, E>>,
             Matrix<RationalPolynomialField<Z, E>>,
         ),
-        String,
+        SolveError,
     > {
         AtomView::system_to_matrix::<E, T1, T2>(system, vars)
     }
@@ -836,7 +841,7 @@ pub trait AtomCore: private::Sealed + Sized {
         coeff_map: F,
         const_map: &HashMap<A, T>,
         function_map: &HashMap<Symbol, EvaluationFn<A, T>>,
-    ) -> Result<T, String> {
+    ) -> Result<T, EvaluationError> {
         self.as_atom_view()
             .evaluate(coeff_map, const_map, function_map)
     }
@@ -867,7 +872,7 @@ pub trait AtomCore: private::Sealed + Sized {
         &self,
         fn_map: &FunctionMap,
         params: &[Atom],
-    ) -> Result<EvalTree<Complex<Rational>>, String> {
+    ) -> Result<EvalTree<Complex<Rational>>, EvaluationError> {
         self.as_atom_view().to_evaluation_tree(fn_map, params)
     }
 
@@ -929,7 +934,7 @@ pub trait AtomCore: private::Sealed + Sized {
         fn_map: &FunctionMap,
         params: &[Atom],
         optimization_settings: OptimizationSettings,
-    ) -> Result<ExpressionEvaluator<Complex<Rational>>, String> {
+    ) -> Result<ExpressionEvaluator<Complex<Rational>>, EvaluationError> {
         if optimization_settings.direct_translation {
             AtomView::to_evaluator(
                 std::slice::from_ref(&self.as_atom_view()),
@@ -974,7 +979,7 @@ pub trait AtomCore: private::Sealed + Sized {
         fn_map: &FunctionMap,
         params: &[Atom],
         optimization_settings: OptimizationSettings,
-    ) -> Result<ExpressionEvaluator<Complex<Rational>>, String> {
+    ) -> Result<ExpressionEvaluator<Complex<Rational>>, EvaluationError> {
         if optimization_settings.direct_translation {
             let exprs = exprs.iter().map(|e| e.as_atom_view()).collect::<Vec<_>>();
             AtomView::to_evaluator(&exprs, fn_map, params, optimization_settings)
@@ -1173,9 +1178,13 @@ pub trait AtomCore: private::Sealed + Sized {
         &self,
         field: &R,
         var_map: impl IntoVariableMap,
-    ) -> Result<MultivariatePolynomial<R, E>, String> {
-        self.as_atom_view()
-            .try_to_polynomial(field, var_map.into_var_map()?)
+    ) -> Result<MultivariatePolynomial<R, E>, PolynomialConversionError> {
+        self.as_atom_view().try_to_polynomial(
+            field,
+            var_map
+                .into_var_map()
+                .map_err(PolynomialConversionError::InvalidVariableMap)?,
+        )
     }
 
     /// Convert the atom to a polynomial in specific variables.
@@ -1258,13 +1267,18 @@ pub trait AtomCore: private::Sealed + Sized {
         field: &R,
         out_field: &RO,
         var_map: impl IntoVariableMap,
-    ) -> Result<RationalPolynomial<RO, E>, String>
+    ) -> Result<RationalPolynomial<RO, E>, PolynomialConversionError>
     where
         RationalPolynomial<RO, E>:
             FromNumeratorAndDenominator<R, RO, E> + FromNumeratorAndDenominator<RO, RO, E>,
     {
-        self.as_atom_view()
-            .try_to_rational_polynomial(field, out_field, var_map.into_var_map()?)
+        self.as_atom_view().try_to_rational_polynomial(
+            field,
+            out_field,
+            var_map
+                .into_var_map()
+                .map_err(PolynomialConversionError::InvalidVariableMap)?,
+        )
     }
 
     /// Convert the atom to a rational polynomial with factorized denominators, optionally in the variable ordering
@@ -1329,7 +1343,7 @@ pub trait AtomCore: private::Sealed + Sized {
         field: &R,
         out_field: &RO,
         var_map: impl IntoVariableMap,
-    ) -> Result<FactorizedRationalPolynomial<RO, E>, String>
+    ) -> Result<FactorizedRationalPolynomial<RO, E>, PolynomialConversionError>
     where
         FactorizedRationalPolynomial<RO, E>: FromNumeratorAndFactorizedDenominator<R, RO, E>
             + FromNumeratorAndFactorizedDenominator<RO, RO, E>,
@@ -1338,7 +1352,9 @@ pub trait AtomCore: private::Sealed + Sized {
         self.as_atom_view().try_to_factorized_rational_polynomial(
             field,
             out_field,
-            var_map.into_var_map()?,
+            var_map
+                .into_var_map()
+                .map_err(PolynomialConversionError::InvalidVariableMap)?,
         )
     }
 
@@ -1503,7 +1519,7 @@ pub trait AtomCore: private::Sealed + Sized {
     fn canonize_tensors<I, T: AtomCore, G: Ord + std::hash::Hash>(
         &self,
         indices: I,
-    ) -> Result<CanonicalTensor<T, G>, String>
+    ) -> Result<CanonicalTensor<T, G>, TensorCanonicalizationError>
     where
         I: IntoIterator<Item = (T, G)>,
     {

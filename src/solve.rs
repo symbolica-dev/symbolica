@@ -26,6 +26,22 @@ use crate::{
 /// Underdetermined systems return a partial solution.
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
 pub enum SolveError {
+    /// The system contains complex coefficients, but the solver works over the reals.
+    ComplexCoefficients,
+    /// The number of equations differs from the number of unknowns.
+    NonSquareSystem,
+    /// Initial values were not provided for all unknowns.
+    IncompleteInitialValues,
+    /// Newton's method encountered a zero derivative.
+    ZeroDerivative,
+    /// Newton's method could not invert the Jacobian.
+    SingularJacobian,
+    /// The solver did not converge within the iteration limit.
+    NoConvergence,
+    /// The input system is empty.
+    EmptySystem,
+    /// The input system is not linear in the requested variables.
+    NonLinearSystem,
     /// The system was underdetermined. The partial solution is returned.
     Underdetermined {
         /// Rank of the system.
@@ -38,9 +54,35 @@ pub enum SolveError {
 
 impl std::error::Error for SolveError {}
 
+impl From<String> for SolveError {
+    fn from(value: String) -> Self {
+        SolveError::Other(value)
+    }
+}
+
+impl From<&str> for SolveError {
+    fn from(value: &str) -> Self {
+        SolveError::Other(value.to_owned())
+    }
+}
+
 impl std::fmt::Display for SolveError {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
+            SolveError::ComplexCoefficients => {
+                f.write_str("Complex coefficients are not supported")
+            }
+            SolveError::NonSquareSystem => {
+                f.write_str("System must have same number of equations as there are unknowns")
+            }
+            SolveError::IncompleteInitialValues => {
+                f.write_str("Initial values must be provided for all unknowns")
+            }
+            SolveError::ZeroDerivative => f.write_str("Derivative is zero"),
+            SolveError::SingularJacobian => f.write_str("Could not invert Jacobian"),
+            SolveError::NoConvergence => f.write_str("Did not converge"),
+            SolveError::EmptySystem => f.write_str("Empty system"),
+            SolveError::NonLinearSystem => f.write_str("Not a linear system"),
             SolveError::Underdetermined {
                 rank,
                 partial_solution,
@@ -64,14 +106,15 @@ impl AtomView<'_> {
         init: N,
         prec: N,
         max_iterations: usize,
-    ) -> Result<N, String> {
+    ) -> Result<N, SolveError> {
         if self.has_complex_coefficients() {
-            return Err("Complex coefficients are not supported".to_owned());
+            return Err(SolveError::ComplexCoefficients);
         }
 
         let v = x.clone().into();
         let f = self
-            .to_evaluation_tree(&FunctionMap::new(), std::slice::from_ref(&v))?
+            .to_evaluation_tree(&FunctionMap::new(), std::slice::from_ref(&v))
+            .map_err(|e| SolveError::Other(e.to_string()))?
             .optimize(&OptimizationSettings {
                 horner_iterations: 1,
                 n_cores: 0,
@@ -83,7 +126,8 @@ impl AtomView<'_> {
             });
         let df = self
             .derivative(x)
-            .to_evaluation_tree(&FunctionMap::new(), std::slice::from_ref(&v))?
+            .to_evaluation_tree(&FunctionMap::new(), std::slice::from_ref(&v))
+            .map_err(|e| SolveError::Other(e.to_string()))?
             .optimize(&OptimizationSettings {
                 horner_iterations: 1,
                 n_cores: 0,
@@ -104,7 +148,7 @@ impl AtomView<'_> {
             let f_val = f_e.evaluate_single(std::slice::from_ref(&cur));
 
             if !df_val.is_finite() || df_val.is_zero() {
-                return Err("Derivative is zero".to_owned());
+                return Err(SolveError::ZeroDerivative);
             }
 
             cur -= f_val.clone() / df_val;
@@ -113,7 +157,7 @@ impl AtomView<'_> {
             }
         }
 
-        Err("Did not converge".to_owned())
+        Err(SolveError::NoConvergence)
     }
 
     /// Solve a non-linear system numerically over the reals using Newton's method.
@@ -132,7 +176,7 @@ impl AtomView<'_> {
         init: &[N],
         prec: N,
         max_iterations: usize,
-    ) -> Result<Vec<N>, String> {
+    ) -> Result<Vec<N>, SolveError> {
         let system = system.iter().map(|v| v.as_atom_view()).collect::<Vec<_>>();
         AtomView::nsolve_system_impl(&system, vars, init, prec, max_iterations)
     }
@@ -151,13 +195,13 @@ impl AtomView<'_> {
         init: &[N],
         prec: N,
         max_iterations: usize,
-    ) -> Result<Vec<N>, String> {
+    ) -> Result<Vec<N>, SolveError> {
         if system.len() != vars.len() {
-            Err("System must have same number of equations as there are unknowns".to_owned())?;
+            Err(SolveError::NonSquareSystem)?;
         }
 
         if vars.len() != init.len() {
-            Err("Initial values must be provided for all unknowns".to_owned())?;
+            Err(SolveError::IncompleteInitialValues)?;
         }
 
         if system.is_empty() {
@@ -165,7 +209,7 @@ impl AtomView<'_> {
         }
 
         if system.iter().any(|a| a.has_complex_coefficients()) {
-            return Err("Complex coefficients are not supported".to_owned());
+            return Err(SolveError::ComplexCoefficients);
         }
 
         if system.len() == 1 {
@@ -182,7 +226,8 @@ impl AtomView<'_> {
         let mut fs = system
             .iter()
             .map(|a| {
-                Ok(a.to_evaluation_tree(&FunctionMap::new(), &avars)?
+                Ok(a.to_evaluation_tree(&FunctionMap::new(), &avars)
+                    .map_err(|e| SolveError::Other(e.to_string()))?
                     .optimize(&OptimizationSettings {
                         horner_iterations: 1,
                         n_cores: 0,
@@ -194,7 +239,7 @@ impl AtomView<'_> {
                     })
                     .map_coeff(&|x| init[0].from_rational(x.to_real().unwrap())))
             })
-            .collect::<Result<Vec<_>, String>>()?;
+            .collect::<Result<Vec<_>, SolveError>>()?;
 
         let mut jacobian = Vec::with_capacity(vars.len() * system.len());
         for a in system {
@@ -203,7 +248,8 @@ impl AtomView<'_> {
                 let deriv = a.derivative(v);
 
                 let a = deriv
-                    .to_evaluation_tree(&FunctionMap::new(), &avars)?
+                    .to_evaluation_tree(&FunctionMap::new(), &avars)
+                    .map_err(|e| SolveError::Other(e.to_string()))?
                     .optimize(&OptimizationSettings {
                         horner_iterations: 1,
                         n_cores: 0,
@@ -239,7 +285,7 @@ impl AtomView<'_> {
                 .unwrap();
 
             let Ok(i) = df.inv() else {
-                return Err("Could not invert Jacobian".to_owned());
+                return Err(SolveError::SingularJacobian);
             };
 
             let mut ci = Matrix::new_vec(cur.to_vec(), field.clone());
@@ -253,7 +299,7 @@ impl AtomView<'_> {
             }
         }
 
-        Err("Did not converge".to_owned())
+        Err(SolveError::NoConvergence)
     }
 
     /// Solve a system that is linear in `vars`, if possible.
@@ -283,7 +329,7 @@ impl AtomView<'_> {
             Matrix<RationalPolynomialField<Z, E>>,
             Matrix<RationalPolynomialField<Z, E>>,
         ),
-        String,
+        SolveError,
     > {
         let system: Vec<_> = system.iter().map(|v| v.as_atom_view()).collect();
 
@@ -305,7 +351,7 @@ impl AtomView<'_> {
             Matrix<RationalPolynomialField<Z, E>>,
             Matrix<RationalPolynomialField<Z, E>>,
         ),
-        String,
+        SolveError,
     > {
         let mut mat = Vec::with_capacity(system.len() * vars.len());
         let mut row = vec![RationalPolynomial::<_, E>::new(&Z, Arc::new(vec![])); vars.len()];
@@ -315,13 +361,18 @@ impl AtomView<'_> {
             params
                 .iter()
                 .map(|x| Ok(x.to_owned().try_into()?))
-                .collect::<Result<Vec<_>, String>>()?,
+                .collect::<Result<Vec<_>, String>>()
+                .map_err(SolveError::Other)?,
         );
 
         for (si, a) in system.iter().enumerate() {
-            let rat: RationalPolynomial<Z, E> = a.try_to_rational_polynomial(&Q, &Z, None)?;
+            let rat: RationalPolynomial<Z, E> = a
+                .try_to_rational_polynomial(&Q, &Z, None)
+                .map_err(|e| SolveError::Other(e.to_string()))?;
 
-            let poly = rat.to_polynomial(vars, true).map_err(|e| e.to_owned())?;
+            let poly = rat
+                .to_polynomial(vars, true)
+                .map_err(|e| SolveError::Other(e.to_owned()))?;
 
             for e in &mut row {
                 *e = RationalPolynomial::<_, E>::new(&Z, params.clone());
@@ -330,7 +381,7 @@ impl AtomView<'_> {
             // get linear coefficients
             'next_monomial: for e in poly.into_iter() {
                 if e.exponents.iter().cloned().sum::<E>() > E::one() {
-                    Err("Not a linear system")?;
+                    Err(SolveError::NonLinearSystem)?;
                 }
 
                 for (rv, p) in row.iter_mut().zip(e.exponents) {
@@ -348,7 +399,7 @@ impl AtomView<'_> {
         }
 
         let Some((first, rest)) = mat.split_first_mut() else {
-            return Err("Empty system".to_owned());
+            return Err(SolveError::EmptySystem);
         };
 
         for _ in 0..2 {
@@ -403,7 +454,7 @@ impl AtomView<'_> {
         for (row, s) in system.iter().enumerate() {
             let poly = s
                 .try_to_polynomial::<_, u8>(&field, Some(vars.clone()))
-                .map_err(|e| SolveError::Other(e))?;
+                .map_err(|e| SolveError::Other(e.to_string()))?;
 
             for e in &poly {
                 let mut found = false;
@@ -487,8 +538,7 @@ impl AtomView<'_> {
             }
         }
 
-        let (m, b) = Self::system_to_matrix_impl::<E>(system, vars, params)
-            .map_err(|e| SolveError::Other(e.to_string()))?;
+        let (m, b) = Self::system_to_matrix_impl::<E>(system, vars, params)?;
 
         match m.solve(&b) {
             Ok(sol) => Ok(sol
