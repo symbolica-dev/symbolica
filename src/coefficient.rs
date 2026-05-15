@@ -1348,6 +1348,53 @@ impl CoefficientView<'_> {
         }
     }
 
+    pub fn to_float(&self, binary_prec: u32) -> Result<Complex<Float>, String> {
+        match self {
+            CoefficientView::Natural(n, d, ni, di) => Ok(Complex::new(
+                Float::with_val(binary_prec, n) / Float::with_val(binary_prec, d),
+                Float::with_val(binary_prec, ni) / Float::with_val(binary_prec, di),
+            )),
+            CoefficientView::Float(r, i) => {
+                let mut f = r.to_float();
+                let mut g = i.to_float();
+                if f.prec() > binary_prec || g.prec() > binary_prec {
+                    f.set_prec(binary_prec);
+                    g.set_prec(binary_prec);
+                    Ok(Complex::new(f, g))
+                } else {
+                    Ok(Complex::new(f, g))
+                }
+            }
+            CoefficientView::Large(r, d) => Ok(Complex::new(
+                r.to_rat().to_multi_prec_float(binary_prec),
+                d.to_rat().to_multi_prec_float(binary_prec),
+            )),
+            CoefficientView::FiniteField(_, _) => {
+                Err("Cannot convert finite field to float".to_owned())
+            }
+            CoefficientView::RationalPolynomial(_) => {
+                Err("Cannot convert rational polynomial to float".to_owned())
+            }
+            CoefficientView::Infinity(None) => {
+                Err("Cannot convert complex infinity to float".to_owned())
+            }
+            CoefficientView::Indeterminate => {
+                Err("Cannot convert indeterminate to float".to_owned())
+            }
+            CoefficientView::Infinity(Some((r, i))) => {
+                if i.is_zero() {
+                    if r.is_negative() {
+                        Ok(Float::with_val(binary_prec, rug::float::Special::Infinity).into())
+                    } else {
+                        Ok(Float::with_val(binary_prec, rug::float::Special::NegInfinity).into())
+                    }
+                } else {
+                    Err("Cannot convert complex infinity to float".to_owned())
+                }
+            }
+        }
+    }
+
     pub fn pow(&self, other: &CoefficientView<'_>) -> (Coefficient, Coefficient, Coefficient) {
         if let CoefficientView::Natural(0, _, 0, _) = self {
             let r = match other {
@@ -3007,62 +3054,13 @@ impl AtomView<'_> {
         out: &mut Atom,
     ) {
         match self {
-            AtomView::Num(n) => match n.get_coeff_view() {
-                CoefficientView::Natural(n, d, ni, di) => {
-                    out.to_num(Coefficient::Float(Complex::new(
-                        Float::with_val(binary_prec, n) / Float::with_val(binary_prec, d),
-                        Float::with_val(binary_prec, ni) / Float::with_val(binary_prec, di),
-                    )));
+            AtomView::Num(n) => match n.get_coeff_view().to_float(binary_prec) {
+                Ok(result) => {
+                    out.to_num(Coefficient::Float(result));
                 }
-                CoefficientView::Float(r, i) => {
-                    let mut f = r.to_float();
-                    let mut g = i.to_float();
-                    if f.prec() > binary_prec || g.prec() > binary_prec {
-                        f.set_prec(binary_prec);
-                        g.set_prec(binary_prec);
-                        out.to_num(Coefficient::Float(Complex::new(f, g)));
-                    } else {
-                        out.set_from_view(self);
-                    }
-                }
-                CoefficientView::Large(r, d) => {
-                    out.to_num(Coefficient::Float(Complex::new(
-                        r.to_rat().to_multi_prec_float(binary_prec),
-                        d.to_rat().to_multi_prec_float(binary_prec),
-                    )));
-                }
-                CoefficientView::FiniteField(_, _) => {
-                    error!("Cannot convert finite field to float");
+                Err(e) => {
+                    error!(e);
                     out.to_num(Coefficient::Indeterminate);
-                }
-                CoefficientView::RationalPolynomial(_) => {
-                    error!("Cannot convert rational polynomial to float");
-                    out.to_num(Coefficient::Indeterminate);
-                }
-                CoefficientView::Infinity(None) => {
-                    error!("Cannot convert complex infinity to float");
-                    out.to_num(Coefficient::Indeterminate);
-                }
-                CoefficientView::Indeterminate => {
-                    error!("Cannot convert indeterminate to float");
-                    out.to_num(Coefficient::Indeterminate);
-                }
-                CoefficientView::Infinity(Some((r, i))) => {
-                    if i.is_zero() {
-                        if r.is_negative() {
-                            out.to_num(
-                                Float::with_val(binary_prec, rug::float::Special::Infinity).into(),
-                            );
-                        } else {
-                            out.to_num(
-                                Float::with_val(binary_prec, rug::float::Special::NegInfinity)
-                                    .into(),
-                            );
-                        }
-                    } else {
-                        error!("Cannot convert complex infinity to float");
-                        out.to_num(Coefficient::Indeterminate);
-                    }
                 }
             },
             AtomView::Var(v) => {

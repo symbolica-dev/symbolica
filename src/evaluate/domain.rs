@@ -224,3 +224,59 @@ impl EvaluationDomain for Complex<Float> {
         Ok(f)
     }
 }
+
+impl EvaluationDomain for ErrorPropagatingFloat<f64> {
+    const FIXED_PRECISION: Option<u32> = f64::FIXED_PRECISION;
+
+    fn try_from_complex_float(f: Complex<Float>) -> Result<Self, String> {
+        if f.is_real() {
+            Ok(ErrorPropagatingFloat::new(
+                f.re.to_f64(),
+                15.954589770191003,
+            ))
+        } else {
+            Err(format!(
+                "Cannot convert from Complex<Float> to Float because the result {f} is not real"
+            ))
+        }
+    }
+}
+
+impl EvaluationDomain for ErrorPropagatingFloat<Float> {
+    const FIXED_PRECISION: Option<u32> = None;
+
+    fn try_from_complex_float(f: Complex<Float>) -> Result<Self, String> {
+        let dr = -f.re.get_epsilon().log10();
+        if f.is_real() {
+            Ok(ErrorPropagatingFloat::new(f.re, dr))
+        } else {
+            Err(format!(
+                "Cannot convert from Complex<Float> to Float because the result {f} is not real"
+            ))
+        }
+    }
+}
+
+impl EvaluationDomain for Complex<ErrorPropagatingFloat<f64>> {
+    const FIXED_PRECISION: Option<u32> = Some(53);
+
+    fn try_from_complex_float(f: Complex<Float>) -> Result<Self, String> {
+        Ok(Complex::new(
+            ErrorPropagatingFloat::new(f.re.to_f64(), 15.954589770191003),
+            ErrorPropagatingFloat::new(f.im.to_f64(), 15.954589770191003),
+        ))
+    }
+}
+
+impl EvaluationDomain for Complex<ErrorPropagatingFloat<Float>> {
+    const FIXED_PRECISION: Option<u32> = Some(53);
+
+    fn try_from_complex_float(f: Complex<Float>) -> Result<Self, String> {
+        let dr = -f.re.get_epsilon().log10();
+        let di = -f.im.get_epsilon().log10();
+        Ok(Complex::new(
+            ErrorPropagatingFloat::new(f.re, dr),
+            ErrorPropagatingFloat::new(f.im, di),
+        ))
+    }
+}

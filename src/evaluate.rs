@@ -79,9 +79,7 @@ mod test {
             float::{Complex, Float, FloatLike},
             rational::Rational,
         },
-        evaluate::{
-            Dualizer, EvaluationFn, ExportSettings, FunctionMap, Instruction, OptimizationSettings,
-        },
+        evaluate::{Dualizer, ExportSettings, FunctionMap, Instruction, OptimizationSettings},
         id::ConditionResult,
         parse, symbol,
     };
@@ -143,36 +141,14 @@ mod test {
 
     #[test]
     fn evaluate() {
-        let x = symbol!("v1");
-        let f = symbol!("f1");
-        let g = symbol!("f2");
-        let p0 = parse!("v2(0)");
-        let a = parse!("v1*cos(v1) + f1(v1, 1)^2 + f2(f2(v1)) + v2(0)");
-
-        let v = Atom::var(x);
+        let a = parse!("v1*cos(v1) + f1(1)^2");
 
         let mut const_map = HashMap::default();
-        let mut fn_map: HashMap<_, EvaluationFn<_, _>> = HashMap::default();
+        const_map.insert(parse!("v1"), 6.);
+        const_map.insert(parse!("f1(1)"), 7.);
 
-        const_map.insert(v.as_view(), 6.);
-        const_map.insert(p0.as_view(), 7.);
-
-        fn_map.insert(
-            f,
-            EvaluationFn::new(Box::new(|args: &[f64], _, _, _| {
-                args[0] * args[0] + args[1]
-            })),
-        );
-
-        fn_map.insert(
-            g,
-            EvaluationFn::new(Box::new(move |args: &[f64], var_map, fn_map, cache| {
-                fn_map.get(&f).unwrap().get()(&[args[0], 3.], var_map, fn_map, cache)
-            })),
-        );
-
-        let r = a.evaluate(|x| x.into(), &const_map, &fn_map).unwrap();
-        assert_eq!(r, 2905.761021719902);
+        let r = a.evaluate(&const_map).unwrap();
+        assert_eq!(r, 54.761021719902196);
     }
 
     #[test]
@@ -185,13 +161,7 @@ mod test {
         let v = Atom::var(x);
         const_map.insert(v.as_view(), Float::with_val(200, 6));
 
-        let r = a
-            .evaluate(
-                |r| r.to_multi_prec_float(200),
-                &const_map,
-                &HashMap::default(),
-            )
-            .unwrap();
+        let r = a.evaluate_with_prec(&const_map, 200).unwrap();
 
         assert_eq!(
             format!("{r}"),
