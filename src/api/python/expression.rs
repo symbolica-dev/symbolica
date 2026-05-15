@@ -2274,7 +2274,7 @@ impl PythonExpression {
             if names.len() == 1 {
                 let name = names.get_item(0).unwrap().extract::<PyBackedStr>()?;
 
-                let id = Symbol::new(namespace.attach_namespace(&name))
+                let id = SymbolBuilder::new(namespace.attach_namespace(&name))
                     .build()
                     .map_err(|e| exceptions::PyTypeError::new_err(e.to_string()))?;
                 let r = PythonExpression::from(Atom::var(id));
@@ -2283,7 +2283,7 @@ impl PythonExpression {
                 let mut result = vec![];
                 for a in names {
                     let name = a.extract::<PyBackedStr>()?;
-                    let id = Symbol::new(namespace.attach_namespace(&name))
+                    let id = SymbolBuilder::new(namespace.attach_namespace(&name))
                         .build()
                         .map_err(|e| exceptions::PyTypeError::new_err(e.to_string()))?;
 
@@ -2343,7 +2343,7 @@ impl PythonExpression {
             let name = names.get_item(0).unwrap().extract::<PyBackedStr>()?;
             let name = namespace.attach_namespace(&name);
 
-            let mut symbol = Symbol::new(name).with_attributes(opts);
+            let mut symbol = SymbolBuilder::new(name).with_attributes(opts);
 
             if let Some(f) = normalization {
                 symbol = symbol.with_normalization_function(Box::new(
@@ -2452,7 +2452,7 @@ impl PythonExpression {
             for a in names {
                 let name = a.extract::<PyBackedStr>()?;
                 let name = namespace.attach_namespace(&name);
-                let mut symbol = Symbol::new(name).with_attributes(opts.clone());
+                let mut symbol = SymbolBuilder::new(name).with_attributes(opts.clone());
 
                 if let Some(f) = &normalization {
                     let t = f.chain.clone();
