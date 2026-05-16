@@ -82,9 +82,9 @@ use crate::{
         BatchEvaluator, CompileOptions, CompiledComplexEvaluator, CompiledCudaComplexEvaluator,
         CompiledCudaRealEvaluator, CompiledNumber, CompiledRealEvaluator,
         CompiledSimdComplexEvaluator, CompiledSimdRealEvaluator, ComplexEvaluatorSettings,
-        CudaComplexf64, CudaLoadSettings, CudaRealf64, Dualizer, EvaluationFn, EvaluatorLoader,
-        ExportSettings, ExpressionEvaluator, FunctionMap, InlineASM, Instruction,
-        JITCompiledEvaluator, OptimizationSettings, Slot,
+        CudaComplexf64, CudaLoadSettings, CudaRealf64, Dualizer, EvaluatorLoader, ExportSettings,
+        ExpressionEvaluator, FunctionMap, InlineASM, Instruction, JITCompiledEvaluator,
+        OptimizationSettings, Slot,
     },
     graph::{GenerationSettings, Graph, HalfEdge},
     id::{

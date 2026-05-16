@@ -486,7 +486,7 @@ impl PythonExpressionEvaluator {
                 self.jit_real = Some(
                     real_eval
                         .jit_compile()
-                        .map_err(|e| exceptions::PyValueError::new_err(e))?,
+                        .map_err(|e| exceptions::PyValueError::new_err(e.to_string()))?,
                 );
             } else {
                 self.eval_real = Some(real_eval);
@@ -611,7 +611,7 @@ impl PythonExpressionEvaluator {
             self.jit_complex = Some(
                 self.eval_complex
                     .jit_compile()
-                    .map_err(|e| exceptions::PyValueError::new_err(e))?,
+                    .map_err(|e| exceptions::PyValueError::new_err(e.to_string()))?,
             );
         }
 
@@ -800,7 +800,7 @@ impl PythonExpressionEvaluator {
                 &real_params,
                 ComplexEvaluatorSettings::new(sqrt_real, log_real, powf_real, verbose),
             )
-            .map_err(|e| exceptions::PyValueError::new_err(e))
+            .map_err(|e| exceptions::PyValueError::new_err(e.to_string()))
     }
 
     /// Compile the evaluator to a shared library using C++ and optionally inline assembly and load it.
