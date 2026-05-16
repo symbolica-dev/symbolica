@@ -1623,6 +1623,79 @@ pub struct PythonExpression {
     pub expr: Atom,
 }
 
+pub enum PythonEvaluationValue {
+    Real(PythonMultiPrecisionFloat),
+    Complex(Complex<f64>),
+    DecimalComplex(PythonMultiPrecisionFloat, PythonMultiPrecisionFloat),
+}
+
+impl PythonEvaluationValue {
+    fn to_complex_f64(&self) -> Complex<f64> {
+        match self {
+            PythonEvaluationValue::Real(r) => Complex::new(r.0.to_f64(), 0.),
+            PythonEvaluationValue::Complex(c) => *c,
+            PythonEvaluationValue::DecimalComplex(re, im) => {
+                Complex::new(re.0.to_f64(), im.0.to_f64())
+            }
+        }
+    }
+
+    fn to_complex_float(&self, prec: u32) -> Complex<Float> {
+        match self {
+            PythonEvaluationValue::Real(r) => {
+                let mut re = r.0.clone();
+                re.set_prec(prec);
+                Complex::new(re, Float::new(prec))
+            }
+            PythonEvaluationValue::Complex(c) => {
+                Complex::new(Float::with_val(prec, c.re), Float::with_val(prec, c.im))
+            }
+            PythonEvaluationValue::DecimalComplex(re, im) => {
+                let mut re = re.0.clone();
+                let mut im = im.0.clone();
+                re.set_prec(prec);
+                im.set_prec(prec);
+                Complex::new(re, im)
+            }
+        }
+    }
+}
+
+impl<'py> FromPyObject<'_, 'py> for PythonEvaluationValue {
+    type Error = PyErr;
+
+    fn extract(ob: Borrowed<'_, 'py, PyAny>) -> PyResult<Self> {
+        if let Ok((re, im)) = ob.extract::<(PythonMultiPrecisionFloat, PythonMultiPrecisionFloat)>()
+        {
+            Ok(PythonEvaluationValue::DecimalComplex(re, im))
+        } else if let Ok(r) = ob.extract::<PythonMultiPrecisionFloat>() {
+            Ok(PythonEvaluationValue::Real(r))
+        } else if let Ok(c) = ob.extract::<Complex<f64>>() {
+            Ok(PythonEvaluationValue::Complex(c))
+        } else {
+            Err(exceptions::PyTypeError::new_err(
+                "Expected int, float, complex, Decimal or tuple[Decimal, Decimal]",
+            ))
+        }
+    }
+}
+
+#[cfg(feature = "python_stubgen")]
+impl PyStubType for PythonEvaluationValue {
+    fn type_output() -> TypeInfo {
+        TypeInfo {
+            name:
+                "int | float | complex | decimal.Decimal | tuple[decimal.Decimal, decimal.Decimal]"
+                    .into(),
+            import: {
+                let mut h = std::collections::HashSet::default();
+                h.insert("decimal".into());
+                h
+            },
+        }
+    }
+}
+
 impl From<Atom> for PythonExpression {
     fn from(expr: Atom) -> Self {
         PythonExpression { expr }
@@ -5795,7 +5868,7 @@ impl PythonExpression {
     }
 
     /// Evaluate the expression, using a map of all the constants and
-    /// user functions to a float.
+    /// user functions to a complex number.
     ///
     /// Examples
     /// --------
@@ -5803,120 +5876,43 @@ impl PythonExpression {
     /// >>> x, f = S('x', 'f')
     /// >>> e = E('cos(x)')*3 + f(2)
     /// >>> print(e.evaluate({x: 1, f(2): 4.}))
-    pub fn evaluate(&self, constants: HashMap<PythonExpression, f64>) -> PyResult<f64> {
-        let constants: HashMap<AtomView, f64> = constants
-            .iter()
-            .map(|(k, v)| (k.expr.as_view(), *v))
-            .collect();
-
-        self.expr.evaluate(&constants).map_err(|e| {
-            exceptions::PyValueError::new_err(format!("Could not evaluate expression: {e}"))
-        })
-    }
-
-    /// Evaluate the expression, using a map of all the constants and
-    /// user functions using arbitrary precision arithmetic.
-    /// The user has to specify the number of decimal digits of precision
-    /// and provide all input numbers as floats, strings or `decimal`.
-    ///
-    /// Examples
-    /// --------
-    /// >>> from symbolica import *
-    /// >>> from decimal import Decimal
-    /// >>> x, f = S('x', 'f')
-    /// >>> e = E('cos(x)')*3 + f(2)
-    /// >>> a = e.evaluate_with_prec({x: Decimal('1.123456789'), f(2): Decimal('4.1280372189')}, 100)
-    pub fn evaluate_with_prec(
+    #[pyo3(signature = (constants, decimal_digit_precision = None))]
+    #[gen_stub(override_return_type(type_repr = "complex | tuple[decimal.Decimal, decimal.Decimal]", imports = ("decimal")))]
+    pub fn evaluate(
         &self,
-        constants: HashMap<PythonExpression, PythonMultiPrecisionFloat>,
-        decimal_digit_precision: u32,
-    ) -> PyResult<PythonMultiPrecisionFloat> {
-        let prec = (decimal_digit_precision as f64 * std::f64::consts::LOG2_10).ceil() as u32;
+        py: Python,
+        constants: HashMap<PythonExpression, PythonEvaluationValue>,
+        decimal_digit_precision: Option<u32>,
+    ) -> PyResult<Py<PyAny>> {
+        let Some(decimal_digit_precision) = decimal_digit_precision else {
+            let constants: HashMap<AtomView, Complex<f64>> = constants
+                .iter()
+                .map(|(k, v)| (k.expr.as_view(), v.to_complex_f64()))
+                .collect();
 
-        let constants: HashMap<AtomView, Float> = constants
-            .iter()
-            .map(|(k, v)| {
-                Ok((k.expr.as_view(), {
-                    let mut vv = v.0.clone();
-                    vv.set_prec(prec);
-                    vv
-                }))
-            })
-            .collect::<PyResult<_>>()?;
-
-        Ok(self
-            .expr
-            .evaluate_with_prec(&constants, prec)
-            .map_err(|e| {
+            let r = self.expr.evaluate(&constants).map_err(|e| {
                 exceptions::PyValueError::new_err(format!("Could not evaluate expression: {e}"))
-            })?
-            .into())
-    }
+            })?;
+            return PyComplex::from_doubles(py, r.re, r.im).into_py_any(py);
+        };
 
-    /// Evaluate the expression, using a map of all the variables and
-    /// user functions to a complex number.
-    ///
-    /// Examples
-    /// --------
-    /// >>> from symbolica import Expression
-    /// >>> x, y = S('x', 'y')
-    /// >>> e = E('sqrt(x)')*y
-    /// >>> print(e.evaluate_complex({x: 1 + 2j, y: 4 + 3j}, {}))
-    pub fn evaluate_complex<'py>(
-        &self,
-        py: Python<'py>,
-        constants: HashMap<PythonExpression, Complex<f64>>,
-    ) -> PyResult<Bound<'py, PyComplex>> {
-        let constants: HashMap<AtomView, Complex<f64>> = constants
-            .iter()
-            .map(|(k, v)| (k.expr.as_view(), *v))
-            .collect();
-
-        let r = self.expr.evaluate(&constants).map_err(|e| {
-            exceptions::PyValueError::new_err(format!("Could not evaluate expression: {e}"))
-        })?;
-        Ok(PyComplex::from_doubles(py, r.re, r.im))
-    }
-
-    /// Evaluate the expression, using a map of all the constants and
-    /// user functions using arbitrary precision arithmetic.
-    /// The user has to specify the number of decimal digits of precision
-    /// and provide all input numbers as floats, strings or `decimal`.
-    ///
-    /// Examples
-    /// --------
-    /// >>> from symbolica import *
-    /// >>> from decimal import Decimal
-    /// >>> x, f = S('x', 'f')
-    /// >>> e = E('cos(x)')*3 + f(2)
-    /// >>> a = e.evaluate_with_prec({x: Decimal('1.123456789'), f(2): Decimal('4.1280372189')}, 100)
-    pub fn evaluate_complex_with_prec(
-        &self,
-        constants: HashMap<
-            PythonExpression,
-            (PythonMultiPrecisionFloat, PythonMultiPrecisionFloat),
-        >,
-        decimal_digit_precision: u32,
-    ) -> PyResult<(PythonMultiPrecisionFloat, PythonMultiPrecisionFloat)> {
         let prec = (decimal_digit_precision as f64 * std::f64::consts::LOG2_10).ceil() as u32;
-
         let constants: HashMap<AtomView, Complex<Float>> = constants
             .iter()
-            .map(|(k, (re, im))| {
-                (k.expr.as_view(), {
-                    Complex::new(re.0.clone(), im.0.clone())
-                })
-            })
+            .map(|(k, v)| (k.expr.as_view(), v.to_complex_float(prec)))
             .collect();
 
-        let a = self
+        let r = self
             .expr
             .evaluate_with_prec(&constants, prec)
             .map_err(|e| {
                 exceptions::PyValueError::new_err(format!("Could not evaluate expression: {e}"))
             })?;
-
-        Ok((a.re.into(), a.im.into()))
+        (
+            PythonMultiPrecisionFloat(r.re),
+            PythonMultiPrecisionFloat(r.im),
+        )
+            .into_py_any(py)
     }
 
     /// Create an evaluator that can evaluate (nested) expressions in an optimized fashion.
