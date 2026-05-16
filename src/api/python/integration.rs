@@ -376,7 +376,7 @@ impl PythonNumericalIntegrator {
     pub fn probe(&self, probe: PythonProbe) -> PyResult<f64> {
         self.grid
             .probe(&probe.into_probe())
-            .map_err(|e| exceptions::PyValueError::new_err(e))
+            .map_err(|e| exceptions::PyValueError::new_err(e.to_string()))
     }
 
     /// Sample `num_samples` points from the grid using the random number generator

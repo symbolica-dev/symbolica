@@ -428,15 +428,15 @@ impl PythonPolynomial {
     /// Set a new variable ordering for the polynomial.
     /// This can be used to introduce new variables as well.
     pub fn reorder(&mut self, order: Vec<PythonExpression>) -> PyResult<()> {
-        let vars: Vec<_> = order
+        let vars: Vec<PolyVariable> = order
             .into_iter()
             .map(|x| x.expr.try_into())
             .collect::<Result<_, _>>()
-            .map_err(|e| exceptions::PyValueError::new_err(e))?;
+            .map_err(|e: String| exceptions::PyValueError::new_err(e.to_string()))?;
         self.poly = self
             .poly
             .rearrange_with_growth(&vars)
-            .map_err(exceptions::PyValueError::new_err)?;
+            .map_err(|e: String| exceptions::PyValueError::new_err(e.to_string()))?;
         Ok(())
     }
 
@@ -887,7 +887,7 @@ impl PythonPolynomial {
         let var: PolyVariable = x
             .expr
             .try_into()
-            .map_err(|e| exceptions::PyValueError::new_err(e))?;
+            .map_err(|e: String| exceptions::PyValueError::new_err(e.to_string()))?;
 
         let v = match v {
             PolynomialOrInteger::Polynomial(p) => p,
@@ -943,7 +943,7 @@ impl PythonPolynomial {
         vars: Vec<PyBackedStr>,
         default_namespace: Option<String>,
     ) -> PyResult<Self> {
-        let mut var_map = vec![];
+        let mut var_map: Vec<PolyVariable> = vec![];
         let mut var_name_map: SmallVec<[SmartString<LazyCompact>; INLINED_EXPONENTS]> =
             SmallVec::new();
 
@@ -967,9 +967,9 @@ impl PythonPolynomial {
         }
 
         let e = Token::parse(arg, ParseSettings::polynomial())
-            .map_err(exceptions::PyValueError::new_err)?
+            .map_err(|e: String| exceptions::PyValueError::new_err(e.to_string()))?
             .to_polynomial(&Q, &Arc::new(var_map), &var_name_map)
-            .map_err(exceptions::PyValueError::new_err)?;
+            .map_err(|e| exceptions::PyValueError::new_err(e.to_string()))?;
 
         Ok(Self { poly: e })
     }
@@ -1218,7 +1218,7 @@ impl PythonPolynomial {
         let var = x
             .expr
             .try_into()
-            .map_err(|e| exceptions::PyValueError::new_err(e))?;
+            .map_err(|e: String| exceptions::PyValueError::new_err(e.to_string()))?;
 
         let sample_points: Vec<Rational> = sample_points
             .into_iter()
@@ -1765,16 +1765,16 @@ impl PythonFiniteFieldPolynomial {
     /// Set a new variable ordering for the polynomial.
     /// This can be used to introduce new variables as well.
     pub fn reorder(&mut self, order: Vec<PythonExpression>) -> PyResult<()> {
-        let vars: Vec<_> = order
+        let vars: Vec<PolyVariable> = order
             .into_iter()
             .map(|x| x.expr.try_into())
             .collect::<Result<_, _>>()
-            .map_err(|e| exceptions::PyValueError::new_err(e))?;
+            .map_err(|e: String| exceptions::PyValueError::new_err(e.to_string()))?;
 
         self.poly = self
             .poly
             .rearrange_with_growth(&vars)
-            .map_err(exceptions::PyValueError::new_err)?;
+            .map_err(|e: String| exceptions::PyValueError::new_err(e.to_string()))?;
         Ok(())
     }
 
@@ -2334,7 +2334,7 @@ impl PythonFiniteFieldPolynomial {
         prime: u64,
         default_namespace: Option<String>,
     ) -> PyResult<Self> {
-        let mut var_map = vec![];
+        let mut var_map: Vec<PolyVariable> = vec![];
         let mut var_name_map = vec![];
 
         let namespace = DefaultNamespace {
@@ -2357,9 +2357,9 @@ impl PythonFiniteFieldPolynomial {
         }
 
         let e = Token::parse(arg, ParseSettings::polynomial())
-            .map_err(exceptions::PyValueError::new_err)?
+            .map_err(|e: String| exceptions::PyValueError::new_err(e.to_string()))?
             .to_polynomial(&Zp64::new(prime), &Arc::new(var_map), &var_name_map)
-            .map_err(exceptions::PyValueError::new_err)?;
+            .map_err(|e| exceptions::PyValueError::new_err(e.to_string()))?;
 
         Ok(Self { poly: e })
     }
@@ -2858,15 +2858,15 @@ impl PythonPrimeTwoPolynomial {
     /// Set a new variable ordering for the polynomial.
     /// This can be used to introduce new variables as well.
     pub fn reorder(&mut self, order: Vec<PythonExpression>) -> PyResult<()> {
-        let vars: Vec<_> = order
+        let vars: Vec<PolyVariable> = order
             .into_iter()
             .map(|x| x.expr.try_into())
             .collect::<Result<_, _>>()
-            .map_err(|e| exceptions::PyValueError::new_err(e))?;
+            .map_err(|e: String| exceptions::PyValueError::new_err(e.to_string()))?;
         self.poly = self
             .poly
             .rearrange_with_growth(&vars)
-            .map_err(exceptions::PyValueError::new_err)?;
+            .map_err(|e: String| exceptions::PyValueError::new_err(e.to_string()))?;
         Ok(())
     }
 
@@ -3743,15 +3743,15 @@ impl PythonGaloisFieldPrimeTwoPolynomial {
     /// Set a new variable ordering for the polynomial.
     /// This can be used to introduce new variables as well.
     pub fn reorder(&mut self, order: Vec<PythonExpression>) -> PyResult<()> {
-        let vars: Vec<_> = order
+        let vars: Vec<PolyVariable> = order
             .into_iter()
             .map(|x| x.expr.try_into())
             .collect::<Result<_, _>>()
-            .map_err(|e| exceptions::PyValueError::new_err(e))?;
+            .map_err(|e: String| exceptions::PyValueError::new_err(e.to_string()))?;
         self.poly = self
             .poly
             .rearrange_with_growth(&vars)
-            .map_err(exceptions::PyValueError::new_err)?;
+            .map_err(|e: String| exceptions::PyValueError::new_err(e.to_string()))?;
         Ok(())
     }
 
@@ -4718,15 +4718,15 @@ impl PythonGaloisFieldPolynomial {
     /// Set a new variable ordering for the polynomial.
     /// This can be used to introduce new variables as well.
     pub fn reorder(&mut self, order: Vec<PythonExpression>) -> PyResult<()> {
-        let vars: Vec<_> = order
+        let vars: Vec<PolyVariable> = order
             .into_iter()
             .map(|x| x.expr.try_into())
             .collect::<Result<_, _>>()
-            .map_err(|e| exceptions::PyValueError::new_err(e))?;
+            .map_err(|e: String| exceptions::PyValueError::new_err(e.to_string()))?;
         self.poly = self
             .poly
             .rearrange_with_growth(&vars)
-            .map_err(exceptions::PyValueError::new_err)?;
+            .map_err(|e: String| exceptions::PyValueError::new_err(e.to_string()))?;
         Ok(())
     }
 
@@ -5645,15 +5645,15 @@ impl PythonNumberFieldPolynomial {
     /// Set a new variable ordering for the polynomial.
     /// This can be used to introduce new variables as well.
     pub fn reorder(&mut self, order: Vec<PythonExpression>) -> PyResult<()> {
-        let vars: Vec<_> = order
+        let vars: Vec<PolyVariable> = order
             .into_iter()
             .map(|x| x.expr.try_into())
             .collect::<Result<_, _>>()
-            .map_err(|e| exceptions::PyValueError::new_err(e))?;
+            .map_err(|e: String| exceptions::PyValueError::new_err(e.to_string()))?;
         self.poly = self
             .poly
             .rearrange_with_growth(&vars)
-            .map_err(exceptions::PyValueError::new_err)?;
+            .map_err(|e: String| exceptions::PyValueError::new_err(e.to_string()))?;
         Ok(())
     }
 
@@ -6487,7 +6487,7 @@ impl PythonRationalPolynomial {
         vars: Vec<PyBackedStr>,
         default_namespace: Option<String>,
     ) -> PyResult<Self> {
-        let mut var_map = vec![];
+        let mut var_map: Vec<PolyVariable> = vec![];
         let mut var_name_map = vec![];
 
         let namespace = DefaultNamespace {
@@ -6510,9 +6510,9 @@ impl PythonRationalPolynomial {
         }
 
         let e = Token::parse(arg, ParseSettings::polynomial())
-            .map_err(exceptions::PyValueError::new_err)?
+            .map_err(|e: String| exceptions::PyValueError::new_err(e.to_string()))?
             .to_rational_polynomial(&Q, &Z, &Arc::new(var_map), &var_name_map)
-            .map_err(exceptions::PyValueError::new_err)?;
+            .map_err(|e| exceptions::PyValueError::new_err(e.to_string()))?;
 
         Ok(Self { poly: e })
     }
@@ -6828,7 +6828,7 @@ impl PythonFiniteFieldRationalPolynomial {
         prime: u64,
         default_namespace: Option<String>,
     ) -> PyResult<Self> {
-        let mut var_map = vec![];
+        let mut var_map: Vec<PolyVariable> = vec![];
         let mut var_name_map = vec![];
 
         let namespace = DefaultNamespace {
@@ -6852,9 +6852,9 @@ impl PythonFiniteFieldRationalPolynomial {
 
         let field = Zp64::new(prime);
         let e = Token::parse(arg, ParseSettings::polynomial())
-            .map_err(exceptions::PyValueError::new_err)?
+            .map_err(|e: String| exceptions::PyValueError::new_err(e.to_string()))?
             .to_rational_polynomial(&field, &field, &Arc::new(var_map), &var_name_map)
-            .map_err(exceptions::PyValueError::new_err)?;
+            .map_err(|e| exceptions::PyValueError::new_err(e.to_string()))?;
 
         Ok(Self { poly: e })
     }

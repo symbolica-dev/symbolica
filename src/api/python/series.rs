@@ -54,7 +54,8 @@ impl PythonSeries {
                 series: &self.series + &rhs.series,
             }),
             SeriesOrExpression::Expression(rhs) => Ok(Self {
-                series: (&self.series + &rhs.expr).map_err(exceptions::PyValueError::new_err)?,
+                series: (&self.series + &rhs.expr)
+                    .map_err(|e| exceptions::PyValueError::new_err(e.to_string()))?,
             }),
         }
     }
@@ -62,7 +63,8 @@ impl PythonSeries {
     /// Add this series to `rhs`, returning the result.
     pub fn __radd__(&self, rhs: &PythonExpression) -> PyResult<Self> {
         Ok(Self {
-            series: (&self.series + &rhs.expr).map_err(exceptions::PyValueError::new_err)?,
+            series: (&self.series + &rhs.expr)
+                .map_err(|e| exceptions::PyValueError::new_err(e.to_string()))?,
         })
     }
 
@@ -72,14 +74,16 @@ impl PythonSeries {
                 series: &self.series - &rhs.series,
             }),
             SeriesOrExpression::Expression(rhs) => Ok(Self {
-                series: (&self.series - &rhs.expr).map_err(exceptions::PyValueError::new_err)?,
+                series: (&self.series - &rhs.expr)
+                    .map_err(|e| exceptions::PyValueError::new_err(e.to_string()))?,
             }),
         }
     }
 
     pub fn __rsub__(&self, lhs: &PythonExpression) -> PyResult<Self> {
         Ok(Self {
-            series: (&lhs.expr - &self.series).map_err(exceptions::PyValueError::new_err)?,
+            series: (&lhs.expr - &self.series)
+                .map_err(|e| exceptions::PyValueError::new_err(e.to_string()))?,
         })
     }
 
@@ -89,14 +93,16 @@ impl PythonSeries {
                 series: &self.series * &rhs.series,
             }),
             SeriesOrExpression::Expression(rhs) => Ok(Self {
-                series: (&self.series * &rhs.expr).map_err(exceptions::PyValueError::new_err)?,
+                series: (&self.series * &rhs.expr)
+                    .map_err(|e| exceptions::PyValueError::new_err(e.to_string()))?,
             }),
         }
     }
 
     pub fn __rmul__(&self, lhs: &PythonExpression) -> PyResult<Self> {
         Ok(Self {
-            series: (&self.series * &lhs.expr).map_err(exceptions::PyValueError::new_err)?,
+            series: (&self.series * &lhs.expr)
+                .map_err(|e| exceptions::PyValueError::new_err(e.to_string()))?,
         })
     }
 
@@ -106,14 +112,16 @@ impl PythonSeries {
                 series: &self.series / &rhs.series,
             }),
             SeriesOrExpression::Expression(rhs) => Ok(Self {
-                series: (&self.series / &rhs.expr).map_err(exceptions::PyValueError::new_err)?,
+                series: (&self.series / &rhs.expr)
+                    .map_err(|e| exceptions::PyValueError::new_err(e.to_string()))?,
             }),
         }
     }
 
     pub fn __rtruediv__(&self, lhs: &PythonExpression) -> PyResult<Self> {
         Ok(Self {
-            series: (&lhs.expr / &self.series).map_err(exceptions::PyValueError::new_err)?,
+            series: (&lhs.expr / &self.series)
+                .map_err(|e| exceptions::PyValueError::new_err(e.to_string()))?,
         })
     }
 
@@ -128,7 +136,7 @@ impl PythonSeries {
             series: self
                 .series
                 .rpow((exponent, 1).into())
-                .map_err(exceptions::PyValueError::new_err)?,
+                .map_err(|e| exceptions::PyValueError::new_err(e.to_string()))?,
         })
     }
 
@@ -264,7 +272,7 @@ impl PythonSeries {
             series: self
                 .series
                 .sin()
-                .map_err(exceptions::PyValueError::new_err)?,
+                .map_err(|e| exceptions::PyValueError::new_err(e.to_string()))?,
         })
     }
 
@@ -273,7 +281,7 @@ impl PythonSeries {
             series: self
                 .series
                 .cos()
-                .map_err(exceptions::PyValueError::new_err)?,
+                .map_err(|e| exceptions::PyValueError::new_err(e.to_string()))?,
         })
     }
 
@@ -282,7 +290,7 @@ impl PythonSeries {
             series: self
                 .series
                 .exp()
-                .map_err(exceptions::PyValueError::new_err)?,
+                .map_err(|e| exceptions::PyValueError::new_err(e.to_string()))?,
         })
     }
 
@@ -291,7 +299,7 @@ impl PythonSeries {
             series: self
                 .series
                 .log()
-                .map_err(exceptions::PyValueError::new_err)?,
+                .map_err(|e| exceptions::PyValueError::new_err(e.to_string()))?,
         })
     }
 
@@ -301,7 +309,7 @@ impl PythonSeries {
             series: self
                 .series
                 .rpow((num, den).into())
-                .map_err(exceptions::PyValueError::new_err)?,
+                .map_err(|e| exceptions::PyValueError::new_err(e.to_string()))?,
         })
     }
 
@@ -310,7 +318,7 @@ impl PythonSeries {
             series: self
                 .series
                 .pow(&pow.series)
-                .map_err(exceptions::PyValueError::new_err)?,
+                .map_err(|e| exceptions::PyValueError::new_err(e.to_string()))?,
         })
     }
 
