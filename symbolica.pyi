@@ -3173,7 +3173,6 @@ class Expression:
     def evaluate(
         self,
         constants: dict[Expression, float],
-        functions: dict[Expression, Callable[[Sequence[float]], float]],
     ) -> float:
         """
         Evaluate the expression, using a map of all the variables and
@@ -3182,25 +3181,19 @@ class Expression:
         Examples
         --------
         >>> from symbolica import *
-        >>> x = S('x')
-        >>> f = S('f')
-        >>> e = E('cos(x)')*3 + f(x,2)
-        >>> print(e.evaluate({x: 1}, {f: lambda args: args[0]+args[1]}))
+        >>> x, f = S('x', 'f')
+        >>> e = E('cos(x)')*3 + f(2)
+        >>> print(e.evaluate({x: 1, f: 2.}))
 
         Parameters
         ----------
         constants: dict[Expression, float]
             The constant substitutions applied during evaluation.
-        functions: dict[Expression, Callable[[Sequence[float]], float]]
-            The function callback table used during evaluation.
         """
 
     def evaluate_with_prec(
         self,
         constants: dict[Expression, float | str | Decimal],
-        functions: dict[
-            Expression, Callable[[Sequence[Decimal]], float | str | Decimal]
-        ],
         decimal_digit_precision: int,
     ) -> Decimal:
         """
@@ -3213,18 +3206,16 @@ class Expression:
         --------
         >>> from symbolica import *
         >>> from decimal import Decimal, getcontext
-        >>> x = S('x', 'f')
-        >>> e = E('cos(x)')*3 + f(x, 2)
+        >>> x, f = S('x', 'f')
+        >>> e = E('cos(x)')*3 + f(2)
         >>> getcontext().prec = 100
         >>> a = e.evaluate_with_prec({x: Decimal('1.123456789')}, {
-        >>>                         f: lambda args: args[0] + args[1]}, 100)
+        >>>                         f(2): 2.}, 100)
 
         Parameters
         ----------
         constants: dict[Expression, float | str | Decimal]
             The constant substitutions applied during evaluation.
-        functions: dict[Expression, Callable[[Sequence[Decimal]], float | str | Decimal]]
-            The function callback table used during evaluation.
         decimal_digit_precision: int
             The decimal precision used for arbitrary-precision evaluation.
         """
@@ -3232,7 +3223,6 @@ class Expression:
     def evaluate_complex(
         self,
         constants: dict[Expression, float | complex],
-        functions: dict[Expression, Callable[[Sequence[complex]], float | complex]],
     ) -> complex:
         """
         Evaluate the expression, using a map of all the variables and
@@ -3243,14 +3233,35 @@ class Expression:
         >>> from symbolica import *
         >>> x, y = S('x', 'y')
         >>> e = E('sqrt(x)')*y
-        >>> print(e.evaluate_complex({x: 1 + 2j, y: 4 + 3j}, {}))
+        >>> print(e.evaluate_complex({x: 1 + 2j, y: 4 + 3j}))
 
         Parameters
         ----------
         constants: dict[Expression, float | complex]
             The constant substitutions applied during evaluation.
-        functions: dict[Expression, Callable[[Sequence[complex]], float | complex]]
-            The function callback table used during evaluation.
+        """
+
+    def evaluate_complex_with_prec(
+        self,
+        constants: dict[
+            Expression, tuple[float | complex | Decimal, float | complex | Decimal]
+        ],
+    ) -> tuple[complex, complex]:
+        """
+        Evaluate the expression, using a map of all the variables and
+        user functions to a complex number.
+
+        Examples
+        --------
+        >>> from symbolica import *
+        >>> x, y = S('x', 'y')
+        >>> e = E('sqrt(x)')*y
+        >>> print(e.evaluate_complex_with_prec({x: (1, 2), y: (4, 3)}, 100))
+
+        Parameters
+        ----------
+        constants: dict[Expression, float | complex]
+            The constant substitutions applied during evaluation.
         """
 
     def evaluator(
