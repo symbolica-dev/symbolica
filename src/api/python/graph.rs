@@ -304,7 +304,7 @@ impl PythonGraph {
                 directed,
                 data.map(|x| x.to_expression().expr).unwrap_or_default(),
             )
-            .map_err(exceptions::PyValueError::new_err)
+            .map_err(|e| exceptions::PyValueError::new_err(e.to_string()))
     }
 
     /// Set the data of the node at index `index`, returning the old data.

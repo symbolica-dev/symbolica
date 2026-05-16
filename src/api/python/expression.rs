@@ -967,12 +967,12 @@ impl PythonTransformer {
     /// vars: List[Expression]
     ///     A list of variables
     pub fn set_coefficient_ring(&self, vars: Vec<PythonExpression>) -> PyResult<PythonTransformer> {
-        let mut var_map = vec![];
+        let mut var_map: Vec<PolyVariable> = vec![];
         for v in vars {
             var_map.push(
                 v.expr
                     .try_into()
-                    .map_err(|e| exceptions::PyValueError::new_err(e))?,
+                    .map_err(|e: String| exceptions::PyValueError::new_err(e.to_string()))?,
             );
         }
 
@@ -1153,7 +1153,7 @@ impl PythonTransformer {
                 .into_iter()
                 .map(|e| Indeterminate::try_from(e.expr))
                 .collect::<Result<Vec<_>, _>>()
-                .map_err(|e| pyo3::exceptions::PyValueError::new_err(e))?;
+                .map_err(|e| exceptions::PyValueError::new_err(e.to_string()))?;
             Some(vars)
         } else {
             None
@@ -1768,7 +1768,7 @@ impl PythonCondition {
         Ok(self
             .condition
             .evaluate(&None)
-            .map_err(exceptions::PyValueError::new_err)?
+            .map_err(|e| exceptions::PyValueError::new_err(e.to_string()))?
             == ConditionResult::True)
     }
 
@@ -1798,7 +1798,7 @@ impl PythonCondition {
             .clone()
             .try_into()
             .map(|e| PythonPatternRestriction { condition: e })
-            .map_err(exceptions::PyValueError::new_err)
+            .map_err(|e| exceptions::PyValueError::new_err(e.to_string()))
     }
 }
 
@@ -1960,7 +1960,7 @@ impl<'py> FromPyObject<'_, 'py> for ConvertibleToPatternRestriction {
             Ok(ConvertibleToPatternRestriction(
                 a.condition
                     .try_into()
-                    .map_err(exceptions::PyValueError::new_err)?,
+                    .map_err(|e: &'static str| exceptions::PyValueError::new_err(e.to_string()))?,
             ))
         } else {
             Err(exceptions::PyTypeError::new_err(
@@ -2562,8 +2562,11 @@ impl PythonExpression {
             if let Some(relative_error) = relative_error {
                 let err = relative_error
                     .try_into()
-                    .map_err(exceptions::PyValueError::new_err)?;
-                let mut r: Rational = f.0.try_into().map_err(exceptions::PyValueError::new_err)?;
+                    .map_err(|e: &'static str| exceptions::PyValueError::new_err(e.to_string()))?;
+                let mut r: Rational = f
+                    .0
+                    .try_into()
+                    .map_err(|e: &'static str| exceptions::PyValueError::new_err(e.to_string()))?;
                 r = r.round(&err);
                 Ok(Atom::num(r).into())
             } else {
@@ -2573,12 +2576,12 @@ impl PythonExpression {
             if let Some(relative_error) = relative_error {
                 let err = relative_error
                     .try_into()
-                    .map_err(exceptions::PyValueError::new_err)?;
+                    .map_err(|e: &'static str| exceptions::PyValueError::new_err(e.to_string()))?;
                 let r = Rational::try_from(f.re)
-                    .map_err(exceptions::PyValueError::new_err)?
+                    .map_err(|e| exceptions::PyValueError::new_err(e.to_string()))?
                     .round(&err);
                 let i = Rational::try_from(f.im)
-                    .map_err(exceptions::PyValueError::new_err)?
+                    .map_err(|e| exceptions::PyValueError::new_err(e.to_string()))?
                     .round(&err);
                 Ok(Atom::num(Complex::new(r, i)).into())
             } else {
@@ -2757,7 +2760,7 @@ impl PythonExpression {
             },
             default_namespace = namespace
         )
-        .map_err(exceptions::PyValueError::new_err)?;
+        .map_err(|e| exceptions::PyValueError::new_err(e.to_string()))?;
         Ok(e.into())
     }
 
@@ -3847,7 +3850,7 @@ impl PythonExpression {
             .rationalize(
                 &relative_error
                     .try_into()
-                    .map_err(exceptions::PyValueError::new_err)?,
+                    .map_err(|e: &'static str| exceptions::PyValueError::new_err(e.to_string()))?,
             )
             .into())
     }
@@ -4491,12 +4494,12 @@ impl PythonExpression {
     /// vars: List[Expression]
     ///     A list of variables
     pub fn set_coefficient_ring(&self, vars: Vec<PythonExpression>) -> PyResult<PythonExpression> {
-        let mut var_map = vec![];
+        let mut var_map: Vec<PolyVariable> = vec![];
         for v in vars {
             var_map.push(
                 v.expr
                     .try_into()
-                    .map_err(|e| exceptions::PyValueError::new_err(e))?,
+                    .map_err(|e: String| exceptions::PyValueError::new_err(e.to_string()))?,
             );
         }
 
@@ -4799,7 +4802,7 @@ impl PythonExpression {
                 .into_iter()
                 .map(|e| Indeterminate::try_from(e.expr))
                 .collect::<Result<Vec<_>, _>>()
-                .map_err(|e| pyo3::exceptions::PyValueError::new_err(e))?;
+                .map_err(|e| exceptions::PyValueError::new_err(e.to_string()))?;
             Ok(self.expr.collect_horner(Some(&vars)).into())
         } else {
             Ok(self.expr.collect_horner::<Indeterminate>(None).into())
@@ -5056,13 +5059,13 @@ impl PythonExpression {
         vars: Option<Vec<PythonExpression>>,
         py: Python,
     ) -> PyResult<Py<PyAny>> {
-        let mut var_map = vec![];
+        let mut var_map: Vec<PolyVariable> = vec![];
         if let Some(vm) = vars {
             for v in vm {
                 var_map.push(
                     v.expr
                         .try_into()
-                        .map_err(|e| exceptions::PyValueError::new_err(e))?,
+                        .map_err(|e: String| exceptions::PyValueError::new_err(e.to_string()))?,
                 );
             }
         }
@@ -5126,7 +5129,7 @@ impl PythonExpression {
                             poly: self
                                 .expr
                                 .try_to_polynomial(&Z2, var_map)
-                                .map_err(|e| exceptions::PyValueError::new_err(e))?
+                                .map_err(|e| exceptions::PyValueError::new_err(e.to_string()))?
                                 .to_number_field(&g),
                         }
                         .into_py_any(py)
@@ -5144,7 +5147,7 @@ impl PythonExpression {
                             poly: self
                                 .expr
                                 .try_to_polynomial(&f, var_map)
-                                .map_err(|e| exceptions::PyValueError::new_err(e))?
+                                .map_err(|e| exceptions::PyValueError::new_err(e.to_string()))?
                                 .to_number_field(&g),
                         }
                         .into_py_any(py)
@@ -5155,7 +5158,7 @@ impl PythonExpression {
                         poly: self
                             .expr
                             .try_to_polynomial(&Z2, var_map)
-                            .map_err(|e| exceptions::PyValueError::new_err(e))?
+                            .map_err(|e| exceptions::PyValueError::new_err(e.to_string()))?
                             .to_number_field(&g),
                     }
                     .into_py_any(py)
@@ -5166,7 +5169,7 @@ impl PythonExpression {
                         poly: self
                             .expr
                             .try_to_polynomial(&f, var_map)
-                            .map_err(|e| exceptions::PyValueError::new_err(e))?
+                            .map_err(|e| exceptions::PyValueError::new_err(e.to_string()))?
                             .to_number_field(&g),
                     }
                     .into_py_any(py)
@@ -5176,7 +5179,7 @@ impl PythonExpression {
                     poly: self
                         .expr
                         .try_to_polynomial(&Z2, var_map)
-                        .map_err(|e| exceptions::PyValueError::new_err(e))?,
+                        .map_err(|e| exceptions::PyValueError::new_err(e.to_string()))?,
                 }
                 .into_py_any(py)
             } else {
@@ -5184,7 +5187,7 @@ impl PythonExpression {
                     poly: self
                         .expr
                         .try_to_polynomial(&Zp64::new(m), var_map)
-                        .map_err(|e| exceptions::PyValueError::new_err(e))?,
+                        .map_err(|e| exceptions::PyValueError::new_err(e.to_string()))?,
                 }
                 .into_py_any(py)
             }
@@ -5203,7 +5206,7 @@ impl PythonExpression {
                     poly: self
                         .expr
                         .try_to_polynomial(&f, var_map)
-                        .map_err(|e| exceptions::PyValueError::new_err(e))?,
+                        .map_err(|e| exceptions::PyValueError::new_err(e.to_string()))?,
                 }
                 .into_py_any(py)
             } else {
@@ -5211,7 +5214,7 @@ impl PythonExpression {
                     poly: self
                         .expr
                         .try_to_polynomial(&Q, var_map)
-                        .map_err(|e| exceptions::PyValueError::new_err(e))?
+                        .map_err(|e| exceptions::PyValueError::new_err(e.to_string()))?
                         .to_number_field(&f),
                 }
                 .into_py_any(py)
@@ -5221,7 +5224,7 @@ impl PythonExpression {
                 poly: self
                     .expr
                     .try_to_polynomial(&Q, var_map)
-                    .map_err(|e| exceptions::PyValueError::new_err(e))?,
+                    .map_err(|e| exceptions::PyValueError::new_err(e.to_string()))?,
             }
             .into_py_any(py)
         }
@@ -5242,13 +5245,13 @@ impl PythonExpression {
         &self,
         vars: Option<Vec<PythonExpression>>,
     ) -> PyResult<PythonRationalPolynomial> {
-        let mut var_map = vec![];
+        let mut var_map: Vec<PolyVariable> = vec![];
         if let Some(vm) = vars {
             for v in vm {
                 var_map.push(
                     v.expr
                         .try_into()
-                        .map_err(|e| exceptions::PyValueError::new_err(e))?,
+                        .map_err(|e: String| exceptions::PyValueError::new_err(e.to_string()))?,
                 );
             }
         }
@@ -5950,10 +5953,6 @@ impl PythonExpression {
         &self,
         py: Python<'py>,
         constants: HashMap<PythonExpression, Complex<f64>>,
-        #[gen_stub(override_type(
-            type_repr = "dict[Expression, typing.Callable[[typing.Sequence[float | complex]], float | complex]]"
-        ))]
-        functions: HashMap<PolyVariable, Py<PyAny>>,
     ) -> PyResult<Bound<'py, PyComplex>> {
         let constants = constants
             .iter()
