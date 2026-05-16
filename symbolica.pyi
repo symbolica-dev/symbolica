@@ -3170,98 +3170,57 @@ class Expression:
             The maximum number of Newton iterations.
         """
 
+    @overload
     def evaluate(
         self,
-        constants: dict[Expression, float],
-    ) -> float:
-        """
-        Evaluate the expression, using a map of all the variables and
-        user functions to a float.
-
-        Examples
-        --------
-        >>> from symbolica import *
-        >>> x, f = S('x', 'f')
-        >>> e = E('cos(x)')*3 + f(2)
-        >>> print(e.evaluate({x: 1, f: 2.}))
-
-        Parameters
-        ----------
-        constants: dict[Expression, float]
-            The constant substitutions applied during evaluation.
-        """
-
-    def evaluate_with_prec(
-        self,
-        constants: dict[Expression, float | str | Decimal],
-        decimal_digit_precision: int,
-    ) -> Decimal:
-        """
-        Evaluate the expression, using a map of all the constants and
-        user functions using arbitrary precision arithmetic.
-        The user has to specify the number of decimal digits of precision
-        and provide all input numbers as floats, strings or `Decimal`.
-
-        Examples
-        --------
-        >>> from symbolica import *
-        >>> from decimal import Decimal, getcontext
-        >>> x, f = S('x', 'f')
-        >>> e = E('cos(x)')*3 + f(2)
-        >>> getcontext().prec = 100
-        >>> a = e.evaluate_with_prec({x: Decimal('1.123456789')}, {
-        >>>                         f(2): 2.}, 100)
-
-        Parameters
-        ----------
-        constants: dict[Expression, float | str | Decimal]
-            The constant substitutions applied during evaluation.
-        decimal_digit_precision: int
-            The decimal precision used for arbitrary-precision evaluation.
-        """
-
-    def evaluate_complex(
-        self,
-        constants: dict[Expression, float | complex],
+        constants: dict[
+            Expression, int | float | complex | Decimal | tuple[Decimal, Decimal]
+        ],
     ) -> complex:
         """
-        Evaluate the expression, using a map of all the variables and
-        user functions to a complex number.
+        Evaluate the expression, using a map of all constants and user functions.
 
         Examples
         --------
         >>> from symbolica import *
-        >>> x, y = S('x', 'y')
-        >>> e = E('sqrt(x)')*y
-        >>> print(e.evaluate_complex({x: 1 + 2j, y: 4 + 3j}))
+        >>> x, f = S('x', 'f')
+        >>> e = E('cos(x)')*3 + f(2)
+        >>> print(e.evaluate({x: 1, f(2): 4.}))
 
         Parameters
         ----------
-        constants: dict[Expression, float | complex]
+        constants: dict[Expression, int | float | complex | Decimal | tuple[Decimal, Decimal]]
             The constant substitutions applied during evaluation.
+        decimal_digit_precision: int | None
+            If omitted, uses the f64 backend and returns a complex. If specified,
+            uses arbitrary precision and returns (real, imaginary) as Decimals.
         """
 
-    def evaluate_complex_with_prec(
+    @overload
+    def evaluate(
         self,
         constants: dict[
-            Expression, tuple[float | complex | Decimal, float | complex | Decimal]
+            Expression, int | float | complex | Decimal | tuple[Decimal, Decimal]
         ],
-    ) -> tuple[complex, complex]:
+        decimal_digit_precision: int,
+    ) -> tuple[Decimal, Decimal]:
         """
-        Evaluate the expression, using a map of all the variables and
-        user functions to a complex number.
+        Evaluate the expression, using a map of all constants and user functions.
 
         Examples
         --------
         >>> from symbolica import *
-        >>> x, y = S('x', 'y')
-        >>> e = E('sqrt(x)')*y
-        >>> print(e.evaluate_complex_with_prec({x: (1, 2), y: (4, 3)}, 100))
+        >>> x, f = S('x', 'f')
+        >>> e = E('cos(x)')*3 + f(2)
+        >>> print(e.evaluate({x: 1, f(2): 4.}))
 
         Parameters
         ----------
-        constants: dict[Expression, float | complex]
+        constants: dict[Expression, int | float | complex | Decimal | tuple[Decimal, Decimal]]
             The constant substitutions applied during evaluation.
+        decimal_digit_precision: int
+            If omitted, uses the f64 backend and returns a complex. If specified,
+            uses arbitrary precision and returns (real, imaginary) as Decimals.
         """
 
     def evaluator(
