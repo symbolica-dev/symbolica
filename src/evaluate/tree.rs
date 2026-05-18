@@ -13,9 +13,6 @@ pub enum EvaluationError {
     UndefinedFunction {
         expression: Atom,
     },
-    MissingFunction {
-        symbol: Symbol,
-    },
     WrongNumberOfArguments {
         function: Symbol,
         expected: usize,
@@ -43,6 +40,10 @@ pub enum EvaluationError {
         expression_count: usize,
         reason: String,
     },
+    MissingEvaluator {
+        expression: Atom,
+        eval_type: String,
+    },
 }
 
 impl std::error::Error for EvaluationError {}
@@ -62,14 +63,14 @@ impl std::fmt::Display for EvaluationError {
             EvaluationError::UndefinedVariable { symbol } => {
                 write!(
                     f,
-                    "variable {symbol} is not in the constant map or function map"
+                    "variable {symbol} is not in a parameter map and does not have an evaluator"
                 )
             }
             EvaluationError::UndefinedFunction { expression } => {
-                write!(f, "undefined function {expression}")
-            }
-            EvaluationError::MissingFunction { symbol } => {
-                write!(f, "missing function {}", symbol.get_name())
+                write!(
+                    f,
+                    "function {expression} is not in a parameter map and does not have an evaluator"
+                )
             }
             EvaluationError::WrongNumberOfArguments {
                 function,
@@ -109,6 +110,15 @@ impl std::fmt::Display for EvaluationError {
                 f,
                 "could not build an evaluator for {expression_count} expressions: {reason}"
             ),
+            EvaluationError::MissingEvaluator {
+                expression,
+                eval_type,
+            } => {
+                write!(
+                    f,
+                    "could not find an evaluator of type {eval_type} for {expression}"
+                )
+            }
         }
     }
 }
@@ -3790,15 +3800,15 @@ impl<'a> AtomView<'a> {
                     ) {
                         cache.insert(*self, val.clone());
                         return Ok(val);
+                    } else {
+                        return Err(EvaluationError::MissingEvaluator {
+                            expression: self.to_owned(),
+                            eval_type: std::any::type_name::<T>().to_string(),
+                        });
                     }
                 }
 
                 Err(EvaluationError::UndefinedVariable { symbol: s })
-                // Err(format!(
-                //     "Variable {} does not have an evaluator for type {} and was not provided as a parameter",
-                //     v.get_symbol().get_name(),
-                //     std::any::type_name::<Self>()
-                // ))
             }
             AtomView::Fun(f) => {
                 let name = f.get_symbol();
@@ -3898,17 +3908,17 @@ impl<'a> AtomView<'a> {
                         let val = (eval_fun)(&args);
                         cache.insert(*self, val.clone());
                         return Ok(val);
+                    } else {
+                        return Err(EvaluationError::MissingEvaluator {
+                            expression: self.to_owned(),
+                            eval_type: std::any::type_name::<T>().to_string(),
+                        });
                     }
                 }
 
                 Err(EvaluationError::UndefinedFunction {
                     expression: self.to_owned(),
                 })
-                // Err(format!(
-                //     "Function {} does not have an evaluator for type {} and was not provided as a parameter",
-                //     self,
-                //     std::any::type_name::<Self>()
-                // ))
             }
             AtomView::Pow(p) => {
                 let (b, e) = p.get_base_exp();
