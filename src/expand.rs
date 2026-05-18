@@ -244,7 +244,7 @@ impl AtomView<'_> {
                         for (a, pow) in args.iter().zip(new_term) {
                             if *pow != 0 {
                                 let mut new_exp_h = workspace.new_atom();
-                                new_exp_h.to_num((*pow as i64).into());
+                                new_exp_h.to_num(*pow as i64);
                                 hhh.to_pow(*a, new_exp_h.as_view());
                                 p.extend(hhh.as_view());
                             }
@@ -263,7 +263,7 @@ impl AtomView<'_> {
                         let coeff_f = Integer::multinom(new_term);
                         if coeff_f != Integer::one() {
                             let mut coeff_h = workspace.new_atom();
-                            coeff_h.to_num(coeff_f.into());
+                            coeff_h.to_num(coeff_f);
 
                             if let Atom::Mul(m) = expanded_child.deref_mut() {
                                 m.extend(coeff_h.as_view());
@@ -282,7 +282,7 @@ impl AtomView<'_> {
 
                     if negative {
                         let mut num_h = workspace.new_atom();
-                        num_h.to_num((-1i64).into());
+                        num_h.to_num(-1i64);
 
                         let mut pow_h = workspace.new_atom();
                         pow_h.to_pow(add_h.as_view(), num_h.as_view());
@@ -299,9 +299,9 @@ impl AtomView<'_> {
 
                     let mut exp_h = workspace.new_atom();
                     if negative {
-                        exp_h.to_num((-(num as i64)).into());
+                        exp_h.to_num(-(num as i64));
                     } else {
-                        exp_h.to_num((num as i64).into());
+                        exp_h.to_num(num as i64);
                     }
 
                     for arg in m {

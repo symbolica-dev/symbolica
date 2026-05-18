@@ -1442,7 +1442,7 @@ impl Series<AtomField> {
     }
 
     pub fn to_atom_into(&self, out: &mut Atom) {
-        out.to_num(0.into());
+        out.to_num(0);
 
         if self.order == 0 {
             return;

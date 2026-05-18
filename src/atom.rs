@@ -2824,9 +2824,9 @@ impl Atom {
     }
 
     #[inline]
-    pub fn to_num(&mut self, coeff: Coefficient) -> &mut Num {
+    pub fn to_num<T: Into<Coefficient>>(&mut self, coeff: T) -> &mut Num {
         let buffer = std::mem::replace(self, Atom::Zero).into_raw();
-        *self = Atom::Num(Num::new_into(coeff, buffer));
+        *self = Atom::Num(Num::new_into(coeff.into(), buffer));
         if let Atom::Num(n) = self {
             n
         } else {

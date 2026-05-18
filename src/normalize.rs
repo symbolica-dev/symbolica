@@ -9,7 +9,7 @@ use crate::{
     },
     coefficient::{Coefficient, CoefficientView},
     domains::{
-        float::{Complex, FloatLike, Real},
+        float::{Complex, Float, FloatLike, Real},
         integer::Z,
         rational::{Q, Rational},
     },
@@ -331,7 +331,7 @@ impl Atom {
                     let new_exp = helper.to_num(n.get_coeff_view() + n2.get_coeff_view());
 
                     if new_exp.to_num_view().is_zero() {
-                        self.to_num(1.into());
+                        self.to_num(1);
                     } else if new_exp.to_num_view().is_one() {
                         self.set_from_view(&base2);
                     } else {
@@ -350,7 +350,7 @@ impl Atom {
 
                 if let AtomView::Num(n) = helper2.as_view() {
                     if n.is_zero() {
-                        self.to_num(1.into());
+                        self.to_num(1);
                         return true;
                     } else if n.is_one() {
                         self.set_from_view(&base2);
@@ -372,7 +372,7 @@ impl Atom {
                     let new_exp = n.get_coeff_view() + 1;
 
                     if new_exp.is_zero() {
-                        self.to_num(1.into());
+                        self.to_num(1);
                     } else if new_exp == 1.into() {
                         self.set_from_view(&other.as_view());
                     } else {
@@ -380,7 +380,7 @@ impl Atom {
                         self.to_pow(other.as_view(), AtomView::Num(num.to_num_view()));
                     }
                 } else {
-                    other.to_num(1.into());
+                    other.to_num(1);
 
                     let new_exp = helper.to_add();
                     new_exp.extend(other.as_view());
@@ -408,7 +408,7 @@ impl Atom {
                     let new_exp = n.get_coeff_view() + 1;
 
                     if new_exp.is_zero() {
-                        self.to_num(1.into());
+                        self.to_num(1);
                     } else if new_exp == 1.into() {
                         self.set_from_view(&base);
                     } else {
@@ -416,7 +416,7 @@ impl Atom {
                         self.to_pow(base, AtomView::Num(num.to_num_view()));
                     }
                 } else {
-                    self.to_num(1.into());
+                    self.to_num(1);
 
                     let new_exp = helper.to_add();
                     new_exp.extend(self.as_view());
@@ -446,7 +446,7 @@ impl Atom {
         // x * x => x^2
         if self.as_view() == other.as_view() {
             // add powers
-            let exp = other.to_num(2.into());
+            let exp = other.to_num(2);
             helper.to_pow(self.as_view(), AtomView::Num(exp.to_num_view()));
             helper.set_normalized(true);
 
@@ -622,7 +622,7 @@ impl Atom {
             }
         } else if self.as_view() == other {
             let mul = helper.to_mul();
-            self.to_num((2, 1).into());
+            self.to_num((2, 1));
             mul.extend(self.as_view());
             mul.extend(other);
             mul.set_has_coefficient(true);
@@ -788,7 +788,7 @@ impl AtomView<'_> {
                         }
                     }
                 } else {
-                    out.to_num(1.into());
+                    out.to_num(1);
                 }
             }
             AtomView::Num(n) => {
@@ -959,11 +959,11 @@ impl AtomView<'_> {
                         if id.get_id() == Symbol::ABS_ID {
                             if let Coefficient::Complex(c) = n.get_coeff_view().to_owned() {
                                 if c.is_real() {
-                                    out.to_num(c.re.abs().into());
+                                    out.to_num(c.re.abs());
                                 } else {
                                     let r = c.norm_squared();
                                     let mut buffer = workspace.new_atom();
-                                    buffer.to_num(r.into());
+                                    buffer.to_num(r);
                                     *out = buffer.pow((1, 2));
                                 }
                                 return;
@@ -1277,7 +1277,7 @@ impl AtomView<'_> {
 
                             let m = out.to_mul();
                             m.extend(handle.as_view());
-                            handle.to_num((-1).into());
+                            handle.to_num(-1);
                             m.extend(handle.as_view());
                             m.set_normalized(true);
 
@@ -1326,14 +1326,40 @@ impl AtomView<'_> {
                     std::mem::swap(ff, out_f);
                 }
 
-                if let Some(f) = State::get_normalization_function(id) {
+                let data = id.get_global_data();
+                if let Some(n) = &data.custom_normalization {
                     let mut fs = workspace.new_atom();
                     let mut setter = fs.deref_mut().into();
-                    f(out.as_view(), &mut setter);
+                    n(out.as_view(), &mut setter);
                     if setter.is_set() {
                         std::mem::swap(out, fs.deref_mut());
                     }
                     debug_assert!(!out.as_view().needs_normalization());
+                }
+
+                if let Some(e) = &data.custom_evaluation
+                    && e.get_tag_count() == 0
+                    && let Some(e) = e.get_evaluator::<Complex<Float>>(&[])
+                {
+                    if let AtomView::Fun(f) = out.as_view() {
+                        if f.iter().all(|arg| {
+                            if let AtomView::Num(n) = arg
+                                && n.get_coeff_view().is_float()
+                            {
+                                true
+                            } else {
+                                false
+                            }
+                        }) {
+                            let args = f
+                                .iter()
+                                .map(|x| Complex::<Float>::try_from(x).unwrap())
+                                .collect::<Vec<_>>();
+                            let result = (e)(&args);
+                            out.to_num(result);
+                            return;
+                        }
+                    }
                 }
             }
             AtomView::Pow(p) => {
@@ -1429,7 +1455,7 @@ impl AtomView<'_> {
                             }
                         } else if exp_num == CoefficientView::Natural(0, 1, 0, 1) {
                             // x^0 = 1
-                            out.to_num(1.into());
+                            out.to_num(1);
                             break 'pow_simplify;
                         } else if let CoefficientView::Natural(n, 1, 0, 1) = exp_num
                             && n % 2 == 0

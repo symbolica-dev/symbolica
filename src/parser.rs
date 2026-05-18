@@ -671,16 +671,16 @@ impl Token {
             Token::Number(n, is_imag) => match n.parse::<Integer>() {
                 Ok(x) => {
                     if *is_imag {
-                        out.to_num(Complex::new(Rational::zero(), x.into()).into());
+                        out.to_num(Complex::new(Rational::zero(), x.into()));
                     } else {
-                        out.to_num(x.into());
+                        out.to_num(x);
                     }
                 }
                 Err(_) => match Float::parse(n, None) {
                     Ok(f) => {
                         // derive precision from string length, should be overestimate
                         if *is_imag {
-                            out.to_num(Complex::new(f.zero(), f).into());
+                            out.to_num(Complex::new(f.zero(), f));
                         } else {
                             out.to_num(Coefficient::Float(f.into()));
                         }
@@ -801,16 +801,16 @@ impl Token {
             Token::Number(n, is_imag) => match n.parse::<Integer>() {
                 Ok(x) => {
                     if *is_imag {
-                        out.to_num(Complex::new(Rational::zero(), x.into()).into());
+                        out.to_num(Complex::new(Rational::zero(), x.into()));
                     } else {
-                        out.to_num(x.into());
+                        out.to_num(x);
                     }
                 }
                 Err(_) => match Float::parse(n, None) {
                     Ok(f) => {
                         // derive precision from string length, should be overestimate
                         if *is_imag {
-                            out.to_num(Complex::new(f.zero(), f).into());
+                            out.to_num(Complex::new(f.zero(), f));
                         } else {
                             out.to_num(Coefficient::Float(f.into()));
                         }
