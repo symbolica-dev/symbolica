@@ -3233,6 +3233,8 @@ class Expression:
         verbose: bool = False,
         jit_compile: bool = True,
         direct_translation: bool = True,
+        jit_direct_translation: bool = False,
+        jit_optimization_level: int = 3,
         max_horner_scheme_variables: int = 500,
         max_common_pair_cache_entries: int = 1000000,
         max_common_pair_distance: int = 100,
@@ -3284,6 +3286,10 @@ class Expression:
             significant performance improvements.
         direct_translation: bool, optional
             If set to `True`, the optimized expression will be directly constructed from atoms without building a tree.
+        jit_direct_translation: bool, optional
+            If set to `True`, JIT compilation directly translates Symbolica instructions to SymJIT IR.
+        jit_optimization_level: int, optional
+            The optimization level to use for JIT compilation.
         max_horner_scheme_variables: int, optional
             The maximum number of variables in a Horner scheme.
         max_common_pair_cache_entries: int, optional
@@ -3304,6 +3310,8 @@ class Expression:
         verbose: bool = False,
         jit_compile: bool = True,
         direct_translation: bool = True,
+        jit_direct_translation: bool = False,
+        jit_optimization_level: int = 3,
         max_horner_scheme_variables: int = 500,
         max_common_pair_cache_entries: int = 1000000,
         max_common_pair_distance: int = 100,
@@ -3343,6 +3351,10 @@ class Expression:
             Whether JIT compilation should be enabled.
         direct_translation: bool
             Whether to prefer direct translation when compiling the evaluator.
+        jit_direct_translation: bool
+            Whether to directly translate Symbolica instructions to SymJIT IR.
+        jit_optimization_level: int
+            The optimization level to use for JIT compilation.
         max_horner_scheme_variables: int
             The maximum number of variables considered for Horner-scheme optimization.
         max_common_pair_cache_entries: int
@@ -8421,7 +8433,12 @@ class Evaluator:
             The external functions to register.
         """
 
-    def jit_compile(self, jit_compile: bool) -> None:
+    def jit_compile(
+        self,
+        jit_compile: bool,
+        direct_translation: bool | None = None,
+        optimization_level: int | None = None,
+    ) -> None:
         """
         JIT compile the evaluator for faster evaluation. This may take some time, but will speed up subsequent evaluations.
 
@@ -8429,6 +8446,10 @@ class Evaluator:
         ----------
         jit_compile: bool
             Whether JIT compilation should be enabled.
+        direct_translation: bool | None
+            If set, controls direct translation from Symbolica instructions to SymJIT IR.
+        optimization_level: int | None
+            If set, controls the JIT optimization level.
         """
 
     def save(self) -> bytes:

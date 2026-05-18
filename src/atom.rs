@@ -273,7 +273,7 @@ macro_rules! hide_namespace {
 /// let normalize_fn: NormalizationFunction = Box::new(|view, out| {
 ///     // Example normalization logic
 ///     if view.is_zero() {
-///         out.to_num(0.into());
+///         out.to_num(0);
 ///     }
 /// });
 /// ```
@@ -291,7 +291,7 @@ pub type NormalizationFunction = Box<dyn Fn(AtomView, &mut Settable<Atom>) + Sen
 ///
 /// let derivative_fn: DerivativeFunction = Box::new(|view, arg, out| {
 ///     // Example derivative logic for a transparent function
-///     out.to_num(1.into());
+///     out.to_num(1);
 /// });
 /// ```
 pub type DerivativeFunction = Box<dyn Fn(AtomView, usize, &mut Settable<Atom>) + Send + Sync>;
@@ -834,7 +834,7 @@ impl SymbolBuilder {
     ///     // Example normalization logic that sets odd-length function to 0
     ///     if let AtomView::Fun(f) = view {
     ///         if f.get_nargs() % 2 == 1 {
-    ///             out.to_num(0.into());
+    ///             out.to_num(0);
     ///         }
     ///     } else {
     ///         unreachable!()
@@ -880,9 +880,9 @@ impl SymbolBuilder {
     ///
     /// let f = SymbolBuilder::new(wrap_symbol!("tag")).with_derivative_function(|view, arg, out| {
     ///       if arg == 1 {
-    ///          out.to_num(1.into());
+    ///          out.to_num(1);
     ///       } else {
-    ///          out.to_num(0.into());
+    ///          out.to_num(0);
     ///       }
     /// }).build().unwrap();
     /// ```
@@ -3384,7 +3384,7 @@ macro_rules! tag {
 /// let x = symbol!("f", norm = |f, out| {
 ///     if let AtomView::Fun(ff) = f {
 ///         if ff.get_nargs() % 2 == 1 {
-///            out.to_num(0.into());
+///            out.to_num(0);
 ///         }
 ///     }
 /// });

@@ -5960,6 +5960,10 @@ impl PythonExpression {
     ///    If set to `True`, the optimized expression will be compiled using JIT compilation
     /// direct_translation: bool, optional
     ///    If set to `True`, the optimized expression will be directly constructed from atom manipulations without building a tree.
+    /// jit_direct_translation: bool, optional
+    ///    If set to `True`, JIT compilation directly translates Symbolica instructions to SymJIT IR.
+    /// jit_optimization_level: int, optional
+    ///    The optimization level to use for JIT compilation.
     /// max_horner_scheme_variables: int, optional
     ///     The maximum number of variables in a Horner scheme.
     /// max_common_pair_cache_entries: int, optional
@@ -5976,6 +5980,8 @@ impl PythonExpression {
         verbose = false,
         jit_compile = true,
         direct_translation = true,
+        jit_direct_translation = false,
+        jit_optimization_level = 3,
         max_horner_scheme_variables = 500,
         max_common_pair_cache_entries = 1_000_000,
         max_common_pair_distance = 100),
@@ -5990,6 +5996,8 @@ impl PythonExpression {
         verbose: bool,
         jit_compile: bool,
         direct_translation: bool,
+        jit_direct_translation: bool,
+        jit_optimization_level: u8,
         max_horner_scheme_variables: usize,
         max_common_pair_cache_entries: usize,
         max_common_pair_distance: usize,
@@ -6085,6 +6093,9 @@ impl PythonExpression {
             eval_arb_prec: None,
             eval_arb_prec_complex: None,
             jit_compile,
+            jit_settings: JITCompilationSettings::new()
+                .direct_translation(jit_direct_translation)
+                .optimization_level(jit_optimization_level),
         })
     }
 
@@ -6111,6 +6122,8 @@ impl PythonExpression {
         verbose = false,
         jit_compile = true,
         direct_translation = true,
+        jit_direct_translation = false,
+        jit_optimization_level = 3,
         max_horner_scheme_variables = 500,
         max_common_pair_cache_entries = 1_000_000,
         max_common_pair_distance = 100)
@@ -6126,6 +6139,8 @@ impl PythonExpression {
         verbose: bool,
         jit_compile: bool,
         direct_translation: bool,
+        jit_direct_translation: bool,
+        jit_optimization_level: u8,
         max_horner_scheme_variables: usize,
         max_common_pair_cache_entries: usize,
         max_common_pair_distance: usize,
@@ -6220,6 +6235,9 @@ impl PythonExpression {
             eval_arb_prec: None,
             eval_arb_prec_complex: None,
             jit_compile,
+            jit_settings: JITCompilationSettings::new()
+                .direct_translation(jit_direct_translation)
+                .optimization_level(jit_optimization_level),
         })
     }
 
