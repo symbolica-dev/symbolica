@@ -1316,7 +1316,7 @@ impl Workspace {
     #[inline]
     pub fn new_num<T: Into<Coefficient>>(&self, num: T) -> RecycledAtom {
         let mut owned = self.new_atom();
-        owned.to_num(num.into());
+        owned.to_num(num);
         owned
     }
 
@@ -1373,7 +1373,7 @@ impl RecycledAtom {
     #[inline]
     pub fn new_num<T: Into<Coefficient>>(num: T) -> RecycledAtom {
         let mut owned = Self::new();
-        owned.to_num(num.into());
+        owned.to_num(num);
         owned
     }
 

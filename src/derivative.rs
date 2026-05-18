@@ -41,7 +41,7 @@ impl AtomView<'_> {
         out: &mut Atom,
     ) -> bool {
         if x == self {
-            out.to_num(1.into());
+            out.to_num(1);
             return true;
         }
 
@@ -116,7 +116,7 @@ impl AtomView<'_> {
                         }
                         Symbol::LOG_ID => {
                             let mut n = workspace.new_atom();
-                            n.to_num((-1).into());
+                            n.to_num(-1);
 
                             fn_der.to_pow(f.iter().next().unwrap(), n.as_view());
                         }
@@ -126,7 +126,7 @@ impl AtomView<'_> {
                         }
                         Symbol::COS_ID => {
                             let mut n = workspace.new_atom();
-                            n.to_num((-1).into());
+                            n.to_num(-1);
 
                             let mut sin = workspace.new_atom();
                             let sin_fun = sin.to_fun(Symbol::SIN);
@@ -138,12 +138,12 @@ impl AtomView<'_> {
                         }
                         Symbol::SQRT_ID => {
                             let mut n = workspace.new_atom();
-                            n.to_num((-1, 1).into());
+                            n.to_num((-1, 1));
 
                             let mut sqrt = workspace.new_atom();
                             sqrt.to_pow(*self, n.as_view());
 
-                            n.to_num((1, 2).into());
+                            n.to_num((1, 2));
 
                             let m = fn_der.to_mul();
                             m.extend(n.as_view());
@@ -223,7 +223,7 @@ impl AtomView<'_> {
                         }
                     } else {
                         for i in 0..f.get_nargs() {
-                            n.to_num((if i == index { 1 } else { 0 }, 1).into());
+                            n.to_num((if i == index { 1 } else { 0 }, 1));
                             p.add_arg(n.as_view());
                         }
                     }
@@ -255,7 +255,7 @@ impl AtomView<'_> {
                 let base_der_non_zero = base.derivative_with_ws_into(x, workspace, &mut base_der);
 
                 if !exp_der_non_zero && !base_der_non_zero {
-                    out.to_num(0.into());
+                    out.to_num(0);
                     return false;
                 }
 
@@ -303,7 +303,7 @@ impl AtomView<'_> {
                     ao.extend(exp);
 
                     let mut min_one = workspace.new_atom();
-                    min_one.to_num((-1).into());
+                    min_one.to_num(-1);
 
                     ao.extend(min_one.as_view());
                 }
@@ -362,7 +362,7 @@ impl AtomView<'_> {
                     add_h.as_view().normalize(workspace, out);
                     true
                 } else {
-                    out.to_num(0.into());
+                    out.to_num(0);
                     false
                 }
             }
@@ -382,7 +382,7 @@ impl AtomView<'_> {
                     add_h.as_view().normalize(workspace, out);
                     true
                 } else {
-                    out.to_num(0.into());
+                    out.to_num(0);
                     false
                 }
             }
@@ -1025,7 +1025,7 @@ mod test {
                     && f.get_nargs() == 1
                     && f.iter().next().unwrap() == Atom::num(2).as_view()
                 {
-                    out.to_num(1.into());
+                    out.to_num(1);
                 }
             }
         );

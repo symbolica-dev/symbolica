@@ -804,12 +804,12 @@ impl Transformer {
                     if let AtomView::Fun(f) = cur_input {
                         if !*only_for_arg_fun || f.get_symbol_id() == Symbol::ARG_ID {
                             let n_args = f.get_nargs();
-                            out.to_num((n_args as i64).into());
+                            out.to_num(n_args as i64);
                         } else {
-                            out.to_num(1.into());
+                            out.to_num(1);
                         }
                     } else if !only_for_arg_fun {
-                        out.to_num(1.into());
+                        out.to_num(1);
                     } else {
                         out.to_num(Coefficient::zero());
                     }

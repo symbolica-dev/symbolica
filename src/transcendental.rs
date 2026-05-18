@@ -2785,7 +2785,7 @@ fn maybe_eval_unary_float_in_norm(
         return false;
     };
 
-    out.to_num(evaluator(&z, prec).into());
+    out.to_num(evaluator(&z, prec));
     true
 }
 
@@ -2797,7 +2797,7 @@ fn maybe_eval_polygamma_float_in_norm(order: u32, arg: AtomView, out: &mut Setta
         return false;
     };
 
-    out.to_num(polygamma_numeric_eval(order, &z, prec).into());
+    out.to_num(polygamma_numeric_eval(order, &z, prec));
     true
 }
 
@@ -2820,7 +2820,7 @@ fn maybe_eval_binary_float_in_norm(
     let Some(value) = evaluator(&lhs_float, &rhs_float, prec) else {
         return false;
     };
-    out.to_num(value.into());
+    out.to_num(value);
     true
 }
 

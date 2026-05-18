@@ -2058,6 +2058,10 @@ impl CoefficientView<'_> {
             CoefficientView::Infinity(Some((_, i))) => i.is_zero(),
         }
     }
+
+    pub fn is_float(&self) -> bool {
+        matches!(self, CoefficientView::Float(_, _))
+    }
 }
 
 impl PartialOrd for CoefficientView<'_> {
@@ -3080,7 +3084,7 @@ impl AtomView<'_> {
                     _ => {
                         if let Some(eval) = s.get_evaluation_info() {
                             if let Ok(v) = eval.evaluate_constant(&[], binary_prec) {
-                                out.to_num(v.into());
+                                out.to_num(v);
                                 return;
                             }
                         }
@@ -3108,7 +3112,7 @@ impl AtomView<'_> {
 
                     if arg_float.is_empty() {
                         if let Ok(result) = eval.evaluate_constant(&tags, binary_prec) {
-                            out.to_num(result.into());
+                            out.to_num(result);
                             return;
                         }
                     } else if binary_prec <= 54
@@ -3116,17 +3120,14 @@ impl AtomView<'_> {
                     {
                         let arg_double: Vec<_> = arg_float.iter().map(|x| x.to_f64()).collect();
                         let result = ev(&arg_double);
-                        out.to_num(
-                            Complex::new(
-                                Float::with_val(53, result.re),
-                                Float::with_val(53, result.im),
-                            )
-                            .into(),
-                        );
+                        out.to_num(Complex::new(
+                            Float::with_val(53, result.re),
+                            Float::with_val(53, result.im),
+                        ));
                         return;
                     } else if let Some(ev) = eval.get_evaluator::<Complex<Float>>(&tags) {
                         let result = ev(&arg_float);
-                        out.to_num(result.into());
+                        out.to_num(result);
                         return;
                     }
                 }

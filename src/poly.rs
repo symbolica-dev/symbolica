@@ -1881,7 +1881,7 @@ impl<E: Exponent, O: MonomialOrder> MultivariatePolynomial<AtomField, E, O> {
                 let pow = monomial.exponents[*i];
                 if pow != E::zero() {
                     if pow != E::one() {
-                        num_h.to_num((pow.to_i32() as i64).into());
+                        num_h.to_num(pow.to_i32());
                         pow_h.to_pow(var.as_view(), num_h.as_view());
                         mul.extend(pow_h.as_view());
                     } else {
@@ -1973,7 +1973,7 @@ impl<R: Ring, E: Exponent, O: MonomialOrder> MultivariatePolynomial<R, E, O> {
                 let pow = monomial.exponents[*i];
                 if pow != E::zero() {
                     if pow != E::one() {
-                        num_h.to_num((pow.to_i32() as i64).into());
+                        num_h.to_num(pow.to_i32());
                         pow_h.to_pow(var.as_view(), num_h.as_view());
                         mul.extend(pow_h.as_view());
                     } else {
@@ -2044,7 +2044,7 @@ impl<R: Ring, E: Exponent, O: MonomialOrder> MultivariatePolynomial<R, E, O> {
                     }
 
                     if pow != E::one() {
-                        num_h.to_num((pow.to_i32() as i64).into());
+                        num_h.to_num(pow.to_i32());
                         pow_h.to_pow(var_h.as_view(), num_h.as_view());
                         mul.extend(pow_h.as_view());
                     } else {

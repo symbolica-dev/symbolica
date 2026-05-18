@@ -2619,7 +2619,7 @@ impl Pattern {
     pub fn div(&self, rhs: &Self, workspace: &Workspace) -> Self {
         if let Pattern::Literal(l2) = rhs {
             let mut pow = workspace.new_atom();
-            pow.to_num((-1).into());
+            pow.to_num(-1);
 
             let mut e = workspace.new_atom();
             e.to_pow(l2.as_view(), pow.as_view());
@@ -2682,7 +2682,7 @@ impl Pattern {
             let a = e.to_mul();
 
             let mut sign = workspace.new_atom();
-            sign.to_num((-1).into());
+            sign.to_num(-1);
 
             a.extend(l1.as_view());
             a.extend(sign.as_view());

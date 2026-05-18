@@ -3896,7 +3896,8 @@ impl<'a> AtomView<'a> {
 
                     if let Some(eval_fun) = T::resolve_function(&tags, eval) {
                         let val = (eval_fun)(&args);
-                        cache.insert(*self, val);
+                        cache.insert(*self, val.clone());
+                        return Ok(val);
                     }
                 }
 
