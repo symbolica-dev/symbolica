@@ -316,6 +316,50 @@ self_cell!(
     }
 );
 
+#[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
+#[cfg_attr(feature = "bincode", derive(bincode::Encode, bincode::Decode))]
+#[derive(Debug, Clone)]
+/// The settings for JIT compilation.
+pub struct JITCompilationSettings {
+    /// Directly translate the Symbolica instructions to SymJIT IR, without performing any tree-based analysis.
+    direct_translation: bool,
+    /// The optimization level to use for JIT compilation.
+    optimization_level: u8,
+}
+
+impl Default for JITCompilationSettings {
+    fn default() -> Self {
+        Self {
+            direct_translation: false,
+            optimization_level: 3,
+        }
+    }
+}
+
+impl JITCompilationSettings {
+    /// Create JIT compilation settings with default values.
+    pub fn new() -> Self {
+        Self::default()
+    }
+
+    /// Directly translate the Symbolica instructions to SymJIT IR, without performing any tree-based analysis.
+    pub fn direct_translation(mut self, direct_translation: bool) -> Self {
+        self.direct_translation = direct_translation;
+        self
+    }
+
+    /// The optimization level to use for JIT compilation.
+    pub fn optimization_level(mut self, optimization_level: u8) -> Self {
+        self.optimization_level = optimization_level;
+        self
+    }
+
+    fn apply_to_config(&self, config: &mut Config) {
+        config.set_dicect(self.direct_translation);
+        config.set_opt_level(2);
+    }
+}
+
 impl ExpressionEvaluator<Complex<Rational>> {
     /// JIT-compiles the evaluator using SymJIT.
     ///
@@ -330,7 +374,7 @@ impl ExpressionEvaluator<Complex<Rational>> {
     /// let mut evaluator = parse!("x + y")
     ///     .evaluator(&FunctionMap::new(), &params, OptimizationSettings::default())
     ///     .unwrap()
-    ///     .jit_compile::<f64>()
+    ///     .jit_compile::<f64>(JITCompilationSettings::default())
     ///     .unwrap();
     ///
     /// let mut res = [0.];
@@ -338,6 +382,7 @@ impl ExpressionEvaluator<Complex<Rational>> {
     /// assert_eq!(res, [3.]);
     pub fn jit_compile<T: JITCompiledNumber + EvaluationDomain>(
         &self,
+        settings: JITCompilationSettings,
     ) -> Result<JITCompiledEvaluator<T>, String> {
         let (instructions, _, constants) = self.export_instructions();
         let constants = constants
@@ -360,7 +405,7 @@ impl ExpressionEvaluator<Complex<Rational>> {
                 Ok(mapped)
             })
             .collect::<Result<Vec<_>, _>>()?;
-        T::jit_compile(instructions, constants, &external_fns)
+        T::jit_compile(instructions, constants, &external_fns, settings)
     }
 }
 
@@ -376,13 +421,17 @@ impl<T: JITCompiledNumber + Clone> ExpressionEvaluator<T> {
     /// let mut evaluator = parse!("x + y")
     ///     .evaluator(&FunctionMap::new(), &params, OptimizationSettings::default())
     ///     .unwrap()
-    ///     .jit_compile::<f64>()
+    ///     .map_coeff(&|x| x.re.to_f64())
+    ///     .jit_compile(JITCompilationSettings::default())
     ///     .unwrap();
     ///
     /// let mut res = [0.];
     /// evaluator.evaluate(&[1., 2.], &mut res);
     /// assert_eq!(res, [3.]);
-    pub fn jit_compile(&self) -> Result<JITCompiledEvaluator<T>, String> {
+    pub fn jit_compile(
+        &self,
+        settings: JITCompilationSettings,
+    ) -> Result<JITCompiledEvaluator<T>, String> {
         let (instructions, _, constants) = self.export_instructions();
         let constants = constants
             .into_iter()
@@ -403,7 +452,7 @@ impl<T: JITCompiledNumber + Clone> ExpressionEvaluator<T> {
                 Ok(f.clone())
             })
             .collect::<Result<Vec<_>, _>>()?;
-        T::jit_compile(instructions, constants, &external_fns)
+        T::jit_compile(instructions, constants, &external_fns, settings)
     }
 }
 
@@ -489,6 +538,7 @@ pub trait JITCompiledNumber: Sized {
         instructions: Vec<Instruction>,
         constants: Vec<symjit::Complex<f64>>,
         external_functions: &[ExternalFunctionContainer<Self>],
+        settings: JITCompilationSettings,
     ) -> Result<JITCompiledEvaluator<Self>, String>;
 
     fn evaluate(eval: &mut JITCompiledEvaluator<Self>, args: &[Self], out: &mut [Self]);
@@ -530,6 +580,7 @@ impl JITCompiledNumber for f64 {
         instructions: Vec<Instruction>,
         constants: Vec<symjit::Complex<f64>>,
         external_functions: &[ExternalFunctionContainer<f64>],
+        settings: JITCompilationSettings,
     ) -> Result<JITCompiledEvaluator<Self>, String> {
         if constants.iter().any(|x| x.im != 0.) {
             return Err("complex constants are not supported for f64 JIT export".to_string());
@@ -538,6 +589,7 @@ impl JITCompiledNumber for f64 {
         let mut config = Config::default();
         config.set_complex(false);
         config.set_simd(false);
+        settings.apply_to_config(&mut config);
         config.set_defuns(Self::convert_external_functions(external_functions)?);
 
         let mut translator = translate_to_symjit(instructions, constants, config)?;
@@ -731,10 +783,12 @@ impl JITCompiledNumber for wide::f64x4 {
         instructions: Vec<Instruction>,
         constants: Vec<symjit::Complex<f64>>,
         external_functions: &[ExternalFunctionContainer<Self>],
+        settings: JITCompilationSettings,
     ) -> Result<JITCompiledEvaluator<Self>, String> {
         let mut config = Config::default();
         config.set_complex(false);
         config.set_simd(true);
+        settings.apply_to_config(&mut config);
         config.set_defuns(Self::convert_external_functions(external_functions)?);
 
         let mut translator = translate_to_symjit(instructions, constants, config)?;
@@ -895,10 +949,12 @@ impl JITCompiledNumber for Complex<f64> {
         instructions: Vec<Instruction>,
         constants: Vec<symjit::Complex<f64>>,
         external_functions: &[ExternalFunctionContainer<Self>],
+        settings: JITCompilationSettings,
     ) -> Result<JITCompiledEvaluator<Complex<f64>>, String> {
         let mut config = Config::default();
         config.set_complex(true);
         config.set_simd(false);
+        settings.apply_to_config(&mut config);
         config.set_defuns(Self::convert_external_functions(external_functions)?);
 
         let mut translator = translate_to_symjit(instructions, constants, config)?;
@@ -1015,10 +1071,12 @@ impl JITCompiledNumber for Complex<wide::f64x4> {
         instructions: Vec<Instruction>,
         constants: Vec<symjit::Complex<f64>>,
         external_functions: &[ExternalFunctionContainer<Self>],
+        settings: JITCompilationSettings,
     ) -> Result<JITCompiledEvaluator<Self>, String> {
         let mut config = Config::default();
         config.set_complex(true);
         config.set_simd(true);
+        settings.apply_to_config(&mut config);
         config.set_defuns(Self::convert_external_functions(external_functions)?);
 
         let mut translator = translate_to_symjit(instructions, constants, config)?;

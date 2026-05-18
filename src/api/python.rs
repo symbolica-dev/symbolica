@@ -83,8 +83,8 @@ use crate::{
         CompiledCudaRealEvaluator, CompiledNumber, CompiledRealEvaluator,
         CompiledSimdComplexEvaluator, CompiledSimdRealEvaluator, ComplexEvaluatorSettings,
         CudaComplexf64, CudaLoadSettings, CudaRealf64, Dualizer, EvaluatorLoader, ExportSettings,
-        ExpressionEvaluator, FunctionMap, InlineASM, Instruction, JITCompiledEvaluator,
-        OptimizationSettings, Slot,
+        ExpressionEvaluator, FunctionMap, InlineASM, Instruction, JITCompilationSettings,
+        JITCompiledEvaluator, OptimizationSettings, Slot,
     },
     graph::{GenerationSettings, Graph, HalfEdge},
     id::{
