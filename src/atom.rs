@@ -2226,6 +2226,13 @@ impl From<Symbol> for Atom {
     }
 }
 
+impl From<&Symbol> for Atom {
+    /// Convert a symbol to an atom. This will allocate memory.
+    fn from(symbol: &Symbol) -> Atom {
+        Atom::var(*symbol)
+    }
+}
+
 impl From<AtomView<'_>> for Atom {
     /// Convert an `AtomView` to an atom. This will allocate memory.
     fn from(view: AtomView) -> Atom {
@@ -2658,6 +2665,16 @@ impl Atom {
     /// The imaginary unit.
     pub fn i() -> Atom {
         Atom::num(Complex::<Rational>::new_i())
+    }
+
+    /// The zero atom.
+    pub fn zero() -> Atom {
+        Atom::Zero
+    }
+
+    /// The one atom.
+    pub fn one() -> Atom {
+        Atom::num(1)
     }
 }
 
@@ -4026,7 +4043,10 @@ impl AsRef<Atom> for Atom {
 
 #[cfg(test)]
 mod test {
-    use crate::atom::{Atom, AtomCore, Symbol, UserData};
+    use crate::{
+        atom::{Atom, AtomCore, Symbol, UserData},
+        domains::{integer::Integer, rational::Rational},
+    };
 
     use super::FunctionBuilder;
 
@@ -4120,6 +4140,66 @@ mod test {
         assert_eq!(x.call((1, 2, 3, y)), function!(x, 1, 2, 3, y));
         assert_eq!(x.call_args([1, 2, 3]), function!(x, 1, 2, 3));
         assert_eq!(x.call_args(1..=3), function!(x, 1, 2, 3));
+    }
+
+    #[test]
+    fn arithmetic_combinations() {
+        let (x, y) = symbol!("x", "y");
+        let xa = Atom::from(x);
+        let ya = Atom::from(y);
+
+        assert_eq!(&xa + y, parse!("x+y"));
+        assert_eq!(&xa - y, parse!("x-y"));
+        assert_eq!(&xa * y, parse!("x*y"));
+        assert_eq!(&xa / y, parse!("x/y"));
+
+        assert_eq!(xa.as_view() + y, parse!("x+y"));
+        assert_eq!(xa.as_view() - y, parse!("x-y"));
+        assert_eq!(xa.as_view() * y, parse!("x*y"));
+        assert_eq!(xa.as_view() / y, parse!("x/y"));
+
+        assert_eq!(x + ya.clone(), parse!("x+y"));
+        assert_eq!(x - ya.clone(), parse!("x-y"));
+        assert_eq!(x * ya.clone(), parse!("x*y"));
+        assert_eq!(x / ya.clone(), parse!("x/y"));
+
+        assert_eq!(x + &ya, parse!("x+y"));
+        assert_eq!(x - &ya, parse!("x-y"));
+        assert_eq!(x * &ya, parse!("x*y"));
+        assert_eq!(x / &ya, parse!("x/y"));
+
+        assert_eq!(x + ya.as_view(), parse!("x+y"));
+        assert_eq!(x - ya.as_view(), parse!("x-y"));
+        assert_eq!(x * ya.as_view(), parse!("x*y"));
+        assert_eq!(x / ya.as_view(), parse!("x/y"));
+
+        assert_eq!(x + 2, parse!("x+2"));
+        assert_eq!(x - 2, parse!("x-2"));
+        assert_eq!(x * 2, parse!("2*x"));
+        assert_eq!(x / 2, parse!("x/2"));
+        assert_eq!(&xa + 2, parse!("x+2"));
+        assert_eq!(&xa - 2, parse!("x-2"));
+        assert_eq!(&xa * 2, parse!("2*x"));
+        assert_eq!(&xa / 2, parse!("x/2"));
+
+        assert_eq!(2 + x, parse!("x+2"));
+        assert_eq!(2 - x, parse!("2-x"));
+        assert_eq!(x * y, parse!("x*y"));
+        assert_eq!(2 * x, parse!("2*x"));
+        assert_eq!(2 / x, parse!("2/x"));
+        assert_eq!(2 + x, parse!("x+2"));
+        assert_eq!(2 - &xa, parse!("2-x"));
+        assert_eq!(2 * &xa, parse!("2*x"));
+        assert_eq!(2 / &xa, parse!("2/x"));
+
+        assert_eq!(Integer::from(2) * xa.as_view(), parse!("2*x"));
+        assert_eq!(Rational::from((2, 3)) * xa.as_view(), parse!("2/3*x"));
+        assert_eq!(Integer::from(2) * xa.clone(), parse!("2*x"));
+        assert_eq!(Rational::from((2, 3)) * xa.clone(), parse!("2/3*x"));
+
+        let mut a = Atom::from(x);
+        a += y;
+        assert_eq!(a, parse!("x+y"));
     }
 
     #[test]
