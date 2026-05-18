@@ -823,6 +823,7 @@ pub trait AtomCore: private::Sealed + Sized {
     /// # Example
     ///
     /// ```
+    /// # use ahash::HashMap;
     /// use symbolica::prelude::*;
     /// let expr = parse!("x + y");
     /// let x = parse!("x");
@@ -851,6 +852,7 @@ pub trait AtomCore: private::Sealed + Sized {
     /// # Example
     ///
     /// ```
+    /// # use ahash::HashMap;
     /// use symbolica::prelude::*;
     /// let expr = parse!("2x");
     /// let x = parse!("x");

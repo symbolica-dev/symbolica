@@ -123,7 +123,7 @@ pub mod prelude {
         CompiledRealEvaluator, CompiledSimdComplexEvaluator, CompiledSimdRealEvaluator, Dualizer,
         EvaluationDomain, EvaluationFn, EvaluatorLoader, ExportNumber, ExportSettings,
         ExportedCode, ExpressionEvaluator, ExternalFunction, FunctionMap, InlineASM,
-        OptimizationSettings, Vectorize,
+        JITCompilationSettings, OptimizationSettings, Vectorize,
     };
 
     pub use crate::id::{

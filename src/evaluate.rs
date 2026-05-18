@@ -79,7 +79,10 @@ mod test {
             float::{Complex, Float, FloatLike},
             rational::Rational,
         },
-        evaluate::{Dualizer, ExportSettings, FunctionMap, Instruction, OptimizationSettings},
+        evaluate::{
+            Dualizer, ExportSettings, FunctionMap, Instruction, JITCompilationSettings,
+            OptimizationSettings,
+        },
         id::ConditionResult,
         parse, symbol,
     };
@@ -119,7 +122,9 @@ mod test {
         r_f64.evaluate(&[0.1], &mut res);
         assert_eq!(res[0], 0.2727397524895022);
 
-        let mut jit_compiled = r_f64.jit_compile().unwrap();
+        let mut jit_compiled = r_f64
+            .jit_compile(JITCompilationSettings::default())
+            .unwrap();
 
         jit_compiled.evaluate(&[0.1], &mut res);
         assert_eq!(res[0], 0.2727397524895022);
@@ -381,7 +386,13 @@ mod test {
         let mut eval_re = eval.clone().map_coeff(&|x| x.re.to_f64());
         eval_re.evaluate(&[0.5], &mut res);
 
-        let mut jit_eval_re = eval_re.jit_compile().unwrap();
+        let mut jit_eval_re = eval_re
+            .jit_compile(
+                JITCompilationSettings::new()
+                    .direct_translation(true)
+                    .optimization_level(2),
+            )
+            .unwrap();
 
         let mut jit_res = [0.; 1];
         jit_eval_re.evaluate(&[0.5], &mut jit_res);
@@ -393,7 +404,9 @@ mod test {
             .map_coeff(&|x| Complex::new(x.re.to_f64(), x.im.to_f64()));
         eval_c.evaluate(&[Complex::new(0.5, 1.2)], &mut res);
 
-        let mut jit_eval_c = eval.jit_compile::<Complex<f64>>().unwrap();
+        let mut jit_eval_c = eval
+            .jit_compile::<Complex<f64>>(JITCompilationSettings::default())
+            .unwrap();
         let mut jit_res = [Complex::new(0., 0.); 1];
         jit_eval_c.evaluate(&[Complex::new(0.5, 1.2)], &mut jit_res);
         assert_eq!(res[0], jit_res[0]);

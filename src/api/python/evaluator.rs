@@ -15,6 +15,7 @@ pub struct PythonExpressionEvaluator {
     pub eval_arb_prec: Option<(u32, ExpressionEvaluator<Float>)>,
     pub eval_arb_prec_complex: Option<(u32, ExpressionEvaluator<Complex<Float>>)>,
     pub jit_compile: bool,
+    pub jit_settings: JITCompilationSettings,
 }
 
 impl PythonExpressionEvaluator {
@@ -153,26 +154,81 @@ impl PythonExpressionEvaluator {
             eval_arb_prec: self.eval_arb_prec.clone(),
             eval_arb_prec_complex: self.eval_arb_prec_complex.clone(),
             jit_compile: self.jit_compile.clone(),
+            jit_settings: self.jit_settings.clone(),
         }
     }
 
-    /// Set whether to use JIT compilation.
-    fn jit_compile(&mut self, jit_compile: bool) {
+    /// Set whether to use JIT compilation, optionally updating the JIT settings.
+    #[pyo3(signature = (jit_compile, direct_translation = None, optimization_level = None))]
+    fn jit_compile(
+        &mut self,
+        jit_compile: bool,
+        direct_translation: Option<bool>,
+        optimization_level: Option<u8>,
+    ) {
         self.jit_compile = jit_compile;
+
+        if let Some(direct_translation) = direct_translation {
+            self.jit_settings = self
+                .jit_settings
+                .clone()
+                .direct_translation(direct_translation);
+            self.jit_real = None;
+            self.jit_complex = None;
+        }
+
+        if let Some(optimization_level) = optimization_level {
+            self.jit_settings = self
+                .jit_settings
+                .clone()
+                .optimization_level(optimization_level);
+            self.jit_real = None;
+            self.jit_complex = None;
+        }
     }
 
     /// Import an exported evaluator from another thread or machine.
     /// Use `save` to export the evaluator.
     #[classmethod]
     fn load(_cls: &Bound<'_, PyType>, evaluator: Bound<'_, PyBytes>) -> PyResult<Self> {
-        let (jit_compile, eval, jit_real, jit_complex): (
+        type SavedEvaluator = (
+            bool,
+            JITCompilationSettings,
+            ExpressionEvaluator<Complex<Rational>>,
+            Option<JITCompiledEvaluator<f64>>,
+            Option<JITCompiledEvaluator<Complex<f64>>>,
+        );
+        type LegacySavedEvaluator = (
             bool,
             ExpressionEvaluator<Complex<Rational>>,
             Option<JITCompiledEvaluator<f64>>,
             Option<JITCompiledEvaluator<Complex<f64>>>,
-        ) = bincode::decode_from_slice(evaluator.extract()?, bincode::config::standard())
-            .map_err(|e| pyo3::exceptions::PyIOError::new_err(e.to_string()))?
-            .0;
+        );
+
+        let bytes: &[u8] = evaluator.extract()?;
+        let (jit_compile, jit_settings, eval, jit_real, jit_complex) =
+            match bincode::decode_from_slice::<SavedEvaluator, _>(
+                bytes,
+                bincode::config::standard(),
+            ) {
+                Ok((decoded, _)) => decoded,
+                Err(new_err) => {
+                    let (jit_compile, eval, jit_real, jit_complex) =
+                        bincode::decode_from_slice::<LegacySavedEvaluator, _>(
+                            bytes,
+                            bincode::config::standard(),
+                        )
+                        .map_err(|_| pyo3::exceptions::PyIOError::new_err(new_err.to_string()))?
+                        .0;
+                    (
+                        jit_compile,
+                        JITCompilationSettings::default(),
+                        eval,
+                        jit_real,
+                        jit_complex,
+                    )
+                }
+            };
 
         Ok(PythonExpressionEvaluator {
             rational_constants: eval.get_constants().to_vec(),
@@ -185,6 +241,7 @@ impl PythonExpressionEvaluator {
             eval_arb_prec: None,
             eval_arb_prec_complex: None,
             jit_compile,
+            jit_settings,
         })
     }
 
@@ -195,6 +252,7 @@ impl PythonExpressionEvaluator {
         bincode::encode_to_vec(
             &(
                 self.jit_compile,
+                self.jit_settings.clone(),
                 self.eval_complex
                     .clone()
                     .set_coeff(&self.rational_constants),
@@ -485,7 +543,7 @@ impl PythonExpressionEvaluator {
             if self.jit_compile {
                 self.jit_real = Some(
                     real_eval
-                        .jit_compile()
+                        .jit_compile(self.jit_settings.clone())
                         .map_err(|e| exceptions::PyValueError::new_err(e.to_string()))?,
                 );
             } else {
@@ -610,7 +668,7 @@ impl PythonExpressionEvaluator {
         if self.jit_compile && self.jit_complex.is_none() {
             self.jit_complex = Some(
                 self.eval_complex
-                    .jit_compile()
+                    .jit_compile(self.jit_settings.clone())
                     .map_err(|e| exceptions::PyValueError::new_err(e.to_string()))?,
             );
         }
