@@ -49,7 +49,7 @@ use smartstring::{LazyCompact, SmartString};
 
 use crate::{
     coefficient::Coefficient,
-    domains::{atom::AtomField, float::Complex, rational::Rational},
+    domains::{atom::AtomField, float::Complex, integer::Integer, rational::Rational},
     evaluate::ExternalFunction,
     parser::{ParseSettings, Token},
     poly::series::Series,
@@ -1132,6 +1132,47 @@ impl Symbol {
     /// Create a new variable from the symbol.
     pub fn to_atom(self) -> Atom {
         Atom::var(self)
+    }
+
+    /// Create a new function from the symbol.
+    ///
+    /// Multiple arguments are passed as a tuple.
+    /// For arguments from an iterator, use [Symbol::call_args].
+    ///
+    /// # Examples
+    ///
+    /// ```
+    /// use symbolica::prelude::*;
+    ///
+    /// let (x, y) = symbol!("x", "y");
+    /// let f = x.call(3);
+    /// assert_eq!(f, function!(x, 3));
+    ///
+    /// let f = x.call((1, 2, 3, y));
+    /// assert_eq!(f, function!(x, 1, 2, 3, y));
+    /// ```
+    pub fn call<A: FunctionArguments>(self, args: A) -> Atom {
+        args.add_args_to_function_builder(FunctionBuilder::new(self))
+            .finish()
+    }
+
+    /// Create a new function from the symbol with arguments from an iterator.
+    ///
+    /// # Examples
+    ///
+    /// ```
+    /// use symbolica::prelude::*;
+    ///
+    /// let x = symbol!("x");
+    /// let f = x.call_args([1, 2, 3]);
+    /// assert_eq!(f, function!(x, 1, 2, 3));
+    /// ```
+    pub fn call_args<'a, I, T>(self, args: I) -> Atom
+    where
+        I: IntoIterator<Item = T>,
+        T: Into<AtomOrView<'a>>,
+    {
+        FunctionBuilder::new(self).add_args(args).finish()
     }
 
     /// Get the name of the symbol, which includes its namespace.
@@ -3037,6 +3078,155 @@ pub trait FunctionArgument {
     fn add_arg_to_function_builder(&self, f: FunctionBuilder) -> FunctionBuilder;
 }
 
+/// A trait that allows to add multiple arguments to a function builder.
+pub trait FunctionArguments {
+    fn add_args_to_function_builder(self, f: FunctionBuilder) -> FunctionBuilder;
+}
+
+impl FunctionArguments for () {
+    fn add_args_to_function_builder(self, f: FunctionBuilder) -> FunctionBuilder {
+        f
+    }
+}
+
+macro_rules! impl_single_function_arguments {
+    ($($ty:ty),+ $(,)?) => {
+        $(
+            impl FunctionArguments for $ty {
+                fn add_args_to_function_builder(self, f: FunctionBuilder) -> FunctionBuilder {
+                    <$ty as FunctionArgument>::add_arg_to_function_builder(&self, f)
+                }
+            }
+        )+
+    };
+}
+
+// explicit list required, since x.call((1, 2)) can mean x(1,2) or x(1/2)
+impl_single_function_arguments!(
+    Atom,
+    &Atom,
+    &mut Atom,
+    AtomView<'_>,
+    &AtomView<'_>,
+    Symbol,
+    &Symbol,
+    Coefficient,
+    &Coefficient,
+    Integer,
+    Rational,
+    Float,
+    Complex<Rational>,
+    Complex<Float>,
+    i8,
+    &i8,
+    i16,
+    &i16,
+    i32,
+    &i32,
+    i64,
+    &i64,
+    i128,
+    &i128,
+    isize,
+    &isize,
+    u8,
+    &u8,
+    u16,
+    &u16,
+    u32,
+    &u32,
+    u64,
+    &u64,
+    u128,
+    &u128,
+    usize,
+    &usize,
+    f64,
+    &f64,
+);
+
+macro_rules! impl_function_arguments {
+    ($(($ty:ident, $var:ident)),+) => {
+        impl<$($ty: FunctionArgument),+> FunctionArguments for ($($ty,)+) {
+            fn add_args_to_function_builder(self, f: FunctionBuilder) -> FunctionBuilder {
+                let ($($var,)+) = self;
+                $(
+                    let f = FunctionArgument::add_arg_to_function_builder(&$var, f);
+                )+
+                f
+            }
+        }
+    };
+}
+
+impl_function_arguments!((A, a));
+impl_function_arguments!((A, a), (B, b));
+impl_function_arguments!((A, a), (B, b), (C, c));
+impl_function_arguments!((A, a), (B, b), (C, c), (D, d));
+impl_function_arguments!((A, a), (B, b), (C, c), (D, d), (E, e));
+impl_function_arguments!((A, a), (B, b), (C, c), (D, d), (E, e), (F, f));
+impl_function_arguments!((A, a), (B, b), (C, c), (D, d), (E, e), (F, f), (G, g));
+impl_function_arguments!(
+    (A, a),
+    (B, b),
+    (C, c),
+    (D, d),
+    (E, e),
+    (F, f),
+    (G, g),
+    (H, h)
+);
+impl_function_arguments!(
+    (A, a),
+    (B, b),
+    (C, c),
+    (D, d),
+    (E, e),
+    (F, f),
+    (G, g),
+    (H, h),
+    (I, i)
+);
+impl_function_arguments!(
+    (A, a),
+    (B, b),
+    (C, c),
+    (D, d),
+    (E, e),
+    (F, f),
+    (G, g),
+    (H, h),
+    (I, i),
+    (J, j)
+);
+impl_function_arguments!(
+    (A, a),
+    (B, b),
+    (C, c),
+    (D, d),
+    (E, e),
+    (F, f),
+    (G, g),
+    (H, h),
+    (I, i),
+    (J, j),
+    (K, k)
+);
+impl_function_arguments!(
+    (A, a),
+    (B, b),
+    (C, c),
+    (D, d),
+    (E, e),
+    (F, f),
+    (G, g),
+    (H, h),
+    (I, i),
+    (J, j),
+    (K, k),
+    (L, l)
+);
+
 impl FunctionArgument for Atom {
     fn add_arg_to_function_builder(&self, f: FunctionBuilder) -> FunctionBuilder {
         f.add_arg(self.as_view())
@@ -3070,6 +3260,13 @@ impl FunctionArgument for &AtomView<'_> {
 impl FunctionArgument for Symbol {
     fn add_arg_to_function_builder(&self, f: FunctionBuilder) -> FunctionBuilder {
         let t = InlineVar::new(*self);
+        f.add_arg(t.as_view())
+    }
+}
+
+impl FunctionArgument for &Symbol {
+    fn add_arg_to_function_builder(&self, f: FunctionBuilder) -> FunctionBuilder {
+        let t = InlineVar::new(**self);
         f.add_arg(t.as_view())
     }
 }
@@ -3911,6 +4108,18 @@ mod test {
             .add_arg(parse!("a"))
             .add_arg(parse!("a").as_view())
             .finish();
+    }
+
+    #[test]
+    fn call_symbol_as_function() {
+        let (x, y) = symbol!("x", "y");
+
+        assert_eq!(x.call(()), function!(x));
+        assert_eq!(x.call(3), function!(x, 3));
+        assert_eq!(x.call(y), function!(x, y));
+        assert_eq!(x.call((1, 2, 3, y)), function!(x, 1, 2, 3, y));
+        assert_eq!(x.call_args([1, 2, 3]), function!(x, 1, 2, 3));
+        assert_eq!(x.call_args(1..=3), function!(x, 1, 2, 3));
     }
 
     #[test]
