@@ -542,6 +542,13 @@ pub trait JITCompiledNumber: Sized {
     ) -> Result<JITCompiledEvaluator<Self>, String>;
 
     fn evaluate(eval: &mut JITCompiledEvaluator<Self>, args: &[Self], out: &mut [Self]);
+
+    fn batch_evaluate(
+        eval: &mut JITCompiledEvaluator<Self>,
+        args: &[Self],
+        out: &mut [Self],
+        rows: usize,
+    );
 }
 
 impl JITCompiledNumber for f64 {
@@ -610,6 +617,16 @@ impl JITCompiledNumber for f64 {
     #[inline(always)]
     fn evaluate(eval: &mut JITCompiledEvaluator<Self>, args: &[Self], out: &mut [Self]) {
         eval.code.evaluate(args, out);
+    }
+
+    #[inline(always)]
+    fn batch_evaluate(
+        eval: &mut JITCompiledEvaluator<Self>,
+        args: &[Self],
+        out: &mut [Self],
+        rows: usize,
+    ) {
+        eval.code.evaluate_matrix(args, out, rows);
     }
 }
 
@@ -685,6 +702,11 @@ impl<T: JITCompiledNumber> JITCompiledEvaluator<T> {
     pub fn evaluate(&mut self, args: &[T], out: &mut [T]) {
         T::evaluate(self, args, out);
     }
+
+    #[inline(always)]
+    pub fn batch_evaluate(&mut self, args: &[T], out: &mut [T], rows: usize) {
+        T::batch_evaluate(self, args, out, rows);
+    }
 }
 
 impl<T: JITCompiledNumber> JITCompiledEvaluator<T> {
@@ -732,12 +754,7 @@ impl BatchEvaluator<f64> for JITCompiledEvaluator<f64> {
             ));
         }
 
-        let n_params = params.len() / batch_size;
-        let n_out = out.len() / batch_size;
-        for (o, i) in out.chunks_mut(n_out).zip(params.chunks(n_params)) {
-            self.evaluate(i, o);
-        }
-
+        self.batch_evaluate(params, out, batch_size);
         Ok(())
     }
 }
@@ -813,6 +830,16 @@ impl JITCompiledNumber for wide::f64x4 {
         out: &mut [wide::f64x4],
     ) {
         eval.code.evaluate(args, out);
+    }
+
+    #[inline(always)]
+    fn batch_evaluate(
+        eval: &mut JITCompiledEvaluator<Self>,
+        args: &[Self],
+        out: &mut [Self],
+        rows: usize,
+    ) {
+        eval.code.evaluate_matrix(args, out, rows);
     }
 }
 
@@ -983,6 +1010,18 @@ impl JITCompiledNumber for Complex<f64> {
         let out: &mut [symjit::Complex<f64>] = unsafe { std::mem::transmute(out) };
         eval.code.evaluate(args, out);
     }
+
+    #[inline(always)]
+    fn batch_evaluate(
+        eval: &mut JITCompiledEvaluator<Self>,
+        args: &[Self],
+        out: &mut [Self],
+        rows: usize,
+    ) {
+        let args: &[symjit::Complex<f64>] = unsafe { std::mem::transmute(args) };
+        let out: &mut [symjit::Complex<f64>] = unsafe { std::mem::transmute(out) };
+        eval.code.evaluate_matrix(args, out, rows);
+    }
 }
 
 impl BatchEvaluator<Complex<f64>> for JITCompiledEvaluator<Complex<f64>> {
@@ -1007,12 +1046,7 @@ impl BatchEvaluator<Complex<f64>> for JITCompiledEvaluator<Complex<f64>> {
             ));
         }
 
-        let n_params = params.len() / batch_size;
-        let n_out = out.len() / batch_size;
-        for (o, i) in out.chunks_mut(n_out).zip(params.chunks(n_params)) {
-            self.evaluate(i, o);
-        }
-
+        self.batch_evaluate(params, out, batch_size);
         Ok(())
     }
 }
@@ -1102,8 +1136,19 @@ impl JITCompiledNumber for Complex<wide::f64x4> {
     ) {
         let args: &[symjit::Complex<wide::f64x4>] = unsafe { std::mem::transmute(args) };
         let out: &mut [symjit::Complex<wide::f64x4>] = unsafe { std::mem::transmute(out) };
-
         eval.code.evaluate(args, out);
+    }
+
+    #[inline(always)]
+    fn batch_evaluate(
+        eval: &mut JITCompiledEvaluator<Self>,
+        args: &[Self],
+        out: &mut [Self],
+        rows: usize,
+    ) {
+        let args: &[symjit::Complex<wide::f64x4>] = unsafe { std::mem::transmute(args) };
+        let out: &mut [symjit::Complex<wide::f64x4>] = unsafe { std::mem::transmute(out) };
+        eval.code.evaluate_matrix(args, out, rows);
     }
 }
 

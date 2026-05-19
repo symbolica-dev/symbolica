@@ -557,18 +557,33 @@ impl PythonExpressionEvaluator {
         )?;
 
         let n_inputs = arr.shape()[0];
+        let arr = if self.jit_compile && n_inputs > 1 && !arr.is_standard_layout() {
+            CowArray::from(arr.as_standard_layout().into_owned())
+        } else {
+            arr
+        };
         let mut out = ArrayD::zeros(&[n_inputs, self.eval_complex.get_output_len()][..]);
 
         if self.jit_compile {
             let eval = self.jit_real.as_mut().unwrap();
 
-            for (i, mut o) in arr.axis_iter(Axis(0)).zip(out.axis_iter_mut(Axis(0))) {
-                eval.evaluate(
-                    i.as_slice().ok_or_else(|| {
+            if n_inputs > 1 {
+                eval.batch_evaluate(
+                    arr.as_slice().ok_or_else(|| {
                         exceptions::PyValueError::new_err("Failed to convert input to slice")
                     })?,
-                    o.as_slice_mut().unwrap(),
+                    out.as_slice_mut().unwrap(),
+                    n_inputs,
                 );
+            } else {
+                for (i, mut o) in arr.axis_iter(Axis(0)).zip(out.axis_iter_mut(Axis(0))) {
+                    eval.evaluate(
+                        i.as_slice().ok_or_else(|| {
+                            exceptions::PyValueError::new_err("Failed to convert input to slice")
+                        })?,
+                        o.as_slice_mut().unwrap(),
+                    );
+                }
             }
         } else {
             let eval = self.eval_real.as_mut().unwrap();
@@ -679,22 +694,40 @@ impl PythonExpressionEvaluator {
         )?;
 
         let n_inputs = arr.shape()[0];
+        let arr = if self.jit_compile && n_inputs > 1 && !arr.is_standard_layout() {
+            CowArray::from(arr.as_standard_layout().into_owned())
+        } else {
+            arr
+        };
         let mut out = ArrayD::zeros(&[n_inputs, self.eval_complex.get_output_len()][..]);
 
         if self.jit_compile {
             let eval = self.jit_complex.as_mut().unwrap();
 
-            for (i, mut o) in arr.axis_iter(Axis(0)).zip(out.axis_iter_mut(Axis(0))) {
+            if n_inputs > 1 {
                 let sc = unsafe {
-                    std::mem::transmute::<&[Complex64], &[Complex<f64>]>(i.as_slice().unwrap())
+                    std::mem::transmute::<&[Complex64], &[Complex<f64>]>(arr.as_slice().unwrap())
                 };
                 let os = unsafe {
                     std::mem::transmute::<&mut [Complex64], &mut [Complex<f64>]>(
-                        o.as_slice_mut().unwrap(),
+                        out.as_slice_mut().unwrap(),
                     )
                 };
 
-                eval.evaluate(sc, os);
+                eval.batch_evaluate(sc, os, n_inputs);
+            } else {
+                for (i, mut o) in arr.axis_iter(Axis(0)).zip(out.axis_iter_mut(Axis(0))) {
+                    let sc = unsafe {
+                        std::mem::transmute::<&[Complex64], &[Complex<f64>]>(i.as_slice().unwrap())
+                    };
+                    let os = unsafe {
+                        std::mem::transmute::<&mut [Complex64], &mut [Complex<f64>]>(
+                            o.as_slice_mut().unwrap(),
+                        )
+                    };
+
+                    eval.evaluate(sc, os);
+                }
             }
         } else {
             for (i, mut o) in arr.axis_iter(Axis(0)).zip(out.axis_iter_mut(Axis(0))) {
@@ -853,6 +886,7 @@ impl PythonExpressionEvaluator {
         powf_real: bool,
         verbose: bool,
     ) -> PyResult<()> {
+        self.jit_complex = None; // force a recompilation
         self.eval_complex
             .set_real_params(
                 &real_params,
