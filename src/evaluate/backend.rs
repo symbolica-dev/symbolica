@@ -372,7 +372,8 @@ impl ExpressionEvaluator<Complex<Rational>> {
     /// # use symbolica::prelude::*;
     /// let params = vec![parse!("x"), parse!("y")];
     /// let mut evaluator = parse!("x + y")
-    ///     .evaluator(&FunctionMap::new(), &params, OptimizationSettings::default())
+    ///     .evaluator(&params)
+    ///     .build()
     ///     .unwrap()
     ///     .jit_compile::<f64>(JITCompilationSettings::default())
     ///     .unwrap();
@@ -419,7 +420,8 @@ impl<T: JITCompiledNumber + Clone> ExpressionEvaluator<T> {
     /// # use symbolica::prelude::*;
     /// let params = vec![parse!("x"), parse!("y")];
     /// let mut evaluator = parse!("x + y")
-    ///     .evaluator(&FunctionMap::new(), &params, OptimizationSettings::default())
+    ///     .evaluator(&params)
+    ///     .build()
     ///     .unwrap()
     ///     .map_coeff(&|x| x.re.to_f64())
     ///     .jit_compile(JITCompilationSettings::default())

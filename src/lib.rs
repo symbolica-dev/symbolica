@@ -121,9 +121,9 @@ pub mod prelude {
     pub use crate::evaluate::{
         BatchEvaluator, CompileOptions, CompiledCode, CompiledComplexEvaluator, CompiledNumber,
         CompiledRealEvaluator, CompiledSimdComplexEvaluator, CompiledSimdRealEvaluator, Dualizer,
-        EvaluationDomain, EvaluationFn, EvaluatorLoader, ExportNumber, ExportSettings,
-        ExportedCode, ExpressionEvaluator, ExternalFunction, FunctionMap, InlineASM,
-        JITCompilationSettings, OptimizationSettings, Vectorize,
+        EvaluationDomain, EvaluationFn, EvaluatorBuilder, EvaluatorLoader, ExportNumber,
+        ExportSettings, ExportedCode, ExpressionEvaluator, ExternalFunction, FunctionMap,
+        InlineASM, JITCompilationSettings, OptimizationSettings, Vectorize,
     };
 
     pub use crate::id::{

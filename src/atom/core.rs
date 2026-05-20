@@ -17,22 +17,20 @@ use crate::{
         factorized_rational_polynomial::{
             FactorizedRationalPolynomial, FromNumeratorAndFactorizedDenominator,
         },
-        float::{Complex, FixedPrecision, Real, SingleFloat},
+        float::{FixedPrecision, Real, SingleFloat},
         integer::Z,
         rational::Rational,
         rational_polynomial::{
             FromNumeratorAndDenominator, RationalPolynomial, RationalPolynomialField,
         },
     },
-    evaluate::{
-        EvalTree, EvaluationDomain, ExpressionEvaluator, FunctionMap, OptimizationSettings,
-    },
+    evaluate::{EvaluationDomain, EvaluatorBuilder},
     id::{
         AliasedAtom, BorrowReplacement, Condition, ConditionResult, Context, MatchSettings,
         Pattern, PatternAtomTreeIterator, PatternRestriction, ReplaceBuilder, ReplaceSettings,
     },
     poly::{
-        Exponent, IntoVariableMap, PolyVariable, PositiveExponent,
+        Exponent, IntoVariableMap, PositiveExponent,
         factor::Factorize,
         gcd::PolynomialGCD,
         polynomial::MultivariatePolynomial,
@@ -44,7 +42,6 @@ use crate::{
     tensors::{CanonicalTensor, matrix::Matrix},
     utils::{BorrowedOrOwned, Settable},
 };
-use std::sync::Arc;
 
 use super::{
     Atom, AtomOrView, AtomView, ListSlice, Symbol,
@@ -869,40 +866,10 @@ pub trait AtomCore: private::Sealed + Sized {
         self.as_atom_view().evaluate(map, binary_prec)
     }
 
-    /// Convert nested expressions to a tree suitable for repeated evaluations with
-    /// different values for `params`.
-    /// All variables and all user functions in the expression must occur in the map.
-    ///
-    /// Consider using [AtomCore::evaluator] instead.
-    ///
-    /// # Example
-    ///
-    /// ```
-    /// use symbolica::prelude::*;
-    /// let expr = parse!("x + y");
-    /// let x = parse!("x");
-    /// let y = parse!("y");
-    /// let fn_map = FunctionMap::new();
-    /// let params = vec![x.clone(), y.clone()];
-    /// let mut tree = expr.to_evaluation_tree(&fn_map, &params).unwrap();
-    /// tree.common_subexpression_elimination();
-    /// let e = tree.optimize(&OptimizationSettings::default());
-    /// let mut e = e.map_coeff(&|c| c.to_real().unwrap().to_f64());
-    /// let r = e.evaluate_single(&[0.5, 0.3]);
-    /// assert_eq!(r, 0.8);
-    /// ```
-    fn to_evaluation_tree(
-        &self,
-        fn_map: &FunctionMap,
-        params: &[Atom],
-    ) -> Result<EvalTree<Complex<Rational>>, EvaluationError> {
-        self.as_atom_view().to_evaluation_tree(fn_map, params)
-    }
-
     /// Create an efficient evaluator for a (nested) expression.
-    /// All free parameters must appear in `params` and all other variables
-    /// and user functions in the expression must occur in the function map.
-    /// The function map may have nested expressions.
+    /// All free parameters must appear in `params` and all nested functions
+    /// must be registered using [`EvaluatorBuilder::add_function`] or [`EvaluatorBuilder::add_function_with_map`].
+    /// All other functions, must have an evaluation hook.
     ///
     /// For the best performance, the evaluator should be JIT-compiled ([ExpressionEvaluator::jit_compile])
     /// or compiled to C++ with inline ASM using [ExpressionEvaluator::export_cpp].
@@ -913,32 +880,30 @@ pub trait AtomCore: private::Sealed + Sized {
     ///
     /// ```
     /// use symbolica::prelude::*;
-    /// let fn_map = FunctionMap::new();
     /// let params = vec![parse!("x"), parse!("y")];
-    /// let optimization_settings = OptimizationSettings::default();
     /// let mut evaluator = parse!("x + y")
-    ///     .evaluator(&fn_map, &params, optimization_settings)
+    ///     .evaluator(&params)
+    ///     .build()
     ///     .unwrap()
-    ///     .map_coeff(&|x| x.to_real().unwrap().to_f64());
+    ///     .map_coeff(&|x| x.re.to_f64());
     /// assert_eq!(evaluator.evaluate_single(&[1.0, 2.0]), 3.0);
     /// ```
     ///
     /// An evaluation with a nested function `f(x) = x^2 + 1`:
     /// ```rust
     /// use symbolica::prelude::*;
-    /// let mut fn_map = FunctionMap::new();
-    /// fn_map.add_function(symbol!("f"), vec![symbol!("x")], parse!("x^2 + 1")).unwrap();
-    ///
-    /// let optimization_settings = OptimizationSettings::default();
+    /// let params = vec![parse!("x")];
     /// let mut evaluator = parse!("f(x)")
-    ///     .evaluator(&fn_map, &vec![parse!("x")], optimization_settings)
-    ///     .unwrap().map_coeff(&|x| x.re.to_f64());
+    ///     .evaluator(&params)
+    ///     .add_function(symbol!("f"), vec![symbol!("x")], parse!("x^2 + 1"))?
+    ///     .build()?
+    ///     .map_coeff(&|x| x.re.to_f64());
     /// assert_eq!(evaluator.evaluate_single(&[2.0]), 5.0);
+    /// # Ok::<(), EvaluationError>(())
     /// ```
     ///
     /// An evaluation with externally defined functions:
     /// ```rust
-    /// use ahash::HashMap;
     /// use symbolica::prelude::*;
     ///
     /// let _ = symbol!(
@@ -946,34 +911,18 @@ pub trait AtomCore: private::Sealed + Sized {
     ///     eval = EvaluationInfo::new().register(|args: &[f64]| args[0] * args[0] + args[1])
     /// );
     ///
-    /// let mut f = FunctionMap::new();
     /// let params = vec![parse!("x"), parse!("y")];
-    /// let optimization_settings = OptimizationSettings::default();
-    /// let mut evaluator = parse!("symbolica::eval::f(x,y)").evaluator(&f, &params, optimization_settings).unwrap().map_coeff(&|x| x.re.to_f64());
+    /// let mut evaluator = parse!("symbolica::eval::f(x,y)").evaluator(&params).build().unwrap().map_coeff(&|x| x.re.to_f64());
     /// assert_eq!(evaluator.evaluate_single(&[2.0, 3.0]), 7.0);
     /// ```
-    fn evaluator(
-        &self,
-        fn_map: &FunctionMap,
-        params: &[Atom],
-        optimization_settings: OptimizationSettings,
-    ) -> Result<ExpressionEvaluator<Complex<Rational>>, EvaluationError> {
-        if optimization_settings.direct_translation {
-            AtomView::to_evaluator(
-                std::slice::from_ref(&self.as_atom_view()),
-                fn_map,
-                params,
-                optimization_settings,
-            )
-        } else {
-            let tree = self.to_evaluation_tree(fn_map, params)?;
-            Ok(tree.optimize(&optimization_settings))
-        }
+    fn evaluator<A: AtomCore>(&self, params: &[A]) -> EvaluatorBuilder<'_> {
+        EvaluatorBuilder::new(self.as_atom_view(), params)
     }
 
-    /// Convert nested expressions to a tree suitable for repeated evaluations with
-    /// different values for `params`.
-    /// All variables and all user functions in the expression must occur in the map.
+    /// Create an efficient evaluator for (nested) expressions.
+    /// All free parameters must appear in `params` and all nested functions
+    /// must be registered using [`EvaluatorBuilder::add_function`] or [`EvaluatorBuilder::add_function_with_map`].
+    /// All other functions, must have an evaluation hook.
     ///
     /// # Example
     ///
@@ -981,35 +930,20 @@ pub trait AtomCore: private::Sealed + Sized {
     /// use symbolica::prelude::*;
     /// let expr1 = parse!("x + y");
     /// let expr2 = parse!("x - y");
-    /// let x = parse!("x");
-    /// let y = parse!("y");
-    /// let fn_map = FunctionMap::new();
-    /// let params = vec![x.clone(), y.clone()];
-    /// let evaluator = Atom::evaluator_multiple(
-    ///     &[expr1, expr2],
-    ///     &fn_map,
-    ///     &params,
-    ///     OptimizationSettings::default(),
-    /// )
-    /// .unwrap();
-    /// let mut evaluator = evaluator.map_coeff(&|c| c.to_real().unwrap().to_f64());
+    /// let params = vec![parse!("x"), parse!("y")];
+    /// let mut evaluator = Atom::evaluator_multiple(&[expr1, expr2], &params)
+    ///     .build()
+    ///     .unwrap()
+    ///     .map_coeff(&|c| c.to_real().unwrap().to_f64());
     /// let mut out = vec![0., 0.];
     /// evaluator.evaluate(&[1.0, 2.0], &mut out);
     /// assert_eq!(out, &[3.0, -1.0]);
     /// ```
-    fn evaluator_multiple<A: AtomCore>(
-        exprs: &[A],
-        fn_map: &FunctionMap,
-        params: &[Atom],
-        optimization_settings: OptimizationSettings,
-    ) -> Result<ExpressionEvaluator<Complex<Rational>>, EvaluationError> {
-        if optimization_settings.direct_translation {
-            let exprs = exprs.iter().map(|e| e.as_atom_view()).collect::<Vec<_>>();
-            AtomView::to_evaluator(&exprs, fn_map, params, optimization_settings)
-        } else {
-            let tree = AtomView::to_eval_tree_multiple(exprs, fn_map, params)?;
-            Ok(tree.optimize(&optimization_settings))
-        }
+    fn evaluator_multiple<'a, A: AtomCore, P: AtomCore>(
+        exprs: &'a [A],
+        params: &[P],
+    ) -> EvaluatorBuilder<'a> {
+        EvaluatorBuilder::new_multiple(exprs, params)
     }
 
     /// Check if the expression could be 0, using (potentially) numerical sampling with
@@ -1032,16 +966,18 @@ pub trait AtomCore: private::Sealed + Sized {
     /// # Example
     ///
     /// ```
-    /// use std::sync::Arc;
     /// use symbolica::prelude::*;
     /// let expr = parse!("x*y + x^2*y + y/(1+x)");
-    /// let vars = Arc::new(vec![symbol!("x").into()]);
-    /// let result = expr.set_coefficient_ring(&vars);
-    /// let r = result.set_coefficient_ring(&Arc::new(vec![]));
+    /// let result = expr.set_coefficient_ring(symbol!("x"));
+    /// let r = result.set_coefficient_ring(Vec::<Symbol>::new());
     /// assert_eq!(r, parse!("y*(x+1)^-1*(x+2*x^2+x^3+1)"));
     /// ```
-    fn set_coefficient_ring(&self, vars: &Arc<Vec<PolyVariable>>) -> Self::Output {
-        self.as_atom_view().set_coefficient_ring(vars).wrap(self)
+    fn set_coefficient_ring(&self, vars: impl IntoVariableMap) -> Self::Output {
+        let vars = vars
+            .into_var_map()
+            .expect("Could not convert variables to a variable map")
+            .expect("A variable map is required");
+        self.as_atom_view().set_coefficient_ring(&vars).wrap(self)
     }
 
     /// Convert all coefficients and built-in functions to floats with a given precision `decimal_prec`.
@@ -1219,11 +1155,9 @@ pub trait AtomCore: private::Sealed + Sized {
     /// # Example
     ///
     /// ```
-    /// use std::sync::Arc;
     /// use symbolica::prelude::*;
     /// let expr = parse!("x^2 + y*x + x + 1");
-    /// let var_map = Arc::new(vec![symbol!("x").into()]);
-    /// let poly = expr.to_polynomial_in_vars::<u8>(&var_map);
+    /// let poly = expr.to_polynomial_in_vars::<u8>(symbol!("x"));
     /// assert_eq!(
     ///     poly.flatten(false),
     ///     parse!("x^2 + (1+y)*x + 1")
@@ -1231,9 +1165,13 @@ pub trait AtomCore: private::Sealed + Sized {
     /// ```
     fn to_polynomial_in_vars<E: Exponent>(
         &self,
-        var_map: &Arc<Vec<PolyVariable>>,
+        var_map: impl IntoVariableMap,
     ) -> MultivariatePolynomial<AtomField, E> {
-        self.as_atom_view().to_polynomial_in_vars(var_map)
+        let var_map = var_map
+            .into_var_map()
+            .expect("Could not convert variables to a variable map")
+            .expect("A variable map is required");
+        self.as_atom_view().to_polynomial_in_vars(&var_map)
     }
 
     /// Convert the atom to a rational polynomial, optionally in the variable ordering

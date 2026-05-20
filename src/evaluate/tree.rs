@@ -23,6 +23,11 @@ pub enum EvaluationError {
         expected: usize,
         actual: usize,
     },
+    InconsistentFunctionTagCount {
+        function: Symbol,
+        expected: usize,
+        actual: usize,
+    },
     NumericalTypeDoesNotSupportImaginaryUnit,
     EvaluationFailed {
         expression: Atom,
@@ -88,6 +93,15 @@ impl std::fmt::Display for EvaluationError {
             } => write!(
                 f,
                 "builtin function {} must have exactly {expected} argument(s), got {actual}",
+                function.get_name()
+            ),
+            EvaluationError::InconsistentFunctionTagCount {
+                function,
+                expected,
+                actual,
+            } => write!(
+                f,
+                "function {} cannot be registered with {actual} tag(s); it was already registered with {expected} tag(s)",
                 function.get_name()
             ),
             EvaluationError::NumericalTypeDoesNotSupportImaginaryUnit => {
