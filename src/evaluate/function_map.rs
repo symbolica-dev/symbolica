@@ -29,13 +29,13 @@ impl<A, T> EvaluationFn<A, T> {
 /// --------
 /// ```rust
 /// use symbolica::prelude::*;
-/// let mut fn_map = FunctionMap::new();
-/// fn_map.add_function(symbol!("f"), vec![symbol!("x")], parse!("x^2 + 1")).unwrap();
-///
-/// let optimization_settings = OptimizationSettings::default();
+/// let params = vec![parse!("x")];
 /// let mut evaluator = parse!("f(x)")
-///     .evaluator(&fn_map, &vec![parse!("x")], optimization_settings)
-///     .unwrap().map_coeff(&|x| x.re.to_f64());
+///     .evaluator(&params)
+///     .add_function(symbol!("f"), vec![symbol!("x")], parse!("x^2 + 1")).unwrap()
+///     .build()
+///     .unwrap()
+///     .map_coeff(&|x| x.re.to_f64());
 /// assert_eq!(evaluator.evaluate_single(&[2.0]), 5.0);
 /// ```
 #[cfg_attr(
@@ -74,7 +74,7 @@ impl FunctionMap {
         name: S,
         args: Vec<A>,
         body: Atom,
-    ) -> Result<(), String> {
+    ) -> Result<(), EvaluationError> {
         let name = name.into();
 
         let (name, tags) = match name {
@@ -100,14 +100,19 @@ impl FunctionMap {
         tags: Vec<Atom>,
         args: Vec<A>,
         body: Atom,
-    ) -> Result<(), String> {
-        if let Some(t) = self.tag.insert(name, tags.len())
-            && t != tags.len()
-        {
-            return Err(format!(
-                "Cannot add the same function {} with a different number of tags",
-                name.get_name()
-            ));
+    ) -> Result<(), EvaluationError> {
+        match self.tag.get(&name) {
+            Some(&t) if t != tags.len() => {
+                return Err(EvaluationError::InconsistentFunctionTagCount {
+                    function: name,
+                    expected: t,
+                    actual: tags.len(),
+                });
+            }
+            None => {
+                self.tag.insert(name, tags.len());
+            }
+            _ => {}
         }
 
         let id = self.tagged_fn_map.len();
@@ -144,6 +149,169 @@ impl FunctionMap {
         }
 
         None
+    }
+}
+
+/// Builder for creating an [`ExpressionEvaluator`]. Constructed using
+/// [`Atom::evaluator_multiple`] or [`Atom::evaluator`].
+///
+/// Nested functions can be registerd using [`Self::add_function`] or [`Self::add_tagged_function`].
+/// The [`Self::build`] method finalizes the builder and returns an [`ExpressionEvaluator`].
+///
+/// # Examples
+///
+/// ```
+/// use symbolica::prelude::*;
+/// let params = vec![parse!("x")];
+/// let mut evaluator = parse!("f(x)")
+///     .evaluator(&params)
+///     .add_function(symbol!("f"), vec![symbol!("x")], parse!("x^2 + 1"))?
+///     .build()?
+///     .map_coeff(&|x| x.re.to_f64());
+/// assert_eq!(evaluator.evaluate_single(&[2.0]), 5.0);
+/// # Ok::<(), EvaluationError>(())
+/// ```
+#[derive(Clone, Debug)]
+pub struct EvaluatorBuilder<'a> {
+    exprs: Vec<AtomView<'a>>,
+    fn_map: FunctionMap,
+    params: Vec<Atom>,
+    optimization_settings: OptimizationSettings,
+}
+
+impl<'a> EvaluatorBuilder<'a> {
+    pub(crate) fn new<A: AtomCore>(expr: AtomView<'a>, params: &[A]) -> Self {
+        Self {
+            exprs: vec![expr],
+            fn_map: FunctionMap::new(),
+            params: params.iter().map(|p| p.as_atom_view().to_owned()).collect(),
+            optimization_settings: OptimizationSettings::default(),
+        }
+    }
+
+    pub(crate) fn new_multiple<E: AtomCore, A: AtomCore>(exprs: &'a [E], params: &[A]) -> Self {
+        Self {
+            exprs: exprs.iter().map(|e| e.as_atom_view()).collect(),
+            fn_map: FunctionMap::new(),
+            params: params.iter().map(|p| p.as_atom_view().to_owned()).collect(),
+            optimization_settings: OptimizationSettings::default(),
+        }
+    }
+
+    /// Set the function map.
+    pub fn function_map(mut self, fn_map: FunctionMap) -> Self {
+        self.fn_map = fn_map;
+        self
+    }
+
+    /// Register a function. If `name` is a symbol, it will be treated as a regular function; if it is a function, its arguments will be treated as tags.
+    pub fn add_function<S: Into<Indeterminate>, A: Into<Indeterminate>>(
+        mut self,
+        name: S,
+        args: Vec<A>,
+        body: Atom,
+    ) -> Result<Self, EvaluationError> {
+        self.fn_map.add_function(name, args, body)?;
+        Ok(self)
+    }
+
+    /// Register a function, where the first arguments are `tags` instead of arguments.
+    pub fn add_tagged_function<A: Into<Indeterminate>>(
+        mut self,
+        name: Symbol,
+        tags: Vec<Atom>,
+        args: Vec<A>,
+        body: Atom,
+    ) -> Result<Self, EvaluationError> {
+        self.fn_map.add_tagged_function(name, tags, args, body)?;
+        Ok(self)
+    }
+
+    /// Set all optimization settings at once.
+    pub fn optimization_settings(mut self, optimization_settings: OptimizationSettings) -> Self {
+        self.optimization_settings = optimization_settings;
+        self
+    }
+
+    /// Set the number of Horner scheme optimization iterations.
+    pub fn horner_iterations(mut self, horner_iterations: usize) -> Self {
+        self.optimization_settings.horner_iterations = horner_iterations;
+        self
+    }
+
+    /// Set the number of CPU cores to use during optimization.
+    pub fn cores(mut self, n_cores: usize) -> Self {
+        self.optimization_settings.n_cores = n_cores;
+        self
+    }
+
+    /// Set the number of common pair elimination iterations.
+    pub fn cpe_iterations(mut self, cpe_iterations: Option<usize>) -> Self {
+        self.optimization_settings.cpe_iterations = cpe_iterations;
+        self
+    }
+
+    /// Set a hot-start expression list for optimization.
+    pub fn hot_start(mut self, hot_start: Option<Vec<Expression<Complex<Rational>>>>) -> Self {
+        self.optimization_settings.hot_start = hot_start;
+        self
+    }
+
+    /// Set the abort check used during optimization.
+    pub fn abort_check(mut self, abort_check: Option<Box<dyn AbortCheck>>) -> Self {
+        self.optimization_settings.abort_check = abort_check;
+        self
+    }
+
+    /// Set the abort polling level.
+    pub fn abort_level(mut self, abort_level: usize) -> Self {
+        self.optimization_settings.abort_level = abort_level;
+        self
+    }
+
+    /// Set the maximum number of variables considered for a Horner scheme.
+    pub fn max_horner_scheme_variables(mut self, max_horner_scheme_variables: usize) -> Self {
+        self.optimization_settings.max_horner_scheme_variables = max_horner_scheme_variables;
+        self
+    }
+
+    /// Set the maximum number of common-pair cache entries.
+    pub fn max_common_pair_cache_entries(mut self, max_common_pair_cache_entries: usize) -> Self {
+        self.optimization_settings.max_common_pair_cache_entries = max_common_pair_cache_entries;
+        self
+    }
+
+    /// Set the maximum distance considered for common-pair elimination.
+    pub fn max_common_pair_distance(mut self, max_common_pair_distance: usize) -> Self {
+        self.optimization_settings.max_common_pair_distance = max_common_pair_distance;
+        self
+    }
+
+    /// Enable or disable verbose optimization output.
+    pub fn verbose(mut self, verbose: bool) -> Self {
+        self.optimization_settings.verbose = verbose;
+        self
+    }
+
+    /// Enable or disable direct translation.
+    pub fn direct_translation(mut self, direct_translation: bool) -> Self {
+        self.optimization_settings.direct_translation = direct_translation;
+        self
+    }
+
+    /// Build the evaluator.
+    pub fn build(self) -> Result<ExpressionEvaluator<Complex<Rational>>, EvaluationError> {
+        if self.optimization_settings.direct_translation {
+            AtomView::to_evaluator(
+                &self.exprs,
+                &self.fn_map,
+                &self.params,
+                self.optimization_settings,
+            )
+        } else {
+            let tree = AtomView::to_eval_tree_multiple(&self.exprs, &self.fn_map, &self.params)?;
+            Ok(tree.optimize(&self.optimization_settings))
+        }
     }
 }
 

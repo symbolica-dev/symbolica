@@ -201,11 +201,10 @@ impl<T: ExportNumber + SingleFloat> ExpressionEvaluator<T> {
     /// Create a C++ library that evaluates the function `x + y` for `f64` inputs:
     /// ```rust
     /// use symbolica::prelude::*;
-    /// let fn_map = FunctionMap::new();
     /// let params = vec![parse!("x"), parse!("y")];
-    /// let optimization_settings = OptimizationSettings::default();
     /// let evaluator = parse!("x + y")
-    ///     .evaluator(&fn_map, &params, optimization_settings)
+    ///     .evaluator(&params)
+    ///     .build()
     ///     .unwrap()
     ///     .map_coeff(&|x| x.to_real().unwrap().to_f64());
     ///

@@ -29,13 +29,10 @@ fn main() {
 
     let params = vec![parse!("x")];
 
-    let evaluator = Atom::evaluator_multiple(
-        &[e1.as_view(), e2.as_view()],
-        &fn_map,
-        &params,
-        OptimizationSettings::default(),
-    )
-    .unwrap();
+    let evaluator = Atom::evaluator_multiple(&[e1.as_view(), e2.as_view()], &params)
+        .function_map(fn_map)
+        .build()
+        .unwrap();
 
     let mut e_f64 = evaluator.map_coeff(&|x| x.to_real().unwrap().into());
     let mut out = vec![0., 0.];

@@ -6,7 +6,7 @@ use symbolica::{
     },
     evaluate::{
         CompileOptions, CudaComplexf64, CudaLoadSettings, CudaRealf64, ExportSettings,
-        ExpressionEvaluator, FunctionMap, InlineASM, OptimizationSettings,
+        ExpressionEvaluator, InlineASM, OptimizationSettings,
     },
     parse, symbol,
 };
@@ -36,12 +36,16 @@ fn merge_evaluator_with_external_functions() {
     let mut left = parse!(
         "symbolica::test::merge_external_double(x) + symbolica::test::merge_external_left_constant"
     )
-    .evaluator(&FunctionMap::new(), &params, settings.clone())
+    .evaluator(&params)
+    .optimization_settings(settings.clone())
+    .build()
     .unwrap();
     let right = parse!(
         "symbolica::test::merge_external_shift(x) + symbolica::test::merge_external_right_constant"
     )
-    .evaluator(&FunctionMap::new(), &params, settings)
+    .evaluator(&params)
+    .optimization_settings(settings)
+    .build()
     .unwrap();
 
     left.merge(right, Some(0)).unwrap();
@@ -67,11 +71,9 @@ fn error_propagating_float_transcendental_evaluator() {
     );
 
     let evaluator = expr
-        .evaluator(
-            &FunctionMap::new(),
-            &params,
-            OptimizationSettings::new().horner_iterations(0),
-        )
+        .evaluator(&params)
+        .horner_iterations(0)
+        .build()
         .unwrap();
 
     let f64_params = [0.5, 2.0, 0.1, 0.3, 0.5];
@@ -1151,14 +1153,11 @@ fn generate_evaluator() -> ExpressionEvaluator<Complex<Rational>> {
         .stack_size(16 * 1024 * 1024) // use a larger stack size as in debug mode the default stack size is too small
         .spawn(move || {
             parse!(F13)
-                .evaluator(
-                    &FunctionMap::new(),
-                    &params,
-                    OptimizationSettings::new()
-                        .horner_iterations(1)
-                        .cores(1)
-                        .verbose(false),
-                )
+                .evaluator(&params)
+                .horner_iterations(1)
+                .cores(1)
+                .verbose(false)
+                .build()
                 .unwrap()
         })
         .unwrap()

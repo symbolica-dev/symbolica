@@ -6077,7 +6077,13 @@ impl PythonExpression {
         let params: Vec<_> = params.iter().map(|x| x.expr.clone()).collect();
 
         let eval = py
-            .detach(move || self.expr.evaluator(&fn_map, &params, settings))
+            .detach(move || {
+                self.expr
+                    .evaluator(&params)
+                    .function_map(fn_map)
+                    .optimization_settings(settings)
+                    .build()
+            })
             .map_err(|e| {
                 exceptions::PyValueError::new_err(format!("Could not create evaluator: {e}"))
             })?;
@@ -6220,9 +6226,13 @@ impl PythonExpression {
 
         let exprs = exprs.iter().map(|x| x.expr.as_view()).collect::<Vec<_>>();
 
-        let eval = Atom::evaluator_multiple(&exprs, &fn_map, &params, settings).map_err(|e| {
-            exceptions::PyValueError::new_err(format!("Could not create evaluator: {e}"))
-        })?;
+        let eval = Atom::evaluator_multiple(&exprs, &params)
+            .function_map(fn_map)
+            .optimization_settings(settings)
+            .build()
+            .map_err(|e| {
+                exceptions::PyValueError::new_err(format!("Could not create evaluator: {e}"))
+            })?;
 
         Ok(PythonExpressionEvaluator {
             rational_constants: eval.get_constants().to_vec(),

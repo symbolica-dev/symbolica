@@ -7,15 +7,13 @@ const SIGMA: &str = "+32*amel2^3*zk^2*xcp3 +32*amel2^3*zk^2*xcp1 -48*amel2^3*zk^
 fn main() {
     let e = parse!(SIGMA);
 
-    let vars = e
+    let vars: Vec<Atom> = e
         .get_all_symbols(false)
         .into_iter()
         .map(|x| x.into())
         .collect::<Vec<_>>();
 
-    let evaluator = e
-        .evaluator(&FunctionMap::new(), &vars, OptimizationSettings::default())
-        .unwrap();
+    let evaluator = e.evaluator(&vars).build().unwrap();
     let mut simd_evaluator = evaluator.map_coeff(&|x| x.re.to_f64().into());
 
     let res = simd_evaluator.evaluate_single(

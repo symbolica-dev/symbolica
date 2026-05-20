@@ -6,19 +6,16 @@ fn main() {
     let e = parse!(SIGMA);
     let e2 = &e + 2;
 
-    let vars = e
+    let vars: Vec<Atom> = e
         .get_all_symbols(false)
         .into_iter()
         .map(|x| x.into())
         .collect::<Vec<_>>();
 
-    let evaluator = Atom::evaluator_multiple(
-        &[e, e2],
-        &FunctionMap::new(),
-        &vars,
-        OptimizationSettings::default(),
-    )
-    .unwrap();
+    let evaluator = Atom::evaluator_multiple(&[e, e2], &vars)
+        .optimization_settings(OptimizationSettings::default())
+        .build()
+        .unwrap();
     let mut double_evaluator = evaluator.map_coeff(&|x| x.re.to_f64());
 
     let mut res = [0., 0.];

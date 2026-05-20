@@ -3539,7 +3539,6 @@ mod tests {
         atom::{Atom, AtomCore},
         coefficient::Coefficient,
         domains::float::{Complex, Float, Real, RealLike},
-        evaluate::{FunctionMap, OptimizationSettings},
         parse, symbol,
     };
 
@@ -3743,11 +3742,8 @@ mod tests {
     fn special_functions_register_eval_info() {
         let mut evaluator =
             parse!("gamma(x)+polygamma(0,x)+polygamma(1,x)+polylog(2,x)+zeta(x)+euler_gamma")
-                .evaluator(
-                    &FunctionMap::new(),
-                    &[parse!("x")],
-                    OptimizationSettings::default(),
-                )
+                .evaluator(&[parse!("x")])
+                .build()
                 .unwrap()
                 .map_coeff(&|x| x.re.to_f64());
 
@@ -3912,11 +3908,8 @@ mod tests {
     #[test]
     fn geometric_functions_register_eval_info() {
         let mut evaluator = parse!("tan(x)+atan(x)+atan(x,-1)+sinh(x)+atanh(x/2)+sec(x)+coth(x+2)")
-            .evaluator(
-                &FunctionMap::new(),
-                &[parse!("x")],
-                OptimizationSettings::default(),
-            )
+            .evaluator(&[parse!("x")])
+            .build()
             .unwrap()
             .map_coeff(&|x| x.re.to_f64());
 
@@ -3972,11 +3965,8 @@ mod tests {
     fn bessel_functions_register_eval_info() {
         let mut evaluator =
             parse!("bessel_j(1/2,x)+bessel_y(1/2,x)+bessel_i(1/2,x)+bessel_k(1/2,x)")
-                .evaluator(
-                    &FunctionMap::new(),
-                    &[parse!("x")],
-                    OptimizationSettings::default(),
-                )
+                .evaluator(&[parse!("x")])
+                .build()
                 .unwrap()
                 .map_coeff(&|x| x.re.to_f64());
 

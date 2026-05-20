@@ -22,11 +22,8 @@ impl<T: Default + Clone> ExpressionEvaluator<T> {
     /// create_hyperdual_single_derivative!(Dual2, 2);
     ///
     /// let ev = parse!("sin(x+y)^2+cos(x+y)^2 - 1")
-    ///     .evaluator(
-    ///         &FunctionMap::new(),
-    ///         &[parse!("x"), parse!("y")],
-    ///         OptimizationSettings::default(),
-    ///    )
+    ///     .evaluator(&[parse!("x"), parse!("y")])
+    ///     .build()
     ///    .unwrap();
     ///
     /// let dualizer = Dualizer::new(Dual2::<Complex<Rational>>::new_zero(), vec![]);
@@ -798,23 +795,13 @@ impl<T: DualNumberStructure> Vectorize<Complex<Rational>> for Dualizer<T> {
 mod test {
     use numerica::domains::{dual::HyperDual, float::Complex, rational::Rational};
 
-    use crate::{
-        atom::AtomCore,
-        evaluate::{Dualizer, FunctionMap, OptimizationSettings},
-        parse,
-    };
+    use crate::{atom::AtomCore, evaluate::Dualizer, parse};
 
     #[test]
     fn unknown_constant() {
         let expr = parse!("2*pi*x^2");
 
-        let mut evaluator = expr
-            .evaluator(
-                &FunctionMap::new(),
-                &[parse!("x")],
-                OptimizationSettings::default(),
-            )
-            .unwrap();
+        let mut evaluator = expr.evaluator(&[parse!("x")]).build().unwrap();
         let dual = HyperDual::<Complex<Rational>>::new(vec![vec![0], vec![1]]);
         let dualizer = Dualizer::new(dual, vec![]);
         evaluator = evaluator.vectorize(&dualizer).unwrap();

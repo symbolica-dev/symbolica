@@ -80,12 +80,36 @@ mod test {
             rational::Rational,
         },
         evaluate::{
-            Dualizer, ExportSettings, FunctionMap, Instruction, JITCompilationSettings,
-            OptimizationSettings,
+            Dualizer, EvaluationError, ExportSettings, FunctionMap, Instruction,
+            JITCompilationSettings, OptimizationSettings,
         },
         id::ConditionResult,
         parse, symbol,
     };
+
+    #[test]
+    fn function_map_inconsistent_tag_count_returns_evaluation_error() {
+        let mut fn_map = FunctionMap::new();
+        let f = symbol!("symbolica::test::tag_count_mismatch");
+
+        fn_map
+            .add_tagged_function(f, vec![Atom::num(1)], vec![symbol!("x")], parse!("x"))
+            .unwrap();
+
+        assert_eq!(
+            fn_map.add_tagged_function(
+                f,
+                vec![Atom::num(1), Atom::num(2)],
+                vec![symbol!("x")],
+                parse!("x"),
+            ),
+            Err(EvaluationError::InconsistentFunctionTagCount {
+                function: f,
+                expected: 1,
+                actual: 2,
+            })
+        );
+    }
 
     #[test]
     fn eval_fun() {
@@ -110,11 +134,7 @@ mod test {
                 < parse!("1e-30`32")
         );
 
-        let fn_map = FunctionMap::new();
-
-        let r = a
-            .evaluator(&fn_map, &[parse!("x")], OptimizationSettings::default())
-            .unwrap();
+        let r = a.evaluator(&[parse!("x")]).build().unwrap();
 
         let mut r_f64 = r.clone().map_coeff(&|x| x.re.to_f64());
 
@@ -204,9 +224,11 @@ mod test {
 
         let params = vec![parse!("x")];
 
-        let evaluator =
-            Atom::evaluator_multiple(&[e1, e2], &fn_map, &params, OptimizationSettings::default())
-                .unwrap();
+        let evaluator = Atom::evaluator_multiple(&[e1, e2], &params)
+            .function_map(fn_map)
+            .optimization_settings(OptimizationSettings::default())
+            .build()
+            .unwrap();
 
         let mut e_f64 = evaluator.map_coeff(&|x| x.clone().to_real().unwrap().into());
         let mut res = [0., 0.];
@@ -239,11 +261,12 @@ mod test {
 
         for (input, true_res, false_res) in tests {
             let mut eval = parse!(input)
-                .evaluator(
-                    &FunctionMap::new(),
-                    &vec![crate::parse!("x"), crate::parse!("y"), crate::parse!("z")],
-                    Default::default(),
-                )
+                .evaluator(&vec![
+                    crate::parse!("x"),
+                    crate::parse!("y"),
+                    crate::parse!("z"),
+                ])
+                .build()
                 .unwrap()
                 .map_coeff(&|x| x.re.to_f64());
 
@@ -272,11 +295,8 @@ mod test {
         );
 
         let ev = parse!("sin(x+y)^2+cos(x+y)^2 - exp(sqrt(x)/sqrt(z)-1)")
-            .evaluator(
-                &FunctionMap::new(),
-                &[parse!("x"), parse!("y"), parse!("z")],
-                OptimizationSettings::default(),
-            )
+            .evaluator(&[parse!("x"), parse!("y"), parse!("z")])
+            .build()
             .unwrap();
 
         let dual = Dualizer::new(Dual::<Complex<Rational>>::new_zero(), vec![]);
@@ -319,11 +339,8 @@ mod test {
         );
 
         let ev = parse!("symbolica::vec::f(x + 1)")
-            .evaluator(
-                &FunctionMap::new(),
-                &[parse!("x")],
-                OptimizationSettings::default(),
-            )
+            .evaluator(&[parse!("x")])
+            .build()
             .unwrap();
 
         let mut vec_ev = ev.vectorize(&dual).unwrap().map_coeff(&|c| c.re.to_f64());
@@ -337,9 +354,7 @@ mod test {
     fn constant_with_args() {
         let r = parse!("zeta(5/6)");
         let numerical = f64::try_from(r.to_float(53)).unwrap();
-        let ev = r
-            .evaluator(&FunctionMap::new(), &[], OptimizationSettings::default())
-            .unwrap();
+        let ev = r.evaluator(&[] as &[Atom]).build().unwrap();
         let ev2 = ev.map_coeff(&|c| c.re.to_f64());
         let (instr, _, constants) = ev2.export_instructions();
         assert!(matches!(instr[0], Instruction::Assign(_, _)));
@@ -355,11 +370,8 @@ mod test {
         );
 
         let ev = parse!("cpp_external(x)")
-            .evaluator(
-                &FunctionMap::new(),
-                &[parse!("x")],
-                OptimizationSettings::default(),
-            )
+            .evaluator(&[parse!("x")])
+            .build()
             .unwrap()
             .map_coeff(&|x| x.re.to_f64());
 
@@ -375,11 +387,8 @@ mod test {
     fn jit_compile() {
         use crate::parse;
         let eval = parse!("x^2 * cos(x)")
-            .evaluator(
-                &FunctionMap::new(),
-                &[parse!("x")],
-                OptimizationSettings::default(),
-            )
+            .evaluator(&[parse!("x")])
+            .build()
             .unwrap();
 
         let mut res = [0.; 1];

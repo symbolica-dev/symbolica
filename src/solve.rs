@@ -111,32 +111,16 @@ impl AtomView<'_> {
             return Err(SolveError::ComplexCoefficients);
         }
 
-        let v = x.clone().into();
+        let v: Atom = x.clone().into();
         let f = self
-            .to_evaluation_tree(&FunctionMap::new(), std::slice::from_ref(&v))
-            .map_err(|e| SolveError::Other(e.to_string()))?
-            .optimize(&OptimizationSettings {
-                horner_iterations: 1,
-                n_cores: 0,
-                cpe_iterations: None,
-                hot_start: None,
-                abort_check: None,
-                verbose: false,
-                ..Default::default()
-            });
+            .evaluator(std::slice::from_ref(&v))
+            .build()
+            .map_err(|e| SolveError::Other(e.to_string()))?;
         let df = self
             .derivative(x)
-            .to_evaluation_tree(&FunctionMap::new(), std::slice::from_ref(&v))
-            .map_err(|e| SolveError::Other(e.to_string()))?
-            .optimize(&OptimizationSettings {
-                horner_iterations: 1,
-                n_cores: 0,
-                cpe_iterations: None,
-                hot_start: None,
-                abort_check: None,
-                verbose: false,
-                ..Default::default()
-            });
+            .evaluator(std::slice::from_ref(&v))
+            .build()
+            .map_err(|e| SolveError::Other(e.to_string()))?;
 
         let mut f_e = f.map_coeff(&|x| init.from_rational(x.to_real().unwrap()));
         let mut df_e = df.map_coeff(&|x| init.from_rational(x.to_real().unwrap()));
@@ -248,17 +232,9 @@ impl AtomView<'_> {
                 let deriv = a.derivative(v);
 
                 let a = deriv
-                    .to_evaluation_tree(&FunctionMap::new(), &avars)
+                    .evaluator(&avars)
+                    .build()
                     .map_err(|e| SolveError::Other(e.to_string()))?
-                    .optimize(&OptimizationSettings {
-                        horner_iterations: 1,
-                        n_cores: 0,
-                        cpe_iterations: None,
-                        hot_start: None,
-                        abort_check: None,
-                        verbose: false,
-                        ..Default::default()
-                    })
                     .map_coeff(&|x| init[0].from_rational(x.to_real().unwrap()));
 
                 row.push(a);
