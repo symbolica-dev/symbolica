@@ -71,7 +71,7 @@ use crate::{
         algebraic_number::AlgebraicExtension,
         atom::AtomField,
         dual::HyperDual,
-        finite_field::{FiniteFieldCore, PrimeIteratorU64, ToFiniteField, Z2, Zp64, is_prime_u64},
+        finite_field::{FiniteFieldCore, PrimeIteratorU64, ToFiniteField, Z2, Zp64},
         float::{Complex, DoubleFloat, F64, Float, PythonMultiPrecisionFloat, RealLike},
         integer::{FromFiniteField, Integer, IntegerRelationError, IntegerRing, Z},
         rational::{Q, Rational, RationalField},
@@ -20762,35 +20762,23 @@ impl PythonInteger {
         })
     }
 
-    /// Check if the 64-bit number `n` is a prime number.
+    /// Check if the number `n` is a prime number.
     #[classmethod]
-    fn is_prime(_cls: &Bound<'_, PyType>, n: u64) -> bool {
-        is_prime_u64(n)
+    #[pyo3(signature = (n, k = 24))]
+    fn is_prime(_cls: &Bound<'_, PyType>, n: Integer, k: usize) -> bool {
+        n.is_prime(k)
     }
 
-    /// Factor a 64-bit number `n` into primes.
+    /// Factor the number `n` into primes.
     #[classmethod]
-    fn factor(_cls: &Bound<'_, PyType>, n: u64) -> Vec<(u64, u64)> {
-        let mut factors = Vec::new();
-        crate::domains::finite_field::factor(n, &mut factors);
-        factors.sort();
-        let mut ff = vec![];
-        ff.push((factors[0], 1));
-        for i in 1..factors.len() {
-            if factors[i] == factors[i - 1] {
-                ff.last_mut().unwrap().1 += 1;
-            } else {
-                ff.push((factors[i], 1));
-            }
-        }
-
-        ff
+    fn factor(_cls: &Bound<'_, PyType>, n: Integer) -> Vec<(Integer, Integer)> {
+        n.factor()
     }
 
     /// Compute the Euler totient function for the number `n`.
     #[classmethod]
-    fn totient(_cls: &Bound<'_, PyType>, n: u64) -> u64 {
-        crate::domains::finite_field::totient(n)
+    fn totient(_cls: &Bound<'_, PyType>, n: Integer) -> Integer {
+        n.totient()
     }
 
     /// Compute the greatest common divisor of the numbers `a` and `b`.

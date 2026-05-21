@@ -9565,20 +9565,22 @@ class Integer:
         """
 
     @classmethod
-    def is_prime(_cls, n: int) -> bool:
+    def is_prime(_cls, n: int, k: int = 24) -> bool:
         """
-        Check if the 64-bit number `n` is a prime number.
+        Check if the number `n` is a prime number, using the Miller-Rabin primality test.
 
         Parameters
         ----------
         n: int
             The integer to test for primality.
+        k: int
+            The number of iterations to perform in the Miller-Rabin test.
         """
 
     @classmethod
     def factor(_cls, n: int) -> Sequence[tuple[int, int]]:
         """
-        Factor the 64-bit number `n` into its prime factors and return a list of tuples `(p, e)` where `p` is a prime factor and `e` is its exponent.
+        Factor the number `n` into its prime factors and return a list of tuples `(p, e)` where `p` is a prime factor and `e` is its exponent.
 
         Parameters
         ----------
