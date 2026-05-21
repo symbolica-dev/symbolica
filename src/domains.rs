@@ -6,7 +6,7 @@
 //! - The ring of integers [Z](type@integer::Z) has elements of type [Integer].
 //! - The ring of rational numbers [Q](type@rational::Q) has elements of type [Rational](rational::Rational).
 //! - The ring of finite fields [FiniteField](finite_field::FiniteField) has elements of type [FiniteField](finite_field::FiniteFieldElement).
-//! - The ring of polynomials [PolynomialRing](super::poly::polynomial::PolynomialRing) has elements of type [MultivariatePolynomial](super::poly::polynomial::MultivariatePolynomial).
+//! - The ring of polynomials has elements of type `MultivariatePolynomial`.
 //!
 //! In general, the ring elements do not implement operations such as addition or multiplication,
 //! but rather the ring itself does. Most Symbolica structures are generic over the ring type.
@@ -139,7 +139,7 @@ pub trait RingOps<T>: Set {
 /// - The ring of integers [Z](type@integer::Z) has elements of type [Integer].
 /// - The ring of rational numbers [Q](type@rational::Q) has elements of type [Rational](rational::Rational).
 /// - The ring of finite fields [FiniteField](finite_field::FiniteField) has elements of type [FiniteField](finite_field::FiniteFieldElement).
-/// - The ring of polynomials [PolynomialRing](super::poly::polynomial::PolynomialRing) has elements of type [MultivariatePolynomial](super::poly::polynomial::MultivariatePolynomial).
+/// - The ring of polynomials has elements of type `MultivariatePolynomial`.
 ///
 /// In general, the ring elements do not implement operations such as addition or multiplication,
 /// but rather the ring itself does. Most Symbolica structures are generic over the ring type.
