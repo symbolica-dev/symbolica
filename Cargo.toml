@@ -74,8 +74,8 @@ optional = true
 version = "0.28"
 
 [dependencies]
-numerica = "1.4"
-graphica = "1.2"
+numerica = "2.0"
+graphica = "2.0"
 
 ahash = "0.8.7"
 append-only-vec = "0.1"
