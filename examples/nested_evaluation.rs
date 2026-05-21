@@ -1,9 +1,4 @@
-use symbolica::{
-    atom::{Atom, AtomCore},
-    domains::{float::Complex, rational::Rational},
-    evaluate::{CompileOptions, ExportSettings, FunctionMap, InlineASM, OptimizationSettings},
-    parse, symbol,
-};
+use symbolica::prelude::*;
 
 fn main() {
     let e1 = parse!("x + pi + cos(x) + f(g(x+1),h(x*2)) + p(1,x)");

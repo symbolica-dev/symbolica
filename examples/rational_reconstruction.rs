@@ -1,8 +1,4 @@
-use symbolica::domains::{
-    Field, RingOps, Set,
-    finite_field::{FiniteFieldCore, Zp},
-    rational::{Q, Rational},
-};
+use symbolica::prelude::*;
 
 /// An arbitrarily complicated black-box function.
 fn black_box(field: &Zp, eval: &[<Zp as Set>::Element]) -> <Zp as Set>::Element {

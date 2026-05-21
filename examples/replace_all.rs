@@ -1,4 +1,4 @@
-use symbolica::{atom::AtomCore, parse};
+use symbolica::prelude::*;
 
 fn main() {
     let expr = parse!(" f(1,2,x) + f(1,2,3)");

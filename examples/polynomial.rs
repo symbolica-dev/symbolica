@@ -1,13 +1,6 @@
 use std::sync::Arc;
 
-use symbolica::{
-    domains::{
-        finite_field::{FiniteFieldCore, Zp},
-        rational::Q,
-    },
-    poly::polynomial::MultivariatePolynomial,
-    symbol,
-};
+use symbolica::prelude::*;
 
 fn main() {
     let x = symbol!("x");

@@ -154,7 +154,7 @@ impl StateInitializer {
 /// This macro should be called outside of any functions.
 ///
 /// ```ignore
-/// use symbolica::{initialize, symbol};
+/// use symbolica::prelude::*;
 ///
 /// initialize!(|| {
 ///     symbol!("your_symbol"; Linear);
@@ -570,8 +570,7 @@ impl State {
     ///
     /// Example:
     /// ```
-    /// # use symbolica::symbol;
-    /// # use symbolica::state::State;
+    /// # use symbolica::prelude::*;
     /// symbol!("f"; Symmetric);
     /// unsafe { State::reset(); }
     /// symbol!("f"; Antisymmetric);

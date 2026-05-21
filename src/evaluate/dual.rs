@@ -16,16 +16,8 @@ impl<T: Default + Clone> ExpressionEvaluator<T> {
     /// Create a dual number and evaluate an expression over it:
     /// ```
     /// use ahash::HashMap;
-    /// use symbolica::{
-    ///     atom::{Atom, AtomCore},
-    ///     create_hyperdual_single_derivative,
-    ///     domains::{
-    ///         float::{Complex, Float, FloatLike},
-    ///         rational::Rational,
-    ///     },
-    ///     evaluate::{FunctionMap, OptimizationSettings, Dualizer},
-    ///     parse,
-    /// };
+    /// use symbolica::prelude::*;
+    /// use symbolica::create_hyperdual_single_derivative;
     ///
     /// create_hyperdual_single_derivative!(Dual2, 2);
     ///

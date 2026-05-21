@@ -9,7 +9,7 @@
 //! Parse a new expression and expand it:
 //!
 //! ```
-//! use symbolica::{atom::AtomCore, parse};
+//! use symbolica::prelude::*;
 //!
 //! let a = parse!("(x+1)^2");
 //! let b = a.expand();
@@ -20,7 +20,7 @@
 //! Create a new symbol and use it in an expression:
 //!
 //! ```
-//! use symbolica::{atom::Atom, parse, symbol};
+//! use symbolica::prelude::*;
 //!
 //! let x = symbol!("x");
 //! let expr = Atom::var(x) + 1;
@@ -31,8 +31,7 @@
 //! Define a function with attributes and use it in an expression:
 //!
 //! ```
-//! use symbolica::{function, parse, symbol};
-//! use symbolica::atom::{Symbol, SymbolAttribute, Atom, AtomCore};
+//! use symbolica::prelude::*;
 //!
 //! let f = symbol!("f"; Symmetric);
 //! let expr = function!(f, 3, 2) + (1, 4);
@@ -330,7 +329,7 @@ pub type SeriesExpansionFunction =
 ///
 /// Register a tagless function:
 /// ```
-/// use symbolica::{atom::EvaluationInfo, symbol};
+/// use symbolica::prelude::*;
 ///
 /// let _ = symbol!(
 ///     "double",
@@ -359,7 +358,7 @@ pub type SeriesExpansionFunction =
 ///
 /// Register an arbitrary-precision constant:
 /// ```
-/// use symbolica::{atom::EvaluationInfo, domains::float::{Float, Real}, symbol};
+/// use symbolica::prelude::*;
 ///
 /// let _ = symbol!(
 ///     "e",
@@ -613,7 +612,7 @@ pub enum SymbolAttribute {
 /// # Examples
 ///
 /// ```
-/// use symbolica::symbol;
+/// use symbolica::prelude::*;
 ///
 /// let x = symbol!("x");
 /// let (x, y) = symbol!("x", "y");
@@ -1142,7 +1141,7 @@ impl Symbol {
     /// # Examples
     ///
     /// ```
-    /// use symbolica::symbol;
+    /// use symbolica::prelude::*;
     ///
     /// let x = symbol!("test::x");
     /// assert_eq!(x.get_name(), "test::x");
@@ -1157,7 +1156,7 @@ impl Symbol {
     /// # Examples
     ///
     /// ```
-    /// use symbolica::symbol;
+    /// use symbolica::prelude::*;
     ///
     /// let x = symbol!("test::γ", aliases = ["gamma"]);
     /// assert_eq!(x.get_ascii_name(), Some("test_gamma".to_string()));
@@ -1182,7 +1181,7 @@ impl Symbol {
     /// # Examples
     ///
     /// ```
-    /// use symbolica::symbol;
+    /// use symbolica::prelude::*;
     ///
     /// let x = symbol!("test::γ", aliases = ["gamma"]);
     /// assert_eq!(x.get_stripped_ascii_name(), Some("gamma"));
@@ -1210,7 +1209,7 @@ impl Symbol {
     /// # Examples
     ///
     /// ```
-    /// use symbolica::symbol;
+    /// use symbolica::prelude::*;
     ///
     /// let x = symbol!("test::x");
     /// assert_eq!(x.get_stripped_name(), "x");
@@ -1225,7 +1224,7 @@ impl Symbol {
     /// # Examples
     ///
     /// ```
-    /// use symbolica::symbol;
+    /// use symbolica::prelude::*;
     ///
     /// let x = symbol!("x");
     /// println!("id = {}", x.get_id());
@@ -1239,7 +1238,7 @@ impl Symbol {
     /// # Examples
     ///
     /// ```
-    /// use symbolica::symbol;
+    /// use symbolica::prelude::*;
     ///
     /// let x = symbol!("test::x");
     /// assert_eq!(x.get_namespace(), "test");
@@ -1254,7 +1253,7 @@ impl Symbol {
     /// # Examples
     ///
     /// ```
-    /// use symbolica::symbol;
+    /// use symbolica::prelude::*;
     ///
     /// let x = symbol!("x");
     /// let x_ = symbol!("x_");
@@ -1274,7 +1273,7 @@ impl Symbol {
     /// # Examples
     ///
     /// ```
-    /// use symbolica::symbol;
+    /// use symbolica::prelude::*;
     ///
     /// let f = symbol!("f"; Symmetric);
     /// assert!(f.is_symmetric());
@@ -1288,7 +1287,7 @@ impl Symbol {
     /// # Examples
     ///
     /// ```
-    /// use symbolica::symbol;
+    /// use symbolica::prelude::*;
     ///
     /// let f = symbol!("f"; Antisymmetric);
     /// assert!(f.is_antisymmetric());
@@ -1302,7 +1301,7 @@ impl Symbol {
     /// # Examples
     ///
     /// ```
-    /// use symbolica::symbol;
+    /// use symbolica::prelude::*;
     ///
     /// let f = symbol!("f"; Cyclesymmetric);
     /// assert!(f.is_cyclesymmetric());
@@ -1316,7 +1315,7 @@ impl Symbol {
     /// # Examples
     ///
     /// ```
-    /// use symbolica::symbol;
+    /// use symbolica::prelude::*;
     ///
     /// let f = symbol!("f"; Linear);
     /// assert!(f.is_linear());
@@ -1330,7 +1329,7 @@ impl Symbol {
     /// # Examples
     ///
     /// ```
-    /// use symbolica::symbol;
+    /// use symbolica::prelude::*;
     ///
     /// let f = symbol!("f"; Scalar);
     /// assert!(f.is_scalar());
@@ -1344,7 +1343,7 @@ impl Symbol {
     /// # Examples
     ///
     /// ```
-    /// use symbolica::symbol;
+    /// use symbolica::prelude::*;
     ///
     /// let f = symbol!("f"; Real);
     /// assert!(f.is_real());
@@ -1358,7 +1357,7 @@ impl Symbol {
     /// # Examples
     ///
     /// ```
-    /// use symbolica::symbol;
+    /// use symbolica::prelude::*;
     ///
     /// let f = symbol!("f"; Integer);
     /// assert!(f.is_integer());
@@ -1372,7 +1371,7 @@ impl Symbol {
     /// # Examples
     ///
     /// ```
-    /// use symbolica::symbol;
+    /// use symbolica::prelude::*;
     ///
     /// let f = symbol!("f"; Positive);
     /// assert!(f.is_positive());
@@ -1475,7 +1474,7 @@ impl Symbol {
     ///
     /// # Example
     /// ```rust
-    /// use symbolica::{atom::AtomCore, symbol, tag};
+    /// use symbolica::prelude::*;
     /// let a = symbol!("symbolica::attr::x"; Linear, Antisymmetric; tags = [tag!("mytag"), "python::test2".to_string()]);
     /// let b = symbol!("symbolica::attr::y"; Linear; tags = [tag!("mytag")]);
     /// assert!(a.has_attributes_of(b));
@@ -1971,7 +1970,7 @@ impl Symbol {
 /// A symbol or a function.
 ///
 /// ```rust
-/// use symbolica::{atom::Indeterminate, parse, symbol};
+/// use symbolica::prelude::*;
 /// let x: Indeterminate = symbol!("x").into();
 /// let f: Indeterminate = parse!("f(x)").try_into().unwrap();
 /// ```
@@ -2538,7 +2537,7 @@ impl AtomView<'_> {
 /// Parse a new expression and expand it:
 ///
 /// ```
-/// use symbolica::{atom::AtomCore, parse};
+/// use symbolica::prelude::*;
 ///
 /// let a = parse!("(x+1)^2");
 /// let b = a.expand();
@@ -2549,7 +2548,7 @@ impl AtomView<'_> {
 /// Create a new symbol and use it in an expression:
 ///
 /// ```
-/// use symbolica::{atom::Atom, parse, symbol};
+/// use symbolica::prelude::*;
 ///
 /// let x = symbol!("x");
 /// let expr = Atom::var(x) + 1;
@@ -2560,8 +2559,7 @@ impl AtomView<'_> {
 /// Define a function with attributes and use it in an expression:
 ///
 /// ```
-/// use symbolica::{function, parse, symbol};
-/// use symbolica::atom::{Symbol, Atom, AtomCore};
+/// use symbolica::prelude::*;
 ///
 /// let f = symbol!("f"; Symmetric);
 /// let expr = function!(f, 3, 2) + (1, 4);
@@ -2573,7 +2571,7 @@ impl AtomView<'_> {
 ///
 /// The output can be controlled with
 /// ```
-/// use symbolica::{hide_namespace, parse};
+/// use symbolica::prelude::*;
 /// let a = parse!("x^2+cos(x)");
 /// println!("{:80}", a); // print the expression with indentation and line breaks to fit within 80 characters
 /// println!("{:+}", a); // print with a leading sign
@@ -2586,7 +2584,7 @@ impl AtomView<'_> {
 /// to print an expression in a format that can be parsed again.
 ///
 /// ```
-/// use symbolica::{atom::AtomCore, parse, printer::PrintOptions};
+/// use symbolica::prelude::*;
 /// let a = parse!("x^2+cos(x)");
 /// println!("{}", a.printer(PrintOptions::latex()));
 /// println!("{}", a.printer(PrintOptions::mathematica()));
@@ -2719,7 +2717,7 @@ impl Atom {
     ///
     /// # Examples
     /// ```rust
-    /// use symbolica::atom::{Atom, AtomCore};
+    /// use symbolica::prelude::*;
     /// let x = Atom::parse("x", "test", Default::default()).unwrap();
     /// assert_eq!(x.to_canonical_string(), "test::{}::x");
     /// ```
@@ -2950,8 +2948,7 @@ impl Atom {
 ///
 /// For example:
 /// ```
-/// # use symbolica::symbol;
-/// # use symbolica::atom::{Atom, AtomCore, FunctionBuilder};
+/// # use symbolica::prelude::*;
 /// # fn main() {
 /// let f_id = symbol!("f"; Symmetric);
 /// let fb = FunctionBuilder::new(f_id);
@@ -2980,7 +2977,7 @@ impl FunctionBuilder {
     /// Create a new `FunctionBuilder` from a variable or function. For other input, this function will panic.
     ///
     /// ```
-    /// # use symbolica::{atom::{Atom, AtomCore, FunctionBuilder}, parse};
+    /// # use symbolica::prelude::*;
     /// let f_id = parse!("f(1,2)");
     /// let fb = FunctionBuilder::from_atom(parse!("f(1,2)")).add_arg(3).finish();
     /// assert_eq!(fb, parse!("f(1,2,3)"));
@@ -3091,7 +3088,7 @@ impl<T: Into<Coefficient> + Clone> FunctionArgument for T {
 /// # Examples
 ///
 /// ```
-/// use symbolica::{atom::Atom, atom::Symbol, function, symbol, parse};
+/// use symbolica::prelude::*;
 /// let f_id = symbol!("f");
 /// let f = function!(symbol!("f"), 3, parse!("x"));
 /// ```
@@ -3099,7 +3096,7 @@ impl<T: Into<Coefficient> + Clone> FunctionArgument for T {
 /// Extend a function:
 ///
 /// ```
-/// use symbolica::{atom::Atom, atom::Symbol, function, symbol, parse};
+/// use symbolica::prelude::*;
 /// let f = function!(parse!("f(1,2,3)"), 4);
 /// assert_eq!(f, parse!("f(1,2,3,4)"));
 /// ```
@@ -3124,7 +3121,7 @@ macro_rules! function {
 /// Create a tag in the current project namespace if no explicit namespace is set.
 /// This macro can be used in the `symbol!` macro:
 /// ```
-/// use symbolica::{symbol, tag};
+/// use symbolica::prelude::*;
 /// let x = symbol!("tagged_x", tag = tag!("nonzero"));
 /// assert_eq!(x.has_tag("symbolica::nonzero"), true);
 /// ```
@@ -3148,7 +3145,7 @@ macro_rules! tag {
 ///
 /// For example:
 /// ```no_run
-/// use symbolica::symbol;
+/// use symbolica::prelude::*;
 /// let x = symbol!("x");
 /// let (x, y, z) = symbol!("x", "y", "z");
 /// let x_remote = symbol!("remote::x");
@@ -3162,14 +3159,14 @@ macro_rules! tag {
 /// between symbol names and attributes. See [SymbolAttribute] for all options.
 ///
 /// ```no_run
-/// use symbolica::symbol;
+/// use symbolica::prelude::*;
 /// let x = symbol!("x"; Symmetric, Linear);
 /// let (x, y, z) = symbol!("x", "y", "z"; Symmetric); // define all as symmetric
 /// ```
 ///
 /// Explicitly specifying a symbol without attributes:
 /// ```no_run
-/// use symbolica::symbol;
+/// use symbolica::prelude::*;
 /// let x = symbol!("x";);
 /// ```
 /// will panic if the symbol was previously defined with attributes. Use
@@ -3181,7 +3178,7 @@ macro_rules! tag {
 /// ### Tags
 /// You can set tags using `tag` or `tags` flags:
 /// ```no_run
-/// use symbolica::{symbol, tag};
+/// use symbolica::prelude::*;
 /// let x = symbol!("x", tag = tag!("nonzero"));
 /// let y = symbol!("y", tags = ["test::a", "test::b"]);
 /// let (w, z) = symbol!("w", "z"; tags = ["test::a", "test::b"]);
@@ -3191,7 +3188,7 @@ macro_rules! tag {
 /// ### Aliases
 /// You can set aliases using `aliases`:
 /// ```no_run
-/// use symbolica::{symbol, tag};
+/// use symbolica::prelude::*;
 /// let x = symbol!("x", aliases = ["alias1", "alias2"]);
 /// ```
 ///
@@ -3201,8 +3198,7 @@ macro_rules! tag {
 /// You can specify a normalization function for the symbol using `norm` flag:
 ///
 /// ```no_run
-/// use symbolica::symbol;
-/// use symbolica::atom::AtomView;
+/// use symbolica::prelude::*;
 /// let x = symbol!("f", norm = |f, out| {
 ///     if let AtomView::Fun(ff) = f {
 ///         if ff.get_nargs() % 2 == 1 {
@@ -3216,9 +3212,7 @@ macro_rules! tag {
 /// ### Printing
 /// You can define a custom printing function using the `print` flag:
 /// ```no_run
-/// use symbolica::symbol;
-/// use symbolica::atom::{AtomCore, AtomView};
-/// use symbolica::printer::PrintState;
+/// use symbolica::prelude::*;
 /// let _ = symbol!("mu", print = |a, opt, _state| {
 ///     if !opt.mode.is_latex() {
 ///         return None; // use default printer
@@ -3246,7 +3240,7 @@ macro_rules! tag {
 /// ### Derivatives
 /// You can define a custom derivative function using the `der` flag:
 /// ```no_run
-/// use symbolica::{atom::Atom, symbol};
+/// use symbolica::prelude::*;
 /// let _ = symbol!("tag", der = |a, arg, out| {
 ///     out.set_from_view(&a); // function behaves as a tag
 /// });
@@ -3257,7 +3251,7 @@ macro_rules! tag {
 /// You can define a function that returns the principal part and the regular part
 /// when evaluated at a pole using the `series` flag:
 /// ```no_run
-/// use symbolica::{atom::{Atom, AtomCore}, parse, symbol};
+/// use symbolica::prelude::*;
 /// let inv = symbol!("inv", series = |args| {
 ///     Some((Atom::Zero, args[0].rpow((-1).into()).unwrap().to_atom()))
 /// });
@@ -3270,7 +3264,7 @@ macro_rules! tag {
 /// ### Evaluation
 /// You can attach numeric evaluation implementations using the `eval` flag:
 /// ```no_run
-/// use symbolica::{atom::EvaluationInfo, symbol};
+/// use symbolica::prelude::*;
 ///
 /// let _ = symbol!(
 ///     "double",
@@ -3279,7 +3273,7 @@ macro_rules! tag {
 /// ```
 /// Constants that need arbitrary-precision evaluation can use [EvaluationInfo::constant]:
 /// ```no_run
-/// use symbolica::{atom::EvaluationInfo, domains::float::{Float, Real}, symbol};
+/// use symbolica::prelude::*;
 ///
 /// let _ = symbol!(
 ///     "e",
@@ -3292,7 +3286,7 @@ macro_rules! tag {
 ///
 /// You can attach custom user data to the symbol using the `data` flag:
 /// ```no_run
-/// use symbolica::{symbol, atom::UserData};
+/// use symbolica::prelude::*;
 /// let _ = symbol!("my_symbol", data = UserData::String("custom user data".to_owned()));
 /// ```
 /// It can be retrieved later using [Symbol::get_data]. See [UserData] for more details.
@@ -3301,7 +3295,7 @@ macro_rules! tag {
 /// `;`:
 ///
 /// ```no_run
-/// use symbolica::symbol;
+/// use symbolica::prelude::*;
 /// let _ = symbol!("gamma"; Symmetric, Linear; print = |_, _, _| { None });
 /// ```
 #[macro_export]
@@ -3504,7 +3498,7 @@ macro_rules! try_symbol {
 ///
 /// Returns `None` if the symbol has not been defined yet.
 /// ```
-/// use symbolica::get_symbol;
+/// use symbolica::prelude::*;
 /// let x = symbolica::get_symbol!("newsymbol::x");
 /// assert!(x.is_none());
 /// let sin = symbolica::get_symbol!("sin");
@@ -3535,14 +3529,14 @@ macro_rules! get_symbol {
 /// The structure is as follows:
 ///
 /// ```no_run
-/// # use symbolica::symbol_group;
+/// # use symbolica::prelude::*;
 /// symbol_group!("name1"; Linear; |symbols, b| { b },
 ///               "name2";; |symbols, b| { b });
 /// ```
 ///
 /// For example, to define `tan` and `sec` with custom derivatives that depend on each other:
 /// ```
-/// use symbolica::{atom::AtomCore, function, symbol_group};
+/// use symbolica::prelude::*;
 /// let _ = symbol_group!("test::tan";;
 ///     |symbs, b| {
 ///         let sec = symbs[1];
@@ -3592,14 +3586,14 @@ macro_rules! try_symbol_group {
 /// # Examples
 /// Parse from a literal string:
 /// ```
-/// use symbolica::parse;
+/// use symbolica::prelude::*;
 /// let a = parse!("x^2 + 5 + f(x)");
 /// println!("{}", a);
 /// ```
 ///
 /// Parse a constructed string:
 /// ```
-/// use symbolica::parse;
+/// use symbolica::prelude::*;
 /// let s = format!("x^{}", 2);
 /// let a = parse!(s);
 /// println!("{}", a);
@@ -3607,14 +3601,14 @@ macro_rules! try_symbol_group {
 ///
 /// Parse using another default namespace:
 /// ```
-/// use symbolica::parse;
+/// use symbolica::prelude::*;
 /// let a = parse!("test::x + y", default_namespace = "custom");
 /// assert_eq!(a, parse!("test::x + custom::y"));
 /// ```
 ///
 /// Parse a complex number:
 /// ```
-/// use symbolica::parse;
+/// use symbolica::prelude::*;
 /// let a = parse!("(2+3i)*x");
 /// println!("{}", a);
 /// ```
@@ -3622,14 +3616,14 @@ macro_rules! try_symbol_group {
 /// Parse a floating-point number in exponential notation with
 /// a custom precision of 5 decimal digits:
 /// ```
-/// use symbolica::parse;
+/// use symbolica::prelude::*;
 /// let a = parse!("1.23456e-6`5");
 /// println!("{}", a);
 /// ```
 ///
 /// Parse Mathematica code:
 /// ```
-/// use symbolica::parse;
+/// use symbolica::prelude::*;
 /// let a = parse!("Cos[x] + Sqrt[Conjugate[x]] + Test`y + Exp[x] + Log[x]", Mathematica);
 /// println!("{}", a);
 /// ```
@@ -3641,7 +3635,7 @@ macro_rules! try_symbol_group {
 ///
 /// Parse with custom settings:
 /// ```
-/// use symbolica::{parse, parser::ParseSettings};
+/// use symbolica::prelude::*;
 /// let a = parse!("Cos[x]", settings = ParseSettings::mathematica());
 /// println!("{}", a);
 /// ```
@@ -3695,14 +3689,14 @@ macro_rules! try_parse {
 ///
 /// # Examples
 /// ```
-/// use symbolica::parse_lit;
+/// use symbolica::prelude::*;
 /// let a = parse_lit!(x ^ 2 + 5 + f(x));
 /// println!("{}", a);
 /// ```
 ///
 /// Parse using another default namespace:
 /// ```
-/// use symbolica::{parse, parse_lit};
+/// use symbolica::prelude::*;
 /// let a = parse_lit!(test::x + y, default_namespace = "custom");
 /// assert_eq!(a, parse!("test::x + custom::y"));
 /// ```

@@ -2,12 +2,7 @@
 //!
 //! # Examples
 //! ```
-//! use symbolica::{
-//!   atom::{Atom, AtomCore},
-//!   domains::finite_field::Zp,
-//!   parse,
-//!   poly::{groebner::GroebnerBasis, polynomial::MultivariatePolynomial, GrevLexOrder},
-//! };
+//! use symbolica::prelude::*;
 //!
 //! let polys = [
 //!     "v1 v2 v3 v4 - 1",

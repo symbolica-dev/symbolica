@@ -2,7 +2,7 @@
 //!
 //! # Examples
 //! ```
-//! use symbolica::{atom::AtomCore, parse, symbol};
+//! use symbolica::prelude::*;
 //!
 //! let x = symbol!("x");
 //! let a = parse!("(1-cos(x))/sin(x)");
@@ -77,7 +77,7 @@ impl<T: Into<Rational>> From<T> for SeriesDepth {
 ///
 /// A series can be constructed from an [Atom]:
 /// ```
-/// use symbolica::{atom::AtomCore, parse, symbol};
+/// use symbolica::prelude::*;
 ///
 /// let x = symbol!("x");
 /// let a = parse!("(1-cos(x))/sin(x)");

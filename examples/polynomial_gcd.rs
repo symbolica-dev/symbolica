@@ -1,8 +1,4 @@
-use symbolica::{
-    atom::AtomCore,
-    domains::{integer::Z, rational::Q},
-    parse,
-};
+use symbolica::prelude::*;
 use tracing_subscriber::{EnvFilter, fmt, prelude::*, util::SubscriberInitExt};
 
 fn gcd_integer_poly() {

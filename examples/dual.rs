@@ -1,7 +1,4 @@
-use symbolica::{
-    create_hyperdual_from_components,
-    domains::{float::FloatLike, rational::Rational},
-};
+use symbolica::prelude::*;
 
 create_hyperdual_from_components!(
     Dual,

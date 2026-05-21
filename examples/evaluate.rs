@@ -1,8 +1,5 @@
 use ahash::HashMap;
-use symbolica::atom::Atom;
-use symbolica::atom::AtomCore;
-use symbolica::evaluate::EvaluationFn;
-use symbolica::{parse, symbol};
+use symbolica::prelude::*;
 
 fn main() {
     let x = symbol!("x");
