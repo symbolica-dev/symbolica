@@ -306,8 +306,7 @@ impl ExpressionEvaluator<Complex<Rational>> {
     ///
     /// Compile and evaluate the function `x + y` for `f64` inputs:
     /// ```rust
-    /// # use symbolica::{atom::AtomCore, parse};
-    /// # use symbolica::evaluate::{FunctionMap, OptimizationSettings};
+    /// # use symbolica::prelude::*;
     /// let params = vec![parse!("x"), parse!("y")];
     /// let mut evaluator = parse!("x + y")
     ///     .evaluator(&FunctionMap::new(), &params, OptimizationSettings::default())
@@ -353,8 +352,7 @@ impl<T: JITCompiledNumber + Clone> ExpressionEvaluator<T> {
     ///
     /// Compile and evaluate the function `x + y` for `f64` inputs:
     /// ```rust
-    /// # use symbolica::{atom::AtomCore, parse};
-    /// # use symbolica::evaluate::{FunctionMap, OptimizationSettings};
+    /// # use symbolica::prelude::*;
     /// let params = vec![parse!("x"), parse!("y")];
     /// let mut evaluator = parse!("x + y")
     ///     .evaluator(&FunctionMap::new(), &params, OptimizationSettings::default())

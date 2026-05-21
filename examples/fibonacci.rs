@@ -1,7 +1,4 @@
-use symbolica::{
-    atom::{Atom, AtomCore},
-    parse, symbol,
-};
+use symbolica::prelude::*;
 
 fn main() {
     // prepare all patterns

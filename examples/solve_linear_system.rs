@@ -1,17 +1,6 @@
 use std::sync::Arc;
 
-use symbolica::{
-    atom::{AtomCore, AtomView, representation::InlineVar},
-    domains::{
-        integer::Z,
-        rational::Q,
-        rational_polynomial::{RationalPolynomial, RationalPolynomialField},
-    },
-    parse,
-    poly::PolyVariable,
-    symbol,
-    tensors::matrix::Matrix,
-};
+use symbolica::prelude::*;
 
 fn solve() {
     let x = symbol!("x").into();

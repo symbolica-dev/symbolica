@@ -28,8 +28,7 @@ impl<A, T> EvaluationFn<A, T> {
 /// Examples
 /// --------
 /// ```rust
-/// use symbolica::{atom::AtomCore, parse, symbol};
-/// use symbolica::evaluate::{FunctionMap, OptimizationSettings};
+/// use symbolica::prelude::*;
 /// let mut fn_map = FunctionMap::new();
 /// fn_map.add_function(symbol!("f"), vec![symbol!("x")], parse!("x^2 + 1")).unwrap();
 ///

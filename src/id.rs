@@ -6,7 +6,7 @@
 //! # Examples
 //!
 //! ```
-//! use symbolica::{atom::AtomCore, id::Pattern, parse};
+//! use symbolica::prelude::*;
 //!
 //! let expr = parse!("f(1,2,x) + f(1,2,3)");
 //! let pat = parse!("f(1,2,y_)");
@@ -39,7 +39,7 @@ use crate::{
 /// # Examples
 /// Patterns can be created from atoms:
 /// ```
-/// # use symbolica::{atom::AtomCore, parse};
+/// # use symbolica::prelude::*;
 /// parse!("x_+1").to_pattern();
 /// ```
 #[derive(Clone)]
@@ -59,7 +59,7 @@ impl From<Symbol> for Pattern {
     /// # Examples
     ///
     /// ```
-    /// use symbolica::{symbol, id::Pattern};
+    /// use symbolica::prelude::*;
     ///
     /// let p = symbol!("x_").into();
     /// assert!(matches!(p, Pattern::Wildcard(_)));
@@ -369,7 +369,7 @@ impl<'a, 'b> ReplaceBuilder<'a, 'b> {
     /// # Example
     ///
     /// ```
-    /// use symbolica::{atom::AtomCore, parse, symbol};
+    /// use symbolica::prelude::*;
     ///
     /// let r = parse!("f(2)").replace(parse!("f(x_)")).with(parse!("f(x_+1)"));
     /// assert_eq!(r, parse!("f(3)"));
@@ -437,7 +437,7 @@ impl<'a, 'b> ReplaceBuilder<'a, 'b> {
     ///
     /// Prefix the argument of a function with `p`:
     /// ```
-    /// use symbolica::{atom::AtomCore, function, parse, printer::PrintOptions, symbol};
+    /// use symbolica::prelude::*;
     /// let (f, x_) = symbol!("f", "x_");
     /// let a = function!(f, 1) * function!(f, 3);
     /// let p = function!(f, x_);
@@ -486,8 +486,7 @@ impl<'a, 'b> ReplaceBuilder<'a, 'b> {
     /// # Example
     ///
     /// ```
-    /// use symbolica::{atom::AtomCore, parse};
-    /// use symbolica::id::Pattern;
+    /// use symbolica::prelude::*;
     /// let expr = parse!("f(x) + f(y)");
     /// let pattern = parse!("f(x_)").to_pattern();
     /// let replacement = parse!("f(z)").to_pattern();
@@ -525,7 +524,7 @@ impl<'a, 'b> ReplaceBuilder<'a, 'b> {
     /// # Example
     ///
     /// ```
-    /// use symbolica::{atom::AtomCore, parse, symbol};
+    /// use symbolica::prelude::*;
     ///
     /// for x in parse!("f(x,y)").replace(parse!("x_")).match_iter() {
     ///     println!("{}", x[&symbol!("x_")]);
@@ -3197,7 +3196,7 @@ impl WildcardRestriction {
     /// # Examples
     /// Check if `x` is greater than 1:
     /// ```
-    /// # use symbolica::id::WildcardRestriction;
+    /// # use symbolica::prelude::*;
     /// WildcardRestriction::filter(|x| x.to_atom() > 1);
     /// ```
     pub fn filter(f: impl FilterFn + 'static) -> Self {
@@ -3242,8 +3241,7 @@ impl Condition<PatternRestriction> {
     ///
     /// # Example
     /// ```
-    /// use symbolica::id::{Condition, ConditionResult, Pattern};
-    /// use symbolica::{atom::AtomCore, parse, symbol};
+    /// use symbolica::prelude::*;
     /// let expr = parse!("f(1, 2, 3)");
     /// let out = expr
     ///     .replace(parse!("f(x_,y_,z_)"))
@@ -3314,7 +3312,7 @@ impl Symbol {
     /// # Example
     /// Restrict the wildcard `x__` to a length between 2 and 3:
     /// ```
-    /// use symbolica::{id::WildcardRestriction, symbol};
+    /// use symbolica::prelude::*;
     /// symbol!("x__").restrict(WildcardRestriction::Length(2, Some(3)));
     /// ```
     pub fn restrict(&self, restriction: WildcardRestriction) -> Condition<PatternRestriction> {
@@ -3326,7 +3324,7 @@ impl Symbol {
     ///
     /// # Examples
     /// ```
-    /// use symbolica::{id::WildcardRestriction, symbol};
+    /// use symbolica::prelude::*;
     /// symbol!("x_").filter_tag("symbolica::real".into());
     /// ```
     pub fn filter_tag(&self, tag: String) -> Condition<PatternRestriction> {
@@ -3342,7 +3340,7 @@ impl Symbol {
     /// # Examples
     /// Restrict the wildcard `x_` to be greater than 1:
     /// ```
-    /// use symbolica::{id::WildcardRestriction, symbol};
+    /// use symbolica::prelude::*;
     /// symbol!("x_").filter(|x| x.to_atom() > 1);
     /// ```
     #[deprecated(since = "1.4.0", note = "Use filter_single or filter_match")]
@@ -3355,7 +3353,7 @@ impl Symbol {
     /// # Examples
     /// Restrict the wildcard `x_` to be greater than 1:
     /// ```
-    /// use symbolica::{id::WildcardRestriction, symbol};
+    /// use symbolica::prelude::*;
     /// symbol!("x_").filter_single(|x| x > 1);
     /// ```
     pub fn filter_single(
@@ -3381,7 +3379,7 @@ impl Symbol {
     /// # Examples
     /// Restrict the wildcard `x_` to be greater than 1:
     /// ```
-    /// use symbolica::{id::WildcardRestriction, symbol};
+    /// use symbolica::prelude::*;
     /// symbol!("x_").filter(|x| x.to_atom() > 1);
     /// ```
     pub fn filter_match(&self, f: impl FilterFn + 'static) -> Condition<PatternRestriction> {
@@ -3393,7 +3391,7 @@ impl Symbol {
     /// # Example
     /// Restrict the wildcard `x_` to be greater than `y_ + 1`:
     /// ```
-    /// use symbolica::{id::WildcardRestriction, symbol};
+    /// use symbolica::prelude::*;
     /// symbol!("x_").filter_cmp(symbol!("y_"), |x, y| x.to_atom() > y.to_atom() + 1);
     /// ```
     pub fn filter_cmp(&self, s: Symbol, f: impl CmpFn + 'static) -> Condition<PatternRestriction> {

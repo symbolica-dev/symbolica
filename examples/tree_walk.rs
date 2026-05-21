@@ -1,8 +1,4 @@
-use symbolica::{
-    atom::Atom,
-    id::{AtomTreeIterator, MatchSettings},
-    parse,
-};
+use symbolica::prelude::*;
 
 fn main() {
     let expr: Atom = parse!("f(z)*f(f(x),z)*f(y)");

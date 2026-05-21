@@ -164,8 +164,7 @@ define_formatters!(
 /// # Examples
 ///
 /// ```
-/// use symbolica::{atom::AtomCore, parse};
-/// use symbolica::printer::PrintOptions;
+/// use symbolica::prelude::*;
 /// let a = parse!("x + y");
 /// println!("{}", a.printer(PrintOptions::latex()));
 /// ```

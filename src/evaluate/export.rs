@@ -175,8 +175,7 @@ impl<T: ExportNumber + SingleFloat> ExpressionEvaluator<T> {
     ///
     /// Create a C++ library that evaluates the function `x + y` for `f64` inputs:
     /// ```rust
-    /// use symbolica::{atom::AtomCore, parse};
-    /// use symbolica::evaluate::{CompiledNumber, FunctionMap, OptimizationSettings};
+    /// use symbolica::prelude::*;
     /// let fn_map = FunctionMap::new();
     /// let params = vec![parse!("x"), parse!("y")];
     /// let optimization_settings = OptimizationSettings::default();

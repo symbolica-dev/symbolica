@@ -1,12 +1,6 @@
 use std::sync::Arc;
 
-use symbolica::{
-    atom::AtomCore,
-    domains::{finite_field::Zp, integer::Z},
-    parse,
-    poly::{PolyVariable, factor::Factorize, polynomial::MultivariatePolynomial},
-    symbol,
-};
+use symbolica::prelude::*;
 
 fn factor_ff_univariate() {
     let exp = parse!("x^100-1").expand();

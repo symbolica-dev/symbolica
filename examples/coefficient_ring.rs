@@ -1,6 +1,6 @@
 use std::sync::Arc;
 
-use symbolica::{atom::AtomCore, parse, symbol};
+use symbolica::prelude::*;
 
 fn main() {
     let expr = parse!("x*z+x*(y+2)^-1*(y+z+1)");

@@ -1,6 +1,6 @@
 use std::f64::consts::PI;
 
-use symbolica::numerical_integration::{ContinuousGrid, DiscreteGrid, Grid, MonteCarloRng, Sample};
+use symbolica::prelude::*;
 
 fn main() {
     // Integrate x*pi + x^2 using multi-channeling:

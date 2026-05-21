@@ -4,12 +4,7 @@ use std::{
 };
 
 use smartstring::{LazyCompact, SmartString};
-use symbolica::{
-    domains::{SelfRing, integer::Z, rational::Q, rational_polynomial::RationalPolynomial},
-    parser::{ParseSettings, Token},
-    printer::{PrintOptions, PrintState},
-    symbol,
-};
+use symbolica::prelude::*;
 
 fn main() {
     let mut buffer = String::with_capacity(2048);
@@ -52,7 +47,7 @@ fn main() {
             .unwrap();
 
         buffer.clear();
-        r.format(&print_opt, PrintState::new(), &mut buffer)
+        symbolica::domains::SelfRing::format(&r, &print_opt, PrintState::new(), &mut buffer)
             .unwrap();
         writeln!(stdout, "{buffer}").unwrap();
 

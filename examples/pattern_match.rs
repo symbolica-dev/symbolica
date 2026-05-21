@@ -1,4 +1,4 @@
-use symbolica::{atom::AtomCore, id::Match, parse};
+use symbolica::prelude::*;
 
 fn main() {
     let expr = parse!("x*y*w*z*f(x,y,x*y,z)");

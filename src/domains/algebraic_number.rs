@@ -138,11 +138,7 @@ where
 /// # Examples
 ///
 /// ```
-/// use symbolica::{
-///     atom::{Atom, AtomCore},
-///     domains::{algebraic_number::AlgebraicExtension, rational::Q, Ring, RingOps},
-///     parse,
-/// };
+/// use symbolica::prelude::*;
 ///
 /// let extension = AlgebraicExtension::new(parse!("x^2-2").to_polynomial(&Q, None));
 /// let sqrt_2 = extension.to_element(parse!("x").to_polynomial::<_, u16>(&Q, None));
@@ -157,11 +153,7 @@ where
 /// Galois field:
 ///
 /// ```
-/// use symbolica::{
-///     atom::{Atom, AtomCore, Symbol},
-///     domains::{algebraic_number::AlgebraicExtension, finite_field::Zp, rational::Q, Ring},
-///     symbol,
-/// };
+/// use symbolica::prelude::*;
 ///
 /// let field = AlgebraicExtension::galois_field(Zp::new(17), 4, symbol!("x0").into());
 /// ```
@@ -603,7 +595,7 @@ impl<R: Ring> AlgebraicExtension<R> {
     ///
     /// Creating Gaussian rationals:
     /// ```rust
-    /// use symbolica::{parse, atom::AtomCore, domains::{algebraic_number::AlgebraicExtension, rational::Q}, poly::factor::Factorize};
+    /// use symbolica::prelude::*;
     /// let Q_i = AlgebraicExtension::new_complex(Q);
     /// let poly = parse!("(-1+6𝑖)*x+(4+2𝑖)*x^2+3𝑖").to_polynomial::<_, u8>(&Q_i, None);
     /// assert_eq!(poly.factor().len(), 3);
@@ -646,11 +638,7 @@ impl<R: Ring> std::fmt::Display for AlgebraicExtension<R> {
 /// # Examples
 ///
 /// ```
-/// use symbolica::{
-///     atom::{Atom, AtomCore},
-///     domains::{algebraic_number::AlgebraicExtension, rational::Q, Ring, RingOps},
-///     parse,
-/// };
+/// use symbolica::prelude::*;
 ///
 /// let extension = AlgebraicExtension::new(parse!("x^2-2").to_polynomial(&Q, None));
 /// let sqrt_2 = extension.to_element(parse!("x").to_polynomial::<_, u16>(&Q, None));

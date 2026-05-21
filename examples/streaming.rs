@@ -1,9 +1,5 @@
 use brotli::CompressorWriter;
-use symbolica::{
-    atom::AtomCore,
-    parse,
-    streaming::{TermStreamer, TermStreamerConfig},
-};
+use symbolica::prelude::*;
 
 fn main() {
     let input = parse!("x+ f(x) + 2*f(y) + 7*f(z)");

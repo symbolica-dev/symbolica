@@ -1,8 +1,4 @@
-use symbolica::{
-    atom::AtomCore,
-    evaluate::{FunctionMap, OptimizationSettings},
-    parse,
-};
+use symbolica::prelude::*;
 use wide::f64x4;
 
 // a large test polynomial

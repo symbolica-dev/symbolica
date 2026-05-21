@@ -11,7 +11,7 @@
 //! For example:
 //!
 //! ```
-//! use symbolica::{atom::AtomCore, parse, symbol};
+//! use symbolica::prelude::*;
 //!
 //! fn main() {
 //!     let input = parse!("x^2*log(2*x + y) + exp(3*x)");
@@ -74,6 +74,98 @@ pub mod tensors;
 pub mod transcendental;
 pub mod transformer;
 pub mod utils;
+
+/// Common imports for working with Symbolica.
+///
+/// The prelude is intended for examples, applications, and notebooks where a compact import is more
+/// useful than listing every trait and constructor separately.
+///
+/// ```
+/// use symbolica::prelude::*;
+///
+/// let x = symbol!("x");
+/// let expr = parse!("x^2 + 2*x + 1");
+/// assert_eq!(expr.derivative(x), parse!("2 + 2*x"));
+/// ```
+pub mod prelude {
+    pub use crate::{
+        LicenseManager, create_hyperdual_from_components, create_hyperdual_single_derivative,
+        function, get_symbol, hide_namespace, initialize, namespace, parse, parse_lit, symbol,
+        symbol_group, tag, try_parse, try_parse_lit, try_symbol, try_symbol_group,
+    };
+
+    pub use crate::atom::{
+        Atom, AtomCore, AtomOrView, AtomType, AtomView, EvaluationInfo, FunctionArgument,
+        FunctionBuilder, Indeterminate, InlineNum, InlineVar, Symbol, UserData, UserDataKey,
+    };
+
+    pub use crate::coefficient::{Coefficient, CoefficientView, ConvertToRing};
+
+    pub use crate::domains::{
+        EuclideanDomain, Field, Ring, RingOps, Set,
+        algebraic_number::{AlgebraicExtension, AlgebraicNumber},
+        atom::AtomField,
+        factorized_rational_polynomial::FactorizedRationalPolynomial,
+        finite_field::{FiniteField, FiniteFieldCore, FiniteFieldElement, Z2, Zp, Zp64},
+        float::{
+            Complex, Constructible, DoubleFloat, ErrorPropagatingFloat, F64, Float, FloatLike,
+            Real, RealLike, SingleFloat,
+        },
+        integer::{Integer, IntegerRing, Z},
+        rational::{Q, Rational},
+        rational_polynomial::{RationalPolynomial, RationalPolynomialField},
+    };
+
+    pub use crate::evaluate::{
+        BatchEvaluator, CompileOptions, CompiledCode, CompiledComplexEvaluator, CompiledNumber,
+        CompiledRealEvaluator, CompiledSimdComplexEvaluator, CompiledSimdRealEvaluator, Dualizer,
+        EvaluationDomain, EvaluationFn, EvaluatorLoader, ExportNumber, ExportSettings,
+        ExportedCode, ExpressionEvaluator, ExternalFunction, FunctionMap, InlineASM,
+        OptimizationSettings, Vectorize,
+    };
+
+    pub use crate::id::{
+        AtomTreeIterator, BorrowReplacement, Condition, ConditionResult, Match, MatchError,
+        MatchSettings, MatchStack, Pattern, PatternAtomTreeIterator, PatternRestriction, Relation,
+        ReplaceBuilder, ReplaceIterator, ReplaceSettings, ReplaceWith, Replacement,
+        WildcardRestriction,
+    };
+
+    pub use crate::numerical_integration::{
+        ContinuousGrid, DiscreteGrid, Grid, MonteCarloRng, Sample,
+    };
+
+    pub use crate::parser::{ParseMode, ParseSettings, Token};
+
+    pub use crate::poly::{
+        Exponent, GrevLexOrder, LexOrder, MonomialOrder, PolyVariable, PositiveExponent,
+        factor::Factorize,
+        gcd::PolynomialGCD,
+        groebner::GroebnerBasis,
+        polynomial::{MultivariatePolynomial, PolynomialRing},
+        series::{Series, SeriesDepth},
+        univariate::{UnivariatePolynomial, UnivariatePolynomialRing},
+    };
+
+    pub use crate::printer::{
+        AtomPrinter, CanonicalOrderingSettings, PrintMode, PrintOptions, PrintState,
+    };
+
+    pub use crate::solve::SolveError;
+
+    pub use crate::state::State;
+
+    pub use crate::streaming::{TermStreamer, TermStreamerConfig};
+
+    pub use crate::tensors::{
+        CanonicalTensor,
+        matrix::{Matrix, Vector},
+    };
+
+    pub use crate::transcendental::TranscendentalFunctions;
+
+    pub use crate::transformer::Transformer;
+}
 
 pub use graphica as graph; // re-export graphica
 #[doc(hidden)]
