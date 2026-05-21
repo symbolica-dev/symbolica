@@ -597,7 +597,6 @@ impl JITCompiledNumber for f64 {
 
         let mut config = Config::default();
         config.set_complex(false);
-        config.set_simd(false);
         settings.apply_to_config(&mut config);
         config.set_defuns(Self::convert_external_functions(external_functions)?);
 
@@ -982,7 +981,6 @@ impl JITCompiledNumber for Complex<f64> {
     ) -> Result<JITCompiledEvaluator<Complex<f64>>, String> {
         let mut config = Config::default();
         config.set_complex(true);
-        config.set_simd(false);
         settings.apply_to_config(&mut config);
         config.set_defuns(Self::convert_external_functions(external_functions)?);
 
