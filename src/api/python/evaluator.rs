@@ -872,26 +872,28 @@ impl PythonExpressionEvaluator {
     /// assembly output that uses real arithmetic instead of complex arithmetic
     /// where possible.
     ///
-    /// You can also set if all encountered sqrt, log, and powf operations with real
-    /// arguments are expected to yield real results.
+    /// You can also set if all encountered sqrt, log, powf, and custom evaluator
+    /// operations with real arguments are expected to yield real results.
     ///
     /// Must be called after all optimization functions and merging are performed
     /// on the evaluator and before the first call to `evaluate`, or the registration will be lost.
-    #[pyo3(signature = (real_params, sqrt_real = false, log_real = false, powf_real = false, verbose = false))]
+    #[pyo3(signature = (real_params, sqrt_real = false, log_real = false, powf_real = false, real_if_args_real = false, verbose = false))]
     fn set_real_params(
         &mut self,
         real_params: Vec<usize>,
         sqrt_real: bool,
         log_real: bool,
         powf_real: bool,
+        real_if_args_real: bool,
         verbose: bool,
     ) -> PyResult<()> {
         self.jit_complex = None; // force a recompilation
+        let mut settings = ComplexEvaluatorSettings::new(sqrt_real, log_real, powf_real, verbose);
+        if real_if_args_real {
+            settings = settings.real_if_args_real();
+        }
         self.eval_complex
-            .set_real_params(
-                &real_params,
-                ComplexEvaluatorSettings::new(sqrt_real, log_real, powf_real, verbose),
-            )
+            .set_real_params(&real_params, settings)
             .map_err(|e| exceptions::PyValueError::new_err(e.to_string()))
     }
 
