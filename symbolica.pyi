@@ -8576,6 +8576,7 @@ class Evaluator:
         sqrt_real=False,
         log_real=False,
         powf_real=False,
+        real_if_args_real=False,
         verbose=False,
     ) -> None:
         """
@@ -8583,8 +8584,8 @@ class Evaluator:
         assembly output that uses real arithmetic instead of complex arithmetic
         where possible.
 
-        You can also set if all encountered sqrt, log, and powf operations with real
-        arguments are expected to yield real results.
+        You can also set if all encountered sqrt, log, powf, and custom evaluator
+        operations with real arguments are expected to yield real results.
 
         Must be called after all optimization functions and merging are performed
         on the evaluator, or the registration will be lost.
@@ -8599,6 +8600,8 @@ class Evaluator:
             Whether logarithms should be assumed real.
         powf_real: Any
             Whether fractional powers should be assumed real.
+        real_if_args_real: Any
+            Whether custom evaluators should yield real results for real arguments.
         verbose: Any
             Whether verbose output should be enabled.
         """

@@ -9,6 +9,8 @@ pub struct ComplexEvaluatorSettings {
     pub(crate) log_real: bool,
     /// Whether powf with real arguments yields real results.
     pub(crate) powf_real: bool,
+    /// Whether custom evaluator functions with real arguments yield real results.
+    pub(crate) real_if_args_real: bool,
     /// Report on the number of converted operations.
     pub(crate) verbose: bool,
 }
@@ -20,6 +22,7 @@ impl ComplexEvaluatorSettings {
             sqrt_real,
             log_real,
             powf_real,
+            real_if_args_real: false,
             verbose,
         }
     }
@@ -42,6 +45,12 @@ impl ComplexEvaluatorSettings {
         self
     }
 
+    /// Set that all custom evaluator functions with real arguments yield real results.
+    pub fn real_if_args_real(mut self) -> Self {
+        self.real_if_args_real = true;
+        self
+    }
+
     /// Set verbose reporting.
     pub fn verbose(mut self) -> Self {
         self.verbose = true;
@@ -56,6 +65,7 @@ impl Default for ComplexEvaluatorSettings {
             sqrt_real: false,
             log_real: false,
             powf_real: false,
+            real_if_args_real: false,
             verbose: false,
         }
     }
@@ -66,8 +76,8 @@ impl<T: Default + PartialEq> ExpressionEvaluator<Complex<T>> {
     /// assembly output that uses real arithmetic instead of complex arithmetic
     /// where possible.
     ///
-    /// You can also set if all encountered sqrt, log, and powf operations with real
-    /// arguments are expected to yield real results.
+    /// You can also set if all encountered sqrt, log, powf, and custom evaluator
+    /// operations with real arguments are expected to yield real results.
     ///
     /// Must be called after all optimization functions and merging are performed
     /// on the evaluator, or the registration will be lost.
@@ -192,8 +202,15 @@ impl<T: Default + PartialEq> ExpressionEvaluator<Complex<T>> {
                     }
                     subcomponents[*r] = *sc;
                 }
-                Instr::ExternalFun(r, ..) => {
-                    *sc = ComplexPhase::Any;
+                Instr::ExternalFun(r, _, a) => {
+                    if settings.real_if_args_real
+                        && !a.is_empty()
+                        && a.iter().all(|x| subcomponents[*x] == ComplexPhase::Real)
+                    {
+                        *sc = ComplexPhase::Real;
+                    } else {
+                        *sc = ComplexPhase::Any;
+                    }
                     subcomponents[*r] = *sc;
                 }
                 Instr::IfElse(..) | Instr::Goto(..) | Instr::Label(..) => {
