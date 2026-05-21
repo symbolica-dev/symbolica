@@ -1909,7 +1909,7 @@ impl CoefficientView<'_> {
                 } else {
                     match self {
                         CoefficientView::Natural(rn, _, ir, _) => {
-                            return (
+                            (
                                 Coefficient::one(),
                                 if *rn > 0 && *ir == 0 {
                                     Coefficient::Infinity(None)
@@ -1923,10 +1923,10 @@ impl CoefficientView<'_> {
                                     Coefficient::Indeterminate
                                 },
                                 Coefficient::one(),
-                            );
+                            )
                         }
                         CoefficientView::Large(rn, ir) => {
-                            return (
+                            (
                                 Coefficient::one(),
                                 if !rn.is_negative() && !rn.is_zero() && ir.is_zero() {
                                     Coefficient::Infinity(None)
@@ -1940,21 +1940,21 @@ impl CoefficientView<'_> {
                                     Coefficient::Indeterminate
                                 },
                                 Coefficient::one(),
-                            );
+                            )
                         }
                         CoefficientView::Indeterminate => {
-                            return (
+                            (
                                 Coefficient::one(),
                                 Coefficient::Indeterminate,
                                 Coefficient::one(),
-                            );
+                            )
                         }
                         CoefficientView::Infinity(_) => {
-                            return (
+                            (
                                 Coefficient::one(),
                                 Coefficient::Infinity(None),
                                 Coefficient::one(),
-                            );
+                            )
                         }
                         _ => {
                             error!(
@@ -2087,7 +2087,7 @@ impl Ord for CoefficientView<'_> {
                 .cmp(&n2.to_rat())
                 .then_with(|| d1.to_rat().cmp(&d2.to_rat())),
             (CoefficientView::FiniteField(n1, _), CoefficientView::FiniteField(n2, _)) => {
-                n1.inner().cmp(&n2.inner())
+                n1.inner().cmp(n2.inner())
             }
             (CoefficientView::Natural(n1, d1, ni1, di1), CoefficientView::Large(n2, d)) => {
                 Rational::from_int_unchecked(*n1, *d1)
@@ -2804,15 +2804,14 @@ impl<'a> TryFrom<AtomView<'a>> for f64 {
 
         let f = value.to_float(16);
 
-        if let AtomView::Num(n) = f.as_view() {
-            if let CoefficientView::Float(r, i) = n.get_coeff_view() {
+        if let AtomView::Num(n) = f.as_view()
+            && let CoefficientView::Float(r, i) = n.get_coeff_view() {
                 if i.is_zero() {
                     return Ok(r.to_float().to_f64());
                 } else {
                     return Err("Cannot convert complex number to float");
                 }
             }
-        }
 
         Err("Not a number")
     }
@@ -2860,11 +2859,10 @@ impl<'a> TryFrom<AtomView<'a>> for Complex<f64> {
 
         let f = value.to_float(16);
 
-        if let AtomView::Num(n) = f.as_view() {
-            if let CoefficientView::Float(r, i) = n.get_coeff_view() {
+        if let AtomView::Num(n) = f.as_view()
+            && let CoefficientView::Float(r, i) = n.get_coeff_view() {
                 return Ok(Complex::new(r.to_float().to_f64(), i.to_float().to_f64()));
             }
-        }
 
         Err("Not a number")
     }
@@ -3082,12 +3080,11 @@ impl AtomView<'_> {
                         ));
                     }
                     _ => {
-                        if let Some(eval) = s.get_evaluation_info() {
-                            if let Ok(v) = eval.evaluate_constant(&[], binary_prec) {
+                        if let Some(eval) = s.get_evaluation_info()
+                            && let Ok(v) = eval.evaluate_constant(&[], binary_prec) {
                                 out.to_num(v);
                                 return;
                             }
-                        }
 
                         out.set_from_view(self);
                     }

@@ -512,14 +512,13 @@ impl EvaluationInfo {
         tags: &[AtomView],
         precision: u32,
     ) -> Result<Complex<Float>, String> {
-        if precision == 53 && self.tag_count == 0 {
-            if let Some(eval) = &self.constant_eval {
+        if precision == 53 && self.tag_count == 0
+            && let Some(eval) = &self.constant_eval {
                 return self
                     .constant_eval_cache
                     .get_or_init(|| eval(&[], 53))
                     .clone();
             }
-        }
 
         if let Some(eval) = &self.constant_eval {
             return eval(tags, precision);
@@ -1466,7 +1465,7 @@ impl Symbol {
 
     /// Get the custom Laurent-series transform of the symbol, if any.
     pub fn get_series_function(&self) -> Option<&'static SeriesExpansionFunction> {
-        self.get_global_data().custom_series.as_ref().map(|v| &**v)
+        self.get_global_data().custom_series.as_deref()
     }
 
     /// Get the custom print function of the symbol, if any.
@@ -1573,16 +1572,14 @@ impl Symbol {
         source.read_exact(&mut v)?;
 
         let str: String = std::string::String::from_utf8(v)
-            .map_err(|e| std::io::Error::new(std::io::ErrorKind::InvalidData, e))?
-            .into();
+            .map_err(|e| std::io::Error::new(std::io::ErrorKind::InvalidData, e))?;
 
         let l = source.read_u32::<LittleEndian>()?;
         let mut v = vec![0; l as usize];
         source.read_exact(&mut v)?;
 
         let namespace: String = std::string::String::from_utf8(v)
-            .map_err(|e| std::io::Error::new(std::io::ErrorKind::InvalidData, e))?
-            .into();
+            .map_err(|e| std::io::Error::new(std::io::ErrorKind::InvalidData, e))?;
 
         let flags = source.read_u8()?;
         let extra_flags = source.read_u32::<LittleEndian>()?;
@@ -1598,8 +1595,7 @@ impl Symbol {
             source.read_exact(&mut v)?;
 
             let tag: String = std::string::String::from_utf8(v)
-                .map_err(|e| std::io::Error::new(std::io::ErrorKind::InvalidData, e))?
-                .into();
+                .map_err(|e| std::io::Error::new(std::io::ErrorKind::InvalidData, e))?;
 
             tags.push(tag);
         }
@@ -1613,8 +1609,7 @@ impl Symbol {
             source.read_exact(&mut v)?;
 
             let alias: String = std::string::String::from_utf8(v)
-                .map_err(|e| std::io::Error::new(std::io::ErrorKind::InvalidData, e))?
-                .into();
+                .map_err(|e| std::io::Error::new(std::io::ErrorKind::InvalidData, e))?;
 
             aliases.push(alias);
         }

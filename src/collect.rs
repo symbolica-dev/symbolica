@@ -1448,7 +1448,7 @@ impl<'a> AtomView<'a> {
                     } else {
                         coeff.as_view()
                     })
-                    .horner_scheme_impl_no_norm(ws, &xs, enter_functions);
+                    .horner_scheme_impl_no_norm(ws, xs, enter_functions);
                     let v = if min_power == 1 {
                         new_key.as_view().mul_no_norm(ws, x)
                     } else {
@@ -1463,8 +1463,7 @@ impl<'a> AtomView<'a> {
                         res = res
                             .as_view()
                             .add_no_norm(ws, v.as_view())
-                            .into_inner()
-                            .into();
+                            .into_inner();
                     }
                 }
 

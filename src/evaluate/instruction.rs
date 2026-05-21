@@ -288,7 +288,7 @@ impl<T: PartialEq + Clone + std::fmt::Debug> InstructionList<T> {
             .constants
             .chunks(self.dim)
             .zip(&self.unknown_constants)
-            .position(|(x, u)| x == &value && !u)
+            .position(|(x, u)| x == value && !u)
         {
             Slot::Const(c * self.dim)
         } else {

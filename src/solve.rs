@@ -336,7 +336,7 @@ impl AtomView<'_> {
         let params = Arc::new(
             params
                 .iter()
-                .map(|x| Ok(x.to_owned().try_into()?))
+                .map(|x| x.to_owned().try_into())
                 .collect::<Result<Vec<_>, String>>()
                 .map_err(SolveError::Other)?,
         );
@@ -451,11 +451,11 @@ impl AtomView<'_> {
         }
 
         let m = Matrix::from_linear(mat, system.len() as u32, vars.len() as u32, field.clone())
-            .map_err(|e| SolveError::Other(e))?;
+            .map_err(SolveError::Other)?;
         let rhs = Matrix::new_vec(rhs, field.clone());
 
         match m.solve(&rhs) {
-            Ok(sol) => Ok(sol.into_vec().into_iter().map(|s| Atom::num(s)).collect()),
+            Ok(sol) => Ok(sol.into_vec().into_iter().map(Atom::num).collect()),
             Err(MatrixError::Underdetermined {
                 rank,
                 row_reduced_augmented_matrix,

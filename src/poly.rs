@@ -2321,10 +2321,10 @@ impl Token {
                     Workspace::get_local().with(|ws| {
                         let mut atom = ws.new_atom();
                         self.to_atom_with_output_and_var_map(ws, var_map, var_name_map, &mut atom)?;
-                        Ok(atom
+                        atom
                             .as_view()
                             .to_rational_polynomial_impl(field, out_field, var_map)
-                            .map_err(|e| Cow::Owned(e.to_string()))?)
+                            .map_err(|e| Cow::Owned(e.to_string()))
                     })
                 }
             }
@@ -2357,10 +2357,10 @@ impl Token {
             _ => Workspace::get_local().with(|ws| {
                 let mut atom = ws.new_atom();
                 self.to_atom_with_output_and_var_map(ws, var_map, var_name_map, &mut atom)?;
-                Ok(atom
+                atom
                     .as_view()
                     .to_rational_polynomial_impl(field, out_field, var_map)
-                    .map_err(|e| Cow::Owned(e.to_string()))?)
+                    .map_err(|e| Cow::Owned(e.to_string()))
             }),
         }
     }
@@ -2474,10 +2474,10 @@ impl Token {
                     Workspace::get_local().with(|ws| {
                         let mut atom = ws.new_atom();
                         self.to_atom_with_output_and_var_map(ws, var_map, var_name_map, &mut atom)?;
-                        Ok(atom
+                        atom
                             .as_view()
                             .to_factorized_rational_polynomial_impl(field, out_field, var_map)
-                            .map_err(|e| Cow::Owned(e.to_string()))?)
+                            .map_err(|e| Cow::Owned(e.to_string()))
                     })
                 }
             }
@@ -2553,10 +2553,10 @@ impl Token {
             _ => Workspace::get_local().with(|ws| {
                 let mut atom = ws.new_atom();
                 self.to_atom_with_output_and_var_map(ws, var_map, var_name_map, &mut atom)?;
-                Ok(atom
+                atom
                     .as_view()
                     .to_factorized_rational_polynomial_impl(field, out_field, var_map)
-                    .map_err(|e| Cow::Owned(e.to_string()))?)
+                    .map_err(|e| Cow::Owned(e.to_string()))
             }),
         }
     }

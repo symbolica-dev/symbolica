@@ -500,8 +500,8 @@ impl AtomView<'_> {
                     Symbol::LOG_ID => args_series[0].log(),
                     Symbol::SQRT_ID => args_series[0].rpow((1, 2).into()),
                     _ => {
-                        if let Some(custom_series) = &f.get_symbol().get_series_function() {
-                            if let Some((singular, regularized)) = custom_series(&args_series) {
+                        if let Some(custom_series) = &f.get_symbol().get_series_function()
+                            && let Some((singular, regularized)) = custom_series(&args_series) {
                                 let singular_series =
                                     singular.as_view().series_impl(x, expansion_point, info)?;
                                 // TODO: expand deeper?
@@ -511,7 +511,6 @@ impl AtomView<'_> {
                                         .series_impl(x, expansion_point, info)?;
                                 return Ok(&singular_series * &regularized_series);
                             }
-                        }
 
                         // TODO: also check for log(x)
                         if args_series

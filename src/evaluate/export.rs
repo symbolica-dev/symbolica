@@ -1136,7 +1136,7 @@ extern "C" {{
 
             // find free registers in the range
             // start at j+1 as we can recycle registers that are last used in iteration j
-            let mut free_regs = u16::MAX & !(1 << 15); // leave xmmm15 open
+            let mut free_regs = !(1 << 15); // leave xmmm15 open
 
             for k in &new_instr[j + 1..=*last_use] {
                 match k {
@@ -2301,7 +2301,7 @@ extern "C" {{
                             for i in &a[1..] {
                                 let (addr, _) = asm_load!(*i);
                                 *out += &format!("\t\t\"movupd {addr}, %%xmm1\\n\\t\"\n");
-                                *out += &format!("\t\t\"addpd %%xmm1, %%xmm0\\n\\t\"\n");
+                                *out += "\t\t\"addpd %%xmm1, %%xmm0\\n\\t\"\n";
                             }
                             let (addr, _) = asm_load!(*o);
                             *out += &format!("\t\t\"movupd %%xmm0, {addr}\\n\\t\"\n");

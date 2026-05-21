@@ -947,7 +947,7 @@ impl AtomView<'_> {
                                     let r = if i.is_zero() {
                                         r.to_float().norm().into()
                                     } else {
-                                        Complex::new(r.to_float(), i.to_float()).norm().into()
+                                        Complex::new(r.to_float(), i.to_float()).norm()
                                     };
                                     out.to_num(Coefficient::Float(r));
                                     return;
@@ -956,8 +956,8 @@ impl AtomView<'_> {
                             }
                         }
 
-                        if id.get_id() == Symbol::ABS_ID {
-                            if let Coefficient::Complex(c) = n.get_coeff_view().to_owned() {
+                        if id.get_id() == Symbol::ABS_ID
+                            && let Coefficient::Complex(c) = n.get_coeff_view().to_owned() {
                                 if c.is_real() {
                                     out.to_num(c.re.abs());
                                 } else {
@@ -968,7 +968,6 @@ impl AtomView<'_> {
                                 }
                                 return;
                             }
-                        }
                     } else if id.get_id() == Symbol::ABS_ID && arg.is_positive() {
                         let mut buffer = workspace.new_atom();
                         buffer.set_from_view(&arg);
@@ -1340,9 +1339,8 @@ impl AtomView<'_> {
                 if let Some(e) = &data.custom_evaluation
                     && e.get_tag_count() == 0
                     && let Some(e) = e.get_evaluator::<Complex<Float>>(&[])
-                {
-                    if let AtomView::Fun(f) = out.as_view() {
-                        if f.iter().all(|arg| {
+                    && let AtomView::Fun(f) = out.as_view()
+                        && f.iter().all(|arg| {
                             if let AtomView::Num(n) = arg
                                 && n.get_coeff_view().is_float()
                             {
@@ -1357,10 +1355,7 @@ impl AtomView<'_> {
                                 .collect::<Vec<_>>();
                             let result = (e)(&args);
                             out.to_num(result);
-                            return;
                         }
-                    }
-                }
             }
             AtomView::Pow(p) => {
                 let (base, exp) = p.get_base_exp();
@@ -1554,7 +1549,7 @@ impl AtomView<'_> {
                     atom_sort_buf.push((x, x.get_term_cmp_slice()));
                 }
 
-                atom_sort_buf.sort_unstable_by(|a, b| a.1.cmp(&b.1));
+                atom_sort_buf.sort_unstable_by(|a, b| a.1.cmp(b.1));
 
                 if atom_sort_buf.is_empty() {
                     out.to_num(Coefficient::zero());

@@ -298,7 +298,7 @@ pub trait AtomCore: private::Sealed + Sized {
         let vs = variables.map(|v| v.iter().map(|x| x.clone().into()).collect::<Vec<_>>());
 
         self.as_atom_view()
-            .horner_scheme(vs.as_ref().map(|x| x.as_slice()), false)
+            .horner_scheme(vs.as_deref(), false)
             .wrap(self)
     }
 

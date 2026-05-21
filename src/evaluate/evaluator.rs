@@ -625,14 +625,12 @@ impl<T: Default> ExpressionEvaluator<T> {
                 break;
             }
 
-            if p % 10000 == 0 {
-                if let Some(abort_check) = &self.settings.abort_check {
-                    if abort_check() {
+            if p % 10000 == 0
+                && let Some(abort_check) = &self.settings.abort_check
+                    && abort_check() {
                         self.settings.abort_level = 1;
                         break;
                     }
-                }
-            }
 
             match i {
                 Instr::Add(_, a) | Instr::Mul(_, a) => {

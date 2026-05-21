@@ -152,7 +152,7 @@ impl SpecialSymbols {
                         let shift = (-pole).to_i64().unwrap();
                         let mut regularized = function!(gamma_symbol, arg.to_owned() + shift + 1);
                         for k in 0..shift {
-                            regularized = regularized / (arg.to_owned() + k);
+                            regularized /= arg.to_owned() + k;
                         }
 
                         Some((Atom::num(1) / (arg + shift), regularized))
@@ -174,8 +174,8 @@ impl SpecialSymbols {
                 let polygamma_symbol = symbols[1];
 
                 b.with_normalization_function(move |x, out| {
-                    if let Some([n, z]) = function_arguments::<2>(x) {
-                        if let Ok(order) = u32::try_from(n) {
+                    if let Some([n, z]) = function_arguments::<2>(x)
+                        && let Ok(order) = u32::try_from(n) {
                             if maybe_eval_polygamma_float_in_norm(order, z, out) {
                                 return;
                             }
@@ -194,7 +194,6 @@ impl SpecialSymbols {
                                 out.to_num(Coefficient::complex_infinity());
                             }
                         }
-                    }
                 })
                 .with_derivative_function(move |x, i, out| {
                     if i == 1
@@ -279,7 +278,6 @@ impl SpecialSymbols {
                         }
 
                         if maybe_eval_binary_float_in_norm(s, z, out, polylog_numeric_eval) {
-                            return;
                         }
                     }
                 })
@@ -351,7 +349,6 @@ impl SpecialSymbols {
                         // TODO: add Stieltjes constants
                         if depth == 1 && arg == 0 {
                             **out = -(Atom::var(Symbol::PI) * 2).log() / 2;
-                            return;
                         }
                     }
                 })
@@ -921,9 +918,7 @@ impl GeometricSymbols {
                     && maybe_eval_binary_float_in_norm(x, y, out, |x, y, prec| {
                         Some(atan2_numeric_eval(x, y, prec))
                     })
-                {
-                    return;
-                }
+                {}
             },
             der = move |x, i, out| {
                 if i == 0
@@ -2157,16 +2152,15 @@ fn bessel_j_numeric_eval(
     z: &Complex<Float>,
     binary_prec: u32,
 ) -> Option<Complex<Float>> {
-    if z.is_zero() {
-        if let Some(n) = complex_float_to_integer(order)
-            && n >= 0
-        {
-            return Some(if n == 0 {
-                complex_one(binary_prec)
-            } else {
-                Complex::new(Float::new(binary_prec), Float::new(binary_prec))
-            });
-        }
+    if z.is_zero()
+        && let Some(n) = complex_float_to_integer(order)
+        && n >= 0
+    {
+        return Some(if n == 0 {
+            complex_one(binary_prec)
+        } else {
+            Complex::new(Float::new(binary_prec), Float::new(binary_prec))
+        });
     }
 
     if let Some(n) = complex_float_to_integer(order)
@@ -2185,16 +2179,15 @@ fn bessel_i_numeric_eval(
     z: &Complex<Float>,
     binary_prec: u32,
 ) -> Option<Complex<Float>> {
-    if z.is_zero() {
-        if let Some(n) = complex_float_to_integer(order)
-            && n >= 0
-        {
-            return Some(if n == 0 {
-                complex_one(binary_prec)
-            } else {
-                Complex::new(Float::new(binary_prec), Float::new(binary_prec))
-            });
-        }
+    if z.is_zero()
+        && let Some(n) = complex_float_to_integer(order)
+        && n >= 0
+    {
+        return Some(if n == 0 {
+            complex_one(binary_prec)
+        } else {
+            Complex::new(Float::new(binary_prec), Float::new(binary_prec))
+        });
     }
 
     if let Some(n) = complex_float_to_integer(order)
@@ -2487,7 +2480,7 @@ fn zeta_exact_rational(rat: &Rational) -> Option<Atom> {
 
     let half_order = n as u32 / 2;
     let mut bernoulli = bernoulli_number(n as u32);
-    if half_order % 2 == 0 {
+    if half_order.is_multiple_of(2) {
         bernoulli = -bernoulli;
     }
 
@@ -2884,7 +2877,7 @@ fn polygamma_numeric_eval(order: u32, z: &Complex<Float>, binary_prec: u32) -> C
     let one = Float::with_val(binary_prec, 1);
     let exponent = Complex::new(Float::with_val(binary_prec, order + 1), zero.clone());
     let factorial = Float::with_val(binary_prec, Integer::factorial(order).to_multi_prec());
-    let sign = if order % 2 == 0 {
+    let sign = if order.is_multiple_of(2) {
         -factorial
     } else {
         factorial
@@ -2951,7 +2944,7 @@ fn polylog_exact(s: AtomView, z: AtomView) -> Option<Atom> {
     }
 
     if let Ok(rat) = Rational::try_from(z)
-        && rat == Rational::from((-1, 1))
+        && rat == (-1, 1)
     {
         if let Some(order) = atom_to_integer(s)
             && order == 1
@@ -3521,7 +3514,7 @@ fn spouge_coefficient(a: u32, k: u32, binary_prec: u32) -> Float {
     let factorial = Float::with_val(binary_prec, Integer::factorial(k - 1).to_multi_prec());
     let mut coeff = a_minus_k.powf(&exponent) * a_minus_k.exp() / factorial;
 
-    if k % 2 == 0 {
+    if k.is_multiple_of(2) {
         coeff = -coeff;
     }
 

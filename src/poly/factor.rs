@@ -3438,7 +3438,7 @@ impl<E: PositiveExponent> MultivariatePolynomial<IntegerRing, E, LexOrder> {
                             c.get_constant().abs(),
                             bivariate_factors.clone(),
                             cur_sample_points.clone(),
-                            coefficient_upper_bound.clone(),
+                            coefficient_upper_bound,
                             cur_uni_f.clone(),
                         ));
                     }

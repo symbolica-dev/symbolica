@@ -2130,8 +2130,8 @@ impl<'a> AtomView<'a> {
         replace_settings: ReplaceSettings,
         out: &mut Settable<Atom>,
     ) {
-        if !replace_settings.bottom_up && !replace_settings.nested {
-            if !self.replace_node(
+        if !replace_settings.bottom_up && !replace_settings.nested
+            && (!self.replace_node(
                 replacements,
                 atom_match_iterators,
                 workspace,
@@ -2139,11 +2139,10 @@ impl<'a> AtomView<'a> {
                 fn_level,
                 rhs_cache,
                 out,
-            ) || out.is_set()
+            ) || out.is_set())
             {
                 return;
             }
-        }
 
         // no match found at this level, so check the children
         match self {
@@ -4549,8 +4548,7 @@ impl<'a, 'b> AtomMatchIterator<'a, 'b> {
                 let range = match_stack.get_range(*w);
                 if range.0 <= 1 && range.1.map(|w| w >= 1).unwrap_or(true) {
                     // TODO: any problems with matching Single vs a list?
-                    if let Some(new_stack_len) =
-                        match_stack.insert(*w, Match::Single(self.target)).ok()
+                    if let Ok(new_stack_len) = match_stack.insert(*w, Match::Single(self.target))
                     {
                         self.old_match_stack_len = Some(new_stack_len);
                         return Some((new_stack_len, &[]));
@@ -5158,12 +5156,11 @@ impl<'a, 'b> SubSliceIterator<'a, 'b> {
                                         continue 'next_match;
                                     }
                                     Err(MatchError::StructurallyImpossible) => {
-                                        if self.processed_iterators < 64 {
-                                            if w.name.get_wildcard_level() == 1 {
+                                        if self.processed_iterators < 64
+                                            && w.name.get_wildcard_level() == 1 {
                                                 self.compatibility_flag[k] |=
                                                     1 << (self.processed_iterators - 1) as u64;
                                             }
-                                        }
                                     }
                                     Err(_) => {
                                         structural_mismatch = false;
@@ -5572,10 +5569,7 @@ impl<'a> Iterator for AtomTreeIterator<'a> {
     /// Return the next position and atom in the tree.
     fn next(&mut self) -> Option<Self::Item> {
         let mut location = Vec::new();
-        match self.next_into(Some(&mut location)) {
-            Some(atom) => Some((location, atom)),
-            None => None,
-        }
+        self.next_into(Some(&mut location)).map(|atom| (location, atom))
     }
 }
 
@@ -5848,7 +5842,7 @@ impl<'a: 'b, 'b> ReplaceIterator<'a, 'b> {
                 ReplaceIterator::copy_and_replace(
                     &mut h,
                     pattern_match.position,
-                    &pattern_match.used_flags,
+                    pattern_match.used_flags,
                     self.target,
                     new_rhs.as_view(),
                     ws,

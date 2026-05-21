@@ -541,7 +541,7 @@ impl Token {
             Err(format!("operator expected between '{self}' and '{n}'"))
         } else if let Token::OpenParenthesis = self {
             // reached EOF
-            Err(format!("parenthesis not closed"))
+            Err("parenthesis not closed".to_string())
         } else if let Token::Fn(_, _, a) = self {
             Err(format!(
                 "missing closing parenthesis for function '{}'",
