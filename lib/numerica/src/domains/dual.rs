@@ -144,6 +144,85 @@ pub const fn get_multiplication_index<const N: usize, const C: usize>(
     if i == r.len() { None } else { Some(i) }
 }
 
+/// Check if every dual component's immediate ancestors are present in the shape.
+pub const fn is_dual_shape_ancestor_closed<const N: usize, const C: usize>(
+    r: &[[usize; N]; C],
+) -> bool {
+    let mut i = 0;
+    while i < r.len() {
+        let mut ancestor = r[i];
+        let mut j = 0;
+        while j < N {
+            if ancestor[j] > 0 {
+                ancestor[j] -= 1;
+
+                let mut k = 0;
+                'find_ancestor: loop {
+                    if k == r.len() {
+                        return false;
+                    }
+
+                    let mut l = 0;
+                    while l < N {
+                        if r[k][l] != ancestor[l] {
+                            k += 1;
+                            continue 'find_ancestor;
+                        }
+                        l += 1;
+                    }
+                    break;
+                }
+
+                ancestor[j] += 1;
+            }
+            j += 1;
+        }
+        i += 1;
+    }
+
+    true
+}
+
+/// Find the component for the first derivative with respect to `var`.
+pub const fn get_single_derivative_index<const N: usize, const C: usize>(
+    r: &[[usize; N]; C],
+    var: usize,
+) -> Option<usize> {
+    if var >= N {
+        return None;
+    }
+
+    if 1 + var < C && is_single_derivative_component(&r[1 + var], var) {
+        return Some(1 + var);
+    }
+
+    let mut i = 0;
+    while i < r.len() {
+        if is_single_derivative_component(&r[i], var) {
+            return Some(i);
+        }
+        i += 1;
+    }
+
+    None
+}
+
+const fn is_single_derivative_component<const N: usize>(
+    component: &[usize; N],
+    var: usize,
+) -> bool {
+    let mut i = 0;
+    while i < N {
+        let expected = if i == var { 1 } else { 0 };
+        if component[i] != expected {
+            return false;
+        }
+        i += 1;
+    }
+
+    true
+}
+
 /// Get the size of the multiplication table.
 pub const fn get_mult_table_size<const N: usize, const C: usize>(r: &[[usize; N]; C]) -> usize {
     let mut i = 0;
@@ -279,6 +358,11 @@ pub trait DualNumberStructure {
 #[macro_export]
 macro_rules! create_hyperdual_from_components {
     ($t: ident, $var: expr) => {
+        const _: () = assert!(
+            $crate::domains::dual::is_dual_shape_ancestor_closed(&$var),
+            "Dual shape is not ancestor-closed"
+        );
+
         /// A hyperdual with a given shape.
         /// The multiplication table is precomputed and (partially) unrolled
         /// for performance.
@@ -310,6 +394,13 @@ macro_rules! create_hyperdual_from_components {
             const MULT_TABLE: [(usize, usize, usize); {
                 $crate::domains::dual::get_mult_table_size(&$var)
             }] = $crate::domains::dual::get_mult_table(&$var);
+
+            fn single_derivative_index(var: usize) -> usize {
+                $crate::domains::dual::get_single_derivative_index(&Self::SHAPE, var)
+                    .unwrap_or_else(|| {
+                        panic!("No single derivative component for variable {}", var)
+                    })
+            }
         }
 
         impl<T> $crate::domains::dual::DualNumberStructure for $t<T> {
@@ -337,7 +428,7 @@ macro_rules! create_hyperdual_from_components {
             pub fn variable(&self, var: usize, value: T) -> Self {
                 let mut values = std::array::from_fn(|_| self.values[0].zero());
                 values[0] = value;
-                values[1 + var] = self.values[0].one();
+                values[Self::single_derivative_index(var)] = self.values[0].one();
                 $t { values }
             }
         }
@@ -348,7 +439,7 @@ macro_rules! create_hyperdual_from_components {
             pub fn new_variable(var: usize, value: T) -> Self {
                 let mut values = std::array::from_fn(|_| T::new_zero());
                 values[0] = value;
-                values[1 + var] = T::new_one();
+                values[Self::single_derivative_index(var)] = T::new_one();
                 $t { values }
             }
         }
@@ -1166,8 +1257,12 @@ pub struct HyperDual<T> {
 
 impl<T> HyperDual<T> {
     /// Create a new dual with a given shape. If you already have a dual with the same shape,
-    /// consider using methods such as [Dual::variable] to inherit the shape and floating point settings.
+    /// consider using methods such as [HyperDual::variable] to inherit the shape and floating point settings.
     pub fn from_values(shape: Vec<Vec<usize>>, values: Vec<T>) -> Self {
+        if shape.is_empty() {
+            panic!("Shape must contain at least one component");
+        }
+
         if shape.iter().any(|s| s.len() != shape[0].len()) {
             panic!(
                 "All shape vectors must have the same length: got {:?}",
@@ -1181,6 +1276,24 @@ impl<T> HyperDual<T> {
                 shape.len(),
                 values.len()
             );
+        }
+
+        // check if all ancestors appear in the shape
+        for component in &shape {
+            let mut ancestor = component.clone();
+
+            for index in 0..ancestor.len() {
+                if ancestor[index] > 0 {
+                    ancestor[index] -= 1;
+                    if !shape.iter().any(|s| s == &ancestor) {
+                        panic!(
+                            "Dual shape is not ancestor-closed: missing {:?} for component {:?}",
+                            ancestor, component
+                        );
+                    }
+                    ancestor[index] += 1;
+                }
+            }
         }
 
         let max_pow = shape
@@ -1217,7 +1330,7 @@ impl<T> HyperDual<T> {
 
 impl<T: Default> HyperDual<T> {
     /// Create a new dual with a given shape. If you already have a dual with the same shape,
-    /// consider using methods such as [Dual::variable] to inherit the shape and floating point settings.
+    /// consider using methods such as [HyperDual::variable] to inherit the shape and floating point settings.
     pub fn new(shape: Vec<Vec<usize>>) -> Self {
         let values = (0..shape.len()).map(|_| T::default()).collect();
         Self::from_values(shape, values)
@@ -1255,13 +1368,40 @@ impl<T> DualNumberStructure for HyperDual<T> {
 }
 
 impl<T: FloatLike> HyperDual<T> {
+    fn single_derivative_index(&self, var: usize) -> usize {
+        if var >= self.shape.shape[0].len() {
+            panic!("No single derivative component for variable {}", var);
+        }
+
+        let fast_index = 1 + var;
+        if fast_index < self.shape.shape.len()
+            && self.shape.shape[fast_index]
+                .iter()
+                .enumerate()
+                .all(|(i, p)| *p == if i == var { 1 } else { 0 })
+        {
+            return fast_index;
+        }
+
+        self.shape
+            .shape
+            .iter()
+            .position(|component| {
+                component
+                    .iter()
+                    .enumerate()
+                    .all(|(i, p)| *p == if i == var { 1 } else { 0 })
+            })
+            .unwrap_or_else(|| panic!("No single derivative component for variable {}", var))
+    }
+
     /// Create a new dual variable for the variable `var`, i.e. `value + 1*ε_var`,
     /// inheriting the floating point settings from `self`.
     #[allow(dead_code)]
     pub fn variable(&self, var: usize, value: T) -> Self {
         let mut values = vec![self.values[0].zero(); self.values.len()];
         values[0] = value;
-        values[1 + var] = self.values[0].one();
+        values[self.single_derivative_index(var)] = self.values[0].one();
         HyperDual {
             values,
             shape: self.shape.clone(),
@@ -2145,6 +2285,7 @@ mod test {
     };
 
     create_hyperdual_from_depths!(Dual, [1, 2, 3]);
+    create_hyperdual_from_components!(ReorderedDual, [[0, 0], [0, 1], [1, 0]]);
 
     #[test]
     fn real_functions() {
@@ -2190,6 +2331,34 @@ mod test {
         let one = t3.clone() * t3.inv();
 
         assert_eq!(one, t3.one());
+    }
+
+    #[test]
+    #[should_panic(expected = "Dual shape is not ancestor-closed")]
+    fn bad_shape() {
+        HyperDual::<f64>::from_values(
+            vec![vec![0, 0, 0], vec![1, 0, 0], vec![1, 1, 0]],
+            vec![2., 1., 3.],
+        );
+    }
+
+    #[test]
+    fn reordered_single_derivative_indices() {
+        let static_x = ReorderedDual::<f64>::new_variable(0, 2.);
+        let static_y = ReorderedDual::<f64>::new_variable(1, 3.);
+
+        assert_eq!(static_x.values, [2., 0., 1.]);
+        assert_eq!(static_y.values, [3., 1., 0.]);
+
+        let dual = HyperDual::<f64>::from_values(
+            vec![vec![0, 0], vec![0, 1], vec![1, 0]],
+            vec![0., 0., 0.],
+        );
+        let runtime_x = dual.variable(0, 2.);
+        let runtime_y = dual.variable(1, 3.);
+
+        assert_eq!(runtime_x.values, [2., 0., 1.]);
+        assert_eq!(runtime_y.values, [3., 1., 0.]);
     }
 
     #[test]

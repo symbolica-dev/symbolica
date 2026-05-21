@@ -1415,6 +1415,8 @@ impl<F: Ring> std::fmt::Display for MatrixError<F> {
     }
 }
 
+impl<F: Ring> std::error::Error for MatrixError<F> {}
+
 impl<F: EuclideanDomain> Matrix<F> {
     /// Get the content of the matrix, i.e. the gcd of all entries.
     pub fn content(&self) -> F::Element {

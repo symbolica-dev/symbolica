@@ -1,11 +1,12 @@
 //! Finite fields and modular rings.
 
 use rand::Rng;
+use rug::{Complete, Integer as MultiPrecisionInteger};
 use std::fmt::{Display, Error, Formatter};
 use std::hash::Hash;
-use std::ops::{Deref, Neg};
+use std::ops::Deref;
 
-use crate::domains::integer::{Integer, gcd_unsigned};
+use crate::domains::integer::Integer;
 use crate::domains::{RingOps, Set};
 use crate::printer::{PrintOptions, PrintState};
 
@@ -82,6 +83,12 @@ impl<UField: PartialOrd> InternalOrdering for FiniteFieldElement<UField> {
     }
 }
 
+impl<UField: Display> Display for FiniteFieldElement<UField> {
+    fn fmt(&self, f: &mut Formatter<'_>) -> std::fmt::Result {
+        self.0.fmt(f)
+    }
+}
+
 pub trait FiniteFieldWorkspace: Clone + Display + Eq + Hash {
     /// Get a large prime with the guarantee that there are still many primes above
     /// this number in `Self`.
@@ -146,6 +153,9 @@ pub trait FiniteFieldCore<UField: FiniteFieldWorkspace>: Field {
 pub struct FiniteField<UField> {
     p: UField,
     m: UField,
+    r_mask: UField,
+    r2: UField,
+    r_bits: u32,
     one: FiniteFieldElement<UField>,
     is_prime: bool,
 }
@@ -160,6 +170,9 @@ impl Zp {
         FiniteField {
             p,
             m: Self::inv_2_32(p),
+            r_mask: 0,
+            r2: 0,
+            r_bits: 32,
             one: FiniteFieldElement(Self::get_one(p)),
             is_prime: false,
         }
@@ -174,6 +187,9 @@ impl Zp {
         FiniteField {
             p,
             m: Self::inv_2_32(p),
+            r_mask: 0,
+            r2: 0,
+            r_bits: 32,
             one: FiniteFieldElement(Self::get_one(p)),
             is_prime: true,
         }
@@ -610,6 +626,9 @@ impl Zp64 {
         FiniteField {
             p,
             m: Self::inv_2_64(p),
+            r_mask: 0,
+            r2: 0,
+            r_bits: 64,
             one: FiniteFieldElement(Self::get_one(p)),
             is_prime: false,
         }
@@ -624,6 +643,9 @@ impl Zp64 {
         FiniteField {
             p,
             m: Self::inv_2_64(p),
+            r_mask: 0,
+            r2: 0,
+            r_bits: 64,
             one: FiniteFieldElement(Self::get_one(p)),
             is_prime: true,
         }
@@ -1097,6 +1119,9 @@ impl Z2 {
         FiniteField {
             p: Two(2),
             m: Two(2),
+            r_mask: Two(0),
+            r2: Two(1),
+            r_bits: 1,
             one: FiniteFieldElement(Two(1)),
             is_prime: true,
         }
@@ -1167,6 +1192,9 @@ impl FiniteFieldCore<Two> for FiniteField<Two> {
         FiniteField {
             p,
             m: p,
+            r_mask: Two(0),
+            r2: Two(1),
+            r_bits: 1,
             one: FiniteFieldElement(Two(1)),
             is_prime: true,
         }
@@ -1465,6 +1493,9 @@ impl FiniteFieldCore<Mersenne64> for FiniteField<Mersenne64> {
         FiniteField {
             p,
             m: p,
+            r_mask: Mersenne64(0),
+            r2: Mersenne64(1),
+            r_bits: 61,
             one: FiniteFieldElement(Mersenne64(1)),
             is_prime: true,
         }
@@ -1790,14 +1821,51 @@ impl FiniteFieldWorkspace for Integer {
     }
 }
 
-/// A finite field with a large prime modulus.
-/// We use the symmetric representation, as this is the most efficient.
+impl FiniteField<Integer> {
+    /// Create a new modular ring. `n` must be odd.
+    pub fn new_non_prime(p: Integer) -> FiniteField<Integer> {
+        let mut f = Self::new(p);
+        f.is_prime = false;
+        f
+    }
+
+    #[inline(always)]
+    fn montgomery_reduce_integer(&self, t: Integer) -> Integer {
+        let m = ((&t & &self.r_mask) * &self.m) & &self.r_mask;
+        let mut u = (t + m * &self.p) >> self.r_bits;
+        if u >= self.p {
+            u -= &self.p;
+        }
+        u
+    }
+}
+
+/// A finite field with a large odd modulus.
+/// Elements are stored in Montgomery form with non-symmetric representatives.
 impl FiniteFieldCore<Integer> for FiniteField<Integer> {
+    /// Create a new modular ring. `n` must be odd and prime.
     fn new(m: Integer) -> FiniteField<Integer> {
+        let n = m.clone().to_multi_prec();
+        let r_bits = n.significant_bits().div_ceil(64) * 64;
+        let r = MultiPrecisionInteger::from(1) << r_bits;
+        let r_mask = MultiPrecisionInteger::from(&r - 1);
+        let n_inv = {
+            let inv = n
+                .clone()
+                .invert(&r)
+                .unwrap_or_else(|_| panic!("Could not invert {m} modulo 2^{r_bits}"));
+            if inv == 0 { inv } else { &r - inv }
+        };
+        let r_mod_n = r % &n;
+        let r2_mod_n = (&r_mod_n * &r_mod_n).complete() % &n;
+
         FiniteField {
             p: m.clone(),
-            m: Integer::one(),
-            one: FiniteFieldElement(Integer::one()),
+            m: n_inv.into(),
+            r_mask: r_mask.into(),
+            r2: r2_mod_n.into(),
+            r_bits,
+            one: FiniteFieldElement(r_mod_n.into()),
             is_prime: true,
         }
     }
@@ -1807,16 +1875,16 @@ impl FiniteFieldCore<Integer> for FiniteField<Integer> {
         self.p.clone()
     }
 
-    fn to_element(&self, a: Integer) -> Integer {
-        a.symmetric_mod(&self.p)
+    fn to_element(&self, a: Integer) -> FiniteFieldElement<Integer> {
+        let mut a = a % &self.p;
+        if a.is_negative() {
+            a += &self.p;
+        }
+        FiniteFieldElement(self.montgomery_reduce_integer(a * &self.r2))
     }
 
-    fn from_element(&self, a: &Integer) -> Integer {
-        if a.is_negative() {
-            a.clone() + &self.p
-        } else {
-            a.clone()
-        }
+    fn from_element(&self, a: &FiniteFieldElement<Integer>) -> Integer {
+        self.montgomery_reduce_integer(a.0.clone())
     }
 
     fn to_integer(&self, a: &Self::Element) -> Integer {
@@ -1824,99 +1892,91 @@ impl FiniteFieldCore<Integer> for FiniteField<Integer> {
     }
 }
 
-impl FiniteField<Integer> {
-    #[inline(always)]
-    fn normalize(&self, mut c: Integer) -> Integer {
-        self.normalize_mut(&mut c);
-        c
-    }
-
-    #[inline(always)]
-    fn normalize_mut(&self, c: &mut Integer) {
-        let two_c = &*c + &*c;
-
-        if two_c.is_negative() {
-            if -two_c >= self.p {
-                *c += &self.p;
-            }
-        } else if two_c >= self.p {
-            *c -= &self.p;
-        }
-    }
-}
-
 impl Set for FiniteField<Integer> {
-    type Element = Integer;
+    type Element = FiniteFieldElement<Integer>;
 
     fn size(&self) -> Option<Integer> {
         Some(self.get_prime())
     }
 }
 
-impl RingOps<Integer> for FiniteField<Integer> {
+impl RingOps<FiniteFieldElement<Integer>> for FiniteField<Integer> {
     fn add(&self, a: Self::Element, b: Self::Element) -> Self::Element {
-        self.normalize(a + b)
+        let mut c = a.0 + b.0;
+        if c >= self.p {
+            c -= &self.p;
+        }
+        FiniteFieldElement(c)
     }
 
     fn sub(&self, a: Self::Element, b: Self::Element) -> Self::Element {
-        self.normalize(a - b)
+        if a.0 >= b.0 {
+            FiniteFieldElement(a.0 - b.0)
+        } else {
+            FiniteFieldElement(a.0 + &self.p - b.0)
+        }
     }
 
     fn mul(&self, a: Self::Element, b: Self::Element) -> Self::Element {
-        (a * b).symmetric_mod(&self.p)
+        FiniteFieldElement(self.montgomery_reduce_integer(a.0 * b.0))
     }
 
     fn add_assign(&self, a: &mut Self::Element, b: Self::Element) {
-        *a += b;
-        self.normalize_mut(a);
+        *a = self.add(a.clone(), b);
     }
 
     fn sub_assign(&self, a: &mut Self::Element, b: Self::Element) {
-        *a -= b;
-        self.normalize_mut(a);
+        *a = self.sub(a.clone(), b);
     }
 
     fn mul_assign(&self, a: &mut Self::Element, b: Self::Element) {
-        *a *= b;
-        self.normalize_mut(a);
+        *a = self.mul(a.clone(), b);
     }
 
     fn add_mul_assign(&self, a: &mut Self::Element, b: Self::Element, c: Self::Element) {
-        *a += b * c;
-        self.normalize_mut(a);
+        self.add_assign(a, self.mul(b, c));
     }
 
     fn sub_mul_assign(&self, a: &mut Self::Element, b: Self::Element, c: Self::Element) {
-        *a -= b * c;
-        self.normalize_mut(a);
+        self.sub_assign(a, self.mul(b, c));
     }
 
     fn neg(&self, a: Self::Element) -> Self::Element {
-        a.neg()
+        if a.0.is_zero() {
+            a
+        } else {
+            FiniteFieldElement(&self.p - a.0)
+        }
     }
 }
 
-impl RingOps<&Integer> for FiniteField<Integer> {
+impl RingOps<&FiniteFieldElement<Integer>> for FiniteField<Integer> {
     fn add(&self, a: &Self::Element, b: &Self::Element) -> Self::Element {
-        self.normalize(a + b)
+        let mut c = &a.0 + &b.0;
+        if c >= self.p {
+            c -= &self.p;
+        }
+        FiniteFieldElement(c)
     }
 
     fn sub(&self, a: &Self::Element, b: &Self::Element) -> Self::Element {
-        self.normalize(a - b)
+        if a.0 >= b.0 {
+            FiniteFieldElement(&a.0 - &b.0)
+        } else {
+            FiniteFieldElement(&a.0 + &self.p - &b.0)
+        }
     }
 
     fn mul(&self, a: &Self::Element, b: &Self::Element) -> Self::Element {
-        (a * b).symmetric_mod(&self.p)
+        FiniteFieldElement(self.montgomery_reduce_integer(&a.0 * &b.0))
     }
 
     fn add_assign(&self, a: &mut Self::Element, b: &Self::Element) {
-        *a += b;
-        self.normalize_mut(a);
+        *a = self.add(&*a, b);
     }
 
     fn sub_assign(&self, a: &mut Self::Element, b: &Self::Element) {
-        *a -= b;
-        self.normalize_mut(a);
+        *a = self.sub(&*a, b);
     }
 
     fn mul_assign(&self, a: &mut Self::Element, b: &Self::Element) {
@@ -1932,35 +1992,53 @@ impl RingOps<&Integer> for FiniteField<Integer> {
     }
 
     fn neg(&self, a: &Self::Element) -> Self::Element {
-        a.neg()
+        if a.0.is_zero() {
+            a.clone()
+        } else {
+            FiniteFieldElement(&self.p - &a.0)
+        }
     }
 }
 
 impl Ring for FiniteField<Integer> {
     fn zero(&self) -> Self::Element {
-        Integer::zero()
+        FiniteFieldElement(Integer::zero())
     }
 
     fn one(&self) -> Self::Element {
-        Integer::one()
+        self.one.clone()
     }
 
     #[inline]
     fn nth(&self, n: Integer) -> Self::Element {
-        n.symmetric_mod(&self.p)
+        self.to_element(n)
     }
 
-    fn pow(&self, b: &Self::Element, e: u64) -> Self::Element {
-        // FIXME: intermediate mods
-        b.pow(e).symmetric_mod(&self.p)
+    fn pow(&self, b: &Self::Element, mut e: u64) -> Self::Element {
+        if e == 0 {
+            return self.one();
+        }
+
+        let mut x = b.clone();
+        let mut y = self.one();
+        while e != 1 {
+            if e % 2 == 1 {
+                y = self.mul(&y, &x);
+            }
+
+            x = self.mul(&x, &x);
+            e /= 2;
+        }
+
+        self.mul(&x, &y)
     }
 
     fn is_zero(&self, a: &Self::Element) -> bool {
-        a.is_zero()
+        a.0.is_zero()
     }
 
     fn is_one(&self, a: &Self::Element) -> bool {
-        a.is_one()
+        a == &self.one
     }
 
     fn one_is_gcd_unit() -> bool {
@@ -1972,12 +2050,13 @@ impl Ring for FiniteField<Integer> {
     }
 
     fn try_inv(&self, a: &Self::Element) -> Option<Self::Element> {
-        if a.is_zero() {
+        if a.0.is_zero() {
             return None;
         }
 
+        let a = self.from_element(a);
         let mut u1 = Integer::one();
-        let mut u3 = a.clone();
+        let mut u3 = a;
         let mut v1 = Integer::zero();
         let mut v3 = self.get_prime();
         let mut even_iter: bool = true;
@@ -1997,9 +2076,9 @@ impl Ring for FiniteField<Integer> {
         }
 
         if even_iter {
-            Some(u1)
+            Some(self.to_element(u1))
         } else {
-            Some(&self.p - &u1)
+            Some(self.to_element(&self.p - &u1))
         }
     }
 
@@ -2008,7 +2087,7 @@ impl Ring for FiniteField<Integer> {
     }
 
     fn sample(&self, rng: &mut impl rand::RngCore, range: (i64, i64)) -> Self::Element {
-        Z.sample(rng, range).symmetric_mod(&self.p)
+        self.to_element(Z.sample(rng, range))
     }
 
     fn format<W: std::fmt::Write>(
@@ -2028,15 +2107,15 @@ impl Ring for FiniteField<Integer> {
 
 impl EuclideanDomain for FiniteField<Integer> {
     fn rem(&self, _: &Self::Element, _: &Self::Element) -> Self::Element {
-        Integer::zero()
+        self.zero()
     }
 
     fn quot_rem(&self, a: &Self::Element, b: &Self::Element) -> (Self::Element, Self::Element) {
-        (self.mul(a, &self.inv(b)), Integer::zero())
+        (self.mul(a, &self.inv(b)), self.zero())
     }
 
     fn gcd(&self, _: &Self::Element, _: &Self::Element) -> Self::Element {
-        Integer::one()
+        self.one()
     }
 }
 
@@ -2062,73 +2141,509 @@ impl Field for FiniteField<Integer> {
     }
 }
 
-/// Do a deterministic Miller test to check if `n` is a prime.
-/// Since `n` is a `u64`, a basis of only 7 witnesses has to be tested.
-///
-/// Based on [Wojciech Izykowski's implementation](https://github.com/wizykowski/miller-rabin).
-pub fn is_prime_u64(n: u64) -> bool {
-    let w = if n < 341531 {
-        [9345883071009581737].as_slice()
-    } else if n < 1050535501 {
-        [336781006125, 9639812373923155].as_slice()
-    } else if n < 350269456337 {
-        [
-            4230279247111683200,
-            14694767155120705706,
-            16641139526367750375,
-        ]
-        .as_slice()
-    } else {
-        // shortest SPRP basis from Jim Sinclair for testing primality of u64
-        [2, 325, 9375, 28178, 450775, 9780504, 1795265022].as_slice()
-    };
+impl ToFiniteField<MultiPrecisionInteger> for Integer {
+    fn to_finite_field(
+        &self,
+        field: &FiniteField<MultiPrecisionInteger>,
+    ) -> <FiniteField<MultiPrecisionInteger> as Set>::Element {
+        field.to_element(self.clone().to_multi_prec())
+    }
+}
 
-    if n < 2 {
-        return false;
+impl FiniteFieldWorkspace for MultiPrecisionInteger {
+    fn get_large_prime() -> MultiPrecisionInteger {
+        MultiPrecisionInteger::from(Integer::get_large_prime().to_multi_prec())
     }
 
-    if n.is_multiple_of(2) {
-        return n == 2;
+    fn try_from_integer(n: Integer) -> Option<Self> {
+        Some(n.to_multi_prec())
     }
 
-    let mut s = 0;
-    let mut d = n - 1;
-    while d.is_multiple_of(2) {
-        d /= 2;
-        s += 1;
+    fn to_integer(&self) -> Integer {
+        Integer::from(self.clone())
+    }
+}
+
+impl FiniteField<MultiPrecisionInteger> {
+    /// Create a new modular ring. `n` must be odd.
+    pub fn new_non_prime(p: MultiPrecisionInteger) -> FiniteField<MultiPrecisionInteger> {
+        let mut f = Self::new(p);
+        f.is_prime = false;
+        f
     }
 
-    let f = Zp64::new(n);
-    let neg_one = FiniteFieldElement(n.wrapping_sub(f.one().0));
+    #[inline(always)]
+    fn montgomery_reduce(&self, t: MultiPrecisionInteger) -> MultiPrecisionInteger {
+        let m = ((&t & &self.r_mask).complete() * &self.m) & &self.r_mask;
+        let mut u = (t + m * &self.p) >> self.r_bits;
+        if u >= self.p {
+            u -= &self.p;
+        }
+        u
+    }
+}
 
-    'test: for a in w {
-        let a = f.to_element(*a);
+impl FiniteFieldCore<MultiPrecisionInteger> for FiniteField<MultiPrecisionInteger> {
+    /// Create a new modular ring. `n` must be odd and prime.
+    fn new(p: MultiPrecisionInteger) -> FiniteField<MultiPrecisionInteger> {
+        let r_bits = p.significant_bits().div_ceil(64) * 64;
+        let r = MultiPrecisionInteger::from(1) << r_bits;
+        let r_mask = MultiPrecisionInteger::from(&r - 1);
+        let m = {
+            let inv = p
+                .clone()
+                .invert(&r)
+                .unwrap_or_else(|_| panic!("Could not invert {p} modulo 2^{r_bits}"));
+            if inv == 0 { inv } else { &r - inv }
+        };
+        let r_mod_n = r % &p;
+        let r2 = (&r_mod_n * &r_mod_n).complete() % &p;
 
+        FiniteField {
+            p,
+            m,
+            r_mask,
+            r2,
+            r_bits,
+            one: FiniteFieldElement(r_mod_n),
+            is_prime: true,
+        }
+    }
+
+    fn get_prime(&self) -> MultiPrecisionInteger {
+        self.p.clone()
+    }
+
+    fn to_element(
+        &self,
+        mut a: MultiPrecisionInteger,
+    ) -> FiniteFieldElement<MultiPrecisionInteger> {
+        a %= &self.p;
+        if a < 0 {
+            a += &self.p;
+        }
+        FiniteFieldElement(self.montgomery_reduce(a * &self.r2))
+    }
+
+    fn from_element(&self, a: &FiniteFieldElement<MultiPrecisionInteger>) -> MultiPrecisionInteger {
+        self.montgomery_reduce(a.0.clone())
+    }
+
+    fn to_integer(&self, a: &Self::Element) -> Integer {
+        Integer::from(self.from_element(a))
+    }
+}
+
+impl Set for FiniteField<MultiPrecisionInteger> {
+    type Element = FiniteFieldElement<MultiPrecisionInteger>;
+
+    fn size(&self) -> Option<Integer> {
+        Some(Integer::from(self.p.clone()))
+    }
+}
+
+impl RingOps<FiniteFieldElement<MultiPrecisionInteger>> for FiniteField<MultiPrecisionInteger> {
+    fn add(&self, a: Self::Element, b: Self::Element) -> Self::Element {
+        let mut c = a.0 + b.0;
+        if c >= self.p {
+            c -= &self.p;
+        }
+        FiniteFieldElement(c)
+    }
+
+    fn sub(&self, a: Self::Element, b: Self::Element) -> Self::Element {
+        if a.0 >= b.0 {
+            FiniteFieldElement(a.0 - b.0)
+        } else {
+            let mut c = a.0 + &self.p;
+            c -= b.0;
+            FiniteFieldElement(c)
+        }
+    }
+
+    fn mul(&self, a: Self::Element, b: Self::Element) -> Self::Element {
+        FiniteFieldElement(self.montgomery_reduce(a.0 * b.0))
+    }
+
+    fn add_assign(&self, a: &mut Self::Element, b: Self::Element) {
+        *a = self.add(a.clone(), b);
+    }
+
+    fn sub_assign(&self, a: &mut Self::Element, b: Self::Element) {
+        *a = self.sub(a.clone(), b);
+    }
+
+    fn mul_assign(&self, a: &mut Self::Element, b: Self::Element) {
+        *a = self.mul(a.clone(), b);
+    }
+
+    fn add_mul_assign(&self, a: &mut Self::Element, b: Self::Element, c: Self::Element) {
+        self.add_assign(a, self.mul(b, c));
+    }
+
+    fn sub_mul_assign(&self, a: &mut Self::Element, b: Self::Element, c: Self::Element) {
+        self.sub_assign(a, self.mul(b, c));
+    }
+
+    fn neg(&self, a: Self::Element) -> Self::Element {
         if a.0 == 0 {
-            continue;
+            a
+        } else {
+            FiniteFieldElement((&self.p - &a.0).complete())
         }
+    }
+}
 
-        let mut x = f.pow(&a, d);
-
-        if x == f.one() || x == neg_one {
-            continue;
+impl RingOps<&FiniteFieldElement<MultiPrecisionInteger>> for FiniteField<MultiPrecisionInteger> {
+    fn add(&self, a: &Self::Element, b: &Self::Element) -> Self::Element {
+        let mut c = (&a.0 + &b.0).complete();
+        if c >= self.p {
+            c -= &self.p;
         }
-
-        for _ in 0..s {
-            x = f.mul(&x, &x);
-
-            if x == f.one() {
-                return false;
-            }
-            if x == neg_one {
-                continue 'test;
-            }
-        }
-
-        return false;
+        FiniteFieldElement(c)
     }
 
-    true
+    fn sub(&self, a: &Self::Element, b: &Self::Element) -> Self::Element {
+        if a.0 >= b.0 {
+            FiniteFieldElement((&a.0 - &b.0).complete())
+        } else {
+            let mut c = (&a.0 + &self.p).complete();
+            c -= &b.0;
+            FiniteFieldElement(c)
+        }
+    }
+
+    fn mul(&self, a: &Self::Element, b: &Self::Element) -> Self::Element {
+        FiniteFieldElement(self.montgomery_reduce((&a.0 * &b.0).complete()))
+    }
+
+    fn add_assign(&self, a: &mut Self::Element, b: &Self::Element) {
+        *a = self.add(&*a, b);
+    }
+
+    fn sub_assign(&self, a: &mut Self::Element, b: &Self::Element) {
+        *a = self.sub(&*a, b);
+    }
+
+    fn mul_assign(&self, a: &mut Self::Element, b: &Self::Element) {
+        *a = self.mul(&*a, b);
+    }
+
+    fn add_mul_assign(&self, a: &mut Self::Element, b: &Self::Element, c: &Self::Element) {
+        self.add_assign(a, &self.mul(b, c));
+    }
+
+    fn sub_mul_assign(&self, a: &mut Self::Element, b: &Self::Element, c: &Self::Element) {
+        self.sub_assign(a, &self.mul(b, c));
+    }
+
+    fn neg(&self, a: &Self::Element) -> Self::Element {
+        if a.0 == 0 {
+            a.clone()
+        } else {
+            FiniteFieldElement((&self.p - &a.0).complete())
+        }
+    }
+}
+
+impl Ring for FiniteField<MultiPrecisionInteger> {
+    fn zero(&self) -> Self::Element {
+        FiniteFieldElement(MultiPrecisionInteger::new())
+    }
+
+    fn one(&self) -> Self::Element {
+        self.one.clone()
+    }
+
+    fn nth(&self, n: Integer) -> Self::Element {
+        self.to_element(n.to_multi_prec())
+    }
+
+    fn pow(&self, b: &Self::Element, mut e: u64) -> Self::Element {
+        if e == 0 {
+            return self.one();
+        }
+
+        let mut x = b.clone();
+        let mut y = self.one();
+        while e != 1 {
+            if e % 2 == 1 {
+                y = self.mul(&y, &x);
+            }
+
+            x = self.mul(&x, &x);
+            e /= 2;
+        }
+
+        self.mul(&x, &y)
+    }
+
+    fn is_zero(&self, a: &Self::Element) -> bool {
+        a.0 == 0
+    }
+
+    fn is_one(&self, a: &Self::Element) -> bool {
+        a == &self.one
+    }
+
+    fn one_is_gcd_unit() -> bool {
+        true
+    }
+
+    fn characteristic(&self) -> Integer {
+        Integer::from(self.p.clone())
+    }
+
+    fn try_inv(&self, a: &Self::Element) -> Option<Self::Element> {
+        if self.is_zero(a) {
+            return None;
+        }
+
+        self.from_element(a)
+            .invert(&self.p)
+            .ok()
+            .map(|inv| self.to_element(inv))
+    }
+
+    fn try_div(&self, a: &Self::Element, b: &Self::Element) -> Option<Self::Element> {
+        self.try_inv(b).map(|r| self.mul(a, &r))
+    }
+
+    fn sample(&self, rng: &mut impl rand::RngCore, range: (i64, i64)) -> Self::Element {
+        self.to_element(MultiPrecisionInteger::from(
+            rng.random_range(range.0..range.1),
+        ))
+    }
+
+    fn format<W: std::fmt::Write>(
+        &self,
+        element: &Self::Element,
+        opts: &PrintOptions,
+        state: PrintState,
+        f: &mut W,
+    ) -> Result<bool, Error> {
+        if opts.symmetric_representation_for_finite_field {
+            Z.format(&self.to_symmetric_integer(element), opts, state, f)
+        } else {
+            Z.format(&self.to_integer(element), opts, state, f)
+        }
+    }
+}
+
+impl EuclideanDomain for FiniteField<MultiPrecisionInteger> {
+    fn rem(&self, _: &Self::Element, _: &Self::Element) -> Self::Element {
+        self.zero()
+    }
+
+    fn quot_rem(&self, a: &Self::Element, b: &Self::Element) -> (Self::Element, Self::Element) {
+        (self.mul(a, &self.inv(b)), self.zero())
+    }
+
+    fn gcd(&self, _: &Self::Element, _: &Self::Element) -> Self::Element {
+        self.one()
+    }
+}
+
+impl Field for FiniteField<MultiPrecisionInteger> {
+    fn div(&self, a: &Self::Element, b: &Self::Element) -> Self::Element {
+        self.mul(a, &self.inv(b))
+    }
+
+    fn div_assign(&self, a: &mut Self::Element, b: &Self::Element) {
+        *a = self.mul(&*a, &self.inv(b));
+    }
+
+    fn inv(&self, a: &Self::Element) -> Self::Element {
+        self.try_inv(a)
+            .unwrap_or_else(|| panic!("{} is not invertible mod {}", a, self.p))
+    }
+}
+
+impl<U: FiniteFieldWorkspace> FiniteField<U>
+where
+    FiniteField<U>: FiniteFieldCore<U>,
+    Integer: ToFiniteField<U>,
+{
+    /// Test whether the field is a prime field using the Miller-Rabin primality test using `k` random witnesses.
+    /// For 64-bit numbers the test is deterministic and uses at most 7 fixed witnesses.
+    ///
+    /// Based on [Wojciech Izykowski's implementation](https://github.com/wizykowski/miller-rabin).
+    pub fn is_prime_field(&self, k: usize) -> bool {
+        let n = self.get_prime().to_integer();
+        if n < 2 {
+            return false;
+        }
+
+        if &n % 2 == 0 {
+            return n == 2;
+        }
+
+        if n > u64::MAX {
+            let n = match &n {
+                Integer::Double(n) => MultiPrecisionInteger::from(*n),
+                Integer::Large(n) => n.clone(),
+                Integer::Single(_) => unreachable!(),
+            };
+
+            return n.is_probably_prime((k + 24) as u32) != rug::integer::IsPrime::No;
+        }
+
+        let mut s = 0;
+        let mut d: Integer = &n - 1;
+        while &d % 2 == 0 {
+            d /= 2;
+            s += 1;
+        }
+
+        let w = if n < 341531 {
+            [Integer::Double(9345883071009581737)].as_slice()
+        } else if n < 1050535501 {
+            [
+                Integer::Single(336781006125),
+                Integer::Single(9639812373923155),
+            ]
+            .as_slice()
+        } else if n < 350269456337i64 {
+            [
+                Integer::Single(4230279247111683200),
+                Integer::Double(14694767155120705706),
+                Integer::Double(16641139526367750375),
+            ]
+            .as_slice()
+        } else if n < u64::MAX {
+            // shortest SPRP basis from Jim Sinclair for testing primality of u64
+            [
+                Integer::Single(2),
+                Integer::Single(325),
+                Integer::Single(9375),
+                Integer::Single(28178),
+                Integer::Single(450775),
+                Integer::Single(9780504),
+                Integer::Single(1795265022),
+            ]
+            .as_slice()
+        } else {
+            unreachable!()
+        };
+
+        let neg_one = self.neg(&self.one());
+
+        'test: for a in w {
+            let mut x = a.to_finite_field(self);
+
+            if self.is_zero(&x) {
+                continue;
+            }
+
+            // compute x^d using exponentiation by squaring
+            let mut y = self.one();
+            let mut exponent = d.clone();
+            while exponent != 1 {
+                if &exponent % 2 == 1 {
+                    y = self.mul(&y, &x);
+                }
+
+                x = self.mul(&x, &x);
+                exponent /= 2;
+            }
+
+            self.mul_assign(&mut x, &y);
+
+            if x == self.one() || x == neg_one {
+                continue;
+            }
+
+            for _ in 0..s {
+                x = self.mul(&x, &x);
+
+                if self.is_one(&x) {
+                    return false;
+                }
+                if x == neg_one {
+                    continue 'test;
+                }
+            }
+
+            return false;
+        }
+
+        true
+    }
+
+    /// Perform Pollard's rho algorithm with Brent's cycle detection that finds
+    /// a factor of the modulus `p`, where `p` must be non-prime.
+    /// Calling this method on a prime field will result in an infinite loop.
+    pub fn pollard_brent_rho(&self) -> Integer {
+        const M: u64 = 1000;
+
+        let mut rng = rand::rng();
+        let mut rug_rng = rug::rand::RandState::new();
+        rug_rng.seed(&MultiPrecisionInteger::from(rng.random::<u128>()));
+
+        let mut c = Integer::new(3);
+        let n = self.get_prime().to_integer();
+        let n_rug = match &n {
+            Integer::Single(_) => None,
+            Integer::Double(n) => Some(MultiPrecisionInteger::from(*n)),
+            Integer::Large(n) => Some(n.clone()),
+        };
+
+        'restart: loop {
+            let cf = c.to_finite_field(&self);
+            let mut y = if let Some(n_rug) = &n_rug {
+                Integer::from(n_rug.clone().random_below(&mut rug_rng)).to_finite_field(self)
+            } else {
+                Integer::from(rng.random_range(0..n.to_u64().unwrap())).to_finite_field(self)
+            };
+
+            let mut x = y.clone();
+            let mut ys = y.clone();
+            let mut r = 1;
+            let mut g = Integer::one();
+
+            while g == 1 {
+                x = y.clone();
+
+                for _ in 0..r {
+                    y = self.add(&self.mul(&y, &y), &cf);
+                }
+
+                let mut k = 0;
+                while k < r && g == 1 {
+                    ys = y.clone();
+                    let mut q = self.one();
+                    for _ in 0..M.min(r - k) {
+                        y = self.add(&self.mul(&y, &y), &cf);
+                        self.mul_assign(&mut q, &self.sub(&x, &y));
+                    }
+
+                    g = self.to_integer(&q).gcd(&n);
+                    k += M;
+                }
+
+                r *= 2;
+            }
+
+            if g == n {
+                loop {
+                    ys = self.add(&self.mul(&ys, &ys), &cf);
+                    g = self.to_integer(&self.sub(&x, &ys)).gcd(&n);
+                    if g > 1 {
+                        if g == n {
+                            // two sequences are repeating at the same time, increase constant
+                            c += 1;
+                            continue 'restart;
+                        }
+                        return g;
+                    }
+                }
+            }
+
+            if g != n {
+                return g;
+            }
+        }
+    }
 }
 
 /// An iterator over consecutive 64-bit primes.
@@ -2154,12 +2669,42 @@ impl Iterator for PrimeIteratorU64 {
         while self.current_number < u64::MAX {
             self.current_number += 1;
 
-            if is_prime_u64(self.current_number) {
+            if Integer::from(self.current_number).is_prime(0) {
                 return Some(self.current_number);
             }
         }
 
         None
+    }
+}
+
+/// An iterator over primes.
+#[derive(Debug, Clone, Hash, Eq, PartialEq)]
+pub struct PrimeIterator {
+    current_number: Integer,
+}
+
+impl PrimeIterator {
+    /// Create a new prime iterator that is larger than `start`.
+    pub fn new(start: Integer) -> PrimeIterator {
+        PrimeIterator {
+            current_number: start.max(Integer::one()),
+        }
+    }
+}
+
+impl Iterator for PrimeIterator {
+    type Item = Integer;
+
+    /// Yield the next prime or `None` if `u64::MAX` has been reached.
+    fn next(&mut self) -> Option<Integer> {
+        loop {
+            self.current_number += 1;
+
+            if self.current_number.is_prime(24) {
+                return Some(self.current_number.clone());
+            }
+        }
     }
 }
 
@@ -2231,7 +2776,7 @@ impl SmoothPrimeIterator {
     fn next_impl(&mut self, pos: usize, skip_first: &mut bool, lower_bound: u64) -> Option<u64> {
         if pos == self.primes.len() {
             let n = *self.accum.last().unwrap();
-            if n >= lower_bound && n < u64::MAX - 1 && is_prime_u64(n + 1) {
+            if n >= lower_bound && n < u64::MAX - 1 && Integer::from(n + 1).is_prime(0) {
                 if !*skip_first {
                     self.first = false;
                     return Some(n + 1);
@@ -2279,120 +2824,6 @@ impl SmoothPrimeIterator {
     }
 }
 
-/// Perform Pollard's rho algorithm with Brent's cycle detection.
-fn pollard_brent_rho(n: u64) -> u64 {
-    const M: u64 = 1000;
-
-    if is_prime_u64(n) {
-        return n;
-    }
-
-    if n.is_multiple_of(2) {
-        return 2;
-    }
-
-    let field = Zp64::new(n);
-    let mut rng = rand::rng();
-
-    let mut c = 3;
-
-    loop {
-        let cf = field.to_element(c);
-        let mut x = field.sample(&mut rng, (0, n.clamp(0, i64::MAX as u64) as i64));
-
-        let mut y = x;
-        let mut q = field.one();
-        let mut ys = field.one();
-        let mut r = 1;
-        let mut g = 1;
-
-        while g == 1 {
-            x = y;
-
-            for _ in 1..r {
-                y = field.add(&field.mul(&y, &y), &cf);
-            }
-
-            let mut k = 0;
-            while k < r && g == 1 {
-                ys = y;
-                for _ in 1..M.min(r - k) {
-                    y = field.add(&field.mul(&y, &y), &cf);
-                    field.mul_assign(&mut q, &field.sub(&x, &y));
-                }
-
-                g = gcd_unsigned(field.from_element(&q), n);
-                k += M;
-            }
-
-            r *= 2;
-        }
-
-        if g == n {
-            loop {
-                ys = field.add(&field.mul(&ys, &ys), &cf);
-                g = gcd_unsigned(field.from_element(&field.sub(&x, &ys)), n);
-                if g > 1 {
-                    if g == n {
-                        // two sequences are repeating at the same time, increase constant
-                        c += 1;
-                        break;
-                    }
-                    return g;
-                }
-            }
-        }
-
-        if g != n {
-            return g;
-        }
-    }
-}
-
-/// Factorize a 64-bit number into its prime factors.
-pub fn factor(mut n: u64, out: &mut Vec<u64>) {
-    if n < 2 {
-        out.push(n);
-        return;
-    }
-
-    while n.is_multiple_of(2) {
-        out.push(2);
-        n /= 2;
-    }
-
-    while n > 1 {
-        let f = pollard_brent_rho(n);
-
-        if f == n {
-            out.push(n);
-        } else {
-            factor(f, out);
-        }
-
-        n /= f;
-    }
-}
-
-/// Compute the Euler totient function of `n`.
-pub fn totient(n: u64) -> u64 {
-    if is_prime_u64(n) {
-        return n - 1;
-    }
-
-    let mut factors = Vec::new();
-    factor(n, &mut factors);
-    factors.sort();
-    factors.dedup();
-
-    let mut t = n;
-    for f in factors {
-        t = t - t / f;
-    }
-
-    t
-}
-
 /// An iterator over the primitive roots of a finite field with odd (potentially composite) modulus `n`.
 pub struct PrimitiveRootIterator {
     f: Zp64,
@@ -2403,14 +2834,15 @@ pub struct PrimitiveRootIterator {
 
 impl PrimitiveRootIterator {
     pub fn new(n: u64) -> Self {
-        let totient = totient(n);
-        let mut factors = vec![];
+        let totient = Integer::from(n).totient();
 
-        factor(totient, &mut factors);
-        factors.sort();
-        factors.dedup();
+        let factors = totient
+            .factor()
+            .into_iter()
+            .map(|(f, _)| f.to_u64().unwrap())
+            .collect();
 
-        Self::new_with_totient_factors(n, totient, factors)
+        Self::new_with_totient_factors(n, totient.to_u64().unwrap(), factors)
     }
 
     pub fn new_with_totient_factors(n: u64, totient: u64, totient_factors: Vec<u64>) -> Self {
@@ -2776,10 +3208,14 @@ pub const SMOOTH_PRIMES: [(u64, u8, [u8; 4]); 323] = [
 
 #[cfg(test)]
 mod test {
+    use rug::Integer as MultiPrecisionInteger;
+    use std::str::FromStr;
+
     use super::{FiniteFieldCore, Zp};
     use crate::domains::{
-        Ring, RingOps,
-        finite_field::{PrimitiveRootIterator, Zp64},
+        Field, Ring, RingOps,
+        finite_field::{FiniteField, PrimitiveRootIterator, Zp64},
+        integer::Integer,
     };
 
     #[test]
@@ -2811,18 +3247,43 @@ mod test {
     }
 
     #[test]
-    fn factor() {
-        let mut factors = Vec::new();
-        for i in 18446744073709541426..18446744073709551426 {
-            super::factor(i, &mut factors);
-            let mut res = 1;
-            for f in &factors {
-                res *= f;
-            }
+    fn is_prime_field_rejects_large_composites() {
+        let r = FiniteField::<Integer>::new(Integer::from_str("179769313486231590772930519078902473361797697894230657273430081157732675805500963132708477322407536021120113879871393357658789768814416622492847430639474124377767893424865485276302219601246094119453082952085005768838150682342462881473913110540827237163350510684586298239947245938479716304835356329624224137219").unwrap());
+        assert!(!r.is_prime_field(40));
+    }
 
-            assert_eq!(res, i);
-            factors.clear();
-        }
+    #[test]
+    fn large_montgomery_fields() {
+        let p = Integer::from_str("18446744073709551557").unwrap();
+        let a = Integer::from_str("18446744073709551500").unwrap();
+        let b = Integer::from(123456789u64);
+
+        let field = FiniteField::<Integer>::new(p.clone());
+        let af = field.to_element(a.clone());
+        let bf = field.to_element(b.clone());
+        assert_eq!(
+            field.from_element(&field.add(&af, &bf)),
+            (a.clone() + &b) % &p
+        );
+        assert_eq!(
+            field.from_element(&field.mul(&af, &bf)),
+            (a.clone() * &b) % &p
+        );
+        assert_eq!(
+            field.from_element(&field.div(&af, &bf)),
+            (a * b.mod_inverse(&p)) % &p
+        );
+
+        let p_rug = p.to_multi_prec();
+        let field = FiniteField::<MultiPrecisionInteger>::new(p_rug.clone());
+        let af = field.to_element(MultiPrecisionInteger::from(18446744073709551500u128));
+        let bf = field.to_element(MultiPrecisionInteger::from(123456789u64));
+        assert_eq!(
+            field.from_element(&field.mul(&af, &bf)),
+            (MultiPrecisionInteger::from(18446744073709551500u128)
+                * MultiPrecisionInteger::from(123456789u64))
+                % p_rug
+        );
     }
 
     #[test]
