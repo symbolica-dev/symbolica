@@ -309,7 +309,7 @@ impl<'a> AtomView<'a> {
 
         let horner: Vec<_> = expressions
             .iter()
-            .map(|x| x.horner_scheme(Some(&vars), true))
+            .map(|x| x.horner_scheme(Some(vars), true))
             .collect();
         let mut subexpr = HashSet::default();
         let mut best_ops = (0, 0);
@@ -581,7 +581,7 @@ impl<'a> AtomView<'a> {
                             });
                         }
                         instructions.push((
-                            Instr::BuiltinFun(slot_map!(o), sym.clone(), slot_map!(args[0])),
+                            Instr::BuiltinFun(slot_map!(o), *sym, slot_map!(args[0])),
                             ComplexPhase::default(),
                         ));
                         continue;
@@ -635,7 +635,7 @@ impl<'a> AtomView<'a> {
             stack,
             param_count: params.len(),
             reserved_indices,
-            instructions: instructions,
+            instructions,
             result_indices: result_indices.iter().map(|s| slot_map!(*s)).collect(),
             external_fns: external_functions,
             settings: settings.clone(),
@@ -914,7 +914,7 @@ impl<'a> AtomView<'a> {
                     instr[if_instr_pos] = Instruction::IfElse(cond, instr.len());
                     instr.push(Instruction::Label(instr.len()));
 
-                    sub_expr_pos_child.clone_from(&subexpressions);
+                    sub_expr_pos_child.clone_from(subexpressions);
                     let else_branch = else_branch.linearize_impl(
                         fn_map,
                         params,
@@ -3079,7 +3079,7 @@ impl<T: Clone + Default + std::fmt::Debug + Eq + std::hash::Hash + InternalOrder
         // assign a unique index to every subexpression
         let mut h = HashMap::default();
         for (index, (_, e)) in v.iter().enumerate() {
-            h.insert(&*e, self.subexpressions.len() + index);
+            h.insert(e, self.subexpressions.len() + index);
         }
 
         for t in &mut self.tree {

@@ -633,7 +633,7 @@ impl PackedRationalNumberReader for [u8] {
             }
             U64_NUM => {
                 let v = source.get_u64_le();
-                (v as u64, source)
+                (v, source)
             }
             x => {
                 unreachable!("Unsupported numerator type {}", x)
@@ -657,7 +657,7 @@ impl PackedRationalNumberReader for [u8] {
             }
             U64_DEN => {
                 let v = source.get_u64_le();
-                (v as u64, source)
+                (v, source)
             }
             x => {
                 unreachable!("Unsupported denominator type {}", x)

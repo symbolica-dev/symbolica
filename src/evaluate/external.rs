@@ -114,7 +114,7 @@ impl<T> Clone for ExternalFunctionContainer<T> {
     fn clone(&self) -> Self {
         Self {
             export_name: self.export_name.clone(),
-            symbol: self.symbol.clone(),
+            symbol: self.symbol,
             tags: self.tags.clone(),
             fixed_args: self.fixed_args.clone(),
             imp: self.imp.clone(),

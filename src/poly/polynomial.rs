@@ -4503,7 +4503,7 @@ impl<E: Exponent> MultivariatePolynomial<IntegerRing, E> {
 
         while i < self.nterms() || j < other.nterms() {
             let (exp, mut c1, mut c2) = if i < self.nterms() && j < other.nterms() {
-                match self.exponents(i).cmp(&other.exponents(j)) {
+                match self.exponents(i).cmp(other.exponents(j)) {
                     std::cmp::Ordering::Equal => {
                         i += 1;
                         j += 1;

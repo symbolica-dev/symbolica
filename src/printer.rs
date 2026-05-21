@@ -1162,13 +1162,11 @@ impl FormattedPrintMul for MulView<'_> {
             print_state.suppress_one = self.iter().skip(1).any(|x| {
                 if let AtomView::Pow(p) = x {
                     let (_, e) = p.get_base_exp();
-                    if let AtomView::Num(n) = e {
-                        if let CoefficientView::Natural(num, _, 0, 1) = n.get_coeff_view() {
-                            if num < 0 {
+                    if let AtomView::Num(n) = e
+                        && let CoefficientView::Natural(num, _, 0, 1) = n.get_coeff_view()
+                            && num < 0 {
                                 return false;
                             }
-                        }
-                    }
                 }
                 true
             });
@@ -1215,9 +1213,9 @@ impl FormattedPrintMul for MulView<'_> {
             // count and skip denominators
             if let AtomView::Pow(p) = x {
                 let (_, e) = p.get_base_exp();
-                if let AtomView::Num(n) = e {
-                    if let CoefficientView::Natural(num, _, 0, 1) = n.get_coeff_view() {
-                        if num < 0 {
+                if let AtomView::Num(n) = e
+                    && let CoefficientView::Natural(num, _, 0, 1) = n.get_coeff_view()
+                        && num < 0 {
                             den_count += 1;
 
                             if opts.fill_indented_lines && opts.max_line_length.is_some() {
@@ -1225,8 +1223,6 @@ impl FormattedPrintMul for MulView<'_> {
                             }
                             continue;
                         }
-                    }
-                }
             }
 
             num_count += 1;

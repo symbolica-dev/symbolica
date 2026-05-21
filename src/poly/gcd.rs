@@ -2495,8 +2495,8 @@ impl<E: PositiveExponent> MultivariatePolynomial<IntegerRing, E> {
                 gp = gp.mul_coeff(ap.ring.div(&gammap, &gpc));
                 debug!("gp: {} mod {}", gp, gp.ring.get_prime());
 
-                let gp_i = gp.map_coeff(|c| gp.ring.to_integer(c), self.ring.clone());
-                gm = gm.chinese_remainder(&gp_i, &m, &gp.ring.get_prime().to_integer().into());
+                let gp_i = gp.map_coeff(|c| gp.ring.to_integer(c), self.ring);
+                gm = gm.chinese_remainder(&gp_i, &m, &gp.ring.get_prime().to_integer());
 
                 self.ring.mul_assign(&mut m, &Integer::from_prime(&gp.ring));
 
@@ -2515,10 +2515,10 @@ impl<E: PositiveExponent> MultivariatePolynomial<IntegerRing, E> {
         let mut unique_indices = vec![];
         let mut index_map = HashMap::default();
         for p in poly.exponents_iter() {
-            if !index_map.contains_key(&p[0]) {
+            index_map.entry(p[0]).or_insert_with(|| {
                 unique_indices.push(p[0]);
-                index_map.insert(p[0], 0);
-            }
+                0
+            });
         }
         unique_indices.sort();
         for (index, e) in unique_indices.iter().enumerate() {
@@ -2604,10 +2604,10 @@ impl<E: PositiveExponent> MultivariatePolynomial<IntegerRing, E> {
         let mut index_map = HashMap::default();
         for p in poly.exponents_iter() {
             let row = (p[0], p[1]);
-            if !index_map.contains_key(&row) {
+            index_map.entry(row).or_insert_with(|| {
                 unique_indices.push(row);
-                index_map.insert(row, 0);
-            }
+                0
+            });
         }
         unique_indices.sort();
         for (index, e) in unique_indices.iter().enumerate() {
@@ -2694,7 +2694,7 @@ impl<E: PositiveExponent> MultivariatePolynomial<IntegerRing, E> {
         ri_prod: u64,
         d_0: PE,
     ) -> Option<MultivariatePolynomial<Zp64, u32>> {
-        if images.len() < 4 || images.len() % 2 != 0 {
+        if images.len() < 4 || !images.len().is_multiple_of(2) {
             return None;
         }
 
@@ -2814,7 +2814,7 @@ impl<E: PositiveExponent> MultivariatePolynomial<IntegerRing, E> {
         ri_prod: u64,
         d_0_1: (u32, u32),
     ) -> Option<MultivariatePolynomial<Zp64, u32>> {
-        if images.len() < 4 || images.len() % 2 != 0 {
+        if images.len() < 4 || !images.len().is_multiple_of(2) {
             return None;
         }
 
@@ -3633,7 +3633,7 @@ impl<E: PositiveExponent> PolynomialGCD<E> for IntegerRing {
                 }
             }
 
-            cofactor_box_size * 12 < box_size || Integer::from(nterms) < box_size
+            cofactor_box_size * 12 < box_size || nterms < box_size
         }
 
         if GLOBAL_SETTINGS

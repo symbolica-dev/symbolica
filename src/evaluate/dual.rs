@@ -181,9 +181,8 @@ impl<T: Default + Clone> ExpressionEvaluator<T> {
                         let r = ins.add(VectorInstruction::ExternalFun(
                             *index,
                             a.iter()
-                                .map(|x| get_slot!(slot_map[&x]))
-                                .map(|x| (0..v.get_dimension()).map(move |k| x.index(k)))
-                                .flatten()
+                                .map(|x| get_slot!(slot_map[x]))
+                                .flat_map(|x| (0..v.get_dimension()).map(move |k| x.index(k)))
                                 .chain(results.iter().cloned())
                                 .collect(),
                         ));
@@ -555,7 +554,7 @@ impl<T: DualNumberStructure> Vectorize<Complex<Rational>> for Dualizer<T> {
                     for p in 1..self.dual.get_max_depth() + 1 {
                         scale *= p;
                         num = num.clone()
-                            * (num.from_usize(2).inv() - &num.from_usize(p as usize - 1));
+                            * (num.from_usize(2).inv() - &num.from_usize(p - 1));
                         accum = mul(&accum, &r, mult_table, self, instrs);
 
                         let c = instrs
@@ -643,7 +642,7 @@ impl<T: DualNumberStructure> Vectorize<Complex<Rational>> for Dualizer<T> {
                     let mut scale = Complex::from(Rational::one());
                     for i in 1..self.dual.get_max_depth() + 1 {
                         scale *= Rational::from(i);
-                        let b = if i % 2 == 1 { c.clone() } else { s.clone() };
+                        let b = if i % 2 == 1 { c } else { s };
 
                         let sc = instrs.add_constant_in_first_component(if i % 4 >= 2 {
                             -scale.inv()
@@ -675,7 +674,7 @@ impl<T: DualNumberStructure> Vectorize<Complex<Rational>> for Dualizer<T> {
                     let mut scale = Complex::from(Rational::one());
                     for i in 1..self.dual.get_max_depth() + 1 {
                         scale *= Rational::from(i);
-                        let b = if i % 2 == 1 { s.clone() } else { c.clone() };
+                        let b = if i % 2 == 1 { s } else { c };
 
                         let sc =
                             instrs.add_constant_in_first_component(if (i % 2 == 0) ^ (i % 4 < 2) {
