@@ -234,7 +234,7 @@ impl<'a> AtomView<'a> {
 
         let hornered_expressions = expressions
             .iter()
-            .map(|x| x.horner_scheme(Some(&scheme), true))
+            .map(|x| x.horner_scheme(Some(&scheme), true, true))
             .collect::<Vec<_>>();
 
         if settings.horner_iterations == 1 && settings.verbose {
@@ -253,7 +253,7 @@ impl<'a> AtomView<'a> {
 
         let mut f = fn_map.clone();
         for Expr { body, .. } in f.tagged_fn_map.values_mut() {
-            *body = body.as_view().horner_scheme(Some(&scheme), true);
+            *body = body.as_view().horner_scheme(Some(&scheme), true, true);
         }
 
         let mut e = Self::linearize_multiple(&hornered_expressions, &f, params, settings)?;
@@ -309,7 +309,7 @@ impl<'a> AtomView<'a> {
 
         let horner: Vec<_> = expressions
             .iter()
-            .map(|x| x.horner_scheme(Some(vars), true))
+            .map(|x| x.horner_scheme(Some(vars), true, true))
             .collect();
         let mut subexpr = HashSet::default();
         let mut best_ops = (0, 0);
@@ -407,7 +407,7 @@ impl<'a> AtomView<'a> {
 
                         let horner: Vec<_> = expressions
                             .iter()
-                            .map(|x| x.horner_scheme(Some(&cvars), true))
+                            .map(|x| x.horner_scheme(Some(&cvars), true, true))
                             .collect();
                         let mut subexpr = HashSet::default();
                         let mut cur_ops = (0, 0);
