@@ -2721,7 +2721,6 @@ class Expression:
         level_range: tuple[int, int | None] | None = None,
         level_is_tree_depth: bool = False,
         partial: bool = True,
-        allow_new_wildcards_on_rhs: bool = False,
     ) -> MatchIterator:
         """
         Return an iterator over the pattern `self` matching to `lhs`.
@@ -2757,8 +2756,6 @@ class Expression:
             Whether levels should be measured by tree depth instead of function nesting.
         partial: bool
             Whether matches are allowed inside larger expressions instead of only at the top level.
-        allow_new_wildcards_on_rhs: bool
-            Whether wildcards that appear only on the right-hand side are allowed.
         """
 
     def matches(
@@ -2770,7 +2767,6 @@ class Expression:
         level_range: tuple[int, int | None] | None = None,
         level_is_tree_depth: bool = False,
         partial: bool = True,
-        allow_new_wildcards_on_rhs: bool = False,
     ) -> Condition:
         """
         Test whether the pattern is found in the expression.
@@ -2799,8 +2795,6 @@ class Expression:
             Whether levels should be measured by tree depth instead of function nesting.
         partial: bool
             Whether matches are allowed inside larger expressions instead of only at the top level.
-        allow_new_wildcards_on_rhs: bool
-            Whether wildcards that appear only on the right-hand side are allowed.
         """
 
     def replace_iter(
@@ -3694,7 +3688,6 @@ class HeldExpression:
         level_range: tuple[int, int | None] | None = None,
         level_is_tree_depth: bool = False,
         partial: bool = True,
-        allow_new_wildcards_on_rhs: bool = False,
     ) -> Condition:
         """
         Create a transformer that tests whether the pattern is found in the expression.
@@ -3716,8 +3709,6 @@ class HeldExpression:
             Whether levels should be measured by tree depth instead of function nesting.
         partial: bool
             Whether matches are allowed inside larger expressions instead of only at the top level.
-        allow_new_wildcards_on_rhs: bool
-            Whether wildcards that appear only on the right-hand side are allowed.
         """
 
     def __add__(
@@ -4903,7 +4894,6 @@ class Transformer:
         level_range: tuple[int, int | None] | None = None,
         level_is_tree_depth: bool = False,
         partial: bool = True,
-        allow_new_wildcards_on_rhs: bool = False,
     ) -> Condition:
         """
         Create a transformer that tests whether the pattern is found in the expression.
@@ -4925,8 +4915,6 @@ class Transformer:
             Whether levels should be measured by tree depth instead of function nesting.
         partial: bool
             Whether matches are allowed inside larger expressions instead of only at the top level.
-        allow_new_wildcards_on_rhs: bool
-            Whether wildcards that appear only on the right-hand side are allowed.
         """
 
 class Series:

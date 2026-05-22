@@ -488,6 +488,34 @@ impl<'a, 'b> ReplaceBuilder<'a, 'b> {
         out.into_inner()
     }
 
+    /// Execute the replacement by specifying the right-hand side.
+    /// If the right-hand side contains wildcards that do not appear in the pattern, an error is returned
+    /// unless [ReplaceBuilder::allow_new_wildcards_on_rhs] is set to `true`.
+    ///
+    /// To use a map as a right-hand side, use [ReplaceBuilder::with_map].
+    ///
+    /// # Example
+    ///
+    /// ```
+    /// use symbolica::prelude::*;
+    ///
+    /// let r = parse!("f(2)").replace(parse!("f(x_)")).with(parse!("f(x_+1)"));
+    /// assert_eq!(r, parse!("f(3)"));
+    pub fn try_with<'c, R: Into<BorrowedOrOwned<'c, Pattern>>>(
+        &self,
+        rhs: R,
+    ) -> Result<Atom, Symbol> {
+        let rhs = rhs.into();
+
+        if !self.match_settings.allow_new_wildcards_on_rhs {
+            if let Some(w) = self.pattern.find_new_wildcard(rhs.borrow()) {
+                return Err(w);
+            }
+        }
+
+        Ok(self.with(rhs))
+    }
+
     /// Execute the replacement by specifying the right-hand side and writing the result in `out`.
     pub fn with_into<'c, R: Into<BorrowedOrOwned<'c, Pattern>>>(
         &self,
@@ -2130,7 +2158,8 @@ impl<'a> AtomView<'a> {
         replace_settings: ReplaceSettings,
         out: &mut Settable<Atom>,
     ) {
-        if !replace_settings.bottom_up && !replace_settings.nested
+        if !replace_settings.bottom_up
+            && !replace_settings.nested
             && (!self.replace_node(
                 replacements,
                 atom_match_iterators,
@@ -2140,9 +2169,9 @@ impl<'a> AtomView<'a> {
                 rhs_cache,
                 out,
             ) || out.is_set())
-            {
-                return;
-            }
+        {
+            return;
+        }
 
         // no match found at this level, so check the children
         match self {
@@ -2704,6 +2733,57 @@ impl Pattern {
     /// Create a replacement that replaces this pattern with a given map function.
     pub fn replace_with_map<'c, R: MatchMap + 'static>(self, rhs: R) -> Replacement {
         Replacement::new(self, ReplaceWith::Map(Box::new(rhs)))
+    }
+
+    /// Visit each pattern in this pattern, calling `f` on each one.
+    pub fn visitor<F: FnMut(&Pattern)>(&self, f: &mut F) {
+        f(self);
+        match self {
+            Pattern::Fn(_, a) => {
+                for p in a {
+                    p.visitor(f);
+                }
+            }
+            Pattern::Pow(a) => {
+                a[0].visitor(f);
+                a[1].visitor(f);
+            }
+            Pattern::Mul(a) => {
+                for p in a {
+                    p.visitor(f);
+                }
+            }
+            Pattern::Add(a) => {
+                for p in a {
+                    p.visitor(f);
+                }
+            }
+            _ => {}
+        }
+    }
+
+    /// Check if the rhs of this replacement contains a new wildcard. If so,
+    /// return the first new wildcard found.
+    pub fn find_new_wildcard(&self, rhs: &Self) -> Option<Symbol> {
+        let mut wildcards = HashSet::default();
+        self.visitor(&mut |p| {
+            if let Pattern::Wildcard(w) = p {
+                wildcards.insert(*w);
+            }
+        });
+
+        let mut new_found = None;
+        rhs.visitor(&mut |p| {
+            if new_found.is_none()
+                && let Pattern::Wildcard(w) = p
+            {
+                if wildcards.insert(*w) {
+                    new_found = Some(*w);
+                };
+            }
+        });
+
+        new_found
     }
 }
 
@@ -4548,8 +4628,7 @@ impl<'a, 'b> AtomMatchIterator<'a, 'b> {
                 let range = match_stack.get_range(*w);
                 if range.0 <= 1 && range.1.map(|w| w >= 1).unwrap_or(true) {
                     // TODO: any problems with matching Single vs a list?
-                    if let Ok(new_stack_len) = match_stack.insert(*w, Match::Single(self.target))
-                    {
+                    if let Ok(new_stack_len) = match_stack.insert(*w, Match::Single(self.target)) {
                         self.old_match_stack_len = Some(new_stack_len);
                         return Some((new_stack_len, &[]));
                     }
@@ -5157,10 +5236,11 @@ impl<'a, 'b> SubSliceIterator<'a, 'b> {
                                     }
                                     Err(MatchError::StructurallyImpossible) => {
                                         if self.processed_iterators < 64
-                                            && w.name.get_wildcard_level() == 1 {
-                                                self.compatibility_flag[k] |=
-                                                    1 << (self.processed_iterators - 1) as u64;
-                                            }
+                                            && w.name.get_wildcard_level() == 1
+                                        {
+                                            self.compatibility_flag[k] |=
+                                                1 << (self.processed_iterators - 1) as u64;
+                                        }
                                     }
                                     Err(_) => {
                                         structural_mismatch = false;
@@ -5569,7 +5649,8 @@ impl<'a> Iterator for AtomTreeIterator<'a> {
     /// Return the next position and atom in the tree.
     fn next(&mut self) -> Option<Self::Item> {
         let mut location = Vec::new();
-        self.next_into(Some(&mut location)).map(|atom| (location, atom))
+        self.next_into(Some(&mut location))
+            .map(|atom| (location, atom))
     }
 }
 
@@ -6183,7 +6264,7 @@ mod test {
     fn nested() {
         let res = parse!("f(x+x*y+f(x+x^2),x,f(x+x^2))").replace_map_bottom_up(|a, c, o| {
             if c.parent_type == Some(AtomType::Fun) {
-                let r = a.horner_scheme(None, false);
+                let r = a.horner_scheme(None, false, false);
                 if r.as_view() != a {
                     **o = r;
                 }
