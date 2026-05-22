@@ -1181,6 +1181,27 @@ impl PythonTransformer {
         self.append_transformer(Transformer::CollectNum)
     }
 
+    /// Create a transformer that collects terms that have the same numerical coefficient.
+    /// For example, `2*x + 2*x^2 + x^3` will be transformed into `2*(x+x^2)+x^3`.
+    ///
+    /// Examples
+    /// --------
+    ///
+    /// >>> from symbolica import *
+    /// >>>
+    /// >>> x = S('x')
+    /// >>> e = 2*x + 2*x**2 + x**3
+    /// >>> print(Transformer().collect_by_coefficient()(e))
+    ///
+    /// yields
+    ///
+    /// ```log
+    /// x^3+2*(x+x^2)
+    /// ```
+    pub fn collect_by_coefficient(&self) -> PyResult<PythonTransformer> {
+        self.append_transformer(Transformer::CollectByCoefficient)
+    }
+
     /// Complex conjugate the expression.
     pub fn conjugate(&self) -> PyResult<PythonTransformer> {
         self.append_transformer(Transformer::Conjugate)
@@ -4997,6 +5018,27 @@ impl PythonExpression {
     /// ```
     pub fn collect_num(&self) -> PythonExpression {
         self.expr.collect_num().into()
+    }
+
+    /// Collect terms that have the same numerical coefficient.
+    /// For example, `2*x + 2*x^2 + x^3` will be transformed into `2*(x+x^2)+x^3`.
+    ///
+    /// Examples
+    /// --------
+    ///
+    /// >>> from symbolica import *
+    /// >>>
+    /// >>> x = S('x')
+    /// >>> e = 2*x + 2*x**2 + x**3
+    /// >>> print(e.collect_by_coefficient())
+    ///
+    /// yields
+    ///
+    /// ```log
+    /// x^3+2*(x+x^2)
+    /// ```
+    pub fn collect_by_coefficient(&self) -> PythonExpression {
+        self.expr.collect_by_coefficient().into()
     }
 
     /// Collect terms involving the literal occurrence of `x`.

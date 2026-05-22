@@ -235,6 +235,8 @@ pub enum Transformer {
     CollectFactors,
     /// Construct a Horner form.
     CollectHorner(Option<Vec<Indeterminate>>),
+    /// Collect terms that have the same numerical coefficient.
+    CollectByCoefficient,
     /// Collect numbers.
     CollectNum,
     Conjugate,
@@ -293,6 +295,7 @@ impl std::fmt::Debug for Transformer {
             }
             Transformer::CollectFactors => f.debug_tuple("CollectFactors").finish(),
             Transformer::CollectHorner(x) => f.debug_tuple("CollectHorner").field(x).finish(),
+            Transformer::CollectByCoefficient => f.debug_tuple("CollectByCoefficient").finish(),
             Transformer::CollectSymbol(x, a, b) => f
                 .debug_tuple("CollectSymbol")
                 .field(x)
@@ -739,6 +742,9 @@ impl Transformer {
                 }
                 Transformer::CollectHorner(x) => {
                     *out = cur_input.collect_horner(x.as_ref().map(|v| v.as_slice()));
+                }
+                Transformer::CollectByCoefficient => {
+                    *out = cur_input.collect_by_coefficient();
                 }
                 Transformer::CollectNum => {
                     *out = cur_input.collect_num();

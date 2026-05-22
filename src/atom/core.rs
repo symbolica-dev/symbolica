@@ -298,7 +298,7 @@ pub trait AtomCore: private::Sealed + Sized {
         let vs = variables.map(|v| v.iter().map(|x| x.clone().into()).collect::<Vec<_>>());
 
         self.as_atom_view()
-            .horner_scheme(vs.as_deref(), false)
+            .horner_scheme(vs.as_deref(), false, false)
             .wrap(self)
     }
 
@@ -472,6 +472,22 @@ pub trait AtomCore: private::Sealed + Sized {
     /// ```
     fn collect_num(&self) -> Self::Output {
         self.as_atom_view().collect_num().wrap(self)
+    }
+
+    /// Collect terms that have the same numerical factor.
+    /// For example, `2*x + 2*x^2 + x^3` will be transformed into `2(x+x^2)+x^3`.
+    ///
+    /// # Example
+    ///
+    /// ```
+    /// use symbolica::prelude::*;
+    /// let expr = parse!("2*x + 2*x^2 + x^3");
+    /// let collected_num = expr.collect_by_coefficient();
+    /// let r = parse!("2(x+x^2)+x^3");
+    /// assert_eq!(collected_num, r);
+    /// ```
+    fn collect_by_coefficient(&self) -> Self::Output {
+        self.as_atom_view().collect_by_coefficient().wrap(self)
     }
 
     /// Expand an expression. The function [AtomCore::expand_via_poly] may be faster.

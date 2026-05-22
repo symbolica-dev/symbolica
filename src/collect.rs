@@ -1043,6 +1043,100 @@ impl<'a> AtomView<'a> {
         }
     }
 
+    pub(crate) fn collect_by_coefficient(&self) -> Atom {
+        Workspace::get_local().with(|ws| {
+            self.replace_map_bottom_up(
+                |term, _, out| {
+                    term.collect_num_exact_no_norm_impl(ws, out);
+
+                    if out.is_set() {
+                        let mut n = ws.new_atom();
+                        out.as_view().normalize(ws, &mut n);
+                        std::mem::swap(&mut **out, &mut n);
+                    }
+                },
+                true,
+            )
+        })
+    }
+
+    pub(crate) fn collect_num_exact_no_norm_impl(&self, ws: &Workspace, out: &mut Settable<Atom>) {
+        let AtomView::Add(a) = self else {
+            return;
+        };
+
+        let mut unique_constants = HashMap::default();
+        for term in a.iter() {
+            if let AtomView::Num(n) = term
+                && !n.is_one()
+            {
+                let l = unique_constants.len();
+                let g = unique_constants.entry(term).or_insert((l, 0));
+                g.1 += 1;
+            } else if let AtomView::Mul(m) = term {
+                if let Some(c) = m.get_coefficient() {
+                    let l = unique_constants.len();
+                    let g = unique_constants.entry(c).or_insert((l, 0));
+                    g.1 += 1;
+                }
+            }
+        }
+
+        let old_len = unique_constants.len();
+        unique_constants.retain(|_, v| v.1 != 1);
+
+        if unique_constants.is_empty() {
+            return;
+        }
+
+        let mut outs = vec![(*self, ws.new_atom()); old_len];
+        for (k, v) in &mut unique_constants {
+            outs[v.0].0 = *k;
+        }
+
+        let mut outs_add = outs.iter_mut().map(|x| x.1.to_add()).collect::<Vec<_>>();
+
+        let out_add = out.to_add();
+        for t in a.iter() {
+            if let AtomView::Num(n) = t
+                && !n.is_one()
+            {
+                if let Some(d) = unique_constants.get(&t) {
+                    outs_add[d.0].extend(ws.new_num(1).as_view());
+                    continue;
+                }
+            } else if let AtomView::Mul(m) = t {
+                if let Some(c) = m.get_coefficient() {
+                    if let Some(d) = unique_constants.get(&c) {
+                        if m.get_nargs() == 2 {
+                            let f = m.iter().skip(1).next().unwrap();
+                            outs_add[d.0].extend(f);
+                        } else {
+                            let mut prod = ws.new_atom();
+                            let prod_prod = prod.to_mul();
+                            for f in m.iter().skip(1) {
+                                prod_prod.extend(f);
+                            }
+                            outs_add[d.0].extend(prod.as_view());
+                        }
+
+                        continue;
+                    }
+                }
+            }
+
+            out_add.extend(t);
+        }
+
+        let mut mul = ws.new_atom();
+        for (k, x) in outs {
+            let mul_mul = mul.to_mul();
+            mul_mul.extend(k);
+            mul_mul.extend(x.as_view());
+            out_add.extend(mul.as_view());
+        }
+    }
+
     pub(crate) fn collect_factors(&self) -> Atom {
         let mut factors = HashMap::default();
         Workspace::get_local().with(|ws| {
@@ -1268,8 +1362,9 @@ impl<'a> AtomView<'a> {
         &self,
         xs: Option<&[Indeterminate]>,
         enter_functions: bool,
+        collect_by_coefficient: bool,
     ) -> Atom {
-        if let Some(xs) = xs {
+        let r = if let Some(xs) = xs {
             self.horner_scheme_impl(xs, enter_functions)
         } else {
             // sort variables by their occurrence count
@@ -1284,6 +1379,12 @@ impl<'a> AtomView<'a> {
                 .collect::<Vec<_>>();
 
             self.horner_scheme_impl(&res, enter_functions)
+        };
+
+        if collect_by_coefficient {
+            r.as_view().collect_by_coefficient()
+        } else {
+            r
         }
     }
 
@@ -1460,10 +1561,7 @@ impl<'a> AtomView<'a> {
                     if let Atom::Add(a) = &mut res {
                         a.extend(v.as_view());
                     } else {
-                        res = res
-                            .as_view()
-                            .add_no_norm(ws, v.as_view())
-                            .into_inner();
+                        res = res.as_view().add_no_norm(ws, v.as_view()).into_inner();
                     }
                 }
 
@@ -1486,6 +1584,14 @@ mod test {
         atom::{Atom, AtomCore, representation::InlineVar},
         function, parse, symbol,
     };
+
+    #[test]
+    fn collect_by_coefficient() {
+        let expr = parse!("4 + 2*v1 + 3*v2 + 2*v3 + 3*v4 + 4*x5 + x6 + 3*x6*x7 + 5*x7");
+        let collected = expr.as_view().collect_by_coefficient();
+        println!("{}", collected);
+        assert_eq!(collected.expand(), expr);
+    }
 
     #[test]
     fn collect_horner() {

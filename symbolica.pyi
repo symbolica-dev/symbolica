@@ -2482,6 +2482,26 @@ class Expression:
         ```
         """
 
+    def collect_by_coefficient(self) -> Expression:
+        """
+        Collect terms that have the same numerical coefficient.
+        For example, `2*x + 2*x^2 + x^3` will be transformed into `2*(x+x^2)+x^3`.
+
+        Examples
+        --------
+
+        >>> from symbolica import *
+        >>> x = S('x')
+        >>> e = 2*x + 2*x**2 + x**3
+        >>> print(e.collect_by_coefficient())
+
+        yields
+
+        ```
+        x^3+2*(x+x^2)
+        ```
+        """
+
     def coefficient_list(
         self, *x: Expression
     ) -> Sequence[tuple[Expression, Expression]]:
@@ -4487,6 +4507,26 @@ class Transformer:
 
         ```
         -6*(x+y)*(x-2*y)
+        ```
+        """
+
+    def collect_by_coefficient(self) -> Transformer:
+        """
+        Create a transformer that collects terms that have the same numerical coefficient.
+        For example, `2*x + 2*x^2 + x^3` will be transformed into `2*(x+x^2)+x^3`.
+
+        Examples
+        --------
+
+        >>> from symbolica import *
+        >>> x = S('x')
+        >>> e = 2*x + 2*x**2 + x**3
+        >>> print(T().collect_by_coefficient()(e))
+
+        yields
+
+        ```
+        x^3+2*(x+x^2)
         ```
         """
 

@@ -1913,6 +1913,11 @@ impl<'a> AtomView<'a> {
         if !parent_context.child_changed {
             m(*self, &parent_context, out);
         } else if nested {
+            let mut norm = ws.new_atom();
+
+            out.as_view().normalize(ws, &mut norm);
+            std::mem::swap(out.deref_mut(), norm.deref_mut());
+
             let mut child_h = ws.new_atom();
             let mut set = Settable::from(child_h.deref_mut());
             m(out.as_view(), &parent_context, &mut set);
