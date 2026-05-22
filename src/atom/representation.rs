@@ -1795,6 +1795,15 @@ impl<'a> MulView<'a> {
         self.data[0] & MUL_HAS_COEFF_FLAG == MUL_HAS_COEFF_FLAG
     }
 
+    #[inline]
+    pub fn get_coefficient(&self) -> Option<AtomView<'a>> {
+        if self.has_coefficient() {
+            self.iter().next()
+        } else {
+            None
+        }
+    }
+
     pub fn get_byte_size(&self) -> usize {
         self.data.len()
     }
