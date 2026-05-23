@@ -2,6 +2,7 @@
 
 use std::{
     borrow::Cow,
+    cell::Cell,
     fmt::{self, Error, Write},
     io::IsTerminal,
     sync::LazyLock,
@@ -25,6 +26,30 @@ static SHOULD_COLORIZE: LazyLock<bool> = LazyLock::new(|| {
         .map(|v| v != "0")
         .unwrap_or_else(|_| std::io::stdout().is_terminal())
 });
+
+thread_local! {
+    static FORCE_COLORIZE: Cell<bool> = const { Cell::new(false) };
+}
+
+struct ForceColorizeGuard {
+    was_forced: bool,
+}
+
+impl Drop for ForceColorizeGuard {
+    fn drop(&mut self) {
+        FORCE_COLORIZE.with(|force| force.set(self.was_forced));
+    }
+}
+
+pub(crate) fn with_forced_ansi_color<T>(f: impl FnOnce() -> T) -> T {
+    let was_forced = FORCE_COLORIZE.with(|force| force.replace(true));
+    let _guard = ForceColorizeGuard { was_forced };
+    f()
+}
+
+fn should_write_ansi_color() -> bool {
+    FORCE_COLORIZE.with(|force| force.get()) || *SHOULD_COLORIZE
+}
 
 /// Wrap a printable object with ANSI escape codes for coloring and styling in terminal output.
 pub struct AnsiWrap<T> {
@@ -101,7 +126,7 @@ impl<T> AnsiWrap<T> {
 
     pub fn should_colorize_with_mode(color_mode: ColorMode) -> bool {
         match color_mode {
-            ColorMode::Auto => *SHOULD_COLORIZE,
+            ColorMode::Auto => should_write_ansi_color(),
             ColorMode::Always => true,
             ColorMode::Never => false,
         }
