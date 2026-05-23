@@ -1070,6 +1070,21 @@ class Expression:
         Get the number of bytes that this expression takes up in memory.
         """
 
+    def _repr_html_(self) -> str:
+        """
+        Convert the expression into an HTML representation.
+        """
+
+    def _repr_latex_(self) -> str:
+        """
+        Convert the expression into a LaTeX representation.
+        """
+
+    def _repr_pretty_(self) -> str:
+        """
+        Convert the expression into a pretty string representation.
+        """
+
     def format(
         self,
         mode: PrintMode = PrintMode.Symbolica,

@@ -1,6 +1,7 @@
 //! Methods for printing atoms and polynomials.
 
 use std::{
+    cell::Cell,
     fmt::{self, Error, Write},
     io::IsTerminal,
     sync::LazyLock,
@@ -24,6 +25,30 @@ static SHOULD_COLORIZE: LazyLock<bool> = LazyLock::new(|| {
         .map(|v| v != "0")
         .unwrap_or_else(|_| std::io::stdout().is_terminal())
 });
+
+thread_local! {
+    static FORCE_COLORIZE: Cell<bool> = const { Cell::new(false) };
+}
+
+struct ForceColorizeGuard {
+    was_forced: bool,
+}
+
+impl Drop for ForceColorizeGuard {
+    fn drop(&mut self) {
+        FORCE_COLORIZE.with(|force| force.set(self.was_forced));
+    }
+}
+
+pub(crate) fn with_forced_ansi_color<T>(f: impl FnOnce() -> T) -> T {
+    let was_forced = FORCE_COLORIZE.with(|force| force.replace(true));
+    let _guard = ForceColorizeGuard { was_forced };
+    f()
+}
+
+fn should_write_ansi_color() -> bool {
+    FORCE_COLORIZE.with(|force| force.get()) || *SHOULD_COLORIZE
+}
 
 /// Wrap a printable object with ANSI escape codes for coloring and styling in terminal output.
 pub struct AnsiWrap<T> {
@@ -114,7 +139,7 @@ impl<T> AnsiWrap<T> {
 
 impl<T: fmt::Display> fmt::Display for AnsiWrap<T> {
     fn fmt(&self, f: &mut fmt::Formatter) -> fmt::Result {
-        if *SHOULD_COLORIZE {
+        if should_write_ansi_color() {
             write!(
                 f,
                 "\u{1b}[{};38;5;{}m{}\u{1b}[0m",

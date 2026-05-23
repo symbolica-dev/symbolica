@@ -20,6 +20,150 @@ impl From<Pattern> for PythonHeldExpression {
     }
 }
 
+enum AnsiHtmlStyle {
+    Reset,
+    Open { mode: u8, color: u8 },
+}
+
+fn format_ansi_html(formatted: &str) -> String {
+    let mut html = String::with_capacity(formatted.len() + 64);
+    let mut remaining = formatted;
+    let mut span_is_open = false;
+
+    html.push_str("<div style=\"white-space: pre-wrap; margin: 0;\">");
+
+    while let Some(escape_start) = remaining.find('\u{1b}') {
+        push_html_escaped(&mut html, &remaining[..escape_start]);
+        remaining = &remaining[escape_start..];
+
+        if let Some((style, rest)) = parse_ansi_html_style(remaining) {
+            if span_is_open {
+                html.push_str("</span>");
+                span_is_open = false;
+            }
+
+            if let AnsiHtmlStyle::Open { mode, color } = style {
+                push_ansi_html_span(&mut html, mode, color);
+                span_is_open = true;
+            }
+
+            remaining = rest;
+        } else {
+            remaining = &remaining['\u{1b}'.len_utf8()..];
+        }
+    }
+
+    push_html_escaped(&mut html, remaining);
+
+    if span_is_open {
+        html.push_str("</span>");
+    }
+
+    html.push_str("</div>");
+    html
+}
+
+fn parse_ansi_html_style(input: &str) -> Option<(AnsiHtmlStyle, &str)> {
+    let sequence = input.strip_prefix("\u{1b}[")?;
+    let sequence_end = sequence.find('m')?;
+    let params = &sequence[..sequence_end];
+    let rest = &sequence[sequence_end + 1..];
+
+    if params == "0" {
+        return Some((AnsiHtmlStyle::Reset, rest));
+    }
+
+    let mut parts = params.split(';');
+    let mode = parts.next()?.parse().ok()?;
+
+    if parts.next()? != "38" || parts.next()? != "5" {
+        return None;
+    }
+
+    let color = parts.next()?.parse().ok()?;
+
+    if parts.next().is_some() {
+        return None;
+    }
+
+    Some((AnsiHtmlStyle::Open { mode, color }, rest))
+}
+
+fn push_html_escaped(html: &mut String, text: &str) {
+    for c in text.chars() {
+        match c {
+            '&' => html.push_str("&amp;"),
+            '<' => html.push_str("&lt;"),
+            '>' => html.push_str("&gt;"),
+            _ => html.push(c),
+        }
+    }
+}
+
+fn push_ansi_html_span(html: &mut String, mode: u8, color: u8) {
+    let (red, green, blue) = xterm_color(color);
+
+    html.push_str("<span style=\"color: rgb(");
+    html.push_str(&red.to_string());
+    html.push_str(", ");
+    html.push_str(&green.to_string());
+    html.push_str(", ");
+    html.push_str(&blue.to_string());
+    html.push(')');
+
+    if mode & 1 != 0 {
+        html.push_str("; font-weight: bold");
+    }
+
+    if mode & 2 != 0 {
+        html.push_str("; opacity: 0.65");
+    }
+
+    if mode & 4 != 0 {
+        html.push_str("; font-style: italic");
+    }
+
+    html.push_str("\">");
+}
+
+fn xterm_color(color: u8) -> (u8, u8, u8) {
+    const ANSI_COLORS: [(u8, u8, u8); 16] = [
+        (0, 0, 0),
+        (205, 0, 0),
+        (0, 205, 0),
+        (205, 205, 0),
+        (0, 0, 238),
+        (205, 0, 205),
+        (0, 205, 205),
+        (229, 229, 229),
+        (127, 127, 127),
+        (255, 0, 0),
+        (0, 255, 0),
+        (255, 255, 0),
+        (92, 92, 255),
+        (255, 0, 255),
+        (0, 255, 255),
+        (255, 255, 255),
+    ];
+    const COLOR_CUBE: [u8; 6] = [0, 95, 135, 175, 215, 255];
+
+    if color < 16 {
+        return ANSI_COLORS[color as usize];
+    }
+
+    if color < 232 {
+        let color = color - 16;
+        return (
+            COLOR_CUBE[(color / 36) as usize],
+            COLOR_CUBE[((color / 6) % 6) as usize],
+            COLOR_CUBE[(color % 6) as usize],
+        );
+    }
+
+    let level = 8 + (color - 232) * 10;
+    (level, level, level)
+}
+
 #[cfg_attr(feature = "python_stubgen", gen_stub_pymethods)]
 #[cfg_attr(not(feature = "python_stubgen"), remove_gen_stub)]
 #[pymethods]
@@ -2892,6 +3036,77 @@ impl PythonExpression {
             },
             PrintState::new(),
         ))
+    }
+
+    /// Convert the expression into an HTML representation.
+    pub fn _repr_html_(&self) -> PyResult<String> {
+        let formatted = crate::printer::with_forced_ansi_color(|| {
+            self.format(
+                PythonPrintMode::Symbolica,
+                Some(80),
+                4,
+                true,
+                false,
+                true,
+                true,
+                Some([
+                    244, 25, 97, 36, 38, 40, 42, 44, 46, 48, 50, 52, 54, 56, 58, 60,
+                ]),
+                true,
+                false,
+                false,
+                None,
+                '·',
+                false,
+                false,
+                ('(', ')'),
+                true,
+                None,
+                false,
+                None,
+                false,
+                Some(100),
+                None,
+            )
+        })?;
+
+        Ok(format_ansi_html(&formatted))
+    }
+
+    /// Convert the expression into a LaTeX representation.
+    pub fn _repr_latex_(&self) -> PyResult<String> {
+        self.to_latex()
+    }
+
+    /// Convert the expression into an HTML representation.
+    pub fn _repr_pretty_(&self) -> PyResult<String> {
+        self.format(
+            PythonPrintMode::Symbolica,
+            Some(80),
+            4,
+            true,
+            false,
+            true,
+            true,
+            Some([
+                244, 25, 97, 36, 38, 40, 42, 44, 46, 48, 50, 52, 54, 56, 58, 60,
+            ]),
+            true,
+            false,
+            false,
+            None,
+            '·',
+            false,
+            false,
+            ('(', ')'),
+            true,
+            None,
+            false,
+            None,
+            false,
+            Some(100),
+            None,
+        )
     }
 
     /// Convert the expression into a canonical string that
