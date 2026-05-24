@@ -1189,9 +1189,10 @@ impl FormattedPrintMul for MulView<'_> {
                     let (_, e) = p.get_base_exp();
                     if let AtomView::Num(n) = e
                         && let CoefficientView::Natural(num, _, 0, 1) = n.get_coeff_view()
-                            && num < 0 {
-                                return false;
-                            }
+                        && num < 0
+                    {
+                        return false;
+                    }
                 }
                 true
             });
@@ -1240,14 +1241,15 @@ impl FormattedPrintMul for MulView<'_> {
                 let (_, e) = p.get_base_exp();
                 if let AtomView::Num(n) = e
                     && let CoefficientView::Natural(num, _, 0, 1) = n.get_coeff_view()
-                        && num < 0 {
-                            den_count += 1;
+                    && num < 0
+                {
+                    den_count += 1;
 
-                            if opts.fill_indented_lines && opts.max_line_length.is_some() {
-                                den_char_count += x.estimate_char_length(opts);
-                            }
-                            continue;
-                        }
+                    if opts.fill_indented_lines && opts.max_line_length.is_some() {
+                        den_char_count += x.estimate_char_length(opts);
+                    }
+                    continue;
+                }
             }
 
             num_count += 1;
@@ -1973,7 +1975,7 @@ impl FormattedPrintAdd for AddView<'_> {
         let mut was_split = false;
         for x in self.iter() {
             if let Some(max_terms) = opts.max_terms
-                && opts.mode.is_symbolica()
+                && (opts.mode.is_symbolica() || opts.mode.is_latex() || opts.mode.is_typst())
                 && count >= max_terms
             {
                 break;
@@ -2000,7 +2002,11 @@ impl FormattedPrintAdd for AddView<'_> {
                 }
 
                 if count > 0 && !last_arg_splits_with_brackets {
-                    f.write_char('\n')?;
+                    if opts.mode.is_latex() && print_state.top_level_add_child {
+                        f.write_str("\\\\\n")?;
+                    } else {
+                        f.write_char('\n')?;
+                    }
 
                     if print_state.top_level_add_child && opts.terms_on_new_line {
                         char_count = 0; // do not indent top-level sum

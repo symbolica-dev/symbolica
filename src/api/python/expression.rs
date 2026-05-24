@@ -3040,7 +3040,47 @@ impl PythonExpression {
 
     /// Convert the expression into an HTML representation.
     pub fn _repr_html_(&self) -> PyResult<String> {
-        let formatted = crate::printer::with_forced_ansi_color(|| {
+        let formatted = self.format(
+            PythonPrintMode::Symbolica,
+            Some(80),
+            4,
+            true,
+            false,
+            true,
+            true,
+            Some([
+                244, 25, 97, 36, 38, 40, 42, 44, 46, 48, 50, 52, 54, 56, 58, 60,
+            ]),
+            true,
+            false,
+            false,
+            None,
+            '·',
+            false,
+            false,
+            ('(', ')'),
+            true,
+            None,
+            false,
+            None,
+            false,
+            Some(100),
+            None,
+        )?;
+
+        Ok(format_ansi_html(&formatted))
+    }
+
+    /// Convert the expression into a LaTeX representation.
+    pub fn _repr_latex_(&self) -> PyResult<String> {
+        self.to_latex(Some(80))
+    }
+
+    /// Convert the expression into a pretty string representation.
+    pub fn _repr_pretty_(&self, pretty: &Bound<'_, PyAny>, cycle: bool) -> PyResult<()> {
+        let text = if cycle {
+            "...".to_string()
+        } else {
             self.format(
                 PythonPrintMode::Symbolica,
                 Some(80),
@@ -3067,46 +3107,11 @@ impl PythonExpression {
                 false,
                 Some(100),
                 None,
-            )
-        })?;
+            )?
+        };
 
-        Ok(format_ansi_html(&formatted))
-    }
-
-    /// Convert the expression into a LaTeX representation.
-    pub fn _repr_latex_(&self) -> PyResult<String> {
-        self.to_latex()
-    }
-
-    /// Convert the expression into an HTML representation.
-    pub fn _repr_pretty_(&self) -> PyResult<String> {
-        self.format(
-            PythonPrintMode::Symbolica,
-            Some(80),
-            4,
-            true,
-            false,
-            true,
-            true,
-            Some([
-                244, 25, 97, 36, 38, 40, 42, 44, 46, 48, 50, 52, 54, 56, 58, 60,
-            ]),
-            true,
-            false,
-            false,
-            None,
-            '·',
-            false,
-            false,
-            ('(', ')'),
-            true,
-            None,
-            false,
-            None,
-            false,
-            Some(100),
-            None,
-        )
+        pretty.call_method1("text", (text,))?;
+        Ok(())
     }
 
     /// Convert the expression into a canonical string that
@@ -3246,11 +3251,27 @@ impl PythonExpression {
     /// >>> print(a.to_latex())
     ///
     /// Yields `$$z^{34}+x^{x+2}+y^{4}+f(x,x^{2})+128378127123 z^{\\frac{2}{3}} w^{2} \\frac{1}{x} \\frac{1}{y}+\\frac{3}{5}$$`.
-    pub fn to_latex(&self) -> PyResult<String> {
-        Ok(format!(
-            "$${}$$",
-            AtomPrinter::new_with_options(self.expr.as_view(), LATEX_PRINT_OPTIONS,)
-        ))
+    #[pyo3(signature = (max_line_length = None))]
+    pub fn to_latex(&self, max_line_length: Option<usize>) -> PyResult<String> {
+        let body = format!(
+            "{}",
+            AtomPrinter::new_with_options(
+                self.expr.as_view(),
+                PrintOptions {
+                    max_line_length,
+                    max_terms: Some(100),
+                    ..LATEX_PRINT_OPTIONS
+                },
+            )
+        );
+
+        if body.contains("\\\\\n") {
+            Ok(format!(
+                "$$\\begin{{gathered}}\n{body}\n\\end{{gathered}}$$"
+            ))
+        } else {
+            Ok(format!("$${body}$$"))
+        }
     }
 
     /// Convert the expression into a Typst string.
