@@ -1080,7 +1080,7 @@ class Expression:
         Convert the expression into a LaTeX representation.
         """
 
-    def _repr_pretty_(self) -> str:
+    def _repr_pretty_(self, pretty, cycle: bool):
         """
         Convert the expression into a pretty string representation.
         """
@@ -1205,7 +1205,7 @@ class Expression:
         Yields `5 + x^2`, without any coloring.
         """
 
-    def to_latex(self) -> str:
+    def to_latex(self, max_line_length: int | None = None) -> str:
         """
         Convert the expression into a LaTeX string.
 
@@ -1215,6 +1215,11 @@ class Expression:
         >>> print(a.to_latex())
 
         Yields `$$z^{34}+x^{x+2}+y^{4}+f(x,x^{2})+128378127123 z^{\\frac{2}{3}} w^{2} \\frac{1}{x} \\frac{1}{y}+\\frac{3}{5}$$`.
+
+        Parameters
+        ----------
+        max_line_length: int | None
+            The preferred maximum line length before wrapping top-level sums.
         """
 
     def to_typst(self, show_namespaces: bool = False) -> str:

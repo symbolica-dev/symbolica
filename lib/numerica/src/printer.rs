@@ -283,6 +283,7 @@ impl PrintOptions {
     pub const fn sympy() -> PrintOptions {
         Self {
             double_star_for_exponentiation: true,
+            mode: PrintMode::Sympy,
             ..Self::file()
         }
     }

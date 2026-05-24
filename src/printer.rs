@@ -1,7 +1,6 @@
 //! Methods for printing atoms and polynomials.
 
 use std::{
-    cell::Cell,
     fmt::{self, Error, Write},
     io::IsTerminal,
     sync::LazyLock,
@@ -25,30 +24,6 @@ static SHOULD_COLORIZE: LazyLock<bool> = LazyLock::new(|| {
         .map(|v| v != "0")
         .unwrap_or_else(|_| std::io::stdout().is_terminal())
 });
-
-thread_local! {
-    static FORCE_COLORIZE: Cell<bool> = const { Cell::new(false) };
-}
-
-struct ForceColorizeGuard {
-    was_forced: bool,
-}
-
-impl Drop for ForceColorizeGuard {
-    fn drop(&mut self) {
-        FORCE_COLORIZE.with(|force| force.set(self.was_forced));
-    }
-}
-
-pub(crate) fn with_forced_ansi_color<T>(f: impl FnOnce() -> T) -> T {
-    let was_forced = FORCE_COLORIZE.with(|force| force.replace(true));
-    let _guard = ForceColorizeGuard { was_forced };
-    f()
-}
-
-fn should_write_ansi_color() -> bool {
-    FORCE_COLORIZE.with(|force| force.get()) || *SHOULD_COLORIZE
-}
 
 /// Wrap a printable object with ANSI escape codes for coloring and styling in terminal output.
 pub struct AnsiWrap<T> {
@@ -139,7 +114,7 @@ impl<T> AnsiWrap<T> {
 
 impl<T: fmt::Display> fmt::Display for AnsiWrap<T> {
     fn fmt(&self, f: &mut fmt::Formatter) -> fmt::Result {
-        if should_write_ansi_color() {
+        if *SHOULD_COLORIZE {
             write!(
                 f,
                 "\u{1b}[{};38;5;{}m{}\u{1b}[0m",
@@ -1163,9 +1138,10 @@ impl FormattedPrintMul for MulView<'_> {
                     let (_, e) = p.get_base_exp();
                     if let AtomView::Num(n) = e
                         && let CoefficientView::Natural(num, _, 0, 1) = n.get_coeff_view()
-                            && num < 0 {
-                                return false;
-                            }
+                        && num < 0
+                    {
+                        return false;
+                    }
                 }
                 true
             });
@@ -1211,14 +1187,15 @@ impl FormattedPrintMul for MulView<'_> {
                 let (_, e) = p.get_base_exp();
                 if let AtomView::Num(n) = e
                     && let CoefficientView::Natural(num, _, 0, 1) = n.get_coeff_view()
-                        && num < 0 {
-                            den_count += 1;
+                    && num < 0
+                {
+                    den_count += 1;
 
-                            if opts.fill_indented_lines && opts.max_line_length.is_some() {
-                                den_char_count += x.estimate_char_length(opts);
-                            }
-                            continue;
-                        }
+                    if opts.fill_indented_lines && opts.max_line_length.is_some() {
+                        den_char_count += x.estimate_char_length(opts);
+                    }
+                    continue;
+                }
             }
 
             num_count += 1;
@@ -1945,7 +1922,7 @@ impl FormattedPrintAdd for AddView<'_> {
         let mut was_split = false;
         for x in self.iter() {
             if let Some(max_terms) = opts.max_terms
-                && opts.mode.is_symbolica()
+                && (opts.mode.is_symbolica() || opts.mode.is_latex() || opts.mode.is_typst())
                 && count >= max_terms
             {
                 break;
@@ -1972,7 +1949,11 @@ impl FormattedPrintAdd for AddView<'_> {
                 }
 
                 if count > 0 && !last_arg_splits_with_brackets {
-                    f.write_char('\n')?;
+                    if opts.mode.is_latex() && print_state.top_level_add_child {
+                        f.write_str("\\\\\n")?;
+                    } else {
+                        f.write_char('\n')?;
+                    }
 
                     if print_state.top_level_add_child && opts.terms_on_new_line {
                         char_count = 0; // do not indent top-level sum
