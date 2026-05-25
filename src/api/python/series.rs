@@ -235,6 +235,7 @@ impl PythonSeries {
                     indentation,
                     fill_indented_lines,
                     terms_on_new_line,
+                    color_mode: ColorMode::Auto,
                     color_top_level_sum,
                     color_builtin_symbols,
                     bracket_level_colors,

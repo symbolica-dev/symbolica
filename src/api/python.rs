@@ -99,7 +99,7 @@ use crate::{
         gcd::PolynomialGCD, groebner::GroebnerBasis, polynomial::MultivariatePolynomial,
         series::Series,
     },
-    printer::{AtomPrinter, PrintMode, PrintOptions, PrintState},
+    printer::{AtomPrinter, ColorMode, PrintMode, PrintOptions, PrintState},
     solve::SolveError,
     state::{RecycledAtom, State, Workspace},
     streaming::{TermStreamer, TermStreamerConfig},

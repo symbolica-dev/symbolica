@@ -1513,6 +1513,7 @@ impl PythonTransformer {
             indentation,
             fill_indented_lines,
             terms_on_new_line,
+            color_mode: ColorMode::Auto,
             color_top_level_sum,
             color_builtin_symbols,
             bracket_level_colors,
@@ -2913,33 +2914,15 @@ impl PythonExpression {
 
     /// Convert the expression into an HTML representation.
     pub fn _repr_html_(&self) -> PyResult<String> {
-        let formatted = self.format(
-            PythonPrintMode::Symbolica,
-            Some(80),
-            4,
-            true,
-            false,
-            true,
-            true,
-            Some([
-                244, 25, 97, 36, 38, 40, 42, 44, 46, 48, 50, 52, 54, 56, 58, 60,
-            ]),
-            true,
-            false,
-            false,
-            None,
-            '·',
-            false,
-            false,
-            ('(', ')'),
-            true,
-            None,
-            false,
-            None,
-            false,
-            Some(100),
-            None,
-        )?;
+        let formatted = self.expr.format_string(
+            &PrintOptions::new()
+                .max_line_length(Some(80))
+                .multiplication_operator('·')
+                .num_exp_as_superscript(true)
+                .max_terms(Some(100))
+                .color_mode(ColorMode::Always),
+            PrintState::new(),
+        );
 
         Ok(crate::printer::AnsiHtmlFormatter::new(&formatted).to_string())
     }
@@ -2954,33 +2937,14 @@ impl PythonExpression {
         let text = if cycle {
             "...".to_string()
         } else {
-            self.format(
-                PythonPrintMode::Symbolica,
-                Some(80),
-                4,
-                true,
-                false,
-                true,
-                true,
-                Some([
-                    244, 25, 97, 36, 38, 40, 42, 44, 46, 48, 50, 52, 54, 56, 58, 60,
-                ]),
-                true,
-                false,
-                false,
-                None,
-                '·',
-                false,
-                false,
-                ('(', ')'),
-                true,
-                None,
-                false,
-                None,
-                false,
-                Some(100),
-                None,
-            )?
+            self.expr.format_string(
+                &PrintOptions::new()
+                    .max_line_length(Some(80))
+                    .multiplication_operator('·')
+                    .num_exp_as_superscript(true)
+                    .max_terms(Some(100)),
+                PrintState::new(),
+            )
         };
 
         pretty.call_method1("text", (text,))?;
@@ -3071,6 +3035,7 @@ impl PythonExpression {
                     indentation,
                     fill_indented_lines,
                     terms_on_new_line,
+                    color_mode: ColorMode::Auto,
                     color_top_level_sum,
                     color_builtin_symbols,
                     bracket_level_colors,

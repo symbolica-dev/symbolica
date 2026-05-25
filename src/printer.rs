@@ -2269,6 +2269,25 @@ mod test {
     }
 
     #[test]
+    fn ansi_html_formats_forced_color_output() {
+        let a = parse!("f(x)+y");
+        let formatted = a.format_string(
+            &PrintOptions {
+                color_mode: ColorMode::Always,
+                hide_all_namespaces: true,
+                ..PrintOptions::new()
+            },
+            PrintState::new(),
+        );
+
+        assert!(formatted.contains('\u{1b}'));
+
+        let html = AnsiHtmlFormatter::new(&formatted).to_string();
+        assert!(html.contains("<span style=\"color: rgb("));
+        assert!(!html.contains('\u{1b}'));
+    }
+
+    #[test]
     fn nested() {
         let b = parse_lit!(
             3 + v1
