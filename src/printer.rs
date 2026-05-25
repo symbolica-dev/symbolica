@@ -30,6 +30,7 @@ pub struct AnsiWrap<T> {
     pub value: T,
     pub mode: u8,
     pub color: u8,
+    pub color_mode: ColorMode,
 }
 
 impl<T: fmt::Display> From<T> for AnsiWrap<T> {
@@ -44,6 +45,7 @@ impl<T> AnsiWrap<T> {
             value,
             mode: 0,
             color: 0,
+            color_mode: ColorMode::Auto,
         }
     }
 
@@ -72,6 +74,11 @@ impl<T> AnsiWrap<T> {
         self
     }
 
+    pub const fn color_mode(mut self, color_mode: ColorMode) -> Self {
+        self.color_mode = color_mode;
+        self
+    }
+
     pub const fn bold(mut self) -> Self {
         self.mode |= 1;
         self
@@ -89,6 +96,14 @@ impl<T> AnsiWrap<T> {
 
     pub fn should_colorize() -> bool {
         *SHOULD_COLORIZE
+    }
+
+    pub fn should_colorize_with_mode(color_mode: ColorMode) -> bool {
+        match color_mode {
+            ColorMode::Auto => *SHOULD_COLORIZE,
+            ColorMode::Always => true,
+            ColorMode::Never => false,
+        }
     }
 
     /// Calculate the character length after stripping ANSI escape codes, for use in alignment and formatting decisions.
@@ -114,7 +129,7 @@ impl<T> AnsiWrap<T> {
 
 impl<T: fmt::Display> fmt::Display for AnsiWrap<T> {
     fn fmt(&self, f: &mut fmt::Formatter) -> fmt::Result {
-        if *SHOULD_COLORIZE {
+        if Self::should_colorize_with_mode(self.color_mode) {
             write!(
                 f,
                 "\u{1b}[{};38;5;{}m{}\u{1b}[0m",
@@ -351,6 +366,7 @@ impl<'a> AtomPrinter<'a> {
                 "{}",
                 AnsiWrap::new(bracket.encode_utf8(&mut [0; 4]))
                     .color(bracket_colors[print_state.bracket_level.min(15) as usize])
+                    .color_mode(opts.color_mode)
             ))?;
         } else {
             f.write_char(bracket)?;
@@ -903,7 +919,10 @@ impl FormattedPrintVar for VarView<'_> {
                 && opts.mode.is_symbolica()
                 && opts.color_top_level_sum
             {
-                f.write_fmt(format_args!("{}", AnsiWrap::yellow("+")))?;
+                f.write_fmt(format_args!(
+                    "{}",
+                    AnsiWrap::yellow("+").color_mode(opts.color_mode)
+                ))?;
             } else {
                 f.write_char('+')?;
             }
@@ -951,7 +970,10 @@ impl FormattedPrintNum for NumView<'_> {
                 && opts.mode.is_symbolica()
                 && opts.color_top_level_sum
             {
-                f.write_fmt(format_args!("{}", AnsiWrap::yellow("-")))?;
+                f.write_fmt(format_args!(
+                    "{}",
+                    AnsiWrap::yellow("-").color_mode(opts.color_mode)
+                ))?;
             } else if print_state.superscript {
                 f.write_char('⁻')?;
             } else {
@@ -964,7 +986,10 @@ impl FormattedPrintNum for NumView<'_> {
                 && opts.mode.is_symbolica()
                 && opts.color_top_level_sum
             {
-                f.write_fmt(format_args!("{}", AnsiWrap::yellow("+")))?;
+                f.write_fmt(format_args!(
+                    "{}",
+                    AnsiWrap::yellow("+").color_mode(opts.color_mode)
+                ))?;
             } else {
                 f.write_char('+')?;
             }
@@ -1307,7 +1332,10 @@ impl FormattedPrintMul for MulView<'_> {
                 && opts.mode.is_symbolica()
                 && opts.color_top_level_sum
             {
-                f.write_fmt(format_args!("{}", AnsiWrap::yellow("+")))?;
+                f.write_fmt(format_args!(
+                    "{}",
+                    AnsiWrap::yellow("+").color_mode(opts.color_mode)
+                ))?;
             } else {
                 f.write_char('+')?;
             }
@@ -1611,7 +1639,10 @@ impl FormattedPrintFn for FunView<'_> {
                 && opts.mode.is_symbolica()
                 && opts.color_top_level_sum
             {
-                f.write_fmt(format_args!("{}", AnsiWrap::yellow("+")))?;
+                f.write_fmt(format_args!(
+                    "{}",
+                    AnsiWrap::yellow("+").color_mode(opts.color_mode)
+                ))?;
             } else {
                 f.write_char('+')?;
             }
@@ -1883,7 +1914,10 @@ impl FormattedPrintPow for PowView<'_> {
                 && print_state.top_level_add_child
                 && opts.color_top_level_sum
             {
-                f.write_fmt(format_args!("{}", AnsiWrap::yellow("+")))?;
+                f.write_fmt(format_args!(
+                    "{}",
+                    AnsiWrap::yellow("+").color_mode(opts.color_mode)
+                ))?;
             } else {
                 f.write_char('+')?;
             }
@@ -2033,7 +2067,10 @@ impl FormattedPrintAdd for AddView<'_> {
                     && print_state.top_level_add_child
                     && opts.color_top_level_sum
                 {
-                    f.write_fmt(format_args!("{}", AnsiWrap::yellow("+")))?;
+                    f.write_fmt(format_args!(
+                        "{}",
+                        AnsiWrap::yellow("+").color_mode(opts.color_mode)
+                    ))?;
                 } else {
                     f.write_char('+')?;
                 }
@@ -2140,7 +2177,10 @@ impl FormattedPrintAdd for AddView<'_> {
                 && opts.mode.is_symbolica()
                 && opts.color_top_level_sum
             {
-                f.write_fmt(format_args!("{0}...", AnsiWrap::yellow("+")))?;
+                f.write_fmt(format_args!(
+                    "{0}...",
+                    AnsiWrap::yellow("+").color_mode(opts.color_mode)
+                ))?;
             } else {
                 f.write_str("+...")?;
             }
@@ -2176,9 +2216,25 @@ mod test {
         atom::{AtomCore, AtomView},
         domains::{SelfRing, finite_field::Zp, integer::Z},
         function, parse, parse_lit,
-        printer::{AnsiHtmlFormatter, AnsiWrap, AtomPrinter, PrintOptions, PrintState},
+        printer::{AnsiHtmlFormatter, AnsiWrap, AtomPrinter, ColorMode, PrintOptions, PrintState},
         symbol,
     };
+
+    #[test]
+    fn ansi_wrap_respects_color_mode() {
+        assert_eq!(
+            AnsiWrap::yellow("+")
+                .color_mode(ColorMode::Always)
+                .to_string(),
+            "\u{1b}[0;38;5;3m+\u{1b}[0m"
+        );
+        assert_eq!(
+            AnsiWrap::yellow("+")
+                .color_mode(ColorMode::Never)
+                .to_string(),
+            "+"
+        );
+    }
 
     #[test]
     fn ansi_html_escapes_text() {
@@ -2194,6 +2250,25 @@ mod test {
             AnsiHtmlFormatter::new("a\u{1b}[0;38;5;3m+\u{1b}[0mb").to_string(),
             "<div style=\"white-space: pre-wrap; margin: 0;\">a<span style=\"color: rgb(205, 205, 0)\">+</span>b</div>"
         );
+    }
+
+    #[test]
+    fn ansi_html_formats_forced_color_output() {
+        let a = parse!("f(x)+y");
+        let formatted = a.format_string(
+            &PrintOptions {
+                color_mode: ColorMode::Always,
+                hide_all_namespaces: true,
+                ..PrintOptions::new()
+            },
+            PrintState::new(),
+        );
+
+        assert!(formatted.contains('\u{1b}'));
+
+        let html = AnsiHtmlFormatter::new(&formatted).to_string();
+        assert!(html.contains("<span style=\"color: rgb("));
+        assert!(!html.contains('\u{1b}'));
     }
 
     #[test]

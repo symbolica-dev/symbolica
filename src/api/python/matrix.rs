@@ -478,6 +478,7 @@ impl PythonMatrix {
                 indentation,
                 fill_indented_lines,
                 terms_on_new_line: false,
+                color_mode: ColorMode::Auto,
                 color_top_level_sum: false,
                 color_builtin_symbols: false,
                 bracket_level_colors: None,
