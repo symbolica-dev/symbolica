@@ -551,15 +551,25 @@ impl PythonMatrix {
     }
 
     /// Add this matrix to `rhs`, returning the result.
-    pub fn __add__(&self, rhs: PythonMatrix) -> PythonMatrix {
-        let (new_self, new_rhs) = self.unify(&rhs);
-        PythonMatrix {
-            matrix: &new_self.matrix + &new_rhs.matrix,
+    pub fn __add__(&self, rhs: PythonMatrix) -> PyResult<PythonMatrix> {
+        if self.matrix.nrows() != rhs.matrix.nrows() || self.matrix.ncols() != rhs.matrix.ncols() {
+            return Err(exceptions::PyValueError::new_err(format!(
+                "Cannot add matrices of different dimensions: ({},{}) vs ({},{})",
+                self.matrix.nrows(),
+                self.matrix.ncols(),
+                rhs.matrix.nrows(),
+                rhs.matrix.ncols()
+            )));
         }
+
+        let (new_self, new_rhs) = self.unify(&rhs);
+        Ok(PythonMatrix {
+            matrix: &new_self.matrix + &new_rhs.matrix,
+        })
     }
 
     ///  Subtract `rhs` from this matrix, returning the result.
-    pub fn __sub__(&self, rhs: PythonMatrix) -> PythonMatrix {
+    pub fn __sub__(&self, rhs: PythonMatrix) -> PyResult<PythonMatrix> {
         self.__add__(rhs.__neg__())
     }
 
@@ -574,6 +584,16 @@ impl PythonMatrix {
                 })
             }
             ScalarOrMatrix::Matrix(m) => {
+                if self.matrix.ncols() != m.matrix.nrows() {
+                    return Err(exceptions::PyValueError::new_err(format!(
+                        "Cannot multiply matrices because of a dimension mismatch: ({},{}) vs ({},{})",
+                        self.matrix.nrows(),
+                        self.matrix.ncols(),
+                        m.matrix.nrows(),
+                        m.matrix.ncols()
+                    )));
+                }
+
                 let (new_self, new_rhs) = self.unify(&m);
                 Ok(PythonMatrix {
                     matrix: &new_self.matrix * &new_rhs.matrix,
@@ -599,8 +619,15 @@ impl PythonMatrix {
 
     /// Divide the matrix by the scalar, returning the result.
     pub fn __truediv__(&self, rhs: ConvertibleToRationalPolynomial) -> PyResult<PythonMatrix> {
+        let rhs = rhs.to_rational_polynomial()?;
+        if rhs.poly.is_zero() {
+            return Err(exceptions::PyZeroDivisionError::new_err(
+                "Cannot divide a matrix by zero",
+            ));
+        }
+
         Ok(PythonMatrix {
-            matrix: self.matrix.div_scalar(&rhs.to_rational_polynomial()?.poly),
+            matrix: self.matrix.div_scalar(&rhs.poly),
         })
     }
 

@@ -288,14 +288,14 @@ impl<W: WriteableNamedStream> TermStreamer<W> {
     pub fn push(&mut self, a: Atom) {
         if let AtomView::Add(aa) = a.as_view() {
             for arg in aa.iter() {
-                self.push_sorted_impl(arg.to_owned());
+                self.push_sorted_impl(arg.to_owned()).unwrap();
             }
         } else {
-            self.push_sorted_impl(a);
+            self.push_sorted_impl(a).unwrap();
         }
     }
 
-    fn push_sorted_impl(&mut self, a: Atom) {
+    fn push_sorted_impl(&mut self, a: Atom) -> Result<(), std::io::Error> {
         let size = a.as_view().get_byte_size();
         self.mem_buf.push(a);
         self.mem_size += size;
@@ -306,21 +306,27 @@ impl<W: WriteableNamedStream> TermStreamer<W> {
             self.sort();
 
             if self.mem_size * 2 > self.config.max_mem_bytes {
-                self.flush();
+                self.flush()?;
             }
         }
+
+        Ok(())
     }
 
     /// Write the memory buffer to a new file.
-    fn flush(&mut self) {
+    fn flush(&mut self) -> Result<(), std::io::Error> {
         self.file_buf
             .push(W::create(&self.get_filename(self.file_buf.len())));
 
-        let f = self.file_buf.last_mut().unwrap();
+        let f = self.file_buf.last_mut().ok_or(std::io::Error::new(
+            std::io::ErrorKind::Other,
+            "no file buffer",
+        ))?;
         for x in self.mem_buf.drain(..) {
-            x.as_view().write(&mut *f).unwrap();
+            x.as_view().write(&mut *f)?;
         }
         self.mem_size = 0;
+        Ok(())
     }
 
     /// Import terms and their state from a binary stream into the term streamer.
@@ -368,7 +374,7 @@ impl<W: WriteableNamedStream> TermStreamer<W> {
         }
 
         for x in &mut self.file_buf {
-            x.flush().unwrap();
+            x.flush()?;
         }
 
         let mut tmp = Atom::new();
@@ -505,10 +511,10 @@ impl<W: WriteableNamedStream> TermStreamer<W> {
             if !last.merge_terms(c.as_view(), &mut helper) {
                 if let AtomView::Num(n) = last.as_view() {
                     if !n.is_zero() {
-                        new_stream.push_sorted_impl(last.clone());
+                        new_stream.push_sorted_impl(last.clone()).unwrap();
                     }
                 } else {
-                    new_stream.push_sorted_impl(last.clone());
+                    new_stream.push_sorted_impl(last.clone()).unwrap();
                 }
 
                 last.set_from_view(&c.as_view());
@@ -517,16 +523,16 @@ impl<W: WriteableNamedStream> TermStreamer<W> {
 
         if let AtomView::Num(n) = last.as_view() {
             if !n.is_zero() {
-                new_stream.push_sorted_impl(last.clone());
+                new_stream.push_sorted_impl(last.clone()).unwrap();
             }
         } else {
-            new_stream.push_sorted_impl(last.clone());
+            new_stream.push_sorted_impl(last.clone()).unwrap();
         }
 
         if !new_stream.file_buf.is_empty() {
             // the memory buffer has the larger elements than the
             // file streams, so write the elements to a file
-            new_stream.flush();
+            new_stream.flush().unwrap();
         }
 
         *self = new_stream;

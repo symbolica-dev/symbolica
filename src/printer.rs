@@ -1690,11 +1690,8 @@ impl FormattedPrintFn for FunView<'_> {
             && opts.num_exp_as_superscript
             && n_args >= 3
             && n_args % 2 == 1
+            && let Some(function_symbol) = self.get(n_args / 2).get_symbol()
         {
-            let function_symbol = self
-                .get(n_args / 2)
-                .get_symbol()
-                .expect("No symbol for derivative function");
             function_symbol.format(opts, print_state, f)?;
 
             let mut arg_iter = self.iter();

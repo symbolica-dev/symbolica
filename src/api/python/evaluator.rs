@@ -572,7 +572,9 @@ impl PythonExpressionEvaluator {
                     arr.as_slice().ok_or_else(|| {
                         exceptions::PyValueError::new_err("Failed to convert input to slice")
                     })?,
-                    out.as_slice_mut().unwrap(),
+                    out.as_slice_mut().ok_or_else(|| {
+                        exceptions::PyValueError::new_err("Failed to convert output to slice")
+                    })?,
                     n_inputs,
                 );
             } else {
@@ -581,7 +583,9 @@ impl PythonExpressionEvaluator {
                         i.as_slice().ok_or_else(|| {
                             exceptions::PyValueError::new_err("Failed to convert input to slice")
                         })?,
-                        o.as_slice_mut().unwrap(),
+                        o.as_slice_mut().ok_or_else(|| {
+                            exceptions::PyValueError::new_err("Failed to convert output to slice")
+                        })?,
                     );
                 }
             }
@@ -593,7 +597,9 @@ impl PythonExpressionEvaluator {
                     i.as_slice().ok_or_else(|| {
                         exceptions::PyValueError::new_err("Failed to convert input to slice")
                     })?,
-                    o.as_slice_mut().unwrap(),
+                    o.as_slice_mut().ok_or_else(|| {
+                        exceptions::PyValueError::new_err("Failed to convert output to slice")
+                    })?,
                 );
             }
         }
@@ -706,11 +712,17 @@ impl PythonExpressionEvaluator {
 
             if n_inputs > 1 {
                 let sc = unsafe {
-                    std::mem::transmute::<&[Complex64], &[Complex<f64>]>(arr.as_slice().unwrap())
+                    std::mem::transmute::<&[Complex64], &[Complex<f64>]>(
+                        arr.as_slice().ok_or_else(|| {
+                            exceptions::PyValueError::new_err("Failed to convert input to slice")
+                        })?,
+                    )
                 };
                 let os = unsafe {
                     std::mem::transmute::<&mut [Complex64], &mut [Complex<f64>]>(
-                        out.as_slice_mut().unwrap(),
+                        out.as_slice_mut().ok_or_else(|| {
+                            exceptions::PyValueError::new_err("Failed to convert output to slice")
+                        })?,
                     )
                 };
 
@@ -718,11 +730,21 @@ impl PythonExpressionEvaluator {
             } else {
                 for (i, mut o) in arr.axis_iter(Axis(0)).zip(out.axis_iter_mut(Axis(0))) {
                     let sc = unsafe {
-                        std::mem::transmute::<&[Complex64], &[Complex<f64>]>(i.as_slice().unwrap())
+                        std::mem::transmute::<&[Complex64], &[Complex<f64>]>(
+                            i.as_slice().ok_or_else(|| {
+                                exceptions::PyValueError::new_err(
+                                    "Failed to convert input to slice",
+                                )
+                            })?,
+                        )
                     };
                     let os = unsafe {
                         std::mem::transmute::<&mut [Complex64], &mut [Complex<f64>]>(
-                            o.as_slice_mut().unwrap(),
+                            o.as_slice_mut().ok_or_else(|| {
+                                exceptions::PyValueError::new_err(
+                                    "Failed to convert output to slice",
+                                )
+                            })?,
                         )
                     };
 
@@ -732,11 +754,15 @@ impl PythonExpressionEvaluator {
         } else {
             for (i, mut o) in arr.axis_iter(Axis(0)).zip(out.axis_iter_mut(Axis(0))) {
                 let sc = unsafe {
-                    std::mem::transmute::<&[Complex64], &[Complex<f64>]>(i.as_slice().unwrap())
+                    std::mem::transmute::<&[Complex64], &[Complex<f64>]>(i.as_slice().ok_or_else(
+                        || exceptions::PyValueError::new_err("Failed to convert input to slice"),
+                    )?)
                 };
                 let os = unsafe {
                     std::mem::transmute::<&mut [Complex64], &mut [Complex<f64>]>(
-                        o.as_slice_mut().unwrap(),
+                        o.as_slice_mut().ok_or_else(|| {
+                            exceptions::PyValueError::new_err("Failed to convert output to slice")
+                        })?,
                     )
                 };
 
@@ -1811,7 +1837,9 @@ impl PythonCompiledRealExpressionEvaluator {
                 i.as_slice().ok_or_else(|| {
                     exceptions::PyValueError::new_err("Failed to convert input to slice")
                 })?,
-                o.as_slice_mut().unwrap(),
+                o.as_slice_mut().ok_or_else(|| {
+                    exceptions::PyValueError::new_err("Failed to convert output to slice")
+                })?,
             );
         }
 
@@ -1879,7 +1907,9 @@ impl PythonCompiledSimdRealExpressionEvaluator {
                 arr.as_slice().ok_or_else(|| {
                     exceptions::PyValueError::new_err("Failed to convert input to slice")
                 })?,
-                out.as_slice_mut().unwrap(),
+                out.as_slice_mut().ok_or_else(|| {
+                    exceptions::PyValueError::new_err("Failed to convert output to slice")
+                })?,
             )
             .map_err(|e| exceptions::PyValueError::new_err(format!("Batch error: {}", e)))?;
 
@@ -1957,7 +1987,9 @@ impl PythonCompiledCudaRealExpressionEvaluator {
                 arr.as_slice().ok_or_else(|| {
                     exceptions::PyValueError::new_err("Failed to convert input to slice")
                 })?,
-                out.as_slice_mut().unwrap(),
+                out.as_slice_mut().ok_or_else(|| {
+                    exceptions::PyValueError::new_err("Failed to convert output to slice")
+                })?,
             )
             .map_err(|e| exceptions::PyValueError::new_err(format!("Evaluation error: {}", e)))?;
 
@@ -2037,7 +2069,9 @@ impl PythonCompiledCudaComplexExpressionEvaluator {
         };
         let os = unsafe {
             std::mem::transmute::<&mut [Complex64], &mut [Complex<f64>]>(
-                out.as_slice_mut().unwrap(),
+                out.as_slice_mut().ok_or_else(|| {
+                    exceptions::PyValueError::new_err("Failed to convert output to slice")
+                })?,
             )
         };
 
@@ -2104,11 +2138,15 @@ impl PythonCompiledComplexExpressionEvaluator {
         let mut out = ArrayD::zeros(&[n_inputs, self.output_len][..]);
         for (i, mut o) in arr.axis_iter(Axis(0)).zip(out.axis_iter_mut(Axis(0))) {
             let sc = unsafe {
-                std::mem::transmute::<&[Complex64], &[Complex<f64>]>(i.as_slice().unwrap())
+                std::mem::transmute::<&[Complex64], &[Complex<f64>]>(i.as_slice().ok_or_else(
+                    || exceptions::PyValueError::new_err("Failed to convert input to slice"),
+                )?)
             };
             let os = unsafe {
                 std::mem::transmute::<&mut [Complex64], &mut [Complex<f64>]>(
-                    o.as_slice_mut().unwrap(),
+                    o.as_slice_mut().ok_or_else(|| {
+                        exceptions::PyValueError::new_err("Failed to convert output to slice")
+                    })?,
                 )
             };
 
@@ -2180,7 +2218,9 @@ impl PythonCompiledSimdComplexExpressionEvaluator {
         };
         let os = unsafe {
             std::mem::transmute::<&mut [Complex64], &mut [Complex<f64>]>(
-                out.as_slice_mut().unwrap(),
+                out.as_slice_mut().ok_or_else(|| {
+                    exceptions::PyValueError::new_err("Failed to convert output to slice")
+                })?,
             )
         };
 

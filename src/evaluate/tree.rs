@@ -3,6 +3,14 @@ use super::*;
 /// Errors that can occur while building or performing numerical expression evaluation.
 #[derive(Clone, Debug, PartialEq, Eq, Hash)]
 pub enum EvaluationError {
+    InvalidParameterCount {
+        expected: usize,
+        actual: usize,
+    },
+    InvalidOutputCount {
+        expected: usize,
+        actual: usize,
+    },
     UnsupportedHotStart,
     UnsupportedCoefficient {
         coefficient: String,
@@ -56,6 +64,15 @@ impl std::error::Error for EvaluationError {}
 impl std::fmt::Display for EvaluationError {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
+            EvaluationError::InvalidParameterCount { expected, actual } => {
+                write!(
+                    f,
+                    "invalid parameter count: expected {expected}, got {actual}"
+                )
+            }
+            EvaluationError::InvalidOutputCount { expected, actual } => {
+                write!(f, "invalid output count: expected {expected}, got {actual}")
+            }
             EvaluationError::UnsupportedHotStart => {
                 f.write_str("hot start is not supported before the deprecation of Expression")
             }
@@ -739,7 +756,14 @@ impl<'a> AtomView<'a> {
                 ]
                 .contains(&name.get_id())
                 {
-                    assert!(f.get_nargs() == 1);
+                    if f.get_nargs() != 1 {
+                        return Err(EvaluationError::WrongNumberOfArguments {
+                            function: name,
+                            expected: 1,
+                            actual: f.get_nargs(),
+                        });
+                    }
+
                     let arg = f.iter().next().unwrap();
                     let arg_eval = arg.linearize_impl(
                         fn_map,
@@ -3837,7 +3861,14 @@ impl<'a> AtomView<'a> {
                 ]
                 .contains(&name.get_id())
                 {
-                    assert!(f.get_nargs() == 1);
+                    if f.get_nargs() != 1 {
+                        return Err(EvaluationError::WrongNumberOfArguments {
+                            function: name,
+                            expected: 1,
+                            actual: f.get_nargs(),
+                        });
+                    }
+
                     let arg = f.iter().next().unwrap();
                     let arg_eval = arg.evaluate_impl(map, cache, binary_prec)?;
 
