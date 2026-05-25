@@ -153,83 +153,19 @@ impl<T: Real> ExpressionEvaluator<T> {
 
     /// Evaluate the expression evaluator and write the results in `out`.
     #[inline]
-    pub fn evaluate(&mut self, params: &[T], out: &mut [T]) {
-        self.evaluate_impl(params, out);
-    }
-
-    #[cold]
-    #[inline(never)]
-    fn evaluate_impl_no_ops(
-        stack: &mut [T],
-        instr: &Instr,
-        external_fns: &mut [ExternalFunctionContainer<T>],
-    ) -> Option<usize> {
-        match instr {
-            Instr::Powf(r, b, e) => {
-                stack[*r] = stack[*b].powf(&stack[*e]);
-            }
-            Instr::BuiltinFun(r, s, arg) => match s.get_id() {
-                Symbol::EXP_ID => stack[*r] = stack[*arg].exp(),
-                Symbol::LOG_ID => stack[*r] = stack[*arg].log(),
-                Symbol::SIN_ID => stack[*r] = stack[*arg].sin(),
-                Symbol::COS_ID => stack[*r] = stack[*arg].cos(),
-                Symbol::SQRT_ID => stack[*r] = stack[*arg].sqrt(),
-                Symbol::ABS_ID => stack[*r] = stack[*arg].norm(),
-                Symbol::CONJ_ID => stack[*r] = stack[*arg].conj(),
-                _ => unreachable!(),
-            },
-            Instr::ExternalFun(r, s, args) => {
-                let external = &mut external_fns[*s];
-                let Some(f) = external.imp.as_ref() else {
-                    panic!(
-                        "External function '{external}' does not have an implementation for {}",
-                        std::any::type_name::<T>()
-                    );
-                };
-
-                if external.cache.len() < args.len() {
-                    external.cache.resize(args.len(), T::new_zero());
-                }
-
-                for (dst, src) in external.cache.iter_mut().zip(args) {
-                    dst.set_from(&stack[*src]);
-                }
-
-                stack[*r] = (f)(&external.cache[..args.len()]);
-            }
-            Instr::IfElse(n, label) => {
-                // jump to else block
-                if stack[*n].is_fully_zero() {
-                    return Some(label.0);
-                }
-            }
-            Instr::Goto(label) => {
-                return Some(label.0);
-            }
-            Instr::Label(_) => {}
-            Instr::Join(r, c, a, b) => {
-                if !stack[*c].is_fully_zero() {
-                    stack[*r] = stack[*a].clone();
-                } else {
-                    stack[*r] = stack[*b].clone();
-                }
-            }
-            Instr::Add(..) | Instr::Mul(..) | Instr::Pow(..) => {
-                unreachable!()
-            }
+    pub fn try_evaluate(&mut self, params: &[T], out: &mut [T]) -> Result<(), EvaluationError> {
+        if params.len() != self.param_count {
+            return Err(EvaluationError::InvalidParameterCount {
+                expected: self.param_count,
+                actual: params.len(),
+            });
         }
 
-        None
-    }
-
-    /// Evaluate the expression evaluator and write the results in `out`.
-    fn evaluate_impl(&mut self, params: &[T], out: &mut [T]) {
-        if self.param_count != params.len() {
-            panic!(
-                "Parameter count mismatch: expected {}, got {}",
-                self.param_count,
-                params.len()
-            );
+        if self.result_indices.len() != out.len() {
+            return Err(EvaluationError::InvalidOutputCount {
+                expected: self.result_indices.len(),
+                actual: out.len(),
+            });
         }
 
         for (t, p) in self.stack.iter_mut().zip(params) {
@@ -307,6 +243,79 @@ impl<T: Real> ExpressionEvaluator<T> {
         for (o, i) in out.iter_mut().zip(&self.result_indices) {
             o.set_from(&stack[*i]);
         }
+
+        Ok(())
+    }
+
+    /// Evaluate the expression evaluator and write the results in `out`.
+    #[inline]
+    pub fn evaluate(&mut self, params: &[T], out: &mut [T]) {
+        self.try_evaluate(params, out).unwrap();
+    }
+
+    #[cold]
+    #[inline(never)]
+    fn evaluate_impl_no_ops(
+        stack: &mut [T],
+        instr: &Instr,
+        external_fns: &mut [ExternalFunctionContainer<T>],
+    ) -> Option<usize> {
+        match instr {
+            Instr::Powf(r, b, e) => {
+                stack[*r] = stack[*b].powf(&stack[*e]);
+            }
+            Instr::BuiltinFun(r, s, arg) => match s.get_id() {
+                Symbol::EXP_ID => stack[*r] = stack[*arg].exp(),
+                Symbol::LOG_ID => stack[*r] = stack[*arg].log(),
+                Symbol::SIN_ID => stack[*r] = stack[*arg].sin(),
+                Symbol::COS_ID => stack[*r] = stack[*arg].cos(),
+                Symbol::SQRT_ID => stack[*r] = stack[*arg].sqrt(),
+                Symbol::ABS_ID => stack[*r] = stack[*arg].norm(),
+                Symbol::CONJ_ID => stack[*r] = stack[*arg].conj(),
+                _ => unreachable!(),
+            },
+            Instr::ExternalFun(r, s, args) => {
+                let external = &mut external_fns[*s];
+                let Some(f) = external.imp.as_ref() else {
+                    panic!(
+                        "External function '{external}' does not have an implementation for {}",
+                        std::any::type_name::<T>()
+                    );
+                };
+
+                if external.cache.len() < args.len() {
+                    external.cache.resize(args.len(), T::new_zero());
+                }
+
+                for (dst, src) in external.cache.iter_mut().zip(args) {
+                    dst.set_from(&stack[*src]);
+                }
+
+                stack[*r] = (f)(&external.cache[..args.len()]);
+            }
+            Instr::IfElse(n, label) => {
+                // jump to else block
+                if stack[*n].is_fully_zero() {
+                    return Some(label.0);
+                }
+            }
+            Instr::Goto(label) => {
+                return Some(label.0);
+            }
+            Instr::Label(_) => {}
+            Instr::Join(r, c, a, b) => {
+                if !stack[*c].is_fully_zero() {
+                    stack[*r] = stack[*a].clone();
+                } else {
+                    stack[*r] = stack[*b].clone();
+                }
+            }
+            Instr::Add(..) | Instr::Mul(..) | Instr::Pow(..) => {
+                unreachable!()
+            }
+        }
+
+        None
     }
 }
 
@@ -627,10 +636,11 @@ impl<T: Default> ExpressionEvaluator<T> {
 
             if p % 10000 == 0
                 && let Some(abort_check) = &self.settings.abort_check
-                    && abort_check() {
-                        self.settings.abort_level = 1;
-                        break;
-                    }
+                && abort_check()
+            {
+                self.settings.abort_level = 1;
+                break;
+            }
 
             match i {
                 Instr::Add(_, a) | Instr::Mul(_, a) => {

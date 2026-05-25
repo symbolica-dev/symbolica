@@ -715,23 +715,39 @@ impl PythonEvalSpec {
         if let Some(f) = self.float {
             if tag_count == 0 {
                 info = info.register(move |args: &[f64]| {
-                    Python::attach(|py| {
+                    match Python::attach(|py| {
                         f.call1(py, (args.to_vec().into_py_any(py)?,))?
                             .extract::<f64>(py)
-                    })
-                    .expect("Python eval callback for f64 failed")
+                    }) {
+                        Ok(value) => value,
+                        Err(err) => {
+                            error!("Python eval callback for f64 failed: {err}");
+                            f64::NAN
+                        }
+                    }
                 });
             } else {
                 info = info.register_tagged(move |tags| {
-                    let f =
-                        Python::attach(|py| Self::python_eval_callable(py, &f, tags, tag_count))
-                            .expect("Python tagged eval callback for f64 failed");
+                    let f = match Python::attach(|py| {
+                        Self::python_eval_callable(py, &f, tags, tag_count)
+                    }) {
+                        Ok(f) => f,
+                        Err(err) => {
+                            error!("Python tagged eval callback for f64 failed: {err}");
+                            return Box::new(|_: &[f64]| f64::NAN);
+                        }
+                    };
                     Box::new(move |args: &[f64]| {
-                        Python::attach(|py| {
+                        match Python::attach(|py| {
                             f.call1(py, (args.to_vec().into_py_any(py)?,))?
                                 .extract::<f64>(py)
-                        })
-                        .expect("Python eval callback for f64 failed")
+                        }) {
+                            Ok(value) => value,
+                            Err(err) => {
+                                error!("Python eval callback for f64 failed: {err}");
+                                f64::NAN
+                            }
+                        }
                     })
                 });
             }
@@ -740,31 +756,49 @@ impl PythonEvalSpec {
         if let Some(f) = self.complex {
             if tag_count == 0 {
                 info = info.register(move |args: &[Complex<f64>]| {
-                    Python::attach(|py| {
+                    match Python::attach(|py| {
                         let args = args
                             .iter()
                             .map(|x| PyComplex::from_doubles(py, x.re, x.im))
                             .collect::<Vec<_>>();
                         f.call1(py, (args.into_py_any(py)?,))?
                             .extract::<Complex<f64>>(py)
-                    })
-                    .expect("Python eval callback for complex f64 failed")
+                    }) {
+                        Ok(value) => value,
+                        Err(err) => {
+                            error!("Python eval callback for complex f64 failed: {err}");
+                            Complex::new(f64::NAN, f64::NAN)
+                        }
+                    }
                 });
             } else {
                 info = info.register_tagged(move |tags| {
-                    let f =
-                        Python::attach(|py| Self::python_eval_callable(py, &f, tags, tag_count))
-                            .expect("Python tagged eval callback for complex f64 failed");
+                    let f = match Python::attach(|py| {
+                        Self::python_eval_callable(py, &f, tags, tag_count)
+                    }) {
+                        Ok(f) => f,
+                        Err(err) => {
+                            error!("Python tagged eval callback for complex f64 failed: {err}");
+                            return Box::new(|_: &[Complex<f64>]| {
+                                Complex::new(f64::NAN, f64::NAN)
+                            });
+                        }
+                    };
                     Box::new(move |args: &[Complex<f64>]| {
-                        Python::attach(|py| {
+                        match Python::attach(|py| {
                             let args = args
                                 .iter()
                                 .map(|x| PyComplex::from_doubles(py, x.re, x.im))
                                 .collect::<Vec<_>>();
                             f.call1(py, (args.into_py_any(py)?,))?
                                 .extract::<Complex<f64>>(py)
-                        })
-                        .expect("Python eval callback for complex f64 failed")
+                        }) {
+                            Ok(value) => value,
+                            Err(err) => {
+                                error!("Python eval callback for complex f64 failed: {err}");
+                                Complex::new(f64::NAN, f64::NAN)
+                            }
+                        }
                     })
                 });
             }
@@ -773,7 +807,7 @@ impl PythonEvalSpec {
         if let Some(f) = self.decimal {
             if tag_count == 0 {
                 info = info.register(move |args: &[Float]| {
-                    Python::attach(|py| {
+                    match Python::attach(|py| {
                         let args = args
                             .iter()
                             .cloned()
@@ -782,16 +816,27 @@ impl PythonEvalSpec {
                         f.call1(py, (args.into_py_any(py)?,))?
                             .extract::<PythonMultiPrecisionFloat>(py)
                             .map(|x| x.0)
-                    })
-                    .expect("Python eval callback for decimal failed")
+                    }) {
+                        Ok(value) => value,
+                        Err(err) => {
+                            error!("Python eval callback for decimal failed: {err}");
+                            Float::with_val(53, f64::NAN)
+                        }
+                    }
                 });
             } else {
                 info = info.register_tagged(move |tags| {
-                    let f =
-                        Python::attach(|py| Self::python_eval_callable(py, &f, tags, tag_count))
-                            .expect("Python tagged eval callback for decimal failed");
+                    let f = match Python::attach(|py| {
+                        Self::python_eval_callable(py, &f, tags, tag_count)
+                    }) {
+                        Ok(f) => f,
+                        Err(err) => {
+                            error!("Python tagged eval callback for decimal failed: {err}");
+                            return Box::new(|_: &[Float]| Float::with_val(53, f64::NAN));
+                        }
+                    };
                     Box::new(move |args: &[Float]| {
-                        Python::attach(|py| {
+                        match Python::attach(|py| {
                             let args = args
                                 .iter()
                                 .cloned()
@@ -800,8 +845,13 @@ impl PythonEvalSpec {
                             f.call1(py, (args.into_py_any(py)?,))?
                                 .extract::<PythonMultiPrecisionFloat>(py)
                                 .map(|x| x.0)
-                        })
-                        .expect("Python eval callback for decimal failed")
+                        }) {
+                            Ok(value) => value,
+                            Err(err) => {
+                                error!("Python eval callback for decimal failed: {err}");
+                                Float::with_val(53, f64::NAN)
+                            }
+                        }
                     })
                 });
             }
@@ -810,7 +860,7 @@ impl PythonEvalSpec {
         if let Some(f) = self.decimal_complex {
             if tag_count == 0 {
                 info = info.register(move |args: &[Complex<Float>]| {
-                    Python::attach(|py| {
+                    match Python::attach(|py| {
                         let args = args
                             .iter()
                             .map(|x| (x.re.clone().into(), x.im.clone().into()))
@@ -823,16 +873,35 @@ impl PythonEvalSpec {
                             py
                         )?;
                         Ok::<Complex<Float>, PyErr>(Complex::new(re.0, im.0))
-                    })
-                    .expect("Python eval callback for decimal complex failed")
+                    }) {
+                        Ok(value) => value,
+                        Err(err) => {
+                            error!("Python eval callback for decimal complex failed: {err}");
+                            Complex::new(
+                                Float::with_val(53, f64::NAN),
+                                Float::with_val(53, f64::NAN),
+                            )
+                        }
+                    }
                 });
             } else {
                 info = info.register_tagged(move |tags| {
-                    let f =
-                        Python::attach(|py| Self::python_eval_callable(py, &f, tags, tag_count))
-                            .expect("Python tagged eval callback for decimal complex failed");
+                    let f = match Python::attach(|py| {
+                        Self::python_eval_callable(py, &f, tags, tag_count)
+                    }) {
+                        Ok(f) => f,
+                        Err(err) => {
+                            error!("Python tagged eval callback for decimal complex failed: {err}");
+                            return Box::new(|_: &[Complex<Float>]| {
+                                Complex::new(
+                                    Float::with_val(53, f64::NAN),
+                                    Float::with_val(53, f64::NAN),
+                                )
+                            });
+                        }
+                    };
                     Box::new(move |args: &[Complex<Float>]| {
-                        Python::attach(|py| {
+                        match Python::attach(|py| {
                             let args = args
                                 .iter()
                                 .map(|x| (x.re.clone().into(), x.im.clone().into()))
@@ -847,8 +916,16 @@ impl PythonEvalSpec {
                                 py
                             )?;
                             Ok::<Complex<Float>, PyErr>(Complex::new(re.0, im.0))
-                        })
-                        .expect("Python eval callback for decimal complex failed")
+                        }) {
+                            Ok(value) => value,
+                            Err(err) => {
+                                error!("Python eval callback for decimal complex failed: {err}");
+                                Complex::new(
+                                    Float::with_val(53, f64::NAN),
+                                    Float::with_val(53, f64::NAN),
+                                )
+                            }
+                        }
                     })
                 });
             }

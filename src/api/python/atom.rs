@@ -370,11 +370,17 @@ impl ConvertibleToReplaceWith {
 
                 Python::attach(|py| {
                     m.call(py, (match_stack,), None)
-                        .expect("Bad callback function")
-                        .extract::<PythonExpression>(py)
-                        .expect("Match map does not return an expression")
+                        .map_err(|e| {
+                            error!("Python match map callback failed: {}", e);
+                        })
+                        .and_then(|x| {
+                            x.extract::<PythonExpression>(py).map_err(|e| {
+                                error!("Python match map callback failed: {}", e);
+                            })
+                        })
+                        .map(|x| x.expr)
+                        .unwrap_or_else(|_| Atom::num(Coefficient::Indeterminate))
                 })
-                .expr
             }))),
         }
     }

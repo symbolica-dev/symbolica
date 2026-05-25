@@ -3,10 +3,13 @@ use std::{
     sync::Arc,
 };
 
+use numerica::printer::PrintOptions;
+
 use crate::{
     atom::{Atom, AtomCore, AtomView, FunctionBuilder, Indeterminate, InlineVar, Symbol},
     coefficient::{Coefficient, CoefficientView},
     domains::{Ring, atom::AtomField, integer::Integer, rational::Rational},
+    error,
     poly::{
         PolyVariable,
         series::{Series, SeriesDepth, SeriesError},
@@ -56,15 +59,25 @@ impl AtomView<'_> {
                 let mut der_function_call = workspace.new_atom();
                 let (f, is_der, arg_count) = if f_orig.get_symbol() == Symbol::DERIVATIVE {
                     if f_orig.get_nargs() < 3 || f_orig.get_nargs() % 2 == 0 {
-                        panic!(
-                            "Derivative function must contain n depths, a function symbol, and n arguments"
+                        error!(
+                            "Derivative function {} must contain n depths, a function symbol, and n arguments",
+                            self.printer(PrintOptions::file())
                         );
+                        out.to_num(Coefficient::Indeterminate);
+                        return false;
                     }
 
                     let der_depth_count = (f_orig.get_nargs() - 1) / 2;
                     let function_symbol = match f_orig.iter().nth(der_depth_count).unwrap() {
                         AtomView::Var(v) => v.get_symbol(),
-                        _ => panic!("Derivative function argument must be a function symbol"),
+                        _ => {
+                            error!(
+                                "Derivative function {} argument must be a function symbol",
+                                self.printer(PrintOptions::file())
+                            );
+                            out.to_num(Coefficient::Indeterminate);
+                            return false;
+                        }
                     };
 
                     let function_call = der_function_call.to_fun(function_symbol);
@@ -216,9 +229,12 @@ impl AtomView<'_> {
                                 n.to_num(num);
                                 p.add_arg(n.as_view());
                             } else {
-                                panic!(
-                                    "Derivative function must contain numbers for argument derivative counters"
+                                error!(
+                                    "Derivative function {} must contain numbers for argument derivative counters",
+                                    self.printer(PrintOptions::file())
                                 );
+                                out.to_num(Coefficient::Indeterminate);
+                                return false;
                             }
                         }
                     } else {
@@ -501,16 +517,17 @@ impl AtomView<'_> {
                     Symbol::SQRT_ID => args_series[0].rpow((1, 2).into()),
                     _ => {
                         if let Some(custom_series) = &f.get_symbol().get_series_function()
-                            && let Some((singular, regularized)) = custom_series(&args_series) {
-                                let singular_series =
-                                    singular.as_view().series_impl(x, expansion_point, info)?;
-                                // TODO: expand deeper?
-                                let regularized_series =
-                                    regularized
-                                        .as_view()
-                                        .series_impl(x, expansion_point, info)?;
-                                return Ok(&singular_series * &regularized_series);
-                            }
+                            && let Some((singular, regularized)) = custom_series(&args_series)
+                        {
+                            let singular_series =
+                                singular.as_view().series_impl(x, expansion_point, info)?;
+                            // TODO: expand deeper?
+                            let regularized_series =
+                                regularized
+                                    .as_view()
+                                    .series_impl(x, expansion_point, info)?;
+                            return Ok(&singular_series * &regularized_series);
+                        }
 
                         // TODO: also check for log(x)
                         if args_series
@@ -670,8 +687,18 @@ impl Mul<&Atom> for &Series<AtomField> {
     type Output = Result<Series<AtomField>, SeriesError>;
 
     fn mul(self, rhs: &Atom) -> Result<Series<AtomField>, SeriesError> {
-        let PolyVariable::Symbol(x) = self.get_variable().as_ref().clone() else {
-            panic!("Series variable is not a symbol");
+        let x = match self.get_variable().as_ref() {
+            PolyVariable::Symbol(x) => Indeterminate::from(*x),
+            PolyVariable::Function(_, x) => Indeterminate::try_from(x.clone()).map_err(|_| {
+                SeriesError::NonIndeterminateSeriesVariable {
+                    variable: self.get_variable().as_ref().clone(),
+                }
+            })?,
+            PolyVariable::Power(_) | PolyVariable::Temporary(_) => {
+                return Err(SeriesError::NonIndeterminateSeriesVariable {
+                    variable: self.get_variable().as_ref().clone(),
+                });
+            }
         };
 
         let expansion_point = self.get_expansion_point();
@@ -692,7 +719,7 @@ impl Mul<&Atom> for &Series<AtomField> {
 
             let series = rhs
                 .as_view()
-                .series_impl(&x.into(), expansion_point.as_view(), &info)?
+                .series_impl(&x, expansion_point.as_view(), &info)?
                 * self;
             if series.relative_order() >= self.relative_order() {
                 return Ok(series);
@@ -732,8 +759,18 @@ impl Add<&Atom> for &Series<AtomField> {
     type Output = Result<Series<AtomField>, SeriesError>;
 
     fn add(self, rhs: &Atom) -> Result<Series<AtomField>, SeriesError> {
-        let PolyVariable::Symbol(x) = self.get_variable().as_ref().clone() else {
-            panic!("Series variable is not a symbol");
+        let x = match self.get_variable().as_ref() {
+            PolyVariable::Symbol(x) => Indeterminate::from(*x),
+            PolyVariable::Function(_, x) => Indeterminate::try_from(x.clone()).map_err(|_| {
+                SeriesError::NonIndeterminateSeriesVariable {
+                    variable: self.get_variable().as_ref().clone(),
+                }
+            })?,
+            PolyVariable::Power(_) | PolyVariable::Temporary(_) => {
+                return Err(SeriesError::NonIndeterminateSeriesVariable {
+                    variable: self.get_variable().as_ref().clone(),
+                });
+            }
         };
 
         let expansion_point = self.get_expansion_point();
@@ -754,7 +791,7 @@ impl Add<&Atom> for &Series<AtomField> {
 
             let series = rhs
                 .as_view()
-                .series_impl(&x.into(), expansion_point.as_view(), &info)?
+                .series_impl(&x, expansion_point.as_view(), &info)?
                 + self.clone();
             if series.absolute_order() >= self.absolute_order() {
                 return Ok(series);
@@ -794,8 +831,18 @@ impl Div<&Atom> for &Series<AtomField> {
     type Output = Result<Series<AtomField>, SeriesError>;
 
     fn div(self, rhs: &Atom) -> Result<Series<AtomField>, SeriesError> {
-        let PolyVariable::Symbol(x) = self.get_variable().as_ref().clone() else {
-            panic!("Series variable is not a symbol");
+        let x = match self.get_variable().as_ref() {
+            PolyVariable::Symbol(x) => Indeterminate::from(*x),
+            PolyVariable::Function(_, x) => Indeterminate::try_from(x.clone()).map_err(|_| {
+                SeriesError::NonIndeterminateSeriesVariable {
+                    variable: self.get_variable().as_ref().clone(),
+                }
+            })?,
+            PolyVariable::Power(_) | PolyVariable::Temporary(_) => {
+                return Err(SeriesError::NonIndeterminateSeriesVariable {
+                    variable: self.get_variable().as_ref().clone(),
+                });
+            }
         };
 
         let expansion_point = self.get_expansion_point();
@@ -817,7 +864,7 @@ impl Div<&Atom> for &Series<AtomField> {
             let series = self
                 / &rhs
                     .as_view()
-                    .series_impl(&x.into(), expansion_point.as_view(), &info)?;
+                    .series_impl(&x, expansion_point.as_view(), &info)?;
             if series.relative_order() >= self.relative_order() {
                 return Ok(series);
             } else {

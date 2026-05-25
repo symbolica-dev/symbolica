@@ -65,6 +65,9 @@ pub enum SeriesError {
         constant: Atom,
         variable: PolyVariable,
     },
+    NonIndeterminateSeriesVariable {
+        variable: PolyVariable,
+    },
     ZeroPowerRequiresInfinitePrecision,
     DivisionByZero,
 }
@@ -121,6 +124,9 @@ impl std::fmt::Display for SeriesError {
                 f,
                 "cannot compute {function} of a series whose constant term {constant} depends on {variable}"
             ),
+            SeriesError::NonIndeterminateSeriesVariable { variable } => {
+                write!(f, "series variable {variable} is not an indeterminate")
+            }
             SeriesError::ZeroPowerRequiresInfinitePrecision => f.write_str(
                 "cannot raise series to the power of zero, as this generates infinite precision 1",
             ),

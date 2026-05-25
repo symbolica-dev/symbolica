@@ -1797,13 +1797,15 @@ impl PythonPatternRestriction {
                     .map(|(s, t)| (Atom::var(*s).into(), t.to_atom().into()))
                     .collect();
 
-                let r = Python::attach(|py| {
-                    match_fn
-                        .call(py, (matches,), None)
-                        .expect("Bad callback function")
-                        .extract::<isize>(py)
-                        .expect("Pattern comparison does not return an integer")
-                });
+                let r = match Python::attach(|py| {
+                    match_fn.call(py, (matches,), None)?.extract::<isize>(py)
+                }) {
+                    Ok(value) => value,
+                    Err(err) => {
+                        error!("Python pattern match callback failed: {err}");
+                        -1
+                    }
+                };
 
                 if r < 0 {
                     false.into()
@@ -2474,17 +2476,21 @@ impl PythonExpression {
             if let Some(f) = print {
                 symbol = symbol.with_print_function(Box::new(
                     move |input: AtomView<'_>, opts: &PrintOptions, state: &PrintState| {
-                        Python::attach(|py| {
-                            let kwargs = print_options_to_dict(opts, state, py).unwrap();
+                        match Python::attach(|py| {
+                            let kwargs = print_options_to_dict(opts, state, py)?;
                             f.call(
                                 py,
                                 (PythonExpression::from(input.to_owned()),),
                                 Some(&kwargs),
-                            )
-                            .unwrap()
+                            )?
                             .extract::<Option<String>>(py)
-                            .unwrap()
-                        })
+                        }) {
+                            Ok(value) => value,
+                            Err(err) => {
+                                error!("Python custom print callback failed: {err}");
+                                None
+                            }
+                        }
                     },
                 ))
             }
@@ -2492,13 +2498,18 @@ impl PythonExpression {
             if let Some(f) = derivative {
                 symbol = symbol.with_derivative_function(Box::new(
                     move |input: AtomView<'_>, arg: usize, out: &mut Settable<Atom>| {
-                        **out = Python::attach(|py| {
-                            f.call1(py, (PythonExpression::from(input.to_owned()), arg))
-                                .unwrap()
-                                .extract::<PythonExpression>(py)
-                                .unwrap()
-                        })
-                        .expr;
+                        match Python::attach(|py| -> PyResult<PythonExpression> {
+                            Ok(
+                                f.call1(py, (PythonExpression::from(input.to_owned()), arg))?
+                                    .extract::<PythonExpression>(py)?,
+                            )
+                        }) {
+                            Ok(value) => **out = value.expr,
+                            Err(err) => {
+                                error!("Python custom derivative callback failed: {err}");
+                                **out = input.to_owned();
+                            }
+                        }
                     },
                 ))
             }
@@ -2506,18 +2517,24 @@ impl PythonExpression {
             if let Some(f) = series {
                 symbol =
                     symbol.with_series_function(Box::new(move |args: &[Series<AtomField>]| {
-                        Python::attach(|py| {
+                        match Python::attach(|py| -> PyResult<Option<(Atom, Atom)>> {
                             let args = args
                                 .iter()
                                 .cloned()
                                 .map(|series| PythonSeries { series })
                                 .collect::<Vec<_>>();
-                            f.call1(py, (args,))
-                                .unwrap()
-                                .extract::<Option<(PythonExpression, PythonExpression)>>(py)
-                                .unwrap()
-                                .map(|(singular, regularized)| (singular.expr, regularized.expr))
-                        })
+                            let value = f
+                                .call1(py, (args,))?
+                                .extract::<Option<(PythonExpression, PythonExpression)>>(py)?;
+                            Ok(value
+                                .map(|(singular, regularized)| (singular.expr, regularized.expr)))
+                        }) {
+                            Ok(value) => value,
+                            Err(err) => {
+                                error!("Python custom series callback failed: {err}");
+                                None
+                            }
+                        }
                     }))
             }
 
@@ -4413,13 +4430,13 @@ impl PythonExpression {
                 WildcardRestriction::Filter(Box::new(move |m| {
                     let data: PythonExpression = m.to_atom().into();
 
-                    Python::attach(|py| {
-                        filter_fn
-                            .call(py, (data,), None)
-                            .expect("Bad callback function")
-                            .is_truthy(py)
-                            .expect("Pattern filter does not return a boolean")
-                    })
+                    match Python::attach(|py| filter_fn.call(py, (data,), None)?.is_truthy(py)) {
+                        Ok(value) => value,
+                        Err(err) => {
+                            error!("Python pattern filter callback failed: {err}");
+                            false
+                        }
+                    }
                 })),
             )
                 .into(),
@@ -4579,13 +4596,15 @@ impl PythonExpression {
                         let data1: PythonExpression = m1.to_atom().into();
                         let data2: PythonExpression = m2.to_atom().into();
 
-                        Python::attach(|py| {
-                            cmp_fn
-                                .call(py, (data1, data2), None)
-                                .expect("Bad callback function")
-                                .is_truthy(py)
-                                .expect("Pattern comparison does not return a boolean")
-                        })
+                        match Python::attach(|py| {
+                            cmp_fn.call(py, (data1, data2), None)?.is_truthy(py)
+                        }) {
+                            Ok(value) => value,
+                            Err(err) => {
+                                error!("Python pattern comparison callback failed: {err}");
+                                false
+                            }
+                        }
                     }),
                 ),
             )
@@ -4806,16 +4825,19 @@ impl PythonExpression {
             let key_map_fn: Box<dyn Fn(AtomView, &mut Settable<'_, Atom>)> =
                 if let Some(key_map) = key_map {
                     Box::new(move |key, out| {
-                        Python::attach(|py| {
+                        match Python::attach(|py| -> PyResult<PythonExpression> {
                             let key: PythonExpression = key.to_owned().into();
 
-                            **out = key_map
-                                .call(py, (key,), None)
-                                .expect("Bad callback function")
-                                .extract::<PythonExpression>(py)
-                                .expect("Key map should return an expression")
-                                .expr;
-                        });
+                            Ok(key_map
+                                .call(py, (key,), None)?
+                                .extract::<PythonExpression>(py)?)
+                        }) {
+                            Ok(value) => **out = value.expr,
+                            Err(err) => {
+                                error!("Python collect key_map callback failed: {err}");
+                                **out = key.to_owned();
+                            }
+                        }
                     })
                 } else {
                     Box::new(|_, _| {})
@@ -4824,16 +4846,19 @@ impl PythonExpression {
             let coeff_map_fn: Box<dyn Fn(AtomView, &mut Settable<'_, Atom>)> =
                 if let Some(coeff_map) = coeff_map {
                     Box::new(move |coeff, out| {
-                        Python::attach(|py| {
+                        match Python::attach(|py| -> PyResult<PythonExpression> {
                             let coeff: PythonExpression = coeff.to_owned().into();
 
-                            **out = coeff_map
-                                .call(py, (coeff,), None)
-                                .expect("Bad callback function")
-                                .extract::<PythonExpression>(py)
-                                .expect("Coeff map should return an expression")
-                                .expr;
-                        });
+                            Ok(coeff_map
+                                .call(py, (coeff,), None)?
+                                .extract::<PythonExpression>(py)?)
+                        }) {
+                            Ok(value) => **out = value.expr,
+                            Err(err) => {
+                                error!("Python collect coeff_map callback failed: {err}");
+                                **out = coeff.to_owned();
+                            }
+                        }
                     })
                 } else {
                     Box::new(|_, _| {})
@@ -4894,16 +4919,19 @@ impl PythonExpression {
             let key_map_fn: Box<dyn Fn(AtomView, &mut Settable<'_, Atom>)> =
                 if let Some(key_map) = key_map {
                     Box::new(move |key, out| {
-                        Python::attach(|py| {
+                        match Python::attach(|py| -> PyResult<PythonExpression> {
                             let key: PythonExpression = key.to_owned().into();
 
-                            **out = key_map
-                                .call(py, (key,), None)
-                                .expect("Bad callback function")
-                                .extract::<PythonExpression>(py)
-                                .expect("Key map should return an expression")
-                                .expr;
-                        });
+                            Ok(key_map
+                                .call(py, (key,), None)?
+                                .extract::<PythonExpression>(py)?)
+                        }) {
+                            Ok(value) => **out = value.expr,
+                            Err(err) => {
+                                error!("Python collect_symbol key_map callback failed: {err}");
+                                **out = key.to_owned();
+                            }
+                        }
                     })
                 } else {
                     Box::new(|_, _| {})
@@ -4912,16 +4940,19 @@ impl PythonExpression {
             let coeff_map_fn: Box<dyn Fn(AtomView, &mut Settable<'_, Atom>)> =
                 if let Some(coeff_map) = coeff_map {
                     Box::new(move |coeff, out| {
-                        Python::attach(|py| {
+                        match Python::attach(|py| -> PyResult<PythonExpression> {
                             let coeff: PythonExpression = coeff.to_owned().into();
 
-                            **out = coeff_map
-                                .call(py, (coeff,), None)
-                                .expect("Bad callback function")
-                                .extract::<PythonExpression>(py)
-                                .expect("Coeff map should return an expression")
-                                .expr;
-                        });
+                            Ok(coeff_map
+                                .call(py, (coeff,), None)?
+                                .extract::<PythonExpression>(py)?)
+                        }) {
+                            Ok(value) => **out = value.expr,
+                            Err(err) => {
+                                error!("Python collect_symbol coeff_map callback failed: {err}");
+                                **out = coeff.to_owned();
+                            }
+                        }
                     })
                 } else {
                     Box::new(|_, _| {})
@@ -5137,13 +5168,15 @@ impl PythonExpression {
             crate::poly::series::SeriesDepth::relative((depth, depth_denom))
         };
 
-        match self
-            .expr
-            .series(id, expansion_point.to_expression().expr.as_view(), depth)
-        {
-            Ok(s) => Ok(PythonSeries { series: s }),
-            Err(e) => Err(exceptions::PyValueError::new_err(e.to_string())),
-        }
+        let result =
+            match self
+                .expr
+                .series(id, expansion_point.to_expression().expr.as_view(), depth)
+            {
+                Ok(s) => Ok(PythonSeries { series: s }),
+                Err(e) => Err(exceptions::PyValueError::new_err(e.to_string())),
+            };
+        result
     }
 
     /// Compute the partial fraction decomposition in `x`.
@@ -5820,7 +5853,11 @@ impl PythonExpression {
             reps.insert(s, v.expr);
         }
 
-        let res = self.expr.to_pattern().replace_wildcards(&reps);
+        let res = self
+            .expr
+            .to_pattern()
+            .replace_wildcards(&reps)
+            .map_err(|e| exceptions::PyValueError::new_err(e))?;
 
         Ok(res.into())
     }
