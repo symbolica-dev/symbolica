@@ -961,7 +961,7 @@ impl PythonPolynomial {
         for v in vars {
             let id = SymbolBuilder::new(namespace.attach_namespace(&v))
                 .build()
-                .unwrap();
+                .map_err(|e| exceptions::PyValueError::new_err(e.to_string()))?;
             var_map.push(id.into());
             var_name_map.push((*v).into());
         }
@@ -1065,10 +1065,22 @@ impl PythonPolynomial {
     }
 
     /// Convert the coefficients of the polynomial to a finite field with prime `prime`.
-    pub fn to_finite_field(&self, prime: u64) -> PythonFiniteFieldPolynomial {
-        let f = Zp64::new(prime);
-        PythonFiniteFieldPolynomial {
-            poly: self.poly.map_coeff(|c| c.to_finite_field(&f), f.clone()),
+    pub fn to_finite_field(&self, prime: u64, py: Python<'_>) -> PyResult<Py<PyAny>> {
+        if prime == 2 {
+            PythonPrimeTwoPolynomial {
+                poly: self.poly.map_coeff(|c| c.to_finite_field(&Z2), Z2.clone()),
+            }
+            .into_py_any(py)
+        } else if prime < 3 || prime.is_multiple_of(2) {
+            return Err(exceptions::PyValueError::new_err(
+                "FiniteFieldPolynomial requires an odd modulus",
+            ));
+        } else {
+            let f = Zp64::new(prime);
+            PythonFiniteFieldPolynomial {
+                poly: self.poly.map_coeff(|c| c.to_finite_field(&f), f.clone()),
+            }
+            .into_py_any(py)
         }
     }
 
@@ -2351,9 +2363,15 @@ impl PythonFiniteFieldPolynomial {
         for v in vars {
             let id = SymbolBuilder::new(namespace.attach_namespace(&v))
                 .build()
-                .unwrap();
+                .map_err(|e| exceptions::PyValueError::new_err(e.to_string()))?;
             var_map.push(id.into());
             var_name_map.push((*v).into());
+        }
+
+        if prime < 3 || prime.is_multiple_of(2) {
+            return Err(exceptions::PyValueError::new_err(
+                "FiniteFieldPolynomial requires an odd prime modulus greater than 2",
+            ));
         }
 
         let e = Token::parse(arg, ParseSettings::polynomial())
@@ -6444,10 +6462,16 @@ impl PythonRationalPolynomial {
     }
 
     /// Convert the coefficients to finite fields with prime `prime`.
-    pub fn to_finite_field(&self, prime: u64) -> PythonFiniteFieldRationalPolynomial {
-        PythonFiniteFieldRationalPolynomial {
-            poly: self.poly.to_finite_field(&Zp64::new(prime)),
+    pub fn to_finite_field(&self, prime: u64) -> PyResult<PythonFiniteFieldRationalPolynomial> {
+        if prime < 3 || prime.is_multiple_of(2) {
+            return Err(exceptions::PyValueError::new_err(
+                "FiniteFieldPolynomial requires an odd prime modulus greater than 2",
+            ));
         }
+
+        Ok(PythonFiniteFieldRationalPolynomial {
+            poly: self.poly.to_finite_field(&Zp64::new(prime)),
+        })
     }
 
     /// Get the numerator.
@@ -6504,7 +6528,7 @@ impl PythonRationalPolynomial {
         for v in vars {
             let id = SymbolBuilder::new(namespace.attach_namespace(&v))
                 .build()
-                .unwrap();
+                .map_err(|e| exceptions::PyValueError::new_err(e.to_string()))?;
             var_map.push(id.into());
             var_name_map.push((*v).into());
         }
@@ -6845,9 +6869,15 @@ impl PythonFiniteFieldRationalPolynomial {
         for v in vars {
             let id = SymbolBuilder::new(namespace.attach_namespace(&v))
                 .build()
-                .unwrap();
+                .map_err(|e| exceptions::PyValueError::new_err(e.to_string()))?;
             var_map.push(id.into());
             var_name_map.push((*v).into());
+        }
+
+        if prime < 3 || prime.is_multiple_of(2) {
+            return Err(exceptions::PyValueError::new_err(
+                "FiniteFieldPolynomial requires an odd prime modulus greater than 2",
+            ));
         }
 
         let field = Zp64::new(prime);

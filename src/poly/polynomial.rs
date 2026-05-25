@@ -3433,7 +3433,7 @@ impl<F: Ring, E: Exponent> MultivariatePolynomial<F, E, LexOrder> {
         div: &MultivariatePolynomial<F, E, LexOrder>,
     ) -> Option<MultivariatePolynomial<F, E, LexOrder>> {
         if div.is_zero() {
-            panic!("Cannot divide by 0 polynomial");
+            return None;
         }
 
         if self.variables != div.variables {

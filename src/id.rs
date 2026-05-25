@@ -464,11 +464,31 @@ impl<'a, 'b> ReplaceBuilder<'a, 'b> {
     ///
     /// let r = parse!("f(2)").replace(parse!("f(x_)")).with(parse!("f(x_+1)"));
     /// assert_eq!(r, parse!("f(3)"));
-    pub fn with<'c, R: Into<BorrowedOrOwned<'c, Pattern>>>(&self, rhs: R) -> Atom {
+    pub fn with<'c, R: Into<BorrowedOrOwned<'c, Pattern>>>(&mut self, rhs: R) -> Atom {
         let rhs = ReplaceWith::Pattern(rhs.into());
         let mut expr_ref = self.target;
         let mut out = RecycledAtom::new();
         let mut out2 = RecycledAtom::new();
+
+        // add extra conditions if the rhs contains wildcard functions,
+        // to prevent matching non-symbols
+        let mut c = Condition::True;
+        for fn_name in self.pattern.borrow().get_wildcard_function_names() {
+            c = Condition::And(Box::new((
+                c,
+                fn_name.restrict(WildcardRestriction::IsAtomType(AtomType::Var)),
+            )));
+        }
+
+        if matches!(c, Condition::True) {
+            if let Some(s) = self.conditions.as_mut() {
+                let old = std::mem::replace(s, BorrowedOrOwned::Owned(Condition::True));
+                *s = BorrowedOrOwned::Owned(Condition::And(Box::new((old.yield_owned(), c))));
+            } else {
+                self.conditions = Some(BorrowedOrOwned::Owned(c));
+            }
+        }
+
         while expr_ref.replace_into(
             self.pattern.borrow(),
             &rhs,
@@ -502,7 +522,7 @@ impl<'a, 'b> ReplaceBuilder<'a, 'b> {
     /// let r = parse!("f(2)").replace(parse!("f(x_)")).with(parse!("f(x_+1)"));
     /// assert_eq!(r, parse!("f(3)"));
     pub fn try_with<'c, R: Into<BorrowedOrOwned<'c, Pattern>>>(
-        &self,
+        &mut self,
         rhs: R,
     ) -> Result<Atom, Symbol> {
         let rhs = rhs.into();
@@ -2762,6 +2782,19 @@ impl Pattern {
         }
     }
 
+    /// Get all wildcards that are used as function names.
+    pub fn get_wildcard_function_names(&self) -> Vec<Symbol> {
+        let mut function_names = vec![];
+        self.visitor(&mut |p| {
+            if let Pattern::Fn(s, _) = p
+                && s.get_wildcard_level() > 0
+            {
+                function_names.push(*s);
+            }
+        });
+        function_names
+    }
+
     /// Check if the rhs of this replacement contains a new wildcard. If so,
     /// return the first new wildcard found.
     pub fn find_new_wildcard(&self, rhs: &Self) -> Option<Symbol> {
@@ -2963,12 +2996,10 @@ impl Pattern {
     }
 
     /// Substitute the wildcards in the pattern.
-    pub fn replace_wildcards(&self, matches: &HashMap<Symbol, Atom>) -> Atom {
+    pub fn replace_wildcards(&self, matches: &HashMap<Symbol, Atom>) -> Result<Atom, String> {
         let mut out = Atom::new();
-        Workspace::get_local().with(|ws| {
-            self.replace_wildcards_impl(matches, ws, &mut out);
-        });
-        out
+        Workspace::get_local().with(|ws| self.replace_wildcards_impl(matches, ws, &mut out))?;
+        Ok(out)
     }
 
     fn replace_wildcards_impl(
@@ -2976,7 +3007,7 @@ impl Pattern {
         matches: &HashMap<Symbol, Atom>,
         ws: &Workspace,
         out: &mut Atom,
-    ) {
+    ) -> Result<(), String> {
         match self {
             Pattern::Literal(atom) => out.set_from_view(&atom.as_view()),
             Pattern::Wildcard(symbol) => {
@@ -2988,7 +3019,15 @@ impl Pattern {
             }
             Pattern::Fn(symbol, args) => {
                 let symbol = if let Some(a) = matches.get(symbol) {
-                    a.as_view().get_symbol().expect("Function name expected")
+                    if let Some(s) = a.as_view().get_symbol() {
+                        s
+                    } else {
+                        return Err(format!(
+                            "Wildcard function name expected for {}, got {}",
+                            symbol.get_name(),
+                            a
+                        ));
+                    }
                 } else {
                     *symbol
                 };
@@ -2998,7 +3037,7 @@ impl Pattern {
 
                 let mut arg = ws.new_atom();
                 for a in args {
-                    a.replace_wildcards_impl(matches, ws, &mut arg);
+                    a.replace_wildcards_impl(matches, ws, &mut arg)?;
                     f.add_arg(arg.as_view());
                 }
 
@@ -3008,9 +3047,9 @@ impl Pattern {
                 let mut pow = ws.new_atom();
 
                 let mut base = ws.new_atom();
-                args[0].replace_wildcards_impl(matches, ws, &mut base);
+                args[0].replace_wildcards_impl(matches, ws, &mut base)?;
                 let mut exp = ws.new_atom();
-                args[1].replace_wildcards_impl(matches, ws, &mut exp);
+                args[1].replace_wildcards_impl(matches, ws, &mut exp)?;
                 pow.to_pow(base.as_view(), exp.as_view());
 
                 pow.as_view().normalize(ws, out);
@@ -3021,7 +3060,7 @@ impl Pattern {
 
                 let mut arg = ws.new_atom();
                 for a in args {
-                    a.replace_wildcards_impl(matches, ws, &mut arg);
+                    a.replace_wildcards_impl(matches, ws, &mut arg)?;
                     m.extend(arg.as_view());
                 }
 
@@ -3033,16 +3072,20 @@ impl Pattern {
 
                 let mut arg = ws.new_atom();
                 for a in args {
-                    a.replace_wildcards_impl(matches, ws, &mut arg);
+                    a.replace_wildcards_impl(matches, ws, &mut arg)?;
                     aa.extend(arg.as_view());
                 }
 
                 add.as_view().normalize(ws, out);
             }
             Pattern::Transformer(_) => {
-                panic!("Encountered transformer during substitution of wildcards from a map")
+                return Err(format!(
+                    "Encountered transformer during substitution of wildcards from a map",
+                ));
             }
         }
+
+        Ok(())
     }
 
     /// Substitute the wildcards in the pattern with the values in the match stack.
@@ -6009,15 +6052,17 @@ mod test {
     #[test]
     fn replace_wildcards_with_map() {
         let a = parse!("f1(v1__, 5) + v1*v2_ + v3^v3_").to_pattern();
-        let r = a.replace_wildcards(
-            &[
-                (symbol!("v1__"), parse!("arg(v4, v5)")),
-                (symbol!("v2_"), Atom::num(4)),
-                (symbol!("v3_"), Atom::num(5)),
-            ]
-            .into_iter()
-            .collect(),
-        );
+        let r = a
+            .replace_wildcards(
+                &[
+                    (symbol!("v1__"), parse!("arg(v4, v5)")),
+                    (symbol!("v2_"), Atom::num(4)),
+                    (symbol!("v3_"), Atom::num(5)),
+                ]
+                .into_iter()
+                .collect(),
+            )
+            .unwrap();
 
         let res = parse!("f1(v4, v5, 5) + v1*4 + v3^5");
         assert_eq!(r, res);

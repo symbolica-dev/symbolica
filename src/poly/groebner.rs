@@ -129,6 +129,13 @@ impl<R: Field + Echelonize, E: Exponent, O: MonomialOrder> GroebnerBasis<R, E, O
         ideal: &[MultivariatePolynomial<R, E, O>],
         print_stats: bool,
     ) -> GroebnerBasis<R, E, O> {
+        if ideal.is_empty() {
+            return GroebnerBasis {
+                system: Vec::new(),
+                print_stats,
+            };
+        }
+
         let mut ideal = ideal.to_vec();
         MultivariatePolynomial::unify_variables_list(&mut ideal);
 
