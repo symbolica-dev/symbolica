@@ -13,7 +13,7 @@ fn fibonacci() {
     let rhs_one = Atom::num(1).to_pattern();
 
     // prepare the pattern restriction `x_ > 1`
-    let restrictions = symbol!("x_").filter_single(|n| !n.is_one() && !n.is_zero());
+    let restrictions = symbol!("x_").filter(|n| !n.is_one() && !n.is_zero());
 
     let mut target = parse!("f(10)");
 
