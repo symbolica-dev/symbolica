@@ -512,13 +512,15 @@ impl EvaluationInfo {
         tags: &[AtomView],
         precision: u32,
     ) -> Result<Complex<Float>, String> {
-        if precision == 53 && self.tag_count == 0
-            && let Some(eval) = &self.constant_eval {
-                return self
-                    .constant_eval_cache
-                    .get_or_init(|| eval(&[], 53))
-                    .clone();
-            }
+        if precision == 53
+            && self.tag_count == 0
+            && let Some(eval) = &self.constant_eval
+        {
+            return self
+                .constant_eval_cache
+                .get_or_init(|| eval(&[], 53))
+                .clone();
+        }
 
         if let Some(eval) = &self.constant_eval {
             return eval(tags, precision);
@@ -3748,7 +3750,7 @@ macro_rules! get_symbol {
 ///     |symbs, b| {
 ///         let sec = symbs[1];
 ///         b.with_derivative_function(move |f, index, out| {
-///             **out = function!(sec, f.as_fun_view().unwrap().get(index)).npow(2)
+///             **out = function!(sec, f.as_fun_view().unwrap().get(index)).pow(2)
 ///         })
 ///     },
 ///     "test::sec";;
@@ -3943,23 +3945,6 @@ macro_rules! try_parse_lit {
 }
 
 impl Atom {
-    /// Take the `self` to a numerical power `exp`
-    #[deprecated(
-        since = "1.4.0",
-        note = "Use Atom::pow() instead with a numerical argument for the exponent."
-    )]
-    pub fn npow<T: Into<Coefficient>>(&self, exp: T) -> Atom {
-        Workspace::get_local().with(|ws| {
-            let n = ws.new_num(exp);
-            let mut t = ws.new_atom();
-            self.as_view()
-                .pow_no_norm(ws, n.as_view())
-                .as_view()
-                .normalize(ws, &mut t);
-            t.into_inner()
-        })
-    }
-
     /// Add the atoms in `args`, using a fast n-way merge sort.
     ///
     /// This method should be preferred over repeated addition when adding many atoms.

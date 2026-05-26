@@ -3564,28 +3564,15 @@ impl Symbol {
     /// Restrict the wildcard `x_` to be greater than 1:
     /// ```
     /// use symbolica::prelude::*;
-    /// symbol!("x_").filter(|x| x.to_atom() > 1);
+    /// symbol!("x_").filter(|x| x > 1);
     /// ```
-    #[deprecated(since = "1.4.0", note = "Use filter_single or filter_match")]
-    pub fn filter(&self, f: impl FilterFn + 'static) -> Condition<PatternRestriction> {
-        self.restrict(WildcardRestriction::filter(f))
-    }
-
-    /// Restrict a wildcard symbol with a filter function `f`.
-    ///
-    /// # Examples
-    /// Restrict the wildcard `x_` to be greater than 1:
-    /// ```
-    /// use symbolica::prelude::*;
-    /// symbol!("x_").filter_single(|x| x > 1);
-    /// ```
-    pub fn filter_single(
+    pub fn filter(
         &self,
         f: impl FilterSingleFn + 'static + Clone,
     ) -> Condition<PatternRestriction> {
         if self.get_wildcard_level() != 1 {
             panic!(
-                "filter_single can only be used on single wildcards (with one underscore), but {} has level {}",
+                "filter can only be used on single wildcards (with one underscore), but {} has level {}",
                 self,
                 self.get_wildcard_level()
             );
@@ -3593,17 +3580,17 @@ impl Symbol {
 
         self.restrict(WildcardRestriction::filter(move |m| match m {
             Match::Single(a) => f(*a),
-            _ => unreachable!("Expected single match for filter_single, but got {m:?}"),
+            _ => unreachable!("Expected single match for filter, but got {m:?}"),
         }))
     }
 
     /// Restrict a wildcard symbol with a filter function `f`.
     ///
     /// # Examples
-    /// Restrict the wildcard `x_` to be greater than 1:
+    /// Restrict the wildcard `x___`.
     /// ```
     /// use symbolica::prelude::*;
-    /// symbol!("x_").filter(|x| x.to_atom() > 1);
+    /// symbol!("x___").filter_match(|x| matches!(x, Match::Multiple(_, _)));
     /// ```
     pub fn filter_match(&self, f: impl FilterFn + 'static) -> Condition<PatternRestriction> {
         self.restrict(WildcardRestriction::filter(f))

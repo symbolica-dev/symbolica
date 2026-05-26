@@ -9,7 +9,7 @@ fn main() {
     let rhs_one = Atom::num(1).to_pattern();
 
     // prepare the pattern restriction `x_ > 1`
-    let restrictions = symbol!("x_").filter_single(|v| v > 1);
+    let restrictions = symbol!("x_").filter(|v| v > 1);
 
     let mut target = parse!("f(10)");
 
