@@ -1472,7 +1472,6 @@ impl PythonTransformer {
             number_thousands_separator = None,
             multiplication_operator = '·',
             double_star_for_exponentiation = false,
-            square_brackets_for_function = false,
             function_brackets = ('(',')'),
             num_exp_as_superscript = true,
             precision = None,
@@ -1498,7 +1497,6 @@ impl PythonTransformer {
         number_thousands_separator: Option<char>,
         multiplication_operator: char,
         double_star_for_exponentiation: bool,
-        square_brackets_for_function: bool,
         function_brackets: (char, char),
         num_exp_as_superscript: bool,
         precision: Option<usize>,
@@ -1506,7 +1504,7 @@ impl PythonTransformer {
         hide_namespace: Option<&str>,
         include_attributes: bool,
         max_terms: Option<usize>,
-        custom_print_mode: Option<usize>,
+        custom_print_mode: Option<HashMap<String, PythonPrintUserData>>,
     ) -> PyResult<PythonTransformer> {
         self.append_transformer(Transformer::Print(PrintOptions {
             max_line_length,
@@ -1523,8 +1521,6 @@ impl PythonTransformer {
             number_thousands_separator,
             multiplication_operator,
             double_star_for_exponentiation,
-            #[allow(deprecated)]
-            square_brackets_for_function,
             function_brackets,
             num_exp_as_superscript,
             mode: mode.into(),
@@ -1533,13 +1529,15 @@ impl PythonTransformer {
             hide_all_namespaces: !show_namespaces,
             color_namespace: true,
             hide_namespace: if show_namespaces {
-                hide_namespace.map(intern_string)
+                hide_namespace.map(|x| std::borrow::Cow::Owned(x.to_owned()))
             } else {
                 None
             },
             include_attributes,
             max_terms,
-            custom_print_mode: custom_print_mode.map(|x| ("default", x)),
+            custom_print_mode: custom_print_mode
+                .map(|m| m.into_iter().map(|(k, v)| (k, v.0)).collect())
+                .unwrap_or_default(),
         }))
     }
 
@@ -2898,7 +2896,7 @@ impl PythonExpression {
     pub fn __repr__(&self) -> PyResult<String> {
         Ok(self
             .expr
-            .format_string(&PLAIN_PRINT_OPTIONS, PrintState::new()))
+            .format_string(&*PLAIN_PRINT_OPTIONS, PrintState::new()))
     }
 
     /// Convert the expression into a human-readable string.
@@ -2906,7 +2904,7 @@ impl PythonExpression {
         Ok(self.expr.format_string(
             &PrintOptions {
                 max_terms: Some(100),
-                ..DEFAULT_PRINT_OPTIONS
+                ..(*DEFAULT_PRINT_OPTIONS).clone()
             },
             PrintState::new(),
         ))
@@ -2990,7 +2988,6 @@ impl PythonExpression {
             number_thousands_separator = None,
             multiplication_operator = '·',
             double_star_for_exponentiation = false,
-            square_brackets_for_function = false,
             function_brackets = ('(',')'),
             num_exp_as_superscript = true,
             precision = None,
@@ -3016,7 +3013,6 @@ impl PythonExpression {
         number_thousands_separator: Option<char>,
         multiplication_operator: char,
         double_star_for_exponentiation: bool,
-        square_brackets_for_function: bool,
         function_brackets: (char, char),
         num_exp_as_superscript: bool,
         precision: Option<usize>,
@@ -3024,7 +3020,7 @@ impl PythonExpression {
         hide_namespace: Option<&str>,
         include_attributes: bool,
         max_terms: Option<usize>,
-        custom_print_mode: Option<usize>,
+        custom_print_mode: Option<HashMap<String, PythonPrintUserData>>,
     ) -> PyResult<String> {
         Ok(format!(
             "{}",
@@ -3045,8 +3041,6 @@ impl PythonExpression {
                     number_thousands_separator,
                     multiplication_operator,
                     double_star_for_exponentiation,
-                    #[allow(deprecated)]
-                    square_brackets_for_function,
                     function_brackets,
                     num_exp_as_superscript,
                     mode: mode.into(),
@@ -3055,13 +3049,15 @@ impl PythonExpression {
                     hide_all_namespaces: !show_namespaces,
                     color_namespace: true,
                     hide_namespace: if show_namespaces {
-                        hide_namespace.map(intern_string)
+                        hide_namespace.map(|x| std::borrow::Cow::Owned(x.to_owned()))
                     } else {
                         None
                     },
                     include_attributes,
                     max_terms,
-                    custom_print_mode: custom_print_mode.map(|x| ("default", x)),
+                    custom_print_mode: custom_print_mode
+                        .map(|m| m.into_iter().map(|(k, v)| (k, v.0)).collect())
+                        .unwrap_or_default(),
                 },
             )
         ))
@@ -3078,7 +3074,7 @@ impl PythonExpression {
     pub fn format_plain(&self) -> PyResult<String> {
         Ok(self
             .expr
-            .format_string(&PLAIN_PRINT_OPTIONS, PrintState::new()))
+            .format_string(&*PLAIN_PRINT_OPTIONS, PrintState::new()))
     }
 
     /// Convert the expression into a LaTeX string.
@@ -3098,7 +3094,7 @@ impl PythonExpression {
                 PrintOptions {
                     max_line_length,
                     max_terms: Some(100),
-                    ..LATEX_PRINT_OPTIONS
+                    ..(*LATEX_PRINT_OPTIONS).clone()
                 },
             )
         );

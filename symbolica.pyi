@@ -1118,14 +1118,13 @@ class Expression:
         number_thousands_separator: str | None = None,
         multiplication_operator: str = "*",
         double_star_for_exponentiation: bool = False,
-        square_brackets_for_function: bool = False,
         function_brackets: tuple[str, str] = ("(", ")"),
         num_exp_as_superscript: bool = True,
         show_namespaces: bool = False,
         hide_namespace: str | None = None,
         include_attributes: bool = False,
         max_terms: int | None = 100,
-        custom_print_mode: int | None = None,
+        custom_print_mode: dict[str, int | str | dict[str | int, Any]] | None = None,
     ) -> str:
         """
         Convert the expression into a human-readable string, with tunable settings.
@@ -1175,8 +1174,6 @@ class Expression:
             The string used to print multiplication.
         double_star_for_exponentiation: bool
             Whether exponentiation should be printed as `**` instead of `^`.
-        square_brackets_for_function: bool
-            Whether function calls should be printed with square brackets.
         function_brackets: tuple[str, str]
             The opening and closing brackets used when printing function arguments.
         num_exp_as_superscript: bool
@@ -1189,8 +1186,8 @@ class Expression:
             Whether symbol attributes should be included in the printed output.
         max_terms: int | None
             The maximum number of terms to print before truncating the output.
-        custom_print_mode: int | None
-            A custom print-mode identifier passed through to custom print callbacks.
+        custom_print_mode: dict[str, int | str | dict[str | int, Any]] | None
+            Custom print data passed through to custom print callbacks.
         """
 
     def format_plain(self) -> str:
@@ -4710,14 +4707,13 @@ class Transformer:
         number_thousands_separator: str | None = None,
         multiplication_operator: str = "*",
         double_star_for_exponentiation: bool = False,
-        square_brackets_for_function: bool = False,
         function_brackets: tuple[str, str] = ("(", ")"),
         num_exp_as_superscript: bool = True,
         show_namespaces: bool = False,
         hide_namespace: str | None = None,
         include_attributes: bool = False,
         max_terms: int | None = None,
-        custom_print_mode: int | None = None,
+        custom_print_mode: dict[str, int | str | dict[str | int, Any]] | None = None,
     ) -> Transformer:
         """
         Create a transformer that prints the expression.
@@ -4756,8 +4752,6 @@ class Transformer:
             The string used to print multiplication.
         double_star_for_exponentiation: bool
             Whether exponentiation should be printed as `**` instead of `^`.
-        square_brackets_for_function: bool
-            Whether function calls should be printed with square brackets.
         function_brackets: tuple[str, str]
             The opening and closing brackets used when printing function arguments.
         num_exp_as_superscript: bool
@@ -4770,8 +4764,8 @@ class Transformer:
             Whether symbol attributes should be included in the printed output.
         max_terms: int | None
             The maximum number of terms to print before truncating the output.
-        custom_print_mode: int | None
-            A custom print-mode identifier passed through to custom print callbacks.
+        custom_print_mode: dict[str, int | str | dict[str | int, Any]] | None
+            Custom print data passed through to custom print callbacks.
         """
 
     def stats(
@@ -5019,7 +5013,6 @@ class Series:
         number_thousands_separator: str | None = None,
         multiplication_operator: str = "*",
         double_star_for_exponentiation: bool = False,
-        square_brackets_for_function: bool = False,
         function_brackets: tuple[str, str] = ("(", ")"),
         num_exp_as_superscript: bool = True,
         precision: int | None = None,
@@ -5027,7 +5020,7 @@ class Series:
         hide_namespace: str | None = None,
         include_attributes: bool = False,
         max_terms: int | None = None,
-        custom_print_mode: int | None = None,
+        custom_print_mode: dict[str, int | str | dict[str | int, Any]] | None = None,
     ) -> str:
         """
         Convert the series into a human-readable string.
@@ -5062,8 +5055,6 @@ class Series:
             The string used to print multiplication.
         double_star_for_exponentiation: bool
             Whether exponentiation should be printed as `**` instead of `^`.
-        square_brackets_for_function: bool
-            Whether function calls should be printed with square brackets.
         function_brackets: tuple[str, str]
             The opening and closing brackets used when printing function arguments.
         num_exp_as_superscript: bool
@@ -5078,8 +5069,8 @@ class Series:
             Whether symbol attributes should be included in the printed output.
         max_terms: int | None
             The maximum number of terms to print before truncating the output.
-        custom_print_mode: int | None
-            A custom print-mode identifier passed through to custom print callbacks.
+        custom_print_mode: dict[str, int | str | dict[str | int, Any]] | None
+            Custom print data passed through to custom print callbacks.
         """
 
     def __add__(self, other: Series | Expression) -> Series:
@@ -5508,7 +5499,6 @@ class Polynomial:
         number_thousands_separator: str | None = None,
         multiplication_operator: str = "*",
         double_star_for_exponentiation: bool = False,
-        square_brackets_for_function: bool = False,
         function_brackets: tuple[str, str] = ("(", ")"),
         num_exp_as_superscript: bool = True,
         precision: int | None = None,
@@ -5516,7 +5506,7 @@ class Polynomial:
         hide_namespace: str | None = None,
         include_attributes: bool = False,
         max_terms: int | None = None,
-        custom_print_mode: int | None = None,
+        custom_print_mode: dict[str, int | str | dict[str | int, Any]] | None = None,
     ) -> str:
         """
         Convert the polynomial into a human-readable string, with tunable settings.
@@ -5558,8 +5548,6 @@ class Polynomial:
             The string used to print multiplication.
         double_star_for_exponentiation: bool
             Whether exponentiation should be printed as `**` instead of `^`.
-        square_brackets_for_function: bool
-            Whether function calls should be printed with square brackets.
         function_brackets: tuple[str, str]
             The opening and closing brackets used when printing function arguments.
         num_exp_as_superscript: bool
@@ -5574,8 +5562,8 @@ class Polynomial:
             Whether symbol attributes should be included in the printed output.
         max_terms: int | None
             The maximum number of terms to print before truncating the output.
-        custom_print_mode: int | None
-            A custom print-mode identifier passed through to custom print callbacks.
+        custom_print_mode: dict[str, int | str | dict[str | int, Any]] | None
+            Custom print data passed through to custom print callbacks.
         """
 
     def nterms(self) -> int:
@@ -6313,7 +6301,6 @@ class NumberFieldPolynomial:
         number_thousands_separator: str | None = None,
         multiplication_operator: str = "*",
         double_star_for_exponentiation: bool = False,
-        square_brackets_for_function: bool = False,
         function_brackets: tuple[str, str] = ("(", ")"),
         num_exp_as_superscript: bool = True,
         precision: int | None = None,
@@ -6321,7 +6308,7 @@ class NumberFieldPolynomial:
         hide_namespace: str | None = None,
         include_attributes: bool = False,
         max_terms: int | None = None,
-        custom_print_mode: int | None = None,
+        custom_print_mode: dict[str, int | str | dict[str | int, Any]] | None = None,
     ) -> str:
         """
         Convert the polynomial into a human-readable string, with tunable settings.
@@ -6363,8 +6350,6 @@ class NumberFieldPolynomial:
             The string used to print multiplication.
         double_star_for_exponentiation: bool
             Whether exponentiation should be printed as `**` instead of `^`.
-        square_brackets_for_function: bool
-            Whether function calls should be printed with square brackets.
         function_brackets: tuple[str, str]
             The opening and closing brackets used when printing function arguments.
         num_exp_as_superscript: bool
@@ -6379,8 +6364,8 @@ class NumberFieldPolynomial:
             Whether symbol attributes should be included in the printed output.
         max_terms: int | None
             The maximum number of terms to print before truncating the output.
-        custom_print_mode: int | None
-            A custom print-mode identifier passed through to custom print callbacks.
+        custom_print_mode: dict[str, int | str | dict[str | int, Any]] | None
+            Custom print data passed through to custom print callbacks.
         """
 
     def nterms(self) -> int:
@@ -6961,7 +6946,6 @@ class FiniteFieldPolynomial:
         number_thousands_separator: str | None = None,
         multiplication_operator: str = "*",
         double_star_for_exponentiation: bool = False,
-        square_brackets_for_function: bool = False,
         function_brackets: tuple[str, str] = ("(", ")"),
         num_exp_as_superscript: bool = True,
         precision: int | None = None,
@@ -6969,7 +6953,7 @@ class FiniteFieldPolynomial:
         hide_namespace: str | None = None,
         include_attributes: bool = False,
         max_terms: int | None = None,
-        custom_print_mode: int | None = None,
+        custom_print_mode: dict[str, int | str | dict[str | int, Any]] | None = None,
     ) -> str:
         """
         Convert the polynomial into a human-readable string, with tunable settings.
@@ -7011,8 +6995,6 @@ class FiniteFieldPolynomial:
             The string used to print multiplication.
         double_star_for_exponentiation: bool
             Whether exponentiation should be printed as `**` instead of `^`.
-        square_brackets_for_function: bool
-            Whether function calls should be printed with square brackets.
         function_brackets: tuple[str, str]
             The opening and closing brackets used when printing function arguments.
         num_exp_as_superscript: bool
@@ -7027,8 +7009,8 @@ class FiniteFieldPolynomial:
             Whether symbol attributes should be included in the printed output.
         max_terms: int | None
             The maximum number of terms to print before truncating the output.
-        custom_print_mode: int | None
-            A custom print-mode identifier passed through to custom print callbacks.
+        custom_print_mode: dict[str, int | str | dict[str | int, Any]] | None
+            Custom print data passed through to custom print callbacks.
         """
 
     def nterms(self) -> int:
@@ -8232,7 +8214,6 @@ class Matrix:
         number_thousands_separator: str | None = None,
         multiplication_operator: str = "*",
         double_star_for_exponentiation: bool = False,
-        square_brackets_for_function: bool = False,
         function_brackets: tuple[str, str] = ("(", ")"),
         num_exp_as_superscript: bool = True,
         precision: int | None = None,
@@ -8240,7 +8221,7 @@ class Matrix:
         hide_namespace: str | None = None,
         include_attributes: bool = False,
         max_terms: int | None = None,
-        custom_print_mode: int | None = None,
+        custom_print_mode: dict[str, int | str | dict[str | int, Any]] | None = None,
     ) -> str:
         """
         Convert the matrix into a human-readable string, with tunable settings.
@@ -8263,8 +8244,6 @@ class Matrix:
             The string used to print multiplication.
         double_star_for_exponentiation: bool
             Whether exponentiation should be printed as `**` instead of `^`.
-        square_brackets_for_function: bool
-            Whether function calls should be printed with square brackets.
         function_brackets: tuple[str, str]
             The opening and closing brackets used when printing function arguments.
         num_exp_as_superscript: bool
@@ -8279,8 +8258,8 @@ class Matrix:
             Whether symbol attributes should be included in the printed output.
         max_terms: int | None
             The maximum number of terms to print before truncating the output.
-        custom_print_mode: int | None
-            A custom print-mode identifier passed through to custom print callbacks.
+        custom_print_mode: dict[str, int | str | dict[str | int, Any]] | None
+            Custom print data passed through to custom print callbacks.
         """
 
     def to_latex(self) -> str:
