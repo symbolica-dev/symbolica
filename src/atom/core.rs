@@ -531,27 +531,6 @@ pub trait AtomCore: private::Sealed + Sized {
             .wrap(self)
     }
 
-    /// Expand an expression in the variable `var`.
-    ///
-    /// # Example
-    ///
-    /// ```
-    /// use symbolica::prelude::*;
-    /// let expr = parse!("(1+x)*(1+y)^2");
-    /// let expanded = expr.expand_in_symbol(symbol!("x"));
-    /// let r = parse!("(1+y)^2 + (1+y)^2*x");
-    /// assert_eq!(expanded, r);
-    /// ```
-    #[deprecated(
-        since = "1.4.0",
-        note = "Use `expand_in` instead, which can expand in both variables and functions."
-    )]
-    fn expand_in_symbol(&self, var: Symbol) -> Self::Output {
-        self.as_atom_view()
-            .expand_in(InlineVar::from(var).as_view())
-            .wrap(self)
-    }
-
     /// Expand an expression, returning `true` iff the expression changed.
     ///
     /// # Example

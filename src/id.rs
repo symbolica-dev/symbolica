@@ -3564,22 +3564,9 @@ impl Symbol {
     /// Restrict the wildcard `x_` to be greater than 1:
     /// ```
     /// use symbolica::prelude::*;
-    /// symbol!("x_").filter(|x| x.to_atom() > 1);
-    /// ```
-    #[deprecated(since = "1.4.0", note = "Use filter_single or filter_match")]
-    pub fn filter(&self, f: impl FilterFn + 'static) -> Condition<PatternRestriction> {
-        self.restrict(WildcardRestriction::filter(f))
-    }
-
-    /// Restrict a wildcard symbol with a filter function `f`.
-    ///
-    /// # Examples
-    /// Restrict the wildcard `x_` to be greater than 1:
-    /// ```
-    /// use symbolica::prelude::*;
     /// symbol!("x_").filter_single(|x| x > 1);
     /// ```
-    pub fn filter_single(
+    pub fn filter(
         &self,
         f: impl FilterSingleFn + 'static + Clone,
     ) -> Condition<PatternRestriction> {
