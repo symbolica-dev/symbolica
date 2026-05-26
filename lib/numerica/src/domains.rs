@@ -374,7 +374,7 @@ impl<R: Ring> Display for RingPrinter<'_, R> {
         self.ring
             .format(
                 self.element,
-                &self.opts.update_with_fmt(f),
+                &self.opts.clone().update_with_fmt(f),
                 self.state.update_with_fmt(f),
                 f,
             )

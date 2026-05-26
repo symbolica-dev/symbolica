@@ -1,5 +1,9 @@
 //! Methods for printing rings.
 
+use std::borrow::Cow;
+
+use ahash::HashMap;
+
 /// The overall print mode.
 #[derive(Debug, Copy, Clone, PartialEq, Eq)]
 #[non_exhaustive]
@@ -47,8 +51,30 @@ pub enum ColorMode {
     Never,
 }
 
+/// Represents user-defined data that can be used as a key in [PrintUserData].
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
+pub enum PrintUserDataKey {
+    /// A small integer value.
+    Integer(i64),
+    /// A string value.
+    String(String),
+}
+
+/// Represents user-defined data that can be attached to [PrintOptions].
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum PrintUserData {
+    /// A small integer value.
+    Integer(i64),
+    /// A string value.
+    String(String),
+    /// A list of extended symbol data.
+    List(Vec<PrintUserData>),
+    /// A map from extended symbol data to extended symbol data.
+    Map(HashMap<PrintUserDataKey, PrintUserData>),
+}
+
 /// Various options for printing expressions.
-#[derive(Debug, Copy, Clone)]
+#[derive(Debug, Clone)]
 pub struct PrintOptions {
     /// The overall print mode.
     pub mode: PrintMode,
@@ -81,8 +107,6 @@ pub struct PrintOptions {
     pub multiplication_operator: char,
     /// Whether to use `**` for exponentiation (e.g. for sympy) instead of `^`.
     pub double_star_for_exponentiation: bool,
-    #[deprecated(note = "Use function_brackets instead")]
-    pub square_brackets_for_function: bool,
     /// The open and close brackets to use for function application.
     pub function_brackets: (char, char),
     /// Whether to print the exponent of numbers as a superscript.
@@ -92,7 +116,7 @@ pub struct PrintOptions {
     /// Whether to print matrices in a tabular format (e.g. with newlines and indentation).
     pub pretty_matrix: bool,
     /// The namespace to hide when printing. If None, no namespace is hidden.
-    pub hide_namespace: Option<&'static str>,
+    pub hide_namespace: Option<Cow<'static, str>>,
     /// Whether to hide all namespaces when printing.
     pub hide_all_namespaces: bool,
     /// Print attribute and tags
@@ -103,11 +127,11 @@ pub struct PrintOptions {
     pub max_terms: Option<usize>,
     /// Provides a handle to set the behavior of the custom print function.
     /// Symbolica does not use this option for its own printing.
-    pub custom_print_mode: Option<(&'static str, usize)>,
+    pub custom_print_mode: HashMap<String, PrintUserData>,
 }
 
 impl PrintOptions {
-    pub const fn new() -> Self {
+    pub fn new() -> Self {
         Self {
             max_line_length: None,
             indentation: 4,
@@ -125,8 +149,6 @@ impl PrintOptions {
             number_thousands_separator: None,
             multiplication_operator: '*',
             double_star_for_exponentiation: false,
-            #[allow(deprecated)]
-            square_brackets_for_function: false,
             function_brackets: ('(', ')'),
             num_exp_as_superscript: false,
             mode: PrintMode::Symbolica,
@@ -137,12 +159,12 @@ impl PrintOptions {
             include_attributes: false,
             color_namespace: true,
             max_terms: None,
-            custom_print_mode: None,
+            custom_print_mode: HashMap::default(),
         }
     }
 
     /// Print the output in a Mathematica-readable format.
-    pub const fn mathematica() -> PrintOptions {
+    pub fn mathematica() -> PrintOptions {
         Self {
             max_line_length: None,
             indentation: 4,
@@ -157,25 +179,23 @@ impl PrintOptions {
             number_thousands_separator: None,
             multiplication_operator: ' ',
             double_star_for_exponentiation: false,
-            #[allow(deprecated)]
-            square_brackets_for_function: true,
             function_brackets: ('[', ']'),
             num_exp_as_superscript: false,
             mode: PrintMode::Mathematica,
             precision: None,
             pretty_matrix: false,
-            hide_namespace: Some("symbolica"),
+            hide_namespace: Some(Cow::Borrowed("symbolica")),
             hide_all_namespaces: false,
             include_attributes: false,
             color_namespace: false,
             max_terms: None,
             bracket_level_colors: None,
-            custom_print_mode: None,
+            custom_print_mode: HashMap::default(),
         }
     }
 
     /// Print the output in a Latex input format.
-    pub const fn latex() -> PrintOptions {
+    pub fn latex() -> PrintOptions {
         Self {
             max_line_length: None,
             indentation: 4,
@@ -190,8 +210,6 @@ impl PrintOptions {
             number_thousands_separator: None,
             multiplication_operator: ' ',
             double_star_for_exponentiation: false,
-            #[allow(deprecated)]
-            square_brackets_for_function: false,
             function_brackets: ('(', ')'),
             num_exp_as_superscript: false,
             mode: PrintMode::Latex,
@@ -203,12 +221,12 @@ impl PrintOptions {
             color_namespace: false,
             max_terms: None,
             bracket_level_colors: None,
-            custom_print_mode: None,
+            custom_print_mode: HashMap::default(),
         }
     }
 
     /// Print the output in a Typst-readable format.
-    pub const fn typst() -> PrintOptions {
+    pub fn typst() -> PrintOptions {
         Self {
             max_line_length: None,
             indentation: 4,
@@ -223,8 +241,6 @@ impl PrintOptions {
             number_thousands_separator: None,
             multiplication_operator: ' ',
             double_star_for_exponentiation: false,
-            #[allow(deprecated)]
-            square_brackets_for_function: false,
             function_brackets: ('(', ')'),
             num_exp_as_superscript: false,
             mode: PrintMode::Typst,
@@ -236,12 +252,12 @@ impl PrintOptions {
             color_namespace: false,
             max_terms: None,
             bracket_level_colors: None,
-            custom_print_mode: None,
+            custom_print_mode: HashMap::default(),
         }
     }
 
     /// Print the output suitable for a file.
-    pub const fn file() -> PrintOptions {
+    pub fn file() -> PrintOptions {
         Self {
             max_line_length: None,
             indentation: 4,
@@ -256,8 +272,6 @@ impl PrintOptions {
             number_thousands_separator: None,
             multiplication_operator: '*',
             double_star_for_exponentiation: false,
-            #[allow(deprecated)]
-            square_brackets_for_function: false,
             function_brackets: ('(', ')'),
             num_exp_as_superscript: false,
             mode: PrintMode::Symbolica,
@@ -269,12 +283,12 @@ impl PrintOptions {
             color_namespace: false,
             max_terms: None,
             bracket_level_colors: None,
-            custom_print_mode: None,
+            custom_print_mode: HashMap::default(),
         }
     }
 
     /// Print the output suitable for a file without namespaces.
-    pub const fn file_no_namespace() -> PrintOptions {
+    pub fn file_no_namespace() -> PrintOptions {
         Self {
             hide_all_namespaces: true,
             ..Self::file()
@@ -283,7 +297,7 @@ impl PrintOptions {
 
     /// Print the output suitable for a file with namespaces
     /// and attributes and tags.
-    pub const fn full() -> PrintOptions {
+    pub fn full() -> PrintOptions {
         Self {
             include_attributes: true,
             ..Self::file()
@@ -291,7 +305,7 @@ impl PrintOptions {
     }
 
     /// Print the output with namespaces suppressed.
-    pub const fn short() -> PrintOptions {
+    pub fn short() -> PrintOptions {
         Self {
             hide_all_namespaces: true,
             ..Self::new()
@@ -299,7 +313,7 @@ impl PrintOptions {
     }
 
     /// Print the output in a sympy input format.
-    pub const fn sympy() -> PrintOptions {
+    pub fn sympy() -> PrintOptions {
         Self {
             double_star_for_exponentiation: true,
             mode: PrintMode::Sympy,
@@ -436,19 +450,6 @@ impl PrintOptions {
         self
     }
 
-    /// Set whether function application should use square brackets.
-    #[deprecated(note = "Use function_brackets instead")]
-    pub const fn square_brackets_for_function(
-        mut self,
-        square_brackets_for_function: bool,
-    ) -> Self {
-        #[allow(deprecated)]
-        {
-            self.square_brackets_for_function = square_brackets_for_function;
-        }
-        self
-    }
-
     /// Set the open and close brackets used for function application.
     pub const fn function_brackets(mut self, function_brackets: (char, char)) -> Self {
         self.function_brackets = function_brackets;
@@ -474,14 +475,8 @@ impl PrintOptions {
     }
 
     /// Set the namespace to hide.
-    pub const fn hide_namespace(mut self, namespace: &'static str) -> Self {
-        self.hide_namespace = Some(namespace);
-        self
-    }
-
-    /// Set the optional namespace to hide.
-    pub const fn hide_namespace_option(mut self, hide_namespace: Option<&'static str>) -> Self {
-        self.hide_namespace = hide_namespace;
+    pub fn hide_namespace<T: Into<Cow<'static, str>>>(mut self, namespace: T) -> Self {
+        self.hide_namespace = Some(namespace.into());
         self
     }
 
@@ -506,15 +501,6 @@ impl PrintOptions {
     /// Set the maximum number of terms to print for a top-level sum.
     pub const fn max_terms(mut self, max_terms: Option<usize>) -> Self {
         self.max_terms = max_terms;
-        self
-    }
-
-    /// Set the custom print mode handle.
-    pub const fn custom_print_mode(
-        mut self,
-        custom_print_mode: Option<(&'static str, usize)>,
-    ) -> Self {
-        self.custom_print_mode = custom_print_mode;
         self
     }
 }
