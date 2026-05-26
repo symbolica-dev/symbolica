@@ -3,6 +3,7 @@
 //! All Symbolica community extensions must implement the [SymbolicaCommunityModule] trait.
 
 use std::{
+    borrow::Cow,
     fs::File,
     hash::{Hash, Hasher},
     io::{BufReader, BufWriter},
@@ -99,7 +100,10 @@ use crate::{
         gcd::PolynomialGCD, groebner::GroebnerBasis, polynomial::MultivariatePolynomial,
         series::Series,
     },
-    printer::{AtomPrinter, ColorMode, PrintMode, PrintOptions, PrintState},
+    printer::{
+        AtomPrinter, ColorMode, PrintMode, PrintOptions, PrintState, PrintUserData,
+        PrintUserDataKey,
+    },
     solve::SolveError,
     state::{RecycledAtom, State, Workspace},
     streaming::{TermStreamer, TermStreamerConfig},
@@ -111,20 +115,23 @@ use crate::{
 #[cfg(feature = "python_stubgen")]
 static NONE_ARG: fn() -> String = || "None".into();
 
-const DEFAULT_PRINT_OPTIONS: PrintOptions = PrintOptions {
-    hide_namespace: Some("python"),
-    ..PrintOptions::new()
-};
+static DEFAULT_PRINT_OPTIONS: std::sync::LazyLock<PrintOptions> =
+    std::sync::LazyLock::new(|| PrintOptions {
+        hide_namespace: Some(Cow::Borrowed("python")),
+        ..PrintOptions::new()
+    });
 
-const PLAIN_PRINT_OPTIONS: PrintOptions = PrintOptions {
-    hide_namespace: Some("python"),
-    ..PrintOptions::file()
-};
+static PLAIN_PRINT_OPTIONS: std::sync::LazyLock<PrintOptions> =
+    std::sync::LazyLock::new(|| PrintOptions {
+        hide_namespace: Some(Cow::Borrowed("python")),
+        ..PrintOptions::file()
+    });
 
-const LATEX_PRINT_OPTIONS: PrintOptions = PrintOptions {
-    hide_namespace: Some("python"),
-    ..PrintOptions::latex()
-};
+static LATEX_PRINT_OPTIONS: std::sync::LazyLock<PrintOptions> =
+    std::sync::LazyLock::new(|| PrintOptions {
+        hide_namespace: Some(Cow::Borrowed("python")),
+        ..PrintOptions::latex()
+    });
 
 mod atom;
 mod evaluator;
@@ -360,26 +367,112 @@ fn print_options_to_dict<'py>(
         "double_star_for_exponentiation",
         options.double_star_for_exponentiation,
     )?;
-    #[allow(deprecated)]
-    dict.set_item(
-        "square_brackets_for_function",
-        options.square_brackets_for_function,
-    )?;
     dict.set_item("function_brackets", options.function_brackets)?;
     dict.set_item("num_exp_as_superscript", options.num_exp_as_superscript)?;
     dict.set_item("precision", options.precision)?;
     dict.set_item("pretty_matrix", options.pretty_matrix)?;
-    dict.set_item("hide_namespace", options.hide_namespace)?;
+    dict.set_item("hide_namespace", options.hide_namespace.as_deref())?;
     dict.set_item("hide_all_namespaces", options.hide_all_namespaces)?;
     dict.set_item("color_namespace", options.color_namespace)?;
     dict.set_item("max_terms", options.max_terms)?;
-    dict.set_item("custom_print_mode", options.custom_print_mode.map(|x| x.1))?;
+    let custom_print_mode = PyDict::new(py);
+    for (name, value) in &options.custom_print_mode {
+        custom_print_mode.set_item(name, PythonBorrowedPrintUserData(value))?;
+    }
+    dict.set_item("custom_print_mode", custom_print_mode)?;
 
     dict.set_item("level", state.level)?;
     dict.set_item("bracket_level", state.bracket_level)?;
     dict.set_item("indentation_level", state.indentation_level)?;
 
     Ok(dict)
+}
+
+/// Represents user-defined data that can be used as a key in [PythonPrintUserData].
+#[derive(Clone, PartialEq, Eq, Hash)]
+pub struct PythonPrintUserDataKey(pub PrintUserDataKey);
+
+impl<'py> FromPyObject<'_, 'py> for PythonPrintUserDataKey {
+    type Error = PyErr;
+
+    fn extract(ob: Borrowed<'_, 'py, pyo3::PyAny>) -> PyResult<Self> {
+        if let Ok(num) = ob.extract::<i64>() {
+            Ok(PythonPrintUserDataKey(PrintUserDataKey::Integer(num)))
+        } else if let Ok(s) = ob.extract::<PyBackedStr>() {
+            Ok(PythonPrintUserDataKey(PrintUserDataKey::String(
+                s.to_string(),
+            )))
+        } else {
+            Err(exceptions::PyTypeError::new_err(
+                "Cannot convert to PrintUserDataKey",
+            ))
+        }
+    }
+}
+
+/// Represents user-defined data that can be attached to [PrintOptions] in Python.
+pub struct PythonPrintUserData(pub PrintUserData);
+
+#[cfg(feature = "python_stubgen")]
+impl_stub_type!(PythonPrintUserData = i64 | PyBackedStr | PyDict | PyList);
+
+impl<'py> FromPyObject<'_, 'py> for PythonPrintUserData {
+    type Error = PyErr;
+
+    fn extract(ob: Borrowed<'_, 'py, pyo3::PyAny>) -> PyResult<Self> {
+        if let Ok(num) = ob.extract::<i64>() {
+            Ok(PythonPrintUserData(PrintUserData::Integer(num)))
+        } else if let Ok(s) = ob.extract::<PyBackedStr>() {
+            Ok(PythonPrintUserData(PrintUserData::String(s.to_string())))
+        } else if let Ok(list) = ob.extract::<Vec<PythonPrintUserData>>() {
+            Ok(PythonPrintUserData(PrintUserData::List(
+                list.into_iter().map(|x| x.0).collect(),
+            )))
+        } else if let Ok(map) = ob.extract::<HashMap<PythonPrintUserDataKey, PythonPrintUserData>>()
+        {
+            Ok(PythonPrintUserData(PrintUserData::Map(
+                map.into_iter().map(|(k, v)| (k.0, v.0)).collect(),
+            )))
+        } else {
+            Err(exceptions::PyTypeError::new_err(
+                "Cannot convert to PrintUserData",
+            ))
+        }
+    }
+}
+
+pub(super) struct PythonBorrowedPrintUserData<'a>(pub(super) &'a PrintUserData);
+
+impl<'a, 'py> IntoPyObject<'py> for PythonBorrowedPrintUserData<'a> {
+    type Target = PyAny;
+    type Output = Bound<'py, Self::Target>;
+    type Error = PyErr;
+
+    fn into_pyobject(self, py: Python<'py>) -> Result<Self::Output, Self::Error> {
+        match self.0 {
+            PrintUserData::Integer(i) => i.into_bound_py_any(py),
+            PrintUserData::String(s) => s.into_bound_py_any(py),
+            PrintUserData::List(l) => {
+                let pl: Vec<PythonBorrowedPrintUserData> =
+                    l.iter().map(PythonBorrowedPrintUserData).collect();
+                pl.into_bound_py_any(py)
+            }
+            PrintUserData::Map(m) => {
+                let dict = PyDict::new(py);
+                for (key, value) in m {
+                    match key {
+                        PrintUserDataKey::Integer(i) => {
+                            dict.set_item(i, PythonBorrowedPrintUserData(value))?
+                        }
+                        PrintUserDataKey::String(s) => {
+                            dict.set_item(s, PythonBorrowedPrintUserData(value))?
+                        }
+                    }
+                }
+                dict.into_bound_py_any(py)
+            }
+        }
+    }
 }
 
 /// Set the Symbolica namespace for the calling module.
@@ -779,9 +872,7 @@ impl PythonEvalSpec {
                         Ok(f) => f,
                         Err(err) => {
                             error!("Python tagged eval callback for complex f64 failed: {err}");
-                            return Box::new(|_: &[Complex<f64>]| {
-                                Complex::new(f64::NAN, f64::NAN)
-                            });
+                            return Box::new(|_: &[Complex<f64>]| Complex::new(f64::NAN, f64::NAN));
                         }
                     };
                     Box::new(move |args: &[Complex<f64>]| {

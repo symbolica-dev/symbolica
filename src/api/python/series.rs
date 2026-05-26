@@ -150,13 +150,13 @@ impl PythonSeries {
     pub fn __repr__(&self) -> PyResult<String> {
         Ok(self
             .series
-            .format_string(&PLAIN_PRINT_OPTIONS, PrintState::new()))
+            .format_string(&*PLAIN_PRINT_OPTIONS, PrintState::new()))
     }
 
     pub fn __str__(&self) -> PyResult<String> {
         Ok(self
             .series
-            .format_string(&DEFAULT_PRINT_OPTIONS, PrintState::new()))
+            .format_string(&*DEFAULT_PRINT_OPTIONS, PrintState::new()))
     }
 
     /// Convert the series into a LaTeX string.
@@ -164,7 +164,7 @@ impl PythonSeries {
         Ok(format!(
             "$${}$$",
             self.series
-                .format_string(&LATEX_PRINT_OPTIONS, PrintState::new())
+                .format_string(&*LATEX_PRINT_OPTIONS, PrintState::new())
         ))
     }
 
@@ -191,7 +191,6 @@ impl PythonSeries {
             number_thousands_separator = None,
             multiplication_operator = '·',
             double_star_for_exponentiation = false,
-            square_brackets_for_function = false,
             function_brackets = ('(',')'),
             num_exp_as_superscript = true,
             precision = None,
@@ -217,7 +216,6 @@ impl PythonSeries {
         number_thousands_separator: Option<char>,
         multiplication_operator: char,
         double_star_for_exponentiation: bool,
-        square_brackets_for_function: bool,
         function_brackets: (char, char),
         num_exp_as_superscript: bool,
         precision: Option<usize>,
@@ -225,7 +223,7 @@ impl PythonSeries {
         hide_namespace: Option<&str>,
         include_attributes: bool,
         max_terms: Option<usize>,
-        custom_print_mode: Option<usize>,
+        custom_print_mode: Option<HashMap<String, PythonPrintUserData>>,
     ) -> PyResult<String> {
         Ok(self
             .series
@@ -245,8 +243,6 @@ impl PythonSeries {
                     number_thousands_separator,
                     multiplication_operator,
                     double_star_for_exponentiation,
-                    #[allow(deprecated)]
-                    square_brackets_for_function,
                     function_brackets,
                     num_exp_as_superscript,
                     mode: mode.into(),
@@ -255,13 +251,15 @@ impl PythonSeries {
                     hide_all_namespaces: !show_namespaces,
                     color_namespace: true,
                     hide_namespace: if show_namespaces {
-                        hide_namespace.map(intern_string)
+                        hide_namespace.map(|x| std::borrow::Cow::Owned(x.to_owned()))
                     } else {
                         None
                     },
                     include_attributes,
                     max_terms,
-                    custom_print_mode: custom_print_mode.map(|x| ("default", x)),
+                    custom_print_mode: custom_print_mode
+                        .map(|m| m.into_iter().map(|(k, v)| (k, v.0)).collect())
+                        .unwrap_or_default(),
                 },
                 PrintState::new(),
             )

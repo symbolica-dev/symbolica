@@ -120,7 +120,6 @@ impl PythonPolynomial {
             number_thousands_separator = None,
             multiplication_operator = '·',
             double_star_for_exponentiation = false,
-            square_brackets_for_function = false,
             function_brackets = ('(',')'),
             num_exp_as_superscript = true,
             precision = None,
@@ -146,7 +145,6 @@ impl PythonPolynomial {
         number_thousands_separator: Option<char>,
         multiplication_operator: char,
         double_star_for_exponentiation: bool,
-        square_brackets_for_function: bool,
         function_brackets: (char, char),
         num_exp_as_superscript: bool,
         precision: Option<usize>,
@@ -154,7 +152,7 @@ impl PythonPolynomial {
         hide_namespace: Option<&str>,
         include_attributes: bool,
         max_terms: Option<usize>,
-        custom_print_mode: Option<usize>,
+        custom_print_mode: Option<HashMap<String, PythonPrintUserData>>,
     ) -> PyResult<String> {
         Ok(self.poly.format_string(
             &PrintOptions {
@@ -172,8 +170,6 @@ impl PythonPolynomial {
                 number_thousands_separator,
                 multiplication_operator,
                 double_star_for_exponentiation,
-                #[allow(deprecated)]
-                square_brackets_for_function,
                 function_brackets,
                 num_exp_as_superscript,
                 mode: mode.into(),
@@ -182,13 +178,15 @@ impl PythonPolynomial {
                 hide_all_namespaces: !show_namespaces,
                 color_namespace: true,
                 hide_namespace: if show_namespaces {
-                    hide_namespace.map(intern_string)
+                    hide_namespace.map(|x| std::borrow::Cow::Owned(x.to_owned()))
                 } else {
                     None
                 },
                 include_attributes,
                 max_terms,
-                custom_print_mode: custom_print_mode.map(|x| ("default", x)),
+                custom_print_mode: custom_print_mode
+                    .map(|m| m.into_iter().map(|(k, v)| (k, v.0)).collect())
+                    .unwrap_or_default(),
             },
             PrintState::new(),
         ))
@@ -198,14 +196,14 @@ impl PythonPolynomial {
     pub fn __repr__(&self) -> PyResult<String> {
         Ok(self
             .poly
-            .format_string(&PLAIN_PRINT_OPTIONS, PrintState::new()))
+            .format_string(&*PLAIN_PRINT_OPTIONS, PrintState::new()))
     }
 
     /// Print the polynomial in a human-readable format.
     pub fn __str__(&self) -> PyResult<String> {
         Ok(self
             .poly
-            .format_string(&DEFAULT_PRINT_OPTIONS, PrintState::new()))
+            .format_string(&*DEFAULT_PRINT_OPTIONS, PrintState::new()))
     }
 
     pub fn __pow__(&self, exponent: usize, modulo: Option<i64>) -> PyResult<PythonPolynomial> {
@@ -225,7 +223,7 @@ impl PythonPolynomial {
         Ok(format!(
             "$${}$$",
             self.poly
-                .format_string(&LATEX_PRINT_OPTIONS, PrintState::new())
+                .format_string(&*LATEX_PRINT_OPTIONS, PrintState::new())
         ))
     }
 
@@ -1453,7 +1451,6 @@ impl PythonFiniteFieldPolynomial {
             number_thousands_separator = None,
             multiplication_operator = '·',
             double_star_for_exponentiation = false,
-            square_brackets_for_function = false,
             function_brackets = ('(',')'),
             num_exp_as_superscript = true,
             precision = None,
@@ -1479,7 +1476,6 @@ impl PythonFiniteFieldPolynomial {
         number_thousands_separator: Option<char>,
         multiplication_operator: char,
         double_star_for_exponentiation: bool,
-        square_brackets_for_function: bool,
         function_brackets: (char, char),
         num_exp_as_superscript: bool,
         precision: Option<usize>,
@@ -1487,7 +1483,7 @@ impl PythonFiniteFieldPolynomial {
         hide_namespace: Option<&str>,
         include_attributes: bool,
         max_terms: Option<usize>,
-        custom_print_mode: Option<usize>,
+        custom_print_mode: Option<HashMap<String, PythonPrintUserData>>,
     ) -> PyResult<String> {
         Ok(self.poly.format_string(
             &PrintOptions {
@@ -1505,8 +1501,6 @@ impl PythonFiniteFieldPolynomial {
                 number_thousands_separator,
                 multiplication_operator,
                 double_star_for_exponentiation,
-                #[allow(deprecated)]
-                square_brackets_for_function,
                 function_brackets,
                 num_exp_as_superscript,
                 mode: mode.into(),
@@ -1515,13 +1509,15 @@ impl PythonFiniteFieldPolynomial {
                 hide_all_namespaces: !show_namespaces,
                 color_namespace: true,
                 hide_namespace: if show_namespaces {
-                    hide_namespace.map(intern_string)
+                    hide_namespace.map(|x| std::borrow::Cow::Owned(x.to_owned()))
                 } else {
                     None
                 },
                 include_attributes,
                 max_terms,
-                custom_print_mode: custom_print_mode.map(|x| ("default", x)),
+                custom_print_mode: custom_print_mode
+                    .map(|m| m.into_iter().map(|(k, v)| (k, v.0)).collect())
+                    .unwrap_or_default(),
             },
             PrintState::new(),
         ))
@@ -1531,14 +1527,14 @@ impl PythonFiniteFieldPolynomial {
     pub fn __repr__(&self) -> PyResult<String> {
         Ok(self
             .poly
-            .format_string(&PLAIN_PRINT_OPTIONS, PrintState::new()))
+            .format_string(&*PLAIN_PRINT_OPTIONS, PrintState::new()))
     }
 
     /// Print the polynomial in a human-readable format.
     pub fn __str__(&self) -> PyResult<String> {
         Ok(self
             .poly
-            .format_string(&DEFAULT_PRINT_OPTIONS, PrintState::new()))
+            .format_string(&*DEFAULT_PRINT_OPTIONS, PrintState::new()))
     }
 
     pub fn __pow__(
@@ -1562,7 +1558,7 @@ impl PythonFiniteFieldPolynomial {
         Ok(format!(
             "$${}$$",
             self.poly
-                .format_string(&LATEX_PRINT_OPTIONS, PrintState::new())
+                .format_string(&*LATEX_PRINT_OPTIONS, PrintState::new())
         ))
     }
 
@@ -2559,7 +2555,6 @@ impl PythonPrimeTwoPolynomial {
             number_thousands_separator = None,
             multiplication_operator = '·',
             double_star_for_exponentiation = false,
-            square_brackets_for_function = false,
             function_brackets = ('(',')'),
             num_exp_as_superscript = true,
             precision = None,
@@ -2585,7 +2580,6 @@ impl PythonPrimeTwoPolynomial {
         number_thousands_separator: Option<char>,
         multiplication_operator: char,
         double_star_for_exponentiation: bool,
-        square_brackets_for_function: bool,
         function_brackets: (char, char),
         num_exp_as_superscript: bool,
         precision: Option<usize>,
@@ -2593,7 +2587,7 @@ impl PythonPrimeTwoPolynomial {
         hide_namespace: Option<&str>,
         include_attributes: bool,
         max_terms: Option<usize>,
-        custom_print_mode: Option<usize>,
+        custom_print_mode: Option<HashMap<String, PythonPrintUserData>>,
     ) -> PyResult<String> {
         Ok(self.poly.format_string(
             &PrintOptions {
@@ -2611,8 +2605,6 @@ impl PythonPrimeTwoPolynomial {
                 number_thousands_separator,
                 multiplication_operator,
                 double_star_for_exponentiation,
-                #[allow(deprecated)]
-                square_brackets_for_function,
                 function_brackets,
                 num_exp_as_superscript,
                 mode: mode.into(),
@@ -2621,13 +2613,15 @@ impl PythonPrimeTwoPolynomial {
                 hide_all_namespaces: !show_namespaces,
                 color_namespace: true,
                 hide_namespace: if show_namespaces {
-                    hide_namespace.map(intern_string)
+                    hide_namespace.map(|x| std::borrow::Cow::Owned(x.to_owned()))
                 } else {
                     None
                 },
                 include_attributes,
                 max_terms,
-                custom_print_mode: custom_print_mode.map(|x| ("default", x)),
+                custom_print_mode: custom_print_mode
+                    .map(|m| m.into_iter().map(|(k, v)| (k, v.0)).collect())
+                    .unwrap_or_default(),
             },
             PrintState::new(),
         ))
@@ -2637,14 +2631,14 @@ impl PythonPrimeTwoPolynomial {
     pub fn __repr__(&self) -> PyResult<String> {
         Ok(self
             .poly
-            .format_string(&PLAIN_PRINT_OPTIONS, PrintState::new()))
+            .format_string(&*PLAIN_PRINT_OPTIONS, PrintState::new()))
     }
 
     /// Print the polynomial in a human-readable format.
     pub fn __str__(&self) -> PyResult<String> {
         Ok(self
             .poly
-            .format_string(&DEFAULT_PRINT_OPTIONS, PrintState::new()))
+            .format_string(&*DEFAULT_PRINT_OPTIONS, PrintState::new()))
     }
 
     pub fn __pow__(
@@ -2668,7 +2662,7 @@ impl PythonPrimeTwoPolynomial {
         Ok(format!(
             "$${}$$",
             self.poly
-                .format_string(&LATEX_PRINT_OPTIONS, PrintState::new())
+                .format_string(&*LATEX_PRINT_OPTIONS, PrintState::new())
         ))
     }
 
@@ -3439,7 +3433,6 @@ impl PythonGaloisFieldPrimeTwoPolynomial {
             number_thousands_separator = None,
             multiplication_operator = '·',
             double_star_for_exponentiation = false,
-            square_brackets_for_function = false,
             function_brackets = ('(',')'),
             num_exp_as_superscript = true,
             precision = None,
@@ -3465,7 +3458,6 @@ impl PythonGaloisFieldPrimeTwoPolynomial {
         number_thousands_separator: Option<char>,
         multiplication_operator: char,
         double_star_for_exponentiation: bool,
-        square_brackets_for_function: bool,
         function_brackets: (char, char),
         num_exp_as_superscript: bool,
         precision: Option<usize>,
@@ -3473,7 +3465,7 @@ impl PythonGaloisFieldPrimeTwoPolynomial {
         hide_namespace: Option<&str>,
         include_attributes: bool,
         max_terms: Option<usize>,
-        custom_print_mode: Option<usize>,
+        custom_print_mode: Option<HashMap<String, PythonPrintUserData>>,
     ) -> PyResult<String> {
         Ok(self.poly.format_string(
             &PrintOptions {
@@ -3491,8 +3483,6 @@ impl PythonGaloisFieldPrimeTwoPolynomial {
                 number_thousands_separator,
                 multiplication_operator,
                 double_star_for_exponentiation,
-                #[allow(deprecated)]
-                square_brackets_for_function,
                 function_brackets,
                 num_exp_as_superscript,
                 mode: mode.into(),
@@ -3501,13 +3491,15 @@ impl PythonGaloisFieldPrimeTwoPolynomial {
                 hide_all_namespaces: !show_namespaces,
                 color_namespace: true,
                 hide_namespace: if show_namespaces {
-                    hide_namespace.map(intern_string)
+                    hide_namespace.map(|x| std::borrow::Cow::Owned(x.to_owned()))
                 } else {
                     None
                 },
                 include_attributes,
                 max_terms,
-                custom_print_mode: custom_print_mode.map(|x| ("default", x)),
+                custom_print_mode: custom_print_mode
+                    .map(|m| m.into_iter().map(|(k, v)| (k, v.0)).collect())
+                    .unwrap_or_default(),
             },
             PrintState::new(),
         ))
@@ -3517,14 +3509,14 @@ impl PythonGaloisFieldPrimeTwoPolynomial {
     pub fn __repr__(&self) -> PyResult<String> {
         Ok(self
             .poly
-            .format_string(&PLAIN_PRINT_OPTIONS, PrintState::new()))
+            .format_string(&*PLAIN_PRINT_OPTIONS, PrintState::new()))
     }
 
     /// Print the polynomial in a human-readable format.
     pub fn __str__(&self) -> PyResult<String> {
         Ok(self
             .poly
-            .format_string(&DEFAULT_PRINT_OPTIONS, PrintState::new()))
+            .format_string(&*DEFAULT_PRINT_OPTIONS, PrintState::new()))
     }
 
     pub fn __pow__(
@@ -3548,7 +3540,7 @@ impl PythonGaloisFieldPrimeTwoPolynomial {
         Ok(format!(
             "$${}$$",
             self.poly
-                .format_string(&LATEX_PRINT_OPTIONS, PrintState::new())
+                .format_string(&*LATEX_PRINT_OPTIONS, PrintState::new())
         ))
     }
 
@@ -4421,7 +4413,6 @@ impl PythonGaloisFieldPolynomial {
             number_thousands_separator = None,
             multiplication_operator = '·',
             double_star_for_exponentiation = false,
-            square_brackets_for_function = false,
             function_brackets = ('(',')'),
             num_exp_as_superscript = true,
             precision = None,
@@ -4447,7 +4438,6 @@ impl PythonGaloisFieldPolynomial {
         number_thousands_separator: Option<char>,
         multiplication_operator: char,
         double_star_for_exponentiation: bool,
-        square_brackets_for_function: bool,
         function_brackets: (char, char),
         num_exp_as_superscript: bool,
         precision: Option<usize>,
@@ -4455,7 +4445,7 @@ impl PythonGaloisFieldPolynomial {
         hide_namespace: Option<&str>,
         include_attributes: bool,
         max_terms: Option<usize>,
-        custom_print_mode: Option<usize>,
+        custom_print_mode: Option<HashMap<String, PythonPrintUserData>>,
     ) -> PyResult<String> {
         Ok(self.poly.format_string(
             &PrintOptions {
@@ -4473,8 +4463,6 @@ impl PythonGaloisFieldPolynomial {
                 number_thousands_separator,
                 multiplication_operator,
                 double_star_for_exponentiation,
-                #[allow(deprecated)]
-                square_brackets_for_function,
                 function_brackets,
                 num_exp_as_superscript,
                 mode: mode.into(),
@@ -4483,13 +4471,15 @@ impl PythonGaloisFieldPolynomial {
                 hide_all_namespaces: !show_namespaces,
                 color_namespace: true,
                 hide_namespace: if show_namespaces {
-                    hide_namespace.map(intern_string)
+                    hide_namespace.map(|x| std::borrow::Cow::Owned(x.to_owned()))
                 } else {
                     None
                 },
                 include_attributes,
                 max_terms,
-                custom_print_mode: custom_print_mode.map(|x| ("default", x)),
+                custom_print_mode: custom_print_mode
+                    .map(|m| m.into_iter().map(|(k, v)| (k, v.0)).collect())
+                    .unwrap_or_default(),
             },
             PrintState::new(),
         ))
@@ -4499,14 +4489,14 @@ impl PythonGaloisFieldPolynomial {
     pub fn __repr__(&self) -> PyResult<String> {
         Ok(self
             .poly
-            .format_string(&PLAIN_PRINT_OPTIONS, PrintState::new()))
+            .format_string(&*PLAIN_PRINT_OPTIONS, PrintState::new()))
     }
 
     /// Print the polynomial in a human-readable format.
     pub fn __str__(&self) -> PyResult<String> {
         Ok(self
             .poly
-            .format_string(&DEFAULT_PRINT_OPTIONS, PrintState::new()))
+            .format_string(&*DEFAULT_PRINT_OPTIONS, PrintState::new()))
     }
 
     pub fn __pow__(
@@ -4530,7 +4520,7 @@ impl PythonGaloisFieldPolynomial {
         Ok(format!(
             "$${}$$",
             self.poly
-                .format_string(&LATEX_PRINT_OPTIONS, PrintState::new())
+                .format_string(&*LATEX_PRINT_OPTIONS, PrintState::new())
         ))
     }
 
@@ -5349,7 +5339,6 @@ impl PythonNumberFieldPolynomial {
             number_thousands_separator = None,
             multiplication_operator = '·',
             double_star_for_exponentiation = false,
-            square_brackets_for_function = false,
             function_brackets = ('(',')'),
             num_exp_as_superscript = true,
             precision = None,
@@ -5375,7 +5364,6 @@ impl PythonNumberFieldPolynomial {
         number_thousands_separator: Option<char>,
         multiplication_operator: char,
         double_star_for_exponentiation: bool,
-        square_brackets_for_function: bool,
         function_brackets: (char, char),
         num_exp_as_superscript: bool,
         precision: Option<usize>,
@@ -5383,7 +5371,7 @@ impl PythonNumberFieldPolynomial {
         hide_namespace: Option<&str>,
         include_attributes: bool,
         max_terms: Option<usize>,
-        custom_print_mode: Option<usize>,
+        custom_print_mode: Option<HashMap<String, PythonPrintUserData>>,
     ) -> PyResult<String> {
         Ok(self.poly.format_string(
             &PrintOptions {
@@ -5401,8 +5389,6 @@ impl PythonNumberFieldPolynomial {
                 number_thousands_separator,
                 multiplication_operator,
                 double_star_for_exponentiation,
-                #[allow(deprecated)]
-                square_brackets_for_function,
                 function_brackets,
                 num_exp_as_superscript,
                 mode: mode.into(),
@@ -5411,13 +5397,15 @@ impl PythonNumberFieldPolynomial {
                 hide_all_namespaces: !show_namespaces,
                 color_namespace: true,
                 hide_namespace: if show_namespaces {
-                    hide_namespace.map(intern_string)
+                    hide_namespace.map(|x| std::borrow::Cow::Owned(x.to_owned()))
                 } else {
                     None
                 },
                 include_attributes,
                 max_terms,
-                custom_print_mode: custom_print_mode.map(|x| ("default", x)),
+                custom_print_mode: custom_print_mode
+                    .map(|m| m.into_iter().map(|(k, v)| (k, v.0)).collect())
+                    .unwrap_or_default(),
             },
             PrintState::new(),
         ))
@@ -5427,14 +5415,14 @@ impl PythonNumberFieldPolynomial {
     pub fn __repr__(&self) -> PyResult<String> {
         Ok(self
             .poly
-            .format_string(&PLAIN_PRINT_OPTIONS, PrintState::new()))
+            .format_string(&*PLAIN_PRINT_OPTIONS, PrintState::new()))
     }
 
     /// Print the polynomial in a human-readable format.
     pub fn __str__(&self) -> PyResult<String> {
         Ok(self
             .poly
-            .format_string(&DEFAULT_PRINT_OPTIONS, PrintState::new()))
+            .format_string(&*DEFAULT_PRINT_OPTIONS, PrintState::new()))
     }
 
     pub fn __pow__(
@@ -5458,7 +5446,7 @@ impl PythonNumberFieldPolynomial {
         Ok(format!(
             "$${}$$",
             self.poly
-                .format_string(&LATEX_PRINT_OPTIONS, PrintState::new())
+                .format_string(&*LATEX_PRINT_OPTIONS, PrintState::new())
         ))
     }
 
@@ -6271,14 +6259,14 @@ impl PythonRationalPolynomial {
     pub fn __repr__(&self) -> PyResult<String> {
         Ok(self
             .poly
-            .format_string(&PLAIN_PRINT_OPTIONS, PrintState::new()))
+            .format_string(&*PLAIN_PRINT_OPTIONS, PrintState::new()))
     }
 
     /// Print the rational polynomial in a human-readable format.
     pub fn __str__(&self) -> PyResult<String> {
         Ok(self
             .poly
-            .format_string(&DEFAULT_PRINT_OPTIONS, PrintState::new()))
+            .format_string(&*DEFAULT_PRINT_OPTIONS, PrintState::new()))
     }
 
     /// Convert the rational polynomial into a LaTeX string.
@@ -6286,7 +6274,7 @@ impl PythonRationalPolynomial {
         Ok(format!(
             "$${}$$",
             self.poly
-                .format_string(&LATEX_PRINT_OPTIONS, PrintState::new())
+                .format_string(&*LATEX_PRINT_OPTIONS, PrintState::new())
         ))
     }
 
@@ -6652,14 +6640,14 @@ impl PythonFiniteFieldRationalPolynomial {
     pub fn __repr__(&self) -> PyResult<String> {
         Ok(self
             .poly
-            .format_string(&PLAIN_PRINT_OPTIONS, PrintState::new()))
+            .format_string(&*PLAIN_PRINT_OPTIONS, PrintState::new()))
     }
 
     /// Print the rational polynomial in a human-readable format.
     pub fn __str__(&self) -> PyResult<String> {
         Ok(self
             .poly
-            .format_string(&DEFAULT_PRINT_OPTIONS, PrintState::new()))
+            .format_string(&*DEFAULT_PRINT_OPTIONS, PrintState::new()))
     }
 
     /// Convert the rational polynomial into a LaTeX string.
@@ -6667,7 +6655,7 @@ impl PythonFiniteFieldRationalPolynomial {
         Ok(format!(
             "$${}$$",
             self.poly
-                .format_string(&LATEX_PRINT_OPTIONS, PrintState::new())
+                .format_string(&*LATEX_PRINT_OPTIONS, PrintState::new())
         ))
     }
 
