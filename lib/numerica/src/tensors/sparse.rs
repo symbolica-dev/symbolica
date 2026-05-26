@@ -201,6 +201,32 @@ pub enum SparseMatrixError<F: Ring> {
     Singular,
 }
 
+impl<F: Ring> std::error::Error for SparseMatrixError<F> {}
+
+impl<F: Ring> std::fmt::Display for SparseMatrixError<F> {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            SparseMatrixError::ShapeMismatch => {
+                write!(f, "The shape of the matrix is not compatible")
+            }
+            SparseMatrixError::FieldMismatch => write!(f, "The fields of the arguments differ"),
+            SparseMatrixError::Inconsistent => write!(f, "The system is inconsistent"),
+            SparseMatrixError::NotSquare => write!(f, "The matrix is not square"),
+            SparseMatrixError::Underdetermined {
+                rank,
+                row_reduced_augmented_matrix,
+            } => {
+                writeln!(f, "The system is underdetermined with rank {rank}")?;
+                writeln!(
+                    f,
+                    "\nRow reduced augmented matrix:\n{row_reduced_augmented_matrix}"
+                )
+            }
+            SparseMatrixError::Singular => write!(f, "The matrix is singular"),
+        }
+    }
+}
+
 /// A sparse matrix in compressed sparse row (CSR) format.
 ///
 /// We keep each row sorted at all times.
@@ -699,7 +725,7 @@ impl<F: Ring> SparseMatrix<F> {
     /// Extract the last column of the matrix, sorted by the corresponding pivot column.
     ///
     /// # Arguments
-    /// * `pivots` - The pivot positions for each column, i.e. there is a pivot on column j and row pivots[j].
+    /// * `pivots` - The pivot positions for each column, i.e. there is a pivot on column `j` and `row pivots[j]`.
     pub fn last_column_by_pivot(self, pivots: &Vec<Option<u32>>) -> SparseVector<F> {
         let mut values = self.values;
         let mut ret = SparseVector::new(self.nrows, self.field.clone());
@@ -818,7 +844,7 @@ impl<F: Ring> SparseMatrix<F> {
     /// Sorts the rows of the matrix by their pivot column.
     ///
     /// # Arguments
-    /// * `pivots` - The pivot positions for each column, i.e. there is a pivot on column j and row pivots[j].
+    /// * `pivots` - The pivot positions for each column, i.e. there is a pivot on column `j` and row `pivots[j]`.
     pub fn sort_rows_by_pivot(&mut self, pivots: &Vec<Option<u32>>) {
         let mut new_values = Vec::with_capacity(self.values.len());
         let mut new_col_idcs = Vec::with_capacity(self.col_idcs.len());
@@ -1374,7 +1400,7 @@ unsafe impl<F: Field + Sync + Send> Sync for GpluScratch<F> where F::Element: Sy
 ///
 /// I.e. for a given matrix A we compute L*U = A, where U is upper triangular up to row permutations and L is lower triangular.
 /// One may submit a whole system and run the reduction, but one may also choose to submit row by row which is then immediately processed
-/// according to the GPLU algorithm, see [https://www-almasty.lip6.fr/~bouillaguet/static/publis/CASC16.pdf].
+/// according to the GPLU algorithm, see [here](https://www-almasty.lip6.fr/~bouillaguet/static/publis/CASC16.pdf).
 /// The algorithm is adapted from the SpaSM library, it is essentially a rewrite of the function spasm_LU in commit 965089a of SpaSM.
 /// After the LU decomposition, a backsubstitution can be applied to U in order to obtain a RREF form of A (up to row permutations).
 ///
@@ -1508,7 +1534,7 @@ impl<F: Field> Gplu<F> {
     }
 
     /// Return the pivot positions of U for each column.
-    /// I.e. there is a pivot on column j and row pivots()[j]. No pivot present if None.
+    /// I.e. there is a pivot on column `j` and row `pivots()[j]`. No pivot present if `None`.
     pub fn pivots(&self) -> &Vec<Option<u32>> {
         &self.pivots
     }

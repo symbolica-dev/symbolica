@@ -1,5 +1,9 @@
 //! Methods for printing rings.
 
+use std::borrow::Cow;
+
+use ahash::HashMap;
+
 /// The overall print mode.
 #[derive(Debug, Copy, Clone, PartialEq, Eq)]
 #[non_exhaustive]
@@ -35,8 +39,42 @@ impl PrintMode {
     }
 }
 
+/// Controls when print output should contain color/style escape codes.
+#[derive(Debug, Copy, Clone, PartialEq, Eq, Default)]
+pub enum ColorMode {
+    /// Colorize only when the output target supports it.
+    #[default]
+    Auto,
+    /// Always emit color/style escape codes.
+    Always,
+    /// Never emit color/style escape codes.
+    Never,
+}
+
+/// Represents user-defined data that can be used as a key in [PrintUserData].
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
+pub enum PrintUserDataKey {
+    /// A small integer value.
+    Integer(i64),
+    /// A string value.
+    String(String),
+}
+
+/// Represents user-defined data that can be attached to [PrintOptions].
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum PrintUserData {
+    /// A small integer value.
+    Integer(i64),
+    /// A string value.
+    String(String),
+    /// A list of extended symbol data.
+    List(Vec<PrintUserData>),
+    /// A map from extended symbol data to extended symbol data.
+    Map(HashMap<PrintUserDataKey, PrintUserData>),
+}
+
 /// Various options for printing expressions.
-#[derive(Debug, Copy, Clone)]
+#[derive(Debug, Clone)]
 pub struct PrintOptions {
     /// The overall print mode.
     pub mode: PrintMode,
@@ -49,6 +87,8 @@ pub struct PrintOptions {
     pub fill_indented_lines: bool,
     /// Whether to put each term of a top-level sum on a new line.
     pub terms_on_new_line: bool,
+    /// Whether color/style escape codes should be emitted.
+    pub color_mode: ColorMode,
     /// Whether to color the top-level `+` and `-`.
     pub color_top_level_sum: bool,
     /// Whether to color built-in symbols.
@@ -67,8 +107,6 @@ pub struct PrintOptions {
     pub multiplication_operator: char,
     /// Whether to use `**` for exponentiation (e.g. for sympy) instead of `^`.
     pub double_star_for_exponentiation: bool,
-    #[deprecated(note = "Use function_brackets instead")]
-    pub square_brackets_for_function: bool,
     /// The open and close brackets to use for function application.
     pub function_brackets: (char, char),
     /// Whether to print the exponent of numbers as a superscript.
@@ -78,7 +116,7 @@ pub struct PrintOptions {
     /// Whether to print matrices in a tabular format (e.g. with newlines and indentation).
     pub pretty_matrix: bool,
     /// The namespace to hide when printing. If None, no namespace is hidden.
-    pub hide_namespace: Option<&'static str>,
+    pub hide_namespace: Option<Cow<'static, str>>,
     /// Whether to hide all namespaces when printing.
     pub hide_all_namespaces: bool,
     /// Print attribute and tags
@@ -89,16 +127,17 @@ pub struct PrintOptions {
     pub max_terms: Option<usize>,
     /// Provides a handle to set the behavior of the custom print function.
     /// Symbolica does not use this option for its own printing.
-    pub custom_print_mode: Option<(&'static str, usize)>,
+    pub custom_print_mode: HashMap<String, PrintUserData>,
 }
 
 impl PrintOptions {
-    pub const fn new() -> Self {
+    pub fn new() -> Self {
         Self {
             max_line_length: None,
             indentation: 4,
             fill_indented_lines: true,
             terms_on_new_line: false,
+            color_mode: ColorMode::Auto,
             color_top_level_sum: true,
             color_builtin_symbols: true,
             bracket_level_colors: Some([
@@ -110,8 +149,6 @@ impl PrintOptions {
             number_thousands_separator: None,
             multiplication_operator: '*',
             double_star_for_exponentiation: false,
-            #[allow(deprecated)]
-            square_brackets_for_function: false,
             function_brackets: ('(', ')'),
             num_exp_as_superscript: false,
             mode: PrintMode::Symbolica,
@@ -122,17 +159,18 @@ impl PrintOptions {
             include_attributes: false,
             color_namespace: true,
             max_terms: None,
-            custom_print_mode: None,
+            custom_print_mode: HashMap::default(),
         }
     }
 
     /// Print the output in a Mathematica-readable format.
-    pub const fn mathematica() -> PrintOptions {
+    pub fn mathematica() -> PrintOptions {
         Self {
             max_line_length: None,
             indentation: 4,
             fill_indented_lines: true,
             terms_on_new_line: false,
+            color_mode: ColorMode::Never,
             color_top_level_sum: false,
             color_builtin_symbols: false,
             print_ring: true,
@@ -141,30 +179,29 @@ impl PrintOptions {
             number_thousands_separator: None,
             multiplication_operator: ' ',
             double_star_for_exponentiation: false,
-            #[allow(deprecated)]
-            square_brackets_for_function: true,
             function_brackets: ('[', ']'),
             num_exp_as_superscript: false,
             mode: PrintMode::Mathematica,
             precision: None,
             pretty_matrix: false,
-            hide_namespace: Some("symbolica"),
+            hide_namespace: Some(Cow::Borrowed("symbolica")),
             hide_all_namespaces: false,
             include_attributes: false,
             color_namespace: false,
             max_terms: None,
             bracket_level_colors: None,
-            custom_print_mode: None,
+            custom_print_mode: HashMap::default(),
         }
     }
 
     /// Print the output in a Latex input format.
-    pub const fn latex() -> PrintOptions {
+    pub fn latex() -> PrintOptions {
         Self {
             max_line_length: None,
             indentation: 4,
             fill_indented_lines: true,
             terms_on_new_line: false,
+            color_mode: ColorMode::Never,
             color_top_level_sum: false,
             color_builtin_symbols: false,
             print_ring: true,
@@ -173,8 +210,6 @@ impl PrintOptions {
             number_thousands_separator: None,
             multiplication_operator: ' ',
             double_star_for_exponentiation: false,
-            #[allow(deprecated)]
-            square_brackets_for_function: false,
             function_brackets: ('(', ')'),
             num_exp_as_superscript: false,
             mode: PrintMode::Latex,
@@ -186,17 +221,18 @@ impl PrintOptions {
             color_namespace: false,
             max_terms: None,
             bracket_level_colors: None,
-            custom_print_mode: None,
+            custom_print_mode: HashMap::default(),
         }
     }
 
     /// Print the output in a Typst-readable format.
-    pub const fn typst() -> PrintOptions {
+    pub fn typst() -> PrintOptions {
         Self {
             max_line_length: None,
             indentation: 4,
             fill_indented_lines: true,
             terms_on_new_line: false,
+            color_mode: ColorMode::Never,
             color_top_level_sum: false,
             color_builtin_symbols: false,
             print_ring: true,
@@ -205,8 +241,6 @@ impl PrintOptions {
             number_thousands_separator: None,
             multiplication_operator: ' ',
             double_star_for_exponentiation: false,
-            #[allow(deprecated)]
-            square_brackets_for_function: false,
             function_brackets: ('(', ')'),
             num_exp_as_superscript: false,
             mode: PrintMode::Typst,
@@ -218,17 +252,18 @@ impl PrintOptions {
             color_namespace: false,
             max_terms: None,
             bracket_level_colors: None,
-            custom_print_mode: None,
+            custom_print_mode: HashMap::default(),
         }
     }
 
     /// Print the output suitable for a file.
-    pub const fn file() -> PrintOptions {
+    pub fn file() -> PrintOptions {
         Self {
             max_line_length: None,
             indentation: 4,
             fill_indented_lines: true,
             terms_on_new_line: false,
+            color_mode: ColorMode::Never,
             color_top_level_sum: false,
             color_builtin_symbols: false,
             print_ring: false,
@@ -237,8 +272,6 @@ impl PrintOptions {
             number_thousands_separator: None,
             multiplication_operator: '*',
             double_star_for_exponentiation: false,
-            #[allow(deprecated)]
-            square_brackets_for_function: false,
             function_brackets: ('(', ')'),
             num_exp_as_superscript: false,
             mode: PrintMode::Symbolica,
@@ -250,12 +283,12 @@ impl PrintOptions {
             color_namespace: false,
             max_terms: None,
             bracket_level_colors: None,
-            custom_print_mode: None,
+            custom_print_mode: HashMap::default(),
         }
     }
 
     /// Print the output suitable for a file without namespaces.
-    pub const fn file_no_namespace() -> PrintOptions {
+    pub fn file_no_namespace() -> PrintOptions {
         Self {
             hide_all_namespaces: true,
             ..Self::file()
@@ -264,7 +297,7 @@ impl PrintOptions {
 
     /// Print the output suitable for a file with namespaces
     /// and attributes and tags.
-    pub const fn full() -> PrintOptions {
+    pub fn full() -> PrintOptions {
         Self {
             include_attributes: true,
             ..Self::file()
@@ -272,7 +305,7 @@ impl PrintOptions {
     }
 
     /// Print the output with namespaces suppressed.
-    pub const fn short() -> PrintOptions {
+    pub fn short() -> PrintOptions {
         Self {
             hide_all_namespaces: true,
             ..Self::new()
@@ -280,9 +313,10 @@ impl PrintOptions {
     }
 
     /// Print the output in a sympy input format.
-    pub const fn sympy() -> PrintOptions {
+    pub fn sympy() -> PrintOptions {
         Self {
             double_star_for_exponentiation: true,
+            mode: PrintMode::Sympy,
             ..Self::file()
         }
     }
@@ -314,8 +348,159 @@ impl PrintOptions {
         self
     }
 
-    pub const fn hide_namespace(mut self, namespace: &'static str) -> Self {
-        self.hide_namespace = Some(namespace);
+    /// Set the overall print mode.
+    pub const fn mode(mut self, mode: PrintMode) -> Self {
+        self.mode = mode;
+        self
+    }
+
+    /// Set the maximum line length before splitting into multiple lines.
+    pub const fn max_line_length(mut self, max_line_length: Option<usize>) -> Self {
+        self.max_line_length = max_line_length;
+        self
+    }
+
+    /// Set the number of spaces to use for indentation.
+    pub const fn indentation(mut self, indentation: usize) -> Self {
+        self.indentation = indentation;
+        self
+    }
+
+    /// Set whether indented lines should be filled with as many operator arguments as possible.
+    pub const fn fill_indented_lines(mut self, fill_indented_lines: bool) -> Self {
+        self.fill_indented_lines = fill_indented_lines;
+        self
+    }
+
+    /// Set whether each term of a top-level sum should be put on a new line.
+    pub const fn terms_on_new_line(mut self, terms_on_new_line: bool) -> Self {
+        self.terms_on_new_line = terms_on_new_line;
+        self
+    }
+
+    /// Set when color/style escape codes should be emitted.
+    pub const fn color_mode(mut self, color_mode: ColorMode) -> Self {
+        self.color_mode = color_mode;
+        self
+    }
+
+    /// Set whether the top-level `+` and `-` should be colorized.
+    pub const fn color_top_level_sum(mut self, color_top_level_sum: bool) -> Self {
+        self.color_top_level_sum = color_top_level_sum;
+        self
+    }
+
+    /// Set whether built-in symbols should be colorized.
+    pub const fn color_builtin_symbols(mut self, color_builtin_symbols: bool) -> Self {
+        self.color_builtin_symbols = color_builtin_symbols;
+        self
+    }
+
+    /// Set the colors for successive bracket levels.
+    pub const fn bracket_level_colors(mut self, bracket_level_colors: Option<[u8; 16]>) -> Self {
+        self.bracket_level_colors = bracket_level_colors;
+        self
+    }
+
+    /// Set whether the ring should be printed.
+    pub const fn print_ring(mut self, print_ring: bool) -> Self {
+        self.print_ring = print_ring;
+        self
+    }
+
+    /// Set whether finite fields should use a symmetric representation.
+    pub const fn symmetric_representation_for_finite_field(
+        mut self,
+        symmetric_representation_for_finite_field: bool,
+    ) -> Self {
+        self.symmetric_representation_for_finite_field = symmetric_representation_for_finite_field;
+        self
+    }
+
+    /// Set whether rational polynomials should be printed explicitly.
+    pub const fn explicit_rational_polynomial(
+        mut self,
+        explicit_rational_polynomial: bool,
+    ) -> Self {
+        self.explicit_rational_polynomial = explicit_rational_polynomial;
+        self
+    }
+
+    /// Set the thousands separator for numbers.
+    pub const fn number_thousands_separator(
+        mut self,
+        number_thousands_separator: Option<char>,
+    ) -> Self {
+        self.number_thousands_separator = number_thousands_separator;
+        self
+    }
+
+    /// Set the multiplication operator character.
+    pub const fn multiplication_operator(mut self, multiplication_operator: char) -> Self {
+        self.multiplication_operator = multiplication_operator;
+        self
+    }
+
+    /// Set whether exponentiation should be printed as `**` instead of `^`.
+    pub const fn double_star_for_exponentiation(
+        mut self,
+        double_star_for_exponentiation: bool,
+    ) -> Self {
+        self.double_star_for_exponentiation = double_star_for_exponentiation;
+        self
+    }
+
+    /// Set the open and close brackets used for function application.
+    pub const fn function_brackets(mut self, function_brackets: (char, char)) -> Self {
+        self.function_brackets = function_brackets;
+        self
+    }
+
+    /// Set whether numeric exponents should be printed as superscripts.
+    pub const fn num_exp_as_superscript(mut self, num_exp_as_superscript: bool) -> Self {
+        self.num_exp_as_superscript = num_exp_as_superscript;
+        self
+    }
+
+    /// Set the precision used when printing floating point numbers.
+    pub const fn precision(mut self, precision: Option<usize>) -> Self {
+        self.precision = precision;
+        self
+    }
+
+    /// Set whether matrices should be printed in a tabular format.
+    pub const fn pretty_matrix(mut self, pretty_matrix: bool) -> Self {
+        self.pretty_matrix = pretty_matrix;
+        self
+    }
+
+    /// Set the namespace to hide.
+    pub fn hide_namespace<T: Into<Cow<'static, str>>>(mut self, namespace: T) -> Self {
+        self.hide_namespace = Some(namespace.into());
+        self
+    }
+
+    /// Set whether all namespaces should be hidden.
+    pub const fn hide_all_namespaces(mut self, hide_all_namespaces: bool) -> Self {
+        self.hide_all_namespaces = hide_all_namespaces;
+        self
+    }
+
+    /// Set whether attributes and tags should be printed.
+    pub const fn include_attributes(mut self, include_attributes: bool) -> Self {
+        self.include_attributes = include_attributes;
+        self
+    }
+
+    /// Set whether namespaces should be colorized.
+    pub const fn color_namespace(mut self, color_namespace: bool) -> Self {
+        self.color_namespace = color_namespace;
+        self
+    }
+
+    /// Set the maximum number of terms to print for a top-level sum.
+    pub const fn max_terms(mut self, max_terms: Option<usize>) -> Self {
+        self.max_terms = max_terms;
         self
     }
 }
