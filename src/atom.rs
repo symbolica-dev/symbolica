@@ -1793,36 +1793,60 @@ impl Symbol {
                 if opts.color_namespace && opts.mode.is_symbolica() {
                     f.write_fmt(format_args!(
                         "{}",
-                        AnsiWrap::new(namespace).dimmed().italic()
+                        AnsiWrap::new(namespace)
+                            .dimmed()
+                            .italic()
+                            .color_mode(opts.color_mode)
                     ))?;
 
                     if opts.include_attributes {
-                        f.write_fmt(format_args!("{}", AnsiWrap::new("::{").dimmed()))?;
+                        f.write_fmt(format_args!(
+                            "{}",
+                            AnsiWrap::new("::{").dimmed().color_mode(opts.color_mode)
+                        ))?;
                         let mut first = true;
                         for (x, t) in self.get_attributes_tuple_str() {
                             if t {
                                 if !first {
-                                    f.write_fmt(format_args!("{}", AnsiWrap::new(",").dimmed()))?;
+                                    f.write_fmt(format_args!(
+                                        "{}",
+                                        AnsiWrap::new(",").dimmed().color_mode(opts.color_mode)
+                                    ))?;
                                 }
                                 first = false;
-                                f.write_fmt(format_args!("{}", AnsiWrap::new(x).dimmed()))?;
+                                f.write_fmt(format_args!(
+                                    "{}",
+                                    AnsiWrap::new(x).dimmed().color_mode(opts.color_mode)
+                                ))?;
                             }
                         }
 
                         if !self.get_tags().is_empty() {
                             for tag in self.get_tags() {
                                 if !first {
-                                    f.write_fmt(format_args!("{}", AnsiWrap::new(",").dimmed()))?;
+                                    f.write_fmt(format_args!(
+                                        "{}",
+                                        AnsiWrap::new(",").dimmed().color_mode(opts.color_mode)
+                                    ))?;
                                 }
                                 first = false;
-                                f.write_fmt(format_args!("{}", AnsiWrap::new(tag).dimmed()))?;
+                                f.write_fmt(format_args!(
+                                    "{}",
+                                    AnsiWrap::new(tag).dimmed().color_mode(opts.color_mode)
+                                ))?;
                             }
                         }
 
-                        f.write_fmt(format_args!("{}", AnsiWrap::new("}").dimmed()))?;
+                        f.write_fmt(format_args!(
+                            "{}",
+                            AnsiWrap::new("}").dimmed().color_mode(opts.color_mode)
+                        ))?;
                     }
 
-                    f.write_fmt(format_args!("{}", AnsiWrap::new("::").dimmed()))?;
+                    f.write_fmt(format_args!(
+                        "{}",
+                        AnsiWrap::new("::").dimmed().color_mode(opts.color_mode)
+                    ))?;
                 } else {
                     if opts.mode.is_mathematica() {
                         for part in namespace.split("::") {
@@ -1871,9 +1895,15 @@ impl Symbol {
             }
 
             if opts.mode.is_symbolica() && opts.color_builtin_symbols && name.ends_with('_') {
-                f.write_fmt(format_args!("{}", AnsiWrap::cyan(name).italic()))
+                f.write_fmt(format_args!(
+                    "{}",
+                    AnsiWrap::cyan(name).italic().color_mode(opts.color_mode)
+                ))
             } else if opts.mode.is_symbolica() && opts.color_builtin_symbols && self.is_builtin() {
-                f.write_fmt(format_args!("{}", AnsiWrap::purple(name)))
+                f.write_fmt(format_args!(
+                    "{}",
+                    AnsiWrap::purple(name).color_mode(opts.color_mode)
+                ))
             } else if opts.mode.is_mathematica() {
                 if self.is_fixed_builtin() {
                     match self.get_id() {
