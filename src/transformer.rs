@@ -985,7 +985,7 @@ impl Transformer {
                     std::mem::swap(out, &mut tmp);
                 },
                 Transformer::Print(o) => {
-                    println!("{}", AtomPrinter::new_with_options(cur_input, *o));
+                    println!("{}", AtomPrinter::new_with_options(cur_input, o.clone()));
                     std::mem::swap(out, &mut tmp);
                 }
                 Transformer::Stats(o, r) => {

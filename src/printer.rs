@@ -1,6 +1,7 @@
 //! Methods for printing atoms and polynomials.
 
 use std::{
+    borrow::Cow,
     fmt::{self, Error, Write},
     io::IsTerminal,
     sync::LazyLock,
@@ -244,7 +245,7 @@ impl fmt::Display for AtomPrinter<'_> {
         self.atom
             .format(
                 f,
-                &self.print_opts.update_with_fmt(f),
+                &self.print_opts.clone().update_with_fmt(f),
                 PrintState::from_fmt(f),
             )
             .map(|_| ())
@@ -459,7 +460,7 @@ impl AtomView<'_> {
                     v.get_symbol()
                         .format(
                             &PrintOptions {
-                                hide_namespace: settings.hide_namespace,
+                                hide_namespace: settings.hide_namespace.map(Cow::Borrowed),
                                 ..PrintOptions::file()
                             },
                             out,
@@ -478,7 +479,7 @@ impl AtomView<'_> {
                     f.get_symbol()
                         .format(
                             &PrintOptions {
-                                hide_namespace: settings.hide_namespace,
+                                hide_namespace: settings.hide_namespace.map(Cow::Borrowed),
                                 ..PrintOptions::file()
                             },
                             out,
@@ -1472,12 +1473,7 @@ impl FormattedPrintFn for FunView<'_> {
                 print_state.bracket_level = 1;
             }
 
-            #[allow(deprecated)]
-            let brackets = if opts.square_brackets_for_function {
-                ('[', ']')
-            } else {
-                opts.function_brackets
-            };
+            let brackets = opts.function_brackets;
 
             AtomPrinter::format_bracket(brackets.0, f, opts, print_state)?;
             print_state.bracket_level += 1;
@@ -1516,12 +1512,7 @@ impl FormattedPrintFn for FunView<'_> {
             print_state.bracket_level = 1;
         }
 
-        #[allow(deprecated)]
-        let brackets = if opts.square_brackets_for_function {
-            ('[', ']')
-        } else {
-            opts.function_brackets
-        };
+        let brackets = opts.function_brackets;
 
         if opts.mode.is_latex() {
             f.write_str("\\!\\left(")?;
