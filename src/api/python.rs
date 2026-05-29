@@ -275,10 +275,69 @@ impl From<PythonPrintMode> for PrintMode {
     }
 }
 
+/// A formatted string with rich notebook display representations.
+#[cfg_attr(feature = "python_stubgen", gen_stub_pyclass)]
+#[pyclass(
+    name = "FormattedOutput",
+    skip_from_py_object,
+    module = "symbolica.core"
+)]
+#[derive(Clone)]
+pub struct PythonFormattedOutput {
+    pub text: String,
+    pub html: Option<String>,
+    pub latex: Option<String>,
+}
+
+#[cfg_attr(feature = "python_stubgen", gen_stub_pymethods)]
+#[cfg_attr(not(feature = "python_stubgen"), remove_gen_stub)]
+#[pymethods]
+impl PythonFormattedOutput {
+    /// Create a formatted output object.
+    #[new]
+    #[pyo3(signature = (text, html = None, latex = None))]
+    pub fn new(text: String, html: Option<String>, latex: Option<String>) -> Self {
+        Self { text, html, latex }
+    }
+
+    /// Convert the formatted output into plain text.
+    pub fn __str__(&self) -> String {
+        self.text.clone()
+    }
+
+    /// Convert the formatted output into plain text.
+    pub fn __repr__(&self) -> String {
+        self.text.clone()
+    }
+
+    /// Convert the formatted output into plain text.
+    pub fn format_plain(&self) -> String {
+        self.text.clone()
+    }
+
+    /// Convert the formatted output into an HTML representation.
+    pub fn _repr_html_(&self) -> Option<String> {
+        self.html.clone()
+    }
+
+    /// Convert the formatted output into a LaTeX representation.
+    pub fn _repr_latex_(&self) -> Option<String> {
+        self.latex.clone()
+    }
+
+    /// Convert the formatted output into a pretty string representation.
+    pub fn _repr_pretty_(&self, pretty: &Bound<'_, PyAny>, cycle: bool) -> PyResult<()> {
+        let text = if cycle { "..." } else { &self.text };
+        pretty.call_method1("text", (text,))?;
+        Ok(())
+    }
+}
+
 /// Create a Symbolica Python module.
 pub fn create_symbolica_module<'a, 'b>(
     m: &'b Bound<'a, PyModule>,
 ) -> PyResult<&'b Bound<'a, PyModule>> {
+    m.add_class::<PythonFormattedOutput>()?;
     m.add_class::<PythonExpression>()?;
     m.add_class::<PythonHeldExpression>()?;
     m.add_class::<PythonTransformer>()?;
@@ -411,6 +470,7 @@ impl<'py> FromPyObject<'_, 'py> for PythonPrintUserDataKey {
 }
 
 /// Represents user-defined data that can be attached to [PrintOptions] in Python.
+#[derive(Clone)]
 pub struct PythonPrintUserData(pub PrintUserData);
 
 #[cfg(feature = "python_stubgen")]

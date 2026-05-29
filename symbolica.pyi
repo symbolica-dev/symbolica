@@ -571,6 +571,32 @@ class PrintMode(Enum):
     Typst = 5
     """Print using Typst notation."""
 
+class FormattedOutput:
+    """A formatted string with rich notebook display representations."""
+
+    def __init__(
+        self, text: str, html: str | None = None, latex: str | None = None
+    ) -> None:
+        """Create a formatted output object."""
+
+    def __str__(self) -> str:
+        """Convert the formatted output into plain text."""
+
+    def __repr__(self) -> str:
+        """Convert the formatted output into plain text."""
+
+    def format_plain(self) -> str:
+        """Convert the formatted output into plain text."""
+
+    def _repr_html_(self) -> str | None:
+        """Convert the formatted output into an HTML representation."""
+
+    def _repr_latex_(self) -> str | None:
+        """Convert the formatted output into a LaTeX representation."""
+
+    def _repr_pretty_(self, pretty, cycle: bool):
+        """Convert the formatted output into a pretty string representation."""
+
 class Expression:
     """
     A Symbolica expression.
@@ -1087,6 +1113,7 @@ class Expression:
 
     def format(
         self,
+        max_terms: int | None = 100,
         mode: PrintMode = PrintMode.Symbolica,
         max_line_length: int | None = 80,
         indentation: int = 4,
@@ -1120,14 +1147,15 @@ class Expression:
         double_star_for_exponentiation: bool = False,
         function_brackets: tuple[str, str] = ("(", ")"),
         num_exp_as_superscript: bool = True,
+        precision: int | None = None,
         show_namespaces: bool = False,
         hide_namespace: str | None = None,
         include_attributes: bool = False,
-        max_terms: int | None = 100,
         custom_print_mode: dict[str, int | str | dict[str | int, Any]] | None = None,
     ) -> str:
         """
         Convert the expression into a human-readable string, with tunable settings.
+        Use `formatted` instead if you need rich output for interactive notebooks.
 
         Examples
         --------
@@ -1146,6 +1174,8 @@ class Expression:
 
         Parameters
         ----------
+        max_terms: int | None
+            The maximum number of terms to print before truncating the output.
         mode: PrintMode
             The mode that controls how the input is interpreted or formatted.
         max_line_length: int | None
@@ -1178,14 +1208,107 @@ class Expression:
             The opening and closing brackets used when printing function arguments.
         num_exp_as_superscript: bool
             Whether small integer exponents should be printed as superscripts.
+        precision: int | None
+            The number of digits to use when printing approximate numbers.
         show_namespaces: bool
             Whether namespaces should be included in the formatted output.
         hide_namespace: str | None
             A namespace prefix to omit from printed symbol names.
         include_attributes: bool
             Whether symbol attributes should be included in the printed output.
+        custom_print_mode: dict[str, int | str | dict[str | int, Any]] | None
+            Custom print data passed through to custom print callbacks.
+        """
+
+    def formatted(
+        self,
+        max_terms: int | None = 100,
+        mode: PrintMode = PrintMode.Symbolica,
+        max_line_length: int | None = 80,
+        indentation: int = 4,
+        fill_indented_lines: bool = True,
+        terms_on_new_line: bool = False,
+        color_top_level_sum: bool = True,
+        color_builtin_symbols: bool = True,
+        bracket_level_colors: Sequence[int] | None = [
+            244,
+            25,
+            97,
+            36,
+            38,
+            40,
+            42,
+            44,
+            46,
+            48,
+            50,
+            52,
+            54,
+            56,
+            58,
+            60,
+        ],
+        print_ring: bool = True,
+        symmetric_representation_for_finite_field: bool = False,
+        explicit_rational_polynomial: bool = False,
+        number_thousands_separator: str | None = None,
+        multiplication_operator: str = "*",
+        double_star_for_exponentiation: bool = False,
+        function_brackets: tuple[str, str] = ("(", ")"),
+        num_exp_as_superscript: bool = True,
+        precision: int | None = None,
+        show_namespaces: bool = False,
+        hide_namespace: str | None = None,
+        include_attributes: bool = False,
+        custom_print_mode: dict[str, int | str | dict[str | int, Any]] | None = None,
+    ) -> FormattedOutput:
+        """
+        Convert the expression into a rich display object, with tunable settings.
+
+        Parameters
+        ----------
         max_terms: int | None
             The maximum number of terms to print before truncating the output.
+        mode: PrintMode
+            The mode that controls how the input is interpreted or formatted.
+        max_line_length: int | None
+            The preferred maximum line length before wrapping.
+        indentation: int
+            The number of spaces used for wrapped lines.
+        fill_indented_lines: bool
+            Whether wrapped lines should be padded to the configured indentation.
+        terms_on_new_line: bool
+            Whether wrapped output should place terms on separate lines.
+        color_top_level_sum: bool
+            Whether top-level sums should be colorized.
+        color_builtin_symbols: bool
+            Whether built-in symbols should be colorized.
+        bracket_level_colors: Sequence[int] | None
+            The colors assigned to successive nested bracket levels.
+        print_ring: bool
+            Whether the coefficient ring should be included in the printed output.
+        symmetric_representation_for_finite_field: bool
+            Whether finite-field elements should be printed using symmetric representatives.
+        explicit_rational_polynomial: bool
+            Whether rational polynomials should be printed explicitly as numerator and denominator.
+        number_thousands_separator: str | None
+            The separator inserted between groups of digits in printed integers.
+        multiplication_operator: str
+            The string used to print multiplication.
+        double_star_for_exponentiation: bool
+            Whether exponentiation should be printed as `**` instead of `^`.
+        function_brackets: tuple[str, str]
+            The opening and closing brackets used when printing function arguments.
+        num_exp_as_superscript: bool
+            Whether small integer exponents should be printed as superscripts.
+        precision: int | None
+            The number of digits to use when printing approximate numbers.
+        show_namespaces: bool
+            Whether namespaces should be included in the formatted output.
+        hide_namespace: str | None
+            A namespace prefix to omit from printed symbol names.
+        include_attributes: bool
+            Whether symbol attributes should be included in the printed output.
         custom_print_mode: dict[str, int | str | dict[str | int, Any]] | None
             Custom print data passed through to custom print callbacks.
         """
@@ -5528,6 +5651,7 @@ class Polynomial:
 
     def format(
         self,
+        max_terms: int | None = None,
         mode: PrintMode = PrintMode.Symbolica,
         max_line_length: int | None = 80,
         indentation: int = 4,
@@ -5565,7 +5689,6 @@ class Polynomial:
         show_namespaces: bool = False,
         hide_namespace: str | None = None,
         include_attributes: bool = False,
-        max_terms: int | None = None,
         custom_print_mode: dict[str, int | str | dict[str | int, Any]] | None = None,
     ) -> str:
         """
@@ -5580,6 +5703,8 @@ class Polynomial:
 
         Parameters
         ----------
+        max_terms: int | None
+            The maximum number of terms to print before truncating the output.
         mode: PrintMode
             The mode that controls how the input is interpreted or formatted.
         max_line_length: int | None
@@ -5620,8 +5745,82 @@ class Polynomial:
             A namespace prefix to omit from printed symbol names.
         include_attributes: bool
             Whether symbol attributes should be included in the printed output.
+        custom_print_mode: dict[str, int | str | dict[str | int, Any]] | None
+            Custom print data passed through to custom print callbacks.
+        """
+
+    def formatted(
+        self,
+        max_terms: int | None = None,
+        mode: PrintMode = PrintMode.Symbolica,
+        max_line_length: int | None = 80,
+        indentation: int = 4,
+        fill_indented_lines: bool = True,
+        terms_on_new_line: bool = False,
+        color_top_level_sum: bool = True,
+        color_builtin_symbols: bool = True,
+        bracket_level_colors: Sequence[int] | None = None,
+        print_ring: bool = True,
+        symmetric_representation_for_finite_field: bool = False,
+        explicit_rational_polynomial: bool = False,
+        number_thousands_separator: str | None = None,
+        multiplication_operator: str = "*",
+        double_star_for_exponentiation: bool = False,
+        function_brackets: tuple[str, str] = ("(", ")"),
+        num_exp_as_superscript: bool = True,
+        precision: int | None = None,
+        show_namespaces: bool = False,
+        hide_namespace: str | None = None,
+        include_attributes: bool = False,
+        custom_print_mode: dict[str, int | str | dict[str | int, Any]] | None = None,
+    ) -> FormattedOutput:
+        """
+        Convert the polynomial into a rich display object, with tunable settings.
+
+        Parameters
+        ----------
         max_terms: int | None
             The maximum number of terms to print before truncating the output.
+        mode: PrintMode
+            The mode that controls how the input is interpreted or formatted.
+        max_line_length: int | None
+            The preferred maximum line length before wrapping.
+        indentation: int
+            The number of spaces used for wrapped lines.
+        fill_indented_lines: bool
+            Whether wrapped lines should be padded to the configured indentation.
+        terms_on_new_line: bool
+            Whether wrapped output should place terms on separate lines.
+        color_top_level_sum: bool
+            Whether top-level sums should be colorized.
+        color_builtin_symbols: bool
+            Whether built-in symbols should be colorized.
+        bracket_level_colors: Sequence[int] | None
+            The colors assigned to successive nested bracket levels.
+        print_ring: bool
+            Whether the coefficient ring should be included in the printed output.
+        symmetric_representation_for_finite_field: bool
+            Whether finite-field elements should be printed using symmetric representatives.
+        explicit_rational_polynomial: bool
+            Whether rational polynomials should be printed explicitly as numerator and denominator.
+        number_thousands_separator: str | None
+            The separator inserted between groups of digits in printed integers.
+        multiplication_operator: str
+            The string used to print multiplication.
+        double_star_for_exponentiation: bool
+            Whether exponentiation should be printed as `**` instead of `^`.
+        function_brackets: tuple[str, str]
+            The opening and closing brackets used when printing function arguments.
+        num_exp_as_superscript: bool
+            Whether small integer exponents should be printed as superscripts.
+        precision: int | None
+            The decimal precision used when printing numeric coefficients.
+        show_namespaces: bool
+            Whether namespaces should be included in the formatted output.
+        hide_namespace: str | None
+            A namespace prefix to omit from printed symbol names.
+        include_attributes: bool
+            Whether symbol attributes should be included in the printed output.
         custom_print_mode: dict[str, int | str | dict[str | int, Any]] | None
             Custom print data passed through to custom print callbacks.
         """

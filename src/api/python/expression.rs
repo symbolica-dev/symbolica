@@ -2280,6 +2280,118 @@ macro_rules! req_wc_cmp {
     }};
 }
 
+impl PythonExpression {
+    fn wrap_latex_body(body: String) -> String {
+        if body.contains("\\\\\n") {
+            format!("$$\\begin{{gathered}}\n{body}\n\\end{{gathered}}$$")
+        } else {
+            format!("$${body}$$")
+        }
+    }
+
+    fn format_latex_with_options(
+        &self,
+        max_line_length: Option<usize>,
+        max_terms: Option<usize>,
+        precision: Option<usize>,
+        show_namespaces: bool,
+        hide_namespace: Option<&str>,
+        include_attributes: bool,
+        custom_print_mode: Option<HashMap<String, PythonPrintUserData>>,
+    ) -> String {
+        Self::wrap_latex_body(format!(
+            "{}",
+            AtomPrinter::new_with_options(
+                self.expr.as_view(),
+                PrintOptions {
+                    max_line_length,
+                    precision,
+                    hide_all_namespaces: !show_namespaces,
+                    hide_namespace: if show_namespaces {
+                        hide_namespace.map(|x| std::borrow::Cow::Owned(x.to_owned()))
+                    } else {
+                        None
+                    },
+                    include_attributes,
+                    max_terms,
+                    custom_print_mode: custom_print_mode
+                        .map(|m| m.into_iter().map(|(k, v)| (k, v.0)).collect())
+                        .unwrap_or_default(),
+                    ..(*LATEX_PRINT_OPTIONS).clone()
+                },
+            )
+        ))
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    fn format_with_color_mode(
+        &self,
+        mode: PythonPrintMode,
+        max_line_length: Option<usize>,
+        indentation: usize,
+        fill_indented_lines: bool,
+        terms_on_new_line: bool,
+        color_top_level_sum: bool,
+        color_builtin_symbols: bool,
+        bracket_level_colors: Option<[u8; 16]>,
+        print_ring: bool,
+        symmetric_representation_for_finite_field: bool,
+        explicit_rational_polynomial: bool,
+        number_thousands_separator: Option<char>,
+        multiplication_operator: char,
+        double_star_for_exponentiation: bool,
+        function_brackets: (char, char),
+        num_exp_as_superscript: bool,
+        precision: Option<usize>,
+        show_namespaces: bool,
+        hide_namespace: Option<&str>,
+        include_attributes: bool,
+        max_terms: Option<usize>,
+        custom_print_mode: Option<HashMap<String, PythonPrintUserData>>,
+        color_mode: ColorMode,
+    ) -> String {
+        format!(
+            "{}",
+            AtomPrinter::new_with_options(
+                self.expr.as_view(),
+                PrintOptions {
+                    max_line_length,
+                    indentation,
+                    fill_indented_lines,
+                    terms_on_new_line,
+                    color_mode,
+                    color_top_level_sum,
+                    color_builtin_symbols,
+                    bracket_level_colors,
+                    print_ring,
+                    symmetric_representation_for_finite_field,
+                    explicit_rational_polynomial,
+                    number_thousands_separator,
+                    multiplication_operator,
+                    double_star_for_exponentiation,
+                    function_brackets,
+                    num_exp_as_superscript,
+                    mode: mode.into(),
+                    precision,
+                    pretty_matrix: false,
+                    hide_all_namespaces: !show_namespaces,
+                    color_namespace: true,
+                    hide_namespace: if show_namespaces {
+                        hide_namespace.map(|x| std::borrow::Cow::Owned(x.to_owned()))
+                    } else {
+                        None
+                    },
+                    include_attributes,
+                    max_terms,
+                    custom_print_mode: custom_print_mode
+                        .map(|m| m.into_iter().map(|(k, v)| (k, v.0)).collect())
+                        .unwrap_or_default(),
+                },
+            )
+        )
+    }
+}
+
 #[cfg_attr(feature = "python_stubgen", gen_stub_pymethods)]
 #[cfg_attr(not(feature = "python_stubgen"), remove_gen_stub)]
 #[pymethods]
@@ -2993,7 +3105,8 @@ impl PythonExpression {
     /// >>> a = E('128378127123 z^(2/3)*w^2/x/y + y^4 + z^34 + x^(x+2)+3/5+f(x,x^2)')
     /// >>> print(a.format(number_thousands_separator='_', multiplication_operator=' '))
     #[pyo3(signature =
-        (mode = PythonPrintMode::Symbolica,
+        (max_terms = Some(100),
+            mode = PythonPrintMode::Symbolica,
             max_line_length = Some(80),
             indentation = 4,
             fill_indented_lines = true,
@@ -3015,11 +3128,11 @@ impl PythonExpression {
             show_namespaces = false,
             hide_namespace = None,
             include_attributes = false,
-            max_terms = Some(100),
             custom_print_mode = None)
         )]
     pub fn format(
         &self,
+        max_terms: Option<usize>,
         mode: PythonPrintMode,
         max_line_length: Option<usize>,
         indentation: usize,
@@ -3040,48 +3153,156 @@ impl PythonExpression {
         show_namespaces: bool,
         hide_namespace: Option<&str>,
         include_attributes: bool,
-        max_terms: Option<usize>,
         custom_print_mode: Option<HashMap<String, PythonPrintUserData>>,
     ) -> PyResult<String> {
-        Ok(format!(
-            "{}",
-            AtomPrinter::new_with_options(
-                self.expr.as_view(),
-                PrintOptions {
-                    max_line_length,
-                    indentation,
-                    fill_indented_lines,
-                    terms_on_new_line,
-                    color_mode: ColorMode::Auto,
-                    color_top_level_sum,
-                    color_builtin_symbols,
-                    bracket_level_colors,
-                    print_ring,
-                    symmetric_representation_for_finite_field,
-                    explicit_rational_polynomial,
-                    number_thousands_separator,
-                    multiplication_operator,
-                    double_star_for_exponentiation,
-                    function_brackets,
-                    num_exp_as_superscript,
-                    mode: mode.into(),
-                    precision,
-                    pretty_matrix: false,
-                    hide_all_namespaces: !show_namespaces,
-                    color_namespace: true,
-                    hide_namespace: if show_namespaces {
-                        hide_namespace.map(|x| std::borrow::Cow::Owned(x.to_owned()))
-                    } else {
-                        None
-                    },
-                    include_attributes,
-                    max_terms,
-                    custom_print_mode: custom_print_mode
-                        .map(|m| m.into_iter().map(|(k, v)| (k, v.0)).collect())
-                        .unwrap_or_default(),
-                },
-            )
+        Ok(self.format_with_color_mode(
+            mode,
+            max_line_length,
+            indentation,
+            fill_indented_lines,
+            terms_on_new_line,
+            color_top_level_sum,
+            color_builtin_symbols,
+            bracket_level_colors,
+            print_ring,
+            symmetric_representation_for_finite_field,
+            explicit_rational_polynomial,
+            number_thousands_separator,
+            multiplication_operator,
+            double_star_for_exponentiation,
+            function_brackets,
+            num_exp_as_superscript,
+            precision,
+            show_namespaces,
+            hide_namespace,
+            include_attributes,
+            max_terms,
+            custom_print_mode,
+            ColorMode::Auto,
         ))
+    }
+
+    /// Convert the expression into a rich display object, with tunable settings.
+    ///
+    /// In notebooks, the returned object displays as highlighted HTML while
+    /// `str(...)` returns the plain formatted text.
+    #[pyo3(signature =
+        (max_terms = Some(100),
+            mode = PythonPrintMode::Symbolica,
+            max_line_length = Some(80),
+            indentation = 4,
+            fill_indented_lines = true,
+            terms_on_new_line = false,
+            color_top_level_sum = true,
+            color_builtin_symbols = true,
+            bracket_level_colors = Some([
+                244, 25, 97, 36, 38, 40, 42, 44, 46, 48, 50, 52, 54, 56, 58, 60,
+            ]),
+            print_ring = true,
+            symmetric_representation_for_finite_field = false,
+            explicit_rational_polynomial = false,
+            number_thousands_separator = None,
+            multiplication_operator = '·',
+            double_star_for_exponentiation = false,
+            function_brackets = ('(',')'),
+            num_exp_as_superscript = true,
+            precision = None,
+            show_namespaces = false,
+            hide_namespace = None,
+            include_attributes = false,
+            custom_print_mode = None)
+        )]
+    pub fn formatted(
+        &self,
+        max_terms: Option<usize>,
+        mode: PythonPrintMode,
+        max_line_length: Option<usize>,
+        indentation: usize,
+        fill_indented_lines: bool,
+        terms_on_new_line: bool,
+        color_top_level_sum: bool,
+        color_builtin_symbols: bool,
+        bracket_level_colors: Option<[u8; 16]>,
+        print_ring: bool,
+        symmetric_representation_for_finite_field: bool,
+        explicit_rational_polynomial: bool,
+        number_thousands_separator: Option<char>,
+        multiplication_operator: char,
+        double_star_for_exponentiation: bool,
+        function_brackets: (char, char),
+        num_exp_as_superscript: bool,
+        precision: Option<usize>,
+        show_namespaces: bool,
+        hide_namespace: Option<&str>,
+        include_attributes: bool,
+        custom_print_mode: Option<HashMap<String, PythonPrintUserData>>,
+    ) -> PyResult<PythonFormattedOutput> {
+        let text = self.format_with_color_mode(
+            mode,
+            max_line_length,
+            indentation,
+            fill_indented_lines,
+            terms_on_new_line,
+            color_top_level_sum,
+            color_builtin_symbols,
+            bracket_level_colors,
+            print_ring,
+            symmetric_representation_for_finite_field,
+            explicit_rational_polynomial,
+            number_thousands_separator,
+            multiplication_operator,
+            double_star_for_exponentiation,
+            function_brackets,
+            num_exp_as_superscript,
+            precision,
+            show_namespaces,
+            hide_namespace,
+            include_attributes,
+            max_terms,
+            custom_print_mode.clone(),
+            ColorMode::Never,
+        );
+
+        let formatted = self.format_with_color_mode(
+            mode,
+            max_line_length,
+            indentation,
+            fill_indented_lines,
+            terms_on_new_line,
+            color_top_level_sum,
+            color_builtin_symbols,
+            bracket_level_colors,
+            print_ring,
+            symmetric_representation_for_finite_field,
+            explicit_rational_polynomial,
+            number_thousands_separator,
+            multiplication_operator,
+            double_star_for_exponentiation,
+            function_brackets,
+            num_exp_as_superscript,
+            precision,
+            show_namespaces,
+            hide_namespace,
+            include_attributes,
+            max_terms,
+            custom_print_mode.clone(),
+            ColorMode::Always,
+        );
+        let latex = self.format_latex_with_options(
+            max_line_length,
+            max_terms,
+            precision,
+            show_namespaces,
+            hide_namespace,
+            include_attributes,
+            custom_print_mode,
+        );
+
+        Ok(PythonFormattedOutput {
+            text,
+            html: Some(crate::printer::AnsiHtmlFormatter::new(&formatted).to_string()),
+            latex: Some(latex),
+        })
     }
 
     /// Convert the expression into a plain string, useful for importing and exporting.
@@ -3108,25 +3329,15 @@ impl PythonExpression {
     /// Yields `$$z^{34}+x^{x+2}+y^{4}+f(x,x^{2})+128378127123 z^{\\frac{2}{3}} w^{2} \\frac{1}{x} \\frac{1}{y}+\\frac{3}{5}$$`.
     #[pyo3(signature = (max_line_length = None))]
     pub fn to_latex(&self, max_line_length: Option<usize>) -> PyResult<String> {
-        let body = format!(
-            "{}",
-            AtomPrinter::new_with_options(
-                self.expr.as_view(),
-                PrintOptions {
-                    max_line_length,
-                    max_terms: Some(100),
-                    ..(*LATEX_PRINT_OPTIONS).clone()
-                },
-            )
-        );
-
-        if body.contains("\\\\\n") {
-            Ok(format!(
-                "$$\\begin{{gathered}}\n{body}\n\\end{{gathered}}$$"
-            ))
-        } else {
-            Ok(format!("$${body}$$"))
-        }
+        Ok(self.format_latex_with_options(
+            max_line_length,
+            Some(100),
+            None,
+            false,
+            None,
+            false,
+            None,
+        ))
     }
 
     /// Convert the expression into a Typst string.
