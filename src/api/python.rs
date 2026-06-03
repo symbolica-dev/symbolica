@@ -50,7 +50,6 @@ use pyo3_stub_gen::{
 use pyo3_stub_gen_derive::remove_gen_stub;
 
 use rand::{Rng, RngCore};
-use rug::Complete;
 use self_cell::self_cell;
 use smallvec::SmallVec;
 use smartstring::{LazyCompact, SmartString};
@@ -72,7 +71,9 @@ use crate::{
         dual::HyperDual,
         finite_field::{FiniteFieldCore, PrimeIteratorU64, ToFiniteField, Z2, Zp64},
         float::{Complex, DoubleFloat, F64, Float, PythonMultiPrecisionFloat, RealLike},
-        integer::{FromFiniteField, Integer, IntegerRelationError, IntegerRing, Z},
+        integer::{
+            FromFiniteField, Integer, IntegerRelationError, IntegerRing, MultiPrecisionInteger, Z,
+        },
         rational::{Q, Rational, RationalField},
         rational_polynomial::{
             FromNumeratorAndDenominator, RationalPolynomial, RationalPolynomialField,

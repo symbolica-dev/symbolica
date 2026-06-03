@@ -1,5 +1,3 @@
-use rug::Float as MultiPrecisionFloat;
-
 use super::{Complex, Float};
 
 #[cfg(feature = "python")]
@@ -79,23 +77,11 @@ impl<'py> FromPyObject<'_, 'py> for PythonMultiPrecisionFloat {
                 .extract::<PyBackedStr>()?;
 
             if a == "NaN" {
-                return Ok(Float::from(MultiPrecisionFloat::with_val(
-                    53,
-                    rug::float::Special::Nan,
-                ))
-                .into());
+                return Ok(Float::with_val(53, f64::NAN).into());
             } else if a == "Infinity" {
-                return Ok(Float::from(MultiPrecisionFloat::with_val(
-                    53,
-                    rug::float::Special::Infinity,
-                ))
-                .into());
+                return Ok(Float::with_val(53, f64::INFINITY).into());
             } else if a == "-Infinity" {
-                return Ok(Float::from(MultiPrecisionFloat::with_val(
-                    53,
-                    rug::float::Special::NegInfinity,
-                ))
-                .into());
+                return Ok(Float::with_val(53, f64::NEG_INFINITY).into());
             }
 
             // get the number of accurate digits

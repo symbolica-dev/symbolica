@@ -2343,7 +2343,7 @@ impl<'py> FromPyObject<'_, 'py> for ConvertibleToExpression {
             Ok(ConvertibleToExpression(Atom::num(num).into()))
         } else if let Ok(num) = ob.cast::<PyInt>() {
             let a = num.to_string();
-            let i = Integer::from(rug::Integer::parse(&a).unwrap().complete());
+            let i = Integer::from(a.parse::<MultiPrecisionInteger>().unwrap());
             Ok(ConvertibleToExpression(Atom::num(i).into()))
         } else if ob.extract::<PyBackedStr>().is_ok() {
             // disallow direct string conversion

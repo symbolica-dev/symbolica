@@ -18,7 +18,6 @@ use std::{
 
 use ahash::HashMap;
 use bytes::Buf;
-use rug::{integer::Order, ops::NegAssign};
 use smallvec::{SmallVec, smallvec};
 
 use crate::{
@@ -27,6 +26,8 @@ use crate::{
         EuclideanDomain, Field, InternalOrdering, Ring, RingOps, Set,
         algebraic_number::AlgebraicExtension,
         atom::AtomField,
+        backend::float::Constant,
+        backend::integer::from_lsf_bytes,
         finite_field::{
             FiniteField, FiniteFieldCore, FiniteFieldElement, FiniteFieldWorkspace, ToFiniteField,
             Zp64,
@@ -218,7 +219,7 @@ impl From<f64> for Coefficient {
 
 impl From<&f64> for Coefficient {
     fn from(value: &f64) -> Self {
-        Coefficient::Float(Float::with_val(53, value).into())
+        Coefficient::Float(Float::with_val(53, *value).into())
     }
 }
 
@@ -248,12 +249,14 @@ impl From<(Integer, Integer)> for Coefficient {
     }
 }
 
+#[cfg(feature = "gmp")]
 impl From<rug::Integer> for Coefficient {
     fn from(value: rug::Integer) -> Self {
         Coefficient::Complex(Rational::from(value).into())
     }
 }
 
+#[cfg(feature = "gmp")]
 impl From<rug::Rational> for Coefficient {
     fn from(value: rug::Rational) -> Self {
         Coefficient::Complex(Rational::from(value).into())
@@ -714,11 +717,9 @@ impl SerializedLargeRational<'_> {
             return Rational::zero();
         }
 
-        let mut num = rug::Integer::from_digits(self.num_digits, Order::Lsf);
-        let den = rug::Integer::from_digits(self.den_digits, Order::Lsf);
-        if self.is_negative {
-            num.neg_assign();
-        }
+        let num = from_lsf_bytes(self.num_digits);
+        let num = if self.is_negative { -num } else { num };
+        let den = from_lsf_bytes(self.den_digits);
 
         Rational::from_int_unchecked(num, den)
     }
@@ -1352,8 +1353,8 @@ impl CoefficientView<'_> {
     pub fn to_float(&self, binary_prec: u32) -> Result<Complex<Float>, String> {
         match self {
             CoefficientView::Natural(n, d, ni, di) => Ok(Complex::new(
-                Float::with_val(binary_prec, n) / Float::with_val(binary_prec, d),
-                Float::with_val(binary_prec, ni) / Float::with_val(binary_prec, di),
+                Float::with_val(binary_prec, *n) / Float::with_val(binary_prec, *d),
+                Float::with_val(binary_prec, *ni) / Float::with_val(binary_prec, *di),
             )),
             CoefficientView::Float(r, i) => {
                 let mut f = r.to_float();
@@ -1385,9 +1386,9 @@ impl CoefficientView<'_> {
             CoefficientView::Infinity(Some((r, i))) => {
                 if i.is_zero() {
                     if r.is_negative() {
-                        Ok(Float::with_val(binary_prec, rug::float::Special::Infinity).into())
+                        Ok(Float::with_val(binary_prec, f64::INFINITY).into())
                     } else {
-                        Ok(Float::with_val(binary_prec, rug::float::Special::NegInfinity).into())
+                        Ok(Float::with_val(binary_prec, f64::NEG_INFINITY).into())
                     }
                 } else {
                     Err("Cannot convert complex infinity to float".to_owned())
@@ -3066,7 +3067,7 @@ impl AtomView<'_> {
                 match s.get_id() {
                     Symbol::PI_ID => {
                         out.to_num(Coefficient::Float(
-                            Float::with_val(binary_prec, rug::float::Constant::Pi).into(),
+                            Float::with_val(binary_prec, Constant::Pi).into(),
                         ));
                     }
                     Symbol::E_ID => {
@@ -3418,7 +3419,9 @@ mod test {
     #[test]
     fn float() {
         let expr = parse!("1/2 x + 5.8912734891723 + sin(1.2334)");
-        let c = Coefficient::Float(Float::with_val(200, rug::float::Constant::Pi).into());
+        let c = Coefficient::Float(
+            Float::with_val(200, crate::domains::backend::float::Constant::Pi).into(),
+        );
         let expr = expr * &Atom::num(c);
         let r = format!(
             "{}",

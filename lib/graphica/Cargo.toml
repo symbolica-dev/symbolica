@@ -11,6 +11,9 @@ repository = "https://github.com/symbolica-dev/graphica"
 rust-version = "1.88"
 
 [features]
+default = ["gmp"]
+gmp = ["numerica/gmp"]
+no_gmp = ["numerica/no_gmp"]
 # import/export objects that do not depend on the state using serde
 serde = ["dep:serde"]
 # allow importing/exporting of atoms with a state map using bincode
@@ -23,4 +26,4 @@ rand = "0.9"
 serde = { version = "1.0", features = ["derive"], optional = true }
 bincode = { version = "2.0", optional = true }
 bincode-trait-derive = { version = "0.1.0", optional = true }
-numerica = { version = "2.0" }
+numerica = { version = "2.0", default-features = false }

@@ -1,5 +1,6 @@
 [workspace]
 members = ["lib/numerica", "lib/graphica"]
+resolver = "3"
 
 [package]
 authors = ["Ben Ruijl <ben@symbolica.io>"]
@@ -35,8 +36,10 @@ crate-type = ["lib"]
 name = "symbolica"
 
 [features]
-default = ["tracing_max_level_info", "faster_alloc"]
+default = ["tracing_max_level_info", "faster_alloc", "gmp"]
 faster_alloc = ["mimalloc"]
+gmp = ["dep:rug", "numerica/gmp", "graphica/gmp"]
+no_gmp = ["numerica/no_gmp", "graphica/no_gmp"]
 # sort functions based on an argument-by-argument comparison
 full_fn_cmp = []
 mathematica_api = ["wolfram-library-link"]
@@ -64,7 +67,7 @@ python_stubgen = ["python_export", "pyo3-stub-gen", "numerica/python_stubgen"]
 python_abi3 = ["pyo3/abi3", "pyo3/abi3-py37"]
 tracing_max_level_info = ["tracing/release_max_level_info"]
 # import/export objects that do not depend on the state using serde
-serde = ["dep:serde", "rug/serde", "numerica/serde"]
+serde = ["dep:serde", "rug?/serde", "numerica/serde"]
 # allow importing/exporting of atoms with a state map using bincode
 bincode = ["dep:bincode", "dep:bincode-trait-derive", "numerica/bincode"]
 
@@ -74,8 +77,8 @@ optional = true
 version = "0.28"
 
 [dependencies]
-numerica = "2.0"
-graphica = "2.0"
+numerica = { version = "2.0", default-features = false }
+graphica = { version = "2.0", default-features = false }
 
 ahash = "0.8.7"
 append-only-vec = "0.1"
@@ -93,7 +96,7 @@ pyo3-stub-gen = { version = "0.17", default-features = false, features = [
 ], optional = true }
 pyo3-stub-gen-derive = { version = "0.17", optional = true }
 rayon = "1.8"
-rug = "1.27.0"
+rug = { version = "1.27.0", optional = true }
 numpy = { version = "0.28", optional = true }
 self_cell = "1.2.0"
 serde = { version = "1.0", features = ["derive"], optional = true }

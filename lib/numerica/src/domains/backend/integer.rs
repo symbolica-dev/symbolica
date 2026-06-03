@@ -17,6 +17,45 @@ pub(crate) fn probably_prime(value: &MultiPrecisionInteger, reps: u32) -> Option
     Some(value.is_probably_prime(reps) != rug::integer::IsPrime::No)
 }
 
+#[cfg(feature = "gmp")]
+pub fn from_lsf_bytes(bytes: &[u8]) -> MultiPrecisionInteger {
+    MultiPrecisionInteger::from_digits(bytes, rug::integer::Order::Lsf)
+}
+
+#[cfg(feature = "gmp")]
+pub fn write_lsf_bytes(value: &MultiPrecisionInteger, dest: &mut Vec<u8>) {
+    let value = value.as_abs();
+    let num_digits = value.significant_digits::<u8>();
+    let old_len = dest.len();
+    dest.resize(old_len + num_digits, 0);
+    value.write_digits(&mut dest[old_len..], rug::integer::Order::Lsf);
+}
+
+#[cfg(feature = "gmp")]
+pub fn lsf_byte_size(value: &MultiPrecisionInteger) -> usize {
+    value.significant_digits::<u8>()
+}
+
+#[cfg(feature = "gmp")]
+pub fn to_lsf_bytes(value: &MultiPrecisionInteger) -> Vec<u8> {
+    let mut bytes = Vec::new();
+    write_lsf_bytes(value, &mut bytes);
+    bytes
+}
+
+#[cfg(feature = "gmp")]
+pub fn from_digits_radix(digits: &[u8], radix: u32, is_negative: bool) -> MultiPrecisionInteger {
+    let mut value = MultiPrecisionInteger::new();
+    unsafe {
+        value.assign_bytes_radix_unchecked(
+            digits,
+            i32::try_from(radix).expect("radix does not fit in i32"),
+            is_negative,
+        );
+    }
+    value
+}
+
 #[cfg(all(feature = "gmp", feature = "bincode"))]
 pub(crate) fn to_be_bytes(value: &MultiPrecisionInteger) -> Vec<u8> {
     value.to_digits::<u8>(rug::integer::Order::MsfBe)
@@ -97,11 +136,9 @@ mod malachite {
 
         #[inline]
         pub fn from_f64(f: f64) -> Option<Self> {
-            if f.is_finite() {
-                Some(Self::from(f.trunc() as i128))
-            } else {
-                None
-            }
+            f.is_finite()
+                .then(|| f.trunc().to_string().parse::<Self>().ok())
+                .flatten()
         }
 
         #[inline]
@@ -928,6 +965,51 @@ pub(crate) fn pow_ref_u32(base: &MultiPrecisionInteger, e: u32) -> MultiPrecisio
 #[cfg(feature = "no_gmp")]
 pub(crate) fn probably_prime(_value: &MultiPrecisionInteger, _reps: u32) -> Option<bool> {
     None
+}
+#[cfg(feature = "no_gmp")]
+pub fn from_lsf_bytes(bytes: &[u8]) -> MultiPrecisionInteger {
+    let mut value = MultiPrecisionInteger::from(0u32);
+    for &byte in bytes.iter().rev() {
+        value = (value << 8usize) + u32::from(byte);
+    }
+    value
+}
+#[cfg(feature = "no_gmp")]
+pub fn write_lsf_bytes(value: &MultiPrecisionInteger, dest: &mut Vec<u8>) {
+    let mut value = if value.is_negative() {
+        -value.clone()
+    } else {
+        value.clone()
+    };
+
+    while !value.is_zero() {
+        dest.push((value.clone() & 0xffu32).to_u64().unwrap() as u8);
+        value = value >> 8usize;
+    }
+}
+#[cfg(feature = "no_gmp")]
+pub fn lsf_byte_size(value: &MultiPrecisionInteger) -> usize {
+    value
+        .significant_bits()
+        .div_ceil(u64::from(u8::BITS))
+        .try_into()
+        .expect("large integer byte length does not fit in usize")
+}
+#[cfg(feature = "no_gmp")]
+pub fn to_lsf_bytes(value: &MultiPrecisionInteger) -> Vec<u8> {
+    let mut bytes = Vec::new();
+    write_lsf_bytes(value, &mut bytes);
+    bytes
+}
+#[cfg(feature = "no_gmp")]
+pub fn from_digits_radix(digits: &[u8], radix: u32, is_negative: bool) -> MultiPrecisionInteger {
+    let mut value = MultiPrecisionInteger::from(0u32);
+    for &digit in digits {
+        value *= radix;
+        value += u32::from(digit);
+    }
+
+    if is_negative { -value } else { value }
 }
 #[cfg(all(feature = "no_gmp", feature = "bincode"))]
 pub(crate) use malachite::{from_be_bytes, to_be_bytes};

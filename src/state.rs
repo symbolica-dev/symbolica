@@ -96,7 +96,7 @@ fn builtin_constant_evaluation(symbol: Symbol) -> Option<EvaluationInfo> {
         })),
         Symbol::PI_ID => Some(EvaluationInfo::constant(|_tags, prec| {
             Ok(Complex::new(
-                Float::with_val(prec, rug::float::Constant::Pi),
+                Float::with_val(prec, crate::domains::backend::float::Constant::Pi),
                 Float::new(prec),
             ))
         })),

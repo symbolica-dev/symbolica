@@ -700,6 +700,12 @@ mod astro {
         }
     }
 
+    impl IntoMultiPrecisionFloat for &f64 {
+        fn into_float(self, prec: u32) -> MultiPrecisionFloat {
+            (*self).into_float(prec)
+        }
+    }
+
     impl IntoMultiPrecisionFloat for f32 {
         fn into_float(self, prec: u32) -> MultiPrecisionFloat {
             MultiPrecisionFloat::from_f64(prec, self as f64)
@@ -710,6 +716,12 @@ mod astro {
         fn into_float(self, prec: u32) -> MultiPrecisionFloat {
             let value = integer_to_float(self, prec);
             MultiPrecisionFloat { value, prec }
+        }
+    }
+
+    impl IntoMultiPrecisionFloat for &i64 {
+        fn into_float(self, prec: u32) -> MultiPrecisionFloat {
+            (*self).into_float(prec)
         }
     }
 
@@ -740,6 +752,20 @@ mod astro {
     }
 
     impl IntoMultiPrecisionFloat for usize {
+        fn into_float(self, prec: u32) -> MultiPrecisionFloat {
+            let value = integer_to_float(self, prec);
+            MultiPrecisionFloat { value, prec }
+        }
+    }
+
+    impl IntoMultiPrecisionFloat for MultiPrecisionInteger {
+        fn into_float(self, prec: u32) -> MultiPrecisionFloat {
+            let value = integer_to_float(self, prec);
+            MultiPrecisionFloat { value, prec }
+        }
+    }
+
+    impl IntoMultiPrecisionFloat for &MultiPrecisionInteger {
         fn into_float(self, prec: u32) -> MultiPrecisionFloat {
             let value = integer_to_float(self, prec);
             MultiPrecisionFloat { value, prec }

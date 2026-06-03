@@ -1977,7 +1977,7 @@ impl<E: PositiveExponent> MultivariatePolynomial<IntegerRing, E> {
                     Integer::Single(_) => {}
                     Integer::Double(_) => {}
                     Integer::Large(r) => {
-                        if r.as_limbs().len() > 4 {
+                        if u64::from(r.significant_bits()) > 4 * u64::from(usize::BITS) {
                             debug!("big num {}", r);
                             return Err(HeuristicGCDError::MaxSizeExceeded);
                         }

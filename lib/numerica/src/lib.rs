@@ -39,9 +39,6 @@ compile_error!(
     "`gmp` and `no_gmp` are mutually exclusive. Use `--no-default-features --features no_gmp` for the Malachite backend."
 );
 
-#[cfg(all(feature = "no_gmp", feature = "python"))]
-compile_error!("`python` currently requires the default `gmp` backend.");
-
 pub mod combinatorics;
 pub mod domains;
 pub mod numerical_integration;

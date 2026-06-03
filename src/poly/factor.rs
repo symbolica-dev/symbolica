@@ -2983,11 +2983,11 @@ impl<E: PositiveExponent> MultivariatePolynomial<IntegerRing, E, LexOrder> {
         // to an integer
         bound = &bound * &Integer::Single(2).pow((total_degree * 2).saturating_sub(non_zero_vars));
 
-        bound = &match bound {
-            Integer::Single(b) => Integer::Single((b as f64).sqrt() as i64),
-            Integer::Double(b) => Integer::from(rug::Integer::from(b).sqrt()),
-            Integer::Large(b) => Integer::from(b.sqrt()),
-        } + &1i64.into();
+        let root_bound = match &bound {
+            Integer::Single(b) => Integer::Single((*b as f64).sqrt() as i64),
+            Integer::Double(_) | Integer::Large(_) => bound.root(2),
+        };
+        bound = &root_bound + &1i64.into();
 
         &bound * &(&max_norm * &self.lcoeff().abs())
     }

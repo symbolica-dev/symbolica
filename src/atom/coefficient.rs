@@ -1,7 +1,6 @@
 use std::io::Write;
 
 use bytes::{Buf, BufMut};
-use rug::{Integer as MultiPrecisionInteger, integer::Order};
 
 use crate::{
     coefficient::{
@@ -9,6 +8,7 @@ use crate::{
         SerializedRationalPolynomial,
     },
     domains::{
+        backend::integer::{from_lsf_bytes, lsf_byte_size, write_lsf_bytes},
         finite_field::FiniteFieldElement,
         integer::{Integer, IntegerRing, Z},
         rational::Fraction,
@@ -124,10 +124,7 @@ impl SerializedRationalPolynomial<'_> {
                 x @ 4 | x @ 5 => {
                     let (num_digits, _, new_source) = source.get_frac_u64();
                     *source = new_source;
-                    let i = MultiPrecisionInteger::from_digits(
-                        &source[..num_digits as usize],
-                        Order::Lsf,
-                    );
+                    let i = from_lsf_bytes(&source[..num_digits as usize]);
                     source.advance(num_digits as usize);
                     if x == 5 {
                         Integer::from(-i)
@@ -179,23 +176,20 @@ impl PackedRationalNumberWriter for Coefficient {
 
         #[inline(always)]
         fn write_multi_rational(r: &Fraction<IntegerRing>, dest: &mut Vec<u8>) {
-            let r = r.clone().to_multi_prec();
+            let num = r.numerator_ref().clone().to_multi_prec();
+            let den = r.denominator_ref().clone().to_multi_prec();
+            let num_digits = lsf_byte_size(&num);
+            let den_digits = lsf_byte_size(&den);
             dest.put_u8(ARB_NUM | ARB_DEN);
 
-            let num_digits = r.numer().significant_digits::<u8>();
-            let den_digits = r.denom().significant_digits::<u8>();
-
-            if r.numer() < &0 {
+            if r.numerator_ref().is_negative() {
                 (-(num_digits as i64), den_digits as u64).write_packed(dest);
             } else {
                 (num_digits as i64, den_digits as u64).write_packed(dest);
             }
 
-            let old_len = dest.len();
-            dest.resize(old_len + num_digits + den_digits, 0);
-            r.numer().write_digits(&mut dest[old_len..], Order::Lsf);
-            r.denom()
-                .write_digits(&mut dest[old_len + num_digits..], Order::Lsf);
+            write_lsf_bytes(&num, dest);
+            write_lsf_bytes(&den, dest);
         }
 
         match self {
@@ -272,11 +266,9 @@ impl PackedRationalNumberWriter for Coefficient {
                             } else {
                                 dest.put_u8(4);
                             }
-                            let num_digits = l.significant_digits::<u8>();
+                            let num_digits = lsf_byte_size(l);
                             (num_digits as u64, 1).write_packed(dest);
-                            let old_len = dest.len();
-                            dest.resize(old_len + num_digits, 0);
-                            l.write_digits(&mut dest[old_len..], Order::Lsf);
+                            write_lsf_bytes(l, dest);
                         }
                     }
                 }
@@ -348,9 +340,8 @@ impl PackedRationalNumberWriter for Coefficient {
 
         #[inline(always)]
         fn packed_size_multi_rat(r: &Fraction<IntegerRing>) -> u64 {
-            let l = r.clone().to_multi_prec();
-            let n = l.numer().significant_digits::<u8>() as u64;
-            let d = l.denom().significant_digits::<u8>() as u64;
+            let n = lsf_byte_size(&r.numerator_ref().clone().to_multi_prec()) as u64;
+            let d = lsf_byte_size(&r.denominator_ref().clone().to_multi_prec()) as u64;
             1 + (n, d).get_packed_size() + n + d
         }
 

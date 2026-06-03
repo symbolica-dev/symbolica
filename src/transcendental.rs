@@ -1,11 +1,10 @@
 use std::sync::LazyLock;
 
-use rug::float::Constant;
-
 use crate::{
     atom::{Atom, AtomCore, AtomOrView, AtomView, EvaluationInfo, FunctionBuilder, Symbol},
     coefficient::{Coefficient, CoefficientView},
     domains::{
+        backend::float::Constant,
         float::{Complex, ErrorPropagatingFloat, Float, FloatLike, Real, RealLike, SingleFloat},
         integer::Integer,
         rational::Rational,
@@ -245,8 +244,8 @@ impl SpecialSymbols {
                         Box::new(move |args: &[Complex<Float>]| {
                             let Some(order) = order else {
                                 return Complex::new(
-                                    Float::with_val(53, rug::float::Special::Nan),
-                                    Float::with_val(53, rug::float::Special::Nan),
+                                    Float::with_val(53, f64::NAN),
+                                    Float::with_val(53, f64::NAN),
                                 );
                             };
                             unary_eval_complex_float(args, |arg, prec| {
@@ -305,20 +304,20 @@ impl SpecialSymbols {
                             let tag_views = tags.iter().map(|x| x.as_view()).collect::<Vec<_>>();
                             let Ok(order) = complex_float_tag("polylog", &tag_views, prec) else {
                                 return Complex::new(
-                                    Float::with_val(53, rug::float::Special::Nan),
-                                    Float::with_val(53, rug::float::Special::Nan),
+                                    Float::with_val(53, f64::NAN),
+                                    Float::with_val(53, f64::NAN),
                                 );
                             };
                             let [arg] = args else {
                                 return Complex::new(
-                                    Float::with_val(53, rug::float::Special::Nan),
-                                    Float::with_val(53, rug::float::Special::Nan),
+                                    Float::with_val(53, f64::NAN),
+                                    Float::with_val(53, f64::NAN),
                                 );
                             };
                             polylog_numeric_eval(&order, arg, prec).unwrap_or_else(|| {
                                 Complex::new(
-                                    Float::with_val(53, rug::float::Special::Nan),
-                                    Float::with_val(53, rug::float::Special::Nan),
+                                    Float::with_val(53, f64::NAN),
+                                    Float::with_val(53, f64::NAN),
                                 )
                             })
                         })
@@ -948,10 +947,8 @@ impl GeometricSymbols {
                             .max(y.im.prec())
                             .max(x.re.prec().max(x.im.prec())),
                     ),
-                    _ => Complex::new(
-                        Float::with_val(53, rug::float::Special::Nan),
-                        Float::with_val(53, rug::float::Special::Nan),
-                    ),
+                    _ =>
+                        Complex::new(Float::with_val(53, f64::NAN), Float::with_val(53, f64::NAN),),
                 })
                 .register(|args: &[f64]| match args {
                     [z] => z.atan(),
@@ -1943,10 +1940,7 @@ where
         .map(|x| x.re.prec().max(x.im.prec()))
         .unwrap_or(53);
     let [arg] = args else {
-        return Complex::new(
-            Float::with_val(53, rug::float::Special::Nan),
-            Float::with_val(53, rug::float::Special::Nan),
-        );
+        return Complex::new(Float::with_val(53, f64::NAN), Float::with_val(53, f64::NAN));
     };
     evaluator(arg, prec)
 }
@@ -1980,10 +1974,7 @@ fn tagged_unary_eval_complex_float(
         .unwrap_or(53);
     let tag_views = tags.iter().map(|x| x.as_view()).collect::<Vec<_>>();
     tagged_unary_eval_to_float(name, &tag_views, args, prec, evaluator).unwrap_or_else(|_| {
-        Complex::new(
-            Float::with_val(53, rug::float::Special::Nan),
-            Float::with_val(53, rug::float::Special::Nan),
-        )
+        Complex::new(Float::with_val(53, f64::NAN), Float::with_val(53, f64::NAN))
     })
 }
 
@@ -2847,25 +2838,31 @@ fn atom_to_complex_float(value: AtomView, binary_prec: u32) -> Option<Complex<Fl
 }
 
 fn gamma_numeric_eval(z: &Complex<Float>, binary_prec: u32) -> Complex<Float> {
-    if z.im.to_f64() == 0.0 {
-        Complex::new(
-            z.re.clone().into_inner().gamma().into(),
-            Float::new(binary_prec),
-        )
-    } else {
-        gamma_complex_spouge(z, binary_prec)
+    #[cfg(feature = "gmp")]
+    {
+        if z.im.to_f64() == 0.0 {
+            return Complex::new(
+                z.re.clone().into_inner().gamma().into(),
+                Float::new(binary_prec),
+            );
+        }
     }
+
+    gamma_complex_spouge(z, binary_prec)
 }
 
 fn polygamma_order_zero_numeric_eval(z: &Complex<Float>, binary_prec: u32) -> Complex<Float> {
-    if z.im.to_f64() == 0.0 {
-        Complex::new(
-            z.re.clone().into_inner().digamma().into(),
-            Float::new(binary_prec),
-        )
-    } else {
-        polygamma_order_zero_complex(z, binary_prec)
+    #[cfg(feature = "gmp")]
+    {
+        if z.im.to_f64() == 0.0 {
+            return Complex::new(
+                z.re.clone().into_inner().digamma().into(),
+                Float::new(binary_prec),
+            );
+        }
     }
+
+    polygamma_order_zero_complex(z, binary_prec)
 }
 
 fn polygamma_numeric_eval(order: u32, z: &Complex<Float>, binary_prec: u32) -> Complex<Float> {
@@ -3101,6 +3098,7 @@ fn polylog_integer_numeric_eval(
         return Some(-(complex_one(binary_prec) - z.clone()).log());
     }
 
+    #[cfg(feature = "gmp")]
     if order == 2 && z.im.to_f64() == 0.0 && z.re.to_f64() <= 1.0 {
         return Some(Complex::new(
             z.re.clone().into_inner().li2().into(),
@@ -3327,20 +3325,22 @@ fn zeta_numeric_eval(s: &Complex<Float>, binary_prec: u32) -> Complex<Float> {
 
     if s.is_real() {
         if s.re.to_f64() == 1.0 {
-            return Complex::new(
-                Float::with_val(binary_prec, rug::float::Special::Infinity),
-                zero,
-            );
+            return Complex::new(Float::with_val(binary_prec, f64::INFINITY), zero);
         }
 
-        return Complex::new(s.re.clone().into_inner().zeta().into(), zero);
+        #[cfg(feature = "gmp")]
+        {
+            return Complex::new(s.re.clone().into_inner().zeta().into(), zero);
+        }
+
+        #[cfg(not(feature = "gmp"))]
+        {
+            return zeta_complex_hasse(s, binary_prec);
+        }
     }
 
     if (s.re.to_f64() - 1.0).abs() < 1e-14 && s.im.to_f64().abs() < 1e-14 {
-        return Complex::new(
-            Float::with_val(binary_prec, rug::float::Special::Infinity),
-            zero,
-        );
+        return Complex::new(Float::with_val(binary_prec, f64::INFINITY), zero);
     }
 
     let work_prec = binary_prec
@@ -3381,6 +3381,7 @@ fn zeta_complex_reflection(s: &Complex<Float>, binary_prec: u32) -> Complex<Floa
     let sine =
         (pi_c * s.clone() / Complex::new(Float::with_val(binary_prec, 2), zero.clone())).sin();
     let gamma = gamma_numeric_eval(&reflected, binary_prec);
+    #[cfg(feature = "gmp")]
     let zeta = if reflected.im.to_f64() == 0.0 {
         Complex::new(
             reflected.re.clone().into_inner().zeta().into(),
@@ -3389,6 +3390,9 @@ fn zeta_complex_reflection(s: &Complex<Float>, binary_prec: u32) -> Complex<Floa
     } else {
         zeta_complex_hasse(&reflected, binary_prec)
     };
+
+    #[cfg(not(feature = "gmp"))]
+    let zeta = zeta_complex_hasse(&reflected, binary_prec);
 
     two_power * pi_power * sine * gamma * zeta
 }

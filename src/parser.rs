@@ -10,7 +10,6 @@ use std::{borrow::Cow, fmt::Write, str::Chars, string::String, sync::Arc};
 
 use ahash::HashMap;
 use bytes::Buf;
-use rug::Integer as MultiPrecisionInteger;
 
 use smallvec::SmallVec;
 use smartstring::{LazyCompact, SmartString};
@@ -21,6 +20,7 @@ use crate::{
     coefficient::{Coefficient, ConvertToRing},
     domains::{
         Ring,
+        backend::integer::from_digits_radix,
         float::{Complex, Float, FloatLike},
         integer::Integer,
         rational::Rational,
@@ -1897,16 +1897,10 @@ impl Token {
                         digit_buffer.extend(digits.iter().map(|&x| x - b'0'));
                     }
 
-                    let mut p = MultiPrecisionInteger::new();
-                    unsafe {
-                        p.assign_bytes_radix_unchecked(
-                            &digit_buffer,
-                            if is_hex { 16 } else { 10 },
-                            is_negative,
-                        )
-                    };
+                    let p =
+                        from_digits_radix(&digit_buffer, if is_hex { 16 } else { 10 }, is_negative);
 
-                    field.element_from_coefficient(p.into())
+                    field.element_from_coefficient(Integer::from(p).into())
                 }
             }
 
