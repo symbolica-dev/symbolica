@@ -2,7 +2,8 @@ use std::fmt::LowerExp;
 
 use rand::Rng;
 
-use super::{Constructible, Float, FloatLike, RealLike, SingleFloat};
+use super::Float;
+use super::{Constructible, FloatLike, RealLike, SingleFloat};
 use crate::domains::{integer::Integer, rational::Rational};
 
 impl TryFrom<Float> for Rational {

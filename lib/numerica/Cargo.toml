@@ -2,7 +2,7 @@
 name = "numerica"
 authors = ["Ben Ruijl <ben@symbolica.io>"]
 keywords = ["algebra", "mathematics", "integer", "float", "rational"]
-version = "2.0.0"
+version = "2.1.0"
 edition = "2024"
 license = "MIT"
 description = "Open-source math library for exact and floating point computations"
@@ -11,8 +11,22 @@ repository = "https://github.com/symbolica-dev/numerica"
 rust-version = "1.88"
 
 [features]
+default = ["gmp"]
+gmp = ["dep:rug"]
+no_gmp = [
+    "dep:astro-float",
+    "dep:malachite-base",
+    "dep:malachite-nz",
+    "dep:malachite-q",
+]
 # import/export objects that do not depend on the state using serde
-serde = ["dep:serde", "rug/serde"]
+serde = [
+    "dep:serde",
+    "astro-float?/serde",
+    "rug?/serde",
+    "malachite-nz?/enable_serde",
+    "malachite-q?/enable_serde",
+]
 # allow importing/exporting of atoms with a state map using bincode
 bincode = ["dep:bincode", "dep:bincode-trait-derive"]
 python = ["pyo3", "numpy"]
@@ -22,7 +36,11 @@ python_stubgen = ["python", "pyo3-stub-gen"]
 pyo3 = { version = "0.28", features = ["num-complex"], optional = true }
 numpy = { version = "0.28", optional = true }
 rand = "0.9"
-rug = "1.27.0"
+rug = { version = "1.27.0", optional = true }
+astro-float = { version = "0.9.5", default-features = false, features = ["std"], optional = true }
+malachite-base = { version = "0.7.0", optional = true }
+malachite-nz = { version = "0.7.0", optional = true }
+malachite-q = { version = "0.7.0", optional = true }
 xprec = "0.2.2"
 simba = "0.9"
 num-traits = "0.2"
