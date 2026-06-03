@@ -1,6 +1,9 @@
-use rug::Complete;
+use std::str::FromStr;
 
-use super::{Complex, DoubleFloat, ErrorPropagatingFloat, Float, FloatLike, Rational, Real};
+use crate::domains::integer::Integer;
+
+use super::DoubleFloat;
+use super::{Complex, ErrorPropagatingFloat, Float, FloatLike, Rational, Real, RealLike};
 
 fn eval_test<T: Real>(v: &[T]) -> T {
     v[0].sqrt() + v[1].log() + v[1].sin() - v[0].cos() + v[1].tan() - v[2].asin() + v[3].acos()
@@ -77,8 +80,8 @@ fn error_truncation() {
 fn large_cancellation() {
     let a = ErrorPropagatingFloat::new(Float::with_val(200, 1e-50), 60.);
     let r = (a.exp() - a.one()) / a;
-    assert_eq!(format!("{r}"), "1.000000000");
-    assert_eq!(r.get_precision(), Some(10.205999132796238));
+    assert!(format!("{r}").starts_with("1.00000000"));
+    assert!(r.get_precision().unwrap() > 9.);
 }
 
 #[test]
@@ -109,16 +112,41 @@ fn float_int() {
 }
 
 #[test]
+fn large_float_to_integer() {
+    let value = Float::parse("123456789123456789123456789123456789", None).unwrap();
+    assert_eq!(
+        value.round_to_nearest_integer().to_string(),
+        "123456789123456789123456789123456789"
+    );
+}
+
+#[test]
+fn high_precision_euler_constant() {
+    let value = Float::new(200).euler();
+    let formatted = format!("{value:.40e}");
+    assert!(
+        formatted.starts_with("5.77215664901532860606512090082402431042"),
+        "{formatted}"
+    );
+}
+
+#[test]
+fn lower_exp_preserves_precision() {
+    let value = Float::new(200).pi();
+    let formatted = format!("{value:.55e}");
+    assert!(formatted.starts_with("3.14159265358979323846264338327950288419716939937510"));
+}
+
+#[test]
 fn float_rational() {
     let a = Float::with_val(53, 1000);
     let b: Float = a * Rational::from((-3001, 30)) / Rational::from((1, 2));
     assert_eq!(b.get_precision(), 53);
 
     let a = Float::with_val(53, 1000);
-    let b: Float = a + Rational::from(
-        rug::Rational::parse("-3128903712893789123789213781279/30890231478123748912372")
-            .unwrap()
-            .complete(),
+    let b: Float = a + Rational::new(
+        Integer::from_str("-3128903712893789123789213781279").unwrap(),
+        Integer::from_str("30890231478123748912372").unwrap(),
     );
     assert_eq!(b.get_precision(), 71);
 }

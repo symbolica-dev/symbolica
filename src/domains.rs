@@ -13,6 +13,7 @@
 //!
 //! An extension of the ring trait is the [`EuclideanDomain`] trait, which adds the ability to compute remainders, quotients, and gcds.
 //! Another extension is the [`Field`] trait, which adds the ability to divide and invert elements.
+pub mod backend;
 pub mod dual;
 pub mod finite_field;
 pub mod float;

@@ -13,6 +13,7 @@ use crate::{
 
 use super::{
     EuclideanDomain, Field, InternalOrdering, Ring, SelfRing, UpgradeToField,
+    backend::float::{BackendRational, BackendRationalExt},
     finite_field::{
         FiniteField, FiniteFieldCore, FiniteFieldWorkspace, PrimeIteratorU64, ToFiniteField, Two,
         Z2, Zp,
@@ -821,9 +822,9 @@ impl<T: Into<Integer>> From<(T, T)> for Rational {
     }
 }
 
-impl From<rug::Rational> for Rational {
-    fn from(value: rug::Rational) -> Self {
-        let (num, den) = value.into_numer_denom();
+impl From<BackendRational> for Rational {
+    fn from(value: BackendRational) -> Self {
+        let (num, den) = value.into_integer_ratio();
         Q.to_element(num.into(), den.into(), false)
     }
 }
@@ -924,18 +925,16 @@ impl Rational {
     }
 
     pub fn to_f64(&self) -> f64 {
-        rug::Rational::from((
-            self.numerator.clone().to_multi_prec(),
-            self.denominator.clone().to_multi_prec(),
-        ))
-        .to_f64()
+        let numerator = self.numerator.to_string().parse::<f64>().unwrap();
+        let denominator = self.denominator.to_string().parse::<f64>().unwrap();
+        numerator / denominator
     }
 
-    pub fn to_multi_prec(self) -> rug::Rational {
-        rug::Rational::from((
+    pub fn to_multi_prec(self) -> BackendRational {
+        BackendRational::from_integer_ratio(
             self.numerator.to_multi_prec(),
             self.denominator.to_multi_prec(),
-        ))
+        )
     }
 
     /// Return a best approximation of the rational number where the denominator
@@ -1076,21 +1075,7 @@ impl Rational {
                 let ceil_log2 = match &p {
                     Integer::Single(n) => u64::BITS as u64 - (*n as u64).leading_zeros() as u64,
                     Integer::Double(n) => u128::BITS as u64 - (*n as u128).leading_zeros() as u64,
-                    Integer::Large(n) => {
-                        let mut pos = 0;
-                        while let Some(p) = n.find_one(pos) {
-                            if let Some(p2) = pos.checked_add(p) {
-                                if p2 == u32::MAX {
-                                    return Err("Could not reconstruct, as the log is too large");
-                                }
-
-                                pos += 1;
-                            } else {
-                                return Err("Could not reconstruct, as the log is too large");
-                            }
-                        }
-                        pos as u64
-                    }
+                    Integer::Large(n) => n.significant_bits().into(),
                 };
 
                 &Integer::new(2i64 << 10) * &Integer::new(ceil_log2 as i64)
@@ -1391,6 +1376,7 @@ impl<'a> std::iter::Sum<&'a Self> for Rational {
 mod test {
     use crate::domains::{
         Field, Ring, RingOps,
+        float::{Float, Real},
         integer::Z,
         rational::{FractionField, Rational},
     };
@@ -1413,11 +1399,7 @@ mod test {
         let res = r.round(&(1, 10).into());
         assert_eq!(res, (-1, 3));
 
-        let r = crate::domains::float::Float::from(rug::Float::with_val(
-            1000,
-            rug::float::Constant::Pi,
-        ))
-        .to_rational();
+        let r = Float::new(1000).pi().to_rational();
         let res = r.round(&(1, 100000000).into());
         assert_eq!(res, (93343, 29712));
     }
