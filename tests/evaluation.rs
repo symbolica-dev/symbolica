@@ -99,6 +99,44 @@ fn error_propagating_float_transcendental_evaluator() {
     assert!(epfloat.get_precision().is_some());
 }
 
+#[test]
+fn float_transcendental_evaluator() {
+    let params = vec![
+        parse!("x"),
+        parse!("y"),
+        parse!("z"),
+        parse!("a"),
+        parse!("b"),
+    ];
+    let expr = parse!(
+        "tan(x)+asin(a)+acos(b)+atan(x)+atan(x,y)+sinh(x)+cosh(x)+tanh(x)+cot(x)+sec(x)+csc(x)+acot(x)+asec(y)+acsc(y)+coth(x)+sech(x)+csch(x)+asinh(x)+acosh(y)+atanh(a)+acoth(y)+asech(b)+acsch(x)+gamma(y)+zeta(y)+polygamma(1,y)+polylog(2,a)+bessel_j(0,x)+bessel_y(0,y)+bessel_i(0,x)+bessel_k(0,y)"
+    );
+
+    let evaluator = expr
+        .evaluator(&params)
+        .horner_iterations(0)
+        .build()
+        .unwrap();
+
+    let f64_params = [0.5, 2.0, 0.1, 0.3, 0.5];
+    let expected = evaluator
+        .clone()
+        .map_coeff(&|x| x.re.to_f64())
+        .evaluate_single(&f64_params);
+
+    let float_params = f64_params.map(|x| Float::with_val(53, x));
+    let result = evaluator
+        .map_coeff(&|x| Float::with_val(53, x.re.to_f64()))
+        .evaluate_single(&float_params);
+
+    assert!(
+        (result.to_f64() - expected).abs() < 1e-10,
+        "Float result {} differs from f64 result {}",
+        result,
+        expected
+    );
+}
+
 const F13: &'static str = "-48*ammu*amuq*ammu2*amuq2*x6*xcp4*e1234-48*ammu*amuq*ammu2*amuq2*x6*xcp3*e1234+48*ammu*amuq*ammu2*amuq2*x6*xcp2*e1234+48*ammu*amuq*ammu2*amuq2*x6*xcp1*e1234+48*ammu*amuq*ammu2*amuq2*x6^2*xcp3*e1234-48*ammu*amuq*ammu2*amuq2*x6^2*xcp2*e1234-144*ammu*
 amuq*ammu2*amuq2*x5*xcp4*e1234-48*ammu*amuq*ammu2*amuq2*x5*xcp3*e1234+48*ammu*amuq*ammu2*amuq2*x5*xcp2*e1234+144*ammu*amuq*ammu2*amuq2*x5*xcp1*e1234+96*ammu*amuq*ammu2*amuq2*x5*x6*xcp3*e1234-96*ammu*amuq*ammu2*amuq2*x5*x6*xcp2*e1234+48*ammu*amuq*
 ammu2*amuq2*x5^2*xcp3*e1234-48*ammu*amuq*ammu2*amuq2*x5^2*xcp2*e1234-96*ammu*amuq*ammu2*amuq2*x4*xcp4*e1245-48*ammu*amuq*ammu2*amuq2*x4*xcp3*e1245-96*ammu*amuq*ammu2*amuq2*x4*xcp3*e1234+48*ammu*amuq*ammu2*amuq2*x4*xcp2*e1245+96*ammu*amuq*ammu2*

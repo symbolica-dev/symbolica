@@ -162,6 +162,13 @@ impl SpecialSymbols {
                     .register(|args: &[Complex<Float>]| {
                         unary_eval_complex_float(args, gamma_numeric_eval)
                     })
+                    .register(|args: &[Float]| {
+                        let prec = args.first().map(|x| x.prec()).unwrap_or(53);
+                        let [arg] = args else {
+                            return Float::with_val(53, f64::NAN);
+                        };
+                        gamma_numeric_eval(&Complex::new(arg.clone(), Float::new(prec)), prec).re
+                    })
                     .register(|args: &[f64]| unary_eval_f64(args, gamma_numeric_eval))
                     .register(|args: &[Complex<f64>]| {
                         unary_eval_complex_f64(args, gamma_numeric_eval)
@@ -255,6 +262,24 @@ impl SpecialSymbols {
                     })
                     .register_tagged(|tags| {
                         let order = nonnegative_integer_tag("polygamma", tags).ok();
+                        Box::new(move |args: &[Float]| {
+                            let Some(order) = order else {
+                                return Float::with_val(53, f64::NAN);
+                            };
+                            let prec = args.first().map(|x| x.prec()).unwrap_or(53);
+                            let [arg] = args else {
+                                return Float::with_val(53, f64::NAN);
+                            };
+                            polygamma_numeric_eval(
+                                order,
+                                &Complex::new(arg.clone(), Float::new(prec)),
+                                prec,
+                            )
+                            .re
+                        })
+                    })
+                    .register_tagged(|tags| {
+                        let order = nonnegative_integer_tag("polygamma", tags).ok();
                         Box::new(move |args: &[f64]| polygamma_eval_f64(order, args))
                     })
                     .register_tagged(|tags| {
@@ -320,6 +345,26 @@ impl SpecialSymbols {
                                     Float::with_val(53, f64::NAN),
                                 )
                             })
+                        })
+                    })
+                    .register_tagged(|tags| {
+                        let tags = tags.iter().map(|x| x.to_owned()).collect::<Vec<_>>();
+                        Box::new(move |args: &[Float]| {
+                            let prec = args.first().map(|x| x.prec()).unwrap_or(53);
+                            let tag_views = tags.iter().map(|x| x.as_view()).collect::<Vec<_>>();
+                            let Ok(order) = complex_float_tag("polylog", &tag_views, prec) else {
+                                return Float::with_val(53, f64::NAN);
+                            };
+                            let [arg] = args else {
+                                return Float::with_val(53, f64::NAN);
+                            };
+                            polylog_numeric_eval(
+                                &order,
+                                &Complex::new(arg.clone(), Float::new(prec)),
+                                prec,
+                            )
+                            .map(|z| z.re)
+                            .unwrap_or_else(|| Float::with_val(53, f64::NAN))
                         })
                     })
                     .register_tagged(|tags| {
@@ -403,6 +448,13 @@ impl SpecialSymbols {
                     .register(|args: &[Complex<Float>]| {
                         unary_eval_complex_float(args, zeta_numeric_eval)
                     })
+                    .register(|args: &[Float]| {
+                        let prec = args.first().map(|x| x.prec()).unwrap_or(53);
+                        let [arg] = args else {
+                            return Float::with_val(53, f64::NAN);
+                        };
+                        zeta_numeric_eval(&Complex::new(arg.clone(), Float::new(prec)), prec).re
+                    })
                     .register(|args: &[f64]| zeta_eval_f64(args))
                     .register(|args: &[Complex<f64>]| zeta_eval_complex_f64(args)),
                 )
@@ -459,6 +511,7 @@ impl GeometricSymbols {
                     EvaluationInfo::new().register(|args: &[Complex<Float>]| {
                         unary_eval_complex_float(args, |z, _| z.tan())
                     })
+                    .register(|args: &[Float]| unary_eval_real(args, |x| x.tan()))
                     .register(|args: &[f64]| unary_eval_real_f64(args, f64::tan))
                     .register(|args: &[Complex<f64>]| unary_eval_complex_real_f64(args, |z| z.tan()))
                     .register(|args: &[ErrorPropagatingFloat<f64>]| {
@@ -500,6 +553,7 @@ impl GeometricSymbols {
                     EvaluationInfo::new().register(|args: &[Complex<Float>]| {
                         unary_eval_complex_float(args, |z, _| z.tan().inv())
                     })
+                    .register(|args: &[Float]| unary_eval_real(args, |x| x.tan().inv()))
                     .register(|args: &[f64]| unary_eval_real_f64(args, |x| x.tan().recip()))
                     .register(|args: &[Complex<f64>]| unary_eval_complex_real_f64(args, |z| z.tan().inv()))
                     .register(|args: &[ErrorPropagatingFloat<f64>]| {
@@ -542,6 +596,7 @@ impl GeometricSymbols {
                     EvaluationInfo::new().register(|args: &[Complex<Float>]| {
                         unary_eval_complex_float(args, |z, _| z.cos().inv())
                     })
+                    .register(|args: &[Float]| unary_eval_real(args, |x| x.cos().inv()))
                     .register(|args: &[f64]| unary_eval_real_f64(args, |x| x.cos().recip()))
                     .register(|args: &[Complex<f64>]| unary_eval_complex_real_f64(args, |z| z.cos().inv()))
                     .register(|args: &[ErrorPropagatingFloat<f64>]| {
@@ -584,6 +639,7 @@ impl GeometricSymbols {
                     EvaluationInfo::new().register(|args: &[Complex<Float>]| {
                         unary_eval_complex_float(args, |z, _| z.sin().inv())
                     })
+                    .register(|args: &[Float]| unary_eval_real(args, |x| x.sin().inv()))
                     .register(|args: &[f64]| unary_eval_real_f64(args, |x| x.sin().recip()))
                     .register(|args: &[Complex<f64>]| unary_eval_complex_real_f64(args, |z| z.sin().inv()))
                     .register(|args: &[ErrorPropagatingFloat<f64>]| {
@@ -615,6 +671,7 @@ impl GeometricSymbols {
                     EvaluationInfo::new().register(|args: &[Complex<Float>]| {
                         unary_eval_complex_float(args, |z, _| z.sinh())
                     })
+                    .register(|args: &[Float]| unary_eval_real(args, |x| x.sinh()))
                     .register(|args: &[f64]| unary_eval_real_f64(args, f64::sinh))
                     .register(|args: &[Complex<f64>]| unary_eval_complex_real_f64(args, |z| z.sinh()))
                     .register(|args: &[ErrorPropagatingFloat<f64>]| {
@@ -646,6 +703,7 @@ impl GeometricSymbols {
                     EvaluationInfo::new().register(|args: &[Complex<Float>]| {
                         unary_eval_complex_float(args, |z, _| z.cosh())
                     })
+                    .register(|args: &[Float]| unary_eval_real(args, |x| x.cosh()))
                     .register(|args: &[f64]| unary_eval_real_f64(args, f64::cosh))
                     .register(|args: &[Complex<f64>]| unary_eval_complex_real_f64(args, |z| z.cosh()))
                     .register(|args: &[ErrorPropagatingFloat<f64>]| {
@@ -687,6 +745,7 @@ impl GeometricSymbols {
                     EvaluationInfo::new().register(|args: &[Complex<Float>]| {
                         unary_eval_complex_float(args, |z, _| z.tanh())
                     })
+                    .register(|args: &[Float]| unary_eval_real(args, |x| x.tanh()))
                     .register(|args: &[f64]| unary_eval_real_f64(args, f64::tanh))
                     .register(|args: &[Complex<f64>]| unary_eval_complex_real_f64(args, |z| z.tanh()))
                     .register(|args: &[ErrorPropagatingFloat<f64>]| {
@@ -728,6 +787,7 @@ impl GeometricSymbols {
                     EvaluationInfo::new().register(|args: &[Complex<Float>]| {
                         unary_eval_complex_float(args, |z, _| z.tanh().inv())
                     })
+                    .register(|args: &[Float]| unary_eval_real(args, |x| x.tanh().inv()))
                     .register(|args: &[f64]| unary_eval_real_f64(args, |x| x.tanh().recip()))
                     .register(|args: &[Complex<f64>]| unary_eval_complex_real_f64(args, |z| z.tanh().inv()))
                     .register(|args: &[ErrorPropagatingFloat<f64>]| {
@@ -768,6 +828,7 @@ impl GeometricSymbols {
                     EvaluationInfo::new().register(|args: &[Complex<Float>]| {
                         unary_eval_complex_float(args, |z, _| z.cosh().inv())
                     })
+                    .register(|args: &[Float]| unary_eval_real(args, |x| x.cosh().inv()))
                     .register(|args: &[f64]| unary_eval_real_f64(args, |x| x.cosh().recip()))
                     .register(|args: &[Complex<f64>]| unary_eval_complex_real_f64(args, |z| z.cosh().inv()))
                     .register(|args: &[ErrorPropagatingFloat<f64>]| {
@@ -808,6 +869,7 @@ impl GeometricSymbols {
                     EvaluationInfo::new().register(|args: &[Complex<Float>]| {
                         unary_eval_complex_float(args, |z, _| z.sinh().inv())
                     })
+                    .register(|args: &[Float]| unary_eval_real(args, |x| x.sinh().inv()))
                     .register(|args: &[f64]| unary_eval_real_f64(args, |x| x.sinh().recip()))
                     .register(|args: &[Complex<f64>]| unary_eval_complex_real_f64(args, |z| z.sinh().inv()))
                     .register(|args: &[ErrorPropagatingFloat<f64>]| {
@@ -855,6 +917,7 @@ impl GeometricSymbols {
                 .register(|args: &[Complex<Float>]| {
                     unary_eval_complex_float(args, |z, _| z.asin())
                 })
+                .register(|args: &[Float]| unary_eval_real(args, |x| x.asin()))
                 .register(|args: &[f64]| unary_eval_real_f64(args, f64::asin))
                 .register(|args: &[Complex<f64>]| {
                     unary_eval_complex_real_f64(args, |z| z.asin())
@@ -891,6 +954,7 @@ impl GeometricSymbols {
                 .register(|args: &[Complex<Float>]| {
                     unary_eval_complex_float(args, |z, _| z.acos())
                 })
+                .register(|args: &[Float]| unary_eval_real(args, |x| x.acos()))
                 .register(|args: &[f64]| unary_eval_real_f64(args, f64::acos))
                 .register(|args: &[Complex<f64>]| {
                     unary_eval_complex_real_f64(args, |z| z.acos())
@@ -950,6 +1014,7 @@ impl GeometricSymbols {
                     _ =>
                         Complex::new(Float::with_val(53, f64::NAN), Float::with_val(53, f64::NAN),),
                 })
+                .register(|args: &[Float]| atan_eval_real(args))
                 .register(|args: &[f64]| match args {
                     [z] => z.atan(),
                     [x, y] => (*y).atan2(*x),
@@ -990,6 +1055,12 @@ impl GeometricSymbols {
             eval = EvaluationInfo::new()
                 .register(|args: &[Complex<Float>]| {
                     unary_eval_complex_float(args, |z, prec| atan_numeric_eval(&z.inv(), prec))
+                })
+                .register(|args: &[Float]| {
+                    unary_eval_real(args, |x| {
+                        let inv = x.inv();
+                        inv.atan2(&inv.one())
+                    })
                 })
                 .register(|args: &[f64]| unary_eval_real_f64(args, |x| x.recip().atan()))
                 .register(|args: &[Complex<f64>]| {
@@ -1034,6 +1105,7 @@ impl GeometricSymbols {
                 .register(|args: &[Complex<Float>]| {
                     unary_eval_complex_float(args, |z, _| z.inv().acos())
                 })
+                .register(|args: &[Float]| unary_eval_real(args, |x| x.inv().acos()))
                 .register(|args: &[f64]| unary_eval_real_f64(args, |x| x.recip().acos()))
                 .register(|args: &[Complex<f64>]| {
                     unary_eval_complex_real_f64(args, |z| z.inv().acos())
@@ -1067,6 +1139,7 @@ impl GeometricSymbols {
                 .register(|args: &[Complex<Float>]| {
                     unary_eval_complex_float(args, |z, _| z.inv().asin())
                 })
+                .register(|args: &[Float]| unary_eval_real(args, |x| x.inv().asin()))
                 .register(|args: &[f64]| unary_eval_real_f64(args, |x| x.recip().asin()))
                 .register(|args: &[Complex<f64>]| {
                     unary_eval_complex_real_f64(args, |z| z.inv().asin())
@@ -1103,6 +1176,7 @@ impl GeometricSymbols {
                 .register(|args: &[Complex<Float>]| {
                     unary_eval_complex_float(args, |z, _| z.asinh())
                 })
+                .register(|args: &[Float]| unary_eval_real(args, |x| x.asinh()))
                 .register(|args: &[f64]| unary_eval_real_f64(args, f64::asinh))
                 .register(|args: &[Complex<f64>]| {
                     unary_eval_complex_real_f64(args, |z| z.asinh())
@@ -1140,6 +1214,7 @@ impl GeometricSymbols {
                 .register(|args: &[Complex<Float>]| {
                     unary_eval_complex_float(args, |z, _| z.acosh())
                 })
+                .register(|args: &[Float]| unary_eval_real(args, |x| x.acosh()))
                 .register(|args: &[f64]| unary_eval_real_f64(args, f64::acosh))
                 .register(|args: &[Complex<f64>]| {
                     unary_eval_complex_real_f64(args, |z| z.acosh())
@@ -1175,6 +1250,7 @@ impl GeometricSymbols {
                 .register(|args: &[Complex<Float>]| {
                     unary_eval_complex_float(args, |z, _| z.atanh())
                 })
+                .register(|args: &[Float]| unary_eval_real(args, |x| x.atanh()))
                 .register(|args: &[f64]| unary_eval_real_f64(args, f64::atanh))
                 .register(|args: &[Complex<f64>]| {
                     unary_eval_complex_real_f64(args, |z| z.atanh())
@@ -1206,6 +1282,7 @@ impl GeometricSymbols {
                 .register(|args: &[Complex<Float>]| {
                     unary_eval_complex_float(args, |z, _| z.inv().atanh())
                 })
+                .register(|args: &[Float]| unary_eval_real(args, |x| x.inv().atanh()))
                 .register(|args: &[f64]| unary_eval_real_f64(args, |x| x.recip().atanh()))
                 .register(|args: &[Complex<f64>]| {
                     unary_eval_complex_real_f64(args, |z| z.inv().atanh())
@@ -1245,6 +1322,7 @@ impl GeometricSymbols {
                 .register(|args: &[Complex<Float>]| {
                     unary_eval_complex_float(args, |z, _| z.inv().acosh())
                 })
+                .register(|args: &[Float]| unary_eval_real(args, |x| x.inv().acosh()))
                 .register(|args: &[f64]| unary_eval_real_f64(args, |x| x.recip().acosh()))
                 .register(|args: &[Complex<f64>]| {
                     unary_eval_complex_real_f64(args, |z| z.inv().acosh())
@@ -1279,6 +1357,7 @@ impl GeometricSymbols {
                 .register(|args: &[Complex<Float>]| {
                     unary_eval_complex_float(args, |z, _| z.inv().asinh())
                 })
+                .register(|args: &[Float]| unary_eval_real(args, |x| x.inv().asinh()))
                 .register(|args: &[f64]| unary_eval_real_f64(args, |x| x.recip().asinh()))
                 .register(|args: &[Complex<f64>]| {
                     unary_eval_complex_real_f64(args, |z| z.inv().asinh())
@@ -1362,6 +1441,26 @@ impl BesselSymbols {
                     })
                 })
                 .register_tagged(|tags| {
+                    let tags = tags.iter().map(|x| x.to_owned()).collect::<Vec<_>>();
+                    Box::new(move |args: &[Float]| {
+                        let prec = args.first().map(|x| x.prec()).unwrap_or(53);
+                        let tag_views = tags.iter().map(|x| x.as_view()).collect::<Vec<_>>();
+                        let Ok(order) = complex_float_tag("bessel_j", &tag_views, prec) else {
+                            return Float::with_val(53, f64::NAN);
+                        };
+                        let [arg] = args else {
+                            return Float::with_val(53, f64::NAN);
+                        };
+                        bessel_j_numeric_eval(
+                            &order,
+                            &Complex::new(arg.clone(), Float::new(prec)),
+                            prec,
+                        )
+                        .map(|z| z.re)
+                        .unwrap_or_else(|| Float::with_val(53, f64::NAN))
+                    })
+                })
+                .register_tagged(|tags| {
                     let order = complex_float_tag("bessel_j", tags, 53).ok();
                     Box::new(move |args: &[f64]| {
                         tagged_unary_eval_real_f64(order.clone(), args, bessel_j_numeric_eval)
@@ -1408,6 +1507,26 @@ impl BesselSymbols {
                             args,
                             bessel_y_numeric_eval,
                         )
+                    })
+                })
+                .register_tagged(|tags| {
+                    let tags = tags.iter().map(|x| x.to_owned()).collect::<Vec<_>>();
+                    Box::new(move |args: &[Float]| {
+                        let prec = args.first().map(|x| x.prec()).unwrap_or(53);
+                        let tag_views = tags.iter().map(|x| x.as_view()).collect::<Vec<_>>();
+                        let Ok(order) = complex_float_tag("bessel_y", &tag_views, prec) else {
+                            return Float::with_val(53, f64::NAN);
+                        };
+                        let [arg] = args else {
+                            return Float::with_val(53, f64::NAN);
+                        };
+                        bessel_y_numeric_eval(
+                            &order,
+                            &Complex::new(arg.clone(), Float::new(prec)),
+                            prec,
+                        )
+                        .map(|z| z.re)
+                        .unwrap_or_else(|| Float::with_val(53, f64::NAN))
                     })
                 })
                 .register_tagged(|tags| {
@@ -1467,6 +1586,26 @@ impl BesselSymbols {
                     })
                 })
                 .register_tagged(|tags| {
+                    let tags = tags.iter().map(|x| x.to_owned()).collect::<Vec<_>>();
+                    Box::new(move |args: &[Float]| {
+                        let prec = args.first().map(|x| x.prec()).unwrap_or(53);
+                        let tag_views = tags.iter().map(|x| x.as_view()).collect::<Vec<_>>();
+                        let Ok(order) = complex_float_tag("bessel_i", &tag_views, prec) else {
+                            return Float::with_val(53, f64::NAN);
+                        };
+                        let [arg] = args else {
+                            return Float::with_val(53, f64::NAN);
+                        };
+                        bessel_i_numeric_eval(
+                            &order,
+                            &Complex::new(arg.clone(), Float::new(prec)),
+                            prec,
+                        )
+                        .map(|z| z.re)
+                        .unwrap_or_else(|| Float::with_val(53, f64::NAN))
+                    })
+                })
+                .register_tagged(|tags| {
                     let order = complex_float_tag("bessel_i", tags, 53).ok();
                     Box::new(move |args: &[f64]| {
                         tagged_unary_eval_real_f64(order.clone(), args, bessel_i_numeric_eval)
@@ -1513,6 +1652,26 @@ impl BesselSymbols {
                             args,
                             bessel_k_numeric_eval,
                         )
+                    })
+                })
+                .register_tagged(|tags| {
+                    let tags = tags.iter().map(|x| x.to_owned()).collect::<Vec<_>>();
+                    Box::new(move |args: &[Float]| {
+                        let prec = args.first().map(|x| x.prec()).unwrap_or(53);
+                        let tag_views = tags.iter().map(|x| x.as_view()).collect::<Vec<_>>();
+                        let Ok(order) = complex_float_tag("bessel_k", &tag_views, prec) else {
+                            return Float::with_val(53, f64::NAN);
+                        };
+                        let [arg] = args else {
+                            return Float::with_val(53, f64::NAN);
+                        };
+                        bessel_k_numeric_eval(
+                            &order,
+                            &Complex::new(arg.clone(), Float::new(prec)),
+                            prec,
+                        )
+                        .map(|z| z.re)
+                        .unwrap_or_else(|| Float::with_val(53, f64::NAN))
                     })
                 })
                 .register_tagged(|tags| {

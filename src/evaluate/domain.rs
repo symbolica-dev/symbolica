@@ -118,7 +118,8 @@ impl EvaluationDomain for wide::f64x4 {
         // create a vectorized version of the scalar function if it exists
         if let Some(f) = f64::resolve_function(tags, info) {
             Some(Box::new(move |args| {
-                let mut buffer = smallvec::SmallVec::<[f64; 4]>::from([0.; 4]);
+                let mut buffer =
+                    smallvec::SmallVec::<[f64; 4]>::from_iter(std::iter::repeat_n(0., args.len()));
                 let mut res = [0.; 4];
 
                 for i in 0..4 {
