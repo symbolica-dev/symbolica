@@ -1,3 +1,6 @@
+use crate::coefficient::{Coefficient, ConvertToRing};
+use crate::domains::Ring;
+
 use super::*;
 
 /// An evaluator for symbolic expressions. Use [AtomCore::evaluator] to create an evaluator for a given expression.
@@ -331,7 +334,212 @@ impl<T: Real> ExpressionEvaluator<T> {
     }
 }
 
-impl ExpressionEvaluator<Complex<Rational>> {}
+impl<T: Clone> ExpressionEvaluator<T> {
+    /// Evaluate the expression evaluator which yields a single result.
+    pub fn evaluate_single_in_ring<R: Ring<Element = T>>(&mut self, params: &[T], ring: &R) -> T {
+        if self.result_indices.len() != 1 {
+            panic!(
+                "Evaluator does not return a single result but {} results",
+                self.result_indices.len()
+            );
+        }
+
+        let mut res = ring.zero();
+        self.evaluate_in_ring(params, std::slice::from_mut(&mut res), ring);
+        res
+    }
+
+    /// Evaluate the expression evaluator and write the results in `out`.
+    #[inline]
+    pub fn try_evaluate_in_ring<R: Ring<Element = T>>(
+        &mut self,
+        params: &[T],
+        out: &mut [T],
+        ring: &R,
+    ) -> Result<(), EvaluationError> {
+        if params.len() != self.param_count {
+            return Err(EvaluationError::InvalidParameterCount {
+                expected: self.param_count,
+                actual: params.len(),
+            });
+        }
+
+        if self.result_indices.len() != out.len() {
+            return Err(EvaluationError::InvalidOutputCount {
+                expected: self.result_indices.len(),
+                actual: out.len(),
+            });
+        }
+
+        for (t, p) in self.stack.iter_mut().zip(params) {
+            *t = p.clone();
+        }
+
+        let mut i = 0;
+        let stack = &mut self.stack;
+        while i < self.instructions.len() {
+            let (instr, _) = unsafe { &self.instructions.get_unchecked(i) };
+            match instr {
+                Instr::Add(r, v) => unsafe {
+                    let mut tmp = stack.get_unchecked(*v.get_unchecked(0)).clone();
+                    for x in v.get_unchecked(1..) {
+                        ring.add_assign(&mut tmp, stack.get_unchecked(*x));
+                    }
+
+                    *stack.get_unchecked_mut(*r) = tmp;
+                },
+                Instr::Mul(r, v) => unsafe {
+                    let mut tmp = stack.get_unchecked(*v.get_unchecked(0)).clone();
+                    for x in v.get_unchecked(1..) {
+                        ring.mul_assign(&mut tmp, stack.get_unchecked(*x));
+                    }
+
+                    *stack.get_unchecked_mut(*r) = tmp;
+                },
+                Instr::Pow(r, b, e) => {
+                    if *e == -1 {
+                        stack[*r] = ring.try_inv(&stack[*b]).ok_or_else(|| {
+                            EvaluationError::EvaluationFailed {
+                                expression: Atom::num(0),
+                                reason: format!("Could not invert {}", ring.printer(&stack[*b])),
+                            }
+                        })?;
+                    } else if *e >= 0 {
+                        stack[*r] = ring.pow(&stack[*b], *e as u64);
+                    } else {
+                        let p = ring.pow(&stack[*b], e.unsigned_abs());
+                        stack[*r] =
+                            ring.try_inv(&p)
+                                .ok_or_else(|| EvaluationError::EvaluationFailed {
+                                    expression: Atom::num(0),
+                                    reason: format!("Could not invert {}", ring.printer(&p)),
+                                })?;
+                    }
+                }
+                _ => {
+                    if let Some(idx) = Self::evaluate_impl_no_ops_in_ring(stack, instr, ring)? {
+                        i = idx;
+                        continue;
+                    }
+                }
+            }
+
+            i += 1;
+        }
+
+        for (o, i) in out.iter_mut().zip(&self.result_indices) {
+            *o = stack[*i].clone();
+        }
+
+        Ok(())
+    }
+
+    /// Evaluate the expression evaluator and write the results in `out`.
+    ///
+    /// # Example
+    ///
+    /// ```
+    /// use symbolica::prelude::*;
+    /// let ring = Zp::new(5);
+    /// let mut evaluator = parse!("x^2").evaluator(&[parse!("x")]).build()
+    ///     .unwrap().map_to_ring(&ring).unwrap();
+    /// let mut out = vec![ring.zero()];
+    /// evaluator.evaluate_in_ring(&[ring.nth(2.into())], &mut out, &ring);
+    /// assert_eq!(out, vec![ring.nth(4.into())]);
+    /// ```
+    #[inline]
+    pub fn evaluate_in_ring<R: Ring<Element = T>>(
+        &mut self,
+        params: &[T],
+        out: &mut [T],
+        ring: &R,
+    ) {
+        self.try_evaluate_in_ring(params, out, ring).unwrap();
+    }
+
+    #[cold]
+    #[inline(never)]
+    fn evaluate_impl_no_ops_in_ring<R: Ring<Element = T>>(
+        stack: &mut [T],
+        instr: &Instr,
+        ring: &R,
+    ) -> Result<Option<usize>, EvaluationError> {
+        match instr {
+            Instr::Powf(_, _, _) => {
+                return Err(EvaluationError::EvaluationFailed {
+                    expression: Atom::num(0),
+                    reason: "Non-integer powers are not supported in ring evaluation".to_string(),
+                });
+            }
+            Instr::BuiltinFun(_, s, _) => {
+                return Err(EvaluationError::UndefinedFunction {
+                    expression: s.to_atom(),
+                });
+            }
+            Instr::ExternalFun(_, _, _) => {
+                return Err(EvaluationError::EvaluationFailed {
+                    expression: Atom::num(0),
+                    reason: "External functions are not supported in ring evaluation".to_string(),
+                });
+            }
+            Instr::IfElse(n, label) => {
+                // jump to else block
+                if ring.is_zero(&stack[*n]) {
+                    return Ok(Some(label.0));
+                }
+            }
+            Instr::Goto(label) => {
+                return Ok(Some(label.0));
+            }
+            Instr::Label(_) => {}
+            Instr::Join(r, c, a, b) => {
+                if !ring.is_zero(&stack[*c]) {
+                    stack[*r] = stack[*a].clone();
+                } else {
+                    stack[*r] = stack[*b].clone();
+                }
+            }
+            Instr::Add(..) | Instr::Mul(..) | Instr::Pow(..) => {
+                unreachable!()
+            }
+        }
+
+        Ok(None)
+    }
+}
+
+impl ExpressionEvaluator<Complex<Rational>> {
+    /// Map the coefficients to a given ring.
+    pub fn map_to_ring<R: ConvertToRing>(
+        self,
+        ring: &R,
+    ) -> Result<ExpressionEvaluator<R::Element>, EvaluationError> {
+        if self.external_fns.len() > 0 {
+            return Err(EvaluationError::UndefinedFunction {
+                expression: self.external_fns[0].symbol.to_atom(),
+            });
+        }
+
+        let stack = self
+            .stack
+            .into_iter()
+            .map(|x| {
+                ring.try_element_from_coefficient(Coefficient::from(x))
+                    .map_err(|e| EvaluationError::UnsupportedCoefficient { coefficient: e })
+            })
+            .collect::<Result<Vec<_>, _>>()?;
+
+        Ok(ExpressionEvaluator {
+            stack,
+            param_count: self.param_count,
+            reserved_indices: self.reserved_indices,
+            instructions: self.instructions,
+            result_indices: self.result_indices,
+            external_fns: vec![],
+            settings: self.settings,
+        })
+    }
+}
 
 impl<T: Default> ExpressionEvaluator<T> {
     /// Map the coefficients to a different type.

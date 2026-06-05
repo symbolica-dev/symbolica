@@ -1,6 +1,8 @@
 use symbolica::{
-    atom::{AtomCore, EvaluationInfo},
+    atom::{Atom, AtomCore, EvaluationInfo},
     domains::{
+        Ring,
+        finite_field::{FiniteFieldCore, Zp},
         float::{Complex, ErrorPropagatingFloat, Float, RealLike},
         rational::Rational,
     },
@@ -10,6 +12,37 @@ use symbolica::{
     },
     parse, symbol,
 };
+
+#[test]
+fn evaluator_in_finite_field_ring() {
+    let params = vec![parse!("x"), parse!("y")];
+    let field = Zp::new(7);
+
+    let mut evaluator = parse!("x^3 + 2*x*y + y^-1")
+        .evaluator(&params)
+        .build()
+        .unwrap()
+        .map_to_ring(&field)
+        .unwrap();
+
+    let inputs = [field.to_element(3), field.to_element(5)];
+    assert_eq!(
+        evaluator.evaluate_single_in_ring(&inputs, &field),
+        field.to_element(4)
+    );
+
+    let exprs = vec![parse!("if(x, x + y, y)"), parse!("(x + y)^2")];
+    let mut evaluator = Atom::evaluator_multiple(&exprs, &params)
+        .build()
+        .unwrap()
+        .map_to_ring(&field)
+        .unwrap();
+
+    let inputs = [field.zero(), field.to_element(5)];
+    let mut out = vec![field.zero(); 2];
+    evaluator.evaluate_in_ring(&inputs, &mut out, &field);
+    assert_eq!(out, vec![field.to_element(5), field.to_element(4)]);
+}
 
 #[test]
 fn merge_evaluator_with_external_functions() {
