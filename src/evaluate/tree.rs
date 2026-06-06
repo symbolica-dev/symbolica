@@ -349,12 +349,7 @@ impl<'a> AtomView<'a> {
         };
         let p_ref = &permutations;
 
-        let n_cores = if LicenseManager::is_licensed() {
-            settings.n_cores
-        } else {
-            1
-        }
-        .min(n_iterations);
+        let n_cores = LicenseManager::max_threads(settings.n_cores).min(n_iterations);
 
         std::thread::scope(|s| {
             let abort = Arc::new(AtomicBool::new(false));
@@ -1635,6 +1630,7 @@ impl<T: std::hash::Hash + Clone> Expression<T> {
 }
 
 impl<T> ExpressionEvaluator<T> {
+    #[cfg(feature = "native_code_generation")]
     pub(super) fn export_external_cpps(&self) -> String {
         let mut seen = HashSet::default();
         let mut res = String::new();
@@ -2818,12 +2814,7 @@ impl Expression<Complex<Rational>> {
         };
         let p_ref = &permutations;
 
-        let n_cores = if LicenseManager::is_licensed() {
-            settings.n_cores
-        } else {
-            1
-        }
-        .min(n_iterations);
+        let n_cores = LicenseManager::max_threads(settings.n_cores).min(n_iterations);
 
         std::thread::scope(|s| {
             let abort = Arc::new(AtomicBool::new(false));

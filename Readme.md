@@ -28,6 +28,9 @@ Try the live [Jupyter Notebook demo](https://colab.research.google.com/drive/1VA
 read the [documentation](https://symbolica.io/docs/), or see
 [symbolica.io](https://symbolica.io) for licensing and support.
 
+There is also a static browser playground in
+[`docs/playground`](docs/playground/) for experimenting with the WASM build.
+
 ## Why Symbolica?
 
 - Native Python and Rust APIs for the same symbolic core
