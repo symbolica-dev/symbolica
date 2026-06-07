@@ -12,7 +12,7 @@ use tracing::{debug, instrument};
 use crate::domains::algebraic_number::{AlgebraicExtension, GaloisField};
 use crate::domains::finite_field::{
     FiniteField, FiniteFieldCore, FiniteFieldElement, FiniteFieldWorkspace, PrimeIteratorU64,
-    SMOOTH_PRIME_BASE, SMOOTH_PRIMES, ToFiniteField, Zp, Zp64,
+    SMOOTH_PRIME_BASE, SMOOTH_PRIMES, ToFiniteField, Zp64,
 };
 use crate::domains::float::{FloatField, SingleFloat};
 use crate::domains::integer::{FromFiniteField, Integer, IntegerRing, SMALL_PRIMES, Z};
@@ -26,6 +26,12 @@ use crate::{GLOBAL_SETTINGS, warn};
 use super::PositiveExponent;
 use super::polynomial::MultivariatePolynomial;
 
+#[cfg(feature = "binary_size")]
+type ModularGcdFieldWorkspace = u64;
+#[cfg(not(feature = "binary_size"))]
+type ModularGcdFieldWorkspace = u32;
+type ModularGcdField = FiniteField<ModularGcdFieldWorkspace>;
+
 /// The maximum power of a variable that is cached
 pub(crate) const POW_CACHE_SIZE: usize = 1000;
 pub(crate) const INITIAL_POW_MAP_SIZE: usize = 1000;
@@ -37,6 +43,26 @@ pub(crate) const MAX_RNG_PREFACTOR: u32 = 50000;
 enum GCDError {
     BadOriginalImage,
     BadCurrentImage,
+}
+
+fn modular_gcd_prime_iterator() -> PrimeIteratorU64 {
+    PrimeIteratorU64::new(
+        <ModularGcdFieldWorkspace as FiniteFieldWorkspace>::get_large_prime()
+            .to_u64()
+            .unwrap_or(1 << 63),
+    )
+}
+
+fn next_modular_gcd_prime(
+    primes: &mut PrimeIteratorU64,
+    context: &str,
+) -> ModularGcdFieldWorkspace {
+    let Some(p) = primes.next().and_then(|p| {
+        <ModularGcdFieldWorkspace as FiniteFieldWorkspace>::try_from_integer(p.into())
+    }) else {
+        panic!("Ran out of primes for {context}");
+    };
+    p
 }
 
 impl<R: Ring, E: PositiveExponent> MultivariatePolynomial<R, E> {
@@ -3547,15 +3573,20 @@ impl<E: PositiveExponent> PolynomialGCD<E> for IntegerRing {
         }
 
         let mut tight_bounds: SmallVec<[E; INLINED_EXPONENTS]> = bounds.iter().cloned().collect();
-        if a.coefficients
-            .iter()
-            .any(|x| !matches!(x, Integer::Single(_)))
+        if cfg!(feature = "binary_size")
+            || a.coefficients
+                .iter()
+                .any(|x| !matches!(x, Integer::Single(_)))
             || b.coefficients
                 .iter()
                 .any(|x| !matches!(x, Integer::Single(_)))
         {
             MultivariatePolynomial::gcd_zippel::<u64>(a, b, vars, bounds, &mut tight_bounds)
         } else {
+            #[cfg(feature = "binary_size")]
+            unreachable!("binary_size builds only instantiate the u64 modular GCD path");
+
+            #[cfg(not(feature = "binary_size"))]
             MultivariatePolynomial::gcd_zippel::<u32>(a, b, vars, bounds, &mut tight_bounds)
         }
     }
@@ -3568,9 +3599,12 @@ impl<E: PositiveExponent> PolynomialGCD<E> for IntegerRing {
         let mut bounds: SmallVec<[_; INLINED_EXPONENTS]> =
             (0..a.nvars()).map(|_| E::zero()).collect();
 
-        let mut primes = PrimeIteratorU64::new(u32::get_large_prime() as u64);
+        let mut primes = modular_gcd_prime_iterator();
 
-        let mut f = Zp::new(primes.next().unwrap() as u32);
+        let mut f = ModularGcdField::new(next_modular_gcd_prime(
+            &mut primes,
+            "gcd var bound detection",
+        ));
         let mut ap = a.map_coeff(|c| c.to_finite_field(&f), f.clone());
         let mut bp = b.map_coeff(|c| c.to_finite_field(&f), f.clone());
 
@@ -3582,11 +3616,8 @@ impl<E: PositiveExponent> PolynomialGCD<E> for IntegerRing {
             while ap.degree(*var) != a.degree(*var) || bp.degree(*var) != b.degree(*var) {
                 debug!("Variable bounds failed due to bad prime");
 
-                let Some(p) = u32::try_from_integer(primes.next().unwrap().into()) else {
-                    panic!("Ran out of primes for gcd var bound detection.\ngcd({a},{b})");
-                };
-
-                f = Zp::new(p);
+                let p = next_modular_gcd_prime(&mut primes, "gcd var bound detection");
+                f = ModularGcdField::new(p);
                 ap = a.map_coeff(|c| c.to_finite_field(&f), f.clone());
                 bp = b.map_coeff(|c| c.to_finite_field(&f), f.clone());
             }
@@ -3810,16 +3841,13 @@ impl<E: PositiveExponent> PolynomialGCD<E> for AlgebraicExtension<RationalField>
             b.check_consistency();
         }
 
-        let mut primes = PrimeIteratorU64::new(u32::get_large_prime() as u64);
+        let mut primes = modular_gcd_prime_iterator();
 
         let mut tight_bounds: SmallVec<[E; INLINED_EXPONENTS]> = bounds.iter().cloned().collect();
 
         'newfirstprime: loop {
-            let Some(p) = u32::try_from_integer(primes.next().unwrap().into()) else {
-                panic!("Ran out of primes for gcd reconstruction.\ngcd({a},{b})");
-            };
-
-            let mut finite_field = Zp::new(p);
+            let p = next_modular_gcd_prime(&mut primes, "gcd reconstruction");
+            let mut finite_field = ModularGcdField::new(p);
             let mut algebraic_field_ff = a.ring.to_finite_field(&finite_field);
 
             let a_lcoeff_p = a_lcoeff.to_finite_field(&finite_field);
@@ -3917,13 +3945,8 @@ impl<E: PositiveExponent> PolynomialGCD<E> for AlgebraicExtension<RationalField>
             // add new primes until we can reconstruct the full gcd
             'newprime: loop {
                 loop {
-                    let Some(p) = u32::try_from_integer(primes.next().unwrap().into()) else {
-                        panic!(
-                            "Ran out of primes for gcd images.\ngcd({a},{b})\nAttempt: {gm}\n vars: {vars:?}, bounds: {bounds:?}; {tight_bounds:?}"
-                        );
-                    };
-
-                    finite_field = Zp::new(p);
+                    let p = next_modular_gcd_prime(&mut primes, "gcd images");
+                    finite_field = ModularGcdField::new(p);
                     algebraic_field_ff = a.ring.to_finite_field(&finite_field);
 
                     let a_lcoeff_p = a_lcoeff.to_finite_field(&finite_field);
@@ -4112,9 +4135,12 @@ impl<E: PositiveExponent> PolynomialGCD<E> for AlgebraicExtension<RationalField>
     ) -> SmallVec<[E; INLINED_EXPONENTS]> {
         let mut bounds: SmallVec<[_; INLINED_EXPONENTS]> =
             (0..a.nvars()).map(|_| E::zero()).collect();
-        let mut primes = PrimeIteratorU64::new(u32::get_large_prime() as u64);
+        let mut primes = modular_gcd_prime_iterator();
 
-        let mut f = Zp::new(primes.next().unwrap() as u32);
+        let mut f = ModularGcdField::new(next_modular_gcd_prime(
+            &mut primes,
+            "gcd var bound detection",
+        ));
         let mut algebraic_field_ff = a.ring.to_finite_field(&f);
         let mut ap = a.map_coeff(|c| c.to_finite_field(&f), algebraic_field_ff.clone());
         let mut bp = b.map_coeff(|c| c.to_finite_field(&f), algebraic_field_ff.clone());
@@ -4127,11 +4153,8 @@ impl<E: PositiveExponent> PolynomialGCD<E> for AlgebraicExtension<RationalField>
             while ap.degree(*var) != a.degree(*var) || bp.degree(*var) != b.degree(*var) {
                 debug!("Variable bounds failed due to bad prime");
 
-                let Some(p) = u32::try_from_integer(primes.next().unwrap().into()) else {
-                    panic!("Ran out of primes for gcd var bound detection.\ngcd({a},{b})");
-                };
-
-                f = Zp::new(p);
+                let p = next_modular_gcd_prime(&mut primes, "gcd var bound detection");
+                f = ModularGcdField::new(p);
                 algebraic_field_ff = a.ring.to_finite_field(&f);
                 ap = a.map_coeff(|c| c.to_finite_field(&f), algebraic_field_ff.clone());
                 bp = b.map_coeff(|c| c.to_finite_field(&f), algebraic_field_ff.clone());

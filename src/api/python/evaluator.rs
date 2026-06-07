@@ -8,13 +8,16 @@ pub struct PythonExpressionEvaluator {
     pub rational_constants: Vec<Complex<Rational>>,
     pub eval_complex: ExpressionEvaluator<Complex<f64>>,
     pub eval_real: Option<ExpressionEvaluator<f64>>,
+    #[cfg(feature = "native_code_generation")]
     pub jit_real: Option<JITCompiledEvaluator<f64>>,
+    #[cfg(feature = "native_code_generation")]
     pub jit_complex: Option<JITCompiledEvaluator<Complex<f64>>>,
     pub eval_double_float: Option<ExpressionEvaluator<DoubleFloat>>,
     pub eval_double_float_complex: Option<ExpressionEvaluator<Complex<DoubleFloat>>>,
     pub eval_arb_prec: Option<(u32, ExpressionEvaluator<Float>)>,
     pub eval_arb_prec_complex: Option<(u32, ExpressionEvaluator<Complex<Float>>)>,
     pub jit_compile: bool,
+    #[cfg(feature = "native_code_generation")]
     pub jit_settings: JITCompilationSettings,
 }
 
@@ -147,13 +150,16 @@ impl PythonExpressionEvaluator {
             rational_constants: self.rational_constants.clone(),
             eval_complex: self.eval_complex.clone(),
             eval_real: self.eval_real.clone(),
+            #[cfg(feature = "native_code_generation")]
             jit_real: self.jit_real.clone(),
+            #[cfg(feature = "native_code_generation")]
             jit_complex: self.jit_complex.clone(),
             eval_double_float: self.eval_double_float.clone(),
             eval_double_float_complex: self.eval_double_float_complex.clone(),
             eval_arb_prec: self.eval_arb_prec.clone(),
             eval_arb_prec_complex: self.eval_arb_prec_complex.clone(),
             jit_compile: self.jit_compile.clone(),
+            #[cfg(feature = "native_code_generation")]
             jit_settings: self.jit_settings.clone(),
         }
     }
@@ -165,25 +171,42 @@ impl PythonExpressionEvaluator {
         jit_compile: bool,
         direct_translation: Option<bool>,
         optimization_level: Option<u8>,
-    ) {
-        self.jit_compile = jit_compile;
-
-        if let Some(direct_translation) = direct_translation {
-            self.jit_settings = self
-                .jit_settings
-                .clone()
-                .direct_translation(direct_translation);
-            self.jit_real = None;
-            self.jit_complex = None;
+    ) -> PyResult<()> {
+        #[cfg(not(feature = "native_code_generation"))]
+        {
+            let _ = (direct_translation, optimization_level);
+            self.jit_compile = false;
+            if jit_compile {
+                return Err(exceptions::PyRuntimeError::new_err(
+                    "JIT compilation is not available in this Symbolica build.",
+                ));
+            }
+            return Ok(());
         }
 
-        if let Some(optimization_level) = optimization_level {
-            self.jit_settings = self
-                .jit_settings
-                .clone()
-                .optimization_level(optimization_level);
-            self.jit_real = None;
-            self.jit_complex = None;
+        #[cfg(feature = "native_code_generation")]
+        {
+            self.jit_compile = jit_compile;
+
+            if let Some(direct_translation) = direct_translation {
+                self.jit_settings = self
+                    .jit_settings
+                    .clone()
+                    .direct_translation(direct_translation);
+                self.jit_real = None;
+                self.jit_complex = None;
+            }
+
+            if let Some(optimization_level) = optimization_level {
+                self.jit_settings = self
+                    .jit_settings
+                    .clone()
+                    .optimization_level(optimization_level);
+                self.jit_real = None;
+                self.jit_complex = None;
+            }
+
+            Ok(())
         }
     }
 
@@ -195,78 +218,118 @@ impl PythonExpressionEvaluator {
     ///     The serialized evaluator state.
     #[classmethod]
     fn load(_cls: &Bound<'_, PyType>, evaluator: Bound<'_, PyBytes>) -> PyResult<Self> {
-        type SavedEvaluator = (
-            bool,
-            JITCompilationSettings,
-            ExpressionEvaluator<Complex<Rational>>,
-            Option<JITCompiledEvaluator<f64>>,
-            Option<JITCompiledEvaluator<Complex<f64>>>,
-        );
-        type LegacySavedEvaluator = (
-            bool,
-            ExpressionEvaluator<Complex<Rational>>,
-            Option<JITCompiledEvaluator<f64>>,
-            Option<JITCompiledEvaluator<Complex<f64>>>,
-        );
-
-        let bytes: &[u8] = evaluator.extract()?;
-        let (jit_compile, jit_settings, eval, jit_real, jit_complex) =
-            match bincode::decode_from_slice::<SavedEvaluator, _>(
+        #[cfg(not(feature = "native_code_generation"))]
+        {
+            let bytes: &[u8] = evaluator.extract()?;
+            let eval = bincode::decode_from_slice::<ExpressionEvaluator<Complex<Rational>>, _>(
                 bytes,
                 bincode::config::standard(),
-            ) {
-                Ok((decoded, _)) => decoded,
-                Err(new_err) => {
-                    let (jit_compile, eval, jit_real, jit_complex) =
-                        bincode::decode_from_slice::<LegacySavedEvaluator, _>(
-                            bytes,
-                            bincode::config::standard(),
-                        )
-                        .map_err(|_| pyo3::exceptions::PyIOError::new_err(new_err.to_string()))?
-                        .0;
-                    (
-                        jit_compile,
-                        JITCompilationSettings::default(),
-                        eval,
-                        jit_real,
-                        jit_complex,
-                    )
-                }
-            };
+            )
+            .map_err(|e| pyo3::exceptions::PyIOError::new_err(e.to_string()))?
+            .0;
 
-        Ok(PythonExpressionEvaluator {
-            rational_constants: eval.get_constants().to_vec(),
-            eval_complex: eval.map_coeff(&|c| Complex::new(c.re.to_f64(), c.im.to_f64())),
-            eval_real: None,
-            jit_real,
-            jit_complex,
-            eval_double_float: None,
-            eval_double_float_complex: None,
-            eval_arb_prec: None,
-            eval_arb_prec_complex: None,
-            jit_compile,
-            jit_settings,
-        })
+            return Ok(PythonExpressionEvaluator {
+                rational_constants: eval.get_constants().to_vec(),
+                eval_complex: eval.map_coeff(&|c| Complex::new(c.re.to_f64(), c.im.to_f64())),
+                eval_real: None,
+                eval_double_float: None,
+                eval_double_float_complex: None,
+                eval_arb_prec: None,
+                eval_arb_prec_complex: None,
+                jit_compile: false,
+            });
+        }
+
+        #[cfg(feature = "native_code_generation")]
+        {
+            type SavedEvaluator = (
+                bool,
+                JITCompilationSettings,
+                ExpressionEvaluator<Complex<Rational>>,
+                Option<JITCompiledEvaluator<f64>>,
+                Option<JITCompiledEvaluator<Complex<f64>>>,
+            );
+            type LegacySavedEvaluator = (
+                bool,
+                ExpressionEvaluator<Complex<Rational>>,
+                Option<JITCompiledEvaluator<f64>>,
+                Option<JITCompiledEvaluator<Complex<f64>>>,
+            );
+
+            let bytes: &[u8] = evaluator.extract()?;
+            let (jit_compile, jit_settings, eval, jit_real, jit_complex) =
+                match bincode::decode_from_slice::<SavedEvaluator, _>(
+                    bytes,
+                    bincode::config::standard(),
+                ) {
+                    Ok((decoded, _)) => decoded,
+                    Err(new_err) => {
+                        let (jit_compile, eval, jit_real, jit_complex) =
+                            bincode::decode_from_slice::<LegacySavedEvaluator, _>(
+                                bytes,
+                                bincode::config::standard(),
+                            )
+                            .map_err(|_| pyo3::exceptions::PyIOError::new_err(new_err.to_string()))?
+                            .0;
+                        (
+                            jit_compile,
+                            JITCompilationSettings::default(),
+                            eval,
+                            jit_real,
+                            jit_complex,
+                        )
+                    }
+                };
+
+            Ok(PythonExpressionEvaluator {
+                rational_constants: eval.get_constants().to_vec(),
+                eval_complex: eval.map_coeff(&|c| Complex::new(c.re.to_f64(), c.im.to_f64())),
+                eval_real: None,
+                jit_real,
+                jit_complex,
+                eval_double_float: None,
+                eval_double_float_complex: None,
+                eval_arb_prec: None,
+                eval_arb_prec_complex: None,
+                jit_compile,
+                jit_settings,
+            })
+        }
     }
 
     /// Save the evaluator to a byte string that can be imported in another thread or machine.
     /// The external functions are not exported, so they need to be provided separately when importing.
     /// Use `load` to import the evaluator.
     fn save<'p>(&self, py: Python<'p>) -> PyResult<Bound<'p, PyBytes>> {
-        bincode::encode_to_vec(
-            &(
-                self.jit_compile,
-                self.jit_settings.clone(),
+        #[cfg(not(feature = "native_code_generation"))]
+        {
+            return bincode::encode_to_vec(
                 self.eval_complex
                     .clone()
                     .set_coeff(&self.rational_constants),
-                &self.jit_real,
-                &self.jit_complex,
-            ),
-            bincode::config::standard(),
-        )
-        .map(|a| PyBytes::new(py, &a))
-        .map_err(|e| pyo3::exceptions::PyIOError::new_err(e.to_string()))
+                bincode::config::standard(),
+            )
+            .map(|a| PyBytes::new(py, &a))
+            .map_err(|e| pyo3::exceptions::PyIOError::new_err(e.to_string()));
+        }
+
+        #[cfg(feature = "native_code_generation")]
+        {
+            bincode::encode_to_vec(
+                &(
+                    self.jit_compile,
+                    self.jit_settings.clone(),
+                    self.eval_complex
+                        .clone()
+                        .set_coeff(&self.rational_constants),
+                    &self.jit_real,
+                    &self.jit_complex,
+                ),
+                bincode::config::standard(),
+            )
+            .map(|a| PyBytes::new(py, &a))
+            .map_err(|e| pyo3::exceptions::PyIOError::new_err(e.to_string()))
+        }
     }
 
     /// Return the instructions for efficiently evaluating the expression, the length of the list
@@ -504,8 +567,11 @@ impl PythonExpressionEvaluator {
         self.rational_constants = r.get_constants().to_vec();
         self.eval_complex = r.map_coeff(&|c| Complex::new(c.re.to_f64(), c.im.to_f64()));
         self.eval_real = None;
-        self.jit_real = None;
-        self.jit_complex = None;
+        #[cfg(feature = "native_code_generation")]
+        {
+            self.jit_real = None;
+            self.jit_complex = None;
+        }
         self.eval_arb_prec = None;
         self.eval_arb_prec_complex = None;
 
@@ -551,20 +617,24 @@ impl PythonExpressionEvaluator {
             ));
         }
 
-        if self.jit_compile && self.jit_real.is_none()
-            || !self.jit_compile && self.eval_real.is_none()
-        {
+        #[cfg(feature = "native_code_generation")]
+        let use_jit = self.jit_compile;
+        #[cfg(not(feature = "native_code_generation"))]
+        let use_jit = false;
+
+        #[cfg(feature = "native_code_generation")]
+        if use_jit && self.jit_real.is_none() {
             let real_eval = self.eval_complex.clone().map_coeff(&|x| x.re);
 
-            if self.jit_compile {
-                self.jit_real = Some(
-                    real_eval
-                        .jit_compile(self.jit_settings.clone())
-                        .map_err(|e| exceptions::PyValueError::new_err(e.to_string()))?,
-                );
-            } else {
-                self.eval_real = Some(real_eval);
-            }
+            self.jit_real = Some(
+                real_eval
+                    .jit_compile(self.jit_settings.clone())
+                    .map_err(|e| exceptions::PyValueError::new_err(e.to_string()))?,
+            );
+        }
+
+        if !use_jit && self.eval_real.is_none() {
+            self.eval_real = Some(self.eval_complex.clone().map_coeff(&|x| x.re));
         }
 
         let arr = reshape_evaluator_inputs(
@@ -573,14 +643,15 @@ impl PythonExpressionEvaluator {
         )?;
 
         let n_inputs = arr.shape()[0];
-        let arr = if self.jit_compile && n_inputs > 1 && !arr.is_standard_layout() {
+        let arr = if use_jit && n_inputs > 1 && !arr.is_standard_layout() {
             CowArray::from(arr.as_standard_layout().into_owned())
         } else {
             arr
         };
         let mut out = ArrayD::zeros(&[n_inputs, self.eval_complex.get_output_len()][..]);
 
-        if self.jit_compile {
+        #[cfg(feature = "native_code_generation")]
+        if use_jit {
             let eval = self.jit_real.as_mut().unwrap();
 
             if n_inputs > 1 {
@@ -605,19 +676,20 @@ impl PythonExpressionEvaluator {
                     );
                 }
             }
-        } else {
-            let eval = self.eval_real.as_mut().unwrap();
+            return Ok(out.into_pyarray(py));
+        }
 
-            for (i, mut o) in arr.axis_iter(Axis(0)).zip(out.axis_iter_mut(Axis(0))) {
-                eval.evaluate(
-                    i.as_slice().ok_or_else(|| {
-                        exceptions::PyValueError::new_err("Failed to convert input to slice")
-                    })?,
-                    o.as_slice_mut().ok_or_else(|| {
-                        exceptions::PyValueError::new_err("Failed to convert output to slice")
-                    })?,
-                );
-            }
+        let eval = self.eval_real.as_mut().unwrap();
+
+        for (i, mut o) in arr.axis_iter(Axis(0)).zip(out.axis_iter_mut(Axis(0))) {
+            eval.evaluate(
+                i.as_slice().ok_or_else(|| {
+                    exceptions::PyValueError::new_err("Failed to convert input to slice")
+                })?,
+                o.as_slice_mut().ok_or_else(|| {
+                    exceptions::PyValueError::new_err("Failed to convert output to slice")
+                })?,
+            );
         }
 
         Ok(out.into_pyarray(py))
@@ -714,7 +786,13 @@ impl PythonExpressionEvaluator {
         ))]
         inputs: PyArrayLikeDyn<'py, Complex64, AllowTypeChange>,
     ) -> PyResult<Bound<'py, PyArrayDyn<Complex64>>> {
-        if self.jit_compile && self.jit_complex.is_none() {
+        #[cfg(feature = "native_code_generation")]
+        let use_jit = self.jit_compile;
+        #[cfg(not(feature = "native_code_generation"))]
+        let use_jit = false;
+
+        #[cfg(feature = "native_code_generation")]
+        if use_jit && self.jit_complex.is_none() {
             self.jit_complex = Some(
                 self.eval_complex
                     .jit_compile(self.jit_settings.clone())
@@ -728,14 +806,15 @@ impl PythonExpressionEvaluator {
         )?;
 
         let n_inputs = arr.shape()[0];
-        let arr = if self.jit_compile && n_inputs > 1 && !arr.is_standard_layout() {
+        let arr = if use_jit && n_inputs > 1 && !arr.is_standard_layout() {
             CowArray::from(arr.as_standard_layout().into_owned())
         } else {
             arr
         };
         let mut out = ArrayD::zeros(&[n_inputs, self.eval_complex.get_output_len()][..]);
 
-        if self.jit_compile {
+        #[cfg(feature = "native_code_generation")]
+        if use_jit {
             let eval = self.jit_complex.as_mut().unwrap();
 
             if n_inputs > 1 {
@@ -779,23 +858,24 @@ impl PythonExpressionEvaluator {
                     eval.evaluate(sc, os);
                 }
             }
-        } else {
-            for (i, mut o) in arr.axis_iter(Axis(0)).zip(out.axis_iter_mut(Axis(0))) {
-                let sc = unsafe {
-                    std::mem::transmute::<&[Complex64], &[Complex<f64>]>(i.as_slice().ok_or_else(
-                        || exceptions::PyValueError::new_err("Failed to convert input to slice"),
-                    )?)
-                };
-                let os = unsafe {
-                    std::mem::transmute::<&mut [Complex64], &mut [Complex<f64>]>(
-                        o.as_slice_mut().ok_or_else(|| {
-                            exceptions::PyValueError::new_err("Failed to convert output to slice")
-                        })?,
-                    )
-                };
+            return Ok(out.into_pyarray(py));
+        }
 
-                self.eval_complex.evaluate(sc, os);
-            }
+        for (i, mut o) in arr.axis_iter(Axis(0)).zip(out.axis_iter_mut(Axis(0))) {
+            let sc = unsafe {
+                std::mem::transmute::<&[Complex64], &[Complex<f64>]>(i.as_slice().ok_or_else(
+                    || exceptions::PyValueError::new_err("Failed to convert input to slice"),
+                )?)
+            };
+            let os = unsafe {
+                std::mem::transmute::<&mut [Complex64], &mut [Complex<f64>]>(
+                    o.as_slice_mut().ok_or_else(|| {
+                        exceptions::PyValueError::new_err("Failed to convert output to slice")
+                    })?,
+                )
+            };
+
+            self.eval_complex.evaluate(sc, os);
         }
         Ok(out.into_pyarray(py))
     }
@@ -921,8 +1001,11 @@ impl PythonExpressionEvaluator {
         self.rational_constants = r.get_constants().to_vec();
         self.eval_complex = r.map_coeff(&|c| Complex::new(c.re.to_f64(), c.im.to_f64()));
         self.eval_real = None;
-        self.jit_real = None;
-        self.jit_complex = None;
+        #[cfg(feature = "native_code_generation")]
+        {
+            self.jit_real = None;
+            self.jit_complex = None;
+        }
         self.eval_arb_prec = None;
         self.eval_arb_prec_complex = None;
 
@@ -963,7 +1046,10 @@ impl PythonExpressionEvaluator {
         real_if_args_real: bool,
         verbose: bool,
     ) -> PyResult<()> {
-        self.jit_complex = None; // force a recompilation
+        #[cfg(feature = "native_code_generation")]
+        {
+            self.jit_complex = None; // force a recompilation
+        }
         let mut settings = ComplexEvaluatorSettings::new(sqrt_real, log_real, powf_real, verbose);
         if real_if_args_real {
             settings = settings.real_if_args_real();
@@ -1008,6 +1094,7 @@ impl PythonExpressionEvaluator {
     /// cuda_block_size: int | None
     ///     The block size for CUDA kernel launches.
     #[gen_stub(skip)]
+    #[cfg(feature = "native_code_generation")]
     #[pyo3(signature =
         (function_name,
         filename,
@@ -1253,18 +1340,18 @@ impl PythonExpressionEvaluator {
     }
 }
 
-#[cfg(feature = "python_stubgen")]
+#[cfg(all(feature = "python_stubgen", feature = "native_code_generation"))]
 static ONE: fn() -> String = || "1".into();
-#[cfg(feature = "python_stubgen")]
+#[cfg(all(feature = "python_stubgen", feature = "native_code_generation"))]
 static THREE: fn() -> String = || "3".into();
-#[cfg(feature = "python_stubgen")]
+#[cfg(all(feature = "python_stubgen", feature = "native_code_generation"))]
 static TRUE_ARG: fn() -> String = || "True".into();
-#[cfg(feature = "python_stubgen")]
+#[cfg(all(feature = "python_stubgen", feature = "native_code_generation"))]
 static CUDA_BLOCK_DEFAULT: fn() -> String = || "256".into();
-#[cfg(feature = "python_stubgen")]
+#[cfg(all(feature = "python_stubgen", feature = "native_code_generation"))]
 static DEFAULT: fn() -> String = || "\"default\"".into();
 
-#[cfg(feature = "python_stubgen")]
+#[cfg(all(feature = "python_stubgen", feature = "native_code_generation"))]
 submit! {
 PyMethodsInfo {
         struct_id: std::any::TypeId::of::<PythonExpressionEvaluator>,
@@ -1913,6 +2000,7 @@ cuda_block_size: int | None
 }
 
 /// A compiled and optimized evaluator for expressions.
+#[cfg(feature = "native_code_generation")]
 #[cfg_attr(feature = "python_stubgen", gen_stub_pyclass)]
 #[pyclass(
     from_py_object,
@@ -1926,6 +2014,7 @@ pub struct PythonCompiledRealExpressionEvaluator {
     pub output_len: usize,
 }
 
+#[cfg(feature = "native_code_generation")]
 #[cfg_attr(feature = "python_stubgen", gen_stub_pymethods)]
 #[cfg_attr(not(feature = "python_stubgen"), remove_gen_stub)]
 #[pymethods]
@@ -1981,6 +2070,7 @@ impl PythonCompiledRealExpressionEvaluator {
 }
 
 /// A compiled and optimized evaluator for expressions.
+#[cfg(feature = "native_code_generation")]
 #[cfg_attr(feature = "python_stubgen", gen_stub_pyclass)]
 #[pyclass(
     from_py_object,
@@ -1994,6 +2084,7 @@ pub struct PythonCompiledSimdRealExpressionEvaluator {
     pub output_len: usize,
 }
 
+#[cfg(feature = "native_code_generation")]
 #[cfg_attr(feature = "python_stubgen", gen_stub_pymethods)]
 #[cfg_attr(not(feature = "python_stubgen"), remove_gen_stub)]
 #[pymethods]
@@ -2051,6 +2142,7 @@ impl PythonCompiledSimdRealExpressionEvaluator {
 }
 
 /// A compiled and optimized evaluator for expressions.
+#[cfg(feature = "native_code_generation")]
 #[cfg_attr(feature = "python_stubgen", gen_stub_pyclass)]
 #[pyclass(
     from_py_object,
@@ -2064,6 +2156,7 @@ pub struct PythonCompiledCudaRealExpressionEvaluator {
     pub output_len: usize,
 }
 
+#[cfg(feature = "native_code_generation")]
 #[cfg_attr(feature = "python_stubgen", gen_stub_pymethods)]
 #[cfg_attr(not(feature = "python_stubgen"), remove_gen_stub)]
 #[pymethods]
@@ -2131,6 +2224,7 @@ impl PythonCompiledCudaRealExpressionEvaluator {
 }
 
 /// A compiled and optimized evaluator for expressions.
+#[cfg(feature = "native_code_generation")]
 #[cfg_attr(feature = "python_stubgen", gen_stub_pyclass)]
 #[pyclass(
     from_py_object,
@@ -2144,6 +2238,7 @@ pub struct PythonCompiledCudaComplexExpressionEvaluator {
     pub output_len: usize,
 }
 
+#[cfg(feature = "native_code_generation")]
 #[cfg_attr(feature = "python_stubgen", gen_stub_pymethods)]
 #[cfg_attr(not(feature = "python_stubgen"), remove_gen_stub)]
 #[pymethods]
@@ -2217,6 +2312,7 @@ impl PythonCompiledCudaComplexExpressionEvaluator {
 }
 
 /// A compiled and optimized evaluator for expressions.
+#[cfg(feature = "native_code_generation")]
 #[cfg_attr(feature = "python_stubgen", gen_stub_pyclass)]
 #[pyclass(
     from_py_object,
@@ -2230,6 +2326,7 @@ pub struct PythonCompiledComplexExpressionEvaluator {
     pub output_len: usize,
 }
 
+#[cfg(feature = "native_code_generation")]
 #[cfg_attr(feature = "python_stubgen", gen_stub_pymethods)]
 #[cfg_attr(not(feature = "python_stubgen"), remove_gen_stub)]
 #[pymethods]
@@ -2291,6 +2388,7 @@ impl PythonCompiledComplexExpressionEvaluator {
 }
 
 /// A compiled and optimized evaluator for expressions.
+#[cfg(feature = "native_code_generation")]
 #[cfg_attr(feature = "python_stubgen", gen_stub_pyclass)]
 #[pyclass(
     from_py_object,
@@ -2304,6 +2402,7 @@ pub struct PythonCompiledSimdComplexExpressionEvaluator {
     pub output_len: usize,
 }
 
+#[cfg(feature = "native_code_generation")]
 #[cfg_attr(feature = "python_stubgen", gen_stub_pymethods)]
 #[cfg_attr(not(feature = "python_stubgen"), remove_gen_stub)]
 #[pymethods]

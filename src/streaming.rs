@@ -243,11 +243,7 @@ impl<W: WriteableNamedStream> TermStreamer<W> {
             filename,
             thread_pool: Arc::new(
                 rayon::ThreadPoolBuilder::new()
-                    .num_threads(if LicenseManager::is_licensed() {
-                        config.n_cores
-                    } else {
-                        1
-                    })
+                    .num_threads(LicenseManager::max_threads(config.n_cores))
                     .build()
                     .unwrap(),
             ),
@@ -671,7 +667,8 @@ impl AtomView<'_> {
         f: impl Fn(AtomView) -> Atom + Send + Sync,
         n_cores: usize,
     ) -> Atom {
-        if n_cores < 2 || !LicenseManager::is_licensed() {
+        let n_cores = LicenseManager::max_threads(n_cores);
+        if n_cores < 2 {
             return self.map_terms_single_core(f);
         }
 
@@ -693,7 +690,7 @@ impl AtomView<'_> {
         f: impl Fn(AtomView) -> Atom + Send + Sync,
         p: &ThreadPool,
     ) -> Atom {
-        if !LicenseManager::is_licensed() {
+        if LicenseManager::max_threads(p.current_num_threads()) < 2 {
             return self.map_terms_single_core(f);
         }
 

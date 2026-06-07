@@ -215,6 +215,7 @@ impl<T> ExternalFunctionContainer<T> {
         T2::resolve_function(&tags, info)
     }
 
+    #[cfg(feature = "native_code_generation")]
     pub(super) fn cpp(&self) -> Option<&str> {
         self.symbol.get_evaluation_info()?.get_cpp()
     }

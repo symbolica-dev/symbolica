@@ -45,7 +45,7 @@ xprec = "0.2.2"
 simba = "0.9"
 num-traits = "0.2"
 wide = "1.1"
-ahash = "0.8.7"
+ahash = { version = "0.8.7", default-features = false, features = ["std"] }
 dyn-clone = "1.0"
 colored = "3.0"
 smallvec = "1.13"
@@ -60,3 +60,13 @@ rayon = "1.11"
 
 [dev-dependencies]
 rand_xoshiro = "0.7"
+
+[target.'cfg(not(target_arch = "wasm32"))'.dependencies.ahash]
+version = "0.8.7"
+default-features = false
+features = ["runtime-rng"]
+
+[target.'cfg(target_arch = "wasm32")'.dependencies.ahash]
+version = "0.8.7"
+default-features = false
+features = ["compile-time-rng"]

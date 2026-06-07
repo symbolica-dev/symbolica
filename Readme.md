@@ -28,6 +28,13 @@ Try the live [Jupyter Notebook demo](https://colab.research.google.com/drive/1VA
 read the [documentation](https://symbolica.io/docs/), or see
 [symbolica.io](https://symbolica.io) for licensing and support.
 
+There is also a static browser playground in
+[`docs/playground`](docs/playground/) for experimenting with the WASM build.
+The website showcase sketch in [`docs/showcase`](docs/showcase/) demonstrates a
+guided live-demo layout with syntax-highlighted Python examples.
+The Pyodide browser session in [`docs/pyodide`](docs/pyodide/) runs the Python
+API in browser Python.
+
 ## Why Symbolica?
 
 - Native Python and Rust APIs for the same symbolic core
@@ -48,6 +55,59 @@ Symbolica can be installed from PyPI using `pip`:
 ```sh
 pip install symbolica
 ```
+
+### Pyodide
+
+To build a browser-compatible Python wheel for Pyodide, install
+`pyodide-build` and run:
+
+```sh
+pip install pyodide-build
+rustup toolchain install nightly-2025-06-15 --profile minimal --target wasm32-unknown-emscripten
+tools/build_pyodide_wheel.sh
+```
+
+This produces a `dist/symbolica-*-wasm32.whl` wheel that can be installed in
+Pyodide with `micropip.install()`. The Pyodide build uses Symbolica's WASM
+feature set, disables GMP and native code generation, and omits the Python APIs
+that load generated C++/CUDA/JIT shared libraries. The helper defaults to the
+non-release `pyodide-debug` profile for a quick smoke test; set
+`SYMBOLICA_PYODIDE_PROFILE=release` for an optimized wheel.
+
+To run the local Node/Pyodide smoke test, point it at a Pyodide checkout and the
+wheel built for that runtime:
+
+```sh
+PYODIDE_ROOT=/path/to/pyodide-root \
+SYMBOLICA_PYODIDE_WHEEL=target/wheels/symbolica-*-wasm32.whl \
+node --experimental-wasm-stack-switching tools/smoke_pyodide_symbolica.mjs
+```
+
+To serve the browser session locally from this repository:
+
+```sh
+python3 -m http.server 8765
+```
+
+Then open <http://localhost:8765/docs/pyodide/>.
+The page discovers the newest `symbolica-*-wasm32.whl` in `target/wheels/` and
+runs a parse-and-expand example when the Pyodide session is ready.
+
+### JupyterLite
+
+To build a JupyterLite site with a starter Symbolica notebook, install the
+JupyterLite tooling and run:
+
+```sh
+pip install 'jupyterlite-core==0.6.4' 'jupyterlite-pyodide-kernel==0.6.1' jupyterlab notebook
+tools/build_jupyterlite.sh
+```
+
+Then open
+<http://localhost:8765/docs/jupyterlite/_output/lab/index.html?path=Symbolica.ipynb>.
+The helper bundles Pyodide 0.27.7 and the local Symbolica wheel into the
+JupyterLite output so the notebook can run `pip install symbolica` in the
+browser.
 
 ## Rust
 

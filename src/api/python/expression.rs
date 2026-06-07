@@ -1909,7 +1909,8 @@ pub struct PythonExpression {
 }
 
 pub enum PythonEvaluationValue {
-    Real(PythonMultiPrecisionFloat),
+    RealF64(f64),
+    Real(PythonMultiPrecisionFloat, f64),
     Complex(Complex<f64>),
     DecimalComplex(PythonMultiPrecisionFloat, PythonMultiPrecisionFloat),
 }
@@ -1917,7 +1918,8 @@ pub enum PythonEvaluationValue {
 impl PythonEvaluationValue {
     fn to_complex_f64(&self) -> Complex<f64> {
         match self {
-            PythonEvaluationValue::Real(r) => Complex::new(r.0.to_f64(), 0.),
+            PythonEvaluationValue::RealF64(r) => Complex::new(*r, 0.),
+            PythonEvaluationValue::Real(_, r) => Complex::new(*r, 0.),
             PythonEvaluationValue::Complex(c) => *c,
             PythonEvaluationValue::DecimalComplex(re, im) => {
                 Complex::new(re.0.to_f64(), im.0.to_f64())
@@ -1927,7 +1929,11 @@ impl PythonEvaluationValue {
 
     fn to_complex_float(&self, prec: u32) -> Complex<Float> {
         match self {
-            PythonEvaluationValue::Real(r) => {
+            PythonEvaluationValue::RealF64(r) => Complex::new(
+                Float::parse(&r.to_string(), Some(prec)).expect("finite f64 should parse"),
+                Float::new(prec),
+            ),
+            PythonEvaluationValue::Real(r, _) => {
                 let mut re = r.0.clone();
                 re.set_prec(prec);
                 Complex::new(re, Float::new(prec))
@@ -1953,8 +1959,36 @@ impl<'py> FromPyObject<'_, 'py> for PythonEvaluationValue {
         if let Ok((re, im)) = ob.extract::<(PythonMultiPrecisionFloat, PythonMultiPrecisionFloat)>()
         {
             Ok(PythonEvaluationValue::DecimalComplex(re, im))
-        } else if let Ok(r) = ob.extract::<PythonMultiPrecisionFloat>() {
-            Ok(PythonEvaluationValue::Real(r))
+        } else if is_python_decimal(ob)? {
+            let r = ob.extract::<PythonMultiPrecisionFloat>()?;
+            Ok(PythonEvaluationValue::Real(r, decimal_string_to_f64(ob)?))
+        } else if let Ok(r) = ob.extract::<f64>() {
+            if r.is_finite() {
+                Ok(PythonEvaluationValue::RealF64(r))
+            } else {
+                Err(exceptions::PyValueError::new_err(
+                    "Floating point number is not finite",
+                ))
+            }
+        } else if let Ok(s) = ob.extract::<PyBackedStr>() {
+            let f64_value = s.parse::<f64>().map_err(|_| {
+                exceptions::PyValueError::new_err(format!("Not a floating point number: {s}"))
+            })?;
+            if !f64_value.is_finite() {
+                return Err(exceptions::PyValueError::new_err(
+                    "Floating point number is not finite",
+                ));
+            }
+            Ok(PythonEvaluationValue::Real(
+                Float::parse(&s, None)
+                    .map_err(|_| {
+                        exceptions::PyValueError::new_err(format!(
+                            "Not a floating point number: {s}"
+                        ))
+                    })?
+                    .into(),
+                f64_value,
+            ))
         } else if let Ok(c) = ob.extract::<Complex<f64>>() {
             Ok(PythonEvaluationValue::Complex(c))
         } else {
@@ -1962,6 +1996,25 @@ impl<'py> FromPyObject<'_, 'py> for PythonEvaluationValue {
                 "Expected int, float, complex, Decimal or tuple[Decimal, Decimal]",
             ))
         }
+    }
+}
+
+fn is_python_decimal(ob: Borrowed<'_, '_, PyAny>) -> PyResult<bool> {
+    let typ = ob.get_type();
+    Ok(typ.name()?.to_str()? == "Decimal" && typ.module()?.to_str()? == "decimal")
+}
+
+fn decimal_string_to_f64(ob: Borrowed<'_, '_, PyAny>) -> PyResult<f64> {
+    let s = ob.call_method0("__str__")?.extract::<PyBackedStr>()?;
+    let value = s.parse::<f64>().map_err(|_| {
+        exceptions::PyValueError::new_err(format!("Not a floating point number: {s}"))
+    })?;
+    if value.is_finite() {
+        Ok(value)
+    } else {
+        Err(exceptions::PyValueError::new_err(
+            "Floating point number is not finite",
+        ))
     }
 }
 
@@ -7204,6 +7257,9 @@ impl PythonExpression {
         max_common_pair_distance: usize,
         py: Python,
     ) -> PyResult<PythonExpressionEvaluator> {
+        #[cfg(not(feature = "native_code_generation"))]
+        let _ = (jit_direct_translation, jit_optimization_level);
+
         let mut fn_map = FunctionMap::new();
 
         for ((symbol, args), body) in functions {
@@ -7293,13 +7349,16 @@ impl PythonExpression {
             rational_constants: eval.get_constants().to_vec(),
             eval_complex: eval.map_coeff(&|c| Complex::new(c.re.to_f64(), c.im.to_f64())),
             eval_real: None,
+            #[cfg(feature = "native_code_generation")]
             jit_real: None,
+            #[cfg(feature = "native_code_generation")]
             jit_complex: None,
             eval_double_float: None,
             eval_double_float_complex: None,
             eval_arb_prec: None,
             eval_arb_prec_complex: None,
-            jit_compile,
+            jit_compile: jit_compile && cfg!(feature = "native_code_generation"),
+            #[cfg(feature = "native_code_generation")]
             jit_settings: JITCompilationSettings::new()
                 .direct_translation(jit_direct_translation)
                 .optimization_level(jit_optimization_level),
@@ -7384,6 +7443,9 @@ impl PythonExpression {
         max_common_pair_cache_entries: usize,
         max_common_pair_distance: usize,
     ) -> PyResult<PythonExpressionEvaluator> {
+        #[cfg(not(feature = "native_code_generation"))]
+        let _ = (jit_direct_translation, jit_optimization_level);
+
         let mut fn_map = FunctionMap::new();
 
         for ((symbol, args), body) in functions {
@@ -7471,13 +7533,16 @@ impl PythonExpression {
             rational_constants: eval.get_constants().to_vec(),
             eval_complex: eval.map_coeff(&|c| Complex::new(c.re.to_f64(), c.im.to_f64())),
             eval_real: None,
+            #[cfg(feature = "native_code_generation")]
             jit_real: None,
+            #[cfg(feature = "native_code_generation")]
             jit_complex: None,
             eval_double_float: None,
             eval_double_float_complex: None,
             eval_arb_prec: None,
             eval_arb_prec_complex: None,
-            jit_compile,
+            jit_compile: jit_compile && cfg!(feature = "native_code_generation"),
+            #[cfg(feature = "native_code_generation")]
             jit_settings: JITCompilationSettings::new()
                 .direct_translation(jit_direct_translation)
                 .optimization_level(jit_optimization_level),

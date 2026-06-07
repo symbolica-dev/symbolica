@@ -1,6 +1,6 @@
 [build-system]
 build-backend = "maturin"
-requires = ["maturin>=1.0,<2.0"]
+requires = ["maturin>=1.13,<2.0"]
 
 [project]
 authors = [{ email = "ben@symbolica.io" }, { name = "Ben Ruijl" }]
@@ -23,3 +23,5 @@ repository = "https://github.com/symbolica-dev/symbolica"
 
 [tool.maturin]
 features = ["python_api", "python_abi3", "tracing/release_max_level_info"]
+module-name = "symbolica.symbolica"
+python-source = "python"

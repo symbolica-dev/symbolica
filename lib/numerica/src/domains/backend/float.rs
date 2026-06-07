@@ -367,8 +367,21 @@ mod astro {
             } else if value == f64::NEG_INFINITY {
                 INF_NEG
             } else {
+                #[cfg(target_arch = "wasm32")]
+                let mut value = with_constants(|constants| {
+                    BigFloat::parse(
+                        &value.to_string(),
+                        Radix::Dec,
+                        precision(prec).max(f64::MANTISSA_DIGITS as usize),
+                        ROUNDING_MODE,
+                        constants,
+                    )
+                });
+
+                #[cfg(not(target_arch = "wasm32"))]
                 let mut value =
                     BigFloat::from_f64(value, precision(prec).max(f64::MANTISSA_DIGITS as usize));
+
                 let _ = value.set_precision(precision(prec), ROUNDING_MODE);
                 value
             };
