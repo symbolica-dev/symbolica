@@ -1981,18 +1981,62 @@ impl<F: Ring, E: PositiveExponent> MultivariatePolynomial<F, E, LexOrder> {
             }
         }
 
-        let mut poly = self.zero();
+        let mut shifted_coefficients = Vec::with_capacity(v.len());
         for (i, mut v) in v.into_iter().enumerate() {
             for x in v.exponents.chunks_mut(self.nvars()) {
                 x[var] = E::from_i32(i as i32);
             }
-
-            for m in &v {
-                poly.append_monomial(m.coefficient.clone(), m.exponents);
-            }
+            shifted_coefficients.push(v);
         }
 
-        poly
+        self.merge_shifted_univariate_coefficients(shifted_coefficients)
+    }
+
+    fn merge_shifted_univariate_coefficients(&self, coefficients: Vec<Self>) -> Self {
+        let capacity = coefficients.iter().map(|p| p.nterms()).sum();
+        let mut poly = self.zero_with_capacity(capacity);
+        let mut indices = vec![0usize; coefficients.len()];
+        let mut exponent: SmallVec<[E; INLINED_EXPONENTS]> = smallvec![E::zero(); self.nvars()];
+
+        loop {
+            let mut min_poly: Option<usize> = None;
+            for (i, p) in coefficients.iter().enumerate() {
+                if indices[i] == p.nterms() {
+                    continue;
+                }
+
+                if min_poly
+                    .map(|j| {
+                        LexOrder::cmp(
+                            p.exponents(indices[i]),
+                            coefficients[j].exponents(indices[j]),
+                        )
+                        .is_lt()
+                    })
+                    .unwrap_or(true)
+                {
+                    min_poly = Some(i);
+                }
+            }
+
+            let Some(min_poly) = min_poly else {
+                return poly;
+            };
+
+            exponent.clear();
+            exponent.extend_from_slice(coefficients[min_poly].exponents(indices[min_poly]));
+
+            let mut coefficient = self.ring.zero();
+            for (i, p) in coefficients.iter().enumerate() {
+                if indices[i] < p.nterms() && p.exponents(indices[i]) == &exponent[..] {
+                    self.ring
+                        .add_assign(&mut coefficient, p.coefficients[indices[i]].clone());
+                    indices[i] += 1;
+                }
+            }
+
+            poly.append_monomial_back(coefficient, &exponent);
+        }
     }
 
     /// Compute the inverse of the univariate polynomial in `var` up until `pow` using Newton's method.
@@ -4423,9 +4467,9 @@ impl<F: Field, E: PositiveExponent> MultivariatePolynomial<F, E, LexOrder> {
             }
         }
 
-        let mut poly = self.zero();
         let mut accum_inv = self.ring.one();
         let sample_point_inv = self.ring.inv(shift);
+        let mut shifted_coefficients = Vec::with_capacity(v.len());
         for (i, mut v) in v.into_iter().enumerate() {
             v = v.mul_coeff(accum_inv.clone());
 
@@ -4433,14 +4477,12 @@ impl<F: Field, E: PositiveExponent> MultivariatePolynomial<F, E, LexOrder> {
                 x[var] = E::from_u32(i as u32);
             }
 
-            for m in &v {
-                poly.append_monomial(m.coefficient.clone(), m.exponents);
-            }
+            shifted_coefficients.push(v);
 
             self.ring.mul_assign(&mut accum_inv, &sample_point_inv);
         }
 
-        poly
+        self.merge_shifted_univariate_coefficients(shifted_coefficients)
     }
 }
 

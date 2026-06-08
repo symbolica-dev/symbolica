@@ -42,7 +42,7 @@ enum GCDError {
 impl<R: Ring, E: PositiveExponent> MultivariatePolynomial<R, E> {
     /// Evaluation of the exponents by filling in the variables
     #[inline(always)]
-    fn evaluate_exponents(
+    pub(crate) fn evaluate_exponents(
         &self,
         r: &[(usize, R::Element)],
         cache: &mut [Vec<R::Element>],
@@ -70,7 +70,7 @@ impl<R: Ring, E: PositiveExponent> MultivariatePolynomial<R, E> {
 
     /// Evaluate a polynomial using the evaluation of the exponent of every monomial.
     #[inline(always)]
-    fn evaluate_using_exponents(
+    pub(crate) fn evaluate_using_exponents(
         &self,
         exp_evals: &[R::Element],
         main_var: usize,
@@ -275,7 +275,7 @@ impl<F: Field, E: PositiveExponent> MultivariatePolynomial<F, E> {
     }
 
     /// Solve `rhs[k] = sum_i c_i * x[i]^(k+1)`.
-    fn solve_shifted_transposed_vandermonde(
+    pub(crate) fn solve_shifted_transposed_vandermonde(
         &self,
         x: &[F::Element],
         rhs: &[F::Element],
