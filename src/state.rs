@@ -1136,6 +1136,7 @@ impl State {
                 Symbol::import_impl(source)?;
 
             loop {
+                let num_symbols = ID_TO_STR.len();
                 match SymbolBuilder::new(NamespacedSymbol {
                     symbol: name.clone().into(),
                     namespace: namespace.to_string().into(),
@@ -1149,13 +1150,13 @@ impl State {
                 .build()
                 {
                     Ok(id) => {
-                        if x as u32 != id.get_id() {
-                            if !is_exportable {
-                                warn!(
-                                    "Imported symbol {name} was previously defined with user-defined functions, but the imported version does not have any."
-                                );
-                            }
+                        if !is_exportable && num_symbols != ID_TO_STR.len() {
+                            warn!(
+                                "Imported symbol {name} was previously defined with user-defined functions, but the imported version does not have any."
+                            );
+                        }
 
+                        if x as u32 != id.get_id() {
                             state_map.symbols.insert(x as u32, id);
                         }
                         break;
