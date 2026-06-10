@@ -1554,6 +1554,19 @@ impl Symbol {
             || !self.get_tags().is_empty()
     }
 
+    /// Take `self` to the power `exp`.
+    pub fn pow<'a, T: Into<AtomOrView<'a>>>(&self, exp: T) -> Atom {
+        let mut t = Atom::new();
+        Workspace::get_local().with(|ws| {
+            InlineVar::new(*self)
+                .as_view()
+                .pow_no_norm(ws, exp.into().as_atom_view())
+                .as_view()
+                .normalize(ws, &mut t);
+            t
+        })
+    }
+
     pub(crate) fn import_impl<R: Read>(
         source: &mut R,
     ) -> Result<

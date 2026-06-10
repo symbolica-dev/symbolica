@@ -751,6 +751,19 @@ impl AliasedAtom {
         &self.aliases
     }
 
+    /// Map the root atom using the given function.
+    pub fn map_root(self, f: impl FnOnce(Atom) -> Atom) -> Self {
+        Self {
+            root: f(self.root),
+            aliases: self.aliases,
+        }
+    }
+
+    /// Return the root atom and the alias map.
+    pub fn into_inner_with_aliases(self) -> (Atom, HashMap<Atom, Atom>) {
+        (self.root, self.aliases)
+    }
+
     /// Undo the common subexpression extraction and return the original atom.
     pub fn into_inner(mut self) -> Atom {
         // TODO: this can be a one-pass if unfolded in reverse insertion order
