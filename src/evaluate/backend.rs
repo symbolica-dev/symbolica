@@ -408,7 +408,13 @@ impl ExpressionEvaluator<Complex<Rational>> {
                 Ok(mapped)
             })
             .collect::<Result<Vec<_>, _>>()?;
-        T::jit_compile(exported.instructions, constants, &external_fns, settings)
+        T::jit_compile(
+            exported.instructions,
+            constants,
+            self.param_count,
+            &external_fns,
+            settings,
+        )
     }
 }
 
@@ -457,16 +463,24 @@ impl<T: JITCompiledNumber + Clone> ExpressionEvaluator<T> {
                 Ok(f.clone())
             })
             .collect::<Result<Vec<_>, _>>()?;
-        T::jit_compile(exported.instructions, constants, &external_fns, settings)
+        T::jit_compile(
+            exported.instructions,
+            constants,
+            self.param_count,
+            &external_fns,
+            settings,
+        )
     }
 }
 
 fn translate_to_symjit(
     instructions: Vec<Instruction>,
     constants: Vec<symjit::Complex<f64>>,
+    param_count: usize,
     config: Config,
 ) -> Result<Translator, String> {
     let mut translator = Translator::new(config);
+    translator.set_num_params(param_count);
 
     for z in constants {
         translator.append_constant(z).unwrap();
@@ -542,6 +556,7 @@ pub trait JITCompiledNumber: Sized {
     fn jit_compile(
         instructions: Vec<Instruction>,
         constants: Vec<symjit::Complex<f64>>,
+        param_count: usize,
         external_functions: &[ExternalFunctionContainer<Self>],
         settings: JITCompilationSettings,
     ) -> Result<JITCompiledEvaluator<Self>, String>;
@@ -591,6 +606,7 @@ impl JITCompiledNumber for f64 {
     fn jit_compile(
         instructions: Vec<Instruction>,
         constants: Vec<symjit::Complex<f64>>,
+        param_count: usize,
         external_functions: &[ExternalFunctionContainer<f64>],
         settings: JITCompilationSettings,
     ) -> Result<JITCompiledEvaluator<Self>, String> {
@@ -603,7 +619,7 @@ impl JITCompiledNumber for f64 {
         settings.apply_to_config(&mut config);
         config.set_defuns(Self::convert_external_functions(external_functions)?);
 
-        let mut translator = translate_to_symjit(instructions, constants, config)?;
+        let mut translator = translate_to_symjit(instructions, constants, param_count, config)?;
 
         let app = translator.compile().map_err(|e| e.to_string())?;
         let mut compressed_ir = Vec::new();
@@ -803,6 +819,7 @@ impl JITCompiledNumber for wide::f64x4 {
     fn jit_compile(
         instructions: Vec<Instruction>,
         constants: Vec<symjit::Complex<f64>>,
+        param_count: usize,
         external_functions: &[ExternalFunctionContainer<Self>],
         settings: JITCompilationSettings,
     ) -> Result<JITCompiledEvaluator<Self>, String> {
@@ -812,7 +829,7 @@ impl JITCompiledNumber for wide::f64x4 {
         settings.apply_to_config(&mut config);
         config.set_defuns(Self::convert_external_functions(external_functions)?);
 
-        let mut translator = translate_to_symjit(instructions, constants, config)?;
+        let mut translator = translate_to_symjit(instructions, constants, param_count, config)?;
 
         let app = translator.compile().map_err(|e| e.to_string())?;
         let mut compressed_ir = Vec::new();
@@ -979,6 +996,7 @@ impl JITCompiledNumber for Complex<f64> {
     fn jit_compile(
         instructions: Vec<Instruction>,
         constants: Vec<symjit::Complex<f64>>,
+        param_count: usize,
         external_functions: &[ExternalFunctionContainer<Self>],
         settings: JITCompilationSettings,
     ) -> Result<JITCompiledEvaluator<Complex<f64>>, String> {
@@ -987,7 +1005,7 @@ impl JITCompiledNumber for Complex<f64> {
         settings.apply_to_config(&mut config);
         config.set_defuns(Self::convert_external_functions(external_functions)?);
 
-        let mut translator = translate_to_symjit(instructions, constants, config)?;
+        let mut translator = translate_to_symjit(instructions, constants, param_count, config)?;
 
         let app = translator.compile().map_err(|e| e.to_string())?;
         let mut compressed_ir = Vec::new();
@@ -1107,6 +1125,7 @@ impl JITCompiledNumber for Complex<wide::f64x4> {
     fn jit_compile(
         instructions: Vec<Instruction>,
         constants: Vec<symjit::Complex<f64>>,
+        param_count: usize,
         external_functions: &[ExternalFunctionContainer<Self>],
         settings: JITCompilationSettings,
     ) -> Result<JITCompiledEvaluator<Self>, String> {
@@ -1116,7 +1135,7 @@ impl JITCompiledNumber for Complex<wide::f64x4> {
         settings.apply_to_config(&mut config);
         config.set_defuns(Self::convert_external_functions(external_functions)?);
 
-        let mut translator = translate_to_symjit(instructions, constants, config)?;
+        let mut translator = translate_to_symjit(instructions, constants, param_count, config)?;
 
         let app = translator.compile().map_err(|e| e.to_string())?;
         let mut compressed_ir = Vec::new();
