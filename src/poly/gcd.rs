@@ -3516,7 +3516,7 @@ impl<E: PositiveExponent> PolynomialGCD<E> for IntegerRing {
                 }
             }
 
-            cofactor_box_size * 12 < box_size || nterms < box_size
+            cofactor_box_size * 12 < box_size || Integer::from(nterms) * 12 < box_size
         }
 
         if GLOBAL_SETTINGS
