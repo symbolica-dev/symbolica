@@ -186,7 +186,7 @@ fn register_constant_external_container<T>(
 ) -> usize {
     let index = if let Some(index) = external_functions
         .iter()
-        .position(|x| x.symbol == symbol && x.tags == tags)
+        .position(|x| x.symbol == symbol && x.tags == tags && x.fixed_args == fixed_args)
     {
         index
     } else {
@@ -597,10 +597,12 @@ impl<'a> AtomView<'a> {
                     }
 
                     let tags = tags.iter().map(|x| crate::parse!(x)).collect::<Vec<_>>();
-                    let index = if let Some(index) = external_functions
-                        .iter()
-                        .position(|x| x.symbol == *sym && x.tags == tags)
-                    {
+                    let index = if let Some(index) = external_functions.iter().position(|x| {
+                        x.symbol == *sym
+                            && x.tags == tags
+                            && x.fixed_args.is_empty()
+                            && x.constant_index.is_none()
+                    }) {
                         index
                     } else {
                         external_functions.push(ExternalFunctionContainer::new(*sym, tags, vec![]));
@@ -1719,49 +1721,77 @@ impl<T: Clone + PartialEq> Expression<T> {
             }
         }
     }
+}
 
-    fn strip_constants(&mut self, stack: &mut Vec<T>, param_len: usize) {
+impl Expression<Complex<Rational>> {
+    fn strip_constants(
+        &mut self,
+        constants: &mut Vec<Complex<Rational>>,
+        param_count: usize,
+        external_functions: &mut Vec<ExternalFunctionContainer<Complex<Rational>>>,
+    ) {
         match self {
             Expression::Const(_, t) => {
-                if let Some(p) = stack.iter().skip(param_len).position(|x| x == &**t) {
-                    *self = Expression::Parameter(0, param_len + p);
+                if let Some(p) = constants.iter().position(|x| x == &**t) {
+                    *self = Expression::Parameter(0, param_count + p);
                 } else {
-                    stack.push(t.as_ref().clone());
-                    *self = Expression::Parameter(0, stack.len() - 1);
+                    constants.push(t.as_ref().clone());
+                    *self = Expression::Parameter(0, param_count + constants.len() - 1);
                 }
             }
             Expression::Parameter(_, _) => {}
             Expression::Eval(_, _, e_args) => {
                 for a in e_args {
-                    a.strip_constants(stack, param_len);
+                    a.strip_constants(constants, param_count, external_functions);
                 }
             }
             Expression::Add(_, a) | Expression::Mul(_, a) => {
                 for arg in a {
-                    arg.strip_constants(stack, param_len);
+                    arg.strip_constants(constants, param_count, external_functions);
                 }
             }
             Expression::Pow(_, p) => {
-                p.0.strip_constants(stack, param_len);
+                p.0.strip_constants(constants, param_count, external_functions);
             }
             Expression::Powf(_, p) => {
-                p.0.strip_constants(stack, param_len);
-                p.1.strip_constants(stack, param_len);
+                p.0.strip_constants(constants, param_count, external_functions);
+                p.1.strip_constants(constants, param_count, external_functions);
             }
             Expression::ReadArg(_, _) => {}
             Expression::BuiltinFun(_, _, a) => {
-                a.strip_constants(stack, param_len);
+                a.strip_constants(constants, param_count, external_functions);
             }
             Expression::SubExpression(_, _) => {}
-            Expression::Fun(_, _, _, a) => {
+            Expression::Fun(_, symbol, tags, a) => {
+                let fixed_args = a
+                    .iter()
+                    .map(|arg| match arg {
+                        Expression::Const(_, c) => Some(c.as_ref().clone()),
+                        _ => None,
+                    })
+                    .collect::<Option<Vec<_>>>();
+
+                if let Some(fixed_args) = fixed_args {
+                    let tags = tags.iter().map(|x| crate::parse!(x)).collect::<Vec<_>>();
+                    let i = register_constant_external_container(
+                        external_functions,
+                        *symbol,
+                        tags,
+                        fixed_args,
+                        constants,
+                    );
+                    *self = Expression::Parameter(0, param_count + i);
+                    return;
+                }
+
                 for arg in a {
-                    arg.strip_constants(stack, param_len);
+                    arg.strip_constants(constants, param_count, external_functions);
                 }
             }
             Expression::IfElse(_, b) => {
-                b.0.strip_constants(stack, param_len);
-                b.1.strip_constants(stack, param_len);
-                b.2.strip_constants(stack, param_len);
+                b.0.strip_constants(constants, param_count, external_functions);
+                b.1.strip_constants(constants, param_count, external_functions);
+                b.2.strip_constants(constants, param_count, external_functions);
             }
         }
     }
@@ -1801,10 +1831,12 @@ impl EvalTree<Complex<Rational>> {
         &mut self,
         settings: &OptimizationSettings,
     ) -> ExpressionEvaluator<Complex<Rational>> {
-        let mut stack = vec![Complex::<Rational>::default(); self.param_count];
-
         // strip every constant and move them into the stack after the params
-        self.strip_constants(&mut stack); // FIXME
+        let mut constants = vec![];
+        self.strip_constants(&mut constants, self.param_count);
+
+        let mut stack = vec![Complex::<Rational>::default(); self.param_count];
+        stack.extend(constants);
         let reserved_indices = stack.len();
 
         let mut sub_expr_pos = HashMap::default();
@@ -1867,22 +1899,22 @@ impl EvalTree<Complex<Rational>> {
         e
     }
 
-    fn strip_constants(&mut self, stack: &mut Vec<Complex<Rational>>) {
+    fn strip_constants(&mut self, constants: &mut Vec<Complex<Rational>>, param_count: usize) {
         for t in &mut self.expressions.tree {
-            t.strip_constants(stack, self.param_count);
+            t.strip_constants(constants, param_count, &mut self.external_functions);
         }
 
         for e in &mut self.expressions.subexpressions {
-            e.strip_constants(stack, self.param_count);
+            e.strip_constants(constants, param_count, &mut self.external_functions);
         }
 
         for (_, _, e) in &mut self.functions {
             for t in &mut e.tree {
-                t.strip_constants(stack, self.param_count);
+                t.strip_constants(constants, param_count, &mut self.external_functions);
             }
 
             for e in &mut e.subexpressions {
-                e.strip_constants(stack, self.param_count);
+                e.strip_constants(constants, param_count, &mut self.external_functions);
             }
         }
     }
@@ -2109,7 +2141,12 @@ impl EvalTree<Complex<Rational>> {
                 let index = self
                     .external_functions
                     .iter()
-                    .position(|x| x.symbol == *s && x.tags == tag_atoms)
+                    .position(|x| {
+                        x.symbol == *s
+                            && x.tags == tag_atoms
+                            && x.fixed_args.is_empty()
+                            && x.constant_index.is_none()
+                    })
                     .expect("missing external function container");
 
                 let f = Instr::ExternalFun(res, index, args);
@@ -3494,6 +3531,7 @@ impl<'a> AtomView<'a> {
                 }
             },
             AtomView::Var(v) => {
+                let name = v.get_symbol();
                 if let Some(expr) = fn_map.get(*self) {
                     return expr.body.as_view().to_eval_tree_impl(
                         fn_map,
@@ -3503,6 +3541,21 @@ impl<'a> AtomView<'a> {
                         funcs,
                         external_functions,
                     );
+                }
+
+                if name.get_evaluation_info().is_some() {
+                    if external_functions
+                        .iter()
+                        .all(|x| x.symbol != name || !x.tags.is_empty())
+                    {
+                        external_functions.push(ExternalFunctionContainer::new(
+                            name,
+                            vec![],
+                            vec![],
+                        ));
+                    }
+
+                    return Ok(Expression::Fun(0, name, vec![], vec![]));
                 }
 
                 Err(EvaluationError::UndefinedVariable {
