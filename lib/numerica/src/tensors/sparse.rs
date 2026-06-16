@@ -1076,7 +1076,7 @@ impl<F: Ring> Add<&SparseMatrix<F>> for &SparseMatrix<F> {
 
     /// Add two sparse matrices
     fn add(self, rhs: &SparseMatrix<F>) -> Self::Output {
-        if self.nrows != rhs.nrows || self.nrows != rhs.nrows {
+        if self.nrows != rhs.nrows || self.ncols != rhs.ncols {
             panic!(
                 "Cannot add sparse matrices of different dimensions: ({},{}) vs ({},{})",
                 self.nrows, self.ncols, rhs.nrows, rhs.ncols
@@ -1174,7 +1174,7 @@ impl<F: Ring> Sub<&SparseMatrix<F>> for &SparseMatrix<F> {
 
     /// Add two sparse matrices
     fn sub(self, rhs: &SparseMatrix<F>) -> Self::Output {
-        if self.nrows != rhs.nrows || self.nrows != rhs.nrows {
+        if self.nrows != rhs.nrows || self.ncols != rhs.ncols {
             panic!(
                 "Cannot subtract sparse matrices of different dimensions: ({},{}) vs ({},{})",
                 self.nrows, self.ncols, rhs.nrows, rhs.ncols
@@ -2281,6 +2281,24 @@ mod tests {
 
         let b = a.to_sparse().to_dense();
         assert_eq!(a, b);
+    }
+
+    #[test]
+    #[should_panic(expected = "Cannot add sparse matrices of different dimensions")]
+    fn add_sparse_matrices_with_different_column_counts_panics() {
+        let lhs = SparseMatrix::from_triplets(2, 2, vec![(0, 0, 1.into())], Q);
+        let rhs = SparseMatrix::from_triplets(2, 3, vec![(0, 2, 1.into())], Q);
+
+        let _ = &lhs + &rhs;
+    }
+
+    #[test]
+    #[should_panic(expected = "Cannot subtract sparse matrices of different dimensions")]
+    fn subtract_sparse_matrices_with_different_column_counts_panics() {
+        let lhs = SparseMatrix::from_triplets(2, 2, vec![(0, 0, 1.into())], Q);
+        let rhs = SparseMatrix::from_triplets(2, 3, vec![(0, 2, 1.into())], Q);
+
+        let _ = &lhs - &rhs;
     }
 
     /*#[test]
