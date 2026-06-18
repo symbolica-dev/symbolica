@@ -757,6 +757,41 @@ impl<F: Ring, E: Exponent, O: MonomialOrder> MultivariatePolynomial<F, E, O> {
         self.exponents = new_exp;
     }
 
+    /// Add several variables to the polynomial if they are not already present.
+    pub fn add_variables(&mut self, vars: &[PolyVariable]) {
+        // collect only genuinely new variables
+        let new_vars: Vec<_> = vars
+            .iter()
+            .filter(|var| !self.variables.iter().any(|v| v == *var))
+            .cloned()
+            .collect();
+
+        if new_vars.is_empty() {
+            return;
+        }
+
+        let l_old = self.variables.len();
+        let n_new = new_vars.len();
+        let l_new = l_old + n_new;
+
+        let mut new_exp = vec![E::zero(); l_new * self.nterms()];
+
+        if l_old > 0 {
+            for (en, e) in new_exp
+                .chunks_mut(l_new)
+                .zip(self.exponents.chunks(l_old))
+            {
+                en[..l_old].copy_from_slice(e);
+            }
+        }
+
+        let mut variables = self.variables.as_ref().clone();
+        variables.extend(new_vars);
+
+        self.variables = Arc::new(variables);
+        self.exponents = new_exp;
+    }
+
     /// Check if the polynomial is sorted and has only non-zero coefficients
     pub fn check_consistency(&self) {
         assert_eq!(self.coefficients.len(), self.nterms());
