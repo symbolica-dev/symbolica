@@ -332,7 +332,9 @@ impl PrintOptions {
     }
 
     pub fn update_with_fmt(mut self, f: &std::fmt::Formatter) -> Self {
-        self.precision = f.precision();
+        if let Some(precision) = f.precision() {
+            self.precision = Some(precision);
+        }
 
         if f.alternate() {
             self.hide_all_namespaces = false;

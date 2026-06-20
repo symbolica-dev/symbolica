@@ -6,14 +6,15 @@ use std::{
 };
 
 use rand::Rng;
-use rug::{
-    Assign, Float as MultiPrecisionFloat,
-    ops::{CompleteRound, Pow},
-};
 use xprec::{CompensatedArithmetic, Df64};
 
 use super::{DoubleFloat, FloatLike, Real, RealLike, SingleFloat};
-use crate::domains::{InternalOrdering, integer::Integer, rational::Rational};
+use crate::domains::{
+    InternalOrdering,
+    backend::float::{Assign, CompleteRound, Constant, MultiPrecisionFloat, Pow},
+    integer::Integer,
+    rational::Rational,
+};
 
 /// A multi-precision floating point type. Operations on this type
 /// loosely track the precision of the result, but always overestimate.
@@ -715,7 +716,7 @@ impl FloatLike for Float {
 
     #[inline]
     fn pow(&self, e: u64) -> Self {
-        MultiPrecisionFloat::with_val(self.prec(), rug::ops::Pow::pow(&self.0, e)).into()
+        MultiPrecisionFloat::with_val(self.prec(), Pow::pow(&self.0, e)).into()
     }
 
     #[inline(always)]
@@ -803,7 +804,7 @@ impl RealLike for Float {
 impl Real for Float {
     #[inline(always)]
     fn pi(&self) -> Self {
-        MultiPrecisionFloat::with_val(self.prec(), rug::float::Constant::Pi).into()
+        MultiPrecisionFloat::with_val(self.prec(), Constant::Pi).into()
     }
 
     #[inline(always)]
@@ -813,7 +814,7 @@ impl Real for Float {
 
     #[inline(always)]
     fn euler(&self) -> Self {
-        MultiPrecisionFloat::with_val(self.prec(), rug::float::Constant::Euler).into()
+        MultiPrecisionFloat::with_val(self.prec(), Constant::Euler).into()
     }
 
     #[inline(always)]
@@ -970,12 +971,6 @@ impl Real for Float {
 impl Rational {
     // Convert the rational number to a multi-precision float with precision `prec`.
     pub fn to_multi_prec_float(&self, prec: u32) -> Float {
-        Float::with_val(
-            prec,
-            rug::Rational::from((
-                self.numerator().to_multi_prec(),
-                self.denominator().to_multi_prec(),
-            )),
-        )
+        Float::with_val(prec, self.clone().to_multi_prec())
     }
 }

@@ -11,10 +11,6 @@ use std::{
 };
 
 use rand::Rng;
-use rug::{
-    Complete, Integer as MultiPrecisionInteger,
-    ops::{Pow, RemRounding},
-};
 
 use crate::{
     domains::{RingOps, Set},
@@ -25,12 +21,32 @@ use crate::{
 use super::{
     EuclideanDomain, Field, InternalOrdering, Ring, SelfRing,
     finite_field::{
-        FiniteField, FiniteFieldCore, FiniteFieldElement, FiniteFieldWorkspace, Mersenne64,
-        PrimeIteratorU64, ToFiniteField, Two, Z2, Zp, Zp64,
+        FiniteField, FiniteFieldCore, FiniteFieldElement, FiniteFieldWorkspace, Mersenne32,
+        Mersenne64, PrimeIteratorU64, ToFiniteField, Two, Z2, Zp, Zp64,
     },
     float::{FloatField, FloatLike, Real, RealLike, SingleFloat},
     rational::Rational,
 };
+
+pub(crate) use super::backend::integer::Complete;
+pub use super::backend::integer::MultiPrecisionInteger;
+#[allow(unused_imports)]
+use super::backend::integer::RemRounding as _;
+use super::backend::integer::pow_ref_u32 as mp_pow_ref_u32;
+#[cfg(feature = "bincode")]
+use super::backend::integer::{from_be_bytes as mp_from_be_bytes, to_be_bytes as mp_to_be_bytes};
+
+fn mp_try_div_exact(
+    a: &MultiPrecisionInteger,
+    b: &MultiPrecisionInteger,
+) -> Option<MultiPrecisionInteger> {
+    if b.is_zero() {
+        return None;
+    }
+
+    let (q, r) = a.div_rem_ref(b).complete();
+    if r.is_zero() { Some(q) } else { None }
+}
 
 /// The first 100 primes.
 pub const SMALL_PRIMES: [i64; 100] = [
@@ -104,7 +120,7 @@ impl<'py> FromPyObject<'_, 'py> for Integer {
             Ok(num.into())
         } else if let Ok(num) = ob.cast::<PyInt>() {
             let a = num.to_string();
-            Ok(Integer::from(rug::Integer::parse(&a).unwrap().complete()))
+            Ok(Integer::from(a.parse::<MultiPrecisionInteger>().unwrap()))
         } else {
             Err(exceptions::PyValueError::new_err("Not a valid integer"))
         }
@@ -154,7 +170,7 @@ impl bincode::Encode for Integer {
             }
             Integer::Large(val) => {
                 2u8.encode(encoder)?;
-                let bytes = val.to_digits::<u8>(rug::integer::Order::MsfBe);
+                let bytes = mp_to_be_bytes(val);
                 bytes.encode(encoder)
             }
         }
@@ -180,7 +196,8 @@ impl<Context> bincode::Decode<Context> for Integer {
             }
             2 => {
                 let b = Vec::<u8>::decode(decoder)?;
-                let val = MultiPrecisionInteger::from_digits(&b, rug::integer::Order::MsfBe);
+                let val =
+                    mp_from_be_bytes(&b).map_err(|e| bincode::error::DecodeError::Other(e))?;
                 Ok(Integer::Large(val))
             }
             _ => Err(bincode::error::DecodeError::OtherString(format!(
@@ -622,6 +639,23 @@ impl ToFiniteField<Integer> for Integer {
     }
 }
 
+impl ToFiniteField<Mersenne32> for Integer {
+    fn to_finite_field(
+        &self,
+        _field: &FiniteField<Mersenne32>,
+    ) -> <FiniteField<Mersenne32> as Set>::Element {
+        match self {
+            &Integer::Single(n) => n.rem_euclid(Mersenne32::PRIME as i64) as u32,
+            &Integer::Double(n) => n.rem_euclid(Mersenne32::PRIME as i128) as u32,
+            Integer::Large(r) => r
+                .rem_euc(Mersenne32::PRIME)
+                .complete()
+                .to_u64()
+                .unwrap() as u32,
+        }
+    }
+}
+
 impl ToFiniteField<Mersenne64> for Integer {
     fn to_finite_field(
         &self,
@@ -673,6 +707,16 @@ impl FromFiniteField<u64> for Integer {
         } else {
             Integer::Double(r as i128)
         }
+    }
+}
+
+impl FromFiniteField<Mersenne32> for Integer {
+    fn from_finite_field(_field: &FiniteField<Mersenne32>, element: u32) -> Self {
+        Integer::Single(element as i64)
+    }
+
+    fn from_prime(_field: &FiniteField<Mersenne32>) -> Self {
+        Integer::Single(Mersenne32::PRIME as i64)
     }
 }
 
@@ -806,7 +850,7 @@ impl Integer {
         match self {
             Integer::Single(n) => *n < 0,
             Integer::Double(n) => *n < 0,
-            Integer::Large(r) => MultiPrecisionInteger::from(r.signum_ref()) == -1,
+            Integer::Large(r) => r.is_negative(),
         }
     }
 
@@ -1291,7 +1335,7 @@ impl Integer {
             }
             Integer::Single(f)
         } else {
-            Integer::Large(rug::Integer::factorial(n).complete())
+            Integer::Large(MultiPrecisionInteger::factorial(n).complete())
         }
     }
 
@@ -1441,17 +1485,17 @@ impl Integer {
                 } else if let Some(pn) = (*n1 as i128).checked_pow(e) {
                     Integer::Double(pn)
                 } else {
-                    Integer::Large(MultiPrecisionInteger::from(*n1).pow(e))
+                    Integer::Large(mp_pow_ref_u32(&MultiPrecisionInteger::from(*n1), e))
                 }
             }
             Integer::Double(n1) => {
                 if let Some(pn) = n1.checked_pow(e) {
                     Integer::Double(pn)
                 } else {
-                    Integer::Large(MultiPrecisionInteger::from(*n1).pow(e))
+                    Integer::Large(mp_pow_ref_u32(&MultiPrecisionInteger::from(*n1), e))
                 }
             }
-            Integer::Large(r) => Integer::Large(r.pow(e).into()),
+            Integer::Large(r) => Integer::Large(mp_pow_ref_u32(r, e)),
         }
     }
 
@@ -1592,13 +1636,13 @@ impl Integer {
             (Integer::Single(n1), Integer::Large(r2))
             | (Integer::Large(r2), Integer::Single(n1)) => {
                 let r1 = MultiPrecisionInteger::from(*n1);
-                let (g, s, t) = r1.extended_gcd(r2.clone(), MultiPrecisionInteger::new());
+                let (g, s, t) = r1.extended_gcd(r2.clone(), MultiPrecisionInteger::default());
                 (Integer::from(g), Integer::from(s), Integer::from(t))
             }
             (Integer::Large(r1), Integer::Large(r2)) => {
                 let (g, s, t) = r1
                     .clone()
-                    .extended_gcd(r2.clone(), MultiPrecisionInteger::new());
+                    .extended_gcd(r2.clone(), MultiPrecisionInteger::default());
                 (Integer::from(g), Integer::from(s), Integer::from(t))
             }
             (Integer::Single(r1), Integer::Double(r2))
@@ -1628,14 +1672,13 @@ impl Integer {
             }
             (Integer::Double(r1), Integer::Large(r2)) => {
                 let (g, s, t) = MultiPrecisionInteger::from(*r1)
-                    .clone()
-                    .extended_gcd(r2.clone(), MultiPrecisionInteger::new());
+                    .extended_gcd(r2.clone(), MultiPrecisionInteger::default());
                 (Integer::from(g), Integer::from(s), Integer::from(t))
             }
             (Integer::Large(r1), Integer::Double(r2)) => {
                 let (g, s, t) = r1.clone().extended_gcd(
                     MultiPrecisionInteger::from(*r2),
-                    MultiPrecisionInteger::new(),
+                    MultiPrecisionInteger::default(),
                 );
                 (Integer::from(g), Integer::from(s), Integer::from(t))
             }
@@ -1715,7 +1758,7 @@ impl Integer {
         // convert to standard representation
         let r = v1 * p1.clone() + n1;
 
-        let res = if r.clone() * 2 > p1.clone() * p2.clone() {
+        let res = if r.clone() * MultiPrecisionInteger::from(2) > p1.clone() * p2.clone() {
             r - p1 * p2
         } else {
             r
@@ -2366,9 +2409,9 @@ impl<'b> Add<&'b Integer> for &Integer {
                 }
             }
             (Integer::Single(n1), Integer::Large(r2))
-            | (Integer::Large(r2), Integer::Single(n1)) => Integer::from((*n1 + r2).complete()),
+            | (Integer::Large(r2), Integer::Single(n1)) => Integer::from((n1 + r2).complete()),
             (Integer::Double(n1), Integer::Large(r2))
-            | (Integer::Large(r2), Integer::Double(n1)) => Integer::from((*n1 + r2).complete()),
+            | (Integer::Large(r2), Integer::Double(n1)) => Integer::from((n1 + r2).complete()),
             (Integer::Large(r1), Integer::Large(r2)) => Integer::from((r1 + r2).complete()),
         }
     }
@@ -2465,9 +2508,9 @@ impl<'b> Sub<&'b Integer> for &Integer {
                     Integer::Large(MultiPrecisionInteger::from(*r1) - *r2)
                 }
             }
-            (Integer::Single(n1), Integer::Large(r2)) => Integer::from((*n1 - r2).complete()),
+            (Integer::Single(n1), Integer::Large(r2)) => Integer::from((n1 - r2).complete()),
             (Integer::Large(r1), Integer::Single(n2)) => Integer::from((r1 - *n2).complete()),
-            (Integer::Double(n1), Integer::Large(r2)) => Integer::from((*n1 - r2).complete()),
+            (Integer::Double(n1), Integer::Large(r2)) => Integer::from((n1 - r2).complete()),
             (Integer::Large(r1), Integer::Double(n2)) => Integer::from((r1 - *n2).complete()),
             (Integer::Large(r1), Integer::Large(r2)) => Integer::from((r1 - r2).complete()),
         }
@@ -2541,14 +2584,18 @@ impl<'b> Mul<&'b Integer> for &Integer {
                 if let Some(num) = (*n1 as i128).checked_mul(*r2) {
                     Integer::from_double(num)
                 } else {
-                    Integer::Large(MultiPrecisionInteger::from(*r2) * *n1)
+                    Integer::Large(
+                        MultiPrecisionInteger::from(*r2) * MultiPrecisionInteger::from(*n1),
+                    )
                 }
             }
             (Integer::Double(r1), Integer::Double(r2)) => {
                 if let Some(num) = r1.checked_mul(*r2) {
                     Integer::from_double(num)
                 } else {
-                    Integer::Large(MultiPrecisionInteger::from(*r1) * *r2)
+                    Integer::Large(
+                        MultiPrecisionInteger::from(*r1) * MultiPrecisionInteger::from(*r2),
+                    )
                 }
             }
             (Integer::Single(n1), Integer::Large(r2))
@@ -2651,9 +2698,9 @@ impl<'b> Div<&'b Integer> for &Integer {
                     Integer::Large(MultiPrecisionInteger::from(*r1) / *r2)
                 }
             }
-            (Integer::Single(n1), Integer::Large(r2)) => Integer::from((*n1 / r2).complete()),
+            (Integer::Single(n1), Integer::Large(r2)) => Integer::from((n1 / r2).complete()),
             (Integer::Large(r1), Integer::Single(n2)) => Integer::from((r1 / *n2).complete()),
-            (Integer::Double(n1), Integer::Large(r2)) => Integer::from((*n1 / r2).complete()),
+            (Integer::Double(n1), Integer::Large(r2)) => Integer::from((n1 / r2).complete()),
             (Integer::Large(r1), Integer::Double(n2)) => Integer::from((r1 / *n2).complete()),
             (Integer::Large(r1), Integer::Large(r2)) => Integer::from((r1 / r2).complete()),
         }
@@ -3218,9 +3265,9 @@ impl<'a> Rem<&'a Integer> for Integer {
         }
 
         match (self, rhs) {
-            (Integer::Large(a), Integer::Single(b)) => Integer::from(a.rem_euc(b)),
-            (Integer::Large(a), Integer::Double(b)) => Integer::from(a.rem_euc(b)),
-            (Integer::Large(a), Integer::Large(b)) => Integer::from(a.rem_euc(b)),
+            (Integer::Large(a), Integer::Single(b)) => Integer::from(a.rem_euc(*b)),
+            (Integer::Large(a), Integer::Double(b)) => Integer::from(a.rem_euc(*b)),
+            (Integer::Large(a), Integer::Large(b)) => Integer::from(a.rem_euc(b.clone())),
             (x, _) => (&x).rem(rhs),
         }
     }
@@ -3302,9 +3349,9 @@ impl Rem for &Integer {
                     Integer::zero()
                 }
             }
-            (Integer::Large(a), Integer::Single(b)) => Integer::from(a.rem_euc(b).complete()),
-            (Integer::Large(a), Integer::Double(b)) => Integer::from(a.rem_euc(b).complete()),
-            (Integer::Large(a), Integer::Large(b)) => Integer::from(a.rem_euc(b).complete()),
+            (Integer::Large(a), Integer::Single(b)) => Integer::from(a.rem_euc(*b).complete()),
+            (Integer::Large(a), Integer::Double(b)) => Integer::from(a.rem_euc(*b).complete()),
+            (Integer::Large(a), Integer::Large(b)) => Integer::from(a.rem_euc(b.clone())),
         }
     }
 }
@@ -3442,7 +3489,7 @@ impl RingOps<&<Self as Set>::Element> for MultiPrecisionIntegerRing {
 impl Ring for MultiPrecisionIntegerRing {
     #[inline]
     fn zero(&self) -> Self::Element {
-        MultiPrecisionInteger::new()
+        MultiPrecisionInteger::default()
     }
 
     #[inline]
@@ -3460,7 +3507,7 @@ impl Ring for MultiPrecisionIntegerRing {
         if e > u32::MAX as u64 {
             panic!("Power of exponentiation is larger than 2^32: {e}");
         }
-        b.clone().pow(e as u32)
+        mp_pow_ref_u32(b, e as u32)
     }
 
     #[inline]
@@ -3490,13 +3537,7 @@ impl Ring for MultiPrecisionIntegerRing {
     }
 
     fn try_div(&self, a: &Self::Element, b: &Self::Element) -> Option<Self::Element> {
-        if b.is_zero() {
-            return None;
-        }
-
-        let (r, q) = a.div_rem_ref(b).complete();
-
-        if q.is_zero() { Some(r) } else { None }
+        mp_try_div_exact(a, b)
     }
 
     fn sample(&self, rng: &mut impl rand::RngCore, range: (i64, i64)) -> Self::Element {
@@ -3641,10 +3682,10 @@ mod test {
         str::FromStr,
     };
 
-    use rug::Complete;
-
+    #[cfg(feature = "gmp")]
+    use crate::domains::float::{Float, Real};
     use crate::domains::{
-        float::{F64, Float},
+        float::F64,
         integer::{extended_gcd, extended_gcd_i128},
     };
 
@@ -3695,37 +3736,29 @@ mod test {
         try_variants!(
             a,
             b,
-            Integer::from(
-                rug::Integer::parse("3529178341193418202448766865967598093745792000000")
-                    .unwrap()
-                    .complete()
-            ),
+            Integer::from_str("3529178341193418202448766865967598093745792000000").unwrap(),
             add
         );
         try_variants!(
             a,
             b,
-            Integer::from(
-                rug::Integer::parse("3529184275300451286008027827753913822719081764864")
-                    .unwrap()
-                    .complete()
-            ),
+            Integer::from_str("3529184275300451286008027827753913822719081764864").unwrap(),
             sub
         );
-        try_variants!(a, b,  Integer::from(
-            rug::Integer::parse("-10471269811147586074167526453409671971439869211545667023340431153576356451994427981246234624")
-                .unwrap()
-                .complete()
-        ), mul);
+        try_variants!(
+            a,
+            b,
+            Integer::from_str(
+                "-10471269811147586074167526453409671971439869211545667023340431153576356451994427981246234624"
+            )
+            .unwrap(),
+            mul
+        );
         try_variants!(a, b, -1189456, div);
         try_variants!(
             a,
             b,
-            Integer::from(
-                rug::Integer::parse("1700675215712075116094879895131557158845440")
-                    .unwrap()
-                    .complete()
-            ),
+            Integer::from_str("1700675215712075116094879895131557158845440").unwrap(),
             rem
         );
     }
@@ -3817,11 +3850,13 @@ mod test {
         assert_eq!(result, &[1, 5, 6]);
     }
 
+    #[cfg(feature = "gmp")]
     #[test]
     fn pslq_medium() {
-        let pi = Float::with_val(300, rug::float::Constant::Pi);
-        let e = Float::with_val(300, rug::float::Constant::Euler);
-        let log2 = Float::with_val(300, rug::float::Constant::Log2);
+        let f = Float::new(300);
+        let pi = f.pi();
+        let e = f.e();
+        let log2 = Float::with_val(300, 2).log();
         let r = pi.clone() * 178236781263123i64
             + e.clone() * -712365671253675i64
             + log2.clone() * 712637812361762786i64;
@@ -3859,7 +3894,7 @@ mod test {
     #[cfg(feature = "bincode")]
     #[test]
     fn bincode_export() {
-        let a = Integer::from(rug::Integer::factorial(150).complete());
+        let a = Integer::factorial(150);
         let encoded = bincode::encode_to_vec(&a, bincode::config::standard()).unwrap();
         let b: Integer = bincode::decode_from_slice(&encoded, bincode::config::standard())
             .unwrap()
