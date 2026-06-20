@@ -6,11 +6,10 @@ use std::{
 
 use num_traits::FromPrimitive;
 use rand::Rng;
-use rug::Float as MultiPrecisionFloat;
 use simba::scalar::{ComplexField, RealField};
 use xprec::{CompensatedArithmetic, Df64};
 
-use super::{Constructible, FixedPrecision, FloatLike, Real, RealLike, SingleFloat};
+use super::{Constructible, FixedPrecision, Float, FloatLike, Real, RealLike, SingleFloat};
 use crate::domains::{InternalOrdering, integer::Integer, rational::Rational};
 
 /// A 106-bit precision floating point number represented by the compensated sum of two `f64` values.
@@ -653,7 +652,7 @@ impl From<&Rational> for DoubleFloat {
 
 impl From<Rational> for DoubleFloat {
     fn from(value: Rational) -> Self {
-        value.to_multi_prec_float(106).to_double_float()
+        (&value).into()
     }
 }
 
@@ -687,15 +686,13 @@ impl InternalOrdering for DoubleFloat {
 
 impl Display for DoubleFloat {
     fn fmt(&self, f: &mut Formatter<'_>) -> fmt::Result {
-        let value = MultiPrecisionFloat::with_val(106, self.0.hi()) + self.0.lo();
-        Display::fmt(&value, f)
+        Display::fmt(&Float::from(*self), f)
     }
 }
 
 impl LowerExp for DoubleFloat {
     fn fmt(&self, f: &mut Formatter<'_>) -> fmt::Result {
-        let value = MultiPrecisionFloat::with_val(106, self.0.hi()) + self.0.lo();
-        LowerExp::fmt(&value, f)
+        LowerExp::fmt(&Float::from(*self), f)
     }
 }
 

@@ -5,9 +5,8 @@ use std::{
 
 use rand::Rng;
 
-use super::{
-    Constructible, DoubleFloat, FixedPrecision, Float, FloatLike, Real, RealLike, SingleFloat,
-};
+use super::{Constructible, FixedPrecision, FloatLike, Real, SingleFloat};
+use super::{DoubleFloat, Float, RealLike};
 use crate::domains::{InternalOrdering, integer::Integer, rational::Rational};
 
 /// A complex number, `re + i * im`, where `i` is the imaginary unit.
