@@ -138,6 +138,51 @@ impl EvaluationDomain for wide::f64x4 {
     }
 }
 
+impl EvaluationDomain for wide::f64x8 {
+    const FIXED_PRECISION: Option<u32> = Some(53);
+
+    fn try_from_complex_float(f: Complex<Float>) -> Result<Self, String> {
+        if f.is_real() {
+            let r = f.re.to_f64();
+            Ok(wide::f64x8::new([r; 8]))
+        } else {
+            Err(format!(
+                "Cannot convert from Complex<Float> to f64 because the result {f} is not real"
+            ))
+        }
+    }
+
+    fn resolve_function(
+        tags: &[AtomView],
+        info: &EvaluationInfo,
+    ) -> Option<Box<dyn ExternalFunction<Self>>> {
+        if let Some(f) = info.get_evaluator::<wide::f64x8>(tags) {
+            return Some(f);
+        }
+
+        // create a vectorized version of the scalar function if it exists
+        if let Some(f) = f64::resolve_function(tags, info) {
+            Some(Box::new(move |args| {
+                let mut buffer =
+                    smallvec::SmallVec::<[f64; 4]>::from_iter(std::iter::repeat_n(0., args.len()));
+                let mut res = [0.; 8];
+
+                for i in 0..8 {
+                    for (b, v) in buffer.iter_mut().zip(args) {
+                        *b = v.as_array()[i];
+                    }
+
+                    res[i] = f(&buffer);
+                }
+
+                res.into()
+            }))
+        } else {
+            None
+        }
+    }
+}
+
 impl EvaluationDomain for DoubleFloat {
     const FIXED_PRECISION: Option<u32> = Some(106);
 
