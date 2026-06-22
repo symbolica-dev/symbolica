@@ -18,6 +18,7 @@ use crate::{
 static SPECIALS: LazyLock<SpecialSymbols> = LazyLock::new(|| SpecialSymbols {
     euler_gamma: get_symbol!("euler_gamma").expect("Euler gamma not defined"),
     gamma: get_symbol!("gamma").expect("gamma not defined"),
+    erf: get_symbol!("erf").expect("erf not defined"),
     polygamma: get_symbol!("polygamma").expect("polygamma not defined"),
     polylog: get_symbol!("polylog").expect("polylog not defined"),
     zeta: get_symbol!("zeta").expect("zeta not defined"),
@@ -56,6 +57,7 @@ static BESSELS: LazyLock<BesselSymbols> = LazyLock::new(|| BesselSymbols {
 struct SpecialSymbols {
     euler_gamma: Symbol,
     gamma: Symbol,
+    erf: Symbol,
     polygamma: Symbol,
     polylog: Symbol,
     zeta: Symbol,
@@ -308,13 +310,8 @@ impl SpecialSymbols {
                 .with_derivative_function(move |x, i, out| {
                     if i == 1
                         && let Some([s, z]) = function_arguments::<2>(x)
-                        && let Some(order) = atom_to_integer(s)
                     {
-                        if order == 1 {
-                            **out = Atom::num(1) / (Atom::num(1) - z);
-                        } else {
-                            **out = function!(polylog_symbol, Atom::num(order - 1), z) / z;
-                        }
+                        **out = function!(polylog_symbol, s.to_owned() - 1, z) / z;
                     }
                 })
                 .with_evaluation_info(
@@ -459,8 +456,57 @@ impl SpecialSymbols {
                     .register(|args: &[Complex<f64>]| zeta_eval_complex_f64(args)),
                 )
             }
+            ,
+            "erf";;
+            |symbols, b| {
+                let erf_symbol = symbols[5];
+
+                b.with_normalization_function(move |x, out| {
+                    if let Some([arg]) = function_arguments::<1>(x) {
+                        if arg.is_zero() {
+                            out.to_num(Coefficient::zero());
+                            return;
+                        }
+
+                        if maybe_eval_unary_float_in_norm(arg, out, erf_numeric_eval) {
+                            return;
+                        }
+
+                        if is_negative_atom(arg) {
+                            **out = -function!(erf_symbol, -arg.to_owned());
+                        }
+                    }
+                })
+                .with_derivative_function(move |x, i, out| {
+                    if i == 0
+                        && let Some([arg]) = function_arguments::<1>(x)
+                    {
+                        **out = Atom::num(2)
+                            * (-arg.to_owned().pow(Atom::num(2))).exp()
+                            / Atom::from(State::PI).sqrt();
+                    }
+                })
+                .with_evaluation_info(
+                    EvaluationInfo::new()
+                    .register(|args: &[Complex<Float>]| {
+                        unary_eval_complex_float(args, erf_numeric_eval)
+                    })
+                    .register(|args: &[Float]| {
+                        let prec = args.first().map(|x| x.prec()).unwrap_or(53);
+                        let [arg] = args else {
+                            return Float::with_val(53, f64::NAN);
+                        };
+                        erf_numeric_eval(&Complex::new(arg.clone(), Float::new(prec)), prec).re
+                    })
+                    .register(|args: &[f64]| unary_eval_f64(args, erf_numeric_eval))
+                    .register(|args: &[Complex<f64>]| {
+                        unary_eval_complex_f64(args, erf_numeric_eval)
+                    }),
+                )
+            }
         );
 
+        let erf = symbols.pop().unwrap();
         let zeta = symbols.pop().unwrap();
         let _dzeta = symbols.pop().unwrap();
         let polylog = symbols.pop().unwrap();
@@ -470,6 +516,7 @@ impl SpecialSymbols {
         Self {
             euler_gamma,
             gamma,
+            erf,
             polygamma,
             polylog,
             zeta,
@@ -1713,6 +1760,13 @@ pub fn gamma() -> Symbol {
     SPECIALS.gamma
 }
 
+/// Return the built-in error function symbol `erf`.
+///
+/// `erf(z)` is entire and odd, with derivative `2 exp(-z^2) / sqrt(pi)`.
+pub fn erf() -> Symbol {
+    SPECIALS.erf
+}
+
 /// Return the built-in Euler-Mascheroni constant symbol `euler_gamma`.
 ///
 /// This is the constant `gamma_E`, approximately `0.57721`, used in expansions of `gamma`,
@@ -2004,6 +2058,8 @@ pub trait TranscendentalFunctions: AtomCore {
         acsch => acsch;
         /// Apply the gamma function.
         gamma => gamma;
+        /// Apply the error function.
+        erf => erf;
         /// Apply the Riemann zeta function.
         zeta => zeta;
     }
@@ -2897,6 +2953,14 @@ fn complex_rational_multiple_of_pi(point: AtomView) -> Option<Complex<Rational>>
     }
 }
 
+fn is_negative_atom(arg: AtomView) -> bool {
+    match arg {
+        AtomView::Num(n) => n.get_coeff_view().to_owned().is_negative(),
+        AtomView::Mul(m) => m.into_iter().any(is_negative_atom),
+        _ => false,
+    }
+}
+
 fn atom_float_precision(value: AtomView) -> Option<u32> {
     let AtomView::Num(number) = value else {
         return None;
@@ -3008,6 +3072,23 @@ fn gamma_numeric_eval(z: &Complex<Float>, binary_prec: u32) -> Complex<Float> {
     }
 
     gamma_complex_spouge(z, binary_prec)
+}
+
+fn erf_numeric_eval(z: &Complex<Float>, binary_prec: u32) -> Complex<Float> {
+    if z.is_zero() {
+        return Complex::new(Float::new(binary_prec), Float::new(binary_prec));
+    }
+
+    if z.re.to_f64() < 0.0 {
+        return -erf_numeric_eval(&(-z.clone()), binary_prec);
+    }
+
+    let abs_z = z.norm().re.to_f64().abs();
+    if abs_z <= 4.0 || z.re.to_f64().abs() < 1.0 {
+        erf_series_eval(z, binary_prec)
+    } else {
+        erf_asymptotic_eval(z, binary_prec)
+    }
 }
 
 fn polygamma_order_zero_numeric_eval(z: &Complex<Float>, binary_prec: u32) -> Complex<Float> {
@@ -3666,6 +3747,82 @@ fn polygamma_order_zero_complex(z: &Complex<Float>, binary_prec: u32) -> Complex
     correction + sum
 }
 
+fn erf_series_eval(z: &Complex<Float>, binary_prec: u32) -> Complex<Float> {
+    let work_prec = binary_prec
+        .saturating_mul(2)
+        .max(binary_prec.saturating_add(64));
+    let mut z = z.clone();
+    z.re.set_prec(work_prec);
+    z.im.set_prec(work_prec);
+
+    let zero = Float::new(work_prec);
+    let z_squared = z.clone() * z.clone();
+    let mut term = z.clone();
+    let mut sum = term.clone();
+    let threshold = 2f64.powi(-(binary_prec.min(900) as i32));
+
+    for n in 0..(64 * binary_prec.max(16)) {
+        let numerator = Complex::new(Float::with_val(work_prec, 2 * n + 1), zero.clone());
+        let denominator = Complex::new(
+            Float::with_val(work_prec, n + 1) * Float::with_val(work_prec, 2 * n + 3),
+            zero.clone(),
+        );
+        term = -term * z_squared.clone() * numerator / denominator;
+        let term_size = term.norm().re.to_f64().abs();
+        sum += term.clone();
+        if n > 16 && (term_size == 0.0 || term_size < threshold) {
+            break;
+        }
+    }
+
+    let prefactor = Complex::new(
+        Float::with_val(work_prec, 2) / Float::with_val(work_prec, Constant::Pi).sqrt(),
+        zero,
+    );
+    let mut result = prefactor * sum;
+    result.re.set_prec(binary_prec);
+    result.im.set_prec(binary_prec);
+    result
+}
+
+fn erf_asymptotic_eval(z: &Complex<Float>, binary_prec: u32) -> Complex<Float> {
+    let work_prec = binary_prec
+        .saturating_mul(2)
+        .max(binary_prec.saturating_add(64));
+    let mut z = z.clone();
+    z.re.set_prec(work_prec);
+    z.im.set_prec(work_prec);
+
+    let zero = Float::new(work_prec);
+    let one = Complex::new(Float::with_val(work_prec, 1), zero.clone());
+    let two = Complex::new(Float::with_val(work_prec, 2), zero.clone());
+    let z_squared = z.clone() * z.clone();
+    let mut term = one.clone();
+    let mut sum = term.clone();
+    let threshold = 2f64.powi(-(binary_prec.min(900) as i32));
+
+    for n in 0..(16 * binary_prec.max(16)) {
+        let factor = Complex::new(Float::with_val(work_prec, 2 * n + 1), zero.clone())
+            / (two.clone() * z_squared.clone());
+        term = -term * factor;
+        let term_size = term.norm().re.to_f64().abs();
+        if n > 0 && term_size > sum.norm().re.to_f64().abs() {
+            break;
+        }
+        sum += term.clone();
+        if n > 4 && (term_size == 0.0 || term_size < threshold) {
+            break;
+        }
+    }
+
+    let sqrt_pi = Float::with_val(work_prec, Constant::Pi).sqrt();
+    let erfc = (-z_squared).exp() * sum / (Complex::new(sqrt_pi, zero) * z);
+    let mut result = one - erfc;
+    result.re.set_prec(binary_prec);
+    result.im.set_prec(binary_prec);
+    result
+}
+
 fn spouge_parameter(binary_prec: u32) -> u32 {
     ((binary_prec as f64 / (2.0 * std::f64::consts::PI).log2()).ceil() as u32).max(12) + 2
 }
@@ -3715,6 +3872,27 @@ mod tests {
         assert_eq!(
             parse!("gamma(x)").derivative(symbol!("x")),
             parse!("gamma(x)*polygamma(0,x)")
+        );
+    }
+
+    #[test]
+    fn erf_basic_normalization() {
+        assert_eq!(parse!("erf(0)"), Atom::new());
+        assert_eq!(parse!("erf(-x)"), parse!("-erf(x)"));
+
+        let actual = Complex::<Float>::try_from(parse!("erf(1)").to_float(80)).unwrap();
+        let expected = Complex::new(
+            Float::parse("0.84270079294971486934", Some(80)).unwrap(),
+            Float::new(80),
+        );
+        assert_close_complex(&actual, &expected, "1e-20");
+    }
+
+    #[test]
+    fn erf_derivative() {
+        assert_eq!(
+            parse!("erf(x)").derivative(symbol!("x")),
+            parse!("2*exp(-x^2)/sqrt(pi)")
         );
     }
 
@@ -3782,6 +3960,7 @@ mod tests {
     #[test]
     fn special_float_inputs_normalize_immediately() {
         assert!(Complex::<Float>::try_from(parse!("gamma(1.25)")).is_ok());
+        assert!(Complex::<Float>::try_from(parse!("erf(1.25)")).is_ok());
         assert!(Complex::<Float>::try_from(parse!("polygamma(0,1.25)")).is_ok());
         assert!(Complex::<Float>::try_from(parse!("polygamma(1,1.25)")).is_ok());
         assert!(Complex::<Float>::try_from(parse!("zeta(1.25)")).is_ok());
@@ -3896,12 +4075,13 @@ mod tests {
 
     #[test]
     fn special_functions_register_eval_info() {
-        let mut evaluator =
-            parse!("gamma(x)+polygamma(0,x)+polygamma(1,x)+polylog(2,x)+zeta(x)+euler_gamma")
-                .evaluator(&[parse!("x")])
-                .build()
-                .unwrap()
-                .map_coeff(&|x| x.re.to_f64());
+        let mut evaluator = parse!(
+            "gamma(x)+erf(x)+polygamma(0,x)+polygamma(1,x)+polylog(2,x)+zeta(x)+euler_gamma"
+        )
+        .evaluator(&[parse!("x")])
+        .build()
+        .unwrap()
+        .map_coeff(&|x| x.re.to_f64());
 
         let mut out = [0.0];
         evaluator.evaluate(&[0.25], &mut out);
@@ -3941,6 +4121,7 @@ mod tests {
         assert_eq!(x.atan(), parse!("atan(x)"));
         assert_eq!(x.atan2(parse!("y")), parse!("atan(x,y)"));
         assert_eq!(x.gamma(), parse!("gamma(x)"));
+        assert_eq!(x.erf(), parse!("erf(x)"));
         assert_eq!(x.zeta(), parse!("zeta(x)"));
         assert_eq!(x.polylog(2), parse!("polylog(2,x)"));
         assert_eq!(x.polygamma(1), parse!("polygamma(1,x)"));
