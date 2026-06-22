@@ -4602,6 +4602,12 @@ impl PythonExpression {
         crate::function!(crate::transcendental::gamma(), self.expr.clone()).into()
     }
 
+    /// Compute the error function of the expression.
+    /// `erf(z)` is entire and odd, with derivative `2*exp(-z^2)/sqrt(pi)`.
+    pub fn erf(&self) -> PythonExpression {
+        crate::function!(crate::transcendental::erf(), self.expr.clone()).into()
+    }
+
     /// Compute the polygamma function of order `n` at the expression.
     /// For fixed non-negative integer `n`, this is meromorphic with poles at the non-positive integers.
     pub fn polygamma(&self, n: ConvertibleToExpression) -> PythonExpression {

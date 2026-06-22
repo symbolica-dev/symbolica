@@ -142,7 +142,7 @@ fn float_transcendental_evaluator() {
         parse!("b"),
     ];
     let expr = parse!(
-        "tan(x)+asin(a)+acos(b)+atan(x)+atan(x,y)+sinh(x)+cosh(x)+tanh(x)+cot(x)+sec(x)+csc(x)+acot(x)+asec(y)+acsc(y)+coth(x)+sech(x)+csch(x)+asinh(x)+acosh(y)+atanh(a)+acoth(y)+asech(b)+acsch(x)+gamma(y)+zeta(y)+polygamma(1,y)+polylog(2,a)+bessel_j(0,x)+bessel_y(0,y)+bessel_i(0,x)+bessel_k(0,y)"
+        "tan(x)+asin(a)+acos(b)+atan(x)+atan(x,y)+sinh(x)+cosh(x)+tanh(x)+cot(x)+sec(x)+csc(x)+acot(x)+asec(y)+acsc(y)+coth(x)+sech(x)+csch(x)+asinh(x)+acosh(y)+atanh(a)+acoth(y)+asech(b)+acsch(x)+gamma(y)+erf(x)+zeta(y)+polygamma(1,y)+polylog(2,a)+bessel_j(0,x)+bessel_y(0,y)+bessel_i(0,x)+bessel_k(0,y)"
     );
 
     let evaluator = expr
