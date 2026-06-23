@@ -1514,7 +1514,7 @@ where
 
             // drop the denominator as it is constant in x
             let mut sqf = r.numerator.square_free_factorization();
-            sqf.retain(|(x, _)| !x.is_constant());
+            sqf.retain(|(x, _)| x.degree(new_var) > E::zero());
 
             let factors: Vec<(Vec<_>, _, _)> = sqf
                 .into_iter()
