@@ -1475,7 +1475,7 @@ where
 
                 let r = -(&t_full / &(&rat_field.nth(i.into()) * &p_full.pow(i as u64)));
                 if !r.is_zero() {
-                    v.push(r);
+                    v.push(&r * &constant);
                 }
             }
 
