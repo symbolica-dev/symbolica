@@ -542,8 +542,12 @@ impl<F: Ring, E: Exponent, O: MonomialOrder> MultivariatePolynomial<F, E, O> {
         &self.exponents[index * self.nvars()..(index + 1) * self.nvars()]
     }
 
+    /// Return the slice for the exponents of the trailing last monomial.
     #[inline(always)]
     pub fn last_exponents(&self) -> &[E] {
+        if self.coefficients.is_empty() {
+            panic!("Cannot get last exponent of empty polynomial");
+        }
         //assert!(self.nterms() > 0);
         &self.exponents[(self.nterms() - 1) * self.nvars()..self.nterms() * self.nvars()]
     }
@@ -1490,15 +1494,6 @@ impl<F: Ring, E: Exponent, O: MonomialOrder> MultivariatePolynomial<F, E, O> {
     #[inline]
     pub fn max_coeff(&self) -> &F::Element {
         self.coefficients.last().unwrap()
-    }
-
-    #[inline]
-    pub fn max_exp(&self) -> &[E] {
-        if self.coefficients.is_empty() {
-            panic!("Cannot get max exponent of empty polynomial");
-        }
-
-        &self.exponents[(self.nterms() - 1) * self.nvars()..self.nterms() * self.nvars()]
     }
 
     /// Add a new monomial with coefficient `other` and exponent one.
