@@ -1993,7 +1993,7 @@ impl FormattedPrintPow for PowView<'_> {
             }
         }
 
-        let add_paren = print_state.in_exp_base; // right associative
+        let mut add_paren = print_state.in_exp_base; // right associative
         if add_paren {
             AtomPrinter::format_bracket('(', f, opts, print_state)?;
             print_state.in_exp = false;
@@ -2025,6 +2025,13 @@ impl FormattedPrintPow for PowView<'_> {
             && let CoefficientView::Natural(num, den, 0, 1) = n.get_coeff_view()
             && num < 0
         {
+            if print_state.in_exp && !add_paren {
+                add_paren = true;
+                AtomPrinter::format_bracket('(', f, opts, print_state)?;
+                print_state.in_exp = false;
+                print_state.bracket_level += 1;
+            }
+
             let exp = Rational::new(num, den).neg();
 
             if opts.mode.is_latex() {
