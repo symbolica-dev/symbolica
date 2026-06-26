@@ -16,7 +16,10 @@
 //! assert_eq!(out, parse!("f(1,2,x+1)+f(1,2,4)"));
 //! ```
 
-use std::ops::DerefMut;
+use std::{
+    hash::Hash,
+    ops::{Add, BitOr, DerefMut, Div, Mul},
+};
 
 use ahash::{HashMap, HashSet};
 use dyn_clone::DynClone;
@@ -58,6 +61,78 @@ pub enum Pattern {
     Add(Vec<Pattern>),
     Alternative(Vec<(Vec<(Symbol, AtomView<'static>)>, Pattern)>),
     Transformer(Box<(Option<Pattern>, Vec<Transformer>)>),
+}
+
+impl<T: Into<Pattern>> Mul<T> for &Pattern {
+    type Output = Pattern;
+
+    fn mul(self, rhs: T) -> Self::Output {
+        Workspace::get_local().with(|ws| self.mul(&rhs.into(), ws))
+    }
+}
+
+impl<T: Into<Pattern>> Mul<T> for Pattern {
+    type Output = Pattern;
+
+    fn mul(self, rhs: T) -> Self::Output {
+        Workspace::get_local().with(|ws| (&self).mul(&rhs.into(), ws))
+    }
+}
+
+impl<T: Into<Pattern>> Add<T> for &Pattern {
+    type Output = Pattern;
+
+    fn add(self, rhs: T) -> Self::Output {
+        Workspace::get_local().with(|ws| self.add(&rhs.into(), ws))
+    }
+}
+
+impl<T: Into<Pattern>> Add<T> for Pattern {
+    type Output = Pattern;
+
+    fn add(self, rhs: T) -> Self::Output {
+        Workspace::get_local().with(|ws| (&self).add(&rhs.into(), ws))
+    }
+}
+
+impl<T: Into<Pattern>> Div<T> for &Pattern {
+    type Output = Pattern;
+
+    fn div(self, rhs: T) -> Self::Output {
+        Workspace::get_local().with(|ws| self.div(&rhs.into(), ws))
+    }
+}
+
+impl<T: Into<Pattern>> Div<T> for Pattern {
+    type Output = Pattern;
+
+    fn div(self, rhs: T) -> Self::Output {
+        Workspace::get_local().with(|ws| (&self).div(&rhs.into(), ws))
+    }
+}
+
+impl<T: Into<Pattern>> BitOr<T> for &Pattern {
+    type Output = Pattern;
+
+    /// Create an alternative pattern that matches either `self` or `rhs`.
+    ///
+    /// Panics if `self` or `rhs` do not contain the same wildcards.
+    /// Use [`Pattern::alternative`] if you want to handle the error instead of panicking.
+    fn bitor(self, rhs: T) -> Self::Output {
+        self.clone().alternative(rhs.into()).unwrap()
+    }
+}
+
+impl<T: Into<Pattern>> BitOr<T> for Pattern {
+    type Output = Pattern;
+
+    /// Create an alternative pattern that matches either `self` or `rhs`.
+    ///
+    /// Panics if `self` or `rhs` do not contain the same wildcards.
+    /// Use [`Pattern::alternative`] if you want to handle the error instead of panicking.
+    fn bitor(self, rhs: T) -> Self::Output {
+        self.alternative(rhs.into()).unwrap()
+    }
 }
 
 impl From<Symbol> for Pattern {
@@ -422,6 +497,24 @@ impl<'a, 'b> ReplaceBuilder<'a, 'b> {
     /// This can be used to prevent expensive recomputations.
     pub fn rhs_cache_size(mut self, rhs_cache_size: usize) -> Self {
         self.match_settings.rhs_cache_size = rhs_cache_size;
+        self
+    }
+
+    /// Set a wildcard as optional and replace it with a default value. The following matches work for optional `y_`:
+    /// - `x^y_` matches `x`, and `y_` is set to 1
+    /// - `x*y_` matches `x`, and `y_` is set to 1
+    /// - `x+y_` matches `x`, and `y_` is set to 0
+    ///
+    /// # Example
+    ///
+    /// ```
+    /// use symbolica::prelude::*;
+    ///
+    /// let res = parse!("x").replace(parse!("x_^y_")).set_optional(symbol!("y_")).with(1);
+    /// assert_eq!(res, 1);
+    /// ```
+    pub fn set_optional(mut self, wildcard: Symbol) -> Self {
+        self.pattern = BorrowedOrOwned::Owned(self.pattern.yield_owned().set_optional(wildcard));
         self
     }
 
@@ -2519,6 +2612,96 @@ impl Pattern {
         Ok(())
     }
 
+    fn get_all_wildcards(&self) -> HashSet<Symbol> {
+        let mut wildcards = HashSet::default();
+        self.get_all_wildcards_impl(&mut wildcards);
+        wildcards
+    }
+
+    fn get_all_wildcards_impl(&self, wildcards: &mut HashSet<Symbol>) {
+        match self {
+            Pattern::Literal(_) => {}
+            Pattern::Wildcard(s) => {
+                wildcards.insert(*s);
+            }
+            Pattern::Fn(s, args) => {
+                if s.get_wildcard_level() > 0 {
+                    wildcards.insert(*s);
+                }
+
+                for arg in args {
+                    arg.get_all_wildcards_impl(wildcards);
+                }
+            }
+            Pattern::Pow(p) => {
+                p[0].get_all_wildcards_impl(wildcards);
+                p[1].get_all_wildcards_impl(wildcards);
+            }
+            Pattern::Mul(m) | Pattern::Add(m) => {
+                for arg in m {
+                    arg.get_all_wildcards_impl(wildcards);
+                }
+            }
+            Pattern::Alternative(alts) => {
+                for (_, alt) in alts {
+                    alt.get_all_wildcards_impl(wildcards);
+                }
+            }
+            Pattern::Transformer(_) => {}
+        }
+    }
+
+    /// Create an alternative pattern that matches either `self` or `rhs`.
+    /// You can also use the `|` operator to create an alternative pattern.
+    ///
+    /// This function will return an error if `self` or `rhs` do not contain the same wildcards.
+    ///
+    /// # Example
+    ///
+    /// ```
+    /// use symbolica::prelude::*;
+    ///
+    /// let pat = (parse!("x").to_pattern() | parse!("y")) * parse!("z");
+    /// let res = parse!("x*z + y*z + a*z").replace(pat).with(1);
+    /// assert_eq!(res, parse!("2 + a*z"));
+    /// ```
+    pub fn alternative(self, rhs: Self) -> Result<Self, String> {
+        let wc_1 = self.get_all_wildcards();
+        let wc_2 = rhs.get_all_wildcards();
+        if wc_1 != wc_2 {
+            return Err(format!(
+                "Cannot create alternative pattern with different wildcards: {:?} and {:?}",
+                wc_1, wc_2
+            ));
+        }
+
+        match (self, rhs) {
+            (Pattern::Alternative(mut alts1), Pattern::Alternative(alts2)) => {
+                alts1.extend(alts2);
+                Ok(Pattern::Alternative(alts1))
+            }
+            (Pattern::Alternative(mut alts), p) | (p, Pattern::Alternative(mut alts)) => {
+                alts.push((vec![], p));
+                Ok(Pattern::Alternative(alts))
+            }
+            (p1, p2) => Ok(Pattern::Alternative(vec![(vec![], p1), (vec![], p2)])),
+        }
+    }
+
+    /// Set a wildcard as optional and replace it with a default value. The following matches work for optional `y_`:
+    /// - `x^y_` matches `x`, and `y_` is set to 1
+    /// - `x*y_` matches `x`, and `y_` is set to 1
+    /// - `x+y_` matches `x`, and `y_` is set to 0
+    ///
+    /// # Example
+    ///
+    /// ```
+    /// use symbolica::prelude::*;
+    ///
+    /// let pat = parse!("x_^y_").to_pattern().set_optional(symbol!("y_"));
+    /// let res = parse!("x").replace(pat).with(1);
+    /// assert_eq!(res, 1);
+    /// ```
     pub fn set_optional(self, symbol: Symbol) -> Self {
         self.set_optional_impl(symbol)
     }
@@ -2850,9 +3033,7 @@ impl Pattern {
 
         new_found
     }
-}
 
-impl Pattern {
     /// A quick check to see if a pattern can match.
     #[inline]
     fn could_match(&self, target: AtomView) -> bool {
@@ -4851,54 +5032,6 @@ impl<'a, 'b> AtomMatchIterator<'a, 'b> {
     }
 }
 
-#[test]
-fn alternative() {
-    let pat = Pattern::Mul(vec![
-        Pattern::Alternative(vec![
-            (vec![], Pattern::Literal(crate::parse!("x"))),
-            (vec![], Pattern::Literal(crate::parse!("y"))),
-        ]),
-        Pattern::Wildcard(crate::symbol!("x_")),
-    ]);
-
-    let rhs = crate::parse!("f(x_)").to_pattern();
-
-    let e = crate::parse!("x*z").replace(&pat).with(&rhs);
-    println!("{e}");
-
-    let e = crate::parse!("y*z").replace(&pat).with(&rhs);
-    println!("{e}");
-
-    let e = crate::parse!("a*z").replace(&pat).with(&rhs);
-    println!("{e}");
-}
-
-#[test]
-fn optional() {
-    let pat = crate::parse!("(a_+b_*x)^p_")
-        .to_pattern()
-        .set_optional(crate::symbol!("a_"))
-        .set_optional(crate::symbol!("b_"))
-        .set_optional(crate::symbol!("p_"));
-
-    let rhs = crate::parse!("f(a_,b_,p_)").to_pattern();
-
-    let e = crate::parse!("(1+2*x)^3").replace(&pat).with(&rhs);
-    println!("{e}");
-
-    let e = crate::parse!("(1+x)^3").replace(&pat).with(&rhs);
-    println!("{e}");
-
-    let e = crate::parse!("1+2*x").replace(&pat).with(&rhs);
-    println!("{e}");
-
-    let e = crate::parse!("1+x").replace(&pat).with(&rhs);
-    println!("{e}");
-
-    let e = crate::parse!("x").replace(&pat).with(&rhs);
-    println!("{e}");
-}
-
 /// A slice of atoms with a known type.
 #[derive(Debug)]
 struct TypedSlice<'a> {
@@ -6585,5 +6718,48 @@ mod test {
         });
 
         assert_eq!(res, parse!("f(x*(1+y)+f(x*(1+x)),x,f(x*(1+x)))"));
+    }
+
+    #[test]
+    fn alternative() {
+        let pat = (parse!("x").to_pattern() | parse!("y").to_pattern())
+            * crate::parse!("x_").to_pattern();
+
+        let rhs = crate::parse!("f(x_)").to_pattern();
+
+        let e = crate::parse!("x*z").replace(&pat).with(&rhs);
+        assert_eq!(e, crate::parse!("f(z)"));
+
+        let e = crate::parse!("y*z").replace(&pat).with(&rhs);
+        assert_eq!(e, crate::parse!("f(z)"));
+
+        let e = crate::parse!("a*z").replace(&pat).with(&rhs);
+        assert_eq!(e, crate::parse!("a*z"));
+    }
+
+    #[test]
+    fn optional() {
+        let pat = crate::parse!("(a_+b_*x)^p_")
+            .to_pattern()
+            .set_optional(crate::symbol!("a_"))
+            .set_optional(crate::symbol!("b_"))
+            .set_optional(crate::symbol!("p_"));
+
+        let rhs = crate::parse!("f(a_,b_,p_)").to_pattern();
+
+        let e = crate::parse!("(1+2*x)^3").replace(&pat).with(&rhs);
+        assert_eq!(e, crate::parse!("f(1,2,3)"));
+
+        let e = crate::parse!("(1+x)^3").replace(&pat).with(&rhs);
+        assert_eq!(e, crate::parse!("f(1,1,3)"));
+
+        let e = crate::parse!("1+2*x").replace(&pat).with(&rhs);
+        assert_eq!(e, crate::parse!("f(1,2,1)"));
+
+        let e = crate::parse!("1+x").replace(&pat).with(&rhs);
+        assert_eq!(e, crate::parse!("f(1,1,1)"));
+
+        let e = crate::parse!("x").replace(&pat).with(&rhs);
+        assert_eq!(e, crate::parse!("f(0,1,1)"));
     }
 }
