@@ -24,8 +24,8 @@ use dyn_clone::DynClone;
 use crate::{
     OperationCount,
     atom::{
-        Atom, AtomCore, AtomType, AtomView, Indeterminate, ListIterator, SliceType, Symbol,
-        representation::InlineVar,
+        Atom, AtomCore, AtomType, AtomView, Indeterminate, InlineNum, ListIterator, SliceType,
+        Symbol, representation::InlineVar,
     },
     coefficient::{Coefficient, CoefficientView},
     domains::rational::Rational,
@@ -35,6 +35,9 @@ use crate::{
 };
 
 pub use crate::atom::AliasedAtom;
+
+static ZERO: InlineNum = InlineNum::zero();
+static ONE: InlineNum = InlineNum::one();
 
 /// A general expression that can contain pattern-matching wildcards
 /// and transformers.
@@ -53,6 +56,7 @@ pub enum Pattern {
     Pow(Box<[Pattern; 2]>),
     Mul(Vec<Pattern>),
     Add(Vec<Pattern>),
+    Alternative(Vec<(Vec<(Symbol, AtomView<'static>)>, Pattern)>),
     Transformer(Box<(Option<Pattern>, Vec<Transformer>)>),
 }
 
@@ -2508,10 +2512,123 @@ impl Pattern {
 
                 add_h.as_view().normalize(ws, out);
             }
+            Pattern::Alternative(_) => Err("Cannot convert alternative to atom")?,
             Pattern::Transformer(_) => Err("Cannot convert transformer to atom")?,
         }
 
         Ok(())
+    }
+
+    pub fn set_optional(self, symbol: Symbol) -> Self {
+        self.set_optional_impl(symbol)
+    }
+
+    fn from_mul_args(mut args: Vec<Pattern>) -> Pattern {
+        match args.len() {
+            0 => Pattern::Literal(Atom::num(1)),
+            1 => args.pop().unwrap(),
+            _ => Pattern::Mul(args),
+        }
+    }
+
+    fn from_add_args(mut args: Vec<Pattern>) -> Pattern {
+        match args.len() {
+            0 => Pattern::Literal(Atom::Zero),
+            1 => args.pop().unwrap(),
+            _ => Pattern::Add(args),
+        }
+    }
+
+    fn set_optional_impl(self, symbol: Symbol) -> Self {
+        match self {
+            Pattern::Literal(t) => Pattern::Literal(t),
+            Pattern::Wildcard(w) => Pattern::Wildcard(w),
+            Pattern::Fn(s, args) => {
+                let new_args = args
+                    .into_iter()
+                    .map(|arg| arg.set_optional_impl(symbol))
+                    .collect::<Vec<_>>();
+                Pattern::Fn(s, new_args)
+            }
+            Pattern::Pow(p) => {
+                let (base, exp) = (
+                    p[0].clone().set_optional_impl(symbol),
+                    p[1].clone().set_optional_impl(symbol),
+                );
+                if matches!(&p[1], Pattern::Wildcard(s) if *s == symbol) {
+                    Pattern::Alternative(vec![
+                        (vec![], Pattern::Pow(Box::new([base.clone(), exp]))),
+                        (vec![(symbol, ONE.as_view())], base),
+                    ])
+                } else {
+                    Pattern::Pow(Box::new([base, exp]))
+                }
+            }
+            Pattern::Add(a) => {
+                let mut new_args = vec![];
+                for x in a {
+                    new_args.push(x.set_optional_impl(symbol));
+                }
+
+                if new_args
+                    .iter()
+                    .any(|x| matches!(x, Pattern::Wildcard(s) if *s == symbol))
+                {
+                    let stripped = new_args
+                        .iter()
+                        .cloned()
+                        .filter(|x| !matches!(x, Pattern::Wildcard(s) if *s == symbol))
+                        .collect::<Vec<_>>();
+
+                    Pattern::Alternative(vec![
+                        (vec![], Pattern::Add(new_args)),
+                        (
+                            vec![(symbol, ZERO.as_view())],
+                            Self::from_add_args(stripped),
+                        ),
+                    ])
+                } else {
+                    Pattern::Add(new_args)
+                }
+            }
+            Pattern::Mul(a) => {
+                let mut new_args = vec![];
+                for x in a {
+                    new_args.push(x.set_optional_impl(symbol));
+                }
+
+                if new_args
+                    .iter()
+                    .any(|x| matches!(x, Pattern::Wildcard(s) if *s == symbol))
+                {
+                    let stripped = new_args
+                        .iter()
+                        .cloned()
+                        .filter(|x| !matches!(x, Pattern::Wildcard(s) if *s == symbol))
+                        .collect::<Vec<_>>();
+
+                    Pattern::Alternative(vec![
+                        (vec![], Pattern::Mul(new_args)),
+                        (vec![(symbol, ONE.as_view())], Self::from_mul_args(stripped)),
+                    ])
+                } else {
+                    Pattern::Mul(new_args)
+                }
+            }
+            Pattern::Alternative(alts) => {
+                // TODO: flatten?
+                if !alts.iter().any(|a| a.0.iter().any(|(s, _)| *s == symbol)) {
+                    Pattern::Alternative(
+                        alts.into_iter()
+                            .map(|(req, p)| (req, p.set_optional_impl(symbol)))
+                            .collect(),
+                    )
+                } else {
+                    Pattern::Alternative(alts)
+                }
+            }
+            Pattern::Transformer(t) => Pattern::Transformer(t),
+        }
     }
 
     pub fn add(&self, rhs: &Self, workspace: &Workspace) -> Self {
@@ -2749,6 +2866,9 @@ impl Pattern {
             (Pattern::Wildcard(w), x) => x.has_attributes_of(*w),
             (Pattern::Pow(_), AtomView::Pow(_)) => true,
             (Pattern::Literal(p), _) => p.as_view() == target,
+            (Pattern::Alternative(alternatives), _) => {
+                alternatives.iter().any(|(_, p)| p.could_match(target))
+            }
             (Pattern::Transformer(_), _) => panic!("Pattern is a transformer"),
             (_, _) => false,
         }
@@ -2846,6 +2966,9 @@ impl Pattern {
                 }),
                 (Pattern::Add(_), _) => std::cmp::Ordering::Less,
                 (_, Pattern::Add(_)) => std::cmp::Ordering::Greater,
+                (Pattern::Alternative(_), Pattern::Alternative(_)) => std::cmp::Ordering::Equal,
+                (Pattern::Alternative(_), _) => std::cmp::Ordering::Less,
+                (_, Pattern::Alternative(_)) => std::cmp::Ordering::Greater,
                 (Pattern::Transformer(_), Pattern::Transformer(_)) => std::cmp::Ordering::Equal,
             }
         }
@@ -2992,6 +3115,11 @@ impl Pattern {
                 }
 
                 add.as_view().normalize(ws, out);
+            }
+            Pattern::Alternative(_) => {
+                return Err(format!(
+                    "Encountered alternative during substitution of wildcards from a map",
+                ));
             }
             Pattern::Transformer(_) => {
                 return Err(format!(
@@ -3247,6 +3375,9 @@ impl Pattern {
             Pattern::Literal(oa) => {
                 out.set_from_view(&oa.as_view());
             }
+            Pattern::Alternative(_) => Err(TransformerError::ValueError(
+                "Cannot replace wildcards in an alternative pattern.".to_owned(),
+            ))?,
             Pattern::Transformer(p) => {
                 let (pat, ts) = &**p;
 
@@ -3292,6 +3423,7 @@ impl std::fmt::Debug for Pattern {
             Self::Mul(arg0) => f.debug_tuple("Mul").field(arg0).finish(),
             Self::Add(arg0) => f.debug_tuple("Add").field(arg0).finish(),
             Self::Literal(arg0) => f.debug_tuple("Literal").field(arg0).finish(),
+            Self::Alternative(arg0) => f.debug_tuple("Alternative").field(arg0).finish(),
             Self::Transformer(arg0) => f.debug_tuple("Transformer").field(arg0).finish(),
         }
     }
@@ -4520,10 +4652,102 @@ enum PatternIter<'a, 'b> {
     Wildcard(WildcardIter),
     Fn(Option<usize>, Symbol, Box<SubSliceIterator<'a, 'b>>), // index first
     Sequence(Option<usize>, Box<SubSliceIterator<'a, 'b>>),
+    Alternative(Option<usize>, AlternativeIter<'a, 'b>),
+}
+
+#[derive(Debug)]
+struct AlternativeVariantIter<'a, 'b> {
+    fixed_matches: &'b [(Symbol, AtomView<'static>)],
+    iterator: AtomMatchIterator<'a, 'b>,
+}
+
+#[derive(Debug)]
+struct AlternativeIter<'a, 'b> {
+    variants: Vec<AlternativeVariantIter<'a, 'b>>,
+    variant_index: usize,
+    match_stack_len: Option<usize>,
+    fixed_match_stack_len: Option<usize>,
+    target: AtomView<'a>,
+}
+
+impl<'a, 'b> AlternativeIter<'a, 'b> {
+    fn new(alternatives: &'b [(Vec<(Symbol, AtomView<'static>)>, Pattern)]) -> Self {
+        AlternativeIter {
+            variants: alternatives
+                .iter()
+                .map(|(fixed_matches, pattern)| AlternativeVariantIter {
+                    fixed_matches: fixed_matches,
+                    iterator: AtomMatchIterator::new(pattern, AtomView::ZERO),
+                })
+                .collect(),
+            variant_index: 0,
+            match_stack_len: None,
+            fixed_match_stack_len: None,
+            target: AtomView::ZERO,
+        }
+    }
+
+    fn set_target(&mut self, target: AtomView<'a>) {
+        self.variant_index = 0;
+        self.match_stack_len = None;
+        self.fixed_match_stack_len = None;
+        self.target = target;
+    }
+
+    fn clear_current(&mut self, match_stack: &mut WrappedMatchStack<'a, 'b>) {
+        if let Some(match_stack_len) = self.match_stack_len.take() {
+            match_stack.truncate(match_stack_len);
+        }
+        self.fixed_match_stack_len = None;
+    }
+
+    fn next(&mut self, match_stack: &mut WrappedMatchStack<'a, 'b>) -> Option<usize> {
+        while self.variant_index < self.variants.len() {
+            let variant_index = self.variant_index;
+
+            if self.match_stack_len.is_none() {
+                let match_stack_len = match_stack.len();
+                let mut fixed_matches_ok = true;
+
+                for (symbol, atom) in self.variants[variant_index].fixed_matches {
+                    if match_stack.insert(*symbol, Match::Single(*atom)).is_err() {
+                        fixed_matches_ok = false;
+                        break;
+                    }
+                }
+
+                if !fixed_matches_ok {
+                    match_stack.truncate(match_stack_len);
+                    self.variant_index += 1;
+                    continue;
+                }
+
+                self.match_stack_len = Some(match_stack_len);
+                self.fixed_match_stack_len = Some(match_stack.len());
+                self.variants[variant_index]
+                    .iterator
+                    .set_new_target_complete(self.target);
+            }
+
+            if self.variants[variant_index]
+                .iterator
+                .next(match_stack)
+                .is_some()
+            {
+                return self.fixed_match_stack_len;
+            }
+
+            self.clear_current(match_stack);
+            self.variant_index += 1;
+        }
+
+        None
+    }
 }
 
 /// An iterator that tries to match an entire atom or
 /// a subslice to a pattern.
+#[derive(Debug)]
 pub struct AtomMatchIterator<'a, 'b> {
     try_match_atom: bool,
     reset_subslice_iter: bool,
@@ -4531,6 +4755,7 @@ pub struct AtomMatchIterator<'a, 'b> {
     pattern: &'b Pattern,
     target: AtomView<'a>,
     old_match_stack_len: Option<usize>,
+    force_complete: bool,
 }
 
 impl<'a, 'b> AtomMatchIterator<'a, 'b> {
@@ -4550,16 +4775,28 @@ impl<'a, 'b> AtomMatchIterator<'a, 'b> {
             pattern,
             target,
             old_match_stack_len: None,
+            force_complete: false,
         }
     }
 
     /// Reuse the iterator for a new target atom.
     #[inline]
     pub fn set_new_target(&mut self, target: AtomView<'a>) {
+        self.set_new_target_impl(target, false);
+    }
+
+    #[inline]
+    fn set_new_target_complete(&mut self, target: AtomView<'a>) {
+        self.set_new_target_impl(target, true);
+    }
+
+    #[inline]
+    fn set_new_target_impl(&mut self, target: AtomView<'a>, force_complete: bool) {
         self.target = target;
         self.try_match_atom = matches!(self.pattern, Pattern::Wildcard(_) | Pattern::Literal(_));
         self.reset_subslice_iter = true;
         self.old_match_stack_len = None;
+        self.force_complete = force_complete;
     }
 
     pub fn next(
@@ -4604,10 +4841,62 @@ impl<'a, 'b> AtomMatchIterator<'a, 'b> {
                 true,
                 matches!(self.pattern, Pattern::Wildcard(_) | Pattern::Literal(_)),
             );
+
+            if self.force_complete {
+                self.subslice_iter.complete = true;
+            }
         }
 
         self.subslice_iter.next(match_stack).ok()
     }
+}
+
+#[test]
+fn alternative() {
+    let pat = Pattern::Mul(vec![
+        Pattern::Alternative(vec![
+            (vec![], Pattern::Literal(crate::parse!("x"))),
+            (vec![], Pattern::Literal(crate::parse!("y"))),
+        ]),
+        Pattern::Wildcard(crate::symbol!("x_")),
+    ]);
+
+    let rhs = crate::parse!("f(x_)").to_pattern();
+
+    let e = crate::parse!("x*z").replace(&pat).with(&rhs);
+    println!("{e}");
+
+    let e = crate::parse!("y*z").replace(&pat).with(&rhs);
+    println!("{e}");
+
+    let e = crate::parse!("a*z").replace(&pat).with(&rhs);
+    println!("{e}");
+}
+
+#[test]
+fn optional() {
+    let pat = crate::parse!("(a_+b_*x)^p_")
+        .to_pattern()
+        .set_optional(crate::symbol!("a_"))
+        .set_optional(crate::symbol!("b_"))
+        .set_optional(crate::symbol!("p_"));
+
+    let rhs = crate::parse!("f(a_,b_,p_)").to_pattern();
+
+    let e = crate::parse!("(1+2*x)^3").replace(&pat).with(&rhs);
+    println!("{e}");
+
+    let e = crate::parse!("(1+x)^3").replace(&pat).with(&rhs);
+    println!("{e}");
+
+    let e = crate::parse!("1+2*x").replace(&pat).with(&rhs);
+    println!("{e}");
+
+    let e = crate::parse!("1+x").replace(&pat).with(&rhs);
+    println!("{e}");
+
+    let e = crate::parse!("x").replace(&pat).with(&rhs);
+    println!("{e}");
 }
 
 /// A slice of atoms with a known type.
@@ -4741,6 +5030,9 @@ impl<'a, 'b> SubSliceIterator<'a, 'b> {
                     Box::new(SubSliceIterator::new(pat, SliceType::Add)),
                 ),
                 Pattern::Literal(atom) => PatternIter::Literal(None, atom.as_view()),
+                Pattern::Alternative(alternatives) => {
+                    PatternIter::Alternative(None, AlternativeIter::new(alternatives))
+                }
                 Pattern::Transformer(_) => panic!("Transformer is not allowed on lhs"),
             })
             .collect();
@@ -4788,7 +5080,9 @@ impl<'a, 'b> SubSliceIterator<'a, 'b> {
                 if matches!(self.pattern[0], Pattern::Wildcard(_)) {
                     self.target.set_list(target);
                 } else {
-                    if do_not_match_to_single_atom_in_list {
+                    if do_not_match_to_single_atom_in_list
+                        && !matches!(self.pattern[0], Pattern::Alternative(_))
+                    {
                         shortcut_done = true; // cannot match
                     }
                     self.target.set_one(target);
@@ -5018,6 +5312,9 @@ impl<'a, 'b> SubSliceIterator<'a, 'b> {
                         *index = None;
                     }
                     (Pattern::Literal(..), PatternIter::Literal(index, _)) => {
+                        *index = None;
+                    }
+                    (Pattern::Alternative(..), PatternIter::Alternative(index, _)) => {
                         *index = None;
                     }
                     (Pattern::Transformer(_), _) => panic!("Transformer is not allowed on lhs"),
@@ -5394,6 +5691,75 @@ impl<'a, 'b> SubSliceIterator<'a, 'b> {
                             self.used_flag[ii] = true;
                             continue 'next_match;
                         }
+                        ii += 1;
+                    }
+                }
+                PatternIter::Alternative(index, s) => {
+                    let mut tried_first_option = false;
+
+                    let mut ii = match index {
+                        Some(jj) => {
+                            if !structural_mismatch {
+                                if let Some(x) = s.next(match_stack) {
+                                    self.matches.push(x);
+                                    continue 'next_match;
+                                }
+                            } else {
+                                s.clear_current(match_stack);
+                            }
+
+                            self.used_flag[*jj] = false;
+                            tried_first_option = true;
+                            *jj + 1
+                        }
+                        None => {
+                            if self.cyclic && !self.used_flag.iter().all(|u| *u) {
+                                // start after the last used index
+                                let mut pos = self.used_flag.iter().position(|x| *x).unwrap_or(0);
+                                while self.used_flag[pos] {
+                                    pos = (pos + 1) % self.used_flag.len();
+                                }
+                                pos
+                            } else {
+                                0
+                            }
+                        }
+                    };
+
+                    while ii < self.target.len() {
+                        if self.used_flag[ii]
+                            || self.processed_iterators < 64
+                                && self.compatibility_flag[ii]
+                                    & (1 << (self.processed_iterators - 1))
+                                    != 0
+                        {
+                            if self.cyclic {
+                                break;
+                            }
+
+                            ii += 1;
+                            continue;
+                        }
+
+                        if self.ordered_gapless && tried_first_option {
+                            // cyclic sequences can start at any position
+                            if !self.cyclic || self.used_flag.iter().any(|x| *x) {
+                                break;
+                            }
+                        }
+
+                        tried_first_option = true;
+
+                        s.set_target(self.target.get(ii));
+
+                        if let Some(x) = s.next(match_stack) {
+                            *index = Some(ii);
+                            self.matches.push(x);
+                            self.used_flag[ii] = true;
+                            continue 'next_match;
+                        }
+
+                        structural_mismatch = false;
                         ii += 1;
                     }
                 }
