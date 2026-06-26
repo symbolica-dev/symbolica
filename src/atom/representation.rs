@@ -433,6 +433,24 @@ impl InlineNum {
         InlineNum { data, size }
     }
 
+    pub const fn zero() -> InlineNum {
+        InlineNum {
+            data: [
+                NUM_ID, 1, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0,
+            ],
+            size: 3,
+        }
+    }
+
+    pub const fn one() -> InlineNum {
+        InlineNum {
+            data: [
+                NUM_ID, 1, 1, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0,
+            ],
+            size: 3,
+        }
+    }
+
     pub fn get_data(&self) -> &[u8] {
         &self.data[..self.size as usize]
     }
