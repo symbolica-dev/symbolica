@@ -1431,7 +1431,7 @@ impl Drop for RecycledAtom {
 #[cfg(test)]
 mod tests {
     use crate::{
-        atom::{Atom, AtomCore, AtomView, Symbol},
+        atom::{Atom, AtomCore, AtomView, InlineVar, Symbol},
         parse, symbol,
     };
 
@@ -1472,9 +1472,10 @@ mod tests {
                 if let AtomView::Fun(f) = input {
                     if f.get_nargs() == 1 {
                         let arg = f.iter().next().unwrap();
-                        if let AtomView::Fun(f2) = arg {
-                            if f2.get_symbol() == Symbol::EXP && f2.get_nargs() == 1 {
-                                out.set_from_view(&f2.iter().next().unwrap());
+                        if let AtomView::Pow(p) = arg {
+                            let (b, e) = p.get_base_exp();
+                            if b == InlineVar::new(Symbol::E).as_view() {
+                                out.set_from_view(&e);
                             }
                         }
                     }

@@ -1,4 +1,4 @@
-use crate::coefficient::ConvertToRing;
+use crate::{atom::InlineVar, coefficient::ConvertToRing};
 
 use super::*;
 
@@ -753,11 +753,9 @@ impl<'a> AtomView<'a> {
             AtomView::Fun(f) => {
                 let name = f.get_symbol();
                 if [
-                    Symbol::EXP_ID,
                     Symbol::LOG_ID,
                     Symbol::SIN_ID,
                     Symbol::COS_ID,
-                    Symbol::SQRT_ID,
                     Symbol::ABS_ID,
                     Symbol::CONJ_ID,
                 ]
@@ -1090,6 +1088,31 @@ impl<'a> AtomView<'a> {
             }
             AtomView::Pow(p) => {
                 let (b, e) = p.get_base_exp();
+
+                if b == InlineVar::new(Symbol::E).as_view() {
+                    let e_eval = e.linearize_impl(
+                        fn_map,
+                        params,
+                        constants,
+                        constant_map,
+                        external_functions,
+                        instr,
+                        subexpressions,
+                        args,
+                    )?;
+
+                    let temp = Slot::Temp(instr.len());
+                    let c = Instruction::Fun(
+                        temp,
+                        Box::new((Symbol::EXP, vec![], vec![e_eval])),
+                        false,
+                    );
+                    instr.push(c);
+
+                    subexpressions.insert(*self, temp);
+                    return Ok(temp);
+                }
+
                 let b_eval = b.linearize_impl(
                     fn_map,
                     params,
@@ -1128,6 +1151,22 @@ impl<'a> AtomView<'a> {
 
                     subexpressions.insert(*self, res);
                     return Ok(res);
+                }
+
+                if let Ok(r) = Rational::try_from(e) {
+                    // FIXME: support 3,2 etc as well
+                    if r == (1, 2) {
+                        let temp = Slot::Temp(instr.len());
+                        let c = Instruction::Fun(
+                            temp,
+                            Box::new((Symbol::SQRT, vec![], vec![b_eval])),
+                            false,
+                        );
+                        instr.push(c);
+
+                        subexpressions.insert(*self, temp);
+                        return Ok(temp);
+                    }
                 }
 
                 let e_eval = e.linearize_impl(
@@ -3565,11 +3604,9 @@ impl<'a> AtomView<'a> {
             AtomView::Fun(f) => {
                 let name = f.get_symbol();
                 if [
-                    Symbol::EXP_ID,
                     Symbol::LOG_ID,
                     Symbol::SIN_ID,
                     Symbol::COS_ID,
-                    Symbol::SQRT_ID,
                     Symbol::ABS_ID,
                     Symbol::CONJ_ID,
                 ]
@@ -3753,6 +3790,19 @@ impl<'a> AtomView<'a> {
             }
             AtomView::Pow(p) => {
                 let (b, e) = p.get_base_exp();
+
+                if b == InlineVar::new(Symbol::E).as_view() {
+                    let e_eval = e.to_eval_tree_impl(
+                        fn_map,
+                        params,
+                        args,
+                        fn_id_map,
+                        funcs,
+                        external_functions,
+                    )?;
+                    return Ok(Expression::BuiltinFun(0, Symbol::EXP, Box::new(e_eval)));
+                }
+
                 let b_eval = b.to_eval_tree_impl(
                     fn_map,
                     params,
@@ -3880,11 +3930,9 @@ impl<'a> AtomView<'a> {
             AtomView::Fun(f) => {
                 let name = f.get_symbol();
                 if [
-                    Symbol::EXP_ID,
                     Symbol::LOG_ID,
                     Symbol::SIN_ID,
                     Symbol::COS_ID,
-                    Symbol::SQRT_ID,
                     Symbol::ABS_ID,
                     Symbol::CONJ_ID,
                 ]
@@ -3902,11 +3950,9 @@ impl<'a> AtomView<'a> {
                     let arg_eval = arg.evaluate_impl(map, cache, binary_prec)?;
 
                     return Ok(match f.get_symbol_id() {
-                        Symbol::EXP_ID => arg_eval.exp(),
                         Symbol::LOG_ID => arg_eval.log(),
                         Symbol::SIN_ID => arg_eval.sin(),
                         Symbol::COS_ID => arg_eval.cos(),
-                        Symbol::SQRT_ID => arg_eval.sqrt(),
                         Symbol::ABS_ID => arg_eval.norm(),
                         Symbol::CONJ_ID => arg_eval.conj(),
                         _ => unreachable!(),
@@ -3996,19 +4042,34 @@ impl<'a> AtomView<'a> {
             }
             AtomView::Pow(p) => {
                 let (b, e) = p.get_base_exp();
+
+                if b == InlineVar::new(Symbol::E).as_view() {
+                    let e_eval = e.evaluate_impl(map, cache, binary_prec)?;
+                    return Ok(e_eval.exp());
+                }
+
                 let b_eval = b.evaluate_impl(map, cache, binary_prec)?;
 
                 if let AtomView::Num(n) = e
                     && let CoefficientView::Natural(num, den, ni, _di) = n.get_coeff_view()
-                    && den == 1
                     && ni == 0
                 {
-                    if num == -1 {
-                        return Ok(b_eval.inv());
-                    } else if num >= 0 {
-                        return Ok(b_eval.pow(num as u64));
-                    } else {
-                        return Ok(b_eval.pow(num.unsigned_abs()).inv());
+                    if den == 1 {
+                        if num == -1 {
+                            return Ok(b_eval.inv());
+                        } else if num >= 0 {
+                            return Ok(b_eval.pow(num as u64));
+                        } else {
+                            return Ok(b_eval.pow(num.unsigned_abs()).inv());
+                        }
+                    } else if den == 2 {
+                        if num == -1 {
+                            return Ok(b_eval.sqrt().inv());
+                        } else if num >= 0 {
+                            return Ok(b_eval.sqrt().pow(num as u64));
+                        } else {
+                            return Ok(b_eval.sqrt().pow(num.unsigned_abs()).inv());
+                        }
                     }
                 }
 
@@ -4068,11 +4129,9 @@ impl<'a> AtomView<'a> {
             AtomView::Fun(f) => {
                 let name = f.get_symbol();
                 if [
-                    Symbol::EXP_ID,
                     Symbol::LOG_ID,
                     Symbol::SIN_ID,
                     Symbol::COS_ID,
-                    Symbol::SQRT_ID,
                     Symbol::ABS_ID,
                     Symbol::CONJ_ID,
                 ]

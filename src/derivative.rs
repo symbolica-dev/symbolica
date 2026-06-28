@@ -113,20 +113,10 @@ impl AtomView<'_> {
 
                 // derive special functions
                 if f.get_nargs() == 1
-                    && [
-                        Symbol::EXP,
-                        Symbol::LOG,
-                        Symbol::SIN,
-                        Symbol::COS,
-                        Symbol::SQRT,
-                    ]
-                    .contains(&f.get_symbol())
+                    && [Symbol::LOG, Symbol::SIN, Symbol::COS].contains(&f.get_symbol())
                 {
                     let mut fn_der = workspace.new_atom();
                     match f.get_symbol_id() {
-                        Symbol::EXP_ID => {
-                            fn_der.set_from_view(self);
-                        }
                         Symbol::LOG_ID => {
                             let mut n = workspace.new_atom();
                             n.to_num(-1);
@@ -148,19 +138,6 @@ impl AtomView<'_> {
                             let m = fn_der.to_mul();
                             m.extend(sin.as_view());
                             m.extend(n.as_view());
-                        }
-                        Symbol::SQRT_ID => {
-                            let mut n = workspace.new_atom();
-                            n.to_num((-1, 1));
-
-                            let mut sqrt = workspace.new_atom();
-                            sqrt.to_pow(*self, n.as_view());
-
-                            n.to_num((1, 2));
-
-                            let m = fn_der.to_mul();
-                            m.extend(n.as_view());
-                            m.extend(sqrt.as_view());
                         }
                         _ => unreachable!(),
                     }
@@ -512,9 +489,7 @@ impl AtomView<'_> {
                 match f.get_symbol_id() {
                     Symbol::COS_ID => args_series[0].cos(),
                     Symbol::SIN_ID => args_series[0].sin(),
-                    Symbol::EXP_ID => args_series[0].exp(),
                     Symbol::LOG_ID => args_series[0].log(),
-                    Symbol::SQRT_ID => args_series[0].rpow((1, 2).into()),
                     _ => {
                         if let Some(custom_series) = &f.get_symbol().get_series_function()
                             && let Some((singular, regularized)) = custom_series(&args_series)

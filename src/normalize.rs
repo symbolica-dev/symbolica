@@ -4,12 +4,12 @@ use smallvec::SmallVec;
 
 use crate::{
     atom::{
-        Atom, AtomCore, AtomView, Fun, Symbol,
+        Atom, AtomCore, AtomView, Fun, InlineVar, Symbol,
         representation::{InlineNum, ListIterator},
     },
     coefficient::{Coefficient, CoefficientView},
     domains::{
-        float::{Complex, Float, FloatLike, Real},
+        float::{Complex, Float, Real},
         integer::Z,
         rational::{Q, Rational},
     },
@@ -811,6 +811,25 @@ impl AtomView<'_> {
             }
             AtomView::Fun(f) => {
                 let id = f.get_symbol();
+
+                if id.get_id() == Symbol::EXP_ID && f.get_nargs() == 1 {
+                    let mut h = workspace.new_atom();
+                    h.to_pow(
+                        InlineVar::new(Symbol::E).as_view(),
+                        f.iter().next().unwrap(),
+                    );
+                    h.as_view().normalize(workspace, out);
+                    return;
+                }
+
+                if id.get_id() == Symbol::SQRT_ID && f.get_nargs() == 1 {
+                    let mut h = workspace.new_atom();
+                    let exp = workspace.new_num((1, 2));
+                    h.to_pow(f.iter().next().unwrap(), exp.as_view());
+                    h.as_view().normalize(workspace, out);
+                    return;
+                }
+
                 let out_f = out.to_fun(id);
 
                 /// Add an argument `a` to `f` and flatten nested `arg`s.
@@ -871,9 +890,7 @@ impl AtomView<'_> {
                 if [
                     Symbol::COS_ID,
                     Symbol::SIN_ID,
-                    Symbol::EXP_ID,
                     Symbol::LOG_ID,
-                    Symbol::SQRT_ID,
                     Symbol::ABS_ID,
                 ]
                 .contains(&id.get_id())
@@ -882,22 +899,13 @@ impl AtomView<'_> {
                     let arg = out_f.to_fun_view().iter().next().unwrap();
                     if let AtomView::Num(n) = arg {
                         if n.is_zero() && id != Symbol::LOG || n.is_one() && id == Symbol::LOG {
-                            if id == Symbol::COS || id == Symbol::EXP {
+                            if id == Symbol::COS {
                                 out.to_num(Coefficient::one());
                                 return;
-                            } else if id == Symbol::SIN
-                                || id == Symbol::LOG
-                                || id == Symbol::SQRT
-                                || id == Symbol::ABS
-                            {
+                            } else if id == Symbol::SIN || id == Symbol::LOG || id == Symbol::ABS {
                                 out.to_num(Coefficient::zero());
                                 return;
                             }
-                        }
-
-                        if id == Symbol::SQRT && n.is_one() {
-                            out.to_num(Coefficient::one());
-                            return;
                         }
 
                         if n.is_zero() && id == Symbol::LOG {
@@ -926,30 +934,11 @@ impl AtomView<'_> {
                                     out.to_num(Coefficient::Float(r));
                                     return;
                                 }
-                                Symbol::EXP_ID => {
-                                    let r = if i.is_zero() {
-                                        r.to_float().exp().into()
-                                    } else {
-                                        Complex::new(r.to_float(), i.to_float()).exp()
-                                    };
-                                    out.to_num(Coefficient::Float(r));
-                                    return;
-                                }
                                 Symbol::LOG_ID => {
                                     let r = if i.is_zero() {
                                         r.to_float().log().into()
                                     } else {
                                         Complex::new(r.to_float(), i.to_float()).log()
-                                    };
-                                    out.to_num(Coefficient::Float(r));
-                                    return;
-                                }
-                                Symbol::SQRT_ID => {
-                                    let r = if i.is_zero() {
-                                        let r = r.to_float();
-                                        Complex::new(r.sqrt(), r.zero())
-                                    } else {
-                                        Complex::new(r.to_float(), i.to_float()).sqrt()
                                     };
                                     out.to_num(Coefficient::Float(r));
                                     return;
@@ -1029,15 +1018,6 @@ impl AtomView<'_> {
                                 let mut inner = workspace.new_atom();
                                 inner.set_from_view(&arg);
                                 out.set_from_view(&inner.as_view());
-                            } else if s == Symbol::EXP && ff.get_nargs() == 1 {
-                                // conj(exp(a)) = exp(conj(a))
-                                let exp_arg = ff.iter().next().unwrap();
-                                let mut conj_fun = workspace.new_atom();
-                                conj_fun.to_fun(Symbol::CONJ).add_arg(exp_arg);
-
-                                let mut new_exp = workspace.new_atom();
-                                new_exp.to_fun(Symbol::EXP).add_arg(conj_fun.as_view());
-                                new_exp.as_view().normalize(workspace, out);
                             }
                         }
                         AtomView::Pow(p) => {
@@ -1097,29 +1077,22 @@ impl AtomView<'_> {
                 if id == Symbol::LOG && out_f.to_fun_view().get_nargs() == 1 {
                     let arg = out_f.to_fun_view().iter().next().unwrap();
 
-                    if let AtomView::Fun(f2) = arg
-                        && f2.get_symbol() == Symbol::EXP
-                        && f2.get_nargs() == 1
-                    {
-                        let exp_arg = f2.iter().next().unwrap();
-                        if exp_arg.is_real() {
-                            let mut buffer = workspace.new_atom();
-                            buffer.set_from_view(&exp_arg);
-                            out.set_from_view(&buffer.as_view());
-                            return;
-                        }
-                    }
-                }
-
-                if id == Symbol::EXP && out_f.to_fun_view().get_nargs() == 1 {
-                    let arg = out_f.to_fun_view().iter().next().unwrap();
-                    // simplify logs inside exp
-                    if arg.contains_symbol(Symbol::LOG) {
-                        let mut buffer = workspace.new_atom();
-                        if arg.simplify_exp_log(workspace, &mut buffer) {
-                            out.set_from_view(&buffer.as_view());
-                        }
+                    if arg == InlineVar::new(Symbol::E).as_view() {
+                        out.set_from_view(&InlineNum::one().as_view());
                         return;
+                    }
+
+                    if let AtomView::Pow(p) = arg {
+                        let (b, e) = p.get_base_exp();
+                        // TODO: support comparison with symbol?
+                        if b == InlineVar::new(Symbol::E).as_view() {
+                            if e.is_real() {
+                                let mut buffer = workspace.new_atom();
+                                buffer.set_from_view(&e);
+                                out.set_from_view(&buffer.as_view());
+                                return;
+                            }
+                        }
                     }
                 }
 
@@ -1390,6 +1363,17 @@ impl AtomView<'_> {
                     exp_handle.set_from_view(&exp);
                 };
 
+                if base == InlineVar::new(Symbol::E).as_view() {
+                    // simplify logs inside exp
+                    if exp.contains_symbol(Symbol::LOG) {
+                        let mut buffer = workspace.new_atom();
+                        if exp.simplify_exp_log(workspace, &mut buffer) {
+                            out.set_from_view(&buffer.as_view());
+                        }
+                        return;
+                    }
+                }
+
                 'pow_simplify: {
                     if let AtomView::Num(e) = exp_handle.as_view() {
                         let exp_num = e.get_coeff_view();
@@ -1470,19 +1454,7 @@ impl AtomView<'_> {
                             && let AtomView::Fun(f) = base_handle.as_view()
                         {
                             let s = f.get_symbol_id();
-                            if s == Symbol::SQRT_ID && f.get_nargs() == 1 {
-                                let sqrt_arg = f.iter().next().unwrap();
-                                if n == 2 {
-                                    out.set_from_view(&sqrt_arg);
-                                } else {
-                                    let mut pow_h = workspace.new_atom();
-                                    pow_h.to_pow(sqrt_arg, workspace.new_num(n / 2).as_view());
-                                    pow_h.as_view().normalize(workspace, out);
-                                    out.set_from_view(&pow_h.as_view());
-                                }
-
-                                break 'pow_simplify;
-                            } else if s == Symbol::ABS_ID && f.get_nargs() == 1 {
+                            if s == Symbol::ABS_ID && f.get_nargs() == 1 {
                                 let abs_arg = f.iter().next().unwrap();
                                 if abs_arg.is_real() {
                                     let mut pow_h = workspace.new_atom();
