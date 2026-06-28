@@ -1,4 +1,4 @@
-use crate::coefficient::ConvertToRing;
+use crate::{atom::InlineVar, coefficient::ConvertToRing};
 
 use super::*;
 
@@ -753,11 +753,9 @@ impl<'a> AtomView<'a> {
             AtomView::Fun(f) => {
                 let name = f.get_symbol();
                 if [
-                    Symbol::EXP_ID,
                     Symbol::LOG_ID,
                     Symbol::SIN_ID,
                     Symbol::COS_ID,
-                    Symbol::SQRT_ID,
                     Symbol::ABS_ID,
                     Symbol::CONJ_ID,
                 ]
@@ -1090,6 +1088,31 @@ impl<'a> AtomView<'a> {
             }
             AtomView::Pow(p) => {
                 let (b, e) = p.get_base_exp();
+
+                if b == InlineVar::new(Symbol::E).as_view() {
+                    let e_eval = e.linearize_impl(
+                        fn_map,
+                        params,
+                        constants,
+                        constant_map,
+                        external_functions,
+                        instr,
+                        subexpressions,
+                        args,
+                    )?;
+
+                    let temp = Slot::Temp(instr.len());
+                    let c = Instruction::Fun(
+                        temp,
+                        Box::new((Symbol::EXP, vec![], vec![e_eval])),
+                        false,
+                    );
+                    instr.push(c);
+
+                    subexpressions.insert(*self, temp);
+                    return Ok(temp);
+                }
+
                 let b_eval = b.linearize_impl(
                     fn_map,
                     params,
@@ -1128,6 +1151,22 @@ impl<'a> AtomView<'a> {
 
                     subexpressions.insert(*self, res);
                     return Ok(res);
+                }
+
+                if let Ok(r) = Rational::try_from(e) {
+                    // FIXME: support 3,2 etc as well
+                    if r == (1, 2) {
+                        let temp = Slot::Temp(instr.len());
+                        let c = Instruction::Fun(
+                            temp,
+                            Box::new((Symbol::SQRT, vec![], vec![b_eval])),
+                            false,
+                        );
+                        instr.push(c);
+
+                        subexpressions.insert(*self, temp);
+                        return Ok(temp);
+                    }
                 }
 
                 let e_eval = e.linearize_impl(
@@ -3753,6 +3792,19 @@ impl<'a> AtomView<'a> {
             }
             AtomView::Pow(p) => {
                 let (b, e) = p.get_base_exp();
+
+                if b == InlineVar::new(Symbol::E).as_view() {
+                    let e_eval = e.to_eval_tree_impl(
+                        fn_map,
+                        params,
+                        args,
+                        fn_id_map,
+                        funcs,
+                        external_functions,
+                    )?;
+                    return Ok(Expression::BuiltinFun(0, Symbol::EXP, Box::new(e_eval)));
+                }
+
                 let b_eval = b.to_eval_tree_impl(
                     fn_map,
                     params,
