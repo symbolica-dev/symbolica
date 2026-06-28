@@ -5239,6 +5239,47 @@ impl<'a, 'b> SubSliceIterator<'a, 'b> {
         }
     }
 
+    fn target_matches_list_type(&self, target: AtomView<'a>) -> bool {
+        matches!(
+            (target, self.slice_type),
+            (AtomView::Mul(_), SliceType::Mul)
+                | (AtomView::Add(_), SliceType::Add)
+                | (AtomView::Pow(_), SliceType::Pow)
+        )
+    }
+
+    fn can_try_single_atom_fallback(&self, target: AtomView<'a>) -> bool {
+        self.target.get_type() != SliceType::One
+            && self.target_matches_list_type(target)
+            && self.can_match_as_single_with_optional(target)
+    }
+
+    fn set_single_atom_fallback_target(&mut self, target: AtomView<'a>, complete: bool) {
+        self.target.set_one(target);
+        self.matches.clear();
+        self.used_flag.clear();
+        self.compatibility_flag.clear();
+        self.used_flag.resize(self.target.len(), false);
+        self.compatibility_flag.resize(self.target.len(), 0);
+        self.initialized = false;
+        self.processed_iterators = 0;
+        self.complete = complete;
+        self.ordered_gapless = self.slice_type == SliceType::Pow;
+        self.cyclic = false;
+        self.do_not_match_to_single_atom_in_list = false;
+        self.do_not_match_entire_slice = false;
+    }
+
+    fn next_single_atom_fallback(
+        &mut self,
+        target: AtomView<'a>,
+        match_stack: &mut WrappedMatchStack<'a, 'b>,
+        complete: bool,
+    ) -> Result<(usize, &[bool]), MatchError> {
+        self.set_single_atom_fallback_target(target, complete);
+        self.next(match_stack)
+    }
+
     fn optional_default_match_for(slice_type: SliceType) -> Match<'a> {
         match slice_type {
             SliceType::Add => Match::Single(ZERO.as_view()),
@@ -5343,14 +5384,6 @@ impl<'a, 'b> SubSliceIterator<'a, 'b> {
         let mut shortcut_done = false;
 
         self.target.set_list(target);
-        let single_atom_fallback = complete
-            && self.can_match_as_single_with_optional(target)
-            && matches!(
-                (target, self.slice_type),
-                (AtomView::Mul(_), SliceType::Mul)
-                    | (AtomView::Add(_), SliceType::Add)
-                    | (AtomView::Pow(_), SliceType::Pow)
-            );
 
         // shortcut if the number of arguments is wrong
         let min_length: usize = self
@@ -5389,7 +5422,7 @@ impl<'a, 'b> SubSliceIterator<'a, 'b> {
         self.complete = complete;
         self.ordered_gapless = ordered;
         self.cyclic = cyclic;
-        self.single_atom_fallback = single_atom_fallback.then_some(target);
+        self.single_atom_fallback = None;
         self.do_not_match_to_single_atom_in_list = false;
         self.do_not_match_entire_slice = false;
     }
@@ -5448,15 +5481,12 @@ impl<'a, 'b> SubSliceIterator<'a, 'b> {
 
         'next_match: loop {
             if !forward_pass && self.processed_iterators == 0 {
+                // Top-level sequence patterns do not pass through
+                // PatternIter::Sequence, so their single-atom fallback is
+                // handled here. Nested sequences handle the same fallback in
+                // the local Sequence branch after structural matching fails.
                 if let Some(target) = self.single_atom_fallback.take() {
-                    self.target.set_one(target);
-                    self.matches.clear();
-                    self.used_flag.clear();
-                    self.compatibility_flag.clear();
-                    self.used_flag.resize(self.target.len(), false);
-                    self.compatibility_flag.resize(self.target.len(), 0);
-                    self.initialized = true;
-                    self.processed_iterators = 0;
+                    self.set_single_atom_fallback_target(target, self.complete);
                     forward_pass = true;
                     structural_mismatch = true;
                     continue 'next_match;
@@ -6096,6 +6126,8 @@ impl<'a, 'b> SubSliceIterator<'a, 'b> {
                     // query an existing iterator
                     let mut ii = match index {
                         Some(jj) => {
+                            let current_target = self.target.get(*jj);
+
                             // get the next iteration of the function
                             if !structural_mismatch {
                                 match s.next(match_stack) {
@@ -6109,7 +6141,21 @@ impl<'a, 'b> SubSliceIterator<'a, 'b> {
                                             s.pattern
                                         );
                                     }
-                                    _ => {}
+                                    _ => {
+                                        if s.can_try_single_atom_fallback(current_target) {
+                                            match s.next_single_atom_fallback(
+                                                current_target,
+                                                match_stack,
+                                                true,
+                                            ) {
+                                                Ok((x, _)) => {
+                                                    self.matches.push(x);
+                                                    continue 'next_match;
+                                                }
+                                                Err(_) => {}
+                                            }
+                                        }
+                                    }
                                 }
                             } else {
                                 // there is a structural mismatch for a future iterator, so
@@ -6201,14 +6247,43 @@ impl<'a, 'b> SubSliceIterator<'a, 'b> {
 
                                 continue 'next_match;
                             }
-                            Err(MatchError::StructurallyImpossible) => {
-                                if self.processed_iterators < 64 {
-                                    self.compatibility_flag[ii] |=
-                                        1 << (self.processed_iterators - 1) as u64;
-                                };
-                            }
-                            _ => {
-                                structural_mismatch = false;
+                            Err(e) => {
+                                let mut structurally_impossible =
+                                    matches!(e, MatchError::StructurallyImpossible);
+
+                                if s.can_try_single_atom_fallback(new_target) {
+                                    match s.next_single_atom_fallback(
+                                        new_target,
+                                        match_stack,
+                                        true,
+                                    ) {
+                                        Ok((x, _)) => {
+                                            *index = Some(ii);
+                                            self.matches.push(x);
+                                            self.used_flag[ii] = true;
+
+                                            continue 'next_match;
+                                        }
+                                        Err(fallback_error) => {
+                                            structurally_impossible &= matches!(
+                                                fallback_error,
+                                                MatchError::StructurallyImpossible
+                                            );
+                                        }
+                                    }
+                                }
+
+                                if structurally_impossible {
+                                    // TODO: Prove that caching structural impossibility is sound
+                                    // when the optional-default single-atom fallback has also
+                                    // been tried for this sequence.
+                                    if self.processed_iterators < 64 {
+                                        self.compatibility_flag[ii] |=
+                                            1 << (self.processed_iterators - 1) as u64;
+                                    };
+                                } else {
+                                    structural_mismatch = false;
+                                }
                             }
                         }
 
