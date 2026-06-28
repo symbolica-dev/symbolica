@@ -755,7 +755,7 @@ impl PythonTransformer {
                         ));
                     }
                 }
-                Pattern::Wildcard(x) => *x,
+                Pattern::Wildcard(x, _) => *x,
                 _ => {
                     return Err(exceptions::PyValueError::new_err(
                         "Derivative must be taken wrt a variable",
@@ -799,7 +799,7 @@ impl PythonTransformer {
                     ));
                 }
             }
-            Pattern::Wildcard(x) => *x,
+            Pattern::Wildcard(x, _) => *x,
             _ => {
                 return Err(exceptions::PyValueError::new_err(
                     "Derivative must be taken wrt a variable",
@@ -2180,7 +2180,7 @@ macro_rules! req_cmp_rel {
             return Err("Pattern must be literal");
         };
 
-        if let Pattern::Wildcard(name) = $self {
+        if let Pattern::Wildcard(name, _) = $self {
             if name.get_wildcard_level() == 0 {
                 return Err("Only wildcards can be restricted.");
             }
@@ -2231,7 +2231,7 @@ impl TryFrom<Relation> for PatternRestriction {
                 req_cmp_rel!(atom, atom1, true, is_le)
             }
             Relation::Contains(atom, atom1) => {
-                if let Pattern::Wildcard(name) = atom {
+                if let Pattern::Wildcard(name, _) = atom {
                     if name.get_wildcard_level() == 0 {
                         return Err("Only wildcards can be restricted.");
                     }
@@ -2260,7 +2260,7 @@ impl TryFrom<Relation> for PatternRestriction {
                 }
             }
             Relation::Matches(atom, pattern, cond, settings) => {
-                if let Pattern::Wildcard(name) = atom {
+                if let Pattern::Wildcard(name, _) = atom {
                     if name.get_wildcard_level() == 0 {
                         return Err("Only wildcards can be restricted.");
                     }
@@ -2279,7 +2279,7 @@ impl TryFrom<Relation> for PatternRestriction {
                 }
             }
             Relation::IsType(atom, atom_type) => {
-                if let Pattern::Wildcard(name) = atom {
+                if let Pattern::Wildcard(name, _) = atom {
                     Ok(PatternRestriction::Wildcard((
                         name,
                         WildcardRestriction::IsAtomType(atom_type),
