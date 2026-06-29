@@ -4519,6 +4519,150 @@ impl<F: Field, E: PositiveExponent> MultivariatePolynomial<F, E, LexOrder> {
 
         self.merge_shifted_univariate_coefficients(shifted_coefficients)
     }
+
+    /// Shift multiple variables simultaneously.
+    ///
+    /// For each `(var, shift)` pair, shifts variable `var` by `shift`:
+    /// `x_var -> x_var + shift`. All shifts are applied to the original
+    /// polynomial (not sequentially).
+    ///
+    /// # Example
+    /// ```rust
+    /// # use symbolica::prelude::*;
+    /// let f = parse!("x*y").to_polynomial::<_, u8>(&Q, None);
+    /// let g1 = f.shift_vars(&[(0, &1.into()), (1, &2.into())]);
+    /// let g2 = f.shift_var(0, &1.into()).shift_var(1, &2.into());
+    /// assert_eq!(g1, g2);
+    /// ```
+    ///
+    /// # Algorithm
+    ///
+    /// Uses direct simultaneous binomial expansion per term. For each term
+    /// `c * x_0^{e_0} * ... * x_{n-1}^{e_{n-1}}`, every shifted variable
+    /// `x_i` with a non-zero shift amount is expanded via the binomial theorem:
+    /// (x_i + a_i)^{e_i} = sum_{j=0}^{e_i} C(e_i, j) * x_i^j * a_i^{e_i - j}.
+    ///
+    /// Cross-terms from multiple simultaneously shifted variables are merged
+    /// by collecting results into an exponent -> coefficient map before
+    /// constructing the final polynomial. This avoids intermediate allocations
+    /// that would result from applying single-variable shifts sequentially.
+    pub fn shift_vars(&self, shifts: &[(usize, &F::Element)]) -> Self {
+        // Early return: zero poly stays zero, empty shift list is identity
+        if self.is_zero() || shifts.is_empty() {
+            return self.clone();
+        }
+
+        // Quick check: if all shift amounts are zero, nothing changes
+        if shifts.iter().all(|(_, s)| self.ring.is_zero(s)) {
+            return self.clone();
+        }
+
+        // Precompute powers for each shifted variable: powers[pi][k] = shifts[pi].1^k
+        let nvars = self.nvars();
+        let max_total_degree: usize = shifts.iter()
+            .map(|(var_idx, _)| if *var_idx < nvars {
+                self.degree(*var_idx).to_u32() as usize
+            } else {
+                0
+            })
+            .max()
+            .unwrap_or(0);
+
+        let mut powers: Vec<Vec<F::Element>> = Vec::with_capacity(shifts.len());
+        for &(_, shift_amt) in shifts {
+            if max_total_degree == 0 {
+                powers.push(vec![self.ring.one()]);
+            } else {
+                let mut pvec = Vec::with_capacity(max_total_degree + 1);
+                pvec.push(self.ring.one());
+                let mut cur = shift_amt.clone();
+                for _ in 0..max_total_degree {
+                    pvec.push(cur.clone());
+                    self.ring.mul_assign(&mut cur, shift_amt);
+                }
+                powers.push(pvec);
+            }
+        }
+
+        // For each term of the original polynomial, compute all new terms via binomial expansion.
+        let mut temp_terms: HashMap<Vec<E>, F::Element> = HashMap::with_capacity(self.nterms());
+
+        for term in self.into_iter() {
+            let ei = term.exponents;
+
+            // Collect which shifted variables actually contribute (non-zero exponent).
+            // Skip any variable indices outside the polynomial's variable range.
+            let mut contributing: SmallVec<[(usize, usize); 4]> = smallvec![];
+            for (pi, &(var_idx, _)) in shifts.iter().enumerate() {
+                if var_idx < nvars && ei[var_idx].to_u32() != 0 {
+                    contributing.push((pi, var_idx));
+                }
+            }
+
+            if contributing.is_empty() {
+                // No shifted variable has a non-zero exponent in this term — nothing changes.
+                temp_terms.insert(ei.to_vec(), (*term.coefficient).clone());
+            } else if contributing.len() == 1 && shifts.len() == 1 {
+                // Single-variable shift: delegate to the well-tested `shift_var_cached`.
+                return self.shift_var_cached(shifts[0].0, shifts[0].1);
+            } else {
+                // Multiple contributing variables — simultaneous binomial expansion.
+                // Iteratively apply each contributing variable's binomial expansion.
+                let mut new_terms: SmallVec<[(Vec<E>, F::Element); 64]> = smallvec![];
+
+                // Start with the current term's base coefficient and exponents.
+                let base_coeff = (*term.coefficient).clone();
+                new_terms.push((ei.to_vec(), base_coeff));
+
+                for &(pow_idx, var_idx) in &contributing {
+                    let e_i: u32 = ei[var_idx].to_u32();
+                    let mut next_terms: SmallVec<[(Vec<E>, F::Element); 64]> = smallvec![];
+                    next_terms.reserve(new_terms.len() * (e_i as usize + 1));
+
+                    for (exp, coeff) in new_terms.drain(..) {
+                        for j in 0..=e_i {
+                            let mut ne = exp.clone();
+                            ne[var_idx] = E::from_u32(j);
+
+                            // Compute binomial coefficient C(e_i, j) as a ring element.
+                            let n_val = e_i as i64;
+                            let k_val = j as i64;
+                            let binom_val = Integer::binom(n_val, k_val);
+                            
+                            // coefficient * C(e_i, j) * shift^(e_i - j)
+                            let mut nc = coeff.clone();
+                            self.ring.mul_assign(&mut nc, &self.ring.nth(Integer::from(binom_val)));
+                            self.ring.mul_assign(&mut nc, &powers[pow_idx][(e_i as usize) - (j as usize)]);
+
+                            next_terms.push((ne, nc));
+                        }
+                    }
+                    new_terms = next_terms;
+                }
+
+                // Merge results into temp_terms using HashMap lookup (O(1) amortized).
+                for (exp, coeff) in new_terms {
+                    temp_terms.entry(exp).and_modify(|e| {
+                        self.ring.add_assign(e, &coeff);
+                    }).or_insert(coeff);
+                }
+            }
+        }
+
+        // Build result polynomial: filter out zero coefficients and sort by monomial order.
+        let capacity = temp_terms.len();
+        let mut result = self.zero_with_capacity(capacity);
+
+        for (exp, coeff) in temp_terms {
+            if !self.ring.is_zero(&coeff) {
+                // Use append_monomial which sorts and merges internally,
+                // ensuring the same ordering as shift_var_cached.
+                result.append_monomial(coeff, &exp);
+            }
+        }
+
+        result
+    }
 }
 
 impl<R: Ring, E: Exponent> Derivable for PolynomialRing<R, E> {
@@ -4723,7 +4867,11 @@ impl<R: Ring + FractionNormalization + EuclideanDomain, E: Exponent, O: Monomial
 
 #[cfg(test)]
 mod test {
-    use crate::{atom::AtomCore, domains::integer::Z, domains::rational::Q, parse, symbol};
+    use crate::{atom::AtomCore, domains::integer::{Integer, Z}, domains::rational::{Q, Rational}, parse, symbol};
+
+    fn q(i: i32) -> Rational {
+        (Integer::from(i as i64)).into()
+    }
 
     #[test]
     fn mul_packed() {
@@ -4800,5 +4948,169 @@ mod test {
         let c = b_rev.inverse_univariate(0, 2.into());
         let d = a.exp_mod_univariate_fast(0, 4.into(), &b, &c);
         assert_eq!(d.to_expression(), parse!("367+333*x"));
+    }
+
+    #[test]
+    fn shift_vars_basic() {
+        // (x+y) shifted: x→x+1, y→y+2
+        let f = parse!("v1+v2").to_polynomial::<_, u8>(&Q, None);
+        let g = f.shift_vars(&[(0, &(q(1))), (1, &(q(2)))]);
+        let expected = f.shift_var(0, &(q(1))).shift_var(1, &(q(2)));
+        assert_eq!(g.to_string(), expected.to_string());
+
+        // x*y shifted: x→x+1, y→y+2
+        let f = parse!("v1*v2").to_polynomial::<_, u8>(&Q, None);
+        let g = f.shift_vars(&[(0, &(q(1))), (1, &(q(2)))]);
+        let expected = f.shift_var(0, &(q(1))).shift_var(1, &(q(2)));
+        assert_eq!(g.to_string(), expected.to_string());
+
+        // x*y*z shifted: x→x+1, y→y+2, z→z+3
+        let f = parse!("v1*v2*v3").to_polynomial::<_, u8>(&Q, None);
+        let g = f.shift_vars(&[
+            (0, &(q(1))),
+            (1, &(q(2))),
+            (2, &(q(3))),
+        ]);
+        let expected = f.shift_var(0, &(q(1))).shift_var(1, &(q(2))).shift_var(2, &(q(3)));
+        assert_eq!(g.to_string(), expected.to_string());
+    }
+
+    #[test]
+    fn shift_vars_equals_sequential() {
+        // Verify simultaneous shift matches sequential application
+        let f = parse!("v1^2*v2 + v1*v2^2 + v1 + v2").to_polynomial::<_, u8>(&Q, None);
+
+        let simultaneous = f.shift_vars(&[
+            (0, &(q(1))),
+            (1, &(q(2))),
+        ]);
+
+        let sequential = f
+            .shift_var(0, &(q(1)))
+            .shift_var(1, &(q(2)));
+
+        assert_eq!(simultaneous.to_string(), sequential.to_string());
+    }
+
+    #[test]
+    fn shift_vars_zero_poly() {
+        let f = parse!("0").to_polynomial::<_, u8>(&Q, None);
+        let g = f.shift_vars(&[(0, &(q(5))), (1, &(q(3)))]);
+        assert_eq!(g.get_constant(), 0);
+        assert_eq!(g.nterms(), 0);
+    }
+
+    #[test]
+    fn shift_vars_zero_shifts() {
+        let f = parse!("v1^2 + 3*v1*v2 + v2").to_polynomial::<_, u8>(&Q, None);
+        // All shifts are zero: should return self
+        let g = f.shift_vars(&[
+            (0, &(q(0))),
+            (1, &(q(0))),
+        ]);
+        assert_eq!(g.to_string(), f.to_string());
+    }
+
+    #[test]
+    fn shift_vars_empty() {
+        let f = parse!("v1^2 + v2").to_polynomial::<_, u8>(&Q, None);
+        let g = f.shift_vars(&[]);
+        assert_eq!(g.to_string(), f.to_string());
+    }
+
+    #[test]
+    fn shift_vars_single_var() {
+        // Single variable shift should delegate to shift_var_cached
+        let f = parse!("v1^2 + 3*v1 + 5").to_polynomial::<_, u8>(&Q, None);
+        let g = f.shift_vars(&[(0, &(q(7)))]);
+        let expected = f.shift_var(0, &(q(7)));
+        assert_eq!(g.to_string(), expected.to_string());
+    }
+
+    #[test]
+    fn shift_vars_partial() {
+        // Shift only some variables — others stay as-is
+        let f = parse!("v1*v2 + v3").to_polynomial::<_, u8>(&Q, None);
+        let g = f.shift_vars(&[(0, &(q(1)))]);
+        let expected = f.shift_var(0, &(q(1)));
+        assert_eq!(g.to_string(), expected.to_string());
+    }
+
+    #[test]
+    fn shift_vars_high_degree() {
+        // (v1 + v2)^3 shifted: v1→v1+1, v2→v2+1 = ((v1+1) + (v2+1))^3
+        let f = parse!("v1^3 + 3*v1^2*v2 + 3*v1*v2^2 + v2^3").to_polynomial::<_, u8>(&Q, None);
+        // Original is (v1+v2)^3. After shift: ((v1+1)+(v2+1))^3 = (v1+v2+2)^3
+        let g = f.shift_vars(&[
+            (0, &(q(1))),
+            (1, &(q(1))),
+        ]);
+        // Expand (v1+v2+2)^3 term by term to verify:
+        let expected_f = parse!("v1^3 + 3*v1^2*v2 + 3*v1*v2^2 + v2^3").to_polynomial::<_, u8>(&Q, None);
+        let h = expected_f.shift_var(0, &(q(1))).shift_var(1, &(q(1)));
+        assert_eq!(g.to_string(), h.to_string());
+    }
+
+    #[test]
+    fn shift_vars_no_overlap() {
+        // Shift variable indices that exceed the polynomial's variable count — no effect
+        let f = parse!("v1").to_polynomial::<_, u8>(&Q, None);
+        // Polynomial has 1 variable (index 0). Shifting indices 5,6 is out of range.
+        let g = f.shift_vars(&[(5, &(q(1))), (6, &(q(2)))]);
+        assert_eq!(g.to_string(), "v1");
+    }
+
+    #[test]
+    fn shift_vars_constant() {
+        let f = parse!("42").to_polynomial::<_, u8>(&Q, None);
+        let g = f.shift_vars(&[(0, &(q(5))), (1, &(q(-3)))]);
+        assert_eq!(g.get_constant(), 42);
+    }
+
+    #[test]
+    fn shift_vars_three_vars() {
+        // Verify a specific case with 3 variables and different degrees
+        let f = parse!("v1*v2 + v1*v2*v3^2").to_polynomial::<_, u8>(&Q, None);
+        let g = f.shift_vars(&[
+            (0, &(q(1))),
+            (1, &(q(1))),
+            (2, &(q(1))),
+        ]);
+
+        // Verify against sequential:
+        let expected = f
+            .shift_var(0, &(q(1)))
+            .shift_var(1, &(q(1)))
+            .shift_var(2, &(q(1)));
+
+        assert_eq!(g.to_string(), expected.to_string());
+    }
+
+    #[test]
+    fn shift_vars_negative_shift() {
+        let f = parse!("v1*v2").to_polynomial::<_, u8>(&Q, None);
+        let g = f.shift_vars(&[
+            (0, &(q(-1))),
+            (1, &(q(-1))),
+        ]);
+        // (x-1)(y-1) = xy - x - y + 1
+        let expected = f.shift_var(0, &(q(-1))).shift_var(1, &(q(-1)));
+        assert_eq!(g.to_string(), expected.to_string());
+    }
+
+    #[test]
+    fn shift_vars_coefficients_preserved() {
+        let f = parse!("3*v1^2 + 5*v1*v2 + 7*v2^3").to_polynomial::<_, u8>(&Q, None);
+        let g = f.shift_vars(&[
+            (0, &(q(2))),
+            (1, &(q(-1))),
+        ]);
+
+        // Verify against sequential:
+        let expected = f
+            .shift_var(0, &(q(2)))
+            .shift_var(1, &(q(-1)));
+
+        assert_eq!(g.to_string(), expected.to_string());
     }
 }
