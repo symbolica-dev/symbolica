@@ -1907,6 +1907,145 @@ impl<F: Ring, E: PositiveExponent> MultivariatePolynomial<F, E, LexOrder> {
         res
     }
 
+    /// Evaluate the polynomial for some variables.
+    ///
+    /// For each `(variable_idx, element)` pair, substitutes the variable at
+    /// position `variable_idx` with the given element.
+    ///
+    /// When `erase_variables` is `true`, variables that appear in `point` are removed
+    /// from the polynomial `variables`.
+    ///
+    /// # Example
+    /// ```rust
+    /// # use symbolica::prelude::*;
+    /// let f = parse!("v1*v2 + v3").to_polynomial::<_, u8>(&Q, None);
+    /// // Evaluate v1 -> 5 (erase v1 from variable list)
+    /// let g = f.evaluate_some(&[(0, &(5.into()))], true);
+    /// assert_eq!(g.to_string(), "v3+5*v2");
+    /// ```
+    pub fn evaluate_some(
+        &self,
+        point: &[(usize, &F::Element)],
+        erase_variables: bool,
+    ) -> MultivariatePolynomial<F, E, LexOrder> {
+        if point.is_empty() {
+            return self.clone();
+        }
+
+        // Track which variables we explicitly evaluated (to remove them from the list).
+        let eval_set: ahash::HashSet<usize> = point.iter().map(|(i, _)| *i).collect();
+
+        // Determine which variables survive in the new variable list.
+        let kept_variable_idcs = if erase_variables {
+            (0..self.nvars())
+                .filter(|i| !eval_set.contains(i))
+                .collect::<Vec<_>>()
+        } else {
+            (0..self.nvars()).collect()
+        };
+
+        // Build new variable list and index mapping.
+        let new_nvars = kept_variable_idcs.len();
+        
+        // Pre-build pair lists for both erasing and keeping modes — avoids per-term hash lookups.
+        let exp_copy_pairs: Vec<(usize, usize)> = if !erase_variables {
+            // keep all variables; evaluated vars' slots stay zero.
+            (0..self.nvars())
+                .filter(|&i| !eval_set.contains(&i))
+                .map(|old_idx| (old_idx, old_idx))
+                .collect()
+        } else {
+            // kept ids are already non-evaluated vars.
+            kept_variable_idcs
+                .iter()
+                .copied()
+                .enumerate()
+                .map(|(new_idx, old_idx)| (old_idx, new_idx))
+                .collect()
+        };
+
+        // Evaluate evaluated variables into coefficients; zero their exponents.
+        let mut coefficients: Vec<F::Element> = Vec::with_capacity(self.nterms());
+        let mut exponents: Vec<E> = Vec::with_capacity(self.nterms() * new_nvars);
+
+        // Exponent buffer reused across terms — eliminates per-term allocation.
+        let mut exp = vec![E::zero(); new_nvars];
+
+        for t in self {
+            // Multiply coefficient by powers of substituted values.
+            let mut c = t.coefficient.clone();
+
+            let mut skipped = false;
+            for &(var_idx, val) in point {
+                if t.exponents[var_idx].is_zero() {
+                    continue;
+                }
+                self.ring.mul_assign(&mut c, &self.ring.pow(val, t.exponents[var_idx].to_u32() as u64));
+                if self.ring.is_zero(&c) {
+                    skipped = true;
+                    break;
+                }
+            }
+            if skipped { continue; }
+
+            // Copy retained variable exponents.
+            if new_nvars > 0 {
+                for &(old_idx, new_idx) in &exp_copy_pairs {
+                    exp[new_idx] = t.exponents[old_idx];
+                }
+            } else {
+                exp.clear();
+            }
+
+            coefficients.push(c);
+            exponents.extend_from_slice(&exp);
+        }
+
+        let new_vars = if erase_variables {
+            Arc::new(kept_variable_idcs.iter().map(|i| self.variables[*i].clone()).collect())
+        } else {
+            self.variables.clone()
+        };
+
+        // Handle the case where all terms were zeroed out.
+        if coefficients.is_empty() {
+            return Self {
+                coefficients: vec![],
+                exponents: vec![],
+                ring: self.ring.clone(),
+                variables: new_vars,
+                _phantom: PhantomData,
+            };
+        }
+
+        // When all exponents are empty (all vars evaluated), merge into a single constant.
+        if new_nvars == 0 {
+            let mut result_coeff = self.ring.zero();
+            for c in coefficients {
+                self.ring.add_assign(&mut result_coeff, &c);
+            }
+            if self.ring.is_zero(&result_coeff) {
+                return Self {
+                    coefficients: vec![],
+                    exponents: vec![],
+                    ring: self.ring.clone(),
+                    variables: new_vars,
+                    _phantom: PhantomData,
+                };
+            }
+            return Self {
+                coefficients: vec![result_coeff],
+                exponents: vec![],
+                ring: self.ring.clone(),
+                variables: new_vars,
+                _phantom: PhantomData,
+            };
+        }
+
+        // Rebuild polynomial with possibly pruned variable list.
+        Self::from_coefficient_list(coefficients, exponents, new_vars, &self.ring)
+    }
+
     /// Replace all variables in the polynomial by an element from
     /// the ring `v`.
     pub fn replace_all(&self, r: &[F::Element]) -> F::Element {
@@ -5112,5 +5251,106 @@ mod test {
             .shift_var(1, &(q(-1)));
 
         assert_eq!(g.to_string(), expected.to_string());
+    }
+
+    #[test]
+    fn evaluate_some_single_var_erase() {
+        // Evaluate v1 -> 5 in "v1*v2 + v3", erase v1 from variable list
+        let f = parse!("v1*v2 + v3").to_polynomial::<_, u8>(&Q, None);
+        let g = f.evaluate_some(&[(0, &(q(5)))], true);
+        assert_eq!(g.to_string(), "v3+5*v2");
+        // Variable list should have been pruned: only v2 and v3 remain
+        assert_eq!(g.nvars(), 2);
+    }
+
+    #[test]
+    fn evaluate_some_single_var_keep() {
+        // Evaluate v1 -> 5 in "v1*v2 + v3", keep all variables (exponents zeroed)
+        let f = parse!("v1*v2 + v3").to_polynomial::<_, u8>(&Q, None);
+        let g = f.evaluate_some(&[(0, &(q(5)))], false);
+        assert_eq!(g.to_string(), "v3+5*v2");
+        // All original variables preserved
+        assert_eq!(g.nvars(), 3);
+    }
+
+    #[test]
+    fn evaluate_some_all_vars_erase() {
+        // Evaluate all variables -> constants, result should be a constant polynomial
+        let f = parse!("v1*v2 + v3").to_polynomial::<_, u8>(&Q, None);
+        let g = f.evaluate_some(&[(0, &(q(2))), (1, &(q(3))), (2, &(q(4)))], true);
+        assert_eq!(g.get_constant(), q(10)); // 2*3 + 4
+    }
+
+    #[test]
+    fn evaluate_some_partial_erase() {
+        // Only evaluate some variables; only those with degree 0 are erased
+        let f = parse!("v1 + v1*v2").to_polynomial::<_, u8>(&Q, None);
+        let g = f.evaluate_some(&[(0, &(q(0)))], true);
+        // v1=0 → "0 + 0*v2" = "0", only v2 remains
+        assert_eq!(g.nterms(), 0); // zero polynomial
+    }
+
+    #[test]
+    fn evaluate_some_zero_poly() {
+        let f = parse!("0").to_polynomial::<_, u8>(&Q, None);
+        let g = f.evaluate_some(&[(0, &(q(5)))], true);
+        assert_eq!(g.nterms(), 0);
+    }
+
+    #[test]
+    fn evaluate_some_empty_point() {
+        let f = parse!("v1 + v2").to_polynomial::<_, u8>(&Q, None);
+        let g = f.evaluate_some(&[], true);
+        assert_eq!(g.nterms(), f.nterms());
+        assert_eq!(g.nvars(), f.nvars());
+    }
+
+    #[test]
+    fn evaluate_some_vs_replace() {
+        // When erase_variables=false, evaluate_some should produce mathematically
+        // equivalent results to replace_last (same coefficients for same terms).
+        let f = parse!("v1^2 + 3*v1*v2 + v2").to_polynomial::<_, u8>(&Q, None);
+        let g_eval = f.evaluate_some(&[(1, &(q(7)))], false);
+        let g_replace = f.replace_last(1, &(q(7)));
+
+        // Both should have same number of variables and terms
+        assert_eq!(g_eval.get_vars().len(), f.get_vars().len());
+        assert_eq!(g_eval.nterms(), g_replace.nterms());
+
+        // Evaluate both results at a test point to verify equivalence
+        let test_point = vec![q(2), q(3)];
+        let val_eval = g_eval.evaluate_with_coeff_map(|c| c.clone(), &test_point, &Q);
+        let val_replace = g_replace.evaluate_with_coeff_map(|c| c.clone(), &test_point, &Q);
+        assert_eq!(val_eval, val_replace);
+    }
+
+    #[test]
+    fn evaluate_some_zero_poly_erases() {
+        // A zero polynomial should have empty variable list regardless of point.
+        let f = parse!("0").to_polynomial::<_, u8>(&Q, None);
+        assert_eq!(f.nterms(), 0);
+        let g = f.evaluate_some(&[(0, &(q(5)))], true);
+        assert_eq!(g.nterms(), 0);
+        assert_eq!(g.nvars(), 0); // variables must be erased even for zero poly
+    }
+
+    #[test]
+    fn evaluate_some_variable_not_in_poly_erases() {
+        // Variables listed in point must be removed even if they don't appear in the polynomial.
+        let f = parse!("v1 + v3").to_polynomial::<_, u8>(&Q, None);
+        // nvars is 2 (v1 and v3), index 0 is not present in the poly.
+        assert_eq!(f.nvars(), 2);
+        let g = f.evaluate_some(&[(0, &(q(99)))], true);
+        assert_eq!(g.nterms(), f.nterms()); // same number of terms
+        assert_eq!(g.nvars(), 1); // index 0 should be removed
+    }
+
+    #[test]
+    fn evaluate_some_nonzero_result_erases() {
+        // Even when result is nonzero, all variables in point must be erased.
+        let f = parse!("v1*v2 + v3").to_polynomial::<_, u8>(&Q, None);
+        let g = f.evaluate_some(&[(0, &(q(5))), (2, &(q(7)))], true);
+        assert_eq!(g.nvars(), 1); // only v1 (mapped to v2) remains
+        assert_eq!(g.get_vars()[0].to_string(), "v2");
     }
 }
