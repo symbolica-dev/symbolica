@@ -59,7 +59,7 @@ pub enum Pattern {
     Pow(Box<[Pattern; 2]>),
     Mul(Vec<Pattern>),
     Add(Vec<Pattern>),
-    Alternative(Vec<(Vec<(Symbol, AtomView<'static>)>, Pattern)>),
+    Alternative(Vec<Pattern>),
     Transformer(Box<(Option<Pattern>, Vec<Transformer>)>),
 }
 
@@ -2648,7 +2648,7 @@ impl Pattern {
                 }
             }
             Pattern::Alternative(alts) => {
-                for (_, alt) in alts {
+                for alt in alts {
                     alt.get_all_wildcards_impl(wildcards);
                 }
             }
@@ -2686,10 +2686,10 @@ impl Pattern {
                 Ok(Pattern::Alternative(alts1))
             }
             (Pattern::Alternative(mut alts), p) | (p, Pattern::Alternative(mut alts)) => {
-                alts.push((vec![], p));
+                alts.push(p);
                 Ok(Pattern::Alternative(alts))
             }
-            (p1, p2) => Ok(Pattern::Alternative(vec![(vec![], p1), (vec![], p2)])),
+            (p1, p2) => Ok(Pattern::Alternative(vec![p1, p2])),
         }
     }
 
@@ -2750,18 +2750,11 @@ impl Pattern {
 
                 Pattern::Mul(new_args)
             }
-            Pattern::Alternative(alts) => {
-                // TODO: flatten?
-                if !alts.iter().any(|a| a.0.iter().any(|(s, _)| *s == symbol)) {
-                    Pattern::Alternative(
-                        alts.into_iter()
-                            .map(|(req, p)| (req, p.set_optional_impl(symbol)))
-                            .collect(),
-                    )
-                } else {
-                    Pattern::Alternative(alts)
-                }
-            }
+            Pattern::Alternative(alts) => Pattern::Alternative(
+                alts.into_iter()
+                    .map(|p| p.set_optional_impl(symbol))
+                    .collect(),
+            ),
             Pattern::Transformer(t) => Pattern::Transformer(t),
         }
     }
@@ -3010,7 +3003,7 @@ impl Pattern {
             }
             (Pattern::Literal(p), _) => p.as_view() == target,
             (Pattern::Alternative(alternatives), _) => {
-                alternatives.iter().any(|(_, p)| p.could_match(target))
+                alternatives.iter().any(|p| p.could_match(target))
             }
             (Pattern::Transformer(_), _) => panic!("Pattern is a transformer"),
             (_, _) => false,
@@ -4827,41 +4820,125 @@ struct WildcardIter {
 
 #[derive(Debug)]
 enum PatternIter<'a, 'b> {
-    Literal(Option<usize>, AtomView<'b>),
     Wildcard(WildcardIter),
-    Fn(Option<usize>, Symbol, Box<SubSliceIterator<'a, 'b>>), // index first
-    Sequence(Option<usize>, Box<AtomMatchIterator<'a, 'b>>),
-    Alternative(Option<usize>, AlternativeIter<'a, 'b>),
+    Node(Option<usize>, Box<AtomMatchIterator<'a, 'b>>),
 }
 
 #[derive(Debug)]
-struct AlternativeVariantIter<'a, 'b> {
-    fixed_matches: &'b [(Symbol, AtomView<'static>)],
-    iterator: AtomMatchIterator<'a, 'b>,
+struct FnMatchIterator<'a, 'b> {
+    initialized: bool,
+    name: Symbol,
+    args: SubSliceIterator<'a, 'b>,
+    match_stack_len: Option<usize>,
+}
+
+impl<'a, 'b> FnMatchIterator<'a, 'b> {
+    fn new(name: Symbol, args: &'b [Pattern]) -> Self {
+        FnMatchIterator {
+            initialized: false,
+            name,
+            args: SubSliceIterator::new(args, SliceType::Arg),
+            match_stack_len: None,
+        }
+    }
+
+    fn reset(&mut self) {
+        self.initialized = false;
+        self.match_stack_len = None;
+    }
+
+    fn clear_current(&mut self, match_stack: &mut WrappedMatchStack<'a, 'b>) {
+        if let Some(match_stack_len) = self.match_stack_len.take() {
+            match_stack.truncate(match_stack_len); // truncate to before the function name was matched
+        } else if let Some(match_stack_len) = self.args.matches.first().copied() {
+            match_stack.truncate(match_stack_len); // truncate to before the first argument was matched
+        }
+    }
+
+    fn next(
+        &mut self,
+        target: AtomView<'a>,
+        match_stack: &mut WrappedMatchStack<'a, 'b>,
+    ) -> Result<usize, MatchError> {
+        if !self.initialized {
+            self.initialized = true;
+            let stack_len = match_stack.len();
+
+            match target {
+                AtomView::Fun(f) => {
+                    let target_name = f.get_symbol();
+                    let name_match_stack_len = if self.name.get_wildcard_level() > 0 {
+                        match match_stack.insert(self.name, Match::FunctionName(target_name)) {
+                            Ok(new_stack_len) => new_stack_len,
+                            Err(e) => return Err(e),
+                        }
+                    } else if target_name == self.name {
+                        stack_len
+                    } else {
+                        return Err(MatchError::StructurallyImpossible);
+                    };
+
+                    self.match_stack_len = Some(name_match_stack_len);
+                    self.args.set_list_target(
+                        target,
+                        match_stack,
+                        true,
+                        !target_name.is_antisymmetric() && !target_name.is_symmetric(),
+                        target_name.is_cyclesymmetric(),
+                    );
+                }
+                AtomView::Var(v) => {
+                    if !self.args.pattern.iter().all(Pattern::is_optional_wildcard) {
+                        return Err(MatchError::StructurallyImpossible);
+                    }
+
+                    let target_name = v.get_symbol();
+                    let name_match_stack_len = if self.name.get_wildcard_level() > 0 {
+                        match match_stack.insert(self.name, Match::FunctionName(target_name)) {
+                            Ok(new_stack_len) => new_stack_len,
+                            Err(e) => return Err(e),
+                        }
+                    } else if target_name == self.name {
+                        stack_len
+                    } else {
+                        return Err(MatchError::StructurallyImpossible);
+                    };
+
+                    self.match_stack_len = Some(name_match_stack_len);
+                    self.args
+                        .set_empty_list_target(match_stack, true, true, false);
+                }
+                _ => return Err(MatchError::StructurallyImpossible),
+            }
+        }
+
+        match self.args.next(match_stack) {
+            Ok((new_stack_len, _)) => Ok(new_stack_len),
+            Err(e) => {
+                self.clear_current(match_stack);
+                Err(e)
+            }
+        }
+    }
 }
 
 #[derive(Debug)]
 struct AlternativeIter<'a, 'b> {
-    variants: Vec<AlternativeVariantIter<'a, 'b>>,
+    variants: Vec<AtomMatchIterator<'a, 'b>>,
     variant_index: usize,
     match_stack_len: Option<usize>,
-    fixed_match_stack_len: Option<usize>,
     target: AtomView<'a>,
 }
 
 impl<'a, 'b> AlternativeIter<'a, 'b> {
-    fn new(alternatives: &'b [(Vec<(Symbol, AtomView<'static>)>, Pattern)]) -> Self {
+    fn new(alternatives: &'b [Pattern]) -> Self {
         AlternativeIter {
             variants: alternatives
                 .iter()
-                .map(|(fixed_matches, pattern)| AlternativeVariantIter {
-                    fixed_matches: fixed_matches,
-                    iterator: AtomMatchIterator::new(pattern, AtomView::ZERO),
-                })
+                .map(|pattern| AtomMatchIterator::new(pattern, AtomView::ZERO))
                 .collect(),
             variant_index: 0,
             match_stack_len: None,
-            fixed_match_stack_len: None,
             target: AtomView::ZERO,
         }
     }
@@ -4869,7 +4946,6 @@ impl<'a, 'b> AlternativeIter<'a, 'b> {
     fn set_target(&mut self, target: AtomView<'a>) {
         self.variant_index = 0;
         self.match_stack_len = None;
-        self.fixed_match_stack_len = None;
         self.target = target;
     }
 
@@ -4877,7 +4953,6 @@ impl<'a, 'b> AlternativeIter<'a, 'b> {
         if let Some(match_stack_len) = self.match_stack_len.take() {
             match_stack.truncate(match_stack_len);
         }
-        self.fixed_match_stack_len = None;
     }
 
     fn next(&mut self, match_stack: &mut WrappedMatchStack<'a, 'b>) -> Option<usize> {
@@ -4886,34 +4961,12 @@ impl<'a, 'b> AlternativeIter<'a, 'b> {
 
             if self.match_stack_len.is_none() {
                 let match_stack_len = match_stack.len();
-                let mut fixed_matches_ok = true;
-
-                for (symbol, atom) in self.variants[variant_index].fixed_matches {
-                    if match_stack.insert(*symbol, Match::Single(*atom)).is_err() {
-                        fixed_matches_ok = false;
-                        break;
-                    }
-                }
-
-                if !fixed_matches_ok {
-                    match_stack.truncate(match_stack_len);
-                    self.variant_index += 1;
-                    continue;
-                }
-
                 self.match_stack_len = Some(match_stack_len);
-                self.fixed_match_stack_len = Some(match_stack.len());
-                self.variants[variant_index]
-                    .iterator
-                    .set_new_target_complete(self.target);
+                self.variants[variant_index].set_new_target_complete(self.target);
             }
 
-            if self.variants[variant_index]
-                .iterator
-                .next(match_stack)
-                .is_some()
-            {
-                return self.fixed_match_stack_len;
+            if self.variants[variant_index].next(match_stack).is_some() {
+                return self.match_stack_len;
             }
 
             self.clear_current(match_stack);
@@ -4924,126 +4977,85 @@ impl<'a, 'b> AlternativeIter<'a, 'b> {
     }
 }
 
-/// An iterator that tries to match an entire atom or
-/// a subslice to a pattern.
 #[derive(Debug)]
-pub struct AtomMatchIterator<'a, 'b> {
+struct LiteralAtomIter<'b> {
+    literal: &'b Atom,
     try_match_atom: bool,
-    reset_subslice_iter: bool,
-    single_atom_fallback: Option<AtomView<'a>>,
-    subslice_iter: SubSliceIterator<'a, 'b>,
-    pattern: &'b Pattern,
-    target: AtomView<'a>,
-    used_flags: Vec<bool>,
-    old_match_stack_len: Option<usize>,
-    force_complete: bool,
 }
 
-impl<'a, 'b> AtomMatchIterator<'a, 'b> {
-    pub fn new(pattern: &'b Pattern, target: AtomView<'a>) -> AtomMatchIterator<'a, 'b> {
-        let try_match_atom = matches!(pattern, Pattern::Wildcard(..) | Pattern::Literal(_));
-
-        let (pat_list, slice_type) = match pattern {
-            Pattern::Pow(p) => (p.as_slice(), SliceType::Pow),
-            Pattern::Mul(m1) => (m1.as_slice(), SliceType::Mul),
-            Pattern::Add(a1) => (a1.as_slice(), SliceType::Add),
-            _ => (std::slice::from_ref(pattern), SliceType::One),
-        };
-
-        Self::from_parts(pattern, target, try_match_atom, pat_list, slice_type)
-    }
-
-    fn from_parts(
-        pattern: &'b Pattern,
-        target: AtomView<'a>,
-        try_match_atom: bool,
-        pat_list: &'b [Pattern],
-        slice_type: SliceType,
-    ) -> AtomMatchIterator<'a, 'b> {
-        AtomMatchIterator {
-            try_match_atom,
-            reset_subslice_iter: true,
-            single_atom_fallback: None,
-            subslice_iter: SubSliceIterator::new(pat_list, slice_type),
-            pattern,
-            target,
-            used_flags: Vec::new(),
-            old_match_stack_len: None,
-            force_complete: false,
+impl<'b> LiteralAtomIter<'b> {
+    fn new(literal: &'b Atom) -> Self {
+        LiteralAtomIter {
+            literal,
+            try_match_atom: true,
         }
     }
 
-    /// Reuse the iterator for a new target atom.
-    #[inline]
-    pub fn set_new_target(&mut self, target: AtomView<'a>) {
-        self.set_new_target_impl(target, false);
+    fn set_target(&mut self) {
+        self.try_match_atom = true;
     }
 
-    #[inline]
-    fn set_new_target_complete(&mut self, target: AtomView<'a>) {
-        self.set_new_target_impl(target, true);
-    }
-
-    #[inline]
-    fn set_new_target_impl(&mut self, target: AtomView<'a>, force_complete: bool) {
-        self.target = target;
-        self.try_match_atom = matches!(self.pattern, Pattern::Wildcard(..) | Pattern::Literal(_));
-        self.reset_subslice_iter = true;
-        self.single_atom_fallback = None;
-        self.old_match_stack_len = None;
-        self.force_complete = force_complete;
-    }
-
-    pub fn next(
+    fn next<'a>(
         &mut self,
-        match_stack: &mut WrappedMatchStack<'a, 'b>,
-    ) -> Option<(usize, &[bool])> {
-        self.next_result(match_stack).ok()
-    }
-
-    fn next_result(
-        &mut self,
-        match_stack: &mut WrappedMatchStack<'a, 'b>,
-    ) -> Result<(usize, &[bool]), MatchError> {
+        target: AtomView<'a>,
+        match_stack: &WrappedMatchStack<'a, 'b>,
+    ) -> Result<usize, MatchError> {
         if self.try_match_atom {
             self.try_match_atom = false;
 
-            if let Pattern::Wildcard(w, optional) = self.pattern {
-                let range = match_stack.get_range_with_optional(*w, *optional);
-                if range.0 <= 1 && range.1.map(|w| w >= 1).unwrap_or(true) {
-                    // TODO: any problems with matching Single vs a list?
-                    if let Ok(new_stack_len) = match_stack.insert(*w, Match::Single(self.target)) {
-                        self.old_match_stack_len = Some(new_stack_len);
-                        self.used_flags.clear();
-                        return Ok((new_stack_len, &self.used_flags));
-                    }
-                }
-            } else if let Pattern::Literal(w) = self.pattern
-                && w.as_view() == self.target
-            {
-                self.used_flags.clear();
-                return Ok((match_stack.len(), &self.used_flags));
+            if self.literal.as_view() == target {
+                return Ok(match_stack.len());
             }
-            // TODO: also do type matches, Fn Fn, etc?
         }
 
-        if let Some(oml) = self.old_match_stack_len {
-            match_stack.truncate(oml);
-            self.old_match_stack_len = None;
-        }
+        Err(MatchError::StructurallyImpossible)
+    }
 
-        if matches!(self.pattern, Pattern::Literal(_)) {
-            // TODO: also catch Pattern:Add(_) and Pattern:Mul(_) without any sub-wildcards
-            return Err(MatchError::StructurallyImpossible);
-        }
+    fn clear_current(&mut self, _match_stack: &mut WrappedMatchStack<'_, 'b>) {}
+}
 
-        if self.reset_subslice_iter {
-            self.reset_subslice_iter = false;
+#[derive(Debug)]
+struct SliceAtomIter<'a, 'b> {
+    pattern: &'b Pattern,
+    target: AtomView<'a>,
+    iter: SubSliceIterator<'a, 'b>,
+    reset_iter: bool,
+    single_atom_fallback: Option<AtomView<'a>>,
+    force_complete: bool,
+    used_flags: Vec<bool>,
+}
+
+impl<'a, 'b> SliceAtomIter<'a, 'b> {
+    fn new(pattern: &'b Pattern, pat_list: &'b [Pattern], slice_type: SliceType) -> Self {
+        SliceAtomIter {
+            pattern,
+            target: AtomView::ZERO,
+            iter: SubSliceIterator::new(pat_list, slice_type),
+            reset_iter: true,
+            single_atom_fallback: None,
+            force_complete: false,
+            used_flags: Vec::new(),
+        }
+    }
+
+    fn set_target(&mut self, target: AtomView<'a>, force_complete: bool) {
+        self.target = target;
+        self.reset_iter = true;
+        self.single_atom_fallback = None;
+        self.force_complete = force_complete;
+    }
+
+    fn next(
+        &mut self,
+        match_stack: &mut WrappedMatchStack<'a, 'b>,
+    ) -> Result<(usize, Option<&[bool]>), MatchError> {
+        if self.reset_iter {
+            self.reset_iter = false;
             self.single_atom_fallback = self
-                .subslice_iter
+                .iter
                 .can_match_list_atom_as_single_with_optional(self.target)
                 .then_some(self.target);
-            self.subslice_iter.set_target(
+            self.iter.set_target(
                 self.target,
                 match_stack,
                 true,
@@ -5051,28 +5063,28 @@ impl<'a, 'b> AtomMatchIterator<'a, 'b> {
             );
 
             if self.force_complete {
-                self.subslice_iter.complete = true;
+                self.iter.complete = true;
             }
         }
 
-        let primary_error = match self.subslice_iter.next(match_stack) {
+        let primary_error = match self.iter.next(match_stack) {
             Ok((new_stack_len, used_flags)) => {
                 self.used_flags.clear();
                 self.used_flags.extend_from_slice(used_flags);
-                return Ok((new_stack_len, &self.used_flags));
+                return Ok((new_stack_len, Some(&self.used_flags)));
             }
             Err(e) => e,
         };
 
         if let Some(target) = self.single_atom_fallback.take() {
-            let complete = self.subslice_iter.complete;
-            self.subslice_iter.set_single_atom_target(target, complete);
+            let complete = self.iter.complete;
+            self.iter.set_single_atom_target(target, complete);
 
-            match self.subslice_iter.next(match_stack) {
+            match self.iter.next(match_stack) {
                 Ok((new_stack_len, used_flags)) => {
                     self.used_flags.clear();
                     self.used_flags.extend_from_slice(used_flags);
-                    Ok((new_stack_len, &self.used_flags))
+                    Ok((new_stack_len, Some(&self.used_flags)))
                 }
                 Err(fallback_error) => {
                     if matches!(primary_error, MatchError::StructurallyImpossible)
@@ -5090,11 +5102,201 @@ impl<'a, 'b> AtomMatchIterator<'a, 'b> {
     }
 
     fn clear_current(&mut self, match_stack: &mut WrappedMatchStack<'a, 'b>) {
-        if let Some(old_match_stack_len) = self.old_match_stack_len.take() {
-            match_stack.truncate(old_match_stack_len);
-        } else if let Some(old_match_stack_len) = self.subslice_iter.matches.first().copied() {
+        if let Some(old_match_stack_len) = self.iter.matches.first().copied() {
             match_stack.truncate(old_match_stack_len);
         }
+    }
+}
+
+#[derive(Debug)]
+struct WildcardAtomIter<'a, 'b> {
+    name: Symbol,
+    optional: bool,
+    try_match_atom: bool,
+    direct_match_stack_len: Option<usize>,
+    slice: SliceAtomIter<'a, 'b>,
+}
+
+impl<'a, 'b> WildcardAtomIter<'a, 'b> {
+    fn new(pattern: &'b Pattern, name: Symbol, optional: bool) -> Self {
+        WildcardAtomIter {
+            name,
+            optional,
+            try_match_atom: true,
+            direct_match_stack_len: None,
+            slice: SliceAtomIter::new(pattern, std::slice::from_ref(pattern), SliceType::One),
+        }
+    }
+
+    fn set_target(&mut self, target: AtomView<'a>, force_complete: bool) {
+        self.try_match_atom = true;
+        self.direct_match_stack_len = None;
+        self.slice.set_target(target, force_complete);
+    }
+
+    fn next(
+        &mut self,
+        target: AtomView<'a>,
+        match_stack: &mut WrappedMatchStack<'a, 'b>,
+    ) -> Result<(usize, Option<&[bool]>), MatchError> {
+        if self.try_match_atom {
+            self.try_match_atom = false;
+
+            let range = match_stack.get_range_with_optional(self.name, self.optional);
+            if range.0 <= 1
+                && range.1.map(|w| w >= 1).unwrap_or(true)
+                && let Ok(new_stack_len) = match_stack.insert(self.name, Match::Single(target))
+            {
+                self.direct_match_stack_len = Some(new_stack_len);
+                return Ok((new_stack_len, None));
+            }
+        }
+
+        if let Some(old_match_stack_len) = self.direct_match_stack_len.take() {
+            match_stack.truncate(old_match_stack_len);
+        }
+
+        self.slice.next(match_stack)
+    }
+
+    fn clear_current(&mut self, match_stack: &mut WrappedMatchStack<'a, 'b>) {
+        if let Some(old_match_stack_len) = self.direct_match_stack_len.take() {
+            match_stack.truncate(old_match_stack_len);
+        } else {
+            self.slice.clear_current(match_stack);
+        }
+    }
+}
+
+#[derive(Debug)]
+enum AtomMatcher<'a, 'b> {
+    Literal(LiteralAtomIter<'b>),
+    Wildcard(WildcardAtomIter<'a, 'b>),
+    Slice(SliceAtomIter<'a, 'b>),
+    Function(FnMatchIterator<'a, 'b>),
+    Alternative(AlternativeIter<'a, 'b>),
+}
+
+impl<'a, 'b> AtomMatcher<'a, 'b> {
+    fn new(pattern: &'b Pattern) -> Self {
+        match pattern {
+            Pattern::Literal(literal) => AtomMatcher::Literal(LiteralAtomIter::new(literal)),
+            Pattern::Wildcard(name, optional) => {
+                AtomMatcher::Wildcard(WildcardAtomIter::new(pattern, *name, *optional))
+            }
+            Pattern::Pow(p) => {
+                AtomMatcher::Slice(SliceAtomIter::new(pattern, p.as_slice(), SliceType::Pow))
+            }
+            Pattern::Mul(m) => {
+                AtomMatcher::Slice(SliceAtomIter::new(pattern, m.as_slice(), SliceType::Mul))
+            }
+            Pattern::Add(a) => {
+                AtomMatcher::Slice(SliceAtomIter::new(pattern, a.as_slice(), SliceType::Add))
+            }
+            Pattern::Fn(name, args) => AtomMatcher::Function(FnMatchIterator::new(*name, args)),
+            Pattern::Alternative(alternatives) => {
+                AtomMatcher::Alternative(AlternativeIter::new(alternatives))
+            }
+            Pattern::Transformer(_) => panic!("Transformer is not allowed on lhs"),
+        }
+    }
+
+    fn set_target(&mut self, target: AtomView<'a>, force_complete: bool) {
+        match self {
+            AtomMatcher::Literal(iter) => iter.set_target(),
+            AtomMatcher::Wildcard(iter) => iter.set_target(target, force_complete),
+            AtomMatcher::Slice(iter) => iter.set_target(target, force_complete),
+            AtomMatcher::Function(iter) => iter.reset(),
+            AtomMatcher::Alternative(iter) => iter.set_target(target),
+        }
+    }
+
+    fn next(
+        &mut self,
+        target: AtomView<'a>,
+        match_stack: &mut WrappedMatchStack<'a, 'b>,
+    ) -> Result<(usize, Option<&[bool]>), MatchError> {
+        match self {
+            AtomMatcher::Literal(iter) => iter.next(target, match_stack).map(|len| (len, None)),
+            AtomMatcher::Wildcard(iter) => iter.next(target, match_stack),
+            AtomMatcher::Slice(iter) => iter.next(match_stack),
+            AtomMatcher::Function(iter) => iter.next(target, match_stack).map(|len| (len, None)),
+            AtomMatcher::Alternative(iter) => iter
+                .next(match_stack)
+                .map(|len| (len, None))
+                .ok_or(MatchError::NoMoreMatches),
+        }
+    }
+
+    fn clear_current(&mut self, match_stack: &mut WrappedMatchStack<'a, 'b>) {
+        match self {
+            AtomMatcher::Literal(iter) => iter.clear_current(match_stack),
+            AtomMatcher::Wildcard(iter) => iter.clear_current(match_stack),
+            AtomMatcher::Slice(iter) => iter.clear_current(match_stack),
+            AtomMatcher::Function(iter) => iter.clear_current(match_stack),
+            AtomMatcher::Alternative(iter) => iter.clear_current(match_stack),
+        }
+    }
+}
+
+/// An iterator that tries to match an entire atom or
+/// a subslice to a pattern.
+#[derive(Debug)]
+pub struct AtomMatchIterator<'a, 'b> {
+    matcher: AtomMatcher<'a, 'b>,
+    target: AtomView<'a>,
+    used_flags: Vec<bool>,
+}
+
+impl<'a, 'b> AtomMatchIterator<'a, 'b> {
+    pub fn new(pattern: &'b Pattern, target: AtomView<'a>) -> AtomMatchIterator<'a, 'b> {
+        let mut iterator = AtomMatchIterator {
+            matcher: AtomMatcher::new(pattern),
+            target,
+            used_flags: Vec::new(),
+        };
+        iterator.set_new_target(target);
+        iterator
+    }
+
+    /// Reuse the iterator for a new target atom.
+    #[inline]
+    pub fn set_new_target(&mut self, target: AtomView<'a>) {
+        self.set_new_target_impl(target, false);
+    }
+
+    #[inline]
+    fn set_new_target_complete(&mut self, target: AtomView<'a>) {
+        self.set_new_target_impl(target, true);
+    }
+
+    #[inline]
+    fn set_new_target_impl(&mut self, target: AtomView<'a>, force_complete: bool) {
+        self.target = target;
+        self.matcher.set_target(target, force_complete);
+    }
+
+    pub fn next(
+        &mut self,
+        match_stack: &mut WrappedMatchStack<'a, 'b>,
+    ) -> Option<(usize, &[bool])> {
+        self.next_result(match_stack).ok()
+    }
+
+    pub fn next_result(
+        &mut self,
+        match_stack: &mut WrappedMatchStack<'a, 'b>,
+    ) -> Result<(usize, &[bool]), MatchError> {
+        let (new_stack_len, used_flags) = self.matcher.next(self.target, match_stack)?;
+        self.used_flags.clear();
+        if let Some(used_flags) = used_flags {
+            self.used_flags.extend_from_slice(used_flags);
+        }
+        Ok((new_stack_len, &self.used_flags))
+    }
+
+    fn clear_current(&mut self, match_stack: &mut WrappedMatchStack<'a, 'b>) {
+        self.matcher.clear_current(match_stack);
     }
 }
 
@@ -5216,25 +5418,8 @@ impl<'a, 'b> SubSliceIterator<'a, 'b> {
                     max_size: 0,
                     greedy: false,
                 }),
-                Pattern::Fn(name, args) => PatternIter::Fn(
-                    None,
-                    *name,
-                    Box::new(SubSliceIterator::new(args, SliceType::Arg)),
-                ),
-                Pattern::Pow(_) => {
-                    PatternIter::Sequence(None, Box::new(AtomMatchIterator::new(p, AtomView::ZERO)))
-                }
-                Pattern::Mul(_) => {
-                    PatternIter::Sequence(None, Box::new(AtomMatchIterator::new(p, AtomView::ZERO)))
-                }
-                Pattern::Add(_) => {
-                    PatternIter::Sequence(None, Box::new(AtomMatchIterator::new(p, AtomView::ZERO)))
-                }
-                Pattern::Literal(atom) => PatternIter::Literal(None, atom.as_view()),
-                Pattern::Alternative(alternatives) => {
-                    PatternIter::Alternative(None, AlternativeIter::new(alternatives))
-                }
                 Pattern::Transformer(_) => panic!("Transformer is not allowed on lhs"),
+                _ => PatternIter::Node(None, Box::new(AtomMatchIterator::new(p, AtomView::ZERO))),
             })
             .collect();
 
@@ -5639,25 +5824,8 @@ impl<'a, 'b> SubSliceIterator<'a, 'b> {
                         w.max_size = range.1 as u32;
                         w.greedy = greedy;
                     }
-                    (Pattern::Fn(..), PatternIter::Fn(index, _, _)) => {
-                        *index = None;
-                    }
-                    (Pattern::Pow(..), PatternIter::Sequence(index, _)) => {
-                        *index = None;
-                    }
-                    (Pattern::Mul(..), PatternIter::Sequence(index, _)) => {
-                        *index = None;
-                    }
-                    (Pattern::Add(..), PatternIter::Sequence(index, _)) => {
-                        *index = None;
-                    }
-                    (Pattern::Literal(..), PatternIter::Literal(index, _)) => {
-                        *index = None;
-                    }
-                    (Pattern::Alternative(..), PatternIter::Alternative(index, _)) => {
-                        *index = None;
-                    }
                     (Pattern::Transformer(_), _) => panic!("Transformer is not allowed on lhs"),
+                    (_, PatternIter::Node(index, _)) => *index = None,
                     (p, i) => panic!("Pattern and iterator type mismatch: {:?} vs {:?}", p, i),
                 }
 
@@ -5840,316 +6008,7 @@ impl<'a, 'b> SubSliceIterator<'a, 'b> {
                         wildcard_forward_pass = false;
                     }
                 }
-                PatternIter::Fn(index, name, s) => {
-                    let mut tried_first_option = false;
-
-                    // query an existing iterator
-                    let mut ii = match index {
-                        Some(jj) => {
-                            // get the next iteration of the function
-                            if !structural_mismatch {
-                                match s.next(match_stack) {
-                                    Ok((x, _)) => {
-                                        self.matches.push(x);
-                                        continue 'next_match;
-                                    }
-                                    Err(MatchError::StructurallyImpossible) => {
-                                        unreachable!(
-                                            "Structural mismatch after successful match of subiterator {:?}",
-                                            s.pattern
-                                        );
-                                    }
-                                    _ => {}
-                                }
-                            } else {
-                                // there is a structural mismatch for a future iterator, so
-                                // this iterator needs to move its position in the target list
-                                // clear all matches from this iterator
-                                match_stack.truncate(s.matches[0]);
-                            }
-
-                            if name.get_wildcard_level() > 0 {
-                                // pop the matched name and truncate the stack
-                                // we cannot wait until the truncation at the start of 'next_match
-                                // as we will try to match this iterator to a new index
-                                match_stack.truncate(self.matches.pop().unwrap());
-                            }
-
-                            self.used_flag[*jj] = false;
-                            tried_first_option = true;
-                            *jj + 1
-                        }
-                        None => {
-                            if self.cyclic && !self.used_flag.iter().all(|u| *u) {
-                                // start after the last used index
-                                let mut pos = self.used_flag.iter().position(|x| *x).unwrap_or(0);
-                                while self.used_flag[pos] {
-                                    pos = (pos + 1) % self.used_flag.len();
-                                }
-                                pos
-                            } else {
-                                0
-                            }
-                        }
-                    };
-
-                    // find a new match and create a new iterator
-                    while ii < self.target.len() {
-                        if self.used_flag[ii]
-                            || self.processed_iterators < 64
-                                && self.compatibility_flag[ii]
-                                    & (1 << (self.processed_iterators - 1))
-                                    != 0
-                        {
-                            if self.cyclic {
-                                break;
-                            }
-
-                            ii += 1;
-                            continue;
-                        }
-
-                        if self.ordered_gapless && tried_first_option {
-                            // cyclic sequences can start at any position
-                            if !self.cyclic || self.used_flag.iter().any(|x| *x) {
-                                break;
-                            }
-                        }
-
-                        tried_first_option = true;
-
-                        let new_target = self.target.get(ii);
-                        if let AtomView::Fun(f) = new_target {
-                            let target_name = f.get_symbol();
-                            let name_match = if name.get_wildcard_level() > 0 {
-                                match match_stack.insert(*name, Match::FunctionName(target_name)) {
-                                    Ok(new_stack_len) => {
-                                        self.matches.push(new_stack_len);
-                                        true
-                                    }
-                                    Err(MatchError::StructurallyImpossible) => {
-                                        ii += 1;
-                                        continue;
-                                    }
-                                    Err(_) => {
-                                        // skipping based on previous match means we cannot prove structural mismatch
-                                        structural_mismatch = false;
-                                        ii += 1;
-                                        continue;
-                                    }
-                                }
-                            } else {
-                                target_name == *name
-                            };
-
-                            if name_match {
-                                // inherit symmetric attributes from the matched target
-
-                                s.set_list_target(
-                                    new_target,
-                                    match_stack,
-                                    true,
-                                    !target_name.is_antisymmetric() && !target_name.is_symmetric(),
-                                    target_name.is_cyclesymmetric(),
-                                );
-
-                                match s.next(match_stack) {
-                                    Ok((x, _)) => {
-                                        *index = Some(ii);
-                                        self.matches.push(x);
-                                        self.used_flag[ii] = true;
-                                        continue 'next_match;
-                                    }
-                                    Err(MatchError::StructurallyImpossible) => {
-                                        if self.processed_iterators < 64 {
-                                            self.compatibility_flag[ii] |=
-                                                1 << (self.processed_iterators - 1) as u64;
-                                        }
-                                    }
-                                    _ => {
-                                        structural_mismatch = false;
-                                    }
-                                }
-
-                                if name.get_wildcard_level() > 0 {
-                                    // pop the matched name and truncate the stack
-                                    // we cannot wait until the truncation at the start of 'next_match
-                                    // as we will try to match this iterator to a new index
-                                    match_stack.truncate(self.matches.pop().unwrap());
-                                }
-                            }
-                        } else if let AtomView::Var(v) = new_target {
-                            let target_name = v.get_symbol();
-                            let name_match = if name.get_wildcard_level() > 0 {
-                                match match_stack.insert(*name, Match::FunctionName(target_name)) {
-                                    Ok(new_stack_len) => {
-                                        self.matches.push(new_stack_len);
-                                        true
-                                    }
-                                    Err(MatchError::StructurallyImpossible) => {
-                                        ii += 1;
-                                        continue;
-                                    }
-                                    Err(_) => {
-                                        structural_mismatch = false;
-                                        ii += 1;
-                                        continue;
-                                    }
-                                }
-                            } else {
-                                target_name == *name
-                            };
-
-                            if name_match {
-                                s.set_empty_list_target(match_stack, true, true, false);
-
-                                match s.next(match_stack) {
-                                    Ok((x, _)) => {
-                                        *index = Some(ii);
-                                        self.matches.push(x);
-                                        self.used_flag[ii] = true;
-                                        continue 'next_match;
-                                    }
-                                    Err(MatchError::StructurallyImpossible) => {
-                                        if self.processed_iterators < 64 {
-                                            self.compatibility_flag[ii] |=
-                                                1 << (self.processed_iterators - 1) as u64;
-                                        }
-                                    }
-                                    _ => {
-                                        structural_mismatch = false;
-                                    }
-                                }
-
-                                if name.get_wildcard_level() > 0 {
-                                    match_stack.truncate(self.matches.pop().unwrap());
-                                }
-                            }
-                        }
-
-                        ii += 1;
-                    }
-                }
-                PatternIter::Literal(index, atom) => {
-                    let mut tried_first_option = false;
-                    let mut ii = match index {
-                        Some(jj) => {
-                            self.used_flag[*jj] = false;
-                            tried_first_option = true;
-                            *jj + 1
-                        }
-                        None => {
-                            if self.cyclic && !self.used_flag.iter().all(|u| *u) {
-                                // start after the last used index
-                                let mut pos = self.used_flag.iter().position(|x| *x).unwrap_or(0);
-                                while self.used_flag[pos] {
-                                    pos = (pos + 1) % self.used_flag.len();
-                                }
-                                pos
-                            } else {
-                                0
-                            }
-                        }
-                    };
-
-                    while ii < self.target.len() {
-                        if self.used_flag[ii] {
-                            if self.cyclic {
-                                break;
-                            }
-
-                            ii += 1;
-                            continue;
-                        }
-
-                        if self.ordered_gapless && tried_first_option {
-                            // cyclic sequences can start at any position
-                            if !self.cyclic || self.used_flag.iter().any(|x| *x) {
-                                break;
-                            }
-                        }
-
-                        tried_first_option = true;
-
-                        if self.target.get(ii) == *atom {
-                            *index = Some(ii);
-                            self.matches.push(match_stack.len());
-                            self.used_flag[ii] = true;
-                            continue 'next_match;
-                        }
-                        ii += 1;
-                    }
-                }
-                PatternIter::Alternative(index, s) => {
-                    let mut tried_first_option = false;
-
-                    let mut ii = match index {
-                        Some(jj) => {
-                            if !structural_mismatch {
-                                if let Some(x) = s.next(match_stack) {
-                                    self.matches.push(x);
-                                    continue 'next_match;
-                                }
-                            } else {
-                                s.clear_current(match_stack);
-                            }
-
-                            self.used_flag[*jj] = false;
-                            tried_first_option = true;
-                            *jj + 1
-                        }
-                        None => {
-                            if self.cyclic && !self.used_flag.iter().all(|u| *u) {
-                                // start after the last used index
-                                let mut pos = self.used_flag.iter().position(|x| *x).unwrap_or(0);
-                                while self.used_flag[pos] {
-                                    pos = (pos + 1) % self.used_flag.len();
-                                }
-                                pos
-                            } else {
-                                0
-                            }
-                        }
-                    };
-
-                    while ii < self.target.len() {
-                        if self.used_flag[ii]
-                            || self.processed_iterators < 64
-                                && self.compatibility_flag[ii]
-                                    & (1 << (self.processed_iterators - 1))
-                                    != 0
-                        {
-                            if self.cyclic {
-                                break;
-                            }
-
-                            ii += 1;
-                            continue;
-                        }
-
-                        if self.ordered_gapless && tried_first_option {
-                            // cyclic sequences can start at any position
-                            if !self.cyclic || self.used_flag.iter().any(|x| *x) {
-                                break;
-                            }
-                        }
-
-                        tried_first_option = true;
-
-                        s.set_target(self.target.get(ii));
-
-                        if let Some(x) = s.next(match_stack) {
-                            *index = Some(ii);
-                            self.matches.push(x);
-                            self.used_flag[ii] = true;
-                            continue 'next_match;
-                        }
-
-                        structural_mismatch = false;
-                        ii += 1;
-                    }
-                }
-                PatternIter::Sequence(index, s) => {
+                PatternIter::Node(index, s) => {
                     let mut tried_first_option = false;
 
                     // query an existing iterator
@@ -6381,7 +6240,6 @@ impl<'a: 'b, 'b> PatternAtomTreeIterator<'a, 'b> {
     pub fn next_detailed(&mut self) -> Option<PatternMatch<'a, '_>> {
         loop {
             if let Some((_, used_flags)) = self.pattern_iter.next(&mut self.match_stack) {
-                // duplicate matches are prevented because the atom match iterator does not match to single atoms in a list
                 self.used_flags.clear();
                 self.used_flags.extend_from_slice(used_flags);
 
@@ -6632,6 +6490,15 @@ mod test {
         printer::PrintOptions,
         symbol,
     };
+
+    fn assert_contains_all(got: &[Atom], expected: &[Atom]) {
+        for expected in expected {
+            assert!(
+                got.contains(expected),
+                "missing expected replacement {expected}; got {got:?}"
+            );
+        }
+    }
 
     #[test]
     fn optional_bug() {
@@ -7001,16 +6868,42 @@ mod test {
     }
 
     #[test]
-    fn optional() {
-        fn assert_contains_all(got: &[Atom], expected: &[Atom]) {
-            for expected in expected {
-                assert!(
-                    got.contains(expected),
-                    "missing expected replacement {expected}; got {got:?}"
-                );
-            }
-        }
+    fn match_stack_reset_during_backtracking() {
+        let replacements = crate::parse!("f(1)*g(2)*g(3)")
+            .replace(crate::parse!("h_(x_)*h_(y_)"))
+            .iter(crate::parse!("hit(h_,x_,y_)"))
+            .collect::<Vec<_>>();
+        let expected = [
+            crate::parse!("f(1)*hit(g,2,3)"),
+            crate::parse!("f(1)*hit(g,3,2)"),
+        ];
+        assert_eq!(replacements.len(), expected.len());
+        assert_contains_all(&replacements, &expected);
 
+        let alt = crate::parse!("f(x_,0)").to_pattern() | crate::parse!("f(0,x_)").to_pattern();
+        let pat = alt * crate::parse!("f(x_,1)").to_pattern();
+        let replacements = crate::parse!("f(1,0)*f(0,2)*f(2,1)")
+            .replace(&pat)
+            .iter(crate::parse!("hit(x_)"))
+            .collect::<Vec<_>>();
+        let expected = [crate::parse!("f(1,0)*hit(2)")];
+        assert_eq!(replacements.len(), expected.len());
+        assert_contains_all(&replacements, &expected);
+
+        let pat = crate::parse!("g(x_*o_)*f(x_)")
+            .to_pattern()
+            .set_optional(crate::symbol!("o_"));
+        let replacements = crate::parse!("g(a*b)*f(a*b)")
+            .replace(&pat)
+            .iter(crate::parse!("hit(x_,o_)"))
+            .collect::<Vec<_>>();
+        let expected = [crate::parse!("hit(a*b,1)")];
+        assert_eq!(replacements.len(), expected.len());
+        assert_contains_all(&replacements, &expected);
+    }
+
+    #[test]
+    fn optional() {
         let pat = crate::parse!("(a_+b_*x)^p_")
             .to_pattern()
             .set_optional(crate::symbol!("a_"))
@@ -7127,10 +7020,14 @@ mod test {
             );
         }
 
-        let pat = crate::parse!("f(x___)")
-            .to_pattern()
-            .set_optional(crate::symbol!("x___"));
+        let pat = crate::parse!("f(x___)").to_pattern();
         let rhs = crate::parse!("g(x___)").to_pattern();
+
+        let e = crate::parse!("f").replace(&pat).with(&rhs);
+        assert_eq!(e, crate::parse!("f"));
+        assert!(crate::parse!("f").replace(&pat).iter(&rhs).next().is_none());
+
+        let pat = pat.set_optional(crate::symbol!("x___"));
         let e = crate::parse!("f").replace(&pat).with(&rhs);
         assert_eq!(e, crate::parse!("g()"));
     }
