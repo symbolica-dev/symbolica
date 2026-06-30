@@ -2186,27 +2186,181 @@ impl Copy for AtomView<'_> {}
 
 impl Eq for AtomView<'_> {}
 
-impl<'a, T> PartialEq<T> for AtomView<'a>
-where
-    for<'b> &'b T: Into<AtomOrView<'a>>,
-{
+impl<T: AtomCore> PartialEq<T> for AtomView<'_> {
+    #[inline]
     fn eq(&self, other: &T) -> bool {
-        self.get_data() == other.into().as_view().get_data()
+        self.get_data() == other.as_atom_view().get_data()
     }
 }
 
-impl<'a, T> PartialOrd<T> for AtomView<'a>
-where
-    for<'b> &'b T: Into<AtomOrView<'a>>,
-{
-    fn partial_cmp(&self, other: &T) -> Option<Ordering> {
-        Some(self.cmp(&other.into().as_view()))
+impl<T: AtomCore> PartialEq<T> for Atom {
+    #[inline]
+    fn eq(&self, other: &T) -> bool {
+        self.as_view() == other.as_atom_view()
     }
 }
+
+macro_rules! impl_atom_eq_for_symbol {
+    ($rhs:ty, $symbol:expr) => {
+        impl PartialEq<$rhs> for AtomView<'_> {
+            #[inline]
+            fn eq(&self, other: &$rhs) -> bool {
+                let other = InlineVar::new($symbol(other));
+                *self == other.as_view()
+            }
+        }
+
+        impl PartialEq<$rhs> for Atom {
+            #[inline]
+            fn eq(&self, other: &$rhs) -> bool {
+                let other = InlineVar::new($symbol(other));
+                self.as_view() == other.as_view()
+            }
+        }
+    };
+}
+
+impl_atom_eq_for_symbol!(Symbol, |other: &Symbol| *other);
+impl_atom_eq_for_symbol!(&Symbol, |other: &&Symbol| **other);
+
+impl PartialEq<Symbol> for &Atom {
+    #[inline]
+    fn eq(&self, other: &Symbol) -> bool {
+        let other = InlineVar::new(*other);
+        self.as_view() == other.as_view()
+    }
+}
+
+macro_rules! impl_ref_atom_eq {
+    ($($rhs:ty),+ $(,)?) => {
+        $(
+            impl PartialEq<$rhs> for &Atom {
+                #[inline]
+                fn eq(&self, other: &$rhs) -> bool {
+                    self.as_view() == other.as_atom_view()
+                }
+            }
+        )+
+    };
+}
+
+impl_ref_atom_eq!(
+    AtomView<'_>,
+    AtomOrView<'_>,
+    InlineVar,
+    InlineNum,
+    Indeterminate,
+    RecycledAtom,
+    AliasedAtom,
+);
+
+#[inline]
+fn eq_atom_num<T: Into<Coefficient>>(lhs: AtomView<'_>, rhs: T) -> bool {
+    let rhs = Atom::num(rhs);
+    lhs == rhs.as_view()
+}
+
+macro_rules! impl_atom_eq_for_num {
+    ($($ty:ty, $num:expr, $ref_num:expr;)+) => {
+        $(
+            impl PartialEq<$ty> for AtomView<'_> {
+                #[inline]
+                fn eq(&self, other: &$ty) -> bool {
+                    eq_atom_num(*self, ($num)(other))
+                }
+            }
+
+            impl PartialEq<&$ty> for AtomView<'_> {
+                #[inline]
+                fn eq(&self, other: &&$ty) -> bool {
+                    eq_atom_num(*self, ($ref_num)(other))
+                }
+            }
+
+            impl PartialEq<$ty> for Atom {
+                #[inline]
+                fn eq(&self, other: &$ty) -> bool {
+                    eq_atom_num(self.as_view(), ($num)(other))
+                }
+            }
+
+            impl PartialEq<&$ty> for Atom {
+                #[inline]
+                fn eq(&self, other: &&$ty) -> bool {
+                    eq_atom_num(self.as_view(), ($ref_num)(other))
+                }
+            }
+
+            impl PartialEq<$ty> for &Atom {
+                #[inline]
+                fn eq(&self, other: &$ty) -> bool {
+                    eq_atom_num(self.as_view(), ($num)(other))
+                }
+            }
+        )+
+    };
+}
+
+macro_rules! impl_atom_eq_for_coefficient {
+    ($($ty:ty),+ $(,)?) => {
+        impl_atom_eq_for_num!(
+            $($ty, |other: &$ty| other.clone(), |other: &&$ty| (*other).clone();)+
+        );
+    };
+}
+
+impl_atom_eq_for_coefficient!(
+    Coefficient,
+    Integer,
+    Rational,
+    Float,
+    Complex<Rational>,
+    Complex<Float>,
+    i8,
+    i16,
+    i32,
+    i64,
+    i128,
+    isize,
+    u8,
+    u16,
+    u32,
+    u64,
+    u128,
+    usize,
+    f64,
+    (i8, i8),
+    (i16, i16),
+    (i32, i32),
+    (i64, i64),
+    (i128, i128),
+    (isize, isize),
+    (u8, u8),
+    (u16, u16),
+    (u32, u32),
+    (u64, u64),
+    (u128, u128),
+    (usize, usize),
+);
+
+impl_atom_eq_for_num!(
+    crate::coefficient::CoefficientView<'_>,
+    |other: &crate::coefficient::CoefficientView<'_>| other.to_owned(),
+    |other: &&crate::coefficient::CoefficientView<'_>| (*other).to_owned();
+);
+
+#[cfg(feature = "gmp")]
+impl_atom_eq_for_coefficient!(rug::Integer, rug::Rational);
 
 impl Ord for AtomView<'_> {
     fn cmp(&self, other: &Self) -> Ordering {
-        self.cmp(other)
+        self.get_data().cmp(other.get_data())
+    }
+}
+
+impl PartialOrd for AtomView<'_> {
+    fn partial_cmp(&self, other: &Self) -> Option<Ordering> {
+        Some(self.cmp(other))
     }
 }
 
@@ -2754,21 +2908,9 @@ impl Ord for Atom {
     }
 }
 
-impl<T> PartialEq<T> for Atom
-where
-    for<'a> &'a T: Into<AtomOrView<'a>>,
-{
-    fn eq(&self, other: &T) -> bool {
-        self.as_view() == other.into().as_view()
-    }
-}
-
-impl<T> PartialOrd<T> for Atom
-where
-    for<'a> &'a T: Into<AtomOrView<'a>>,
-{
-    fn partial_cmp(&self, other: &T) -> Option<Ordering> {
-        Some(self.as_view().cmp(&other.into().as_view()))
+impl PartialOrd for Atom {
+    fn partial_cmp(&self, other: &Self) -> Option<Ordering> {
+        Some(self.cmp(other))
     }
 }
 
@@ -4039,6 +4181,7 @@ impl AsRef<Atom> for Atom {
 mod test {
     use crate::{
         atom::{Atom, AtomCore, Symbol, UserData},
+        coefficient::Coefficient,
         domains::{integer::Integer, rational::Rational},
     };
 
@@ -4122,6 +4265,39 @@ mod test {
             .add_arg(parse!("a"))
             .add_arg(parse!("a").as_view())
             .finish();
+    }
+
+    #[test]
+    fn generic_atom_comparisons() {
+        let x = symbol!("generic_atom_comparisons::x");
+        let a = Atom::var(x);
+        let view = a.as_view();
+
+        assert!(view == a.clone());
+        assert!(view == &a);
+        assert!(view == a.as_view());
+        assert!(view == x);
+        assert!(a == view);
+        assert!(a == &a);
+        assert!(&a == view);
+
+        let n = Atom::num(2);
+        let n_view = n.as_view();
+        let integer = Integer::from(2);
+        let rational = Rational::from((2, 1));
+        let coefficient = Coefficient::from(2);
+
+        assert!(n_view == 2);
+        assert!(n_view == (2, 1));
+        assert!(n_view == integer);
+        assert!(n_view == rational);
+        assert!(n_view == coefficient);
+        assert!(n_view == &Integer::from(2));
+        assert!(n == 2);
+        assert!(&n == 2);
+        assert!(n == &Integer::from(2));
+        assert!(&n == &Integer::from(2));
+        assert!(n != 3);
     }
 
     #[test]
