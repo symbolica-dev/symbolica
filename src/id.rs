@@ -4830,7 +4830,7 @@ enum PatternIter<'a, 'b> {
     Literal(Option<usize>, AtomView<'b>),
     Wildcard(WildcardIter),
     Fn(Option<usize>, Symbol, Box<SubSliceIterator<'a, 'b>>), // index first
-    Sequence(Option<usize>, Box<SubSliceIterator<'a, 'b>>),
+    Sequence(Option<usize>, Box<AtomMatchIterator<'a, 'b>>),
     Alternative(Option<usize>, AlternativeIter<'a, 'b>),
 }
 
@@ -4930,9 +4930,11 @@ impl<'a, 'b> AlternativeIter<'a, 'b> {
 pub struct AtomMatchIterator<'a, 'b> {
     try_match_atom: bool,
     reset_subslice_iter: bool,
+    single_atom_fallback: Option<AtomView<'a>>,
     subslice_iter: SubSliceIterator<'a, 'b>,
     pattern: &'b Pattern,
     target: AtomView<'a>,
+    used_flags: Vec<bool>,
     old_match_stack_len: Option<usize>,
     force_complete: bool,
 }
@@ -4942,17 +4944,30 @@ impl<'a, 'b> AtomMatchIterator<'a, 'b> {
         let try_match_atom = matches!(pattern, Pattern::Wildcard(..) | Pattern::Literal(_));
 
         let (pat_list, slice_type) = match pattern {
+            Pattern::Pow(p) => (p.as_slice(), SliceType::Pow),
             Pattern::Mul(m1) => (m1.as_slice(), SliceType::Mul),
             Pattern::Add(a1) => (a1.as_slice(), SliceType::Add),
             _ => (std::slice::from_ref(pattern), SliceType::One),
         };
 
+        Self::from_parts(pattern, target, try_match_atom, pat_list, slice_type)
+    }
+
+    fn from_parts(
+        pattern: &'b Pattern,
+        target: AtomView<'a>,
+        try_match_atom: bool,
+        pat_list: &'b [Pattern],
+        slice_type: SliceType,
+    ) -> AtomMatchIterator<'a, 'b> {
         AtomMatchIterator {
             try_match_atom,
             reset_subslice_iter: true,
+            single_atom_fallback: None,
             subslice_iter: SubSliceIterator::new(pat_list, slice_type),
             pattern,
             target,
+            used_flags: Vec::new(),
             old_match_stack_len: None,
             force_complete: false,
         }
@@ -4974,6 +4989,7 @@ impl<'a, 'b> AtomMatchIterator<'a, 'b> {
         self.target = target;
         self.try_match_atom = matches!(self.pattern, Pattern::Wildcard(..) | Pattern::Literal(_));
         self.reset_subslice_iter = true;
+        self.single_atom_fallback = None;
         self.old_match_stack_len = None;
         self.force_complete = force_complete;
     }
@@ -4982,6 +4998,13 @@ impl<'a, 'b> AtomMatchIterator<'a, 'b> {
         &mut self,
         match_stack: &mut WrappedMatchStack<'a, 'b>,
     ) -> Option<(usize, &[bool])> {
+        self.next_result(match_stack).ok()
+    }
+
+    fn next_result(
+        &mut self,
+        match_stack: &mut WrappedMatchStack<'a, 'b>,
+    ) -> Result<(usize, &[bool]), MatchError> {
         if self.try_match_atom {
             self.try_match_atom = false;
 
@@ -4991,13 +5014,15 @@ impl<'a, 'b> AtomMatchIterator<'a, 'b> {
                     // TODO: any problems with matching Single vs a list?
                     if let Ok(new_stack_len) = match_stack.insert(*w, Match::Single(self.target)) {
                         self.old_match_stack_len = Some(new_stack_len);
-                        return Some((new_stack_len, &[]));
+                        self.used_flags.clear();
+                        return Ok((new_stack_len, &self.used_flags));
                     }
                 }
             } else if let Pattern::Literal(w) = self.pattern
                 && w.as_view() == self.target
             {
-                return Some((match_stack.len(), &[]));
+                self.used_flags.clear();
+                return Ok((match_stack.len(), &self.used_flags));
             }
             // TODO: also do type matches, Fn Fn, etc?
         }
@@ -5009,11 +5034,15 @@ impl<'a, 'b> AtomMatchIterator<'a, 'b> {
 
         if matches!(self.pattern, Pattern::Literal(_)) {
             // TODO: also catch Pattern:Add(_) and Pattern:Mul(_) without any sub-wildcards
-            return None;
+            return Err(MatchError::StructurallyImpossible);
         }
 
         if self.reset_subslice_iter {
             self.reset_subslice_iter = false;
+            self.single_atom_fallback = self
+                .subslice_iter
+                .can_match_list_atom_as_single_with_optional(self.target)
+                .then_some(self.target);
             self.subslice_iter.set_target(
                 self.target,
                 match_stack,
@@ -5026,7 +5055,46 @@ impl<'a, 'b> AtomMatchIterator<'a, 'b> {
             }
         }
 
-        self.subslice_iter.next(match_stack).ok()
+        let primary_error = match self.subslice_iter.next(match_stack) {
+            Ok((new_stack_len, used_flags)) => {
+                self.used_flags.clear();
+                self.used_flags.extend_from_slice(used_flags);
+                return Ok((new_stack_len, &self.used_flags));
+            }
+            Err(e) => e,
+        };
+
+        if let Some(target) = self.single_atom_fallback.take() {
+            let complete = self.subslice_iter.complete;
+            self.subslice_iter.set_single_atom_target(target, complete);
+
+            match self.subslice_iter.next(match_stack) {
+                Ok((new_stack_len, used_flags)) => {
+                    self.used_flags.clear();
+                    self.used_flags.extend_from_slice(used_flags);
+                    Ok((new_stack_len, &self.used_flags))
+                }
+                Err(fallback_error) => {
+                    if matches!(primary_error, MatchError::StructurallyImpossible)
+                        && matches!(fallback_error, MatchError::StructurallyImpossible)
+                    {
+                        Err(MatchError::StructurallyImpossible)
+                    } else {
+                        Err(fallback_error)
+                    }
+                }
+            }
+        } else {
+            Err(primary_error)
+        }
+    }
+
+    fn clear_current(&mut self, match_stack: &mut WrappedMatchStack<'a, 'b>) {
+        if let Some(old_match_stack_len) = self.old_match_stack_len.take() {
+            match_stack.truncate(old_match_stack_len);
+        } else if let Some(old_match_stack_len) = self.subslice_iter.matches.first().copied() {
+            match_stack.truncate(old_match_stack_len);
+        }
     }
 }
 
@@ -5119,7 +5187,6 @@ pub struct SubSliceIterator<'a, 'b> {
     complete: bool,        // match needs to consume entire target
     ordered_gapless: bool, // pattern should appear ordered and have no gaps
     cyclic: bool,          // pattern is cyclic
-    single_atom_fallback: Option<AtomView<'a>>,
     do_not_match_to_single_atom_in_list: bool,
     do_not_match_entire_slice: bool,
     slice_type: SliceType,
@@ -5154,18 +5221,15 @@ impl<'a, 'b> SubSliceIterator<'a, 'b> {
                     *name,
                     Box::new(SubSliceIterator::new(args, SliceType::Arg)),
                 ),
-                Pattern::Pow(base_exp) => PatternIter::Sequence(
-                    None,
-                    Box::new(SubSliceIterator::new(base_exp.as_slice(), SliceType::Pow)),
-                ),
-                Pattern::Mul(pat) => PatternIter::Sequence(
-                    None,
-                    Box::new(SubSliceIterator::new(pat, SliceType::Mul)),
-                ),
-                Pattern::Add(pat) => PatternIter::Sequence(
-                    None,
-                    Box::new(SubSliceIterator::new(pat, SliceType::Add)),
-                ),
+                Pattern::Pow(_) => {
+                    PatternIter::Sequence(None, Box::new(AtomMatchIterator::new(p, AtomView::ZERO)))
+                }
+                Pattern::Mul(_) => {
+                    PatternIter::Sequence(None, Box::new(AtomMatchIterator::new(p, AtomView::ZERO)))
+                }
+                Pattern::Add(_) => {
+                    PatternIter::Sequence(None, Box::new(AtomMatchIterator::new(p, AtomView::ZERO)))
+                }
                 Pattern::Literal(atom) => PatternIter::Literal(None, atom.as_view()),
                 Pattern::Alternative(alternatives) => {
                     PatternIter::Alternative(None, AlternativeIter::new(alternatives))
@@ -5186,7 +5250,6 @@ impl<'a, 'b> SubSliceIterator<'a, 'b> {
             complete: false,
             ordered_gapless: false,
             cyclic: false,
-            single_atom_fallback: None,
             do_not_match_to_single_atom_in_list: false,
             do_not_match_entire_slice: false,
             slice_type,
@@ -5239,22 +5302,16 @@ impl<'a, 'b> SubSliceIterator<'a, 'b> {
         }
     }
 
-    fn target_matches_list_type(&self, target: AtomView<'a>) -> bool {
+    fn can_match_list_atom_as_single_with_optional(&self, target: AtomView<'a>) -> bool {
         matches!(
             (target, self.slice_type),
             (AtomView::Mul(_), SliceType::Mul)
                 | (AtomView::Add(_), SliceType::Add)
                 | (AtomView::Pow(_), SliceType::Pow)
-        )
+        ) && self.can_match_as_single_with_optional(target)
     }
 
-    fn can_try_single_atom_fallback(&self, target: AtomView<'a>) -> bool {
-        self.target.get_type() != SliceType::One
-            && self.target_matches_list_type(target)
-            && self.can_match_as_single_with_optional(target)
-    }
-
-    fn set_single_atom_fallback_target(&mut self, target: AtomView<'a>, complete: bool) {
+    fn set_single_atom_target(&mut self, target: AtomView<'a>, complete: bool) {
         self.target.set_one(target);
         self.matches.clear();
         self.used_flag.clear();
@@ -5268,16 +5325,6 @@ impl<'a, 'b> SubSliceIterator<'a, 'b> {
         self.cyclic = false;
         self.do_not_match_to_single_atom_in_list = false;
         self.do_not_match_entire_slice = false;
-    }
-
-    fn next_single_atom_fallback(
-        &mut self,
-        target: AtomView<'a>,
-        match_stack: &mut WrappedMatchStack<'a, 'b>,
-        complete: bool,
-    ) -> Result<(usize, &[bool]), MatchError> {
-        self.set_single_atom_fallback_target(target, complete);
-        self.next(match_stack)
     }
 
     fn optional_default_match_for(slice_type: SliceType) -> Match<'a> {
@@ -5303,16 +5350,11 @@ impl<'a, 'b> SubSliceIterator<'a, 'b> {
         // for (list, list)  create a subslice iterator on the lists that is not complete
         // for (single, list), upgrade single to a slice with one element
 
-        self.single_atom_fallback = None;
-
         match (self.slice_type, target) {
             (SliceType::Mul, AtomView::Mul(_))
             | (SliceType::Add, AtomView::Add(_))
             | (SliceType::Pow, AtomView::Pow(_)) => {
                 self.target.set_list(target);
-                if self.can_match_as_single_with_optional(target) {
-                    self.single_atom_fallback = Some(target);
-                }
             }
             (SliceType::Mul | SliceType::Add | SliceType::Pow, _) => {
                 self.target.set_one(target);
@@ -5422,7 +5464,6 @@ impl<'a, 'b> SubSliceIterator<'a, 'b> {
         self.complete = complete;
         self.ordered_gapless = ordered;
         self.cyclic = cyclic;
-        self.single_atom_fallback = None;
         self.do_not_match_to_single_atom_in_list = false;
         self.do_not_match_entire_slice = false;
     }
@@ -5459,7 +5500,6 @@ impl<'a, 'b> SubSliceIterator<'a, 'b> {
         self.complete = complete;
         self.ordered_gapless = ordered;
         self.cyclic = cyclic;
-        self.single_atom_fallback = None;
         self.do_not_match_to_single_atom_in_list = false;
         self.do_not_match_entire_slice = false;
     }
@@ -5481,17 +5521,6 @@ impl<'a, 'b> SubSliceIterator<'a, 'b> {
 
         'next_match: loop {
             if !forward_pass && self.processed_iterators == 0 {
-                // Top-level sequence patterns do not pass through
-                // PatternIter::Sequence, so their single-atom fallback is
-                // handled here. Nested sequences handle the same fallback in
-                // the local Sequence branch after structural matching fails.
-                if let Some(target) = self.single_atom_fallback.take() {
-                    self.set_single_atom_fallback_target(target, self.complete);
-                    forward_pass = true;
-                    structural_mismatch = true;
-                    continue 'next_match;
-                }
-
                 if structural_mismatch {
                     return Err(MatchError::StructurallyImpossible);
                 } else {
@@ -6126,42 +6155,20 @@ impl<'a, 'b> SubSliceIterator<'a, 'b> {
                     // query an existing iterator
                     let mut ii = match index {
                         Some(jj) => {
-                            let current_target = self.target.get(*jj);
-
                             // get the next iteration of the function
                             if !structural_mismatch {
-                                match s.next(match_stack) {
+                                match s.next_result(match_stack) {
                                     Ok((x, _)) => {
                                         self.matches.push(x);
                                         continue 'next_match;
                                     }
-                                    Err(MatchError::StructurallyImpossible) => {
-                                        unreachable!(
-                                            "Structural mismatch after successful match of subiterator {:?}",
-                                            s.pattern
-                                        );
-                                    }
-                                    _ => {
-                                        if s.can_try_single_atom_fallback(current_target) {
-                                            match s.next_single_atom_fallback(
-                                                current_target,
-                                                match_stack,
-                                                true,
-                                            ) {
-                                                Ok((x, _)) => {
-                                                    self.matches.push(x);
-                                                    continue 'next_match;
-                                                }
-                                                Err(_) => {}
-                                            }
-                                        }
-                                    }
+                                    Err(_) => {}
                                 }
                             } else {
                                 // there is a structural mismatch for a future iterator, so
                                 // this iterator needs to move its position in the target list
                                 // clear all matches from this iterator
-                                match_stack.truncate(s.matches[0]);
+                                s.clear_current(match_stack);
                             }
 
                             self.used_flag[*jj] = false;
@@ -6208,38 +6215,9 @@ impl<'a, 'b> SubSliceIterator<'a, 'b> {
                         tried_first_option = true;
 
                         let new_target = self.target.get(ii);
-                        match (new_target, s.slice_type) {
-                            (AtomView::Mul(_), SliceType::Mul) => {}
-                            (AtomView::Add(_), SliceType::Add) => {}
-                            (AtomView::Pow(_), SliceType::Pow) => {}
-                            (_, _) if s.can_match_as_single_with_optional(new_target) => {}
-                            _ => {
-                                ii += 1;
-                                continue;
-                            }
-                        };
+                        s.set_new_target_complete(new_target);
 
-                        let ordered = match s.slice_type {
-                            SliceType::Add | SliceType::Mul => false,
-                            SliceType::Pow => true, // make sure pattern (base,exp) is not exchanged
-                            _ => unreachable!(),
-                        };
-
-                        let matches_as_list = matches!(
-                            (new_target, s.slice_type),
-                            (AtomView::Mul(_), SliceType::Mul)
-                                | (AtomView::Add(_), SliceType::Add)
-                                | (AtomView::Pow(_), SliceType::Pow)
-                        );
-
-                        if matches_as_list {
-                            s.set_list_target(new_target, match_stack, true, ordered, false);
-                        } else {
-                            s.set_target(new_target, match_stack, false, false);
-                            s.complete = true;
-                        }
-
-                        match s.next(match_stack) {
+                        match s.next_result(match_stack) {
                             Ok((x, _)) => {
                                 *index = Some(ii);
                                 self.matches.push(x);
@@ -6248,35 +6226,7 @@ impl<'a, 'b> SubSliceIterator<'a, 'b> {
                                 continue 'next_match;
                             }
                             Err(e) => {
-                                let mut structurally_impossible =
-                                    matches!(e, MatchError::StructurallyImpossible);
-
-                                if s.can_try_single_atom_fallback(new_target) {
-                                    match s.next_single_atom_fallback(
-                                        new_target,
-                                        match_stack,
-                                        true,
-                                    ) {
-                                        Ok((x, _)) => {
-                                            *index = Some(ii);
-                                            self.matches.push(x);
-                                            self.used_flag[ii] = true;
-
-                                            continue 'next_match;
-                                        }
-                                        Err(fallback_error) => {
-                                            structurally_impossible &= matches!(
-                                                fallback_error,
-                                                MatchError::StructurallyImpossible
-                                            );
-                                        }
-                                    }
-                                }
-
-                                if structurally_impossible {
-                                    // TODO: Prove that caching structural impossibility is sound
-                                    // when the optional-default single-atom fallback has also
-                                    // been tried for this sequence.
+                                if matches!(e, MatchError::StructurallyImpossible) {
                                     if self.processed_iterators < 64 {
                                         self.compatibility_flag[ii] |=
                                             1 << (self.processed_iterators - 1) as u64;
@@ -6925,10 +6875,30 @@ mod test {
         let expr = parse!("f1(1)*f1(2)+f1(1)*f1(2)*f2");
         let pat = parse!("v1_(id1_)*v2_(id2_)");
 
+        let replacements = expr
+            .replace(pat.clone())
+            .iter(parse!("f1(id1_)"))
+            .collect::<Vec<_>>();
+        let expected_replacements = [
+            parse!("f2*f1(1)+f1(1)*f1(2)"),
+            parse!("f2*f1(2)+f1(1)*f1(2)"),
+            parse!("f2*f1(1)*f1(2)+f1(1)"),
+            parse!("f2*f1(1)*f1(2)+f1(2)"),
+        ];
+        assert_eq!(replacements.len(), expected_replacements.len());
+        for expected in expected_replacements {
+            assert!(
+                replacements.contains(&expected),
+                "missing expected replacement {expected}; got {replacements:?}"
+            );
+        }
+
         let expr = expr.replace(pat).with(parse!("f1(id1_)"));
 
-        let res = parse!("f1(1)+f2*f1(1)");
-        assert_eq!(expr, res);
+        assert!(
+            [parse!("f1(1)+f2*f1(1)"), parse!("f1(2)+f2*f1(2)")].contains(&expr),
+            "unexpected cached replacement result {expr}"
+        );
     }
 
     #[test]
@@ -7061,9 +7031,13 @@ mod test {
             .replace(&pat)
             .iter(&rhs)
             .collect::<Vec<_>>();
-        assert_contains_all(
-            &replacements,
-            &[crate::parse!("f(1,2,1)"), crate::parse!("1+2*f(0,1,1)")],
+        let non_default = crate::parse!("f(1,2,1)");
+        let default = crate::parse!("1+2*f(0,1,1)");
+        assert_contains_all(&replacements, &[non_default.clone(), default.clone()]);
+        assert!(
+            replacements.iter().position(|r| r == &non_default).unwrap()
+                < replacements.iter().position(|r| r == &default).unwrap(),
+            "non-default match should be yielded before optional-default fallback"
         );
 
         let e = crate::parse!("1+x").replace(&pat).with(&rhs);
@@ -7103,9 +7077,13 @@ mod test {
             .replace(&pat)
             .iter(&rhs)
             .collect::<Vec<_>>();
-        assert_contains_all(
-            &replacements,
-            &[crate::parse!("f(z)"), crate::parse!("z*f(1)")],
+        let non_default = crate::parse!("f(z)");
+        let default = crate::parse!("z*f(1)");
+        assert_contains_all(&replacements, &[non_default.clone(), default.clone()]);
+        assert!(
+            replacements.iter().position(|r| r == &non_default).unwrap()
+                < replacements.iter().position(|r| r == &default).unwrap(),
+            "non-default match should be yielded before optional-default fallback"
         );
 
         let pat = crate::parse!("(b_+2*x)*n_")
