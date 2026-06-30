@@ -2085,8 +2085,8 @@ impl<'a> AtomView<'a> {
 
             if r.pattern.could_match(*self) {
                 let (match_iter, match_stack) = &mut atom_match_iterators[rep_id];
-                match_iter.set_new_target(*self);
                 match_stack.truncate(0);
+                match_iter.set_new_target(*self, match_stack);
                 let it = match_iter;
                 if let Some((_, used_flags)) = it.next(match_stack) {
                     let mut rhs_subs = workspace.new_atom();
@@ -4962,7 +4962,7 @@ impl<'a, 'b> AlternativeIter<'a, 'b> {
             if self.match_stack_len.is_none() {
                 let match_stack_len = match_stack.len();
                 self.match_stack_len = Some(match_stack_len);
-                self.variants[variant_index].set_new_target_complete(self.target);
+                self.variants[variant_index].set_new_target_complete(self.target, match_stack);
             }
 
             if self.variants[variant_index].next(match_stack).is_some() {
@@ -5019,9 +5019,7 @@ struct SliceAtomIter<'a, 'b> {
     pattern: &'b Pattern,
     target: AtomView<'a>,
     iter: SubSliceIterator<'a, 'b>,
-    reset_iter: bool,
     single_atom_fallback: Option<AtomView<'a>>,
-    force_complete: bool,
     used_flags: Vec<bool>,
 }
 
@@ -5031,42 +5029,38 @@ impl<'a, 'b> SliceAtomIter<'a, 'b> {
             pattern,
             target: AtomView::ZERO,
             iter: SubSliceIterator::new(pat_list, slice_type),
-            reset_iter: true,
             single_atom_fallback: None,
-            force_complete: false,
             used_flags: Vec::new(),
         }
     }
 
-    fn set_target(&mut self, target: AtomView<'a>, force_complete: bool) {
+    fn set_target(
+        &mut self,
+        target: AtomView<'a>,
+        match_stack: &WrappedMatchStack<'a, 'b>,
+        force_complete: bool,
+    ) {
         self.target = target;
-        self.reset_iter = true;
-        self.single_atom_fallback = None;
-        self.force_complete = force_complete;
+        self.single_atom_fallback = self
+            .iter
+            .can_match_list_atom_as_single_with_optional(self.target)
+            .then_some(self.target);
+        self.iter.set_target(
+            self.target,
+            match_stack,
+            true,
+            matches!(self.pattern, Pattern::Wildcard(..) | Pattern::Literal(_)),
+        );
+
+        if force_complete {
+            self.iter.complete = true;
+        }
     }
 
     fn next(
         &mut self,
         match_stack: &mut WrappedMatchStack<'a, 'b>,
     ) -> Result<(usize, Option<&[bool]>), MatchError> {
-        if self.reset_iter {
-            self.reset_iter = false;
-            self.single_atom_fallback = self
-                .iter
-                .can_match_list_atom_as_single_with_optional(self.target)
-                .then_some(self.target);
-            self.iter.set_target(
-                self.target,
-                match_stack,
-                true,
-                matches!(self.pattern, Pattern::Wildcard(..) | Pattern::Literal(_)),
-            );
-
-            if self.force_complete {
-                self.iter.complete = true;
-            }
-        }
-
         let primary_error = match self.iter.next(match_stack) {
             Ok((new_stack_len, used_flags)) => {
                 self.used_flags.clear();
@@ -5128,10 +5122,15 @@ impl<'a, 'b> WildcardAtomIter<'a, 'b> {
         }
     }
 
-    fn set_target(&mut self, target: AtomView<'a>, force_complete: bool) {
+    fn set_target(
+        &mut self,
+        target: AtomView<'a>,
+        match_stack: &WrappedMatchStack<'a, 'b>,
+        force_complete: bool,
+    ) {
         self.try_match_atom = true;
         self.direct_match_stack_len = None;
-        self.slice.set_target(target, force_complete);
+        self.slice.set_target(target, match_stack, force_complete);
     }
 
     fn next(
@@ -5201,11 +5200,16 @@ impl<'a, 'b> AtomMatcher<'a, 'b> {
         }
     }
 
-    fn set_target(&mut self, target: AtomView<'a>, force_complete: bool) {
+    fn set_target(
+        &mut self,
+        target: AtomView<'a>,
+        match_stack: &WrappedMatchStack<'a, 'b>,
+        force_complete: bool,
+    ) {
         match self {
             AtomMatcher::Literal(iter) => iter.set_target(),
-            AtomMatcher::Wildcard(iter) => iter.set_target(target, force_complete),
-            AtomMatcher::Slice(iter) => iter.set_target(target, force_complete),
+            AtomMatcher::Wildcard(iter) => iter.set_target(target, match_stack, force_complete),
+            AtomMatcher::Slice(iter) => iter.set_target(target, match_stack, force_complete),
             AtomMatcher::Function(iter) => iter.reset(),
             AtomMatcher::Alternative(iter) => iter.set_target(target),
         }
@@ -5250,30 +5254,41 @@ pub struct AtomMatchIterator<'a, 'b> {
 
 impl<'a, 'b> AtomMatchIterator<'a, 'b> {
     pub fn new(pattern: &'b Pattern, target: AtomView<'a>) -> AtomMatchIterator<'a, 'b> {
-        let mut iterator = AtomMatchIterator {
+        AtomMatchIterator {
             matcher: AtomMatcher::new(pattern),
             target,
             used_flags: Vec::new(),
-        };
-        iterator.set_new_target(target);
-        iterator
+        }
     }
 
     /// Reuse the iterator for a new target atom.
     #[inline]
-    pub fn set_new_target(&mut self, target: AtomView<'a>) {
-        self.set_new_target_impl(target, false);
+    pub fn set_new_target(
+        &mut self,
+        target: AtomView<'a>,
+        match_stack: &WrappedMatchStack<'a, 'b>,
+    ) {
+        self.set_new_target_impl(target, match_stack, false);
     }
 
     #[inline]
-    fn set_new_target_complete(&mut self, target: AtomView<'a>) {
-        self.set_new_target_impl(target, true);
+    fn set_new_target_complete(
+        &mut self,
+        target: AtomView<'a>,
+        match_stack: &WrappedMatchStack<'a, 'b>,
+    ) {
+        self.set_new_target_impl(target, match_stack, true);
     }
 
     #[inline]
-    fn set_new_target_impl(&mut self, target: AtomView<'a>, force_complete: bool) {
+    fn set_new_target_impl(
+        &mut self,
+        target: AtomView<'a>,
+        match_stack: &WrappedMatchStack<'a, 'b>,
+        force_complete: bool,
+    ) {
         self.target = target;
-        self.matcher.set_target(target, force_complete);
+        self.matcher.set_target(target, match_stack, force_complete);
     }
 
     pub fn next(
@@ -6074,7 +6089,7 @@ impl<'a, 'b> SubSliceIterator<'a, 'b> {
                         tried_first_option = true;
 
                         let new_target = self.target.get(ii);
-                        s.set_new_target_complete(new_target);
+                        s.set_new_target_complete(new_target, match_stack);
 
                         match s.next_result(match_stack) {
                             Ok((x, _)) => {
@@ -6222,13 +6237,17 @@ impl<'a: 'b, 'b> PatternAtomTreeIterator<'a, 'b> {
             AtomTreeIterator::new(target, settings.unwrap_or(&DEFAULT_MATCH_SETTINGS).clone());
         it.next(); // prevent a repeated match attempt on the entire target
 
+        let match_stack = WrappedMatchStack::new(
+            conditions.unwrap_or(&DEFAULT_PATTERN_CONDITION),
+            settings.unwrap_or(&DEFAULT_MATCH_SETTINGS),
+        );
+        let mut pattern_iter = AtomMatchIterator::new(pattern, target);
+        pattern_iter.set_new_target(target, &match_stack);
+
         PatternAtomTreeIterator {
             atom_tree_iterator: it,
-            pattern_iter: AtomMatchIterator::new(pattern, target),
-            match_stack: WrappedMatchStack::new(
-                conditions.unwrap_or(&DEFAULT_PATTERN_CONDITION),
-                settings.unwrap_or(&DEFAULT_MATCH_SETTINGS),
-            ),
+            pattern_iter,
+            match_stack,
             tree_pos: Vec::new(),
             used_flags: Vec::new(),
             first_match: false,
@@ -6257,7 +6276,8 @@ impl<'a: 'b, 'b> PatternAtomTreeIterator<'a, 'b> {
             }
 
             if let Some(cur_target) = self.atom_tree_iterator.next_into(Some(&mut self.tree_pos)) {
-                self.pattern_iter.set_new_target(cur_target);
+                self.pattern_iter
+                    .set_new_target(cur_target, &self.match_stack);
             } else {
                 return None;
             }
