@@ -437,6 +437,16 @@ impl<'a> AtomPrinter<'a> {
         opts: &PrintOptions,
         print_state: PrintState,
     ) -> fmt::Result {
+        if opts.mode.is_latex() {
+            return if bracket == '(' {
+                f.write_str("\\left(")
+            } else if bracket == ')' {
+                f.write_str("\\right)")
+            } else {
+                f.write_char(bracket)
+            };
+        }
+
         if let Some(bracket_colors) = opts.bracket_level_colors {
             f.write_fmt(format_args!(
                 "{}",
@@ -2020,35 +2030,136 @@ impl FormattedPrintPow for PowView<'_> {
 
         print_state.in_exp_base = true;
 
-        // detect denominator
-        if let AtomView::Num(n) = e
-            && let CoefficientView::Natural(num, den, 0, 1) = n.get_coeff_view()
-            && num < 0
+        // handle n-th roots
+        if (opts.mode.is_latex() || opts.mode.is_typst())
+            && let Ok(r) = Rational::try_from(e)
+            && !r.is_integer()
         {
-            if print_state.in_exp && !add_paren {
-                add_paren = true;
-                AtomPrinter::format_bracket('(', f, opts, print_state)?;
-                print_state.in_exp = false;
-                print_state.bracket_level += 1;
-            }
+            let abs_num = r.numerator().abs();
+            let has_pow = abs_num != 1;
+            if r < 0 {
+                if print_state.in_exp && !add_paren {
+                    add_paren = true;
+                    AtomPrinter::format_bracket('(', f, opts, print_state)?;
+                    print_state.in_exp = false;
+                    print_state.bracket_level += 1;
+                }
 
-            let exp = Rational::new(num, den).neg();
+                print_state.in_exp_base = false;
+                if opts.mode.is_latex() {
+                    f.write_str("\\frac{1}{")?;
+                } else {
+                    f.write_str("1/")?;
+                }
+            }
 
             if opts.mode.is_latex() {
-                print_state.in_exp_base = !exp.is_one();
-                f.write_str("\\frac{1}{")?;
+                f.write_str("\\sqrt")?;
+
+                if *r.denominator_ref() != 2 {
+                    f.write_char('[')?;
+                    r.denominator_ref().format(opts, print_state, f)?;
+                    f.write_char(']')?;
+                }
+
+                f.write_char('{')?;
+                b.format(f, opts, print_state)?;
+                f.write_char('}')?;
+            } else if *r.denominator_ref() != 2 {
+                f.write_str("root(")?;
+                r.denominator_ref().format(opts, print_state, f)?;
+                f.write_char(',')?;
+                b.format(f, opts, print_state)?;
+                f.write_char(')')?;
             } else {
-                f.write_str("1/")?;
+                f.write_str("sqrt(")?;
+                b.format(f, opts, print_state)?;
+                f.write_char(')')?;
             }
 
-            b.format(f, opts, print_state)?;
+            if has_pow {
+                if opts.mode.is_latex() {
+                    f.write_str("^{")?;
+                    abs_num.format(opts, print_state, f)?;
+                    f.write_char('}')?;
+                } else {
+                    f.write_char('^')?;
+                    print_state.in_exp = true;
+                    abs_num.format(opts, print_state, f)?;
+                }
+            }
 
-            print_state.in_exp_base = false;
+            if r < 0 && opts.mode.is_latex() {
+                f.write_str("}")?;
+            }
+        } else {
+            // detect denominator
+            if let AtomView::Num(n) = e
+                && let CoefficientView::Natural(num, den, 0, 1) = n.get_coeff_view()
+                && num < 0
+            {
+                if print_state.in_exp && !add_paren {
+                    add_paren = true;
+                    AtomPrinter::format_bracket('(', f, opts, print_state)?;
+                    print_state.in_exp = false;
+                    print_state.bracket_level += 1;
+                }
 
-            if !exp.is_one() {
+                let exp = Rational::new(num, den).neg();
+
+                if opts.mode.is_latex() {
+                    print_state.in_exp_base = !exp.is_one();
+                    f.write_str("\\frac{1}{")?;
+                } else {
+                    f.write_str("1/")?;
+                }
+
+                b.format(f, opts, print_state)?;
+
+                print_state.in_exp_base = false;
+
+                if !exp.is_one() {
+                    print_state.in_exp = true;
+
+                    let superscript_exponent = opts.num_exp_as_superscript && den == 1;
+
+                    if !superscript_exponent {
+                        if opts.mode.is_sympy()
+                            || (!opts.mode.is_latex() && opts.double_star_for_exponentiation)
+                        {
+                            f.write_str("**")?;
+                        } else {
+                            f.write_char('^')?;
+                        }
+                    }
+
+                    if opts.mode.is_latex() {
+                        f.write_char('{')?;
+                        print_state.in_exp = false;
+                        exp.format(opts, print_state, f)?;
+                        f.write_char('}')?;
+                    } else if superscript_exponent {
+                        print_state.in_exp = false;
+                        print_state.superscript = true;
+                        AtomPrinter::format_digits(
+                            num.unsigned_abs().to_string(),
+                            opts,
+                            &print_state,
+                            f,
+                        )?;
+                    } else {
+                        exp.format(opts, print_state, f)?;
+                    }
+                }
+
+                if opts.mode.is_latex() {
+                    f.write_str("}")?;
+                }
+            } else {
+                b.format(f, opts, print_state)?;
+
+                print_state.in_exp_base = false;
                 print_state.in_exp = true;
-
-                let superscript_exponent = opts.num_exp_as_superscript && den == 1;
 
                 if !superscript_exponent {
                     if opts.mode.is_sympy()
@@ -2063,53 +2174,16 @@ impl FormattedPrintPow for PowView<'_> {
                 if opts.mode.is_latex() {
                     f.write_char('{')?;
                     print_state.in_exp = false;
-                    exp.format(opts, print_state, f)?;
+                    e.format(f, opts, print_state)?;
                     f.write_char('}')?;
-                } else if superscript_exponent {
-                    print_state.in_exp = false;
-                    print_state.superscript = true;
-                    AtomPrinter::format_digits(
-                        num.unsigned_abs().to_string(),
-                        opts,
-                        &print_state,
-                        f,
-                    )?;
                 } else {
-                    exp.format(opts, print_state, f)?;
+                    if superscript_exponent {
+                        print_state.in_exp = false;
+                        print_state.superscript = true;
+                    }
+
+                    e.format(f, opts, print_state)?;
                 }
-            }
-
-            if opts.mode.is_latex() {
-                f.write_str("}")?;
-            }
-        } else {
-            b.format(f, opts, print_state)?;
-
-            print_state.in_exp_base = false;
-            print_state.in_exp = true;
-
-            if !superscript_exponent {
-                if opts.mode.is_sympy()
-                    || (!opts.mode.is_latex() && opts.double_star_for_exponentiation)
-                {
-                    f.write_str("**")?;
-                } else {
-                    f.write_char('^')?;
-                }
-            }
-
-            if opts.mode.is_latex() {
-                f.write_char('{')?;
-                print_state.in_exp = false;
-                e.format(f, opts, print_state)?;
-                f.write_char('}')?;
-            } else {
-                if superscript_exponent {
-                    print_state.in_exp = false;
-                    print_state.superscript = true;
-                }
-
-                e.format(f, opts, print_state)?;
             }
         }
 
