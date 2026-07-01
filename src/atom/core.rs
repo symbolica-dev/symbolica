@@ -407,6 +407,7 @@ pub trait AtomCore: private::Sealed + Sized {
     }
 
     /// Write the expression as a sum of terms with minimal denominators in `x`.
+    /// Factors the denominators over the rationals by default, or over the complex rationals if an `i` appears.
     ///
     /// # Example
     ///
@@ -453,7 +454,8 @@ pub trait AtomCore: private::Sealed + Sized {
         self.as_atom_view().cancel().wrap(self)
     }
 
-    /// Factor the expression over the rationals.
+    /// Factor the expression over the rationals, or over the
+    /// complex rationals if an `i` appears.
     ///
     /// # Example
     ///
@@ -466,6 +468,21 @@ pub trait AtomCore: private::Sealed + Sized {
     /// ```
     fn factor(&self) -> Self::Output {
         self.as_atom_view().factor().wrap(self)
+    }
+
+    /// Factor the expression over complex rationals.
+    ///
+    /// # Example
+    ///
+    /// ```
+    /// use symbolica::prelude::*;
+    /// let expr = parse!("x^4 + 1");
+    /// let factored = expr.factor_complex();
+    /// let r = parse!("(-1𝑖+x^2)*(1𝑖+x^2)");
+    /// assert_eq!(factored, r);
+    /// ```
+    fn factor_complex(&self) -> Self::Output {
+        self.as_atom_view().factor_complex().wrap(self)
     }
 
     /// Collect numerical factors by removing the numerical content from additions.
