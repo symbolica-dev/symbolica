@@ -1062,6 +1062,10 @@ impl Symbol {
     pub const IF: Symbol = State::IF;
     /// The built-in function that represents a logical separator of function arguments.
     pub const SEP: Symbol = State::SEP;
+    /// The built-in function that represents an optional pattern.
+    pub const OPT: Symbol = State::OPT;
+    /// The built-in function that represents an alternative pattern.
+    pub const ALT: Symbol = State::ALT;
     /// The built-in function that represents an abstract derivative.
     pub const DERIVATIVE: Symbol = State::DERIVATIVE;
     /// The constant `𝑒`, the base of the natural logarithm, approximately `2.7182`.
@@ -1419,6 +1423,23 @@ impl Symbol {
     /// ```
     pub fn is_positive(&self) -> bool {
         self.is_positive
+    }
+
+    /// Turn a wildcard symbol into an optional wildcard which will match a default value if the wildcard is not matched.
+    /// Identical to wrapping `x_` in `opt(x_)`.
+    ///
+    /// # Examples
+    ///
+    /// ```
+    /// use symbolica::prelude::*;
+    ///
+    /// let b_ = symbol!("b_");
+    /// let p_ = symbol!("p_").optional();
+    /// let result = parse!("x").replace(b_.pow(p_)).with(1);
+    /// assert_eq!(result, 1);
+    /// ```
+    pub fn optional(&self) -> Atom {
+        Symbol::OPT.call(self)
     }
 
     /// Returns `true` iff this identifier is a hardcoded definition by Symbolica.

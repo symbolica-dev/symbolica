@@ -244,9 +244,15 @@ impl State {
         Symbol::raw_fn(12, 0, false, false, false, false, true, true, false, true);
     pub(crate) const SEP: Symbol =
         Symbol::raw_fn(13, 0, false, false, false, false, true, true, true, true);
+    pub(crate) const OPT: Symbol = Symbol::raw_fn(
+        14, 0, false, false, false, false, false, false, false, false,
+    );
+    pub(crate) const ALT: Symbol = Symbol::raw_fn(
+        15, 0, false, false, false, false, false, false, false, false,
+    );
 
     /// The list of built-in symbols.
-    pub const BUILTIN_SYMBOL_NAMES: [&'static str; 14] = [
+    pub const BUILTIN_SYMBOL_NAMES: [&'static str; 16] = [
         "arg",
         "coeff",
         "exp",
@@ -261,10 +267,12 @@ impl State {
         Symbol::E_STR,
         Symbol::PI_STR,
         Symbol::SEP_STR,
+        "opt",
+        "alt",
     ];
 
     /// The list of built-in symbol names and their aliases.
-    pub const BUILTIN_NAMES_AND_ALIASES: [&'static str; 15] = [
+    pub const BUILTIN_NAMES_AND_ALIASES: [&'static str; 18] = [
         "arg",
         "coeff",
         "exp",
@@ -279,11 +287,14 @@ impl State {
         Symbol::E_STR,
         Symbol::PI_STR,
         Symbol::SEP_STR,
+        "opt",
+        "alt",
+        "euler_e",
         "pi",
     ];
 
     /// The list of built-in symbols.
-    pub const BUILTIN_SYMBOLS: [Symbol; 14] = [
+    pub const BUILTIN_SYMBOLS: [Symbol; 16] = [
         Self::ARG,
         Self::COEFF,
         Self::EXP,
@@ -298,6 +309,8 @@ impl State {
         Self::E,
         Self::PI,
         Self::SEP,
+        Self::OPT,
+        Self::ALT,
     ];
 
     pub(crate) fn is_builtin_name<S: AsRef<str>>(&self, str: S) -> bool {
@@ -321,7 +334,10 @@ impl State {
             data.custom_evaluation = builtin_constant_evaluation(symbol);
 
             self.builtin_symbols.insert((*name).into());
-            if symbol == Self::PI {
+            if symbol == Self::E {
+                data.aliases = vec!["symbolica::euler_e".to_owned()];
+                self.builtin_symbols.insert("euler_e".into());
+            } else if symbol == Self::PI {
                 data.aliases = vec!["symbolica::pi".to_owned()];
                 self.builtin_symbols.insert("pi".into());
             }
