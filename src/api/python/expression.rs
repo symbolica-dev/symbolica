@@ -1434,10 +1434,16 @@ impl PythonTransformer {
         })))
     }
 
-    /// Create a transformer that factors the expression over the rationals.
-    pub fn factor(&self) -> PyResult<PythonTransformer> {
-        self.append_transformer(Transformer::Map(Box::new(|i, _state, o| {
-            *o = i.factor();
+    /// Create a transformer that factors the expression over the rationals, or over the
+    /// complex rationals if `complex` is set to `True` or if an `i` is present in the expression.
+    #[pyo3(signature = (complex = false))]
+    pub fn factor(&self, complex: bool) -> PyResult<PythonTransformer> {
+        self.append_transformer(Transformer::Map(Box::new(move |i, _state, o| {
+            *o = if complex {
+                i.factor_complex()
+            } else {
+                i.factor()
+            };
             Ok(())
         })))
     }
@@ -6199,7 +6205,8 @@ impl PythonExpression {
         Ok(self.expr.cancel().into())
     }
 
-    /// Factor the expression over the rationals.
+    /// Factor the expression over the rationals, or over the
+    /// complex rationals if `complex` is set to `True` or if an `i` is present in the expression.
     ///
     /// Examples
     /// --------
@@ -6208,8 +6215,19 @@ impl PythonExpression {
     /// >>> p = E('(6 + x)/(7776 + 6480*x + 2160*x^2 + 360*x^3 + 30*x^4 + x^5)')
     /// >>> print(p.factor())
     /// (x+6)**-4
-    pub fn factor(&self) -> PyResult<PythonExpression> {
-        Ok(self.expr.factor().into())
+    ///
+    /// Parameters
+    /// ----------
+    /// complex: bool
+    ///     If `True`, factor over the complex rationals.
+    #[pyo3(signature = (complex = false))]
+    pub fn factor(&self, complex: bool) -> PyResult<PythonExpression> {
+        Ok(if complex {
+            self.expr.factor_complex()
+        } else {
+            self.expr.factor()
+        }
+        .into())
     }
 
     /// Convert the expression to a polynomial, optionally, with the variables and the ordering specified in `vars`.

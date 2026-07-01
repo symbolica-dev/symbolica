@@ -2803,9 +2803,9 @@ class Expression:
         >>> print(p.cancel())  # 1+(y+1)**10/(x+1)
         """
 
-    def factor(self) -> Expression:
+    def factor(self, complex: bool = False) -> Expression:
         """
-        Factor the expression over the rationals.
+        Factor the expression over the rationals, or over the complex rationals if `complex` is set to `True` or if an `i` is present in the expression.
 
         Examples
         --------
@@ -2813,6 +2813,11 @@ class Expression:
         >>> from symbolica import *
         >>> p = E('(6 + x)/(7776 + 6480*x + 2160*x^2 + 360*x^3 + 30*x^4 + x^5)')
         >>> print(p.factor())  # (x+6)**-4
+
+        Parameters
+        ----------
+        complex: bool
+            If `True`, factor over the complex rationals.
         """
 
     @overload
@@ -4725,9 +4730,9 @@ class Transformer:
         Any non-canceling parts of the expression will not be rewritten.
         """
 
-    def factor(self) -> Transformer:
+    def factor(self, complex: bool = False) -> Transformer:
         """
-        Create a transformer that factors the expression over the rationals.
+        Create a transformer that factors the expression over the rationals, or over the complex rationals if `complex` is set to `True` or if an `i` is present in the expression.
         """
 
     def series(

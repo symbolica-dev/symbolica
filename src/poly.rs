@@ -2081,6 +2081,19 @@ impl<R: Ring, E: PositiveExponent> RationalPolynomial<R, E> {
         Workspace::get_local().with(|ws| self.to_expression_with_map(ws, &HashMap::default(), out));
     }
 
+    pub fn to_expression_with_coeff_map<F: Fn(&R, &R::Element, &mut Atom) + Clone>(
+        &self,
+        f: F,
+    ) -> Atom {
+        let mut num = Atom::default();
+        self.numerator
+            .to_expression_with_coeff_map_into(f.clone(), &mut num);
+        let mut den = Atom::default();
+        self.denominator
+            .to_expression_with_coeff_map_into(f, &mut den);
+        num / den
+    }
+
     /// Convert from a rational polynomial to an atom. The `map` maps all
     /// temporary variables back to atoms.
     pub(crate) fn to_expression_with_map(
