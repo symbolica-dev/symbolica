@@ -2221,6 +2221,20 @@ impl<T: AtomCore> PartialEq<T> for Atom {
     }
 }
 
+impl<T: AtomCore> PartialOrd<T> for AtomView<'_> {
+    #[inline]
+    fn partial_cmp(&self, other: &T) -> Option<Ordering> {
+        Some(self.cmp(&other.as_atom_view()))
+    }
+}
+
+impl<T: AtomCore> PartialOrd<T> for Atom {
+    #[inline]
+    fn partial_cmp(&self, other: &T) -> Option<Ordering> {
+        Some(self.as_view().cmp(&other.as_atom_view()))
+    }
+}
+
 macro_rules! impl_atom_eq_for_symbol {
     ($rhs:ty, $symbol:expr) => {
         impl PartialEq<$rhs> for AtomView<'_> {
@@ -2238,6 +2252,22 @@ macro_rules! impl_atom_eq_for_symbol {
                 self.as_view() == other.as_view()
             }
         }
+
+        impl PartialOrd<$rhs> for AtomView<'_> {
+            #[inline]
+            fn partial_cmp(&self, other: &$rhs) -> Option<Ordering> {
+                let other = InlineVar::new($symbol(other));
+                Some(self.cmp(&other.as_view()))
+            }
+        }
+
+        impl PartialOrd<$rhs> for Atom {
+            #[inline]
+            fn partial_cmp(&self, other: &$rhs) -> Option<Ordering> {
+                let other = InlineVar::new($symbol(other));
+                Some(self.as_view().cmp(&other.as_view()))
+            }
+        }
     };
 }
 
@@ -2249,6 +2279,14 @@ impl PartialEq<Symbol> for &Atom {
     fn eq(&self, other: &Symbol) -> bool {
         let other = InlineVar::new(*other);
         self.as_view() == other.as_view()
+    }
+}
+
+impl PartialOrd<Symbol> for &Atom {
+    #[inline]
+    fn partial_cmp(&self, other: &Symbol) -> Option<Ordering> {
+        let other = InlineVar::new(*other);
+        Some(self.as_view().cmp(&other.as_view()))
     }
 }
 
@@ -2279,6 +2317,12 @@ impl_ref_atom_eq!(
 fn eq_atom_num<T: Into<Coefficient>>(lhs: AtomView<'_>, rhs: T) -> bool {
     let rhs = Atom::num(rhs);
     lhs == rhs.as_view()
+}
+
+#[inline]
+fn cmp_atom_num<T: Into<Coefficient>>(lhs: AtomView<'_>, rhs: T) -> Ordering {
+    let rhs = Atom::num(rhs);
+    lhs.cmp(&rhs.as_view())
 }
 
 macro_rules! impl_atom_eq_for_num {
@@ -2316,6 +2360,41 @@ macro_rules! impl_atom_eq_for_num {
                 #[inline]
                 fn eq(&self, other: &$ty) -> bool {
                     eq_atom_num(self.as_view(), ($num)(other))
+                }
+            }
+
+            impl PartialOrd<$ty> for AtomView<'_> {
+                #[inline]
+                fn partial_cmp(&self, other: &$ty) -> Option<Ordering> {
+                    Some(cmp_atom_num(*self, ($num)(other)))
+                }
+            }
+
+            impl PartialOrd<&$ty> for AtomView<'_> {
+                #[inline]
+                fn partial_cmp(&self, other: &&$ty) -> Option<Ordering> {
+                    Some(cmp_atom_num(*self, ($ref_num)(other)))
+                }
+            }
+
+            impl PartialOrd<$ty> for Atom {
+                #[inline]
+                fn partial_cmp(&self, other: &$ty) -> Option<Ordering> {
+                    Some(cmp_atom_num(self.as_view(), ($num)(other)))
+                }
+            }
+
+            impl PartialOrd<&$ty> for Atom {
+                #[inline]
+                fn partial_cmp(&self, other: &&$ty) -> Option<Ordering> {
+                    Some(cmp_atom_num(self.as_view(), ($ref_num)(other)))
+                }
+            }
+
+            impl PartialOrd<$ty> for &Atom {
+                #[inline]
+                fn partial_cmp(&self, other: &$ty) -> Option<Ordering> {
+                    Some(cmp_atom_num(self.as_view(), ($num)(other)))
                 }
             }
         )+
@@ -2376,12 +2455,6 @@ impl_atom_eq_for_coefficient!(rug::Integer, rug::Rational);
 impl Ord for AtomView<'_> {
     fn cmp(&self, other: &Self) -> Ordering {
         self.get_data().cmp(other.get_data())
-    }
-}
-
-impl PartialOrd for AtomView<'_> {
-    fn partial_cmp(&self, other: &Self) -> Option<Ordering> {
-        Some(self.cmp(other))
     }
 }
 
@@ -2926,12 +2999,6 @@ impl Hash for Atom {
 impl Ord for Atom {
     fn cmp(&self, other: &Self) -> Ordering {
         self.as_view().cmp(&other.as_view())
-    }
-}
-
-impl PartialOrd for Atom {
-    fn partial_cmp(&self, other: &Self) -> Option<Ordering> {
-        Some(self.cmp(other))
     }
 }
 
@@ -4298,13 +4365,17 @@ mod test {
         assert!(view == &a);
         assert!(view == a.as_view());
         assert!(view == x);
+        assert!(view >= x);
         assert!(a == view);
         assert!(a == &a);
+        assert!(a >= x);
         assert!(&a == view);
+        assert!(&a >= x);
 
         let n = Atom::num(2);
         let n_view = n.as_view();
         let integer = Integer::from(2);
+        let one = Integer::from(1);
         let rational = Rational::from((2, 1));
         let coefficient = Coefficient::from(2);
 
@@ -4319,6 +4390,11 @@ mod test {
         assert!(n == &Integer::from(2));
         assert!(&n == &Integer::from(2));
         assert!(n != 3);
+        assert!(n_view > 1);
+        assert!(n_view > &one);
+        assert!(n > 1);
+        assert!(&n > 1);
+        assert!(n < 3);
     }
 
     #[test]
