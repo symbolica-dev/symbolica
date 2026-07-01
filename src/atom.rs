@@ -4309,7 +4309,7 @@ mod test {
         let x = parse!("v1+f1(v2)");
         assert_eq!(
             format!("{x:#?}"),
-            "AddView { data: [5, 17, 2, 13, 2, 1, 15, 3, 5, 0, 0, 0, 1, 45, 2, 1, 16] }"
+            "AddView { data: [5, 17, 2, 13, 2, 1, 17, 3, 5, 0, 0, 0, 1, 47, 2, 1, 18] }"
         );
         assert_eq!(
             x.get_all_symbols(true),
