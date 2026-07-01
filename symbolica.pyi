@@ -1926,6 +1926,18 @@ class Expression:
             The transformer to bind to the expression.
         """
 
+    def opt(self) -> Expression:
+        """
+        Turn a wildcard `x_` into an optional wildcard which will match a default value if the wildcard is not matched.
+        Equivalent to writing `opt(x_)`.
+
+        Examples
+        --------
+        >>> from symbolica import *
+        >>> x, b_, e_ = S('x', 'b_', 'e_')
+        >>> x.replace(b_**e_.opt(), 1) # 1
+        """
+
     def contains(
         self, a: Transformer | HeldExpression | Expression | int | float | Decimal
     ) -> Condition:

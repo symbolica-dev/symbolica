@@ -2560,8 +2560,12 @@ impl Pattern {
             Pattern::Literal(a) => {
                 out.set_from_view(&a.as_view());
             }
-            Pattern::Wildcard(s, _) => {
-                out.to_var(*s);
+            Pattern::Wildcard(s, optional) => {
+                if *optional {
+                    *out = s.optional();
+                } else {
+                    out.to_var(*s);
+                }
             }
             Pattern::Fn(s, a) => {
                 let mut f = ws.new_atom();
@@ -2610,7 +2614,18 @@ impl Pattern {
 
                 add_h.as_view().normalize(ws, out);
             }
-            Pattern::Alternative(_) => Err("Cannot convert alternative to atom")?,
+            Pattern::Alternative(a) => {
+                let mut f = ws.new_atom();
+                let fun = f.to_fun(Symbol::ALT);
+
+                let mut arg_h = ws.new_atom();
+                for arg in a {
+                    arg.to_atom_impl(ws, &mut arg_h)?;
+                    fun.add_arg(arg_h.as_view());
+                }
+
+                f.as_view().normalize(ws, out);
+            }
             Pattern::Transformer(_) => Err("Cannot convert transformer to atom")?,
         }
 
@@ -3029,17 +3044,18 @@ impl Pattern {
     }
 
     /// Check if the expression `atom` contains a wildcard.
-    fn has_wildcard(atom: AtomView<'_>) -> bool {
+    fn has_wildcard_or_alternative(atom: AtomView<'_>) -> bool {
         match atom {
             AtomView::Num(_) => false,
             AtomView::Var(v) => v.get_wildcard_level() > 0,
             AtomView::Fun(f) => {
-                if f.get_symbol().get_wildcard_level() > 0 {
+                let s = f.get_symbol();
+                if s.get_wildcard_level() > 0 || s == Symbol::ALT {
                     return true;
                 }
 
                 for arg in f {
-                    if Self::has_wildcard(arg) {
+                    if Self::has_wildcard_or_alternative(arg) {
                         return true;
                     }
                 }
@@ -3048,11 +3064,11 @@ impl Pattern {
             AtomView::Pow(p) => {
                 let (base, exp) = p.get_base_exp();
 
-                Self::has_wildcard(base) || Self::has_wildcard(exp)
+                Self::has_wildcard_or_alternative(base) || Self::has_wildcard_or_alternative(exp)
             }
             AtomView::Mul(m) => {
                 for child in m {
-                    if Self::has_wildcard(child) {
+                    if Self::has_wildcard_or_alternative(child) {
                         return true;
                     }
                 }
@@ -3060,7 +3076,7 @@ impl Pattern {
             }
             AtomView::Add(a) => {
                 for child in a {
-                    if Self::has_wildcard(child) {
+                    if Self::has_wildcard_or_alternative(child) {
                         return true;
                     }
                 }
@@ -3128,7 +3144,7 @@ impl Pattern {
         }
 
         // split up Add and Mul for literal patterns as well so that x+y can match to x+y+z
-        if Self::has_wildcard(atom)
+        if Self::has_wildcard_or_alternative(atom)
             || is_top_layer && matches!(atom, AtomView::Mul(_) | AtomView::Add(_))
         {
             match atom {
@@ -3146,7 +3162,16 @@ impl Pattern {
                         args.sort_unstable_by(sort_on_specificity);
                     }
 
-                    Pattern::Fn(name, args)
+                    if name == Symbol::ALT {
+                        Pattern::Alternative(args)
+                    } else if name == Symbol::OPT
+                        && args.len() == 1
+                        && let Pattern::Wildcard(w, _) = &args[0]
+                    {
+                        Pattern::Wildcard(w.clone(), true)
+                    } else {
+                        Pattern::Fn(name, args)
+                    }
                 }
                 AtomView::Pow(p) => {
                     let (base, exp) = p.get_base_exp();
@@ -6874,6 +6899,8 @@ mod test {
     fn alternative() {
         let pat = (parse!("x").to_pattern() | parse!("y").to_pattern())
             * crate::parse!("x_").to_pattern();
+
+        assert_eq!(crate::parse!("alt(x,y)*x_"), pat.to_atom().unwrap());
 
         let rhs = crate::parse!("f(x_)").to_pattern();
 

@@ -4707,6 +4707,26 @@ impl PythonExpression {
         Ok(Pattern::Transformer(Box::new((Some(self.expr.to_pattern()), t.chain))).into())
     }
 
+    /// Turn a wildcard into an optional wildcard which will match a default value if the wildcard is not matched.
+    ///
+    /// Examples
+    /// --------
+    /// >>> from symbolica import *
+    /// >>> x, b_, e_ = S('x', 'b_', 'e_')
+    /// >>> x.replace(b_**e_.opt(), 1) # 1
+    pub fn opt(&self) -> PyResult<PythonExpression> {
+        if let AtomView::Var(s) = self.expr.as_view()
+            && let s = s.get_symbol()
+            && s.get_wildcard_level() > 0
+        {
+            Ok(s.optional().into())
+        } else {
+            Err(exceptions::PyValueError::new_err(
+                "Cannot convert non-wildcard symbol to optional",
+            ))
+        }
+    }
+
     /// Get the `idx`th component of the expression.
     ///
     /// Parameters
