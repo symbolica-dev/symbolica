@@ -5965,7 +5965,10 @@ impl<'a, 'b> SubSliceIterator<'a, 'b> {
                             }
 
                             if self.ordered_gapless && tried_first_option {
-                                break;
+                                // cyclic sequences can start at any position
+                                if !self.cyclic || self.used_flag.iter().any(|x| *x) {
+                                    break;
+                                }
                             }
 
                             if self.used_flag[k]
@@ -6843,6 +6846,12 @@ mod test {
         // function shift
         let expr = parse!("fc1(f1(1),f1(2),f1(3))");
         let p = parse!("fc1(f1(v1_),f1(2),f1(3))");
+        let expr = expr.replace(p).with(&rhs);
+        assert_eq!(expr, 1);
+
+        // cross match
+        let expr = parse!("fc1(1,2,3)*f(2)");
+        let p = parse!("fc1(v1_,v2___)*f(v1_)");
         let expr = expr.replace(p).with(&rhs);
         assert_eq!(expr, 1);
     }
