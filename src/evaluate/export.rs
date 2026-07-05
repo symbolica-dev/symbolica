@@ -112,7 +112,7 @@ impl<T: ExportNumber + SingleFloat> ExportNumber for Complex<T> {
             self.re.export_wrapped_with(wrapper)
         } else {
             format!(
-                "{}, {}",
+                "{wrapper}({}, {})",
                 self.re.export_wrapped_with(wrapper),
                 self.im.export_wrapped_with(wrapper)
             )
