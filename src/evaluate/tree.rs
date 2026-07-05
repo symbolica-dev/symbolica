@@ -4024,6 +4024,25 @@ impl<'a> AtomView<'a> {
                         args.push(arg.evaluate_impl(map, cache, binary_prec)?);
                     }
 
+                    if args.is_empty() && eval.has_constant_evaluator() {
+                        let val = T::try_from_complex_float(
+                            eval.evaluate_constant(&tags, binary_prec).map_err(|e| {
+                                EvaluationError::EvaluationFailed {
+                                    expression: self.to_owned(),
+                                    reason: e,
+                                }
+                            })?,
+                        )
+                        .map_err(|_| {
+                            EvaluationError::MissingEvaluator {
+                                expression: self.to_owned(),
+                                eval_type: std::any::type_name::<T>().to_string(),
+                            }
+                        })?;
+                        cache.insert(*self, val.clone());
+                        return Ok(val);
+                    }
+
                     if let Some(eval_fun) = T::resolve_function(&tags, eval) {
                         let val = (eval_fun)(&args);
                         cache.insert(*self, val.clone());
