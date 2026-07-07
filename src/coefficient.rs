@@ -1476,40 +1476,74 @@ impl CoefficientView<'_> {
             return (Coefficient::one(), self.to_owned(), other.to_owned());
         }
 
+        fn simplify_perfect_square(mut base: Rational, mut exp: Rational) -> (Rational, Rational) {
+            if let Some(d) = exp.denominator_ref().to_i64() {
+                if d > 1 && d < u32::MAX as i64 {
+                    assert!(!base.numerator_ref().is_negative());
+                    let root_num = base.numerator_ref().root(d as u32);
+                    if base.numerator_ref() > &1 && root_num.pow(d as u64) == *base.numerator_ref()
+                    {
+                        base = Rational::from((root_num, base.denominator().clone()));
+                        exp = Rational::from(exp.numerator());
+                    } else if base.denominator_ref() > &1 {
+                        let root_den = base.denominator_ref().root(d as u32);
+                        if root_den.pow(d as u64) == *base.denominator_ref() {
+                            base = Rational::from((base.numerator().clone(), root_den));
+                            exp = Rational::from(exp.numerator());
+                        }
+                    }
+                }
+            }
+
+            (base, exp)
+        }
+
         fn rat_pow(
             mut base: Rational,
             mut exp: Rational,
         ) -> (Complex<Rational>, Rational, Rational) {
-            if base.is_negative() && !exp.is_integer() {
+            if base.is_one() {
+                (Rational::one().into(), Rational::one(), Rational::one())
+            } else if base.is_negative() && !exp.is_integer() {
                 let pow = exp.numerator() / exp.denominator();
                 let rest = exp.numerator() - &pow * exp.denominator();
 
-                let base_integer_pow = if pow.is_negative() {
+                let mut base_integer_pow = if pow.is_negative() {
                     base.inv().pow(pow.to_i64().unwrap().unsigned_abs())
                 } else {
                     base.pow(pow.to_i64().unwrap().unsigned_abs())
                 };
 
                 if exp.denominator_ref() == &2 {
+                    (base, exp) = simplify_perfect_square(base.abs(), exp);
+
                     (
                         if rest.is_negative() {
                             Complex::new(Rational::zero(), -base_integer_pow)
                         } else {
                             Complex::new(Rational::zero(), base_integer_pow)
                         },
-                        base.abs(),
+                        base,
                         Rational::from_int_unchecked(rest, exp.denominator()),
                     )
                 } else {
+                    let (new_base, new_exp) = simplify_perfect_square(base.abs(), exp.clone());
+
+                    if new_exp.is_integer() {
+                        // integer extraction worked
+                        base_integer_pow *= new_base;
+                        base = (-1).into();
+                    }
+
                     (
                         base_integer_pow.into(),
                         base,
                         Rational::from_int_unchecked(rest, exp.denominator()),
                     )
                 }
-            } else if base.is_one() {
-                (Rational::one().into(), Rational::one(), Rational::one())
             } else {
+                (base, exp) = simplify_perfect_square(base, exp);
+
                 if exp < 0 {
                     base = base.inv();
                     exp = -exp;
@@ -3349,6 +3383,14 @@ mod test {
         assert_eq!(parse!("(-2)^(-5/3)"), parse!("-1/2*(-2)^(-2/3)"));
         assert_eq!(parse!("(-2)^(-5/2)"), parse!("-1i/4*(1/2)^(1/2)"));
         assert_eq!(parse!("(2)^(-5/2)"), parse!("(1/32)^(1/2)"));
+        assert_eq!(parse!("(4)^(1/2)"), parse!("2"));
+        assert_eq!(parse!("(1/4)^(1/2)"), parse!("1/2"));
+        assert_eq!(parse!("(-1/4)^(1/2)"), parse!("1i/2"));
+        assert_eq!(parse!("(27)^(1/3)"), parse!("3"));
+        assert_eq!(parse!("(-1/27)^(1/3)"), parse!("1/3*(-1)^(1/3)"));
+        assert_eq!(parse!("(27)^(2/3)"), parse!("9"));
+        assert_eq!(parse!("(-2)^(3)"), parse!("-8"));
+        assert_eq!(parse!("(1)^(1/2)"), parse!("1"));
     }
 
     #[test]
