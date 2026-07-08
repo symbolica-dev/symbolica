@@ -4801,7 +4801,14 @@ impl<'a, 'b> WrappedMatchStack<'a, 'b> {
         for (rk, rv) in self.stack.stack.iter() {
             if *rk == identifier {
                 return match rv {
-                    Match::Single(_) => (1, Some(1)),
+                    Match::Single(a) => (
+                        if optional && (*a == ZERO.as_view() || *a == ONE.as_view()) {
+                            0
+                        } else {
+                            1
+                        },
+                        Some(1),
+                    ),
                     Match::Multiple(slice_type, slice) => {
                         match slice_type {
                             SliceType::Empty => (0, Some(0)),
@@ -6549,12 +6556,11 @@ mod test {
     }
 
     #[test]
-    fn optional_bug() {
-        let x = parse!("2^x");
-        let pattern = parse!("(b_*2^x)^n_")
+    fn repeated_optional() {
+        let x = parse!("x*y");
+        let pattern = parse!("(a_+x)*(a_+y)")
             .to_pattern()
-            .set_optional(symbol!("b_"))
-            .set_optional(symbol!("n_"));
+            .set_optional(symbol!("a_"));
         let r = x.replace(pattern).with(1);
         assert_eq!(r, 1);
     }
