@@ -4960,6 +4960,7 @@ struct AlternativeIter<'a, 'b> {
     variant_index: usize,
     match_stack_len: Option<usize>,
     target: AtomView<'a>,
+    structural_impossible: bool,
 }
 
 impl<'a, 'b> AlternativeIter<'a, 'b> {
@@ -4972,6 +4973,7 @@ impl<'a, 'b> AlternativeIter<'a, 'b> {
             variant_index: 0,
             match_stack_len: None,
             target: AtomView::ZERO,
+            structural_impossible: true,
         }
     }
 
@@ -4979,6 +4981,7 @@ impl<'a, 'b> AlternativeIter<'a, 'b> {
         self.variant_index = 0;
         self.match_stack_len = None;
         self.target = target;
+        self.structural_impossible = true;
     }
 
     fn clear_current(&mut self, match_stack: &mut WrappedMatchStack<'a, 'b>) {
@@ -4987,7 +4990,7 @@ impl<'a, 'b> AlternativeIter<'a, 'b> {
         }
     }
 
-    fn next(&mut self, match_stack: &mut WrappedMatchStack<'a, 'b>) -> Option<usize> {
+    fn next(&mut self, match_stack: &mut WrappedMatchStack<'a, 'b>) -> Result<usize, MatchError> {
         while self.variant_index < self.variants.len() {
             let variant_index = self.variant_index;
 
@@ -4997,15 +5000,27 @@ impl<'a, 'b> AlternativeIter<'a, 'b> {
                 self.variants[variant_index].set_new_target_complete(self.target, match_stack);
             }
 
-            if self.variants[variant_index].next(match_stack).is_some() {
-                return self.match_stack_len;
+            match self.variants[variant_index].next_result(match_stack) {
+                Ok(_) => {
+                    self.structural_impossible = false;
+                    return Ok(self.match_stack_len.unwrap());
+                }
+                Err(e) => {
+                    if !matches!(e, MatchError::StructurallyImpossible) {
+                        self.structural_impossible = false;
+                    }
+                }
             }
 
             self.clear_current(match_stack);
             self.variant_index += 1;
         }
 
-        None
+        if self.structural_impossible {
+            Err(MatchError::StructurallyImpossible)
+        } else {
+            Err(MatchError::NoMoreMatches)
+        }
     }
 }
 
@@ -5053,6 +5068,7 @@ struct SliceAtomIter<'a, 'b> {
     iter: SubSliceIterator<'a, 'b>,
     single_atom_fallback: Option<AtomView<'a>>,
     used_flags: Vec<bool>,
+    match_stack_len: Option<usize>,
 }
 
 impl<'a, 'b> SliceAtomIter<'a, 'b> {
@@ -5063,6 +5079,7 @@ impl<'a, 'b> SliceAtomIter<'a, 'b> {
             iter: SubSliceIterator::new(pat_list, slice_type),
             single_atom_fallback: None,
             used_flags: Vec::new(),
+            match_stack_len: None,
         }
     }
 
@@ -5073,6 +5090,7 @@ impl<'a, 'b> SliceAtomIter<'a, 'b> {
         force_complete: bool,
     ) {
         self.target = target;
+        self.match_stack_len = Some(match_stack.len());
         self.single_atom_fallback = self
             .iter
             .can_match_list_atom_as_single_with_optional(self.target)
@@ -5103,6 +5121,7 @@ impl<'a, 'b> SliceAtomIter<'a, 'b> {
         };
 
         if let Some(target) = self.single_atom_fallback.take() {
+            self.clear_current(match_stack);
             let complete = self.iter.complete;
             self.iter.set_single_atom_target(target, complete);
 
@@ -5113,6 +5132,7 @@ impl<'a, 'b> SliceAtomIter<'a, 'b> {
                     Ok((new_stack_len, Some(&self.used_flags)))
                 }
                 Err(fallback_error) => {
+                    self.clear_current(match_stack);
                     if matches!(primary_error, MatchError::StructurallyImpossible)
                         && matches!(fallback_error, MatchError::StructurallyImpossible)
                     {
@@ -5123,12 +5143,15 @@ impl<'a, 'b> SliceAtomIter<'a, 'b> {
                 }
             }
         } else {
+            self.clear_current(match_stack);
             Err(primary_error)
         }
     }
 
     fn clear_current(&mut self, match_stack: &mut WrappedMatchStack<'a, 'b>) {
         if let Some(old_match_stack_len) = self.iter.matches.first().copied() {
+            match_stack.truncate(old_match_stack_len);
+        } else if let Some(old_match_stack_len) = self.match_stack_len {
             match_stack.truncate(old_match_stack_len);
         }
     }
@@ -5257,10 +5280,7 @@ impl<'a, 'b> AtomMatcher<'a, 'b> {
             AtomMatcher::Wildcard(iter) => iter.next(target, match_stack),
             AtomMatcher::Slice(iter) => iter.next(match_stack),
             AtomMatcher::Function(iter) => iter.next(target, match_stack).map(|len| (len, None)),
-            AtomMatcher::Alternative(iter) => iter
-                .next(match_stack)
-                .map(|len| (len, None))
-                .ok_or(MatchError::NoMoreMatches),
+            AtomMatcher::Alternative(iter) => iter.next(match_stack).map(|len| (len, None)),
         }
     }
 
