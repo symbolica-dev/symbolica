@@ -1508,7 +1508,7 @@ impl<R: EuclideanDomain + PolynomialGCD<E>, E: PositiveExponent> MultivariatePol
 
         if let Some(g) = self.simple_gcd(b) {
             debug!("Simple {} ", g);
-            return g;
+            return PolynomialGCD::normalize(g);
         }
 
         // a and b are only copied when needed
@@ -3662,7 +3662,9 @@ impl<E: PositiveExponent> PolynomialGCD<E> for RationalField {
         let a_int = a.map_coeff(|c| a.ring.div(c, &content).numerator(), Z);
         let b_int = b.map_coeff(|c| b.ring.div(c, &content).numerator(), Z);
 
-        PolynomialGCD::gcd(&a_int, &b_int, vars, bounds).map_coeff(|c| c.to_rational(), Q)
+        PolynomialGCD::gcd(&a_int, &b_int, vars, bounds)
+            .map_coeff(|c| c.to_rational(), Q)
+            .make_monic()
     }
 
     fn get_gcd_var_bounds(
@@ -3680,7 +3682,7 @@ impl<E: PositiveExponent> PolynomialGCD<E> for RationalField {
     }
 
     fn normalize(a: MultivariatePolynomial<Self, E>) -> MultivariatePolynomial<Self, E> {
-        if a.lcoeff().is_negative() { -a } else { a }
+        a.make_monic()
     }
 }
 
@@ -4146,11 +4148,7 @@ impl<E: PositiveExponent> PolynomialGCD<E> for AlgebraicExtension<RationalField>
     }
 
     fn normalize(a: MultivariatePolynomial<Self, E>) -> MultivariatePolynomial<Self, E> {
-        if a.lcoeff().poly.lcoeff().is_negative() {
-            -a
-        } else {
-            a
-        }
+        a.make_monic()
     }
 }
 
