@@ -384,6 +384,20 @@ impl<'a> AtomView<'a> {
     /// Write the expression as a sum of terms with minimal denominators.
     pub fn apart_with_ws_into(&self, x: &Indeterminate, ws: &Workspace, out: &mut Atom) {
         if self.has_complex_coefficients() {
+            macro_rules! map_coeff {
+                ($p: expr, $f: expr) => {
+                    $p.map_coeff(
+                        |c| {
+                            Complex::new(
+                                c.poly.get_constant(),
+                                c.poly.coefficient(&[1]).unwrap_or(Rational::zero()),
+                            )
+                        },
+                        $f.clone(),
+                    )
+                };
+            }
+
             let f = AlgebraicExtension::new_complex(Q);
             let f2 = FloatField::from_rep(Complex::new(Rational::zero(), Rational::one()));
             if let Ok(poly) = self.try_to_rational_polynomial::<_, _, u32>(&f, &f, None) {
@@ -392,31 +406,30 @@ impl<'a> AtomView<'a> {
                     let add = a.to_add();
 
                     let mut numa = ws.new_atom();
+                    let mut num_dena = ws.new_atom();
                     let mut dena = ws.new_atom();
-                    for x in poly.apart(v) {
-                        let num = x.numerator.map_coeff(
-                            |c| {
-                                Complex::new(
-                                    c.poly.get_constant(),
-                                    c.poly.coefficient(&[1]).unwrap_or(Rational::zero()),
-                                )
-                            },
-                            f2.clone(),
-                        );
-
-                        let den = x.denominator.map_coeff(
-                            |c| {
-                                Complex::new(
-                                    c.poly.get_constant(),
-                                    c.poly.coefficient(&[1]).unwrap_or(Rational::zero()),
-                                )
-                            },
-                            f2.clone(),
-                        );
+                    let mut den_dena = ws.new_atom();
+                    for (numerator, denominator, exponent) in poly.apart_factored_denominators(v) {
+                        let num = map_coeff!(numerator.numerator, f2);
+                        let num_den = map_coeff!(numerator.denominator, f2);
+                        let den = map_coeff!(denominator.numerator, f2);
+                        let den_den = map_coeff!(denominator.denominator, f2);
 
                         num.to_expression_into(&mut numa);
+                        num_den.to_expression_into(&mut num_dena);
                         den.to_expression_into(&mut dena);
-                        add.extend(numa.as_view().div(dena.as_view()).as_view());
+                        den_den.to_expression_into(&mut den_dena);
+
+                        let numerator = numa.as_view().div_no_norm(ws, num_dena.as_view());
+                        let denominator = dena.as_view().div_no_norm(ws, den_dena.as_view());
+                        let exponent = ws.new_num(Integer::from(exponent));
+                        let denominator = denominator.as_view().pow_no_norm(ws, exponent.as_view());
+                        add.extend(
+                            numerator
+                                .as_view()
+                                .div_no_norm(ws, denominator.as_view())
+                                .as_view(),
+                        );
                     }
 
                     add.as_view().normalize(ws, out);
@@ -431,10 +444,19 @@ impl<'a> AtomView<'a> {
                 let mut a = ws.new_atom();
                 let add = a.to_add();
 
-                let mut a = ws.new_atom();
-                for x in poly.apart(v) {
-                    x.to_expression_into(&mut a);
-                    add.extend(a.as_view());
+                let mut numa = ws.new_atom();
+                let mut dena = ws.new_atom();
+                for (numerator, denominator, exponent) in poly.apart_factored_denominators(v) {
+                    numerator.to_expression_into(&mut numa);
+                    denominator.to_expression_into(&mut dena);
+
+                    let exponent = ws.new_num(Integer::from(exponent));
+                    let denominator = dena.as_view().pow_no_norm(ws, exponent.as_view());
+                    add.extend(
+                        numa.as_view()
+                            .div_no_norm(ws, denominator.as_view())
+                            .as_view(),
+                    );
                 }
 
                 add.as_view().normalize(ws, out);
