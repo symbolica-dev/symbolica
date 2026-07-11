@@ -1179,8 +1179,24 @@ where
 {
     /// Compute the partial fraction decomposition of the rational polynomial in `var`.
     pub fn apart(&self, var: usize) -> Vec<Self> {
+        self.apart_factored_denominators(var)
+            .into_iter()
+            .map(|(numerator, denominator, exponent)| {
+                &numerator / &denominator.pow(exponent as u64)
+            })
+            .collect()
+    }
+
+    /// Compute the partial fraction decomposition of the rational polynomial in `var`,
+    /// returning tuples `(numerator, denominator, exponent)` representing terms of the form
+    /// `numerator / denominator^exponent`.
+    ///
+    /// The denominator in every proper fraction is one of the irreducible factors found while
+    /// decomposing the original denominator. It is not expanded to its indicated power or
+    /// recovered by factoring the resulting rational polynomial again.
+    pub fn apart_factored_denominators(&self, var: usize) -> Vec<(Self, Self, usize)> {
         if self.denominator.degree(var) == E::zero() {
-            return vec![self.clone()];
+            return vec![(self.clone(), self.numerator.one().into(), 1)];
         }
 
         let rat_field = RationalPolynomialField::from_poly(&self.numerator);
@@ -1198,14 +1214,13 @@ where
                 .map_coeff(|c| c.clone().into(), rat_field.clone());
             let (q, r) = n.quot_rem(&d);
             if !q.is_zero() {
-                hs.push(Self::from_univariate(q));
+                hs.push((Self::from_univariate(q), self.numerator.one().into(), 1));
             }
             r
         } else {
             n
         };
 
-        // partial fraction the denominator
         let mut fs = self
             .denominator
             .factor()
@@ -1250,10 +1265,11 @@ where
             let exp = d.p_adic_expansion(&p);
             let p_rat = Self::from_univariate(p);
             for (pow, d_exp) in exp.into_iter().enumerate() {
-                hs.push(
-                    &(&Self::from_univariate(d_exp) / &p_rat.pow(p_pow as u64 - pow as u64))
-                        * &constant,
-                );
+                hs.push((
+                    &Self::from_univariate(d_exp) * &constant,
+                    p_rat.clone(),
+                    p_pow - pow,
+                ));
             }
         }
 
@@ -1654,13 +1670,15 @@ mod test {
     use crate::{
         atom::AtomCore,
         domains::{
-            InternalOrdering, Ring,
+            InternalOrdering, Ring, SelfRing,
             finite_field::{ToFiniteField, Zp},
             integer::Z,
             rational::Q,
             rational_polynomial::RationalPolynomial,
         },
-        parse, symbol,
+        parse,
+        poly::factor::Factorize,
+        symbol,
     };
 
     use super::RationalPolynomialField;
@@ -1932,5 +1950,40 @@ mod test {
                 )
             ]
         );
+    }
+
+    #[test]
+    fn apart_preserves_factored_denominators() {
+        let p: RationalPolynomial<_, _> =
+            parse!("(v1^7+v1^3*v2+2*v1+3)/(6*(v1+1)^3*(v1^2+v2+1)^2)")
+                .to_rational_polynomial::<_, _, u8>(&Q, &Z, None);
+
+        let terms = p.apart_factored_denominators(0);
+        let mut reconstructed: RationalPolynomial<_, _> = p.numerator.zero().into();
+        for (numerator, denominator, exponent) in &terms {
+            reconstructed = &reconstructed + &(numerator / &denominator.pow(*exponent as u64));
+        }
+
+        assert_eq!(reconstructed, p);
+
+        let denominator_factors = p
+            .denominator
+            .factor()
+            .into_iter()
+            .filter(|(factor, _)| !factor.is_constant())
+            .collect::<Vec<_>>();
+
+        for (_, denominator, exponent) in terms {
+            if denominator.is_one() {
+                continue;
+            }
+
+            let (_, multiplicity) = denominator_factors
+                .iter()
+                .find(|(factor, _)| denominator.numerator == *factor)
+                .expect("partial-fraction denominator should be an original factor");
+            assert!(exponent <= *multiplicity);
+            assert!(denominator.denominator.is_one());
+        }
     }
 }
