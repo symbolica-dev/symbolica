@@ -509,14 +509,10 @@ impl<E: PositiveExponent> Factorize
             return vec![];
         }
 
-        let c = self.content();
-        let stripped = self.clone().div_coeff(&c);
+        let c = self.lcoeff();
+        let stripped = self.clone().make_monic();
 
         let mut factors = vec![];
-
-        if !self.ring.is_one(&c) {
-            factors.push((self.constant(c), 1));
-        }
 
         let fs = stripped.factor_separable();
 
@@ -525,8 +521,8 @@ impl<E: PositiveExponent> Factorize
             factors.append(&mut nf);
         }
 
-        if factors.is_empty() {
-            factors.push((self.one(), 1))
+        if factors.is_empty() || !self.ring.is_one(&c) {
+            factors.insert(0, (self.constant(c), 1));
         }
 
         factors
@@ -551,7 +547,8 @@ impl<E: PositiveExponent> Factorize
 
             let (v, s, g, n) = f.norm_impl();
 
-            let factors = n.factor();
+            let mut factors = n.factor();
+            factors.retain(|(f, _)| !f.is_constant());
 
             if factors.len() == 1 {
                 full_factors.push((f.clone(), *p));
