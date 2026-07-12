@@ -954,12 +954,20 @@ self_cell!(
 impl PythonAtomIterator {
     /// Create a self-referential structure for the iterator.
     pub fn from_expr(expr: PythonExpression) -> PythonAtomIterator {
-        PythonAtomIterator::new(expr.expr.clone(), |expr| match expr.as_view() {
+        PythonAtomIterator::new(expr.expr, |expr| match expr.as_view() {
             AtomView::Add(a) => a.iter(),
             AtomView::Mul(m) => m.iter(),
             AtomView::Fun(f) => f.iter(),
             AtomView::Pow(p) => p.iter(),
             _ => unreachable!(),
+        })
+    }
+
+    /// Create a self-referential structure for the iterator.
+    pub fn term_iter(expr: PythonExpression) -> PythonAtomIterator {
+        PythonAtomIterator::new(expr.expr, |expr| match expr.as_view() {
+            AtomView::Add(a) => a.iter(),
+            e => ListIterator::from_one(e),
         })
     }
 }

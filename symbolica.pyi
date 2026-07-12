@@ -2417,6 +2417,11 @@ class Expression:
         Create an iterator over all subexpressions of the expression.
         """
 
+    def terms(self) -> Iterator[Expression]:
+        """
+        Create an iterator over all terms in the expression.
+        """
+
     def __getitem__(self, idx: int) -> Expression:
         """
         Get the `idx`th component of the expression.

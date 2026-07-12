@@ -5531,6 +5531,11 @@ impl PythonExpression {
         Ok(PythonAtomIterator::from_expr(self.clone()))
     }
 
+    /// Iterator over all terms in the expression.
+    pub fn terms(&self) -> PythonAtomIterator {
+        PythonAtomIterator::term_iter(self.clone())
+    }
+
     /// Map the transformations to every term in the expression.
     /// The execution happens in parallel using `n_cores`.
     ///
