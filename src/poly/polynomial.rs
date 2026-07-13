@@ -604,6 +604,14 @@ impl<F: Ring, E: Exponent, O: MonomialOrder> MultivariatePolynomial<F, E, O> {
     #[inline(always)]
     pub fn unify_variables(&mut self, other: &mut Self) {
         if self.variables == other.variables {
+            // reduce the number of equal variable copies
+            if self.variables.as_ptr() != other.variables.as_ptr() {
+                if self.variables.as_ptr() < other.variables.as_ptr() {
+                    other.variables = self.variables.clone();
+                } else {
+                    self.variables = other.variables.clone();
+                }
+            }
             return;
         }
 
@@ -777,10 +785,7 @@ impl<F: Ring, E: Exponent, O: MonomialOrder> MultivariatePolynomial<F, E, O> {
         let mut new_exp = vec![E::zero(); l_new * self.nterms()];
 
         if l_old > 0 {
-            for (en, e) in new_exp
-                .chunks_mut(l_new)
-                .zip(self.exponents.chunks(l_old))
-            {
+            for (en, e) in new_exp.chunks_mut(l_new).zip(self.exponents.chunks(l_old)) {
                 en[..l_old].copy_from_slice(e);
             }
         }
