@@ -1758,7 +1758,8 @@ mod test {
         let input = parse!("v1^2/2+v1^3/v4*v2+v3/(1+v4)");
         let out = input.together();
 
-        let ref_out = parse!("(2*v4+2*v4^2)^-1*(2*v3*v4+v1^2*v4+v1^2*v4^2+2*v1^3*v2+2*v1^3*v2*v4)");
+        let ref_out =
+            parse!("1/2*(v4*(1+v4))^-1*(2*v3*v4+v1^2*v4+v1^2*v4^2+2*v1^3*v2+2*v1^3*v2*v4)");
 
         assert_eq!(out, ref_out);
     }
