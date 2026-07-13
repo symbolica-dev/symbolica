@@ -378,6 +378,7 @@ pub fn create_symbolica_module<'a, 'b>(
     m.add_function(wrap_pyfunction!(expression_shorthand, m)?)?;
     m.add_function(wrap_pyfunction!(transformer_shorthand, m)?)?;
     m.add_function(wrap_pyfunction!(poly_shorthand, m)?)?;
+    m.add_function(wrap_pyfunction!(_reconstruct_expression, m)?)?;
 
     m.add_function(wrap_pyfunction!(get_version, m)?)?;
     m.add_function(wrap_pyfunction!(is_licensed, m)?)?;
@@ -1805,6 +1806,11 @@ fn expression_shorthand(
         mode,
         default_namespace,
     )
+}
+
+#[pyfunction]
+fn _reconstruct_expression(state: Vec<u8>) -> PythonExpression {
+    unsafe { Atom::from_raw(state).into() }
 }
 
 /// Create a new transformer that maps an expression.

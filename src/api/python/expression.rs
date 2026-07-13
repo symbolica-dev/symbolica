@@ -1904,6 +1904,7 @@ impl PythonTransformer {
 ///    The built-in function for piecewise-defined expressions. `IF(cond, true_expr, false_expr)` evaluates to `true_expr` if `cond` is non-zero and `false_expr` otherwise.
 #[cfg_attr(feature = "python_stubgen", gen_stub_pyclass)]
 #[pyclass(
+    frozen,
     from_py_object,
     name = "Expression",
     subclass,
@@ -3399,22 +3400,20 @@ impl PythonExpression {
         Atom::new().into()
     }
 
-    /// Construct an expression from a serialized state.
-    pub fn __setstate__(&mut self, state: Vec<u8>) -> PyResult<()> {
-        unsafe {
-            self.expr = Atom::from_raw(state);
-        }
-        Ok(())
-    }
-
     /// Get a serialized version of the expression.
     pub fn __getstate__(&self) -> PyResult<Vec<u8>> {
         Ok(self.expr.clone().into_raw())
     }
 
-    /// Get the default positional arguments for `__new__`.
-    pub fn __getnewargs__<'py>(&self, py: Python<'py>) -> PyResult<Bound<'py, PyTuple>> {
-        Ok(PyTuple::empty(py))
+    /// Reconstruct an expression from a serialized version.
+    pub fn __reduce__<'py>(&self, py: Python<'py>) -> PyResult<(Py<PyAny>, (Py<PyBytes>,))> {
+        let module = py
+            .import("symbolica.symbolica")
+            .or_else(|_| py.import("symbolica"))?;
+        let reconstruct = module.getattr("_reconstruct_expression")?.unbind();
+        let state = PyBytes::new(py, &self.expr.clone().into_raw()).unbind();
+
+        Ok((reconstruct, (state,)))
     }
 
     /// Copy the expression.
@@ -5517,8 +5516,8 @@ impl PythonExpression {
     }
 
     /// Create an iterator over all sub-atoms in the expression.
-    fn __iter__(&self) -> PyResult<PythonAtomIterator> {
-        match self.expr.as_view() {
+    fn __iter__(slf: PyRef<'_, Self>) -> PyResult<PythonAtomIterator> {
+        match slf.expr.as_view() {
             AtomView::Add(_) | AtomView::Mul(_) | AtomView::Fun(_) | AtomView::Pow(_) => {}
             x => {
                 return Err(exceptions::PyValueError::new_err(format!(
@@ -5528,12 +5527,12 @@ impl PythonExpression {
             }
         };
 
-        Ok(PythonAtomIterator::from_expr(self.clone()))
+        Ok(PythonAtomIterator::from_expr(slf.into()))
     }
 
     /// Iterator over all terms in the expression.
-    pub fn terms(&self) -> PythonAtomIterator {
-        PythonAtomIterator::term_iter(self.clone())
+    pub fn terms(slf: PyRef<'_, Self>) -> PythonAtomIterator {
+        PythonAtomIterator::term_iter(slf.into())
     }
 
     /// Map the transformations to every term in the expression.
