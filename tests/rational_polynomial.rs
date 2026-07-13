@@ -2,12 +2,54 @@ use std::sync::Arc;
 
 use symbolica::{
     atom::AtomCore,
-    domains::{integer::Z, rational_polynomial::RationalPolynomial},
+    domains::{integer::Z, rational::Q, rational_polynomial::RationalPolynomial},
     parse,
     parser::{ParseSettings, Token},
     poly::{PolyVariable, polynomial::MultivariatePolynomial},
     symbol,
 };
+
+#[test]
+fn integer_factors_in_non_polynomial_exponents() {
+    let exp_x = parse!("exp(x)");
+    let exp_x_var = PolyVariable::Power(exp_x.clone());
+    let var_map = Arc::new(vec![exp_x_var.clone()]);
+
+    let p = parse!("exp(3*x)").to_polynomial_in_vars::<u16>(var_map.clone());
+    let term = (&p).into_iter().next().unwrap();
+    assert_eq!(p.nterms(), 1);
+    assert_eq!(term.exponents, &[3]);
+
+    let r = parse!("exp(x)+exp(2*x)+exp(3*x)").to_rational_polynomial::<_, _, u16>(&Q, &Z, None);
+    assert_eq!(r.get_variables().as_ref(), &[exp_x_var.clone()]);
+
+    let r_inv = parse!("exp(-3*x)").to_rational_polynomial::<_, _, u16>(&Q, &Z, None);
+    assert_eq!(r_inv.get_variables().as_ref(), &[exp_x_var.clone()]);
+    let term = (&r_inv.denominator).into_iter().next().unwrap();
+    assert_eq!(term.exponents, &[3]);
+
+    let r_inv_one = parse!("exp(-x)").to_rational_polynomial::<_, _, u16>(&Q, &Z, None);
+    assert_eq!(r_inv_one.get_variables().as_ref(), &[exp_x_var.clone()]);
+    let term = (&r_inv_one.denominator).into_iter().next().unwrap();
+    assert_eq!(term.exponents, &[1]);
+
+    let r_den = parse!("1/(1+exp(3*x))").to_rational_polynomial::<_, _, u16>(&Q, &Z, None);
+    assert_eq!(r_den.get_variables().as_ref(), &[exp_x_var.clone()]);
+
+    let f = parse!("exp(x)+exp(2*x)+exp(3*x)")
+        .to_factorized_rational_polynomial::<_, _, u16>(&Q, &Z, None);
+    assert_eq!(f.get_variables(), &[exp_x_var.clone()]);
+
+    let f_inv = parse!("exp(-3*x)").to_factorized_rational_polynomial::<_, _, u16>(&Q, &Z, None);
+    assert_eq!(f_inv.get_variables(), &[exp_x_var.clone()]);
+
+    let f_inv_one = parse!("exp(-x)").to_factorized_rational_polynomial::<_, _, u16>(&Q, &Z, None);
+    assert_eq!(f_inv_one.get_variables(), &[exp_x_var.clone()]);
+
+    let f_den =
+        parse!("1/(1+exp(3*x))").to_factorized_rational_polynomial::<_, _, u16>(&Q, &Z, None);
+    assert_eq!(f_den.get_variables(), &[exp_x_var]);
+}
 
 #[test]
 fn default_exponent_and_variable_inputs() {
