@@ -259,34 +259,60 @@ impl<'a> AtomView<'a> {
         if self.has_complex_coefficients() {
             let f = AlgebraicExtension::new_complex(Q);
             let f2 = FloatField::from_rep(Complex::new(Rational::zero(), Rational::one()));
-            if let Ok(p) = self.try_to_rational_polynomial::<_, _, u32>(&f, &f, None) {
-                let num = p.numerator.map_coeff(
-                    |c| {
-                        Complex::new(
-                            c.poly.get_constant(),
-                            c.poly.coefficient(&[1]).unwrap_or(Rational::zero()),
-                        )
-                    },
-                    f2.clone(),
-                );
+            if let Ok(p) = self.try_to_factorized_rational_polynomial::<_, _, u32>(&f, &f, None) {
+                let num = Atom::num(Complex::new(
+                    p.numer_coeff.poly.get_constant(),
+                    p.numer_coeff
+                        .poly
+                        .coefficient(&[1])
+                        .unwrap_or(Rational::zero()),
+                )) * p
+                    .numerator
+                    .map_coeff(
+                        |c| {
+                            Complex::new(
+                                c.poly.get_constant(),
+                                c.poly.coefficient(&[1]).unwrap_or(Rational::zero()),
+                            )
+                        },
+                        f2.clone(),
+                    )
+                    .to_expression();
 
-                let den = p.denominator.map_coeff(
-                    |c| {
-                        Complex::new(
-                            c.poly.get_constant(),
-                            c.poly.coefficient(&[1]).unwrap_or(Rational::zero()),
-                        )
-                    },
-                    f2.clone(),
-                );
+                let mut den = Atom::num(Complex::new(
+                    p.denom_coeff.poly.get_constant(),
+                    p.denom_coeff
+                        .poly
+                        .coefficient(&[1])
+                        .unwrap_or(Rational::zero()),
+                ));
+                for (x, e) in p.denominators {
+                    let d = x.map_coeff(
+                        |c| {
+                            Complex::new(
+                                c.poly.get_constant(),
+                                c.poly.coefficient(&[1]).unwrap_or(Rational::zero()),
+                            )
+                        },
+                        f2.clone(),
+                    );
+                    den *= d.to_expression().pow(e);
+                }
 
-                *out = num.to_expression() / den.to_expression();
+                *out = num / den;
                 return;
-            } else {
-                out.set_from_view(self);
             }
-        } else if let Ok(poly) = self.try_to_rational_polynomial::<_, _, u32>(&Q, &Z, None) {
-            poly.to_expression_into(out);
+        } else if let Ok(poly) =
+            self.try_to_factorized_rational_polynomial::<_, _, u32>(&Q, &Z, None)
+        {
+            let num = Atom::num(poly.numer_coeff) * poly.numerator.to_expression();
+
+            let mut den = Atom::num(poly.denom_coeff);
+            for (x, e) in poly.denominators {
+                den *= x.to_expression().pow(e);
+            }
+
+            *out = num / den;
             return;
         }
 
@@ -1732,7 +1758,8 @@ mod test {
         let input = parse!("v1^2/2+v1^3/v4*v2+v3/(1+v4)");
         let out = input.together();
 
-        let ref_out = parse!("(2*v4+2*v4^2)^-1*(2*v3*v4+v1^2*v4+v1^2*v4^2+2*v1^3*v2+2*v1^3*v2*v4)");
+        let ref_out =
+            parse!("1/2*(v4*(1+v4))^-1*(2*v3*v4+v1^2*v4+v1^2*v4^2+2*v1^3*v2+2*v1^3*v2*v4)");
 
         assert_eq!(out, ref_out);
     }
