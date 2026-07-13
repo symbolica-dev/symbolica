@@ -52,6 +52,52 @@ fn integer_factors_in_non_polynomial_exponents() {
 }
 
 #[test]
+fn integer_content_of_rational_and_complex_exponents() {
+    let exp_ix_var = PolyVariable::Power(parse!("exp(i*x)"));
+    let exp_third_x_var = PolyVariable::Power(parse!("exp(1/3*x)"));
+    let exp_third_var = PolyVariable::Power(parse!("exp(1/3)"));
+
+    let p_i = parse!("exp(2*i*x)").to_polynomial::<_, u16>(&Q, None);
+    assert_eq!(p_i.get_vars_ref(), &[exp_ix_var.clone()]);
+    let term = (&p_i).into_iter().next().unwrap();
+    assert_eq!(term.exponents, &[2]);
+
+    let p_fraction = parse!("exp(2/3*x)").to_polynomial::<_, u16>(&Q, None);
+    assert_eq!(p_fraction.get_vars_ref(), &[exp_third_x_var.clone()]);
+    let term = (&p_fraction).into_iter().next().unwrap();
+    assert_eq!(term.exponents, &[2]);
+
+    let r_i = parse!("exp(2*i*x)").to_rational_polynomial::<_, _, u16>(&Q, &Z, None);
+    assert_eq!(r_i.get_variables().as_ref(), &[exp_ix_var.clone()]);
+    let term = (&r_i.numerator).into_iter().next().unwrap();
+    assert_eq!(term.exponents, &[2]);
+
+    let r_neg_i = parse!("exp(-2*i*x)").to_rational_polynomial::<_, _, u16>(&Q, &Z, None);
+    assert_eq!(r_neg_i.get_variables().as_ref(), &[exp_ix_var.clone()]);
+    let term = (&r_neg_i.denominator).into_iter().next().unwrap();
+    assert_eq!(term.exponents, &[2]);
+
+    let r_fraction = parse!("exp(2/3*x)").to_rational_polynomial::<_, _, u16>(&Q, &Z, None);
+    assert_eq!(
+        r_fraction.get_variables().as_ref(),
+        &[exp_third_x_var.clone()]
+    );
+
+    let r_numeric_fraction = parse!("exp(2/3)").to_rational_polynomial::<_, _, u16>(&Q, &Z, None);
+    assert_eq!(
+        r_numeric_fraction.get_variables().as_ref(),
+        &[exp_third_var]
+    );
+
+    let f_i = parse!("exp(2*i*x)").to_factorized_rational_polynomial::<_, _, u16>(&Q, &Z, None);
+    assert_eq!(f_i.get_variables(), &[exp_ix_var]);
+
+    let f_fraction =
+        parse!("exp(2/3*x)").to_factorized_rational_polynomial::<_, _, u16>(&Q, &Z, None);
+    assert_eq!(f_fraction.get_variables(), &[exp_third_x_var]);
+}
+
+#[test]
 fn default_exponent_and_variable_inputs() {
     let x = symbol!("x");
     let y = symbol!("y");
