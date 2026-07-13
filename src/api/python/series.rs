@@ -945,7 +945,7 @@ self_cell!(
     #[cfg_attr(feature = "python_stubgen", gen_stub_pyclass)]
     #[pyclass(skip_from_py_object, name = "AtomIterator", module = "symbolica.core")]
     pub struct PythonAtomIterator {
-        owner: Atom,
+        owner: Py<PythonExpression>,
         #[covariant]
         dependent: ListIterator,
     }
@@ -953,8 +953,8 @@ self_cell!(
 
 impl PythonAtomIterator {
     /// Create a self-referential structure for the iterator.
-    pub fn from_expr(expr: PythonExpression) -> PythonAtomIterator {
-        PythonAtomIterator::new(expr.expr, |expr| match expr.as_view() {
+    pub fn from_expr(expr: Py<PythonExpression>) -> PythonAtomIterator {
+        PythonAtomIterator::new(expr, |expr| match expr.get().expr.as_view() {
             AtomView::Add(a) => a.iter(),
             AtomView::Mul(m) => m.iter(),
             AtomView::Fun(f) => f.iter(),
@@ -964,8 +964,8 @@ impl PythonAtomIterator {
     }
 
     /// Create a self-referential structure for the iterator.
-    pub fn term_iter(expr: PythonExpression) -> PythonAtomIterator {
-        PythonAtomIterator::new(expr.expr, |expr| match expr.as_view() {
+    pub fn term_iter(expr: Py<PythonExpression>) -> PythonAtomIterator {
+        PythonAtomIterator::new(expr, |expr| match expr.get().expr.as_view() {
             AtomView::Add(a) => a.iter(),
             e => ListIterator::from_one(e),
         })

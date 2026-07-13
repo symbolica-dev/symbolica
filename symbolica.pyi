@@ -1039,6 +1039,16 @@ class Expression:
         Create a new expression that represents 0.
         """
 
+    def __getstate__(self) -> bytes:
+        """
+        Get a serialized version of the expression.
+        """
+
+    def __reduce__(self) -> tuple[Callable[[bytes], Expression], tuple[bytes]]:
+        """
+        Reconstruct an expression from a serialized version.
+        """
+
     def __copy__(self) -> Expression:
         """
         Copy the expression.
