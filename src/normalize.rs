@@ -1547,6 +1547,7 @@ impl AtomView<'_> {
 
                 let mut helper = workspace.new_atom();
                 let mut cur_len = 0;
+                let mut second_pass = false;
 
                 for (cur, _) in atom_sort_buf.iter().skip(1) {
                     if !last_buf.merge_terms(*cur, &mut helper) {
@@ -1573,12 +1574,23 @@ impl AtomView<'_> {
 
                         // TODO: prevent this copy, as it occurs on every non-merge
                         cur.clone_into(&mut last_buf);
+                    } else if let AtomView::Add(_) = last_buf.as_view() {
+                        // a sub-addition was created during the merge, e.g. (x+y)/2+(x+y)/2 = x+y
+                        // we need a second pass to normalize the addition
+                        second_pass = true;
                     }
                 }
 
                 if cur_len == 0 {
                     out.set_from_view(&last_buf.as_view());
                 } else {
+                    if second_pass {
+                        out_add.extend(last_buf.as_view());
+                        out.as_view().normalize(workspace, &mut helper);
+                        out.set_from_view(&helper.as_view());
+                        return;
+                    }
+
                     let v = last_buf.as_view();
                     if let AtomView::Num(n) = v {
                         let coeff = n.get_coeff_view();
@@ -1626,6 +1638,7 @@ impl AtomView<'_> {
 
         let mut helper = ws.new_atom();
         let mut b = ws.new_atom();
+        let mut second_pass = false;
         if let AtomView::Add(a1) = self
             && let AtomView::Add(a2) = rhs
         {
@@ -1649,6 +1662,7 @@ impl AtomView<'_> {
                             Ordering::Equal => {
                                 b.set_from_view(&ss);
                                 if b.merge_terms(tt, &mut helper) {
+                                    second_pass |= matches!(b.as_view(), AtomView::Add(_));
                                     if let AtomView::Num(n) = b.as_view() {
                                         if !n.is_zero() {
                                             a.extend(b.as_view());
@@ -1683,6 +1697,9 @@ impl AtomView<'_> {
                 let mut b = ws.new_atom();
                 b.set_from_view(&a.to_add_view().iter().next().unwrap());
                 out.set_from_view(&b.as_view());
+            } else if second_pass {
+                out.as_view().normalize(ws, &mut helper);
+                out.set_from_view(&helper.as_view());
             } else {
                 a.set_normalized(true);
             }
@@ -1719,6 +1736,7 @@ impl AtomView<'_> {
                             found = true;
                             b.set_from_view(&x);
                             if b.merge_terms(rhs, &mut helper) {
+                                second_pass |= matches!(b.as_view(), AtomView::Add(_));
                                 if let AtomView::Num(n) = b.as_view() {
                                     if !n.is_zero() {
                                         a.extend(b.as_view());
@@ -1754,6 +1772,7 @@ impl AtomView<'_> {
 
                         b.set_from_view(&v[p]);
                         if b.merge_terms(rhs, &mut helper) {
+                            second_pass |= matches!(b.as_view(), AtomView::Add(_));
                             if let AtomView::Num(n) = b.as_view() {
                                 if !n.is_zero() {
                                     a.extend(b.as_view());
@@ -1790,6 +1809,9 @@ impl AtomView<'_> {
                 let mut b = ws.new_atom();
                 b.set_from_view(&a.to_add_view().iter().next().unwrap());
                 out.set_from_view(&b.as_view());
+            } else if second_pass {
+                out.as_view().normalize(ws, &mut helper);
+                out.set_from_view(&helper.as_view());
             } else {
                 a.set_normalized(true);
             }
@@ -1892,6 +1914,7 @@ impl AtomView<'_> {
 
         let mut helper = ws.new_atom();
         let mut cur_len = 0;
+        let mut second_pass = false;
 
         while let Some(mut cursor) = heap.pop() {
             let cur = cursor.atom;
@@ -1918,6 +1941,8 @@ impl AtomView<'_> {
                 }
 
                 last_buf.set_from_view(&cur);
+            } else if let AtomView::Add(_) = last_buf.as_view() {
+                second_pass = true;
             }
 
             if let Some(rest) = cursor.rest.as_mut()
@@ -1932,6 +1957,13 @@ impl AtomView<'_> {
         if cur_len == 0 {
             out.set_from_view(&last_buf.as_view());
         } else {
+            if second_pass {
+                out_add.extend(last_buf.as_view());
+                out.as_view().normalize(ws, &mut helper);
+                out.set_from_view(&helper.as_view());
+                return;
+            }
+
             let v = last_buf.as_view();
             if let AtomView::Num(n) = v {
                 let coeff = n.get_coeff_view();
@@ -2035,6 +2067,13 @@ mod test {
         let a = parse!("v2 + v3 + v4");
         let b = parse!("v1");
         assert_eq!(a + b, parse!("v1+v2+v3+v4"));
+
+        let half_sum = parse!("(v1 + v2) / 2");
+        assert_eq!(parse!("v1") + &half_sum + &half_sum, parse!("2*v1+v2"));
+
+        let a = parse!("v1 + (v1 + v2) / 2");
+        let b = parse!("v2 + (v1 + v2) / 2");
+        assert_eq!(a + b, parse!("2*v1+2*v2"));
     }
 
     #[test]
@@ -2052,5 +2091,15 @@ mod test {
         Workspace::get_local().with(|ws| AtomView::add_normalized_slice(&views, ws, &mut out));
 
         assert_eq!(out, parse!("v2 + 3*v3 + v4"));
+
+        let args = [
+            parse!("v1"),
+            parse!("(v1 + v2) / 2"),
+            parse!("(v1 + v2) / 2"),
+        ];
+        let views: Vec<_> = args.iter().map(|x| x.as_view()).collect();
+        Workspace::get_local().with(|ws| AtomView::add_normalized_slice(&views, ws, &mut out));
+
+        assert_eq!(out, parse!("2*v1 + v2"));
     }
 }
