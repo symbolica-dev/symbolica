@@ -98,6 +98,117 @@ fn integer_content_of_rational_and_complex_exponents() {
 }
 
 #[test]
+fn split_exponential_sums() {
+    let exp_x = PolyVariable::Power(parse!("exp(x)"));
+    let exp_y = PolyVariable::Power(parse!("exp(y)"));
+
+    let p = parse!("exp(x+y)").to_polynomial::<_, u16>(&Q, None);
+    assert_eq!(p.get_vars_ref(), &[exp_x.clone(), exp_y.clone()]);
+    let term = (&p).into_iter().next().unwrap();
+    assert_eq!(term.exponents, &[1, 1]);
+
+    let p_in_vars = parse!("exp(x+y)")
+        .to_polynomial_in_vars::<u16>(Arc::new(vec![exp_x.clone(), exp_y.clone()]));
+    let term = (&p_in_vars).into_iter().next().unwrap();
+    assert_eq!(term.exponents, &[1, 1]);
+
+    let r = parse!("exp(x+y)").to_rational_polynomial::<_, _, u16>(&Q, &Z, None);
+    assert_eq!(r.get_variables().as_ref(), &[exp_x.clone(), exp_y.clone()]);
+    let term = (&r.numerator).into_iter().next().unwrap();
+    assert_eq!(term.exponents, &[1, 1]);
+
+    let f = parse!("exp(x+y)").to_factorized_rational_polynomial::<_, _, u16>(&Q, &Z, None);
+    assert_eq!(f.get_variables(), &[exp_x, exp_y]);
+    let term = (&f.numerator).into_iter().next().unwrap();
+    assert_eq!(term.exponents, &[1, 1]);
+}
+
+#[test]
+fn split_additive_power_exponents() {
+    let x_to_a = PolyVariable::Power(parse!("x^a"));
+    let x_to_b = PolyVariable::Power(parse!("x^b"));
+
+    let p = parse!("x^(a+b)").to_polynomial::<_, u16>(&Q, None);
+    assert_eq!(p.get_vars_ref(), &[x_to_a.clone(), x_to_b.clone()]);
+    assert_eq!((&p).into_iter().next().unwrap().exponents, &[1, 1]);
+
+    let p_in_vars = parse!("x^(a+b)")
+        .to_polynomial_in_vars::<u16>(Arc::new(vec![x_to_a.clone(), x_to_b.clone()]));
+    assert_eq!((&p_in_vars).into_iter().next().unwrap().exponents, &[1, 1]);
+
+    let r = parse!("x^(a+b)").to_rational_polynomial::<_, _, u16>(&Q, &Z, None);
+    assert_eq!(
+        r.get_variables().as_ref(),
+        &[x_to_a.clone(), x_to_b.clone()]
+    );
+    assert_eq!(
+        (&r.numerator).into_iter().next().unwrap().exponents,
+        &[1, 1]
+    );
+
+    let f = parse!("x^(a+b)").to_factorized_rational_polynomial::<_, _, u16>(&Q, &Z, None);
+    assert_eq!(f.get_variables(), &[x_to_a, x_to_b]);
+    assert_eq!(
+        (&f.numerator).into_iter().next().unwrap().exponents,
+        &[1, 1]
+    );
+}
+
+#[test]
+fn common_rational_power_basis() {
+    let root = PolyVariable::Power(parse!("x^(1/6)"));
+    let input = parse!("x+x^(1/2)+x^(1/3)");
+
+    let p = input.to_polynomial::<_, u16>(&Q, None);
+    assert_eq!(p.get_vars_ref(), &[root.clone()]);
+    assert_eq!(
+        (&p).into_iter()
+            .map(|term| term.exponents[0])
+            .collect::<Vec<_>>(),
+        vec![2, 3, 6]
+    );
+
+    let r = input.to_rational_polynomial::<_, _, u16>(&Q, &Z, None);
+    assert_eq!(r.get_variables().as_ref(), &[root.clone()]);
+    assert_eq!(
+        (&r.numerator)
+            .into_iter()
+            .map(|term| term.exponents[0])
+            .collect::<Vec<_>>(),
+        vec![2, 3, 6]
+    );
+
+    let f = input.to_factorized_rational_polynomial::<_, _, u16>(&Q, &Z, None);
+    assert_eq!(f.get_variables(), &[root]);
+    assert_eq!(
+        (&f.numerator)
+            .into_iter()
+            .map(|term| term.exponents[0])
+            .collect::<Vec<_>>(),
+        vec![2, 3, 6]
+    );
+
+    let inverse_input = parse!("1/(1+x^(1/2)+x^(1/3))");
+    let r_inverse = inverse_input.to_rational_polynomial::<_, _, u16>(&Q, &Z, None);
+    assert_eq!(
+        r_inverse.get_variables().as_ref(),
+        &[PolyVariable::Power(parse!("x^(1/6)"))]
+    );
+    let f_inverse = inverse_input.to_factorized_rational_polynomial::<_, _, u16>(&Q, &Z, None);
+    assert_eq!(
+        f_inverse.get_variables(),
+        &[PolyVariable::Power(parse!("x^(1/6)"))]
+    );
+    assert!(
+        f_inverse
+            .denominators
+            .iter()
+            .all(|(denominator, _)| denominator.get_vars_ref()
+                == [PolyVariable::Power(parse!("x^(1/6)"))])
+    );
+}
+
+#[test]
 fn default_exponent_and_variable_inputs() {
     let x = symbol!("x");
     let y = symbol!("y");
