@@ -468,6 +468,11 @@ impl EvaluationInfo {
         self.cpp.as_deref()
     }
 
+    /// Return true if a precision-aware constant evaluator is registered.
+    pub fn has_constant_evaluator(&self) -> bool {
+        self.constant_eval.is_some()
+    }
+
     /// Register a tagless numeric implementation for type `T`.
     ///
     /// The callable receives only numeric arguments and returns a value of the same
