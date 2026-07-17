@@ -269,6 +269,47 @@ impl PythonExpressionEvaluator {
         .map_err(|e| pyo3::exceptions::PyIOError::new_err(e.to_string()))
     }
 
+    /// Export the serialized SymJIT application used for double or complex evaluation.
+    /// It can later be imported by the `symjit` module.
+    ///
+    /// The evaluator must be configured for JIT compilation and materialized by
+    /// calling `evaluate_complex` once. Evaluators with external functions are
+    /// rejected because those definitions are not self-contained.
+    #[pyo3(signature = (complex = false))]
+    fn export_symjit<'py>(&self, py: Python<'py>, complex: bool) -> PyResult<Bound<'py, PyBytes>> {
+        if !self.jit_compile {
+            return Err(exceptions::PyRuntimeError::new_err(
+                "Cannot export a SymJIT application because this evaluator is not configured for JIT compilation.",
+            ));
+        }
+
+        if complex {
+            let evaluator = self.jit_complex.as_ref().ok_or_else(|| {
+                exceptions::PyRuntimeError::new_err(
+                    "Cannot export a SymJIT application because the JIT payload has not been compiled. Call evaluate_complex() once before exporting it.",
+                )
+            })?;
+            if evaluator.has_external_functions() {
+                return Err(exceptions::PyRuntimeError::new_err(
+                    "Cannot export a self-contained SymJIT application because the selected JIT payload uses external functions.",
+                ));
+            }
+            Ok(PyBytes::new(py, evaluator.as_bytes()))
+        } else {
+            let evaluator = self.jit_real.as_ref().ok_or_else(|| {
+                exceptions::PyRuntimeError::new_err(
+                    "Cannot export a SymJIT application because the JIT payload has not been compiled. Call evaluate_double() once before exporting it.",
+                )
+            })?;
+            if evaluator.has_external_functions() {
+                return Err(exceptions::PyRuntimeError::new_err(
+                    "Cannot export a self-contained SymJIT application because the selected JIT payload uses external functions.",
+                ));
+            }
+            Ok(PyBytes::new(py, evaluator.as_bytes()))
+        }
+    }
+
     /// Return the instructions for efficiently evaluating the expression, the length of the list
     /// of temporary variables, and the list of constants. This can be used to generate
     /// code for the expression evaluation in any programming language.
