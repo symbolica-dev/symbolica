@@ -357,7 +357,7 @@ impl JITCompilationSettings {
 
     fn apply_to_config(&self, config: &mut Config) {
         config.set_dicect(self.direct_translation);
-        config.set_opt_level(2);
+        config.set_opt_level(self.optimization_level);
     }
 }
 
@@ -660,6 +660,18 @@ pub struct JITCompiledEvaluator<T> {
     compressed_ir: Vec<u8>,
     batch_input_buffer: Vec<T>,
     batch_output_buffer: Vec<T>,
+}
+
+impl<T> JITCompiledEvaluator<T> {
+    /// Return the serialized SymJIT application used by this evaluator.
+    pub fn as_bytes(&self) -> &[u8] {
+        &self.compressed_ir
+    }
+
+    /// Return whether this evaluator depends on external function definitions.
+    pub fn has_external_functions(&self) -> bool {
+        !self.external_functions.is_empty()
+    }
 }
 
 #[cfg(feature = "serde")]

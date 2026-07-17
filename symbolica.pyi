@@ -9034,6 +9034,17 @@ class Evaluator:
         Save the evaluator to a byte string.
         """
 
+    def export_symjit(self, complex: bool = False) -> bytes:
+        """
+        Export the serialized SymJIT application used for double or complex evaluation, which
+        can be loaded by the `symjit` module.
+
+        Parameters
+        ----------
+        complex: bool
+            Whether to export the real or complex evaluator.
+        """
+
     def get_instructions(
         self,
     ) -> tuple[
