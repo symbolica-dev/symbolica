@@ -4444,6 +4444,18 @@ impl<'a> Match<'a> {
         }
     }
 
+    /// Compare two matches. A function head match and a variable match are considered equal if the variable matches the function name.
+    pub fn matches(&self, other: &Match<'a>) -> bool {
+        match (self, other) {
+            (Self::Single(a), Self::Single(b)) => a == b,
+            (Self::Multiple(t1, list1), Self::Multiple(t2, list2)) => t1 == t2 && list1 == list2,
+            (Self::FunctionName(n1), Self::FunctionName(n2)) => n1 == n2,
+            (Self::Single(a), Self::FunctionName(n)) => a == n,
+            (Self::FunctionName(n), Self::Single(b)) => b == n,
+            _ => false,
+        }
+    }
+
     /// Create a new atom from a matched subexpression.
     /// Arguments lists are wrapped in the function `arg`.
     pub fn to_atom_into(&self, out: &mut Atom) {
@@ -4732,7 +4744,7 @@ impl<'a, 'b> WrappedMatchStack<'a, 'b> {
 
         for (rk, rv) in self.stack.stack.iter() {
             if rk == &key {
-                if rv == &value {
+                if rv.matches(&value) {
                     return Ok(self.stack.stack.len());
                 } else {
                     return Err(MatchError::ImpossibleDueToConstraints);
