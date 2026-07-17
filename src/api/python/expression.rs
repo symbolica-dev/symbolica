@@ -7214,6 +7214,8 @@ impl PythonExpression {
     ///    If set to `True`, JIT compilation directly translates Symbolica instructions to SymJIT IR.
     /// jit_optimization_level: int, optional
     ///    The optimization level to use for JIT compilation.
+    /// jit_options: dict[str, str], optional
+    ///    Additional options to pass to the JIT compiler.
     /// max_horner_scheme_variables: int, optional
     ///     The maximum number of variables in a Horner scheme.
     /// max_common_pair_cache_entries: int, optional
@@ -7232,6 +7234,7 @@ impl PythonExpression {
         direct_translation = true,
         jit_direct_translation = false,
         jit_optimization_level = 3,
+        jit_options = HashMap::default(),
         max_horner_scheme_variables = 500,
         max_common_pair_cache_entries = 1_000_000,
         max_common_pair_distance = 100),
@@ -7248,6 +7251,7 @@ impl PythonExpression {
         direct_translation: bool,
         jit_direct_translation: bool,
         jit_optimization_level: u8,
+        jit_options: HashMap<String, String>,
         max_horner_scheme_variables: usize,
         max_common_pair_cache_entries: usize,
         max_common_pair_distance: usize,
@@ -7338,6 +7342,13 @@ impl PythonExpression {
                 exceptions::PyValueError::new_err(format!("Could not create evaluator: {e}"))
             })?;
 
+        let mut jit_settings = JITCompilationSettings::new()
+            .direct_translation(jit_direct_translation)
+            .optimization_level(jit_optimization_level);
+        for (k, v) in jit_options {
+            jit_settings = jit_settings.with_option(k, v);
+        }
+
         Ok(PythonExpressionEvaluator {
             rational_constants: eval.get_constants().to_vec(),
             eval_complex: eval.map_coeff(&|c| Complex::new(c.re.to_f64(), c.im.to_f64())),
@@ -7349,9 +7360,7 @@ impl PythonExpression {
             eval_arb_prec: None,
             eval_arb_prec_complex: None,
             jit_compile,
-            jit_settings: JITCompilationSettings::new()
-                .direct_translation(jit_direct_translation)
-                .optimization_level(jit_optimization_level),
+            jit_settings,
         })
     }
 
@@ -7393,6 +7402,8 @@ impl PythonExpression {
     ///     Whether to directly translate Symbolica instructions to SymJIT IR.
     /// jit_optimization_level: int
     ///     The optimization level to use for JIT compilation.
+    /// jit_options: dict[str, str]
+    ///     Additional options to pass to the JIT compiler.
     /// max_horner_scheme_variables: int
     ///     The maximum number of variables considered for Horner-scheme optimization.
     /// max_common_pair_cache_entries: int
@@ -7412,6 +7423,7 @@ impl PythonExpression {
         direct_translation = true,
         jit_direct_translation = false,
         jit_optimization_level = 3,
+        jit_options = HashMap::default(),
         max_horner_scheme_variables = 500,
         max_common_pair_cache_entries = 1_000_000,
         max_common_pair_distance = 100)
@@ -7429,6 +7441,7 @@ impl PythonExpression {
         direct_translation: bool,
         jit_direct_translation: bool,
         jit_optimization_level: u8,
+        jit_options: HashMap<String, String>,
         max_horner_scheme_variables: usize,
         max_common_pair_cache_entries: usize,
         max_common_pair_distance: usize,
@@ -7519,6 +7532,13 @@ impl PythonExpression {
                 exceptions::PyValueError::new_err(format!("Could not create evaluator: {e}"))
             })?;
 
+        let mut jit_settings = JITCompilationSettings::new()
+            .direct_translation(jit_direct_translation)
+            .optimization_level(jit_optimization_level);
+        for (k, v) in jit_options {
+            jit_settings = jit_settings.with_option(k, v);
+        }
+
         Ok(PythonExpressionEvaluator {
             rational_constants: eval.get_constants().to_vec(),
             eval_complex: eval.map_coeff(&|c| Complex::new(c.re.to_f64(), c.im.to_f64())),
@@ -7530,9 +7550,7 @@ impl PythonExpression {
             eval_arb_prec: None,
             eval_arb_prec_complex: None,
             jit_compile,
-            jit_settings: JITCompilationSettings::new()
-                .direct_translation(jit_direct_translation)
-                .optimization_level(jit_optimization_level),
+            jit_settings,
         })
     }
 

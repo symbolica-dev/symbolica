@@ -3450,6 +3450,7 @@ class Expression:
         direct_translation: bool = True,
         jit_direct_translation: bool = False,
         jit_optimization_level: int = 3,
+        jit_options: dict[str, str] = {},
         max_horner_scheme_variables: int = 500,
         max_common_pair_cache_entries: int = 1000000,
         max_common_pair_distance: int = 100,
@@ -3505,6 +3506,8 @@ class Expression:
             If set to `True`, JIT compilation directly translates Symbolica instructions to SymJIT IR.
         jit_optimization_level: int, optional
             The optimization level to use for JIT compilation.
+        jit_options: dict[str, str], optional
+            A dictionary of options to pass to the JIT compiler.
         max_horner_scheme_variables: int, optional
             The maximum number of variables in a Horner scheme.
         max_common_pair_cache_entries: int, optional
@@ -3528,6 +3531,7 @@ class Expression:
         direct_translation: bool = True,
         jit_direct_translation: bool = False,
         jit_optimization_level: int = 3,
+        jit_options: dict[str, str] = {},
         max_horner_scheme_variables: int = 500,
         max_common_pair_cache_entries: int = 1000000,
         max_common_pair_distance: int = 100,
@@ -3555,27 +3559,29 @@ class Expression:
         functions: dict[tuple[Expression, Sequence[Expression]], Expression]
             A dictionary of functions. The key is a tuple of the function name and the argument variables.
             The value is the function body. If the function name entry contains arguments, these are considered tags.
-        iterations: int
+        iterations: int, optional
             The number of optimization passes to run.
-        cpe_iterations: int | None
+        cpe_iterations: int | None, optional
             The number of common subexpression elimination iterations to perform.
-        n_cores: int
+        n_cores: int, optional
             The number of CPU cores used for parallel optimization.
-        verbose: bool
+        verbose: bool, optional
             Whether verbose output should be enabled.
-        jit_compile: bool
+        jit_compile: bool, optional
             Whether JIT compilation should be enabled.
-        direct_translation: bool
+        direct_translation: bool, optional
             Whether to prefer direct translation when compiling the evaluator.
-        jit_direct_translation: bool
+        jit_direct_translation: bool, optional
             Whether to directly translate Symbolica instructions to SymJIT IR.
-        jit_optimization_level: int
+        jit_optimization_level: int, optional
             The optimization level to use for JIT compilation.
-        max_horner_scheme_variables: int
+        jit_options: dict[str, str], optional
+            A dictionary of options to pass to the JIT compiler.
+        max_horner_scheme_variables: int, optional
             The maximum number of variables considered for Horner-scheme optimization.
-        max_common_pair_cache_entries: int
+        max_common_pair_cache_entries: int, optional
             The maximum number of common-subexpression pairs to cache.
-        max_common_pair_distance: int
+        max_common_pair_distance: int, optional
             The maximum distance between factors when searching for common pairs.
         """
 

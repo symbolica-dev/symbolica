@@ -159,32 +159,35 @@ impl PythonExpressionEvaluator {
     }
 
     /// Set whether to use JIT compilation, optionally updating the JIT settings.
-    #[pyo3(signature = (jit_compile, direct_translation = None, optimization_level = None))]
+    #[pyo3(signature = (jit_compile, direct_translation = None, optimization_level = None, options = None))]
     fn jit_compile(
         &mut self,
         jit_compile: bool,
         direct_translation: Option<bool>,
         optimization_level: Option<u8>,
+        options: Option<HashMap<String, String>>,
     ) {
         self.jit_compile = jit_compile;
+        self.jit_real = None;
+        self.jit_complex = None;
+
+        let mut jit_settings = self.jit_settings.clone();
 
         if let Some(direct_translation) = direct_translation {
-            self.jit_settings = self
-                .jit_settings
-                .clone()
-                .direct_translation(direct_translation);
-            self.jit_real = None;
-            self.jit_complex = None;
+            jit_settings = jit_settings.direct_translation(direct_translation);
         }
 
         if let Some(optimization_level) = optimization_level {
-            self.jit_settings = self
-                .jit_settings
-                .clone()
-                .optimization_level(optimization_level);
-            self.jit_real = None;
-            self.jit_complex = None;
+            jit_settings = jit_settings.optimization_level(optimization_level);
         }
+
+        if let Some(options) = options {
+            for (key, value) in options {
+                jit_settings = jit_settings.with_option(key, value);
+            }
+        }
+
+        self.jit_settings = jit_settings;
     }
 
     /// Load the evaluator into memory, preparing it for evaluation.

@@ -326,6 +326,8 @@ pub struct JITCompilationSettings {
     direct_translation: bool,
     /// The optimization level to use for JIT compilation.
     optimization_level: u8,
+    /// Additional options to pass to the SymJIT compiler.
+    options: HashMap<String, String>,
 }
 
 impl Default for JITCompilationSettings {
@@ -333,6 +335,7 @@ impl Default for JITCompilationSettings {
         Self {
             direct_translation: false,
             optimization_level: 3,
+            options: HashMap::default(),
         }
     }
 }
@@ -355,9 +358,19 @@ impl JITCompilationSettings {
         self
     }
 
-    fn apply_to_config(&self, config: &mut Config) {
+    /// Add an additional option to pass to the SymJIT compiler.
+    pub fn with_option(mut self, key: impl Into<String>, value: impl Into<String>) -> Self {
+        self.options.insert(key.into(), value.into());
+        self
+    }
+
+    fn apply_to_config(&self, config: &mut Config) -> Result<(), String> {
         config.set_dicect(self.direct_translation);
         config.set_opt_level(self.optimization_level);
+        for (key, value) in &self.options {
+            config.set_option(key, value).map_err(|e| e.to_string())?;
+        }
+        Ok(())
     }
 }
 
@@ -616,7 +629,7 @@ impl JITCompiledNumber for f64 {
 
         let mut config = Config::default();
         config.set_complex(false);
-        settings.apply_to_config(&mut config);
+        settings.apply_to_config(&mut config)?;
         config.set_defuns(Self::convert_external_functions(external_functions)?);
 
         let mut translator = translate_to_symjit(instructions, constants, param_count, config)?;
@@ -838,7 +851,7 @@ impl JITCompiledNumber for wide::f64x4 {
         let mut config = Config::default();
         config.set_complex(false);
         config.set_simd(true);
-        settings.apply_to_config(&mut config);
+        settings.apply_to_config(&mut config)?;
         config.set_defuns(Self::convert_external_functions(external_functions)?);
 
         let mut translator = translate_to_symjit(instructions, constants, param_count, config)?;
@@ -1014,7 +1027,7 @@ impl JITCompiledNumber for Complex<f64> {
     ) -> Result<JITCompiledEvaluator<Complex<f64>>, String> {
         let mut config = Config::default();
         config.set_complex(true);
-        settings.apply_to_config(&mut config);
+        settings.apply_to_config(&mut config)?;
         config.set_defuns(Self::convert_external_functions(external_functions)?);
 
         let mut translator = translate_to_symjit(instructions, constants, param_count, config)?;
@@ -1144,7 +1157,7 @@ impl JITCompiledNumber for Complex<wide::f64x4> {
         let mut config = Config::default();
         config.set_complex(true);
         config.set_simd(true);
-        settings.apply_to_config(&mut config);
+        settings.apply_to_config(&mut config)?;
         config.set_defuns(Self::convert_external_functions(external_functions)?);
 
         let mut translator = translate_to_symjit(instructions, constants, param_count, config)?;
