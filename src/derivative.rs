@@ -201,18 +201,9 @@ impl AtomView<'_> {
 
                     if is_der {
                         for (i, x_orig) in f_orig.iter().take(arg_count).enumerate() {
-                            if let AtomView::Num(nn) = x_orig {
-                                let num = nn.get_coeff_view() + (if i == index { 1 } else { 0 });
-                                n.to_num(num);
-                                p.add_arg(n.as_view());
-                            } else {
-                                error!(
-                                    "Derivative function {} must contain numbers for argument derivative counters",
-                                    self.printer(PrintOptions::file())
-                                );
-                                out.to_num(Coefficient::Indeterminate);
-                                return false;
-                            }
+                            n.set_from_view(&x_orig);
+                            *n += if i == index { 1 } else { 0 };
+                            p.add_arg(n.as_view());
                         }
                     } else {
                         for i in 0..f.get_nargs() {
