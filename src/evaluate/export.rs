@@ -126,7 +126,7 @@ impl<T: ExportNumber + SingleFloat> ExportNumber for Complex<T> {
     fn to_complex_double(&self) -> Complex<f64> {
         Complex {
             re: self.re.to_complex_double().re,
-            im: self.im.to_complex_double().im,
+            im: self.im.to_complex_double().re,
         }
     }
 }
@@ -2233,7 +2233,7 @@ extern "C" {{
                             *out += &format!("\t\t:\n\t\t: \"r\"(Z), \"r\"({}_CONSTANTS_complex), \"r\"(params)\n\t\t: \"memory\", \"ymm0\", \"ymm1\", \"ymm2\", \"ymm3\", \"ymm4\", \"ymm5\", \"ymm6\", \"ymm7\", \"ymm8\", \"ymm9\", \"ymm10\", \"ymm11\", \"ymm12\", \"ymm13\", \"ymm14\", \"ymm15\");\n",  function_name);
                         }
                         InlineASM::AArch64 => {
-                            *out += &format!("\t\t:\n\t\t: \"r\"(Z), \"r\"({}_CONSTANTS_complex), \"r\"(params)\n\t\t: \"memory\", \"x8\", \"d0\", \"d1\", \"d2\", \"d3\", \"d4\", \"d5\", \"d6\", \"d7\", \"d8\", \"d9\", \"d10\", \"d11\", \"d12\", \"d13\", \"d14\", \"d15\", \"d16\", \"d17\", \"d18\", \"d19\", \"d20\", \"d21\", \"d22\", \"d23\", \"d24\", \"d25\", \"d26\", \"d27\", \"d28\", \"d29\", \"d30\", \"d31\");\n",  function_name);
+                            *out += &format!("\t\t:\n\t\t: \"r\"(Z), \"r\"({}_CONSTANTS_complex), \"r\"(params)\n\t\t: \"memory\", \"x8\", \"v0\", \"v1\", \"v2\", \"v3\", \"v4\", \"v5\", \"v6\", \"v7\", \"v8\", \"v9\", \"v10\", \"v11\", \"v12\", \"v13\", \"v14\", \"v15\", \"v16\", \"v17\", \"v18\", \"v19\", \"v20\", \"v21\", \"v22\", \"v23\", \"v24\", \"v25\", \"v26\", \"v27\", \"v28\", \"v29\", \"v30\", \"v31\");\n",  function_name);
                             #[allow(unused_assignments)] { second_index = 0;} // the second index in x8 will be lost after the block, so reset it
                         }
                         InlineASM::None => unreachable!(),
@@ -2322,17 +2322,37 @@ extern "C" {{
                             *out += &format!("\t\t\"vmovupd %%ymm1, {imag_addr}\\n\\t\"\n");
                         }
                         InlineASM::AArch64 => {
-                            let (addr, _) = asm_load!(a[0]);
-                            *out += &format!("\t\t\"ldr q0, {addr}\\n\\t\"\n");
+                            if let ComplexPhase::Real = *c {
+                                let (addr, _) = asm_load!(a[0]);
+                                *out += &format!("\t\t\"ldr d0, {addr}\\n\\t\"\n");
 
-                            for i in &a[1..] {
-                                let (addr, _) = asm_load!(*i);
-                                *out += &format!("\t\t\"ldr q1, {addr}\\n\\t\"\n");
-                                *out += "\t\t\"fadd v0.2d, v1.2d, v0.2d\\n\\t\"\n";
+                                for i in &a[1..] {
+                                    let (addr, _) = asm_load!(*i);
+                                    *out += &format!("\t\t\"ldr d1, {addr}\\n\\t\"\n");
+                                    *out += "\t\t\"fadd d0, d1, d0\\n\\t\"\n";
+                                }
+
+                                *out += "\t\t\"fmov d1, xzr\\n\\t\"";
+                                let (addr_re, addr_im) = asm_load!(*o);
+                                if *o * 16 < 450 {
+                                    *out += &format!("\t\t\"stp d0, d1, {addr_re}\\n\\t\"\n");
+                                } else {
+                                    *out += &format!("\t\t\"str d0, {addr_re}\\n\\t\"\n");
+                                    *out += &format!("\t\t\"str d1, {addr_im}\\n\\t\"\n");
+                                }
+                            } else {
+                                let (addr, _) = asm_load!(a[0]);
+                                *out += &format!("\t\t\"ldr q0, {addr}\\n\\t\"\n");
+
+                                for i in &a[1..] {
+                                    let (addr, _) = asm_load!(*i);
+                                    *out += &format!("\t\t\"ldr q1, {addr}\\n\\t\"\n");
+                                    *out += "\t\t\"fadd v0.2d, v1.2d, v0.2d\\n\\t\"\n";
+                                }
+
+                                let (addr, _) = asm_load!(*o);
+                                *out += &format!("\t\t\"str q0, {addr}\\n\\t\"\n");
                             }
-
-                            let (addr, _) = asm_load!(*o);
-                            *out += &format!("\t\t\"str q0, {addr}\\n\\t\"\n");
                         }
                         InlineASM::None => unreachable!(),
                     }
@@ -2494,6 +2514,9 @@ extern "C" {{
                             *out += &format!("\t\t\"vmovupd %%ymm1, {addr_im}\\n\\t\"\n");
                         }
                         InlineASM::AArch64 => {
+                            if let ComplexPhase::Real = *c {
+                                *out += "\t\t\"fmov d3, xzr\\n\\t\"";
+                            }
                             if *o * 16 < 450 {
                                 *out += &format!("\t\t\"stp d2, d3, {addr_re}\\n\\t\"\n");
                             } else {
@@ -2512,9 +2535,9 @@ extern "C" {{
                         }
 
                         let addr_b = asm_load!(*b);
-                        let addr_o = asm_load!(*o);
                         match asm_flavour {
                             InlineASM::X64 => {
+                                let addr_o = asm_load!(*o);
                                 if let ComplexPhase::Real = *c {
                                     *out += &format!(
                                         "\t\t\"movupd {}, %%xmm0\\n\\t\"
@@ -2542,6 +2565,7 @@ extern "C" {{
                                 }
                             }
                             InlineASM::AVX2 => {
+                                let addr_o = asm_load!(*o);
                                 if let ComplexPhase::Real = *c {
                                     *out += &format!(
                                         "\t\t\"vmovupd {0}, %%ymm0\\n\\t\"
@@ -2588,7 +2612,8 @@ extern "C" {{
                                 if let ComplexPhase::Real = *c {
                                     *out += &format!(
                                         "\t\t\"ldr    d2, [%1, {}]\\n\\t\"
-\t\t\"fdiv    d0, d2, d0\\n\\t\"\n",
+\t\t\"fdiv    d0, d2, d0\\n\\t\"
+\t\t\"fmov    d1, xzr\\n\\t\"\n",
                                         (self.reserved_indices - self.param_count + 1) * 16
                                     );
                                 } else {
@@ -2600,6 +2625,7 @@ extern "C" {{
 \t\t\"fdiv    d1, d1, d2\\n\\t\"\n";
                                 }
 
+                                let addr_o = asm_load!(*o);
                                 if *o * 16 < 450 {
                                     *out += &format!("\t\t\"stp d0, d1, {}\\n\\t\"\n", addr_o.0);
                                 } else {
@@ -2635,10 +2661,10 @@ extern "C" {{
                         && let ComplexPhase::Real = *c
                     {
                         let addr_a = asm_load!(*a);
-                        let addr_o = asm_load!(*o);
 
                         match asm_flavour {
                             InlineASM::X64 => {
+                                let addr_o = asm_load!(*o);
                                 *out += &format!(
                                     "\t\t\"movupd {}, %%xmm0\\n\\t\"
 \t\t\"sqrtsd %%xmm0, %%xmm0\\n\\t\"
@@ -2647,6 +2673,7 @@ extern "C" {{
                                 );
                             }
                             InlineASM::AVX2 => {
+                                let addr_o = asm_load!(*o);
                                 *out += &format!(
                                     "\t\t\"vmovupd {}, %%ymm0\\n\\t\"
 \t\t\"vsqrtpd %%ymm0, %%ymm0\\n\\t\"
@@ -2660,9 +2687,16 @@ extern "C" {{
                                 *out += &format!(
                                     "\t\t\"ldr d0, {}\\n\\t\"
 \t\t\"fsqrt d0, d0\\n\\t\"
-\t\t\"str d0, {}\\n\\t\"\n",
-                                    addr_a.0, addr_o.0
+\t\t\"fmov d1, xzr\\n\\t\"\n",
+                                    addr_a.0
                                 );
+                                let addr_o = asm_load!(*o);
+                                if *o * 16 < 450 {
+                                    *out += &format!("\t\t\"stp d0, d1, {}\\n\\t\"\n", addr_o.0);
+                                } else {
+                                    *out += &format!("\t\t\"str d0, {}\\n\\t\"\n", addr_o.0);
+                                    *out += &format!("\t\t\"str d1, {}\\n\\t\"\n", addr_o.1);
+                                }
                             }
                             InlineASM::None => unreachable!(),
                         }
@@ -2847,7 +2881,7 @@ extern "C" {{
             }
             InlineASM::AArch64 => {
                 *out += &format!(
-                    "\t\t:\n\t\t: \"r\"(Z), \"r\"({function_name}_CONSTANTS_complex), \"r\"(params), \"r\"(out)\n\t\t: \"memory\", \"x8\", \"d0\", \"d1\", \"d2\", \"d3\", \"d4\", \"d5\", \"d6\", \"d7\", \"d8\", \"d9\", \"d10\", \"d11\", \"d12\", \"d13\", \"d14\", \"d15\", \"d16\", \"d17\", \"d18\", \"d19\", \"d20\", \"d21\", \"d22\", \"d23\", \"d24\", \"d25\", \"d26\", \"d27\", \"d28\", \"d29\", \"d30\", \"d31\");\n"
+                    "\t\t:\n\t\t: \"r\"(Z), \"r\"({function_name}_CONSTANTS_complex), \"r\"(params), \"r\"(out)\n\t\t: \"memory\", \"x8\", \"v0\", \"v1\", \"v2\", \"v3\", \"v4\", \"v5\", \"v6\", \"v7\", \"v8\", \"v9\", \"v10\", \"v11\", \"v12\", \"v13\", \"v14\", \"v15\", \"v16\", \"v17\", \"v18\", \"v19\", \"v20\", \"v21\", \"v22\", \"v23\", \"v24\", \"v25\", \"v26\", \"v27\", \"v28\", \"v29\", \"v30\", \"v31\");\n"
                 );
             }
             InlineASM::None => unreachable!(),
