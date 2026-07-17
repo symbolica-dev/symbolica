@@ -312,6 +312,7 @@ impl PythonHeldExpression {
 /// Operations that transform an expression.
 #[cfg_attr(feature = "python_stubgen", gen_stub_pyclass)]
 #[pyclass(
+    frozen,
     from_py_object,
     name = "Transformer",
     subclass,
@@ -7431,6 +7432,7 @@ impl PythonExpression {
         max_horner_scheme_variables: usize,
         max_common_pair_cache_entries: usize,
         max_common_pair_distance: usize,
+        py: Python,
     ) -> PyResult<PythonExpressionEvaluator> {
         let mut fn_map = FunctionMap::new();
 
@@ -7503,14 +7505,16 @@ impl PythonExpression {
             ..OptimizationSettings::default()
         };
 
-        let params: Vec<_> = params.iter().map(|x| x.expr.clone()).collect();
+        let params: Vec<_> = params.into_iter().map(|x| x.expr).collect();
+        let exprs: Vec<_> = exprs.into_iter().map(|x| x.expr).collect();
 
-        let exprs = exprs.iter().map(|x| x.expr.as_view()).collect::<Vec<_>>();
-
-        let eval = Atom::evaluator_multiple(&exprs, &params)
-            .function_map(fn_map)
-            .optimization_settings(settings)
-            .build()
+        let eval = py
+            .detach(move || {
+                Atom::evaluator_multiple(&exprs, &params)
+                    .function_map(fn_map)
+                    .optimization_settings(settings)
+                    .build()
+            })
             .map_err(|e| {
                 exceptions::PyValueError::new_err(format!("Could not create evaluator: {e}"))
             })?;
