@@ -1992,11 +1992,8 @@ impl<'a> AtomView<'a> {
             .iter()
             .map(|r| {
                 (
-                    AtomMatchIterator::new(r.borrow().pattern, *self),
-                    WrappedMatchStack::new(
-                        r.borrow().conditions.unwrap_or(&DEFAULT_PATTERN_CONDITION),
-                        r.borrow().settings.unwrap_or(&DEFAULT_MATCH_SETTINGS),
-                    ),
+                    AtomMatchIterator::new(r.borrow().pattern),
+                    WrappedMatchStack::from_replacement(r.borrow()),
                 )
             })
             .collect::<Vec<_>>();
@@ -2085,7 +2082,7 @@ impl<'a> AtomView<'a> {
 
             if r.pattern.could_match(*self) {
                 let (match_iter, match_stack) = &mut atom_match_iterators[rep_id];
-                match_stack.truncate(0);
+                match_stack.reset();
                 match_iter.set_new_target(*self, match_stack);
                 let it = match_iter;
                 if let Some((_, used_flags)) = it.next(match_stack) {
@@ -2430,7 +2427,7 @@ impl<'a> AtomView<'a> {
                     .iter()
                     .map(|r| {
                         (
-                            AtomMatchIterator::new(r.borrow().pattern, out.as_view()),
+                            AtomMatchIterator::new(r.borrow().pattern),
                             WrappedMatchStack::new(
                                 r.borrow().conditions.unwrap_or(&DEFAULT_PATTERN_CONDITION),
                                 r.borrow().settings.unwrap_or(&DEFAULT_MATCH_SETTINGS),
@@ -2489,7 +2486,7 @@ impl<'a> AtomView<'a> {
             .iter()
             .map(|r| {
                 (
-                    AtomMatchIterator::new(r.pattern, *self),
+                    AtomMatchIterator::new(r.pattern),
                     WrappedMatchStack::new(
                         r.conditions.unwrap_or(&DEFAULT_PATTERN_CONDITION),
                         r.settings.unwrap_or(&DEFAULT_MATCH_SETTINGS),
@@ -4703,6 +4700,19 @@ impl std::fmt::Debug for WrappedMatchStack<'_, '_> {
 }
 
 impl<'a, 'b> WrappedMatchStack<'a, 'b> {
+    pub fn from_replacement(replacement: BorrowedReplacement<'b>) -> WrappedMatchStack<'a, 'b> {
+        WrappedMatchStack {
+            stack: MatchStack::new(),
+            conditions: replacement.conditions.unwrap_or(&DEFAULT_PATTERN_CONDITION),
+            settings: replacement.settings.unwrap_or(&DEFAULT_MATCH_SETTINGS),
+        }
+    }
+
+    /// Clear the match stack.
+    pub fn reset(&mut self) {
+        self.stack.stack.clear();
+    }
+
     /// Create a new match stack wrapped with the conditions and settings.
     pub fn new(
         conditions: &'b Condition<PatternRestriction>,
@@ -4980,7 +4990,7 @@ impl<'a, 'b> AlternativeIter<'a, 'b> {
         AlternativeIter {
             variants: alternatives
                 .iter()
-                .map(|pattern| AtomMatchIterator::new(pattern, AtomView::ZERO))
+                .map(|pattern| AtomMatchIterator::new(pattern))
                 .collect(),
             variant_index: 0,
             match_stack_len: None,
@@ -5317,10 +5327,10 @@ pub struct AtomMatchIterator<'a, 'b> {
 }
 
 impl<'a, 'b> AtomMatchIterator<'a, 'b> {
-    pub fn new(pattern: &'b Pattern, target: AtomView<'a>) -> AtomMatchIterator<'a, 'b> {
+    pub fn new(pattern: &'b Pattern) -> AtomMatchIterator<'a, 'b> {
         AtomMatchIterator {
             matcher: AtomMatcher::new(pattern),
-            target,
+            target: AtomView::ZERO,
             used_flags: Vec::new(),
         }
     }
@@ -5498,7 +5508,7 @@ impl<'a, 'b> SubSliceIterator<'a, 'b> {
                     greedy: false,
                 }),
                 Pattern::Transformer(_) => panic!("Transformer is not allowed on lhs"),
-                _ => PatternIter::Node(None, Box::new(AtomMatchIterator::new(p, AtomView::ZERO))),
+                _ => PatternIter::Node(None, Box::new(AtomMatchIterator::new(p))),
             })
             .collect();
 
@@ -5974,6 +5984,19 @@ impl<'a, 'b> SubSliceIterator<'a, 'b> {
                             }
                         }
 
+                        // check if there are enough remaining indices to satisfy the wildcard size target
+                        if !self.cyclic {
+                            // indices are collected in increasing order
+                            let remaining_available = self.used_flag[start_index..]
+                                .iter()
+                                .filter(|used| !**used)
+                                .count();
+                            if w.indices.len() + remaining_available < w.size_target as usize {
+                                wildcard_forward_pass = false;
+                                continue 'next_wildcard_match;
+                            }
+                        }
+
                         // check for an empty slice match
                         if w.size_target == 0 && w.indices.is_empty() {
                             match match_stack.insert(w.name, optional_default_match.clone()) {
@@ -6308,7 +6331,7 @@ impl<'a: 'b, 'b> PatternAtomTreeIterator<'a, 'b> {
             conditions.unwrap_or(&DEFAULT_PATTERN_CONDITION),
             settings.unwrap_or(&DEFAULT_MATCH_SETTINGS),
         );
-        let mut pattern_iter = AtomMatchIterator::new(pattern, target);
+        let mut pattern_iter = AtomMatchIterator::new(pattern);
         pattern_iter.set_new_target(target, &match_stack);
 
         PatternAtomTreeIterator {
@@ -6608,6 +6631,22 @@ mod test {
         let mut it = pat.iter(parse!("g(x_,y_)"));
         assert_eq!(it.next(), Some(parse!("g(1,2)")));
         assert_eq!(it.next(), Some(parse!("g(2,1)")));
+    }
+
+    #[test]
+    fn exhaust_large_fixed_size_wildcard() {
+        let input = parse!(
+            "f(a0+a1+a2+a3+a4+a5+a6+a7+a8+a9+
+               a10+a11+a12+a13+a14+a15+a16+a17+a18+a19+
+               a20+a21+a22+a23+a24+a25+a26+a27+a28+x*y)"
+        );
+        let pattern = parse!("f(g__+x*h__)").to_pattern();
+        let settings = MatchSettings::default();
+
+        assert_eq!(
+            input.pattern_match(&pattern, None, Some(&settings)).count(),
+            1
+        );
     }
 
     #[test]
