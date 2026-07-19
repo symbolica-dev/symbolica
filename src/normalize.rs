@@ -1481,7 +1481,11 @@ impl AtomView<'_> {
                         mul_h.to_pow(p_base_base, exp_h.as_view());
                         mul_h.as_view().normalize(workspace, out);
                         break 'pow_simplify;
+                    } else if base.is_one() {
+                        out.to_num(Coefficient::one()); // 1^x = 1 for any non-infinite x
+                        return;
                     }
+
                     out.to_pow(base_handle.as_view(), exp_handle.as_view());
                 }
 
