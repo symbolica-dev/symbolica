@@ -3480,6 +3480,8 @@ impl<E: PositiveExponent> PolynomialGCD<E> for IntegerRing {
         MultivariatePolynomial::gcd_multiple(f)
     }
 
+    /// Compute the gcd of two multivariate polynomials using a combination of heuristics and Zippel's algorithm.
+    /// Assumes a and b are primitive in the main variable.
     fn gcd(
         a: &MultivariatePolynomial<Self, E>,
         b: &MultivariatePolynomial<Self, E>,
@@ -3657,10 +3659,10 @@ impl<E: PositiveExponent> PolynomialGCD<E> for RationalField {
         bounds: &mut [E],
     ) -> MultivariatePolynomial<Self, E> {
         // remove the content so that the polynomials have integer coefficients
-        let content = a.ring.gcd(&a.content(), &b.content());
-
-        let a_int = a.map_coeff(|c| a.ring.div(c, &content).numerator(), Z);
-        let b_int = b.map_coeff(|c| b.ring.div(c, &content).numerator(), Z);
+        let a_c = a.content();
+        let a_int = a.map_coeff(|c| a.ring.div(c, &a_c).numerator(), Z);
+        let b_c = b.content();
+        let b_int = b.map_coeff(|c| b.ring.div(c, &b_c).numerator(), Z);
 
         PolynomialGCD::gcd(&a_int, &b_int, vars, bounds)
             .map_coeff(|c| c.to_rational(), Q)
@@ -3673,10 +3675,10 @@ impl<E: PositiveExponent> PolynomialGCD<E> for RationalField {
         vars: &[usize],
     ) -> SmallVec<[E; INLINED_EXPONENTS]> {
         // remove the content so that the polynomials have integer coefficients
-        let content = a.ring.gcd(&a.content(), &b.content());
-
-        let a_int = a.map_coeff(|c| a.ring.div(c, &content).numerator(), Z);
-        let b_int = b.map_coeff(|c| b.ring.div(c, &content).numerator(), Z);
+        let a_c = a.content();
+        let a_int = a.map_coeff(|c| a.ring.div(c, &a_c).numerator(), Z);
+        let b_c = b.content();
+        let b_int = b.map_coeff(|c| b.ring.div(c, &b_c).numerator(), Z);
 
         PolynomialGCD::get_gcd_var_bounds(&a_int, &b_int, vars)
     }
