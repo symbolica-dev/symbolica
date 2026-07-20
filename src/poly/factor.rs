@@ -3893,9 +3893,9 @@ impl<E: PositiveExponent> MultivariatePolynomial<IntegerRing, E, LexOrder> {
                 return false;
             }
 
-            let sqf = poly_eval.square_free_factorization();
-            if sqf.len() != 1 || sqf[0].1 != 1 {
-                return false;
+            let derivative = poly_eval.derivative(var);
+            if !poly_eval.gcd(&derivative).is_constant() {
+                return false; // not square-free
             }
         }
 
