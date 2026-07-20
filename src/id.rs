@@ -2085,7 +2085,7 @@ impl<'a> AtomView<'a> {
                 match_stack.reset();
                 match_iter.set_new_target(*self, match_stack);
                 let it = match_iter;
-                if let Some((_, used_flags)) = it.next(match_stack) {
+                if let Some(used_flags) = it.next(match_stack) {
                     let mut rhs_subs = workspace.new_atom();
 
                     let key = (rep_id, std::mem::take(&mut match_stack.stack.stack));
@@ -4870,6 +4870,25 @@ struct WildcardIter {
     min_size: u32,
     max_size: u32,
     greedy: bool,
+    resume_point: Option<Checkpoint>,
+}
+
+/// A checkpoint in the match stack that can be used to restore the stack to a previous state.
+#[derive(Clone, Copy, Debug)]
+struct Checkpoint(usize);
+
+impl Checkpoint {
+    fn new(stack_len: usize) -> Self {
+        Self(stack_len)
+    }
+
+    fn restore(self, match_stack: &mut WrappedMatchStack<'_, '_>) {
+        debug_assert!(
+            match_stack.len() >= self.0,
+            "match stack was cleaned past its frame"
+        );
+        match_stack.truncate(self.0);
+    }
 }
 
 #[derive(Debug)]
@@ -4883,7 +4902,7 @@ struct FnMatchIterator<'a, 'b> {
     initialized: bool,
     name: Symbol,
     args: SubSliceIterator<'a, 'b>,
-    match_stack_len: Option<usize>,
+    target: AtomView<'a>,
 }
 
 impl<'a, 'b> FnMatchIterator<'a, 'b> {
@@ -4892,49 +4911,30 @@ impl<'a, 'b> FnMatchIterator<'a, 'b> {
             initialized: false,
             name,
             args: SubSliceIterator::new(args, SliceType::Arg),
-            match_stack_len: None,
+            target: AtomView::ZERO,
         }
     }
 
-    fn reset(&mut self) {
+    fn set_target(&mut self, target: AtomView<'a>) {
         self.initialized = false;
-        self.match_stack_len = None;
+        self.target = target;
     }
 
-    fn clear_current(&mut self, match_stack: &mut WrappedMatchStack<'a, 'b>) {
-        if let Some(match_stack_len) = self.match_stack_len.take() {
-            match_stack.truncate(match_stack_len); // truncate to before the function name was matched
-        } else if let Some(match_stack_len) = self.args.matches.first().copied() {
-            match_stack.truncate(match_stack_len); // truncate to before the first argument was matched
-        }
-    }
-
-    fn next(
-        &mut self,
-        target: AtomView<'a>,
-        match_stack: &mut WrappedMatchStack<'a, 'b>,
-    ) -> Result<usize, MatchError> {
+    fn next(&mut self, match_stack: &mut WrappedMatchStack<'a, 'b>) -> Result<(), MatchError> {
         if !self.initialized {
             self.initialized = true;
-            let stack_len = match_stack.len();
 
-            match target {
+            match self.target {
                 AtomView::Fun(f) => {
                     let target_name = f.get_symbol();
-                    let name_match_stack_len = if self.name.get_wildcard_level() > 0 {
-                        match match_stack.insert(self.name, Match::FunctionName(target_name)) {
-                            Ok(new_stack_len) => new_stack_len,
-                            Err(e) => return Err(e),
-                        }
-                    } else if target_name == self.name {
-                        stack_len
-                    } else {
+                    if self.name.get_wildcard_level() > 0 {
+                        match_stack.insert(self.name, Match::FunctionName(target_name))?;
+                    } else if target_name != self.name {
                         return Err(MatchError::StructurallyImpossible);
-                    };
+                    }
 
-                    self.match_stack_len = Some(name_match_stack_len);
                     self.args.set_list_target(
-                        target,
+                        self.target,
                         match_stack,
                         true,
                         !target_name.is_antisymmetric() && !target_name.is_symmetric(),
@@ -4947,18 +4947,12 @@ impl<'a, 'b> FnMatchIterator<'a, 'b> {
                     }
 
                     let target_name = v.get_symbol();
-                    let name_match_stack_len = if self.name.get_wildcard_level() > 0 {
-                        match match_stack.insert(self.name, Match::FunctionName(target_name)) {
-                            Ok(new_stack_len) => new_stack_len,
-                            Err(e) => return Err(e),
-                        }
-                    } else if target_name == self.name {
-                        stack_len
-                    } else {
+                    if self.name.get_wildcard_level() > 0 {
+                        match_stack.insert(self.name, Match::FunctionName(target_name))?;
+                    } else if target_name != self.name {
                         return Err(MatchError::StructurallyImpossible);
-                    };
+                    }
 
-                    self.match_stack_len = Some(name_match_stack_len);
                     self.args
                         .set_empty_list_target(match_stack, true, true, false);
                 }
@@ -4966,13 +4960,7 @@ impl<'a, 'b> FnMatchIterator<'a, 'b> {
             }
         }
 
-        match self.args.next(match_stack) {
-            Ok((new_stack_len, _)) => Ok(new_stack_len),
-            Err(e) => {
-                self.clear_current(match_stack);
-                Err(e)
-            }
-        }
+        self.args.next(match_stack).map(|_| ())
     }
 }
 
@@ -4980,7 +4968,7 @@ impl<'a, 'b> FnMatchIterator<'a, 'b> {
 struct AlternativeIter<'a, 'b> {
     variants: Vec<AtomMatchIterator<'a, 'b>>,
     variant_index: usize,
-    match_stack_len: Option<usize>,
+    variant_initialized: bool,
     target: AtomView<'a>,
     structural_impossible: bool,
 }
@@ -4993,7 +4981,7 @@ impl<'a, 'b> AlternativeIter<'a, 'b> {
                 .map(|pattern| AtomMatchIterator::new(pattern))
                 .collect(),
             variant_index: 0,
-            match_stack_len: None,
+            variant_initialized: false,
             target: AtomView::ZERO,
             structural_impossible: true,
         }
@@ -5001,31 +4989,24 @@ impl<'a, 'b> AlternativeIter<'a, 'b> {
 
     fn set_target(&mut self, target: AtomView<'a>) {
         self.variant_index = 0;
-        self.match_stack_len = None;
+        self.variant_initialized = false;
         self.target = target;
         self.structural_impossible = true;
     }
 
-    fn clear_current(&mut self, match_stack: &mut WrappedMatchStack<'a, 'b>) {
-        if let Some(match_stack_len) = self.match_stack_len.take() {
-            match_stack.truncate(match_stack_len);
-        }
-    }
-
-    fn next(&mut self, match_stack: &mut WrappedMatchStack<'a, 'b>) -> Result<usize, MatchError> {
+    fn next(&mut self, match_stack: &mut WrappedMatchStack<'a, 'b>) -> Result<(), MatchError> {
         while self.variant_index < self.variants.len() {
             let variant_index = self.variant_index;
 
-            if self.match_stack_len.is_none() {
-                let match_stack_len = match_stack.len();
-                self.match_stack_len = Some(match_stack_len);
+            if !self.variant_initialized {
                 self.variants[variant_index].set_new_target_complete(self.target, match_stack);
+                self.variant_initialized = true;
             }
 
             match self.variants[variant_index].next_result(match_stack) {
                 Ok(_) => {
                     self.structural_impossible = false;
-                    return Ok(self.match_stack_len.unwrap());
+                    return Ok(());
                 }
                 Err(e) => {
                     if !matches!(e, MatchError::StructurallyImpossible) {
@@ -5034,8 +5015,8 @@ impl<'a, 'b> AlternativeIter<'a, 'b> {
                 }
             }
 
-            self.clear_current(match_stack);
             self.variant_index += 1;
+            self.variant_initialized = false;
         }
 
         if self.structural_impossible {
@@ -5064,23 +5045,17 @@ impl<'b> LiteralAtomIter<'b> {
         self.try_match_atom = true;
     }
 
-    fn next<'a>(
-        &mut self,
-        target: AtomView<'a>,
-        match_stack: &WrappedMatchStack<'a, 'b>,
-    ) -> Result<usize, MatchError> {
+    fn next<'a>(&mut self, target: AtomView<'a>) -> Result<(), MatchError> {
         if self.try_match_atom {
             self.try_match_atom = false;
 
             if self.literal.as_view() == target {
-                return Ok(match_stack.len());
+                return Ok(());
             }
         }
 
         Err(MatchError::StructurallyImpossible)
     }
-
-    fn clear_current(&mut self, _match_stack: &mut WrappedMatchStack<'_, 'b>) {}
 }
 
 #[derive(Debug)]
@@ -5090,7 +5065,6 @@ struct SliceAtomIter<'a, 'b> {
     iter: SubSliceIterator<'a, 'b>,
     single_atom_fallback: Option<AtomView<'a>>,
     used_flags: Vec<bool>,
-    match_stack_len: Option<usize>,
 }
 
 impl<'a, 'b> SliceAtomIter<'a, 'b> {
@@ -5101,7 +5075,6 @@ impl<'a, 'b> SliceAtomIter<'a, 'b> {
             iter: SubSliceIterator::new(pat_list, slice_type),
             single_atom_fallback: None,
             used_flags: Vec::new(),
-            match_stack_len: None,
         }
     }
 
@@ -5112,7 +5085,6 @@ impl<'a, 'b> SliceAtomIter<'a, 'b> {
         force_complete: bool,
     ) {
         self.target = target;
-        self.match_stack_len = Some(match_stack.len());
         self.single_atom_fallback = self
             .iter
             .can_match_list_atom_as_single_with_optional(self.target)
@@ -5132,29 +5104,27 @@ impl<'a, 'b> SliceAtomIter<'a, 'b> {
     fn next(
         &mut self,
         match_stack: &mut WrappedMatchStack<'a, 'b>,
-    ) -> Result<(usize, Option<&[bool]>), MatchError> {
+    ) -> Result<Option<&[bool]>, MatchError> {
         let primary_error = match self.iter.next(match_stack) {
-            Ok((new_stack_len, used_flags)) => {
+            Ok(used_flags) => {
                 self.used_flags.clear();
                 self.used_flags.extend_from_slice(used_flags);
-                return Ok((new_stack_len, Some(&self.used_flags)));
+                return Ok(Some(&self.used_flags));
             }
             Err(e) => e,
         };
 
         if let Some(target) = self.single_atom_fallback.take() {
-            self.clear_current(match_stack);
             let complete = self.iter.complete;
             self.iter.set_single_atom_target(target, complete);
 
             match self.iter.next(match_stack) {
-                Ok((new_stack_len, used_flags)) => {
+                Ok(used_flags) => {
                     self.used_flags.clear();
                     self.used_flags.extend_from_slice(used_flags);
-                    Ok((new_stack_len, Some(&self.used_flags)))
+                    Ok(Some(&self.used_flags))
                 }
                 Err(fallback_error) => {
-                    self.clear_current(match_stack);
                     if matches!(primary_error, MatchError::StructurallyImpossible)
                         && matches!(fallback_error, MatchError::StructurallyImpossible)
                     {
@@ -5165,16 +5135,7 @@ impl<'a, 'b> SliceAtomIter<'a, 'b> {
                 }
             }
         } else {
-            self.clear_current(match_stack);
             Err(primary_error)
-        }
-    }
-
-    fn clear_current(&mut self, match_stack: &mut WrappedMatchStack<'a, 'b>) {
-        if let Some(old_match_stack_len) = self.iter.matches.first().copied() {
-            match_stack.truncate(old_match_stack_len);
-        } else if let Some(old_match_stack_len) = self.match_stack_len {
-            match_stack.truncate(old_match_stack_len);
         }
     }
 }
@@ -5184,7 +5145,7 @@ struct WildcardAtomIter<'a, 'b> {
     name: Symbol,
     optional: bool,
     try_match_atom: bool,
-    direct_match_stack_len: Option<usize>,
+    direct_resume_point: Option<Checkpoint>,
     slice: SliceAtomIter<'a, 'b>,
 }
 
@@ -5194,7 +5155,7 @@ impl<'a, 'b> WildcardAtomIter<'a, 'b> {
             name,
             optional,
             try_match_atom: true,
-            direct_match_stack_len: None,
+            direct_resume_point: None,
             slice: SliceAtomIter::new(pattern, std::slice::from_ref(pattern), SliceType::One),
         }
     }
@@ -5206,7 +5167,7 @@ impl<'a, 'b> WildcardAtomIter<'a, 'b> {
         force_complete: bool,
     ) {
         self.try_match_atom = true;
-        self.direct_match_stack_len = None;
+        self.direct_resume_point = None;
         self.slice.set_target(target, match_stack, force_complete);
     }
 
@@ -5214,7 +5175,7 @@ impl<'a, 'b> WildcardAtomIter<'a, 'b> {
         &mut self,
         target: AtomView<'a>,
         match_stack: &mut WrappedMatchStack<'a, 'b>,
-    ) -> Result<(usize, Option<&[bool]>), MatchError> {
+    ) -> Result<Option<&[bool]>, MatchError> {
         if self.try_match_atom {
             self.try_match_atom = false;
 
@@ -5223,24 +5184,16 @@ impl<'a, 'b> WildcardAtomIter<'a, 'b> {
                 && range.1.map(|w| w >= 1).unwrap_or(true)
                 && let Ok(new_stack_len) = match_stack.insert(self.name, Match::Single(target))
             {
-                self.direct_match_stack_len = Some(new_stack_len);
-                return Ok((new_stack_len, None));
+                self.direct_resume_point = Some(Checkpoint::new(new_stack_len));
+                return Ok(None);
             }
         }
 
-        if let Some(old_match_stack_len) = self.direct_match_stack_len.take() {
-            match_stack.truncate(old_match_stack_len);
+        if let Some(resume_point) = self.direct_resume_point.take() {
+            resume_point.restore(match_stack);
         }
 
         self.slice.next(match_stack)
-    }
-
-    fn clear_current(&mut self, match_stack: &mut WrappedMatchStack<'a, 'b>) {
-        if let Some(old_match_stack_len) = self.direct_match_stack_len.take() {
-            match_stack.truncate(old_match_stack_len);
-        } else {
-            self.slice.clear_current(match_stack);
-        }
     }
 }
 
@@ -5287,7 +5240,7 @@ impl<'a, 'b> AtomMatcher<'a, 'b> {
             AtomMatcher::Literal(iter) => iter.set_target(),
             AtomMatcher::Wildcard(iter) => iter.set_target(target, match_stack, force_complete),
             AtomMatcher::Slice(iter) => iter.set_target(target, match_stack, force_complete),
-            AtomMatcher::Function(iter) => iter.reset(),
+            AtomMatcher::Function(iter) => iter.set_target(target),
             AtomMatcher::Alternative(iter) => iter.set_target(target),
         }
     }
@@ -5296,23 +5249,13 @@ impl<'a, 'b> AtomMatcher<'a, 'b> {
         &mut self,
         target: AtomView<'a>,
         match_stack: &mut WrappedMatchStack<'a, 'b>,
-    ) -> Result<(usize, Option<&[bool]>), MatchError> {
+    ) -> Result<Option<&[bool]>, MatchError> {
         match self {
-            AtomMatcher::Literal(iter) => iter.next(target, match_stack).map(|len| (len, None)),
+            AtomMatcher::Literal(iter) => iter.next(target).map(|_| None),
             AtomMatcher::Wildcard(iter) => iter.next(target, match_stack),
             AtomMatcher::Slice(iter) => iter.next(match_stack),
-            AtomMatcher::Function(iter) => iter.next(target, match_stack).map(|len| (len, None)),
-            AtomMatcher::Alternative(iter) => iter.next(match_stack).map(|len| (len, None)),
-        }
-    }
-
-    fn clear_current(&mut self, match_stack: &mut WrappedMatchStack<'a, 'b>) {
-        match self {
-            AtomMatcher::Literal(iter) => iter.clear_current(match_stack),
-            AtomMatcher::Wildcard(iter) => iter.clear_current(match_stack),
-            AtomMatcher::Slice(iter) => iter.clear_current(match_stack),
-            AtomMatcher::Function(iter) => iter.clear_current(match_stack),
-            AtomMatcher::Alternative(iter) => iter.clear_current(match_stack),
+            AtomMatcher::Function(iter) => iter.next(match_stack).map(|_| None),
+            AtomMatcher::Alternative(iter) => iter.next(match_stack).map(|_| None),
         }
     }
 }
@@ -5324,6 +5267,7 @@ pub struct AtomMatchIterator<'a, 'b> {
     matcher: AtomMatcher<'a, 'b>,
     target: AtomView<'a>,
     used_flags: Vec<bool>,
+    frame: Option<Checkpoint>,
 }
 
 impl<'a, 'b> AtomMatchIterator<'a, 'b> {
@@ -5332,6 +5276,7 @@ impl<'a, 'b> AtomMatchIterator<'a, 'b> {
             matcher: AtomMatcher::new(pattern),
             target: AtomView::ZERO,
             used_flags: Vec::new(),
+            frame: None,
         }
     }
 
@@ -5362,30 +5307,35 @@ impl<'a, 'b> AtomMatchIterator<'a, 'b> {
         force_complete: bool,
     ) {
         self.target = target;
+        self.frame = Some(Checkpoint::new(match_stack.len()));
         self.matcher.set_target(target, match_stack, force_complete);
     }
 
-    pub fn next(
-        &mut self,
-        match_stack: &mut WrappedMatchStack<'a, 'b>,
-    ) -> Option<(usize, &[bool])> {
+    pub fn next(&mut self, match_stack: &mut WrappedMatchStack<'a, 'b>) -> Option<&[bool]> {
         self.next_result(match_stack).ok()
     }
 
     pub fn next_result(
         &mut self,
         match_stack: &mut WrappedMatchStack<'a, 'b>,
-    ) -> Result<(usize, &[bool]), MatchError> {
-        let (new_stack_len, used_flags) = self.matcher.next(self.target, match_stack)?;
-        self.used_flags.clear();
-        if let Some(used_flags) = used_flags {
-            self.used_flags.extend_from_slice(used_flags);
+    ) -> Result<&[bool], MatchError> {
+        match self.matcher.next(self.target, match_stack) {
+            Ok(used_flags) => {
+                self.used_flags.clear();
+                if let Some(used_flags) = used_flags {
+                    self.used_flags.extend_from_slice(used_flags);
+                }
+                Ok(&self.used_flags)
+            }
+            Err(e) => {
+                self.frame.unwrap().restore(match_stack);
+                Err(e)
+            }
         }
-        Ok((new_stack_len, &self.used_flags))
     }
 
-    fn clear_current(&mut self, match_stack: &mut WrappedMatchStack<'a, 'b>) {
-        self.matcher.clear_current(match_stack);
+    fn discard_current(&mut self, match_stack: &mut WrappedMatchStack<'a, 'b>) {
+        self.frame.unwrap().restore(match_stack);
     }
 }
 
@@ -5474,7 +5424,7 @@ pub struct SubSliceIterator<'a, 'b> {
     compatibility_flag: Vec<u64>, // track which iterators are compatible with which index
     initialized: bool,
     processed_iterators: usize,
-    matches: Vec<usize>,   // track match stack length
+    frame: Option<Checkpoint>,
     complete: bool,        // match needs to consume entire target
     ordered_gapless: bool, // pattern should appear ordered and have no gaps
     cyclic: bool,          // pattern is cyclic
@@ -5506,6 +5456,7 @@ impl<'a, 'b> SubSliceIterator<'a, 'b> {
                     min_size: 0,
                     max_size: 0,
                     greedy: false,
+                    resume_point: None,
                 }),
                 Pattern::Transformer(_) => panic!("Transformer is not allowed on lhs"),
                 _ => PatternIter::Node(None, Box::new(AtomMatchIterator::new(p))),
@@ -5515,12 +5466,12 @@ impl<'a, 'b> SubSliceIterator<'a, 'b> {
         SubSliceIterator {
             pattern,
             iterators,
-            matches: Vec::with_capacity(pattern.len()),
             used_flag: Vec::with_capacity(pattern.len()),
             compatibility_flag: Vec::with_capacity(pattern.len()),
             target: TypedSlice::empty(),
             initialized: false,
             processed_iterators: 0,
+            frame: None,
             complete: false,
             ordered_gapless: false,
             cyclic: false,
@@ -5587,7 +5538,6 @@ impl<'a, 'b> SubSliceIterator<'a, 'b> {
 
     fn set_single_atom_target(&mut self, target: AtomView<'a>, complete: bool) {
         self.target.set_one(target);
-        self.matches.clear();
         self.used_flag.clear();
         self.compatibility_flag.clear();
         self.used_flag.resize(self.target.len(), false);
@@ -5671,7 +5621,6 @@ impl<'a, 'b> SubSliceIterator<'a, 'b> {
             shortcut_done = true;
         };
 
-        self.matches.clear();
         self.used_flag.clear();
         self.compatibility_flag.clear();
         if !shortcut_done {
@@ -5686,6 +5635,7 @@ impl<'a, 'b> SubSliceIterator<'a, 'b> {
         self.cyclic = false;
         self.do_not_match_to_single_atom_in_list = do_not_match_to_single_atom_in_list;
         self.do_not_match_entire_slice = do_not_match_entire_slice;
+        self.frame = Some(Checkpoint::new(match_stack.len()));
     }
 
     /// Create a new sub-slice iterator.
@@ -5728,7 +5678,6 @@ impl<'a, 'b> SubSliceIterator<'a, 'b> {
             shortcut_done = true;
         };
 
-        self.matches.clear();
         self.used_flag.clear();
         self.compatibility_flag.clear();
         self.used_flag.resize(self.target.len(), false);
@@ -5740,6 +5689,7 @@ impl<'a, 'b> SubSliceIterator<'a, 'b> {
         self.cyclic = cyclic;
         self.do_not_match_to_single_atom_in_list = false;
         self.do_not_match_entire_slice = false;
+        self.frame = Some(Checkpoint::new(match_stack.len()));
     }
 
     /// Set an empty list target for degenerate matches such as `f(x___)` matching
@@ -5766,7 +5716,6 @@ impl<'a, 'b> SubSliceIterator<'a, 'b> {
             shortcut_done = true;
         };
 
-        self.matches.clear();
         self.used_flag.clear();
         self.compatibility_flag.clear();
         self.initialized = shortcut_done;
@@ -5776,17 +5725,15 @@ impl<'a, 'b> SubSliceIterator<'a, 'b> {
         self.cyclic = cyclic;
         self.do_not_match_to_single_atom_in_list = false;
         self.do_not_match_entire_slice = false;
+        self.frame = Some(Checkpoint::new(match_stack.len()));
     }
 
-    /// Get the next matches, where the map of matches is written into `match_stack`.
-    /// The function returns the length of the match stack before the last subiterator
-    /// matched. This value can be ignored by the end-user. If `None` is returned,
-    /// all potential matches will have been generated and the iterator will generate
-    /// `None` if called again.
+    /// Get the next match, writing wildcard bindings into `match_stack`.
+    /// On error, all bindings owned by this iterator have been removed.
     pub fn next(
         &mut self,
         match_stack: &mut WrappedMatchStack<'a, 'b>,
-    ) -> Result<(usize, &[bool]), MatchError> {
+    ) -> Result<&[bool], MatchError> {
         let mut forward_pass = !self.initialized;
         self.initialized = true;
 
@@ -5795,11 +5742,13 @@ impl<'a, 'b> SubSliceIterator<'a, 'b> {
 
         'next_match: loop {
             if !forward_pass && self.processed_iterators == 0 {
-                if structural_mismatch {
-                    return Err(MatchError::StructurallyImpossible);
+                let error = if structural_mismatch {
+                    MatchError::StructurallyImpossible
                 } else {
-                    return Err(MatchError::NoMoreMatches); // done as all options have been exhausted
-                }
+                    MatchError::NoMoreMatches
+                };
+                self.frame.unwrap().restore(match_stack);
+                return Err(error);
             }
 
             if forward_pass && self.processed_iterators == self.pattern.len() {
@@ -5813,7 +5762,7 @@ impl<'a, 'b> SubSliceIterator<'a, 'b> {
                     forward_pass = false;
                 } else {
                     // yield the current match
-                    return Ok((*self.matches.last().unwrap(), &self.used_flag));
+                    return Ok(&self.used_flag);
                 }
             }
 
@@ -5912,6 +5861,7 @@ impl<'a, 'b> SubSliceIterator<'a, 'b> {
                         w.min_size = range.0 as u32;
                         w.max_size = range.1 as u32;
                         w.greedy = greedy;
+                        w.resume_point = None;
                     }
                     (Pattern::Transformer(_), _) => panic!("Transformer is not allowed on lhs"),
                     (_, PatternIter::Node(index, _)) => *index = None,
@@ -5919,9 +5869,6 @@ impl<'a, 'b> SubSliceIterator<'a, 'b> {
                 }
 
                 self.processed_iterators += 1;
-            } else {
-                // update an existing iterator, so pop the latest matches (this implies every iter pushes to the match)
-                match_stack.truncate(self.matches.pop().unwrap());
             }
 
             // assume we are in forward pass mode
@@ -5933,6 +5880,10 @@ impl<'a, 'b> SubSliceIterator<'a, 'b> {
                 PatternIter::Wildcard(w) => {
                     let mut wildcard_forward_pass = !w.initialized;
                     w.initialized = true;
+
+                    if !wildcard_forward_pass {
+                        w.resume_point.take().unwrap().restore(match_stack);
+                    }
 
                     'next_wildcard_match: loop {
                         // a wildcard collects indices in increasing order
@@ -6001,7 +5952,7 @@ impl<'a, 'b> SubSliceIterator<'a, 'b> {
                         if w.size_target == 0 && w.indices.is_empty() {
                             match match_stack.insert(w.name, optional_default_match.clone()) {
                                 Ok(new_stack_len) => {
-                                    self.matches.push(new_stack_len);
+                                    w.resume_point = Some(Checkpoint::new(new_stack_len));
                                     continue 'next_match;
                                 }
                                 Err(MatchError::StructurallyImpossible) => {}
@@ -6085,7 +6036,7 @@ impl<'a, 'b> SubSliceIterator<'a, 'b> {
                                 // add the match to the stack if it is compatible
                                 match match_stack.insert(w.name, matched) {
                                     Ok(new_stack_len) => {
-                                        self.matches.push(new_stack_len);
+                                        w.resume_point = Some(Checkpoint::new(new_stack_len));
                                         continue 'next_match;
                                     }
                                     Err(MatchError::StructurallyImpossible) => {
@@ -6122,8 +6073,7 @@ impl<'a, 'b> SubSliceIterator<'a, 'b> {
                             // get the next iteration of the function
                             if !structural_mismatch {
                                 match s.next_result(match_stack) {
-                                    Ok((x, _)) => {
-                                        self.matches.push(x);
+                                    Ok(_) => {
                                         continue 'next_match;
                                     }
                                     Err(_) => {}
@@ -6131,8 +6081,8 @@ impl<'a, 'b> SubSliceIterator<'a, 'b> {
                             } else {
                                 // there is a structural mismatch for a future iterator, so
                                 // this iterator needs to move its position in the target list
-                                // clear all matches from this iterator
-                                s.clear_current(match_stack);
+                                // discard all matches from this iterator
+                                s.discard_current(match_stack);
                             }
 
                             self.used_flag[*jj] = false;
@@ -6182,9 +6132,8 @@ impl<'a, 'b> SubSliceIterator<'a, 'b> {
                         s.set_new_target_complete(new_target, match_stack);
 
                         match s.next_result(match_stack) {
-                            Ok((x, _)) => {
+                            Ok(_) => {
                                 *index = Some(ii);
-                                self.matches.push(x);
                                 self.used_flag[ii] = true;
 
                                 continue 'next_match;
@@ -6348,7 +6297,7 @@ impl<'a: 'b, 'b> PatternAtomTreeIterator<'a, 'b> {
     /// matched position. Use the iterator [Self::next] to obtain a map of wildcard matches.
     pub fn next_detailed(&mut self) -> Option<PatternMatch<'a, '_>> {
         loop {
-            if let Some((_, used_flags)) = self.pattern_iter.next(&mut self.match_stack) {
+            if let Some(used_flags) = self.pattern_iter.next(&mut self.match_stack) {
                 self.used_flags.clear();
                 self.used_flags.extend_from_slice(used_flags);
 
@@ -6593,6 +6542,9 @@ impl<'a: 'b, 'b> Iterator for ReplaceIterator<'a, 'b> {
 
 #[cfg(test)]
 mod test {
+    use super::{
+        AtomMatchIterator, DEFAULT_MATCH_SETTINGS, DEFAULT_PATTERN_CONDITION, WrappedMatchStack,
+    };
     use crate::{
         atom::{Atom, AtomCore, AtomType},
         id::{AtomTreeIterator, Condition, ConditionResult, Match, MatchSettings, Replacement},
@@ -6983,82 +6935,352 @@ mod test {
 
     #[test]
     fn alternative() {
-        let pat = (parse!("x").to_pattern() | parse!("y").to_pattern())
-            * crate::parse!("x_").to_pattern();
+        let pat = (parse!("x").to_pattern() | parse!("y").to_pattern()) * parse!("x_").to_pattern();
 
-        assert_eq!(crate::parse!("alt(x,y)*x_"), pat.to_atom().unwrap());
+        assert_eq!(parse!("alt(x,y)*x_"), pat.to_atom().unwrap());
 
-        let rhs = crate::parse!("f(x_)").to_pattern();
+        let rhs = parse!("f(x_)").to_pattern();
 
-        let e = crate::parse!("x*z").replace(&pat).with(&rhs);
-        assert_eq!(e, crate::parse!("f(z)"));
+        let e = parse!("x*z").replace(&pat).with(&rhs);
+        assert_eq!(e, parse!("f(z)"));
 
-        let e = crate::parse!("y*z").replace(&pat).with(&rhs);
-        assert_eq!(e, crate::parse!("f(z)"));
+        let e = parse!("y*z").replace(&pat).with(&rhs);
+        assert_eq!(e, parse!("f(z)"));
 
-        let e = crate::parse!("a*z").replace(&pat).with(&rhs);
-        assert_eq!(e, crate::parse!("a*z"));
+        let e = parse!("a*z").replace(&pat).with(&rhs);
+        assert_eq!(e, parse!("a*z"));
     }
 
     #[test]
     fn match_stack_reset_during_backtracking() {
-        let replacements = crate::parse!("f(1)*g(2)*g(3)")
-            .replace(crate::parse!("h_(x_)*h_(y_)"))
-            .iter(crate::parse!("hit(h_,x_,y_)"))
+        let replacements = parse!("f(1)*g(2)*g(3)")
+            .replace(parse!("h_(x_)*h_(y_)"))
+            .iter(parse!("hit(h_,x_,y_)"))
             .collect::<Vec<_>>();
-        let expected = [
-            crate::parse!("f(1)*hit(g,2,3)"),
-            crate::parse!("f(1)*hit(g,3,2)"),
-        ];
+        let expected = [parse!("f(1)*hit(g,2,3)"), parse!("f(1)*hit(g,3,2)")];
         assert_eq!(replacements.len(), expected.len());
         assert_contains_all(&replacements, &expected);
 
-        let alt = crate::parse!("f(x_,0)").to_pattern() | crate::parse!("f(0,x_)").to_pattern();
-        let pat = alt * crate::parse!("f(x_,1)").to_pattern();
-        let replacements = crate::parse!("f(1,0)*f(0,2)*f(2,1)")
+        let alt = parse!("f(x_,0)").to_pattern() | parse!("f(0,x_)").to_pattern();
+        let pat = alt * parse!("f(x_,1)").to_pattern();
+        let replacements = parse!("f(1,0)*f(0,2)*f(2,1)")
             .replace(&pat)
-            .iter(crate::parse!("hit(x_)"))
+            .iter(parse!("hit(x_)"))
             .collect::<Vec<_>>();
-        let expected = [crate::parse!("f(1,0)*hit(2)")];
+        let expected = [parse!("f(1,0)*hit(2)")];
         assert_eq!(replacements.len(), expected.len());
         assert_contains_all(&replacements, &expected);
 
-        let pat = crate::parse!("g(x_*o_)*f(x_)")
+        let pat = parse!("g(x_*o_)*f(x_)")
             .to_pattern()
-            .set_optional(crate::symbol!("o_"));
-        let replacements = crate::parse!("g(a*b)*f(a*b)")
+            .set_optional(symbol!("o_"));
+        let replacements = parse!("g(a*b)*f(a*b)")
             .replace(&pat)
-            .iter(crate::parse!("hit(x_,o_)"))
+            .iter(parse!("hit(x_,o_)"))
             .collect::<Vec<_>>();
-        let expected = [crate::parse!("hit(a*b,1)")];
+        let expected = [parse!("hit(a*b,1)")];
         assert_eq!(replacements.len(), expected.len());
         assert_contains_all(&replacements, &expected);
     }
 
     #[test]
+    fn match_iterator_owns_cleanup_boundary() {
+        let outer_value = parse!("z");
+        let target = parse!("f(a,g(b))");
+        let pattern = parse!("f(x_,g(y_))").to_pattern();
+        let outer = symbol!("outer_");
+        let mut match_stack =
+            WrappedMatchStack::new(&DEFAULT_PATTERN_CONDITION, &DEFAULT_MATCH_SETTINGS);
+        assert!(
+            match_stack
+                .insert(outer, Match::Single(outer_value.as_view()))
+                .is_ok()
+        );
+
+        let mut iter = AtomMatchIterator::new(&pattern);
+        iter.set_new_target(target.as_view(), &match_stack);
+        assert!(iter.next_result(&mut match_stack).is_ok());
+        assert!(match_stack.len() > 1);
+
+        iter.discard_current(&mut match_stack);
+        assert_eq!(match_stack.len(), 1);
+        assert_eq!(
+            match_stack.stack.get(outer),
+            Some(&Match::Single(outer_value.as_view()))
+        );
+
+        iter.set_new_target(target.as_view(), &match_stack);
+        while iter.next_result(&mut match_stack).is_ok() {}
+        assert_eq!(match_stack.len(), 1);
+        assert!(iter.next_result(&mut match_stack).is_err());
+        assert_eq!(match_stack.len(), 1);
+    }
+
+    #[test]
+    fn discard_match_that_adds_no_binding() {
+        let target = parse!("a");
+        let pattern = parse!("x_").to_pattern();
+        let wildcard = symbol!("x_");
+        let mut match_stack =
+            WrappedMatchStack::new(&DEFAULT_PATTERN_CONDITION, &DEFAULT_MATCH_SETTINGS);
+        assert!(
+            match_stack
+                .insert(wildcard, Match::Single(target.as_view()))
+                .is_ok()
+        );
+
+        let mut iter = AtomMatchIterator::new(&pattern);
+        iter.set_new_target(target.as_view(), &match_stack);
+        assert!(iter.next_result(&mut match_stack).is_ok());
+        assert_eq!(match_stack.len(), 1);
+
+        iter.discard_current(&mut match_stack);
+        assert_eq!(match_stack.len(), 1);
+    }
+
+    #[test]
+    fn nested_function_bindings_restore_to_the_outer_frame() {
+        let outer_value = parse!("sentinel");
+        let target = parse!("g(a(b),c(d))");
+        let pattern = parse!("g(f_(x_),h_(y_))").to_pattern();
+        let outer = symbol!("outer_");
+        let f = symbol!("f_");
+        let h = symbol!("h_");
+        let x = symbol!("x_");
+        let y = symbol!("y_");
+        let mut match_stack =
+            WrappedMatchStack::new(&DEFAULT_PATTERN_CONDITION, &DEFAULT_MATCH_SETTINGS);
+        assert!(
+            match_stack
+                .insert(outer, Match::Single(outer_value.as_view()))
+                .is_ok()
+        );
+
+        let mut iter = AtomMatchIterator::new(&pattern);
+        iter.set_new_target_complete(target.as_view(), &match_stack);
+        assert!(iter.next_result(&mut match_stack).is_ok());
+        assert_eq!(match_stack.len(), 5);
+        assert_eq!(
+            match_stack.stack.get(f),
+            Some(&Match::FunctionName(symbol!("a")))
+        );
+        assert_eq!(
+            match_stack.stack.get(h),
+            Some(&Match::FunctionName(symbol!("c")))
+        );
+        assert_eq!(
+            match_stack.stack.get(x),
+            Some(&Match::Single(parse!("b").as_view()))
+        );
+        assert_eq!(
+            match_stack.stack.get(y),
+            Some(&Match::Single(parse!("d").as_view()))
+        );
+
+        assert!(iter.next_result(&mut match_stack).is_err());
+        assert_eq!(match_stack.len(), 1);
+        assert_eq!(
+            match_stack.stack.get(outer),
+            Some(&Match::Single(outer_value.as_view()))
+        );
+    }
+
+    #[test]
+    fn failed_alternative_variant_does_not_leak_bindings() {
+        let outer_value = parse!("sentinel");
+        let target = parse!("f(1,2)");
+        let pattern = parse!("f(x_,0)").to_pattern() | parse!("f(1,x_)").to_pattern();
+        let outer = symbol!("outer_");
+        let x = symbol!("x_");
+        let two = parse!("2");
+        let mut match_stack =
+            WrappedMatchStack::new(&DEFAULT_PATTERN_CONDITION, &DEFAULT_MATCH_SETTINGS);
+        assert!(
+            match_stack
+                .insert(outer, Match::Single(outer_value.as_view()))
+                .is_ok()
+        );
+
+        let mut iter = AtomMatchIterator::new(&pattern);
+        iter.set_new_target_complete(target.as_view(), &match_stack);
+        assert!(iter.next_result(&mut match_stack).is_ok());
+        assert_eq!(match_stack.len(), 2);
+        assert_eq!(
+            match_stack.stack.get(x),
+            Some(&Match::Single(two.as_view()))
+        );
+
+        assert!(iter.next_result(&mut match_stack).is_err());
+        assert_eq!(match_stack.len(), 1);
+        assert_eq!(
+            match_stack.stack.get(outer),
+            Some(&Match::Single(outer_value.as_view()))
+        );
+    }
+
+    #[test]
+    fn direct_wildcard_and_slice_fallback_share_one_cleanup_boundary() {
+        let outer_value = parse!("sentinel");
+        let target = parse!("a*b*c");
+        let pattern = parse!("x__").to_pattern();
+        let outer = symbol!("outer_");
+        let x = symbol!("x__");
+        let mut match_stack =
+            WrappedMatchStack::new(&DEFAULT_PATTERN_CONDITION, &DEFAULT_MATCH_SETTINGS);
+        assert!(
+            match_stack
+                .insert(outer, Match::Single(outer_value.as_view()))
+                .is_ok()
+        );
+
+        let mut iter = AtomMatchIterator::new(&pattern);
+        iter.set_new_target(target.as_view(), &match_stack);
+
+        let mut match_count = 0;
+        while iter.next_result(&mut match_stack).is_ok() {
+            match_count += 1;
+            assert_eq!(match_stack.len(), 2);
+            let matched = match_stack.stack.get(x).unwrap();
+            if match_count == 1 {
+                assert_eq!(matched, &Match::Single(target.as_view()));
+            } else {
+                assert_ne!(matched, &Match::Single(target.as_view()));
+            }
+        }
+
+        assert_eq!(match_count, 4);
+        assert_eq!(match_stack.len(), 1);
+        assert_eq!(
+            match_stack.stack.get(outer),
+            Some(&Match::Single(outer_value.as_view()))
+        );
+    }
+
+    #[test]
+    fn sibling_backtracking_discards_nested_function_bindings() {
+        let outer_value = parse!("sentinel");
+        let target = parse!("f(a)*f(b)*g(b)");
+        let pattern = parse!("h_(x_)*g(x_)").to_pattern();
+        let outer = symbol!("outer_");
+        let h = symbol!("h_");
+        let x = symbol!("x_");
+        let b = parse!("b");
+        let mut match_stack =
+            WrappedMatchStack::new(&DEFAULT_PATTERN_CONDITION, &DEFAULT_MATCH_SETTINGS);
+        assert!(
+            match_stack
+                .insert(outer, Match::Single(outer_value.as_view()))
+                .is_ok()
+        );
+
+        let mut iter = AtomMatchIterator::new(&pattern);
+        iter.set_new_target(target.as_view(), &match_stack);
+        assert!(iter.next_result(&mut match_stack).is_ok());
+        assert_eq!(match_stack.len(), 3);
+        assert_eq!(
+            match_stack.stack.get(h),
+            Some(&Match::FunctionName(symbol!("f")))
+        );
+        assert_eq!(match_stack.stack.get(x), Some(&Match::Single(b.as_view())));
+
+        while iter.next_result(&mut match_stack).is_ok() {
+            assert_eq!(match_stack.len(), 3);
+        }
+        assert_eq!(match_stack.len(), 1);
+        assert_eq!(
+            match_stack.stack.get(outer),
+            Some(&Match::Single(outer_value.as_view()))
+        );
+    }
+
+    #[test]
+    fn ranged_wildcard_backtracking_keeps_a_stable_stack_shape() {
+        let _ = symbol!("symbolica::id_test::stack_sym"; Symmetric);
+        let outer_value = parse!("sentinel");
+        let target = parse!("symbolica::id_test::stack_sym(a,b,g(c),d,e)");
+        let pattern = parse!("symbolica::id_test::stack_sym(x__,g(y_),z__)").to_pattern();
+        let outer = symbol!("outer_");
+        let x = symbol!("x__");
+        let y = symbol!("y_");
+        let z = symbol!("z__");
+        let mut match_stack =
+            WrappedMatchStack::new(&DEFAULT_PATTERN_CONDITION, &DEFAULT_MATCH_SETTINGS);
+        assert!(
+            match_stack
+                .insert(outer, Match::Single(outer_value.as_view()))
+                .is_ok()
+        );
+
+        let mut iter = AtomMatchIterator::new(&pattern);
+        iter.set_new_target_complete(target.as_view(), &match_stack);
+
+        let mut match_count = 0;
+        while iter.next_result(&mut match_stack).is_ok() {
+            match_count += 1;
+            assert_eq!(match_stack.len(), 4);
+            assert!(match_stack.stack.get(x).is_some());
+            assert!(match_stack.stack.get(y).is_some());
+            assert!(match_stack.stack.get(z).is_some());
+        }
+
+        assert!(match_count > 1);
+        assert_eq!(match_stack.len(), 1);
+        assert_eq!(
+            match_stack.stack.get(outer),
+            Some(&Match::Single(outer_value.as_view()))
+        );
+    }
+
+    #[test]
+    fn match_stack_reset_nested_slice_atom_fallback() {
+        let target = parse!("rubi_int(log(a/(a+b*x))*log(c*x/(a+b*x))^2/(x*(a+b*x)),x)");
+        let pattern =
+            parse!("rubi_int(u__*log(v_)*log(e__*(f__*(a__+b__*w_)^p_*(c__+d__*w_)^q_)^r_)^s_,w_)")
+                .to_pattern()
+                .set_optional(symbol!("e__"))
+                .set_optional(symbol!("f__"))
+                .set_optional(symbol!("a__"))
+                .set_optional(symbol!("b__"))
+                .set_optional(symbol!("c__"))
+                .set_optional(symbol!("d__"))
+                .set_optional(symbol!("p_"))
+                .set_optional(symbol!("q_"))
+                .set_optional(symbol!("r_"))
+                .set_optional(symbol!("s_"));
+        let bindings =
+            parse!("bindings(u__,v_,e__,f__,a__,b__,w_,p_,c__,d__,q_,r_,s_)").to_pattern();
+
+        let matched = target.replace(&pattern).iter(&bindings).next();
+
+        assert_eq!(
+            matched,
+            Some(parse!(
+                "bindings(1/(x*(a+b*x)),a/(a+b*x),1,c,0,1,x,1,a,b,-1,1,2)"
+            ))
+        );
+    }
+
+    #[test]
     fn optional() {
-        let pat = crate::parse!("(a_+b_*x)^p_")
+        let pat = parse!("(a_+b_*x)^p_")
             .to_pattern()
-            .set_optional(crate::symbol!("a_"))
-            .set_optional(crate::symbol!("b_"))
-            .set_optional(crate::symbol!("p_"));
+            .set_optional(symbol!("a_"))
+            .set_optional(symbol!("b_"))
+            .set_optional(symbol!("p_"));
 
-        let rhs = crate::parse!("f(a_,b_,p_)").to_pattern();
+        let rhs = parse!("f(a_,b_,p_)").to_pattern();
 
-        let e = crate::parse!("(1+2*x)^3").replace(&pat).with(&rhs);
-        assert_eq!(e, crate::parse!("f(1,2,3)"));
+        let e = parse!("(1+2*x)^3").replace(&pat).with(&rhs);
+        assert_eq!(e, parse!("f(1,2,3)"));
 
-        let e = crate::parse!("(1+x)^3").replace(&pat).with(&rhs);
-        assert_eq!(e, crate::parse!("f(1,1,3)"));
+        let e = parse!("(1+x)^3").replace(&pat).with(&rhs);
+        assert_eq!(e, parse!("f(1,1,3)"));
 
-        let e = crate::parse!("1+2*x").replace(&pat).with(&rhs);
-        assert_eq!(e, crate::parse!("f(1,2,1)"));
-        let replacements = crate::parse!("1+2*x")
-            .replace(&pat)
-            .iter(&rhs)
-            .collect::<Vec<_>>();
-        let non_default = crate::parse!("f(1,2,1)");
-        let default = crate::parse!("1+2*f(0,1,1)");
+        let e = parse!("1+2*x").replace(&pat).with(&rhs);
+        assert_eq!(e, parse!("f(1,2,1)"));
+        let replacements = parse!("1+2*x").replace(&pat).iter(&rhs).collect::<Vec<_>>();
+        let non_default = parse!("f(1,2,1)");
+        let default = parse!("1+2*f(0,1,1)");
         assert_contains_all(&replacements, &[non_default.clone(), default.clone()]);
         assert!(
             replacements.iter().position(|r| r == &non_default).unwrap()
@@ -7066,45 +7288,34 @@ mod test {
             "non-default match should be yielded before optional-default fallback"
         );
 
-        let e = crate::parse!("1+x").replace(&pat).with(&rhs);
-        assert_eq!(e, crate::parse!("f(1,1,1)"));
+        let e = parse!("1+x").replace(&pat).with(&rhs);
+        assert_eq!(e, parse!("f(1,1,1)"));
 
-        let e = crate::parse!("x").replace(&pat).with(&rhs);
-        assert_eq!(e, crate::parse!("f(0,1,1)"));
+        let e = parse!("x").replace(&pat).with(&rhs);
+        assert_eq!(e, parse!("f(0,1,1)"));
 
-        let pat = crate::parse!("x_*o_")
-            .to_pattern()
-            .set_optional(crate::symbol!("o_"));
-        let rhs = crate::parse!("f(x_,o_)").to_pattern();
-        let e = crate::parse!("x").replace(&pat).with(&rhs);
-        assert_eq!(e, crate::parse!("f(x,1)"));
+        let pat = parse!("x_*o_").to_pattern().set_optional(symbol!("o_"));
+        let rhs = parse!("f(x_,o_)").to_pattern();
+        let e = parse!("x").replace(&pat).with(&rhs);
+        assert_eq!(e, parse!("f(x,1)"));
 
-        let pat = crate::parse!("x_^o_")
-            .to_pattern()
-            .set_optional(crate::symbol!("o_"));
-        let rhs = crate::parse!("f(x_,o_)").to_pattern();
-        let e = crate::parse!("x").replace(&pat).with(&rhs);
-        assert_eq!(e, crate::parse!("f(x,1)"));
+        let pat = parse!("x_^o_").to_pattern().set_optional(symbol!("o_"));
+        let rhs = parse!("f(x_,o_)").to_pattern();
+        let e = parse!("x").replace(&pat).with(&rhs);
+        assert_eq!(e, parse!("f(x,1)"));
 
-        let pat = crate::parse!("x_+o_")
-            .to_pattern()
-            .set_optional(crate::symbol!("o_"));
-        let rhs = crate::parse!("f(x_,o_)").to_pattern();
-        let e = crate::parse!("x").replace(&pat).with(&rhs);
-        assert_eq!(e, crate::parse!("f(x,0)"));
+        let pat = parse!("x_+o_").to_pattern().set_optional(symbol!("o_"));
+        let rhs = parse!("f(x_,o_)").to_pattern();
+        let e = parse!("x").replace(&pat).with(&rhs);
+        assert_eq!(e, parse!("f(x,0)"));
 
-        let pat = crate::parse!("x*y*o_")
-            .to_pattern()
-            .set_optional(crate::symbol!("o_"));
-        let rhs = crate::parse!("f(o_)").to_pattern();
-        let e = crate::parse!("x*y").replace(&pat).with(&rhs);
-        assert_eq!(e, crate::parse!("f(1)"));
-        let replacements = crate::parse!("x*y*z")
-            .replace(&pat)
-            .iter(&rhs)
-            .collect::<Vec<_>>();
-        let non_default = crate::parse!("f(z)");
-        let default = crate::parse!("z*f(1)");
+        let pat = parse!("x*y*o_").to_pattern().set_optional(symbol!("o_"));
+        let rhs = parse!("f(o_)").to_pattern();
+        let e = parse!("x*y").replace(&pat).with(&rhs);
+        assert_eq!(e, parse!("f(1)"));
+        let replacements = parse!("x*y*z").replace(&pat).iter(&rhs).collect::<Vec<_>>();
+        let non_default = parse!("f(z)");
+        let default = parse!("z*f(1)");
         assert_contains_all(&replacements, &[non_default.clone(), default.clone()]);
         assert!(
             replacements.iter().position(|r| r == &non_default).unwrap()
@@ -7112,27 +7323,21 @@ mod test {
             "non-default match should be yielded before optional-default fallback"
         );
 
-        let pat = crate::parse!("(b_+2*x)*n_")
+        let pat = parse!("(b_+2*x)*n_")
             .to_pattern()
-            .set_optional(crate::symbol!("b_"))
-            .set_optional(crate::symbol!("n_"));
-        let rhs = crate::parse!("f(b_,n_)").to_pattern();
-        let e = crate::parse!("2*x").replace(&pat).with(&rhs);
-        assert_eq!(e, crate::parse!("f(0,1)"));
+            .set_optional(symbol!("b_"))
+            .set_optional(symbol!("n_"));
+        let rhs = parse!("f(b_,n_)").to_pattern();
+        let e = parse!("2*x").replace(&pat).with(&rhs);
+        assert_eq!(e, parse!("f(0,1)"));
 
-        let pat = crate::parse!("x*o1_*o2_")
+        let pat = parse!("x*o1_*o2_")
             .to_pattern()
-            .set_optional(crate::symbol!("o1_"))
-            .set_optional(crate::symbol!("o2_"));
-        let rhs = crate::parse!("f(o1_,o2_)").to_pattern();
-        let replacements = crate::parse!("x*y")
-            .replace(&pat)
-            .iter(&rhs)
-            .collect::<Vec<_>>();
-        assert_contains_all(
-            &replacements,
-            &[crate::parse!("f(y,1)"), crate::parse!("f(1,y)")],
-        );
+            .set_optional(symbol!("o1_"))
+            .set_optional(symbol!("o2_"));
+        let rhs = parse!("f(o1_,o2_)").to_pattern();
+        let replacements = parse!("x*y").replace(&pat).iter(&rhs).collect::<Vec<_>>();
+        assert_contains_all(&replacements, &[parse!("f(y,1)"), parse!("f(1,y)")]);
         for replacement in replacements {
             let s = replacement.to_string();
             assert!(
@@ -7140,11 +7345,8 @@ mod test {
                 "nonsensical optional wildcard replacement: {s}"
             );
         }
-        let replacements = crate::parse!("x")
-            .replace(&pat)
-            .iter(&rhs)
-            .collect::<Vec<_>>();
-        assert_contains_all(&replacements, &[crate::parse!("f(1,1)")]);
+        let replacements = parse!("x").replace(&pat).iter(&rhs).collect::<Vec<_>>();
+        assert_contains_all(&replacements, &[parse!("f(1,1)")]);
         for replacement in replacements {
             let s = replacement.to_string();
             assert!(
@@ -7153,15 +7355,15 @@ mod test {
             );
         }
 
-        let pat = crate::parse!("f(x___)").to_pattern();
-        let rhs = crate::parse!("g(x___)").to_pattern();
+        let pat = parse!("f(x___)").to_pattern();
+        let rhs = parse!("g(x___)").to_pattern();
 
-        let e = crate::parse!("f").replace(&pat).with(&rhs);
-        assert_eq!(e, crate::parse!("f"));
-        assert!(crate::parse!("f").replace(&pat).iter(&rhs).next().is_none());
+        let e = parse!("f").replace(&pat).with(&rhs);
+        assert_eq!(e, parse!("f"));
+        assert!(parse!("f").replace(&pat).iter(&rhs).next().is_none());
 
-        let pat = pat.set_optional(crate::symbol!("x___"));
-        let e = crate::parse!("f").replace(&pat).with(&rhs);
-        assert_eq!(e, crate::parse!("g()"));
+        let pat = pat.set_optional(symbol!("x___"));
+        let e = parse!("f").replace(&pat).with(&rhs);
+        assert_eq!(e, parse!("g()"));
     }
 }
