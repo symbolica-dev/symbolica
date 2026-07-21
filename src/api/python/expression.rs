@@ -3807,7 +3807,7 @@ impl PythonExpression {
     /// >>> a = E('f(x+2i + 3) * 2 / x')
     /// >>> print(a.to_typst())
     ///
-    /// Yields ```(2 op("f")(3+2𝑖+"x"))/"x"```.
+    /// Yields ```(2 op(f)(3+2𝑖+x))/x```.
     ///
     /// Parameters
     /// ----------

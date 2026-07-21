@@ -1876,14 +1876,17 @@ impl Symbol {
                 Symbol::EXP_ID => f.write_str("exp"),
                 Symbol::LOG_ID => f.write_str("log"),
                 _ => {
-                    f.write_char('"')?;
-
-                    if !opts.hide_all_namespaces {
+                    if opts.hide_all_namespaces && name.chars().count() == 1 {
+                        f.write_str(name)
+                    } else if !opts.hide_all_namespaces {
+                        f.write_char('"')?;
                         f.write_fmt(format_args!("{}::{}", namespace, name))?;
+                        f.write_char('"')
                     } else {
+                        f.write_char('"')?;
                         f.write_str(name)?;
+                        f.write_char('"')
                     }
-                    f.write_char('"')
                 }
             }
         } else {
