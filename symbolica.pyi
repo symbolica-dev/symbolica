@@ -9836,6 +9836,7 @@ class NumericalIntegrator:
         min_samples_for_update: int = 100,
         bin_number_evolution: Sequence[int] | None = None,
         train_on_avg: bool = False,
+        min_probability_density: float = 0.0,
     ) -> NumericalIntegrator:
         """
         Create a new continuous grid for the numerical integrator.
@@ -9852,6 +9853,10 @@ class NumericalIntegrator:
             An optional schedule that changes the number of bins during training.
         train_on_avg: bool
             Whether integrator training should use average sample values.
+        min_probability_density: float
+            The uniform probability-density floor for the joint continuous grid.
+            A positive value bounds the continuous inverse density by its reciprocal.
+            Zero disables the safeguard.
         """
 
     @classmethod

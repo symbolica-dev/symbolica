@@ -1485,12 +1485,14 @@ impl PythonPolynomial {
         let prec = (decimal_digit_precision as f64 * std::f64::consts::LOG2_10).ceil() as u32;
         let tolerance = Float::with_val(prec, tolerance);
 
-        uni
-            .approximate_roots::<Float>(max_iterations, &tolerance)
+        uni.approximate_roots::<Float>(max_iterations, &tolerance)
             .unwrap_or_else(|e| e)
             .into_iter()
             .map(|(r, p)| ((r.re.into(), r.im.into()), p))
-            .collect::<Vec<((PythonMultiPrecisionFloat, PythonMultiPrecisionFloat), usize)>>()
+            .collect::<Vec<(
+                (PythonMultiPrecisionFloat, PythonMultiPrecisionFloat),
+                usize,
+            )>>()
             .into_py_any(py)
     }
 

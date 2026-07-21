@@ -255,12 +255,17 @@ impl_stub_type!(&mut PythonRandomNumberGenerator = PythonRandomNumberGenerator);
 #[pymethods]
 impl PythonNumericalIntegrator {
     /// Create a new continuous grid for the numerical integrator.
+    ///
+    /// `min_probability_density` mixes the adaptive density with a uniform density
+    /// on the unit hypercube and bounds the joint continuous inverse density by its
+    /// reciprocal. A value of zero disables this safeguard.
     #[classmethod]
     #[pyo3(signature =
         (n_dims, n_bins = 128,
         min_samples_for_update = 100,
         bin_number_evolution = None,
-        train_on_avg = false)
+        train_on_avg = false,
+        min_probability_density = 0.)
     )]
     pub fn continuous(
         _cls: &Bound<'_, PyType>,
@@ -269,16 +274,21 @@ impl PythonNumericalIntegrator {
         min_samples_for_update: usize,
         bin_number_evolution: Option<Vec<usize>>,
         train_on_avg: bool,
-    ) -> PythonNumericalIntegrator {
-        PythonNumericalIntegrator {
-            grid: Grid::Continuous(ContinuousGrid::new(
-                n_dims,
-                n_bins,
-                min_samples_for_update,
-                bin_number_evolution,
-                train_on_avg,
-            )),
-        }
+        min_probability_density: f64,
+    ) -> PyResult<PythonNumericalIntegrator> {
+        Ok(PythonNumericalIntegrator {
+            grid: Grid::Continuous(
+                ContinuousGrid::new_with_min_probability_density(
+                    n_dims,
+                    n_bins,
+                    min_samples_for_update,
+                    bin_number_evolution,
+                    train_on_avg,
+                    min_probability_density,
+                )
+                .map_err(exceptions::PyValueError::new_err)?,
+            ),
+        })
     }
 
     /// Create a new discrete grid for the numerical integrator.
