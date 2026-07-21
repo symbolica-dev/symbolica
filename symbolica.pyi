@@ -622,6 +622,44 @@ class FormattedOutput:
         """Convert the formatted output into a pretty string representation."""
 
 
+class IntegrationStep:
+    """One accepted transformation in a symbolic integration derivation."""
+
+    @property
+    def rule(self) -> int | None:
+        """The integration rule number, if available."""
+
+    @property
+    def depth(self) -> int:
+        """The zero-based depth in the recursive integration tree."""
+
+    @property
+    def description(self) -> str:
+        """A description of the transformation."""
+
+    @property
+    def references(self) -> list[str]:
+        """Bibliographic references associated with the rule."""
+
+    @property
+    def source(self) -> str:
+        """The original Rubi rule or pattern used by the integration backend."""
+
+    @property
+    def input(self) -> Expression:
+        """The integrand to which the rule was applied."""
+
+    @property
+    def output(self) -> Expression:
+        """The immediate result produced by the rule."""
+
+    def __repr__(self) -> str: ...
+    def __str__(self) -> str: ...
+    def _repr_html_(self) -> str: ...
+    def _repr_latex_(self) -> str: ...
+    def _repr_pretty_(self, pretty, cycle: bool) -> None: ...
+
+
 class Expression:
     """
     A Symbolica expression.
@@ -2777,6 +2815,59 @@ class Expression:
         depth_is_absolute : bool, optional
             If `True`, `depth` is the absolute depth in `x`; if `False`, `depth` is the
             relative to the lowest order encountered in the expression.
+        """
+
+    def integrate(self, x: Expression) -> Expression:
+        """
+        Integrate the expression with respect to `x`.
+
+        If the integral cannot be completely solved, the best-effort result is
+        returned and may contain an unevaluated integral.
+
+        Examples
+        --------
+        >>> from symbolica import *
+        >>> x = S('x')
+        >>> e = 1/(x^2+1)
+        >>> print(e.integrate(x))  # atan(x)
+
+        Parameters
+        ----------
+        x: Expression
+            The variable with respect to which to integrate.
+        """
+
+    def integrate_with_steps(
+        self, x: Expression
+    ) -> tuple[Expression, str, list[IntegrationStep]]:
+        """
+        Integrate the expression and return the result, an overview of the steps, and each individual transformation step.
+
+        Steps are ordered from the outer transformation to recursively solved
+        subintegrals.
+
+        Examples
+        --------
+        >>> from symbolica import *
+        >>> x = S('x')
+        >>> e = x/(1+x)
+        >>> result, overview, steps = e.integrate_with_steps(x)
+        >>> print(overview)
+
+        yields
+
+        ```
+        ∫ x/(1+x) dx = ∫ 1-1/(1+x) dx
+            ∫ 1-1/(1+x) dx = ∫ 1 dx+∫ 1/(-1-x) dx
+                ∫ 1 dx = x
+                ∫ -1/(1+x) dx = -log(1+x)
+            = x-log(1+x)
+        ```
+
+        Parameters
+        ----------
+        x: Expression
+            The variable with respect to which to integrate.
         """
 
     def apart(self, x: Expression | None = None) -> Expression:

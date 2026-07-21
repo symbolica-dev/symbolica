@@ -6167,6 +6167,91 @@ impl PythonExpression {
         result
     }
 
+    /// Integrate the expression with respect to `x`.
+    ///
+    /// If the integral cannot be completely solved, the best-effort result is
+    /// returned and may contain an unevaluated integral.
+    ///
+    /// Examples
+    /// --------
+    /// >>> from symbolica import *
+    /// >>> x = S('x')
+    /// >>> e = 1/(x^2+1)
+    /// >>> print(e.integrate(x))  # atan(x)
+    ///
+    /// Parameters
+    /// ----------
+    /// x: Expression
+    ///     The variable with respect to which to integrate.
+    pub fn integrate(&self, x: PythonExpression) -> PyResult<PythonExpression> {
+        let Some(x) = x.expr.get_symbol() else {
+            return Err(exceptions::PyValueError::new_err(
+                "Integration must be done with respect to a variable",
+            ));
+        };
+
+        let functions = python_integration_functions().ok_or_else(|| {
+            exceptions::PyNotImplementedError::new_err(
+                "No symbolic integration backend is linked into this Symbolica build",
+            )
+        })?;
+        let result = (functions.integrate)(&self.expr, x);
+        Ok(match result {
+            Ok(result) | Err(result) => result.into(),
+        })
+    }
+
+    /// Integrate the expression and return the result, an overview of the steps, and each individual transformation step.
+    /// Steps are ordered from the outer transformation to recursively solved
+    /// subintegrals.
+    ///
+    /// Examples
+    /// --------
+    /// >>> from symbolica import *
+    /// >>> x = S('x')
+    /// >>> e = x/(1+x)
+    /// >>> result, overview, steps = e.integrate_with_steps(x)
+    /// >>> print(overview)
+    ///
+    /// yields
+    ///
+    /// ```log
+    /// ∫ x/(1+x) dx = ∫ 1-1/(1+x) dx
+    ///     ∫ 1-1/(1+x) dx = ∫ 1 dx+∫ 1/(-1-x) dx
+    ///         ∫ 1 dx = x
+    ///         ∫ -1/(1+x) dx = -log(1+x)
+    ///     = x-log(1+x)
+    /// ```
+    ///
+    /// Parameters
+    /// ----------
+    /// x: Expression
+    ///     The variable with respect to which to integrate.
+    pub fn integrate_with_steps(
+        &self,
+        x: PythonExpression,
+    ) -> PyResult<(PythonExpression, String, Vec<PythonIntegrationStep>)> {
+        let Some(x) = x.expr.get_symbol() else {
+            return Err(exceptions::PyValueError::new_err(
+                "Integration must be done with respect to a variable",
+            ));
+        };
+
+        let functions = python_integration_functions().ok_or_else(|| {
+            exceptions::PyNotImplementedError::new_err(
+                "No symbolic integration backend is linked into this Symbolica build",
+            )
+        })?;
+        let (result, overview, steps) = (functions.integrate_with_steps)(&self.expr, x);
+        Ok((
+            match result {
+                Ok(result) | Err(result) => result.into(),
+            },
+            overview,
+            steps,
+        ))
+    }
+
     /// Compute the partial fraction decomposition in `x`.
     ///
     /// If `None` is passed, the expression will be decomposed in all variables

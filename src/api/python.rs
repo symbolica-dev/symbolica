@@ -143,6 +143,7 @@ mod integration;
 mod matrix;
 mod polynomial;
 mod series;
+mod symbolic_integration;
 
 pub use atom::*;
 pub use evaluator::*;
@@ -153,6 +154,7 @@ pub use integration::*;
 pub use matrix::*;
 pub use polynomial::*;
 pub use series::*;
+pub use symbolic_integration::*;
 
 /// Trait for registering Python submodules for Symbolica, which enables
 /// multiple crates to use the same Symbolica kernel.
@@ -340,6 +342,7 @@ pub fn create_symbolica_module<'a, 'b>(
 ) -> PyResult<&'b Bound<'a, PyModule>> {
     m.add_class::<PythonFormattedOutput>()?;
     m.add_class::<PythonExpression>()?;
+    m.add_class::<PythonIntegrationStep>()?;
     m.add_class::<PythonHeldExpression>()?;
     m.add_class::<PythonTransformer>()?;
     m.add_class::<PythonPolynomial>()?;
