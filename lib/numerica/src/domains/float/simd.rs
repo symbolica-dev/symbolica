@@ -1,5 +1,5 @@
 use rand::Rng;
-use wide::{f64x2, f64x4};
+use wide::{f64x2, f64x4, f64x8};
 
 use super::{FloatLike, Real};
 use crate::domains::rational::Rational;
@@ -210,3 +210,4 @@ macro_rules! simd_impl {
 
 simd_impl!(f64x2, pow_f64x2);
 simd_impl!(f64x4, pow_f64x4);
+simd_impl!(f64x8, pow_f64x8);

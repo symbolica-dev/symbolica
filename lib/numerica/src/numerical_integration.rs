@@ -1025,6 +1025,7 @@ impl<T: Real + Constructible + Copy + RealLike + PartialOrd> DiscreteGrid<T> {
 pub struct ContinuousGrid<T: Real + Constructible + Copy + RealLike + PartialOrd> {
     pub continuous_dimensions: Vec<ContinuousDimension<T>>,
     pub accumulator: StatisticsAccumulator<T>,
+    pub min_probability_density: T,
 }
 
 impl<T: Real + Constructible + Copy + RealLike + PartialOrd> ContinuousGrid<T> {
@@ -1046,7 +1047,42 @@ impl<T: Real + Constructible + Copy + RealLike + PartialOrd> ContinuousGrid<T> {
         bin_number_evolution: Option<Vec<usize>>,
         train_on_avg: bool,
     ) -> ContinuousGrid<T> {
-        ContinuousGrid {
+        Self::new_with_min_probability_density(
+            n_dims,
+            n_bins,
+            min_samples_for_update,
+            bin_number_evolution,
+            train_on_avg,
+            T::new_zero(),
+        )
+        .expect("a zero minimum probability density is valid")
+    }
+
+    /// Create a new grid with a lower bound on its joint sampling probability density.
+    ///
+    /// For `min_probability_density = epsilon`, sampling uses the mixture
+    /// `q = (1 - epsilon) * q_adaptive + epsilon * q_uniform`. Since the continuous
+    /// domain is the unit hypercube and `q_uniform = 1`, this guarantees a joint
+    /// inverse probability density no larger than `1 / epsilon`. Setting the value
+    /// to zero disables the bound and preserves the original sampling sequence.
+    pub fn new_with_min_probability_density(
+        n_dims: usize,
+        n_bins: usize,
+        min_samples_for_update: usize,
+        bin_number_evolution: Option<Vec<usize>>,
+        train_on_avg: bool,
+        min_probability_density: T,
+    ) -> Result<ContinuousGrid<T>, String> {
+        if !min_probability_density.is_finite()
+            || min_probability_density < T::new_zero()
+            || min_probability_density > T::new_one()
+        {
+            return Err(
+                "The minimum continuous probability density must lie in [0, 1].".to_owned(),
+            );
+        }
+
+        Ok(ContinuousGrid {
             continuous_dimensions: vec![
                 ContinuousDimension::new(
                     n_bins,
@@ -1057,7 +1093,25 @@ impl<T: Real + Constructible + Copy + RealLike + PartialOrd> ContinuousGrid<T> {
                 n_dims
             ],
             accumulator: StatisticsAccumulator::new(),
+            min_probability_density,
+        })
+    }
+
+    /// Apply the uniform-mixture correction to an inverse adaptive probability density.
+    fn apply_min_probability_density(&self, adaptive_weight: T) -> T {
+        if self.min_probability_density.is_zero() {
+            return adaptive_weight;
         }
+        if self.min_probability_density.is_one() {
+            return T::new_one();
+        }
+        if adaptive_weight.is_zero() {
+            return T::new_zero();
+        }
+
+        ((T::new_one() - self.min_probability_density) / adaptive_weight
+            + self.min_probability_density)
+            .inv()
     }
 
     /// Sample a point in the grid, writing the result in `sample`.
@@ -1066,11 +1120,29 @@ impl<T: Real + Constructible + Copy + RealLike + PartialOrd> ContinuousGrid<T> {
         *weight = T::new_one();
         vs.clear();
         vs.resize(self.continuous_dimensions.len(), T::new_zero());
-        for (vs, d) in vs.iter_mut().zip(&self.continuous_dimensions) {
-            let (v, w) = d.sample(rng);
-            *weight *= &w;
-            *vs = v;
+
+        // Do not consume an extra random number when the floor is disabled, preserving
+        // reproducibility for existing integrations.
+        let sample_uniformly = !self.min_probability_density.is_zero()
+            && (self.min_probability_density.is_one()
+                || T::new_sample_unit(rng) < self.min_probability_density);
+
+        if sample_uniformly {
+            for (vs, d) in vs.iter_mut().zip(&self.continuous_dimensions) {
+                *vs = T::new_sample_unit(rng);
+                *weight *= d
+                    .probe(*vs)
+                    .expect("a uniformly sampled point lies in the unit interval");
+            }
+        } else {
+            for (vs, d) in vs.iter_mut().zip(&self.continuous_dimensions) {
+                let (v, w) = d.sample(rng);
+                *weight *= &w;
+                *vs = v;
+            }
         }
+
+        *weight = self.apply_min_probability_density(*weight);
     }
 
     /// Probe the Jacobian weight of a point or region in the continuous grid.
@@ -1090,7 +1162,7 @@ impl<T: Real + Constructible + Copy + RealLike + PartialOrd> ContinuousGrid<T> {
             }
         }
 
-        Ok(weight)
+        Ok(self.apply_min_probability_density(weight))
     }
 
     /// Add a training sample with its corresponding evaluation, i.e. `f(sample)`, to the grid.
@@ -1133,6 +1205,12 @@ impl<T: Real + Constructible + Copy + RealLike + PartialOrd> ContinuousGrid<T> {
     pub fn is_mergeable(&self, grid: &ContinuousGrid<T>) -> Result<(), String> {
         if self.continuous_dimensions.len() != grid.continuous_dimensions.len() {
             return Err("Cannot merge grids that have a different shape.".to_owned());
+        }
+        if self.min_probability_density != grid.min_probability_density {
+            return Err(
+                "Cannot merge continuous grids with different minimum probability densities."
+                    .to_owned(),
+            );
         }
 
         for (c, o) in self
@@ -1752,6 +1830,108 @@ mod test {
                 "left={sample_weight}, right={probe_weight}"
             );
         }
+    }
+
+    #[test]
+    fn continuous_min_probability_density_is_validated() {
+        for invalid_value in [-f64::EPSILON, 1.0 + f64::EPSILON, f64::NAN] {
+            assert!(
+                ContinuousGrid::new_with_min_probability_density(
+                    1,
+                    10,
+                    1,
+                    None,
+                    false,
+                    invalid_value,
+                )
+                .is_err()
+            );
+        }
+
+        assert!(
+            ContinuousGrid::new_with_min_probability_density(1, 10, 1, None, false, 0.0).is_ok()
+        );
+        assert!(
+            ContinuousGrid::new_with_min_probability_density(1, 10, 1, None, false, 1.0).is_ok()
+        );
+    }
+
+    #[test]
+    fn continuous_min_probability_density_bounds_weight_and_matches_probe() {
+        let min_probability_density = 0.01;
+        let mut grid = ContinuousGrid::new_with_min_probability_density(
+            3,
+            10,
+            1,
+            None,
+            false,
+            min_probability_density,
+        )
+        .unwrap();
+        let extreme_partitioning = vec![
+            0.0, 1.0e-9, 2.0e-9, 3.0e-9, 4.0e-9, 5.0e-9, 6.0e-9, 7.0e-9, 8.0e-9, 9.0e-9, 1.0,
+        ];
+        for dimension in &mut grid.continuous_dimensions {
+            dimension.partitioning.clone_from(&extreme_partitioning);
+        }
+
+        let maximum_weight = 1.0 / min_probability_density;
+        let probe_weight = grid.probe(&[Some(0.5), Some(0.5), Some(0.5)]).unwrap();
+        assert!(probe_weight <= maximum_weight);
+
+        let mut rng = MonteCarloRng::new(1234, 0);
+        let mut sample = Sample::new();
+        for _ in 0..10_000 {
+            grid.sample(&mut rng, &mut sample);
+            let Sample::Continuous(sample_weight, xs) = &sample else {
+                panic!("expected a continuous sample")
+            };
+            let probe = xs.iter().copied().map(Some).collect::<Vec<_>>();
+            let sampled_probe_weight = grid.probe(&probe).unwrap();
+            let scale = sample_weight.abs().max(sampled_probe_weight.abs()).max(1.0);
+
+            assert!(*sample_weight <= maximum_weight);
+            assert!(
+                (sample_weight - sampled_probe_weight).abs() <= 1.0e-14 * scale,
+                "sample weight {sample_weight} does not match probe weight {sampled_probe_weight}",
+            );
+        }
+    }
+
+    #[test]
+    fn zero_continuous_min_probability_density_preserves_sampling_sequence() {
+        let mut original: ContinuousGrid<f64> = ContinuousGrid::new(3, 10, 1, None, false);
+        let mut configured =
+            ContinuousGrid::new_with_min_probability_density(3, 10, 1, None, false, 0.0).unwrap();
+        let mut original_rng = MonteCarloRng::new(1234, 0);
+        let mut configured_rng = MonteCarloRng::new(1234, 0);
+        let mut original_sample = Sample::new();
+        let mut configured_sample = Sample::new();
+
+        for _ in 0..100 {
+            original.sample(&mut original_rng, &mut original_sample);
+            configured.sample(&mut configured_rng, &mut configured_sample);
+
+            match (&original_sample, &configured_sample) {
+                (
+                    Sample::Continuous(original_weight, original_xs),
+                    Sample::Continuous(configured_weight, configured_xs),
+                ) => {
+                    assert_eq!(original_weight, configured_weight);
+                    assert_eq!(original_xs, configured_xs);
+                }
+                _ => panic!("expected continuous samples"),
+            }
+        }
+    }
+
+    #[test]
+    fn continuous_grids_with_different_probability_floors_do_not_merge() {
+        let original = ContinuousGrid::new(1, 10, 1, None, false);
+        let configured =
+            ContinuousGrid::new_with_min_probability_density(1, 10, 1, None, false, 0.01).unwrap();
+
+        assert!(original.is_mergeable(&configured).is_err());
     }
 
     #[test]
