@@ -133,4 +133,4 @@ Finally, plug in measured values:
 
 ## Development
 
-Follow the development of Symbolica and the open-source spin-off projects [numerica](https://github.com/symbolica-dev/numerica) and [graphica](https://github.com/symbolica-dev/graphica) on [Zulip](https://zulip.symbolica.io)!
+Follow the development of Symbolica and the open-source spin-off projects [numerica](https://github.com/symbolica-dev/numerica), [graphica](https://github.com/symbolica-dev/graphica), and [symbolica-integrate](https://github.com/symbolica-dev/symbolica-integrate) on [Zulip](https://zulip.symbolica.io)!
