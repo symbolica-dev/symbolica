@@ -310,17 +310,17 @@ impl<'a, F: Ring> Iterator for SparseMatrixRowIterator<'a, F> {
     fn next(&mut self) -> Option<Self::Item> {
         if self.row < self.end_row {
             let row = self.row;
-            
+
             let row_start = self.matrix.row_ptrs[row as usize];
             let row_end = self.matrix.row_ptrs[(row + 1) as usize];
-            
+
             //move to next row
             self.row += 1;
 
             Some((
                 row,
                 &self.matrix.col_idcs[row_start..row_end],
-                &self.matrix.values[row_start..row_end]
+                &self.matrix.values[row_start..row_end],
             ))
         } else {
             None
@@ -825,7 +825,11 @@ impl<F: Ring> SparseMatrix<F> {
             let row_start = self.row_ptrs[self.row_ptrs.len() - 2] as usize;
             let row_end = self.row_ptrs[self.row_ptrs.len() - 1] as usize;
 
-            Some((self.nrows - 1, &self.col_idcs[row_start..row_end], &self.values[row_start..row_end]))
+            Some((
+                self.nrows - 1,
+                &self.col_idcs[row_start..row_end],
+                &self.values[row_start..row_end],
+            ))
         }
     }
 
@@ -1114,7 +1118,9 @@ where
         sparse_row_reducer.back_substitute_parallel();
 
         //solution is the reversed last column of U
-        Ok(sparse_row_reducer.u.last_column_by_pivot(&sparse_row_reducer.pivots))
+        Ok(sparse_row_reducer
+            .u
+            .last_column_by_pivot(&sparse_row_reducer.pivots))
     }
 }
 
@@ -1462,7 +1468,7 @@ struct Scratch<F: Field> {
     /// Stores the row that we are currently working on in dense form.
     dense_row: Vec<F::Element>,
 
-	/// Remembers which columns we have touched in the current forward solving step.
+    /// Remembers which columns we have touched in the current forward solving step.
     touched: Vec<bool>,
 }
 
@@ -1507,7 +1513,7 @@ pub struct SparseRowReducer<F: Field> {
 }
 
 impl<F: Field> SparseRowReducer<F> {
-    /// Construct an empty reducer object. 
+    /// Construct an empty reducer object.
     ///
     /// New row(s) can be added with `add_row()` or `add_matrix()`.
     pub fn new(ncols: u32, field: F, mode: LuLMode) -> Self {
@@ -1537,7 +1543,7 @@ impl<F: Field> SparseRowReducer<F> {
         ret.add_matrix_with_back_subs(mat);
         ret
     }
-    
+
     /// Construct a new row reducer that immediately forward solves the given matrix and checks for consistency at each step.
     ///
     /// Checking for consistency means that we return None whenever a new row in `U` is all zero except the last entry.
@@ -1552,7 +1558,9 @@ impl<F: Field> SparseRowReducer<F> {
         };
 
         for row in mat.row_ptrs.windows(2) {
-            if let Some(_) = ret.forward_solve_row(&mat.values[row[0]..row[1]], &mat.col_idcs[row[0]..row[1]]) {
+            if let Some(_) =
+                ret.forward_solve_row(&mat.values[row[0]..row[1]], &mat.col_idcs[row[0]..row[1]])
+            {
                 //check last, just added, row for inconsistency
                 let start = ret.u.row_ptrs[(ret.u.nrows - 1) as usize];
                 let end = ret.u.row_ptrs[ret.u.nrows as usize];
@@ -1574,7 +1582,10 @@ impl<F: Field> SparseRowReducer<F> {
     /// Checking for consistency means that we return None whenever a new row in `U` is all zero except the last entry.
     /// The idea is that we decompose the matrix `(A|b)` for solving the system `A * x = b`, which becomes unsolvable in this case.
     /// This version also performs back substitution on every new row during the forward solving.
-    pub fn from_matrix_checked_with_back_subs(mat: &SparseMatrix<F>, mode: LuLMode) -> Option<Self> {
+    pub fn from_matrix_checked_with_back_subs(
+        mat: &SparseMatrix<F>,
+        mode: LuLMode,
+    ) -> Option<Self> {
         let mut ret = Self {
             u: SparseMatrix::new(0, mat.ncols(), mat.field().clone()),
             l: SparseMatrix::new(0, 0, mat.field().clone()),
@@ -1584,7 +1595,10 @@ impl<F: Field> SparseRowReducer<F> {
         };
 
         for row in mat.row_ptrs.windows(2) {
-            if let Some(_) = ret.forward_solve_row_with_back_subs(&mat.values[row[0]..row[1]], &mat.col_idcs[row[0]..row[1]]) {
+            if let Some(_) = ret.forward_solve_row_with_back_subs(
+                &mat.values[row[0]..row[1]],
+                &mat.col_idcs[row[0]..row[1]],
+            ) {
                 //check last, just added, row for inconsistency
                 let start = ret.u.row_ptrs[(ret.u.nrows - 1) as usize];
                 let end = ret.u.row_ptrs[ret.u.nrows as usize];
@@ -1616,10 +1630,7 @@ impl<F: Field> SparseRowReducer<F> {
 
         for row in mat.row_ptrs.windows(2) {
             if ret
-                .forward_solve_row(
-                    &mat.values[row[0]..row[1]],
-                    &mat.col_idcs[row[0]..row[1]],
-                )
+                .forward_solve_row(&mat.values[row[0]..row[1]], &mat.col_idcs[row[0]..row[1]])
                 .is_none()
             {
                 return None;
@@ -1634,7 +1645,10 @@ impl<F: Field> SparseRowReducer<F> {
     /// Checking for consistency means that we return None whenever a new row in `U` is all zero except the last entry.
     /// The idea is that we decompose the matrix `(A|b)` for solving the system `A * x = b`, which becomes unsolvable in this case.
     /// This version also performs back substitution on every new row during the forward solving.
-    pub fn from_matrix_check_dependent_with_back_subs(mat: &SparseMatrix<F>, mode: LuLMode) -> Option<Self> {
+    pub fn from_matrix_check_dependent_with_back_subs(
+        mat: &SparseMatrix<F>,
+        mode: LuLMode,
+    ) -> Option<Self> {
         let mut ret = Self {
             u: SparseMatrix::new(0, mat.ncols(), mat.field().clone()),
             l: SparseMatrix::new(0, 0, mat.field().clone()),
@@ -1720,7 +1734,11 @@ impl<F: Field> SparseRowReducer<F> {
     /// If the new row is linearly independent from the rows of the current system it returns the pivot column index
     /// of the new row after the row reduction step, otherwise None.
     /// Note linearly dependent rows are not added to the system.
-    pub fn add_row_with_back_subs(&mut self, values: &[F::Element], col_idcs: &[u32]) -> Option<u32> {
+    pub fn add_row_with_back_subs(
+        &mut self,
+        values: &[F::Element],
+        col_idcs: &[u32],
+    ) -> Option<u32> {
         assert_eq!(values.len(), col_idcs.len());
 
         //run next forward solving step
@@ -1749,7 +1767,10 @@ impl<F: Field> SparseRowReducer<F> {
         assert_eq!(mat.ncols(), self.u.ncols());
 
         for row in mat.row_ptrs.windows(2) {
-            self.forward_solve_row_with_back_subs(&mat.values[row[0]..row[1]], &mat.col_idcs[row[0]..row[1]]);
+            self.forward_solve_row_with_back_subs(
+                &mat.values[row[0]..row[1]],
+                &mat.col_idcs[row[0]..row[1]],
+            );
         }
     }
 
@@ -1759,7 +1780,7 @@ impl<F: Field> SparseRowReducer<F> {
     pub fn add_cols(&mut self, col_pos: &Vec<u32>) -> () {
         //update U
         self.u.add_cols(col_pos);
-        
+
         //update pivots
         let mut new_pivots = Vec::with_capacity(self.pivots.len() + col_pos.len());
         let mut pivots_idx: usize = 0;
@@ -1795,18 +1816,11 @@ impl<F: Field> SparseRowReducer<F> {
         let mut new_u = SparseMatrix::new(0, ncols, self.u.field.clone());
         let mut new_pivots = vec![None; ncols as usize];
 
-        let rows: Vec<_> = self.pivots.iter().rev()
-            .filter_map(|&r| r)
-            .collect();
-
+        let rows: Vec<_> = self.pivots.iter().rev().filter_map(|&r| r).collect();
 
         for row in rows {
             let new_row = new_u.nrows;
-            let pivot_col = self.back_substitute_row(
-                row,
-                &mut new_u,
-                &new_pivots,
-            );
+            let pivot_col = self.back_substitute_row(row, &mut new_u, &new_pivots);
             new_pivots[pivot_col] = Some(new_row);
         }
 
@@ -1825,7 +1839,7 @@ impl<F: Field> SparseRowReducer<F> {
                 self.l.nrows = 0;
                 self.l.ncols = 0;
                 self.mode = LuLMode::None;
-            },
+            }
             LuLMode::Pattern => {
                 self.l.col_idcs.clear();
                 self.l.row_ptrs.clear();
@@ -1833,8 +1847,8 @@ impl<F: Field> SparseRowReducer<F> {
                 self.l.nrows = 0;
                 self.l.ncols = 0;
                 self.mode = LuLMode::None;
-            },
-            LuLMode::None => ()
+            }
+            LuLMode::None => (),
         }
     }
 
@@ -1904,7 +1918,7 @@ impl<F: Field> SparseRowReducer<F> {
         }
 
         let n = self.u.ncols as usize;
-        
+
         //gaussian reduction until we find a pivot (or dense_row is zero)
         while pivot_col < n {
             if self.scratch.touched[pivot_col] {
@@ -1927,7 +1941,7 @@ impl<F: Field> SparseRowReducer<F> {
                         &self.u.values[start..end],
                         &self.u.col_idcs[start..end],
                         &self.u.field,
-                        &mut self.scratch.touched
+                        &mut self.scratch.touched,
                     );
 
                     debug_assert!(self.u.field.is_zero(&self.scratch.dense_row[pivot_col]));
@@ -1978,7 +1992,7 @@ impl<F: Field> SparseRowReducer<F> {
             }
 
             self.u.nrows += 1;
-            
+
             //normalize and copy the dense row into U
             let leading_coeff_inv = self.u.field.inv(&leading_coeff);
             for i in pivot_col..n {
@@ -1986,14 +2000,16 @@ impl<F: Field> SparseRowReducer<F> {
                     //need to check for accidental zeroes
                     let val = &mut self.scratch.dense_row[i];
                     if !self.u.field.is_zero(val) {
-	                    self.u.col_idcs.push(i as u32);
-    	                if self.u.field.is_one(&leading_coeff_inv) {
-        	                self.u.values.push(val.clone());
-            	        } else {
-                	        self.u.values.push(self.u.field.mul(&leading_coeff_inv, val));
-                    	}
-                        //clean up scratch                      
-                    	*val = self.u.field.zero();
+                        self.u.col_idcs.push(i as u32);
+                        if self.u.field.is_one(&leading_coeff_inv) {
+                            self.u.values.push(val.clone());
+                        } else {
+                            self.u
+                                .values
+                                .push(self.u.field.mul(&leading_coeff_inv, val));
+                        }
+                        //clean up scratch
+                        *val = self.u.field.zero();
                     }
 
                     //clean up scratch
@@ -2025,14 +2041,18 @@ impl<F: Field> SparseRowReducer<F> {
         //row is linearly dependent
         None
     }
-    
+
     /// Apply forward solving step to the given row.
     ///
     /// This version also performs as much back substitution as possible on the current row.
     ///
     /// # Return
     /// The pivot column of the new row in U if it was a linearly independent row.
-    fn forward_solve_row_with_back_subs(&mut self, values: &[F::Element], col_idcs: &[u32]) -> Option<u32> {
+    fn forward_solve_row_with_back_subs(
+        &mut self,
+        values: &[F::Element],
+        col_idcs: &[u32],
+    ) -> Option<u32> {
         if self.u.nrows == self.u.ncols || col_idcs.is_empty() {
             //full rank reached or empty row
             return None;
@@ -2102,7 +2122,7 @@ impl<F: Field> SparseRowReducer<F> {
         }
 
         let n = self.u.ncols as usize;
-        
+
         //gaussian reduction until we find a pivot (or dense_row is zero)
         pivot_col = n;
         for col in col_idcs[0] as usize..n {
@@ -2124,7 +2144,7 @@ impl<F: Field> SparseRowReducer<F> {
                         &self.u.values[start..end],
                         &self.u.col_idcs[start..end],
                         &self.u.field,
-                        &mut self.scratch.touched
+                        &mut self.scratch.touched,
                     );
 
                     debug_assert!(self.u.field.is_zero(&self.scratch.dense_row[col]));
@@ -2141,7 +2161,7 @@ impl<F: Field> SparseRowReducer<F> {
                         }
                         LuLMode::None => (), //nothing to be done
                     }
-                } else if pivot_col == n{
+                } else if pivot_col == n {
                     //found a pivot, but we still continue
                     pivot_col = col;
                 }
@@ -2172,7 +2192,7 @@ impl<F: Field> SparseRowReducer<F> {
             }
 
             self.u.nrows += 1;
-            
+
             //normalize and copy the dense row into U
             let leading_coeff_inv = self.u.field.inv(&leading_coeff);
             for i in pivot_col..n {
@@ -2180,14 +2200,16 @@ impl<F: Field> SparseRowReducer<F> {
                     //need to check for accidental zeroes
                     let val = &mut self.scratch.dense_row[i];
                     if !self.u.field.is_zero(val) {
-	                    self.u.col_idcs.push(i as u32);
-    	                if self.u.field.is_one(&leading_coeff_inv) {
-        	                self.u.values.push(val.clone());
-            	        } else {
-                	        self.u.values.push(self.u.field.mul(&leading_coeff_inv, val));
-                    	}
-                        //clean up scratch                      
-                    	*val = self.u.field.zero();
+                        self.u.col_idcs.push(i as u32);
+                        if self.u.field.is_one(&leading_coeff_inv) {
+                            self.u.values.push(val.clone());
+                        } else {
+                            self.u
+                                .values
+                                .push(self.u.field.mul(&leading_coeff_inv, val));
+                        }
+                        //clean up scratch
+                        *val = self.u.field.zero();
                     }
 
                     //clean up scratch
@@ -2284,11 +2306,11 @@ impl<F: Field> SparseRowReducer<F> {
                 //need to check for accidental zeroes
                 let val = &mut self.scratch.dense_row[i];
                 if !self.u.field.is_zero(val) {
-	                new_u.col_idcs.push(i as u32);
-    	            new_u.values.push(val.clone());
+                    new_u.col_idcs.push(i as u32);
+                    new_u.values.push(val.clone());
 
                     //clean up scratch
-            	    *val = self.u.field.zero();
+                    *val = self.u.field.zero();
                 }
                 //clean up scratch
                 self.scratch.touched[i] = false;
@@ -2460,7 +2482,9 @@ where
                 new_u.row_ptrs.reserve(new_u.nrows as usize + 1);
                 // skip first row_ptr (always 0)
                 for i in 1..local_mat.row_ptrs.len() {
-                    new_u.row_ptrs.push(local_mat.row_ptrs[i] + n_entries_before);
+                    new_u
+                        .row_ptrs
+                        .push(local_mat.row_ptrs[i] + n_entries_before);
                 }
                 for (pivot_col, local_row) in local_pivots {
                     debug_assert!(new_pivots[pivot_col as usize].is_none());
@@ -2536,10 +2560,10 @@ where
                 //need to check for accidental zeroes
                 let val = &mut scratch.dense_row[i];
                 if !self.u.field.is_zero(val) {
-	                out_mat.col_idcs.push(i as u32);
-    	            out_mat.values.push(val.clone());
-        	        //clean up scratch
-            	    *val = self.u.field.zero();
+                    out_mat.col_idcs.push(i as u32);
+                    out_mat.values.push(val.clone());
+                    //clean up scratch
+                    *val = self.u.field.zero();
                 }
                 //clean up scratch
                 scratch.touched[i] = false;
@@ -2557,9 +2581,8 @@ mod tests {
 
     use crate::tensors::{
         matrix::Matrix,
-        sparse::{SparseRowReducer, LuLMode, SparseMatrix, SparseVector}
+        sparse::{LuLMode, SparseMatrix, SparseRowReducer, SparseVector},
     };
-
 
     #[test]
     fn dense_to_sparse() {
@@ -2579,7 +2602,7 @@ mod tests {
             3,
             Q,
         )
-            .unwrap();
+        .unwrap();
 
         let b = a.to_sparse().to_dense();
         assert_eq!(a, b);
@@ -2618,37 +2641,40 @@ mod tests {
         //]
 
         let values: Vec<<Q as Set>::Element> = vec![3.into(), 7.into(), 13.into()];
-        let col_idcs: Vec<u32> = vec![1,2,5];
+        let col_idcs: Vec<u32> = vec![1, 2, 5];
         sparse_row_reducer.add_row(&values, &col_idcs);
         sparse_row_reducer_with_back_subs.add_row_with_back_subs(&values, &col_idcs);
         mat.add_row(values, col_idcs);
 
         let values: Vec<<Q as Set>::Element> = vec![1.into(), 3.into(), (-7).into(), 11.into()];
-        let col_idcs: Vec<u32> = vec![0,3,4,5];
+        let col_idcs: Vec<u32> = vec![0, 3, 4, 5];
         sparse_row_reducer.add_row(&values, &col_idcs);
         sparse_row_reducer_with_back_subs.add_row_with_back_subs(&values, &col_idcs);
         mat.add_row(values, col_idcs);
 
         let values: Vec<<Q as Set>::Element> = vec![(-2).into(), 14.into(), (-27).into()];
-        let col_idcs: Vec<u32> = vec![0,3,4];
+        let col_idcs: Vec<u32> = vec![0, 3, 4];
         sparse_row_reducer.add_row(&values, &col_idcs);
         sparse_row_reducer_with_back_subs.add_row_with_back_subs(&values, &col_idcs);
         mat.add_row(values, col_idcs);
 
         let values: Vec<<Q as Set>::Element> = vec![23.into(), 18.into(), 6.into()];
-        let col_idcs: Vec<u32> = vec![1,2,3];
+        let col_idcs: Vec<u32> = vec![1, 2, 3];
         sparse_row_reducer.add_row(&values, &col_idcs);
         sparse_row_reducer_with_back_subs.add_row_with_back_subs(&values, &col_idcs);
         mat.add_row(values, col_idcs);
 
         //check L.U == A (also checking multiplication and subtraction)
         assert_eq!(&(sparse_row_reducer.l() * sparse_row_reducer.u()), &mat);
-        assert_eq!(&(sparse_row_reducer_with_back_subs.l() * sparse_row_reducer_with_back_subs.u()), &mat);
+        assert_eq!(
+            &(sparse_row_reducer_with_back_subs.l() * sparse_row_reducer_with_back_subs.u()),
+            &mat
+        );
         assert_eq!(
             &(sparse_row_reducer.l() * sparse_row_reducer.u()) - &mat,
             SparseMatrix::new(mat.nrows(), mat.ncols(), Q)
         );
-        
+
         //check Us explicitly
         assert_eq!(
             sparse_row_reducer.u().fmt_mma(),
@@ -2663,8 +2689,11 @@ mod tests {
         //check rref
         sparse_row_reducer.back_substitute();
         sparse_row_reducer_with_back_subs.back_substitute();
-        
-        assert_eq!(sparse_row_reducer.u(), sparse_row_reducer_with_back_subs.u());
+
+        assert_eq!(
+            sparse_row_reducer.u(),
+            sparse_row_reducer_with_back_subs.u()
+        );
         assert_eq!(
             sparse_row_reducer.u().fmt_mma(),
             "{{{1,4}->1,{1,5}->-41/20,{1,6}->11/10,{2,3}->1,{2,5}->-369/1070,{2,6}->1594/535,{3,2}->1,{3,5}->861/1070,{3,6}->-1401/535,{4,1}->1,{4,5}->-17/20,{4,6}->77/10},{4,6}}"
@@ -2673,7 +2702,6 @@ mod tests {
 
     #[test]
     fn all_at_once_rref() {
-        
         let mut mat = SparseMatrix::new(0, 6, Q);
 
         //mat=
@@ -2685,23 +2713,24 @@ mod tests {
         //]
 
         let values: Vec<<Q as Set>::Element> = vec![3.into(), 7.into(), 13.into()];
-        let col_idcs: Vec<u32> = vec![1,2,5];
+        let col_idcs: Vec<u32> = vec![1, 2, 5];
         mat.add_row(values, col_idcs);
 
         let values: Vec<<Q as Set>::Element> = vec![1.into(), 3.into(), (-7).into(), 11.into()];
-        let col_idcs: Vec<u32> = vec![0,3,4,5];
+        let col_idcs: Vec<u32> = vec![0, 3, 4, 5];
         mat.add_row(values, col_idcs);
 
         let values: Vec<<Q as Set>::Element> = vec![(-2).into(), 14.into(), (-27).into()];
-        let col_idcs: Vec<u32> = vec![0,3,4];
+        let col_idcs: Vec<u32> = vec![0, 3, 4];
         mat.add_row(values, col_idcs);
 
         let values: Vec<<Q as Set>::Element> = vec![23.into(), 18.into(), 6.into()];
-        let col_idcs: Vec<u32> = vec![1,2,3];
+        let col_idcs: Vec<u32> = vec![1, 2, 3];
         mat.add_row(values, col_idcs);
 
         let mut sparse_row_reducer = SparseRowReducer::from_matrix(&mat, LuLMode::Full);
-        let mut sparse_row_reducer_with_back_subs = SparseRowReducer::from_matrix_with_back_subs(&mat, LuLMode::Full);
+        let mut sparse_row_reducer_with_back_subs =
+            SparseRowReducer::from_matrix_with_back_subs(&mat, LuLMode::Full);
 
         //check L.U == A (also checking multiplication and subtraction)
         assert_eq!(&(sparse_row_reducer.l() * sparse_row_reducer.u()), &mat);
@@ -2710,7 +2739,10 @@ mod tests {
             SparseMatrix::new(mat.nrows(), mat.ncols(), Q)
         );
 
-        assert_eq!(&(sparse_row_reducer_with_back_subs.l() * sparse_row_reducer_with_back_subs.u()), &mat);
+        assert_eq!(
+            &(sparse_row_reducer_with_back_subs.l() * sparse_row_reducer_with_back_subs.u()),
+            &mat
+        );
         assert_eq!(
             &(sparse_row_reducer_with_back_subs.l() * sparse_row_reducer_with_back_subs.u()) - &mat,
             SparseMatrix::new(mat.nrows(), mat.ncols(), Q)
@@ -2727,12 +2759,14 @@ mod tests {
             "{{{1,2}->1,{1,3}->7/3,{1,6}->13/3,{2,1}->1,{2,4}->3,{2,5}->-7,{2,6}->11,{3,4}->1,{3,5}->-41/20,{3,6}->11/10,{4,3}->1,{4,5}->-369/1070,{4,6}->1594/535},{4,6}}"
         );
 
-
         //check rref
         sparse_row_reducer.back_substitute();
         sparse_row_reducer_with_back_subs.back_substitute();
-        
-        assert_eq!(sparse_row_reducer.u(), sparse_row_reducer_with_back_subs.u());
+
+        assert_eq!(
+            sparse_row_reducer.u(),
+            sparse_row_reducer_with_back_subs.u()
+        );
         assert_eq!(
             sparse_row_reducer.u().fmt_mma(),
             "{{{1,4}->1,{1,5}->-41/20,{1,6}->11/10,{2,3}->1,{2,5}->-369/1070,{2,6}->1594/535,{3,2}->1,{3,5}->861/1070,{3,6}->-1401/535,{4,1}->1,{4,5}->-17/20,{4,6}->77/10},{4,6}}"
@@ -2772,7 +2806,6 @@ mod tests {
 
         let res = mat.solve(b);
         let res2 = mat2.solve_parallel(b2);
-
 
         //check serial vs. parallel result
         assert_eq!(res, res2);
@@ -2850,6 +2883,5 @@ mod tests {
 
         assert_eq!(count_entries, 9);
         assert_eq!(count_rows, 5);
-        
     }
 }

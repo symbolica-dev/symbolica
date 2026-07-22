@@ -647,11 +647,7 @@ impl ToFiniteField<Mersenne32> for Integer {
         match self {
             &Integer::Single(n) => n.rem_euclid(Mersenne32::PRIME as i64) as u32,
             &Integer::Double(n) => n.rem_euclid(Mersenne32::PRIME as i128) as u32,
-            Integer::Large(r) => r
-                .rem_euc(Mersenne32::PRIME)
-                .complete()
-                .to_u64()
-                .unwrap() as u32,
+            Integer::Large(r) => r.rem_euc(Mersenne32::PRIME).complete().to_u64().unwrap() as u32,
         }
     }
 }

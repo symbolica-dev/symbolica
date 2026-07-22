@@ -2,7 +2,7 @@
 name = "numerica"
 authors = ["Ben Ruijl <ben@symbolica.io>"]
 keywords = ["algebra", "mathematics", "integer", "float", "rational"]
-version = "2.1.0"
+version = "2.2.0"
 edition = "2024"
 license = "MIT"
 description = "Open-source math library for exact and floating point computations"
@@ -37,7 +37,9 @@ pyo3 = { version = "0.28", features = ["num-complex"], optional = true }
 numpy = { version = "0.28", optional = true }
 rand = "0.9"
 rug = { version = "1.27.0", optional = true }
-astro-float = { version = "0.9.5", default-features = false, features = ["std"], optional = true }
+astro-float = { version = "0.9.5", default-features = false, features = [
+    "std",
+], optional = true }
 malachite-base = { version = "0.7.0", optional = true }
 malachite-nz = { version = "0.7.0", optional = true }
 malachite-q = { version = "0.7.0", optional = true }

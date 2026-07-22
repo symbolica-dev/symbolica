@@ -74,7 +74,7 @@ impl<F: Ring> Vector<F> {
         self.data.len()
     }
 
-    /// Create a column vector. This operation is very cheap.
+    /// Create a row vector. This operation is very cheap.
     pub fn into_matrix(self) -> Matrix<F> {
         Matrix {
             nrows: 1,
@@ -842,6 +842,15 @@ impl<F: Ring> Matrix<F> {
 
     /// Transpose the matrix.
     pub fn transpose(&self) -> Matrix<F> {
+        if self.nrows == 1 || self.ncols == 1 {
+            return Matrix {
+                nrows: self.ncols,
+                ncols: self.nrows,
+                data: self.data.clone(),
+                field: self.field.clone(),
+            };
+        }
+
         let mut m = Matrix::new(self.ncols, self.nrows, self.field.clone());
         for i in 0..self.nrows {
             for j in 0..self.ncols {
@@ -858,6 +867,11 @@ impl<F: Ring> Matrix<F> {
 
     /// Transpose the matrix in-place.
     pub fn into_transposed(mut self) -> Matrix<F> {
+        if self.nrows == 1 || self.ncols == 1 {
+            (self.nrows, self.ncols) = (self.ncols, self.nrows);
+            return self;
+        }
+
         if self.nrows == self.ncols {
             for i in 0..self.nrows {
                 for j in 0..i {
