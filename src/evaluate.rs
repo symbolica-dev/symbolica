@@ -117,7 +117,7 @@ mod test {
     #[test]
     fn eval_fun() {
         let _ = symbol!(
-            "e",
+            "symbolica::eval_fun::e",
             eval = EvaluationInfo::constant(|_tags, prec| { Ok(Float::new(prec).e().into()) })
         );
 
@@ -128,10 +128,10 @@ mod test {
                 .register(|args: &[f64]| args[0].atanh())
         );
 
-        let a = parse!("e*symbolica::eval_fun::atanh(x)");
+        let a = parse!("symbolica::eval_fun::e*symbolica::eval_fun::atanh(x)");
 
         assert!(
-            (parse!("e*symbolica::eval_fun::atanh(0.1`32)").to_float(32)
+            (parse!("symbolica::eval_fun::e*symbolica::eval_fun::atanh(0.1`32)").to_float(32)
                 - parse!("2.7273975248950224505081204947890e-1`32"))
             .abs()
                 < parse!("1e-30`32")
