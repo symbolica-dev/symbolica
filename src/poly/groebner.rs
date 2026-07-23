@@ -76,26 +76,26 @@ impl<R: Field, E: Exponent, O: MonomialOrder> CriticalPair<R, E, O> {
     ) -> CriticalPair<R, E, O> {
         // determine the lcm of leading monomials
         let lcm: Vec<E> = f1
-            .max_exp()
+            .last_exponents()
             .iter()
-            .zip(f2.max_exp())
+            .zip(f2.last_exponents())
             .map(|(e1, e2)| *e1.max(e2))
             .collect();
 
         let lcm_diff_first: Vec<E> = lcm
             .iter()
-            .zip(f1.max_exp())
+            .zip(f1.last_exponents())
             .map(|(e1, e2)| *e1 - *e2)
             .collect();
 
         let lcm_diff_sec: Vec<E> = lcm
             .iter()
-            .zip(f2.max_exp())
+            .zip(f2.last_exponents())
             .map(|(e1, e2)| *e1 - *e2)
             .collect();
 
         CriticalPair {
-            disjoint: lcm_diff_first == f2.max_exp(),
+            disjoint: lcm_diff_first == f2.last_exponents(),
             degree: lcm.iter().cloned().sum::<E>(),
             lcm_diff_first,
             poly_first: f1,
@@ -252,11 +252,11 @@ impl<R: Field + Echelonize, E: Exponent, O: MonomialOrder> GroebnerBasis<R, E, O
 
             // flag all head monomials as done
             for p in &selected_polys {
-                if let Some(m) = all_monomials.get_mut(p.max_exp()) {
+                if let Some(m) = all_monomials.get_mut(p.last_exponents()) {
                     m.present = true;
                 } else {
                     all_monomials.insert(
-                        p.max_exp().to_vec(),
+                        p.last_exponents().to_vec(),
                         MonomialData {
                             present: true,
                             column: 0,
@@ -287,10 +287,10 @@ impl<R: Field + Echelonize, E: Exponent, O: MonomialOrder> GroebnerBasis<R, E, O
                     // search for a reducer and select the smallest for better performance
                     if let Some((index, g)) = basis
                         .iter()
-                        .filter(|g| monom.iter().zip(g.1.max_exp()).all(|(pe, ge)| *pe >= *ge))
+                        .filter(|g| monom.iter().zip(g.1.last_exponents()).all(|(pe, ge)| *pe >= *ge))
                         .min_by_key(|g| g.1.nterms())
                     {
-                        for ((e, pe), ge) in exp.iter_mut().zip(monom).zip(g.max_exp()) {
+                        for ((e, pe), ge) in exp.iter_mut().zip(monom).zip(g.last_exponents()) {
                             *e = *pe - *ge;
                         }
 
@@ -378,7 +378,7 @@ impl<R: Field + Echelonize, E: Exponent, O: MonomialOrder> GroebnerBasis<R, E, O
 
                 let poly = Rc::new(poly);
 
-                if selected_polys.iter().all(|p| p.max_exp() != lm) {
+                if selected_polys.iter().all(|p| p.last_exponents() != lm) {
                     let new_index = simplifications.len();
                     simplifications.push(vec![(vec![E::zero(); nvars], poly.clone())]);
 
@@ -447,14 +447,14 @@ impl<R: Field, E: Exponent, O: MonomialOrder> MultivariatePolynomial<R, E, O> {
             while let Some(g) = gs
                 .iter()
                 .filter(|g| {
-                    r.max_exp()
+                    r.last_exponents()
                         .iter()
-                        .zip(g.max_exp())
+                        .zip(g.last_exponents())
                         .all(|(h1, h2)| *h1 >= *h2)
                 })
                 .min_by_key(|g| g.nterms())
             {
-                for ((e, e1), e2) in monom.iter_mut().zip(r.max_exp()).zip(g.max_exp()) {
+                for ((e, e1), e2) in monom.iter_mut().zip(r.last_exponents()).zip(g.last_exponents()) {
                     *e = *e1 - *e2;
                 }
 
@@ -514,17 +514,17 @@ impl<R: Field, E: Exponent, O: MonomialOrder> GroebnerBasis<R, E, O> {
         new_pairs.retain(|p| p.1 && !p.0.disjoint);
 
         critical_pairs.retain(|p| {
-            p.lcm.iter().zip(f.max_exp()).any(|(e1, e2)| *e1 < *e2)
+            p.lcm.iter().zip(f.last_exponents()).any(|(e1, e2)| *e1 < *e2)
                 || p.poly_first
-                    .max_exp()
+                    .last_exponents()
                     .iter()
-                    .zip(f.max_exp())
+                    .zip(f.last_exponents())
                     .zip(&p.lcm)
                     .all(|((e1, e2), ecm)| e1.max(e2) == ecm)
                 || p.poly_sec
-                    .max_exp()
+                    .last_exponents()
                     .iter()
-                    .zip(f.max_exp())
+                    .zip(f.last_exponents())
                     .zip(&p.lcm)
                     .all(|((e1, e2), ecm)| e1.max(e2) == ecm)
         });
@@ -532,9 +532,9 @@ impl<R: Field, E: Exponent, O: MonomialOrder> GroebnerBasis<R, E, O> {
         critical_pairs.extend(new_pairs.into_iter().map(|np| np.0));
 
         basis.retain(|b| {
-            b.1.max_exp()
+            b.1.last_exponents()
                 .iter()
-                .zip(f.max_exp())
+                .zip(f.last_exponents())
                 .any(|(e1, e2)| *e1 < *e2)
         });
 
@@ -549,9 +549,9 @@ impl<R: Field, E: Exponent, O: MonomialOrder> GroebnerBasis<R, E, O> {
                 if i != j
                     && res[j]
                     && p1
-                        .max_exp()
+                        .last_exponents()
                         .iter()
-                        .zip(p2.max_exp())
+                        .zip(p2.last_exponents())
                         .all(|(h1, h2)| *h1 >= *h2)
                 {
                     res[i] = false;
@@ -577,7 +577,7 @@ impl<R: Field, E: Exponent, O: MonomialOrder> GroebnerBasis<R, E, O> {
             }
         }
 
-        basis.sort_by(|p1, p2| p2.max_exp().cmp(p1.max_exp()));
+        basis.sort_by(|p1, p2| p2.last_exponents().cmp(p1.last_exponents()));
 
         GroebnerBasis {
             system: basis,
@@ -589,22 +589,22 @@ impl<R: Field, E: Exponent, O: MonomialOrder> GroebnerBasis<R, E, O> {
         for (i, p1) in system.iter().enumerate() {
             for p2 in &system[i + 1..] {
                 let lcm: Vec<E> = p1
-                    .max_exp()
+                    .last_exponents()
                     .iter()
-                    .zip(p2.max_exp())
+                    .zip(p2.last_exponents())
                     .map(|(e1, e2)| *e1.max(e2))
                     .collect();
 
                 // construct s-polynomial
                 let extra_factor_f1: Vec<E> = lcm
                     .iter()
-                    .zip(p1.max_exp())
+                    .zip(p1.last_exponents())
                     .map(|(e1, e2)| *e1 - *e2)
                     .collect();
 
                 let extra_factor_f2: Vec<E> = lcm
                     .iter()
-                    .zip(p2.max_exp())
+                    .zip(p2.last_exponents())
                     .map(|(e1, e2)| *e1 - *e2)
                     .collect();
                 let new_f1 = p1
