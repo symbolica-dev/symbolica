@@ -3044,20 +3044,14 @@ impl<T: AtomCore> AtomIndex<usize> for T {
     }
 }
 
-impl<T: AtomCore> AtomIndex<&[usize]> for T {
-    fn index(&self, index: &[usize]) -> Option<AtomView<'_>> {
-        self.as_atom_view().multi_index(index)
+impl<T: AtomCore, I: AsRef<[usize]> + ?Sized> AtomIndex<&I> for T {
+    fn index(&self, index: &I) -> Option<AtomView<'_>> {
+        self.as_atom_view().multi_index(index.as_ref())
     }
 }
 
 impl<T: AtomCore, const N: usize> AtomIndex<[usize; N]> for T {
     fn index(&self, index: [usize; N]) -> Option<AtomView<'_>> {
-        self.as_atom_view().multi_index(index.as_slice())
-    }
-}
-
-impl<T: AtomCore, const N: usize> AtomIndex<&[usize; N]> for T {
-    fn index(&self, index: &[usize; N]) -> Option<AtomView<'_>> {
         self.as_atom_view().multi_index(index.as_slice())
     }
 }

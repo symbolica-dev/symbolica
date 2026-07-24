@@ -1311,6 +1311,75 @@ impl<'a> AtomView<'a> {
         }
     }
 
+    /// Get the position of `part` within `self`, if it is contained within it.
+    /// This position can be used with [`Atom::index`] to retrieve the corresponding [`Atom`] within `self`.
+    pub(crate) fn position(&self, part: AtomView) -> Option<Vec<usize>> {
+        let mut index = Vec::new();
+        if self.position_in_impl(part, &mut index) {
+            Some(index)
+        } else {
+            None
+        }
+    }
+
+    fn position_in_impl(&self, part: AtomView, index: &mut Vec<usize>) -> bool {
+        let part_ptr = part.get_data().as_ptr();
+        let self_ptr = self.get_data().as_ptr();
+
+        if self_ptr == part_ptr {
+            return true;
+        }
+
+        // check if the pointer fits within the data range
+        if part_ptr < self_ptr || part_ptr >= self_ptr.wrapping_add(self.get_data().len()) {
+            return false;
+        }
+
+        match self {
+            AtomView::Num(_) | AtomView::Var(_) => false,
+            AtomView::Fun(f) => {
+                for (i, arg) in f.iter().enumerate() {
+                    index.push(i);
+                    if arg.position_in_impl(part, index) {
+                        return true;
+                    }
+                    index.pop();
+                }
+                false
+            }
+            AtomView::Pow(p) => {
+                for (i, arg) in p.iter().enumerate() {
+                    index.push(i);
+                    if arg.position_in_impl(part, index) {
+                        return true;
+                    }
+                    index.pop();
+                }
+                false
+            }
+            AtomView::Mul(m) => {
+                for (i, arg) in m.iter().enumerate() {
+                    index.push(i);
+                    if arg.position_in_impl(part, index) {
+                        return true;
+                    }
+                    index.pop();
+                }
+                false
+            }
+            AtomView::Add(a) => {
+                for (i, arg) in a.iter().enumerate() {
+                    index.push(i);
+                    if arg.position_in_impl(part, index) {
+                        return true;
+                    }
+                    index.pop();
+                }
+                false
+            }
+        }
+    }
+
     pub(crate) fn alias_subexpressions(
         &self,
         mut f: impl FnMut(AtomView, usize, usize) -> Option<Atom>,
