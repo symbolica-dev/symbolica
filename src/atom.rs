@@ -2679,6 +2679,29 @@ impl<'a> AtomOrView<'a> {
     }
 }
 
+impl<'a> AtomView<'a> {
+    /// Returns the `index`-th child of this atom, if it exists.
+    pub fn index(&self, index: usize) -> Option<AtomView<'a>> {
+        match self {
+            AtomView::Num(_) => None,
+            AtomView::Var(_) => None,
+            AtomView::Fun(f) => f.iter().nth(index),
+            AtomView::Pow(p) => p.iter().nth(index),
+            AtomView::Mul(m) => m.iter().nth(index),
+            AtomView::Add(a) => a.iter().nth(index),
+        }
+    }
+
+    /// Returns the `index[0]`-th child of this atom, and recursively applies `multi_index` to the remaining indices.
+    pub fn multi_index(&self, index: &[usize]) -> Option<AtomView<'a>> {
+        if index.is_empty() {
+            return Some(*self);
+        }
+        self.index(index[0])
+            .and_then(|view| view.multi_index(&index[1..]))
+    }
+}
+
 impl AtomView<'_> {
     pub fn to_owned(&self) -> Atom {
         let mut a = Atom::default();
@@ -3007,6 +3030,55 @@ impl Hash for Atom {
 impl Ord for Atom {
     fn cmp(&self, other: &Self) -> Ordering {
         self.as_view().cmp(&other.as_view())
+    }
+}
+
+pub trait AtomIndex<T> {
+    /// Returns the `index`-th sub-atom of this atom
+    fn index(&self, index: T) -> Option<AtomView<'_>>;
+}
+
+impl<T: AtomCore> AtomIndex<usize> for T {
+    fn index(&self, index: usize) -> Option<AtomView<'_>> {
+        self.as_atom_view().index(index)
+    }
+}
+
+impl<T: AtomCore> AtomIndex<&[usize]> for T {
+    fn index(&self, index: &[usize]) -> Option<AtomView<'_>> {
+        self.as_atom_view().multi_index(index)
+    }
+}
+
+impl<T: AtomCore, const N: usize> AtomIndex<[usize; N]> for T {
+    fn index(&self, index: [usize; N]) -> Option<AtomView<'_>> {
+        self.as_atom_view().multi_index(index.as_slice())
+    }
+}
+
+impl<T: AtomCore, const N: usize> AtomIndex<&[usize; N]> for T {
+    fn index(&self, index: &[usize; N]) -> Option<AtomView<'_>> {
+        self.as_atom_view().multi_index(index.as_slice())
+    }
+}
+
+impl<T: AtomCore> AtomIndex<(usize, usize)> for T {
+    fn index(&self, index: (usize, usize)) -> Option<AtomView<'_>> {
+        self.as_atom_view().multi_index(&[index.0, index.1])
+    }
+}
+
+impl<T: AtomCore> AtomIndex<(usize, usize, usize)> for T {
+    fn index(&self, index: (usize, usize, usize)) -> Option<AtomView<'_>> {
+        self.as_atom_view()
+            .multi_index(&[index.0, index.1, index.2])
+    }
+}
+
+impl<T: AtomCore> AtomIndex<(usize, usize, usize, usize)> for T {
+    fn index(&self, index: (usize, usize, usize, usize)) -> Option<AtomView<'_>> {
+        self.as_atom_view()
+            .multi_index(&[index.0, index.1, index.2, index.3])
     }
 }
 
