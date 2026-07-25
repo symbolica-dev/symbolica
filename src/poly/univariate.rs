@@ -2,16 +2,23 @@
 
 use std::{
     cmp::Ordering,
+    collections::HashMap,
     ops::{Add, Div, Mul, Neg, Sub},
-    sync::Arc,
+    sync::{Arc, LazyLock, RwLock},
 };
+
+use numerica::domains::float::Float;
 
 use crate::{
     domains::{
         EuclideanDomain, Field, InternalOrdering, Ring, RingOps, SelfRing, Set,
+        algebraic_number::{AlgebraicExtension, AlgebraicNumber},
         float::{Complex, FloatField, FloatLike, Real, SingleFloat},
         integer::{Integer, IntegerRing, Z},
         rational::{Q, Rational, RationalField},
+        rational_polynomial::{
+            FromNumeratorAndDenominator, RationalPolynomial, RationalPolynomialField,
+        },
     },
     printer::{PrintOptions, PrintState},
 };
@@ -470,7 +477,7 @@ impl<F: Ring> UnivariatePolynomial<F> {
         r
     }
 
-    fn truncate(&mut self) {
+    pub(crate) fn truncate(&mut self) {
         let d = self
             .coefficients
             .iter_mut()
@@ -761,7 +768,1306 @@ impl<F: Ring> SelfRing for UnivariatePolynomial<F> {
     }
 }
 
+type ExactComplexField = FloatField<Complex<Rational>>;
+type ExactComplexPolynomial = UnivariatePolynomial<ExactComplexField>;
+
+#[derive(Clone, Debug)]
+pub struct ComplexRootInterval {
+    poly: Option<Arc<ExactComplexPolynomial>>,
+    index: Option<usize>,
+    center: Complex<Rational>,
+    radius: Rational,
+    multiplicity: Option<usize>,
+    real: bool,
+    imaginary: bool,
+}
+
+struct ProjectedRealRoot {
+    poly: UnivariatePolynomial<Q>,
+    interval: (Rational, Rational),
+}
+
+pub struct RootCache {
+    roots: RwLock<HashMap<Vec<Rational>, Vec<ComplexRootInterval>>>,
+    complex_roots: RwLock<HashMap<Vec<Complex<Rational>>, Vec<ComplexRootInterval>>>,
+}
+
+impl RootCache {
+    fn new() -> Self {
+        Self {
+            roots: RwLock::new(HashMap::new()),
+            complex_roots: RwLock::new(HashMap::new()),
+        }
+    }
+
+    fn get_or_insert_with(
+        &self,
+        poly: &UnivariatePolynomial<Q>,
+        refine: Option<&Rational>,
+        compute: impl FnOnce() -> Vec<ComplexRootInterval>,
+    ) -> Vec<ComplexRootInterval> {
+        let key = poly.coefficients.clone();
+
+        if let Some(roots) = self.roots.read().unwrap().get(&key).cloned() {
+            if roots
+                .iter()
+                .all(|root| Self::satisfies_refine(root, refine))
+            {
+                return roots;
+            }
+        }
+
+        {
+            let mut cache = self.roots.write().unwrap();
+            if let Some(roots) = cache.get_mut(&key) {
+                Self::refine_if_needed(roots, refine);
+                return roots.clone();
+            }
+        }
+
+        let mut roots = compute();
+        Self::refine_if_needed(&mut roots, refine);
+
+        let mut cache = self.roots.write().unwrap();
+        let roots = cache.entry(key).or_insert(roots);
+        Self::refine_if_needed(roots, refine);
+        UnivariatePolynomial::<Q>::sort_complex_roots_canonical(roots);
+        roots.clone()
+    }
+
+    fn get_index_with_precision(
+        &self,
+        poly: &UnivariatePolynomial<Q>,
+        index: usize,
+        binary_prec: u32,
+        compute: impl FnOnce() -> Vec<ComplexRootInterval>,
+    ) -> Option<ComplexRootInterval> {
+        let key = poly.coefficients.clone();
+
+        if let Some(roots) = self.roots.read().unwrap().get(&key)
+            && let Some(root) = Self::select_indexed_root(roots, index)
+            && Self::satisfies_precision(root, binary_prec)
+        {
+            return Some(root.clone());
+        }
+
+        {
+            let mut cache = self.roots.write().unwrap();
+            if let Some(roots) = cache.get_mut(&key) {
+                if !Self::refine_index_if_needed(roots, index, binary_prec) {
+                    return None;
+                }
+                return Self::select_indexed_root(roots, index).cloned();
+            }
+        }
+
+        let mut roots = compute();
+        if !Self::refine_index_if_needed(&mut roots, index, binary_prec) {
+            return None;
+        }
+
+        let mut cache = self.roots.write().unwrap();
+        let roots = cache.entry(key).or_insert(roots);
+        if !Self::refine_index_if_needed(roots, index, binary_prec) {
+            return None;
+        }
+        UnivariatePolynomial::<Q>::sort_complex_roots_canonical(roots);
+        Self::select_indexed_root(roots, index).cloned()
+    }
+
+    fn get_complex_or_insert_with(
+        &self,
+        poly: &ExactComplexPolynomial,
+        refine: Option<&Rational>,
+        compute: impl FnOnce() -> Vec<ComplexRootInterval>,
+    ) -> Vec<ComplexRootInterval> {
+        let key = poly.coefficients.clone();
+
+        if let Some(roots) = self.complex_roots.read().unwrap().get(&key).cloned() {
+            if roots
+                .iter()
+                .all(|root| Self::satisfies_refine(root, refine))
+            {
+                return roots;
+            }
+        }
+
+        {
+            let mut cache = self.complex_roots.write().unwrap();
+            if let Some(roots) = cache.get_mut(&key) {
+                Self::refine_if_needed(roots, refine);
+                return roots.clone();
+            }
+        }
+
+        let mut roots = compute();
+        Self::refine_if_needed(&mut roots, refine);
+
+        let mut cache = self.complex_roots.write().unwrap();
+        let roots = cache.entry(key).or_insert(roots);
+        Self::refine_if_needed(roots, refine);
+        UnivariatePolynomial::<Q>::sort_complex_roots_canonical(roots);
+        roots.clone()
+    }
+
+    fn get_complex_index_with_precision(
+        &self,
+        poly: &ExactComplexPolynomial,
+        index: usize,
+        binary_prec: u32,
+        compute: impl FnOnce() -> Vec<ComplexRootInterval>,
+    ) -> Option<ComplexRootInterval> {
+        let key = poly.coefficients.clone();
+
+        if let Some(roots) = self.complex_roots.read().unwrap().get(&key)
+            && let Some(root) = Self::select_indexed_root(roots, index)
+            && Self::satisfies_precision(root, binary_prec)
+        {
+            return Some(root.clone());
+        }
+
+        {
+            let mut cache = self.complex_roots.write().unwrap();
+            if let Some(roots) = cache.get_mut(&key) {
+                if !Self::refine_index_if_needed(roots, index, binary_prec) {
+                    return None;
+                }
+                return Self::select_indexed_root(roots, index).cloned();
+            }
+        }
+
+        let mut roots = compute();
+        if !Self::refine_index_if_needed(&mut roots, index, binary_prec) {
+            return None;
+        }
+
+        let mut cache = self.complex_roots.write().unwrap();
+        let roots = cache.entry(key).or_insert(roots);
+        if !Self::refine_index_if_needed(roots, index, binary_prec) {
+            return None;
+        }
+        UnivariatePolynomial::<Q>::sort_complex_roots_canonical(roots);
+        Self::select_indexed_root(roots, index).cloned()
+    }
+
+    fn select_indexed_root(
+        roots: &[ComplexRootInterval],
+        index: usize,
+    ) -> Option<&ComplexRootInterval> {
+        let mut seen = 0;
+        for root in roots {
+            let multiplicity = root.multiplicity().unwrap_or(1);
+            if index < seen + multiplicity {
+                return Some(root);
+            }
+            seen += multiplicity;
+        }
+
+        None
+    }
+
+    fn satisfies_refine(root: &ComplexRootInterval, refine: Option<&Rational>) -> bool {
+        match refine {
+            Some(refine) => refine.is_zero() || root.radius <= *refine,
+            None => true,
+        }
+    }
+
+    fn refinement_for_precision(root: &ComplexRootInterval, binary_prec: u32) -> Rational {
+        let guard_bits = 16;
+        let refine_bits = binary_prec.saturating_add(guard_bits).max(1);
+        let mut scale = root.center.re.abs().max(root.center.im.abs());
+        scale += &root.radius;
+        scale = scale.max(Rational::one());
+        scale / Rational::from(Integer::from(2).pow(refine_bits as u64))
+    }
+
+    fn satisfies_precision(root: &ComplexRootInterval, binary_prec: u32) -> bool {
+        root.radius <= Self::refinement_for_precision(root, binary_prec)
+    }
+
+    fn refine_if_needed(roots: &mut [ComplexRootInterval], refine: Option<&Rational>) {
+        let Some(refine) = refine else {
+            return;
+        };
+
+        if refine.is_zero()
+            || roots
+                .iter()
+                .all(|root| Self::satisfies_refine(root, Some(refine)))
+        {
+            return;
+        }
+
+        UnivariatePolynomial::<Q>::refine_complex_root_intervals_until_refined(roots, Some(refine));
+        UnivariatePolynomial::<Q>::sort_complex_roots_canonical(roots);
+    }
+
+    fn refine_index_if_needed(
+        roots: &mut [ComplexRootInterval],
+        index: usize,
+        binary_prec: u32,
+    ) -> bool {
+        for _ in 0..64 {
+            let Some(root_index) = Self::select_indexed_root_position(roots, index) else {
+                return false;
+            };
+
+            let refine = Self::refinement_for_precision(&roots[root_index], binary_prec);
+            if Self::satisfies_refine(&roots[root_index], Some(&refine)) {
+                return true;
+            }
+
+            if !UnivariatePolynomial::<Q>::refine_complex_root_interval_until_refined(
+                &mut roots[root_index],
+                &refine,
+            ) {
+                return false;
+            }
+
+            UnivariatePolynomial::<Q>::sort_complex_roots_canonical(roots);
+        }
+
+        let Some(root_index) = Self::select_indexed_root_position(roots, index) else {
+            return false;
+        };
+        Self::satisfies_precision(&roots[root_index], binary_prec)
+    }
+
+    fn select_indexed_root_position(roots: &[ComplexRootInterval], index: usize) -> Option<usize> {
+        let mut seen = 0;
+        for (root_index, root) in roots.iter().enumerate() {
+            let multiplicity = root.multiplicity().unwrap_or(1);
+            if index < seen + multiplicity {
+                return Some(root_index);
+            }
+            seen += multiplicity;
+        }
+
+        None
+    }
+}
+
+static ROOT_CACHE: LazyLock<RootCache> = LazyLock::new(RootCache::new);
+
+impl Add for ComplexRootInterval {
+    type Output = Self;
+
+    fn add(self, other: Self) -> Self {
+        Self {
+            poly: if self.poly == other.poly {
+                self.poly
+            } else {
+                None
+            },
+            index: None,
+            center: self.center + other.center,
+            radius: self.radius + other.radius,
+            multiplicity: None,
+            real: self.real && other.real,
+            imaginary: self.imaginary && other.imaginary,
+        }
+    }
+}
+
+impl Sub for ComplexRootInterval {
+    type Output = Self;
+
+    fn sub(self, other: Self) -> Self {
+        Self {
+            poly: if self.poly == other.poly {
+                self.poly
+            } else {
+                None
+            },
+            index: None,
+            center: self.center - other.center,
+            radius: self.radius + other.radius,
+            multiplicity: None,
+            real: self.real && other.real,
+            imaginary: self.imaginary && other.imaginary,
+        }
+    }
+}
+
+impl Mul for ComplexRootInterval {
+    type Output = Self;
+
+    fn mul(self, other: Self) -> Self {
+        let center = &self.center * &other.center;
+        let self_center_norm = ComplexRootInterval::norm_upper_bound(&self.center);
+        let other_center_norm = ComplexRootInterval::norm_upper_bound(&other.center);
+        let radius = &self.radius * &other.radius
+            + &self.radius * &other_center_norm
+            + &other.radius * &self_center_norm;
+
+        Self {
+            poly: if self.poly == other.poly {
+                self.poly
+            } else {
+                None
+            },
+            index: None,
+            center,
+            radius,
+            multiplicity: None,
+            real: self.real && other.real,
+            imaginary: false,
+        }
+    }
+}
+
+impl ComplexRootInterval {
+    fn norm_upper_bound(z: &Complex<Rational>) -> Rational {
+        z.re.abs() + z.im.abs()
+    }
+
+    fn norm_lower_bound(z: &Complex<Rational>) -> Rational {
+        z.re.abs().max(z.im.abs())
+    }
+
+    pub fn is_isolated(&self, other: &Self) -> bool {
+        &self.radius + &other.radius < Self::norm_lower_bound(&(&self.center - &other.center))
+    }
+
+    pub fn poly(&self) -> Option<&Arc<ExactComplexPolynomial>> {
+        self.poly.as_ref()
+    }
+
+    pub fn index(&self) -> Option<usize> {
+        self.index
+    }
+
+    pub fn center(&self) -> &Complex<Rational> {
+        &self.center
+    }
+
+    pub fn radius(&self) -> &Rational {
+        &self.radius
+    }
+
+    pub fn multiplicity(&self) -> Option<usize> {
+        self.multiplicity
+    }
+
+    pub fn is_real(&self) -> bool {
+        self.real
+    }
+
+    pub fn is_imaginary(&self) -> bool {
+        self.imaginary
+    }
+
+    pub fn to_float_center(&self, binary_prec: u32) -> Complex<Float> {
+        let mut center = Complex::new(
+            self.center.re.to_multi_prec_float(binary_prec),
+            self.center.im.to_multi_prec_float(binary_prec),
+        );
+
+        let Some(poly) = self.poly.as_ref() else {
+            return center;
+        };
+
+        let field = FloatField::from_rep(Complex::new(
+            Float::with_val(binary_prec, 1),
+            Float::new(binary_prec),
+        ));
+        let poly = poly.map_coeff(
+            |c| {
+                Complex::new(
+                    c.re.to_multi_prec_float(binary_prec),
+                    c.im.to_multi_prec_float(binary_prec),
+                )
+            },
+            field,
+        );
+        let derivative = poly.derivative();
+        let tolerance = Rational::from((Integer::one(), Integer::from(2).pow(binary_prec as u64)))
+            .to_multi_prec_float(binary_prec);
+        let tolerance_squared = tolerance.clone() * tolerance;
+
+        for _ in 0..32 {
+            let derivative_at_center = derivative.evaluate(&center);
+            if SingleFloat::is_zero(&derivative_at_center) {
+                break;
+            }
+
+            let correction = poly.evaluate(&center) / derivative_at_center;
+            if !correction.is_finite() {
+                break;
+            }
+
+            center -= correction.clone();
+            if correction.norm_squared() < tolerance_squared {
+                break;
+            }
+        }
+
+        center
+    }
+
+    /// For two pairwise isolated complex roots, find which one is smaller
+    /// under the lexicographic ordering of the real and imaginary parts.
+    pub fn cmp(self, other: &Self) -> Option<std::cmp::Ordering> {
+        if self.is_isolated(other) {
+            Some(
+                self.center
+                    .re
+                    .cmp(&other.center.re)
+                    .then_with(|| self.center.im.cmp(&other.center.im)),
+            )
+        } else {
+            None
+        }
+    }
+}
+
 impl UnivariatePolynomial<RationalField> {
+    fn complex_root_tolerance(num_prec: u32) -> Float {
+        let bits = num_prec.saturating_sub(8).max(1);
+        Rational::from((Integer::one(), Integer::from(2).pow(bits as u64)))
+            .to_multi_prec_float(num_prec)
+    }
+
+    fn certify_one_complex_root_disk(
+        poly: &UnivariatePolynomial<FloatField<Complex<Rational>>>,
+        center: &Complex<Rational>,
+        radius: &Rational,
+    ) -> bool {
+        if radius.is_zero() {
+            return false;
+        }
+
+        let shifted = poly.shift_var(center);
+        let Some(linear) = shifted.coefficients.get(1) else {
+            return false;
+        };
+
+        let mut eval_higher_powers = Rational::zero();
+        for (pow, c) in shifted.coefficients.iter().enumerate().skip(2) {
+            eval_higher_powers += radius.pow(pow as u64) * ComplexRootInterval::norm_upper_bound(c);
+        }
+
+        let first_lower_bound = ComplexRootInterval::norm_lower_bound(linear) * radius;
+        let const_upper = shifted
+            .coefficients
+            .first()
+            .map(ComplexRootInterval::norm_upper_bound)
+            .unwrap_or_else(Rational::zero);
+
+        first_lower_bound > const_upper + eval_higher_powers
+    }
+
+    fn complex_root_radius(
+        centers: &[Complex<Rational>],
+        root_index: usize,
+        refine: Option<&Rational>,
+    ) -> Option<Rational> {
+        let mut radius = None;
+
+        for (other_index, other_center) in centers.iter().enumerate() {
+            if root_index == other_index {
+                continue;
+            }
+
+            let distance =
+                ComplexRootInterval::norm_lower_bound(&(&centers[root_index] - other_center));
+            radius = Some(match radius {
+                Some(r) if r < distance => r,
+                _ => distance,
+            });
+        }
+
+        let mut radius = radius
+            .map(|r| r / Rational::from(4))
+            .or_else(|| refine.cloned())
+            .unwrap_or_else(Rational::one);
+
+        if let Some(refine) = refine {
+            if !refine.is_zero() && refine < &radius {
+                radius = refine.clone();
+            }
+        }
+
+        if radius.is_zero() { None } else { Some(radius) }
+    }
+
+    fn certify_complex_roots_from_approximations(
+        &self,
+        roots: &[Complex<Float>],
+        refine: Option<&Rational>,
+    ) -> Option<Vec<ComplexRootInterval>> {
+        let complex = FloatField::from_rep(Complex::from(Rational::one()));
+        let self_complex = self.map_coeff(|c| Complex::from(c.clone()), complex);
+
+        let centers = roots
+            .iter()
+            .map(|root| Complex::new(root.re.to_rational(), root.im.to_rational()))
+            .collect::<Vec<_>>();
+
+        let mut complex_roots = Vec::with_capacity(centers.len());
+        for (root_index, center) in centers.iter().enumerate() {
+            let mut radius = Self::complex_root_radius(&centers, root_index, refine)?;
+
+            let mut certified_radius = None;
+            for _ in 0..16 {
+                if Self::certify_one_complex_root_disk(&self_complex, center, &radius) {
+                    certified_radius = Some(radius);
+                    break;
+                }
+
+                radius *= Rational::from((1, 2));
+                if radius.is_zero() {
+                    break;
+                }
+            }
+
+            complex_roots.push(ComplexRootInterval {
+                poly: Some(Arc::new(self_complex.clone())),
+                index: Some(root_index),
+                center: center.clone(),
+                radius: certified_radius?,
+                multiplicity: None,
+                real: false,
+                imaginary: false,
+            });
+        }
+
+        let derivative = self_complex.derivative();
+        if Self::refine_complex_root_balls_until_disjoint(
+            &self_complex,
+            &derivative,
+            &mut complex_roots,
+            refine,
+        ) {
+            self.mark_real_complex_roots(&mut complex_roots);
+            self.mark_imaginary_complex_roots(&mut complex_roots);
+            Some(complex_roots)
+        } else {
+            None
+        }
+    }
+
+    /// Returns whether the polynomial has cached roots.
+    pub fn has_cached_roots(&self) -> bool {
+        ROOT_CACHE
+            .roots
+            .read()
+            .unwrap()
+            .contains_key(&self.coefficients)
+    }
+
+    /// Gets the `index`-th root of the polynomial. Fails when `index` is out of bounds.
+    pub fn get_root(&self, index: usize) -> Option<ComplexRootInterval> {
+        if index > self.degree() {
+            return None;
+        }
+
+        if let Some(rs) = ROOT_CACHE.roots.read().unwrap().get(&self.coefficients) {
+            Some(rs[index].clone())
+        } else {
+            self.isolate_complex_roots(None).get(index).cloned()
+        }
+    }
+
+    /// Isolate the complex roots of the polynomial. The result is a sorted list of intervals with rational bounds that contain exactly one root
+    pub fn isolate_complex_roots(&self, refine: Option<Rational>) -> Vec<ComplexRootInterval> {
+        // TODO: also insert factored roots into the cache
+        ROOT_CACHE.get_or_insert_with(self, refine.as_ref(), || {
+            self.isolate_complex_roots_uncached(refine.clone(), true)
+        })
+    }
+
+    /// Isolate the `index`-th complex root and refine it for a numeric value with
+    /// `binary_prec` bits of precision.
+    pub fn isolate_complex_root(
+        &self,
+        index: usize,
+        binary_prec: u32,
+    ) -> Option<ComplexRootInterval> {
+        ROOT_CACHE.get_index_with_precision(self, index, binary_prec, || {
+            self.isolate_complex_roots_uncached(None, true)
+        })
+    }
+
+    fn isolate_complex_roots_uncached(
+        &self,
+        refine: Option<Rational>,
+        full_factor: bool,
+    ) -> Vec<ComplexRootInterval> {
+        let mut roots = vec![];
+
+        let factors = if full_factor {
+            self.clone().to_multivariate::<u16>().factor()
+        } else {
+            self.clone()
+                .to_multivariate::<u16>()
+                .square_free_factorization()
+        };
+
+        for (f, p) in factors {
+            f.to_univariate_from_univariate(0)
+                .isolate_complex_roots_impl(refine.clone())
+                .into_iter()
+                .for_each(|mut r| {
+                    r.multiplicity = Some(p);
+                    roots.push(r);
+                });
+        }
+
+        Self::refine_complex_root_intervals_until_disjoint(&mut roots, refine.as_ref());
+        Self::sort_complex_roots_canonical(&mut roots);
+        roots
+    }
+
+    fn sort_complex_roots_canonical(roots: &mut [ComplexRootInterval]) {
+        roots.sort_by(Self::cmp_complex_roots_canonical);
+    }
+
+    fn cmp_complex_roots_canonical(a: &ComplexRootInterval, b: &ComplexRootInterval) -> Ordering {
+        let a_re_upper = &a.center.re + &a.radius;
+        let b_re_lower = &b.center.re - &b.radius;
+        if a_re_upper < b_re_lower {
+            return Ordering::Less;
+        }
+
+        let b_re_upper = &b.center.re + &b.radius;
+        let a_re_lower = &a.center.re - &a.radius;
+        if b_re_upper < a_re_lower {
+            return Ordering::Greater;
+        }
+
+        if let Some(ordering) = Self::cmp_complex_roots_by_projected_real_parts(a, b) {
+            if ordering != Ordering::Equal {
+                return ordering;
+            }
+
+            return Self::cmp_complex_roots_by_imaginary_part(a, b);
+        }
+
+        match a.center.re.cmp(&b.center.re) {
+            Ordering::Equal => {}
+            ordering => return ordering,
+        }
+
+        Self::cmp_complex_roots_by_imaginary_part(a, b)
+    }
+
+    fn cmp_complex_roots_by_imaginary_part(
+        a: &ComplexRootInterval,
+        b: &ComplexRootInterval,
+    ) -> Ordering {
+        let a_im_upper = &a.center.im + &a.radius;
+        let b_im_lower = &b.center.im - &b.radius;
+        if a_im_upper < b_im_lower {
+            return Ordering::Less;
+        }
+
+        let b_im_upper = &b.center.im + &b.radius;
+        let a_im_lower = &a.center.im - &a.radius;
+        if b_im_upper < a_im_lower {
+            return Ordering::Greater;
+        }
+
+        a.center
+            .im
+            .cmp(&b.center.im)
+            .then_with(|| a.radius.cmp(&b.radius))
+    }
+
+    fn cmp_complex_roots_by_projected_real_parts(
+        a: &ComplexRootInterval,
+        b: &ComplexRootInterval,
+    ) -> Option<Ordering> {
+        let a_projected = Self::projected_real_root_for_complex_root(a)?;
+        let b_projected = Self::projected_real_root_for_complex_root(b)?;
+
+        Self::cmp_projected_real_roots(a_projected, b_projected)
+    }
+
+    fn projected_real_root_for_complex_root(
+        root: &ComplexRootInterval,
+    ) -> Option<ProjectedRealRoot> {
+        let poly = root.poly.as_ref()?;
+        let projection = Self::complex_real_projection_polynomial(poly)?;
+        let mut intervals = projection
+            .isolate_roots(None)
+            .into_iter()
+            .map(|(lower, upper, _)| (lower, upper))
+            .collect::<Vec<_>>();
+        let mut root = root.clone();
+
+        for _ in 0..1024 {
+            let root_interval = Self::complex_root_real_interval(&root);
+            let mut candidates = intervals
+                .iter()
+                .enumerate()
+                .filter(|(_, interval)| {
+                    Self::rational_intervals_intersect(interval, &root_interval)
+                })
+                .map(|(i, _)| i)
+                .collect::<Vec<_>>();
+
+            if candidates.len() == 1 {
+                return Some(ProjectedRealRoot {
+                    poly: projection,
+                    interval: intervals.swap_remove(candidates[0]),
+                });
+            }
+
+            if candidates.is_empty() {
+                candidates.extend(0..intervals.len());
+            }
+
+            if let Some(poly_complex) = root.poly.as_ref().map(|p| (**p).clone()) {
+                let derivative = poly_complex.derivative();
+                let _ = Self::newton_refine_complex_root_ball(
+                    &poly_complex,
+                    &derivative,
+                    &mut root,
+                    None,
+                );
+            }
+
+            for i in candidates {
+                projection.refine_real_root_interval_once(&mut intervals[i]);
+            }
+        }
+
+        None
+    }
+
+    fn complex_real_projection_polynomial(
+        poly: &ExactComplexPolynomial,
+    ) -> Option<UnivariatePolynomial<Q>> {
+        let variables = Arc::new(vec![PolyVariable::Temporary(0), PolyVariable::Temporary(1)]);
+        let mut real_part = MultivariatePolynomial::<Q, u16>::new(&Q, None, variables.clone());
+        let mut imaginary_part = MultivariatePolynomial::<Q, u16>::new(&Q, None, variables);
+
+        for (pow, coeff) in poly.coefficients.iter().enumerate() {
+            for y_pow in 0..=pow {
+                let x_pow = pow - y_pow;
+                let binom = Self::binomial_rational(pow, y_pow);
+                let rotated = Self::mul_complex_rational_by_i_power(coeff, y_pow);
+                let exponents = [u16::try_from(x_pow).ok()?, u16::try_from(y_pow).ok()?];
+
+                real_part.append_monomial(rotated.re * &binom, &exponents);
+                imaginary_part.append_monomial(rotated.im * binom, &exponents);
+            }
+        }
+
+        if real_part.is_zero() || imaginary_part.is_zero() {
+            return None;
+        }
+
+        let rational_function_field = RationalPolynomialField::new(Z);
+        let real_in_y = real_part.to_univariate(1).map_coeff(
+            |c| RationalPolynomial::from_num_den(c.clone(), c.one(), &Z, false),
+            rational_function_field.clone(),
+        );
+        let imaginary_in_y = imaginary_part.to_univariate(1).map_coeff(
+            |c| RationalPolynomial::from_num_den(c.clone(), c.one(), &Z, false),
+            rational_function_field,
+        );
+
+        let resultant = real_in_y.resultant(&imaginary_in_y);
+        let mut projection = resultant
+            .numerator
+            .map_coeff(|c| c.to_rational(), Q)
+            .to_univariate_from_univariate(0);
+        projection.truncate();
+
+        if projection.is_constant() {
+            return None;
+        }
+
+        let derivative = projection.derivative();
+        if !derivative.is_zero() {
+            let repeated = projection.gcd(&derivative);
+            if !repeated.is_constant() {
+                projection = projection.quot_rem(&repeated).0;
+                projection.truncate();
+            }
+        }
+
+        Some(projection)
+    }
+
+    fn binomial_rational(n: usize, k: usize) -> Rational {
+        let k = k.min(n - k);
+        let mut result = Rational::one();
+
+        for i in 0..k {
+            result *= Rational::from(n - i);
+            result /= Rational::from(i + 1);
+        }
+
+        result
+    }
+
+    fn mul_complex_rational_by_i_power(c: &Complex<Rational>, pow: usize) -> Complex<Rational> {
+        match pow % 4 {
+            0 => c.clone(),
+            1 => Complex::new(-c.im.clone(), c.re.clone()),
+            2 => Complex::new(-c.re.clone(), -c.im.clone()),
+            _ => Complex::new(c.im.clone(), -c.re.clone()),
+        }
+    }
+
+    fn complex_root_real_interval(root: &ComplexRootInterval) -> (Rational, Rational) {
+        (
+            root.center.re.clone() - &root.radius,
+            root.center.re.clone() + &root.radius,
+        )
+    }
+
+    fn rational_intervals_intersect(a: &(Rational, Rational), b: &(Rational, Rational)) -> bool {
+        a.0 <= b.1 && b.0 <= a.1
+    }
+
+    fn rational_interval_contains(a: &(Rational, Rational), b: &(Rational, Rational)) -> bool {
+        a.0 <= b.0 && b.1 <= a.1
+    }
+
+    fn cmp_projected_real_roots(
+        mut a: ProjectedRealRoot,
+        mut b: ProjectedRealRoot,
+    ) -> Option<Ordering> {
+        let gcd = a.poly.gcd(&b.poly);
+        let mut common_intervals = if gcd.is_constant() {
+            vec![]
+        } else {
+            gcd.isolate_roots(None)
+                .into_iter()
+                .map(|(lower, upper, _)| (lower, upper))
+                .collect::<Vec<_>>()
+        };
+
+        for _ in 0..1024 {
+            if a.interval.1 < b.interval.0 {
+                return Some(Ordering::Less);
+            }
+
+            if b.interval.1 < a.interval.0 {
+                return Some(Ordering::Greater);
+            }
+
+            if common_intervals.iter().any(|interval| {
+                Self::rational_interval_contains(&a.interval, interval)
+                    && Self::rational_interval_contains(&b.interval, interval)
+            }) {
+                return Some(Ordering::Equal);
+            }
+
+            a.poly.refine_real_root_interval_once(&mut a.interval);
+            b.poly.refine_real_root_interval_once(&mut b.interval);
+            for interval in &mut common_intervals {
+                gcd.refine_real_root_interval_once(interval);
+            }
+        }
+
+        None
+    }
+
+    fn complex_root_balls_are_disjoint(roots: &[ComplexRootInterval]) -> bool {
+        for i in 0..roots.len() {
+            for j in i + 1..roots.len() {
+                if !roots[i].is_isolated(&roots[j]) {
+                    return false;
+                }
+            }
+        }
+
+        true
+    }
+
+    fn newton_refine_complex_root_ball(
+        poly: &UnivariatePolynomial<FloatField<Complex<Rational>>>,
+        derivative: &UnivariatePolynomial<FloatField<Complex<Rational>>>,
+        root: &mut ComplexRootInterval,
+        refine: Option<&Rational>,
+    ) -> bool {
+        let derivative_at_center = derivative.evaluate(&root.center);
+        if derivative_at_center.is_zero() {
+            return false;
+        }
+
+        let new_center = &root.center - &(poly.evaluate(&root.center) / derivative_at_center);
+        let half_radius = root.radius.clone() / Rational::from(2);
+        let mut candidate_radii = vec![];
+
+        if let Some(refine) = refine {
+            if !refine.is_zero() && refine < &half_radius {
+                candidate_radii.push(refine.clone());
+            }
+        }
+        let quadratic_radius = &root.radius * &root.radius;
+        if !quadratic_radius.is_zero()
+            && quadratic_radius < half_radius
+            && candidate_radii
+                .iter()
+                .all(|radius| radius != &quadratic_radius)
+        {
+            candidate_radii.push(quadratic_radius);
+        }
+        candidate_radii.push(half_radius);
+
+        for mut new_radius in candidate_radii {
+            for _ in 0..16 {
+                if Self::certify_one_complex_root_disk(poly, &new_center, &new_radius) {
+                    root.center = new_center;
+                    root.radius = new_radius;
+                    return true;
+                }
+
+                new_radius *= Rational::from((1, 2));
+                if new_radius.is_zero() {
+                    break;
+                }
+            }
+        }
+
+        false
+    }
+
+    fn refine_complex_root_balls_until_disjoint(
+        poly: &UnivariatePolynomial<FloatField<Complex<Rational>>>,
+        derivative: &UnivariatePolynomial<FloatField<Complex<Rational>>>,
+        roots: &mut [ComplexRootInterval],
+        refine: Option<&Rational>,
+    ) -> bool {
+        if Self::complex_root_balls_are_disjoint(roots) {
+            return true;
+        }
+
+        for _ in 0..32 {
+            for root in roots.iter_mut() {
+                if !Self::newton_refine_complex_root_ball(poly, derivative, root, refine) {
+                    return false;
+                }
+            }
+
+            if Self::complex_root_balls_are_disjoint(roots) {
+                return true;
+            }
+        }
+
+        false
+    }
+
+    fn refine_complex_root_intervals_until_disjoint(
+        roots: &mut [ComplexRootInterval],
+        refine: Option<&Rational>,
+    ) {
+        for _ in 0..32 {
+            if Self::complex_root_balls_are_disjoint(roots) {
+                return;
+            }
+
+            for root in roots.iter_mut() {
+                let Some(poly_complex) = root.poly.as_ref().map(|p| (**p).clone()) else {
+                    return;
+                };
+
+                let derivative = poly_complex.derivative();
+
+                if !Self::newton_refine_complex_root_ball(&poly_complex, &derivative, root, refine)
+                {
+                    return;
+                }
+            }
+        }
+    }
+
+    fn refine_complex_root_intervals_until_refined(
+        roots: &mut [ComplexRootInterval],
+        refine: Option<&Rational>,
+    ) {
+        let Some(refine) = refine else {
+            return;
+        };
+
+        if refine.is_zero() {
+            return;
+        }
+
+        for _ in 0..64 {
+            if roots.iter().all(|root| root.radius <= *refine) {
+                return;
+            }
+
+            let mut refined_any = false;
+            for root in roots.iter_mut().filter(|root| root.radius > *refine) {
+                let Some(poly_complex) = root.poly.as_ref().map(|p| (**p).clone()) else {
+                    return;
+                };
+
+                let derivative = poly_complex.derivative();
+
+                if Self::newton_refine_complex_root_ball(
+                    &poly_complex,
+                    &derivative,
+                    root,
+                    Some(refine),
+                ) {
+                    refined_any = true;
+                }
+            }
+
+            if !refined_any {
+                return;
+            }
+        }
+    }
+
+    fn refine_complex_root_interval_until_refined(
+        root: &mut ComplexRootInterval,
+        refine: &Rational,
+    ) -> bool {
+        if refine.is_zero() {
+            return true;
+        }
+
+        for _ in 0..64 {
+            if root.radius <= *refine {
+                return true;
+            }
+
+            let Some(poly_complex) = root.poly.as_ref().map(|p| (**p).clone()) else {
+                return false;
+            };
+
+            let derivative = poly_complex.derivative();
+
+            if !Self::newton_refine_complex_root_ball(
+                &poly_complex,
+                &derivative,
+                root,
+                Some(refine),
+            ) {
+                return false;
+            }
+        }
+
+        root.radius <= *refine
+    }
+
+    fn real_interval_contained_in_complex_root_ball(
+        interval: &(Rational, Rational),
+        root: &ComplexRootInterval,
+    ) -> bool {
+        let im = root.center.im.abs();
+        let left_distance = (&interval.0 - &root.center.re).abs() + &im;
+        let right_distance = (&interval.1 - &root.center.re).abs() + &im;
+        left_distance <= root.radius && right_distance <= root.radius
+    }
+
+    fn imaginary_interval_contained_in_complex_root_ball(
+        interval: &(Rational, Rational),
+        root: &ComplexRootInterval,
+    ) -> bool {
+        let re = root.center.re.abs();
+        let lower_distance = (&interval.0 - &root.center.im).abs() + &re;
+        let upper_distance = (&interval.1 - &root.center.im).abs() + &re;
+        if lower_distance <= root.radius && upper_distance <= root.radius {
+            return true;
+        }
+
+        re <= root.radius
+            && interval.0 <= root.center.im.clone() - &root.radius
+            && root.center.im.clone() + &root.radius <= interval.1
+    }
+
+    fn refine_real_root_interval_once(&self, interval: &mut (Rational, Rational)) {
+        if interval.0 == interval.1 {
+            return;
+        }
+
+        let left_value = self.evaluate(&interval.0);
+        if left_value.is_zero() {
+            interval.1 = interval.0.clone();
+            return;
+        }
+
+        let right_value = self.evaluate(&interval.1);
+        if right_value.is_zero() {
+            interval.0 = interval.1.clone();
+            return;
+        }
+
+        let left_is_negative = left_value.is_negative();
+        let mid = (&interval.0 + &interval.1) / Rational::from(2);
+        let mid_value = self.evaluate(&mid);
+        if mid_value.is_zero() {
+            interval.0 = mid.clone();
+            interval.1 = mid;
+        } else if mid_value.is_negative() == left_is_negative {
+            interval.0 = mid;
+        } else {
+            interval.1 = mid;
+        }
+    }
+
+    fn mark_real_complex_roots(&self, roots: &mut [ComplexRootInterval]) {
+        if !roots.iter().any(|root| root.center.im.abs() <= root.radius) {
+            return;
+        }
+
+        for (a, b, _) in self.isolate_roots(None) {
+            let mut interval = (a, b);
+            for _ in 0..1024 {
+                let mut matched = false;
+                for root in roots.iter_mut() {
+                    if root.real || root.center.im.abs() > root.radius {
+                        continue;
+                    }
+
+                    if Self::real_interval_contained_in_complex_root_ball(&interval, root) {
+                        root.real = true;
+                        matched = true;
+                        break;
+                    }
+                }
+
+                if matched || interval.0 == interval.1 {
+                    break;
+                }
+
+                self.refine_real_root_interval_once(&mut interval);
+            }
+        }
+    }
+
+    fn polynomial_at_imaginary_axis_parts(&self) -> (Self, Self) {
+        let mut real = self.zero();
+        let mut imaginary = self.zero();
+        real.coefficients = vec![self.ring.zero(); self.coefficients.len()];
+        imaginary.coefficients = vec![self.ring.zero(); self.coefficients.len()];
+
+        for (pow, coeff) in self.coefficients.iter().enumerate() {
+            if self.ring.is_zero(coeff) {
+                continue;
+            }
+
+            let mut transformed = coeff.clone();
+            if (pow / 2) % 2 == 1 {
+                transformed = -transformed;
+            }
+
+            if pow % 2 == 0 {
+                real.coefficients[pow] = transformed;
+            } else {
+                imaginary.coefficients[pow] = transformed;
+            }
+        }
+
+        real.truncate();
+        imaginary.truncate();
+        (real, imaginary)
+    }
+
+    fn mark_imaginary_complex_roots(&self, roots: &mut [ComplexRootInterval]) {
+        if !roots.iter().any(|root| root.center.re.abs() <= root.radius) {
+            return;
+        }
+
+        let (real_part, imaginary_part) = self.polynomial_at_imaginary_axis_parts();
+        let imaginary_axis_poly = match (real_part.is_zero(), imaginary_part.is_zero()) {
+            (true, true) => return,
+            (true, false) => imaginary_part,
+            (false, true) => real_part,
+            (false, false) => real_part.gcd(&imaginary_part),
+        };
+
+        if imaginary_axis_poly.is_constant() {
+            return;
+        }
+
+        for (a, b, _) in imaginary_axis_poly.isolate_roots(None) {
+            let mut interval = (a, b);
+            for _ in 0..1024 {
+                let mut matched = false;
+                for root in roots.iter_mut() {
+                    if root.imaginary || root.center.re.abs() > root.radius {
+                        continue;
+                    }
+
+                    if Self::imaginary_interval_contained_in_complex_root_ball(&interval, root) {
+                        root.imaginary = true;
+                        matched = true;
+                        break;
+                    }
+                }
+
+                if matched || interval.0 == interval.1 {
+                    break;
+                }
+
+                imaginary_axis_poly.refine_real_root_interval_once(&mut interval);
+            }
+        }
+    }
+
+    // Self is square-free
+    fn isolate_complex_roots_impl(&self, refine: Option<Rational>) -> Vec<ComplexRootInterval> {
+        // Clustered roots can certify long before Aberth's residual test succeeds.
+        // Try the exact certificate between short Aberth batches and raise precision early.
+        const ABERTH_CERTIFICATION_BATCH: usize = 64;
+        const MAX_ABERTH_ITERATIONS_PER_PRECISION: usize = 256;
+
+        let mut num_prec = 128;
+        let mut previous_roots: Option<Vec<Complex<Float>>> = None;
+
+        loop {
+            let tolerance = Self::complex_root_tolerance(num_prec);
+            let field = FloatField::from_rep(Complex::from(tolerance.clone()));
+            let c = self.map_coeff(|c| c.to_multi_prec_float(num_prec).into(), field);
+
+            let mut roots_at_precision = previous_roots.take().map(|roots| {
+                roots
+                    .into_iter()
+                    .map(|root: Complex<Float>| {
+                        Complex::new(
+                            root.re.to_rational().to_multi_prec_float(num_prec),
+                            root.im.to_rational().to_multi_prec_float(num_prec),
+                        )
+                    })
+                    .collect::<Vec<_>>()
+            });
+
+            let mut iterations = 0;
+            while iterations < MAX_ABERTH_ITERATIONS_PER_PRECISION {
+                let batch = ABERTH_CERTIFICATION_BATCH
+                    .min(MAX_ABERTH_ITERATIONS_PER_PRECISION - iterations);
+                let roots = if let Some(initial_guesses) = roots_at_precision.take() {
+                    c.roots_hot_start(batch, &tolerance, initial_guesses)
+                } else {
+                    c.roots(batch, &tolerance)
+                };
+                iterations += batch;
+
+                let aberth_converged = roots.is_ok();
+                let roots = match roots {
+                    Ok(roots) => roots,
+                    Err(roots) => roots,
+                };
+                if let Some(complex_roots) =
+                    self.certify_complex_roots_from_approximations(&roots, refine.as_ref())
+                {
+                    return complex_roots;
+                }
+
+                roots_at_precision = Some(roots);
+                if aberth_converged {
+                    break;
+                }
+            }
+
+            previous_roots = roots_at_precision;
+            num_prec *= 2;
+        }
+    }
+
     /// Isolate the real roots of the polynomial. The result is a list of intervals with rational bounds that contain exactly one root,
     /// and the multiplicity of that root.
     /// Optionally, the intervals can be refined to a given precision.
@@ -918,6 +2224,216 @@ impl UnivariatePolynomial<RationalField> {
         }
 
         if iter_bound { Err(roots) } else { Ok(roots) }
+    }
+}
+
+impl UnivariatePolynomial<ExactComplexField> {
+    fn try_map_to_rational(&self) -> Option<UnivariatePolynomial<Q>> {
+        if self.coefficients.iter().any(|c| !c.im.is_zero()) {
+            return None;
+        }
+
+        Some(self.map_coeff(|c| c.re.clone(), Q))
+    }
+
+    fn complex_rational_to_algebraic(
+        field: &AlgebraicExtension<Q>,
+        c: &Complex<Rational>,
+    ) -> AlgebraicNumber<Q> {
+        let mut poly = field.poly().constant(c.re.clone());
+        if !c.im.is_zero() {
+            poly = poly + field.poly().monomial(c.im.clone(), vec![1]);
+        }
+        field.to_element(poly)
+    }
+
+    fn algebraic_to_complex_rational(c: &AlgebraicNumber<Q>) -> Complex<Rational> {
+        Complex::new(
+            c.poly().coefficient(&[0]).unwrap_or_else(Rational::zero),
+            c.poly().coefficient(&[1]).unwrap_or_else(Rational::zero),
+        )
+    }
+
+    fn certify_complex_roots_from_approximations(
+        &self,
+        roots: &[Complex<Float>],
+        refine: Option<&Rational>,
+    ) -> Option<Vec<ComplexRootInterval>> {
+        let centers = roots
+            .iter()
+            .map(|root| Complex::new(root.re.to_rational(), root.im.to_rational()))
+            .collect::<Vec<_>>();
+
+        let mut complex_roots = Vec::with_capacity(centers.len());
+        for (root_index, center) in centers.iter().enumerate() {
+            let mut radius =
+                UnivariatePolynomial::<Q>::complex_root_radius(&centers, root_index, refine)?;
+
+            let mut certified_radius = None;
+            for _ in 0..16 {
+                if UnivariatePolynomial::<Q>::certify_one_complex_root_disk(self, center, &radius) {
+                    certified_radius = Some(radius);
+                    break;
+                }
+
+                radius *= Rational::from((1, 2));
+                if radius.is_zero() {
+                    break;
+                }
+            }
+
+            complex_roots.push(ComplexRootInterval {
+                poly: Some(Arc::new(self.clone())),
+                index: Some(root_index),
+                center: center.clone(),
+                radius: certified_radius?,
+                multiplicity: None,
+                real: false,
+                imaginary: false,
+            });
+        }
+
+        let derivative = self.derivative();
+        if UnivariatePolynomial::<Q>::refine_complex_root_balls_until_disjoint(
+            self,
+            &derivative,
+            &mut complex_roots,
+            refine,
+        ) {
+            Some(complex_roots)
+        } else {
+            None
+        }
+    }
+
+    /// Isolate the complex roots of a polynomial with exact complex rational
+    /// coefficients. If all coefficients are rational, use the rational
+    /// polynomial path and its root cache.
+    pub fn isolate_complex_roots(&self, refine: Option<Rational>) -> Vec<ComplexRootInterval> {
+        if let Some(poly) = self.try_map_to_rational() {
+            return poly.isolate_complex_roots(refine);
+        }
+
+        ROOT_CACHE.get_complex_or_insert_with(self, refine.as_ref(), || {
+            self.isolate_complex_roots_uncached(refine.clone())
+        })
+    }
+
+    /// Isolate the `index`-th complex root and refine it for a numeric value with
+    /// `binary_prec` bits of precision.
+    pub fn isolate_complex_root(
+        &self,
+        index: usize,
+        binary_prec: u32,
+    ) -> Option<ComplexRootInterval> {
+        if let Some(poly) = self.try_map_to_rational() {
+            return poly.isolate_complex_root(index, binary_prec);
+        }
+
+        ROOT_CACHE.get_complex_index_with_precision(self, index, binary_prec, || {
+            self.isolate_complex_roots_uncached(None)
+        })
+    }
+
+    fn isolate_complex_roots_uncached(&self, refine: Option<Rational>) -> Vec<ComplexRootInterval> {
+        let complex_field = FloatField::from_rep(Complex::from(Rational::one()));
+        let algebraic_field = AlgebraicExtension::new_complex(Q);
+        let algebraic_poly = self.map_coeff(
+            |c| Self::complex_rational_to_algebraic(&algebraic_field, c),
+            algebraic_field.clone(),
+        );
+
+        let mut roots = vec![];
+        for (f, p) in algebraic_poly
+            .to_multivariate::<u16>()
+            .square_free_factorization()
+        {
+            if f.is_constant() {
+                continue;
+            }
+
+            f.to_univariate_from_univariate(0)
+                .map_coeff(Self::algebraic_to_complex_rational, complex_field.clone())
+                .isolate_complex_roots_impl(refine.clone())
+                .into_iter()
+                .for_each(|mut r| {
+                    r.multiplicity = Some(p);
+                    roots.push(r);
+                });
+        }
+
+        UnivariatePolynomial::<Q>::refine_complex_root_intervals_until_disjoint(
+            &mut roots,
+            refine.as_ref(),
+        );
+        UnivariatePolynomial::<Q>::sort_complex_roots_canonical(&mut roots);
+        roots
+    }
+
+    // Self is square-free
+    fn isolate_complex_roots_impl(&self, refine: Option<Rational>) -> Vec<ComplexRootInterval> {
+        const ABERTH_CERTIFICATION_BATCH: usize = 64;
+        const MAX_ABERTH_ITERATIONS_PER_PRECISION: usize = 256;
+
+        let mut num_prec = 128;
+        let mut previous_roots: Option<Vec<Complex<Float>>> = None;
+
+        loop {
+            let tolerance = UnivariatePolynomial::<Q>::complex_root_tolerance(num_prec);
+            let field = FloatField::from_rep(Complex::from(tolerance.clone()));
+            let c = self.map_coeff(
+                |c| {
+                    Complex::new(
+                        c.re.to_multi_prec_float(num_prec),
+                        c.im.to_multi_prec_float(num_prec),
+                    )
+                },
+                field,
+            );
+
+            let mut roots_at_precision = previous_roots.take().map(|roots| {
+                roots
+                    .into_iter()
+                    .map(|root: Complex<Float>| {
+                        Complex::new(
+                            root.re.to_rational().to_multi_prec_float(num_prec),
+                            root.im.to_rational().to_multi_prec_float(num_prec),
+                        )
+                    })
+                    .collect::<Vec<_>>()
+            });
+
+            let mut iterations = 0;
+            while iterations < MAX_ABERTH_ITERATIONS_PER_PRECISION {
+                let batch = ABERTH_CERTIFICATION_BATCH
+                    .min(MAX_ABERTH_ITERATIONS_PER_PRECISION - iterations);
+                let roots = if let Some(initial_guesses) = roots_at_precision.take() {
+                    c.roots_hot_start(batch, &tolerance, initial_guesses)
+                } else {
+                    c.roots(batch, &tolerance)
+                };
+                iterations += batch;
+
+                let aberth_converged = roots.is_ok();
+                let roots = match roots {
+                    Ok(roots) => roots,
+                    Err(roots) => roots,
+                };
+                if let Some(complex_roots) =
+                    self.certify_complex_roots_from_approximations(&roots, refine.as_ref())
+                {
+                    return complex_roots;
+                }
+
+                roots_at_precision = Some(roots);
+                if aberth_converged {
+                    break;
+                }
+            }
+
+            previous_roots = roots_at_precision;
+            num_prec *= 2;
+        }
     }
 }
 
@@ -1303,33 +2819,105 @@ impl<R: Real + SingleFloat + std::hash::Hash + Eq + PartialOrd + InternalOrderin
 
         let upper = self.get_root_upper_bound();
         let lower = self.get_root_lower_bound();
+        let radius_span = upper.clone() - &lower;
+        let golden_angle = upper.pi() * (upper.from_usize(3) - upper.from_usize(5).sqrt());
+        let degree = self.degree();
 
-        let df = self.derivative();
-
-        let mut rng = rand::rng();
-        let mut n: Vec<_> = (0..self.degree())
-            .map(|_| {
-                let r = upper.sample_unit(&mut rng) * (upper.clone() - &lower) + &lower;
-                let phi = upper.sample_unit(&mut rng) * upper.pi() * upper.from_usize(2);
+        let n: Vec<_> = (0..degree)
+            .map(|i| {
+                let radius_fraction = upper.from_usize(i + 1) / upper.from_usize(degree + 1);
+                let r = lower.clone() + radius_span.clone() * &radius_fraction;
+                let phi = golden_angle.clone() * upper.from_usize(i + 1);
                 Complex::from_polar_coordinates(r, phi)
             })
             .collect();
 
+        self.roots_hot_start(max_iterations, tolerance, n)
+    }
+
+    /// Compute all complex roots of the polynomial using Aberth's method with an initial guess for each root.
+    pub fn roots_hot_start(
+        &self,
+        max_iterations: usize,
+        tolerance: &R,
+        initial_guesses: Vec<Complex<R>>,
+    ) -> Result<Vec<Complex<R>>, Vec<Complex<R>>> {
+        if self.get_constant().is_zero() {
+            match self.div_exp(1).roots(max_iterations, tolerance) {
+                Ok(mut roots) => {
+                    roots.push(self.ring.zero());
+                    return Ok(roots);
+                }
+                Err(mut roots) => {
+                    roots.push(self.ring.zero());
+                    return Err(roots);
+                }
+            }
+        }
+
+        let df = self.derivative();
+
+        let mut n = initial_guesses;
+        let finite_error = |roots: &[Complex<R>]| {
+            let mut roots = roots.to_vec();
+            roots.sort_unstable_by(|a, b| {
+                a.re.partial_cmp(&b.re)
+                    .unwrap_or(Ordering::Equal)
+                    .then(a.im.partial_cmp(&b.im).unwrap_or(Ordering::Equal))
+            });
+            Err(roots)
+        };
+
         let t_sq = tolerance.clone() * tolerance;
         for _ in 0..max_iterations {
             for i in 0..n.len() {
-                let e = self.evaluate(&n[i]) / df.evaluate(&n[i]);
+                let last_finite = n.clone();
+                let p_at_i = self.evaluate(&n[i]);
+                let df_at_i = df.evaluate(&n[i]);
+                if !p_at_i.is_finite() || !df_at_i.is_finite() || df_at_i.is_zero() {
+                    return finite_error(&last_finite);
+                }
+
+                let e = p_at_i / df_at_i;
+                if !e.is_finite() {
+                    return finite_error(&last_finite);
+                }
 
                 let mut rep = e.zero();
                 for j in 0..n.len() {
                     if i != j && n[i] != n[j] {
-                        rep += (n[i].clone() - &n[j]).inv();
+                        let diff = n[i].clone() - &n[j];
+                        if !diff.is_finite() || diff.is_zero() {
+                            return finite_error(&last_finite);
+                        }
+
+                        let diff_inv = diff.inv();
+                        if !diff_inv.is_finite() {
+                            return finite_error(&last_finite);
+                        }
+
+                        rep += diff_inv;
                     }
                 }
+                if !rep.is_finite() {
+                    return finite_error(&last_finite);
+                }
 
-                n[i] -= &e / (rep.one() - &e * rep); // immediately use the new value
+                let denom = rep.one() - &e * rep;
+                if !denom.is_finite() || denom.is_zero() {
+                    return finite_error(&last_finite);
+                }
+
+                let correction = e / denom;
+                if !correction.is_finite() {
+                    return finite_error(&last_finite);
+                }
+
+                n[i] -= correction;
+                if !n[i].is_finite() {
+                    return finite_error(&last_finite);
+                }
             }
-
             if n.iter().all(|x| self.evaluate(x).norm_squared() < t_sq) {
                 n.sort_unstable_by(|a, b| {
                     a.re.partial_cmp(&b.re)
@@ -1842,10 +3430,18 @@ impl<R: Ring, E: PositiveExponent> UnivariatePolynomial<PolynomialRing<R, E>> {
 
 #[cfg(test)]
 mod test {
+    use super::{RootCache, UnivariatePolynomial};
+    use std::{cmp::Ordering, sync::Arc};
+
     use crate::{
         atom::AtomCore,
-        domains::{float::F64, integer::Z, rational::Q},
+        domains::{
+            float::{Complex, F64, Float, FloatField},
+            integer::Z,
+            rational::{Q, Rational},
+        },
         parse,
+        poly::{PolyVariable, univariate::ComplexRootInterval},
     };
 
     #[test]
@@ -1942,5 +3538,233 @@ mod test {
         let pc = p.approximate_roots::<F64>(10000, &1e-8.into()).unwrap();
         assert!(pc[0].0.re < 2f64.into());
         assert!(pc[9].0.re > 1f64.into());
+    }
+
+    fn assert_pairwise_isolated(roots: &[ComplexRootInterval]) {
+        for i in 0..roots.len() {
+            for j in i + 1..roots.len() {
+                assert!(roots[i].is_isolated(&roots[j]));
+            }
+        }
+    }
+
+    fn assert_complex_roots_canonical(roots: &[ComplexRootInterval]) {
+        for pair in roots.windows(2) {
+            assert!(
+                UnivariatePolynomial::<Q>::cmp_complex_roots_canonical(&pair[0], &pair[1])
+                    != Ordering::Greater
+            );
+        }
+    }
+
+    #[test]
+    fn aberth_handles_very_close_roots_without_non_finite_iterates() {
+        let p = parse!("(x^2+1)*((x-1/1000000)^2+1)*((x+1/1000000)^2+1)")
+            .to_polynomial::<_, u16>(&Q, None)
+            .to_univariate_from_univariate(0);
+
+        let prec = 256;
+        let tolerance = Float::with_val(prec, 1e-40);
+        let field = FloatField::from_rep(Complex::from(tolerance.clone()));
+        let p_float = p.map_coeff(|c| c.to_multi_prec_float(prec).into(), field);
+
+        let roots = match p_float.roots(10000, &tolerance) {
+            Ok(roots) | Err(roots) => roots,
+        };
+
+        assert_eq!(roots.len(), 6);
+        assert!(roots.iter().all(|r| r.re.is_finite() && r.im.is_finite()));
+    }
+
+    #[test]
+    fn complex_root_isolation_refines_across_factors() {
+        let p = parse!("(x^2+1)*((x-1/100)^2+1)")
+            .to_polynomial::<_, u16>(&Q, None)
+            .to_univariate_from_univariate(0);
+        let roots = p.isolate_complex_roots(None);
+
+        assert_eq!(roots.len(), 4);
+        assert_pairwise_isolated(&roots);
+        assert_complex_roots_canonical(&roots);
+    }
+
+    #[test]
+    fn complex_root_isolation_marks_real_roots() {
+        let p = parse!("(x+1)*(x-2)*(x^2+1)")
+            .to_polynomial::<_, u16>(&Q, None)
+            .to_univariate_from_univariate(0);
+        let roots = p.isolate_complex_roots(None);
+
+        assert_eq!(roots.len(), 4);
+        assert_eq!(roots.iter().filter(|r| r.real).count(), 2);
+        assert_eq!(roots.iter().filter(|r| r.imaginary).count(), 2);
+        assert_pairwise_isolated(&roots);
+        assert_complex_roots_canonical(&roots);
+    }
+
+    #[test]
+    fn complex_root_isolation_marks_imaginary_roots_from_common_axis_part() {
+        let p = parse!("x^3+x")
+            .to_polynomial::<_, u16>(&Q, None)
+            .to_univariate_from_univariate(0);
+        let roots = p.isolate_complex_roots(None);
+
+        assert_eq!(roots.len(), 3);
+        assert_eq!(roots.iter().filter(|r| r.imaginary).count(), 3);
+        assert_pairwise_isolated(&roots);
+        assert_complex_roots_canonical(&roots);
+    }
+
+    fn complex_root_contains(root: &ComplexRootInterval, re: Rational, im: Rational) -> bool {
+        (&root.center.re - &re).abs() <= root.radius && (&root.center.im - &im).abs() <= root.radius
+    }
+
+    #[test]
+    fn complex_root_isolation_handles_exact_complex_coefficients() {
+        let field = FloatField::from_rep(Complex::from(Rational::one()));
+        let mut p = UnivariatePolynomial::new(&field, None, Arc::new(PolyVariable::Temporary(0)));
+        p.coefficients = vec![
+            Complex::new(Rational::from(3), Rational::one()),
+            Complex::new(Rational::from(-3), Rational::zero()),
+            Complex::new(Rational::one(), Rational::zero()),
+        ];
+
+        let roots = p.isolate_complex_roots(None);
+
+        assert_eq!(roots.len(), 2);
+        assert!(complex_root_contains(
+            &roots[0],
+            Rational::one(),
+            Rational::one()
+        ));
+        assert!(complex_root_contains(
+            &roots[1],
+            Rational::from(2),
+            Rational::from(-1)
+        ));
+        assert_pairwise_isolated(&roots);
+        assert_complex_roots_canonical(&roots);
+    }
+
+    #[test]
+    fn complex_root_canonical_sort_handles_equal_real_parts() {
+        let field = FloatField::from_rep(Complex::from(Rational::one()));
+        let mut p = UnivariatePolynomial::new(&field, None, Arc::new(PolyVariable::Temporary(0)));
+        p.coefficients = vec![
+            Complex::new(Rational::from(-1), Rational::from(3)),
+            Complex::new(Rational::from(-2), Rational::from(-3)),
+            Complex::new(Rational::one(), Rational::zero()),
+        ];
+
+        let roots = p.isolate_complex_roots(None);
+
+        assert_eq!(roots.len(), 2);
+        assert!(complex_root_contains(
+            &roots[0],
+            Rational::one(),
+            Rational::one()
+        ));
+        assert!(complex_root_contains(
+            &roots[1],
+            Rational::one(),
+            Rational::from(2)
+        ));
+        assert_pairwise_isolated(&roots);
+        assert_complex_roots_canonical(&roots);
+    }
+
+    #[test]
+    fn complex_root_isolation_maps_rational_complex_coefficients_to_q() {
+        let p = parse!("x^2+1")
+            .to_polynomial::<_, u16>(&Q, None)
+            .to_univariate_from_univariate(0);
+        let field = FloatField::from_rep(Complex::from(Rational::one()));
+        let p_complex = p.map_coeff(|c| Complex::from(c.clone()), field);
+
+        let roots = p_complex.isolate_complex_roots(None);
+
+        assert_eq!(roots.len(), 2);
+        assert_eq!(roots.iter().filter(|r| r.is_imaginary()).count(), 2);
+        assert_complex_roots_canonical(&roots);
+    }
+
+    #[test]
+    fn complex_root_isolation_handles_very_close_conjugate_pairs() {
+        let p = parse!("(x^2+1)*((x-1/10000)^2+1)*((x+1/10000)^2+1)")
+            .to_polynomial::<_, u16>(&Q, None)
+            .to_univariate_from_univariate(0);
+        let roots = p.isolate_complex_roots(None);
+
+        assert_eq!(roots.len(), 6);
+        assert_pairwise_isolated(&roots);
+        assert_complex_roots_canonical(&roots);
+    }
+
+    #[test]
+    fn complex_root_isolation_handles_mixed_close_clusters() {
+        let p = parse!(
+            "((x-2)^2+(1/10)^2)*\
+             ((x-2-1/100)^2+(1/10)^2)*\
+             ((x+3)^2+(1/5)^2)*\
+             (x^2+2*x+2)"
+        )
+        .to_polynomial::<_, u16>(&Q, None)
+        .to_univariate_from_univariate(0);
+        let refine = Rational::from((1, 1000));
+        let roots = p.isolate_complex_roots(Some(refine.clone()));
+
+        assert_eq!(roots.len(), 8);
+        assert_pairwise_isolated(&roots);
+        assert_complex_roots_canonical(&roots);
+        assert!(roots.iter().all(|r| r.radius <= refine));
+    }
+
+    #[test]
+    fn complex_root_cache_ignores_variable_name() {
+        let p_x = parse!("x^2+1")
+            .to_polynomial::<_, u16>(&Q, None)
+            .to_univariate_from_univariate(0);
+        let p_y = parse!("y^2+1")
+            .to_polynomial::<_, u16>(&Q, None)
+            .to_univariate_from_univariate(0);
+
+        let cache = RootCache::new();
+        let mut calls = 0;
+        cache.get_or_insert_with(&p_x, None, || {
+            calls += 1;
+            vec![]
+        });
+        cache.get_or_insert_with(&p_y, None, || {
+            calls += 1;
+            vec![]
+        });
+
+        assert_eq!(calls, 1);
+    }
+
+    #[test]
+    fn complex_root_cache_ignores_variable_name_for_complex_coefficients() {
+        let field = FloatField::from_rep(Complex::from(Rational::one()));
+        let mut p_x = UnivariatePolynomial::new(&field, None, Arc::new(PolyVariable::Temporary(0)));
+        p_x.coefficients = vec![
+            Complex::new(Rational::from(3), Rational::one()),
+            Complex::new(Rational::from(-3), Rational::zero()),
+            Complex::new(Rational::one(), Rational::zero()),
+        ];
+        let mut p_y = UnivariatePolynomial::new(&field, None, Arc::new(PolyVariable::Temporary(1)));
+        p_y.coefficients = p_x.coefficients.clone();
+
+        let cache = RootCache::new();
+        let mut calls = 0;
+        cache.get_complex_or_insert_with(&p_x, None, || {
+            calls += 1;
+            vec![]
+        });
+        cache.get_complex_or_insert_with(&p_y, None, || {
+            calls += 1;
+            vec![]
+        });
+
+        assert_eq!(calls, 1);
     }
 }

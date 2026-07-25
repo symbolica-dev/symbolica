@@ -1,15 +1,20 @@
-use std::sync::LazyLock;
+use std::sync::{Arc, LazyLock};
 
 use crate::{
     atom::{Atom, AtomCore, AtomOrView, AtomView, EvaluationInfo, FunctionBuilder, Symbol},
     coefficient::{Coefficient, CoefficientView},
     domains::{
+        algebraic_number::{AlgebraicExtension, AlgebraicNumber},
         backend::float::Constant,
-        float::{Complex, ErrorPropagatingFloat, Float, FloatLike, Real, RealLike, SingleFloat},
+        float::{
+            Complex, ErrorPropagatingFloat, Float, FloatField, FloatLike, Real, RealLike,
+            SingleFloat,
+        },
         integer::Integer,
-        rational::Rational,
+        rational::{Q, Rational, RationalField},
     },
     function, get_symbol,
+    poly::{PolyVariable, univariate::UnivariatePolynomial},
     state::{State, StateInitializer},
     symbol,
     utils::Settable,
@@ -21,6 +26,7 @@ static SPECIALS: LazyLock<SpecialSymbols> = LazyLock::new(|| SpecialSymbols {
     erf: get_symbol!("erf").expect("erf not defined"),
     polygamma: get_symbol!("polygamma").expect("polygamma not defined"),
     polylog: get_symbol!("polylog").expect("polylog not defined"),
+    root: get_symbol!("root").expect("root not defined"),
     zeta: get_symbol!("zeta").expect("zeta not defined"),
 });
 static GEOMETRICS: LazyLock<GeometricSymbols> = LazyLock::new(|| GeometricSymbols {
@@ -60,6 +66,7 @@ struct SpecialSymbols {
     erf: Symbol,
     polygamma: Symbol,
     polylog: Symbol,
+    root: Symbol,
     zeta: Symbol,
 }
 
@@ -97,6 +104,54 @@ struct BesselSymbols {
 
 impl SpecialSymbols {
     fn new() -> Self {
+        let root = symbol!(
+            "root",
+            norm = |x, out| {
+                let Some([poly_tag, index_tag]) = function_arguments::<2>(x) else {
+                    return;
+                };
+
+                let Ok(index) = usize::try_from(index_tag) else {
+                    return;
+                };
+
+                let Ok(poly) = polynomial_tag_to_univariate(&poly_tag) else {
+                    return;
+                };
+
+                if let Some(root) = poly.get_root(index) {
+                    let p = root.poly().unwrap();
+                    if p.degree() < poly.degree() {
+                        let p = p.as_ref().clone().to_multivariate::<u16>().to_expression();
+
+                        **out = x.get_symbol().unwrap().call((p, root.index().unwrap()));
+                        return;
+                    }
+                }
+
+                if poly.degree() == 1 {
+                    out.to_num(&poly.coefficients[0] / &-poly.coefficients[1].clone());
+                } else if poly.degree() == 2 {
+                    let [c, b, a] = poly.coefficients.as_slice() else {
+                        return;
+                    };
+
+                    let d = Atom::num(b * b - a * c * &Rational::from(4));
+                    **out = if index == 0 {
+                        ((-b.clone() - d.sqrt()) / (Rational::from(2) * a.clone())).expand()
+                    } else if index == 1 {
+                        ((-b.clone() + d.sqrt()) / (Rational::from(2) * a.clone())).expand()
+                    } else {
+                        return;
+                    }
+                }
+            },
+            der = |_x, _i, out| {
+                out.to_num(Coefficient::zero());
+            },
+            eval = EvaluationInfo::constant(root_numeric_eval).with_tags(2)
+        );
+
         let euler_gamma = symbol!(
             "γ",
             aliases = ["euler_gamma"],
@@ -519,8 +574,120 @@ impl SpecialSymbols {
             erf,
             polygamma,
             polylog,
+            root,
             zeta,
         }
+    }
+}
+
+fn root_numeric_eval(tags: &[AtomView], prec: u32) -> Result<Complex<Float>, String> {
+    let [poly_tag, index_tag] = tags else {
+        return Err(format!("root expects 2 tags, got {}", tags.len()));
+    };
+
+    let index = usize::try_from(*index_tag).map_err(|_| {
+        format!(
+            "root index {} is not a non-negative integer",
+            index_tag.printer(numerica::printer::PrintOptions::file())
+        )
+    })?;
+
+    let poly = polynomial_tag_to_univariate_complex(poly_tag)?;
+    if poly.degree() == 0 {
+        return Err(format!(
+            "root polynomial {} has no roots",
+            poly_tag.printer(numerica::printer::PrintOptions::file())
+        ));
+    }
+
+    let roots = poly.isolate_complex_roots(None);
+    let mut seen = 0;
+    let Some(root) = roots.into_iter().find(|root| {
+        let multiplicity = root.multiplicity().unwrap_or(1);
+        let selected = index < seen + multiplicity;
+        seen += multiplicity;
+        selected
+    }) else {
+        return Err(format!(
+            "root index {index} is out of bounds for polynomial of degree {}",
+            poly.degree()
+        ));
+    };
+
+    let mut value = root.to_float_center(prec);
+    if root.is_imaginary() {
+        value.re = Float::new(prec);
+    }
+    if root.is_real() {
+        value.im = Float::new(prec);
+    }
+    Ok(value)
+}
+
+fn polynomial_tag_to_univariate(
+    poly_tag: &AtomView,
+) -> Result<UnivariatePolynomial<crate::domains::rational::RationalField>, String> {
+    let poly = poly_tag
+        .try_to_polynomial::<_, u16>(&crate::domains::rational::Q, None)
+        .map_err(|e| format!("could not convert root polynomial tag to a polynomial: {e}"))?;
+
+    match poly.nvars() {
+        0 => {
+            let mut univariate = UnivariatePolynomial::new(
+                &crate::domains::rational::Q,
+                None,
+                Arc::new(PolyVariable::Temporary(0)),
+            );
+            univariate.coefficients = poly.coefficients;
+            univariate.truncate();
+            Ok(univariate)
+        }
+        1 => Ok(poly.to_univariate_from_univariate(0)),
+        n => Err(format!(
+            "root expects a univariate polynomial, got {n} variables"
+        )),
+    }
+}
+
+fn algebraic_complex_to_complex_rational(c: &AlgebraicNumber<RationalField>) -> Complex<Rational> {
+    Complex::new(
+        c.poly().coefficient(&[0]).unwrap_or_else(Rational::zero),
+        c.poly().coefficient(&[1]).unwrap_or_else(Rational::zero),
+    )
+}
+
+fn polynomial_tag_to_univariate_complex(
+    poly_tag: &AtomView,
+) -> Result<UnivariatePolynomial<FloatField<Complex<Rational>>>, String> {
+    let algebraic_field = AlgebraicExtension::new_complex(Q);
+    let poly = poly_tag
+        .try_to_polynomial::<_, u16>(&algebraic_field, None)
+        .map_err(|e| {
+            format!("could not convert root polynomial tag to a complex polynomial: {e}")
+        })?;
+    let complex_field = FloatField::from_rep(Complex::from(Rational::one()));
+
+    match poly.nvars() {
+        0 => {
+            let mut univariate = UnivariatePolynomial::new(
+                &complex_field,
+                None,
+                Arc::new(PolyVariable::Temporary(0)),
+            );
+            univariate.coefficients = poly
+                .coefficients
+                .iter()
+                .map(algebraic_complex_to_complex_rational)
+                .collect();
+            univariate.truncate();
+            Ok(univariate)
+        }
+        1 => Ok(poly
+            .to_univariate_from_univariate(0)
+            .map_coeff(algebraic_complex_to_complex_rational, complex_field)),
+        n => Err(format!(
+            "root expects a univariate polynomial, got {n} variables"
+        )),
     }
 }
 
@@ -1789,6 +1956,14 @@ pub fn polygamma() -> Symbol {
 /// along the real interval `[1, +infinity)`.
 pub fn polylog() -> Symbol {
     SPECIALS.polylog
+}
+
+/// Return the built-in algebraic root symbol `root`.
+///
+/// `root(poly, n)` represents the `n`-th complex root of a univariate polynomial
+/// over `Q(i)`, ordered lexicographically by `(re, im)`.
+pub fn root() -> Symbol {
+    SPECIALS.root
 }
 
 /// Return the built-in Riemann zeta function symbol `zeta`.
@@ -3843,6 +4018,8 @@ fn spouge_coefficient(a: u32, k: u32, binary_prec: u32) -> Float {
 
 #[cfg(test)]
 mod tests {
+    use ahash::HashMap;
+
     use std::{
         io::Write,
         process::{Command, Stdio},
@@ -3854,6 +4031,30 @@ mod tests {
         domains::float::{Complex, Float, Real, RealLike},
         parse, symbol,
     };
+
+    #[test]
+    fn root_factor() {
+        let mut roots = vec![];
+        for x in 0..7 {
+            let p = parse!(format!("root((x^3+3)(x^4+4), {x})"));
+            roots.push(p);
+        }
+
+        let mut last = -1.5;
+        for root in &roots {
+            let v = Complex::<f64>::try_from(root.to_float(16)).unwrap();
+            assert!(last <= v.re);
+            last = v.re;
+        }
+
+        assert_eq!(roots[0], parse!("root(3+x^3,0)"));
+        assert_eq!(roots[1], parse!("-1-1i"));
+        assert_eq!(roots[2], parse!("-1+1i"));
+        assert_eq!(roots[3], parse!("root(3+x^3,1)"));
+        assert_eq!(roots[4], parse!("root(3+x^3,2)"));
+        assert_eq!(roots[5], parse!("1-1i"));
+        assert_eq!(roots[6], parse!("1+1i"));
+    }
 
     #[test]
     fn gamma_exact_normalization() {
@@ -3873,6 +4074,70 @@ mod tests {
             parse!("gamma(x)").derivative(symbol!("x")),
             parse!("gamma(x)*polygamma(0,x)")
         );
+    }
+
+    #[test]
+    fn root_derivative_is_zero() {
+        assert_eq!(parse!("root(x^2-2,1)").derivative(symbol!("x")), Atom::Zero);
+    }
+
+    #[test]
+    fn root_evaluator_uses_complex_root_isolation() {
+        let direct_value = parse!("root(x^2-2,1)")
+            .evaluate_with_prec(&HashMap::<Atom, Float>::default(), 128)
+            .unwrap();
+        assert!((direct_value.to_f64() - 2f64.sqrt()).abs() < 1e-12);
+
+        let params: Vec<Atom> = vec![];
+        let mut real_root = parse!("root(x^2-2,1)")
+            .evaluator(&params)
+            .build()
+            .unwrap()
+            .map_coeff(&|x| x.re.to_f64());
+        let real_value = real_root.evaluate_single(&[]);
+        assert!((real_value - 2f64.sqrt()).abs() < 1e-12);
+
+        let mut complex_root = parse!("root(x^2+1,1)")
+            .evaluator(&params)
+            .build()
+            .unwrap()
+            .map_coeff(&|x| Complex::new(x.re.to_f64(), x.im.to_f64()));
+        let complex_value = complex_root.evaluate_single(&[]);
+        assert!(complex_value.re.abs() < 1e-12);
+        assert!((complex_value.im - 1.).abs() < 1e-12);
+
+        let imaginary_value =
+            Complex::<Float>::try_from(parse!("root(x^2+1,1)").to_float(53)).unwrap();
+        assert_eq!(imaginary_value.re, Float::new(53));
+        assert!((imaginary_value.im.to_f64() - 1.).abs() < 1e-12);
+
+        let complex_coefficient_value =
+            Complex::<Float>::try_from(parse!("root(x-(1+1i),0)").to_float(80)).unwrap();
+        assert!((complex_coefficient_value.re.to_f64() - 1.).abs() < 1e-12);
+        assert!((complex_coefficient_value.im.to_f64() - 1.).abs() < 1e-12);
+    }
+
+    #[test]
+    fn root_evaluator_refines_to_requested_precision() {
+        let value = parse!("root(x^2-2,1)")
+            .evaluate_with_prec(&HashMap::<Atom, Float>::default(), 192)
+            .unwrap();
+        let mut residual = value.clone() * value - Float::with_val(192, 2);
+        if residual.is_negative() {
+            residual = -residual;
+        }
+
+        assert_eq!(residual.prec(), 192);
+        assert!(residual.to_f64() < 2f64.powi(-150));
+    }
+
+    #[test]
+    fn root_to_float_degree_ten_regression() {
+        let root = parse!("root(x^10+x^7-3,3)").to_float(53);
+        let value = Complex::<Float>::try_from(root).unwrap();
+
+        assert!(value.re.is_finite());
+        assert!(value.im.is_finite());
     }
 
     #[test]

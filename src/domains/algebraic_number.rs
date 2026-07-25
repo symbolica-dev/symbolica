@@ -5,7 +5,7 @@ use std::sync::Arc;
 use rand::Rng;
 
 use crate::{
-    atom::Atom,
+    atom::{Atom, AtomCore},
     coefficient::ConvertToRing,
     combinatorics::CombinationIterator,
     domains::{RingOps, Set, rational::Q},
@@ -586,7 +586,7 @@ impl<R: EuclideanDomain> AlgebraicExtension<R> {
     }
 }
 
-impl<R: Ring> AlgebraicExtension<R> {
+impl<R: EuclideanDomain> AlgebraicExtension<R> {
     /// Create a new algebraic extension `R(i)`.
     /// This ring can be used to convert expressions with complex coefficients
     /// to polynomials.
@@ -617,6 +617,53 @@ impl<R: Ring> AlgebraicExtension<R> {
                 isolating_interval: Some((0.into(), 0.into())),
                 complex_interval: Some((1.into(), 1.into())),
             })),
+        }
+    }
+
+    pub fn try_to_atom(&self, element: &<Self as Set>::Element) -> Result<Atom, String>
+    where
+        R::Element: Into<crate::coefficient::Coefficient>,
+    {
+        if self.poly.nterms() == 2
+            && self.poly.degree(0) == 2
+            && self.poly.get_constant() == self.poly.ring.one()
+            && self
+                .poly
+                .coefficient(&[2])
+                .is_some_and(|c| c == self.poly.ring.one())
+        {
+            if element.poly.degree(0) > 1 {
+                return Err("Polynomial degree is too high".to_string());
+            }
+
+            let re = element
+                .poly
+                .coefficient(&[0])
+                .unwrap_or_else(|| self.poly.ring.zero());
+            let im = element
+                .poly
+                .coefficient(&[1])
+                .unwrap_or_else(|| self.poly.ring.zero());
+
+            Ok(Atom::num(re) + Atom::num(im) * Atom::i())
+        } else if self.poly.nterms() == 2 {
+            let degree = self.poly.degree(0);
+            let leading = self
+                .poly
+                .coefficient(&[degree])
+                .unwrap_or_else(|| self.poly.ring.zero());
+
+            if degree == 0 || leading != self.poly.ring.one() {
+                return Err("Algebraic extension is not a binomial root".to_string());
+            }
+
+            let base = self.poly.ring.neg(&self.poly.get_constant());
+            let root = Atom::num(base).pow(Atom::num((1usize, degree as usize)));
+            let mut poly = element.poly.clone();
+            poly.rename_variable(&self.poly.get_vars_ref()[0], &PolyVariable::Power(root));
+            Ok(poly.to_expression())
+        } else {
+            Err("Algebraic extension is not complex or a binomial root".to_string())
         }
     }
 }
@@ -1219,6 +1266,29 @@ mod tests {
         let a = ring.to_element(a);
 
         assert_eq!(ring.is_positive(&a), Ok(true));
+    }
+
+    #[test]
+    fn algebraic_number_to_atom_complex() {
+        let ring = AlgebraicExtension::new_complex(Q);
+
+        let i = ring.to_element(parse!("𝑖").to_polynomial::<_, u16>(&Q, None));
+        assert_eq!(ring.try_to_atom(&i).unwrap(), parse!("1𝑖"));
+
+        let one_plus_i = ring.to_element(parse!("1+𝑖").to_polynomial::<_, u16>(&Q, None));
+        assert_eq!(ring.try_to_atom(&one_plus_i).unwrap(), parse!("1+1𝑖"));
+
+        let ring = AlgebraicExtension::new(parse!("a^2+1").to_polynomial(&Q, None));
+        let a = ring.to_element(parse!("a").to_polynomial::<_, u16>(&Q, None));
+        assert_eq!(ring.try_to_atom(&a).unwrap(), parse!("1𝑖"));
+    }
+
+    #[test]
+    fn algebraic_number_to_atom_binomial_root() {
+        let ring = AlgebraicExtension::new(parse!("a^3-2").to_polynomial(&Q, None));
+
+        let a_squared = ring.to_element(parse!("a^2").to_polynomial::<_, u16>(&Q, None));
+        assert_eq!(ring.try_to_atom(&a_squared).unwrap(), parse!("2^(2/3)"));
     }
 
     #[test]
