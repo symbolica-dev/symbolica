@@ -74,6 +74,16 @@ pub trait ConvertToRing: Ring {
         &self,
         number: CoefficientView<'_>,
     ) -> Result<Self::Element, String>;
+
+    /// Try to convert a `base` raised to the power of `exponent` to a Ring element.
+    fn try_element_from_pow(&self, _base: AtomView, _exponent: Rational) -> Option<Self::Element> {
+        None
+    }
+
+    /// Try to convert a `root` atom to a Ring element.
+    fn try_element_from_root(&self, _root: AtomView) -> Option<Self::Element> {
+        None
+    }
 }
 
 /// A coefficient that can appear in a Symbolica expression.
@@ -1196,18 +1206,12 @@ impl ConvertToRing for AlgebraicExtension<Q> {
             Coefficient::Complex(r) => {
                 if r.is_real() {
                     Ok(self.constant(r.re.clone()))
-                } else if self.poly().exponents == [0, 2]
-                    && self.poly().get_constant() == Rational::one()
-                {
-                    Ok(self.to_element(
-                        self.poly().monomial(r.im.clone(), vec![1])
-                            + self.poly().constant(r.re.clone()),
-                    ))
                 } else {
-                    Err(
-                        "Cannot directly convert complex number to this extension. First create a polynomial with extension x^2+1 and then upgrade."
-                            .to_owned(),
-                    )
+                    let imaginary_unit = self.imaginary_unit()?;
+                    Ok(self.add(
+                        &self.constant(r.re.clone()),
+                        &self.mul(&self.constant(r.im.clone()), &imaginary_unit),
+                    ))
                 }
             }
             Coefficient::Float(_) => Err(format!("Cannot convert float {} to extension", number)),
@@ -1235,36 +1239,26 @@ impl ConvertToRing for AlgebraicExtension<Q> {
             CoefficientView::Natural(r, d, cr, cd) => {
                 if cr == 0 {
                     Ok(self.constant(Rational::from_int_unchecked(r, d)))
-                } else if self.poly().exponents == [0, 2]
-                    && self.poly().get_constant() == Rational::one()
-                {
-                    Ok(self.to_element(
-                        self.poly()
-                            .monomial(Rational::from_int_unchecked(cr, cd), vec![1])
-                            + self.poly().constant(Rational::from_int_unchecked(r, d)),
-                    ))
                 } else {
-                    Err(
-                        "Cannot directly convert complex number to this extension. First create a polynomial with extension x^2+1 and then upgrade."
-                            .to_owned(),
-                    )
+                    let imaginary_unit = self.imaginary_unit()?;
+                    Ok(self.add(
+                        &self.constant(Rational::from_int_unchecked(r, d)),
+                        &self.mul(
+                            &self.constant(Rational::from_int_unchecked(cr, cd)),
+                            &imaginary_unit,
+                        ),
+                    ))
                 }
             }
             CoefficientView::Large(r, i) => {
                 if i.is_zero() {
                     Ok(self.constant(r.to_rat()))
-                } else if self.poly().exponents == [0, 2]
-                    && self.poly().get_constant() == Rational::one()
-                {
-                    Ok(self.to_element(
-                        self.poly().monomial(i.to_rat(), vec![1])
-                            + self.poly().constant(r.to_rat()),
-                    ))
                 } else {
-                    Err(
-                        "Cannot directly convert complex number to this extension. First create a polynomial with extension x^2+1 and then upgrade."
-                            .to_owned(),
-                    )
+                    let imaginary_unit = self.imaginary_unit()?;
+                    Ok(self.add(
+                        &self.constant(r.to_rat()),
+                        &self.mul(&self.constant(i.to_rat()), &imaginary_unit),
+                    ))
                 }
             }
             CoefficientView::Float(_, _) => Err(format!(
@@ -1279,6 +1273,15 @@ impl ConvertToRing for AlgebraicExtension<Q> {
                 number.to_owned()
             )),
         }
+    }
+
+    fn try_element_from_pow(&self, base: AtomView, exponent: Rational) -> Option<Self::Element> {
+        let power = base.pow(Atom::num(exponent));
+        power.as_view().to_algebraic(self).ok()
+    }
+
+    fn try_element_from_root(&self, root: AtomView) -> Option<Self::Element> {
+        root.to_algebraic(self).ok()
     }
 }
 
