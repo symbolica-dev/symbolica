@@ -2275,6 +2275,11 @@ pub trait TranscendentalFunctions: AtomCore {
     fn bessel_k<'a, T: Into<AtomOrView<'a>>>(&self, nu: T) -> Self::Output {
         receiver_last_transcendental_function(self, crate::transcendental::bessel_k(), nu)
     }
+
+    /// Construct the root function of `self` with index `index`.
+    fn root(&self, index: usize) -> Self::Output {
+        self.atom_to_output(root().call((self.as_atom_view(), index)))
+    }
 }
 
 impl<T: AtomCore> TranscendentalFunctions for T {}
@@ -4134,6 +4139,24 @@ mod tests {
     #[test]
     fn root_to_float_degree_ten_regression() {
         let root = parse!("root(x^10+x^7-3,3)").to_float(53);
+        let value = Complex::<Float>::try_from(root).unwrap();
+
+        assert!(value.re.is_finite());
+        assert!(value.im.is_finite());
+    }
+
+    #[test]
+    fn root_to_float_degree_ten_complex_coefficients_regression() {
+        let root = parse!("root(x^10+(2+1i)*x^7-3,3)").to_float(100);
+        let value = Complex::<Float>::try_from(root).unwrap();
+
+        assert!(value.re.is_finite());
+        assert!(value.im.is_finite());
+    }
+
+    #[test]
+    fn root_to_float_degree_ten_conjugate_sort_regression() {
+        let root = parse!("root(x^10+3*x^7-3,1)").to_float(100);
         let value = Complex::<Float>::try_from(root).unwrap();
 
         assert!(value.re.is_finite());

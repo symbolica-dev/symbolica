@@ -782,8 +782,14 @@ pub struct ComplexRootInterval {
     imaginary: bool,
 }
 
+#[derive(Clone)]
+struct RealProjection {
+    poly: Arc<UnivariatePolynomial<Q>>,
+    intervals: Vec<(Rational, Rational)>,
+}
+
 struct ProjectedRealRoot {
-    poly: UnivariatePolynomial<Q>,
+    poly: Arc<UnivariatePolynomial<Q>>,
     interval: (Rational, Rational),
 }
 
@@ -1421,10 +1427,205 @@ impl UnivariatePolynomial<RationalField> {
     }
 
     fn sort_complex_roots_canonical(roots: &mut [ComplexRootInterval]) {
-        roots.sort_by(Self::cmp_complex_roots_canonical);
+        let mut sorting_roots = roots.to_vec();
+        Self::refine_real_projections_for_sort(&mut sorting_roots);
+        let known_equal_real_parts = Self::known_equal_real_parts(&sorting_roots);
+        let needs_projection = Self::roots_with_unresolved_real_projection_overlaps(
+            &sorting_roots,
+            &known_equal_real_parts,
+        );
+
+        let mut projection_cache = HashMap::new();
+        let projected_roots = sorting_roots
+            .iter()
+            .zip(needs_projection)
+            .map(|(root, needs_projection)| {
+                if !needs_projection {
+                    return None;
+                }
+
+                let poly = root.poly.as_ref()?;
+                let projection = projection_cache
+                    .entry(poly.coefficients.clone())
+                    .or_insert_with(|| {
+                        Self::complex_real_projection_polynomial(poly).map(|projection| {
+                            let intervals = projection
+                                .isolate_roots(None)
+                                .into_iter()
+                                .map(|(lower, upper, _)| (lower, upper))
+                                .collect();
+                            RealProjection {
+                                poly: Arc::new(projection),
+                                intervals,
+                            }
+                        })
+                    })
+                    .as_ref()?;
+
+                Self::projected_real_root_for_complex_root(root, projection)
+            })
+            .collect::<Vec<_>>();
+
+        let mut order = (0..roots.len()).collect::<Vec<_>>();
+        order.sort_by(|&a, &b| {
+            Self::cmp_complex_roots_canonical_with_projected(
+                &sorting_roots[a],
+                &sorting_roots[b],
+                projected_roots[a].as_ref(),
+                projected_roots[b].as_ref(),
+                known_equal_real_parts[a * roots.len() + b],
+            )
+        });
+
+        let sorted = order
+            .into_iter()
+            .map(|index| roots[index].clone())
+            .collect::<Vec<_>>();
+        roots.clone_from_slice(&sorted);
     }
 
+    fn refine_real_projections_for_sort(roots: &mut [ComplexRootInterval]) {
+        let known_equal_real_parts = Self::known_equal_real_parts(roots);
+        let overlaps =
+            Self::roots_with_unresolved_real_projection_overlaps(roots, &known_equal_real_parts);
+        for (root, overlaps) in roots.iter_mut().zip(overlaps) {
+            if !overlaps {
+                continue;
+            }
+
+            let Some(poly) = root.poly.as_ref().map(|poly| (**poly).clone()) else {
+                continue;
+            };
+            Self::bounded_refine_complex_root_ball_for_sort(&poly, root);
+        }
+    }
+
+    fn bounded_refine_complex_root_ball_for_sort(
+        poly: &ExactComplexPolynomial,
+        root: &mut ComplexRootInterval,
+    ) -> bool {
+        const BINARY_PRECISION: u32 = 256;
+        const TARGET_RADIUS_BITS: u64 = 192;
+
+        let approximate_center = root.to_float_center(BINARY_PRECISION);
+        if !approximate_center.is_finite() {
+            return false;
+        }
+        let center = Complex::new(
+            approximate_center.re.to_rational(),
+            approximate_center.im.to_rational(),
+        );
+        let center_distance = ComplexRootInterval::norm_upper_bound(&(&center - &root.center));
+
+        let max_radius = &root.radius / &Rational::from(2);
+        let mut radius = Rational::from((Integer::one(), Integer::from(2).pow(TARGET_RADIUS_BITS)))
+            .min(max_radius.clone());
+
+        for _ in 0..64 {
+            if &center_distance + &radius <= root.radius
+                && Self::certify_one_complex_root_disk(poly, &center, &radius)
+            {
+                root.center = center;
+                root.radius = radius;
+                return true;
+            }
+
+            if radius >= max_radius {
+                return false;
+            }
+            radius = (radius * Rational::from(2)).min(max_radius.clone());
+        }
+
+        false
+    }
+
+    fn known_equal_real_parts(roots: &[ComplexRootInterval]) -> Vec<bool> {
+        let mut equal = vec![false; roots.len() * roots.len()];
+        for i in 0..roots.len() {
+            equal[i * roots.len() + i] = true;
+            for j in i + 1..roots.len() {
+                if Self::are_certified_conjugates(&roots[i], &roots[j]) {
+                    equal[i * roots.len() + j] = true;
+                    equal[j * roots.len() + i] = true;
+                }
+            }
+        }
+        equal
+    }
+
+    fn are_certified_conjugates(a: &ComplexRootInterval, b: &ComplexRootInterval) -> bool {
+        let (Some(a_poly), Some(b_poly)) = (&a.poly, &b.poly) else {
+            return false;
+        };
+        if a_poly.coefficients != b_poly.coefficients
+            || a_poly
+                .coefficients
+                .iter()
+                .any(|coefficient| !coefficient.im.is_zero())
+        {
+            return false;
+        }
+
+        // Conjugating a certified root ball of a real polynomial produces
+        // another certified one-root ball. If that ball contains, or is
+        // contained in, b's ball, both balls contain the same conjugate root.
+        let conjugate_center_distance = ComplexRootInterval::norm_upper_bound(&Complex::new(
+            &a.center.re - &b.center.re,
+            &a.center.im + &b.center.im,
+        ));
+        let (smaller_radius, larger_radius) = if a.radius < b.radius {
+            (&a.radius, &b.radius)
+        } else {
+            (&b.radius, &a.radius)
+        };
+        conjugate_center_distance + smaller_radius <= *larger_radius
+    }
+
+    fn roots_with_unresolved_real_projection_overlaps(
+        roots: &[ComplexRootInterval],
+        known_equal_real_parts: &[bool],
+    ) -> Vec<bool> {
+        let mut overlaps = vec![false; roots.len()];
+        for i in 0..roots.len() {
+            let a_lower = &roots[i].center.re - &roots[i].radius;
+            let a_upper = &roots[i].center.re + &roots[i].radius;
+
+            for j in i + 1..roots.len() {
+                if known_equal_real_parts[i * roots.len() + j] {
+                    continue;
+                }
+
+                let b_lower = &roots[j].center.re - &roots[j].radius;
+                let b_upper = &roots[j].center.re + &roots[j].radius;
+                if a_lower <= b_upper && b_lower <= a_upper {
+                    overlaps[i] = true;
+                    overlaps[j] = true;
+                }
+            }
+        }
+        overlaps
+    }
+
+    #[cfg(test)]
     fn cmp_complex_roots_canonical(a: &ComplexRootInterval, b: &ComplexRootInterval) -> Ordering {
+        let a_projected = Self::projected_real_root_for_complex_root_uncached(a);
+        let b_projected = Self::projected_real_root_for_complex_root_uncached(b);
+        Self::cmp_complex_roots_canonical_with_projected(
+            a,
+            b,
+            a_projected.as_ref(),
+            b_projected.as_ref(),
+            false,
+        )
+    }
+
+    fn cmp_complex_roots_canonical_with_projected(
+        a: &ComplexRootInterval,
+        b: &ComplexRootInterval,
+        a_projected: Option<&ProjectedRealRoot>,
+        b_projected: Option<&ProjectedRealRoot>,
+        known_equal_real_parts: bool,
+    ) -> Ordering {
         let a_re_upper = &a.center.re + &a.radius;
         let b_re_lower = &b.center.re - &b.radius;
         if a_re_upper < b_re_lower {
@@ -1437,7 +1638,13 @@ impl UnivariatePolynomial<RationalField> {
             return Ordering::Greater;
         }
 
-        if let Some(ordering) = Self::cmp_complex_roots_by_projected_real_parts(a, b) {
+        if known_equal_real_parts {
+            return Self::cmp_complex_roots_by_imaginary_part(a, b);
+        }
+
+        if let Some(ordering) =
+            Self::cmp_complex_roots_by_projected_real_parts(a_projected, b_projected)
+        {
             if ordering != Ordering::Equal {
                 return ordering;
             }
@@ -1476,25 +1683,52 @@ impl UnivariatePolynomial<RationalField> {
     }
 
     fn cmp_complex_roots_by_projected_real_parts(
-        a: &ComplexRootInterval,
-        b: &ComplexRootInterval,
+        a: Option<&ProjectedRealRoot>,
+        b: Option<&ProjectedRealRoot>,
     ) -> Option<Ordering> {
-        let a_projected = Self::projected_real_root_for_complex_root(a)?;
-        let b_projected = Self::projected_real_root_for_complex_root(b)?;
+        let a = a?;
+        let b = b?;
 
-        Self::cmp_projected_real_roots(a_projected, b_projected)
+        if Arc::ptr_eq(&a.poly, &b.poly) {
+            if a.interval == b.interval {
+                return Some(Ordering::Equal);
+            }
+
+            if a.interval.1 < b.interval.0 {
+                return Some(Ordering::Less);
+            }
+
+            if b.interval.1 < a.interval.0 {
+                return Some(Ordering::Greater);
+            }
+        }
+
+        Self::cmp_projected_real_roots(a, b)
     }
 
-    fn projected_real_root_for_complex_root(
+    #[cfg(test)]
+    fn projected_real_root_for_complex_root_uncached(
         root: &ComplexRootInterval,
     ) -> Option<ProjectedRealRoot> {
         let poly = root.poly.as_ref()?;
         let projection = Self::complex_real_projection_polynomial(poly)?;
-        let mut intervals = projection
+        let intervals = projection
             .isolate_roots(None)
             .into_iter()
             .map(|(lower, upper, _)| (lower, upper))
-            .collect::<Vec<_>>();
+            .collect();
+        let projection = RealProjection {
+            poly: Arc::new(projection),
+            intervals,
+        };
+        Self::projected_real_root_for_complex_root(root, &projection)
+    }
+
+    fn projected_real_root_for_complex_root(
+        root: &ComplexRootInterval,
+        projection: &RealProjection,
+    ) -> Option<ProjectedRealRoot> {
+        let mut intervals = projection.intervals.clone();
         let mut root = root.clone();
 
         for _ in 0..1024 {
@@ -1510,7 +1744,7 @@ impl UnivariatePolynomial<RationalField> {
 
             if candidates.len() == 1 {
                 return Some(ProjectedRealRoot {
-                    poly: projection,
+                    poly: projection.poly.clone(),
                     interval: intervals.swap_remove(candidates[0]),
                 });
             }
@@ -1530,7 +1764,9 @@ impl UnivariatePolynomial<RationalField> {
             }
 
             for i in candidates {
-                projection.refine_real_root_interval_once(&mut intervals[i]);
+                projection
+                    .poly
+                    .refine_real_root_interval_once(&mut intervals[i]);
             }
         }
 
@@ -1629,10 +1865,9 @@ impl UnivariatePolynomial<RationalField> {
         a.0 <= b.0 && b.1 <= a.1
     }
 
-    fn cmp_projected_real_roots(
-        mut a: ProjectedRealRoot,
-        mut b: ProjectedRealRoot,
-    ) -> Option<Ordering> {
+    fn cmp_projected_real_roots(a: &ProjectedRealRoot, b: &ProjectedRealRoot) -> Option<Ordering> {
+        let mut a_interval = a.interval.clone();
+        let mut b_interval = b.interval.clone();
         let gcd = a.poly.gcd(&b.poly);
         let mut common_intervals = if gcd.is_constant() {
             vec![]
@@ -1644,23 +1879,23 @@ impl UnivariatePolynomial<RationalField> {
         };
 
         for _ in 0..1024 {
-            if a.interval.1 < b.interval.0 {
+            if a_interval.1 < b_interval.0 {
                 return Some(Ordering::Less);
             }
 
-            if b.interval.1 < a.interval.0 {
+            if b_interval.1 < a_interval.0 {
                 return Some(Ordering::Greater);
             }
 
             if common_intervals.iter().any(|interval| {
-                Self::rational_interval_contains(&a.interval, interval)
-                    && Self::rational_interval_contains(&b.interval, interval)
+                Self::rational_interval_contains(&a_interval, interval)
+                    && Self::rational_interval_contains(&b_interval, interval)
             }) {
                 return Some(Ordering::Equal);
             }
 
-            a.poly.refine_real_root_interval_once(&mut a.interval);
-            b.poly.refine_real_root_interval_once(&mut b.interval);
+            a.poly.refine_real_root_interval_once(&mut a_interval);
+            b.poly.refine_real_root_interval_once(&mut b_interval);
             for interval in &mut common_intervals {
                 gcd.refine_real_root_interval_once(interval);
             }
