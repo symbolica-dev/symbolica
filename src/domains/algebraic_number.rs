@@ -175,6 +175,17 @@ pub struct AlgebraicExtension<R: Ring> {
     embedding: usize,                          // root index
 }
 
+/// A formal simple algebraic quotient `R[t]/(f)` without a selected analytic
+/// embedding.
+///
+/// This is the appropriate coefficient field for parametric algebraic roots:
+/// before parameters are specialized, the conjugates of `f` have no globally
+/// stable ordering in the complex plane.
+#[derive(Clone, PartialEq, Eq, Hash)]
+pub struct AlgebraicQuotient<R: Ring> {
+    poly: Arc<MultivariatePolynomial<R, u16>>,
+}
+
 /// A number field together with the images of algebraic atoms in that field.
 ///
 /// When the field is enlarged, all stored images are transported to the new
@@ -2229,7 +2240,7 @@ impl<R: EuclideanDomain> Ring for AlgebraicExtension<R> {
     }
 }
 
-impl<R: Field + PolynomialGCD<u16>> EuclideanDomain for AlgebraicExtension<R> {
+impl<R: Field> EuclideanDomain for AlgebraicExtension<R> {
     fn rem(&self, _a: &Self::Element, _b: &Self::Element) -> Self::Element {
         // TODO: due to the remainder requiring an inverse, we need to have R be a field
         // instead of a Euclidean domain. Relax this condition by doing a pseudo-division
@@ -2250,7 +2261,7 @@ impl<R: Field + PolynomialGCD<u16>> EuclideanDomain for AlgebraicExtension<R> {
     }
 }
 
-impl<R: Field + PolynomialGCD<u16>> Field for AlgebraicExtension<R> {
+impl<R: Field> Field for AlgebraicExtension<R> {
     fn div(&self, a: &Self::Element, b: &Self::Element) -> Self::Element {
         self.mul(a, &self.inv(b))
     }
@@ -2267,6 +2278,246 @@ impl<R: Field + PolynomialGCD<u16>> Field for AlgebraicExtension<R> {
         AlgebraicNumber {
             poly: a.poly.eea_univariate(&self.poly).1,
         }
+    }
+}
+
+impl<R: Ring> std::fmt::Debug for AlgebraicQuotient<R> {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(f, " quotient {:?}", self.poly)
+    }
+}
+
+impl<R: Ring> std::fmt::Display for AlgebraicQuotient<R> {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(f, " quotient {}", self.poly)
+    }
+}
+
+impl<R: EuclideanDomain> AlgebraicQuotient<R> {
+    /// Construct `R[t]/(f)`.
+    ///
+    /// The polynomial must be monic and irreducible if the quotient is to be
+    /// used as a field. This is not checked.
+    pub fn new(poly: MultivariatePolynomial<R, u16>) -> Self {
+        let extension = AlgebraicExtension::new(poly);
+        Self {
+            poly: extension.poly,
+        }
+    }
+
+    /// Construct the degree-one quotient `R[t]/(t)`.
+    pub fn trivial(ring: R) -> Self {
+        let extension = AlgebraicExtension::trivial(ring);
+        Self {
+            poly: extension.poly,
+        }
+    }
+
+    fn arithmetic(&self) -> AlgebraicExtension<R> {
+        AlgebraicExtension {
+            poly: self.poly.clone(),
+            embedding: 0,
+        }
+    }
+
+    pub fn poly(&self) -> &MultivariatePolynomial<R, u16> {
+        &self.poly
+    }
+
+    pub fn constant(&self, coefficient: R::Element) -> AlgebraicNumber<R> {
+        AlgebraicNumber {
+            poly: self.poly.constant(coefficient),
+        }
+    }
+
+    pub fn generator(&self) -> AlgebraicNumber<R> {
+        self.to_element(self.poly.one().mul_exp(&[1]))
+    }
+
+    pub fn try_to_element(
+        &self,
+        polynomial: MultivariatePolynomial<R, u16>,
+    ) -> Result<AlgebraicNumber<R>, String> {
+        self.arithmetic().try_to_element(polynomial)
+    }
+
+    pub fn to_element(&self, polynomial: MultivariatePolynomial<R, u16>) -> AlgebraicNumber<R> {
+        self.try_to_element(polynomial).unwrap()
+    }
+
+    pub(crate) fn get_new_var(&self) -> PolyVariable {
+        match self.poly.get_vars_ref()[0] {
+            PolyVariable::Temporary(index) => PolyVariable::Temporary(index + 1),
+            _ => PolyVariable::Temporary(0),
+        }
+    }
+}
+
+impl<R: EuclideanDomain> Set for AlgebraicQuotient<R> {
+    type Element = AlgebraicNumber<R>;
+
+    fn size(&self) -> Option<Integer> {
+        self.arithmetic().size()
+    }
+}
+
+impl<R: EuclideanDomain> RingOps<AlgebraicNumber<R>> for AlgebraicQuotient<R> {
+    fn add(&self, a: Self::Element, b: Self::Element) -> Self::Element {
+        self.arithmetic().add(a, b)
+    }
+
+    fn sub(&self, a: Self::Element, b: Self::Element) -> Self::Element {
+        self.arithmetic().sub(a, b)
+    }
+
+    fn mul(&self, a: Self::Element, b: Self::Element) -> Self::Element {
+        self.arithmetic().mul(a, b)
+    }
+
+    fn add_assign(&self, a: &mut Self::Element, b: Self::Element) {
+        self.arithmetic().add_assign(a, b)
+    }
+
+    fn sub_assign(&self, a: &mut Self::Element, b: Self::Element) {
+        self.arithmetic().sub_assign(a, b)
+    }
+
+    fn mul_assign(&self, a: &mut Self::Element, b: Self::Element) {
+        self.arithmetic().mul_assign(a, b)
+    }
+
+    fn add_mul_assign(&self, a: &mut Self::Element, b: Self::Element, c: Self::Element) {
+        self.arithmetic().add_mul_assign(a, b, c)
+    }
+
+    fn sub_mul_assign(&self, a: &mut Self::Element, b: Self::Element, c: Self::Element) {
+        self.arithmetic().sub_mul_assign(a, b, c)
+    }
+
+    fn neg(&self, a: Self::Element) -> Self::Element {
+        self.arithmetic().neg(a)
+    }
+}
+
+impl<R: EuclideanDomain> RingOps<&AlgebraicNumber<R>> for AlgebraicQuotient<R> {
+    fn add(&self, a: &Self::Element, b: &Self::Element) -> Self::Element {
+        self.arithmetic().add(a, b)
+    }
+
+    fn sub(&self, a: &Self::Element, b: &Self::Element) -> Self::Element {
+        self.arithmetic().sub(a, b)
+    }
+
+    fn mul(&self, a: &Self::Element, b: &Self::Element) -> Self::Element {
+        self.arithmetic().mul(a, b)
+    }
+
+    fn add_assign(&self, a: &mut Self::Element, b: &Self::Element) {
+        self.arithmetic().add_assign(a, b)
+    }
+
+    fn sub_assign(&self, a: &mut Self::Element, b: &Self::Element) {
+        self.arithmetic().sub_assign(a, b)
+    }
+
+    fn mul_assign(&self, a: &mut Self::Element, b: &Self::Element) {
+        self.arithmetic().mul_assign(a, b)
+    }
+
+    fn add_mul_assign(&self, a: &mut Self::Element, b: &Self::Element, c: &Self::Element) {
+        self.arithmetic().add_mul_assign(a, b, c)
+    }
+
+    fn sub_mul_assign(&self, a: &mut Self::Element, b: &Self::Element, c: &Self::Element) {
+        self.arithmetic().sub_mul_assign(a, b, c)
+    }
+
+    fn neg(&self, a: &Self::Element) -> Self::Element {
+        self.arithmetic().neg(a)
+    }
+}
+
+impl<R: EuclideanDomain> Ring for AlgebraicQuotient<R> {
+    fn zero(&self) -> Self::Element {
+        self.arithmetic().zero()
+    }
+
+    fn one(&self) -> Self::Element {
+        self.arithmetic().one()
+    }
+
+    fn nth(&self, n: Integer) -> Self::Element {
+        self.arithmetic().nth(n)
+    }
+
+    fn pow(&self, b: &Self::Element, e: u64) -> Self::Element {
+        self.arithmetic().pow(b, e)
+    }
+
+    fn is_zero(&self, a: &Self::Element) -> bool {
+        self.arithmetic().is_zero(a)
+    }
+
+    fn is_one(&self, a: &Self::Element) -> bool {
+        self.arithmetic().is_one(a)
+    }
+
+    fn one_is_gcd_unit() -> bool {
+        true
+    }
+
+    fn characteristic(&self) -> Integer {
+        self.poly.ring.characteristic()
+    }
+
+    fn try_inv(&self, a: &Self::Element) -> Option<Self::Element> {
+        self.arithmetic().try_inv(a)
+    }
+
+    fn try_div(&self, a: &Self::Element, b: &Self::Element) -> Option<Self::Element> {
+        self.arithmetic().try_div(a, b)
+    }
+
+    fn sample(&self, rng: &mut impl rand::RngCore, range: (i64, i64)) -> Self::Element {
+        self.arithmetic().sample(rng, range)
+    }
+
+    fn format<W: std::fmt::Write>(
+        &self,
+        element: &Self::Element,
+        opts: &crate::printer::PrintOptions,
+        state: crate::printer::PrintState,
+        f: &mut W,
+    ) -> Result<bool, std::fmt::Error> {
+        element.poly.format(opts, state, f)
+    }
+}
+
+impl<R: Field> EuclideanDomain for AlgebraicQuotient<R> {
+    fn rem(&self, _a: &Self::Element, _b: &Self::Element) -> Self::Element {
+        self.zero()
+    }
+
+    fn quot_rem(&self, a: &Self::Element, b: &Self::Element) -> (Self::Element, Self::Element) {
+        (self.div(a, b), self.zero())
+    }
+
+    fn gcd(&self, a: &Self::Element, b: &Self::Element) -> Self::Element {
+        self.arithmetic().gcd(a, b)
+    }
+}
+
+impl<R: Field> Field for AlgebraicQuotient<R> {
+    fn div(&self, a: &Self::Element, b: &Self::Element) -> Self::Element {
+        self.arithmetic().div(a, b)
+    }
+
+    fn div_assign(&self, a: &mut Self::Element, b: &Self::Element) {
+        self.arithmetic().div_assign(a, b)
+    }
+
+    fn inv(&self, a: &Self::Element) -> Self::Element {
+        self.arithmetic().inv(a)
     }
 }
 

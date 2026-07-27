@@ -50,14 +50,17 @@ use std::{
 use ahash::{HashMap, HashSet};
 
 use crate::{
-    atom::Atom,
+    atom::{Atom, AtomCore},
     domains::{
-        Field, Ring, RingOps, Set,
-        algebraic_number::{AlgebraicExtension, AlgebraicNumber},
+        Field, InternalOrdering, Ring, RingOps, Set,
+        algebraic_number::{AlgebraicExtension, AlgebraicNumber, AlgebraicQuotient},
         finite_field::{FiniteFieldCore, Zp},
-        rational::{Q, RationalField},
+        integer::IntegerRing,
+        rational::{Q, Rational, RationalField},
+        rational_polynomial::{RationalPolynomial, RationalPolynomialField},
     },
     tensors::matrix::{Matrix, MatrixError},
+    transcendental::TranscendentalFunctions,
 };
 
 use super::{
@@ -180,6 +183,330 @@ impl PolynomialSolution<RationalField> {
             .iter()
             .map(|(variable, value)| Ok((variable.clone(), self.field.try_to_atom(value)?)))
             .collect()
+    }
+}
+
+/// The rational-function field `Q(parameters)`.
+pub type ParameterField<E = u16> = RationalPolynomialField<IntegerRing, E>;
+
+/// A formal algebraic extension of `Q(parameters)`.
+///
+/// This type deliberately contains an [`AlgebraicQuotient`] rather than an
+/// [`AlgebraicExtension`]: no analytic embedding exists until all parameters
+/// have been specialized.
+#[derive(Clone, Debug, PartialEq, Eq, Hash)]
+pub struct ParametricExtension<E: PositiveExponent = u16> {
+    quotient: AlgebraicQuotient<ParameterField<E>>,
+    parameters: Arc<Vec<PolyVariable>>,
+    generic_conditions: Vec<MultivariatePolynomial<IntegerRing, E>>,
+}
+
+impl<E: PositiveExponent> ParametricExtension<E> {
+    pub fn quotient(&self) -> &AlgebraicQuotient<ParameterField<E>> {
+        &self.quotient
+    }
+
+    pub fn polynomial(&self) -> &MultivariatePolynomial<ParameterField<E>, u16> {
+        self.quotient.poly()
+    }
+
+    pub fn parameters(&self) -> &[PolyVariable] {
+        &self.parameters
+    }
+
+    /// Polynomials that must remain nonzero for the generic solution to apply.
+    pub fn generic_conditions(&self) -> &[MultivariatePolynomial<IntegerRing, E>] {
+        &self.generic_conditions
+    }
+
+    fn parameter_point(
+        variables: &[PolyVariable],
+        values: &HashMap<PolyVariable, Rational>,
+    ) -> Result<Vec<Rational>, String> {
+        variables
+            .iter()
+            .map(|variable| {
+                values
+                    .get(variable)
+                    .cloned()
+                    .ok_or_else(|| format!("Missing value for parameter {variable}"))
+            })
+            .collect()
+    }
+
+    fn evaluate_coefficient(
+        coefficient: &RationalPolynomial<IntegerRing, E>,
+        values: &HashMap<PolyVariable, Rational>,
+    ) -> Result<Rational, String> {
+        let point = coefficient
+            .get_variables()
+            .iter()
+            .enumerate()
+            .map(|(index, variable)| {
+                if let Some(value) = values.get(variable) {
+                    Ok(value.clone())
+                } else if coefficient.numerator.degree(index) == E::zero()
+                    && coefficient.denominator.degree(index) == E::zero()
+                {
+                    Ok(Rational::zero())
+                } else {
+                    Err(format!("Missing value for parameter {variable}"))
+                }
+            })
+            .collect::<Result<Vec<_>, String>>()?;
+        let denominator = coefficient.denominator.evaluate_with_coeff_map(
+            |integer| integer.to_rational(),
+            &point,
+            &Q,
+        );
+        if denominator.is_zero() {
+            return Err(format!(
+                "A denominator vanishes while specializing {}",
+                coefficient
+            ));
+        }
+        Ok(Q.div(
+            &coefficient.numerator.evaluate_with_coeff_map(
+                |integer| integer.to_rational(),
+                &point,
+                &Q,
+            ),
+            &denominator,
+        ))
+    }
+
+    fn specialize_polynomial(
+        polynomial: &MultivariatePolynomial<ParameterField<E>, u16>,
+        values: &HashMap<PolyVariable, Rational>,
+    ) -> Result<MultivariatePolynomial<RationalField, u16>, String> {
+        let mut result = MultivariatePolynomial::new(
+            &Q,
+            Some(polynomial.nterms()),
+            polynomial.variables.clone(),
+        );
+        for term in polynomial {
+            let coefficient = Self::evaluate_coefficient(term.coefficient, values)?;
+            result.append_monomial(coefficient, term.exponents);
+        }
+        Ok(result)
+    }
+
+    fn specialize_field(
+        &self,
+        values: &HashMap<PolyVariable, Rational>,
+        conjugate: usize,
+    ) -> Result<AlgebraicExtension<RationalField>, String> {
+        for condition in &self.generic_conditions {
+            let point = Self::parameter_point(condition.get_vars_ref(), values)?;
+            let value =
+                condition.evaluate_with_coeff_map(|integer| integer.to_rational(), &point, &Q);
+            if value.is_zero() {
+                return Err(format!(
+                    "The specialization lies on the exceptional locus {} = 0",
+                    condition
+                ));
+            }
+        }
+
+        let polynomial = Self::specialize_polynomial(self.quotient.poly(), values)?;
+        let degree = polynomial.degree(0) as usize;
+        if conjugate >= degree {
+            return Err(format!(
+                "Conjugate {conjugate} is out of bounds after specialization to degree {degree}"
+            ));
+        }
+
+        // This goes through ROOT_CACHE and gives the formal conjugate its
+        // analytic meaning only after all parameters have concrete values.
+        polynomial
+            .to_univariate_from_univariate(0)
+            .isolate_complex_root(conjugate, 32)
+            .ok_or_else(|| format!("Could not isolate conjugate {conjugate} of {polynomial}"))?;
+
+        Ok(AlgebraicExtension::new_with_embedding(
+            polynomial, conjugate,
+        ))
+    }
+
+    fn specialize_value(
+        &self,
+        value: &AlgebraicNumber<ParameterField<E>>,
+        values: &HashMap<PolyVariable, Rational>,
+        field: &AlgebraicExtension<RationalField>,
+    ) -> Result<AlgebraicNumber<RationalField>, String> {
+        let polynomial = Self::specialize_polynomial(value.poly(), values)?;
+        field.try_to_element(polynomial)
+    }
+}
+
+/// One algebraic value in a formal parametric extension.
+#[derive(Clone, Debug, PartialEq, Eq, Hash)]
+pub struct ParametricRoot<E: PositiveExponent = u16> {
+    field: Arc<ParametricExtension<E>>,
+    value: AlgebraicNumber<ParameterField<E>>,
+    conjugate: usize,
+}
+
+impl<E: PositiveExponent> ParametricRoot<E> {
+    pub fn field(&self) -> &ParametricExtension<E> {
+        &self.field
+    }
+
+    pub fn polynomial(&self) -> &MultivariatePolynomial<ParameterField<E>, u16> {
+        self.field.polynomial()
+    }
+
+    pub fn conjugate(&self) -> usize {
+        self.conjugate
+    }
+
+    pub fn value(&self) -> &AlgebraicNumber<ParameterField<E>> {
+        &self.value
+    }
+
+    pub fn into_parts(
+        self,
+    ) -> (
+        Arc<ParametricExtension<E>>,
+        AlgebraicNumber<ParameterField<E>>,
+        usize,
+    ) {
+        (self.field, self.value, self.conjugate)
+    }
+
+    pub fn specialize(
+        &self,
+        values: &HashMap<PolyVariable, Rational>,
+    ) -> Result<
+        (
+            AlgebraicExtension<RationalField>,
+            AlgebraicNumber<RationalField>,
+        ),
+        String,
+    > {
+        let field = self.field.specialize_field(values, self.conjugate)?;
+        let value = self.field.specialize_value(&self.value, values, &field)?;
+        Ok((field, value))
+    }
+
+    /// Convert the formal parametric root to an expression-level `root`.
+    pub fn to_atom(&self) -> Atom {
+        let root_variable: Atom = crate::symbol!("symbolica::root::z").into();
+        let mut defining_polynomial = Atom::Zero;
+        for term in self.field.polynomial() {
+            let coefficient = term.coefficient.to_expression();
+            if term.exponents[0] == 0 {
+                defining_polynomial += coefficient;
+            } else {
+                defining_polynomial += coefficient * root_variable.pow(term.exponents[0] as u64);
+            }
+        }
+        let root = defining_polynomial.root(self.conjugate);
+
+        let mut result = Atom::Zero;
+        for term in self.value.poly() {
+            let coefficient = term.coefficient.to_expression();
+            if term.exponents[0] == 0 {
+                result += coefficient;
+            } else {
+                result += coefficient * root.pow(term.exponents[0] as u64);
+            }
+        }
+        result
+    }
+}
+
+impl<E: PositiveExponent> std::fmt::Display for ParametricRoot<E> {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(f, "{}", self.to_atom())
+    }
+}
+
+/// One solution branch over `Q(parameters)`.
+///
+/// All values share one formal quotient field and one conjugate label.
+#[derive(Clone, Debug)]
+pub struct ParametricSolution<E: PositiveExponent = u16> {
+    field: Arc<ParametricExtension<E>>,
+    conjugate: usize,
+    values: HashMap<PolyVariable, AlgebraicNumber<ParameterField<E>>>,
+}
+
+impl<E: PositiveExponent> ParametricSolution<E> {
+    pub fn field(&self) -> &ParametricExtension<E> {
+        &self.field
+    }
+
+    pub fn conjugate(&self) -> usize {
+        self.conjugate
+    }
+
+    pub fn values(&self) -> &HashMap<PolyVariable, AlgebraicNumber<ParameterField<E>>> {
+        &self.values
+    }
+
+    pub fn len(&self) -> usize {
+        self.values.len()
+    }
+
+    pub fn is_empty(&self) -> bool {
+        self.values.is_empty()
+    }
+
+    pub fn get(&self, variable: &PolyVariable) -> Option<ParametricRoot<E>> {
+        self.values
+            .get(variable)
+            .cloned()
+            .map(|value| ParametricRoot {
+                field: self.field.clone(),
+                value,
+                conjugate: self.conjugate,
+            })
+    }
+
+    pub fn to_atom_map(&self) -> HashMap<PolyVariable, Atom> {
+        self.values
+            .iter()
+            .map(|(variable, value)| {
+                let root = ParametricRoot {
+                    field: self.field.clone(),
+                    value: value.clone(),
+                    conjugate: self.conjugate,
+                };
+                (variable.clone(), root.to_atom())
+            })
+            .collect()
+    }
+
+    pub fn specialize(
+        &self,
+        values: &HashMap<PolyVariable, Rational>,
+    ) -> Result<PolynomialSolution<RationalField>, String> {
+        let field = self.field.specialize_field(values, self.conjugate)?;
+        let solution_values = self
+            .values
+            .iter()
+            .map(|(variable, value)| {
+                Ok((
+                    variable.clone(),
+                    self.field.specialize_value(value, values, &field)?,
+                ))
+            })
+            .collect::<Result<HashMap<_, _>, String>>()?;
+        Ok(PolynomialSolution {
+            field,
+            values: solution_values,
+        })
+    }
+
+    pub fn into_parts(
+        self,
+    ) -> (
+        Arc<ParametricExtension<E>>,
+        usize,
+        HashMap<PolyVariable, AlgebraicNumber<ParameterField<E>>>,
+    ) {
+        (self.field, self.conjugate, self.values)
     }
 }
 
@@ -1281,6 +1608,422 @@ impl<E: PositiveExponent> GroebnerBasis<RationalField, E, LexOrder> {
     }
 }
 
+#[derive(Clone)]
+struct ParametricSolveBranch<E: PositiveExponent> {
+    field: AlgebraicQuotient<ParameterField<E>>,
+    conjugate: usize,
+    values: HashMap<PolyVariable, AlgebraicNumber<ParameterField<E>>>,
+}
+
+impl<E: PositiveExponent> GroebnerBasis<RationalPolynomialField<IntegerRing, E>, E, LexOrder> {
+    fn parametric_univariate_factors(
+        polynomial: &MultivariatePolynomial<RationalPolynomialField<IntegerRing, E>, E, LexOrder>,
+        variable: usize,
+    ) -> Result<
+        Vec<MultivariatePolynomial<RationalPolynomialField<IntegerRing, E>, u16, LexOrder>>,
+        String,
+    > {
+        if (0..polynomial.nvars())
+            .any(|index| index != variable && polynomial.degree(index) != E::zero())
+        {
+            return Err("Expected a univariate polynomial over Q(parameters)".to_string());
+        }
+
+        let root_variable = polynomial.get_vars_ref()[variable].clone();
+        let rational_polynomial =
+            RationalPolynomial::from_univariate(polynomial.to_univariate_from_univariate(variable));
+        let mut result = Vec::new();
+
+        for (factor, _) in rational_polynomial.numerator.factor() {
+            let Some(root_position) = factor
+                .get_vars_ref()
+                .iter()
+                .position(|candidate| candidate == &root_variable)
+            else {
+                continue;
+            };
+            if factor.degree(root_position) == E::zero() {
+                continue;
+            }
+
+            let factor: RationalPolynomial<IntegerRing, E> = factor.into();
+            let factor = factor
+                .to_polynomial(std::slice::from_ref(&root_variable), false)
+                .map_err(str::to_owned)?;
+            let target_variable = PolyVariable::Temporary(0);
+            let mut converted = MultivariatePolynomial::new(
+                &factor.ring,
+                Some(factor.nterms()),
+                Arc::new(vec![target_variable]),
+            );
+            for term in &factor {
+                let exponent = u16::try_from(term.exponents[0].to_u32())
+                    .map_err(|_| "Parametric root exponent does not fit in u16".to_string())?;
+                converted.append_monomial(term.coefficient.clone(), &[exponent]);
+            }
+            result.push(converted.make_monic());
+        }
+
+        Ok(result)
+    }
+
+    fn specialize_parametric_polynomial(
+        polynomial: &MultivariatePolynomial<RationalPolynomialField<IntegerRing, E>, E, LexOrder>,
+        target: usize,
+        variables: &[PolyVariable],
+        solution: &ParametricSolveBranch<E>,
+    ) -> Result<
+        Option<
+            MultivariatePolynomial<AlgebraicQuotient<RationalPolynomialField<IntegerRing, E>>, u16>,
+        >,
+        String,
+    > {
+        let mut coefficients = HashMap::default();
+        for term in polynomial {
+            let mut coefficient = solution.field.constant(term.coefficient.clone());
+            for (index, exponent) in term.exponents.iter().enumerate() {
+                if exponent.is_zero() || index == target {
+                    continue;
+                }
+                let Some(value) = solution.values.get(&variables[index]) else {
+                    return Ok(None);
+                };
+                coefficient = solution.field.mul(
+                    &coefficient,
+                    &solution.field.pow(value, u64::from(exponent.to_u32())),
+                );
+            }
+
+            let exponent = u16::try_from(term.exponents[target].to_u32())
+                .map_err(|_| "Specialized exponent does not fit in u16".to_string())?;
+            coefficients
+                .entry(exponent)
+                .and_modify(|current| solution.field.add_assign(current, &coefficient))
+                .or_insert(coefficient);
+        }
+
+        let variable = solution.field.get_new_var();
+        let mut result = MultivariatePolynomial::new(
+            &solution.field,
+            Some(coefficients.len()),
+            Arc::new(vec![variable]),
+        );
+        let mut coefficients = coefficients.into_iter().collect::<Vec<_>>();
+        coefficients.sort_by_key(|(exponent, _)| *exponent);
+        for (exponent, coefficient) in coefficients {
+            if !solution.field.is_zero(&coefficient) {
+                result.append_monomial(coefficient, &[exponent]);
+            }
+        }
+        Ok(Some(result))
+    }
+
+    fn parametric_extension(
+        quotient: AlgebraicQuotient<ParameterField<E>>,
+        system: &[MultivariatePolynomial<ParameterField<E>, E, LexOrder>],
+        elimination_polynomial: &MultivariatePolynomial<ParameterField<E>, E, LexOrder>,
+        elimination_variable: usize,
+    ) -> ParametricExtension<E> {
+        fn compact_condition<E: PositiveExponent>(
+            polynomial: &MultivariatePolynomial<IntegerRing, E>,
+            solve_variables: &HashSet<PolyVariable>,
+        ) -> MultivariatePolynomial<IntegerRing, E> {
+            let active = (0..polynomial.nvars())
+                .filter(|index| {
+                    polynomial.degree(*index) != E::zero()
+                        && !solve_variables.contains(&polynomial.get_vars_ref()[*index])
+                })
+                .collect::<Vec<_>>();
+            let variables = Arc::new(
+                active
+                    .iter()
+                    .map(|index| polynomial.get_vars_ref()[*index].clone())
+                    .collect(),
+            );
+            let mut result =
+                MultivariatePolynomial::new(&polynomial.ring, Some(polynomial.nterms()), variables);
+            for term in polynomial {
+                let exponents = active
+                    .iter()
+                    .map(|index| term.exponents[*index])
+                    .collect::<Vec<_>>();
+                result.append_monomial(term.coefficient.clone(), &exponents);
+            }
+            result
+        }
+
+        fn collect_coefficient<E: PositiveExponent>(
+            coefficient: &RationalPolynomial<IntegerRing, E>,
+            solve_variables: &HashSet<PolyVariable>,
+            parameters: &mut HashSet<PolyVariable>,
+            conditions: &mut HashSet<MultivariatePolynomial<IntegerRing, E>>,
+        ) {
+            for (index, variable) in coefficient.get_variables().iter().enumerate() {
+                if !solve_variables.contains(variable)
+                    && (coefficient.numerator.degree(index) != E::zero()
+                        || coefficient.denominator.degree(index) != E::zero())
+                {
+                    parameters.insert(variable.clone());
+                }
+            }
+            if !coefficient.denominator.is_one() {
+                let condition = compact_condition(&coefficient.denominator, solve_variables);
+                if !condition.is_constant() {
+                    conditions.insert(condition);
+                }
+            }
+        }
+
+        let solve_variables: HashSet<PolyVariable> = system
+            .first()
+            .map(|polynomial| polynomial.variables.iter().cloned().collect())
+            .unwrap_or_default();
+        let mut parameters = HashSet::default();
+        let mut conditions = HashSet::default();
+
+        for polynomial in system {
+            for coefficient in &polynomial.coefficients {
+                collect_coefficient(
+                    coefficient,
+                    &solve_variables,
+                    &mut parameters,
+                    &mut conditions,
+                );
+            }
+        }
+        for coefficient in &quotient.poly().coefficients {
+            collect_coefficient(
+                coefficient,
+                &solve_variables,
+                &mut parameters,
+                &mut conditions,
+            );
+        }
+
+        let defining_polynomial = quotient.poly().to_univariate_from_univariate(0);
+        let derivative = defining_polynomial.derivative();
+        if !derivative.is_zero() {
+            let discriminant = defining_polynomial.resultant_prs(&derivative);
+            collect_coefficient(
+                &discriminant,
+                &solve_variables,
+                &mut parameters,
+                &mut conditions,
+            );
+            if !discriminant.numerator.is_constant() {
+                conditions.insert(compact_condition(&discriminant.numerator, &solve_variables));
+            }
+        }
+
+        let elimination_polynomial =
+            elimination_polynomial.to_univariate_from_univariate(elimination_variable);
+        let derivative = elimination_polynomial.derivative();
+        if !derivative.is_zero() {
+            let discriminant = elimination_polynomial.resultant_prs(&derivative);
+            collect_coefficient(
+                &discriminant,
+                &solve_variables,
+                &mut parameters,
+                &mut conditions,
+            );
+            if !discriminant.numerator.is_constant() {
+                conditions.insert(compact_condition(&discriminant.numerator, &solve_variables));
+            }
+        }
+
+        let mut parameters = parameters.into_iter().collect::<Vec<_>>();
+        parameters.sort();
+        let mut generic_conditions = conditions.into_iter().collect::<Vec<_>>();
+        generic_conditions.sort_by(|a, b| a.internal_cmp(b));
+
+        ParametricExtension {
+            quotient,
+            parameters: Arc::new(parameters),
+            generic_conditions,
+        }
+    }
+
+    /// Solve a zero-dimensional lexicographic Gröbner basis over
+    /// `Q(parameters)`.
+    ///
+    /// Parametric root indices are formal conjugate labels. They acquire the
+    /// usual complex-root ordering only after the parameters are specialized.
+    /// The result describes the generic parameter locus: specializations at
+    /// which a denominator vanishes, the degree drops, or the ideal ceases to
+    /// be zero-dimensional must be considered separately.
+    ///
+    /// Nonlinear adjoining after the first parametric extension is not yet
+    /// supported. Shape-position bases, where the remaining variables are
+    /// linear in the primitive root, are supported.
+    ///
+    /// Each [`ParametricSolution`] stores one shared formal quotient field.
+    /// Call [`ParametricSolution::specialize`] to check its generic conditions,
+    /// select a cached analytic embedding, and obtain a [`PolynomialSolution`]
+    /// over `Q`.
+    pub fn solve_parametric(&self) -> Result<Vec<ParametricSolution<E>>, String> {
+        if self.system.is_empty() {
+            return Err(
+                "Cannot enumerate the solutions of an empty, positive-dimensional basis"
+                    .to_string(),
+            );
+        }
+        if self
+            .system
+            .iter()
+            .any(|polynomial| !polynomial.is_zero() && polynomial.is_constant())
+        {
+            return Ok(Vec::new());
+        }
+
+        let variables = self.system[0].variables.clone();
+        if variables.is_empty() {
+            return Err("The Gröbner basis has no variables".to_string());
+        }
+        if self
+            .system
+            .iter()
+            .any(|polynomial| polynomial.variables != variables)
+        {
+            return Err("The Gröbner basis does not have a unified variable map".to_string());
+        }
+
+        let last = variables.len() - 1;
+        let elimination_polynomial = self
+            .system
+            .iter()
+            .filter(|polynomial| {
+                polynomial.degree(last) > E::zero()
+                    && (0..last).all(|index| polynomial.degree(index) == E::zero())
+            })
+            .min_by_key(|polynomial| polynomial.degree(last).to_u32())
+            .ok_or_else(|| {
+                format!(
+                    "The lexicographic basis has no univariate elimination polynomial for {}",
+                    variables[last]
+                )
+            })?;
+
+        let factors = Self::parametric_univariate_factors(elimination_polynomial, last)?;
+        let mut branches = Vec::new();
+        for factor in factors {
+            let degree = factor.degree(0) as usize;
+            if degree == 0 {
+                continue;
+            }
+            if degree == 1 {
+                let field = AlgebraicQuotient::trivial(factor.ring.clone());
+                let root = field.constant(
+                    factor
+                        .ring
+                        .neg(&factor.ring.div(&factor.get_constant(), &factor.lcoeff())),
+                );
+                let mut values = HashMap::default();
+                values.insert(variables[last].clone(), root);
+                branches.push(ParametricSolveBranch {
+                    field,
+                    conjugate: 0,
+                    values,
+                });
+                continue;
+            }
+
+            let field = AlgebraicQuotient::new(factor);
+            for conjugate in 0..degree {
+                let root = field.generator();
+                let mut values = HashMap::default();
+                values.insert(variables[last].clone(), root);
+                branches.push(ParametricSolveBranch {
+                    field: field.clone(),
+                    conjugate,
+                    values,
+                });
+            }
+        }
+
+        for target in (0..last).rev() {
+            let candidates = self
+                .system
+                .iter()
+                .filter(|polynomial| {
+                    polynomial.degree(target) > E::zero()
+                        && (0..target).all(|index| polynomial.degree(index) == E::zero())
+                })
+                .collect::<Vec<_>>();
+            if candidates.is_empty() {
+                return Err(format!(
+                    "The lexicographic basis has no triangular equation for {}",
+                    variables[target]
+                ));
+            }
+
+            let mut next_branches = Vec::new();
+            for branch in branches {
+                let mut child = None;
+                for polynomial in &candidates {
+                    let Some(specialized) = Self::specialize_parametric_polynomial(
+                        polynomial, target, &variables, &branch,
+                    )?
+                    else {
+                        continue;
+                    };
+                    if specialized.is_zero() {
+                        continue;
+                    }
+                    if specialized.is_constant() {
+                        child = Some(None);
+                        break;
+                    }
+                    if specialized.degree(0) != 1 {
+                        return Err(format!(
+                            "Nonlinear roots over an already algebraic parametric field are not supported while solving {}",
+                            variables[target]
+                        ));
+                    }
+
+                    let root = branch.field.neg(
+                        &branch
+                            .field
+                            .div(&specialized.get_constant(), &specialized.lcoeff()),
+                    );
+                    let mut solved = branch.clone();
+                    solved.values.insert(variables[target].clone(), root);
+                    child = Some(Some(solved));
+                    break;
+                }
+
+                match child {
+                    Some(Some(solution)) => next_branches.push(solution),
+                    Some(None) => {}
+                    None => {
+                        return Err(format!(
+                            "Could not find a nonzero triangular equation for {} on this branch",
+                            variables[target]
+                        ));
+                    }
+                }
+            }
+            branches = next_branches;
+        }
+
+        Ok(branches
+            .into_iter()
+            .map(|solution| {
+                let field = Arc::new(Self::parametric_extension(
+                    solution.field,
+                    &self.system,
+                    elimination_polynomial,
+                    last,
+                ));
+                ParametricSolution {
+                    field,
+                    conjugate: solution.conjugate,
+                    values: solution.values,
+                }
+            })
+            .collect())
+    }
+}
+
 /// Marker for fields that can be echelonized by the F4 implementation.
 ///
 /// All `'static` fields use the default sparse row reduction. `Zp` is detected
@@ -1961,6 +2704,102 @@ mod test {
                 &solution.field().constant(2.into()),
             )));
         }
+    }
+
+    #[test]
+    fn solve_parametric_shape_basis() {
+        let variables = Arc::new(vec![
+            PolyVariable::from(symbol!("x")),
+            PolyVariable::from(symbol!("y")),
+        ]);
+        let ideal: Vec<MultivariatePolynomial<_, u16>> = ["x+y", "y^2-a"]
+            .iter()
+            .map(|expression| {
+                parse!(expression)
+                    .to_rational_polynomial::<_, _, u16>(&Q, &crate::domains::integer::Z, None)
+                    .to_polynomial(&variables, true)
+                    .unwrap()
+            })
+            .collect();
+
+        let solutions = GroebnerBasis::new(&ideal, false)
+            .solve_parametric()
+            .unwrap();
+        assert_eq!(solutions.len(), 2);
+
+        let x = PolyVariable::from(symbol!("x"));
+        let y = PolyVariable::from(symbol!("y"));
+        let a = PolyVariable::from(symbol!("a"));
+        let mut indices = Vec::new();
+        for solution in solutions {
+            let x_value = solution.get(&x).unwrap();
+            let y_value = solution.get(&y).unwrap();
+            assert!(std::ptr::eq(x_value.field(), y_value.field()));
+            assert_eq!(y_value.polynomial().degree(0), 2);
+            let field = y_value.field().quotient();
+            assert!(field.is_zero(&field.add(x_value.value(), y_value.value())));
+            indices.push(y_value.conjugate());
+
+            assert_eq!(solution.field().parameters(), std::slice::from_ref(&a));
+            assert!(!solution.field().generic_conditions().is_empty());
+
+            let mut point = ahash::HashMap::default();
+            point.insert(a.clone(), 2.into());
+            let specialized = solution.specialize(&point).unwrap();
+            assert!(
+                specialized
+                    .field()
+                    .poly()
+                    .to_univariate_from_univariate(0)
+                    .has_cached_roots()
+            );
+            let x_value = specialized.get(&x).unwrap();
+            let y_value = specialized.get(&y).unwrap();
+            assert!(
+                specialized
+                    .field()
+                    .is_zero(&specialized.field().add(x_value, y_value))
+            );
+
+            point.insert(a.clone(), 0.into());
+            assert!(solution.specialize(&point).is_err());
+        }
+        indices.sort_unstable();
+        assert_eq!(indices, vec![0, 1]);
+    }
+
+    #[test]
+    fn solve_parametric_tracks_factor_collision_locus() {
+        let variables = Arc::new(vec![PolyVariable::from(symbol!("x"))]);
+        let ideal: Vec<MultivariatePolynomial<_, u16>> = ["x^2-a^2"]
+            .iter()
+            .map(|expression| {
+                parse!(expression)
+                    .to_rational_polynomial::<_, _, u16>(&Q, &crate::domains::integer::Z, None)
+                    .to_polynomial(&variables, true)
+                    .unwrap()
+            })
+            .collect();
+        let solutions = GroebnerBasis::new(&ideal, false)
+            .solve_parametric()
+            .unwrap();
+        assert_eq!(solutions.len(), 2);
+
+        let a = PolyVariable::from(symbol!("a"));
+        let mut point = ahash::HashMap::default();
+        point.insert(a.clone(), 0.into());
+        assert!(
+            solutions
+                .iter()
+                .all(|solution| solution.specialize(&point).is_err())
+        );
+
+        point.insert(a, 2.into());
+        assert!(
+            solutions
+                .iter()
+                .all(|solution| solution.specialize(&point).is_ok())
+        );
     }
 
     #[test]

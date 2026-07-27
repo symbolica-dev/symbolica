@@ -228,15 +228,20 @@ impl AtomView<'_> {
     /// Solve a system exactly for `vars`.
     ///
     /// Linear systems are delegated to [`Self::solve_linear_system`]. Polynomial
-    /// nonlinear systems over `Q` are first converted to a grevlex Gröbner
-    /// basis, changed to lex order with FGLM, and solved by triangular
-    /// back-substitution. Rational powers such as `sqrt(x+3)` are replaced by
-    /// auxiliary polynomial variables and defining equations; solutions on
-    /// non-principal power branches are removed afterwards.
+    /// nonlinear systems over `Q` or `Q(parameters)` are first converted to a
+    /// grevlex Gröbner basis, changed to lex order with FGLM, and solved by
+    /// triangular back-substitution. Rational powers such as `sqrt(x+3)` are
+    /// replaced by auxiliary polynomial variables and defining equations;
+    /// solutions on non-principal power branches are removed afterwards.
+    /// Rational-power auxiliaries combined with parameters are not yet
+    /// supported because selecting their analytic branch requires assumptions
+    /// on the parameters. Parametric results describe the generic parameter
+    /// locus; exceptional specializations where denominators vanish or the
+    /// Gröbner basis changes must be solved separately.
     ///
     /// Every expression in `system` is understood to equal zero. Each solution
     /// is returned as a map from a requested variable to its exact value.
-    pub fn solve<E: PositiveExponent, T1: AtomCore, T2: AtomCore>(
+    pub fn solve<E: PositiveExponent + 'static, T1: AtomCore, T2: AtomCore>(
         system: &[T1],
         vars: &[T2],
     ) -> Result<Vec<HashMap<PolyVariable, Atom>>, SolveError> {
@@ -264,6 +269,49 @@ impl AtomView<'_> {
             }
         }
         let variable_map = Arc::new(augmented_variables);
+
+        let system_views = system
+            .iter()
+            .map(|expression| expression.as_atom_view())
+            .collect::<Vec<_>>();
+        let parameters = Self::get_parameters(&system_views, &variables);
+        if !parameters.is_empty() {
+            if !auxiliaries.is_empty() {
+                return Err(SolveError::Other(
+                    "Parametric solving with rational-power auxiliary variables is not supported"
+                        .to_string(),
+                ));
+            }
+
+            let polynomials = system
+                .iter()
+                .map(|expression| {
+                    let rational: RationalPolynomial<_, E> = expression
+                        .as_atom_view()
+                        .try_to_rational_polynomial(&Q, &Z, None)
+                        .map_err(|error| SolveError::Other(error.to_string()))?;
+                    let polynomial = rational
+                        .to_polynomial(variable_map.as_ref(), true)
+                        .map_err(|error| SolveError::Other(error.to_string()))?;
+                    Ok(polynomial.reorder::<GrevLexOrder>())
+                })
+                .collect::<Result<Vec<_>, SolveError>>()?
+                .into_iter()
+                .filter(|polynomial| !polynomial.is_zero())
+                .collect::<Vec<_>>();
+
+            let basis = GroebnerBasis::new(&polynomials, false);
+            let basis = basis
+                .change_order::<LexOrder>()
+                .map_err(SolveError::Other)?;
+            return Ok(basis
+                .solve_parametric()
+                .map_err(SolveError::Other)?
+                .into_iter()
+                .map(|solution| solution.to_atom_map())
+                .collect());
+        }
+
         let mut polynomials = system
             .iter()
             .map(|expression| {
@@ -891,6 +939,66 @@ mod test {
                 (y_value.clone().pow(Atom::num(2)) - Atom::num(2)).expand(),
                 Atom::Zero
             );
+        }
+    }
+
+    #[test]
+    fn exact_solve_supports_polynomial_parameters() {
+        let x = symbol!("x");
+        let y = symbol!("y");
+        let a = symbol!("a");
+        let system = [parse!("x+y"), parse!("y^2-a")];
+        let variables = [Atom::var(x), Atom::var(y)];
+
+        let solutions = Atom::solve::<u16, _, Atom>(&system, &variables).unwrap();
+        assert_eq!(solutions.len(), 2);
+
+        for solution in solutions {
+            let x_value = solution.get(&PolyVariable::from(x)).unwrap();
+            let y_value = solution.get(&PolyVariable::from(y)).unwrap();
+            assert_eq!((x_value.clone() + y_value).expand(), Atom::Zero);
+
+            let specialized = y_value.replace(a).with(Atom::num(2));
+            assert_algebraic_zero(specialized.pow(Atom::num(2)) - Atom::num(2));
+        }
+    }
+
+    #[test]
+    fn exact_solve_factors_over_rational_function_parameters() {
+        let x = symbol!("x");
+        let system = [parse!("x^2-a^2")];
+        let variables = [Atom::var(x)];
+
+        let solutions = Atom::solve::<u16, _, Atom>(&system, &variables).unwrap();
+        assert_eq!(solutions.len(), 2);
+
+        let values = solutions
+            .iter()
+            .map(|solution| solution.get(&PolyVariable::from(x)).unwrap())
+            .collect::<Vec<_>>();
+        assert!(values.contains(&&parse!("a")));
+        assert!(values.contains(&&parse!("-a")));
+    }
+
+    #[test]
+    fn exact_solve_supports_rational_function_parameters() {
+        let x = symbol!("x");
+        let a = symbol!("a");
+        let b = symbol!("b");
+        let system = [parse!("x^2-a/b")];
+        let variables = [Atom::var(x)];
+
+        let solutions = Atom::solve::<u16, _, Atom>(&system, &variables).unwrap();
+        assert_eq!(solutions.len(), 2);
+        for solution in solutions {
+            let value = solution
+                .get(&PolyVariable::from(x))
+                .unwrap()
+                .replace(a)
+                .with(Atom::num(2))
+                .replace(b)
+                .with(Atom::num(1));
+            assert_algebraic_zero(value.pow(Atom::num(2)) - Atom::num(2));
         }
     }
 

@@ -3321,10 +3321,11 @@ class Expression:
         Solve a system exactly in the requested variables.
 
         Linear systems use the linear-system solver. Polynomial nonlinear
-        systems over the rationals use a grevlex Gröbner basis, FGLM conversion
-        to lex, and exact algebraic roots. Rational powers such as ``sqrt(x+3)``
-        are polynomialized using auxiliary variables, after which solutions on
-        non-principal branches are filtered out.
+        systems over the rationals or rational functions in symbolic parameters
+        use a grevlex Gröbner basis, FGLM conversion to lex, and exact algebraic
+        roots. Rational powers such as ``sqrt(x+3)`` are polynomialized using
+        auxiliary variables, after which solutions on non-principal branches
+        are filtered out.
 
         Examples
         --------

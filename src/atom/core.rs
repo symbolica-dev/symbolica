@@ -828,11 +828,11 @@ pub trait AtomCore: private::Sealed + Sized {
     /// Solve a system exactly for `vars`.
     ///
     /// Linear systems use the linear-system solver. Polynomial nonlinear
-    /// systems over `Q` use a grevlex Gröbner basis, FGLM conversion to lex,
-    /// and exact algebraic root adjoining. Every expression in `system` is
-    /// understood to equal zero. Rational powers involving the solve variables
-    /// are polynomialized with auxiliary variables, and non-principal branches
-    /// are filtered from the result.
+    /// systems over `Q` or `Q(parameters)` use a grevlex Gröbner basis, FGLM
+    /// conversion to lex, and exact algebraic roots. Every expression in
+    /// `system` is understood to equal zero. Rational powers involving the
+    /// solve variables are polynomialized with auxiliary variables, and
+    /// non-principal branches are filtered from the result.
     ///
     /// # Example
     ///
@@ -849,7 +849,7 @@ pub trait AtomCore: private::Sealed + Sized {
     ///
     /// assert_eq!(solutions.len(), 2);
     /// ```
-    fn solve<E: PositiveExponent, T1: AtomCore, T2: AtomCore>(
+    fn solve<E: PositiveExponent + 'static, T1: AtomCore, T2: AtomCore>(
         system: &[T1],
         vars: &[T2],
     ) -> Result<Vec<HashMap<crate::poly::PolyVariable, Atom>>, SolveError> {
