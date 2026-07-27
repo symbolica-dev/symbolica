@@ -2313,7 +2313,7 @@ impl<R: EuclideanDomain> AlgebraicQuotient<R> {
         }
     }
 
-    fn arithmetic(&self) -> AlgebraicExtension<R> {
+    pub(crate) fn as_extension(&self) -> AlgebraicExtension<R> {
         AlgebraicExtension {
             poly: self.poly.clone(),
             embedding: 0,
@@ -2338,7 +2338,7 @@ impl<R: EuclideanDomain> AlgebraicQuotient<R> {
         &self,
         polynomial: MultivariatePolynomial<R, u16>,
     ) -> Result<AlgebraicNumber<R>, String> {
-        self.arithmetic().try_to_element(polynomial)
+        self.as_extension().try_to_element(polynomial)
     }
 
     pub fn to_element(&self, polynomial: MultivariatePolynomial<R, u16>) -> AlgebraicNumber<R> {
@@ -2357,109 +2357,109 @@ impl<R: EuclideanDomain> Set for AlgebraicQuotient<R> {
     type Element = AlgebraicNumber<R>;
 
     fn size(&self) -> Option<Integer> {
-        self.arithmetic().size()
+        self.as_extension().size()
     }
 }
 
 impl<R: EuclideanDomain> RingOps<AlgebraicNumber<R>> for AlgebraicQuotient<R> {
     fn add(&self, a: Self::Element, b: Self::Element) -> Self::Element {
-        self.arithmetic().add(a, b)
+        self.as_extension().add(a, b)
     }
 
     fn sub(&self, a: Self::Element, b: Self::Element) -> Self::Element {
-        self.arithmetic().sub(a, b)
+        self.as_extension().sub(a, b)
     }
 
     fn mul(&self, a: Self::Element, b: Self::Element) -> Self::Element {
-        self.arithmetic().mul(a, b)
+        self.as_extension().mul(a, b)
     }
 
     fn add_assign(&self, a: &mut Self::Element, b: Self::Element) {
-        self.arithmetic().add_assign(a, b)
+        self.as_extension().add_assign(a, b)
     }
 
     fn sub_assign(&self, a: &mut Self::Element, b: Self::Element) {
-        self.arithmetic().sub_assign(a, b)
+        self.as_extension().sub_assign(a, b)
     }
 
     fn mul_assign(&self, a: &mut Self::Element, b: Self::Element) {
-        self.arithmetic().mul_assign(a, b)
+        self.as_extension().mul_assign(a, b)
     }
 
     fn add_mul_assign(&self, a: &mut Self::Element, b: Self::Element, c: Self::Element) {
-        self.arithmetic().add_mul_assign(a, b, c)
+        self.as_extension().add_mul_assign(a, b, c)
     }
 
     fn sub_mul_assign(&self, a: &mut Self::Element, b: Self::Element, c: Self::Element) {
-        self.arithmetic().sub_mul_assign(a, b, c)
+        self.as_extension().sub_mul_assign(a, b, c)
     }
 
     fn neg(&self, a: Self::Element) -> Self::Element {
-        self.arithmetic().neg(a)
+        self.as_extension().neg(a)
     }
 }
 
 impl<R: EuclideanDomain> RingOps<&AlgebraicNumber<R>> for AlgebraicQuotient<R> {
     fn add(&self, a: &Self::Element, b: &Self::Element) -> Self::Element {
-        self.arithmetic().add(a, b)
+        self.as_extension().add(a, b)
     }
 
     fn sub(&self, a: &Self::Element, b: &Self::Element) -> Self::Element {
-        self.arithmetic().sub(a, b)
+        self.as_extension().sub(a, b)
     }
 
     fn mul(&self, a: &Self::Element, b: &Self::Element) -> Self::Element {
-        self.arithmetic().mul(a, b)
+        self.as_extension().mul(a, b)
     }
 
     fn add_assign(&self, a: &mut Self::Element, b: &Self::Element) {
-        self.arithmetic().add_assign(a, b)
+        self.as_extension().add_assign(a, b)
     }
 
     fn sub_assign(&self, a: &mut Self::Element, b: &Self::Element) {
-        self.arithmetic().sub_assign(a, b)
+        self.as_extension().sub_assign(a, b)
     }
 
     fn mul_assign(&self, a: &mut Self::Element, b: &Self::Element) {
-        self.arithmetic().mul_assign(a, b)
+        self.as_extension().mul_assign(a, b)
     }
 
     fn add_mul_assign(&self, a: &mut Self::Element, b: &Self::Element, c: &Self::Element) {
-        self.arithmetic().add_mul_assign(a, b, c)
+        self.as_extension().add_mul_assign(a, b, c)
     }
 
     fn sub_mul_assign(&self, a: &mut Self::Element, b: &Self::Element, c: &Self::Element) {
-        self.arithmetic().sub_mul_assign(a, b, c)
+        self.as_extension().sub_mul_assign(a, b, c)
     }
 
     fn neg(&self, a: &Self::Element) -> Self::Element {
-        self.arithmetic().neg(a)
+        self.as_extension().neg(a)
     }
 }
 
 impl<R: EuclideanDomain> Ring for AlgebraicQuotient<R> {
     fn zero(&self) -> Self::Element {
-        self.arithmetic().zero()
+        self.as_extension().zero()
     }
 
     fn one(&self) -> Self::Element {
-        self.arithmetic().one()
+        self.as_extension().one()
     }
 
     fn nth(&self, n: Integer) -> Self::Element {
-        self.arithmetic().nth(n)
+        self.as_extension().nth(n)
     }
 
     fn pow(&self, b: &Self::Element, e: u64) -> Self::Element {
-        self.arithmetic().pow(b, e)
+        self.as_extension().pow(b, e)
     }
 
     fn is_zero(&self, a: &Self::Element) -> bool {
-        self.arithmetic().is_zero(a)
+        self.as_extension().is_zero(a)
     }
 
     fn is_one(&self, a: &Self::Element) -> bool {
-        self.arithmetic().is_one(a)
+        self.as_extension().is_one(a)
     }
 
     fn one_is_gcd_unit() -> bool {
@@ -2471,15 +2471,15 @@ impl<R: EuclideanDomain> Ring for AlgebraicQuotient<R> {
     }
 
     fn try_inv(&self, a: &Self::Element) -> Option<Self::Element> {
-        self.arithmetic().try_inv(a)
+        self.as_extension().try_inv(a)
     }
 
     fn try_div(&self, a: &Self::Element, b: &Self::Element) -> Option<Self::Element> {
-        self.arithmetic().try_div(a, b)
+        self.as_extension().try_div(a, b)
     }
 
     fn sample(&self, rng: &mut impl rand::RngCore, range: (i64, i64)) -> Self::Element {
-        self.arithmetic().sample(rng, range)
+        self.as_extension().sample(rng, range)
     }
 
     fn format<W: std::fmt::Write>(
@@ -2503,21 +2503,58 @@ impl<R: Field> EuclideanDomain for AlgebraicQuotient<R> {
     }
 
     fn gcd(&self, a: &Self::Element, b: &Self::Element) -> Self::Element {
-        self.arithmetic().gcd(a, b)
+        self.as_extension().gcd(a, b)
     }
 }
 
 impl<R: Field> Field for AlgebraicQuotient<R> {
     fn div(&self, a: &Self::Element, b: &Self::Element) -> Self::Element {
-        self.arithmetic().div(a, b)
+        self.as_extension().div(a, b)
     }
 
     fn div_assign(&self, a: &mut Self::Element, b: &Self::Element) {
-        self.arithmetic().div_assign(a, b)
+        self.as_extension().div_assign(a, b)
     }
 
     fn inv(&self, a: &Self::Element) -> Self::Element {
-        self.arithmetic().inv(a)
+        self.as_extension().inv(a)
+    }
+}
+
+impl<R: Field + PolynomialGCD<u16>> AlgebraicQuotient<R> {
+    /// Adjoin a formal root and collapse the resulting tower to one primitive
+    /// quotient. The polynomial must be monic and irreducible.
+    pub fn adjoin_formal(
+        &self,
+        polynomial: &MultivariatePolynomial<AlgebraicQuotient<R>>,
+        new_symbol: Option<PolyVariable>,
+    ) -> (AlgebraicQuotient<R>, AlgebraicNumber<R>, AlgebraicNumber<R>) {
+        let (field, old_generator, new_generator, _) =
+            self.adjoin_formal_with_shift(polynomial, new_symbol);
+        (field, old_generator, new_generator)
+    }
+
+    pub(crate) fn adjoin_formal_with_shift(
+        &self,
+        polynomial: &MultivariatePolynomial<AlgebraicQuotient<R>>,
+        new_symbol: Option<PolyVariable>,
+    ) -> (
+        AlgebraicQuotient<R>,
+        AlgebraicNumber<R>,
+        AlgebraicNumber<R>,
+        usize,
+    ) {
+        assert_eq!(self, &polynomial.ring);
+        let extension = self.as_extension();
+        let polynomial = polynomial.map_coeff(|coefficient| coefficient.clone(), extension.clone());
+        let (field, old_generator, new_generator, shift) =
+            extension.adjoin_formal_with_shift(&polynomial, new_symbol);
+        (
+            AlgebraicQuotient { poly: field.poly },
+            old_generator,
+            new_generator,
+            shift,
+        )
     }
 }
 
@@ -2579,6 +2616,83 @@ impl<R: Field> AlgebraicExtension<R> {
 }
 
 impl<R: Field + PolynomialGCD<u16>> AlgebraicExtension<R> {
+    /// Formally adjoin a root of a monic irreducible polynomial.
+    ///
+    /// This performs the primitive-element construction without selecting an
+    /// analytic embedding. Irreducibility is required but not checked.
+    pub fn adjoin_formal(
+        &self,
+        b: &MultivariatePolynomial<AlgebraicExtension<R>>,
+        new_symbol: Option<PolyVariable>,
+    ) -> (
+        AlgebraicExtension<R>,
+        AlgebraicNumber<R>,
+        AlgebraicNumber<R>,
+    ) {
+        let (field, old_generator, new_generator, _) = self.adjoin_formal_with_shift(b, new_symbol);
+        (field, old_generator, new_generator)
+    }
+
+    pub(crate) fn adjoin_formal_with_shift(
+        &self,
+        b: &MultivariatePolynomial<AlgebraicExtension<R>>,
+        new_symbol: Option<PolyVariable>,
+    ) -> (
+        AlgebraicExtension<R>,
+        AlgebraicNumber<R>,
+        AlgebraicNumber<R>,
+        usize,
+    ) {
+        assert_eq!(self, &b.ring);
+
+        let (_, s, g, r) = b.norm_impl();
+        self.adjoin_formal_from_norm(s, g, r, new_symbol)
+    }
+
+    fn adjoin_formal_from_norm(
+        &self,
+        s: usize,
+        g: MultivariatePolynomial<R>,
+        r: MultivariatePolynomial<R>,
+        new_symbol: Option<PolyVariable>,
+    ) -> (
+        AlgebraicExtension<R>,
+        AlgebraicNumber<R>,
+        AlgebraicNumber<R>,
+        usize,
+    ) {
+        let mut field = AlgebraicExtension::new(r);
+        let mut shifted = g.to_number_field(&field);
+        let mut old_minimal_polynomial = self.poly.to_number_field(&field);
+
+        shifted.unify_variables(&mut old_minimal_polynomial);
+        let gcd = shifted.univariate_gcd(&old_minimal_polynomial);
+
+        let mut old_generator = field.neg(&field.div(&gcd.get_constant(), &gcd.lcoeff()));
+        let primitive_generator = field.generator();
+        let mut new_generator = field.sub(
+            &primitive_generator,
+            &field.mul(&old_generator, &field.nth(s.into())),
+        );
+
+        if let Some(variable) = &new_symbol {
+            let old_variable = &field.poly.get_vars_ref()[0];
+            old_generator.poly.rename_variable(old_variable, variable);
+            new_generator.poly.rename_variable(old_variable, variable);
+
+            let mut new_polynomial = field.poly.as_ref().clone();
+            new_polynomial.rename_variable(old_variable, variable);
+            field = AlgebraicExtension {
+                poly: Arc::new(new_polynomial),
+                embedding: 0,
+            };
+        }
+
+        (field, old_generator, new_generator, s)
+    }
+}
+
+impl<R: Field + PolynomialGCD<u16>> AlgebraicExtension<R> {
     /// Adjoin the current algebraic extension `R[a]` with `b`, whose minimal polynomial
     /// is `R[a][b]` and form `R[b]`. Also return the new representation of `a` and `b`.
     ///
@@ -2602,35 +2716,11 @@ impl<R: Field + PolynomialGCD<u16>> AlgebraicExtension<R> {
     {
         assert_eq!(self, &b.ring);
 
-        let (_, s, g, r) = b.norm_impl();
-        debug_assert!(r.is_irreducible());
-
-        let mut f = AlgebraicExtension::new(r);
-        let mut g2 = g.to_number_field(&f);
-        let mut h = self.poly.to_number_field(&f); // yields constant coeffs
-
-        g2.unify_variables(&mut h);
-        let g2 = g2.gcd(&h);
-
-        let mut a = f.neg(&f.div(&g2.get_constant(), &g2.lcoeff()));
-        let y = f.to_element(g2.ring.poly.one().mul_exp(&[1]));
-        let mut b = f.sub(&y, &f.mul(&a, &f.nth(s.into())));
-
-        if let Some(v) = &new_symbol {
-            let old_var = &f.poly.get_vars_ref()[0];
-            a.poly.rename_variable(old_var, v);
-            b.poly.rename_variable(old_var, v);
-
-            let mut new_poly = f.poly.as_ref().clone();
-            new_poly.rename_variable(old_var, v);
-
-            f = AlgebraicExtension {
-                poly: Arc::new(new_poly),
-                embedding: f.embedding,
-            };
-        }
-
-        (f, a, b)
+        let (_, shift, shifted, norm) = b.norm_impl();
+        debug_assert!(norm.is_irreducible());
+        let (field, old_generator, new_generator, _) =
+            self.adjoin_formal_from_norm(shift, shifted, norm, new_symbol);
+        (field, old_generator, new_generator)
     }
 }
 
@@ -2689,7 +2779,7 @@ impl<R: Field + PolynomialGCD<E>, E: PositiveExponent>
                 let r = g_uni.resultant_prs(&poly_uni);
 
                 let d = r.derivative(v);
-                if r.gcd(&d).is_constant() {
+                if r.univariate_gcd(&d).is_constant() {
                     return (v, s, g_multi, r);
                 }
             }
