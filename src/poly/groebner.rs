@@ -962,6 +962,22 @@ impl<R: Field, E: PositiveExponent, O: MonomialOrder> GroebnerBasis<R, E, O> {
 }
 
 impl<E: PositiveExponent> GroebnerBasis<RationalField, E, LexOrder> {
+    fn explicit_root<E2: PositiveExponent>(
+        polynomial: &MultivariatePolynomial<RationalField, E2, LexOrder>,
+        variable: usize,
+        embedding: usize,
+    ) -> Atom {
+        let mut polynomial = polynomial.clone();
+        let old_variable = polynomial.get_vars_ref()[variable].clone();
+        if !matches!(old_variable, PolyVariable::Symbol(_)) {
+            polynomial.rename_variable(
+                &old_variable,
+                &PolyVariable::Symbol(crate::symbol!("symbolica::root::z")),
+            );
+        }
+        polynomial.to_expression().root(embedding)
+    }
+
     fn substitute_solution(
         polynomial: &MultivariatePolynomial<RationalField, E, LexOrder>,
         target: usize,
@@ -1089,9 +1105,8 @@ impl<E: PositiveExponent> GroebnerBasis<RationalField, E, LexOrder> {
                 continue;
             }
 
-            let factor = factor.to_expression();
             for embedding in 0..degree {
-                let root = factor.root(embedding);
+                let root = Self::explicit_root(&factor, 0, embedding);
                 let mut child = branch.clone();
                 child.solution.insert(target.clone(), root.clone());
                 child.context = AlgebraicContext::from_atom(root.as_view())?;
@@ -1190,9 +1205,8 @@ impl<E: PositiveExponent> GroebnerBasis<RationalField, E, LexOrder> {
                 continue;
             }
 
-            let factor = factor.to_expression();
             for index in 0..degree as usize {
-                let root = factor.root(index);
+                let root = Self::explicit_root(&factor, last, index);
                 let mut solution = HashMap::default();
                 solution.insert(variables[last].clone(), root.clone());
                 branches.push(AlgebraicSolveBranch {

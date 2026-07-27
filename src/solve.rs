@@ -5,13 +5,18 @@
 use std::{ops::Neg, sync::Arc};
 
 use ahash::{HashMap, HashSet};
-use numerica::domains::{Field, float::Complex, rational::Rational};
+use numerica::domains::{
+    Field, Ring,
+    float::{Complex, Float, RealLike},
+    rational::Rational,
+};
 
 use crate::{
     atom::{Atom, AtomCore, AtomView, Indeterminate},
     coefficient::{Coefficient, ConvertToRing},
     domains::{
         InternalOrdering, SelfRing,
+        algebraic_number::AlgebraicContext,
         float::{FloatField, Real, SingleFloat},
         integer::Z,
         rational::Q,
@@ -24,6 +29,15 @@ use crate::{
     },
     tensors::matrix::{Matrix, MatrixError},
 };
+
+#[derive(Clone)]
+struct AuxiliaryPower {
+    variable: PolyVariable,
+    base: Atom,
+    exponent: Atom,
+    numerator: i64,
+    denominator: usize,
+}
 
 /// Errors that can occur when solving a system.
 /// Underdetermined systems return a partial solution.
@@ -102,12 +116,123 @@ impl std::fmt::Display for SolveError {
 }
 
 impl AtomView<'_> {
+    fn rational_exponent_parts(exponent: AtomView<'_>) -> Option<(i64, usize)> {
+        let exponent = Rational::try_from(exponent).ok()?;
+        let numerator = exponent.numerator().to_i64()?;
+        let denominator = usize::try_from(exponent.denominator().to_i64()?).ok()?;
+        Some((numerator, denominator))
+    }
+
+    fn collect_auxiliary_powers<T: AtomCore>(system: &[T]) -> Vec<AuxiliaryPower> {
+        let mut seen = HashSet::default();
+        let mut powers = Vec::new();
+
+        for expression in system {
+            expression.visitor(&mut |atom| {
+                let AtomView::Pow(power) = atom else {
+                    return true;
+                };
+                let (base, exponent) = power.get_base_exp();
+                let Some((numerator, denominator)) = Self::rational_exponent_parts(exponent) else {
+                    return true;
+                };
+                if denominator <= 1 {
+                    return true;
+                }
+
+                let power = atom.to_owned();
+                if seen.insert(power.clone()) {
+                    powers.push(AuxiliaryPower {
+                        variable: PolyVariable::Power(power),
+                        base: base.to_owned(),
+                        exponent: exponent.to_owned(),
+                        numerator,
+                        denominator,
+                    });
+                }
+                true
+            });
+        }
+
+        powers
+    }
+
+    fn substitute_algebraic_solution(
+        expression: AtomView<'_>,
+        solution: &HashMap<PolyVariable, Atom>,
+    ) -> Atom {
+        let replacements = solution
+            .iter()
+            .filter_map(|(variable, value)| {
+                (!matches!(variable, PolyVariable::Temporary(_)))
+                    .then(|| (variable.to_atom(), value))
+            })
+            .collect::<Vec<_>>();
+
+        expression.replace_map_bottom_up(
+            |atom, _, out| {
+                if let Some((_, value)) = replacements
+                    .iter()
+                    .find(|(variable, _)| variable.as_view() == atom)
+                {
+                    **out = (*value).clone();
+                }
+            },
+            true,
+        )
+    }
+
+    fn numerically_zero(expression: &Atom) -> Result<bool, String> {
+        let norm = |decimal_precision| -> Result<f64, String> {
+            let approximation = expression.to_float(decimal_precision);
+            let value = Complex::<Float>::try_from(approximation.as_view())
+                .map_err(|error| error.to_string())?;
+            Ok(value.norm().re.to_f64().abs())
+        };
+
+        let low_precision = norm(48)?;
+        let high_precision = norm(96)?;
+        if high_precision == 0.0 {
+            return Ok(low_precision == 0.0);
+        }
+
+        Ok(high_precision < 1e-40 && low_precision > 0.0 && high_precision < low_precision * 1e-12)
+    }
+
+    fn auxiliary_branch_matches(
+        auxiliary: &AuxiliaryPower,
+        solution: &HashMap<PolyVariable, Atom>,
+    ) -> Result<bool, String> {
+        let candidate = solution.get(&auxiliary.variable).ok_or_else(|| {
+            format!(
+                "The Gröbner solution is missing auxiliary variable {}",
+                auxiliary.variable
+            )
+        })?;
+        let base = Self::substitute_algebraic_solution(auxiliary.base.as_view(), solution);
+        let expected = base.pow(auxiliary.exponent.clone());
+        let difference = (candidate.clone() - expected.clone()).expand();
+        if difference.is_zero() {
+            return Ok(true);
+        }
+
+        if let Ok(Some(mut context)) = AlgebraicContext::from_atom(difference.as_view())
+            && let Ok(value) = context.convert_atom(difference.as_view())
+        {
+            return Ok(context.field().is_zero(&value));
+        }
+
+        Self::numerically_zero(&difference)
+    }
+
     /// Solve a system exactly for `vars`.
     ///
     /// Linear systems are delegated to [`Self::solve_linear_system`]. Polynomial
     /// nonlinear systems over `Q` are first converted to a grevlex Gröbner
     /// basis, changed to lex order with FGLM, and solved by triangular
-    /// back-substitution.
+    /// back-substitution. Rational powers such as `sqrt(x+3)` are replaced by
+    /// auxiliary polynomial variables and defining equations; solutions on
+    /// non-principal power branches are removed afterwards.
     ///
     /// Every expression in `system` is understood to equal zero. Each solution
     /// is returned as a map from a requested variable to its exact value.
@@ -121,21 +246,30 @@ impl AtomView<'_> {
             .collect::<Result<Vec<PolyVariable>, String>>()
             .map_err(SolveError::Other)?;
 
-        match Self::solve_linear_system::<E, _, _>(system, vars) {
-            Ok(values) => {
-                return Ok(vec![variables.into_iter().zip(values).collect()]);
+        let auxiliaries = Self::collect_auxiliary_powers(system);
+        if auxiliaries.is_empty() {
+            match Self::solve_linear_system::<E, _, _>(system, vars) {
+                Ok(values) => {
+                    return Ok(vec![variables.into_iter().zip(values).collect()]);
+                }
+                Err(SolveError::NonLinearSystem) => {}
+                Err(error) => return Err(error),
             }
-            Err(SolveError::NonLinearSystem) => {}
-            Err(error) => return Err(error),
         }
 
-        let variable_map = Arc::new(variables);
-        let polynomials = system
+        let mut augmented_variables = variables.clone();
+        for auxiliary in &auxiliaries {
+            if !augmented_variables.contains(&auxiliary.variable) {
+                augmented_variables.push(auxiliary.variable.clone());
+            }
+        }
+        let variable_map = Arc::new(augmented_variables);
+        let mut polynomials = system
             .iter()
             .map(|expression| {
                 let polynomial = expression
                     .as_atom_view()
-                    .try_to_polynomial::<_, E>(&Q, Some(variable_map.clone()))
+                    .to_polynomial_impl::<_, E>(&Q, &variable_map)
                     .map_err(|error| SolveError::Other(error.to_string()))?;
                 Ok(polynomial.reorder::<GrevLexOrder>())
             })
@@ -144,11 +278,62 @@ impl AtomView<'_> {
             .filter(|polynomial| !polynomial.is_zero())
             .collect::<Vec<_>>();
 
-        GroebnerBasis::new(&polynomials, false)
+        if !auxiliaries.is_empty() {
+            let prototype = MultivariatePolynomial::<_, E>::new(&Q, None, variable_map.clone());
+            for auxiliary in &auxiliaries {
+                let helper = prototype
+                    .variable(&auxiliary.variable)
+                    .map_err(SolveError::Other)?;
+                let base = auxiliary
+                    .base
+                    .as_view()
+                    .to_polynomial_impl::<_, E>(&Q, &variable_map)
+                    .map_err(|error| SolveError::Other(error.to_string()))?;
+                let relation = if auxiliary.numerator > 0 {
+                    helper.pow(auxiliary.denominator)
+                        - base.pow(auxiliary.numerator.unsigned_abs() as usize)
+                } else {
+                    helper.pow(auxiliary.denominator)
+                        * &base.pow(auxiliary.numerator.unsigned_abs() as usize)
+                        - prototype.one()
+                };
+                polynomials.push(relation.reorder::<GrevLexOrder>());
+            }
+        }
+        let basis = GroebnerBasis::new(&polynomials, false);
+        let basis = basis
             .change_order::<LexOrder>()
-            .map_err(SolveError::Other)?
-            .solve()
-            .map_err(SolveError::Other)
+            .map_err(SolveError::Other)?;
+        let solutions = basis.solve().map_err(SolveError::Other)?;
+
+        if auxiliaries.is_empty() {
+            return Ok(solutions);
+        }
+
+        let mut filtered = Vec::new();
+        'solutions: for solution in solutions {
+            for auxiliary in &auxiliaries {
+                if !Self::auxiliary_branch_matches(auxiliary, &solution)
+                    .map_err(SolveError::Other)?
+                {
+                    continue 'solutions;
+                }
+            }
+
+            filtered.push(
+                variables
+                    .iter()
+                    .filter_map(|variable| {
+                        solution
+                            .get(variable)
+                            .cloned()
+                            .map(|value| (variable.clone(), value))
+                    })
+                    .collect(),
+            );
+        }
+
+        Ok(filtered)
     }
 
     /// Find the root of a function in `x` numerically over the reals using Newton's method.
@@ -630,6 +815,8 @@ mod test {
     use crate::{
         atom::{Atom, AtomCore, AtomView, representation::InlineVar},
         domains::{
+            Ring,
+            algebraic_number::AlgebraicContext,
             float::{F64, Real},
             integer::Z,
             rational::Q,
@@ -641,6 +828,21 @@ mod test {
         symbol,
         tensors::matrix::Matrix,
     };
+
+    fn assert_algebraic_zero(expression: Atom) {
+        if expression.is_zero() {
+            return;
+        }
+
+        let mut context = AlgebraicContext::from_atom(expression.as_view())
+            .unwrap()
+            .expect("expression should contain an algebraic number");
+        let value = context.convert_atom(expression.as_view()).unwrap();
+        assert!(
+            context.field().is_zero(&value),
+            "expected {expression} to be zero"
+        );
+    }
 
     #[test]
     fn exact_solve_dispatches_linear_systems() {
@@ -685,6 +887,46 @@ mod test {
                 Atom::Zero
             );
         }
+    }
+
+    #[test]
+    fn exact_solve_polynomializes_radicals_and_filters_the_sign_branch() {
+        let x = symbol!("x");
+        let system = [parse!("sqrt(x+3)+x")];
+        let variables = [Atom::var(x)];
+
+        let solutions = Atom::solve::<u16, _, Atom>(&system, &variables).unwrap();
+
+        assert_eq!(solutions.len(), 1);
+        assert_eq!(solutions[0].len(), 1);
+        let x_value = solutions[0].get(&PolyVariable::from(x)).unwrap();
+        assert_algebraic_zero(x_value.clone().pow(Atom::num(2)) - x_value.clone() - Atom::num(3));
+        assert_algebraic_zero((x_value.clone() + Atom::num(3)).sqrt() + x_value.clone());
+    }
+
+    #[test]
+    fn exact_solve_rejects_a_nonprincipal_square_root_branch() {
+        let x = symbol!("x");
+        let system = [parse!("sqrt(x)+1")];
+        let variables = [Atom::var(x)];
+
+        let solutions = Atom::solve::<u16, _, Atom>(&system, &variables).unwrap();
+        assert!(solutions.is_empty());
+    }
+
+    #[test]
+    fn exact_solve_polynomializes_nested_radicals() {
+        let x = symbol!("x");
+        let system = [parse!("sqrt(sqrt(x)+1)-2")];
+        let variables = [Atom::var(x)];
+
+        let solutions = Atom::solve::<u16, _, Atom>(&system, &variables).unwrap();
+
+        assert_eq!(solutions.len(), 1);
+        assert_eq!(
+            solutions[0].get(&PolyVariable::from(x)),
+            Some(&Atom::num(9))
+        );
     }
 
     #[test]

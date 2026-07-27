@@ -3322,7 +3322,9 @@ class Expression:
 
         Linear systems use the linear-system solver. Polynomial nonlinear
         systems over the rationals use a grevlex Gröbner basis, FGLM conversion
-        to lex, and exact algebraic roots.
+        to lex, and exact algebraic roots. Rational powers such as ``sqrt(x+3)``
+        are polynomialized using auxiliary variables, after which solutions on
+        non-principal branches are filtered out.
 
         Examples
         --------

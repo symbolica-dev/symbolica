@@ -830,7 +830,9 @@ pub trait AtomCore: private::Sealed + Sized {
     /// Linear systems use the linear-system solver. Polynomial nonlinear
     /// systems over `Q` use a grevlex Gröbner basis, FGLM conversion to lex,
     /// and exact algebraic root adjoining. Every expression in `system` is
-    /// understood to equal zero.
+    /// understood to equal zero. Rational powers involving the solve variables
+    /// are polynomialized with auxiliary variables, and non-principal branches
+    /// are filtered from the result.
     ///
     /// # Example
     ///
