@@ -977,6 +977,77 @@ where
     }
 }
 
+/// Polynomial GCD support needed when `Q(parameters)` is itself used as the
+/// coefficient field of a simple algebraic quotient.
+///
+/// The current implementation is intentionally limited to univariate
+/// polynomials, which is the case used by primitive-element adjoining.
+impl<R: EuclideanDomain + PolynomialGCD<PE>, PE: PositiveExponent, E: PositiveExponent>
+    PolynomialGCD<E> for RationalPolynomialField<R, PE>
+where
+    RationalPolynomial<R, PE>: FromNumeratorAndDenominator<R, R, PE>,
+{
+    fn heuristic_gcd(
+        _a: &MultivariatePolynomial<Self, E>,
+        _b: &MultivariatePolynomial<Self, E>,
+    ) -> Option<(
+        MultivariatePolynomial<Self, E>,
+        MultivariatePolynomial<Self, E>,
+        MultivariatePolynomial<Self, E>,
+    )> {
+        None
+    }
+
+    fn gcd_multiple(
+        polynomials: Vec<MultivariatePolynomial<Self, E>>,
+    ) -> MultivariatePolynomial<Self, E> {
+        MultivariatePolynomial::repeated_gcd(polynomials)
+    }
+
+    fn gcd(
+        a: &MultivariatePolynomial<Self, E>,
+        b: &MultivariatePolynomial<Self, E>,
+        vars: &[usize],
+        bounds: &mut [E],
+    ) -> MultivariatePolynomial<Self, E> {
+        let active_variables = vars
+            .iter()
+            .filter(|variable| {
+                a.degree(**variable) != E::zero() || b.degree(**variable) != E::zero()
+            })
+            .copied()
+            .collect::<Vec<_>>();
+        assert!(
+            active_variables.len() <= 1,
+            "Multivariate polynomial GCDs over rational-function fields are not implemented"
+        );
+
+        let result = a.univariate_gcd(b);
+        if let Some(variable) = active_variables.first() {
+            bounds[*variable] = result.degree(*variable);
+        }
+        result
+    }
+
+    fn get_gcd_var_bounds(
+        a: &MultivariatePolynomial<Self, E>,
+        b: &MultivariatePolynomial<Self, E>,
+        vars: &[usize],
+    ) -> smallvec::SmallVec<[E; crate::poly::INLINED_EXPONENTS]> {
+        let mut bounds = (0..a.nvars())
+            .map(|_| E::zero())
+            .collect::<smallvec::SmallVec<[E; crate::poly::INLINED_EXPONENTS]>>();
+        for variable in vars {
+            bounds[*variable] = a.degree(*variable).min(b.degree(*variable));
+        }
+        bounds
+    }
+
+    fn normalize(a: MultivariatePolynomial<Self, E>) -> MultivariatePolynomial<Self, E> {
+        a.make_monic()
+    }
+}
+
 impl<'a, R: EuclideanDomain + PolynomialGCD<E> + PolynomialGCD<E>, E: PositiveExponent>
     Add<&'a RationalPolynomial<R, E>> for &RationalPolynomial<R, E>
 where

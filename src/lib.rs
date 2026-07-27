@@ -106,7 +106,9 @@ pub mod prelude {
 
     pub use crate::domains::{
         EuclideanDomain, Field, Ring, RingOps, Set,
-        algebraic_number::{AlgebraicContext, AlgebraicExtension, AlgebraicNumber},
+        algebraic_number::{
+            AlgebraicContext, AlgebraicExtension, AlgebraicNumber, AlgebraicQuotient, Root,
+        },
         atom::AtomField,
         dual::HyperDual,
         factorized_rational_polynomial::FactorizedRationalPolynomial,
@@ -148,7 +150,10 @@ pub mod prelude {
         PositiveExponent,
         factor::Factorize,
         gcd::PolynomialGCD,
-        groebner::GroebnerBasis,
+        groebner::{
+            GroebnerBasis, ParameterField, ParametricExtension, ParametricRoot, ParametricSolution,
+            PolynomialSolution,
+        },
         polynomial::{MultivariatePolynomial, PolynomialRing},
         series::{Series, SeriesDepth},
         univariate::{UnivariatePolynomial, UnivariatePolynomialRing},
