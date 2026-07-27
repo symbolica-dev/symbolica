@@ -304,7 +304,12 @@ impl AtomView<'_> {
         let basis = basis
             .change_order::<LexOrder>()
             .map_err(SolveError::Other)?;
-        let solutions = basis.solve().map_err(SolveError::Other)?;
+        let solutions = basis
+            .solve()
+            .map_err(SolveError::Other)?
+            .iter()
+            .map(|solution| solution.to_atom_map().map_err(SolveError::Other))
+            .collect::<Result<Vec<_>, _>>()?;
 
         if auxiliaries.is_empty() {
             return Ok(solutions);

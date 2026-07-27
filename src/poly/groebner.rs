@@ -50,15 +50,14 @@ use std::{
 use ahash::{HashMap, HashSet};
 
 use crate::{
-    atom::{Atom, AtomCore},
+    atom::Atom,
     domains::{
         Field, Ring, RingOps, Set,
-        algebraic_number::AlgebraicContext,
+        algebraic_number::{AlgebraicExtension, AlgebraicNumber},
         finite_field::{FiniteFieldCore, Zp},
         rational::{Q, RationalField},
     },
     tensors::matrix::{Matrix, MatrixError},
-    transcendental::TranscendentalFunctions,
 };
 
 use super::{
@@ -132,10 +131,56 @@ pub struct GroebnerBasis<R: Field, E: Exponent, O: MonomialOrder> {
     pub print_stats: bool,
 }
 
-#[derive(Clone)]
-struct AlgebraicSolveBranch {
-    solution: HashMap<PolyVariable, Atom>,
-    context: Option<AlgebraicContext>,
+/// One solution of a zero-dimensional polynomial system.
+///
+/// All values live in the same simple algebraic extension. A degree-one
+/// extension represents the base field itself, so callers do not need a
+/// separate value variant for rational and algebraic solutions.
+#[derive(Clone, Debug)]
+pub struct PolynomialSolution<R: Ring> {
+    field: AlgebraicExtension<R>,
+    values: HashMap<PolyVariable, AlgebraicNumber<R>>,
+}
+
+impl<R: Ring> PolynomialSolution<R> {
+    pub fn field(&self) -> &AlgebraicExtension<R> {
+        &self.field
+    }
+
+    pub fn values(&self) -> &HashMap<PolyVariable, AlgebraicNumber<R>> {
+        &self.values
+    }
+
+    pub fn get(&self, variable: &PolyVariable) -> Option<&AlgebraicNumber<R>> {
+        self.values.get(variable)
+    }
+
+    pub fn len(&self) -> usize {
+        self.values.len()
+    }
+
+    pub fn is_empty(&self) -> bool {
+        self.values.is_empty()
+    }
+
+    pub fn into_parts(
+        self,
+    ) -> (
+        AlgebraicExtension<R>,
+        HashMap<PolyVariable, AlgebraicNumber<R>>,
+    ) {
+        (self.field, self.values)
+    }
+}
+
+impl PolynomialSolution<RationalField> {
+    /// Convert a polynomial-native solution to expression atoms.
+    pub fn to_atom_map(&self) -> Result<HashMap<PolyVariable, Atom>, String> {
+        self.values
+            .iter()
+            .map(|(variable, value)| Ok((variable.clone(), self.field.try_to_atom(value)?)))
+            .collect()
+    }
 }
 
 struct OrderedMonomial<E, O> {
@@ -962,177 +1007,116 @@ impl<R: Field, E: PositiveExponent, O: MonomialOrder> GroebnerBasis<R, E, O> {
 }
 
 impl<E: PositiveExponent> GroebnerBasis<RationalField, E, LexOrder> {
-    fn explicit_root<E2: PositiveExponent>(
-        polynomial: &MultivariatePolynomial<RationalField, E2, LexOrder>,
+    fn rational_univariate(
+        polynomial: &MultivariatePolynomial<RationalField, E, LexOrder>,
         variable: usize,
-        embedding: usize,
-    ) -> Atom {
-        let mut polynomial = polynomial.clone();
-        let old_variable = polynomial.get_vars_ref()[variable].clone();
-        if !matches!(old_variable, PolyVariable::Symbol(_)) {
-            polynomial.rename_variable(
-                &old_variable,
-                &PolyVariable::Symbol(crate::symbol!("symbolica::root::z")),
-            );
-        }
-        polynomial.to_expression().root(embedding)
-    }
-
-    fn substitute_solution(
-        polynomial: &MultivariatePolynomial<RationalField, E, LexOrder>,
-        target: usize,
-        variables: &[PolyVariable],
-        solution: &HashMap<PolyVariable, Atom>,
-    ) -> Option<Atom> {
-        let target_atom: Atom = variables[target].clone().into();
-        let mut result = Atom::Zero;
-
+    ) -> Result<MultivariatePolynomial<RationalField, u16>, String> {
+        let target = PolyVariable::Temporary(0);
+        let mut result =
+            MultivariatePolynomial::new(&Q, Some(polynomial.nterms()), Arc::new(vec![target]));
         for term in polynomial {
-            let mut evaluated_term = Atom::num(term.coefficient.clone());
             for (index, exponent) in term.exponents.iter().enumerate() {
-                if exponent.is_zero() {
-                    continue;
+                if index != variable && !exponent.is_zero() {
+                    return Err("Expected a univariate polynomial".to_string());
                 }
-
-                let value = if index == target {
-                    target_atom.clone()
-                } else {
-                    solution.get(&variables[index])?.clone()
-                };
-                evaluated_term *= value.pow(u64::from(exponent.to_u32()));
             }
-            result += evaluated_term;
+            let exponent = u16::try_from(term.exponents[variable].to_u32())
+                .map_err(|_| "Root exponent does not fit in u16".to_string())?;
+            result.append_monomial(term.coefficient.clone(), &[exponent]);
         }
-
-        Some(result)
+        Ok(result)
     }
 
-    fn substitute_linear_solution(
+    fn specialize_polynomial(
         polynomial: &MultivariatePolynomial<RationalField, E, LexOrder>,
         target: usize,
         variables: &[PolyVariable],
-        solution: &HashMap<PolyVariable, Atom>,
-    ) -> Option<(Atom, Atom)> {
-        let mut linear_coefficient = Atom::Zero;
-        let mut constant = Atom::Zero;
-
+        solution: &PolynomialSolution<RationalField>,
+    ) -> Result<Option<MultivariatePolynomial<AlgebraicExtension<Q>, u16>>, String> {
+        let mut coefficients: HashMap<u16, AlgebraicNumber<Q>> = HashMap::default();
         for term in polynomial {
-            let mut evaluated_term = Atom::num(term.coefficient.clone());
+            let mut coefficient = solution.field.constant(term.coefficient.clone());
             for (index, exponent) in term.exponents.iter().enumerate() {
                 if exponent.is_zero() || index == target {
                     continue;
                 }
-                evaluated_term *= solution
-                    .get(&variables[index])?
-                    .clone()
-                    .pow(u64::from(exponent.to_u32()));
+                let Some(value) = solution.values.get(&variables[index]) else {
+                    return Ok(None);
+                };
+                coefficient = solution.field.mul(
+                    &coefficient,
+                    &solution.field.pow(value, u64::from(exponent.to_u32())),
+                );
             }
-
-            if term.exponents[target].is_zero() {
-                constant += evaluated_term;
-            } else {
-                linear_coefficient += evaluated_term;
-            }
+            let exponent = u16::try_from(term.exponents[target].to_u32())
+                .map_err(|_| "Specialized exponent does not fit in u16".to_string())?;
+            coefficients
+                .entry(exponent)
+                .and_modify(|current| solution.field.add_assign(current, &coefficient))
+                .or_insert(coefficient);
         }
 
-        Some((linear_coefficient, constant))
+        let variable = solution.field.get_new_var();
+        let mut result = MultivariatePolynomial::new(
+            &solution.field,
+            Some(coefficients.len()),
+            Arc::new(vec![variable]),
+        );
+        let mut coefficients = coefficients.into_iter().collect::<Vec<_>>();
+        coefficients.sort_by_key(|(exponent, _)| *exponent);
+        for (exponent, coefficient) in coefficients {
+            if !solution.field.is_zero(&coefficient) {
+                result.append_monomial(coefficient, &[exponent]);
+            }
+        }
+        Ok(Some(result))
     }
 
-    fn solve_branch_equation(
-        branch: &AlgebraicSolveBranch,
-        equation: Atom,
-        target: &PolyVariable,
-    ) -> Result<Option<Vec<AlgebraicSolveBranch>>, String> {
-        let variable_map = Arc::new(vec![target.clone()]);
-
-        if let Some(mut context) = branch.context.clone() {
-            let polynomial = context.to_polynomial::<u16>(equation.as_view(), variable_map)?;
-            if polynomial.is_zero() {
-                return Ok(None);
-            }
-            if polynomial.is_constant() {
-                return Ok(Some(Vec::new()));
-            }
-
-            let mut children = Vec::new();
-            for (factor, _) in polynomial.factor() {
-                let degree = factor.degree(0) as usize;
-                if degree == 0 {
-                    continue;
-                }
-
-                if degree == 1 {
-                    let root = factor
-                        .ring
-                        .neg(&factor.ring.div(&factor.get_constant(), &factor.lcoeff()));
-                    let mut child_context = context.clone();
-                    let root = child_context.atom_from_element(root)?;
-                    let mut child = branch.clone();
-                    child.solution.insert(target.clone(), root);
-                    child.context = Some(child_context);
-                    children.push(child);
-                    continue;
-                }
-
-                for embedding in 0..degree {
-                    let mut child_context = context.clone();
-                    let root = child_context.adjoin_root(factor.clone(), embedding)?;
-                    let mut child = branch.clone();
-                    child.solution.insert(target.clone(), root);
-                    child.context = Some(child_context);
-                    children.push(child);
-                }
-            }
-
-            return Ok(Some(children));
+    fn transport_element(
+        element: &AlgebraicNumber<Q>,
+        field: &AlgebraicExtension<Q>,
+        old_generator: &AlgebraicNumber<Q>,
+    ) -> AlgebraicNumber<Q> {
+        let mut coefficients = vec![Q.zero(); element.poly().degree(0) as usize + 1];
+        for term in element.poly() {
+            coefficients[term.exponents[0] as usize] = term.coefficient.clone();
         }
 
-        let polynomial = equation
-            .as_view()
-            .try_to_polynomial::<_, u16>(&Q, Some(variable_map))
-            .map_err(|error| error.to_string())?;
-        if polynomial.is_zero() {
-            return Ok(None);
+        let mut result = field.zero();
+        for coefficient in coefficients.into_iter().rev() {
+            result = field.add(
+                &field.mul(&result, old_generator),
+                &field.constant(coefficient),
+            );
         }
-        if polynomial.is_constant() {
-            return Ok(Some(Vec::new()));
-        }
-
-        let mut children = Vec::new();
-        for (factor, _) in polynomial.factor() {
-            let degree = factor.degree(0) as usize;
-            if degree == 0 {
-                continue;
-            }
-
-            for embedding in 0..degree {
-                let root = Self::explicit_root(&factor, 0, embedding);
-                let mut child = branch.clone();
-                child.solution.insert(target.clone(), root.clone());
-                child.context = AlgebraicContext::from_atom(root.as_view())?;
-                children.push(child);
-            }
-        }
-
-        Ok(Some(children))
+        result
     }
 
-    /// Solve a zero-dimensional lexicographic Gröbner basis by triangular
-    /// back-substitution.
+    fn with_adjoined_root(
+        mut solution: PolynomialSolution<RationalField>,
+        polynomial: MultivariatePolynomial<AlgebraicExtension<Q>, u16>,
+        embedding: usize,
+        target: PolyVariable,
+    ) -> PolynomialSolution<RationalField> {
+        let extension = AlgebraicExtension::new_with_embedding(polynomial, embedding);
+        let new_variable = solution.field.get_new_var();
+        let (field, old_generator, new_generator) = solution
+            .field
+            .adjoin_with_embedding(&extension, Some(new_variable));
+        for value in solution.values.values_mut() {
+            *value = Self::transport_element(value, &field, &old_generator);
+        }
+        solution.field = field;
+        solution.values.insert(target, new_generator);
+        solution
+    }
+
+    /// Solve a zero-dimensional lexicographic Gröbner basis inside the
+    /// polynomial domain.
     ///
-    /// The last variable must have a univariate elimination polynomial. Every
-    /// preceding variable must have a triangular equation that only involves
-    /// that variable and variables that have already been solved. Nonlinear
-    /// equations are factored over the algebraic field of each solution branch
-    /// and their roots are adjoined with the matching embedding.
-    /// Each solution is returned as a map from polynomial variables to exact
-    /// [`Atom`] values containing rational powers or explicit `root` objects.
-    ///
-    /// Repeated roots are returned once. An inconsistent basis returns an
-    /// empty solution list. Positive-dimensional and non-triangular bases return
-    /// an error. The order of the returned solutions is unspecified.
-    ///
-    /// # Examples
+    /// Every returned branch stores its values in one common algebraic
+    /// extension. Conversion to expression atoms is deliberately left to
+    /// [`PolynomialSolution::to_atom_map`].
     ///
     /// ```
     /// use symbolica::prelude::*;
@@ -1144,11 +1128,12 @@ impl<E: PositiveExponent> GroebnerBasis<RationalField, E, LexOrder> {
     /// let solutions = GroebnerBasis::new(&ideal, false).solve().unwrap();
     ///
     /// assert_eq!(solutions.len(), 2);
+    /// assert!(solutions.iter().all(|solution| solution.len() == 2));
     /// assert!(solutions
     ///     .iter()
-    ///     .all(|solution| solution.len() == 2));
+    ///     .all(|solution| solution.field().poly().degree(0) == 2));
     /// ```
-    pub fn solve(&self) -> Result<Vec<HashMap<PolyVariable, Atom>>, String> {
+    pub fn solve(&self) -> Result<Vec<PolynomialSolution<RationalField>>, String> {
         if self.system.is_empty() {
             return Err(
                 "Cannot enumerate the solutions of an empty, positive-dimensional basis"
@@ -1175,12 +1160,6 @@ impl<E: PositiveExponent> GroebnerBasis<RationalField, E, LexOrder> {
         {
             return Err("The Gröbner basis does not have a unified variable map".to_string());
         }
-        if variables
-            .iter()
-            .any(|variable| matches!(variable, PolyVariable::Temporary(_)))
-        {
-            return Err("Cannot express temporary polynomial variables as atoms".to_string());
-        }
 
         let last = variables.len() - 1;
         let elimination_polynomial = self
@@ -1200,19 +1179,27 @@ impl<E: PositiveExponent> GroebnerBasis<RationalField, E, LexOrder> {
 
         let mut branches = Vec::new();
         for (factor, _) in elimination_polynomial.factor() {
-            let degree = factor.degree(last).to_u32();
+            let degree = factor.degree(last).to_u32() as usize;
             if degree == 0 {
                 continue;
             }
 
-            for index in 0..degree as usize {
-                let root = Self::explicit_root(&factor, last, index);
-                let mut solution = HashMap::default();
-                solution.insert(variables[last].clone(), root.clone());
-                branches.push(AlgebraicSolveBranch {
-                    solution,
-                    context: AlgebraicContext::from_atom(root.as_view())?,
-                });
+            if degree == 1 {
+                let field = AlgebraicExtension::trivial(Q);
+                let root = Q.neg(&Q.div(&factor.get_constant(), &factor.lcoeff()));
+                let mut values = HashMap::default();
+                values.insert(variables[last].clone(), field.constant(root));
+                branches.push(PolynomialSolution { field, values });
+                continue;
+            }
+
+            let factor = Self::rational_univariate(&factor, last)?.make_monic();
+            for embedding in 0..degree {
+                let field = AlgebraicExtension::new_with_embedding(factor.clone(), embedding);
+                let root = field.generator();
+                let mut values = HashMap::default();
+                values.insert(variables[last].clone(), root);
+                branches.push(PolynomialSolution { field, values });
             }
         }
 
@@ -1237,54 +1224,46 @@ impl<E: PositiveExponent> GroebnerBasis<RationalField, E, LexOrder> {
             for branch in branches {
                 let mut branch_children = None;
                 for polynomial in &candidates {
-                    if polynomial.degree(target) == E::one()
-                        && let Some((linear_coefficient, constant)) =
-                            Self::substitute_linear_solution(
-                                polynomial,
-                                target,
-                                &variables,
-                                &branch.solution,
-                            )
-                    {
-                        let mut child = branch.clone();
-                        if let Some(context) = &mut child.context {
-                            let coefficient = context.convert_atom(linear_coefficient.as_view())?;
-                            if context.field().is_zero(&coefficient) {
-                                let constant = context.convert_atom(constant.as_view())?;
-                                if context.field().is_zero(&constant) {
-                                    continue;
-                                }
-                                branch_children = Some(Vec::new());
-                                break;
-                            }
-                        } else if linear_coefficient.is_zero() {
-                            if constant.is_zero() {
-                                continue;
-                            }
-                            branch_children = Some(Vec::new());
-                            break;
-                        }
-
-                        let value = -constant / linear_coefficient;
-                        if let Some(context) = &mut child.context {
-                            context.convert_atom(value.as_view())?;
-                        }
-                        child.solution.insert(variables[target].clone(), value);
-                        branch_children = Some(vec![child]);
-                        break;
-                    }
-
-                    let Some(equation) =
-                        Self::substitute_solution(polynomial, target, &variables, &branch.solution)
+                    let Some(specialized) =
+                        Self::specialize_polynomial(polynomial, target, &variables, &branch)?
                     else {
                         continue;
                     };
-                    if let Some(children) =
-                        Self::solve_branch_equation(&branch, equation, &variables[target])?
-                    {
-                        branch_children = Some(children);
+                    if specialized.is_zero() {
+                        continue;
+                    }
+                    if specialized.is_constant() {
+                        branch_children = Some(Vec::new());
                         break;
                     }
+
+                    let mut children = Vec::new();
+                    for (factor, _) in specialized.factor() {
+                        let degree = factor.degree(0) as usize;
+                        if degree == 0 {
+                            continue;
+                        }
+                        if degree == 1 {
+                            let root = branch
+                                .field
+                                .neg(&branch.field.div(&factor.get_constant(), &factor.lcoeff()));
+                            let mut child = branch.clone();
+                            child.values.insert(variables[target].clone(), root);
+                            children.push(child);
+                            continue;
+                        }
+
+                        for embedding in 0..degree {
+                            children.push(Self::with_adjoined_root(
+                                branch.clone(),
+                                factor.clone(),
+                                embedding,
+                                variables[target].clone(),
+                            ));
+                        }
+                    }
+                    branch_children = Some(children);
+                    break;
                 }
 
                 let children = branch_children.ok_or_else(|| {
@@ -1298,7 +1277,7 @@ impl<E: PositiveExponent> GroebnerBasis<RationalField, E, LexOrder> {
             branches = next_branches;
         }
 
-        Ok(branches.into_iter().map(|branch| branch.solution).collect())
+        Ok(branches)
     }
 }
 
@@ -1681,7 +1660,9 @@ mod test {
 
     use crate::{
         atom::{Atom, AtomCore},
-        domains::{Ring, algebraic_number::AlgebraicContext, finite_field::Zp, rational::Q},
+        domains::{
+            Ring, RingOps, algebraic_number::AlgebraicContext, finite_field::Zp, rational::Q,
+        },
         parse,
         poly::{
             GrevLexOrder, LexOrder, PolyVariable, groebner::GroebnerBasis,
@@ -1689,6 +1670,15 @@ mod test {
         },
         symbol,
     };
+
+    fn atom_solutions(
+        solutions: Vec<super::PolynomialSolution<crate::domains::rational::RationalField>>,
+    ) -> Vec<ahash::HashMap<PolyVariable, Atom>> {
+        solutions
+            .iter()
+            .map(|solution| solution.to_atom_map().unwrap())
+            .collect()
+    }
 
     #[test]
     fn solve_test() {
@@ -1700,7 +1690,7 @@ mod test {
             .iter()
             .map(|polynomial| parse!(polynomial).to_polynomial(&Q, Some(variables.clone())))
             .collect();
-        let solutions = GroebnerBasis::new(&ideal, false).solve().unwrap();
+        let solutions = atom_solutions(GroebnerBasis::new(&ideal, false).solve().unwrap());
 
         assert_eq!(solutions.len(), 4);
         for solution in solutions {
@@ -1931,7 +1921,7 @@ mod test {
             .iter()
             .map(|polynomial| parse!(polynomial).to_polynomial(&Q, None))
             .collect();
-        let solutions = GroebnerBasis::new(&ideal, false).solve().unwrap();
+        let solutions = atom_solutions(GroebnerBasis::new(&ideal, false).solve().unwrap());
 
         let x = PolyVariable::from(symbol!("x"));
         let y = PolyVariable::from(symbol!("y"));
@@ -1947,12 +1937,39 @@ mod test {
     }
 
     #[test]
+    fn polynomial_solutions_stay_in_one_algebraic_field() {
+        let ideal: Vec<MultivariatePolynomial<_, u16>> = ["x+y", "y^2-2"]
+            .iter()
+            .map(|polynomial| parse!(polynomial).to_polynomial(&Q, None))
+            .collect();
+        let solutions = GroebnerBasis::new(&ideal, false).solve().unwrap();
+        let x = PolyVariable::from(symbol!("x"));
+        let y = PolyVariable::from(symbol!("y"));
+
+        assert_eq!(solutions.len(), 2);
+        for solution in solutions {
+            assert_eq!(solution.field().poly().degree(0), 2);
+            let x_value = solution.get(&x).unwrap();
+            let y_value = solution.get(&y).unwrap();
+            assert!(
+                solution
+                    .field()
+                    .is_zero(&solution.field().add(x_value, y_value))
+            );
+            assert!(solution.field().is_zero(&solution.field().sub(
+                &solution.field().pow(y_value, 2),
+                &solution.field().constant(2.into()),
+            )));
+        }
+    }
+
+    #[test]
     fn solve_lexicographic_shape_basis_with_explicit_roots() {
         let ideal: Vec<MultivariatePolynomial<_, u16>> = ["x-y^2", "y^3-2"]
             .iter()
             .map(|polynomial| parse!(polynomial).to_polynomial(&Q, None))
             .collect();
-        let solutions = GroebnerBasis::new(&ideal, false).solve().unwrap();
+        let solutions = atom_solutions(GroebnerBasis::new(&ideal, false).solve().unwrap());
 
         let x = PolyVariable::from(symbol!("x"));
         let y = PolyVariable::from(symbol!("y"));
@@ -1972,7 +1989,7 @@ mod test {
             .iter()
             .map(|polynomial| parse!(polynomial).to_polynomial(&Q, Some(variables.clone())))
             .collect();
-        let solutions = GroebnerBasis::new(&ideal, false).solve().unwrap();
+        let solutions = atom_solutions(GroebnerBasis::new(&ideal, false).solve().unwrap());
 
         assert_eq!(solutions.len(), 4);
         for solution in solutions {
@@ -1993,7 +2010,7 @@ mod test {
             .iter()
             .map(|polynomial| parse!(polynomial).to_polynomial(&Q, Some(variables.clone())))
             .collect();
-        let solutions = GroebnerBasis::new(&ideal, false).solve().unwrap();
+        let solutions = atom_solutions(GroebnerBasis::new(&ideal, false).solve().unwrap());
 
         assert_eq!(solutions.len(), 4);
         for solution in solutions {
@@ -2012,7 +2029,7 @@ mod test {
             .iter()
             .map(|polynomial| parse!(polynomial).to_polynomial(&Q, None))
             .collect();
-        let solutions = GroebnerBasis::new(&ideal, false).solve().unwrap();
+        let solutions = atom_solutions(GroebnerBasis::new(&ideal, false).solve().unwrap());
 
         let x = PolyVariable::from(symbol!("x"));
         let y = PolyVariable::from(symbol!("y"));
@@ -2036,7 +2053,7 @@ mod test {
             .iter()
             .map(|polynomial| parse!(polynomial).to_polynomial(&Q, None))
             .collect();
-        let solutions = GroebnerBasis::new(&ideal, false).solve().unwrap();
+        let solutions = atom_solutions(GroebnerBasis::new(&ideal, false).solve().unwrap());
 
         let x = PolyVariable::from(symbol!("x"));
         let y = PolyVariable::from(symbol!("y"));

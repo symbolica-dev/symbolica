@@ -148,7 +148,7 @@ pub mod prelude {
         PositiveExponent,
         factor::Factorize,
         gcd::PolynomialGCD,
-        groebner::GroebnerBasis,
+        groebner::{GroebnerBasis, PolynomialSolution},
         polynomial::{MultivariatePolynomial, PolynomialRing},
         series::{Series, SeriesDepth},
         univariate::{UnivariatePolynomial, UnivariatePolynomialRing},

@@ -1700,6 +1700,17 @@ impl AtomView<'_> {
 }
 
 impl<R: EuclideanDomain> AlgebraicExtension<R> {
+    /// Construct the degree-one extension `R[t]/(t)`.
+    ///
+    /// This represents the base field itself while providing the same element
+    /// type as a nontrivial algebraic extension.
+    pub fn trivial(ring: R) -> AlgebraicExtension<R> {
+        let variable = PolyVariable::Temporary(0);
+        let prototype =
+            MultivariatePolynomial::new(&ring, Some(1), Arc::new(vec![variable.clone()]));
+        AlgebraicExtension::new(prototype.variable(&variable).unwrap())
+    }
+
     /// Create a new algebraic extension from a univariate polynomial.
     /// The polynomial should be monic and irreducible.
     ///
@@ -1738,9 +1749,19 @@ impl<R: EuclideanDomain> AlgebraicExtension<R> {
         }
     }
 
+    /// Return the residue class of the defining polynomial's variable.
+    pub fn generator(&self) -> AlgebraicNumber<R> {
+        self.to_element(self.poly.one().mul_exp(&[1]))
+    }
+
     /// Get the minimal polynomial.
     pub fn poly(&self) -> &MultivariatePolynomial<R, u16> {
         &self.poly
+    }
+
+    /// Return the selected root index of the defining polynomial.
+    pub fn embedding(&self) -> usize {
+        self.embedding
     }
 
     pub fn to_finite_field<UField: FiniteFieldWorkspace>(
@@ -1855,7 +1876,12 @@ impl<R: EuclideanDomain> AlgebraicExtension<R> {
 
         let mut res = Atom::Zero;
         for t in element.poly() {
-            res += root.pow(t.exponents[0]) * t.coefficient.clone().into();
+            let coefficient = t.coefficient.clone().into();
+            if t.exponents[0] == 0 {
+                res += coefficient;
+            } else {
+                res += root.pow(t.exponents[0]) * coefficient;
+            }
         }
         return Ok(res);
 
