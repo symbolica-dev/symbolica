@@ -4,7 +4,7 @@
 
 use std::{ops::Neg, sync::Arc};
 
-use ahash::HashSet;
+use ahash::{HashMap, HashSet};
 use numerica::domains::{Field, float::Complex, rational::Rational};
 
 use crate::{
@@ -18,7 +18,10 @@ use crate::{
         rational_polynomial::{RationalPolynomial, RationalPolynomialField},
     },
     evaluate::{EvaluationDomain, FunctionMap, OptimizationSettings},
-    poly::{PolyVariable, PositiveExponent},
+    poly::{
+        GrevLexOrder, LexOrder, PolyVariable, PositiveExponent, groebner::GroebnerBasis,
+        polynomial::MultivariatePolynomial,
+    },
     tensors::matrix::{Matrix, MatrixError},
 };
 
@@ -99,6 +102,55 @@ impl std::fmt::Display for SolveError {
 }
 
 impl AtomView<'_> {
+    /// Solve a system exactly for `vars`.
+    ///
+    /// Linear systems are delegated to [`Self::solve_linear_system`]. Polynomial
+    /// nonlinear systems over `Q` are first converted to a grevlex Gröbner
+    /// basis, changed to lex order with FGLM, and solved by triangular
+    /// back-substitution.
+    ///
+    /// Every expression in `system` is understood to equal zero. Each solution
+    /// is returned as a map from a requested variable to its exact value.
+    pub fn solve<E: PositiveExponent, T1: AtomCore, T2: AtomCore>(
+        system: &[T1],
+        vars: &[T2],
+    ) -> Result<Vec<HashMap<PolyVariable, Atom>>, SolveError> {
+        let variables = vars
+            .iter()
+            .map(|variable| variable.as_atom_view().to_owned().try_into())
+            .collect::<Result<Vec<PolyVariable>, String>>()
+            .map_err(SolveError::Other)?;
+
+        match Self::solve_linear_system::<E, _, _>(system, vars) {
+            Ok(values) => {
+                return Ok(vec![variables.into_iter().zip(values).collect()]);
+            }
+            Err(SolveError::NonLinearSystem) => {}
+            Err(error) => return Err(error),
+        }
+
+        let variable_map = Arc::new(variables);
+        let polynomials = system
+            .iter()
+            .map(|expression| {
+                let polynomial = expression
+                    .as_atom_view()
+                    .try_to_polynomial::<_, E>(&Q, Some(variable_map.clone()))
+                    .map_err(|error| SolveError::Other(error.to_string()))?;
+                Ok(polynomial.reorder::<GrevLexOrder>())
+            })
+            .collect::<Result<Vec<MultivariatePolynomial<_, E, GrevLexOrder>>, SolveError>>()?
+            .into_iter()
+            .filter(|polynomial| !polynomial.is_zero())
+            .collect::<Vec<_>>();
+
+        GroebnerBasis::new(&polynomials, false)
+            .change_order::<LexOrder>()
+            .map_err(SolveError::Other)?
+            .solve()
+            .map_err(SolveError::Other)
+    }
+
     /// Find the root of a function in `x` numerically over the reals using Newton's method.
     pub(crate) fn nsolve<N: SingleFloat + Real + EvaluationDomain + PartialOrd>(
         &self,
@@ -433,6 +485,10 @@ impl AtomView<'_> {
                 .map_err(|e| SolveError::Other(e.to_string()))?;
 
             for e in &poly {
+                if e.exponents.iter().copied().sum::<u8>() > 1 {
+                    return Err(SolveError::NonLinearSystem);
+                }
+
                 let mut found = false;
                 for j in 0..vars.len() {
                     if e.exponents[j] != 0 {
@@ -572,7 +628,7 @@ mod test {
     use std::sync::Arc;
 
     use crate::{
-        atom::{AtomCore, AtomView, representation::InlineVar},
+        atom::{Atom, AtomCore, AtomView, representation::InlineVar},
         domains::{
             float::{F64, Real},
             integer::Z,
@@ -585,6 +641,51 @@ mod test {
         symbol,
         tensors::matrix::Matrix,
     };
+
+    #[test]
+    fn exact_solve_dispatches_linear_systems() {
+        let x = symbol!("x");
+        let y = symbol!("y");
+        let system = [parse!("x+y-3"), parse!("x-y-1")];
+        let variables = [Atom::var(x), Atom::var(y)];
+
+        let solutions = Atom::solve::<u16, _, Atom>(&system, &variables).unwrap();
+
+        assert_eq!(solutions.len(), 1);
+        assert_eq!(
+            solutions[0].get(&PolyVariable::from(x)),
+            Some(&Atom::num(2))
+        );
+        assert_eq!(
+            solutions[0].get(&PolyVariable::from(y)),
+            Some(&Atom::num(1))
+        );
+    }
+
+    #[test]
+    fn exact_solve_dispatches_nonlinear_polynomial_systems() {
+        let x = symbol!("x");
+        let y = symbol!("y");
+        let system = [parse!("x+y"), parse!("y^2-2")];
+        let variables = [Atom::var(x), Atom::var(y)];
+
+        assert_eq!(
+            AtomView::solve_linear_system::<u16, _, Atom>(&system, &variables),
+            Err(SolveError::NonLinearSystem)
+        );
+
+        let solutions = Atom::solve::<u16, _, Atom>(&system, &variables).unwrap();
+        assert_eq!(solutions.len(), 2);
+        for solution in solutions {
+            let x_value = solution.get(&PolyVariable::from(x)).unwrap();
+            let y_value = solution.get(&PolyVariable::from(y)).unwrap();
+            assert_eq!(x_value, &-y_value.clone());
+            assert_eq!(
+                (y_value.clone().pow(Atom::num(2)) - Atom::num(2)).expand(),
+                Atom::Zero
+            );
+        }
+    }
 
     #[test]
     fn underdetermined() {

@@ -731,6 +731,62 @@ impl AlgebraicContext {
         self.images.get(atom)
     }
 
+    /// Convert a field element to an atom and cache that representation.
+    pub fn atom_from_element(&mut self, element: AlgebraicNumber<Q>) -> Result<Atom, String> {
+        if let Some(atom) = self
+            .images
+            .iter()
+            .filter_map(|(atom, image)| {
+                self.field
+                    .is_zero(&self.field.sub(image, &element))
+                    .then_some(atom)
+            })
+            .min()
+            .cloned()
+        {
+            return Ok(atom);
+        }
+
+        let atom = self.field.try_to_atom(&element)?;
+        self.images.insert(atom.clone(), element);
+        Ok(atom)
+    }
+
+    /// Adjoin one embedded root of an irreducible polynomial over this field.
+    ///
+    /// `polynomial` must be univariate, use this context's current field as
+    /// its coefficient ring, and be irreducible over that field.
+    pub fn adjoin_root(
+        &mut self,
+        polynomial: MultivariatePolynomial<AlgebraicExtension<Q>, u16>,
+        embedding: usize,
+    ) -> Result<Atom, String> {
+        if polynomial.ring != self.field {
+            return Err("The root polynomial uses a different coefficient field".to_string());
+        }
+        if polynomial.nvars() != 1 || polynomial.degree(0) == 0 {
+            return Err("The root polynomial must be non-constant and univariate".to_string());
+        }
+        if embedding >= polynomial.degree(0) as usize {
+            return Err(format!(
+                "Root index {embedding} is out of bounds for polynomial of degree {}",
+                polynomial.degree(0)
+            ));
+        }
+
+        let extension = AlgebraicExtension::new_with_embedding(polynomial, embedding);
+        let new_variable = self.field.get_new_var();
+        let (field, old_generator, new_generator) = self
+            .field
+            .adjoin_with_embedding(&extension, Some(new_variable));
+
+        for image in self.images.values_mut() {
+            *image = Self::transport_element(image, &field, &old_generator);
+        }
+        self.field = field;
+        self.atom_from_element(new_generator)
+    }
+
     pub fn into_parts(self) -> (AlgebraicExtension<Q>, HashMap<Atom, AlgebraicNumber<Q>>) {
         (self.field, self.images)
     }
@@ -1215,7 +1271,6 @@ fn algebraic_context_conversion() {
 #[test]
 fn factor_in_extension() {
     let factorization = crate::parse!("x^2+1")
-        .as_view()
         .factor_in_extension(&[Atom::i()])
         .unwrap();
     assert_eq!(factorization, crate::parse!("(x-1𝑖)*(x+1𝑖)"));

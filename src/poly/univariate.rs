@@ -2243,8 +2243,82 @@ impl UnivariatePolynomial<RationalField> {
         }
     }
 
+    /// Isolate all roots directly when every root lies on one of the coordinate
+    /// axes. This avoids a difficult symmetric Aberth certification case for
+    /// polynomials such as `x^4-a`.
+    fn isolate_axis_roots(&self, refine: Option<Rational>) -> Option<Vec<ComplexRootInterval>> {
+        let real_roots = self.isolate_roots(refine.clone());
+        let (real_part, imaginary_part) = self.polynomial_at_imaginary_axis_parts();
+        let imaginary_axis_poly = match (real_part.is_zero(), imaginary_part.is_zero()) {
+            (true, true) => return None,
+            (true, false) => imaginary_part,
+            (false, true) => real_part,
+            (false, false) => real_part.gcd(&imaginary_part),
+        };
+        let imaginary_roots = if imaginary_axis_poly.is_constant() {
+            Vec::new()
+        } else {
+            imaginary_axis_poly.isolate_roots(refine.clone())
+        };
+
+        let root_count = real_roots
+            .iter()
+            .chain(&imaginary_roots)
+            .map(|(_, _, multiplicity)| *multiplicity)
+            .sum::<usize>();
+        if root_count != self.degree() {
+            return None;
+        }
+
+        let complex_field = FloatField::from_rep(Complex::from(Rational::one()));
+        let complex_poly = Arc::new(self.map_coeff(|c| Complex::from(c.clone()), complex_field));
+        let mut roots = Vec::with_capacity(root_count);
+
+        for (lower, upper, multiplicity) in real_roots {
+            let center = (&lower + &upper) / Rational::from(2);
+            let radius = (&upper - &lower) / Rational::from(2);
+            roots.push(ComplexRootInterval {
+                poly: Some(complex_poly.clone()),
+                index: None,
+                center: Complex::new(center, Rational::zero()),
+                radius,
+                multiplicity: Some(multiplicity),
+                real: true,
+                imaginary: false,
+            });
+        }
+        for (lower, upper, multiplicity) in imaginary_roots {
+            let center = (&lower + &upper) / Rational::from(2);
+            let radius = (&upper - &lower) / Rational::from(2);
+            roots.push(ComplexRootInterval {
+                poly: Some(complex_poly.clone()),
+                index: None,
+                center: Complex::new(Rational::zero(), center),
+                radius,
+                multiplicity: Some(multiplicity),
+                real: false,
+                imaginary: true,
+            });
+        }
+
+        let derivative = complex_poly.derivative();
+        if !Self::refine_complex_root_balls_until_disjoint(
+            &complex_poly,
+            &derivative,
+            &mut roots,
+            refine.as_ref(),
+        ) {
+            return None;
+        }
+        Some(roots)
+    }
+
     // Self is square-free
     fn isolate_complex_roots_impl(&self, refine: Option<Rational>) -> Vec<ComplexRootInterval> {
+        if let Some(roots) = self.isolate_axis_roots(refine.clone()) {
+            return roots;
+        }
+
         // Clustered roots can certify long before Aberth's residual test succeeds.
         // Try the exact certificate between short Aberth batches and raise precision early.
         const ABERTH_CERTIFICATION_BATCH: usize = 64;
@@ -3848,6 +3922,23 @@ mod test {
         assert_eq!(roots.iter().filter(|r| r.imaginary).count(), 3);
         assert_pairwise_isolated(&roots);
         assert_complex_roots_canonical(&roots);
+    }
+
+    #[test]
+    fn complex_root_isolation_handles_axis_binomial() {
+        let p = parse!("x^4-2")
+            .to_polynomial::<_, u16>(&Q, None)
+            .to_univariate_from_univariate(0);
+        let roots = p.isolate_complex_roots(Some(Rational::from((1, 1 << 16))));
+
+        assert_eq!(roots.len(), 4);
+        assert_eq!(roots.iter().filter(|root| root.real).count(), 2);
+        assert_eq!(roots.iter().filter(|root| root.imaginary).count(), 2);
+        assert_pairwise_isolated(&roots);
+        assert!(roots[0].real);
+        assert!(roots[1].imaginary && roots[1].center.im.is_negative());
+        assert!(roots[2].imaginary && roots[2].center.im > Rational::zero());
+        assert!(roots[3].real);
     }
 
     fn complex_root_contains(root: &ComplexRootInterval, re: Rational, im: Rational) -> bool {

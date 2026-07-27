@@ -43,16 +43,28 @@
 //! assert_eq!(gb.system, res);
 //! ```
 
-use std::{any::TypeId, cmp::Ordering, rc::Rc};
-
-use ahash::HashMap;
-
-use crate::domains::{
-    Field, Set,
-    finite_field::{FiniteFieldCore, Zp},
+use std::{
+    any::TypeId, cmp::Ordering, collections::BTreeSet, marker::PhantomData, rc::Rc, sync::Arc,
 };
 
-use super::{Exponent, MonomialOrder, polynomial::MultivariatePolynomial};
+use ahash::{HashMap, HashSet};
+
+use crate::{
+    atom::{Atom, AtomCore},
+    domains::{
+        Field, Ring, RingOps, Set,
+        algebraic_number::AlgebraicContext,
+        finite_field::{FiniteFieldCore, Zp},
+        rational::{Q, RationalField},
+    },
+    tensors::matrix::{Matrix, MatrixError},
+    transcendental::TranscendentalFunctions,
+};
+
+use super::{
+    Exponent, LexOrder, MonomialOrder, PolyVariable, PositiveExponent, factor::Factorize,
+    polynomial::MultivariatePolynomial,
+};
 
 #[derive(Debug)]
 pub struct CriticalPair<R: Field, E: Exponent, O: MonomialOrder> {
@@ -118,6 +130,46 @@ pub struct MonomialData {
 pub struct GroebnerBasis<R: Field, E: Exponent, O: MonomialOrder> {
     pub system: Vec<MultivariatePolynomial<R, E, O>>,
     pub print_stats: bool,
+}
+
+#[derive(Clone)]
+struct AlgebraicSolveBranch {
+    solution: HashMap<PolyVariable, Atom>,
+    context: Option<AlgebraicContext>,
+}
+
+struct OrderedMonomial<E, O> {
+    exponents: Vec<E>,
+    order: PhantomData<O>,
+}
+
+impl<E, O> OrderedMonomial<E, O> {
+    fn new(exponents: Vec<E>) -> Self {
+        Self {
+            exponents,
+            order: PhantomData,
+        }
+    }
+}
+
+impl<E: Exponent, O: MonomialOrder> PartialEq for OrderedMonomial<E, O> {
+    fn eq(&self, other: &Self) -> bool {
+        self.exponents == other.exponents
+    }
+}
+
+impl<E: Exponent, O: MonomialOrder> Eq for OrderedMonomial<E, O> {}
+
+impl<E: Exponent, O: MonomialOrder> PartialOrd for OrderedMonomial<E, O> {
+    fn partial_cmp(&self, other: &Self) -> Option<Ordering> {
+        Some(self.cmp(other))
+    }
+}
+
+impl<E: Exponent, O: MonomialOrder> Ord for OrderedMonomial<E, O> {
+    fn cmp(&self, other: &Self) -> Ordering {
+        O::cmp(&self.exponents, &other.exponents)
+    }
 }
 
 impl<R: Field + Echelonize, E: Exponent, O: MonomialOrder> GroebnerBasis<R, E, O> {
@@ -627,6 +679,615 @@ impl<R: Field, E: Exponent, O: MonomialOrder> GroebnerBasis<R, E, O> {
     }
 }
 
+impl<R: Field, E: PositiveExponent, O: MonomialOrder> GroebnerBasis<R, E, O> {
+    fn fglm_linear_combination(
+        field: &R,
+        columns: &[Vec<R::Element>],
+        target: &[R::Element],
+    ) -> Result<Option<Vec<R::Element>>, String> {
+        if columns.is_empty() {
+            return Ok(target
+                .iter()
+                .all(|entry| field.is_zero(entry))
+                .then(Vec::new));
+        }
+
+        let rows = target.len();
+        let mut data = Vec::with_capacity(rows * columns.len());
+        for row in 0..rows {
+            for column in columns {
+                data.push(column[row].clone());
+            }
+        }
+
+        let matrix = Matrix::from_linear(data, rows as u32, columns.len() as u32, field.clone())?;
+        let right_hand_side = Matrix::new_vec(target.to_vec(), field.clone());
+        match matrix.solve(&right_hand_side) {
+            Ok(solution) => Ok(Some(solution.into_vec())),
+            Err(MatrixError::Inconsistent) => Ok(None),
+            Err(MatrixError::Underdetermined { .. }) => {
+                Err("FGLM encountered dependent quotient-basis vectors".to_string())
+            }
+            Err(error) => Err(format!("FGLM linear-algebra failure: {error}")),
+        }
+    }
+
+    /// Change the monomial order of this zero-dimensional Gröbner basis using
+    /// the FGLM algorithm.
+    ///
+    /// The input must be a Gröbner basis over a field. An error is returned
+    /// when its leading ideal is not zero-dimensional.
+    ///
+    /// # Example
+    ///
+    /// ```
+    /// use symbolica::prelude::*;
+    ///
+    /// let ideal = ["x*y-1", "y^2-x"]
+    ///     .iter()
+    ///     .map(|polynomial| {
+    ///         parse!(polynomial)
+    ///             .to_polynomial::<_, u16>(&Q, None)
+    ///             .reorder::<GrevLexOrder>()
+    ///     })
+    ///     .collect::<Vec<_>>();
+    /// let grevlex = GroebnerBasis::new(&ideal, false);
+    /// let lex = grevlex.change_order::<LexOrder>().unwrap();
+    ///
+    /// assert!(GroebnerBasis::is_groebner_basis(&lex.system));
+    /// ```
+    pub fn change_order<O2: MonomialOrder>(&self) -> Result<GroebnerBasis<R, E, O2>, String> {
+        if self.system.is_empty() {
+            return Err("FGLM requires a non-empty zero-dimensional basis".to_string());
+        }
+        if self
+            .system
+            .iter()
+            .any(|polynomial| polynomial.variables != self.system[0].variables)
+        {
+            return Err("FGLM requires a unified variable map".to_string());
+        }
+
+        let field = self.system[0].ring.clone();
+        let variables = self.system[0].variables.clone();
+        let nvars = variables.len();
+
+        if self
+            .system
+            .iter()
+            .any(|polynomial| !polynomial.is_zero() && polynomial.is_constant())
+        {
+            let mut one = MultivariatePolynomial::<R, E, O2>::new(&field, Some(1), variables);
+            one.append_monomial(field.one(), &vec![E::zero(); nvars]);
+            return Ok(GroebnerBasis {
+                system: vec![one],
+                print_stats: self.print_stats,
+            });
+        }
+        if nvars == 0 {
+            return Err("FGLM requires at least one polynomial variable".to_string());
+        }
+
+        let leading_monomials = self
+            .system
+            .iter()
+            .filter(|polynomial| !polynomial.is_zero())
+            .map(|polynomial| polynomial.max_exp().to_vec())
+            .collect::<Vec<_>>();
+
+        let mut pure_power_bounds = vec![None; nvars];
+        for leading in &leading_monomials {
+            for variable in 0..nvars {
+                if leading[variable].is_zero()
+                    || leading
+                        .iter()
+                        .enumerate()
+                        .any(|(index, exponent)| index != variable && !exponent.is_zero())
+                {
+                    continue;
+                }
+
+                let bound = &mut pure_power_bounds[variable];
+                if bound
+                    .as_ref()
+                    .is_none_or(|current| leading[variable] < *current)
+                {
+                    *bound = Some(leading[variable]);
+                }
+            }
+        }
+        let pure_power_bounds = pure_power_bounds
+            .into_iter()
+            .enumerate()
+            .map(|(variable, bound)| {
+                bound.ok_or_else(|| {
+                    format!(
+                        "The leading ideal is not zero-dimensional: no pure power of {}",
+                        variables[variable]
+                    )
+                })
+            })
+            .collect::<Result<Vec<_>, _>>()?;
+
+        let is_standard = |monomial: &[E]| {
+            !leading_monomials.iter().any(|leading| {
+                monomial
+                    .iter()
+                    .zip(leading)
+                    .all(|(exponent, divisor)| exponent >= divisor)
+            })
+        };
+
+        let zero_monomial = vec![E::zero(); nvars];
+        let mut pending_source = BTreeSet::from([zero_monomial.clone()]);
+        let mut seen_source = HashSet::default();
+        seen_source.insert(zero_monomial);
+        let mut source_standard_monomials = Vec::new();
+
+        while let Some(monomial) = pending_source.pop_first() {
+            if !is_standard(&monomial) {
+                continue;
+            }
+            source_standard_monomials.push(monomial.clone());
+
+            for variable in 0..nvars {
+                let Some(next_exponent) = monomial[variable].checked_add(&E::one()) else {
+                    return Err(
+                        "Exponent overflow while constructing the FGLM staircase".to_string()
+                    );
+                };
+                if next_exponent >= pure_power_bounds[variable] {
+                    continue;
+                }
+
+                let mut child = monomial.clone();
+                child[variable] = next_exponent;
+                if seen_source.insert(child.clone()) {
+                    pending_source.insert(child);
+                }
+            }
+        }
+
+        let quotient_dimension = source_standard_monomials.len();
+        if quotient_dimension == 0 {
+            return Err("FGLM constructed an empty quotient basis".to_string());
+        }
+        let source_indices = source_standard_monomials
+            .iter()
+            .cloned()
+            .enumerate()
+            .map(|(index, monomial)| (monomial, index))
+            .collect::<HashMap<_, _>>();
+
+        let prototype = &self.system[0];
+        let mut normal_form_cache: HashMap<Vec<E>, Vec<R::Element>> = HashMap::default();
+        let mut normal_form_vector = |monomial: &[E]| -> Result<Vec<R::Element>, String> {
+            if let Some(vector) = normal_form_cache.get(monomial) {
+                return Ok(vector.clone());
+            }
+
+            let remainder = prototype
+                .monomial(field.one(), monomial.to_vec())
+                .reduce(&self.system);
+            let mut vector = vec![field.zero(); quotient_dimension];
+            for term in &remainder {
+                let index = source_indices.get(term.exponents).ok_or_else(|| {
+                    format!(
+                        "Normal form contains a monomial outside the FGLM staircase: {:?}",
+                        term.exponents
+                    )
+                })?;
+                vector[*index] = term.coefficient.clone();
+            }
+            normal_form_cache.insert(monomial.to_vec(), vector.clone());
+            Ok(vector)
+        };
+
+        let zero_monomial = vec![E::zero(); nvars];
+        let mut pending_target =
+            BTreeSet::from([OrderedMonomial::<E, O2>::new(zero_monomial.clone())]);
+        let mut seen_target = HashSet::default();
+        seen_target.insert(zero_monomial);
+        let mut target_standard_monomials: Vec<Vec<E>> = Vec::with_capacity(quotient_dimension);
+        let mut target_vectors: Vec<Vec<R::Element>> = Vec::with_capacity(quotient_dimension);
+        let mut target_leading_monomials: Vec<Vec<E>> = Vec::new();
+        let mut target_basis = Vec::new();
+
+        while let Some(ordered_monomial) = pending_target.pop_first() {
+            let monomial = ordered_monomial.exponents;
+            if target_leading_monomials.iter().any(|leading| {
+                monomial
+                    .iter()
+                    .zip(leading)
+                    .all(|(exponent, divisor)| exponent >= divisor)
+            }) {
+                continue;
+            }
+
+            let vector = normal_form_vector(&monomial)?;
+            if let Some(coefficients) =
+                Self::fglm_linear_combination(&field, &target_vectors, &vector)?
+            {
+                let mut relation = MultivariatePolynomial::<R, E, O2>::new(
+                    &field,
+                    Some(coefficients.len() + 1),
+                    variables.clone(),
+                );
+                relation.append_monomial(field.one(), &monomial);
+                for (coefficient, standard) in
+                    coefficients.into_iter().zip(&target_standard_monomials)
+                {
+                    relation.append_monomial(field.neg(&coefficient), standard);
+                }
+                target_leading_monomials.push(monomial);
+                target_basis.push(relation);
+                continue;
+            }
+
+            if target_standard_monomials.len() == quotient_dimension {
+                return Err(
+                    "FGLM found too many linearly independent quotient elements".to_string()
+                );
+            }
+
+            target_standard_monomials.push(monomial.clone());
+            target_vectors.push(vector);
+            for variable in 0..nvars {
+                let Some(next_exponent) = monomial[variable].checked_add(&E::one()) else {
+                    return Err(
+                        "Exponent overflow while constructing the lex staircase".to_string()
+                    );
+                };
+                let mut child = monomial.clone();
+                child[variable] = next_exponent;
+                if seen_target.insert(child.clone()) {
+                    pending_target.insert(OrderedMonomial::new(child));
+                }
+            }
+        }
+
+        if target_standard_monomials.len() != quotient_dimension {
+            return Err(format!(
+                "FGLM found {} lex standard monomials, expected {quotient_dimension}",
+                target_standard_monomials.len()
+            ));
+        }
+
+        Ok(GroebnerBasis {
+            system: target_basis,
+            print_stats: self.print_stats,
+        }
+        .reduce_basis())
+    }
+}
+
+impl<E: PositiveExponent> GroebnerBasis<RationalField, E, LexOrder> {
+    fn substitute_solution(
+        polynomial: &MultivariatePolynomial<RationalField, E, LexOrder>,
+        target: usize,
+        variables: &[PolyVariable],
+        solution: &HashMap<PolyVariable, Atom>,
+    ) -> Option<Atom> {
+        let target_atom: Atom = variables[target].clone().into();
+        let mut result = Atom::Zero;
+
+        for term in polynomial {
+            let mut evaluated_term = Atom::num(term.coefficient.clone());
+            for (index, exponent) in term.exponents.iter().enumerate() {
+                if exponent.is_zero() {
+                    continue;
+                }
+
+                let value = if index == target {
+                    target_atom.clone()
+                } else {
+                    solution.get(&variables[index])?.clone()
+                };
+                evaluated_term *= value.pow(u64::from(exponent.to_u32()));
+            }
+            result += evaluated_term;
+        }
+
+        Some(result)
+    }
+
+    fn substitute_linear_solution(
+        polynomial: &MultivariatePolynomial<RationalField, E, LexOrder>,
+        target: usize,
+        variables: &[PolyVariable],
+        solution: &HashMap<PolyVariable, Atom>,
+    ) -> Option<(Atom, Atom)> {
+        let mut linear_coefficient = Atom::Zero;
+        let mut constant = Atom::Zero;
+
+        for term in polynomial {
+            let mut evaluated_term = Atom::num(term.coefficient.clone());
+            for (index, exponent) in term.exponents.iter().enumerate() {
+                if exponent.is_zero() || index == target {
+                    continue;
+                }
+                evaluated_term *= solution
+                    .get(&variables[index])?
+                    .clone()
+                    .pow(u64::from(exponent.to_u32()));
+            }
+
+            if term.exponents[target].is_zero() {
+                constant += evaluated_term;
+            } else {
+                linear_coefficient += evaluated_term;
+            }
+        }
+
+        Some((linear_coefficient, constant))
+    }
+
+    fn solve_branch_equation(
+        branch: &AlgebraicSolveBranch,
+        equation: Atom,
+        target: &PolyVariable,
+    ) -> Result<Option<Vec<AlgebraicSolveBranch>>, String> {
+        let variable_map = Arc::new(vec![target.clone()]);
+
+        if let Some(mut context) = branch.context.clone() {
+            let polynomial = context.to_polynomial::<u16>(equation.as_view(), variable_map)?;
+            if polynomial.is_zero() {
+                return Ok(None);
+            }
+            if polynomial.is_constant() {
+                return Ok(Some(Vec::new()));
+            }
+
+            let mut children = Vec::new();
+            for (factor, _) in polynomial.factor() {
+                let degree = factor.degree(0) as usize;
+                if degree == 0 {
+                    continue;
+                }
+
+                if degree == 1 {
+                    let root = factor
+                        .ring
+                        .neg(&factor.ring.div(&factor.get_constant(), &factor.lcoeff()));
+                    let mut child_context = context.clone();
+                    let root = child_context.atom_from_element(root)?;
+                    let mut child = branch.clone();
+                    child.solution.insert(target.clone(), root);
+                    child.context = Some(child_context);
+                    children.push(child);
+                    continue;
+                }
+
+                for embedding in 0..degree {
+                    let mut child_context = context.clone();
+                    let root = child_context.adjoin_root(factor.clone(), embedding)?;
+                    let mut child = branch.clone();
+                    child.solution.insert(target.clone(), root);
+                    child.context = Some(child_context);
+                    children.push(child);
+                }
+            }
+
+            return Ok(Some(children));
+        }
+
+        let polynomial = equation
+            .as_view()
+            .try_to_polynomial::<_, u16>(&Q, Some(variable_map))
+            .map_err(|error| error.to_string())?;
+        if polynomial.is_zero() {
+            return Ok(None);
+        }
+        if polynomial.is_constant() {
+            return Ok(Some(Vec::new()));
+        }
+
+        let mut children = Vec::new();
+        for (factor, _) in polynomial.factor() {
+            let degree = factor.degree(0) as usize;
+            if degree == 0 {
+                continue;
+            }
+
+            let factor = factor.to_expression();
+            for embedding in 0..degree {
+                let root = factor.root(embedding);
+                let mut child = branch.clone();
+                child.solution.insert(target.clone(), root.clone());
+                child.context = AlgebraicContext::from_atom(root.as_view())?;
+                children.push(child);
+            }
+        }
+
+        Ok(Some(children))
+    }
+
+    /// Solve a zero-dimensional lexicographic Gröbner basis by triangular
+    /// back-substitution.
+    ///
+    /// The last variable must have a univariate elimination polynomial. Every
+    /// preceding variable must have a triangular equation that only involves
+    /// that variable and variables that have already been solved. Nonlinear
+    /// equations are factored over the algebraic field of each solution branch
+    /// and their roots are adjoined with the matching embedding.
+    /// Each solution is returned as a map from polynomial variables to exact
+    /// [`Atom`] values containing rational powers or explicit `root` objects.
+    ///
+    /// Repeated roots are returned once. An inconsistent basis returns an
+    /// empty solution list. Positive-dimensional and non-triangular bases return
+    /// an error. The order of the returned solutions is unspecified.
+    ///
+    /// # Examples
+    ///
+    /// ```
+    /// use symbolica::prelude::*;
+    ///
+    /// let ideal: Vec<MultivariatePolynomial<_, u16>> = ["x+y", "y^2-2"]
+    ///     .iter()
+    ///     .map(|polynomial| parse!(polynomial).to_polynomial(&Q, None))
+    ///     .collect();
+    /// let solutions = GroebnerBasis::new(&ideal, false).solve().unwrap();
+    ///
+    /// assert_eq!(solutions.len(), 2);
+    /// assert!(solutions
+    ///     .iter()
+    ///     .all(|solution| solution.len() == 2));
+    /// ```
+    pub fn solve(&self) -> Result<Vec<HashMap<PolyVariable, Atom>>, String> {
+        if self.system.is_empty() {
+            return Err(
+                "Cannot enumerate the solutions of an empty, positive-dimensional basis"
+                    .to_string(),
+            );
+        }
+
+        if self
+            .system
+            .iter()
+            .any(|polynomial| !polynomial.is_zero() && polynomial.is_constant())
+        {
+            return Ok(Vec::new());
+        }
+
+        let variables = self.system[0].variables.clone();
+        if variables.is_empty() {
+            return Err("The Gröbner basis has no variables".to_string());
+        }
+        if self
+            .system
+            .iter()
+            .any(|polynomial| polynomial.variables != variables)
+        {
+            return Err("The Gröbner basis does not have a unified variable map".to_string());
+        }
+        if variables
+            .iter()
+            .any(|variable| matches!(variable, PolyVariable::Temporary(_)))
+        {
+            return Err("Cannot express temporary polynomial variables as atoms".to_string());
+        }
+
+        let last = variables.len() - 1;
+        let elimination_polynomial = self
+            .system
+            .iter()
+            .filter(|polynomial| {
+                polynomial.degree(last) > E::zero()
+                    && (0..last).all(|index| polynomial.degree(index) == E::zero())
+            })
+            .min_by_key(|polynomial| polynomial.degree(last).to_u32())
+            .ok_or_else(|| {
+                format!(
+                    "The lexicographic basis has no univariate elimination polynomial for {}",
+                    variables[last]
+                )
+            })?;
+
+        let mut branches = Vec::new();
+        for (factor, _) in elimination_polynomial.factor() {
+            let degree = factor.degree(last).to_u32();
+            if degree == 0 {
+                continue;
+            }
+
+            let factor = factor.to_expression();
+            for index in 0..degree as usize {
+                let root = factor.root(index);
+                let mut solution = HashMap::default();
+                solution.insert(variables[last].clone(), root.clone());
+                branches.push(AlgebraicSolveBranch {
+                    solution,
+                    context: AlgebraicContext::from_atom(root.as_view())?,
+                });
+            }
+        }
+
+        for target in (0..last).rev() {
+            let candidates = self
+                .system
+                .iter()
+                .filter(|polynomial| {
+                    polynomial.degree(target) > E::zero()
+                        && (0..target).all(|index| polynomial.degree(index) == E::zero())
+                })
+                .collect::<Vec<_>>();
+
+            if candidates.is_empty() {
+                return Err(format!(
+                    "The lexicographic basis has no triangular equation for {}",
+                    variables[target]
+                ));
+            }
+
+            let mut next_branches = Vec::new();
+            for branch in branches {
+                let mut branch_children = None;
+                for polynomial in &candidates {
+                    if polynomial.degree(target) == E::one()
+                        && let Some((linear_coefficient, constant)) =
+                            Self::substitute_linear_solution(
+                                polynomial,
+                                target,
+                                &variables,
+                                &branch.solution,
+                            )
+                    {
+                        let mut child = branch.clone();
+                        if let Some(context) = &mut child.context {
+                            let coefficient = context.convert_atom(linear_coefficient.as_view())?;
+                            if context.field().is_zero(&coefficient) {
+                                let constant = context.convert_atom(constant.as_view())?;
+                                if context.field().is_zero(&constant) {
+                                    continue;
+                                }
+                                branch_children = Some(Vec::new());
+                                break;
+                            }
+                        } else if linear_coefficient.is_zero() {
+                            if constant.is_zero() {
+                                continue;
+                            }
+                            branch_children = Some(Vec::new());
+                            break;
+                        }
+
+                        let value = -constant / linear_coefficient;
+                        if let Some(context) = &mut child.context {
+                            context.convert_atom(value.as_view())?;
+                        }
+                        child.solution.insert(variables[target].clone(), value);
+                        branch_children = Some(vec![child]);
+                        break;
+                    }
+
+                    let Some(equation) =
+                        Self::substitute_solution(polynomial, target, &variables, &branch.solution)
+                    else {
+                        continue;
+                    };
+                    if let Some(children) =
+                        Self::solve_branch_equation(&branch, equation, &variables[target])?
+                    {
+                        branch_children = Some(children);
+                        break;
+                    }
+                }
+
+                let children = branch_children.ok_or_else(|| {
+                    format!(
+                        "Could not find a nonzero triangular equation for {} on this branch",
+                        variables[target]
+                    )
+                })?;
+                next_branches.extend(children);
+            }
+            branches = next_branches;
+        }
+
+        Ok(branches.into_iter().map(|branch| branch.solution).collect())
+    }
+}
+
 /// Marker for fields that can be echelonized by the F4 implementation.
 ///
 /// All `'static` fields use the default sparse row reduction. `Zp` is detected
@@ -1002,12 +1663,62 @@ fn u32_inv(coeff: u32, prime: u32) -> u32 {
 
 #[cfg(test)]
 mod test {
+    use std::sync::Arc;
+
     use crate::{
-        atom::AtomCore,
-        domains::{finite_field::Zp, rational::Q},
+        atom::{Atom, AtomCore},
+        domains::{Ring, algebraic_number::AlgebraicContext, finite_field::Zp, rational::Q},
         parse,
-        poly::{GrevLexOrder, groebner::GroebnerBasis, polynomial::MultivariatePolynomial},
+        poly::{
+            GrevLexOrder, LexOrder, PolyVariable, groebner::GroebnerBasis,
+            polynomial::MultivariatePolynomial,
+        },
+        symbol,
     };
+
+    #[test]
+    fn solve_test() {
+        let x = PolyVariable::from(symbol!("x"));
+        let y = PolyVariable::from(symbol!("y"));
+        let z = PolyVariable::from(symbol!("z"));
+        let variables = Arc::new(vec![x.clone(), y.clone(), z.clone()]);
+        let ideal: Vec<MultivariatePolynomial<_, u16>> = ["x-y-z", "y^2-z", "z^2-2"]
+            .iter()
+            .map(|polynomial| parse!(polynomial).to_polynomial(&Q, Some(variables.clone())))
+            .collect();
+        let solutions = GroebnerBasis::new(&ideal, false).solve().unwrap();
+
+        assert_eq!(solutions.len(), 4);
+        for solution in solutions {
+            let x_value = solution.get(&x).unwrap();
+            let y_value = solution.get(&y).unwrap();
+            let z_value = solution.get(&z).unwrap();
+            println!(
+                "x = {x_value} ({}), y = {y_value} ({}), z = {z_value} ({}))",
+                x_value.to_float(16),
+                y_value.to_float(16),
+                z_value.to_float(16)
+            );
+            assert_algebraic_zero(x_value.clone() - y_value.clone() - z_value.clone());
+            assert_algebraic_zero(y_value.clone().pow(Atom::num(2)) - z_value.clone());
+            assert_algebraic_zero(z_value.clone().pow(Atom::num(2)) - Atom::num(2));
+        }
+    }
+
+    fn assert_algebraic_zero(expression: Atom) {
+        if expression.is_zero() {
+            return;
+        }
+
+        let mut context = AlgebraicContext::from_atom(expression.as_view())
+            .unwrap()
+            .expect("expression should contain an algebraic number");
+        let value = context.convert_atom(expression.as_view()).unwrap();
+        assert!(
+            context.field().is_zero(&value),
+            "expected {expression} to be zero"
+        );
+    }
 
     #[test]
     fn cyclic4() {
@@ -1084,5 +1795,273 @@ mod test {
         let gb = GroebnerBasis::new(&ideal, false);
 
         assert!(ideal.iter().all(|p| p.reduce(&gb.system).is_zero()));
+    }
+
+    #[test]
+    fn change_order_converts_grevlex_basis_to_lex() {
+        let x = PolyVariable::from(symbol!("x"));
+        let y = PolyVariable::from(symbol!("y"));
+        let variables = Arc::new(vec![x, y]);
+        let ideal_lex: Vec<MultivariatePolynomial<_, u16>> = ["x*y-1", "y^2-x"]
+            .iter()
+            .map(|polynomial| parse!(polynomial).to_polynomial(&Q, Some(variables.clone())))
+            .collect();
+        let ideal_grevlex = ideal_lex
+            .iter()
+            .map(|polynomial| polynomial.reorder::<GrevLexOrder>())
+            .collect::<Vec<_>>();
+
+        let grevlex_basis = GroebnerBasis::new(&ideal_grevlex, false);
+        let converted = grevlex_basis.change_order::<LexOrder>().unwrap();
+        let direct_lex = GroebnerBasis::new(&ideal_lex, false);
+
+        assert_eq!(converted.system, direct_lex.system);
+        assert!(GroebnerBasis::is_groebner_basis(&converted.system));
+        assert!(
+            ideal_lex
+                .iter()
+                .all(|polynomial| polynomial.reduce(&converted.system).is_zero())
+        );
+    }
+
+    #[test]
+    fn change_order_accepts_a_nonlex_target_order() {
+        let ideal_lex: Vec<MultivariatePolynomial<_, u16>> = ["x*y-1", "y^2-x"]
+            .iter()
+            .map(|polynomial| parse!(polynomial).to_polynomial(&Q, None))
+            .collect();
+        let lex_basis = GroebnerBasis::new(&ideal_lex, false);
+
+        let converted = lex_basis.change_order::<GrevLexOrder>().unwrap();
+        let ideal_grevlex = ideal_lex
+            .iter()
+            .map(|polynomial| polynomial.reorder::<GrevLexOrder>())
+            .collect::<Vec<_>>();
+        let direct_grevlex = GroebnerBasis::new(&ideal_grevlex, false);
+
+        assert_eq!(converted.system, direct_grevlex.system);
+        assert!(GroebnerBasis::is_groebner_basis(&converted.system));
+    }
+
+    #[test]
+    fn change_order_works_over_finite_fields() {
+        let field = Zp::new(7);
+        let ideal_lex: Vec<MultivariatePolynomial<_, u16>> = ["x*y-1", "y^2-x"]
+            .iter()
+            .map(|polynomial| parse!(polynomial).to_polynomial(&field, None))
+            .collect();
+        let ideal_grevlex = ideal_lex
+            .iter()
+            .map(|polynomial| polynomial.reorder::<GrevLexOrder>())
+            .collect::<Vec<_>>();
+
+        let converted = GroebnerBasis::new(&ideal_grevlex, false)
+            .change_order::<LexOrder>()
+            .unwrap();
+        let direct_lex = GroebnerBasis::new(&ideal_lex, false);
+        assert_eq!(converted.system, direct_lex.system);
+    }
+
+    #[test]
+    fn change_order_preserves_nonradical_quotient_structure() {
+        let ideal_lex: Vec<MultivariatePolynomial<_, u16>> = ["x^2", "x*y", "y^2"]
+            .iter()
+            .map(|polynomial| parse!(polynomial).to_polynomial(&Q, None))
+            .collect();
+        let ideal_grevlex = ideal_lex
+            .iter()
+            .map(|polynomial| polynomial.reorder::<GrevLexOrder>())
+            .collect::<Vec<_>>();
+
+        let converted = GroebnerBasis::new(&ideal_grevlex, false)
+            .change_order::<LexOrder>()
+            .unwrap();
+        let direct_lex = GroebnerBasis::new(&ideal_lex, false);
+        assert_eq!(converted.system, direct_lex.system);
+    }
+
+    #[test]
+    fn change_order_rejects_positive_dimensional_bases() {
+        let ideal = vec![
+            parse!("x*y")
+                .to_polynomial::<_, u16>(&Q, None)
+                .reorder::<GrevLexOrder>(),
+        ];
+        let error = GroebnerBasis::new(&ideal, false)
+            .change_order::<LexOrder>()
+            .err()
+            .unwrap();
+        assert!(error.contains("not zero-dimensional"));
+    }
+
+    #[test]
+    fn change_order_preserves_the_inconsistent_ideal() {
+        let ideal = ["x", "x-1"]
+            .iter()
+            .map(|polynomial| {
+                parse!(polynomial)
+                    .to_polynomial::<_, u16>(&Q, None)
+                    .reorder::<GrevLexOrder>()
+            })
+            .collect::<Vec<_>>();
+        let converted = GroebnerBasis::new(&ideal, false)
+            .change_order::<LexOrder>()
+            .unwrap();
+        assert_eq!(converted.system.len(), 1);
+        assert!(converted.system[0].is_one());
+    }
+
+    #[test]
+    fn solve_lexicographic_shape_basis() {
+        let ideal: Vec<MultivariatePolynomial<_, u16>> = ["x+y", "y^2-2"]
+            .iter()
+            .map(|polynomial| parse!(polynomial).to_polynomial(&Q, None))
+            .collect();
+        let solutions = GroebnerBasis::new(&ideal, false).solve().unwrap();
+
+        let x = PolyVariable::from(symbol!("x"));
+        let y = PolyVariable::from(symbol!("y"));
+        assert_eq!(solutions.len(), 2);
+        for solution in solutions {
+            let y_value = solution.get(&y).unwrap();
+            assert_eq!(solution.get(&x), Some(&(-y_value.clone())));
+            assert_eq!(
+                (y_value.clone().pow(Atom::num(2)) - Atom::num(2)).expand(),
+                Atom::Zero
+            );
+        }
+    }
+
+    #[test]
+    fn solve_lexicographic_shape_basis_with_explicit_roots() {
+        let ideal: Vec<MultivariatePolynomial<_, u16>> = ["x-y^2", "y^3-2"]
+            .iter()
+            .map(|polynomial| parse!(polynomial).to_polynomial(&Q, None))
+            .collect();
+        let solutions = GroebnerBasis::new(&ideal, false).solve().unwrap();
+
+        let x = PolyVariable::from(symbol!("x"));
+        let y = PolyVariable::from(symbol!("y"));
+        assert_eq!(solutions.len(), 3);
+        for solution in solutions {
+            let y_value = solution.get(&y).unwrap();
+            assert_eq!(solution.get(&x), Some(&y_value.clone().pow(Atom::num(2))));
+        }
+    }
+
+    #[test]
+    fn solve_lexicographic_basis_adjoins_nonlinear_roots() {
+        let x = PolyVariable::from(symbol!("x"));
+        let y = PolyVariable::from(symbol!("y"));
+        let variables = Arc::new(vec![x.clone(), y.clone()]);
+        let ideal: Vec<MultivariatePolynomial<_, u16>> = ["x^2-y", "y^2-2"]
+            .iter()
+            .map(|polynomial| parse!(polynomial).to_polynomial(&Q, Some(variables.clone())))
+            .collect();
+        let solutions = GroebnerBasis::new(&ideal, false).solve().unwrap();
+
+        assert_eq!(solutions.len(), 4);
+        for solution in solutions {
+            let x_value = solution.get(&x).unwrap();
+            let y_value = solution.get(&y).unwrap();
+            assert_algebraic_zero(x_value.clone().pow(Atom::num(2)) - y_value.clone());
+            assert_algebraic_zero(y_value.clone().pow(Atom::num(2)) - Atom::num(2));
+        }
+    }
+
+    #[test]
+    fn solve_lexicographic_basis_continues_after_adjoining() {
+        let x = PolyVariable::from(symbol!("x"));
+        let y = PolyVariable::from(symbol!("y"));
+        let z = PolyVariable::from(symbol!("z"));
+        let variables = Arc::new(vec![x.clone(), y.clone(), z.clone()]);
+        let ideal: Vec<MultivariatePolynomial<_, u16>> = ["x-y-z", "y^2-z", "z^2-2"]
+            .iter()
+            .map(|polynomial| parse!(polynomial).to_polynomial(&Q, Some(variables.clone())))
+            .collect();
+        let solutions = GroebnerBasis::new(&ideal, false).solve().unwrap();
+
+        assert_eq!(solutions.len(), 4);
+        for solution in solutions {
+            let x_value = solution.get(&x).unwrap();
+            let y_value = solution.get(&y).unwrap();
+            let z_value = solution.get(&z).unwrap();
+            assert_algebraic_zero(x_value.clone() - y_value.clone() - z_value.clone());
+            assert_algebraic_zero(y_value.clone().pow(Atom::num(2)) - z_value.clone());
+            assert_algebraic_zero(z_value.clone().pow(Atom::num(2)) - Atom::num(2));
+        }
+    }
+
+    #[test]
+    fn solve_lexicographic_shape_basis_back_substitutes_in_order() {
+        let ideal: Vec<MultivariatePolynomial<_, u16>> = ["x-y-1", "y-z-1", "z^2-1"]
+            .iter()
+            .map(|polynomial| parse!(polynomial).to_polynomial(&Q, None))
+            .collect();
+        let solutions = GroebnerBasis::new(&ideal, false).solve().unwrap();
+
+        let x = PolyVariable::from(symbol!("x"));
+        let y = PolyVariable::from(symbol!("y"));
+        let z = PolyVariable::from(symbol!("z"));
+        assert_eq!(solutions.len(), 2);
+        assert!(solutions.iter().any(|solution| {
+            solution.get(&x) == Some(&Atom::num(1))
+                && solution.get(&y) == Some(&Atom::num(0))
+                && solution.get(&z) == Some(&Atom::num(-1))
+        }));
+        assert!(solutions.iter().any(|solution| {
+            solution.get(&x) == Some(&Atom::num(3))
+                && solution.get(&y) == Some(&Atom::num(2))
+                && solution.get(&z) == Some(&Atom::num(1))
+        }));
+    }
+
+    #[test]
+    fn solve_lexicographic_basis_deduplicates_roots() {
+        let ideal: Vec<MultivariatePolynomial<_, u16>> = ["x-y", "(y-1)^2"]
+            .iter()
+            .map(|polynomial| parse!(polynomial).to_polynomial(&Q, None))
+            .collect();
+        let solutions = GroebnerBasis::new(&ideal, false).solve().unwrap();
+
+        let x = PolyVariable::from(symbol!("x"));
+        let y = PolyVariable::from(symbol!("y"));
+        assert_eq!(solutions.len(), 1);
+        assert_eq!(solutions[0].get(&x), Some(&Atom::num(1)));
+        assert_eq!(solutions[0].get(&y), Some(&Atom::num(1)));
+    }
+
+    #[test]
+    fn solve_lexicographic_basis_reports_unsupported_systems() {
+        let ideal: Vec<MultivariatePolynomial<_, u16>> = ["x^2-2", "y^2-3"]
+            .iter()
+            .map(|polynomial| parse!(polynomial).to_polynomial(&Q, None))
+            .collect();
+        let solutions = GroebnerBasis::new(&ideal, false).solve().unwrap();
+        assert_eq!(solutions.len(), 4);
+
+        let positive_dimensional: Vec<MultivariatePolynomial<_, u16>> = ["x-y"]
+            .iter()
+            .map(|polynomial| parse!(polynomial).to_polynomial(&Q, None))
+            .collect();
+        assert!(
+            GroebnerBasis::new(&positive_dimensional, false)
+                .solve()
+                .is_err()
+        );
+
+        let inconsistent: Vec<MultivariatePolynomial<_, u16>> = ["x", "x-1"]
+            .iter()
+            .map(|polynomial| parse!(polynomial).to_polynomial(&Q, None))
+            .collect();
+        assert!(
+            GroebnerBasis::new(&inconsistent, false)
+                .solve()
+                .unwrap()
+                .is_empty()
+        );
+
+        let empty: Vec<MultivariatePolynomial<_, u16>> = Vec::new();
+        assert!(GroebnerBasis::new(&empty, false).solve().is_err());
     }
 }
