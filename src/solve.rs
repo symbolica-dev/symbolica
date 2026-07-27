@@ -880,6 +880,7 @@ mod test {
         solve::SolveError,
         symbol,
         tensors::matrix::Matrix,
+        transcendental::root,
     };
 
     fn assert_algebraic_zero(expression: Atom) {
@@ -960,6 +961,32 @@ mod test {
 
             let specialized = y_value.replace(a).with(Atom::num(2));
             assert_algebraic_zero(specialized.pow(Atom::num(2)) - Atom::num(2));
+        }
+    }
+
+    #[test]
+    fn exact_solve_expands_parametric_binomial_cubic_roots() {
+        let x = symbol!("x");
+        let y = symbol!("y");
+        let a = symbol!("a");
+        let system = [parse!("x^3+y+1"), parse!("y^2-a")];
+        let variables = [Atom::var(x), Atom::var(y)];
+
+        let solutions = Atom::solve::<u16, _, Atom>(&system, &variables).unwrap();
+        assert_eq!(solutions.len(), 6);
+
+        for solution in solutions {
+            let x_value = solution.get(&PolyVariable::from(x)).unwrap();
+            let y_value = solution.get(&PolyVariable::from(y)).unwrap();
+            assert!(!x_value.contains_symbol(root()));
+            assert!(!y_value.contains_symbol(root()));
+
+            let x_value = x_value.replace(a).with(Atom::num(2));
+            let y_value = y_value.replace(a).with(Atom::num(2));
+            assert_algebraic_zero(
+                (x_value.pow(Atom::num(3)) + y_value.clone() + Atom::num(1)).expand(),
+            );
+            assert_algebraic_zero(y_value.pow(Atom::num(2)) - Atom::num(2));
         }
     }
 

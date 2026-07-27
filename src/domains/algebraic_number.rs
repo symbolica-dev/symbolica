@@ -1,6 +1,9 @@
 //! Algebraic number fields, e.g. fields supporting sqrt(2).
 
-use std::{collections::HashMap, sync::Arc};
+use std::{
+    collections::{HashMap, HashSet},
+    sync::{Arc, LazyLock, RwLock},
+};
 
 use rand::Rng;
 
@@ -12,7 +15,9 @@ use crate::{
         RingOps, Set,
         atom::AtomField,
         rational::Q,
-        rational_polynomial::{FromNumeratorAndDenominator, RationalPolynomial},
+        rational_polynomial::{
+            FromNumeratorAndDenominator, RationalPolynomial, RationalPolynomialField,
+        },
     },
     poly::{
         Exponent, IntoVariableMap, PolyVariable, PositiveExponent,
@@ -30,7 +35,7 @@ use super::{
     EuclideanDomain, Field, InternalOrdering, Ring, SelfRing,
     finite_field::{FiniteField, FiniteFieldCore, FiniteFieldWorkspace, ToFiniteField},
     float::Complex,
-    integer::Integer,
+    integer::{Integer, IntegerRing, Z},
     rational::Rational,
 };
 
@@ -184,6 +189,61 @@ pub struct AlgebraicExtension<R: Ring> {
 #[derive(Clone, PartialEq, Eq, Hash)]
 pub struct AlgebraicQuotient<R: Ring> {
     poly: Arc<MultivariatePolynomial<R, u16>>,
+}
+
+/// A selected root of a univariate polynomial over `R`.
+///
+/// For fields with an analytic embedding, such as [`Q`] and
+/// [`AlgebraicExtension<Q>`], `index` refers to Symbolica's canonical ordering
+/// of complex roots. Over a parametric field such as `Q(a, b, ...)`, it is a
+/// formal branch label whose analytic meaning is fixed only after the
+/// parameters are specialized.
+#[derive(Clone, PartialEq, Eq, Hash)]
+pub struct Root<R: Ring> {
+    polynomial: MultivariatePolynomial<R, u16>,
+    index: usize,
+}
+
+impl<R: Ring> Root<R> {
+    /// Construct a root descriptor and discard inactive polynomial variables.
+    ///
+    /// The active variable is deliberately retained: replacing it with a
+    /// fixed temporary variable could collide with the defining variable of a
+    /// coefficient-field extension.
+    pub fn new(polynomial: MultivariatePolynomial<R, u16>, index: usize) -> Result<Self, String> {
+        let active_variables = (0..polynomial.nvars())
+            .filter(|&variable| polynomial.degree(variable) > 0)
+            .collect::<Vec<_>>();
+        if active_variables.len() != 1 {
+            return Err(format!(
+                "root expects a non-constant univariate polynomial, got {} active variables",
+                active_variables.len()
+            ));
+        }
+
+        let polynomial = polynomial
+            .to_univariate_from_univariate(active_variables[0])
+            .to_multivariate::<u16>();
+        let degree = polynomial.degree(0) as usize;
+        if index >= degree {
+            return Err(format!(
+                "root index {index} is out of bounds for polynomial of degree {degree}"
+            ));
+        }
+        Ok(Self { polynomial, index })
+    }
+
+    pub fn polynomial(&self) -> &MultivariatePolynomial<R, u16> {
+        &self.polynomial
+    }
+
+    pub fn index(&self) -> usize {
+        self.index
+    }
+
+    pub fn into_parts(self) -> (MultivariatePolynomial<R, u16>, usize) {
+        (self.polynomial, self.index)
+    }
 }
 
 /// A number field together with the images of algebraic atoms in that field.
@@ -2988,12 +3048,8 @@ impl AlgebraicExtension<Q> {
                 continue;
             }
 
-            for local_embedding in 0..degree {
-                let extension = AlgebraicExtension {
-                    poly: Arc::new(factor.clone()),
-                    embedding: local_embedding,
-                };
-                let (extension, _, generator) = self.adjoin_with_embedding(&extension, None);
+            let (extensions, _, generator) = self.adjoin_with_all_embeddings(&factor, None);
+            for extension in extensions {
                 if extension
                     .root_index_of_element(&generator, polynomial)
                     .ok()?
@@ -3094,20 +3150,45 @@ impl AlgebraicExtension<Q> {
         <AlgebraicExtension<Q> as Set>::Element,
         <AlgebraicExtension<Q> as Set>::Element,
     ) {
+        let embedding = b.embedding;
+        let (mut extensions, old_generator, new_generator) =
+            self.adjoin_with_all_embeddings(&b.poly, new_symbol);
+        assert!(
+            embedding < extensions.len(),
+            "Embedding index {} is out of bounds for polynomial of degree {}",
+            embedding,
+            extensions.len()
+        );
+        (
+            extensions.swap_remove(embedding),
+            old_generator,
+            new_generator,
+        )
+    }
+
+    /// Adjoin every embedding of an irreducible polynomial over `self`.
+    ///
+    /// The expensive primitive-element construction is performed once. The
+    /// returned fields differ only in their selected embedding and are ordered
+    /// by the canonical complex ordering of the new generator over the
+    /// selected embedding of `self`.
+    pub(crate) fn adjoin_with_all_embeddings(
+        &self,
+        polynomial: &MultivariatePolynomial<AlgebraicExtension<Q>, u16>,
+        new_symbol: Option<PolyVariable>,
+    ) -> (
+        Vec<AlgebraicExtension<Q>>,
+        <AlgebraicExtension<Q> as Set>::Element,
+        <AlgebraicExtension<Q> as Set>::Element,
+    ) {
         assert_eq!(
-            self, &b.poly.ring,
+            self, &polynomial.ring,
             "The base field of the adjoined extension does not match"
         );
 
-        let extension_degree = b.poly.degree(0) as usize;
-        assert!(
-            b.embedding < extension_degree,
-            "Embedding index {} is out of bounds for polynomial of degree {}",
-            b.embedding,
-            extension_degree
-        );
+        let extension_degree = polynomial.degree(0) as usize;
 
-        let (mut extension, old_generator, new_generator) = self.adjoin(&b.poly, new_symbol);
+        let (extension, old_generator, new_generator) = self.adjoin(polynomial, new_symbol);
 
         // The minimal polynomial of the image of b lets us reuse the rational
         // complex-root cache to put the roots over the selected embedding of
@@ -3191,13 +3272,20 @@ impl AlgebraicExtension<Q> {
                 continue;
             }
 
-            extension.embedding = ordered_candidates[b.embedding].1;
-            return (extension, old_generator, new_generator);
+            let extensions = ordered_candidates
+                .into_iter()
+                .map(|(_, embedding)| {
+                    let mut field = extension.clone();
+                    field.embedding = embedding;
+                    field
+                })
+                .collect();
+            return (extensions, old_generator, new_generator);
         }
 
         panic!(
-            "Could not distinguish the embedding while adjoining root {} of {}",
-            b.embedding, b.poly
+            "Could not distinguish all embeddings while adjoining roots of {}",
+            polynomial
         );
     }
 
@@ -3218,13 +3306,440 @@ impl AlgebraicExtension<Q> {
     }
 }
 
+impl Root<Q> {
+    /// Convert an expression polynomial into a rational root descriptor.
+    pub fn from_atom(polynomial: AtomView<'_>, index: usize) -> Result<Self, String> {
+        let polynomial = polynomial
+            .try_to_polynomial::<_, u16>(&Q, None)
+            .map_err(|error| {
+                format!("could not convert root polynomial to a polynomial over Q: {error}")
+            })?;
+        Self::new(polynomial, index)
+    }
+
+    /// Replace the defining polynomial by the irreducible factor containing
+    /// the selected root. Root isolation is served by the shared root cache.
+    pub fn simplify(&self) -> Result<Self, String> {
+        let polynomial = self.polynomial.to_univariate_from_univariate(0);
+        let isolated = polynomial.get_root(self.index).ok_or_else(|| {
+            format!(
+                "root index {} is out of bounds for polynomial of degree {}",
+                self.index,
+                polynomial.degree()
+            )
+        })?;
+        let Some(minimal_polynomial) = isolated.poly() else {
+            return Ok(self.clone());
+        };
+        if minimal_polynomial.degree() >= polynomial.degree() {
+            return Ok(self.clone());
+        }
+        if minimal_polynomial
+            .coefficients
+            .iter()
+            .any(|coefficient| !coefficient.im.is_zero())
+        {
+            return Err("a rational polynomial produced a non-rational root factor".to_string());
+        }
+
+        let minimal_polynomial =
+            minimal_polynomial.map_coeff(|coefficient| coefficient.re.clone(), Q);
+        Root::new(
+            minimal_polynomial.to_multivariate::<u16>(),
+            isolated
+                .index()
+                .ok_or_else(|| "an isolated algebraic root has no root index".to_string())?,
+        )
+    }
+
+    /// Convert this polynomial-native root to an expression.
+    pub fn to_atom(&self) -> Atom {
+        let polynomial = self.polynomial.to_univariate_from_univariate(0);
+        if polynomial.degree() == 1 {
+            return Atom::num(&polynomial.coefficients[0] / &-polynomial.coefficients[1].clone());
+        }
+        if polynomial.degree() == 2 {
+            let [c, b, a] = polynomial.coefficients.as_slice() else {
+                unreachable!("a quadratic has three coefficients");
+            };
+            let discriminant = Atom::num(b * b - a * c * &Rational::from(4));
+            return if self.index == 0 {
+                ((-b.clone() - discriminant.sqrt()) / (Rational::from(2) * a.clone())).expand()
+            } else {
+                ((-b.clone() + discriminant.sqrt()) / (Rational::from(2) * a.clone())).expand()
+            };
+        }
+
+        let mut polynomial = self.polynomial.clone();
+        if matches!(polynomial.get_vars_ref()[0], PolyVariable::Temporary(_)) {
+            polynomial.rename_variable(
+                &polynomial.get_vars_ref()[0].clone(),
+                &PolyVariable::Symbol(symbol!("symbolica::root::z")),
+            );
+        }
+        polynomial.to_expression().root(self.index)
+    }
+}
+
+impl Root<RationalPolynomialField<IntegerRing, u16>> {
+    /// Convert an expression polynomial into a root over `Q(parameters)`.
+    ///
+    /// The canonical root variable, conventional `z`, or a unique
+    /// highest-degree variable is selected as the polynomial variable. Every
+    /// other indeterminate becomes part of the rational-function coefficient
+    /// field.
+    pub fn from_atom(polynomial: AtomView<'_>, index: usize) -> Result<Self, String> {
+        let rational: RationalPolynomial<IntegerRing, u16> = polynomial
+            .try_to_rational_polynomial(&Q, &Z, None)
+            .map_err(|error| format!("could not convert parametric root polynomial: {error}"))?;
+        let variables = rational.numerator.variables.as_ref();
+        let candidates = variables
+            .iter()
+            .enumerate()
+            .filter(|(position, _)| rational.denominator.degree(*position) == 0)
+            .collect::<Vec<_>>();
+        let root_variable = candidates
+            .iter()
+            .find(|(_, variable)| variable == &&PolyVariable::from(symbol!("symbolica::root::z")))
+            .or_else(|| {
+                candidates
+                    .iter()
+                    .find(|(_, variable)| variable == &&PolyVariable::from(symbol!("z")))
+            })
+            .map(|(_, variable)| (*variable).clone())
+            .or_else(|| {
+                let maximum_degree = candidates
+                    .iter()
+                    .map(|(position, _)| rational.numerator.degree(*position))
+                    .max()?;
+                let mut maximum_variables = candidates
+                    .iter()
+                    .filter(|(position, _)| rational.numerator.degree(*position) == maximum_degree)
+                    .map(|(_, variable)| (*variable).clone());
+                let variable = maximum_variables.next()?;
+                maximum_variables.next().is_none().then_some(variable)
+            })
+            .ok_or_else(|| {
+                "could not uniquely determine the root variable of the parametric polynomial"
+                    .to_string()
+            })?;
+        let polynomial = rational
+            .to_polynomial(&[root_variable], false)
+            .map_err(str::to_string)?;
+        Root::new(polynomial, index)
+    }
+
+    /// Normalize roots which have a closed expression over the parametric
+    /// field. Branch indices are formal until parameter specialization.
+    pub fn simplify(&self) -> Option<Atom> {
+        let polynomial = self.polynomial.to_univariate_from_univariate(0);
+        let field = &polynomial.ring;
+
+        if polynomial.degree() == 1 {
+            let value =
+                field.neg(field.div(&polynomial.coefficients[0], &polynomial.coefficients[1]));
+            return Some(value.to_expression());
+        }
+
+        if polynomial.degree() == 2 {
+            let [c, b, a] = polynomial.coefficients.as_slice() else {
+                unreachable!("a quadratic has three coefficients");
+            };
+
+            // This common form avoids introducing and then simplifying a
+            // superfluous factor of four in sqrt(4*a).
+            if field.is_zero(b) && field.is_one(a) {
+                let square_root = field.neg(c).to_expression().sqrt();
+                return Some(if self.index == 0 {
+                    -square_root
+                } else {
+                    square_root
+                });
+            }
+
+            let four_ac = field.mul(&field.nth(Integer::from(4)), &field.mul(a, c));
+            let discriminant = field.sub(&field.mul(b, b), &four_ac).to_expression().sqrt();
+            let minus_b = -b.to_expression();
+            let numerator = if self.index == 0 {
+                minus_b - discriminant
+            } else {
+                minus_b + discriminant
+            };
+            return Some((numerator / (Atom::num(2) * a.to_expression())).expand());
+        }
+
+        if polynomial.degree() == 3 {
+            let [constant, linear, quadratic, leading] = polynomial.coefficients.as_slice() else {
+                unreachable!("a cubic has four coefficients");
+            };
+            if field.is_zero(linear) && field.is_zero(quadratic) {
+                let radicand = field.neg(field.div(constant, leading)).to_expression();
+                let one_third = Atom::num(Rational::from((1, 3)));
+                let principal_root = radicand.pow(one_third.clone());
+                let minus_one_root = Atom::num(-1).pow(one_third);
+                return Some(match self.index {
+                    // For a positive radicand these follow the canonical
+                    // complex order: negative-imaginary, positive-imaginary,
+                    // and positive-real.
+                    0 => -minus_one_root * principal_root,
+                    1 => minus_one_root.pow(Atom::num(2)) * principal_root,
+                    2 => principal_root,
+                    _ => unreachable!("the root index was checked by Root::new"),
+                });
+            }
+        }
+
+        None
+    }
+
+    /// Convert this formal polynomial root to an expression-level root.
+    pub fn to_atom(&self) -> Atom {
+        if let Some(simplified) = self.simplify() {
+            return simplified;
+        }
+
+        let mut polynomial = self.polynomial.clone();
+        if matches!(polynomial.get_vars_ref()[0], PolyVariable::Temporary(_)) {
+            polynomial.rename_variable(
+                &polynomial.get_vars_ref()[0].clone(),
+                &PolyVariable::Symbol(symbol!("symbolica::root::z")),
+            );
+        }
+        polynomial
+            .to_expression_with_coeff_map(|_, coefficient, out| coefficient.to_expression_into(out))
+            .root(self.index)
+    }
+}
+
+#[derive(Clone)]
+struct AlgebraicRootCandidate {
+    polynomial: MultivariatePolynomial<Q, u16>,
+    embedding: usize,
+    multiplicity: usize,
+    order: Option<usize>,
+}
+
+static ALGEBRAIC_ROOT_CACHE: LazyLock<
+    RwLock<HashMap<MultivariatePolynomial<AlgebraicExtension<Q>, u16>, Vec<Root<Q>>>>,
+> = LazyLock::new(|| RwLock::new(HashMap::new()));
+
+const MAX_GAUSSIAN_ROOT_NORMALIZATION_DEGREE: usize = 4;
+
+impl AlgebraicRootCandidate {
+    fn new(
+        field: &AlgebraicExtension<Q>,
+        value: &AlgebraicNumber<Q>,
+        multiplicity: usize,
+    ) -> Result<Self, String> {
+        let minimal_field = field.simplify(value);
+        Self::new_with_minimal(field, value, minimal_field.poly(), multiplicity)
+    }
+
+    fn new_with_minimal(
+        field: &AlgebraicExtension<Q>,
+        value: &AlgebraicNumber<Q>,
+        minimal_polynomial: &MultivariatePolynomial<Q, u16>,
+        multiplicity: usize,
+    ) -> Result<Self, String> {
+        let embedding = field.root_index_of_element(value, minimal_polynomial)?;
+        let mut polynomial = minimal_polynomial.clone();
+        let variable = polynomial.get_vars_ref()[0].clone();
+        polynomial.rename_variable(&variable, &PolyVariable::Temporary(0));
+        Ok(Self {
+            polynomial,
+            embedding,
+            multiplicity,
+            order: None,
+        })
+    }
+
+    fn to_root(&self) -> Result<Root<Q>, String> {
+        Root::new(self.polynomial.clone(), self.embedding)
+    }
+}
+
+impl Root<AlgebraicExtension<Q>> {
+    /// Convert an expression polynomial and all of its algebraic constants to
+    /// one embedded simple extension.
+    ///
+    /// `Ok(None)` means that the expression has no algebraic coefficients.
+    pub fn from_atom(polynomial: AtomView<'_>, index: usize) -> Result<Option<Self>, String> {
+        let Some(mut context) = AlgebraicContext::from_atom(polynomial)? else {
+            return Ok(None);
+        };
+        let polynomial = context.to_polynomial::<u16>(polynomial, None)?;
+        Root::new(polynomial, index).map(Some)
+    }
+
+    /// Collapse a selected root over an embedded algebraic coefficient field
+    /// to its rational minimal polynomial and embedding.
+    ///
+    /// `Ok(None)` retains the specialized exact-Gaussian isolation path for
+    /// high-degree polynomials, where primitive-element collapse is usually
+    /// substantially more expensive.
+    pub fn simplify(&self) -> Result<Option<Root<Q>>, String> {
+        if self.polynomial.ring == AlgebraicExtension::new_complex(Q)
+            && self.polynomial.degree(0) as usize > MAX_GAUSSIAN_ROOT_NORMALIZATION_DEGREE
+        {
+            return Ok(None);
+        }
+
+        if let Some(root) = ALGEBRAIC_ROOT_CACHE
+            .read()
+            .unwrap()
+            .get(&self.polynomial)
+            .and_then(|roots| roots.get(self.index))
+            .cloned()
+        {
+            return Ok(Some(root));
+        }
+
+        let base_field = self.polynomial.ring.clone();
+        let mut candidates = Vec::new();
+        for (factor, multiplicity) in self.polynomial.factor() {
+            if factor.is_constant() {
+                continue;
+            }
+
+            let degree = factor.degree(0) as usize;
+            if degree == 1 {
+                let value =
+                    base_field.neg(&base_field.div(&factor.get_constant(), &factor.lcoeff()));
+                candidates.push(AlgebraicRootCandidate::new(
+                    &base_field,
+                    &value,
+                    multiplicity,
+                )?);
+                continue;
+            }
+
+            let variable = base_field.get_new_var();
+            let (fields, _, generator) =
+                base_field.adjoin_with_all_embeddings(&factor, Some(variable));
+            let minimal_polynomial = fields[0].simplify(&generator);
+            for field in fields {
+                candidates.push(AlgebraicRootCandidate::new_with_minimal(
+                    &field,
+                    &generator,
+                    minimal_polynomial.poly(),
+                    multiplicity,
+                )?);
+            }
+        }
+
+        let counted_degree = candidates
+            .iter()
+            .map(|candidate| candidate.multiplicity)
+            .sum::<usize>();
+        if counted_degree != self.polynomial.degree(0) as usize {
+            return Err(format!(
+                "Factorization produced {counted_degree} roots for a polynomial of degree {}",
+                self.polynomial.degree(0)
+            ));
+        }
+
+        // Candidate minimal polynomials contain conjugates that need not be
+        // roots over the selected embedding of the coefficient field. Their
+        // square-free product nevertheless provides one rational, canonically
+        // ordered root list into which every selected candidate can be
+        // embedded.
+        let mut seen_polynomials = HashSet::new();
+        let prototype = MultivariatePolynomial::<Q, u16>::new(
+            &Q,
+            None,
+            Arc::new(vec![PolyVariable::Temporary(0)]),
+        );
+        let mut union = prototype.one();
+        for candidate in &candidates {
+            let key = candidate
+                .polynomial
+                .to_univariate_from_univariate(0)
+                .coefficients;
+            if seen_polynomials.insert(key) {
+                union = &union * &candidate.polynomial;
+            }
+        }
+        let union = union.to_univariate_from_univariate(0);
+
+        let mut binary_precision = 32u32;
+        for _ in 0..10 {
+            let tolerance = Rational::from((
+                Integer::one(),
+                Integer::from(2).pow(binary_precision as u64),
+            ));
+            let union_roots = union.isolate_complex_roots(Some(tolerance));
+            let mut all_identified = true;
+
+            for candidate in &mut candidates {
+                let root = candidate
+                    .polynomial
+                    .to_univariate_from_univariate(0)
+                    .isolate_complex_root(candidate.embedding, binary_precision)
+                    .ok_or_else(|| {
+                        format!(
+                            "Could not isolate root {} of {}",
+                            candidate.embedding, candidate.polynomial
+                        )
+                    })?;
+                let root = AlgebraicBall::from_root(&root);
+                let matches = union_roots
+                    .iter()
+                    .enumerate()
+                    .filter_map(|(index, union_root)| {
+                        (!root.is_disjoint(&AlgebraicBall::from_root(union_root))).then_some(index)
+                    })
+                    .collect::<Vec<_>>();
+                if matches.len() == 1 {
+                    candidate.order = Some(matches[0]);
+                } else {
+                    candidate.order = None;
+                    all_identified = false;
+                }
+            }
+
+            if all_identified {
+                break;
+            }
+            binary_precision *= 2;
+        }
+
+        if candidates.iter().any(|candidate| candidate.order.is_none()) {
+            return Err(
+                "Could not canonically order roots with algebraic coefficients".to_string(),
+            );
+        }
+        candidates.sort_by_key(|candidate| candidate.order.unwrap());
+
+        let mut roots = Vec::with_capacity(self.polynomial.degree(0) as usize);
+        for candidate in candidates {
+            let root = candidate.to_root()?;
+            for _ in 0..candidate.multiplicity {
+                roots.push(root.clone());
+            }
+        }
+        let result = roots.get(self.index).cloned().ok_or_else(|| {
+            format!(
+                "root index {} is out of bounds for a polynomial of degree {}",
+                self.index,
+                self.polynomial.degree(0)
+            )
+        })?;
+        ALGEBRAIC_ROOT_CACHE
+            .write()
+            .unwrap()
+            .insert(self.polynomial.clone(), roots);
+        Ok(Some(result))
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use crate::atom::AtomCore;
-    use crate::domains::algebraic_number::AlgebraicExtension;
+    use crate::domains::algebraic_number::{AlgebraicExtension, Root};
     use crate::domains::finite_field::{PrimeIteratorU64, Z2, Zp};
-    use crate::domains::integer::Z;
+    use crate::domains::integer::{IntegerRing, Z};
     use crate::domains::rational::Q;
+    use crate::domains::rational_polynomial::RationalPolynomialField;
     use crate::domains::{Ring, RingOps};
     use crate::{parse, symbol};
 
@@ -3243,6 +3758,16 @@ mod tests {
     // }
     //
     //
+
+    #[test]
+    fn simplify_parametric_root_struct() {
+        let root = Root::<RationalPolynomialField<IntegerRing, u16>>::from_atom(
+            parse!("-a+z^2").as_view(),
+            0,
+        )
+        .unwrap();
+        assert_eq!(root.simplify().unwrap(), parse!("-a^(1/2)"));
+    }
 
     #[test]
     fn adjoin_and_convert() {

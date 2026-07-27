@@ -4,14 +4,15 @@ use crate::{
     atom::{Atom, AtomCore, AtomOrView, AtomView, EvaluationInfo, FunctionBuilder, Symbol},
     coefficient::{Coefficient, CoefficientView},
     domains::{
-        algebraic_number::{AlgebraicExtension, AlgebraicNumber},
+        algebraic_number::{AlgebraicExtension, AlgebraicNumber, Root},
         backend::float::Constant,
         float::{
             Complex, ErrorPropagatingFloat, Float, FloatField, FloatLike, Real, RealLike,
             SingleFloat,
         },
-        integer::Integer,
+        integer::{Integer, IntegerRing},
         rational::{Q, Rational, RationalField},
+        rational_polynomial::RationalPolynomialField,
     },
     function, get_symbol,
     poly::{PolyVariable, univariate::UnivariatePolynomial},
@@ -115,35 +116,27 @@ impl SpecialSymbols {
                     return;
                 };
 
-                let Ok(poly) = polynomial_tag_to_univariate(&poly_tag) else {
-                    return;
-                };
-
-                if let Some(root) = poly.get_root(index) {
-                    let p = root.poly().unwrap();
-                    if p.degree() < poly.degree() {
-                        let p = p.as_ref().clone().to_multivariate::<u16>().to_expression();
-
-                        **out = x.get_symbol().unwrap().call((p, root.index().unwrap()));
-                        return;
+                if let Ok(root) = Root::<Q>::from_atom(poly_tag, index) {
+                    if let Ok(simplified) = root.simplify()
+                        && (simplified != root || simplified.polynomial().degree(0) <= 2)
+                    {
+                        **out = simplified.to_atom();
                     }
+                    return;
                 }
 
-                if poly.degree() == 1 {
-                    out.to_num(&poly.coefficients[0] / &-poly.coefficients[1].clone());
-                } else if poly.degree() == 2 {
-                    let [c, b, a] = poly.coefficients.as_slice() else {
-                        return;
-                    };
-
-                    let d = Atom::num(b * b - a * c * &Rational::from(4));
-                    **out = if index == 0 {
-                        ((-b.clone() - d.sqrt()) / (Rational::from(2) * a.clone())).expand()
-                    } else if index == 1 {
-                        ((-b.clone() + d.sqrt()) / (Rational::from(2) * a.clone())).expand()
-                    } else {
-                        return;
+                if let Ok(Some(root)) = Root::<AlgebraicExtension<Q>>::from_atom(poly_tag, index) {
+                    if let Ok(Some(simplified)) = root.simplify() {
+                        **out = simplified.to_atom();
                     }
+                    return;
+                }
+
+                if let Ok(root) =
+                    Root::<RationalPolynomialField<IntegerRing, u16>>::from_atom(poly_tag, index)
+                    && let Some(simplified) = root.simplify()
+                {
+                    **out = simplified;
                 }
             },
             der = |_x, _i, out| {
@@ -622,31 +615,6 @@ fn root_numeric_eval(tags: &[AtomView], prec: u32) -> Result<Complex<Float>, Str
         value.im = Float::new(prec);
     }
     Ok(value)
-}
-
-fn polynomial_tag_to_univariate(
-    poly_tag: &AtomView,
-) -> Result<UnivariatePolynomial<crate::domains::rational::RationalField>, String> {
-    let poly = poly_tag
-        .try_to_polynomial::<_, u16>(&crate::domains::rational::Q, None)
-        .map_err(|e| format!("could not convert root polynomial tag to a polynomial: {e}"))?;
-
-    match poly.nvars() {
-        0 => {
-            let mut univariate = UnivariatePolynomial::new(
-                &crate::domains::rational::Q,
-                None,
-                Arc::new(PolyVariable::Temporary(0)),
-            );
-            univariate.coefficients = poly.coefficients;
-            univariate.truncate();
-            Ok(univariate)
-        }
-        1 => Ok(poly.to_univariate_from_univariate(0)),
-        n => Err(format!(
-            "root expects a univariate polynomial, got {n} variables"
-        )),
-    }
 }
 
 fn algebraic_complex_to_complex_rational(c: &AlgebraicNumber<RationalField>) -> Complex<Rational> {
@@ -1961,7 +1929,9 @@ pub fn polylog() -> Symbol {
 /// Return the built-in algebraic root symbol `root`.
 ///
 /// `root(poly, n)` represents the `n`-th complex root of a univariate polynomial
-/// over `Q(i)`, ordered lexicographically by `(re, im)`.
+/// with exact algebraic coefficients, ordered lexicographically by `(re, im)`.
+/// Algebraic coefficient fields are collapsed to a simple extension over `Q`
+/// when the root is normalized.
 pub fn root() -> Symbol {
     SPECIALS.root
 }
@@ -4134,6 +4104,53 @@ mod tests {
 
         assert_eq!(residual.prec(), 192);
         assert!(residual.to_f64() < 2f64.powi(-150));
+    }
+
+    #[test]
+    fn root_simplifies_algebraic_coefficients() {
+        assert_eq!(
+            parse!("root(1-1/2*12^(1/2)+z^3,0)"),
+            parse!("root(symbolica::root::z^6+2*symbolica::root::z^3-2,1)")
+        );
+        assert_eq!(
+            parse!("root(1-1/2*12^(1/2)+z^3,1)"),
+            parse!("root(symbolica::root::z^6+2*symbolica::root::z^3-2,2)")
+        );
+        assert_eq!(
+            parse!("root(1-1/2*12^(1/2)+z^3,2)"),
+            parse!("root(symbolica::root::z^6+2*symbolica::root::z^3-2,5)")
+        );
+        assert_eq!(parse!("root((z-2^(1/2))^2,0)"), parse!("1/2*8^(1/2)"));
+        assert_eq!(parse!("root((z-2^(1/2))^2,1)"), parse!("1/2*8^(1/2)"));
+        assert_eq!(parse!("root((z-2^(1/2))*(z-1),0)"), parse!("1"));
+        assert_eq!(parse!("root((z-2^(1/2))*(z-1),1)"), parse!("1/2*8^(1/2)"));
+        assert_eq!(
+            parse!("root(z^2-2^(1/2),0)"),
+            parse!("root(-2+symbolica::root::z^4,0)")
+        );
+        assert_eq!(
+            parse!("root(z^2-2^(1/2),1)"),
+            parse!("root(-2+symbolica::root::z^4,3)")
+        );
+        assert_eq!(
+            parse!("root(z-2^(1/2)-3^(1/2),0)"),
+            parse!("root(1-10*symbolica::root::z^2+symbolica::root::z^4,3)")
+        );
+        assert_eq!(parse!("root(z-(1+1i),0)"), parse!("1+1i"));
+    }
+
+    #[test]
+    fn root_simplifies_parametric_quadratic() {
+        assert_eq!(parse!("root(-a+z^2,0)"), parse!("-a^(1/2)"));
+        assert_eq!(parse!("root(-a+z^2,1)"), parse!("a^(1/2)"));
+        assert_eq!(parse!("root(-a+x^2,0)"), parse!("-a^(1/2)"));
+    }
+
+    #[test]
+    fn root_simplifies_parametric_binomial_cubic() {
+        assert_eq!(parse!("root(-a+z^3,0)"), parse!("-(-1)^(1/3)*a^(1/3)"));
+        assert_eq!(parse!("root(-a+z^3,1)"), parse!("(-1)^(2/3)*a^(1/3)"));
+        assert_eq!(parse!("root(-a+z^3,2)"), parse!("a^(1/3)"));
     }
 
     #[test]

@@ -107,7 +107,7 @@ pub mod prelude {
     pub use crate::domains::{
         EuclideanDomain, Field, Ring, RingOps, Set,
         algebraic_number::{
-            AlgebraicContext, AlgebraicExtension, AlgebraicNumber, AlgebraicQuotient,
+            AlgebraicContext, AlgebraicExtension, AlgebraicNumber, AlgebraicQuotient, Root,
         },
         atom::AtomField,
         dual::HyperDual,
