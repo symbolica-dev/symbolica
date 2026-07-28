@@ -276,6 +276,7 @@ impl AtomView<'_> {
                     return Ok(vec![variables.into_iter().zip(values).collect()]);
                 }
                 Err(SolveError::NonLinearSystem) => {}
+                Err(SolveError::Other(error)) if error == "Not a polynomial" => {}
                 Err(error) => return Err(error),
             }
         }
@@ -301,22 +302,76 @@ impl AtomView<'_> {
                 ));
             }
 
-            let polynomials = system
+            let rationals = system
                 .iter()
                 .map(|expression| {
-                    let rational: RationalPolynomial<_, E> = expression
+                    expression
                         .as_atom_view()
                         .try_to_rational_polynomial(&Q, &Z, None)
-                        .map_err(|error| SolveError::Other(error.to_string()))?;
-                    let polynomial = rational
-                        .to_polynomial(variable_map.as_ref(), true)
-                        .map_err(|error| SolveError::Other(error.to_string()))?;
-                    Ok(polynomial.reorder::<GrevLexOrder>())
+                        .map_err(|error| SolveError::Other(error.to_string()))
                 })
-                .collect::<Result<Vec<_>, SolveError>>()?
-                .into_iter()
-                .filter(|polynomial| !polynomial.is_zero())
-                .collect::<Vec<_>>();
+                .collect::<Result<Vec<RationalPolynomial<_, E>>, SolveError>>()?;
+
+            let has_denominators = rationals
+                .iter()
+                .any(|rational| !rational.denominator.is_one());
+            let mut parametric_variables = variable_map.as_ref().clone();
+            let saturation_variable = if has_denominators {
+                let mut index = 0;
+                let variable = loop {
+                    let candidate = PolyVariable::Temporary(index);
+                    if !parametric_variables.contains(&candidate) {
+                        break candidate;
+                    }
+                    index += 1;
+                };
+                parametric_variables.push(variable.clone());
+                Some(variable)
+            } else {
+                None
+            };
+            let parametric_variables = Arc::new(parametric_variables);
+
+            let mut denominators = Vec::new();
+            let mut polynomials = Vec::new();
+            for rational in rationals {
+                let numerator_one = rational.numerator.one();
+                let numerator = RationalPolynomial {
+                    numerator: rational.numerator,
+                    denominator: numerator_one,
+                }
+                .to_polynomial(parametric_variables.as_ref(), true)
+                .map_err(|error| SolveError::Other(error.to_string()))?;
+                if !numerator.is_zero() {
+                    polynomials.push(numerator.reorder::<GrevLexOrder>());
+                }
+
+                if !rational.denominator.is_one() {
+                    let denominator_one = rational.denominator.one();
+                    let denominator = RationalPolynomial {
+                        numerator: rational.denominator,
+                        denominator: denominator_one,
+                    }
+                    .to_polynomial(parametric_variables.as_ref(), true)
+                    .map_err(|error| SolveError::Other(error.to_string()))?;
+                    denominators.push(denominator);
+                }
+            }
+
+            if let Some(saturation_variable) = saturation_variable {
+                let mut denominator_product = denominators
+                    .first()
+                    .expect("A saturation variable requires a denominator")
+                    .one();
+                for denominator in denominators {
+                    denominator_product = &denominator_product * &denominator;
+                }
+                let helper = denominator_product
+                    .variable(&saturation_variable)
+                    .map_err(SolveError::Other)?;
+                let saturation = &helper * &denominator_product - denominator_product.one();
+                polynomials.push(saturation.reorder::<GrevLexOrder>());
+            }
 
             let basis = GroebnerBasis::new(&polynomials, false);
             let basis = basis
@@ -326,7 +381,16 @@ impl AtomView<'_> {
                 .solve_parametric()
                 .map_err(SolveError::Other)?
                 .into_iter()
-                .map(|solution| solution.to_atom_map())
+                .map(|solution| {
+                    variables
+                        .iter()
+                        .filter_map(|variable| {
+                            solution
+                                .get(variable)
+                                .map(|value| (variable.clone(), value.to_atom()))
+                        })
+                        .collect()
+                })
                 .collect());
         }
 
@@ -1082,6 +1146,22 @@ mod test {
                 .with(Atom::num(1));
             assert_algebraic_zero(value.pow(Atom::num(2)) - Atom::num(2));
         }
+    }
+
+    #[test]
+    fn exact_solve_clears_parametric_denominators_in_solve_variables() {
+        let x = symbol!("x");
+        let system = [parse!("x/(x-a)")];
+        let variables = [Atom::var(x)];
+
+        let solutions = Atom::solve::<u16, _, Atom>(&system, &variables).unwrap();
+
+        assert_eq!(solutions.len(), 1);
+        assert_eq!(
+            solutions[0].get(&PolyVariable::from(x)),
+            Some(&Atom::num(0))
+        );
+        assert_eq!(solutions[0].len(), 1);
     }
 
     #[test]
