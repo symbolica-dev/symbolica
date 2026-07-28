@@ -1479,21 +1479,18 @@ impl CoefficientView<'_> {
             return (Coefficient::one(), self.to_owned(), other.to_owned());
         }
 
-        fn simplify_perfect_square(mut base: Rational, mut exp: Rational) -> (Rational, Rational) {
+        fn simplify_perfect_power(mut base: Rational, mut exp: Rational) -> (Rational, Rational) {
             if let Some(d) = exp.denominator_ref().to_i64() {
                 if d > 1 && d < u32::MAX as i64 {
                     assert!(!base.numerator_ref().is_negative());
                     let root_num = base.numerator_ref().root(d as u32);
-                    if base.numerator_ref() > &1 && root_num.pow(d as u64) == *base.numerator_ref()
+                    let root_den = base.denominator_ref().root(d as u32);
+
+                    if root_num.pow(d as u64) == *base.numerator_ref()
+                        && root_den.pow(d as u64) == *base.denominator_ref()
                     {
-                        base = Rational::from((root_num, base.denominator().clone()));
+                        base = Rational::from((root_num, root_den));
                         exp = Rational::from(exp.numerator());
-                    } else if base.denominator_ref() > &1 {
-                        let root_den = base.denominator_ref().root(d as u32);
-                        if root_den.pow(d as u64) == *base.denominator_ref() {
-                            base = Rational::from((base.numerator().clone(), root_den));
-                            exp = Rational::from(exp.numerator());
-                        }
                     }
                 }
             }
@@ -1518,7 +1515,7 @@ impl CoefficientView<'_> {
                 };
 
                 if exp.denominator_ref() == &2 {
-                    (base, exp) = simplify_perfect_square(base.abs(), exp);
+                    (base, exp) = simplify_perfect_power(base.abs(), exp);
 
                     (
                         if rest.is_negative() {
@@ -1530,7 +1527,7 @@ impl CoefficientView<'_> {
                         Rational::from_int_unchecked(rest, exp.denominator()),
                     )
                 } else {
-                    let (new_base, new_exp) = simplify_perfect_square(base.abs(), exp.clone());
+                    let (new_base, new_exp) = simplify_perfect_power(base.abs(), exp.clone());
 
                     if new_exp.is_integer() {
                         // integer extraction worked
@@ -1545,7 +1542,7 @@ impl CoefficientView<'_> {
                     )
                 }
             } else {
-                (base, exp) = simplify_perfect_square(base, exp);
+                (base, exp) = simplify_perfect_power(base, exp);
 
                 if exp < 0 {
                     base = base.inv();
@@ -2103,6 +2100,29 @@ impl PartialOrd for CoefficientView<'_> {
 
 impl Ord for CoefficientView<'_> {
     fn cmp(&self, other: &CoefficientView) -> Ordering {
+        fn cmp_float_rational(
+            fr: &SerializedFloat,
+            fi: &SerializedFloat,
+            rr: Rational,
+            ri: Rational,
+        ) -> Ordering {
+            let difference = fr.to_float() - rr;
+            if difference.is_negative() {
+                Ordering::Less
+            } else if difference.is_zero() {
+                let difference = fi.to_float() - ri;
+                if difference.is_negative() {
+                    Ordering::Less
+                } else if difference.is_zero() {
+                    Ordering::Equal
+                } else {
+                    Ordering::Greater
+                }
+            } else {
+                Ordering::Greater
+            }
+        }
+
         match (self, other) {
             (
                 CoefficientView::Natural(n1, d1, ni1, di1),
@@ -2138,6 +2158,29 @@ impl Ord for CoefficientView<'_> {
                         .partial_cmp(&fi2.to_float())
                         .unwrap_or(Ordering::Equal)
                 }),
+            (CoefficientView::Float(fr1, fi1), CoefficientView::Natural(n2, d2, ni2, di2)) => {
+                cmp_float_rational(
+                    fr1,
+                    fi1,
+                    Rational::from_int_unchecked(*n2, *d2),
+                    Rational::from_int_unchecked(*ni2, *di2),
+                )
+            }
+            (CoefficientView::Natural(n1, d1, ni1, di1), CoefficientView::Float(fr2, fi2)) => {
+                cmp_float_rational(
+                    fr2,
+                    fi2,
+                    Rational::from_int_unchecked(*n1, *d1),
+                    Rational::from_int_unchecked(*ni1, *di1),
+                )
+                .reverse()
+            }
+            (CoefficientView::Float(fr1, fi1), CoefficientView::Large(r2, i2)) => {
+                cmp_float_rational(fr1, fi1, r2.to_rat(), i2.to_rat())
+            }
+            (CoefficientView::Large(r1, i1), CoefficientView::Float(fr2, fi2)) => {
+                cmp_float_rational(fr2, fi2, r1.to_rat(), i1.to_rat()).reverse()
+            }
             (CoefficientView::RationalPolynomial(n1), CoefficientView::RationalPolynomial(n2)) => {
                 n1.deserialize().internal_cmp(&n2.deserialize())
             }
@@ -3367,17 +3410,24 @@ impl AtomView<'_> {
 
 #[cfg(test)]
 mod test {
-    use std::sync::Arc;
+    use std::{cmp::Ordering, sync::Arc};
 
     use crate::{
-        atom::{Atom, AtomCore},
+        atom::{Atom, AtomCore, AtomView},
         domains::float::Float,
         parse,
         printer::{AtomPrinter, PrintOptions},
         symbol,
     };
 
-    use super::Coefficient;
+    use super::{Coefficient, CoefficientView};
+
+    fn coefficient_view(atom: &Atom) -> CoefficientView<'_> {
+        let AtomView::Num(number) = atom.as_view() else {
+            panic!("expected a coefficient");
+        };
+        number.get_coeff_view()
+    }
 
     #[test]
     fn rat_pow() {
@@ -3394,6 +3444,11 @@ mod test {
         assert_eq!(parse!("(27)^(2/3)"), parse!("9"));
         assert_eq!(parse!("(-2)^(3)"), parse!("-8"));
         assert_eq!(parse!("(1)^(1/2)"), parse!("1"));
+
+        // A root may only be extracted from a rational when both its numerator
+        // and denominator are perfect powers.
+        assert_ne!(parse!("(4/3)^(1/2)"), parse!("2/sqrt(3)7"));
+        assert_ne!(parse!("(2850/39601)^(1/2)"), parse!("2850/199"));
     }
 
     #[test]
@@ -3412,6 +3467,44 @@ mod test {
             "1289378192371289372891378127893+8123781237821378123128937128937211238971238*coeff(v2)"
         );
         assert_eq!(expr + &res, Atom::new());
+    }
+
+    #[test]
+    fn compare_float_with_rational() {
+        let natural = parse!("1/2");
+        let natural_float = natural.to_float(16);
+        assert_eq!(
+            coefficient_view(&natural_float).cmp(&coefficient_view(&natural)),
+            Ordering::Equal
+        );
+        assert_eq!(
+            coefficient_view(&natural).cmp(&coefficient_view(&natural_float)),
+            Ordering::Equal
+        );
+
+        let negative_float = parse!("-2/3").to_float(16);
+        let zero = parse!("0");
+        assert_eq!(
+            coefficient_view(&negative_float).cmp(&coefficient_view(&zero)),
+            Ordering::Less
+        );
+        assert_eq!(
+            coefficient_view(&zero).cmp(&coefficient_view(&negative_float)),
+            Ordering::Greater
+        );
+
+        // This value is too large for the inline natural representation, but is
+        // exactly representable as a binary float.
+        let large = parse!("18446744073709551616");
+        let large_float = large.to_float(16);
+        assert_eq!(
+            coefficient_view(&large_float).cmp(&coefficient_view(&large)),
+            Ordering::Equal
+        );
+        assert_eq!(
+            coefficient_view(&large).cmp(&coefficient_view(&large_float)),
+            Ordering::Equal
+        );
     }
 
     #[test]
