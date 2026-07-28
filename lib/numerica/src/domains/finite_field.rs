@@ -2985,10 +2985,24 @@ where
     /// a factor of the modulus `p`, where `p` must be non-prime.
     /// Calling this method on a prime field will result in an infinite loop.
     pub fn pollard_brent_rho(&self) -> Integer {
+        self.pollard_brent_rho_impl(None).unwrap()
+    }
+
+    /// Try Pollard's rho algorithm with Brent's cycle detection for at most
+    /// `max_iterations` polynomial evaluations.
+    ///
+    /// Returns `None` if no factor is found within the work limit. In
+    /// particular, a prime modulus exhausts the limit and returns `None`.
+    pub fn try_pollard_brent_rho(&self, max_iterations: u64) -> Option<Integer> {
+        self.pollard_brent_rho_impl(Some(max_iterations))
+    }
+
+    fn pollard_brent_rho_impl(&self, max_iterations: Option<u64>) -> Option<Integer> {
         const M: u64 = 1000;
 
         let mut rng = rand::rng();
         let mut backend_rng = BackendRandState::new(rng.random::<u128>());
+        let mut iterations = 0;
 
         let mut c = Integer::new(3);
         let n = self.get_prime().to_integer();
@@ -3011,11 +3025,21 @@ where
             let mut r = 1;
             let mut g = Integer::one();
 
+            macro_rules! iterate {
+                ($value:expr) => {{
+                    if max_iterations.is_some_and(|limit| iterations >= limit) {
+                        return None;
+                    }
+                    iterations += 1;
+                    self.add(&self.mul(&$value, &$value), &cf)
+                }};
+            }
+
             while g == 1 {
                 x = y.clone();
 
                 for _ in 0..r {
-                    y = self.add(&self.mul(&y, &y), &cf);
+                    y = iterate!(y);
                 }
 
                 let mut k = 0;
@@ -3023,7 +3047,7 @@ where
                     ys = y.clone();
                     let mut q = self.one();
                     for _ in 0..M.min(r - k) {
-                        y = self.add(&self.mul(&y, &y), &cf);
+                        y = iterate!(y);
                         self.mul_assign(&mut q, &self.sub(&x, &y));
                     }
 
@@ -3036,7 +3060,7 @@ where
 
             if g == n {
                 loop {
-                    ys = self.add(&self.mul(&ys, &ys), &cf);
+                    ys = iterate!(ys);
                     g = self.to_integer(&self.sub(&x, &ys)).gcd(&n);
                     if g > 1 {
                         if g == n {
@@ -3044,13 +3068,13 @@ where
                             c += 1;
                             continue 'restart;
                         }
-                        return g;
+                        return Some(g);
                     }
                 }
             }
 
             if g != n {
-                return g;
+                return Some(g);
             }
         }
     }
@@ -3653,6 +3677,17 @@ mod test {
         let y = field.to_element(5);
         let r = field.mul(&x, &y);
         assert_eq!(field.from_element(&r), 11);
+    }
+
+    #[test]
+    fn bounded_pollard_brent_rho() {
+        let n = 166_659_413_u64;
+        let field = Zp64::new_non_prime(n);
+        assert_eq!(field.try_pollard_brent_rho(0), None);
+
+        let factor = field.try_pollard_brent_rho(50_000).unwrap();
+        assert!(factor > 1 && factor < n);
+        assert_eq!(Integer::from(n) % &factor, Integer::zero());
     }
 
     #[test]

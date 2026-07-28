@@ -914,13 +914,32 @@ impl Integer {
     }
 
     fn get_single_factor(&self) -> Integer {
+        for &prime in &SMALL_PRIMES {
+            if self % prime == 0 {
+                return prime.into();
+            }
+        }
+
         if self.is_prime(24) {
             return self.clone();
         }
 
-        for i in [2, 3, 5, 7, 11, 13, 17, 19, 23] {
-            if self % i == 0 {
-                return i.into();
+        // Pollard-Brent is substantially cheaper than setting up ECM for
+        // machine-sized integers. `is_prime` above is deterministic for u64,
+        // so the composite-modulus requirement is guaranteed here.
+        if let Some(c) = self.to_u64() {
+            return Zp64::new_non_prime(c).pollard_brent_rho().into();
+        }
+
+        if matches!(self, Integer::Double(_)) {
+            if let Some(f) =
+                FiniteField::<Integer>::new_non_prime(self.clone()).try_pollard_brent_rho(50_000)
+            {
+                return f;
+            }
+
+            if let Some(f) = self.ecm_factor(15, 2_000, 100_000) {
+                return f;
             }
         }
 
@@ -928,11 +947,7 @@ impl Integer {
             return f;
         }
 
-        if let Some(c) = self.to_u64() {
-            Zp64::new(c).pollard_brent_rho().into()
-        } else {
-            FiniteField::<Integer>::new(self.clone()).pollard_brent_rho()
-        }
+        FiniteField::<Integer>::new_non_prime(self.clone()).pollard_brent_rho()
     }
 
     fn ecm_montgomery_double(
@@ -1440,7 +1455,7 @@ impl Integer {
         if self % 2 == 0 {
             return false;
         }
-        if *self < u64::MAX {
+        if *self <= u64::MAX {
             Zp64::new(self.to_u64().unwrap()).is_prime_field(k)
         } else {
             FiniteField::<Integer>::new(self.clone()).is_prime_field(k)
@@ -3681,6 +3696,7 @@ mod test {
     #[cfg(feature = "gmp")]
     use crate::domains::float::{Float, Real};
     use crate::domains::{
+        finite_field::FiniteFieldWorkspace,
         float::F64,
         integer::{extended_gcd, extended_gcd_i128},
     };
@@ -3774,6 +3790,44 @@ mod test {
             assert_eq!(res, start);
             start += 1;
         }
+    }
+
+    #[test]
+    fn factor_machine_sized_composites() {
+        assert_eq!(
+            Integer::from(166_659_413).factor(),
+            vec![
+                (Integer::from(547), Integer::from(2)),
+                (Integer::from(557), Integer::from(1)),
+            ]
+        );
+
+        let p = Integer::from(4_294_967_291_u64);
+        let q = Integer::from(4_294_967_279_u64);
+        assert!(p.is_prime(24));
+        assert!(q.is_prime(24));
+
+        let semiprime = &p * &q;
+        assert!(semiprime.to_u64().is_some());
+        assert_eq!(
+            semiprime.factor(),
+            vec![(q, Integer::from(1)), (p, Integer::from(1))]
+        );
+
+        assert_eq!(
+            Integer::from_str("226136264309038487395159182893727571875")
+                .unwrap()
+                .factor(),
+            vec![
+                (Integer::from(3), Integer::from(1)),
+                (Integer::from(5), Integer::from(5)),
+                (Integer::from(5101), Integer::from(1)),
+                (
+                    Integer::from_str("4728720158066543551359271941841").unwrap(),
+                    Integer::from(1),
+                ),
+            ]
+        );
     }
 
     #[test]
