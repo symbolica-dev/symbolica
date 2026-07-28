@@ -28,7 +28,7 @@ use crate::{
     },
     symbol,
     tensors::matrix::Matrix,
-    transcendental::{TranscendentalFunctions, root},
+    transcendental::{TranscendentalFunctions, root, root_var},
 };
 
 use super::{
@@ -1937,13 +1937,12 @@ impl<R: EuclideanDomain> AlgebraicExtension<R> {
     where
         R::Element: Into<crate::coefficient::Coefficient>,
     {
-        let root = if matches!(self.poly.get_vars_ref()[0], PolyVariable::Temporary(_)) {
-            let mut p = self.poly.as_ref().clone();
-            p.variables = Arc::new(vec![PolyVariable::Symbol(symbol!("symbolica::root::z"))]);
-            p.to_expression().root(self.embedding)
-        } else {
-            self.poly.to_expression().root(self.embedding)
-        };
+        let mut p = self.poly.as_ref().clone();
+        let variable = p.get_vars_ref()[0].clone();
+        if variable != PolyVariable::Symbol(root_var()) {
+            p.rename_variable(&variable, &PolyVariable::Symbol(root_var()));
+        }
+        let root = p.to_expression().root(self.embedding);
 
         // TODO: try simplification here
 
@@ -3311,8 +3310,27 @@ impl AlgebraicExtension<Q> {
 impl Root<Q> {
     /// Convert an expression polynomial into a rational root descriptor.
     pub fn from_atom(polynomial: AtomView<'_>, index: usize) -> Result<Self, String> {
+        Self::from_atom_impl(polynomial, None, index)
+    }
+
+    /// Convert an expression polynomial into a rational root descriptor using
+    /// `variable` as its polynomial variable.
+    pub fn from_atom_with_variable(
+        polynomial: AtomView<'_>,
+        variable: PolyVariable,
+        index: usize,
+    ) -> Result<Self, String> {
+        Self::from_atom_impl(polynomial, Some(variable), index)
+    }
+
+    fn from_atom_impl(
+        polynomial: AtomView<'_>,
+        variable: Option<PolyVariable>,
+        index: usize,
+    ) -> Result<Self, String> {
+        let variables = variable.map(|variable| Arc::new(vec![variable]));
         let polynomial = polynomial
-            .try_to_polynomial::<_, u16>(&Q, None)
+            .try_to_polynomial::<_, u16>(&Q, variables)
             .map_err(|error| {
                 format!("could not convert root polynomial to a polynomial over Q: {error}")
             })?;
@@ -3373,10 +3391,10 @@ impl Root<Q> {
         }
 
         let mut polynomial = self.polynomial.clone();
-        if matches!(polynomial.get_vars_ref()[0], PolyVariable::Temporary(_)) {
+        if polynomial.get_vars_ref()[0] != PolyVariable::Symbol(root_var()) {
             polynomial.rename_variable(
                 &polynomial.get_vars_ref()[0].clone(),
-                &PolyVariable::Symbol(symbol!("symbolica::root::z")),
+                &PolyVariable::Symbol(root_var()),
             );
         }
         polynomial.to_expression().root(self.index)
@@ -3386,13 +3404,35 @@ impl Root<Q> {
 impl Root<RationalPolynomialField<IntegerRing, u16>> {
     /// Convert an expression polynomial into a root over `Q(parameters)`.
     ///
-    /// The canonical root variable, conventional `z`, or a unique
-    /// highest-degree variable is selected as the polynomial variable. Every
-    /// other indeterminate becomes part of the rational-function coefficient
-    /// field.
+    /// The canonical root variable, conventional `z`, or the sole
+    /// indeterminate is selected as the polynomial variable. If multiple
+    /// other indeterminates occur, the root variable must be supplied
+    /// explicitly. Every remaining indeterminate becomes part of the
+    /// rational-function coefficient field.
     pub fn from_atom(polynomial: AtomView<'_>, index: usize) -> Result<Self, String> {
+        Self::from_atom_impl(polynomial, None, index)
+    }
+
+    /// Convert an expression polynomial into a root over `Q(parameters)`,
+    /// explicitly selecting its polynomial variable.
+    pub fn from_atom_with_variable(
+        polynomial: AtomView<'_>,
+        variable: PolyVariable,
+        index: usize,
+    ) -> Result<Self, String> {
+        Self::from_atom_impl(polynomial, Some(variable), index)
+    }
+
+    fn from_atom_impl(
+        polynomial: AtomView<'_>,
+        explicit_variable: Option<PolyVariable>,
+        index: usize,
+    ) -> Result<Self, String> {
+        let variables = explicit_variable
+            .as_ref()
+            .map(|variable| Arc::new(vec![variable.clone()]));
         let rational: RationalPolynomial<IntegerRing, u16> = polynomial
-            .try_to_rational_polynomial(&Q, &Z, None)
+            .try_to_rational_polynomial(&Q, &Z, variables)
             .map_err(|error| format!("could not convert parametric root polynomial: {error}"))?;
         let variables = rational.numerator.variables.as_ref();
         let candidates = variables
@@ -3400,31 +3440,32 @@ impl Root<RationalPolynomialField<IntegerRing, u16>> {
             .enumerate()
             .filter(|(position, _)| rational.denominator.degree(*position) == 0)
             .collect::<Vec<_>>();
-        let root_variable = candidates
-            .iter()
-            .find(|(_, variable)| variable == &&PolyVariable::from(symbol!("symbolica::root::z")))
-            .or_else(|| {
-                candidates
-                    .iter()
-                    .find(|(_, variable)| variable == &&PolyVariable::from(symbol!("z")))
-            })
-            .map(|(_, variable)| (*variable).clone())
-            .or_else(|| {
-                let maximum_degree = candidates
-                    .iter()
-                    .map(|(position, _)| rational.numerator.degree(*position))
-                    .max()?;
-                let mut maximum_variables = candidates
-                    .iter()
-                    .filter(|(position, _)| rational.numerator.degree(*position) == maximum_degree)
-                    .map(|(_, variable)| (*variable).clone());
-                let variable = maximum_variables.next()?;
-                maximum_variables.next().is_none().then_some(variable)
-            })
-            .ok_or_else(|| {
-                "could not uniquely determine the root variable of the parametric polynomial"
-                    .to_string()
-            })?;
+        let root_variable = if let Some(explicit_variable) = explicit_variable {
+            candidates
+                .iter()
+                .find(|(_, variable)| variable == &&explicit_variable)
+                .map(|(_, variable)| (*variable).clone())
+                .ok_or_else(|| {
+                    format!(
+                        "the explicit root variable {explicit_variable} is not a polynomial variable"
+                    )
+                })?
+        } else {
+            candidates
+                .iter()
+                .find(|(_, variable)| variable == &&PolyVariable::from(root_var()))
+                .or_else(|| {
+                    candidates
+                        .iter()
+                        .find(|(_, variable)| variable == &&PolyVariable::from(symbol!("z")))
+                })
+                .map(|(_, variable)| (*variable).clone())
+                .or_else(|| (candidates.len() == 1).then(|| candidates[0].1.clone()))
+                .ok_or_else(|| {
+                    "could not uniquely determine the root variable of the parametric polynomial"
+                        .to_string()
+                })?
+        };
         let polynomial = rational
             .to_polynomial(&[root_variable], false)
             .map_err(str::to_string)?;
@@ -3501,10 +3542,10 @@ impl Root<RationalPolynomialField<IntegerRing, u16>> {
         }
 
         let mut polynomial = self.polynomial.clone();
-        if matches!(polynomial.get_vars_ref()[0], PolyVariable::Temporary(_)) {
+        if polynomial.get_vars_ref()[0] != PolyVariable::Symbol(root_var()) {
             polynomial.rename_variable(
                 &polynomial.get_vars_ref()[0].clone(),
-                &PolyVariable::Symbol(symbol!("symbolica::root::z")),
+                &PolyVariable::Symbol(root_var()),
             );
         }
         polynomial
@@ -3566,10 +3607,30 @@ impl Root<AlgebraicExtension<Q>> {
     ///
     /// `Ok(None)` means that the expression has no algebraic coefficients.
     pub fn from_atom(polynomial: AtomView<'_>, index: usize) -> Result<Option<Self>, String> {
+        Self::from_atom_impl(polynomial, None, index)
+    }
+
+    /// Convert an expression polynomial and all of its algebraic constants to
+    /// one embedded simple extension, explicitly selecting its polynomial
+    /// variable.
+    pub fn from_atom_with_variable(
+        polynomial: AtomView<'_>,
+        variable: PolyVariable,
+        index: usize,
+    ) -> Result<Option<Self>, String> {
+        Self::from_atom_impl(polynomial, Some(variable), index)
+    }
+
+    fn from_atom_impl(
+        polynomial: AtomView<'_>,
+        variable: Option<PolyVariable>,
+        index: usize,
+    ) -> Result<Option<Self>, String> {
         let Some(mut context) = AlgebraicContext::from_atom(polynomial)? else {
             return Ok(None);
         };
-        let polynomial = context.to_polynomial::<u16>(polynomial, None)?;
+        let variables = variable.map(|variable| Arc::new(vec![variable]));
+        let polynomial = context.to_polynomial::<u16>(polynomial, variables)?;
         Root::new(polynomial, index).map(Some)
     }
 

@@ -60,7 +60,7 @@ use crate::{
         rational_polynomial::{RationalPolynomial, RationalPolynomialField},
     },
     tensors::matrix::{Matrix, MatrixError},
-    transcendental::TranscendentalFunctions,
+    transcendental::{TranscendentalFunctions, root_var},
 };
 
 use super::{
@@ -430,7 +430,7 @@ impl<E: PositiveExponent> ParametricExtension<E> {
     fn primitive_atom(&self, conjugates: &[usize]) -> Atom {
         match &self.construction {
             ParametricExtensionConstruction::Primitive => {
-                let root_variable: Atom = crate::symbol!("symbolica::root::z").into();
+                let root_variable: Atom = root_var().into();
                 let mut defining_polynomial = Atom::Zero;
                 for term in self.polynomial() {
                     let coefficient = term.coefficient.to_expression();
@@ -452,7 +452,7 @@ impl<E: PositiveExponent> ParametricExtension<E> {
                     .split_last()
                     .expect("An adjoined extension must have a conjugate path");
                 let base_generator = base.primitive_atom(base_conjugates);
-                let root_variable: Atom = crate::symbol!("symbolica::root::z").into();
+                let root_variable: Atom = root_var().into();
                 let mut defining_polynomial = Atom::Zero;
                 for term in polynomial {
                     let coefficient =

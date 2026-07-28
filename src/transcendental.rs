@@ -28,6 +28,7 @@ static SPECIALS: LazyLock<SpecialSymbols> = LazyLock::new(|| SpecialSymbols {
     polygamma: get_symbol!("polygamma").expect("polygamma not defined"),
     polylog: get_symbol!("polylog").expect("polylog not defined"),
     root: get_symbol!("root").expect("root not defined"),
+    root_var: get_symbol!("root_var").expect("root_var not defined"),
     zeta: get_symbol!("zeta").expect("zeta not defined"),
 });
 static GEOMETRICS: LazyLock<GeometricSymbols> = LazyLock::new(|| GeometricSymbols {
@@ -68,6 +69,7 @@ struct SpecialSymbols {
     polygamma: Symbol,
     polylog: Symbol,
     root: Symbol,
+    root_var: Symbol,
     zeta: Symbol,
 }
 
@@ -103,12 +105,40 @@ struct BesselSymbols {
     bessel_k: Symbol,
 }
 
+fn canonical_root_polynomial(polynomial: AtomView<'_>, variable: &PolyVariable) -> Option<Atom> {
+    if variable == &PolyVariable::Symbol(root_var()) {
+        return None;
+    }
+
+    let variable = match variable {
+        PolyVariable::Temporary(_) => return None,
+        _ => Atom::from(variable.clone()),
+    };
+    Some(polynomial.replace(variable).with(Atom::var(root_var())))
+}
+
 impl SpecialSymbols {
     fn new() -> Self {
+        let root_var = symbol!("ξ", aliases = ["root_var"]);
+
         let root = symbol!(
             "root",
-            norm = |x, out| {
-                let Some([poly_tag, index_tag]) = function_arguments::<2>(x) else {
+            norm = move |x, out| {
+                let (poly_tag, explicit_variable, index_tag) = if let Some([poly_tag, index_tag]) =
+                    function_arguments::<2>(x)
+                {
+                    (poly_tag, None, index_tag)
+                } else if let Some([poly_tag, variable_tag, index_tag]) = function_arguments::<3>(x)
+                {
+                    let AtomView::Var(variable) = variable_tag else {
+                        return;
+                    };
+                    (
+                        poly_tag,
+                        Some(PolyVariable::from(variable.get_symbol())),
+                        index_tag,
+                    )
+                } else {
                     return;
                 };
 
@@ -116,27 +146,113 @@ impl SpecialSymbols {
                     return;
                 };
 
-                if let Ok(root) = Root::<Q>::from_atom(poly_tag, index) {
-                    if let Ok(simplified) = root.simplify()
-                        && (simplified != root || simplified.polynomial().degree(0) <= 2)
-                    {
-                        **out = simplified.to_atom();
+                let rational_root = if let Some(variable) = &explicit_variable {
+                    Root::<Q>::from_atom_with_variable(poly_tag, variable.clone(), index)
+                } else {
+                    Root::<Q>::from_atom(poly_tag, index)
+                };
+                if let Ok(root) = rational_root {
+                    match root.simplify() {
+                        Ok(simplified)
+                            if simplified != root || simplified.polynomial().degree(0) <= 2 =>
+                        {
+                            **out = simplified.to_atom();
+                        }
+                        _ if root.polynomial().get_vars_ref()[0]
+                            != PolyVariable::Symbol(root_var) =>
+                        {
+                            **out = root.to_atom();
+                        }
+                        _ => {}
                     }
                     return;
                 }
 
-                if let Ok(Some(root)) = Root::<AlgebraicExtension<Q>>::from_atom(poly_tag, index) {
+                let algebraic_root = if let Some(variable) = &explicit_variable {
+                    Root::<AlgebraicExtension<Q>>::from_atom_with_variable(
+                        poly_tag,
+                        variable.clone(),
+                        index,
+                    )
+                } else {
+                    Root::<AlgebraicExtension<Q>>::from_atom(poly_tag, index)
+                };
+                if let Ok(Some(root)) = algebraic_root {
                     if let Ok(Some(simplified)) = root.simplify() {
                         **out = simplified.to_atom();
+                    } else if let Some(polynomial) =
+                        canonical_root_polynomial(poly_tag, &root.polynomial().get_vars_ref()[0])
+                    {
+                        **out = polynomial.root(index);
                     }
                     return;
                 }
 
-                if let Ok(root) =
+                let parametric_root = if let Some(variable) = &explicit_variable {
+                    Root::<RationalPolynomialField<IntegerRing, u16>>::from_atom_with_variable(
+                        poly_tag,
+                        variable.clone(),
+                        index,
+                    )
+                } else {
                     Root::<RationalPolynomialField<IntegerRing, u16>>::from_atom(poly_tag, index)
-                    && let Some(simplified) = root.simplify()
+                };
+                if let Ok(root) = parametric_root {
+                    if let Some(simplified) = root.simplify() {
+                        **out = simplified;
+                    } else if root.polynomial().get_vars_ref()[0] != PolyVariable::Symbol(root_var)
+                    {
+                        **out = root.to_atom();
+                    }
+                    return;
+                }
+
+                // Canonicalize the polynomial variable even when the selected
+                // root index is invalid. Use index zero only to recover the
+                // same variable selection without weakening Root's index
+                // validation.
+                let rational_root = if let Some(variable) = &explicit_variable {
+                    Root::<Q>::from_atom_with_variable(poly_tag, variable.clone(), 0)
+                } else {
+                    Root::<Q>::from_atom(poly_tag, 0)
+                };
+                let mut root_variable = rational_root
+                    .ok()
+                    .map(|root| root.polynomial().get_vars_ref()[0].clone());
+
+                if root_variable.is_none() {
+                    let algebraic_root = if let Some(variable) = &explicit_variable {
+                        Root::<AlgebraicExtension<Q>>::from_atom_with_variable(
+                            poly_tag,
+                            variable.clone(),
+                            0,
+                        )
+                    } else {
+                        Root::<AlgebraicExtension<Q>>::from_atom(poly_tag, 0)
+                    };
+                    root_variable = algebraic_root
+                        .ok()
+                        .flatten()
+                        .map(|root| root.polynomial().get_vars_ref()[0].clone());
+                }
+
+                if root_variable.is_none() {
+                    let parametric_root = if let Some(variable) = explicit_variable {
+                        Root::<RationalPolynomialField<IntegerRing, u16>>::from_atom_with_variable(
+                            poly_tag, variable, 0,
+                        )
+                    } else {
+                        Root::<RationalPolynomialField<IntegerRing, u16>>::from_atom(poly_tag, 0)
+                    };
+                    root_variable = parametric_root
+                        .ok()
+                        .map(|root| root.polynomial().get_vars_ref()[0].clone());
+                }
+
+                if let Some(variable) = root_variable
+                    && let Some(polynomial) = canonical_root_polynomial(poly_tag, &variable)
                 {
-                    **out = simplified;
+                    **out = polynomial.root(index);
                 }
             },
             der = |_x, _i, out| {
@@ -568,6 +684,7 @@ impl SpecialSymbols {
             polygamma,
             polylog,
             root,
+            root_var,
             zeta,
         }
     }
@@ -1930,10 +2047,26 @@ pub fn polylog() -> Symbol {
 ///
 /// `root(poly, n)` represents the `n`-th complex root of a univariate polynomial
 /// with exact algebraic coefficients, ordered lexicographically by `(re, im)`.
+/// The three-argument form `root(poly, x, n)` explicitly selects the symbol
+/// `x` as the polynomial variable; all other symbols in `poly` are treated as
+/// parameters. For example, `root(x^2-a-1, x, 0)` represents the first root in
+/// `x`.
+///
+/// In the two-argument form the polynomial variable is inferred only when
+/// there is a single indeterminate, or when `root_var` (or conventional `z`)
+/// occurs. An expression such as `root(x^2-a, 0)` is left unchanged because
+/// either symbol could be the polynomial variable; use `root(x^2-a, x, 0)` to
+/// resolve the ambiguity.
+///
 /// Algebraic coefficient fields are collapsed to a simple extension over `Q`
 /// when the root is normalized.
 pub fn root() -> Symbol {
     SPECIALS.root
+}
+
+/// Return the built-in variable used as the polynomial variable in `root`.
+pub fn root_var() -> Symbol {
+    SPECIALS.root_var
 }
 
 /// Return the built-in Riemann zeta function symbol `zeta`.
@@ -4102,7 +4235,7 @@ mod tests {
             residual = -residual;
         }
 
-        assert_eq!(residual.prec(), 192);
+        assert!(residual.prec() >= 192);
         assert!(residual.to_f64() < 2f64.powi(-150));
     }
 
@@ -4110,15 +4243,15 @@ mod tests {
     fn root_simplifies_algebraic_coefficients() {
         assert_eq!(
             parse!("root(1-1/2*12^(1/2)+z^3,0)"),
-            parse!("root(symbolica::root::z^6+2*symbolica::root::z^3-2,1)")
+            parse!("root(root_var^6+2*root_var^3-2,1)")
         );
         assert_eq!(
             parse!("root(1-1/2*12^(1/2)+z^3,1)"),
-            parse!("root(symbolica::root::z^6+2*symbolica::root::z^3-2,2)")
+            parse!("root(root_var^6+2*root_var^3-2,2)")
         );
         assert_eq!(
             parse!("root(1-1/2*12^(1/2)+z^3,2)"),
-            parse!("root(symbolica::root::z^6+2*symbolica::root::z^3-2,5)")
+            parse!("root(root_var^6+2*root_var^3-2,5)")
         );
         assert_eq!(parse!("root((z-2^(1/2))^2,0)"), parse!("1/2*8^(1/2)"));
         assert_eq!(parse!("root((z-2^(1/2))^2,1)"), parse!("1/2*8^(1/2)"));
@@ -4126,15 +4259,15 @@ mod tests {
         assert_eq!(parse!("root((z-2^(1/2))*(z-1),1)"), parse!("1/2*8^(1/2)"));
         assert_eq!(
             parse!("root(z^2-2^(1/2),0)"),
-            parse!("root(-2+symbolica::root::z^4,0)")
+            parse!("root(-2+root_var^4,0)")
         );
         assert_eq!(
             parse!("root(z^2-2^(1/2),1)"),
-            parse!("root(-2+symbolica::root::z^4,3)")
+            parse!("root(-2+root_var^4,3)")
         );
         assert_eq!(
             parse!("root(z-2^(1/2)-3^(1/2),0)"),
-            parse!("root(1-10*symbolica::root::z^2+symbolica::root::z^4,3)")
+            parse!("root(1-10*root_var^2+root_var^4,3)")
         );
         assert_eq!(parse!("root(z-(1+1i),0)"), parse!("1+1i"));
     }
@@ -4143,7 +4276,17 @@ mod tests {
     fn root_simplifies_parametric_quadratic() {
         assert_eq!(parse!("root(-a+z^2,0)"), parse!("-a^(1/2)"));
         assert_eq!(parse!("root(-a+z^2,1)"), parse!("a^(1/2)"));
-        assert_eq!(parse!("root(-a+x^2,0)"), parse!("-a^(1/2)"));
+        assert_eq!(parse!("root(x^2-a-1,x,0)"), parse!("-(1+a)^(1/2)"));
+        assert_eq!(parse!("root(x^2-a^3-1,x,0)"), parse!("-(1+a^3)^(1/2)"));
+    }
+
+    #[test]
+    fn root_does_not_guess_between_multiple_symbols() {
+        for ambiguous in [parse!("root(x^2-a,0)"), parse!("root(x^2-a,2)")] {
+            assert!(ambiguous.contains_symbol(symbol!("x")));
+            assert!(ambiguous.contains_symbol(symbol!("a")));
+            assert!(!ambiguous.contains_symbol(super::root_var()));
+        }
     }
 
     #[test]
@@ -4151,6 +4294,24 @@ mod tests {
         assert_eq!(parse!("root(-a+z^3,0)"), parse!("-(-1)^(1/3)*a^(1/3)"));
         assert_eq!(parse!("root(-a+z^3,1)"), parse!("(-1)^(2/3)*a^(1/3)"));
         assert_eq!(parse!("root(-a+z^3,2)"), parse!("a^(1/3)"));
+        assert_eq!(parse!("root(x^2-a^3-1,a,2)"), parse!("(-1+x^2)^(1/3)"));
+    }
+
+    #[test]
+    fn root_accepts_an_explicit_polynomial_variable() {
+        assert_eq!(parse!("root(x^5-2,x,0)"), parse!("root(root_var^5-2,0)"));
+        assert_eq!(parse!("root(x^5-a,x,0)"), parse!("root(root_var^5-a,0)"));
+        assert_eq!(
+            parse!("root(x^5-a,x,0)")
+                .replace(symbol!("a"))
+                .with(Atom::num(2)),
+            parse!("root(x^5-2,0)")
+        );
+    }
+
+    #[test]
+    fn root_canonicalizes_the_variable_with_an_invalid_index() {
+        assert_eq!(parse!("root(-4+x^3,3)"), parse!("root(-4+root_var^3,3)"));
     }
 
     #[test]

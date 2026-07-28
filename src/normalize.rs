@@ -1386,6 +1386,12 @@ impl AtomView<'_> {
                             let (prefactor, new_base_num, new_exp_num) =
                                 n.get_coeff_view().pow(&exp_num);
 
+                            if matches!(&new_base_num, Coefficient::Complex(c) if c.re.is_one() && c.im.is_zero())
+                            {
+                                out.to_num(prefactor);
+                                break 'pow_simplify;
+                            }
+
                             if !prefactor.is_one() {
                                 let mut mul_h = workspace.new_atom();
                                 let m = mul_h.to_mul();
