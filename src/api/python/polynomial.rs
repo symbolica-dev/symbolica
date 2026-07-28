@@ -1846,7 +1846,7 @@ impl PythonPolynomial {
                 e
             ))
         })?;
-        let poly_nf = a.simplify(&m).poly().clone();
+        let poly_nf = a.minimal_polynomial_of_element(&m);
 
         Ok(Self { poly: poly_nf })
     }
@@ -3127,7 +3127,7 @@ impl PythonFiniteFieldPolynomial {
                 e
             ))
         })?;
-        let poly_nf = a.simplify(&m).poly().clone();
+        let poly_nf = a.minimal_polynomial_of_element(&m);
 
         Ok(Self { poly: poly_nf })
     }

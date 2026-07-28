@@ -877,7 +877,6 @@ impl RootCache {
         if !Self::refine_index_if_needed(roots, index, binary_prec) {
             return None;
         }
-        UnivariatePolynomial::<Q>::sort_complex_roots_canonical(roots);
         Self::select_indexed_root(roots, index).cloned()
     }
 
@@ -1031,7 +1030,9 @@ impl RootCache {
                 return false;
             }
 
-            UnivariatePolynomial::<Q>::sort_complex_roots_canonical(roots);
+            // Refinement changes only the certified ball, not the root it
+            // contains. The cached vector is already in canonical order;
+            // sorting it again can require costly real-projection algebra.
         }
 
         let Some(root_index) = Self::select_indexed_root_position(roots, index) else {
@@ -1365,14 +1366,15 @@ impl UnivariatePolynomial<RationalField> {
 
     /// Gets the `index`-th root of the polynomial. Fails when `index` is out of bounds.
     pub fn get_root(&self, index: usize) -> Option<ComplexRootInterval> {
-        if index > self.degree() {
+        if index >= self.degree() {
             return None;
         }
 
         if let Some(rs) = ROOT_CACHE.roots.read().unwrap().get(&self.coefficients) {
-            Some(rs[index].clone())
+            RootCache::select_indexed_root(rs, index).cloned()
         } else {
-            self.isolate_complex_roots(None).get(index).cloned()
+            let roots = self.isolate_complex_roots(None);
+            RootCache::select_indexed_root(&roots, index).cloned()
         }
     }
 
@@ -1482,6 +1484,23 @@ impl UnivariatePolynomial<RationalField> {
             .map(|index| roots[index].clone())
             .collect::<Vec<_>>();
         roots.clone_from_slice(&sorted);
+
+        // The root index is local to its defining polynomial. Aberth's output
+        // order is arbitrary, so assign these indices only after canonical
+        // sorting. This is also required when roots from multiple factors are
+        // sorted together: simplification uses the local index to select the
+        // same root of the irreducible factor.
+        let mut next_index_by_polynomial = HashMap::new();
+        for root in roots {
+            let Some(poly) = root.poly.as_ref() else {
+                continue;
+            };
+            let next_index = next_index_by_polynomial
+                .entry(poly.coefficients.clone())
+                .or_insert(0);
+            root.index = Some(*next_index);
+            *next_index += 1;
+        }
     }
 
     fn refine_real_projections_for_sort(roots: &mut [ComplexRootInterval]) {
@@ -1543,42 +1562,52 @@ impl UnivariatePolynomial<RationalField> {
         let mut equal = vec![false; roots.len() * roots.len()];
         for i in 0..roots.len() {
             equal[i * roots.len() + i] = true;
-            for j in i + 1..roots.len() {
-                if Self::are_certified_conjugates(&roots[i], &roots[j]) {
-                    equal[i * roots.len() + j] = true;
-                    equal[j * roots.len() + i] = true;
-                }
-            }
-        }
-        equal
-    }
 
-    fn are_certified_conjugates(a: &ComplexRootInterval, b: &ComplexRootInterval) -> bool {
-        let (Some(a_poly), Some(b_poly)) = (&a.poly, &b.poly) else {
-            return false;
-        };
-        if a_poly.coefficients != b_poly.coefficients
-            || a_poly
+            let Some(poly) = roots[i].poly.as_ref() else {
+                continue;
+            };
+            if poly
                 .coefficients
                 .iter()
                 .any(|coefficient| !coefficient.im.is_zero())
-        {
-            return false;
-        }
+            {
+                continue;
+            }
 
-        // Conjugating a certified root ball of a real polynomial produces
-        // another certified one-root ball. If that ball contains, or is
-        // contained in, b's ball, both balls contain the same conjugate root.
-        let conjugate_center_distance = ComplexRootInterval::norm_upper_bound(&Complex::new(
-            &a.center.re - &b.center.re,
-            &a.center.im + &b.center.im,
-        ));
-        let (smaller_radius, larger_radius) = if a.radius < b.radius {
-            (&a.radius, &b.radius)
-        } else {
-            (&b.radius, &a.radius)
-        };
-        conjugate_center_distance + smaller_radius <= *larger_radius
+            // Conjugating a certified root ball of a real polynomial produces
+            // another certified one-root ball. It cannot be certified disjoint
+            // from the ball containing the conjugate root. Only use the match
+            // when it is unique: this proves which isolated root is the
+            // conjugate without requiring either independently refined ball to
+            // contain the other.
+            let mut conjugate = None;
+            for (j, candidate) in roots.iter().enumerate() {
+                let Some(candidate_poly) = candidate.poly.as_ref() else {
+                    continue;
+                };
+                if poly.coefficients != candidate_poly.coefficients {
+                    continue;
+                }
+
+                let center_distance = ComplexRootInterval::norm_lower_bound(&Complex::new(
+                    &roots[i].center.re - &candidate.center.re,
+                    &roots[i].center.im + &candidate.center.im,
+                ));
+                if center_distance <= &roots[i].radius + &candidate.radius {
+                    if conjugate.is_some() {
+                        conjugate = None;
+                        break;
+                    }
+                    conjugate = Some(j);
+                }
+            }
+
+            if let Some(j) = conjugate {
+                equal[i * roots.len() + j] = true;
+                equal[j * roots.len() + i] = true;
+            }
+        }
+        equal
     }
 
     fn roots_with_unresolved_real_projection_overlaps(
@@ -2310,6 +2339,12 @@ impl UnivariatePolynomial<RationalField> {
         ) {
             return None;
         }
+
+        Self::sort_complex_roots_canonical(&mut roots);
+        for (index, root) in roots.iter_mut().enumerate() {
+            root.index = Some(index);
+        }
+
         Some(roots)
     }
 
@@ -3939,6 +3974,33 @@ mod test {
         assert!(roots[1].imaginary && roots[1].center.im.is_negative());
         assert!(roots[2].imaginary && roots[2].center.im > Rational::zero());
         assert!(roots[3].real);
+    }
+
+    #[test]
+    fn complex_root_isolation_handles_non_axis_binomial() {
+        let p = parse!("x^8-2")
+            .to_polynomial::<_, u16>(&Q, None)
+            .to_univariate_from_univariate(0);
+        let roots = p.isolate_complex_roots(Some(Rational::from((1, 1 << 16))));
+
+        assert_eq!(roots.len(), 8);
+        assert_eq!(roots.iter().filter(|root| root.real).count(), 2);
+        assert_eq!(roots.iter().filter(|root| root.imaginary).count(), 2);
+        assert_pairwise_isolated(&roots);
+        assert!(roots[0].real);
+        assert!(roots[1].center.im.is_negative());
+        assert!(roots[2].center.im > Rational::zero());
+        assert!(roots[3].imaginary && roots[3].center.im.is_negative());
+        assert!(roots[4].imaginary && roots[4].center.im > Rational::zero());
+        assert!(roots[5].center.im.is_negative());
+        assert!(roots[6].center.im > Rational::zero());
+        assert!(roots[7].real);
+        assert!(
+            roots
+                .iter()
+                .enumerate()
+                .all(|(index, root)| root.index() == Some(index))
+        );
     }
 
     fn complex_root_contains(root: &ComplexRootInterval, re: Rational, im: Rational) -> bool {

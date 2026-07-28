@@ -1890,6 +1890,24 @@ class Expression:
         Take the square root of this expression, returning the result.
         """
 
+    def root(self, index: int, variable: Expression | None = None) -> Expression:
+        """
+        Construct the root with index `index` of the polynomial represented by
+        this expression. If `variable` is provided, explicitly select it as the
+        polynomial variable.
+
+        Examples
+        --------
+        >>> E("x^3-1").root(1) == E("root(x^3-1,1)")
+        True
+
+        If the polynomial contains parameters, explicitly select the polynomial
+        variable:
+        >>> x = E("x")
+        >>> E("x^2-a").root(1, x) == E("root(x^2-a,x,1)")
+        True
+        """
+
     def abs(self) -> Expression:
         """
         Take the absolute value of this expression, returning the result.
