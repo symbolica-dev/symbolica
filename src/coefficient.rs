@@ -33,7 +33,7 @@ use crate::{
             Zp64,
         },
         float::{Complex, F64, Float, FloatField, FloatLike, Real, RealLike, SingleFloat},
-        integer::{Integer, IntegerRing, Z},
+        integer::{Integer, IntegerRing, SMALL_PRIMES, Z},
         rational::{Fraction, Q, Rational},
         rational_polynomial::{FromNumeratorAndDenominator, RationalPolynomial},
     },
@@ -159,6 +159,22 @@ impl Coefficient {
             Coefficient::Float(f) => Coefficient::Float(f.conj()),
             Coefficient::FiniteField(n, i) => Coefficient::FiniteField(*n, *i),
             Coefficient::RationalPolynomial(p) => Coefficient::RationalPolynomial(p.clone()),
+        }
+    }
+
+    pub fn is_integer(&self) -> bool {
+        match self {
+            Coefficient::Complex(c) => c.is_real() && c.re.is_integer(),
+            _ => false,
+        }
+    }
+
+    pub fn is_real(&self) -> bool {
+        match self {
+            Coefficient::Complex(c) => c.is_real(),
+            Coefficient::Float(f) => f.is_real(),
+            Coefficient::Infinity(Some(d)) => d.is_real(),
+            _ => false,
         }
     }
 }
@@ -1479,62 +1495,140 @@ impl CoefficientView<'_> {
             return (Coefficient::one(), self.to_owned(), other.to_owned());
         }
 
-        fn simplify_perfect_power(mut base: Rational, mut exp: Rational) -> (Rational, Rational) {
-            if let Some(d) = exp.denominator_ref().to_i64() {
-                if d > 1 && d < u32::MAX as i64 {
-                    assert!(!base.numerator_ref().is_negative());
-                    let root_num = base.numerator_ref().root(d as u32);
-                    let root_den = base.denominator_ref().root(d as u32);
+        /// Return `(extracted, rest)` such that
+        /// `base = extracted^denominator * rest`,
+        /// with `rest` denominator-th-power-free.
+        fn simplify_perfect_power_factors(
+            mut base: Integer,
+            denominator: u32,
+        ) -> (Integer, Integer) {
+            debug_assert!(!base.is_negative());
+            debug_assert!(denominator > 1);
 
-                    if root_num.pow(d as u64) == *base.numerator_ref()
-                        && root_den.pow(d as u64) == *base.denominator_ref()
-                    {
-                        base = Rational::from((root_num, root_den));
-                        exp = Rational::from(exp.numerator());
+            if base <= 1 || base.root(denominator).is_one() {
+                return (Integer::one(), base);
+            }
+
+            let denominator_integer = Integer::from(denominator);
+            let mut extracted = Integer::one();
+            let mut rest = Integer::one();
+
+            for prime in SMALL_PRIMES.into_iter().map(|prime| prime as u64) {
+                let prime_integer = Integer::from(prime);
+                if prime_integer.pow(denominator as u64) > base {
+                    rest *= base;
+                    return (extracted, rest);
+                }
+
+                let mut count = Integer::zero();
+                while &base % prime == 0 {
+                    base /= prime;
+                    count += 1;
+                }
+
+                if !count.is_zero() {
+                    let occurrences = &count / &denominator_integer;
+                    let remainder = count - &occurrences * &denominator_integer;
+                    if !occurrences.is_zero() {
+                        extracted *= prime_integer.pow_i(occurrences);
                     }
+                    if !remainder.is_zero() {
+                        rest *= Integer::from(prime).pow_i(remainder);
+                    }
+                }
+
+                if base.is_one() {
+                    return (extracted, rest);
                 }
             }
 
-            (base, exp)
+            let root = base.root(denominator);
+            if root.pow(denominator as u64) == base {
+                extracted *= root;
+                return (extracted, rest);
+            }
+
+            for (prime, count) in base.factor() {
+                let occurrences = &count / &denominator_integer;
+                let remainder = count - &occurrences * &denominator_integer;
+                if !occurrences.is_zero() {
+                    extracted *= prime.pow_i(occurrences);
+                }
+                if !remainder.is_zero() {
+                    rest *= prime.pow_i(remainder);
+                }
+            }
+
+            (extracted, rest)
+        }
+
+        fn simplify_rational_perfect_power_factors(
+            base: Rational,
+            denominator: u32,
+        ) -> (Rational, Rational) {
+            debug_assert!(!base.is_negative());
+            let (extracted_numerator, rest_numerator) =
+                simplify_perfect_power_factors(base.numerator(), denominator);
+            let (extracted_denominator, rest_denominator) =
+                simplify_perfect_power_factors(base.denominator(), denominator);
+            (
+                Rational::from((extracted_numerator, extracted_denominator)),
+                Rational::from((rest_numerator, rest_denominator)),
+            )
         }
 
         fn rat_pow(
             mut base: Rational,
             mut exp: Rational,
         ) -> (Complex<Rational>, Rational, Rational) {
+            if !base.is_one()
+                && !exp.is_integer()
+                && let Some(denominator) = exp
+                    .denominator_ref()
+                    .to_u64()
+                    .and_then(|d| u32::try_from(d).ok())
+                && denominator > 1
+            {
+                let absolute_base = base.abs();
+                let (extracted, rest) =
+                    simplify_rational_perfect_power_factors(absolute_base, denominator);
+
+                if !extracted.is_one() {
+                    let numerator = exp.numerator_ref().to_i64().unwrap();
+                    let extracted = if numerator < 0 {
+                        extracted.inv().pow(numerator.unsigned_abs())
+                    } else {
+                        extracted.pow(numerator.unsigned_abs())
+                    };
+                    let rest = if base.is_negative() { -rest } else { rest };
+                    let (coefficient, base, exp) = rat_pow(rest, exp);
+                    return (coefficient * Complex::from(extracted), base, exp);
+                }
+            }
+
             if base.is_one() {
                 (Rational::one().into(), Rational::one(), Rational::one())
             } else if base.is_negative() && !exp.is_integer() {
                 let pow = exp.numerator() / exp.denominator();
                 let rest = exp.numerator() - &pow * exp.denominator();
 
-                let mut base_integer_pow = if pow.is_negative() {
+                let base_integer_pow = if pow.is_negative() {
                     base.inv().pow(pow.to_i64().unwrap().unsigned_abs())
                 } else {
                     base.pow(pow.to_i64().unwrap().unsigned_abs())
                 };
 
                 if exp.denominator_ref() == &2 {
-                    (base, exp) = simplify_perfect_power(base.abs(), exp);
-
                     (
                         if rest.is_negative() {
                             Complex::new(Rational::zero(), -base_integer_pow)
                         } else {
                             Complex::new(Rational::zero(), base_integer_pow)
                         },
-                        base,
+                        base.abs(),
                         Rational::from_int_unchecked(rest, exp.denominator()),
                     )
                 } else {
-                    let (new_base, new_exp) = simplify_perfect_power(base.abs(), exp.clone());
-
-                    if new_exp.is_integer() {
-                        // integer extraction worked
-                        base_integer_pow *= new_base;
-                        base = (-1).into();
-                    }
-
                     (
                         base_integer_pow.into(),
                         base,
@@ -1542,14 +1636,33 @@ impl CoefficientView<'_> {
                     )
                 }
             } else {
-                (base, exp) = simplify_perfect_power(base, exp);
-
                 if exp < 0 {
                     base = base.inv();
                     exp = -exp;
                 }
 
                 base = base.pow(exp.numerator().to_i64().unwrap().unsigned_abs());
+                if let Some(denominator) = exp
+                    .denominator_ref()
+                    .to_u64()
+                    .and_then(|d| u32::try_from(d).ok())
+                    && denominator > 1
+                {
+                    let (extracted, rest) =
+                        simplify_rational_perfect_power_factors(base, denominator);
+                    if !extracted.is_one() {
+                        return if rest.is_one() {
+                            (extracted.into(), Rational::one(), Rational::one())
+                        } else {
+                            (
+                                extracted.into(),
+                                rest,
+                                Rational::from_int_unchecked(Integer::one(), exp.denominator()),
+                            )
+                        };
+                    }
+                    base = rest;
+                }
                 (
                     Rational::one().into(),
                     base,
@@ -3435,20 +3548,27 @@ mod test {
         assert_eq!(parse!("(-2)^(1/2)"), parse!("1i*2^(1/2)"));
         assert_eq!(parse!("(-2)^(-5/3)"), parse!("-1/2*(-2)^(-2/3)"));
         assert_eq!(parse!("(-2)^(-5/2)"), parse!("-1i/4*(1/2)^(1/2)"));
-        assert_eq!(parse!("(2)^(-5/2)"), parse!("(1/32)^(1/2)"));
+        assert_eq!(parse!("(2)^(-5/2)"), parse!("1/4*(1/2)^(1/2)"));
         assert_eq!(parse!("(4)^(1/2)"), parse!("2"));
         assert_eq!(parse!("(1/4)^(1/2)"), parse!("1/2"));
         assert_eq!(parse!("(-1/4)^(1/2)"), parse!("1i/2"));
         assert_eq!(parse!("(27)^(1/3)"), parse!("3"));
         assert_eq!(parse!("(-1/27)^(1/3)"), parse!("1/3*(-1)^(1/3)"));
         assert_eq!(parse!("(27)^(2/3)"), parse!("9"));
+        assert_eq!(parse!("8^(-1/3)"), parse!("1/2"));
+        assert_eq!(parse!("72^(3/2)"), parse!("432*2^(1/2)"));
         assert_eq!(parse!("(-2)^(3)"), parse!("-8"));
         assert_eq!(parse!("(1)^(1/2)"), parse!("1"));
 
-        // A root may only be extracted from a rational when both its numerator
-        // and denominator are perfect powers.
-        assert_ne!(parse!("(4/3)^(1/2)"), parse!("2/sqrt(3)7"));
-        assert_ne!(parse!("(2850/39601)^(1/2)"), parse!("2850/199"));
+        assert_eq!(parse!("8^(1/2)"), parse!("2*2^(1/2)"));
+        assert_eq!(parse!("54^(1/3)"), parse!("3*2^(1/3)"));
+        assert_eq!(parse!("(-54)^(1/3)"), parse!("3*(-2)^(1/3)"));
+        assert_eq!(parse!("(4/3)^(1/2)"), parse!("2*(1/3)^(1/2)"));
+        assert_eq!(parse!("(2850/39601)^(1/2)"), parse!("5/199*114^(1/2)"));
+        assert_eq!(parse!("17408^(1/10)"), parse!("2*17^(1/10)"));
+        assert_eq!(parse!("166659413^(1/2)"), parse!("547*557^(1/2)"));
+        assert_eq!(parse!("1301820637^(1/2)"), parse!("10007*13^(1/2)"));
+        assert_eq!(parse!("(13/100140049)^(1/2)"), parse!("1/10007*13^(1/2)"));
     }
 
     #[test]
