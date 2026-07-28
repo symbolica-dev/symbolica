@@ -832,7 +832,8 @@ pub trait AtomCore: private::Sealed + Sized {
     /// conversion to lex, and exact algebraic roots. Every expression in
     /// `system` is understood to equal zero. Rational powers involving the
     /// solve variables are polynomialized with auxiliary variables, and
-    /// non-principal branches are filtered from the result.
+    /// non-principal branches are filtered from the result. Rational
+    /// denominators are cleared and their zero loci are excluded.
     ///
     /// # Example
     ///

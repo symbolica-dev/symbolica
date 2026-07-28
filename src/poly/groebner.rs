@@ -2976,6 +2976,67 @@ mod test {
     }
 
     #[test]
+    fn solve_ellipse_intersection_with_auxiliary_radii() {
+        let kx = PolyVariable::from(symbol!("kx"));
+        let ky = PolyVariable::from(symbol!("ky"));
+        let r0 = PolyVariable::from(symbol!("r0"));
+        let r1 = PolyVariable::from(symbol!("r1"));
+        let r2 = PolyVariable::from(symbol!("r2"));
+        let variables = Arc::new(vec![
+            kx.clone(),
+            ky.clone(),
+            r0.clone(),
+            r1.clone(),
+            r2.clone(),
+        ]);
+        let equations = [
+            "r0+r1-10",
+            "r0+r2-10",
+            "r0^2-kx^2-ky^2",
+            "r1^2-(kx+1)^2-(ky+2)^2",
+            "r2^2-(kx+6)^2-(ky+7)^2",
+        ];
+        let ideal: Vec<MultivariatePolynomial<_, u16>> = equations
+            .iter()
+            .map(|polynomial| parse!(polynomial).to_polynomial(&Q, Some(variables.clone())))
+            .collect();
+        let solutions = atom_solutions(GroebnerBasis::new(&ideal, false).solve().unwrap());
+
+        assert_eq!(solutions.len(), 2);
+        for solution in solutions {
+            let kx_value = solution.get(&kx).unwrap();
+            let ky_value = solution.get(&ky).unwrap();
+            let r0_value = solution.get(&r0).unwrap();
+            let r1_value = solution.get(&r1).unwrap();
+            let r2_value = solution.get(&r2).unwrap();
+
+            assert_algebraic_zero(r0_value.clone() + r1_value.clone() - Atom::num(10));
+            assert_algebraic_zero(r0_value.clone() + r2_value.clone() - Atom::num(10));
+            assert_algebraic_zero(
+                r0_value.clone().pow(Atom::num(2))
+                    - kx_value.clone().pow(Atom::num(2))
+                    - ky_value.clone().pow(Atom::num(2)),
+            );
+            assert_algebraic_zero(
+                r1_value.clone().pow(Atom::num(2))
+                    - (kx_value.clone() + Atom::num(1)).pow(Atom::num(2))
+                    - (ky_value.clone() + Atom::num(2)).pow(Atom::num(2)),
+            );
+            assert_algebraic_zero(
+                r2_value.clone().pow(Atom::num(2))
+                    - (kx_value.clone() + Atom::num(6)).pow(Atom::num(2))
+                    - (ky_value.clone() + Atom::num(7)).pow(Atom::num(2)),
+            );
+
+            // Positive auxiliary radii select the principal square-root
+            // branches of the original, non-polynomial equations.
+            assert!(f64::try_from(r0_value.to_float(16)).unwrap() > 0.0);
+            assert!(f64::try_from(r1_value.to_float(16)).unwrap() > 0.0);
+            assert!(f64::try_from(r2_value.to_float(16)).unwrap() > 0.0);
+        }
+    }
+
+    #[test]
     fn polynomial_solutions_stay_in_one_algebraic_field() {
         let ideal: Vec<MultivariatePolynomial<_, u16>> = ["x+y", "y^2-2"]
             .iter()

@@ -35,7 +35,6 @@ struct AuxiliaryPower {
     variable: PolyVariable,
     base: Atom,
     exponent: Atom,
-    numerator: i64,
     denominator: usize,
 }
 
@@ -133,20 +132,24 @@ impl AtomView<'_> {
                     return true;
                 };
                 let (base, exponent) = power.get_base_exp();
-                let Some((numerator, denominator)) = Self::rational_exponent_parts(exponent) else {
+                let Some((_, denominator)) = Self::rational_exponent_parts(exponent) else {
                     return true;
                 };
                 if denominator <= 1 {
                     return true;
                 }
 
-                let power = atom.to_owned();
+                // Use the primitive principal power base^(1/denominator) as
+                // the auxiliary. Other powers, including negative ones, are
+                // represented as integer powers of this generator by the
+                // rational-polynomial converter.
+                let exponent = Atom::num(Rational::from((1, denominator as i64)));
+                let power = base.pow(exponent.clone());
                 if seen.insert(power.clone()) {
                     powers.push(AuxiliaryPower {
                         variable: PolyVariable::Power(power),
                         base: base.to_owned(),
-                        exponent: exponent.to_owned(),
-                        numerator,
+                        exponent,
                         denominator,
                     });
                 }
@@ -199,6 +202,25 @@ impl AtomView<'_> {
         Ok(high_precision < 1e-40 && low_precision > 0.0 && high_precision < low_precision * 1e-12)
     }
 
+    fn algebraically_zero(expression: &Atom) -> Option<bool> {
+        let expression = expression.expand();
+        if expression.is_zero() {
+            return Some(true);
+        }
+
+        if let Ok(value) = Rational::try_from(expression.as_view()) {
+            return Some(value.is_zero());
+        }
+
+        if let Ok(Some(mut context)) = AlgebraicContext::from_atom(expression.as_view())
+            && let Ok(value) = context.convert_atom(expression.as_view())
+        {
+            return Some(context.field().is_zero(&value));
+        }
+
+        None
+    }
+
     fn auxiliary_branch_matches(
         auxiliary: &AuxiliaryPower,
         solution: &HashMap<PolyVariable, Atom>,
@@ -212,14 +234,8 @@ impl AtomView<'_> {
         let base = Self::substitute_algebraic_solution(auxiliary.base.as_view(), solution);
         let expected = base.pow(auxiliary.exponent.clone());
         let difference = (candidate.clone() - expected.clone()).expand();
-        if difference.is_zero() {
-            return Ok(true);
-        }
-
-        if let Ok(Some(mut context)) = AlgebraicContext::from_atom(difference.as_view())
-            && let Ok(value) = context.convert_atom(difference.as_view())
-        {
-            return Ok(context.field().is_zero(&value));
+        if let Some(is_zero) = Self::algebraically_zero(&difference) {
+            return Ok(is_zero);
         }
 
         Self::numerically_zero(&difference)
@@ -233,6 +249,8 @@ impl AtomView<'_> {
     /// triangular back-substitution. Rational powers such as `sqrt(x+3)` are
     /// replaced by auxiliary polynomial variables and defining equations;
     /// solutions on non-principal power branches are removed afterwards.
+    /// Denominators involving solve variables are cleared before constructing
+    /// the basis, and solutions on their zero loci are rejected.
     /// Rational-power auxiliaries combined with parameters are not yet
     /// supported because selecting their analytic branch requires assumptions
     /// on the parameters. Parametric results describe the generic parameter
@@ -312,14 +330,28 @@ impl AtomView<'_> {
                 .collect());
         }
 
+        let mut denominators = Vec::new();
         let mut polynomials = system
             .iter()
             .map(|expression| {
-                let polynomial = expression
+                let rational: RationalPolynomial<_, E> = expression
                     .as_atom_view()
-                    .to_polynomial_impl::<_, E>(&Q, &variable_map)
+                    .try_to_rational_polynomial_preserve_power_variables(
+                        &Q,
+                        &Z,
+                        Some(variable_map.clone()),
+                    )
                     .map_err(|error| SolveError::Other(error.to_string()))?;
-                Ok(polynomial.reorder::<GrevLexOrder>())
+                let numerator = rational
+                    .numerator
+                    .map_coeff(|coefficient| coefficient.into(), Q);
+                let denominator = rational
+                    .denominator
+                    .map_coeff(|coefficient| coefficient.into(), Q);
+                if !denominator.is_one() {
+                    denominators.push(denominator);
+                }
+                Ok(numerator.reorder::<GrevLexOrder>())
             })
             .collect::<Result<Vec<MultivariatePolynomial<_, E, GrevLexOrder>>, SolveError>>()?
             .into_iter()
@@ -332,19 +364,26 @@ impl AtomView<'_> {
                 let helper = prototype
                     .variable(&auxiliary.variable)
                     .map_err(SolveError::Other)?;
-                let base = auxiliary
+                let base: RationalPolynomial<_, E> = auxiliary
                     .base
                     .as_view()
-                    .to_polynomial_impl::<_, E>(&Q, &variable_map)
+                    .try_to_rational_polynomial_preserve_power_variables(
+                        &Q,
+                        &Z,
+                        Some(variable_map.clone()),
+                    )
                     .map_err(|error| SolveError::Other(error.to_string()))?;
-                let relation = if auxiliary.numerator > 0 {
-                    helper.pow(auxiliary.denominator)
-                        - base.pow(auxiliary.numerator.unsigned_abs() as usize)
-                } else {
-                    helper.pow(auxiliary.denominator)
-                        * &base.pow(auxiliary.numerator.unsigned_abs() as usize)
-                        - prototype.one()
-                };
+                let base_numerator = base
+                    .numerator
+                    .map_coeff(|coefficient| coefficient.into(), Q);
+                let base_denominator = base
+                    .denominator
+                    .map_coeff(|coefficient| coefficient.into(), Q);
+                let relation =
+                    helper.pow(auxiliary.denominator) * &base_denominator - base_numerator;
+                if !base_denominator.is_one() {
+                    denominators.push(base_denominator);
+                }
                 polynomials.push(relation.reorder::<GrevLexOrder>());
             }
         }
@@ -359,12 +398,28 @@ impl AtomView<'_> {
             .map(|solution| solution.to_atom_map().map_err(SolveError::Other))
             .collect::<Result<Vec<_>, _>>()?;
 
-        if auxiliaries.is_empty() {
+        if auxiliaries.is_empty() && denominators.is_empty() {
             return Ok(solutions);
         }
 
         let mut filtered = Vec::new();
         'solutions: for solution in solutions {
+            for denominator in &denominators {
+                let denominator = Self::substitute_algebraic_solution(
+                    denominator.to_expression().as_view(),
+                    &solution,
+                );
+                match Self::algebraically_zero(&denominator) {
+                    Some(true) => continue 'solutions,
+                    Some(false) => {}
+                    None => {
+                        return Err(SolveError::Other(format!(
+                            "Could not determine whether denominator {denominator} is zero"
+                        )));
+                    }
+                }
+            }
+
             for auxiliary in &auxiliaries {
                 if !Self::auxiliary_branch_matches(auxiliary, &solution)
                     .map_err(SolveError::Other)?
@@ -1051,6 +1106,33 @@ mod test {
         let variables = [Atom::var(x)];
 
         let solutions = Atom::solve::<u16, _, Atom>(&system, &variables).unwrap();
+        assert!(solutions.is_empty());
+    }
+
+    #[test]
+    fn exact_solve_supports_rational_radical_equations() {
+        let x = symbol!("x");
+        let system = [parse!("1/x+1/sqrt(x)-1")];
+        let variables = [Atom::var(x)];
+
+        let solutions = Atom::solve::<u16, _, Atom>(&system, &variables).unwrap();
+
+        assert_eq!(solutions.len(), 1);
+        let x_value = solutions[0].get(&PolyVariable::from(x)).unwrap();
+        assert_algebraic_zero(x_value.clone() - parse!("(3+sqrt(5))/2"));
+        assert_algebraic_zero(
+            x_value.clone().pow(Atom::num(-1)) + x_value.clone().pow(parse!("-1/2")) - Atom::num(1),
+        );
+    }
+
+    #[test]
+    fn exact_solve_rejects_a_zero_of_a_cleared_denominator() {
+        let x = symbol!("x");
+        let system = [parse!("(sqrt(x)-1)/(x-1)")];
+        let variables = [Atom::var(x)];
+
+        let solutions = Atom::solve::<u16, _, Atom>(&system, &variables).unwrap();
+
         assert!(solutions.is_empty());
     }
 

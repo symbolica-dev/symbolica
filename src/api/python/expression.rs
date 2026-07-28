@@ -7027,7 +7027,8 @@ impl PythonExpression {
     /// use a grevlex Gröbner basis, FGLM conversion to lex, and exact algebraic
     /// roots. Rational powers such as `sqrt(x+3)` are polynomialized using
     /// auxiliary variables, after which solutions on non-principal branches
-    /// are filtered out.
+    /// are filtered out. Rational denominators are cleared and solutions where
+    /// they vanish are rejected.
     ///
     /// Examples
     /// --------

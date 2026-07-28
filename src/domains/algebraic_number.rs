@@ -1689,6 +1689,7 @@ impl AtomView<'_> {
                         } else {
                             let mut selected_factor = None;
                             for (factor, _) in factors {
+                                let factor = factor.make_monic();
                                 let degree = factor.degree(0) as usize;
                                 if degree <= 1 {
                                     continue;
@@ -1731,6 +1732,7 @@ impl AtomView<'_> {
 
                         let mut selected = None;
                         for (factor, _) in poly.factor() {
+                            let factor = factor.make_monic();
                             let Some(embedding) = positive_real_root_index(&factor) else {
                                 continue;
                             };
