@@ -4273,6 +4273,10 @@ mod tests {
             parse!("root(1-10*root_var^2+root_var^4,3)")
         );
         assert_eq!(parse!("root(z-(1+1i),0)"), parse!("1+1i"));
+        assert_eq!(
+            parse!("root((1+x)^2*(2^(1/2)+x^4),3)"),
+            parse!("root(-2+root_var^8,2)")
+        );
     }
 
     #[test]
