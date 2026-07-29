@@ -4162,6 +4162,9 @@ mod tests {
         assert_eq!(roots[4], parse!("root(3+x^3,2)"));
         assert_eq!(roots[5], parse!("1-1i"));
         assert_eq!(roots[6], parse!("1+1i"));
+
+        assert_eq!(parse!("root((1+x)^2*(2+x),1)"), parse!("-1"));
+        assert_eq!(parse!("root((1+x)^2*(2+x),2)"), parse!("-1"));
     }
 
     #[test]

@@ -1365,14 +1365,15 @@ impl UnivariatePolynomial<RationalField> {
 
     /// Gets the `index`-th root of the polynomial. Fails when `index` is out of bounds.
     pub fn get_root(&self, index: usize) -> Option<ComplexRootInterval> {
-        if index > self.degree() {
+        if index >= self.degree() {
             return None;
         }
 
         if let Some(rs) = ROOT_CACHE.roots.read().unwrap().get(&self.coefficients) {
-            Some(rs[index].clone())
+            RootCache::select_indexed_root(rs, index).cloned()
         } else {
-            self.isolate_complex_roots(None).get(index).cloned()
+            let roots = self.isolate_complex_roots(None);
+            RootCache::select_indexed_root(&roots, index).cloned()
         }
     }
 
@@ -2310,6 +2311,12 @@ impl UnivariatePolynomial<RationalField> {
         ) {
             return None;
         }
+
+        Self::sort_complex_roots_canonical(&mut roots);
+        for (index, root) in roots.iter_mut().enumerate() {
+            root.index = Some(index);
+        }
+
         Some(roots)
     }
 
