@@ -1267,6 +1267,47 @@ impl<'a> AtomView<'a> {
         false
     }
 
+    /// Returns true iff `self` contains a wildcard symbol.
+    pub(crate) fn contains_wildcard(&self) -> bool {
+        let mut stack = Vec::with_capacity(20);
+        stack.push(*self);
+        while let Some(c) = stack.pop() {
+            match c {
+                AtomView::Num(_) => {}
+                AtomView::Var(v) => {
+                    if v.get_symbol().get_wildcard_level() > 0 {
+                        return true;
+                    }
+                }
+                AtomView::Fun(f) => {
+                    if f.get_symbol().get_wildcard_level() > 0 {
+                        return true;
+                    }
+                    for arg in f {
+                        stack.push(arg);
+                    }
+                }
+                AtomView::Pow(p) => {
+                    let (base, exp) = p.get_base_exp();
+                    stack.push(base);
+                    stack.push(exp);
+                }
+                AtomView::Mul(m) => {
+                    for child in m {
+                        stack.push(child);
+                    }
+                }
+                AtomView::Add(a) => {
+                    for child in a {
+                        stack.push(child);
+                    }
+                }
+            }
+        }
+
+        false
+    }
+
     pub(crate) fn visitor<F: FnMut(AtomView<'a>) -> bool>(&self, v: &mut F) {
         match self {
             AtomView::Num(_) | AtomView::Var(_) => {
@@ -5013,7 +5054,7 @@ impl<'a, 'b> FnMatchIterator<'a, 'b> {
                         self.target,
                         match_stack,
                         true,
-                        !target_name.is_antisymmetric() && !target_name.is_symmetric(),
+                        !target_name.is_symmetric(),
                         target_name.is_cyclesymmetric(),
                     );
                 }
