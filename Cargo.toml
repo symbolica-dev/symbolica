@@ -36,11 +36,15 @@ default = ["tracing_max_level_info", "faster_alloc", "gmp", "native_code_generat
 faster_alloc = ["mimalloc"]
 gmp = ["dep:rug", "numerica/gmp", "graphica/gmp"]
 no_gmp = ["numerica/no_gmp", "graphica/no_gmp"]
-wasm = ["no_gmp", "dep:getrandom"]
+wasm = ["no_gmp", "binary_size", "dep:getrandom"]
 native_code_generation = ["dep:libloading", "dep:symjit"]
 # sort functions based on an argument-by-argument comparison
 full_fn_cmp = []
 mathematica_api = ["wolfram-library-link"]
+# Reduce monomorphized polynomial code in internal modular GCD routines by using
+# FiniteField<u64> only instead of compiling both FiniteField<u32> and
+# FiniteField<u64> paths.
+binary_size = []
 # create a Python module
 python_api = [
     "pyo3/extension-module",
