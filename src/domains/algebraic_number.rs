@@ -5,6 +5,7 @@ use std::{
     sync::{Arc, LazyLock, RwLock},
 };
 
+use numerica::domains::float::{Float, RealLike};
 use rand::Rng;
 
 use crate::{
@@ -34,7 +35,7 @@ use crate::{
 use super::{
     EuclideanDomain, Field, InternalOrdering, Ring, SelfRing,
     finite_field::{FiniteField, FiniteFieldCore, FiniteFieldWorkspace, ToFiniteField},
-    float::Complex,
+    float::{Complex, FloatField},
     integer::{Integer, IntegerRing, Z},
     rational::Rational,
 };
@@ -800,6 +801,12 @@ impl AlgebraicContext {
 
     pub fn image(&self, atom: &Atom) -> Option<&AlgebraicNumber<Q>> {
         self.images.get(atom)
+    }
+
+    /// Record the image of an atom that is already known to belong to the
+    /// current field.
+    pub(crate) fn insert_image(&mut self, atom: Atom, image: AlgebraicNumber<Q>) {
+        self.images.insert(atom, image);
     }
 
     /// Convert a field element to an atom and cache that representation.
@@ -2865,7 +2872,7 @@ impl AlgebraicExtension<Q> {
         value
     }
 
-    fn is_positive_real(&self, element: &AlgebraicNumber<Q>) -> Result<bool, String> {
+    pub(crate) fn is_positive_real(&self, element: &AlgebraicNumber<Q>) -> Result<bool, String> {
         if self.is_zero(element) {
             return Ok(false);
         }
@@ -2945,6 +2952,85 @@ impl AlgebraicExtension<Q> {
 
         Err(format!(
             "Could not determine the sign of {} in {}",
+            element, self
+        ))
+    }
+
+    /// Determine the sign of the real part at this field's embedding without
+    /// first constructing a minimal polynomial for `element`.
+    ///
+    /// A non-real value whose real part is numerically indistinguishable from
+    /// zero is classified as not positive.
+    pub(crate) fn has_positive_real_part(
+        &self,
+        element: &AlgebraicNumber<Q>,
+    ) -> Result<bool, String> {
+        if element.poly.is_constant() {
+            let constant = element.poly.get_constant();
+            return Ok(!constant.is_negative() && !constant.is_zero());
+        }
+
+        let polynomial = self.poly.to_univariate_from_univariate(0);
+        if let Some(root) = polynomial.get_root(self.embedding) {
+            let value = Self::evaluate_at_root(element, &root);
+            if &value.center.re - &value.radius > Rational::zero() {
+                return Ok(true);
+            }
+            if &value.center.re + &value.radius < Rational::zero() {
+                return Ok(false);
+            }
+
+            // A wide certified ball can make interval evaluation pessimistic
+            // for a high-degree expression. Refine its center numerically
+            // (without refining/re-sorting the entire algebraic root set) and
+            // use it when the sign is far from the numerical error scale.
+            let binary_precision = 128;
+            let root = root.to_float_center(binary_precision);
+            let field = FloatField::from_rep(Complex::new(
+                Float::with_val(binary_precision, 1),
+                Float::new(binary_precision),
+            ));
+            let element = element
+                .poly
+                .to_univariate_from_univariate(0)
+                .map_coeff(
+                    |coefficient| coefficient.to_multi_prec_float(binary_precision).into(),
+                    field,
+                )
+                .evaluate(&root);
+            let real = element.re.to_f64();
+            let imaginary = element.im.to_f64();
+            if real.abs() > 1e-30 {
+                return Ok(real > 0.0);
+            }
+            if imaginary.abs() > 1e-30 {
+                return Ok(false);
+            }
+        }
+
+        let mut binary_precision = 32u32;
+        for _ in 0..10 {
+            let root = polynomial
+                .isolate_complex_root(self.embedding, binary_precision)
+                .ok_or_else(|| {
+                    format!(
+                        "Embedding index {} is out of bounds for polynomial of degree {}",
+                        self.embedding,
+                        polynomial.degree()
+                    )
+                })?;
+            let value = Self::evaluate_at_root(element, &root);
+            if &value.center.re - &value.radius > Rational::zero() {
+                return Ok(true);
+            }
+            if &value.center.re + &value.radius < Rational::zero() {
+                return Ok(false);
+            }
+            binary_precision *= 2;
+        }
+
+        Err(format!(
+            "Could not determine the sign of the real part of {} in {}",
             element, self
         ))
     }

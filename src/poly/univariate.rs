@@ -877,7 +877,6 @@ impl RootCache {
         if !Self::refine_index_if_needed(roots, index, binary_prec) {
             return None;
         }
-        UnivariatePolynomial::<Q>::sort_complex_roots_canonical(roots);
         Self::select_indexed_root(roots, index).cloned()
     }
 
@@ -1031,7 +1030,9 @@ impl RootCache {
                 return false;
             }
 
-            UnivariatePolynomial::<Q>::sort_complex_roots_canonical(roots);
+            // Refinement changes only the certified ball, not the root it
+            // contains. The cached vector is already in canonical order;
+            // sorting it again can require costly real-projection algebra.
         }
 
         let Some(root_index) = Self::select_indexed_root_position(roots, index) else {

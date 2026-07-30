@@ -6,7 +6,7 @@ use std::{ops::Neg, sync::Arc};
 
 use ahash::{HashMap, HashSet};
 use numerica::domains::{
-    Field, Ring,
+    Field, Ring, RingOps,
     float::{Complex, Float, RealLike},
     rational::Rational,
 };
@@ -224,6 +224,7 @@ impl AtomView<'_> {
     fn auxiliary_branch_matches(
         auxiliary: &AuxiliaryPower,
         solution: &HashMap<PolyVariable, Atom>,
+        context: &mut AlgebraicContext,
     ) -> Result<bool, String> {
         let candidate = solution.get(&auxiliary.variable).ok_or_else(|| {
             format!(
@@ -231,6 +232,40 @@ impl AtomView<'_> {
                 auxiliary.variable
             )
         })?;
+
+        // The polynomial solver has already put the auxiliary and all solved
+        // variables in one algebraic field. For a positive real base, select
+        // the principal branch there: it is the unique positive real d-th
+        // root. This avoids rebuilding a compositum from the printed root
+        // expressions merely to rediscover an element already in the field.
+        let auxiliary_atom = auxiliary.variable.to_atom();
+        if let (Ok(candidate_value), Ok(base_value)) = (
+            context.convert_atom(auxiliary_atom.as_view()),
+            context.convert_atom(auxiliary.base.as_view()),
+        ) {
+            let field = context.field();
+            let relation = field.sub(
+                &field.pow(&candidate_value, auxiliary.denominator as u64),
+                &base_value,
+            );
+            if !field.is_zero(&relation) {
+                return Ok(false);
+            }
+            if field.is_zero(&base_value) {
+                return Ok(field.is_zero(&candidate_value));
+            }
+            if field.is_positive_real(&base_value).unwrap_or(false) {
+                // For d <= 4 the principal positive root is the only d-th
+                // root with positive real part. Checking that part directly
+                // avoids computing a second minimal polynomial when the
+                // primitive generator of the solution field is complex.
+                if auxiliary.denominator <= 4 {
+                    return field.has_positive_real_part(&candidate_value);
+                }
+                return field.is_positive_real(&candidate_value);
+            }
+        }
+
         let base = Self::substitute_algebraic_solution(auxiliary.base.as_view(), solution);
         let expected = base.pow(auxiliary.exponent.clone());
         let difference = (candidate.clone() - expected.clone()).expand();
@@ -421,7 +456,6 @@ impl AtomView<'_> {
             .into_iter()
             .filter(|polynomial| !polynomial.is_zero())
             .collect::<Vec<_>>();
-
         if !auxiliaries.is_empty() {
             let prototype = MultivariatePolynomial::<_, E>::new(&Q, None, variable_map.clone());
             for auxiliary in &auxiliaries {
@@ -455,25 +489,40 @@ impl AtomView<'_> {
         let basis = basis
             .change_order::<LexOrder>()
             .map_err(SolveError::Other)?;
-        let solutions = basis
-            .solve()
-            .map_err(SolveError::Other)?
-            .iter()
-            .map(|solution| solution.to_atom_map().map_err(SolveError::Other))
-            .collect::<Result<Vec<_>, _>>()?;
+        let polynomial_solutions = basis.solve().map_err(SolveError::Other)?;
 
         if auxiliaries.is_empty() && denominators.is_empty() {
-            return Ok(solutions);
+            return polynomial_solutions
+                .iter()
+                .map(|solution| solution.to_atom_map().map_err(SolveError::Other))
+                .collect();
         }
 
         let mut filtered = Vec::new();
-        'solutions: for solution in solutions {
+        'solutions: for polynomial_solution in polynomial_solutions {
+            let solution = polynomial_solution
+                .to_atom_map()
+                .map_err(SolveError::Other)?;
+            let mut context = AlgebraicContext::new(polynomial_solution.field().clone());
+            for (variable, value) in polynomial_solution.values() {
+                context.insert_image(variable.to_atom(), value.clone());
+                if let Some(atom) = solution.get(variable) {
+                    context.insert_image(atom.clone(), value.clone());
+                }
+            }
+
             for denominator in &denominators {
-                let denominator = Self::substitute_algebraic_solution(
-                    denominator.to_expression().as_view(),
-                    &solution,
-                );
-                match Self::algebraically_zero(&denominator) {
+                let denominator = denominator.to_expression();
+                let is_zero = context
+                    .convert_atom(denominator.as_view())
+                    .ok()
+                    .map(|value| context.field().is_zero(&value))
+                    .or_else(|| {
+                        let denominator =
+                            Self::substitute_algebraic_solution(denominator.as_view(), &solution);
+                        Self::algebraically_zero(&denominator)
+                    });
+                match is_zero {
                     Some(true) => continue 'solutions,
                     Some(false) => {}
                     None => {
@@ -485,7 +534,7 @@ impl AtomView<'_> {
             }
 
             for auxiliary in &auxiliaries {
-                if !Self::auxiliary_branch_matches(auxiliary, &solution)
+                if !Self::auxiliary_branch_matches(auxiliary, &solution, &mut context)
                     .map_err(SolveError::Other)?
                 {
                     continue 'solutions;
@@ -1060,6 +1109,42 @@ mod test {
                 Atom::Zero
             );
         }
+    }
+
+    #[test]
+    fn exact_solve_cubic_over_quadratic_extension() {
+        let x = symbol!("x");
+        let y = symbol!("y");
+        let system = [parse!("x^3+y+2"), parse!("y^2-3")];
+        let variables = [Atom::var(x), Atom::var(y)];
+
+        let solutions = Atom::solve::<u16, _, Atom>(&system, &variables).unwrap();
+        assert_eq!(solutions.len(), 6);
+
+        for solution in solutions {
+            let x_value = solution.get(&PolyVariable::from(x)).unwrap();
+            let y_value = solution.get(&PolyVariable::from(y)).unwrap();
+            assert_algebraic_zero(
+                x_value.clone().pow(Atom::num(3)) + y_value.clone() + Atom::num(2),
+            );
+            assert_algebraic_zero(y_value.clone().pow(Atom::num(2)) - Atom::num(3));
+        }
+    }
+
+    #[test]
+    fn exact_solve_cubic_with_algebraic_constant() {
+        let x = symbol!("x");
+        let y = symbol!("y");
+        let system = [parse!("x^3+y+sqrt(2)"), parse!("y^2-3")];
+        let variables = [Atom::var(x), Atom::var(y)];
+
+        let solutions = Atom::solve::<u16, _, Atom>(&system, &variables).unwrap();
+        assert_eq!(solutions.len(), 6);
+        assert!(solutions.iter().all(|solution| {
+            solution.contains_key(&PolyVariable::from(x))
+                && solution.contains_key(&PolyVariable::from(y))
+                && solution.len() == 2
+        }));
     }
 
     #[test]
