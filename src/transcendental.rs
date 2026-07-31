@@ -4168,6 +4168,23 @@ mod tests {
     }
 
     #[test]
+    fn root_factor_preserves_canonical_conjugate_indices() {
+        let roots = (0..4)
+            .map(|index| parse!(format!("root(((x-1)^2+100)*((x-1)^2+81),{index})")))
+            .collect::<Vec<_>>();
+
+        assert_eq!(
+            roots,
+            vec![
+                parse!("1-10i"),
+                parse!("1-9i"),
+                parse!("1+9i"),
+                parse!("1+10i"),
+            ]
+        );
+    }
+
+    #[test]
     fn gamma_exact_normalization() {
         assert_eq!(parse!("gamma(5)"), Atom::num(24));
         assert_eq!(parse!("gamma(1/2)"), parse!("pi^(1/2)"));

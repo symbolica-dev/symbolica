@@ -1484,6 +1484,23 @@ impl UnivariatePolynomial<RationalField> {
             .map(|index| roots[index].clone())
             .collect::<Vec<_>>();
         roots.clone_from_slice(&sorted);
+
+        // The root index is local to its defining polynomial. Aberth's output
+        // order is arbitrary, so assign these indices only after canonical
+        // sorting. This is also required when roots from multiple factors are
+        // sorted together: simplification uses the local index to select the
+        // same root of the irreducible factor.
+        let mut next_index_by_polynomial = HashMap::new();
+        for root in roots {
+            let Some(poly) = root.poly.as_ref() else {
+                continue;
+            };
+            let next_index = next_index_by_polynomial
+                .entry(poly.coefficients.clone())
+                .or_insert(0);
+            root.index = Some(*next_index);
+            *next_index += 1;
+        }
     }
 
     fn refine_real_projections_for_sort(roots: &mut [ComplexRootInterval]) {
