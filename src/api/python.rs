@@ -81,12 +81,8 @@ use crate::{
     },
     error,
     evaluate::{
-        BatchEvaluator, CompileOptions, CompiledComplexEvaluator, CompiledCudaComplexEvaluator,
-        CompiledCudaRealEvaluator, CompiledNumber, CompiledRealEvaluator,
-        CompiledSimdComplexEvaluator, CompiledSimdRealEvaluator, ComplexEvaluatorSettings,
-        CudaComplexf64, CudaLoadSettings, CudaRealf64, Dualizer, EvaluatorLoader, ExportSettings,
-        ExpressionEvaluator, FunctionMap, InlineASM, Instruction, JITCompilationSettings,
-        JITCompiledEvaluator, OptimizationSettings, Slot,
+        ComplexEvaluatorSettings, Dualizer, ExpressionEvaluator, FunctionMap, Instruction,
+        OptimizationSettings, Slot,
     },
     graph::{GenerationSettings, Graph, HalfEdge},
     id::{
@@ -112,6 +108,14 @@ use crate::{
     transcendental::TranscendentalFunctions,
     transformer::{StatsOptions, Transformer, TransformerError, TransformerState},
     try_parse, warn,
+};
+
+#[cfg(feature = "native_code_generation")]
+use crate::evaluate::{
+    BatchEvaluator, CompileOptions, CompiledComplexEvaluator, CompiledCudaComplexEvaluator,
+    CompiledCudaRealEvaluator, CompiledNumber, CompiledRealEvaluator, CompiledSimdComplexEvaluator,
+    CompiledSimdRealEvaluator, CudaComplexf64, CudaLoadSettings, CudaRealf64, EvaluatorLoader,
+    ExportSettings, InlineASM, JITCompilationSettings, JITCompiledEvaluator,
 };
 
 #[cfg(feature = "python_stubgen")]
@@ -363,12 +367,15 @@ pub fn create_symbolica_module<'a, 'b>(
     m.add_class::<PythonCondition>()?;
     m.add_class::<PythonReplacement>()?;
     m.add_class::<PythonExpressionEvaluator>()?;
-    m.add_class::<PythonCompiledRealExpressionEvaluator>()?;
-    m.add_class::<PythonCompiledComplexExpressionEvaluator>()?;
-    m.add_class::<PythonCompiledSimdRealExpressionEvaluator>()?;
-    m.add_class::<PythonCompiledSimdComplexExpressionEvaluator>()?;
-    m.add_class::<PythonCompiledCudaRealExpressionEvaluator>()?;
-    m.add_class::<PythonCompiledCudaComplexExpressionEvaluator>()?;
+    #[cfg(feature = "native_code_generation")]
+    {
+        m.add_class::<PythonCompiledRealExpressionEvaluator>()?;
+        m.add_class::<PythonCompiledComplexExpressionEvaluator>()?;
+        m.add_class::<PythonCompiledSimdRealExpressionEvaluator>()?;
+        m.add_class::<PythonCompiledSimdComplexExpressionEvaluator>()?;
+        m.add_class::<PythonCompiledCudaRealExpressionEvaluator>()?;
+        m.add_class::<PythonCompiledCudaComplexExpressionEvaluator>()?;
+    }
     m.add_class::<PythonRandomNumberGenerator>()?;
     m.add_class::<PythonPatternRestriction>()?;
     m.add_class::<PythonTermStreamer>()?;

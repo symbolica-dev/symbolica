@@ -7472,6 +7472,9 @@ impl PythonExpression {
         max_common_pair_distance: usize,
         py: Python,
     ) -> PyResult<PythonExpressionEvaluator> {
+        #[cfg(not(feature = "native_code_generation"))]
+        let _ = (jit_direct_translation, jit_optimization_level, &jit_options);
+
         let mut fn_map = FunctionMap::new();
 
         for ((symbol, args), body) in functions {
@@ -7557,9 +7560,11 @@ impl PythonExpression {
                 exceptions::PyValueError::new_err(format!("Could not create evaluator: {e}"))
             })?;
 
+        #[cfg(feature = "native_code_generation")]
         let mut jit_settings = JITCompilationSettings::new()
             .direct_translation(jit_direct_translation)
             .optimization_level(jit_optimization_level);
+        #[cfg(feature = "native_code_generation")]
         for (k, v) in jit_options {
             jit_settings = jit_settings.with_option(k, v);
         }
@@ -7568,13 +7573,16 @@ impl PythonExpression {
             rational_constants: eval.get_constants().to_vec(),
             eval_complex: eval.map_coeff(&|c| Complex::new(c.re.to_f64(), c.im.to_f64())),
             eval_real: None,
+            #[cfg(feature = "native_code_generation")]
             jit_real: None,
+            #[cfg(feature = "native_code_generation")]
             jit_complex: None,
             eval_double_float: None,
             eval_double_float_complex: None,
             eval_arb_prec: None,
             eval_arb_prec_complex: None,
-            jit_compile,
+            jit_compile: jit_compile && cfg!(feature = "native_code_generation"),
+            #[cfg(feature = "native_code_generation")]
             jit_settings,
         })
     }
@@ -7662,6 +7670,9 @@ impl PythonExpression {
         max_common_pair_distance: usize,
         py: Python,
     ) -> PyResult<PythonExpressionEvaluator> {
+        #[cfg(not(feature = "native_code_generation"))]
+        let _ = (jit_direct_translation, jit_optimization_level, &jit_options);
+
         let mut fn_map = FunctionMap::new();
 
         for ((symbol, args), body) in functions {
@@ -7747,9 +7758,11 @@ impl PythonExpression {
                 exceptions::PyValueError::new_err(format!("Could not create evaluator: {e}"))
             })?;
 
+        #[cfg(feature = "native_code_generation")]
         let mut jit_settings = JITCompilationSettings::new()
             .direct_translation(jit_direct_translation)
             .optimization_level(jit_optimization_level);
+        #[cfg(feature = "native_code_generation")]
         for (k, v) in jit_options {
             jit_settings = jit_settings.with_option(k, v);
         }
@@ -7758,13 +7771,16 @@ impl PythonExpression {
             rational_constants: eval.get_constants().to_vec(),
             eval_complex: eval.map_coeff(&|c| Complex::new(c.re.to_f64(), c.im.to_f64())),
             eval_real: None,
+            #[cfg(feature = "native_code_generation")]
             jit_real: None,
+            #[cfg(feature = "native_code_generation")]
             jit_complex: None,
             eval_double_float: None,
             eval_double_float_complex: None,
             eval_arb_prec: None,
             eval_arb_prec_complex: None,
-            jit_compile,
+            jit_compile: jit_compile && cfg!(feature = "native_code_generation"),
+            #[cfg(feature = "native_code_generation")]
             jit_settings,
         })
     }
