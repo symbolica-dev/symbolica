@@ -2380,8 +2380,14 @@ pub trait TranscendentalFunctions: AtomCore {
     }
 
     /// Construct the root function of `self` with index `index`.
+    /// If the polynomial is not univariate, use [Self::root_in] to specify the main variable.
     fn root(&self, index: usize) -> Self::Output {
         self.atom_to_output(root().call((self.as_atom_view(), index)))
+    }
+
+    /// Construct the root function of `self` in variable `var` with index `index`.
+    fn root_in(&self, var: Symbol, index: usize) -> Self::Output {
+        self.atom_to_output(root().call((self.as_atom_view(), var, index)))
     }
 }
 
