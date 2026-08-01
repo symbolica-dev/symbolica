@@ -1,4 +1,5 @@
 use super::*;
+use crate::atom::FunctionBuilder;
 use crate::utils::Settable;
 
 /// Operations that transform an expression.
@@ -1916,6 +1917,359 @@ pub struct PythonExpression {
     pub expr: Atom,
 }
 
+/// Built-in Symbolica symbols.
+#[cfg_attr(feature = "python_stubgen", gen_stub_pyclass)]
+#[pyclass(frozen, name = "Symbol", module = "symbolica.core")]
+pub struct PythonSymbol;
+
+#[cfg_attr(feature = "python_stubgen", gen_stub_pymethods)]
+#[cfg_attr(not(feature = "python_stubgen"), remove_gen_stub)]
+#[pymethods]
+impl PythonSymbol {
+    /// Euler's number `e`, approximately `2.7182`.
+    #[classattr]
+    #[pyo3(name = "E")]
+    pub fn e() -> PythonExpression {
+        Atom::var(Symbol::E).into()
+    }
+
+    /// The mathematical constant `π`, approximately `3.1415`.
+    #[classattr]
+    #[pyo3(name = "PI")]
+    pub fn pi() -> PythonExpression {
+        Atom::var(Symbol::PI).into()
+    }
+
+    /// The Euler-Mascheroni constant `γ`, approximately `0.57721`.
+    #[classattr]
+    #[pyo3(name = "EULER_GAMMA")]
+    pub fn euler_gamma() -> PythonExpression {
+        Atom::from(crate::transcendental::euler_gamma()).into()
+    }
+
+    /// The mathematical constant `i`, where `i^2 = -1`.
+    #[classattr]
+    #[pyo3(name = "I")]
+    pub fn i() -> PythonExpression {
+        Atom::i().into()
+    }
+
+    /// The number that represents infinity: `∞`.
+    #[classattr]
+    #[pyo3(name = "INFINITY")]
+    pub fn inf() -> PythonExpression {
+        Atom::num(Coefficient::Infinity(Some(Rational::one().into()))).into()
+    }
+
+    /// The number that represents infinity with an unknown complex phase: `⧞`.
+    #[classattr]
+    #[pyo3(name = "COMPLEX_INFINITY")]
+    pub fn cinf() -> PythonExpression {
+        Atom::num(Coefficient::Infinity(None)).into()
+    }
+
+    /// The number that represents indeterminacy: `¿`.
+    #[classattr]
+    #[pyo3(name = "INDETERMINATE")]
+    pub fn indeterminate() -> PythonExpression {
+        Atom::num(Coefficient::Indeterminate).into()
+    }
+
+    /// The built-in function that converts a rational polynomial to a coefficient.
+    #[classattr]
+    #[pyo3(name = "COEFF")]
+    pub fn coeff() -> PythonExpression {
+        Atom::var(Symbol::COEFF).into()
+    }
+
+    /// The built-in cosine function.
+    #[classattr]
+    #[pyo3(name = "COS")]
+    pub fn cos() -> PythonExpression {
+        Atom::var(Symbol::COS).into()
+    }
+
+    /// The built-in sine function.
+    #[classattr]
+    #[pyo3(name = "SIN")]
+    pub fn sin() -> PythonExpression {
+        Atom::var(Symbol::SIN).into()
+    }
+
+    /// The built-in exponential function.
+    #[classattr]
+    #[pyo3(name = "EXP")]
+    pub fn exp() -> PythonExpression {
+        Atom::var(Symbol::EXP).into()
+    }
+
+    /// The built-in logarithm function.
+    #[classattr]
+    #[pyo3(name = "LOG")]
+    pub fn log() -> PythonExpression {
+        Atom::var(Symbol::LOG).into()
+    }
+
+    /// The built-in square root function.
+    #[classattr]
+    #[pyo3(name = "SQRT")]
+    pub fn sqrt() -> PythonExpression {
+        Atom::var(Symbol::SQRT).into()
+    }
+
+    /// The built-in absolute value function.
+    #[classattr]
+    #[pyo3(name = "ABS")]
+    pub fn abs() -> PythonExpression {
+        Atom::var(Symbol::ABS).into()
+    }
+
+    /// The built-in complex conjugate function.
+    #[classattr]
+    #[pyo3(name = "CONJ")]
+    pub fn conj() -> PythonExpression {
+        Atom::var(Symbol::CONJ).into()
+    }
+
+    /// The built-in if function.
+    #[classattr]
+    #[pyo3(name = "IF")]
+    pub fn if_attr() -> PythonExpression {
+        Atom::var(Symbol::IF).into()
+    }
+
+    /// The built-in tangent function.
+    #[classattr]
+    #[pyo3(name = "TAN")]
+    pub fn tan() -> PythonExpression {
+        Atom::from(crate::transcendental::tan()).into()
+    }
+
+    /// The built-in cotangent function.
+    #[classattr]
+    #[pyo3(name = "COT")]
+    pub fn cot() -> PythonExpression {
+        Atom::from(crate::transcendental::cot()).into()
+    }
+
+    /// The built-in secant function.
+    #[classattr]
+    #[pyo3(name = "SEC")]
+    pub fn sec() -> PythonExpression {
+        Atom::from(crate::transcendental::sec()).into()
+    }
+
+    /// The built-in cosecant function.
+    #[classattr]
+    #[pyo3(name = "CSC")]
+    pub fn csc() -> PythonExpression {
+        Atom::from(crate::transcendental::csc()).into()
+    }
+
+    /// The built-in inverse sine function.
+    #[classattr]
+    #[pyo3(name = "ASIN")]
+    pub fn asin() -> PythonExpression {
+        Atom::from(crate::transcendental::asin()).into()
+    }
+
+    /// The built-in inverse cosine function.
+    #[classattr]
+    #[pyo3(name = "ACOS")]
+    pub fn acos() -> PythonExpression {
+        Atom::from(crate::transcendental::acos()).into()
+    }
+
+    /// The built-in inverse tangent function.
+    #[classattr]
+    #[pyo3(name = "ATAN")]
+    pub fn atan() -> PythonExpression {
+        Atom::from(crate::transcendental::atan()).into()
+    }
+
+    /// The built-in inverse cotangent function.
+    #[classattr]
+    #[pyo3(name = "ACOT")]
+    pub fn acot() -> PythonExpression {
+        Atom::from(crate::transcendental::acot()).into()
+    }
+
+    /// The built-in inverse secant function.
+    #[classattr]
+    #[pyo3(name = "ASEC")]
+    pub fn asec() -> PythonExpression {
+        Atom::from(crate::transcendental::asec()).into()
+    }
+
+    /// The built-in inverse cosecant function.
+    #[classattr]
+    #[pyo3(name = "ACSC")]
+    pub fn acsc() -> PythonExpression {
+        Atom::from(crate::transcendental::acsc()).into()
+    }
+
+    /// The built-in hyperbolic sine function.
+    #[classattr]
+    #[pyo3(name = "SINH")]
+    pub fn sinh() -> PythonExpression {
+        Atom::from(crate::transcendental::sinh()).into()
+    }
+
+    /// The built-in hyperbolic cosine function.
+    #[classattr]
+    #[pyo3(name = "COSH")]
+    pub fn cosh() -> PythonExpression {
+        Atom::from(crate::transcendental::cosh()).into()
+    }
+
+    /// The built-in hyperbolic tangent function.
+    #[classattr]
+    #[pyo3(name = "TANH")]
+    pub fn tanh() -> PythonExpression {
+        Atom::from(crate::transcendental::tanh()).into()
+    }
+
+    /// The built-in hyperbolic cotangent function.
+    #[classattr]
+    #[pyo3(name = "COTH")]
+    pub fn coth() -> PythonExpression {
+        Atom::from(crate::transcendental::coth()).into()
+    }
+
+    /// The built-in hyperbolic secant function.
+    #[classattr]
+    #[pyo3(name = "SECH")]
+    pub fn sech() -> PythonExpression {
+        Atom::from(crate::transcendental::sech()).into()
+    }
+
+    /// The built-in hyperbolic cosecant function.
+    #[classattr]
+    #[pyo3(name = "CSCH")]
+    pub fn csch() -> PythonExpression {
+        Atom::from(crate::transcendental::csch()).into()
+    }
+
+    /// The built-in inverse hyperbolic sine function.
+    #[classattr]
+    #[pyo3(name = "ASINH")]
+    pub fn asinh() -> PythonExpression {
+        Atom::from(crate::transcendental::asinh()).into()
+    }
+
+    /// The built-in inverse hyperbolic cosine function.
+    #[classattr]
+    #[pyo3(name = "ACOSH")]
+    pub fn acosh() -> PythonExpression {
+        Atom::from(crate::transcendental::acosh()).into()
+    }
+
+    /// The built-in inverse hyperbolic tangent function.
+    #[classattr]
+    #[pyo3(name = "ATANH")]
+    pub fn atanh() -> PythonExpression {
+        Atom::from(crate::transcendental::atanh()).into()
+    }
+
+    /// The built-in inverse hyperbolic cotangent function.
+    #[classattr]
+    #[pyo3(name = "ACOTH")]
+    pub fn acoth() -> PythonExpression {
+        Atom::from(crate::transcendental::acoth()).into()
+    }
+
+    /// The built-in inverse hyperbolic secant function.
+    #[classattr]
+    #[pyo3(name = "ASECH")]
+    pub fn asech() -> PythonExpression {
+        Atom::from(crate::transcendental::asech()).into()
+    }
+
+    /// The built-in inverse hyperbolic cosecant function.
+    #[classattr]
+    #[pyo3(name = "ACSCH")]
+    pub fn acsch() -> PythonExpression {
+        Atom::from(crate::transcendental::acsch()).into()
+    }
+
+    /// The built-in Riemann zeta function.
+    #[classattr]
+    #[pyo3(name = "ZETA")]
+    pub fn zeta() -> PythonExpression {
+        Atom::from(crate::transcendental::zeta()).into()
+    }
+
+    /// The built-in gamma function.
+    #[classattr]
+    #[pyo3(name = "GAMMA")]
+    pub fn gamma() -> PythonExpression {
+        Atom::from(crate::transcendental::gamma()).into()
+    }
+
+    /// The built-in error function.
+    #[classattr]
+    #[pyo3(name = "ERF")]
+    pub fn erf() -> PythonExpression {
+        Atom::from(crate::transcendental::erf()).into()
+    }
+
+    /// The built-in polygamma function.
+    #[classattr]
+    #[pyo3(name = "POLYGAMMA")]
+    pub fn polygamma() -> PythonExpression {
+        Atom::from(crate::transcendental::polygamma()).into()
+    }
+
+    /// The built-in polylogarithm function.
+    #[classattr]
+    #[pyo3(name = "POLYLOG")]
+    pub fn polylog() -> PythonExpression {
+        Atom::from(crate::transcendental::polylog()).into()
+    }
+
+    /// The built-in cylindrical Bessel function of the first kind.
+    #[classattr]
+    #[pyo3(name = "BESSEL_J")]
+    pub fn bessel_j() -> PythonExpression {
+        Atom::from(crate::transcendental::bessel_j()).into()
+    }
+
+    /// The built-in cylindrical Bessel function of the second kind.
+    #[classattr]
+    #[pyo3(name = "BESSEL_Y")]
+    pub fn bessel_y() -> PythonExpression {
+        Atom::from(crate::transcendental::bessel_y()).into()
+    }
+
+    /// The built-in modified Bessel function of the first kind.
+    #[classattr]
+    #[pyo3(name = "BESSEL_I")]
+    pub fn bessel_i() -> PythonExpression {
+        Atom::from(crate::transcendental::bessel_i()).into()
+    }
+
+    /// The built-in modified Bessel function of the second kind.
+    #[classattr]
+    #[pyo3(name = "BESSEL_K")]
+    pub fn bessel_k() -> PythonExpression {
+        Atom::from(crate::transcendental::bessel_k()).into()
+    }
+
+    /// The built-in algebraic root function.
+    #[classattr]
+    #[pyo3(name = "ROOT")]
+    pub fn root() -> PythonExpression {
+        Atom::from(crate::transcendental::root()).into()
+    }
+
+    /// The built-in alternative-pattern function.
+    #[classattr]
+    #[pyo3(name = "ALT")]
+    pub fn alt() -> PythonExpression {
+        Atom::var(Symbol::ALT).into()
+    }
+}
+
 pub enum PythonEvaluationValue {
     Real(PythonMultiPrecisionFloat),
     Complex(Complex<f64>),
@@ -3294,6 +3648,160 @@ impl PythonExpression {
         Atom::var(Symbol::SIN).into()
     }
 
+    /// The built-in tangent function.
+    #[classattr]
+    #[pyo3(name = "TAN")]
+    pub fn tan_attr() -> PythonExpression {
+        Atom::from(crate::transcendental::tan()).into()
+    }
+
+    /// The built-in cotangent function.
+    #[classattr]
+    #[pyo3(name = "COT")]
+    pub fn cot_attr() -> PythonExpression {
+        Atom::from(crate::transcendental::cot()).into()
+    }
+
+    /// The built-in secant function.
+    #[classattr]
+    #[pyo3(name = "SEC")]
+    pub fn sec_attr() -> PythonExpression {
+        Atom::from(crate::transcendental::sec()).into()
+    }
+
+    /// The built-in cosecant function.
+    #[classattr]
+    #[pyo3(name = "CSC")]
+    pub fn csc_attr() -> PythonExpression {
+        Atom::from(crate::transcendental::csc()).into()
+    }
+
+    /// The built-in inverse sine function.
+    #[classattr]
+    #[pyo3(name = "ASIN")]
+    pub fn asin_attr() -> PythonExpression {
+        Atom::from(crate::transcendental::asin()).into()
+    }
+
+    /// The built-in inverse cosine function.
+    #[classattr]
+    #[pyo3(name = "ACOS")]
+    pub fn acos_attr() -> PythonExpression {
+        Atom::from(crate::transcendental::acos()).into()
+    }
+
+    /// The built-in inverse tangent function.
+    #[classattr]
+    #[pyo3(name = "ATAN")]
+    pub fn atan_attr() -> PythonExpression {
+        Atom::from(crate::transcendental::atan()).into()
+    }
+
+    /// The built-in inverse cotangent function.
+    #[classattr]
+    #[pyo3(name = "ACOT")]
+    pub fn acot_attr() -> PythonExpression {
+        Atom::from(crate::transcendental::acot()).into()
+    }
+
+    /// The built-in inverse secant function.
+    #[classattr]
+    #[pyo3(name = "ASEC")]
+    pub fn asec_attr() -> PythonExpression {
+        Atom::from(crate::transcendental::asec()).into()
+    }
+
+    /// The built-in inverse cosecant function.
+    #[classattr]
+    #[pyo3(name = "ACSC")]
+    pub fn acsc_attr() -> PythonExpression {
+        Atom::from(crate::transcendental::acsc()).into()
+    }
+
+    /// The built-in hyperbolic sine function.
+    #[classattr]
+    #[pyo3(name = "SINH")]
+    pub fn sinh_attr() -> PythonExpression {
+        Atom::from(crate::transcendental::sinh()).into()
+    }
+
+    /// The built-in hyperbolic cosine function.
+    #[classattr]
+    #[pyo3(name = "COSH")]
+    pub fn cosh_attr() -> PythonExpression {
+        Atom::from(crate::transcendental::cosh()).into()
+    }
+
+    /// The built-in hyperbolic tangent function.
+    #[classattr]
+    #[pyo3(name = "TANH")]
+    pub fn tanh_attr() -> PythonExpression {
+        Atom::from(crate::transcendental::tanh()).into()
+    }
+
+    /// The built-in hyperbolic cotangent function.
+    #[classattr]
+    #[pyo3(name = "COTH")]
+    pub fn coth_attr() -> PythonExpression {
+        Atom::from(crate::transcendental::coth()).into()
+    }
+
+    /// The built-in hyperbolic secant function.
+    #[classattr]
+    #[pyo3(name = "SECH")]
+    pub fn sech_attr() -> PythonExpression {
+        Atom::from(crate::transcendental::sech()).into()
+    }
+
+    /// The built-in hyperbolic cosecant function.
+    #[classattr]
+    #[pyo3(name = "CSCH")]
+    pub fn csch_attr() -> PythonExpression {
+        Atom::from(crate::transcendental::csch()).into()
+    }
+
+    /// The built-in inverse hyperbolic sine function.
+    #[classattr]
+    #[pyo3(name = "ASINH")]
+    pub fn asinh_attr() -> PythonExpression {
+        Atom::from(crate::transcendental::asinh()).into()
+    }
+
+    /// The built-in inverse hyperbolic cosine function.
+    #[classattr]
+    #[pyo3(name = "ACOSH")]
+    pub fn acosh_attr() -> PythonExpression {
+        Atom::from(crate::transcendental::acosh()).into()
+    }
+
+    /// The built-in inverse hyperbolic tangent function.
+    #[classattr]
+    #[pyo3(name = "ATANH")]
+    pub fn atanh_attr() -> PythonExpression {
+        Atom::from(crate::transcendental::atanh()).into()
+    }
+
+    /// The built-in inverse hyperbolic cotangent function.
+    #[classattr]
+    #[pyo3(name = "ACOTH")]
+    pub fn acoth_attr() -> PythonExpression {
+        Atom::from(crate::transcendental::acoth()).into()
+    }
+
+    /// The built-in inverse hyperbolic secant function.
+    #[classattr]
+    #[pyo3(name = "ASECH")]
+    pub fn asech_attr() -> PythonExpression {
+        Atom::from(crate::transcendental::asech()).into()
+    }
+
+    /// The built-in inverse hyperbolic cosecant function.
+    #[classattr]
+    #[pyo3(name = "ACSCH")]
+    pub fn acsch_attr() -> PythonExpression {
+        Atom::from(crate::transcendental::acsch()).into()
+    }
+
     /// The built-in exponential function.
     #[classattr]
     #[pyo3(name = "EXP")]
@@ -3322,6 +3830,76 @@ impl PythonExpression {
         Atom::var(Symbol::ABS).into()
     }
 
+    /// The built-in Riemann zeta function.
+    #[classattr]
+    #[pyo3(name = "ZETA")]
+    pub fn zeta_attr() -> PythonExpression {
+        Atom::from(crate::transcendental::zeta()).into()
+    }
+
+    /// The built-in gamma function.
+    #[classattr]
+    #[pyo3(name = "GAMMA")]
+    pub fn gamma_attr() -> PythonExpression {
+        Atom::from(crate::transcendental::gamma()).into()
+    }
+
+    /// The built-in error function.
+    #[classattr]
+    #[pyo3(name = "ERF")]
+    pub fn erf_attr() -> PythonExpression {
+        Atom::from(crate::transcendental::erf()).into()
+    }
+
+    /// The built-in polygamma function.
+    #[classattr]
+    #[pyo3(name = "POLYGAMMA")]
+    pub fn polygamma_attr() -> PythonExpression {
+        Atom::from(crate::transcendental::polygamma()).into()
+    }
+
+    /// The built-in polylogarithm function.
+    #[classattr]
+    #[pyo3(name = "POLYLOG")]
+    pub fn polylog_attr() -> PythonExpression {
+        Atom::from(crate::transcendental::polylog()).into()
+    }
+
+    /// The built-in cylindrical Bessel function of the first kind.
+    #[classattr]
+    #[pyo3(name = "BESSEL_J")]
+    pub fn bessel_j_attr() -> PythonExpression {
+        Atom::from(crate::transcendental::bessel_j()).into()
+    }
+
+    /// The built-in cylindrical Bessel function of the second kind.
+    #[classattr]
+    #[pyo3(name = "BESSEL_Y")]
+    pub fn bessel_y_attr() -> PythonExpression {
+        Atom::from(crate::transcendental::bessel_y()).into()
+    }
+
+    /// The built-in modified Bessel function of the first kind.
+    #[classattr]
+    #[pyo3(name = "BESSEL_I")]
+    pub fn bessel_i_attr() -> PythonExpression {
+        Atom::from(crate::transcendental::bessel_i()).into()
+    }
+
+    /// The built-in modified Bessel function of the second kind.
+    #[classattr]
+    #[pyo3(name = "BESSEL_K")]
+    pub fn bessel_k_attr() -> PythonExpression {
+        Atom::from(crate::transcendental::bessel_k()).into()
+    }
+
+    /// The built-in algebraic root function.
+    #[classattr]
+    #[pyo3(name = "ROOT")]
+    pub fn root_attr() -> PythonExpression {
+        Atom::from(crate::transcendental::root()).into()
+    }
+
     /// The built-in complex conjugate function.
     #[classattr]
     #[pyo3(name = "CONJ")]
@@ -3334,6 +3912,13 @@ impl PythonExpression {
     #[pyo3(name = "IF")]
     pub fn if_attr() -> PythonExpression {
         Atom::var(Symbol::IF).into()
+    }
+
+    /// The built-in alternative-pattern function.
+    #[classattr]
+    #[pyo3(name = "ALT")]
+    pub fn alt_attr() -> PythonExpression {
+        Atom::var(Symbol::ALT).into()
     }
 
     /// Return all defined symbol names (function names and variables).
@@ -3981,6 +4566,27 @@ impl PythonExpression {
         match self.expr.as_ref() {
             Atom::Var(v) => Ok(v.get_symbol().get_name().to_string()),
             Atom::Fun(f) => Ok(f.get_symbol().get_name().to_string()),
+            _ => Err(exceptions::PyTypeError::new_err(format!(
+                "The expression {} is not a variable or function",
+                self.expr
+            ))),
+        }
+    }
+
+    /// Get the function symbol of a function or return the variable itself.
+    /// Throw an error if the current atom is neither a variable nor a function.
+    ///
+    /// Examples
+    /// --------
+    /// >>> x, f = S('x', 'f')
+    /// >>> f(x).get_head() == f
+    /// True
+    /// >>> x.get_head() == x
+    /// True
+    pub fn get_head(&self) -> PyResult<PythonExpression> {
+        match self.expr.as_ref() {
+            Atom::Var(v) => Ok(Atom::var(v.get_symbol()).into()),
+            Atom::Fun(f) => Ok(Atom::var(f.get_symbol()).into()),
             _ => Err(exceptions::PyTypeError::new_err(format!(
                 "The expression {} is not a variable or function",
                 self.expr
@@ -4738,6 +5344,47 @@ impl PythonExpression {
     ///     The transformer to bind to the expression.
     pub fn hold(&self, t: PythonTransformer) -> PyResult<PythonHeldExpression> {
         Ok(Pattern::Transformer(Box::new((Some(self.expr.to_pattern()), t.chain))).into())
+    }
+
+    /// Create an alternative pattern that matches this expression or any of the
+    /// supplied alternatives.
+    ///
+    /// Examples
+    /// --------
+    /// >>> x, y, z, w_ = S('x', 'y', 'z', 'w_')
+    /// >>> next(E('y*a').match(x.alt(y, z) * w_), None) is not None
+    /// True
+    ///
+    /// Parameters
+    /// ----------
+    /// other: Expression | int | float | complex | Decimal
+    ///     The first alternative.
+    /// others: Expression | int | float | complex | Decimal
+    ///     Additional alternatives.
+    #[pyo3(signature = (other, *others))]
+    pub fn alt(
+        &self,
+        other: ConvertibleToExpression,
+        #[gen_stub(override_type(type_repr = "Expression | int | float | complex | decimal.Decimal", imports = ("decimal")))]
+        others: &Bound<'_, PyTuple>,
+    ) -> PyResult<PythonExpression> {
+        let mut alternatives = Vec::with_capacity(others.len() + 2);
+        alternatives.push(self.expr.clone());
+        alternatives.push(other.to_expression().expr);
+
+        for alternative in others {
+            alternatives.push(
+                alternative
+                    .extract::<ConvertibleToExpression>()?
+                    .to_expression()
+                    .expr,
+            );
+        }
+
+        Ok(FunctionBuilder::new(Symbol::ALT)
+            .add_args(alternatives)
+            .finish()
+            .into())
     }
 
     /// Turn a wildcard into an optional wildcard which will match a default value if the wildcard is not matched.
