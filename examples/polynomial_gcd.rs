@@ -4,7 +4,8 @@ use tracing_subscriber::{EnvFilter, fmt, prelude::*, util::SubscriberInitExt};
 fn gcd_integer_poly() {
     let a = parse!("5 + 8*x + 3*x^2 - 5*y - 3*x*y").to_polynomial::<_, u8>(&Z, None);
 
-    let b = parse!("5 + 5*x - 2*y + 3*x*y - 3*y^2").to_polynomial::<_, u8>(&Z, a.variables.clone());
+    let b =
+        parse!("5 + 5*x - 2*y + 3*x*y - 3*y^2").to_polynomial::<_, u8>(&Z, a.variables().clone());
 
     println!("> Polynomial gcd of {a} and {b} =");
     println!("\t{}", a.gcd(&b));

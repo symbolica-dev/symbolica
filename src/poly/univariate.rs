@@ -3710,7 +3710,7 @@ impl<R: Ring, E: PositiveExponent> UnivariatePolynomial<PolynomialRing<R, E>> {
         }
 
         let Some(pos) = self.coefficients[0]
-            .variables
+            .variables()
             .iter()
             .position(|x| x == self.variable.as_ref())
         else {
