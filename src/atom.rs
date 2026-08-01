@@ -2009,7 +2009,13 @@ impl Symbol {
                     AnsiWrap::purple(name).color_mode(opts.color_mode)
                 ))
             } else if opts.mode.is_mathematica() {
-                if self.is_fixed_builtin() {
+                let ascii_name = self.get_stripped_ascii_name().unwrap_or(name);
+                if namespace == "symbolica"
+                    && let Some(mathematica_name) =
+                        crate::parser::symbolica_to_mathematica_name(ascii_name)
+                {
+                    f.write_str(mathematica_name)
+                } else if self.is_fixed_builtin() {
                     match self.get_id() {
                         Symbol::E_ID => f.write_str("E"),
                         Symbol::PI_ID => f.write_str("Pi"),

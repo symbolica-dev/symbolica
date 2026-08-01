@@ -30,6 +30,68 @@ use crate::{
     state::{RecycledAtom, State, Workspace},
 };
 
+/// Mathematica names for Symbolica's built-in mathematical symbols.
+///
+/// Keep this table as the single source of truth for both Mathematica parsing
+/// and printing. The Symbolica names are ASCII names (including aliases for
+/// built-ins whose canonical name is Unicode).
+pub(crate) const MATHEMATICA_SYMBOLS: &[(&str, &str)] = &[
+    ("Pi", "pi"),
+    ("E", "euler_e"),
+    ("Sqrt", "sqrt"),
+    ("Cos", "cos"),
+    ("Sin", "sin"),
+    ("Tan", "tan"),
+    ("Cot", "cot"),
+    ("Sec", "sec"),
+    ("Csc", "csc"),
+    ("ArcSin", "asin"),
+    ("ArcCos", "acos"),
+    ("ArcTan", "atan"),
+    ("ArcCot", "acot"),
+    ("ArcSec", "asec"),
+    ("ArcCsc", "acsc"),
+    ("Sinh", "sinh"),
+    ("Cosh", "cosh"),
+    ("Tanh", "tanh"),
+    ("Coth", "coth"),
+    ("Sech", "sech"),
+    ("Csch", "csch"),
+    ("ArcSinh", "asinh"),
+    ("ArcCosh", "acosh"),
+    ("ArcTanh", "atanh"),
+    ("ArcCoth", "acoth"),
+    ("ArcSech", "asech"),
+    ("ArcCsch", "acsch"),
+    ("Exp", "exp"),
+    ("Log", "log"),
+    ("Gamma", "gamma"),
+    ("PolyGamma", "polygamma"),
+    ("PolyLog", "polylog"),
+    ("Zeta", "zeta"),
+    ("Erf", "erf"),
+    ("BesselJ", "bessel_j"),
+    ("BesselY", "bessel_y"),
+    ("BesselI", "bessel_i"),
+    ("BesselK", "bessel_k"),
+    ("EulerGamma", "euler_gamma"),
+    ("Conjugate", "conj"),
+    ("Abs", "abs"),
+    ("Derivative", "der"),
+];
+
+fn mathematica_to_symbolica_name(name: &str) -> Option<&'static str> {
+    MATHEMATICA_SYMBOLS
+        .iter()
+        .find_map(|(mathematica, symbolica)| (*mathematica == name).then_some(*symbolica))
+}
+
+pub(crate) fn symbolica_to_mathematica_name(name: &str) -> Option<&'static str> {
+    MATHEMATICA_SYMBOLS
+        .iter()
+        .find_map(|(mathematica, symbolica)| (*symbolica == name).then_some(*mathematica))
+}
+
 const HEX_DIGIT_MASK: [bool; 255] = [
     false, false, false, false, false, false, false, false, false, false, false, false, false,
     false, false, false, false, false, false, false, false, false, false, false, false, false,
@@ -1210,39 +1272,19 @@ impl Token {
                         state = ParseState::Any;
 
                         if settings.mode.is_mathematica() {
-                            match id_buffer.as_str() {
-                                "Pi" => {
-                                    stack.push(Token::ID(Symbol::PI_STR.into()));
-                                }
-                                "E" => {
-                                    stack.push(Token::ID(Symbol::E_STR.into()));
-                                }
-                                "I" => {
-                                    stack.push(Token::Number("1".into(), true));
-                                }
-                                "Sqrt" => {
-                                    stack.push(Token::ID("sqrt".into()));
-                                }
-                                "Cos" => {
-                                    stack.push(Token::ID("cos".into()));
-                                }
-                                "Sin" => {
-                                    stack.push(Token::ID("sin".into()));
-                                }
-                                "Log" => {
-                                    stack.push(Token::ID("log".into()));
-                                }
-                                "Exp" => {
-                                    stack.push(Token::ID("exp".into()));
-                                }
-                                "Conjugate" => {
-                                    stack.push(Token::ID("conj".into()));
-                                }
-                                "Indeterminate" => {
-                                    stack.push(Token::SpecialNumber('¿'));
-                                }
-                                _ => {
-                                    stack.push(Token::ID(id_buffer.as_str().into()));
+                            if let Some(name) = mathematica_to_symbolica_name(id_buffer.as_str()) {
+                                stack.push(Token::ID(name.into()));
+                            } else {
+                                match id_buffer.as_str() {
+                                    "I" => {
+                                        stack.push(Token::Number("1".into(), true));
+                                    }
+                                    "Indeterminate" => {
+                                        stack.push(Token::SpecialNumber('¿'));
+                                    }
+                                    _ => {
+                                        stack.push(Token::ID(id_buffer.as_str().into()));
+                                    }
                                 }
                             }
                         } else {
