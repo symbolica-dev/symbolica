@@ -223,12 +223,12 @@ fn default_exponent_and_variable_inputs() {
 
     let poly: MultivariatePolynomial<_> = parse!("x+y").to_polynomial(&Z, &[x, y]);
     assert_eq!(
-        *poly.variables,
-        vec![PolyVariable::from(x), PolyVariable::from(y)]
+        poly.get_vars_ref(),
+        &[PolyVariable::from(x), PolyVariable::from(y)]
     );
 
     let single_var_poly: MultivariatePolynomial<_> = parse!("x+1").to_polynomial(&Z, x);
-    assert_eq!(*single_var_poly.variables, vec![PolyVariable::from(x)]);
+    assert_eq!(single_var_poly.get_vars_ref(), &[PolyVariable::from(x)]);
 }
 
 #[test]

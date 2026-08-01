@@ -52,7 +52,7 @@ impl<R: Ring, E: PositiveExponent> RationalPolynomialField<R, E> {
 
     pub fn from_poly(poly: &MultivariatePolynomial<R, E>) -> RationalPolynomialField<R, E> {
         RationalPolynomialField {
-            ring: poly.ring.clone(),
+            ring: poly.ring().clone(),
             _phantom_exp: PhantomData,
         }
     }
@@ -147,7 +147,7 @@ where
 {
     fn from(poly: MultivariatePolynomial<R, E>) -> Self {
         let d = poly.one();
-        let field = poly.ring.clone();
+        let field = poly.ring().clone();
         Self::from_num_den(poly, d, &field, false)
     }
 }
@@ -157,10 +157,10 @@ where
     Self: FromNumeratorAndDenominator<R, R, E>,
 {
     pub fn unify_variables(&mut self, other: &mut Self) {
-        assert_eq!(self.numerator.variables, self.denominator.variables);
-        assert_eq!(other.numerator.variables, other.denominator.variables);
+        assert_eq!(self.numerator.variables(), self.denominator.variables());
+        assert_eq!(other.numerator.variables(), other.denominator.variables());
 
-        if self.numerator.variables == other.numerator.variables {
+        if self.numerator.variables() == other.numerator.variables() {
             return;
         }
 
@@ -171,14 +171,14 @@ where
         *self = Self::from_num_den(
             self.numerator.clone(),
             self.denominator.clone(),
-            &self.numerator.ring,
+            &self.numerator.ring(),
             false,
         );
 
         *other = Self::from_num_den(
             other.numerator.clone(),
             other.denominator.clone(),
-            &other.numerator.ring,
+            &other.numerator.ring(),
             false,
         );
     }
@@ -196,7 +196,7 @@ impl<R: Ring, E: PositiveExponent> RationalPolynomial<R, E> {
     }
 
     pub fn get_variables(&self) -> &Arc<Vec<PolyVariable>> {
-        &self.numerator.variables
+        &self.numerator.variables()
     }
 
     pub fn is_zero(&self) -> bool {
@@ -363,15 +363,17 @@ impl<E: PositiveExponent> FromNumeratorAndDenominator<RationalField, IntegerRing
         field: &IntegerRing,
         do_gcd: bool,
     ) -> RationalPolynomial<IntegerRing, E> {
-        let content = num.ring.gcd(&num.content(), &den.content());
+        let ring = num.ring().clone();
+        let content = ring.gcd(&num.content(), &den.content());
 
-        let mut num_int = MultivariatePolynomial::new(&Z, None, num.variables);
+        let mut num_int = MultivariatePolynomial::new(&Z, None, num.variables().clone());
         num_int.exponents = num.exponents;
 
-        let mut den_int = MultivariatePolynomial::new(&Z, Some(den.nterms()), den.variables);
+        let mut den_int =
+            MultivariatePolynomial::new(&Z, Some(den.nterms()), den.variables().clone());
         den_int.exponents = den.exponents;
 
-        if num.ring.is_one(&content) {
+        if ring.is_one(&content) {
             num_int.coefficients = num
                 .coefficients
                 .into_iter()
@@ -386,12 +388,12 @@ impl<E: PositiveExponent> FromNumeratorAndDenominator<RationalField, IntegerRing
             num_int.coefficients = num
                 .coefficients
                 .into_iter()
-                .map(|c| num.ring.div(&c, &content).numerator())
+                .map(|c| ring.div(&c, &content).numerator())
                 .collect();
             den_int.coefficients = den
                 .coefficients
                 .into_iter()
-                .map(|c| den.ring.div(&c, &content).numerator())
+                .map(|c| ring.div(&c, &content).numerator())
                 .collect();
         }
 
@@ -531,7 +533,7 @@ where
             panic!("Cannot invert 0");
         }
 
-        let field = self.numerator.ring.clone();
+        let field = self.numerator.ring().clone();
         Self::from_num_den(self.denominator, self.numerator, &field, false)
     }
 
@@ -576,14 +578,14 @@ where
     ) -> Result<MultivariatePolynomial<RationalPolynomialField<R, E>, E>, &'static str> {
         let index_mask: Vec<_> = self
             .numerator
-            .variables
+            .variables()
             .iter()
             .map(|v| variables.iter().position(|vv| vv == v))
             .collect();
 
         let coefficient_vars = Arc::new(
             self.numerator
-                .variables
+                .variables()
                 .iter()
                 .zip(&index_mask)
                 .filter_map(|(var, mask)| {
@@ -630,8 +632,10 @@ where
                 r.numerator
                     .append_monomial(e.coefficient.clone(), &e_list_coeff);
             } else {
-                let mut r =
-                    RationalPolynomial::new(&self.numerator.ring.clone(), coefficient_vars.clone());
+                let mut r = RationalPolynomial::new(
+                    &self.numerator.ring().clone(),
+                    coefficient_vars.clone(),
+                );
                 r.numerator
                     .append_monomial(e.coefficient.clone(), &e_list_coeff);
                 hm.insert(e_list.clone(), r);
@@ -639,14 +643,14 @@ where
         }
 
         let v = Arc::new(variables.to_vec());
-        let field = RationalPolynomialField::new(self.numerator.ring.clone());
+        let field = RationalPolynomialField::new(self.numerator.ring().clone());
         let mut poly = MultivariatePolynomial::new(&field, Some(hm.len()), v);
 
         if !ignore_denominator {
             let denom = RationalPolynomial::from_num_den(
                 self.denominator.one(),
                 self.denominator.clone(),
-                &self.denominator.ring,
+                &self.denominator.ring(),
                 false,
             );
 
@@ -680,7 +684,7 @@ where
             .position(|x| x == f.variable.as_ref())
             .unwrap_or_else(|| {
                 let mut r = RationalPolynomial::new(
-                    &f.coefficients[0].numerator.ring,
+                    f.coefficients[0].numerator.ring(),
                     Arc::new(vec![f.variable.as_ref().clone()]),
                 );
                 for c in &mut f.coefficients {
@@ -695,8 +699,10 @@ where
 
         let mut exp = vec![E::zero(); f.coefficients[0].get_variables().len()];
         exp[pos] = E::one();
-        let v: RationalPolynomial<R, E> =
-            res.numerator.monomial(res.numerator.ring.one(), exp).into();
+        let v: RationalPolynomial<R, E> = res
+            .numerator
+            .monomial(res.numerator.ring().one(), exp)
+            .into();
 
         for (p, c) in f.coefficients.into_iter().enumerate() {
             res = &res + &(&v.pow(p as u64) * &c);
@@ -711,7 +717,7 @@ impl<R: Field, E: PositiveExponent> RationalPolynomial<R, E> {
     pub fn evaluate(&self, x: &[R::Element]) -> R::Element {
         let num = self.numerator.replace_all(x);
         let den = self.denominator.replace_all(x);
-        self.numerator.ring.div(&num, &den)
+        self.numerator.ring().div(&num, &den)
     }
 }
 
@@ -1209,13 +1215,13 @@ where
         let a = RationalPolynomial::from_num_den(
             dn,
             self.denominator.clone(),
-            &self.numerator.ring,
+            self.numerator.ring(),
             false,
         );
         let b = RationalPolynomial::from_num_den(
             &self.numerator * &dd,
             &self.denominator * &self.denominator,
-            &self.numerator.ring,
+            self.numerator.ring(),
             false,
         );
 
@@ -1386,11 +1392,11 @@ where
                 .rearrange_with_growth(&vars)
                 .unwrap()
                 .mul_exp(&exp)
-                .add_constant(f.ring.neg(&f.ring.one()));
+                .add_constant(f.ring().neg(&f.ring().one()));
 
             system.push(f.reorder::<GrevLexOrder>().map_coeff(
-                |c| f.ring.upgrade_element(c.clone()),
-                f.ring.clone().upgrade(),
+                |c| f.ring().upgrade_element(c.clone()),
+                f.ring().clone().upgrade(),
             ));
             exp[var] = E::zero();
         }
@@ -1398,8 +1404,8 @@ where
         let g = GroebnerBasis::new(&system, false);
         let res = r
             .map_coeff(
-                |c| r.ring.upgrade_element(c.clone()),
-                r.ring.clone().upgrade(),
+                |c| r.ring().upgrade_element(c.clone()),
+                r.ring().clone().upgrade(),
             )
             .reorder::<GrevLexOrder>()
             .reduce(&g.system)
@@ -1409,8 +1415,8 @@ where
             .iter()
             .map(|(f, _)| {
                 f.map_coeff(
-                    |c| r.ring.upgrade_element(c.clone()),
-                    r.ring.clone().upgrade(),
+                    |c| r.ring().upgrade_element(c.clone()),
+                    r.ring().clone().upgrade(),
                 )
             })
             .collect::<Vec<_>>();
@@ -1421,8 +1427,8 @@ where
             let mut num = self
                 .numerator
                 .map_coeff(
-                    |c| r.ring.upgrade_element(c.clone()),
-                    r.ring.clone().upgrade(),
+                    |c| r.ring().upgrade_element(c.clone()),
+                    r.ring().clone().upgrade(),
                 )
                 .constant(term.coefficient.clone());
             let mut den = num.one();
@@ -1441,7 +1447,7 @@ where
                     }
                 }
             }
-            parts.push(Self::from_num_den(num, den, &self.numerator.ring, false));
+            parts.push(Self::from_num_den(num, den, &self.numerator.ring(), false));
         }
 
         parts
@@ -1573,11 +1579,11 @@ where
 
         // create new temporary variable
         let mut t = MultivariatePolynomial::new(
-            &self.numerator.ring,
+            self.numerator.ring(),
             None,
             Arc::new(vec![PolyVariable::Temporary(0)]),
         )
-        .monomial(self.numerator.ring.one(), vec![E::one()])
+        .monomial(self.numerator.ring().one(), vec![E::one()])
         .into();
 
         let mut w = vec![];
@@ -1686,7 +1692,7 @@ where
                     exp.copy_from_slice(t.exponents);
                     let mm = p.coefficients[0]
                         .numerator
-                        .monomial(self.numerator.ring.one(), exp);
+                        .monomial(self.numerator.ring().one(), exp);
                     res = &res + &(t.coefficient * &mm.into());
                 }
 
@@ -1697,7 +1703,7 @@ where
                         let sol = RationalPolynomial::from_num_den(
                             -a.coefficients[0].clone(),
                             a.coefficients[1].clone(),
-                            &a.coefficients[0].ring,
+                            &a.coefficients[0].ring(),
                             true,
                         );
 
@@ -1709,7 +1715,7 @@ where
                             exp.copy_from_slice(t.exponents);
                             let mm = p.coefficients[0]
                                 .numerator
-                                .monomial(self.numerator.ring.one(), exp);
+                                .monomial(self.numerator.ring().one(), exp);
                             res = &res + &(t.coefficient * &mm.into());
                         }
 
@@ -1911,10 +1917,10 @@ mod test {
         *v.last_mut().unwrap() = new_var.into();
         let new_map = Arc::new(v);
 
-        l[0].0.numerator.variables = new_map.clone();
-        l[0].0.denominator.variables = new_map.clone();
-        l[0].1.numerator.variables = new_map.clone();
-        l[0].1.denominator.variables = new_map.clone();
+        l[0].0.numerator.set_variables(new_map.clone());
+        l[0].0.denominator.set_variables(new_map.clone());
+        l[0].1.numerator.set_variables(new_map.clone());
+        l[0].1.denominator.set_variables(new_map.clone());
 
         assert!(r.is_empty());
         assert_eq!(
