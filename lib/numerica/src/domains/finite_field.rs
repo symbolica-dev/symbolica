@@ -9,7 +9,7 @@ use std::ops::Deref;
 use crate::domains::{RingOps, Set};
 use crate::domains::{
     backend::integer::{BackendRandState, probably_prime as backend_probably_prime},
-    integer::{Integer, MultiPrecisionInteger},
+    integer::{DoubleInteger, Integer, MultiPrecisionInteger},
 };
 use crate::printer::{PrintOptions, PrintState};
 
@@ -114,6 +114,7 @@ pub trait FiniteFieldWorkspace: Clone + Display + Eq + Hash {
                 }
             }
             Integer::Double(s) => {
+                let s = s.get();
                 if s >= 0 && s <= u64::MAX as i128 {
                     Some(s as u64)
                 } else {
@@ -605,6 +606,7 @@ impl FiniteFieldWorkspace for u64 {
                 }
             }
             Integer::Double(d) => {
+                let d = d.get();
                 if d >= 0 && d <= u64::MAX as i128 {
                     Some(d as u64)
                 } else {
@@ -2190,7 +2192,7 @@ impl Field for FiniteField<Mersenne64> {
 
 impl FiniteFieldWorkspace for Integer {
     fn get_large_prime() -> Integer {
-        Integer::Double(85070591730234615865843651857942052871)
+        Integer::from(85070591730234615865843651857942052871i128)
     }
 
     fn try_from_integer(n: Integer) -> Option<Self> {
@@ -2861,7 +2863,7 @@ where
 
         if n > u64::MAX {
             let n_mp = match &n {
-                Integer::Double(n) => MultiPrecisionInteger::from(*n),
+                Integer::Double(n) => MultiPrecisionInteger::from(n.get()),
                 Integer::Large(n) => n.clone(),
                 Integer::Single(_) => unreachable!(),
             };
@@ -2880,24 +2882,29 @@ where
             s += 1;
         }
 
+        let witnesses_1;
+        let witnesses_2;
+        let witnesses_3;
+        let witnesses_4;
         let w = if n < 341531 {
-            [Integer::Double(9345883071009581737)].as_slice()
+            witnesses_1 = [Integer::Double(DoubleInteger::new(9345883071009581737))];
+            witnesses_1.as_slice()
         } else if n < 1050535501 {
-            [
+            witnesses_2 = [
                 Integer::Single(336781006125),
                 Integer::Single(9639812373923155),
-            ]
-            .as_slice()
+            ];
+            witnesses_2.as_slice()
         } else if n < 350269456337i64 {
-            [
+            witnesses_3 = [
                 Integer::Single(4230279247111683200),
-                Integer::Double(14694767155120705706),
-                Integer::Double(16641139526367750375),
-            ]
-            .as_slice()
+                Integer::Double(DoubleInteger::new(14694767155120705706)),
+                Integer::Double(DoubleInteger::new(16641139526367750375)),
+            ];
+            witnesses_3.as_slice()
         } else if n < u64::MAX {
             // shortest SPRP basis from Jim Sinclair for testing primality of u64
-            [
+            witnesses_4 = [
                 Integer::Single(2),
                 Integer::Single(325),
                 Integer::Single(9375),
@@ -2905,8 +2912,8 @@ where
                 Integer::Single(450775),
                 Integer::Single(9780504),
                 Integer::Single(1795265022),
-            ]
-            .as_slice()
+            ];
+            witnesses_4.as_slice()
         } else {
             unreachable!()
         };
@@ -3008,7 +3015,7 @@ where
         let n = self.get_prime().to_integer();
         let n_mp = match &n {
             Integer::Single(_) => None,
-            Integer::Double(n) => Some(MultiPrecisionInteger::from(*n)),
+            Integer::Double(n) => Some(MultiPrecisionInteger::from(n.get())),
             Integer::Large(n) => Some(n.clone()),
         };
 

@@ -442,7 +442,7 @@ impl<R: Into<Rational>> Add<R> for Float {
         fn get_bits(i: &Integer) -> i32 {
             match i {
                 Integer::Single(n) => n.unsigned_abs().ilog2() as i32 + 1,
-                Integer::Double(n) => n.unsigned_abs().ilog2() as i32 + 1,
+                Integer::Double(n) => n.get().unsigned_abs().ilog2() as i32 + 1,
                 Integer::Large(r) => r.significant_bits() as i32,
             }
         }
@@ -467,7 +467,7 @@ impl<R: Into<Rational>> Add<R> for Float {
 
             let mut r = match rhs.numerator() {
                 Integer::Single(n) => self.0 + n,
-                Integer::Double(n) => self.0 + n,
+                Integer::Double(n) => self.0 + n.get(),
                 Integer::Large(n) => self.0 + n,
             };
 
@@ -516,7 +516,7 @@ impl<R: Into<Rational>> Mul<R> for Float {
         if r.is_integer() {
             match r.numerator() {
                 Integer::Single(n) => self.0 * n,
-                Integer::Double(n) => self.0 * n,
+                Integer::Double(n) => self.0 * n.get(),
                 Integer::Large(n) => self.0 * n,
             }
             .into()
@@ -535,7 +535,7 @@ impl<R: Into<Rational>> Div<R> for Float {
         if r.is_integer() {
             match r.numerator() {
                 Integer::Single(n) => self.0 / n,
-                Integer::Double(n) => self.0 / n,
+                Integer::Double(n) => self.0 / n.get(),
                 Integer::Large(n) => self.0 / n,
             }
             .into()
