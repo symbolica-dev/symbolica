@@ -346,6 +346,7 @@ pub fn create_symbolica_module<'a, 'b>(
     m: &'b Bound<'a, PyModule>,
 ) -> PyResult<&'b Bound<'a, PyModule>> {
     m.add_class::<PythonFormattedOutput>()?;
+    m.add_class::<PythonSymbol>()?;
     m.add_class::<PythonExpression>()?;
     m.add_class::<PythonIntegrationStep>()?;
     m.add_class::<PythonHeldExpression>()?;
