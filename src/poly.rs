@@ -1246,7 +1246,7 @@ impl AtomView<'_> {
             poly: &mut MultivariatePolynomial<R, E>,
             field: &R,
         ) -> Result<(), &'static str> {
-            let mut coefficient = poly.ring.one();
+            let mut coefficient = poly.ring().one();
             let mut exponents = vec![E::zero(); vars.len()];
 
             match term {
@@ -1362,7 +1362,7 @@ impl AtomView<'_> {
                         let factor = base.pow(term);
                         let mut factor = factor
                             .as_view()
-                            .to_polynomial_impl(field, &result.variables)?;
+                            .to_polynomial_impl(field, &result.variables())?;
                         result.unify_variables(&mut factor);
                         result = &result * &factor;
                     }
@@ -1448,7 +1448,7 @@ impl AtomView<'_> {
                 let mut r =
                     MultivariatePolynomial::new(field, None, var_map.clone()).constant(field.one());
                 for arg in m {
-                    let mut arg_r = arg.to_polynomial_impl(field, &r.variables)?;
+                    let mut arg_r = arg.to_polynomial_impl(field, &r.variables())?;
                     r.unify_variables(&mut arg_r);
                     r = &r * &arg_r;
                 }
@@ -1457,7 +1457,7 @@ impl AtomView<'_> {
             AtomView::Add(a) => {
                 let mut r = MultivariatePolynomial::new(field, None, var_map.clone());
                 for arg in a {
-                    let mut arg_r = arg.to_polynomial_impl(field, &r.variables)?;
+                    let mut arg_r = arg.to_polynomial_impl(field, &r.variables())?;
                     r.unify_variables(&mut arg_r);
                     r = &r + &arg_r;
                 }
@@ -1508,7 +1508,7 @@ impl AtomView<'_> {
                         let factor = base.pow(term);
                         let factor = factor
                             .as_view()
-                            .to_polynomial_in_vars_impl(&result.variables, poly);
+                            .to_polynomial_in_vars_impl(&result.variables(), poly);
                         result = &result * &factor;
                     }
                     return result;
@@ -1561,7 +1561,7 @@ impl AtomView<'_> {
             AtomView::Mul(m) => {
                 let mut r = poly.one();
                 for arg in m {
-                    let arg_r = arg.to_polynomial_in_vars_impl(&r.variables, poly);
+                    let arg_r = arg.to_polynomial_in_vars_impl(&r.variables(), poly);
                     r = &r * &arg_r;
                 }
                 r
@@ -1569,7 +1569,7 @@ impl AtomView<'_> {
             AtomView::Add(a) => {
                 let mut r = poly.zero();
                 for arg in a {
-                    let arg_r = arg.to_polynomial_in_vars_impl(&r.variables, poly);
+                    let arg_r = arg.to_polynomial_in_vars_impl(&r.variables(), poly);
                     r = &r + &arg_r;
                 }
                 r
@@ -1718,7 +1718,7 @@ impl AtomView<'_> {
                         let mut factor = factor.as_view().to_rational_polynomial_impl(
                             field,
                             out_field,
-                            &result.numerator.variables,
+                            &result.numerator.variables(),
                         )?;
                         result.unify_variables(&mut factor);
                         result = &result * &factor;
@@ -1803,8 +1803,11 @@ impl AtomView<'_> {
                 let mut r = RationalPolynomial::new(out_field, var_map.clone());
                 r.numerator = r.numerator.add_constant(out_field.one());
                 for arg in m {
-                    let mut arg_r =
-                        arg.to_rational_polynomial_impl(field, out_field, &r.numerator.variables)?;
+                    let mut arg_r = arg.to_rational_polynomial_impl(
+                        field,
+                        out_field,
+                        &r.numerator.variables(),
+                    )?;
                     r.unify_variables(&mut arg_r);
                     r = &r * &arg_r;
                 }
@@ -1813,8 +1816,11 @@ impl AtomView<'_> {
             AtomView::Add(a) => {
                 let mut r = RationalPolynomial::new(out_field, var_map.clone());
                 for arg in a {
-                    let mut arg_r =
-                        arg.to_rational_polynomial_impl(field, out_field, &r.numerator.variables)?;
+                    let mut arg_r = arg.to_rational_polynomial_impl(
+                        field,
+                        out_field,
+                        &r.numerator.variables(),
+                    )?;
                     r.unify_variables(&mut arg_r);
                     r = &r + &arg_r;
                 }
@@ -1909,7 +1915,7 @@ impl AtomView<'_> {
                         let mut factor = factor.as_view().to_factorized_rational_polynomial_impl(
                             field,
                             out_field,
-                            &result.numerator.variables,
+                            &result.numerator.variables(),
                         )?;
                         result.unify_variables(&mut factor);
                         result = &result * &factor;
@@ -2002,7 +2008,7 @@ impl AtomView<'_> {
                     let mut arg_r = arg.to_factorized_rational_polynomial_impl(
                         field,
                         out_field,
-                        &r.numerator.variables,
+                        &r.numerator.variables(),
                     )?;
                     r.unify_variables(&mut arg_r);
                     r = &r * &arg_r;
@@ -2015,7 +2021,7 @@ impl AtomView<'_> {
                     let mut arg_r = arg.to_factorized_rational_polynomial_impl(
                         field,
                         out_field,
-                        &r.numerator.variables,
+                        &r.numerator.variables(),
                     )?;
                     r.unify_variables(&mut arg_r);
                     r = &r + &arg_r;
@@ -2046,7 +2052,7 @@ impl<E: Exponent, O: MonomialOrder> MultivariatePolynomial<AtomField, E, O> {
         let mut num_h = ws.new_atom();
         let mut pow_h = ws.new_atom();
 
-        let vars: Vec<Atom> = self.variables.iter().map(|v| v.clone().into()).collect();
+        let vars: Vec<Atom> = self.variables().iter().map(|v| v.clone().into()).collect();
 
         let mut sorted_vars = (0..vars.len()).collect::<Vec<_>>();
         sorted_vars.sort_by_key(|&i| vars[i].clone());
@@ -2096,13 +2102,13 @@ impl<R: Ring, E: Exponent, O: MonomialOrder> MultivariatePolynomial<R, E, O> {
     /// variables `x^(1/2)` and `x^(1/3)` are replaced by `x^(1/6)`, with
     /// polynomial exponents of 3 and 2 respectively.
     fn reduce_rational_power_variable_basis(&mut self) {
-        if self.variables.len() < 2 {
+        if self.variables().len() < 2 {
             return;
         }
 
         let mut groups: Vec<(Atom, Rational, usize)> = Vec::new();
 
-        for variable in self.variables.iter() {
+        for variable in self.variables().iter() {
             let PolyVariable::Power(power) = variable else {
                 continue;
             };
@@ -2130,7 +2136,7 @@ impl<R: Ring, E: Exponent, O: MonomialOrder> MultivariatePolynomial<R, E, O> {
                 *exponent_gcd = exponent_gcd.gcd(&exponent);
                 *count += 1;
             } else {
-                let has_base = self.variables.iter().any(|variable| variable == &base);
+                let has_base = self.variables().iter().any(|variable| variable == &base);
                 let exponent_gcd = if has_base {
                     exponent.gcd(&Rational::one())
                 } else {
@@ -2144,7 +2150,7 @@ impl<R: Ring, E: Exponent, O: MonomialOrder> MultivariatePolynomial<R, E, O> {
             return;
         }
 
-        let mut replacements: Vec<Option<(PolyVariable, i32)>> = vec![None; self.variables.len()];
+        let mut replacements: Vec<Option<(PolyVariable, i32)>> = vec![None; self.variables().len()];
 
         for (base, exponent_gcd, count) in groups {
             if count < 2 {
@@ -2174,7 +2180,7 @@ impl<R: Ring, E: Exponent, O: MonomialOrder> MultivariatePolynomial<R, E, O> {
                 (Atom::from(variable.clone()) == base).then(Rational::one)
             };
 
-            if self.variables.iter().any(|variable| {
+            if self.variables().iter().any(|variable| {
                 relative_exponent(variable).is_some_and(|exponent| {
                     let multiplier = exponent / &exponent_gcd;
                     !multiplier.is_integer() || i32::try_from(multiplier.numerator()).is_err()
@@ -2183,7 +2189,7 @@ impl<R: Ring, E: Exponent, O: MonomialOrder> MultivariatePolynomial<R, E, O> {
                 continue;
             }
 
-            for (index, variable) in self.variables.iter().enumerate() {
+            for (index, variable) in self.variables().iter().enumerate() {
                 if let Some(exponent) = relative_exponent(variable) {
                     let multiplier = exponent / &exponent_gcd;
                     replacements[index] = Some((
@@ -2199,9 +2205,9 @@ impl<R: Ring, E: Exponent, O: MonomialOrder> MultivariatePolynomial<R, E, O> {
             return;
         }
 
-        let mut new_variables = Vec::with_capacity(self.variables.len());
-        let mut variable_map = Vec::with_capacity(self.variables.len());
-        for (index, variable) in self.variables.iter().enumerate() {
+        let mut new_variables = Vec::with_capacity(self.variables().len());
+        let mut variable_map = Vec::with_capacity(self.variables().len());
+        for (index, variable) in self.variables().iter().enumerate() {
             let (variable, multiplier) = replacements[index]
                 .as_ref()
                 .map(|(variable, multiplier)| (variable.clone(), *multiplier))
@@ -2241,14 +2247,14 @@ impl<R: Ring, E: Exponent, O: MonomialOrder> MultivariatePolynomial<R, E, O> {
         }
 
         if self.is_zero() {
-            self.variables = Arc::new(new_variables);
+            self.set_variables(Arc::new(new_variables));
             self.exponents.clear();
         } else {
             *self = Self::from_coefficient_list(
                 self.coefficients.clone(),
                 new_exponents,
                 Arc::new(new_variables),
-                &self.ring,
+                &self.ring(),
             );
         }
     }
@@ -2289,7 +2295,7 @@ impl<R: Ring, E: Exponent, O: MonomialOrder> MultivariatePolynomial<R, E, O> {
         let mut pow_h = workspace.new_atom();
 
         let vars: Vec<_> = self
-            .variables
+            .variables()
             .iter()
             .map(|v| {
                 if let PolyVariable::Temporary(_) = v {
@@ -2368,7 +2374,7 @@ impl<R: Ring, E: Exponent, O: MonomialOrder> MultivariatePolynomial<R, E, O> {
         for monomial in self {
             let mul = mul_h.to_mul();
 
-            for (var_id, &pow) in self.variables.iter().zip(monomial.exponents) {
+            for (var_id, &pow) in self.variables().iter().zip(monomial.exponents) {
                 if pow != E::zero() {
                     match var_id {
                         PolyVariable::Symbol(v) => {
@@ -2392,7 +2398,7 @@ impl<R: Ring, E: Exponent, O: MonomialOrder> MultivariatePolynomial<R, E, O> {
                 }
             }
 
-            f(&self.ring, monomial.coefficient, &mut coeff);
+            f(&self.ring(), monomial.coefficient, &mut coeff);
             mul.extend(coeff.as_view());
             add.extend(mul_h.as_view());
         }
@@ -2539,7 +2545,7 @@ impl Token {
             poly: &mut MultivariatePolynomial<R, E>,
             field: &R,
         ) -> Result<(), Cow<'static, str>> {
-            let mut coefficient = poly.ring.one();
+            let mut coefficient = poly.ring().one();
             let mut exponents = smallvec![E::zero(); var_name_map.len()];
 
             match term {

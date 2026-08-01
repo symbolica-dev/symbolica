@@ -2007,8 +2007,8 @@ impl<'a> AtomView<'a> {
 
                     if let Some(nv) = state_map.variables_lists.get(&old_id) {
                         let mut rr = r.deserialize();
-                        rr.numerator.variables = nv.clone();
-                        rr.denominator.variables = nv.clone();
+                        rr.numerator.set_variables(nv.clone());
+                        rr.denominator.set_variables(nv.clone());
                         out.to_num(Coefficient::RationalPolynomial(rr));
                     } else {
                         out.set_from_view(self);

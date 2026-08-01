@@ -568,7 +568,7 @@ impl PythonPolynomial {
     pub fn __add__(&self, rhs: PolynomialOrInteger<PythonPolynomial>) -> PyResult<Self> {
         match rhs {
             PolynomialOrInteger::Polynomial(p) => {
-                if self.poly.ring != p.poly.ring {
+                if self.poly.ring() != p.poly.ring() {
                     Err(exceptions::PyValueError::new_err(
                         "Polynomials have different rings".to_string(),
                     ))
@@ -593,7 +593,7 @@ impl PythonPolynomial {
     pub fn __sub__(&self, rhs: PolynomialOrInteger<PythonPolynomial>) -> PyResult<Self> {
         match rhs {
             PolynomialOrInteger::Polynomial(p) => {
-                if self.poly.ring != p.poly.ring {
+                if self.poly.ring() != p.poly.ring() {
                     Err(exceptions::PyValueError::new_err(
                         "Polynomials have different rings".to_string(),
                     ))
@@ -618,7 +618,7 @@ impl PythonPolynomial {
     pub fn __mul__(&self, rhs: PolynomialOrInteger<PythonPolynomial>) -> PyResult<Self> {
         match rhs {
             PolynomialOrInteger::Polynomial(p) => {
-                if self.poly.ring != p.poly.ring {
+                if self.poly.ring() != p.poly.ring() {
                     Err(exceptions::PyValueError::new_err(
                         "Polynomials have different rings".to_string(),
                     ))
@@ -641,7 +641,7 @@ impl PythonPolynomial {
     pub fn __rsub__(&self, rhs: PolynomialOrInteger<PythonPolynomial>) -> PyResult<Self> {
         match rhs {
             PolynomialOrInteger::Polynomial(p) => {
-                if self.poly.ring != p.poly.ring {
+                if self.poly.ring() != p.poly.ring() {
                     Err(exceptions::PyValueError::new_err(
                         "Polynomials have different rings".to_string(),
                     ))
@@ -666,7 +666,7 @@ impl PythonPolynomial {
             return Err(exceptions::PyValueError::new_err("Division by zero"));
         }
 
-        if self.poly.ring != rhs.poly.ring {
+        if self.poly.ring() != rhs.poly.ring() {
             return Err(exceptions::PyValueError::new_err(
                 "Polynomials have different rings".to_string(),
             ));
@@ -688,7 +688,7 @@ impl PythonPolynomial {
             return Err(exceptions::PyValueError::new_err("Division by zero"));
         }
 
-        if self.poly.ring != rhs.poly.ring {
+        if self.poly.ring() != rhs.poly.ring() {
             return Err(exceptions::PyValueError::new_err(
                 "Polynomials have different rings".to_string(),
             ));
@@ -774,7 +774,7 @@ impl PythonPolynomial {
     /// rhs: Polynomial
     ///     The right-hand-side operand.
     pub fn quot_rem(&self, rhs: Self) -> PyResult<(PythonPolynomial, PythonPolynomial)> {
-        if self.poly.ring != rhs.poly.ring {
+        if self.poly.ring() != rhs.poly.ring() {
             return Err(exceptions::PyValueError::new_err(
                 "Polynomials have different rings".to_string(),
             ));
@@ -802,7 +802,7 @@ impl PythonPolynomial {
     /// rhs: Polynomial
     ///     The right-hand-side operand.
     pub fn __mod__(&self, rhs: Self) -> PyResult<Self> {
-        if self.poly.ring != rhs.poly.ring {
+        if self.poly.ring() != rhs.poly.ring() {
             return Err(exceptions::PyValueError::new_err(
                 "Polynomials have different rings".to_string(),
             ));
@@ -830,7 +830,7 @@ impl PythonPolynomial {
     ) -> PyResult<Self> {
         if rhs.len() == 1 {
             let rhs = rhs.get_item(0)?.extract::<Self>()?;
-            if self.poly.ring != rhs.poly.ring {
+            if self.poly.ring() != rhs.poly.ring() {
                 Err(exceptions::PyValueError::new_err(
                     "Polynomials have different rings".to_string(),
                 ))
@@ -843,7 +843,7 @@ impl PythonPolynomial {
             let mut args = vec![self.poly.clone()];
             for r in rhs.iter() {
                 let p = r.extract::<Self>()?;
-                if args[0].ring != p.poly.ring {
+                if args[0].ring() != p.poly.ring() {
                     return Err(exceptions::PyValueError::new_err(
                         "Polynomials have different rings".to_string(),
                     ));
@@ -876,13 +876,13 @@ impl PythonPolynomial {
         &self,
         rhs: Self,
     ) -> PyResult<(PythonPolynomial, PythonPolynomial, PythonPolynomial)> {
-        if self.poly.ring != rhs.poly.ring {
+        if self.poly.ring() != rhs.poly.ring() {
             return Err(exceptions::PyValueError::new_err(
                 "Polynomials have different rings".to_string(),
             ));
         }
 
-        if self.poly.variables != rhs.poly.variables
+        if self.poly.variables() != rhs.poly.variables()
             || (0..self.poly.nvars())
                 .filter(|i| self.poly.degree(*i) > 0 || rhs.poly.degree(*i) > 0)
                 .count()
@@ -1882,12 +1882,12 @@ impl PythonFiniteFieldPolynomial {
         match op {
             CompareOp::Eq => match other {
                 PolynomialOrInteger::Integer(i) => Ok(self.poly.is_constant()
-                    && self.poly.get_constant() == self.poly.ring.element_from_integer(i)),
+                    && self.poly.get_constant() == self.poly.ring().element_from_integer(i)),
                 PolynomialOrInteger::Polynomial(p) => Ok(self.poly == p.poly),
             },
             CompareOp::Ne => match other {
                 PolynomialOrInteger::Integer(i) => Ok(!self.poly.is_constant()
-                    || self.poly.get_constant() != self.poly.ring.element_from_integer(i)),
+                    || self.poly.get_constant() != self.poly.ring().element_from_integer(i)),
                 PolynomialOrInteger::Polynomial(p) => Ok(self.poly != p.poly),
             },
             _ => Err(exceptions::PyTypeError::new_err(format!(
@@ -2132,7 +2132,7 @@ impl PythonFiniteFieldPolynomial {
     pub fn __add__(&self, rhs: PolynomialOrInteger<Self>) -> PyResult<Self> {
         match rhs {
             PolynomialOrInteger::Polynomial(p) => {
-                if self.poly.ring != p.poly.ring {
+                if self.poly.ring() != p.poly.ring() {
                     Err(exceptions::PyValueError::new_err(
                         "Polynomials have different rings".to_string(),
                     ))
@@ -2146,7 +2146,7 @@ impl PythonFiniteFieldPolynomial {
                 poly: self
                     .poly
                     .clone()
-                    .add_constant(self.poly.ring.element_from_integer(i)),
+                    .add_constant(self.poly.ring().element_from_integer(i)),
             }),
         }
     }
@@ -2160,7 +2160,7 @@ impl PythonFiniteFieldPolynomial {
     pub fn __sub__(&self, rhs: PolynomialOrInteger<Self>) -> PyResult<Self> {
         match rhs {
             PolynomialOrInteger::Polynomial(p) => {
-                if self.poly.ring != p.poly.ring {
+                if self.poly.ring() != p.poly.ring() {
                     Err(exceptions::PyValueError::new_err(
                         "Polynomials have different rings".to_string(),
                     ))
@@ -2171,10 +2171,11 @@ impl PythonFiniteFieldPolynomial {
                 }
             }
             PolynomialOrInteger::Integer(i) => Ok(Self {
-                poly: self
-                    .poly
-                    .clone()
-                    .add_constant(self.poly.ring.neg(&self.poly.ring.element_from_integer(i))),
+                poly: self.poly.clone().add_constant(
+                    self.poly
+                        .ring()
+                        .neg(&self.poly.ring().element_from_integer(i)),
+                ),
             }),
         }
     }
@@ -2188,7 +2189,7 @@ impl PythonFiniteFieldPolynomial {
     pub fn __mul__(&self, rhs: PolynomialOrInteger<Self>) -> PyResult<Self> {
         match rhs {
             PolynomialOrInteger::Polynomial(p) => {
-                if self.poly.ring != p.poly.ring {
+                if self.poly.ring() != p.poly.ring() {
                     Err(exceptions::PyValueError::new_err(
                         "Polynomials have different rings".to_string(),
                     ))
@@ -2202,7 +2203,7 @@ impl PythonFiniteFieldPolynomial {
                 poly: self
                     .poly
                     .clone()
-                    .mul_coeff(self.poly.ring.element_from_integer(i)),
+                    .mul_coeff(self.poly.ring().element_from_integer(i)),
             }),
         }
     }
@@ -2214,7 +2215,7 @@ impl PythonFiniteFieldPolynomial {
     pub fn __rsub__(&self, rhs: PolynomialOrInteger<Self>) -> PyResult<Self> {
         match rhs {
             PolynomialOrInteger::Polynomial(p) => {
-                if self.poly.ring != p.poly.ring {
+                if self.poly.ring() != p.poly.ring() {
                     Err(exceptions::PyValueError::new_err(
                         "Polynomials have different rings".to_string(),
                     ))
@@ -2229,7 +2230,7 @@ impl PythonFiniteFieldPolynomial {
                     .poly
                     .clone()
                     .neg()
-                    .add_constant(self.poly.ring.element_from_integer(i)),
+                    .add_constant(self.poly.ring().element_from_integer(i)),
             }),
         }
     }
@@ -2243,7 +2244,7 @@ impl PythonFiniteFieldPolynomial {
             return Err(exceptions::PyValueError::new_err("Division by zero"));
         }
 
-        if self.poly.ring != rhs.poly.ring {
+        if self.poly.ring() != rhs.poly.ring() {
             return Err(exceptions::PyValueError::new_err(
                 "Polynomials have different rings".to_string(),
             ));
@@ -2264,7 +2265,7 @@ impl PythonFiniteFieldPolynomial {
         if rhs.poly.is_zero() {
             return Err(exceptions::PyValueError::new_err("Division by zero"));
         }
-        if self.poly.ring != rhs.poly.ring {
+        if self.poly.ring() != rhs.poly.ring() {
             return Err(exceptions::PyValueError::new_err(
                 "Polynomials have different rings".to_string(),
             ));
@@ -2355,7 +2356,7 @@ impl PythonFiniteFieldPolynomial {
         &self,
         rhs: Self,
     ) -> PyResult<(PythonFiniteFieldPolynomial, PythonFiniteFieldPolynomial)> {
-        if self.poly.ring != rhs.poly.ring {
+        if self.poly.ring() != rhs.poly.ring() {
             return Err(exceptions::PyValueError::new_err(
                 "Polynomials have different rings".to_string(),
             ));
@@ -2383,7 +2384,7 @@ impl PythonFiniteFieldPolynomial {
     /// rhs: FiniteFieldPolynomial
     ///     The right-hand-side operand.
     pub fn __mod__(&self, rhs: Self) -> PyResult<Self> {
-        if self.poly.ring != rhs.poly.ring {
+        if self.poly.ring() != rhs.poly.ring() {
             return Err(exceptions::PyValueError::new_err(
                 "Polynomials have different rings".to_string(),
             ));
@@ -2411,7 +2412,7 @@ impl PythonFiniteFieldPolynomial {
     ) -> PyResult<Self> {
         if rhs.len() == 1 {
             let rhs = rhs.get_item(0)?.extract::<Self>()?;
-            if self.poly.ring != rhs.poly.ring {
+            if self.poly.ring() != rhs.poly.ring() {
                 Err(exceptions::PyValueError::new_err(
                     "Polynomials have different rings".to_string(),
                 ))
@@ -2424,7 +2425,7 @@ impl PythonFiniteFieldPolynomial {
             let mut args = vec![self.poly.clone()];
             for r in rhs.iter() {
                 let p = r.extract::<Self>()?;
-                if args[0].ring != p.poly.ring {
+                if args[0].ring() != p.poly.ring() {
                     return Err(exceptions::PyValueError::new_err(
                         "Polynomials have different rings".to_string(),
                     ));
@@ -2461,13 +2462,13 @@ impl PythonFiniteFieldPolynomial {
         PythonFiniteFieldPolynomial,
         PythonFiniteFieldPolynomial,
     )> {
-        if self.poly.ring != rhs.poly.ring {
+        if self.poly.ring() != rhs.poly.ring() {
             return Err(exceptions::PyValueError::new_err(
                 "Polynomials have different rings".to_string(),
             ));
         }
 
-        if self.poly.variables != rhs.poly.variables
+        if self.poly.variables() != rhs.poly.variables()
             || (0..self.poly.nvars())
                 .filter(|i| self.poly.degree(*i) > 0 || rhs.poly.degree(*i) > 0)
                 .count()
@@ -2493,10 +2494,10 @@ impl PythonFiniteFieldPolynomial {
         PythonPolynomial {
             poly: if symmetric_representation {
                 self.poly
-                    .map_coeff(|x| self.poly.ring.to_symmetric_integer(x).into(), Q)
+                    .map_coeff(|x| self.poly.ring().to_symmetric_integer(x).into(), Q)
             } else {
                 self.poly
-                    .map_coeff(|x| self.poly.ring.to_integer(x).into(), Q)
+                    .map_coeff(|x| self.poly.ring().to_integer(x).into(), Q)
             },
         }
     }
@@ -2616,7 +2617,7 @@ impl PythonFiniteFieldPolynomial {
     }
 
     pub fn get_modulus(&self) -> u64 {
-        self.poly.ring.get_prime()
+        self.poly.ring().get_prime()
     }
 
     /// Make the polynomial monic, i.e., the polynomial
@@ -2774,12 +2775,12 @@ impl PythonFiniteFieldPolynomial {
 
         let input = values
             .into_iter()
-            .map(|x| self.poly.ring.element_from_integer(x))
+            .map(|x| self.poly.ring().element_from_integer(x))
             .collect::<Vec<_>>();
 
         let r = self.poly.replace_all(&input);
 
-        Ok(self.poly.ring.to_integer(&r))
+        Ok(self.poly.ring().to_integer(&r))
     }
 
     /// Replace the variable `x` with a polynomial `v`.
@@ -2811,7 +2812,7 @@ impl PythonFiniteFieldPolynomial {
         let v = match v {
             PolynomialOrInteger::Polynomial(p) => p.poly,
             PolynomialOrInteger::Integer(i) => {
-                self.poly.constant(self.poly.ring.element_from_integer(i))
+                self.poly.constant(self.poly.ring().element_from_integer(i))
             }
         };
 
@@ -3039,7 +3040,7 @@ impl PythonFiniteFieldPolynomial {
     pub fn to_expression(&self) -> PyResult<PythonExpression> {
         let p = self
             .poly
-            .map_coeff(|x| self.poly.ring.to_symmetric_integer(x), Z);
+            .map_coeff(|x| self.poly.ring().to_symmetric_integer(x), Z);
 
         Ok(p.to_expression().into())
     }
@@ -3051,7 +3052,7 @@ impl PythonFiniteFieldPolynomial {
     /// minimal_poly: FiniteFieldPolynomial
     ///     The minimal polynomial that defines the algebraic extension.
     pub fn to_galois_field(&self, minimal_poly: Self) -> PyResult<PythonGaloisFieldPolynomial> {
-        if self.poly.ring != minimal_poly.poly.ring {
+        if self.poly.ring() != minimal_poly.poly.ring() {
             return Err(exceptions::PyValueError::new_err(
                 "Polynomials have different moduli".to_string(),
             ));
@@ -3087,7 +3088,7 @@ impl PythonFiniteFieldPolynomial {
         PythonFiniteFieldPolynomial,
         PythonFiniteFieldPolynomial,
     )> {
-        if self.poly.ring != b.poly.ring {
+        if self.poly.ring() != b.poly.ring() {
             return Err(exceptions::PyValueError::new_err(
                 "Polynomials have different moduli".to_string(),
             ));
@@ -3163,12 +3164,12 @@ impl PythonPrimeTwoPolynomial {
         match op {
             CompareOp::Eq => match other {
                 PolynomialOrInteger::Integer(i) => Ok(self.poly.is_constant()
-                    && self.poly.get_constant() == self.poly.ring.element_from_integer(i)),
+                    && self.poly.get_constant() == self.poly.ring().element_from_integer(i)),
                 PolynomialOrInteger::Polynomial(p) => Ok(self.poly == p.poly),
             },
             CompareOp::Ne => match other {
                 PolynomialOrInteger::Integer(i) => Ok(!self.poly.is_constant()
-                    || self.poly.get_constant() != self.poly.ring.element_from_integer(i)),
+                    || self.poly.get_constant() != self.poly.ring().element_from_integer(i)),
                 PolynomialOrInteger::Polynomial(p) => Ok(self.poly != p.poly),
             },
             _ => Err(exceptions::PyTypeError::new_err(format!(
@@ -3408,7 +3409,7 @@ impl PythonPrimeTwoPolynomial {
     pub fn __add__(&self, rhs: PolynomialOrInteger<Self>) -> PyResult<Self> {
         match rhs {
             PolynomialOrInteger::Polynomial(p) => {
-                if self.poly.ring != p.poly.ring {
+                if self.poly.ring() != p.poly.ring() {
                     Err(exceptions::PyValueError::new_err(
                         "Polynomials have different rings".to_string(),
                     ))
@@ -3422,7 +3423,7 @@ impl PythonPrimeTwoPolynomial {
                 poly: self
                     .poly
                     .clone()
-                    .add_constant(self.poly.ring.element_from_integer(i)),
+                    .add_constant(self.poly.ring().element_from_integer(i)),
             }),
         }
     }
@@ -3431,7 +3432,7 @@ impl PythonPrimeTwoPolynomial {
     pub fn __sub__(&self, rhs: PolynomialOrInteger<Self>) -> PyResult<Self> {
         match rhs {
             PolynomialOrInteger::Polynomial(p) => {
-                if self.poly.ring != p.poly.ring {
+                if self.poly.ring() != p.poly.ring() {
                     Err(exceptions::PyValueError::new_err(
                         "Polynomials have different rings".to_string(),
                     ))
@@ -3442,10 +3443,11 @@ impl PythonPrimeTwoPolynomial {
                 }
             }
             PolynomialOrInteger::Integer(i) => Ok(Self {
-                poly: self
-                    .poly
-                    .clone()
-                    .add_constant(self.poly.ring.neg(&self.poly.ring.element_from_integer(i))),
+                poly: self.poly.clone().add_constant(
+                    self.poly
+                        .ring()
+                        .neg(&self.poly.ring().element_from_integer(i)),
+                ),
             }),
         }
     }
@@ -3454,7 +3456,7 @@ impl PythonPrimeTwoPolynomial {
     pub fn __mul__(&self, rhs: PolynomialOrInteger<Self>) -> PyResult<Self> {
         match rhs {
             PolynomialOrInteger::Polynomial(p) => {
-                if self.poly.ring != p.poly.ring {
+                if self.poly.ring() != p.poly.ring() {
                     Err(exceptions::PyValueError::new_err(
                         "Polynomials have different rings".to_string(),
                     ))
@@ -3468,7 +3470,7 @@ impl PythonPrimeTwoPolynomial {
                 poly: self
                     .poly
                     .clone()
-                    .mul_coeff(self.poly.ring.element_from_integer(i)),
+                    .mul_coeff(self.poly.ring().element_from_integer(i)),
             }),
         }
     }
@@ -3480,7 +3482,7 @@ impl PythonPrimeTwoPolynomial {
     pub fn __rsub__(&self, rhs: PolynomialOrInteger<Self>) -> PyResult<Self> {
         match rhs {
             PolynomialOrInteger::Polynomial(p) => {
-                if self.poly.ring != p.poly.ring {
+                if self.poly.ring() != p.poly.ring() {
                     Err(exceptions::PyValueError::new_err(
                         "Polynomials have different rings".to_string(),
                     ))
@@ -3495,7 +3497,7 @@ impl PythonPrimeTwoPolynomial {
                     .poly
                     .clone()
                     .neg()
-                    .add_constant(self.poly.ring.element_from_integer(i)),
+                    .add_constant(self.poly.ring().element_from_integer(i)),
             }),
         }
     }
@@ -3509,7 +3511,7 @@ impl PythonPrimeTwoPolynomial {
             return Err(exceptions::PyValueError::new_err("Division by zero"));
         }
 
-        if self.poly.ring != rhs.poly.ring {
+        if self.poly.ring() != rhs.poly.ring() {
             return Err(exceptions::PyValueError::new_err(
                 "Polynomials have different rings".to_string(),
             ));
@@ -3899,12 +3901,12 @@ impl PythonPrimeTwoPolynomial {
 
         let input = values
             .into_iter()
-            .map(|x| self.poly.ring.element_from_integer(x))
+            .map(|x| self.poly.ring().element_from_integer(x))
             .collect::<Vec<_>>();
 
         let r = self.poly.replace_all(&input);
 
-        Ok(self.poly.ring.to_integer(&r))
+        Ok(self.poly.ring().to_integer(&r))
     }
 
     /// Replace the variable `x` with a polynomial `v`.
@@ -3930,7 +3932,7 @@ impl PythonPrimeTwoPolynomial {
         let v = match v {
             PolynomialOrInteger::Polynomial(p) => p.poly,
             PolynomialOrInteger::Integer(i) => {
-                self.poly.constant(self.poly.ring.element_from_integer(i))
+                self.poly.constant(self.poly.ring().element_from_integer(i))
             }
         };
 
@@ -4088,12 +4090,12 @@ impl PythonGaloisFieldPrimeTwoPolynomial {
         match op {
             CompareOp::Eq => match other {
                 PolynomialOrInteger::Integer(i) => Ok(self.poly.is_constant()
-                    && self.poly.get_constant() == self.poly.ring.element_from_integer(i)),
+                    && self.poly.get_constant() == self.poly.ring().element_from_integer(i)),
                 PolynomialOrInteger::Polynomial(p) => Ok(self.poly == p.poly),
             },
             CompareOp::Ne => match other {
                 PolynomialOrInteger::Integer(i) => Ok(!self.poly.is_constant()
-                    || self.poly.get_constant() != self.poly.ring.element_from_integer(i)),
+                    || self.poly.get_constant() != self.poly.ring().element_from_integer(i)),
                 PolynomialOrInteger::Polynomial(p) => Ok(self.poly != p.poly),
             },
             _ => Err(exceptions::PyTypeError::new_err(format!(
@@ -4333,7 +4335,7 @@ impl PythonGaloisFieldPrimeTwoPolynomial {
     pub fn __add__(&self, rhs: PolynomialOrInteger<Self>) -> PyResult<Self> {
         match rhs {
             PolynomialOrInteger::Polynomial(p) => {
-                if self.poly.ring != p.poly.ring {
+                if self.poly.ring() != p.poly.ring() {
                     Err(exceptions::PyValueError::new_err(
                         "Polynomials have different rings".to_string(),
                     ))
@@ -4347,7 +4349,7 @@ impl PythonGaloisFieldPrimeTwoPolynomial {
                 poly: self
                     .poly
                     .clone()
-                    .add_constant(self.poly.ring.element_from_integer(i)),
+                    .add_constant(self.poly.ring().element_from_integer(i)),
             }),
         }
     }
@@ -4356,7 +4358,7 @@ impl PythonGaloisFieldPrimeTwoPolynomial {
     pub fn __sub__(&self, rhs: PolynomialOrInteger<Self>) -> PyResult<Self> {
         match rhs {
             PolynomialOrInteger::Polynomial(p) => {
-                if self.poly.ring != p.poly.ring {
+                if self.poly.ring() != p.poly.ring() {
                     Err(exceptions::PyValueError::new_err(
                         "Polynomials have different rings".to_string(),
                     ))
@@ -4367,10 +4369,11 @@ impl PythonGaloisFieldPrimeTwoPolynomial {
                 }
             }
             PolynomialOrInteger::Integer(i) => Ok(Self {
-                poly: self
-                    .poly
-                    .clone()
-                    .add_constant(self.poly.ring.neg(&self.poly.ring.element_from_integer(i))),
+                poly: self.poly.clone().add_constant(
+                    self.poly
+                        .ring()
+                        .neg(&self.poly.ring().element_from_integer(i)),
+                ),
             }),
         }
     }
@@ -4379,7 +4382,7 @@ impl PythonGaloisFieldPrimeTwoPolynomial {
     pub fn __mul__(&self, rhs: PolynomialOrInteger<Self>) -> PyResult<Self> {
         match rhs {
             PolynomialOrInteger::Polynomial(p) => {
-                if self.poly.ring != p.poly.ring {
+                if self.poly.ring() != p.poly.ring() {
                     Err(exceptions::PyValueError::new_err(
                         "Polynomials have different rings".to_string(),
                     ))
@@ -4393,7 +4396,7 @@ impl PythonGaloisFieldPrimeTwoPolynomial {
                 poly: self
                     .poly
                     .clone()
-                    .mul_coeff(self.poly.ring.element_from_integer(i)),
+                    .mul_coeff(self.poly.ring().element_from_integer(i)),
             }),
         }
     }
@@ -4405,7 +4408,7 @@ impl PythonGaloisFieldPrimeTwoPolynomial {
     pub fn __rsub__(&self, rhs: PolynomialOrInteger<Self>) -> PyResult<Self> {
         match rhs {
             PolynomialOrInteger::Polynomial(p) => {
-                if self.poly.ring != p.poly.ring {
+                if self.poly.ring() != p.poly.ring() {
                     Err(exceptions::PyValueError::new_err(
                         "Polynomials have different rings".to_string(),
                     ))
@@ -4420,7 +4423,7 @@ impl PythonGaloisFieldPrimeTwoPolynomial {
                     .poly
                     .clone()
                     .neg()
-                    .add_constant(self.poly.ring.element_from_integer(i)),
+                    .add_constant(self.poly.ring().element_from_integer(i)),
             }),
         }
     }
@@ -4434,7 +4437,7 @@ impl PythonGaloisFieldPrimeTwoPolynomial {
             return Err(exceptions::PyValueError::new_err("Division by zero"));
         }
 
-        if self.poly.ring != rhs.poly.ring {
+        if self.poly.ring() != rhs.poly.ring() {
             return Err(exceptions::PyValueError::new_err(
                 "Polynomials have different rings".to_string(),
             ));
@@ -4450,7 +4453,7 @@ impl PythonGaloisFieldPrimeTwoPolynomial {
         if rhs.poly.is_zero() {
             return Err(exceptions::PyValueError::new_err("Division by zero"));
         }
-        if self.poly.ring != rhs.poly.ring {
+        if self.poly.ring() != rhs.poly.ring() {
             return Err(exceptions::PyValueError::new_err(
                 "Polynomials have different rings".to_string(),
             ));
@@ -4534,7 +4537,7 @@ impl PythonGaloisFieldPrimeTwoPolynomial {
         PythonGaloisFieldPrimeTwoPolynomial,
         PythonGaloisFieldPrimeTwoPolynomial,
     )> {
-        if self.poly.ring != rhs.poly.ring {
+        if self.poly.ring() != rhs.poly.ring() {
             return Err(exceptions::PyValueError::new_err(
                 "Polynomials have different rings".to_string(),
             ));
@@ -4557,7 +4560,7 @@ impl PythonGaloisFieldPrimeTwoPolynomial {
 
     /// Compute the remainder `self % rhs.
     pub fn __mod__(&self, rhs: Self) -> PyResult<Self> {
-        if self.poly.ring != rhs.poly.ring {
+        if self.poly.ring() != rhs.poly.ring() {
             return Err(exceptions::PyValueError::new_err(
                 "Polynomials have different rings".to_string(),
             ));
@@ -4580,7 +4583,7 @@ impl PythonGaloisFieldPrimeTwoPolynomial {
     ) -> PyResult<Self> {
         if rhs.len() == 1 {
             let rhs = rhs.get_item(0)?.extract::<Self>()?;
-            if self.poly.ring != rhs.poly.ring {
+            if self.poly.ring() != rhs.poly.ring() {
                 Err(exceptions::PyValueError::new_err(
                     "Polynomials have different rings".to_string(),
                 ))
@@ -4593,7 +4596,7 @@ impl PythonGaloisFieldPrimeTwoPolynomial {
             let mut args = vec![self.poly.clone()];
             for r in rhs.iter() {
                 let p = r.extract::<Self>()?;
-                if args[0].ring != p.poly.ring {
+                if args[0].ring() != p.poly.ring() {
                     return Err(exceptions::PyValueError::new_err(
                         "Polynomials have different rings".to_string(),
                     ));
@@ -4625,13 +4628,13 @@ impl PythonGaloisFieldPrimeTwoPolynomial {
         PythonGaloisFieldPrimeTwoPolynomial,
         PythonGaloisFieldPrimeTwoPolynomial,
     )> {
-        if self.poly.ring != rhs.poly.ring {
+        if self.poly.ring() != rhs.poly.ring() {
             return Err(exceptions::PyValueError::new_err(
                 "Polynomials have different rings".to_string(),
             ));
         }
 
-        if self.poly.variables != rhs.poly.variables
+        if self.poly.variables() != rhs.poly.variables()
             || (0..self.poly.nvars())
                 .filter(|i| self.poly.degree(*i) > 0 || rhs.poly.degree(*i) > 0)
                 .count()
@@ -4892,12 +4895,12 @@ impl PythonGaloisFieldPrimeTwoPolynomial {
 
         let input = values
             .into_iter()
-            .map(|x| self.poly.ring.element_from_integer(x))
+            .map(|x| self.poly.ring().element_from_integer(x))
             .collect::<Vec<_>>();
 
         let r = self.poly.replace_all(&input);
 
-        Ok(self.poly.ring.to_integer(&r))
+        Ok(self.poly.ring().to_integer(&r))
     }
 
     /// Replace the variable `x` with a polynomial `v`.
@@ -4923,7 +4926,7 @@ impl PythonGaloisFieldPrimeTwoPolynomial {
         let v = match v {
             PolynomialOrInteger::Polynomial(p) => p.poly,
             PolynomialOrInteger::Integer(i) => {
-                self.poly.constant(self.poly.ring.element_from_integer(i))
+                self.poly.constant(self.poly.ring().element_from_integer(i))
             }
         };
 
@@ -5057,14 +5060,14 @@ impl PythonGaloisFieldPrimeTwoPolynomial {
     pub fn to_polynomial(&self) -> PyResult<PythonPrimeTwoPolynomial> {
         let mut c = self.poly.clone();
         let mut min_poly = MultivariatePolynomial::new(
-            &c.ring,
+            c.ring(),
             None,
-            Arc::new(self.poly.ring.poly().get_vars_ref().to_vec()),
+            Arc::new(self.poly.ring().poly().get_vars_ref().to_vec()),
         );
         c.unify_variables(&mut min_poly);
 
         let mut poly = MultivariatePolynomial::new(
-            &c.ring.poly().ring,
+            c.ring().poly().ring(),
             None,
             Arc::new(c.get_vars_ref().to_vec()),
         );
@@ -5080,7 +5083,7 @@ impl PythonGaloisFieldPrimeTwoPolynomial {
     /// Get the minimal polynomial of the algebraic extension.
     pub fn get_minimal_polynomial(&self) -> PythonPrimeTwoPolynomial {
         PythonPrimeTwoPolynomial {
-            poly: self.poly.ring.poly().clone(),
+            poly: self.poly.ring().poly().clone(),
         }
     }
 }
@@ -5115,12 +5118,12 @@ impl PythonGaloisFieldPolynomial {
         match op {
             CompareOp::Eq => match other {
                 PolynomialOrInteger::Integer(i) => Ok(self.poly.is_constant()
-                    && self.poly.get_constant() == self.poly.ring.element_from_integer(i)),
+                    && self.poly.get_constant() == self.poly.ring().element_from_integer(i)),
                 PolynomialOrInteger::Polynomial(p) => Ok(self.poly == p.poly),
             },
             CompareOp::Ne => match other {
                 PolynomialOrInteger::Integer(i) => Ok(!self.poly.is_constant()
-                    || self.poly.get_constant() != self.poly.ring.element_from_integer(i)),
+                    || self.poly.get_constant() != self.poly.ring().element_from_integer(i)),
                 PolynomialOrInteger::Polynomial(p) => Ok(self.poly != p.poly),
             },
             _ => Err(exceptions::PyTypeError::new_err(format!(
@@ -5360,7 +5363,7 @@ impl PythonGaloisFieldPolynomial {
     pub fn __add__(&self, rhs: PolynomialOrInteger<Self>) -> PyResult<Self> {
         match rhs {
             PolynomialOrInteger::Polynomial(p) => {
-                if self.poly.ring != p.poly.ring {
+                if self.poly.ring() != p.poly.ring() {
                     Err(exceptions::PyValueError::new_err(
                         "Polynomials have different rings".to_string(),
                     ))
@@ -5374,7 +5377,7 @@ impl PythonGaloisFieldPolynomial {
                 poly: self
                     .poly
                     .clone()
-                    .add_constant(self.poly.ring.element_from_integer(i)),
+                    .add_constant(self.poly.ring().element_from_integer(i)),
             }),
         }
     }
@@ -5383,7 +5386,7 @@ impl PythonGaloisFieldPolynomial {
     pub fn __sub__(&self, rhs: PolynomialOrInteger<Self>) -> PyResult<Self> {
         match rhs {
             PolynomialOrInteger::Polynomial(p) => {
-                if self.poly.ring != p.poly.ring {
+                if self.poly.ring() != p.poly.ring() {
                     Err(exceptions::PyValueError::new_err(
                         "Polynomials have different rings".to_string(),
                     ))
@@ -5394,10 +5397,11 @@ impl PythonGaloisFieldPolynomial {
                 }
             }
             PolynomialOrInteger::Integer(i) => Ok(Self {
-                poly: self
-                    .poly
-                    .clone()
-                    .add_constant(self.poly.ring.neg(&self.poly.ring.element_from_integer(i))),
+                poly: self.poly.clone().add_constant(
+                    self.poly
+                        .ring()
+                        .neg(&self.poly.ring().element_from_integer(i)),
+                ),
             }),
         }
     }
@@ -5406,7 +5410,7 @@ impl PythonGaloisFieldPolynomial {
     pub fn __mul__(&self, rhs: PolynomialOrInteger<Self>) -> PyResult<Self> {
         match rhs {
             PolynomialOrInteger::Polynomial(p) => {
-                if self.poly.ring != p.poly.ring {
+                if self.poly.ring() != p.poly.ring() {
                     Err(exceptions::PyValueError::new_err(
                         "Polynomials have different rings".to_string(),
                     ))
@@ -5420,7 +5424,7 @@ impl PythonGaloisFieldPolynomial {
                 poly: self
                     .poly
                     .clone()
-                    .mul_coeff(self.poly.ring.element_from_integer(i)),
+                    .mul_coeff(self.poly.ring().element_from_integer(i)),
             }),
         }
     }
@@ -5432,7 +5436,7 @@ impl PythonGaloisFieldPolynomial {
     pub fn __rsub__(&self, rhs: PolynomialOrInteger<Self>) -> PyResult<Self> {
         match rhs {
             PolynomialOrInteger::Polynomial(p) => {
-                if self.poly.ring != p.poly.ring {
+                if self.poly.ring() != p.poly.ring() {
                     Err(exceptions::PyValueError::new_err(
                         "Polynomials have different rings".to_string(),
                     ))
@@ -5447,7 +5451,7 @@ impl PythonGaloisFieldPolynomial {
                     .poly
                     .clone()
                     .neg()
-                    .add_constant(self.poly.ring.element_from_integer(i)),
+                    .add_constant(self.poly.ring().element_from_integer(i)),
             }),
         }
     }
@@ -5461,7 +5465,7 @@ impl PythonGaloisFieldPolynomial {
             return Err(exceptions::PyValueError::new_err("Division by zero"));
         }
 
-        if self.poly.ring != rhs.poly.ring {
+        if self.poly.ring() != rhs.poly.ring() {
             return Err(exceptions::PyValueError::new_err(
                 "Polynomials have different rings".to_string(),
             ));
@@ -5586,7 +5590,7 @@ impl PythonGaloisFieldPolynomial {
     ) -> PyResult<Self> {
         if rhs.len() == 1 {
             let rhs = rhs.get_item(0)?.extract::<Self>()?;
-            if self.poly.ring != rhs.poly.ring {
+            if self.poly.ring() != rhs.poly.ring() {
                 Err(exceptions::PyValueError::new_err(
                     "Polynomials have different rings".to_string(),
                 ))
@@ -5599,7 +5603,7 @@ impl PythonGaloisFieldPolynomial {
             let mut args = vec![self.poly.clone()];
             for r in rhs.iter() {
                 let p = r.extract::<Self>()?;
-                if args[0].ring != p.poly.ring {
+                if args[0].ring() != p.poly.ring() {
                     return Err(exceptions::PyValueError::new_err(
                         "Polynomials have different rings".to_string(),
                     ));
@@ -5859,12 +5863,12 @@ impl PythonGaloisFieldPolynomial {
 
         let input = values
             .into_iter()
-            .map(|x| self.poly.ring.element_from_integer(x))
+            .map(|x| self.poly.ring().element_from_integer(x))
             .collect::<Vec<_>>();
 
         let r = self.poly.replace_all(&input);
 
-        Ok(self.poly.ring.to_integer(&r))
+        Ok(self.poly.ring().to_integer(&r))
     }
 
     /// Replace the variable `x` with a polynomial `v`.
@@ -5890,7 +5894,7 @@ impl PythonGaloisFieldPolynomial {
         let v = match v {
             PolynomialOrInteger::Polynomial(p) => p.poly,
             PolynomialOrInteger::Integer(i) => {
-                self.poly.constant(self.poly.ring.element_from_integer(i))
+                self.poly.constant(self.poly.ring().element_from_integer(i))
             }
         };
 
@@ -6013,7 +6017,7 @@ impl PythonGaloisFieldPolynomial {
             .poly
             .to_expression_with_coeff_map(|_, element, out| {
                 let p = element.poly.map_coeff(
-                    |c| Integer::from_finite_field(&element.poly.ring, *c),
+                    |c| Integer::from_finite_field(&element.poly.ring(), *c),
                     IntegerRing::new(),
                 );
                 p.to_expression_into(out);
@@ -6025,14 +6029,14 @@ impl PythonGaloisFieldPolynomial {
     pub fn to_polynomial(&self) -> PyResult<PythonFiniteFieldPolynomial> {
         let mut c = self.poly.clone();
         let mut min_poly = MultivariatePolynomial::new(
-            &c.ring,
+            c.ring(),
             None,
-            Arc::new(self.poly.ring.poly().get_vars_ref().to_vec()),
+            Arc::new(self.poly.ring().poly().get_vars_ref().to_vec()),
         );
         c.unify_variables(&mut min_poly);
 
         let mut poly = MultivariatePolynomial::new(
-            &c.ring.poly().ring,
+            c.ring().poly().ring(),
             None,
             Arc::new(c.get_vars_ref().to_vec()),
         );
@@ -6048,13 +6052,13 @@ impl PythonGaloisFieldPolynomial {
     /// Get the minimal polynomial of the algebraic extension.
     pub fn get_minimal_polynomial(&self) -> PythonFiniteFieldPolynomial {
         PythonFiniteFieldPolynomial {
-            poly: self.poly.ring.poly().clone(),
+            poly: self.poly.ring().poly().clone(),
         }
     }
 
     /// Get the modulus of the base finite field.
     pub fn get_modulus(&self) -> u64 {
-        self.poly.ring.poly().ring.get_prime()
+        self.poly.ring().poly().ring().get_prime()
     }
 }
 
@@ -6088,12 +6092,12 @@ impl PythonNumberFieldPolynomial {
         match op {
             CompareOp::Eq => match other {
                 PolynomialOrInteger::Integer(i) => Ok(self.poly.is_constant()
-                    && self.poly.get_constant() == self.poly.ring.element_from_integer(i)),
+                    && self.poly.get_constant() == self.poly.ring().element_from_integer(i)),
                 PolynomialOrInteger::Polynomial(p) => Ok(self.poly == p.poly),
             },
             CompareOp::Ne => match other {
                 PolynomialOrInteger::Integer(i) => Ok(!self.poly.is_constant()
-                    || self.poly.get_constant() != self.poly.ring.element_from_integer(i)),
+                    || self.poly.get_constant() != self.poly.ring().element_from_integer(i)),
                 PolynomialOrInteger::Polynomial(p) => Ok(self.poly != p.poly),
             },
             _ => Err(exceptions::PyTypeError::new_err(format!(
@@ -6338,7 +6342,7 @@ impl PythonNumberFieldPolynomial {
     pub fn __add__(&self, rhs: PolynomialOrInteger<Self>) -> PyResult<Self> {
         match rhs {
             PolynomialOrInteger::Polynomial(p) => {
-                if self.poly.ring != p.poly.ring {
+                if self.poly.ring() != p.poly.ring() {
                     Err(exceptions::PyValueError::new_err(
                         "Polynomials have different rings".to_string(),
                     ))
@@ -6352,7 +6356,7 @@ impl PythonNumberFieldPolynomial {
                 poly: self
                     .poly
                     .clone()
-                    .add_constant(self.poly.ring.element_from_integer(i)),
+                    .add_constant(self.poly.ring().element_from_integer(i)),
             }),
         }
     }
@@ -6366,7 +6370,7 @@ impl PythonNumberFieldPolynomial {
     pub fn __sub__(&self, rhs: PolynomialOrInteger<Self>) -> PyResult<Self> {
         match rhs {
             PolynomialOrInteger::Polynomial(p) => {
-                if self.poly.ring != p.poly.ring {
+                if self.poly.ring() != p.poly.ring() {
                     Err(exceptions::PyValueError::new_err(
                         "Polynomials have different rings".to_string(),
                     ))
@@ -6377,10 +6381,11 @@ impl PythonNumberFieldPolynomial {
                 }
             }
             PolynomialOrInteger::Integer(i) => Ok(Self {
-                poly: self
-                    .poly
-                    .clone()
-                    .add_constant(self.poly.ring.neg(&self.poly.ring.element_from_integer(i))),
+                poly: self.poly.clone().add_constant(
+                    self.poly
+                        .ring()
+                        .neg(&self.poly.ring().element_from_integer(i)),
+                ),
             }),
         }
     }
@@ -6394,7 +6399,7 @@ impl PythonNumberFieldPolynomial {
     pub fn __mul__(&self, rhs: PolynomialOrInteger<Self>) -> PyResult<Self> {
         match rhs {
             PolynomialOrInteger::Polynomial(p) => {
-                if self.poly.ring != p.poly.ring {
+                if self.poly.ring() != p.poly.ring() {
                     Err(exceptions::PyValueError::new_err(
                         "Polynomials have different rings".to_string(),
                     ))
@@ -6408,7 +6413,7 @@ impl PythonNumberFieldPolynomial {
                 poly: self
                     .poly
                     .clone()
-                    .mul_coeff(self.poly.ring.element_from_integer(i)),
+                    .mul_coeff(self.poly.ring().element_from_integer(i)),
             }),
         }
     }
@@ -6420,7 +6425,7 @@ impl PythonNumberFieldPolynomial {
     pub fn __rsub__(&self, rhs: PolynomialOrInteger<Self>) -> PyResult<Self> {
         match rhs {
             PolynomialOrInteger::Polynomial(p) => {
-                if self.poly.ring != p.poly.ring {
+                if self.poly.ring() != p.poly.ring() {
                     Err(exceptions::PyValueError::new_err(
                         "Polynomials have different rings".to_string(),
                     ))
@@ -6435,7 +6440,7 @@ impl PythonNumberFieldPolynomial {
                     .poly
                     .clone()
                     .neg()
-                    .add_constant(self.poly.ring.element_from_integer(i)),
+                    .add_constant(self.poly.ring().element_from_integer(i)),
             }),
         }
     }
@@ -6449,7 +6454,7 @@ impl PythonNumberFieldPolynomial {
             return Err(exceptions::PyValueError::new_err("Division by zero"));
         }
 
-        if self.poly.ring != rhs.poly.ring {
+        if self.poly.ring() != rhs.poly.ring() {
             return Err(exceptions::PyValueError::new_err(
                 "Polynomials have different rings".to_string(),
             ));
@@ -6598,7 +6603,7 @@ impl PythonNumberFieldPolynomial {
     ) -> PyResult<Self> {
         if rhs.len() == 1 {
             let rhs = rhs.get_item(0)?.extract::<Self>()?;
-            if self.poly.ring != rhs.poly.ring {
+            if self.poly.ring() != rhs.poly.ring() {
                 Err(exceptions::PyValueError::new_err(
                     "Polynomials have different rings".to_string(),
                 ))
@@ -6611,7 +6616,7 @@ impl PythonNumberFieldPolynomial {
             let mut args = vec![self.poly.clone()];
             for r in rhs.iter() {
                 let p = r.extract::<Self>()?;
-                if args[0].ring != p.poly.ring {
+                if args[0].ring() != p.poly.ring() {
                     return Err(exceptions::PyValueError::new_err(
                         "Polynomials have different rings".to_string(),
                     ));
@@ -6928,7 +6933,7 @@ impl PythonNumberFieldPolynomial {
         let v = match v {
             PolynomialOrInteger::Polynomial(p) => p.poly,
             PolynomialOrInteger::Integer(i) => {
-                self.poly.constant(self.poly.ring.element_from_integer(i))
+                self.poly.constant(self.poly.ring().element_from_integer(i))
             }
         };
 
@@ -7096,9 +7101,9 @@ impl PythonNumberFieldPolynomial {
     pub fn to_polynomial(&self) -> PyResult<PythonPolynomial> {
         let mut c = self.poly.clone();
         let mut min_poly = MultivariatePolynomial::new(
-            &c.ring,
+            c.ring(),
             None,
-            Arc::new(self.poly.ring.poly().get_vars_ref().to_vec()),
+            Arc::new(self.poly.ring().poly().get_vars_ref().to_vec()),
         );
         c.unify_variables(&mut min_poly);
 
@@ -7115,7 +7120,7 @@ impl PythonNumberFieldPolynomial {
     /// Get the minimal polynomial of the algebraic extension.
     pub fn get_minimal_polynomial(&self) -> PythonPolynomial {
         PythonPolynomial {
-            poly: self.poly.ring.poly().clone(),
+            poly: self.poly.ring().poly().clone(),
         }
     }
 }
@@ -7155,13 +7160,13 @@ impl PythonRationalPolynomial {
             CompareOp::Eq => match other {
                 PolynomialOrInteger::Integer(i) => Ok(self.poly.denominator.is_one()
                     && self.poly.numerator.get_constant()
-                        == self.poly.numerator.ring.element_from_integer(i)),
+                        == self.poly.numerator.ring().element_from_integer(i)),
                 PolynomialOrInteger::Polynomial(p) => Ok(self.poly == p.poly),
             },
             CompareOp::Ne => match other {
                 PolynomialOrInteger::Integer(i) => Ok(!self.poly.denominator.is_one()
                     || self.poly.numerator.get_constant()
-                        != self.poly.numerator.ring.element_from_integer(i)),
+                        != self.poly.numerator.ring().element_from_integer(i)),
                 PolynomialOrInteger::Polynomial(p) => Ok(self.poly != p.poly),
             },
             _ => Err(exceptions::PyTypeError::new_err(format!(
@@ -7612,13 +7617,13 @@ impl PythonFiniteFieldRationalPolynomial {
             CompareOp::Eq => match other {
                 PolynomialOrInteger::Integer(i) => Ok(self.poly.denominator.is_one()
                     && self.poly.numerator.get_constant()
-                        == self.poly.numerator.ring.element_from_integer(i)),
+                        == self.poly.numerator.ring().element_from_integer(i)),
                 PolynomialOrInteger::Polynomial(p) => Ok(self.poly == p.poly),
             },
             CompareOp::Ne => match other {
                 PolynomialOrInteger::Integer(i) => Ok(!self.poly.denominator.is_one()
                     || self.poly.numerator.get_constant()
-                        != self.poly.numerator.ring.element_from_integer(i)),
+                        != self.poly.numerator.ring().element_from_integer(i)),
                 PolynomialOrInteger::Polynomial(p) => Ok(self.poly != p.poly),
             },
             _ => Err(exceptions::PyTypeError::new_err(format!(
@@ -7847,7 +7852,7 @@ impl PythonFiniteFieldRationalPolynomial {
 
     /// Get the modulus of the finite field.
     pub fn get_modulus(&self) -> u64 {
-        self.poly.numerator.ring.get_prime()
+        self.poly.numerator.ring().get_prime()
     }
 
     /// Take a derivative in `x`.
