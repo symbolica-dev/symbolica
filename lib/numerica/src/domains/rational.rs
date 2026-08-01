@@ -1074,7 +1074,9 @@ impl Rational {
                 // set t to 2^20*ceil(log2(m))
                 let ceil_log2 = match &p {
                     Integer::Single(n) => u64::BITS as u64 - (*n as u64).leading_zeros() as u64,
-                    Integer::Double(n) => u128::BITS as u64 - (*n as u128).leading_zeros() as u64,
+                    Integer::Double(n) => {
+                        u128::BITS as u64 - (n.get() as u128).leading_zeros() as u64
+                    }
                     Integer::Large(n) => n.significant_bits().into(),
                 };
 

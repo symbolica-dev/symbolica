@@ -86,9 +86,82 @@ pub enum Integer {
     /// Single machine-width integer (`i64`), hardware-accelerated on most platforms.
     Single(i64),
     /// Double machine-width integer (`i128`), partially hardware accelerated on some platforms.
-    Double(i128),
+    Double(DoubleInteger),
     /// Multi-precision integer (using the `rug` crate).
     Large(MultiPrecisionInteger),
+}
+
+/// An `i128` stored as two 64-bit limbs so that [`Integer`] only requires
+/// 8-byte alignment on 64-bit targets.
+///
+/// Convert this value to an ordinary `i128` with [`DoubleInteger::get`].
+#[repr(C)]
+#[derive(Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
+pub struct DoubleInteger {
+    low: u64,
+    high: i64,
+}
+
+impl DoubleInteger {
+    #[inline(always)]
+    pub const fn new(value: i128) -> Self {
+        Self {
+            low: value as u64,
+            high: (value >> 64) as i64,
+        }
+    }
+
+    #[inline(always)]
+    pub const fn get(self) -> i128 {
+        ((self.high as i128) << 64) | self.low as i128
+    }
+}
+
+impl From<i128> for DoubleInteger {
+    #[inline(always)]
+    fn from(value: i128) -> Self {
+        Self::new(value)
+    }
+}
+
+impl From<DoubleInteger> for i128 {
+    #[inline(always)]
+    fn from(value: DoubleInteger) -> Self {
+        value.get()
+    }
+}
+
+impl From<&DoubleInteger> for i128 {
+    #[inline(always)]
+    fn from(value: &DoubleInteger) -> Self {
+        value.get()
+    }
+}
+
+impl std::fmt::Display for DoubleInteger {
+    fn fmt(&self, f: &mut Formatter<'_>) -> std::fmt::Result {
+        std::fmt::Display::fmt(&self.get(), f)
+    }
+}
+
+impl std::fmt::Debug for DoubleInteger {
+    fn fmt(&self, f: &mut Formatter<'_>) -> std::fmt::Result {
+        std::fmt::Debug::fmt(&self.get(), f)
+    }
+}
+
+#[cfg(feature = "serde")]
+impl serde::Serialize for DoubleInteger {
+    fn serialize<S: serde::Serializer>(&self, serializer: S) -> Result<S::Ok, S::Error> {
+        serializer.serialize_i128(self.get())
+    }
+}
+
+#[cfg(feature = "serde")]
+impl<'de> serde::Deserialize<'de> for DoubleInteger {
+    fn deserialize<D: serde::Deserializer<'de>>(deserializer: D) -> Result<Self, D::Error> {
+        <i128 as serde::Deserialize>::deserialize(deserializer).map(Self::new)
+    }
 }
 
 #[derive(Clone)]
@@ -136,7 +209,7 @@ impl<'py> IntoPyObject<'py> for Integer {
     fn into_pyobject(self, py: Python<'py>) -> Result<Self::Output, Self::Error> {
         match self {
             Integer::Single(n) => n.into_pyobject(py),
-            Integer::Double(d) => d.into_pyobject(py),
+            Integer::Double(d) => d.get().into_pyobject(py),
             Integer::Large(l) => unsafe {
                 Ok(Bound::from_owned_ptr(
                     py,
@@ -166,7 +239,7 @@ impl bincode::Encode for Integer {
             }
             Integer::Double(val) => {
                 1u8.encode(encoder)?;
-                val.encode(encoder)
+                val.get().encode(encoder)
             }
             Integer::Large(val) => {
                 2u8.encode(encoder)?;
@@ -192,7 +265,7 @@ impl<Context> bincode::Decode<Context> for Integer {
             }
             1 => {
                 let val = i128::decode(decoder)?;
-                Ok(Integer::Double(val))
+                Ok(Integer::from_double(val))
             }
             2 => {
                 let b = Vec::<u8>::decode(decoder)?;
@@ -345,7 +418,7 @@ impl TryFrom<Integer> for i128 {
     fn try_from(value: Integer) -> Result<Self, Self::Error> {
         match value {
             Integer::Single(n) => Ok(n as i128),
-            Integer::Double(n) => Ok(n),
+            Integer::Double(n) => Ok(n.get()),
             _ => Err("Could not convert to i64 as it is too large"),
         }
     }
@@ -436,6 +509,7 @@ impl TryFrom<Integer> for u64 {
                 }
             }
             Integer::Double(n) => {
+                let n = n.get();
                 if n >= 0 {
                     if n <= u64::MAX as i128 {
                         Ok(n as u64)
@@ -465,6 +539,7 @@ impl TryFrom<Integer> for u128 {
                 }
             }
             Integer::Double(n) => {
+                let n = n.get();
                 if n >= 0 {
                     Ok(n as u128)
                 } else {
@@ -506,7 +581,7 @@ impl From<u64> for Integer {
         if value <= i64::MAX as u64 {
             Integer::Single(value as i64)
         } else {
-            Integer::Double(value as i128)
+            Integer::from_double(value as i128)
         }
     }
 }
@@ -545,7 +620,7 @@ impl From<MultiPrecisionInteger> for Integer {
         if let Some(n) = n.to_i64() {
             Integer::Single(n)
         } else if let Some(n) = n.to_i128() {
-            Integer::Double(n)
+            Integer::from_double(n)
         } else {
             Integer::Large(n)
         }
@@ -571,7 +646,7 @@ impl FromStr for Integer {
         if s.len() <= 40
             && let Ok(n) = s.parse::<i128>()
         {
-            return Ok(Integer::Double(n));
+            return Ok(Integer::from_double(n));
         }
 
         if let Ok(n) = s.parse::<MultiPrecisionInteger>() {
@@ -596,7 +671,9 @@ impl ToFiniteField<u32> for Integer {
     fn to_finite_field(&self, field: &Zp) -> <Zp as Set>::Element {
         match self {
             Integer::Single(n) => field.to_element(n.rem_euclid(field.get_prime() as i64) as u32),
-            Integer::Double(n) => field.to_element(n.rem_euclid(field.get_prime() as i128) as u32),
+            Integer::Double(n) => {
+                field.to_element(n.get().rem_euclid(field.get_prime() as i128) as u32)
+            }
             Integer::Large(r) => field.to_element(r.mod_u(field.get_prime())),
         }
     }
@@ -612,7 +689,9 @@ impl ToFiniteField<u64> for Integer {
                     field.to_element(n.rem_euclid(field.get_prime() as i64) as u64)
                 }
             }
-            &Integer::Double(n) => field.to_element(n.rem_euclid(field.get_prime() as i128) as u64),
+            &Integer::Double(n) => {
+                field.to_element(n.get().rem_euclid(field.get_prime() as i128) as u64)
+            }
             Integer::Large(r) => {
                 field.to_element(r.rem_euc(field.get_prime()).complete().to_u64().unwrap())
             }
@@ -624,7 +703,7 @@ impl ToFiniteField<Two> for Integer {
     fn to_finite_field(&self, field: &Z2) -> <Z2 as Set>::Element {
         match self {
             &Integer::Single(n) => field.to_element(Two(n.rem_euclid(2) as u8)),
-            &Integer::Double(n) => field.to_element(Two(n.rem_euclid(2) as u8)),
+            &Integer::Double(n) => field.to_element(Two(n.get().rem_euclid(2) as u8)),
             Integer::Large(r) => field.to_element(Two(r.mod_u(2) as u8)),
         }
     }
@@ -646,7 +725,7 @@ impl ToFiniteField<Mersenne32> for Integer {
     ) -> <FiniteField<Mersenne32> as Set>::Element {
         match self {
             &Integer::Single(n) => n.rem_euclid(Mersenne32::PRIME as i64) as u32,
-            &Integer::Double(n) => n.rem_euclid(Mersenne32::PRIME as i128) as u32,
+            &Integer::Double(n) => n.get().rem_euclid(Mersenne32::PRIME as i128) as u32,
             Integer::Large(r) => r.rem_euc(Mersenne32::PRIME).complete().to_u64().unwrap() as u32,
         }
     }
@@ -659,7 +738,7 @@ impl ToFiniteField<Mersenne64> for Integer {
     ) -> <FiniteField<Mersenne64> as Set>::Element {
         match self {
             &Integer::Single(n) => n.rem_euclid(Mersenne64::PRIME as i64) as u64,
-            &Integer::Double(n) => n.rem_euclid(Mersenne64::PRIME as i128) as u64,
+            &Integer::Double(n) => n.get().rem_euclid(Mersenne64::PRIME as i128) as u64,
             Integer::Large(r) => r.rem_euc(Mersenne64::PRIME).complete().to_u64().unwrap(),
         }
     }
@@ -692,7 +771,7 @@ impl FromFiniteField<u64> for Integer {
         if r <= i64::MAX as u64 {
             Integer::Single(r as i64)
         } else {
-            Integer::Double(r as i128)
+            Integer::from_double(r as i128)
         }
     }
 
@@ -701,7 +780,7 @@ impl FromFiniteField<u64> for Integer {
         if r <= i64::MAX as u64 {
             Integer::Single(r as i64)
         } else {
-            Integer::Double(r as i128)
+            Integer::from_double(r as i128)
         }
     }
 }
@@ -735,13 +814,13 @@ impl Integer {
     fn simplify(&mut self) -> &mut Self {
         match self {
             Integer::Double(n) => {
-                *self = Integer::from_double(*n);
+                *self = Integer::from_double(n.get());
             }
             Integer::Large(l) => {
                 if let Some(n) = l.to_i64() {
                     *self = Integer::Single(n);
                 } else if let Some(n) = l.to_i128() {
-                    *self = Integer::Double(n);
+                    *self = Integer::from_double(n);
                 }
             }
             _ => {}
@@ -767,11 +846,11 @@ impl Integer {
             }
             Integer::Double(n) => {
                 if rhs < i128::BITS as usize
-                    && let Some(n) = n.checked_shl(rhs as u32)
+                    && let Some(n) = n.get().checked_shl(rhs as u32)
                 {
                     Integer::from_double(n)
                 } else {
-                    Integer::from(MultiPrecisionInteger::from(*n) << rhs)
+                    Integer::from(MultiPrecisionInteger::from(n.get()) << rhs)
                 }
             }
             Integer::Large(n) => Integer::from((n << rhs).complete()),
@@ -790,9 +869,9 @@ impl Integer {
             }
             Integer::Double(n) => {
                 if rhs < i128::BITS as usize {
-                    Integer::from_double(n >> rhs)
+                    Integer::from_double(n.get() >> rhs)
                 } else {
-                    Integer::from(MultiPrecisionInteger::from(*n) >> rhs)
+                    Integer::from(MultiPrecisionInteger::from(n.get()) >> rhs)
                 }
             }
             Integer::Large(n) => Integer::from((n >> rhs).complete()),
@@ -804,7 +883,7 @@ impl Integer {
         if n >= i64::MIN as i128 && n <= i64::MAX as i128 {
             Integer::Single(n as i64)
         } else {
-            Integer::Double(n)
+            Integer::Double(DoubleInteger::new(n))
         }
     }
 
@@ -820,7 +899,7 @@ impl Integer {
     pub fn to_multi_prec(self) -> MultiPrecisionInteger {
         match self {
             Integer::Single(n) => n.into(),
-            Integer::Double(d) => d.into(),
+            Integer::Double(d) => d.get().into(),
             Integer::Large(l) => l,
         }
     }
@@ -845,7 +924,7 @@ impl Integer {
     pub fn is_negative(&self) -> bool {
         match self {
             Integer::Single(n) => *n < 0,
-            Integer::Double(n) => *n < 0,
+            Integer::Double(n) => n.get() < 0,
             Integer::Large(r) => r.is_negative(),
         }
     }
@@ -872,16 +951,16 @@ impl Integer {
         match self {
             Integer::Single(n) => {
                 if *n == i64::MIN {
-                    Integer::Double((*n as i128).abs())
+                    Integer::from_double((*n as i128).abs())
                 } else {
                     Integer::Single(n.abs())
                 }
             }
             Integer::Double(n) => {
-                if *n == i128::MIN {
-                    Integer::Large(MultiPrecisionInteger::from(*n).abs())
+                if n.get() == i128::MIN {
+                    Integer::Large(MultiPrecisionInteger::from(n.get()).abs())
                 } else {
-                    Integer::Double(n.abs())
+                    Integer::from_double(n.get().abs())
                 }
             }
             Integer::Large(n) => Integer::Large(n.clone().abs()),
@@ -898,7 +977,7 @@ impl Integer {
                 .reverse(),
             (Integer::Double(n1), Integer::Large(n2)) => n2
                 .as_abs()
-                .partial_cmp(&n1.unsigned_abs())
+                .partial_cmp(&n1.get().unsigned_abs())
                 .unwrap_or(Ordering::Equal)
                 .reverse(),
             (Integer::Large(n1), Integer::Single(n2)) => n1
@@ -907,7 +986,7 @@ impl Integer {
                 .unwrap_or(Ordering::Equal),
             (Integer::Large(n1), Integer::Double(n2)) => n1
                 .as_abs()
-                .partial_cmp(&n2.unsigned_abs())
+                .partial_cmp(&n2.get().unsigned_abs())
                 .unwrap_or(Ordering::Equal),
             (_, _) => Ord::cmp(&self.abs(), &other.abs()),
         }
@@ -1421,6 +1500,7 @@ impl Integer {
                 }
             }
             Integer::Double(n) => {
+                let n = n.get();
                 let mut r = 1u128 << (n.ilog2() / e + 1);
                 let k = e as u128;
                 loop {
@@ -1494,16 +1574,16 @@ impl Integer {
                 if let Some(pn) = n1.checked_pow(e) {
                     Integer::Single(pn)
                 } else if let Some(pn) = (*n1 as i128).checked_pow(e) {
-                    Integer::Double(pn)
+                    Integer::from_double(pn)
                 } else {
                     Integer::Large(mp_pow_ref_u32(&MultiPrecisionInteger::from(*n1), e))
                 }
             }
             Integer::Double(n1) => {
-                if let Some(pn) = n1.checked_pow(e) {
-                    Integer::Double(pn)
+                if let Some(pn) = n1.get().checked_pow(e) {
+                    Integer::from_double(pn)
                 } else {
-                    Integer::Large(mp_pow_ref_u32(&MultiPrecisionInteger::from(*n1), e))
+                    Integer::Large(mp_pow_ref_u32(&MultiPrecisionInteger::from(n1.get()), e))
                 }
             }
             Integer::Large(r) => Integer::Large(mp_pow_ref_u32(r, e)),
@@ -1520,23 +1600,29 @@ impl Integer {
                 if let Some(q) = aa.checked_div_euclid(*bb) {
                     (Integer::Single(q), self - &(b * &Integer::Single(q)))
                 } else {
-                    (Integer::Double(-(i64::MIN as i128)), Integer::zero())
+                    (Integer::from_double(-(i64::MIN as i128)), Integer::zero())
                 }
             }
             (Integer::Single(a), Integer::Double(b)) => {
                 // we always have |a| <= |b|
                 if *a < 0 {
-                    if *b > 0 {
-                        (Integer::Single(-1), Integer::from_double(*a as i128 + *b))
+                    if b.get() > 0 {
+                        (
+                            Integer::Single(-1),
+                            Integer::from_double(*a as i128 + b.get()),
+                        )
                     } else {
-                        (Integer::Single(1), Integer::from_double(*a as i128 - *b))
+                        (
+                            Integer::Single(1),
+                            Integer::from_double(*a as i128 - b.get()),
+                        )
                     }
                 } else {
                     (Integer::zero(), Integer::Single(*a))
                 }
             }
             (Integer::Double(aa), Integer::Single(bb)) => {
-                if let Some(q) = aa.checked_div_euclid(*bb as i128) {
+                if let Some(q) = aa.get().checked_div_euclid(*bb as i128) {
                     let q = Integer::from_double(q);
                     (q.clone(), self - &(b * &q))
                 } else {
@@ -1547,7 +1633,7 @@ impl Integer {
                 }
             }
             (Integer::Double(aa), Integer::Double(bb)) => {
-                let q = Integer::from_double(aa.div_euclid(*bb)); // b != -1
+                let q = Integer::from_double(aa.get().div_euclid(bb.get())); // b != -1
                 (q.clone(), self - &(b * &q))
             }
             (Integer::Single(a), Integer::Large(b)) => {
@@ -1571,18 +1657,18 @@ impl Integer {
             }
 
             (Integer::Double(a), Integer::Large(b)) => {
-                if *a < 0 {
+                if a.get() < 0 {
                     if *b > 0 {
-                        (Integer::Single(-1), Integer::from((a + b).complete()))
+                        (Integer::Single(-1), Integer::from((a.get() + b).complete()))
                     } else {
-                        (Integer::Single(1), Integer::from((a - b).complete()))
+                        (Integer::Single(1), Integer::from((a.get() - b).complete()))
                     }
                 } else {
                     (Integer::zero(), Integer::Double(*a))
                 }
             }
             (Integer::Large(a), Integer::Double(b)) => {
-                let r = a.clone().div_rem_euc(MultiPrecisionInteger::from(*b));
+                let r = a.clone().div_rem_euc(MultiPrecisionInteger::from(b.get()));
                 (Integer::from(r.0), Integer::from(r.1))
             }
         }
@@ -1594,7 +1680,7 @@ impl Integer {
                 let gcd = gcd_signed(*n1, *n2);
                 if gcd == i64::MAX as u64 + 1 {
                     // n1 == n2 == u64::MIN
-                    Integer::Double(gcd as i128)
+                    Integer::from_double(gcd as i128)
                 } else {
                     Integer::Single(gcd as i64)
                 }
@@ -1607,10 +1693,10 @@ impl Integer {
             (Integer::Large(r1), Integer::Large(r2)) => Integer::from(r1.clone().gcd(r2)),
             (Integer::Single(r1), Integer::Double(r2))
             | (Integer::Double(r2), Integer::Single(r1)) => {
-                Integer::from_double(gcd_signed_i128(*r1 as i128, *r2) as i128)
+                Integer::from_double(gcd_signed_i128(*r1 as i128, r2.get()) as i128)
             }
             (Integer::Double(r1), Integer::Double(r2)) => {
-                let gcd = gcd_signed_i128(*r1, *r2);
+                let gcd = gcd_signed_i128(r1.get(), r2.get());
                 if gcd == i128::MAX as u128 + 1 {
                     Integer::Large(MultiPrecisionInteger::from(gcd))
                 } else {
@@ -1618,10 +1704,10 @@ impl Integer {
                 }
             }
             (Integer::Double(r1), Integer::Large(r2)) => {
-                Integer::from(MultiPrecisionInteger::from(*r1).clone().gcd(r2))
+                Integer::from(MultiPrecisionInteger::from(r1.get()).gcd(r2))
             }
             (Integer::Large(r1), Integer::Double(r2)) => {
-                Integer::from(r1.clone().gcd(&MultiPrecisionInteger::from(*r2)))
+                Integer::from(r1.clone().gcd(&MultiPrecisionInteger::from(r2.get())))
             }
         }
     }
@@ -1632,7 +1718,7 @@ impl Integer {
                 let (gcd, t, s) = extended_gcd(*n1, *n2);
                 if gcd == i64::MAX as u64 + 1 {
                     (
-                        Integer::Double(gcd as i128),
+                        Integer::from_double(gcd as i128),
                         Integer::Single(t),
                         Integer::Single(s),
                     )
@@ -1658,7 +1744,7 @@ impl Integer {
             }
             (Integer::Single(r1), Integer::Double(r2))
             | (Integer::Double(r2), Integer::Single(r1)) => {
-                let (gcd, t, s) = extended_gcd_i128(*r1 as i128, *r2);
+                let (gcd, t, s) = extended_gcd_i128(*r1 as i128, r2.get());
                 (
                     Integer::from_double(gcd as i128),
                     Integer::from_double(t),
@@ -1666,7 +1752,7 @@ impl Integer {
                 )
             }
             (Integer::Double(r1), Integer::Double(r2)) => {
-                let (g, t, s) = extended_gcd_i128(*r1, *r2);
+                let (g, t, s) = extended_gcd_i128(r1.get(), r2.get());
                 if g == i128::MAX as u128 + 1 {
                     (
                         Integer::Large(MultiPrecisionInteger::from(g)),
@@ -1682,13 +1768,13 @@ impl Integer {
                 }
             }
             (Integer::Double(r1), Integer::Large(r2)) => {
-                let (g, s, t) = MultiPrecisionInteger::from(*r1)
+                let (g, s, t) = MultiPrecisionInteger::from(r1.get())
                     .extended_gcd(r2.clone(), MultiPrecisionInteger::default());
                 (Integer::from(g), Integer::from(s), Integer::from(t))
             }
             (Integer::Large(r1), Integer::Double(r2)) => {
                 let (g, s, t) = r1.clone().extended_gcd(
-                    MultiPrecisionInteger::from(*r2),
+                    MultiPrecisionInteger::from(r2.get()),
                     MultiPrecisionInteger::default(),
                 );
                 (Integer::from(g), Integer::from(s), Integer::from(t))
@@ -1731,7 +1817,7 @@ impl Integer {
             (Integer::Double(_), Integer::Large(_)) => false,
             (Integer::Large(_), Integer::Single(_)) => true,
             (Integer::Large(_), Integer::Double(_)) => true,
-            (Integer::Double(n1), Integer::Double(n2)) => n1 > n2,
+            (Integer::Double(n1), Integer::Double(n2)) => n1.get() > n2.get(),
             (Integer::Large(r1), Integer::Large(r2)) => r1 > r2,
         } {
             return Self::chinese_remainder(n2, n1, p2, p1);
@@ -1739,23 +1825,23 @@ impl Integer {
 
         let p1 = match p1 {
             Integer::Single(n) => MultiPrecisionInteger::from(n),
-            Integer::Double(n) => MultiPrecisionInteger::from(n),
+            Integer::Double(n) => MultiPrecisionInteger::from(n.get()),
             Integer::Large(r) => r,
         };
         let p2 = match p2 {
             Integer::Single(n) => MultiPrecisionInteger::from(n),
-            Integer::Double(n) => MultiPrecisionInteger::from(n),
+            Integer::Double(n) => MultiPrecisionInteger::from(n.get()),
             Integer::Large(r) => r,
         };
 
         let n1 = match n1 {
             Integer::Single(n) => MultiPrecisionInteger::from(n),
-            Integer::Double(n) => MultiPrecisionInteger::from(n),
+            Integer::Double(n) => MultiPrecisionInteger::from(n.get()),
             Integer::Large(r) => r,
         };
         let n2 = match n2 {
             Integer::Single(n) => MultiPrecisionInteger::from(n),
-            Integer::Double(n) => MultiPrecisionInteger::from(n),
+            Integer::Double(n) => MultiPrecisionInteger::from(n.get()),
             Integer::Large(r) => r,
         };
 
@@ -2027,11 +2113,11 @@ impl PartialOrd for Integer {
             (Integer::Single(n1), Integer::Large(n2)) => n1.partial_cmp(n2),
             (Integer::Large(n1), Integer::Single(n2)) => n1.partial_cmp(n2),
             (Integer::Large(n1), Integer::Large(n2)) => n1.partial_cmp(n2),
-            (Integer::Single(n1), Integer::Double(n2)) => (*n1 as i128).partial_cmp(n2),
-            (Integer::Double(n1), Integer::Single(n2)) => n1.partial_cmp(&(*n2 as i128)),
-            (Integer::Double(n1), Integer::Double(n2)) => n1.partial_cmp(n2),
-            (Integer::Double(n1), Integer::Large(n2)) => n1.partial_cmp(n2),
-            (Integer::Large(n1), Integer::Double(n2)) => n1.partial_cmp(n2),
+            (Integer::Single(n1), Integer::Double(n2)) => (*n1 as i128).partial_cmp(&n2.get()),
+            (Integer::Double(n1), Integer::Single(n2)) => n1.get().partial_cmp(&(*n2 as i128)),
+            (Integer::Double(n1), Integer::Double(n2)) => n1.get().partial_cmp(&n2.get()),
+            (Integer::Double(n1), Integer::Large(n2)) => n1.get().partial_cmp(n2),
+            (Integer::Large(n1), Integer::Double(n2)) => n1.partial_cmp(&n2.get()),
         }
     }
 }
@@ -2134,9 +2220,9 @@ impl RingOps<&<Self as Set>::Element> for IntegerRing {
             // prevent the creation of a GMP integer b * c
             match (b, c) {
                 (Integer::Single(b1), Integer::Large(c1)) => l.add_assign(b1 * c1),
-                (Integer::Double(b1), Integer::Large(c1)) => l.add_assign(b1 * c1),
+                (Integer::Double(b1), Integer::Large(c1)) => l.add_assign(b1.get() * c1),
                 (Integer::Large(b1), Integer::Single(c1)) => l.add_assign(b1 * c1),
-                (Integer::Large(b1), Integer::Double(c1)) => l.add_assign(b1 * c1),
+                (Integer::Large(b1), Integer::Double(c1)) => l.add_assign(b1 * c1.get()),
                 (Integer::Large(b1), Integer::Large(c1)) => l.add_assign(b1 * c1),
                 _ => {
                     return *a += b * c;
@@ -2155,9 +2241,9 @@ impl RingOps<&<Self as Set>::Element> for IntegerRing {
         if let Integer::Large(l) = a {
             match (b, c) {
                 (Integer::Single(b1), Integer::Large(c1)) => l.sub_assign(b1 * c1),
-                (Integer::Double(b1), Integer::Large(c1)) => l.sub_assign(b1 * c1),
+                (Integer::Double(b1), Integer::Large(c1)) => l.sub_assign(b1.get() * c1),
                 (Integer::Large(b1), Integer::Single(c1)) => l.sub_assign(b1 * c1),
-                (Integer::Large(b1), Integer::Double(c1)) => l.sub_assign(b1 * c1),
+                (Integer::Large(b1), Integer::Double(c1)) => l.sub_assign(b1 * c1.get()),
                 (Integer::Large(b1), Integer::Large(c1)) => l.sub_assign(b1 * c1),
                 _ => {
                     return *a -= b * c;
@@ -2350,7 +2436,7 @@ impl<'b> Add<&'b Integer> for Integer {
         if let Integer::Large(r) = self {
             match rhs {
                 Integer::Single(n) => Integer::from(*n + r),
-                Integer::Double(n) => Integer::from(*n + r),
+                Integer::Double(n) => Integer::from(n.get() + r),
                 Integer::Large(n) => Integer::from(n + r),
             }
         } else {
@@ -2367,13 +2453,13 @@ impl Add<Integer> for Integer {
         if let Integer::Large(r) = self {
             match rhs {
                 Integer::Single(n) => Integer::from(n + r),
-                Integer::Double(n) => Integer::from(n + r),
+                Integer::Double(n) => Integer::from(n.get() + r),
                 Integer::Large(n) => Integer::from(n + r),
             }
         } else if let Integer::Large(r) = rhs {
             match self {
                 Integer::Single(n) => Integer::from(n + r),
-                Integer::Double(n) => Integer::from(n + r),
+                Integer::Double(n) => Integer::from(n.get() + r),
                 Integer::Large(n) => Integer::from(n + r),
             }
         } else {
@@ -2401,28 +2487,30 @@ impl<'b> Add<&'b Integer> for &Integer {
                 if let Some(num) = n1.checked_add(*n2) {
                     Integer::Single(num)
                 } else {
-                    Integer::Double(*n1 as i128 + *n2 as i128)
+                    Integer::from_double(*n1 as i128 + *n2 as i128)
                 }
             }
             (Integer::Single(n1), Integer::Double(r2))
             | (Integer::Double(r2), Integer::Single(n1)) => {
-                if let Some(num) = (*n1 as i128).checked_add(*r2) {
+                if let Some(num) = (*n1 as i128).checked_add(r2.get()) {
                     Integer::from_double(num)
                 } else {
-                    Integer::Large(MultiPrecisionInteger::from(*r2) + *n1)
+                    Integer::Large(MultiPrecisionInteger::from(r2.get()) + *n1)
                 }
             }
             (Integer::Double(r1), Integer::Double(r2)) => {
-                if let Some(num) = r1.checked_add(*r2) {
+                if let Some(num) = r1.get().checked_add(r2.get()) {
                     Integer::from_double(num)
                 } else {
-                    Integer::Large(MultiPrecisionInteger::from(*r1) + *r2)
+                    Integer::Large(MultiPrecisionInteger::from(r1.get()) + r2.get())
                 }
             }
             (Integer::Single(n1), Integer::Large(r2))
             | (Integer::Large(r2), Integer::Single(n1)) => Integer::from((n1 + r2).complete()),
             (Integer::Double(n1), Integer::Large(r2))
-            | (Integer::Large(r2), Integer::Double(n1)) => Integer::from((n1 + r2).complete()),
+            | (Integer::Large(r2), Integer::Double(n1)) => {
+                Integer::from((n1.get() + r2).complete())
+            }
             (Integer::Large(r1), Integer::Large(r2)) => Integer::from((r1 + r2).complete()),
         }
     }
@@ -2436,7 +2524,7 @@ impl Sub<&Integer> for Integer {
         if let Integer::Large(s) = self {
             match rhs {
                 Integer::Single(r) => Integer::from(s - r),
-                Integer::Double(r) => Integer::from(s - r),
+                Integer::Double(r) => Integer::from(s - r.get()),
                 Integer::Large(r) => Integer::from(s - r),
             }
         } else {
@@ -2453,7 +2541,7 @@ impl Sub<Integer> for &Integer {
         if let Integer::Large(r) = rhs {
             match self {
                 Integer::Single(s) => Integer::from(*s - r),
-                Integer::Double(s) => Integer::from(*s - r),
+                Integer::Double(s) => Integer::from(s.get() - r),
                 Integer::Large(s) => Integer::from(s - r),
             }
         } else {
@@ -2470,13 +2558,13 @@ impl Sub<Integer> for Integer {
         if let Integer::Large(s) = self {
             match rhs {
                 Integer::Single(r) => Integer::from(s - r),
-                Integer::Double(r) => Integer::from(s - r),
+                Integer::Double(r) => Integer::from(s - r.get()),
                 Integer::Large(r) => Integer::from(s - r),
             }
         } else if let Integer::Large(r) = rhs {
             match self {
                 Integer::Single(s) => Integer::from(s - r),
-                Integer::Double(s) => Integer::from(s - r),
+                Integer::Double(s) => Integer::from(s.get() - r),
                 Integer::Large(s) => Integer::from(s - r),
             }
         } else {
@@ -2495,34 +2583,34 @@ impl<'b> Sub<&'b Integer> for &Integer {
                 if let Some(num) = n1.checked_sub(*n2) {
                     Integer::Single(num)
                 } else {
-                    Integer::Double(*n1 as i128 - *n2 as i128)
+                    Integer::from_double(*n1 as i128 - *n2 as i128)
                 }
             }
             (Integer::Single(n1), Integer::Double(r2)) => {
-                if let Some(num) = (*n1 as i128).checked_sub(*r2) {
+                if let Some(num) = (*n1 as i128).checked_sub(r2.get()) {
                     Integer::from_double(num)
                 } else {
-                    Integer::Large(MultiPrecisionInteger::from(*n1) - *r2)
+                    Integer::Large(MultiPrecisionInteger::from(*n1) - r2.get())
                 }
             }
             (Integer::Double(r1), Integer::Single(r2)) => {
-                if let Some(num) = r1.checked_sub(*r2 as i128) {
+                if let Some(num) = r1.get().checked_sub(*r2 as i128) {
                     Integer::from_double(num)
                 } else {
-                    Integer::Large(MultiPrecisionInteger::from(*r1) - *r2)
+                    Integer::Large(MultiPrecisionInteger::from(r1.get()) - *r2)
                 }
             }
             (Integer::Double(r1), Integer::Double(r2)) => {
-                if let Some(num) = r1.checked_sub(*r2) {
+                if let Some(num) = r1.get().checked_sub(r2.get()) {
                     Integer::from_double(num)
                 } else {
-                    Integer::Large(MultiPrecisionInteger::from(*r1) - *r2)
+                    Integer::Large(MultiPrecisionInteger::from(r1.get()) - r2.get())
                 }
             }
             (Integer::Single(n1), Integer::Large(r2)) => Integer::from((n1 - r2).complete()),
             (Integer::Large(r1), Integer::Single(n2)) => Integer::from((r1 - *n2).complete()),
-            (Integer::Double(n1), Integer::Large(r2)) => Integer::from((n1 - r2).complete()),
-            (Integer::Large(r1), Integer::Double(n2)) => Integer::from((r1 - *n2).complete()),
+            (Integer::Double(n1), Integer::Large(r2)) => Integer::from((n1.get() - r2).complete()),
+            (Integer::Large(r1), Integer::Double(n2)) => Integer::from((r1 - n2.get()).complete()),
             (Integer::Large(r1), Integer::Large(r2)) => Integer::from((r1 - r2).complete()),
         }
     }
@@ -2536,7 +2624,7 @@ impl<'a> Mul<&'a Integer> for Integer {
         if let Integer::Large(r) = self {
             match rhs {
                 Integer::Single(n) => Integer::from(*n * r),
-                Integer::Double(n) => Integer::from(*n * r),
+                Integer::Double(n) => Integer::from(n.get() * r),
                 Integer::Large(n) => Integer::from(n * r),
             }
         } else {
@@ -2562,13 +2650,13 @@ impl Mul<Integer> for Integer {
         if let Integer::Large(r) = self {
             match rhs {
                 Integer::Single(n) => Integer::from(n * r),
-                Integer::Double(n) => Integer::from(n * r),
+                Integer::Double(n) => Integer::from(n.get() * r),
                 Integer::Large(n) => Integer::from(n * r),
             }
         } else if let Integer::Large(r) = rhs {
             match self {
                 Integer::Single(n) => Integer::from(n * r),
-                Integer::Double(n) => Integer::from(n * r),
+                Integer::Double(n) => Integer::from(n.get() * r),
                 Integer::Large(n) => Integer::from(n * r),
             }
         } else {
@@ -2587,32 +2675,35 @@ impl<'b> Mul<&'b Integer> for &Integer {
                 if let Some(num) = n1.checked_mul(*n2) {
                     Integer::Single(num)
                 } else {
-                    Integer::Double(*n1 as i128 * *n2 as i128)
+                    Integer::from_double(*n1 as i128 * *n2 as i128)
                 }
             }
             (Integer::Single(n1), Integer::Double(r2))
             | (Integer::Double(r2), Integer::Single(n1)) => {
-                if let Some(num) = (*n1 as i128).checked_mul(*r2) {
+                if let Some(num) = (*n1 as i128).checked_mul(r2.get()) {
                     Integer::from_double(num)
                 } else {
                     Integer::Large(
-                        MultiPrecisionInteger::from(*r2) * MultiPrecisionInteger::from(*n1),
+                        MultiPrecisionInteger::from(r2.get()) * MultiPrecisionInteger::from(*n1),
                     )
                 }
             }
             (Integer::Double(r1), Integer::Double(r2)) => {
-                if let Some(num) = r1.checked_mul(*r2) {
+                if let Some(num) = r1.get().checked_mul(r2.get()) {
                     Integer::from_double(num)
                 } else {
                     Integer::Large(
-                        MultiPrecisionInteger::from(*r1) * MultiPrecisionInteger::from(*r2),
+                        MultiPrecisionInteger::from(r1.get())
+                            * MultiPrecisionInteger::from(r2.get()),
                     )
                 }
             }
             (Integer::Single(n1), Integer::Large(r2))
             | (Integer::Large(r2), Integer::Single(n1)) => Integer::from((n1 * r2).complete()),
             (Integer::Double(n1), Integer::Large(r2))
-            | (Integer::Large(r2), Integer::Double(n1)) => Integer::from((n1 * r2).complete()),
+            | (Integer::Large(r2), Integer::Double(n1)) => {
+                Integer::from((n1.get() * r2).complete())
+            }
             (Integer::Large(r1), Integer::Large(r2)) => Integer::from((r1 * r2).complete()),
         }
     }
@@ -2626,7 +2717,7 @@ impl Div<&Integer> for Integer {
         if let Integer::Large(s) = self {
             match rhs {
                 Integer::Single(r) => Integer::from(s / r),
-                Integer::Double(r) => Integer::from(s / r),
+                Integer::Double(r) => Integer::from(s / r.get()),
                 Integer::Large(r) => Integer::from(s / r),
             }
         } else {
@@ -2643,7 +2734,7 @@ impl Div<Integer> for &Integer {
         if let Integer::Large(r) = rhs {
             match self {
                 Integer::Single(s) => Integer::from(*s / r),
-                Integer::Double(s) => Integer::from(*s / r),
+                Integer::Double(s) => Integer::from(s.get() / r),
                 Integer::Large(s) => Integer::from(s / r),
             }
         } else {
@@ -2660,13 +2751,13 @@ impl Div<Integer> for Integer {
         if let Integer::Large(s) = self {
             match rhs {
                 Integer::Single(r) => Integer::from(s / r),
-                Integer::Double(r) => Integer::from(s / r),
+                Integer::Double(r) => Integer::from(s / r.get()),
                 Integer::Large(r) => Integer::from(s / r),
             }
         } else if let Integer::Large(r) = rhs {
             match self {
                 Integer::Single(s) => Integer::from(s / r),
-                Integer::Double(s) => Integer::from(s / r),
+                Integer::Double(s) => Integer::from(s.get() / r),
                 Integer::Large(s) => Integer::from(s / r),
             }
         } else {
@@ -2685,34 +2776,34 @@ impl<'b> Div<&'b Integer> for &Integer {
                 if let Some(num) = n1.checked_div(*n2) {
                     Integer::Single(num)
                 } else {
-                    Integer::Double(*n1 as i128 / *n2 as i128)
+                    Integer::from_double(*n1 as i128 / *n2 as i128)
                 }
             }
             (Integer::Single(n1), Integer::Double(r2)) => {
-                if let Some(num) = (*n1 as i128).checked_div(*r2) {
+                if let Some(num) = (*n1 as i128).checked_div(r2.get()) {
                     Integer::from_double(num)
                 } else {
-                    Integer::Large(MultiPrecisionInteger::from(*n1) / *r2)
+                    Integer::Large(MultiPrecisionInteger::from(*n1) / r2.get())
                 }
             }
             (Integer::Double(r1), Integer::Single(r2)) => {
-                if let Some(num) = r1.checked_div(*r2 as i128) {
+                if let Some(num) = r1.get().checked_div(*r2 as i128) {
                     Integer::from_double(num)
                 } else {
-                    Integer::Large(MultiPrecisionInteger::from(*r1) / *r2)
+                    Integer::Large(MultiPrecisionInteger::from(r1.get()) / *r2)
                 }
             }
             (Integer::Double(r1), Integer::Double(r2)) => {
-                if let Some(num) = r1.checked_div(*r2) {
+                if let Some(num) = r1.get().checked_div(r2.get()) {
                     Integer::from_double(num)
                 } else {
-                    Integer::Large(MultiPrecisionInteger::from(*r1) / *r2)
+                    Integer::Large(MultiPrecisionInteger::from(r1.get()) / r2.get())
                 }
             }
             (Integer::Single(n1), Integer::Large(r2)) => Integer::from((n1 / r2).complete()),
             (Integer::Large(r1), Integer::Single(n2)) => Integer::from((r1 / *n2).complete()),
-            (Integer::Double(n1), Integer::Large(r2)) => Integer::from((n1 / r2).complete()),
-            (Integer::Large(r1), Integer::Double(n2)) => Integer::from((r1 / *n2).complete()),
+            (Integer::Double(n1), Integer::Large(r2)) => Integer::from((n1.get() / r2).complete()),
+            (Integer::Large(r1), Integer::Double(n2)) => Integer::from((r1 / n2.get()).complete()),
             (Integer::Large(r1), Integer::Large(r2)) => Integer::from((r1 / r2).complete()),
         }
     }
@@ -2911,7 +3002,7 @@ impl AddAssign<Integer> for Integer {
         if let Integer::Large(l) = self {
             match rhs {
                 Integer::Single(r) => l.add_assign(r),
-                Integer::Double(r) => l.add_assign(r),
+                Integer::Double(r) => l.add_assign(r.get()),
                 Integer::Large(r) => l.add_assign(r),
             }
 
@@ -2928,7 +3019,7 @@ impl<'a> AddAssign<&'a Integer> for Integer {
         if let Integer::Large(l) = self {
             match rhs {
                 Integer::Single(r) => l.add_assign(*r),
-                Integer::Double(r) => l.add_assign(*r),
+                Integer::Double(r) => l.add_assign(r.get()),
                 Integer::Large(r) => l.add_assign(r),
             }
 
@@ -2945,7 +3036,7 @@ impl SubAssign<Integer> for Integer {
         if let Integer::Large(l) = self {
             match rhs {
                 Integer::Single(r) => l.sub_assign(r),
-                Integer::Double(r) => l.sub_assign(r),
+                Integer::Double(r) => l.sub_assign(r.get()),
                 Integer::Large(r) => l.sub_assign(r),
             }
 
@@ -2962,7 +3053,7 @@ impl<'a> SubAssign<&'a Integer> for Integer {
         if let Integer::Large(l) = self {
             match rhs {
                 Integer::Single(r) => l.sub_assign(*r),
-                Integer::Double(r) => l.sub_assign(*r),
+                Integer::Double(r) => l.sub_assign(r.get()),
                 Integer::Large(r) => l.sub_assign(r),
             }
 
@@ -2979,7 +3070,7 @@ impl MulAssign<Integer> for Integer {
         if let Integer::Large(l) = self {
             match rhs {
                 Integer::Single(r) => l.mul_assign(r),
-                Integer::Double(r) => l.mul_assign(r),
+                Integer::Double(r) => l.mul_assign(r.get()),
                 Integer::Large(r) => l.mul_assign(r),
             }
 
@@ -2996,7 +3087,7 @@ impl<'a> MulAssign<&'a Integer> for Integer {
         if let Integer::Large(l) = self {
             match rhs {
                 Integer::Single(r) => l.mul_assign(*r),
-                Integer::Double(r) => l.mul_assign(*r),
+                Integer::Double(r) => l.mul_assign(r.get()),
                 Integer::Large(r) => l.mul_assign(r),
             }
 
@@ -3013,7 +3104,7 @@ impl DivAssign<Integer> for Integer {
         if let Integer::Large(l) = self {
             match rhs {
                 Integer::Single(r) => l.div_assign(r),
-                Integer::Double(r) => l.div_assign(r),
+                Integer::Double(r) => l.div_assign(r.get()),
                 Integer::Large(r) => l.div_assign(r),
             }
 
@@ -3030,7 +3121,7 @@ impl<'a> DivAssign<&'a Integer> for Integer {
         if let Integer::Large(l) = self {
             match rhs {
                 Integer::Single(r) => l.div_assign(*r),
-                Integer::Double(r) => l.div_assign(*r),
+                Integer::Double(r) => l.div_assign(r.get()),
                 Integer::Large(r) => l.div_assign(r),
             }
 
@@ -3110,7 +3201,7 @@ impl<'b> BitAnd<&'b Integer> for Integer {
         if let Integer::Large(l) = self {
             match rhs {
                 Integer::Single(r) => Integer::from(l & *r),
-                Integer::Double(r) => Integer::from(l & *r),
+                Integer::Double(r) => Integer::from(l & r.get()),
                 Integer::Large(r) => Integer::from(l & r),
             }
         } else {
@@ -3127,13 +3218,13 @@ impl BitAnd<Integer> for Integer {
         if let Integer::Large(l) = self {
             match rhs {
                 Integer::Single(r) => Integer::from(l & r),
-                Integer::Double(r) => Integer::from(l & r),
+                Integer::Double(r) => Integer::from(l & r.get()),
                 Integer::Large(r) => Integer::from(l & r),
             }
         } else if let Integer::Large(r) = rhs {
             match self {
                 Integer::Single(l) => Integer::from(r & l),
-                Integer::Double(l) => Integer::from(r & l),
+                Integer::Double(l) => Integer::from(r & l.get()),
                 Integer::Large(l) => Integer::from(l & r),
             }
         } else {
@@ -3159,14 +3250,14 @@ impl<'b> BitAnd<&'b Integer> for &Integer {
         match (self, rhs) {
             (Integer::Single(l), Integer::Single(r)) => Integer::Single(l & r),
             (Integer::Single(l), Integer::Double(r)) | (Integer::Double(r), Integer::Single(l)) => {
-                Integer::from_double((*l as i128) & *r)
+                Integer::from_double((*l as i128) & r.get())
             }
-            (Integer::Double(l), Integer::Double(r)) => Integer::from_double(l & r),
+            (Integer::Double(l), Integer::Double(r)) => Integer::from_double(l.get() & r.get()),
             (Integer::Single(l), Integer::Large(r)) | (Integer::Large(r), Integer::Single(l)) => {
                 Integer::from((r & *l).complete())
             }
             (Integer::Double(l), Integer::Large(r)) | (Integer::Large(r), Integer::Double(l)) => {
-                Integer::from((r & *l).complete())
+                Integer::from((r & l.get()).complete())
             }
             (Integer::Large(l), Integer::Large(r)) => Integer::from((l & r).complete()),
         }
@@ -3179,7 +3270,7 @@ impl BitAndAssign<Integer> for Integer {
         if let Integer::Large(l) = self {
             match rhs {
                 Integer::Single(r) => l.bitand_assign(r),
-                Integer::Double(r) => l.bitand_assign(r),
+                Integer::Double(r) => l.bitand_assign(r.get()),
                 Integer::Large(r) => l.bitand_assign(r),
             }
             self.simplify();
@@ -3195,7 +3286,7 @@ impl<'a> BitAndAssign<&'a Integer> for Integer {
         if let Integer::Large(l) = self {
             match rhs {
                 Integer::Single(r) => l.bitand_assign(*r),
-                Integer::Double(r) => l.bitand_assign(*r),
+                Integer::Double(r) => l.bitand_assign(r.get()),
                 Integer::Large(r) => l.bitand_assign(r),
             }
             self.simplify();
@@ -3215,14 +3306,14 @@ impl Neg for Integer {
                 if let Some(neg) = n.checked_neg() {
                     Integer::Single(neg)
                 } else {
-                    Integer::Double((n as i128).neg())
+                    Integer::from_double((n as i128).neg())
                 }
             }
             Integer::Double(n) => {
-                if let Some(neg) = n.checked_neg() {
+                if let Some(neg) = n.get().checked_neg() {
                     Integer::from_double(neg)
                 } else {
-                    Integer::Large(MultiPrecisionInteger::from(n).neg())
+                    Integer::Large(MultiPrecisionInteger::from(n.get()).neg())
                 }
             }
             Integer::Large(r) => Integer::from(-r),
@@ -3240,14 +3331,14 @@ impl Neg for &Integer {
                 if let Some(neg) = n.checked_neg() {
                     Integer::Single(neg)
                 } else {
-                    Integer::Double((*n as i128).neg())
+                    Integer::from_double((*n as i128).neg())
                 }
             }
             Integer::Double(n) => {
-                if let Some(neg) = n.checked_neg() {
+                if let Some(neg) = n.get().checked_neg() {
                     Integer::from_double(neg)
                 } else {
-                    Integer::Large(MultiPrecisionInteger::from(*n).neg())
+                    Integer::Large(MultiPrecisionInteger::from(n.get()).neg())
                 }
             }
             Integer::Large(r) => Integer::from(r.clone().neg()),
@@ -3277,7 +3368,7 @@ impl<'a> Rem<&'a Integer> for Integer {
 
         match (self, rhs) {
             (Integer::Large(a), Integer::Single(b)) => Integer::from(a.rem_euc(*b)),
-            (Integer::Large(a), Integer::Double(b)) => Integer::from(a.rem_euc(*b)),
+            (Integer::Large(a), Integer::Double(b)) => Integer::from(a.rem_euc(b.get())),
             (Integer::Large(a), Integer::Large(b)) => Integer::from(a.rem_euc(b.clone())),
             (x, _) => (&x).rem(rhs),
         }
@@ -3315,10 +3406,10 @@ impl Rem for &Integer {
             (Integer::Single(a), Integer::Double(b)) => {
                 // b must be larger than a, so division is never needed
                 if *a < 0 {
-                    if *b > 0 {
-                        Integer::from_double(*a as i128 + *b)
+                    if b.get() > 0 {
+                        Integer::from_double(*a as i128 + b.get())
                     } else {
-                        Integer::from_double(*a as i128 - *b)
+                        Integer::from_double(*a as i128 - b.get())
                     }
                 } else {
                     Integer::Single(*a)
@@ -3336,32 +3427,32 @@ impl Rem for &Integer {
                 }
             }
             (Integer::Double(a), Integer::Large(b)) => {
-                if *a < 0 {
+                if a.get() < 0 {
                     if *b > 0 {
-                        Integer::from((a + b).complete())
+                        Integer::from((a.get() + b).complete())
                     } else {
-                        Integer::from((a - b).complete())
+                        Integer::from((a.get() - b).complete())
                     }
                 } else {
                     Integer::Double(*a)
                 }
             }
             (Integer::Double(a), Integer::Single(b)) => {
-                if let Some(r) = a.checked_rem_euclid(*b as i128) {
+                if let Some(r) = a.get().checked_rem_euclid(*b as i128) {
                     Integer::from_double(r)
                 } else {
                     Integer::zero()
                 }
             }
             (Integer::Double(a), Integer::Double(b)) => {
-                if let Some(r) = a.checked_rem_euclid(*b) {
+                if let Some(r) = a.get().checked_rem_euclid(b.get()) {
                     Integer::from_double(r)
                 } else {
                     Integer::zero()
                 }
             }
             (Integer::Large(a), Integer::Single(b)) => Integer::from(a.rem_euc(*b).complete()),
-            (Integer::Large(a), Integer::Double(b)) => Integer::from(a.rem_euc(*b).complete()),
+            (Integer::Large(a), Integer::Double(b)) => Integer::from(a.rem_euc(b.get()).complete()),
             (Integer::Large(a), Integer::Large(b)) => Integer::from(a.rem_euc(b.clone())),
         }
     }
@@ -3689,6 +3780,7 @@ pub fn gcd_signed_i128(mut a: i128, mut b: i128) -> u128 {
 #[cfg(test)]
 mod test {
     use std::{
+        mem::{align_of, size_of},
         ops::{Add, Div, Mul, Rem, Sub},
         str::FromStr,
     };
@@ -3701,7 +3793,73 @@ mod test {
         integer::{extended_gcd, extended_gcd_i128},
     };
 
-    use super::Integer;
+    use super::{DoubleInteger, Integer};
+
+    #[test]
+    fn double_integer_roundtrip() {
+        for value in [
+            i128::MIN,
+            i64::MIN as i128 - 1,
+            i64::MIN as i128,
+            -1,
+            0,
+            1,
+            i64::MAX as i128,
+            i64::MAX as i128 + 1,
+            i128::MAX,
+        ] {
+            assert_eq!(DoubleInteger::from(value).get(), value);
+        }
+    }
+
+    #[cfg(target_pointer_width = "64")]
+    #[test]
+    fn integer_layout() {
+        use crate::domains::{
+            finite_field::FiniteFieldElement, float::Complex, rational::Rational,
+        };
+
+        assert_eq!(size_of::<DoubleInteger>(), 16);
+        assert_eq!(align_of::<DoubleInteger>(), 8);
+        #[cfg(feature = "gmp")]
+        {
+            assert_eq!(size_of::<Integer>(), 24);
+            assert_eq!(align_of::<Integer>(), 8);
+            assert_eq!(size_of::<Rational>(), 48);
+            assert_eq!(align_of::<Rational>(), 8);
+            assert_eq!(size_of::<FiniteFieldElement<Integer>>(), 24);
+            assert_eq!(size_of::<Complex<Integer>>(), 48);
+        }
+        // Malachite's larger inline integer storage keeps this enum at 32 bytes.
+        #[cfg(feature = "no_gmp")]
+        {
+            assert_eq!(size_of::<Integer>(), 32);
+            assert_eq!(align_of::<Integer>(), 8);
+            assert_eq!(size_of::<Rational>(), 64);
+            assert_eq!(align_of::<Rational>(), 8);
+            assert_eq!(size_of::<FiniteFieldElement<Integer>>(), 32);
+            assert_eq!(size_of::<Complex<Integer>>(), 64);
+        }
+    }
+
+    #[test]
+    fn double_integer_arithmetic_boundaries() {
+        let max = Integer::from(i128::MAX);
+        let min = Integer::from(i128::MIN);
+
+        assert_eq!(&max - 1, Integer::from(i128::MAX - 1));
+        assert_eq!(&min + 1, Integer::from(i128::MIN + 1));
+        let beyond_i128 = Integer::from_str("170141183460469231731687303715884105728").unwrap();
+        assert_eq!(&max + 1, beyond_i128);
+        assert_eq!(-&min, beyond_i128);
+
+        let a = Integer::from(i64::MAX as i128 + 1);
+        let b = Integer::from(i64::MIN as i128 - 1);
+        assert_eq!(&a + &b, Integer::from(-1));
+        assert_eq!(&a * 3, Integer::from((i64::MAX as i128 + 1) * 3));
+        assert_eq!(&b / 3, Integer::from((i64::MIN as i128 - 1) / 3));
+        assert_eq!(&b % 3, Integer::from((i64::MIN as i128 - 1).rem_euclid(3)));
+    }
 
     #[test]
     fn binary_ops() {

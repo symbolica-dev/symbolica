@@ -1917,7 +1917,7 @@ impl Token {
 
                         if let Ok(n) = n.parse::<i128>() {
                             break 'read_coeff field
-                                .element_from_coefficient(Integer::Double(n).into());
+                                .element_from_coefficient(Integer::Double(n.into()).into());
                         }
                     }
 

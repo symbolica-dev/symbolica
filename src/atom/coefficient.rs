@@ -120,7 +120,7 @@ impl SerializedRationalPolynomial<'_> {
         fn parse_num(source: &mut &[u8]) -> Integer {
             match source.get_u8() {
                 1 => Integer::Single(source.get_i64_le()),
-                2 => Integer::Double(source.get_i128_le()),
+                2 => Integer::Double(source.get_i128_le().into()),
                 x @ 4 | x @ 5 => {
                     let (num_digits, _, new_source) = source.get_frac_u64();
                     *source = new_source;
@@ -258,7 +258,7 @@ impl PackedRationalNumberWriter for Coefficient {
                         }
                         Integer::Double(d) => {
                             dest.put_u8(2);
-                            dest.put_i128_le(*d);
+                            dest.put_i128_le(d.get());
                         }
                         Integer::Large(l) => {
                             if l.is_negative() {
