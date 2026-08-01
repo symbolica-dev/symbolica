@@ -1038,7 +1038,7 @@ mod test {
         domains::{
             Ring,
             algebraic_number::AlgebraicContext,
-            float::{F64, Real},
+            float::{Complex, F64, Real},
             integer::Z,
             rational::Q,
             rational_polynomial::{RationalPolynomial, RationalPolynomialField},
@@ -1140,11 +1140,22 @@ mod test {
 
         let solutions = Atom::solve::<u16, _, Atom>(&system, &variables).unwrap();
         assert_eq!(solutions.len(), 6);
-        assert!(solutions.iter().all(|solution| {
-            solution.contains_key(&PolyVariable::from(x))
-                && solution.contains_key(&PolyVariable::from(y))
-                && solution.len() == 2
-        }));
+        for solution in solutions {
+            assert_eq!(solution.len(), 2);
+            let x_value = solution.get(&PolyVariable::from(x)).unwrap();
+            let y_value = solution.get(&PolyVariable::from(y)).unwrap();
+            let first_residual = Complex::<f64>::try_from(
+                (x_value.clone().pow(Atom::num(3)) + y_value.clone() + parse!("sqrt(2)"))
+                    .to_float(16),
+            )
+            .unwrap();
+            let second_residual = Complex::<f64>::try_from(
+                (y_value.clone().pow(Atom::num(2)) - Atom::num(3)).to_float(16),
+            )
+            .unwrap();
+            assert!(first_residual.re.hypot(first_residual.im) < 1e-12);
+            assert!(second_residual.re.hypot(second_residual.im) < 1e-12);
+        }
     }
 
     #[test]
