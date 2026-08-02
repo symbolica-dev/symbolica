@@ -834,8 +834,6 @@ impl<T: Default> ExpressionEvaluator<T> {
     /// Remove common pairs of instructions. Assumes that the arguments
     /// of the instructions are sorted.
     pub(super) fn remove_common_pairs(&mut self) -> usize {
-        let mut affected_lines = vec![false; self.instructions.len()];
-
         // store the global branch a line belongs to
         let mut branch_id = vec![0; self.instructions.len()];
         let mut dag_nodes = vec![0]; // store index to parent node
@@ -908,6 +906,10 @@ impl<T: Default> ExpressionEvaluator<T> {
 
         common_ops_simple.retain(|_, v| *v > 1);
 
+        if common_ops_simple.is_empty() {
+            return 0;
+        }
+
         let mut common_ops_2: HashMap<_, Vec<usize>> = HashMap::default();
 
         for (p, (i, _)) in self.instructions.iter().enumerate() {
@@ -947,18 +949,48 @@ impl<T: Default> ExpressionEvaluator<T> {
         // sort in other direction since we pop
         to_remove.sort_by(|a, b| a.1.len().cmp(&b.1.len()).then_with(|| a.cmp(b)));
 
-        let total_remove = to_remove.len();
-
         let old_len = self.instructions.len();
 
         let mut new_symb_branch = vec![];
+        let mut active_lines = vec![];
+        let mut removed = 0;
 
         while let Some((key, lines)) = to_remove.pop() {
             let l = (key >> 32) as usize;
             let r = ((key >> 1) & 0x7FFFFFFF) as usize;
             let is_add = key & 1 == 0;
 
-            if lines.iter().any(|x| affected_lines[*x]) {
+            // reassess whether the pairs still exists in lines as they
+            // may have been consumed by earlier extractions
+            active_lines.clear();
+            let mut usage_count = 0;
+            for line in lines {
+                let args = match &self.instructions[line].0 {
+                    Instr::Add(_, args) if is_add => args,
+                    Instr::Mul(_, args) if !is_add => args,
+                    _ => continue,
+                };
+
+                let count = |n| {
+                    let start = args.partition_point(|&arg| arg < n);
+                    args[start..].partition_point(|&arg| arg == n)
+                };
+                let l_count = count(l);
+                let r_count = if l == r { l_count } else { count(r) };
+
+                let pair_count = if l == r {
+                    l_count / 2
+                } else {
+                    l_count.min(r_count)
+                };
+
+                if pair_count > 0 {
+                    usage_count += pair_count;
+                    active_lines.push((line, l_count, r_count, pair_count));
+                }
+            }
+
+            if usage_count < 2 {
                 continue;
             }
 
@@ -972,10 +1004,9 @@ impl<T: Default> ExpressionEvaluator<T> {
             self.stack.push(T::default());
             self.instructions.push((new_op, ComplexPhase::Any));
 
-            let mut branch = branch_id[lines[0]];
-            for &line in &lines {
-                affected_lines[line] = true;
-
+            let first_usage = active_lines[0].0;
+            let mut branch = branch_id[first_usage];
+            for &(line, l_count, r_count, pair_count) in &active_lines {
                 let mut new_branch = branch_id[line];
                 // find common root
                 while branch != new_branch {
@@ -988,51 +1019,33 @@ impl<T: Default> ExpressionEvaluator<T> {
 
                 if let Instr::Add(_, a) | Instr::Mul(_, a) = &mut self.instructions[line].0 {
                     if l == r {
-                        let count = a.iter().filter(|x| **x == l).count();
-                        let pairs = count / 2;
-                        if pairs > 0 {
-                            a.retain(|x| *x != l);
+                        a.retain(|x| *x != l);
 
-                            if count % 2 == 1 {
-                                a.push(l);
-                            }
-
-                            a.extend(std::iter::repeat_n(new_idx, pairs));
-                            a.sort_unstable();
+                        if l_count % 2 == 1 {
+                            a.push(l);
                         }
+
+                        a.extend(std::iter::repeat_n(new_idx, pair_count));
+                        a.sort_unstable();
                     } else {
-                        let mut idx1_count = 0;
-                        let mut idx2_count = 0;
-                        for v in &*a {
-                            if *v == l {
-                                idx1_count += 1;
-                            }
-                            if *v == r {
-                                idx2_count += 1;
-                            }
+                        a.retain(|x| *x != l && *x != r);
+
+                        // add back unmatched operands in cases such as l*r*r.
+                        if l_count > pair_count {
+                            a.extend(std::iter::repeat_n(l, l_count - pair_count));
+                        }
+                        if r_count > pair_count {
+                            a.extend(std::iter::repeat_n(r, r_count - pair_count));
                         }
 
-                        let pair_count = idx1_count.min(idx2_count);
-
-                        if pair_count > 0 {
-                            a.retain(|x| *x != l && *x != r);
-
-                            // add back removed indices in cases such as idx1*idx2*idx2
-                            if idx1_count > pair_count {
-                                a.extend(std::iter::repeat_n(l, idx1_count - pair_count));
-                            }
-                            if idx2_count > pair_count {
-                                a.extend(std::iter::repeat_n(r, idx2_count - pair_count));
-                            }
-
-                            a.extend(std::iter::repeat_n(new_idx, pair_count));
-                            a.sort_unstable();
-                        }
+                        a.extend(std::iter::repeat_n(new_idx, pair_count));
+                        a.sort_unstable();
                     }
                 }
             }
 
-            new_symb_branch.push((lines[0], branch));
+            new_symb_branch.push((first_usage, branch));
+            removed += 1;
         }
 
         // detect the earliest point and latest point for an instruction placement
@@ -1176,6 +1189,34 @@ impl<T: Default> ExpressionEvaluator<T> {
         self.instructions = new_instr;
         self.fix_labels();
 
-        total_remove
+        removed
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn common_pair_elimination_revalidates_multiplicity() {
+        let mut evaluator = ExpressionEvaluator {
+            stack: vec![0.0; 8],
+            param_count: 7,
+            reserved_indices: 7,
+            instructions: vec![(Instr::Add(7, vec![0, 0, 0, 0, 1, 2, 3]), ComplexPhase::Any)],
+            result_indices: vec![7],
+            external_fns: vec![],
+            settings: OptimizationSettings::default(),
+        };
+
+        // Four copies of parameter 0 contain two usable (0, 0) pairs. Other
+        // candidates occur combinatorially but have only one usable instance.
+        assert_eq!(evaluator.remove_common_pairs(), 1);
+        assert_eq!(evaluator.count_operations().additions, 5);
+        assert_eq!(evaluator.instructions.len(), 2);
+        assert_eq!(
+            evaluator.evaluate_single(&[1.0, 2.0, 3.0, 4.0, 0.0, 0.0, 0.0]),
+            13.0
+        );
     }
 }
