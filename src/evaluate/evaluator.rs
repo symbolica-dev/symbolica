@@ -1183,14 +1183,17 @@ impl<T: Default> ExpressionEvaluator<T> {
 
                 j += 1;
             } else {
-                let (mut s, sc) = self.instructions[i].clone();
+                let (mut s, sc) = std::mem::replace(
+                    &mut self.instructions[i],
+                    (Instr::Label(Label(0)), ComplexPhase::Any),
+                );
 
                 match &mut s {
                     Instr::Add(p, a) | Instr::Mul(p, a) => {
                         for x in &mut *a {
                             *x = rename!(*x);
                         }
-                        a.sort();
+                        a.sort_unstable();
 
                         // remove assignments
                         if a.len() == 1 {
