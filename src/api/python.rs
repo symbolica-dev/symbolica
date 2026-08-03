@@ -772,7 +772,7 @@ fn get_license_key(email: String) -> PyResult<()> {
         .map_err(exceptions::PyConnectionError::new_err)
 }
 
-#[pyfunction(name = "S", signature = (*names,is_symmetric=None,is_antisymmetric=None,is_cyclesymmetric=None,is_linear=None,is_scalar=None,is_real=None,is_integer=None,is_positive=None,tags=None,aliases=None,normalization=None,print=None,derivative=None,series=None,eval=None,data=None))]
+#[pyfunction(name = "S", signature = (*names,is_symmetric=None,is_antisymmetric=None,is_cyclesymmetric=None,is_linear=None,is_flat=None,is_scalar=None,is_real=None,is_integer=None,is_positive=None,tags=None,aliases=None,normalization=None,print=None,derivative=None,series=None,eval=None,data=None))]
 /// Create new symbols from `names`. Symbols can have attributes,
 /// such as symmetries. If no attributes
 /// are specified and the symbol was previously defined, the attributes are inherited.
@@ -859,6 +859,8 @@ fn get_license_key(email: String) -> PyResult<()> {
 ///     Set to true if the symbol is cyclesymmetric.
 /// is_linear : bool | None
 ///     Set to true if the symbol is linear.
+/// is_flat : bool | None
+///     Set to true if the symbol is flat (associative).
 /// is_scalar : bool | None
 ///     Set to true if the symbol is a scalar. It will be moved out of linear functions.
 /// is_real : bool | None
@@ -912,6 +914,7 @@ fn symbol_shorthand(
     is_antisymmetric: Option<bool>,
     is_cyclesymmetric: Option<bool>,
     is_linear: Option<bool>,
+    is_flat: Option<bool>,
     is_scalar: Option<bool>,
     is_real: Option<bool>,
     is_integer: Option<bool>,
@@ -934,6 +937,7 @@ fn symbol_shorthand(
         is_antisymmetric,
         is_cyclesymmetric,
         is_linear,
+        is_flat,
         is_scalar,
         is_real,
         is_integer,
@@ -1399,6 +1403,12 @@ PyFunctionInfo {
                     type_info: || Option::<bool>::type_input(),
                 },
                 ParameterInfo {
+                    name: "is_flat",
+                    kind: ParameterKind::PositionalOrKeyword,
+                    default: ParameterDefault::Expr(NONE_ARG),
+                    type_info: || Option::<bool>::type_input(),
+                },
+                ParameterInfo {
                     name: "is_scalar",
                     kind: ParameterKind::PositionalOrKeyword,
                     default: ParameterDefault::Expr(NONE_ARG),
@@ -1458,6 +1468,8 @@ is_cyclesymmetric : bool | None
     Set to true if the symbol is cyclesymmetric.
 is_linear : bool | None
     Set to true if the symbol is multilinear.
+is_flat : bool | None
+    Set to true if the symbol is flat (associative).
 is_scalar : bool | None
     Set to true if the symbol is a scalar. It will be moved out of linear functions.
 is_real : bool | None
@@ -1511,6 +1523,12 @@ PyFunctionInfo {
                 },
                 ParameterInfo {
                     name: "is_linear",
+                    kind: ParameterKind::PositionalOrKeyword,
+                    default: ParameterDefault::Expr(NONE_ARG),
+                    type_info: || Option::<bool>::type_input(),
+                },
+                ParameterInfo {
+                    name: "is_flat",
                     kind: ParameterKind::PositionalOrKeyword,
                     default: ParameterDefault::Expr(NONE_ARG),
                     type_info: || Option::<bool>::type_input(),

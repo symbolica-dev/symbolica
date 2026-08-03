@@ -909,6 +909,7 @@ impl<'a> AtomView<'a> {
             && !s.is_symmetric()
             && !s.is_cyclesymmetric()
             && !s.is_linear()
+            && !s.is_flat()
             && s.get_tags().is_empty()
             && (!s.is_positive() || self.is_positive())
             && (!s.is_integer() || self.is_integer())

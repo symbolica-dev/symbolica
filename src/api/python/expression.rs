@@ -3159,6 +3159,8 @@ impl PythonExpression {
     ///     Set to true if the symbol is cyclesymmetric.
     /// is_linear : bool | None
     ///     Set to true if the symbol is linear.
+    /// is_flat : bool | None
+    ///     Set to true if the symbol is flat (associative).
     /// is_scalar : bool | None
     ///     Set to true if the symbol is a scalar. It will be moved out of linear functions.
     /// is_real : bool | None
@@ -3207,7 +3209,7 @@ impl PythonExpression {
     /// data: str | int | Expression | bytes | list | dict | None = None
     ///     Custom user data to associate with the symbol.
     #[gen_stub(skip)]
-    #[pyo3(signature = (*names,is_symmetric=None,is_antisymmetric=None,is_cyclesymmetric=None,is_linear=None,is_scalar=None,is_real=None,is_integer=None,is_positive=None,tags=None,aliases=None,normalization=None, print=None, derivative=None, series=None, eval=None, data=None))]
+    #[pyo3(signature = (*names,is_symmetric=None,is_antisymmetric=None,is_cyclesymmetric=None,is_linear=None,is_flat=None,is_scalar=None,is_real=None,is_integer=None,is_positive=None,tags=None,aliases=None,normalization=None, print=None, derivative=None, series=None, eval=None, data=None))]
     #[classmethod]
     pub fn symbol(
         _cls: &Bound<'_, PyType>,
@@ -3217,6 +3219,7 @@ impl PythonExpression {
         is_antisymmetric: Option<bool>,
         is_cyclesymmetric: Option<bool>,
         is_linear: Option<bool>,
+        is_flat: Option<bool>,
         is_scalar: Option<bool>,
         is_real: Option<bool>,
         is_integer: Option<bool>,
@@ -3247,6 +3250,7 @@ impl PythonExpression {
             && is_antisymmetric.is_none()
             && is_cyclesymmetric.is_none()
             && is_linear.is_none()
+            && is_flat.is_none()
             && is_scalar.is_none()
             && is_real.is_none()
             && is_integer.is_none()
@@ -3310,6 +3314,10 @@ impl PythonExpression {
 
         if let Some(true) = is_linear {
             opts.push(SymbolAttribute::Linear);
+        }
+
+        if let Some(true) = is_flat {
+            opts.push(SymbolAttribute::Flat);
         }
 
         if let Some(true) = is_scalar {
@@ -5684,6 +5692,7 @@ impl PythonExpression {
                     PythonSymbolAttribute::Antisymmetric => s.is_antisymmetric(),
                     PythonSymbolAttribute::Cyclesymmetric => s.is_cyclesymmetric(),
                     PythonSymbolAttribute::Linear => s.is_linear(),
+                    PythonSymbolAttribute::Flat => s.is_flat(),
                     PythonSymbolAttribute::Scalar => s.is_scalar(),
                     PythonSymbolAttribute::Real => s.is_real(),
                     PythonSymbolAttribute::Integer => s.is_integer(),
