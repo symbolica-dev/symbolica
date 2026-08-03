@@ -52,6 +52,8 @@ pub enum PythonSymbolAttribute {
     Integer,
     /// The symbol represents a positive number.
     Positive,
+    /// The function is flat (associative).
+    Flat,
 }
 
 impl From<SymbolAttribute> for PythonSymbolAttribute {
@@ -61,6 +63,7 @@ impl From<SymbolAttribute> for PythonSymbolAttribute {
             SymbolAttribute::Antisymmetric => PythonSymbolAttribute::Antisymmetric,
             SymbolAttribute::Cyclesymmetric => PythonSymbolAttribute::Cyclesymmetric,
             SymbolAttribute::Linear => PythonSymbolAttribute::Linear,
+            SymbolAttribute::Flat => PythonSymbolAttribute::Flat,
             SymbolAttribute::Scalar => PythonSymbolAttribute::Scalar,
             SymbolAttribute::Real => PythonSymbolAttribute::Real,
             SymbolAttribute::Integer => PythonSymbolAttribute::Integer,

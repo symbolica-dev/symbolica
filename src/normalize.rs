@@ -1121,6 +1121,33 @@ impl AtomView<'_> {
                     }
                 }
 
+                if id.is_flat()
+                    && out_f.to_fun_view().iter().any(|a| {
+                        if let AtomView::Fun(inner_f) = a {
+                            inner_f.get_symbol() == id
+                        } else {
+                            false
+                        }
+                    })
+                {
+                    let mut flat_h = workspace.new_atom();
+                    let flat_f = flat_h.to_fun(id);
+                    for a in out_f.to_fun_view().iter() {
+                        if let AtomView::Fun(inner_f) = a
+                            && inner_f.get_symbol() == id
+                        {
+                            for b in inner_f.iter() {
+                                flat_f.add_arg(b);
+                            }
+                        } else {
+                            flat_f.add_arg(a);
+                        }
+                    }
+
+                    flat_h.as_view().normalize(workspace, out);
+                    return;
+                }
+
                 if id.is_linear() {
                     // linearize sums
                     if out_f

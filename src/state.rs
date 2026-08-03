@@ -215,40 +215,53 @@ impl Default for State {
 }
 
 impl State {
-    pub(crate) const ARG: Symbol =
-        Symbol::raw_fn(0, 0, false, false, false, false, false, false, false, false);
-    pub(crate) const COEFF: Symbol =
-        Symbol::raw_fn(1, 0, false, false, false, false, true, false, false, false);
-    pub(crate) const EXP: Symbol =
-        Symbol::raw_fn(2, 0, false, false, false, false, false, false, false, false);
-    pub(crate) const LOG: Symbol =
-        Symbol::raw_fn(3, 0, false, false, false, false, false, false, false, false);
-    pub(crate) const SIN: Symbol =
-        Symbol::raw_fn(4, 0, false, false, false, false, false, false, false, false);
-    pub(crate) const COS: Symbol =
-        Symbol::raw_fn(5, 0, false, false, false, false, false, false, false, false);
-    pub(crate) const SQRT: Symbol =
-        Symbol::raw_fn(6, 0, false, false, false, false, false, false, false, false);
-    pub(crate) const CONJ: Symbol =
-        Symbol::raw_fn(7, 0, false, false, false, false, false, false, false, false);
-    pub(crate) const ABS: Symbol =
-        Symbol::raw_fn(8, 0, false, false, false, false, false, true, false, true);
-    pub(crate) const IF: Symbol =
-        Symbol::raw_fn(9, 0, false, false, false, false, false, false, false, false);
-    pub(crate) const DERIVATIVE: Symbol = Symbol::raw_fn(
-        10, 0, false, false, false, false, false, false, false, false,
+    pub(crate) const ARG: Symbol = Symbol::raw_fn(
+        0, 0, false, false, false, false, false, false, false, false, false,
     );
-    pub(crate) const E: Symbol =
-        Symbol::raw_fn(11, 0, false, false, false, false, true, true, false, true);
-    pub(crate) const PI: Symbol =
-        Symbol::raw_fn(12, 0, false, false, false, false, true, true, false, true);
-    pub(crate) const SEP: Symbol =
-        Symbol::raw_fn(13, 0, false, false, false, false, true, true, true, true);
+    pub(crate) const COEFF: Symbol = Symbol::raw_fn(
+        1, 0, false, false, false, false, false, true, false, false, false,
+    );
+    pub(crate) const EXP: Symbol = Symbol::raw_fn(
+        2, 0, false, false, false, false, false, false, false, false, false,
+    );
+    pub(crate) const LOG: Symbol = Symbol::raw_fn(
+        3, 0, false, false, false, false, false, false, false, false, false,
+    );
+    pub(crate) const SIN: Symbol = Symbol::raw_fn(
+        4, 0, false, false, false, false, false, false, false, false, false,
+    );
+    pub(crate) const COS: Symbol = Symbol::raw_fn(
+        5, 0, false, false, false, false, false, false, false, false, false,
+    );
+    pub(crate) const SQRT: Symbol = Symbol::raw_fn(
+        6, 0, false, false, false, false, false, false, false, false, false,
+    );
+    pub(crate) const CONJ: Symbol = Symbol::raw_fn(
+        7, 0, false, false, false, false, false, false, false, false, false,
+    );
+    pub(crate) const ABS: Symbol = Symbol::raw_fn(
+        8, 0, false, false, false, false, false, false, true, false, true,
+    );
+    pub(crate) const IF: Symbol = Symbol::raw_fn(
+        9, 0, false, false, false, false, false, false, false, false, false,
+    );
+    pub(crate) const DERIVATIVE: Symbol = Symbol::raw_fn(
+        10, 0, false, false, false, false, false, false, false, false, false,
+    );
+    pub(crate) const E: Symbol = Symbol::raw_fn(
+        11, 0, false, false, false, false, false, true, true, false, true,
+    );
+    pub(crate) const PI: Symbol = Symbol::raw_fn(
+        12, 0, false, false, false, false, false, true, true, false, true,
+    );
+    pub(crate) const SEP: Symbol = Symbol::raw_fn(
+        13, 0, false, false, false, false, false, true, true, true, true,
+    );
     pub(crate) const OPT: Symbol = Symbol::raw_fn(
-        14, 0, false, false, false, false, false, false, false, false,
+        14, 0, false, false, false, false, false, false, false, false, false,
     );
     pub(crate) const ALT: Symbol = Symbol::raw_fn(
-        15, 0, false, false, false, false, false, false, false, false,
+        15, 0, false, false, false, false, false, false, false, false, false,
     );
 
     /// The list of built-in symbols.
@@ -744,6 +757,7 @@ impl State {
                     attributes.contains(&SymbolAttribute::Antisymmetric),
                     attributes.contains(&SymbolAttribute::Cyclesymmetric),
                     attributes.contains(&SymbolAttribute::Linear),
+                    attributes.contains(&SymbolAttribute::Flat),
                     attributes.contains(&SymbolAttribute::Scalar),
                     attributes.contains(&SymbolAttribute::Real),
                     attributes.contains(&SymbolAttribute::Integer),
@@ -755,6 +769,7 @@ impl State {
                     && r.is_antisymmetric() == new_id.is_antisymmetric()
                     && r.is_cyclesymmetric() == new_id.is_cyclesymmetric()
                     && r.is_linear() == new_id.is_linear()
+                    && r.is_flat() == new_id.is_flat()
                     && r.is_scalar() == new_id.is_scalar()
                     && r.is_real() == new_id.is_real()
                     && r.is_integer() == new_id.is_integer()
@@ -800,6 +815,13 @@ impl State {
                             "\t- linear: {} vs {}\n",
                             r.is_linear(),
                             new_id.is_linear()
+                        ));
+                    }
+                    if r.is_flat() != new_id.is_flat() {
+                        diff_attr.push_str(&format!(
+                            "\t- flat: {} vs {}\n",
+                            r.is_flat(),
+                            new_id.is_flat()
                         ));
                     }
                     if r.is_scalar() != new_id.is_scalar() {
@@ -900,6 +922,7 @@ impl State {
                     attributes.contains(&SymbolAttribute::Antisymmetric),
                     attributes.contains(&SymbolAttribute::Cyclesymmetric),
                     attributes.contains(&SymbolAttribute::Linear),
+                    attributes.contains(&SymbolAttribute::Flat),
                     attributes.contains(&SymbolAttribute::Scalar),
                     attributes.contains(&SymbolAttribute::Real),
                     attributes.contains(&SymbolAttribute::Integer),
