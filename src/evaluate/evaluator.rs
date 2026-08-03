@@ -839,7 +839,13 @@ impl<T: Default> ExpressionEvaluator<T> {
         let mut dag_nodes = vec![0]; // store index to parent node
         let mut current_node = 0;
 
-        let mut common_ops_simple: HashMap<_, u32> = HashMap::default();
+        const PROMOTED_PAIR: u32 = 1 << 31;
+
+        // A value below PROMOTED_PAIR is the line containing the pair's first
+        // occurrence. On the second occurrence it is promoted to an index in
+        // common_pair_lines, marked by PROMOTED_PAIR.
+        let mut common_ops: HashMap<u64, u32> = HashMap::default();
+        let mut common_pair_lines: Vec<(u64, Vec<u32>)> = vec![];
 
         if self.instructions.len() > u32::MAX as usize / 2 {
             // the extension is easy, but it will cost more memory.
@@ -851,10 +857,6 @@ impl<T: Default> ExpressionEvaluator<T> {
         }
 
         for (p, (i, _)) in self.instructions.iter().enumerate() {
-            if common_ops_simple.len() > self.settings.max_common_pair_cache_entries {
-                break;
-            }
-
             if p % 10000 == 0
                 && let Some(abort_check) = &self.settings.abort_check
                 && abort_check()
@@ -866,22 +868,44 @@ impl<T: Default> ExpressionEvaluator<T> {
             match i {
                 Instr::Add(_, a) | Instr::Mul(_, a) => {
                     let is_add = matches!(i, Instr::Add(_, _));
-                    'add_loop: for (li, l) in a.iter().enumerate() {
+                    let line = p as u32;
+                    for (li, l) in a.iter().enumerate() {
                         for r in &a[li + 1..] {
                             let mut key = (*l as u64) << 32 | (*r as u64) << 1;
                             if !is_add {
                                 key |= 1;
                             }
 
-                            if common_ops_simple.len() > self.settings.max_common_pair_cache_entries
-                            {
-                                break 'add_loop;
+                            let allow_new_pair =
+                                common_ops.len() <= self.settings.max_common_pair_cache_entries;
+                            match common_ops.entry(key) {
+                                Entry::Occupied(mut entry) => {
+                                    let location = *entry.get();
+                                    if location & PROMOTED_PAIR == 0 {
+                                        debug_assert!(
+                                            common_pair_lines.len() < PROMOTED_PAIR as usize
+                                        );
+                                        let index = common_pair_lines.len() as u32;
+                                        let mut lines = vec![location];
+                                        if location != line {
+                                            lines.push(line);
+                                        }
+                                        common_pair_lines.push((key, lines));
+                                        *entry.get_mut() = PROMOTED_PAIR | index;
+                                    } else {
+                                        let index = (location & !PROMOTED_PAIR) as usize;
+                                        let lines = &mut common_pair_lines[index].1;
+                                        if lines.last() != Some(&line) {
+                                            lines.push(line);
+                                        }
+                                    }
+                                }
+                                Entry::Vacant(entry) => {
+                                    if allow_new_pair {
+                                        entry.insert(line);
+                                    }
+                                }
                             }
-
-                            common_ops_simple
-                                .entry(key)
-                                .and_modify(|x| *x += 1)
-                                .or_insert(1);
                         }
                     }
                 }
@@ -904,55 +928,28 @@ impl<T: Default> ExpressionEvaluator<T> {
             branch_id[p] = current_node;
         }
 
-        common_ops_simple.retain(|_, v| *v > 1);
+        drop(common_ops);
 
-        if common_ops_simple.is_empty() {
+        if common_pair_lines.is_empty() {
             return 0;
         }
 
-        let mut common_ops_2: HashMap<_, Vec<usize>> = HashMap::default();
-
-        for (p, (i, _)) in self.instructions.iter().enumerate() {
-            match i {
-                Instr::Add(_, a) | Instr::Mul(_, a) => {
-                    let is_add = matches!(i, Instr::Add(_, _));
-                    for (li, l) in a.iter().enumerate() {
-                        for r in &a[li + 1..] {
-                            let mut key = (*l as u64) << 32 | (*r as u64) << 1;
-                            if !is_add {
-                                key |= 1;
-                            }
-
-                            if *common_ops_simple.get(&key).unwrap_or(&0) > 1 {
-                                common_ops_2.entry(key).or_default().push(p);
-                            }
-                        }
-                    }
-                }
-                _ => {}
-            }
-        }
-
-        drop(common_ops_simple); // clear the memory
-
-        if common_ops_2.is_empty() {
-            return 0;
-        }
-
-        let mut to_remove: Vec<_> = common_ops_2.into_iter().collect();
-        to_remove.retain_mut(|(_, v)| {
-            let keep = v.len() > 1;
-            v.dedup();
-            keep
-        });
+        let mut to_remove = common_pair_lines;
 
         // sort in other direction since we pop
         to_remove.sort_by(|a, b| a.1.len().cmp(&b.1.len()).then_with(|| a.cmp(b)));
 
         let old_len = self.instructions.len();
+        let operand_count_key = |line: u32, operand: usize| {
+            debug_assert!(u32::try_from(operand).is_ok());
+            ((line as u64) << 32) + operand as u64
+        };
 
         let mut new_symb_branch = vec![];
         let mut active_lines = vec![];
+        let mut operand_counts_initialized = vec![false; old_len];
+        let mut operand_counts: HashMap<u64, u32> = HashMap::default();
+        let mut line_replacements: HashMap<u32, Vec<(usize, u32)>> = HashMap::default();
         let mut removed = 0;
 
         while let Some((key, lines)) = to_remove.pop() {
@@ -960,23 +957,36 @@ impl<T: Default> ExpressionEvaluator<T> {
             let r = ((key >> 1) & 0x7FFFFFFF) as usize;
             let is_add = key & 1 == 0;
 
-            // reassess whether the pairs still exists in lines as they
-            // may have been consumed by earlier extractions
+            // Reassess whether the pair still exists in each line, as it may
+            // have been consumed by an earlier extraction.
             active_lines.clear();
-            let mut usage_count = 0;
+            let mut usage_count = 0u64;
             for line in lines {
-                let args = match &self.instructions[line].0 {
+                let line_index = line as usize;
+                let args = match &self.instructions[line_index].0 {
                     Instr::Add(_, args) if is_add => args,
                     Instr::Mul(_, args) if !is_add => args,
                     _ => continue,
                 };
 
-                let count = |n| {
-                    let start = args.partition_point(|&arg| arg < n);
-                    args[start..].partition_point(|&arg| arg == n)
+                if !operand_counts_initialized[line_index] {
+                    for &arg in args {
+                        operand_counts
+                            .entry(operand_count_key(line, arg))
+                            .and_modify(|count| *count += 1)
+                            .or_insert(1);
+                    }
+                    operand_counts_initialized[line_index] = true;
+                }
+
+                let l_key = operand_count_key(line, l);
+                let r_key = operand_count_key(line, r);
+                let l_count = *operand_counts.get(&l_key).unwrap_or(&0);
+                let r_count = if l == r {
+                    l_count
+                } else {
+                    *operand_counts.get(&r_key).unwrap_or(&0)
                 };
-                let l_count = count(l);
-                let r_count = if l == r { l_count } else { count(r) };
 
                 let pair_count = if l == r {
                     l_count / 2
@@ -985,7 +995,7 @@ impl<T: Default> ExpressionEvaluator<T> {
                 };
 
                 if pair_count > 0 {
-                    usage_count += pair_count;
+                    usage_count += pair_count as u64;
                     active_lines.push((line, l_count, r_count, pair_count));
                 }
             }
@@ -1004,10 +1014,10 @@ impl<T: Default> ExpressionEvaluator<T> {
             self.stack.push(T::default());
             self.instructions.push((new_op, ComplexPhase::Any));
 
-            let first_usage = active_lines[0].0;
+            let first_usage = active_lines[0].0 as usize;
             let mut branch = branch_id[first_usage];
             for &(line, l_count, r_count, pair_count) in &active_lines {
-                let mut new_branch = branch_id[line];
+                let mut new_branch = branch_id[line as usize];
                 // find common root
                 while branch != new_branch {
                     if branch > new_branch {
@@ -1017,36 +1027,80 @@ impl<T: Default> ExpressionEvaluator<T> {
                     }
                 }
 
-                if let Instr::Add(_, a) | Instr::Mul(_, a) = &mut self.instructions[line].0 {
-                    if l == r {
-                        a.retain(|x| *x != l);
-
-                        if l_count % 2 == 1 {
-                            a.push(l);
-                        }
-
-                        a.extend(std::iter::repeat_n(new_idx, pair_count));
-                        a.sort_unstable();
+                let l_key = operand_count_key(line, l);
+                let r_key = operand_count_key(line, r);
+                if l == r {
+                    let remaining = l_count - pair_count * 2;
+                    if remaining == 0 {
+                        operand_counts.remove(&l_key);
                     } else {
-                        a.retain(|x| *x != l && *x != r);
+                        operand_counts.insert(l_key, remaining);
+                    }
+                } else {
+                    let l_remaining = l_count - pair_count;
+                    if l_remaining == 0 {
+                        operand_counts.remove(&l_key);
+                    } else {
+                        operand_counts.insert(l_key, l_remaining);
+                    }
 
-                        // add back unmatched operands in cases such as l*r*r.
-                        if l_count > pair_count {
-                            a.extend(std::iter::repeat_n(l, l_count - pair_count));
-                        }
-                        if r_count > pair_count {
-                            a.extend(std::iter::repeat_n(r, r_count - pair_count));
-                        }
-
-                        a.extend(std::iter::repeat_n(new_idx, pair_count));
-                        a.sort_unstable();
+                    let r_remaining = r_count - pair_count;
+                    if r_remaining == 0 {
+                        operand_counts.remove(&r_key);
+                    } else {
+                        operand_counts.insert(r_key, r_remaining);
                     }
                 }
+
+                line_replacements
+                    .entry(line)
+                    .or_default()
+                    .push((new_idx, pair_count));
             }
 
             new_symb_branch.push((first_usage, branch));
             removed += 1;
         }
+
+        drop(operand_counts_initialized);
+
+        // Apply all accepted replacements to each affected instruction at
+        // once. This avoids repeatedly scanning and sorting a long operand
+        // list when several disjoint pairs are extracted from it.
+        for (line, replacements) in line_replacements {
+            let args = match &mut self.instructions[line as usize].0 {
+                Instr::Add(_, args) | Instr::Mul(_, args) => args,
+                _ => unreachable!(),
+            };
+
+            // Compact the original operands in place according to the counts
+            // left after all accepted extractions.
+            let original_len = args.len();
+            let mut read = 0;
+            let mut write = 0;
+            while read < original_len {
+                let arg = args[read];
+                read += 1;
+                while read < original_len && args[read] == arg {
+                    read += 1;
+                }
+
+                let count = *operand_counts
+                    .get(&operand_count_key(line, arg))
+                    .unwrap_or(&0);
+                for _ in 0..count {
+                    args[write] = arg;
+                    write += 1;
+                }
+            }
+            args.truncate(write);
+
+            for (arg, count) in replacements {
+                args.extend(std::iter::repeat_n(arg, count as usize));
+            }
+            args.sort_unstable();
+        }
+        drop(operand_counts);
 
         // detect the earliest point and latest point for an instruction placement
         // earliest point: after last dependency
