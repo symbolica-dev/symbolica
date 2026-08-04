@@ -15,7 +15,8 @@ use crate::domains::float::FloatLike;
 use crate::domains::integer::{Integer, IntegerRing};
 use crate::domains::rational::{Fraction, FractionField, FractionNormalization, Q, RationalField};
 use crate::domains::{
-    Derivable, EuclideanDomain, Field, InternalOrdering, Ring, RingOps, SelfRing, Set,
+    Derivable, EuclideanDomain, Field, InternalOrdering, RealEmbedding, Ring, RingOps, SelfRing,
+    Set,
 };
 use crate::printer::{AtomPrinter, PrintOptions, PrintState};
 
@@ -298,6 +299,40 @@ pub struct MultivariatePolynomial<F: Ring, E: Exponent = u16, O: MonomialOrder =
     pub variables: Arc<Vec<PolyVariable>>,
     pub(crate) _phantom: PhantomData<O>,
 }
+
+/// An error encountered while counting the positive real roots of a
+/// polynomial.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum PositiveRealRootCountError<E> {
+    /// The polynomial has more than one variable.
+    NotUnivariate { variables: usize },
+    /// The zero polynomial has infinitely many roots.
+    ZeroPolynomial,
+    /// A coefficient could not be compared through its real embedding.
+    Comparison(E),
+    /// The sign variations obtained from the Sturm sequence were inconsistent.
+    InvalidSturmSequence,
+}
+
+impl<E: Display> Display for PositiveRealRootCountError<E> {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::NotUnivariate { variables } => {
+                write!(
+                    f,
+                    "expected a univariate polynomial, got {variables} variables"
+                )
+            }
+            Self::ZeroPolynomial => f.write_str("cannot count the roots of the zero polynomial"),
+            Self::Comparison(error) => write!(f, "could not determine a coefficient sign: {error}"),
+            Self::InvalidSturmSequence => {
+                f.write_str("invalid Sturm sequence while counting positive real roots")
+            }
+        }
+    }
+}
+
+impl<E: std::fmt::Debug + Display> std::error::Error for PositiveRealRootCountError<E> {}
 
 #[cfg(feature = "bincode")]
 impl<
@@ -4213,6 +4248,77 @@ impl<F: Field, E: Exponent, O: MonomialOrder> MultivariatePolynomial<F, E, O> {
     }
 }
 
+impl<R: Field + RealEmbedding, E: PositiveExponent> MultivariatePolynomial<R, E, LexOrder> {
+    /// Count the distinct roots of this polynomial in the open interval
+    /// `(0, +infinity)` using a Sturm sequence.
+    ///
+    /// The coefficient ring supplies the real embedding used to determine
+    /// coefficient signs. The polynomial must be univariate. A constant
+    /// nonzero polynomial has no roots, while the zero polynomial is rejected.
+    pub fn count_positive_real_roots(&self) -> Result<usize, PositiveRealRootCountError<R::Error>> {
+        if self.is_zero() {
+            return Err(PositiveRealRootCountError::ZeroPolynomial);
+        }
+        if self.nvars() == 0 {
+            return Ok(0);
+        }
+        if self.nvars() != 1 {
+            return Err(PositiveRealRootCountError::NotUnivariate {
+                variables: self.nvars(),
+            });
+        }
+
+        let mut previous = self.to_univariate_from_univariate(0);
+        let mut current = previous.derivative();
+        let mut sturm_sequence = vec![previous.clone()];
+
+        if !current.is_zero() {
+            sturm_sequence.push(current.clone());
+        }
+
+        while !current.is_zero() {
+            let remainder = -previous.rem(&current);
+            previous = current;
+            current = remainder;
+            if !current.is_zero() {
+                sturm_sequence.push(current.clone());
+            }
+        }
+
+        let sign_variations = |at_positive_infinity: bool| {
+            let mut previous_sign = Ordering::Equal;
+            let mut variations = 0usize;
+
+            for polynomial in &sturm_sequence {
+                let value = if at_positive_infinity {
+                    polynomial.lcoeff()
+                } else {
+                    polynomial.get_constant()
+                };
+                let sign = self
+                    .ring
+                    .try_sign(&value)
+                    .map_err(PositiveRealRootCountError::Comparison)?;
+                if sign == Ordering::Equal {
+                    continue;
+                }
+                if previous_sign != Ordering::Equal && sign != previous_sign {
+                    variations += 1;
+                }
+                previous_sign = sign;
+            }
+
+            Ok::<_, PositiveRealRootCountError<R::Error>>(variations)
+        };
+
+        let at_zero = sign_variations(false)?;
+        let at_positive_infinity = sign_variations(true)?;
+        at_zero
+            .checked_sub(at_positive_infinity)
+            .ok_or(PositiveRealRootCountError::InvalidSturmSequence)
+    }
+}
+
 impl<F: Field, E: PositiveExponent, O: MonomialOrder> MultivariatePolynomial<F, E, O> {
     /// Integrate the polynomial w.r.t the variable `var`,
     /// producing the antiderivative with zero constant.
@@ -4729,6 +4835,35 @@ impl<R: Ring + FractionNormalization + EuclideanDomain, E: Exponent, O: Monomial
 #[cfg(test)]
 mod test {
     use crate::{atom::AtomCore, domains::integer::Z, domains::rational::Q, parse, symbol};
+
+    use super::PositiveRealRootCountError;
+
+    #[test]
+    fn count_positive_real_roots() {
+        let two_positive = parse!("(x-1)*(x-2)*(x+3)").to_polynomial::<_, u16>(&Q, None);
+        assert_eq!(two_positive.count_positive_real_roots(), Ok(2));
+
+        let no_real_roots = parse!("x^2+1").to_polynomial::<_, u16>(&Q, None);
+        assert_eq!(no_real_roots.count_positive_real_roots(), Ok(0));
+
+        let zero_is_excluded = parse!("x*(x-1)").to_polynomial::<_, u16>(&Q, None);
+        assert_eq!(zero_is_excluded.count_positive_real_roots(), Ok(1));
+
+        let repeated_root = parse!("(x-1)^2*(x+1)").to_polynomial::<_, u16>(&Q, None);
+        assert_eq!(repeated_root.count_positive_real_roots(), Ok(1));
+
+        let multivariate = parse!("x+y").to_polynomial::<_, u16>(&Q, None);
+        assert_eq!(
+            multivariate.count_positive_real_roots(),
+            Err(PositiveRealRootCountError::NotUnivariate { variables: 2 })
+        );
+
+        let zero = parse!("0").to_polynomial::<_, u16>(&Q, None);
+        assert_eq!(
+            zero.count_positive_real_roots(),
+            Err(PositiveRealRootCountError::ZeroPolynomial)
+        );
+    }
 
     #[test]
     fn mul_packed() {

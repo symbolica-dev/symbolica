@@ -108,7 +108,7 @@ pub mod prelude {
     pub use crate::coefficient::{Coefficient, CoefficientView, ConvertToRing};
 
     pub use crate::domains::{
-        EuclideanDomain, Field, Ring, RingOps, Set,
+        EuclideanDomain, Field, OrderedRing, RealEmbedding, Ring, RingOps, Set,
         algebraic_number::{
             AlgebraicContext, AlgebraicExtension, AlgebraicNumber, AlgebraicQuotient, Root,
         },
@@ -162,7 +162,7 @@ pub mod prelude {
             GroebnerBasis, ParameterField, ParametricExtension, ParametricRoot, ParametricSolution,
             PolynomialSolution,
         },
-        polynomial::{MultivariatePolynomial, PolynomialRing},
+        polynomial::{MultivariatePolynomial, PolynomialRing, PositiveRealRootCountError},
         series::{Series, SeriesDepth},
         univariate::{UnivariatePolynomial, UnivariatePolynomialRing},
     };
