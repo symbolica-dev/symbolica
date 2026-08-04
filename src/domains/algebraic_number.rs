@@ -5,7 +5,7 @@ use std::{
     sync::{Arc, LazyLock, RwLock},
 };
 
-use numerica::domains::float::{Float, RealLike};
+use numerica::domains::float::{ComplexBall, Float, RealBall};
 use rand::Rng;
 
 use crate::{
@@ -35,59 +35,9 @@ use crate::{
 use super::{
     EuclideanDomain, Field, InternalOrdering, Ring, SelfRing,
     finite_field::{FiniteField, FiniteFieldCore, FiniteFieldWorkspace, ToFiniteField},
-    float::{Complex, FloatField},
     integer::{Integer, IntegerRing, Z},
     rational::Rational,
 };
-
-#[derive(Clone)]
-struct AlgebraicBall {
-    center: Complex<Rational>,
-    radius: Rational,
-}
-
-impl AlgebraicBall {
-    fn from_root(root: &ComplexRootInterval) -> Self {
-        Self {
-            center: root.center().clone(),
-            radius: root.radius().clone(),
-        }
-    }
-
-    fn zero() -> Self {
-        Self {
-            center: Complex::new(Rational::zero(), Rational::zero()),
-            radius: Rational::zero(),
-        }
-    }
-
-    fn norm_upper_bound(center: &Complex<Rational>) -> Rational {
-        center.re.abs() + center.im.abs()
-    }
-
-    fn add_rational(mut self, value: Rational) -> Self {
-        self.center.re += value;
-        self
-    }
-
-    fn mul(self, other: &Self) -> Self {
-        let center = &self.center * &other.center;
-        let self_center_norm = Self::norm_upper_bound(&self.center);
-        let other_center_norm = Self::norm_upper_bound(&other.center);
-        let radius = &self.radius * &other.radius
-            + &self.radius * &other_center_norm
-            + &other.radius * &self_center_norm;
-
-        Self { center, radius }
-    }
-
-    fn is_disjoint(&self, other: &Self) -> bool {
-        let distance = (&self.center.re - &other.center.re)
-            .abs()
-            .max((&self.center.im - &other.center.im).abs());
-        distance > &self.radius + &other.radius
-    }
-}
 
 /// A Galois field `GF(p,n)` is a finite field with `p^n` elements.
 /// It provides methods to upgrade and downgrade to Galois fields with the
@@ -675,7 +625,7 @@ fn root_descriptor(
         let requested_root = univariate
             .isolate_complex_root(requested_index, binary_precision)
             .ok_or_else(|| "could not isolate requested root".to_string())?;
-        let requested_root = AlgebraicBall::from_root(&requested_root);
+        let requested_root = requested_root.to_ball(binary_precision);
         let mut matches = Vec::new();
 
         for (factor, _) in &factors {
@@ -683,7 +633,7 @@ fn root_descriptor(
                 .to_univariate_from_univariate(0)
                 .isolate_complex_roots(Some(tolerance.clone()));
             for (index, candidate) in roots.iter().enumerate() {
-                if !requested_root.is_disjoint(&AlgebraicBall::from_root(candidate)) {
+                if !requested_root.is_disjoint(&candidate.to_ball(binary_precision)) {
                     matches.push((factor.clone(), index));
                 }
             }
@@ -2888,16 +2838,22 @@ impl<R: Field + PolynomialGCD<E>, E: PositiveExponent>
 }
 
 impl AlgebraicExtension<Q> {
-    fn evaluate_at_root(element: &AlgebraicNumber<Q>, root: &ComplexRootInterval) -> AlgebraicBall {
+    fn evaluate_at_root(
+        element: &AlgebraicNumber<Q>,
+        root: &ComplexRootInterval,
+        precision: u32,
+    ) -> ComplexBall {
         let mut coefficients = vec![Rational::zero(); element.poly.degree(0) as usize + 1];
         for term in element.poly() {
             coefficients[term.exponents[0] as usize] = term.coefficient.clone();
         }
 
-        let root = AlgebraicBall::from_root(root);
-        let mut value = AlgebraicBall::zero();
+        let root = root.to_ball(precision);
+        let zero = RealBall::exact(Float::new(precision));
+        let mut value = ComplexBall::new(zero.clone(), zero);
         for coefficient in coefficients.into_iter().rev() {
-            value = value.mul(&root).add_rational(coefficient);
+            let coefficient = RealBall::from_rational_bounds(&coefficient, &coefficient, precision);
+            value = value * &root + coefficient;
         }
         value
     }
@@ -2968,11 +2924,11 @@ impl AlgebraicExtension<Q> {
                     )
                 })?;
 
-            let value = Self::evaluate_at_root(element, &root);
-            if &value.center.re - &value.radius > Rational::zero() {
+            let value = Self::evaluate_at_root(element, &root, binary_precision);
+            if value.re.is_strictly_positive() {
                 return Ok(true);
             }
-            if &value.center.re + &value.radius < Rational::zero() {
+            if value.re.is_strictly_negative() {
                 return Ok(false);
             }
 
@@ -2988,8 +2944,8 @@ impl AlgebraicExtension<Q> {
     /// Determine the sign of the real part at this field's embedding without
     /// first constructing a minimal polynomial for `element`.
     ///
-    /// A non-real value whose real part is numerically indistinguishable from
-    /// zero is classified as not positive.
+    /// Returns an error if interval refinement cannot certify the sign of the
+    /// real part.
     pub(crate) fn has_positive_real_part(
         &self,
         element: &AlgebraicNumber<Q>,
@@ -3001,38 +2957,11 @@ impl AlgebraicExtension<Q> {
 
         let polynomial = self.poly.to_univariate_from_univariate(0);
         if let Some(root) = polynomial.get_root(self.embedding) {
-            let value = Self::evaluate_at_root(element, &root);
-            if &value.center.re - &value.radius > Rational::zero() {
+            let value = Self::evaluate_at_root(element, &root, 128);
+            if value.re.is_strictly_positive() {
                 return Ok(true);
             }
-            if &value.center.re + &value.radius < Rational::zero() {
-                return Ok(false);
-            }
-
-            // A wide certified ball can make interval evaluation pessimistic
-            // for a high-degree expression. Refine its center numerically
-            // (without refining/re-sorting the entire algebraic root set) and
-            // use it when the sign is far from the numerical error scale.
-            let binary_precision = 128;
-            let root = root.to_float_center(binary_precision);
-            let field = FloatField::from_rep(Complex::new(
-                Float::with_val(binary_precision, 1),
-                Float::new(binary_precision),
-            ));
-            let element = element
-                .poly
-                .to_univariate_from_univariate(0)
-                .map_coeff(
-                    |coefficient| coefficient.to_multi_prec_float(binary_precision).into(),
-                    field,
-                )
-                .evaluate(&root);
-            let real = element.re.to_f64();
-            let imaginary = element.im.to_f64();
-            if real.abs() > 1e-30 {
-                return Ok(real > 0.0);
-            }
-            if imaginary.abs() > 1e-30 {
+            if value.re.is_strictly_negative() {
                 return Ok(false);
             }
         }
@@ -3048,11 +2977,11 @@ impl AlgebraicExtension<Q> {
                         polynomial.degree()
                     )
                 })?;
-            let value = Self::evaluate_at_root(element, &root);
-            if &value.center.re - &value.radius > Rational::zero() {
+            let value = Self::evaluate_at_root(element, &root, binary_precision);
+            if value.re.is_strictly_positive() {
                 return Ok(true);
             }
-            if &value.center.re + &value.radius < Rational::zero() {
+            if value.re.is_strictly_negative() {
                 return Ok(false);
             }
             binary_precision *= 2;
@@ -3087,13 +3016,13 @@ impl AlgebraicExtension<Q> {
                         extension_polynomial.degree()
                     )
                 })?;
-            let value = Self::evaluate_at_root(element, &extension_root);
+            let value = Self::evaluate_at_root(element, &extension_root, binary_precision);
             let roots = polynomial.isolate_complex_roots(Some(tolerance));
             let matches = roots
                 .iter()
                 .enumerate()
                 .filter_map(|(index, root)| {
-                    (!value.is_disjoint(&AlgebraicBall::from_root(root))).then_some(index)
+                    (!value.is_disjoint(&root.to_ball(binary_precision))).then_some(index)
                 })
                 .collect::<Vec<_>>();
 
@@ -3376,14 +3305,14 @@ impl AlgebraicExtension<Q> {
                         old_poly.degree()
                     )
                 });
-            let old_root = AlgebraicBall::from_root(&old_root);
+            let old_root = old_root.to_ball(binary_precision);
             let extension_roots = extension_poly.isolate_complex_roots(Some(tolerance.clone()));
 
             let candidates = extension_roots
                 .iter()
                 .enumerate()
                 .filter_map(|(index, root)| {
-                    let image = Self::evaluate_at_root(&old_generator, root);
+                    let image = Self::evaluate_at_root(&old_generator, root, binary_precision);
                     (!image.is_disjoint(&old_root)).then_some(index)
                 })
                 .collect::<Vec<_>>();
@@ -3398,12 +3327,16 @@ impl AlgebraicExtension<Q> {
             let mut all_unique = true;
 
             for candidate in candidates {
-                let image = Self::evaluate_at_root(&new_generator, &extension_roots[candidate]);
+                let image = Self::evaluate_at_root(
+                    &new_generator,
+                    &extension_roots[candidate],
+                    binary_precision,
+                );
                 let matching_roots = new_generator_roots
                     .iter()
                     .enumerate()
                     .filter_map(|(index, root)| {
-                        let root = AlgebraicBall::from_root(root);
+                        let root = root.to_ball(binary_precision);
                         (!image.is_disjoint(&root)).then_some(index)
                     })
                     .collect::<Vec<_>>();
@@ -3906,12 +3839,12 @@ impl Root<AlgebraicExtension<Q>> {
                             candidate.embedding, candidate.polynomial
                         )
                     })?;
-                let root = AlgebraicBall::from_root(&root);
+                let root = root.to_ball(binary_precision);
                 let matches = union_roots
                     .iter()
                     .enumerate()
                     .filter_map(|(index, union_root)| {
-                        (!root.is_disjoint(&AlgebraicBall::from_root(union_root))).then_some(index)
+                        (!root.is_disjoint(&union_root.to_ball(binary_precision))).then_some(index)
                     })
                     .collect::<Vec<_>>();
                 if matches.len() == 1 {
@@ -4190,6 +4123,18 @@ mod tests {
             assert_eq!(simplified.poly(), &parse!("x^2-2").to_polynomial(&Q, None));
             assert_eq!(simplified.embedding(), expected_embedding);
         }
+    }
+
+    #[test]
+    fn certified_ball_determines_real_sign() {
+        let field =
+            AlgebraicExtension::new_with_embedding(parse!("x^2-2").to_polynomial(&Q, None), 1);
+        let generator = field.generator();
+        let negative_generator = field.neg(&generator);
+
+        assert_eq!(field.is_positive_real(&generator), Ok(true));
+        assert_eq!(field.is_positive_real(&negative_generator), Ok(false));
+        assert_eq!(field.has_positive_real_part(&generator), Ok(true));
     }
 
     #[test]

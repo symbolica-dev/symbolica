@@ -7,7 +7,7 @@ use std::{
     sync::{Arc, LazyLock, RwLock},
 };
 
-use numerica::domains::float::Float;
+use numerica::domains::float::{ComplexBall, Float};
 
 use crate::{
     domains::{
@@ -1057,73 +1057,6 @@ impl RootCache {
 
 static ROOT_CACHE: LazyLock<RootCache> = LazyLock::new(RootCache::new);
 
-impl Add for ComplexRootInterval {
-    type Output = Self;
-
-    fn add(self, other: Self) -> Self {
-        Self {
-            poly: if self.poly == other.poly {
-                self.poly
-            } else {
-                None
-            },
-            index: None,
-            center: self.center + other.center,
-            radius: self.radius + other.radius,
-            multiplicity: None,
-            real: self.real && other.real,
-            imaginary: self.imaginary && other.imaginary,
-        }
-    }
-}
-
-impl Sub for ComplexRootInterval {
-    type Output = Self;
-
-    fn sub(self, other: Self) -> Self {
-        Self {
-            poly: if self.poly == other.poly {
-                self.poly
-            } else {
-                None
-            },
-            index: None,
-            center: self.center - other.center,
-            radius: self.radius + other.radius,
-            multiplicity: None,
-            real: self.real && other.real,
-            imaginary: self.imaginary && other.imaginary,
-        }
-    }
-}
-
-impl Mul for ComplexRootInterval {
-    type Output = Self;
-
-    fn mul(self, other: Self) -> Self {
-        let center = &self.center * &other.center;
-        let self_center_norm = ComplexRootInterval::norm_upper_bound(&self.center);
-        let other_center_norm = ComplexRootInterval::norm_upper_bound(&other.center);
-        let radius = &self.radius * &other.radius
-            + &self.radius * &other_center_norm
-            + &other.radius * &self_center_norm;
-
-        Self {
-            poly: if self.poly == other.poly {
-                self.poly
-            } else {
-                None
-            },
-            index: None,
-            center,
-            radius,
-            multiplicity: None,
-            real: self.real && other.real,
-            imaginary: false,
-        }
-    }
-}
-
 impl ComplexRootInterval {
     fn norm_upper_bound(z: &Complex<Rational>) -> Rational {
         z.re.abs() + z.im.abs()
@@ -1151,6 +1084,11 @@ impl ComplexRootInterval {
 
     pub fn radius(&self) -> &Rational {
         &self.radius
+    }
+
+    /// Convert this exact rational root enclosure to a certified floating-point ball.
+    pub fn to_ball(&self, precision: u32) -> ComplexBall {
+        ComplexBall::from_rational_ball(&self.center, &self.radius, precision)
     }
 
     pub fn multiplicity(&self) -> Option<usize> {
