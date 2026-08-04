@@ -1,11 +1,68 @@
 use crate::domains::backend::integer::MultiPrecisionInteger;
 
+/// The rounding direction for a `Float` operation.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum RoundingDirection {
+    /// Round to the nearest representable value, breaking ties toward an even
+    /// significand.
+    Nearest,
+    /// Round toward positive infinity.
+    Up,
+    /// Round toward negative infinity.
+    Down,
+}
+
 #[cfg(feature = "gmp")]
 pub use rug::{
     Assign, Float as MultiPrecisionFloat, Rational as BackendRational,
     float::Constant,
     ops::{CompleteRound, Pow},
 };
+
+pub(crate) trait MultiPrecisionFloatRounding {
+    fn add_round(&self, rhs: &Self, prec: u32, direction: RoundingDirection) -> Self;
+    fn sub_round(&self, rhs: &Self, prec: u32, direction: RoundingDirection) -> Self;
+    fn mul_round(&self, rhs: &Self, prec: u32, direction: RoundingDirection) -> Self;
+    fn div_round(&self, rhs: &Self, prec: u32, direction: RoundingDirection) -> Self;
+    fn from_rational_round(value: BackendRational, prec: u32, direction: RoundingDirection)
+    -> Self;
+}
+
+#[cfg(feature = "gmp")]
+fn rug_rounding_direction(direction: RoundingDirection) -> rug::float::Round {
+    match direction {
+        RoundingDirection::Nearest => rug::float::Round::Nearest,
+        RoundingDirection::Up => rug::float::Round::Up,
+        RoundingDirection::Down => rug::float::Round::Down,
+    }
+}
+
+#[cfg(feature = "gmp")]
+impl MultiPrecisionFloatRounding for MultiPrecisionFloat {
+    fn add_round(&self, rhs: &Self, prec: u32, direction: RoundingDirection) -> Self {
+        Self::with_val_round(prec, self + rhs, rug_rounding_direction(direction)).0
+    }
+
+    fn sub_round(&self, rhs: &Self, prec: u32, direction: RoundingDirection) -> Self {
+        Self::with_val_round(prec, self - rhs, rug_rounding_direction(direction)).0
+    }
+
+    fn mul_round(&self, rhs: &Self, prec: u32, direction: RoundingDirection) -> Self {
+        Self::with_val_round(prec, self * rhs, rug_rounding_direction(direction)).0
+    }
+
+    fn div_round(&self, rhs: &Self, prec: u32, direction: RoundingDirection) -> Self {
+        Self::with_val_round(prec, self / rhs, rug_rounding_direction(direction)).0
+    }
+
+    fn from_rational_round(
+        value: BackendRational,
+        prec: u32,
+        direction: RoundingDirection,
+    ) -> Self {
+        Self::with_val_round(prec, value, rug_rounding_direction(direction)).0
+    }
+}
 
 pub trait BackendRationalExt {
     fn from_integer_ratio(num: MultiPrecisionInteger, den: MultiPrecisionInteger) -> Self;
@@ -36,7 +93,7 @@ mod astro {
     use astro_float::{BigFloat, Consts, INF_NEG, INF_POS, NAN, Radix, RoundingMode, Sign};
     use malachite_q::Rational as MalachiteRational;
 
-    use super::BackendRationalExt;
+    use super::{BackendRationalExt, RoundingDirection};
     use crate::domains::backend::integer::MultiPrecisionInteger;
 
     pub type BackendRational = MalachiteRational;
@@ -117,6 +174,14 @@ mod astro {
     }
 
     const ROUNDING_MODE: RoundingMode = RoundingMode::ToEven;
+
+    fn rounding_mode(direction: RoundingDirection) -> RoundingMode {
+        match direction {
+            RoundingDirection::Nearest => RoundingMode::ToEven,
+            RoundingDirection::Up => RoundingMode::Up,
+            RoundingDirection::Down => RoundingMode::Down,
+        }
+    }
 
     fn precision(prec: u32) -> usize {
         prec.max(1) as usize
@@ -242,6 +307,62 @@ mod astro {
         let num = parse_integer_at_precision(num, work_precision);
         let den = parse_integer_at_precision(den, work_precision);
         num.div(&den, p, ROUNDING_MODE)
+    }
+
+    impl super::MultiPrecisionFloatRounding for MultiPrecisionFloat {
+        fn add_round(&self, rhs: &Self, prec: u32, direction: RoundingDirection) -> Self {
+            MultiPrecisionFloat {
+                value: self
+                    .value
+                    .add(&rhs.value, precision(prec), rounding_mode(direction)),
+                prec,
+            }
+        }
+
+        fn sub_round(&self, rhs: &Self, prec: u32, direction: RoundingDirection) -> Self {
+            MultiPrecisionFloat {
+                value: self
+                    .value
+                    .sub(&rhs.value, precision(prec), rounding_mode(direction)),
+                prec,
+            }
+        }
+
+        fn mul_round(&self, rhs: &Self, prec: u32, direction: RoundingDirection) -> Self {
+            MultiPrecisionFloat {
+                value: self
+                    .value
+                    .mul(&rhs.value, precision(prec), rounding_mode(direction)),
+                prec,
+            }
+        }
+
+        fn div_round(&self, rhs: &Self, prec: u32, direction: RoundingDirection) -> Self {
+            MultiPrecisionFloat {
+                value: self
+                    .value
+                    .div(&rhs.value, precision(prec), rounding_mode(direction)),
+                prec,
+            }
+        }
+
+        fn from_rational_round(
+            value: BackendRational,
+            prec: u32,
+            direction: RoundingDirection,
+        ) -> Self {
+            let (num, den) = value.into_integer_ratio();
+            let p = precision(prec);
+            let work_precision = guard_precision(prec)
+                .max(num.significant_bits() as usize)
+                .max(den.significant_bits() as usize);
+            let num = parse_integer_at_precision(num, work_precision);
+            let den = parse_integer_at_precision(den, work_precision);
+            MultiPrecisionFloat {
+                value: num.div(&den, p, rounding_mode(direction)),
+                prec,
+            }
+        }
     }
 
     fn integer_to_float(value: impl Display, prec: u32) -> BigFloat {

@@ -13,6 +13,7 @@ mod complex;
 mod double;
 mod error;
 mod field;
+mod interval;
 mod multiprecision;
 mod native;
 #[cfg(feature = "python")]
@@ -23,10 +24,12 @@ mod simd;
 #[cfg(test)]
 mod tests;
 
+pub use super::backend::float::RoundingDirection;
 pub use complex::Complex;
 pub use double::DoubleFloat;
 pub use error::ErrorPropagatingFloat;
 pub use field::FloatField;
+pub use interval::{ComplexBall, RealBall};
 pub use multiprecision::Float;
 pub use native::F64;
 #[cfg(feature = "python")]

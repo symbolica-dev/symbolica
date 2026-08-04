@@ -796,7 +796,7 @@ impl<F: Ring> SparseMatrix<F> {
     /// Extract the last column of the matrix, sorted by the corresponding pivot column.
     ///
     /// # Arguments
-    /// * `pivots` - The pivot positions for each column, i.e. there is a pivot on column `j` and `row pivots[j]`.
+    /// * `pivots` - The pivot positions for each column, i.e. there is a pivot on column `j` and row `pivots[j]`.
     pub fn last_column_by_pivot(self, pivots: &Vec<Option<u32>>) -> SparseVector<F> {
         let mut values = self.values;
         let mut ret = SparseVector::new(self.nrows, self.field.clone());
@@ -1502,7 +1502,7 @@ pub struct SparseRowReducer<F: Field> {
     l: SparseMatrix<F>,
 
     /// The pivot positions of U for each column.
-    /// I.e. there is a pivot on column j and row pivots[j]. No pivot present if None.
+    /// I.e. there is a pivot on column `j` and row `pivots[j]`. No pivot present if None.
     pivots: Vec<Option<u32>>,
 
     /// Whether to keep the L matrix, just record the pattern or don't record anything at all
@@ -1678,7 +1678,7 @@ impl<F: Field> SparseRowReducer<F> {
     /// Note that the correct pivots need to be provided too.
     /// # Arguments
     /// * `u` -- A sparse matrix in upper triangular form (up to row permutations).
-    /// * `pivots` -- The pivots of `u`: I.e. there is a pivot on column j and row pivots[j] or no pivot present if None.
+    /// * `pivots` -- The pivots of `u`: I.e. there is a pivot on column `j` and row `pivots[j]` or no pivot present if None.
     pub fn from_upper_triangular_matrix(u: SparseMatrix<F>, pivots: Vec<Option<u32>>) -> Self {
         Self {
             l: SparseMatrix::new(0, 0, u.field().clone()),

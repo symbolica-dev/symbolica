@@ -11,7 +11,10 @@ use xprec::{CompensatedArithmetic, Df64};
 use super::{DoubleFloat, FloatLike, Real, RealLike, SingleFloat};
 use crate::domains::{
     InternalOrdering,
-    backend::float::{Assign, CompleteRound, Constant, MultiPrecisionFloat, Pow},
+    backend::float::{
+        Assign, CompleteRound, Constant, MultiPrecisionFloat, MultiPrecisionFloatRounding, Pow,
+        RoundingDirection,
+    },
     integer::Integer,
     rational::Rational,
 };
@@ -578,6 +581,55 @@ impl Float {
 
     pub fn set_prec(&mut self, prec: u32) {
         self.0.set_prec(prec);
+    }
+
+    /// Adds `rhs` and rounds the result to `prec` binary digits in `direction`.
+    ///
+    /// In particular, [`RoundingDirection::Down`] and
+    /// [`RoundingDirection::Up`] give lower and upper bounds, respectively,
+    /// for the exact sum of the represented values.
+    pub fn add_round(&self, rhs: &Self, prec: u32, direction: RoundingDirection) -> Self {
+        self.0.add_round(&rhs.0, prec, direction).into()
+    }
+
+    /// Subtracts `rhs` and rounds the result to `prec` binary digits in
+    /// `direction`.
+    ///
+    /// In particular, [`RoundingDirection::Down`] and
+    /// [`RoundingDirection::Up`] give lower and upper bounds, respectively,
+    /// for the exact difference of the represented values.
+    pub fn sub_round(&self, rhs: &Self, prec: u32, direction: RoundingDirection) -> Self {
+        self.0.sub_round(&rhs.0, prec, direction).into()
+    }
+
+    /// Multiplies by `rhs` and rounds the result to `prec` binary digits in
+    /// `direction`.
+    ///
+    /// In particular, [`RoundingDirection::Down`] and
+    /// [`RoundingDirection::Up`] give lower and upper bounds, respectively,
+    /// for the exact product of the represented values.
+    pub fn mul_round(&self, rhs: &Self, prec: u32, direction: RoundingDirection) -> Self {
+        self.0.mul_round(&rhs.0, prec, direction).into()
+    }
+
+    /// Divides by `rhs` and rounds the result to `prec` binary digits in
+    /// `direction`.
+    ///
+    /// For nonzero `rhs`, [`RoundingDirection::Down`] and
+    /// [`RoundingDirection::Up`] give lower and upper bounds, respectively,
+    /// for the exact quotient of the represented values.
+    pub fn div_round(&self, rhs: &Self, prec: u32, direction: RoundingDirection) -> Self {
+        self.0.div_round(&rhs.0, prec, direction).into()
+    }
+
+    /// Converts the exact rational `value` to `prec` binary digits, rounding
+    /// in `direction`.
+    ///
+    /// [`RoundingDirection::Down`] and [`RoundingDirection::Up`] give a lower
+    /// and upper bound, respectively, for `value`.
+    pub fn from_rational_round(value: &Rational, prec: u32, direction: RoundingDirection) -> Self {
+        MultiPrecisionFloat::from_rational_round(value.clone().to_multi_prec(), prec, direction)
+            .into()
     }
 
     pub fn is_finite(&self) -> bool {
