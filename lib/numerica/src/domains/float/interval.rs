@@ -34,6 +34,44 @@ pub struct RealBall {
 /// are not currently certifying.
 pub type ComplexBall = Complex<RealBall>;
 
+impl ComplexBall {
+    /// Certify that every value in this ball is real and strictly positive.
+    pub fn is_strictly_positive(&self) -> bool {
+        self.is_real() && self.re.is_strictly_positive()
+    }
+
+    /// Certify that every value in this ball is real and strictly negative.
+    pub fn is_strictly_negative(&self) -> bool {
+        self.is_real() && self.re.is_strictly_negative()
+    }
+
+    /// Return whether this ball contains zero.
+    pub fn contains_zero(&self) -> bool {
+        let zero = self.re.center.zero();
+        self.re.contains(&zero) && self.im.contains(&zero)
+    }
+
+    /// Return whether this ball contains the real value `value`.
+    pub fn contains(&self, value: &Float) -> bool {
+        self.im.contains_zero() && self.re.contains(value)
+    }
+
+    /// Return whether this ball contains the complex value `value`.
+    pub fn contains_complex(&self, value: &Complex<Float>) -> bool {
+        self.re.contains(&value.re) && self.im.contains(&value.im)
+    }
+
+    /// Return whether this ball contains the whole of `other`.
+    pub fn contains_ball(&self, other: &Self) -> bool {
+        self.re.contains_ball(&other.re) && self.im.contains_ball(&other.im)
+    }
+
+    /// Return whether this ball intersects `other`.
+    pub fn intersects(&self, other: &Self) -> bool {
+        self.re.intersects(&other.re) && self.im.intersects(&other.im)
+    }
+}
+
 impl RealBall {
     /// Construct a ball from its center and radius.
     ///
@@ -188,7 +226,7 @@ impl Complex<RealBall> {
 
     /// Certify that these rectangular complex balls are disjoint.
     pub fn is_disjoint(&self, other: &Self) -> bool {
-        !self.re.intersects(&other.re) || !self.im.intersects(&other.im)
+        !self.intersects(other)
     }
 }
 
