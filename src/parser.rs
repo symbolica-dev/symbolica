@@ -698,7 +698,7 @@ impl Token {
             .build_with_state(state)
             .map_err(|e| e.to_string())
         } else {
-            SymbolBuilder::new(namespace.attach_namespace(x))
+            SymbolBuilder::new(namespace.attach_namespace_no_builtin(x))
                 .build_with_state(state)
                 .map_err(|e| e.to_string())
         }?;
