@@ -3,7 +3,7 @@
 use std::{
     cmp::Ordering,
     collections::{HashMap, HashSet},
-    sync::{Arc, LazyLock, RwLock},
+    sync::{Arc, LazyLock, OnceLock, RwLock},
 };
 
 use numerica::domains::float::{ComplexBall, Float, RealBall};
@@ -3675,9 +3675,43 @@ struct AlgebraicRootCandidate {
     order: Option<usize>,
 }
 
+struct AlgebraicRootCacheEntry {
+    roots: OnceLock<Result<Vec<Root<Q>>, String>>,
+}
+
+impl AlgebraicRootCacheEntry {
+    fn new() -> Self {
+        Self {
+            roots: OnceLock::new(),
+        }
+    }
+}
+
 static ALGEBRAIC_ROOT_CACHE: LazyLock<
-    RwLock<HashMap<MultivariatePolynomial<AlgebraicExtension<Q>, u16>, Vec<Root<Q>>>>,
+    RwLock<
+        HashMap<MultivariatePolynomial<AlgebraicExtension<Q>, u16>, Arc<AlgebraicRootCacheEntry>>,
+    >,
 > = LazyLock::new(|| RwLock::new(HashMap::new()));
+
+fn algebraic_root_cache_entry(
+    polynomial: &MultivariatePolynomial<AlgebraicExtension<Q>, u16>,
+) -> Arc<AlgebraicRootCacheEntry> {
+    if let Some(entry) = ALGEBRAIC_ROOT_CACHE
+        .read()
+        .unwrap()
+        .get(polynomial)
+        .cloned()
+    {
+        return entry;
+    }
+
+    ALGEBRAIC_ROOT_CACHE
+        .write()
+        .unwrap()
+        .entry(polynomial.clone())
+        .or_insert_with(|| Arc::new(AlgebraicRootCacheEntry::new()))
+        .clone()
+}
 
 const MAX_GAUSSIAN_ROOT_NORMALIZATION_DEGREE: usize = 4;
 
@@ -3764,17 +3798,9 @@ impl Root<AlgebraicExtension<Q>> {
             return Ok(None);
         }
 
-        if let Some(root) = ALGEBRAIC_ROOT_CACHE
-            .read()
-            .unwrap()
-            .get(&self.polynomial)
-            .and_then(|roots| roots.get(self.index))
-            .cloned()
-        {
-            return Ok(Some(root));
-        }
-
-        let roots = self.simplify_all_roots()?;
+        let entry = algebraic_root_cache_entry(&self.polynomial);
+        let roots = entry.roots.get_or_init(|| self.simplify_all_roots());
+        let roots = roots.as_ref().map_err(Clone::clone)?;
         let result = roots.get(self.index).cloned().ok_or_else(|| {
             format!(
                 "root index {} is out of bounds for a polynomial of degree {}",
@@ -3782,10 +3808,6 @@ impl Root<AlgebraicExtension<Q>> {
                 self.polynomial.degree(0)
             )
         })?;
-        ALGEBRAIC_ROOT_CACHE
-            .write()
-            .unwrap()
-            .insert(self.polynomial.clone(), roots);
         Ok(Some(result))
     }
 

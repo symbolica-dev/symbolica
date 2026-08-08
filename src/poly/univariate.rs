@@ -4,7 +4,7 @@ use std::{
     cmp::Ordering,
     collections::HashMap,
     ops::{Add, Div, Mul, Neg, Sub},
-    sync::{Arc, LazyLock, RwLock},
+    sync::{Arc, LazyLock, OnceLock, RwLock},
 };
 
 use numerica::domains::float::{ComplexBall, Float};
@@ -794,8 +794,20 @@ struct ProjectedRealRoot {
 }
 
 pub struct RootCache {
-    roots: RwLock<HashMap<Vec<Rational>, Vec<ComplexRootInterval>>>,
-    complex_roots: RwLock<HashMap<Vec<Complex<Rational>>, Vec<ComplexRootInterval>>>,
+    roots: RwLock<HashMap<Vec<Rational>, Arc<RootCacheEntry>>>,
+    complex_roots: RwLock<HashMap<Vec<Complex<Rational>>, Arc<RootCacheEntry>>>,
+}
+
+struct RootCacheEntry {
+    roots: OnceLock<RwLock<Vec<ComplexRootInterval>>>,
+}
+
+impl RootCacheEntry {
+    fn new() -> Self {
+        Self {
+            roots: OnceLock::new(),
+        }
+    }
 }
 
 impl RootCache {
@@ -806,39 +818,86 @@ impl RootCache {
         }
     }
 
+    fn rational_entry(&self, key: Vec<Rational>) -> Arc<RootCacheEntry> {
+        if let Some(entry) = self.roots.read().unwrap().get(&key).cloned() {
+            return entry;
+        }
+
+        self.roots
+            .write()
+            .unwrap()
+            .entry(key)
+            .or_insert_with(|| Arc::new(RootCacheEntry::new()))
+            .clone()
+    }
+
+    fn complex_entry(&self, key: Vec<Complex<Rational>>) -> Arc<RootCacheEntry> {
+        if let Some(entry) = self.complex_roots.read().unwrap().get(&key).cloned() {
+            return entry;
+        }
+
+        self.complex_roots
+            .write()
+            .unwrap()
+            .entry(key)
+            .or_insert_with(|| Arc::new(RootCacheEntry::new()))
+            .clone()
+    }
+
+    fn all_roots(
+        entry: &RootCacheEntry,
+        refine: Option<&Rational>,
+        compute: impl FnOnce() -> Vec<ComplexRootInterval>,
+    ) -> Vec<ComplexRootInterval> {
+        let roots = entry.roots.get_or_init(|| RwLock::new(compute()));
+
+        {
+            let roots = roots.read().unwrap();
+            if roots
+                .iter()
+                .all(|root| Self::satisfies_refine(root, refine))
+            {
+                return roots.clone();
+            }
+        }
+
+        let mut roots = roots.write().unwrap();
+        Self::refine_if_needed(&mut roots, refine);
+        roots.clone()
+    }
+
+    fn indexed_root(
+        entry: &RootCacheEntry,
+        index: usize,
+        binary_prec: u32,
+        compute: impl FnOnce() -> Vec<ComplexRootInterval>,
+    ) -> Option<ComplexRootInterval> {
+        let roots = entry.roots.get_or_init(|| RwLock::new(compute()));
+
+        {
+            let roots = roots.read().unwrap();
+            if let Some(root) = Self::select_indexed_root(&roots, index)
+                && Self::satisfies_precision(root, binary_prec)
+            {
+                return Some(root.clone());
+            }
+        }
+
+        let mut roots = roots.write().unwrap();
+        if !Self::refine_index_if_needed(&mut roots, index, binary_prec) {
+            return None;
+        }
+        Self::select_indexed_root(&roots, index).cloned()
+    }
+
     fn get_or_insert_with(
         &self,
         poly: &UnivariatePolynomial<Q>,
         refine: Option<&Rational>,
         compute: impl FnOnce() -> Vec<ComplexRootInterval>,
     ) -> Vec<ComplexRootInterval> {
-        let key = poly.coefficients.clone();
-
-        if let Some(roots) = self.roots.read().unwrap().get(&key).cloned() {
-            if roots
-                .iter()
-                .all(|root| Self::satisfies_refine(root, refine))
-            {
-                return roots;
-            }
-        }
-
-        {
-            let mut cache = self.roots.write().unwrap();
-            if let Some(roots) = cache.get_mut(&key) {
-                Self::refine_if_needed(roots, refine);
-                return roots.clone();
-            }
-        }
-
-        let mut roots = compute();
-        Self::refine_if_needed(&mut roots, refine);
-
-        let mut cache = self.roots.write().unwrap();
-        let roots = cache.entry(key).or_insert(roots);
-        Self::refine_if_needed(roots, refine);
-        UnivariatePolynomial::<Q>::sort_complex_roots_canonical(roots);
-        roots.clone()
+        let entry = self.rational_entry(poly.coefficients.clone());
+        Self::all_roots(&entry, refine, compute)
     }
 
     fn get_index_with_precision(
@@ -848,36 +907,8 @@ impl RootCache {
         binary_prec: u32,
         compute: impl FnOnce() -> Vec<ComplexRootInterval>,
     ) -> Option<ComplexRootInterval> {
-        let key = poly.coefficients.clone();
-
-        if let Some(roots) = self.roots.read().unwrap().get(&key)
-            && let Some(root) = Self::select_indexed_root(roots, index)
-            && Self::satisfies_precision(root, binary_prec)
-        {
-            return Some(root.clone());
-        }
-
-        {
-            let mut cache = self.roots.write().unwrap();
-            if let Some(roots) = cache.get_mut(&key) {
-                if !Self::refine_index_if_needed(roots, index, binary_prec) {
-                    return None;
-                }
-                return Self::select_indexed_root(roots, index).cloned();
-            }
-        }
-
-        let mut roots = compute();
-        if !Self::refine_index_if_needed(&mut roots, index, binary_prec) {
-            return None;
-        }
-
-        let mut cache = self.roots.write().unwrap();
-        let roots = cache.entry(key).or_insert(roots);
-        if !Self::refine_index_if_needed(roots, index, binary_prec) {
-            return None;
-        }
-        Self::select_indexed_root(roots, index).cloned()
+        let entry = self.rational_entry(poly.coefficients.clone());
+        Self::indexed_root(&entry, index, binary_prec, compute)
     }
 
     fn get_complex_or_insert_with(
@@ -886,33 +917,8 @@ impl RootCache {
         refine: Option<&Rational>,
         compute: impl FnOnce() -> Vec<ComplexRootInterval>,
     ) -> Vec<ComplexRootInterval> {
-        let key = poly.coefficients.clone();
-
-        if let Some(roots) = self.complex_roots.read().unwrap().get(&key).cloned() {
-            if roots
-                .iter()
-                .all(|root| Self::satisfies_refine(root, refine))
-            {
-                return roots;
-            }
-        }
-
-        {
-            let mut cache = self.complex_roots.write().unwrap();
-            if let Some(roots) = cache.get_mut(&key) {
-                Self::refine_if_needed(roots, refine);
-                return roots.clone();
-            }
-        }
-
-        let mut roots = compute();
-        Self::refine_if_needed(&mut roots, refine);
-
-        let mut cache = self.complex_roots.write().unwrap();
-        let roots = cache.entry(key).or_insert(roots);
-        Self::refine_if_needed(roots, refine);
-        UnivariatePolynomial::<Q>::sort_complex_roots_canonical(roots);
-        roots.clone()
+        let entry = self.complex_entry(poly.coefficients.clone());
+        Self::all_roots(&entry, refine, compute)
     }
 
     fn get_complex_index_with_precision(
@@ -922,37 +928,8 @@ impl RootCache {
         binary_prec: u32,
         compute: impl FnOnce() -> Vec<ComplexRootInterval>,
     ) -> Option<ComplexRootInterval> {
-        let key = poly.coefficients.clone();
-
-        if let Some(roots) = self.complex_roots.read().unwrap().get(&key)
-            && let Some(root) = Self::select_indexed_root(roots, index)
-            && Self::satisfies_precision(root, binary_prec)
-        {
-            return Some(root.clone());
-        }
-
-        {
-            let mut cache = self.complex_roots.write().unwrap();
-            if let Some(roots) = cache.get_mut(&key) {
-                if !Self::refine_index_if_needed(roots, index, binary_prec) {
-                    return None;
-                }
-                return Self::select_indexed_root(roots, index).cloned();
-            }
-        }
-
-        let mut roots = compute();
-        if !Self::refine_index_if_needed(&mut roots, index, binary_prec) {
-            return None;
-        }
-
-        let mut cache = self.complex_roots.write().unwrap();
-        let roots = cache.entry(key).or_insert(roots);
-        if !Self::refine_index_if_needed(roots, index, binary_prec) {
-            return None;
-        }
-        UnivariatePolynomial::<Q>::sort_complex_roots_canonical(roots);
-        Self::select_indexed_root(roots, index).cloned()
+        let entry = self.complex_entry(poly.coefficients.clone());
+        Self::indexed_root(&entry, index, binary_prec, compute)
     }
 
     fn select_indexed_root(
@@ -1005,7 +982,8 @@ impl RootCache {
         }
 
         UnivariatePolynomial::<Q>::refine_complex_root_intervals_until_refined(roots, Some(refine));
-        UnivariatePolynomial::<Q>::sort_complex_roots_canonical(roots);
+        // Refinement changes only the enclosure, not the root identity. The
+        // entry was canonically sorted when it was initialized.
     }
 
     fn refine_index_if_needed(
@@ -1299,7 +1277,8 @@ impl UnivariatePolynomial<RationalField> {
             .roots
             .read()
             .unwrap()
-            .contains_key(&self.coefficients)
+            .get(&self.coefficients)
+            .is_some_and(|entry| entry.roots.get().is_some())
     }
 
     /// Gets the `index`-th root of the polynomial. Fails when `index` is out of bounds.
@@ -1308,12 +1287,18 @@ impl UnivariatePolynomial<RationalField> {
             return None;
         }
 
-        if let Some(rs) = ROOT_CACHE.roots.read().unwrap().get(&self.coefficients) {
-            RootCache::select_indexed_root(rs, index).cloned()
-        } else {
-            let roots = self.isolate_complex_roots(None);
-            RootCache::select_indexed_root(&roots, index).cloned()
+        let entry = ROOT_CACHE
+            .roots
+            .read()
+            .unwrap()
+            .get(&self.coefficients)
+            .cloned();
+        if let Some(roots) = entry.as_ref().and_then(|entry| entry.roots.get()) {
+            return RootCache::select_indexed_root(&roots.read().unwrap(), index).cloned();
         }
+
+        let roots = self.isolate_complex_roots(None);
+        RootCache::select_indexed_root(&roots, index).cloned()
     }
 
     /// Isolate the complex roots of the polynomial. The result is a sorted list of intervals with rational bounds that contain exactly one root
@@ -1351,6 +1336,7 @@ impl UnivariatePolynomial<RationalField> {
                 .square_free_factorization()
         };
 
+        // TODO: look up in cache!
         for (f, p) in factors {
             f.to_univariate_from_univariate(0)
                 .isolate_complex_roots_impl(refine.clone())
@@ -1833,6 +1819,7 @@ impl UnivariatePolynomial<RationalField> {
     }
 
     fn cmp_projected_real_roots(a: &ProjectedRealRoot, b: &ProjectedRealRoot) -> Option<Ordering> {
+        // TODO: strip GCD first?
         let mut a_interval = a.interval.clone();
         let mut b_interval = b.interval.clone();
         let gcd = a.poly.gcd(&b.poly);
@@ -3713,7 +3700,14 @@ impl<R: Ring, E: PositiveExponent> UnivariatePolynomial<PolynomialRing<R, E>> {
 #[cfg(test)]
 mod test {
     use super::{RootCache, UnivariatePolynomial};
-    use std::{cmp::Ordering, sync::Arc};
+    use std::{
+        cmp::Ordering,
+        sync::{
+            Arc, Barrier,
+            atomic::{AtomicUsize, Ordering as AtomicOrdering},
+        },
+        time::Duration,
+    };
 
     use crate::{
         atom::AtomCore,
@@ -4066,6 +4060,71 @@ mod test {
         });
 
         assert_eq!(calls, 1);
+    }
+
+    #[test]
+    fn concurrent_root_cache_miss_computes_once() {
+        let polynomial = Arc::new(
+            parse!("x^3-2")
+                .to_polynomial::<_, u16>(&Q, None)
+                .to_univariate_from_univariate(0),
+        );
+        let cache = Arc::new(RootCache::new());
+        let calls = Arc::new(AtomicUsize::new(0));
+        let start = Arc::new(Barrier::new(8));
+
+        let threads = (0..8)
+            .map(|_| {
+                let polynomial = polynomial.clone();
+                let cache = cache.clone();
+                let calls = calls.clone();
+                let start = start.clone();
+                std::thread::spawn(move || {
+                    start.wait();
+                    cache.get_or_insert_with(&polynomial, None, || {
+                        calls.fetch_add(1, AtomicOrdering::Relaxed);
+                        std::thread::sleep(Duration::from_millis(25));
+                        vec![]
+                    });
+                })
+            })
+            .collect::<Vec<_>>();
+
+        for thread in threads {
+            thread.join().unwrap();
+        }
+        assert_eq!(calls.load(AtomicOrdering::Relaxed), 1);
+    }
+
+    #[test]
+    fn refining_one_polynomial_does_not_lock_other_entries() {
+        let p_a = parse!("x^2-2")
+            .to_polynomial::<_, u16>(&Q, None)
+            .to_univariate_from_univariate(0);
+        let p_b = parse!("x^2-3")
+            .to_polynomial::<_, u16>(&Q, None)
+            .to_univariate_from_univariate(0);
+        let cache = Arc::new(RootCache::new());
+        cache.get_or_insert_with(&p_a, None, Vec::new);
+        cache.get_or_insert_with(&p_b, None, Vec::new);
+
+        let entry_a = cache.rational_entry(p_a.coefficients.clone());
+        let roots_a = entry_a.roots.get().unwrap();
+        let _refining_a = roots_a.write().unwrap();
+
+        let (finished_tx, finished_rx) = std::sync::mpsc::channel();
+        let worker = {
+            let cache = cache.clone();
+            std::thread::spawn(move || {
+                cache.get_or_insert_with(&p_b, None, Vec::new);
+                finished_tx.send(()).unwrap();
+            })
+        };
+
+        finished_rx
+            .recv_timeout(Duration::from_millis(250))
+            .expect("an unrelated cache entry was blocked");
+        worker.join().unwrap();
     }
 
     #[test]
