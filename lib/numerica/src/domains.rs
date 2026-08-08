@@ -235,6 +235,64 @@ pub trait Ring:
     }
 }
 
+/// A ring equipped with a total order compatible with its ring operations.
+pub trait OrderedRing: Ring {
+    /// Compare two elements in the ring's mathematical order.
+    fn cmp(&self, a: &Self::Element, b: &Self::Element) -> std::cmp::Ordering;
+
+    /// Compare an element with zero.
+    ///
+    /// [`std::cmp::Ordering::Less`] denotes a negative element,
+    /// [`std::cmp::Ordering::Equal`] zero, and
+    /// [`std::cmp::Ordering::Greater`] a positive element.
+    fn sign(&self, a: &Self::Element) -> std::cmp::Ordering {
+        self.cmp(a, &self.zero())
+    }
+}
+
+/// A ring with a distinguished embedding for which real comparisons can be
+/// attempted.
+///
+/// Unlike [`OrderedRing`], this trait does not assert that every pair of ring
+/// elements is comparable. Comparison may fail, for example when an element
+/// has a non-real image or when an implementation cannot certify its sign.
+pub trait RealEmbedding: Ring {
+    /// The error returned when a real comparison cannot be established.
+    type Error;
+
+    /// Try to compare an element's image with zero.
+    ///
+    /// [`std::cmp::Ordering::Less`] denotes a negative image,
+    /// [`std::cmp::Ordering::Equal`] zero, and
+    /// [`std::cmp::Ordering::Greater`] a positive image.
+    fn try_sign(&self, a: &Self::Element) -> Result<std::cmp::Ordering, Self::Error>;
+
+    /// Try to compare the images of two elements.
+    fn try_cmp(
+        &self,
+        a: &Self::Element,
+        b: &Self::Element,
+    ) -> Result<std::cmp::Ordering, Self::Error> {
+        self.try_sign(&self.sub(a, b))
+    }
+}
+
+impl<R: OrderedRing> RealEmbedding for R {
+    type Error = std::convert::Infallible;
+
+    fn try_sign(&self, a: &Self::Element) -> Result<std::cmp::Ordering, Self::Error> {
+        Ok(OrderedRing::sign(self, a))
+    }
+
+    fn try_cmp(
+        &self,
+        a: &Self::Element,
+        b: &Self::Element,
+    ) -> Result<std::cmp::Ordering, Self::Error> {
+        Ok(OrderedRing::cmp(self, a, b))
+    }
+}
+
 /// A Euclidean domain is a ring that supports division with remainder, quotients, and gcds.
 pub trait EuclideanDomain: Ring {
     fn rem(&self, a: &Self::Element, b: &Self::Element) -> Self::Element;

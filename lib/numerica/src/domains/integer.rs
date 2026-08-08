@@ -19,7 +19,7 @@ use crate::{
 };
 
 use super::{
-    EuclideanDomain, Field, InternalOrdering, Ring, SelfRing,
+    EuclideanDomain, Field, InternalOrdering, OrderedRing, Ring, SelfRing,
     finite_field::{
         FiniteField, FiniteFieldCore, FiniteFieldElement, FiniteFieldWorkspace, Mersenne32,
         Mersenne64, PrimeIteratorU64, ToFiniteField, Two, Z2, Zp, Zp64,
@@ -2260,6 +2260,13 @@ impl Ring for IntegerRing {
     }
 }
 
+impl OrderedRing for IntegerRing {
+    #[inline]
+    fn cmp(&self, a: &Self::Element, b: &Self::Element) -> std::cmp::Ordering {
+        Ord::cmp(a, b)
+    }
+}
+
 impl SelfRing for Integer {
     fn is_zero(&self) -> bool {
         self.is_zero()
@@ -3574,6 +3581,13 @@ impl Ring for MultiPrecisionIntegerRing {
 
     fn has_independent_elements(&self) -> bool {
         true
+    }
+}
+
+impl OrderedRing for MultiPrecisionIntegerRing {
+    #[inline]
+    fn cmp(&self, a: &Self::Element, b: &Self::Element) -> std::cmp::Ordering {
+        Ord::cmp(a, b)
     }
 }
 

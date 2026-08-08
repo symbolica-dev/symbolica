@@ -12,7 +12,7 @@ use crate::{
 };
 
 use super::{
-    EuclideanDomain, Field, InternalOrdering, Ring, SelfRing, UpgradeToField,
+    EuclideanDomain, Field, InternalOrdering, OrderedRing, Ring, SelfRing, UpgradeToField,
     backend::float::{BackendRational, BackendRationalExt},
     finite_field::{
         FiniteField, FiniteFieldCore, FiniteFieldWorkspace, PrimeIteratorU64, ToFiniteField, Two,
@@ -576,6 +576,21 @@ impl<R: EuclideanDomain + FractionNormalization> Ring for FractionField<R> {
 
     fn has_independent_elements(&self) -> bool {
         self.ring.has_independent_elements()
+    }
+}
+
+impl<R: EuclideanDomain + FractionNormalization + OrderedRing> OrderedRing for FractionField<R> {
+    fn cmp(&self, a: &Self::Element, b: &Self::Element) -> std::cmp::Ordering {
+        let left = self.ring.mul(a.numerator_ref(), b.denominator_ref());
+        let right = self.ring.mul(b.numerator_ref(), a.denominator_ref());
+        let ordering = self.ring.cmp(&left, &right);
+        let denominator = self.ring.mul(a.denominator_ref(), b.denominator_ref());
+
+        if self.ring.sign(&denominator).is_lt() {
+            ordering.reverse()
+        } else {
+            ordering
+        }
     }
 }
 
@@ -1375,7 +1390,7 @@ impl<'a> std::iter::Sum<&'a Self> for Rational {
 #[cfg(test)]
 mod test {
     use crate::domains::{
-        Field, Ring, RingOps,
+        Field, OrderedRing, RealEmbedding, Ring, RingOps,
         float::{Float, Real},
         integer::Z,
         rational::{FractionField, Rational},
@@ -1410,5 +1425,18 @@ mod test {
         let b = f.neg(f.nth(3.into()));
         let d = f.div(&f.add(&f.nth(100.into()), &b), &b);
         assert_eq!(d, f.to_element((-97).into(), 3.into(), false));
+    }
+
+    #[test]
+    fn ordered_fraction_comparison() {
+        let f = FractionField::new(Z);
+        let negative: Rational = (-1, 2).into();
+        let half: Rational = (1, 2).into();
+        let two_thirds: Rational = (2, 3).into();
+
+        assert_eq!(f.sign(&negative), std::cmp::Ordering::Less);
+        assert_eq!(f.sign(&Rational::zero()), std::cmp::Ordering::Equal);
+        assert_eq!(f.cmp(&half, &two_thirds), std::cmp::Ordering::Less);
+        assert_eq!(f.try_cmp(&half, &two_thirds), Ok(std::cmp::Ordering::Less));
     }
 }
