@@ -829,11 +829,14 @@ pub trait AtomCore: private::Sealed + Sized {
     ///
     /// Linear systems use the linear-system solver. Polynomial nonlinear
     /// systems over `Q` or `Q(parameters)` use a grevlex Gröbner basis, FGLM
-    /// conversion to lex, and exact algebraic roots. Every expression in
-    /// `system` is understood to equal zero. Rational powers involving the
-    /// solve variables are polynomialized with auxiliary variables, and
-    /// non-principal branches are filtered from the result. Rational
-    /// denominators are cleared and their zero loci are excluded.
+    /// conversion to lex, and exact algebraic roots. Positive-dimensional
+    /// systems use a maximal viable set of requested variables as inputs,
+    /// preferring variables later in `vars`, and map those inputs to
+    /// themselves. Every expression in `system` is understood to equal zero.
+    /// Rational powers involving the solve variables are polynomialized with
+    /// auxiliary variables, and non-principal branches are filtered from the
+    /// result. Rational denominators are cleared and their zero loci are
+    /// excluded.
     ///
     /// # Example
     ///

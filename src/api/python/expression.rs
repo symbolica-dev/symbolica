@@ -7732,10 +7732,13 @@ impl PythonExpression {
     /// Linear systems use the linear-system solver. Polynomial nonlinear
     /// systems over the rationals or rational functions in symbolic parameters
     /// use a grevlex Gröbner basis, FGLM conversion to lex, and exact algebraic
-    /// roots. Rational powers such as `sqrt(x+3)` are polynomialized using
-    /// auxiliary variables, after which solutions on non-principal branches
-    /// are filtered out. Rational denominators are cleared and solutions where
-    /// they vanish are rejected.
+    /// roots. For positive-dimensional systems, a maximal viable set of
+    /// requested variables is used as input, preferring variables later in the
+    /// list; input variables map to themselves in every returned solution.
+    /// Rational powers such as `sqrt(x+3)` are polynomialized using auxiliary
+    /// variables, after which solutions on non-principal branches are filtered
+    /// out. Rational denominators are cleared and solutions where they vanish
+    /// are rejected.
     ///
     /// Examples
     /// --------
@@ -7750,9 +7753,10 @@ impl PythonExpression {
     /// system: Sequence[Expression]
     ///     Expressions that are each understood to equal zero.
     /// variables: Sequence[Expression]
-    ///     Variables to solve for, in lexicographic elimination order.
+    ///     Variables to solve for, in lexicographic elimination order. When
+    ///     inputs are needed, viable variables later in this list are preferred.
     /// warn_if_underdetermined: bool
-    ///     Whether to warn when a linear system is underdetermined.
+    ///     Whether to warn when the system is underdetermined.
     #[pyo3(signature = (system, variables, warn_if_underdetermined = true))]
     #[classmethod]
     pub fn solve(
@@ -7778,7 +7782,38 @@ impl PythonExpression {
         };
 
         match AtomView::solve::<u16, _, Atom>(&system, &variables) {
-            Ok(solutions) => Ok(solutions.into_iter().map(convert_solution).collect()),
+            Ok(solutions) => {
+                if warn_if_underdetermined && !solutions.is_empty() {
+                    let input_variables = variables
+                        .iter()
+                        .filter_map(|variable| {
+                            let polynomial_variable =
+                                PolyVariable::try_from(variable.clone()).ok()?;
+                            solutions
+                                .iter()
+                                .all(|solution| {
+                                    solution.get(&polynomial_variable) == Some(variable)
+                                })
+                                .then(|| variable.to_string())
+                        })
+                        .collect::<Vec<_>>();
+
+                    if !input_variables.is_empty() {
+                        warn!(
+                            "The system is underdetermined (dimension {}); treating {} as input {}",
+                            input_variables.len(),
+                            input_variables.join(", "),
+                            if input_variables.len() == 1 {
+                                "variable"
+                            } else {
+                                "variables"
+                            }
+                        );
+                    }
+                }
+
+                Ok(solutions.into_iter().map(convert_solution).collect())
+            }
             Err(SolveError::Underdetermined {
                 rank,
                 partial_solution,
