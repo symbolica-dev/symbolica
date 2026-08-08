@@ -6,7 +6,7 @@ use std::{ops::Neg, sync::Arc};
 
 use ahash::{HashMap, HashSet};
 use numerica::domains::{
-    Field, Ring, RingOps,
+    Field, RealEmbedding, Ring, RingOps,
     float::{Complex, Float, RealLike},
     rational::Rational,
 };
@@ -38,6 +38,27 @@ struct AuxiliaryPower {
     denominator: usize,
 }
 
+enum ParametricSolveResult {
+    Solved(Vec<SolveBranch>),
+    PositiveDimensional(usize),
+    Inconsistent,
+}
+
+#[derive(Clone)]
+pub(crate) struct SolveBranch {
+    values: HashMap<PolyVariable, Atom>,
+    nonzero_conditions: Vec<Atom>,
+}
+
+impl SolveBranch {
+    fn unconditional(values: HashMap<PolyVariable, Atom>) -> Self {
+        Self {
+            values,
+            nonzero_conditions: Vec::new(),
+        }
+    }
+}
+
 /// Errors that can occur when solving a system.
 /// Underdetermined systems return a partial solution.
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
@@ -66,6 +87,369 @@ pub enum SolveError {
         partial_solution: Vec<Atom>,
     },
     Other(String),
+}
+
+/// A domain supported by the exact solver.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Hash)]
+pub enum SolveDomain {
+    /// Keep solutions whose requested values are integers.
+    Integers,
+    /// Keep solutions whose requested values are rational numbers.
+    Rationals,
+    /// Keep solutions whose requested values are real numbers.
+    Reals,
+    /// Keep all complex solutions.
+    #[default]
+    Complexes,
+}
+
+pub use SolveDomain::{Complexes, Integers, Rationals, Reals};
+
+#[doc(hidden)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum DomainMembership {
+    Yes,
+    No,
+    Indeterminate,
+}
+
+fn algebraic_domain_membership(value: &Atom, domain: SolveDomain) -> DomainMembership {
+    let Ok(mut context) = AlgebraicContext::from_atom(value.as_view()) else {
+        return DomainMembership::Indeterminate;
+    };
+    let Ok(element) = context.convert_atom(value.as_view()) else {
+        return DomainMembership::Indeterminate;
+    };
+
+    match domain {
+        Integers => {
+            if context
+                .field()
+                .element_to_atom_simplified(&element)
+                .is_integer()
+            {
+                DomainMembership::Yes
+            } else {
+                DomainMembership::No
+            }
+        }
+        Rationals => {
+            let simplified = context.field().element_to_atom_simplified(&element);
+            if Rational::try_from(simplified.as_view()).is_ok() {
+                DomainMembership::Yes
+            } else {
+                DomainMembership::No
+            }
+        }
+        Reals if context.field().try_sign(&element).is_ok() => DomainMembership::Yes,
+        Reals => DomainMembership::No,
+        Complexes => DomainMembership::Yes,
+    }
+}
+
+pub(crate) fn value_in_domain(value: &Atom, domain: SolveDomain) -> DomainMembership {
+    match domain {
+        Complexes => DomainMembership::Yes,
+        Integers if value.is_integer() => DomainMembership::Yes,
+        Rationals if Rational::try_from(value.as_view()).is_ok() => DomainMembership::Yes,
+        Reals if value.is_real() => DomainMembership::Yes,
+        _ => algebraic_domain_membership(value, domain),
+    }
+}
+
+fn rational_denominator<E: PositiveExponent + 'static>(expression: AtomView<'_>) -> Option<Atom> {
+    let rational: RationalPolynomial<_, E> =
+        expression.try_to_rational_polynomial(&Q, &Z, None).ok()?;
+    (!rational.denominator.is_one()).then(|| rational.denominator.to_expression())
+}
+
+/// One branch of an exact solution to a system of equations.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct Solution {
+    values: HashMap<PolyVariable, Atom>,
+    free_variables: Vec<PolyVariable>,
+    conditions: Vec<SolutionCondition>,
+    domain: SolveDomain,
+}
+
+impl Solution {
+    fn new(
+        values: HashMap<PolyVariable, Atom>,
+        free_variables: Vec<PolyVariable>,
+        conditions: Vec<SolutionCondition>,
+        domain: SolveDomain,
+    ) -> Self {
+        Self {
+            values,
+            free_variables,
+            conditions,
+            domain,
+        }
+    }
+
+    /// Return whether this branch contains a free variable or a domain
+    /// membership that could not be decided exactly.
+    pub fn is_indeterminate(&self) -> bool {
+        !self.free_variables.is_empty()
+            || self
+                .conditions
+                .iter()
+                .any(|condition| matches!(condition, SolutionCondition::DomainMembership { .. }))
+    }
+
+    /// Return whether this branch has conditions that must be satisfied.
+    pub fn is_conditional(&self) -> bool {
+        !self.conditions.is_empty()
+    }
+
+    /// Return whether this branch describes a family with free variables.
+    pub fn is_parametric(&self) -> bool {
+        !self.free_variables.is_empty()
+    }
+
+    /// Return whether this branch leaves any requested variables free.
+    pub fn is_underdetermined(&self) -> bool {
+        !self.free_variables.is_empty()
+    }
+
+    /// Number of requested variables determined in terms of the free inputs.
+    pub fn rank(&self) -> usize {
+        self.values.len() - self.free_variables.len()
+    }
+
+    /// Dimension of this solution branch, measured by its free inputs.
+    pub fn dimension(&self) -> usize {
+        self.free_variables.len()
+    }
+
+    /// Variables treated as free inputs on this branch.
+    pub fn free_variables(&self) -> &[PolyVariable] {
+        &self.free_variables
+    }
+
+    /// Conditions under which this branch is valid.
+    pub fn conditions(&self) -> &[SolutionCondition] {
+        &self.conditions
+    }
+
+    /// Domain requested for this solve operation.
+    pub fn domain(&self) -> SolveDomain {
+        self.domain
+    }
+
+    /// Borrow the variable-value map for this branch.
+    pub fn as_map(&self) -> &HashMap<PolyVariable, Atom> {
+        &self.values
+    }
+
+    /// Consume the solution and return its variable-value map.
+    pub fn into_values(self) -> HashMap<PolyVariable, Atom> {
+        self.values
+    }
+}
+
+/// A condition attached to an exact solution branch.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum SolutionCondition {
+    /// This expression must not vanish. Such conditions arise from
+    /// denominators and exceptional loci of generic parametric solutions.
+    NonZero(Atom),
+    /// Membership of this value in the requested domain could not be decided
+    /// exactly. The branch is retained and marked indeterminate.
+    DomainMembership {
+        variable: PolyVariable,
+        value: Atom,
+        domain: SolveDomain,
+    },
+}
+
+impl std::fmt::Display for SolutionCondition {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::NonZero(expression) => write!(f, "{expression} != 0"),
+            Self::DomainMembership { value, domain, .. } => write!(f, "{value} in {domain:?}"),
+        }
+    }
+}
+
+impl std::fmt::Display for Solution {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        let mut values = self.values.iter().collect::<Vec<_>>();
+        values.sort_by(|(left, _), (right, _)| left.cmp(right));
+
+        f.write_str("{")?;
+        for (index, (variable, value)) in values.into_iter().enumerate() {
+            if index > 0 {
+                f.write_str(", ")?;
+            }
+            write!(f, "{variable} = {value}")?;
+        }
+        f.write_str("}")?;
+
+        if !self.conditions.is_empty() {
+            let mut conditions = self
+                .conditions
+                .iter()
+                .map(ToString::to_string)
+                .collect::<Vec<_>>();
+            conditions.sort();
+            write!(f, " where {}", conditions.join(", "))?;
+        }
+
+        Ok(())
+    }
+}
+
+impl std::ops::Deref for Solution {
+    type Target = HashMap<PolyVariable, Atom>;
+
+    fn deref(&self) -> &Self::Target {
+        &self.values
+    }
+}
+
+impl IntoIterator for Solution {
+    type Item = (PolyVariable, Atom);
+    type IntoIter = <HashMap<PolyVariable, Atom> as IntoIterator>::IntoIter;
+
+    fn into_iter(self) -> Self::IntoIter {
+        self.values.into_iter()
+    }
+}
+
+impl<'a> IntoIterator for &'a Solution {
+    type Item = (&'a PolyVariable, &'a Atom);
+    type IntoIter = <&'a HashMap<PolyVariable, Atom> as IntoIterator>::IntoIter;
+
+    fn into_iter(self) -> Self::IntoIter {
+        self.values.iter()
+    }
+}
+
+/// A pending exact solve operation.
+pub struct SolveBuilder<'a, T: AtomCore> {
+    system: &'a [T],
+    domain: SolveDomain,
+}
+
+impl<'a, T: AtomCore> SolveBuilder<'a, T> {
+    pub(crate) fn new(system: &'a [T]) -> Self {
+        Self {
+            system,
+            domain: Complexes,
+        }
+    }
+
+    /// Select the domain in which solutions must lie.
+    pub fn over(mut self, domain: SolveDomain) -> Self {
+        self.domain = domain;
+        self
+    }
+
+    /// Solve the system with respect to `variables`, using `u16` exponents.
+    pub fn wrt<V: AtomCore>(&self, variables: &[V]) -> Result<Vec<Solution>, SolveError> {
+        self.wrt_with_exponent::<u16, V>(variables)
+    }
+
+    /// Solve the system with respect to `variables` using exponent type `E`.
+    pub fn wrt_with_exponent<E: PositiveExponent + 'static, V: AtomCore>(
+        &self,
+        variables: &[V],
+    ) -> Result<Vec<Solution>, SolveError> {
+        let polynomial_variables = variables
+            .iter()
+            .map(|variable| variable.as_atom_view().to_owned().try_into())
+            .collect::<Result<Vec<PolyVariable>, String>>()
+            .map_err(SolveError::Other)?;
+
+        let system_denominators = self
+            .system
+            .iter()
+            .filter_map(|expression| rational_denominator::<E>(expression.as_atom_view()))
+            .collect::<Vec<_>>();
+
+        let raw_solutions =
+            match AtomView::solve_impl::<E, _, _>(self.system, variables, self.domain) {
+                Ok(solutions) => solutions,
+                Err(SolveError::Underdetermined {
+                    partial_solution, ..
+                }) => vec![SolveBranch::unconditional(
+                    polynomial_variables
+                        .iter()
+                        .cloned()
+                        .zip(partial_solution)
+                        .collect(),
+                )],
+                Err(error) => return Err(error),
+            };
+
+        Ok(raw_solutions
+            .into_iter()
+            .filter_map(|branch| {
+                let values = branch.values;
+                let mut free_variables = Vec::new();
+                let mut conditions = branch
+                    .nonzero_conditions
+                    .into_iter()
+                    .map(SolutionCondition::NonZero)
+                    .collect::<Vec<_>>();
+
+                let mut nonzero_conditions = conditions
+                    .iter()
+                    .filter_map(|condition| match condition {
+                        SolutionCondition::NonZero(expression) => Some(expression.clone()),
+                        SolutionCondition::DomainMembership { .. } => None,
+                    })
+                    .collect::<HashSet<_>>();
+                let denominator_conditions = system_denominators
+                    .iter()
+                    .map(|denominator| {
+                        AtomView::substitute_algebraic_solution(denominator.as_view(), &values)
+                    })
+                    .chain(
+                        values
+                            .values()
+                            .filter_map(|value| rational_denominator::<E>(value.as_view())),
+                    );
+                for denominator in denominator_conditions {
+                    let denominator = denominator.expand();
+                    match AtomView::algebraically_zero(&denominator) {
+                        Some(true) => return None,
+                        Some(false) => continue,
+                        None => {}
+                    }
+                    if nonzero_conditions.insert(denominator.clone()) {
+                        conditions.push(SolutionCondition::NonZero(denominator));
+                    }
+                }
+
+                for variable in &polynomial_variables {
+                    let value = values.get(variable)?;
+                    if value == &variable.to_atom() {
+                        free_variables.push(variable.clone());
+                        continue;
+                    }
+                    match value_in_domain(value, self.domain) {
+                        DomainMembership::Yes => {}
+                        DomainMembership::No => return None,
+                        DomainMembership::Indeterminate => {
+                            conditions.push(SolutionCondition::DomainMembership {
+                                variable: variable.clone(),
+                                value: value.clone(),
+                                domain: self.domain,
+                            });
+                        }
+                    }
+                }
+                Some(Solution::new(
+                    values,
+                    free_variables,
+                    conditions,
+                    self.domain,
+                ))
+            })
+            .collect())
+    }
 }
 
 impl std::error::Error for SolveError {}
@@ -115,6 +499,279 @@ impl std::fmt::Display for SolveError {
 }
 
 impl AtomView<'_> {
+    fn leading_ideal_dimension<E: PositiveExponent>(
+        leading_monomials: &[Vec<E>],
+        nvars: usize,
+    ) -> usize {
+        fn subsets_of_size(
+            nvars: usize,
+            size: usize,
+            start: usize,
+            current: &mut Vec<usize>,
+            subsets: &mut Vec<Vec<usize>>,
+        ) {
+            if current.len() == size {
+                subsets.push(current.clone());
+                return;
+            }
+
+            let remaining = size - current.len();
+            for variable in start..=nvars - remaining {
+                current.push(variable);
+                subsets_of_size(nvars, size, variable + 1, current, subsets);
+                current.pop();
+            }
+        }
+
+        for size in (0..=nvars).rev() {
+            let mut subsets = Vec::new();
+            subsets_of_size(nvars, size, 0, &mut Vec::new(), &mut subsets);
+            if subsets.into_iter().any(|subset| {
+                !leading_monomials.iter().any(|leading| {
+                    leading.iter().enumerate().all(|(variable, exponent)| {
+                        exponent.is_zero() || subset.contains(&variable)
+                    })
+                })
+            }) {
+                return size;
+            }
+        }
+
+        0
+    }
+
+    fn preferred_input_sets(nvars: usize, dimension: usize) -> Vec<Vec<usize>> {
+        fn collect(
+            nvars: usize,
+            dimension: usize,
+            start: usize,
+            current: &mut Vec<usize>,
+            result: &mut Vec<Vec<usize>>,
+        ) {
+            if current.len() == dimension {
+                result.push(current.clone());
+                return;
+            }
+
+            let remaining = dimension - current.len();
+            for variable in start..=nvars - remaining {
+                current.push(variable);
+                collect(nvars, dimension, variable + 1, current, result);
+                current.pop();
+            }
+        }
+
+        let mut result = Vec::new();
+        collect(nvars, dimension, 0, &mut Vec::new(), &mut result);
+        result.sort_by(|left, right| right.cmp(left));
+        result
+    }
+
+    fn solve_parametric_polynomial_system<E: PositiveExponent + 'static, T: AtomCore>(
+        system: &[T],
+        variables: &[PolyVariable],
+        input_variables: &HashSet<PolyVariable>,
+        domain: SolveDomain,
+    ) -> Result<ParametricSolveResult, SolveError> {
+        let rationals = system
+            .iter()
+            .map(|expression| {
+                expression
+                    .as_atom_view()
+                    .try_to_rational_polynomial(&Q, &Z, None)
+                    .map_err(|error| SolveError::Other(error.to_string()))
+            })
+            .collect::<Result<Vec<RationalPolynomial<_, E>>, SolveError>>()?;
+
+        let has_denominators = rationals
+            .iter()
+            .any(|rational| !rational.denominator.is_one());
+        let mut polynomial_variables = variables
+            .iter()
+            .filter(|variable| !input_variables.contains(*variable))
+            .cloned()
+            .collect::<Vec<_>>();
+        let saturation_variable = if has_denominators {
+            let mut index = 0;
+            let variable = loop {
+                let candidate = PolyVariable::Temporary(index);
+                if !variables.contains(&candidate) {
+                    break candidate;
+                }
+                index += 1;
+            };
+            polynomial_variables.push(variable.clone());
+            Some(variable)
+        } else {
+            None
+        };
+        let polynomial_variables = Arc::new(polynomial_variables);
+
+        let mut denominators = Vec::new();
+        let mut polynomials = Vec::new();
+        for rational in rationals {
+            let numerator_one = rational.numerator.one();
+            let numerator = RationalPolynomial {
+                numerator: rational.numerator,
+                denominator: numerator_one,
+            }
+            .to_polynomial(polynomial_variables.as_ref(), true)
+            .map_err(|error| SolveError::Other(error.to_string()))?;
+            if !numerator.is_zero() {
+                polynomials.push(numerator.reorder::<GrevLexOrder>());
+            }
+
+            if !rational.denominator.is_one() {
+                let denominator_one = rational.denominator.one();
+                let denominator = RationalPolynomial {
+                    numerator: rational.denominator,
+                    denominator: denominator_one,
+                }
+                .to_polynomial(polynomial_variables.as_ref(), true)
+                .map_err(|error| SolveError::Other(error.to_string()))?;
+                denominators.push(denominator);
+            }
+        }
+
+        if let Some(saturation_variable) = saturation_variable {
+            let mut denominator_product = denominators
+                .first()
+                .expect("A saturation variable requires a denominator")
+                .one();
+            for denominator in denominators {
+                denominator_product = &denominator_product * &denominator;
+            }
+            let helper = denominator_product
+                .variable(&saturation_variable)
+                .map_err(SolveError::Other)?;
+            let saturation = &helper * &denominator_product - denominator_product.one();
+            polynomials.push(saturation.reorder::<GrevLexOrder>());
+        }
+
+        if polynomials.is_empty() {
+            if polynomial_variables.is_empty() {
+                return Ok(ParametricSolveResult::Solved(vec![
+                    SolveBranch::unconditional(
+                        variables
+                            .iter()
+                            .map(|variable| (variable.clone(), variable.to_atom()))
+                            .collect(),
+                    ),
+                ]));
+            }
+            return Ok(ParametricSolveResult::PositiveDimensional(
+                polynomial_variables.len(),
+            ));
+        }
+
+        let basis = GroebnerBasis::new(&polynomials, false);
+        if basis
+            .system
+            .iter()
+            .any(|polynomial| !polynomial.is_zero() && polynomial.is_constant())
+        {
+            return Ok(ParametricSolveResult::Inconsistent);
+        }
+
+        let leading_monomials = basis
+            .system
+            .iter()
+            .filter(|polynomial| !polynomial.is_zero())
+            .map(|polynomial| polynomial.max_exp().to_vec())
+            .collect::<Vec<_>>();
+        let dimension =
+            Self::leading_ideal_dimension(&leading_monomials, polynomial_variables.len());
+        if dimension > 0 {
+            return Ok(ParametricSolveResult::PositiveDimensional(dimension));
+        }
+
+        let basis = basis
+            .change_order::<LexOrder>()
+            .map_err(SolveError::Other)?;
+        let solutions = basis
+            .solve_parametric_in_base_field(matches!(domain, Integers | Rationals))
+            .map_err(SolveError::Other)?
+            .into_iter()
+            .map(|solution| {
+                let nonzero_conditions = solution
+                    .field()
+                    .generic_conditions()
+                    .iter()
+                    .map(|condition| condition.to_expression())
+                    .collect();
+                let values = variables
+                    .iter()
+                    .filter_map(|variable| {
+                        if input_variables.contains(variable) {
+                            Some((variable.clone(), variable.to_atom()))
+                        } else {
+                            solution
+                                .get(variable)
+                                .map(|value| (variable.clone(), value.to_atom()))
+                        }
+                    })
+                    .collect();
+                SolveBranch {
+                    values,
+                    nonzero_conditions,
+                }
+            })
+            .collect();
+        Ok(ParametricSolveResult::Solved(solutions))
+    }
+
+    fn solve_positive_dimensional_polynomial_system<E: PositiveExponent + 'static, T: AtomCore>(
+        system: &[T],
+        variables: &[PolyVariable],
+        dimension: usize,
+        domain: SolveDomain,
+    ) -> Result<Vec<SolveBranch>, SolveError> {
+        if dimension > variables.len() {
+            return Err(SolveError::Other(format!(
+                "The polynomial system has dimension {dimension}, but only {} solve variables",
+                variables.len()
+            )));
+        }
+
+        let maximize_base_field_branches = matches!(domain, Integers | Rationals);
+        let mut best_solutions = None;
+        for indices in Self::preferred_input_sets(variables.len(), dimension) {
+            let input_variables = indices
+                .into_iter()
+                .map(|index| variables[index].clone())
+                .collect::<HashSet<_>>();
+            match Self::solve_parametric_polynomial_system::<E, _>(
+                system,
+                variables,
+                &input_variables,
+                domain,
+            )? {
+                ParametricSolveResult::Solved(solutions) => {
+                    if !maximize_base_field_branches {
+                        return Ok(solutions);
+                    }
+                    if best_solutions
+                        .as_ref()
+                        .is_none_or(|best: &Vec<_>| solutions.len() > best.len())
+                    {
+                        best_solutions = Some(solutions);
+                    }
+                }
+                ParametricSolveResult::PositiveDimensional(_)
+                | ParametricSolveResult::Inconsistent => {}
+            }
+        }
+
+        if let Some(solutions) = best_solutions {
+            return Ok(solutions);
+        }
+
+        Err(SolveError::Other(
+            "Could not select input variables for the positive-dimensional polynomial system"
+                .to_string(),
+        ))
+    }
+
     fn rational_exponent_parts(exponent: AtomView<'_>) -> Option<(i64, usize)> {
         let exponent = Rational::try_from(exponent).ok()?;
         let numerator = exponent.numerator().to_i64()?;
@@ -281,23 +938,30 @@ impl AtomView<'_> {
     /// Linear systems are delegated to [`Self::solve_linear_system`]. Polynomial
     /// nonlinear systems over `Q` or `Q(parameters)` are first converted to a
     /// grevlex Gröbner basis, changed to lex order with FGLM, and solved by
-    /// triangular back-substitution. Rational powers such as `sqrt(x+3)` are
-    /// replaced by auxiliary polynomial variables and defining equations;
-    /// solutions on non-principal power branches are removed afterwards.
+    /// triangular back-substitution. For a positive-dimensional nonlinear
+    /// system, a maximal set of requested variables is treated as input
+    /// parameters and mapped to itself. As in the linear solver, viable input
+    /// sets containing variables later in `vars` are preferred. Rational powers
+    /// such as `sqrt(x+3)` are replaced by auxiliary polynomial variables and
+    /// defining equations; solutions on non-principal power branches are
+    /// removed afterwards.
     /// Denominators involving solve variables are cleared before constructing
     /// the basis, and solutions on their zero loci are rejected.
     /// Rational-power auxiliaries combined with parameters are not yet
     /// supported because selecting their analytic branch requires assumptions
     /// on the parameters. Parametric results describe the generic parameter
-    /// locus; exceptional specializations where denominators vanish or the
-    /// Gröbner basis changes must be solved separately.
+    /// locus. This also applies to automatically selected input variables in a
+    /// positive-dimensional result: exceptional input values where
+    /// denominators vanish or the Gröbner basis changes must be solved
+    /// separately.
     ///
-    /// Every expression in `system` is understood to equal zero. Each solution
-    /// is returned as a map from a requested variable to its exact value.
-    pub fn solve<E: PositiveExponent + 'static, T1: AtomCore, T2: AtomCore>(
+    /// Every expression in `system` is understood to equal zero. Each internal
+    /// branch retains its exact values and generic nonvanishing conditions.
+    pub(crate) fn solve_impl<E: PositiveExponent + 'static, T1: AtomCore, T2: AtomCore>(
         system: &[T1],
         vars: &[T2],
-    ) -> Result<Vec<HashMap<PolyVariable, Atom>>, SolveError> {
+        domain: SolveDomain,
+    ) -> Result<Vec<SolveBranch>, SolveError> {
         let variables = vars
             .iter()
             .map(|variable| variable.as_atom_view().to_owned().try_into())
@@ -308,7 +972,9 @@ impl AtomView<'_> {
         if auxiliaries.is_empty() {
             match Self::solve_linear_system::<E, _, _>(system, vars) {
                 Ok(values) => {
-                    return Ok(vec![variables.into_iter().zip(values).collect()]);
+                    return Ok(vec![SolveBranch::unconditional(
+                        variables.into_iter().zip(values).collect(),
+                    )]);
                 }
                 Err(SolveError::NonLinearSystem) => {}
                 Err(SolveError::Other(error)) if error == "Not a polynomial" => {}
@@ -337,96 +1003,20 @@ impl AtomView<'_> {
                 ));
             }
 
-            let rationals = system
-                .iter()
-                .map(|expression| {
-                    expression
-                        .as_atom_view()
-                        .try_to_rational_polynomial(&Q, &Z, None)
-                        .map_err(|error| SolveError::Other(error.to_string()))
-                })
-                .collect::<Result<Vec<RationalPolynomial<_, E>>, SolveError>>()?;
-
-            let has_denominators = rationals
-                .iter()
-                .any(|rational| !rational.denominator.is_one());
-            let mut parametric_variables = variable_map.as_ref().clone();
-            let saturation_variable = if has_denominators {
-                let mut index = 0;
-                let variable = loop {
-                    let candidate = PolyVariable::Temporary(index);
-                    if !parametric_variables.contains(&candidate) {
-                        break candidate;
-                    }
-                    index += 1;
-                };
-                parametric_variables.push(variable.clone());
-                Some(variable)
-            } else {
-                None
+            return match Self::solve_parametric_polynomial_system::<E, _>(
+                system,
+                &variables,
+                &HashSet::default(),
+                domain,
+            )? {
+                ParametricSolveResult::Solved(solutions) => Ok(solutions),
+                ParametricSolveResult::PositiveDimensional(dimension) => {
+                    Self::solve_positive_dimensional_polynomial_system::<E, _>(
+                        system, &variables, dimension, domain,
+                    )
+                }
+                ParametricSolveResult::Inconsistent => Ok(Vec::new()),
             };
-            let parametric_variables = Arc::new(parametric_variables);
-
-            let mut denominators = Vec::new();
-            let mut polynomials = Vec::new();
-            for rational in rationals {
-                let numerator_one = rational.numerator.one();
-                let numerator = RationalPolynomial {
-                    numerator: rational.numerator,
-                    denominator: numerator_one,
-                }
-                .to_polynomial(parametric_variables.as_ref(), true)
-                .map_err(|error| SolveError::Other(error.to_string()))?;
-                if !numerator.is_zero() {
-                    polynomials.push(numerator.reorder::<GrevLexOrder>());
-                }
-
-                if !rational.denominator.is_one() {
-                    let denominator_one = rational.denominator.one();
-                    let denominator = RationalPolynomial {
-                        numerator: rational.denominator,
-                        denominator: denominator_one,
-                    }
-                    .to_polynomial(parametric_variables.as_ref(), true)
-                    .map_err(|error| SolveError::Other(error.to_string()))?;
-                    denominators.push(denominator);
-                }
-            }
-
-            if let Some(saturation_variable) = saturation_variable {
-                let mut denominator_product = denominators
-                    .first()
-                    .expect("A saturation variable requires a denominator")
-                    .one();
-                for denominator in denominators {
-                    denominator_product = &denominator_product * &denominator;
-                }
-                let helper = denominator_product
-                    .variable(&saturation_variable)
-                    .map_err(SolveError::Other)?;
-                let saturation = &helper * &denominator_product - denominator_product.one();
-                polynomials.push(saturation.reorder::<GrevLexOrder>());
-            }
-
-            let basis = GroebnerBasis::new(&polynomials, false);
-            let basis = basis
-                .change_order::<LexOrder>()
-                .map_err(SolveError::Other)?;
-            return Ok(basis
-                .solve_parametric()
-                .map_err(SolveError::Other)?
-                .into_iter()
-                .map(|solution| {
-                    variables
-                        .iter()
-                        .filter_map(|variable| {
-                            solution
-                                .get(variable)
-                                .map(|value| (variable.clone(), value.to_atom()))
-                        })
-                        .collect()
-                })
-                .collect());
         }
 
         let mut denominators = Vec::new();
@@ -486,15 +1076,39 @@ impl AtomView<'_> {
             }
         }
         let basis = GroebnerBasis::new(&polynomials, false);
-        let basis = basis
-            .change_order::<LexOrder>()
+        let basis = match basis.change_order::<LexOrder>() {
+            Ok(basis) => basis,
+            Err(_) if auxiliaries.is_empty() => {
+                return match Self::solve_parametric_polynomial_system::<E, _>(
+                    system,
+                    &variables,
+                    &HashSet::default(),
+                    domain,
+                )? {
+                    ParametricSolveResult::Solved(solutions) => Ok(solutions),
+                    ParametricSolveResult::PositiveDimensional(dimension) => {
+                        Self::solve_positive_dimensional_polynomial_system::<E, _>(
+                            system, &variables, dimension, domain,
+                        )
+                    }
+                    ParametricSolveResult::Inconsistent => Ok(Vec::new()),
+                };
+            }
+            Err(error) => return Err(SolveError::Other(error)),
+        };
+        let polynomial_solutions = basis
+            .solve_in_base_field(auxiliaries.is_empty() && matches!(domain, Integers | Rationals))
             .map_err(SolveError::Other)?;
-        let polynomial_solutions = basis.solve().map_err(SolveError::Other)?;
 
         if auxiliaries.is_empty() && denominators.is_empty() {
             return polynomial_solutions
                 .iter()
-                .map(|solution| solution.to_atom_map().map_err(SolveError::Other))
+                .map(|solution| {
+                    solution
+                        .to_atom_map()
+                        .map(SolveBranch::unconditional)
+                        .map_err(SolveError::Other)
+                })
                 .collect();
         }
 
@@ -541,7 +1155,7 @@ impl AtomView<'_> {
                 }
             }
 
-            filtered.push(
+            filtered.push(SolveBranch::unconditional(
                 variables
                     .iter()
                     .filter_map(|variable| {
@@ -551,7 +1165,7 @@ impl AtomView<'_> {
                             .map(|value| (variable.clone(), value))
                     })
                     .collect(),
-            );
+            ));
         }
 
         Ok(filtered)
@@ -1045,7 +1659,7 @@ mod test {
         },
         parse,
         poly::PolyVariable,
-        solve::SolveError,
+        solve::{Complexes, Integers, Rationals, Reals, Solution, SolutionCondition, SolveError},
         symbol,
         tensors::matrix::Matrix,
         transcendental::root,
@@ -1075,7 +1689,7 @@ mod test {
         let system = [parse!("x+y-3"), parse!("x-y-1")];
         let variables = [Atom::var(x), Atom::var(y)];
 
-        let solutions = Atom::solve::<u16, _, Atom>(&system, &variables).unwrap();
+        let solutions = Atom::solve(&system).wrt(&variables).unwrap();
 
         assert_eq!(solutions.len(), 1);
         assert_eq!(
@@ -1086,6 +1700,10 @@ mod test {
             solutions[0].get(&PolyVariable::from(y)),
             Some(&Atom::num(1))
         );
+        assert!(!solutions[0].is_underdetermined());
+        assert_eq!(solutions[0].rank(), 2);
+        assert_eq!(solutions[0].dimension(), 0);
+        assert_eq!(solutions[0].to_string(), "{x = 2, y = 1}");
     }
 
     #[test]
@@ -1100,7 +1718,7 @@ mod test {
             Err(SolveError::NonLinearSystem)
         );
 
-        let solutions = Atom::solve::<u16, _, Atom>(&system, &variables).unwrap();
+        let solutions = Atom::solve(&system).wrt(&variables).unwrap();
         assert_eq!(solutions.len(), 2);
         for solution in solutions {
             let x_value = solution.get(&PolyVariable::from(x)).unwrap();
@@ -1114,13 +1732,244 @@ mod test {
     }
 
     #[test]
+    fn solve_builder_filters_by_domain() {
+        let x = symbol!("x");
+        let variable = Atom::var(x);
+
+        let real_solutions = Atom::solve(&[parse!("x^2-2")])
+            .over(Reals)
+            .wrt(std::slice::from_ref(&variable))
+            .unwrap();
+        assert_eq!(real_solutions.len(), 2);
+        assert!(
+            real_solutions
+                .iter()
+                .all(|solution| !solution.is_indeterminate())
+        );
+
+        let integer_solutions = Atom::solve(&[parse!("x^2-2")])
+            .over(Integers)
+            .wrt(std::slice::from_ref(&variable))
+            .unwrap();
+        assert!(integer_solutions.is_empty());
+
+        let rational_solutions = Atom::solve(&[parse!("(x-1/2)*(x^2-2)")])
+            .over(Rationals)
+            .wrt(std::slice::from_ref(&variable))
+            .unwrap();
+        assert_eq!(rational_solutions.len(), 1);
+        assert_eq!(
+            rational_solutions[0].get(&PolyVariable::from(x)),
+            Some(&parse!("1/2"))
+        );
+
+        let integer_solutions = Atom::solve(&[parse!("(x-1/2)*(x^2-2)")])
+            .over(Integers)
+            .wrt(std::slice::from_ref(&variable))
+            .unwrap();
+        assert!(integer_solutions.is_empty());
+
+        let rational_radical_solution = Atom::solve(&[parse!("sqrt(x)-sqrt(2)")])
+            .over(Rationals)
+            .wrt(std::slice::from_ref(&variable))
+            .unwrap();
+        assert_eq!(rational_radical_solution.len(), 1);
+        assert_eq!(
+            rational_radical_solution[0].get(&PolyVariable::from(x)),
+            Some(&Atom::num(2))
+        );
+
+        let nonreal_solutions = Atom::solve(&[parse!("x^2+1")])
+            .over(Reals)
+            .wrt(std::slice::from_ref(&variable))
+            .unwrap();
+        assert!(nonreal_solutions.is_empty());
+
+        let complex_solutions = Atom::solve(&[parse!("x^2+1")])
+            .over(Complexes)
+            .wrt(std::slice::from_ref(&variable))
+            .unwrap();
+        assert_eq!(complex_solutions.len(), 2);
+    }
+
+    #[test]
+    fn solution_reports_indeterminate_branches() {
+        let x = symbol!("x");
+        let y = symbol!("y");
+        let variables = [Atom::var(x), Atom::var(y)];
+
+        let solutions = Atom::solve(&[parse!("x+y-1")])
+            .over(Complexes)
+            .wrt(&variables)
+            .unwrap();
+
+        assert_eq!(solutions.len(), 1);
+        assert!(solutions[0].is_indeterminate());
+        assert!(solutions[0].is_parametric());
+        assert!(solutions[0].is_underdetermined());
+        assert_eq!(solutions[0].rank(), 1);
+        assert_eq!(solutions[0].dimension(), 1);
+        assert_eq!(solutions[0].free_variables().len(), 1);
+        assert!(solutions[0].conditions().is_empty());
+        assert_eq!(solutions[0].domain(), Complexes);
+    }
+
+    #[test]
+    fn solution_reports_unresolved_domain_membership() {
+        let x = symbol!("x");
+        let variable = Atom::var(x);
+        let solutions = Atom::solve(&[parse!("x-a")])
+            .over(Reals)
+            .wrt(std::slice::from_ref(&variable))
+            .unwrap();
+
+        assert_eq!(solutions.len(), 1);
+        assert!(solutions[0].is_indeterminate());
+        assert!(!solutions[0].is_parametric());
+        assert!(solutions[0].conditions().iter().any(|condition| {
+            matches!(
+                condition,
+                SolutionCondition::DomainMembership {
+                    variable,
+                    value,
+                    domain: Reals,
+                } if variable == &PolyVariable::from(x) && value == &parse!("a")
+            )
+        }));
+        assert_eq!(solutions[0].to_string(), "{x = a} where a in Reals");
+    }
+
+    #[test]
+    fn solution_reports_nonzero_denominator_conditions() {
+        let x = symbol!("x");
+        let variable = Atom::var(x);
+
+        for equation in [parse!("a*x-1"), parse!("(x-1)/a")] {
+            let solutions = Atom::solve(&[equation])
+                .wrt(std::slice::from_ref(&variable))
+                .unwrap();
+            assert_eq!(solutions.len(), 1);
+            assert!(solutions[0].is_conditional());
+            assert!(solutions[0].conditions().iter().any(|condition| {
+                matches!(condition, SolutionCondition::NonZero(value) if value == &parse!("a"))
+            }));
+            assert!(solutions[0].to_string().contains(" where a != 0"));
+        }
+    }
+
+    #[test]
+    fn rational_positive_dimensional_system_keeps_all_variables_mapped() {
+        let x = symbol!("x");
+        let y = symbol!("y");
+        let z = symbol!("z");
+        let variables = [Atom::var(x), Atom::var(y), Atom::var(z)];
+
+        let solutions = Atom::solve(&[parse!("(x-z)*(x^2-3*x+y)"), parse!("z+y-3")])
+            .over(Rationals)
+            .wrt(&variables)
+            .unwrap();
+
+        assert_eq!(solutions.len(), 2);
+        assert!(solutions.iter().all(Solution::is_indeterminate));
+        assert!(solutions.iter().all(|solution| solution.len() == 3));
+        assert!(
+            solutions
+                .iter()
+                .all(|solution| { solution.get(&PolyVariable::from(x)) == Some(&Atom::var(x)) })
+        );
+        assert!(solutions.iter().any(|solution| {
+            solution.get(&PolyVariable::from(y)) == Some(&parse!("3-x"))
+                && solution.get(&PolyVariable::from(z)) == Some(&Atom::var(x))
+        }));
+        assert!(solutions.iter().any(|solution| {
+            solution.get(&PolyVariable::from(y)) == Some(&parse!("-x^2+3*x"))
+                && solution.get(&PolyVariable::from(z)) == Some(&parse!("x^2-3*x+3"))
+        }));
+    }
+
+    #[test]
+    fn exact_solve_returns_a_parametrization_for_positive_dimensional_systems() {
+        let x = symbol!("x");
+        let y = symbol!("y");
+        let z = symbol!("z");
+        let system = [parse!("x+y^2"), parse!("z-y")];
+        let variables = [Atom::var(x), Atom::var(y), Atom::var(z)];
+
+        let solutions = Atom::solve(&system).wrt(&variables).unwrap();
+
+        assert_eq!(solutions.len(), 1);
+        let solution = &solutions[0];
+        assert_eq!(solution.get(&PolyVariable::from(x)), Some(&parse!("-z^2")));
+        assert_eq!(solution.get(&PolyVariable::from(y)), Some(&Atom::var(z)));
+        assert_eq!(solution.get(&PolyVariable::from(z)), Some(&Atom::var(z)));
+    }
+
+    #[test]
+    fn exact_solve_does_not_choose_a_constrained_variable_as_input() {
+        let x = symbol!("x");
+        let y = symbol!("y");
+        let system = [parse!("y^2-1")];
+        let variables = [Atom::var(x), Atom::var(y)];
+
+        let solutions = Atom::solve(&system).wrt(&variables).unwrap();
+
+        assert_eq!(solutions.len(), 2);
+        for solution in solutions {
+            assert_eq!(solution.get(&PolyVariable::from(x)), Some(&Atom::var(x)));
+            let y_value = solution.get(&PolyVariable::from(y)).unwrap();
+            assert_eq!(
+                (y_value.clone().pow(Atom::num(2)) - Atom::num(1)).expand(),
+                Atom::Zero
+            );
+        }
+    }
+
+    #[test]
+    fn exact_solve_branches_over_nonlinear_input_parameters() {
+        let x = symbol!("x");
+        let y = symbol!("y");
+        let system = [parse!("x^2+y^2-1")];
+        let variables = [Atom::var(x), Atom::var(y)];
+
+        let solutions = Atom::solve(&system).wrt(&variables).unwrap();
+
+        assert_eq!(solutions.len(), 2);
+        for solution in solutions {
+            assert_eq!(solution.get(&PolyVariable::from(y)), Some(&Atom::var(y)));
+            let x_value = solution
+                .get(&PolyVariable::from(x))
+                .unwrap()
+                .replace(y)
+                .with(Atom::num(0));
+            assert_algebraic_zero(x_value.pow(Atom::num(2)) - Atom::num(1));
+        }
+    }
+
+    #[test]
+    fn exact_solve_combines_explicit_and_selected_parameters() {
+        let a = symbol!("a");
+        let x = symbol!("x");
+        let y = symbol!("y");
+        let system = [parse!("x+y^2-a")];
+        let variables = [Atom::var(x), Atom::var(y)];
+
+        let solutions = Atom::solve(&system).wrt(&variables).unwrap();
+
+        assert_eq!(solutions.len(), 1);
+        let solution = &solutions[0];
+        assert_eq!(solution.get(&PolyVariable::from(x)), Some(&parse!("a-y^2")));
+        assert_eq!(solution.get(&PolyVariable::from(y)), Some(&Atom::var(y)));
+        assert!(!solution.contains_key(&PolyVariable::from(a)));
+    }
+
+    #[test]
     fn exact_solve_cubic_over_quadratic_extension() {
         let x = symbol!("x");
         let y = symbol!("y");
         let system = [parse!("x^3+y+2"), parse!("y^2-3")];
         let variables = [Atom::var(x), Atom::var(y)];
 
-        let solutions = Atom::solve::<u16, _, Atom>(&system, &variables).unwrap();
+        let solutions = Atom::solve(&system).wrt(&variables).unwrap();
         assert_eq!(solutions.len(), 6);
 
         for solution in solutions {
@@ -1140,7 +1989,7 @@ mod test {
         let system = [parse!("x^3+y+sqrt(2)"), parse!("y^2-3")];
         let variables = [Atom::var(x), Atom::var(y)];
 
-        let solutions = Atom::solve::<u16, _, Atom>(&system, &variables).unwrap();
+        let solutions = Atom::solve(&system).wrt(&variables).unwrap();
         assert_eq!(solutions.len(), 6);
         for solution in solutions {
             assert_eq!(solution.len(), 2);
@@ -1168,13 +2017,22 @@ mod test {
         let system = [parse!("x+y"), parse!("y^2-a")];
         let variables = [Atom::var(x), Atom::var(y)];
 
-        let solutions = Atom::solve::<u16, _, Atom>(&system, &variables).unwrap();
+        let solutions = Atom::solve(&system).wrt(&variables).unwrap();
         assert_eq!(solutions.len(), 2);
 
         for solution in solutions {
             let x_value = solution.get(&PolyVariable::from(x)).unwrap();
             let y_value = solution.get(&PolyVariable::from(y)).unwrap();
             assert_eq!((x_value.clone() + y_value).expand(), Atom::Zero);
+            assert!(!solution.is_indeterminate());
+            assert!(!solution.is_parametric());
+            assert!(solution.is_conditional());
+            assert!(
+                solution
+                    .conditions()
+                    .iter()
+                    .any(|condition| matches!(condition, SolutionCondition::NonZero(_)))
+            );
 
             let specialized = y_value.replace(a).with(Atom::num(2));
             assert_algebraic_zero(specialized.pow(Atom::num(2)) - Atom::num(2));
@@ -1189,7 +2047,7 @@ mod test {
         let system = [parse!("x^3+y+1"), parse!("y^2-a")];
         let variables = [Atom::var(x), Atom::var(y)];
 
-        let solutions = Atom::solve::<u16, _, Atom>(&system, &variables).unwrap();
+        let solutions = Atom::solve(&system).wrt(&variables).unwrap();
         assert_eq!(solutions.len(), 6);
 
         for solution in solutions {
@@ -1213,7 +2071,7 @@ mod test {
         let system = [parse!("x^2-a^2")];
         let variables = [Atom::var(x)];
 
-        let solutions = Atom::solve::<u16, _, Atom>(&system, &variables).unwrap();
+        let solutions = Atom::solve(&system).wrt(&variables).unwrap();
         assert_eq!(solutions.len(), 2);
 
         let values = solutions
@@ -1232,7 +2090,7 @@ mod test {
         let system = [parse!("x^2-a/b")];
         let variables = [Atom::var(x)];
 
-        let solutions = Atom::solve::<u16, _, Atom>(&system, &variables).unwrap();
+        let solutions = Atom::solve(&system).wrt(&variables).unwrap();
         assert_eq!(solutions.len(), 2);
         for solution in solutions {
             let value = solution
@@ -1252,7 +2110,7 @@ mod test {
         let system = [parse!("x/(x-a)")];
         let variables = [Atom::var(x)];
 
-        let solutions = Atom::solve::<u16, _, Atom>(&system, &variables).unwrap();
+        let solutions = Atom::solve(&system).wrt(&variables).unwrap();
 
         assert_eq!(solutions.len(), 1);
         assert_eq!(
@@ -1268,7 +2126,7 @@ mod test {
         let system = [parse!("sqrt(x+3)+x")];
         let variables = [Atom::var(x)];
 
-        let solutions = Atom::solve::<u16, _, Atom>(&system, &variables).unwrap();
+        let solutions = Atom::solve(&system).wrt(&variables).unwrap();
 
         assert_eq!(solutions.len(), 1);
         assert_eq!(solutions[0].len(), 1);
@@ -1283,7 +2141,7 @@ mod test {
         let system = [parse!("sqrt(x)+1")];
         let variables = [Atom::var(x)];
 
-        let solutions = Atom::solve::<u16, _, Atom>(&system, &variables).unwrap();
+        let solutions = Atom::solve(&system).wrt(&variables).unwrap();
         assert!(solutions.is_empty());
     }
 
@@ -1293,7 +2151,7 @@ mod test {
         let system = [parse!("1/x+1/sqrt(x)-1")];
         let variables = [Atom::var(x)];
 
-        let solutions = Atom::solve::<u16, _, Atom>(&system, &variables).unwrap();
+        let solutions = Atom::solve(&system).wrt(&variables).unwrap();
 
         assert_eq!(solutions.len(), 1);
         let x_value = solutions[0].get(&PolyVariable::from(x)).unwrap();
@@ -1309,7 +2167,7 @@ mod test {
         let system = [parse!("(sqrt(x)-1)/(x-1)")];
         let variables = [Atom::var(x)];
 
-        let solutions = Atom::solve::<u16, _, Atom>(&system, &variables).unwrap();
+        let solutions = Atom::solve(&system).wrt(&variables).unwrap();
 
         assert!(solutions.is_empty());
     }
@@ -1320,7 +2178,7 @@ mod test {
         let system = [parse!("sqrt(sqrt(x)+1)-2")];
         let variables = [Atom::var(x)];
 
-        let solutions = Atom::solve::<u16, _, Atom>(&system, &variables).unwrap();
+        let solutions = Atom::solve(&system).wrt(&variables).unwrap();
 
         assert_eq!(solutions.len(), 1);
         assert_eq!(

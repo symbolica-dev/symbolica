@@ -565,6 +565,97 @@ class ParseMode(Enum):
     Mathematica = 2
     """Parse using Mathematica notation."""
 
+class SolveDomain(Enum):
+    """A domain supported by the exact equation solver."""
+
+    Integers = 1
+    Rationals = 2
+    Reals = 3
+    Complexes = 4
+
+Integers: SolveDomain
+Rationals: SolveDomain
+Reals: SolveDomain
+Complexes: SolveDomain
+
+class SolutionCondition:
+    """A condition under which an exact solution branch is valid."""
+
+    @property
+    def kind(self) -> Literal["nonzero", "domain_membership"]:
+        """The condition kind."""
+
+    @property
+    def expression(self) -> Expression | None:
+        """Expression required to be nonzero for a ``nonzero`` condition."""
+
+    @property
+    def variable(self) -> Expression | None:
+        """Variable whose domain membership could not be decided exactly."""
+
+    @property
+    def value(self) -> Expression | None:
+        """Value whose domain membership could not be decided exactly."""
+
+    @property
+    def domain(self) -> SolveDomain | None:
+        """Requested domain for a ``domain_membership`` condition."""
+
+    def __repr__(self) -> str: ...
+
+class Solution:
+    """
+    One branch of an exact solution.
+
+    A solution behaves as a read-only mapping from requested variables to
+    exact values and retains free-variable, condition, and domain metadata.
+    """
+
+    def as_dict(self) -> dict[Expression, Expression]:
+        """Convert this branch to a plain dictionary."""
+
+    def free_variables(self) -> list[Expression]:
+        """Variables treated as free inputs on this branch."""
+
+    def conditions(self) -> list[SolutionCondition]:
+        """Conditions under which this branch is valid."""
+
+    @property
+    def domain(self) -> SolveDomain:
+        """Domain requested for this solve operation."""
+
+    def is_indeterminate(self) -> bool:
+        """Whether this branch has a free variable or unresolved domain membership."""
+
+    def is_conditional(self) -> bool:
+        """Whether this branch has any validity conditions."""
+
+    def is_parametric(self) -> bool:
+        """Whether this branch describes a family with free variables."""
+
+    def is_underdetermined(self) -> bool:
+        """Whether this branch leaves any requested variables free."""
+
+    def rank(self) -> int:
+        """Number of requested variables determined in terms of the free inputs."""
+
+    def dimension(self) -> int:
+        """Dimension of this branch, measured by its free inputs."""
+
+    def keys(self) -> list[Expression]: ...
+    def values(self) -> list[Expression]: ...
+    def items(self) -> list[tuple[Expression, Expression]]: ...
+    def get(self, variable: Expression) -> Expression | None: ...
+    def __getitem__(self, variable: Expression) -> Expression: ...
+    def __contains__(self, variable: Expression) -> bool: ...
+    def __len__(self) -> int: ...
+    def __iter__(self) -> Iterator[Expression]: ...
+    def __repr__(self) -> str: ...
+    def __str__(self) -> str: ...
+    def _repr_html_(self) -> str: ...
+    def _repr_latex_(self) -> str: ...
+    def _repr_pretty_(self, pretty, cycle: bool) -> None: ...
+
 class PrintMode(Enum):
     """Specifies the print mode."""
 
@@ -3476,7 +3567,8 @@ class Expression:
         system: Sequence[Expression],
         variables: Sequence[Expression],
         warn_if_underdetermined: bool = True,
-    ) -> Sequence[dict[Expression, Expression]]:
+        domain: SolveDomain | None = None,
+    ) -> list[Solution]:
         """
         Solve a system exactly in the requested variables.
 
@@ -3485,7 +3577,10 @@ class Expression:
         use a grevlex Gröbner basis, FGLM conversion to lex, and exact algebraic
         roots. Rational powers such as ``sqrt(x+3)`` are polynomialized using
         auxiliary variables, after which solutions on non-principal branches
-        are filtered out.
+        are filtered out. For positive-dimensional systems, a maximal viable
+        set of requested variables is used as input. Rational denominators are
+        cleared and their nonvanishing requirements are retained as solution
+        conditions.
 
         Examples
         --------
@@ -3502,7 +3597,16 @@ class Expression:
         variables: Sequence[Expression]
             Variables to solve for, in lexicographic elimination order.
         warn_if_underdetermined: bool
-            Whether to warn when a linear system is underdetermined.
+            Whether to warn when the system is underdetermined.
+        domain: SolveDomain | None
+            Restrict solutions to this domain. The default is ``Complexes``.
+
+        Returns
+        -------
+        list[Solution]
+            Exact solution branches. Each branch behaves as a read-only mapping
+            and exposes its free variables, validity conditions, rank, dimension,
+            and requested domain.
         """
 
     @classmethod

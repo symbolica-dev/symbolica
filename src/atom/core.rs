@@ -825,15 +825,18 @@ pub trait AtomCore: private::Sealed + Sized {
         AtomView::solve_linear_system::<E, T1, T2>(system, vars)
     }
 
-    /// Solve a system exactly for `vars`.
+    /// Build an exact solve operation for `system`.
     ///
     /// Linear systems use the linear-system solver. Polynomial nonlinear
     /// systems over `Q` or `Q(parameters)` use a grevlex Gröbner basis, FGLM
-    /// conversion to lex, and exact algebraic roots. Every expression in
-    /// `system` is understood to equal zero. Rational powers involving the
-    /// solve variables are polynomialized with auxiliary variables, and
-    /// non-principal branches are filtered from the result. Rational
-    /// denominators are cleared and their zero loci are excluded.
+    /// conversion to lex, and exact algebraic roots. Positive-dimensional
+    /// systems use a maximal viable set of requested variables as inputs,
+    /// preferring variables later in `vars`, and map those inputs to
+    /// themselves. Every expression in `system` is understood to equal zero.
+    /// Rational powers involving the solve variables are polynomialized with
+    /// auxiliary variables, and non-principal branches are filtered from the
+    /// result. Rational denominators are cleared and their zero loci are
+    /// excluded.
     ///
     /// # Example
     ///
@@ -842,19 +845,15 @@ pub trait AtomCore: private::Sealed + Sized {
     ///
     /// let (x, y) = symbol!("x", "y");
     /// let system = [parse!("x+y"), parse!("y^2-2")];
-    /// let solutions = Atom::solve::<u16, _, Atom>(
-    ///     &system,
-    ///     &[x.into(), y.into()],
-    /// )
-    /// .unwrap();
+    /// let solutions = Atom::solve(&system)
+    ///     .over(Complexes)
+    ///     .wrt(&[Atom::var(x), Atom::var(y)])
+    ///     .unwrap();
     ///
     /// assert_eq!(solutions.len(), 2);
     /// ```
-    fn solve<E: PositiveExponent + 'static, T1: AtomCore, T2: AtomCore>(
-        system: &[T1],
-        vars: &[T2],
-    ) -> Result<Vec<HashMap<crate::poly::PolyVariable, Atom>>, SolveError> {
-        AtomView::solve::<E, T1, T2>(system, vars)
+    fn solve<T: AtomCore>(system: &[T]) -> crate::solve::SolveBuilder<'_, T> {
+        crate::solve::SolveBuilder::new(system)
     }
 
     /// Convert a system of linear equations to a matrix representation, returning the matrix
