@@ -1,6 +1,7 @@
 //! Algebraic number fields, e.g. fields supporting sqrt(2).
 
 use std::{
+    cmp::Ordering,
     collections::{HashMap, HashSet},
     sync::{Arc, LazyLock, RwLock},
 };
@@ -21,11 +22,8 @@ use crate::{
         },
     },
     poly::{
-        Exponent, IntoVariableMap, PolyVariable, PositiveExponent,
-        factor::Factorize,
-        gcd::PolynomialGCD,
-        polynomial::MultivariatePolynomial,
-        univariate::{ComplexRootInterval, UnivariatePolynomial},
+        Exponent, IntoVariableMap, PolyVariable, PositiveExponent, factor::Factorize,
+        gcd::PolynomialGCD, polynomial::MultivariatePolynomial, univariate::ComplexRootInterval,
     },
     symbol,
     tensors::matrix::Matrix,
@@ -33,7 +31,7 @@ use crate::{
 };
 
 use super::{
-    EuclideanDomain, Field, InternalOrdering, Ring, SelfRing,
+    EuclideanDomain, Field, InternalOrdering, OrderedRing, RealEmbedding, Ring, SelfRing,
     finite_field::{FiniteField, FiniteFieldCore, FiniteFieldWorkspace, ToFiniteField},
     integer::{Integer, IntegerRing, Z},
     rational::Rational,
@@ -1679,7 +1677,7 @@ impl AtomView<'_> {
                                     continue;
                                 }
 
-                                if c.count_positive_real_roots(&factor).ok()? > 0 {
+                                if factor.count_positive_real_roots().ok()? > 0 {
                                     if selected_factor.is_some() {
                                         return None;
                                     }
@@ -3112,73 +3110,6 @@ impl AlgebraicExtension<Q> {
         self.embedded_rational_root(&imaginary_unit_polynomial(), 1)
     }
 
-    fn sign_at_embedding(&self, element: &AlgebraicNumber<Q>) -> Result<i8, String> {
-        if self.is_zero(element) {
-            Ok(0)
-        } else if self.is_positive_real(element)? {
-            Ok(1)
-        } else {
-            Ok(-1)
-        }
-    }
-
-    /// Count the positive real roots of a square-free polynomial whose
-    /// coefficients lie in this embedded real number field.
-    fn count_positive_real_roots(
-        &self,
-        poly: &MultivariatePolynomial<AlgebraicExtension<Q>, u16>,
-    ) -> Result<usize, String> {
-        let mut previous = poly.to_univariate_from_univariate(0);
-        let mut current = previous.derivative();
-        let mut sturm_sequence: Vec<UnivariatePolynomial<AlgebraicExtension<Q>>> =
-            vec![previous.clone()];
-
-        if !current.is_zero() {
-            sturm_sequence.push(current.clone());
-        }
-
-        while !current.is_zero() {
-            let remainder = -previous.rem(&current);
-            previous = current;
-            current = remainder;
-            if !current.is_zero() {
-                sturm_sequence.push(current.clone());
-            }
-        }
-
-        let sign_variations = |at_positive_infinity: bool| -> Result<usize, String> {
-            let mut previous_sign = 0;
-            let mut variations = 0;
-
-            for polynomial in &sturm_sequence {
-                let value = if at_positive_infinity {
-                    polynomial.lcoeff()
-                } else {
-                    polynomial.get_constant()
-                };
-                let sign = self.sign_at_embedding(&value)?;
-                if sign == 0 {
-                    continue;
-                }
-                if previous_sign != 0 && sign != previous_sign {
-                    variations += 1;
-                }
-                previous_sign = sign;
-            }
-
-            Ok(variations)
-        };
-
-        let at_zero = sign_variations(false)?;
-        let at_positive_infinity = sign_variations(true)?;
-        at_zero.checked_sub(at_positive_infinity).ok_or_else(|| {
-            format!(
-                "Invalid Sturm sequence while counting positive roots of {}",
-                poly
-            )
-        })
-    }
-
     /// Adjoin the embedded extension `self[b]` and preserve the selected
     /// embeddings of both `self` and `b`.
     ///
@@ -3388,17 +3319,92 @@ impl AlgebraicExtension<Q> {
     /// Determine if the algebraic number is negative.
     /// This requires the embedding information to be set.
     pub fn is_negative(&self, element: &AlgebraicNumber<Q>) -> Result<bool, String> {
-        if self.is_zero(element) {
-            Ok(false)
-        } else {
-            self.is_positive(element).map(|b| !b)
-        }
+        self.try_sign(element).map(Ordering::is_lt)
     }
 
     /// Determine if the algebraic number is positive.
     /// This requires the embedding information to be set.
     pub fn is_positive(&self, element: &AlgebraicNumber<Q>) -> Result<bool, String> {
-        self.is_positive_real(element)
+        self.try_sign(element).map(Ordering::is_gt)
+    }
+}
+
+impl RealEmbedding for AlgebraicExtension<Q> {
+    type Error = String;
+
+    fn try_sign(&self, element: &AlgebraicNumber<Q>) -> Result<Ordering, Self::Error> {
+        if self.is_zero(element) {
+            return Ok(Ordering::Equal);
+        }
+        if element.poly.is_constant() {
+            return Ok(OrderedRing::cmp(
+                &Q,
+                &element.poly.get_constant(),
+                &Rational::zero(),
+            ));
+        }
+
+        let polynomial = self.poly.to_univariate_from_univariate(0);
+        let primitive_root = polynomial
+            .isolate_complex_root(self.embedding, 32)
+            .ok_or_else(|| {
+                format!(
+                    "Embedding index {} is out of bounds for polynomial of degree {}",
+                    self.embedding,
+                    polynomial.degree()
+                )
+            })?;
+
+        if primitive_root.is_real() {
+            return self.is_positive_real(element).map(|positive| {
+                if positive {
+                    Ordering::Greater
+                } else {
+                    Ordering::Less
+                }
+            });
+        }
+
+        let minimal_field = self.simplify(element);
+        let minimal_polynomial = minimal_field.poly.to_univariate_from_univariate(0);
+        let root = minimal_polynomial
+            .isolate_complex_root(minimal_field.embedding, 32)
+            .ok_or_else(|| {
+                format!(
+                    "Embedding index {} is out of bounds for polynomial of degree {}",
+                    minimal_field.embedding,
+                    minimal_polynomial.degree()
+                )
+            })?;
+        if !root.is_real() {
+            return Err(format!(
+                "{} does not have a real image in {}",
+                element, self
+            ));
+        }
+
+        minimal_field
+            .is_positive_real(&minimal_field.generator())
+            .map(|positive| {
+                if positive {
+                    Ordering::Greater
+                } else {
+                    Ordering::Less
+                }
+            })
+    }
+
+    fn try_cmp(
+        &self,
+        a: &AlgebraicNumber<Q>,
+        b: &AlgebraicNumber<Q>,
+    ) -> Result<Ordering, Self::Error> {
+        // Unlike a genuinely ordered ring, this extension may contain
+        // non-real elements. Require both operands, rather than merely their
+        // difference, to have real images.
+        self.try_sign(a)?;
+        self.try_sign(b)?;
+        self.try_sign(&self.sub(a, b))
     }
 }
 
@@ -3892,13 +3898,15 @@ impl Root<AlgebraicExtension<Q>> {
 
 #[cfg(test)]
 mod tests {
+    use std::cmp::Ordering;
+
     use crate::atom::AtomCore;
     use crate::domains::algebraic_number::{AlgebraicExtension, Root};
     use crate::domains::finite_field::{PrimeIteratorU64, Z2, Zp};
     use crate::domains::integer::{IntegerRing, Z};
     use crate::domains::rational::Q;
     use crate::domains::rational_polynomial::RationalPolynomialField;
-    use crate::domains::{Ring, RingOps};
+    use crate::domains::{RealEmbedding, Ring, RingOps};
     use crate::{parse, symbol};
 
     // #[test]
@@ -4135,6 +4143,19 @@ mod tests {
         assert_eq!(field.is_positive_real(&generator), Ok(true));
         assert_eq!(field.is_positive_real(&negative_generator), Ok(false));
         assert_eq!(field.has_positive_real_part(&generator), Ok(true));
+        assert_eq!(field.try_sign(&generator), Ok(Ordering::Greater));
+        assert_eq!(
+            field.try_cmp(&negative_generator, &generator),
+            Ok(Ordering::Less)
+        );
+
+        let complex = AlgebraicExtension::new_complex(Q);
+        assert!(complex.try_sign(&complex.generator()).is_err());
+        assert!(
+            complex
+                .try_cmp(&complex.generator(), &complex.generator())
+                .is_err()
+        );
     }
 
     #[test]
