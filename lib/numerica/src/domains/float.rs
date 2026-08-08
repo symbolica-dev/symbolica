@@ -28,7 +28,7 @@ pub use super::backend::float::RoundingDirection;
 pub use complex::Complex;
 pub use double::DoubleFloat;
 pub use error::ErrorPropagatingFloat;
-pub use field::FloatField;
+pub use field::{FloatComparisonError, FloatField};
 pub use interval::{ComplexBall, RealBall};
 pub use multiprecision::Float;
 pub use native::F64;

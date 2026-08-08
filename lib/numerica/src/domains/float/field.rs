@@ -7,12 +7,38 @@ use rand::Rng;
 use xprec::Df64;
 
 use crate::{
-    domains::{RingOps, Set, integer::Integer},
+    domains::{RealEmbedding, RingOps, Set, integer::Integer},
     printer::{self, PrintMode},
 };
 
-use super::{Complex, DoubleFloat, F64, Float, SingleFloat};
+use super::{Complex, DoubleFloat, F64, Float, FloatLike, RealBall, SingleFloat};
 use crate::domains::{EuclideanDomain, Field, InternalOrdering, Ring, RingPrinter, SelfRing};
+
+/// An error encountered while comparing floating-point values through their
+/// real embedding.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum FloatComparisonError {
+    /// At least one value is NaN or infinite.
+    NonFinite,
+    /// At least one value has a nonzero imaginary component.
+    NonReal,
+    /// The available enclosures overlap, so their order cannot be certified.
+    OverlappingIntervals,
+}
+
+impl Display for FloatComparisonError {
+    fn fmt(&self, f: &mut Formatter<'_>) -> fmt::Result {
+        match self {
+            Self::NonFinite => f.write_str("cannot compare a non-finite floating-point value"),
+            Self::NonReal => f.write_str("cannot compare a non-real floating-point value"),
+            Self::OverlappingIntervals => {
+                f.write_str("cannot certify the order of overlapping intervals")
+            }
+        }
+    }
+}
+
+impl std::error::Error for FloatComparisonError {}
 
 /// A field of floating point type `T`. For `f64` fields, use [`FloatField<F64>`].
 #[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
@@ -294,6 +320,143 @@ impl<T: SingleFloat + Hash + Eq + InternalOrdering> Ring for FloatField<T> {
     }
 }
 
+macro_rules! impl_real_embedding_for_float {
+    ($($t:ty),* $(,)?) => {
+        $(
+            impl RealEmbedding for FloatField<$t> {
+                type Error = FloatComparisonError;
+
+                fn try_sign(
+                    &self,
+                    a: &Self::Element,
+                ) -> Result<std::cmp::Ordering, Self::Error> {
+                    if !a.is_finite() {
+                        return Err(FloatComparisonError::NonFinite);
+                    }
+                    a.partial_cmp(&a.zero())
+                        .ok_or(FloatComparisonError::NonFinite)
+                }
+
+                fn try_cmp(
+                    &self,
+                    a: &Self::Element,
+                    b: &Self::Element,
+                ) -> Result<std::cmp::Ordering, Self::Error> {
+                    if !a.is_finite() || !b.is_finite() {
+                        return Err(FloatComparisonError::NonFinite);
+                    }
+                    a.partial_cmp(b).ok_or(FloatComparisonError::NonFinite)
+                }
+            }
+        )*
+    };
+}
+
+impl_real_embedding_for_float!(F64, DoubleFloat, Float);
+
+macro_rules! impl_real_embedding_for_complex_float {
+    ($($t:ty),* $(,)?) => {
+        $(
+            impl RealEmbedding for FloatField<Complex<$t>> {
+                type Error = FloatComparisonError;
+
+                fn try_sign(
+                    &self,
+                    a: &Self::Element,
+                ) -> Result<std::cmp::Ordering, Self::Error> {
+                    if !a.is_finite() {
+                        return Err(FloatComparisonError::NonFinite);
+                    }
+                    let Some(real) = a.to_real() else {
+                        return Err(FloatComparisonError::NonReal);
+                    };
+                    real.partial_cmp(&real.zero())
+                        .ok_or(FloatComparisonError::NonFinite)
+                }
+
+                fn try_cmp(
+                    &self,
+                    a: &Self::Element,
+                    b: &Self::Element,
+                ) -> Result<std::cmp::Ordering, Self::Error> {
+                    if !a.is_finite() || !b.is_finite() {
+                        return Err(FloatComparisonError::NonFinite);
+                    }
+                    let (Some(a), Some(b)) = (a.to_real(), b.to_real()) else {
+                        return Err(FloatComparisonError::NonReal);
+                    };
+                    a.partial_cmp(b).ok_or(FloatComparisonError::NonFinite)
+                }
+            }
+        )*
+    };
+}
+
+impl_real_embedding_for_complex_float!(F64, DoubleFloat, Float);
+
+fn try_cmp_real_balls(
+    a: &RealBall,
+    b: &RealBall,
+) -> Result<std::cmp::Ordering, FloatComparisonError> {
+    if !a.is_finite() || !b.is_finite() {
+        return Err(FloatComparisonError::NonFinite);
+    }
+    if a.upper_bound() < b.lower_bound() {
+        return Ok(std::cmp::Ordering::Less);
+    }
+    if a.lower_bound() > b.upper_bound() {
+        return Ok(std::cmp::Ordering::Greater);
+    }
+    if SingleFloat::is_zero(&a.radius) && SingleFloat::is_zero(&b.radius) && a.center == b.center {
+        return Ok(std::cmp::Ordering::Equal);
+    }
+    Err(FloatComparisonError::OverlappingIntervals)
+}
+
+impl RealEmbedding for FloatField<RealBall> {
+    type Error = FloatComparisonError;
+
+    fn try_sign(&self, a: &Self::Element) -> Result<std::cmp::Ordering, Self::Error> {
+        try_cmp_real_balls(a, &a.zero())
+    }
+
+    fn try_cmp(
+        &self,
+        a: &Self::Element,
+        b: &Self::Element,
+    ) -> Result<std::cmp::Ordering, Self::Error> {
+        try_cmp_real_balls(a, b)
+    }
+}
+
+impl RealEmbedding for FloatField<Complex<RealBall>> {
+    type Error = FloatComparisonError;
+
+    fn try_sign(&self, a: &Self::Element) -> Result<std::cmp::Ordering, Self::Error> {
+        if !a.is_finite() {
+            return Err(FloatComparisonError::NonFinite);
+        }
+        let Some(real) = a.to_real() else {
+            return Err(FloatComparisonError::NonReal);
+        };
+        try_cmp_real_balls(real, &real.zero())
+    }
+
+    fn try_cmp(
+        &self,
+        a: &Self::Element,
+        b: &Self::Element,
+    ) -> Result<std::cmp::Ordering, Self::Error> {
+        if !a.is_finite() || !b.is_finite() {
+            return Err(FloatComparisonError::NonFinite);
+        }
+        let (Some(a), Some(b)) = (a.to_real(), b.to_real()) else {
+            return Err(FloatComparisonError::NonReal);
+        };
+        try_cmp_real_balls(a, b)
+    }
+}
+
 impl SelfRing for F64 {
     #[inline(always)]
     fn is_zero(&self) -> bool {
@@ -531,5 +694,65 @@ impl<T: SingleFloat + Hash + Eq + InternalOrdering> Field for FloatField<T> {
     #[inline(always)]
     fn inv(&self, a: &Self::Element) -> Self::Element {
         a.inv()
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use std::cmp::Ordering;
+
+    use super::*;
+
+    #[test]
+    fn real_float_embeddings_compare_finite_values() {
+        let f64_field = FloatField::<F64>::new();
+        assert_eq!(f64_field.try_cmp(&F64(1.0), &F64(2.0)), Ok(Ordering::Less));
+        assert_eq!(
+            f64_field.try_sign(&F64(f64::NAN)),
+            Err(FloatComparisonError::NonFinite)
+        );
+
+        let double_field = FloatField::<DoubleFloat>::new();
+        assert_eq!(
+            double_field.try_sign(&double_field.nth(1.into())),
+            Ok(Ordering::Greater)
+        );
+
+        let float_field = FloatField::<Float>::new(128);
+        assert_eq!(
+            float_field.try_sign(&float_field.nth((-1).into())),
+            Ok(Ordering::Less)
+        );
+    }
+
+    #[test]
+    fn complex_float_embeddings_require_real_values() {
+        let field = FloatField::<Complex<F64>>::new();
+        let real = Complex::new(F64(1.0), F64(0.0));
+        let non_real = Complex::new(F64(1.0), F64(1.0));
+
+        assert_eq!(field.try_sign(&real), Ok(Ordering::Greater));
+        assert_eq!(
+            field.try_sign(&non_real),
+            Err(FloatComparisonError::NonReal)
+        );
+    }
+
+    #[test]
+    fn real_ball_embedding_requires_disjoint_enclosures() {
+        let precision = 128;
+        let field = FloatField::from_rep(RealBall::exact(Float::new(precision)));
+        let a = RealBall::from_bounds(Float::with_val(precision, 0), Float::with_val(precision, 2));
+        let b = RealBall::from_bounds(Float::with_val(precision, 1), Float::with_val(precision, 3));
+        let negative = RealBall::from_bounds(
+            Float::with_val(precision, -2),
+            Float::with_val(precision, -1),
+        );
+
+        assert_eq!(
+            field.try_cmp(&a, &b),
+            Err(FloatComparisonError::OverlappingIntervals)
+        );
+        assert_eq!(field.try_sign(&negative), Ok(Ordering::Less));
     }
 }
