@@ -3688,25 +3688,28 @@ impl AlgebraicRootCandidate {
         multiplicity: usize,
     ) -> Result<Self, String> {
         let minimal_polynomial = field.minimal_polynomial_of_element(value);
-        Self::new_with_minimal(field, value, &minimal_polynomial, multiplicity)
+        let embedding = field.root_index_of_element(value, &minimal_polynomial)?;
+        Ok(Self::new_with_minimal(
+            &minimal_polynomial,
+            embedding,
+            multiplicity,
+        ))
     }
 
     fn new_with_minimal(
-        field: &AlgebraicExtension<Q>,
-        value: &AlgebraicNumber<Q>,
         minimal_polynomial: &MultivariatePolynomial<Q, u16>,
+        embedding: usize,
         multiplicity: usize,
-    ) -> Result<Self, String> {
-        let embedding = field.root_index_of_element(value, minimal_polynomial)?;
+    ) -> Self {
         let mut polynomial = minimal_polynomial.clone();
         let variable = polynomial.get_vars_ref()[0].clone();
         polynomial.rename_variable(&variable, &PolyVariable::Temporary(0));
-        Ok(Self {
+        Self {
             polynomial,
             embedding,
             multiplicity,
             order: None,
-        })
+        }
     }
 
     fn to_root(&self) -> Result<Root<Q>, String> {
@@ -3771,6 +3774,22 @@ impl Root<AlgebraicExtension<Q>> {
             return Ok(Some(root));
         }
 
+        let roots = self.simplify_all_roots()?;
+        let result = roots.get(self.index).cloned().ok_or_else(|| {
+            format!(
+                "root index {} is out of bounds for a polynomial of degree {}",
+                self.index,
+                self.polynomial.degree(0)
+            )
+        })?;
+        ALGEBRAIC_ROOT_CACHE
+            .write()
+            .unwrap()
+            .insert(self.polynomial.clone(), roots);
+        Ok(Some(result))
+    }
+
+    fn simplify_all_roots(&self) -> Result<Vec<Root<Q>>, String> {
         let base_field = self.polynomial.ring.clone();
         let mut candidates = Vec::new();
         for (factor, multiplicity) in self.polynomial.factor() {
@@ -3791,16 +3810,14 @@ impl Root<AlgebraicExtension<Q>> {
             }
 
             let variable = base_field.get_new_var();
-            let (fields, _, generator) =
-                base_field.adjoin_with_all_embeddings(&factor, Some(variable));
-            let minimal_polynomial = fields[0].minimal_polynomial_of_element(&generator);
-            for field in fields {
+            let (_, _, _, minimal_polynomial, embeddings) =
+                base_field.adjoin_with_all_embeddings_and_generator_data(&factor, Some(variable));
+            for embedding in embeddings {
                 candidates.push(AlgebraicRootCandidate::new_with_minimal(
-                    &field,
-                    &generator,
                     &minimal_polynomial,
+                    embedding,
                     multiplicity,
-                )?);
+                ));
             }
         }
 
@@ -3813,6 +3830,26 @@ impl Root<AlgebraicExtension<Q>> {
                 "Factorization produced {counted_degree} roots for a polynomial of degree {}",
                 self.polynomial.degree(0)
             ));
+        }
+
+        // When all candidates have the same rational minimal polynomial,
+        // their embedding indices already provide their canonical global
+        // order. In particular, adjoin_with_all_embeddings computed these
+        // indices while ordering the primitive extension. Re-isolating the
+        // degree-d product below would rediscover exactly the same ordering.
+        if candidates
+            .windows(2)
+            .all(|pair| pair[0].polynomial == pair[1].polynomial)
+        {
+            candidates.sort_by_key(|candidate| candidate.embedding);
+            let mut roots = Vec::with_capacity(self.polynomial.degree(0) as usize);
+            for candidate in candidates {
+                let root = candidate.to_root()?;
+                for _ in 0..candidate.multiplicity {
+                    roots.push(root.clone());
+                }
+            }
+            return Ok(roots);
         }
 
         // Candidate minimal polynomials contain conjugates that need not be
@@ -3894,18 +3931,7 @@ impl Root<AlgebraicExtension<Q>> {
                 roots.push(root.clone());
             }
         }
-        let result = roots.get(self.index).cloned().ok_or_else(|| {
-            format!(
-                "root index {} is out of bounds for a polynomial of degree {}",
-                self.index,
-                self.polynomial.degree(0)
-            )
-        })?;
-        ALGEBRAIC_ROOT_CACHE
-            .write()
-            .unwrap()
-            .insert(self.polynomial.clone(), roots);
-        Ok(Some(result))
+        Ok(roots)
     }
 }
 
@@ -3946,6 +3972,25 @@ mod tests {
         )
         .unwrap();
         assert_eq!(root.simplify().unwrap(), parse!("-a^(1/2)"));
+    }
+
+    #[test]
+    fn normalize_degree_twenty_extension_without_rediscovering_embeddings() {
+        // Use a non-canonical presentation of Q(i) so that Root::simplify is
+        // forced to collapse the degree-ten polynomial to degree twenty over Q.
+        let gaussian =
+            AlgebraicExtension::new_with_embedding(parse!("u^2+1").to_polynomial(&Q, None), 1);
+        assert_ne!(gaussian, AlgebraicExtension::new_complex(Q));
+
+        let polynomial = parse!("x^10+(2+1i)*x^7-3").to_polynomial::<_, u16>(&gaussian, None);
+        let simplified = Root::new(polynomial, 3)
+            .unwrap()
+            .simplify()
+            .unwrap()
+            .unwrap();
+
+        assert_eq!(simplified.polynomial().degree(0), 20);
+        assert_eq!(simplified.index(), 6);
     }
 
     #[test]
