@@ -10,7 +10,7 @@ use numerica::domains::float::{ComplexBall, Float, RealBall};
 use rand::Rng;
 
 use crate::{
-    atom::{Atom, AtomCore, AtomView, representation::FunView},
+    atom::{Atom, AtomCore, AtomView},
     coefficient::ConvertToRing,
     combinatorics::CombinationIterator,
     domains::{
@@ -151,6 +151,59 @@ pub struct AlgebraicQuotient<R: Ring> {
 pub struct Root<R: Ring> {
     polynomial: MultivariatePolynomial<R, u16>,
     index: usize,
+}
+
+impl TryFrom<AtomView<'_>> for Root<Q> {
+    type Error = String;
+
+    // TODO: also support Pow!
+    fn try_from(value: AtomView<'_>) -> Result<Self, Self::Error> {
+        if let AtomView::Pow(pow) = value {
+            let (b, e) = pow.get_base_exp();
+
+            if let Ok(_r) = Rational::try_from(e) {
+                // TODO: create new poly x^r_d
+                return Self::from_atom(b, 1);
+            }
+        }
+
+        let AtomView::Fun(f) = value else {
+            return Err("expected function tag".to_string());
+        };
+        if f.get_symbol() != root() {
+            return Err("expected root function".to_string());
+        }
+
+        if f.get_nargs() != 2 && f.get_nargs() != 3 {
+            return Err("expected 2 or 3 arguments".to_string());
+        }
+
+        let mut i = f.iter();
+        let poly = i.next().unwrap();
+
+        let mut var_or_index = i.next().unwrap();
+        let mut var = None;
+
+        if f.get_nargs() == 3 {
+            if let AtomView::Var(variable) = var_or_index {
+                var = Some(variable.get_symbol());
+            } else {
+                return Err("expected variable tag".to_string());
+            };
+
+            var_or_index = i.next().unwrap();
+        };
+
+        let Ok(index) = usize::try_from(var_or_index) else {
+            return Err("expected index tag".to_string());
+        };
+
+        if let Some(variable) = var {
+            Self::from_atom_with_variable(poly, variable.into(), index)
+        } else {
+            Self::from_atom(poly, index)
+        }
+    }
 }
 
 impl<R: Ring> Root<R> {
@@ -562,13 +615,6 @@ fn positive_real_root_index(poly: &MultivariatePolynomial<Q, u16>) -> Option<usi
     None
 }
 
-fn rational_exponent_parts(exponent: AtomView<'_>) -> Option<(i64, usize)> {
-    let exponent = Rational::try_from(exponent).ok()?;
-    let numerator = exponent.numerator().to_i64()?;
-    let denominator = usize::try_from(exponent.denominator().to_i64()?).ok()?;
-    Some((numerator, denominator))
-}
-
 fn imaginary_unit_polynomial() -> MultivariatePolynomial<Q, u16> {
     let variable = PolyVariable::Temporary(0);
     let mut polynomial = MultivariatePolynomial::new(&Q, Some(2), Arc::new(vec![variable.clone()]));
@@ -584,102 +630,16 @@ fn has_exact_imaginary_part(number: crate::coefficient::CoefficientView<'_>) -> 
     }
 }
 
-fn root_descriptor(
-    function: &FunView<'_>,
-) -> Result<(MultivariatePolynomial<Q, u16>, usize), String> {
-    if function.get_nargs() != 2 {
-        return Err(format!(
-            "root expects 2 arguments, got {}",
-            function.get_nargs()
-        ));
-    }
-
-    let polynomial_atom = function.get(0);
-    let requested_index = usize::try_from(function.get(1))
-        .map_err(|_| "root index is not a non-negative integer".to_string())?;
-    let polynomial = polynomial_atom
-        .try_to_polynomial::<_, u16>(&Q, None)
-        .map_err(|error| format!("could not convert root polynomial: {error}"))?;
-
-    if polynomial.nvars() != 1 || polynomial.degree(0) == 0 {
-        return Err("root expects a non-constant univariate polynomial over Q".to_string());
-    }
-
-    let univariate = polynomial.to_univariate_from_univariate(0);
-    if requested_index >= univariate.degree() {
-        return Err(format!(
-            "root index {requested_index} is out of bounds for polynomial of degree {}",
-            univariate.degree()
-        ));
-    }
-
-    let factors = polynomial.factor();
-    let mut binary_precision = 32u32;
-    for _ in 0..10 {
-        let tolerance = Rational::from((
-            Integer::one(),
-            Integer::from(2).pow(binary_precision as u64),
-        ));
-        let requested_root = univariate
-            .isolate_complex_root(requested_index, binary_precision)
-            .ok_or_else(|| "could not isolate requested root".to_string())?;
-        let requested_root = requested_root.to_ball(binary_precision);
-        let mut matches = Vec::new();
-
-        for (factor, _) in &factors {
-            let roots = factor
-                .to_univariate_from_univariate(0)
-                .isolate_complex_roots(Some(tolerance.clone()));
-            for (index, candidate) in roots.iter().enumerate() {
-                if !requested_root.is_disjoint(&candidate.to_ball(binary_precision)) {
-                    matches.push((factor.clone(), index));
-                }
-            }
-        }
-
-        if matches.len() == 1 {
-            let (mut factor, embedding) = matches.pop().unwrap();
-            factor.variables = Arc::new(vec![PolyVariable::Temporary(0)]);
-            return Ok((factor, embedding));
-        }
-
-        binary_precision *= 2;
-    }
-
-    Err(format!(
-        "could not identify root {requested_index} of {polynomial}"
-    ))
-}
-
-fn initial_embedding_field(atom: AtomView<'_>) -> Option<AlgebraicExtension<Q>> {
-    match atom {
-        AtomView::Num(number) => has_exact_imaginary_part(number.get_coeff_view())
-            .then(|| AlgebraicExtension::new_complex(Q)),
-        AtomView::Var(_) => None,
-        AtomView::Fun(function) => {
-            if function.get_symbol() == root() {
-                atom.get_embedding_field_impl(None)
-            } else {
-                None
-            }
-        }
-        AtomView::Pow(power) => {
-            let (base, exponent) = power.get_base_exp();
-            initial_embedding_field(base)
-                .or_else(|| initial_embedding_field(exponent))
-                .or_else(|| atom.get_embedding_field_impl(None))
-        }
-        AtomView::Mul(product) => product.into_iter().find_map(initial_embedding_field),
-        AtomView::Add(sum) => sum.into_iter().find_map(initial_embedding_field),
-    }
-}
-
 fn is_extension_generator(atom: AtomView<'_>) -> bool {
     match atom {
         AtomView::Fun(function) => function.get_symbol() == root(),
         AtomView::Pow(power) => {
             let (_, exponent) = power.get_base_exp();
-            rational_exponent_parts(exponent).is_some_and(|(_, denominator)| denominator > 1)
+            if let Ok(r) = Rational::try_from(exponent) {
+                !r.denominator_ref().is_one()
+            } else {
+                false
+            }
         }
         AtomView::Num(number) => has_exact_imaginary_part(number.get_coeff_view()),
         _ => false,
@@ -695,17 +655,10 @@ impl AlgebraicContext {
     }
 
     /// Build a context and convert every algebraic subexpression in `atom`.
-    ///
-    /// `Ok(None)` means that the atom contains no supported algebraic
-    /// extension and can be represented over `Q`.
-    pub fn from_atom(atom: AtomView<'_>) -> Result<Option<Self>, String> {
-        let Some(field) = initial_embedding_field(atom) else {
-            return Ok(None);
-        };
-
-        let mut context = Self::new(field);
-        context.prepare_atom(atom)?;
-        Ok(Some(context))
+    pub fn from_atom(atom: AtomView<'_>) -> Result<Self, String> {
+        let mut context = Self::new(AlgebraicExtension::trivial(Q));
+        context.extend(atom)?;
+        Ok(context)
     }
 
     /// Build a context from explicit algebraic generators.
@@ -714,13 +667,7 @@ impl AlgebraicContext {
             return Err("At least one algebraic generator is required".to_string());
         }
 
-        let field = generators
-            .iter()
-            .find_map(|generator| initial_embedding_field(generator.as_view()))
-            .ok_or_else(|| {
-                "The supplied generators do not define an algebraic extension".to_string()
-            })?;
-        let mut context = Self::new(field);
+        let mut context = Self::new(AlgebraicExtension::trivial(Q));
         context.adjoin_generators(generators)?;
         Ok(context)
     }
@@ -741,6 +688,11 @@ impl AlgebraicContext {
 
     pub fn field(&self) -> &AlgebraicExtension<Q> {
         &self.field
+    }
+
+    /// Return whether this context still represents the base field `Q`.
+    pub fn is_trivial(&self) -> bool {
+        self.field.poly.degree(0) <= 1
     }
 
     pub fn images(&self) -> &HashMap<Atom, AlgebraicNumber<Q>> {
@@ -851,14 +803,21 @@ impl AlgebraicContext {
     }
 
     fn ensure_field_for(&mut self, atom: AtomView<'_>) -> Result<(), String> {
-        let field = atom
-            .get_embedding_field_impl(Some(self.field.clone()))
-            .ok_or_else(|| format!("Could not construct an embedding field for {atom}"))?;
-        self.replace_field(field)
+        if self.is_trivial() {
+            if let Some(field) = atom.get_embedding_field_impl(None) {
+                self.replace_field(field)?;
+            }
+            Ok(())
+        } else {
+            let field = atom
+                .get_embedding_field_impl(Some(self.field.clone()))
+                .ok_or_else(|| format!("Could not construct an embedding field for {atom}"))?;
+            self.replace_field(field)
+        }
     }
 
     /// Discover and cache every supported algebraic subexpression in `atom`.
-    pub fn prepare_atom(&mut self, atom: AtomView<'_>) -> Result<(), String> {
+    pub fn extend(&mut self, atom: AtomView<'_>) -> Result<(), String> {
         let key = atom.to_owned();
         if self.images.contains_key(&key) {
             return Ok(());
@@ -880,7 +839,7 @@ impl AlgebraicContext {
             }
             AtomView::Pow(power) => {
                 let (base, exponent) = power.get_base_exp();
-                self.prepare_atom(base)?;
+                self.extend(base)?;
                 if !self.images.contains_key(&base.to_owned())
                     || Rational::try_from(exponent).is_err()
                 {
@@ -894,7 +853,7 @@ impl AlgebraicContext {
             AtomView::Mul(product) => {
                 let factors = product.into_iter().collect::<Vec<_>>();
                 for factor in &factors {
-                    self.prepare_atom(*factor)?;
+                    self.extend(*factor)?;
                 }
 
                 let mut result = self.field.one();
@@ -909,7 +868,7 @@ impl AlgebraicContext {
             AtomView::Add(sum) => {
                 let terms = sum.into_iter().collect::<Vec<_>>();
                 for term in &terms {
-                    self.prepare_atom(*term)?;
+                    self.extend(*term)?;
                 }
 
                 let mut result = self.field.zero();
@@ -928,7 +887,7 @@ impl AlgebraicContext {
 
     /// Convert an algebraic atom to its image in the context's current field.
     pub fn convert_atom(&mut self, atom: AtomView<'_>) -> Result<AlgebraicNumber<Q>, String> {
-        self.prepare_atom(atom)?;
+        self.extend(atom)?;
         self.images
             .get(&atom.to_owned())
             .cloned()
@@ -1145,7 +1104,7 @@ impl AlgebraicContext {
         atom: AtomView<'_>,
         var_map: impl IntoVariableMap,
     ) -> Result<MultivariatePolynomial<AlgebraicExtension<Q>, E>, String> {
-        self.prepare_atom(atom)?;
+        self.extend(atom)?;
         let var_map = var_map
             .into_var_map()?
             .unwrap_or_else(|| Arc::new(Vec::new()));
@@ -1163,7 +1122,7 @@ impl AlgebraicContext {
         RationalPolynomial<AlgebraicExtension<Q>, E>:
             FromNumeratorAndDenominator<AlgebraicExtension<Q>, AlgebraicExtension<Q>, E>,
     {
-        self.prepare_atom(atom)?;
+        self.extend(atom)?;
         let var_map = var_map
             .into_var_map()?
             .unwrap_or_else(|| Arc::new(Vec::new()));
@@ -1261,6 +1220,9 @@ fn to_alg() {
 
 #[test]
 fn algebraic_context_conversion() {
+    let trivial = AlgebraicContext::from_atom(crate::parse!("x+1").as_view()).unwrap();
+    assert!(trivial.is_trivial());
+
     let expression = crate::parse!("x+sqrt(2)+sqrt(3)");
     let (context, polynomial) = expression
         .as_view()
@@ -1322,6 +1284,19 @@ fn algebraic_context_conversion() {
 }
 
 #[test]
+fn algebraic_context_preserves_integer_powers() {
+    for expression in [
+        crate::parse!("(1/2-1/2*13^(1/2))^2"),
+        crate::parse!("root(-2+x^4,1)^2"),
+        crate::parse!("root(1+4*x^3+x^6,1)^3"),
+    ] {
+        let context = AlgebraicContext::from_atom(expression.as_view()).unwrap();
+        assert!(!context.is_trivial());
+        assert!(context.images().contains_key(&expression));
+    }
+}
+
+#[test]
 fn factor_in_extension() {
     let factorization = crate::parse!("x^2+1")
         .factor_in_extension(&[Atom::i()])
@@ -1376,9 +1351,7 @@ fn factor_in_extension() {
         .as_view()
         .factor_in_extension(&[crate::parse!("sqrt(3)")])
         .unwrap();
-    let mut context = AlgebraicContext::from_atom(expression.as_view())
-        .unwrap()
-        .unwrap();
+    let mut context = AlgebraicContext::from_atom(expression.as_view()).unwrap();
     context
         .adjoin_generators(&[crate::parse!("sqrt(3)")])
         .unwrap();
@@ -1415,8 +1388,8 @@ impl AtomView<'_> {
             }
             AtomView::Fun(f) => {
                 if f.get_symbol() == root() {
-                    let (polynomial, embedding) = root_descriptor(f)?;
-                    ring.embedded_rational_root(&polynomial, embedding)
+                    let r = Root::<Q>::try_from(*self)?;
+                    ring.embedded_rational_root(r.polynomial(), r.index)
                 } else {
                     Err("function atoms cannot be converted to algebraic numbers".to_string())
                 }
@@ -1425,9 +1398,12 @@ impl AtomView<'_> {
                 let (b, e) = p.get_base_exp();
                 let base_converted = b.to_algebraic(&ring)?;
 
-                if let Some((numerator, denominator)) = rational_exponent_parts(e) {
-                    if denominator == 1 {
-                        if numerator < 0 {
+                if let Ok(r) = Rational::try_from(e)
+                    && let Ok(numerator) = i64::try_from(r.numerator())
+                    && let Ok(denominator) = u64::try_from(r.denominator())
+                {
+                    if r.is_integer() {
+                        if r.is_negative() {
                             return Ok(
                                 ring.inv(&ring.pow(&base_converted, numerator.unsigned_abs()))
                             );
@@ -1441,7 +1417,7 @@ impl AtomView<'_> {
                         None,
                         Arc::new(vec![var.clone()]),
                     );
-                    poly = poly.variable(&var).unwrap().pow(denominator)
+                    poly = poly.variable(&var).unwrap().pow(denominator as usize)
                         - poly.constant(base_converted);
 
                     let f = poly.factor();
@@ -1502,14 +1478,12 @@ impl AtomView<'_> {
     /// will subsequently be converted, so that the computed atom images are
     /// retained.
     pub fn get_embedding_field(&self) -> Option<AlgebraicExtension<Q>> {
-        self.get_algebraic_context()
-            .ok()
-            .flatten()
-            .map(|context| context.field)
+        let context = self.get_algebraic_context().ok()?;
+        (!context.is_trivial()).then_some(context.field)
     }
 
     /// Build a live algebraic context for the atom.
-    pub fn get_algebraic_context(&self) -> Result<Option<AlgebraicContext>, String> {
+    pub fn get_algebraic_context(&self) -> Result<AlgebraicContext, String> {
         AlgebraicContext::from_atom(*self)
     }
 
@@ -1535,14 +1509,11 @@ impl AtomView<'_> {
     /// assert_eq!(factorization, parse!("(x-sqrt(2))*(x+sqrt(2))"));
     /// ```
     pub fn factor_in_extension(&self, generators: &[Atom]) -> Result<Atom, String> {
-        let mut context = match AlgebraicContext::from_atom(*self)? {
-            Some(mut context) => {
-                context.adjoin_generators(generators)?;
-                context
-            }
-            None if generators.is_empty() => return Ok(self.factor()),
-            None => AlgebraicContext::from_generators(generators)?,
-        };
+        let mut context = AlgebraicContext::from_atom(*self)?;
+        if context.is_trivial() && generators.is_empty() {
+            return Ok(self.factor());
+        }
+        context.adjoin_generators(generators)?;
         let rational = context.to_rational_polynomial::<u16>(*self, None)?;
         if rational.is_zero() {
             return Ok(Atom::num(0));
@@ -1566,9 +1537,10 @@ impl AtomView<'_> {
         )>,
         String,
     > {
-        let Some(mut context) = self.get_algebraic_context()? else {
+        let mut context = self.get_algebraic_context()?;
+        if context.is_trivial() {
             return Ok(None);
-        };
+        }
         let polynomial = context.to_polynomial(*self, var_map)?;
         Ok(Some((context, polynomial)))
     }
@@ -1589,9 +1561,10 @@ impl AtomView<'_> {
         RationalPolynomial<AlgebraicExtension<Q>, E>:
             FromNumeratorAndDenominator<AlgebraicExtension<Q>, AlgebraicExtension<Q>, E>,
     {
-        let Some(mut context) = self.get_algebraic_context()? else {
+        let mut context = self.get_algebraic_context()?;
+        if context.is_trivial() {
             return Ok(None);
-        };
+        }
         let polynomial = context.to_rational_polynomial(*self, var_map)?;
         Ok(Some((context, polynomial)))
     }
@@ -1615,13 +1588,13 @@ impl AtomView<'_> {
             AtomView::Var(_) => cur,
             AtomView::Fun(f) => {
                 if f.get_symbol() == root() {
-                    let (polynomial, embedding) = root_descriptor(f).ok()?;
+                    let (poly, index) = Root::try_from(*self).ok()?.into_parts();
                     if let Some(c) = cur {
-                        c.with_adjoined_rational_root(&polynomial, embedding)
+                        c.with_adjoined_rational_root(&poly, index)
                     } else {
                         Some(AlgebraicExtension {
-                            poly: Arc::new(polynomial),
-                            embedding,
+                            poly: Arc::new(poly),
+                            embedding: index,
                         })
                     }
                 } else {
@@ -1633,7 +1606,8 @@ impl AtomView<'_> {
                 cur = b.get_embedding_field_impl(cur);
                 cur = e.get_embedding_field_impl(cur);
 
-                if let Some((_, denominator)) = rational_exponent_parts(e)
+                if let Ok(r) = Rational::try_from(e)
+                    && let Ok(denominator) = u64::try_from(r.denominator())
                     && denominator > 1
                 {
                     if let Some(c) = cur {
@@ -1649,7 +1623,7 @@ impl AtomView<'_> {
                             None,
                             Arc::new(vec![var.clone()]),
                         );
-                        poly = poly.variable(&var).unwrap().pow(denominator)
+                        poly = poly.variable(&var).unwrap().pow(denominator as usize)
                             - poly.constant(base_converted);
 
                         let factors = poly.factor();
@@ -1709,7 +1683,7 @@ impl AtomView<'_> {
                         poly = poly
                             .variable(&PolyVariable::Temporary(0))
                             .unwrap()
-                            .pow(denominator)
+                            .pow(denominator as usize)
                             - poly.constant(rat_base);
 
                         let mut selected = None;
@@ -1993,9 +1967,6 @@ impl<R: Ring> std::fmt::Display for AlgebraicExtension<R> {
 pub struct AlgebraicNumber<R: Ring> {
     pub(crate) poly: MultivariatePolynomial<R, u16>,
 }
-
-// can we use AlgebraicNumber directly the same as Root?
-// index specifies the index of the root of the minimal polynomial
 
 impl<R: Ring> InternalOrdering for AlgebraicNumber<R> {
     fn internal_cmp(&self, other: &Self) -> std::cmp::Ordering {
@@ -3727,9 +3698,10 @@ impl Root<AlgebraicExtension<Q>> {
         variable: Option<PolyVariable>,
         index: usize,
     ) -> Result<Option<Self>, String> {
-        let Some(mut context) = AlgebraicContext::from_atom(polynomial)? else {
+        let mut context = AlgebraicContext::from_atom(polynomial)?;
+        if context.is_trivial() {
             return Ok(None);
-        };
+        }
         let variables = variable.map(|variable| Arc::new(vec![variable]));
         let polynomial = context.to_polynomial::<u16>(polynomial, variables)?;
         Root::new(polynomial, index).map(Some)

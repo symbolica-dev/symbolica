@@ -212,7 +212,7 @@ impl AtomView<'_> {
             return Some(value.is_zero());
         }
 
-        if let Ok(Some(mut context)) = AlgebraicContext::from_atom(expression.as_view())
+        if let Ok(mut context) = AlgebraicContext::from_atom(expression.as_view())
             && let Ok(value) = context.convert_atom(expression.as_view())
         {
             return Some(context.field().is_zero(&value));
@@ -1056,9 +1056,11 @@ mod test {
             return;
         }
 
-        let mut context = AlgebraicContext::from_atom(expression.as_view())
-            .unwrap()
-            .expect("expression should contain an algebraic number");
+        let mut context = AlgebraicContext::from_atom(expression.as_view()).unwrap();
+        assert!(
+            !context.is_trivial(),
+            "expression should contain an algebraic number"
+        );
         let value = context.convert_atom(expression.as_view()).unwrap();
         assert!(
             context.field().is_zero(&value),
