@@ -3178,6 +3178,47 @@ impl AlgebraicExtension<Q> {
 
         let extension_degree = polynomial.degree(0) as usize;
 
+        if self.poly.degree(0) == 1 {
+            let mut rational_polynomial = polynomial.map_coeff(
+                |coefficient| {
+                    assert!(
+                        coefficient.poly.is_constant(),
+                        "an element of a degree-one extension must be constant"
+                    );
+                    coefficient.poly.get_constant()
+                },
+                Q,
+            );
+            if let Some(new_symbol) = new_symbol {
+                let active_variable = (0..rational_polynomial.nvars())
+                    .find(|&variable| rational_polynomial.degree(variable) > 0)
+                    .expect("the adjoined polynomial must be non-constant");
+                let old_symbol = rational_polynomial.get_vars_ref()[active_variable].clone();
+                rational_polynomial.rename_variable(&old_symbol, &new_symbol);
+            }
+
+            let extension = AlgebraicExtension::new(rational_polynomial);
+            let old_value = Q.neg(&Q.div(&self.poly.get_constant(), &self.poly.lcoeff()));
+            let old_generator = extension.constant(old_value);
+            let new_generator = extension.generator();
+            let new_generator_minimal_poly = extension.poly.as_ref().clone();
+            let extensions = (0..extension_degree)
+                .map(|embedding| {
+                    let mut field = extension.clone();
+                    field.embedding = embedding;
+                    field
+                })
+                .collect();
+
+            return (
+                extensions,
+                old_generator,
+                new_generator,
+                new_generator_minimal_poly,
+                (0..extension_degree).collect(),
+            );
+        }
+
         let (extension, old_generator, new_generator) = self.adjoin(polynomial, new_symbol);
 
         // The minimal polynomial of the image of b lets us reuse the rational
@@ -3954,6 +3995,28 @@ mod tests {
             assert_eq!(sqrt23.embedding, expected_embedding);
             assert_eq!(sqrt23.mul(&r1, &r1), sqrt23.nth(2.into()));
             assert_eq!(sqrt23.mul(&r2, &r2), sqrt23.nth(3.into()));
+        }
+    }
+
+    #[test]
+    fn adjoin_with_all_embeddings_from_degree_one_extension() {
+        let base = AlgebraicExtension::new(parse!("a-2").to_polynomial(&Q, None));
+        let polynomial = parse!("b^3-3")
+            .to_polynomial(&Q, None)
+            .to_number_field(&base);
+        let gamma = symbol!("gamma");
+        let (extensions, old_generator, new_generator) =
+            base.adjoin_with_all_embeddings(&polynomial, Some(gamma.into()));
+
+        assert_eq!(extensions.len(), 3);
+        for (embedding, extension) in extensions.iter().enumerate() {
+            assert_eq!(extension.embedding(), embedding);
+            assert_eq!(
+                extension.poly().get_vars_ref(),
+                &[crate::poly::PolyVariable::from(gamma)]
+            );
+            assert_eq!(&old_generator, &extension.nth(2.into()));
+            assert_eq!(extension.pow(&new_generator, 3), extension.nth(3.into()));
         }
     }
 
