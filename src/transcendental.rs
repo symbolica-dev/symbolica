@@ -710,25 +710,19 @@ fn root_numeric_eval(tags: &[AtomView], prec: u32) -> Result<Complex<Float>, Str
         ));
     }
 
-    let roots = poly.isolate_complex_roots(None);
-    let mut seen = 0;
-    let Some(root) = roots.into_iter().find(|root| {
-        let multiplicity = root.multiplicity().unwrap_or(1);
-        let selected = index < seen + multiplicity;
-        seen += multiplicity;
-        selected
-    }) else {
+    let Some(root) = poly.root(index) else {
         return Err(format!(
             "root index {index} is out of bounds for polynomial of degree {}",
             poly.degree()
         ));
     };
+    let (root, _) = root.location();
 
     let mut value = root.to_float_center(prec);
-    if root.is_imaginary() {
+    if root.is_imaginary() == Some(true) {
         value.re = Float::new(prec);
     }
-    if root.is_real() {
+    if root.is_real() == Some(true) {
         value.im = Float::new(prec);
     }
     Ok(value)

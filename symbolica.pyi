@@ -579,6 +579,15 @@ class PrintMode(Enum):
     Typst = 5
     """Print using Typst notation."""
 
+class RootLocation(Enum):
+    """Proven location of an isolated root relative to the coordinate axes."""
+
+    Unknown = ...
+    Complex = ...
+    Real = ...
+    Imaginary = ...
+    Zero = ...
+
 class FormattedOutput:
     """A formatted string with rich notebook display representations."""
 
@@ -6041,6 +6050,52 @@ class ReplaceIterator:
         Return the next replacement.
         """
 
+class IsolatedRoot:
+    """A certified isolated root in the complex plane."""
+
+    @property
+    def index(self) -> int:
+        """Canonical index of this root within its defining polynomial."""
+
+    @property
+    def center(self) -> tuple[Expression, Expression]:
+        """Center of the certified complex disk as exact real and imaginary parts."""
+
+    @property
+    def radius(self) -> Expression:
+        """Radius of the certified complex disk."""
+
+    def defining_polynomial_coefficients(
+        self,
+    ) -> list[tuple[Expression, Expression]]:
+        """Return the exact complex coefficients from constant to leading."""
+
+    def to_expression(self) -> Expression:
+        """Convert this isolated root to an exact expression."""
+
+    def refine(self, tolerance: float | Decimal) -> IsolatedRoot:
+        """Return a root whose cached enclosure has at most the requested radius."""
+
+    def refine_to_precision(self, binary_precision: int) -> IsolatedRoot:
+        """Return a root refined sufficiently for the requested binary precision."""
+
+    def location(self) -> RootLocation:
+        """Resolve and cache the root's relationship to the coordinate axes."""
+
+    def is_real(self) -> bool | None:
+        """Return the resolved real-axis membership, or `None` if unresolved."""
+
+    def is_imaginary(self) -> bool | None:
+        """Return the resolved imaginary-axis membership, or `None` if unresolved."""
+
+    def is_zero(self) -> bool | None:
+        """Return whether the root is zero, or `None` if unresolved."""
+
+    def is_positive(self) -> bool:
+        """Determine whether this root is strictly positive on the real line."""
+
+    def __repr__(self) -> str: ...
+
 class Polynomial:
     """A Symbolica polynomial with rational coefficients."""
 
@@ -6564,34 +6619,31 @@ class Polynomial:
             The prime modulus of the target finite field.
         """
 
-    def isolate_roots(
-        self, refine: float | Decimal | None = None
-    ) -> list[tuple[Expression, Expression, int]]:
+    def root(self, index: int) -> IsolatedRoot | None:
+        """Return one root from the canonical ordering, counting multiplicity."""
+
+    def isolate_roots(self) -> list[tuple[IsolatedRoot, int]]:
         """
-        Isolate the real roots of the polynomial. The result is a list of intervals with rational bounds that contain exactly one root,
-        and the multiplicity of that root. Optionally, the intervals can be refined to a given precision.
+        Isolate all distinct roots in the complex plane, together with their
+        multiplicities.
 
         Examples
         --------
         >>> from symbolica import *
-        >>> p = E('2016+5808*x+5452*x^2+1178*x^3+-753*x^4+-232*x^5+41*x^6').to_polynomial()
-        >>> for a, b, n in p.isolate_roots():
-        >>>     print('({},{}): {}'.format(a, b, n))
+        >>> p = E('(x-1)^2*(x^2+1)').to_polynomial()
+        >>> for root, multiplicity in p.isolate_roots():
+        ...     print(root.center, multiplicity)
+        """
 
-        yields
-        ```
-        (-56/45,-77/62): 1
-        (-98/79,-119/96): 1
-        (-119/96,-21/17): 1
-        (-7/6,0): 1
-        (0,6): 1
-        (6,12): 1
-        ```
+    def isolate_real_roots(self) -> list[tuple[IsolatedRoot, int]]:
+        """Isolate all distinct real roots, together with their multiplicities."""
 
-        Parameters
-        ----------
-        refine: float | Decimal | None
-            The optional interval refinement tolerance.
+    def isolate_real_root_intervals(
+        self,
+    ) -> list[tuple[Expression, Expression, int]]:
+        """
+        Isolate the real roots as rational intervals containing exactly one
+        distinct root, together with their multiplicities.
         """
 
     @overload

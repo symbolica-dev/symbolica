@@ -377,7 +377,7 @@ impl<E: PositiveExponent> ParametricExtension<E> {
                 // its analytic meaning only after parameter specialization.
                 polynomial
                     .to_univariate_from_univariate(0)
-                    .isolate_complex_root(*conjugate, 32)
+                    .root(*conjugate)
                     .ok_or_else(|| {
                         format!("Could not isolate conjugate {conjugate} of {polynomial}")
                     })?;
@@ -3142,13 +3142,6 @@ mod test {
             let mut point = ahash::HashMap::default();
             point.insert(a.clone(), 2.into());
             let specialized = solution.specialize(&point).unwrap();
-            assert!(
-                specialized
-                    .field()
-                    .poly()
-                    .to_univariate_from_univariate(0)
-                    .has_cached_roots()
-            );
             let x_value = specialized.get(&x).unwrap();
             let y_value = specialized.get(&y).unwrap();
             assert!(
@@ -3235,12 +3228,6 @@ mod test {
             assert_eq!(solution.to_atom_map().len(), 2);
             let specialized = solution.specialize(&point).unwrap();
             let field = specialized.field();
-            assert!(
-                field
-                    .poly()
-                    .to_univariate_from_univariate(0)
-                    .has_cached_roots()
-            );
             let x_value = specialized.get(&x).unwrap();
             let y_value = specialized.get(&y).unwrap();
             assert!(field.is_zero(&field.sub(&field.pow(x_value, 2), y_value,)));
