@@ -1,5 +1,5 @@
 use super::*;
-use crate::poly::univariate::{ComplexRootLocation, IsolatedRoot, UnivariatePolynomial};
+use crate::poly::univariate::{IsolatedRoot, RootLocation, UnivariatePolynomial};
 
 /// Proven location of an isolated root relative to the coordinate axes.
 #[cfg_attr(feature = "python_stubgen", gen_stub_pyclass_enum)]
@@ -12,21 +12,19 @@ use crate::poly::univariate::{ComplexRootLocation, IsolatedRoot, UnivariatePolyn
 )]
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
 pub enum PythonRootLocation {
-    Unknown,
     Complex,
     Real,
     Imaginary,
     Zero,
 }
 
-impl From<ComplexRootLocation> for PythonRootLocation {
-    fn from(location: ComplexRootLocation) -> Self {
+impl From<RootLocation> for PythonRootLocation {
+    fn from(location: RootLocation) -> Self {
         match location {
-            ComplexRootLocation::Unknown => Self::Unknown,
-            ComplexRootLocation::Complex => Self::Complex,
-            ComplexRootLocation::Real => Self::Real,
-            ComplexRootLocation::Imaginary => Self::Imaginary,
-            ComplexRootLocation::Zero => Self::Zero,
+            RootLocation::Complex => Self::Complex,
+            RootLocation::Real => Self::Real,
+            RootLocation::Imaginary => Self::Imaginary,
+            RootLocation::Zero => Self::Zero,
         }
     }
 }
@@ -59,31 +57,15 @@ impl PythonIsolatedRoot {
     #[getter]
     pub fn center(&self) -> (PythonExpression, PythonExpression) {
         (
-            Atom::num(self.root.center().re.clone()).into(),
-            Atom::num(self.root.center().im.clone()).into(),
+            Atom::num(self.root.enclosure().center().re.clone()).into(),
+            Atom::num(self.root.enclosure().center().im.clone()).into(),
         )
     }
 
     /// Radius of the certified complex disk.
     #[getter]
     pub fn radius(&self) -> PythonExpression {
-        Atom::num(self.root.radius().clone()).into()
-    }
-
-    /// Coefficients of the exact defining polynomial, from constant to leading
-    /// coefficient, represented as exact `(real, imaginary)` pairs.
-    pub fn defining_polynomial_coefficients(&self) -> Vec<(PythonExpression, PythonExpression)> {
-        self.root
-            .poly()
-            .coefficients
-            .iter()
-            .map(|coefficient| {
-                (
-                    Atom::num(coefficient.re.clone()).into(),
-                    Atom::num(coefficient.im.clone()).into(),
-                )
-            })
-            .collect()
+        Atom::num(self.root.enclosure().radius().clone()).into()
     }
 
     /// Convert this isolated root to an exact expression.
@@ -102,53 +84,24 @@ impl PythonIsolatedRoot {
         Ok(self.root.clone().refine(&tolerance).into())
     }
 
-    /// Return a new root refined sufficiently for the requested binary precision.
-    pub fn refine_to_precision(&self, binary_precision: u32) -> Self {
-        self.root
-            .clone()
-            .refine_to_precision(binary_precision)
-            .into()
-    }
-
     /// Resolve and cache the root's exact relationship to the coordinate axes.
     pub fn location(&mut self) -> PythonRootLocation {
-        let (root, location) = self.root.clone().location();
-        self.root = root;
-        location.into()
+        self.root.location().into()
     }
 
-    /// Return whether real-axis membership has been resolved, and if so whether
-    /// this root is real.
-    pub fn is_real(&self) -> Option<bool> {
-        self.root.is_real()
-    }
-
-    /// Return whether imaginary-axis membership has been resolved, and if so
-    /// whether this root is purely imaginary.
-    pub fn is_imaginary(&self) -> Option<bool> {
-        self.root.is_imaginary()
-    }
-
-    /// Return whether this root has been resolved to be zero.
-    pub fn is_zero(&self) -> Option<bool> {
-        self.root.is_zero()
-    }
-
-    /// Determine whether this root is strictly positive on the real line.
-    pub fn is_positive(&self) -> PyResult<bool> {
-        self.root
-            .is_positive()
-            .map_err(exceptions::PyValueError::new_err)
+    /// Determine whether this root lies on the positive real axis.
+    pub fn is_positive(&mut self) -> bool {
+        self.root.is_positive()
     }
 
     fn __repr__(&self) -> String {
         format!(
             "IsolatedRoot(index={}, center=({}, {}), radius={}, polynomial={})",
             self.root.index(),
-            self.root.center().re,
-            self.root.center().im,
-            self.root.radius(),
-            self.root.poly()
+            self.root.enclosure().center().re,
+            self.root.enclosure().center().im,
+            self.root.enclosure().radius(),
+            self.root.defining_polynomial()
         )
     }
 }

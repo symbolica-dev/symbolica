@@ -582,7 +582,6 @@ class PrintMode(Enum):
 class RootLocation(Enum):
     """Proven location of an isolated root relative to the coordinate axes."""
 
-    Unknown = ...
     Complex = ...
     Real = ...
     Imaginary = ...
@@ -6065,34 +6064,17 @@ class IsolatedRoot:
     def radius(self) -> Expression:
         """Radius of the certified complex disk."""
 
-    def defining_polynomial_coefficients(
-        self,
-    ) -> list[tuple[Expression, Expression]]:
-        """Return the exact complex coefficients from constant to leading."""
-
     def to_expression(self) -> Expression:
         """Convert this isolated root to an exact expression."""
 
     def refine(self, tolerance: float | Decimal) -> IsolatedRoot:
         """Return a root whose cached enclosure has at most the requested radius."""
 
-    def refine_to_precision(self, binary_precision: int) -> IsolatedRoot:
-        """Return a root refined sufficiently for the requested binary precision."""
-
     def location(self) -> RootLocation:
         """Resolve and cache the root's relationship to the coordinate axes."""
 
-    def is_real(self) -> bool | None:
-        """Return the resolved real-axis membership, or `None` if unresolved."""
-
-    def is_imaginary(self) -> bool | None:
-        """Return the resolved imaginary-axis membership, or `None` if unresolved."""
-
-    def is_zero(self) -> bool | None:
-        """Return whether the root is zero, or `None` if unresolved."""
-
     def is_positive(self) -> bool:
-        """Determine whether this root is strictly positive on the real line."""
+        """Determine whether this root lies on the positive real axis."""
 
     def __repr__(self) -> str: ...
 

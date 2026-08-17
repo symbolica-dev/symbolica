@@ -21,8 +21,14 @@ use crate::{
         },
     },
     poly::{
-        Exponent, IntoVariableMap, PolyVariable, PositiveExponent, factor::Factorize,
-        gcd::PolynomialGCD, polynomial::MultivariatePolynomial, univariate::ComplexRootLocation,
+        Exponent, IntoVariableMap, PolyVariable, PositiveExponent,
+        factor::Factorize,
+        gcd::PolynomialGCD,
+        polynomial::MultivariatePolynomial,
+        univariate::{
+            RootImage, RootLocation, match_certified_root_images,
+            rational_polynomial_value_has_positive_real_part,
+        },
     },
     symbol,
     tensors::matrix::Matrix,
@@ -581,13 +587,8 @@ where
 fn positive_real_root_index(poly: &MultivariatePolynomial<Q, u16>) -> Option<usize> {
     let poly = poly.to_univariate_from_univariate(0);
     let mut index = 0;
-    for (root, multiplicity) in poly.isolate_roots() {
-        let (root, location) = root.location();
-        if matches!(
-            location,
-            ComplexRootLocation::Real | ComplexRootLocation::Zero
-        ) && root.is_positive().ok()?
-        {
+    for (mut root, multiplicity) in poly.isolate_roots() {
+        if root.is_positive() {
             return Some(index);
         }
         index += multiplicity;
@@ -2804,33 +2805,26 @@ impl AlgebraicExtension<Q> {
         }
 
         let poly = self.poly.to_univariate_from_univariate(0);
-        let (primitive_root, primitive_location) = poly.root(self.embedding).unwrap().location();
+        let mut primitive_root = poly.root(self.embedding).unwrap();
+        let primitive_location = primitive_root.location();
 
-        if !matches!(
-            primitive_location,
-            ComplexRootLocation::Real | ComplexRootLocation::Zero
-        ) {
+        if !matches!(primitive_location, RootLocation::Real | RootLocation::Zero) {
             let minimal_field = self.simplify(element);
             let element_embedding = minimal_field.embedding;
             let minimal_polynomial = minimal_field.poly.to_univariate_from_univariate(0);
-            let (root, location) = minimal_polynomial
-                .root(element_embedding)
-                .unwrap()
-                .location();
-            if !matches!(
-                location,
-                ComplexRootLocation::Real | ComplexRootLocation::Zero
-            ) {
+            let mut root = minimal_polynomial.root(element_embedding).unwrap();
+            let location = root.location();
+            if !matches!(location, RootLocation::Real | RootLocation::Zero) {
                 return Ok(false);
             }
-            return root
-                .is_positive()
-                .map_err(|_| format!("Could not determine the sign of {} in {}", element, self));
+            return Ok(root.is_positive());
         }
 
-        primitive_root
-            .polynomial_value_has_positive_real_part(&Self::element_coefficients(element))
-            .map_err(|_| format!("Could not determine the sign of {} in {}", element, self))
+        rational_polynomial_value_has_positive_real_part(
+            &primitive_root,
+            &Self::element_coefficients(element),
+        )
+        .map_err(|_| format!("Could not determine the sign of {} in {}", element, self))
     }
 
     /// Determine the sign of the real part at this field's embedding without
@@ -2849,13 +2843,16 @@ impl AlgebraicExtension<Q> {
 
         let polynomial = self.poly.to_univariate_from_univariate(0);
         let root = polynomial.root(self.embedding).unwrap();
-        root.polynomial_value_has_positive_real_part(&Self::element_coefficients(element))
-            .map_err(|_| {
-                format!(
-                    "Could not determine the sign of the real part of {} in {}",
-                    element, self
-                )
-            })
+        rational_polynomial_value_has_positive_real_part(
+            &root,
+            &Self::element_coefficients(element),
+        )
+        .map_err(|_| {
+            format!(
+                "Could not determine the sign of the real part of {} in {}",
+                element, self
+            )
+        })
     }
 
     fn root_index_of_element(
@@ -2871,9 +2868,16 @@ impl AlgebraicExtension<Q> {
             .into_iter()
             .map(|(root, _)| root)
             .collect::<Vec<_>>();
-        extension_root
-            .matching_rational_polynomial_value(&Self::element_coefficients(element), &mut roots)
-            .map_err(|_| format!("Could not identify {} as a root of {}", element, polynomial))
+        let coefficients = Self::element_coefficients(element);
+        match_certified_root_images(
+            &extension_root,
+            RootImage::RationalPolynomial(&coefficients),
+            &mut roots,
+            RootImage::Identity,
+            1,
+        )
+        .map(|matches| matches[0])
+        .map_err(|_| format!("Could not identify {} as a root of {}", element, polynomial))
     }
 
     fn embedded_rational_root(
@@ -3108,34 +3112,39 @@ impl AlgebraicExtension<Q> {
             .into_iter()
             .map(|(root, _)| root)
             .collect::<Vec<_>>();
-        let candidates = old_root
-            .matching_rational_polynomial_preimages(
-                &Self::element_coefficients(&old_generator),
-                &mut extension_roots,
-                extension_degree,
+        let old_generator_coefficients = Self::element_coefficients(&old_generator);
+        let candidates = match_certified_root_images(
+            &old_root,
+            RootImage::Identity,
+            &mut extension_roots,
+            RootImage::RationalPolynomial(&old_generator_coefficients),
+            extension_degree,
+        )
+        .unwrap_or_else(|error| {
+            panic!(
+                "Could not select embeddings while adjoining roots of {}: {}",
+                polynomial, error
             )
-            .unwrap_or_else(|error| {
-                panic!(
-                    "Could not select embeddings while adjoining roots of {}: {}",
-                    polynomial, error
-                )
-            });
+        });
 
         let new_generator_coefficients = Self::element_coefficients(&new_generator);
         let mut ordered_candidates = candidates
             .into_iter()
             .map(|candidate| {
-                let new_generator_embedding = extension_roots[candidate]
-                    .matching_rational_polynomial_value(
-                        &new_generator_coefficients,
-                        &mut new_generator_roots,
+                let new_generator_embedding = match_certified_root_images(
+                    &extension_roots[candidate],
+                    RootImage::RationalPolynomial(&new_generator_coefficients),
+                    &mut new_generator_roots,
+                    RootImage::Identity,
+                    1,
+                )
+                .map(|matches| matches[0])
+                .unwrap_or_else(|error| {
+                    panic!(
+                        "Could not order an embedding while adjoining roots of {}: {}",
+                        polynomial, error
                     )
-                    .unwrap_or_else(|error| {
-                        panic!(
-                            "Could not order an embedding while adjoining roots of {}: {}",
-                            polynomial, error
-                        )
-                    });
+                });
                 (new_generator_embedding, candidate)
             })
             .collect::<Vec<_>>();
@@ -3193,12 +3202,10 @@ impl RealEmbedding for AlgebraicExtension<Q> {
         }
 
         let polynomial = self.poly.to_univariate_from_univariate(0);
-        let (_, primitive_location) = polynomial.root(self.embedding).unwrap().location();
+        let mut primitive_root = polynomial.root(self.embedding).unwrap();
+        let primitive_location = primitive_root.location();
 
-        if matches!(
-            primitive_location,
-            ComplexRootLocation::Real | ComplexRootLocation::Zero
-        ) {
+        if matches!(primitive_location, RootLocation::Real | RootLocation::Zero) {
             return self.is_positive_real(element).map(|positive| {
                 if positive {
                     Ordering::Greater
@@ -3210,14 +3217,9 @@ impl RealEmbedding for AlgebraicExtension<Q> {
 
         let minimal_field = self.simplify(element);
         let minimal_polynomial = minimal_field.poly.to_univariate_from_univariate(0);
-        let (_, location) = minimal_polynomial
-            .root(minimal_field.embedding)
-            .unwrap()
-            .location();
-        if !matches!(
-            location,
-            ComplexRootLocation::Real | ComplexRootLocation::Zero
-        ) {
+        let mut root = minimal_polynomial.root(minimal_field.embedding).unwrap();
+        let location = root.location();
+        if !matches!(location, RootLocation::Real | RootLocation::Zero) {
             return Err(format!(
                 "{} does not have a real image in {}",
                 element, self
@@ -3290,7 +3292,7 @@ impl Root<Q> {
                 polynomial.degree()
             )
         })?;
-        let minimal_polynomial = isolated.poly();
+        let minimal_polynomial = isolated.defining_polynomial();
         if minimal_polynomial.degree() >= polynomial.degree() {
             return Ok(self.clone());
         }
@@ -3737,12 +3739,22 @@ impl Root<AlgebraicExtension<Q>> {
                         candidate.embedding, candidate.polynomial
                     )
                 })?;
-            candidate.order = Some(root.matching_root(&mut union_roots).map_err(|_| {
-                format!(
-                    "Could not canonically place root {} of {}",
-                    candidate.embedding, candidate.polynomial
+            candidate.order = Some(
+                match_certified_root_images(
+                    &root,
+                    RootImage::Identity,
+                    &mut union_roots,
+                    RootImage::Identity,
+                    1,
                 )
-            })?);
+                .map(|matches| matches[0])
+                .map_err(|_| {
+                    format!(
+                        "Could not canonically place root {} of {}",
+                        candidate.embedding, candidate.polynomial
+                    )
+                })?,
+            );
         }
         candidates.sort_by_key(|candidate| candidate.order.unwrap());
 
