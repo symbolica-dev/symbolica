@@ -2123,10 +2123,8 @@ impl UnivariatePolynomial<RationalField> {
         // root.
         let integer_bits = |integer: Integer| match integer {
             Integer::Single(value) => i64::BITS - value.unsigned_abs().leading_zeros(),
-            Integer::Double(value) => {
-                i128::BITS - i128::from(value).unsigned_abs().leading_zeros()
-            }
-            Integer::Large(value) => value.significant_bits(),
+            Integer::Double(value) => i128::BITS - value.get().unsigned_abs().leading_zeros(),
+            Integer::Large(value) => u32::try_from(value.significant_bits()).unwrap_or(u32::MAX),
         };
         let numerator_bits = integer_bits(refine.numerator());
         let denominator_bits = integer_bits(refine.denominator());
