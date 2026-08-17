@@ -565,6 +565,19 @@ class ParseMode(Enum):
     Mathematica = 2
     """Parse using Mathematica notation."""
 
+class SolveDomain(Enum):
+    """A domain supported by the exact equation solver."""
+
+    Integers = 1
+    Rationals = 2
+    Reals = 3
+    Complexes = 4
+
+Integers: SolveDomain
+Rationals: SolveDomain
+Reals: SolveDomain
+Complexes: SolveDomain
+
 class PrintMode(Enum):
     """Specifies the print mode."""
 
@@ -3476,6 +3489,7 @@ class Expression:
         system: Sequence[Expression],
         variables: Sequence[Expression],
         warn_if_underdetermined: bool = True,
+        domain: SolveDomain | None = None,
     ) -> Sequence[dict[Expression, Expression]]:
         """
         Solve a system exactly in the requested variables.
@@ -3502,7 +3516,9 @@ class Expression:
         variables: Sequence[Expression]
             Variables to solve for, in lexicographic elimination order.
         warn_if_underdetermined: bool
-            Whether to warn when a linear system is underdetermined.
+            Whether to warn when the system is underdetermined.
+        domain: SolveDomain | None
+            Restrict solutions to this domain. The default is ``Complexes``.
         """
 
     @classmethod

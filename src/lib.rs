@@ -171,7 +171,9 @@ pub mod prelude {
         AtomPrinter, CanonicalOrderingSettings, PrintMode, PrintOptions, PrintState,
     };
 
-    pub use crate::solve::SolveError;
+    pub use crate::solve::{
+        Complexes, Integers, Rationals, Reals, Solution, SolveBuilder, SolveDomain, SolveError,
+    };
 
     pub use crate::state::State;
 

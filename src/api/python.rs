@@ -223,6 +223,34 @@ pub enum PythonParseMode {
     Mathematica,
 }
 
+/// A domain supported by the exact equation solver.
+#[cfg_attr(feature = "python_stubgen", gen_stub_pyclass_enum)]
+#[pyclass(
+    from_py_object,
+    name = "SolveDomain",
+    eq,
+    eq_int,
+    module = "symbolica.core"
+)]
+#[derive(Clone, Copy, PartialEq, Eq, Hash)]
+pub enum PythonSolveDomain {
+    Integers,
+    Rationals,
+    Reals,
+    Complexes,
+}
+
+impl From<PythonSolveDomain> for crate::solve::SolveDomain {
+    fn from(domain: PythonSolveDomain) -> Self {
+        match domain {
+            PythonSolveDomain::Integers => Self::Integers,
+            PythonSolveDomain::Rationals => Self::Rationals,
+            PythonSolveDomain::Reals => Self::Reals,
+            PythonSolveDomain::Complexes => Self::Complexes,
+        }
+    }
+}
+
 impl From<PythonParseMode> for ParseMode {
     fn from(mode: PythonParseMode) -> Self {
         match mode {
@@ -366,6 +394,7 @@ pub fn create_symbolica_module<'a, 'b>(
     m.add_class::<PythonAtomTree>()?;
     m.add_class::<PythonSymbolAttribute>()?;
     m.add_class::<PythonParseMode>()?;
+    m.add_class::<PythonSolveDomain>()?;
     m.add_class::<PythonPrintMode>()?;
     m.add_class::<PythonCondition>()?;
     m.add_class::<PythonReplacement>()?;
@@ -386,6 +415,11 @@ pub fn create_symbolica_module<'a, 'b>(
     m.add_class::<PythonHalfEdge>()?;
     m.add_class::<PythonGraph>()?;
     m.add_class::<PythonInteger>()?;
+
+    m.add("Integers", PythonSolveDomain::Integers)?;
+    m.add("Rationals", PythonSolveDomain::Rationals)?;
+    m.add("Reals", PythonSolveDomain::Reals)?;
+    m.add("Complexes", PythonSolveDomain::Complexes)?;
 
     m.add_function(wrap_pyfunction!(symbol_shorthand, m)?)?;
     m.add_function(wrap_pyfunction!(number_shorthand, m)?)?;

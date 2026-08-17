@@ -7757,13 +7757,16 @@ impl PythonExpression {
     ///     inputs are needed, viable variables later in this list are preferred.
     /// warn_if_underdetermined: bool
     ///     Whether to warn when the system is underdetermined.
-    #[pyo3(signature = (system, variables, warn_if_underdetermined = true))]
+    /// domain: SolveDomain | None
+    ///     Restrict solutions to this domain. The default is `Complexes`.
+    #[pyo3(signature = (system, variables, warn_if_underdetermined = true, domain = None))]
     #[classmethod]
     pub fn solve(
         _cls: &Bound<'_, PyType>,
         system: Vec<ConvertibleToExpression>,
         variables: Vec<PythonExpression>,
         warn_if_underdetermined: bool,
+        domain: Option<PythonSolveDomain>,
     ) -> PyResult<Vec<HashMap<PythonExpression, PythonExpression>>> {
         let system = system
             .into_iter()
@@ -7774,6 +7777,8 @@ impl PythonExpression {
             .map(|variable| variable.expr)
             .collect::<Vec<_>>();
 
+        let domain = domain.unwrap_or(PythonSolveDomain::Complexes).into();
+
         let convert_solution = |solution: HashMap<PolyVariable, Atom>| {
             solution
                 .into_iter()
@@ -7781,7 +7786,7 @@ impl PythonExpression {
                 .collect()
         };
 
-        match AtomView::solve::<u16, _, Atom>(&system, &variables) {
+        match AtomView::solve(&system).over(domain).wrt(&variables) {
             Ok(solutions) => {
                 if warn_if_underdetermined && !solutions.is_empty() {
                     let input_variables = variables
@@ -7812,26 +7817,10 @@ impl PythonExpression {
                     }
                 }
 
-                Ok(solutions.into_iter().map(convert_solution).collect())
-            }
-            Err(SolveError::Underdetermined {
-                rank,
-                partial_solution,
-            }) => {
-                if warn_if_underdetermined {
-                    warn!(
-                        "The system is underdetermined (rank {rank} < size {})",
-                        variables.len()
-                    );
-                }
-
-                Ok(vec![
-                    variables
-                        .into_iter()
-                        .zip(partial_solution)
-                        .map(|(variable, value)| (variable.into(), value.into()))
-                        .collect(),
-                ])
+                Ok(solutions
+                    .into_iter()
+                    .map(|solution| convert_solution(solution.into_values()))
+                    .collect())
             }
             Err(error) => Err(exceptions::PyValueError::new_err(error.to_string())),
         }
