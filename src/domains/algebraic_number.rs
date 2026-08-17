@@ -26,7 +26,7 @@ use crate::{
         gcd::PolynomialGCD,
         polynomial::MultivariatePolynomial,
         univariate::{
-            IsolatedRoot, RootImage, RootLocation, match_certified_root_images,
+            RootImage, RootLocation, match_certified_root_images,
             rational_polynomial_value_has_positive_real_part,
         },
     },

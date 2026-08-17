@@ -7759,6 +7759,12 @@ impl PythonExpression {
     ///     Whether to warn when the system is underdetermined.
     /// domain: SolveDomain | None
     ///     Restrict solutions to this domain. The default is `Complexes`.
+    ///
+    /// Returns
+    /// -------
+    /// list[Solution]
+    ///     Exact solution branches. A `Solution` behaves as a read-only mapping
+    ///     and also exposes its free variables, validity conditions, and domain.
     #[pyo3(signature = (system, variables, warn_if_underdetermined = true, domain = None))]
     #[classmethod]
     pub fn solve(
@@ -7767,7 +7773,7 @@ impl PythonExpression {
         variables: Vec<PythonExpression>,
         warn_if_underdetermined: bool,
         domain: Option<PythonSolveDomain>,
-    ) -> PyResult<Vec<HashMap<PythonExpression, PythonExpression>>> {
+    ) -> PyResult<Vec<PythonSolution>> {
         let system = system
             .into_iter()
             .map(|expression| expression.to_expression().expr)
@@ -7778,13 +7784,6 @@ impl PythonExpression {
             .collect::<Vec<_>>();
 
         let domain = domain.unwrap_or(PythonSolveDomain::Complexes).into();
-
-        let convert_solution = |solution: HashMap<PolyVariable, Atom>| {
-            solution
-                .into_iter()
-                .map(|(variable, value)| (variable.to_atom().into(), value.into()))
-                .collect()
-        };
 
         match AtomView::solve(&system).over(domain).wrt(&variables) {
             Ok(solutions) => {
@@ -7817,10 +7816,7 @@ impl PythonExpression {
                     }
                 }
 
-                Ok(solutions
-                    .into_iter()
-                    .map(|solution| convert_solution(solution.into_values()))
-                    .collect())
+                Ok(solutions.into_iter().map(Into::into).collect())
             }
             Err(error) => Err(exceptions::PyValueError::new_err(error.to_string())),
         }

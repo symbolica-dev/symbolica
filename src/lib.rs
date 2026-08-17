@@ -172,7 +172,8 @@ pub mod prelude {
     };
 
     pub use crate::solve::{
-        Complexes, Integers, Rationals, Reals, Solution, SolveBuilder, SolveDomain, SolveError,
+        Complexes, Integers, Rationals, Reals, Solution, SolutionCondition, SolveBuilder,
+        SolveDomain, SolveError,
     };
 
     pub use crate::state::State;

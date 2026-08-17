@@ -101,7 +101,7 @@ use crate::{
         AtomPrinter, ColorMode, PrintMode, PrintOptions, PrintState, PrintUserData,
         PrintUserDataKey,
     },
-    solve::SolveError,
+    solve::{Solution, SolutionCondition, SolveDomain, SolveError},
     state::{RecycledAtom, State, Workspace},
     streaming::{TermStreamer, TermStreamerConfig},
     tensors::matrix::Matrix,
@@ -251,6 +251,380 @@ impl From<PythonSolveDomain> for crate::solve::SolveDomain {
     }
 }
 
+impl From<SolveDomain> for PythonSolveDomain {
+    fn from(domain: SolveDomain) -> Self {
+        match domain {
+            SolveDomain::Integers => Self::Integers,
+            SolveDomain::Rationals => Self::Rationals,
+            SolveDomain::Reals => Self::Reals,
+            SolveDomain::Complexes => Self::Complexes,
+        }
+    }
+}
+
+/// A condition under which an exact solution branch is valid.
+#[cfg_attr(feature = "python_stubgen", gen_stub_pyclass)]
+#[pyclass(
+    frozen,
+    skip_from_py_object,
+    name = "SolutionCondition",
+    module = "symbolica.core"
+)]
+#[derive(Clone)]
+pub struct PythonSolutionCondition {
+    condition: SolutionCondition,
+}
+
+#[cfg_attr(feature = "python_stubgen", gen_stub_pymethods)]
+#[cfg_attr(not(feature = "python_stubgen"), remove_gen_stub)]
+#[pymethods]
+impl PythonSolutionCondition {
+    /// The condition kind: ``"nonzero"`` or ``"domain_membership"``.
+    #[getter]
+    pub fn kind(&self) -> &'static str {
+        match self.condition {
+            SolutionCondition::NonZero(_) => "nonzero",
+            SolutionCondition::DomainMembership { .. } => "domain_membership",
+        }
+    }
+
+    /// Expression required to be nonzero, when ``kind == "nonzero"``.
+    #[getter]
+    pub fn expression(&self) -> Option<PythonExpression> {
+        match &self.condition {
+            SolutionCondition::NonZero(expression) => Some(expression.clone().into()),
+            SolutionCondition::DomainMembership { .. } => None,
+        }
+    }
+
+    /// Variable whose domain membership is unresolved.
+    #[getter]
+    pub fn variable(&self) -> Option<PythonExpression> {
+        match &self.condition {
+            SolutionCondition::DomainMembership { variable, .. } => Some(variable.to_atom().into()),
+            SolutionCondition::NonZero(_) => None,
+        }
+    }
+
+    /// Value whose domain membership is unresolved.
+    #[getter]
+    pub fn value(&self) -> Option<PythonExpression> {
+        match &self.condition {
+            SolutionCondition::DomainMembership { value, .. } => Some(value.clone().into()),
+            SolutionCondition::NonZero(_) => None,
+        }
+    }
+
+    /// Requested domain for an unresolved domain-membership condition.
+    #[getter]
+    pub fn domain(&self) -> Option<PythonSolveDomain> {
+        match self.condition {
+            SolutionCondition::DomainMembership { domain, .. } => Some(domain.into()),
+            SolutionCondition::NonZero(_) => None,
+        }
+    }
+
+    fn __repr__(&self) -> String {
+        match &self.condition {
+            SolutionCondition::NonZero(expression) => format!("{expression} != 0"),
+            SolutionCondition::DomainMembership { value, domain, .. } => {
+                format!("{value} in {domain:?}")
+            }
+        }
+    }
+}
+
+/// One branch of an exact solution.
+///
+/// This object implements the usual read-only mapping operations and retains
+/// free-variable, validity-condition, and requested-domain metadata.
+#[cfg_attr(feature = "python_stubgen", gen_stub_pyclass)]
+#[pyclass(
+    frozen,
+    skip_from_py_object,
+    name = "Solution",
+    module = "symbolica.core"
+)]
+#[derive(Clone)]
+pub struct PythonSolution {
+    solution: Solution,
+}
+
+impl From<Solution> for PythonSolution {
+    fn from(solution: Solution) -> Self {
+        Self { solution }
+    }
+}
+
+impl PythonSolution {
+    fn sorted_values(&self) -> Vec<(&PolyVariable, &Atom)> {
+        let mut values = self.solution.iter().collect::<Vec<_>>();
+        values.sort_by(|(left, _), (right, _)| left.cmp(right));
+        values
+    }
+
+    fn atom_html(atom: &Atom) -> String {
+        let formatted = atom.format_string(
+            &PrintOptions::new()
+                .max_line_length(Some(80))
+                .multiplication_operator('·')
+                .num_exp_as_superscript(true)
+                .max_terms(Some(100))
+                .color_mode(ColorMode::Always),
+            PrintState::new(),
+        );
+        let html = crate::printer::AnsiHtmlFormatter::new(&formatted).to_string();
+        html.strip_prefix("<div style=\"white-space: pre-wrap; margin: 0;\">")
+            .and_then(|html| html.strip_suffix("</div>"))
+            .unwrap_or(&html)
+            .to_owned()
+    }
+
+    fn atom_latex(atom: &Atom) -> String {
+        atom.format_string(&LATEX_PRINT_OPTIONS, PrintState::new())
+    }
+
+    fn domain_html(domain: SolveDomain) -> &'static str {
+        match domain {
+            SolveDomain::Integers => "ℤ",
+            SolveDomain::Rationals => "ℚ",
+            SolveDomain::Reals => "ℝ",
+            SolveDomain::Complexes => "ℂ",
+        }
+    }
+
+    fn domain_latex(domain: SolveDomain) -> &'static str {
+        match domain {
+            SolveDomain::Integers => "\\mathbb{Z}",
+            SolveDomain::Rationals => "\\mathbb{Q}",
+            SolveDomain::Reals => "\\mathbb{R}",
+            SolveDomain::Complexes => "\\mathbb{C}",
+        }
+    }
+
+    fn condition_html(condition: &SolutionCondition) -> String {
+        match condition {
+            SolutionCondition::NonZero(expression) => {
+                format!("{} ≠ 0", Self::atom_html(expression))
+            }
+            SolutionCondition::DomainMembership { value, domain, .. } => format!(
+                "{} ∈ {}",
+                Self::atom_html(value),
+                Self::domain_html(*domain),
+            ),
+        }
+    }
+
+    fn condition_latex(condition: &SolutionCondition) -> String {
+        match condition {
+            SolutionCondition::NonZero(expression) => {
+                format!("{} \\ne 0", Self::atom_latex(expression))
+            }
+            SolutionCondition::DomainMembership { value, domain, .. } => format!(
+                "{} \\in {}",
+                Self::atom_latex(value),
+                Self::domain_latex(*domain),
+            ),
+        }
+    }
+}
+
+#[cfg_attr(feature = "python_stubgen", gen_stub_pymethods)]
+#[cfg_attr(not(feature = "python_stubgen"), remove_gen_stub)]
+#[pymethods]
+impl PythonSolution {
+    /// Convert this branch to a plain dictionary.
+    pub fn as_dict(&self) -> HashMap<PythonExpression, PythonExpression> {
+        self.solution
+            .iter()
+            .map(|(variable, value)| (variable.to_atom().into(), value.clone().into()))
+            .collect()
+    }
+
+    /// Variables treated as free inputs on this branch.
+    pub fn free_variables(&self) -> Vec<PythonExpression> {
+        self.solution
+            .free_variables()
+            .iter()
+            .map(|variable| variable.to_atom().into())
+            .collect()
+    }
+
+    /// Conditions under which this branch is valid.
+    pub fn conditions(&self) -> Vec<PythonSolutionCondition> {
+        self.solution
+            .conditions()
+            .iter()
+            .cloned()
+            .map(|condition| PythonSolutionCondition { condition })
+            .collect()
+    }
+
+    /// Domain requested for this solve operation.
+    #[getter]
+    pub fn domain(&self) -> PythonSolveDomain {
+        self.solution.domain().into()
+    }
+
+    /// Whether the branch has a free variable or unresolved domain membership.
+    pub fn is_indeterminate(&self) -> bool {
+        self.solution.is_indeterminate()
+    }
+
+    /// Whether the branch has any validity conditions.
+    pub fn is_conditional(&self) -> bool {
+        self.solution.is_conditional()
+    }
+
+    /// Whether this branch describes a family with free variables.
+    pub fn is_parametric(&self) -> bool {
+        self.solution.is_parametric()
+    }
+
+    /// Whether this branch leaves any requested variables free.
+    pub fn is_underdetermined(&self) -> bool {
+        self.solution.is_underdetermined()
+    }
+
+    /// Number of requested variables determined in terms of the free inputs.
+    pub fn rank(&self) -> usize {
+        self.solution.rank()
+    }
+
+    /// Dimension of this branch, measured by its free inputs.
+    pub fn dimension(&self) -> usize {
+        self.solution.dimension()
+    }
+
+    pub fn keys(&self) -> Vec<PythonExpression> {
+        self.solution
+            .keys()
+            .map(|variable| variable.to_atom().into())
+            .collect()
+    }
+
+    pub fn values(&self) -> Vec<PythonExpression> {
+        self.solution.values().cloned().map(Into::into).collect()
+    }
+
+    pub fn items(&self) -> Vec<(PythonExpression, PythonExpression)> {
+        self.solution
+            .iter()
+            .map(|(variable, value)| (variable.to_atom().into(), value.clone().into()))
+            .collect()
+    }
+
+    pub fn get(&self, variable: &PythonExpression) -> PyResult<Option<PythonExpression>> {
+        let variable = PolyVariable::try_from(variable.expr.clone())
+            .map_err(exceptions::PyTypeError::new_err)?;
+        Ok(self.solution.get(&variable).cloned().map(Into::into))
+    }
+
+    fn __getitem__(&self, variable: &PythonExpression) -> PyResult<PythonExpression> {
+        self.get(variable)?.ok_or_else(|| {
+            exceptions::PyKeyError::new_err(format!("Solution has no value for {}", variable.expr))
+        })
+    }
+
+    fn __contains__(&self, variable: &PythonExpression) -> PyResult<bool> {
+        let variable = PolyVariable::try_from(variable.expr.clone())
+            .map_err(exceptions::PyTypeError::new_err)?;
+        Ok(self.solution.contains_key(&variable))
+    }
+
+    fn __len__(&self) -> usize {
+        self.solution.len()
+    }
+
+    #[gen_stub(override_return_type(type_repr = "typing.Iterator[Expression]"))]
+    fn __iter__<'py>(&self, py: Python<'py>) -> PyResult<Bound<'py, PyIterator>> {
+        self.keys().into_pyobject(py)?.try_iter()
+    }
+
+    fn __repr__(&self) -> String {
+        format!("Solution({})", self.solution)
+    }
+
+    /// Convert this solution into a human-readable string, including its conditions.
+    fn __str__(&self) -> String {
+        self.solution.to_string()
+    }
+
+    /// Render this solution as HTML in notebook environments.
+    fn _repr_html_(&self) -> String {
+        let rows = self
+            .sorted_values()
+            .into_iter()
+            .map(|(variable, value)| {
+                format!(
+                    "<div class=\"symbolica-solution-value\"><span>{}</span>\
+                     <span style=\"padding:0 .5em\">=</span><span>{}</span></div>",
+                    Self::atom_html(&variable.to_atom()),
+                    Self::atom_html(value),
+                )
+            })
+            .collect::<String>();
+
+        let conditions = if self.solution.conditions().is_empty() {
+            String::new()
+        } else {
+            let conditions = self
+                .solution
+                .conditions()
+                .iter()
+                .map(Self::condition_html)
+                .collect::<Vec<_>>()
+                .join(", ");
+            format!("<div><strong>where</strong> {conditions}</div>")
+        };
+
+        format!(
+            "<div class=\"symbolica-solution\"><div class=\"symbolica-solution-values\">\
+             {rows}</div>{conditions}</div>"
+        )
+    }
+
+    /// Render this solution as LaTeX in notebook environments.
+    fn _repr_latex_(&self) -> String {
+        let values = self
+            .sorted_values()
+            .into_iter()
+            .map(|(variable, value)| {
+                format!(
+                    "{} &= {}",
+                    Self::atom_latex(&variable.to_atom()),
+                    Self::atom_latex(value),
+                )
+            })
+            .collect::<Vec<_>>()
+            .join(" \\\\ ");
+        let conditions = if self.solution.conditions().is_empty() {
+            String::new()
+        } else {
+            let conditions = self
+                .solution
+                .conditions()
+                .iter()
+                .map(Self::condition_latex)
+                .collect::<Vec<_>>()
+                .join(",\\; ");
+            format!("\\quad\\text{{where }} {conditions}")
+        };
+        format!("$$\\left\\{{\\begin{{aligned}} {values} \\end{{aligned}}\\right. {conditions}$$")
+    }
+
+    /// Render this solution with IPython's pretty printer.
+    fn _repr_pretty_(&self, pretty: &Bound<'_, PyAny>, cycle: bool) -> PyResult<()> {
+        let text = if cycle {
+            "...".to_owned()
+        } else {
+            self.solution.to_string()
+        };
+        pretty.call_method1("text", (text,))?;
+        Ok(())
+    }
+}
+
 impl From<PythonParseMode> for ParseMode {
     fn from(mode: PythonParseMode) -> Self {
         match mode {
@@ -395,6 +769,8 @@ pub fn create_symbolica_module<'a, 'b>(
     m.add_class::<PythonSymbolAttribute>()?;
     m.add_class::<PythonParseMode>()?;
     m.add_class::<PythonSolveDomain>()?;
+    m.add_class::<PythonSolutionCondition>()?;
+    m.add_class::<PythonSolution>()?;
     m.add_class::<PythonPrintMode>()?;
     m.add_class::<PythonCondition>()?;
     m.add_class::<PythonReplacement>()?;
