@@ -7078,6 +7078,22 @@ impl PythonExpression {
     ///
     /// If a `minimal_poly` is provided, the Galois field will be created with `minimal_poly` as the minimal polynomial.
     ///
+    /// Set `extensions` to an empty sequence to automatically place algebraic
+    /// coefficients in a common number field. Additional generators in the
+    /// sequence are adjoined to that field. When `extensions` is `None`,
+    /// algebraic expressions such as `sqrt(2)` remain independent polynomial
+    /// variables, preserving the default behavior.
+    ///
+    /// Examples
+    /// --------
+    /// >>> from symbolica import E, S
+    /// >>> x = S('x')
+    /// >>> default = E('x+sqrt(2)').to_polynomial()
+    /// >>> sqrt_2_is_a_variable = E('sqrt(2)') in default.get_variables()
+    /// >>> automatic = E('x+sqrt(2)').to_polynomial(extensions=[])
+    /// >>> automatic.get_variables() == [x]
+    /// True
+    ///
     /// Parameters
     /// ----------
     /// modulus: int
@@ -7088,14 +7104,19 @@ impl PythonExpression {
     ///     The minimal polynomial that defines the algebraic extension.
     /// vars: Sequence[Expression] | None
     ///     The variables treated as polynomial variables, in the given order.
+    /// extensions: Sequence[Expression] | None
+    ///     If set, automatically construct an algebraic number field and
+    ///     adjoin the supplied generators. An empty sequence enables automatic
+    ///     discovery without adjoining additional generators.
     #[gen_stub(skip)]
-    #[pyo3(signature = (modulus = None, power = None, minimal_poly = None, vars = None))]
+    #[pyo3(signature = (modulus = None, power = None, minimal_poly = None, vars = None, *, extensions = None))]
     pub fn to_polynomial(
         &self,
         modulus: Option<u64>,
         mut power: Option<(u16, Symbol)>,
         minimal_poly: Option<PythonPolynomial>,
         vars: Option<Vec<PythonExpression>>,
+        extensions: Option<Vec<ConvertibleToExpression>>,
         py: Python,
     ) -> PyResult<Py<PyAny>> {
         let mut var_map: Vec<PolyVariable> = vec![];
@@ -7114,6 +7135,36 @@ impl PythonExpression {
         } else {
             Some(Arc::new(var_map))
         };
+
+        if let Some(extensions) = extensions {
+            if modulus.is_some() || power.is_some() || minimal_poly.is_some() {
+                return Err(exceptions::PyValueError::new_err(
+                    "extensions cannot be combined with modulus, power, or minimal_poly",
+                ));
+            }
+
+            let generators = extensions
+                .into_iter()
+                .map(|generator| generator.to_expression().expr)
+                .collect::<Vec<_>>();
+            let mut context = AlgebraicContext::from_atom(self.expr.as_view())
+                .map_err(exceptions::PyValueError::new_err)?;
+            context
+                .adjoin_generators(&generators)
+                .map_err(exceptions::PyValueError::new_err)?;
+            if !context.is_trivial() {
+                let generator = context.field().generator();
+                if let Some(atom) = context.atom_for_element(&generator)
+                    && let Ok(variable) = PolyVariable::try_from(atom)
+                {
+                    context.rename_generator(variable);
+                }
+            }
+            let poly = context
+                .to_polynomial::<u16>(self.expr.as_view(), var_map)
+                .map_err(exceptions::PyValueError::new_err)?;
+            return PythonNumberFieldPolynomial { poly }.into_py_any(py);
+        }
 
         if power.is_some() && modulus.is_none() {
             return Err(exceptions::PyValueError::new_err(
@@ -9014,10 +9065,52 @@ submit! {
                 name: "to_polynomial",
                 parameters: &[
                     ParameterInfo {
+                        name: "extensions",
+                        kind: ParameterKind::KeywordOnly,
+                        default: ParameterDefault::None,
+                        type_info: || Vec::<ConvertibleToExpression>::type_input(),
+                    },
+                    ParameterInfo {
+                        name: "vars",
+                        kind: ParameterKind::KeywordOnly,
+                        default: ParameterDefault::Expr(NONE_ARG),
+                        type_info: || Option::<Vec<PythonExpression>>::type_input(),
+                    },
+                ],
+                r#type: MethodType::Instance,
+                r#return: || PythonNumberFieldPolynomial::type_output(),
+                doc:
+                r#"Convert the expression to a polynomial over an automatically constructed algebraic number field.
+
+An empty `extensions` sequence discovers algebraic coefficients already in the
+expression. Any supplied generators are adjoined to the discovered field.
+
+Parameters
+----------
+extensions: Sequence[Expression]
+    Additional algebraic generators to adjoin. Use an empty sequence for
+    automatic discovery only.
+vars: Sequence[Expression] | None
+    The variables treated as polynomial variables, in the given order."#,
+                is_async: false,
+                deprecated: None,
+                type_ignored: None,
+                is_overload: true,
+            },
+            MethodInfo {
+                name: "to_polynomial",
+                parameters: &[
+                    ParameterInfo {
                         name: "vars",
                         kind: ParameterKind::PositionalOrKeyword,
                         default: ParameterDefault::Expr(NONE_ARG),
                         type_info: || Option::<Vec<PythonExpression>>::type_input(),
+                    },
+                    ParameterInfo {
+                        name: "extensions",
+                        kind: ParameterKind::KeywordOnly,
+                        default: ParameterDefault::Expr(NONE_ARG),
+                        type_info: TypeInfo::none,
                     },
                 ],
                 r#type: MethodType::Instance,
@@ -9049,6 +9142,12 @@ vars: Sequence[Expression] | None
                         kind: ParameterKind::PositionalOrKeyword,
                         default: ParameterDefault::Expr(NONE_ARG),
                         type_info: || Option::<Vec<PythonExpression>>::type_input(),
+                    },
+                    ParameterInfo {
+                        name: "extensions",
+                        kind: ParameterKind::KeywordOnly,
+                        default: ParameterDefault::Expr(NONE_ARG),
+                        type_info: TypeInfo::none,
                     },
                 ],
                 r#type: MethodType::Instance,
@@ -9097,6 +9196,12 @@ vars: Sequence[Expression] | None
                         kind: ParameterKind::PositionalOrKeyword,
                         default: ParameterDefault::Expr(NONE_ARG),
                         type_info: || Option::<Vec<PythonExpression>>::type_input(),
+                    },
+                    ParameterInfo {
+                        name: "extensions",
+                        kind: ParameterKind::KeywordOnly,
+                        default: ParameterDefault::Expr(NONE_ARG),
+                        type_info: TypeInfo::none,
                     },
                 ],
                 r#type: MethodType::Instance,

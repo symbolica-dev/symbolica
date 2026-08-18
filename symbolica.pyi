@@ -3199,7 +3199,34 @@ class Expression:
         """
 
     @overload
-    def to_polynomial(self, vars: Sequence[Expression] | None = None) -> Polynomial:
+    def to_polynomial(
+        self,
+        *,
+        extensions: Sequence[Expression],
+        vars: Sequence[Expression] | None = None,
+    ) -> NumberFieldPolynomial:
+        """
+        Convert the expression to a polynomial over an automatically constructed algebraic number field.
+
+        An empty `extensions` sequence discovers algebraic coefficients already in the
+        expression. Any supplied generators are adjoined to the discovered field.
+
+        Parameters
+        ----------
+        extensions: Sequence[Expression]
+            Additional algebraic generators to adjoin. Use an empty sequence for
+            automatic discovery only.
+        vars: Sequence[Expression] | None
+            The variables treated as polynomial variables, in the given order.
+        """
+
+    @overload
+    def to_polynomial(
+        self,
+        vars: Sequence[Expression] | None = None,
+        *,
+        extensions: None = None,
+    ) -> Polynomial:
         """
         Convert the expression to a polynomial, optionally, with the variable ordering specified in `vars`.
         All non-polynomial parts will be converted to new, independent variables.
@@ -3215,6 +3242,8 @@ class Expression:
         self,
         minimal_poly: Polynomial,
         vars: Sequence[Expression] | None = None,
+        *,
+        extensions: None = None,
     ) -> NumberFieldPolynomial:
         """
         Convert the expression to a polynomial, optionally, with the variables and the ordering specified in `vars`.
@@ -3238,6 +3267,8 @@ class Expression:
         power: tuple[int, Expression] | None = None,
         minimal_poly: Polynomial | None = None,
         vars: Sequence[Expression] | None = None,
+        *,
+        extensions: None = None,
     ) -> FiniteFieldPolynomial:
         """
         Convert the expression to a polynomial, optionally, with the variables and the ordering specified in `vars`.

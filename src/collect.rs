@@ -8,7 +8,7 @@ use numerica::domains::{
 use crate::{
     atom::{Add, Atom, AtomCore, AtomOrView, AtomView, Indeterminate, Symbol},
     coefficient::{Coefficient, CoefficientView},
-    domains::{algebraic_number::AlgebraicExtension, float::FloatLike, integer::Z, rational::Q},
+    domains::{algebraic::AlgebraicExtension, float::FloatLike, integer::Z, rational::Q},
     poly::{Exponent, factor::Factorize, polynomial::MultivariatePolynomial},
     state::Workspace,
     utils::Settable,
@@ -257,7 +257,7 @@ impl<'a> AtomView<'a> {
     /// Write the expression over a common denominator.
     pub fn together_into(&self, out: &mut Atom) {
         if self.has_complex_coefficients() {
-            let f = AlgebraicExtension::new_complex(Q);
+            let f = AlgebraicExtension::complex(Q);
             let f2 = FloatField::from_rep(Complex::new(Rational::zero(), Rational::one()));
             if let Ok(p) = self.try_to_factorized_rational_polynomial::<_, _, u32>(&f, &f, None) {
                 let num = Atom::num(Complex::new(
@@ -424,7 +424,7 @@ impl<'a> AtomView<'a> {
                 };
             }
 
-            let f = AlgebraicExtension::new_complex(Q);
+            let f = AlgebraicExtension::complex(Q);
             let f2 = FloatField::from_rep(Complex::new(Rational::zero(), Rational::one()));
             if let Ok(poly) = self.try_to_rational_polynomial::<_, _, u32>(&f, &f, None) {
                 if let Some(v) = poly.get_variables().iter().position(|v| v == x) {
@@ -508,7 +508,7 @@ impl<'a> AtomView<'a> {
     /// Write the expression as a sum of terms with minimal denominators in all variables.
     pub fn apart_multivariate_with_ws_into(&self, ws: &Workspace, out: &mut Atom) {
         if self.has_complex_coefficients() {
-            let f = AlgebraicExtension::new_complex(Q);
+            let f = AlgebraicExtension::complex(Q);
             let f2 = FloatField::from_rep(Complex::new(Rational::zero(), Rational::one()));
             if let Ok(poly) = self.try_to_rational_polynomial::<_, _, u32>(&f, &f, None) {
                 let mut a = ws.new_atom();
@@ -593,7 +593,7 @@ impl<'a> AtomView<'a> {
                 let mut den_changed = vec![];
                 let mut rest = vec![];
 
-                let complex = AlgebraicExtension::new_complex(Q);
+                let complex = AlgebraicExtension::complex(Q);
 
                 for a in m {
                     if let AtomView::Pow(p) = a {
@@ -781,7 +781,7 @@ impl<'a> AtomView<'a> {
 
     /// Factor the expression over complex rationals.
     pub fn factor_complex(&self) -> Atom {
-        let f = AlgebraicExtension::new_complex(Q);
+        let f = AlgebraicExtension::complex(Q);
         let f2 = FloatField::from_rep(Complex::new(Rational::zero(), Rational::one()));
         let Ok(r) = self.try_to_rational_polynomial::<_, _, u32>(&f, &f, None) else {
             return self.to_owned();
@@ -843,7 +843,7 @@ impl<'a> AtomView<'a> {
     /// Square-free factor the expression over the rationals.
     pub fn factor_square_free(&self) -> Atom {
         if self.has_complex_coefficients() {
-            let f = AlgebraicExtension::new_complex(Q);
+            let f = AlgebraicExtension::complex(Q);
             let f2 = FloatField::from_rep(Complex::new(Rational::zero(), Rational::one()));
             let Ok(r) = self.try_to_rational_polynomial::<_, _, u32>(&f, &f, None) else {
                 return self.to_owned();

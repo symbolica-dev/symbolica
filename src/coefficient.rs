@@ -26,7 +26,7 @@ use crate::{
     atom::{Atom, AtomCore, AtomView, Symbol},
     domains::{
         EuclideanDomain, Field, InternalOrdering, Ring, RingOps, Set,
-        algebraic_number::AlgebraicExtension,
+        algebraic::AlgebraicExtension,
         atom::AtomField,
         backend::float::Constant,
         backend::integer::from_lsf_bytes,

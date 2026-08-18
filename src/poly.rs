@@ -40,6 +40,21 @@ use self::polynomial::MultivariatePolynomial;
 
 pub(crate) const INLINED_EXPONENTS: usize = 6;
 
+/// A polynomial coefficient that can be converted to a Symbolica expression using its ring.
+pub trait CoefficientToExpression<R: Ring> {
+    /// Write this coefficient as an expression to `out`.
+    fn coefficient_to_expression(&self, ring: &R, out: &mut Atom);
+}
+
+impl<R: Ring, T> CoefficientToExpression<R> for T
+where
+    T: Clone + Into<Coefficient>,
+{
+    fn coefficient_to_expression(&self, _ring: &R, out: &mut Atom) {
+        out.to_num(self.clone().into());
+    }
+}
+
 /// Errors that can occur while converting expressions to polynomial representations.
 #[derive(Clone, Debug, PartialEq, Eq, Hash)]
 pub enum PolynomialConversionError {
@@ -2261,7 +2276,7 @@ impl<R: Ring, E: Exponent, O: MonomialOrder> MultivariatePolynomial<R, E, O> {
 
     pub fn to_expression(&self) -> Atom
     where
-        R::Element: Into<Coefficient>,
+        R::Element: CoefficientToExpression<R>,
     {
         let mut out = Atom::default();
         self.to_expression_into(&mut out);
@@ -2270,7 +2285,7 @@ impl<R: Ring, E: Exponent, O: MonomialOrder> MultivariatePolynomial<R, E, O> {
 
     pub fn to_expression_into(&self, out: &mut Atom)
     where
-        R::Element: Into<Coefficient>,
+        R::Element: CoefficientToExpression<R>,
     {
         Workspace::get_local().with(|ws| self.to_expression_with_map(ws, &HashMap::default(), out));
     }
@@ -2281,7 +2296,7 @@ impl<R: Ring, E: Exponent, O: MonomialOrder> MultivariatePolynomial<R, E, O> {
         map: &HashMap<PolyVariable, AtomView>,
         out: &mut Atom,
     ) where
-        R::Element: Into<Coefficient>,
+        R::Element: CoefficientToExpression<R>,
     {
         if self.is_zero() {
             out.set_from_view(&workspace.new_num(0).as_view());
@@ -2297,12 +2312,17 @@ impl<R: Ring, E: Exponent, O: MonomialOrder> MultivariatePolynomial<R, E, O> {
         let vars: Vec<_> = self
             .variables()
             .iter()
-            .map(|v| {
+            .enumerate()
+            .map(|(index, v)| {
+                if self.degree(index) == E::zero() {
+                    return None;
+                }
+
                 if let PolyVariable::Temporary(_) = v {
                     let a = map.get(v).expect("Variable missing from map");
-                    a.to_owned()
+                    Some(a.to_owned())
                 } else {
-                    v.clone().into()
+                    Some(v.clone().into())
                 }
             })
             .collect();
@@ -2317,6 +2337,9 @@ impl<R: Ring, E: Exponent, O: MonomialOrder> MultivariatePolynomial<R, E, O> {
                 let var = &vars[*i];
                 let pow = monomial.exponents[*i];
                 if pow != E::zero() {
+                    let var = var
+                        .as_ref()
+                        .expect("an active polynomial variable must have an expression");
                     if pow != E::one() {
                         num_h.to_num(pow.to_i32());
                         pow_h.to_pow(var.as_view(), num_h.as_view());
@@ -2327,8 +2350,9 @@ impl<R: Ring, E: Exponent, O: MonomialOrder> MultivariatePolynomial<R, E, O> {
                 }
             }
 
-            let number = monomial.coefficient.clone().into();
-            num_h.to_num(number);
+            monomial
+                .coefficient
+                .coefficient_to_expression(&self.ring(), &mut num_h);
             mul.extend(num_h.as_view());
             add.extend(mul_h.as_view());
         }
@@ -2412,7 +2436,7 @@ impl<R: Ring, E: Exponent, O: MonomialOrder> MultivariatePolynomial<R, E, O> {
 impl<R: Ring, E: PositiveExponent> RationalPolynomial<R, E> {
     pub fn to_expression(&self) -> Atom
     where
-        R::Element: Into<Coefficient>,
+        R::Element: CoefficientToExpression<R>,
     {
         let mut out = Atom::default();
         self.to_expression_into(&mut out);
@@ -2421,7 +2445,7 @@ impl<R: Ring, E: PositiveExponent> RationalPolynomial<R, E> {
 
     pub fn to_expression_into(&self, out: &mut Atom)
     where
-        R::Element: Into<Coefficient>,
+        R::Element: CoefficientToExpression<R>,
     {
         Workspace::get_local().with(|ws| self.to_expression_with_map(ws, &HashMap::default(), out));
     }
@@ -2447,7 +2471,7 @@ impl<R: Ring, E: PositiveExponent> RationalPolynomial<R, E> {
         map: &HashMap<PolyVariable, AtomView>,
         out: &mut Atom,
     ) where
-        R::Element: Into<Coefficient>,
+        R::Element: CoefficientToExpression<R>,
     {
         if self.denominator.is_one() {
             self.numerator.to_expression_with_map(workspace, map, out);
