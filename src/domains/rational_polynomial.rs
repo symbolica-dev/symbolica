@@ -1540,7 +1540,7 @@ where
         let mut hs = vec![];
         for (d, (p, p_pow)) in deltas.into_iter().zip(&fs) {
             let p_diff = p.derivative();
-            let (_, s, t) = p.eea(&p_diff);
+            let (_, s, t) = p.extended_gcd(&p_diff);
 
             let p_full = Self::from_univariate(p.clone());
 
@@ -1662,7 +1662,7 @@ where
                 // all other variables and solve a diophantine equation
                 let lcoeff = bivar_poly.to_univariate(var).lcoeff();
                 let aa = lcoeff.to_univariate_from_univariate(new_var);
-                let (_, s, _) = aa.eea(&def_uni);
+                let (_, s, _) = aa.extended_gcd(&def_uni);
 
                 // convert the s to a multivariate polynomial and multiply with the bivariate polynomial
                 // and mod with the defining polynomial

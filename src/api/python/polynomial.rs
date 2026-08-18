@@ -81,17 +81,17 @@ impl PythonIsolatedRoot {
                 "Root refinement tolerance must be positive",
             ));
         }
-        Ok(self.root.clone().refine(&tolerance).into())
+        Ok(self.root.clone().refined(&tolerance).into())
     }
 
     /// Resolve and cache the root's exact relationship to the coordinate axes.
     pub fn location(&mut self) -> PythonRootLocation {
-        self.root.location().into()
+        self.root.classify_location().into()
     }
 
     /// Determine whether this root lies on the positive real axis.
     pub fn is_positive(&mut self) -> bool {
-        self.root.is_positive()
+        self.root.is_positive_real()
     }
 
     fn __repr__(&self) -> String {

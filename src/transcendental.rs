@@ -719,7 +719,7 @@ fn root_numeric_eval(tags: &[AtomView], prec: u32) -> Result<Complex<Float>, Str
             poly.degree()
         ));
     };
-    let location = root.location();
+    let location = root.classify_location();
 
     let mut value = root.to_float_center(prec);
     if matches!(location, RootLocation::Imaginary | RootLocation::Zero) {
