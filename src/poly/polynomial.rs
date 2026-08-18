@@ -10,7 +10,7 @@ use std::mem;
 use std::ops::{Add, Div, Mul, Neg, Sub};
 use std::sync::Arc;
 
-use crate::domains::algebraic_number::AlgebraicExtension;
+use crate::domains::algebraic::AlgebraicExtension;
 use crate::domains::float::FloatLike;
 use crate::domains::integer::{Integer, IntegerRing};
 use crate::domains::rational::{Fraction, FractionField, FractionNormalization, Q, RationalField};
@@ -3550,7 +3550,7 @@ impl<F: EuclideanDomain, E: PositiveExponent> MultivariatePolynomial<F, E, LexOr
         let var = &field.poly().get_vars_ref()[0];
         let Some(var_index) = self.get_vars_ref().iter().position(|x| x == var) else {
             return self.map_coeff(
-                |c| field.to_element(field.poly().constant(c.clone())),
+                |c| field.element_from_polynomial(field.poly().constant(c.clone())),
                 field.clone(),
             );
         };
@@ -3573,7 +3573,7 @@ impl<F: EuclideanDomain, E: PositiveExponent> MultivariatePolynomial<F, E, LexOr
                 .collect();
             c2.coefficients = c.coefficients;
 
-            poly.append_monomial(field.to_element(c2), &e);
+            poly.append_monomial(field.element_from_polynomial(c2), &e);
         }
         poly
     }
@@ -4941,7 +4941,7 @@ mod test {
     use crate::{
         atom::AtomCore,
         domains::{
-            algebraic_number::AlgebraicExtension,
+            algebraic::AlgebraicExtension,
             finite_field::{Zp, Zp64},
             integer::{IntegerRing, Z},
             rational::{Q, RationalField},

@@ -700,6 +700,7 @@ impl UnivariatePolynomial<RationalField> {
             .to_multi_prec_float(num_prec)
     }
 
+    /// Test if a disk contains a single root of the polynomial using Rouché's theorem.
     fn disk_contains_one_root(
         poly: &UnivariatePolynomial<FloatField<Complex<Rational>>>,
         center: &Complex<Rational>,
@@ -1847,7 +1848,7 @@ impl UnivariatePolynomial<ExactComplexField> {
         if !c.im.is_zero() {
             poly = poly + field.poly().monomial(c.im.clone(), vec![1]);
         }
-        field.to_element(poly)
+        field.element_from_polynomial(poly)
     }
 
     fn algebraic_to_complex_rational(c: &AlgebraicNumber<Q>) -> Complex<Rational> {
@@ -1946,7 +1947,7 @@ impl UnivariatePolynomial<ExactComplexField> {
 
     fn build_root_layout(&self) -> RootLayout {
         let complex_field = FloatField::from_rep(Complex::from(Rational::one()));
-        let algebraic_field = AlgebraicExtension::new_complex(Q);
+        let algebraic_field = AlgebraicExtension::complex(Q);
         let algebraic_poly = self.map_coeff(
             |c| Self::complex_rational_to_algebraic(&algebraic_field, c),
             algebraic_field.clone(),

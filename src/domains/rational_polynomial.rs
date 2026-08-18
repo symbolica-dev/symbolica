@@ -14,7 +14,7 @@ use ahash::HashMap;
 use crate::{
     domains::{
         RingOps, Set,
-        algebraic_number::AlgebraicExtension,
+        algebraic::AlgebraicExtension,
         float::{FloatField, SingleFloat},
     },
     poly::{

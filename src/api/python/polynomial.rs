@@ -1940,12 +1940,14 @@ impl PythonPolynomial {
     ///     The minimal polynomial that defines the algebraic extension.
     pub fn simplify_algebraic_number(&self, minimal_poly: Self) -> PyResult<Self> {
         let a = AlgebraicExtension::new(minimal_poly.poly);
-        let m = a.try_to_element(self.poly.clone()).map_err(|e| {
-            exceptions::PyValueError::new_err(format!(
-                "Could not convert polynomial to algebraic number: {}",
-                e
-            ))
-        })?;
+        let m = a
+            .try_element_from_polynomial(self.poly.clone())
+            .map_err(|e| {
+                exceptions::PyValueError::new_err(format!(
+                    "Could not convert polynomial to algebraic number: {}",
+                    e
+                ))
+            })?;
         let poly_nf = a.minimal_polynomial_of_element(&m);
 
         Ok(Self { poly: poly_nf })
@@ -3222,12 +3224,14 @@ impl PythonFiniteFieldPolynomial {
     ///     The minimal polynomial that defines the algebraic extension.
     pub fn simplify_algebraic_number(&self, minimal_poly: Self) -> PyResult<Self> {
         let a = AlgebraicExtension::new(minimal_poly.poly);
-        let m = a.try_to_element(self.poly.clone()).map_err(|e| {
-            exceptions::PyValueError::new_err(format!(
-                "Could not convert polynomial to algebraic number: {}",
-                e
-            ))
-        })?;
+        let m = a
+            .try_element_from_polynomial(self.poly.clone())
+            .map_err(|e| {
+                exceptions::PyValueError::new_err(format!(
+                    "Could not convert polynomial to algebraic number: {}",
+                    e
+                ))
+            })?;
         let poly_nf = a.minimal_polynomial_of_element(&m);
 
         Ok(Self { poly: poly_nf })

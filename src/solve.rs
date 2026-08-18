@@ -16,7 +16,7 @@ use crate::{
     coefficient::{Coefficient, ConvertToRing},
     domains::{
         InternalOrdering, SelfRing,
-        algebraic_number::AlgebraicContext,
+        algebraic::AlgebraicContext,
         float::{FloatField, Real, SingleFloat},
         integer::Z,
         rational::Q,
@@ -1651,7 +1651,7 @@ mod test {
         atom::{Atom, AtomCore, AtomView, representation::InlineVar},
         domains::{
             Ring,
-            algebraic_number::AlgebraicContext,
+            algebraic::AlgebraicContext,
             float::{Complex, F64, Real},
             integer::Z,
             rational::Q,

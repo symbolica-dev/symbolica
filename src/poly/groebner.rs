@@ -53,7 +53,7 @@ use crate::{
     atom::{Atom, AtomCore},
     domains::{
         Field, InternalOrdering, Ring, RingOps, Set,
-        algebraic_number::{AlgebraicExtension, AlgebraicNumber, AlgebraicQuotient},
+        algebraic::{AlgebraicExtension, AlgebraicNumber, AlgebraicQuotient},
         finite_field::{FiniteFieldCore, Zp},
         integer::IntegerRing,
         rational::{Q, Rational, RationalField},
@@ -366,7 +366,7 @@ impl<E: PositiveExponent> ParametricExtension<E> {
         for term in polynomial {
             let coefficient_polynomial =
                 Self::specialize_polynomial(term.coefficient.poly(), values)?;
-            let coefficient = field.try_to_element(coefficient_polynomial)?;
+            let coefficient = field.try_element_from_polynomial(coefficient_polynomial)?;
             result.append_monomial(coefficient, term.exponents);
         }
         Ok(result)
@@ -404,7 +404,7 @@ impl<E: PositiveExponent> ParametricExtension<E> {
                         format!("Could not isolate conjugate {conjugate} of {polynomial}")
                     })?;
 
-                Ok(AlgebraicExtension::new_with_embedding(
+                Ok(AlgebraicExtension::from_polynomial_with_embedding(
                     polynomial, *conjugate,
                 ))
             }
@@ -441,7 +441,8 @@ impl<E: PositiveExponent> ParametricExtension<E> {
                     ));
                 }
 
-                let extension = AlgebraicExtension::new_with_embedding(polynomial, conjugate);
+                let extension =
+                    AlgebraicExtension::from_polynomial_with_embedding(polynomial, conjugate);
                 let variable = self.quotient.poly().get_vars_ref()[0].clone();
                 Ok(base_field
                     .adjoin_with_embedding(&extension, Some(variable))
@@ -457,7 +458,7 @@ impl<E: PositiveExponent> ParametricExtension<E> {
         field: &AlgebraicExtension<RationalField>,
     ) -> Result<AlgebraicNumber<RationalField>, String> {
         let polynomial = Self::specialize_polynomial(value.poly(), values)?;
-        field.try_to_element(polynomial)
+        field.try_element_from_polynomial(polynomial)
     }
 
     fn primitive_atom(&self, conjugates: &[usize]) -> Atom {
@@ -1564,7 +1565,7 @@ impl<E: PositiveExponent> GroebnerBasis<RationalField, E, LexOrder> {
                 .or_insert(coefficient);
         }
 
-        let variable = solution.field.get_new_var();
+        let variable = solution.field.fresh_variable();
         let mut result = MultivariatePolynomial::new(
             &solution.field,
             Some(coefficients.len()),
@@ -1606,8 +1607,8 @@ impl<E: PositiveExponent> GroebnerBasis<RationalField, E, LexOrder> {
         embedding: usize,
         target: PolyVariable,
     ) -> PolynomialSolution<RationalField> {
-        let extension = AlgebraicExtension::new_with_embedding(polynomial, embedding);
-        let new_variable = solution.field.get_new_var();
+        let extension = AlgebraicExtension::from_polynomial_with_embedding(polynomial, embedding);
+        let new_variable = solution.field.fresh_variable();
         let (field, old_generator, new_generator, new_generator_field) = solution
             .field
             .adjoin_with_embedding_and_generator_field(&extension, Some(new_variable));
@@ -1724,7 +1725,8 @@ impl<E: PositiveExponent> GroebnerBasis<RationalField, E, LexOrder> {
 
             let factor = Self::rational_univariate(&factor, last)?.make_monic();
             for embedding in 0..degree {
-                let field = AlgebraicExtension::new_with_embedding(factor.clone(), embedding);
+                let field =
+                    AlgebraicExtension::from_polynomial_with_embedding(factor.clone(), embedding);
                 let root = field.generator();
                 let mut values = HashMap::default();
                 values.insert(variables[last].clone(), root);
@@ -1957,7 +1959,7 @@ impl<E: PositiveExponent> GroebnerBasis<RationalPolynomialField<IntegerRing, E>,
         for (square_free, _) in Self::quotient_square_free_factors(polynomial) {
             let square_free =
                 square_free.map_coeff(|coefficient| coefficient.clone(), extension.clone());
-            let (variable, shift, shifted, norm) = square_free.norm_impl();
+            let (variable, shift, shifted, norm) = square_free.norm_with_shift_data();
             let norm_factors = Self::parametric_univariate_factors(&norm, variable)?;
 
             if norm_factors.len() == 1 {
@@ -2061,7 +2063,7 @@ impl<E: PositiveExponent> GroebnerBasis<RationalPolynomialField<IntegerRing, E>,
                 .or_insert(coefficient);
         }
 
-        let variable = field.get_new_var();
+        let variable = field.fresh_variable();
         let mut result =
             MultivariatePolynomial::new(field, Some(coefficients.len()), Arc::new(vec![variable]));
         let mut coefficients = coefficients.into_iter().collect::<Vec<_>>();
@@ -2378,7 +2380,7 @@ impl<E: PositiveExponent> GroebnerBasis<RationalPolynomialField<IntegerRing, E>,
                         }
 
                         let old_extension = branch.extension.clone();
-                        let new_variable = old_extension.quotient().get_new_var();
+                        let new_variable = old_extension.quotient().fresh_variable();
                         let (field, old_generator, new_generator, shift) = old_extension
                             .quotient()
                             .adjoin_formal_with_shift(&factor, Some(new_variable));
@@ -2818,9 +2820,7 @@ mod test {
 
     use crate::{
         atom::{Atom, AtomCore},
-        domains::{
-            Ring, RingOps, algebraic_number::AlgebraicContext, finite_field::Zp, rational::Q,
-        },
+        domains::{Ring, RingOps, algebraic::AlgebraicContext, finite_field::Zp, rational::Q},
         parse,
         poly::{
             GrevLexOrder, LexOrder, PolyVariable, groebner::GroebnerBasis,

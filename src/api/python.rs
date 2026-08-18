@@ -66,7 +66,7 @@ use crate::{
     coefficient::{Coefficient, CoefficientView, ConvertToRing},
     domains::{
         Ring, RingOps, SelfRing,
-        algebraic_number::AlgebraicExtension,
+        algebraic::AlgebraicExtension,
         atom::AtomField,
         dual::HyperDual,
         finite_field::{FiniteFieldCore, PrimeIteratorU64, ToFiniteField, Z2, Zp64},

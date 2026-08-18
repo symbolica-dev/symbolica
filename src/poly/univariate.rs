@@ -15,7 +15,7 @@ use crate::{
     atom::Atom,
     domains::{
         EuclideanDomain, Field, InternalOrdering, Ring, RingOps, SelfRing, Set,
-        algebraic_number::{AlgebraicExtension, AlgebraicNumber},
+        algebraic::{AlgebraicExtension, AlgebraicNumber},
         float::{Complex, FloatField, FloatLike, Real, SingleFloat},
         integer::{Integer, IntegerRing, Z},
         rational::{Q, Rational, RationalField},
