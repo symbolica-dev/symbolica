@@ -3,17 +3,21 @@ use std::sync::Arc;
 use symbolica::prelude::*;
 
 fn solve() {
-    let x = symbol!("x").into();
-    let y = symbol!("y").into();
-    let z = symbol!("z").into();
+    let x: InlineVar = symbol!("x").into();
+    let y: InlineVar = symbol!("y").into();
+    let z: InlineVar = symbol!("z").into();
     let eqs = ["c*x + f(c)*y + z - 1", "x + c*y + z/c - 2", "(c-1)x + c*z"];
 
     let system: Vec<_> = eqs.iter().map(|e| parse!(e)).collect();
 
-    let sol = AtomView::solve_linear_system::<u8, _, InlineVar>(&system, &[x, y, z]).unwrap();
+    let variables = [x, y, z];
+    let solutions = AtomView::solve(&system)
+        .wrt_with_exponent::<u8, _>(&variables)
+        .unwrap();
+    let solution = &solutions[0];
 
-    for (v, s) in ["x", "y", "z"].iter().zip(&sol) {
-        println!("{v} = {s}");
+    for (variable, value) in solution {
+        println!("{variable} = {value}");
     }
 }
 

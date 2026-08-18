@@ -104,10 +104,12 @@ measurement angles using `replace`, and solve the resulting linear system:
 
 τ_model = τ_small.to_expression() + τ0
 
-κ_fit, τ0_fit = Expression.solve_linear_system([
+solution = Expression.solve([
     τ_model.replace(θ, θ1) - τ1,
     τ_model.replace(θ, θ2) - τ2,
-], [κ, τ0])
+], [κ, τ0])[0]
+
+κ_fit, τ0_fit = solution[κ], solution[τ0]
 
 κ_fit
 ```

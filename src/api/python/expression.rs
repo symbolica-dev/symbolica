@@ -7822,59 +7822,6 @@ impl PythonExpression {
         }
     }
 
-    /// Solve a linear system in the variables `variables`, where each expression
-    /// in the system is understood to yield 0.
-    ///
-    /// If the system is underdetermined, a partial solution is returned
-    /// where each bound variable is a linear combination of the free
-    /// variables. The free variables are chosen such that they have the highest index in the `vars` list.
-    ///
-    /// Examples
-    /// --------
-    /// >>> from symbolica import *
-    /// >>> x, y, c = S('x', 'y', 'c')
-    /// >>> f = S('f')
-    /// >>> x_r, y_r = Expression.solve_linear_system([f(c)*x + y/c - 1, y-c/2], [x, y])
-    /// >>> print('x =', x_r, ', y =', y_r)
-    ///
-    /// Parameters
-    /// ----------
-    /// system: Sequence[Expression]
-    ///     The equations or polynomials that define the system.
-    /// variables: Sequence[Expression]
-    ///     The variables to solve for, in order.
-    /// warn_if_underdetermined: bool
-    ///     Whether to warn when the system is underdetermined.
-    #[pyo3(signature = (system, variables, warn_if_underdetermined = true))]
-    #[classmethod]
-    pub fn solve_linear_system(
-        _cls: &Bound<'_, PyType>,
-        system: Vec<ConvertibleToExpression>,
-        variables: Vec<PythonExpression>,
-        warn_if_underdetermined: bool,
-    ) -> PyResult<Vec<PythonExpression>> {
-        let system: Vec<_> = system.into_iter().map(|x| x.to_expression().expr).collect();
-        let vars: Vec<_> = variables.into_iter().map(|v| v.expr).collect();
-
-        match AtomView::solve_linear_system::<u16, _, Atom>(&system, &vars) {
-            Ok(res) => Ok(res.into_iter().map(|x| x.into()).collect()),
-            Err(SolveError::Underdetermined {
-                rank,
-                partial_solution,
-            }) => {
-                if warn_if_underdetermined {
-                    warn!(
-                        "The system is underdetermined (rank {rank} < size {})",
-                        vars.len()
-                    );
-                }
-
-                Ok(partial_solution.into_iter().map(|x| x.into()).collect())
-            }
-            Err(e) => Err(exceptions::PyValueError::new_err(e.to_string())),
-        }
-    }
-
     /// Find the root of an expression in `x` numerically over the reals using Newton's method.
     /// Use `init` as the initial guess for the root. This method uses the same precision as `init`.
     ///

@@ -1,6 +1,6 @@
 //! Solve systems of equations.
 //!
-//! See [AtomCore::solve_linear_system] and [AtomCore::nsolve_system].
+//! See [AtomCore::solve] and [AtomCore::nsolve_system].
 
 use std::{ops::Neg, sync::Arc};
 
@@ -935,8 +935,8 @@ impl AtomView<'_> {
 
     /// Solve a system exactly for `vars`.
     ///
-    /// Linear systems are delegated to [`Self::solve_linear_system`]. Polynomial
-    /// nonlinear systems over `Q` or `Q(parameters)` are first converted to a
+    /// Linear systems use a dedicated exact fast path. Polynomial nonlinear
+    /// systems over `Q` or `Q(parameters)` are first converted to a
     /// grevlex Gröbner basis, changed to lex order with FGLM, and solved by
     /// triangular back-substitution. For a positive-dimensional nonlinear
     /// system, a maximal set of requested variables is treated as input
@@ -1352,7 +1352,7 @@ impl AtomView<'_> {
 
     /// Solve a system that is linear in `vars`, if possible.
     /// Each expression in `system` is understood to yield 0.
-    pub(crate) fn solve_linear_system<E: PositiveExponent, T1: AtomCore, T2: AtomCore>(
+    fn solve_linear_system<E: PositiveExponent, T1: AtomCore, T2: AtomCore>(
         system: &[T1],
         vars: &[T2],
     ) -> Result<Vec<Atom>, SolveError> {
