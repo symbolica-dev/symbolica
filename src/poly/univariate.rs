@@ -814,7 +814,6 @@ mod roots;
 #[cfg(test)]
 mod tests;
 
-pub(crate) use roots::RootTransform;
 pub use roots::{ComplexDisk, ExactComplexPolynomial, IsolatedRoot, RootLocation};
 
 impl UnivariatePolynomial<IntegerRing> {

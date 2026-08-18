@@ -23,11 +23,8 @@ use crate::{
         },
     },
     poly::{
-        Exponent, IntoVariableMap, PolyVariable, PositiveExponent,
-        factor::Factorize,
-        gcd::PolynomialGCD,
-        polynomial::MultivariatePolynomial,
-        univariate::{RootLocation, RootTransform},
+        Exponent, IntoVariableMap, PolyVariable, PositiveExponent, factor::Factorize,
+        gcd::PolynomialGCD, polynomial::MultivariatePolynomial, univariate::RootLocation,
     },
     symbol,
     tensors::matrix::Matrix,
@@ -2592,14 +2589,6 @@ impl<R: Field + PolynomialGCD<E>, E: PositiveExponent>
 }
 
 impl AlgebraicExtension<Q> {
-    fn element_coefficients(element: &AlgebraicNumber<Q>) -> Vec<Rational> {
-        let mut coefficients = vec![Rational::zero(); element.poly.degree(0) as usize + 1];
-        for term in element.poly() {
-            coefficients[term.exponents[0] as usize] = term.coefficient.clone();
-        }
-        coefficients
-    }
-
     pub(crate) fn is_positive_real(&self, element: &AlgebraicNumber<Q>) -> Result<bool, String> {
         if self.is_zero(element) {
             return Ok(false);
@@ -2672,14 +2661,9 @@ impl AlgebraicExtension<Q> {
             .into_iter()
             .map(|(root, _)| root)
             .collect::<Vec<_>>();
-        let coefficients = Self::element_coefficients(element);
+        let element_polynomial = element.poly.to_univariate_from_univariate(0);
         extension_root
-            .matching_roots(
-                RootTransform::RationalPolynomial(&coefficients),
-                &mut roots,
-                RootTransform::Identity,
-                1,
-            )
+            .matching_roots(Some(&element_polynomial), &mut roots, None, 1)
             .map(|matches| matches[0])
             .map_err(|_| format!("Could not identify {} as a root of {}", element, polynomial))
     }
@@ -2917,12 +2901,12 @@ impl AlgebraicExtension<Q> {
             .into_iter()
             .map(|(root, _)| root)
             .collect::<Vec<_>>();
-        let old_generator_coefficients = Self::element_coefficients(&old_generator);
+        let old_generator_polynomial = old_generator.poly.to_univariate_from_univariate(0);
         let candidates = old_root
             .matching_roots(
-                RootTransform::Identity,
+                None,
                 &mut extension_roots,
-                RootTransform::RationalPolynomial(&old_generator_coefficients),
+                Some(&old_generator_polynomial),
                 extension_degree,
             )
             .unwrap_or_else(|error| {
@@ -2932,15 +2916,15 @@ impl AlgebraicExtension<Q> {
                 )
             });
 
-        let new_generator_coefficients = Self::element_coefficients(&new_generator);
+        let new_generator_polynomial = new_generator.poly.to_univariate_from_univariate(0);
         let mut ordered_candidates = candidates
             .into_iter()
             .map(|candidate| {
                 let new_generator_embedding = extension_roots[candidate]
                     .matching_roots(
-                        RootTransform::RationalPolynomial(&new_generator_coefficients),
+                        Some(&new_generator_polynomial),
                         &mut new_generator_roots,
-                        RootTransform::Identity,
+                        None,
                         1,
                     )
                     .map(|matches| matches[0])
@@ -3548,19 +3532,14 @@ impl Root<AlgebraicExtension<Q>> {
                     )
                 })?;
             candidate.order = Some(
-                root.matching_roots(
-                    RootTransform::Identity,
-                    &mut union_roots,
-                    RootTransform::Identity,
-                    1,
-                )
-                .map(|matches| matches[0])
-                .map_err(|_| {
-                    format!(
-                        "Could not canonically place root {} of {}",
-                        candidate.embedding, candidate.polynomial
-                    )
-                })?,
+                root.matching_roots(None, &mut union_roots, None, 1)
+                    .map(|matches| matches[0])
+                    .map_err(|_| {
+                        format!(
+                            "Could not canonically place root {} of {}",
+                            candidate.embedding, candidate.polynomial
+                        )
+                    })?,
             );
         }
         candidates.sort_by_key(|candidate| candidate.order.unwrap());

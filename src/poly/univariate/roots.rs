@@ -7,6 +7,7 @@
 
 use super::*;
 
+/// Exact complex-rational coefficient field used by root isolation.
 type ExactComplexField = FloatField<Complex<Rational>>;
 
 /// A dense univariate polynomial with exact complex-rational coefficients.
@@ -56,18 +57,16 @@ struct CachedRoot {
     location: Option<RootLocation>,
 }
 
-/// A unique identifier for a root, consisting of its polynomial and index.
+/// A root and its multiplicity in a polynomial.
 #[derive(Clone)]
-struct RootReference {
+struct RootMultisetEntry {
     poly: Arc<ExactComplexPolynomial>,
     index: usize,
+    multiplicity: usize,
 }
 
-/// A collection of roots and their multiplicity.
-#[derive(Clone)]
-struct RootLayout {
-    roots: Vec<(RootReference, usize)>,
-}
+/// A canonically ordered collection of roots, potentially from multiple polynomials, and their multiplicity.
+type RootMultiset = Vec<RootMultisetEntry>;
 
 /// Intervals over which a real root is known to exist.
 #[derive(Clone)]
@@ -82,77 +81,89 @@ struct ProjectedRealRoot {
     interval: (Rational, Rational),
 }
 
-/// A key used to identify a polynomial in the root cache.
-#[derive(Clone, Eq, Hash, PartialEq)]
-enum PolynomialKey {
-    Rational(Vec<Rational>),
-    Complex(Vec<Complex<Rational>>),
-}
-
-/// Process-wide storage for reusable root certificates and polynomial layouts.
+/// Process-wide storage for reusable root certificates and root multisets.
 struct RootCache {
-    roots: RwLock<HashMap<PolynomialKey, Arc<RootSet>>>,
-    layouts: RwLock<HashMap<PolynomialKey, Arc<LayoutSlot>>>,
+    rational: PolynomialCache<Rational>,
+    complex: PolynomialCache<Complex<Rational>>,
 }
 
-struct RootSet {
-    roots: OnceLock<RwLock<Vec<CachedRoot>>>,
+/// Cached root data keyed by a polynomial.
+struct PolynomialCache<C> {
+    roots: RwLock<HashMap<Vec<C>, Arc<RootSetSlot>>>,
+    root_multisets: RwLock<HashMap<Vec<C>, Arc<RootMultisetSlot>>>,
 }
 
-struct LayoutSlot {
-    layout: OnceLock<RootLayout>,
-}
+/// A slot for a root set, used to lazily initialize the root set.
+type RootSetSlot = OnceLock<RwLock<Vec<CachedRoot>>>;
+/// A slot for a root multiset, used to lazily initialize the root multiset.
+type RootMultisetSlot = OnceLock<RootMultiset>;
 
-impl RootSet {
+impl<C: Clone + Eq + std::hash::Hash> PolynomialCache<C> {
+    /// Create an empty cache for one coefficient type.
     fn new() -> Self {
         Self {
-            roots: OnceLock::new(),
+            roots: RwLock::new(HashMap::new()),
+            root_multisets: RwLock::new(HashMap::new()),
         }
     }
-}
 
-impl LayoutSlot {
-    fn new() -> Self {
-        Self {
-            layout: OnceLock::new(),
+    /// Return the lazy root-set slot keyed by `polynomial`'s coefficients.
+    fn root_slot<R: Ring<Element = C>>(
+        &self,
+        polynomial: &UnivariatePolynomial<R>,
+    ) -> Arc<RootSetSlot> {
+        let coefficients = polynomial.coefficients();
+        if let Some(entry) = self.roots.read().unwrap().get(coefficients).cloned() {
+            return entry;
         }
+
+        let mut roots = self.roots.write().unwrap();
+        if let Some(entry) = roots.get(coefficients).cloned() {
+            return entry;
+        }
+
+        let entry = Arc::new(RootSetSlot::new());
+        roots.insert(coefficients.to_vec(), entry.clone());
+        entry
+    }
+
+    /// Return the lazy root-multiset slot keyed by `polynomial`'s coefficients.
+    fn root_multiset_slot<R: Ring<Element = C>>(
+        &self,
+        polynomial: &UnivariatePolynomial<R>,
+    ) -> Arc<RootMultisetSlot> {
+        let coefficients = polynomial.coefficients();
+        if let Some(entry) = self
+            .root_multisets
+            .read()
+            .unwrap()
+            .get(coefficients)
+            .cloned()
+        {
+            return entry;
+        }
+
+        let mut root_multisets = self.root_multisets.write().unwrap();
+        if let Some(entry) = root_multisets.get(coefficients).cloned() {
+            return entry;
+        }
+
+        let entry = Arc::new(RootMultisetSlot::new());
+        root_multisets.insert(coefficients.to_vec(), entry.clone());
+        entry
     }
 }
 
 impl RootCache {
+    /// Create empty rational and exact-complex polynomial caches.
     fn new() -> Self {
         Self {
-            roots: RwLock::new(HashMap::new()),
-            layouts: RwLock::new(HashMap::new()),
+            rational: PolynomialCache::new(),
+            complex: PolynomialCache::new(),
         }
     }
 
-    fn root_slot(&self, key: PolynomialKey) -> Arc<RootSet> {
-        if let Some(entry) = self.roots.read().unwrap().get(&key).cloned() {
-            return entry;
-        }
-
-        self.roots
-            .write()
-            .unwrap()
-            .entry(key)
-            .or_insert_with(|| Arc::new(RootSet::new()))
-            .clone()
-    }
-
-    fn layout_slot(&self, key: PolynomialKey) -> Arc<LayoutSlot> {
-        if let Some(entry) = self.layouts.read().unwrap().get(&key).cloned() {
-            return entry;
-        }
-
-        self.layouts
-            .write()
-            .unwrap()
-            .entry(key)
-            .or_insert_with(|| Arc::new(LayoutSlot::new()))
-            .clone()
-    }
-
+    /// Convert roots into canonically ordered cache records.
     fn cache_states(mut roots: Vec<IsolatedRoot>) -> Vec<CachedRoot> {
         UnivariatePolynomial::<Q>::sort_roots_canonically(&mut roots);
         roots
@@ -164,7 +175,8 @@ impl RootCache {
             .collect()
     }
 
-    fn isolate_defining_roots(
+    /// Isolate a square-free defining polynomial to the requested radius.
+    fn isolate_roots(
         poly: &ExactComplexPolynomial,
         target_radius: Option<&Rational>,
     ) -> Vec<IsolatedRoot> {
@@ -175,22 +187,21 @@ impl RootCache {
         }
     }
 
-    fn root_set(&self, poly: &ExactComplexPolynomial) -> Arc<RootSet> {
-        let key = if let Some(rational) = poly.try_map_to_rational() {
-            PolynomialKey::Rational(rational.coefficients)
+    /// Return the initialized root-set slot for a defining polynomial.
+    fn root_set(&self, poly: &ExactComplexPolynomial) -> Arc<RootSetSlot> {
+        let entry = if let Some(rational) = poly.try_map_to_rational() {
+            self.rational.root_slot(&rational)
         } else {
-            PolynomialKey::Complex(poly.coefficients.clone())
+            self.complex.root_slot(poly)
         };
-        let entry = self.root_slot(key);
-        entry.roots.get_or_init(|| {
-            RwLock::new(Self::cache_states(Self::isolate_defining_roots(poly, None)))
-        });
+        entry.get_or_init(|| RwLock::new(Self::cache_states(Self::isolate_roots(poly, None))));
         entry
     }
 
+    /// Copy one root certificate from the cache into an isolated-root value.
     fn root_snapshot(&self, poly: Arc<ExactComplexPolynomial>, index: usize) -> IsolatedRoot {
         let entry = self.root_set(&poly);
-        let roots = entry.roots.get().unwrap().read().unwrap();
+        let roots = entry.get().unwrap().read().unwrap();
         let state = roots
             .get(index)
             .unwrap_or_else(|| panic!("root index {index} is out of bounds for {poly}"));
@@ -202,9 +213,10 @@ impl RootCache {
         }
     }
 
+    /// Copy all root certificates for a defining polynomial from the cache.
     fn root_snapshots(&self, poly: Arc<ExactComplexPolynomial>) -> Vec<IsolatedRoot> {
         let entry = self.root_set(&poly);
-        let states = entry.roots.get().unwrap().read().unwrap();
+        let states = entry.get().unwrap().read().unwrap();
         states
             .iter()
             .enumerate()
@@ -217,10 +229,11 @@ impl RootCache {
             .collect()
     }
 
-    fn build_layout(
+    /// Combine roots of square-free factors into one canonical multiset.
+    fn build_root_multiset(
         &self,
         factors: impl IntoIterator<Item = (Arc<ExactComplexPolynomial>, usize)>,
-    ) -> RootLayout {
+    ) -> RootMultiset {
         let mut roots = Vec::new();
         let mut multiplicities = HashMap::new();
         for (poly, multiplicity) in factors {
@@ -234,26 +247,20 @@ impl RootCache {
             self.merge_root_certificate(root);
         }
 
-        RootLayout {
-            roots: roots
-                .into_iter()
-                .map(|root| {
-                    let multiplicity = multiplicities[&root.poly.coefficients];
-                    (
-                        RootReference {
-                            poly: root.poly,
-                            index: root.index,
-                        },
-                        multiplicity,
-                    )
-                })
-                .collect(),
-        }
+        roots
+            .into_iter()
+            .map(|root| RootMultisetEntry {
+                multiplicity: multiplicities[&root.poly.coefficients],
+                poly: root.poly,
+                index: root.index,
+            })
+            .collect()
     }
 
+    /// Refines the root to the given tolerance.
     fn refine_root(&self, root: &mut IsolatedRoot, tolerance: &Rational) {
         let entry = self.root_set(&root.poly);
-        let mut states = entry.roots.get().unwrap().write().unwrap();
+        let mut states = entry.get().unwrap().write().unwrap();
         let state = states.get(root.index).unwrap_or_else(|| {
             panic!(
                 "root index {} is out of bounds for {}",
@@ -267,8 +274,7 @@ impl RootCache {
             && root.enclosure.radius > *tolerance
             && !UnivariatePolynomial::<Q>::refine_root_to_tolerance(root, tolerance)
         {
-            let replacement =
-                Self::cache_states(Self::isolate_defining_roots(&root.poly, Some(tolerance)));
+            let replacement = Self::cache_states(Self::isolate_roots(&root.poly, Some(tolerance)));
             *states = replacement;
             let state = states.get(root.index).unwrap_or_else(|| {
                 panic!(
@@ -287,9 +293,10 @@ impl RootCache {
         };
     }
 
+    /// Merges the root certificate from the given root into the root set if it is more precise than the current state.
     fn merge_root_certificate(&self, root: &IsolatedRoot) {
         let entry = self.root_set(&root.poly);
-        let mut states = entry.roots.get().unwrap().write().unwrap();
+        let mut states = entry.get().unwrap().write().unwrap();
         let state = states.get_mut(root.index).unwrap_or_else(|| {
             panic!(
                 "root index {} is out of bounds for {}",
@@ -304,10 +311,11 @@ impl RootCache {
         }
     }
 
+    /// Classifies the root based on the root set state.
     fn classify_root(&self, root: &mut IsolatedRoot) {
         let entry = self.root_set(&root.poly);
         let mut roots = {
-            let states = entry.roots.get().unwrap().read().unwrap();
+            let states = entry.get().unwrap().read().unwrap();
             let state = states.get(root.index).unwrap_or_else(|| {
                 panic!(
                     "root index {} is out of bounds for {}",
@@ -334,7 +342,7 @@ impl RootCache {
 
         root.poly.classify_root_locations(&mut roots);
 
-        let mut states = entry.roots.get().unwrap().write().unwrap();
+        let mut states = entry.get().unwrap().write().unwrap();
         for resolved in roots {
             let state = &mut states[resolved.index];
             if state.location.is_none() {
@@ -346,50 +354,43 @@ impl RootCache {
         root.location = state.location;
     }
 
-    fn roots_in_layout(&self, layout: &RootLayout) -> Vec<(IsolatedRoot, usize)> {
-        layout
-            .roots
+    /// Materialize every distinct root and multiplicity in a cached multiset.
+    fn roots_in_multiset(&self, multiset: &RootMultiset) -> Vec<(IsolatedRoot, usize)> {
+        multiset
             .iter()
-            .map(|(identity, multiplicity)| {
-                let root = self.root_snapshot(identity.poly.clone(), identity.index);
-                (root, *multiplicity)
+            .map(|entry| {
+                let root = self.root_snapshot(entry.poly.clone(), entry.index);
+                (root, entry.multiplicity)
             })
             .collect()
     }
 
-    fn root_in_layout(&self, layout: &RootLayout, index: usize) -> Option<IsolatedRoot> {
+    /// Resolve an index that counts multiplicity to its distinct cached root.
+    fn root_in_multiset(&self, multiset: &RootMultiset, index: usize) -> Option<IsolatedRoot> {
         let mut seen = 0;
-        for (identity, multiplicity) in &layout.roots {
-            if index < seen + multiplicity {
-                return Some(self.root_snapshot(identity.poly.clone(), identity.index));
+        for entry in multiset {
+            if index < seen + entry.multiplicity {
+                return Some(self.root_snapshot(entry.poly.clone(), entry.index));
             }
-            seen += *multiplicity;
+            seen += entry.multiplicity;
         }
         None
     }
 }
 
+/// Get the global root cache.
 fn root_cache() -> &'static RootCache {
     static CACHE: LazyLock<RootCache> = LazyLock::new(RootCache::new);
     &CACHE
 }
 
-fn filter_real_roots(roots: Vec<(IsolatedRoot, usize)>) -> Vec<(IsolatedRoot, usize)> {
-    roots
-        .into_iter()
-        .filter_map(|(mut root, multiplicity)| {
-            let location = root.classify_location();
-            matches!(location, RootLocation::Real | RootLocation::Zero)
-                .then_some((root, multiplicity))
-        })
-        .collect()
-}
-
 impl ComplexDisk {
+    /// Return an upper bound for the complex norm used by disk estimates.
     fn norm_upper_bound(z: &Complex<Rational>) -> Rational {
         z.re.abs() + z.im.abs()
     }
 
+    /// Return a lower bound for the complex norm used by disk separation.
     fn norm_lower_bound(z: &Complex<Rational>) -> Rational {
         z.re.abs().max(z.im.abs())
     }
@@ -417,6 +418,7 @@ impl ComplexDisk {
 }
 
 impl RootLocation {
+    /// Add a proven coordinate-axis membership to an existing location.
     fn with_axis(location: Option<Self>, axis: CoordinateAxis) -> Self {
         match (location, axis) {
             (Some(Self::Imaginary | Self::Zero), CoordinateAxis::Real)
@@ -428,6 +430,7 @@ impl RootLocation {
 }
 
 impl CoordinateAxis {
+    /// Test whether an axis interval is certified to belong to `root`'s disk.
     fn contains_interval(self, interval: &(Rational, Rational), root: &IsolatedRoot) -> bool {
         let (center, distance_to_axis) = match self {
             Self::Real => (&root.enclosure.center.re, root.enclosure.center.im.abs()),
@@ -447,6 +450,7 @@ impl CoordinateAxis {
 }
 
 impl IsolatedRoot {
+    /// Construct the absolute tolerance `2^-binary_precision`.
     fn absolute_tolerance(binary_precision: u32) -> Rational {
         Rational::from((
             Integer::one(),
@@ -565,30 +569,18 @@ impl IsolatedRoot {
     }
 }
 
-/// A transformation whose value at an isolated root can be certified by ball arithmetic.
-#[derive(Clone, Copy)]
-pub(crate) enum RootTransform<'a> {
-    /// Leave the root unchanged.
-    Identity,
-    /// Evaluate a polynomial with rational coefficients, ordered from constant
-    /// to highest-degree coefficient.
-    RationalPolynomial(&'a [Rational]),
-}
-
-impl RootTransform<'_> {
-    fn evaluate(self, root: &IsolatedRoot, precision: u32) -> ComplexBall {
-        let root_ball = root.enclosure().to_ball(precision);
-        let Self::RationalPolynomial(coefficients) = self else {
-            return root_ball;
-        };
-
-        let zero = RealBall::exact(Float::new(precision));
-        let mut value = ComplexBall::new(zero.clone(), zero);
-        for coefficient in coefficients.iter().rev() {
-            let coefficient = RealBall::from_rational_bounds(coefficient, coefficient, precision);
-            value = value * &root_ball + coefficient;
+impl IsolatedRoot {
+    /// Enclose this root or its image under an optional rational polynomial.
+    fn transformed_enclosure(
+        &self,
+        polynomial: Option<&UnivariatePolynomial<RationalField>>,
+        precision: u32,
+    ) -> ComplexBall {
+        let root_ball = self.enclosure().to_ball(precision);
+        match polynomial {
+            Some(polynomial) => polynomial.evaluate_complex_ball(&root_ball, precision),
+            None => root_ball,
         }
-        value
     }
 }
 
@@ -607,6 +599,7 @@ pub(crate) enum RootCertificationError {
 }
 
 impl std::fmt::Display for RootCertificationError {
+    /// Format a concise explanation of the failed certification.
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
             Self::UnexpectedMatchCount { expected, found } => write!(
@@ -621,24 +614,27 @@ impl std::fmt::Display for RootCertificationError {
 }
 
 impl IsolatedRoot {
-    /// Find candidates whose transformed enclosures match this transformed root.
+    /// Find candidates whose polynomial images may match this root's polynomial image.
+    ///
+    /// A missing polynomial denotes the identity map.
     pub(crate) fn matching_roots(
         &self,
-        transform: RootTransform<'_>,
+        polynomial: Option<&UnivariatePolynomial<RationalField>>,
         candidates: &mut [IsolatedRoot],
-        candidate_transform: RootTransform<'_>,
+        candidate_polynomial: Option<&UnivariatePolynomial<RationalField>>,
         expected_count: usize,
     ) -> Result<Vec<usize>, RootCertificationError> {
         let mut target = self.clone();
         let mut binary_precision = 32u32;
         let mut final_match_count = candidates.len();
         for _ in 0..10 {
-            let target_ball = transform.evaluate(&target, binary_precision);
+            let target_ball = target.transformed_enclosure(polynomial, binary_precision);
             let matches = candidates
                 .iter()
                 .enumerate()
                 .filter_map(|(index, candidate)| {
-                    let value = candidate_transform.evaluate(candidate, binary_precision);
+                    let value =
+                        candidate.transformed_enclosure(candidate_polynomial, binary_precision);
                     (!value.is_disjoint(&target_ball)).then_some(index)
                 })
                 .collect::<Vec<_>>();
@@ -669,6 +665,17 @@ impl IsolatedRoot {
 }
 
 impl UnivariatePolynomial<RationalField> {
+    /// Evaluate this rational polynomial over a certified complex enclosure.
+    pub(crate) fn evaluate_complex_ball(&self, value: &ComplexBall, precision: u32) -> ComplexBall {
+        let zero = RealBall::exact(Float::new(precision));
+        let mut result = ComplexBall::new(zero.clone(), zero);
+        for coefficient in self.coefficients.iter().rev() {
+            let coefficient = RealBall::from_rational_bounds(coefficient, coefficient, precision);
+            result = result * value + coefficient;
+        }
+        result
+    }
+
     /// Determine whether this polynomial evaluated at `root` has a strictly
     /// positive real part.
     pub(crate) fn has_positive_real_part_at(
@@ -678,8 +685,8 @@ impl UnivariatePolynomial<RationalField> {
         let mut root = root.clone();
         let mut binary_precision = 32u32;
         for _ in 0..10 {
-            let value = RootTransform::RationalPolynomial(&self.coefficients)
-                .evaluate(&root, binary_precision);
+            let root_ball = root.enclosure().to_ball(binary_precision);
+            let value = self.evaluate_complex_ball(&root_ball, binary_precision);
             if value.re.is_strictly_positive() {
                 return Ok(true);
             }
@@ -694,6 +701,7 @@ impl UnivariatePolynomial<RationalField> {
         Err(RootCertificationError::IndeterminateRealPart)
     }
 
+    /// Choose the working tolerance for Aberth iteration at `num_prec` bits.
     fn aberth_tolerance(num_prec: u32) -> Float {
         let bits = num_prec.saturating_sub(8).max(1);
         Rational::from((Integer::one(), Integer::from(2).pow(bits as u64)))
@@ -730,6 +738,7 @@ impl UnivariatePolynomial<RationalField> {
         first_lower_bound > const_upper + eval_higher_powers
     }
 
+    /// Choose an initially disjoint candidate radius around one approximate root.
     fn initial_disk_radius(
         centers: &[Complex<Rational>],
         root_index: usize,
@@ -770,9 +779,9 @@ impl UnivariatePolynomial<RationalField> {
         }
 
         let cache = root_cache();
-        let entry = cache.layout_slot(PolynomialKey::Rational(self.coefficients.clone()));
-        let layout = entry.layout.get_or_init(|| self.build_root_layout());
-        cache.root_in_layout(layout, index)
+        let entry = cache.rational.root_multiset_slot(self);
+        let multiset = entry.get_or_init(|| self.build_root_multiset());
+        cache.root_in_multiset(multiset, index)
     }
 
     /// Isolate the distinct complex roots of the polynomial. The result contains
@@ -780,18 +789,26 @@ impl UnivariatePolynomial<RationalField> {
     /// rational ball containing exactly one root of its defining polynomial.
     pub fn isolate_roots(&self) -> Vec<(IsolatedRoot, usize)> {
         let cache = root_cache();
-        let entry = cache.layout_slot(PolynomialKey::Rational(self.coefficients.clone()));
-        let layout = entry.layout.get_or_init(|| self.build_root_layout());
-        cache.roots_in_layout(layout)
+        let entry = cache.rational.root_multiset_slot(self);
+        let multiset = entry.get_or_init(|| self.build_root_multiset());
+        cache.roots_in_multiset(multiset)
     }
 
     /// Isolate the distinct real roots of the polynomial. Resolving whether a
     /// root lies on the real axis may refine its cached enclosure.
     pub fn isolate_real_roots(&self) -> Vec<(IsolatedRoot, usize)> {
-        filter_real_roots(self.isolate_roots())
+        self.isolate_roots()
+            .into_iter()
+            .filter_map(|(mut root, multiplicity)| {
+                let location = root.classify_location();
+                matches!(location, RootLocation::Real | RootLocation::Zero)
+                    .then_some((root, multiplicity))
+            })
+            .collect()
     }
 
-    fn build_root_layout(&self) -> RootLayout {
+    /// Factor this polynomial and build its canonical root multiset.
+    fn build_root_multiset(&self) -> RootMultiset {
         let complex_field = FloatField::from_rep(Complex::from(Rational::one()));
         let factors = self
             .clone()
@@ -806,9 +823,10 @@ impl UnivariatePolynomial<RationalField> {
                 ));
                 (defining_poly, multiplicity)
             });
-        root_cache().build_layout(factors)
+        root_cache().build_root_multiset(factors)
     }
 
+    /// Sort roots by certified real part and then imaginary part.
     fn sort_roots_canonically(roots: &mut [IsolatedRoot]) {
         // Establishing the order may strengthen the supplied root snapshots.
         // Cache owners must retain those stronger certificates after this call.
@@ -865,6 +883,7 @@ impl UnivariatePolynomial<RationalField> {
         roots.clone_from_slice(&sorted);
     }
 
+    /// Refine disks whose real projections overlap before exact comparison.
     fn separate_real_projections(roots: &mut [IsolatedRoot]) {
         // Use bounded-size approximate centers here. Repeated exact rational
         // Newton steps make numerator and denominator sizes grow explosively.
@@ -896,6 +915,7 @@ impl UnivariatePolynomial<RationalField> {
         }
     }
 
+    /// Refine one disk around a bounded-size approximate center for ordering.
     fn refine_disk_for_ordering(
         poly: &ExactComplexPolynomial,
         root: &mut IsolatedRoot,
@@ -934,6 +954,7 @@ impl UnivariatePolynomial<RationalField> {
         false
     }
 
+    /// Record root pairs whose real parts are known to be equal by conjugation.
     fn known_equal_real_parts(roots: &[IsolatedRoot]) -> Vec<bool> {
         let mut equal = vec![false; roots.len() * roots.len()];
         for i in 0..roots.len() {
@@ -982,6 +1003,7 @@ impl UnivariatePolynomial<RationalField> {
         equal
     }
 
+    /// Mark roots whose real intervals still overlap an unequal real part.
     fn roots_needing_real_projection(
         roots: &[IsolatedRoot],
         known_equal_real_parts: &[bool],
@@ -1008,6 +1030,7 @@ impl UnivariatePolynomial<RationalField> {
     }
 
     #[cfg(test)]
+    /// Compare two roots using the complete canonical-ordering procedure.
     fn cmp_complex_roots_canonical(a: &IsolatedRoot, b: &IsolatedRoot) -> Ordering {
         let a_projected = Self::compute_projected_real_root(a);
         let b_projected = Self::compute_projected_real_root(b);
@@ -1020,6 +1043,7 @@ impl UnivariatePolynomial<RationalField> {
         )
     }
 
+    /// Compare two roots using their disks and optional exact real projections.
     fn cmp_complex_roots_canonical_with_projected(
         a: &IsolatedRoot,
         b: &IsolatedRoot,
@@ -1061,6 +1085,7 @@ impl UnivariatePolynomial<RationalField> {
         Self::cmp_complex_roots_by_imaginary_part(a, b)
     }
 
+    /// Compare roots by certified imaginary part with deterministic fallbacks.
     fn cmp_complex_roots_by_imaginary_part(a: &IsolatedRoot, b: &IsolatedRoot) -> Ordering {
         let a_im_upper = &a.enclosure.center.im + &a.enclosure.radius;
         let b_im_lower = &b.enclosure.center.im - &b.enclosure.radius;
@@ -1081,6 +1106,7 @@ impl UnivariatePolynomial<RationalField> {
             .then_with(|| a.enclosure.radius.cmp(&b.enclosure.radius))
     }
 
+    /// Compare optional exact real projections when both are available.
     fn cmp_complex_roots_by_projected_real_parts(
         a: Option<&ProjectedRealRoot>,
         b: Option<&ProjectedRealRoot>,
@@ -1106,6 +1132,7 @@ impl UnivariatePolynomial<RationalField> {
     }
 
     #[cfg(test)]
+    /// Compute an exact real projection for one root in tests.
     fn compute_projected_real_root(root: &IsolatedRoot) -> Option<ProjectedRealRoot> {
         let poly = &root.poly;
         let projection = Self::real_projection_polynomial(poly)?;
@@ -1122,6 +1149,7 @@ impl UnivariatePolynomial<RationalField> {
         Self::projected_real_root(&mut root, &projection)
     }
 
+    /// Match a complex root disk to one interval of a real projection polynomial.
     fn projected_real_root(
         root: &mut IsolatedRoot,
         projection: &RealProjection,
@@ -1164,6 +1192,7 @@ impl UnivariatePolynomial<RationalField> {
         None
     }
 
+    /// Eliminate the imaginary coordinate to obtain a polynomial for real parts.
     fn real_projection_polynomial(
         poly: &ExactComplexPolynomial,
     ) -> Option<UnivariatePolynomial<Q>> {
@@ -1220,6 +1249,7 @@ impl UnivariatePolynomial<RationalField> {
         Some(projection)
     }
 
+    /// Compute a binomial coefficient as an exact rational number.
     fn binomial_rational(n: usize, k: usize) -> Rational {
         let k = k.min(n - k);
         let mut result = Rational::one();
@@ -1232,6 +1262,7 @@ impl UnivariatePolynomial<RationalField> {
         result
     }
 
+    /// Multiply an exact complex rational by `i^pow`.
     fn mul_complex_rational_by_i_power(c: &Complex<Rational>, pow: usize) -> Complex<Rational> {
         match pow % 4 {
             0 => c.clone(),
@@ -1241,6 +1272,7 @@ impl UnivariatePolynomial<RationalField> {
         }
     }
 
+    /// Return the real-axis projection of a root's disk.
     fn root_real_interval(root: &IsolatedRoot) -> (Rational, Rational) {
         (
             root.enclosure.center.re.clone() - &root.enclosure.radius,
@@ -1248,14 +1280,17 @@ impl UnivariatePolynomial<RationalField> {
         )
     }
 
+    /// Test whether two closed rational intervals intersect.
     fn rational_intervals_intersect(a: &(Rational, Rational), b: &(Rational, Rational)) -> bool {
         a.0 <= b.1 && b.0 <= a.1
     }
 
+    /// Test whether closed rational interval `a` contains `b`.
     fn rational_interval_contains(a: &(Rational, Rational), b: &(Rational, Rational)) -> bool {
         a.0 <= b.0 && b.1 <= a.1
     }
 
+    /// Compare projected real roots by refining their isolating intervals.
     fn cmp_projected_real_roots(a: &ProjectedRealRoot, b: &ProjectedRealRoot) -> Option<Ordering> {
         // TODO: strip GCD first?
         let mut a_interval = a.interval.clone();
@@ -1296,6 +1331,7 @@ impl UnivariatePolynomial<RationalField> {
         None
     }
 
+    /// Test whether every pair of root disks is certified disjoint.
     fn root_disks_are_pairwise_disjoint(roots: &[IsolatedRoot]) -> bool {
         for i in 0..roots.len() {
             for j in i + 1..roots.len() {
@@ -1308,6 +1344,7 @@ impl UnivariatePolynomial<RationalField> {
         true
     }
 
+    /// Attempt one certified Newton refinement of a root disk.
     fn refine_root_disk_with_newton(
         poly: &UnivariatePolynomial<FloatField<Complex<Rational>>>,
         derivative: &UnivariatePolynomial<FloatField<Complex<Rational>>>,
@@ -1352,6 +1389,7 @@ impl UnivariatePolynomial<RationalField> {
         false
     }
 
+    /// Refine roots of one polynomial until their disks are pairwise disjoint.
     fn separate_root_disks(
         poly: &UnivariatePolynomial<FloatField<Complex<Rational>>>,
         derivative: &UnivariatePolynomial<FloatField<Complex<Rational>>>,
@@ -1376,6 +1414,7 @@ impl UnivariatePolynomial<RationalField> {
         false
     }
 
+    /// Refine roots from potentially different polynomials until disks separate.
     fn separate_isolated_roots(roots: &mut [IsolatedRoot]) {
         for _ in 0..32 {
             if Self::root_disks_are_pairwise_disjoint(roots) {
@@ -1394,6 +1433,7 @@ impl UnivariatePolynomial<RationalField> {
         }
     }
 
+    /// Refine a root disk to `refine`, returning whether certification succeeded.
     fn refine_root_to_tolerance(root: &mut IsolatedRoot, refine: &Rational) -> bool {
         if refine.is_zero() {
             return true;
@@ -1457,6 +1497,7 @@ impl UnivariatePolynomial<RationalField> {
         root.enclosure.radius <= *refine
     }
 
+    /// Bisect one real-root interval while retaining the sign change.
     fn refine_real_root_interval_once(&self, interval: &mut (Rational, Rational)) {
         if interval.0 == interval.1 {
             return;
@@ -1487,6 +1528,7 @@ impl UnivariatePolynomial<RationalField> {
         }
     }
 
+    /// Split `p(i y)` into its real and imaginary rational polynomials.
     fn imaginary_axis_parts(&self) -> (Self, Self) {
         let mut real = self.zero();
         let mut imaginary = self.zero();
@@ -1588,7 +1630,7 @@ impl UnivariatePolynomial<RationalField> {
         Some(roots)
     }
 
-    // Self is square-free.
+    /// Isolate every root of this square-free rational polynomial.
     fn isolate_square_free_roots(&self, target_radius: Option<&Rational>) -> Vec<IsolatedRoot> {
         if let Some(roots) = self.isolate_axis_roots(target_radius) {
             return roots;
@@ -1761,6 +1803,7 @@ impl UnivariatePolynomial<RationalField> {
 }
 
 impl UnivariatePolynomial<ExactComplexField> {
+    /// Construct the rational polynomial whose roots lie on `axis`.
     fn axis_polynomial(&self, axis: CoordinateAxis) -> Option<UnivariatePolynomial<Q>> {
         let mut real_part = self.map_coeff(|coefficient| coefficient.re.clone(), Q);
         let mut imaginary_part = self.map_coeff(|coefficient| coefficient.im.clone(), Q);
@@ -1790,6 +1833,7 @@ impl UnivariatePolynomial<ExactComplexField> {
         (!polynomial.is_constant()).then_some(polynomial)
     }
 
+    /// Match exact roots of an axis polynomial to complex root disks.
     fn classify_axis_roots(
         axis_polynomial: &UnivariatePolynomial<Q>,
         roots: &mut [IsolatedRoot],
@@ -1819,6 +1863,7 @@ impl UnivariatePolynomial<ExactComplexField> {
         }
     }
 
+    /// Classifies the root locations.
     fn classify_root_locations(&self, roots: &mut [IsolatedRoot]) {
         for axis in [CoordinateAxis::Real, CoordinateAxis::Imaginary] {
             if let Some(axis_polynomial) = self.axis_polynomial(axis) {
@@ -1832,6 +1877,7 @@ impl UnivariatePolynomial<ExactComplexField> {
         }
     }
 
+    /// Convert this polynomial when every coefficient has zero imaginary part.
     fn try_map_to_rational(&self) -> Option<UnivariatePolynomial<Q>> {
         if self.coefficients.iter().any(|c| !c.im.is_zero()) {
             return None;
@@ -1840,6 +1886,7 @@ impl UnivariatePolynomial<ExactComplexField> {
         Some(self.map_coeff(|c| c.re.clone(), Q))
     }
 
+    /// Embed an exact complex rational into the Gaussian algebraic extension.
     fn complex_rational_to_algebraic(
         field: &AlgebraicExtension<Q>,
         c: &Complex<Rational>,
@@ -1851,6 +1898,7 @@ impl UnivariatePolynomial<ExactComplexField> {
         field.element_from_polynomial(poly)
     }
 
+    /// Extract an exact complex rational from the Gaussian algebraic extension.
     fn algebraic_to_complex_rational(c: &AlgebraicNumber<Q>) -> Complex<Rational> {
         Complex::new(
             c.poly().coefficient(&[0]).unwrap_or_else(Rational::zero),
@@ -1858,6 +1906,7 @@ impl UnivariatePolynomial<ExactComplexField> {
         )
     }
 
+    /// Turn approximate roots into certified, pairwise-disjoint rational disks.
     fn certify_approximate_roots(
         &self,
         roots: &[Complex<Float>],
@@ -1919,9 +1968,9 @@ impl UnivariatePolynomial<ExactComplexField> {
         }
 
         let cache = root_cache();
-        let entry = cache.layout_slot(PolynomialKey::Complex(self.coefficients.clone()));
-        let layout = entry.layout.get_or_init(|| self.build_root_layout());
-        cache.root_in_layout(layout, index)
+        let entry = cache.complex.root_multiset_slot(self);
+        let multiset = entry.get_or_init(|| self.build_root_multiset());
+        cache.root_in_multiset(multiset, index)
     }
 
     /// Isolate the distinct complex roots of a polynomial with exact complex
@@ -1934,18 +1983,26 @@ impl UnivariatePolynomial<ExactComplexField> {
         }
 
         let cache = root_cache();
-        let entry = cache.layout_slot(PolynomialKey::Complex(self.coefficients.clone()));
-        let layout = entry.layout.get_or_init(|| self.build_root_layout());
-        cache.roots_in_layout(layout)
+        let entry = cache.complex.root_multiset_slot(self);
+        let multiset = entry.get_or_init(|| self.build_root_multiset());
+        cache.roots_in_multiset(multiset)
     }
 
     /// Isolate the distinct real roots of the polynomial. Resolving whether a
     /// root lies on the real axis may refine its cached enclosure.
     pub fn isolate_real_roots(&self) -> Vec<(IsolatedRoot, usize)> {
-        filter_real_roots(self.isolate_roots())
+        self.isolate_roots()
+            .into_iter()
+            .filter_map(|(mut root, multiplicity)| {
+                let location = root.classify_location();
+                matches!(location, RootLocation::Real | RootLocation::Zero)
+                    .then_some((root, multiplicity))
+            })
+            .collect()
     }
 
-    fn build_root_layout(&self) -> RootLayout {
+    /// Factor this polynomial and build its canonical root multiset.
+    fn build_root_multiset(&self) -> RootMultiset {
         let complex_field = FloatField::from_rep(Complex::from(Rational::one()));
         let algebraic_field = AlgebraicExtension::complex(Q);
         let algebraic_poly = self.map_coeff(
@@ -1966,10 +2023,10 @@ impl UnivariatePolynomial<ExactComplexField> {
                 );
                 (defining_poly, multiplicity)
             });
-        root_cache().build_layout(factors)
+        root_cache().build_root_multiset(factors)
     }
 
-    // Self is square-free
+    /// Isolate every root of this square-free exact-complex polynomial.
     fn isolate_square_free_roots(&self, target_radius: Option<&Rational>) -> Vec<IsolatedRoot> {
         const ABERTH_CERTIFICATION_BATCH: usize = 64;
         const MAX_ABERTH_ITERATIONS_PER_PRECISION: usize = 256;

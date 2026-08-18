@@ -1,9 +1,6 @@
 //! Tests for certified root isolation and caching.
 
-use super::{
-    CachedRoot, PolynomialKey, RootCache, RootLayout, RootLocation, UnivariatePolynomial,
-    root_cache,
-};
+use super::{CachedRoot, RootCache, RootLocation, RootMultiset, UnivariatePolynomial, root_cache};
 use std::{
     cmp::Ordering,
     sync::{
@@ -444,16 +441,16 @@ fn targeted_complex_root_refinement_is_retained_in_cache() {
     let tolerance = Rational::from((Integer::from(1), Integer::from(1) << 80u32));
 
     let original = p.root(0).unwrap();
-    let defining_key = original
+    let defining_polynomial = original
         .defining_polynomial()
         .try_map_to_rational()
-        .unwrap()
-        .coefficients;
+        .unwrap();
     root_cache()
+        .rational
         .roots
         .write()
         .unwrap()
-        .remove(&PolynomialKey::Rational(defining_key));
+        .remove(defining_polynomial.coefficients());
     let refined = original.clone().refined(&tolerance);
     assert!(refined.enclosure().radius() <= &tolerance);
 
@@ -526,17 +523,19 @@ fn complex_root_multiplicity_expands_canonical_indices() {
     assert_eq!(roots[1].0.index(), 0);
     assert!(
         root_cache()
-            .layouts
+            .rational
+            .root_multisets
             .read()
             .unwrap()
-            .contains_key(&PolynomialKey::Rational(p.coefficients.clone()))
+            .contains_key(p.coefficients())
     );
     assert!(
         !root_cache()
+            .rational
             .roots
             .read()
             .unwrap()
-            .contains_key(&PolynomialKey::Rational(p.coefficients.clone()))
+            .contains_key(p.coefficients())
     );
     assert_eq!(
         p.root(0).unwrap().enclosure().center(),
@@ -559,15 +558,15 @@ fn complex_root_cache_ignores_variable_name() {
 
     let cache = RootCache::new();
     let mut calls = 0;
-    let entry = cache.layout_slot(PolynomialKey::Rational(p_x.coefficients.clone()));
-    entry.layout.get_or_init(|| {
+    let entry = cache.rational.root_multiset_slot(&p_x);
+    entry.get_or_init(|| {
         calls += 1;
-        RootLayout { roots: vec![] }
+        RootMultiset::new()
     });
-    let entry = cache.layout_slot(PolynomialKey::Rational(p_y.coefficients.clone()));
-    entry.layout.get_or_init(|| {
+    let entry = cache.rational.root_multiset_slot(&p_y);
+    entry.get_or_init(|| {
         calls += 1;
-        RootLayout { roots: vec![] }
+        RootMultiset::new()
     });
 
     assert_eq!(calls, 1);
@@ -592,12 +591,11 @@ fn concurrent_root_cache_miss_computes_once() {
             let start = start.clone();
             std::thread::spawn(move || {
                 start.wait();
-                let entry =
-                    cache.layout_slot(PolynomialKey::Rational(polynomial.coefficients.clone()));
-                entry.layout.get_or_init(|| {
+                let entry = cache.rational.root_multiset_slot(polynomial.as_ref());
+                entry.get_or_init(|| {
                     calls.fetch_add(1, AtomicOrdering::Relaxed);
                     std::thread::sleep(Duration::from_millis(25));
-                    RootLayout { roots: vec![] }
+                    RootMultiset::new()
                 });
             })
         })
@@ -618,24 +616,20 @@ fn refining_one_polynomial_does_not_lock_other_entries() {
         .to_polynomial::<_, u16>(&Q, None)
         .to_univariate_from_univariate(0);
     let cache = Arc::new(RootCache::new());
-    let entry_a = cache.root_slot(PolynomialKey::Rational(p_a.coefficients.clone()));
-    entry_a
-        .roots
-        .get_or_init(|| RwLock::new(Vec::<CachedRoot>::new()));
-    let entry_b = cache.root_slot(PolynomialKey::Rational(p_b.coefficients.clone()));
-    entry_b
-        .roots
-        .get_or_init(|| RwLock::new(Vec::<CachedRoot>::new()));
+    let entry_a = cache.rational.root_slot(&p_a);
+    entry_a.get_or_init(|| RwLock::new(Vec::<CachedRoot>::new()));
+    let entry_b = cache.rational.root_slot(&p_b);
+    entry_b.get_or_init(|| RwLock::new(Vec::<CachedRoot>::new()));
 
-    let roots_a = entry_a.roots.get().unwrap();
+    let roots_a = entry_a.get().unwrap();
     let _refining_a = roots_a.write().unwrap();
 
     let (finished_tx, finished_rx) = std::sync::mpsc::channel();
     let worker = {
         let cache = cache.clone();
         std::thread::spawn(move || {
-            let entry_b = cache.root_slot(PolynomialKey::Rational(p_b.coefficients.clone()));
-            let _roots_b = entry_b.roots.get().unwrap().read().unwrap();
+            let entry_b = cache.rational.root_slot(&p_b);
+            let _roots_b = entry_b.get().unwrap().read().unwrap();
             finished_tx.send(()).unwrap();
         })
     };
@@ -660,15 +654,15 @@ fn complex_root_cache_ignores_variable_name_for_complex_coefficients() {
 
     let cache = RootCache::new();
     let mut calls = 0;
-    let entry = cache.layout_slot(PolynomialKey::Complex(p_x.coefficients.clone()));
-    entry.layout.get_or_init(|| {
+    let entry = cache.complex.root_multiset_slot(&p_x);
+    entry.get_or_init(|| {
         calls += 1;
-        RootLayout { roots: vec![] }
+        RootMultiset::new()
     });
-    let entry = cache.layout_slot(PolynomialKey::Complex(p_y.coefficients.clone()));
-    entry.layout.get_or_init(|| {
+    let entry = cache.complex.root_multiset_slot(&p_y);
+    entry.get_or_init(|| {
         calls += 1;
-        RootLayout { roots: vec![] }
+        RootMultiset::new()
     });
 
     assert_eq!(calls, 1);
