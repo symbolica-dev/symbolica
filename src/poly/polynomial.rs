@@ -4969,7 +4969,8 @@ mod test {
 
     #[test]
     fn polynomial_context_is_shared_and_copy_on_write() {
-        let p = parse!("x+y").to_polynomial::<_, u8>(&Zp64::new(17), None);
+        let variables = Arc::new(vec![symbol!("x").into(), symbol!("y").into()]);
+        let p = parse!("x+y").to_polynomial::<_, u8>(&Zp64::new(17), variables);
         let mut zero = p.zero();
         assert!(Arc::ptr_eq(&p.context, &zero.context));
 

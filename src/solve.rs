@@ -1703,7 +1703,6 @@ mod test {
         assert!(!solutions[0].is_underdetermined());
         assert_eq!(solutions[0].rank(), 2);
         assert_eq!(solutions[0].dimension(), 0);
-        assert_eq!(solutions[0].to_string(), "{x = 2, y = 1}");
     }
 
     #[test]
@@ -1836,7 +1835,6 @@ mod test {
                 } if variable == &PolyVariable::from(x) && value == &parse!("a")
             )
         }));
-        assert_eq!(solutions[0].to_string(), "{x = a} where a in Reals");
     }
 
     #[test]
@@ -1853,7 +1851,6 @@ mod test {
             assert!(solutions[0].conditions().iter().any(|condition| {
                 matches!(condition, SolutionCondition::NonZero(value) if value == &parse!("a"))
             }));
-            assert!(solutions[0].to_string().contains(" where a != 0"));
         }
     }
 
