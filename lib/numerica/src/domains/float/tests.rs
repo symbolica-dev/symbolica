@@ -17,6 +17,20 @@ fn eval_test<T: Real>(v: &[T]) -> T {
 }
 
 #[test]
+fn multi_precision_float_raw_roundtrip() {
+    let value = Float::with_val(128, 1.25);
+
+    let borrowed = Float::from_raw(value.as_raw().clone());
+    assert_eq!(borrowed, value);
+
+    let copied = Float::from_raw(value.to_raw());
+    assert_eq!(copied, value);
+
+    let consumed = Float::from_raw(value.clone().into_raw());
+    assert_eq!(consumed, value);
+}
+
+#[test]
 fn double() {
     let r = eval_test(&[5., 7., 0.3, 0.5, 0.7, 0.4]);
     assert_eq!(r, 17293.219725825093);

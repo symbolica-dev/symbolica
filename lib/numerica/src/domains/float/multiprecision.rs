@@ -9,6 +9,8 @@ use rand::Rng;
 use xprec::{CompensatedArithmetic, Df64};
 
 use super::{DoubleFloat, FloatLike, Real, RealLike, SingleFloat};
+#[cfg(feature = "gmp")]
+use crate::domains::integer::MultiPrecisionInteger;
 use crate::domains::{
     InternalOrdering,
     backend::float::{
@@ -468,7 +470,16 @@ impl<R: Into<Rational>> Add<R> for Float {
             let mut r = match rhs.numerator() {
                 Integer::Single(n) => self.0 + n,
                 Integer::Double(n) => self.0 + n.get(),
-                Integer::Large(n) => self.0 + n,
+                Integer::Large(n) => {
+                    #[cfg(feature = "gmp")]
+                    {
+                        self.0 + n.into_raw()
+                    }
+                    #[cfg(feature = "no_gmp")]
+                    {
+                        self.0 + n
+                    }
+                }
             };
 
             if let Some(e) = r.get_exp() {
@@ -517,7 +528,16 @@ impl<R: Into<Rational>> Mul<R> for Float {
             match r.numerator() {
                 Integer::Single(n) => self.0 * n,
                 Integer::Double(n) => self.0 * n.get(),
-                Integer::Large(n) => self.0 * n,
+                Integer::Large(n) => {
+                    #[cfg(feature = "gmp")]
+                    {
+                        self.0 * n.into_raw()
+                    }
+                    #[cfg(feature = "no_gmp")]
+                    {
+                        self.0 * n
+                    }
+                }
             }
             .into()
         } else {
@@ -536,7 +556,16 @@ impl<R: Into<Rational>> Div<R> for Float {
             match r.numerator() {
                 Integer::Single(n) => self.0 / n,
                 Integer::Double(n) => self.0 / n.get(),
-                Integer::Large(n) => self.0 / n,
+                Integer::Large(n) => {
+                    #[cfg(feature = "gmp")]
+                    {
+                        self.0 / n.into_raw()
+                    }
+                    #[cfg(feature = "no_gmp")]
+                    {
+                        self.0 / n
+                    }
+                }
             }
             .into()
         } else {
@@ -564,6 +593,24 @@ impl From<&DoubleFloat> for Float {
 }
 
 impl Float {
+    /// Wrap a value from the selected arbitrary-precision float backend.
+    #[inline]
+    pub fn from_raw(value: MultiPrecisionFloat) -> Self {
+        Self(value)
+    }
+
+    /// Borrow the value from the selected arbitrary-precision float backend.
+    #[inline]
+    pub fn as_raw(&self) -> &MultiPrecisionFloat {
+        &self.0
+    }
+
+    /// Clone the value from the selected arbitrary-precision float backend.
+    #[inline]
+    pub fn to_raw(&self) -> MultiPrecisionFloat {
+        self.0.clone()
+    }
+
     pub fn new(prec: u32) -> Self {
         Float(MultiPrecisionFloat::new(prec))
     }
@@ -573,6 +620,18 @@ impl Float {
         MultiPrecisionFloat: Assign<T>,
     {
         Float(MultiPrecisionFloat::with_val(prec, val))
+    }
+
+    /// Construct a multi-precision float from a backend-independent integer.
+    pub fn with_integer(prec: u32, value: crate::domains::integer::MultiPrecisionInteger) -> Self {
+        #[cfg(feature = "gmp")]
+        {
+            Float(MultiPrecisionFloat::with_val(prec, value.into_raw()))
+        }
+        #[cfg(feature = "no_gmp")]
+        {
+            Float(MultiPrecisionFloat::with_val(prec, value))
+        }
     }
 
     pub fn prec(&self) -> u32 {
@@ -724,14 +783,16 @@ impl Float {
         self.0.to_rational().map(|x| x.into())
     }
 
-    pub fn into_inner(self) -> MultiPrecisionFloat {
+    /// Consume this wrapper and return the selected backend's value.
+    #[inline]
+    pub fn into_raw(self) -> MultiPrecisionFloat {
         self.0
     }
 }
 
 impl From<MultiPrecisionFloat> for Float {
     fn from(value: MultiPrecisionFloat) -> Self {
-        Float(value)
+        Self::from_raw(value)
     }
 }
 
@@ -849,7 +910,14 @@ impl RealLike for Float {
 
     #[inline(always)]
     fn round_to_nearest_integer(&self) -> Integer {
-        self.0.to_integer().unwrap().into()
+        #[cfg(feature = "gmp")]
+        {
+            MultiPrecisionInteger::from_raw(self.0.to_integer().unwrap()).into()
+        }
+        #[cfg(feature = "no_gmp")]
+        {
+            self.0.to_integer().unwrap().into()
+        }
     }
 }
 
