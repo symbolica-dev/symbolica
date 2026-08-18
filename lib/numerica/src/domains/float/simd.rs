@@ -5,7 +5,7 @@ use super::{FloatLike, Real};
 use crate::domains::rational::Rational;
 
 macro_rules! simd_impl {
-    ($t:ty, $p:ident) => {
+    ($t:ty) => {
         impl FloatLike for $t {
             #[inline(always)]
             fn set_from(&mut self, other: &Self) {
@@ -41,7 +41,7 @@ macro_rules! simd_impl {
             fn pow(&self, e: u64) -> Self {
                 // FIXME: use binary exponentiation
                 debug_assert!(e <= i32::MAX as u64);
-                (*self).powf(e as f64)
+                (*self).powf_simd(<$t>::splat(e as f64))
             }
 
             #[inline(always)]
@@ -196,7 +196,7 @@ macro_rules! simd_impl {
 
             #[inline(always)]
             fn powf(&self, e: &Self) -> Self {
-                (*self).$p(*e)
+                (*self).powf_simd(*e)
             }
         }
 
@@ -208,6 +208,6 @@ macro_rules! simd_impl {
     };
 }
 
-simd_impl!(f64x2, pow_f64x2);
-simd_impl!(f64x4, pow_f64x4);
-simd_impl!(f64x8, pow_f64x8);
+simd_impl!(f64x2);
+simd_impl!(f64x4);
+simd_impl!(f64x8);

@@ -72,11 +72,12 @@ pub trait BackendRationalExt {
 #[cfg(feature = "gmp")]
 impl BackendRationalExt for BackendRational {
     fn from_integer_ratio(num: MultiPrecisionInteger, den: MultiPrecisionInteger) -> Self {
-        Self::from((num, den))
+        Self::from((num.into_raw(), den.into_raw()))
     }
 
     fn into_integer_ratio(self) -> (MultiPrecisionInteger, MultiPrecisionInteger) {
-        self.into_numer_denom()
+        let (num, den) = self.into_numer_denom();
+        (num.into(), den.into())
     }
 }
 

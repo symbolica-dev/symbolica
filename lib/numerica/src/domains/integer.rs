@@ -29,10 +29,12 @@ use super::{
 };
 
 pub(crate) use super::backend::integer::Complete;
-pub use super::backend::integer::MultiPrecisionInteger;
 #[allow(unused_imports)]
 use super::backend::integer::RemRounding as _;
 use super::backend::integer::pow_ref_u32 as mp_pow_ref_u32;
+pub use super::backend::integer::{
+    MultiPrecisionInteger, ParseMultiPrecisionIntegerError, RawMultiPrecisionInteger,
+};
 #[cfg(feature = "bincode")]
 use super::backend::integer::{from_be_bytes as mp_from_be_bytes, to_be_bytes as mp_to_be_bytes};
 
@@ -87,7 +89,7 @@ pub enum Integer {
     Single(i64),
     /// Double machine-width integer (`i128`), partially hardware accelerated on some platforms.
     Double(DoubleInteger),
-    /// Multi-precision integer (using the `rug` crate).
+    /// Multi-precision integer using the selected arbitrary-precision backend.
     Large(MultiPrecisionInteger),
 }
 
@@ -624,6 +626,14 @@ impl From<MultiPrecisionInteger> for Integer {
         } else {
             Integer::Large(n)
         }
+    }
+}
+
+#[cfg(feature = "gmp")]
+impl From<rug::Integer> for Integer {
+    #[inline]
+    fn from(value: rug::Integer) -> Self {
+        Self::from(MultiPrecisionInteger::from_raw(value))
     }
 }
 
@@ -3807,7 +3817,23 @@ mod test {
         integer::{extended_gcd, extended_gcd_i128},
     };
 
-    use super::{DoubleInteger, Integer};
+    use super::{DoubleInteger, Integer, MultiPrecisionInteger};
+
+    #[test]
+    fn multi_precision_integer_raw_roundtrip_and_common_bit_count() {
+        let value = (MultiPrecisionInteger::from(1u32) << 130u32) + 7u32;
+        let bits: u64 = value.significant_bits();
+        assert_eq!(bits, 131);
+
+        let borrowed = MultiPrecisionInteger::from_raw(value.as_raw().clone());
+        assert_eq!(borrowed, value);
+
+        let copied = MultiPrecisionInteger::from_raw(value.to_raw());
+        assert_eq!(copied, value);
+
+        let consumed = MultiPrecisionInteger::from_raw(value.clone().into_raw());
+        assert_eq!(consumed, value);
+    }
 
     #[test]
     fn double_integer_roundtrip() {

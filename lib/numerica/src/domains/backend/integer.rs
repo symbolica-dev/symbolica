@@ -1,92 +1,4 @@
-#[cfg(feature = "gmp")]
-pub(crate) use rug::Complete;
-#[cfg(feature = "gmp")]
-pub use rug::Integer as MultiPrecisionInteger;
-#[cfg(feature = "gmp")]
-pub(crate) use rug::ops::RemRounding;
-
-#[cfg(feature = "gmp")]
-pub(crate) fn pow_ref_u32(base: &MultiPrecisionInteger, e: u32) -> MultiPrecisionInteger {
-    use rug::ops::Pow;
-
-    base.pow(e).into()
-}
-
-#[cfg(feature = "gmp")]
-pub(crate) fn probably_prime(value: &MultiPrecisionInteger, reps: u32) -> Option<bool> {
-    Some(value.is_probably_prime(reps) != rug::integer::IsPrime::No)
-}
-
-#[cfg(feature = "gmp")]
-pub fn from_lsf_bytes(bytes: &[u8]) -> MultiPrecisionInteger {
-    MultiPrecisionInteger::from_digits(bytes, rug::integer::Order::Lsf)
-}
-
-#[cfg(feature = "gmp")]
-pub fn write_lsf_bytes(value: &MultiPrecisionInteger, dest: &mut Vec<u8>) {
-    let value = value.as_abs();
-    let num_digits = value.significant_digits::<u8>();
-    let old_len = dest.len();
-    dest.resize(old_len + num_digits, 0);
-    value.write_digits(&mut dest[old_len..], rug::integer::Order::Lsf);
-}
-
-#[cfg(feature = "gmp")]
-pub fn lsf_byte_size(value: &MultiPrecisionInteger) -> usize {
-    value.significant_digits::<u8>()
-}
-
-#[cfg(feature = "gmp")]
-pub fn to_lsf_bytes(value: &MultiPrecisionInteger) -> Vec<u8> {
-    let mut bytes = Vec::new();
-    write_lsf_bytes(value, &mut bytes);
-    bytes
-}
-
-#[cfg(feature = "gmp")]
-pub fn from_digits_radix(digits: &[u8], radix: u32, is_negative: bool) -> MultiPrecisionInteger {
-    let mut value = MultiPrecisionInteger::new();
-    unsafe {
-        value.assign_bytes_radix_unchecked(
-            digits,
-            i32::try_from(radix).expect("radix does not fit in i32"),
-            is_negative,
-        );
-    }
-    value
-}
-
-#[cfg(all(feature = "gmp", feature = "bincode"))]
-pub(crate) fn to_be_bytes(value: &MultiPrecisionInteger) -> Vec<u8> {
-    value.to_digits::<u8>(rug::integer::Order::MsfBe)
-}
-
-#[cfg(all(feature = "gmp", feature = "bincode"))]
-pub(crate) fn from_be_bytes(bytes: &[u8]) -> Result<MultiPrecisionInteger, &'static str> {
-    Ok(MultiPrecisionInteger::from_digits(
-        bytes,
-        rug::integer::Order::MsfBe,
-    ))
-}
-
-#[cfg(feature = "gmp")]
-pub(crate) struct BackendRandState(rug::rand::RandState<'static>);
-
-#[cfg(feature = "gmp")]
-impl BackendRandState {
-    pub(crate) fn new(seed: u128) -> Self {
-        let mut state = rug::rand::RandState::new();
-        state.seed(&MultiPrecisionInteger::from(seed));
-        Self(state)
-    }
-
-    pub(crate) fn below(&mut self, modulus: &MultiPrecisionInteger) -> MultiPrecisionInteger {
-        modulus.clone().random_below(&mut self.0)
-    }
-}
-
-#[cfg(feature = "no_gmp")]
-mod malachite {
+mod implementation {
     use std::{
         fmt::{Debug, Display, Formatter, UpperHex},
         ops::{
@@ -96,17 +8,41 @@ mod malachite {
         str::FromStr,
     };
 
+    #[cfg(feature = "no_gmp")]
     use malachite_base::num::{
         arithmetic::traits::{
-            Abs, DivMod, ExtendedGcd, FloorRoot, Gcd, Mod, Pow as MalachitePow, UnsignedAbs,
+            Abs, ExtendedGcd, FloorRoot, Gcd, Mod, Pow as MalachitePow, UnsignedAbs,
         },
         logic::traits::SignificantBits,
     };
-    use malachite_nz::integer::Integer as MalachiteInteger;
+    /// Native integer type used by the selected arbitrary-precision backend.
+    #[cfg(feature = "no_gmp")]
+    pub type RawMultiPrecisionInteger = malachite_nz::integer::Integer;
+    /// Native integer type used by the selected arbitrary-precision backend.
+    #[cfg(feature = "gmp")]
+    pub type RawMultiPrecisionInteger = rug::Integer;
 
+    /// A backend-independent arbitrary-precision integer.
+    ///
+    /// Use [`Self::as_raw`], [`Self::to_raw`], or [`Self::into_raw`] when a
+    /// backend-specific operation is required.
     #[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
+    #[cfg_attr(feature = "serde", serde(transparent))]
     #[derive(Clone, PartialEq, Eq, PartialOrd, Ord, Hash, Default)]
-    pub struct MultiPrecisionInteger(MalachiteInteger);
+    #[repr(transparent)]
+    pub struct MultiPrecisionInteger(RawMultiPrecisionInteger);
+
+    /// Error returned when parsing a [`MultiPrecisionInteger`].
+    #[derive(Clone, Copy, Debug, PartialEq, Eq)]
+    pub struct ParseMultiPrecisionIntegerError;
+
+    impl Display for ParseMultiPrecisionIntegerError {
+        fn fmt(&self, f: &mut Formatter<'_>) -> std::fmt::Result {
+            f.write_str("invalid arbitrary-precision integer")
+        }
+    }
+
+    impl std::error::Error for ParseMultiPrecisionIntegerError {}
 
     #[allow(dead_code)]
     pub(crate) trait RemRounding {}
@@ -125,6 +61,30 @@ mod malachite {
     }
 
     impl MultiPrecisionInteger {
+        /// Wrap a value from the selected arbitrary-precision backend.
+        #[inline]
+        pub fn from_raw(value: RawMultiPrecisionInteger) -> Self {
+            Self(value)
+        }
+
+        /// Borrow the value from the selected arbitrary-precision backend.
+        #[inline]
+        pub fn as_raw(&self) -> &RawMultiPrecisionInteger {
+            &self.0
+        }
+
+        /// Clone the value from the selected arbitrary-precision backend.
+        #[inline]
+        pub fn to_raw(&self) -> RawMultiPrecisionInteger {
+            self.0.clone()
+        }
+
+        /// Consume this wrapper and return the selected backend's value.
+        #[inline]
+        pub fn into_raw(self) -> RawMultiPrecisionInteger {
+            self.0
+        }
+
         #[inline]
         pub fn factorial(n: u32) -> Self {
             let mut f = Self::from(1);
@@ -143,17 +103,26 @@ mod malachite {
 
         #[inline]
         pub fn to_i64(&self) -> Option<i64> {
-            i64::try_from(&self.0).ok()
+            #[cfg(feature = "gmp")]
+            return self.0.to_i64();
+            #[cfg(feature = "no_gmp")]
+            return i64::try_from(&self.0).ok();
         }
 
         #[inline]
         pub fn to_i128(&self) -> Option<i128> {
-            i128::try_from(&self.0).ok()
+            #[cfg(feature = "gmp")]
+            return self.0.to_i128();
+            #[cfg(feature = "no_gmp")]
+            return i128::try_from(&self.0).ok();
         }
 
         #[inline]
         pub fn to_u64(&self) -> Option<u64> {
-            u64::try_from(&self.0).ok()
+            #[cfg(feature = "gmp")]
+            return self.0.to_u64();
+            #[cfg(feature = "no_gmp")]
+            return u64::try_from(&self.0).ok();
         }
 
         pub fn to_usize(&self) -> Option<usize> {
@@ -162,7 +131,10 @@ mod malachite {
 
         #[inline]
         pub fn to_u128(&self) -> Option<u128> {
-            u128::try_from(&self.0).ok()
+            #[cfg(feature = "gmp")]
+            return self.0.to_u128();
+            #[cfg(feature = "no_gmp")]
+            return u128::try_from(&self.0).ok();
         }
 
         #[inline]
@@ -172,7 +144,13 @@ mod malachite {
 
         #[inline]
         pub fn rem_euc<T: Into<Self>>(&self, rhs: T) -> Self {
-            Self(self.0.clone().mod_op(rhs.into().0.abs()))
+            let rhs = rhs.into();
+            let modulus = if rhs.is_negative() { -rhs.0 } else { rhs.0 };
+            let mut remainder = self.0.clone() % modulus.clone();
+            if remainder < 0 {
+                remainder += modulus;
+            }
+            Self(remainder)
         }
 
         #[inline]
@@ -185,13 +163,21 @@ mod malachite {
 
         #[inline]
         pub fn div_rem_ref(&self, rhs: &Self) -> (Self, Self) {
-            let (q, r) = self.0.clone().div_mod(rhs.0.clone());
+            let q = self.0.clone() / rhs.0.clone();
+            let r = self.0.clone() - q.clone() * rhs.0.clone();
             (Self(q), Self(r))
         }
 
         #[inline]
         pub fn root_ref(&self, e: u32) -> Self {
-            Self(self.0.clone().floor_root(u64::from(e)))
+            #[cfg(feature = "gmp")]
+            {
+                return Self(self.0.clone().root(e));
+            }
+            #[cfg(feature = "no_gmp")]
+            {
+                return Self(self.0.clone().floor_root(u64::from(e)));
+            }
         }
 
         #[inline]
@@ -207,35 +193,68 @@ mod malachite {
 
         #[inline]
         pub fn gcd(&self, rhs: &Self) -> Self {
-            Self(MalachiteInteger::from(Gcd::gcd(
-                self.0.clone().unsigned_abs(),
-                rhs.0.clone().unsigned_abs(),
-            )))
+            #[cfg(feature = "gmp")]
+            {
+                return Self(self.0.clone().gcd(&rhs.0));
+            }
+            #[cfg(feature = "no_gmp")]
+            {
+                return Self(RawMultiPrecisionInteger::from(Gcd::gcd(
+                    self.0.clone().unsigned_abs(),
+                    rhs.0.clone().unsigned_abs(),
+                )));
+            }
         }
 
         #[inline]
         pub fn extended_gcd(self, rhs: Self, _scratch: Self) -> (Self, Self, Self) {
-            let (g, s, t) = ExtendedGcd::extended_gcd(self.0, rhs.0);
-            (Self(MalachiteInteger::from(g)), Self(s), Self(t))
+            #[cfg(feature = "gmp")]
+            {
+                let (g, s, t) = self.0.extended_gcd(rhs.0, _scratch.0);
+                return (Self(g), Self(s), Self(t));
+            }
+            #[cfg(feature = "no_gmp")]
+            {
+                let (g, s, t) = ExtendedGcd::extended_gcd(self.0, rhs.0);
+                return (Self(RawMultiPrecisionInteger::from(g)), Self(s), Self(t));
+            }
         }
 
         #[inline]
         pub fn invert(&self, modulus: &Self) -> Result<Self, ()> {
-            let (g, s, _) = ExtendedGcd::extended_gcd(self.0.clone(), modulus.0.clone());
-            if g != 1u32 {
-                return Err(());
+            #[cfg(feature = "gmp")]
+            {
+                return self.0.clone().invert(&modulus.0).map(Self).map_err(|_| ());
             }
-            Ok(Self(s.mod_op(modulus.0.clone())))
+            #[cfg(feature = "no_gmp")]
+            {
+                let (g, s, _) = ExtendedGcd::extended_gcd(self.0.clone(), modulus.0.clone());
+                if g != 1u32 {
+                    return Err(());
+                }
+                return Ok(Self(s.mod_op(modulus.0.clone())));
+            }
         }
 
         #[inline]
         pub fn significant_bits(&self) -> u64 {
-            SignificantBits::significant_bits(&self.0)
+            #[cfg(feature = "gmp")]
+            return u64::from(self.0.significant_bits());
+            #[cfg(feature = "no_gmp")]
+            return SignificantBits::significant_bits(&self.0);
         }
 
         #[inline]
         pub fn pow(self, e: u32) -> Self {
-            Self(MalachitePow::pow(self.0, u64::from(e)))
+            #[cfg(feature = "gmp")]
+            {
+                use rug::ops::Pow;
+                return Self(self.0.pow(e));
+            }
+            #[cfg(feature = "no_gmp")]
+            {
+                return Self(MalachitePow::pow(self.0, u64::from(e)));
+            }
         }
 
         #[inline]
@@ -258,9 +277,25 @@ mod malachite {
             self.0 == 0
         }
 
-        fn rem_trunc(lhs: MalachiteInteger, rhs: MalachiteInteger) -> Self {
+        fn rem_trunc(lhs: RawMultiPrecisionInteger, rhs: RawMultiPrecisionInteger) -> Self {
             let q = lhs.clone() / rhs.clone();
             Self(lhs - q * rhs)
+        }
+
+        #[inline]
+        fn shl_raw(value: RawMultiPrecisionInteger, rhs: u64) -> RawMultiPrecisionInteger {
+            #[cfg(feature = "gmp")]
+            return value << usize::try_from(rhs).expect("shift amount does not fit in usize");
+            #[cfg(feature = "no_gmp")]
+            return value << rhs;
+        }
+
+        #[inline]
+        fn shr_raw(value: RawMultiPrecisionInteger, rhs: u64) -> RawMultiPrecisionInteger {
+            #[cfg(feature = "gmp")]
+            return value >> usize::try_from(rhs).expect("shift amount does not fit in usize");
+            #[cfg(feature = "no_gmp")]
+            return value >> rhs;
         }
     }
 
@@ -283,10 +318,12 @@ mod malachite {
     }
 
     impl FromStr for MultiPrecisionInteger {
-        type Err = <MalachiteInteger as FromStr>::Err;
+        type Err = ParseMultiPrecisionIntegerError;
 
         fn from_str(s: &str) -> Result<Self, Self::Err> {
-            MalachiteInteger::from_str(s).map(Self)
+            RawMultiPrecisionInteger::from_str(s)
+                .map(Self)
+                .map_err(|_| ParseMultiPrecisionIntegerError)
         }
     }
 
@@ -296,7 +333,7 @@ mod malachite {
                 impl From<$t> for MultiPrecisionInteger {
                     #[inline]
                     fn from(value: $t) -> Self {
-                        Self(MalachiteInteger::from(value))
+                        Self(RawMultiPrecisionInteger::from(value))
                     }
                 }
             )*
@@ -307,14 +344,14 @@ mod malachite {
         i8, i16, i32, i64, i128, isize, u8, u16, u32, u64, u128, usize
     );
 
-    impl From<MalachiteInteger> for MultiPrecisionInteger {
+    impl From<RawMultiPrecisionInteger> for MultiPrecisionInteger {
         #[inline]
-        fn from(value: MalachiteInteger) -> Self {
+        fn from(value: RawMultiPrecisionInteger) -> Self {
             Self(value)
         }
     }
 
-    impl From<MultiPrecisionInteger> for MalachiteInteger {
+    impl From<MultiPrecisionInteger> for RawMultiPrecisionInteger {
         #[inline]
         fn from(value: MultiPrecisionInteger) -> Self {
             value.0
@@ -327,28 +364,28 @@ mod malachite {
                 impl PartialEq<$t> for MultiPrecisionInteger {
                     #[inline]
                     fn eq(&self, other: &$t) -> bool {
-                        self.0 == MalachiteInteger::from(*other)
+                        self.0 == RawMultiPrecisionInteger::from(*other)
                     }
                 }
 
                 impl PartialEq<MultiPrecisionInteger> for $t {
                     #[inline]
                     fn eq(&self, other: &MultiPrecisionInteger) -> bool {
-                        MalachiteInteger::from(*self) == other.0
+                        RawMultiPrecisionInteger::from(*self) == other.0
                     }
                 }
 
                 impl PartialOrd<$t> for MultiPrecisionInteger {
                     #[inline]
                     fn partial_cmp(&self, other: &$t) -> Option<std::cmp::Ordering> {
-                        self.0.partial_cmp(&MalachiteInteger::from(*other))
+                        self.0.partial_cmp(&RawMultiPrecisionInteger::from(*other))
                     }
                 }
 
                 impl PartialOrd<MultiPrecisionInteger> for $t {
                     #[inline]
                     fn partial_cmp(&self, other: &MultiPrecisionInteger) -> Option<std::cmp::Ordering> {
-                        MalachiteInteger::from(*self).partial_cmp(&other.0)
+                        RawMultiPrecisionInteger::from(*self).partial_cmp(&other.0)
                     }
                 }
             )*
@@ -391,7 +428,7 @@ mod malachite {
 
                 #[inline]
                 fn $method(self, rhs: &'a MultiPrecisionInteger) -> Self::Output {
-                    MultiPrecisionInteger((&self.0).$method(&rhs.0))
+                    MultiPrecisionInteger(RawMultiPrecisionInteger::from((&self.0).$method(&rhs.0)))
                 }
             }
 
@@ -776,7 +813,7 @@ mod malachite {
 
         #[inline]
         fn bitand(self, rhs: &'a MultiPrecisionInteger) -> Self::Output {
-            MultiPrecisionInteger((&self.0) & &rhs.0)
+            MultiPrecisionInteger(RawMultiPrecisionInteger::from((&self.0) & &rhs.0))
         }
     }
 
@@ -808,7 +845,7 @@ mod malachite {
 
         #[inline]
         fn neg(self) -> Self::Output {
-            MultiPrecisionInteger(-&self.0)
+            MultiPrecisionInteger(RawMultiPrecisionInteger::from(-&self.0))
         }
     }
 
@@ -849,7 +886,7 @@ mod malachite {
 
         #[inline]
         fn shl(self, rhs: u32) -> Self::Output {
-            Self(self.0 << u64::from(rhs))
+            Self(MultiPrecisionInteger::shl_raw(self.0, u64::from(rhs)))
         }
     }
 
@@ -858,7 +895,10 @@ mod malachite {
 
         #[inline]
         fn shl(self, rhs: usize) -> Self::Output {
-            Self(self.0 << u64::try_from(rhs).expect("Shift amount does not fit in u64"))
+            Self(MultiPrecisionInteger::shl_raw(
+                self.0,
+                u64::try_from(rhs).expect("shift amount does not fit in u64"),
+            ))
         }
     }
 
@@ -867,9 +907,10 @@ mod malachite {
 
         #[inline]
         fn shl(self, rhs: usize) -> Self::Output {
-            MultiPrecisionInteger(
-                &self.0 << u64::try_from(rhs).expect("Shift amount does not fit in u64"),
-            )
+            MultiPrecisionInteger(MultiPrecisionInteger::shl_raw(
+                self.0.clone(),
+                u64::try_from(rhs).expect("shift amount does not fit in u64"),
+            ))
         }
     }
 
@@ -878,7 +919,7 @@ mod malachite {
 
         #[inline]
         fn shr(self, rhs: u32) -> Self::Output {
-            Self(self.0 >> u64::from(rhs))
+            Self(MultiPrecisionInteger::shr_raw(self.0, u64::from(rhs)))
         }
     }
 
@@ -887,7 +928,10 @@ mod malachite {
 
         #[inline]
         fn shr(self, rhs: u32) -> Self::Output {
-            MultiPrecisionInteger(&self.0 >> u64::from(rhs))
+            MultiPrecisionInteger(MultiPrecisionInteger::shr_raw(
+                self.0.clone(),
+                u64::from(rhs),
+            ))
         }
     }
 
@@ -896,7 +940,7 @@ mod malachite {
 
         #[inline]
         fn shl(self, rhs: u64) -> Self::Output {
-            Self(self.0 << rhs)
+            Self(MultiPrecisionInteger::shl_raw(self.0, rhs))
         }
     }
 
@@ -905,7 +949,10 @@ mod malachite {
 
         #[inline]
         fn shr(self, rhs: usize) -> Self::Output {
-            Self(self.0 >> u64::try_from(rhs).expect("Shift amount does not fit in u64"))
+            Self(MultiPrecisionInteger::shr_raw(
+                self.0,
+                u64::try_from(rhs).expect("shift amount does not fit in u64"),
+            ))
         }
     }
 
@@ -914,18 +961,19 @@ mod malachite {
 
         #[inline]
         fn shr(self, rhs: usize) -> Self::Output {
-            MultiPrecisionInteger(
-                &self.0 >> u64::try_from(rhs).expect("Shift amount does not fit in u64"),
-            )
+            MultiPrecisionInteger(MultiPrecisionInteger::shr_raw(
+                self.0.clone(),
+                u64::try_from(rhs).expect("shift amount does not fit in u64"),
+            ))
         }
     }
 
-    #[cfg(feature = "bincode")]
+    #[cfg(all(feature = "no_gmp", feature = "bincode"))]
     pub(crate) fn to_be_bytes(value: &MultiPrecisionInteger) -> Vec<u8> {
         value.to_string().into_bytes()
     }
 
-    #[cfg(feature = "bincode")]
+    #[cfg(all(feature = "no_gmp", feature = "bincode"))]
     pub(crate) fn from_be_bytes(bytes: &[u8]) -> Result<MultiPrecisionInteger, &'static str> {
         std::str::from_utf8(bytes)
             .ok()
@@ -933,10 +981,12 @@ mod malachite {
             .ok_or("Failed to parse large integer")
     }
 
+    #[cfg(feature = "no_gmp")]
     pub(crate) struct BackendRandState {
         rng: rand::rngs::ThreadRng,
     }
 
+    #[cfg(feature = "no_gmp")]
     impl BackendRandState {
         pub(crate) fn new(_seed: u128) -> Self {
             Self { rng: rand::rng() }
@@ -952,20 +1002,60 @@ mod malachite {
             }
         }
     }
+
+    #[cfg(all(feature = "gmp", feature = "bincode"))]
+    pub(crate) fn to_be_bytes(value: &MultiPrecisionInteger) -> Vec<u8> {
+        value.0.to_digits::<u8>(rug::integer::Order::MsfBe)
+    }
+
+    #[cfg(all(feature = "gmp", feature = "bincode"))]
+    pub(crate) fn from_be_bytes(bytes: &[u8]) -> Result<MultiPrecisionInteger, &'static str> {
+        Ok(MultiPrecisionInteger(rug::Integer::from_digits(
+            bytes,
+            rug::integer::Order::MsfBe,
+        )))
+    }
+
+    #[cfg(feature = "gmp")]
+    pub(crate) struct BackendRandState(rug::rand::RandState<'static>);
+
+    #[cfg(feature = "gmp")]
+    impl BackendRandState {
+        pub(crate) fn new(seed: u128) -> Self {
+            let mut state = rug::rand::RandState::new();
+            state.seed(&rug::Integer::from(seed));
+            Self(state)
+        }
+
+        pub(crate) fn below(&mut self, modulus: &MultiPrecisionInteger) -> MultiPrecisionInteger {
+            MultiPrecisionInteger(modulus.0.clone().random_below(&mut self.0))
+        }
+    }
 }
 
-#[cfg(feature = "no_gmp")]
-pub use malachite::MultiPrecisionInteger;
-#[cfg(feature = "no_gmp")]
-pub(crate) use malachite::{BackendRandState, Complete, RemRounding};
-#[cfg(feature = "no_gmp")]
+pub(crate) use implementation::{BackendRandState, Complete, RemRounding};
+pub use implementation::{
+    MultiPrecisionInteger, ParseMultiPrecisionIntegerError, RawMultiPrecisionInteger,
+};
+
 pub(crate) fn pow_ref_u32(base: &MultiPrecisionInteger, e: u32) -> MultiPrecisionInteger {
     base.clone().pow(e)
 }
-#[cfg(feature = "no_gmp")]
-pub(crate) fn probably_prime(_value: &MultiPrecisionInteger, _reps: u32) -> Option<bool> {
-    None
+
+pub(crate) fn probably_prime(value: &MultiPrecisionInteger, reps: u32) -> Option<bool> {
+    #[cfg(feature = "gmp")]
+    return Some(value.as_raw().is_probably_prime(reps) != rug::integer::IsPrime::No);
+    #[cfg(feature = "no_gmp")]
+    {
+        let _ = (value, reps);
+        return None;
+    }
 }
+#[cfg(feature = "gmp")]
+pub fn from_lsf_bytes(bytes: &[u8]) -> MultiPrecisionInteger {
+    MultiPrecisionInteger::from_raw(rug::Integer::from_digits(bytes, rug::integer::Order::Lsf))
+}
+
 #[cfg(feature = "no_gmp")]
 pub fn from_lsf_bytes(bytes: &[u8]) -> MultiPrecisionInteger {
     let mut value = MultiPrecisionInteger::from(0u32);
@@ -974,6 +1064,15 @@ pub fn from_lsf_bytes(bytes: &[u8]) -> MultiPrecisionInteger {
     }
     value
 }
+#[cfg(feature = "gmp")]
+pub fn write_lsf_bytes(value: &MultiPrecisionInteger, dest: &mut Vec<u8>) {
+    let value = value.as_raw().as_abs();
+    let num_digits = value.significant_digits::<u8>();
+    let old_len = dest.len();
+    dest.resize(old_len + num_digits, 0);
+    value.write_digits(&mut dest[old_len..], rug::integer::Order::Lsf);
+}
+
 #[cfg(feature = "no_gmp")]
 pub fn write_lsf_bytes(value: &MultiPrecisionInteger, dest: &mut Vec<u8>) {
     let mut value = if value.is_negative() {
@@ -987,6 +1086,11 @@ pub fn write_lsf_bytes(value: &MultiPrecisionInteger, dest: &mut Vec<u8>) {
         value = value >> 8usize;
     }
 }
+#[cfg(feature = "gmp")]
+pub fn lsf_byte_size(value: &MultiPrecisionInteger) -> usize {
+    value.as_raw().significant_digits::<u8>()
+}
+
 #[cfg(feature = "no_gmp")]
 pub fn lsf_byte_size(value: &MultiPrecisionInteger) -> usize {
     value
@@ -995,12 +1099,24 @@ pub fn lsf_byte_size(value: &MultiPrecisionInteger) -> usize {
         .try_into()
         .expect("large integer byte length does not fit in usize")
 }
-#[cfg(feature = "no_gmp")]
 pub fn to_lsf_bytes(value: &MultiPrecisionInteger) -> Vec<u8> {
     let mut bytes = Vec::new();
     write_lsf_bytes(value, &mut bytes);
     bytes
 }
+#[cfg(feature = "gmp")]
+pub fn from_digits_radix(digits: &[u8], radix: u32, is_negative: bool) -> MultiPrecisionInteger {
+    let mut value = rug::Integer::new();
+    unsafe {
+        value.assign_bytes_radix_unchecked(
+            digits,
+            i32::try_from(radix).expect("radix does not fit in i32"),
+            is_negative,
+        );
+    }
+    MultiPrecisionInteger::from_raw(value)
+}
+
 #[cfg(feature = "no_gmp")]
 pub fn from_digits_radix(digits: &[u8], radix: u32, is_negative: bool) -> MultiPrecisionInteger {
     let mut value = MultiPrecisionInteger::from(0u32);
@@ -1011,5 +1127,5 @@ pub fn from_digits_radix(digits: &[u8], radix: u32, is_negative: bool) -> MultiP
 
     if is_negative { -value } else { value }
 }
-#[cfg(all(feature = "no_gmp", feature = "bincode"))]
-pub(crate) use malachite::{from_be_bytes, to_be_bytes};
+#[cfg(feature = "bincode")]
+pub(crate) use implementation::{from_be_bytes, to_be_bytes};
