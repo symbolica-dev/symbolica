@@ -8025,44 +8025,61 @@ impl PythonExpression {
         Ok(res.into())
     }
 
-    /// Solve a system exactly in the requested variables.
+    /// Find the exact solutions of a system of equations.
     ///
-    /// Linear systems use the linear-system solver. Polynomial nonlinear
-    /// systems over the rationals or rational functions in symbolic parameters
-    /// use a grevlex Gröbner basis, FGLM conversion to lex, and exact algebraic
-    /// roots. For positive-dimensional systems, a maximal viable set of
-    /// requested variables is used as input, preferring variables later in the
-    /// list; input variables map to themselves in every returned solution.
-    /// Rational powers such as `sqrt(x+3)` are polynomialized using auxiliary
-    /// variables, after which solutions on non-principal branches are filtered
-    /// out. Rational denominators are cleared and solutions where they vanish
-    /// are rejected.
+    /// Write every equation as an expression equal to zero. For example, pass
+    /// `x + y - 3` to represent `x + y = 3`. The result contains one `Solution`
+    /// for each solution branch. A solution behaves like a read-only dictionary,
+    /// so values can be accessed with `solution[x]` or copied with
+    /// `solution.as_dict()`.
+    ///
+    /// The default domain is `Complexes`. Pass `Integers`, `Rationals`, or
+    /// `Reals` to keep only solutions in that domain. An empty list means that
+    /// the system has no solutions in the requested domain.
+    ///
+    /// Underdetermined systems return families of solutions. Inspect
+    /// `solution.free_variables()` to see which variables remain free and
+    /// `solution.conditions()` for restrictions such as a symbolic denominator
+    /// that must be nonzero. Variables later in `variables` are preferred as
+    /// free inputs when there is a choice.
+    ///
+    /// This method handles exact linear and polynomial systems, including
+    /// symbolic parameters, as well as many rational equations and rational
+    /// powers such as square roots. Use `nsolve` instead when you need a
+    /// numerical root from an initial guess or no exact solution is available.
     ///
     /// Examples
     /// --------
-    /// >>> from symbolica import Expression, S
+    /// >>> from symbolica import Expression, Reals, S
     /// >>> x, y = S("x", "y")
-    /// >>> solutions = Expression.solve([x+y, y**2-2], [x, y])
+    /// >>> solutions = Expression.solve([x+y, y**2-2], [x, y], domain=Reals)
     /// >>> len(solutions)
     /// 2
+    /// >>> solutions[0][x] == -solutions[0][y]
+    /// True
+    ///
+    /// Domain restrictions can remove otherwise valid solutions:
+    ///
+    /// >>> Expression.solve([x**2+1], [x], domain=Reals)
+    /// []
     ///
     /// Parameters
     /// ----------
     /// system: Sequence[Expression]
-    ///     Expressions that are each understood to equal zero.
+    ///     Left-hand sides of equations, each understood to equal zero.
     /// variables: Sequence[Expression]
-    ///     Variables to solve for, in lexicographic elimination order. When
-    ///     inputs are needed, viable variables later in this list are preferred.
+    ///     Variables whose values should be returned. In an underdetermined
+    ///     system, variables later in this list are preferred as free inputs.
     /// warn_if_underdetermined: bool
-    ///     Whether to warn when the system is underdetermined.
+    ///     Emit a warning when the returned solutions contain free variables.
     /// domain: SolveDomain | None
-    ///     Restrict solutions to this domain. The default is `Complexes`.
+    ///     Keep only solutions in this domain. Defaults to `Complexes`.
     ///
     /// Returns
     /// -------
     /// list[Solution]
-    ///     Exact solution branches. A `Solution` behaves as a read-only mapping
-    ///     and also exposes its free variables, validity conditions, and domain.
+    ///     Exact solution branches. Returns an empty list if there are none in
+    ///     the requested domain.
     #[pyo3(signature = (system, variables, warn_if_underdetermined = true, domain = None))]
     #[classmethod]
     pub fn solve(
@@ -8117,59 +8134,6 @@ impl PythonExpression {
                 Ok(solutions.into_iter().map(Into::into).collect())
             }
             Err(error) => Err(exceptions::PyValueError::new_err(error.to_string())),
-        }
-    }
-
-    /// Solve a linear system in the variables `variables`, where each expression
-    /// in the system is understood to yield 0.
-    ///
-    /// If the system is underdetermined, a partial solution is returned
-    /// where each bound variable is a linear combination of the free
-    /// variables. The free variables are chosen such that they have the highest index in the `vars` list.
-    ///
-    /// Examples
-    /// --------
-    /// >>> from symbolica import *
-    /// >>> x, y, c = S('x', 'y', 'c')
-    /// >>> f = S('f')
-    /// >>> x_r, y_r = Expression.solve_linear_system([f(c)*x + y/c - 1, y-c/2], [x, y])
-    /// >>> print('x =', x_r, ', y =', y_r)
-    ///
-    /// Parameters
-    /// ----------
-    /// system: Sequence[Expression]
-    ///     The equations or polynomials that define the system.
-    /// variables: Sequence[Expression]
-    ///     The variables to solve for, in order.
-    /// warn_if_underdetermined: bool
-    ///     Whether to warn when the system is underdetermined.
-    #[pyo3(signature = (system, variables, warn_if_underdetermined = true))]
-    #[classmethod]
-    pub fn solve_linear_system(
-        _cls: &Bound<'_, PyType>,
-        system: Vec<ConvertibleToExpression>,
-        variables: Vec<PythonExpression>,
-        warn_if_underdetermined: bool,
-    ) -> PyResult<Vec<PythonExpression>> {
-        let system: Vec<_> = system.into_iter().map(|x| x.to_expression().expr).collect();
-        let vars: Vec<_> = variables.into_iter().map(|v| v.expr).collect();
-
-        match AtomView::solve_linear_system::<u16, _, Atom>(&system, &vars) {
-            Ok(res) => Ok(res.into_iter().map(|x| x.into()).collect()),
-            Err(SolveError::Underdetermined {
-                rank,
-                partial_solution,
-            }) => {
-                if warn_if_underdetermined {
-                    warn!(
-                        "The system is underdetermined (rank {rank} < size {})",
-                        vars.len()
-                    );
-                }
-
-                Ok(partial_solution.into_iter().map(|x| x.into()).collect())
-            }
-            Err(e) => Err(exceptions::PyValueError::new_err(e.to_string())),
         }
     }
 
