@@ -253,6 +253,29 @@ impl<R: Ring> Root<R> {
 ///
 /// When the field is enlarged, all stored images are transported to the new
 /// primitive-element representation.
+///
+/// # Examples
+///
+/// ```
+/// use symbolica::prelude::*;
+///
+/// let sqrt_2 = parse!("sqrt(2)");
+/// let sqrt_3 = parse!("sqrt(3)");
+/// let context =
+///     AlgebraicContext::from_generators(&[sqrt_2.clone(), sqrt_3.clone()]).unwrap();
+///
+/// // Both radicals are represented in the same exact number field.
+/// let sqrt_2_image = context.image(&sqrt_2).unwrap();
+/// let sqrt_3_image = context.image(&sqrt_3).unwrap();
+/// assert_eq!(
+///     context.field().mul(sqrt_2_image, sqrt_2_image),
+///     context.field().nth(2.into()),
+/// );
+/// assert_eq!(
+///     context.field().mul(sqrt_3_image, sqrt_3_image),
+///     context.field().nth(3.into()),
+/// );
+/// ```
 #[derive(Clone)]
 pub struct AlgebraicContext {
     field: AlgebraicExtension<Q>,
@@ -683,6 +706,22 @@ impl AlgebraicContext {
     /// current field.
     pub(crate) fn insert_image(&mut self, atom: Atom, image: AlgebraicNumber<Q>) {
         self.images.insert(atom, image);
+    }
+
+    /// Rename the primitive element in the field and every recorded image.
+    pub(crate) fn rename_generator(&mut self, variable: PolyVariable) {
+        let old_variable = self.field.poly.get_vars_ref()[0].clone();
+        if old_variable == variable {
+            return;
+        }
+
+        let mut polynomial = self.field.poly.as_ref().clone();
+        polynomial.rename_variable(&old_variable, &variable);
+        for image in self.images.values_mut() {
+            image.poly.rename_variable(&old_variable, &variable);
+        }
+        self.field =
+            AlgebraicExtension::from_polynomial_with_embedding(polynomial, self.field.embedding);
     }
 
     /// Convert a field element to an atom and cache that representation.
@@ -1251,51 +1290,6 @@ impl AtomView<'_> {
         let numerator = rational.numerator.factor();
         let denominator = rational.denominator.factor();
         context.factorization_to_atom(numerator, denominator)
-    }
-
-    /// Convert the atom to a polynomial over a generated algebraic extension.
-    ///
-    /// Returns `Ok(None)` when no algebraic extension is required.
-    pub fn to_polynomial_in_algebraic_extension<E: Exponent>(
-        &self,
-        var_map: impl IntoVariableMap,
-    ) -> Result<
-        Option<(
-            AlgebraicContext,
-            MultivariatePolynomial<AlgebraicExtension<Q>, E>,
-        )>,
-        String,
-    > {
-        let mut context = self.algebraic_context()?;
-        if context.is_trivial() {
-            return Ok(None);
-        }
-        let polynomial = context.to_polynomial(*self, var_map)?;
-        Ok(Some((context, polynomial)))
-    }
-
-    /// Convert the atom to a rational polynomial over a generated algebraic
-    /// extension. Returns `Ok(None)` when no extension is required.
-    pub fn to_rational_polynomial_in_algebraic_extension<E: PositiveExponent>(
-        &self,
-        var_map: impl IntoVariableMap,
-    ) -> Result<
-        Option<(
-            AlgebraicContext,
-            RationalPolynomial<AlgebraicExtension<Q>, E>,
-        )>,
-        String,
-    >
-    where
-        RationalPolynomial<AlgebraicExtension<Q>, E>:
-            FromNumeratorAndDenominator<AlgebraicExtension<Q>, AlgebraicExtension<Q>, E>,
-    {
-        let mut context = self.algebraic_context()?;
-        if context.is_trivial() {
-            return Ok(None);
-        }
-        let polynomial = context.to_rational_polynomial(*self, var_map)?;
-        Ok(Some((context, polynomial)))
     }
 
     fn discover_embedding_field(

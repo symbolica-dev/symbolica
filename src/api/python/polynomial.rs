@@ -7195,8 +7195,12 @@ impl PythonNumberFieldPolynomial {
     pub fn to_expression(&self) -> PyResult<PythonExpression> {
         Ok(self
             .poly
-            .to_expression_with_coeff_map(|_, element, out| {
-                element.poly.to_expression_into(out);
+            .to_expression_with_coeff_map(|field, element, out| {
+                if matches!(field.poly().get_vars_ref()[0], PolyVariable::Temporary(_)) {
+                    *out = field.element_to_atom_simplified(element);
+                } else {
+                    element.poly.to_expression_into(out);
+                }
             })
             .into())
     }

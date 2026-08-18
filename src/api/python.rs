@@ -66,7 +66,7 @@ use crate::{
     coefficient::{Coefficient, CoefficientView, ConvertToRing},
     domains::{
         Ring, RingOps, SelfRing,
-        algebraic::AlgebraicExtension,
+        algebraic::{AlgebraicContext, AlgebraicExtension},
         atom::AtomField,
         dual::HyperDual,
         finite_field::{FiniteFieldCore, PrimeIteratorU64, ToFiniteField, Z2, Zp64},
@@ -2305,7 +2305,7 @@ fn poly_shorthand(
         PythonParseMode::Symbolica,
         default_namespace,
     )?
-    .to_polynomial(modulus, power, minimal_poly, vars, py)
+    .to_polynomial(modulus, power, minimal_poly, vars, None, py)
 }
 
 #[cfg(feature = "python_stubgen")]

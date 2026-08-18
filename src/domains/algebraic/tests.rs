@@ -95,11 +95,15 @@ fn algebraic_context_conversion() {
     let trivial = AlgebraicContext::from_atom(crate::parse!("x+1").as_view()).unwrap();
     assert!(trivial.is_trivial());
 
+    let (trivial, polynomial) = crate::parse!("x^2+1")
+        .to_polynomial_in_algebraic_extension::<u16>(symbol!("x"))
+        .unwrap();
+    assert!(trivial.is_trivial());
+    assert_eq!(polynomial.degree(0), 2);
+
     let expression = crate::parse!("x+sqrt(2)+sqrt(3)");
     let (context, polynomial) = expression
-        .as_view()
         .to_polynomial_in_algebraic_extension::<u16>(symbol!("x"))
-        .unwrap()
         .unwrap();
     assert_eq!(context.field().embedding, 3);
 
@@ -130,9 +134,7 @@ fn algebraic_context_conversion() {
 
     let expression = crate::parse!("(x+sqrt(2))/(x-sqrt(3))");
     let (mut context, rational) = expression
-        .as_view()
         .to_rational_polynomial_in_algebraic_extension::<u16>(symbol!("x"))
-        .unwrap()
         .unwrap();
     let sqrt2 = context
         .convert_atom(crate::parse!("sqrt(2)").as_view())
