@@ -806,34 +806,40 @@ pub struct IsolatedRoot {
     location: Option<RootLocation>,
 }
 
+/// An enclosure and location of a root.
 #[derive(Clone, Debug)]
 struct RootState {
     enclosure: ComplexDisk,
     location: Option<RootLocation>,
 }
 
+/// A unique identifier for a root, consisting of its polynomial and index.
 #[derive(Clone)]
 struct RootIdentity {
     poly: Arc<ExactComplexPolynomial>,
     index: usize,
 }
 
+/// A collection of roots and their multiplicity.
 #[derive(Clone)]
 struct PolynomialRootLayout {
     roots: Vec<(RootIdentity, usize)>,
 }
 
+/// Intervals over which a real root is known to exist.
 #[derive(Clone)]
 struct RealProjection {
     poly: Arc<UnivariatePolynomial<Q>>,
     intervals: Vec<(Rational, Rational)>,
 }
 
+/// A projected real root, consisting of a polynomial and an interval.
 struct ProjectedRealRoot {
     poly: Arc<UnivariatePolynomial<Q>>,
     interval: (Rational, Rational),
 }
 
+/// A key used to identify a polynomial in the root cache.
 #[derive(Clone, Eq, Hash, PartialEq)]
 enum RootPolynomialKey {
     Rational(Vec<Rational>),
@@ -915,7 +921,7 @@ impl RootCache {
             .collect()
     }
 
-    fn compute_defining_roots(
+    fn isolate_roots(
         poly: &ExactComplexPolynomial,
         target_radius: Option<&Rational>,
     ) -> Vec<IsolatedRoot> {
@@ -926,23 +932,24 @@ impl RootCache {
         }
     }
 
-    fn defining_entry(&self, poly: &ExactComplexPolynomial) -> Arc<RootCacheEntry> {
+    /// Get the root cache entry for the given polynomial. If the polynomial is not cached,
+    /// the roots will be isolated and cached.
+    fn get_roots_from_cache(&self, poly: &ExactComplexPolynomial) -> Arc<RootCacheEntry> {
         let key = if let Some(rational) = poly.try_map_to_rational() {
             RootPolynomialKey::Rational(rational.coefficients)
         } else {
             RootPolynomialKey::Complex(poly.coefficients.clone())
         };
         let entry = self.root_entry(key);
-        entry.roots.get_or_init(|| {
-            RwLock::new(Self::states_from_roots(Self::compute_defining_roots(
-                poly, None,
-            )))
-        });
+        entry
+            .roots
+            .get_or_init(|| RwLock::new(Self::states_from_roots(Self::isolate_roots(poly, None))));
         entry
     }
 
-    fn materialize_root(&self, poly: Arc<ExactComplexPolynomial>, index: usize) -> IsolatedRoot {
-        let entry = self.defining_entry(&poly);
+    /// Get the root cache entry for the given polynomial and index.
+    fn get_root(&self, poly: Arc<ExactComplexPolynomial>, index: usize) -> IsolatedRoot {
+        let entry = self.get_roots_from_cache(&poly);
         let roots = entry.roots.get().unwrap().read().unwrap();
         let state = roots
             .get(index)
@@ -955,8 +962,9 @@ impl RootCache {
         }
     }
 
-    fn defining_roots(&self, poly: Arc<ExactComplexPolynomial>) -> Vec<IsolatedRoot> {
-        let entry = self.defining_entry(&poly);
+    /// Get the roots of the given polynomial.
+    fn get_roots(&self, poly: Arc<ExactComplexPolynomial>) -> Vec<IsolatedRoot> {
+        let entry = self.get_roots_from_cache(&poly);
         let states = entry.roots.get().unwrap().read().unwrap();
         states
             .iter()
@@ -978,13 +986,13 @@ impl RootCache {
         let mut multiplicities = HashMap::new();
         for (poly, multiplicity) in factors {
             multiplicities.insert(poly.coefficients.clone(), multiplicity);
-            roots.extend(self.defining_roots(poly));
+            roots.extend(self.get_roots(poly));
         }
 
         UnivariatePolynomial::<Q>::refine_isolated_complex_roots_until_disjoint(&mut roots);
         UnivariatePolynomial::<Q>::sort_complex_roots_canonical(&mut roots);
         for root in &roots {
-            self.merge_root(root);
+            self.update_root(root);
         }
 
         PolynomialRootLayout {
@@ -1004,8 +1012,9 @@ impl RootCache {
         }
     }
 
+    /// Refine the root to the given tolerance. The cache entry will be updated.
     fn refine_root(&self, root: &mut IsolatedRoot, tolerance: &Rational) {
-        let entry = self.defining_entry(&root.poly);
+        let entry = self.get_roots_from_cache(&root.poly);
         let mut states = entry.roots.get().unwrap().write().unwrap();
         let state = states.get(root.index).unwrap_or_else(|| {
             panic!(
@@ -1023,7 +1032,7 @@ impl RootCache {
             )
         {
             let replacement =
-                Self::states_from_roots(Self::compute_defining_roots(&root.poly, Some(tolerance)));
+                Self::states_from_roots(Self::isolate_roots(&root.poly, Some(tolerance)));
             *states = replacement;
             let state = states.get(root.index).unwrap_or_else(|| {
                 panic!(
@@ -1042,8 +1051,9 @@ impl RootCache {
         };
     }
 
-    fn merge_root(&self, root: &IsolatedRoot) {
-        let entry = self.defining_entry(&root.poly);
+    /// Update the root in the cache to match the given root's enclosure and location if  the latter is more precise.
+    fn update_root(&self, root: &IsolatedRoot) {
+        let entry = self.get_roots_from_cache(&root.poly);
         let mut states = entry.roots.get().unwrap().write().unwrap();
         let state = states.get_mut(root.index).unwrap_or_else(|| {
             panic!(
@@ -1059,8 +1069,9 @@ impl RootCache {
         }
     }
 
+    /// Resolve the location of the root (e.g., if is known to be on the real line).
     fn resolve_root_location(&self, root: &mut IsolatedRoot) {
-        let entry = self.defining_entry(&root.poly);
+        let entry = self.get_roots_from_cache(&root.poly);
         let mut roots = {
             let states = entry.roots.get().unwrap().read().unwrap();
             let state = states.get(root.index).unwrap_or_else(|| {
@@ -1101,22 +1112,31 @@ impl RootCache {
         root.location = state.location;
     }
 
-    fn materialize_layout(&self, layout: &PolynomialRootLayout) -> Vec<(IsolatedRoot, usize)> {
+    /// Get the roots of the given polynomial with their multiplicities.
+    fn get_roots_with_multiplicity(
+        &self,
+        layout: &PolynomialRootLayout,
+    ) -> Vec<(IsolatedRoot, usize)> {
         layout
             .roots
             .iter()
             .map(|(identity, multiplicity)| {
-                let root = self.materialize_root(identity.poly.clone(), identity.index);
+                let root = self.get_root(identity.poly.clone(), identity.index);
                 (root, *multiplicity)
             })
             .collect()
     }
 
-    fn get_index(&self, layout: &PolynomialRootLayout, index: usize) -> Option<IsolatedRoot> {
+    /// Get the root at the given index in the polynomial layout.
+    fn get_root_at_index(
+        &self,
+        layout: &PolynomialRootLayout,
+        index: usize,
+    ) -> Option<IsolatedRoot> {
         let mut seen = 0;
         for (identity, multiplicity) in &layout.roots {
             if index < seen + multiplicity {
-                return Some(self.materialize_root(identity.poly.clone(), identity.index));
+                return Some(self.get_root(identity.poly.clone(), identity.index));
             }
             seen += *multiplicity;
         }
@@ -1268,6 +1288,7 @@ impl IsolatedRoot {
             .expect("root location resolution must classify every root")
     }
 
+    /// Convert the root's enclosure to a floating-point center.
     pub(crate) fn to_float_center(&self, binary_prec: u32) -> Complex<Float> {
         let mut center = Complex::new(
             self.enclosure.center.re.to_multi_prec_float(binary_prec),
@@ -1477,7 +1498,7 @@ impl UnivariatePolynomial<RationalField> {
 
         let entry = ROOT_CACHE.layout_entry(RootPolynomialKey::Rational(self.coefficients.clone()));
         let layout = entry.layout.get_or_init(|| self.compute_root_layout());
-        ROOT_CACHE.get_index(layout, index)
+        ROOT_CACHE.get_root_at_index(layout, index)
     }
 
     /// Isolate the distinct complex roots of the polynomial. The result contains
@@ -1486,7 +1507,7 @@ impl UnivariatePolynomial<RationalField> {
     pub fn isolate_roots(&self) -> Vec<(IsolatedRoot, usize)> {
         let entry = ROOT_CACHE.layout_entry(RootPolynomialKey::Rational(self.coefficients.clone()));
         let layout = entry.layout.get_or_init(|| self.compute_root_layout());
-        ROOT_CACHE.materialize_layout(layout)
+        ROOT_CACHE.get_roots_with_multiplicity(layout)
     }
 
     /// Isolate the distinct real roots of the polynomial. Resolving whether a
@@ -2637,7 +2658,7 @@ impl UnivariatePolynomial<ExactComplexField> {
 
         let entry = ROOT_CACHE.layout_entry(RootPolynomialKey::Complex(self.coefficients.clone()));
         let layout = entry.layout.get_or_init(|| self.compute_root_layout());
-        ROOT_CACHE.get_index(layout, index)
+        ROOT_CACHE.get_root_at_index(layout, index)
     }
 
     /// Isolate the distinct complex roots of a polynomial with exact complex
@@ -2651,7 +2672,7 @@ impl UnivariatePolynomial<ExactComplexField> {
 
         let entry = ROOT_CACHE.layout_entry(RootPolynomialKey::Complex(self.coefficients.clone()));
         let layout = entry.layout.get_or_init(|| self.compute_root_layout());
-        ROOT_CACHE.materialize_layout(layout)
+        ROOT_CACHE.get_roots_with_multiplicity(layout)
     }
 
     /// Isolate the distinct real roots of the polynomial. Resolving whether a
