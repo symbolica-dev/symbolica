@@ -163,17 +163,8 @@ pub struct Root<R: Ring> {
 impl TryFrom<AtomView<'_>> for Root<Q> {
     type Error = String;
 
-    // TODO: also support Pow!
+    /// Try to convert a root function to a [Root].
     fn try_from(value: AtomView<'_>) -> Result<Self, Self::Error> {
-        if let AtomView::Pow(pow) = value {
-            let (b, e) = pow.get_base_exp();
-
-            if let Ok(_r) = Rational::try_from(e) {
-                // TODO: create new poly x^r_d
-                return Self::from_atom(b, 1);
-            }
-        }
-
         let AtomView::Fun(f) = value else {
             return Err("expected function tag".to_string());
         };
