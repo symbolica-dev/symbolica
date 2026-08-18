@@ -3351,7 +3351,7 @@ fn gamma_numeric_eval(z: &Complex<Float>, binary_prec: u32) -> Complex<Float> {
     {
         if z.im.to_f64() == 0.0 {
             return Complex::new(
-                z.re.clone().into_inner().gamma().into(),
+                z.re.clone().into_raw().gamma().into(),
                 Float::new(binary_prec),
             );
         }
@@ -3382,7 +3382,7 @@ fn polygamma_order_zero_numeric_eval(z: &Complex<Float>, binary_prec: u32) -> Co
     {
         if z.im.to_f64() == 0.0 {
             return Complex::new(
-                z.re.clone().into_inner().digamma().into(),
+                z.re.clone().into_raw().digamma().into(),
                 Float::new(binary_prec),
             );
         }
@@ -3399,7 +3399,7 @@ fn polygamma_numeric_eval(order: u32, z: &Complex<Float>, binary_prec: u32) -> C
     let zero = Float::new(binary_prec);
     let one = Float::with_val(binary_prec, 1);
     let exponent = Complex::new(Float::with_val(binary_prec, order + 1), zero.clone());
-    let factorial = Float::with_val(binary_prec, Integer::factorial(order).to_multi_prec());
+    let factorial = Float::with_integer(binary_prec, Integer::factorial(order).to_multi_prec());
     let sign = if order.is_multiple_of(2) {
         -factorial
     } else {
@@ -3627,7 +3627,7 @@ fn polylog_integer_numeric_eval(
     #[cfg(feature = "gmp")]
     if order == 2 && z.im.to_f64() == 0.0 && z.re.to_f64() <= 1.0 {
         return Some(Complex::new(
-            z.re.clone().into_inner().li2().into(),
+            z.re.clone().into_raw().li2().into(),
             zero.clone(),
         ));
     }
@@ -3712,7 +3712,7 @@ fn polylog_negative_integer_numeric_eval(
         poly = z.clone()
             * (poly
                 + Complex::new(
-                    Float::with_val(binary_prec, coeff.clone().to_multi_prec()),
+                    Float::with_integer(binary_prec, coeff.clone().to_multi_prec()),
                     Float::new(binary_prec),
                 ));
     }
@@ -3791,7 +3791,7 @@ fn bernoulli_polynomial(n: u32, x: &Complex<Float>, binary_prec: u32) -> Complex
     let mut sum = Complex::new(zero.clone(), zero.clone());
 
     for k in 0..=n {
-        let coeff = Float::with_val(
+        let coeff = Float::with_integer(
             binary_prec,
             Integer::binom(n.into(), k.into()).to_multi_prec(),
         ) * bernoulli_number(n - k).to_multi_prec_float(binary_prec);
@@ -3843,7 +3843,7 @@ fn pow_complex_u32(z: &Complex<Float>, n: u32) -> Complex<Float> {
 }
 
 fn factorial_float(n: u32, binary_prec: u32) -> Float {
-    Float::with_val(binary_prec, Integer::factorial(n).to_multi_prec())
+    Float::with_integer(binary_prec, Integer::factorial(n).to_multi_prec())
 }
 
 fn zeta_numeric_eval(s: &Complex<Float>, binary_prec: u32) -> Complex<Float> {
@@ -3856,7 +3856,7 @@ fn zeta_numeric_eval(s: &Complex<Float>, binary_prec: u32) -> Complex<Float> {
 
         #[cfg(feature = "gmp")]
         {
-            return Complex::new(s.re.clone().into_inner().zeta().into(), zero);
+            return Complex::new(s.re.clone().into_raw().zeta().into(), zero);
         }
 
         #[cfg(not(feature = "gmp"))]
@@ -3909,10 +3909,7 @@ fn zeta_complex_reflection(s: &Complex<Float>, binary_prec: u32) -> Complex<Floa
     let gamma = gamma_numeric_eval(&reflected, binary_prec);
     #[cfg(feature = "gmp")]
     let zeta = if reflected.im.to_f64() == 0.0 {
-        Complex::new(
-            reflected.re.clone().into_inner().zeta().into(),
-            zero.clone(),
-        )
+        Complex::new(reflected.re.clone().into_raw().zeta().into(), zero.clone())
     } else {
         zeta_complex_hasse(&reflected, binary_prec)
     };
@@ -4117,7 +4114,7 @@ fn spouge_coefficient(a: u32, k: u32, binary_prec: u32) -> Float {
     let half = Float::with_val(binary_prec, 1) / Float::with_val(binary_prec, 2);
     let a_minus_k = Float::with_val(binary_prec, a - k);
     let exponent = Float::with_val(binary_prec, k) - half;
-    let factorial = Float::with_val(binary_prec, Integer::factorial(k - 1).to_multi_prec());
+    let factorial = Float::with_integer(binary_prec, Integer::factorial(k - 1).to_multi_prec());
     let mut coeff = a_minus_k.powf(&exponent) * a_minus_k.exp() / factorial;
 
     if k.is_multiple_of(2) {

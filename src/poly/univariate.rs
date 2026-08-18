@@ -3741,7 +3741,6 @@ mod test {
         PolynomialRootLayout, ROOT_CACHE, RootCache, RootLocation, RootPolynomialKey, RootState,
         UnivariatePolynomial,
     };
-    use rug::Integer;
     use std::{
         cmp::Ordering,
         sync::{
@@ -3755,7 +3754,7 @@ mod test {
         atom::AtomCore,
         domains::{
             float::{Complex, F64, Float, FloatField},
-            integer::Z,
+            integer::{Integer, Z},
             rational::{Q, Rational},
         },
         parse,
@@ -4039,7 +4038,7 @@ mod test {
         let p = parse!("x^4-2")
             .to_polynomial::<_, u16>(&Q, None)
             .to_univariate_from_univariate(0);
-        let target_radius = Rational::from((Integer::from(1), Integer::from(1) << 32));
+        let target_radius = Rational::from((Integer::from(1), Integer::from(1) << 32u32));
         let roots = p.isolate_roots_impl(Some(&target_radius));
 
         assert!(
@@ -4223,7 +4222,7 @@ mod test {
         let p = parse!("x^3-7919")
             .to_polynomial::<_, u16>(&Q, None)
             .to_univariate_from_univariate(0);
-        let tolerance = Rational::from((Integer::from(1), Integer::from(1) << 80));
+        let tolerance = Rational::from((Integer::from(1), Integer::from(1) << 80u32));
 
         let original = p.root(0).unwrap();
         let defining_key = original
@@ -4273,7 +4272,7 @@ mod test {
         let p = parse!("x^4+43*x+103")
             .to_polynomial::<_, u16>(&Q, None)
             .to_univariate_from_univariate(0);
-        let tolerance = Rational::from((Integer::from(1), Integer::from(1) << 72));
+        let tolerance = Rational::from((Integer::from(1), Integer::from(1) << 72u32));
 
         p.isolate_roots();
         let refined = refine_roots(p.isolate_roots(), &tolerance);
