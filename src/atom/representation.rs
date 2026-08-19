@@ -1963,11 +1963,12 @@ impl<'a> AtomView<'a> {
         }
     }
 
-    /// Export the atom and state to a binary stream. It can be loaded
+    /// Export the atom and the required state to a binary stream. It can be loaded
     /// with [Atom::import].
     #[inline(always)]
     pub fn export<W: Write>(&self, dest: &mut W) -> Result<(), std::io::Error> {
-        State::export(dest)?;
+        let active_symbols = self.get_all_symbols(true);
+        State::export_partial(dest, &active_symbols)?;
 
         dest.write_u64::<LittleEndian>(1)?; // export a single expression
 
