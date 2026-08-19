@@ -3,6 +3,7 @@
 #![warn(missing_docs)]
 
 use std::{
+    borrow::Cow,
     cmp::Ordering,
     collections::{HashMap, HashSet},
     sync::{Arc, LazyLock, OnceLock, RwLock},
@@ -23,8 +24,9 @@ use crate::{
         },
     },
     poly::{
-        Exponent, IntoVariableMap, PolyVariable, PositiveExponent, factor::Factorize,
-        gcd::PolynomialGCD, polynomial::MultivariatePolynomial, univariate::RootLocation,
+        CoefficientToExpression, Exponent, IntoVariableMap, MonomialOrder, PolyVariable,
+        PositiveExponent, factor::Factorize, gcd::PolynomialGCD,
+        polynomial::MultivariatePolynomial, univariate::RootLocation,
     },
     symbol,
     tensors::matrix::Matrix,
@@ -280,6 +282,20 @@ impl<R: Ring> Root<R> {
 pub struct AlgebraicContext {
     field: AlgebraicExtension<Q>,
     images: HashMap<Atom, AlgebraicNumber<Q>>,
+}
+
+impl CoefficientToExpression<AlgebraicExtension<Q>> for AlgebraicNumber<Q> {
+    fn coefficient_to_expression(&self, field: &AlgebraicExtension<Q>, out: &mut Atom) {
+        *out = field.element_to_atom_simplified(self);
+    }
+}
+
+impl<E: Exponent, O: MonomialOrder> MultivariatePolynomial<AlgebraicExtension<Q>, E, O> {
+    /// Convert to an expression using the preferred algebraic representations recorded by
+    /// `context`.
+    pub fn to_expression_with_context(&self, context: &AlgebraicContext) -> Result<Atom, String> {
+        context.polynomial_to_expression(self)
+    }
 }
 
 impl<T: FiniteFieldWorkspace> AlgebraicExtension<FiniteField<T>>
@@ -709,6 +725,7 @@ impl AlgebraicContext {
     }
 
     /// Rename the primitive element in the field and every recorded image.
+    #[cfg(any(feature = "python_api", feature = "python_export"))]
     pub(crate) fn rename_generator(&mut self, variable: PolyVariable) {
         let old_variable = self.field.poly.get_vars_ref()[0].clone();
         if old_variable == variable {
@@ -724,19 +741,22 @@ impl AlgebraicContext {
             AlgebraicExtension::from_polynomial_with_embedding(polynomial, self.field.embedding);
     }
 
-    /// Convert a field element to an atom and cache that representation.
-    pub fn atom_from_element(&mut self, element: AlgebraicNumber<Q>) -> Result<Atom, String> {
-        if let Some(atom) = self
-            .images
+    /// Return a known atom representing `element`, preferring canonical order.
+    pub(crate) fn atom_for_element(&self, element: &AlgebraicNumber<Q>) -> Option<Atom> {
+        self.images
             .iter()
             .filter_map(|(atom, image)| {
                 self.field
-                    .is_zero(&self.field.sub(image, &element))
+                    .is_zero(&self.field.sub(image, element))
                     .then_some(atom)
             })
             .min()
             .cloned()
-        {
+    }
+
+    /// Convert a field element to an atom and cache that representation.
+    pub fn atom_from_element(&mut self, element: AlgebraicNumber<Q>) -> Result<Atom, String> {
+        if let Some(atom) = self.atom_for_element(&element) {
             return Ok(atom);
         }
 
@@ -818,6 +838,27 @@ impl AlgebraicContext {
         Ok(())
     }
 
+    fn adjoin_rational_root(&mut self, root: &Root<Q>) -> Result<AlgebraicNumber<Q>, String> {
+        let (field, old_generator, new_generator) = self
+            .field
+            .with_adjoined_rational_root_data(root.polynomial(), root.index())
+            .ok_or_else(|| {
+                format!(
+                    "Could not construct an embedding field for root {} of {}",
+                    root.index(),
+                    root.polynomial()
+                )
+            })?;
+
+        if field != self.field {
+            for image in self.images.values_mut() {
+                *image = Self::transport_element(image, &field, &old_generator);
+            }
+            self.field = field;
+        }
+        Ok(new_generator)
+    }
+
     fn ensure_field_for(&mut self, atom: AtomView<'_>) -> Result<(), String> {
         if self.is_trivial() {
             if let Some(field) = atom.discover_embedding_field(None) {
@@ -848,8 +889,8 @@ impl AlgebraicContext {
             AtomView::Var(_) => {}
             AtomView::Fun(function) => {
                 if function.get_symbol() == root() {
-                    self.ensure_field_for(atom)?;
-                    let image = atom.to_algebraic(&self.field)?;
+                    let root = Root::<Q>::try_from(atom)?;
+                    let image = self.adjoin_rational_root(&root)?;
                     self.images.insert(key, image);
                 }
             }
@@ -1014,9 +1055,9 @@ impl AlgebraicContext {
         }
     }
 
-    fn polynomial_to_atom<E: PositiveExponent>(
+    fn polynomial_to_atom<E: Exponent, O: MonomialOrder>(
         &self,
-        polynomial: &MultivariatePolynomial<AlgebraicExtension<Q>, E>,
+        polynomial: &MultivariatePolynomial<AlgebraicExtension<Q>, E, O>,
         generator: &Atom,
         express_in_generator: bool,
         element_atoms: &mut HashMap<AlgebraicNumber<Q>, Atom>,
@@ -1060,11 +1101,7 @@ impl AlgebraicContext {
         Ok(converted.flatten(false))
     }
 
-    fn factorization_to_atom(
-        &self,
-        numerator: Vec<(MultivariatePolynomial<AlgebraicExtension<Q>, u16>, usize)>,
-        denominator: Vec<(MultivariatePolynomial<AlgebraicExtension<Q>, u16>, usize)>,
-    ) -> Result<Atom, String> {
+    fn expression_conversion_data(&self) -> (HashMap<AlgebraicNumber<Q>, Atom>, Atom, bool) {
         let mut element_atoms = HashMap::<AlgebraicNumber<Q>, Atom>::new();
         for (atom, element) in &self.images {
             match element_atoms.entry(element.clone()) {
@@ -1087,6 +1124,38 @@ impl AlgebraicContext {
             element_atoms.insert(generator_image, generator.clone());
             generator
         });
+        (element_atoms, generator, express_in_generator)
+    }
+
+    /// Convert a polynomial over this context's algebraic number field to an expression.
+    ///
+    /// Known algebraic numbers are written using the preferred representations recorded by this
+    /// context. An error is returned if `polynomial` uses a different coefficient field.
+    pub fn polynomial_to_expression<E: Exponent, O: MonomialOrder>(
+        &self,
+        polynomial: &MultivariatePolynomial<AlgebraicExtension<Q>, E, O>,
+    ) -> Result<Atom, String> {
+        if polynomial.ring() != &self.field {
+            return Err("The polynomial uses a different coefficient field".to_string());
+        }
+
+        let (mut element_atoms, generator, express_in_generator) =
+            self.expression_conversion_data();
+        self.polynomial_to_atom(
+            polynomial,
+            &generator,
+            express_in_generator,
+            &mut element_atoms,
+        )
+    }
+
+    fn factorization_to_atom(
+        &self,
+        numerator: Vec<(MultivariatePolynomial<AlgebraicExtension<Q>, u16>, usize)>,
+        denominator: Vec<(MultivariatePolynomial<AlgebraicExtension<Q>, u16>, usize)>,
+    ) -> Result<Atom, String> {
+        let (mut element_atoms, generator, express_in_generator) =
+            self.expression_conversion_data();
 
         let mut result = Atom::num(1);
         for (factor, exponent) in numerator {
@@ -1692,9 +1761,27 @@ impl<R: Ring> std::fmt::Debug for AlgebraicExtension<R> {
     }
 }
 
+fn algebraic_polynomial_for_display<R: Ring>(
+    polynomial: &MultivariatePolynomial<R, u16>,
+) -> Cow<'_, MultivariatePolynomial<R, u16>> {
+    let Some(PolyVariable::Temporary(_)) = polynomial.get_vars_ref().first() else {
+        return Cow::Borrowed(polynomial);
+    };
+
+    let mut polynomial = polynomial.clone();
+    let generator = polynomial.get_vars_ref()[0].clone();
+    polynomial.rename_variable(&generator, &PolyVariable::Symbol(root_var()));
+    Cow::Owned(polynomial)
+}
+
 impl<R: Ring> std::fmt::Display for AlgebraicExtension<R> {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        write!(f, " % {}", self.poly)
+        if self.poly.degree(0) <= 1 {
+            return Ok(());
+        }
+
+        f.write_str(" % ")?;
+        std::fmt::Display::fmt(&algebraic_polynomial_for_display(&self.poly), f)
     }
 }
 
@@ -1733,7 +1820,7 @@ impl<R: Ring> std::fmt::Debug for AlgebraicNumber<R> {
 
 impl<R: Ring> std::fmt::Display for AlgebraicNumber<R> {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        write!(f, "{}", self.poly)
+        std::fmt::Display::fmt(&algebraic_polynomial_for_display(&self.poly), f)
     }
 }
 
@@ -1983,7 +2070,7 @@ impl<R: EuclideanDomain> Ring for AlgebraicExtension<R> {
         state: crate::printer::PrintState,
         f: &mut W,
     ) -> Result<bool, std::fmt::Error> {
-        element.poly.format(opts, state, f)
+        algebraic_polynomial_for_display(&element.poly).format(opts, state, f)
     }
 }
 
@@ -2248,7 +2335,7 @@ impl<R: EuclideanDomain> Ring for AlgebraicQuotient<R> {
         state: crate::printer::PrintState,
         f: &mut W,
     ) -> Result<bool, std::fmt::Error> {
-        element.poly.format(opts, state, f)
+        algebraic_polynomial_for_display(&element.poly).format(opts, state, f)
     }
 }
 
@@ -2688,38 +2775,70 @@ impl AlgebraicExtension<Q> {
         })
     }
 
-    fn with_adjoined_rational_root(
+    fn with_adjoined_rational_root_data(
         &self,
         polynomial: &MultivariatePolynomial<Q, u16>,
         embedding: usize,
-    ) -> Option<Self> {
-        if self.embedded_rational_root(polynomial, embedding).is_ok() {
-            return Some(self.clone());
+    ) -> Option<(Self, AlgebraicNumber<Q>, AlgebraicNumber<Q>)> {
+        if let Ok(root) = self.embedded_rational_root(polynomial, embedding) {
+            return Some((self.clone(), self.generator(), root));
         }
 
         let mut polynomial_over_self = polynomial.clone();
         polynomial_over_self.rename_variable(&polynomial.get_vars_ref()[0], &self.fresh_variable());
         let polynomial_over_self = polynomial_over_self.to_number_field(self);
+        let target = polynomial
+            .to_univariate_from_univariate(0)
+            .root(embedding)?;
 
-        for (factor, _) in polynomial_over_self.factor() {
+        let factors = polynomial_over_self.factor();
+        for (factor, _) in factors {
             let degree = factor.degree(0) as usize;
             if degree <= 1 {
                 continue;
             }
 
-            let (extensions, _, generator) = self.adjoin_with_all_embeddings(&factor, None);
-            for extension in extensions {
-                if extension
-                    .root_index_of_element(&generator, polynomial)
-                    .ok()?
-                    == embedding
-                {
-                    return Some(extension);
-                }
-            }
+            let (
+                mut extensions,
+                old_generator,
+                new_generator,
+                generator_minimal_polynomial,
+                generator_embeddings,
+            ) = self.adjoin_with_all_embeddings_and_generator_data(&factor, None);
+
+            let mut generator_roots = generator_minimal_polynomial
+                .to_univariate_from_univariate(0)
+                .isolate_roots()
+                .into_iter()
+                .map(|(root, _)| root)
+                .collect::<Vec<_>>();
+            let Ok(matches) = target.matching_roots(None, &mut generator_roots, None, 1) else {
+                continue;
+            };
+            let generator_embedding = matches[0];
+            let Some(extension_index) = generator_embeddings
+                .iter()
+                .position(|&candidate| candidate == generator_embedding)
+            else {
+                continue;
+            };
+            return Some((
+                extensions.swap_remove(extension_index),
+                old_generator,
+                new_generator,
+            ));
         }
 
         None
+    }
+
+    fn with_adjoined_rational_root(
+        &self,
+        polynomial: &MultivariatePolynomial<Q, u16>,
+        embedding: usize,
+    ) -> Option<Self> {
+        self.with_adjoined_rational_root_data(polynomial, embedding)
+            .map(|(field, _, _)| field)
     }
 
     pub(crate) fn imaginary_unit(&self) -> Result<AlgebraicNumber<Q>, String> {
@@ -2786,11 +2905,7 @@ impl AlgebraicExtension<Q> {
     }
 
     /// Adjoin every embedding of an irreducible polynomial over `self`.
-    ///
-    /// The expensive primitive-element construction is performed once. The
-    /// returned fields differ only in their selected embedding and are ordered
-    /// by the canonical complex ordering of the new generator over the
-    /// selected embedding of `self`.
+    #[cfg(test)]
     pub(crate) fn adjoin_with_all_embeddings(
         &self,
         polynomial: &MultivariatePolynomial<AlgebraicExtension<Q>, u16>,

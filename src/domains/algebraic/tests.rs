@@ -96,14 +96,14 @@ fn algebraic_context_conversion() {
     assert!(trivial.is_trivial());
 
     let (trivial, polynomial) = crate::parse!("x^2+1")
-        .to_polynomial_in_algebraic_extension::<u16>(symbol!("x"))
+        .to_polynomial_in_algebraic_extension::<u16>(symbol!("x"), &[])
         .unwrap();
     assert!(trivial.is_trivial());
     assert_eq!(polynomial.degree(0), 2);
 
     let expression = crate::parse!("x+sqrt(2)+sqrt(3)");
     let (context, polynomial) = expression
-        .to_polynomial_in_algebraic_extension::<u16>(symbol!("x"))
+        .to_polynomial_in_algebraic_extension::<u16>(symbol!("x"), &[])
         .unwrap();
     assert_eq!(context.field().embedding, 3);
 
@@ -154,6 +154,75 @@ fn algebraic_context_conversion() {
     assert_eq!(
         rational.denominator.coefficient(&[1]).unwrap(),
         context.field().one()
+    );
+}
+
+#[test]
+fn algebraic_context_adjoins_high_degree_rational_root() {
+    let generators = [crate::parse!("sqrt(2)"), crate::parse!("root(x^7-4,0)")];
+    let (context, polynomial) = crate::parse!("x^2-2")
+        .to_polynomial_in_algebraic_extension::<u16>(symbol!("x"), &generators)
+        .unwrap();
+
+    let sqrt_2 = context.image(&generators[0]).unwrap();
+    assert_eq!(
+        context.field().mul(sqrt_2, sqrt_2),
+        context.field().nth(2.into())
+    );
+    let seventh_root = context.image(&generators[1]).unwrap();
+    assert_eq!(
+        context.field().pow(seventh_root, 7),
+        context.field().nth(4.into())
+    );
+    assert_eq!(context.field().poly().degree(0), 14);
+    assert_eq!(polynomial.factor().len(), 2);
+}
+
+#[test]
+fn algebraic_display_hides_temporary_generators() {
+    let (_, rational_polynomial) = crate::parse!("x^2-2")
+        .to_polynomial_in_algebraic_extension::<u16>(symbol!("x"), &[])
+        .unwrap();
+    assert_eq!(rational_polynomial.to_string(), "-2+x^2");
+
+    let (context, algebraic_polynomial) = crate::parse!("x+sqrt(2)")
+        .to_polynomial_in_algebraic_extension::<u16>(symbol!("x"), &[])
+        .unwrap();
+    assert!(!algebraic_polynomial.to_string().contains("_TMP_"));
+    assert!(!context.field().generator().to_string().contains("_TMP_"));
+    assert!(algebraic_polynomial.to_string().contains('ξ'));
+}
+
+#[test]
+fn algebraic_polynomial_to_expression() {
+    let expression = crate::parse!("x+sqrt(2)");
+    let (_, polynomial) = expression
+        .to_polynomial_in_algebraic_extension::<u16>(symbol!("x"), &[])
+        .unwrap();
+    assert_eq!(polynomial.to_expression(), expression);
+
+    let (context, polynomial) = crate::parse!("x^2-2")
+        .to_polynomial_in_algebraic_extension::<u16>(symbol!("x"), &[crate::parse!("sqrt(2)")])
+        .unwrap();
+    let factors = polynomial
+        .factor()
+        .into_iter()
+        .map(|(factor, _)| {
+            let automatic = factor.to_expression();
+            let with_context = factor.to_expression_with_context(&context).unwrap();
+            assert_eq!(automatic, with_context);
+            with_context
+        })
+        .collect::<Vec<_>>();
+    assert!(factors.contains(&crate::parse!("x-sqrt(2)")));
+    assert!(factors.contains(&crate::parse!("x+sqrt(2)")));
+
+    let other_context = AlgebraicContext::from_generators(&[crate::parse!("sqrt(3)")]).unwrap();
+    assert_eq!(
+        polynomial
+            .to_expression_with_context(&other_context)
+            .unwrap_err(),
+        "The polynomial uses a different coefficient field"
     );
 }
 

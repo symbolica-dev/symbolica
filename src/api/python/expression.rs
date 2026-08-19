@@ -7154,13 +7154,9 @@ impl PythonExpression {
                 .map_err(exceptions::PyValueError::new_err)?;
             if !context.is_trivial() {
                 let generator = context.field().generator();
-                let preferred_atom = context
-                    .atom_from_element(generator.clone())
-                    .map_err(exceptions::PyValueError::new_err)?;
-                let variable = PolyVariable::try_from(preferred_atom).or_else(|_| {
-                    PolyVariable::try_from(context.field().element_to_atom(&generator))
-                });
-                if let Ok(variable) = variable {
+                if let Some(atom) = context.atom_for_element(&generator)
+                    && let Ok(variable) = PolyVariable::try_from(atom)
+                {
                     context.rename_generator(variable);
                 }
             }
