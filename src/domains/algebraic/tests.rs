@@ -179,6 +179,59 @@ fn algebraic_context_adjoins_high_degree_rational_root() {
 }
 
 #[test]
+fn algebraic_context_adjoins_selected_rational_root() {
+    let sqrt_2 = crate::parse!("sqrt(2)");
+    let defining_polynomial = crate::parse!("y^4-7").to_polynomial::<_, u16>(&Q, None);
+    let roots = [
+        crate::parse!("root(y^4-7,0)"),
+        crate::parse!("root(y^4-7,1)"),
+        crate::parse!("root(y^4-7,2)"),
+        crate::parse!("root(y^4-7,3)"),
+    ];
+
+    for (embedding, root) in roots.into_iter().enumerate() {
+        let context = AlgebraicContext::from_generators(&[sqrt_2.clone(), root.clone()]).unwrap();
+        let sqrt_2_image = context.image(&sqrt_2).unwrap();
+        let root_image = context.image(&root).unwrap();
+
+        assert_eq!(context.field().poly().degree(0), 8);
+        assert_eq!(
+            context.field().pow(sqrt_2_image, 2),
+            context.field().nth(2.into())
+        );
+        assert_eq!(
+            context.field().pow(root_image, 4),
+            context.field().nth(7.into())
+        );
+        assert_eq!(
+            context
+                .field()
+                .root_index_of_element(root_image, &defining_polynomial)
+                .unwrap(),
+            embedding
+        );
+    }
+}
+
+#[test]
+fn algebraic_context_selects_factor_of_reducible_rational_root() {
+    let sqrt_2 = crate::parse!("sqrt(2)");
+    let root = crate::parse!("root((y^2-2)*(y^2-3),3)");
+    let context = AlgebraicContext::from_generators(&[sqrt_2, root.clone()]).unwrap();
+    let root_image = context.image(&root).unwrap();
+    let defining_polynomial = crate::parse!("(y^2-2)*(y^2-3)").to_polynomial::<_, u16>(&Q, None);
+
+    assert_eq!(context.field().poly().degree(0), 4);
+    assert_eq!(
+        context
+            .field()
+            .root_index_of_element(root_image, &defining_polynomial)
+            .unwrap(),
+        3
+    );
+}
+
+#[test]
 fn algebraic_display_hides_temporary_generators() {
     let (_, rational_polynomial) = crate::parse!("x^2-2")
         .to_polynomial_in_algebraic_extension::<u16>(symbol!("x"), &[])

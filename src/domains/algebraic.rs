@@ -25,8 +25,11 @@ use crate::{
     },
     poly::{
         CoefficientToExpression, Exponent, IntoVariableMap, MonomialOrder, PolyVariable,
-        PositiveExponent, factor::Factorize, gcd::PolynomialGCD,
-        polynomial::MultivariatePolynomial, univariate::RootLocation,
+        PositiveExponent,
+        factor::Factorize,
+        gcd::PolynomialGCD,
+        polynomial::MultivariatePolynomial,
+        univariate::{IsolatedRoot, RootLocation},
     },
     symbol,
     tensors::matrix::Matrix,
@@ -2750,9 +2753,19 @@ impl AlgebraicExtension<Q> {
         let mut polynomial_over_self = polynomial.clone();
         polynomial_over_self.rename_variable(&polynomial.get_vars_ref()[0], &self.fresh_variable());
         let polynomial_over_self = polynomial_over_self.to_number_field(self);
+        let factors = polynomial_over_self.factor();
+        self.embedded_rational_root_from_factors(polynomial, embedding, &factors)
+    }
+
+    fn embedded_rational_root_from_factors(
+        &self,
+        polynomial: &MultivariatePolynomial<Q, u16>,
+        embedding: usize,
+        factors: &[(MultivariatePolynomial<AlgebraicExtension<Q>, u16>, usize)],
+    ) -> Result<AlgebraicNumber<Q>, String> {
         let mut selected = None;
 
-        for (factor, _) in polynomial_over_self.factor() {
+        for (factor, _) in factors {
             if factor.degree(0) != 1 {
                 continue;
             }
@@ -2782,56 +2795,84 @@ impl AlgebraicExtension<Q> {
         polynomial: &MultivariatePolynomial<Q, u16>,
         embedding: usize,
     ) -> Option<(Self, AlgebraicNumber<Q>, AlgebraicNumber<Q>)> {
-        if let Ok(root) = self.embedded_rational_root(polynomial, embedding) {
-            return Some((self.clone(), self.generator(), root));
-        }
-
         let mut polynomial_over_self = polynomial.clone();
         polynomial_over_self.rename_variable(&polynomial.get_vars_ref()[0], &self.fresh_variable());
         let polynomial_over_self = polynomial_over_self.to_number_field(self);
+        let factors = polynomial_over_self.factor();
+        if let Ok(root) = self.embedded_rational_root_from_factors(polynomial, embedding, &factors)
+        {
+            return Some((self.clone(), self.generator(), root));
+        }
+
         let target = polynomial
             .to_univariate_from_univariate(0)
             .root(embedding)?;
 
-        let factors = polynomial_over_self.factor();
         for (factor, _) in factors {
             let degree = factor.degree(0) as usize;
             if degree <= 1 {
                 continue;
             }
 
-            let (
-                mut extensions,
-                old_generator,
-                new_generator,
-                generator_minimal_polynomial,
-                generator_embeddings,
-            ) = self.adjoin_with_all_embeddings_and_generator_data(&factor, None);
-
-            let mut generator_roots = generator_minimal_polynomial
-                .to_univariate_from_univariate(0)
-                .isolate_roots()
-                .into_iter()
-                .map(|(root, _)| root)
-                .collect::<Vec<_>>();
-            let Ok(matches) = target.matching_roots(None, &mut generator_roots, None, 1) else {
-                continue;
-            };
-            let generator_embedding = matches[0];
-            let Some(extension_index) = generator_embeddings
-                .iter()
-                .position(|&candidate| candidate == generator_embedding)
-            else {
-                continue;
-            };
-            return Some((
-                extensions.swap_remove(extension_index),
-                old_generator,
-                new_generator,
-            ));
+            if let Some(extension) = self.adjoin_with_selected_rational_root(&factor, &target, None)
+            {
+                return Some(extension);
+            }
         }
 
         None
+    }
+
+    /// Adjoin one factor whose selected generator is the supplied rational
+    /// root. Only the primitive embedding compatible with both selected roots
+    /// is retained.
+    fn adjoin_with_selected_rational_root(
+        &self,
+        polynomial: &MultivariatePolynomial<AlgebraicExtension<Q>, u16>,
+        target: &IsolatedRoot,
+        new_symbol: Option<PolyVariable>,
+    ) -> Option<(Self, AlgebraicNumber<Q>, AlgebraicNumber<Q>)> {
+        let extension_degree = polynomial.degree(0) as usize;
+        let (mut extension, old_generator, new_generator) = self.adjoin(polynomial, new_symbol);
+
+        let old_polynomial = self.poly.to_univariate_from_univariate(0);
+        let extension_polynomial = extension.poly.to_univariate_from_univariate(0);
+        let old_root = old_polynomial.root(self.embedding)?;
+        let mut extension_roots = extension_polynomial
+            .isolate_roots()
+            .into_iter()
+            .map(|(root, _)| root)
+            .collect::<Vec<_>>();
+        let old_generator_polynomial = old_generator.poly.to_univariate_from_univariate(0);
+        let candidates = old_root
+            .matching_roots(
+                None,
+                &mut extension_roots,
+                Some(&old_generator_polynomial),
+                extension_degree,
+            )
+            .unwrap_or_else(|error| {
+                panic!(
+                    "Could not select embeddings while adjoining roots of {}: {}",
+                    polynomial, error
+                )
+            });
+
+        let mut compatible_roots = candidates
+            .iter()
+            .map(|&candidate| extension_roots[candidate].clone())
+            .collect::<Vec<_>>();
+        let new_generator_polynomial = new_generator.poly.to_univariate_from_univariate(0);
+        let selected = target
+            .matching_roots(
+                None,
+                &mut compatible_roots,
+                Some(&new_generator_polynomial),
+                1,
+            )
+            .ok()?;
+        extension.embedding = candidates[selected[0]];
+        Some((extension, old_generator, new_generator))
     }
 
     fn with_adjoined_rational_root(
