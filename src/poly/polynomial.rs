@@ -3583,6 +3583,13 @@ impl<F: Field, E: PositiveExponent> MultivariatePolynomial<F, E, LexOrder> {
     }
 }
 
+impl<F: PolynomialGCD<E>, E: PositiveExponent> MultivariatePolynomial<F, E, LexOrder> {
+    /// Divide exactly using the algorithm selected by the coefficient domain.
+    pub fn try_div_exact(&self, divisor: &Self) -> Option<Self> {
+        F::try_div_exact(self, divisor)
+    }
+}
+
 impl<F: EuclideanDomain, E: PositiveExponent> MultivariatePolynomial<F, E, LexOrder> {
     /// Convert the polynomial to one in a number field, where the variable
     /// of the number field is moved into the coefficient.

@@ -506,6 +506,55 @@ impl<F: Ring> UnivariatePolynomial<F> {
         self
     }
 
+    /// Compute a pseudo-remainder without dividing coefficients.
+    ///
+    /// The result is a scalar multiple of the remainder over the fraction
+    /// field of the coefficient ring. In particular, over an integral domain
+    /// it is zero exactly when `divisor` divides `self` over that fraction
+    /// field.
+    pub fn pseudo_remainder(&self, divisor: &Self) -> Self {
+        assert_eq!(self.ring, divisor.ring);
+        assert_eq!(self.variable, divisor.variable);
+        assert!(!divisor.is_zero(), "pseudo-division by zero");
+
+        if self.is_zero() || self.degree() < divisor.degree() {
+            return self.clone();
+        }
+
+        let divisor_degree = divisor.degree();
+        let divisor_leading_coefficient = divisor.lcoeff();
+        let divisor_is_monic = self.ring.is_one(&divisor_leading_coefficient);
+        let mut remainder = self.clone();
+
+        while !remainder.is_zero() && remainder.degree() >= divisor_degree {
+            let shift = remainder.degree() - divisor_degree;
+            let remainder_leading_coefficient = remainder.lcoeff();
+
+            if !divisor_is_monic {
+                for coefficient in &mut remainder.coefficients {
+                    self.ring
+                        .mul_assign(coefficient, &divisor_leading_coefficient);
+                }
+            }
+
+            for (coefficient, divisor_coefficient) in remainder
+                .coefficients
+                .iter_mut()
+                .skip(shift)
+                .zip(&divisor.coefficients)
+            {
+                self.ring.sub_mul_assign(
+                    coefficient,
+                    divisor_coefficient,
+                    &remainder_leading_coefficient,
+                );
+            }
+            remainder.truncate();
+        }
+
+        remainder
+    }
+
     /// Map a coefficient using the function `f`.
     pub fn map_coeff<U: Ring, T: Fn(&F::Element) -> U::Element>(
         &self,

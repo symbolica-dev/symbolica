@@ -3412,6 +3412,24 @@ impl<E: PositiveExponent> MultivariatePolynomial<IntegerRing, E> {
 
 /// Polynomial GCD functions for a certain coefficient type `Self`.
 pub trait PolynomialGCD<E: PositiveExponent>: Ring {
+    /// Divide two polynomials exactly, allowing the coefficient domain to
+    /// select a more suitable algorithm than generic term division.
+    fn try_div_exact(
+        dividend: &MultivariatePolynomial<Self, E>,
+        divisor: &MultivariatePolynomial<Self, E>,
+    ) -> Option<MultivariatePolynomial<Self, E>> {
+        dividend.try_div(divisor)
+    }
+
+    /// Test exact divisibility. Coefficient domains can override this to avoid
+    /// constructing the quotient.
+    fn divides_exact(
+        dividend: &MultivariatePolynomial<Self, E>,
+        divisor: &MultivariatePolynomial<Self, E>,
+    ) -> bool {
+        Self::try_div_exact(dividend, divisor).is_some()
+    }
+
     fn heuristic_gcd(
         a: &MultivariatePolynomial<Self, E>,
         b: &MultivariatePolynomial<Self, E>,
@@ -3802,6 +3820,131 @@ where
 }
 
 impl<E: PositiveExponent> PolynomialGCD<E> for AlgebraicExtension<RationalField> {
+    fn try_div_exact(
+        dividend: &MultivariatePolynomial<Self, E>,
+        divisor: &MultivariatePolynomial<Self, E>,
+    ) -> Option<MultivariatePolynomial<Self, E>> {
+        if dividend.variables() != divisor.variables() {
+            let mut dividend = dividend.clone();
+            let mut divisor = divisor.clone();
+            dividend.unify_variables(&mut divisor);
+            return Self::try_div_exact(&dividend, &divisor);
+        }
+
+        let active_variables = (0..dividend.nvars())
+            .filter(|&variable| {
+                dividend.degree(variable) != E::zero() || divisor.degree(variable) != E::zero()
+            })
+            .count();
+        if active_variables == 1 {
+            dividend.try_div_univariate_field(divisor)
+        } else {
+            dividend.try_div(divisor)
+        }
+    }
+
+    fn divides_exact(
+        dividend: &MultivariatePolynomial<Self, E>,
+        divisor: &MultivariatePolynomial<Self, E>,
+    ) -> bool {
+        assert_eq!(dividend.ring(), divisor.ring());
+        assert_eq!(dividend.variables(), divisor.variables());
+
+        if divisor.is_zero() {
+            return false;
+        }
+        if dividend.is_zero() || divisor.is_constant() {
+            return true;
+        }
+
+        let mut active_variables = (0..dividend.nvars()).filter(|&candidate| {
+            dividend.degree(candidate) != E::zero() || divisor.degree(candidate) != E::zero()
+        });
+        let variable = active_variables
+            .next()
+            .expect("a nonconstant polynomial must have an active variable");
+        if active_variables.next().is_some() {
+            return Self::try_div_exact(dividend, divisor).is_some();
+        }
+        if dividend.degree(variable) < divisor.degree(variable) {
+            return false;
+        }
+
+        let defining_polynomial = dividend.ring().poly();
+        let algebraic_variable = &defining_polynomial.variables()[0];
+        assert!(
+            dividend
+                .variables()
+                .iter()
+                .position(|candidate| candidate == algebraic_variable)
+                .is_none_or(|position| {
+                    dividend.degree(position) == E::zero() && divisor.degree(position) == E::zero()
+                }),
+            "the number-field generator cannot also be an active polynomial variable"
+        );
+
+        // Flatten Q(alpha)[x] to Q[alpha, x] and clear all coefficient
+        // denominators at once, as in the ordinary rational polynomial GCD.
+        let to_integer_associate = |polynomial: &MultivariatePolynomial<RationalField, E>| {
+            let content = polynomial.content();
+            polynomial.map_coeff(
+                |coefficient| polynomial.ring().div(coefficient, &content).numerator(),
+                Z,
+            )
+        };
+        let dividend_integer = to_integer_associate(&dividend.from_number_field());
+        let divisor_integer = to_integer_associate(&divisor.from_number_field());
+        let defining_polynomial_content = defining_polynomial.content();
+        let defining_polynomial_integer = defining_polynomial.map_coeff(
+            |coefficient| {
+                defining_polynomial
+                    .ring()
+                    .div(coefficient, &defining_polynomial_content)
+                    .numerator()
+            },
+            Z,
+        );
+
+        if defining_polynomial_integer
+            .ring()
+            .is_one(&defining_polynomial_integer.lcoeff())
+        {
+            // The existing integer algebraic extension reduces every product
+            // modulo the defining polynomial and prevents degree growth in
+            // alpha during pseudo-division.
+            let integer_extension = AlgebraicExtension::new(defining_polynomial_integer);
+            let dividend_integer = dividend_integer.to_number_field(&integer_extension);
+            let divisor_integer = divisor_integer.to_number_field(&integer_extension);
+            return dividend_integer
+                .to_univariate_from_univariate(variable)
+                .pseudo_remainder(&divisor_integer.to_univariate_from_univariate(variable))
+                .is_zero();
+        }
+
+        // If denominator clearing makes the defining polynomial non-monic,
+        // remain in Z[alpha, x] and reduce the outer pseudo-remainder modulo it.
+        let algebraic_variable_position = dividend_integer
+            .variables()
+            .iter()
+            .position(|candidate| candidate == algebraic_variable)
+            .expect("flattening must add the number-field generator");
+        let remainder = dividend_integer
+            .to_univariate(variable)
+            .pseudo_remainder(&divisor_integer.to_univariate(variable));
+        if remainder.is_zero() {
+            return true;
+        }
+
+        let defining_polynomial_univariate =
+            defining_polynomial_integer.to_univariate_from_univariate(0);
+        remainder.coefficients().iter().all(|coefficient| {
+            coefficient
+                .to_univariate_from_univariate(algebraic_variable_position)
+                .pseudo_remainder(&defining_polynomial_univariate)
+                .is_zero()
+        })
+    }
+
     fn heuristic_gcd(
         _a: &MultivariatePolynomial<Self, E>,
         _b: &MultivariatePolynomial<Self, E>,
@@ -4112,7 +4255,7 @@ impl<E: PositiveExponent> PolynomialGCD<E> for AlgebraicExtension<RationalField>
                 gc.exponents.clone_from(&gm.exponents);
 
                 debug!("Final suggested gcd: {}", gc);
-                if gc.is_one() || (a.try_div(&gc).is_some() && b.try_div(&gc).is_some()) {
+                if gc.is_one() || (Self::divides_exact(a, &gc) && Self::divides_exact(b, &gc)) {
                     return gc;
                 }
 

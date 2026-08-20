@@ -44,6 +44,23 @@ fn arithmetic_and_evaluation() {
 }
 
 #[test]
+fn pseudo_remainder_does_not_divide_coefficients() {
+    let factor = parse!("2*x^2+3*x+5").to_polynomial::<_, u8>(&Z, None);
+    let variables = factor.variables().clone();
+    let cofactor = parse!("7*x^2-x+4")
+        .to_polynomial::<_, u8>(&Z, Some(variables.clone()))
+        .to_univariate_from_univariate(0);
+    let factor = factor.to_univariate_from_univariate(0);
+    let product = &factor * &cofactor;
+    let non_factor = parse!("2*x+1")
+        .to_polynomial::<_, u8>(&Z, Some(variables))
+        .to_univariate_from_univariate(0);
+
+    assert!(product.pseudo_remainder(&factor).is_zero());
+    assert!(!product.pseudo_remainder(&non_factor).is_zero());
+}
+
+#[test]
 fn gcd_over_rationals_uses_polynomial_gcd() {
     let a = parse!("(x^12+x+1)*(x^8-3*x^2+2)")
         .to_polynomial::<_, u16>(&Q, None)

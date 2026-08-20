@@ -675,3 +675,31 @@ fn try_div() {
     assert_eq!(extension.try_div(&prod, &f1).unwrap(), f2);
     assert!(extension.try_div(&f2, &f1).is_none());
 }
+
+#[test]
+fn univariate_divisibility_clears_number_field_denominators() {
+    let field = AlgebraicExtension::new(parse!("a^3+a/2-2").to_polynomial(&Q, None));
+    let factor_1 = parse!("x^2+a*x+1")
+        .to_polynomial::<_, u16>(&Q, None)
+        .to_number_field(&field);
+    let factor_2 = parse!("2*x+a/3")
+        .to_polynomial::<_, u16>(&Q, Some(factor_1.variables().clone()))
+        .to_number_field(&field);
+    let not_a_factor = parse!("x+a+1")
+        .to_polynomial::<_, u16>(&Q, Some(factor_1.variables().clone()))
+        .to_number_field(&field);
+    let product = &factor_1 * &factor_2;
+
+    assert!(<AlgebraicExtension<Q> as crate::poly::gcd::PolynomialGCD<
+        u16,
+    >>::divides_exact(&product, &factor_1));
+    assert!(<AlgebraicExtension<Q> as crate::poly::gcd::PolynomialGCD<
+        u16,
+    >>::divides_exact(&product, &factor_2));
+    assert!(
+        !<AlgebraicExtension<Q> as crate::poly::gcd::PolynomialGCD<u16>>::divides_exact(
+            &product,
+            &not_a_factor,
+        )
+    );
+}
