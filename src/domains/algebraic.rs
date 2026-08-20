@@ -18,6 +18,7 @@ use crate::{
     domains::{
         RingOps, Set,
         atom::AtomField,
+        float::Float,
         rational::Q,
         rational_polynomial::{
             FromNumeratorAndDenominator, RationalPolynomial, RationalPolynomialField,
@@ -2590,13 +2591,32 @@ impl<R: Field + PolynomialGCD<u16>> AlgebraicExtension<R> {
         MultivariatePolynomial<R>: Factorize,
         MultivariatePolynomial<AlgebraicExtension<R>>: Factorize,
     {
+        let (field, old_generator, new_generator, _) = self.adjoin_with_shift(b, new_symbol);
+        (field, old_generator, new_generator)
+    }
+
+    /// Adjoin a root and also return the primitive-element shift.
+    pub(crate) fn adjoin_with_shift(
+        &self,
+        b: &MultivariatePolynomial<AlgebraicExtension<R>>,
+        new_symbol: Option<PolyVariable>,
+    ) -> (
+        AlgebraicExtension<R>,
+        <AlgebraicExtension<R> as Set>::Element,
+        <AlgebraicExtension<R> as Set>::Element,
+        usize,
+    )
+    where
+        AlgebraicExtension<R>: PolynomialGCD<u16> + Ring<Element = AlgebraicNumber<R>>,
+        MultivariatePolynomial<R>: Factorize,
+        MultivariatePolynomial<AlgebraicExtension<R>>: Factorize,
+    {
         assert_eq!(self, b.ring());
 
         let (_, shift, shifted, norm) = b.norm_with_shift_data();
-        debug_assert!(norm.is_irreducible());
-        let (field, old_generator, new_generator, _) =
-            self.adjoin_formal_from_norm(shift, shifted, norm, new_symbol);
-        (field, old_generator, new_generator)
+        #[cfg(test)]
+        assert!(norm.is_irreducible());
+        self.adjoin_formal_from_norm(shift, shifted, norm, new_symbol)
     }
 }
 
@@ -2833,13 +2853,32 @@ impl AlgebraicExtension<Q> {
         new_symbol: Option<PolyVariable>,
     ) -> Option<(Self, AlgebraicNumber<Q>, AlgebraicNumber<Q>)> {
         let extension_degree = polynomial.degree(0) as usize;
-        let (mut extension, old_generator, new_generator) = self.adjoin(polynomial, new_symbol);
+        let (mut extension, old_generator, new_generator, shift) =
+            self.adjoin_with_shift(polynomial, new_symbol);
 
         let old_polynomial = self.poly.to_univariate_from_univariate(0);
         let extension_polynomial = extension.poly.to_univariate_from_univariate(0);
         let old_root = old_polynomial.root(self.embedding)?;
-        let mut extension_roots = extension_polynomial
+        let old_roots = old_polynomial
             .isolate_roots()
+            .into_iter()
+            .map(|(root, _)| root.to_float_center(64))
+            .collect::<Vec<_>>();
+        let new_roots = target
+            .defining_polynomial()
+            .isolate_roots()
+            .into_iter()
+            .map(|(root, _)| root.to_float_center(64))
+            .collect::<Vec<_>>();
+        let shift_float = Float::with_val(64, shift);
+        let mut initial_guesses = Vec::with_capacity(old_roots.len() * new_roots.len());
+        for old_root in &old_roots {
+            for new_root in &new_roots {
+                initial_guesses.push(new_root.clone() + old_root * &shift_float);
+            }
+        }
+        let mut extension_roots = extension_polynomial
+            .isolate_roots_with_initial_guesses(initial_guesses)
             .into_iter()
             .map(|(root, _)| root)
             .collect::<Vec<_>>();
