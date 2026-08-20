@@ -48,6 +48,53 @@ pub struct IsolatedRoot {
     index: usize,
     enclosure: ComplexDisk,
     location: Option<RootLocation>,
+    expression: Option<Arc<RootExpression>>,
+}
+
+#[derive(Clone, Debug, Eq, Hash, PartialEq)]
+enum RootExpression {
+    Root(RootExpressionLeaf),
+    Sum(Vec<(Rational, Arc<RootExpression>)>),
+    Product(Arc<RootExpression>, Arc<RootExpression>),
+}
+
+#[derive(Clone, Debug)]
+struct RootExpressionLeaf {
+    poly: Arc<ExactComplexPolynomial>,
+    index: usize,
+}
+
+impl PartialEq for RootExpressionLeaf {
+    fn eq(&self, other: &Self) -> bool {
+        self.poly.coefficients == other.poly.coefficients && self.index == other.index
+    }
+}
+
+impl Eq for RootExpressionLeaf {}
+
+impl std::hash::Hash for RootExpressionLeaf {
+    fn hash<H: std::hash::Hasher>(&self, state: &mut H) {
+        self.poly.coefficients.hash(state);
+        self.index.hash(state);
+    }
+}
+
+impl PartialEq for IsolatedRoot {
+    fn eq(&self, other: &Self) -> bool {
+        self.poly.coefficients == other.poly.coefficients
+            && self.index == other.index
+            && self.expression == other.expression
+    }
+}
+
+impl Eq for IsolatedRoot {}
+
+impl std::hash::Hash for IsolatedRoot {
+    fn hash<H: std::hash::Hasher>(&self, state: &mut H) {
+        self.poly.coefficients.hash(state);
+        self.index.hash(state);
+        self.expression.hash(state);
+    }
 }
 
 /// An enclosure and location of a root.
@@ -230,6 +277,7 @@ impl RootCache {
             index,
             enclosure: state.enclosure.clone(),
             location: state.location,
+            expression: None,
         }
     }
 
@@ -245,6 +293,7 @@ impl RootCache {
                 index,
                 enclosure: state.enclosure.clone(),
                 location: state.location,
+                expression: None,
             })
             .collect()
     }
@@ -356,6 +405,7 @@ impl RootCache {
                     index,
                     enclosure: state.enclosure.clone(),
                     location: state.location,
+                    expression: None,
                 })
                 .collect::<Vec<_>>()
         };
@@ -478,6 +528,157 @@ impl IsolatedRoot {
         ))
     }
 
+    /// Construct a selected root of `defining_polynomial` from an exact
+    /// rational linear combination of already selected roots.
+    ///
+    /// This is an exact embedding witness, not a numerical guess: refinement
+    /// refines the component roots and recomputes their interval sum. A
+    /// primitive extension can therefore retain one requested embedding
+    /// without isolating all of its conjugates.
+    pub(crate) fn from_rational_linear_combination(
+        defining_polynomial: &UnivariatePolynomial<Q>,
+        terms: &[(Rational, &IsolatedRoot)],
+    ) -> Self {
+        let expression_terms = terms
+            .iter()
+            .filter(|(coefficient, _)| !coefficient.is_zero())
+            .map(|(coefficient, root)| (coefficient.clone(), Self::root_expression(root)))
+            .collect::<Vec<_>>();
+        assert!(
+            !expression_terms.is_empty(),
+            "a selected primitive root must have a nonzero root expression"
+        );
+
+        Self::from_expression(
+            defining_polynomial,
+            Arc::new(RootExpression::Sum(expression_terms)),
+        )
+    }
+
+    /// Construct a selected root of `defining_polynomial` as the exact
+    /// product of two already selected roots.
+    pub(crate) fn from_rational_product(
+        defining_polynomial: &UnivariatePolynomial<Q>,
+        left: &IsolatedRoot,
+        right: &IsolatedRoot,
+    ) -> Self {
+        Self::from_expression(
+            defining_polynomial,
+            Arc::new(RootExpression::Product(
+                Self::root_expression(left),
+                Self::root_expression(right),
+            )),
+        )
+    }
+
+    /// Return the exact expression represented by a selected root.
+    fn root_expression(root: &IsolatedRoot) -> Arc<RootExpression> {
+        root.expression.clone().unwrap_or_else(|| {
+            Arc::new(RootExpression::Root(RootExpressionLeaf {
+                poly: root.poly.clone(),
+                index: root.index,
+            }))
+        })
+    }
+
+    /// Construct and certify a selected root from an exact expression.
+    fn from_expression(
+        defining_polynomial: &UnivariatePolynomial<Q>,
+        expression: Arc<RootExpression>,
+    ) -> Self {
+        let complex_field = FloatField::from_rep(Complex::from(Rational::one()));
+        let poly = Arc::new(defining_polynomial.map_coeff(
+            |coefficient| Complex::from(coefficient.clone()),
+            complex_field,
+        ));
+        let enclosure =
+            Self::certified_expression_enclosure(&expression, &poly, &Self::absolute_tolerance(32));
+        Self {
+            poly,
+            index: 0,
+            enclosure,
+            location: None,
+            expression: Some(expression),
+        }
+    }
+
+    /// Recompute a structural root enclosure, optionally refining its
+    /// component roots so that the resulting radius is at most `tolerance`.
+    fn expression_enclosure(
+        expression: &RootExpression,
+        tolerance: Option<&Rational>,
+    ) -> ComplexDisk {
+        match expression {
+            RootExpression::Root(root) => {
+                let mut root = root_cache().root_snapshot(root.poly.clone(), root.index);
+                if let Some(tolerance) = tolerance {
+                    root_cache().refine_root(&mut root, tolerance);
+                }
+                root.enclosure
+            }
+            RootExpression::Sum(terms) => {
+                let term_count = Rational::from(terms.len() as u64);
+                let mut center = Complex::new(Rational::zero(), Rational::zero());
+                let mut radius = Rational::zero();
+                for (coefficient, expression) in terms {
+                    let absolute_coefficient = coefficient.abs();
+                    let component_tolerance = tolerance
+                        .map(|tolerance| tolerance / &(&term_count * &absolute_coefficient));
+                    let enclosure =
+                        Self::expression_enclosure(expression, component_tolerance.as_ref());
+                    center += &enclosure.center * coefficient;
+                    radius += &enclosure.radius * &absolute_coefficient;
+                }
+                ComplexDisk { center, radius }
+            }
+            RootExpression::Product(left, right) => {
+                let mut component_tolerance = tolerance.cloned();
+                loop {
+                    let left = Self::expression_enclosure(left, component_tolerance.as_ref());
+                    let right = Self::expression_enclosure(right, component_tolerance.as_ref());
+                    let radius = ComplexDisk::norm_upper_bound(&left.center) * &right.radius
+                        + ComplexDisk::norm_upper_bound(&right.center) * &left.radius
+                        + &left.radius * &right.radius;
+                    let enclosure = ComplexDisk {
+                        center: &left.center * &right.center,
+                        radius,
+                    };
+                    if tolerance.is_none()
+                        || enclosure.radius <= *tolerance.expect("tolerance is present")
+                    {
+                        return enclosure;
+                    }
+                    *component_tolerance
+                        .as_mut()
+                        .expect("a target tolerance initializes component tolerance") /=
+                        Rational::from(2);
+                }
+            }
+        }
+    }
+
+    /// Refine a structural expression until its disk is certified to contain
+    /// exactly one root of the primitive polynomial.
+    fn certified_expression_enclosure(
+        expression: &RootExpression,
+        polynomial: &ExactComplexPolynomial,
+        target_tolerance: &Rational,
+    ) -> ComplexDisk {
+        let mut tolerance = target_tolerance.clone();
+        for _ in 0..16 {
+            let enclosure = Self::expression_enclosure(expression, Some(&tolerance));
+            if UnivariatePolynomial::<Q>::disk_contains_one_root(
+                polynomial,
+                &enclosure.center,
+                &enclosure.radius,
+            ) {
+                return enclosure;
+            }
+            tolerance /= Rational::from(2);
+        }
+        panic!("could not certify the selected primitive root")
+    }
+
     /// Returns a reference to the polynomial defining this root.
     pub fn defining_polynomial(&self) -> &ExactComplexPolynomial {
         &self.poly
@@ -490,11 +691,28 @@ impl IsolatedRoot {
 
     /// Canonical index of this root within its defining polynomial.
     pub fn index(&self) -> usize {
+        if self.expression.is_some() {
+            let rational = self
+                .poly
+                .try_map_to_rational()
+                .expect("a rational root expression must define a rational polynomial");
+            let mut candidates = rational
+                .isolate_roots()
+                .into_iter()
+                .map(|(root, _)| root)
+                .collect::<Vec<_>>();
+            return self
+                .matching_roots(None, &mut candidates, None, 1)
+                .expect("a structural embedding must select one primitive root")[0];
+        }
         self.index
     }
 
     /// Convert this root to the canonical expression-level `root` representation.
     pub fn to_atom(&self) -> Atom {
+        if let Some(expression) = &self.expression {
+            return Self::expression_to_atom(expression);
+        }
         let mut polynomial = self.poly.as_ref().clone().to_multivariate::<u16>();
         let variable = polynomial.get_vars_ref()[0].clone();
         let canonical_variable = PolyVariable::Symbol(root_var());
@@ -504,10 +722,39 @@ impl IsolatedRoot {
         root().call((polynomial.to_expression(), self.index))
     }
 
+    /// Convert an exact structural root expression to an atom.
+    fn expression_to_atom(expression: &RootExpression) -> Atom {
+        match expression {
+            RootExpression::Root(root) => {
+                let root = IsolatedRoot {
+                    poly: root.poly.clone(),
+                    index: root.index,
+                    enclosure: root_cache()
+                        .root_snapshot(root.poly.clone(), root.index)
+                        .enclosure,
+                    location: None,
+                    expression: None,
+                };
+                root.to_atom()
+            }
+            RootExpression::Sum(terms) => terms.iter().fold(Atom::Zero, |result, term| {
+                result + Self::expression_to_atom(&term.1) * Atom::num(term.0.clone())
+            }),
+            RootExpression::Product(left, right) => {
+                Self::expression_to_atom(left) * Self::expression_to_atom(right)
+            }
+        }
+    }
+
     /// Refine this root to an absolute radius, update its cached enclosure,
     /// and return the updated root.
     pub fn refined(mut self, tolerance: &Rational) -> Self {
-        root_cache().refine_root(&mut self, tolerance);
+        if let Some(expression) = &self.expression {
+            self.enclosure =
+                Self::certified_expression_enclosure(expression, &self.poly, tolerance);
+        } else {
+            root_cache().refine_root(&mut self, tolerance);
+        }
         self
     }
 
@@ -528,7 +775,7 @@ impl IsolatedRoot {
             }
 
             let tolerance = Self::absolute_tolerance(binary_precision);
-            root_cache().refine_root(self, &tolerance);
+            *self = self.clone().refined(&tolerance);
             binary_precision = binary_precision.saturating_mul(2);
         }
     }
@@ -536,6 +783,21 @@ impl IsolatedRoot {
     /// Resolve this root's exact relationship to the coordinate axes and
     /// update both this root and its defining-root cache entry.
     pub fn classify_location(&mut self) -> RootLocation {
+        if self.expression.is_some() && self.location.is_none() {
+            let rational = self
+                .poly
+                .try_map_to_rational()
+                .expect("a rational root expression must define a rational polynomial");
+            let mut candidates = rational
+                .isolate_roots()
+                .into_iter()
+                .map(|(root, _)| root)
+                .collect::<Vec<_>>();
+            let selected = self
+                .matching_roots(None, &mut candidates, None, 1)
+                .expect("a structural embedding must select one primitive root")[0];
+            self.location = Some(candidates[selected].classify_location());
+        }
         if self.location.is_none() {
             root_cache().classify_root(self);
         }
@@ -545,6 +807,14 @@ impl IsolatedRoot {
 
     /// Convert the root's enclosure to a floating-point center.
     pub(crate) fn to_float_center(&self, binary_prec: u32) -> Complex<Float> {
+        if self.expression.is_some() {
+            let tolerance = Self::absolute_tolerance(binary_prec);
+            let refined = self.clone().refined(&tolerance);
+            return Complex::new(
+                refined.enclosure.center.re.to_multi_prec_float(binary_prec),
+                refined.enclosure.center.im.to_multi_prec_float(binary_prec),
+            );
+        }
         let mut center = Complex::new(
             self.enclosure.center.re.to_multi_prec_float(binary_prec),
             self.enclosure.center.im.to_multi_prec_float(binary_prec),
@@ -1803,6 +2073,7 @@ impl UnivariatePolynomial<RationalField> {
                     radius,
                 },
                 location: Some(RootLocation::Real),
+                expression: None,
             });
         }
         for (lower, upper, _) in imaginary_roots {
@@ -1816,6 +2087,7 @@ impl UnivariatePolynomial<RationalField> {
                     radius,
                 },
                 location: Some(RootLocation::Imaginary),
+                expression: None,
             });
         }
 
@@ -2151,6 +2423,7 @@ impl UnivariatePolynomial<ExactComplexField> {
                 index: root_index,
                 enclosure,
                 location: None,
+                expression: None,
             });
         }
 

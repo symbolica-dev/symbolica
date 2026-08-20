@@ -8,40 +8,40 @@ fn to_alg() {
     let ext = a.as_view().embedding_field().unwrap();
     let alg = a.as_view().to_algebraic(&ext).unwrap();
     let generator = ext.element_from_polynomial(ext.poly.one().mul_exp(&[1]));
-    assert_eq!(ext.embedding, 1);
+    assert_eq!(ext.embedding.index(), Some(1));
     assert_eq!(alg, ext.add(&generator, &ext.one()));
 
     let b = crate::parse!("sqrt(2)+sqrt(3)");
     let ext = b.as_view().embedding_field().unwrap();
     let alg = b.as_view().to_algebraic(&ext).unwrap();
     let generator = ext.element_from_polynomial(ext.poly.one().mul_exp(&[1]));
-    assert_eq!(ext.embedding, 3);
+    assert_eq!(ext.embedding.index(), Some(3));
     assert_eq!(alg, generator);
 
     let b = crate::parse!("sqrt(2)+sqrt(3)+sqrt(6)");
     let ext = b.as_view().embedding_field().unwrap();
     let alg = b.as_view().to_algebraic(&ext).unwrap();
-    assert_eq!(ext.embedding, 3);
+    assert_eq!(ext.embedding.index(), Some(3));
     assert_eq!(ext.is_positive(&alg), Ok(true));
 
     let b = crate::parse!("sqrt(3+sqrt(2))+1");
     let ext = b.as_view().embedding_field().unwrap();
     let alg = b.as_view().to_algebraic(&ext).unwrap();
     let generator = ext.element_from_polynomial(ext.poly.one().mul_exp(&[1]));
-    assert_eq!(ext.embedding, 3);
+    assert_eq!(ext.embedding.index(), Some(3));
     assert_eq!(alg, ext.add(&generator, &ext.one()));
 
     let b = crate::parse!("2^(2/3)");
     let ext = b.as_view().embedding_field().unwrap();
     let alg = b.as_view().to_algebraic(&ext).unwrap();
-    assert_eq!(ext.embedding, 2);
+    assert_eq!(ext.embedding.index(), Some(2));
     assert_eq!(ext.pow(&alg, 3), ext.nth(4.into()));
 
     let b = crate::parse!("root(1-10*x^2+x^4,3)+1");
     let ext = b.as_view().embedding_field().unwrap();
     let alg = b.as_view().to_algebraic(&ext).unwrap();
     let generator = ext.element_from_polynomial(ext.poly.one().mul_exp(&[1]));
-    assert_eq!(ext.embedding, 3);
+    assert_eq!(ext.embedding.index(), Some(3));
     assert_eq!(alg, ext.add(&generator, &ext.one()));
     let polynomial = b.as_view().try_to_polynomial::<_, u16>(&ext, None).unwrap();
     assert_eq!(polynomial.nvars(), 0);
@@ -79,7 +79,7 @@ fn to_alg() {
 
     let b = crate::parse!("2+3𝑖");
     let ext = b.as_view().embedding_field().unwrap();
-    assert_eq!(ext.embedding, 1);
+    assert_eq!(ext.embedding.index(), Some(1));
     let imaginary_unit = ext.imaginary_unit().unwrap();
     assert_eq!(
         b.as_view().to_algebraic(&ext).unwrap(),
@@ -105,7 +105,7 @@ fn algebraic_context_conversion() {
     let (context, polynomial) = expression
         .to_polynomial_in_algebraic_extension::<u16>(symbol!("x"), &[])
         .unwrap();
-    assert_eq!(context.field().embedding, 3);
+    assert_eq!(context.field().embedding.index(), Some(3));
 
     let sqrt2 = context
         .images()
@@ -173,6 +173,16 @@ fn algebraic_context_adjoins_high_degree_rational_root() {
     assert_eq!(
         context.field().pow(seventh_root, 7),
         context.field().nth(4.into())
+    );
+    assert_eq!(
+        context
+            .field()
+            .root_index_of_element(
+                seventh_root,
+                &crate::parse!("x^7-4").to_polynomial::<_, u16>(&Q, None),
+            )
+            .unwrap(),
+        0
     );
     assert_eq!(context.field().poly().degree(0), 14);
     assert_eq!(polynomial.factor().len(), 2);
@@ -459,7 +469,7 @@ fn adjoin_with_embedding() {
 
         let (sqrt23, r1, r2) = sqrt2.adjoin_with_embedding(&sqrt3, Some(symbol!("gamma").into()));
 
-        assert_eq!(sqrt23.embedding, expected_embedding);
+        assert_eq!(sqrt23.embedding.index(), Some(expected_embedding));
         assert_eq!(sqrt23.mul(&r1, &r1), sqrt23.nth(2.into()));
         assert_eq!(sqrt23.mul(&r2, &r2), sqrt23.nth(3.into()));
     }
@@ -477,7 +487,7 @@ fn adjoin_with_all_embeddings_from_degree_one_extension() {
 
     assert_eq!(extensions.len(), 3);
     for (embedding, extension) in extensions.iter().enumerate() {
-        assert_eq!(extension.embedding(), embedding);
+        assert_eq!(extension.embedding().index(), Some(embedding));
         assert_eq!(
             extension.poly().get_vars_ref(),
             &[crate::poly::PolyVariable::from(gamma)]
@@ -505,7 +515,7 @@ fn adjoin_with_complex_embedding() {
 
         let (extension, r1, r2) = sqrt2.adjoin_with_embedding(&i, Some(symbol!("gamma").into()));
 
-        assert_eq!(extension.embedding, expected_embedding);
+        assert_eq!(extension.embedding.index(), Some(expected_embedding));
         assert_eq!(extension.mul(&r1, &r1), extension.nth(2.into()));
         assert_eq!(extension.mul(&r2, &r2), extension.neg(&extension.one()));
     }
@@ -632,7 +642,7 @@ fn simplify_preserves_the_selected_embedding() {
         let simplified = field.simplify(&squared);
 
         assert_eq!(simplified.poly(), &parse!("x^2-2").to_polynomial(&Q, None));
-        assert_eq!(simplified.embedding(), expected_embedding);
+        assert_eq!(simplified.embedding().index(), Some(expected_embedding));
     }
 }
 
