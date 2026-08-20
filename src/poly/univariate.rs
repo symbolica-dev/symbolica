@@ -16,7 +16,7 @@ use crate::{
     domains::{
         EuclideanDomain, Field, InternalOrdering, Ring, RingOps, SelfRing, Set,
         algebraic::{AlgebraicExtension, AlgebraicNumber},
-        float::{Complex, FloatField, FloatLike, Real, SingleFloat},
+        float::{Complex, F64, FloatField, FloatLike, Real, SingleFloat},
         integer::{Integer, IntegerRing, Z},
         rational::{Q, Rational, RationalField},
         rational_polynomial::{
@@ -1250,16 +1250,15 @@ impl<R: Real + SingleFloat + std::hash::Hash + Eq + PartialOrd + InternalOrderin
         let t_sq = tolerance.clone() * tolerance;
         for _ in 0..max_iterations {
             for i in 0..n.len() {
-                let last_finite = n.clone();
                 let p_at_i = self.evaluate(&n[i]);
                 let df_at_i = df.evaluate(&n[i]);
                 if !p_at_i.is_finite() || !df_at_i.is_finite() || df_at_i.is_zero() {
-                    return finite_error(&last_finite);
+                    return finite_error(&n);
                 }
 
                 let e = p_at_i / df_at_i;
                 if !e.is_finite() {
-                    return finite_error(&last_finite);
+                    return finite_error(&n);
                 }
 
                 let mut rep = e.zero();
@@ -1267,35 +1266,36 @@ impl<R: Real + SingleFloat + std::hash::Hash + Eq + PartialOrd + InternalOrderin
                     if i != j && n[i] != n[j] {
                         let diff = n[i].clone() - &n[j];
                         if !diff.is_finite() || diff.is_zero() {
-                            return finite_error(&last_finite);
+                            return finite_error(&n);
                         }
 
                         let diff_inv = diff.inv();
                         if !diff_inv.is_finite() {
-                            return finite_error(&last_finite);
+                            return finite_error(&n);
                         }
 
                         rep += diff_inv;
                     }
                 }
                 if !rep.is_finite() {
-                    return finite_error(&last_finite);
+                    return finite_error(&n);
                 }
 
                 let denom = rep.one() - &e * rep;
                 if !denom.is_finite() || denom.is_zero() {
-                    return finite_error(&last_finite);
+                    return finite_error(&n);
                 }
 
                 let correction = e / denom;
                 if !correction.is_finite() {
-                    return finite_error(&last_finite);
+                    return finite_error(&n);
                 }
 
-                n[i] -= correction;
-                if !n[i].is_finite() {
-                    return finite_error(&last_finite);
+                let updated = n[i].clone() - correction;
+                if !updated.is_finite() {
+                    return finite_error(&n);
                 }
+                n[i] = updated;
             }
             if n.iter().all(|x| self.evaluate(x).norm_squared() < t_sq) {
                 n.sort_unstable_by(|a, b| {

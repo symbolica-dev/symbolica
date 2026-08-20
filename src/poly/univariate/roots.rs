@@ -735,6 +735,74 @@ impl UnivariatePolynomial<RationalField> {
         RealBall::from_bounds(lower, upper)
     }
 
+    /// Evaluate ball coefficients at a ball argument using Horner's method.
+    fn evaluate_complex_ball_coefficients(
+        coefficients: &[ComplexBall],
+        value: &ComplexBall,
+        precision: u32,
+    ) -> ComplexBall {
+        let zero = RealBall::exact(Float::new(precision));
+        let mut result = ComplexBall::new(zero.clone(), zero);
+        for coefficient in coefficients.iter().rev() {
+            result = result * value + coefficient;
+        }
+        result
+    }
+
+    /// Convert exact coefficients to certified floating-point balls once for
+    /// all root-inclusion tests at one precision.
+    fn coefficients_to_complex_balls(
+        poly: &ExactComplexPolynomial,
+        precision: u32,
+    ) -> Vec<ComplexBall> {
+        poly.coefficients
+            .iter()
+            .map(|coefficient| Self::exact_complex_to_ball(coefficient, precision))
+            .collect()
+    }
+
+    /// Construct a disk centered at `center` that is guaranteed to contain a
+    /// root. The radius is the upper bound `degree * |f(center) / f'(center)|`.
+    ///
+    /// If one such disk can be constructed for every approximate root and all
+    /// disks are disjoint, degree counting proves that every disk contains
+    /// exactly one root. This is the inclusion test used by FLINT/Arb and
+    /// avoids a quadratic Taylor shift for every candidate root.
+    fn root_inclusion_disk(
+        coefficients: &[ComplexBall],
+        derivative_coefficients: &[ComplexBall],
+        center: &Complex<Rational>,
+        degree: usize,
+        precision: u32,
+    ) -> Option<ComplexDisk> {
+        let center_ball = Self::exact_complex_to_ball(center, precision);
+        let value = Self::evaluate_complex_ball_coefficients(coefficients, &center_ball, precision);
+        let derivative = Self::evaluate_complex_ball_coefficients(
+            derivative_coefficients,
+            &center_ball,
+            precision,
+        );
+        if !value.is_finite() || !derivative.is_finite() || derivative.contains_zero() {
+            return None;
+        }
+
+        let quotient = value / derivative;
+        if !quotient.is_finite() {
+            return None;
+        }
+        let degree = Rational::from(degree);
+        let degree = RealBall::from_rational_bounds(&degree, &degree, precision);
+        let radius = (Self::complex_ball_modulus_bounds(&quotient) * degree).upper_bound();
+        if !radius.is_finite() || radius.is_negative() {
+            return None;
+        }
+
+        Some(ComplexDisk {
+            center: center.clone(),
+            radius: radius.to_rational(),
+        })
+    }
+
     /// Compute certified ball enclosures of the coefficients of
     /// `poly(x + center)` using an in-place quadratic Taylor shift.
     fn shift_var_complex_ball(
@@ -845,40 +913,6 @@ impl UnivariatePolynomial<RationalField> {
             &shifted_ball,
             &mut exact_shifted,
         )
-    }
-
-    /// Choose an initially disjoint candidate radius around one approximate root.
-    fn initial_disk_radius(
-        centers: &[Complex<Rational>],
-        root_index: usize,
-        target_radius: Option<&Rational>,
-    ) -> Option<Rational> {
-        let mut radius = None;
-
-        for (other_index, other_center) in centers.iter().enumerate() {
-            if root_index == other_index {
-                continue;
-            }
-
-            let distance = ComplexDisk::norm_lower_bound(&(&centers[root_index] - other_center));
-            radius = Some(match radius {
-                Some(r) if r < distance => r,
-                _ => distance,
-            });
-        }
-
-        let mut radius = radius
-            .map(|r| r / Rational::from(4))
-            .or_else(|| target_radius.cloned())
-            .unwrap_or_else(Rational::one);
-
-        if let Some(target_radius) = target_radius {
-            if !target_radius.is_zero() && target_radius < &radius {
-                radius = target_radius.clone();
-            }
-        }
-
-        if radius.is_zero() { None } else { Some(radius) }
     }
 
     /// Gets the `index`-th root of the polynomial. Fails when `index` is out of bounds.
@@ -2036,8 +2070,18 @@ impl UnivariatePolynomial<ExactComplexField> {
         &self,
         roots: &[Complex<Float>],
         target_radius: Option<&Rational>,
+        precision: u32,
     ) -> Option<Vec<IsolatedRoot>> {
+        if roots.len() != self.degree() {
+            return None;
+        }
+
         let defining_polynomial = Arc::new(self.clone());
+        let derivative = self.derivative();
+        let coefficients =
+            UnivariatePolynomial::<Q>::coefficients_to_complex_balls(self, precision);
+        let derivative_coefficients =
+            UnivariatePolynomial::<Q>::coefficients_to_complex_balls(&derivative, precision);
         let centers = roots
             .iter()
             .map(|root| Complex::new(root.re.to_rational(), root.im.to_rational()))
@@ -2045,50 +2089,27 @@ impl UnivariatePolynomial<ExactComplexField> {
 
         let mut complex_roots = Vec::with_capacity(centers.len());
         for (root_index, center) in centers.iter().enumerate() {
-            let mut radius = UnivariatePolynomial::<Q>::initial_disk_radius(
-                &centers,
-                root_index,
-                target_radius,
+            let enclosure = UnivariatePolynomial::<Q>::root_inclusion_disk(
+                &coefficients,
+                &derivative_coefficients,
+                center,
+                self.degree(),
+                precision,
             )?;
-            let shifted_ball = UnivariatePolynomial::<Q>::shift_var_complex_ball(self, center, 128);
-            let mut exact_shifted = None;
-
-            let mut certified_radius = None;
-            for _ in 0..16 {
-                if UnivariatePolynomial::<Q>::disk_contains_one_root_with_shift_cache(
-                    self,
-                    center,
-                    &radius,
-                    &shifted_ball,
-                    &mut exact_shifted,
-                ) {
-                    certified_radius = Some(radius);
-                    break;
-                }
-
-                radius *= Rational::from((1, 2));
-                if radius.is_zero() {
-                    break;
-                }
+            if target_radius.is_some_and(|target| enclosure.radius > *target) {
+                return None;
             }
 
             complex_roots.push(IsolatedRoot {
                 poly: defining_polynomial.clone(),
                 index: root_index,
-                enclosure: ComplexDisk {
-                    center: center.clone(),
-                    radius: certified_radius?,
-                },
+                enclosure,
                 location: None,
             });
         }
 
-        let derivative = self.derivative();
-        if UnivariatePolynomial::<Q>::separate_root_disks(self, &derivative, &mut complex_roots) {
-            Some(complex_roots)
-        } else {
-            None
-        }
+        UnivariatePolynomial::<Q>::root_disks_are_pairwise_disjoint(&complex_roots)
+            .then_some(complex_roots)
     }
 
     /// Gets the `index`-th root of the polynomial. Fails when `index` is out of bounds.
@@ -2159,18 +2180,138 @@ impl UnivariatePolynomial<ExactComplexField> {
         root_cache().build_root_multiset(factors)
     }
 
+    /// Return the largest `d` for which this polynomial can be written as
+    /// `q(x^d)`. Deflation is only used when the constant coefficient is
+    /// nonzero, so expanding roots of `q` cannot introduce ambiguity at zero.
+    fn numerical_deflation(&self) -> usize {
+        if self.get_constant().is_zero() {
+            return 1;
+        }
+
+        fn gcd(mut a: usize, mut b: usize) -> usize {
+            while b != 0 {
+                (a, b) = (b, a % b);
+            }
+            a
+        }
+
+        let mut deflation = 0;
+        for (exponent, coefficient) in self.coefficients.iter().enumerate().skip(1) {
+            if !coefficient.is_zero() {
+                deflation = gcd(deflation, exponent);
+            }
+        }
+        deflation.max(1)
+    }
+
+    /// Replace `q(x^d)` by `q(x)` for numerical root finding.
+    fn deflated_polynomial(&self, deflation: usize) -> Self {
+        if deflation == 1 {
+            return self.clone();
+        }
+
+        Self::from_coefficients(
+            &self.ring,
+            self.coefficients
+                .iter()
+                .step_by(deflation)
+                .cloned()
+                .collect(),
+            self.variable.clone(),
+        )
+    }
+
+    /// Expand roots of `q` to roots of `q(x^d)` using all `d` branches.
+    fn expand_deflated_roots(
+        roots: &[Complex<Float>],
+        deflation: usize,
+        precision: u32,
+    ) -> Vec<Complex<Float>> {
+        if deflation == 1 {
+            return roots.to_vec();
+        }
+
+        let one = Float::with_val(precision, 1);
+        let deflation_float = Float::with_val(precision, deflation);
+        let reciprocal = one.clone() / &deflation_float;
+        let two_pi = one.pi() * Float::with_val(precision, 2);
+        let mut expanded = Vec::with_capacity(roots.len() * deflation);
+        for root in roots {
+            let (radius, argument) = root.clone().to_polar_coordinates();
+            let radius = radius.powf(&reciprocal);
+            for branch in 0..deflation {
+                let branch = Float::with_val(precision, branch);
+                let angle = (argument.clone() + two_pi.clone() * branch) / &deflation_float;
+                expanded.push(Complex::from_polar_coordinates(radius.clone(), angle));
+            }
+        }
+        expanded
+    }
+
+    /// Obtain inexpensive machine-double starting values. Failure is benign:
+    /// the arbitrary-precision path below will choose its own initial values.
+    fn approximate_roots_f64(&self) -> Option<Vec<Complex<Float>>> {
+        let coefficients = self
+            .coefficients
+            .iter()
+            .map(|coefficient| {
+                Complex::new(F64(coefficient.re.to_f64()), F64(coefficient.im.to_f64()))
+            })
+            .collect::<Vec<_>>();
+        if coefficients
+            .iter()
+            .any(|coefficient| !coefficient.is_finite())
+        {
+            return None;
+        }
+
+        let tolerance = F64(2f64.powi(-45));
+        let field = FloatField::<Complex<F64>>::new();
+        let polynomial =
+            UnivariatePolynomial::from_coefficients(&field, coefficients, self.variable.clone());
+        if polynomial.degree() != self.degree() {
+            return None;
+        }
+
+        let roots = polynomial
+            .roots(256, &tolerance)
+            .unwrap_or_else(|roots| roots);
+        roots.iter().all(SingleFloat::is_finite).then(|| {
+            roots
+                .into_iter()
+                .map(|root| {
+                    Complex::new(
+                        Float::with_val(64, root.re.0),
+                        Float::with_val(64, root.im.0),
+                    )
+                })
+                .collect()
+        })
+    }
+
     /// Isolate every root of this square-free exact-complex polynomial.
     fn isolate_square_free_roots(&self, target_radius: Option<&Rational>) -> Vec<IsolatedRoot> {
         const ABERTH_CERTIFICATION_BATCH: usize = 64;
         const MAX_ABERTH_ITERATIONS_PER_PRECISION: usize = 256;
 
+        let deflation = self.numerical_deflation();
+        let numerical_polynomial = self.deflated_polynomial(deflation);
+        let mut previous_roots = numerical_polynomial.approximate_roots_f64();
+        if let Some(roots) = &previous_roots {
+            let expanded = Self::expand_deflated_roots(roots, deflation, 64);
+            if let Some(complex_roots) =
+                self.certify_approximate_roots(&expanded, target_radius, 64)
+            {
+                return complex_roots;
+            }
+        }
+
         let mut num_prec = 128;
-        let mut previous_roots: Option<Vec<Complex<Float>>> = None;
 
         loop {
             let tolerance = UnivariatePolynomial::<Q>::aberth_tolerance(num_prec);
             let field = FloatField::from_rep(Complex::from(tolerance.clone()));
-            let c = self.map_coeff(
+            let c = numerical_polynomial.map_coeff(
                 |c| {
                     Complex::new(
                         c.re.to_multi_prec_float(num_prec),
@@ -2208,7 +2349,10 @@ impl UnivariatePolynomial<ExactComplexField> {
                     Ok(roots) => roots,
                     Err(roots) => roots,
                 };
-                if let Some(complex_roots) = self.certify_approximate_roots(&roots, target_radius) {
+                let expanded = Self::expand_deflated_roots(&roots, deflation, num_prec);
+                if let Some(complex_roots) =
+                    self.certify_approximate_roots(&expanded, target_radius, num_prec)
+                {
                     return complex_roots;
                 }
 

@@ -322,6 +322,38 @@ fn complex_root_isolation_handles_non_axis_binomial() {
     );
 }
 
+#[test]
+fn complex_root_isolation_certifies_all_deflated_branches() {
+    let field = FloatField::from_rep(Complex::from(Rational::one()));
+    let mut p = UnivariatePolynomial::new(&field, None, Arc::new(PolyVariable::Temporary(0)));
+    // p(x) = q(x^3), where q(y) = y^2 + (1+i)y + (2-i). This is neither a
+    // binomial nor an axis-only polynomial, so isolation must numerically solve
+    // q and expand all three cube-root branches before certifying p itself.
+    p.coefficients = vec![
+        Complex::new(Rational::from(2), Rational::from(-1)),
+        Complex::from(Rational::zero()),
+        Complex::from(Rational::zero()),
+        Complex::new(Rational::one(), Rational::one()),
+        Complex::from(Rational::zero()),
+        Complex::from(Rational::zero()),
+        Complex::from(Rational::one()),
+    ];
+
+    assert_eq!(p.numerical_deflation(), 3);
+    assert_eq!(p.deflated_polynomial(3).degree(), 2);
+
+    let target_radius = Rational::from((Integer::one(), Integer::one() << 32u32));
+    let roots = p.isolate_square_free_roots(Some(&target_radius));
+
+    assert_eq!(roots.len(), 6);
+    assert_pairwise_isolated(&roots);
+    assert!(
+        roots
+            .iter()
+            .all(|root| root.enclosure().radius() <= &target_radius)
+    );
+}
+
 fn complex_root_contains(root: &IsolatedRoot, re: Rational, im: Rational) -> bool {
     (&root.enclosure.center.re - &re).abs() <= root.enclosure.radius
         && (&root.enclosure.center.im - &im).abs() <= root.enclosure.radius
