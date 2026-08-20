@@ -2007,6 +2007,8 @@ impl<R: EuclideanDomain> Ring for AlgebraicExtension<R> {
         self.try_div(&self.one(), a)
     }
 
+    /// Attempt to divide `a` by `b`, returning `None` if `b` is zero.
+    /// This routine is slow, as it solves a linear system to compute the quotient.
     fn try_div(&self, a: &Self::Element, b: &Self::Element) -> Option<Self::Element> {
         if self.is_zero(b) {
             return None;
@@ -2650,7 +2652,7 @@ impl<R: Field + PolynomialGCD<E>, E: PositiveExponent>
                 let r = g_uni.resultant_prs(&poly_uni);
 
                 let d = r.derivative(v);
-                if r.univariate_gcd(&d).is_constant() {
+                if r.gcd(&d).is_constant() {
                     return (v, s, g_multi, r);
                 }
             }

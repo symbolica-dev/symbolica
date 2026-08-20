@@ -42,3 +42,19 @@ fn arithmetic_and_evaluation() {
     assert_eq!(a.quot_rem(&b), (expected_quotient, expected_remainder));
     assert_eq!(a.evaluate(&5.into()), 78178);
 }
+
+#[test]
+fn gcd_over_rationals_uses_polynomial_gcd() {
+    let a = parse!("(x^12+x+1)*(x^8-3*x^2+2)")
+        .to_polynomial::<_, u16>(&Q, None)
+        .to_univariate_from_univariate(0);
+    let b = parse!("(x^10-x+3)*(x^8-3*x^2+2)")
+        .to_polynomial::<_, u16>(&Q, None)
+        .to_univariate_from_univariate(0);
+    let expected = parse!("x^8-3*x^2+2")
+        .to_polynomial::<_, u16>(&Q, None)
+        .to_univariate_from_univariate(0);
+
+    assert_eq!(a.gcd(&b), expected);
+    assert_eq!(a.gcd_euclidean(&b), expected);
+}

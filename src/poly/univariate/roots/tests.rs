@@ -215,6 +215,33 @@ fn exact_complex_isolated_root_to_atom_is_exact() {
 }
 
 #[test]
+fn complex_ball_rouche_certificate_matches_exact_certificate() {
+    let field = FloatField::from_rep(Complex::from(Rational::one()));
+    let mut polynomial =
+        UnivariatePolynomial::new(&field, None, Arc::new(PolyVariable::Temporary(0)));
+    polynomial.coefficients = vec![
+        Complex::from(Rational::from(-2)),
+        Complex::from(Rational::zero()),
+        Complex::from(Rational::one()),
+    ];
+    let center = Complex::new(Rational::from((99, 70)), Rational::zero());
+    let radius = Rational::from((1, 100));
+
+    let shifted_ball = UnivariatePolynomial::<Q>::shift_var_complex_ball(&polynomial, &center, 128);
+    assert!(UnivariatePolynomial::<Q>::shifted_ball_contains_one_root(
+        &shifted_ball,
+        &radius,
+        128
+    ));
+
+    let shifted_exact = polynomial.shift_var(&center);
+    assert!(UnivariatePolynomial::<Q>::shifted_disk_contains_one_root(
+        &shifted_exact,
+        &radius
+    ));
+}
+
+#[test]
 fn complex_root_isolation_marks_imaginary_roots_from_common_axis_part() {
     let p = parse!("x^3+x")
         .to_polynomial::<_, u16>(&Q, None)

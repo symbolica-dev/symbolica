@@ -708,17 +708,93 @@ impl UnivariatePolynomial<RationalField> {
             .to_multi_prec_float(num_prec)
     }
 
-    /// Test if a disk contains a single root of the polynomial using Rouché's theorem.
-    fn disk_contains_one_root(
-        poly: &UnivariatePolynomial<FloatField<Complex<Rational>>>,
+    /// Enclose an exact complex rational in a rectangular complex ball.
+    fn exact_complex_to_ball(value: &Complex<Rational>, precision: u32) -> ComplexBall {
+        ComplexBall::new(
+            RealBall::from_rational_bounds(&value.re, &value.re, precision),
+            RealBall::from_rational_bounds(&value.im, &value.im, precision),
+        )
+    }
+
+    /// Return a certified enclosure of the complex modulus.
+    ///
+    /// The componentwise maximum is a lower bound for the Euclidean norm and
+    /// the componentwise sum is an upper bound. These slightly loose bounds
+    /// avoid non-algebraic square roots in the Rouché test.
+    fn complex_ball_modulus_bounds(value: &ComplexBall) -> RealBall {
+        let re_abs = value.re.norm();
+        let im_abs = value.im.norm();
+        let re_lower = re_abs.lower_bound();
+        let im_lower = im_abs.lower_bound();
+        let lower = if re_lower >= im_lower {
+            re_lower
+        } else {
+            im_lower
+        };
+        let upper = (re_abs + &im_abs).upper_bound();
+        RealBall::from_bounds(lower, upper)
+    }
+
+    /// Compute certified ball enclosures of the coefficients of
+    /// `poly(x + center)` using an in-place quadratic Taylor shift.
+    fn shift_var_complex_ball(
+        poly: &ExactComplexPolynomial,
         center: &Complex<Rational>,
+        precision: u32,
+    ) -> Vec<ComplexBall> {
+        let center = Self::exact_complex_to_ball(center, precision);
+        let mut shifted = poly
+            .coefficients
+            .iter()
+            .map(|coefficient| Self::exact_complex_to_ball(coefficient, precision))
+            .collect::<Vec<_>>();
+
+        for i in (0..shifted.len().saturating_sub(1)).rev() {
+            for j in i..shifted.len() - 1 {
+                shifted[j] = shifted[j].clone() + &shifted[j + 1] * &center;
+            }
+        }
+        shifted
+    }
+
+    /// Test Rouché's strict inequality using directed-rounding ball
+    /// arithmetic. A false result is inconclusive and may use an exact
+    /// rational fallback.
+    fn shifted_ball_contains_one_root(
+        shifted: &[ComplexBall],
         radius: &Rational,
+        precision: u32,
     ) -> bool {
         if radius.is_zero() {
             return false;
         }
 
-        let shifted = poly.shift_var(center);
+        let Some(linear) = shifted.get(1) else {
+            return false;
+        };
+
+        let radius = RealBall::from_rational_bounds(radius, radius, precision);
+        let first_lower_bound = Self::complex_ball_modulus_bounds(linear) * &radius;
+        let mut upper_bound = shifted
+            .first()
+            .map(Self::complex_ball_modulus_bounds)
+            .unwrap_or_else(|| RealBall::exact(Float::new(precision)));
+        let mut radius_power = radius.clone();
+        for coefficient in shifted.iter().skip(2) {
+            radius_power *= &radius;
+            upper_bound += Self::complex_ball_modulus_bounds(coefficient) * &radius_power;
+        }
+
+        first_lower_bound.lower_bound() > upper_bound.upper_bound()
+    }
+
+    /// Test Rouché's strict inequality on an already shifted exact
+    /// polynomial.
+    fn shifted_disk_contains_one_root(shifted: &ExactComplexPolynomial, radius: &Rational) -> bool {
+        if radius.is_zero() {
+            return false;
+        }
+
         let Some(linear) = shifted.coefficients.get(1) else {
             return false;
         };
@@ -736,6 +812,39 @@ impl UnivariatePolynomial<RationalField> {
             .unwrap_or_else(Rational::zero);
 
         first_lower_bound > const_upper + eval_higher_powers
+    }
+
+    /// Test a disk while reusing Taylor shifts across radius retries.
+    fn disk_contains_one_root_with_shift_cache(
+        poly: &ExactComplexPolynomial,
+        center: &Complex<Rational>,
+        radius: &Rational,
+        shifted_ball: &[ComplexBall],
+        exact_shifted: &mut Option<ExactComplexPolynomial>,
+    ) -> bool {
+        if Self::shifted_ball_contains_one_root(shifted_ball, radius, 128) {
+            return true;
+        }
+
+        let shifted = exact_shifted.get_or_insert_with(|| poly.shift_var(center));
+        Self::shifted_disk_contains_one_root(shifted, radius)
+    }
+
+    /// Test if a disk contains a single root of the polynomial using Rouché's theorem.
+    fn disk_contains_one_root(
+        poly: &ExactComplexPolynomial,
+        center: &Complex<Rational>,
+        radius: &Rational,
+    ) -> bool {
+        let shifted_ball = Self::shift_var_complex_ball(poly, center, 128);
+        let mut exact_shifted = None;
+        Self::disk_contains_one_root_with_shift_cache(
+            poly,
+            center,
+            radius,
+            &shifted_ball,
+            &mut exact_shifted,
+        )
     }
 
     /// Choose an initially disjoint candidate radius around one approximate root.
@@ -935,10 +1044,18 @@ impl UnivariatePolynomial<RationalField> {
         let max_radius = &root.enclosure.radius / &Rational::from(2);
         let mut radius = Rational::from((Integer::one(), Integer::from(2).pow(target_radius_bits)))
             .min(max_radius.clone());
+        let shifted_ball = Self::shift_var_complex_ball(poly, &center, 128);
+        let mut exact_shifted = None;
 
         for _ in 0..64 {
             if &center_distance + &radius <= root.enclosure.radius
-                && Self::disk_contains_one_root(poly, &center, &radius)
+                && Self::disk_contains_one_root_with_shift_cache(
+                    poly,
+                    &center,
+                    &radius,
+                    &shifted_ball,
+                    &mut exact_shifted,
+                )
             {
                 root.enclosure.center = center;
                 root.enclosure.radius = radius;
@@ -1370,10 +1487,18 @@ impl UnivariatePolynomial<RationalField> {
             candidate_radii.push(quadratic_radius);
         }
         candidate_radii.push(half_radius);
+        let shifted_ball = Self::shift_var_complex_ball(poly, &new_center, 128);
+        let mut exact_shifted = None;
 
         for mut new_radius in candidate_radii {
             for _ in 0..16 {
-                if Self::disk_contains_one_root(poly, &new_center, &new_radius) {
+                if Self::disk_contains_one_root_with_shift_cache(
+                    poly,
+                    &new_center,
+                    &new_radius,
+                    &shifted_ball,
+                    &mut exact_shifted,
+                ) {
                     root.enclosure.center = new_center;
                     root.enclosure.radius = new_radius;
                     return true;
@@ -1925,10 +2050,18 @@ impl UnivariatePolynomial<ExactComplexField> {
                 root_index,
                 target_radius,
             )?;
+            let shifted_ball = UnivariatePolynomial::<Q>::shift_var_complex_ball(self, center, 128);
+            let mut exact_shifted = None;
 
             let mut certified_radius = None;
             for _ in 0..16 {
-                if UnivariatePolynomial::<Q>::disk_contains_one_root(self, center, &radius) {
+                if UnivariatePolynomial::<Q>::disk_contains_one_root_with_shift_cache(
+                    self,
+                    center,
+                    &radius,
+                    &shifted_ball,
+                    &mut exact_shifted,
+                ) {
                     certified_radius = Some(radius);
                     break;
                 }

@@ -30,6 +30,7 @@ use crate::{
 use super::{
     PolyVariable, PositiveExponent,
     factor::Factorize,
+    gcd::PolynomialGCD,
     polynomial::{MultivariatePolynomial, PolynomialRing},
 };
 
@@ -1700,8 +1701,11 @@ impl<F: Field> UnivariatePolynomial<F> {
         ss
     }
 
-    /// Compute the univariate GCD using Euclid's algorithm. The result is normalized to 1.
-    pub fn gcd(&self, b: &Self) -> Self {
+    /// Compute the univariate GCD using Euclid's algorithm. The result is made monic.
+    ///
+    /// Prefer [`Self::gcd`] when the coefficient ring implements [`PolynomialGCD`]. Exact
+    /// Euclidean division can cause severe coefficient swell over fields such as the rationals.
+    pub fn gcd_euclidean(&self, b: &Self) -> Self {
         if self.is_zero() {
             return b.clone();
         }
@@ -1771,6 +1775,20 @@ impl<F: Field> UnivariatePolynomial<F> {
         q.truncate();
 
         (q, r)
+    }
+}
+
+impl<F: Field + PolynomialGCD<u16>> UnivariatePolynomial<F> {
+    /// Compute the GCD using the coefficient ring's preferred polynomial GCD algorithm.
+    pub fn gcd(&self, b: &Self) -> Self {
+        if self.variable != b.variable {
+            panic!("Cannot compute GCD of polynomials with different variables");
+        }
+
+        self.clone()
+            .to_multivariate::<u16>()
+            .gcd(&b.clone().to_multivariate::<u16>())
+            .to_univariate_from_univariate(0)
     }
 }
 

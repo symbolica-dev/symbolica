@@ -3540,6 +3540,61 @@ impl<F: Ring, E: Exponent> MultivariatePolynomial<F, E, LexOrder> {
     }
 }
 
+impl<F: Field, E: PositiveExponent> MultivariatePolynomial<F, E, LexOrder> {
+    /// Divide univariate polynomials over a field if the division is exact.
+    ///
+    /// Unlike [`Self::try_div`], this method uses the field inverse of the leading coefficient
+    /// once and then performs synthetic division by a monic polynomial. This is important for
+    /// extension fields where a generic exact coefficient-division test may be much more
+    /// expensive than inversion.
+    pub(crate) fn try_div_univariate_field(&self, div: &Self) -> Option<Self> {
+        if div.is_zero() {
+            return None;
+        }
+
+        if self.variables() != div.variables() {
+            let mut dividend = self.clone();
+            let mut divisor = div.clone();
+            dividend.unify_variables(&mut divisor);
+            return dividend.try_div_univariate_field(&divisor);
+        }
+
+        if self.is_zero() {
+            return Some(self.clone());
+        }
+
+        if div.is_constant() {
+            return Some(self.clone().mul_coeff(self.ring().inv(&div.get_constant())));
+        }
+
+        let active_variables = (0..self.nvars())
+            .filter(|&variable| {
+                self.degree(variable) != E::zero() || div.degree(variable) != E::zero()
+            })
+            .count();
+        assert_eq!(
+            active_variables, 1,
+            "try_div_univariate_field requires univariate polynomials"
+        );
+
+        if (0..self.nvars()).any(|variable| self.degree(variable) < div.degree(variable)) {
+            return None;
+        }
+
+        let leading_coefficient = div.lcoeff();
+        let (leading_inverse, monic_divisor) = if self.ring().is_one(&leading_coefficient) {
+            (self.ring().one(), div.clone())
+        } else {
+            let inverse = self.ring().inv(&leading_coefficient);
+            (inverse.clone(), div.clone().mul_coeff(inverse))
+        };
+        let (quotient, remainder) = self.quot_rem_univariate_monic(&monic_divisor);
+        remainder
+            .is_zero()
+            .then(|| quotient.mul_coeff(leading_inverse))
+    }
+}
+
 impl<F: EuclideanDomain, E: PositiveExponent> MultivariatePolynomial<F, E, LexOrder> {
     /// Convert the polynomial to one in a number field, where the variable
     /// of the number field is moved into the coefficient.
