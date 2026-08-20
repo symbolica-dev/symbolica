@@ -558,11 +558,9 @@ where
     pub fn gcd(&self, other: &Self) -> Self {
         let gcd_num = self.numerator.gcd(&other.numerator);
         let gcd_den = self.denominator.gcd(&other.denominator);
-
-        RationalPolynomial {
-            numerator: gcd_num,
-            denominator: (&other.denominator / &gcd_den) * &self.denominator,
-        }
+        let denominator = (&other.denominator / &gcd_den) * &self.denominator;
+        let field = gcd_num.ring().clone();
+        Self::from_num_den(gcd_num, denominator, &field, false)
     }
 
     /// Convert the rational polynomial to a polynomial in the specified
@@ -1774,6 +1772,19 @@ mod test {
         let one = field.one();
         let t = format!("{}", field.printer(&one));
         assert_eq!(t, "1");
+    }
+
+    #[test]
+    fn gcd_unifies_numerator_and_denominator_variables() {
+        let field = RationalPolynomialField::<_, u8>::new(Z);
+        let one = field.one();
+        let parameter: RationalPolynomial<_, u8> =
+            parse!("a/b").to_rational_polynomial(&Q, &Z, None);
+
+        let gcd = one.gcd(&parameter);
+
+        assert_eq!(gcd.numerator.variables(), gcd.denominator.variables());
+        assert!((&gcd * &gcd.clone().inv()).is_one());
     }
 
     #[test]
