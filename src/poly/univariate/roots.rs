@@ -198,6 +198,26 @@ impl RootCache {
         entry
     }
 
+    /// Initialize a square-free root set from caller-supplied numerical
+    /// centers, unless another caller has already populated the cache.
+    fn root_set_with_initial_guesses(
+        &self,
+        poly: &ExactComplexPolynomial,
+        initial_guesses: Vec<Complex<Float>>,
+    ) -> Arc<RootSetSlot> {
+        let entry = if let Some(rational) = poly.try_map_to_rational() {
+            self.rational.root_slot(&rational)
+        } else {
+            self.complex.root_slot(poly)
+        };
+        entry.get_or_init(|| {
+            RwLock::new(Self::cache_states(
+                poly.isolate_square_free_roots_with_initial_guesses(None, initial_guesses),
+            ))
+        });
+        entry
+    }
+
     /// Copy one root certificate from the cache into an isolated-root value.
     fn root_snapshot(&self, poly: Arc<ExactComplexPolynomial>, index: usize) -> IsolatedRoot {
         let entry = self.root_set(&poly);
@@ -937,6 +957,28 @@ impl UnivariatePolynomial<RationalField> {
         cache.roots_in_multiset(multiset)
     }
 
+    /// Isolate roots using numerical centers supplied by a construction that
+    /// knows the roots analytically. The centers remain hints: the normal exact
+    /// certification and canonical ordering are still required.
+    pub(crate) fn isolate_roots_with_initial_guesses(
+        &self,
+        initial_guesses: Vec<Complex<Float>>,
+    ) -> Vec<(IsolatedRoot, usize)> {
+        let cache = root_cache();
+        let entry = cache.rational.root_multiset_slot(self);
+        let multiset = entry.get_or_init(|| {
+            let factors = self.root_factors();
+            if factors.len() == 1
+                && factors[0].0.degree() == initial_guesses.len()
+                && factors[0].1 == 1
+            {
+                cache.root_set_with_initial_guesses(&factors[0].0, initial_guesses);
+            }
+            cache.build_root_multiset(factors)
+        });
+        cache.roots_in_multiset(multiset)
+    }
+
     /// Isolate the distinct real roots of the polynomial. Resolving whether a
     /// root lies on the real axis may refine its cached enclosure.
     pub fn isolate_real_roots(&self) -> Vec<(IsolatedRoot, usize)> {
@@ -952,9 +994,13 @@ impl UnivariatePolynomial<RationalField> {
 
     /// Factor this polynomial and build its canonical root multiset.
     fn build_root_multiset(&self) -> RootMultiset {
+        root_cache().build_root_multiset(self.root_factors())
+    }
+
+    /// Factor this polynomial and convert each defining factor to exact-complex form.
+    fn root_factors(&self) -> Vec<(Arc<ExactComplexPolynomial>, usize)> {
         let complex_field = FloatField::from_rep(Complex::from(Rational::one()));
-        let factors = self
-            .clone()
+        self.clone()
             .to_multivariate::<u16>()
             .factor()
             .into_iter()
@@ -965,8 +1011,8 @@ impl UnivariatePolynomial<RationalField> {
                     complex_field.clone(),
                 ));
                 (defining_poly, multiplicity)
-            });
-        root_cache().build_root_multiset(factors)
+            })
+            .collect()
     }
 
     /// Sort roots by certified real part and then imaginary part.
@@ -2291,12 +2337,32 @@ impl UnivariatePolynomial<ExactComplexField> {
 
     /// Isolate every root of this square-free exact-complex polynomial.
     fn isolate_square_free_roots(&self, target_radius: Option<&Rational>) -> Vec<IsolatedRoot> {
+        self.isolate_square_free_roots_from(target_radius, None)
+    }
+
+    /// Isolate every root, starting from caller-supplied numerical centers.
+    fn isolate_square_free_roots_with_initial_guesses(
+        &self,
+        target_radius: Option<&Rational>,
+        initial_guesses: Vec<Complex<Float>>,
+    ) -> Vec<IsolatedRoot> {
+        self.isolate_square_free_roots_from(target_radius, Some(initial_guesses))
+    }
+
+    fn isolate_square_free_roots_from(
+        &self,
+        target_radius: Option<&Rational>,
+        initial_guesses: Option<Vec<Complex<Float>>>,
+    ) -> Vec<IsolatedRoot> {
         const ABERTH_CERTIFICATION_BATCH: usize = 64;
         const MAX_ABERTH_ITERATIONS_PER_PRECISION: usize = 256;
 
         let deflation = self.numerical_deflation();
         let numerical_polynomial = self.deflated_polynomial(deflation);
-        let mut previous_roots = numerical_polynomial.approximate_roots_f64();
+        let supplied_roots = initial_guesses
+            .filter(|roots| deflation == 1 && roots.len() == numerical_polynomial.degree());
+        let mut previous_roots =
+            supplied_roots.or_else(|| numerical_polynomial.approximate_roots_f64());
         if let Some(roots) = &previous_roots {
             let expanded = Self::expand_deflated_roots(roots, deflation, 64);
             if let Some(complex_roots) =
@@ -2309,6 +2375,18 @@ impl UnivariatePolynomial<ExactComplexField> {
         let mut num_prec = 128;
 
         loop {
+            // A failed certificate at the previous precision can become
+            // conclusive solely by evaluating the same centers with tighter
+            // coefficient balls. Try that before doing more Aberth steps.
+            if let Some(roots) = &previous_roots {
+                let expanded = Self::expand_deflated_roots(roots, deflation, num_prec);
+                if let Some(complex_roots) =
+                    self.certify_approximate_roots(&expanded, target_radius, num_prec)
+                {
+                    return complex_roots;
+                }
+            }
+
             let tolerance = UnivariatePolynomial::<Q>::aberth_tolerance(num_prec);
             let field = FloatField::from_rep(Complex::from(tolerance.clone()));
             let c = numerical_polynomial.map_coeff(
