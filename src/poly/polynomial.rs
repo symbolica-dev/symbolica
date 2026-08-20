@@ -2798,90 +2798,78 @@ impl<F: Ring, E: Exponent> MultivariatePolynomial<F, E, LexOrder> {
             return (self.clone(), self.clone());
         }
 
-        let mut dividendpos = self.nterms() - 1; // work from the back
+        let Some(var) = div
+            .last_exponents()
+            .iter()
+            .position(|exponent| !exponent.is_zero())
+        else {
+            // The only monic constant polynomial is one.
+            return (self.clone(), self.zero());
+        };
 
-        let mut q = self.zero_with_capacity(self.nterms());
-        let mut r = self.zero();
+        debug_assert_eq!(self.get_vars_ref(), div.get_vars_ref());
+        debug_assert!(self.is_polynomial() && div.is_polynomial());
+        debug_assert!(
+            self.exponents_iter()
+                .chain(div.exponents_iter())
+                .all(|exponents| exponents
+                    .iter()
+                    .enumerate()
+                    .all(|(index, exponent)| index == var || exponent.is_zero()))
+        );
 
-        // determine the variable
-        let mut var = 0;
-        for (i, x) in self.last_exponents().iter().enumerate() {
-            if !x.is_zero() {
-                var = i;
-                break;
+        let div_degree = div.degree(var).to_i32() as usize;
+        let dividend_degree = self.degree(var).to_i32() as usize;
+        if dividend_degree < div_degree {
+            return (self.zero(), self.clone());
+        }
+
+        let mut coefficients = vec![self.ring().zero(); dividend_degree + 1];
+        for term in self {
+            coefficients[term.exponents[var].to_i32() as usize] = term.coefficient.clone();
+        }
+
+        let quotient_degree = dividend_degree - div_degree;
+        let mut quotient_coefficients = vec![self.ring().zero(); quotient_degree + 1];
+        for degree in (div_degree..=dividend_degree).rev() {
+            let coefficient = std::mem::replace(&mut coefficients[degree], self.ring().zero());
+            if self.ring().is_zero(&coefficient) {
+                continue;
+            }
+
+            for term in div {
+                let term_degree = term.exponents[var].to_i32() as usize;
+                if term_degree == div_degree {
+                    continue;
+                }
+
+                self.ring().sub_mul_assign(
+                    &mut coefficients[degree - div_degree + term_degree],
+                    term.coefficient,
+                    &coefficient,
+                );
+            }
+            quotient_coefficients[degree - div_degree] = coefficient;
+        }
+
+        let mut exponent = vec![E::zero(); self.nvars()];
+        let mut q = self.zero_with_capacity(quotient_coefficients.len());
+        for (degree, coefficient) in quotient_coefficients.into_iter().enumerate() {
+            if !self.ring().is_zero(&coefficient) {
+                exponent[var] = E::from_i32(degree as i32);
+                q.append_monomial(coefficient, &exponent);
             }
         }
 
-        let m = div.ldegree_max();
-        let mut pow = self.ldegree_max();
-
-        loop {
-            // find the power in the dividend if it exists
-            let mut coeff = loop {
-                if self.exponents(dividendpos)[var] == pow {
-                    break self.coefficients[dividendpos].clone();
-                }
-                if dividendpos == 0 || self.exponents(dividendpos)[var] < pow {
-                    break self.ring().zero();
-                }
-                dividendpos -= 1;
-            };
-
-            let mut qindex = 0; // starting from highest
-            let mut bindex = 0; // starting from lowest
-            while bindex < div.nterms() && qindex < q.nterms() {
-                while bindex + 1 < div.nterms()
-                    && div.exponents(bindex)[var] + q.exponents(qindex)[var] < pow
-                {
-                    bindex += 1;
-                }
-
-                if div.exponents(bindex)[var] + q.exponents(qindex)[var] == pow {
-                    self.ring().sub_mul_assign(
-                        &mut coeff,
-                        &div.coefficients[bindex],
-                        &q.coefficients[qindex],
-                    );
-                }
-
-                qindex += 1;
+        let mut r = self.zero_with_capacity(div_degree);
+        for (degree, coefficient) in coefficients.into_iter().take(div_degree).enumerate() {
+            if !self.ring().is_zero(&coefficient) {
+                exponent[var] = E::from_i32(degree as i32);
+                r.append_monomial(coefficient, &exponent);
             }
-
-            if !self.ring().is_zero(&coeff) {
-                // can the division be performed? if not, add to rest
-                // TODO: refactor
-                let (quot, div) = if pow >= m {
-                    (coeff, true)
-                } else {
-                    (coeff, false)
-                };
-
-                if div {
-                    let nterms = q.nterms();
-                    let nvars = q.nvars();
-                    q.coefficients.push(quot);
-                    q.exponents.resize((nterms + 1) * nvars, E::zero());
-                    q.exponents[nterms * nvars + var] = pow - m;
-                } else {
-                    let nterms = r.nterms();
-                    let nvars = r.nvars();
-                    r.coefficients.push(quot);
-                    r.exponents.resize((nterms + 1) * nvars, E::zero());
-                    r.exponents[nterms * nvars + var] = pow;
-                }
-            }
-
-            if pow.is_zero() {
-                break;
-            }
-
-            pow = pow - E::one();
         }
 
-        q.reverse_monomials();
-        r.reverse_monomials();
-
-        #[cfg(debug_assertions)]
+        #[cfg(test)]
         {
             if !(&q * div + r.clone() - self.clone()).is_zero() {
                 panic!("Division failed: ({self})/({div}): q={q}, r={r}");
@@ -4070,7 +4058,7 @@ impl<F: Ring, E: Exponent> MultivariatePolynomial<F, E, LexOrder> {
         q.reverse_monomials();
         r.reverse_monomials();
 
-        #[cfg(debug_assertions)]
+        #[cfg(test)]
         {
             if !(&q * div + r.clone() - self.clone()).is_zero() {
                 panic!("Division failed: ({self})/({div}): q={q}, r={r}");
@@ -4327,7 +4315,7 @@ impl<F: Ring, E: Exponent> MultivariatePolynomial<F, E, LexOrder> {
         q.reverse_monomials();
         r.reverse_monomials();
 
-        #[cfg(debug_assertions)]
+        #[cfg(test)]
         {
             if !(&q * div + r.clone() - self.clone()).is_zero() {
                 panic!("Division failed: ({self})/({div}): q={q}, r={r}");
@@ -5095,6 +5083,36 @@ mod test {
         assert_eq!(
             r.to_expression(),
             parse!("1-v8-v8*v9-v7-v6-v5-v4+v3-4*v2+v2*v3^2+v2^2*v3")
+        );
+    }
+
+    #[test]
+    fn quot_rem_univariate_monic_dense() {
+        let variables = Arc::new(vec![symbol!("x").into(), symbol!("y").into()]);
+        let dividend = parse!("y^12-3*y^7+2*y^2-5").to_polynomial::<_, u16>(&Q, variables);
+        let divisor = parse!("y^4+2*y+1").to_polynomial::<_, u16>(&Q, dividend.variables().clone());
+        let (quotient, remainder) = dividend.quot_rem_univariate_monic(&divisor);
+
+        assert_eq!(
+            quotient.to_expression(),
+            parse!("7+4*y+4*y^2-3*y^3-y^4-2*y^5+y^8")
+        );
+        assert_eq!(remainder.to_expression(), parse!("-12-18*y-10*y^2-5*y^3"));
+    }
+
+    #[test]
+    fn quot_rem_univariate_monic_edge_cases() {
+        let dividend = parse!("y^2+1").to_polynomial::<_, u16>(&Q, None);
+        let larger = parse!("y^3+y+1").to_polynomial::<_, u16>(&Q, dividend.variables().clone());
+        let one = parse!("1").to_polynomial::<_, u16>(&Q, dividend.variables().clone());
+
+        assert_eq!(
+            dividend.quot_rem_univariate_monic(&larger),
+            (dividend.zero(), dividend.clone())
+        );
+        assert_eq!(
+            dividend.quot_rem_univariate_monic(&one),
+            (dividend.clone(), dividend.zero())
         );
     }
 
