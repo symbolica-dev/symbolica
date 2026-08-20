@@ -2009,54 +2009,6 @@ impl FormattedPrintFn for FunView<'_> {
     }
 }
 
-#[test]
-fn test() {
-    let a = crate::parse!("1/(x*y)");
-    println!("{}", a.printer(PrintOptions::typst()));
-
-    let b = crate::parse!("gamma(x)");
-    println!("{}", b.printer(PrintOptions::typst()));
-
-    let b = crate::parse!("euler_gamma");
-    println!("{}", b.printer(PrintOptions::typst()));
-
-    let c = crate::parse!("pi^(1/2)");
-    println!("{}", c.printer(PrintOptions::typst()));
-
-    let d = crate::parse!("1/f(x)");
-    println!("{}", d.printer(PrintOptions::typst()));
-
-    let e = crate::parse!("1/(f(x)*y)");
-    println!("{}", e.printer(PrintOptions::typst()));
-
-    let e = crate::parse!("x*z/(-f(x)*y)");
-    println!("{}", e.printer(PrintOptions::typst()));
-
-    let f = crate::parse!("1/3");
-    println!("{}", f.printer(PrintOptions::typst()));
-
-    let a = crate::parse!("1/(x*y)");
-    println!("{}", a.printer(PrintOptions::latex()));
-
-    let b = crate::parse!("gamma(x)");
-    println!("{}", b.printer(PrintOptions::latex()));
-
-    let b = crate::parse!("euler_gamma");
-    println!("{}", b.printer(PrintOptions::latex()));
-
-    let c = crate::parse!("pi^(1/2)");
-    println!("{}", c.printer(PrintOptions::latex()));
-
-    let d = crate::parse!("1/f(x)");
-    println!("{}", d.printer(PrintOptions::latex()));
-
-    let e = crate::parse!("1/(f(x)*y)");
-    println!("{}", e.printer(PrintOptions::latex()));
-
-    let f = crate::parse!("1/3");
-    println!("{}", f.printer(PrintOptions::latex()));
-}
-
 impl FormattedPrintPow for PowView<'_> {
     fn fmt_output<W: std::fmt::Write>(
         &self,
