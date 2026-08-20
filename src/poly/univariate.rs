@@ -16,7 +16,7 @@ use crate::{
     domains::{
         EuclideanDomain, Field, InternalOrdering, Ring, RingOps, SelfRing, Set,
         algebraic::{AlgebraicExtension, AlgebraicNumber},
-        float::{Complex, FloatField, FloatLike, Real, SingleFloat},
+        float::{Complex, F64, FloatField, FloatLike, Real, SingleFloat},
         integer::{Integer, IntegerRing, Z},
         rational::{Q, Rational, RationalField},
         rational_polynomial::{
@@ -30,6 +30,7 @@ use crate::{
 use super::{
     PolyVariable, PositiveExponent,
     factor::Factorize,
+    gcd::PolynomialGCD,
     polynomial::{MultivariatePolynomial, PolynomialRing},
 };
 
@@ -503,6 +504,55 @@ impl<F: Ring> UnivariatePolynomial<F> {
         }
 
         self
+    }
+
+    /// Compute a pseudo-remainder without dividing coefficients.
+    ///
+    /// The result is a scalar multiple of the remainder over the fraction
+    /// field of the coefficient ring. In particular, over an integral domain
+    /// it is zero exactly when `divisor` divides `self` over that fraction
+    /// field.
+    pub fn pseudo_remainder(&self, divisor: &Self) -> Self {
+        assert_eq!(self.ring, divisor.ring);
+        assert_eq!(self.variable, divisor.variable);
+        assert!(!divisor.is_zero(), "pseudo-division by zero");
+
+        if self.is_zero() || self.degree() < divisor.degree() {
+            return self.clone();
+        }
+
+        let divisor_degree = divisor.degree();
+        let divisor_leading_coefficient = divisor.lcoeff();
+        let divisor_is_monic = self.ring.is_one(&divisor_leading_coefficient);
+        let mut remainder = self.clone();
+
+        while !remainder.is_zero() && remainder.degree() >= divisor_degree {
+            let shift = remainder.degree() - divisor_degree;
+            let remainder_leading_coefficient = remainder.lcoeff();
+
+            if !divisor_is_monic {
+                for coefficient in &mut remainder.coefficients {
+                    self.ring
+                        .mul_assign(coefficient, &divisor_leading_coefficient);
+                }
+            }
+
+            for (coefficient, divisor_coefficient) in remainder
+                .coefficients
+                .iter_mut()
+                .skip(shift)
+                .zip(&divisor.coefficients)
+            {
+                self.ring.sub_mul_assign(
+                    coefficient,
+                    divisor_coefficient,
+                    &remainder_leading_coefficient,
+                );
+            }
+            remainder.truncate();
+        }
+
+        remainder
     }
 
     /// Map a coefficient using the function `f`.
@@ -1249,16 +1299,15 @@ impl<R: Real + SingleFloat + std::hash::Hash + Eq + PartialOrd + InternalOrderin
         let t_sq = tolerance.clone() * tolerance;
         for _ in 0..max_iterations {
             for i in 0..n.len() {
-                let last_finite = n.clone();
                 let p_at_i = self.evaluate(&n[i]);
                 let df_at_i = df.evaluate(&n[i]);
                 if !p_at_i.is_finite() || !df_at_i.is_finite() || df_at_i.is_zero() {
-                    return finite_error(&last_finite);
+                    return finite_error(&n);
                 }
 
                 let e = p_at_i / df_at_i;
                 if !e.is_finite() {
-                    return finite_error(&last_finite);
+                    return finite_error(&n);
                 }
 
                 let mut rep = e.zero();
@@ -1266,35 +1315,36 @@ impl<R: Real + SingleFloat + std::hash::Hash + Eq + PartialOrd + InternalOrderin
                     if i != j && n[i] != n[j] {
                         let diff = n[i].clone() - &n[j];
                         if !diff.is_finite() || diff.is_zero() {
-                            return finite_error(&last_finite);
+                            return finite_error(&n);
                         }
 
                         let diff_inv = diff.inv();
                         if !diff_inv.is_finite() {
-                            return finite_error(&last_finite);
+                            return finite_error(&n);
                         }
 
                         rep += diff_inv;
                     }
                 }
                 if !rep.is_finite() {
-                    return finite_error(&last_finite);
+                    return finite_error(&n);
                 }
 
                 let denom = rep.one() - &e * rep;
                 if !denom.is_finite() || denom.is_zero() {
-                    return finite_error(&last_finite);
+                    return finite_error(&n);
                 }
 
                 let correction = e / denom;
                 if !correction.is_finite() {
-                    return finite_error(&last_finite);
+                    return finite_error(&n);
                 }
 
-                n[i] -= correction;
-                if !n[i].is_finite() {
-                    return finite_error(&last_finite);
+                let updated = n[i].clone() - correction;
+                if !updated.is_finite() {
+                    return finite_error(&n);
                 }
+                n[i] = updated;
             }
             if n.iter().all(|x| self.evaluate(x).norm_squared() < t_sq) {
                 n.sort_unstable_by(|a, b| {
@@ -1700,8 +1750,11 @@ impl<F: Field> UnivariatePolynomial<F> {
         ss
     }
 
-    /// Compute the univariate GCD using Euclid's algorithm. The result is normalized to 1.
-    pub fn gcd(&self, b: &Self) -> Self {
+    /// Compute the univariate GCD using Euclid's algorithm. The result is made monic.
+    ///
+    /// Prefer [`Self::gcd`] when the coefficient ring implements [`PolynomialGCD`]. Exact
+    /// Euclidean division can cause severe coefficient swell over fields such as the rationals.
+    pub fn gcd_euclidean(&self, b: &Self) -> Self {
         if self.is_zero() {
             return b.clone();
         }
@@ -1771,6 +1824,20 @@ impl<F: Field> UnivariatePolynomial<F> {
         q.truncate();
 
         (q, r)
+    }
+}
+
+impl<F: Field + PolynomialGCD<u16>> UnivariatePolynomial<F> {
+    /// Compute the GCD using the coefficient ring's preferred polynomial GCD algorithm.
+    pub fn gcd(&self, b: &Self) -> Self {
+        if self.variable != b.variable {
+            panic!("Cannot compute GCD of polynomials with different variables");
+        }
+
+        self.clone()
+            .to_multivariate::<u16>()
+            .gcd(&b.clone().to_multivariate::<u16>())
+            .to_univariate_from_univariate(0)
     }
 }
 

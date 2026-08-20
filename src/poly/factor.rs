@@ -556,18 +556,25 @@ impl<E: PositiveExponent> Factorize
             }
 
             let mut g_f = g.to_number_field(&self.ring());
+            let alpha_poly = g.variable(&self.get_vars_ref()[v]).unwrap()
+                + g.variable(&self.ring().poly().variables()[0]).unwrap()
+                    * &g.constant((s as u64).into());
+            let last_factor = factors.len() - 1;
 
-            for (f, b) in factors {
+            for (factor_index, (f, b)) in factors.into_iter().enumerate() {
                 debug!("Rational factor {}", f);
-                let alpha_poly = g.variable(&self.get_vars_ref()[v]).unwrap()
-                    + g.variable(&self.ring().poly().variables()[0]).unwrap()
-                        * &g.constant((s as u64).into());
-
-                let f = f.to_number_field(&self.ring());
-
-                let gcd = f.gcd(&g_f);
-
-                g_f = g_f / &gcd;
+                let gcd = if factor_index == last_factor {
+                    // The square-free norm associates every rational factor with a unique factor
+                    // of g, so the final unfactored remainder is the final lift.
+                    g_f.clone()
+                } else {
+                    let f = f.to_number_field(&self.ring());
+                    let gcd = f.gcd(&g_f);
+                    g_f = g_f
+                        .try_div_exact(&gcd)
+                        .expect("the lifted norm factor must divide the shifted polynomial");
+                    gcd
+                };
 
                 let g = MultivariatePolynomial::from_number_field(&gcd)
                     .replace_with_poly(v, &alpha_poly)
