@@ -83,9 +83,37 @@ pub(crate) struct SymbolData {
     pub(crate) custom_derivative: Option<DerivativeFunction>,
     pub(crate) custom_series: Option<Box<SeriesExpansionFunction>>,
     pub(crate) custom_evaluation: Option<EvaluationInfo>,
+    pub(crate) custom_function_keys: CustomFunctionDefinitionKeys,
     pub(crate) aliases: Vec<std::string::String>,
     pub(crate) tags: Vec<std::string::String>,
     pub(crate) user_data: UserData,
+}
+
+/// Opaque keys used to recognize equivalent custom function definitions.
+///
+/// Public Rust symbol builders leave these keys empty, preserving the rule that
+/// callbacks are registered once. The Python API supplies them so that rerunning
+/// a notebook cell with an equivalent callback is idempotent.
+#[derive(Default)]
+pub(crate) struct CustomFunctionDefinitionKeys {
+    pub(crate) normalization: Option<Vec<u8>>,
+    pub(crate) print: Option<Vec<u8>>,
+    pub(crate) derivative: Option<Vec<u8>>,
+    pub(crate) series: Option<Vec<u8>>,
+    pub(crate) evaluation: Option<Vec<u8>>,
+}
+
+fn custom_function_matches<T>(
+    new_function: &Option<T>,
+    new_key: &Option<Vec<u8>>,
+    existing_function: &Option<T>,
+    existing_key: &Option<Vec<u8>>,
+) -> bool {
+    new_function.is_none()
+        || (existing_function.is_some()
+            && new_key
+                .as_ref()
+                .is_some_and(|key| existing_key.as_ref() == Some(key)))
 }
 
 fn builtin_constant_evaluation(symbol: Symbol) -> Option<EvaluationInfo> {
@@ -118,6 +146,7 @@ impl SymbolData {
             custom_derivative: None,
             custom_series: None,
             custom_evaluation: None,
+            custom_function_keys: CustomFunctionDefinitionKeys::default(),
             aliases: vec![],
             tags: vec![],
             user_data: UserData::None,
@@ -533,6 +562,7 @@ impl State {
                 None,
                 None,
                 None,
+                CustomFunctionDefinitionKeys::default(),
                 vec![],
                 vec![],
                 None,
@@ -547,6 +577,7 @@ impl State {
                 None,
                 None,
                 None,
+                CustomFunctionDefinitionKeys::default(),
                 vec![],
                 vec![],
                 None,
@@ -561,6 +592,7 @@ impl State {
                 None,
                 None,
                 None,
+                CustomFunctionDefinitionKeys::default(),
                 vec![],
                 vec![],
                 None,
@@ -575,6 +607,7 @@ impl State {
                 None,
                 None,
                 None,
+                CustomFunctionDefinitionKeys::default(),
                 vec![],
                 vec![],
                 None,
@@ -589,6 +622,7 @@ impl State {
                 None,
                 None,
                 None,
+                CustomFunctionDefinitionKeys::default(),
                 vec![],
                 vec![],
                 None,
@@ -700,6 +734,7 @@ impl State {
                         custom_derivative: None,
                         custom_series: None,
                         custom_evaluation: None,
+                        custom_function_keys: CustomFunctionDefinitionKeys::default(),
                         tags: vec![],
                         user_data: UserData::None,
                     },
@@ -732,6 +767,7 @@ impl State {
         derivative_function: Option<DerivativeFunction>,
         series_function: Option<Box<SeriesExpansionFunction>>,
         evaluation_function: Option<EvaluationInfo>,
+        custom_function_keys: CustomFunctionDefinitionKeys,
         tags: Vec<std::string::String>,
         mut aliases: Vec<std::string::String>,
         user_data: Option<UserData>,
@@ -751,6 +787,7 @@ impl State {
         match self.str_to_id.entry(name.symbol.into()) {
             Entry::Occupied(o) => {
                 let r = *o.get();
+                let data = &ID_TO_STR[r.get_id() as usize].1;
 
                 let new_id = Symbol::raw_fn(
                     r.get_id(),
@@ -776,11 +813,36 @@ impl State {
                     && r.is_real() == new_id.is_real()
                     && r.is_integer() == new_id.is_integer()
                     && r.is_positive() == new_id.is_positive()
-                    && normalization_function.is_none()
-                    && print_function.is_none()
-                    && derivative_function.is_none()
-                    && series_function.is_none()
-                    && evaluation_function.is_none()
+                    && custom_function_matches(
+                        &normalization_function,
+                        &custom_function_keys.normalization,
+                        &data.custom_normalization,
+                        &data.custom_function_keys.normalization,
+                    )
+                    && custom_function_matches(
+                        &print_function,
+                        &custom_function_keys.print,
+                        &data.custom_print,
+                        &data.custom_function_keys.print,
+                    )
+                    && custom_function_matches(
+                        &derivative_function,
+                        &custom_function_keys.derivative,
+                        &data.custom_derivative,
+                        &data.custom_function_keys.derivative,
+                    )
+                    && custom_function_matches(
+                        &series_function,
+                        &custom_function_keys.series,
+                        &data.custom_series,
+                        &data.custom_function_keys.series,
+                    )
+                    && custom_function_matches(
+                        &evaluation_function,
+                        &custom_function_keys.evaluation,
+                        &data.custom_evaluation,
+                        &data.custom_function_keys.evaluation,
+                    )
                     && tags == r.get_tags()
                     && aliases == r.get_aliases()
                     && user_data.as_ref().unwrap_or(&UserData::None)
@@ -788,8 +850,6 @@ impl State {
                 {
                     Ok(r)
                 } else {
-                    let data = &ID_TO_STR[r.get_id() as usize].1;
-
                     let mut diff_attr = String::new();
                     if r.is_antisymmetric() != new_id.is_antisymmetric() {
                         diff_attr.push_str(&format!(
@@ -871,19 +931,44 @@ impl State {
                         ));
                     }
 
-                    if normalization_function.is_some() {
+                    if !custom_function_matches(
+                        &normalization_function,
+                        &custom_function_keys.normalization,
+                        &data.custom_normalization,
+                        &data.custom_function_keys.normalization,
+                    ) {
                         diff_attr.push_str("\t- new normalization function specified.\n");
                     }
-                    if print_function.is_some() {
+                    if !custom_function_matches(
+                        &print_function,
+                        &custom_function_keys.print,
+                        &data.custom_print,
+                        &data.custom_function_keys.print,
+                    ) {
                         diff_attr.push_str("\t- new print function specified.\n");
                     }
-                    if derivative_function.is_some() {
+                    if !custom_function_matches(
+                        &derivative_function,
+                        &custom_function_keys.derivative,
+                        &data.custom_derivative,
+                        &data.custom_function_keys.derivative,
+                    ) {
                         diff_attr.push_str("\t- new derivative function specified.\n");
                     }
-                    if series_function.is_some() {
+                    if !custom_function_matches(
+                        &series_function,
+                        &custom_function_keys.series,
+                        &data.custom_series,
+                        &data.custom_function_keys.series,
+                    ) {
                         diff_attr.push_str("\t- new series function specified.\n");
                     }
-                    if evaluation_function.is_some() {
+                    if !custom_function_matches(
+                        &evaluation_function,
+                        &custom_function_keys.evaluation,
+                        &data.custom_evaluation,
+                        &data.custom_function_keys.evaluation,
+                    ) {
                         diff_attr.push_str("\t- new evaluation function specified.\n");
                     }
 
@@ -943,6 +1028,7 @@ impl State {
                         custom_derivative: derivative_function,
                         custom_series: series_function,
                         custom_evaluation: evaluation_function,
+                        custom_function_keys,
                         tags,
                         aliases: aliases.clone(),
                         user_data: user_data.unwrap_or(UserData::None),
@@ -1536,11 +1622,21 @@ impl Drop for RecycledAtom {
 #[cfg(test)]
 mod tests {
     use crate::{
-        atom::{Atom, AtomCore, AtomView, InlineVar, Symbol},
-        parse, symbol,
+        atom::{Atom, AtomCore, AtomView, InlineVar, NormalizationFunction, Symbol},
+        parse,
+        printer::PrintFunction,
+        symbol, wrap_symbol,
     };
 
-    use super::State;
+    use super::{CustomFunctionDefinitionKeys, State};
+
+    fn test_print_function() -> PrintFunction {
+        Box::new(|_, _, _| Some("test".into()))
+    }
+
+    fn test_normalization_function() -> NormalizationFunction {
+        Box::new(|_, _| {})
+    }
 
     #[test]
     fn state_export_import() {
@@ -1567,6 +1663,176 @@ mod tests {
             .get_symbol()
             .unwrap();
         assert_eq!(a.get_data(), &crate::state::UserData::Atom(parse!("z")));
+    }
+
+    #[test]
+    fn custom_function_definition_keys_are_opt_in() {
+        let name = wrap_symbol!("symbolica::keyed_normalization_redefinition");
+        let key = b"same Python transformer".to_vec();
+
+        let first = State::get_state_mut()
+            .get_symbol_with_attributes(
+                name.clone(),
+                &[],
+                Some(test_normalization_function()),
+                None,
+                None,
+                None,
+                None,
+                CustomFunctionDefinitionKeys {
+                    normalization: Some(key.clone()),
+                    ..Default::default()
+                },
+                vec![],
+                vec![],
+                None,
+            )
+            .unwrap();
+
+        let repeated = State::get_state_mut()
+            .get_symbol_with_attributes(
+                name.clone(),
+                &[],
+                Some(test_normalization_function()),
+                None,
+                None,
+                None,
+                None,
+                CustomFunctionDefinitionKeys {
+                    normalization: Some(key),
+                    ..Default::default()
+                },
+                vec![],
+                vec![],
+                None,
+            )
+            .unwrap();
+        assert_eq!(first, repeated);
+
+        let changed = State::get_state_mut().get_symbol_with_attributes(
+            name,
+            &[],
+            Some(test_normalization_function()),
+            None,
+            None,
+            None,
+            None,
+            CustomFunctionDefinitionKeys {
+                normalization: Some(b"different Python transformer".to_vec()),
+                ..Default::default()
+            },
+            vec![],
+            vec![],
+            None,
+        );
+        assert!(
+            changed
+                .unwrap_err()
+                .contains("new normalization function specified")
+        );
+
+        let name = wrap_symbol!("symbolica::keyed_custom_function_redefinition");
+        let key = b"same Python definition".to_vec();
+
+        let first = State::get_state_mut()
+            .get_symbol_with_attributes(
+                name.clone(),
+                &[],
+                None,
+                Some(test_print_function()),
+                None,
+                None,
+                None,
+                CustomFunctionDefinitionKeys {
+                    print: Some(key.clone()),
+                    ..Default::default()
+                },
+                vec![],
+                vec![],
+                None,
+            )
+            .unwrap();
+
+        let repeated = State::get_state_mut()
+            .get_symbol_with_attributes(
+                name.clone(),
+                &[],
+                None,
+                Some(test_print_function()),
+                None,
+                None,
+                None,
+                CustomFunctionDefinitionKeys {
+                    print: Some(key),
+                    ..Default::default()
+                },
+                vec![],
+                vec![],
+                None,
+            )
+            .unwrap();
+        assert_eq!(first, repeated);
+
+        let changed = State::get_state_mut().get_symbol_with_attributes(
+            name,
+            &[],
+            None,
+            Some(test_print_function()),
+            None,
+            None,
+            None,
+            CustomFunctionDefinitionKeys {
+                print: Some(b"different Python definition".to_vec()),
+                ..Default::default()
+            },
+            vec![],
+            vec![],
+            None,
+        );
+        assert!(
+            changed
+                .unwrap_err()
+                .contains("new print function specified")
+        );
+
+        // Public Rust builders do not supply a definition key and therefore
+        // retain the existing define-once behavior.
+        let name = wrap_symbol!("symbolica::unkeyed_custom_function_redefinition");
+
+        State::get_state_mut()
+            .get_symbol_with_attributes(
+                name.clone(),
+                &[],
+                None,
+                Some(test_print_function()),
+                None,
+                None,
+                None,
+                CustomFunctionDefinitionKeys::default(),
+                vec![],
+                vec![],
+                None,
+            )
+            .unwrap();
+
+        let repeated = State::get_state_mut().get_symbol_with_attributes(
+            name,
+            &[],
+            None,
+            Some(test_print_function()),
+            None,
+            None,
+            None,
+            CustomFunctionDefinitionKeys::default(),
+            vec![],
+            vec![],
+            None,
+        );
+        assert!(
+            repeated
+                .unwrap_err()
+                .contains("new print function specified")
+        );
     }
 
     #[test]

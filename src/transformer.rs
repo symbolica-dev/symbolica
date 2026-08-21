@@ -284,10 +284,22 @@ pub enum Transformer {
 impl std::fmt::Debug for Transformer {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
-            Transformer::IfElse(_, _, _) => f.debug_tuple("IfElse").finish(),
-            Transformer::IfChanged(_, _, _) => f.debug_tuple("IfChanged").finish(),
+            Transformer::IfElse(condition, if_block, else_block) => f
+                .debug_tuple("IfElse")
+                .field(condition)
+                .field(if_block)
+                .field(else_block)
+                .finish(),
+            Transformer::IfChanged(condition, if_block, else_block) => f
+                .debug_tuple("IfChanged")
+                .field(condition)
+                .field(if_block)
+                .field(else_block)
+                .finish(),
             Transformer::BreakChain => f.debug_tuple("BreakChain").finish(),
-            Transformer::Expand(s, _) => f.debug_tuple("Expand").field(s).finish(),
+            Transformer::Expand(s, via_poly) => {
+                f.debug_tuple("Expand").field(s).field(via_poly).finish()
+            }
             Transformer::ExpandNum => f.debug_tuple("ExpandNum").finish(),
             Transformer::Derivative(x) => f.debug_tuple("Derivative").field(x).finish(),
             Transformer::Collect(x, a, b) => {
@@ -304,9 +316,14 @@ impl std::fmt::Debug for Transformer {
                 .finish(),
             Transformer::CollectNum => f.debug_tuple("CollectNum").finish(),
             Transformer::Conjugate => f.debug_tuple("Conjugate").finish(),
-            Transformer::ReplaceAll(pat, rhs, ..) => {
-                f.debug_tuple("ReplaceAll").field(pat).field(rhs).finish()
-            }
+            Transformer::ReplaceAll(pat, rhs, condition, match_settings, replace_settings) => f
+                .debug_tuple("ReplaceAll")
+                .field(pat)
+                .field(rhs)
+                .field(condition)
+                .field(match_settings)
+                .field(replace_settings)
+                .finish(),
             Transformer::ReplaceAllMultiple(pats, settings) => f
                 .debug_tuple("ReplaceAllMultiple")
                 .field(pats)
@@ -317,7 +334,11 @@ impl std::fmt::Debug for Transformer {
             Transformer::ArgCount(p) => f.debug_tuple("ArgCount").field(p).finish(),
             Transformer::Linearize(s) => f.debug_tuple("Linearize").field(s).finish(),
             Transformer::Map(_) => f.debug_tuple("Map").finish(),
-            Transformer::MapTerms(v, c) => f.debug_tuple("Map").field(v).field(c).finish(),
+            Transformer::MapTerms(v, pool) => f
+                .debug_tuple("MapTerms")
+                .field(v)
+                .field(&pool.as_ref().map(|p| p.current_num_threads()))
+                .finish(),
             Transformer::ForEach(t) => f.debug_tuple("ForEach").field(t).finish(),
             Transformer::Split => f.debug_tuple("Split").finish(),
             Transformer::Partition(g, b1, b2) => f

@@ -25,8 +25,8 @@ use pyo3::{
     pyclass::CompareOp,
     pyfunction, pymethods,
     types::{
-        PyAnyMethods, PyBytes, PyBytesMethods, PyComplex, PyDict, PyDictMethods, PyInt, PyIterator,
-        PyModule, PyNone, PyTuple, PyTupleMethods, PyType, PyTypeMethods,
+        PyAnyMethods, PyBytes, PyBytesMethods, PyCode, PyComplex, PyDict, PyDictMethods, PyInt,
+        PyIterator, PyModule, PyNone, PyTuple, PyTupleMethods, PyType, PyTypeMethods,
     },
     wrap_pyfunction,
 };
@@ -1184,6 +1184,223 @@ fn get_license_key(email: String) -> PyResult<()> {
         .map_err(exceptions::PyConnectionError::new_err)
 }
 
+fn append_fingerprint_part(out: &mut Vec<u8>, bytes: &[u8]) {
+    out.extend_from_slice(&(bytes.len() as u64).to_le_bytes());
+    out.extend_from_slice(bytes);
+}
+
+fn append_python_identity(value: &Bound<'_, PyAny>, out: &mut Vec<u8>) -> PyResult<()> {
+    out.push(b'I');
+    let type_name = value
+        .get_type()
+        .fully_qualified_name()?
+        .extract::<String>()?;
+    append_fingerprint_part(out, type_name.as_bytes());
+    out.extend_from_slice(&(value.as_ptr() as usize as u64).to_le_bytes());
+    Ok(())
+}
+
+fn marshal_python_value(value: &Bound<'_, PyAny>) -> PyResult<Vec<u8>> {
+    PyModule::import(value.py(), "marshal")?
+        .getattr("dumps")?
+        .call1((value,))?
+        .cast_into::<PyBytes>()
+        .map(|bytes| bytes.as_bytes().to_vec())
+        .map_err(Into::into)
+}
+
+fn normalize_python_code<'py>(code: &Bound<'py, PyCode>) -> PyResult<Option<Bound<'py, PyCode>>> {
+    if !code.hasattr("replace")? {
+        // CodeType.replace was added in Python 3.8. On Python 3.7 we retain
+        // identity-only matching rather than making callback registration fail.
+        return Ok(None);
+    }
+
+    let constants = code.getattr("co_consts")?.cast_into::<PyTuple>()?;
+    let mut normalized_constants = Vec::with_capacity(constants.len());
+    for constant in constants {
+        if let Ok(nested_code) = constant.cast::<PyCode>() {
+            let Some(normalized) = normalize_python_code(nested_code)? else {
+                return Ok(None);
+            };
+            normalized_constants.push(normalized.into_any().unbind());
+        } else {
+            normalized_constants.push(constant.unbind());
+        }
+    }
+
+    let kwargs = PyDict::new(code.py());
+    kwargs.set_item("co_consts", PyTuple::new(code.py(), normalized_constants)?)?;
+    kwargs.set_item("co_filename", "")?;
+    kwargs.set_item("co_firstlineno", 1)?;
+    if code.hasattr("co_linetable")? {
+        kwargs.set_item("co_linetable", PyBytes::new(code.py(), &[]))?;
+    } else if code.hasattr("co_lnotab")? {
+        kwargs.set_item("co_lnotab", PyBytes::new(code.py(), &[]))?;
+    }
+    Ok(Some(
+        code.call_method("replace", (), Some(&kwargs))?
+            .cast_into::<PyCode>()?,
+    ))
+}
+
+fn append_python_code_fingerprint(code: &Bound<'_, PyCode>, out: &mut Vec<u8>) -> PyResult<()> {
+    if let Some(normalized) = normalize_python_code(code)? {
+        out.push(b'C');
+        append_fingerprint_part(out, &marshal_python_value(normalized.as_any())?);
+    } else {
+        append_python_identity(code.as_any(), out)?;
+    }
+    Ok(())
+}
+
+fn append_python_value_fingerprint(value: &Bound<'_, PyAny>, out: &mut Vec<u8>) -> PyResult<()> {
+    if let Ok(code) = value.cast_exact::<PyCode>() {
+        return append_python_code_fingerprint(code, out);
+    }
+
+    match marshal_python_value(value) {
+        Ok(marshaled) => {
+            out.push(b'V');
+            append_fingerprint_part(out, &marshaled);
+            return Ok(());
+        }
+        Err(error) if error.is_instance_of::<exceptions::PyValueError>(value.py()) => {}
+        Err(error) => return Err(error),
+    }
+
+    // marshal deliberately supports only simple Python values. User-defined
+    // values fall back to identity instead of relying on potentially misleading
+    // pickle implementations.
+    append_python_identity(value, out)
+}
+
+fn append_optional_python_value(
+    callable: &Bound<'_, PyAny>,
+    attribute: &str,
+    out: &mut Vec<u8>,
+) -> PyResult<()> {
+    append_fingerprint_part(out, attribute.as_bytes());
+    if let Some(value) = callable.getattr_opt(attribute)? {
+        out.push(1);
+        let mut value_fingerprint = Vec::new();
+        append_python_value_fingerprint(&value, &mut value_fingerprint)?;
+        append_fingerprint_part(out, &value_fingerprint);
+    } else {
+        out.push(0);
+    }
+    Ok(())
+}
+
+fn append_closure_fingerprint(callable: &Bound<'_, PyAny>, out: &mut Vec<u8>) -> PyResult<()> {
+    append_fingerprint_part(out, b"__closure__");
+    let Some(closure) = callable.getattr_opt("__closure__")? else {
+        out.push(0);
+        return Ok(());
+    };
+    if closure.is_none() {
+        out.push(0);
+        return Ok(());
+    }
+
+    let closure = closure.cast::<PyTuple>()?;
+    out.push(1);
+    out.extend_from_slice(&(closure.len() as u64).to_le_bytes());
+    for cell in closure {
+        match cell.getattr("cell_contents") {
+            Ok(value) => {
+                out.push(1);
+                let mut value_fingerprint = Vec::new();
+                append_python_value_fingerprint(&value, &mut value_fingerprint)?;
+                append_fingerprint_part(out, &value_fingerprint);
+            }
+            Err(error) if error.is_instance_of::<exceptions::PyValueError>(cell.py()) => {
+                out.push(0)
+            }
+            Err(error) => return Err(error),
+        }
+    }
+    Ok(())
+}
+
+fn append_python_callable_fingerprint(
+    callable: &Bound<'_, PyAny>,
+    out: &mut Vec<u8>,
+    depth: usize,
+) -> PyResult<()> {
+    if depth > 16 {
+        return append_python_identity(callable, out);
+    }
+
+    if let Some(code) = callable.getattr_opt("__code__")? {
+        let code = code.cast::<PyCode>()?;
+        out.push(b'P');
+        append_python_code_fingerprint(code, out)?;
+
+        append_fingerprint_part(out, b"__globals__");
+        if let Some(globals) = callable.getattr_opt("__globals__")? {
+            out.push(1);
+            append_python_identity(&globals, out)?;
+        } else {
+            out.push(0);
+        }
+
+        append_optional_python_value(callable, "__defaults__", out)?;
+        append_optional_python_value(callable, "__kwdefaults__", out)?;
+        append_closure_fingerprint(callable, out)?;
+        return Ok(());
+    }
+
+    if let (Some(function), Some(instance)) = (
+        callable.getattr_opt("__func__")?,
+        callable.getattr_opt("__self__")?,
+    ) {
+        out.push(b'M');
+        let mut function_fingerprint = Vec::new();
+        append_python_callable_fingerprint(&function, &mut function_fingerprint, depth + 1)?;
+        append_fingerprint_part(out, &function_fingerprint);
+        append_python_identity(&instance, out)?;
+        return Ok(());
+    }
+
+    // Builtins and arbitrary callable instances have no generally useful
+    // structural definition. Exact identity is the conservative fallback.
+    append_python_identity(callable, out)
+}
+
+fn python_callable_fingerprint(callable: &Bound<'_, PyAny>) -> PyResult<Vec<u8>> {
+    let mut out = Vec::new();
+    append_python_callable_fingerprint(callable, &mut out, 0)?;
+    Ok(out)
+}
+
+fn python_evaluation_fingerprint(eval: &Bound<'_, PyAny>) -> PyResult<Vec<u8>> {
+    let dict = eval
+        .cast::<PyDict>()
+        .map_err(|_| exceptions::PyTypeError::new_err("eval must be a dictionary"))?;
+    let mut out = Vec::new();
+    for key in PythonEvalSpec::ALLOWED_KEYS {
+        append_fingerprint_part(&mut out, key.as_bytes());
+        if let Some(value) = dict.get_item(*key)? {
+            out.push(1);
+            let value_fingerprint = if matches!(
+                *key,
+                "float" | "complex" | "decimal" | "decimal_complex" | "constant"
+            ) {
+                python_callable_fingerprint(&value)?
+            } else {
+                let mut fingerprint = Vec::new();
+                append_python_value_fingerprint(&value, &mut fingerprint)?;
+                fingerprint
+            };
+            append_fingerprint_part(&mut out, &value_fingerprint);
+        } else {
+            out.push(0);
+        }
+    }
+    Ok(out)
+}
+
 #[pyfunction(name = "S", signature = (*names,is_symmetric=None,is_antisymmetric=None,is_cyclesymmetric=None,is_linear=None,is_flat=None,is_scalar=None,is_real=None,is_integer=None,is_positive=None,tags=None,aliases=None,normalization=None,print=None,derivative=None,series=None,eval=None,data=None))]
 /// Create new symbols from `names`. Symbols can have attributes,
 /// such as symmetries. If no attributes
@@ -1285,10 +1502,11 @@ fn get_license_key(email: String) -> PyResult<()> {
 ///     A list of tags to associate with the symbol.
 /// aliases: Sequence[str] | None = None
 ///     A list of aliases to associate with the symbol.
-/// normalization : Transformer | None
-///     A transformer that is called after every normalization. Note that the symbol
-///     name cannot be used in the transformer as this will lead to a definition of the
-///     symbol. Use a wildcard with the same attributes instead.
+/// normalization : Transformer | Callable[[Expression], Expression] | None
+///     A transformer or callable that is applied after every normalization. A callable
+///     receives the normalized function and returns its replacement. The symbol name
+///     cannot be used in a transformer, as this would define the symbol recursively;
+///     use a wildcard with the same attributes instead.
 /// print : Callable[..., str | None] | None:
 ///     A function that is called when printing the variable/function, which is provided as its first argument.
 ///     This function should return a string, or `None` if the default print function should be used.
@@ -1333,7 +1551,7 @@ fn symbol_shorthand(
     is_positive: Option<bool>,
     tags: Option<Vec<String>>,
     aliases: Option<Vec<String>>,
-    normalization: Option<PythonTransformer>,
+    normalization: Option<PythonNormalization>,
     print: Option<Py<PyAny>>,
     derivative: Option<Py<PyAny>>,
     series: Option<Py<PyAny>>,
@@ -1904,6 +2122,92 @@ tags: Sequence[str] | None = None
         }
 }
 
+#[cfg(test)]
+mod callback_fingerprint_tests {
+    use pyo3::types::{PyCode, PyCodeInput, PyCodeMethods};
+
+    use super::*;
+
+    #[test]
+    fn ignores_notebook_source_locations() {
+        Python::initialize();
+        Python::attach(|py| {
+            let globals = PyDict::new(py);
+            let first = PyCode::compile(
+                py,
+                c"lambda x, _mode, **kwargs: f'a = {x}'",
+                c"<ipython-input-1>",
+                PyCodeInput::Eval,
+            )?
+            .run(Some(&globals), None)?;
+            let repeated = PyCode::compile(
+                py,
+                c"\n\n(       lambda x, _mode, **kwargs: f'a = {x}')",
+                c"<ipython-input-2>",
+                PyCodeInput::Eval,
+            )?
+            .run(Some(&globals), None)?;
+
+            assert_eq!(
+                python_callable_fingerprint(&first)?,
+                python_callable_fingerprint(&repeated)?
+            );
+
+            // Nested code objects, such as comprehensions, carry their own
+            // filename and line metadata and must be normalized recursively.
+            let nested = PyCode::compile(
+                py,
+                c"lambda values: [value + 1 for value in values]",
+                c"<ipython-input-3>",
+                PyCodeInput::Eval,
+            )?
+            .run(Some(&globals), None)?;
+            let nested_repeated = PyCode::compile(
+                py,
+                c"\n\nlambda values: [value + 1 for value in values]",
+                c"<ipython-input-4>",
+                PyCodeInput::Eval,
+            )?
+            .run(Some(&globals), None)?;
+            assert_eq!(
+                python_callable_fingerprint(&nested)?,
+                python_callable_fingerprint(&nested_repeated)?
+            );
+            Ok::<_, PyErr>(())
+        })
+        .unwrap();
+    }
+
+    #[test]
+    fn detects_code_and_closure_changes() {
+        Python::initialize();
+        Python::attach(|py| {
+            let globals = PyDict::new(py);
+            let first = py.eval(c"lambda x: x + 1", Some(&globals), None)?;
+            let changed = py.eval(c"lambda x: x + 2", Some(&globals), None)?;
+            assert_ne!(
+                python_callable_fingerprint(&first)?,
+                python_callable_fingerprint(&changed)?
+            );
+
+            let factory = py.eval(c"lambda value: (lambda x: x + value)", Some(&globals), None)?;
+            let closure_one = factory.call1((1,))?;
+            let closure_one_again = factory.call1((1,))?;
+            let closure_two = factory.call1((2,))?;
+            assert_eq!(
+                python_callable_fingerprint(&closure_one)?,
+                python_callable_fingerprint(&closure_one_again)?
+            );
+            assert_ne!(
+                python_callable_fingerprint(&closure_one)?,
+                python_callable_fingerprint(&closure_two)?
+            );
+            Ok::<_, PyErr>(())
+        })
+        .unwrap();
+    }
+}
+
 #[cfg(feature = "python_stubgen")]
 submit! {
 PyFunctionInfo {
@@ -1985,7 +2289,7 @@ PyFunctionInfo {
                     name: "normalization",
                     kind: ParameterKind::PositionalOrKeyword,
                     default: ParameterDefault::Expr(NONE_ARG),
-                    type_info: || Option::<PythonTransformer>::type_input(),
+                    type_info: || Option::<PythonNormalization>::type_input(),
                 },
                 ParameterInfo {
                     name: "print",
@@ -2118,10 +2422,11 @@ tags: Sequence[str] | None = None
     A list of tags to associate with the symbol.
 aliases: Sequence[str] | None = None
     A list of aliases to associate with the symbol.
-normalization : Transformer | None
-    A transformer that is called after every normalization. Note that the symbol
-    name cannot be used in the transformer as this will lead to a definition of the
-    symbol. Use a wildcard with the same attributes instead.
+normalization : Transformer | Callable[[Expression], Expression] | None
+    A transformer or callable that is applied after every normalization. A callable
+    receives the normalized function and returns its replacement. The symbol name
+    cannot be used in a transformer, as this would define the symbol recursively;
+    use a wildcard with the same attributes instead.
 print : Callable[..., str | None] | None:
     A function that is called when printing the variable/function, which is provided as its first argument.
     This function should return a string, or `None` if the default print function should be used.
