@@ -1223,15 +1223,37 @@ impl State {
         Ok(())
     }
 
+    /// Get the dependent symbols of a set of symbols.
+    fn get_dependent_symbols(mut symbols: HashSet<Symbol>) -> HashSet<Symbol> {
+        let mut data_symbols = HashSet::new();
+        for x in symbols.iter() {
+            x.get_data().get_symbols(&mut data_symbols);
+        }
+
+        let mut new_data_symbols = HashSet::new();
+        while !data_symbols.is_empty() {
+            for x in data_symbols.iter() {
+                x.get_data().get_symbols(&mut new_data_symbols);
+            }
+
+            symbols.extend(data_symbols.drain());
+            (data_symbols, new_data_symbols) = (new_data_symbols, data_symbols);
+        }
+
+        symbols
+    }
+
     /// Write the state of a part of the symbol table to a binary stream.
     #[inline(always)]
     pub fn export_partial<W: Write>(
         dest: &mut W,
-        symbols: &HashSet<Symbol>,
+        mut symbols: HashSet<Symbol>,
     ) -> Result<(), std::io::Error> {
         if ID_TO_STR.len() == 0 {
             Self::initialize_state();
         }
+
+        symbols = Self::get_dependent_symbols(symbols);
 
         dest.write_u32::<LittleEndian>(SYMBOLICA_MAGIC)?;
         dest.write_u16::<LittleEndian>(EXPORT_FORMAT_VERSION)?;
