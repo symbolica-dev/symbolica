@@ -155,7 +155,7 @@ mod test {
         r_f64.evaluate(&[0.1], &mut res);
         assert_eq!(res[0], 0.2727397524895022);
 
-        let jit_compiled = r_f64
+        let mut jit_compiled = r_f64
             .jit_compile(JITCompilationSettings::default())
             .unwrap();
 
@@ -513,28 +513,17 @@ mod test {
                 .all(|external| { external.sub_evaluator.is_some() && external.imp.is_none() })
         );
 
-        let compiled = evaluator
+        let mut compiled = evaluator
             .jit_compile::<f64>(JITCompilationSettings::default())
             .unwrap();
         let mut out = [0.];
         compiled.evaluate(&[3.], &mut out);
         assert_eq!(out, [39.]);
 
-        std::thread::scope(|scope| {
-            for (input, expected) in [(0., 6.), (1., 9.), (2., 18.), (3., 39.)] {
-                let compiled = &compiled;
-                scope.spawn(move || {
-                    let mut out = [0.];
-                    compiled.evaluate(&[input], &mut out);
-                    assert_eq!(out, [expected]);
-                });
-            }
-        });
-
         #[cfg(feature = "bincode")]
         {
             let bytes = bincode::encode_to_vec(&compiled, bincode::config::standard()).unwrap();
-            let (decoded, _) = bincode::decode_from_slice::<
+            let (mut decoded, _) = bincode::decode_from_slice::<
                 crate::evaluate::JITCompiledEvaluator<f64>,
                 _,
             >(&bytes, bincode::config::standard())
@@ -543,7 +532,7 @@ mod test {
             assert_eq!(out, [78.]);
         }
 
-        let compiled = evaluator
+        let mut compiled = evaluator
             .jit_compile::<Complex<f64>>(JITCompilationSettings::default())
             .unwrap();
         let mut out = [Complex::new(0., 0.)];
@@ -824,7 +813,7 @@ mod test {
         let mut eval_re = eval.clone().map_coeff(&|x| x.re.to_f64());
         eval_re.evaluate(&[0.5], &mut res);
 
-        let jit_eval_re = eval_re
+        let mut jit_eval_re = eval_re
             .jit_compile(
                 JITCompilationSettings::new()
                     .direct_translation(true)
@@ -842,7 +831,7 @@ mod test {
             .map_coeff(&|x| Complex::new(x.re.to_f64(), x.im.to_f64()));
         eval_c.evaluate(&[Complex::new(0.5, 1.2)], &mut res);
 
-        let jit_eval_c = eval
+        let mut jit_eval_c = eval
             .jit_compile::<Complex<f64>>(JITCompilationSettings::default())
             .unwrap();
         let mut jit_res = [Complex::new(0., 0.); 1];

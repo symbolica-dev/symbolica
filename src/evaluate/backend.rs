@@ -577,8 +577,10 @@ pub trait JITCompiledNumber: Sized {
         settings: JITCompilationSettings,
     ) -> Result<JITCompiledEvaluator<Self>, String>;
 
-    /// Evaluate one row. Sealed JIT code is immutable, so this operation must support shared use.
-    fn evaluate(eval: &JITCompiledEvaluator<Self>, args: &[Self], out: &mut [Self]);
+    fn evaluate(eval: &mut JITCompiledEvaluator<Self>, args: &[Self], out: &mut [Self]);
+
+    #[doc(hidden)]
+    fn into_external_function(eval: JITCompiledEvaluator<Self>) -> Box<dyn ExternalFunction<Self>>;
 
     fn batch_evaluate(
         eval: &mut JITCompiledEvaluator<Self>,
@@ -593,7 +595,7 @@ fn jit_compile_sub_evaluators<T>(
     settings: &JITCompilationSettings,
 ) -> Result<(), String>
 where
-    T: JITCompiledNumber + Clone + Default + Send + Sync + 'static,
+    T: JITCompiledNumber + Clone,
 {
     for external in external_functions {
         if external.imp.is_some() {
@@ -609,11 +611,7 @@ where
             .map_err(|e| format!("Could not JIT-compile sub-evaluator '{}': {e}", external))?;
         // Keep the source sub-evaluator on the container: serialization stores that definition,
         // while this generated callback owns the compiled evaluator used at runtime.
-        external.imp = Some(Box::new(move |args: &[T]| {
-            let mut output = T::default();
-            compiled.evaluate(args, std::slice::from_mut(&mut output));
-            output
-        }));
+        external.imp = Some(T::into_external_function(compiled));
     }
 
     Ok(())
@@ -686,8 +684,12 @@ impl JITCompiledNumber for f64 {
     }
 
     #[inline(always)]
-    fn evaluate(eval: &JITCompiledEvaluator<Self>, args: &[Self], out: &mut [Self]) {
+    fn evaluate(eval: &mut JITCompiledEvaluator<Self>, args: &[Self], out: &mut [Self]) {
         eval.code.evaluate(args, out);
+    }
+
+    fn into_external_function(eval: JITCompiledEvaluator<Self>) -> Box<dyn ExternalFunction<Self>> {
+        Box::new(move |args: &[Self]| eval.code.evaluate_single(args))
     }
 
     #[inline(always)]
@@ -735,13 +737,7 @@ impl<T: serde::Serialize> serde::Serialize for JITCompiledEvaluator<T> {
 #[cfg(feature = "serde")]
 impl<
     'de,
-    T: JITCompiledNumber
-        + EvaluationDomain
-        + symjit::Element
-        + Copy
-        + Send
-        + Sync
-        + serde::Deserialize<'de>,
+    T: JITCompiledNumber + EvaluationDomain + symjit::Element + Copy + serde::Deserialize<'de>,
 > serde::Deserialize<'de> for JITCompiledEvaluator<T>
 {
     fn deserialize<D: serde::Deserializer<'de>>(deserializer: D) -> Result<Self, D::Error> {
@@ -764,10 +760,8 @@ impl<T: bincode::Encode> bincode::Encode for JITCompiledEvaluator<T> {
 }
 
 #[cfg(feature = "bincode")]
-impl<
-    Context,
-    T: JITCompiledNumber + EvaluationDomain + Clone + Default + Send + Sync + bincode::Decode<Context>,
-> bincode::Decode<Context> for JITCompiledEvaluator<T>
+impl<Context, T: JITCompiledNumber + EvaluationDomain + Clone + bincode::Decode<Context>>
+    bincode::Decode<Context> for JITCompiledEvaluator<T>
 {
     fn decode<D: bincode::de::Decoder<Context = Context>>(
         decoder: &mut D,
@@ -779,11 +773,8 @@ impl<
 }
 
 #[cfg(feature = "bincode")]
-impl<
-    'de,
-    Context,
-    T: JITCompiledNumber + EvaluationDomain + Clone + Default + Send + Sync + bincode::Decode<Context>,
-> bincode::BorrowDecode<'de, Context> for JITCompiledEvaluator<T>
+impl<'de, Context, T: JITCompiledNumber + EvaluationDomain + Clone + bincode::Decode<Context>>
+    bincode::BorrowDecode<'de, Context> for JITCompiledEvaluator<T>
 {
     fn borrow_decode<D: bincode::de::BorrowDecoder<'de, Context = Context>>(
         decoder: &mut D,
@@ -793,9 +784,9 @@ impl<
 }
 
 impl<T: JITCompiledNumber> JITCompiledEvaluator<T> {
-    /// Evaluate the JIT-compiled code. A compiled evaluator can be shared across concurrent calls.
+    /// Evaluate the JIT-compiled code.
     #[inline(always)]
-    pub fn evaluate(&self, args: &[T], out: &mut [T]) {
+    pub fn evaluate(&mut self, args: &[T], out: &mut [T]) {
         T::evaluate(self, args, out);
     }
 
@@ -805,7 +796,7 @@ impl<T: JITCompiledNumber> JITCompiledEvaluator<T> {
     }
 }
 
-impl<T: JITCompiledNumber + Clone + Default + Send + Sync + 'static> JITCompiledEvaluator<T> {
+impl<T: JITCompiledNumber + Clone> JITCompiledEvaluator<T> {
     #[allow(dead_code)]
     fn load(
         compressed_ir: Vec<u8>,
@@ -927,11 +918,15 @@ impl JITCompiledNumber for wide::f64x4 {
 
     #[inline(always)]
     fn evaluate(
-        eval: &JITCompiledEvaluator<wide::f64x4>,
+        eval: &mut JITCompiledEvaluator<wide::f64x4>,
         args: &[wide::f64x4],
         out: &mut [wide::f64x4],
     ) {
         eval.code.evaluate(args, out);
+    }
+
+    fn into_external_function(eval: JITCompiledEvaluator<Self>) -> Box<dyn ExternalFunction<Self>> {
+        Box::new(move |args: &[Self]| eval.code.evaluate_single(args))
     }
 
     #[inline(always)]
@@ -1107,13 +1102,21 @@ impl JITCompiledNumber for Complex<f64> {
     /// Evaluate the compiled code with double-precision floating point numbers.
     #[inline(always)]
     fn evaluate(
-        eval: &JITCompiledEvaluator<Complex<f64>>,
+        eval: &mut JITCompiledEvaluator<Complex<f64>>,
         args: &[Complex<f64>],
         out: &mut [Complex<f64>],
     ) {
         let args: &[symjit::Complex<f64>] = unsafe { std::mem::transmute(args) };
         let out: &mut [symjit::Complex<f64>] = unsafe { std::mem::transmute(out) };
         eval.code.evaluate(args, out);
+    }
+
+    fn into_external_function(eval: JITCompiledEvaluator<Self>) -> Box<dyn ExternalFunction<Self>> {
+        Box::new(move |args: &[Self]| {
+            let args: &[symjit::Complex<f64>] = unsafe { std::mem::transmute(args) };
+            let result = eval.code.evaluate_single(args);
+            Complex::new(result.re, result.im)
+        })
     }
 
     #[inline(always)]
@@ -1239,13 +1242,21 @@ impl JITCompiledNumber for Complex<wide::f64x4> {
 
     #[inline(always)]
     fn evaluate(
-        eval: &JITCompiledEvaluator<Self>,
+        eval: &mut JITCompiledEvaluator<Self>,
         args: &[Complex<wide::f64x4>],
         out: &mut [Complex<wide::f64x4>],
     ) {
         let args: &[symjit::Complex<wide::f64x4>] = unsafe { std::mem::transmute(args) };
         let out: &mut [symjit::Complex<wide::f64x4>] = unsafe { std::mem::transmute(out) };
         eval.code.evaluate(args, out);
+    }
+
+    fn into_external_function(eval: JITCompiledEvaluator<Self>) -> Box<dyn ExternalFunction<Self>> {
+        Box::new(move |args: &[Self]| {
+            let args: &[symjit::Complex<wide::f64x4>] = unsafe { std::mem::transmute(args) };
+            let result = eval.code.evaluate_single(args);
+            Complex::new(result.re, result.im)
+        })
     }
 
     #[inline(always)]
