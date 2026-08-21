@@ -542,6 +542,47 @@ mod test {
 
     #[cfg(feature = "native_code_generation")]
     #[test]
+    fn jit_compiles_repeated_nested_sub_evaluator_calls() {
+        let mut fn_map = FunctionMap::new();
+        fn_map
+            .add_function_no_inline(symbol!("f"), vec![symbol!("y")], parse!("3 + y^2 + g(y)"))
+            .unwrap();
+        fn_map
+            .add_function_no_inline(symbol!("g"), vec![symbol!("z")], parse!("z"))
+            .unwrap();
+
+        let evaluator = parse!("f(x) + f(2)")
+            .evaluator(&[parse!("x")])
+            .function_map(fn_map)
+            .build()
+            .unwrap();
+
+        let mut evaluator = evaluator.map_coeff(&|x| x.to_real().unwrap().into());
+        let mut out = [0.];
+        evaluator.evaluate(&[5.], &mut out);
+        assert_eq!(out, [42.]);
+
+        let mut compiled = evaluator
+            .jit_compile(JITCompilationSettings::default())
+            .unwrap();
+        compiled.evaluate(&[5.], &mut out);
+        assert_eq!(out, [42.]);
+
+        #[cfg(feature = "bincode")]
+        {
+            let bytes = bincode::encode_to_vec(&compiled, bincode::config::standard()).unwrap();
+            let (mut decoded, _) = bincode::decode_from_slice::<
+                crate::evaluate::JITCompiledEvaluator<f64>,
+                _,
+            >(&bytes, bincode::config::standard())
+            .unwrap();
+            decoded.evaluate(&[7.], &mut out);
+            assert_eq!(out, [68.]);
+        }
+    }
+
+    #[cfg(feature = "native_code_generation")]
+    #[test]
     fn cpp_asm_export_includes_nested_sub_evaluators() {
         fn assert_asm_wrapper(source: &str, name: &str, number_type: &str) {
             let signature = format!("__attribute__((noinline)) {number_type} {name}(");

@@ -535,15 +535,11 @@ fn translate_to_symjit(
             Instruction::Fun(lhs, fun, is_real) => {
                 let (name, tags, args) = *fun;
 
-                let mut name = name.get_ascii_name().ok_or_else(|| {
+                let name = function_export_name(name, &tags).ok_or_else(|| {
                     format!(
                         "No ASCII name for symbol {name} available, which is needed for exporting"
                     )
                 })?;
-
-                for t in tags {
-                    name += &format!("_{}", t);
-                }
 
                 translator
                     .append_fun(&slot(lhs), &name, &slot_list(&args), is_real)
@@ -559,6 +555,44 @@ fn translate_to_symjit(
     }
 
     Ok(translator)
+}
+
+fn function_export_name(symbol: crate::atom::Symbol, tags: &[String]) -> Option<String> {
+    let mut name = symbol.get_ascii_name()?;
+    for tag in tags {
+        name.push('_');
+        name.push_str(tag);
+    }
+    Some(name)
+}
+
+/// SymJIT's optimizing translator passes external-function arguments through shared slots. With
+/// multiple call sites, writes to those slots can be reordered across calls. Direct translation
+/// preserves the instruction order and is therefore required in that case.
+fn requires_direct_translation<T>(
+    instructions: &[Instruction],
+    external_functions: &[ExternalFunctionContainer<T>],
+) -> bool {
+    let external_names = external_functions
+        .iter()
+        .filter(|external| external.constant_index.is_none())
+        .map(|external| external.export_name())
+        .collect::<std::collections::HashSet<_>>();
+
+    instructions
+        .iter()
+        .filter(|instruction| {
+            let Instruction::Fun(_, function, _) = instruction else {
+                return false;
+            };
+            let (symbol, tags, _) = &**function;
+            function_export_name(*symbol, tags)
+                .as_ref()
+                .is_some_and(|name| external_names.contains(name.as_str()))
+        })
+        .take(2)
+        .count()
+        > 1
 }
 
 pub trait JITCompiledNumber: Sized {
@@ -662,10 +696,14 @@ impl JITCompiledNumber for f64 {
 
         let mut external_functions = external_functions.to_vec();
         jit_compile_sub_evaluators(&mut external_functions, &settings)?;
+        let force_direct = requires_direct_translation(&instructions, &external_functions);
 
         let mut config = Config::default();
         config.set_complex(false);
         settings.apply_to_config(&mut config)?;
+        if force_direct {
+            config.set_dicect(true);
+        }
         config.set_defuns(Self::convert_external_functions(&external_functions)?);
 
         let mut translator = translate_to_symjit(instructions, constants, param_count, config)?;
@@ -894,11 +932,15 @@ impl JITCompiledNumber for wide::f64x4 {
     ) -> Result<JITCompiledEvaluator<Self>, String> {
         let mut external_functions = external_functions.to_vec();
         jit_compile_sub_evaluators(&mut external_functions, &settings)?;
+        let force_direct = requires_direct_translation(&instructions, &external_functions);
 
         let mut config = Config::default();
         config.set_complex(false);
         config.set_simd(true);
         settings.apply_to_config(&mut config)?;
+        if force_direct {
+            config.set_dicect(true);
+        }
         config.set_defuns(Self::convert_external_functions(&external_functions)?);
 
         let mut translator = translate_to_symjit(instructions, constants, param_count, config)?;
@@ -1078,10 +1120,14 @@ impl JITCompiledNumber for Complex<f64> {
     ) -> Result<JITCompiledEvaluator<Complex<f64>>, String> {
         let mut external_functions = external_functions.to_vec();
         jit_compile_sub_evaluators(&mut external_functions, &settings)?;
+        let force_direct = requires_direct_translation(&instructions, &external_functions);
 
         let mut config = Config::default();
         config.set_complex(true);
         settings.apply_to_config(&mut config)?;
+        if force_direct {
+            config.set_dicect(true);
+        }
         config.set_defuns(Self::convert_external_functions(&external_functions)?);
 
         let mut translator = translate_to_symjit(instructions, constants, param_count, config)?;
@@ -1218,11 +1264,15 @@ impl JITCompiledNumber for Complex<wide::f64x4> {
     ) -> Result<JITCompiledEvaluator<Self>, String> {
         let mut external_functions = external_functions.to_vec();
         jit_compile_sub_evaluators(&mut external_functions, &settings)?;
+        let force_direct = requires_direct_translation(&instructions, &external_functions);
 
         let mut config = Config::default();
         config.set_complex(true);
         config.set_simd(true);
         settings.apply_to_config(&mut config)?;
+        if force_direct {
+            config.set_dicect(true);
+        }
         config.set_defuns(Self::convert_external_functions(&external_functions)?);
 
         let mut translator = translate_to_symjit(instructions, constants, param_count, config)?;
