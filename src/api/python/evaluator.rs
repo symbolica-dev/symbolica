@@ -1,5 +1,304 @@
 use super::*;
 
+/// A portable instruction stream for evaluating an expression.
+#[cfg_attr(feature = "python_stubgen", gen_stub_pyclass)]
+#[pyclass(
+    from_py_object,
+    name = "EvaluatorInstructions",
+    module = "symbolica.core"
+)]
+#[derive(Clone)]
+pub struct PythonEvaluatorInstructions {
+    input_count: usize,
+    output_count: usize,
+    instructions: Vec<Instruction>,
+    temporary_count: usize,
+    constants: Vec<Complex<Rational>>,
+    sub_evaluators: Vec<PythonEvaluatorSubEvaluator>,
+}
+
+/// A non-inlined function evaluator referenced by an instruction stream.
+#[cfg_attr(feature = "python_stubgen", gen_stub_pyclass)]
+#[pyclass(
+    from_py_object,
+    name = "EvaluatorSubEvaluator",
+    module = "symbolica.core"
+)]
+#[derive(Clone)]
+pub struct PythonEvaluatorSubEvaluator {
+    function: Symbol,
+    tags: Vec<String>,
+    input_count: usize,
+    output_count: usize,
+    evaluator: PythonEvaluatorInstructions,
+}
+
+impl From<ExportedInstructions<Complex<Rational>>> for PythonEvaluatorInstructions {
+    fn from(exported: ExportedInstructions<Complex<Rational>>) -> Self {
+        Self {
+            input_count: exported.input_count,
+            output_count: exported.output_count,
+            instructions: exported.instructions,
+            temporary_count: exported.temporary_count,
+            constants: exported.constants,
+            sub_evaluators: exported
+                .sub_evaluators
+                .into_iter()
+                .map(PythonEvaluatorSubEvaluator::from)
+                .collect(),
+        }
+    }
+}
+
+impl From<ExportedSubEvaluator<Complex<Rational>>> for PythonEvaluatorSubEvaluator {
+    fn from(sub_evaluator: ExportedSubEvaluator<Complex<Rational>>) -> Self {
+        Self {
+            function: sub_evaluator.symbol,
+            tags: sub_evaluator.tags,
+            input_count: sub_evaluator.input_count,
+            output_count: sub_evaluator.output_count,
+            evaluator: sub_evaluator.instructions.into(),
+        }
+    }
+}
+
+impl PythonEvaluatorInstructions {
+    fn instruction_tuples<'py>(&self, py: Python<'py>) -> PyResult<Vec<Bound<'py, PyTuple>>> {
+        fn slot_to_object(slot: &Slot) -> (&str, usize) {
+            match slot {
+                Slot::Const(x) => ("const", *x),
+                Slot::Param(x) => ("param", *x),
+                Slot::Temp(x) => ("temp", *x),
+                Slot::Out(x) => ("out", *x),
+            }
+        }
+
+        let mut result = vec![];
+        for instruction in &self.instructions {
+            match instruction {
+                Instruction::Add(out, args, real_args) | Instruction::Mul(out, args, real_args) => {
+                    result.push(PyTuple::new(
+                        py,
+                        [
+                            if matches!(instruction, Instruction::Add(_, _, _)) {
+                                "add"
+                            } else {
+                                "mul"
+                            }
+                            .into_pyobject(py)?
+                            .as_any(),
+                            slot_to_object(out).into_pyobject(py)?.as_any(),
+                            args.iter()
+                                .map(slot_to_object)
+                                .collect::<Vec<_>>()
+                                .into_pyobject(py)?
+                                .as_any(),
+                            real_args.into_pyobject(py)?.as_any(),
+                        ],
+                    )?);
+                }
+                Instruction::Pow(out, base, exponent, is_real) => {
+                    result.push(PyTuple::new(
+                        py,
+                        [
+                            "pow".into_pyobject(py)?.as_any(),
+                            slot_to_object(out).into_pyobject(py)?.as_any(),
+                            slot_to_object(base).into_pyobject(py)?.as_any(),
+                            exponent.into_pyobject(py)?.as_any(),
+                            is_real.into_pyobject(py)?.as_any(),
+                        ],
+                    )?);
+                }
+                Instruction::Powf(out, base, exponent, is_real) => {
+                    result.push(PyTuple::new(
+                        py,
+                        [
+                            "powf".into_pyobject(py)?.as_any(),
+                            slot_to_object(out).into_pyobject(py)?.as_any(),
+                            slot_to_object(base).into_pyobject(py)?.as_any(),
+                            slot_to_object(exponent).into_pyobject(py)?.as_any(),
+                            is_real.into_pyobject(py)?.as_any(),
+                        ],
+                    )?);
+                }
+                Instruction::Fun(out, function, is_real) => {
+                    let (name, tags, args) = &**function;
+                    result.push(PyTuple::new(
+                        py,
+                        [
+                            "fun".into_pyobject(py)?.as_any(),
+                            slot_to_object(out).into_pyobject(py)?.as_any(),
+                            PythonExpression::from(Atom::var(*name))
+                                .into_pyobject(py)?
+                                .as_any(),
+                            tags.into_pyobject(py)?.as_any(),
+                            args.iter()
+                                .map(slot_to_object)
+                                .collect::<Vec<_>>()
+                                .into_pyobject(py)?
+                                .as_any(),
+                            is_real.into_pyobject(py)?.as_any(),
+                        ],
+                    )?);
+                }
+                Instruction::Assign(out, input) => {
+                    result.push(PyTuple::new(
+                        py,
+                        [
+                            "assign".into_pyobject(py)?.as_any(),
+                            slot_to_object(out).into_pyobject(py)?.as_any(),
+                            slot_to_object(input).into_pyobject(py)?.as_any(),
+                        ],
+                    )?);
+                }
+                Instruction::IfElse(condition, label) => {
+                    result.push(PyTuple::new(
+                        py,
+                        [
+                            "if_else".into_pyobject(py)?.as_any(),
+                            slot_to_object(condition).into_pyobject(py)?.as_any(),
+                            label.into_pyobject(py)?.as_any(),
+                        ],
+                    )?);
+                }
+                Instruction::Join(out, condition, if_true, if_false) => {
+                    result.push(PyTuple::new(
+                        py,
+                        [
+                            "join".into_pyobject(py)?.as_any(),
+                            slot_to_object(out).into_pyobject(py)?.as_any(),
+                            slot_to_object(condition).into_pyobject(py)?.as_any(),
+                            slot_to_object(if_true).into_pyobject(py)?.as_any(),
+                            slot_to_object(if_false).into_pyobject(py)?.as_any(),
+                        ],
+                    )?);
+                }
+                Instruction::Goto(label) => {
+                    result.push(PyTuple::new(
+                        py,
+                        [
+                            "goto".into_pyobject(py)?.as_any(),
+                            label.into_pyobject(py)?.as_any(),
+                        ],
+                    )?);
+                }
+                Instruction::Label(label) => {
+                    result.push(PyTuple::new(
+                        py,
+                        [
+                            "label".into_pyobject(py)?.as_any(),
+                            label.into_pyobject(py)?.as_any(),
+                        ],
+                    )?);
+                }
+            }
+        }
+        Ok(result)
+    }
+}
+
+#[cfg_attr(feature = "python_stubgen", gen_stub_pymethods)]
+#[cfg_attr(not(feature = "python_stubgen"), remove_gen_stub)]
+#[pymethods]
+impl PythonEvaluatorInstructions {
+    /// The number of input parameter values expected by this instruction stream.
+    #[getter]
+    fn input_count(&self) -> usize {
+        self.input_count
+    }
+
+    /// The number of output values produced by this instruction stream.
+    #[getter]
+    fn output_count(&self) -> usize {
+        self.output_count
+    }
+
+    /// The linear evaluation instructions.
+    #[getter]
+    #[gen_stub(override_return_type(type_repr = "list[tuple]"))]
+    fn instructions<'py>(&self, py: Python<'py>) -> PyResult<Vec<Bound<'py, PyTuple>>> {
+        self.instruction_tuples(py)
+    }
+
+    /// The number of temporary storage slots required by `instructions`.
+    #[getter]
+    fn temporary_count(&self) -> usize {
+        self.temporary_count
+    }
+
+    /// Exact constants referenced by `('const', index)` slots.
+    #[getter]
+    fn constants(&self) -> Vec<PythonExpression> {
+        self.constants
+            .iter()
+            .map(|constant| Atom::num(constant.clone()).into())
+            .collect()
+    }
+
+    /// Non-inlined function bodies referenced by `fun` instructions in this stream.
+    #[getter]
+    fn sub_evaluators(&self) -> Vec<PythonEvaluatorSubEvaluator> {
+        self.sub_evaluators.clone()
+    }
+
+    fn __repr__(&self) -> String {
+        format!(
+            "EvaluatorInstructions(input_count={}, output_count={}, instructions={}, temporary_count={}, constants={}, sub_evaluators={})",
+            self.input_count,
+            self.output_count,
+            self.instructions.len(),
+            self.temporary_count,
+            self.constants.len(),
+            self.sub_evaluators.len()
+        )
+    }
+}
+
+#[cfg_attr(feature = "python_stubgen", gen_stub_pymethods)]
+#[cfg_attr(not(feature = "python_stubgen"), remove_gen_stub)]
+#[pymethods]
+impl PythonEvaluatorSubEvaluator {
+    /// The function referenced by the calling `fun` instruction.
+    #[getter]
+    fn function(&self) -> PythonExpression {
+        Atom::var(self.function).into()
+    }
+
+    /// The tags used to distinguish this function implementation.
+    #[getter]
+    fn tags(&self) -> Vec<String> {
+        self.tags.clone()
+    }
+
+    /// The number of arguments expected by the sub-evaluator.
+    #[getter]
+    fn input_count(&self) -> usize {
+        self.input_count
+    }
+
+    /// The number of outputs produced by the sub-evaluator.
+    #[getter]
+    fn output_count(&self) -> usize {
+        self.output_count
+    }
+
+    /// The exported instruction body of this sub-evaluator.
+    #[getter]
+    fn evaluator(&self) -> PythonEvaluatorInstructions {
+        self.evaluator.clone()
+    }
+
+    fn __repr__(&self) -> String {
+        format!(
+            "EvaluatorSubEvaluator(function={}, tags={:?}, input_count={}, output_count={})",
+            Atom::var(self.function),
+            self.tags,
+            self.input_count,
+            self.output_count
+        )
+    }
+}
+
 /// An optimized evaluator for expressions.
 #[cfg_attr(feature = "python_stubgen", gen_stub_pyclass)]
 #[pyclass(from_py_object, name = "Evaluator", module = "symbolica.core")]
@@ -376,13 +675,13 @@ impl PythonExpressionEvaluator {
         }
     }
 
-    /// Return the instructions for efficiently evaluating the expression, the length of the list
-    /// of temporary variables, and the list of constants. This can be used to generate
-    /// code for the expression evaluation in any programming language.
+    /// Return a portable instruction representation for efficiently evaluating the expression.
+    /// This can be used to generate code for the expression evaluation in any programming
+    /// language.
     ///
     /// There are four lists that are used in the evaluation instructions:
     /// - `param`: the list of input parameters.
-    /// - `temp`: the list of temporary slots. The size of it is provided as the second return value.
+    /// - `temp`: the list of temporary slots. Its size is available as `temporary_count`.
     /// - `const`: the list of constants.
     /// - `out`: the list of outputs.
     ///
@@ -402,12 +701,13 @@ impl PythonExpressionEvaluator {
     /// --------
     ///
     /// >>> from symbolica import *
-    /// >>> (ins, m, c) = E('x^2+5/3+cos(x)').evaluator([S('x')]).get_instructions()
+    /// >>> exported = E('x^2+5/3+cos(x)').evaluator([S('x')]).get_instructions()
     /// >>>
-    /// >>> for x in ins:
+    /// >>> for x in exported.instructions:
     /// >>>     print(x)
-    /// >>> print('temp list length:', m)
-    /// >>> print('constants:', c)
+    /// >>> print('temp list length:', exported.temporary_count)
+    /// >>> print('constants:', exported.constants)
+    /// >>> print('sub-evaluators:', exported.sub_evaluators)
     ///
     /// yields
     ///
@@ -417,150 +717,14 @@ impl PythonExpressionEvaluator {
     /// ('add', ('out', 0), [('const', 0), ('out', 0), ('temp', 1)])
     /// temp list length: 2
     /// constants: [5/3]
+    /// sub-evaluators: []
     /// ```
-    fn get_instructions<'py>(
-        &self,
-        py: Python<'py>,
-    ) -> PyResult<(Vec<Bound<'py, PyTuple>>, usize, Vec<PythonExpression>)> {
-        let exported = self.eval_complex.export_instructions();
-
-        fn slot_to_object(slot: &Slot) -> (&str, usize) {
-            match slot {
-                Slot::Const(x) => ("const", *x),
-                Slot::Param(x) => ("param", *x),
-                Slot::Temp(x) => ("temp", *x),
-                Slot::Out(x) => ("out", *x),
-            }
-        }
-
-        let mut v = vec![];
-        for i in &exported.instructions {
-            match i {
-                Instruction::Add(o, s, real_args) | Instruction::Mul(o, s, real_args) => {
-                    v.push(PyTuple::new(
-                        py,
-                        [
-                            if matches!(i, Instruction::Add(_, _, _)) {
-                                "add"
-                            } else {
-                                "mul"
-                            }
-                            .into_pyobject(py)?
-                            .as_any(),
-                            slot_to_object(o).into_pyobject(py)?.as_any(),
-                            s.iter()
-                                .map(slot_to_object)
-                                .collect::<Vec<_>>()
-                                .into_pyobject(py)?
-                                .as_any(),
-                            real_args.into_pyobject(py)?.as_any(),
-                        ],
-                    )?);
-                }
-                Instruction::Pow(o, b, e, is_real) => {
-                    v.push(PyTuple::new(
-                        py,
-                        [
-                            "pow".into_pyobject(py)?.as_any(),
-                            slot_to_object(o).into_pyobject(py)?.as_any(),
-                            slot_to_object(b).into_pyobject(py)?.as_any(),
-                            e.into_pyobject(py)?.as_any(),
-                            is_real.into_pyobject(py)?.as_any(),
-                        ],
-                    )?);
-                }
-                Instruction::Powf(o, b, e, is_real) => {
-                    v.push(PyTuple::new(
-                        py,
-                        [
-                            "powf".into_pyobject(py)?.as_any(),
-                            slot_to_object(o).into_pyobject(py)?.as_any(),
-                            slot_to_object(b).into_pyobject(py)?.as_any(),
-                            slot_to_object(e).into_pyobject(py)?.as_any(),
-                            is_real.into_pyobject(py)?.as_any(),
-                        ],
-                    )?);
-                }
-                Instruction::Fun(o, b, is_real) => {
-                    let (name, tags, s) = &**b;
-                    v.push(PyTuple::new(
-                        py,
-                        [
-                            "fun".into_pyobject(py)?.as_any(),
-                            slot_to_object(o).into_pyobject(py)?.as_any(),
-                            PythonExpression::from(Atom::var(*name))
-                                .into_pyobject(py)?
-                                .as_any(),
-                            tags.into_pyobject(py)?.as_any(),
-                            s.iter()
-                                .map(slot_to_object)
-                                .collect::<Vec<_>>()
-                                .into_pyobject(py)?
-                                .as_any(),
-                            is_real.into_pyobject(py)?.as_any(),
-                        ],
-                    )?);
-                }
-                Instruction::Assign(o, r) => {
-                    v.push(PyTuple::new(
-                        py,
-                        [
-                            "assign".into_pyobject(py)?.as_any(),
-                            slot_to_object(o).into_pyobject(py)?.as_any(),
-                            slot_to_object(r).into_pyobject(py)?.as_any(),
-                        ],
-                    )?);
-                }
-                Instruction::IfElse(cond, label) => {
-                    v.push(PyTuple::new(
-                        py,
-                        [
-                            "if_else".into_pyobject(py)?.as_any(),
-                            slot_to_object(cond).into_pyobject(py)?.as_any(),
-                            label.into_pyobject(py)?.as_any(),
-                        ],
-                    )?);
-                }
-                Instruction::Join(o, cond, t, f) => {
-                    v.push(PyTuple::new(
-                        py,
-                        [
-                            "join".into_pyobject(py)?.as_any(),
-                            slot_to_object(o).into_pyobject(py)?.as_any(),
-                            slot_to_object(cond).into_pyobject(py)?.as_any(),
-                            slot_to_object(t).into_pyobject(py)?.as_any(),
-                            slot_to_object(f).into_pyobject(py)?.as_any(),
-                        ],
-                    )?);
-                }
-                Instruction::Goto(label) => {
-                    v.push(PyTuple::new(
-                        py,
-                        [
-                            "goto".into_pyobject(py)?.as_any(),
-                            label.into_pyobject(py)?.as_any(),
-                        ],
-                    )?);
-                }
-                Instruction::Label(label) => {
-                    v.push(PyTuple::new(
-                        py,
-                        [
-                            "label".into_pyobject(py)?.as_any(),
-                            label.into_pyobject(py)?.as_any(),
-                        ],
-                    )?);
-                }
-            }
-        }
-        Ok((
-            v,
-            exported.temporary_count,
-            self.rational_constants
-                .iter()
-                .map(|x| Atom::num(x.clone()).into())
-                .collect(),
-        ))
+    fn get_instructions(&self) -> PythonEvaluatorInstructions {
+        self.eval_complex
+            .clone()
+            .set_coeff(&self.rational_constants)
+            .export_instructions()
+            .into()
     }
 
     /// Merge evaluator `other` into `self`. The parameters must be the same, and

@@ -76,6 +76,31 @@ impl FunctionMap {
         args: Vec<A>,
         body: Atom,
     ) -> Result<(), EvaluationError> {
+        self.add_function_impl(name, args, body, true)
+    }
+
+    /// Register a function that is evaluated by a separate sub-evaluator instead of being
+    /// inlined at every call site.
+    ///
+    /// This can reduce the instruction-cache footprint when a large function is called one or
+    /// more times. It adds function-call overhead, so small functions should normally remain
+    /// inlined through [`Self::add_function`].
+    pub fn add_function_no_inline<S: Into<Indeterminate>, A: Into<Indeterminate>>(
+        &mut self,
+        name: S,
+        args: Vec<A>,
+        body: Atom,
+    ) -> Result<(), EvaluationError> {
+        self.add_function_impl(name, args, body, false)
+    }
+
+    fn add_function_impl<S: Into<Indeterminate>, A: Into<Indeterminate>>(
+        &mut self,
+        name: S,
+        args: Vec<A>,
+        body: Atom,
+        inline: bool,
+    ) -> Result<(), EvaluationError> {
         let name = name.into();
 
         let (name, tags) = match name {
@@ -91,7 +116,7 @@ impl FunctionMap {
             }
         };
 
-        self.add_tagged_function(name, tags, args, body)
+        self.add_tagged_function_impl(name, tags, args, body, inline)
     }
 
     /// Register a set of aliases (e.g. `s1 -> x^2+y`).
@@ -123,6 +148,29 @@ impl FunctionMap {
         args: Vec<A>,
         body: Atom,
     ) -> Result<(), EvaluationError> {
+        self.add_tagged_function_impl(name, tags, args, body, true)
+    }
+
+    /// Register a tagged function that is evaluated by a separate sub-evaluator instead of being
+    /// inlined at every call site.
+    pub fn add_tagged_function_no_inline<A: Into<Indeterminate>>(
+        &mut self,
+        name: Symbol,
+        tags: Vec<Atom>,
+        args: Vec<A>,
+        body: Atom,
+    ) -> Result<(), EvaluationError> {
+        self.add_tagged_function_impl(name, tags, args, body, false)
+    }
+
+    fn add_tagged_function_impl<A: Into<Indeterminate>>(
+        &mut self,
+        name: Symbol,
+        tags: Vec<Atom>,
+        args: Vec<A>,
+        body: Atom,
+        inline: bool,
+    ) -> Result<(), EvaluationError> {
         match self.tag.get(&name) {
             Some(&t) if t != tags.len() => {
                 return Err(EvaluationError::InconsistentFunctionTagCount {
@@ -146,6 +194,7 @@ impl FunctionMap {
                 tag_len,
                 args: args.into_iter().map(|x| x.into()).collect(),
                 body,
+                inline,
             });
 
         Ok(())
@@ -169,6 +218,10 @@ impl FunctionMap {
         }
 
         None
+    }
+
+    pub(super) fn has_non_inlined_functions(&self) -> bool {
+        self.tagged_fn_map.values().any(|expr| !expr.inline)
     }
 }
 
@@ -244,6 +297,18 @@ impl<'a> EvaluatorBuilder<'a> {
         Ok(self)
     }
 
+    /// Register a function that is evaluated by a separate sub-evaluator instead of being
+    /// inlined at every call site.
+    pub fn add_function_no_inline<S: Into<Indeterminate>, A: Into<Indeterminate>>(
+        mut self,
+        name: S,
+        args: Vec<A>,
+        body: Atom,
+    ) -> Result<Self, EvaluationError> {
+        self.fn_map.add_function_no_inline(name, args, body)?;
+        Ok(self)
+    }
+
     /// Register a function, where the first arguments are `tags` instead of arguments.
     pub fn add_tagged_function<A: Into<Indeterminate>>(
         mut self,
@@ -253,6 +318,20 @@ impl<'a> EvaluatorBuilder<'a> {
         body: Atom,
     ) -> Result<Self, EvaluationError> {
         self.fn_map.add_tagged_function(name, tags, args, body)?;
+        Ok(self)
+    }
+
+    /// Register a tagged function that is evaluated by a separate sub-evaluator instead of being
+    /// inlined at every call site.
+    pub fn add_tagged_function_no_inline<A: Into<Indeterminate>>(
+        mut self,
+        name: Symbol,
+        tags: Vec<Atom>,
+        args: Vec<A>,
+        body: Atom,
+    ) -> Result<Self, EvaluationError> {
+        self.fn_map
+            .add_tagged_function_no_inline(name, tags, args, body)?;
         Ok(self)
     }
 
@@ -339,7 +418,10 @@ impl<'a> EvaluatorBuilder<'a> {
 
     /// Build the evaluator.
     pub fn build(self) -> Result<ExpressionEvaluator<Complex<Rational>>, EvaluationError> {
-        if self.optimization_settings.direct_translation {
+        // EvalTree::linearize expands every function call, so preserving an explicit call boundary
+        // requires the direct translator even when the legacy tree optimizer was requested.
+        if self.optimization_settings.direct_translation || self.fn_map.has_non_inlined_functions()
+        {
             AtomView::to_evaluator(
                 &self.exprs,
                 &self.fn_map,
@@ -366,6 +448,7 @@ pub(super) struct Expr {
     pub(super) tag_len: usize,
     pub(super) args: Vec<Indeterminate>,
     pub(super) body: Atom,
+    pub(super) inline: bool,
 }
 
 /// Settings for optimizing the evaluation of expressions.

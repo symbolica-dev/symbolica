@@ -3850,6 +3850,7 @@ class Expression:
         max_horner_scheme_variables: int = 500,
         max_common_pair_cache_entries: int = 1000000,
         max_common_pair_distance: int = 100,
+        non_inline_functions: Sequence[Expression] = [],
     ) -> Evaluator:
         """
         Create an evaluator that can evaluate (nested) expressions in an optimized fashion.
@@ -3870,7 +3871,11 @@ class Expression:
         >>> fd = E("y^2 + z^2*y^2")
         >>> gd = E("y + 5")
         >>>
-        >>> ev = e1.evaluator([x], functions={(f, (y, z)): fd, (g, (y,)): gd})
+        >>> ev = e1.evaluator(
+        >>>     [x],
+        >>>     functions={(f, (y, z)): fd, (g, (y,)): gd},
+        >>>     non_inline_functions=[f],
+        >>> )
         >>> res = ev.evaluate([[1.], [2.], [3.]])  # evaluate at x=1, x=2, x=3
         >>> print(res)
 
@@ -3885,6 +3890,9 @@ class Expression:
         functions: dict[tuple[Expression, Sequence[Expression]], Expression]
             A dictionary of functions. The key is a tuple of the function name and the argument variables.
             The value is the function body. If the function name entry contains arguments, these are considered tags.
+        non_inline_functions: Sequence[Expression]
+            Function names, or tagged function expressions, whose bodies should be compiled as
+            separate sub-evaluators instead of being inlined.
         iterations: int, optional
             The number of Horner schemes to try.
         cpe_iterations: int | None, optional
@@ -3930,6 +3938,7 @@ class Expression:
         max_horner_scheme_variables: int = 500,
         max_common_pair_cache_entries: int = 1000000,
         max_common_pair_distance: int = 100,
+        non_inline_functions: Sequence[Expression] = [],
     ) -> Evaluator:
         """
         Create an evaluator that can jointly evaluate (nested) expressions in an optimized fashion.
@@ -3954,6 +3963,9 @@ class Expression:
         functions: dict[tuple[Expression, Sequence[Expression]], Expression]
             A dictionary of functions. The key is a tuple of the function name and the argument variables.
             The value is the function body. If the function name entry contains arguments, these are considered tags.
+        non_inline_functions: Sequence[Expression]
+            Function names, or tagged function expressions, whose bodies should be compiled as
+            separate sub-evaluators instead of being inlined.
         iterations: int, optional
             The number of optimization passes to run.
         cpe_iterations: int | None, optional
@@ -9384,6 +9396,60 @@ class Matrix:
         Negate the matrix, returning the result.
         """
 
+class EvaluatorInstructions:
+    """A portable instruction stream for evaluating an expression."""
+
+    @property
+    def input_count(self) -> int:
+        """The number of input parameter values expected by this instruction stream."""
+
+    @property
+    def output_count(self) -> int:
+        """The number of output values produced by this instruction stream."""
+
+    @property
+    def instructions(self) -> list[tuple]:
+        """The linear evaluation instructions."""
+
+    @property
+    def temporary_count(self) -> int:
+        """The number of temporary storage slots required by `instructions`."""
+
+    @property
+    def constants(self) -> list[Expression]:
+        """Exact constants referenced by `('const', index)` slots."""
+
+    @property
+    def sub_evaluators(self) -> list[EvaluatorSubEvaluator]:
+        """Non-inlined function bodies referenced by `fun` instructions in this stream."""
+
+    def __repr__(self) -> str: ...
+
+class EvaluatorSubEvaluator:
+    """A non-inlined function evaluator referenced by an instruction stream."""
+
+    @property
+    def function(self) -> Expression:
+        """The function referenced by the calling `fun` instruction."""
+
+    @property
+    def tags(self) -> list[str]:
+        """The tags used to distinguish this function implementation."""
+
+    @property
+    def input_count(self) -> int:
+        """The number of arguments expected by the sub-evaluator."""
+
+    @property
+    def output_count(self) -> int:
+        """The number of outputs produced by the sub-evaluator."""
+
+    @property
+    def evaluator(self) -> EvaluatorInstructions:
+        """The exported instruction body of this sub-evaluator."""
+
+    def __repr__(self) -> str: ...
+
 class Evaluator:
     """An optimized evaluator of an expression."""
 
@@ -9449,17 +9515,15 @@ class Evaluator:
 
     def get_instructions(
         self,
-    ) -> tuple[
-        list[tuple[str, tuple[str, int], list[tuple[str, int]]]], int, list[Expression]
-    ]:
+    ) -> EvaluatorInstructions:
         """
-        Return the instructions for efficiently evaluating the expression, the length of the list
-        of temporary variables, and the list of constants. This can be used to generate
-        code for the expression evaluation in any programming language.
+        Return a portable instruction representation for efficiently evaluating the expression.
+        This can be used to generate code for the expression evaluation in any programming
+        language.
 
         There are four lists that are used in the evaluation instructions:
         - `param`: the list of input parameters.
-        - `temp`: the list of temporary slots. The size of it is provided as the second return value.
+        - `temp`: the list of temporary slots. Its size is available as `temporary_count`.
         - `const`: the list of constants.
         - `out`: the list of outputs.
 
@@ -9478,12 +9542,13 @@ class Evaluator:
         --------
 
         >>> from symbolica import *
-        >>> (ins, m, c) = E('x^2+5/3+cos(x)').evaluator([S('x')]).get_instructions()
+        >>> exported = E('x^2+5/3+cos(x)').evaluator([S('x')]).get_instructions()
         >>>
-        >>> for x in ins:
+        >>> for x in exported.instructions:
         >>>     print(x)
-        >>> print('temp list length:', m)
-        >>> print('constants:', c)
+        >>> print('temp list length:', exported.temporary_count)
+        >>> print('constants:', exported.constants)
+        >>> print('sub-evaluators:', exported.sub_evaluators)
 
         yields
 
@@ -9493,6 +9558,7 @@ class Evaluator:
         ('add', ('out', 0), [('const', 0), ('out', 0), ('temp', 1)])
         temp list length: 2
         constants: [5/3]
+        sub-evaluators: []
         ```
         """
 

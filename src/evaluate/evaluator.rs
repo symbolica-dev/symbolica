@@ -291,13 +291,6 @@ impl<T: Real> ExpressionEvaluator<T> {
             },
             Instr::ExternalFun(r, s, args) => {
                 let external = &mut external_fns[*s];
-                let Some(f) = external.imp.as_ref() else {
-                    panic!(
-                        "External function '{external}' does not have an implementation for {}",
-                        std::any::type_name::<T>()
-                    );
-                };
-
                 if external.cache.len() < args.len() {
                     external.cache.resize(args.len(), T::new_zero());
                 }
@@ -306,7 +299,21 @@ impl<T: Real> ExpressionEvaluator<T> {
                     dst.set_from(&stack[*src]);
                 }
 
-                stack[*r] = (f)(&external.cache[..args.len()]);
+                if let Some(evaluator) = external.sub_evaluator.as_mut() {
+                    let mut result = T::new_zero();
+                    evaluator.evaluate(
+                        &external.cache[..args.len()],
+                        std::slice::from_mut(&mut result),
+                    );
+                    stack[*r] = result;
+                } else if let Some(f) = external.imp.as_ref() {
+                    stack[*r] = (f)(&external.cache[..args.len()]);
+                } else {
+                    panic!(
+                        "External function '{external}' does not have an implementation for {}",
+                        std::any::type_name::<T>()
+                    );
+                }
             }
             Instr::IfElse(n, label) => {
                 // jump to else block
@@ -544,16 +551,15 @@ impl ExpressionEvaluator<Complex<Rational>> {
 impl<T: Default> ExpressionEvaluator<T> {
     /// Map the coefficients to a different type.
     pub fn map_coeff_with_prec<T2: EvaluationDomain, F: Fn(&T) -> T2>(
-        self,
+        mut self,
         f: &F,
         binary_prec: u32,
     ) -> ExpressionEvaluator<T2> {
         let mut stack: Vec<_> = self.stack.iter().map(f).collect();
 
-        let mut external_fns = self
-            .external_fns
-            .iter()
-            .map(|x| x.map())
+        let mut external_fns = std::mem::take(&mut self.external_fns)
+            .into_iter()
+            .map(|x| x.map_coeff(f, binary_prec))
             .collect::<Vec<_>>();
         for external in &mut external_fns {
             if let Some(i) = external.constant_index {
@@ -640,7 +646,11 @@ impl<T: Default> ExpressionEvaluator<T> {
             reserved_indices: self.reserved_indices,
             instructions: self.instructions,
             result_indices: self.result_indices,
-            external_fns: self.external_fns.into_iter().map(|x| x.map()).collect(),
+            external_fns: self
+                .external_fns
+                .into_iter()
+                .map(|x| x.map_owned())
+                .collect(),
             settings: self.settings,
         }
     }

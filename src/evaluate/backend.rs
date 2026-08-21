@@ -410,8 +410,11 @@ impl ExpressionEvaluator<Complex<Rational>> {
             .external_fns
             .iter()
             .map(|f| {
-                let mapped = f.map::<T>();
-                if mapped.constant_index.is_none() && mapped.imp.is_none() {
+                let mapped = f.map_rational::<T>(T::FIXED_PRECISION.unwrap_or(53));
+                if mapped.constant_index.is_none()
+                    && mapped.imp.is_none()
+                    && mapped.sub_evaluator.is_none()
+                {
                     return Err(format!(
                         "External function '{}' does not have an implementation",
                         f
@@ -466,7 +469,7 @@ impl<T: JITCompiledNumber + Clone> ExpressionEvaluator<T> {
             .external_fns
             .iter()
             .map(|f| {
-                if f.constant_index.is_none() && f.imp.is_none() {
+                if f.constant_index.is_none() && f.imp.is_none() && f.sub_evaluator.is_none() {
                     return Err(format!(
                         "External function '{}' does not have an implementation",
                         f
@@ -599,7 +602,7 @@ impl JITCompiledNumber for f64 {
                 continue;
             }
 
-            let Some(imp) = f.imp.clone() else {
+            let Some(imp) = f.callable() else {
                 return Err(format!(
                     "External function '{}' does not have an implementation",
                     f
@@ -688,15 +691,17 @@ impl<T> JITCompiledEvaluator<T> {
 }
 
 #[cfg(feature = "serde")]
-impl<T> serde::Serialize for JITCompiledEvaluator<T> {
+impl<T: serde::Serialize> serde::Serialize for JITCompiledEvaluator<T> {
     fn serialize<S: serde::Serializer>(&self, serializer: S) -> Result<S::Ok, S::Error> {
         (&self.external_functions, &self.compressed_ir).serialize(serializer)
     }
 }
 
 #[cfg(feature = "serde")]
-impl<'de, T: JITCompiledNumber + EvaluationDomain + symjit::Element + Copy> serde::Deserialize<'de>
-    for JITCompiledEvaluator<T>
+impl<
+    'de,
+    T: JITCompiledNumber + EvaluationDomain + symjit::Element + Copy + serde::Deserialize<'de>,
+> serde::Deserialize<'de> for JITCompiledEvaluator<T>
 {
     fn deserialize<D: serde::Deserializer<'de>>(deserializer: D) -> Result<Self, D::Error> {
         let (fs, compressed_ir): (Vec<ExternalFunctionContainer<T>>, Vec<u8>) =
@@ -706,7 +711,7 @@ impl<'de, T: JITCompiledNumber + EvaluationDomain + symjit::Element + Copy> serd
 }
 
 #[cfg(feature = "bincode")]
-impl<T> bincode::Encode for JITCompiledEvaluator<T> {
+impl<T: bincode::Encode> bincode::Encode for JITCompiledEvaluator<T> {
     fn encode<E: bincode::enc::Encoder>(
         &self,
         encoder: &mut E,
@@ -718,8 +723,8 @@ impl<T> bincode::Encode for JITCompiledEvaluator<T> {
 }
 
 #[cfg(feature = "bincode")]
-impl<Context, T: JITCompiledNumber + EvaluationDomain> bincode::Decode<Context>
-    for JITCompiledEvaluator<T>
+impl<Context, T: JITCompiledNumber + EvaluationDomain + bincode::Decode<Context>>
+    bincode::Decode<Context> for JITCompiledEvaluator<T>
 {
     fn decode<D: bincode::de::Decoder<Context = Context>>(
         decoder: &mut D,
@@ -731,8 +736,8 @@ impl<Context, T: JITCompiledNumber + EvaluationDomain> bincode::Decode<Context>
 }
 
 #[cfg(feature = "bincode")]
-impl<'de, Context, T: JITCompiledNumber + EvaluationDomain> bincode::BorrowDecode<'de, Context>
-    for JITCompiledEvaluator<T>
+impl<'de, Context, T: JITCompiledNumber + EvaluationDomain + bincode::Decode<Context>>
+    bincode::BorrowDecode<'de, Context> for JITCompiledEvaluator<T>
 {
     fn borrow_decode<D: bincode::de::BorrowDecoder<'de, Context = Context>>(
         decoder: &mut D,
@@ -825,7 +830,7 @@ impl JITCompiledNumber for wide::f64x4 {
                 continue;
             }
 
-            let Some(imp) = f.imp.clone() else {
+            let Some(imp) = f.callable() else {
                 return Err(format!(
                     "External function '{}' does not have an implementation",
                     f
@@ -996,7 +1001,7 @@ impl JITCompiledNumber for Complex<f64> {
                 continue;
             }
 
-            let Some(imp) = f.imp.clone() else {
+            let Some(imp) = f.callable() else {
                 return Err(format!(
                     "External function '{}' does not have an implementation",
                     f
@@ -1124,7 +1129,7 @@ impl JITCompiledNumber for Complex<wide::f64x4> {
                 continue;
             }
 
-            let Some(imp) = f.imp.clone() else {
+            let Some(imp) = f.callable() else {
                 return Err(format!(
                     "External function '{}' does not have an implementation",
                     f

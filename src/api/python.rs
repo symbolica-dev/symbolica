@@ -81,8 +81,8 @@ use crate::{
     },
     error,
     evaluate::{
-        ComplexEvaluatorSettings, Dualizer, ExpressionEvaluator, FunctionMap, Instruction,
-        OptimizationSettings, Slot,
+        ComplexEvaluatorSettings, Dualizer, ExportedInstructions, ExportedSubEvaluator,
+        ExpressionEvaluator, FunctionMap, Instruction, OptimizationSettings, Slot,
     },
     graph::{GenerationSettings, Graph, HalfEdge},
     id::{
@@ -774,6 +774,8 @@ pub fn create_symbolica_module<'a, 'b>(
     m.add_class::<PythonPrintMode>()?;
     m.add_class::<PythonCondition>()?;
     m.add_class::<PythonReplacement>()?;
+    m.add_class::<PythonEvaluatorInstructions>()?;
+    m.add_class::<PythonEvaluatorSubEvaluator>()?;
     m.add_class::<PythonExpressionEvaluator>()?;
     #[cfg(feature = "native_code_generation")]
     {

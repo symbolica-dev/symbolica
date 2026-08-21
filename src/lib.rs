@@ -136,8 +136,8 @@ pub mod prelude {
     };
     pub use crate::evaluate::{
         Dualizer, EvaluationDomain, EvaluationFn, EvaluatorBuilder, ExportedInstructions,
-        ExpressionEvaluator, ExternalFunction, FunctionMap, Instruction, OptimizationSettings,
-        Vectorize,
+        ExportedSubEvaluator, ExpressionEvaluator, ExternalFunction, FunctionMap, Instruction,
+        OptimizationSettings, Vectorize,
     };
 
     pub use crate::id::{

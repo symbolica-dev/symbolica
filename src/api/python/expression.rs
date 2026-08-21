@@ -8090,7 +8090,11 @@ impl PythonExpression {
     /// >>> fd = E("y^2 + z^2*y^2")
     /// >>> gd = E("y + 5")
     /// >>>
-    /// >>> ev = e1.evaluator([x], functions={(f, (y, z)): fd, (g, (y,)): gd})
+    /// >>> ev = e1.evaluator(
+    /// >>>     [x],
+    /// >>>     functions={(f, (y, z)): fd, (g, (y,)): gd},
+    /// >>>     non_inline_functions=[f],
+    /// >>> )
     /// >>> res = ev.evaluate([[1.], [2.], [3.]])  # evaluate at x=1, x=2, x=3
     /// >>> print(res)
     ///
@@ -8105,6 +8109,9 @@ impl PythonExpression {
     /// functions: dict[tuple[Expression, Sequence[Expression]], Expression] = {}
     ///     A dictionary of functions. The key is a tuple of the function name and the argument variables.
     ///     The value is the function body. If the function name entry contains arguments, these are considered tags.
+    /// non_inline_functions: Sequence[Expression] = []
+    ///     Function names, or tagged function expressions, whose bodies should be compiled as
+    ///     separate sub-evaluators instead of being inlined.
     /// iterations: int, optional
     ///     The number of optimization iterations to perform.
     /// cpe_iterations: Optional[int], optional
@@ -8144,7 +8151,8 @@ impl PythonExpression {
         jit_options = HashMap::default(),
         max_horner_scheme_variables = 500,
         max_common_pair_cache_entries = 1_000_000,
-        max_common_pair_distance = 100),
+        max_common_pair_distance = 100,
+        non_inline_functions = Vec::default()),
         )]
     pub fn evaluator(
         &self,
@@ -8162,6 +8170,7 @@ impl PythonExpression {
         max_horner_scheme_variables: usize,
         max_common_pair_cache_entries: usize,
         max_common_pair_distance: usize,
+        non_inline_functions: Vec<PolyVariable>,
         py: Python,
     ) -> PyResult<PythonExpressionEvaluator> {
         #[cfg(not(feature = "native_code_generation"))]
@@ -8170,6 +8179,7 @@ impl PythonExpression {
         let mut fn_map = FunctionMap::new();
 
         for ((symbol, args), body) in functions {
+            let inline = !non_inline_functions.contains(&symbol);
             let args: Vec<_> = args
                 .into_iter()
                 .map(|x| match x {
@@ -8183,9 +8193,12 @@ impl PythonExpression {
 
             match symbol {
                 PolyVariable::Symbol(s) => {
-                    fn_map
-                        .add_function(s, args, body.expr)
-                        .map_err(|e| exceptions::PyValueError::new_err(e.to_string()))?;
+                    if inline {
+                        fn_map.add_function(s, args, body.expr)
+                    } else {
+                        fn_map.add_function_no_inline(s, args, body.expr)
+                    }
+                    .map_err(|e| exceptions::PyValueError::new_err(e.to_string()))?;
                 }
                 PolyVariable::Function(s, fa) => {
                     let tags = fa
@@ -8195,9 +8208,12 @@ impl PythonExpression {
                         .map(|x| x.to_owned())
                         .collect();
 
-                    fn_map
-                        .add_tagged_function(s, tags, args, body.expr)
-                        .map_err(|e| exceptions::PyValueError::new_err(e.to_string()))?;
+                    if inline {
+                        fn_map.add_tagged_function(s, tags, args, body.expr)
+                    } else {
+                        fn_map.add_tagged_function_no_inline(s, tags, args, body.expr)
+                    }
+                    .map_err(|e| exceptions::PyValueError::new_err(e.to_string()))?;
                 }
                 _ => Err(exceptions::PyValueError::new_err(format!(
                     "Expected function name instead of {symbol:?}",
@@ -8301,6 +8317,9 @@ impl PythonExpression {
     /// functions: dict[tuple[Expression, Sequence[Expression]], Expression]
     ///     A dictionary of functions. The key is a tuple of the function name and the argument variables.
     ///     The value is the function body. If the function name entry contains arguments, these are considered tags.
+    /// non_inline_functions: Sequence[Expression]
+    ///     Function names, or tagged function expressions, whose bodies should be compiled as
+    ///     separate sub-evaluators instead of being inlined.
     /// iterations: int
     ///     The number of optimization passes to run.
     /// cpe_iterations: int | None
@@ -8341,7 +8360,8 @@ impl PythonExpression {
         jit_options = HashMap::default(),
         max_horner_scheme_variables = 500,
         max_common_pair_cache_entries = 1_000_000,
-        max_common_pair_distance = 100)
+        max_common_pair_distance = 100,
+        non_inline_functions = Vec::default())
     )]
     pub fn evaluator_multiple(
         _cls: &Bound<'_, PyType>,
@@ -8360,6 +8380,7 @@ impl PythonExpression {
         max_horner_scheme_variables: usize,
         max_common_pair_cache_entries: usize,
         max_common_pair_distance: usize,
+        non_inline_functions: Vec<PolyVariable>,
         py: Python,
     ) -> PyResult<PythonExpressionEvaluator> {
         #[cfg(not(feature = "native_code_generation"))]
@@ -8368,6 +8389,7 @@ impl PythonExpression {
         let mut fn_map = FunctionMap::new();
 
         for ((symbol, args), body) in functions {
+            let inline = !non_inline_functions.contains(&symbol);
             let args: Vec<_> = args
                 .into_iter()
                 .map(|x| match x {
@@ -8381,9 +8403,12 @@ impl PythonExpression {
 
             match symbol {
                 PolyVariable::Symbol(s) => {
-                    fn_map
-                        .add_function(s, args, body.expr)
-                        .map_err(|e| exceptions::PyValueError::new_err(e.to_string()))?;
+                    if inline {
+                        fn_map.add_function(s, args, body.expr)
+                    } else {
+                        fn_map.add_function_no_inline(s, args, body.expr)
+                    }
+                    .map_err(|e| exceptions::PyValueError::new_err(e.to_string()))?;
                 }
                 PolyVariable::Function(s, fa) => {
                     let tags = fa
@@ -8393,9 +8418,12 @@ impl PythonExpression {
                         .map(|x| x.to_owned())
                         .collect();
 
-                    fn_map
-                        .add_tagged_function(s, tags, args, body.expr)
-                        .map_err(|e| exceptions::PyValueError::new_err(e.to_string()))?;
+                    if inline {
+                        fn_map.add_tagged_function(s, tags, args, body.expr)
+                    } else {
+                        fn_map.add_tagged_function_no_inline(s, tags, args, body.expr)
+                    }
+                    .map_err(|e| exceptions::PyValueError::new_err(e.to_string()))?;
                 }
                 _ => Err(exceptions::PyValueError::new_err(format!(
                     "Expected function name instead of {symbol:?}",

@@ -190,6 +190,95 @@ impl ExportSettings {
 }
 
 impl<T: ExportNumber + SingleFloat> ExpressionEvaluator<T> {
+    fn export_external_cpps(&self) -> String {
+        self.export_external_cpps_for_target(false)
+    }
+
+    fn export_external_cpps_cuda(&self) -> String {
+        self.export_external_cpps_for_target(true)
+    }
+
+    fn export_external_cpps_for_target(&self, cuda: bool) -> String {
+        fn append<T: ExportNumber + SingleFloat>(
+            evaluator: &ExpressionEvaluator<T>,
+            cuda: bool,
+            seen: &mut HashSet<String>,
+            output: &mut String,
+        ) {
+            for external in &evaluator.external_fns {
+                if external.constant_index.is_some() {
+                    continue;
+                }
+
+                if let Some(sub_evaluator) = &external.sub_evaluator {
+                    append(sub_evaluator, cuda, seen, output);
+
+                    let name = external.export_name();
+                    if !seen.insert(format!("sub-evaluator:{name}")) {
+                        continue;
+                    }
+
+                    output.push_str("template<typename T>\n");
+                    if cuda {
+                        output.push_str("__device__ __noinline__ ");
+                    } else {
+                        output.push_str("__attribute__((noinline)) ");
+                    }
+                    output.push_str(&format!(
+                        "T {name}({}) {{\n",
+                        (0..sub_evaluator.param_count)
+                            .map(|index| format!("T p{index}"))
+                            .collect::<Vec<_>>()
+                            .join(", ")
+                    ));
+
+                    if sub_evaluator.param_count == 0 {
+                        output.push_str("\tT params[1] = {};\n");
+                    } else {
+                        output.push_str(&format!(
+                            "\tT params[{}] = {{{}}};\n",
+                            sub_evaluator.param_count,
+                            (0..sub_evaluator.param_count)
+                                .map(|index| format!("p{index}"))
+                                .collect::<Vec<_>>()
+                                .join(", ")
+                        ));
+                    }
+                    output.push_str(&format!("\tT Z[{}];\n", sub_evaluator.stack.len().max(1)));
+                    sub_evaluator.export_cpp_impl("", "T", true, output);
+
+                    let result = sub_evaluator.result_indices[0];
+                    output.push_str("\treturn ");
+                    if result < sub_evaluator.param_count {
+                        output.push_str(&format!("params[{result}]"));
+                    } else if result < sub_evaluator.reserved_indices {
+                        output.push_str(&sub_evaluator.stack[result].export_wrapped_with("T"));
+                    } else {
+                        output.push_str(&format!("Z[{result}]"));
+                    }
+                    output.push_str(";\n}\n\n");
+                    continue;
+                }
+
+                let Some(snippet) = external.cpp() else {
+                    continue;
+                };
+                if seen.insert(format!("external:{snippet}")) {
+                    output.push_str(snippet);
+                    if !snippet.ends_with('\n') {
+                        output.push('\n');
+                    }
+                    output.push('\n');
+                }
+            }
+        }
+
+        let mut seen = HashSet::default();
+        let mut output = String::new();
+        append(self, cuda, &mut seen, &mut output);
+        output
+    }
+
     /// Create a C++ code representation of the evaluation tree.
     /// The resulting source code can be compiled and loaded.
     ///
@@ -379,7 +468,7 @@ impl<T: ExportNumber + SingleFloat> ExpressionEvaluator<T> {
             res += "typedef double CudaNumber;\n";
             res += "typedef double Number;\n";
         }
-        res += &self.export_external_cpps();
+        res += &self.export_external_cpps_cuda();
 
         res += &format!(
             "\n__device__ void {}(CudaNumber* params, CudaNumber* out, size_t index) {{\n",
