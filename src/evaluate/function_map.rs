@@ -25,6 +25,47 @@ impl<A, T> EvaluationFn<A, T> {
     }
 }
 
+/// Policy controlling whether a registered function is expanded at its call sites.
+#[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
+#[cfg_attr(feature = "bincode", derive(bincode::Encode, bincode::Decode))]
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Hash)]
+pub enum InliningPolicy {
+    /// Always inline the function body.
+    #[default]
+    Always,
+    /// Keep the function body in a separate sub-evaluator.
+    Never,
+    /// Select an inlining strategy automatically.
+    ///
+    /// Currently this has the same behavior as [`Self::Always`].
+    Auto,
+}
+
+/// Settings used when registering a function with an evaluator.
+#[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
+#[cfg_attr(feature = "bincode", derive(bincode::Encode, bincode::Decode))]
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+pub struct FunctionRegistrationOptions {
+    inlining: InliningPolicy,
+}
+
+impl FunctionRegistrationOptions {
+    /// Create function registration options with their default values.
+    pub fn new() -> Self {
+        Self::default()
+    }
+
+    /// Set the function inlining policy.
+    pub fn inlining(mut self, inlining: InliningPolicy) -> Self {
+        self.inlining = inlining;
+        self
+    }
+
+    pub(crate) fn should_inline(&self) -> bool {
+        !matches!(self.inlining, InliningPolicy::Never)
+    }
+}
+
 /// A map of functions and constants used for evaluating expressions.
 ///
 /// Examples
@@ -76,6 +117,17 @@ impl FunctionMap {
         args: Vec<A>,
         body: Atom,
     ) -> Result<(), EvaluationError> {
+        self.add_function_with_options(name, args, body, FunctionRegistrationOptions::default())
+    }
+
+    /// Register a function using explicit registration options.
+    pub fn add_function_with_options<S: Into<Indeterminate>, A: Into<Indeterminate>>(
+        &mut self,
+        name: S,
+        args: Vec<A>,
+        body: Atom,
+        options: FunctionRegistrationOptions,
+    ) -> Result<(), EvaluationError> {
         let name = name.into();
 
         let (name, tags) = match name {
@@ -91,7 +143,7 @@ impl FunctionMap {
             }
         };
 
-        self.add_tagged_function(name, tags, args, body)
+        self.add_tagged_function_with_options(name, tags, args, body, options)
     }
 
     /// Register a set of aliases (e.g. `s1 -> x^2+y`).
@@ -123,6 +175,24 @@ impl FunctionMap {
         args: Vec<A>,
         body: Atom,
     ) -> Result<(), EvaluationError> {
+        self.add_tagged_function_with_options(
+            name,
+            tags,
+            args,
+            body,
+            FunctionRegistrationOptions::default(),
+        )
+    }
+
+    /// Register a tagged function using explicit registration options.
+    pub fn add_tagged_function_with_options<A: Into<Indeterminate>>(
+        &mut self,
+        name: Symbol,
+        tags: Vec<Atom>,
+        args: Vec<A>,
+        body: Atom,
+        options: FunctionRegistrationOptions,
+    ) -> Result<(), EvaluationError> {
         match self.tag.get(&name) {
             Some(&t) if t != tags.len() => {
                 return Err(EvaluationError::InconsistentFunctionTagCount {
@@ -146,6 +216,7 @@ impl FunctionMap {
                 tag_len,
                 args: args.into_iter().map(|x| x.into()).collect(),
                 body,
+                options,
             });
 
         Ok(())
@@ -169,6 +240,12 @@ impl FunctionMap {
         }
 
         None
+    }
+
+    pub(super) fn has_non_inlined_functions(&self) -> bool {
+        self.tagged_fn_map
+            .values()
+            .any(|expr| !expr.options.should_inline())
     }
 }
 
@@ -244,6 +321,19 @@ impl<'a> EvaluatorBuilder<'a> {
         Ok(self)
     }
 
+    /// Register a function using explicit registration options.
+    pub fn add_function_with_options<S: Into<Indeterminate>, A: Into<Indeterminate>>(
+        mut self,
+        name: S,
+        args: Vec<A>,
+        body: Atom,
+        options: FunctionRegistrationOptions,
+    ) -> Result<Self, EvaluationError> {
+        self.fn_map
+            .add_function_with_options(name, args, body, options)?;
+        Ok(self)
+    }
+
     /// Register a function, where the first arguments are `tags` instead of arguments.
     pub fn add_tagged_function<A: Into<Indeterminate>>(
         mut self,
@@ -253,6 +343,20 @@ impl<'a> EvaluatorBuilder<'a> {
         body: Atom,
     ) -> Result<Self, EvaluationError> {
         self.fn_map.add_tagged_function(name, tags, args, body)?;
+        Ok(self)
+    }
+
+    /// Register a tagged function using explicit registration options.
+    pub fn add_tagged_function_with_options<A: Into<Indeterminate>>(
+        mut self,
+        name: Symbol,
+        tags: Vec<Atom>,
+        args: Vec<A>,
+        body: Atom,
+        options: FunctionRegistrationOptions,
+    ) -> Result<Self, EvaluationError> {
+        self.fn_map
+            .add_tagged_function_with_options(name, tags, args, body, options)?;
         Ok(self)
     }
 
@@ -339,7 +443,10 @@ impl<'a> EvaluatorBuilder<'a> {
 
     /// Build the evaluator.
     pub fn build(self) -> Result<ExpressionEvaluator<Complex<Rational>>, EvaluationError> {
-        if self.optimization_settings.direct_translation {
+        // EvalTree::linearize expands every function call, so preserving an explicit call boundary
+        // requires the direct translator even when the legacy tree optimizer was requested.
+        if self.optimization_settings.direct_translation || self.fn_map.has_non_inlined_functions()
+        {
             AtomView::to_evaluator(
                 &self.exprs,
                 &self.fn_map,
@@ -366,6 +473,7 @@ pub(super) struct Expr {
     pub(super) tag_len: usize,
     pub(super) args: Vec<Indeterminate>,
     pub(super) body: Atom,
+    pub(super) options: FunctionRegistrationOptions,
 }
 
 /// Settings for optimizing the evaluation of expressions.

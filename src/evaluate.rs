@@ -47,8 +47,8 @@ pub use export::*;
 pub use external::*;
 pub use function_map::*;
 pub use instruction::{
-    ComplexPhase, ExportedInstructions, Instruction, InstructionList, Label, Slot,
-    VectorInstruction,
+    ComplexPhase, ExportedInstructions, ExportedSubEvaluator, Instruction, InstructionList, Label,
+    Slot, VectorInstruction,
 };
 pub use optimize::*;
 pub use tree::*;
@@ -92,8 +92,9 @@ mod test {
             rational::Rational,
         },
         evaluate::{
-            Dualizer, EvaluationError, ExportSettings, FunctionMap, Instruction,
-            JITCompilationSettings, OptimizationSettings,
+            CompileOptions, Dualizer, EvaluationError, ExportSettings, ExportedInstructions,
+            FunctionMap, FunctionRegistrationOptions, InlineASM, InliningPolicy, Instruction,
+            JITCompilationSettings, OptimizationSettings, Slot,
         },
         id::ConditionResult,
         parse, symbol,
@@ -246,6 +247,557 @@ mod test {
         let mut res = [0., 0.];
         e_f64.evaluate(&[1.1], &mut res);
         assert!((res[0] - 1622709.2241624785).abs() / 1622709.2241624785 < 1e-10);
+    }
+
+    #[test]
+    fn non_inlined_function_uses_sub_evaluator() {
+        fn execute_exported(
+            exported: &ExportedInstructions<f64>,
+            params: &[f64],
+            output_count: usize,
+        ) -> Vec<f64> {
+            fn read(
+                slot: Slot,
+                params: &[f64],
+                constants: &[f64],
+                temporaries: &[f64],
+                outputs: &[f64],
+            ) -> f64 {
+                match slot {
+                    Slot::Param(i) => params[i],
+                    Slot::Const(i) => constants[i],
+                    Slot::Temp(i) => temporaries[i],
+                    Slot::Out(i) => outputs[i],
+                }
+            }
+
+            fn write(slot: Slot, value: f64, temporaries: &mut [f64], outputs: &mut [f64]) {
+                match slot {
+                    Slot::Temp(i) => temporaries[i] = value,
+                    Slot::Out(i) => outputs[i] = value,
+                    Slot::Param(_) | Slot::Const(_) => panic!("cannot write to {slot}"),
+                }
+            }
+
+            let mut temporaries = vec![0.; exported.temporary_count];
+            let mut outputs = vec![0.; output_count];
+            for instruction in &exported.instructions {
+                let value = |slot| read(slot, params, &exported.constants, &temporaries, &outputs);
+                match instruction {
+                    Instruction::Add(out, args, _) => {
+                        let result = args.iter().map(|arg| value(*arg)).sum();
+                        write(*out, result, &mut temporaries, &mut outputs);
+                    }
+                    Instruction::Mul(out, args, _) => {
+                        let result = args.iter().map(|arg| value(*arg)).product();
+                        write(*out, result, &mut temporaries, &mut outputs);
+                    }
+                    Instruction::Pow(out, base, exponent, _) => {
+                        let result = value(*base).powi((*exponent).try_into().unwrap());
+                        write(*out, result, &mut temporaries, &mut outputs);
+                    }
+                    Instruction::Powf(out, base, exponent, _) => {
+                        let result = value(*base).powf(value(*exponent));
+                        write(*out, result, &mut temporaries, &mut outputs);
+                    }
+                    Instruction::Fun(out, function, _) => {
+                        let (symbol, tags, args) = &**function;
+                        let sub_evaluator = exported
+                            .sub_evaluators
+                            .iter()
+                            .find(|sub| sub.symbol == *symbol && sub.tags == *tags)
+                            .expect("test expression should only call exported sub-evaluators");
+                        let arguments = args.iter().map(|arg| value(*arg)).collect::<Vec<_>>();
+                        assert_eq!(arguments.len(), sub_evaluator.input_count);
+                        let result = execute_exported(
+                            &sub_evaluator.instructions,
+                            &arguments,
+                            sub_evaluator.output_count,
+                        );
+                        assert_eq!(result.len(), 1);
+                        write(*out, result[0], &mut temporaries, &mut outputs);
+                    }
+                    Instruction::Assign(out, input) => {
+                        let result = value(*input);
+                        write(*out, result, &mut temporaries, &mut outputs);
+                    }
+                    Instruction::IfElse(_, _)
+                    | Instruction::Goto(_)
+                    | Instruction::Label(_)
+                    | Instruction::Join(_, _, _, _) => {
+                        panic!("control flow is not used by this test")
+                    }
+                }
+            }
+            outputs
+        }
+
+        let mut fn_map = FunctionMap::new();
+        fn_map
+            .add_function_with_options(
+                symbol!("symbolica::sub_eval::helper"),
+                vec![symbol!("z")],
+                parse!("z^2 + 2"),
+                FunctionRegistrationOptions::new().inlining(InliningPolicy::Never),
+            )
+            .unwrap();
+        fn_map
+            .add_function_with_options(
+                symbol!("symbolica::sub_eval::large"),
+                vec![symbol!("y")],
+                parse!("symbolica::sub_eval::helper(y) + x + 5"),
+                FunctionRegistrationOptions::new().inlining(InliningPolicy::Never),
+            )
+            .unwrap();
+        fn_map
+            .add_tagged_function_with_options(
+                symbol!("symbolica::sub_eval::tagged"),
+                vec![Atom::num(1)],
+                vec![symbol!("y")],
+                parse!("3*y + 7"),
+                FunctionRegistrationOptions::new().inlining(InliningPolicy::Never),
+            )
+            .unwrap();
+        fn_map
+            .add_function_with_options(
+                symbol!("symbolica::sub_eval::captured"),
+                Vec::<crate::atom::Symbol>::new(),
+                parse!("q + 1"),
+                FunctionRegistrationOptions::new().inlining(InliningPolicy::Never),
+            )
+            .unwrap();
+        fn_map
+            .add_function(
+                symbol!("symbolica::sub_eval::outer"),
+                vec![symbol!("q")],
+                parse!("symbolica::sub_eval::captured()"),
+            )
+            .unwrap();
+
+        let expressions = [
+            parse!("symbolica::sub_eval::large(x)"),
+            parse!("symbolica::sub_eval::large(x + 1)"),
+            parse!("symbolica::sub_eval::tagged(1, x)"),
+            parse!("symbolica::sub_eval::outer(x)"),
+        ];
+        let evaluator = Atom::evaluator_multiple(&expressions, &[parse!("x")])
+            .function_map(fn_map)
+            // The legacy tree optimizer also falls back to direct translation when a function is
+            // explicitly kept out of line.
+            .direct_translation(false)
+            .build()
+            .unwrap();
+
+        assert_eq!(evaluator.count_operations().function_calls, 4);
+        assert_eq!(evaluator.external_fns.len(), 3);
+        assert!(
+            evaluator
+                .external_fns
+                .iter()
+                .all(|external| external.sub_evaluator.is_some())
+        );
+
+        let exported = evaluator
+            .clone()
+            .map_coeff(&|c| c.re.to_f64())
+            .export_instructions();
+        assert_eq!(exported.input_count, 1);
+        assert_eq!(exported.output_count, 4);
+        assert_eq!(exported.sub_evaluators.len(), 3);
+        assert_eq!(
+            execute_exported(&exported, &[2.], exported.output_count),
+            [13., 18., 13., 3.]
+        );
+
+        let large = exported
+            .sub_evaluators
+            .iter()
+            .find(|sub| sub.symbol == symbol!("symbolica::sub_eval::large"))
+            .unwrap();
+        // Captured values, explicit arguments, and hoisted coefficients are all passed through the
+        // function instruction in exactly the order described by `input_count`.
+        assert_eq!(large.input_count, 4);
+        assert_eq!(large.output_count, 1);
+        assert_eq!(large.instructions.input_count, large.input_count);
+        assert_eq!(large.instructions.output_count, large.output_count);
+        assert!(large.instructions.constants.is_empty());
+        assert_eq!(large.instructions.sub_evaluators.len(), 1);
+        let helper = &large.instructions.sub_evaluators[0];
+        assert_eq!(helper.symbol, symbol!("symbolica::sub_eval::helper"));
+        let helper_argument_count = large
+            .instructions
+            .instructions
+            .iter()
+            .find_map(|instruction| match instruction {
+                Instruction::Fun(_, function, _)
+                    if function.0 == helper.symbol && function.1 == helper.tags =>
+                {
+                    Some(function.2.len())
+                }
+                _ => None,
+            })
+            .unwrap();
+        assert_eq!(helper.input_count, helper_argument_count);
+        assert_eq!(helper.instructions.input_count, helper.input_count);
+        assert_eq!(helper.instructions.output_count, helper.output_count);
+        assert!(helper.instructions.sub_evaluators.is_empty());
+
+        let rational_constants = evaluator.get_constants().to_vec();
+        let mut evaluator_f64 = evaluator.clone().map_coeff(&|c| c.re.to_f64());
+        let mut out = [0.; 4];
+        evaluator_f64.evaluate(&[2.], &mut out);
+        assert_eq!(out, [13., 18., 13., 3.]);
+
+        let mut remapped = evaluator_f64
+            .set_coeff(&rational_constants)
+            .map_coeff(&|c| c.re.to_f64());
+        remapped.evaluate(&[2.], &mut out);
+        assert_eq!(out, [13., 18., 13., 3.]);
+
+        #[cfg(feature = "bincode")]
+        {
+            let bytes = bincode::encode_to_vec(&evaluator, bincode::config::standard()).unwrap();
+            let (decoded, _) = bincode::decode_from_slice::<
+                crate::evaluate::ExpressionEvaluator<Complex<Rational>>,
+                _,
+            >(&bytes, bincode::config::standard())
+            .unwrap();
+            let mut decoded = decoded.map_coeff(&|c| c.re.to_f64());
+            decoded.evaluate(&[2.], &mut out);
+            assert_eq!(out, [13., 18., 13., 3.]);
+        }
+
+        #[cfg(feature = "native_code_generation")]
+        {
+            let base = std::env::temp_dir()
+                .join(format!("symbolica_sub_evaluator_{}", std::process::id()));
+            let source = base.with_extension("cpp");
+            let library = base.with_extension("so");
+            let mut compiled = evaluator
+                .map_coeff(&|c| c.re.to_f64())
+                .export_cpp::<f64>(&source, "sub_evaluator", ExportSettings::default())
+                .unwrap()
+                .compile(&library, CompileOptions::default().compiler("c++"))
+                .unwrap()
+                .load()
+                .unwrap();
+
+            compiled.evaluate(&[2.], &mut out);
+            assert_eq!(out, [13., 18., 13., 3.]);
+
+            let _ = std::fs::remove_file(source);
+            let _ = std::fs::remove_file(library);
+        }
+    }
+
+    #[test]
+    fn function_registration_options_control_inlining() {
+        let never = symbol!("symbolica::sub_eval::options_never");
+        let always = symbol!("symbolica::sub_eval::options_always");
+        let auto = symbol!("symbolica::sub_eval::options_auto");
+        let evaluator = parse!(
+            "symbolica::sub_eval::options_never(x) + symbolica::sub_eval::options_always(x) + symbolica::sub_eval::options_auto(x)"
+        )
+        .evaluator(&[parse!("x")])
+        .add_function_with_options(
+            never,
+            vec![symbol!("y")],
+            parse!("y^2 + 1"),
+            FunctionRegistrationOptions::new().inlining(InliningPolicy::Never),
+        )
+        .unwrap()
+        .add_function_with_options(
+            always,
+            vec![symbol!("y")],
+            parse!("2*y"),
+            FunctionRegistrationOptions::new().inlining(InliningPolicy::Always),
+        )
+        .unwrap()
+        .add_function_with_options(
+            auto,
+            vec![symbol!("y")],
+            parse!("y + 3"),
+            FunctionRegistrationOptions::new().inlining(InliningPolicy::Auto),
+        )
+        .unwrap()
+        .build()
+        .unwrap();
+
+        assert_eq!(evaluator.external_fns.len(), 1);
+        assert_eq!(evaluator.external_fns[0].symbol, never);
+        assert!(evaluator.external_fns[0].sub_evaluator.is_some());
+
+        let mut evaluator = evaluator.map_coeff(&|coefficient| coefficient.re.to_f64());
+        let mut out = [0.];
+        evaluator.evaluate(&[2.], &mut out);
+        assert_eq!(out, [14.]);
+    }
+
+    #[cfg(feature = "bincode")]
+    #[test]
+    fn function_registration_options_can_be_serialized() {
+        let options = FunctionRegistrationOptions::new().inlining(InliningPolicy::Auto);
+        let bytes = bincode::encode_to_vec(&options, bincode::config::standard()).unwrap();
+        let (decoded, _) = bincode::decode_from_slice::<FunctionRegistrationOptions, _>(
+            &bytes,
+            bincode::config::standard(),
+        )
+        .unwrap();
+        assert_eq!(decoded, options);
+    }
+
+    #[cfg(feature = "native_code_generation")]
+    #[test]
+    fn jit_compiles_non_inlined_function_registered_with_options() {
+        let function = symbol!("symbolica::sub_eval::jit_options");
+        let evaluator = parse!(
+            "symbolica::sub_eval::jit_options(x) + symbolica::sub_eval::jit_options(x + 1)"
+        )
+        .evaluator(&[parse!("x")])
+        .add_function_with_options(
+            function,
+            vec![symbol!("y")],
+            parse!("y^2 + 2"),
+            FunctionRegistrationOptions::new().inlining(InliningPolicy::Never),
+        )
+        .unwrap()
+        .build()
+        .unwrap()
+        .map_coeff(&|coefficient| coefficient.re.to_f64());
+
+        let mut compiled = evaluator
+            .jit_compile(JITCompilationSettings::default())
+            .unwrap();
+        let mut out = [0.];
+        compiled.evaluate(&[3.], &mut out);
+        assert_eq!(out, [29.]);
+        compiled.evaluate(&[5.], &mut out);
+        assert_eq!(out, [65.]);
+    }
+
+    #[cfg(feature = "native_code_generation")]
+    #[test]
+    fn jit_compiles_nested_sub_evaluators() {
+        let evaluator = parse!("symbolica::sub_eval::jit_f(x) + 1")
+            .evaluator(&[parse!("x")])
+            .add_function_with_options(
+                symbol!("symbolica::sub_eval::jit_g"),
+                vec![symbol!("z")],
+                parse!("z^2 + 2"),
+                FunctionRegistrationOptions::new().inlining(InliningPolicy::Never),
+            )
+            .unwrap()
+            .add_function_with_options(
+                symbol!("symbolica::sub_eval::jit_f"),
+                vec![symbol!("y")],
+                parse!("symbolica::sub_eval::jit_g(y)*y + 5"),
+                FunctionRegistrationOptions::new().inlining(InliningPolicy::Never),
+            )
+            .unwrap()
+            .build()
+            .unwrap();
+
+        assert!(
+            evaluator
+                .external_fns
+                .iter()
+                .all(|external| { external.sub_evaluator.is_some() && external.imp.is_none() })
+        );
+
+        let mut compiled = evaluator
+            .jit_compile::<f64>(JITCompilationSettings::default())
+            .unwrap();
+        let mut out = [0.];
+        compiled.evaluate(&[3.], &mut out);
+        assert_eq!(out, [39.]);
+
+        #[cfg(feature = "bincode")]
+        {
+            let bytes = bincode::encode_to_vec(&compiled, bincode::config::standard()).unwrap();
+            let (mut decoded, _) = bincode::decode_from_slice::<
+                crate::evaluate::JITCompiledEvaluator<f64>,
+                _,
+            >(&bytes, bincode::config::standard())
+            .unwrap();
+            decoded.evaluate(&[4.], &mut out);
+            assert_eq!(out, [78.]);
+        }
+
+        let mut compiled = evaluator
+            .jit_compile::<Complex<f64>>(JITCompilationSettings::default())
+            .unwrap();
+        let mut out = [Complex::new(0., 0.)];
+        compiled.evaluate(&[Complex::new(3., 1.)], &mut out);
+        assert_eq!(out, [Complex::new(30., 28.)]);
+    }
+
+    #[cfg(feature = "native_code_generation")]
+    #[test]
+    fn jit_compiles_repeated_nested_sub_evaluator_calls() {
+        let mut fn_map = FunctionMap::new();
+        fn_map
+            .add_function_with_options(
+                symbol!("f"),
+                vec![symbol!("y")],
+                parse!("3 + y^2 + g(y)"),
+                FunctionRegistrationOptions::new().inlining(InliningPolicy::Never),
+            )
+            .unwrap();
+        fn_map
+            .add_function_with_options(
+                symbol!("g"),
+                vec![symbol!("z")],
+                parse!("z"),
+                FunctionRegistrationOptions::new().inlining(InliningPolicy::Never),
+            )
+            .unwrap();
+
+        let evaluator = parse!("f(x) + f(2)")
+            .evaluator(&[parse!("x")])
+            .function_map(fn_map)
+            .build()
+            .unwrap();
+
+        let mut evaluator = evaluator.map_coeff(&|x| x.to_real().unwrap().into());
+        let mut out = [0.];
+        evaluator.evaluate(&[5.], &mut out);
+        assert_eq!(out, [42.]);
+
+        let mut compiled = evaluator
+            .jit_compile(JITCompilationSettings::default())
+            .unwrap();
+        compiled.evaluate(&[5.], &mut out);
+        assert_eq!(out, [42.]);
+
+        #[cfg(feature = "bincode")]
+        {
+            let bytes = bincode::encode_to_vec(&compiled, bincode::config::standard()).unwrap();
+            let (mut decoded, _) = bincode::decode_from_slice::<
+                crate::evaluate::JITCompiledEvaluator<f64>,
+                _,
+            >(&bytes, bincode::config::standard())
+            .unwrap();
+            decoded.evaluate(&[7.], &mut out);
+            assert_eq!(out, [68.]);
+        }
+    }
+
+    #[cfg(feature = "native_code_generation")]
+    #[test]
+    fn cpp_asm_export_includes_nested_sub_evaluators() {
+        fn assert_asm_wrapper(source: &str, name: &str, number_type: &str) {
+            let signature = format!("__attribute__((noinline)) {number_type} {name}(");
+            let start = source
+                .find(&signature)
+                .unwrap_or_else(|| panic!("missing sub-evaluator wrapper '{signature}'"));
+            let body = &source[start..];
+            let end = body
+                .find("\n}\n")
+                .expect("sub-evaluator wrapper should have a function body");
+            assert!(
+                body[..end].contains("__asm__("),
+                "sub-evaluator '{name}' should contain inline ASM"
+            );
+        }
+
+        let f = symbol!("non_inlined_functions::f");
+        let g = symbol!("non_inlined_functions::g");
+        let evaluator = parse!("non_inlined_functions::f(x)")
+            .evaluator(&[parse!("x")])
+            .add_function_with_options(
+                g,
+                vec![symbol!("z")],
+                parse!("z*z + 2"),
+                FunctionRegistrationOptions::new().inlining(InliningPolicy::Never),
+            )
+            .unwrap()
+            .add_function_with_options(
+                f,
+                vec![symbol!("y")],
+                parse!("non_inlined_functions::g(y) + y*y + 1"),
+                FunctionRegistrationOptions::new().inlining(InliningPolicy::Never),
+            )
+            .unwrap()
+            .build()
+            .unwrap();
+
+        let (f_index, f_external) = evaluator
+            .external_fns
+            .iter()
+            .enumerate()
+            .find(|(_, external)| external.symbol == f)
+            .unwrap();
+        let f_name = evaluator.external_cpp_name(f_index);
+        let f_evaluator = f_external.sub_evaluator.as_ref().unwrap();
+        let (g_index, _) = f_evaluator
+            .external_fns
+            .iter()
+            .enumerate()
+            .find(|(_, external)| external.symbol == g)
+            .unwrap();
+        let g_name = f_evaluator.external_cpp_name(g_index);
+        assert_eq!(f_name, "f_0");
+        assert_eq!(g_name, "g_0");
+
+        let settings = ExportSettings::new().inline_asm(InlineASM::X64);
+        let real_source = evaluator
+            .export_cpp_str::<f64>("asm_sub_evaluator", settings.clone())
+            .unwrap();
+        assert_asm_wrapper(&real_source, &f_name, "double");
+        assert_asm_wrapper(&real_source, &g_name, "double");
+
+        let complex_source = evaluator
+            .export_cpp_str::<Complex<f64>>("asm_sub_evaluator", settings.clone())
+            .unwrap();
+        assert_asm_wrapper(&complex_source, &f_name, "std::complex<double>");
+        assert_asm_wrapper(&complex_source, &g_name, "std::complex<double>");
+
+        let simd_source = evaluator
+            .export_cpp_str::<wide::f64x4>("asm_sub_evaluator", settings.clone())
+            .unwrap();
+        assert_asm_wrapper(&simd_source, &f_name, "simd");
+        assert_asm_wrapper(&simd_source, &g_name, "simd");
+
+        let complex_simd_source = evaluator
+            .export_cpp_str::<Complex<wide::f64x4>>("asm_sub_evaluator", settings)
+            .unwrap();
+        assert_asm_wrapper(&complex_simd_source, &f_name, "simd");
+        assert_asm_wrapper(&complex_simd_source, &g_name, "simd");
+    }
+
+    #[test]
+    fn exported_sub_evaluator_preserves_external_calls() {
+        let external = symbol!(
+            "symbolica::sub_eval::exported_external",
+            eval = EvaluationInfo::new().register(|args: &[f64]| args[0] + 1.)
+        );
+        let wrapper = symbol!("symbolica::sub_eval::external_wrapper");
+        let evaluator = parse!("symbolica::sub_eval::external_wrapper(x)")
+            .evaluator(&[parse!("x")])
+            .add_function_with_options(
+                wrapper,
+                vec![symbol!("y")],
+                parse!("symbolica::sub_eval::exported_external(y)"),
+                FunctionRegistrationOptions::new().inlining(InliningPolicy::Never),
+            )
+            .unwrap()
+            .build()
+            .unwrap();
+
+        let exported = evaluator.export_instructions();
+        assert_eq!(exported.sub_evaluators.len(), 1);
+        let wrapper = &exported.sub_evaluators[0].instructions;
+        assert!(wrapper.sub_evaluators.is_empty());
+        let (symbol, tags, _) = wrapper
+            .instructions
+            .iter()
+            .find_map(|instruction| match instruction {
+                Instruction::Fun(_, function, _) => Some(function.as_ref()),
+                _ => None,
+            })
+            .unwrap();
+        assert_eq!(*symbol, external);
+        assert!(tags.is_empty());
     }
 
     #[test]
