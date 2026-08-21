@@ -313,19 +313,8 @@ impl<T> ExternalFunctionContainer<T> {
     }
 
     #[cfg(feature = "native_code_generation")]
-    pub(super) fn callable(&self) -> Option<Box<dyn ExternalFunction<T>>>
-    where
-        T: Real + Send + Sync + 'static,
-    {
-        if let Some(imp) = &self.imp {
-            return Some(imp.clone());
-        }
-
-        let evaluator = self.sub_evaluator.as_ref()?;
-        let evaluator = Arc::new(Mutex::new((**evaluator).clone()));
-        Some(Box::new(move |args: &[T]| {
-            evaluator.lock().unwrap().evaluate_single(args)
-        }))
+    pub(super) fn callable(&self) -> Option<Box<dyn ExternalFunction<T>>> {
+        self.imp.clone()
     }
 
     pub(super) fn fetch_impl_for<T2: EvaluationDomain>(

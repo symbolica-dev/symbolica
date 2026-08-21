@@ -464,29 +464,6 @@ mod test {
 
         #[cfg(feature = "native_code_generation")]
         {
-            let jit_evaluator = parse!("symbolica::sub_eval::jit_f(x) + 1")
-                .evaluator(&[parse!("x")])
-                .add_function_no_inline(
-                    symbol!("symbolica::sub_eval::jit_g"),
-                    vec![symbol!("z")],
-                    parse!("z^2 + 2"),
-                )
-                .unwrap()
-                .add_function_no_inline(
-                    symbol!("symbolica::sub_eval::jit_f"),
-                    vec![symbol!("y")],
-                    parse!("symbolica::sub_eval::jit_g(y)*y + 5"),
-                )
-                .unwrap()
-                .build()
-                .unwrap();
-            let mut compiled = jit_evaluator
-                .jit_compile::<f64>(JITCompilationSettings::default())
-                .unwrap();
-            let mut jit_out = [0.];
-            compiled.evaluate(&[3.], &mut jit_out);
-            assert_eq!(jit_out, [39.]);
-
             let base = std::env::temp_dir()
                 .join(format!("symbolica_sub_evaluator_{}", std::process::id()));
             let source = base.with_extension("cpp");
@@ -506,6 +483,60 @@ mod test {
             let _ = std::fs::remove_file(source);
             let _ = std::fs::remove_file(library);
         }
+    }
+
+    #[cfg(feature = "native_code_generation")]
+    #[test]
+    fn jit_compiles_nested_sub_evaluators() {
+        let evaluator = parse!("symbolica::sub_eval::jit_f(x) + 1")
+            .evaluator(&[parse!("x")])
+            .add_function_no_inline(
+                symbol!("symbolica::sub_eval::jit_g"),
+                vec![symbol!("z")],
+                parse!("z^2 + 2"),
+            )
+            .unwrap()
+            .add_function_no_inline(
+                symbol!("symbolica::sub_eval::jit_f"),
+                vec![symbol!("y")],
+                parse!("symbolica::sub_eval::jit_g(y)*y + 5"),
+            )
+            .unwrap()
+            .build()
+            .unwrap();
+
+        assert!(
+            evaluator
+                .external_fns
+                .iter()
+                .all(|external| { external.sub_evaluator.is_some() && external.imp.is_none() })
+        );
+
+        let mut compiled = evaluator
+            .jit_compile::<f64>(JITCompilationSettings::default())
+            .unwrap();
+        let mut out = [0.];
+        compiled.evaluate(&[3.], &mut out);
+        assert_eq!(out, [39.]);
+
+        #[cfg(feature = "bincode")]
+        {
+            let bytes = bincode::encode_to_vec(&compiled, bincode::config::standard()).unwrap();
+            let (mut decoded, _) = bincode::decode_from_slice::<
+                crate::evaluate::JITCompiledEvaluator<f64>,
+                _,
+            >(&bytes, bincode::config::standard())
+            .unwrap();
+            decoded.evaluate(&[4.], &mut out);
+            assert_eq!(out, [78.]);
+        }
+
+        let mut compiled = evaluator
+            .jit_compile::<Complex<f64>>(JITCompilationSettings::default())
+            .unwrap();
+        let mut out = [Complex::new(0., 0.)];
+        compiled.evaluate(&[Complex::new(3., 1.)], &mut out);
+        assert_eq!(out, [Complex::new(30., 28.)]);
     }
 
     #[test]

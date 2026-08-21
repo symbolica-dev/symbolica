@@ -587,6 +587,41 @@ pub trait JITCompiledNumber: Sized {
     );
 }
 
+fn jit_compile_sub_evaluators<T>(
+    external_functions: &mut [ExternalFunctionContainer<T>],
+    settings: &JITCompilationSettings,
+) -> Result<(), String>
+where
+    T: JITCompiledNumber + Clone + Default + Send + Sync + 'static,
+{
+    for external in external_functions {
+        if external.imp.is_some() {
+            continue;
+        }
+
+        let Some(sub_evaluator) = external.sub_evaluator.as_ref() else {
+            continue;
+        };
+
+        let compiled = sub_evaluator
+            .jit_compile(settings.clone())
+            .map_err(|e| format!("Could not JIT-compile sub-evaluator '{}': {e}", external))?;
+        let compiled = Arc::new(Mutex::new(compiled));
+        // Keep the source sub-evaluator on the container: serialization stores that definition,
+        // while this generated callback owns the compiled evaluator used at runtime.
+        external.imp = Some(Box::new(move |args: &[T]| {
+            let mut output = T::default();
+            compiled
+                .lock()
+                .unwrap()
+                .evaluate(args, std::slice::from_mut(&mut output));
+            output
+        }));
+    }
+
+    Ok(())
+}
+
 impl JITCompiledNumber for f64 {
     fn to_complex_f64(&self) -> Result<symjit::Complex<f64>, String> {
         Ok(symjit::Complex::new(*self, 0.))
@@ -630,10 +665,13 @@ impl JITCompiledNumber for f64 {
             return Err("complex constants are not supported for f64 JIT export".to_string());
         }
 
+        let mut external_functions = external_functions.to_vec();
+        jit_compile_sub_evaluators(&mut external_functions, &settings)?;
+
         let mut config = Config::default();
         config.set_complex(false);
         settings.apply_to_config(&mut config)?;
-        config.set_defuns(Self::convert_external_functions(external_functions)?);
+        config.set_defuns(Self::convert_external_functions(&external_functions)?);
 
         let mut translator = translate_to_symjit(instructions, constants, param_count, config)?;
 
@@ -643,7 +681,7 @@ impl JITCompiledNumber for f64 {
 
         Ok(JITCompiledEvaluator {
             code: app.seal().map_err(|e| e.to_string())?,
-            external_functions: external_functions.to_vec(),
+            external_functions,
             compressed_ir,
             batch_input_buffer: Vec::new(),
             batch_output_buffer: Vec::new(),
@@ -700,7 +738,13 @@ impl<T: serde::Serialize> serde::Serialize for JITCompiledEvaluator<T> {
 #[cfg(feature = "serde")]
 impl<
     'de,
-    T: JITCompiledNumber + EvaluationDomain + symjit::Element + Copy + serde::Deserialize<'de>,
+    T: JITCompiledNumber
+        + EvaluationDomain
+        + symjit::Element
+        + Copy
+        + Send
+        + Sync
+        + serde::Deserialize<'de>,
 > serde::Deserialize<'de> for JITCompiledEvaluator<T>
 {
     fn deserialize<D: serde::Deserializer<'de>>(deserializer: D) -> Result<Self, D::Error> {
@@ -723,8 +767,10 @@ impl<T: bincode::Encode> bincode::Encode for JITCompiledEvaluator<T> {
 }
 
 #[cfg(feature = "bincode")]
-impl<Context, T: JITCompiledNumber + EvaluationDomain + bincode::Decode<Context>>
-    bincode::Decode<Context> for JITCompiledEvaluator<T>
+impl<
+    Context,
+    T: JITCompiledNumber + EvaluationDomain + Clone + Default + Send + Sync + bincode::Decode<Context>,
+> bincode::Decode<Context> for JITCompiledEvaluator<T>
 {
     fn decode<D: bincode::de::Decoder<Context = Context>>(
         decoder: &mut D,
@@ -736,8 +782,11 @@ impl<Context, T: JITCompiledNumber + EvaluationDomain + bincode::Decode<Context>
 }
 
 #[cfg(feature = "bincode")]
-impl<'de, Context, T: JITCompiledNumber + EvaluationDomain + bincode::Decode<Context>>
-    bincode::BorrowDecode<'de, Context> for JITCompiledEvaluator<T>
+impl<
+    'de,
+    Context,
+    T: JITCompiledNumber + EvaluationDomain + Clone + Default + Send + Sync + bincode::Decode<Context>,
+> bincode::BorrowDecode<'de, Context> for JITCompiledEvaluator<T>
 {
     fn borrow_decode<D: bincode::de::BorrowDecoder<'de, Context = Context>>(
         decoder: &mut D,
@@ -759,12 +808,14 @@ impl<T: JITCompiledNumber> JITCompiledEvaluator<T> {
     }
 }
 
-impl<T: JITCompiledNumber> JITCompiledEvaluator<T> {
+impl<T: JITCompiledNumber + Clone + Default + Send + Sync + 'static> JITCompiledEvaluator<T> {
     #[allow(dead_code)]
     fn load(
         compressed_ir: Vec<u8>,
-        external_functions: Vec<ExternalFunctionContainer<T>>,
+        mut external_functions: Vec<ExternalFunctionContainer<T>>,
     ) -> Result<Self, String> {
+        jit_compile_sub_evaluators(&mut external_functions, &JITCompilationSettings::default())?;
+
         let mut config = Config::default();
         config.set_defuns(T::convert_external_functions(&external_functions)?);
 
@@ -853,11 +904,14 @@ impl JITCompiledNumber for wide::f64x4 {
         external_functions: &[ExternalFunctionContainer<Self>],
         settings: JITCompilationSettings,
     ) -> Result<JITCompiledEvaluator<Self>, String> {
+        let mut external_functions = external_functions.to_vec();
+        jit_compile_sub_evaluators(&mut external_functions, &settings)?;
+
         let mut config = Config::default();
         config.set_complex(false);
         config.set_simd(true);
         settings.apply_to_config(&mut config)?;
-        config.set_defuns(Self::convert_external_functions(external_functions)?);
+        config.set_defuns(Self::convert_external_functions(&external_functions)?);
 
         let mut translator = translate_to_symjit(instructions, constants, param_count, config)?;
 
@@ -867,7 +921,7 @@ impl JITCompiledNumber for wide::f64x4 {
 
         Ok(JITCompiledEvaluator {
             code: app.seal().map_err(|e| e.to_string())?,
-            external_functions: external_functions.to_vec(),
+            external_functions,
             compressed_ir,
             batch_input_buffer: Vec::new(),
             batch_output_buffer: Vec::new(),
@@ -1030,10 +1084,13 @@ impl JITCompiledNumber for Complex<f64> {
         external_functions: &[ExternalFunctionContainer<Self>],
         settings: JITCompilationSettings,
     ) -> Result<JITCompiledEvaluator<Complex<f64>>, String> {
+        let mut external_functions = external_functions.to_vec();
+        jit_compile_sub_evaluators(&mut external_functions, &settings)?;
+
         let mut config = Config::default();
         config.set_complex(true);
         settings.apply_to_config(&mut config)?;
-        config.set_defuns(Self::convert_external_functions(external_functions)?);
+        config.set_defuns(Self::convert_external_functions(&external_functions)?);
 
         let mut translator = translate_to_symjit(instructions, constants, param_count, config)?;
 
@@ -1043,7 +1100,7 @@ impl JITCompiledNumber for Complex<f64> {
 
         Ok(JITCompiledEvaluator {
             code: app.seal().map_err(|e| e.to_string())?,
-            external_functions: external_functions.to_vec(),
+            external_functions,
             compressed_ir,
             batch_input_buffer: Vec::new(),
             batch_output_buffer: Vec::new(),
@@ -1159,11 +1216,14 @@ impl JITCompiledNumber for Complex<wide::f64x4> {
         external_functions: &[ExternalFunctionContainer<Self>],
         settings: JITCompilationSettings,
     ) -> Result<JITCompiledEvaluator<Self>, String> {
+        let mut external_functions = external_functions.to_vec();
+        jit_compile_sub_evaluators(&mut external_functions, &settings)?;
+
         let mut config = Config::default();
         config.set_complex(true);
         config.set_simd(true);
         settings.apply_to_config(&mut config)?;
-        config.set_defuns(Self::convert_external_functions(external_functions)?);
+        config.set_defuns(Self::convert_external_functions(&external_functions)?);
 
         let mut translator = translate_to_symjit(instructions, constants, param_count, config)?;
 
@@ -1173,7 +1233,7 @@ impl JITCompiledNumber for Complex<wide::f64x4> {
 
         Ok(JITCompiledEvaluator {
             code: app.seal().map_err(|e| e.to_string())?,
-            external_functions: external_functions.to_vec(),
+            external_functions,
             compressed_ir,
             batch_input_buffer: Vec::new(),
             batch_output_buffer: Vec::new(),
