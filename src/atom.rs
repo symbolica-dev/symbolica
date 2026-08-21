@@ -43,7 +43,7 @@ mod coefficient;
 mod core;
 pub mod representation;
 
-use ahash::HashMap;
+use ahash::{HashMap, HashSet};
 use byteorder::{LittleEndian, ReadBytesExt, WriteBytesExt};
 use numerica::domains::float::Float;
 use smartstring::{LazyCompact, SmartString};
@@ -614,6 +614,31 @@ pub enum UserData {
     Map(HashMap<UserDataKey, UserData>),
     /// A serialized byte array.
     Serialized(Vec<u8>),
+}
+
+impl UserData {
+    /// Returns all symbols used in this user data, including those from nested atoms and lists.
+    pub fn get_symbols(&self, symbols: &mut HashSet<Symbol>) {
+        match self {
+            UserData::Atom(atom) => {
+                atom.as_view().get_all_symbols_impl(true, symbols);
+            }
+            UserData::List(list) => {
+                for item in list {
+                    item.get_symbols(symbols);
+                }
+            }
+            UserData::Map(map) => {
+                for (key, item) in map {
+                    if let UserDataKey::Atom(atom) = key {
+                        atom.as_view().get_all_symbols_impl(true, symbols);
+                    }
+                    item.get_symbols(symbols);
+                }
+            }
+            _ => {}
+        }
+    }
 }
 
 /// Attributes that can be assigned to symbols.

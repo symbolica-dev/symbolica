@@ -1968,7 +1968,7 @@ impl<'a> AtomView<'a> {
     #[inline(always)]
     pub fn export<W: Write>(&self, dest: &mut W) -> Result<(), std::io::Error> {
         let active_symbols = self.get_all_symbols(true);
-        State::export_partial(dest, &active_symbols)?;
+        State::export_partial(dest, active_symbols)?;
 
         dest.write_u64::<LittleEndian>(1)?; // export a single expression
 
