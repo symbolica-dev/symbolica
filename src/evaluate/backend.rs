@@ -410,8 +410,11 @@ impl ExpressionEvaluator<Complex<Rational>> {
             .external_fns
             .iter()
             .map(|f| {
-                let mapped = f.map::<T>();
-                if mapped.constant_index.is_none() && mapped.imp.is_none() {
+                let mapped = f.map_rational::<T>(T::FIXED_PRECISION.unwrap_or(53));
+                if mapped.constant_index.is_none()
+                    && mapped.imp.is_none()
+                    && mapped.sub_evaluator.is_none()
+                {
                     return Err(format!(
                         "External function '{}' does not have an implementation",
                         f
@@ -466,7 +469,7 @@ impl<T: JITCompiledNumber + Clone> ExpressionEvaluator<T> {
             .external_fns
             .iter()
             .map(|f| {
-                if f.constant_index.is_none() && f.imp.is_none() {
+                if f.constant_index.is_none() && f.imp.is_none() && f.sub_evaluator.is_none() {
                     return Err(format!(
                         "External function '{}' does not have an implementation",
                         f
@@ -532,15 +535,11 @@ fn translate_to_symjit(
             Instruction::Fun(lhs, fun, is_real) => {
                 let (name, tags, args) = *fun;
 
-                let mut name = name.get_ascii_name().ok_or_else(|| {
+                let name = function_export_name(name, &tags).ok_or_else(|| {
                     format!(
                         "No ASCII name for symbol {name} available, which is needed for exporting"
                     )
                 })?;
-
-                for t in tags {
-                    name += &format!("_{}", t);
-                }
 
                 translator
                     .append_fun(&slot(lhs), &name, &slot_list(&args), is_real)
@@ -558,11 +557,21 @@ fn translate_to_symjit(
     Ok(translator)
 }
 
+fn function_export_name(symbol: crate::atom::Symbol, tags: &[String]) -> Option<String> {
+    let mut name = symbol.get_ascii_name()?;
+    for tag in tags {
+        name.push('_');
+        name.push_str(tag);
+    }
+    Some(name)
+}
+
 pub trait JITCompiledNumber: Sized {
     fn to_complex_f64(&self) -> Result<symjit::Complex<f64>, String>;
 
     fn convert_external_functions(
         external_functions: &[ExternalFunctionContainer<Self>],
+        settings: &JITCompilationSettings,
     ) -> Result<symjit::Defuns, String>;
 
     /// Create a JIT-compiled evaluator for this number type.
@@ -576,12 +585,34 @@ pub trait JITCompiledNumber: Sized {
 
     fn evaluate(eval: &mut JITCompiledEvaluator<Self>, args: &[Self], out: &mut [Self]);
 
+    #[doc(hidden)]
+    fn into_external_function(eval: JITCompiledEvaluator<Self>) -> Box<dyn ExternalFunction<Self>>;
+
     fn batch_evaluate(
         eval: &mut JITCompiledEvaluator<Self>,
         args: &[Self],
         out: &mut [Self],
         rows: usize,
     );
+}
+
+fn register_sub_evaluator<T>(
+    defuns: &mut Defuns,
+    external: &ExternalFunctionContainer<T>,
+    settings: &JITCompilationSettings,
+) -> Result<bool, String>
+where
+    T: JITCompiledNumber + Clone,
+{
+    let Some(sub_evaluator) = external.sub_evaluator.as_ref() else {
+        return Ok(false);
+    };
+
+    let compiled = sub_evaluator
+        .jit_compile(settings.clone())
+        .map_err(|e| format!("Could not JIT-compile sub-evaluator '{}': {e}", external))?;
+    defuns.add_applet(external.export_name(), compiled.code);
+    Ok(true)
 }
 
 impl JITCompiledNumber for f64 {
@@ -591,6 +622,7 @@ impl JITCompiledNumber for f64 {
 
     fn convert_external_functions(
         external_functions: &[ExternalFunctionContainer<Self>],
+        settings: &JITCompilationSettings,
     ) -> Result<symjit::Defuns, String> {
         let mut defuns = Defuns::new();
 
@@ -599,7 +631,11 @@ impl JITCompiledNumber for f64 {
                 continue;
             }
 
-            let Some(imp) = f.imp.clone() else {
+            if register_sub_evaluator(&mut defuns, f, settings)? {
+                continue;
+            }
+
+            let Some(imp) = f.callable() else {
                 return Err(format!(
                     "External function '{}' does not have an implementation",
                     f
@@ -627,10 +663,15 @@ impl JITCompiledNumber for f64 {
             return Err("complex constants are not supported for f64 JIT export".to_string());
         }
 
+        let external_functions = external_functions.to_vec();
+
         let mut config = Config::default();
         config.set_complex(false);
         settings.apply_to_config(&mut config)?;
-        config.set_defuns(Self::convert_external_functions(external_functions)?);
+        config.set_defuns(Self::convert_external_functions(
+            &external_functions,
+            &settings,
+        )?);
 
         let mut translator = translate_to_symjit(instructions, constants, param_count, config)?;
 
@@ -640,7 +681,7 @@ impl JITCompiledNumber for f64 {
 
         Ok(JITCompiledEvaluator {
             code: app.seal().map_err(|e| e.to_string())?,
-            external_functions: external_functions.to_vec(),
+            external_functions,
             compressed_ir,
             batch_input_buffer: Vec::new(),
             batch_output_buffer: Vec::new(),
@@ -650,6 +691,10 @@ impl JITCompiledNumber for f64 {
     #[inline(always)]
     fn evaluate(eval: &mut JITCompiledEvaluator<Self>, args: &[Self], out: &mut [Self]) {
         eval.code.evaluate(args, out);
+    }
+
+    fn into_external_function(eval: JITCompiledEvaluator<Self>) -> Box<dyn ExternalFunction<Self>> {
+        Box::new(move |args: &[Self]| eval.code.evaluate_single(args))
     }
 
     #[inline(always)]
@@ -688,15 +733,17 @@ impl<T> JITCompiledEvaluator<T> {
 }
 
 #[cfg(feature = "serde")]
-impl<T> serde::Serialize for JITCompiledEvaluator<T> {
+impl<T: serde::Serialize> serde::Serialize for JITCompiledEvaluator<T> {
     fn serialize<S: serde::Serializer>(&self, serializer: S) -> Result<S::Ok, S::Error> {
         (&self.external_functions, &self.compressed_ir).serialize(serializer)
     }
 }
 
 #[cfg(feature = "serde")]
-impl<'de, T: JITCompiledNumber + EvaluationDomain + symjit::Element + Copy> serde::Deserialize<'de>
-    for JITCompiledEvaluator<T>
+impl<
+    'de,
+    T: JITCompiledNumber + EvaluationDomain + symjit::Element + Copy + serde::Deserialize<'de>,
+> serde::Deserialize<'de> for JITCompiledEvaluator<T>
 {
     fn deserialize<D: serde::Deserializer<'de>>(deserializer: D) -> Result<Self, D::Error> {
         let (fs, compressed_ir): (Vec<ExternalFunctionContainer<T>>, Vec<u8>) =
@@ -706,7 +753,7 @@ impl<'de, T: JITCompiledNumber + EvaluationDomain + symjit::Element + Copy> serd
 }
 
 #[cfg(feature = "bincode")]
-impl<T> bincode::Encode for JITCompiledEvaluator<T> {
+impl<T: bincode::Encode> bincode::Encode for JITCompiledEvaluator<T> {
     fn encode<E: bincode::enc::Encoder>(
         &self,
         encoder: &mut E,
@@ -718,8 +765,8 @@ impl<T> bincode::Encode for JITCompiledEvaluator<T> {
 }
 
 #[cfg(feature = "bincode")]
-impl<Context, T: JITCompiledNumber + EvaluationDomain> bincode::Decode<Context>
-    for JITCompiledEvaluator<T>
+impl<Context, T: JITCompiledNumber + EvaluationDomain + Clone + bincode::Decode<Context>>
+    bincode::Decode<Context> for JITCompiledEvaluator<T>
 {
     fn decode<D: bincode::de::Decoder<Context = Context>>(
         decoder: &mut D,
@@ -731,8 +778,8 @@ impl<Context, T: JITCompiledNumber + EvaluationDomain> bincode::Decode<Context>
 }
 
 #[cfg(feature = "bincode")]
-impl<'de, Context, T: JITCompiledNumber + EvaluationDomain> bincode::BorrowDecode<'de, Context>
-    for JITCompiledEvaluator<T>
+impl<'de, Context, T: JITCompiledNumber + EvaluationDomain + Clone + bincode::Decode<Context>>
+    bincode::BorrowDecode<'de, Context> for JITCompiledEvaluator<T>
 {
     fn borrow_decode<D: bincode::de::BorrowDecoder<'de, Context = Context>>(
         decoder: &mut D,
@@ -742,7 +789,7 @@ impl<'de, Context, T: JITCompiledNumber + EvaluationDomain> bincode::BorrowDecod
 }
 
 impl<T: JITCompiledNumber> JITCompiledEvaluator<T> {
-    /// Evaluate the JIT compiled code.
+    /// Evaluate the JIT-compiled code.
     #[inline(always)]
     pub fn evaluate(&mut self, args: &[T], out: &mut [T]) {
         T::evaluate(self, args, out);
@@ -754,14 +801,18 @@ impl<T: JITCompiledNumber> JITCompiledEvaluator<T> {
     }
 }
 
-impl<T: JITCompiledNumber> JITCompiledEvaluator<T> {
+impl<T: JITCompiledNumber + Clone> JITCompiledEvaluator<T> {
     #[allow(dead_code)]
     fn load(
         compressed_ir: Vec<u8>,
         external_functions: Vec<ExternalFunctionContainer<T>>,
     ) -> Result<Self, String> {
+        let settings = JITCompilationSettings::default();
         let mut config = Config::default();
-        config.set_defuns(T::convert_external_functions(&external_functions)?);
+        config.set_defuns(T::convert_external_functions(
+            &external_functions,
+            &settings,
+        )?);
 
         let app = symjit::Application::load(&mut compressed_ir.as_slice(), &config)
             .map_err(|e| e.to_string())?
@@ -816,6 +867,7 @@ impl JITCompiledNumber for wide::f64x4 {
 
     fn convert_external_functions(
         external_functions: &[ExternalFunctionContainer<Self>],
+        settings: &JITCompilationSettings,
     ) -> Result<symjit::Defuns, String> {
         let mut defuns = Defuns::new();
         for f in external_functions {
@@ -825,7 +877,11 @@ impl JITCompiledNumber for wide::f64x4 {
                 continue;
             }
 
-            let Some(imp) = f.imp.clone() else {
+            if register_sub_evaluator(&mut defuns, f, settings)? {
+                continue;
+            }
+
+            let Some(imp) = f.callable() else {
                 return Err(format!(
                     "External function '{}' does not have an implementation",
                     f
@@ -848,11 +904,16 @@ impl JITCompiledNumber for wide::f64x4 {
         external_functions: &[ExternalFunctionContainer<Self>],
         settings: JITCompilationSettings,
     ) -> Result<JITCompiledEvaluator<Self>, String> {
+        let external_functions = external_functions.to_vec();
+
         let mut config = Config::default();
         config.set_complex(false);
         config.set_simd(true);
         settings.apply_to_config(&mut config)?;
-        config.set_defuns(Self::convert_external_functions(external_functions)?);
+        config.set_defuns(Self::convert_external_functions(
+            &external_functions,
+            &settings,
+        )?);
 
         let mut translator = translate_to_symjit(instructions, constants, param_count, config)?;
 
@@ -862,7 +923,7 @@ impl JITCompiledNumber for wide::f64x4 {
 
         Ok(JITCompiledEvaluator {
             code: app.seal().map_err(|e| e.to_string())?,
-            external_functions: external_functions.to_vec(),
+            external_functions,
             compressed_ir,
             batch_input_buffer: Vec::new(),
             batch_output_buffer: Vec::new(),
@@ -876,6 +937,10 @@ impl JITCompiledNumber for wide::f64x4 {
         out: &mut [wide::f64x4],
     ) {
         eval.code.evaluate(args, out);
+    }
+
+    fn into_external_function(eval: JITCompiledEvaluator<Self>) -> Box<dyn ExternalFunction<Self>> {
+        Box::new(move |args: &[Self]| eval.code.evaluate_single(args))
     }
 
     #[inline(always)]
@@ -986,6 +1051,7 @@ impl JITCompiledNumber for Complex<f64> {
 
     fn convert_external_functions(
         external_functions: &[ExternalFunctionContainer<Self>],
+        settings: &JITCompilationSettings,
     ) -> Result<symjit::Defuns, String> {
         let mut defuns = Defuns::new();
 
@@ -996,7 +1062,11 @@ impl JITCompiledNumber for Complex<f64> {
                 continue;
             }
 
-            let Some(imp) = f.imp.clone() else {
+            if register_sub_evaluator(&mut defuns, f, settings)? {
+                continue;
+            }
+
+            let Some(imp) = f.callable() else {
                 return Err(format!(
                     "External function '{}' does not have an implementation",
                     f
@@ -1025,10 +1095,15 @@ impl JITCompiledNumber for Complex<f64> {
         external_functions: &[ExternalFunctionContainer<Self>],
         settings: JITCompilationSettings,
     ) -> Result<JITCompiledEvaluator<Complex<f64>>, String> {
+        let external_functions = external_functions.to_vec();
+
         let mut config = Config::default();
         config.set_complex(true);
         settings.apply_to_config(&mut config)?;
-        config.set_defuns(Self::convert_external_functions(external_functions)?);
+        config.set_defuns(Self::convert_external_functions(
+            &external_functions,
+            &settings,
+        )?);
 
         let mut translator = translate_to_symjit(instructions, constants, param_count, config)?;
 
@@ -1038,7 +1113,7 @@ impl JITCompiledNumber for Complex<f64> {
 
         Ok(JITCompiledEvaluator {
             code: app.seal().map_err(|e| e.to_string())?,
-            external_functions: external_functions.to_vec(),
+            external_functions,
             compressed_ir,
             batch_input_buffer: Vec::new(),
             batch_output_buffer: Vec::new(),
@@ -1055,6 +1130,14 @@ impl JITCompiledNumber for Complex<f64> {
         let args: &[symjit::Complex<f64>] = unsafe { std::mem::transmute(args) };
         let out: &mut [symjit::Complex<f64>] = unsafe { std::mem::transmute(out) };
         eval.code.evaluate(args, out);
+    }
+
+    fn into_external_function(eval: JITCompiledEvaluator<Self>) -> Box<dyn ExternalFunction<Self>> {
+        Box::new(move |args: &[Self]| {
+            let args: &[symjit::Complex<f64>] = unsafe { std::mem::transmute(args) };
+            let result = eval.code.evaluate_single(args);
+            Complex::new(result.re, result.im)
+        })
     }
 
     #[inline(always)]
@@ -1114,6 +1197,7 @@ impl JITCompiledNumber for Complex<wide::f64x4> {
 
     fn convert_external_functions(
         external_functions: &[ExternalFunctionContainer<Self>],
+        settings: &JITCompilationSettings,
     ) -> Result<symjit::Defuns, String> {
         let mut defuns = Defuns::new();
 
@@ -1124,7 +1208,11 @@ impl JITCompiledNumber for Complex<wide::f64x4> {
                 continue;
             }
 
-            let Some(imp) = f.imp.clone() else {
+            if register_sub_evaluator(&mut defuns, f, settings)? {
+                continue;
+            }
+
+            let Some(imp) = f.callable() else {
                 return Err(format!(
                     "External function '{}' does not have an implementation",
                     f
@@ -1154,11 +1242,16 @@ impl JITCompiledNumber for Complex<wide::f64x4> {
         external_functions: &[ExternalFunctionContainer<Self>],
         settings: JITCompilationSettings,
     ) -> Result<JITCompiledEvaluator<Self>, String> {
+        let external_functions = external_functions.to_vec();
+
         let mut config = Config::default();
         config.set_complex(true);
         config.set_simd(true);
         settings.apply_to_config(&mut config)?;
-        config.set_defuns(Self::convert_external_functions(external_functions)?);
+        config.set_defuns(Self::convert_external_functions(
+            &external_functions,
+            &settings,
+        )?);
 
         let mut translator = translate_to_symjit(instructions, constants, param_count, config)?;
 
@@ -1168,7 +1261,7 @@ impl JITCompiledNumber for Complex<wide::f64x4> {
 
         Ok(JITCompiledEvaluator {
             code: app.seal().map_err(|e| e.to_string())?,
-            external_functions: external_functions.to_vec(),
+            external_functions,
             compressed_ir,
             batch_input_buffer: Vec::new(),
             batch_output_buffer: Vec::new(),
@@ -1184,6 +1277,14 @@ impl JITCompiledNumber for Complex<wide::f64x4> {
         let args: &[symjit::Complex<wide::f64x4>] = unsafe { std::mem::transmute(args) };
         let out: &mut [symjit::Complex<wide::f64x4>] = unsafe { std::mem::transmute(out) };
         eval.code.evaluate(args, out);
+    }
+
+    fn into_external_function(eval: JITCompiledEvaluator<Self>) -> Box<dyn ExternalFunction<Self>> {
+        Box::new(move |args: &[Self]| {
+            let args: &[symjit::Complex<wide::f64x4>] = unsafe { std::mem::transmute(args) };
+            let result = eval.code.evaluate_single(args);
+            Complex::new(result.re, result.im)
+        })
     }
 
     #[inline(always)]

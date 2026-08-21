@@ -8337,9 +8337,7 @@ impl PythonExpression {
     }
 
     /// Create an evaluator that can evaluate (nested) expressions in an optimized fashion.
-    /// Function definitions can be provided with `functions`, where each key is
-    /// `(name, arguments)` and the value is the function body. For example the function
-    /// `f(x,y)=x^2+y` should be provided as `{(f, (x, y)): x**2 + y}`.
+    /// Function definitions can be provided with `functions`.
     /// All free parameters should be provided in the `params` list.
     ///
     /// If `KeyboardInterrupt` is triggered during the optimization, the optimization will stop and will yield the
@@ -8354,7 +8352,13 @@ impl PythonExpression {
     /// >>> fd = E("y^2 + z^2*y^2")
     /// >>> gd = E("y + 5")
     /// >>>
-    /// >>> ev = e1.evaluator([x], functions={(f, (y, z)): fd, (g, (y,)): gd})
+    /// >>> ev = e1.evaluator(
+    /// >>>     [x],
+    /// >>>     functions=[
+    /// >>>         FunctionDefinition(f, [y, z], fd, inlining="never"),
+    /// >>>         FunctionDefinition(g, [y], gd),
+    /// >>>     ],
+    /// >>> )
     /// >>> res = ev.evaluate([[1.], [2.], [3.]])  # evaluate at x=1, x=2, x=3
     /// >>> print(res)
     ///
@@ -8366,9 +8370,8 @@ impl PythonExpression {
     /// ----------
     /// params: Sequence[Expression]
     ///     A list of free parameters.
-    /// functions: dict[tuple[Expression, Sequence[Expression]], Expression] = {}
-    ///     A dictionary of functions. The key is a tuple of the function name and the argument variables.
-    ///     The value is the function body. If the function name entry contains arguments, these are considered tags.
+    /// functions: Sequence[FunctionDefinition] = []
+    ///     Function definitions available to the evaluator.
     /// iterations: int, optional
     ///     The number of optimization iterations to perform.
     /// cpe_iterations: Optional[int], optional
@@ -8396,7 +8399,7 @@ impl PythonExpression {
     #[pyo3(signature =
         (
         params,
-        functions = HashMap::default(),
+        functions = Vec::default(),
         iterations = 1,
         cpe_iterations = None,
         n_cores = 4,
@@ -8413,7 +8416,7 @@ impl PythonExpression {
     pub fn evaluator(
         &self,
         params: Vec<PythonExpression>,
-        functions: HashMap<(PolyVariable, Vec<PolyVariable>), PythonExpression>,
+        functions: Vec<PythonFunctionDefinition>,
         iterations: usize,
         cpe_iterations: Option<usize>,
         n_cores: usize,
@@ -8433,40 +8436,8 @@ impl PythonExpression {
 
         let mut fn_map = FunctionMap::new();
 
-        for ((symbol, args), body) in functions {
-            let args: Vec<_> = args
-                .into_iter()
-                .map(|x| match x {
-                    PolyVariable::Symbol(s) => Ok(Indeterminate::Symbol(s, s.into())),
-                    PolyVariable::Function(s, f) => Ok(Indeterminate::Function(s, f)),
-                    _ => Err(exceptions::PyValueError::new_err(format!(
-                        "Bad function argument {x} in function {symbol}",
-                    ))),
-                })
-                .collect::<Result<_, _>>()?;
-
-            match symbol {
-                PolyVariable::Symbol(s) => {
-                    fn_map
-                        .add_function(s, args, body.expr)
-                        .map_err(|e| exceptions::PyValueError::new_err(e.to_string()))?;
-                }
-                PolyVariable::Function(s, fa) => {
-                    let tags = fa
-                        .as_fun_view()
-                        .unwrap()
-                        .iter()
-                        .map(|x| x.to_owned())
-                        .collect();
-
-                    fn_map
-                        .add_tagged_function(s, tags, args, body.expr)
-                        .map_err(|e| exceptions::PyValueError::new_err(e.to_string()))?;
-                }
-                _ => Err(exceptions::PyValueError::new_err(format!(
-                    "Expected function name instead of {symbol:?}",
-                )))?,
-            }
+        for function in functions {
+            function.register(&mut fn_map)?;
         }
 
         let abort_check = Box::new(move || {
@@ -8562,9 +8533,8 @@ impl PythonExpression {
     ///     The expressions to compile into a joint evaluator.
     /// params: Sequence[Expression]
     ///     The evaluator parameters, in input order.
-    /// functions: dict[tuple[Expression, Sequence[Expression]], Expression]
-    ///     A dictionary of functions. The key is a tuple of the function name and the argument variables.
-    ///     The value is the function body. If the function name entry contains arguments, these are considered tags.
+    /// functions: Sequence[FunctionDefinition]
+    ///     Function definitions available to the evaluator.
     /// iterations: int
     ///     The number of optimization passes to run.
     /// cpe_iterations: int | None
@@ -8593,7 +8563,7 @@ impl PythonExpression {
     #[pyo3(signature =
         (exprs,
         params,
-        functions = HashMap::default(),
+        functions = Vec::default(),
         iterations = 1,
         cpe_iterations = None,
         n_cores = 4,
@@ -8611,7 +8581,7 @@ impl PythonExpression {
         _cls: &Bound<'_, PyType>,
         exprs: Vec<PythonExpression>,
         params: Vec<PythonExpression>,
-        functions: HashMap<(PolyVariable, Vec<PolyVariable>), PythonExpression>,
+        functions: Vec<PythonFunctionDefinition>,
         iterations: usize,
         cpe_iterations: Option<usize>,
         n_cores: usize,
@@ -8631,40 +8601,8 @@ impl PythonExpression {
 
         let mut fn_map = FunctionMap::new();
 
-        for ((symbol, args), body) in functions {
-            let args: Vec<_> = args
-                .into_iter()
-                .map(|x| match x {
-                    PolyVariable::Symbol(s) => Ok(Indeterminate::Symbol(s, s.into())),
-                    PolyVariable::Function(s, f) => Ok(Indeterminate::Function(s, f)),
-                    _ => Err(exceptions::PyValueError::new_err(format!(
-                        "Bad function argument {x} in function {symbol}",
-                    ))),
-                })
-                .collect::<Result<_, _>>()?;
-
-            match symbol {
-                PolyVariable::Symbol(s) => {
-                    fn_map
-                        .add_function(s, args, body.expr)
-                        .map_err(|e| exceptions::PyValueError::new_err(e.to_string()))?;
-                }
-                PolyVariable::Function(s, fa) => {
-                    let tags = fa
-                        .as_fun_view()
-                        .unwrap()
-                        .iter()
-                        .map(|x| x.to_owned())
-                        .collect();
-
-                    fn_map
-                        .add_tagged_function(s, tags, args, body.expr)
-                        .map_err(|e| exceptions::PyValueError::new_err(e.to_string()))?;
-                }
-                _ => Err(exceptions::PyValueError::new_err(format!(
-                    "Expected function name instead of {symbol:?}",
-                )))?,
-            }
+        for function in functions {
+            function.register(&mut fn_map)?;
         }
 
         let abort_check = Box::new(move || {
