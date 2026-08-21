@@ -577,7 +577,8 @@ pub trait JITCompiledNumber: Sized {
         settings: JITCompilationSettings,
     ) -> Result<JITCompiledEvaluator<Self>, String>;
 
-    fn evaluate(eval: &mut JITCompiledEvaluator<Self>, args: &[Self], out: &mut [Self]);
+    /// Evaluate one row. Sealed JIT code is immutable, so this operation must support shared use.
+    fn evaluate(eval: &JITCompiledEvaluator<Self>, args: &[Self], out: &mut [Self]);
 
     fn batch_evaluate(
         eval: &mut JITCompiledEvaluator<Self>,
@@ -606,15 +607,11 @@ where
         let compiled = sub_evaluator
             .jit_compile(settings.clone())
             .map_err(|e| format!("Could not JIT-compile sub-evaluator '{}': {e}", external))?;
-        let compiled = Arc::new(Mutex::new(compiled));
         // Keep the source sub-evaluator on the container: serialization stores that definition,
         // while this generated callback owns the compiled evaluator used at runtime.
         external.imp = Some(Box::new(move |args: &[T]| {
             let mut output = T::default();
-            compiled
-                .lock()
-                .unwrap()
-                .evaluate(args, std::slice::from_mut(&mut output));
+            compiled.evaluate(args, std::slice::from_mut(&mut output));
             output
         }));
     }
@@ -689,7 +686,7 @@ impl JITCompiledNumber for f64 {
     }
 
     #[inline(always)]
-    fn evaluate(eval: &mut JITCompiledEvaluator<Self>, args: &[Self], out: &mut [Self]) {
+    fn evaluate(eval: &JITCompiledEvaluator<Self>, args: &[Self], out: &mut [Self]) {
         eval.code.evaluate(args, out);
     }
 
@@ -796,9 +793,9 @@ impl<
 }
 
 impl<T: JITCompiledNumber> JITCompiledEvaluator<T> {
-    /// Evaluate the JIT compiled code.
+    /// Evaluate the JIT-compiled code. A compiled evaluator can be shared across concurrent calls.
     #[inline(always)]
-    pub fn evaluate(&mut self, args: &[T], out: &mut [T]) {
+    pub fn evaluate(&self, args: &[T], out: &mut [T]) {
         T::evaluate(self, args, out);
     }
 
@@ -930,7 +927,7 @@ impl JITCompiledNumber for wide::f64x4 {
 
     #[inline(always)]
     fn evaluate(
-        eval: &mut JITCompiledEvaluator<wide::f64x4>,
+        eval: &JITCompiledEvaluator<wide::f64x4>,
         args: &[wide::f64x4],
         out: &mut [wide::f64x4],
     ) {
@@ -1110,7 +1107,7 @@ impl JITCompiledNumber for Complex<f64> {
     /// Evaluate the compiled code with double-precision floating point numbers.
     #[inline(always)]
     fn evaluate(
-        eval: &mut JITCompiledEvaluator<Complex<f64>>,
+        eval: &JITCompiledEvaluator<Complex<f64>>,
         args: &[Complex<f64>],
         out: &mut [Complex<f64>],
     ) {
@@ -1242,7 +1239,7 @@ impl JITCompiledNumber for Complex<wide::f64x4> {
 
     #[inline(always)]
     fn evaluate(
-        eval: &mut JITCompiledEvaluator<Self>,
+        eval: &JITCompiledEvaluator<Self>,
         args: &[Complex<wide::f64x4>],
         out: &mut [Complex<wide::f64x4>],
     ) {
