@@ -190,6 +190,22 @@ impl ExportSettings {
 }
 
 impl<T: ExportNumber + SingleFloat> ExpressionEvaluator<T> {
+    pub(super) fn external_cpp_name(&self, index: usize) -> String {
+        let external = &self.external_fns[index];
+        if external.sub_evaluator.is_some() {
+            format!(
+                "{}_{}",
+                external
+                    .symbol
+                    .get_stripped_ascii_name()
+                    .expect("exportable function should have an ASCII name"),
+                index
+            )
+        } else {
+            external.export_name().to_owned()
+        }
+    }
+
     fn export_external_cpps(&self) -> String {
         self.export_external_cpps_for_target(false, None)
     }
@@ -214,7 +230,7 @@ impl<T: ExportNumber + SingleFloat> ExpressionEvaluator<T> {
             seen: &mut HashSet<String>,
             output: &mut String,
         ) {
-            for external in &evaluator.external_fns {
+            for (external_index, external) in evaluator.external_fns.iter().enumerate() {
                 if external.constant_index.is_some() {
                     continue;
                 }
@@ -222,14 +238,14 @@ impl<T: ExportNumber + SingleFloat> ExpressionEvaluator<T> {
                 if let Some(sub_evaluator) = &external.sub_evaluator {
                     append(sub_evaluator, cuda, asm, seen, output);
 
-                    let name = external.export_name();
+                    let name = evaluator.external_cpp_name(external_index);
                     if !seen.insert(format!("sub-evaluator:{name}")) {
                         continue;
                     }
 
                     if let Some((number_class, asm)) = asm {
                         output.push_str(&sub_evaluator.export_asm_sub_evaluator(
-                            name,
+                            &name,
                             number_class,
                             asm,
                         ));
@@ -930,7 +946,7 @@ extern "C" {{
                     _ => unreachable!(),
                 },
                 Instr::ExternalFun(o, s, a) => {
-                    let name = &self.external_fns[*s];
+                    let name = self.external_cpp_name(*s);
                     let args = a.iter().map(|x| get_input!(*x)).collect::<Vec<_>>();
 
                     *out +=
@@ -2171,7 +2187,7 @@ extern "C" {{
                 RegInstr::ExternalFun(o, s, a) => {
                     end_asm_block!(in_asm_block);
 
-                    let name = &self.external_fns[*s];
+                    let name = self.external_cpp_name(*s);
                     let args = a.iter().map(|x| get_input!(*x)).collect::<Vec<_>>();
 
                     *out += format!("\tZ[{}] = {}({});\n", o, name, args.join(", ")).as_str();
@@ -2954,7 +2970,7 @@ extern "C" {{
                 Instr::ExternalFun(o, s, a) => {
                     end_asm_block!(in_asm_block);
 
-                    let name = &self.external_fns[*s];
+                    let name = self.external_cpp_name(*s);
                     let args = a.iter().map(|x| get_input!(*x)).collect::<Vec<_>>();
 
                     *out += format!("\tZ[{}] = {}({});\n", o, name, args.join(", ")).as_str();

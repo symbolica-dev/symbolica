@@ -558,59 +558,63 @@ mod test {
             );
         }
 
-        let f = symbol!("symbolica::sub_eval::asm_f");
-        let g = symbol!("symbolica::sub_eval::asm_g");
-        let evaluator = parse!("symbolica::sub_eval::asm_f(x)")
+        let f = symbol!("non_inlined_functions::f");
+        let g = symbol!("non_inlined_functions::g");
+        let evaluator = parse!("non_inlined_functions::f(x)")
             .evaluator(&[parse!("x")])
             .add_function_no_inline(g, vec![symbol!("z")], parse!("z*z + 2"))
             .unwrap()
             .add_function_no_inline(
                 f,
                 vec![symbol!("y")],
-                parse!("symbolica::sub_eval::asm_g(y) + y*y + 1"),
+                parse!("non_inlined_functions::g(y) + y*y + 1"),
             )
             .unwrap()
             .build()
             .unwrap();
 
-        let f_external = evaluator
+        let (f_index, f_external) = evaluator
             .external_fns
             .iter()
-            .find(|external| external.symbol == f)
+            .enumerate()
+            .find(|(_, external)| external.symbol == f)
             .unwrap();
-        let f_name = f_external.export_name();
+        let f_name = evaluator.external_cpp_name(f_index);
         let f_evaluator = f_external.sub_evaluator.as_ref().unwrap();
-        let g_name = f_evaluator
+        let (g_index, _) = f_evaluator
             .external_fns
             .iter()
-            .find(|external| external.symbol == g)
-            .unwrap()
-            .export_name();
+            .enumerate()
+            .find(|(_, external)| external.symbol == g)
+            .unwrap();
+        let g_name = f_evaluator.external_cpp_name(g_index);
+        assert_eq!(f_name, "f_0");
+        assert_eq!(g_name, "g_0");
 
         let settings = ExportSettings::new().inline_asm(InlineASM::X64);
         let real_source = evaluator
             .export_cpp_str::<f64>("asm_sub_evaluator", settings.clone())
             .unwrap();
-        assert_asm_wrapper(&real_source, f_name, "double");
-        assert_asm_wrapper(&real_source, g_name, "double");
+        assert_asm_wrapper(&real_source, &f_name, "double");
+        assert_asm_wrapper(&real_source, &g_name, "double");
 
         let complex_source = evaluator
             .export_cpp_str::<Complex<f64>>("asm_sub_evaluator", settings.clone())
             .unwrap();
-        assert_asm_wrapper(&complex_source, f_name, "std::complex<double>");
-        assert_asm_wrapper(&complex_source, g_name, "std::complex<double>");
+        assert_asm_wrapper(&complex_source, &f_name, "std::complex<double>");
+        assert_asm_wrapper(&complex_source, &g_name, "std::complex<double>");
 
         let simd_source = evaluator
             .export_cpp_str::<wide::f64x4>("asm_sub_evaluator", settings.clone())
             .unwrap();
-        assert_asm_wrapper(&simd_source, f_name, "simd");
-        assert_asm_wrapper(&simd_source, g_name, "simd");
+        assert_asm_wrapper(&simd_source, &f_name, "simd");
+        assert_asm_wrapper(&simd_source, &g_name, "simd");
 
         let complex_simd_source = evaluator
             .export_cpp_str::<Complex<wide::f64x4>>("asm_sub_evaluator", settings)
             .unwrap();
-        assert_asm_wrapper(&complex_simd_source, f_name, "simd");
-        assert_asm_wrapper(&complex_simd_source, g_name, "simd");
+        assert_asm_wrapper(&complex_simd_source, &f_name, "simd");
+        assert_asm_wrapper(&complex_simd_source, &g_name, "simd");
     }
 
     #[test]
