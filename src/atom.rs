@@ -55,7 +55,7 @@ use crate::{
     parser::{ParseSettings, Token},
     poly::series::Series,
     printer::{AnsiWrap, AtomPrinter, PrintFunction, PrintOptions, PrintState},
-    state::{CustomFunctionDefinitionKeys, RecycledAtom, State, SymbolData, Workspace},
+    state::{CustomFunctionDefinitionKeys, RecycledAtom, State, StateMap, SymbolData, Workspace},
     transformer::StatsOptions,
     utils::{BorrowedOrOwned, Settable},
     warn,
@@ -637,6 +637,33 @@ impl UserData {
                 }
             }
             _ => {}
+        }
+    }
+
+    /// Rename all symbols in this user data using the given state map.
+    pub(crate) fn rename_symbols(self, state_map: &StateMap) -> Self {
+        match self {
+            UserData::Atom(atom) => UserData::Atom(atom.as_view().rename(state_map)),
+            UserData::List(list) => UserData::List(
+                list.into_iter()
+                    .map(|item| item.rename_symbols(state_map))
+                    .collect(),
+            ),
+            UserData::Map(map) => UserData::Map(
+                map.into_iter()
+                    .map(|(key, item)| {
+                        if let UserDataKey::Atom(atom) = key {
+                            (
+                                UserDataKey::Atom(atom.as_view().rename(state_map)),
+                                item.rename_symbols(state_map),
+                            )
+                        } else {
+                            (key, item.rename_symbols(state_map))
+                        }
+                    })
+                    .collect(),
+            ),
+            x => x,
         }
     }
 }
