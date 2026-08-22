@@ -15,6 +15,7 @@ use crate::{
     atom::{UserData, UserDataKey},
     coefficient::{Coefficient, CoefficientView},
     state::{State, StateMap, Workspace},
+    utils::Settable,
 };
 
 use super::{
@@ -592,13 +593,26 @@ impl Atom {
             let a = res.to_add();
 
             let mut tmp = Atom::new();
+            let mut tmp2 = Atom::new();
 
-            for _ in 0..n_terms {
-                tmp.read(&mut *source)?;
-                a.extend(tmp.as_view());
-            }
+            Workspace::get_local().with(|ws| {
+                for _ in 0..n_terms {
+                    tmp.read(&mut *source)?;
 
-            Ok(res.as_view().rename(&state_map))
+                    let mut settable = Settable::from(&mut tmp2);
+
+                    tmp.as_view().rename_no_norm(&state_map, ws, &mut settable);
+
+                    if settable.is_set() {
+                        a.extend(tmp2.as_view());
+                    } else {
+                        a.extend(tmp.as_view());
+                    }
+                }
+
+                a.as_view().normalize(ws, &mut tmp);
+                Ok(tmp)
+            })
         }
     }
 
@@ -1990,24 +2004,38 @@ impl<'a> AtomView<'a> {
         dest.write_all(d)
     }
 
+    /// Rename all symbols in this (imported) atom using the given state map.
+    /// Normalization can only take place after all symbols have been renamed.
     pub(crate) fn rename(&self, state_map: &StateMap) -> Atom {
+        let mut out = Atom::new();
+
         Workspace::get_local().with(|ws| {
-            let mut a = ws.new_atom();
-            self.rename_no_norm(state_map, ws, &mut a);
-            let mut r = Atom::new();
-            a.as_view().normalize(ws, &mut r);
-            r
-        })
+            let mut set = Settable::from(&mut out);
+            self.rename_no_norm(state_map, ws, &mut set);
+
+            if set.is_set() {
+                let mut a = ws.new_atom();
+                set.as_view().normalize(ws, &mut a);
+                std::mem::swap(&mut out, &mut a);
+            } else {
+                out.set_from_view(self);
+            }
+        });
+
+        out
     }
 
-    fn rename_no_norm(&self, state_map: &StateMap, ws: &Workspace, out: &mut Atom) {
+    pub(crate) fn rename_no_norm(
+        &self,
+        state_map: &StateMap,
+        ws: &Workspace,
+        out: &mut Settable<'_, Atom>,
+    ) {
         match self {
             AtomView::Num(n) => match n.get_coeff_view() {
                 CoefficientView::FiniteField(e, i) => {
                     if let Some(s) = state_map.finite_fields.get(&i) {
                         out.to_num(Coefficient::FiniteField(e, *s));
-                    } else {
-                        out.set_from_view(self);
                     }
                 }
                 CoefficientView::RationalPolynomial(r) => {
@@ -2018,58 +2046,112 @@ impl<'a> AtomView<'a> {
                         rr.numerator.set_variables(nv.clone());
                         rr.denominator.set_variables(nv.clone());
                         out.to_num(Coefficient::RationalPolynomial(rr));
-                    } else {
-                        out.set_from_view(self);
                     }
                 }
-                _ => out.set_from_view(self),
+                _ => {}
             },
             AtomView::Var(v) => {
                 if let Some(s) = state_map.symbols.get(&v.get_symbol_id()) {
                     out.to_var(*s);
-                } else {
-                    out.set_from_view(self);
                 }
             }
             AtomView::Fun(f) => {
-                if let Some(s) = state_map.symbols.get(&f.get_symbol_id()) {
-                    let nf = out.to_fun(*s);
-
-                    let mut na = ws.new_atom();
-                    for a in f {
-                        a.rename_no_norm(state_map, ws, &mut na);
-                        nf.add_arg(na.as_view());
-                    }
+                let mut fun = if let Some(s) = state_map.symbols.get(&f.get_symbol_id()) {
+                    Some(out.to_fun(*s))
                 } else {
-                    out.set_from_view(self);
+                    None
+                };
+
+                let mut arg_h = ws.new_atom();
+                for (i, arg) in f.iter().enumerate() {
+                    let mut set = Settable::from(&mut *arg_h);
+                    arg.rename_no_norm(state_map, ws, &mut set);
+
+                    if fun.is_none() && set.is_set() {
+                        let fun_o = out.to_fun(f.get_symbol());
+
+                        for child in f.iter().take(i) {
+                            fun_o.add_arg(child);
+                        }
+
+                        fun_o.add_arg(set.as_view());
+                        fun = Some(fun_o);
+                    } else if let Some(fun) = &mut fun {
+                        if set.is_set() {
+                            fun.add_arg(set.as_view());
+                        } else {
+                            fun.add_arg(arg);
+                        }
+                    }
                 }
             }
             AtomView::Pow(p) => {
-                let (b, e) = p.get_base_exp();
+                let (base, exp) = p.get_base_exp();
 
-                let mut nb = ws.new_atom();
-                b.rename_no_norm(state_map, ws, &mut nb);
-                let mut ne = ws.new_atom();
-                e.rename_no_norm(state_map, ws, &mut ne);
+                let mut base_h = ws.new_atom();
+                let mut base_set = Settable::from(&mut *base_h);
+                base.rename_no_norm(state_map, ws, &mut base_set);
 
-                out.to_pow(nb.as_view(), ne.as_view());
-            }
-            AtomView::Mul(m) => {
-                let nm = out.to_mul();
+                let mut exp_h = ws.new_atom();
+                let mut exp_set = Settable::from(&mut *exp_h);
+                exp.rename_no_norm(state_map, ws, &mut exp_set);
 
-                let mut na = ws.new_atom();
-                for a in m {
-                    a.rename_no_norm(state_map, ws, &mut na);
-                    nm.extend(na.as_view());
+                if base_set.is_set() && exp_set.is_set() {
+                    out.to_pow(base_set.as_view(), exp_set.as_view());
+                } else if base_set.is_set() {
+                    out.to_pow(base_set.as_view(), exp);
+                } else if exp_set.is_set() {
+                    out.to_pow(base, exp_set.as_view());
                 }
             }
-            AtomView::Add(add) => {
-                let nm = out.to_add();
+            AtomView::Mul(mm) => {
+                let mut mul = None;
 
-                let mut na = ws.new_atom();
-                for a in add {
-                    a.rename_no_norm(state_map, ws, &mut na);
-                    nm.extend(na.as_view());
+                let mut child_h = ws.new_atom();
+                for (i, child) in mm.iter().enumerate() {
+                    let mut set = Settable::from(&mut *child_h);
+                    child.rename_no_norm(state_map, ws, &mut set);
+
+                    if mul.is_none() && set.is_set() {
+                        let mul_o = out.to_mul();
+
+                        for child in mm.iter().take(i) {
+                            mul_o.extend(child);
+                        }
+                        mul_o.extend(set.as_view());
+                        mul = Some(mul_o);
+                    } else if let Some(mul_o) = &mut mul {
+                        if set.is_set() {
+                            mul_o.extend(set.as_view());
+                        } else {
+                            mul_o.extend(child);
+                        }
+                    }
+                }
+            }
+            AtomView::Add(a) => {
+                let mut add = None;
+
+                let mut child_h = ws.new_atom();
+                for (i, child) in a.iter().enumerate() {
+                    let mut set = Settable::from(&mut *child_h);
+                    child.rename_no_norm(state_map, ws, &mut set);
+
+                    if add.is_none() && set.is_set() {
+                        let add_o = out.to_add();
+
+                        for child in a.iter().take(i) {
+                            add_o.extend(child);
+                        }
+                        add_o.extend(set.as_view());
+                        add = Some(add_o);
+                    } else if let Some(mul_o) = &mut add {
+                        if set.is_set() {
+                            mul_o.extend(set.as_view());
+                        } else {
+                            mul_o.extend(child);
+                        }
+                    }
                 }
             }
         }
