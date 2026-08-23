@@ -51,8 +51,53 @@ fn compare(name: &str, a: &str, b: &str, iterations: usize) {
     );
 }
 
+fn compare_multiplication(
+    name: &str,
+    a: &str,
+    a_power: usize,
+    b: &str,
+    b_power: usize,
+    iterations: usize,
+) {
+    let iterations = std::env::var("MULTIPLICATION_BENCH_SAMPLES")
+        .ok()
+        .and_then(|value| value.parse().ok())
+        .unwrap_or(iterations);
+    let mut polys = [
+        parse!(a).to_polynomial::<_, u16>(&Z, None).pow(a_power),
+        parse!(b).to_polynomial::<_, u16>(&Z, None).pow(b_power),
+    ];
+    MultivariatePolynomial::unify_variables_list(&mut polys);
+
+    let product = &polys[0] * &polys[1];
+    let multiplication = measure(iterations, || &polys[0] * &polys[1]);
+    println!(
+        "{name:32} MUL   {:9.3} ms  lhs/rhs/product terms {}/{}/{}",
+        multiplication * 1_000.0,
+        polys[0].nterms(),
+        polys[1].nterms(),
+        product.nterms(),
+    );
+}
+
 fn main() {
     println!("Symbolica {}", env!("CARGO_PKG_VERSION"));
+    compare_multiplication(
+        "dense small multiplication",
+        "1+x+y+z",
+        12,
+        "1+2*x-y+3*z",
+        11,
+        25,
+    );
+    compare_multiplication(
+        "dense high multiplication",
+        "1000000000039+x+y+z",
+        12,
+        "1000000000187+2*x-y+3*z",
+        11,
+        10,
+    );
     compare(
         "dense outer degrees 7/6",
         "1+(2+y^2+z^3)*x+(3+y^3+z^2)*x^2+(4+y+z)*x^3+(5+y^2+z^3)*x^4+(6+y^3+z^2)*x^5+(7+y+z)*x^6+(8+y^2+z^3)*x^7",

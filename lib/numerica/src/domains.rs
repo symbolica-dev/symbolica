@@ -179,6 +179,39 @@ pub trait Ring:
     /// For example, in [Z](type@integer::Z), `4/2` is possible but `3/2` is not.
     fn try_div(&self, a: &Self::Element, b: &Self::Element) -> Option<Self::Element>;
 
+    /// Multiply two polynomials whose exponents have already been mapped to dense indices.
+    ///
+    /// Specialized coefficient rings can override this hook to use packed or fixed-width
+    /// convolution kernels. Returning `None` asks the polynomial implementation to use its
+    /// generic pairwise multiplication. The index slices must have the same lengths as their
+    /// coefficient slices and be strictly increasing.
+    #[inline]
+    fn try_dense_polynomial_mul(
+        &self,
+        _output_len: usize,
+        _left_coefficients: &[Self::Element],
+        _left_indices: &[u32],
+        _right_coefficients: &[Self::Element],
+        _right_indices: &[u32],
+    ) -> Option<Vec<Self::Element>> {
+        None
+    }
+
+    /// Subtract several coefficient products from one accumulator.
+    ///
+    /// Domains with tagged or multiprecision elements can override this to select the
+    /// accumulator representation once for the entire chain.
+    #[inline]
+    fn sub_mul_assign_many<'a, I>(&self, accumulator: &mut Self::Element, products: I)
+    where
+        Self::Element: 'a,
+        I: IntoIterator<Item = (&'a Self::Element, &'a Self::Element)>,
+    {
+        for (left, right) in products {
+            self.sub_mul_assign(accumulator, left, right);
+        }
+    }
+
     fn sample(&self, rng: &mut impl rand::RngCore, range: (i64, i64)) -> Self::Element;
 
     /// Format a ring element with custom [PrintOptions] and [PrintState].
@@ -297,6 +330,16 @@ impl<R: OrderedRing> RealEmbedding for R {
 pub trait EuclideanDomain: Ring {
     fn rem(&self, a: &Self::Element, b: &Self::Element) -> Self::Element;
     fn quot_rem(&self, a: &Self::Element, b: &Self::Element) -> (Self::Element, Self::Element);
+
+    /// Divide an owned numerator, allowing implementations to reuse its storage.
+    #[inline]
+    fn quot_rem_owned(
+        &self,
+        a: Self::Element,
+        b: &Self::Element,
+    ) -> (Self::Element, Self::Element) {
+        self.quot_rem(&a, b)
+    }
 
     fn quot(&self, a: &Self::Element, b: &Self::Element) -> Self::Element {
         self.quot_rem(a, b).0

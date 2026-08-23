@@ -279,6 +279,15 @@ impl<R: EuclideanDomain + PolynomialGCD<E>, E: PositiveExponent> EuclideanDomain
         a.quot_rem(b, false)
     }
 
+    #[inline]
+    fn quot_rem_owned(
+        &self,
+        a: Self::Element,
+        b: &Self::Element,
+    ) -> (Self::Element, Self::Element) {
+        a.quot_rem_owned(b, false)
+    }
+
     fn gcd(&self, a: &Self::Element, b: &Self::Element) -> Self::Element {
         a.gcd(b)
     }
@@ -2973,6 +2982,24 @@ impl<F: Ring, E: Exponent> MultivariatePolynomial<F, E, LexOrder> {
             *es = to_uni_var(s, &max_degs_rev);
         }
 
+        if let Some(coefficients) = self.ring().try_dense_polynomial_mul(
+            total,
+            &self.coefficients,
+            &uni_exp_self,
+            &rhs.coefficients,
+            &uni_exp_rhs,
+        ) {
+            let mut exp = vec![E::zero(); self.nvars()];
+            let mut result = self.zero_with_capacity(self.nterms().max(rhs.nterms()));
+            for (position, coefficient) in coefficients.into_iter().enumerate() {
+                if !self.ring().is_zero(&coefficient) {
+                    from_uni_var(position as u32, &max_degs_rev, &mut exp);
+                    result.append_monomial(coefficient, &exp);
+                }
+            }
+            return Some(result);
+        }
+
         let mut exp = vec![E::zero(); self.nvars()];
         let mut r = self.zero_with_capacity(self.nterms().max(rhs.nterms()));
 
@@ -3705,6 +3732,18 @@ impl<F: EuclideanDomain, E: PositiveExponent> MultivariatePolynomial<F, E, LexOr
         MultivariatePolynomial<F, E, LexOrder>,
         MultivariatePolynomial<F, E, LexOrder>,
     ) {
+        self.clone().quot_rem_impl(div, abort_on_remainder)
+    }
+
+    /// Divide an owned polynomial, reusing its coefficient storage where possible.
+    pub fn quot_rem_owned(
+        self,
+        div: &MultivariatePolynomial<F, E, LexOrder>,
+        abort_on_remainder: bool,
+    ) -> (
+        MultivariatePolynomial<F, E, LexOrder>,
+        MultivariatePolynomial<F, E, LexOrder>,
+    ) {
         self.quot_rem_impl(div, abort_on_remainder)
     }
 
@@ -3815,7 +3854,7 @@ impl<F: Ring, E: Exponent> MultivariatePolynomial<F, E, LexOrder> {
             }
         }
 
-        let (a, b) = self.quot_rem_impl(div, true);
+        let (a, b) = self.clone().quot_rem_impl(div, true);
         if b.nterms() == 0 { Some(a) } else { None }
     }
 
@@ -3823,7 +3862,7 @@ impl<F: Ring, E: Exponent> MultivariatePolynomial<F, E, LexOrder> {
     ///
     /// The input must not have negative exponents.
     fn quot_rem_impl(
-        &self,
+        mut self,
         div: &MultivariatePolynomial<F, E, LexOrder>,
         abort_on_remainder: bool,
     ) -> (
@@ -3835,22 +3874,23 @@ impl<F: Ring, E: Exponent> MultivariatePolynomial<F, E, LexOrder> {
         }
 
         if self.is_zero() {
-            return (self.clone(), self.clone());
+            let remainder = self.zero();
+            return (self, remainder);
         }
 
         if div.is_one() {
-            return (self.clone(), self.zero());
+            let remainder = self.zero();
+            return (self, remainder);
         }
 
         if self.variables() != div.variables() {
-            let mut c1 = self.clone();
             let mut c2 = div.clone();
-            c1.unify_variables(&mut c2);
-            return c1.quot_rem_impl(&c2, abort_on_remainder);
+            self.unify_variables(&mut c2);
+            return self.quot_rem_impl(&c2, abort_on_remainder);
         }
 
         if self.nterms() == div.nterms() {
-            if self == div {
+            if &self == div {
                 return (self.one(), self.zero());
             }
 
@@ -3870,22 +3910,26 @@ impl<F: Ring, E: Exponent> MultivariatePolynomial<F, E, LexOrder> {
         }
 
         if div.is_constant() {
-            let mut q = self.clone();
+            let original = self.clone();
+            let mut q = self;
             let dive = div.to_monomial_view(0);
 
             if let Some(i) = div.ring().try_inv(dive.coefficient) {
-                return (q.mul_coeff(i), self.zero());
+                let remainder = q.zero();
+                return (q.mul_coeff(i), remainder);
             }
 
+            let ring = q.context.ring.clone();
             for c in &mut q.coefficients {
-                if let Some(quot) = self.ring().try_div(c, dive.coefficient) {
+                if let Some(quot) = ring.try_div(c, dive.coefficient) {
                     *c = quot;
                 } else {
-                    return (self.zero(), self.clone());
+                    return (q.zero(), original);
                 }
             }
 
-            return (q, self.zero());
+            let remainder = q.zero();
+            return (q, remainder);
         }
 
         // check if the division is univariate with the same variable
@@ -3920,13 +3964,16 @@ impl<F: Ring, E: Exponent> MultivariatePolynomial<F, E, LexOrder> {
     ///
     /// The input must not have negative exponents.
     fn heap_division(
-        &self,
+        mut self,
         div: &MultivariatePolynomial<F, E, LexOrder>,
         abort_on_remainder: bool,
     ) -> (
         MultivariatePolynomial<F, E, LexOrder>,
         MultivariatePolynomial<F, E, LexOrder>,
     ) {
+        let original = (!abort_on_remainder).then(|| self.clone());
+        #[cfg(test)]
+        let verification_input = self.clone();
         let mut q = self.zero_with_capacity(self.nterms());
         let mut r = self.zero();
 
@@ -3949,7 +3996,9 @@ impl<F: Ring, E: Exponent> MultivariatePolynomial<F, E, LexOrder> {
                     *s = *e;
                 }
 
-                c = self.coefficient_back(k).clone();
+                let coefficient_index = self.nterms() - k - 1;
+                let zero = self.ring().zero();
+                c = std::mem::replace(&mut self.coefficients[coefficient_index], zero);
                 k += 1;
             } else {
                 for (s, e) in m.iter_mut().zip(h.peek().unwrap().as_slice()) {
@@ -3964,10 +4013,12 @@ impl<F: Ring, E: Exponent> MultivariatePolynomial<F, E, LexOrder> {
                 h.pop().unwrap();
 
                 let mut qs = cache.remove(&m).unwrap();
+                self.ring().sub_mul_assign_many(
+                    &mut c,
+                    qs.iter()
+                        .map(|(i, j, _)| (&q.coefficients[*i], div.coefficient_back(*j))),
+                );
                 for (i, j, next_in_divisor) in qs.drain(..) {
-                    self.ring()
-                        .sub_mul_assign(&mut c, &q.coefficients[i], div.coefficient_back(j));
-
                     if next_in_divisor && j + 1 < div.nterms() {
                         // quotient heap product
                         for ((m, e1), e2) in m_cache
@@ -4061,7 +4112,7 @@ impl<F: Ring, E: Exponent> MultivariatePolynomial<F, E, LexOrder> {
                     r = self.one();
                     return (q, r);
                 } else {
-                    return (self.zero(), self.clone());
+                    return (self.zero(), original.unwrap());
                 }
 
                 q.exponents.extend(
@@ -4149,8 +4200,8 @@ impl<F: Ring, E: Exponent> MultivariatePolynomial<F, E, LexOrder> {
 
         #[cfg(test)]
         {
-            if !(&q * div + r.clone() - self.clone()).is_zero() {
-                panic!("Division failed: ({self})/({div}): q={q}, r={r}");
+            if !(&q * div + r.clone() - verification_input.clone()).is_zero() {
+                panic!("Division failed: ({verification_input})/({div}): q={q}, r={r}");
             }
         }
 
@@ -4164,7 +4215,7 @@ impl<F: Ring, E: Exponent> MultivariatePolynomial<F, E, LexOrder> {
     ///
     /// The input must not have negative exponents.
     fn heap_division_packed_exp(
-        &self,
+        mut self,
         div: &MultivariatePolynomial<F, E, LexOrder>,
         abort_on_remainder: bool,
         pack_u8: bool,
@@ -4172,6 +4223,9 @@ impl<F: Ring, E: Exponent> MultivariatePolynomial<F, E, LexOrder> {
         MultivariatePolynomial<F, E, LexOrder>,
         MultivariatePolynomial<F, E, LexOrder>,
     ) {
+        let original = (!abort_on_remainder).then(|| self.clone());
+        #[cfg(test)]
+        let verification_input = self.clone();
         let mut q = self.zero_with_capacity(self.nterms());
         let mut r = self.zero();
 
@@ -4219,7 +4273,9 @@ impl<F: Ring, E: Exponent> MultivariatePolynomial<F, E, LexOrder> {
             {
                 m = pack_a[self.nterms() - k - 1];
 
-                c = self.coefficient_back(k).clone();
+                let coefficient_index = self.nterms() - k - 1;
+                let zero = self.ring().zero();
+                c = std::mem::replace(&mut self.coefficients[coefficient_index], zero);
 
                 k += 1;
             } else {
@@ -4233,11 +4289,12 @@ impl<F: Ring, E: Exponent> MultivariatePolynomial<F, E, LexOrder> {
                 h.pop().unwrap();
 
                 let mut qs = cache.remove(&m).unwrap();
+                self.ring().sub_mul_assign_many(
+                    &mut c,
+                    qs.iter()
+                        .map(|(i, j, _)| (&q.coefficients[*i], div.coefficient_back(*j))),
+                );
                 for (i, j, next_in_divisor) in qs.drain(..) {
-                    // TODO: use fraction-free routines
-                    self.ring()
-                        .sub_mul_assign(&mut c, &q.coefficients[i], div.coefficient_back(j));
-
                     if next_in_divisor && j + 1 < div.nterms() {
                         // quotient heap product
                         m_cache = q_exp[i] + pack_div[div.nterms() - (j + 1) - 1];
@@ -4314,7 +4371,7 @@ impl<F: Ring, E: Exponent> MultivariatePolynomial<F, E, LexOrder> {
                     r = self.one();
                     return (q, r);
                 } else {
-                    return (self.zero(), self.clone());
+                    return (self.zero(), original.unwrap());
                 }
 
                 let len = q.exponents.len();
@@ -4406,8 +4463,8 @@ impl<F: Ring, E: Exponent> MultivariatePolynomial<F, E, LexOrder> {
 
         #[cfg(test)]
         {
-            if !(&q * div + r.clone() - self.clone()).is_zero() {
-                panic!("Division failed: ({self})/({div}): q={q}, r={r}");
+            if !(&q * div + r.clone() - verification_input.clone()).is_zero() {
+                panic!("Division failed: ({verification_input})/({div}): q={q}, r={r}");
             }
         }
 

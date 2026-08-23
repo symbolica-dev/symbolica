@@ -220,10 +220,10 @@ impl<F: EuclideanDomain> UnivariatePolynomial<F> {
 
         while power_of_two > 1 {
             power_of_two >>= 1;
-            factor = self.exact_div_element(&self.ring.mul(&factor, &factor), denominator);
+            factor = self.exact_div_element(self.ring.mul(&factor, &factor), denominator);
 
             if remaining >= power_of_two {
-                factor = self.exact_div_element(&self.ring.mul(&factor, &leading), denominator);
+                factor = self.exact_div_element(self.ring.mul(&factor, &leading), denominator);
                 remaining -= power_of_two;
             }
         }
@@ -276,7 +276,7 @@ impl<F: EuclideanDomain> UnivariatePolynomial<F> {
             }
 
             if !self.ring.is_zero(&d_coefficient) {
-                d_coefficient = self.exact_div_element(&d_coefficient, &self_leading);
+                d_coefficient = self.exact_div_element(d_coefficient, &self_leading);
             }
 
             if degree > 0 && !self.ring.is_zero(&previous.coefficients[degree - 1]) {
@@ -299,7 +299,7 @@ impl<F: EuclideanDomain> UnivariatePolynomial<F> {
             }
 
             if !self.ring.is_zero(&coefficient) {
-                coefficient = self.exact_div_element(&coefficient, nominal_leading);
+                coefficient = self.exact_div_element(coefficient, nominal_leading);
             }
 
             next.coefficients.push(coefficient);
@@ -387,8 +387,8 @@ impl<F: EuclideanDomain> UnivariatePolynomial<F> {
         next
     }
 
-    fn exact_div_element(&self, numerator: &F::Element, denominator: &F::Element) -> F::Element {
-        let (quotient, remainder) = self.ring.quot_rem(numerator, denominator);
+    fn exact_div_element(&self, numerator: F::Element, denominator: &F::Element) -> F::Element {
+        let (quotient, remainder) = self.ring.quot_rem_owned(numerator, denominator);
         debug_assert!(self.ring.is_zero(&remainder));
         quotient
     }
