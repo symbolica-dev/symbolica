@@ -830,6 +830,93 @@ impl Integer {
         self
     }
 
+    /// Add or subtract a coefficient product without constructing a temporary large product.
+    /// The accumulator is promoted only when one of the operands already needs the
+    /// multiprecision backend.
+    #[inline(always)]
+    fn fused_mul_assign(&mut self, b: &Integer, c: &Integer, subtract: bool) {
+        if !matches!(self, Integer::Large(_))
+            && !matches!(b, Integer::Large(_))
+            && !matches!(c, Integer::Large(_))
+        {
+            if subtract {
+                *self -= b * c;
+            } else {
+                *self += b * c;
+            }
+            return;
+        }
+
+        if !matches!(self, Integer::Large(_)) {
+            let accumulator = match std::mem::replace(self, Integer::Single(0)) {
+                Integer::Single(n) => MultiPrecisionInteger::from(n),
+                Integer::Double(n) => MultiPrecisionInteger::from(n.get()),
+                Integer::Large(_) => unreachable!(),
+            };
+            *self = Integer::Large(accumulator);
+        }
+
+        let Integer::Large(accumulator) = self else {
+            unreachable!()
+        };
+
+        macro_rules! apply {
+            ($add:ident, $sub:ident, $($arg:expr),+ $(,)?) => {
+                if subtract {
+                    accumulator.$sub($($arg),+);
+                } else {
+                    accumulator.$add($($arg),+);
+                }
+            };
+        }
+
+        match (b, c) {
+            (Integer::Single(b), Integer::Single(c)) => {
+                let product = (*b as i128) * (*c as i128);
+                if subtract {
+                    *accumulator -= product;
+                } else {
+                    *accumulator += product;
+                }
+            }
+            (Integer::Single(b), Integer::Double(c)) | (Integer::Double(c), Integer::Single(b)) => {
+                if let Some(product) = (*b as i128).checked_mul(c.get()) {
+                    if subtract {
+                        *accumulator -= product;
+                    } else {
+                        *accumulator += product;
+                    }
+                } else {
+                    let c = MultiPrecisionInteger::from(c.get());
+                    apply!(add_i64_mul_assign, sub_i64_mul_assign, *b, &c);
+                }
+            }
+            (Integer::Double(b), Integer::Double(c)) => {
+                if let Some(product) = b.get().checked_mul(c.get()) {
+                    if subtract {
+                        *accumulator -= product;
+                    } else {
+                        *accumulator += product;
+                    }
+                } else {
+                    let c = MultiPrecisionInteger::from(c.get());
+                    apply!(add_i128_mul_assign, sub_i128_mul_assign, b.get(), &c);
+                }
+            }
+            (Integer::Single(b), Integer::Large(c)) | (Integer::Large(c), Integer::Single(b)) => {
+                apply!(add_i64_mul_assign, sub_i64_mul_assign, *b, c);
+            }
+            (Integer::Double(b), Integer::Large(c)) | (Integer::Large(c), Integer::Double(b)) => {
+                apply!(add_i128_mul_assign, sub_i128_mul_assign, b.get(), c);
+            }
+            (Integer::Large(b), Integer::Large(c)) => {
+                apply!(add_mul_assign, sub_mul_assign, b, c);
+            }
+        }
+
+        self.simplify();
+    }
+
     #[inline]
     fn shl_usize(&self, rhs: usize) -> Integer {
         match self {
@@ -2171,12 +2258,12 @@ impl RingOps<<Self as Set>::Element> for IntegerRing {
 
     #[inline(always)]
     fn add_mul_assign(&self, a: &mut Self::Element, b: Self::Element, c: Self::Element) {
-        a.add_assign(b * c)
+        a.fused_mul_assign(&b, &c, false)
     }
 
     #[inline(always)]
     fn sub_mul_assign(&self, a: &mut Self::Element, b: Self::Element, c: Self::Element) {
-        a.sub_assign(b * c)
+        a.fused_mul_assign(&b, &c, true)
     }
 
     #[inline]
@@ -2218,45 +2305,12 @@ impl RingOps<&<Self as Set>::Element> for IntegerRing {
 
     #[inline(always)]
     fn add_mul_assign(&self, a: &mut Self::Element, b: &Self::Element, c: &Self::Element) {
-        if let Integer::Large(l) = a {
-            // prevent the creation of a GMP integer b * c
-            match (b, c) {
-                (Integer::Single(b1), Integer::Large(c1)) => l.add_assign(b1 * c1),
-                (Integer::Double(b1), Integer::Large(c1)) => l.add_assign(b1.get() * c1),
-                (Integer::Large(b1), Integer::Single(c1)) => l.add_assign(b1 * c1),
-                (Integer::Large(b1), Integer::Double(c1)) => l.add_assign(b1 * c1.get()),
-                (Integer::Large(b1), Integer::Large(c1)) => l.add_assign(b1 * c1),
-                _ => {
-                    return *a += b * c;
-                }
-            }
-
-            a.simplify();
-            return;
-        }
-
-        *a += b * c;
+        a.fused_mul_assign(b, c, false)
     }
 
     #[inline(always)]
     fn sub_mul_assign(&self, a: &mut Self::Element, b: &Self::Element, c: &Self::Element) {
-        if let Integer::Large(l) = a {
-            match (b, c) {
-                (Integer::Single(b1), Integer::Large(c1)) => l.sub_assign(b1 * c1),
-                (Integer::Double(b1), Integer::Large(c1)) => l.sub_assign(b1.get() * c1),
-                (Integer::Large(b1), Integer::Single(c1)) => l.sub_assign(b1 * c1),
-                (Integer::Large(b1), Integer::Double(c1)) => l.sub_assign(b1 * c1.get()),
-                (Integer::Large(b1), Integer::Large(c1)) => l.sub_assign(b1 * c1),
-                _ => {
-                    return *a -= b * c;
-                }
-            }
-
-            a.simplify();
-            return;
-        }
-
-        *a -= b * c;
+        a.fused_mul_assign(b, c, true)
     }
 
     #[inline]
@@ -3536,12 +3590,12 @@ impl RingOps<<Self as Set>::Element> for MultiPrecisionIntegerRing {
 
     #[inline(always)]
     fn add_mul_assign(&self, a: &mut Self::Element, b: Self::Element, c: Self::Element) {
-        a.add_assign(b * c)
+        a.add_mul_assign(&b, &c)
     }
 
     #[inline(always)]
     fn sub_mul_assign(&self, a: &mut Self::Element, b: Self::Element, c: Self::Element) {
-        a.sub_assign(b * c)
+        a.sub_mul_assign(&b, &c)
     }
 
     #[inline]
@@ -3583,12 +3637,12 @@ impl RingOps<&<Self as Set>::Element> for MultiPrecisionIntegerRing {
 
     #[inline(always)]
     fn add_mul_assign(&self, a: &mut Self::Element, b: &Self::Element, c: &Self::Element) {
-        a.add_assign(b * c)
+        a.add_mul_assign(b, c)
     }
 
     #[inline(always)]
     fn sub_mul_assign(&self, a: &mut Self::Element, b: &Self::Element, c: &Self::Element) {
-        a.sub_assign(b * c)
+        a.sub_mul_assign(b, c)
     }
 
     #[inline]
@@ -3825,6 +3879,33 @@ mod test {
 
         let consumed = MultiPrecisionInteger::from_raw(value.clone().into_raw());
         assert_eq!(consumed, value);
+    }
+
+    #[test]
+    fn fused_large_integer_products() {
+        let large_b = Integer::from_str("123456789012345678901234567890123456789").unwrap();
+        let large_c = Integer::from_str("987654321098765432109876543210987654321").unwrap();
+        let initial = Integer::from(17);
+        let expected = &initial + &large_b * &large_c;
+
+        let mut actual = initial.clone();
+        actual.fused_mul_assign(&large_b, &large_c, false);
+        assert_eq!(actual, expected);
+
+        actual.fused_mul_assign(&large_b, &large_c, true);
+        assert_eq!(actual, initial);
+
+        let double = Integer::from(i128::MAX - 17);
+        let expected = &large_b + &double * &large_c;
+        let mut actual = large_b.clone();
+        actual.fused_mul_assign(&double, &large_c, false);
+        assert_eq!(actual, expected);
+
+        let single = Integer::from(i64::MIN + 19);
+        let expected = &large_c - &single * &large_b;
+        let mut actual = large_c;
+        actual.fused_mul_assign(&single, &large_b, true);
+        assert_eq!(actual, expected);
     }
 
     #[test]
