@@ -1,6 +1,16 @@
+use rand::Rng;
+
+use crate::domains::finite_field::{FiniteFieldCore, PrimeIteratorU64, ToFiniteField, Zp};
+use crate::domains::integer::{Integer, IntegerRing, Z};
+use crate::domains::rational::{Q, Rational, RationalField};
 use crate::domains::{EuclideanDomain, Field, Ring};
 
+use super::PositiveExponent;
+use super::polynomial::{MultivariatePolynomial, PolynomialRing};
 use super::univariate::UnivariatePolynomial;
+
+const RESULTANT_CRT_PRIME_BLOCK: u64 = 1 << 30;
+const RESULTANT_CRT_VERIFICATION_PRIMES: usize = 2;
 
 impl<F: Ring> UnivariatePolynomial<F> {
     /// Handle resultants for zero, constant, linear, and two quadratic inputs
@@ -128,7 +138,11 @@ impl<F: EuclideanDomain> UnivariatePolynomial<F> {
                 return c.get_constant();
             }
 
-            let next = a.ducos_next_subresultant(&b, &c, &nominal_leading);
+            let next = if degree_difference == 1 {
+                a.ducos_next_subresultant_adjacent(&b, &nominal_leading)
+            } else {
+                a.ducos_next_subresultant(&b, &c, &nominal_leading)
+            };
             a = c;
             nominal_leading = a.lcoeff();
             b = next;
@@ -141,12 +155,57 @@ impl<F: EuclideanDomain> UnivariatePolynomial<F> {
         debug_assert!(!divisor.is_zero());
         debug_assert!(self.degree() >= divisor.degree());
 
-        let exponent = self.degree() - divisor.degree() + 1;
+        let divisor_degree = divisor.degree();
         let negative_leading = self.ring.neg(&divisor.lcoeff());
-        self.clone()
-            .mul_coeff(&self.ring.pow(&negative_leading, exponent as u64))
-            .quot_rem(divisor)
-            .1
+        let mut remaining_scalings = self.degree() - divisor_degree + 1;
+        let mut remainder = self.clone();
+
+        while !remainder.is_zero() && remainder.degree() >= divisor_degree {
+            let remainder_degree = remainder.degree();
+            let shift = remainder_degree - divisor_degree;
+            let remainder_leading = remainder.lcoeff();
+            let mut next = self.zero();
+            next.coefficients.reserve(remainder_degree);
+
+            // One fraction-free pseudo-division step with `-divisor`:
+            //
+            //   next = lc(remainder) * x^shift * divisor
+            //          - lc(divisor) * remainder.
+            //
+            // The leading terms cancel, so construct only the coefficients
+            // below `remainder_degree`.
+            for degree in 0..remainder_degree {
+                let mut coefficient = if self.ring.is_zero(&remainder.coefficients[degree]) {
+                    self.ring.zero()
+                } else {
+                    self.ring
+                        .mul(&negative_leading, &remainder.coefficients[degree])
+                };
+
+                if degree >= shift {
+                    let divisor_coefficient = &divisor.coefficients[degree - shift];
+                    if !self.ring.is_zero(divisor_coefficient) {
+                        let correction = self.ring.mul(&remainder_leading, divisor_coefficient);
+                        coefficient = self.ring.add(&coefficient, &correction);
+                    }
+                }
+
+                next.coefficients.push(coefficient);
+            }
+
+            next.truncate();
+            remainder = next;
+            remaining_scalings -= 1;
+        }
+
+        // A degree drop can skip pseudo-division steps. Apply the corresponding
+        // unused powers of `-lc(divisor)` in one multiplication.
+        if remaining_scalings > 0 && !remainder.is_zero() {
+            let scale = self.ring.pow(&negative_leading, remaining_scalings as u64);
+            remainder = remainder.mul_coeff(&scale);
+        }
+
+        remainder
     }
 
     /// Compute `lc(self)^exponent * self / denominator^exponent` using
@@ -170,6 +229,84 @@ impl<F: EuclideanDomain> UnivariatePolynomial<F> {
         }
 
         self.clone().mul_coeff(&factor).div_coeff(denominator)
+    }
+
+    /// Compute the Ducos recurrence for the common adjacent-degree case
+    /// `degree(self) = degree(previous) + 1`.
+    ///
+    /// Writing `e = degree(previous)`, this evaluates the two fused formulas
+    ///
+    ///   D = (lc(previous) * self - coeff(self, e) * previous) / lc(self)
+    ///   next = (lc(previous) * (D - x * previous)
+    ///           + coeff(previous, e - 1) * previous) / nominal_leading
+    ///
+    /// coefficient by coefficient below degree `e`, where all higher terms
+    /// cancel. This avoids constructing the general sequence of `H_j`
+    /// polynomials when the degree drop is one.
+    fn ducos_next_subresultant_adjacent(
+        &self,
+        previous: &Self,
+        nominal_leading: &F::Element,
+    ) -> Self {
+        let d = self.degree();
+        let e = previous.degree();
+        debug_assert_eq!(d, e + 1);
+        debug_assert!(e > 0);
+
+        let self_leading = self.lcoeff();
+        let self_at_e = &self.coefficients[e];
+        let previous_leading = previous.lcoeff();
+        let previous_at_e_minus_one = &previous.coefficients[e - 1];
+        let mut next = self.zero();
+        next.coefficients.reserve(e);
+
+        for degree in 0..e {
+            let self_coefficient = &self.coefficients[degree];
+            let previous_coefficient = &previous.coefficients[degree];
+
+            let mut d_coefficient = if self.ring.is_zero(self_coefficient) {
+                self.ring.zero()
+            } else {
+                self.ring.mul(&previous_leading, self_coefficient)
+            };
+
+            if !self.ring.is_zero(self_at_e) && !self.ring.is_zero(previous_coefficient) {
+                let correction = self.ring.mul(self_at_e, previous_coefficient);
+                d_coefficient = self.ring.sub(&d_coefficient, &correction);
+            }
+
+            if !self.ring.is_zero(&d_coefficient) {
+                d_coefficient = self.exact_div_element(&d_coefficient, &self_leading);
+            }
+
+            if degree > 0 && !self.ring.is_zero(&previous.coefficients[degree - 1]) {
+                d_coefficient = self
+                    .ring
+                    .sub(&d_coefficient, &previous.coefficients[degree - 1]);
+            }
+
+            let mut coefficient = if self.ring.is_zero(&d_coefficient) {
+                self.ring.zero()
+            } else {
+                self.ring.mul(&previous_leading, &d_coefficient)
+            };
+
+            if !self.ring.is_zero(previous_at_e_minus_one)
+                && !self.ring.is_zero(previous_coefficient)
+            {
+                let correction = self.ring.mul(previous_at_e_minus_one, previous_coefficient);
+                coefficient = self.ring.add(&coefficient, &correction);
+            }
+
+            if !self.ring.is_zero(&coefficient) {
+                coefficient = self.exact_div_element(&coefficient, nominal_leading);
+            }
+
+            next.coefficients.push(coefficient);
+        }
+
+        next.truncate();
+        next
     }
 
     /// Ducos' division-minimizing recurrence for the next nonzero
@@ -435,6 +572,214 @@ impl<F: EuclideanDomain> UnivariatePolynomial<F> {
     }
 }
 
+impl<E: PositiveExponent> UnivariatePolynomial<PolynomialRing<IntegerRing, E>> {
+    /// Compute the resultant modulo a sequence of word-sized primes and
+    /// reconstruct its integer coefficients with the Chinese Remainder Theorem.
+    ///
+    /// Reconstruction stops early when the symmetric representative is stable
+    /// and agrees with two fresh modular images. This is a Monte Carlo check;
+    /// absent early termination, the Sylvester 1-norm bound provides a
+    /// deterministic stopping point.
+    pub fn resultant_ducos_crt(&self, other: &Self) -> MultivariatePolynomial<IntegerRing, E> {
+        if let Some(resultant) = self.resultant_small(other) {
+            return resultant;
+        }
+
+        let coefficient_bound = self.resultant_coefficient_bound(other);
+        let deterministic_modulus = &coefficient_bound * 2;
+        let mut rng = rand::rng();
+        let mut primes = PrimeIteratorU64::new(
+            rng.random_range(RESULTANT_CRT_PRIME_BLOCK..RESULTANT_CRT_PRIME_BLOCK * 3 / 2),
+        );
+        let mut verification_prime_iterators: [PrimeIteratorU64;
+            RESULTANT_CRT_VERIFICATION_PRIMES] = std::array::from_fn(|index| {
+            let block_start = (index as u64 + 2) * RESULTANT_CRT_PRIME_BLOCK;
+            PrimeIteratorU64::new(
+                rng.random_range(block_start..block_start + RESULTANT_CRT_PRIME_BLOCK / 2),
+            )
+        });
+        let mut modulus = Integer::one();
+        let mut reconstruction = self.coefficients[0].zero();
+        let mut accumulated_primes = 0usize;
+
+        loop {
+            let (prime, image) = self.next_ducos_modular_image(other, &mut primes);
+            let previous = reconstruction.clone();
+
+            if accumulated_primes == 0 {
+                reconstruction = image;
+                modulus = prime;
+            } else {
+                reconstruction = reconstruction.chinese_remainder(&image, &modulus, &prime);
+                modulus *= &prime;
+            }
+            accumulated_primes += 1;
+
+            if modulus > deterministic_modulus {
+                return reconstruction;
+            }
+
+            if accumulated_primes < 2 || reconstruction != previous {
+                continue;
+            }
+
+            let mut verification_images = Vec::with_capacity(RESULTANT_CRT_VERIFICATION_PRIMES);
+            let mut verified = true;
+            for verification_primes in &mut verification_prime_iterators {
+                let (prime, image) = self.next_ducos_modular_image(other, verification_primes);
+                if !Self::congruent_modulo(&reconstruction, &image, &prime) {
+                    verified = false;
+                }
+                verification_images.push((prime, image));
+
+                if !verified {
+                    break;
+                }
+            }
+
+            if verified {
+                return reconstruction;
+            }
+
+            // A failed check is still a valid image. Fold it into the CRT so
+            // that none of the modular resultant work is discarded.
+            for (prime, image) in verification_images {
+                reconstruction = reconstruction.chinese_remainder(&image, &modulus, &prime);
+                modulus *= &prime;
+                accumulated_primes += 1;
+            }
+
+            if modulus > deterministic_modulus {
+                return reconstruction;
+            }
+        }
+    }
+
+    /// Bound the 1-norm of the resultant by the product of the Sylvester row
+    /// norms: `||self||_1^degree(other) * ||other||_1^degree(self)`.
+    fn resultant_coefficient_bound(&self, other: &Self) -> Integer {
+        let self_norm = self.coefficient_l1_norm();
+        let other_norm = other.coefficient_l1_norm();
+        &self_norm.pow(other.degree() as u64) * &other_norm.pow(self.degree() as u64)
+    }
+
+    fn coefficient_l1_norm(&self) -> Integer {
+        let mut norm = Integer::zero();
+        for polynomial in &self.coefficients {
+            for coefficient in &polynomial.coefficients {
+                norm += coefficient.abs();
+            }
+        }
+        norm
+    }
+
+    fn next_ducos_modular_image(
+        &self,
+        other: &Self,
+        primes: &mut PrimeIteratorU64,
+    ) -> (Integer, MultivariatePolynomial<IntegerRing, E>) {
+        loop {
+            let prime = primes
+                .next()
+                .and_then(|p| u32::try_from(p).ok())
+                .expect("Ran out of word-sized primes for resultant reconstruction");
+            let field = Zp::new(prime);
+            let polynomial_ring = PolynomialRing::new(field.clone());
+            let self_mod = self.map_coeff(
+                |polynomial| {
+                    polynomial.map_coeff(
+                        |coefficient| coefficient.to_finite_field(&field),
+                        field.clone(),
+                    )
+                },
+                polynomial_ring.clone(),
+            );
+            let other_mod = other.map_coeff(
+                |polynomial| {
+                    polynomial.map_coeff(
+                        |coefficient| coefficient.to_finite_field(&field),
+                        field.clone(),
+                    )
+                },
+                polynomial_ring,
+            );
+
+            // A vanished outer leading coefficient changes the Sylvester
+            // matrix dimensions, so such a prime cannot be used.
+            if self_mod.degree() != self.degree() || other_mod.degree() != other.degree() {
+                continue;
+            }
+
+            let image = self_mod
+                .resultant_ducos(&other_mod)
+                .map_coeff(|coefficient| field.to_symmetric_integer(coefficient), Z);
+            return (prime.into(), image);
+        }
+    }
+
+    fn congruent_modulo(
+        reconstruction: &MultivariatePolynomial<IntegerRing, E>,
+        image: &MultivariatePolynomial<IntegerRing, E>,
+        prime: &Integer,
+    ) -> bool {
+        reconstruction.map_coeff(|c| c.clone().symmetric_mod(prime), Z) == *image
+    }
+}
+
+impl<E: PositiveExponent> UnivariatePolynomial<PolynomialRing<RationalField, E>> {
+    /// Clear rational denominators, compute the integer resultant with modular
+    /// Ducos images and CRT reconstruction, and restore the overall scale.
+    pub fn resultant_ducos_crt(&self, other: &Self) -> MultivariatePolynomial<RationalField, E> {
+        if let Some(resultant) = self.resultant_small(other) {
+            return resultant;
+        }
+
+        let self_denominator = self.coefficient_denominator_lcm();
+        let other_denominator = other.coefficient_denominator_lcm();
+        let integer_ring = PolynomialRing::new(Z);
+        let self_integer = self.map_coeff(
+            |polynomial| Self::clear_coefficient_denominators(polynomial, &self_denominator),
+            integer_ring.clone(),
+        );
+        let other_integer = other.map_coeff(
+            |polynomial| Self::clear_coefficient_denominators(polynomial, &other_denominator),
+            integer_ring,
+        );
+
+        let scale = &self_denominator.pow(other.degree() as u64)
+            * &other_denominator.pow(self.degree() as u64);
+        self_integer.resultant_ducos_crt(&other_integer).map_coeff(
+            |coefficient| Rational::from((coefficient.clone(), scale.clone())),
+            Q,
+        )
+    }
+
+    fn coefficient_denominator_lcm(&self) -> Integer {
+        let mut denominator = Integer::one();
+        for polynomial in &self.coefficients {
+            for coefficient in &polynomial.coefficients {
+                let gcd = Z.gcd(&denominator, coefficient.denominator_ref());
+                denominator = Z.quot_rem(&denominator, &gcd).0 * coefficient.denominator_ref();
+            }
+        }
+        denominator
+    }
+
+    fn clear_coefficient_denominators(
+        polynomial: &MultivariatePolynomial<RationalField, E>,
+        common_denominator: &Integer,
+    ) -> MultivariatePolynomial<IntegerRing, E> {
+        polynomial.map_coeff(
+            |coefficient| {
+                coefficient.numerator_ref()
+                    * &Z.quot_rem(common_denominator, coefficient.denominator_ref())
+                        .0
+            },
+            Z,
+        )
+    }
+}
+
 impl<F: Field> UnivariatePolynomial<F> {
     /// Compute the resultant of the two polynomials.
     pub fn resultant(&self, other: &Self) -> F::Element {
@@ -619,8 +964,23 @@ mod test {
             let b = b.to_univariate(0);
 
             assert_eq!(a.resultant_ducos(&b), a.resultant_prs(&b));
+            assert_eq!(a.resultant_ducos_crt(&b), a.resultant_prs(&b));
             assert_eq!(b.resultant_ducos(&a), b.resultant_prs(&a));
         }
+    }
+
+    #[test]
+    fn resultant_ducos_crt_with_rational_coefficients() {
+        let (x, y, z) = symbol!("x", "y", "z");
+        let vars = Arc::new(vec![x.into(), y.into(), z.into()]);
+        let a = parse!("(y/2+z/3)*x^6+(y*z/5+7/11)*x^3+y/13+1")
+            .to_polynomial::<_, u16>(&Q, Some(vars.clone()))
+            .to_univariate(0);
+        let b = parse!("(z/7+2/3)*x^4+(y/17-z/19)*x^2+5/23")
+            .to_polynomial::<_, u16>(&Q, Some(vars))
+            .to_univariate(0);
+
+        assert_eq!(a.resultant_ducos_crt(&b), a.resultant_ducos(&b));
     }
 
     #[test]
