@@ -3,7 +3,9 @@
 use super::{FiniteFieldElement, Zp, Zp64};
 #[cfg(feature = "gmp")]
 use crate::domains::integer::{MultiPrecisionInteger, RawMultiPrecisionInteger};
-use crate::domains::{DensePolynomialMulRequest, PolynomialKernels};
+use crate::domains::{
+    DensePolynomialMulRequest, PolynomialKernels, polynomial_layouts::try_simplex_kronecker_layout,
+};
 #[cfg(feature = "gmp")]
 use rug::integer::Order as RugIntegerOrder;
 
@@ -69,6 +71,10 @@ pub(super) fn try_ks2_zp_polynomial_mul(
     let coefficient_bits = left_bits
         .checked_add(right_bits)?
         .checked_add(collision_bits)?;
+    // A single Montgomery reduction is sufficient while the exact coefficient is below pR.
+    // This avoids a generic integer remainder for the small-prime packed-convolution case.
+    let direct_montgomery_reduction =
+        coefficient_bits <= (u32::BITS - field.p.leading_zeros()) as usize + u32::BITS as usize - 1;
     let evaluation_bits = coefficient_bits.div_ceil(2).max(left_bits).max(right_bits);
     let digit_bits = evaluation_bits.checked_mul(2)?;
     if digit_bits > 128 {
@@ -76,8 +82,8 @@ pub(super) fn try_ks2_zp_polynomial_mul(
     }
 
     const MAX_PACKED_BITS: usize = 1 << 29;
-    for &last_index in [left_indices.last()?, right_indices.last()?] {
-        if (last_index as usize + 1).checked_mul(evaluation_bits)? > MAX_PACKED_BITS {
+    for maximum_index in [left_indices.iter().max()?, right_indices.iter().max()?] {
+        if (*maximum_index as usize + 1).checked_mul(evaluation_bits)? > MAX_PACKED_BITS {
             return None;
         }
     }
@@ -87,7 +93,8 @@ pub(super) fn try_ks2_zp_polynomial_mul(
         indices: &[u32],
         evaluation_bits: usize,
     ) -> Option<(MultiPrecisionInteger, MultiPrecisionInteger)> {
-        let packed_bits = (indices.last().copied()? as usize + 1).checked_mul(evaluation_bits)?;
+        let packed_bits =
+            (indices.iter().copied().max()? as usize + 1).checked_mul(evaluation_bits)?;
         let limb_count = packed_bits.checked_add(63)? / 64;
         let mut plus_limbs = vec![0u64; limb_count];
         let mut odd_limbs = vec![0u64; limb_count];
@@ -180,9 +187,14 @@ pub(super) fn try_ks2_zp_polynomial_mul(
             continue;
         }
 
-        let exact_coefficient = low as u128 | ((high as u128) << 64);
-        let residue = (exact_coefficient % field.p as u128) as u64;
-        let coefficient = montgomery_reduce_u32(field, residue);
+        let coefficient = if direct_montgomery_reduction {
+            debug_assert_eq!(high, 0);
+            montgomery_reduce_u32(field, low)
+        } else {
+            let exact_coefficient = low as u128 | ((high as u128) << 64);
+            let residue = (exact_coefficient % field.p as u128) as u64;
+            montgomery_reduce_u32(field, residue)
+        };
         if coefficient != 0 {
             output.push((index as u32, FiniteFieldElement(coefficient)));
         }
@@ -192,14 +204,14 @@ pub(super) fn try_ks2_zp_polynomial_mul(
 
 fn try_dense_zp_polynomial_mul(
     field: &Zp,
-    output_len: usize,
+    standard_output_len: usize,
     left_coefficients: &[FiniteFieldElement<u32>],
     left_indices: &[u32],
     right_coefficients: &[FiniteFieldElement<u32>],
     right_indices: &[u32],
 ) -> Option<Vec<(u32, FiniteFieldElement<u32>)>> {
     validate_dense_polynomial_mul(
-        output_len,
+        standard_output_len,
         left_coefficients,
         left_indices,
         right_coefficients,
@@ -213,6 +225,33 @@ fn try_dense_zp_polynomial_mul(
     let number_of_products = left_coefficients
         .len()
         .checked_mul(right_coefficients.len())?;
+    const MIN_SIMPLEX_OUTPUT_LEN: usize = 1 << 16;
+    let simplex_layout = (number_of_products < standard_output_len
+        && standard_output_len >= MIN_SIMPLEX_OUTPUT_LEN)
+        .then(|| try_simplex_kronecker_layout(standard_output_len, left_indices, right_indices))
+        .flatten();
+    let (output_len, left_indices, right_indices) = if let Some(layout) = simplex_layout.as_ref() {
+        (
+            layout.output_len,
+            layout.left_indices.as_slice(),
+            layout.right_indices.as_slice(),
+        )
+    } else {
+        (standard_output_len, left_indices, right_indices)
+    };
+    let decode_output = |mut output: Vec<(u32, FiniteFieldElement<u32>)>| {
+        if let Some(layout) = simplex_layout.as_ref() {
+            for (index, _) in &mut output {
+                let decoded = *layout.decode_indices.get(*index as usize)?;
+                if decoded == u32::MAX {
+                    return None;
+                }
+                *index = decoded;
+            }
+            output.sort_unstable_by_key(|term| term.0);
+        }
+        Some(output)
+    };
 
     #[cfg(feature = "gmp")]
     if number_of_products >= 1_000_000
@@ -226,7 +265,7 @@ fn try_dense_zp_polynomial_mul(
             right_indices,
         )
     {
-        return Some(output);
+        return decode_output(output);
     }
 
     // Small moduli can accumulate the entire convolution in u64. Besides using a
@@ -234,6 +273,9 @@ fn try_dense_zp_polynomial_mul(
     let maximum_product = (field.p - 1) as u128 * (field.p - 1) as u128;
     if maximum_product.checked_mul(number_of_products as u128)? <= u64::MAX as u128 {
         let modulus = field.p as u64;
+        let reduce_directly = maximum_product
+            .checked_mul(left_coefficients.len().min(right_coefficients.len()) as u128)?
+            < (field.p as u128) << u32::BITS;
         if number_of_products >= output_len {
             let mut accumulators = vec![0u64; output_len];
             for (left, &left_index) in left_coefficients.iter().zip(left_indices) {
@@ -251,12 +293,19 @@ fn try_dense_zp_polynomial_mul(
                     continue;
                 }
 
-                let coefficient = montgomery_reduce_u32(field, accumulator % modulus);
+                let coefficient = montgomery_reduce_u32(
+                    field,
+                    if reduce_directly {
+                        accumulator
+                    } else {
+                        accumulator % modulus
+                    },
+                );
                 if coefficient != 0 {
                     result.push((position as u32, FiniteFieldElement(coefficient)));
                 }
             }
-            return Some(result);
+            return decode_output(result);
         }
 
         let mut coefficient_indices = vec![0u32; output_len];
@@ -285,12 +334,19 @@ fn try_dense_zp_polynomial_mul(
 
             let accumulator =
                 unsafe { *accumulators.get_unchecked(accumulator_index as usize - 1) };
-            let coefficient = montgomery_reduce_u32(field, accumulator % modulus);
+            let coefficient = montgomery_reduce_u32(
+                field,
+                if reduce_directly {
+                    accumulator
+                } else {
+                    accumulator % modulus
+                },
+            );
             if coefficient != 0 {
                 result.push((position as u32, FiniteFieldElement(coefficient)));
             }
         }
-        return Some(result);
+        return decode_output(result);
     }
 
     // A coefficient receives at most min(left.len(), right.len()) products. With the
@@ -318,7 +374,7 @@ fn try_dense_zp_polynomial_mul(
                 result.push((position as u32, FiniteFieldElement(coefficient)));
             }
         }
-        return Some(result);
+        return decode_output(result);
     }
 
     let mut coefficient_indices = vec![0u32; output_len];
@@ -352,7 +408,7 @@ fn try_dense_zp_polynomial_mul(
             result.push((position as u32, FiniteFieldElement(coefficient)));
         }
     }
-    Some(result)
+    decode_output(result)
 }
 
 #[inline(always)]
@@ -432,14 +488,21 @@ pub(super) fn try_ks4_zp64_polynomial_mul(
     right_coefficients: &[FiniteFieldElement<u64>],
     right_indices: &[u32],
 ) -> Option<Vec<(u32, FiniteFieldElement<u64>)>> {
-    let left_len = left_indices.last().copied()? as usize + 1;
-    let right_len = right_indices.last().copied()? as usize + 1;
+    let left_len = left_indices.iter().copied().max()? as usize + 1;
+    let right_len = right_indices.iter().copied().max()? as usize + 1;
     let product_len = left_len.checked_add(right_len)?.checked_sub(1)?;
+    let left_bits = left_coefficients
+        .iter()
+        .map(|coefficient| u64::BITS - coefficient.0.leading_zeros())
+        .max()? as usize;
+    let right_bits = right_coefficients
+        .iter()
+        .map(|coefficient| u64::BITS - coefficient.0.leading_zeros())
+        .max()? as usize;
     let collision_count = left_coefficients.len().min(right_coefficients.len());
     let collision_bits = usize::BITS - (collision_count - 1).leading_zeros();
-    let residue_bits = (u64::BITS - field.p.leading_zeros()) as usize;
-    let coefficient_bits = residue_bits
-        .checked_mul(2)?
+    let coefficient_bits = left_bits
+        .checked_add(right_bits)?
         .checked_add(collision_bits as usize)?;
     let evaluation_bits = coefficient_bits.div_ceil(4);
     let digit_bits = evaluation_bits.checked_mul(2)?;
@@ -740,15 +803,25 @@ pub(super) fn try_ks2_zp64_polynomial_mul(
     right_coefficients: &[FiniteFieldElement<u64>],
     right_indices: &[u32],
 ) -> Option<Vec<(u32, FiniteFieldElement<u64>)>> {
+    let left_bits = left_coefficients
+        .iter()
+        .map(|coefficient| u64::BITS - coefficient.0.leading_zeros())
+        .max()? as usize;
+    let right_bits = right_coefficients
+        .iter()
+        .map(|coefficient| u64::BITS - coefficient.0.leading_zeros())
+        .max()? as usize;
     let collision_count = left_coefficients.len().min(right_coefficients.len());
     let collision_bits = usize::BITS - (collision_count - 1).leading_zeros();
-    let coefficient_bits = 128usize.checked_add(collision_bits as usize)?;
-    let evaluation_bits = coefficient_bits.div_ceil(2);
+    let coefficient_bits = left_bits
+        .checked_add(right_bits)?
+        .checked_add(collision_bits as usize)?;
+    let evaluation_bits = coefficient_bits.div_ceil(2).max(left_bits).max(right_bits);
     let digit_bits = evaluation_bits.checked_mul(2)?;
 
     const MAX_PACKED_BITS: usize = 1 << 29;
-    for &last_index in [left_indices.last()?, right_indices.last()?] {
-        if (last_index as usize + 1).checked_mul(evaluation_bits)? > MAX_PACKED_BITS {
+    for maximum_index in [left_indices.iter().max()?, right_indices.iter().max()?] {
+        if (*maximum_index as usize + 1).checked_mul(evaluation_bits)? > MAX_PACKED_BITS {
             return None;
         }
     }
@@ -758,7 +831,8 @@ pub(super) fn try_ks2_zp64_polynomial_mul(
         indices: &[u32],
         evaluation_bits: usize,
     ) -> Option<(MultiPrecisionInteger, MultiPrecisionInteger)> {
-        let packed_bits = (indices.last().copied()? as usize + 1).checked_mul(evaluation_bits)?;
+        let packed_bits =
+            (indices.iter().copied().max()? as usize + 1).checked_mul(evaluation_bits)?;
         let limb_count = packed_bits.checked_add(63)? / 64;
         let mut plus_limbs = vec![0u64; limb_count];
         let mut odd_limbs = vec![0u64; limb_count];
@@ -837,15 +911,23 @@ pub(super) fn try_ks2_zp64_polynomial_mul(
         } else {
             odd_limbs
         };
-        let low = extract_limb(limbs, limb_index, shift);
-        let high = extract_limb(limbs, limb_index + 1, shift);
+        let mut low = extract_limb(limbs, limb_index, shift);
+        let mut high = extract_limb(limbs, limb_index + 1, shift);
         let mut top = extract_limb(limbs, limb_index + 2, shift);
-        if top_bits < 64 {
-            top &= if top_bits == 0 {
-                0
-            } else {
-                (1u64 << top_bits) - 1
-            };
+        if digit_bits < 64 {
+            low &= (1u64 << digit_bits) - 1;
+            high = 0;
+            top = 0;
+        } else if digit_bits == 64 {
+            high = 0;
+            top = 0;
+        } else if digit_bits < 128 {
+            high &= (1u64 << (digit_bits - 64)) - 1;
+            top = 0;
+        } else if digit_bits == 128 {
+            top = 0;
+        } else if top_bits < 64 {
+            top &= (1u64 << top_bits) - 1;
         }
         if low == 0 && high == 0 && top == 0 {
             continue;
@@ -861,14 +943,14 @@ pub(super) fn try_ks2_zp64_polynomial_mul(
 
 fn try_dense_zp64_polynomial_mul(
     field: &Zp64,
-    output_len: usize,
+    standard_output_len: usize,
     left_coefficients: &[FiniteFieldElement<u64>],
     left_indices: &[u32],
     right_coefficients: &[FiniteFieldElement<u64>],
     right_indices: &[u32],
 ) -> Option<Vec<(u32, FiniteFieldElement<u64>)>> {
     validate_dense_polynomial_mul(
-        output_len,
+        standard_output_len,
         left_coefficients,
         left_indices,
         right_coefficients,
@@ -878,30 +960,86 @@ fn try_dense_zp64_polynomial_mul(
         return Some(Vec::new());
     }
 
+    let product_count = left_coefficients
+        .len()
+        .checked_mul(right_coefficients.len())?;
+    const MIN_SIMPLEX_OUTPUT_LEN: usize = 1 << 16;
+    let simplex_layout = ((cfg!(test) || product_count >= 20_000_000)
+        && standard_output_len >= MIN_SIMPLEX_OUTPUT_LEN)
+        .then(|| try_simplex_kronecker_layout(standard_output_len, left_indices, right_indices))
+        .flatten();
+    let (output_len, left_indices, right_indices) = if let Some(layout) = simplex_layout.as_ref() {
+        (
+            layout.output_len,
+            layout.left_indices.as_slice(),
+            layout.right_indices.as_slice(),
+        )
+    } else {
+        (standard_output_len, left_indices, right_indices)
+    };
+    let decode_output = |mut output: Vec<(u32, FiniteFieldElement<u64>)>| {
+        if let Some(layout) = simplex_layout.as_ref() {
+            for (index, _) in &mut output {
+                let decoded = *layout.decode_indices.get(*index as usize)?;
+                if decoded == u32::MAX {
+                    return None;
+                }
+                *index = decoded;
+            }
+            output.sort_unstable_by_key(|term| term.0);
+        }
+        Some(output)
+    };
+
     #[cfg(feature = "gmp")]
     {
-        let product_count = left_coefficients
-            .len()
-            .checked_mul(right_coefficients.len())?;
         if product_count >= 20_000_000 && product_count >= output_len.saturating_mul(128) {
-            if let Some(output) = try_ks2_zp64_polynomial_mul(
-                field,
-                output_len,
-                left_coefficients,
-                left_indices,
-                right_coefficients,
-                right_indices,
-            ) {
-                return Some(output);
-            }
-            if let Some(output) = try_ks4_zp64_polynomial_mul(
-                field,
-                left_coefficients,
-                left_indices,
-                right_coefficients,
-                right_indices,
-            ) {
-                return Some(output);
+            let densely_encoded = left_indices
+                .last()
+                .is_some_and(|&index| index as usize + 1 == left_coefficients.len())
+                && right_indices
+                    .last()
+                    .is_some_and(|&index| index as usize + 1 == right_coefficients.len());
+            if densely_encoded {
+                if let Some(output) = try_ks4_zp64_polynomial_mul(
+                    field,
+                    left_coefficients,
+                    left_indices,
+                    right_coefficients,
+                    right_indices,
+                ) {
+                    return decode_output(output);
+                }
+                if let Some(output) = try_ks2_zp64_polynomial_mul(
+                    field,
+                    output_len,
+                    left_coefficients,
+                    left_indices,
+                    right_coefficients,
+                    right_indices,
+                ) {
+                    return decode_output(output);
+                }
+            } else {
+                if let Some(output) = try_ks2_zp64_polynomial_mul(
+                    field,
+                    output_len,
+                    left_coefficients,
+                    left_indices,
+                    right_coefficients,
+                    right_indices,
+                ) {
+                    return decode_output(output);
+                }
+                if let Some(output) = try_ks4_zp64_polynomial_mul(
+                    field,
+                    left_coefficients,
+                    left_indices,
+                    right_coefficients,
+                    right_indices,
+                ) {
+                    return decode_output(output);
+                }
             }
         }
     }
@@ -914,12 +1052,33 @@ fn try_dense_zp64_polynomial_mul(
         .map(|(coefficient, &index)| (coefficient.0, index as usize * 3))
         .collect::<Vec<_>>();
     let mut accumulators = vec![0u64; output_len * 3];
-    for (left, &left_index) in left_coefficients.iter().zip(left_indices) {
-        let left_offset = left_index as usize * 3;
-        for &(right, right_offset) in &right_terms {
-            let product = left.0 as u128 * right as u128;
-            let accumulator = unsafe { accumulators.as_mut_ptr().add(left_offset + right_offset) };
-            unsafe { add_u128_to_three_limbs(accumulator, product) };
+    if product_count >= 1_000_000 {
+        const BLOCK_SIZE: usize = 64;
+        for left_block in (0..left_coefficients.len()).step_by(BLOCK_SIZE) {
+            for right_block in right_terms.chunks(BLOCK_SIZE) {
+                let left_end = (left_block + BLOCK_SIZE).min(left_coefficients.len());
+                for left_term in left_block..left_end {
+                    let left = unsafe { left_coefficients.get_unchecked(left_term) };
+                    let left_offset =
+                        unsafe { *left_indices.get_unchecked(left_term) as usize } * 3;
+                    for &(right, right_offset) in right_block {
+                        let product = left.0 as u128 * right as u128;
+                        let accumulator =
+                            unsafe { accumulators.as_mut_ptr().add(left_offset + right_offset) };
+                        unsafe { add_u128_to_three_limbs(accumulator, product) };
+                    }
+                }
+            }
+        }
+    } else {
+        for (left, &left_index) in left_coefficients.iter().zip(left_indices) {
+            let left_offset = left_index as usize * 3;
+            for &(right, right_offset) in &right_terms {
+                let product = left.0 as u128 * right as u128;
+                let accumulator =
+                    unsafe { accumulators.as_mut_ptr().add(left_offset + right_offset) };
+                unsafe { add_u128_to_three_limbs(accumulator, product) };
+            }
         }
     }
 
@@ -937,7 +1096,7 @@ fn try_dense_zp64_polynomial_mul(
             result.push((position as u32, FiniteFieldElement(coefficient)));
         }
     }
-    Some(result)
+    decode_output(result)
 }
 
 impl PolynomialKernels<FiniteFieldElement<u32>> for Zp {

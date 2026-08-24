@@ -18,6 +18,7 @@ pub mod dual;
 pub mod finite_field;
 pub mod float;
 pub mod integer;
+mod polynomial_layouts;
 pub mod rational;
 
 use std::borrow::Borrow;

@@ -4120,7 +4120,7 @@ mod test {
         };
         let left = simplex_indices(left_degree);
         let right = simplex_indices(right_degree);
-        let layout = super::polynomial_kernels::try_simplex_kronecker_layout(
+        let layout = crate::domains::polynomial_layouts::try_simplex_kronecker_layout(
             radix.pow(3),
             left.as_slice(),
             right.as_slice(),

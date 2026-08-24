@@ -3715,7 +3715,8 @@ mod test {
         right: &[super::FiniteFieldElement<u32>],
         right_indices: &[u32],
     ) {
-        let output_len = left_indices.last().unwrap() + right_indices.last().unwrap() + 1;
+        let output_len =
+            left_indices.iter().max().unwrap() + right_indices.iter().max().unwrap() + 1;
         let mut expected = vec![field.zero(); output_len as usize];
         for (left, &left_index) in left.iter().zip(left_indices) {
             for (right, &right_index) in right.iter().zip(right_indices) {
@@ -3751,7 +3752,8 @@ mod test {
         right: &[super::FiniteFieldElement<u64>],
         right_indices: &[u32],
     ) {
-        let output_len = left_indices.last().unwrap() + right_indices.last().unwrap() + 1;
+        let output_len =
+            left_indices.iter().max().unwrap() + right_indices.iter().max().unwrap() + 1;
         let mut expected = vec![field.zero(); output_len as usize];
         for (left, &left_index) in left.iter().zip(left_indices) {
             for (right, &right_index) in right.iter().zip(right_indices) {
@@ -3778,6 +3780,43 @@ mod test {
         assert_eq!(actual, expected);
     }
 
+    #[cfg(feature = "gmp")]
+    fn assert_ks2_zp64_polynomial_mul(
+        field: &Zp64,
+        left: &[super::FiniteFieldElement<u64>],
+        left_indices: &[u32],
+        right: &[super::FiniteFieldElement<u64>],
+        right_indices: &[u32],
+    ) {
+        let output_len =
+            left_indices.iter().max().unwrap() + right_indices.iter().max().unwrap() + 1;
+        let mut expected = vec![field.zero(); output_len as usize];
+        for (left, &left_index) in left.iter().zip(left_indices) {
+            for (right, &right_index) in right.iter().zip(right_indices) {
+                field.add_mul_assign(
+                    &mut expected[left_index as usize + right_index as usize],
+                    left,
+                    right,
+                );
+            }
+        }
+
+        let terms = super::polynomial_kernels::try_ks2_zp64_polynomial_mul(
+            field,
+            output_len as usize,
+            left,
+            left_indices,
+            right,
+            right_indices,
+        )
+        .unwrap();
+        let mut actual = vec![field.zero(); output_len as usize];
+        for (position, coefficient) in terms {
+            actual[position as usize] = coefficient;
+        }
+        assert_eq!(actual, expected);
+    }
+
     #[test]
     fn dense_polynomial_multiplication() {
         let field = Zp::new(17);
@@ -3786,7 +3825,38 @@ mod test {
         assert_dense_polynomial_mul(&field, &left, &[0, 2, 5, 7], &right, &[0, 1, 4, 7], 15);
         assert_dense_polynomial_mul(&field, &left, &[0, 2, 5, 7], &right, &[0, 1, 4, 7], 100);
         #[cfg(feature = "gmp")]
-        assert_ks2_zp_polynomial_mul(&field, &left, &[0, 2, 5, 7], &right, &[0, 1, 4, 7]);
+        {
+            assert_ks2_zp_polynomial_mul(&field, &left, &[0, 2, 5, 7], &right, &[0, 1, 4, 7]);
+            assert_ks2_zp_polynomial_mul(&field, &left, &[0, 7, 2, 5], &right, &[7, 1, 4, 0]);
+        }
+
+        let total_degree = 79usize;
+        let radix = total_degree + 1;
+        let simplex = |degree: usize, offset: usize| {
+            let mut coefficients = Vec::new();
+            let mut indices = Vec::new();
+            for high in 0..=degree {
+                for middle in 0..=degree - high {
+                    for low in 0..=degree - high - middle {
+                        coefficients.push(field.to_element(
+                            ((high * 11 + middle * 7 + low * 3 + offset) % 16 + 1) as u32,
+                        ));
+                        indices.push(((high * radix + middle) * radix + low) as u32);
+                    }
+                }
+            }
+            (coefficients, indices)
+        };
+        let (left, left_indices) = simplex(40, 1);
+        let (right, right_indices) = simplex(39, 3);
+        assert_dense_polynomial_mul(
+            &field,
+            &left,
+            &left_indices,
+            &right,
+            &right_indices,
+            radix.pow(3),
+        );
 
         let field = Zp::new(4_294_967_291);
         let left = [4_294_967_290, 4_294_967_200, 2_345_678_901, 123_456_789]
@@ -3818,6 +3888,8 @@ mod test {
         {
             assert_ks4_polynomial_mul(&field, &left, &[0, 2, 5, 7], &right, &[0, 1, 4, 7]);
             assert_ks4_polynomial_mul(&field, &left, &[0, 2, 5, 7], &right[..3], &[0, 1, 4]);
+            assert_ks4_polynomial_mul(&field, &left, &[0, 7, 2, 5], &right, &[7, 1, 4, 0]);
+            assert_ks2_zp64_polynomial_mul(&field, &left, &[0, 7, 2, 5], &right, &[7, 1, 4, 0]);
         }
 
         let raw = vec![super::FiniteFieldElement::from_inner(18_446_744_073_709_551_556); 64];
@@ -3828,27 +3900,45 @@ mod test {
         {
             assert_ks4_polynomial_mul(&field, &raw, &indices, &raw, &indices);
             assert_ks4_polynomial_mul(&field, &raw, &indices, &raw[..63], &indices[..63]);
+            assert_ks2_zp64_polynomial_mul(&field, &raw, &indices, &raw, &indices);
 
-            let mut expected = vec![field.zero(); 127];
-            for (left, &left_index) in raw.iter().zip(&indices) {
-                for (right, &right_index) in raw.iter().zip(&indices) {
-                    field.add_mul_assign(
-                        &mut expected[left_index as usize + right_index as usize],
-                        left,
-                        right,
-                    );
+            let small = (0..64)
+                .map(|index| field.to_element(index % 16 + 1))
+                .collect::<Vec<_>>();
+            assert_ks2_zp64_polynomial_mul(&field, &small, &indices, &small, &indices);
+            assert_ks2_zp64_polynomial_mul(&field, &small, &indices, &raw, &indices);
+            assert_ks2_zp64_polynomial_mul(&field, &raw, &indices, &small, &indices);
+        }
+
+        let total_degree = 47usize;
+        let radix = total_degree + 1;
+        let simplex = |degree: usize, offset: u64| {
+            let mut coefficients = Vec::new();
+            let mut indices = Vec::new();
+            for high in 0..=degree {
+                for middle in 0..=degree - high {
+                    for low in 0..=degree - high - middle {
+                        coefficients.push(field.to_element(
+                            (high as u64 * 31 + middle as u64 * 17 + low as u64 * 7 + offset)
+                                % 10_000
+                                + 1,
+                        ));
+                        indices.push(((high * radix + middle) * radix + low) as u32);
+                    }
                 }
             }
-            let terms = super::polynomial_kernels::try_ks2_zp64_polynomial_mul(
-                &field, 127, &raw, &indices, &raw, &indices,
-            )
-            .unwrap();
-            let mut actual = vec![field.zero(); 127];
-            for (position, coefficient) in terms {
-                actual[position as usize] = coefficient;
-            }
-            assert_eq!(actual, expected);
-        }
+            (coefficients, indices)
+        };
+        let (left, left_indices) = simplex(24, 1);
+        let (right, right_indices) = simplex(23, 3);
+        assert_dense_polynomial_mul(
+            &field,
+            &left,
+            &left_indices,
+            &right,
+            &right_indices,
+            radix.pow(3),
+        );
     }
 
     #[test]
