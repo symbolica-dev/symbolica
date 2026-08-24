@@ -20,9 +20,17 @@ fn median(mut samples: Vec<f64>) -> f64 {
 fn main() {
     let benchmark_case = std::env::var("GCD_BENCH_CASE").unwrap_or_else(|_| "dense".to_owned());
     assert!(
-        matches!(benchmark_case.as_str(), "dense" | "sparse"),
-        "GCD_BENCH_CASE must be dense or sparse"
+        matches!(
+            benchmark_case.as_str(),
+            "dense" | "sparse" | "high-gap" | "high-height"
+        ),
+        "GCD_BENCH_CASE must be dense, sparse, high-gap, or high-height"
     );
+    let gap = std::env::var("GCD_BENCH_GAP")
+        .ok()
+        .and_then(|value| value.parse::<u32>().ok())
+        .unwrap_or(10);
+    assert!(gap > 0, "GCD_BENCH_GAP must be positive");
     let backend = std::env::var("GCD_BENCH_BACKEND").unwrap_or_else(|_| "auto".to_owned());
     match backend.as_str() {
         "auto" => {
@@ -60,6 +68,9 @@ fn main() {
 
     println!("Symbolica {}", env!("CARGO_PKG_VERSION"));
     println!("case {benchmark_case}");
+    if benchmark_case == "high-gap" {
+        println!("gap {gap}");
+    }
     println!("backend {backend}");
     println!("samples {samples}");
 
@@ -78,13 +89,35 @@ fn main() {
                 parse!("(1+3*x1+5*x2+7*x3+9*x4+11*x5+13*x6-15*x7)^7+3")
                     .to_polynomial::<_, u16>(&Z, None),
             ]
-        } else {
+        } else if benchmark_case == "high-height" {
+            [
+                parse!("(1+1000000007*x1+1000000009*x2+1000000033*x3+1000000087*x4+1000000093*x5+1000000097*x6+1000000103*x7)^7-1")
+                    .to_polynomial::<_, u16>(&Z, None),
+                parse!("(1-1000000007*x1-1000000009*x2-1000000033*x3+1000000087*x4-1000000093*x5-1000000097*x6+1000000103*x7)^7+1")
+                    .to_polynomial::<_, u16>(&Z, None),
+                parse!("(1+1000000007*x1+1000000009*x2+1000000033*x3+1000000087*x4+1000000093*x5+1000000097*x6-1000000103*x7)^7+3")
+                    .to_polynomial::<_, u16>(&Z, None),
+            ]
+        } else if benchmark_case == "sparse" {
             [
                 parse!("(1+3*x1+5*x2+7*x3+9*x4+11*x5+13*x6+15*x7)^7-1")
                     .to_polynomial::<_, u16>(&Z, None),
                 parse!("(1-3*x1-5*x2-7*x3+9*x4-11*x5-13*x6+15*x7)^7+1")
                     .to_polynomial::<_, u16>(&Z, None),
                 parse!("1+x1^7+2*x2^7+3*x3^7+5*x4^7+7*x5^7+11*x6^7+13*x7^7")
+                    .to_polynomial::<_, u16>(&Z, None),
+            ]
+        } else {
+            let g_expression = format!(
+                "1+x1^{gap}+2*x2^{gap}+3*x3^{gap}+5*x4^{gap}+7*x5^{gap}+11*x6^{gap}+13*x7^{gap}"
+            );
+            [
+                parse!("(1+3*x1+5*x2+7*x3+9*x4+11*x5+13*x6+15*x7)^7-1")
+                    .to_polynomial::<_, u16>(&Z, None),
+                parse!("(1-3*x1-5*x2-7*x3+9*x4-11*x5-13*x6+15*x7)^7+1")
+                    .to_polynomial::<_, u16>(&Z, None),
+                Atom::parse(&g_expression, "gcd_benchmark", ParseSettings::default())
+                    .unwrap()
                     .to_polynomial::<_, u16>(&Z, None),
             ]
         };

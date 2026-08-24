@@ -75,12 +75,26 @@ int main(void)
     const char *benchmark_case = getenv("GCD_BENCH_CASE");
     if (benchmark_case == NULL)
         benchmark_case = "dense";
-    if (strcmp(benchmark_case, "dense") != 0 && strcmp(benchmark_case, "sparse") != 0)
+    if (strcmp(benchmark_case, "dense") != 0 &&
+        strcmp(benchmark_case, "sparse") != 0 &&
+        strcmp(benchmark_case, "high-gap") != 0 &&
+        strcmp(benchmark_case, "high-height") != 0)
     {
-        fprintf(stderr, "GCD_BENCH_CASE must be dense or sparse\n");
+        fprintf(stderr, "GCD_BENCH_CASE must be dense, sparse, high-gap, or high-height\n");
         return 1;
     }
     const char *sample_override = getenv("GCD_BENCH_SAMPLES");
+    const char *backend = getenv("GCD_BENCH_BACKEND");
+    if (backend == NULL)
+        backend = "all";
+    if (strcmp(backend, "all") != 0 &&
+        strcmp(backend, "hensel") != 0 &&
+        strcmp(backend, "zippel") != 0 &&
+        strcmp(backend, "zippel2") != 0)
+    {
+        fprintf(stderr, "GCD_BENCH_BACKEND must be all, hensel, zippel, or zippel2\n");
+        return 1;
+    }
     int samples = sample_override ? atoi(sample_override) : 1;
     if (samples < 1)
         samples = 1;
@@ -96,29 +110,65 @@ int main(void)
     fmpz_mpoly_init(g, context);
     fmpz_mpoly_init(ag, context);
     fmpz_mpoly_init(bg, context);
+    int benchmark_gap = 0;
 
-    construct_power(a, base, "1+3*x1+5*x2+7*x3+9*x4+11*x5+13*x6+15*x7",
-                    -1, variables, context);
-    construct_power(b, base, "1-3*x1-5*x2-7*x3+9*x4-11*x5-13*x6+15*x7",
-                    1, variables, context);
-    if (strcmp(benchmark_case, "dense") == 0)
+    const int high_height = strcmp(benchmark_case, "high-height") == 0;
+    const char *a_expression = high_height
+        ? "1+1000000007*x1+1000000009*x2+1000000033*x3+1000000087*x4+1000000093*x5+1000000097*x6+1000000103*x7"
+        : "1+3*x1+5*x2+7*x3+9*x4+11*x5+13*x6+15*x7";
+    const char *b_expression = high_height
+        ? "1-1000000007*x1-1000000009*x2-1000000033*x3+1000000087*x4-1000000093*x5-1000000097*x6+1000000103*x7"
+        : "1-3*x1-5*x2-7*x3+9*x4-11*x5-13*x6+15*x7";
+    construct_power(a, base, a_expression, -1, variables, context);
+    construct_power(b, base, b_expression, 1, variables, context);
+    if (strcmp(benchmark_case, "dense") == 0 || high_height)
     {
-        construct_power(g, base, "1+3*x1+5*x2+7*x3+9*x4+11*x5+13*x6-15*x7",
-                        3, variables, context);
+        const char *g_expression = high_height
+            ? "1+1000000007*x1+1000000009*x2+1000000033*x3+1000000087*x4+1000000093*x5+1000000097*x6-1000000103*x7"
+            : "1+3*x1+5*x2+7*x3+9*x4+11*x5+13*x6-15*x7";
+        construct_power(g, base, g_expression, 3, variables, context);
     }
-    else if (fmpz_mpoly_set_str_pretty(
-                 g, "1+x1^7+2*x2^7+3*x3^7+5*x4^7+7*x5^7+11*x6^7+13*x7^7",
-                 variables, context) != 0)
+    else
     {
-        fprintf(stderr, "Could not construct sparse GCD\n");
-        return 1;
+        char high_gap_expression[512];
+        const char *g_expression;
+        if (strcmp(benchmark_case, "sparse") == 0)
+        {
+            g_expression = "1+x1^7+2*x2^7+3*x3^7+5*x4^7+7*x5^7+11*x6^7+13*x7^7";
+        }
+        else
+        {
+            const char *gap_override = getenv("GCD_BENCH_GAP");
+            benchmark_gap = gap_override ? atoi(gap_override) : 10;
+            if (benchmark_gap < 1)
+            {
+                fprintf(stderr, "GCD_BENCH_GAP must be positive\n");
+                return 1;
+            }
+            snprintf(high_gap_expression, sizeof(high_gap_expression),
+                     "1+x1^%d+2*x2^%d+3*x3^%d+5*x4^%d+7*x5^%d+11*x6^%d+13*x7^%d",
+                     benchmark_gap, benchmark_gap, benchmark_gap, benchmark_gap,
+                     benchmark_gap, benchmark_gap, benchmark_gap);
+            g_expression = high_gap_expression;
+        }
+        if (fmpz_mpoly_set_str_pretty(g, g_expression, variables, context) != 0)
+        {
+            fprintf(stderr, "Could not construct sparse GCD\n");
+            return 1;
+        }
     }
     fmpz_mpoly_mul(ag, a, g, context);
     fmpz_mpoly_mul(bg, b, g, context);
 
     printf("FLINT %s, case %s, samples %d\n", flint_version, benchmark_case, samples);
-    run_backend("zippel", fmpz_mpoly_gcd_zippel, ag, bg, g, samples, context);
-    run_backend("zippel2", fmpz_mpoly_gcd_zippel2, ag, bg, g, samples, context);
+    if (benchmark_gap > 0)
+        printf("gap %d\n", benchmark_gap);
+    if (strcmp(backend, "all") == 0 || strcmp(backend, "hensel") == 0)
+        run_backend("hensel", fmpz_mpoly_gcd_hensel, ag, bg, g, samples, context);
+    if (strcmp(backend, "all") == 0 || strcmp(backend, "zippel") == 0)
+        run_backend("zippel", fmpz_mpoly_gcd_zippel, ag, bg, g, samples, context);
+    if (strcmp(backend, "all") == 0 || strcmp(backend, "zippel2") == 0)
+        run_backend("zippel2", fmpz_mpoly_gcd_zippel2, ag, bg, g, samples, context);
 
     fmpz_mpoly_clear(base, context);
     fmpz_mpoly_clear(a, context);
