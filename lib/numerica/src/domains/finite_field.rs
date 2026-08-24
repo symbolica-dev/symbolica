@@ -337,10 +337,12 @@ impl RingOps<FiniteFieldElement<u32>> for Zp {
         *a = self.mul(*a, b);
     }
 
+    #[inline(always)]
     fn add_mul_assign(&self, a: &mut Self::Element, b: Self::Element, c: Self::Element) {
         self.add_assign(a, self.mul(b, c));
     }
 
+    #[inline(always)]
     fn sub_mul_assign(&self, a: &mut Self::Element, b: Self::Element, c: Self::Element) {
         self.sub_assign(a, self.mul(b, c));
     }
@@ -411,10 +413,12 @@ impl RingOps<&FiniteFieldElement<u32>> for Zp {
         *a = self.mul(&*a, b);
     }
 
+    #[inline(always)]
     fn add_mul_assign(&self, a: &mut Self::Element, b: &Self::Element, c: &Self::Element) {
         self.add_assign(a, &self.mul(b, c));
     }
 
+    #[inline(always)]
     fn sub_mul_assign(&self, a: &mut Self::Element, b: &Self::Element, c: &Self::Element) {
         self.sub_assign(a, &self.mul(b, c));
     }
@@ -857,10 +861,12 @@ impl RingOps<FiniteFieldElement<u64>> for Zp64 {
         *a = self.mul(*a, b);
     }
 
+    #[inline(always)]
     fn add_mul_assign(&self, a: &mut Self::Element, b: Self::Element, c: Self::Element) {
         self.add_assign(a, &self.mul(b, c));
     }
 
+    #[inline(always)]
     fn sub_mul_assign(&self, a: &mut Self::Element, b: Self::Element, c: Self::Element) {
         self.sub_assign(a, &self.mul(b, c));
     }
@@ -930,10 +936,12 @@ impl RingOps<&FiniteFieldElement<u64>> for Zp64 {
         *a = self.mul(&*a, b);
     }
 
+    #[inline(always)]
     fn add_mul_assign(&self, a: &mut Self::Element, b: &Self::Element, c: &Self::Element) {
         self.add_assign(a, &self.mul(b, c));
     }
 
+    #[inline(always)]
     fn sub_mul_assign(&self, a: &mut Self::Element, b: &Self::Element, c: &Self::Element) {
         self.sub_assign(a, &self.mul(b, c));
     }

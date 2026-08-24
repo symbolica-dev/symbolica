@@ -94,36 +94,55 @@ impl<R: Ring, E: PositiveExponent> MultivariatePolynomial<R, E> {
         eval
     }
 
-    /// Evaluate a polynomial using the evaluation of the exponent of every monomial.
+    /// Build a univariate polynomial from coefficient-weighted monomial evaluations.
+    ///
+    /// `term_evals[i]` already includes the coefficient of term `i`. This lets callers
+    /// that evaluate a geometric sequence update each term with one multiplication per
+    /// sample instead of multiplying by both the geometric ratio and the coefficient.
     #[inline(always)]
-    pub(crate) fn evaluate_using_exponents(
+    pub(crate) fn evaluate_using_weighted_terms(
         &self,
-        exp_evals: &[R::Element],
+        term_evals: &[R::Element],
         main_var: usize,
+        rows: &[(E, usize, usize)],
         out: &mut MultivariatePolynomial<R, E>,
     ) {
         out.clear();
-        let mut c = self.ring().zero();
         let mut new_exp = vec![E::zero(); self.nvars()];
-        for (aa, e) in self.into_iter().zip(exp_evals) {
-            if aa.exponents[main_var] != new_exp[main_var] {
-                if !self.ring().is_zero(&c) {
-                    out.coefficients.push(c);
-                    out.exponents.extend_from_slice(&new_exp);
-
-                    c = self.ring().zero();
-                }
-
-                new_exp[main_var] = aa.exponents[main_var];
+        for (exponent, start, end) in rows {
+            let mut coefficient = self.ring().zero();
+            for value in &term_evals[*start..*end] {
+                self.ring().add_assign(&mut coefficient, value);
             }
 
-            self.ring().add_mul_assign(&mut c, aa.coefficient, e);
+            if !self.ring().is_zero(&coefficient) {
+                new_exp[main_var] = *exponent;
+                out.coefficients.push(coefficient);
+                out.exponents.extend_from_slice(&new_exp);
+            }
         }
+    }
 
-        if !self.ring().is_zero(&c) {
-            out.coefficients.push(c);
-            out.exponents.extend_from_slice(&new_exp);
+    /// Find the contiguous ranges belonging to each exponent of `main_var`.
+    fn univariate_row_ranges(&self, main_var: usize) -> Vec<(E, usize, usize)> {
+        let mut rows = Vec::new();
+        let mut exponents = self.exponents.chunks(self.nvars());
+        let Some(first) = exponents.next() else {
+            return rows;
+        };
+
+        let mut row_exponent = first[main_var];
+        let mut row_start = 0;
+        for (index, exponents) in exponents.enumerate() {
+            let term_index = index + 1;
+            if exponents[main_var] != row_exponent {
+                rows.push((row_exponent, row_start, term_index));
+                row_exponent = exponents[main_var];
+                row_start = term_index;
+            }
         }
+        rows.push((row_exponent, row_start, self.nterms()));
+        rows
     }
 }
 
@@ -538,8 +557,20 @@ impl<F: Field, E: PositiveExponent> MultivariatePolynomial<F, E> {
             let a_eval = a.evaluate_exponents(&r_orig, &mut cache);
             let b_eval = b.evaluate_exponents(&r_orig, &mut cache);
 
-            let mut a_current = Cow::Borrowed(&a_eval);
-            let mut b_current = Cow::Borrowed(&b_eval);
+            let mut a_current = a
+                .coefficients
+                .iter()
+                .zip(&a_eval)
+                .map(|(coefficient, eval)| a.ring().mul(coefficient, eval))
+                .collect::<Vec<_>>();
+            let mut b_current = b
+                .coefficients
+                .iter()
+                .zip(&b_eval)
+                .map(|(coefficient, eval)| b.ring().mul(coefficient, eval))
+                .collect::<Vec<_>>();
+            let a_rows = a.univariate_row_ranges(main_var);
+            let b_rows = b.univariate_row_ranges(main_var);
 
             let mut a_poly = a.zero_with_capacity(a.degree(main_var).to_u32() as usize + 1);
             let mut b_poly = b.zero_with_capacity(b.degree(main_var).to_u32() as usize + 1);
@@ -551,17 +582,17 @@ impl<F: Field, E: PositiveExponent> MultivariatePolynomial<F, E> {
                         *c = (c.0, a.ring().mul(&c.1, &rr.1));
                     }
 
-                    for (c, e) in a_current.to_mut().iter_mut().zip(&a_eval) {
+                    for (c, e) in a_current.iter_mut().zip(&a_eval) {
                         a.ring().mul_assign(c, e);
                     }
-                    for (c, e) in b_current.to_mut().iter_mut().zip(&b_eval) {
+                    for (c, e) in b_current.iter_mut().zip(&b_eval) {
                         b.ring().mul_assign(c, e);
                     }
                 }
 
                 // now construct the univariate polynomials from the current evaluated monomials
-                a.evaluate_using_exponents(&a_current, main_var, &mut a_poly);
-                b.evaluate_using_exponents(&b_current, main_var, &mut b_poly);
+                a.evaluate_using_weighted_terms(&a_current, main_var, &a_rows, &mut a_poly);
+                b.evaluate_using_weighted_terms(&b_current, main_var, &b_rows, &mut b_poly);
 
                 if a_poly.ldegree(main_var) != a_ldegree || b_poly.ldegree(main_var) != b_ldegree {
                     continue 'find_root_sample;
@@ -765,8 +796,20 @@ impl<F: Field, E: PositiveExponent> MultivariatePolynomial<F, E> {
             let a_eval = a.evaluate_exponents(&r_orig, &mut cache);
             let b_eval = b.evaluate_exponents(&r_orig, &mut cache);
 
-            let mut a_current = Cow::Borrowed(&a_eval);
-            let mut b_current = Cow::Borrowed(&b_eval);
+            let mut a_current = a
+                .coefficients
+                .iter()
+                .zip(&a_eval)
+                .map(|(coefficient, eval)| a.ring().mul(coefficient, eval))
+                .collect::<Vec<_>>();
+            let mut b_current = b
+                .coefficients
+                .iter()
+                .zip(&b_eval)
+                .map(|(coefficient, eval)| b.ring().mul(coefficient, eval))
+                .collect::<Vec<_>>();
+            let a_rows = a.univariate_row_ranges(main_var);
+            let b_rows = b.univariate_row_ranges(main_var);
 
             let mut a_poly = a.zero_with_capacity(a.degree(main_var).to_u32() as usize + 1);
             let mut b_poly = b.zero_with_capacity(b.degree(main_var).to_u32() as usize + 1);
@@ -785,17 +828,17 @@ impl<F: Field, E: PositiveExponent> MultivariatePolynomial<F, E> {
                         *c = (c.0, a.ring().mul(&c.1, &rr.1));
                     }
 
-                    for (c, e) in a_current.to_mut().iter_mut().zip(&a_eval) {
+                    for (c, e) in a_current.iter_mut().zip(&a_eval) {
                         a.ring().mul_assign(c, e);
                     }
-                    for (c, e) in b_current.to_mut().iter_mut().zip(&b_eval) {
+                    for (c, e) in b_current.iter_mut().zip(&b_eval) {
                         b.ring().mul_assign(c, e);
                     }
                 }
 
                 // now construct the univariate polynomials from the current evaluated monomials
-                a.evaluate_using_exponents(&a_current, main_var, &mut a_poly);
-                b.evaluate_using_exponents(&b_current, main_var, &mut b_poly);
+                a.evaluate_using_weighted_terms(&a_current, main_var, &a_rows, &mut a_poly);
+                b.evaluate_using_weighted_terms(&b_current, main_var, &b_rows, &mut b_poly);
 
                 if a_poly.ldegree(main_var) != a_ldegree || b_poly.ldegree(main_var) != b_ldegree {
                     continue 'find_root_sample;
@@ -2439,7 +2482,7 @@ impl<E: PositiveExponent> MultivariatePolynomial<IntegerRing, E> {
         p: &Zp64,
         poly: &MultivariatePolynomial<Zp64, PE>,
         betas: &[FiniteFieldElement<u64>],
-    ) -> (usize, Vec<(usize, FiniteFieldElement<u64>)>) {
+    ) -> (Vec<PE>, Vec<(usize, FiniteFieldElement<u64>)>) {
         let mut unique_indices = vec![];
         let mut index_map = HashMap::default();
         for p in poly.exponents_iter() {
@@ -2454,7 +2497,7 @@ impl<E: PositiveExponent> MultivariatePolynomial<IntegerRing, E> {
         }
 
         (
-            unique_indices.len(),
+            unique_indices,
             poly.exponents
                 .chunks(poly.nvars())
                 .map(|ee| {
@@ -2474,26 +2517,19 @@ impl<E: PositiveExponent> MultivariatePolynomial<IntegerRing, E> {
     fn eval_geometric_image<PE: PositiveExponent>(
         p: &Zp64,
         poly: &MultivariatePolynomial<Zp64, PE>,
-        term_count: usize,
+        row_exponents: &[PE],
         term_evals: &[(usize, FiniteFieldElement<u64>)],
         current_evals: &mut [FiniteFieldElement<u64>],
     ) -> MultivariatePolynomial<Zp64, PE> {
-        let mut coefficients = vec![p.zero(); term_count];
-        let mut exp = vec![PE::zero(); poly.nvars() * term_count];
+        let mut coefficients = vec![p.zero(); row_exponents.len()];
+        let mut exp = vec![PE::zero(); poly.nvars() * row_exponents.len()];
+        for (index, exponent) in row_exponents.iter().enumerate() {
+            exp[index * poly.nvars()] = *exponent;
+        }
 
-        for (((c, ee), (index, term_eval)), current_eval) in poly
-            .coefficients
-            .iter()
-            .zip(poly.exponents.chunks(poly.nvars()))
-            .zip(term_evals)
-            .zip(current_evals)
-        {
-            exp[index * poly.nvars()] = ee[0];
-
-            let c = p.mul(c, current_eval);
+        for ((index, term_eval), current_eval) in term_evals.iter().zip(current_evals) {
+            p.add_assign(&mut coefficients[*index], &*current_eval);
             p.mul_assign(current_eval, term_eval);
-
-            p.add_assign(&mut coefficients[*index], c);
         }
 
         // remove zeros
@@ -2521,7 +2557,7 @@ impl<E: PositiveExponent> MultivariatePolynomial<IntegerRing, E> {
         p: &Zp64,
         poly: &MultivariatePolynomial<Zp64, PE>,
         betas: &[FiniteFieldElement<u64>],
-    ) -> (usize, Vec<(usize, FiniteFieldElement<u64>)>) {
+    ) -> (Vec<(PE, PE)>, Vec<(usize, FiniteFieldElement<u64>)>) {
         let mut unique_indices = vec![];
         let mut index_map = HashMap::default();
         for p in poly.exponents_iter() {
@@ -2537,7 +2573,7 @@ impl<E: PositiveExponent> MultivariatePolynomial<IntegerRing, E> {
         }
 
         (
-            unique_indices.len(),
+            unique_indices,
             poly.exponents
                 .chunks(poly.nvars())
                 .map(|ee| {
@@ -2556,28 +2592,21 @@ impl<E: PositiveExponent> MultivariatePolynomial<IntegerRing, E> {
     fn evaluate_geometric_image_bivariate<PE: PositiveExponent>(
         p: &Zp64,
         poly: &MultivariatePolynomial<Zp64, PE>,
-        term_count: usize,
+        row_exponents: &[(PE, PE)],
         term_evals: &[(usize, FiniteFieldElement<u64>)],
         current_evals: &mut [FiniteFieldElement<u64>],
     ) -> MultivariatePolynomial<Zp64, u32> {
-        let mut coefficients = vec![p.zero(); term_count];
-        let mut exp = vec![0; poly.nvars() * term_count];
-
-        for (((c, ee), (index, term_eval)), current_eval) in poly
-            .coefficients
-            .iter()
-            .zip(poly.exponents.chunks(poly.nvars()))
-            .zip(term_evals)
-            .zip(current_evals)
-        {
+        let mut coefficients = vec![p.zero(); row_exponents.len()];
+        let mut exp = vec![0; poly.nvars() * row_exponents.len()];
+        for (index, (exponent0, exponent1)) in row_exponents.iter().enumerate() {
             let exp_offset = index * poly.nvars();
-            exp[exp_offset] = ee[0].to_u32();
-            exp[exp_offset + 1] = ee[1].to_u32();
+            exp[exp_offset] = exponent0.to_u32();
+            exp[exp_offset + 1] = exponent1.to_u32();
+        }
 
-            let c = p.mul(c, current_eval);
+        for ((index, term_eval), current_eval) in term_evals.iter().zip(current_evals) {
+            p.add_assign(&mut coefficients[*index], &*current_eval);
             p.mul_assign(current_eval, term_eval);
-
-            p.add_assign(&mut coefficients[*index], c);
         }
 
         // remove zeros
@@ -2958,17 +2987,19 @@ impl<E: PositiveExponent> MultivariatePolynomial<IntegerRing, E> {
                     betas.push(p.pow(&alpha, power.to_u32() as u64));
                 }
 
-                let (univ_len_a, a_term_evals) = Self::evaluate_terms(&p, &a_p, &betas);
-                let (univ_len_b, b_term_evals) = Self::evaluate_terms(&p, &b_p, &betas);
+                let (a_row_exponents, a_term_evals) = Self::evaluate_terms(&p, &a_p, &betas);
+                let (b_row_exponents, b_term_evals) = Self::evaluate_terms(&p, &b_p, &betas);
 
                 let shift = p.from_element(&p.sample(&mut rng, (0, i64::MAX)));
                 let mut a_current_evals = a_term_evals
                     .iter()
-                    .map(|(_, x)| p.pow(x, shift))
+                    .zip(&a_p.coefficients)
+                    .map(|((_, x), coefficient)| p.mul(coefficient, &p.pow(x, shift)))
                     .collect::<Vec<_>>();
                 let mut b_current_evals = b_term_evals
                     .iter()
-                    .map(|(_, x)| p.pow(x, shift))
+                    .zip(&b_p.coefficients)
+                    .map(|((_, x), coefficient)| p.mul(coefficient, &p.pow(x, shift)))
                     .collect::<Vec<_>>();
 
                 let mut gcd_images = Vec::new();
@@ -2983,14 +3014,14 @@ impl<E: PositiveExponent> MultivariatePolynomial<IntegerRing, E> {
                         let a_j = Self::eval_geometric_image(
                             &p,
                             &a_p,
-                            univ_len_a,
+                            &a_row_exponents,
                             &a_term_evals,
                             &mut a_current_evals,
                         );
                         let b_j = Self::eval_geometric_image(
                             &p,
                             &b_p,
-                            univ_len_b,
+                            &b_row_exponents,
                             &b_term_evals,
                             &mut b_current_evals,
                         );
@@ -3241,17 +3272,21 @@ impl<E: PositiveExponent> MultivariatePolynomial<IntegerRing, E> {
                     betas.push(p.pow(&alpha, power.to_u32() as u64));
                 }
 
-                let (bivar_len_a, a_term_evals) = Self::evaluate_terms_bivariate(&p, &a_p, &betas);
-                let (bivar_len_b, b_term_evals) = Self::evaluate_terms_bivariate(&p, &b_p, &betas);
+                let (a_row_exponents, a_term_evals) =
+                    Self::evaluate_terms_bivariate(&p, &a_p, &betas);
+                let (b_row_exponents, b_term_evals) =
+                    Self::evaluate_terms_bivariate(&p, &b_p, &betas);
 
                 let shift = p.from_element(&p.sample(&mut rng, (0, i64::MAX)));
                 let mut a_current_evals = a_term_evals
                     .iter()
-                    .map(|(_, x)| p.pow(x, shift))
+                    .zip(&a_p.coefficients)
+                    .map(|((_, x), coefficient)| p.mul(coefficient, &p.pow(x, shift)))
                     .collect::<Vec<_>>();
                 let mut b_current_evals = b_term_evals
                     .iter()
-                    .map(|(_, x)| p.pow(x, shift))
+                    .zip(&b_p.coefficients)
+                    .map(|((_, x), coefficient)| p.mul(coefficient, &p.pow(x, shift)))
                     .collect::<Vec<_>>();
 
                 let mut gcd_images = Vec::new();
@@ -3266,14 +3301,14 @@ impl<E: PositiveExponent> MultivariatePolynomial<IntegerRing, E> {
                         let a_j = Self::evaluate_geometric_image_bivariate(
                             &p,
                             &a_p,
-                            bivar_len_a,
+                            &a_row_exponents,
                             &a_term_evals,
                             &mut a_current_evals,
                         );
                         let b_j = Self::evaluate_geometric_image_bivariate(
                             &p,
                             &b_p,
-                            bivar_len_b,
+                            &b_row_exponents,
                             &b_term_evals,
                             &mut b_current_evals,
                         );
@@ -3539,6 +3574,7 @@ impl<E: PositiveExponent> PolynomialGCD<E> for IntegerRing {
             }
 
             let nterms = a.nterms() + b.nterms();
+            const SPARSITY_MARGIN: u32 = 4;
 
             let mut box_size = Integer::from(1);
             let mut cofactor_box_size = Integer::from(1);
@@ -3553,7 +3589,8 @@ impl<E: PositiveExponent> PolynomialGCD<E> for IntegerRing {
                 }
             }
 
-            cofactor_box_size * 12 < box_size || Integer::from(nterms) * 12 < box_size
+            cofactor_box_size * SPARSITY_MARGIN < box_size
+                || Integer::from(nterms) * SPARSITY_MARGIN < box_size
         }
 
         if GLOBAL_SETTINGS
