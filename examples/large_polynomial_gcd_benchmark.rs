@@ -72,6 +72,9 @@ fn main() {
         println!("gap {gap}");
     }
     println!("backend {backend}");
+    if backend == "hu" && matches!(benchmark_case.as_str(), "dense" | "high-height") {
+        println!("effective_backend zippel (dense Hu handoff)");
+    }
     println!("samples {samples}");
 
     let mut timings = Vec::with_capacity(samples);

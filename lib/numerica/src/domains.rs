@@ -164,6 +164,15 @@ pub struct DensePolynomialExactDivisionRequest<'a, E> {
 /// polynomial implementation. A ring exposes it through [`Ring::polynomial_kernels`]; returning
 /// `None` from an individual operation asks the polynomial layer to use its generic fallback.
 pub trait PolynomialKernels<E> {
+    /// Sum the current values of several geometric sequences and advance every sequence by one
+    /// step. Returns `None` when the coefficient representation has no specialized bulk kernel.
+    ///
+    /// The slices have equal lengths. On success, `current[i]` is replaced by
+    /// `current[i] * ratios[i]`, and the returned value is the sum of the original `current`.
+    fn try_geometric_sum_step(&self, _current: &mut [E], _ratios: &[E]) -> Option<E> {
+        None
+    }
+
     /// Multiply coefficients whose exponents have already been mapped to additive dense indices.
     ///
     /// On success, the result must contain only nonzero `(dense_index, coefficient)` pairs in

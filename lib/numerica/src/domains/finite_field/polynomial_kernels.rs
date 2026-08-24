@@ -993,7 +993,7 @@ fn try_dense_zp64_polynomial_mul(
 
     #[cfg(feature = "gmp")]
     {
-        if product_count >= 20_000_000 && product_count >= output_len.saturating_mul(128) {
+        if product_count >= 1_000_000 && product_count >= output_len.saturating_mul(128) {
             let densely_encoded = left_indices
                 .last()
                 .is_some_and(|&index| index as usize + 1 == left_coefficients.len())
@@ -1101,6 +1101,27 @@ fn try_dense_zp64_polynomial_mul(
 
 impl PolynomialKernels<FiniteFieldElement<u32>> for Zp {
     #[inline]
+    fn try_geometric_sum_step(
+        &self,
+        current: &mut [FiniteFieldElement<u32>],
+        ratios: &[FiniteFieldElement<u32>],
+    ) -> Option<FiniteFieldElement<u32>> {
+        if current.len() != ratios.len()
+            || (current.len() as u128) * (self.p.saturating_sub(1) as u128) > u64::MAX as u128
+        {
+            return None;
+        }
+
+        let mut sum = 0u64;
+        for (current, ratio) in current.iter_mut().zip(ratios) {
+            sum += current.0 as u64;
+            current.0 = montgomery_reduce_u32(self, current.0 as u64 * ratio.0 as u64);
+        }
+
+        Some(FiniteFieldElement((sum % self.p as u64) as u32))
+    }
+
+    #[inline]
     fn try_dense_mul(
         &self,
         request: DensePolynomialMulRequest<'_, FiniteFieldElement<u32>>,
@@ -1124,6 +1145,31 @@ impl PolynomialKernels<FiniteFieldElement<u32>> for Zp {
 }
 
 impl PolynomialKernels<FiniteFieldElement<u64>> for Zp64 {
+    #[inline]
+    fn try_geometric_sum_step(
+        &self,
+        current: &mut [FiniteFieldElement<u64>],
+        ratios: &[FiniteFieldElement<u64>],
+    ) -> Option<FiniteFieldElement<u64>> {
+        if current.len() != ratios.len()
+            || (current.len() as u128)
+                .checked_mul(self.p.saturating_sub(1) as u128)
+                .is_none()
+        {
+            return None;
+        }
+
+        let mut sum = 0u128;
+        for current in current.iter() {
+            sum += current.0 as u128;
+        }
+        for (current, ratio) in current.iter_mut().zip(ratios) {
+            current.0 = montgomery_reduce_u64(self, current.0 as u128 * ratio.0 as u128);
+        }
+
+        Some(FiniteFieldElement((sum % self.p as u128) as u64))
+    }
+
     #[inline]
     fn try_dense_mul(
         &self,
