@@ -2576,6 +2576,33 @@ impl<F: Ring, E: Exponent> MultivariatePolynomial<F, E, LexOrder> {
         res
     }
 
+    /// View the polynomial as a polynomial in the given variables, with all
+    /// remaining variables in the coefficient ring.
+    pub fn to_polynomial_in(
+        &self,
+        vars: &[usize],
+    ) -> MultivariatePolynomial<PolynomialRing<F, E>, E, LexOrder> {
+        let split = self.to_multivariate_polynomial_list(vars, true);
+
+        let mut exponents = vec![];
+        let mut coefficients = vec![];
+
+        for (e, c) in split {
+            coefficients.push(c);
+            exponents.extend(vars.iter().map(|i| e[*i]));
+        }
+
+        let vars = Arc::new(
+            vars.iter()
+                .map(|i| self.variables()[*i].clone())
+                .collect::<Vec<_>>(),
+        );
+
+        let ring = PolynomialRing::new(self.ring().clone());
+
+        MultivariatePolynomial::from_coefficient_list(coefficients, exponents, vars, &ring)
+    }
+
     pub fn to_univariate(&self, var: usize) -> UnivariatePolynomial<PolynomialRing<F, E>> {
         let c = self.to_univariate_polynomial_list(var);
 

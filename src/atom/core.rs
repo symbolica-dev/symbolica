@@ -423,7 +423,8 @@ pub trait AtomCore: private::Sealed + Sized {
         self.as_atom_view().apart(x.into().borrow()).wrap(self)
     }
 
-    /// Write the expression as a sum of terms with minimal denominators in all variables.
+    /// Write the expression as a sum of terms with minimal denominators in the chosen variables.
+    /// Pass an empty slice to decompose in all variables.
     /// This method computes a Groebner basis and may therefore be slow for large inputs.
     ///
     /// # Example
@@ -431,12 +432,22 @@ pub trait AtomCore: private::Sealed + Sized {
     /// ```
     /// use symbolica::prelude::*;
     /// let expr = parse!("(2y-x)/(y*(x+y)*(y-x))");
-    /// let apart = expr.apart_multivariate();
-    /// let r = parse!("3/(2*y*x+2*y^2)+1/(2*y^2-2*x*y)");
+    /// let apart = expr.apart_multivariate(&[symbol!("x"), symbol!("y")]);
+    /// let r = parse!("3/2/(y*x+y^2)-1/2/(y*x-y^2)");
     /// assert_eq!(apart, r);
     /// ```
-    fn apart_multivariate(&self) -> Self::Output {
-        self.as_atom_view().apart_multivariate().wrap(self)
+    fn apart_multivariate<'a, V: Clone + Into<BorrowedOrOwned<'a, Indeterminate>>>(
+        &self,
+        variables: &'a [V],
+    ) -> Self::Output {
+        let variables = variables
+            .iter()
+            .cloned()
+            .map(|variable| variable.into().yield_owned())
+            .collect::<Vec<_>>();
+        self.as_atom_view()
+            .apart_multivariate(&variables)
+            .wrap(self)
     }
 
     /// Cancel all common factors between numerators and denominators.
