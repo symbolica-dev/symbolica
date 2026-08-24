@@ -29,7 +29,7 @@ use colored::{Color, Colorize};
 use crate::{
     domains::{
         Derivable, EuclideanDomain, Field, InternalOrdering, Ring, SelfRing,
-        integer::Z,
+        integer::{Integer, Z},
         rational::{Q, Rational},
     },
     printer::{PrintOptions, PrintState},
@@ -506,6 +506,165 @@ impl<F: Field> Vector<F> {
 }
 
 impl Vector<Z> {
+    fn approximate_gram_schmidt(system: &[Self]) -> Option<(Vec<f64>, Vec<f64>)> {
+        let dimension = system.len();
+        let width = system.first().map_or(0, Vector::len);
+        if system.iter().any(|vector| vector.len() != width) {
+            return None;
+        }
+
+        fn scaled_f64(value: &Integer, scale_bits: u64) -> Option<f64> {
+            let bits = value.significant_bits();
+            if bits == 0 {
+                return Some(0.0);
+            }
+
+            let shift = bits.saturating_sub(f64::MANTISSA_DIGITS.into());
+            let high = u64::try_from(value.abs() >> shift).ok()?;
+            let exponent = i32::try_from(i128::from(shift) - i128::from(scale_bits)).ok()?;
+            let magnitude = (high as f64) * 2.0_f64.powi(exponent);
+            Some(if value.is_negative() {
+                -magnitude
+            } else {
+                magnitude
+            })
+        }
+
+        let scale_bits = system
+            .iter()
+            .flat_map(|vector| &vector.data)
+            .map(Integer::significant_bits)
+            .max()
+            .unwrap_or(0);
+        let original = system
+            .iter()
+            .map(|vector| {
+                vector
+                    .data
+                    .iter()
+                    .map(|value| scaled_f64(value, scale_bits))
+                    .collect::<Option<Vec<_>>>()
+            })
+            .collect::<Option<Vec<_>>>()?;
+        let mut orthogonal = original.clone();
+        let mut mu = vec![0.0_f64; dimension * dimension];
+        let mut norms = vec![0.0_f64; dimension];
+
+        for i in 0..dimension {
+            let (previous, current) = orthogonal.split_at_mut(i);
+            let current = &mut current[0];
+            for j in 0..i {
+                let numerator = original[i]
+                    .iter()
+                    .zip(&previous[j])
+                    .map(|(left, right)| left * right)
+                    .sum::<f64>();
+                if !norms[j].is_normal() {
+                    return None;
+                }
+                mu[i * dimension + j] = numerator / norms[j];
+                for (value, basis_value) in current.iter_mut().zip(&previous[j]) {
+                    *value -= mu[i * dimension + j] * basis_value;
+                }
+            }
+
+            norms[i] = current.iter().map(|value| value * value).sum();
+            if !norms[i].is_normal() {
+                return None;
+            }
+        }
+
+        Some((mu, norms))
+    }
+
+    /// Apply LLL basis reduction using floating-point Gram-Schmidt data and exact integer row
+    /// operations. Returns `None` if the approximation becomes numerically unreliable.
+    ///
+    /// This variant is intended for lattice applications that independently verify their output.
+    /// Use [`Self::basis_reduction`] when an exact reduction is required.
+    pub fn basis_reduction_approximate(system: &[Self], delta: f64) -> Option<Vec<Vector<Z>>> {
+        if !(0.25..1.0).contains(&delta) {
+            return None;
+        }
+        if system.len() < 2 {
+            return Some(system.to_vec());
+        }
+
+        let mut result = system.to_vec();
+        let dimension = result.len();
+        let mut k = 1;
+        let mut iterations = 0;
+        let iteration_limit = dimension.saturating_mul(dimension).saturating_mul(100);
+        let refresh_interval = dimension.saturating_mul(10).max(1);
+        let (mut mu, mut norms) = Self::approximate_gram_schmidt(&result)?;
+
+        while k < dimension {
+            iterations += 1;
+            if iterations > iteration_limit {
+                return None;
+            }
+
+            for j in (0..k).rev() {
+                let approximate_multiple = mu[k * dimension + j].round();
+                if approximate_multiple.abs() < 1.0 {
+                    continue;
+                }
+                if !approximate_multiple.is_finite()
+                    || approximate_multiple < i64::MIN as f64
+                    || approximate_multiple > i64::MAX as f64
+                {
+                    return None;
+                }
+                let integer_multiple = approximate_multiple as i64;
+                let multiple = Integer::from(integer_multiple);
+                for column in 0..result[k].data.len() {
+                    let correction = &result[j].data[column] * &multiple;
+                    result[k].data[column] -= correction;
+                }
+                for i in 0..j {
+                    mu[k * dimension + i] -= integer_multiple as f64 * mu[j * dimension + i];
+                }
+                mu[k * dimension + j] -= integer_multiple as f64;
+            }
+
+            let adjacent_mu = mu[k * dimension + k - 1];
+            let lovasz = (delta - adjacent_mu.powi(2)) * norms[k - 1];
+            if norms[k] >= lovasz {
+                k += 1;
+            } else {
+                result.swap(k, k - 1);
+
+                for j in 0..k - 1 {
+                    mu.swap(k * dimension + j, (k - 1) * dimension + j);
+                }
+
+                let combined_norm = norms[k] + adjacent_mu.powi(2) * norms[k - 1];
+                if !combined_norm.is_normal() {
+                    return None;
+                }
+                let updated_mu = adjacent_mu * norms[k - 1] / combined_norm;
+                norms[k] = norms[k] * norms[k - 1] / combined_norm;
+                norms[k - 1] = combined_norm;
+                mu[k * dimension + k - 1] = updated_mu;
+
+                for i in k + 1..dimension {
+                    let old_upper = mu[i * dimension + k];
+                    let updated_upper = mu[i * dimension + k - 1] - adjacent_mu * old_upper;
+                    mu[i * dimension + k] = updated_upper;
+                    mu[i * dimension + k - 1] = old_upper + updated_mu * updated_upper;
+                }
+
+                k = 1.max(k - 1);
+            }
+
+            if iterations % refresh_interval == 0 {
+                (mu, norms) = Self::approximate_gram_schmidt(&result)?;
+            }
+        }
+
+        Some(result)
+    }
+
     /// Apply the LLL lattice basis reduction algorithm.
     /// `delta` should be a constant between `1/4` and `1`. The most commonly used value is `3/4`.
     pub fn basis_reduction(system: &[Self], delta: Rational) -> Vec<Vector<Z>> {
@@ -1980,6 +2139,18 @@ mod test {
         let v3 = Vector::new(vec![0.into(), 0.into(), 1.into(), (-320177).into()], Z);
 
         let basis = Vector::basis_reduction(&[v1, v2, v3], (3, 4).into());
+
+        // 32.0177 = 5 * pi + 6 * e
+        assert_eq!(basis[0].data, &[5, 6, 1, 1]);
+    }
+
+    #[test]
+    fn approximate_basis_reduction() {
+        let v1 = Vector::new(vec![1.into(), 0.into(), 0.into(), 31416.into()], Z);
+        let v2 = Vector::new(vec![0.into(), 1.into(), 0.into(), 27183.into()], Z);
+        let v3 = Vector::new(vec![0.into(), 0.into(), 1.into(), (-320177).into()], Z);
+
+        let basis = Vector::basis_reduction_approximate(&[v1, v2, v3], 0.75).unwrap();
 
         // 32.0177 = 5 * pi + 6 * e
         assert_eq!(basis[0].data, &[5, 6, 1, 1]);

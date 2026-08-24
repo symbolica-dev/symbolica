@@ -20,6 +20,7 @@ use crate::{
         integer::{Integer, IntegerRing, Z, gcd_unsigned},
         rational::{Q, RationalField},
     },
+    tensors::matrix::Vector,
 };
 
 use super::{
@@ -32,6 +33,14 @@ const SPARSE_MDP_SAMPLE_BASE_ATTEMPTS: usize = 1;
 // Keep the old bivariate start for cases where specializing to two variables
 // does not collapse too many terms onto the same bivariate support.
 const INTEGER_FACTOR_BIVARIATE_SPARSE_BOX_DENSITY_THRESHOLD: f64 = 3.0;
+type ModularIntegerFactorization<E> = (Zp, Vec<MultivariatePolynomial<Zp, E, LexOrder>>);
+
+#[cfg(test)]
+std::thread_local! {
+    pub(crate) static LLL_RECOMBINATION_SUCCESSES: std::cell::Cell<usize> = const {
+        std::cell::Cell::new(0)
+    };
+}
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 enum IntegerFactorStart {
@@ -2822,6 +2831,222 @@ impl<E: PositiveExponent> MultivariatePolynomial<IntegerRing, E, LexOrder> {
         factors
     }
 
+    fn dense_coefficients_mod(&self, var: usize, modulus: &Integer) -> Vec<Integer> {
+        let degree = self.degree(var).to_u32() as usize;
+        let mut exponents = vec![E::zero(); self.nvars()];
+        (0..=degree)
+            .map(|power| {
+                exponents[var] = E::from_u32(power as u32);
+                self.coefficient(&exponents)
+                    .unwrap_or_else(Integer::zero)
+                    .symmetric_mod(modulus)
+            })
+            .collect()
+    }
+
+    /// Compute the coefficient vector of `self * factor' / factor` modulo `modulus`.
+    fn logarithmic_derivative_coefficients(
+        &self,
+        factor: &Self,
+        var: usize,
+        modulus: &Integer,
+    ) -> Vec<Integer> {
+        let dividend = self.dense_coefficients_mod(var, modulus);
+        let divisor = factor.dense_coefficients_mod(var, modulus);
+        let dividend_degree = dividend.len() - 1;
+        let divisor_degree = divisor.len() - 1;
+        let leading_inverse = divisor[divisor_degree].mod_inverse(modulus);
+        let mut remainder = dividend;
+        let mut quotient = vec![Integer::zero(); dividend_degree - divisor_degree + 1];
+
+        for power in (divisor_degree..=dividend_degree).rev() {
+            let coefficient = (&remainder[power] * &leading_inverse).symmetric_mod(modulus);
+            quotient[power - divisor_degree] = coefficient.clone();
+            for (offset, divisor_coefficient) in divisor.iter().enumerate() {
+                remainder[power - divisor_degree + offset] = (&remainder
+                    [power - divisor_degree + offset]
+                    - &coefficient * divisor_coefficient)
+                    .symmetric_mod(modulus);
+            }
+        }
+
+        debug_assert!(
+            remainder
+                .iter()
+                .all(|coefficient| coefficient.clone().symmetric_mod(modulus).is_zero())
+        );
+
+        let derivative = divisor
+            .iter()
+            .enumerate()
+            .skip(1)
+            .map(|(power, coefficient)| {
+                (coefficient * &Integer::from(power)).symmetric_mod(modulus)
+            })
+            .collect::<Vec<_>>();
+        let mut result = vec![Integer::zero(); dividend_degree];
+        for (left_power, left) in quotient.iter().enumerate() {
+            for (right_power, right) in derivative.iter().enumerate() {
+                let index = left_power + right_power;
+                result[index] = (&result[index] + left * right).symmetric_mod(modulus);
+            }
+        }
+        result
+    }
+
+    /// Use a van-Hoeij-style coefficient-of-logarithmic-derivative lattice to partition lifted
+    /// modular factors. Every partition is verified by exact division before it is accepted.
+    fn lll_factor_recombination(
+        &self,
+        factors: &[Self],
+        modulus: &Integer,
+        var: usize,
+    ) -> Option<Vec<Self>> {
+        const MAX_DATA_COLUMNS: usize = 8;
+
+        let factor_count = factors.len();
+        let degree = self.degree(var).to_u32() as usize;
+        if factor_count <= 10 || degree < 2 {
+            return None;
+        }
+
+        let scale_exponent = (usize::BITS - factor_count.max(20).leading_zeros()) as usize;
+        let scale = Integer::Single(2).pow(scale_exponent as u64);
+        let retained_bits = factor_count * 3 / 2 + scale_exponent;
+        let shift = modulus
+            .significant_bits()
+            .saturating_sub(retained_bits as u64);
+        if shift == 0 {
+            return None;
+        }
+        let divisor = Integer::Single(2).pow(shift);
+        let truncated_modulus = modulus / &divisor;
+
+        let logarithmic_derivatives = factors
+            .iter()
+            .map(|factor| self.logarithmic_derivative_coefficients(factor, var, modulus))
+            .collect::<Vec<_>>();
+        let data_columns = (0..degree.min(MAX_DATA_COLUMNS))
+            .map(|index| {
+                if index % 2 == 0 {
+                    index / 2
+                } else {
+                    degree - 1 - index / 2
+                }
+            })
+            .collect::<Vec<_>>();
+        let lattice_dimension = factor_count + data_columns.len();
+        let mut lattice = Vec::with_capacity(lattice_dimension);
+
+        for factor_index in 0..factor_count {
+            let mut row = vec![Integer::zero(); lattice_dimension];
+            row[factor_index] = scale.clone();
+            for (column, coefficient_index) in data_columns.iter().enumerate() {
+                row[factor_count + column] =
+                    &logarithmic_derivatives[factor_index][*coefficient_index] / &divisor;
+            }
+            lattice.push(Vector::new(row, Z));
+        }
+        for column in 0..data_columns.len() {
+            let mut row = vec![Integer::zero(); lattice_dimension];
+            row[factor_count + column] = truncated_modulus.clone();
+            lattice.push(Vector::new(row, Z));
+        }
+
+        let reduced = Vector::basis_reduction_approximate(&lattice, 0.75)?;
+        let scale_squared = &scale * &scale;
+        let carry_bound = Integer::from(factor_count.div_ceil(2));
+        let mut short_bound = &scale_squared * &Integer::from(factor_count + 1);
+        short_bound += &Integer::from(data_columns.len()) * &(&carry_bound * &carry_bound);
+        short_bound *= 4;
+
+        let mut projected_rows = vec![];
+        for row in reduced {
+            if row.norm_squared() > short_bound {
+                continue;
+            }
+            let values = row.into_vec();
+            if values[..factor_count].iter().all(Integer::is_zero)
+                || values[..factor_count]
+                    .iter()
+                    .any(|value| !(value % &scale).is_zero())
+            {
+                continue;
+            }
+            projected_rows.push(
+                values[..factor_count]
+                    .iter()
+                    .map(|value| value / &scale)
+                    .collect::<Vec<_>>(),
+            );
+        }
+        if projected_rows.is_empty() {
+            return None;
+        }
+
+        let mut groups: Vec<(Vec<Integer>, Vec<usize>)> = vec![];
+        for factor_index in 0..factor_count {
+            let signature = projected_rows
+                .iter()
+                .map(|row| row[factor_index].clone())
+                .collect::<Vec<_>>();
+            if let Some((_, indices)) = groups
+                .iter_mut()
+                .find(|(existing, _)| existing == &signature)
+            {
+                indices.push(factor_index);
+            } else {
+                groups.push((signature, vec![factor_index]));
+            }
+        }
+        if groups.len() < 2 {
+            return None;
+        }
+        groups.sort_by_key(|(_, indices)| {
+            indices
+                .iter()
+                .map(|index| factors[*index].degree(var).to_u32())
+                .sum::<u32>()
+        });
+
+        let mut reconstructed = vec![];
+        let mut rest = self.clone();
+        for (_, indices) in groups.iter().take(groups.len() - 1) {
+            let mut candidate = rest.constant(rest.lcoeff());
+            for index in indices {
+                candidate = (&candidate * &factors[*index])
+                    .map_coeff(|coefficient| coefficient.clone().symmetric_mod(modulus), Z);
+            }
+            let content = candidate.content();
+            candidate = candidate.div_coeff(&content);
+
+            let (quotient, remainder) = rest.quot_rem(&candidate, true);
+            if !remainder.is_zero() {
+                return None;
+            }
+            reconstructed.push(candidate);
+            let content = quotient.content();
+            rest = quotient.div_coeff(&content);
+        }
+        reconstructed.push(rest);
+
+        debug!(
+            "LLL recombination partitioned {} modular factors into {} exact factors",
+            factor_count,
+            reconstructed.len()
+        );
+        let mut result = vec![];
+        for factor in reconstructed {
+            if factor.degree(var) >= self.degree(var) {
+                return None;
+            }
+            result.extend(factor.factor_reconstruct());
+        }
+        #[cfg(test)]
+        LLL_RECOMBINATION_SUCCESSES.with(|successes| successes.set(successes.get() + 1));
+        Some(result)
+    }
+
     /// Factor a square-free univariate polynomial over the integers by Hensel lifting factors computed over
     /// a finite field image of the polynomial.
     fn factor_reconstruct(&self) -> Vec<Self> {
@@ -2834,13 +3059,20 @@ impl<E: PositiveExponent> MultivariatePolynomial<IntegerRing, E, LexOrder> {
             return vec![self.clone()];
         }
 
-        // select a suitable prime
-        // we try small primes first as the distinct and equal degree algorithms
-        // scale as log(p)
-        let mut field;
-        let mut f_p;
-        let mut pi = PrimeIteratorU64::new(101);
-        loop {
+        // Select a suitable prime. The number of modular factors controls the
+        // exponential recombination step, so try several small primes and
+        // retain the factorization with the fewest factors.
+        let prime_trials = if d >= 128 {
+            10
+        } else if d >= 32 {
+            5
+        } else {
+            1
+        };
+        let mut best_factorization: Option<ModularIntegerFactorization<E>> = None;
+        let mut suitable_primes = 0;
+        let mut pi = PrimeIteratorU64::new(2);
+        while suitable_primes < prime_trials {
             let p = pi.next().unwrap();
             if p > u32::MAX as u64 {
                 panic!("Ran out of primes during factorization of {self}");
@@ -2851,22 +3083,40 @@ impl<E: PositiveExponent> MultivariatePolynomial<IntegerRing, E, LexOrder> {
                 continue;
             }
 
-            field = Zp::new(p);
-            f_p = self.map_coeff(|f| f.to_finite_field(&field), field.clone());
+            let field = Zp::new(p);
+            let f_p = self.map_coeff(|f| f.to_finite_field(&field), field.clone());
             let df_p = f_p.derivative(var);
 
             // check is f_p remains square-free
             if f_p.gcd(&df_p).is_one() {
-                break;
+                suitable_primes += 1;
+                let factors = f_p.factor_distinct_equal_degree();
+                debug!("Prime {p} yields {} modular factors", factors.len());
+
+                if factors.len() == 1 {
+                    // Irreducibility modulo one prime proves irreducibility over Z.
+                    return vec![self.clone()];
+                }
+
+                let replace_best = best_factorization
+                    .as_ref()
+                    .map(|(_, best)| factors.len() < best.len())
+                    .unwrap_or(true);
+                if replace_best {
+                    best_factorization = Some((field, factors));
+                }
+
+                if best_factorization
+                    .as_ref()
+                    .is_some_and(|(_, factors)| factors.len() <= 12)
+                {
+                    break;
+                }
             }
         }
 
-        let hs: Vec<_> = f_p.factor_distinct_equal_degree();
-
-        if hs.len() == 1 {
-            // the polynomial is irreducible
-            return vec![self.clone()];
-        }
+        let (field, hs) = best_factorization.unwrap();
+        debug!("Selected modular factorization with {} factors", hs.len());
 
         let bound = self.coefficient_bound();
         let p: Integer = (field.get_prime() as i64).into();
@@ -2885,6 +3135,12 @@ impl<E: PositiveExponent> MultivariatePolynomial<IntegerRing, E, LexOrder> {
             if &hh_p != h_p {
                 panic!("Mismatch of lifted factor: {hh_p} vs {h_p} in {self}");
             }
+        }
+
+        if factors.len() > 10
+            && let Some(recombined) = self.lll_factor_recombination(&factors, &max_p, var)
+        {
+            return recombined;
         }
 
         let mut rec_factors = vec![];

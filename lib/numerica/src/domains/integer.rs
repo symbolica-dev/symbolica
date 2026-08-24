@@ -1076,6 +1076,18 @@ impl Integer {
         }
     }
 
+    /// Return the number of bits needed for the absolute value.
+    #[inline]
+    pub fn significant_bits(&self) -> u64 {
+        match self {
+            Integer::Single(value) => u64::from(i64::BITS - value.unsigned_abs().leading_zeros()),
+            Integer::Double(value) => {
+                u64::from(i128::BITS - value.get().unsigned_abs().leading_zeros())
+            }
+            Integer::Large(value) => value.significant_bits(),
+        }
+    }
+
     pub fn abs(&self) -> Integer {
         match self {
             Integer::Single(n) => {

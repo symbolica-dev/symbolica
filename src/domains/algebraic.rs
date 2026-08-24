@@ -1087,17 +1087,35 @@ impl AlgebraicContext {
     fn polynomial_to_atom<E: Exponent, O: MonomialOrder>(
         &self,
         polynomial: &MultivariatePolynomial<AlgebraicExtension<Q>, E, O>,
-        generator: &Atom,
-        express_in_generator: bool,
+        generator: Option<&Atom>,
         element_atoms: &mut HashMap<AlgebraicNumber<Q>, Atom>,
     ) -> Result<Atom, String> {
         let atom_field = AtomField::new();
+        let field_generator = &self.field.poly.get_vars_ref()[0];
+        let fallback_generator = if generator.is_none()
+            && polynomial
+                .variables()
+                .iter()
+                .any(|variable| variable == field_generator)
+        {
+            Some(
+                self.field
+                    .element_to_atom_simplified(&self.field.generator()),
+            )
+        } else {
+            None
+        };
+        let variable_generator = generator.or(fallback_generator.as_ref());
         let variables = polynomial
             .variables()
             .iter()
             .map(|variable| {
-                if variable == &self.field.poly.get_vars_ref()[0] {
-                    PolyVariable::Power(generator.clone())
+                if variable == field_generator {
+                    PolyVariable::Power(
+                        variable_generator
+                            .expect("the field generator expression must be available")
+                            .clone(),
+                    )
                 } else {
                     variable.clone()
                 }
@@ -1112,7 +1130,7 @@ impl AlgebraicContext {
             let coefficient = if let Some(coefficient) = element_atoms.get(term.coefficient) {
                 coefficient.clone()
             } else {
-                let coefficient = if express_in_generator {
+                let coefficient = if let Some(generator) = generator {
                     let mut coefficient = Atom::Zero;
                     for generator_term in term.coefficient.poly() {
                         coefficient += generator.clone().pow(generator_term.exponents[0])
@@ -1130,7 +1148,7 @@ impl AlgebraicContext {
         Ok(converted.flatten(false))
     }
 
-    fn expression_conversion_data(&self) -> (HashMap<AlgebraicNumber<Q>, Atom>, Atom, bool) {
+    fn expression_conversion_data(&self) -> (HashMap<AlgebraicNumber<Q>, Atom>, Option<Atom>) {
         let mut element_atoms = HashMap::<AlgebraicNumber<Q>, Atom>::new();
         for (atom, element) in &self.images {
             match element_atoms.entry(element.clone()) {
@@ -1147,13 +1165,7 @@ impl AlgebraicContext {
 
         let generator_image = self.field.generator();
         let preferred_generator = element_atoms.get(&generator_image).cloned();
-        let express_in_generator = preferred_generator.is_some();
-        let generator = preferred_generator.unwrap_or_else(|| {
-            let generator = self.field.element_to_atom_simplified(&generator_image);
-            element_atoms.insert(generator_image, generator.clone());
-            generator
-        });
-        (element_atoms, generator, express_in_generator)
+        (element_atoms, preferred_generator)
     }
 
     /// Convert a polynomial over this context's algebraic number field to an expression.
@@ -1168,14 +1180,8 @@ impl AlgebraicContext {
             return Err("The polynomial uses a different coefficient field".to_string());
         }
 
-        let (mut element_atoms, generator, express_in_generator) =
-            self.expression_conversion_data();
-        self.polynomial_to_atom(
-            polynomial,
-            &generator,
-            express_in_generator,
-            &mut element_atoms,
-        )
+        let (mut element_atoms, generator) = self.expression_conversion_data();
+        self.polynomial_to_atom(polynomial, generator.as_ref(), &mut element_atoms)
     }
 
     fn factorization_to_atom(
@@ -1183,26 +1189,17 @@ impl AlgebraicContext {
         numerator: Vec<(MultivariatePolynomial<AlgebraicExtension<Q>, u16>, usize)>,
         denominator: Vec<(MultivariatePolynomial<AlgebraicExtension<Q>, u16>, usize)>,
     ) -> Result<Atom, String> {
-        let (mut element_atoms, generator, express_in_generator) =
-            self.expression_conversion_data();
+        let (mut element_atoms, generator) = self.expression_conversion_data();
 
         let mut result = Atom::num(1);
         for (factor, exponent) in numerator {
-            let factor = self.polynomial_to_atom(
-                &factor,
-                &generator,
-                express_in_generator,
-                &mut element_atoms,
-            )?;
+            let factor =
+                self.polynomial_to_atom(&factor, generator.as_ref(), &mut element_atoms)?;
             result *= factor.pow(Atom::num(exponent));
         }
         for (factor, exponent) in denominator {
-            let factor = self.polynomial_to_atom(
-                &factor,
-                &generator,
-                express_in_generator,
-                &mut element_atoms,
-            )?;
+            let factor =
+                self.polynomial_to_atom(&factor, generator.as_ref(), &mut element_atoms)?;
             let exponent = i64::try_from(exponent)
                 .map_err(|_| "Factor multiplicity is too large".to_string())?;
             result *= factor.pow(Atom::num(-exponent));
