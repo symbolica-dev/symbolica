@@ -4373,8 +4373,10 @@ impl<F: Ring, E: Exponent> MultivariatePolynomial<F, E, LexOrder> {
             return self.quot_rem_univariate_monic(div);
         }
 
-        if assume_exact && let Some((bases, total)) = self.dense_exact_division_layout() {
-            return self.dense_exact_division(div, &bases, total);
+        if (assume_exact || abort_on_remainder)
+            && let Some((bases, total)) = self.dense_division_layout()
+        {
+            return self.dense_division(div, &bases, total, assume_exact);
         }
 
         let mut pack_u8 = true;
@@ -4395,9 +4397,9 @@ impl<F: Ring, E: Exponent> MultivariatePolynomial<F, E, LexOrder> {
     }
 
     /// Select a fixed coefficient array when the dividend occupies a reasonably dense
-    /// multivariate box. Ducos divisions are known to be exact, so this avoids maintaining a
-    /// monomial heap and map for every intermediate product.
-    fn dense_exact_division_layout(&self) -> Option<(Vec<usize>, usize)> {
+    /// multivariate box. This avoids maintaining a monomial heap and map for every intermediate
+    /// product. Callers that do not guarantee exactness abort on the first remainder.
+    fn dense_division_layout(&self) -> Option<(Vec<usize>, usize)> {
         let mut bases = Vec::with_capacity(self.nvars());
         let mut total = 1usize;
         for variable in 0..self.nvars() {
@@ -4418,11 +4420,12 @@ impl<F: Ring, E: Exponent> MultivariatePolynomial<F, E, LexOrder> {
         Some((bases, total))
     }
 
-    fn dense_exact_division(
+    fn dense_division(
         mut self,
         div: &MultivariatePolynomial<F, E, LexOrder>,
         bases: &[usize],
         total: usize,
+        assume_exact: bool,
     ) -> (
         MultivariatePolynomial<F, E, LexOrder>,
         MultivariatePolynomial<F, E, LexOrder>,
@@ -4490,15 +4493,17 @@ impl<F: Ring, E: Exponent> MultivariatePolynomial<F, E, LexOrder> {
             .iter()
             .map(|&index| index as u32)
             .collect::<Vec<_>>();
-        if let Some(quotient_terms) = ring.polynomial_kernels().and_then(|kernels| {
-            kernels.try_dense_exact_division(DensePolynomialExactDivisionRequest {
-                total,
-                dividend_coefficients: &mut self.coefficients,
-                dividend_indices: &dividend_indices,
-                divisor_coefficients: &div.coefficients,
-                divisor_indices: &divisor_indices_u32,
+        if assume_exact
+            && let Some(quotient_terms) = ring.polynomial_kernels().and_then(|kernels| {
+                kernels.try_dense_exact_division(DensePolynomialExactDivisionRequest {
+                    total,
+                    dividend_coefficients: &mut self.coefficients,
+                    dividend_indices: &dividend_indices,
+                    divisor_coefficients: &div.coefficients,
+                    divisor_indices: &divisor_indices_u32,
+                })
             })
-        }) {
+        {
             let mut exponents = vec![E::zero(); self.nvars()];
             for (position, coefficient) in quotient_terms {
                 decode_index(position as usize, bases, &mut exponents);
@@ -4532,8 +4537,16 @@ impl<F: Ring, E: Exponent> MultivariatePolynomial<F, E, LexOrder> {
             if !position_is_divisible(position, div.last_exponents(), bases) {
                 return (quotient, nonzero_remainder);
             }
-            let quotient_coefficient =
-                ring.exact_div_owned(coefficient, div.coefficients.last().unwrap());
+            let quotient_coefficient = if assume_exact {
+                ring.exact_div_owned(coefficient, div.coefficients.last().unwrap())
+            } else {
+                let Some(quotient) =
+                    ring.try_div_owned(coefficient, div.coefficients.last().unwrap())
+                else {
+                    return (quotient, nonzero_remainder);
+                };
+                quotient
+            };
             let quotient_position = position - divisor_leading_index;
 
             for (&divisor_position, divisor_coefficient) in divisor_indices[..div.nterms() - 1]
@@ -4564,7 +4577,7 @@ impl<F: Ring, E: Exponent> MultivariatePolynomial<F, E, LexOrder> {
         #[cfg(test)]
         {
             if !(&quotient * div - verification_input).is_zero() {
-                panic!("Dense exact division failed");
+                panic!("Dense division failed");
             }
         }
 
@@ -5890,6 +5903,23 @@ mod test {
             r.to_expression(),
             parse!("1-v8-v8*v9-v7-v6-v5-v4+v3-4*v2+v2*v3^2+v2^2*v3")
         );
+    }
+
+    #[test]
+    fn dense_checked_division_accepts_exact_and_rejects_inexact_inputs() {
+        let quotient = parse!("(1+x+y+z)^8").to_polynomial::<_, u8>(&Z, None);
+        let divisor =
+            parse!("(1+2*x-y+3*z)^5").to_polynomial::<_, u8>(&Z, quotient.variables().clone());
+        let dividend = &quotient * &divisor;
+        assert_eq!(
+            dividend.clone().try_div_owned(&divisor),
+            Some(quotient.clone())
+        );
+
+        // This perturbation is zero both at the origin and at (1, 1, 1), so it passes the cheap
+        // evaluation filters and exercises the checked dense coefficient loop.
+        let perturbation = parse!("x-y").to_polynomial::<_, u8>(&Z, dividend.variables().clone());
+        assert!((dividend + perturbation).try_div_owned(&divisor).is_none());
     }
 
     #[test]

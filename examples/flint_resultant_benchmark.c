@@ -139,6 +139,75 @@ static void compare_multiplication(const char * name,
                                         variables, 3, default_samples);
 }
 
+static void compare_exact_division(const char * name,
+                                   const char * quotient_string, ulong quotient_power,
+                                   const char * divisor_string, ulong divisor_power,
+                                   int default_samples)
+{
+    if (!benchmark_selected(name))
+        return;
+
+    const char * sample_override = getenv("DIVISION_BENCH_SAMPLES");
+    int samples = sample_override ? atoi(sample_override) : default_samples;
+    if (samples < 1)
+        samples = 1;
+
+    const char * variables[] = {"x", "y", "z"};
+    fmpz_mpoly_ctx_t context;
+    fmpz_mpoly_t quotient_base, divisor_base, quotient, divisor, dividend, actual;
+    fmpz_mpoly_ctx_init(context, 3, ORD_LEX);
+    fmpz_mpoly_init(quotient_base, context);
+    fmpz_mpoly_init(divisor_base, context);
+    fmpz_mpoly_init(quotient, context);
+    fmpz_mpoly_init(divisor, context);
+    fmpz_mpoly_init(dividend, context);
+    fmpz_mpoly_init(actual, context);
+
+    if (fmpz_mpoly_set_str_pretty(quotient_base, quotient_string, variables, context) != 0 ||
+        fmpz_mpoly_set_str_pretty(divisor_base, divisor_string, variables, context) != 0 ||
+        !fmpz_mpoly_pow_ui(quotient, quotient_base, quotient_power, context) ||
+        !fmpz_mpoly_pow_ui(divisor, divisor_base, divisor_power, context))
+    {
+        fprintf(stderr, "Could not construct division case: %s\n", name);
+        exit(1);
+    }
+    fmpz_mpoly_mul(dividend, quotient, divisor, context);
+    if (!fmpz_mpoly_divides(actual, dividend, divisor, context) ||
+        !fmpz_mpoly_equal(actual, quotient, context))
+    {
+        fprintf(stderr, "FLINT exact division failed: %s\n", name);
+        exit(1);
+    }
+
+    double * timings = flint_malloc((size_t) samples * sizeof(double));
+    for (int sample = 0; sample < samples; sample++)
+    {
+        double start = now_seconds();
+        if (!fmpz_mpoly_divides(actual, dividend, divisor, context))
+        {
+            fprintf(stderr, "FLINT exact division failed: %s\n", name);
+            exit(1);
+        }
+        timings[sample] = now_seconds() - start;
+    }
+    qsort(timings, (size_t) samples, sizeof(double), compare_double);
+
+    printf("%-32s DIV   %9.3f ms  dividend/divisor/quotient terms %ld/%ld/%ld\n",
+           name, timings[samples / 2] * 1000.0,
+           fmpz_mpoly_length(dividend, context), fmpz_mpoly_length(divisor, context),
+           fmpz_mpoly_length(quotient, context));
+    fflush(stdout);
+
+    flint_free(timings);
+    fmpz_mpoly_clear(quotient_base, context);
+    fmpz_mpoly_clear(divisor_base, context);
+    fmpz_mpoly_clear(quotient, context);
+    fmpz_mpoly_clear(divisor, context);
+    fmpz_mpoly_clear(dividend, context);
+    fmpz_mpoly_clear(actual, context);
+    fmpz_mpoly_ctx_clear(context);
+}
+
 static void compare_finite_field_multiplication_with_options(
     const char * name, ulong modulus,
     const char * a_string, ulong a_power, int subtract_one_from_a,
@@ -348,6 +417,15 @@ int main(void)
     compare_multiplication("dense high large multiplication",
                            "1000000000039+x+y+z", 20,
                            "1000000000187+2*x-y+3*z", 19, 3);
+    compare_exact_division("dense exact division",
+                           "1+x+y+z", 12,
+                           "1+2*x-y+3*z", 7, 7);
+    compare_exact_division("dense large exact division",
+                           "1+x+y+z", 20,
+                           "1+2*x-y+3*z", 12, 5);
+    compare_exact_division("high-height exact division",
+                           "1000000000039+x+y+z", 12,
+                           "1000000000187+2*x-y+3*z", 10, 5);
     compare_multiplication("sparse separated multiplication",
                            "1+2*x^37*y^11+3*x^5*y^43*z^7+5*x^61*z^29+7*x^17*y^73*z^31+11*x^89*y^19*z^47", 7,
                            "1+2*x^37*y^11+3*x^5*y^43*z^7+5*x^61*z^29+7*x^17*y^73*z^31+11*x^89*y^19*z^47", 7, 3);

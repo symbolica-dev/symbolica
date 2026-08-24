@@ -121,6 +121,53 @@ fn compare_multiplication(
     compare_multiplication_with_options(name, a, a_power, false, b, b_power, false, iterations);
 }
 
+fn compare_exact_division(
+    name: &str,
+    quotient_base: &str,
+    quotient_power: usize,
+    divisor_base: &str,
+    divisor_power: usize,
+    iterations: usize,
+) {
+    if !benchmark_selected(name) {
+        return;
+    }
+
+    let iterations = std::env::var("DIVISION_BENCH_SAMPLES")
+        .ok()
+        .and_then(|value| value.parse().ok())
+        .unwrap_or(iterations);
+    let quotient = parse!(quotient_base)
+        .to_polynomial::<_, u16>(&Z, None)
+        .pow(quotient_power);
+    let divisor = parse!(divisor_base)
+        .to_polynomial::<_, u16>(&Z, None)
+        .pow(divisor_power);
+    let mut polys = [quotient, divisor];
+    MultivariatePolynomial::unify_variables_list(&mut polys);
+    let dividend = &polys[0] * &polys[1];
+    assert_eq!(dividend.clone().try_div_owned(&polys[1]).unwrap(), polys[0]);
+
+    let mut samples = Vec::with_capacity(iterations);
+    for _ in 0..iterations {
+        // `try_div_owned` consumes its dividend. Keep the unavoidable benchmark clone outside
+        // the timed region so this matches FLINT's non-consuming `fmpz_mpoly_divides` call.
+        let owned_dividend = dividend.clone();
+        let start = Instant::now();
+        let quotient = owned_dividend.try_div_owned(&polys[1]).unwrap();
+        black_box(quotient);
+        samples.push(start.elapsed().as_secs_f64());
+    }
+    let division = median_seconds(samples);
+    println!(
+        "{name:32} DIV   {:9.3} ms  dividend/divisor/quotient terms {}/{}/{}",
+        division * 1_000.0,
+        dividend.nterms(),
+        polys[1].nterms(),
+        polys[0].nterms(),
+    );
+}
+
 #[allow(clippy::too_many_arguments)]
 fn compare_multiplication_with_options(
     name: &str,
@@ -354,6 +401,23 @@ fn main() {
         "1000000000187+2*x-y+3*z",
         19,
         3,
+    );
+    compare_exact_division("dense exact division", "1+x+y+z", 12, "1+2*x-y+3*z", 7, 7);
+    compare_exact_division(
+        "dense large exact division",
+        "1+x+y+z",
+        20,
+        "1+2*x-y+3*z",
+        12,
+        5,
+    );
+    compare_exact_division(
+        "high-height exact division",
+        "1000000000039+x+y+z",
+        12,
+        "1000000000187+2*x-y+3*z",
+        10,
+        5,
     );
     compare_multiplication(
         "sparse separated multiplication",
