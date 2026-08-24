@@ -2,9 +2,11 @@
 
 #include <flint/flint.h>
 #include <flint/fmpz_mpoly.h>
+#include <flint/nmod_mpoly.h>
 
 #include <stdio.h>
 #include <stdlib.h>
+#include <string.h>
 #include <time.h>
 
 typedef struct
@@ -56,12 +58,23 @@ static int compare_double(const void * left, const void * right)
     return (a > b) - (a < b);
 }
 
-static void compare_multiplication(const char * name,
-                                   const char * a_string, ulong a_power,
-                                   const char * b_string, ulong b_power,
-                                   int default_samples)
+static int benchmark_selected(const char * name)
 {
-    const char * variables[] = {"x", "y", "z"};
+    const char * filter = getenv("BENCHMARK_FILTER");
+    return filter == NULL || strstr(name, filter) != NULL;
+}
+
+static void compare_multiplication_with_options(const char * name,
+                                                const char * a_string, ulong a_power,
+                                                int subtract_one_from_a,
+                                                const char * b_string, ulong b_power,
+                                                int subtract_one_from_b,
+                                                const char ** variables, slong nvariables,
+                                                int default_samples)
+{
+    if (!benchmark_selected(name))
+        return;
+
     const char * sample_override = getenv("MULTIPLICATION_BENCH_SAMPLES");
     int samples = sample_override ? atoi(sample_override) : default_samples;
     if (samples < 1)
@@ -69,7 +82,7 @@ static void compare_multiplication(const char * name,
 
     fmpz_mpoly_ctx_t context;
     fmpz_mpoly_t a_base, b_base, a, b, product;
-    fmpz_mpoly_ctx_init(context, 3, ORD_LEX);
+    fmpz_mpoly_ctx_init(context, nvariables, ORD_LEX);
     fmpz_mpoly_init(a_base, context);
     fmpz_mpoly_init(b_base, context);
     fmpz_mpoly_init(a, context);
@@ -84,6 +97,10 @@ static void compare_multiplication(const char * name,
         fprintf(stderr, "Could not construct multiplication case: %s\n", name);
         exit(1);
     }
+    if (subtract_one_from_a)
+        fmpz_mpoly_sub_ui(a, a, 1, context);
+    if (subtract_one_from_b)
+        fmpz_mpoly_sub_ui(b, b, 1, context);
 
     fmpz_mpoly_mul(product, a, b, context);
     double * timings = flint_malloc((size_t) samples * sizeof(double));
@@ -110,6 +127,130 @@ static void compare_multiplication(const char * name,
     fmpz_mpoly_ctx_clear(context);
 }
 
+static void compare_multiplication(const char * name,
+                                   const char * a_string, ulong a_power,
+                                   const char * b_string, ulong b_power,
+                                   int default_samples)
+{
+    const char * variables[] = {"x", "y", "z"};
+    compare_multiplication_with_options(name,
+                                        a_string, a_power, 0,
+                                        b_string, b_power, 0,
+                                        variables, 3, default_samples);
+}
+
+static void compare_finite_field_multiplication_with_options(
+    const char * name, ulong modulus,
+    const char * a_string, ulong a_power, int subtract_one_from_a,
+    const char * b_string, ulong b_power, int subtract_one_from_b,
+    const char ** variables, slong nvariables, int default_samples)
+{
+    if (!benchmark_selected(name))
+        return;
+
+    const char * sample_override = getenv("MULTIPLICATION_BENCH_SAMPLES");
+    int samples = sample_override ? atoi(sample_override) : default_samples;
+    if (samples < 1)
+        samples = 1;
+
+    nmod_mpoly_ctx_t context;
+    nmod_mpoly_t a_base, b_base, a, b, product;
+    nmod_mpoly_ctx_init(context, nvariables, ORD_LEX, modulus);
+    nmod_mpoly_init(a_base, context);
+    nmod_mpoly_init(b_base, context);
+    nmod_mpoly_init(a, context);
+    nmod_mpoly_init(b, context);
+    nmod_mpoly_init(product, context);
+
+    if (nmod_mpoly_set_str_pretty(a_base, a_string, variables, context) != 0 ||
+        nmod_mpoly_set_str_pretty(b_base, b_string, variables, context) != 0 ||
+        !nmod_mpoly_pow_ui(a, a_base, a_power, context) ||
+        !nmod_mpoly_pow_ui(b, b_base, b_power, context))
+    {
+        fprintf(stderr, "Could not construct finite-field multiplication case: %s\n", name);
+        exit(1);
+    }
+    if (subtract_one_from_a)
+        nmod_mpoly_sub_ui(a, a, 1, context);
+    if (subtract_one_from_b)
+        nmod_mpoly_sub_ui(b, b, 1, context);
+
+    nmod_mpoly_mul(product, a, b, context);
+    double calibration_start = now_seconds();
+    nmod_mpoly_mul(product, a, b, context);
+    double calibration = now_seconds() - calibration_start;
+    double batch_estimate = 0.020 / (calibration > 1e-9 ? calibration : 1e-9);
+    int batch_size = batch_estimate > 256.0 ? 256 : (int) batch_estimate;
+    if (batch_size < 1)
+        batch_size = 1;
+
+    double * timings = flint_malloc((size_t) samples * sizeof(double));
+    for (int sample = 0; sample < samples; sample++)
+    {
+        double start = now_seconds();
+        for (int batch = 0; batch < batch_size; batch++)
+            nmod_mpoly_mul(product, a, b, context);
+        timings[sample] = (now_seconds() - start) / batch_size;
+    }
+    qsort(timings, (size_t) samples, sizeof(double), compare_double);
+
+    printf("%-48s MUL   %9.3f ms  lhs/rhs/product terms %ld/%ld/%ld\n",
+           name, timings[samples / 2] * 1000.0,
+           nmod_mpoly_length(a, context), nmod_mpoly_length(b, context),
+           nmod_mpoly_length(product, context));
+    fflush(stdout);
+
+    flint_free(timings);
+    nmod_mpoly_clear(a_base, context);
+    nmod_mpoly_clear(b_base, context);
+    nmod_mpoly_clear(a, context);
+    nmod_mpoly_clear(b, context);
+    nmod_mpoly_clear(product, context);
+    nmod_mpoly_ctx_clear(context);
+}
+
+static void compare_finite_field_suite(const char * label, ulong modulus)
+{
+    const char * variables3[] = {"x", "y", "z"};
+    const char * variables7[] = {"x1", "x2", "x3", "x4", "x5", "x6", "x7"};
+    char name[128];
+
+    snprintf(name, sizeof(name), "%s dense large multiplication", label);
+    compare_finite_field_multiplication_with_options(
+        name, modulus, "1+x+y+z", 24, 0, "1+2*x-y+3*z", 23, 0,
+        variables3, 3, 5);
+
+    snprintf(name, sizeof(name), "%s dense very large multiplication", label);
+    compare_finite_field_multiplication_with_options(
+        name, modulus, "1+x+y+z", 40, 0, "1+2*x-y+3*z", 39, 0,
+        variables3, 3, 3);
+
+    snprintf(name, sizeof(name), "%s sparse large multiplication", label);
+    compare_finite_field_multiplication_with_options(
+        name, modulus,
+        "1+2*x^37*y^11+3*x^5*y^43*z^7+5*x^61*z^29+7*x^17*y^73*z^31+11*x^89*y^19*z^47+13*x^23*y^97*z^59+17*x^107*y^53*z^83", 7, 0,
+        "1+2*x^37*y^11+3*x^5*y^43*z^7+5*x^61*z^29+7*x^17*y^73*z^31+11*x^89*y^19*z^47+13*x^23*y^97*z^59+17*x^107*y^53*z^83", 7, 0,
+        variables3, 3, 1);
+
+    snprintf(name, sizeof(name), "%s seven-variable power-minus-one multiplication", label);
+    compare_finite_field_multiplication_with_options(
+        name, modulus,
+        "1+3*x1+5*x2+7*x3+9*x4+11*x5+13*x6+15*x7", 7, 1,
+        "1+3*x1+5*x2+7*x3+9*x4+11*x5+13*x6+15*x7", 7, 1,
+        variables7, 7, 1);
+}
+
+static void compare_power_minus_one_square(const char * name,
+                                           const char * base_string, ulong power,
+                                           int default_samples)
+{
+    const char * variables[] = {"x1", "x2", "x3", "x4", "x5", "x6", "x7"};
+    compare_multiplication_with_options(name,
+                                        base_string, power, 1,
+                                        base_string, power, 1,
+                                        variables, 7, default_samples);
+}
+
 int main(void)
 {
     const char * variables[] = {"x", "y", "z"};
@@ -123,10 +264,33 @@ int main(void)
     compare_multiplication("dense high multiplication",
                            "1000000000039+x+y+z", 12,
                            "1000000000187+2*x-y+3*z", 11, 10);
+    compare_multiplication("dense large multiplication",
+                           "1+x+y+z", 24,
+                           "1+2*x-y+3*z", 23, 7);
+    compare_multiplication("dense very large multiplication",
+                           "1+x+y+z", 40,
+                           "1+2*x-y+3*z", 39, 3);
+    compare_multiplication("dense high large multiplication",
+                           "1000000000039+x+y+z", 20,
+                           "1000000000187+2*x-y+3*z", 19, 3);
+    compare_multiplication("sparse separated multiplication",
+                           "1+2*x^37*y^11+3*x^5*y^43*z^7+5*x^61*z^29+7*x^17*y^73*z^31+11*x^89*y^19*z^47", 7,
+                           "1+2*x^37*y^11+3*x^5*y^43*z^7+5*x^61*z^29+7*x^17*y^73*z^31+11*x^89*y^19*z^47", 7, 3);
+    compare_multiplication("sparse large multiplication",
+                           "1+2*x^37*y^11+3*x^5*y^43*z^7+5*x^61*z^29+7*x^17*y^73*z^31+11*x^89*y^19*z^47+13*x^23*y^97*z^59+17*x^107*y^53*z^83", 7,
+                           "1+2*x^37*y^11+3*x^5*y^43*z^7+5*x^61*z^29+7*x^17*y^73*z^31+11*x^89*y^19*z^47+13*x^23*y^97*z^59+17*x^107*y^53*z^83", 7, 1);
+    compare_power_minus_one_square("seven-variable power-minus-one multiplication",
+                                   "1+3*x1+5*x2+7*x3+9*x4+11*x5+13*x6+15*x7", 7, 1);
+    compare_finite_field_suite("GF(17)", 17);
+    compare_finite_field_suite("GF(18446744073709551557)",
+                               (ulong) 18446744073709551557ULL);
 
     for (size_t case_index = 0; case_index < sizeof(cases) / sizeof(cases[0]); case_index++)
     {
         const benchmark_case * benchmark = cases + case_index;
+        if (!benchmark_selected(benchmark->name))
+            continue;
+
         int samples = sample_override ? atoi(sample_override) : benchmark->samples;
         if (samples < 1)
             samples = 1;

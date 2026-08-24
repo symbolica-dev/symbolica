@@ -250,6 +250,18 @@ mod implementation {
             (Self(q), Self(r))
         }
 
+        /// Divide in place when divisibility is guaranteed by the caller.
+        #[inline]
+        pub fn div_exact_owned(mut self, rhs: &Self) -> Self {
+            #[cfg(feature = "gmp")]
+            self.0.div_exact_mut(&rhs.0);
+            #[cfg(feature = "no_gmp")]
+            {
+                self /= rhs;
+            }
+            self
+        }
+
         #[inline]
         pub fn root_ref(&self, e: u32) -> Self {
             #[cfg(feature = "integer-gmp")]

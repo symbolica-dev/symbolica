@@ -26,6 +26,7 @@ use super::{Exponent, INLINED_EXPONENTS, LexOrder, MonomialOrder, PolyVariable, 
 use smallvec::{SmallVec, smallvec};
 
 const MAX_DENSE_MUL_BUFFER_SIZE: usize = 1 << 24;
+const MAX_DENSE_DIV_BUFFER_SIZE: usize = 1 << 20;
 thread_local! { static DENSE_MUL_BUFFER: Cell<Vec<u32>> = const { Cell::new(Vec::new()) }; }
 
 /// A ring for multivariate polynomials.
@@ -246,6 +247,16 @@ impl<R: Ring, E: Exponent> Ring for PolynomialRing<R, E> {
 
     fn try_div(&self, a: &Self::Element, b: &Self::Element) -> Option<Self::Element> {
         a.try_div(b)
+    }
+
+    #[inline]
+    fn try_div_owned(&self, a: Self::Element, b: &Self::Element) -> Option<Self::Element> {
+        a.try_div_owned(b)
+    }
+
+    #[inline]
+    fn exact_div_owned(&self, a: Self::Element, b: &Self::Element) -> Self::Element {
+        a.exact_div_owned(b)
     }
 
     fn sample(&self, _rng: &mut impl rand::RngCore, _range: (i64, i64)) -> Self::Element {
@@ -2972,6 +2983,26 @@ impl<F: Ring, E: Exponent> MultivariatePolynomial<F, E, LexOrder> {
             }
         }
 
+        #[inline(always)]
+        fn advance_uni_var<E: Exponent>(mut delta: u32, max_degs_rev: &[usize], exp: &mut [E]) {
+            for (ee, &radix) in exp.iter_mut().rev().zip(max_degs_rev) {
+                if delta == 0 {
+                    break;
+                }
+
+                let value = ee.to_i32() as u32 + delta;
+                if value < radix as u32 {
+                    *ee = E::from_i32(value as i32);
+                    delta = 0;
+                    break;
+                }
+
+                *ee = E::from_i32((value % radix as u32) as i32);
+                delta = value / radix as u32;
+            }
+            debug_assert_eq!(delta, 0);
+        }
+
         let mut uni_exp_self = vec![0; self.coefficients.len()];
         for (es, s) in &mut uni_exp_self.iter_mut().zip(self.exponents_iter()) {
             *es = to_uni_var(s, &max_degs_rev);
@@ -2990,12 +3021,15 @@ impl<F: Ring, E: Exponent> MultivariatePolynomial<F, E, LexOrder> {
             &uni_exp_rhs,
         ) {
             let mut exp = vec![E::zero(); self.nvars()];
-            let mut result = self.zero_with_capacity(self.nterms().max(rhs.nterms()));
-            for (position, coefficient) in coefficients.into_iter().enumerate() {
-                if !self.ring().is_zero(&coefficient) {
-                    from_uni_var(position as u32, &max_degs_rev, &mut exp);
-                    result.append_monomial(coefficient, &exp);
-                }
+            let mut result = self.zero_with_capacity(coefficients.len());
+            let mut previous_position = 0;
+            for (position, coefficient) in coefficients {
+                debug_assert!(!self.ring().is_zero(&coefficient));
+                debug_assert!(result.coefficients.is_empty() || position > previous_position);
+                advance_uni_var(position - previous_position, &max_degs_rev, &mut exp);
+                previous_position = position;
+                result.coefficients.push(coefficient);
+                result.exponents.extend_from_slice(&exp);
             }
             return Some(result);
         }
@@ -3732,7 +3766,7 @@ impl<F: EuclideanDomain, E: PositiveExponent> MultivariatePolynomial<F, E, LexOr
         MultivariatePolynomial<F, E, LexOrder>,
         MultivariatePolynomial<F, E, LexOrder>,
     ) {
-        self.clone().quot_rem_impl(div, abort_on_remainder)
+        self.clone().quot_rem_impl(div, abort_on_remainder, false)
     }
 
     /// Divide an owned polynomial, reusing its coefficient storage where possible.
@@ -3744,7 +3778,7 @@ impl<F: EuclideanDomain, E: PositiveExponent> MultivariatePolynomial<F, E, LexOr
         MultivariatePolynomial<F, E, LexOrder>,
         MultivariatePolynomial<F, E, LexOrder>,
     ) {
-        self.quot_rem_impl(div, abort_on_remainder)
+        self.quot_rem_impl(div, abort_on_remainder, false)
     }
 
     /// Compute the p-adic expansion of the polynomial.
@@ -3854,8 +3888,98 @@ impl<F: Ring, E: Exponent> MultivariatePolynomial<F, E, LexOrder> {
             }
         }
 
-        let (a, b) = self.clone().quot_rem_impl(div, true);
+        let (a, b) = self.clone().quot_rem_impl(div, true, false);
         if b.nterms() == 0 { Some(a) } else { None }
+    }
+
+    /// Divide an owned polynomial exactly, reusing its coefficient storage where possible.
+    pub fn try_div_owned(
+        mut self,
+        div: &MultivariatePolynomial<F, E, LexOrder>,
+    ) -> Option<MultivariatePolynomial<F, E, LexOrder>> {
+        if div.is_zero() {
+            return None;
+        }
+
+        if self.variables() != div.variables() {
+            let mut div = div.clone();
+            self.unify_variables(&mut div);
+            return self.try_div_owned(&div);
+        }
+
+        if self.is_zero() {
+            return Some(self);
+        }
+
+        // Check the leading coefficients before starting polynomial division.
+        self.ring().try_div(&self.lcoeff(), &div.lcoeff())?;
+
+        if !self.is_polynomial() || !div.is_polynomial() {
+            // Remove all negative exponents.
+            let mut divisor = div.clone();
+            let divisor_shift = (0..self.nvars())
+                .map(|variable| E::zero() - div.degree_bounds(variable).0.min(E::zero()))
+                .collect::<Vec<_>>();
+            let mut quotient_shift = (0..self.nvars())
+                .map(|variable| E::zero() - self.degree_bounds(variable).0.min(E::zero()))
+                .collect::<Vec<_>>();
+
+            self = self.mul_exp(&divisor_shift).mul_exp(&quotient_shift);
+            divisor = divisor.mul_exp(&divisor_shift);
+
+            let quotient = self.try_div_owned(&divisor)?;
+            for degree in &mut quotient_shift {
+                *degree = E::zero() - *degree;
+            }
+            return Some(quotient.mul_exp(&quotient_shift));
+        }
+
+        if (0..self.nvars()).any(|variable| self.degree(variable) < div.degree(variable)) {
+            return None;
+        }
+
+        if self.ring().characteristic().is_zero() {
+            // Test division after evaluating every variable at zero.
+            let divisor_constant = div.get_constant();
+            if !self.ring().is_zero(&divisor_constant)
+                && !self.ring().is_one(&divisor_constant)
+                && self
+                    .ring()
+                    .try_div(&self.get_constant(), &divisor_constant)
+                    .is_none()
+            {
+                return None;
+            }
+
+            // Test division after evaluating every variable at one.
+            let mut numerator_value = self.ring().zero();
+            for coefficient in &self.coefficients {
+                self.ring().add_assign(&mut numerator_value, coefficient);
+            }
+            let mut divisor_value = self.ring().zero();
+            for coefficient in &div.coefficients {
+                self.ring().add_assign(&mut divisor_value, coefficient);
+            }
+            if !self.ring().is_zero(&divisor_value)
+                && !self.ring().is_one(&divisor_value)
+                && self
+                    .ring()
+                    .try_div(&numerator_value, &divisor_value)
+                    .is_none()
+            {
+                return None;
+            }
+        }
+
+        let (quotient, remainder) = self.quot_rem_impl(div, true, false);
+        remainder.is_zero().then_some(quotient)
+    }
+
+    /// Divide an owned polynomial under an exact-divisibility invariant.
+    fn exact_div_owned(self, div: &MultivariatePolynomial<F, E, LexOrder>) -> Self {
+        let (quotient, remainder) = self.quot_rem_impl(div, true, true);
+        debug_assert!(remainder.is_zero());
+        quotient
     }
 
     /// Divide two multivariate polynomials and return the quotient and remainder.
@@ -3865,6 +3989,7 @@ impl<F: Ring, E: Exponent> MultivariatePolynomial<F, E, LexOrder> {
         mut self,
         div: &MultivariatePolynomial<F, E, LexOrder>,
         abort_on_remainder: bool,
+        assume_exact: bool,
     ) -> (
         MultivariatePolynomial<F, E, LexOrder>,
         MultivariatePolynomial<F, E, LexOrder>,
@@ -3886,7 +4011,7 @@ impl<F: Ring, E: Exponent> MultivariatePolynomial<F, E, LexOrder> {
         if self.variables() != div.variables() {
             let mut c2 = div.clone();
             self.unify_variables(&mut c2);
-            return self.quot_rem_impl(&c2, abort_on_remainder);
+            return self.quot_rem_impl(&c2, abort_on_remainder, assume_exact);
         }
 
         if self.nterms() == div.nterms() {
@@ -3910,7 +4035,7 @@ impl<F: Ring, E: Exponent> MultivariatePolynomial<F, E, LexOrder> {
         }
 
         if div.is_constant() {
-            let original = self.clone();
+            let original = (!abort_on_remainder).then(|| self.clone());
             let mut q = self;
             let dive = div.to_monomial_view(0);
 
@@ -3921,10 +4046,15 @@ impl<F: Ring, E: Exponent> MultivariatePolynomial<F, E, LexOrder> {
 
             let ring = q.context.ring.clone();
             for c in &mut q.coefficients {
-                if let Some(quot) = ring.try_div(c, dive.coefficient) {
-                    *c = quot;
+                if assume_exact {
+                    let numerator = std::mem::replace(c, ring.zero());
+                    *c = ring.exact_div_owned(numerator, dive.coefficient);
+                } else if let Some(quotient) = ring.try_div(c, dive.coefficient) {
+                    *c = quotient;
+                } else if abort_on_remainder {
+                    return (q.zero(), q.one());
                 } else {
-                    return (q.zero(), original);
+                    return (q.zero(), original.unwrap());
                 }
             }
 
@@ -3941,6 +4071,10 @@ impl<F: Ring, E: Exponent> MultivariatePolynomial<F, E, LexOrder> {
             return self.quot_rem_univariate_monic(div);
         }
 
+        if assume_exact && let Some((bases, total)) = self.dense_exact_division_layout() {
+            return self.dense_exact_division(div, &bases, total);
+        }
+
         let mut pack_u8 = true;
         if self.nvars() <= 8
             && (0..self.nvars()).all(|i| {
@@ -3952,10 +4086,185 @@ impl<F: Ring, E: Exponent> MultivariatePolynomial<F, E, LexOrder> {
                 deg <= 127 || self.nvars() <= 4 && deg <= 32767
             })
         {
-            self.heap_division_packed_exp(div, abort_on_remainder, pack_u8)
+            self.heap_division_packed_exp(div, abort_on_remainder, pack_u8, assume_exact)
         } else {
-            self.heap_division(div, abort_on_remainder)
+            self.heap_division(div, abort_on_remainder, assume_exact)
         }
+    }
+
+    /// Select a fixed coefficient array when the dividend occupies a reasonably dense
+    /// multivariate box. Ducos divisions are known to be exact, so this avoids maintaining a
+    /// monomial heap and map for every intermediate product.
+    fn dense_exact_division_layout(&self) -> Option<(Vec<usize>, usize)> {
+        let mut bases = Vec::with_capacity(self.nvars());
+        let mut total = 1usize;
+        for variable in 0..self.nvars() {
+            let base = self.degree(variable).to_i32().checked_add(1)? as usize;
+            total = total.checked_mul(base)?;
+            if total > MAX_DENSE_DIV_BUFFER_SIZE {
+                return None;
+            }
+            bases.push(base);
+        }
+
+        // Avoid scanning a very large mostly-empty exponent box. The floor keeps small exact
+        // divisions on this path, where setting up the heap costs more than the array scan.
+        if total > self.nterms().saturating_mul(64).max(1024) {
+            return None;
+        }
+
+        Some((bases, total))
+    }
+
+    fn dense_exact_division(
+        mut self,
+        div: &MultivariatePolynomial<F, E, LexOrder>,
+        bases: &[usize],
+        total: usize,
+    ) -> (
+        MultivariatePolynomial<F, E, LexOrder>,
+        MultivariatePolynomial<F, E, LexOrder>,
+    ) {
+        #[inline(always)]
+        fn dense_index<E: Exponent>(exponents: &[E], bases: &[usize]) -> Option<usize> {
+            let mut index = 0usize;
+            for (exponent, &base) in exponents.iter().zip(bases) {
+                let exponent = exponent.to_i32() as usize;
+                if exponent >= base {
+                    return None;
+                }
+                index = index.checked_mul(base)?.checked_add(exponent)?;
+            }
+            Some(index)
+        }
+
+        #[inline(always)]
+        fn position_is_divisible<E: Exponent>(
+            mut position: usize,
+            divisor_exponents: &[E],
+            bases: &[usize],
+        ) -> bool {
+            for (divisor_exponent, &base) in divisor_exponents.iter().rev().zip(bases.iter().rev())
+            {
+                if position % base < divisor_exponent.to_i32() as usize {
+                    return false;
+                }
+                position /= base;
+            }
+            true
+        }
+
+        #[inline(always)]
+        fn decode_index<E: Exponent>(mut position: usize, bases: &[usize], exponents: &mut [E]) {
+            for (exponent, &base) in exponents.iter_mut().rev().zip(bases.iter().rev()) {
+                *exponent = E::from_i32((position % base) as i32);
+                position /= base;
+            }
+            debug_assert_eq!(position, 0);
+        }
+
+        #[cfg(test)]
+        let verification_input = self.clone();
+        let ring = self.context.ring.clone();
+        let mut quotient = self.zero_with_capacity(self.nterms());
+        let zero_remainder = self.zero();
+        let nonzero_remainder = self.one();
+
+        let divisor_indices = div
+            .exponents_iter()
+            .map(|exponents| dense_index(exponents, bases))
+            .collect::<Option<Vec<_>>>();
+        let Some(divisor_indices) = divisor_indices else {
+            return (quotient, nonzero_remainder);
+        };
+        let divisor_leading_index = *divisor_indices.last().unwrap();
+
+        let dividend_indices = self
+            .exponents_iter()
+            .map(|exponents| dense_index(exponents, bases).map(|index| index as u32))
+            .collect::<Option<Vec<_>>>()
+            .unwrap();
+        let divisor_indices_u32 = divisor_indices
+            .iter()
+            .map(|&index| index as u32)
+            .collect::<Vec<_>>();
+        if let Some(quotient_terms) = ring.try_dense_polynomial_exact_division(
+            total,
+            &mut self.coefficients,
+            &dividend_indices,
+            &div.coefficients,
+            &divisor_indices_u32,
+        ) {
+            let mut exponents = vec![E::zero(); self.nvars()];
+            for (position, coefficient) in quotient_terms {
+                decode_index(position as usize, bases, &mut exponents);
+                quotient.coefficients.push(coefficient);
+                quotient.exponents.extend_from_slice(&exponents);
+            }
+
+            #[cfg(test)]
+            {
+                if !(&quotient * div - verification_input).is_zero() {
+                    panic!("Specialized dense exact division failed");
+                }
+            }
+
+            return (quotient, zero_remainder);
+        }
+
+        let mut coefficients = (0..total).map(|_| ring.zero()).collect::<Vec<_>>();
+        for (term, &index) in dividend_indices.iter().enumerate() {
+            coefficients[index as usize] =
+                std::mem::replace(&mut self.coefficients[term], ring.zero());
+        }
+
+        let mut quotient_terms = Vec::with_capacity(self.nterms());
+        for position in (0..total).rev() {
+            let coefficient = std::mem::replace(&mut coefficients[position], ring.zero());
+            if ring.is_zero(&coefficient) {
+                continue;
+            }
+
+            if !position_is_divisible(position, div.last_exponents(), bases) {
+                return (quotient, nonzero_remainder);
+            }
+            let quotient_coefficient =
+                ring.exact_div_owned(coefficient, div.coefficients.last().unwrap());
+            let quotient_position = position - divisor_leading_index;
+
+            for (&divisor_position, divisor_coefficient) in divisor_indices[..div.nterms() - 1]
+                .iter()
+                .zip(&div.coefficients[..div.nterms() - 1])
+            {
+                let target = quotient_position + divisor_position;
+                if target >= position {
+                    return (quotient, nonzero_remainder);
+                }
+                ring.sub_mul_assign(
+                    unsafe { coefficients.get_unchecked_mut(target) },
+                    &quotient_coefficient,
+                    divisor_coefficient,
+                );
+            }
+            quotient_terms.push((quotient_position, quotient_coefficient));
+        }
+
+        quotient_terms.reverse();
+        let mut exponents = vec![E::zero(); self.nvars()];
+        for (position, coefficient) in quotient_terms {
+            decode_index(position, bases, &mut exponents);
+            quotient.coefficients.push(coefficient);
+            quotient.exponents.extend_from_slice(&exponents);
+        }
+
+        #[cfg(test)]
+        {
+            if !(&quotient * div - verification_input).is_zero() {
+                panic!("Dense exact division failed");
+            }
+        }
+
+        (quotient, zero_remainder)
     }
 
     /// Heap division for multivariate polynomials, using a cache so that only unique
@@ -3967,6 +4276,7 @@ impl<F: Ring, E: Exponent> MultivariatePolynomial<F, E, LexOrder> {
         mut self,
         div: &MultivariatePolynomial<F, E, LexOrder>,
         abort_on_remainder: bool,
+        assume_exact: bool,
     ) -> (
         MultivariatePolynomial<F, E, LexOrder>,
         MultivariatePolynomial<F, E, LexOrder>,
@@ -4106,14 +4416,21 @@ impl<F: Ring, E: Exponent> MultivariatePolynomial<F, E, LexOrder> {
             }
 
             if div.last_exponents().iter().zip(&m).all(|(ge, me)| me >= ge) {
-                if let Some(quot) = self.ring().try_div(&c, &div.lcoeff()) {
-                    q.coefficients.push(quot);
-                } else if abort_on_remainder {
-                    r = self.one();
-                    return (q, r);
+                let quotient_coefficient = if assume_exact {
+                    self.ring()
+                        .exact_div_owned(c, div.coefficients.last().unwrap())
                 } else {
-                    return (self.zero(), original.unwrap());
-                }
+                    let Some(quotient) = self.ring().try_div(&c, div.coefficients.last().unwrap())
+                    else {
+                        if abort_on_remainder {
+                            r = self.one();
+                            return (q, r);
+                        }
+                        return (self.zero(), original.unwrap());
+                    };
+                    quotient
+                };
+                q.coefficients.push(quotient_coefficient);
 
                 q.exponents.extend(
                     div.last_exponents()
@@ -4219,6 +4536,7 @@ impl<F: Ring, E: Exponent> MultivariatePolynomial<F, E, LexOrder> {
         div: &MultivariatePolynomial<F, E, LexOrder>,
         abort_on_remainder: bool,
         pack_u8: bool,
+        assume_exact: bool,
     ) -> (
         MultivariatePolynomial<F, E, LexOrder>,
         MultivariatePolynomial<F, E, LexOrder>,
@@ -4365,14 +4683,21 @@ impl<F: Ring, E: Exponent> MultivariatePolynomial<F, E, LexOrder> {
 
             let q_e = divides(m, pack_div[pack_div.len() - 1], pack_u8);
             if let Some(q_e) = q_e {
-                if let Some(quot) = self.ring().try_div(&c, &div.lcoeff()) {
-                    q.coefficients.push(quot);
-                } else if abort_on_remainder {
-                    r = self.one();
-                    return (q, r);
+                let quotient_coefficient = if assume_exact {
+                    self.ring()
+                        .exact_div_owned(c, div.coefficients.last().unwrap())
                 } else {
-                    return (self.zero(), original.unwrap());
-                }
+                    let Some(quotient) = self.ring().try_div(&c, div.coefficients.last().unwrap())
+                    else {
+                        if abort_on_remainder {
+                            r = self.one();
+                            return (q, r);
+                        }
+                        return (self.zero(), original.unwrap());
+                    };
+                    quotient
+                };
+                q.coefficients.push(quotient_coefficient);
 
                 let len = q.exponents.len();
                 q.exponents.resize(len + self.nvars(), E::zero());

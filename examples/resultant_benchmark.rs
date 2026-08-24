@@ -1,5 +1,6 @@
 use std::{hint::black_box, time::Instant};
 
+use symbolica::coefficient::ConvertToRing;
 use symbolica::prelude::*;
 
 fn median_seconds(mut samples: Vec<f64>) -> f64 {
@@ -18,7 +19,35 @@ fn measure<T>(iterations: usize, mut operation: impl FnMut() -> T) -> f64 {
     median_seconds(samples)
 }
 
+fn measure_batched<T>(iterations: usize, mut operation: impl FnMut() -> T) -> f64 {
+    let start = Instant::now();
+    black_box(operation());
+    let calibration = start.elapsed().as_secs_f64();
+    let batch_size = ((0.020 / calibration.max(1e-9)) as usize).clamp(1, 256);
+
+    let mut samples = Vec::with_capacity(iterations);
+    for _ in 0..iterations {
+        let start = Instant::now();
+        for _ in 0..batch_size {
+            black_box(operation());
+        }
+        samples.push(start.elapsed().as_secs_f64() / batch_size as f64);
+    }
+
+    median_seconds(samples)
+}
+
+fn benchmark_selected(name: &str) -> bool {
+    std::env::var("BENCHMARK_FILTER")
+        .map(|filter| name.contains(&filter))
+        .unwrap_or(true)
+}
+
 fn compare(name: &str, a: &str, b: &str, iterations: usize) {
+    if !benchmark_selected(name) {
+        return;
+    }
+
     let iterations = std::env::var("RESULTANT_BENCH_SAMPLES")
         .ok()
         .and_then(|value| value.parse().ok())
@@ -37,7 +66,37 @@ fn compare(name: &str, a: &str, b: &str, iterations: usize) {
     let a = polys[0].to_univariate(variable);
     let b = polys[1].to_univariate(variable);
 
+    let algorithm =
+        std::env::var("RESULTANT_BENCH_ALGORITHM").unwrap_or_else(|_| "ducos".to_string());
     let expected = a.resultant_ducos(&b);
+    if std::env::var_os("RESULTANT_BENCH_DUCOS_ONLY").is_some() || algorithm != "ducos" {
+        let elapsed = match algorithm.as_str() {
+            "ducos" => measure(iterations, || a.resultant_ducos(&b)),
+            "prs" => measure(iterations, || {
+                let result = a.resultant_prs(&b);
+                assert_eq!(result, expected);
+                result
+            }),
+            "primitive" => measure(iterations, || {
+                let result = a.resultant_primitive(&b);
+                assert_eq!(result, expected);
+                result
+            }),
+            "crt" => measure(iterations, || {
+                let result = a.resultant_ducos_crt(&b);
+                assert_eq!(result, expected);
+                result
+            }),
+            _ => panic!("unknown resultant benchmark algorithm: {algorithm}"),
+        };
+        println!(
+            "{name:32} {algorithm:9} {:9.3} ms  terms {}",
+            elapsed * 1_000.0,
+            expected.nterms(),
+        );
+        return;
+    }
+
     assert_eq!(a.resultant_ducos_crt(&b), expected);
 
     let ducos = measure(iterations, || a.resultant_ducos(&b));
@@ -59,14 +118,37 @@ fn compare_multiplication(
     b_power: usize,
     iterations: usize,
 ) {
+    compare_multiplication_with_options(name, a, a_power, false, b, b_power, false, iterations);
+}
+
+#[allow(clippy::too_many_arguments)]
+fn compare_multiplication_with_options(
+    name: &str,
+    a: &str,
+    a_power: usize,
+    subtract_one_from_a: bool,
+    b: &str,
+    b_power: usize,
+    subtract_one_from_b: bool,
+    iterations: usize,
+) {
+    if !benchmark_selected(name) {
+        return;
+    }
+
     let iterations = std::env::var("MULTIPLICATION_BENCH_SAMPLES")
         .ok()
         .and_then(|value| value.parse().ok())
         .unwrap_or(iterations);
-    let mut polys = [
-        parse!(a).to_polynomial::<_, u16>(&Z, None).pow(a_power),
-        parse!(b).to_polynomial::<_, u16>(&Z, None).pow(b_power),
-    ];
+    let mut a = parse!(a).to_polynomial::<_, u16>(&Z, None).pow(a_power);
+    let mut b = parse!(b).to_polynomial::<_, u16>(&Z, None).pow(b_power);
+    if subtract_one_from_a {
+        a = a.add_constant((-1).into());
+    }
+    if subtract_one_from_b {
+        b = b.add_constant((-1).into());
+    }
+    let mut polys = [a, b];
     MultivariatePolynomial::unify_variables_list(&mut polys);
 
     let product = &polys[0] * &polys[1];
@@ -77,6 +159,95 @@ fn compare_multiplication(
         polys[0].nterms(),
         polys[1].nterms(),
         product.nterms(),
+    );
+}
+
+#[allow(clippy::too_many_arguments)]
+fn compare_finite_field_multiplication<F: EuclideanDomain + ConvertToRing>(
+    name: &str,
+    ring: &F,
+    a: &str,
+    a_power: usize,
+    subtract_one_from_a: bool,
+    b: &str,
+    b_power: usize,
+    subtract_one_from_b: bool,
+    iterations: usize,
+) {
+    if !benchmark_selected(name) {
+        return;
+    }
+
+    let iterations = std::env::var("MULTIPLICATION_BENCH_SAMPLES")
+        .ok()
+        .and_then(|value| value.parse().ok())
+        .unwrap_or(iterations);
+    let mut a = parse!(a).to_polynomial::<_, u16>(ring, None).pow(a_power);
+    let mut b = parse!(b).to_polynomial::<_, u16>(ring, None).pow(b_power);
+    if subtract_one_from_a {
+        a = a.add_constant(ring.neg(&ring.one()));
+    }
+    if subtract_one_from_b {
+        b = b.add_constant(ring.neg(&ring.one()));
+    }
+    let mut polys = [a, b];
+    MultivariatePolynomial::unify_variables_list(&mut polys);
+
+    let product = &polys[0] * &polys[1];
+    let multiplication = measure_batched(iterations, || &polys[0] * &polys[1]);
+    println!(
+        "{name:48} MUL   {:9.3} ms  lhs/rhs/product terms {}/{}/{}",
+        multiplication * 1_000.0,
+        polys[0].nterms(),
+        polys[1].nterms(),
+        product.nterms(),
+    );
+}
+
+fn benchmark_finite_field_suite<F: EuclideanDomain + ConvertToRing>(label: &str, ring: &F) {
+    compare_finite_field_multiplication(
+        &format!("{label} dense large multiplication"),
+        ring,
+        "1+x+y+z",
+        24,
+        false,
+        "1+2*x-y+3*z",
+        23,
+        false,
+        5,
+    );
+    compare_finite_field_multiplication(
+        &format!("{label} dense very large multiplication"),
+        ring,
+        "1+x+y+z",
+        40,
+        false,
+        "1+2*x-y+3*z",
+        39,
+        false,
+        3,
+    );
+    compare_finite_field_multiplication(
+        &format!("{label} sparse large multiplication"),
+        ring,
+        "1+2*x^37*y^11+3*x^5*y^43*z^7+5*x^61*z^29+7*x^17*y^73*z^31+11*x^89*y^19*z^47+13*x^23*y^97*z^59+17*x^107*y^53*z^83",
+        7,
+        false,
+        "1+2*x^37*y^11+3*x^5*y^43*z^7+5*x^61*z^29+7*x^17*y^73*z^31+11*x^89*y^19*z^47+13*x^23*y^97*z^59+17*x^107*y^53*z^83",
+        7,
+        false,
+        1,
+    );
+    compare_finite_field_multiplication(
+        &format!("{label} seven-variable power-minus-one multiplication"),
+        ring,
+        "1+3*x1+5*x2+7*x3+9*x4+11*x5+13*x6+15*x7",
+        7,
+        true,
+        "1+3*x1+5*x2+7*x3+9*x4+11*x5+13*x6+15*x7",
+        7,
+        true,
+        1,
     );
 }
 
@@ -97,6 +268,61 @@ fn main() {
         "1000000000187+2*x-y+3*z",
         11,
         10,
+    );
+    compare_multiplication(
+        "dense large multiplication",
+        "1+x+y+z",
+        24,
+        "1+2*x-y+3*z",
+        23,
+        7,
+    );
+    compare_multiplication(
+        "dense very large multiplication",
+        "1+x+y+z",
+        40,
+        "1+2*x-y+3*z",
+        39,
+        3,
+    );
+    compare_multiplication(
+        "dense high large multiplication",
+        "1000000000039+x+y+z",
+        20,
+        "1000000000187+2*x-y+3*z",
+        19,
+        3,
+    );
+    compare_multiplication(
+        "sparse separated multiplication",
+        "1+2*x^37*y^11+3*x^5*y^43*z^7+5*x^61*z^29+7*x^17*y^73*z^31+11*x^89*y^19*z^47",
+        7,
+        "1+2*x^37*y^11+3*x^5*y^43*z^7+5*x^61*z^29+7*x^17*y^73*z^31+11*x^89*y^19*z^47",
+        7,
+        3,
+    );
+    compare_multiplication(
+        "sparse large multiplication",
+        "1+2*x^37*y^11+3*x^5*y^43*z^7+5*x^61*z^29+7*x^17*y^73*z^31+11*x^89*y^19*z^47+13*x^23*y^97*z^59+17*x^107*y^53*z^83",
+        7,
+        "1+2*x^37*y^11+3*x^5*y^43*z^7+5*x^61*z^29+7*x^17*y^73*z^31+11*x^89*y^19*z^47+13*x^23*y^97*z^59+17*x^107*y^53*z^83",
+        7,
+        1,
+    );
+    compare_multiplication_with_options(
+        "seven-variable power-minus-one multiplication",
+        "1+3*x1+5*x2+7*x3+9*x4+11*x5+13*x6+15*x7",
+        7,
+        true,
+        "1+3*x1+5*x2+7*x3+9*x4+11*x5+13*x6+15*x7",
+        7,
+        true,
+        1,
+    );
+    benchmark_finite_field_suite("GF(17)", &Zp::new(17));
+    benchmark_finite_field_suite(
+        "GF(18446744073709551557)",
+        &Zp64::new(18_446_744_073_709_551_557),
     );
     compare(
         "dense outer degrees 7/6",

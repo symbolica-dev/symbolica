@@ -179,12 +179,29 @@ pub trait Ring:
     /// For example, in [Z](type@integer::Z), `4/2` is possible but `3/2` is not.
     fn try_div(&self, a: &Self::Element, b: &Self::Element) -> Option<Self::Element>;
 
+    /// Divide an owned numerator exactly, allowing implementations to reuse its storage.
+    #[inline]
+    fn try_div_owned(&self, a: Self::Element, b: &Self::Element) -> Option<Self::Element> {
+        self.try_div(&a, b)
+    }
+
+    /// Divide an owned numerator that is known to be exactly divisible by `b`.
+    ///
+    /// Specialized domains can use a faster exact-division primitive that omits remainder
+    /// construction and validation.
+    #[inline]
+    fn exact_div_owned(&self, a: Self::Element, b: &Self::Element) -> Self::Element {
+        self.try_div_owned(a, b)
+            .expect("exact division produced a remainder")
+    }
+
     /// Multiply two polynomials whose exponents have already been mapped to dense indices.
     ///
     /// Specialized coefficient rings can override this hook to use packed or fixed-width
     /// convolution kernels. Returning `None` asks the polynomial implementation to use its
-    /// generic pairwise multiplication. The index slices must have the same lengths as their
-    /// coefficient slices and be strictly increasing.
+    /// generic pairwise multiplication. The successful result contains only nonzero
+    /// `(dense_index, coefficient)` pairs in strictly increasing index order. The input index
+    /// slices must have the same lengths as their coefficient slices and be strictly increasing.
     #[inline]
     fn try_dense_polynomial_mul(
         &self,
@@ -193,7 +210,25 @@ pub trait Ring:
         _left_indices: &[u32],
         _right_coefficients: &[Self::Element],
         _right_indices: &[u32],
-    ) -> Option<Vec<Self::Element>> {
+    ) -> Option<Vec<(u32, Self::Element)>> {
+        None
+    }
+
+    /// Divide dense-indexed polynomial coefficients exactly by another polynomial.
+    ///
+    /// This hook is used only when divisibility is guaranteed. Implementations may consume
+    /// entries of `dividend_coefficients` after deciding to handle the operation, but must
+    /// leave them unchanged when returning `None`. The result contains nonzero quotient
+    /// `(dense_index, coefficient)` pairs in strictly increasing index order.
+    #[inline]
+    fn try_dense_polynomial_exact_division(
+        &self,
+        _total: usize,
+        _dividend_coefficients: &mut [Self::Element],
+        _dividend_indices: &[u32],
+        _divisor_coefficients: &[Self::Element],
+        _divisor_indices: &[u32],
+    ) -> Option<Vec<(u32, Self::Element)>> {
         None
     }
 

@@ -228,7 +228,7 @@ impl<F: EuclideanDomain> UnivariatePolynomial<F> {
             }
         }
 
-        self.clone().mul_coeff(&factor).div_coeff(denominator)
+        self.clone().mul_coeff(&factor).div_coeff_exact(denominator)
     }
 
     /// Compute the Ducos recurrence for the common adjacent-degree case
@@ -355,7 +355,7 @@ impl<F: EuclideanDomain> UnivariatePolynomial<F> {
                 let correction = previous
                     .clone()
                     .mul_coeff(&correction)
-                    .div_coeff(&previous_leading);
+                    .div_coeff_exact(&previous_leading);
                 next_h = next_h - correction;
             }
 
@@ -366,7 +366,7 @@ impl<F: EuclideanDomain> UnivariatePolynomial<F> {
         }
 
         // D = sum(coeff(S_d, j) * H_j, j=0..d-1) / lc(S_d).
-        let d_poly = sum.div_coeff(&self.lcoeff());
+        let d_poly = sum.div_coeff_exact(&self.lcoeff());
         let shifted_h = h.mul_exp(1);
         let correction = shifted_h
             .coefficients
@@ -378,7 +378,7 @@ impl<F: EuclideanDomain> UnivariatePolynomial<F> {
         if !self.ring.is_zero(&correction) {
             next = next - previous.clone().mul_coeff(&correction);
         }
-        next = next.div_coeff(nominal_leading);
+        next = next.div_coeff_exact(nominal_leading);
 
         if (d - e + 1) % 2 == 1 {
             next = -next;
@@ -388,9 +388,16 @@ impl<F: EuclideanDomain> UnivariatePolynomial<F> {
     }
 
     fn exact_div_element(&self, numerator: F::Element, denominator: &F::Element) -> F::Element {
-        let (quotient, remainder) = self.ring.quot_rem_owned(numerator, denominator);
-        debug_assert!(self.ring.is_zero(&remainder));
-        quotient
+        self.ring.exact_div_owned(numerator, denominator)
+    }
+
+    fn div_coeff_exact(mut self, denominator: &F::Element) -> Self {
+        let ring = self.ring.clone();
+        for coefficient in &mut self.coefficients {
+            let numerator = std::mem::replace(coefficient, ring.zero());
+            *coefficient = ring.exact_div_owned(numerator, denominator);
+        }
+        self
     }
 
     /// Compute the resultant and retain the last linear member of Brown's
@@ -444,9 +451,7 @@ impl<F: EuclideanDomain> UnivariatePolynomial<F> {
                 } else {
                     let a = self.ring.pow(&neg_lc, deg);
                     let psi_old = self.ring.pow(&psi, deg - 1);
-                    let (q, r) = self.ring.quot_rem(&a, &psi_old);
-                    debug_assert!(self.ring.is_zero(&r));
-                    q
+                    self.exact_div_element(a, &psi_old)
                 };
 
                 deg = a.degree() as u64 - a_new.degree() as u64;
@@ -457,16 +462,14 @@ impl<F: EuclideanDomain> UnivariatePolynomial<F> {
 
             neg_lc = self.ring.neg(a_new.coefficients.last().unwrap());
 
-            let (_, mut r) = a
-                .mul_coeff(&self.ring.pow(&neg_lc, deg + 1))
-                .quot_rem(&a_new);
+            let mut r = a.pseudo_remainder_with_negative_divisor(&a_new);
             if (deg + 1) % 2 == 1 {
                 r = -r;
             }
 
             lcs.push((a_new.lcoeff(), a_new.degree() as u64));
 
-            (a, a_new) = (a_new, r.div_coeff(&beta));
+            (a, a_new) = (a_new, r.div_coeff_exact(&beta));
             if a_new.degree() == 1 {
                 linear_subresultant = Some((a_new.get_constant(), a_new.lcoeff()));
             }
@@ -496,7 +499,7 @@ impl<F: EuclideanDomain> UnivariatePolynomial<F> {
             }
         }
 
-        (self.ring.quot_rem(&rho, &den).0, linear_subresultant)
+        (self.exact_div_element(rho, &den), linear_subresultant)
     }
 
     /// Compute the resultant using a primitive polynomial remainder sequence.

@@ -6,12 +6,16 @@ use std::fmt::{Display, Error, Formatter};
 use std::hash::Hash;
 use std::ops::Deref;
 
+#[cfg(feature = "gmp")]
+use crate::domains::integer::RawMultiPrecisionInteger;
 use crate::domains::{RingOps, Set};
 use crate::domains::{
     backend::integer::{BackendRandState, probably_prime as backend_probably_prime},
     integer::{DoubleInteger, Integer, MultiPrecisionInteger},
 };
 use crate::printer::{PrintOptions, PrintState};
+#[cfg(feature = "gmp")]
+use rug::integer::Order as RugIntegerOrder;
 
 use super::integer::Z;
 use super::{EuclideanDomain, Field, InternalOrdering, Ring};
@@ -164,6 +168,454 @@ pub struct FiniteField<UField> {
     r_bits: u32,
     one: FiniteFieldElement<UField>,
     is_prime: bool,
+}
+
+const MAX_DENSE_MODULAR_MUL_BUFFER_SIZE: usize = 1 << 20;
+
+#[inline]
+fn validate_dense_polynomial_mul<UField>(
+    output_len: usize,
+    left_coefficients: &[FiniteFieldElement<UField>],
+    left_indices: &[u32],
+    right_coefficients: &[FiniteFieldElement<UField>],
+    right_indices: &[u32],
+) -> Option<()> {
+    if output_len > MAX_DENSE_MODULAR_MUL_BUFFER_SIZE
+        || left_coefficients.len() != left_indices.len()
+        || right_coefficients.len() != right_indices.len()
+    {
+        return None;
+    }
+
+    if let (Some(&left_max), Some(&right_max)) = (left_indices.last(), right_indices.last())
+        && left_max as usize + right_max as usize >= output_len
+    {
+        return None;
+    }
+
+    Some(())
+}
+
+#[inline(always)]
+fn montgomery_reduce_u32(field: &Zp, value: u64) -> u32 {
+    let m = (value as u32).wrapping_mul(field.m);
+    let (sum, overflow) = value.overflowing_add(m as u64 * field.p as u64);
+    let reduced = (sum >> 32) as u32;
+    if overflow {
+        reduced.wrapping_sub(field.p)
+    } else if reduced >= field.p {
+        reduced - field.p
+    } else {
+        reduced
+    }
+}
+
+fn try_dense_zp_polynomial_mul(
+    field: &Zp,
+    output_len: usize,
+    left_coefficients: &[FiniteFieldElement<u32>],
+    left_indices: &[u32],
+    right_coefficients: &[FiniteFieldElement<u32>],
+    right_indices: &[u32],
+) -> Option<Vec<(u32, FiniteFieldElement<u32>)>> {
+    validate_dense_polynomial_mul(
+        output_len,
+        left_coefficients,
+        left_indices,
+        right_coefficients,
+        right_indices,
+    )?;
+    if left_coefficients.is_empty() || right_coefficients.is_empty() {
+        return Some(Vec::new());
+    }
+
+    let modulus = field.p as u128;
+    let number_of_products = left_coefficients
+        .len()
+        .checked_mul(right_coefficients.len())?;
+
+    // Small moduli can accumulate the entire convolution in u64. Besides using a
+    // smaller buffer, this avoids the compiler's generic 128-bit remainder helper.
+    let maximum_product = (field.p - 1) as u128 * (field.p - 1) as u128;
+    if maximum_product.checked_mul(number_of_products as u128)? <= u64::MAX as u128 {
+        let modulus = field.p as u64;
+        if number_of_products >= output_len {
+            let mut accumulators = vec![0u64; output_len];
+            for (left, &left_index) in left_coefficients.iter().zip(left_indices) {
+                for (right, &right_index) in right_coefficients.iter().zip(right_indices) {
+                    let position = left_index as usize + right_index as usize;
+                    unsafe {
+                        *accumulators.get_unchecked_mut(position) += left.0 as u64 * right.0 as u64;
+                    }
+                }
+            }
+
+            let mut result = Vec::new();
+            for (position, accumulator) in accumulators.into_iter().enumerate() {
+                if accumulator == 0 {
+                    continue;
+                }
+
+                let coefficient = montgomery_reduce_u32(field, accumulator % modulus);
+                if coefficient != 0 {
+                    result.push((position as u32, FiniteFieldElement(coefficient)));
+                }
+            }
+            return Some(result);
+        }
+
+        let mut coefficient_indices = vec![0u32; output_len];
+        let mut accumulators = Vec::<u64>::with_capacity(left_coefficients.len());
+        for (left, &left_index) in left_coefficients.iter().zip(left_indices) {
+            for (right, &right_index) in right_coefficients.iter().zip(right_indices) {
+                let position = left_index as usize + right_index as usize;
+                let accumulator_index = unsafe { coefficient_indices.get_unchecked_mut(position) };
+                let product = left.0 as u64 * right.0 as u64;
+                if *accumulator_index == 0 {
+                    accumulators.push(product);
+                    *accumulator_index = accumulators.len() as u32;
+                } else {
+                    unsafe {
+                        *accumulators.get_unchecked_mut(*accumulator_index as usize - 1) += product;
+                    }
+                }
+            }
+        }
+
+        let mut result = Vec::with_capacity(accumulators.len());
+        for (position, accumulator_index) in coefficient_indices.into_iter().enumerate() {
+            if accumulator_index == 0 {
+                continue;
+            }
+
+            let accumulator =
+                unsafe { *accumulators.get_unchecked(accumulator_index as usize - 1) };
+            let coefficient = montgomery_reduce_u32(field, accumulator % modulus);
+            if coefficient != 0 {
+                result.push((position as u32, FiniteFieldElement(coefficient)));
+            }
+        }
+        return Some(result);
+    }
+
+    // A coefficient receives at most min(left.len(), right.len()) products. With the
+    // buffer bound above, the sum of products of two u32 residues always fits in u128.
+    if number_of_products >= output_len {
+        let mut accumulators = vec![0u128; output_len];
+        for (left, &left_index) in left_coefficients.iter().zip(left_indices) {
+            for (right, &right_index) in right_coefficients.iter().zip(right_indices) {
+                let position = left_index as usize + right_index as usize;
+                unsafe {
+                    *accumulators.get_unchecked_mut(position) += left.0 as u128 * right.0 as u128;
+                }
+            }
+        }
+
+        let mut result = Vec::new();
+        for (position, accumulator) in accumulators.into_iter().enumerate() {
+            if accumulator == 0 {
+                continue;
+            }
+
+            let residue = (accumulator % modulus) as u64;
+            let coefficient = montgomery_reduce_u32(field, residue);
+            if coefficient != 0 {
+                result.push((position as u32, FiniteFieldElement(coefficient)));
+            }
+        }
+        return Some(result);
+    }
+
+    let mut coefficient_indices = vec![0u32; output_len];
+    let mut accumulators = Vec::<u128>::with_capacity(left_coefficients.len());
+    for (left, &left_index) in left_coefficients.iter().zip(left_indices) {
+        for (right, &right_index) in right_coefficients.iter().zip(right_indices) {
+            let position = left_index as usize + right_index as usize;
+            let accumulator_index = unsafe { coefficient_indices.get_unchecked_mut(position) };
+            let product = left.0 as u128 * right.0 as u128;
+            if *accumulator_index == 0 {
+                accumulators.push(product);
+                *accumulator_index = accumulators.len() as u32;
+            } else {
+                unsafe {
+                    *accumulators.get_unchecked_mut(*accumulator_index as usize - 1) += product;
+                }
+            }
+        }
+    }
+
+    let mut result = Vec::with_capacity(accumulators.len());
+    for (position, accumulator_index) in coefficient_indices.into_iter().enumerate() {
+        if accumulator_index == 0 {
+            continue;
+        }
+
+        let accumulator = unsafe { *accumulators.get_unchecked(accumulator_index as usize - 1) };
+        let residue = (accumulator % modulus) as u64;
+        let coefficient = montgomery_reduce_u32(field, residue);
+        if coefficient != 0 {
+            result.push((position as u32, FiniteFieldElement(coefficient)));
+        }
+    }
+    Some(result)
+}
+
+#[inline(always)]
+fn montgomery_reduce_u64(field: &Zp64, value: u128) -> u64 {
+    let m = (value as u64).wrapping_mul(field.m);
+    let (sum, overflow) = value.overflowing_add(m as u128 * field.p as u128);
+    let reduced = (sum >> 64) as u64;
+    if overflow {
+        reduced.wrapping_sub(field.p)
+    } else if reduced >= field.p {
+        reduced - field.p
+    } else {
+        reduced
+    }
+}
+
+#[cfg(feature = "gmp")]
+#[inline(never)]
+fn try_ks2_zp64_polynomial_mul(
+    field: &Zp64,
+    output_len: usize,
+    left_coefficients: &[FiniteFieldElement<u64>],
+    left_indices: &[u32],
+    right_coefficients: &[FiniteFieldElement<u64>],
+    right_indices: &[u32],
+) -> Option<Vec<(u32, FiniteFieldElement<u64>)>> {
+    let collision_count = left_coefficients.len().min(right_coefficients.len());
+    let collision_bits = usize::BITS - (collision_count - 1).leading_zeros();
+    let coefficient_bits = 128usize.checked_add(collision_bits as usize)?;
+    let evaluation_bits = coefficient_bits.div_ceil(2);
+    let digit_bits = evaluation_bits.checked_mul(2)?;
+
+    const MAX_PACKED_BITS: usize = 1 << 29;
+    for &last_index in [left_indices.last()?, right_indices.last()?] {
+        if (last_index as usize + 1).checked_mul(evaluation_bits)? > MAX_PACKED_BITS {
+            return None;
+        }
+    }
+
+    fn pack_plus_and_minus(
+        coefficients: &[FiniteFieldElement<u64>],
+        indices: &[u32],
+        evaluation_bits: usize,
+    ) -> Option<(MultiPrecisionInteger, MultiPrecisionInteger)> {
+        let packed_bits = (indices.last().copied()? as usize + 1).checked_mul(evaluation_bits)?;
+        let limb_count = packed_bits.checked_add(63)? / 64;
+        let mut plus_limbs = vec![0u64; limb_count];
+        let mut odd_limbs = vec![0u64; limb_count];
+
+        #[inline(always)]
+        fn write_coefficient(limbs: &mut [u64], bit_index: usize, coefficient: u64) {
+            let limb_index = bit_index / 64;
+            let shift = bit_index % 64;
+            unsafe {
+                *limbs.get_unchecked_mut(limb_index) |= coefficient << shift;
+                if shift != 0 && limb_index + 1 < limbs.len() {
+                    *limbs.get_unchecked_mut(limb_index + 1) |= coefficient >> (64 - shift);
+                }
+            }
+        }
+
+        for (coefficient, &index) in coefficients.iter().zip(indices) {
+            let bit_index = (index as usize).checked_mul(evaluation_bits)?;
+            write_coefficient(&mut plus_limbs, bit_index, coefficient.0);
+            if index % 2 == 1 {
+                write_coefficient(&mut odd_limbs, bit_index, coefficient.0);
+            }
+        }
+
+        let plus = MultiPrecisionInteger::from_raw(RawMultiPrecisionInteger::from_digits(
+            &plus_limbs,
+            RugIntegerOrder::Lsf,
+        ));
+        let odd = MultiPrecisionInteger::from_raw(RawMultiPrecisionInteger::from_digits(
+            &odd_limbs,
+            RugIntegerOrder::Lsf,
+        ));
+        let minus = &plus - (odd << 1usize);
+        Some((plus, minus))
+    }
+
+    let (left_plus, left_minus) =
+        pack_plus_and_minus(left_coefficients, left_indices, evaluation_bits)?;
+    let (right_plus, right_minus) =
+        pack_plus_and_minus(right_coefficients, right_indices, evaluation_bits)?;
+    let plus_product = MultiPrecisionInteger::from_raw(RawMultiPrecisionInteger::from(
+        left_plus.as_raw() * right_plus.as_raw(),
+    ));
+    let minus_product = MultiPrecisionInteger::from_raw(RawMultiPrecisionInteger::from(
+        left_minus.as_raw() * right_minus.as_raw(),
+    ));
+
+    let mut even_coefficients = &plus_product + &minus_product;
+    even_coefficients = even_coefficients >> 1usize;
+    let mut odd_coefficients = plus_product - minus_product;
+    odd_coefficients = odd_coefficients >> 1usize;
+    debug_assert!(!even_coefficients.is_negative());
+    debug_assert!(!odd_coefficients.is_negative());
+
+    let even_limbs = even_coefficients.as_raw().as_limbs();
+    let odd_limbs = odd_coefficients.as_raw().as_limbs();
+    let modulus = field.p as u128;
+    let radix = (1u128 << 64) % modulus;
+    let radix_squared = radix * radix % modulus;
+    let top_bits = digit_bits.saturating_sub(128);
+    debug_assert!(digit_bits <= 192);
+
+    #[inline(always)]
+    fn extract_limb(limbs: &[u64], limb_index: usize, shift: usize) -> u64 {
+        let mut value = limbs.get(limb_index).copied().unwrap_or(0) >> shift;
+        if shift != 0 {
+            value |= limbs.get(limb_index + 1).copied().unwrap_or(0) << (64 - shift);
+        }
+        value
+    }
+
+    let mut output = Vec::new();
+    for index in 0..output_len {
+        let bit_index = index.checked_mul(evaluation_bits)?;
+        let limb_index = bit_index / 64;
+        let shift = bit_index % 64;
+        let limbs = if index % 2 == 0 {
+            even_limbs
+        } else {
+            odd_limbs
+        };
+        let low = extract_limb(limbs, limb_index, shift);
+        let high = extract_limb(limbs, limb_index + 1, shift);
+        let mut top = extract_limb(limbs, limb_index + 2, shift);
+        if top_bits < 64 {
+            top &= if top_bits == 0 {
+                0
+            } else {
+                (1u64 << top_bits) - 1
+            };
+        }
+        if low == 0 && high == 0 && top == 0 {
+            continue;
+        }
+
+        let high_term = high as u128 * radix;
+        let top_term = top as u128 * radix_squared;
+        let residue = if let Some(value) = (low as u128)
+            .checked_add(high_term)
+            .and_then(|value| value.checked_add(top_term))
+        {
+            value % modulus
+        } else {
+            let mut value = low as u128 % modulus;
+            value += high_term % modulus;
+            if value >= modulus {
+                value -= modulus;
+            }
+            value += top_term % modulus;
+            if value >= modulus {
+                value -= modulus;
+            }
+            value
+        };
+        let coefficient = montgomery_reduce_u64(field, residue);
+        if coefficient != 0 {
+            output.push((index as u32, FiniteFieldElement(coefficient)));
+        }
+    }
+    Some(output)
+}
+
+fn try_dense_zp64_polynomial_mul(
+    field: &Zp64,
+    output_len: usize,
+    left_coefficients: &[FiniteFieldElement<u64>],
+    left_indices: &[u32],
+    right_coefficients: &[FiniteFieldElement<u64>],
+    right_indices: &[u32],
+) -> Option<Vec<(u32, FiniteFieldElement<u64>)>> {
+    validate_dense_polynomial_mul(
+        output_len,
+        left_coefficients,
+        left_indices,
+        right_coefficients,
+        right_indices,
+    )?;
+    if left_coefficients.is_empty() || right_coefficients.is_empty() {
+        return Some(Vec::new());
+    }
+
+    #[cfg(feature = "gmp")]
+    {
+        let product_count = left_coefficients
+            .len()
+            .checked_mul(right_coefficients.len())?;
+        if product_count >= 20_000_000
+            && product_count >= output_len.saturating_mul(128)
+            && let Some(output) = try_ks2_zp64_polynomial_mul(
+                field,
+                output_len,
+                left_coefficients,
+                left_indices,
+                right_coefficients,
+                right_indices,
+            )
+        {
+            return Some(output);
+        }
+    }
+
+    // Accumulate exact 128-bit products in three limbs. This postpones Montgomery
+    // reduction until an output coefficient is complete.
+    let right_terms = right_coefficients
+        .iter()
+        .zip(right_indices)
+        .map(|(coefficient, &index)| (coefficient.0, index as usize * 3))
+        .collect::<Vec<_>>();
+    let mut accumulators = vec![0u64; output_len * 3];
+    for (left, &left_index) in left_coefficients.iter().zip(left_indices) {
+        let left_offset = left_index as usize * 3;
+        for &(right, right_offset) in &right_terms {
+            let product = left.0 as u128 * right as u128;
+            let accumulator = unsafe { accumulators.as_mut_ptr().add(left_offset + right_offset) };
+            let (low, carry_low) = unsafe { *accumulator }.overflowing_add(product as u64);
+            unsafe { *accumulator = low };
+            let (high, carry_high) =
+                unsafe { *accumulator.add(1) }.overflowing_add((product >> 64) as u64);
+            let (high, carry_from_low) = high.overflowing_add(carry_low as u64);
+            unsafe {
+                *accumulator.add(1) = high;
+                *accumulator.add(2) += carry_high as u64 + carry_from_low as u64;
+            }
+        }
+    }
+
+    let modulus = field.p as u128;
+    let radix = ((1u128 << 64) % modulus) as u64;
+    let radix_squared = (radix as u128 * radix as u128 % modulus) as u64;
+    let maximum_products = left_coefficients.len().min(right_coefficients.len()) as u128;
+    (u64::MAX as u128)
+        .checked_mul(radix as u128)
+        .and_then(|value| value.checked_add(maximum_products.checked_mul(radix_squared as u128)?))
+        .and_then(|value| value.checked_add(u64::MAX as u128))?;
+
+    let mut result = Vec::new();
+    for (position, accumulator) in accumulators.chunks_exact(3).enumerate() {
+        let [low, high, top] = *accumulator else {
+            unreachable!()
+        };
+        if low == 0 && high == 0 && top == 0 {
+            continue;
+        }
+
+        let combined =
+            low as u128 + high as u128 * radix as u128 + top as u128 * radix_squared as u128;
+        let residue = combined % modulus;
+        let coefficient = montgomery_reduce_u64(field, residue);
+        if coefficient != 0 {
+            result.push((position as u32, FiniteFieldElement(coefficient)));
+        }
+    }
+    Some(result)
 }
 
 impl Zp {
@@ -534,6 +986,25 @@ impl Ring for Zp {
         } else {
             Some(self.div(a, b))
         }
+    }
+
+    #[inline]
+    fn try_dense_polynomial_mul(
+        &self,
+        output_len: usize,
+        left_coefficients: &[Self::Element],
+        left_indices: &[u32],
+        right_coefficients: &[Self::Element],
+        right_indices: &[u32],
+    ) -> Option<Vec<(u32, Self::Element)>> {
+        try_dense_zp_polynomial_mul(
+            self,
+            output_len,
+            left_coefficients,
+            left_indices,
+            right_coefficients,
+            right_indices,
+        )
     }
 
     fn sample(&self, rng: &mut impl rand::RngCore, range: (i64, i64)) -> Self::Element {
@@ -1048,6 +1519,25 @@ impl Ring for Zp64 {
         } else {
             Some(self.div(a, b))
         }
+    }
+
+    #[inline]
+    fn try_dense_polynomial_mul(
+        &self,
+        output_len: usize,
+        left_coefficients: &[Self::Element],
+        left_indices: &[u32],
+        right_coefficients: &[Self::Element],
+        right_indices: &[u32],
+    ) -> Option<Vec<(u32, Self::Element)>> {
+        try_dense_zp64_polynomial_mul(
+            self,
+            output_len,
+            left_coefficients,
+            left_indices,
+            right_coefficients,
+            right_indices,
+        )
     }
 
     fn sample(&self, rng: &mut impl rand::RngCore, range: (i64, i64)) -> Self::Element {
@@ -3657,6 +4147,94 @@ mod test {
         finite_field::{FiniteField, PrimitiveRootIterator, Zp64},
         integer::{Integer, MultiPrecisionInteger},
     };
+
+    fn assert_dense_polynomial_mul<R: Ring>(
+        field: &R,
+        left: &[R::Element],
+        left_indices: &[u32],
+        right: &[R::Element],
+        right_indices: &[u32],
+        output_len: usize,
+    ) {
+        let mut expected = vec![field.zero(); output_len];
+        for (left, &left_index) in left.iter().zip(left_indices) {
+            for (right, &right_index) in right.iter().zip(right_indices) {
+                field.add_mul_assign(
+                    &mut expected[left_index as usize + right_index as usize],
+                    left,
+                    right,
+                );
+            }
+        }
+
+        let terms = field
+            .try_dense_polynomial_mul(output_len, left, left_indices, right, right_indices)
+            .unwrap();
+        let mut actual = vec![field.zero(); output_len];
+        for (position, coefficient) in terms {
+            actual[position as usize] = coefficient;
+        }
+        assert_eq!(actual, expected);
+    }
+
+    #[test]
+    fn dense_polynomial_multiplication() {
+        let field = Zp::new(17);
+        let left = [1, 16, 7, 13].map(|value| field.to_element(value));
+        let right = [15, 3, 16, 8].map(|value| field.to_element(value));
+        assert_dense_polynomial_mul(&field, &left, &[0, 2, 5, 7], &right, &[0, 1, 4, 7], 15);
+        assert_dense_polynomial_mul(&field, &left, &[0, 2, 5, 7], &right, &[0, 1, 4, 7], 100);
+
+        let field = Zp::new(4_294_967_291);
+        let left = [4_294_967_290, 4_294_967_200, 2_345_678_901, 123_456_789]
+            .map(|value| field.to_element(value));
+        let right = [4_294_967_289, 4_294_967_100, 3_456_789_012, 987_654_321]
+            .map(|value| field.to_element(value));
+        assert_dense_polynomial_mul(&field, &left, &[0, 2, 5, 7], &right, &[0, 1, 4, 7], 15);
+
+        let field = Zp64::new(18_446_744_073_709_551_557);
+        let left = [
+            18_446_744_073_709_551_556,
+            18_446_744_073_709_551_500,
+            9_223_372_036_854_775_807,
+            12_345_678_901_234_567_890,
+        ]
+        .map(|value| field.to_element(value));
+        let right = [
+            18_446_744_073_709_551_555,
+            18_446_744_073_709_551_499,
+            9_223_372_036_854_775_809,
+            17_654_321_098_765_432_109,
+        ]
+        .map(|value| field.to_element(value));
+        assert_dense_polynomial_mul(&field, &left, &[0, 2, 5, 7], &right, &[0, 1, 4, 7], 15);
+
+        let raw = vec![super::FiniteFieldElement::from_inner(18_446_744_073_709_551_556); 64];
+        let indices = (0..64).collect::<Vec<_>>();
+        assert_dense_polynomial_mul(&field, &raw, &indices, &raw, &indices, 127);
+
+        #[cfg(feature = "gmp")]
+        {
+            let mut expected = vec![field.zero(); 127];
+            for (left, &left_index) in raw.iter().zip(&indices) {
+                for (right, &right_index) in raw.iter().zip(&indices) {
+                    field.add_mul_assign(
+                        &mut expected[left_index as usize + right_index as usize],
+                        left,
+                        right,
+                    );
+                }
+            }
+            let terms =
+                super::try_ks2_zp64_polynomial_mul(&field, 127, &raw, &indices, &raw, &indices)
+                    .unwrap();
+            let mut actual = vec![field.zero(); 127];
+            for (position, coefficient) in terms {
+                actual[position as usize] = coefficient;
+            }
+            assert_eq!(actual, expected);
+        }
+    }
 
     #[test]
     fn primitive_root() {
