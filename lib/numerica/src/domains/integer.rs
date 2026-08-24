@@ -839,16 +839,54 @@ impl Integer {
     /// multiprecision backend.
     #[inline(always)]
     fn fused_mul_assign(&mut self, b: &Integer, c: &Integer, subtract: bool) {
+        if let (Integer::Single(left), Integer::Single(right)) = (b, c)
+            && !matches!(self, Integer::Large(_))
+        {
+            let accumulator = match self {
+                Integer::Single(value) => *value as i128,
+                Integer::Double(value) => value.get(),
+                Integer::Large(_) => unreachable!(),
+            };
+            let product = (*left as i128) * (*right as i128);
+            if let Some(value) = if subtract {
+                accumulator.checked_sub(product)
+            } else {
+                accumulator.checked_add(product)
+            } {
+                *self = Integer::from_double(value);
+                return;
+            }
+        }
+
         if !matches!(self, Integer::Large(_))
             && !matches!(b, Integer::Large(_))
             && !matches!(c, Integer::Large(_))
         {
-            if subtract {
-                *self -= b * c;
-            } else {
-                *self += b * c;
+            let accumulator = match self {
+                Integer::Single(value) => *value as i128,
+                Integer::Double(value) => value.get(),
+                Integer::Large(_) => unreachable!(),
+            };
+            let left = match b {
+                Integer::Single(value) => *value as i128,
+                Integer::Double(value) => value.get(),
+                Integer::Large(_) => unreachable!(),
+            };
+            let right = match c {
+                Integer::Single(value) => *value as i128,
+                Integer::Double(value) => value.get(),
+                Integer::Large(_) => unreachable!(),
+            };
+            if let Some(product) = left.checked_mul(right)
+                && let Some(value) = if subtract {
+                    accumulator.checked_sub(product)
+                } else {
+                    accumulator.checked_add(product)
+                }
+            {
+                *self = Integer::from_double(value);
+                return;
             }
-            return;
         }
 
         if !matches!(self, Integer::Large(_)) {

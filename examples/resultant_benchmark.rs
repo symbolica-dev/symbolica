@@ -204,7 +204,58 @@ fn compare_finite_field_multiplication<F: EuclideanDomain + ConvertToRing>(
     );
 }
 
+fn compare_finite_field_dense_univariate<F: EuclideanDomain + ConvertToRing>(
+    name: &str,
+    ring: &F,
+    left_degree: usize,
+    right_degree: usize,
+    iterations: usize,
+) {
+    if !benchmark_selected(name) {
+        return;
+    }
+
+    let iterations = std::env::var("MULTIPLICATION_BENCH_SAMPLES")
+        .ok()
+        .and_then(|value| value.parse().ok())
+        .unwrap_or(iterations);
+    let template = parse!("x").to_polynomial::<_, u16>(ring, None);
+    let mut left =
+        MultivariatePolynomial::new(ring, Some(left_degree + 1), template.variables().clone());
+    let mut right =
+        MultivariatePolynomial::new(ring, Some(right_degree + 1), template.variables().clone());
+    for exponent in 0..=left_degree {
+        left.append_monomial_back(
+            ring.nth(((exponent % 16) as u64 + 1).into()),
+            &[exponent as u16],
+        );
+    }
+    for exponent in 0..=right_degree {
+        right.append_monomial_back(
+            ring.nth((((7 * exponent) % 16) as u64 + 1).into()),
+            &[exponent as u16],
+        );
+    }
+
+    let product = &left * &right;
+    let multiplication = measure_batched(iterations, || &left * &right);
+    println!(
+        "{name:48} MUL   {:9.3} ms  lhs/rhs/product terms {}/{}/{}",
+        multiplication * 1_000.0,
+        left.nterms(),
+        right.nterms(),
+        product.nterms(),
+    );
+}
+
 fn benchmark_finite_field_suite<F: EuclideanDomain + ConvertToRing>(label: &str, ring: &F) {
+    compare_finite_field_dense_univariate(
+        &format!("{label} dense univariate degree-4912 multiplication"),
+        ring,
+        4912,
+        4911,
+        3,
+    );
     compare_finite_field_multiplication(
         &format!("{label} dense large multiplication"),
         ring,
@@ -225,6 +276,17 @@ fn benchmark_finite_field_suite<F: EuclideanDomain + ConvertToRing>(label: &str,
         "1+2*x-y+3*z",
         39,
         false,
+        3,
+    );
+    compare_finite_field_multiplication(
+        &format!("{label} five-variable total-degree multiplication"),
+        ring,
+        "1+x1+2*x2+3*x3+4*x4+5*x5",
+        13,
+        true,
+        "1+2*x1-3*x2+5*x3-7*x4+11*x5",
+        12,
+        true,
         3,
     );
     compare_finite_field_multiplication(

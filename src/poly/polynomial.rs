@@ -1,7 +1,7 @@
 //! Multivariate polynomial structures and methods.
 
 use ahash::{HashMap, HashMapExt};
-use std::cell::{Cell, UnsafeCell};
+use std::cell::{Cell, RefCell, UnsafeCell};
 use std::cmp::{Ordering, Reverse};
 use std::collections::{BTreeMap, BinaryHeap};
 use std::fmt::Display;
@@ -28,6 +28,152 @@ use smallvec::{SmallVec, smallvec};
 const MAX_DENSE_MUL_BUFFER_SIZE: usize = 1 << 24;
 const MAX_DENSE_DIV_BUFFER_SIZE: usize = 1 << 20;
 thread_local! { static DENSE_MUL_BUFFER: Cell<Vec<u32>> = const { Cell::new(Vec::new()) }; }
+
+struct TotalDegreeRankTable {
+    variable_count: usize,
+    total_degree: usize,
+    binomial_size: usize,
+    binomial: Vec<usize>,
+    prefix_length: usize,
+    suffix_length: usize,
+    prefix_code_count: usize,
+    suffix_code_count: usize,
+    prefix_rank: Vec<u32>,
+    prefix_remaining: Vec<u8>,
+    suffix_rank: Vec<u32>,
+}
+
+thread_local! {
+    static TOTAL_DEGREE_RANK_TABLE: RefCell<Option<Arc<TotalDegreeRankTable>>> = const {
+        RefCell::new(None)
+    };
+}
+
+impl TotalDegreeRankTable {
+    #[inline(always)]
+    fn choose(&self, n: usize, k: usize) -> usize {
+        self.binomial[n * self.binomial_size + k]
+    }
+
+    fn build(variable_count: usize, total_degree: usize) -> Option<Self> {
+        #[inline]
+        fn decode_code(mut code: usize, length: usize, radix: usize, digits: &mut [usize]) {
+            for digit in digits[..length].iter_mut().rev() {
+                *digit = code % radix;
+                code /= radix;
+            }
+        }
+
+        let radix = total_degree + 1;
+        let prefix_length = variable_count / 2;
+        let suffix_length = variable_count - prefix_length;
+        let prefix_code_count = radix.checked_pow(prefix_length as u32)?;
+        let suffix_code_count = radix.checked_pow(suffix_length as u32)?;
+        let suffix_table_size = suffix_code_count.checked_mul(radix)?;
+        if suffix_table_size > 1 << 22 {
+            return None;
+        }
+
+        let binomial_size = total_degree.checked_add(variable_count)?.checked_add(2)?;
+        let mut binomial = vec![0usize; binomial_size.checked_mul(binomial_size)?];
+        for n in 0..binomial_size {
+            binomial[n * binomial_size] = 1;
+            binomial[n * binomial_size + n] = 1;
+            for k in 1..n {
+                binomial[n * binomial_size + k] = binomial[(n - 1) * binomial_size + k - 1]
+                    .checked_add(binomial[(n - 1) * binomial_size + k])?;
+            }
+        }
+        let choose = |n: usize, k: usize| binomial[n * binomial_size + k];
+
+        let mut prefix_rank = vec![u32::MAX; prefix_code_count];
+        let mut prefix_remaining = vec![u8::MAX; prefix_code_count];
+        let mut digits = vec![0usize; variable_count];
+        for code in 0..prefix_code_count {
+            decode_code(code, prefix_length, radix, &mut digits);
+            let degree = digits[..prefix_length].iter().sum::<usize>();
+            if degree > total_degree {
+                continue;
+            }
+
+            let mut rank = 0usize;
+            let mut used_degree = 0usize;
+            for (index, &exponent) in digits[..prefix_length].iter().enumerate() {
+                let remaining_variables = variable_count - index - 1;
+                let available_degree = total_degree - used_degree;
+                rank += choose(
+                    remaining_variables + available_degree + 1,
+                    remaining_variables + 1,
+                ) - choose(
+                    remaining_variables + available_degree - exponent + 1,
+                    remaining_variables + 1,
+                );
+                used_degree += exponent;
+            }
+            prefix_rank[code] = u32::try_from(rank).ok()?;
+            prefix_remaining[code] = u8::try_from(total_degree - degree).ok()?;
+        }
+
+        let mut suffix_rank = vec![u32::MAX; suffix_table_size];
+        for available_degree in 0..=total_degree {
+            for code in 0..suffix_code_count {
+                decode_code(code, suffix_length, radix, &mut digits);
+                if digits[..suffix_length].iter().sum::<usize>() > available_degree {
+                    continue;
+                }
+
+                let mut rank = 0usize;
+                let mut used_degree = 0usize;
+                for (index, &exponent) in digits[..suffix_length].iter().enumerate() {
+                    let remaining_variables = suffix_length - index - 1;
+                    let remaining_degree = available_degree - used_degree;
+                    rank += choose(
+                        remaining_variables + remaining_degree + 1,
+                        remaining_variables + 1,
+                    ) - choose(
+                        remaining_variables + remaining_degree - exponent + 1,
+                        remaining_variables + 1,
+                    );
+                    used_degree += exponent;
+                }
+                suffix_rank[available_degree * suffix_code_count + code] =
+                    u32::try_from(rank).ok()?;
+            }
+        }
+
+        Some(Self {
+            variable_count,
+            total_degree,
+            binomial_size,
+            binomial,
+            prefix_length,
+            suffix_length,
+            prefix_code_count,
+            suffix_code_count,
+            prefix_rank,
+            prefix_remaining,
+            suffix_rank,
+        })
+    }
+}
+
+fn total_degree_rank_table(
+    variable_count: usize,
+    total_degree: usize,
+) -> Option<Arc<TotalDegreeRankTable>> {
+    TOTAL_DEGREE_RANK_TABLE.with(|cache| {
+        if let Some(table) = cache.borrow().as_ref()
+            && table.variable_count == variable_count
+            && table.total_degree == total_degree
+        {
+            return Some(table.clone());
+        }
+
+        let table = Arc::new(TotalDegreeRankTable::build(variable_count, total_degree)?);
+        *cache.borrow_mut() = Some(table.clone());
+        Some(table)
+    })
+}
 
 /// A ring for multivariate polynomials.
 #[derive(Clone, PartialEq, Eq, Hash, Debug)]
@@ -2939,13 +3085,8 @@ impl<F: Ring, E: Exponent> MultivariatePolynomial<F, E, LexOrder> {
             .map(|i| 1 + self.degree(i).to_i32() as usize + rhs.degree(i).to_i32() as usize)
             .collect::<Vec<_>>();
 
-        if max_degs_rev.iter().filter(|x| **x > 1).count() == 1 {
-            if max_degs_rev.iter().sum::<usize>() < 10000 {
-                return Some(self.mul_univariate_dense(rhs, None));
-            }
-
-            return None;
-        }
+        let univariate = max_degs_rev.iter().filter(|x| **x > 1).count() == 1;
+        let use_generic_univariate_dense = max_degs_rev.iter().sum::<usize>() < 10000;
 
         let mut total: usize = 1;
         for x in &max_degs_rev {
@@ -3032,6 +3173,10 @@ impl<F: Ring, E: Exponent> MultivariatePolynomial<F, E, LexOrder> {
                 result.exponents.extend_from_slice(&exp);
             }
             return Some(result);
+        }
+
+        if univariate {
+            return use_generic_univariate_dense.then(|| self.mul_univariate_dense(rhs, None));
         }
 
         let mut exp = vec![E::zero(); self.nvars()];
@@ -3320,6 +3465,10 @@ impl<F: Ring, E: Exponent> MultivariatePolynomial<F, E, LexOrder> {
         other: &MultivariatePolynomial<F, E, LexOrder>,
         pack_u8: bool,
     ) -> MultivariatePolynomial<F, E, LexOrder> {
+        if pack_u8 && let Some(result) = self.try_total_degree_dense_mul(other) {
+            return result;
+        }
+
         let mut res = self.zero_with_capacity(self.nterms().max(other.nterms()));
 
         let pack_a: Vec<_> = if pack_u8 {
@@ -3365,15 +3514,18 @@ impl<F: Ring, E: Exponent> MultivariatePolynomial<F, E, LexOrder> {
 
                 if i + 1 < self.nterms() && (j == 0 || merged_index[j - 1] > i + 1) {
                     let m = pack_a[i + 1] + pack_b[j];
-                    if let Some(e) = cache.get_mut(&m) {
-                        e.push((i + 1, j));
-                    } else {
-                        h.push(Reverse(m)); // only add when new
-                        if let Some(mut qq) = q_cache.pop() {
-                            qq.push((i + 1, j));
-                            cache.insert(m, qq);
-                        } else {
-                            cache.insert(m, vec![(i + 1, j)]);
+                    match cache.entry(m) {
+                        std::collections::btree_map::Entry::Occupied(mut entry) => {
+                            entry.get_mut().push((i + 1, j));
+                        }
+                        std::collections::btree_map::Entry::Vacant(entry) => {
+                            h.push(Reverse(m)); // only add when new
+                            if let Some(mut qq) = q_cache.pop() {
+                                qq.push((i + 1, j));
+                                entry.insert(qq);
+                            } else {
+                                entry.insert(vec![(i + 1, j)]);
+                            }
                         }
                     }
                 } else {
@@ -3382,16 +3534,18 @@ impl<F: Ring, E: Exponent> MultivariatePolynomial<F, E, LexOrder> {
 
                 if j + 1 < other.nterms() && !in_heap[j + 1] {
                     let m = pack_a[i] + pack_b[j + 1];
-                    if let Some(e) = cache.get_mut(&m) {
-                        e.push((i, j + 1));
-                    } else {
-                        h.push(Reverse(m)); // only add when new
-
-                        if let Some(mut qq) = q_cache.pop() {
-                            qq.push((i, j + 1));
-                            cache.insert(m, qq);
-                        } else {
-                            cache.insert(m, vec![(i, j + 1)]);
+                    match cache.entry(m) {
+                        std::collections::btree_map::Entry::Occupied(mut entry) => {
+                            entry.get_mut().push((i, j + 1));
+                        }
+                        std::collections::btree_map::Entry::Vacant(entry) => {
+                            h.push(Reverse(m)); // only add when new
+                            if let Some(mut qq) = q_cache.pop() {
+                                qq.push((i, j + 1));
+                                entry.insert(qq);
+                            } else {
+                                entry.insert(vec![(i, j + 1)]);
+                            }
                         }
                     }
 
@@ -3415,6 +3569,152 @@ impl<F: Ring, E: Exponent> MultivariatePolynomial<F, E, LexOrder> {
             }
         }
         res
+    }
+
+    /// Multiply polynomials that densely occupy a bounded total-degree simplex.
+    ///
+    /// A full mixed-radix box is prohibitively large for many variables, even when the
+    /// number of total-degree monomials is modest. Split the exponent vector and use a
+    /// compact perfect-rank table for the simplex instead of maintaining a monomial heap.
+    fn try_total_degree_dense_mul(
+        &self,
+        other: &MultivariatePolynomial<F, E, LexOrder>,
+    ) -> Option<MultivariatePolynomial<F, E, LexOrder>> {
+        let variable_count = self.nvars();
+        if variable_count < 2 || variable_count > 8 {
+            return None;
+        }
+
+        let maximum_total_degree = |polynomial: &Self| {
+            polynomial
+                .exponents_iter()
+                .map(|exponents| {
+                    exponents
+                        .iter()
+                        .map(|exponent| exponent.to_i32() as usize)
+                        .sum::<usize>()
+                })
+                .max()
+                .unwrap_or(0)
+        };
+        let total_degree = maximum_total_degree(self).checked_add(maximum_total_degree(other))?;
+        if total_degree >= 255 {
+            return None;
+        }
+
+        fn checked_binomial(n: usize, k: usize) -> Option<usize> {
+            let k = k.min(n - k);
+            let mut result = 1usize;
+            for index in 0..k {
+                result = result.checked_mul(n - index)?.checked_div(index + 1)?;
+            }
+            Some(result)
+        }
+
+        let coefficient_count = checked_binomial(total_degree + variable_count, variable_count)?;
+        let product_count = self.nterms().checked_mul(other.nterms())?;
+        if coefficient_count > MAX_DENSE_DIV_BUFFER_SIZE
+            || product_count < coefficient_count.saturating_mul(32)
+        {
+            return None;
+        }
+
+        let rank_table = total_degree_rank_table(variable_count, total_degree)?;
+        let radix = total_degree + 1;
+        let prefix_length = rank_table.prefix_length;
+        let suffix_code_count = rank_table.suffix_code_count;
+        debug_assert_eq!(rank_table.suffix_length, variable_count - prefix_length);
+        debug_assert_eq!(
+            rank_table.prefix_code_count,
+            radix.pow(prefix_length as u32)
+        );
+
+        let encode_terms = |polynomial: &Self| {
+            polynomial
+                .exponents_iter()
+                .map(|exponents| {
+                    let mut prefix = 0usize;
+                    for exponent in &exponents[..prefix_length] {
+                        prefix = prefix * radix + exponent.to_i32() as usize;
+                    }
+                    let mut suffix = 0usize;
+                    for exponent in &exponents[prefix_length..] {
+                        suffix = suffix * radix + exponent.to_i32() as usize;
+                    }
+                    (prefix, suffix)
+                })
+                .collect::<Vec<_>>()
+        };
+        let left_codes = encode_terms(self);
+        let right_codes = encode_terms(other);
+
+        let mut coefficients = vec![self.ring().zero(); coefficient_count];
+        for (left_coefficient, &(left_prefix, left_suffix)) in
+            self.coefficients.iter().zip(&left_codes)
+        {
+            for (right_coefficient, &(right_prefix, right_suffix)) in
+                other.coefficients.iter().zip(&right_codes)
+            {
+                let prefix = left_prefix + right_prefix;
+                let suffix = left_suffix + right_suffix;
+                let remaining_degree =
+                    unsafe { *rank_table.prefix_remaining.get_unchecked(prefix) } as usize;
+                debug_assert_ne!(remaining_degree, u8::MAX as usize);
+                let rank = unsafe { *rank_table.prefix_rank.get_unchecked(prefix) } as usize
+                    + unsafe {
+                        *rank_table
+                            .suffix_rank
+                            .get_unchecked(remaining_degree * suffix_code_count + suffix)
+                    } as usize;
+                debug_assert!(rank < coefficient_count);
+                self.ring().add_mul_assign(
+                    unsafe { coefficients.get_unchecked_mut(rank) },
+                    left_coefficient,
+                    right_coefficient,
+                );
+            }
+        }
+
+        fn unrank(
+            mut rank: usize,
+            total_degree: usize,
+            exponents: &mut [usize],
+            choose: impl Fn(usize, usize) -> usize,
+        ) {
+            let mut available_degree = total_degree;
+            let variable_count = exponents.len();
+            for (index, exponent) in exponents.iter_mut().enumerate() {
+                let remaining_variables = variable_count - index - 1;
+                for value in 0..=available_degree {
+                    let count = choose(
+                        remaining_variables + available_degree - value,
+                        remaining_variables,
+                    );
+                    if rank < count {
+                        *exponent = value;
+                        available_degree -= value;
+                        break;
+                    }
+                    rank -= count;
+                }
+            }
+            debug_assert_eq!(rank, 0);
+        }
+
+        let choose = |n: usize, k: usize| rank_table.choose(n, k);
+        let mut digits = vec![0usize; variable_count];
+        let mut result = self.zero_with_capacity(coefficient_count);
+        for (rank, coefficient) in coefficients.into_iter().enumerate() {
+            if self.ring().is_zero(&coefficient) {
+                continue;
+            }
+            unrank(rank, total_degree, &mut digits, choose);
+            result.coefficients.push(coefficient);
+            result
+                .exponents
+                .extend(digits.iter().map(|&exponent| E::from_i32(exponent as i32)));
+        }
+        Some(result)
     }
 
     /// Compute `self^pow` using a heap-based algorithm of "Sparse Polynomial Powering Using Heaps"
@@ -5395,14 +5695,14 @@ impl<R: Ring + FractionNormalization + EuclideanDomain, E: Exponent, O: Monomial
 
 #[cfg(test)]
 mod test {
-    use std::{mem::size_of, sync::Arc};
+    use std::{collections::BTreeMap, mem::size_of, sync::Arc};
 
     use crate::{
         atom::AtomCore,
         domains::{
             algebraic::AlgebraicExtension,
             finite_field::{Zp, Zp64},
-            integer::{IntegerRing, Z},
+            integer::{Integer, IntegerRing, Z},
             rational::{Q, RationalField},
         },
         parse, symbol,
@@ -5526,6 +5826,37 @@ mod test {
             "16*v2^2*v3^2+8*v1*v2^2*v3*v6+8*v1^2*v2*v3+v1^2*v2^2*v6^2+2*v1^3*v2*v6+v1^4+24*v1^4*v2^4*v3^2+6*v1^5*v2^4*v3*v6+6*v1^6*v2^3*v3+9*v1^8*v2^6*v3^2+8*v8*v2*v3+8*v8*v2*v3*v9+2*v8*v1*v2*v6+2*v8*v1*v2*v9*v6+2*v8*v1^2+2*v8*v1^2*v9+6*v8*v1^4*v2^3*v3+6*v8*v1^4*v2^3*v3*v9+v8^2+2*v8^2*v9+v8^2*v9^2+8*v5*v2*v3+8*v5*v2*v3*v7+2*v5*v1*v2*v6+2*v5*v1*v2*v7*v6+2*v5*v1^2+2*v5*v1^2*v7+6*v5*v1^4*v2^3*v3+6*v5*v1^4*v2^3*v3*v7+2*v5*v8+2*v5*v8*v9+2*v5*v8*v7+2*v5*v8*v7*v9+v5^2+2*v5^2*v7+v5^2*v7^2+8*v4*v2*v3+2*v4*v1*v2*v6+2*v4*v1^2+6*v4*v1^4*v2^3*v3+2*v4*v8+2*v4*v8*v9+2*v4*v5+2*v4*v5*v7+v4^2"
         );
         assert_eq!(b.to_expression(), r)
+    }
+
+    #[test]
+    fn total_degree_dense_multiplication() {
+        let polynomial = parse!("(1+a+b+c+d)^8-1").to_polynomial::<_, u8>(&Z, None);
+        let actual = polynomial.try_total_degree_dense_mul(&polynomial).unwrap();
+
+        let mut expected_terms = BTreeMap::<Vec<u8>, Integer>::new();
+        for left in &polynomial {
+            for right in &polynomial {
+                let exponents = left
+                    .exponents
+                    .iter()
+                    .zip(right.exponents)
+                    .map(|(left, right)| left + right)
+                    .collect::<Vec<_>>();
+                let product = left.coefficient * right.coefficient;
+                expected_terms
+                    .entry(exponents)
+                    .and_modify(|coefficient| *coefficient += &product)
+                    .or_insert(product);
+            }
+        }
+        let mut expected = polynomial.zero_with_capacity(expected_terms.len());
+        for (exponents, coefficient) in expected_terms {
+            if !coefficient.is_zero() {
+                expected.append_monomial(coefficient, &exponents);
+            }
+        }
+
+        assert_eq!(actual, expected);
     }
 
     #[test]

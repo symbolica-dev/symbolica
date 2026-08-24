@@ -209,11 +209,79 @@ static void compare_finite_field_multiplication_with_options(
     nmod_mpoly_ctx_clear(context);
 }
 
+static void compare_finite_field_dense_univariate(
+    const char * name, ulong modulus, ulong left_degree, ulong right_degree,
+    int default_samples)
+{
+    if (!benchmark_selected(name))
+        return;
+
+    const char * sample_override = getenv("MULTIPLICATION_BENCH_SAMPLES");
+    int samples = sample_override ? atoi(sample_override) : default_samples;
+    if (samples < 1)
+        samples = 1;
+
+    nmod_mpoly_ctx_t context;
+    nmod_mpoly_t left, right, product;
+    nmod_mpoly_ctx_init(context, 1, ORD_LEX, modulus);
+    nmod_mpoly_init(left, context);
+    nmod_mpoly_init(right, context);
+    nmod_mpoly_init(product, context);
+
+    for (ulong exponent = 0; exponent <= left_degree; exponent++)
+    {
+        ulong exponents[] = {exponent};
+        nmod_mpoly_push_term_ui_ui(left, exponent % 16 + 1, exponents, context);
+    }
+    for (ulong exponent = 0; exponent <= right_degree; exponent++)
+    {
+        ulong exponents[] = {exponent};
+        nmod_mpoly_push_term_ui_ui(right, (7 * exponent) % 16 + 1, exponents, context);
+    }
+    nmod_mpoly_sort_terms(left, context);
+    nmod_mpoly_sort_terms(right, context);
+
+    nmod_mpoly_mul(product, left, right, context);
+    double calibration_start = now_seconds();
+    nmod_mpoly_mul(product, left, right, context);
+    double calibration = now_seconds() - calibration_start;
+    double batch_estimate = 0.020 / (calibration > 1e-9 ? calibration : 1e-9);
+    int batch_size = batch_estimate > 256.0 ? 256 : (int) batch_estimate;
+    if (batch_size < 1)
+        batch_size = 1;
+
+    double * timings = flint_malloc((size_t) samples * sizeof(double));
+    for (int sample = 0; sample < samples; sample++)
+    {
+        double start = now_seconds();
+        for (int batch = 0; batch < batch_size; batch++)
+            nmod_mpoly_mul(product, left, right, context);
+        timings[sample] = (now_seconds() - start) / batch_size;
+    }
+    qsort(timings, (size_t) samples, sizeof(double), compare_double);
+
+    printf("%-48s MUL   %9.3f ms  lhs/rhs/product terms %ld/%ld/%ld\n",
+           name, timings[samples / 2] * 1000.0,
+           nmod_mpoly_length(left, context), nmod_mpoly_length(right, context),
+           nmod_mpoly_length(product, context));
+    fflush(stdout);
+
+    flint_free(timings);
+    nmod_mpoly_clear(left, context);
+    nmod_mpoly_clear(right, context);
+    nmod_mpoly_clear(product, context);
+    nmod_mpoly_ctx_clear(context);
+}
+
 static void compare_finite_field_suite(const char * label, ulong modulus)
 {
     const char * variables3[] = {"x", "y", "z"};
+    const char * variables5[] = {"x1", "x2", "x3", "x4", "x5"};
     const char * variables7[] = {"x1", "x2", "x3", "x4", "x5", "x6", "x7"};
     char name[128];
+
+    snprintf(name, sizeof(name), "%s dense univariate degree-4912 multiplication", label);
+    compare_finite_field_dense_univariate(name, modulus, 4912, 4911, 3);
 
     snprintf(name, sizeof(name), "%s dense large multiplication", label);
     compare_finite_field_multiplication_with_options(
@@ -224,6 +292,13 @@ static void compare_finite_field_suite(const char * label, ulong modulus)
     compare_finite_field_multiplication_with_options(
         name, modulus, "1+x+y+z", 40, 0, "1+2*x-y+3*z", 39, 0,
         variables3, 3, 3);
+
+    snprintf(name, sizeof(name), "%s five-variable total-degree multiplication", label);
+    compare_finite_field_multiplication_with_options(
+        name, modulus,
+        "1+x1+2*x2+3*x3+4*x4+5*x5", 13, 1,
+        "1+2*x1-3*x2+5*x3-7*x4+11*x5", 12, 1,
+        variables5, 5, 3);
 
     snprintf(name, sizeof(name), "%s sparse large multiplication", label);
     compare_finite_field_multiplication_with_options(
