@@ -7182,10 +7182,12 @@ impl PythonExpression {
         ))
     }
 
-    /// Compute the partial fraction decomposition in `x`.
+    /// Compute a partial fraction decomposition in the specified variables.
     ///
-    /// If `None` is passed, the expression will be decomposed in all variables
-    /// which involves a potentially expensive Groebner basis computation.
+    /// A single variable uses univariate partial fractioning. Multiple variables
+    /// use multivariate partial fractioning in the chosen variables. With no
+    /// arguments, the expression is decomposed in all variables. Multivariate
+    /// decomposition computes a Groebner basis and may be expensive.
     ///
     ///
     /// Examples
@@ -7200,23 +7202,45 @@ impl PythonExpression {
     ///
     /// yields `3/2*y^-1*(x+y)^-1+1/2*y^-1*(-x+y)^-1`
     ///
+    /// Multivariate partial fractioning in chosen variables:
+    /// >>> p = E('(2*y-x)/(y*(x+z*y)*(y-x))')
+    /// >>> print(p.apart(S('x'), S('y')))
+    ///
     /// Parameters
     /// ----------
-    /// x: Expression | None
-    ///     The variable with respect to which to perform the partial-fraction decomposition.
-    #[pyo3(signature = (x = None))]
-    pub fn apart(&self, x: Option<PythonExpression>) -> PyResult<PythonExpression> {
-        if let Some(x) = x {
-            if let Some(r) = x.expr.get_symbol() {
+    /// variables: Expression
+    ///     No variables for decomposition in all variables, one variable for
+    ///     univariate decomposition, or multiple chosen variables for
+    ///     multivariate decomposition.
+    #[pyo3(signature = (*variables))]
+    pub fn apart(
+        &self,
+        #[gen_stub(override_type(type_repr = "Expression"))] variables: &Bound<'_, PyTuple>,
+    ) -> PyResult<PythonExpression> {
+        if variables.is_empty() {
+            return Ok(self.expr.as_view().apart_multivariate(&[]).into());
+        }
+
+        if variables.len() == 1 {
+            let x = variables.get_item(0)?.extract::<PythonExpression>()?;
+            return if let Some(r) = x.expr.get_symbol() {
                 Ok(self.expr.apart(r).into())
             } else {
                 Err(exceptions::PyValueError::new_err(
-                    "Partial fraction decomposition must be done wrt a symbol",
+                    "Univariate partial fraction decomposition must be done with respect to a symbol",
                 ))
-            }
-        } else {
-            Ok(self.apart_multivariate().into())
+            };
         }
+
+        let variables = variables
+            .iter()
+            .map(|variable| -> PyResult<_> {
+                let variable = variable.extract::<PythonExpression>()?;
+                Indeterminate::try_from(variable.expr).map_err(exceptions::PyValueError::new_err)
+            })
+            .collect::<PyResult<Vec<_>>>()?;
+
+        Ok(self.expr.as_view().apart_multivariate(&variables).into())
     }
 
     /// Write the expression over a common denominator.

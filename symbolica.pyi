@@ -3121,12 +3121,14 @@ class Expression:
             The variable with respect to which to integrate.
         """
 
-    def apart(self, x: Expression | None = None) -> Expression:
+    def apart(self, *variables: Expression) -> Expression:
         """
-        Compute the partial fraction decomposition in `x`.
+        Compute a partial fraction decomposition in the specified variables.
 
-        If `None` is passed, the expression will be decomposed in all variables
-        which involves a potentially expensive Groebner basis computation.
+        A single variable uses univariate partial fractioning. Multiple variables
+        use multivariate partial fractioning in the chosen variables. With no
+        arguments, the expression is decomposed in all variables. Multivariate
+        decomposition computes a Groebner basis and may be expensive.
 
 
         Examples
@@ -3141,10 +3143,16 @@ class Expression:
 
         yields `3/2*y^-1*(x+y)^-1+1/2*y^-1*(-x+y)^-1`
 
+        Multivariate partial fractioning in chosen variables:
+        >>> p = E('(2*y-x)/(y*(x+z*y)*(y-x))')
+        >>> print(p.apart(S('x'), S('y')))
+
         Parameters
         ----------
-        x: Expression | None
-            The variable with respect to which to perform the partial-fraction decomposition.
+        variables: Expression
+            No variables for decomposition in all variables, one variable for
+            univariate decomposition, or multiple chosen variables for
+            multivariate decomposition.
         """
 
     def together(self) -> Expression:

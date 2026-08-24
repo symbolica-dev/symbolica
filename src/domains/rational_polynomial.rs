@@ -1363,8 +1363,31 @@ where
     /// Compute the multivariate partial fraction decomposition.
     /// Based on [MultivariateApart](https://arxiv.org/abs/2101.08283v1) by Heller and von Manteuffel.
     pub fn apart_multivariate(&self) -> Vec<Self> {
-        let mut fs = self.denominator.factor();
+        self.apart_multivariate_with_factors(self.denominator.factor())
+            .into_iter()
+            .map(|part| {
+                Self::from_num_den(
+                    part.numerator,
+                    part.denominator,
+                    self.numerator.ring(),
+                    false,
+                )
+            })
+            .collect()
+    }
+}
 
+impl<R: EuclideanDomain + UpgradeToField + PolynomialGCD<E>, E: PositiveExponent>
+    RationalPolynomial<R, E>
+where
+    <R as UpgradeToField>::Upgraded: Echelonize,
+{
+    /// Compute the multivariate partial fraction decomposition using a known
+    /// factorization of the denominator.
+    pub(crate) fn apart_multivariate_with_factors(
+        &self,
+        mut fs: Vec<(MultivariatePolynomial<R, E>, usize)>,
+    ) -> Vec<RationalPolynomial<<R as UpgradeToField>::Upgraded, E>> {
         // sort by number of variables
         // TODO: block sort
         fs.sort_by_key(|(f, _)| {
@@ -1445,7 +1468,10 @@ where
                     }
                 }
             }
-            parts.push(Self::from_num_den(num, den, &self.numerator.ring(), false));
+            parts.push(RationalPolynomial {
+                numerator: num,
+                denominator: den,
+            });
         }
 
         parts
