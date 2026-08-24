@@ -179,8 +179,9 @@ impl UserDataKey {
                 Ok(UserDataKey::String(s))
             }
             3 => {
-                let data = Atom::import(source, None)?;
-                Ok(UserDataKey::Atom(data))
+                let mut a = Atom::new();
+                a.read(source)?;
+                Ok(UserDataKey::Atom(a))
             }
             _ => Err(std::io::Error::new(
                 std::io::ErrorKind::InvalidData,
@@ -580,10 +581,7 @@ impl Atom {
     ) -> Result<Atom, std::io::Error> {
         let state_map = State::import(source, conflict_fn)?;
 
-        let mut n_terms_buf = [0; 8];
-        source.read_exact(&mut n_terms_buf)?;
-        let n_terms = u64::from_le_bytes(n_terms_buf);
-
+        let n_terms = source.read_u64::<LittleEndian>()?;
         if n_terms == 1 {
             let mut a = Atom::new();
             a.read(source)?;
