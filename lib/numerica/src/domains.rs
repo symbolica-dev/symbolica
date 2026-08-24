@@ -133,6 +133,58 @@ pub trait RingOps<T>: Set {
     fn sub_mul_assign(&self, a: &mut Self::Element, b: T, c: T);
 }
 
+/// A dense-indexed polynomial multiplication request.
+///
+/// The polynomial layer owns the exponent layout. Coefficient domains may use this compact
+/// representation to select a representation-specific convolution kernel.
+pub struct DensePolynomialMulRequest<'a, E> {
+    pub output_len: usize,
+    pub left_coefficients: &'a [E],
+    pub left_indices: &'a [u32],
+    pub right_coefficients: &'a [E],
+    pub right_indices: &'a [u32],
+}
+
+/// An exact dense-indexed polynomial division request.
+///
+/// Divisibility is guaranteed by the caller. A kernel may consume dividend coefficients after it
+/// decides to handle the request, but must leave them unchanged when returning `None`.
+pub struct DensePolynomialExactDivisionRequest<'a, E> {
+    pub total: usize,
+    pub dividend_coefficients: &'a mut [E],
+    pub dividend_indices: &'a [u32],
+    pub divisor_coefficients: &'a [E],
+    pub divisor_indices: &'a [u32],
+}
+
+/// Optional bulk kernels used by polynomial algorithms.
+///
+/// This capability keeps coefficient-representation-specific algorithms out of the generic
+/// polynomial implementation. A ring exposes it through [`Ring::polynomial_kernels`]; returning
+/// `None` from an individual operation asks the polynomial layer to use its generic fallback.
+pub trait PolynomialKernels<E> {
+    /// Multiply coefficients whose exponents have already been mapped to additive dense indices.
+    ///
+    /// On success, the result must contain only nonzero `(dense_index, coefficient)` pairs in
+    /// strictly increasing index order. The input coefficient/index slices have equal lengths,
+    /// their indices are strictly increasing, and every possible summed index fits in
+    /// `request.output_len`.
+    fn try_dense_mul(&self, _request: DensePolynomialMulRequest<'_, E>) -> Option<Vec<(u32, E)>> {
+        None
+    }
+
+    /// Divide dense-indexed coefficients exactly by another polynomial.
+    ///
+    /// On success, the quotient follows the same sparse, strictly increasing representation as
+    /// [`Self::try_dense_mul`].
+    fn try_dense_exact_division(
+        &self,
+        _request: DensePolynomialExactDivisionRequest<'_, E>,
+    ) -> Option<Vec<(u32, E)>> {
+        None
+    }
+}
+
 /// A ring is a set with two binary operations, addition and multiplication.
 /// Examples of rings include the integers, rational numbers, and polynomials.
 ///
@@ -195,40 +247,12 @@ pub trait Ring:
             .expect("exact division produced a remainder")
     }
 
-    /// Multiply two polynomials whose exponents have already been mapped to dense indices.
+    /// Return coefficient-domain-specific bulk kernels for polynomial algorithms.
     ///
-    /// Specialized coefficient rings can override this hook to use packed or fixed-width
-    /// convolution kernels. Returning `None` asks the polynomial implementation to use its
-    /// generic pairwise multiplication. The successful result contains only nonzero
-    /// `(dense_index, coefficient)` pairs in strictly increasing index order. The input index
-    /// slices must have the same lengths as their coefficient slices and be strictly increasing.
+    /// The capability is queried once per polynomial operation; inner coefficient loops remain
+    /// inside the concrete kernel implementation.
     #[inline]
-    fn try_dense_polynomial_mul(
-        &self,
-        _output_len: usize,
-        _left_coefficients: &[Self::Element],
-        _left_indices: &[u32],
-        _right_coefficients: &[Self::Element],
-        _right_indices: &[u32],
-    ) -> Option<Vec<(u32, Self::Element)>> {
-        None
-    }
-
-    /// Divide dense-indexed polynomial coefficients exactly by another polynomial.
-    ///
-    /// This hook is used only when divisibility is guaranteed. Implementations may consume
-    /// entries of `dividend_coefficients` after deciding to handle the operation, but must
-    /// leave them unchanged when returning `None`. The result contains nonzero quotient
-    /// `(dense_index, coefficient)` pairs in strictly increasing index order.
-    #[inline]
-    fn try_dense_polynomial_exact_division(
-        &self,
-        _total: usize,
-        _dividend_coefficients: &mut [Self::Element],
-        _dividend_indices: &[u32],
-        _divisor_coefficients: &[Self::Element],
-        _divisor_indices: &[u32],
-    ) -> Option<Vec<(u32, Self::Element)>> {
+    fn polynomial_kernels(&self) -> Option<&dyn PolynomialKernels<Self::Element>> {
         None
     }
 

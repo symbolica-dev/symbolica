@@ -1,5 +1,7 @@
 //! Arbitrary precision integers.
 
+mod polynomial_kernels;
+
 use std::{
     cmp::Ordering,
     fmt::{Display, Error, Formatter},
@@ -11,13 +13,9 @@ use std::{
 };
 
 use rand::Rng;
-#[cfg(feature = "gmp")]
-use rug::integer::Order as RugIntegerOrder;
-#[cfg(feature = "gmp")]
-use smallvec::SmallVec;
 
 use crate::{
-    domains::{RingOps, Set},
+    domains::{PolynomialKernels, RingOps, Set},
     printer::{PrintOptions, PrintState},
     tensors::matrix::Matrix,
 };
@@ -2361,640 +2359,6 @@ impl RingOps<&<Self as Set>::Element> for IntegerRing {
     }
 }
 
-fn try_dense_i64_polynomial_mul(
-    output_len: usize,
-    left_coefficients: &[Integer],
-    left_indices: &[u32],
-    right_coefficients: &[Integer],
-    right_indices: &[u32],
-) -> Option<Vec<(u32, Integer)>> {
-    let left = left_coefficients
-        .iter()
-        .map(|coefficient| match coefficient {
-            Integer::Single(value) => Some(*value),
-            _ => None,
-        })
-        .collect::<Option<Vec<_>>>()?;
-    let right = right_coefficients
-        .iter()
-        .map(|coefficient| match coefficient {
-            Integer::Single(value) => Some(*value),
-            _ => None,
-        })
-        .collect::<Option<Vec<_>>>()?;
-
-    let max_left = left.iter().map(|value| value.unsigned_abs()).max()?;
-    let max_right = right.iter().map(|value| value.unsigned_abs()).max()?;
-    let coefficient_bound = u128::from(max_left)
-        .checked_mul(u128::from(max_right))?
-        .checked_mul(left.len().min(right.len()) as u128)?;
-    if coefficient_bound > i64::MAX as u128 {
-        return None;
-    }
-
-    const BLOCK_SIZE: usize = 32;
-    let mut output = vec![0i64; output_len];
-    for left_block in (0..left.len()).step_by(BLOCK_SIZE) {
-        for right_block in (0..right.len()).step_by(BLOCK_SIZE) {
-            for i in left_block..(left_block + BLOCK_SIZE).min(left.len()) {
-                // SAFETY: the ring hook checks the coefficient/index lengths and the largest
-                // possible output index before dispatching to this kernel.
-                let left_index = unsafe { *left_indices.get_unchecked(i) as usize };
-                let left_coefficient = unsafe { *left.get_unchecked(i) };
-                for j in right_block..(right_block + BLOCK_SIZE).min(right.len()) {
-                    let index = left_index + unsafe { *right_indices.get_unchecked(j) as usize };
-                    unsafe {
-                        *output.get_unchecked_mut(index) +=
-                            left_coefficient * *right.get_unchecked(j);
-                    }
-                }
-            }
-        }
-    }
-
-    Some(
-        output
-            .into_iter()
-            .enumerate()
-            .filter_map(|(index, coefficient)| {
-                (coefficient != 0).then(|| (index as u32, Integer::Single(coefficient)))
-            })
-            .collect(),
-    )
-}
-
-fn try_dense_i64_i128_polynomial_mul(
-    output_len: usize,
-    left_coefficients: &[Integer],
-    left_indices: &[u32],
-    right_coefficients: &[Integer],
-    right_indices: &[u32],
-) -> Option<Vec<(u32, Integer)>> {
-    let left = left_coefficients
-        .iter()
-        .map(|coefficient| match coefficient {
-            Integer::Single(value) => Some(*value),
-            Integer::Double(_) | Integer::Large(_) => None,
-        })
-        .collect::<Option<Vec<_>>>()?;
-    let right = right_coefficients
-        .iter()
-        .map(|coefficient| match coefficient {
-            Integer::Single(value) => Some(*value),
-            Integer::Double(_) | Integer::Large(_) => None,
-        })
-        .collect::<Option<Vec<_>>>()?;
-
-    let max_left = left.iter().map(|value| value.unsigned_abs()).max()?;
-    let max_right = right.iter().map(|value| value.unsigned_abs()).max()?;
-    let coefficient_bound = u128::from(max_left)
-        .checked_mul(u128::from(max_right))?
-        .checked_mul(left.len().min(right.len()) as u128)?;
-    if coefficient_bound > i128::MAX as u128 {
-        return None;
-    }
-
-    const BLOCK_SIZE: usize = 32;
-    let mut output = vec![0i128; output_len];
-    for left_block in (0..left.len()).step_by(BLOCK_SIZE) {
-        for right_block in (0..right.len()).step_by(BLOCK_SIZE) {
-            for i in left_block..(left_block + BLOCK_SIZE).min(left.len()) {
-                // SAFETY: the ring hook checks the coefficient/index lengths and the largest
-                // possible output index before dispatching to this kernel.
-                let left_index = unsafe { *left_indices.get_unchecked(i) as usize };
-                let left_coefficient = unsafe { *left.get_unchecked(i) };
-                for j in right_block..(right_block + BLOCK_SIZE).min(right.len()) {
-                    let index = left_index + unsafe { *right_indices.get_unchecked(j) as usize };
-                    unsafe {
-                        *output.get_unchecked_mut(index) +=
-                            i128::from(left_coefficient) * i128::from(*right.get_unchecked(j));
-                    }
-                }
-            }
-        }
-    }
-
-    Some(
-        output
-            .into_iter()
-            .enumerate()
-            .filter_map(|(index, coefficient)| {
-                (coefficient != 0).then(|| (index as u32, Integer::from_double(coefficient)))
-            })
-            .collect(),
-    )
-}
-
-fn try_dense_i128_polynomial_mul(
-    output_len: usize,
-    left_coefficients: &[Integer],
-    left_indices: &[u32],
-    right_coefficients: &[Integer],
-    right_indices: &[u32],
-) -> Option<Vec<(u32, Integer)>> {
-    let left = left_coefficients
-        .iter()
-        .map(|coefficient| match coefficient {
-            Integer::Single(value) => Some(i128::from(*value)),
-            Integer::Double(value) => Some(value.get()),
-            Integer::Large(_) => None,
-        })
-        .collect::<Option<Vec<_>>>()?;
-    let right = right_coefficients
-        .iter()
-        .map(|coefficient| match coefficient {
-            Integer::Single(value) => Some(i128::from(*value)),
-            Integer::Double(value) => Some(value.get()),
-            Integer::Large(_) => None,
-        })
-        .collect::<Option<Vec<_>>>()?;
-
-    let max_left = left.iter().map(|value| value.unsigned_abs()).max()?;
-    let max_right = right.iter().map(|value| value.unsigned_abs()).max()?;
-    let coefficient_bound = max_left
-        .checked_mul(max_right)?
-        .checked_mul(left.len().min(right.len()) as u128)?;
-    if coefficient_bound > i128::MAX as u128 {
-        return None;
-    }
-
-    const BLOCK_SIZE: usize = 32;
-    let mut output = vec![0i128; output_len];
-    for left_block in (0..left.len()).step_by(BLOCK_SIZE) {
-        for right_block in (0..right.len()).step_by(BLOCK_SIZE) {
-            for i in left_block..(left_block + BLOCK_SIZE).min(left.len()) {
-                // SAFETY: the ring hook checks the coefficient/index lengths and the largest
-                // possible output index before dispatching to this kernel.
-                let left_index = unsafe { *left_indices.get_unchecked(i) as usize };
-                let left_coefficient = unsafe { *left.get_unchecked(i) };
-                for j in right_block..(right_block + BLOCK_SIZE).min(right.len()) {
-                    let index = left_index + unsafe { *right_indices.get_unchecked(j) as usize };
-                    unsafe {
-                        *output.get_unchecked_mut(index) +=
-                            left_coefficient * *right.get_unchecked(j);
-                    }
-                }
-            }
-        }
-    }
-
-    Some(
-        output
-            .into_iter()
-            .enumerate()
-            .filter_map(|(index, coefficient)| {
-                (coefficient != 0).then(|| (index as u32, Integer::from_double(coefficient)))
-            })
-            .collect(),
-    )
-}
-
-#[cfg(feature = "gmp")]
-fn try_kronecker_polynomial_mul(
-    output_len: usize,
-    left_coefficients: &[Integer],
-    left_indices: &[u32],
-    right_coefficients: &[Integer],
-    right_indices: &[u32],
-) -> Option<Vec<(u32, Integer)>> {
-    let product_count = left_coefficients
-        .len()
-        .checked_mul(right_coefficients.len())?;
-    if product_count < 64 || output_len.saturating_mul(128) >= product_count {
-        return None;
-    }
-
-    fn coefficient_bits(coefficient: &Integer) -> u64 {
-        match coefficient {
-            Integer::Single(value) => u64::from(i64::BITS - value.unsigned_abs().leading_zeros()),
-            Integer::Double(value) => {
-                u64::from(i128::BITS - value.get().unsigned_abs().leading_zeros())
-            }
-            Integer::Large(value) => value.significant_bits(),
-        }
-    }
-
-    let left_bits = left_coefficients
-        .iter()
-        .map(coefficient_bits)
-        .max()
-        .unwrap_or(0);
-    let right_bits = right_coefficients
-        .iter()
-        .map(coefficient_bits)
-        .max()
-        .unwrap_or(0);
-    let collision_count = left_coefficients.len().min(right_coefficients.len());
-    let collision_bits = usize::BITS - (collision_count - 1).leading_zeros();
-    let signed_coefficients = left_coefficients
-        .iter()
-        .chain(right_coefficients)
-        .any(Integer::is_negative);
-    let digit_bits = left_bits
-        .checked_add(right_bits)?
-        .checked_add(u64::from(collision_bits))?
-        .checked_add(u64::from(signed_coefficients))?;
-    let digit_bits_u32 = u32::try_from(digit_bits).ok()?;
-    let digit_bits_usize = usize::try_from(digit_bits).ok()?;
-
-    debug_assert!(
-        left_indices
-            .windows(2)
-            .all(|indices| indices[0] < indices[1])
-    );
-    debug_assert!(
-        right_indices
-            .windows(2)
-            .all(|indices| indices[0] < indices[1])
-    );
-
-    const MAX_PACKED_BITS: usize = 1 << 29;
-    let left_packed_bits =
-        (left_indices.last().copied()? as usize + 1).checked_mul(digit_bits_usize)?;
-    let right_packed_bits =
-        (right_indices.last().copied()? as usize + 1).checked_mul(digit_bits_usize)?;
-    if left_packed_bits > MAX_PACKED_BITS || right_packed_bits > MAX_PACKED_BITS {
-        return None;
-    }
-
-    fn pack(
-        coefficients: &[Integer],
-        indices: &[u32],
-        digit_bits: usize,
-    ) -> Option<MultiPrecisionInteger> {
-        debug_assert_eq!(coefficients.len(), indices.len());
-
-        #[inline(always)]
-        fn low_mask(bits: usize) -> u64 {
-            if bits == 64 {
-                u64::MAX
-            } else {
-                (1u64 << bits) - 1
-            }
-        }
-
-        #[inline(always)]
-        fn fill_ones(limbs: &mut [u64], start: usize, end: usize) {
-            if start == end {
-                return;
-            }
-
-            let first = start / 64;
-            let last = (end - 1) / 64;
-            let first_bit = start % 64;
-            let last_bits = (end - 1) % 64 + 1;
-            if first == last {
-                limbs[first] |= low_mask(last_bits) & !low_mask(first_bit);
-                return;
-            }
-
-            limbs[first] |= u64::MAX << first_bit;
-            limbs[first + 1..last].fill(u64::MAX);
-            limbs[last] |= low_mask(last_bits);
-        }
-
-        #[inline(always)]
-        fn write_digit(limbs: &mut [u64], bit_index: usize, digit: &[u64]) {
-            let limb_index = bit_index / 64;
-            let shift = bit_index % 64;
-            if shift == 0 {
-                limbs[limb_index..limb_index + digit.len()].copy_from_slice(digit);
-                return;
-            }
-
-            for (offset, &value) in digit.iter().enumerate() {
-                limbs[limb_index + offset] |= value << shift;
-                if limb_index + offset + 1 < limbs.len() {
-                    limbs[limb_index + offset + 1] |= value >> (64 - shift);
-                }
-            }
-        }
-
-        let leading_negative = coefficients.last()?.is_negative();
-        let digit_count = indices.last().copied()? as usize + 1;
-        let packed_bits = digit_count.checked_mul(digit_bits)?;
-        let mut limbs = vec![0u64; packed_bits.checked_add(63)? / 64];
-        let mut next_index = 0usize;
-        let mut borrow = false;
-
-        for (coefficient, &index) in coefficients.iter().zip(indices) {
-            let index = index as usize;
-            debug_assert!(index >= next_index);
-            if borrow {
-                fill_ones(&mut limbs, next_index * digit_bits, index * digit_bits);
-            }
-
-            let mut value = coefficient.clone().to_multi_prec();
-            if leading_negative {
-                value = -value;
-            }
-            if borrow {
-                value -= 1i64;
-            }
-
-            borrow = value.is_negative();
-            if borrow {
-                value = -value;
-            }
-
-            let mut digit = SmallVec::<[u64; 4]>::new();
-            digit.resize(digit_bits.div_ceil(64), 0);
-            let value_limbs = value.as_raw().as_limbs();
-            debug_assert!(value_limbs.len() <= digit.len());
-            digit[..value_limbs.len()].copy_from_slice(value_limbs);
-
-            if borrow {
-                let mut carry = true;
-                for limb in &mut digit {
-                    let (value, overflow) = (!*limb).overflowing_add(u64::from(carry));
-                    *limb = value;
-                    carry = overflow;
-                }
-                debug_assert!(!carry);
-            }
-            if digit_bits % 64 != 0 {
-                *digit.last_mut().unwrap() &= low_mask(digit_bits % 64);
-            }
-            write_digit(&mut limbs, index * digit_bits, &digit);
-            next_index = index + 1;
-        }
-        debug_assert!(!borrow);
-
-        let mut packed = MultiPrecisionInteger::from_raw(RawMultiPrecisionInteger::from_digits(
-            &limbs,
-            RugIntegerOrder::Lsf,
-        ));
-        if leading_negative {
-            packed = -packed;
-        }
-        Some(packed)
-    }
-
-    let left = pack(left_coefficients, left_indices, digit_bits_usize)?;
-    let right = pack(right_coefficients, right_indices, digit_bits_usize)?;
-    let product = MultiPrecisionInteger::from_raw(RawMultiPrecisionInteger::from(
-        left.as_raw() * right.as_raw(),
-    ));
-
-    let radix = MultiPrecisionInteger::from(1u32) << digit_bits_usize;
-    let product_negative = product.is_negative();
-    let limbs = product.as_raw().as_limbs();
-    let limbs_per_digit = digit_bits_usize.div_ceil(64);
-    let mut carry = false;
-    let mut output = Vec::with_capacity(output_len);
-    for index in 0..output_len {
-        let bit_index = index.checked_mul(digit_bits_usize)?;
-        let limb_index = bit_index / 64;
-        let shift = bit_index % 64;
-        let mut digit_limbs = SmallVec::<[u64; 4]>::new();
-        digit_limbs.resize(limbs_per_digit, 0);
-        for (offset, digit_limb) in digit_limbs.iter_mut().enumerate() {
-            *digit_limb = limbs.get(limb_index + offset).copied().unwrap_or(0) >> shift;
-            if shift != 0 {
-                *digit_limb |=
-                    limbs.get(limb_index + offset + 1).copied().unwrap_or(0) << (64 - shift);
-            }
-        }
-        if digit_bits_usize % 64 != 0 {
-            *digit_limbs.last_mut().unwrap() &= (1u64 << (digit_bits_usize % 64)) - 1;
-        }
-        let raw_digit = RawMultiPrecisionInteger::from_digits(&digit_limbs, RugIntegerOrder::Lsf);
-        let mut digit = MultiPrecisionInteger::from_raw(raw_digit);
-        if carry {
-            digit += 1i64;
-        }
-
-        carry = signed_coefficients
-            && (digit.significant_bits() > digit_bits
-                || digit.as_raw().get_bit(digit_bits_u32 - 1));
-        if carry {
-            digit -= &radix;
-        }
-        if product_negative {
-            digit = -digit;
-        }
-        if !digit.is_zero() {
-            output.push((index as u32, Integer::from(digit)));
-        }
-    }
-    debug_assert!(!carry);
-
-    Some(output)
-}
-
-#[cfg(feature = "gmp")]
-fn try_large_array_polynomial_mul(
-    output_len: usize,
-    left_coefficients: &[Integer],
-    left_indices: &[u32],
-    right_coefficients: &[Integer],
-    right_indices: &[u32],
-) -> Option<Vec<(u32, Integer)>> {
-    if !left_coefficients
-        .iter()
-        .chain(right_coefficients)
-        .any(|coefficient| matches!(coefficient, Integer::Large(_)))
-    {
-        return None;
-    }
-
-    let product_count = left_coefficients
-        .len()
-        .checked_mul(right_coefficients.len())?;
-    if product_count < 64 || output_len > 1 << 20 || output_len > product_count.saturating_mul(10) {
-        return None;
-    }
-
-    #[inline(always)]
-    fn add_product(accumulator: &mut MultiPrecisionInteger, left: &Integer, right: &Integer) {
-        match (left, right) {
-            (Integer::Single(left), Integer::Single(right)) => {
-                *accumulator += i128::from(*left) * i128::from(*right);
-            }
-            (Integer::Single(left), Integer::Double(right))
-            | (Integer::Double(right), Integer::Single(left)) => {
-                if let Some(product) = i128::from(*left).checked_mul(right.get()) {
-                    *accumulator += product;
-                } else {
-                    let right = MultiPrecisionInteger::from(right.get());
-                    accumulator.add_i64_mul_assign(*left, &right);
-                }
-            }
-            (Integer::Double(left), Integer::Double(right)) => {
-                if let Some(product) = left.get().checked_mul(right.get()) {
-                    *accumulator += product;
-                } else {
-                    let right = MultiPrecisionInteger::from(right.get());
-                    accumulator.add_i128_mul_assign(left.get(), &right);
-                }
-            }
-            (Integer::Single(left), Integer::Large(right))
-            | (Integer::Large(right), Integer::Single(left)) => {
-                accumulator.add_i64_mul_assign(*left, right);
-            }
-            (Integer::Double(left), Integer::Large(right))
-            | (Integer::Large(right), Integer::Double(left)) => {
-                accumulator.add_i128_mul_assign(left.get(), right);
-            }
-            (Integer::Large(left), Integer::Large(right)) => {
-                accumulator.add_mul_assign(left, right);
-            }
-        }
-    }
-
-    const BLOCK_SIZE: usize = 32;
-    let mut output = (0..output_len)
-        .map(|_| MultiPrecisionInteger::default())
-        .collect::<Vec<_>>();
-    for left_block in (0..left_coefficients.len()).step_by(BLOCK_SIZE) {
-        for right_block in (0..right_coefficients.len()).step_by(BLOCK_SIZE) {
-            for i in left_block..(left_block + BLOCK_SIZE).min(left_coefficients.len()) {
-                // SAFETY: the ring hook checks the coefficient/index lengths and the largest
-                // possible output index before dispatching to this kernel.
-                let left_index = unsafe { *left_indices.get_unchecked(i) as usize };
-                let left_coefficient = unsafe { left_coefficients.get_unchecked(i) };
-                for j in right_block..(right_block + BLOCK_SIZE).min(right_coefficients.len()) {
-                    let index = left_index + unsafe { *right_indices.get_unchecked(j) as usize };
-                    unsafe {
-                        add_product(
-                            output.get_unchecked_mut(index),
-                            left_coefficient,
-                            right_coefficients.get_unchecked(j),
-                        );
-                    }
-                }
-            }
-        }
-    }
-
-    Some(
-        output
-            .into_iter()
-            .enumerate()
-            .filter_map(|(index, coefficient)| {
-                (!coefficient.is_zero()).then(|| (index as u32, Integer::from(coefficient)))
-            })
-            .collect(),
-    )
-}
-
-#[cfg(feature = "gmp")]
-fn try_large_array_polynomial_exact_division(
-    total: usize,
-    dividend_coefficients: &mut [Integer],
-    dividend_indices: &[u32],
-    divisor_coefficients: &[Integer],
-    divisor_indices: &[u32],
-) -> Option<Vec<(u32, Integer)>> {
-    if dividend_coefficients.len() != dividend_indices.len()
-        || divisor_coefficients.len() != divisor_indices.len()
-        || divisor_coefficients.is_empty()
-        || !dividend_coefficients
-            .iter()
-            .chain(divisor_coefficients)
-            .any(|coefficient| matches!(coefficient, Integer::Large(_)))
-        || dividend_coefficients
-            .len()
-            .saturating_mul(divisor_coefficients.len())
-            < 64
-    {
-        return None;
-    }
-
-    let divisor_leading_index = *divisor_indices.last()? as usize;
-    if divisor_leading_index >= total
-        || dividend_indices
-            .last()
-            .is_some_and(|&index| index as usize >= total)
-    {
-        return None;
-    }
-
-    enum Divisors<'a> {
-        Borrowed(Vec<&'a MultiPrecisionInteger>),
-        Owned(Vec<MultiPrecisionInteger>),
-    }
-
-    let borrowed_divisors = divisor_coefficients
-        .iter()
-        .map(|coefficient| match coefficient {
-            Integer::Large(value) => Some(value),
-            Integer::Single(_) | Integer::Double(_) => None,
-        })
-        .collect::<Option<Vec<_>>>();
-    let divisors = if let Some(divisors) = borrowed_divisors {
-        Divisors::Borrowed(divisors)
-    } else {
-        Divisors::Owned(
-            divisor_coefficients
-                .iter()
-                .cloned()
-                .map(Integer::to_multi_prec)
-                .collect(),
-        )
-    };
-    let mut workspace = (0..total)
-        .map(|_| MultiPrecisionInteger::default())
-        .collect::<Vec<_>>();
-    for (coefficient, &index) in dividend_coefficients.iter_mut().zip(dividend_indices) {
-        workspace[index as usize] = std::mem::replace(coefficient, Integer::zero()).to_multi_prec();
-    }
-
-    let mut quotient = Vec::with_capacity(dividend_coefficients.len());
-    for position in (0..total).rev() {
-        let coefficient = std::mem::take(unsafe { workspace.get_unchecked_mut(position) });
-        if coefficient.is_zero() {
-            continue;
-        }
-
-        debug_assert!(position >= divisor_leading_index);
-        let quotient_position = position - divisor_leading_index;
-        let quotient_coefficient = match &divisors {
-            Divisors::Borrowed(divisors) => coefficient.div_exact_owned(divisors.last().unwrap()),
-            Divisors::Owned(divisors) => coefficient.div_exact_owned(divisors.last().unwrap()),
-        };
-        match &divisors {
-            Divisors::Borrowed(divisors) => {
-                for (&divisor_position, &divisor_coefficient) in divisor_indices
-                    [..divisor_indices.len() - 1]
-                    .iter()
-                    .zip(&divisors[..divisors.len() - 1])
-                {
-                    let target = quotient_position + divisor_position as usize;
-                    debug_assert!(target < position);
-                    unsafe {
-                        workspace
-                            .get_unchecked_mut(target)
-                            .sub_mul_assign(&quotient_coefficient, divisor_coefficient);
-                    }
-                }
-            }
-            Divisors::Owned(divisors) => {
-                for (&divisor_position, divisor_coefficient) in divisor_indices
-                    [..divisor_indices.len() - 1]
-                    .iter()
-                    .zip(&divisors[..divisors.len() - 1])
-                {
-                    let target = quotient_position + divisor_position as usize;
-                    debug_assert!(target < position);
-                    unsafe {
-                        workspace
-                            .get_unchecked_mut(target)
-                            .sub_mul_assign(&quotient_coefficient, divisor_coefficient);
-                    }
-                }
-            }
-        }
-        quotient.push((
-            quotient_position as u32,
-            Integer::from(quotient_coefficient),
-        ));
-    }
-
-    quotient.reverse();
-    Some(quotient)
-}
-
 impl Ring for IntegerRing {
     #[inline]
     fn zero(&self) -> Self::Element {
@@ -3079,115 +2443,8 @@ impl Ring for IntegerRing {
     }
 
     #[inline]
-    fn try_dense_polynomial_mul(
-        &self,
-        output_len: usize,
-        left_coefficients: &[Self::Element],
-        left_indices: &[u32],
-        right_coefficients: &[Self::Element],
-        right_indices: &[u32],
-    ) -> Option<Vec<(u32, Self::Element)>> {
-        if left_coefficients.len() != left_indices.len()
-            || right_coefficients.len() != right_indices.len()
-        {
-            return None;
-        }
-        let (Some(left_max), Some(right_max)) = (
-            left_indices.iter().copied().max(),
-            right_indices.iter().copied().max(),
-        ) else {
-            return Some(Vec::new());
-        };
-        if left_max as usize + right_max as usize >= output_len {
-            return None;
-        }
-
-        if let Some(output) = try_dense_i64_polynomial_mul(
-            output_len,
-            left_coefficients,
-            left_indices,
-            right_coefficients,
-            right_indices,
-        ) {
-            return Some(output);
-        }
-
-        if let Some(output) = try_dense_i64_i128_polynomial_mul(
-            output_len,
-            left_coefficients,
-            left_indices,
-            right_coefficients,
-            right_indices,
-        ) {
-            return Some(output);
-        }
-
-        if let Some(output) = try_dense_i128_polynomial_mul(
-            output_len,
-            left_coefficients,
-            left_indices,
-            right_coefficients,
-            right_indices,
-        ) {
-            return Some(output);
-        }
-
-        #[cfg(feature = "gmp")]
-        {
-            if let Some(output) = try_kronecker_polynomial_mul(
-                output_len,
-                left_coefficients,
-                left_indices,
-                right_coefficients,
-                right_indices,
-            ) {
-                return Some(output);
-            }
-
-            try_large_array_polynomial_mul(
-                output_len,
-                left_coefficients,
-                left_indices,
-                right_coefficients,
-                right_indices,
-            )
-        }
-        #[cfg(feature = "no_gmp")]
-        {
-            None
-        }
-    }
-
-    #[inline]
-    fn try_dense_polynomial_exact_division(
-        &self,
-        total: usize,
-        dividend_coefficients: &mut [Self::Element],
-        dividend_indices: &[u32],
-        divisor_coefficients: &[Self::Element],
-        divisor_indices: &[u32],
-    ) -> Option<Vec<(u32, Self::Element)>> {
-        #[cfg(feature = "gmp")]
-        {
-            try_large_array_polynomial_exact_division(
-                total,
-                dividend_coefficients,
-                dividend_indices,
-                divisor_coefficients,
-                divisor_indices,
-            )
-        }
-        #[cfg(feature = "no_gmp")]
-        {
-            let _ = (
-                total,
-                dividend_coefficients,
-                dividend_indices,
-                divisor_coefficients,
-                divisor_indices,
-            );
-            None
-        }
+    fn polynomial_kernels(&self) -> Option<&dyn PolynomialKernels<Self::Element>> {
+        Some(self)
     }
 
     #[inline]
@@ -4758,7 +4015,7 @@ mod test {
     #[cfg(feature = "float-mpfr")]
     use crate::domains::float::{Float, Real};
     use crate::domains::{
-        Ring,
+        DensePolynomialMulRequest, Ring,
         finite_field::FiniteFieldWorkspace,
         float::F64,
         integer::{IntegerRing, extended_gcd, extended_gcd_i128},
@@ -4815,7 +4072,15 @@ mod test {
         let right = vec![11.into(), 3_000_000_000i64.into(), (-17).into()];
         let indices = [0, 2, 5];
         let actual_sparse = IntegerRing
-            .try_dense_polynomial_mul(11, &left, &indices, &right, &indices)
+            .polynomial_kernels()
+            .unwrap()
+            .try_dense_mul(DensePolynomialMulRequest {
+                output_len: 11,
+                left_coefficients: &left,
+                left_indices: &indices,
+                right_coefficients: &right,
+                right_indices: &indices,
+            })
             .unwrap();
         let mut actual = vec![Integer::zero(); 11];
         for (index, coefficient) in actual_sparse {
@@ -4829,6 +4094,112 @@ mod test {
             }
         }
         assert_eq!(actual, expected);
+    }
+
+    #[cfg(feature = "gmp")]
+    #[test]
+    fn simplex_kronecker_layout_is_additive() {
+        let left_degree = 4usize;
+        let right_degree = 3usize;
+        let total_degree = left_degree + right_degree;
+        let radix = total_degree + 1;
+        let encode_standard = |high: usize, middle: usize, low: usize| {
+            u32::try_from((high * radix + middle) * radix + low).unwrap()
+        };
+        let simplex_indices = |degree: usize| {
+            let mut indices = Vec::new();
+            for high in 0..=degree {
+                for middle in 0..=degree - high {
+                    for low in 0..=degree - high - middle {
+                        indices.push(encode_standard(high, middle, low));
+                    }
+                }
+            }
+            indices.sort_unstable();
+            indices
+        };
+        let left = simplex_indices(left_degree);
+        let right = simplex_indices(right_degree);
+        let layout = super::polynomial_kernels::try_simplex_kronecker_layout(
+            radix.pow(3),
+            left.as_slice(),
+            right.as_slice(),
+        )
+        .unwrap();
+
+        for (&left_standard, &left_compact) in left.iter().zip(&layout.left_indices) {
+            for (&right_standard, &right_compact) in right.iter().zip(&layout.right_indices) {
+                assert_eq!(
+                    layout.decode_indices[(left_compact + right_compact) as usize],
+                    left_standard + right_standard,
+                );
+            }
+        }
+        assert!(layout.output_len < radix.pow(3));
+    }
+
+    #[cfg(feature = "gmp")]
+    #[test]
+    fn simplex_kronecker_polynomial_multiplication() {
+        let left_degree = 24usize;
+        let right_degree = 23usize;
+        let total_degree = left_degree + right_degree;
+        let radix = total_degree + 1;
+        let simplex = |degree: usize| {
+            let mut terms = Vec::new();
+            for high in 0..=degree {
+                for middle in 0..=degree - high {
+                    for low in 0..=degree - high - middle {
+                        let index = ((high * radix + middle) * radix + low) as u32;
+                        let coefficient = if (high + 2 * middle + 3 * low) % 5 == 0 {
+                            -1
+                        } else {
+                            1
+                        };
+                        terms.push((index, Integer::from(coefficient)));
+                    }
+                }
+            }
+            terms.sort_unstable_by_key(|term| term.0);
+            terms
+        };
+        let left = simplex(left_degree);
+        let right = simplex(right_degree);
+        let left_indices = left.iter().map(|term| term.0).collect::<Vec<_>>();
+        let right_indices = right.iter().map(|term| term.0).collect::<Vec<_>>();
+        let left_coefficients = left.into_iter().map(|term| term.1).collect::<Vec<_>>();
+        let right_coefficients = right.into_iter().map(|term| term.1).collect::<Vec<_>>();
+        let output_len = radix.pow(3);
+
+        let actual_sparse = super::polynomial_kernels::try_kronecker_polynomial_mul(
+            output_len,
+            &left_coefficients,
+            &left_indices,
+            &right_coefficients,
+            &right_indices,
+        )
+        .unwrap();
+        assert!(
+            actual_sparse
+                .windows(2)
+                .all(|terms| terms[0].0 < terms[1].0)
+        );
+        let mut actual = vec![Integer::zero(); output_len];
+        for (index, coefficient) in actual_sparse {
+            actual[index as usize] = coefficient;
+        }
+
+        let mut expected = vec![0i64; output_len];
+        for (&left_index, left_coefficient) in left_indices.iter().zip(&left_coefficients) {
+            for (&right_index, right_coefficient) in right_indices.iter().zip(&right_coefficients) {
+                expected[left_index as usize + right_index as usize] +=
+                    left_coefficient.to_i64().unwrap() * right_coefficient.to_i64().unwrap();
+            }
+        }
+        assert_eq!(
+            actual,
+            expected.into_iter().map(Integer::from).collect::<Vec<_>>()
+        );
     }
 
     #[cfg(feature = "gmp")]
@@ -4855,9 +4226,10 @@ mod test {
             .collect::<Vec<_>>();
         let indices = (0..300).map(|i| i + i / 100).collect::<Vec<u32>>();
         let output_len = 2 * *indices.last().unwrap() as usize + 1;
-        let actual_sparse =
-            super::try_kronecker_polynomial_mul(output_len, &left, &indices, &right, &indices)
-                .unwrap();
+        let actual_sparse = super::polynomial_kernels::try_kronecker_polynomial_mul(
+            output_len, &left, &indices, &right, &indices,
+        )
+        .unwrap();
         let mut actual = vec![Integer::zero(); output_len];
         for (index, coefficient) in actual_sparse {
             actual[index as usize] = coefficient;
@@ -4873,9 +4245,10 @@ mod test {
 
         let left = left.iter().map(Integer::abs).collect::<Vec<_>>();
         let right = right.iter().map(Integer::abs).collect::<Vec<_>>();
-        let actual_sparse =
-            super::try_kronecker_polynomial_mul(output_len, &left, &indices, &right, &indices)
-                .unwrap();
+        let actual_sparse = super::polynomial_kernels::try_kronecker_polynomial_mul(
+            output_len, &left, &indices, &right, &indices,
+        )
+        .unwrap();
         let mut actual = vec![Integer::zero(); output_len];
         for (index, coefficient) in actual_sparse {
             actual[index as usize] = coefficient;
@@ -4908,7 +4281,15 @@ mod test {
             .collect::<Vec<_>>();
         let indices = (0..8).collect::<Vec<u32>>();
         let actual_sparse = IntegerRing
-            .try_dense_polynomial_mul(15, &left, &indices, &right, &indices)
+            .polynomial_kernels()
+            .unwrap()
+            .try_dense_mul(DensePolynomialMulRequest {
+                output_len: 15,
+                left_coefficients: &left,
+                left_indices: &indices,
+                right_coefficients: &right,
+                right_indices: &indices,
+            })
             .unwrap();
         let mut actual = vec![Integer::zero(); 15];
         for (index, coefficient) in actual_sparse {

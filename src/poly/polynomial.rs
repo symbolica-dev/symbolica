@@ -15,8 +15,8 @@ use crate::domains::float::FloatLike;
 use crate::domains::integer::{Integer, IntegerRing};
 use crate::domains::rational::{Fraction, FractionField, FractionNormalization, Q, RationalField};
 use crate::domains::{
-    Derivable, EuclideanDomain, Field, InternalOrdering, RealEmbedding, Ring, RingOps, SelfRing,
-    Set,
+    DensePolynomialExactDivisionRequest, DensePolynomialMulRequest, Derivable, EuclideanDomain,
+    Field, InternalOrdering, RealEmbedding, Ring, RingOps, SelfRing, Set,
 };
 use crate::printer::{AtomPrinter, PrintOptions, PrintState};
 
@@ -3154,13 +3154,15 @@ impl<F: Ring, E: Exponent> MultivariatePolynomial<F, E, LexOrder> {
             *es = to_uni_var(s, &max_degs_rev);
         }
 
-        if let Some(coefficients) = self.ring().try_dense_polynomial_mul(
-            total,
-            &self.coefficients,
-            &uni_exp_self,
-            &rhs.coefficients,
-            &uni_exp_rhs,
-        ) {
+        if let Some(coefficients) = self.ring().polynomial_kernels().and_then(|kernels| {
+            kernels.try_dense_mul(DensePolynomialMulRequest {
+                output_len: total,
+                left_coefficients: &self.coefficients,
+                left_indices: &uni_exp_self,
+                right_coefficients: &rhs.coefficients,
+                right_indices: &uni_exp_rhs,
+            })
+        }) {
             let mut exp = vec![E::zero(); self.nvars()];
             let mut result = self.zero_with_capacity(coefficients.len());
             let mut previous_position = 0;
@@ -4488,13 +4490,15 @@ impl<F: Ring, E: Exponent> MultivariatePolynomial<F, E, LexOrder> {
             .iter()
             .map(|&index| index as u32)
             .collect::<Vec<_>>();
-        if let Some(quotient_terms) = ring.try_dense_polynomial_exact_division(
-            total,
-            &mut self.coefficients,
-            &dividend_indices,
-            &div.coefficients,
-            &divisor_indices_u32,
-        ) {
+        if let Some(quotient_terms) = ring.polynomial_kernels().and_then(|kernels| {
+            kernels.try_dense_exact_division(DensePolynomialExactDivisionRequest {
+                total,
+                dividend_coefficients: &mut self.coefficients,
+                dividend_indices: &dividend_indices,
+                divisor_coefficients: &div.coefficients,
+                divisor_indices: &divisor_indices_u32,
+            })
+        }) {
             let mut exponents = vec![E::zero(); self.nvars()];
             for (position, coefficient) in quotient_terms {
                 decode_index(position as usize, bases, &mut exponents);
