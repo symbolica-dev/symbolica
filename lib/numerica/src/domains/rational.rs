@@ -12,7 +12,8 @@ use crate::{
 };
 
 use super::{
-    EuclideanDomain, Field, InternalOrdering, OrderedRing, Ring, SelfRing, UpgradeToField,
+    EuclideanDomain, Field, InternalOrdering, OrderedRing, Ring, SampleableRing, SelfRing,
+    UpgradeToField,
     finite_field::{
         FiniteField, FiniteFieldCore, FiniteFieldWorkspace, PrimeIteratorU64, ToFiniteField, Two,
         Z2, Zp,
@@ -517,13 +518,6 @@ impl<R: EuclideanDomain + FractionNormalization> Ring for FractionField<R> {
         }
     }
 
-    fn sample(&self, rng: &mut impl rand::RngCore, range: (i64, i64)) -> Self::Element {
-        Fraction {
-            numerator: self.ring.sample(rng, range),
-            denominator: self.ring.one(),
-        }
-    }
-
     fn format<W: std::fmt::Write>(
         &self,
         element: &Self::Element,
@@ -578,6 +572,24 @@ impl<R: EuclideanDomain + FractionNormalization> Ring for FractionField<R> {
 
     fn has_independent_elements(&self) -> bool {
         self.ring.has_independent_elements()
+    }
+}
+
+impl<R> SampleableRing for FractionField<R>
+where
+    R: EuclideanDomain + FractionNormalization + SampleableRing,
+{
+    type SamplingPolicy = R::SamplingPolicy;
+
+    fn sample<G: rand::RngCore + ?Sized>(
+        &self,
+        rng: &mut G,
+        policy: &Self::SamplingPolicy,
+    ) -> Self::Element {
+        Fraction {
+            numerator: SampleableRing::sample(&self.ring, rng, policy),
+            denominator: self.ring.one(),
+        }
     }
 }
 
@@ -1134,14 +1146,17 @@ impl Rational {
         let (mut r, mut old_r) = (if v.is_negative() { v + p } else { v.clone() }, p.clone());
 
         while !r.is_zero() && old_r > acceptance_scale {
-            let q = &old_r / &r;
+            let (q, next_r) = old_r.quot_rem(&r);
             if q > acceptance_scale {
                 n = r.clone();
                 d = t.clone();
                 acceptance_scale = q.clone();
             }
-            (r, old_r) = (&old_r - &(&q * &r), r);
-            (t, old_t) = (&old_t - &(&q * &t), t);
+            (r, old_r) = (next_r, r);
+
+            let mut next_t = old_t;
+            Z.sub_mul_assign(&mut next_t, &q, &t);
+            (t, old_t) = (next_t, t);
         }
 
         if d.is_zero() || !Z.gcd(&n, &d).is_one() {

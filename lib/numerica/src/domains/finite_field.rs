@@ -1,5 +1,9 @@
 //! Finite fields and modular rings.
 
+mod geometric_sequence_kernels;
+mod montgomery;
+mod polynomial_kernels;
+
 use crate::domains::integer::Complete;
 use rand::Rng;
 use std::fmt::{Display, Error, Formatter};
@@ -9,12 +13,13 @@ use std::ops::Deref;
 use crate::domains::{RingOps, Set};
 use crate::domains::{
     backend::integer::{BackendRandState, probably_prime as backend_probably_prime},
-    integer::{DoubleInteger, Integer, MultiPrecisionInteger},
+    integer::{DoubleInteger, Integer, MultiPrecisionInteger, extended_gcd_i128},
 };
+use crate::kernels::RingKernels;
 use crate::printer::{PrintOptions, PrintState};
 
 use super::integer::Z;
-use super::{EuclideanDomain, Field, InternalOrdering, Ring};
+use super::{EuclideanDomain, Field, InternalOrdering, Ring, SampleableRing};
 
 const HENSEL_LIFTING_MASK: [u8; 128] = [
     255, 85, 51, 73, 199, 93, 59, 17, 15, 229, 195, 89, 215, 237, 203, 33, 31, 117, 83, 105, 231,
@@ -166,6 +171,29 @@ pub struct FiniteField<UField> {
     is_prime: bool,
 }
 
+impl<UField: FiniteFieldWorkspace> SampleableRing for FiniteField<UField>
+where
+    Self: Ring,
+{
+    type SamplingPolicy = std::ops::RangeInclusive<i64>;
+
+    #[inline]
+    fn sample<R: rand::RngCore + ?Sized>(
+        &self,
+        rng: &mut R,
+        policy: &Self::SamplingPolicy,
+    ) -> Self::Element {
+        let characteristic = self.characteristic().to_i64().unwrap_or(i64::MAX);
+        let lower = (*policy.start()).max(0);
+        let upper = (*policy.end()).min(characteristic.saturating_sub(1));
+        assert!(
+            lower <= upper,
+            "sampling policy has no field representatives"
+        );
+        self.nth(rng.random_range(lower..=upper).into())
+    }
+}
+
 impl Zp {
     /// Create a new modular ring. `p` must be odd.
     pub fn new_non_prime(p: u32) -> Zp {
@@ -199,6 +227,21 @@ impl Zp {
             one: FiniteFieldElement(Self::get_one(p)),
             is_prime: true,
         }
+    }
+
+    /// Reduce an exact sum of products of raw Montgomery representatives.
+    ///
+    /// Dense multiplication kernels use this after proving that `accumulator` is smaller than
+    /// `p * 2^32`. The result is the corresponding field coefficient in Montgomery
+    /// representation.
+    #[doc(hidden)]
+    #[inline(always)]
+    pub fn reduce_montgomery_product_sum(&self, accumulator: u64) -> FiniteFieldElement<u32> {
+        debug_assert!(
+            u128::from(accumulator) < (u128::from(self.p) << u32::BITS),
+            "a Montgomery product sum must be smaller than p * 2^32"
+        );
+        FiniteFieldElement(montgomery::montgomery_reduce_u32(self, accumulator))
     }
 
     /// Returns the unit element in Montgomory form, ie.e 1 + 2^32 mod a.
@@ -335,10 +378,12 @@ impl RingOps<FiniteFieldElement<u32>> for Zp {
         *a = self.mul(*a, b);
     }
 
+    #[inline(always)]
     fn add_mul_assign(&self, a: &mut Self::Element, b: Self::Element, c: Self::Element) {
         self.add_assign(a, self.mul(b, c));
     }
 
+    #[inline(always)]
     fn sub_mul_assign(&self, a: &mut Self::Element, b: Self::Element, c: Self::Element) {
         self.sub_assign(a, self.mul(b, c));
     }
@@ -409,10 +454,12 @@ impl RingOps<&FiniteFieldElement<u32>> for Zp {
         *a = self.mul(&*a, b);
     }
 
+    #[inline(always)]
     fn add_mul_assign(&self, a: &mut Self::Element, b: &Self::Element, c: &Self::Element) {
         self.add_assign(a, &self.mul(b, c));
     }
 
+    #[inline(always)]
     fn sub_mul_assign(&self, a: &mut Self::Element, b: &Self::Element, c: &Self::Element) {
         self.sub_assign(a, &self.mul(b, c));
     }
@@ -536,9 +583,11 @@ impl Ring for Zp {
         }
     }
 
-    fn sample(&self, rng: &mut impl rand::RngCore, range: (i64, i64)) -> Self::Element {
-        let r = rng.random_range(range.0.max(0)..range.1.min(self.p as i64));
-        FiniteFieldElement(r as u32)
+    #[inline]
+    fn kernels(&self) -> RingKernels<'_, Self::Element> {
+        RingKernels::empty()
+            .with_polynomial(self)
+            .with_geometric_sequences(self)
     }
 
     fn format<W: std::fmt::Write>(
@@ -623,6 +672,234 @@ impl FiniteFieldWorkspace for u64 {
     }
 }
 
+struct DiscreteLogPrimePower<UField> {
+    prime: u64,
+    exponent: u32,
+    cofactor: u64,
+    starting_exponent: u64,
+    beta_powers: Vec<FiniteFieldElement<UField>>,
+    gamma_powers: Vec<FiniteFieldElement<UField>>,
+    crt_idempotent: u64,
+}
+
+/// Precomputed Pohlig–Hellman data for repeated discrete logarithms with one
+/// base in a fixed-width prime field.
+struct FiniteFieldDiscreteLogContext<'a, UField>
+where
+    UField: FiniteFieldWorkspace,
+    FiniteField<UField>: FiniteFieldCore<UField> + Set<Element = FiniteFieldElement<UField>>,
+    FiniteFieldElement<UField>: Copy,
+{
+    field: &'a FiniteField<UField>,
+    base: FiniteFieldElement<UField>,
+    totient: u64,
+    factors: Vec<DiscreteLogPrimePower<UField>>,
+}
+
+impl<'a, UField> FiniteFieldDiscreteLogContext<'a, UField>
+where
+    UField: FiniteFieldWorkspace,
+    FiniteField<UField>: FiniteFieldCore<UField> + Set<Element = FiniteFieldElement<UField>>,
+    FiniteFieldElement<UField>: Copy,
+{
+    /// Precomputes the prime-power generators, digit tables, and CRT
+    /// idempotents for `base`.
+    ///
+    /// `totient_primes` must be the complete prime factorization of `totient`,
+    /// and `base` must have order `totient`.
+    pub fn new(
+        field: &'a FiniteField<UField>,
+        base: &FiniteFieldElement<UField>,
+        totient: u64,
+        totient_primes: &[(u64, u32)],
+    ) -> Self {
+        assert!(totient > 1, "the discrete-log order must exceed one");
+        assert!(
+            !totient_primes.is_empty(),
+            "the discrete-log order factorization must not be empty"
+        );
+        let base_inverse = field.inv(base);
+        let mut factor_product = 1u64;
+        let mut factors = Vec::with_capacity(totient_primes.len());
+        for &(prime, exponent) in totient_primes {
+            assert!(prime > 1, "discrete-log factors must be prime");
+            assert!(
+                exponent > 0,
+                "discrete-log factor exponents must be positive"
+            );
+
+            let prime_power = prime
+                .checked_pow(exponent)
+                .expect("discrete-log prime power overflowed u64");
+            factor_product = factor_product
+                .checked_mul(prime_power)
+                .expect("discrete-log factorization overflowed u64");
+            assert!(
+                totient.is_multiple_of(prime_power),
+                "discrete-log prime power does not divide the order"
+            );
+
+            let cofactor = totient / prime_power;
+            let starting_exponent = prime_power / prime;
+            let gamma = field.pow(base, totient / prime);
+            assert!(
+                !field.is_one(&gamma),
+                "the discrete-log base does not have the requested order"
+            );
+
+            let table_len =
+                usize::try_from(prime).expect("discrete-log prime factor does not fit in usize");
+            let mut gamma_powers = Vec::with_capacity(table_len);
+            let mut gamma_power = field.one();
+            for _ in 0..prime {
+                gamma_powers.push(gamma_power);
+                field.mul_assign(&mut gamma_power, &gamma);
+            }
+
+            let (gcd, inverse, _) = extended_gcd_i128(cofactor as i128, prime_power as i128);
+            assert_eq!(gcd, 1, "discrete-log prime powers must be coprime");
+            let inverse = inverse.rem_euclid(prime_power as i128) as u64;
+            let crt_idempotent = ((cofactor as u128 * inverse as u128) % totient as u128) as u64;
+
+            let mut beta = field.pow(&base_inverse, cofactor);
+            let mut beta_powers = Vec::with_capacity(exponent as usize);
+            for _ in 0..exponent {
+                beta_powers.push(beta);
+                beta = field.pow(&beta, prime);
+            }
+
+            factors.push(DiscreteLogPrimePower {
+                prime,
+                exponent,
+                cofactor,
+                starting_exponent,
+                beta_powers,
+                gamma_powers,
+                crt_idempotent,
+            });
+        }
+
+        assert_eq!(
+            factor_product, totient,
+            "incomplete discrete-log order factorization"
+        );
+
+        Self {
+            field,
+            base: *base,
+            totient,
+            factors,
+        }
+    }
+
+    /// Computes `log_base(value)` using the data precomputed by [`Self::new`].
+    pub fn discrete_log(&self, value: &FiniteFieldElement<UField>) -> u64 {
+        assert!(
+            !self.field.is_zero(value),
+            "zero has no multiplicative discrete logarithm"
+        );
+
+        let mut result = 0u128;
+        for factor in &self.factors {
+            let mut z = self.field.pow(value, factor.cofactor);
+            let mut digit_exponent = factor.starting_exponent;
+            let mut prime_power = 1u64;
+            let mut residue = 0u64;
+
+            for beta in &factor.beta_powers {
+                let w = self.field.pow(&z, digit_exponent);
+                let digit = factor
+                    .gamma_powers
+                    .iter()
+                    .position(|power| *power == w)
+                    .unwrap_or_else(|| {
+                        panic!(
+                            "No discrete logarithm found for base {} and res {} in field with prime {}^{}",
+                            self.base.0, value.0, factor.prime, factor.exponent
+                        )
+                    }) as u64;
+
+                if digit != 0 {
+                    self.field.mul_assign(&mut z, &self.field.pow(beta, digit));
+                }
+                residue += digit * prime_power;
+                prime_power *= factor.prime;
+                digit_exponent /= factor.prime;
+            }
+
+            result += (residue as u128 * factor.crt_idempotent as u128) % self.totient as u128;
+        }
+
+        let result = (result % self.totient as u128) as u64;
+        debug_assert!(value == &self.field.pow(&self.base, result));
+        result
+    }
+}
+
+/// Precomputed Pohlig–Hellman data for repeated discrete logarithms with one
+/// base in a 32-bit prime field.
+pub struct ZpDiscreteLogContext<'a> {
+    context: FiniteFieldDiscreteLogContext<'a, u32>,
+}
+
+impl<'a> ZpDiscreteLogContext<'a> {
+    /// Precomputes the prime-power generators, digit tables, and CRT
+    /// idempotents for `base`.
+    ///
+    /// `totient_primes` must be the complete prime factorization of `totient`,
+    /// and `base` must have order `totient`.
+    pub fn new(
+        field: &'a Zp,
+        base: &FiniteFieldElement<u32>,
+        totient: u64,
+        totient_primes: &[(u64, u32)],
+    ) -> Self {
+        Self {
+            context: FiniteFieldDiscreteLogContext::new(field, base, totient, totient_primes),
+        }
+    }
+
+    /// Computes `log_base(value)` using the precomputed Pohlig–Hellman data.
+    ///
+    /// `value` must be nonzero and belong to the subgroup generated by `base`; otherwise this
+    /// method panics.
+    pub fn discrete_log(&self, value: &FiniteFieldElement<u32>) -> u64 {
+        self.context.discrete_log(value)
+    }
+}
+
+/// Precomputed Pohlig–Hellman data for repeated discrete logarithms with one
+/// base in a 64-bit prime field.
+pub struct Zp64DiscreteLogContext<'a> {
+    context: FiniteFieldDiscreteLogContext<'a, u64>,
+}
+
+impl<'a> Zp64DiscreteLogContext<'a> {
+    /// Precomputes the prime-power generators, digit tables, and CRT
+    /// idempotents for `base`.
+    ///
+    /// `totient_primes` must be the complete prime factorization of `totient`,
+    /// and `base` must have order `totient`.
+    pub fn new(
+        field: &'a Zp64,
+        base: &FiniteFieldElement<u64>,
+        totient: u64,
+        totient_primes: &[(u64, u32)],
+    ) -> Self {
+        Self {
+            context: FiniteFieldDiscreteLogContext::new(field, base, totient, totient_primes),
+        }
+    }
+
+    /// Computes `log_base(value)` using the precomputed Pohlig–Hellman data.
+    ///
+    /// `value` must be nonzero and belong to the subgroup generated by `base`; otherwise this
+    /// method panics.
+    pub fn discrete_log(&self, value: &FiniteFieldElement<u64>) -> u64 {
+        self.context.discrete_log(value)
+    }
+}
+
 impl Zp64 {
     /// Create a new modular ring. `n` must be odd.
     pub fn new_non_prime(p: u64) -> Zp64 {
@@ -630,13 +907,15 @@ impl Zp64 {
             panic!("Prime 2 is not supported: use Z2 instead.");
         }
 
+        let one = Self::get_one(p);
+        let r2 = (one as u128 * one as u128 % p as u128) as u64;
         FiniteField {
             p,
             m: Self::inv_2_64(p),
             r_mask: 0,
-            r2: 0,
+            r2,
             r_bits: 64,
-            one: FiniteFieldElement(Self::get_one(p)),
+            one: FiniteFieldElement(one),
             is_prime: false,
         }
     }
@@ -647,13 +926,15 @@ impl Zp64 {
             panic!("Prime 2 is not supported: use Z2 instead.");
         }
 
+        let one = Self::get_one(p);
+        let r2 = (one as u128 * one as u128 % p as u128) as u64;
         FiniteField {
             p,
             m: Self::inv_2_64(p),
             r_mask: 0,
-            r2: 0,
+            r2,
             r_bits: 64,
-            one: FiniteFieldElement(Self::get_one(p)),
+            one: FiniteFieldElement(one),
             is_prime: true,
         }
     }
@@ -668,69 +949,9 @@ impl Zp64 {
         totient: u64,
         totient_primes: &[(u64, u32)],
     ) -> FiniteFieldElement<u64> {
-        let mut crt = vec![];
-        for (p, e) in totient_primes {
-            let p_e = p.to_u64().unwrap().pow(*e);
-            let exp = totient.to_u64().unwrap() / p.to_u64().unwrap().pow(*e);
-
-            let g = self.pow(base, exp);
-            let g_inv = self.inv(&g);
-            let h = self.pow(res, exp);
-
-            let mut x = 0;
-            let gamma = self.pow(&g, p.pow(*e - 1));
-
-            'next: for k in 0..*e {
-                let hh = self.pow(&self.mul(&self.pow(&g_inv, x), &h), p.pow(*e - 1 - k));
-
-                if self.is_one(&hh) {
-                    continue;
-                }
-
-                // assume smooth prime with small factors
-                // TODO: switch to baby-step giant-step algorithm
-                let mut gamma_c = gamma;
-                for d in 1..*p {
-                    if gamma_c == hh {
-                        x += p.pow(k) * d;
-                        continue 'next;
-                    }
-
-                    self.mul_assign(&mut gamma_c, &gamma);
-                }
-
-                panic!(
-                    "No discrete logarithm found for base {} and res {} in field with prime {}^{}",
-                    base.0, res.0, p, e
-                );
-            }
-
-            crt.push((x, p_e));
-        }
-
-        if crt.len() == 1 {
-            return self.to_element(crt[0].0);
-        }
-
-        let mut cur = Integer::chinese_remainder(
-            crt[0].0.into(),
-            crt[1].0.into(),
-            crt[0].1.into(),
-            crt[1].1.into(),
-        );
-        let mut prime = Integer::from(crt[0].1) * crt[1].1;
-        for x in crt.iter().skip(2) {
-            cur = Integer::chinese_remainder(cur, x.0.into(), prime.clone(), x.1.into());
-            prime *= x.1;
-        }
-
-        if cur < 0 {
-            cur += prime;
-        }
-
-        let r = self.to_element(cur.to_u64().unwrap());
-        debug_assert_eq!(res, &self.pow(base, self.from_element(&r)));
-        r
+        self.to_element(
+            Zp64DiscreteLogContext::new(self, base, totient, totient_primes).discrete_log(res),
+        )
     }
 
     /// Returns the unit element in Montgomory form, ie.e 1 + 2^64 mod a.
@@ -767,8 +988,8 @@ impl FiniteFieldCore<u64> for Zp64 {
     /// Convert a number in a prime field a % n to Montgomory form.
     #[inline(always)]
     fn to_element(&self, a: u64) -> FiniteFieldElement<u64> {
-        // TODO: slow, faster alternatives may need assembly
-        FiniteFieldElement((((a as u128) << 64) % self.p as u128) as u64)
+        // Montgomery multiplication removes one factor of R, so REDC(a R^2) stores a R mod p.
+        self.mul(FiniteFieldElement(a), FiniteFieldElement(self.r2))
     }
 
     /// Convert a number from Montgomory form to standard form.
@@ -850,10 +1071,12 @@ impl RingOps<FiniteFieldElement<u64>> for Zp64 {
         *a = self.mul(*a, b);
     }
 
+    #[inline(always)]
     fn add_mul_assign(&self, a: &mut Self::Element, b: Self::Element, c: Self::Element) {
         self.add_assign(a, &self.mul(b, c));
     }
 
+    #[inline(always)]
     fn sub_mul_assign(&self, a: &mut Self::Element, b: Self::Element, c: Self::Element) {
         self.sub_assign(a, &self.mul(b, c));
     }
@@ -923,10 +1146,12 @@ impl RingOps<&FiniteFieldElement<u64>> for Zp64 {
         *a = self.mul(&*a, b);
     }
 
+    #[inline(always)]
     fn add_mul_assign(&self, a: &mut Self::Element, b: &Self::Element, c: &Self::Element) {
         self.add_assign(a, &self.mul(b, c));
     }
 
+    #[inline(always)]
     fn sub_mul_assign(&self, a: &mut Self::Element, b: &Self::Element, c: &Self::Element) {
         self.sub_assign(a, &self.mul(b, c));
     }
@@ -1050,9 +1275,11 @@ impl Ring for Zp64 {
         }
     }
 
-    fn sample(&self, rng: &mut impl rand::RngCore, range: (i64, i64)) -> Self::Element {
-        let r = rng.random_range(range.0.max(0)..range.1.min(self.p.min(i64::MAX as u64) as i64));
-        FiniteFieldElement(r as u64)
+    #[inline]
+    fn kernels(&self) -> RingKernels<'_, Self::Element> {
+        RingKernels::empty()
+            .with_polynomial(self)
+            .with_geometric_sequences(self)
     }
 
     fn format<W: std::fmt::Write>(
@@ -1371,10 +1598,6 @@ impl Ring for FiniteField<Two> {
 
     fn try_div(&self, a: &Self::Element, b: &Self::Element) -> Option<Self::Element> {
         if *b == 0 { None } else { Some(*a) }
-    }
-
-    fn sample(&self, rng: &mut impl rand::RngCore, _range: (i64, i64)) -> Self::Element {
-        rng.random_range(0..2)
     }
 
     fn format<W: std::fmt::Write>(
@@ -1727,11 +1950,6 @@ impl Ring for FiniteField<Mersenne32> {
         } else {
             Some(self.div(a, b))
         }
-    }
-
-    fn sample(&self, rng: &mut impl rand::RngCore, range: (i64, i64)) -> Self::Element {
-        let r = rng.random_range(range.0.max(0)..range.1.min(Mersenne32::PRIME as i64));
-        r as u32
     }
 
     fn format<W: std::fmt::Write>(
@@ -2109,13 +2327,6 @@ impl Ring for FiniteField<Mersenne64> {
         }
     }
 
-    fn sample(&self, rng: &mut impl rand::RngCore, range: (i64, i64)) -> Self::Element {
-        let r = rng.random_range(
-            range.0.max(0)..range.1.min(Mersenne64::PRIME.min(i64::MAX as u64) as i64),
-        );
-        r as u64
-    }
-
     fn format<W: std::fmt::Write>(
         &self,
         element: &Self::Element,
@@ -2469,8 +2680,9 @@ impl Ring for FiniteField<Integer> {
         self.try_inv(b).map(|r| self.mul(a, &r))
     }
 
-    fn sample(&self, rng: &mut impl rand::RngCore, range: (i64, i64)) -> Self::Element {
-        self.to_element(Z.sample(rng, range))
+    #[inline]
+    fn kernels(&self) -> RingKernels<'_, Self::Element> {
+        RingKernels::empty().with_polynomial(self)
     }
 
     fn format<W: std::fmt::Write>(
@@ -2790,12 +3002,6 @@ impl Ring for FiniteField<MultiPrecisionInteger> {
 
     fn try_div(&self, a: &Self::Element, b: &Self::Element) -> Option<Self::Element> {
         self.try_inv(b).map(|r| self.mul(a, &r))
-    }
-
-    fn sample(&self, rng: &mut impl rand::RngCore, range: (i64, i64)) -> Self::Element {
-        self.to_element(MultiPrecisionInteger::from(
-            rng.random_range(range.0..range.1),
-        ))
     }
 
     fn format<W: std::fmt::Write>(
@@ -3651,12 +3857,695 @@ pub const SMOOTH_PRIMES: [(u64, u8, [u8; 4]); 323] = [
 mod test {
     use std::str::FromStr;
 
-    use super::{FiniteFieldCore, Zp};
+    use rand::{SeedableRng, rngs::StdRng};
+
+    use super::{FiniteFieldCore, FiniteFieldElement, Zp};
     use crate::domains::{
-        Field, Ring, RingOps,
-        finite_field::{FiniteField, PrimitiveRootIterator, Zp64},
+        Field, Ring, RingOps, SampleableRing,
+        finite_field::{
+            FiniteField, PrimitiveRootIterator, Zp64, Zp64DiscreteLogContext, ZpDiscreteLogContext,
+        },
         integer::{Integer, MultiPrecisionInteger},
     };
+    use crate::kernels::{
+        DensePolynomialMulRequest, GeometricSequenceStepRequest, PolynomialKernels,
+    };
+
+    #[test]
+    fn sampling_policy_uses_canonical_field_representatives() {
+        let field = Zp::new(3);
+        let mut rng = StdRng::seed_from_u64(1);
+        let mut seen = [false; 3];
+
+        for _ in 0..1000 {
+            let sample = field.sample(&mut rng, &(1..=49_999));
+            let value = field.to_integer(&sample).to_i64().unwrap() as usize;
+            assert_ne!(value, 0);
+            seen[value] = true;
+        }
+
+        assert_eq!(seen, [false, true, true]);
+    }
+
+    #[test]
+    fn zp_montgomery_product_sum_matches_reduced_reference_at_bounds() {
+        for prime in [3, 17, 65_000_011, 4_294_967_291] {
+            let field = Zp::new(prime);
+            let limit = u64::from(prime) << u32::BITS;
+            let accumulators = [
+                0,
+                1,
+                u64::from(prime - 1),
+                u64::from(u32::MAX),
+                1u64 << u32::BITS,
+                limit / 2,
+                limit - 1,
+            ];
+
+            for accumulator in accumulators {
+                let residue = (accumulator % u64::from(prime)) as u32;
+                let expected = field.mul(
+                    FiniteFieldElement::from_inner(residue),
+                    FiniteFieldElement::from_inner(1),
+                );
+                assert_eq!(
+                    field.reduce_montgomery_product_sum(accumulator),
+                    expected,
+                    "prime {prime}, accumulator {accumulator}"
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn zp64_montgomery_conversion_matches_direct_radix_remainder() {
+        let fields = [
+            Zp64::new(3),
+            Zp64::new(17),
+            Zp64::new(10_030_613_004_288_000_001),
+            Zp64::new(18_446_744_073_709_551_557),
+            Zp64::new_non_prime(9),
+            Zp64::new_non_prime((1u64 << 63) - 1),
+            Zp64::new_non_prime((1u64 << 63) + 1),
+            Zp64::new_non_prime(u64::MAX),
+        ];
+
+        for field in fields {
+            let modulus = field.get_prime();
+            let radix = ((1u128 << 64) % modulus as u128) as u64;
+            let expected_r2 = (radix as u128 * radix as u128 % modulus as u128) as u64;
+            assert_eq!(field.r2, expected_r2, "modulus {modulus}");
+
+            for value in [
+                0,
+                1,
+                2,
+                modulus / 2,
+                modulus - 1,
+                modulus,
+                modulus.saturating_add(1),
+                u64::MAX - 1,
+                u64::MAX,
+            ] {
+                let element = field.to_element(value);
+                let expected = (((value as u128) << 64) % modulus as u128) as u64;
+                assert_eq!(*element.inner(), expected, "value {value} mod {modulus}");
+                assert_eq!(field.from_element(&element), value % modulus);
+            }
+        }
+    }
+
+    fn assert_dense_polynomial_mul<R: Ring>(
+        field: &R,
+        left: &[R::Element],
+        left_indices: &[u32],
+        right: &[R::Element],
+        right_indices: &[u32],
+        output_len: usize,
+    ) {
+        let mut expected = vec![field.zero(); output_len];
+        for (left, &left_index) in left.iter().zip(left_indices) {
+            for (right, &right_index) in right.iter().zip(right_indices) {
+                field.add_mul_assign(
+                    &mut expected[left_index as usize + right_index as usize],
+                    left,
+                    right,
+                );
+            }
+        }
+
+        let terms = field
+            .kernels()
+            .polynomial()
+            .expect("finite field should provide polynomial kernels")
+            .try_dense_mul(DensePolynomialMulRequest {
+                output_len,
+                left_coefficients: left,
+                left_indices,
+                right_coefficients: right,
+                right_indices,
+            })
+            .unwrap();
+        let mut actual = vec![field.zero(); output_len];
+        for (position, coefficient) in terms {
+            actual[position as usize] = coefficient;
+        }
+        assert_eq!(actual, expected);
+    }
+
+    #[cfg(feature = "integer-gmp")]
+    fn assert_ks2_zp_polynomial_mul(
+        field: &Zp,
+        left: &[super::FiniteFieldElement<u32>],
+        left_indices: &[u32],
+        right: &[super::FiniteFieldElement<u32>],
+        right_indices: &[u32],
+    ) {
+        let output_len =
+            left_indices.iter().max().unwrap() + right_indices.iter().max().unwrap() + 1;
+        let mut expected = vec![field.zero(); output_len as usize];
+        for (left, &left_index) in left.iter().zip(left_indices) {
+            for (right, &right_index) in right.iter().zip(right_indices) {
+                field.add_mul_assign(
+                    &mut expected[left_index as usize + right_index as usize],
+                    left,
+                    right,
+                );
+            }
+        }
+
+        let operation = super::polynomial_kernels::DenseZpMul::new(
+            field,
+            DensePolynomialMulRequest {
+                output_len: output_len as usize,
+                left_coefficients: left,
+                left_indices,
+                right_coefficients: right,
+                right_indices,
+            },
+        )
+        .unwrap();
+        let terms = operation.try_ks2().unwrap();
+        let mut actual = vec![field.zero(); output_len as usize];
+        for (position, coefficient) in terms {
+            actual[position as usize] = coefficient;
+        }
+        assert_eq!(actual, expected);
+    }
+
+    #[cfg(feature = "integer-gmp")]
+    fn assert_ks4_polynomial_mul(
+        field: &Zp64,
+        left: &[super::FiniteFieldElement<u64>],
+        left_indices: &[u32],
+        right: &[super::FiniteFieldElement<u64>],
+        right_indices: &[u32],
+    ) {
+        let output_len =
+            left_indices.iter().max().unwrap() + right_indices.iter().max().unwrap() + 1;
+        let mut expected = vec![field.zero(); output_len as usize];
+        for (left, &left_index) in left.iter().zip(left_indices) {
+            for (right, &right_index) in right.iter().zip(right_indices) {
+                field.add_mul_assign(
+                    &mut expected[left_index as usize + right_index as usize],
+                    left,
+                    right,
+                );
+            }
+        }
+
+        let operation = super::polynomial_kernels::DenseZp64Mul::new(
+            field,
+            DensePolynomialMulRequest {
+                output_len: output_len as usize,
+                left_coefficients: left,
+                left_indices,
+                right_coefficients: right,
+                right_indices,
+            },
+        )
+        .unwrap();
+        let terms = operation.try_ks4().unwrap();
+        let mut actual = vec![field.zero(); output_len as usize];
+        for (position, coefficient) in terms {
+            actual[position as usize] = coefficient;
+        }
+        assert_eq!(actual, expected);
+    }
+
+    #[cfg(feature = "integer-gmp")]
+    fn assert_ks2_zp64_polynomial_mul(
+        field: &Zp64,
+        left: &[super::FiniteFieldElement<u64>],
+        left_indices: &[u32],
+        right: &[super::FiniteFieldElement<u64>],
+        right_indices: &[u32],
+    ) {
+        let output_len =
+            left_indices.iter().max().unwrap() + right_indices.iter().max().unwrap() + 1;
+        let mut expected = vec![field.zero(); output_len as usize];
+        for (left, &left_index) in left.iter().zip(left_indices) {
+            for (right, &right_index) in right.iter().zip(right_indices) {
+                field.add_mul_assign(
+                    &mut expected[left_index as usize + right_index as usize],
+                    left,
+                    right,
+                );
+            }
+        }
+
+        let operation = super::polynomial_kernels::DenseZp64Mul::new(
+            field,
+            DensePolynomialMulRequest {
+                output_len: output_len as usize,
+                left_coefficients: left,
+                left_indices,
+                right_coefficients: right,
+                right_indices,
+            },
+        )
+        .unwrap();
+        let terms = operation.try_ks2().unwrap();
+        let mut actual = vec![field.zero(); output_len as usize];
+        for (position, coefficient) in terms {
+            actual[position as usize] = coefficient;
+        }
+        assert_eq!(actual, expected);
+    }
+
+    #[test]
+    fn geometric_sequences_sum_and_advance() {
+        let field = Zp::new(17);
+        let mut current = [field.to_element(3), field.to_element(5)];
+        let ratios = [field.to_element(2), field.to_element(7)];
+        let sum = field
+            .kernels()
+            .geometric_sequences()
+            .unwrap()
+            .try_sum_and_advance_geometric_sequences(GeometricSequenceStepRequest {
+                current: &mut current,
+                ratios: &ratios,
+            })
+            .unwrap();
+        assert_eq!(field.from_element(&sum), 8);
+        assert_eq!(current.map(|value| field.from_element(&value)), [6, 1]);
+
+        let sum = field
+            .kernels()
+            .geometric_sequences()
+            .unwrap()
+            .try_sum_and_advance_geometric_sequences(GeometricSequenceStepRequest {
+                current: &mut current,
+                ratios: &ratios,
+            })
+            .unwrap();
+        assert_eq!(field.from_element(&sum), 7);
+        assert_eq!(current.map(|value| field.from_element(&value)), [12, 7]);
+
+        let before = current;
+        assert!(
+            field
+                .kernels()
+                .geometric_sequences()
+                .unwrap()
+                .try_sum_and_advance_geometric_sequences(GeometricSequenceStepRequest {
+                    current: &mut current,
+                    ratios: &ratios[..1],
+                })
+                .is_none()
+        );
+        assert_eq!(current, before);
+
+        let field = Zp64::new(17);
+        let mut current = [field.to_element(3), field.to_element(5)];
+        let ratios = [field.to_element(2), field.to_element(7)];
+        let sum = field
+            .kernels()
+            .geometric_sequences()
+            .unwrap()
+            .try_sum_and_advance_geometric_sequences(GeometricSequenceStepRequest {
+                current: &mut current,
+                ratios: &ratios,
+            })
+            .unwrap();
+        assert_eq!(field.from_element(&sum), 8);
+        assert_eq!(current.map(|value| field.from_element(&value)), [6, 1]);
+    }
+
+    #[test]
+    fn four_way_zp64_product_row_handles_remainder() {
+        let left = u64::MAX - 2;
+        let right_terms = [
+            (u64::MAX - 4, 0),
+            (17, 3),
+            (u64::MAX / 3, 6),
+            (1, 9),
+            (u64::MAX - 10, 12),
+            (29, 15),
+            (u64::MAX / 7, 18),
+        ];
+        let mut actual = vec![0u64; right_terms.len() * 3];
+        unsafe {
+            super::polynomial_kernels::add_u64_product_row_unrolled4(
+                actual.as_mut_ptr(),
+                left,
+                &right_terms,
+            )
+        };
+
+        for (position, &(right, offset)) in right_terms.iter().enumerate() {
+            assert_eq!(offset, position * 3);
+            let product = left as u128 * right as u128;
+            assert_eq!(actual[offset], product as u64);
+            assert_eq!(actual[offset + 1], (product >> 64) as u64);
+            assert_eq!(actual[offset + 2], 0);
+        }
+    }
+
+    #[test]
+    fn dense_polynomial_multiplication() {
+        let field = Zp::new(17);
+        let left = [1, 16, 7, 13].map(|value| field.to_element(value));
+        let right = [15, 3, 16, 8].map(|value| field.to_element(value));
+        let operation = super::polynomial_kernels::DenseZpMul::new(
+            &field,
+            DensePolynomialMulRequest {
+                output_len: 15,
+                left_coefficients: &left,
+                left_indices: &[0, 2, 5, 7],
+                right_coefficients: &right,
+                right_indices: &[0, 1, 4, 7],
+            },
+        )
+        .unwrap();
+        assert_eq!(
+            operation.u64_accumulation_mode(),
+            Some(super::polynomial_kernels::U64AccumulationMode::DirectMontgomeryReduction)
+        );
+        assert_dense_polynomial_mul(&field, &left, &[0, 2, 5, 7], &right, &[0, 1, 4, 7], 15);
+        assert_dense_polynomial_mul(&field, &left, &[0, 2, 5, 7], &right, &[0, 1, 4, 7], 100);
+        #[cfg(feature = "integer-gmp")]
+        {
+            assert_ks2_zp_polynomial_mul(&field, &left, &[0, 2, 5, 7], &right, &[0, 1, 4, 7]);
+            assert_ks2_zp_polynomial_mul(&field, &left, &[0, 7, 2, 5], &right, &[7, 1, 4, 0]);
+        }
+
+        let total_degree = 79usize;
+        let radix = total_degree + 1;
+        let simplex = |degree: usize, offset: usize| {
+            let mut coefficients = Vec::new();
+            let mut indices = Vec::new();
+            for high in 0..=degree {
+                for middle in 0..=degree - high {
+                    for low in 0..=degree - high - middle {
+                        coefficients.push(field.to_element(
+                            ((high * 11 + middle * 7 + low * 3 + offset) % 16 + 1) as u32,
+                        ));
+                        indices.push(((high * radix + middle) * radix + low) as u32);
+                    }
+                }
+            }
+            (coefficients, indices)
+        };
+        let (left, left_indices) = simplex(40, 1);
+        let (right, right_indices) = simplex(39, 3);
+        assert_dense_polynomial_mul(
+            &field,
+            &left,
+            &left_indices,
+            &right,
+            &right_indices,
+            radix.pow(3),
+        );
+
+        let field = Zp::new(4_294_967_291);
+        let left = [4_294_967_290, 4_294_967_200, 2_345_678_901, 123_456_789]
+            .map(|value| field.to_element(value));
+        let right = [4_294_967_289, 4_294_967_100, 3_456_789_012, 987_654_321]
+            .map(|value| field.to_element(value));
+        let operation = super::polynomial_kernels::DenseZpMul::new(
+            &field,
+            DensePolynomialMulRequest {
+                output_len: 15,
+                left_coefficients: &left,
+                left_indices: &[0, 2, 5, 7],
+                right_coefficients: &right,
+                right_indices: &[0, 1, 4, 7],
+            },
+        )
+        .unwrap();
+        assert_eq!(operation.u64_accumulation_mode(), None);
+        assert_dense_polynomial_mul(&field, &left, &[0, 2, 5, 7], &right, &[0, 1, 4, 7], 15);
+        #[cfg(feature = "integer-gmp")]
+        assert_ks2_zp_polynomial_mul(&field, &left, &[0, 2, 5, 7], &right, &[0, 1, 4, 7]);
+
+        for (prime, expected_mode) in [
+            (
+                65_000_011,
+                super::polynomial_kernels::U64AccumulationMode::DirectMontgomeryReduction,
+            ),
+            (
+                500_000_003,
+                super::polynomial_kernels::U64AccumulationMode::NativeRemainder,
+            ),
+        ] {
+            let field = Zp::new(prime);
+            let maximum_raw = super::FiniteFieldElement::from_inner(prime - 1);
+            let left = vec![maximum_raw; 129];
+            let right = vec![maximum_raw; 65];
+            let maximum_product = u128::from(prime - 1) * u128::from(prime - 1);
+            assert!(maximum_product * left.len() as u128 * right.len() as u128 > u64::MAX as u128);
+            assert!(maximum_product * right.len() as u128 <= u64::MAX as u128);
+            for stride in [1, 128] {
+                let left_indices = (0..left.len() as u32)
+                    .map(|index| 17 + stride * index)
+                    .collect::<Vec<_>>();
+                let right_indices = (0..right.len() as u32)
+                    .map(|index| 29 + stride * index)
+                    .collect::<Vec<_>>();
+                let output_len = *left_indices.last().unwrap() as usize
+                    + *right_indices.last().unwrap() as usize
+                    + 1;
+                let operation = super::polynomial_kernels::DenseZpMul::new(
+                    &field,
+                    DensePolynomialMulRequest {
+                        output_len,
+                        left_coefficients: &left,
+                        left_indices: &left_indices,
+                        right_coefficients: &right,
+                        right_indices: &right_indices,
+                    },
+                )
+                .unwrap();
+                assert_eq!(operation.u64_accumulation_mode(), Some(expected_mode));
+                assert_dense_polynomial_mul(
+                    &field,
+                    &left,
+                    &left_indices,
+                    &right,
+                    &right_indices,
+                    output_len,
+                );
+            }
+        }
+
+        let field = Zp64::new(18_446_744_073_709_551_557);
+        let left = [
+            18_446_744_073_709_551_556,
+            18_446_744_073_709_551_500,
+            9_223_372_036_854_775_807,
+            12_345_678_901_234_567_890,
+        ]
+        .map(|value| field.to_element(value));
+        let right = [
+            18_446_744_073_709_551_555,
+            18_446_744_073_709_551_499,
+            9_223_372_036_854_775_809,
+            17_654_321_098_765_432_109,
+        ]
+        .map(|value| field.to_element(value));
+        assert_dense_polynomial_mul(&field, &left, &[0, 2, 5, 7], &right, &[0, 1, 4, 7], 15);
+
+        #[cfg(feature = "integer-gmp")]
+        {
+            assert_ks4_polynomial_mul(&field, &left, &[0, 2, 5, 7], &right, &[0, 1, 4, 7]);
+            assert_ks4_polynomial_mul(&field, &left, &[0, 2, 5, 7], &right[..3], &[0, 1, 4]);
+            assert_ks4_polynomial_mul(&field, &left, &[0, 7, 2, 5], &right, &[7, 1, 4, 0]);
+            assert_ks2_zp64_polynomial_mul(&field, &left, &[0, 7, 2, 5], &right, &[7, 1, 4, 0]);
+        }
+
+        let raw = vec![super::FiniteFieldElement::from_inner(18_446_744_073_709_551_556); 64];
+        let indices = (0..64).collect::<Vec<_>>();
+        assert_dense_polynomial_mul(&field, &raw, &indices, &raw, &indices, 127);
+
+        #[cfg(feature = "integer-gmp")]
+        {
+            assert_ks4_polynomial_mul(&field, &raw, &indices, &raw, &indices);
+            assert_ks4_polynomial_mul(&field, &raw, &indices, &raw[..63], &indices[..63]);
+            assert_ks2_zp64_polynomial_mul(&field, &raw, &indices, &raw, &indices);
+
+            let small = (0..64)
+                .map(|index| field.to_element(index % 16 + 1))
+                .collect::<Vec<_>>();
+            assert_ks2_zp64_polynomial_mul(&field, &small, &indices, &small, &indices);
+            assert_ks2_zp64_polynomial_mul(&field, &small, &indices, &raw, &indices);
+            assert_ks2_zp64_polynomial_mul(&field, &raw, &indices, &small, &indices);
+        }
+
+        let modulus = Integer::from((1u128 << 64) + 13);
+        let integer_field = FiniteField::<Integer>::new_non_prime(modulus);
+        let left = [1u64, 17, 123_456_789, 9_876_543_210]
+            .map(|value| integer_field.to_element(Integer::from(value)));
+        let right = [11u64, 23, 987_654_321, 8_765_432_109]
+            .map(|value| integer_field.to_element(Integer::from(value)));
+        let operation = super::polynomial_kernels::DenseIntegerMontgomeryMul::new(
+            &integer_field,
+            DensePolynomialMulRequest {
+                output_len: 15,
+                left_coefficients: &left,
+                left_indices: &[0, 2, 5, 7],
+                right_coefficients: &right,
+                right_indices: &[0, 1, 4, 7],
+            },
+        )
+        .unwrap();
+        assert!(operation.direct_montgomery_reduction);
+        assert_dense_polynomial_mul(
+            &integer_field,
+            &left,
+            &[0, 2, 5, 7],
+            &right,
+            &[0, 1, 4, 7],
+            15,
+        );
+
+        let cancellation_left =
+            [1u64, 1].map(|value| integer_field.to_element(Integer::from(value)));
+        let cancellation_right = [Integer::one(), &integer_field.p - &Integer::one()]
+            .map(|value| integer_field.to_element(value));
+        let cancellation = super::polynomial_kernels::DenseIntegerMontgomeryMul::new(
+            &integer_field,
+            DensePolynomialMulRequest {
+                output_len: 3,
+                left_coefficients: &cancellation_left,
+                left_indices: &[0, 1],
+                right_coefficients: &cancellation_right,
+                right_indices: &[0, 1],
+            },
+        )
+        .unwrap();
+        assert!(cancellation.direct_montgomery_reduction);
+        assert_eq!(
+            integer_field
+                .try_dense_mul(DensePolynomialMulRequest {
+                    output_len: 3,
+                    left_coefficients: &cancellation_left,
+                    left_indices: &[0, 1],
+                    right_coefficients: &cancellation_right,
+                    right_indices: &[0, 1],
+                })
+                .unwrap()
+                .iter()
+                .map(|(index, _)| *index)
+                .collect::<Vec<_>>(),
+            [0, 2]
+        );
+
+        // A modulus immediately below its binary Montgomery radix forces the exact convolution
+        // through the one-remainder-per-output path.
+        let modulus = Integer::from(2u64).pow(127) - &Integer::one();
+        let integer_field = FiniteField::<Integer>::new_non_prime(modulus.clone());
+        let maximum = &modulus - &Integer::one();
+        let left = (0..4)
+            .map(|offset| integer_field.to_element(&maximum - &Integer::from(offset as u64)))
+            .collect::<Vec<_>>();
+        let right = (4..8)
+            .map(|offset| integer_field.to_element(&maximum - &Integer::from(offset as u64)))
+            .collect::<Vec<_>>();
+        let operation = super::polynomial_kernels::DenseIntegerMontgomeryMul::new(
+            &integer_field,
+            DensePolynomialMulRequest {
+                output_len: 7,
+                left_coefficients: &left,
+                left_indices: &[0, 1, 2, 3],
+                right_coefficients: &right,
+                right_indices: &[0, 1, 2, 3],
+            },
+        )
+        .unwrap();
+        assert!(!operation.direct_montgomery_reduction);
+        assert_dense_polynomial_mul(
+            &integer_field,
+            &left,
+            &[0, 1, 2, 3],
+            &right,
+            &[0, 1, 2, 3],
+            7,
+        );
+
+        let cancellation_left = (0..4)
+            .map(|_| integer_field.to_element(Integer::one()))
+            .collect::<Vec<_>>();
+        let cancellation_right = [
+            Integer::one(),
+            &modulus - &Integer::one(),
+            Integer::one(),
+            &modulus - &Integer::one(),
+        ]
+        .map(|value| integer_field.to_element(value));
+        let cancellation = super::polynomial_kernels::DenseIntegerMontgomeryMul::new(
+            &integer_field,
+            DensePolynomialMulRequest {
+                output_len: 7,
+                left_coefficients: &cancellation_left,
+                left_indices: &[0, 1, 2, 3],
+                right_coefficients: &cancellation_right,
+                right_indices: &[0, 1, 2, 3],
+            },
+        )
+        .unwrap();
+        assert!(!cancellation.direct_montgomery_reduction);
+        assert_eq!(
+            integer_field
+                .try_dense_mul(DensePolynomialMulRequest {
+                    output_len: 7,
+                    left_coefficients: &cancellation_left,
+                    left_indices: &[0, 1, 2, 3],
+                    right_coefficients: &cancellation_right,
+                    right_indices: &[0, 1, 2, 3],
+                })
+                .unwrap()
+                .iter()
+                .map(|(index, _)| *index)
+                .collect::<Vec<_>>(),
+            [0, 2, 4, 6]
+        );
+
+        let sparse_indices = [0, 5000];
+        assert!(
+            super::polynomial_kernels::DenseIntegerMontgomeryMul::new(
+                &integer_field,
+                DensePolynomialMulRequest {
+                    output_len: 10_001,
+                    left_coefficients: &left[..2],
+                    left_indices: &sparse_indices,
+                    right_coefficients: &right[..2],
+                    right_indices: &sparse_indices,
+                },
+            )
+            .is_none()
+        );
+
+        let total_degree = 47usize;
+        let radix = total_degree + 1;
+        let simplex = |degree: usize, offset: u64| {
+            let mut coefficients = Vec::new();
+            let mut indices = Vec::new();
+            for high in 0..=degree {
+                for middle in 0..=degree - high {
+                    for low in 0..=degree - high - middle {
+                        coefficients.push(field.to_element(
+                            (high as u64 * 31 + middle as u64 * 17 + low as u64 * 7 + offset)
+                                % 10_000
+                                + 1,
+                        ));
+                        indices.push(((high * radix + middle) * radix + low) as u32);
+                    }
+                }
+            }
+            (coefficients, indices)
+        };
+        let (left, left_indices) = simplex(24, 1);
+        let (right, right_indices) = simplex(23, 3);
+        assert_dense_polynomial_mul(
+            &field,
+            &left,
+            &left_indices,
+            &right,
+            &right_indices,
+            radix.pow(3),
+        );
+    }
 
     #[test]
     fn primitive_root() {
@@ -3744,5 +4633,31 @@ mod test {
         let y = field.to_element(11);
         let log = field.discrete_log(&base, &y, 72, &[(2, 3), (3, 2)]);
         assert_eq!(field.from_element(&log), 55);
+    }
+
+    #[test]
+    fn reusable_discrete_log_context() {
+        let field = Zp::new(73);
+        let base = field.to_element(5);
+        let context = ZpDiscreteLogContext::new(&field, &base, 72, &[(2, 3), (3, 2)]);
+        for exponent in 0..72 {
+            assert_eq!(context.discrete_log(&field.pow(&base, exponent)), exponent);
+        }
+
+        let field = Zp64::new(73);
+        let base = field.to_element(5);
+        let context = Zp64DiscreteLogContext::new(&field, &base, 72, &[(2, 3), (3, 2)]);
+        for exponent in 0..72 {
+            assert_eq!(context.discrete_log(&field.pow(&base, exponent)), exponent);
+        }
+
+        let prime = 10_030_613_004_288_000_001;
+        let field = Zp64::new(prime);
+        let base = field.to_element(7);
+        let context =
+            Zp64DiscreteLogContext::new(&field, &base, prime - 1, &[(2, 27), (3, 14), (5, 6)]);
+        for exponent in [0, 1, 2, 55, 1_234_567_890, prime - 2] {
+            assert_eq!(context.discrete_log(&field.pow(&base, exponent)), exponent);
+        }
     }
 }

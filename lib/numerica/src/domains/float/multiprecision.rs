@@ -30,13 +30,6 @@ use crate::domains::{
 #[derive(Clone)]
 pub struct Float(MultiPrecisionFloat);
 
-#[cfg(feature = "gmp")]
-impl Assign<crate::domains::integer::MultiPrecisionInteger> for MultiPrecisionFloat {
-    fn assign(&mut self, value: crate::domains::integer::MultiPrecisionInteger) {
-        Assign::assign(self, value.into_raw());
-    }
-}
-
 #[cfg(feature = "bincode")]
 impl bincode::Encode for Float {
     fn encode<E: bincode::enc::Encoder>(
@@ -770,12 +763,6 @@ impl Float {
     #[inline]
     pub fn into_raw(self) -> MultiPrecisionFloat {
         self.0
-    }
-
-    #[deprecated(note = "use Float::into_raw")]
-    #[inline]
-    pub fn into_inner(self) -> MultiPrecisionFloat {
-        self.into_raw()
     }
 }
 

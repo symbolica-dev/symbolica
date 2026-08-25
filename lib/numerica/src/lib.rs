@@ -45,6 +45,7 @@ compile_error!("select a float backend: `float-mpfr` or `float-astro`");
 
 pub mod combinatorics;
 pub mod domains;
+pub mod kernels;
 pub mod numerical_integration;
 pub mod printer;
 pub mod tensors;
