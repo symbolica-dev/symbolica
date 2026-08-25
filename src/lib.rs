@@ -126,7 +126,6 @@ pub mod prelude {
         rational_polynomial::{
             LogarithmicIntegralTerm, RationalIntegral, RationalPolynomial, RationalPolynomialField,
         },
-        sample_i64, sample_small_integer,
     };
 
     #[cfg(feature = "native_code_generation")]

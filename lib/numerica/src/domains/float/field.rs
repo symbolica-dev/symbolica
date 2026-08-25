@@ -325,7 +325,7 @@ impl<T: SingleFloat + Hash + Eq + InternalOrdering> SampleableRing for FloatFiel
         rng: &mut R,
         policy: &Self::SamplingPolicy,
     ) -> Self::Element {
-        crate::domains::sample_small_integer(self, rng, policy.clone())
+        self.sample_small_integer(rng, policy.clone())
     }
 }
 

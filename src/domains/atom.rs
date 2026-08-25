@@ -283,7 +283,7 @@ impl SampleableRing for AtomField {
         rng: &mut R,
         policy: &Self::SamplingPolicy,
     ) -> Self::Element {
-        super::sample_small_integer(self, rng, policy.clone())
+        self.sample_small_integer(rng, policy.clone())
     }
 }
 

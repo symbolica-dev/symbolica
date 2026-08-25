@@ -30,7 +30,7 @@ use std::ops::{Add, Deref, Div, Mul, RangeInclusive, Sub};
 use rand::Rng;
 use rand_core::RngCore;
 
-use integer::Integer;
+use integer::{Integer, MultiPrecisionInteger};
 
 use crate::kernels::RingKernels;
 use crate::printer::{PrintOptions, PrintState};
@@ -164,6 +164,53 @@ pub trait Ring:
     fn one(&self) -> Self::Element;
     /// Return the nth element by computing `n * 1`.
     fn nth(&self, n: Integer) -> Self::Element;
+    /// Uniformly sample a small integer from an inclusive range and embed it in this ring.
+    ///
+    /// # Panics
+    ///
+    /// Panics if the range is empty.
+    #[inline]
+    fn sample_small_integer<R: RngCore + ?Sized>(
+        &self,
+        rng: &mut R,
+        range: RangeInclusive<i64>,
+    ) -> Self::Element {
+        self.nth(rng.random_range(range).into())
+    }
+    /// Uniformly sample an arbitrary-precision integer from an inclusive range
+    /// and embed it in this ring.
+    ///
+    /// # Panics
+    ///
+    /// Panics if the range is empty.
+    fn sample_integer<R: RngCore + ?Sized>(
+        &self,
+        rng: &mut R,
+        range: RangeInclusive<Integer>,
+    ) -> Self::Element {
+        let (lower, upper) = range.into_inner();
+        assert!(lower <= upper, "cannot sample from an empty integer range");
+
+        let width = &upper - &lower + Integer::one();
+        let bits = (&width - &Integer::one()).significant_bits();
+        loop {
+            let partial_bits = bits % u64::BITS as u64;
+            let mut candidate = if partial_bits == 0 {
+                MultiPrecisionInteger::from(0)
+            } else {
+                MultiPrecisionInteger::from(rng.next_u64() >> (u64::BITS as u64 - partial_bits))
+            };
+
+            for _ in 0..bits / u64::BITS as u64 {
+                candidate = (candidate << u64::BITS) + rng.next_u64();
+            }
+
+            let candidate = Integer::from(candidate);
+            if candidate < width {
+                return self.nth(lower + candidate);
+            }
+        }
+    }
     /// Return `b` raised to the power of `e`.
     fn pow(&self, b: &Self::Element, e: u64) -> Self::Element;
     /// Return `true` iff `a` is the additive identity `0`.
@@ -295,25 +342,6 @@ pub trait SampleableRing: Ring {
         rng: &mut R,
         policy: &Self::SamplingPolicy,
     ) -> Self::Element;
-}
-
-/// Sample an `i64` uniformly from an inclusive range.
-#[inline]
-pub fn sample_i64<R: RngCore + ?Sized>(rng: &mut R, range: RangeInclusive<i64>) -> i64 {
-    rng.random_range(range)
-}
-
-/// Sample a small integer and embed it in `ring`.
-///
-/// Unlike [`SampleableRing::sample`], this operation is available for every
-/// ring and has the same meaning for all of them.
-#[inline]
-pub fn sample_small_integer<R: Ring, G: RngCore + ?Sized>(
-    ring: &R,
-    rng: &mut G,
-    range: RangeInclusive<i64>,
-) -> R::Element {
-    ring.nth(sample_i64(rng, range).into())
 }
 
 /// A ring equipped with a total order compatible with its ring operations.
@@ -694,14 +722,16 @@ mod tests {
     use rand_xoshiro::Xoshiro256PlusPlus;
 
     use crate::domains::{
-        Field, Ring, SampleableRing, integer::Z, rational::Q, sample_small_integer,
+        Field, Ring, SampleableRing,
+        integer::{Integer, Z},
+        rational::Q,
     };
 
     #[test]
     fn small_integer_sampling_is_available_for_every_ring() {
         let mut rng = Xoshiro256PlusPlus::seed_from_u64(1);
         for _ in 0..100 {
-            let value = sample_small_integer(&Q, &mut rng, -4..=7);
+            let value = Q.sample_small_integer(&mut rng, -4..=7);
             assert_eq!(value.denominator_ref(), &Z.one());
             assert!((-4..=7).contains(&value.numerator_ref().to_i64().unwrap()));
         }
@@ -714,6 +744,28 @@ mod tests {
         for _ in 0..100 {
             assert!((5..=9).contains(&Z.sample(&mut rng, &policy).to_i64().unwrap()));
         }
+    }
+
+    #[test]
+    fn samples_arbitrary_precision_integer_ranges() {
+        let mut rng = Xoshiro256PlusPlus::seed_from_u64(3);
+        let magnitude = Integer::one() << 200u32;
+        let lower = -&magnitude + Integer::from(17);
+        let upper = &magnitude + Integer::from(23);
+
+        for _ in 0..100 {
+            let value = Z.sample_integer(&mut rng, lower.clone()..=upper.clone());
+            assert!(
+                value >= lower && value <= upper,
+                "sample {value} is outside {lower}..={upper}"
+            );
+        }
+
+        let singleton = Integer::one() << 256u32;
+        assert_eq!(
+            Z.sample_integer(&mut rng, singleton.clone()..=singleton.clone()),
+            singleton
+        );
     }
 
     #[test]
