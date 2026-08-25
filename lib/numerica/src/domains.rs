@@ -27,10 +27,9 @@ use std::fmt::{Debug, Display, Error, Formatter};
 use std::hash::Hash;
 use std::ops::{Add, Deref, Div, Mul, RangeInclusive, Sub};
 
-use rand::Rng;
 use rand_core::RngCore;
 
-use integer::{Integer, MultiPrecisionInteger};
+use integer::{Integer, Z};
 
 use crate::kernels::RingKernels;
 use crate::printer::{PrintOptions, PrintState};
@@ -175,7 +174,8 @@ pub trait Ring:
         rng: &mut R,
         range: RangeInclusive<i64>,
     ) -> Self::Element {
-        self.nth(rng.random_range(range).into())
+        let (lower, upper) = range.into_inner();
+        self.sample_integer(rng, lower.into()..=upper.into())
     }
     /// Uniformly sample an arbitrary-precision integer from an inclusive range
     /// and embed it in this ring.
@@ -188,28 +188,7 @@ pub trait Ring:
         rng: &mut R,
         range: RangeInclusive<Integer>,
     ) -> Self::Element {
-        let (lower, upper) = range.into_inner();
-        assert!(lower <= upper, "cannot sample from an empty integer range");
-
-        let width = &upper - &lower + Integer::one();
-        let bits = (&width - &Integer::one()).significant_bits();
-        loop {
-            let partial_bits = bits % u64::BITS as u64;
-            let mut candidate = if partial_bits == 0 {
-                MultiPrecisionInteger::from(0)
-            } else {
-                MultiPrecisionInteger::from(rng.next_u64() >> (u64::BITS as u64 - partial_bits))
-            };
-
-            for _ in 0..bits / u64::BITS as u64 {
-                candidate = (candidate << u64::BITS) + rng.next_u64();
-            }
-
-            let candidate = Integer::from(candidate);
-            if candidate < width {
-                return self.nth(lower + candidate);
-            }
-        }
+        self.nth(Z.sample(rng, &range))
     }
     /// Return `b` raised to the power of `e`.
     fn pow(&self, b: &Self::Element, e: u64) -> Self::Element;
@@ -740,7 +719,7 @@ mod tests {
     #[test]
     fn integer_ring_sampling_uses_its_policy() {
         let mut rng = Xoshiro256PlusPlus::seed_from_u64(2);
-        let policy = 5..=9;
+        let policy = Integer::from(5)..=Integer::from(9);
         for _ in 0..100 {
             assert!((5..=9).contains(&Z.sample(&mut rng, &policy).to_i64().unwrap()));
         }

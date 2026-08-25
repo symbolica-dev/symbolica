@@ -12,6 +12,8 @@ use std::{
     str::FromStr,
 };
 
+use rand::Rng;
+
 use crate::{
     domains::{RingOps, Set},
     kernels::RingKernels,
@@ -2566,15 +2568,40 @@ impl Ring for IntegerRing {
 }
 
 impl SampleableRing for IntegerRing {
-    type SamplingPolicy = std::ops::RangeInclusive<i64>;
+    type SamplingPolicy = std::ops::RangeInclusive<Integer>;
 
-    #[inline]
     fn sample<R: rand::RngCore + ?Sized>(
         &self,
         rng: &mut R,
         policy: &Self::SamplingPolicy,
     ) -> Self::Element {
-        self.sample_small_integer(rng, policy.clone())
+        let lower = policy.start();
+        let upper = policy.end();
+        assert!(lower <= upper, "cannot sample from an empty integer range");
+
+        if let (Some(lower), Some(upper)) = (lower.to_i64(), upper.to_i64()) {
+            return rng.random_range(lower..=upper).into();
+        }
+
+        let width = upper - lower + Integer::one();
+        let bits = (&width - &Integer::one()).significant_bits();
+        loop {
+            let partial_bits = bits % u64::BITS as u64;
+            let mut candidate = if partial_bits == 0 {
+                MultiPrecisionInteger::from(0)
+            } else {
+                MultiPrecisionInteger::from(rng.next_u64() >> (u64::BITS as u64 - partial_bits))
+            };
+
+            for _ in 0..bits / u64::BITS as u64 {
+                candidate = (candidate << u64::BITS) + rng.next_u64();
+            }
+
+            let candidate = Integer::from(candidate);
+            if candidate < width {
+                return lower + candidate;
+            }
+        }
     }
 }
 
@@ -3903,7 +3930,7 @@ impl Ring for MultiPrecisionIntegerRing {
 }
 
 impl SampleableRing for MultiPrecisionIntegerRing {
-    type SamplingPolicy = std::ops::RangeInclusive<i64>;
+    type SamplingPolicy = std::ops::RangeInclusive<Integer>;
 
     #[inline]
     fn sample<R: rand::RngCore + ?Sized>(
@@ -3911,7 +3938,7 @@ impl SampleableRing for MultiPrecisionIntegerRing {
         rng: &mut R,
         policy: &Self::SamplingPolicy,
     ) -> Self::Element {
-        self.sample_small_integer(rng, policy.clone())
+        Z.sample(rng, policy).to_multi_prec()
     }
 }
 

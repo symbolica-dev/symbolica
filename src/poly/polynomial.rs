@@ -5818,7 +5818,7 @@ mod test {
             variables: variables.clone(),
             degree_bounds: vec![0..=2, 1..=3],
             term_count: 5..=5,
-            coefficient: 1..=1,
+            coefficient: 1.into()..=1.into(),
         };
         let mut rng = StdRng::seed_from_u64(1);
 

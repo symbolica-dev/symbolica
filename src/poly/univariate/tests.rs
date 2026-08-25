@@ -16,7 +16,7 @@ fn samples_with_degree_and_coefficient_policies() {
     let ring = UnivariatePolynomialRing::from_polynomial(&template);
     let policy = UnivariatePolynomialSamplingPolicy {
         degree: 3..=3,
-        coefficient: 1..=1,
+        coefficient: 1.into()..=1.into(),
     };
     let mut rng = StdRng::seed_from_u64(1);
 
