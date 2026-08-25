@@ -17,6 +17,7 @@ use crate::domains::rational::{Fraction, FractionField, FractionNormalization, Q
 use crate::domains::{
     DensePolynomialExactDivisionRequest, DensePolynomialMulRequest, Derivable, EuclideanDomain,
     Field, InternalOrdering, RealEmbedding, Ring, RingOps, SelfRing, Set,
+    TotalDegreePolynomialMulRequest,
 };
 use crate::printer::{AtomPrinter, PrintOptions, PrintState};
 
@@ -3599,7 +3600,9 @@ impl<F: Ring, E: Exponent> MultivariatePolynomial<F, E, LexOrder> {
                 .max()
                 .unwrap_or(0)
         };
-        let total_degree = maximum_total_degree(self).checked_add(maximum_total_degree(other))?;
+        let left_total_degree = maximum_total_degree(self);
+        let right_total_degree = maximum_total_degree(other);
+        let total_degree = left_total_degree.checked_add(right_total_degree)?;
         if total_degree >= 255 {
             return None;
         }
@@ -3651,29 +3654,49 @@ impl<F: Ring, E: Exponent> MultivariatePolynomial<F, E, LexOrder> {
         let right_codes = encode_terms(other);
 
         let mut coefficients = vec![self.ring().zero(); coefficient_count];
-        for (left_coefficient, &(left_prefix, left_suffix)) in
-            self.coefficients.iter().zip(&left_codes)
-        {
-            for (right_coefficient, &(right_prefix, right_suffix)) in
-                other.coefficients.iter().zip(&right_codes)
+        let specialized = self.ring().polynomial_kernels().and_then(|kernels| {
+            kernels.try_total_degree_mul(TotalDegreePolynomialMulRequest {
+                output_len: coefficient_count,
+                left_coefficients: &self.coefficients,
+                left_codes: &left_codes,
+                right_coefficients: &other.coefficients,
+                right_codes: &right_codes,
+                prefix_rank: &rank_table.prefix_rank,
+                prefix_remaining: &rank_table.prefix_remaining,
+                suffix_rank: &rank_table.suffix_rank,
+                suffix_code_count,
+            })
+        });
+
+        if let Some(specialized) = specialized {
+            for (rank, coefficient) in specialized {
+                *coefficients.get_mut(rank as usize)? = coefficient;
+            }
+        } else {
+            for (left_coefficient, &(left_prefix, left_suffix)) in
+                self.coefficients.iter().zip(&left_codes)
             {
-                let prefix = left_prefix + right_prefix;
-                let suffix = left_suffix + right_suffix;
-                let remaining_degree =
-                    unsafe { *rank_table.prefix_remaining.get_unchecked(prefix) } as usize;
-                debug_assert_ne!(remaining_degree, u8::MAX as usize);
-                let rank = unsafe { *rank_table.prefix_rank.get_unchecked(prefix) } as usize
-                    + unsafe {
-                        *rank_table
-                            .suffix_rank
-                            .get_unchecked(remaining_degree * suffix_code_count + suffix)
-                    } as usize;
-                debug_assert!(rank < coefficient_count);
-                self.ring().add_mul_assign(
-                    unsafe { coefficients.get_unchecked_mut(rank) },
-                    left_coefficient,
-                    right_coefficient,
-                );
+                for (right_coefficient, &(right_prefix, right_suffix)) in
+                    other.coefficients.iter().zip(&right_codes)
+                {
+                    let prefix = left_prefix + right_prefix;
+                    let suffix = left_suffix + right_suffix;
+                    let remaining_degree =
+                        unsafe { *rank_table.prefix_remaining.get_unchecked(prefix) } as usize;
+                    debug_assert_ne!(remaining_degree, u8::MAX as usize);
+                    let rank = unsafe { *rank_table.prefix_rank.get_unchecked(prefix) } as usize
+                        + unsafe {
+                            *rank_table
+                                .suffix_rank
+                                .get_unchecked(remaining_degree * suffix_code_count + suffix)
+                        } as usize;
+                    debug_assert!(rank < coefficient_count);
+                    self.ring().add_mul_assign(
+                        unsafe { coefficients.get_unchecked_mut(rank) },
+                        left_coefficient,
+                        right_coefficient,
+                    );
+                }
             }
         }
 
@@ -5847,33 +5870,52 @@ mod test {
 
     #[test]
     fn total_degree_dense_multiplication() {
-        let polynomial = parse!("(1+a+b+c+d)^8-1").to_polynomial::<_, u8>(&Z, None);
-        let actual = polynomial.try_total_degree_dense_mul(&polynomial).unwrap();
+        fn assert_product(
+            left: &MultivariatePolynomial<IntegerRing, u8>,
+            right: &MultivariatePolynomial<IntegerRing, u8>,
+        ) {
+            let actual = left.try_total_degree_dense_mul(right).unwrap();
 
-        let mut expected_terms = BTreeMap::<Vec<u8>, Integer>::new();
-        for left in &polynomial {
-            for right in &polynomial {
-                let exponents = left
-                    .exponents
-                    .iter()
-                    .zip(right.exponents)
-                    .map(|(left, right)| left + right)
-                    .collect::<Vec<_>>();
-                let product = left.coefficient * right.coefficient;
-                expected_terms
-                    .entry(exponents)
-                    .and_modify(|coefficient| *coefficient += &product)
-                    .or_insert(product);
+            let mut expected_terms = BTreeMap::<Vec<u8>, Integer>::new();
+            for left_term in left {
+                for right_term in right {
+                    let exponents = left_term
+                        .exponents
+                        .iter()
+                        .zip(right_term.exponents)
+                        .map(|(left, right)| left + right)
+                        .collect::<Vec<_>>();
+                    let product = left_term.coefficient * right_term.coefficient;
+                    expected_terms
+                        .entry(exponents)
+                        .and_modify(|coefficient| *coefficient += &product)
+                        .or_insert(product);
+                }
             }
-        }
-        let mut expected = polynomial.zero_with_capacity(expected_terms.len());
-        for (exponents, coefficient) in expected_terms {
-            if !coefficient.is_zero() {
-                expected.append_monomial(coefficient, &exponents);
+            let mut expected = left.zero_with_capacity(expected_terms.len());
+            for (exponents, coefficient) in expected_terms {
+                if !coefficient.is_zero() {
+                    expected.append_monomial(coefficient, &exponents);
+                }
             }
+
+            assert_eq!(actual, expected);
         }
 
-        assert_eq!(actual, expected);
+        let left = parse!(
+            "(1+123456789012345678901*a-123456789012345678927*b+123456789012345678951*c-123456789012345678977*d)^8-1"
+        )
+        .to_polynomial::<_, u8>(&Z, None);
+        let right = parse!(
+            "(1-123456789012345678903*a+123456789012345678929*b+123456789012345678953*c-123456789012345678979*d)^8+1"
+        )
+        .to_polynomial::<_, u8>(&Z, left.variables().clone());
+        assert_product(&left, &right);
+
+        let left = parse!("(1+a-b+c-d+e-f+g-h)^5-1").to_polynomial::<_, u8>(&Z, None);
+        let right =
+            parse!("(1-a+b+c-d-e+f+g-h)^5+1").to_polynomial::<_, u8>(&Z, left.variables().clone());
+        assert_product(&left, &right);
     }
 
     #[test]

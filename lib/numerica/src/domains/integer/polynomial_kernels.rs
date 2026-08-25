@@ -7,7 +7,10 @@ use super::{MultiPrecisionInteger, RawMultiPrecisionInteger};
 use crate::domains::polynomial_layouts::try_simplex_kronecker_layout;
 use crate::domains::{
     DensePolynomialExactDivisionRequest, DensePolynomialMulRequest, PolynomialKernels,
+    TotalDegreePolynomialMulRequest,
 };
+#[cfg(feature = "gmp")]
+use gmp_mpfr_sys::gmp;
 #[cfg(feature = "gmp")]
 use rug::integer::Order as RugIntegerOrder;
 #[cfg(feature = "gmp")]
@@ -588,6 +591,294 @@ fn try_large_array_polynomial_mul(
 }
 
 #[cfg(feature = "gmp")]
+fn try_total_degree_limb_polynomial_mul(
+    request: TotalDegreePolynomialMulRequest<'_, Integer>,
+) -> Option<Vec<(u32, Integer)>> {
+    const MAX_INPUT_LIMBS: usize = 32;
+    const MAX_OUTPUT_LIMBS: usize = 1 << 26;
+    const BLOCK_SIZE: usize = 32;
+
+    if gmp::NUMB_BITS != 64 || gmp::NAIL_BITS != 0 {
+        return None;
+    }
+
+    let TotalDegreePolynomialMulRequest {
+        output_len,
+        left_coefficients,
+        left_codes,
+        right_coefficients,
+        right_codes,
+        prefix_rank,
+        prefix_remaining,
+        suffix_rank,
+        suffix_code_count,
+    } = request;
+    if left_codes.len() != left_coefficients.len()
+        || right_codes.len() != right_coefficients.len()
+        || left_coefficients.is_empty()
+        || right_coefficients.is_empty()
+        || prefix_rank.len() != prefix_remaining.len()
+        || suffix_code_count == 0
+        || !suffix_rank.len().is_multiple_of(suffix_code_count)
+    {
+        return None;
+    }
+    let suffix_rows = suffix_rank.len() / suffix_code_count;
+    if prefix_remaining
+        .iter()
+        .copied()
+        .filter(|remaining| *remaining != u8::MAX)
+        .any(|remaining| remaining as usize >= suffix_rows)
+    {
+        return None;
+    }
+
+    #[derive(Clone, Copy)]
+    struct LimbRange {
+        offset: u32,
+        length: u8,
+        negative: bool,
+    }
+
+    fn flatten_coefficients(
+        coefficients: &[Integer],
+    ) -> Option<(Vec<gmp::limb_t>, Vec<LimbRange>, usize, u64)> {
+        let mut limbs = Vec::new();
+        let mut ranges = Vec::with_capacity(coefficients.len());
+        let mut maximum_length = 0usize;
+        let mut maximum_bits = 0u64;
+        for coefficient in coefficients {
+            let offset = u32::try_from(limbs.len()).ok()?;
+            let negative = coefficient.is_negative();
+            match coefficient {
+                Integer::Single(value) => {
+                    let absolute = value.unsigned_abs();
+                    if absolute != 0 {
+                        limbs.push(absolute);
+                    }
+                }
+                Integer::Double(value) => {
+                    let absolute = value.get().unsigned_abs();
+                    if absolute != 0 {
+                        limbs.push(absolute as u64);
+                        let high = (absolute >> 64) as u64;
+                        if high != 0 {
+                            limbs.push(high);
+                        }
+                    }
+                }
+                Integer::Large(value) => limbs.extend_from_slice(value.as_raw().as_limbs()),
+            }
+            let length = limbs.len() - offset as usize;
+            maximum_length = maximum_length.max(length);
+            maximum_bits = maximum_bits.max(coefficient.significant_bits());
+            ranges.push(LimbRange {
+                offset,
+                length: u8::try_from(length).ok()?,
+                negative,
+            });
+        }
+        Some((limbs, ranges, maximum_length, maximum_bits))
+    }
+
+    let (left_limbs, left_ranges, maximum_left_limbs, maximum_left_bits) =
+        flatten_coefficients(left_coefficients)?;
+    let (right_limbs, right_ranges, maximum_right_limbs, maximum_right_bits) =
+        flatten_coefficients(right_coefficients)?;
+    if maximum_left_limbs > MAX_INPUT_LIMBS || maximum_right_limbs > MAX_INPUT_LIMBS {
+        return None;
+    }
+
+    let products_per_coefficient = left_coefficients.len().min(right_coefficients.len());
+    let accumulation_bits = usize::BITS - products_per_coefficient.leading_zeros();
+    let output_bits = maximum_left_bits
+        .checked_add(maximum_right_bits)?
+        .checked_add(u64::from(accumulation_bits))?
+        .checked_add(1)?;
+    let limbs_per_coefficient = usize::try_from(output_bits.div_ceil(64)).ok()?.max(1);
+    let output_limb_count = output_len.checked_mul(limbs_per_coefficient)?;
+    if output_limb_count > MAX_OUTPUT_LIMBS {
+        return None;
+    }
+
+    let maximum_left_prefix = left_codes.iter().map(|code| code.0).max()?;
+    let maximum_right_prefix = right_codes.iter().map(|code| code.0).max()?;
+    let maximum_left_suffix = left_codes.iter().map(|code| code.1).max()?;
+    let maximum_right_suffix = right_codes.iter().map(|code| code.1).max()?;
+    if maximum_left_prefix.checked_add(maximum_right_prefix)? >= prefix_rank.len()
+        || maximum_left_suffix.checked_add(maximum_right_suffix)? >= suffix_code_count
+    {
+        return None;
+    }
+
+    #[inline(always)]
+    unsafe fn accumulate_product(
+        accumulator: &mut [gmp::limb_t],
+        left: &[gmp::limb_t],
+        right: &[gmp::limb_t],
+        negative: bool,
+        product: &mut [gmp::limb_t],
+    ) {
+        if left.is_empty() || right.is_empty() {
+            return;
+        }
+        let (long, short) = if left.len() >= right.len() {
+            (left, right)
+        } else {
+            (right, left)
+        };
+        let product_length = long.len() + short.len();
+        debug_assert!(product_length <= product.len());
+        unsafe {
+            gmp::mpn_mul(
+                product.as_mut_ptr(),
+                long.as_ptr(),
+                long.len() as gmp::size_t,
+                short.as_ptr(),
+                short.len() as gmp::size_t,
+            );
+        }
+        let product_length = product_length - usize::from(product[product_length - 1] == 0);
+        if product_length == 0 {
+            return;
+        }
+        debug_assert!(product_length <= accumulator.len());
+        let carry = unsafe {
+            if negative {
+                gmp::mpn_sub_n(
+                    accumulator.as_mut_ptr(),
+                    accumulator.as_ptr(),
+                    product.as_ptr(),
+                    product_length as gmp::size_t,
+                )
+            } else {
+                gmp::mpn_add_n(
+                    accumulator.as_mut_ptr(),
+                    accumulator.as_ptr(),
+                    product.as_ptr(),
+                    product_length as gmp::size_t,
+                )
+            }
+        };
+        if carry != 0 && product_length < accumulator.len() {
+            let remaining = accumulator.len() - product_length;
+            unsafe {
+                if negative {
+                    gmp::mpn_sub_1(
+                        accumulator.as_mut_ptr().add(product_length),
+                        accumulator.as_ptr().add(product_length),
+                        remaining as gmp::size_t,
+                        carry,
+                    );
+                } else {
+                    gmp::mpn_add_1(
+                        accumulator.as_mut_ptr().add(product_length),
+                        accumulator.as_ptr().add(product_length),
+                        remaining as gmp::size_t,
+                        carry,
+                    );
+                }
+            }
+        }
+    }
+
+    let mut coefficients = vec![0 as gmp::limb_t; output_limb_count];
+    let mut product = [0 as gmp::limb_t; MAX_INPUT_LIMBS * 2];
+    for left_block in (0..left_coefficients.len()).step_by(BLOCK_SIZE) {
+        for right_block in (0..right_coefficients.len()).step_by(BLOCK_SIZE) {
+            for left_index in left_block..(left_block + BLOCK_SIZE).min(left_coefficients.len()) {
+                let left_range = unsafe { *left_ranges.get_unchecked(left_index) };
+                let left = unsafe {
+                    left_limbs.get_unchecked(
+                        left_range.offset as usize
+                            ..left_range.offset as usize + left_range.length as usize,
+                    )
+                };
+                let (left_prefix, left_suffix) = unsafe { *left_codes.get_unchecked(left_index) };
+                for right_index in
+                    right_block..(right_block + BLOCK_SIZE).min(right_coefficients.len())
+                {
+                    let right_range = unsafe { *right_ranges.get_unchecked(right_index) };
+                    let right = unsafe {
+                        right_limbs.get_unchecked(
+                            right_range.offset as usize
+                                ..right_range.offset as usize + right_range.length as usize,
+                        )
+                    };
+                    let (right_prefix, right_suffix) =
+                        unsafe { *right_codes.get_unchecked(right_index) };
+                    let prefix = left_prefix + right_prefix;
+                    let suffix = left_suffix + right_suffix;
+                    let remaining_degree = unsafe { *prefix_remaining.get_unchecked(prefix) };
+                    if remaining_degree == u8::MAX {
+                        return None;
+                    }
+                    let suffix_rank = unsafe {
+                        *suffix_rank
+                            .get_unchecked(remaining_degree as usize * suffix_code_count + suffix)
+                    };
+                    if suffix_rank == u32::MAX {
+                        return None;
+                    }
+                    let prefix_rank = unsafe { *prefix_rank.get_unchecked(prefix) };
+                    if prefix_rank == u32::MAX {
+                        return None;
+                    }
+                    let rank = prefix_rank as usize + suffix_rank as usize;
+                    if rank >= output_len {
+                        return None;
+                    }
+                    let accumulator = unsafe {
+                        coefficients.get_unchecked_mut(
+                            rank * limbs_per_coefficient..(rank + 1) * limbs_per_coefficient,
+                        )
+                    };
+                    unsafe {
+                        accumulate_product(
+                            accumulator,
+                            left,
+                            right,
+                            left_range.negative ^ right_range.negative,
+                            &mut product,
+                        );
+                    }
+                }
+            }
+        }
+    }
+
+    let mut output = Vec::with_capacity(output_len);
+    for (index, coefficient) in coefficients.chunks_exact(limbs_per_coefficient).enumerate() {
+        let negative = coefficient.last().copied().unwrap() >> 63 != 0;
+        let mut magnitude = SmallVec::<[gmp::limb_t; 128]>::from_slice(coefficient);
+        if negative {
+            let mut carry = true;
+            for limb in &mut magnitude {
+                let (value, overflow) = (!*limb).overflowing_add(gmp::limb_t::from(carry));
+                *limb = value;
+                carry = overflow;
+            }
+            debug_assert!(!carry);
+        }
+        while magnitude.last() == Some(&0) {
+            magnitude.pop();
+        }
+        if magnitude.is_empty() {
+            continue;
+        }
+        let mut value = MultiPrecisionInteger::from_raw(RawMultiPrecisionInteger::from_digits(
+            &magnitude,
+            RugIntegerOrder::Lsf,
+        ));
+        if negative {
+            value = -value;
+        }
+        output.push((index as u32, Integer::from(value)));
+    }
+    Some(output)
+}
+
+#[cfg(feature = "gmp")]
 fn try_large_array_polynomial_exact_division(
     total: usize,
     dividend_coefficients: &mut [Integer],
@@ -705,6 +996,22 @@ fn try_large_array_polynomial_exact_division(
 }
 
 impl PolynomialKernels<Integer> for IntegerRing {
+    #[inline]
+    fn try_total_degree_mul(
+        &self,
+        request: TotalDegreePolynomialMulRequest<'_, Integer>,
+    ) -> Option<Vec<(u32, Integer)>> {
+        #[cfg(feature = "gmp")]
+        {
+            try_total_degree_limb_polynomial_mul(request)
+        }
+        #[cfg(feature = "no_gmp")]
+        {
+            let _ = request;
+            None
+        }
+    }
+
     #[inline]
     fn try_dense_mul(
         &self,

@@ -146,6 +146,23 @@ pub struct DensePolynomialMulRequest<'a, E> {
     pub right_indices: &'a [u32],
 }
 
+/// A multiplication request for polynomials supported on total-degree simplices.
+///
+/// The polynomial layer splits each exponent vector into two additive codes and supplies lookup
+/// tables that map their sums to compact lexicographic simplex ranks. This lets coefficient
+/// domains specialize accumulation without duplicating monomial-ranking logic.
+pub struct TotalDegreePolynomialMulRequest<'a, E> {
+    pub output_len: usize,
+    pub left_coefficients: &'a [E],
+    pub left_codes: &'a [(usize, usize)],
+    pub right_coefficients: &'a [E],
+    pub right_codes: &'a [(usize, usize)],
+    pub prefix_rank: &'a [u32],
+    pub prefix_remaining: &'a [u8],
+    pub suffix_rank: &'a [u32],
+    pub suffix_code_count: usize,
+}
+
 /// An exact dense-indexed polynomial division request.
 ///
 /// Divisibility is guaranteed by the caller. A kernel may consume dividend coefficients after it
@@ -180,6 +197,18 @@ pub trait PolynomialKernels<E> {
     /// their indices are strictly increasing, and every possible summed index fits in
     /// `request.output_len`.
     fn try_dense_mul(&self, _request: DensePolynomialMulRequest<'_, E>) -> Option<Vec<(u32, E)>> {
+        None
+    }
+
+    /// Multiply coefficients on total-degree simplices.
+    ///
+    /// This is separate from [`Self::try_dense_mul`] because compact simplex ranks are not
+    /// additive. A coefficient domain can use the compact rank layout to choose an accumulator
+    /// that avoids materializing the prohibitively large surrounding mixed-radix box.
+    fn try_total_degree_mul(
+        &self,
+        _request: TotalDegreePolynomialMulRequest<'_, E>,
+    ) -> Option<Vec<(u32, E)>> {
         None
     }
 
