@@ -11,9 +11,11 @@ repository = "https://github.com/symbolica-dev/graphica"
 rust-version = "1.88"
 
 [features]
-default = ["gmp"]
-gmp = ["numerica/gmp"]
-no_gmp = ["numerica/no_gmp"]
+default = ["integer-gmp", "float-mpfr"]
+integer-gmp = ["numerica/integer-gmp"]
+integer-malachite = ["numerica/integer-malachite"]
+float-mpfr = ["numerica/float-mpfr"]
+float-astro = ["numerica/float-astro"]
 # import/export objects that do not depend on the state using serde
 serde = ["dep:serde"]
 # allow importing/exporting of atoms with a state map using bincode
