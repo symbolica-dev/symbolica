@@ -377,10 +377,30 @@ impl<F: Ring> InternalOrdering for SparseMatrix<F> {
 }
 
 impl<F: Ring> SelfRing for SparseMatrix<F> {
+    /// Returns `true` iff the matrix is the identity matrix.
     fn is_one(&self) -> bool {
-        self.values.iter().enumerate().all(|(i, e)| {
-            i as u32 % self.ncols == i as u32 / self.ncols && self.field.is_one(e)
-                || self.field.is_zero(e)
+        if self.nrows != self.ncols {
+            return false;
+        }
+
+        (0..self.nrows as usize).all(|row| {
+            let mut found_diagonal_one = false;
+
+            for i in self.row_ptrs[row]..self.row_ptrs[row + 1] {
+                let value = &self.values[i];
+                if self.field.is_zero(value) {
+                    continue;
+                }
+
+                if self.col_idcs[i] != row as u32 || found_diagonal_one || !self.field.is_one(value)
+                {
+                    return false;
+                }
+
+                found_diagonal_one = true;
+            }
+
+            found_diagonal_one
         })
     }
 
@@ -1065,6 +1085,13 @@ impl<F: Field> SparseMatrix<F> {
         }
 
         let mut sparse_row_reducer = sparse_row_reducer.unwrap();
+
+        if sparse_row_reducer.pivots[..self.ncols as usize]
+            .iter()
+            .any(Option::is_none)
+        {
+            return Err(SparseMatrixError::Singular);
+        }
 
         sparse_row_reducer.back_substitute();
 
@@ -2577,11 +2604,11 @@ where
 
 #[cfg(test)]
 mod tests {
-    use crate::domains::{Set, rational::Q};
+    use crate::domains::{SelfRing, Set, rational::Q};
 
     use crate::tensors::{
         matrix::Matrix,
-        sparse::{LuLMode, SparseMatrix, SparseRowReducer, SparseVector},
+        sparse::{LuLMode, SparseMatrix, SparseMatrixError, SparseRowReducer, SparseVector},
     };
 
     #[test]
@@ -2606,6 +2633,19 @@ mod tests {
 
         let b = a.to_sparse().to_dense();
         assert_eq!(a, b);
+    }
+
+    #[test]
+    fn is_one_uses_the_sparse_coordinates_and_requires_a_square_matrix() {
+        assert!(SparseMatrix::identity(3, Q).is_one());
+        assert!(!SparseMatrix::new(3, 3, Q).is_one());
+
+        let wide = SparseMatrix::from_triplets(2, 3, vec![(0, 0, 1.into()), (1, 1, 1.into())], Q);
+        assert!(!wide.is_one());
+
+        let off_diagonal =
+            SparseMatrix::from_triplets(2, 2, vec![(0, 0, 1.into()), (1, 0, 1.into())], Q);
+        assert!(!off_diagonal.is_one());
     }
 
     #[test]
@@ -2852,6 +2892,13 @@ mod tests {
         let inv = mat.inv().unwrap();
 
         assert_eq!(&mat * &inv, SparseMatrix::identity(5, Q));
+    }
+
+    #[test]
+    fn sparse_inv_rejects_a_singular_matrix() {
+        let mat = SparseMatrix::from_triplets(2, 2, vec![(0, 0, 1.into())], Q);
+
+        assert!(matches!(mat.inv(), Err(SparseMatrixError::Singular)));
     }
 
     #[test]

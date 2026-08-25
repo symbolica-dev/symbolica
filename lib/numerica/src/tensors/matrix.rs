@@ -1126,10 +1126,18 @@ impl<F: Ring> Matrix<F> {
 }
 
 impl<F: Ring> SelfRing for Matrix<F> {
+    /// Returns `true` iff the matrix is the identity matrix.
     fn is_one(&self) -> bool {
+        if self.nrows != self.ncols {
+            return false;
+        }
+
         self.data.iter().enumerate().all(|(i, e)| {
-            i as u32 % self.ncols == i as u32 / self.ncols && self.field.is_one(e)
-                || self.field.is_zero(e)
+            if i as u32 % self.ncols == i as u32 / self.ncols {
+                self.field.is_one(e)
+            } else {
+                self.field.is_zero(e)
+            }
         })
     }
 
@@ -1563,7 +1571,7 @@ impl<F: Field> Matrix<F> {
             m[(r, self.nrows + r)] = self.field.one();
         }
 
-        let rank = m.row_reduce(m.ncols);
+        let rank = m.row_reduce(self.ncols);
 
         if rank < self.nrows as usize {
             return Err(MatrixError::Singular);
@@ -1760,7 +1768,7 @@ impl<F: Field> Matrix<F> {
 mod test {
     use crate::{
         domains::{integer::Z, rational::Q},
-        tensors::matrix::{Matrix, Vector},
+        tensors::matrix::{Matrix, MatrixError, Vector},
     };
 
     #[test]
@@ -1960,6 +1968,9 @@ mod test {
 
         let inv = a.inv().unwrap();
         assert_eq!(&a * &inv, Matrix::identity(4, Q));
+
+        let singular = Matrix::new(4, 4, Q);
+        assert!(matches!(singular.inv(), Err(MatrixError::Singular)));
     }
 
     #[test]
