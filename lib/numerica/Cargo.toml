@@ -11,14 +11,16 @@ repository = "https://github.com/symbolica-dev/numerica"
 rust-version = "1.88"
 
 [features]
-default = ["gmp"]
-gmp = ["dep:rug"]
-no_gmp = [
-    "dep:astro-float",
+default = ["integer-gmp", "float-mpfr"]
+integer-gmp = ["dep:rug"]
+integer-malachite = [
     "dep:malachite-base",
     "dep:malachite-nz",
-    "dep:malachite-q",
 ]
+float-mpfr = ["dep:rug"]
+float-astro = ["dep:astro-float", "dep:malachite-q"]
+gmp = ["integer-gmp", "float-mpfr"]
+no_gmp = ["integer-malachite", "float-astro"]
 # import/export objects that do not depend on the state using serde
 serde = [
     "dep:serde",

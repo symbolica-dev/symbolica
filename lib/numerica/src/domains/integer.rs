@@ -3809,7 +3809,7 @@ mod test {
         str::FromStr,
     };
 
-    #[cfg(feature = "gmp")]
+    #[cfg(feature = "float-mpfr")]
     use crate::domains::float::{Float, Real};
     use crate::domains::{
         finite_field::FiniteFieldWorkspace,
@@ -3861,7 +3861,7 @@ mod test {
 
         assert_eq!(size_of::<DoubleInteger>(), 16);
         assert_eq!(align_of::<DoubleInteger>(), 8);
-        #[cfg(feature = "gmp")]
+        #[cfg(feature = "integer-gmp")]
         {
             assert_eq!(size_of::<Integer>(), 24);
             assert_eq!(align_of::<Integer>(), 8);
@@ -3871,7 +3871,7 @@ mod test {
             assert_eq!(size_of::<Complex<Integer>>(), 48);
         }
         // Malachite's larger inline integer storage keeps this enum at 32 bytes.
-        #[cfg(feature = "no_gmp")]
+        #[cfg(feature = "integer-malachite")]
         {
             assert_eq!(size_of::<Integer>(), 32);
             assert_eq!(align_of::<Integer>(), 8);
@@ -4098,7 +4098,7 @@ mod test {
         assert_eq!(result, &[1, 5, 6]);
     }
 
-    #[cfg(feature = "gmp")]
+    #[cfg(feature = "float-mpfr")]
     #[test]
     fn pslq_medium() {
         let f = Float::new(300);

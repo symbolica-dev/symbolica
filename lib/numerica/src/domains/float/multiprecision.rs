@@ -9,13 +9,11 @@ use rand::Rng;
 use xprec::{CompensatedArithmetic, Df64};
 
 use super::{DoubleFloat, FloatLike, Real, RealLike, SingleFloat};
-#[cfg(feature = "gmp")]
-use crate::domains::integer::MultiPrecisionInteger;
 use crate::domains::{
     InternalOrdering,
     backend::float::{
-        Assign, CompleteRound, Constant, MultiPrecisionFloat, MultiPrecisionFloatRational,
-        MultiPrecisionFloatRounding, Pow, RoundingDirection,
+        Assign, CompleteRound, Constant, MultiPrecisionFloat, MultiPrecisionFloatInteger,
+        MultiPrecisionFloatRational, MultiPrecisionFloatRounding, Pow, RoundingDirection,
     },
     integer::Integer,
     rational::Rational,
@@ -33,8 +31,8 @@ use crate::domains::{
 pub struct Float(MultiPrecisionFloat);
 
 #[cfg(feature = "gmp")]
-impl Assign<MultiPrecisionInteger> for MultiPrecisionFloat {
-    fn assign(&mut self, value: MultiPrecisionInteger) {
+impl Assign<crate::domains::integer::MultiPrecisionInteger> for MultiPrecisionFloat {
+    fn assign(&mut self, value: crate::domains::integer::MultiPrecisionInteger) {
         Assign::assign(self, value.into_raw());
     }
 }
@@ -477,16 +475,7 @@ impl<R: Into<Rational>> Add<R> for Float {
             let mut r = match rhs.numerator() {
                 Integer::Single(n) => self.0 + n,
                 Integer::Double(n) => self.0 + n.get(),
-                Integer::Large(n) => {
-                    #[cfg(feature = "gmp")]
-                    {
-                        self.0 + n.into_raw()
-                    }
-                    #[cfg(feature = "no_gmp")]
-                    {
-                        self.0 + n
-                    }
-                }
+                Integer::Large(n) => self.0.add_integer(n),
             };
 
             if let Some(e) = r.get_exp() {
@@ -535,16 +524,7 @@ impl<R: Into<Rational>> Mul<R> for Float {
             match r.numerator() {
                 Integer::Single(n) => self.0 * n,
                 Integer::Double(n) => self.0 * n.get(),
-                Integer::Large(n) => {
-                    #[cfg(feature = "gmp")]
-                    {
-                        self.0 * n.into_raw()
-                    }
-                    #[cfg(feature = "no_gmp")]
-                    {
-                        self.0 * n
-                    }
-                }
+                Integer::Large(n) => self.0.mul_integer(n),
             }
             .into()
         } else {
@@ -565,16 +545,7 @@ impl<R: Into<Rational>> Div<R> for Float {
             match r.numerator() {
                 Integer::Single(n) => self.0 / n,
                 Integer::Double(n) => self.0 / n.get(),
-                Integer::Large(n) => {
-                    #[cfg(feature = "gmp")]
-                    {
-                        self.0 / n.into_raw()
-                    }
-                    #[cfg(feature = "no_gmp")]
-                    {
-                        self.0 / n
-                    }
-                }
+                Integer::Large(n) => self.0.div_integer(n),
             }
             .into()
         } else {
@@ -635,14 +606,7 @@ impl Float {
 
     /// Construct a multi-precision float from a backend-independent integer.
     pub fn with_integer(prec: u32, value: crate::domains::integer::MultiPrecisionInteger) -> Self {
-        #[cfg(feature = "gmp")]
-        {
-            Float(MultiPrecisionFloat::with_val(prec, value.into_raw()))
-        }
-        #[cfg(feature = "no_gmp")]
-        {
-            Float(MultiPrecisionFloat::with_val(prec, value))
-        }
+        Float(MultiPrecisionFloat::from_integer(prec, value))
     }
 
     pub fn prec(&self) -> u32 {
@@ -935,14 +899,7 @@ impl RealLike for Float {
 
     #[inline(always)]
     fn round_to_nearest_integer(&self) -> Integer {
-        #[cfg(feature = "gmp")]
-        {
-            MultiPrecisionInteger::from_raw(self.0.to_integer().unwrap()).into()
-        }
-        #[cfg(feature = "no_gmp")]
-        {
-            self.0.to_integer().unwrap().into()
-        }
+        self.0.to_integer_exact().unwrap().into()
     }
 }
 
