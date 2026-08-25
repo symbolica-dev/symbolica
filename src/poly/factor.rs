@@ -2320,10 +2320,14 @@ impl<F: Field + SampleableRing<SamplingPolicy = RangeInclusive<i64>>, E: Positiv
         sample_vars: &[usize],
         rng: &mut impl rand::RngCore,
     ) -> Vec<(usize, F::Element)> {
+        let upper = match poly.ring().characteristic().to_i64() {
+            Some(characteristic) if characteristic > 0 => characteristic - 1,
+            _ => MAX_RNG_PREFACTOR as i64 - 1,
+        };
+        let policy = 0..=upper;
         sample_vars
             .iter()
             .map(|v| {
-                let policy = 1..=MAX_RNG_PREFACTOR as i64 - 1;
                 let mut value = poly.ring().sample(rng, &policy);
                 let mut attempts = 0;
                 while poly.ring().is_zero(&value) && attempts < 8 {

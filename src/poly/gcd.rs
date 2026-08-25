@@ -6,7 +6,7 @@ use smallvec::{SmallVec, smallvec};
 use std::borrow::Cow;
 use std::cmp::{Ordering, max, min};
 use std::mem;
-use std::ops::Add;
+use std::ops::{Add, RangeInclusive};
 use tracing::{debug, instrument};
 
 use crate::domains::algebraic::{AlgebraicExtension, GaloisField};
@@ -17,7 +17,9 @@ use crate::domains::finite_field::{
 use crate::domains::float::{FloatField, SingleFloat};
 use crate::domains::integer::{FromFiniteField, Integer, IntegerRing, SMALL_PRIMES, Z};
 use crate::domains::rational::{Q, Rational, RationalField};
-use crate::domains::{EuclideanDomain, Field, InternalOrdering, Ring, RingOps, Set};
+use crate::domains::{
+    EuclideanDomain, Field, InternalOrdering, Ring, RingOps, SampleableRing, Set,
+};
 use crate::kernels::GeometricSequenceStepRequest;
 use crate::poly::INLINED_EXPONENTS;
 use crate::tensors::matrix::{Matrix, MatrixError};
@@ -38,6 +40,25 @@ pub(crate) const INITIAL_POW_MAP_SIZE: usize = 1000;
 
 /// The upper bound of the range to be sampled during the computation of multiple gcds
 pub(crate) const MAX_RNG_PREFACTOR: u32 = 50000;
+
+/// Samples a nonzero field element while allowing every extension-basis
+/// coefficient to range over the full prime field.
+fn sample_nonzero_field_element<F>(ring: &F, rng: &mut impl rand::RngCore) -> F::Element
+where
+    F: Field + SampleableRing<SamplingPolicy = RangeInclusive<i64>>,
+{
+    let upper = match ring.characteristic().to_i64() {
+        Some(characteristic) if characteristic > 0 => characteristic - 1,
+        _ => MAX_RNG_PREFACTOR as i64 - 1,
+    };
+    let policy = 0..=upper;
+    loop {
+        let value = ring.sample(rng, &policy);
+        if !ring.is_zero(&value) {
+            return value;
+        }
+    }
+}
 
 #[derive(Debug, PartialEq, Eq, Copy, Clone)]
 enum GCDError {
@@ -304,7 +325,10 @@ impl<F: Field, E: PositiveExponent> MultivariatePolynomial<F, E> {
     /// substituting all variables except `var`. This
     /// upper bound could be too tight due to an unfortunate
     /// sample point, but this is rare.
-    fn get_gcd_var_bound(ap: &Self, bp: &Self, vars: &[usize], var: usize) -> E {
+    fn get_gcd_var_bound(ap: &Self, bp: &Self, vars: &[usize], var: usize) -> E
+    where
+        F: SampleableRing<SamplingPolicy = RangeInclusive<i64>>,
+    {
         let mut rng = rand::rng();
 
         // store a table for variables raised to a certain power
@@ -337,13 +361,7 @@ impl<F: Field, E: PositiveExponent> MultivariatePolynomial<F, E> {
 
             let r: Vec<_> = vars
                 .iter()
-                .map(|i| {
-                    (
-                        *i,
-                        ap.ring()
-                            .sample_small_integer(&mut rng, 1..=MAX_RNG_PREFACTOR as i64 - 1),
-                    )
-                })
+                .map(|i| (*i, sample_nonzero_field_element(ap.ring(), &mut rng)))
                 .collect();
 
             let a1 = ap.sample_polynomial(var, &r, &mut cache, &mut tm);
@@ -515,7 +533,10 @@ impl<F: Field, E: PositiveExponent> MultivariatePolynomial<F, E> {
         vars: &[usize],
         main_var: usize,
         shape: &[(MultivariatePolynomial<F, E>, E)],
-    ) -> Result<MultivariatePolynomial<F, E>, GCDError> {
+    ) -> Result<MultivariatePolynomial<F, E>, GCDError>
+    where
+        F: SampleableRing<SamplingPolicy = RangeInclusive<i64>>,
+    {
         if vars.is_empty() {
             // return gcd divided by the single scale factor
             let g = a.univariate_gcd(b);
@@ -582,13 +603,7 @@ impl<F: Field, E: PositiveExponent> MultivariatePolynomial<F, E> {
 
             let r_orig: SmallVec<[_; INLINED_EXPONENTS]> = vars
                 .iter()
-                .map(|i| {
-                    (
-                        *i,
-                        a.ring()
-                            .sample_small_integer(&mut rng, 1..=MAX_RNG_PREFACTOR as i64 - 1),
-                    )
-                })
+                .map(|i| (*i, sample_nonzero_field_element(a.ring(), &mut rng)))
                 .collect();
 
             let mut row_sample_values = Vec::with_capacity(shape.len()); // coefficients for the linear system
@@ -796,7 +811,10 @@ impl<F: Field, E: PositiveExponent> MultivariatePolynomial<F, E> {
         vars: &[usize],
         main_var: usize,
         shape: &[(MultivariatePolynomial<F, E>, E)],
-    ) -> Result<MultivariatePolynomial<F, E>, GCDError> {
+    ) -> Result<MultivariatePolynomial<F, E>, GCDError>
+    where
+        F: SampleableRing<SamplingPolicy = RangeInclusive<i64>>,
+    {
         let mut rng = rand::rng();
 
         let mut failure_count = 0;
@@ -832,13 +850,7 @@ impl<F: Field, E: PositiveExponent> MultivariatePolynomial<F, E> {
 
             let r_orig: SmallVec<[_; INLINED_EXPONENTS]> = vars
                 .iter()
-                .map(|i| {
-                    (
-                        *i,
-                        a.ring()
-                            .sample_small_integer(&mut rng, 1..=MAX_RNG_PREFACTOR as i64 - 1),
-                    )
-                })
+                .map(|i| (*i, sample_nonzero_field_element(a.ring(), &mut rng)))
                 .collect();
 
             let mut row_sample_values = Vec::with_capacity(shape.len()); // coefficients for the linear system
@@ -1207,7 +1219,11 @@ impl<F: Field, E: PositiveExponent> MultivariatePolynomial<F, E> {
     }
 }
 
-impl<F: Field + PolynomialGCD<E>, E: PositiveExponent> MultivariatePolynomial<F, E> {
+impl<
+    F: Field + PolynomialGCD<E> + SampleableRing<SamplingPolicy = RangeInclusive<i64>>,
+    E: PositiveExponent,
+> MultivariatePolynomial<F, E>
+{
     /// Compute the gcd shape of two polynomials in a finite field by filling in random
     /// numbers.
     #[instrument(level = "debug", skip_all)]
@@ -1277,9 +1293,7 @@ impl<F: Field + PolynomialGCD<E>, E: PositiveExponent> MultivariatePolynomial<F,
 
             let mut sample_fail_count = 0i64;
             let v = loop {
-                let r = a
-                    .ring()
-                    .sample_small_integer(&mut rng, 1..=MAX_RNG_PREFACTOR as i64 - 1);
+                let r = sample_nonzero_field_element(a.ring(), &mut rng);
                 if !gamma.replace(lastvar, &r).is_zero() {
                     break r;
                 }
@@ -1380,9 +1394,7 @@ impl<F: Field + PolynomialGCD<E>, E: PositiveExponent> MultivariatePolynomial<F,
                 }
 
                 let v = loop {
-                    let v = a
-                        .ring()
-                        .sample_small_integer(&mut rng, 1..=MAX_RNG_PREFACTOR as i64 - 1);
+                    let v = sample_nonzero_field_element(a.ring(), &mut rng);
                     if !gamma.replace(lastvar, &v).is_zero() {
                         // we need unique sampling points
                         if !vseq.contains(&v) {
@@ -1494,13 +1506,7 @@ impl<F: Field + PolynomialGCD<E>, E: PositiveExponent> MultivariatePolynomial<F,
                 let r: Vec<_> = vars
                     .iter()
                     .skip(1)
-                    .map(|i| {
-                        (
-                            *i,
-                            a.ring()
-                                .sample_small_integer(&mut rng, 1..=MAX_RNG_PREFACTOR as i64 - 1),
-                        )
-                    })
+                    .map(|i| (*i, sample_nonzero_field_element(a.ring(), &mut rng)))
                     .collect();
 
                 let g1 = gc.replace_except(vars[0], &r, &mut cache);
@@ -3883,8 +3889,11 @@ impl<E: PositiveExponent> PolynomialGCD<E> for RationalField {
     }
 }
 
-impl<UField: FiniteFieldWorkspace, F: GaloisField<Base = FiniteField<UField>>, E: PositiveExponent>
-    PolynomialGCD<E> for F
+impl<
+    UField: FiniteFieldWorkspace,
+    F: GaloisField<Base = FiniteField<UField>> + SampleableRing<SamplingPolicy = RangeInclusive<i64>>,
+    E: PositiveExponent,
+> PolynomialGCD<E> for F
 where
     FiniteField<UField>: FiniteFieldCore<UField>,
     <FiniteField<UField> as Set>::Element: Copy,
@@ -4511,7 +4520,25 @@ impl<T: SingleFloat + std::hash::Hash + Eq + InternalOrdering, E: PositiveExpone
 mod tests {
     use super::*;
     use crate::atom::AtomCore;
+    use crate::domains::finite_field::Z2;
     use crate::parse;
+    use crate::poly::PolyVariable;
+
+    #[test]
+    fn galois_gcd_upgrade_samples_outside_the_prime_subfield() {
+        let field = AlgebraicExtension::galois_field(Z2, 2, PolyVariable::Temporary(0));
+        let mut factors = [
+            parse!("x+y^2+y+1").to_polynomial::<_, u8>(&field, None),
+            parse!("x+y+1").to_polynomial::<_, u8>(&field, None),
+            parse!("x^2+x+y+1").to_polynomial::<_, u8>(&field, None),
+        ];
+        MultivariatePolynomial::unify_variables_list(&mut factors);
+        let [common, left_cofactor, right_cofactor] = factors;
+        let left = &common * &left_cofactor;
+        let right = &common * &right_cofactor;
+
+        assert_eq!(left.gcd(&right), common.make_monic());
+    }
 
     #[test]
     fn hu_monagan_large_kronecker_exponents() {
