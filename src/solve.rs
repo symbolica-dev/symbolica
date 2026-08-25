@@ -1,6 +1,13 @@
-//! Solve systems of equations.
+//! Exact solutions of systems of equations.
 //!
-//! See [AtomCore::solve] and [AtomCore::nsolve_system].
+//! Start with [`AtomCore::solve`], select a domain with [`SolveBuilder::over`]
+//! if needed, and provide the variables with [`SolveBuilder::wrt`]. Each input
+//! expression represents an equation whose right-hand side is zero.
+//!
+//! The solver returns one [`Solution`] per branch. Solutions expose their
+//! variable values, any free variables, and conditions that must hold for the
+//! branch to be valid. For numerical roots, see [`AtomCore::nsolve`] and
+//! [`AtomCore::nsolve_system`].
 
 use std::{ops::Neg, sync::Arc};
 
@@ -89,7 +96,7 @@ pub enum SolveError {
     Other(String),
 }
 
-/// A domain supported by the exact solver.
+/// The values that an exact solve result is allowed to contain.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Hash)]
 pub enum SolveDomain {
     /// Keep solutions whose requested values are integers.
@@ -326,7 +333,7 @@ impl<'a> IntoIterator for &'a Solution {
     }
 }
 
-/// A pending exact solve operation.
+/// An exact solve operation waiting for the variables to solve for.
 pub struct SolveBuilder<'a, T: AtomCore> {
     system: &'a [T],
     domain: SolveDomain,
@@ -340,18 +347,32 @@ impl<'a, T: AtomCore> SolveBuilder<'a, T> {
         }
     }
 
-    /// Select the domain in which solutions must lie.
+    /// Keep only solutions whose requested variable values lie in `domain`.
+    ///
+    /// The default is [`Complexes`]. If symbolic parameters make domain
+    /// membership impossible to decide, the branch is retained with a
+    /// [`SolutionCondition::DomainMembership`] condition.
     pub fn over(mut self, domain: SolveDomain) -> Self {
         self.domain = domain;
         self
     }
 
-    /// Solve the system with respect to `variables`, using `u16` exponents.
+    /// Solve for `variables` and return one [`Solution`] per branch.
+    ///
+    /// Every expression supplied to [`AtomCore::solve`] is treated as equal to
+    /// zero. An empty result means that no solutions exist in the selected
+    /// domain. For an underdetermined system, the returned solutions identify
+    /// their free inputs with [`Solution::free_variables`]. When several choices
+    /// are possible, variables later in this slice are preferred as free inputs.
     pub fn wrt<V: AtomCore>(&self, variables: &[V]) -> Result<Vec<Solution>, SolveError> {
         self.wrt_with_exponent::<u16, V>(variables)
     }
 
-    /// Solve the system with respect to `variables` using exponent type `E`.
+    /// Solve for `variables` using `E` for internal polynomial exponents.
+    ///
+    /// Most users should use [`Self::wrt`]. Choose this method only when the
+    /// system requires polynomial exponents outside the `u16` range or a smaller
+    /// exponent representation is important.
     pub fn wrt_with_exponent<E: PositiveExponent + 'static, V: AtomCore>(
         &self,
         variables: &[V],

@@ -789,20 +789,31 @@ pub trait AtomCore: private::Sealed + Sized {
         AtomView::nsolve_system(system, vars, init, prec, max_iterations)
     }
 
-    /// Build an exact solve operation for `system`.
+    /// Find the exact solutions of a system of equations.
     ///
-    /// Linear systems use the linear-system solver. Polynomial nonlinear
-    /// systems over `Q` or `Q(parameters)` use a grevlex Gröbner basis, FGLM
-    /// conversion to lex, and exact algebraic roots. Positive-dimensional
-    /// systems use a maximal viable set of requested variables as inputs,
-    /// preferring variables later in `vars`, and map those inputs to
-    /// themselves. Every expression in `system` is understood to equal zero.
-    /// Rational powers involving the solve variables are polynomialized with
-    /// auxiliary variables, and non-principal branches are filtered from the
-    /// result. Rational denominators are cleared and their zero loci are
-    /// excluded.
+    /// Write each equation as an expression equal to zero, then specify the
+    /// variables with [`SolveBuilder::wrt`](crate::solve::SolveBuilder::wrt).
+    /// By default, solutions may be complex. Use
+    /// [`SolveBuilder::over`](crate::solve::SolveBuilder::over) to request only
+    /// integer, rational, or real solutions.
     ///
-    /// # Example
+    /// The result contains one [`Solution`](crate::solve::Solution) per solution
+    /// branch. An empty vector means that there are no solutions in the requested
+    /// domain. A branch can describe a family of solutions when the system is
+    /// underdetermined; use [`Solution::free_variables`](crate::solve::Solution::free_variables)
+    /// and [`Solution::conditions`](crate::solve::Solution::conditions) before
+    /// substituting values from such a branch.
+    ///
+    /// `solve` handles exact linear and polynomial systems, including systems
+    /// with symbolic parameters. It also supports many rational equations and
+    /// rational powers such as square roots. Use [`AtomCore::nsolve`] or
+    /// [`AtomCore::nsolve_system`] when you need a numerical root from an initial
+    /// guess, or when an exact solution is not available.
+    ///
+    /// # Examples
+    ///
+    /// Solve two equations over the reals. Each input expression is understood
+    /// to equal zero:
     ///
     /// ```
     /// use symbolica::prelude::*;
@@ -810,11 +821,25 @@ pub trait AtomCore: private::Sealed + Sized {
     /// let (x, y) = symbol!("x", "y");
     /// let system = [parse!("x+y"), parse!("y^2-2")];
     /// let solutions = Atom::solve(&system)
-    ///     .over(Complexes)
+    ///     .over(Reals)
     ///     .wrt(&[Atom::var(x), Atom::var(y)])
     ///     .unwrap();
     ///
     /// assert_eq!(solutions.len(), 2);
+    /// assert!(solutions.iter().all(|solution| !solution.is_parametric()));
+    /// ```
+    ///
+    /// Restricting the domain can remove otherwise valid solutions:
+    ///
+    /// ```
+    /// use symbolica::prelude::*;
+    ///
+    /// let x = Atom::var(symbol!("x"));
+    /// let real_solutions = Atom::solve(&[parse!("x^2+1")])
+    ///     .over(Reals)
+    ///     .wrt(std::slice::from_ref(&x))
+    ///     .unwrap();
+    /// assert!(real_solutions.is_empty());
     /// ```
     fn solve<T: AtomCore>(system: &[T]) -> crate::solve::SolveBuilder<'_, T> {
         crate::solve::SolveBuilder::new(system)
