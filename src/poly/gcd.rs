@@ -18,6 +18,7 @@ use crate::domains::float::{FloatField, SingleFloat};
 use crate::domains::integer::{FromFiniteField, Integer, IntegerRing, SMALL_PRIMES, Z};
 use crate::domains::rational::{Q, Rational, RationalField};
 use crate::domains::{EuclideanDomain, Field, InternalOrdering, Ring, RingOps, Set};
+use crate::kernels::GeometricSequenceStepRequest;
 use crate::poly::INLINED_EXPONENTS;
 use crate::tensors::matrix::{Matrix, MatrixError};
 use crate::{GLOBAL_SETTINGS, warn};
@@ -163,13 +164,17 @@ impl<R: Ring, E: PositiveExponent> MultivariatePolynomial<R, E> {
     ) {
         out.clear();
         let mut new_exp = vec![E::zero(); self.nvars()];
+        let geometric_sequence_kernels = self.ring().kernels().geometric_sequences();
         for (exponent, start, end) in rows {
             let current_row = &mut current_evals[*start..*end];
             let term_row = &term_evals[*start..*end];
-            let coefficient = self
-                .ring()
-                .polynomial_kernels()
-                .and_then(|kernels| kernels.try_geometric_sum_step(current_row, term_row))
+            let coefficient = geometric_sequence_kernels
+                .and_then(|kernels| {
+                    kernels.try_sum_and_advance_geometric_sequences(GeometricSequenceStepRequest {
+                        current: &mut *current_row,
+                        ratios: term_row,
+                    })
+                })
                 .unwrap_or_else(|| {
                     let mut coefficient = self.ring().zero();
                     for (current, term_eval) in current_row.iter_mut().zip(term_row) {

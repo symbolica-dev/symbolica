@@ -1,5 +1,7 @@
 //! Finite fields and modular rings.
 
+mod geometric_sequence_kernels;
+mod montgomery;
 mod polynomial_kernels;
 
 use crate::domains::integer::Complete;
@@ -8,11 +10,12 @@ use std::fmt::{Display, Error, Formatter};
 use std::hash::Hash;
 use std::ops::Deref;
 
-use crate::domains::{PolynomialKernels, RingOps, Set};
+use crate::domains::{RingOps, Set};
 use crate::domains::{
     backend::integer::{BackendRandState, probably_prime as backend_probably_prime},
     integer::{DoubleInteger, Integer, MultiPrecisionInteger},
 };
+use crate::kernels::RingKernels;
 use crate::printer::{PrintOptions, PrintState};
 
 use super::integer::Z;
@@ -543,8 +546,10 @@ impl Ring for Zp {
     }
 
     #[inline]
-    fn polynomial_kernels(&self) -> Option<&dyn PolynomialKernels<Self::Element>> {
-        Some(self)
+    fn kernels(&self) -> RingKernels<'_, Self::Element> {
+        RingKernels::empty()
+            .with_polynomial(self)
+            .with_geometric_sequences(self)
     }
 
     fn sample(&self, rng: &mut impl rand::RngCore, range: (i64, i64)) -> Self::Element {
@@ -1066,8 +1071,10 @@ impl Ring for Zp64 {
     }
 
     #[inline]
-    fn polynomial_kernels(&self) -> Option<&dyn PolynomialKernels<Self::Element>> {
-        Some(self)
+    fn kernels(&self) -> RingKernels<'_, Self::Element> {
+        RingKernels::empty()
+            .with_polynomial(self)
+            .with_geometric_sequences(self)
     }
 
     fn sample(&self, rng: &mut impl rand::RngCore, range: (i64, i64)) -> Self::Element {
@@ -3673,10 +3680,11 @@ mod test {
 
     use super::{FiniteFieldCore, Zp};
     use crate::domains::{
-        DensePolynomialMulRequest, Field, Ring, RingOps,
+        Field, Ring, RingOps,
         finite_field::{FiniteField, PrimitiveRootIterator, Zp64},
         integer::{Integer, MultiPrecisionInteger},
     };
+    use crate::kernels::{DensePolynomialMulRequest, GeometricSequenceStepRequest};
 
     fn assert_dense_polynomial_mul<R: Ring>(
         field: &R,
@@ -3698,7 +3706,8 @@ mod test {
         }
 
         let terms = field
-            .polynomial_kernels()
+            .kernels()
+            .polynomial()
             .expect("finite field should provide polynomial kernels")
             .try_dense_mul(DensePolynomialMulRequest {
                 output_len,
@@ -3736,15 +3745,18 @@ mod test {
             }
         }
 
-        let terms = super::polynomial_kernels::try_ks2_zp_polynomial_mul(
+        let operation = super::polynomial_kernels::DenseZpMul::new(
             field,
-            output_len as usize,
-            left,
-            left_indices,
-            right,
-            right_indices,
+            DensePolynomialMulRequest {
+                output_len: output_len as usize,
+                left_coefficients: left,
+                left_indices,
+                right_coefficients: right,
+                right_indices,
+            },
         )
         .unwrap();
+        let terms = operation.try_ks2().unwrap();
         let mut actual = vec![field.zero(); output_len as usize];
         for (position, coefficient) in terms {
             actual[position as usize] = coefficient;
@@ -3773,14 +3785,18 @@ mod test {
             }
         }
 
-        let terms = super::polynomial_kernels::try_ks4_zp64_polynomial_mul(
+        let operation = super::polynomial_kernels::DenseZp64Mul::new(
             field,
-            left,
-            left_indices,
-            right,
-            right_indices,
+            DensePolynomialMulRequest {
+                output_len: output_len as usize,
+                left_coefficients: left,
+                left_indices,
+                right_coefficients: right,
+                right_indices,
+            },
         )
         .unwrap();
+        let terms = operation.try_ks4().unwrap();
         let mut actual = vec![field.zero(); output_len as usize];
         for (position, coefficient) in terms {
             actual[position as usize] = coefficient;
@@ -3809,20 +3825,82 @@ mod test {
             }
         }
 
-        let terms = super::polynomial_kernels::try_ks2_zp64_polynomial_mul(
+        let operation = super::polynomial_kernels::DenseZp64Mul::new(
             field,
-            output_len as usize,
-            left,
-            left_indices,
-            right,
-            right_indices,
+            DensePolynomialMulRequest {
+                output_len: output_len as usize,
+                left_coefficients: left,
+                left_indices,
+                right_coefficients: right,
+                right_indices,
+            },
         )
         .unwrap();
+        let terms = operation.try_ks2().unwrap();
         let mut actual = vec![field.zero(); output_len as usize];
         for (position, coefficient) in terms {
             actual[position as usize] = coefficient;
         }
         assert_eq!(actual, expected);
+    }
+
+    #[test]
+    fn geometric_sequences_sum_and_advance() {
+        let field = Zp::new(17);
+        let mut current = [field.to_element(3), field.to_element(5)];
+        let ratios = [field.to_element(2), field.to_element(7)];
+        let sum = field
+            .kernels()
+            .geometric_sequences()
+            .unwrap()
+            .try_sum_and_advance_geometric_sequences(GeometricSequenceStepRequest {
+                current: &mut current,
+                ratios: &ratios,
+            })
+            .unwrap();
+        assert_eq!(field.from_element(&sum), 8);
+        assert_eq!(current.map(|value| field.from_element(&value)), [6, 1]);
+
+        let sum = field
+            .kernels()
+            .geometric_sequences()
+            .unwrap()
+            .try_sum_and_advance_geometric_sequences(GeometricSequenceStepRequest {
+                current: &mut current,
+                ratios: &ratios,
+            })
+            .unwrap();
+        assert_eq!(field.from_element(&sum), 7);
+        assert_eq!(current.map(|value| field.from_element(&value)), [12, 7]);
+
+        let before = current;
+        assert!(
+            field
+                .kernels()
+                .geometric_sequences()
+                .unwrap()
+                .try_sum_and_advance_geometric_sequences(GeometricSequenceStepRequest {
+                    current: &mut current,
+                    ratios: &ratios[..1],
+                })
+                .is_none()
+        );
+        assert_eq!(current, before);
+
+        let field = Zp64::new(17);
+        let mut current = [field.to_element(3), field.to_element(5)];
+        let ratios = [field.to_element(2), field.to_element(7)];
+        let sum = field
+            .kernels()
+            .geometric_sequences()
+            .unwrap()
+            .try_sum_and_advance_geometric_sequences(GeometricSequenceStepRequest {
+                current: &mut current,
+                ratios: &ratios,
+            })
+            .unwrap();
+        assert_eq!(field.from_element(&sum), 8);
+        assert_eq!(current.map(|value| field.from_element(&value)), [6, 1]);
     }
 
     #[test]

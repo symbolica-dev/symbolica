@@ -15,9 +15,11 @@ use crate::domains::float::FloatLike;
 use crate::domains::integer::{Integer, IntegerRing};
 use crate::domains::rational::{Fraction, FractionField, FractionNormalization, Q, RationalField};
 use crate::domains::{
-    DensePolynomialExactDivisionRequest, DensePolynomialMulRequest, Derivable, EuclideanDomain,
-    Field, InternalOrdering, RealEmbedding, Ring, RingOps, SelfRing, Set,
-    TotalDegreePolynomialMulRequest,
+    Derivable, EuclideanDomain, Field, InternalOrdering, RealEmbedding, Ring, RingOps, SelfRing,
+    Set,
+};
+use crate::kernels::{
+    DensePolynomialExactDivisionRequest, DensePolynomialMulRequest, TotalDegreePolynomialMulRequest,
 };
 use crate::printer::{AtomPrinter, PrintOptions, PrintState};
 
@@ -3155,7 +3157,7 @@ impl<F: Ring, E: Exponent> MultivariatePolynomial<F, E, LexOrder> {
             *es = to_uni_var(s, &max_degs_rev);
         }
 
-        if let Some(coefficients) = self.ring().polynomial_kernels().and_then(|kernels| {
+        if let Some(coefficients) = self.ring().kernels().polynomial().and_then(|kernels| {
             kernels.try_dense_mul(DensePolynomialMulRequest {
                 output_len: total,
                 left_coefficients: &self.coefficients,
@@ -3654,7 +3656,7 @@ impl<F: Ring, E: Exponent> MultivariatePolynomial<F, E, LexOrder> {
         let right_codes = encode_terms(other);
 
         let mut coefficients = vec![self.ring().zero(); coefficient_count];
-        let specialized = self.ring().polynomial_kernels().and_then(|kernels| {
+        let specialized = self.ring().kernels().polynomial().and_then(|kernels| {
             kernels.try_total_degree_mul(TotalDegreePolynomialMulRequest {
                 output_len: coefficient_count,
                 left_coefficients: &self.coefficients,
@@ -4517,7 +4519,7 @@ impl<F: Ring, E: Exponent> MultivariatePolynomial<F, E, LexOrder> {
             .map(|&index| index as u32)
             .collect::<Vec<_>>();
         if assume_exact
-            && let Some(quotient_terms) = ring.polynomial_kernels().and_then(|kernels| {
+            && let Some(quotient_terms) = ring.kernels().polynomial().and_then(|kernels| {
                 kernels.try_dense_exact_division(DensePolynomialExactDivisionRequest {
                     total,
                     dividend_coefficients: &mut self.coefficients,

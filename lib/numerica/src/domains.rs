@@ -28,6 +28,7 @@ use std::ops::{Add, Deref, Div, Mul, Sub};
 
 use integer::Integer;
 
+use crate::kernels::RingKernels;
 use crate::printer::{PrintOptions, PrintState};
 
 /// The internal ordering trait is used to compare elements of a ring.
@@ -134,96 +135,6 @@ pub trait RingOps<T>: Set {
     fn sub_mul_assign(&self, a: &mut Self::Element, b: T, c: T);
 }
 
-/// A dense-indexed polynomial multiplication request.
-///
-/// The polynomial layer owns the exponent layout. Coefficient domains may use this compact
-/// representation to select a representation-specific convolution kernel.
-pub struct DensePolynomialMulRequest<'a, E> {
-    pub output_len: usize,
-    pub left_coefficients: &'a [E],
-    pub left_indices: &'a [u32],
-    pub right_coefficients: &'a [E],
-    pub right_indices: &'a [u32],
-}
-
-/// A multiplication request for polynomials supported on total-degree simplices.
-///
-/// The polynomial layer splits each exponent vector into two additive codes and supplies lookup
-/// tables that map their sums to compact lexicographic simplex ranks. This lets coefficient
-/// domains specialize accumulation without duplicating monomial-ranking logic.
-pub struct TotalDegreePolynomialMulRequest<'a, E> {
-    pub output_len: usize,
-    pub left_coefficients: &'a [E],
-    pub left_codes: &'a [(usize, usize)],
-    pub right_coefficients: &'a [E],
-    pub right_codes: &'a [(usize, usize)],
-    pub prefix_rank: &'a [u32],
-    pub prefix_remaining: &'a [u8],
-    pub suffix_rank: &'a [u32],
-    pub suffix_code_count: usize,
-}
-
-/// An exact dense-indexed polynomial division request.
-///
-/// Divisibility is guaranteed by the caller. A kernel may consume dividend coefficients after it
-/// decides to handle the request, but must leave them unchanged when returning `None`.
-pub struct DensePolynomialExactDivisionRequest<'a, E> {
-    pub total: usize,
-    pub dividend_coefficients: &'a mut [E],
-    pub dividend_indices: &'a [u32],
-    pub divisor_coefficients: &'a [E],
-    pub divisor_indices: &'a [u32],
-}
-
-/// Optional bulk kernels used by polynomial algorithms.
-///
-/// This capability keeps coefficient-representation-specific algorithms out of the generic
-/// polynomial implementation. A ring exposes it through [`Ring::polynomial_kernels`]; returning
-/// `None` from an individual operation asks the polynomial layer to use its generic fallback.
-pub trait PolynomialKernels<E> {
-    /// Sum the current values of several geometric sequences and advance every sequence by one
-    /// step. Returns `None` when the coefficient representation has no specialized bulk kernel.
-    ///
-    /// The slices have equal lengths. On success, `current[i]` is replaced by
-    /// `current[i] * ratios[i]`, and the returned value is the sum of the original `current`.
-    fn try_geometric_sum_step(&self, _current: &mut [E], _ratios: &[E]) -> Option<E> {
-        None
-    }
-
-    /// Multiply coefficients whose exponents have already been mapped to additive dense indices.
-    ///
-    /// On success, the result must contain only nonzero `(dense_index, coefficient)` pairs in
-    /// strictly increasing index order. The input coefficient/index slices have equal lengths,
-    /// their indices are strictly increasing, and every possible summed index fits in
-    /// `request.output_len`.
-    fn try_dense_mul(&self, _request: DensePolynomialMulRequest<'_, E>) -> Option<Vec<(u32, E)>> {
-        None
-    }
-
-    /// Multiply coefficients on total-degree simplices.
-    ///
-    /// This is separate from [`Self::try_dense_mul`] because compact simplex ranks are not
-    /// additive. A coefficient domain can use the compact rank layout to choose an accumulator
-    /// that avoids materializing the prohibitively large surrounding mixed-radix box.
-    fn try_total_degree_mul(
-        &self,
-        _request: TotalDegreePolynomialMulRequest<'_, E>,
-    ) -> Option<Vec<(u32, E)>> {
-        None
-    }
-
-    /// Divide dense-indexed coefficients exactly by another polynomial.
-    ///
-    /// On success, the quotient follows the same sparse, strictly increasing representation as
-    /// [`Self::try_dense_mul`].
-    fn try_dense_exact_division(
-        &self,
-        _request: DensePolynomialExactDivisionRequest<'_, E>,
-    ) -> Option<Vec<(u32, E)>> {
-        None
-    }
-}
-
 /// A ring is a set with two binary operations, addition and multiplication.
 /// Examples of rings include the integers, rational numbers, and polynomials.
 ///
@@ -286,13 +197,13 @@ pub trait Ring:
             .expect("exact division produced a remainder")
     }
 
-    /// Return coefficient-domain-specific bulk kernels for polynomial algorithms.
+    /// Return coefficient-domain-specific bulk operation kernels.
     ///
-    /// The capability is queried once per polynomial operation; inner coefficient loops remain
-    /// inside the concrete kernel implementation.
+    /// Algorithms query the relevant capability once per bulk operation; its implementation
+    /// performs the inner coefficient loop.
     #[inline]
-    fn polynomial_kernels(&self) -> Option<&dyn PolynomialKernels<Self::Element>> {
-        None
+    fn kernels(&self) -> RingKernels<'_, Self::Element> {
+        RingKernels::empty()
     }
 
     /// Subtract several coefficient products from one accumulator.

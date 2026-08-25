@@ -15,7 +15,8 @@ use std::{
 use rand::Rng;
 
 use crate::{
-    domains::{PolynomialKernels, RingOps, Set},
+    domains::{RingOps, Set},
+    kernels::RingKernels,
     printer::{PrintOptions, PrintState},
     tensors::matrix::Matrix,
 };
@@ -2455,8 +2456,8 @@ impl Ring for IntegerRing {
     }
 
     #[inline]
-    fn polynomial_kernels(&self) -> Option<&dyn PolynomialKernels<Self::Element>> {
-        Some(self)
+    fn kernels(&self) -> RingKernels<'_, Self::Element> {
+        RingKernels::empty().with_polynomial(self)
     }
 
     #[inline]
@@ -4027,11 +4028,12 @@ mod test {
     #[cfg(feature = "float-mpfr")]
     use crate::domains::float::{Float, Real};
     use crate::domains::{
-        DensePolynomialMulRequest, Ring,
+        Ring,
         finite_field::FiniteFieldWorkspace,
         float::F64,
         integer::{IntegerRing, extended_gcd, extended_gcd_i128},
     };
+    use crate::kernels::{DensePolynomialExactDivisionRequest, DensePolynomialMulRequest};
 
     use super::{DoubleInteger, Integer, MultiPrecisionInteger};
 
@@ -4084,7 +4086,8 @@ mod test {
         let right = vec![11.into(), 3_000_000_000i64.into(), (-17).into()];
         let indices = [0, 2, 5];
         let actual_sparse = IntegerRing
-            .polynomial_kernels()
+            .kernels()
+            .polynomial()
             .unwrap()
             .try_dense_mul(DensePolynomialMulRequest {
                 output_len: 11,
@@ -4106,6 +4109,27 @@ mod test {
             }
         }
         assert_eq!(actual, expected);
+    }
+
+    #[test]
+    fn declined_exact_division_preserves_dividend() {
+        let mut dividend = vec![Integer::from(3), Integer::from(5)];
+        let before = dividend.clone();
+        let divisor = [Integer::from(1), Integer::from(1)];
+        let indices = [0, 1];
+        let result = IntegerRing
+            .kernels()
+            .polynomial()
+            .unwrap()
+            .try_dense_exact_division(DensePolynomialExactDivisionRequest {
+                total: 2,
+                dividend_coefficients: &mut dividend,
+                dividend_indices: &indices,
+                divisor_coefficients: &divisor,
+                divisor_indices: &indices,
+            });
+        assert!(result.is_none());
+        assert_eq!(dividend, before);
     }
 
     #[cfg(feature = "gmp")]
@@ -4183,7 +4207,7 @@ mod test {
         let right_coefficients = right.into_iter().map(|term| term.1).collect::<Vec<_>>();
         let output_len = radix.pow(3);
 
-        let actual_sparse = super::polynomial_kernels::try_kronecker_polynomial_mul(
+        let actual_sparse = super::polynomial_kernels::DenseIntegerMul::try_kronecker_for_test(
             output_len,
             &left_coefficients,
             &left_indices,
@@ -4238,7 +4262,7 @@ mod test {
             .collect::<Vec<_>>();
         let indices = (0..300).map(|i| i + i / 100).collect::<Vec<u32>>();
         let output_len = 2 * *indices.last().unwrap() as usize + 1;
-        let actual_sparse = super::polynomial_kernels::try_kronecker_polynomial_mul(
+        let actual_sparse = super::polynomial_kernels::DenseIntegerMul::try_kronecker_for_test(
             output_len, &left, &indices, &right, &indices,
         )
         .unwrap();
@@ -4257,7 +4281,7 @@ mod test {
 
         let left = left.iter().map(Integer::abs).collect::<Vec<_>>();
         let right = right.iter().map(Integer::abs).collect::<Vec<_>>();
-        let actual_sparse = super::polynomial_kernels::try_kronecker_polynomial_mul(
+        let actual_sparse = super::polynomial_kernels::DenseIntegerMul::try_kronecker_for_test(
             output_len, &left, &indices, &right, &indices,
         )
         .unwrap();
@@ -4293,7 +4317,8 @@ mod test {
             .collect::<Vec<_>>();
         let indices = (0..8).collect::<Vec<u32>>();
         let actual_sparse = IntegerRing
-            .polynomial_kernels()
+            .kernels()
+            .polynomial()
             .unwrap()
             .try_dense_mul(DensePolynomialMulRequest {
                 output_len: 15,
