@@ -20,7 +20,7 @@ use super::{
     integer::{Integer, IntegerRing, Z},
 };
 
-#[cfg(feature = "gmp")]
+#[cfg(feature = "integer-gmp")]
 use super::integer::MultiPrecisionInteger;
 
 /// The field of rational numbers.
@@ -839,19 +839,28 @@ impl<T: Into<Integer>> From<(T, T)> for Rational {
     }
 }
 
-#[cfg(feature = "gmp")]
+#[cfg(any(feature = "integer-gmp", feature = "float-mpfr"))]
 impl From<rug::Rational> for Rational {
     fn from(value: rug::Rational) -> Self {
-        let (num, den) = value.into_numer_denom();
-        Q.to_element(
-            MultiPrecisionInteger::from_raw(num).into(),
-            MultiPrecisionInteger::from_raw(den).into(),
-            false,
-        )
+        #[cfg(feature = "integer-gmp")]
+        {
+            let (num, den) = value.into_numer_denom();
+            return Q.to_element(
+                MultiPrecisionInteger::from_raw(num).into(),
+                MultiPrecisionInteger::from_raw(den).into(),
+                false,
+            );
+        }
+        #[cfg(feature = "integer-malachite")]
+        {
+            let value = value.to_string();
+            let (num, den) = value.split_once('/').unwrap_or((&value, "1"));
+            Q.to_element(num.parse().unwrap(), den.parse().unwrap(), false)
+        }
     }
 }
 
-#[cfg(feature = "no_gmp")]
+#[cfg(feature = "float-astro")]
 impl From<malachite_q::Rational> for Rational {
     fn from(value: malachite_q::Rational) -> Self {
         let value = value.to_string();

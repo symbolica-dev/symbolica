@@ -12,7 +12,7 @@ pub enum RoundingDirection {
     Down,
 }
 
-#[cfg(feature = "gmp")]
+#[cfg(feature = "float-mpfr")]
 pub use rug::{
     Assign, Float as MultiPrecisionFloat, Rational as BackendRational,
     float::Constant,
@@ -24,6 +24,15 @@ pub(crate) trait MultiPrecisionFloatRounding {
     fn sub_round(&self, rhs: &Self, prec: u32, direction: RoundingDirection) -> Self;
     fn mul_round(&self, rhs: &Self, prec: u32, direction: RoundingDirection) -> Self;
     fn div_round(&self, rhs: &Self, prec: u32, direction: RoundingDirection) -> Self;
+}
+
+/// Integer operations shared by independently selected integer and float backends.
+pub(crate) trait MultiPrecisionFloatInteger {
+    fn add_integer(self, value: MultiPrecisionInteger) -> Self;
+    fn mul_integer(self, value: MultiPrecisionInteger) -> Self;
+    fn div_integer(self, value: MultiPrecisionInteger) -> Self;
+    fn from_integer(prec: u32, value: MultiPrecisionInteger) -> Self;
+    fn to_integer_exact(&self) -> Option<MultiPrecisionInteger>;
 }
 
 /// Exact rational operations shared by the independently selected integer and float backends.
@@ -39,7 +48,7 @@ pub(crate) trait MultiPrecisionFloatRational {
     fn to_integer_ratio(&self) -> Option<(MultiPrecisionInteger, MultiPrecisionInteger)>;
 }
 
-#[cfg(feature = "gmp")]
+#[cfg(feature = "float-mpfr")]
 fn rug_rounding_direction(direction: RoundingDirection) -> rug::float::Round {
     match direction {
         RoundingDirection::Nearest => rug::float::Round::Nearest,
@@ -48,7 +57,7 @@ fn rug_rounding_direction(direction: RoundingDirection) -> rug::float::Round {
     }
 }
 
-#[cfg(feature = "gmp")]
+#[cfg(feature = "float-mpfr")]
 impl MultiPrecisionFloatRounding for MultiPrecisionFloat {
     fn add_round(&self, rhs: &Self, prec: u32, direction: RoundingDirection) -> Self {
         Self::with_val_round(prec, self + rhs, rug_rounding_direction(direction)).0
@@ -67,14 +76,57 @@ impl MultiPrecisionFloatRounding for MultiPrecisionFloat {
     }
 }
 
-#[cfg(feature = "gmp")]
+#[cfg(all(feature = "float-mpfr", feature = "integer-gmp"))]
+fn rug_integer_from_backend(value: MultiPrecisionInteger) -> rug::Integer {
+    value.into_raw()
+}
+
+#[cfg(all(feature = "float-mpfr", feature = "integer-malachite"))]
+fn rug_integer_from_backend(value: MultiPrecisionInteger) -> rug::Integer {
+    value.to_string().parse().unwrap()
+}
+
+#[cfg(all(feature = "float-mpfr", feature = "integer-gmp"))]
+fn backend_integer_from_rug(value: rug::Integer) -> MultiPrecisionInteger {
+    MultiPrecisionInteger::from_raw(value)
+}
+
+#[cfg(all(feature = "float-mpfr", feature = "integer-malachite"))]
+fn backend_integer_from_rug(value: rug::Integer) -> MultiPrecisionInteger {
+    value.to_string().parse().unwrap()
+}
+
+#[cfg(feature = "float-mpfr")]
+impl MultiPrecisionFloatInteger for MultiPrecisionFloat {
+    fn add_integer(self, value: MultiPrecisionInteger) -> Self {
+        self + rug_integer_from_backend(value)
+    }
+
+    fn mul_integer(self, value: MultiPrecisionInteger) -> Self {
+        self * rug_integer_from_backend(value)
+    }
+
+    fn div_integer(self, value: MultiPrecisionInteger) -> Self {
+        self / rug_integer_from_backend(value)
+    }
+
+    fn from_integer(prec: u32, value: MultiPrecisionInteger) -> Self {
+        Self::with_val(prec, rug_integer_from_backend(value))
+    }
+
+    fn to_integer_exact(&self) -> Option<MultiPrecisionInteger> {
+        self.to_integer().map(backend_integer_from_rug)
+    }
+}
+
+#[cfg(feature = "float-mpfr")]
 impl MultiPrecisionFloatRational for MultiPrecisionFloat {
     fn mul_integer_ratio(self, num: MultiPrecisionInteger, den: MultiPrecisionInteger) -> Self {
-        self * rug::Rational::from((num.into_raw(), den.into_raw()))
+        self * rug::Rational::from((rug_integer_from_backend(num), rug_integer_from_backend(den)))
     }
 
     fn div_integer_ratio(self, num: MultiPrecisionInteger, den: MultiPrecisionInteger) -> Self {
-        self / rug::Rational::from((num.into_raw(), den.into_raw()))
+        self / rug::Rational::from((rug_integer_from_backend(num), rug_integer_from_backend(den)))
     }
 
     fn from_integer_ratio_round(
@@ -83,19 +135,20 @@ impl MultiPrecisionFloatRational for MultiPrecisionFloat {
         prec: u32,
         direction: RoundingDirection,
     ) -> Self {
-        let value = rug::Rational::from((num.into_raw(), den.into_raw()));
+        let value =
+            rug::Rational::from((rug_integer_from_backend(num), rug_integer_from_backend(den)));
         Self::with_val_round(prec, value, rug_rounding_direction(direction)).0
     }
 
     fn to_integer_ratio(&self) -> Option<(MultiPrecisionInteger, MultiPrecisionInteger)> {
         self.to_rational().map(|value| {
             let (num, den) = value.into_numer_denom();
-            (num.into(), den.into())
+            (backend_integer_from_rug(num), backend_integer_from_rug(den))
         })
     }
 }
 
-#[cfg(feature = "no_gmp")]
+#[cfg(feature = "float-astro")]
 mod astro {
     use std::{
         cell::RefCell,
@@ -359,6 +412,28 @@ mod astro {
                     .div(&rhs.value, precision(prec), rounding_mode(direction)),
                 prec,
             }
+        }
+    }
+
+    impl super::MultiPrecisionFloatInteger for MultiPrecisionFloat {
+        fn add_integer(self, value: MultiPrecisionInteger) -> Self {
+            self + value
+        }
+
+        fn mul_integer(self, value: MultiPrecisionInteger) -> Self {
+            self * value
+        }
+
+        fn div_integer(self, value: MultiPrecisionInteger) -> Self {
+            self / value
+        }
+
+        fn from_integer(prec: u32, value: MultiPrecisionInteger) -> Self {
+            Self::with_val(prec, value)
+        }
+
+        fn to_integer_exact(&self) -> Option<MultiPrecisionInteger> {
+            self.to_integer()
         }
     }
 
@@ -1375,7 +1450,7 @@ mod astro {
     }
 }
 
-#[cfg(feature = "no_gmp")]
+#[cfg(feature = "float-astro")]
 pub use astro::{
     Assign, BackendRational, CompleteRound, Constant, IntoMultiPrecisionFloat, MultiPrecisionFloat,
     Pow,

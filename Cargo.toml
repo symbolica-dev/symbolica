@@ -32,11 +32,19 @@ inherits = "dev"
 opt-level = 3
 
 [features]
-default = ["tracing_max_level_info", "faster_alloc", "gmp", "native_code_generation"]
+default = [
+    "tracing_max_level_info",
+    "faster_alloc",
+    "integer-gmp",
+    "float-mpfr",
+    "native_code_generation",
+]
 faster_alloc = ["mimalloc"]
-gmp = ["dep:rug", "numerica/gmp", "graphica/gmp"]
-no_gmp = ["numerica/no_gmp", "graphica/no_gmp"]
-wasm = ["no_gmp", "binary_size", "dep:getrandom"]
+integer-gmp = ["dep:rug", "numerica/integer-gmp", "graphica/integer-gmp"]
+integer-malachite = ["numerica/integer-malachite", "graphica/integer-malachite"]
+float-mpfr = ["numerica/float-mpfr", "graphica/float-mpfr"]
+float-astro = ["numerica/float-astro", "graphica/float-astro"]
+wasm = ["integer-malachite", "float-astro", "binary_size", "dep:getrandom"]
 native_code_generation = ["dep:libloading", "dep:symjit"]
 # sort functions based on an argument-by-argument comparison
 full_fn_cmp = []

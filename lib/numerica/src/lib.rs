@@ -34,10 +34,14 @@
 //! assert_eq!(r.into_vec(), [(-1, 3), (2, 3), (0, 1)]);
 //! ```
 //! Solution: $(-1/3, 2/3, 0)$.
-#[cfg(all(feature = "gmp", feature = "no_gmp"))]
-compile_error!(
-    "`gmp` and `no_gmp` are mutually exclusive. Use `--no-default-features --features no_gmp` for the Malachite backend."
-);
+#[cfg(all(feature = "integer-gmp", feature = "integer-malachite"))]
+compile_error!("`integer-gmp` and `integer-malachite` are mutually exclusive");
+#[cfg(not(any(feature = "integer-gmp", feature = "integer-malachite")))]
+compile_error!("select an integer backend: `integer-gmp` or `integer-malachite`");
+#[cfg(all(feature = "float-mpfr", feature = "float-astro"))]
+compile_error!("`float-mpfr` and `float-astro` are mutually exclusive");
+#[cfg(not(any(feature = "float-mpfr", feature = "float-astro")))]
+compile_error!("select a float backend: `float-mpfr` or `float-astro`");
 
 pub mod combinatorics;
 pub mod domains;

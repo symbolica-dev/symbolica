@@ -2638,7 +2638,7 @@ impl_atom_eq_for_num!(
     |other: &&crate::coefficient::CoefficientView<'_>| (*other).to_owned();
 );
 
-#[cfg(feature = "gmp")]
+#[cfg(feature = "integer-gmp")]
 impl_atom_eq_for_coefficient!(rug::Integer, rug::Rational);
 
 impl Ord for AtomView<'_> {
