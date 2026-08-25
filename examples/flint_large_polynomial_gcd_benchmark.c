@@ -1,8 +1,10 @@
 #define _POSIX_C_SOURCE 200809L
 
 #include <flint/flint.h>
+#include <flint/fmpz.h>
 #include <flint/fmpz_mpoly.h>
 
+#include <stdarg.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
@@ -25,12 +27,59 @@ static int compare_double(const void *left, const void *right)
     return (a > b) - (a < b);
 }
 
+static size_t append_checked(char *buffer, size_t capacity, size_t length,
+                             const char *format, ...)
+{
+    va_list arguments;
+    va_start(arguments, format);
+    int written = vsnprintf(buffer + length, capacity - length, format, arguments);
+    va_end(arguments);
+
+    if (written < 0 || (size_t) written >= capacity - length)
+    {
+        fprintf(stderr, "Polynomial expression buffer is too small\n");
+        exit(1);
+    }
+    return length + (size_t) written;
+}
+
+static void build_linear_expression(char *output, size_t capacity,
+                                    const char *const *weights, const int *signs,
+                                    slong variable_count)
+{
+    size_t length = 0;
+    length = append_checked(output, capacity, length, "1");
+    for (slong variable = 0; variable < variable_count; variable++)
+    {
+        length = append_checked(output, capacity, length, "%c%s*x%ld",
+                                signs[variable] < 0 ? '-' : '+', weights[variable],
+                                variable + 1);
+    }
+}
+
+static void build_sparse_expression(char *output, size_t capacity,
+                                    slong variable_count, ulong degree)
+{
+    static const ulong coefficients[] = {1, 2, 3, 5, 7, 11, 13, 17};
+    size_t length = 0;
+    length = append_checked(output, capacity, length, "1");
+    for (slong variable = 0; variable < variable_count; variable++)
+    {
+        if (coefficients[variable] == 1)
+            length = append_checked(output, capacity, length, "+x%ld^%lu",
+                                    variable + 1, degree);
+        else
+            length = append_checked(output, capacity, length, "+%lu*x%ld^%lu",
+                                    coefficients[variable], variable + 1, degree);
+    }
+}
+
 static void construct_power(fmpz_mpoly_t output, fmpz_mpoly_t base,
-                            const char *expression, slong constant,
+                            const char *expression, ulong degree, slong constant,
                             const char **variables, const fmpz_mpoly_ctx_t context)
 {
     if (fmpz_mpoly_set_str_pretty(base, expression, variables, context) != 0 ||
-        !fmpz_mpoly_pow_ui(output, base, 7, context))
+        !fmpz_mpoly_pow_ui(output, base, degree, context))
     {
         fprintf(stderr, "Could not construct polynomial\n");
         exit(1);
@@ -69,9 +118,37 @@ static void run_backend(const char *name, gcd_backend backend,
     fmpz_mpoly_clear(result, context);
 }
 
+static void run_product_benchmark(fmpz_mpoly_t ag, fmpz_mpoly_t bg,
+                                  const fmpz_mpoly_t a, const fmpz_mpoly_t b,
+                                  const fmpz_mpoly_t g, int samples,
+                                  const fmpz_mpoly_ctx_t context)
+{
+    double *timings = flint_malloc((size_t) samples * sizeof(double));
+    for (int sample = 0; sample < samples; sample++)
+    {
+        if (sample > 0)
+        {
+            fmpz_mpoly_clear(ag, context);
+            fmpz_mpoly_clear(bg, context);
+            fmpz_mpoly_init(ag, context);
+            fmpz_mpoly_init(bg, context);
+        }
+        double start = now_seconds();
+        fmpz_mpoly_mul(ag, a, g, context);
+        fmpz_mpoly_mul(bg, b, g, context);
+        timings[sample] = now_seconds() - start;
+    }
+
+    qsort(timings, (size_t) samples, sizeof(double), compare_double);
+    printf("FLINT products %10.3f ms  terms ag/bg %ld/%ld\n",
+           timings[samples / 2] * 1000.0,
+           fmpz_mpoly_length(ag, context), fmpz_mpoly_length(bg, context));
+    flint_free(timings);
+}
+
 int main(void)
 {
-    const char *variables[] = {"x1", "x2", "x3", "x4", "x5", "x6", "x7"};
+    const char *variables[] = {"x1", "x2", "x3", "x4", "x5", "x6", "x7", "x8"};
     const char *benchmark_case = getenv("GCD_BENCH_CASE");
     if (benchmark_case == NULL)
         benchmark_case = "dense";
@@ -90,19 +167,44 @@ int main(void)
     if (strcmp(backend, "all") != 0 &&
         strcmp(backend, "hensel") != 0 &&
         strcmp(backend, "zippel") != 0 &&
-        strcmp(backend, "zippel2") != 0)
+        strcmp(backend, "zippel2") != 0 &&
+        strcmp(backend, "product") != 0)
     {
-        fprintf(stderr, "GCD_BENCH_BACKEND must be all, hensel, zippel, or zippel2\n");
+        fprintf(stderr, "GCD_BENCH_BACKEND must be all, hensel, zippel, zippel2, or product\n");
         return 1;
     }
     int samples = sample_override ? atoi(sample_override) : 1;
     if (samples < 1)
         samples = 1;
+    const char *variable_override = getenv("GCD_BENCH_NVARS");
+    slong variable_count = variable_override ? atol(variable_override) : 7;
+    if (variable_count < 2 || variable_count > 8)
+    {
+        fprintf(stderr, "GCD_BENCH_NVARS must be between 2 and 8\n");
+        return 1;
+    }
+    const char *degree_override = getenv("GCD_BENCH_DEGREE");
+    long degree_value = degree_override ? atol(degree_override) : 7;
+    if (degree_value < 1)
+    {
+        fprintf(stderr, "GCD_BENCH_DEGREE must be positive\n");
+        return 1;
+    }
+    ulong degree = (ulong) degree_value;
+    const char *coefficient_bits_override = getenv("GCD_BENCH_COEFFICIENT_BITS");
+    long coefficient_bits_value = coefficient_bits_override
+        ? atol(coefficient_bits_override) : 30;
+    if (coefficient_bits_value < 8 || coefficient_bits_value > 1024)
+    {
+        fprintf(stderr, "GCD_BENCH_COEFFICIENT_BITS must be between 8 and 1024\n");
+        return 1;
+    }
+    ulong coefficient_bits = (ulong) coefficient_bits_value;
 
     flint_set_num_threads(1);
 
     fmpz_mpoly_ctx_t context;
-    fmpz_mpoly_ctx_init(context, 7, ORD_LEX);
+    fmpz_mpoly_ctx_init(context, variable_count, ORD_LEX);
     fmpz_mpoly_t base, a, b, g, ag, bg;
     fmpz_mpoly_init(base, context);
     fmpz_mpoly_init(a, context);
@@ -110,46 +212,73 @@ int main(void)
     fmpz_mpoly_init(g, context);
     fmpz_mpoly_init(ag, context);
     fmpz_mpoly_init(bg, context);
-    int benchmark_gap = 0;
+    ulong benchmark_gap = 0;
 
     const int high_height = strcmp(benchmark_case, "high-height") == 0;
-    const char *a_expression = high_height
-        ? "1+1000000007*x1+1000000009*x2+1000000033*x3+1000000087*x4+1000000093*x5+1000000097*x6+1000000103*x7"
-        : "1+3*x1+5*x2+7*x3+9*x4+11*x5+13*x6+15*x7";
-    const char *b_expression = high_height
-        ? "1-1000000007*x1-1000000009*x2-1000000033*x3+1000000087*x4-1000000093*x5-1000000097*x6+1000000103*x7"
-        : "1-3*x1-5*x2-7*x3+9*x4-11*x5-13*x6+15*x7";
-    construct_power(a, base, a_expression, -1, variables, context);
-    construct_power(b, base, b_expression, 1, variables, context);
+    static const char *small_weights[] = {"3", "5", "7", "9", "11", "13", "15", "17"};
+    static const char *thirty_bit_weights[] = {
+        "1000000007", "1000000009", "1000000033", "1000000087",
+        "1000000093", "1000000097", "1000000103", "1000000123"};
+    static const ulong weight_offsets[] = {7, 9, 33, 87, 93, 97, 103, 123};
+    char *generated_weights[] = {NULL, NULL, NULL, NULL, NULL, NULL, NULL, NULL};
+    static const int b_signs[] = {-1, -1, -1, 1, -1, -1, 1, -1};
+    int positive_signs[] = {1, 1, 1, 1, 1, 1, 1, 1};
+    int gcd_signs[] = {1, 1, 1, 1, 1, 1, 1, 1};
+    gcd_signs[variable_count - 1] = -1;
+    const char *const *weights = small_weights;
+    if (high_height && coefficient_bits == 30)
+    {
+        weights = thirty_bit_weights;
+    }
+    else if (high_height)
+    {
+        fmpz_t weight;
+        fmpz_init(weight);
+        for (slong variable = 0; variable < variable_count; variable++)
+        {
+            fmpz_one(weight);
+            fmpz_mul_2exp(weight, weight, coefficient_bits - 1);
+            fmpz_add_ui(weight, weight, weight_offsets[variable]);
+            generated_weights[variable] = fmpz_get_str(NULL, 10, weight);
+        }
+        fmpz_clear(weight);
+        weights = (const char *const *) generated_weights;
+    }
+
+    char a_expression[4096];
+    char b_expression[4096];
+    char g_expression[4096];
+    build_linear_expression(a_expression, sizeof(a_expression), weights,
+                            positive_signs, variable_count);
+    build_linear_expression(b_expression, sizeof(b_expression), weights,
+                            b_signs, variable_count);
+    construct_power(a, base, a_expression, degree, -1, variables, context);
+    construct_power(b, base, b_expression, degree, 1, variables, context);
     if (strcmp(benchmark_case, "dense") == 0 || high_height)
     {
-        const char *g_expression = high_height
-            ? "1+1000000007*x1+1000000009*x2+1000000033*x3+1000000087*x4+1000000093*x5+1000000097*x6-1000000103*x7"
-            : "1+3*x1+5*x2+7*x3+9*x4+11*x5+13*x6-15*x7";
-        construct_power(g, base, g_expression, 3, variables, context);
+        build_linear_expression(g_expression, sizeof(g_expression), weights,
+                                gcd_signs, variable_count);
+        construct_power(g, base, g_expression, degree, 3, variables, context);
     }
     else
     {
-        char high_gap_expression[512];
-        const char *g_expression;
         if (strcmp(benchmark_case, "sparse") == 0)
         {
-            g_expression = "1+x1^7+2*x2^7+3*x3^7+5*x4^7+7*x5^7+11*x6^7+13*x7^7";
+            build_sparse_expression(g_expression, sizeof(g_expression),
+                                    variable_count, degree);
         }
         else
         {
             const char *gap_override = getenv("GCD_BENCH_GAP");
-            benchmark_gap = gap_override ? atoi(gap_override) : 10;
-            if (benchmark_gap < 1)
+            long gap_value = gap_override ? atol(gap_override) : 10;
+            if (gap_value < 1)
             {
                 fprintf(stderr, "GCD_BENCH_GAP must be positive\n");
                 return 1;
             }
-            snprintf(high_gap_expression, sizeof(high_gap_expression),
-                     "1+x1^%d+2*x2^%d+3*x3^%d+5*x4^%d+7*x5^%d+11*x6^%d+13*x7^%d",
-                     benchmark_gap, benchmark_gap, benchmark_gap, benchmark_gap,
-                     benchmark_gap, benchmark_gap, benchmark_gap);
-            g_expression = high_gap_expression;
+            benchmark_gap = (ulong) gap_value;
+            build_sparse_expression(g_expression, sizeof(g_expression),
+                                    variable_count, benchmark_gap);
         }
         if (fmpz_mpoly_set_str_pretty(g, g_expression, variables, context) != 0)
         {
@@ -157,12 +286,13 @@ int main(void)
             return 1;
         }
     }
-    fmpz_mpoly_mul(ag, a, g, context);
-    fmpz_mpoly_mul(bg, b, g, context);
-
-    printf("FLINT %s, case %s, samples %d\n", flint_version, benchmark_case, samples);
+    printf("FLINT %s, case %s, variables %ld, degree %lu, samples %d\n",
+           flint_version, benchmark_case, variable_count, degree, samples);
+    if (high_height)
+        printf("coefficient_bits %lu\n", coefficient_bits);
     if (benchmark_gap > 0)
-        printf("gap %d\n", benchmark_gap);
+        printf("gap %lu\n", benchmark_gap);
+    run_product_benchmark(ag, bg, a, b, g, samples, context);
     if (strcmp(backend, "all") == 0 || strcmp(backend, "hensel") == 0)
         run_backend("hensel", fmpz_mpoly_gcd_hensel, ag, bg, g, samples, context);
     if (strcmp(backend, "all") == 0 || strcmp(backend, "zippel") == 0)
@@ -177,6 +307,9 @@ int main(void)
     fmpz_mpoly_clear(ag, context);
     fmpz_mpoly_clear(bg, context);
     fmpz_mpoly_ctx_clear(context);
+    for (slong variable = 0; variable < variable_count; variable++)
+        if (generated_weights[variable] != NULL)
+            flint_free(generated_weights[variable]);
     flint_cleanup_master();
     return 0;
 }

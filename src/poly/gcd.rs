@@ -60,7 +60,7 @@ fn should_use_hu_monagan<E: PositiveExponent>(
     }
 
     let nterms = a.nterms() + b.nterms();
-    const SPARSITY_MARGIN: u32 = 4;
+    const SPARSITY_MARGIN: u32 = 8;
 
     let mut box_size = Integer::from(1);
     let mut cofactor_box_size = Integer::from(1);
@@ -77,6 +77,24 @@ fn should_use_hu_monagan<E: PositiveExponent>(
 
     cofactor_box_size * SPARSITY_MARGIN < box_size
         || Integer::from(nterms) * SPARSITY_MARGIN < box_size
+}
+
+/// Build the mixed-radix Kronecker powers used by Hu-Monagan interpolation.
+///
+/// The interpolated image stores its encoded exponent as `u32`, so handing an overflowing
+/// range to the sampler would make distinct monomials collide and prevent interpolation from
+/// ever stabilizing.
+fn hu_monagan_kronecker_powers(radices: &[u32], start_index: usize) -> Option<(Vec<u32>, u64)> {
+    let mut product = 1u64;
+    let mut powers = Vec::with_capacity(radices.len().saturating_sub(start_index));
+    for radix in radices.iter().skip(start_index) {
+        product = product.checked_mul(*radix as u64)?;
+        if product > u32::MAX as u64 {
+            return None;
+        }
+        powers.push(product as u32);
+    }
+    Some((powers, product))
 }
 
 fn modular_gcd_prime_iterator() -> PrimeIteratorU64 {
@@ -2799,20 +2817,28 @@ impl<E: PositiveExponent> MultivariatePolynomial<IntegerRing, E> {
                 p.div_assign(coeff, &initial_power);
             }
 
+            for (sample_point, expected) in sample_points.iter().zip(&row).skip(t) {
+                // Do not use `replace` here: encoded Kronecker exponents can use the full u32
+                // range, whereas the generic exponent conversion passes through i32.
+                let mut evaluated = p.zero();
+                for (coefficient, exponent) in sol.iter().zip(&monomials) {
+                    p.add_assign(
+                        &mut evaluated,
+                        &p.mul(coefficient, &p.pow(sample_point, *exponent)),
+                    );
+                }
+                if evaluated != *expected {
+                    debug!("Sparse interpolation row at x^{} failed sample check", i);
+                    return None;
+                }
+            }
+
             let mut row_poly = res.zero();
             for (coeff, e) in sol.into_iter().zip(&monomials) {
                 exp_u32[0] = i;
                 exp_u32[1] = *e as u32;
                 row_poly.append_monomial(coeff, &exp_u32);
                 exp_u32[1] = 0;
-            }
-
-            for (sample_point, expected) in sample_points.iter().zip(&row).skip(t) {
-                let evaluated = row_poly.replace(1, sample_point);
-                if evaluated.coefficient(&exp_u32).unwrap_or(p.zero()) != *expected {
-                    debug!("Sparse interpolation row at x^{} failed sample check", i);
-                    return None;
-                }
             }
 
             res = res + row_poly;
@@ -2923,6 +2949,25 @@ impl<E: PositiveExponent> MultivariatePolynomial<IntegerRing, E> {
                 p.div_assign(coeff, &initial_power);
             }
 
+            for (sample_point, expected) in sample_points.iter().zip(&row).skip(t) {
+                // Keep the encoded exponent unsigned for the same reason as in the univariate
+                // interpolation path above.
+                let mut evaluated = p.zero();
+                for (coefficient, exponent) in sol.iter().zip(&monomials) {
+                    p.add_assign(
+                        &mut evaluated,
+                        &p.mul(coefficient, &p.pow(sample_point, *exponent)),
+                    );
+                }
+                if evaluated != *expected {
+                    debug!(
+                        "Sparse interpolation bivariate row x^{} y^{} failed sample check",
+                        e0, e1
+                    );
+                    return None;
+                }
+            }
+
             let mut row_poly = images[0].zero();
             for (coeff, e) in sol.into_iter().zip(&monomials) {
                 exp[0] = e0;
@@ -2930,19 +2975,6 @@ impl<E: PositiveExponent> MultivariatePolynomial<IntegerRing, E> {
                 exp[2] = *e as u32;
                 row_poly.append_monomial(coeff, &exp);
                 exp[2] = 0;
-            }
-
-            exp[0] = e0;
-            exp[1] = e1;
-            for (sample_point, expected) in sample_points.iter().zip(&row).skip(t) {
-                let evaluated = row_poly.replace(2, sample_point);
-                if evaluated.coefficient(&exp).unwrap_or(p.zero()) != *expected {
-                    debug!(
-                        "Sparse interpolation bivariate row x^{} y^{} failed sample check",
-                        e0, e1
-                    );
-                    return None;
-                }
             }
 
             res = res + row_poly;
@@ -3035,11 +3067,10 @@ impl<E: PositiveExponent> MultivariatePolynomial<IntegerRing, E> {
                 *rr += 1;
             }
 
-            let mut powers = vec![r[1]];
-            for (i, r) in r.iter().skip(1).enumerate().skip(1) {
-                powers.push(powers[i - 1] * r);
-            }
-            let ri_prod = *powers.last().unwrap() as u64;
+            let Some((powers, ri_prod)) = hu_monagan_kronecker_powers(&r, 1) else {
+                debug!("Hu-Monagan Kronecker range does not fit in u32; using Zippel");
+                return None;
+            };
 
             let mut h = h_zero.clone();
             let mut m = Integer::one();
@@ -3316,11 +3347,10 @@ impl<E: PositiveExponent> MultivariatePolynomial<IntegerRing, E> {
                 *rr += 1;
             }
 
-            let mut powers = vec![r[start_exp]];
-            for (i, r) in r.iter().skip(start_exp).enumerate().skip(1) {
-                powers.push(powers[i - 1] * r);
-            }
-            let ri_prod = *powers.last().unwrap() as u64;
+            let Some((powers, ri_prod)) = hu_monagan_kronecker_powers(&r, start_exp) else {
+                debug!("Bivariate Hu-Monagan Kronecker range does not fit in u32; using Zippel");
+                return None;
+            };
 
             let mut h = h_zero.clone();
             let mut m = Integer::one();
@@ -4454,6 +4484,32 @@ mod tests {
     use super::*;
     use crate::atom::AtomCore;
     use crate::parse;
+
+    #[test]
+    fn hu_monagan_large_kronecker_exponents() {
+        let (powers, range) =
+            hu_monagan_kronecker_powers(&[0, 22, 22, 22, 22, 22, 22, 22], 1).unwrap();
+        assert_eq!(powers.last(), Some(&2_494_357_888));
+        assert_eq!(range, 2_494_357_888);
+        assert!(range > i32::MAX as u64);
+        assert!(hu_monagan_kronecker_powers(&[0, 24, 24, 24, 24, 24, 24, 24], 1).is_none());
+
+        let mut polynomials = [
+            parse!("1+x1+2*x2+3*x3+4*x4+5*x5+6*x6+7*x7+8*x8").to_polynomial::<_, u16>(&Z, None),
+            parse!("1-x1+2*x2-3*x3+4*x4-5*x5+6*x6-7*x7+8*x8").to_polynomial::<_, u16>(&Z, None),
+            parse!("1+x1^20+2*x2^20+3*x3^20+5*x4^20+7*x5^20+11*x6^20+13*x7^20+17*x8^20")
+                .to_polynomial::<_, u16>(&Z, None),
+        ];
+        MultivariatePolynomial::unify_variables_list(&mut polynomials);
+        let [a, b, gcd] = polynomials;
+        let ag = &a * &gcd;
+        let bg = &b * &gcd;
+        let bounds = (0..gcd.nvars())
+            .map(|variable| gcd.degree(variable))
+            .collect::<Vec<_>>();
+
+        assert_eq!(ag.gcd_hu_monagan(&bg, &bounds), Some(gcd));
+    }
 
     #[test]
     fn projective_integer_gcd_reconstruction_with_large_coefficients() {
