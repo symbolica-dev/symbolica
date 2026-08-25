@@ -13,6 +13,7 @@
 //!
 //! An extension of the ring trait is the [`EuclideanDomain`] trait, which adds the ability to compute remainders, quotients, and gcds.
 //! Another extension is the [`Field`] trait, which adds the ability to divide and invert elements.
+//! Rings with a meaningful random distribution can separately implement [`SampleableRing`].
 pub mod algebraic;
 pub mod atom;
 pub mod factorized_rational_polynomial;

@@ -7,11 +7,11 @@ use crate::{
 };
 
 use super::{
-    Derivable, EuclideanDomain, Field, InternalOrdering, Ring, SelfRing, integer::Integer,
+    Derivable, EuclideanDomain, Field, InternalOrdering, Ring, SampleableRing, SelfRing,
+    integer::Integer,
 };
 
 use dyn_clone::DynClone;
-use rand::Rng;
 
 pub trait Map: Fn(AtomView, &mut Atom) -> bool + DynClone + Send + Sync {}
 dyn_clone::clone_trait_object!(Map);
@@ -256,11 +256,6 @@ impl Ring for AtomField {
         }
     }
 
-    fn sample(&self, rng: &mut impl rand::RngCore, range: (i64, i64)) -> Self::Element {
-        let r = rng.random_range(range.0..range.1);
-        Atom::num(r)
-    }
-
     fn nth(&self, n: Integer) -> Self::Element {
         Atom::num(n)
     }
@@ -277,6 +272,18 @@ impl Ring for AtomField {
         f: &mut W,
     ) -> Result<bool, std::fmt::Error> {
         element.as_view().format(f, opts, state)
+    }
+}
+
+impl SampleableRing for AtomField {
+    type SamplingPolicy = std::ops::RangeInclusive<i64>;
+
+    fn sample<R: rand::RngCore + ?Sized>(
+        &self,
+        rng: &mut R,
+        policy: &Self::SamplingPolicy,
+    ) -> Self::Element {
+        self.sample_small_integer(rng, policy.clone())
     }
 }
 
