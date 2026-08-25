@@ -1693,7 +1693,7 @@ impl UnivariatePolynomial<RationalField> {
             rational_function_field,
         );
 
-        let resultant = real_in_y.resultant(&imaginary_in_y);
+        let resultant = real_in_y.resultant_euclidean(&imaginary_in_y);
         let mut projection = resultant
             .numerator
             .map_coeff(|c| c.to_rational(), Q)

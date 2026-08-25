@@ -2167,7 +2167,7 @@ impl<E: PositiveExponent> GroebnerBasis<RationalPolynomialField<IntegerRing, E>,
         let defining_polynomial = quotient.poly().to_univariate_from_univariate(0);
         let derivative = defining_polynomial.derivative();
         if !derivative.is_zero() {
-            let discriminant = defining_polynomial.resultant_prs(&derivative);
+            let discriminant = defining_polynomial.resultant_brown(&derivative);
             collect_coefficient(
                 &discriminant,
                 &solve_variables,
@@ -2183,7 +2183,7 @@ impl<E: PositiveExponent> GroebnerBasis<RationalPolynomialField<IntegerRing, E>,
             elimination_polynomial.to_univariate_from_univariate(elimination_variable);
         let derivative = elimination_polynomial.derivative();
         if !derivative.is_zero() {
-            let discriminant = elimination_polynomial.resultant_prs(&derivative);
+            let discriminant = elimination_polynomial.resultant_brown(&derivative);
             collect_coefficient(
                 &discriminant,
                 &solve_variables,

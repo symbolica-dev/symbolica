@@ -2765,7 +2765,7 @@ impl<R: Field + PolynomialGCD<E>, E: PositiveExponent>
                 let g_uni = g_multi.to_univariate(alpha);
 
                 let (r, linear_subresultant) =
-                    g_uni.resultant_prs_with_linear_subresultant(&poly_uni);
+                    g_uni.resultant_brown_with_linear_subresultant(&poly_uni);
 
                 let d = r.derivative(v);
                 if r.gcd(&d).is_constant() {
