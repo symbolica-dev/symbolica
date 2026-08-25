@@ -5,16 +5,17 @@
 use std::{
     cmp::Ordering,
     collections::HashMap,
-    ops::{Add, Div, Mul, Neg, Sub},
+    ops::{Add, Div, Mul, Neg, RangeInclusive, Sub},
     sync::{Arc, LazyLock, OnceLock, RwLock},
 };
 
 use numerica::domains::float::{ComplexBall, Float, RealBall};
+use rand::Rng;
 
 use crate::{
     atom::Atom,
     domains::{
-        EuclideanDomain, Field, InternalOrdering, Ring, RingOps, SelfRing, Set,
+        EuclideanDomain, Field, InternalOrdering, Ring, RingOps, SampleableRing, SelfRing, Set,
         algebraic::{AlgebraicExtension, AlgebraicNumber},
         float::{Complex, F64, FloatField, FloatLike, Real, SingleFloat},
         integer::{Integer, IntegerRing, Z},
@@ -39,6 +40,19 @@ use super::{
 pub struct UnivariatePolynomialRing<R: Ring> {
     ring: R,
     variable: Arc<PolyVariable>,
+}
+
+/// Sampling policy for a univariate polynomial ring.
+///
+/// A degree is sampled from `degree`, then every coefficient through that
+/// degree is sampled using `coefficient`. A zero leading coefficient can make
+/// the resulting polynomial's actual degree smaller.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct UnivariatePolynomialSamplingPolicy<P> {
+    /// Inclusive range from which the degree bound is sampled.
+    pub degree: RangeInclusive<usize>,
+    /// Policy used to sample every coefficient.
+    pub coefficient: P,
 }
 
 impl<R: Ring> UnivariatePolynomialRing<R> {
@@ -195,10 +209,6 @@ impl<R: Ring> Ring for UnivariatePolynomialRing<R> {
         a.try_div(b)
     }
 
-    fn sample(&self, _rng: &mut impl rand::RngCore, _range: (i64, i64)) -> Self::Element {
-        todo!("Sampling a polynomial is not possible yet")
-    }
-
     fn format<W: std::fmt::Write>(
         &self,
         element: &Self::Element,
@@ -211,6 +221,23 @@ impl<R: Ring> Ring for UnivariatePolynomialRing<R> {
 
     fn has_independent_elements(&self) -> bool {
         self.ring.has_independent_elements()
+    }
+}
+
+impl<R: SampleableRing> SampleableRing for UnivariatePolynomialRing<R> {
+    type SamplingPolicy = UnivariatePolynomialSamplingPolicy<R::SamplingPolicy>;
+
+    fn sample<G: rand::RngCore + ?Sized>(
+        &self,
+        rng: &mut G,
+        policy: &Self::SamplingPolicy,
+    ) -> Self::Element {
+        let degree = rng.random_range(policy.degree.clone());
+        let coefficients = (0..=degree)
+            .map(|_| self.ring.sample(rng, &policy.coefficient))
+            .collect();
+
+        UnivariatePolynomial::from_coefficients(&self.ring, coefficients, self.variable.clone())
     }
 }
 

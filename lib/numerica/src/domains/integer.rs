@@ -12,8 +12,6 @@ use std::{
     str::FromStr,
 };
 
-use rand::Rng;
-
 use crate::{
     domains::{RingOps, Set},
     kernels::RingKernels,
@@ -22,7 +20,7 @@ use crate::{
 };
 
 use super::{
-    EuclideanDomain, Field, InternalOrdering, OrderedRing, Ring, SelfRing,
+    EuclideanDomain, Field, InternalOrdering, OrderedRing, Ring, SampleableRing, SelfRing,
     finite_field::{
         FiniteField, FiniteFieldCore, FiniteFieldElement, FiniteFieldWorkspace, Mersenne32,
         Mersenne64, PrimeIteratorU64, ToFiniteField, Two, Z2, Zp, Zp64,
@@ -2552,11 +2550,6 @@ impl Ring for IntegerRing {
         *accumulator = Integer::from_double(small);
     }
 
-    fn sample(&self, rng: &mut impl rand::RngCore, range: (i64, i64)) -> Self::Element {
-        let r = rng.random_range(range.0..range.1);
-        Integer::Single(r)
-    }
-
     fn format<W: std::fmt::Write>(
         &self,
         element: &Self::Element,
@@ -2569,6 +2562,19 @@ impl Ring for IntegerRing {
 
     fn has_independent_elements(&self) -> bool {
         true
+    }
+}
+
+impl SampleableRing for IntegerRing {
+    type SamplingPolicy = std::ops::RangeInclusive<i64>;
+
+    #[inline]
+    fn sample<R: rand::RngCore + ?Sized>(
+        &self,
+        rng: &mut R,
+        policy: &Self::SamplingPolicy,
+    ) -> Self::Element {
+        super::sample_small_integer(self, rng, policy.clone())
     }
 }
 
@@ -3875,11 +3881,6 @@ impl Ring for MultiPrecisionIntegerRing {
         mp_try_div_exact(a, b)
     }
 
-    fn sample(&self, rng: &mut impl rand::RngCore, range: (i64, i64)) -> Self::Element {
-        let r = rng.random_range(range.0..range.1);
-        MultiPrecisionInteger::from(r)
-    }
-
     fn format<W: std::fmt::Write>(
         &self,
         element: &Self::Element,
@@ -3898,6 +3899,19 @@ impl Ring for MultiPrecisionIntegerRing {
 
     fn has_independent_elements(&self) -> bool {
         true
+    }
+}
+
+impl SampleableRing for MultiPrecisionIntegerRing {
+    type SamplingPolicy = std::ops::RangeInclusive<i64>;
+
+    #[inline]
+    fn sample<R: rand::RngCore + ?Sized>(
+        &self,
+        rng: &mut R,
+        policy: &Self::SamplingPolicy,
+    ) -> Self::Element {
+        super::sample_small_integer(self, rng, policy.clone())
     }
 }
 

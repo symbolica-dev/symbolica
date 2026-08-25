@@ -38,7 +38,8 @@ use crate::{
 };
 
 use super::{
-    EuclideanDomain, Field, InternalOrdering, OrderedRing, RealEmbedding, Ring, SelfRing,
+    EuclideanDomain, Field, InternalOrdering, OrderedRing, RealEmbedding, Ring, SampleableRing,
+    SelfRing,
     finite_field::{FiniteField, FiniteFieldCore, FiniteFieldWorkspace, ToFiniteField},
     integer::{Integer, IntegerRing, Z},
     rational::Rational,
@@ -2082,10 +2083,30 @@ impl<R: EuclideanDomain> Ring for AlgebraicExtension<R> {
         }
     }
 
-    /// Sample a polynomial.
-    fn sample(&self, rng: &mut impl rand::RngCore, range: (i64, i64)) -> Self::Element {
+    fn format<W: std::fmt::Write>(
+        &self,
+        element: &Self::Element,
+        opts: &crate::printer::PrintOptions,
+        state: crate::printer::PrintState,
+        f: &mut W,
+    ) -> Result<bool, std::fmt::Error> {
+        algebraic_polynomial_for_display(&element.poly).format(opts, state, f)
+    }
+}
+
+impl<R> SampleableRing for AlgebraicExtension<R>
+where
+    R: EuclideanDomain + SampleableRing,
+{
+    type SamplingPolicy = R::SamplingPolicy;
+
+    fn sample<G: rand::RngCore + ?Sized>(
+        &self,
+        rng: &mut G,
+        policy: &Self::SamplingPolicy,
+    ) -> Self::Element {
         let coeffs: Vec<_> = (0..self.poly.degree(0))
-            .map(|_| self.poly.ring().sample(rng, range))
+            .map(|_| self.poly.ring().sample(rng, policy))
             .collect();
 
         let mut poly = self.poly.zero_with_capacity(coeffs.len());
@@ -2096,16 +2117,6 @@ impl<R: EuclideanDomain> Ring for AlgebraicExtension<R> {
         }
 
         AlgebraicNumber { poly }
-    }
-
-    fn format<W: std::fmt::Write>(
-        &self,
-        element: &Self::Element,
-        opts: &crate::printer::PrintOptions,
-        state: crate::printer::PrintState,
-        f: &mut W,
-    ) -> Result<bool, std::fmt::Error> {
-        algebraic_polynomial_for_display(&element.poly).format(opts, state, f)
     }
 }
 
@@ -2359,10 +2370,6 @@ impl<R: EuclideanDomain> Ring for AlgebraicQuotient<R> {
         self.as_extension().try_div(a, b)
     }
 
-    fn sample(&self, rng: &mut impl rand::RngCore, range: (i64, i64)) -> Self::Element {
-        self.as_extension().sample(rng, range)
-    }
-
     fn format<W: std::fmt::Write>(
         &self,
         element: &Self::Element,
@@ -2371,6 +2378,21 @@ impl<R: EuclideanDomain> Ring for AlgebraicQuotient<R> {
         f: &mut W,
     ) -> Result<bool, std::fmt::Error> {
         algebraic_polynomial_for_display(&element.poly).format(opts, state, f)
+    }
+}
+
+impl<R> SampleableRing for AlgebraicQuotient<R>
+where
+    R: EuclideanDomain + SampleableRing,
+{
+    type SamplingPolicy = R::SamplingPolicy;
+
+    fn sample<G: rand::RngCore + ?Sized>(
+        &self,
+        rng: &mut G,
+        policy: &Self::SamplingPolicy,
+    ) -> Self::Element {
+        self.as_extension().sample(rng, policy)
     }
 }
 

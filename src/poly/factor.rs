@@ -19,6 +19,7 @@ use crate::{
         },
         integer::{Integer, IntegerRing, Z, gcd_unsigned},
         rational::{Q, RationalField},
+        sample_small_integer,
     },
     tensors::matrix::Vector,
 };
@@ -957,9 +958,9 @@ where
             random_poly.clear();
 
             for i in 0..n {
-                let r = self
-                    .ring()
-                    .sample(&mut rng, (0, characteristic.to_i64().unwrap_or(i64::MAX)));
+                let upper_bound = characteristic.to_i64().unwrap_or(i64::MAX);
+                let r =
+                    sample_small_integer(self.ring(), &mut rng, 0..=upper_bound.saturating_sub(1));
                 if !self.ring().is_zero(&r) {
                     exp[var] = E::from_u32(i as u32);
                     random_poly.append_monomial(r, &exp);
@@ -1176,7 +1177,7 @@ where
             }
 
             // TODO: sample simple points first
-            sample_point = self.ring().sample(&mut rng, (0, i));
+            sample_point = sample_small_integer(self.ring(), &mut rng, 0..=i - 1);
             uni_f = self.replace(interpolation_var, &sample_point);
             i += 1;
         }
@@ -2317,10 +2318,12 @@ impl<F: Field, E: PositiveExponent> MultivariatePolynomial<F, E, LexOrder> {
         sample_vars
             .iter()
             .map(|v| {
-                let mut value = poly.ring().sample(rng, (1, MAX_RNG_PREFACTOR as i64));
+                let mut value =
+                    sample_small_integer(poly.ring(), rng, 1..=MAX_RNG_PREFACTOR as i64 - 1);
                 let mut attempts = 0;
                 while poly.ring().is_zero(&value) && attempts < 8 {
-                    value = poly.ring().sample(rng, (1, MAX_RNG_PREFACTOR as i64));
+                    value =
+                        sample_small_integer(poly.ring(), rng, 1..=MAX_RNG_PREFACTOR as i64 - 1);
                     attempts += 1;
                 }
                 (*v, value)

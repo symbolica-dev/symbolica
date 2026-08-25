@@ -17,7 +17,9 @@ use crate::domains::finite_field::{
 use crate::domains::float::{FloatField, SingleFloat};
 use crate::domains::integer::{FromFiniteField, Integer, IntegerRing, SMALL_PRIMES, Z};
 use crate::domains::rational::{Q, Rational, RationalField};
-use crate::domains::{EuclideanDomain, Field, InternalOrdering, Ring, RingOps, Set};
+use crate::domains::{
+    EuclideanDomain, Field, InternalOrdering, Ring, RingOps, Set, sample_small_integer,
+};
 use crate::kernels::GeometricSequenceStepRequest;
 use crate::poly::INLINED_EXPONENTS;
 use crate::tensors::matrix::{Matrix, MatrixError};
@@ -340,7 +342,7 @@ impl<F: Field, E: PositiveExponent> MultivariatePolynomial<F, E> {
                 .map(|i| {
                     (
                         *i,
-                        ap.ring().sample(&mut rng, (1, MAX_RNG_PREFACTOR as i64)),
+                        sample_small_integer(ap.ring(), &mut rng, 1..=MAX_RNG_PREFACTOR as i64 - 1),
                     )
                 })
                 .collect();
@@ -581,7 +583,12 @@ impl<F: Field, E: PositiveExponent> MultivariatePolynomial<F, E> {
 
             let r_orig: SmallVec<[_; INLINED_EXPONENTS]> = vars
                 .iter()
-                .map(|i| (*i, a.ring().sample(&mut rng, (1, MAX_RNG_PREFACTOR as i64))))
+                .map(|i| {
+                    (
+                        *i,
+                        sample_small_integer(a.ring(), &mut rng, 1..=MAX_RNG_PREFACTOR as i64 - 1),
+                    )
+                })
                 .collect();
 
             let mut row_sample_values = Vec::with_capacity(shape.len()); // coefficients for the linear system
@@ -825,7 +832,12 @@ impl<F: Field, E: PositiveExponent> MultivariatePolynomial<F, E> {
 
             let r_orig: SmallVec<[_; INLINED_EXPONENTS]> = vars
                 .iter()
-                .map(|i| (*i, a.ring().sample(&mut rng, (1, MAX_RNG_PREFACTOR as i64))))
+                .map(|i| {
+                    (
+                        *i,
+                        sample_small_integer(a.ring(), &mut rng, 1..=MAX_RNG_PREFACTOR as i64 - 1),
+                    )
+                })
                 .collect();
 
             let mut row_sample_values = Vec::with_capacity(shape.len()); // coefficients for the linear system
@@ -1264,7 +1276,7 @@ impl<F: Field + PolynomialGCD<E>, E: PositiveExponent> MultivariatePolynomial<F,
 
             let mut sample_fail_count = 0i64;
             let v = loop {
-                let r = a.ring().sample(&mut rng, (1, MAX_RNG_PREFACTOR as i64));
+                let r = sample_small_integer(a.ring(), &mut rng, 1..=MAX_RNG_PREFACTOR as i64 - 1);
                 if !gamma.replace(lastvar, &r).is_zero() {
                     break r;
                 }
@@ -1365,7 +1377,8 @@ impl<F: Field + PolynomialGCD<E>, E: PositiveExponent> MultivariatePolynomial<F,
                 }
 
                 let v = loop {
-                    let v = a.ring().sample(&mut rng, (1, MAX_RNG_PREFACTOR as i64));
+                    let v =
+                        sample_small_integer(a.ring(), &mut rng, 1..=MAX_RNG_PREFACTOR as i64 - 1);
                     if !gamma.replace(lastvar, &v).is_zero() {
                         // we need unique sampling points
                         if !vseq.contains(&v) {
@@ -1477,7 +1490,16 @@ impl<F: Field + PolynomialGCD<E>, E: PositiveExponent> MultivariatePolynomial<F,
                 let r: Vec<_> = vars
                     .iter()
                     .skip(1)
-                    .map(|i| (*i, a.ring().sample(&mut rng, (1, MAX_RNG_PREFACTOR as i64))))
+                    .map(|i| {
+                        (
+                            *i,
+                            sample_small_integer(
+                                a.ring(),
+                                &mut rng,
+                                1..=MAX_RNG_PREFACTOR as i64 - 1,
+                            ),
+                        )
+                    })
                     .collect();
 
                 let g1 = gc.replace_except(vars[0], &r, &mut cache);
@@ -3130,7 +3152,7 @@ impl<E: PositiveExponent> MultivariatePolynomial<IntegerRing, E> {
                 let (a_rows, a_term_evals) = Self::evaluate_terms(&p, &a_p, &betas);
                 let (b_rows, b_term_evals) = Self::evaluate_terms(&p, &b_p, &betas);
 
-                let shift = p.from_element(&p.sample(&mut rng, (0, i64::MAX)));
+                let shift = p.from_element(&sample_small_integer(&p, &mut rng, 0..=i64::MAX - 1));
                 let mut a_current_evals = a_term_evals
                     .iter()
                     .zip(&a_p.coefficients)
@@ -3414,7 +3436,7 @@ impl<E: PositiveExponent> MultivariatePolynomial<IntegerRing, E> {
                 let (b_row_exponents, b_term_evals) =
                     Self::evaluate_terms_bivariate(&p, &b_p, &betas);
 
-                let shift = p.from_element(&p.sample(&mut rng, (0, i64::MAX)));
+                let shift = p.from_element(&sample_small_integer(&p, &mut rng, 0..=i64::MAX - 1));
                 let mut a_current_evals = a_term_evals
                     .iter()
                     .zip(&a_p.coefficients)

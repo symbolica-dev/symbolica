@@ -108,7 +108,7 @@ pub mod prelude {
     pub use crate::coefficient::{Coefficient, CoefficientView, ConvertToRing};
 
     pub use crate::domains::{
-        EuclideanDomain, Field, OrderedRing, RealEmbedding, Ring, RingOps, Set,
+        EuclideanDomain, Field, OrderedRing, RealEmbedding, Ring, RingOps, SampleableRing, Set,
         algebraic::{
             AlgebraicContext, AlgebraicEmbedding, AlgebraicExtension, AlgebraicNumber,
             AlgebraicQuotient, Root,
@@ -126,6 +126,7 @@ pub mod prelude {
         rational_polynomial::{
             LogarithmicIntegralTerm, RationalIntegral, RationalPolynomial, RationalPolynomialField,
         },
+        sample_i64, sample_small_integer,
     };
 
     #[cfg(feature = "native_code_generation")]
@@ -163,9 +164,14 @@ pub mod prelude {
             GroebnerBasis, ParameterField, ParametricExtension, ParametricRoot, ParametricSolution,
             PolynomialSolution,
         },
-        polynomial::{MultivariatePolynomial, PolynomialRing, PositiveRealRootCountError},
+        polynomial::{
+            MultivariatePolynomial, PolynomialRing, PolynomialSamplingPolicy,
+            PositiveRealRootCountError,
+        },
         series::{Series, SeriesDepth},
-        univariate::{UnivariatePolynomial, UnivariatePolynomialRing},
+        univariate::{
+            UnivariatePolynomial, UnivariatePolynomialRing, UnivariatePolynomialSamplingPolicy,
+        },
     };
 
     pub use crate::printer::{

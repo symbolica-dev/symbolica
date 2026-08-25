@@ -2,9 +2,34 @@
 
 use crate::{
     atom::AtomCore,
-    domains::{integer::Z, rational::Q},
+    domains::{SampleableRing, integer::Z, rational::Q},
     parse,
+    poly::univariate::{UnivariatePolynomialRing, UnivariatePolynomialSamplingPolicy},
 };
+use rand::{SeedableRng, rngs::StdRng};
+
+#[test]
+fn samples_with_degree_and_coefficient_policies() {
+    let template = parse!("x")
+        .to_polynomial::<_, u8>(&Z, None)
+        .to_univariate_from_univariate(0);
+    let ring = UnivariatePolynomialRing::from_polynomial(&template);
+    let policy = UnivariatePolynomialSamplingPolicy {
+        degree: 3..=3,
+        coefficient: 1..=1,
+    };
+    let mut rng = StdRng::seed_from_u64(1);
+
+    let sample = ring.sample(&mut rng, &policy);
+
+    assert_eq!(sample.degree(), 3);
+    assert!(
+        sample
+            .coefficients()
+            .iter()
+            .all(|coefficient| coefficient == &1)
+    );
+}
 
 #[test]
 fn derivative_and_integral_are_inverses() {

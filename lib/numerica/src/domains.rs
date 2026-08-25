@@ -13,6 +13,7 @@
 //!
 //! An extension of the ring trait is the [`EuclideanDomain`] trait, which adds the ability to compute remainders, quotients, and gcds.
 //! Another extension is the [`Field`] trait, which adds the ability to divide and invert elements.
+//! Rings with a meaningful random distribution can separately implement [`SampleableRing`].
 pub mod backend;
 pub mod dual;
 pub mod finite_field;
@@ -24,7 +25,10 @@ pub mod rational;
 use std::borrow::Borrow;
 use std::fmt::{Debug, Display, Error, Formatter};
 use std::hash::Hash;
-use std::ops::{Add, Deref, Div, Mul, Sub};
+use std::ops::{Add, Deref, Div, Mul, RangeInclusive, Sub};
+
+use rand::Rng;
+use rand_core::RngCore;
 
 use integer::Integer;
 
@@ -150,6 +154,7 @@ pub trait RingOps<T>: Set {
 ///
 /// An extension of the ring trait is the [`EuclideanDomain`] trait, which adds the ability to compute remainders, quotients, and gcds.
 /// Another extension is the [`Field`] trait, which adds the ability to divide and invert elements.
+/// Random sampling is provided separately by [`SampleableRing`].
 pub trait Ring:
     Set + RingOps<<Self as Set>::Element> + for<'a> RingOps<&'a <Self as Set>::Element>
 {
@@ -221,8 +226,6 @@ pub trait Ring:
         }
     }
 
-    fn sample(&self, rng: &mut impl rand::RngCore, range: (i64, i64)) -> Self::Element;
-
     /// Format a ring element with custom [PrintOptions] and [PrintState].
     fn format<W: std::fmt::Write>(
         &self,
@@ -275,6 +278,42 @@ pub trait Ring:
     {
         WrappedRingElement::new(self, element)
     }
+}
+
+/// A ring whose elements can be sampled according to a ring-specific policy.
+///
+/// Sampling is kept separate from [`Ring`] because not every ring has a useful
+/// default distribution. In particular, polynomial distributions need extra
+/// choices such as degree bounds and a coefficient distribution.
+pub trait SampleableRing: Ring {
+    /// Configuration that defines the distribution over ring elements.
+    type SamplingPolicy;
+
+    /// Sample an element according to `policy`.
+    fn sample<R: RngCore + ?Sized>(
+        &self,
+        rng: &mut R,
+        policy: &Self::SamplingPolicy,
+    ) -> Self::Element;
+}
+
+/// Sample an `i64` uniformly from an inclusive range.
+#[inline]
+pub fn sample_i64<R: RngCore + ?Sized>(rng: &mut R, range: RangeInclusive<i64>) -> i64 {
+    rng.random_range(range)
+}
+
+/// Sample a small integer and embed it in `ring`.
+///
+/// Unlike [`SampleableRing::sample`], this operation is available for every
+/// ring and has the same meaning for all of them.
+#[inline]
+pub fn sample_small_integer<R: Ring, G: RngCore + ?Sized>(
+    ring: &R,
+    rng: &mut G,
+    range: RangeInclusive<i64>,
+) -> R::Element {
+    ring.nth(sample_i64(rng, range).into())
 }
 
 /// A ring equipped with a total order compatible with its ring operations.
@@ -651,7 +690,31 @@ pub trait Derivable: Ring {
 
 #[cfg(test)]
 mod tests {
-    use crate::domains::{Field, Ring, rational::Q};
+    use rand::SeedableRng;
+    use rand_xoshiro::Xoshiro256PlusPlus;
+
+    use crate::domains::{
+        Field, Ring, SampleableRing, integer::Z, rational::Q, sample_small_integer,
+    };
+
+    #[test]
+    fn small_integer_sampling_is_available_for_every_ring() {
+        let mut rng = Xoshiro256PlusPlus::seed_from_u64(1);
+        for _ in 0..100 {
+            let value = sample_small_integer(&Q, &mut rng, -4..=7);
+            assert_eq!(value.denominator_ref(), &Z.one());
+            assert!((-4..=7).contains(&value.numerator_ref().to_i64().unwrap()));
+        }
+    }
+
+    #[test]
+    fn integer_ring_sampling_uses_its_policy() {
+        let mut rng = Xoshiro256PlusPlus::seed_from_u64(2);
+        let policy = 5..=9;
+        for _ in 0..100 {
+            assert!((5..=9).contains(&Z.sample(&mut rng, &policy).to_i64().unwrap()));
+        }
+    }
 
     #[test]
     fn linear_recurrence() {

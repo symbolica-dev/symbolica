@@ -19,7 +19,7 @@ use crate::kernels::RingKernels;
 use crate::printer::{PrintOptions, PrintState};
 
 use super::integer::Z;
-use super::{EuclideanDomain, Field, InternalOrdering, Ring};
+use super::{EuclideanDomain, Field, InternalOrdering, Ring, SampleableRing};
 
 const HENSEL_LIFTING_MASK: [u8; 128] = [
     255, 85, 51, 73, 199, 93, 59, 17, 15, 229, 195, 89, 215, 237, 203, 33, 31, 117, 83, 105, 231,
@@ -169,6 +169,29 @@ pub struct FiniteField<UField> {
     r_bits: u32,
     one: FiniteFieldElement<UField>,
     is_prime: bool,
+}
+
+impl<UField: FiniteFieldWorkspace> SampleableRing for FiniteField<UField>
+where
+    Self: Ring,
+{
+    type SamplingPolicy = std::ops::RangeInclusive<i64>;
+
+    #[inline]
+    fn sample<R: rand::RngCore + ?Sized>(
+        &self,
+        rng: &mut R,
+        policy: &Self::SamplingPolicy,
+    ) -> Self::Element {
+        let characteristic = self.characteristic().to_i64().unwrap_or(i64::MAX);
+        let lower = (*policy.start()).max(0);
+        let upper = (*policy.end()).min(characteristic.saturating_sub(1));
+        assert!(
+            lower <= upper,
+            "sampling policy has no field representatives"
+        );
+        self.nth(rng.random_range(lower..=upper).into())
+    }
 }
 
 impl Zp {
@@ -550,11 +573,6 @@ impl Ring for Zp {
         RingKernels::empty()
             .with_polynomial(self)
             .with_geometric_sequences(self)
-    }
-
-    fn sample(&self, rng: &mut impl rand::RngCore, range: (i64, i64)) -> Self::Element {
-        let r = rng.random_range(range.0.max(0)..range.1.min(self.p as i64));
-        FiniteFieldElement(r as u32)
     }
 
     fn format<W: std::fmt::Write>(
@@ -1077,11 +1095,6 @@ impl Ring for Zp64 {
             .with_geometric_sequences(self)
     }
 
-    fn sample(&self, rng: &mut impl rand::RngCore, range: (i64, i64)) -> Self::Element {
-        let r = rng.random_range(range.0.max(0)..range.1.min(self.p.min(i64::MAX as u64) as i64));
-        FiniteFieldElement(r as u64)
-    }
-
     fn format<W: std::fmt::Write>(
         &self,
         element: &Self::Element,
@@ -1398,10 +1411,6 @@ impl Ring for FiniteField<Two> {
 
     fn try_div(&self, a: &Self::Element, b: &Self::Element) -> Option<Self::Element> {
         if *b == 0 { None } else { Some(*a) }
-    }
-
-    fn sample(&self, rng: &mut impl rand::RngCore, _range: (i64, i64)) -> Self::Element {
-        rng.random_range(0..2)
     }
 
     fn format<W: std::fmt::Write>(
@@ -1754,11 +1763,6 @@ impl Ring for FiniteField<Mersenne32> {
         } else {
             Some(self.div(a, b))
         }
-    }
-
-    fn sample(&self, rng: &mut impl rand::RngCore, range: (i64, i64)) -> Self::Element {
-        let r = rng.random_range(range.0.max(0)..range.1.min(Mersenne32::PRIME as i64));
-        r as u32
     }
 
     fn format<W: std::fmt::Write>(
@@ -2136,13 +2140,6 @@ impl Ring for FiniteField<Mersenne64> {
         }
     }
 
-    fn sample(&self, rng: &mut impl rand::RngCore, range: (i64, i64)) -> Self::Element {
-        let r = rng.random_range(
-            range.0.max(0)..range.1.min(Mersenne64::PRIME.min(i64::MAX as u64) as i64),
-        );
-        r as u64
-    }
-
     fn format<W: std::fmt::Write>(
         &self,
         element: &Self::Element,
@@ -2496,10 +2493,6 @@ impl Ring for FiniteField<Integer> {
         self.try_inv(b).map(|r| self.mul(a, &r))
     }
 
-    fn sample(&self, rng: &mut impl rand::RngCore, range: (i64, i64)) -> Self::Element {
-        self.to_element(Z.sample(rng, range))
-    }
-
     fn format<W: std::fmt::Write>(
         &self,
         element: &Self::Element,
@@ -2817,12 +2810,6 @@ impl Ring for FiniteField<MultiPrecisionInteger> {
 
     fn try_div(&self, a: &Self::Element, b: &Self::Element) -> Option<Self::Element> {
         self.try_inv(b).map(|r| self.mul(a, &r))
-    }
-
-    fn sample(&self, rng: &mut impl rand::RngCore, range: (i64, i64)) -> Self::Element {
-        self.to_element(MultiPrecisionInteger::from(
-            rng.random_range(range.0..range.1),
-        ))
     }
 
     fn format<W: std::fmt::Write>(
@@ -3678,13 +3665,31 @@ pub const SMOOTH_PRIMES: [(u64, u8, [u8; 4]); 323] = [
 mod test {
     use std::str::FromStr;
 
+    use rand::{SeedableRng, rngs::StdRng};
+
     use super::{FiniteFieldCore, Zp};
     use crate::domains::{
-        Field, Ring, RingOps,
+        Field, Ring, RingOps, SampleableRing,
         finite_field::{FiniteField, PrimitiveRootIterator, Zp64},
         integer::{Integer, MultiPrecisionInteger},
     };
     use crate::kernels::{DensePolynomialMulRequest, GeometricSequenceStepRequest};
+
+    #[test]
+    fn sampling_policy_uses_canonical_field_representatives() {
+        let field = Zp::new(3);
+        let mut rng = StdRng::seed_from_u64(1);
+        let mut seen = [false; 3];
+
+        for _ in 0..1000 {
+            let sample = field.sample(&mut rng, &(1..=49_999));
+            let value = field.to_integer(&sample).to_i64().unwrap() as usize;
+            assert_ne!(value, 0);
+            seen[value] = true;
+        }
+
+        assert_eq!(seen, [false, true, true]);
+    }
 
     fn assert_dense_polynomial_mul<R: Ring>(
         field: &R,

@@ -3,7 +3,6 @@ use std::{
     hash::Hash,
 };
 
-use rand::Rng;
 use xprec::Df64;
 
 use crate::{
@@ -12,7 +11,9 @@ use crate::{
 };
 
 use super::{Complex, DoubleFloat, F64, Float, FloatLike, RealBall, SingleFloat};
-use crate::domains::{EuclideanDomain, Field, InternalOrdering, Ring, RingPrinter, SelfRing};
+use crate::domains::{
+    EuclideanDomain, Field, InternalOrdering, Ring, RingPrinter, SampleableRing, SelfRing,
+};
 
 /// An error encountered while comparing floating-point values through their
 /// real embedding.
@@ -269,11 +270,6 @@ impl<T: SingleFloat + Hash + Eq + InternalOrdering> Ring for FloatField<T> {
     }
 
     #[inline(always)]
-    fn sample(&self, rng: &mut impl rand::RngCore, range: (i64, i64)) -> Self::Element {
-        self.rep.from_i64(rng.random_range(range.0..range.1))
-    }
-
-    #[inline(always)]
     fn format<W: std::fmt::Write>(
         &self,
         element: &Self::Element,
@@ -317,6 +313,19 @@ impl<T: SingleFloat + Hash + Eq + InternalOrdering> Ring for FloatField<T> {
     #[inline(always)]
     fn printer<'a>(&'a self, element: &'a Self::Element) -> RingPrinter<'a, Self> {
         RingPrinter::new(self, element)
+    }
+}
+
+impl<T: SingleFloat + Hash + Eq + InternalOrdering> SampleableRing for FloatField<T> {
+    type SamplingPolicy = std::ops::RangeInclusive<i64>;
+
+    #[inline(always)]
+    fn sample<R: rand::RngCore + ?Sized>(
+        &self,
+        rng: &mut R,
+        policy: &Self::SamplingPolicy,
+    ) -> Self::Element {
+        crate::domains::sample_small_integer(self, rng, policy.clone())
     }
 }
 

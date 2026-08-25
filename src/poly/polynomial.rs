@@ -7,16 +7,18 @@ use std::collections::{BTreeMap, BinaryHeap};
 use std::fmt::Display;
 use std::marker::PhantomData;
 use std::mem;
-use std::ops::{Add, Div, Mul, Neg, Sub};
+use std::ops::{Add, Div, Mul, Neg, RangeInclusive, Sub};
 use std::sync::Arc;
+
+use rand::Rng;
 
 use crate::domains::algebraic::AlgebraicExtension;
 use crate::domains::float::FloatLike;
 use crate::domains::integer::{Integer, IntegerRing};
 use crate::domains::rational::{Fraction, FractionField, FractionNormalization, Q, RationalField};
 use crate::domains::{
-    Derivable, EuclideanDomain, Field, InternalOrdering, RealEmbedding, Ring, RingOps, SelfRing,
-    Set,
+    Derivable, EuclideanDomain, Field, InternalOrdering, RealEmbedding, Ring, RingOps,
+    SampleableRing, SelfRing, Set,
 };
 use crate::kernels::{
     DensePolynomialExactDivisionRequest, DensePolynomialMulRequest, TotalDegreePolynomialMulRequest,
@@ -183,6 +185,23 @@ fn total_degree_rank_table(
 pub struct PolynomialRing<R: Ring, E: Exponent = u16> {
     pub(crate) ring: R,
     _phantom_exp: PhantomData<E>,
+}
+
+/// Sampling policy for a multivariate polynomial ring.
+///
+/// Each requested term gets an independently sampled coefficient and one
+/// exponent per variable. Zero coefficients and duplicate monomials can make
+/// the resulting polynomial contain fewer terms than the sampled term count.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct PolynomialSamplingPolicy<P> {
+    /// Variables of the sampled polynomial, in exponent-vector order.
+    pub variables: Arc<Vec<PolyVariable>>,
+    /// Inclusive exponent bounds for each variable.
+    pub degree_bounds: Vec<RangeInclusive<u32>>,
+    /// Inclusive range from which the number of attempted terms is sampled.
+    pub term_count: RangeInclusive<usize>,
+    /// Policy used to sample every coefficient.
+    pub coefficient: P,
 }
 
 impl<R: Ring + FractionNormalization, E: Exponent> FractionNormalization for PolynomialRing<R, E> {
@@ -408,10 +427,6 @@ impl<R: Ring, E: Exponent> Ring for PolynomialRing<R, E> {
         a.exact_div_owned(b)
     }
 
-    fn sample(&self, _rng: &mut impl rand::RngCore, _range: (i64, i64)) -> Self::Element {
-        todo!("Sampling a polynomial is not possible yet")
-    }
-
     fn format<W: std::fmt::Write>(
         &self,
         element: &Self::Element,
@@ -425,6 +440,43 @@ impl<R: Ring, E: Exponent> Ring for PolynomialRing<R, E> {
     fn has_independent_elements(&self) -> bool {
         // the coefficient ring is stored in the polynomial
         true
+    }
+}
+
+impl<R: SampleableRing, E: Exponent> SampleableRing for PolynomialRing<R, E> {
+    type SamplingPolicy = PolynomialSamplingPolicy<R::SamplingPolicy>;
+
+    fn sample<G: rand::RngCore + ?Sized>(
+        &self,
+        rng: &mut G,
+        policy: &Self::SamplingPolicy,
+    ) -> Self::Element {
+        assert_eq!(
+            policy.variables.len(),
+            policy.degree_bounds.len(),
+            "a degree bound is required for every polynomial variable"
+        );
+
+        let term_count = rng.random_range(policy.term_count.clone());
+        let mut polynomial =
+            MultivariatePolynomial::new(&self.ring, Some(term_count), policy.variables.clone());
+        for _ in 0..term_count {
+            let coefficient = self.ring.sample(rng, &policy.coefficient);
+            let exponents = policy
+                .degree_bounds
+                .iter()
+                .map(|range| {
+                    E::from_i32(
+                        rng.random_range(range.clone())
+                            .try_into()
+                            .expect("polynomial degree exceeds i32::MAX"),
+                    )
+                })
+                .collect::<Vec<_>>();
+            polynomial.append_monomial(coefficient, &exponents);
+        }
+
+        polynomial
     }
 }
 
@@ -5739,9 +5791,12 @@ impl<R: Ring + FractionNormalization + EuclideanDomain, E: Exponent, O: Monomial
 mod test {
     use std::{collections::BTreeMap, mem::size_of, sync::Arc};
 
+    use rand::{SeedableRng, rngs::StdRng};
+
     use crate::{
         atom::AtomCore,
         domains::{
+            SampleableRing,
             algebraic::AlgebraicExtension,
             finite_field::{Zp, Zp64},
             integer::{Integer, IntegerRing, Z},
@@ -5750,10 +5805,33 @@ mod test {
         parse, symbol,
     };
 
-    use super::MultivariatePolynomial;
+    use super::{MultivariatePolynomial, PolynomialRing, PolynomialSamplingPolicy};
 
     #[cfg(feature = "bincode")]
     use crate::domains::float::{F64, FloatField};
+
+    #[test]
+    fn samples_with_term_and_degree_policies() {
+        let variables = Arc::new(vec![symbol!("x").into(), symbol!("y").into()]);
+        let ring = PolynomialRing::<_, u8>::new(Z);
+        let policy = PolynomialSamplingPolicy {
+            variables: variables.clone(),
+            degree_bounds: vec![0..=2, 1..=3],
+            term_count: 5..=5,
+            coefficient: 1..=1,
+        };
+        let mut rng = StdRng::seed_from_u64(1);
+
+        let sample = ring.sample(&mut rng, &policy);
+
+        assert_eq!(sample.variables(), &variables);
+        assert!(sample.nterms() <= 5);
+        assert!(
+            sample
+                .into_iter()
+                .all(|term| { term.exponents[0] <= 2 && (1..=3).contains(&term.exponents[1]) })
+        );
+    }
 
     #[test]
     #[cfg(target_pointer_width = "64")]
