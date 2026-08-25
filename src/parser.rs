@@ -1241,6 +1241,7 @@ impl Token {
         let mut extra_ops: SmallVec<[char; 6]> = SmallVec::new();
 
         let mut id_buffer = String::with_capacity(30);
+        let mut preceded_by_separating_whitespace = false;
 
         let mut line_counter = 1;
         let mut column_counter = 1;
@@ -1449,6 +1450,8 @@ impl Token {
 
             if state == ParseState::Any {
                 if whitespaces.contains(&c) {
+                    preceded_by_separating_whitespace |= c != '\\';
+
                     if c == '\n' {
                         column_counter = 1;
                         line_counter += 1;
@@ -1459,6 +1462,10 @@ impl Token {
                     c = char_iter.next().unwrap_or('\0');
                     continue;
                 }
+
+                // Consume this once for the next non-whitespace character. This is important for
+                // characters replayed through `extra_ops`, which must not inherit the whitespace.
+                let had_leading_whitespace = std::mem::take(&mut preceded_by_separating_whitespace);
 
                 match c {
                     '+' => {
@@ -1493,7 +1500,9 @@ impl Token {
                     }
                     '(' => {
                         // check if the opening bracket belongs to a function
+                        // a space after an id is treated as an implicit multiplication
                         if settings.mode == ParseMode::Symbolica
+                            && !had_leading_whitespace
                             && let Some(Token::ID(_)) = stack.last()
                         {
                             let name = unsafe { stack.pop().unwrap_unchecked() };
@@ -1501,7 +1510,7 @@ impl Token {
                                 stack.push(Token::Fn(true, false, vec![name])); // serves as open paren
                             }
                         } else if unsafe { stack.last().unwrap_unchecked() }.is_normal() {
-                            // insert multiplication: x(...) -> x*(...)
+                            // insert multiplication: 3(...) -> 3*(...)
                             stack.push(Token::Op(true, true, Operator::Mul, vec![]));
                             extra_ops.push(c);
                         } else {
@@ -2148,6 +2157,18 @@ mod test {
         );
         let res = parse!("8923321837281*x^2*y^-1+5+5x");
         assert_eq!(input, res);
+    }
+
+    #[test]
+    fn whitespace_separates_parenthesized_implicit_multiplication() {
+        assert_eq!(parse!("x y (a+b)"), parse!("x*y*(a+b)"));
+        assert_eq!(parse!("x\ty\n(a+b)"), parse!("x*y*(a+b)"));
+        assert_eq!(parse!("x y(a+b)"), parse!("x*y(a+b)"));
+
+        assert_eq!(parse!("f (x)"), parse!("f*x"));
+        assert_eq!(parse!("f\t(x)"), parse!("f*x"));
+        assert_eq!(parse!("f\n(x)"), parse!("f*x"));
+        assert_eq!(parse!("f(x)"), parse!(r"f\(x)"));
     }
 
     #[test]
