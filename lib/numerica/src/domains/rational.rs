@@ -13,13 +13,15 @@ use crate::{
 
 use super::{
     EuclideanDomain, Field, InternalOrdering, OrderedRing, Ring, SelfRing, UpgradeToField,
-    backend::float::{BackendRational, BackendRationalExt},
     finite_field::{
         FiniteField, FiniteFieldCore, FiniteFieldWorkspace, PrimeIteratorU64, ToFiniteField, Two,
         Z2, Zp,
     },
     integer::{Integer, IntegerRing, Z},
 };
+
+#[cfg(feature = "gmp")]
+use super::integer::MultiPrecisionInteger;
 
 /// The field of rational numbers.
 pub type Q = FractionField<IntegerRing>;
@@ -837,10 +839,27 @@ impl<T: Into<Integer>> From<(T, T)> for Rational {
     }
 }
 
-impl From<BackendRational> for Rational {
-    fn from(value: BackendRational) -> Self {
-        let (num, den) = value.into_integer_ratio();
-        Q.to_element(num.into(), den.into(), false)
+#[cfg(feature = "gmp")]
+impl From<rug::Rational> for Rational {
+    fn from(value: rug::Rational) -> Self {
+        let (num, den) = value.into_numer_denom();
+        Q.to_element(
+            MultiPrecisionInteger::from_raw(num).into(),
+            MultiPrecisionInteger::from_raw(den).into(),
+            false,
+        )
+    }
+}
+
+#[cfg(feature = "no_gmp")]
+impl From<malachite_q::Rational> for Rational {
+    fn from(value: malachite_q::Rational) -> Self {
+        let value = value.to_string();
+        if let Some((num, den)) = value.split_once('/') {
+            Q.to_element(num.parse().unwrap(), den.parse().unwrap(), false)
+        } else {
+            Q.to_element(value.parse().unwrap(), Integer::one(), false)
+        }
     }
 }
 
@@ -943,13 +962,6 @@ impl Rational {
         let numerator = self.numerator.to_string().parse::<f64>().unwrap();
         let denominator = self.denominator.to_string().parse::<f64>().unwrap();
         numerator / denominator
-    }
-
-    pub fn to_multi_prec(self) -> BackendRational {
-        BackendRational::from_integer_ratio(
-            self.numerator.to_multi_prec(),
-            self.denominator.to_multi_prec(),
-        )
     }
 
     /// Return a best approximation of the rational number where the denominator

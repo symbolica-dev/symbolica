@@ -14,8 +14,8 @@ use crate::domains::integer::MultiPrecisionInteger;
 use crate::domains::{
     InternalOrdering,
     backend::float::{
-        Assign, CompleteRound, Constant, MultiPrecisionFloat, MultiPrecisionFloatRounding, Pow,
-        RoundingDirection,
+        Assign, CompleteRound, Constant, MultiPrecisionFloat, MultiPrecisionFloatRational,
+        MultiPrecisionFloatRounding, Pow, RoundingDirection,
     },
     integer::Integer,
     rational::Rational,
@@ -548,7 +548,9 @@ impl<R: Into<Rational>> Mul<R> for Float {
             }
             .into()
         } else {
-            (self.0 * r.to_multi_prec()).into()
+            let num = r.numerator().to_multi_prec();
+            let den = r.denominator().to_multi_prec();
+            self.0.mul_integer_ratio(num, den).into()
         }
     }
 }
@@ -576,7 +578,9 @@ impl<R: Into<Rational>> Div<R> for Float {
             }
             .into()
         } else {
-            (self.0 / r.to_multi_prec()).into()
+            let num = r.numerator().to_multi_prec();
+            let den = r.denominator().to_multi_prec();
+            self.0.div_integer_ratio(num, den).into()
         }
     }
 }
@@ -694,8 +698,13 @@ impl Float {
     /// [`RoundingDirection::Down`] and [`RoundingDirection::Up`] give a lower
     /// and upper bound, respectively, for `value`.
     pub fn from_rational_round(value: &Rational, prec: u32, direction: RoundingDirection) -> Self {
-        MultiPrecisionFloat::from_rational_round(value.clone().to_multi_prec(), prec, direction)
-            .into()
+        MultiPrecisionFloat::from_integer_ratio_round(
+            value.numerator().to_multi_prec(),
+            value.denominator().to_multi_prec(),
+            prec,
+            direction,
+        )
+        .into()
     }
 
     pub fn is_finite(&self) -> bool {
@@ -783,11 +792,14 @@ impl Float {
     }
 
     pub fn to_rational(&self) -> Rational {
-        self.0.to_rational().unwrap().into()
+        let (num, den) = self.0.to_integer_ratio().unwrap();
+        Rational::from_int_unchecked(num, den)
     }
 
     pub fn try_to_rational(&self) -> Option<Rational> {
-        self.0.to_rational().map(|x| x.into())
+        self.0
+            .to_integer_ratio()
+            .map(|(num, den)| Rational::from_int_unchecked(num, den))
     }
 
     /// Consume this wrapper and return the selected backend's value.
@@ -1104,6 +1116,6 @@ impl Real for Float {
 impl Rational {
     // Convert the rational number to a multi-precision float with precision `prec`.
     pub fn to_multi_prec_float(&self, prec: u32) -> Float {
-        Float::with_val(prec, self.clone().to_multi_prec())
+        Float::from_rational_round(self, prec, RoundingDirection::Nearest)
     }
 }
