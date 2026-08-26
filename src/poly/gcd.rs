@@ -688,6 +688,155 @@ impl<R: Ring, E: PositiveExponent> MultivariatePolynomial<R, E> {
     }
 }
 
+/// Dense coefficient storage for the Euclidean GCDs used by modular images.
+///
+/// Each input is converted once. Remainders reuse the two coefficient buffers, and only the final
+/// monic GCD is converted back to a multivariate polynomial.
+struct DenseUnivariateGcdContext<'a, F: Field, E: PositiveExponent> {
+    prototype: &'a MultivariatePolynomial<F, E>,
+    variable: Option<usize>,
+}
+
+impl<'a, F: Field, E: PositiveExponent> DenseUnivariateGcdContext<'a, F, E> {
+    fn new(left: &'a MultivariatePolynomial<F, E>, right: &MultivariatePolynomial<F, E>) -> Self {
+        let variable = left
+            .last_exponents()
+            .iter()
+            .position(|exponent| !exponent.is_zero())
+            .or_else(|| {
+                right
+                    .last_exponents()
+                    .iter()
+                    .position(|exponent| !exponent.is_zero())
+            });
+
+        debug_assert!(
+            left.exponents_iter()
+                .chain(right.exponents_iter())
+                .all(
+                    |exponents| exponents.iter().enumerate().all(|(index, exponent)| {
+                        exponent.is_zero() || variable.is_some_and(|variable| index == variable)
+                    })
+                )
+        );
+
+        Self {
+            prototype: left,
+            variable,
+        }
+    }
+
+    /// Copy a sparse univariate polynomial into a degree-indexed coefficient buffer.
+    fn coefficients(&self, polynomial: &MultivariatePolynomial<F, E>) -> Vec<F::Element> {
+        let Some(variable) = self.variable else {
+            return vec![polynomial.coefficients[0].clone()];
+        };
+        let degree = polynomial.degree(variable).to_u32() as usize;
+        let mut coefficients = vec![polynomial.ring().zero(); degree + 1];
+        for term in polynomial {
+            coefficients[term.exponents[variable].to_u32() as usize] = term.coefficient.clone();
+        }
+        coefficients
+    }
+
+    /// Scale a nonzero dense polynomial so its leading coefficient is one.
+    fn make_monic(&self, polynomial: &mut [F::Element]) {
+        let Some(leading_coefficient) = polynomial.last() else {
+            return;
+        };
+        if self.prototype.ring().is_one(leading_coefficient) {
+            return;
+        }
+        let inverse = self.prototype.ring().inv(leading_coefficient);
+        for coefficient in polynomial {
+            self.prototype.ring().mul_assign(coefficient, &inverse);
+        }
+    }
+
+    /// Replace `dividend` by its remainder modulo the monic `divisor`.
+    fn rem_monic(&self, dividend: &mut Vec<F::Element>, divisor: &[F::Element]) {
+        debug_assert!(!divisor.is_empty());
+        debug_assert!(self.prototype.ring().is_one(divisor.last().unwrap()));
+        if dividend.len() < divisor.len() {
+            return;
+        }
+        if divisor.len() == 1 {
+            dividend.clear();
+            return;
+        }
+
+        let divisor_degree = divisor.len() - 1;
+        for degree in (divisor_degree..dividend.len()).rev() {
+            let leading_coefficient =
+                std::mem::replace(&mut dividend[degree], self.prototype.ring().zero());
+            if self.prototype.ring().is_zero(&leading_coefficient) {
+                continue;
+            }
+
+            let shift = degree - divisor_degree;
+            for (coefficient, divisor_coefficient) in dividend[shift..degree]
+                .iter_mut()
+                .zip(&divisor[..divisor_degree])
+            {
+                self.prototype.ring().sub_mul_assign(
+                    coefficient,
+                    divisor_coefficient,
+                    &leading_coefficient,
+                );
+            }
+        }
+
+        dividend.truncate(divisor_degree);
+        while dividend
+            .last()
+            .is_some_and(|coefficient| self.prototype.ring().is_zero(coefficient))
+        {
+            dividend.pop();
+        }
+    }
+
+    /// Convert a dense coefficient buffer back to the original polynomial representation.
+    fn polynomial(&self, coefficients: Vec<F::Element>) -> MultivariatePolynomial<F, E> {
+        let mut result = self.prototype.zero_with_capacity(coefficients.len());
+        let Some(variable) = self.variable else {
+            return result.add_constant(coefficients.into_iter().next().unwrap());
+        };
+        let mut exponents = vec![E::zero(); self.prototype.nvars()];
+        for (degree, coefficient) in coefficients.into_iter().enumerate() {
+            if !self.prototype.ring().is_zero(&coefficient) {
+                exponents[variable] = E::from_u32(degree as u32);
+                result.append_monomial(coefficient, &exponents);
+            }
+        }
+        result
+    }
+
+    /// Compute a monic GCD while retaining all intermediate remainders in dense storage.
+    fn gcd(
+        &self,
+        left: &MultivariatePolynomial<F, E>,
+        right: &MultivariatePolynomial<F, E>,
+    ) -> MultivariatePolynomial<F, E> {
+        let mut left = self.coefficients(left);
+        let mut right = self.coefficients(right);
+        if left.len() < right.len() {
+            mem::swap(&mut left, &mut right);
+        }
+        self.make_monic(&mut right);
+
+        while !right.is_empty() {
+            if right.len() == 1 {
+                return self.prototype.one();
+            }
+            self.rem_monic(&mut left, &right);
+            mem::swap(&mut left, &mut right);
+            self.make_monic(&mut right);
+        }
+
+        self.polynomial(left)
+    }
+}
+
 impl<F: Field, E: PositiveExponent> MultivariatePolynomial<F, E> {
     /// Compute the univariate GCD using Euclid's algorithm. The result is normalized to 1.
     pub fn univariate_gcd(&self, b: &Self) -> Self {
@@ -698,33 +847,7 @@ impl<F: Field, E: PositiveExponent> MultivariatePolynomial<F, E> {
             return self.clone();
         }
 
-        let mut c = self.clone();
-        let mut d = b.clone();
-        if self.ldegree_max() < b.ldegree_max() {
-            mem::swap(&mut c, &mut d);
-        }
-
-        // TODO: there exists an efficient algorithm for univariate poly
-        // division in a finite field using FFT
-        let mut r = c.quot_rem_univariate(&mut d).1;
-        while !r.is_zero() {
-            c = d;
-            d = r;
-            r = c.quot_rem_univariate(&mut d).1;
-        }
-
-        // normalize the gcd
-        if let Some(l) = d.coefficients.last()
-            && !d.ring().is_one(l)
-        {
-            let i = d.ring().inv(l);
-            let (ring, coefficients) = d.ring_and_coefficients_mut();
-            for x in coefficients {
-                ring.mul_assign(x, &i);
-            }
-        }
-
-        d
+        DenseUnivariateGcdContext::new(self, b).gcd(self, b)
     }
 
     /// Replace all variables except `v` in the polynomial by elements from
@@ -1070,11 +1193,9 @@ impl<F: Field, E: PositiveExponent> MultivariatePolynomial<F, E> {
             .map(|(_, exponent)| exponent.to_u32() as usize)
             .max()
             .unwrap();
-        let mut shape_index_by_degree =
-            vec![None; max_shape_degree - min_shape_degree + 1];
+        let mut shape_index_by_degree = vec![None; max_shape_degree - min_shape_degree + 1];
         for (index, (_, exponent)) in shape.iter().enumerate() {
-            let slot = &mut shape_index_by_degree
-                [exponent.to_u32() as usize - min_shape_degree];
+            let slot = &mut shape_index_by_degree[exponent.to_u32() as usize - min_shape_degree];
             debug_assert!(slot.is_none());
             *slot = Some(index);
         }
@@ -1096,10 +1217,7 @@ impl<F: Field, E: PositiveExponent> MultivariatePolynomial<F, E> {
                 if degree == E::zero() {
                     Vec::new()
                 } else {
-                    vec![
-                        a.ring().zero();
-                        (degree.to_u32() as usize + 1).min(POW_CACHE_SIZE)
-                    ]
+                    vec![a.ring().zero(); (degree.to_u32() as usize + 1).min(POW_CACHE_SIZE)]
                 }
             })
             .collect::<Vec<_>>();
@@ -1265,9 +1383,7 @@ impl<F: Field, E: PositiveExponent> MultivariatePolynomial<F, E> {
                 };
                 let coefficient = scale_value.clone();
                 a.ring().mul_assign(&mut scale_value, &scale_ratio);
-                let scale_factor = g
-                    .ring()
-                    .div(&coefficient, &g.coefficients[scale_term]);
+                let scale_factor = g.ring().div(&coefficient, &g.coefficients[scale_term]);
 
                 // construct the right-hand side
                 for (i, (rhs, (shape_part, _))) in samples.iter_mut().zip(shape).enumerate() {
@@ -5206,6 +5322,25 @@ mod tests {
     use crate::domains::finite_field::Z2;
     use crate::parse;
     use crate::poly::PolyVariable;
+
+    #[test]
+    fn dense_univariate_gcd_handles_sparse_images_and_constants() {
+        let field = Zp::new(2_147_483_659);
+        let factor = parse!("x^7+3*x^4+5*x+2").to_polynomial::<_, u8>(&field, None);
+        let left_cofactor =
+            parse!("x^5+7*x^2+11").to_polynomial::<_, u8>(&field, factor.variables().clone());
+        let right_cofactor =
+            parse!("x^4+13*x^3+17").to_polynomial::<_, u8>(&field, factor.variables().clone());
+        let left = &factor * &left_cofactor;
+        let right = &factor * &right_cofactor;
+
+        assert_eq!(left.univariate_gcd(&right), factor);
+        assert_eq!(
+            left.univariate_gcd(&left.constant(field.nth(Integer::from(3)))),
+            left.one()
+        );
+        assert_eq!(left.zero().univariate_gcd(&left), left);
+    }
 
     #[test]
     fn modular_gcd_primes_start_with_the_workspace_prime() {
