@@ -43,6 +43,9 @@ pub(crate) const INITIAL_POW_MAP_SIZE: usize = 1000;
 /// Larger images use the sparse per-variable sampler to avoid allocating dense coefficient rows.
 const FUSED_GCD_BOUND_MAX_DEGREE: usize = 9999;
 
+/// Maximum estimated coefficient size produced during recursive integer-heuristic substitution.
+const HEURISTIC_GCD_MAX_EVALUATED_COEFFICIENT_BITS: u64 = 32 * 1024;
+
 /// The upper bound of the range to be sampled during the computation of multiple gcds
 pub(crate) const MAX_RNG_PREFACTOR: u32 = 50000;
 
@@ -2496,54 +2499,105 @@ pub enum HeuristicGCDError {
     BadReconstruction,
 }
 
+#[inline]
+fn ceil_log2_usize(value: usize) -> u64 {
+    if value <= 1 {
+        0
+    } else {
+        (usize::BITS - (value - 1).leading_zeros()) as u64
+    }
+}
+
+/// Bounds the largest coefficient produced by recursively substituting every shared variable.
+fn estimated_heuristic_gcd_evaluation_bits<E: PositiveExponent>(
+    a: &MultivariatePolynomial<IntegerRing, E>,
+    b: &MultivariatePolynomial<IntegerRing, E>,
+) -> u64 {
+    let statistics = |polynomial: &MultivariatePolynomial<IntegerRing, E>| {
+        let mut coefficient_bits = 0u64;
+        let mut degrees = vec![0u64; polynomial.nvars()];
+        for term in polynomial {
+            coefficient_bits = coefficient_bits.max(term.coefficient.significant_bits());
+            for (degree, exponent) in degrees.iter_mut().zip(term.exponents) {
+                *degree = (*degree).max(exponent.to_u32() as u64);
+            }
+        }
+        (
+            coefficient_bits,
+            degrees,
+            ceil_log2_usize(polynomial.nterms()),
+        )
+    };
+    let (mut a_bits, a_degrees, a_sum_bits) = statistics(a);
+    let (mut b_bits, b_degrees, b_sum_bits) = statistics(b);
+
+    for (a_degree, b_degree) in a_degrees.into_iter().zip(b_degrees) {
+        if a_degree == 0 || b_degree == 0 {
+            continue;
+        }
+
+        // `xi = 2*min(max_coeff(a), max_coeff(b)) + 29`; two extra bits bound the
+        // addition, including the small-coefficient case.
+        let xi_bits = a_bits.min(b_bits).saturating_add(2).max(6);
+        a_bits = a_bits
+            .saturating_add(xi_bits.saturating_mul(a_degree))
+            .saturating_add(a_sum_bits);
+        b_bits = b_bits
+            .saturating_add(xi_bits.saturating_mul(b_degree))
+            .saturating_add(b_sum_bits);
+    }
+
+    a_bits.max(b_bits)
+}
+
 impl<E: PositiveExponent> MultivariatePolynomial<IntegerRing, E> {
     /// Perform a heuristic GCD algorithm.
     #[instrument(level = "debug", skip_all)]
     pub fn heuristic_gcd(&self, b: &Self) -> Result<(Self, Self, Self), HeuristicGCDError> {
         fn interpolate<E: PositiveExponent>(
-            mut gamma: MultivariatePolynomial<IntegerRing, E>,
+            gamma: MultivariatePolynomial<IntegerRing, E>,
             var: usize,
             xi: &Integer,
         ) -> MultivariatePolynomial<IntegerRing, E> {
-            let mut g = gamma.zero();
-            let mut i = 0;
             let xi_half = xi / &Integer::Single(2);
-            while !gamma.is_zero() {
-                // create xi-adic representation using the symmetric modulus
-                let mut g_i = gamma.zero_with_capacity(gamma.nterms());
-                for m in &gamma {
-                    let mut c = Z.quot_rem(m.coefficient, xi).1;
+            let mut coefficients = Vec::with_capacity(gamma.nterms());
+            let mut exponents = Vec::with_capacity(gamma.exponents.len());
 
-                    if c > xi_half {
-                        c -= xi;
+            // Each coefficient is an independent symmetric xi-adic integer. Decode it directly
+            // instead of constructing and subtracting a polynomial for every radix digit.
+            for term in &gamma {
+                debug_assert!(term.exponents[var].is_zero());
+                let mut coefficient = term.coefficient.clone();
+                let mut exponent = 0u32;
+                while !coefficient.is_zero() {
+                    let (mut quotient, mut digit) = coefficient.quot_rem(xi);
+                    if digit > xi_half {
+                        digit -= xi;
+                        quotient += 1i64;
                     }
 
-                    if !c.is_zero() {
-                        g_i.append_monomial(c, m.exponents);
+                    if !digit.is_zero() {
+                        coefficients.push(digit);
+                        exponents.extend_from_slice(term.exponents);
+                        let exponent_index = exponents.len() - gamma.nvars() + var;
+                        exponents[exponent_index] = E::from_u32(exponent);
                     }
+
+                    coefficient = quotient;
+                    exponent += 1;
                 }
-
-                for c in &mut g_i.coefficients {
-                    *c = Z.quot_rem(c, xi).1;
-
-                    if *c > xi_half {
-                        *c -= xi;
-                    }
-                }
-
-                // multiply with var^i
-                let mut g_i_2 = g_i.clone();
-                let nvars = g_i_2.nvars();
-                for x in g_i_2.exponents.chunks_mut(nvars) {
-                    x[var] = E::from_u32(i);
-                }
-
-                g = g.add(g_i_2);
-
-                gamma = (gamma - g_i).div_coeff(xi);
-                i += 1;
             }
-            g
+
+            if coefficients.is_empty() {
+                return gamma.zero();
+            }
+
+            MultivariatePolynomial::from_coefficient_list(
+                coefficients,
+                exponents,
+                gamma.variables().clone(),
+                gamma.ring(),
+            )
         }
 
         debug!("a={}; b={}", self, b);
@@ -2562,6 +2616,15 @@ impl<E: PositiveExponent> MultivariatePolynomial<IntegerRing, E> {
         }
 
         debug!("a_red={}; b_red={}", a, b);
+
+        let estimated_bits = estimated_heuristic_gcd_evaluation_bits(&a, &b);
+        if estimated_bits > HEURISTIC_GCD_MAX_EVALUATED_COEFFICIENT_BITS {
+            debug!(
+                "Estimated recursive heuristic evaluation coefficient is {} bits",
+                estimated_bits
+            );
+            return Err(HeuristicGCDError::MaxSizeExceeded);
+        }
 
         if let Some(var) =
             (0..a.nvars()).find(|x| a.degree(*x) > E::zero() && b.degree(*x) > E::zero())
@@ -2588,15 +2651,22 @@ impl<E: PositiveExponent> MultivariatePolynomial<IntegerRing, E> {
 
             for retry in 0..6 {
                 debug!("round {}, xi={}", retry, xi);
-                match &xi * &Integer::Single(a.degree(var).max(b.degree(var)).to_u32() as i64) {
-                    Integer::Single(_) => {}
-                    Integer::Double(_) => {}
-                    Integer::Large(r) => {
-                        if u64::from(r.significant_bits()) > 4 * u64::from(usize::BITS) {
-                            debug!("big num {}", r);
-                            return Err(HeuristicGCDError::MaxSizeExceeded);
-                        }
-                    }
+                let evaluation_bits = |polynomial: &Self, max_coefficient: &Integer| {
+                    max_coefficient
+                        .significant_bits()
+                        .saturating_add(
+                            xi.significant_bits()
+                                .saturating_mul(polynomial.degree(var).to_u32() as u64),
+                        )
+                        .saturating_add(ceil_log2_usize(polynomial.nterms()))
+                };
+                let estimated_bits = evaluation_bits(&a, max_a).max(evaluation_bits(&b, max_b));
+                if estimated_bits > HEURISTIC_GCD_MAX_EVALUATED_COEFFICIENT_BITS {
+                    debug!(
+                        "Estimated heuristic evaluation coefficient is {} bits",
+                        estimated_bits
+                    );
+                    return Err(HeuristicGCDError::MaxSizeExceeded);
                 }
 
                 let aa = a.replace(var, &xi);
@@ -5204,6 +5274,25 @@ mod tests {
         let right = &common * &right_cofactor;
 
         assert_eq!(left.gcd(&right), common.make_monic());
+    }
+
+    #[test]
+    fn integer_heuristic_reconstructs_dense_bivariate_gcd() {
+        let mut polynomials = [
+            parse!("(1+3*x+5*y)^5-1").to_polynomial::<_, u16>(&Z, None),
+            parse!("(1-3*x-5*y)^5+1").to_polynomial::<_, u16>(&Z, None),
+            parse!("(1+3*x-5*y)^5+3").to_polynomial::<_, u16>(&Z, None),
+        ];
+        MultivariatePolynomial::unify_variables_list(&mut polynomials);
+        let [left_cofactor, right_cofactor, common_factor] = polynomials;
+        let left = &left_cofactor * &common_factor;
+        let right = &right_cofactor * &common_factor;
+
+        let (actual, actual_left_cofactor, actual_right_cofactor) =
+            left.heuristic_gcd(&right).unwrap();
+        assert!(actual == common_factor || actual == -common_factor);
+        assert_eq!(&actual * &actual_left_cofactor, left);
+        assert_eq!(&actual * &actual_right_cofactor, right);
     }
 
     #[test]
