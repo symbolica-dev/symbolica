@@ -2968,10 +2968,14 @@ impl<E: PositiveExponent> MultivariatePolynomial<IntegerRing, E> {
 
             // add new primes until we can reconstruct the full gcd
             'newprime: loop {
-                // A single hard coefficient is a cheap screening test before reconstructing every
-                // coefficient. Exact division below remains the final correctness check.
+                // A prime dividing `gamma` was rejected above, so reduction preserves the true
+                // GCD's leading multidegree. The lifted candidate retains every nonzero term of
+                // the modular GCD. If it divides both integer inputs, its multidegree is therefore
+                // both at least and at most that of the true GCD, which certifies the full GCD.
+                // Probe one coefficient first so that insufficient moduli do not trigger a full
+                // reconstruction attempt.
                 'reconstruction_attempt: {
-                    if m.significant_bits() <= 32 || accepted_images < next_reconstruction_image {
+                    if accepted_images < next_reconstruction_image {
                         break 'reconstruction_attempt;
                     }
 
