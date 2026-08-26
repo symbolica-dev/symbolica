@@ -48,6 +48,17 @@ fn mixed_radix_dense_work_is_bounded(
     output_len <= pair_products.saturating_mul(MAX_MIXED_RADIX_DENSE_TO_PAIR_PRODUCT_RATIO)
 }
 
+/// Return whether a multivariate dense multiplication can use a bounded coefficient box.
+/// Sparse product checks use the same condition to avoid replacing this path with hashing.
+pub(super) fn mixed_radix_dense_mul_is_bounded(
+    output_len: usize,
+    left_terms: usize,
+    right_terms: usize,
+) -> bool {
+    output_len <= MAX_DENSE_MUL_BUFFER_SIZE
+        && mixed_radix_dense_work_is_bounded(output_len, left_terms, right_terms)
+}
+
 struct TotalDegreeRankTable {
     variable_count: usize,
     total_degree: usize,
@@ -3703,17 +3714,22 @@ impl<F: Ring, E: Exponent> MultivariatePolynomial<F, E, LexOrder> {
         res
     }
 
-    /// Multiply polynomials that densely occupy a bounded total-degree simplex.
-    ///
-    /// A full mixed-radix box is prohibitively large for many variables, even when the
-    /// number of total-degree monomials is modest. Split the exponent vector and use a
-    /// compact perfect-rank table for the simplex instead of maintaining a monomial heap.
-    fn try_total_degree_dense_mul(
+    /// Return the total degree and coefficient count for a bounded dense
+    /// total-degree multiplication, including the packed-exponent limits.
+    fn total_degree_dense_mul_shape(
         &self,
         other: &MultivariatePolynomial<F, E, LexOrder>,
-    ) -> Option<MultivariatePolynomial<F, E, LexOrder>> {
+    ) -> Option<(usize, usize)> {
         let variable_count = self.nvars();
-        if variable_count < 2 || variable_count > 8 {
+        if variable_count != other.nvars()
+            || !(2..=8).contains(&variable_count)
+            || !self.is_polynomial()
+            || !other.is_polynomial()
+            || (0..variable_count).any(|variable| {
+                self.degree(variable).to_i32() as i64 + other.degree(variable).to_i32() as i64
+                    > u8::MAX as i64
+            })
+        {
             return None;
         }
 
@@ -3752,6 +3768,29 @@ impl<F: Ring, E: Exponent> MultivariatePolynomial<F, E, LexOrder> {
         {
             return None;
         }
+
+        Some((total_degree, coefficient_count))
+    }
+
+    /// Return whether multiplication can use the bounded total-degree simplex workspace.
+    pub(super) fn total_degree_dense_mul_is_bounded(
+        &self,
+        other: &MultivariatePolynomial<F, E, LexOrder>,
+    ) -> bool {
+        self.total_degree_dense_mul_shape(other).is_some()
+    }
+
+    /// Multiply polynomials that densely occupy a bounded total-degree simplex.
+    ///
+    /// A full mixed-radix box is prohibitively large for many variables, even when the
+    /// number of total-degree monomials is modest. Split the exponent vector and use a
+    /// compact perfect-rank table for the simplex instead of maintaining a monomial heap.
+    fn try_total_degree_dense_mul(
+        &self,
+        other: &MultivariatePolynomial<F, E, LexOrder>,
+    ) -> Option<MultivariatePolynomial<F, E, LexOrder>> {
+        let variable_count = self.nvars();
+        let (total_degree, coefficient_count) = self.total_degree_dense_mul_shape(other)?;
 
         let rank_table = total_degree_rank_table(variable_count, total_degree)?;
         let radix = total_degree + 1;
