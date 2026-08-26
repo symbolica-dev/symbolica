@@ -12,7 +12,7 @@ use tracing::{debug, instrument};
 use crate::domains::algebraic::{AlgebraicExtension, GaloisField};
 use crate::domains::finite_field::{
     FiniteField, FiniteFieldCore, FiniteFieldElement, FiniteFieldWorkspace, PrimeIteratorU64,
-    SMOOTH_PRIME_BASE, SMOOTH_PRIMES, ToFiniteField, Zp64,
+    SMOOTH_PRIME_BASE, SMOOTH_PRIMES, ToFiniteField, Zp64, Zp64DiscreteLogContext,
 };
 use crate::domains::float::{FloatField, SingleFloat};
 use crate::domains::integer::{FromFiniteField, Integer, IntegerRing, SMALL_PRIMES, Z};
@@ -2945,7 +2945,7 @@ impl<E: PositiveExponent> MultivariatePolynomial<IntegerRing, E> {
         images: &[MultivariatePolynomial<Zp64, PE>],
         sample_points: &[FiniteFieldElement<u64>],
         alpha: &FiniteFieldElement<u64>,
-        totient_primes: &[(u64, u32)],
+        discrete_log_context: &Zp64DiscreteLogContext<'_>,
         kronecker: &HuMonaganKroneckerMap,
         d_0: PE,
     ) -> Option<MultivariatePolynomial<Zp64, PE>> {
@@ -2996,8 +2996,7 @@ impl<E: PositiveExponent> MultivariatePolynomial<IntegerRing, E> {
 
             let mut monomials = Vec::with_capacity(t);
             for m in roots {
-                let e = p.discrete_log(alpha, &m, p.get_prime() - 1, totient_primes);
-                let ee = p.from_element(&e);
+                let ee = discrete_log_context.discrete_log(&m);
                 if ee >= kronecker.range() {
                     debug!("Factor too large: {}", ee);
                     return None;
@@ -3055,7 +3054,7 @@ impl<E: PositiveExponent> MultivariatePolynomial<IntegerRing, E> {
         images: &[MultivariatePolynomial<Zp64, u32>],
         sample_points: &[FiniteFieldElement<u64>],
         alpha: &FiniteFieldElement<u64>,
-        totient_primes: &[(u64, u32)],
+        discrete_log_context: &Zp64DiscreteLogContext<'_>,
         kronecker: &HuMonaganKroneckerMap,
         d_0_1: (u32, u32),
     ) -> Option<MultivariatePolynomial<Zp64, PE>> {
@@ -3118,8 +3117,7 @@ impl<E: PositiveExponent> MultivariatePolynomial<IntegerRing, E> {
 
             let mut monomials = Vec::with_capacity(t);
             for m in roots {
-                let e = p.discrete_log(alpha, &m, p.get_prime() - 1, totient_primes);
-                let ee = p.from_element(&e);
+                let ee = discrete_log_context.discrete_log(&m);
                 if ee >= kronecker.range() {
                     debug!("Factor too large: {}", ee);
                     return None;
@@ -3305,6 +3303,8 @@ impl<E: PositiveExponent> MultivariatePolynomial<IntegerRing, E> {
                     let alpha = field.to_element(*alpha as u64);
                     break (field, totient_primes, alpha, a_p, b_p);
                 };
+                let discrete_log_context =
+                    Zp64DiscreteLogContext::new(&p, &alpha, p.get_prime() - 1, &totient_primes);
 
                 let mut betas = Vec::with_capacity(a.nvars() - 1);
                 betas.push(alpha);
@@ -3390,7 +3390,7 @@ impl<E: PositiveExponent> MultivariatePolynomial<IntegerRing, E> {
                             &gcd_images,
                             &sample_points,
                             &alpha,
-                            &totient_primes,
+                            &discrete_log_context,
                             &kronecker,
                             d_0,
                         );
@@ -3407,7 +3407,7 @@ impl<E: PositiveExponent> MultivariatePolynomial<IntegerRing, E> {
                             &cofactor_images,
                             &sample_points,
                             &alpha,
-                            &totient_primes,
+                            &discrete_log_context,
                             &kronecker,
                             a_p.degree(0) - d_0,
                         );
@@ -3582,6 +3582,8 @@ impl<E: PositiveExponent> MultivariatePolynomial<IntegerRing, E> {
                     let alpha = field.to_element(*alpha as u64);
                     break (field, totient_primes, alpha, a_p, b_p);
                 };
+                let discrete_log_context =
+                    Zp64DiscreteLogContext::new(&p, &alpha, p.get_prime() - 1, &totient_primes);
 
                 let mut betas = Vec::with_capacity(a.nvars() - start_exp);
                 betas.push(alpha);
@@ -3682,7 +3684,7 @@ impl<E: PositiveExponent> MultivariatePolynomial<IntegerRing, E> {
                             &cofactor_images,
                             &sample_points,
                             &alpha,
-                            &totient_primes,
+                            &discrete_log_context,
                             &kronecker,
                             (
                                 a_deg.0.to_u32().saturating_sub(d_0_1.0),
@@ -3702,7 +3704,7 @@ impl<E: PositiveExponent> MultivariatePolynomial<IntegerRing, E> {
                             &gcd_images,
                             &sample_points,
                             &alpha,
-                            &totient_primes,
+                            &discrete_log_context,
                             &kronecker,
                             d_0_1,
                         );

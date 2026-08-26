@@ -13,7 +13,7 @@ use std::ops::Deref;
 use crate::domains::{RingOps, Set};
 use crate::domains::{
     backend::integer::{BackendRandState, probably_prime as backend_probably_prime},
-    integer::{DoubleInteger, Integer, MultiPrecisionInteger},
+    integer::{DoubleInteger, Integer, MultiPrecisionInteger, extended_gcd_i128},
 };
 use crate::kernels::RingKernels;
 use crate::printer::{PrintOptions, PrintState};
@@ -657,6 +657,160 @@ impl FiniteFieldWorkspace for u64 {
     }
 }
 
+struct DiscreteLogPrimePower {
+    prime: u64,
+    exponent: u32,
+    cofactor: u64,
+    starting_exponent: u64,
+    beta_powers: Vec<FiniteFieldElement<u64>>,
+    gamma_powers: Vec<FiniteFieldElement<u64>>,
+    crt_idempotent: u64,
+}
+
+/// Precomputed Pohlig–Hellman data for repeated discrete logarithms with one
+/// base in a 64-bit prime field.
+pub struct Zp64DiscreteLogContext<'a> {
+    field: &'a Zp64,
+    base: FiniteFieldElement<u64>,
+    totient: u64,
+    factors: Vec<DiscreteLogPrimePower>,
+}
+
+impl<'a> Zp64DiscreteLogContext<'a> {
+    /// Precomputes the prime-power generators, digit tables, and CRT
+    /// idempotents for `base`.
+    ///
+    /// `totient_primes` must be the complete prime factorization of `totient`,
+    /// and `base` must have order `totient`.
+    pub fn new(
+        field: &'a Zp64,
+        base: &FiniteFieldElement<u64>,
+        totient: u64,
+        totient_primes: &[(u64, u32)],
+    ) -> Self {
+        assert!(totient > 1, "the discrete-log order must exceed one");
+        assert!(
+            !totient_primes.is_empty(),
+            "the discrete-log order factorization must not be empty"
+        );
+        let base_inverse = field.inv(base);
+        let mut factor_product = 1u64;
+        let mut factors = Vec::with_capacity(totient_primes.len());
+        for &(prime, exponent) in totient_primes {
+            assert!(prime > 1, "discrete-log factors must be prime");
+            assert!(
+                exponent > 0,
+                "discrete-log factor exponents must be positive"
+            );
+
+            let prime_power = prime
+                .checked_pow(exponent)
+                .expect("discrete-log prime power overflowed u64");
+            factor_product = factor_product
+                .checked_mul(prime_power)
+                .expect("discrete-log factorization overflowed u64");
+            assert!(
+                totient.is_multiple_of(prime_power),
+                "discrete-log prime power does not divide the order"
+            );
+
+            let cofactor = totient / prime_power;
+            let starting_exponent = prime_power / prime;
+            let gamma = field.pow(base, totient / prime);
+            assert!(
+                !field.is_one(&gamma),
+                "the discrete-log base does not have the requested order"
+            );
+
+            let table_len =
+                usize::try_from(prime).expect("discrete-log prime factor does not fit in usize");
+            let mut gamma_powers = Vec::with_capacity(table_len);
+            let mut gamma_power = field.one();
+            for _ in 0..prime {
+                gamma_powers.push(gamma_power);
+                field.mul_assign(&mut gamma_power, &gamma);
+            }
+
+            let (gcd, inverse, _) = extended_gcd_i128(cofactor as i128, prime_power as i128);
+            assert_eq!(gcd, 1, "discrete-log prime powers must be coprime");
+            let inverse = inverse.rem_euclid(prime_power as i128) as u64;
+            let crt_idempotent = ((cofactor as u128 * inverse as u128) % totient as u128) as u64;
+
+            let mut beta = field.pow(&base_inverse, cofactor);
+            let mut beta_powers = Vec::with_capacity(exponent as usize);
+            for _ in 0..exponent {
+                beta_powers.push(beta);
+                beta = field.pow(&beta, prime);
+            }
+
+            factors.push(DiscreteLogPrimePower {
+                prime,
+                exponent,
+                cofactor,
+                starting_exponent,
+                beta_powers,
+                gamma_powers,
+                crt_idempotent,
+            });
+        }
+
+        assert_eq!(
+            factor_product, totient,
+            "incomplete discrete-log order factorization"
+        );
+
+        Self {
+            field,
+            base: *base,
+            totient,
+            factors,
+        }
+    }
+
+    /// Computes `log_base(value)` using the data precomputed by [`Self::new`].
+    pub fn discrete_log(&self, value: &FiniteFieldElement<u64>) -> u64 {
+        assert!(
+            !self.field.is_zero(value),
+            "zero has no multiplicative discrete logarithm"
+        );
+
+        let mut result = 0u128;
+        for factor in &self.factors {
+            let mut z = self.field.pow(value, factor.cofactor);
+            let mut digit_exponent = factor.starting_exponent;
+            let mut prime_power = 1u64;
+            let mut residue = 0u64;
+
+            for beta in &factor.beta_powers {
+                let w = self.field.pow(&z, digit_exponent);
+                let digit = factor
+                    .gamma_powers
+                    .iter()
+                    .position(|power| *power == w)
+                    .unwrap_or_else(|| {
+                        panic!(
+                            "No discrete logarithm found for base {} and res {} in field with prime {}^{}",
+                            self.base.0, value.0, factor.prime, factor.exponent
+                        )
+                    }) as u64;
+
+                if digit != 0 {
+                    self.field.mul_assign(&mut z, &self.field.pow(beta, digit));
+                }
+                residue += digit * prime_power;
+                prime_power *= factor.prime;
+                digit_exponent /= factor.prime;
+            }
+
+            result += (residue as u128 * factor.crt_idempotent as u128) % self.totient as u128;
+        }
+
+        let result = (result % self.totient as u128) as u64;
+        debug_assert_eq!(value, &self.field.pow(&self.base, result));
+        result
+    }
+}
+
 impl Zp64 {
     /// Create a new modular ring. `n` must be odd.
     pub fn new_non_prime(p: u64) -> Zp64 {
@@ -702,69 +856,9 @@ impl Zp64 {
         totient: u64,
         totient_primes: &[(u64, u32)],
     ) -> FiniteFieldElement<u64> {
-        let mut crt = vec![];
-        for (p, e) in totient_primes {
-            let p_e = p.to_u64().unwrap().pow(*e);
-            let exp = totient.to_u64().unwrap() / p.to_u64().unwrap().pow(*e);
-
-            let g = self.pow(base, exp);
-            let g_inv = self.inv(&g);
-            let h = self.pow(res, exp);
-
-            let mut x = 0;
-            let gamma = self.pow(&g, p.pow(*e - 1));
-
-            'next: for k in 0..*e {
-                let hh = self.pow(&self.mul(&self.pow(&g_inv, x), &h), p.pow(*e - 1 - k));
-
-                if self.is_one(&hh) {
-                    continue;
-                }
-
-                // assume smooth prime with small factors
-                // TODO: switch to baby-step giant-step algorithm
-                let mut gamma_c = gamma;
-                for d in 1..*p {
-                    if gamma_c == hh {
-                        x += p.pow(k) * d;
-                        continue 'next;
-                    }
-
-                    self.mul_assign(&mut gamma_c, &gamma);
-                }
-
-                panic!(
-                    "No discrete logarithm found for base {} and res {} in field with prime {}^{}",
-                    base.0, res.0, p, e
-                );
-            }
-
-            crt.push((x, p_e));
-        }
-
-        if crt.len() == 1 {
-            return self.to_element(crt[0].0);
-        }
-
-        let mut cur = Integer::chinese_remainder(
-            crt[0].0.into(),
-            crt[1].0.into(),
-            crt[0].1.into(),
-            crt[1].1.into(),
-        );
-        let mut prime = Integer::from(crt[0].1) * crt[1].1;
-        for x in crt.iter().skip(2) {
-            cur = Integer::chinese_remainder(cur, x.0.into(), prime.clone(), x.1.into());
-            prime *= x.1;
-        }
-
-        if cur < 0 {
-            cur += prime;
-        }
-
-        let r = self.to_element(cur.to_u64().unwrap());
-        debug_assert_eq!(res, &self.pow(base, self.from_element(&r)));
-        r
+        self.to_element(
+            Zp64DiscreteLogContext::new(self, base, totient, totient_primes).discrete_log(res),
+        )
     }
 
     /// Returns the unit element in Montgomory form, ie.e 1 + 2^64 mod a.
@@ -3670,7 +3764,7 @@ mod test {
     use super::{FiniteFieldCore, Zp};
     use crate::domains::{
         Field, Ring, RingOps, SampleableRing,
-        finite_field::{FiniteField, PrimitiveRootIterator, Zp64},
+        finite_field::{FiniteField, PrimitiveRootIterator, Zp64, Zp64DiscreteLogContext},
         integer::{Integer, MultiPrecisionInteger},
     };
     use crate::kernels::{DensePolynomialMulRequest, GeometricSequenceStepRequest};
@@ -4118,5 +4212,24 @@ mod test {
         let y = field.to_element(11);
         let log = field.discrete_log(&base, &y, 72, &[(2, 3), (3, 2)]);
         assert_eq!(field.from_element(&log), 55);
+    }
+
+    #[test]
+    fn reusable_discrete_log_context() {
+        let field = Zp64::new(73);
+        let base = field.to_element(5);
+        let context = Zp64DiscreteLogContext::new(&field, &base, 72, &[(2, 3), (3, 2)]);
+        for exponent in 0..72 {
+            assert_eq!(context.discrete_log(&field.pow(&base, exponent)), exponent);
+        }
+
+        let prime = 10_030_613_004_288_000_001;
+        let field = Zp64::new(prime);
+        let base = field.to_element(7);
+        let context =
+            Zp64DiscreteLogContext::new(&field, &base, prime - 1, &[(2, 27), (3, 14), (5, 6)]);
+        for exponent in [0, 1, 2, 55, 1_234_567_890, prime - 2] {
+            assert_eq!(context.discrete_log(&field.pow(&base, exponent)), exponent);
+        }
     }
 }
