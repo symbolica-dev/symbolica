@@ -2185,64 +2185,53 @@ impl<F: Ring, E: PositiveExponent> MultivariatePolynomial<F, E, LexOrder> {
     pub fn replace_last(&self, n: usize, v: &F::Element) -> MultivariatePolynomial<F, E, LexOrder> {
         const MAX_EXP_BUF: usize = 100000;
         let mut res = self.zero_with_capacity(self.nterms());
-        let mut e = vec![E::zero(); self.nvars()];
-        let mut res_cache =
-            vec![self.ring().zero(); (self.degree(n).to_i32() as usize + 1).min(MAX_EXP_BUF)];
-
         let nvars = self.nvars();
+        let cache_size = (self.degree(n).to_u32() as usize + 1).min(MAX_EXP_BUF);
+        let mut power_cache = vec![self.ring().zero(); cache_size];
 
-        for t in self {
-            if t.exponents[n] == E::zero() {
-                res.append_monomial(t.coefficient.clone(), t.exponents);
-                continue;
+        // Lexicographic order makes terms with the same exponents before `n` contiguous when all
+        // later variables are absent. Evaluate each row into one output coefficient.
+        let mut row_start = 0;
+        while row_start < self.nterms() {
+            let row_exponents = self.exponents(row_start);
+            let mut row_end = row_start + 1;
+            while row_end < self.nterms() && self.exponents(row_end)[..n] == row_exponents[..n] {
+                row_end += 1;
             }
 
-            let ee = t.exponents[n].to_i32() as usize;
-
-            let c = if ee < MAX_EXP_BUF {
-                if self.ring().is_zero(&res_cache[ee]) {
-                    res_cache[ee] = self.ring().pow(v, ee as u64);
-                }
-
-                self.ring().mul(t.coefficient, &res_cache[ee])
-            } else {
-                self.ring()
-                    .mul(t.coefficient, &self.ring().pow(v, ee as u64))
-            };
-
-            if self.ring().is_zero(&c) {
-                continue;
-            }
-
-            e.copy_from_slice(t.exponents);
-            e[n] = E::zero();
-
-            let mut different = false;
-            if !res.is_zero() {
-                let start = (res.nterms() - 1) * nvars;
-
-                for i in (0..n).rev() {
-                    if unsafe { e.get_unchecked(i) != res.exponents.get_unchecked(start + i) } {
-                        different = true;
-                        break;
+            let mut coefficient = self.ring().zero();
+            for term_index in row_start..row_end {
+                let exponent = self.exponents(term_index)[n].to_u32() as usize;
+                if exponent == 0 {
+                    self.ring()
+                        .add_assign(&mut coefficient, &self.coefficients[term_index]);
+                } else if exponent < cache_size {
+                    if self.ring().is_zero(&power_cache[exponent]) {
+                        power_cache[exponent] = self.ring().pow(v, exponent as u64);
                     }
-                }
-            } else {
-                different = true;
-            }
-
-            if different {
-                res.coefficients.push(c);
-                res.exponents.extend_from_slice(&e);
-            } else {
-                let l = res.coefficients.last_mut().unwrap();
-                self.ring().add_assign(l, &c);
-
-                if self.ring().is_zero(l) {
-                    res.coefficients.pop();
-                    res.exponents.truncate(res.exponents.len() - self.nvars());
+                    self.ring().add_mul_assign(
+                        &mut coefficient,
+                        &self.coefficients[term_index],
+                        &power_cache[exponent],
+                    );
+                } else {
+                    let power = self.ring().pow(v, exponent as u64);
+                    self.ring().add_mul_assign(
+                        &mut coefficient,
+                        &self.coefficients[term_index],
+                        &power,
+                    );
                 }
             }
+
+            if !self.ring().is_zero(&coefficient) {
+                res.coefficients.push(coefficient);
+                res.exponents.extend_from_slice(row_exponents);
+                let output_exponent = res.exponents.len() - nvars + n;
+                res.exponents[output_exponent] = E::zero();
+            }
+
+            row_start = row_end;
         }
 
         res
@@ -6654,6 +6643,64 @@ mod test {
             r.to_expression(),
             parse!("1-v8-v8*v9-v7-v6-v5-v4+v3-4*v2+v2*v3^2+v2^2*v3")
         );
+    }
+
+    #[test]
+    fn replace_last_evaluates_contiguous_rows_and_removes_cancellations() {
+        let variables = Arc::new(vec![
+            symbol!("x").into(),
+            symbol!("y").into(),
+            symbol!("z").into(),
+            symbol!("w").into(),
+        ]);
+        let polynomial = parse!("x^2*z^4+3*x^2*z^2-4*x^2+y*z^3-y*z+5+x*z-2*x")
+            .to_polynomial::<_, u16>(&Z, variables);
+
+        let at_two = polynomial.replace_last(2, &Integer::from(2));
+        let expected_at_two =
+            parse!("24*x^2+6*y+5").to_polynomial::<_, u16>(&Z, polynomial.variables().clone());
+        assert_eq!(at_two, expected_at_two);
+
+        let at_zero = polynomial.replace_last(2, &Integer::from(0));
+        let expected_at_zero =
+            parse!("-4*x^2-2*x+5").to_polynomial::<_, u16>(&Z, polynomial.variables().clone());
+        assert_eq!(at_zero, expected_at_zero);
+    }
+
+    #[test]
+    fn replace_last_matches_independent_term_evaluation() {
+        let variables = Arc::new(vec![
+            symbol!("x").into(),
+            symbol!("y").into(),
+            symbol!("z").into(),
+            symbol!("w").into(),
+        ]);
+        let mut polynomial = MultivariatePolynomial::<IntegerRing, u16>::new(&Z, None, variables);
+        for x in 0..=4u16 {
+            for y in 0..=3u16 {
+                for z in 0..=6u16 {
+                    let coefficient = i64::from((3 * x + 5 * y + 7 * z) % 11) - 5;
+                    if coefficient != 0 && (x + 2 * y + 3 * z) % 4 != 0 {
+                        polynomial.append_monomial(Integer::from(coefficient), &[x, y, z, 0]);
+                    }
+                }
+            }
+        }
+
+        for value in -3..=3 {
+            let value = Integer::from(value);
+            let mut expected = polynomial.zero_with_capacity(polynomial.nterms());
+            for term in &polynomial {
+                let mut exponents = term.exponents.to_vec();
+                let exponent = exponents[2];
+                exponents[2] = 0;
+                let power = Z.pow(&value, u64::from(exponent));
+                let coefficient = term.coefficient * &power;
+                expected.append_monomial(coefficient, &exponents);
+            }
+
+            assert_eq!(polynomial.replace_last(2, &value), expected);
+        }
     }
 
     #[test]
