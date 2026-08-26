@@ -32,6 +32,7 @@ use crate::{
     },
     coefficient::{Coefficient, CoefficientView},
     domains::rational::Rational,
+    poly::PolyVariable,
     state::{RecycledAtom, Workspace},
     transformer::{Transformer, TransformerError},
     utils::{BorrowedOrOwned, Settable},
@@ -1022,7 +1023,32 @@ impl<'a> AtomView<'a> {
         out: &mut HashSet<Symbol>,
     ) {
         match self {
-            AtomView::Num(_) => {}
+            AtomView::Num(n) => {
+                if n.is_rational_polynomial()
+                    && let CoefficientView::RationalPolynomial(r) = n.get_coeff_view()
+                {
+                    let r = r.deserialize();
+                    for x in r.numerator.variables().iter() {
+                        match x {
+                            PolyVariable::Symbol(s) => {
+                                out.insert(*s);
+                            }
+                            PolyVariable::Function(s, a) => {
+                                if include_function_symbols {
+                                    out.insert(*s);
+                                    a.as_view()
+                                        .get_all_symbols_impl(include_function_symbols, out);
+                                }
+                            }
+                            PolyVariable::Power(p) => {
+                                p.as_view()
+                                    .get_all_symbols_impl(include_function_symbols, out);
+                            }
+                            PolyVariable::Temporary(_) => {}
+                        }
+                    }
+                }
+            }
             AtomView::Var(v) => {
                 out.insert(v.get_symbol());
             }

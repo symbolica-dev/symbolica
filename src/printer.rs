@@ -736,11 +736,16 @@ impl AtomView<'_> {
             AtomView::Var(v) => {
                 if settings.include_attributes {
                     v.get_symbol()
-                        .format(&PrintOptions::full(), PrintState::default(), out)
+                        .format_with_custom(
+                            &PrintOptions::full(),
+                            PrintState::default(),
+                            false,
+                            out,
+                        )
                         .unwrap();
                 } else if settings.include_namespace {
                     v.get_symbol()
-                        .format(
+                        .format_with_custom(
                             &PrintOptions {
                                 hide_namespace: settings
                                     .hide_namespace
@@ -748,14 +753,16 @@ impl AtomView<'_> {
                                 ..PrintOptions::file()
                             },
                             PrintState::default(),
+                            false,
                             out,
                         )
                         .unwrap();
                 } else {
                     v.get_symbol()
-                        .format(
+                        .format_with_custom(
                             &PrintOptions::file_no_namespace(),
                             PrintState::default(),
+                            false,
                             out,
                         )
                         .unwrap();
@@ -764,11 +771,16 @@ impl AtomView<'_> {
             AtomView::Fun(f) => {
                 if settings.include_attributes {
                     f.get_symbol()
-                        .format(&PrintOptions::full(), PrintState::default(), out)
+                        .format_with_custom(
+                            &PrintOptions::full(),
+                            PrintState::default(),
+                            false,
+                            out,
+                        )
                         .unwrap();
                 } else if settings.include_namespace {
                     f.get_symbol()
-                        .format(
+                        .format_with_custom(
                             &PrintOptions {
                                 hide_namespace: settings
                                     .hide_namespace
@@ -776,14 +788,16 @@ impl AtomView<'_> {
                                 ..PrintOptions::file()
                             },
                             PrintState::default(),
+                            false,
                             out,
                         )
                         .unwrap();
                 } else {
                     f.get_symbol()
-                        .format(
+                        .format_with_custom(
                             &PrintOptions::file_no_namespace(),
                             PrintState::default(),
+                            false,
                             out,
                         )
                         .unwrap();
