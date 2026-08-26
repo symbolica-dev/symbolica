@@ -101,22 +101,66 @@ fn should_use_hu_monagan<E: PositiveExponent>(
         || Integer::from(nterms) * SPARSITY_MARGIN < box_size
 }
 
-/// Build the mixed-radix Kronecker powers used by Hu-Monagan interpolation.
+/// Mixed-radix Kronecker map used to encode the variables sampled by Hu-Monagan interpolation.
 ///
-/// The interpolated image stores its encoded exponent as `u32`, so handing an overflowing
-/// range to the sampler would make distinct monomials collide and prevent interpolation from
-/// ever stabilizing.
-fn hu_monagan_kronecker_powers(radices: &[u32], start_index: usize) -> Option<(Vec<u32>, u64)> {
-    let mut product = 1u64;
-    let mut powers = Vec::with_capacity(radices.len().saturating_sub(start_index));
-    for radix in radices.iter().skip(start_index) {
-        product = product.checked_mul(*radix as u64)?;
-        if product > u32::MAX as u64 {
+/// If the active radices are `r_s, ..., r_n`, the evaluation powers are
+/// `r_s, r_s r_(s+1), ...`, and an exponent vector is encoded as
+/// `e_s + r_s e_(s+1) + ...`. Interpolation recovers that encoded exponent as a `u64`; `decode`
+/// expands it directly into the polynomial's exponent type.
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct HuMonaganKroneckerMap {
+    start_index: usize,
+    radices: Vec<u32>,
+    powers: Vec<u64>,
+    range: u64,
+}
+
+impl HuMonaganKroneckerMap {
+    fn new(radices: &[u32], start_index: usize) -> Option<Self> {
+        let radices = radices.get(start_index..)?;
+        let mut product = 1u64;
+        let mut powers = Vec::with_capacity(radices.len());
+        for radix in radices {
+            if *radix == 0 {
+                return None;
+            }
+            product = product.checked_mul(*radix as u64)?;
+            powers.push(product);
+        }
+
+        Some(Self {
+            start_index,
+            radices: radices.to_vec(),
+            powers,
+            range: product,
+        })
+    }
+
+    fn powers(&self) -> &[u64] {
+        &self.powers
+    }
+
+    fn range(&self) -> u64 {
+        self.range
+    }
+
+    fn decode<E: PositiveExponent>(&self, mut encoded: u64, exponents: &mut [E]) -> Option<()> {
+        if encoded >= self.range {
             return None;
         }
-        powers.push(product as u32);
+
+        let decoded = exponents.get_mut(self.start_index..)?;
+        if decoded.len() != self.radices.len() {
+            return None;
+        }
+
+        for (exponent, radix) in decoded.iter_mut().zip(&self.radices) {
+            *exponent = E::from_u32((encoded % *radix as u64) as u32);
+            encoded /= *radix as u64;
+        }
+
+        (encoded == 0).then_some(())
     }
-    Some((powers, product))
 }
 
 trait ModularGcdWorkspace: FiniteFieldWorkspace + WordCrt {
@@ -2901,9 +2945,9 @@ impl<E: PositiveExponent> MultivariatePolynomial<IntegerRing, E> {
         sample_points: &[FiniteFieldElement<u64>],
         alpha: &FiniteFieldElement<u64>,
         totient_primes: &[(u64, u32)],
-        ri_prod: u64,
+        kronecker: &HuMonaganKroneckerMap,
         d_0: PE,
-    ) -> Option<MultivariatePolynomial<Zp64, u32>> {
+    ) -> Option<MultivariatePolynomial<Zp64, PE>> {
         if images.len() < 4 || !images.len().is_multiple_of(2) {
             return None;
         }
@@ -2911,15 +2955,15 @@ impl<E: PositiveExponent> MultivariatePolynomial<IntegerRing, E> {
         let zero_u32 = MultivariatePolynomial::new(p, None, images[0].variables().clone());
 
         let l = images.len() / 2;
-        let mut res = zero_u32.clone();
-        let mut exp = vec![PE::zero(); images[0].nvars()];
-        let mut exp_u32 = vec![0; images[0].nvars()];
+        let mut res = images[0].zero();
+        let mut image_exp = vec![PE::zero(); images[0].nvars()];
+        let mut result_exp = vec![PE::zero(); images[0].nvars()];
 
         for i in 0..=d_0.to_u32() {
-            exp[0] = PE::from_u32(i);
+            image_exp[0] = PE::from_u32(i);
             let row = images
                 .iter()
-                .map(|x| x.coefficient(&exp).unwrap_or(p.zero()))
+                .map(|x| x.coefficient(&image_exp).unwrap_or(p.zero()))
                 .collect::<Vec<_>>();
 
             if row.iter().all(|x| p.is_zero(x)) {
@@ -2936,7 +2980,7 @@ impl<E: PositiveExponent> MultivariatePolynomial<IntegerRing, E> {
                 return None;
             }
 
-            let mut bma_poly = res.zero();
+            let mut bma_poly = zero_u32.clone();
             let mut bma_exp = vec![0; images[0].nvars()];
             for (j, cs) in recurrence.iter().rev().enumerate() {
                 if !p.is_zero(cs) {
@@ -2967,7 +3011,7 @@ impl<E: PositiveExponent> MultivariatePolynomial<IntegerRing, E> {
                 let m = p.neg(&f.get_constant());
                 let e = p.discrete_log(alpha, &m, p.get_prime() - 1, totient_primes);
                 let ee = p.from_element(&e);
-                if ee >= ri_prod || ee > u32::MAX as u64 {
+                if ee >= kronecker.range() {
                     debug!("Factor too large: {}", ee);
                     return None;
                 }
@@ -2991,8 +3035,8 @@ impl<E: PositiveExponent> MultivariatePolynomial<IntegerRing, E> {
             }
 
             for (sample_point, expected) in sample_points.iter().zip(&row).skip(t) {
-                // Do not use `replace` here: encoded Kronecker exponents can use the full u32
-                // range, whereas the generic exponent conversion passes through i32.
+                // Evaluate the encoded exponent directly so values above the signed exponent
+                // range are not truncated by a polynomial substitution.
                 let mut evaluated = p.zero();
                 for (coefficient, exponent) in sol.iter().zip(&monomials) {
                     p.add_assign(
@@ -3008,10 +3052,9 @@ impl<E: PositiveExponent> MultivariatePolynomial<IntegerRing, E> {
 
             let mut row_poly = res.zero();
             for (coeff, e) in sol.into_iter().zip(&monomials) {
-                exp_u32[0] = i;
-                exp_u32[1] = *e as u32;
-                row_poly.append_monomial(coeff, &exp_u32);
-                exp_u32[1] = 0;
+                result_exp[0] = PE::from_u32(i);
+                kronecker.decode(*e, &mut result_exp)?;
+                row_poly.append_monomial(coeff, &result_exp);
             }
 
             res = res + row_poly;
@@ -3020,15 +3063,15 @@ impl<E: PositiveExponent> MultivariatePolynomial<IntegerRing, E> {
         Some(res)
     }
 
-    fn hu_monagan_sparse_interpolate_bivariate(
+    fn hu_monagan_sparse_interpolate_bivariate<PE: PositiveExponent>(
         p: &Zp64,
         images: &[MultivariatePolynomial<Zp64, u32>],
         sample_points: &[FiniteFieldElement<u64>],
         alpha: &FiniteFieldElement<u64>,
         totient_primes: &[(u64, u32)],
-        ri_prod: u64,
+        kronecker: &HuMonaganKroneckerMap,
         d_0_1: (u32, u32),
-    ) -> Option<MultivariatePolynomial<Zp64, u32>> {
+    ) -> Option<MultivariatePolynomial<Zp64, PE>> {
         if images.len() < 4 || !images.len().is_multiple_of(2) {
             return None;
         }
@@ -3048,15 +3091,17 @@ impl<E: PositiveExponent> MultivariatePolynomial<IntegerRing, E> {
         let mut rows = rows.into_iter().collect::<Vec<_>>();
         rows.sort_unstable();
 
-        let mut res = images[0].zero();
-        let mut exp = vec![0; images[0].nvars()];
+        let mut res =
+            MultivariatePolynomial::<Zp64, PE>::new(p, None, images[0].variables().clone());
+        let mut image_exp = vec![0; images[0].nvars()];
+        let mut result_exp = vec![PE::zero(); images[0].nvars()];
 
         for (e0, e1) in rows {
-            exp[0] = e0;
-            exp[1] = e1;
+            image_exp[0] = e0;
+            image_exp[1] = e1;
             let row = images
                 .iter()
-                .map(|x| x.coefficient(&exp).unwrap_or(p.zero()))
+                .map(|x| x.coefficient(&image_exp).unwrap_or(p.zero()))
                 .collect::<Vec<_>>();
 
             let (recurrence, stable_count) = p.find_linear_recurrence_relation(&row);
@@ -3099,7 +3144,7 @@ impl<E: PositiveExponent> MultivariatePolynomial<IntegerRing, E> {
                 let m = p.neg(&f.get_constant());
                 let e = p.discrete_log(alpha, &m, p.get_prime() - 1, totient_primes);
                 let ee = p.from_element(&e);
-                if ee >= ri_prod || ee > u32::MAX as u64 {
+                if ee >= kronecker.range() {
                     debug!("Factor too large: {}", ee);
                     return None;
                 }
@@ -3123,8 +3168,8 @@ impl<E: PositiveExponent> MultivariatePolynomial<IntegerRing, E> {
             }
 
             for (sample_point, expected) in sample_points.iter().zip(&row).skip(t) {
-                // Keep the encoded exponent unsigned for the same reason as in the univariate
-                // interpolation path above.
+                // Evaluate the encoded exponent directly so values above the signed exponent
+                // range are not truncated by a polynomial substitution.
                 let mut evaluated = p.zero();
                 for (coefficient, exponent) in sol.iter().zip(&monomials) {
                     p.add_assign(
@@ -3141,18 +3186,15 @@ impl<E: PositiveExponent> MultivariatePolynomial<IntegerRing, E> {
                 }
             }
 
-            let mut row_poly = images[0].zero();
+            let mut row_poly = res.zero();
             for (coeff, e) in sol.into_iter().zip(&monomials) {
-                exp[0] = e0;
-                exp[1] = e1;
-                exp[2] = *e as u32;
-                row_poly.append_monomial(coeff, &exp);
-                exp[2] = 0;
+                result_exp[0] = PE::from_u32(e0);
+                result_exp[1] = PE::from_u32(e1);
+                kronecker.decode(*e, &mut result_exp)?;
+                row_poly.append_monomial(coeff, &result_exp);
             }
 
             res = res + row_poly;
-            exp[0] = 0;
-            exp[1] = 0;
         }
 
         Some(res)
@@ -3214,8 +3256,7 @@ impl<E: PositiveExponent> MultivariatePolynomial<IntegerRing, E> {
         } else {
             (b, self)
         };
-        let h_zero =
-            MultivariatePolynomial::<_, u32>::new(&IntegerRing, None, a.variables().clone());
+        let h_zero = MultivariatePolynomial::<_, E>::new(&IntegerRing, None, a.variables().clone());
 
         let largest_coeff = a
             .coefficients
@@ -3240,8 +3281,8 @@ impl<E: PositiveExponent> MultivariatePolynomial<IntegerRing, E> {
                 *rr += 1;
             }
 
-            let Some((powers, ri_prod)) = hu_monagan_kronecker_powers(&r, 1) else {
-                debug!("Hu-Monagan Kronecker range does not fit in u32; using Zippel");
+            let Some(kronecker) = HuMonaganKroneckerMap::new(&r, 1) else {
+                debug!("Hu-Monagan Kronecker range does not fit in u64; using Zippel");
                 return None;
             };
 
@@ -3250,7 +3291,7 @@ impl<E: PositiveExponent> MultivariatePolynomial<IntegerRing, E> {
             let mut image_kind = None;
 
             'new_image: loop {
-                let prime_bound = ri_prod.saturating_mul(2u64.saturating_pow(delta));
+                let prime_bound = kronecker.range().saturating_mul(2u64.saturating_pow(delta));
 
                 let (p, totient_primes, alpha, a_p, b_p) = 'new_prime: loop {
                     let Some((p, alpha, fs)) = SMOOTH_PRIMES.get(smooth_prime_index) else {
@@ -3291,8 +3332,8 @@ impl<E: PositiveExponent> MultivariatePolynomial<IntegerRing, E> {
 
                 let mut betas = Vec::with_capacity(a.nvars() - 1);
                 betas.push(alpha);
-                for power in powers.iter().take(a.nvars().saturating_sub(2)) {
-                    betas.push(p.pow(&alpha, power.to_u32() as u64));
+                for power in kronecker.powers().iter().take(a.nvars().saturating_sub(2)) {
+                    betas.push(p.pow(&alpha, *power));
                 }
 
                 let (a_rows, a_term_evals) = Self::evaluate_terms(&p, &a_p, &betas);
@@ -3374,7 +3415,7 @@ impl<E: PositiveExponent> MultivariatePolynomial<IntegerRing, E> {
                             &sample_points,
                             &alpha,
                             &totient_primes,
-                            ri_prod,
+                            &kronecker,
                             d_0,
                         );
 
@@ -3391,7 +3432,7 @@ impl<E: PositiveExponent> MultivariatePolynomial<IntegerRing, E> {
                             &sample_points,
                             &alpha,
                             &totient_primes,
-                            ri_prod,
+                            &kronecker,
                             a_p.degree(0) - d_0,
                         );
 
@@ -3418,7 +3459,7 @@ impl<E: PositiveExponent> MultivariatePolynomial<IntegerRing, E> {
                     continue 'new_image;
                 }
 
-                let hm = h.kronecker_inv_map(&powers, 1).map_exp(|e| E::from_u32(*e));
+                let hm = h.clone();
                 let content = hm.univariate_content(0);
                 let primitive = hm / &content;
 
@@ -3489,8 +3530,7 @@ impl<E: PositiveExponent> MultivariatePolynomial<IntegerRing, E> {
         } else {
             (b, self)
         };
-        let h_zero =
-            MultivariatePolynomial::<_, u32>::new(&IntegerRing, None, a.variables().clone());
+        let h_zero = MultivariatePolynomial::<_, E>::new(&IntegerRing, None, a.variables().clone());
 
         let largest_coeff = a
             .coefficients
@@ -3516,8 +3556,8 @@ impl<E: PositiveExponent> MultivariatePolynomial<IntegerRing, E> {
                 *rr += 1;
             }
 
-            let Some((powers, ri_prod)) = hu_monagan_kronecker_powers(&r, start_exp) else {
-                debug!("Bivariate Hu-Monagan Kronecker range does not fit in u32; using Zippel");
+            let Some(kronecker) = HuMonaganKroneckerMap::new(&r, start_exp) else {
+                debug!("Bivariate Hu-Monagan Kronecker range does not fit in u64; using Zippel");
                 return None;
             };
 
@@ -3526,7 +3566,7 @@ impl<E: PositiveExponent> MultivariatePolynomial<IntegerRing, E> {
             let mut image_kind = None;
 
             'new_image: loop {
-                let prime_bound = ri_prod.saturating_mul(2u64.saturating_pow(delta));
+                let prime_bound = kronecker.range().saturating_mul(2u64.saturating_pow(delta));
 
                 let (p, totient_primes, alpha, a_p, b_p) = 'new_prime: loop {
                     let Some((p, alpha, fs)) = SMOOTH_PRIMES.get(smooth_prime_index) else {
@@ -3569,8 +3609,12 @@ impl<E: PositiveExponent> MultivariatePolynomial<IntegerRing, E> {
 
                 let mut betas = Vec::with_capacity(a.nvars() - start_exp);
                 betas.push(alpha);
-                for power in powers.iter().take(a.nvars().saturating_sub(start_exp + 1)) {
-                    betas.push(p.pow(&alpha, power.to_u32() as u64));
+                for power in kronecker
+                    .powers()
+                    .iter()
+                    .take(a.nvars().saturating_sub(start_exp + 1))
+                {
+                    betas.push(p.pow(&alpha, *power));
                 }
 
                 let (a_row_exponents, a_term_evals) =
@@ -3663,7 +3707,7 @@ impl<E: PositiveExponent> MultivariatePolynomial<IntegerRing, E> {
                             &sample_points,
                             &alpha,
                             &totient_primes,
-                            ri_prod,
+                            &kronecker,
                             (
                                 a_deg.0.to_u32().saturating_sub(d_0_1.0),
                                 a_deg.1.to_u32().saturating_sub(d_0_1.1),
@@ -3683,7 +3727,7 @@ impl<E: PositiveExponent> MultivariatePolynomial<IntegerRing, E> {
                             &sample_points,
                             &alpha,
                             &totient_primes,
-                            ri_prod,
+                            &kronecker,
                             d_0_1,
                         );
 
@@ -3710,9 +3754,7 @@ impl<E: PositiveExponent> MultivariatePolynomial<IntegerRing, E> {
                     continue 'new_image;
                 }
 
-                let image_poly = h
-                    .kronecker_inv_map(&powers, start_exp)
-                    .map_exp(|e| E::from_u32(*e));
+                let image_poly = h.clone();
                 let content = image_poly.bivariate_content(0, 1);
                 let primitive = image_poly / &content;
 
@@ -4698,18 +4740,41 @@ mod tests {
     }
 
     #[test]
+    fn hu_monagan_kronecker_map_decodes_u64_exponents() {
+        let map = HuMonaganKroneckerMap::new(&[0, 24, 24, 24, 24, 24, 24, 24], 1).unwrap();
+        assert_eq!(map.powers().last(), Some(&4_586_471_424));
+        assert_eq!(map.range(), 4_586_471_424);
+        assert!(map.range() > u32::MAX as u64);
+
+        let expected = [0u16, 23, 7, 0, 19, 3, 11, 5];
+        let encoded = expected
+            .iter()
+            .skip(1)
+            .zip(std::iter::once(1u64).chain(map.powers().iter().copied()))
+            .map(|(exponent, power)| *exponent as u64 * power)
+            .sum();
+        let mut decoded = [0u16; 8];
+        map.decode(encoded, &mut decoded).unwrap();
+        assert_eq!(decoded, expected);
+        assert!(map.decode(map.range(), &mut decoded).is_none());
+    }
+
+    #[test]
+    fn hu_monagan_kronecker_map_rejects_invalid_ranges() {
+        assert!(HuMonaganKroneckerMap::new(&[0, u32::MAX, u32::MAX, 2], 1).is_none());
+        assert!(HuMonaganKroneckerMap::new(&[0, 2, 0, 3], 1).is_none());
+        assert!(HuMonaganKroneckerMap::new(&[2, 3], 3).is_none());
+    }
+
+    #[test]
     fn hu_monagan_large_kronecker_exponents() {
-        let (powers, range) =
-            hu_monagan_kronecker_powers(&[0, 22, 22, 22, 22, 22, 22, 22], 1).unwrap();
-        assert_eq!(powers.last(), Some(&2_494_357_888));
-        assert_eq!(range, 2_494_357_888);
-        assert!(range > i32::MAX as u64);
-        assert!(hu_monagan_kronecker_powers(&[0, 24, 24, 24, 24, 24, 24, 24], 1).is_none());
+        let map = HuMonaganKroneckerMap::new(&[0, 261, 261, 261, 261, 261, 261, 261], 1).unwrap();
+        assert_eq!(map.range(), 82_505_623_639_781_421);
 
         let mut polynomials = [
             parse!("1+x1+2*x2+3*x3+4*x4+5*x5+6*x6+7*x7+8*x8").to_polynomial::<_, u16>(&Z, None),
             parse!("1-x1+2*x2-3*x3+4*x4-5*x5+6*x6-7*x7+8*x8").to_polynomial::<_, u16>(&Z, None),
-            parse!("1+x1^20+2*x2^20+3*x3^20+5*x4^20+7*x5^20+11*x6^20+13*x7^20+17*x8^20")
+            parse!("1+x1^256+2*x2^256+3*x3^256+5*x4^256+7*x5^256+11*x6^256+13*x7^256+17*x8^256")
                 .to_polynomial::<_, u16>(&Z, None),
         ];
         MultivariatePolynomial::unify_variables_list(&mut polynomials);
