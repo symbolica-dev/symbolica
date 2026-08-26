@@ -317,6 +317,74 @@ enum GCDError {
     BadCurrentImage,
 }
 
+/// Per-variable exponent bounds for one input to a multivariate GCD operation.
+///
+/// The bounds identify the monomial shift of the input, its degree after that
+/// shift is removed, and which variables remain in the shifted polynomial.
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct GcdInputMetadata<E: PositiveExponent> {
+    variables: SmallVec<[GcdVariableMetadata<E>; INLINED_EXPONENTS]>,
+}
+
+#[derive(Debug, Copy, Clone, PartialEq, Eq)]
+struct GcdVariableMetadata<E: PositiveExponent> {
+    min_degree: E,
+    max_degree: E,
+}
+
+impl<E: PositiveExponent> GcdInputMetadata<E> {
+    fn scan<R: Ring>(polynomial: &MultivariatePolynomial<R, E>) -> Self {
+        debug_assert!(!polynomial.is_zero());
+
+        let mut variables: SmallVec<[GcdVariableMetadata<E>; INLINED_EXPONENTS]> = polynomial
+            .exponents(0)
+            .iter()
+            .map(|exponent| GcdVariableMetadata {
+                min_degree: *exponent,
+                max_degree: *exponent,
+            })
+            .collect();
+        for exponents in polynomial.exponents_iter().skip(1) {
+            for (metadata, exponent) in variables.iter_mut().zip(exponents) {
+                metadata.min_degree = metadata.min_degree.min(*exponent);
+                metadata.max_degree = metadata.max_degree.max(*exponent);
+            }
+        }
+
+        Self { variables }
+    }
+
+    #[inline]
+    fn shifted_degree(&self, variable: usize) -> E {
+        self.variables[variable].max_degree - self.variables[variable].min_degree
+    }
+
+    #[inline]
+    fn occurs_after_shift(&self, variable: usize) -> bool {
+        self.variables[variable].min_degree != self.variables[variable].max_degree
+    }
+
+    /// Removes the input's monomial factor from all of its terms.
+    fn remove_monomial_shift<R: Ring>(
+        &self,
+        polynomial: &mut Cow<'_, MultivariatePolynomial<R, E>>,
+    ) {
+        if self
+            .variables
+            .iter()
+            .all(|metadata| metadata.min_degree == E::zero())
+        {
+            return;
+        }
+
+        for exponents in polynomial.to_mut().exponents_iter_mut() {
+            for (exponent, metadata) in exponents.iter_mut().zip(&self.variables) {
+                *exponent = *exponent - metadata.min_degree;
+            }
+        }
+    }
+}
+
 fn should_use_hu_monagan<E: PositiveExponent>(
     a: &MultivariatePolynomial<IntegerRing, E>,
     b: &MultivariatePolynomial<IntegerRing, E>,
@@ -2126,51 +2194,20 @@ impl<R: EuclideanDomain + PolynomialGCD<E>, E: PositiveExponent> MultivariatePol
             a.to_mut().unify_variables(b.to_mut());
         }
 
-        // determine the maximum shared power of every variable
-        let mut shared_degree: SmallVec<[E; INLINED_EXPONENTS]> = a.exponents(0).into();
-        for p in [&a, &b] {
-            for e in p.exponents_iter() {
-                for (md, v) in shared_degree.iter_mut().zip(e) {
-                    *md = (*md).min(*v);
-                }
-            }
-        }
+        let a_metadata = GcdInputMetadata::scan(&a);
+        let b_metadata = GcdInputMetadata::scan(&b);
 
-        // divide out the common factors
-        if shared_degree.iter().any(|d| *d != E::zero()) {
-            let aa = a.to_mut();
-            for e in aa.exponents_iter_mut() {
-                for (v, d) in e.iter_mut().zip(&shared_degree) {
-                    *v = *v - *d;
-                }
-            }
-
-            let bb = b.to_mut();
-            for e in bb.exponents_iter_mut() {
-                for (v, d) in e.iter_mut().zip(&shared_degree) {
-                    *v = *v - *d;
-                }
-            }
-        };
-
-        // remove superfluous shifts: all variables should occur with exponent 1
-        for v in 0..a.nvars() {
-            let exp = a.degree_bounds(v).0;
-            if exp > E::zero() {
-                let pp = a.to_mut();
-                for e in pp.exponents_iter_mut() {
-                    e[v] = e[v] - exp;
-                }
-            }
-
-            let exp = b.degree_bounds(v).0;
-            if exp > E::zero() {
-                let pp = b.to_mut();
-                for e in pp.exponents_iter_mut() {
-                    e[v] = e[v] - exp;
-                }
-            }
-        }
+        // Retain the common part of the two monomial factors for the result,
+        // then remove each input's complete monomial factor before computing
+        // the polynomial part of the GCD.
+        let shared_degree: SmallVec<[E; INLINED_EXPONENTS]> = a_metadata
+            .variables
+            .iter()
+            .zip(&b_metadata.variables)
+            .map(|(left, right)| left.min_degree.min(right.min_degree))
+            .collect();
+        a_metadata.remove_monomial_shift(&mut a);
+        b_metadata.remove_monomial_shift(&mut b);
 
         let mut base_degree: SmallVec<[Option<E>; INLINED_EXPONENTS]> = smallvec![None; a.nvars()];
 
@@ -2272,16 +2309,12 @@ impl<R: EuclideanDomain + PolynomialGCD<E>, E: PositiveExponent> MultivariatePol
         }
 
         // store which variables appear in which expression
-        let mut scratch: SmallVec<[i32; INLINED_EXPONENTS]> = smallvec![0i32; a.nvars()];
-        for (p, inc) in [(&a, 1), (&b, 2)] {
-            for t in p.into_iter() {
-                for (e, ee) in scratch.iter_mut().zip(t.exponents) {
-                    if !ee.is_zero() {
-                        *e |= inc;
-                    }
-                }
-            }
-        }
+        let scratch: SmallVec<[i32; INLINED_EXPONENTS]> = (0..a.nvars())
+            .map(|variable| {
+                i32::from(a_metadata.occurs_after_shift(variable))
+                    | i32::from(b_metadata.occurs_after_shift(variable)) << 1
+            })
+            .collect();
 
         if a == b {
             debug!("Equal {} ", a);
@@ -2326,8 +2359,11 @@ impl<R: EuclideanDomain + PolynomialGCD<E>, E: PositiveExponent> MultivariatePol
         }
 
         // check if the polynomial is linear in a variable and compute the gcd using the univariate content
-        for (p1, p2) in [(&a, &b), (&b, &a)] {
-            if let Some(var) = (0..p1.nvars()).find(|v| p1.degree(*v) == E::one()) {
+        for (p1, p2, metadata) in [(&a, &b, &a_metadata), (&b, &a, &b_metadata)] {
+            if let Some(var) = (0..p1.nvars()).find(|v| {
+                let degree = metadata.shifted_degree(*v);
+                base_degree[*v].is_some_and(|base| degree / base == E::one())
+            }) {
                 let mut cont = p1.univariate_content(var);
 
                 let p1_prim = p1.as_ref() / &cont;
@@ -2375,7 +2411,7 @@ impl<R: EuclideanDomain + PolynomialGCD<E>, E: PositiveExponent> MultivariatePol
                 .iter()
                 .enumerate()
                 .filter_map(|(i, v)| {
-                    if *v == E::zero() && a.degree(i) > E::zero() {
+                    if *v == E::zero() && a_metadata.occurs_after_shift(i) {
                         Some(i)
                     } else {
                         None
@@ -5340,6 +5376,41 @@ mod tests {
         let left = &common * &left_cofactor;
         let right = &common * &right_cofactor;
         assert_eq!(left.gcd(&right), common);
+    }
+
+    #[test]
+    fn gcd_input_metadata_tracks_monomial_shifts() {
+        let polynomial = parse!("x^3*y^5*z^2*w^6 + 2*x^7*y^5*w^6 + 3*x^5*y^9*z*w^6")
+            .to_polynomial::<_, u16>(&Z, None);
+        let metadata = GcdInputMetadata::scan(&polynomial);
+
+        for variable in 0..polynomial.nvars() {
+            let (minimum, maximum) = polynomial.degree_bounds(variable);
+            assert_eq!(metadata.variables[variable].min_degree, minimum);
+            assert_eq!(metadata.variables[variable].max_degree, maximum);
+            assert_eq!(metadata.shifted_degree(variable), maximum - minimum);
+            assert_eq!(metadata.occurs_after_shift(variable), minimum != maximum);
+        }
+
+        let mut shifted = Cow::Owned(polynomial);
+        metadata.remove_monomial_shift(&mut shifted);
+        for variable in 0..shifted.nvars() {
+            assert_eq!(
+                shifted.degree_bounds(variable),
+                (0, metadata.shifted_degree(variable))
+            );
+        }
+    }
+
+    #[test]
+    fn gcd_metadata_preserves_shifts_powers_and_unified_variables() {
+        let left = parse!("x^3*y^5*(x^4+y^2+1)*(z+1)").to_polynomial::<_, u16>(&Z, None);
+        let right = parse!("x^2*y^7*(x^4+y^2+1)*(w+1)").to_polynomial::<_, u16>(&Z, None);
+        let mut expected = parse!("x^2*y^5*(x^4+y^2+1)").to_polynomial::<_, u16>(&Z, None);
+        let mut actual = left.gcd(&right);
+        actual.unify_variables(&mut expected);
+
+        assert_eq!(actual, expected);
     }
 
     #[test]
