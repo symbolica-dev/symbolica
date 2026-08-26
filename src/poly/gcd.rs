@@ -1060,6 +1060,25 @@ impl<F: Field, E: PositiveExponent> MultivariatePolynomial<F, E> {
 
         let mut failure_count = 0;
 
+        let min_shape_degree = shape
+            .iter()
+            .map(|(_, exponent)| exponent.to_u32() as usize)
+            .min()
+            .expect("a GCD image must have at least one term");
+        let max_shape_degree = shape
+            .iter()
+            .map(|(_, exponent)| exponent.to_u32() as usize)
+            .max()
+            .unwrap();
+        let mut shape_index_by_degree =
+            vec![None; max_shape_degree - min_shape_degree + 1];
+        for (index, (_, exponent)) in shape.iter().enumerate() {
+            let slot = &mut shape_index_by_degree
+                [exponent.to_u32() as usize - min_shape_degree];
+            debug_assert!(slot.is_none());
+            *slot = Some(index);
+        }
+
         // Store powers only for the variables evaluated at this recursion level. Scan both
         // exponent arrays once to find their required cache sizes.
         let mut evaluated_degrees = vec![E::zero(); a.nvars()];
@@ -1134,6 +1153,10 @@ impl<F: Field, E: PositiveExponent> MultivariatePolynomial<F, E> {
                 row_sample_values.push(row);
             }
 
+            debug_assert_eq!(row_sample_values[single_scale].len(), 1);
+            let scale_ratio = row_sample_values[single_scale][0].clone();
+            let mut scale_value = scale_ratio.clone();
+
             let mut samples = vec![Vec::with_capacity(samples_needed); shape.len()];
             let mut r = r_orig.clone();
 
@@ -1157,6 +1180,7 @@ impl<F: Field, E: PositiveExponent> MultivariatePolynomial<F, E> {
 
             let mut a_poly = a.zero_with_capacity(a_ldegree.to_u32() as usize + 1);
             let mut b_poly = b.zero_with_capacity(b_ldegree.to_u32() as usize + 1);
+            let mut sampled_term_by_shape = vec![None; shape.len()];
 
             for sample_index in 0..samples_needed {
                 // sample at r^i
@@ -1219,65 +1243,45 @@ impl<F: Field, E: PositiveExponent> MultivariatePolynomial<F, E> {
                     continue 'find_root_sample;
                 }
 
-                // construct the scaling coefficient
-                let mut scale_factor = a.ring().one();
-                let mut coeff = a.ring().one();
-                let (c, d) = &shape[single_scale];
-                for (n, v) in r.iter() {
-                    // TODO: can be taken from row?
-                    a.ring().mul_assign(
-                        &mut coeff,
-                        &a.ring().pow(v, c.exponents(0)[*n].to_u32() as u64),
-                    );
-                }
-
-                let mut found = false;
-                for t in &g {
-                    if t.exponents[main_var] == *d {
-                        scale_factor = g.ring().div(&coeff, t.coefficient);
-                        found = true;
-                        break;
-                    }
-                }
-
-                if !found {
-                    // the scaling term is missing, so the assumed form is wrong
-                    debug!("Bad original image");
-                    return Err(GCDError::BadOriginalImage);
-                }
-
-                // check if all the monomials of the image appear in the shape
-                // if not, the original shape is bad
-                for m in g.into_iter() {
-                    if shape.iter().all(|(_, pow)| *pow != m.exponents[main_var]) {
+                sampled_term_by_shape.fill(None);
+                for (term_index, term) in (&g).into_iter().enumerate() {
+                    let degree = term.exponents[main_var].to_u32() as usize;
+                    let Some(shape_index) = degree
+                        .checked_sub(min_shape_degree)
+                        .and_then(|degree| shape_index_by_degree.get(degree))
+                        .and_then(|index| *index)
+                    else {
                         debug!("Bad shape: terms missing");
                         return Err(GCDError::BadOriginalImage);
-                    }
+                    };
+                    sampled_term_by_shape[shape_index] = Some(term_index);
                 }
 
+                // Normalize the sampled image by the monomial coefficient chosen in the first
+                // image. Its value follows the same geometric sequence as the sample points.
+                let Some(scale_term) = sampled_term_by_shape[single_scale] else {
+                    debug!("Bad original image");
+                    return Err(GCDError::BadOriginalImage);
+                };
+                let coefficient = scale_value.clone();
+                a.ring().mul_assign(&mut scale_value, &scale_ratio);
+                let scale_factor = g
+                    .ring()
+                    .div(&coefficient, &g.coefficients[scale_term]);
+
                 // construct the right-hand side
-                'rhs: for (i, (rhs, (shape_part, exp))) in samples.iter_mut().zip(shape).enumerate()
-                {
+                for (i, (rhs, (shape_part, _))) in samples.iter_mut().zip(shape).enumerate() {
                     // we may not need all terms
                     if rhs.len() == shape_part.nterms() {
                         continue;
                     }
 
-                    // find the associated term in the sample, trying the usual place first
-                    if i < g.nterms() && g.exponents(i)[main_var] == *exp {
+                    if let Some(term_index) = sampled_term_by_shape[i] {
                         rhs.push(
                             a.ring()
-                                .neg(&a.ring().mul(&g.coefficients[i], &scale_factor)),
+                                .neg(&a.ring().mul(&g.coefficients[term_index], &scale_factor)),
                         );
                     } else {
-                        // find the matching term if it exists
-                        for m in g.into_iter() {
-                            if m.exponents[main_var] == *exp {
-                                rhs.push(a.ring().neg(&a.ring().mul(m.coefficient, &scale_factor)));
-                                continue 'rhs;
-                            }
-                        }
-
                         rhs.push(a.ring().zero());
                     }
                 }
