@@ -2175,19 +2175,30 @@ impl<R: EuclideanDomain + PolynomialGCD<E>, E: PositiveExponent> MultivariatePol
             return rescale_gcd(g, &shared_degree, &base_degree, &a.constant(a.ring().one()));
         }
 
-        // check if the polynomial are functions of x^n, n > 1
-        for p in [&a, &b] {
+        // check if the polynomials are functions of x^n, n > 1
+        let mut unresolved_base_degrees = a.nvars();
+        'base_degrees: for p in [&a, &b] {
             for t in p.into_iter() {
                 for (md, v) in base_degree.iter_mut().zip(t.exponents) {
                     if !v.is_zero() {
                         if let Some(mm) = md.as_mut() {
                             if *mm != E::one() {
                                 *mm = mm.gcd(v);
+                                if *mm == E::one() {
+                                    unresolved_base_degrees -= 1;
+                                }
                             }
                         } else {
                             *md = Some(*v);
+                            if *v == E::one() {
+                                unresolved_base_degrees -= 1;
+                            }
                         }
                     }
+                }
+
+                if unresolved_base_degrees == 0 {
+                    break 'base_degrees;
                 }
             }
         }
@@ -5147,6 +5158,32 @@ mod tests {
             "5+x1*x8+x2*x7+x3*x6+x4*x5",
             &[7, 2, 5, 0, 6, 1, 4, 3],
         );
+    }
+
+    #[test]
+    fn gcd_base_degree_scan_handles_mixed_degrees_and_absent_variables() {
+        let mut polynomials = [
+            parse!("1+x^2*y^3").to_polynomial::<_, u8>(&Z, None),
+            parse!("1+x^4+z^5").to_polynomial::<_, u8>(&Z, None),
+            parse!("1+y^6+w^7").to_polynomial::<_, u8>(&Z, None),
+            parse!("q").to_polynomial::<_, u8>(&Z, None),
+        ];
+        MultivariatePolynomial::unify_variables_list(&mut polynomials);
+        let [common, left_cofactor, right_cofactor, _absent_variable] = polynomials;
+        let left = &common * &left_cofactor;
+        let right = &common * &right_cofactor;
+        assert_eq!(left.gcd(&right), common);
+
+        let mut polynomials = [
+            parse!("1+x*y+y*z+z*x").to_polynomial::<_, u8>(&Z, None),
+            parse!("1+x^2+y^2+z^2").to_polynomial::<_, u8>(&Z, None),
+            parse!("2+x^3+y^3+z^3").to_polynomial::<_, u8>(&Z, None),
+        ];
+        MultivariatePolynomial::unify_variables_list(&mut polynomials);
+        let [common, left_cofactor, right_cofactor] = polynomials;
+        let left = &common * &left_cofactor;
+        let right = &common * &right_cofactor;
+        assert_eq!(left.gcd(&right), common);
     }
 
     #[test]
