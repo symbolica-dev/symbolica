@@ -2184,6 +2184,7 @@ impl<F: Ring, E: PositiveExponent> MultivariatePolynomial<F, E, LexOrder> {
     /// the ring `v`.
     pub fn replace_last(&self, n: usize, v: &F::Element) -> MultivariatePolynomial<F, E, LexOrder> {
         const MAX_EXP_BUF: usize = 100000;
+        debug_assert!((n + 1..self.nvars()).all(|variable| self.degree(variable).is_zero()));
         let mut res = self.zero_with_capacity(self.nterms());
         let nvars = self.nvars();
         let cache_size = (self.degree(n).to_u32() as usize + 1).min(MAX_EXP_BUF);
