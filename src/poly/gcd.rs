@@ -39,6 +39,10 @@ type ModularGcdField = FiniteField<ModularGcdFieldWorkspace>;
 pub(crate) const POW_CACHE_SIZE: usize = 1000;
 pub(crate) const INITIAL_POW_MAP_SIZE: usize = 1000;
 
+/// Largest univariate image degree for which all GCD variable bounds are sampled together.
+/// Larger images use the sparse per-variable sampler to avoid allocating dense coefficient rows.
+const FUSED_GCD_BOUND_MAX_DEGREE: usize = 9999;
+
 /// The upper bound of the range to be sampled during the computation of multiple gcds
 pub(crate) const MAX_RNG_PREFACTOR: u32 = 50000;
 
@@ -57,6 +61,249 @@ where
         let value = ring.sample(rng, &policy);
         if !ring.is_zero(&value) {
             return value;
+        }
+    }
+}
+
+/// Reuses evaluation points, power tables, and dense univariate images while sampling every
+/// active variable bound of a polynomial pair.
+struct GcdBoundSamplingContext<F: Field> {
+    ring: F,
+    sampled_variables: SmallVec<[usize; INLINED_EXPONENTS]>,
+    retained_variables: SmallVec<[usize; INLINED_EXPONENTS]>,
+    points: Vec<F::Element>,
+    inverse_points: Vec<F::Element>,
+    powers: Vec<Vec<F::Element>>,
+    inverse_powers: Vec<Vec<F::Element>>,
+    left_images: Vec<Vec<F::Element>>,
+    right_images: Vec<Vec<F::Element>>,
+}
+
+impl<F: Field> GcdBoundSamplingContext<F> {
+    /// Creates dense images for variables that occur in both input polynomials.
+    fn new<E: PositiveExponent>(
+        left: &MultivariatePolynomial<F, E>,
+        right: &MultivariatePolynomial<F, E>,
+        variables: &[usize],
+    ) -> Option<Self> {
+        let retained_variables = variables
+            .iter()
+            .copied()
+            .filter(|variable| {
+                left.degree(*variable) > E::zero() && right.degree(*variable) > E::zero()
+            })
+            .collect::<SmallVec<[_; INLINED_EXPONENTS]>>();
+
+        if retained_variables.len() < 3 {
+            return None;
+        }
+
+        let mut maximum_degrees = vec![0usize; left.nvars()];
+        for variable in variables {
+            let maximum_degree =
+                left.degree(*variable).max(right.degree(*variable)).to_u32() as usize;
+            if maximum_degree > FUSED_GCD_BOUND_MAX_DEGREE {
+                return None;
+            }
+            maximum_degrees[*variable] = maximum_degree;
+        }
+
+        let ring = left.ring().clone();
+        let points = vec![ring.one(); left.nvars()];
+        let inverse_points = points.clone();
+        let mut powers = (0..left.nvars()).map(|_| Vec::new()).collect::<Vec<_>>();
+        let mut inverse_powers = powers.clone();
+        for variable in variables {
+            let cache_length = (maximum_degrees[*variable] + 1).min(POW_CACHE_SIZE);
+            powers[*variable] = vec![ring.one(); cache_length];
+            inverse_powers[*variable] = vec![ring.one(); cache_length];
+        }
+
+        let left_images = retained_variables
+            .iter()
+            .map(|variable| vec![ring.zero(); left.degree(*variable).to_u32() as usize + 1])
+            .collect();
+        let right_images = retained_variables
+            .iter()
+            .map(|variable| vec![ring.zero(); right.degree(*variable).to_u32() as usize + 1])
+            .collect();
+
+        Some(Self {
+            ring,
+            sampled_variables: variables.iter().copied().collect(),
+            retained_variables,
+            points,
+            inverse_points,
+            powers,
+            inverse_powers,
+            left_images,
+            right_images,
+        })
+    }
+
+    /// Sets one nonzero evaluation point and fills its direct and inverse power tables.
+    fn set_point(&mut self, variable: usize, point: F::Element) {
+        debug_assert!(!self.ring.is_zero(&point));
+        let inverse_point = self.ring.inv(&point);
+        self.points[variable] = point.clone();
+        self.inverse_points[variable] = inverse_point.clone();
+
+        let mut power = self.ring.one();
+        for cached_power in &mut self.powers[variable] {
+            *cached_power = power.clone();
+            self.ring.mul_assign(&mut power, &point);
+        }
+
+        let mut inverse_power = self.ring.one();
+        for cached_power in &mut self.inverse_powers[variable] {
+            *cached_power = inverse_power.clone();
+            self.ring.mul_assign(&mut inverse_power, &inverse_point);
+        }
+    }
+
+    /// Samples one nonzero point per variable and prepares its power tables.
+    fn sample_points(&mut self, rng: &mut impl rand::RngCore)
+    where
+        F: SampleableRing<SamplingPolicy = RangeInclusive<i64>>,
+    {
+        for index in 0..self.sampled_variables.len() {
+            let variable = self.sampled_variables[index];
+            let point = sample_nonzero_field_element(&self.ring, rng);
+            self.set_point(variable, point);
+        }
+    }
+
+    /// Builds every univariate image in one pass over each input polynomial.
+    fn fill_images<E: PositiveExponent>(
+        &mut self,
+        polynomial: &MultivariatePolynomial<F, E>,
+        left: bool,
+    ) {
+        let images = if left {
+            &mut self.left_images
+        } else {
+            &mut self.right_images
+        };
+        for image in &mut *images {
+            image.fill(self.ring.zero());
+        }
+
+        for term in polynomial {
+            let mut full_evaluation = term.coefficient.clone();
+            for variable in &self.sampled_variables {
+                let exponent = term.exponents[*variable].to_u32() as usize;
+                if exponent == 0 {
+                    continue;
+                }
+                if let Some(power) = self.powers[*variable].get(exponent) {
+                    self.ring.mul_assign(&mut full_evaluation, power);
+                } else {
+                    self.ring.mul_assign(
+                        &mut full_evaluation,
+                        &self.ring.pow(&self.points[*variable], exponent as u64),
+                    );
+                }
+            }
+
+            for (image, variable) in images.iter_mut().zip(&self.retained_variables) {
+                let exponent = term.exponents[*variable].to_u32() as usize;
+                let mut coefficient = full_evaluation.clone();
+                if exponent > 0 {
+                    if let Some(inverse_power) = self.inverse_powers[*variable].get(exponent) {
+                        self.ring.mul_assign(&mut coefficient, inverse_power);
+                    } else {
+                        self.ring.mul_assign(
+                            &mut coefficient,
+                            &self
+                                .ring
+                                .pow(&self.inverse_points[*variable], exponent as u64),
+                        );
+                    }
+                }
+                self.ring.add_assign(&mut image[exponent], &coefficient);
+            }
+        }
+    }
+
+    /// Returns whether every sampled image retains the input degree of its free variable.
+    fn degrees_are_preserved(&self) -> bool {
+        self.left_images
+            .iter()
+            .chain(&self.right_images)
+            .all(|image| {
+                image
+                    .last()
+                    .is_some_and(|coefficient| !self.ring.is_zero(coefficient))
+            })
+    }
+
+    /// Converts an ascending dense coefficient row into a univariate multivariate polynomial.
+    fn image_polynomial<E: PositiveExponent>(
+        ring: &F,
+        template: &MultivariatePolynomial<F, E>,
+        variable: usize,
+        coefficients: Vec<F::Element>,
+    ) -> MultivariatePolynomial<F, E> {
+        let mut image = template.zero_with_capacity(coefficients.len());
+        let mut exponents = vec![E::zero(); template.nvars()];
+        for (degree, coefficient) in coefficients.into_iter().enumerate() {
+            if !ring.is_zero(&coefficient) {
+                exponents[variable] = E::from_u32(degree as u32);
+                image.append_monomial_back(coefficient, &exponents);
+            }
+        }
+        image
+    }
+
+    /// Computes the GCD degree of each pair of currently filled univariate images.
+    fn bounds_from_images<E: PositiveExponent>(
+        self,
+        left: &MultivariatePolynomial<F, E>,
+        right: &MultivariatePolynomial<F, E>,
+    ) -> SmallVec<[E; INLINED_EXPONENTS]> {
+        let mut bounds = (0..left.nvars())
+            .map(|_| E::zero())
+            .collect::<SmallVec<[_; INLINED_EXPONENTS]>>();
+        for ((variable, left_coefficients), right_coefficients) in self
+            .retained_variables
+            .into_iter()
+            .zip(self.left_images)
+            .zip(self.right_images)
+        {
+            let left_image = Self::image_polynomial(&self.ring, left, variable, left_coefficients);
+            let right_image =
+                Self::image_polynomial(&self.ring, right, variable, right_coefficients);
+            bounds[variable] = left_image.univariate_gcd(&right_image).ldegree_max();
+        }
+        bounds
+    }
+
+    /// Computes all sampled GCD degree bounds, or returns `None` when a shared good sample point
+    /// cannot be found quickly enough for the coefficient field.
+    fn sample_bounds<E: PositiveExponent>(
+        mut self,
+        left: &MultivariatePolynomial<F, E>,
+        right: &MultivariatePolynomial<F, E>,
+    ) -> Option<SmallVec<[E; INLINED_EXPONENTS]>>
+    where
+        F: SampleableRing<SamplingPolicy = RangeInclusive<i64>>,
+    {
+        let mut rng = rand::rng();
+        let mut fail_count = 0;
+        loop {
+            self.sample_points(&mut rng);
+            self.fill_images(left, true);
+            self.fill_images(right, false);
+            if self.degrees_are_preserved() {
+                return Some(self.bounds_from_images(left, right));
+            }
+
+            if let Some(size) = self.ring.size()
+                && fail_count * 2 > size
+            {
+                return None;
+            }
+            fail_count += 1;
         }
     }
 }
@@ -522,6 +769,34 @@ impl<F: Field, E: PositiveExponent> MultivariatePolynomial<F, E> {
 
         let g1 = a1.univariate_gcd(&b1);
         g1.ldegree_max()
+    }
+
+    /// Samples each variable bound independently. This is used for coefficient fields or degree
+    /// ranges for which the fused dense sampler is not suitable.
+    fn get_gcd_var_bounds_separately(
+        ap: &Self,
+        bp: &Self,
+        vars: &[usize],
+    ) -> SmallVec<[E; INLINED_EXPONENTS]>
+    where
+        F: SampleableRing<SamplingPolicy = RangeInclusive<i64>>,
+    {
+        let mut bounds = (0..ap.nvars())
+            .map(|_| E::zero())
+            .collect::<SmallVec<[_; INLINED_EXPONENTS]>>();
+        for var in vars {
+            if ap.degree(*var) == E::zero() || bp.degree(*var) == E::zero() {
+                continue;
+            }
+
+            let sampled_variables = vars
+                .iter()
+                .filter(|variable| *variable != var)
+                .copied()
+                .collect::<SmallVec<[usize; INLINED_EXPONENTS]>>();
+            bounds[*var] = Self::get_gcd_var_bound(ap, bp, &sampled_variables, *var);
+        }
+        bounds
     }
 
     fn solve_vandermonde(
@@ -3986,9 +4261,6 @@ impl<E: PositiveExponent> PolynomialGCD<E> for IntegerRing {
         b: &MultivariatePolynomial<Self, E>,
         vars: &[usize],
     ) -> SmallVec<[E; INLINED_EXPONENTS]> {
-        let mut bounds: SmallVec<[_; INLINED_EXPONENTS]> =
-            (0..a.nvars()).map(|_| E::zero()).collect();
-
         let mut primes = modular_gcd_prime_iterator();
 
         let mut f = ModularGcdField::new(next_modular_gcd_prime(
@@ -3998,55 +4270,25 @@ impl<E: PositiveExponent> PolynomialGCD<E> for IntegerRing {
         let mut ap = a.map_coeff(|c| c.to_finite_field(&f), f.clone());
         let mut bp = b.map_coeff(|c| c.to_finite_field(&f), f.clone());
 
-        for var in vars.iter() {
-            if a.degree(*var) == E::zero() || b.degree(*var) == E::zero() {
-                continue;
-            }
+        while vars.iter().any(|variable| {
+            a.degree(*variable) > E::zero()
+                && b.degree(*variable) > E::zero()
+                && (ap.degree(*variable) != a.degree(*variable)
+                    || bp.degree(*variable) != b.degree(*variable))
+        }) {
+            debug!("Variable bounds failed due to bad prime");
 
-            while ap.degree(*var) != a.degree(*var) || bp.degree(*var) != b.degree(*var) {
-                debug!("Variable bounds failed due to bad prime");
-
-                let p = next_modular_gcd_prime(&mut primes, "gcd var bound detection");
-                f = ModularGcdField::new(p);
-                ap = a.map_coeff(|c| c.to_finite_field(&f), f.clone());
-                bp = b.map_coeff(|c| c.to_finite_field(&f), f.clone());
-            }
-
-            let vvars: SmallVec<[usize; INLINED_EXPONENTS]> =
-                vars.iter().filter(|i| *i != var).cloned().collect();
-            bounds[*var] = MultivariatePolynomial::get_gcd_var_bound(&ap, &bp, &vvars, *var);
-
-            // evaluate at every other variable at one, if they are present
-            /*if loose_bounds
-                .iter()
-                .enumerate()
-                .all(|(v, b)| *b == E::zero() || v == *var)
-            {
-                continue;
-            }
-
-            let mut a1 = a.zero();
-            let mut exp = vec![E::zero(); a.nvars()];
-            for m in a {
-                exp[*var] = m.exponents[*var];
-                a1.append_monomial(m.coefficient.clone(), &exp);
-            }
-
-            let mut b1 = b.zero();
-            for m in b {
-                exp[*var] = m.exponents[*var];
-                b1.append_monomial(m.coefficient.clone(), &exp);
-            }
-
-            if a1.degree(*var) == a.degree(*var) && b1.degree(*var) == b.degree(*var) {
-                let bound = a1.gcd(&b1).degree(*var);
-                if bound < tight_bounds[*var] {
-                    tight_bounds[*var] = bound;
-                }
-            }*/
+            let p = next_modular_gcd_prime(&mut primes, "gcd var bound detection");
+            f = ModularGcdField::new(p);
+            ap = a.map_coeff(|c| c.to_finite_field(&f), f.clone());
+            bp = b.map_coeff(|c| c.to_finite_field(&f), f.clone());
         }
 
-        bounds
+        GcdBoundSamplingContext::new(&ap, &bp, vars)
+            .and_then(|context| context.sample_bounds(&ap, &bp))
+            .unwrap_or_else(|| {
+                MultivariatePolynomial::get_gcd_var_bounds_separately(&ap, &bp, vars)
+            })
     }
 
     fn normalize(a: MultivariatePolynomial<Self, E>) -> MultivariatePolynomial<Self, E> {
@@ -4791,6 +5033,120 @@ mod tests {
         let low = parse!("x+1").to_polynomial::<_, u16>(&Z, None);
         assert!(!should_use_u64_zippel(&high, &low, &Integer::from(1)));
         assert!(!should_use_u64_zippel(&low, &high, &Integer::from(1)));
+    }
+
+    #[test]
+    fn fused_gcd_bound_images_match_per_variable_sampling() {
+        fn check_case(
+            left_cofactor: &str,
+            right_cofactor: &str,
+            common_factor: &str,
+            variable_order: &[usize],
+        ) {
+            let mut polynomials = [
+                parse!(left_cofactor).to_polynomial::<_, u8>(&Z, None),
+                parse!(right_cofactor).to_polynomial::<_, u8>(&Z, None),
+                parse!(common_factor).to_polynomial::<_, u8>(&Z, None),
+            ];
+            MultivariatePolynomial::unify_variables_list(&mut polynomials);
+            let [left_cofactor, right_cofactor, common_factor] = polynomials;
+            let left = &left_cofactor * &common_factor;
+            let right = &right_cofactor * &common_factor;
+
+            let mut primes = modular_gcd_prime_iterator();
+            let field =
+                ModularGcdField::new(next_modular_gcd_prime(&mut primes, "fused GCD bound test"));
+            let left_mod = left.map_coeff(
+                |coefficient| coefficient.to_finite_field(&field),
+                field.clone(),
+            );
+            let right_mod = right.map_coeff(
+                |coefficient| coefficient.to_finite_field(&field),
+                field.clone(),
+            );
+
+            let mut context =
+                GcdBoundSamplingContext::new(&left_mod, &right_mod, variable_order).unwrap();
+            let mut points = vec![field.one(); left_mod.nvars()];
+            for (index, variable) in variable_order.iter().enumerate() {
+                let point = field.to_element((index as u64 + 101) as ModularGcdFieldWorkspace);
+                points[*variable] = point;
+                context.set_point(*variable, point);
+            }
+            context.fill_images(&left_mod, true);
+            context.fill_images(&right_mod, false);
+            assert!(context.degrees_are_preserved());
+
+            for (image_index, variable) in context.retained_variables.iter().enumerate() {
+                let sampled_variables = variable_order
+                    .iter()
+                    .filter(|sampled_variable| *sampled_variable != variable)
+                    .map(|sampled_variable| (*sampled_variable, points[*sampled_variable]))
+                    .collect::<Vec<_>>();
+                let mut cache = (0..left_mod.nvars())
+                    .map(|sampled_variable| {
+                        vec![
+                            field.zero();
+                            min(
+                                max(
+                                    left_mod.degree(sampled_variable),
+                                    right_mod.degree(sampled_variable)
+                                )
+                                .to_u32() as usize
+                                    + 1,
+                                POW_CACHE_SIZE
+                            )
+                        ]
+                    })
+                    .collect::<Vec<_>>();
+                let mut terms =
+                    HashMap::with_capacity_and_hasher(INITIAL_POW_MAP_SIZE, Default::default());
+                let reference_left = left_mod.sample_polynomial(
+                    *variable,
+                    &sampled_variables,
+                    &mut cache,
+                    &mut terms,
+                );
+                let reference_right = right_mod.sample_polynomial(
+                    *variable,
+                    &sampled_variables,
+                    &mut cache,
+                    &mut terms,
+                );
+                let fused_left = GcdBoundSamplingContext::image_polynomial(
+                    &field,
+                    &left_mod,
+                    *variable,
+                    context.left_images[image_index].clone(),
+                );
+                let fused_right = GcdBoundSamplingContext::image_polynomial(
+                    &field,
+                    &right_mod,
+                    *variable,
+                    context.right_images[image_index].clone(),
+                );
+                assert_eq!(fused_left, reference_left);
+                assert_eq!(fused_right, reference_right);
+            }
+
+            let fused = context.bounds_from_images(&left_mod, &right_mod);
+            for variable in variable_order {
+                assert_eq!(fused[*variable], common_factor.degree(*variable));
+            }
+        }
+
+        check_case(
+            "1+2*x1+3*x2^2+5*x3*x4+7*x5^2",
+            "2+3*x1^2+5*x2+7*x3^2+11*x4*x5",
+            "3+x1+x2*x3+x4^2+x5^3",
+            &[4, 0, 3, 1, 2],
+        );
+        check_case(
+            "1+x1+2*x2^2+3*x3*x4+5*x5*x6+7*x7^2+11*x8",
+            "2+3*x1*x2+5*x3^2+7*x4+11*x5*x7+13*x6^2+17*x8^2",
+            "5+x1*x8+x2*x7+x3*x6+x4*x5",
+            &[7, 2, 5, 0, 6, 1, 4, 3],
+        );
     }
 
     #[test]
