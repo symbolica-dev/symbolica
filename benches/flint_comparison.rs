@@ -25,9 +25,10 @@ use support::polybench_cases::{
 use support::symbolica::{
     BENCHMARK_NAMESPACE, GcdAlgorithm as SymbolicaGcdAlgorithm, IntegerPolynomial,
     PolybenchIntegerPolynomial, configure_factorization_auto,
-    configure_gcd as configure_symbolica_gcd, factorization_input as symbolica_factorization_input,
-    finite_pair as symbolica_finite_pair, gcd_case_config,
-    gcd_factors_for as symbolica_gcd_factors_for, parse_integer_polynomial,
+    configure_gcd as configure_symbolica_gcd,
+    factorization_factors as symbolica_factorization_factors,
+    factorization_input as symbolica_factorization_input, finite_pair as symbolica_finite_pair,
+    gcd_case_config, gcd_factors_for as symbolica_gcd_factors_for, parse_integer_polynomial,
     parse_polybench_integer_polynomial, polybench_factor_input as symbolica_polybench_factor_input,
     polybench_gcd_inputs as symbolica_polybench_gcd_inputs, powered_pair as symbolica_powered_pair,
     resultant_inputs as symbolica_resultant_inputs,
@@ -854,7 +855,7 @@ fn paired_generated_factorization() {
             continue;
         }
 
-        let [symbolica_left, symbolica_right] = symbolica_powered_pair(&Z, case.left, case.right);
+        let [symbolica_left, symbolica_right] = symbolica_factorization_factors(case);
         let symbolica_input = &symbolica_left * &symbolica_right;
         let context = FmpzMPolyContext::new(case.variables).unwrap();
         let flint_left = flint_powered_integer(&context, case.left);

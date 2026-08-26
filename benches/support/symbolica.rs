@@ -297,8 +297,22 @@ pub fn benchmark_polybench_factorization(
 
 /// Constructs the reducible integer polynomial for a generated factorization case.
 pub fn factorization_input(case: FactorizationCase) -> IntegerPolynomial {
-    let [left, right] = powered_pair(&Z, case.left, case.right);
+    let [left, right] = factorization_factors(case);
     &left * &right
+}
+
+/// Constructs the two powered factors using the variable order declared by the benchmark case.
+pub fn factorization_factors(case: FactorizationCase) -> [IntegerPolynomial; 2] {
+    let variables: Arc<Vec<PolyVariable>> = Arc::new(
+        case.variables
+            .iter()
+            .map(|name| PolyVariable::Symbol(symbol!(name)))
+            .collect(),
+    );
+    [
+        powered_polynomial_with_variable_map(&Z, case.left, Some(variables.clone())),
+        powered_polynomial_with_variable_map(&Z, case.right, Some(variables)),
+    ]
 }
 
 /// Verifies that a generated factorization expands to its original polynomial.
@@ -322,7 +336,7 @@ pub fn validate_factorization(input: &IntegerPolynomial, factors: &[(IntegerPoly
 
 /// Measures the multiplication used to construct a generated factorization input.
 pub fn benchmark_factor_product(bencher: divan::Bencher<'_, '_>, case: FactorizationCase) {
-    let [left, right] = powered_pair(&Z, case.left, case.right);
+    let [left, right] = factorization_factors(case);
     bencher.bench_local(|| &left * &right);
 }
 
@@ -343,13 +357,24 @@ pub fn powered_polynomial<R>(
 where
     R: EuclideanDomain + ConvertToRing,
 {
+    powered_polynomial_with_variable_map(ring, polynomial, None)
+}
+
+fn powered_polynomial_with_variable_map<R>(
+    ring: &R,
+    polynomial: PoweredPolynomial,
+    variables: Option<Arc<Vec<PolyVariable>>>,
+) -> MultivariatePolynomial<R, u16>
+where
+    R: EuclideanDomain + ConvertToRing,
+{
     let mut result = Atom::parse(
         polynomial.base,
         BENCHMARK_NAMESPACE,
         ParseSettings::default(),
     )
     .unwrap()
-    .to_polynomial(ring, None)
+    .to_polynomial(ring, variables)
     .pow(polynomial.power as usize);
     if polynomial.constant != 0 {
         result = result.add_constant(ring.nth(Integer::from(polynomial.constant)));

@@ -190,21 +190,21 @@ pub const GENERATED_FACTOR_CASES: [FactorizationCase; 3] = [
         variables: &X1_VARIABLES,
         left: PoweredPolynomial::with_constant("1+3*x1", 32, -1),
         right: PoweredPolynomial::with_constant("1-5*x1", 31, 1),
-        default_samples: 3,
+        default_samples: 4,
     },
     FactorizationCase {
         name: "dense 2-variable degrees 10/9",
         variables: &X1_TO_X2_VARIABLES,
         left: PoweredPolynomial::with_constant("1+3*x1+5*x2", 10, -1),
         right: PoweredPolynomial::with_constant("1-3*x1+5*x2", 9, 1),
-        default_samples: 3,
+        default_samples: 4,
     },
     FactorizationCase {
         name: "dense 3-variable degrees 6/5",
         variables: &X1_TO_X3_VARIABLES,
         left: PoweredPolynomial::with_constant("1+3*x1+5*x2+7*x3", 6, -1),
         right: PoweredPolynomial::with_constant("1-3*x1+5*x2-7*x3", 5, 1),
-        default_samples: 3,
+        default_samples: 4,
     },
 ];
 
