@@ -17,6 +17,7 @@ use crate::{
     domains::{
         EuclideanDomain, Field, InternalOrdering, Ring, RingOps, SampleableRing, SelfRing, Set,
         algebraic::{AlgebraicExtension, AlgebraicNumber},
+        finite_field::{FiniteFieldCore, FiniteFieldElement, Zp64},
         float::{Complex, F64, FloatField, FloatLike, Real, SingleFloat},
         integer::{Integer, IntegerRing, Z},
         rational::{Q, Rational, RationalField},
@@ -53,6 +54,363 @@ pub struct UnivariatePolynomialSamplingPolicy<P> {
     pub degree: RangeInclusive<usize>,
     /// Policy used to sample every coefficient.
     pub coefficient: P,
+}
+
+/// Dense polynomial operations used to recover the distinct nonzero roots of
+/// Hu-Monagan recurrence polynomials over a 64-bit prime field.
+pub(crate) struct DenseFiniteFieldRootContext<'a> {
+    field: &'a Zp64,
+    rng: rand::rngs::ThreadRng,
+}
+
+impl<'a> DenseFiniteFieldRootContext<'a> {
+    /// Creates a root-recovery context for `field`.
+    pub(crate) fn new(field: &'a Zp64) -> Self {
+        assert!(
+            field.get_prime() > 2 && !field.get_prime().is_multiple_of(2),
+            "dense root recovery requires an odd prime field"
+        );
+        Self {
+            field,
+            rng: rand::rng(),
+        }
+    }
+
+    #[inline]
+    fn truncate(&self, polynomial: &mut Vec<FiniteFieldElement<u64>>) {
+        while polynomial
+            .last()
+            .is_some_and(|coefficient| self.field.is_zero(coefficient))
+        {
+            polynomial.pop();
+        }
+    }
+
+    fn make_monic(&self, polynomial: &mut Vec<FiniteFieldElement<u64>>) {
+        let Some(leading_coefficient) = polynomial.last().copied() else {
+            return;
+        };
+        if self.field.is_one(&leading_coefficient) {
+            return;
+        }
+
+        let inverse = self.field.inv(&leading_coefficient);
+        for coefficient in polynomial {
+            self.field.mul_assign(coefficient, &inverse);
+        }
+    }
+
+    /// Replaces `polynomial` by its remainder modulo the monic `modulus`.
+    fn rem_monic(
+        &self,
+        polynomial: &mut Vec<FiniteFieldElement<u64>>,
+        modulus: &[FiniteFieldElement<u64>],
+    ) {
+        debug_assert!(modulus.len() >= 2);
+        debug_assert!(self.field.is_one(modulus.last().unwrap()));
+
+        while polynomial.len() >= modulus.len() {
+            let leading_coefficient = *polynomial.last().unwrap();
+            let shift = polynomial.len() - modulus.len();
+            if !self.field.is_zero(&leading_coefficient) {
+                for (coefficient, modulus_coefficient) in polynomial[shift..]
+                    .iter_mut()
+                    .zip(modulus)
+                    .take(modulus.len() - 1)
+                {
+                    self.field.sub_mul_assign(
+                        coefficient,
+                        modulus_coefficient,
+                        &leading_coefficient,
+                    );
+                }
+            }
+
+            // The leading term cancels because the modulus is monic.
+            polynomial.pop();
+            self.truncate(polynomial);
+        }
+    }
+
+    fn mul_mod(
+        &self,
+        left: &[FiniteFieldElement<u64>],
+        right: &[FiniteFieldElement<u64>],
+        modulus: &[FiniteFieldElement<u64>],
+    ) -> Vec<FiniteFieldElement<u64>> {
+        if left.is_empty() || right.is_empty() {
+            return Vec::new();
+        }
+
+        let mut product = vec![self.field.zero(); left.len() + right.len() - 1];
+        for (left_degree, left_coefficient) in left.iter().enumerate() {
+            if self.field.is_zero(left_coefficient) {
+                continue;
+            }
+            for (right_degree, right_coefficient) in right.iter().enumerate() {
+                if !self.field.is_zero(right_coefficient) {
+                    self.field.add_mul_assign(
+                        &mut product[left_degree + right_degree],
+                        left_coefficient,
+                        right_coefficient,
+                    );
+                }
+            }
+        }
+        self.rem_monic(&mut product, modulus);
+        product
+    }
+
+    fn square_mod(
+        &self,
+        polynomial: &[FiniteFieldElement<u64>],
+        modulus: &[FiniteFieldElement<u64>],
+    ) -> Vec<FiniteFieldElement<u64>> {
+        if polynomial.is_empty() {
+            return Vec::new();
+        }
+
+        let mut square = vec![self.field.zero(); 2 * polynomial.len() - 1];
+        for (degree, coefficient) in polynomial.iter().enumerate() {
+            if self.field.is_zero(coefficient) {
+                continue;
+            }
+            self.field
+                .add_mul_assign(&mut square[2 * degree], coefficient, coefficient);
+            for (other_degree, other_coefficient) in polynomial.iter().enumerate().skip(degree + 1)
+            {
+                if !self.field.is_zero(other_coefficient) {
+                    let product = self.field.mul(coefficient, other_coefficient);
+                    self.field
+                        .add_assign(&mut square[degree + other_degree], &product);
+                    self.field
+                        .add_assign(&mut square[degree + other_degree], &product);
+                }
+            }
+        }
+        self.rem_monic(&mut square, modulus);
+        square
+    }
+
+    fn pow_mod(
+        &self,
+        base: &[FiniteFieldElement<u64>],
+        mut exponent: u64,
+        modulus: &[FiniteFieldElement<u64>],
+    ) -> Vec<FiniteFieldElement<u64>> {
+        let mut power = base.to_vec();
+        self.rem_monic(&mut power, modulus);
+        let mut result = vec![self.field.one()];
+
+        while exponent != 0 {
+            if exponent & 1 == 1 {
+                result = self.mul_mod(&result, &power, modulus);
+            }
+            exponent >>= 1;
+            if exponent != 0 {
+                power = self.square_mod(&power, modulus);
+            }
+        }
+        result
+    }
+
+    fn gcd_monic(
+        &self,
+        mut left: Vec<FiniteFieldElement<u64>>,
+        mut right: Vec<FiniteFieldElement<u64>>,
+    ) -> Vec<FiniteFieldElement<u64>> {
+        self.truncate(&mut left);
+        self.truncate(&mut right);
+        self.make_monic(&mut left);
+        self.make_monic(&mut right);
+
+        while !right.is_empty() {
+            if right.len() == 1 {
+                return vec![self.field.one()];
+            }
+            self.rem_monic(&mut left, &right);
+            std::mem::swap(&mut left, &mut right);
+            self.make_monic(&mut right);
+        }
+        left
+    }
+
+    fn div_exact_monic(
+        &self,
+        dividend: &[FiniteFieldElement<u64>],
+        divisor: &[FiniteFieldElement<u64>],
+    ) -> Option<Vec<FiniteFieldElement<u64>>> {
+        debug_assert!(divisor.len() >= 2);
+        debug_assert!(self.field.is_one(divisor.last().unwrap()));
+        if dividend.len() < divisor.len() {
+            return None;
+        }
+
+        let mut remainder = dividend.to_vec();
+        let mut quotient =
+            vec![self.field.zero(); dividend.len().saturating_sub(divisor.len()) + 1];
+        while remainder.len() >= divisor.len() {
+            let leading_coefficient = *remainder.last().unwrap();
+            let shift = remainder.len() - divisor.len();
+            quotient[shift] = leading_coefficient;
+            if !self.field.is_zero(&leading_coefficient) {
+                for (coefficient, divisor_coefficient) in remainder[shift..]
+                    .iter_mut()
+                    .zip(divisor)
+                    .take(divisor.len() - 1)
+                {
+                    self.field.sub_mul_assign(
+                        coefficient,
+                        divisor_coefficient,
+                        &leading_coefficient,
+                    );
+                }
+            }
+            remainder.pop();
+            self.truncate(&mut remainder);
+        }
+
+        if remainder.is_empty() {
+            self.truncate(&mut quotient);
+            Some(quotient)
+        } else {
+            None
+        }
+    }
+
+    /// Adds one to the constant coefficient when `add` is true and subtracts
+    /// one otherwise.
+    fn offset_by_one(&self, polynomial: &mut Vec<FiniteFieldElement<u64>>, add: bool) {
+        if polynomial.is_empty() {
+            polynomial.push(if add {
+                self.field.one()
+            } else {
+                self.field.neg(&self.field.one())
+            });
+        } else if add {
+            self.field.add_assign(&mut polynomial[0], &self.field.one());
+        } else {
+            self.field.sub_assign(&mut polynomial[0], &self.field.one());
+            self.truncate(polynomial);
+        }
+    }
+
+    fn evaluate(
+        &self,
+        polynomial: &[FiniteFieldElement<u64>],
+        value: &FiniteFieldElement<u64>,
+    ) -> FiniteFieldElement<u64> {
+        let Some(mut result) = polynomial.last().copied() else {
+            return self.field.zero();
+        };
+        for coefficient in polynomial.iter().rev().skip(1) {
+            result = self.field.add(&self.field.mul(&result, value), coefficient);
+        }
+        result
+    }
+
+    /// Finds every root when `coefficients` defines a square-free polynomial
+    /// that splits into distinct nonzero linear factors over the context field.
+    /// Returns `None` when any of these conditions is not satisfied.
+    pub(crate) fn find_distinct_nonzero_roots(
+        &mut self,
+        coefficients: &[FiniteFieldElement<u64>],
+    ) -> Option<Vec<FiniteFieldElement<u64>>> {
+        let mut polynomial = coefficients.to_vec();
+        self.truncate(&mut polynomial);
+        if polynomial.is_empty() {
+            return None;
+        }
+
+        let degree = polynomial.len() - 1;
+        if degree == 0 {
+            return Some(Vec::new());
+        }
+        if self.field.is_zero(&polynomial[0]) {
+            return None;
+        }
+        self.make_monic(&mut polynomial);
+
+        if degree == 1 {
+            let root = self.field.neg(&polynomial[0]);
+            return self
+                .field
+                .is_zero(&self.evaluate(&polynomial, &root))
+                .then_some(vec![root]);
+        }
+
+        let split_exponent = (self.field.get_prime() - 1) / 2;
+        let mut character = self.pow_mod(
+            &[self.field.zero(), self.field.one()],
+            split_exponent,
+            &polynomial,
+        );
+        let mut nonresidue_factor = character.clone();
+        self.offset_by_one(&mut character, false);
+        self.offset_by_one(&mut nonresidue_factor, true);
+        let residue_factor = self.gcd_monic(polynomial.clone(), character);
+        let nonresidue_factor = self.gcd_monic(polynomial.clone(), nonresidue_factor);
+
+        // x^(p-1)-1 has every nonzero field element as a simple root. The two
+        // gcd degrees cover the input degree exactly only when all input roots
+        // are distinct, nonzero, and contained in the prime field.
+        if residue_factor.len().saturating_sub(1) + nonresidue_factor.len().saturating_sub(1)
+            != degree
+        {
+            return None;
+        }
+
+        let mut stack = Vec::with_capacity(degree);
+        if residue_factor.len() > 1 {
+            stack.push(residue_factor);
+        }
+        if nonresidue_factor.len() > 1 {
+            stack.push(nonresidue_factor);
+        }
+
+        let mut roots = Vec::with_capacity(degree);
+        while let Some(factor) = stack.pop() {
+            if factor.len() == 2 {
+                let root = self.field.neg(&factor[0]);
+                if self.field.is_zero(&root) || roots.contains(&root) {
+                    return None;
+                }
+                roots.push(root);
+                continue;
+            }
+
+            let mut split = None;
+            for _ in 0..64 {
+                let shift = self
+                    .field
+                    .to_element(self.rng.random_range(0..self.field.get_prime()));
+                let mut character =
+                    self.pow_mod(&[shift, self.field.one()], split_exponent, &factor);
+                self.offset_by_one(&mut character, false);
+                let left = self.gcd_monic(factor.clone(), character);
+                if left.len() <= 1 || left.len() == factor.len() {
+                    continue;
+                }
+                let right = self.div_exact_monic(&factor, &left)?;
+                split = Some((left, right));
+                break;
+            }
+
+            let (left, right) = split?;
+            stack.push(left);
+            stack.push(right);
+        }
+
+        if roots.len() != degree
+            || roots
+                .iter()
+                .any(|root| !self.field.is_zero(&self.evaluate(&polynomial, root)))
+        {
+            return None;
+        }
+
+        Some(roots)
+    }
 }
 
 impl<R: Ring> UnivariatePolynomialRing<R> {

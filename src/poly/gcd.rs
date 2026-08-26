@@ -27,6 +27,7 @@ use crate::{GLOBAL_SETTINGS, warn};
 
 use super::PositiveExponent;
 use super::polynomial::{IntegerPolynomialCrtContext, MultivariatePolynomial, WordCrt};
+use super::univariate::DenseFiniteFieldRootContext;
 
 #[cfg(feature = "binary_size")]
 type ModularGcdFieldWorkspace = u64;
@@ -2952,12 +2953,11 @@ impl<E: PositiveExponent> MultivariatePolynomial<IntegerRing, E> {
             return None;
         }
 
-        let zero_u32 = MultivariatePolynomial::new(p, None, images[0].variables().clone());
-
         let l = images.len() / 2;
         let mut res = images[0].zero();
         let mut image_exp = vec![PE::zero(); images[0].nvars()];
         let mut result_exp = vec![PE::zero(); images[0].nvars()];
+        let mut root_context = DenseFiniteFieldRootContext::new(p);
 
         for i in 0..=d_0.to_u32() {
             image_exp[0] = PE::from_u32(i);
@@ -2980,35 +2980,22 @@ impl<E: PositiveExponent> MultivariatePolynomial<IntegerRing, E> {
                 return None;
             }
 
-            let mut bma_poly = zero_u32.clone();
-            let mut bma_exp = vec![0; images[0].nvars()];
-            for (j, cs) in recurrence.iter().rev().enumerate() {
-                if !p.is_zero(cs) {
-                    bma_exp[0] = j as u32;
-                    bma_poly.append_monomial(p.neg(cs), &bma_exp);
-                }
-            }
-            bma_exp[0] = t as u32;
-            bma_poly.append_monomial(p.one(), &bma_exp);
-
             // The recurrence roots are the distinct monomial evaluations alpha^e. The prime
             // and Kronecker range checks above guarantee that these are distinct, so the
             // polynomial is already square-free and completely split into linear factors.
-            // Skip the general square-free and distinct-degree factorization passes.
-            let factors = bma_poly.equal_degree_factorization(1);
-            if factors.len() != t {
-                debug!("Failed to factorize BMA poly at x^{}: {:?}", i, bma_poly);
+            let mut bma_coefficients = recurrence
+                .iter()
+                .rev()
+                .map(|coefficient| p.neg(coefficient))
+                .collect::<Vec<_>>();
+            bma_coefficients.push(p.one());
+            let Some(roots) = root_context.find_distinct_nonzero_roots(&bma_coefficients) else {
+                debug!("Failed to recover BMA roots at x^{}", i);
                 return None;
-            }
+            };
 
             let mut monomials = Vec::with_capacity(t);
-            for f in factors {
-                if f.degree(0) != 1 {
-                    debug!("Factor not deg 1: {}", f);
-                    return None;
-                }
-
-                let m = p.neg(&f.get_constant());
+            for m in roots {
                 let e = p.discrete_log(alpha, &m, p.get_prime() - 1, totient_primes);
                 let ee = p.from_element(&e);
                 if ee >= kronecker.range() {
@@ -3095,6 +3082,7 @@ impl<E: PositiveExponent> MultivariatePolynomial<IntegerRing, E> {
             MultivariatePolynomial::<Zp64, PE>::new(p, None, images[0].variables().clone());
         let mut image_exp = vec![0; images[0].nvars()];
         let mut result_exp = vec![PE::zero(); images[0].nvars()];
+        let mut root_context = DenseFiniteFieldRootContext::new(p);
 
         for (e0, e1) in rows {
             image_exp[0] = e0;
@@ -3114,34 +3102,22 @@ impl<E: PositiveExponent> MultivariatePolynomial<IntegerRing, E> {
                 return None;
             }
 
-            let mut bma_poly = images[0].zero();
-            let mut bma_exp = vec![0u32; images[0].nvars()];
-            for (j, cs) in recurrence.iter().rev().enumerate() {
-                if !p.is_zero(cs) {
-                    bma_exp[0] = j as u32;
-                    bma_poly.append_monomial(p.neg(cs), &bma_exp);
-                }
-            }
-            bma_exp[0] = t as u32;
-            bma_poly.append_monomial(p.one(), &bma_exp);
-
-            let factors = bma_poly.equal_degree_factorization(1);
-            if factors.len() != t {
+            let mut bma_coefficients = recurrence
+                .iter()
+                .rev()
+                .map(|coefficient| p.neg(coefficient))
+                .collect::<Vec<_>>();
+            bma_coefficients.push(p.one());
+            let Some(roots) = root_context.find_distinct_nonzero_roots(&bma_coefficients) else {
                 debug!(
-                    "Failed to factorize BMA poly at bivariate row x^{} y^{}: {:?}",
-                    e0, e1, bma_poly
+                    "Failed to recover BMA roots at bivariate row x^{} y^{}",
+                    e0, e1
                 );
                 return None;
-            }
+            };
 
             let mut monomials = Vec::with_capacity(t);
-            for f in factors {
-                if f.degree(0) != 1 {
-                    debug!("Factor not deg 1: {}", f);
-                    return None;
-                }
-
-                let m = p.neg(&f.get_constant());
+            for m in roots {
                 let e = p.discrete_log(alpha, &m, p.get_prime() - 1, totient_primes);
                 let ee = p.from_element(&e);
                 if ee >= kronecker.range() {
