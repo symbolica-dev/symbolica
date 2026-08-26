@@ -2110,20 +2110,30 @@ impl<F: Ring, E: Exponent, O: MonomialOrder> MultivariatePolynomial<F, E, O> {
 }
 
 impl<F: Ring, E: PositiveExponent> MultivariatePolynomial<F, E, LexOrder> {
-    /// Evaluate a one-variable polynomial with Horner's method and return it as a constant.
-    fn replace_univariate_horner(&self, value: &F::Element) -> Self {
-        debug_assert_eq!(self.nvars(), 1);
+    /// Evaluate a polynomial whose only active variable is `variable` with Horner's method.
+    pub(crate) fn evaluate_univariate_horner(
+        &self,
+        variable: usize,
+        value: &F::Element,
+    ) -> F::Element {
+        debug_assert!(variable < self.nvars());
+        debug_assert!(self.exponents_iter().all(|exponents| {
+            exponents
+                .iter()
+                .enumerate()
+                .all(|(index, exponent)| index == variable || exponent.is_zero())
+        }));
 
         let Some(last_term) = self.nterms().checked_sub(1) else {
-            return self.zero();
+            return self.ring().zero();
         };
 
         let ring = self.ring();
         let mut result = self.coefficients[last_term].clone();
-        let mut previous_exponent = self.exponents[last_term];
+        let mut previous_exponent = self.exponents(last_term)[variable];
         for term in (0..last_term).rev() {
-            let exponent = self.exponents[term];
-            let gap = (previous_exponent - exponent).to_i32() as u64;
+            let exponent = self.exponents(term)[variable];
+            let gap = (previous_exponent - exponent).to_u32() as u64;
             if gap == 1 {
                 ring.mul_assign(&mut result, value);
             } else if gap > 1 {
@@ -2133,14 +2143,14 @@ impl<F: Ring, E: PositiveExponent> MultivariatePolynomial<F, E, LexOrder> {
             previous_exponent = exponent;
         }
 
-        let trailing_exponent = previous_exponent.to_i32() as u64;
+        let trailing_exponent = previous_exponent.to_u32() as u64;
         if trailing_exponent == 1 {
             ring.mul_assign(&mut result, value);
         } else if trailing_exponent > 1 {
             ring.mul_assign(&mut result, &ring.pow(value, trailing_exponent));
         }
 
-        self.constant(result)
+        result
     }
 
     /// Remove all non-occurring variables from the polynomial.
@@ -2218,7 +2228,7 @@ impl<F: Ring, E: PositiveExponent> MultivariatePolynomial<F, E, LexOrder> {
     pub fn replace_last(&self, n: usize, v: &F::Element) -> MultivariatePolynomial<F, E, LexOrder> {
         if self.nvars() == 1 {
             debug_assert_eq!(n, 0);
-            return self.replace_univariate_horner(v);
+            return self.constant(self.evaluate_univariate_horner(0, v));
         }
 
         const MAX_EXP_BUF: usize = 100000;

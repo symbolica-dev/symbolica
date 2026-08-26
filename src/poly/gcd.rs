@@ -2846,6 +2846,126 @@ fn estimated_heuristic_gcd_evaluation_bits<E: PositiveExponent>(
 }
 
 impl<E: PositiveExponent> MultivariatePolynomial<IntegerRing, E> {
+    /// Reconstruct an integer polynomial from the symmetric digits of `value` in base `xi`.
+    fn interpolate_univariate_integer(
+        &self,
+        mut value: Integer,
+        variable: usize,
+        xi: &Integer,
+    ) -> Self {
+        let xi_half = xi / &Integer::Single(2);
+        let mut result = self.zero();
+        let mut exponents = vec![E::zero(); self.nvars()];
+        let mut exponent = 0u32;
+
+        while !value.is_zero() {
+            let (mut quotient, mut digit) = value.quot_rem(xi);
+            if digit > xi_half {
+                digit -= xi;
+                quotient += 1i64;
+            }
+
+            if !digit.is_zero() {
+                exponents[variable] = E::from_u32(exponent);
+                result.append_monomial_back(digit, &exponents);
+            }
+
+            value = quotient;
+            exponent += 1;
+        }
+
+        result
+    }
+
+    /// Run the integer heuristic directly when both inputs depend on one variable.
+    fn heuristic_gcd_univariate(
+        &self,
+        b: &Self,
+        variable: usize,
+    ) -> Result<(Self, Self, Self), HeuristicGCDError> {
+        let content_gcd = self.ring().gcd(&self.content(), &b.content());
+        let mut a = Cow::Borrowed(self);
+        let mut b = Cow::Borrowed(b);
+        if !a.ring().is_one(&content_gcd) {
+            a = Cow::Owned(a.into_owned().div_coeff(&content_gcd));
+            b = Cow::Owned(b.into_owned().div_coeff(&content_gcd));
+        }
+
+        let max_a = a
+            .coefficients
+            .iter()
+            .max_by(|left, right| left.abs_cmp(right))
+            .unwrap_or(&Integer::Single(0));
+        let max_b = b
+            .coefficients
+            .iter()
+            .max_by(|left, right| left.abs_cmp(right))
+            .unwrap_or(&Integer::Single(0));
+        let minimum_maximum = if max_a.abs_cmp(max_b) == Ordering::Greater {
+            max_b.abs()
+        } else {
+            max_a.abs()
+        };
+        let mut xi = &(&minimum_maximum * &Integer::Single(2)) + &Integer::Single(29);
+
+        for retry in 0..6 {
+            debug!("univariate round {}, xi={}", retry, xi);
+            let evaluation_bits = |polynomial: &Self, maximum_coefficient: &Integer| {
+                maximum_coefficient
+                    .significant_bits()
+                    .saturating_add(
+                        xi.significant_bits()
+                            .saturating_mul(polynomial.degree(variable).to_u32() as u64),
+                    )
+                    .saturating_add(ceil_log2_usize(polynomial.nterms()))
+            };
+            let estimated_bits = evaluation_bits(&a, max_a).max(evaluation_bits(&b, max_b));
+            if estimated_bits > HEURISTIC_GCD_MAX_EVALUATED_COEFFICIENT_BITS {
+                return Err(HeuristicGCDError::MaxSizeExceeded);
+            }
+
+            let evaluated_a = a.evaluate_univariate_horner(variable, &xi);
+            let evaluated_b = b.evaluate_univariate_horner(variable, &xi);
+            let evaluated_gcd = Z.gcd(&evaluated_a, &evaluated_b);
+
+            let candidate = a.interpolate_univariate_integer(evaluated_gcd, variable, &xi);
+            let candidate_content = candidate.content();
+            let primitive_candidate = candidate.div_coeff(&candidate_content);
+            if let Some(a_cofactor) = a.try_div(&primitive_candidate)
+                && let Some(b_cofactor) = b.try_div(&primitive_candidate)
+            {
+                return Ok((
+                    primitive_candidate.mul_coeff(content_gcd),
+                    a_cofactor,
+                    b_cofactor,
+                ));
+            }
+
+            let evaluated_gcd = Z.gcd(&evaluated_a, &evaluated_b);
+            let evaluated_a_cofactor = Z.exact_div_owned(evaluated_a, &evaluated_gcd);
+            let a_cofactor = a.interpolate_univariate_integer(evaluated_a_cofactor, variable, &xi);
+            if let Some(candidate) = a.try_div(&a_cofactor)
+                && let Some(b_cofactor) = b.try_div(&candidate)
+            {
+                return Ok((candidate.mul_coeff(content_gcd), a_cofactor, b_cofactor));
+            }
+
+            let evaluated_b_cofactor = Z.exact_div_owned(evaluated_b, &evaluated_gcd);
+            let b_cofactor = b.interpolate_univariate_integer(evaluated_b_cofactor, variable, &xi);
+            if let Some(candidate) = b.try_div(&b_cofactor)
+                && let Some(a_cofactor) = a.try_div(&candidate)
+            {
+                return Ok((candidate.mul_coeff(content_gcd), a_cofactor, b_cofactor));
+            }
+
+            xi = Z
+                .quot_rem(&(&xi * &Integer::Single(73794)), &Integer::Single(27011))
+                .0;
+        }
+
+        Err(HeuristicGCDError::BadReconstruction)
+    }
+
     /// Perform a heuristic GCD algorithm.
     #[instrument(level = "debug", skip_all)]
     pub fn heuristic_gcd(&self, b: &Self) -> Result<(Self, Self, Self), HeuristicGCDError> {
@@ -4667,12 +4787,27 @@ impl<E: PositiveExponent> PolynomialGCD<E> for IntegerRing {
             .filter(|(a, b)| **a && **b)
             .count();
 
-        if max_deg_a < 20 || max_deg_b < 20 || num_shared_vars < 3 && max_deg_a.min(max_deg_b) < 150
-        {
-            a.heuristic_gcd(b).ok()
-        } else {
-            None
+        let heuristic_allowed = max_deg_a < 20
+            || max_deg_b < 20
+            || num_shared_vars < 3 && max_deg_a.min(max_deg_b) < 150;
+        if !heuristic_allowed {
+            return None;
         }
+
+        let mut active_variables = contains_a
+            .iter()
+            .zip(&contains_b)
+            .enumerate()
+            .filter_map(|(variable, (in_a, in_b))| (*in_a || *in_b).then_some(variable));
+        if let Some(variable) = active_variables.next()
+            && active_variables.next().is_none()
+            && contains_a[variable]
+            && contains_b[variable]
+        {
+            return a.heuristic_gcd_univariate(b, variable).ok();
+        }
+
+        a.heuristic_gcd(b).ok()
     }
 
     fn gcd_multiple(f: Vec<MultivariatePolynomial<Self, E>>) -> MultivariatePolynomial<Self, E> {
@@ -5779,6 +5914,76 @@ mod tests {
         assert!(actual == common_factor || actual == -common_factor);
         assert_eq!(&actual * &actual_left_cofactor, left);
         assert_eq!(&actual * &actual_right_cofactor, right);
+    }
+
+    #[test]
+    fn integer_heuristic_uses_univariate_horner_path() {
+        let [left_cofactor, right_cofactor, common_factor] = [
+            parse!("(1+3*x)^32-1").to_polynomial::<_, u16>(&Z, None),
+            parse!("(1-3*x)^32+1").to_polynomial::<_, u16>(&Z, None),
+            parse!("(1-3*x)^32+3").to_polynomial::<_, u16>(&Z, None),
+        ];
+        let left = &left_cofactor * &common_factor;
+        let right = &right_cofactor * &common_factor;
+
+        let (actual, actual_left_cofactor, actual_right_cofactor) =
+            <IntegerRing as PolynomialGCD<u16>>::heuristic_gcd(&left, &right).unwrap();
+        assert!(actual == common_factor || actual == -common_factor.clone());
+        assert_eq!(&actual * &actual_left_cofactor, left);
+        assert_eq!(&actual * &actual_right_cofactor, right);
+        assert_eq!(left.gcd(&right), common_factor);
+
+        let mut inactive_left = left.clone();
+        let mut inactive_right = right.clone();
+        let mut inactive_expected = common_factor.clone();
+        let mut variable_template = parse!("y+1").to_polynomial::<IntegerRing, u16>(&Z, None);
+        inactive_left.unify_variables(&mut variable_template);
+        inactive_right.unify_variables(&mut variable_template);
+        inactive_expected.unify_variables(&mut variable_template);
+        assert_eq!(inactive_left.nvars(), 2);
+        let (inactive_gcd, inactive_left_cofactor, inactive_right_cofactor) =
+            <IntegerRing as PolynomialGCD<u16>>::heuristic_gcd(&inactive_left, &inactive_right)
+                .unwrap();
+        assert_eq!(inactive_gcd, inactive_expected);
+        assert_eq!(&inactive_gcd * &inactive_left_cofactor, inactive_left);
+        assert_eq!(&inactive_gcd * &inactive_right_cofactor, inactive_right);
+
+        let variables_before_active = std::sync::Arc::new(vec![
+            PolyVariable::Temporary(0),
+            common_factor.variables()[0].clone(),
+        ]);
+        let [
+            preceding_left_cofactor,
+            preceding_right_cofactor,
+            preceding_common_factor,
+        ] = [
+            parse!("(1+3*x)^32-1")
+                .to_polynomial::<_, u16>(&Z, Some(variables_before_active.clone())),
+            parse!("(1-3*x)^32+1")
+                .to_polynomial::<_, u16>(&Z, Some(variables_before_active.clone())),
+            parse!("(1-3*x)^32+3").to_polynomial::<_, u16>(&Z, Some(variables_before_active)),
+        ];
+        let preceding_left = &preceding_left_cofactor * &preceding_common_factor;
+        let preceding_right = &preceding_right_cofactor * &preceding_common_factor;
+        assert_eq!(preceding_left.degree(0), 0);
+        assert_ne!(preceding_left.degree(1), 0);
+        let (preceding_gcd, preceding_left_result, preceding_right_result) =
+            <IntegerRing as PolynomialGCD<u16>>::heuristic_gcd(&preceding_left, &preceding_right)
+                .unwrap();
+        assert!(
+            preceding_gcd == preceding_common_factor || preceding_gcd == -preceding_common_factor
+        );
+        assert_eq!(&preceding_gcd * &preceding_left_result, preceding_left);
+        assert_eq!(&preceding_gcd * &preceding_right_result, preceding_right);
+
+        let scaled_left = left.mul_coeff(Integer::from(6));
+        let scaled_right = right.mul_coeff(Integer::from(10));
+        let (scaled_gcd, scaled_left_cofactor, scaled_right_cofactor) =
+            <IntegerRing as PolynomialGCD<u16>>::heuristic_gcd(&scaled_left, &scaled_right)
+                .unwrap();
+        assert_eq!(scaled_gcd, common_factor.mul_coeff(Integer::from(2)));
+        assert_eq!(&scaled_gcd * &scaled_left_cofactor, scaled_left);
+        assert_eq!(&scaled_gcd * &scaled_right_cofactor, scaled_right);
     }
 
     #[test]
