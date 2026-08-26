@@ -43,6 +43,18 @@ pub(crate) const INITIAL_POW_MAP_SIZE: usize = 1000;
 /// Larger images use the sparse per-variable sampler to avoid allocating dense coefficient rows.
 const FUSED_GCD_BOUND_MAX_DEGREE: usize = 9999;
 
+/// Largest dense coefficient buffer used for a sampled univariate GCD.
+const DENSE_UNIVARIATE_GCD_MAX_COEFFICIENTS: usize = 4096;
+
+/// Maximum coefficient-buffer length relative to the number of stored input terms.
+const DENSE_UNIVARIATE_GCD_MAX_SPARSITY_RATIO: usize = 32;
+
+/// Largest direct degree-to-shape table used during Zippel interpolation.
+const ZIPPEL_SHAPE_INDEX_MAX_DEGREE_SPAN: usize = 4096;
+
+/// Maximum direct-table length relative to the number of GCD shape coefficients.
+const ZIPPEL_SHAPE_INDEX_MAX_SPARSITY_RATIO: usize = 32;
+
 /// Maximum estimated coefficient size produced during recursive integer-heuristic substitution.
 const HEURISTIC_GCD_MAX_EVALUATED_COEFFICIENT_BITS: u64 = 32 * 1024;
 
@@ -697,6 +709,66 @@ struct DenseUnivariateGcdContext<'a, F: Field, E: PositiveExponent> {
     variable: Option<usize>,
 }
 
+/// Maps a sampled univariate degree to its coefficient in the known GCD shape.
+enum ZippelShapeIndex<E: PositiveExponent> {
+    Dense {
+        minimum_degree: usize,
+        indices: Vec<Option<usize>>,
+    },
+    Sparse(Vec<E>),
+}
+
+impl<E: PositiveExponent> ZippelShapeIndex<E> {
+    fn new(degrees: impl IntoIterator<Item = E>) -> Self {
+        let degrees = degrees.into_iter().collect::<Vec<_>>();
+        let minimum_degree = degrees
+            .iter()
+            .map(|degree| degree.to_u32() as usize)
+            .min()
+            .expect("a GCD image must have at least one term");
+        let maximum_degree = degrees
+            .iter()
+            .map(|degree| degree.to_u32() as usize)
+            .max()
+            .unwrap();
+        let degree_span = maximum_degree - minimum_degree + 1;
+        if degree_span > ZIPPEL_SHAPE_INDEX_MAX_DEGREE_SPAN
+            || degree_span
+                > degrees
+                    .len()
+                    .saturating_mul(ZIPPEL_SHAPE_INDEX_MAX_SPARSITY_RATIO)
+        {
+            return Self::Sparse(degrees);
+        }
+
+        let mut indices = vec![None; degree_span];
+        for (index, degree) in degrees.into_iter().enumerate() {
+            let slot = &mut indices[degree.to_u32() as usize - minimum_degree];
+            debug_assert!(slot.is_none());
+            *slot = Some(index);
+        }
+        Self::Dense {
+            minimum_degree,
+            indices,
+        }
+    }
+
+    fn get(&self, degree: E) -> Option<usize> {
+        match self {
+            Self::Dense {
+                minimum_degree,
+                indices,
+            } => (degree.to_u32() as usize)
+                .checked_sub(*minimum_degree)
+                .and_then(|degree| indices.get(degree))
+                .and_then(|index| *index),
+            Self::Sparse(degrees) => degrees
+                .iter()
+                .position(|shape_degree| *shape_degree == degree),
+        }
+    }
+}
+
 impl<'a, F: Field, E: PositiveExponent> DenseUnivariateGcdContext<'a, F, E> {
     fn new(left: &'a MultivariatePolynomial<F, E>, right: &MultivariatePolynomial<F, E>) -> Self {
         let variable = left
@@ -724,6 +796,44 @@ impl<'a, F: Field, E: PositiveExponent> DenseUnivariateGcdContext<'a, F, E> {
             prototype: left,
             variable,
         }
+    }
+
+    /// Return whether dense storage remains bounded for this polynomial pair.
+    fn storage_is_bounded(
+        &self,
+        left: &MultivariatePolynomial<F, E>,
+        right: &MultivariatePolynomial<F, E>,
+    ) -> bool {
+        let Some(variable) = self.variable else {
+            return true;
+        };
+        let coefficient_count = left.last_exponents()[variable]
+            .max(right.last_exponents()[variable])
+            .to_u32() as usize
+            + 1;
+        coefficient_count <= DENSE_UNIVARIATE_GCD_MAX_COEFFICIENTS
+            && coefficient_count
+                <= (left.nterms() + right.nterms())
+                    .saturating_mul(DENSE_UNIVARIATE_GCD_MAX_SPARSITY_RATIO)
+    }
+
+    /// Compute the monic GCD when at least one input consists of one monomial.
+    fn gcd_with_monomial(
+        &self,
+        left: &MultivariatePolynomial<F, E>,
+        right: &MultivariatePolynomial<F, E>,
+    ) -> MultivariatePolynomial<F, E> {
+        let Some(variable) = self.variable else {
+            return self.prototype.one();
+        };
+        let degree = left.exponents(0)[variable].min(right.exponents(0)[variable]);
+        if degree.is_zero() {
+            return self.prototype.one();
+        }
+        let mut exponents = vec![E::zero(); self.prototype.nvars()];
+        exponents[variable] = degree;
+        self.prototype
+            .monomial(self.prototype.ring().one(), exponents)
     }
 
     /// Copy a sparse univariate polynomial into a degree-indexed coefficient buffer.
@@ -847,7 +957,38 @@ impl<F: Field, E: PositiveExponent> MultivariatePolynomial<F, E> {
             return self.clone();
         }
 
-        DenseUnivariateGcdContext::new(self, b).gcd(self, b)
+        let dense = DenseUnivariateGcdContext::new(self, b);
+        if self.nterms() == 1 || b.nterms() == 1 {
+            return dense.gcd_with_monomial(self, b);
+        }
+        if dense.storage_is_bounded(self, b) {
+            return dense.gcd(self, b);
+        }
+
+        // Use the existing polynomial-buffer division path when exponent gaps would make the
+        // dedicated dense workspace disproportionately large.
+        let mut left = self.clone();
+        let mut right = b.clone();
+        if self.ldegree_max() < b.ldegree_max() {
+            mem::swap(&mut left, &mut right);
+        }
+        let mut remainder = left.quot_rem_univariate(&mut right).1;
+        while !remainder.is_zero() {
+            left = right;
+            right = remainder;
+            remainder = left.quot_rem_univariate(&mut right).1;
+        }
+
+        if let Some(leading_coefficient) = right.coefficients.last()
+            && !right.ring().is_one(leading_coefficient)
+        {
+            let inverse = right.ring().inv(leading_coefficient);
+            let (ring, coefficients) = right.ring_and_coefficients_mut();
+            for coefficient in coefficients {
+                ring.mul_assign(coefficient, &inverse);
+            }
+        }
+        right
     }
 
     /// Replace all variables except `v` in the polynomial by elements from
@@ -1183,22 +1324,8 @@ impl<F: Field, E: PositiveExponent> MultivariatePolynomial<F, E> {
 
         let mut failure_count = 0;
 
-        let min_shape_degree = shape
-            .iter()
-            .map(|(_, exponent)| exponent.to_u32() as usize)
-            .min()
-            .expect("a GCD image must have at least one term");
-        let max_shape_degree = shape
-            .iter()
-            .map(|(_, exponent)| exponent.to_u32() as usize)
-            .max()
-            .unwrap();
-        let mut shape_index_by_degree = vec![None; max_shape_degree - min_shape_degree + 1];
-        for (index, (_, exponent)) in shape.iter().enumerate() {
-            let slot = &mut shape_index_by_degree[exponent.to_u32() as usize - min_shape_degree];
-            debug_assert!(slot.is_none());
-            *slot = Some(index);
-        }
+        let shape_index_by_degree =
+            ZippelShapeIndex::new(shape.iter().map(|(_, exponent)| *exponent));
 
         // Store powers only for the variables evaluated at this recursion level. Scan both
         // exponent arrays once to find their required cache sizes.
@@ -1363,11 +1490,7 @@ impl<F: Field, E: PositiveExponent> MultivariatePolynomial<F, E> {
 
                 sampled_term_by_shape.fill(None);
                 for (term_index, term) in (&g).into_iter().enumerate() {
-                    let degree = term.exponents[main_var].to_u32() as usize;
-                    let Some(shape_index) = degree
-                        .checked_sub(min_shape_degree)
-                        .and_then(|degree| shape_index_by_degree.get(degree))
-                        .and_then(|index| *index)
+                    let Some(shape_index) = shape_index_by_degree.get(term.exponents[main_var])
                     else {
                         debug!("Bad shape: terms missing");
                         return Err(GCDError::BadOriginalImage);
@@ -5339,7 +5462,41 @@ mod tests {
             left.univariate_gcd(&left.constant(field.nth(Integer::from(3)))),
             left.one()
         );
+        assert_eq!(
+            left.constant(field.nth(Integer::from(3)))
+                .univariate_gcd(&left.constant(field.nth(Integer::from(5)))),
+            left.one()
+        );
         assert_eq!(left.zero().univariate_gcd(&left), left);
+
+        let large_gap = parse!("x^100000+x^50000").to_polynomial::<_, u32>(&field, None);
+        let monomial =
+            parse!("x^75000").to_polynomial::<_, u32>(&field, large_gap.variables().clone());
+        let expected =
+            parse!("x^50000").to_polynomial::<_, u32>(&field, large_gap.variables().clone());
+        assert_eq!(large_gap.univariate_gcd(&monomial), expected);
+
+        let sparse_left =
+            parse!("x^100000+1").to_polynomial::<_, u32>(&field, large_gap.variables().clone());
+        let sparse_right =
+            parse!("x^99999+2").to_polynomial::<_, u32>(&field, large_gap.variables().clone());
+        assert!(
+            !DenseUnivariateGcdContext::new(&sparse_left, &sparse_right)
+                .storage_is_bounded(&sparse_left, &sparse_right)
+        );
+    }
+
+    #[test]
+    fn zippel_shape_index_keeps_large_degree_gaps_sparse() {
+        let sparse = ZippelShapeIndex::new([3u32, 1_000_003]);
+        assert!(matches!(&sparse, ZippelShapeIndex::Sparse(_)));
+        assert_eq!(sparse.get(3), Some(0));
+        assert_eq!(sparse.get(1_000_003), Some(1));
+        assert_eq!(sparse.get(4), None);
+
+        let dense = ZippelShapeIndex::new([3u32, 5, 6]);
+        assert!(matches!(&dense, ZippelShapeIndex::Dense { .. }));
+        assert_eq!(dense.get(5), Some(1));
     }
 
     #[test]
