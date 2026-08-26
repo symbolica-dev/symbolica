@@ -47,7 +47,7 @@ const FUSED_GCD_BOUND_MAX_DEGREE: usize = 9999;
 const DENSE_UNIVARIATE_GCD_MAX_COEFFICIENTS: usize = 4096;
 
 /// Maximum coefficient-buffer length relative to the number of stored input terms.
-const DENSE_UNIVARIATE_GCD_MAX_SPARSITY_RATIO: usize = 32;
+const DENSE_UNIVARIATE_GCD_MAX_SPARSITY_RATIO: usize = 8;
 
 /// Largest direct degree-to-shape table used during Zippel interpolation.
 const ZIPPEL_SHAPE_INDEX_MAX_DEGREE_SPAN: usize = 4096;
@@ -5497,6 +5497,27 @@ mod tests {
         let dense = ZippelShapeIndex::new([3u32, 5, 6]);
         assert!(matches!(&dense, ZippelShapeIndex::Dense { .. }));
         assert_eq!(dense.get(5), Some(1));
+    }
+
+    #[test]
+    fn dense_univariate_gcd_selector_rejects_sparse_gap_images() {
+        let field = Zp::new(2_147_483_659);
+        let sparse_left = parse!("x^260+x^256+1").to_polynomial::<_, u16>(&field, None);
+        let sparse_right = parse!("x^259+2*x^128+3")
+            .to_polynomial::<_, u16>(&field, sparse_left.variables().clone());
+        assert!(
+            !DenseUnivariateGcdContext::new(&sparse_left, &sparse_right)
+                .storage_is_bounded(&sparse_left, &sparse_right)
+        );
+
+        let dense_left =
+            parse!("(1+x)^20").to_polynomial::<_, u16>(&field, sparse_left.variables().clone());
+        let dense_right =
+            parse!("(1+2*x)^18").to_polynomial::<_, u16>(&field, sparse_left.variables().clone());
+        assert!(
+            DenseUnivariateGcdContext::new(&dense_left, &dense_right)
+                .storage_is_bounded(&dense_left, &dense_right)
+        );
     }
 
     #[test]

@@ -2180,8 +2180,8 @@ impl<F: Ring, E: PositiveExponent> MultivariatePolynomial<F, E, LexOrder> {
         )
     }
 
-    /// Replace the last variable `n` in the polynomial by an element from
-    /// the ring `v`.
+    /// Replace the last active variable `n` in the polynomial by the ring element `v`.
+    /// Variables after `n` must be absent from the polynomial.
     pub fn replace_last(&self, n: usize, v: &F::Element) -> MultivariatePolynomial<F, E, LexOrder> {
         const MAX_EXP_BUF: usize = 100000;
         debug_assert!((n + 1..self.nvars()).all(|variable| self.degree(variable).is_zero()));
