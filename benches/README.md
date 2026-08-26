@@ -16,10 +16,12 @@ The resultant group measures Symbolica's Brown PRS, Lazard-Ducos, and modular CR
 FLINT's multivariate resultant on the same inputs.
 
 The `generated_gcd_regimes` group is a fixed synthetic suite covering dense and sparse supports in
-five and eight variables, a 64/256 exponent-gap pair, and a 128/256/512/1024-bit coefficient-height
-ladder. It reports the two input-construction products separately from the automatic GCD, making it
-possible to distinguish arithmetic throughput from the GCD algorithm itself. The older
-`polynomial_gcd` group remains configurable through the `GCD_BENCH_*` environment variables.
+two, five, and eight variables, a 64/256 exponent-gap pair, and a
+128/256/512/1024-bit coefficient-height ladder. The bivariate degree-5 case exercises the point at
+which the modular GCD path replaces the small-input heuristic. The group reports the two
+input-construction products separately from the automatic GCD, making it possible to distinguish
+arithmetic throughput from the GCD algorithm itself. The older `polynomial_gcd` group remains
+configurable through the `GCD_BENCH_*` environment variables.
 
 ## Symbolica-only benchmarks
 

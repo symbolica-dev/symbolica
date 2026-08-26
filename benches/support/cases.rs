@@ -468,7 +468,14 @@ impl Default for GcdCaseConfig {
 
 /// Fixed generated cases that exercise support shape, dimension, exponent span,
 /// and coefficient height independently of the imported polybench fixtures.
-pub const GENERATED_GCD_CASES: [GcdCaseConfig; 11] = [
+pub const GENERATED_GCD_CASES: [GcdCaseConfig; 12] = [
+    GcdCaseConfig {
+        kind: GcdCaseKind::Dense,
+        variable_count: 2,
+        degree: 5,
+        gap: 10,
+        coefficient_bits: 30,
+    },
     GcdCaseConfig {
         kind: GcdCaseKind::Dense,
         variable_count: 5,

@@ -2373,10 +2373,6 @@ impl<E: PositiveExponent> MultivariatePolynomial<IntegerRing, E> {
         let mut primes =
             PrimeIteratorU64::new(UField::get_large_prime().to_u64().unwrap_or(1 << 63));
 
-        for _ in 0..100 {
-            let _ = primes.next();
-        }
-
         'newfirstprime: loop {
             let Some(p) = primes.next() else {
                 panic!("Ran out of primes for gcd reconstruction.\ngcd({self},{b})");
