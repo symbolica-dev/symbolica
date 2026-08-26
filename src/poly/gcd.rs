@@ -1732,6 +1732,10 @@ impl<
     ) -> Option<Self> {
         let lastvar = *vars.last().unwrap();
         debug!("GCD shape modular: vars={vars:?} bounds={bounds:?}");
+        debug_assert!(
+            (lastvar + 1..a.nvars())
+                .all(|variable| a.degree(variable).is_zero() && b.degree(variable).is_zero())
+        );
 
         // if we are in the univariate case, return the univariate gcd
         // TODO: this is a modification of the algorithm!
@@ -1790,7 +1794,7 @@ impl<
             let mut sample_fail_count = 0i64;
             let v = loop {
                 let r = sample_nonzero_field_element(a.ring(), &mut rng);
-                if !gamma.replace(lastvar, &r).is_zero() {
+                if !gamma.replace_last(lastvar, &r).is_zero() {
                     break r;
                 }
 
@@ -1804,8 +1808,8 @@ impl<
             };
 
             debug!("Chosen variable: {}", a.ring().printer(&v));
-            let av = a.replace(lastvar, &v);
-            let bv = b.replace(lastvar, &v);
+            let av = a.replace_last(lastvar, &v);
+            let bv = b.replace_last(lastvar, &v);
 
             // performance dense reconstruction
             let mut gv = if vars.len() > 2 {
@@ -1871,7 +1875,7 @@ impl<
                 gv.clone().mul_coeff(
                     gamma
                         .ring()
-                        .div(&gamma.replace(lastvar, &v).coefficients[0], &lc),
+                        .div(&gamma.replace_last(lastvar, &v).coefficients[0], &lc),
                 ),
             ];
             let mut vseq = vec![v];
@@ -1891,7 +1895,7 @@ impl<
 
                 let v = loop {
                     let v = sample_nonzero_field_element(a.ring(), &mut rng);
-                    if !gamma.replace(lastvar, &v).is_zero() {
+                    if !gamma.replace_last(lastvar, &v).is_zero() {
                         // we need unique sampling points
                         if !vseq.contains(&v) {
                             break v;
@@ -1909,8 +1913,8 @@ impl<
                     }
                 };
 
-                let av = a.replace(lastvar, &v);
-                let bv = b.replace(lastvar, &v);
+                let av = a.replace_last(lastvar, &v);
+                let bv = b.replace_last(lastvar, &v);
 
                 let rec = if let Some(single_scale) = single_scale {
                     Self::construct_new_image_single_scale(
@@ -1969,7 +1973,7 @@ impl<
                     gv.clone().mul_coeff(
                         gamma
                             .ring()
-                            .div(&gamma.replace(lastvar, &v).coefficients[0], &lc),
+                            .div(&gamma.replace_last(lastvar, &v).coefficients[0], &lc),
                     ),
                 );
                 vseq.push(v);
