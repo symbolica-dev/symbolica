@@ -9,19 +9,26 @@ change the Symbolica polynomials, exponent type, variable order, or timed operat
 
 The benchmark profile enables full LTO with one code-generation unit. Default crate features remain
 enabled, including `faster_alloc`, GMP, and native code generation.
-Each runner labels results as a workspace build with its Git revision and dirty state so they cannot
-be confused with timings from the released package carrying the same version number.
+Each runner labels results with the Git revision embedded when Symbolica was compiled and the
+current workspace dirty state, so a copied benchmark binary retains its build provenance instead
+of adopting the repository's current revision at run time.
 
 The resultant group measures Symbolica's Brown PRS, Lazard-Ducos, and modular CRT backends against
 FLINT's multivariate resultant on the same inputs.
 
-The `generated_gcd_regimes` group is a fixed synthetic suite covering dense and sparse supports in
-two, five, and eight variables, a 64/256 exponent-gap pair, and a
+The `generated_gcd_regimes` group is a fixed synthetic suite covering dense low-dimensional cases
+in one, two, and three variables, dense and sparse supports in five and eight variables, a 64/256
+exponent-gap pair, and a
 128/256/512/1024-bit coefficient-height ladder. The bivariate degree-5 case exercises the point at
 which the modular GCD path replaces the small-input heuristic. The group reports the two
 input-construction products separately from the automatic GCD, making it possible to distinguish
 arithmetic throughput from the GCD algorithm itself. The older `polynomial_gcd` group remains
 configurable through the `GCD_BENCH_*` environment variables.
+
+The `generated_factor_products` and `generated_factorization` groups use reducible dense inputs in
+one, two, and three variables. Product construction is timed separately from automatic
+factorization, and both Symbolica and FLINT expand the returned factorization outside the timed
+region to verify it reproduces the input.
 
 ## Symbolica-only benchmarks
 
@@ -150,7 +157,7 @@ Use an even sample count so each implementation runs first equally often. Set
 The GCD benchmarks accept the existing case controls:
 
 - `GCD_BENCH_CASE`: `dense`, `sparse`, `high-gap`, or `high-height`
-- `GCD_BENCH_NVARS`: 2 through 8
+- `GCD_BENCH_NVARS`: 1 through 8
 - `GCD_BENCH_DEGREE`: positive and at most 65535
 - `GCD_BENCH_GAP`: positive
 - `GCD_BENCH_COEFFICIENT_BITS`: 8 through 1024

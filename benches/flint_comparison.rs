@@ -9,9 +9,10 @@ use symbolica::prelude::*;
 
 use support::cases::{
     EXACT_DIVISION_CASES, ExactDivisionCase, FINITE_FIELD_MULTIPLICATION_CASES, FINITE_FIELDS,
-    FiniteFieldCase, FiniteFieldMultiplicationCase, FiniteFieldMultiplicationInput,
-    GENERATED_GCD_CASES, GcdCaseConfig, INTEGER_MULTIPLICATION_CASES, IntegerMultiplicationCase,
-    PoweredPolynomial, RESULTANT_CASES, ResultantCase,
+    FactorizationCase, FiniteFieldCase, FiniteFieldMultiplicationCase,
+    FiniteFieldMultiplicationInput, GENERATED_FACTOR_CASES, GENERATED_GCD_CASES, GcdCaseConfig,
+    INTEGER_MULTIPLICATION_CASES, IntegerMultiplicationCase, PoweredPolynomial, RESULTANT_CASES,
+    ResultantCase,
 };
 use support::flint::{
     FmpzMPoly, FmpzMPolyContext, GcdAlgorithm as FlintGcdAlgorithm, NmodMPoly, NmodMPolyContext,
@@ -24,11 +25,13 @@ use support::polybench_cases::{
 use support::symbolica::{
     BENCHMARK_NAMESPACE, GcdAlgorithm as SymbolicaGcdAlgorithm, IntegerPolynomial,
     PolybenchIntegerPolynomial, configure_factorization_auto,
-    configure_gcd as configure_symbolica_gcd, finite_pair as symbolica_finite_pair,
-    gcd_case_config, gcd_factors_for as symbolica_gcd_factors_for, parse_integer_polynomial,
+    configure_gcd as configure_symbolica_gcd, factorization_input as symbolica_factorization_input,
+    finite_pair as symbolica_finite_pair, gcd_case_config,
+    gcd_factors_for as symbolica_gcd_factors_for, parse_integer_polynomial,
     parse_polybench_integer_polynomial, polybench_factor_input as symbolica_polybench_factor_input,
     polybench_gcd_inputs as symbolica_polybench_gcd_inputs, powered_pair as symbolica_powered_pair,
-    resultant_inputs as symbolica_resultant_inputs, validate_polybench_factorization,
+    resultant_inputs as symbolica_resultant_inputs,
+    validate_factorization as validate_symbolica_factorization, validate_polybench_factorization,
     validate_polybench_gcd,
 };
 
@@ -162,6 +165,13 @@ fn flint_polybench_factor_input<'context>(
         .parse(case.factors[0])
         .unwrap()
         .mul(&context.parse(case.factors[1]).unwrap())
+}
+
+fn flint_factorization_input<'context>(
+    context: &'context FmpzMPolyContext,
+    case: FactorizationCase,
+) -> FmpzMPoly<'context> {
+    flint_powered_integer(context, case.left).mul(&flint_powered_integer(context, case.right))
 }
 
 fn assert_modular_results_equal<R>(
@@ -462,6 +472,53 @@ mod generated_gcd_regimes {
     }
 }
 
+#[divan::bench_group(sample_count = 3, sample_size = 1, skip_ext_time)]
+mod generated_factor_products {
+    use super::*;
+
+    #[divan::bench(args = GENERATED_FACTOR_CASES)]
+    fn symbolica(bencher: divan::Bencher, case: FactorizationCase) {
+        support::symbolica::benchmark_factor_product(bencher, case);
+    }
+
+    #[divan::bench(args = GENERATED_FACTOR_CASES)]
+    fn flint(bencher: divan::Bencher, case: FactorizationCase) {
+        let context = FmpzMPolyContext::new(case.variables).unwrap();
+        let left = flint_powered_integer(&context, case.left);
+        let right = flint_powered_integer(&context, case.right);
+        let expected = symbolica_factorization_input(case);
+        assert_integer_results_equal(&left.mul(&right), &expected);
+        drop(expected);
+        bencher.bench_local(|| left.mul(&right));
+    }
+}
+
+#[divan::bench_group(sample_count = 3, sample_size = 1, skip_ext_time)]
+mod generated_factorization {
+    use super::*;
+
+    #[divan::bench(args = GENERATED_FACTOR_CASES)]
+    fn symbolica(bencher: divan::Bencher, case: FactorizationCase) {
+        support::symbolica::benchmark_factorization(bencher, case);
+    }
+
+    #[divan::bench(args = GENERATED_FACTOR_CASES)]
+    fn flint(bencher: divan::Bencher, case: FactorizationCase) {
+        let context = FmpzMPolyContext::new(case.variables).unwrap();
+        let input = flint_factorization_input(&context, case);
+        let expected = symbolica_factorization_input(case);
+        assert_integer_results_equal(&input, &expected);
+        let factors = input.factor().unwrap();
+        assert!(
+            factors.len() >= 2,
+            "the known reducible generated input was not split"
+        );
+        assert!(factors.expand().unwrap().equals(&input));
+        drop((expected, factors));
+        bencher.bench_local(|| input.factor().unwrap());
+    }
+}
+
 #[divan::bench_group(sample_count = 5, sample_size = 1, skip_ext_time)]
 mod polybench_gcd_products {
     use super::*;
@@ -611,6 +668,7 @@ fn paired_benchmarks() {
     paired_resultants();
     paired_gcd();
     paired_generated_gcd_regimes();
+    paired_generated_factorization();
     paired_polybench();
 }
 
@@ -783,6 +841,53 @@ fn paired_gcd() {
 fn paired_generated_gcd_regimes() {
     for case in GENERATED_GCD_CASES {
         paired_gcd_case(case, "generated GCD");
+    }
+}
+
+fn paired_generated_factorization() {
+    configure_factorization_auto();
+    for case in GENERATED_FACTOR_CASES {
+        let config = PairedConfig::from_env(case.default_samples);
+        let product_name = format!("generated factor product: {case}");
+        let factor_name = format!("generated factorization: {case}");
+        if !config.matches(&product_name) && !config.matches(&factor_name) {
+            continue;
+        }
+
+        let [symbolica_left, symbolica_right] = symbolica_powered_pair(&Z, case.left, case.right);
+        let symbolica_input = &symbolica_left * &symbolica_right;
+        let context = FmpzMPolyContext::new(case.variables).unwrap();
+        let flint_left = flint_powered_integer(&context, case.left);
+        let flint_right = flint_powered_integer(&context, case.right);
+        let flint_input = flint_left.mul(&flint_right);
+        assert_integer_results_equal(&flint_input, &symbolica_input);
+
+        if config.matches(&product_name) {
+            run_paired(
+                &config,
+                &product_name,
+                || &symbolica_left * &symbolica_right,
+                || flint_left.mul(&flint_right),
+            );
+        }
+
+        if config.matches(&factor_name) {
+            let symbolica_factors = symbolica_input.factor();
+            validate_symbolica_factorization(&symbolica_input, &symbolica_factors);
+            let flint_factors = flint_input.factor().unwrap();
+            assert!(
+                flint_factors.len() >= 2,
+                "the known reducible generated input was not split"
+            );
+            assert!(flint_factors.expand().unwrap().equals(&flint_input));
+            drop((symbolica_factors, flint_factors));
+            run_paired(
+                &config,
+                &factor_name,
+                || symbolica_input.factor(),
+                || flint_input.factor().unwrap(),
+            );
+        }
     }
 }
 

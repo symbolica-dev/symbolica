@@ -5,6 +5,9 @@
 use std::{fmt, fmt::Write};
 
 pub const X_VARIABLES: [&str; 1] = ["x"];
+pub const X1_VARIABLES: [&str; 1] = ["x1"];
+pub const X1_TO_X2_VARIABLES: [&str; 2] = ["x1", "x2"];
+pub const X1_TO_X3_VARIABLES: [&str; 3] = ["x1", "x2", "x3"];
 pub const XYZ_VARIABLES: [&str; 3] = ["x", "y", "z"];
 pub const XY1Y2_VARIABLES: [&str; 3] = ["x", "y1", "y2"];
 pub const X1_TO_X5_VARIABLES: [&str; 5] = ["x1", "x2", "x3", "x4", "x5"];
@@ -161,6 +164,47 @@ pub const EXACT_DIVISION_CASES: [ExactDivisionCase; 3] = [
         quotient: PoweredPolynomial::new("1000000000039+x+y+z", 12),
         divisor: PoweredPolynomial::new("1000000000187+2*x-y+3*z", 10),
         default_samples: 5,
+    },
+];
+
+/// A reducible integer polynomial constructed as the product of two powered polynomials.
+#[derive(Clone, Copy, Debug)]
+pub struct FactorizationCase {
+    pub name: &'static str,
+    pub variables: &'static [&'static str],
+    pub left: PoweredPolynomial,
+    pub right: PoweredPolynomial,
+    pub default_samples: usize,
+}
+
+impl fmt::Display for FactorizationCase {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter.write_str(self.name)
+    }
+}
+
+/// Low-dimensional factorization cases with comparable dense powered inputs.
+pub const GENERATED_FACTOR_CASES: [FactorizationCase; 3] = [
+    FactorizationCase {
+        name: "dense 1-variable degrees 32/31",
+        variables: &X1_VARIABLES,
+        left: PoweredPolynomial::with_constant("1+3*x1", 32, -1),
+        right: PoweredPolynomial::with_constant("1-5*x1", 31, 1),
+        default_samples: 3,
+    },
+    FactorizationCase {
+        name: "dense 2-variable degrees 10/9",
+        variables: &X1_TO_X2_VARIABLES,
+        left: PoweredPolynomial::with_constant("1+3*x1+5*x2", 10, -1),
+        right: PoweredPolynomial::with_constant("1-3*x1+5*x2", 9, 1),
+        default_samples: 3,
+    },
+    FactorizationCase {
+        name: "dense 3-variable degrees 6/5",
+        variables: &X1_TO_X3_VARIABLES,
+        left: PoweredPolynomial::with_constant("1+3*x1+5*x2+7*x3", 6, -1),
+        right: PoweredPolynomial::with_constant("1-3*x1+5*x2-7*x3", 5, 1),
+        default_samples: 3,
     },
 ];
 
@@ -468,11 +512,25 @@ impl Default for GcdCaseConfig {
 
 /// Fixed generated cases that exercise support shape, dimension, exponent span,
 /// and coefficient height independently of the imported polybench fixtures.
-pub const GENERATED_GCD_CASES: [GcdCaseConfig; 12] = [
+pub const GENERATED_GCD_CASES: [GcdCaseConfig; 14] = [
+    GcdCaseConfig {
+        kind: GcdCaseKind::Dense,
+        variable_count: 1,
+        degree: 32,
+        gap: 10,
+        coefficient_bits: 30,
+    },
     GcdCaseConfig {
         kind: GcdCaseKind::Dense,
         variable_count: 2,
         degree: 5,
+        gap: 10,
+        coefficient_bits: 30,
+    },
+    GcdCaseConfig {
+        kind: GcdCaseKind::Dense,
+        variable_count: 3,
+        degree: 7,
         gap: 10,
         coefficient_bits: 30,
     },
@@ -557,8 +615,8 @@ pub const GENERATED_GCD_CASES: [GcdCaseConfig; 12] = [
 
 impl GcdCaseConfig {
     pub fn validate(self) -> Result<(), String> {
-        if !(2..=8).contains(&self.variable_count) {
-            return Err("GCD variable count must be between 2 and 8".to_owned());
+        if !(1..=8).contains(&self.variable_count) {
+            return Err("GCD variable count must be between 1 and 8".to_owned());
         }
         if self.degree == 0 || self.degree > u16::MAX as u32 {
             return Err(format!("GCD degree must be between 1 and {}", u16::MAX));
