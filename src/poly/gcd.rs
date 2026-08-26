@@ -102,6 +102,26 @@ fn should_use_hu_monagan<E: PositiveExponent>(
         || Integer::from(nterms) * SPARSITY_MARGIN < box_size
 }
 
+/// Returns the minimum modulus for a Hu-Monagan interpolation image.
+///
+/// The Kronecker range bound keeps the encoded exponents distinct in the
+/// multiplicative group. When twice the largest input coefficient fits below
+/// `2^32`, the same modulus also preserves its symmetric integer
+/// representative. Larger coefficients are reconstructed from multiple
+/// modular images by CRT.
+fn hu_monagan_prime_lower_bound(
+    kronecker_range: u64,
+    delta: u32,
+    twice_largest_coefficient: &Integer,
+) -> u64 {
+    let interpolation_bound = kronecker_range.saturating_mul(2u64.saturating_pow(delta));
+    if twice_largest_coefficient < &(1i64 << 32) {
+        interpolation_bound.max(twice_largest_coefficient.to_u64().unwrap())
+    } else {
+        interpolation_bound
+    }
+}
+
 /// Mixed-radix Kronecker map used to encode the variables sampled by Hu-Monagan interpolation.
 ///
 /// If the active radices are `r_s, ..., r_n`, the evaluation powers are
@@ -3299,7 +3319,7 @@ impl<E: PositiveExponent> MultivariatePolynomial<IntegerRing, E> {
 
         let delta = 1u32;
         let mut d_0 = bounds[0];
-        let mut smooth_prime_index = 240;
+        let mut smooth_prime_index = 0;
         let mut rng = rand::rng();
 
         'kronecker_prime: loop {
@@ -3317,7 +3337,8 @@ impl<E: PositiveExponent> MultivariatePolynomial<IntegerRing, E> {
             let mut image_kind = None;
 
             'new_image: loop {
-                let prime_bound = kronecker.range().saturating_mul(2u64.saturating_pow(delta));
+                let prime_bound =
+                    hu_monagan_prime_lower_bound(kronecker.range(), delta, &largest_coeff);
 
                 let (p, totient_primes, alpha, a_p, b_p) = 'new_prime: loop {
                     let Some((p, alpha, fs)) = SMOOTH_PRIMES.get(smooth_prime_index) else {
@@ -3330,9 +3351,7 @@ impl<E: PositiveExponent> MultivariatePolynomial<IntegerRing, E> {
 
                     smooth_prime_index += 1;
 
-                    if *p < prime_bound
-                        || largest_coeff < 1i64 << 32 && *p < largest_coeff.to_u64().unwrap()
-                    {
+                    if *p < prime_bound {
                         continue;
                     }
 
@@ -3576,7 +3595,7 @@ impl<E: PositiveExponent> MultivariatePolynomial<IntegerRing, E> {
 
         let delta = 1u32;
         let mut d_0_1 = (bounds[0].to_u32(), bounds[1].to_u32());
-        let mut smooth_prime_index = 204;
+        let mut smooth_prime_index = 0;
         let mut rng = rand::rng();
 
         'kronecker_prime: loop {
@@ -3594,7 +3613,8 @@ impl<E: PositiveExponent> MultivariatePolynomial<IntegerRing, E> {
             let mut image_kind = None;
 
             'new_image: loop {
-                let prime_bound = kronecker.range().saturating_mul(2u64.saturating_pow(delta));
+                let prime_bound =
+                    hu_monagan_prime_lower_bound(kronecker.range(), delta, &largest_coeff);
 
                 let (p, totient_primes, alpha, a_p, b_p) = 'new_prime: loop {
                     let Some((p, alpha, fs)) = SMOOTH_PRIMES.get(smooth_prime_index) else {
@@ -3607,9 +3627,7 @@ impl<E: PositiveExponent> MultivariatePolynomial<IntegerRing, E> {
 
                     smooth_prime_index += 1;
 
-                    if *p < prime_bound
-                        || largest_coeff < 1i64 << 32 && *p < largest_coeff.to_u64().unwrap()
-                    {
+                    if *p < prime_bound {
                         continue;
                     }
 
@@ -4789,6 +4807,29 @@ mod tests {
         let right = &common * &right_cofactor;
 
         assert_eq!(left.gcd(&right), common.make_monic());
+    }
+
+    #[test]
+    fn hu_monagan_prime_bound_combines_interpolation_and_coefficient_bounds() {
+        assert_eq!(
+            hu_monagan_prime_lower_bound(100, 1, &Integer::from(500)),
+            500
+        );
+        assert_eq!(
+            hu_monagan_prime_lower_bound(1_000, 1, &Integer::from(500)),
+            2_000
+        );
+
+        // Coefficients at this height are recovered by CRT, so they do not
+        // force every individual image to use a word-sized prime.
+        assert_eq!(
+            hu_monagan_prime_lower_bound(1_000, 1, &Integer::from(1u64 << 32)),
+            2_000
+        );
+        assert_eq!(
+            hu_monagan_prime_lower_bound(u64::MAX, 1, &Integer::from(1)),
+            u64::MAX
+        );
     }
 
     #[test]
