@@ -4,7 +4,7 @@ use crate::{
     atom::AtomCore,
     domains::{
         Ring, RingOps, SampleableRing,
-        finite_field::{FiniteFieldCore, Zp64},
+        finite_field::{FiniteFieldCore, Zp, Zp64},
         integer::Z,
         rational::Q,
     },
@@ -40,6 +40,33 @@ fn dense_finite_field_root_context_finds_distinct_nonzero_roots() {
     let polynomial = polynomial_with_roots(&field, &expected);
     let mut context = DenseFiniteFieldRootContext::new(&field);
 
+    let mut actual = context
+        .find_distinct_nonzero_roots(&polynomial)
+        .unwrap()
+        .iter()
+        .map(|root| field.from_element(root))
+        .collect::<Vec<_>>();
+    actual.sort_unstable();
+
+    assert_eq!(actual, expected);
+}
+
+#[test]
+fn dense_finite_field_root_context_uses_u32_fields() {
+    let field = Zp::new(1_088_391_169);
+    let expected = [1u32, 2, 3, 5, 8, 13, 21, 34, 55, 89, 144, 233, 377];
+    let mut polynomial = vec![field.one()];
+    for root in expected {
+        let root = field.to_element(root);
+        let mut product = vec![field.zero(); polynomial.len() + 1];
+        for (degree, coefficient) in polynomial.iter().enumerate() {
+            field.sub_mul_assign(&mut product[degree], coefficient, &root);
+            field.add_assign(&mut product[degree + 1], coefficient);
+        }
+        polynomial = product;
+    }
+
+    let mut context = DenseFiniteFieldRootContext::new(&field);
     let mut actual = context
         .find_distinct_nonzero_roots(&polynomial)
         .unwrap()

@@ -17,7 +17,7 @@ use crate::{
     domains::{
         EuclideanDomain, Field, InternalOrdering, Ring, RingOps, SampleableRing, SelfRing, Set,
         algebraic::{AlgebraicExtension, AlgebraicNumber},
-        finite_field::{FiniteFieldCore, FiniteFieldElement, Zp64},
+        finite_field::{FiniteFieldCore, Zp, Zp64},
         float::{Complex, F64, FloatField, FloatLike, Real, SingleFloat},
         integer::{Integer, IntegerRing, Z},
         rational::{Q, Rational, RationalField},
@@ -56,18 +56,56 @@ pub struct UnivariatePolynomialSamplingPolicy<P> {
     pub coefficient: P,
 }
 
+/// Fixed-width prime fields supported by dense Hu-Monagan root recovery.
+pub(crate) trait DenseRootPrimeField: Field {
+    /// Return the field modulus as a `u64`.
+    fn prime_u64(&self) -> u64;
+
+    /// Convert a canonical `u64` representative into a field element.
+    fn to_element_u64(&self, value: u64) -> Self::Element;
+}
+
+impl DenseRootPrimeField for Zp {
+    fn prime_u64(&self) -> u64 {
+        self.get_prime() as u64
+    }
+
+    fn to_element_u64(&self, value: u64) -> Self::Element {
+        self.to_element(value as u32)
+    }
+}
+
+impl DenseRootPrimeField for Zp64 {
+    fn prime_u64(&self) -> u64 {
+        self.get_prime()
+    }
+
+    fn to_element_u64(&self, value: u64) -> Self::Element {
+        self.to_element(value)
+    }
+}
+
 /// Dense polynomial operations used to recover the distinct nonzero roots of
-/// Hu-Monagan recurrence polynomials over a 64-bit prime field.
-pub(crate) struct DenseFiniteFieldRootContext<'a> {
-    field: &'a Zp64,
+/// Hu-Monagan recurrence polynomials over a fixed-width prime field.
+pub(crate) struct DenseFiniteFieldRootContext<'a, F = Zp64>
+where
+    F: DenseRootPrimeField,
+    F::Element: Copy + PartialEq,
+{
+    field: &'a F,
     rng: rand::rngs::ThreadRng,
 }
 
-impl<'a> DenseFiniteFieldRootContext<'a> {
+impl<'a, F> DenseFiniteFieldRootContext<'a, F>
+where
+    F: DenseRootPrimeField,
+    F::Element: Copy + PartialEq,
+{
     /// Creates a root-recovery context for `field`.
-    pub(crate) fn new(field: &'a Zp64) -> Self {
+    pub(crate) fn new(field: &'a F) -> Self {
+        let prime = field.prime_u64();
         assert!(
-            field.get_prime() > 2 && !field.get_prime().is_multiple_of(2),
+            prime > 2 && !prime.is_multiple_of(2),
             "dense root recovery requires an odd prime field"
         );
         Self {
@@ -77,7 +115,7 @@ impl<'a> DenseFiniteFieldRootContext<'a> {
     }
 
     #[inline]
-    fn truncate(&self, polynomial: &mut Vec<FiniteFieldElement<u64>>) {
+    fn truncate(&self, polynomial: &mut Vec<F::Element>) {
         while polynomial
             .last()
             .is_some_and(|coefficient| self.field.is_zero(coefficient))
@@ -86,7 +124,7 @@ impl<'a> DenseFiniteFieldRootContext<'a> {
         }
     }
 
-    fn make_monic(&self, polynomial: &mut Vec<FiniteFieldElement<u64>>) {
+    fn make_monic(&self, polynomial: &mut Vec<F::Element>) {
         let Some(leading_coefficient) = polynomial.last().copied() else {
             return;
         };
@@ -101,11 +139,7 @@ impl<'a> DenseFiniteFieldRootContext<'a> {
     }
 
     /// Replaces `polynomial` by its remainder modulo the monic `modulus`.
-    fn rem_monic(
-        &self,
-        polynomial: &mut Vec<FiniteFieldElement<u64>>,
-        modulus: &[FiniteFieldElement<u64>],
-    ) {
+    fn rem_monic(&self, polynomial: &mut Vec<F::Element>, modulus: &[F::Element]) {
         debug_assert!(modulus.len() >= 2);
         debug_assert!(self.field.is_one(modulus.last().unwrap()));
 
@@ -134,10 +168,10 @@ impl<'a> DenseFiniteFieldRootContext<'a> {
 
     fn mul_mod(
         &self,
-        left: &[FiniteFieldElement<u64>],
-        right: &[FiniteFieldElement<u64>],
-        modulus: &[FiniteFieldElement<u64>],
-    ) -> Vec<FiniteFieldElement<u64>> {
+        left: &[F::Element],
+        right: &[F::Element],
+        modulus: &[F::Element],
+    ) -> Vec<F::Element> {
         if left.is_empty() || right.is_empty() {
             return Vec::new();
         }
@@ -161,11 +195,7 @@ impl<'a> DenseFiniteFieldRootContext<'a> {
         product
     }
 
-    fn square_mod(
-        &self,
-        polynomial: &[FiniteFieldElement<u64>],
-        modulus: &[FiniteFieldElement<u64>],
-    ) -> Vec<FiniteFieldElement<u64>> {
+    fn square_mod(&self, polynomial: &[F::Element], modulus: &[F::Element]) -> Vec<F::Element> {
         if polynomial.is_empty() {
             return Vec::new();
         }
@@ -194,10 +224,10 @@ impl<'a> DenseFiniteFieldRootContext<'a> {
 
     fn pow_mod(
         &self,
-        base: &[FiniteFieldElement<u64>],
+        base: &[F::Element],
         mut exponent: u64,
-        modulus: &[FiniteFieldElement<u64>],
-    ) -> Vec<FiniteFieldElement<u64>> {
+        modulus: &[F::Element],
+    ) -> Vec<F::Element> {
         let mut power = base.to_vec();
         self.rem_monic(&mut power, modulus);
         let mut result = vec![self.field.one()];
@@ -214,11 +244,7 @@ impl<'a> DenseFiniteFieldRootContext<'a> {
         result
     }
 
-    fn gcd_monic(
-        &self,
-        mut left: Vec<FiniteFieldElement<u64>>,
-        mut right: Vec<FiniteFieldElement<u64>>,
-    ) -> Vec<FiniteFieldElement<u64>> {
+    fn gcd_monic(&self, mut left: Vec<F::Element>, mut right: Vec<F::Element>) -> Vec<F::Element> {
         self.truncate(&mut left);
         self.truncate(&mut right);
         self.make_monic(&mut left);
@@ -237,9 +263,9 @@ impl<'a> DenseFiniteFieldRootContext<'a> {
 
     fn div_exact_monic(
         &self,
-        dividend: &[FiniteFieldElement<u64>],
-        divisor: &[FiniteFieldElement<u64>],
-    ) -> Option<Vec<FiniteFieldElement<u64>>> {
+        dividend: &[F::Element],
+        divisor: &[F::Element],
+    ) -> Option<Vec<F::Element>> {
         debug_assert!(divisor.len() >= 2);
         debug_assert!(self.field.is_one(divisor.last().unwrap()));
         if dividend.len() < divisor.len() {
@@ -280,7 +306,7 @@ impl<'a> DenseFiniteFieldRootContext<'a> {
 
     /// Adds one to the constant coefficient when `add` is true and subtracts
     /// one otherwise.
-    fn offset_by_one(&self, polynomial: &mut Vec<FiniteFieldElement<u64>>, add: bool) {
+    fn offset_by_one(&self, polynomial: &mut Vec<F::Element>, add: bool) {
         if polynomial.is_empty() {
             polynomial.push(if add {
                 self.field.one()
@@ -295,11 +321,7 @@ impl<'a> DenseFiniteFieldRootContext<'a> {
         }
     }
 
-    fn evaluate(
-        &self,
-        polynomial: &[FiniteFieldElement<u64>],
-        value: &FiniteFieldElement<u64>,
-    ) -> FiniteFieldElement<u64> {
+    fn evaluate(&self, polynomial: &[F::Element], value: &F::Element) -> F::Element {
         let Some(mut result) = polynomial.last().copied() else {
             return self.field.zero();
         };
@@ -314,8 +336,8 @@ impl<'a> DenseFiniteFieldRootContext<'a> {
     /// Returns `None` when any of these conditions is not satisfied.
     pub(crate) fn find_distinct_nonzero_roots(
         &mut self,
-        coefficients: &[FiniteFieldElement<u64>],
-    ) -> Option<Vec<FiniteFieldElement<u64>>> {
+        coefficients: &[F::Element],
+    ) -> Option<Vec<F::Element>> {
         let mut polynomial = coefficients.to_vec();
         self.truncate(&mut polynomial);
         if polynomial.is_empty() {
@@ -339,7 +361,7 @@ impl<'a> DenseFiniteFieldRootContext<'a> {
                 .then_some(vec![root]);
         }
 
-        let split_exponent = (self.field.get_prime() - 1) / 2;
+        let split_exponent = (self.field.prime_u64() - 1) / 2;
         let mut character = self.pow_mod(
             &[self.field.zero(), self.field.one()],
             split_exponent,
@@ -383,7 +405,7 @@ impl<'a> DenseFiniteFieldRootContext<'a> {
             for _ in 0..64 {
                 let shift = self
                     .field
-                    .to_element(self.rng.random_range(0..self.field.get_prime()));
+                    .to_element_u64(self.rng.random_range(0..self.field.prime_u64()));
                 let mut character =
                     self.pow_mod(&[shift, self.field.one()], split_exponent, &factor);
                 self.offset_by_one(&mut character, false);

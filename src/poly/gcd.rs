@@ -12,7 +12,7 @@ use tracing::{debug, instrument};
 use crate::domains::algebraic::{AlgebraicExtension, GaloisField};
 use crate::domains::finite_field::{
     FiniteField, FiniteFieldCore, FiniteFieldElement, FiniteFieldWorkspace, PrimeIteratorU64,
-    SMOOTH_PRIME_BASE, SMOOTH_PRIMES, ToFiniteField, Zp64, Zp64DiscreteLogContext,
+    SMOOTH_PRIME_BASE, SMOOTH_PRIMES, ToFiniteField, Zp, Zp64, Zp64DiscreteLogContext,
 };
 use crate::domains::float::{FloatField, SingleFloat};
 use crate::domains::integer::{FromFiniteField, Integer, IntegerRing, SMALL_PRIMES, Z};
@@ -3269,28 +3269,53 @@ impl<E: PositiveExponent> MultivariatePolynomial<IntegerRing, E> {
         }
     }
 
-    /// Evaluate the polynomial at the given beta points and return the total number of expected terms,
-    /// and a list of term indices and evaluations.
+    /// Prepare the coefficient-free ratios and coefficient-weighted starting values for geometric
+    /// evaluation of `poly`.
     fn evaluate_terms<PE: PositiveExponent>(
         p: &Zp64,
         poly: &MultivariatePolynomial<Zp64, PE>,
-        betas: &[FiniteFieldElement<u64>],
-    ) -> (Vec<(PE, usize, usize)>, Vec<FiniteFieldElement<u64>>) {
+        term_bases: &[FiniteFieldElement<u64>],
+        shifted_bases: &[FiniteFieldElement<u64>],
+        term_powers: &[Vec<FiniteFieldElement<u64>>],
+        shifted_powers: &[Vec<FiniteFieldElement<u64>>],
+    ) -> (
+        Vec<(PE, usize, usize)>,
+        Vec<FiniteFieldElement<u64>>,
+        Vec<FiniteFieldElement<u64>>,
+    ) {
+        debug_assert_eq!(term_bases.len(), poly.nvars() - 1);
+        debug_assert_eq!(shifted_bases.len(), poly.nvars() - 1);
+        debug_assert_eq!(term_powers.len(), term_bases.len());
+        debug_assert_eq!(shifted_powers.len(), shifted_bases.len());
         let rows = poly.univariate_row_ranges(0);
-        let term_evals = poly
-            .exponents
-            .chunks(poly.nvars())
-            .map(|ee| {
-                let mut eval = p.one();
-                for (e, beta) in ee.iter().skip(1).zip(betas) {
-                    if *e > PE::zero() {
-                        p.mul_assign(&mut eval, &p.pow(beta, e.to_u32() as u64));
-                    }
+        let mut term_evals = Vec::with_capacity(poly.nterms());
+        let mut current_evals = Vec::with_capacity(poly.nterms());
+        for (coefficient, exponents) in poly
+            .coefficients
+            .iter()
+            .zip(poly.exponents.chunks(poly.nvars()))
+        {
+            let mut term_eval = p.one();
+            let mut current_eval = *coefficient;
+            for (variable, exponent) in exponents.iter().skip(1).enumerate() {
+                let exponent = exponent.to_u32() as usize;
+                if exponent > 0 {
+                    let term_power = term_powers[variable]
+                        .get(exponent)
+                        .copied()
+                        .unwrap_or_else(|| p.pow(&term_bases[variable], exponent as u64));
+                    let shifted_power = shifted_powers[variable]
+                        .get(exponent)
+                        .copied()
+                        .unwrap_or_else(|| p.pow(&shifted_bases[variable], exponent as u64));
+                    p.mul_assign(&mut term_eval, &term_power);
+                    p.mul_assign(&mut current_eval, &shifted_power);
                 }
-                eval
-            })
-            .collect();
-        (rows, term_evals)
+            }
+            term_evals.push(term_eval);
+            current_evals.push(current_eval);
+        }
+        (rows, term_evals, current_evals)
     }
 
     /// Evaluate the geometric image of the polynomial at the given beta points and return the result as a polynomial.
@@ -3382,6 +3407,32 @@ impl<E: PositiveExponent> MultivariatePolynomial<IntegerRing, E> {
         MultivariatePolynomial::from_parts(coefficients, exp, p.clone(), poly.variables().clone())
     }
 
+    /// Recover recurrence roots with 32-bit arithmetic whenever the Hu interpolation prime fits
+    /// in a `u32`, then convert the roots back to the surrounding 64-bit field representation.
+    fn hu_monagan_recurrence_roots(
+        p: &Zp64,
+        coefficients: &[FiniteFieldElement<u64>],
+    ) -> Option<Vec<FiniteFieldElement<u64>>> {
+        if let Ok(prime) = u32::try_from(p.get_prime()) {
+            let small_field = Zp::new(prime);
+            let small_coefficients = coefficients
+                .iter()
+                .map(|coefficient| small_field.to_element(p.from_element(coefficient) as u32))
+                .collect::<Vec<_>>();
+            let mut root_context = DenseFiniteFieldRootContext::new(&small_field);
+            return root_context
+                .find_distinct_nonzero_roots(&small_coefficients)
+                .map(|roots| {
+                    roots
+                        .iter()
+                        .map(|root| p.to_element(small_field.from_element(root) as u64))
+                        .collect()
+                });
+        }
+
+        DenseFiniteFieldRootContext::new(p).find_distinct_nonzero_roots(coefficients)
+    }
+
     fn hu_monagan_sparse_interpolate<PE: PositiveExponent>(
         p: &Zp64,
         images: &[MultivariatePolynomial<Zp64, PE>],
@@ -3399,8 +3450,6 @@ impl<E: PositiveExponent> MultivariatePolynomial<IntegerRing, E> {
         let mut res = images[0].zero();
         let mut image_exp = vec![PE::zero(); images[0].nvars()];
         let mut result_exp = vec![PE::zero(); images[0].nvars()];
-        let mut root_context = DenseFiniteFieldRootContext::new(p);
-
         for i in 0..=d_0.to_u32() {
             image_exp[0] = PE::from_u32(i);
             let row = images
@@ -3431,7 +3480,7 @@ impl<E: PositiveExponent> MultivariatePolynomial<IntegerRing, E> {
                 .map(|coefficient| p.neg(coefficient))
                 .collect::<Vec<_>>();
             bma_coefficients.push(p.one());
-            let Some(roots) = root_context.find_distinct_nonzero_roots(&bma_coefficients) else {
+            let Some(roots) = Self::hu_monagan_recurrence_roots(p, &bma_coefficients) else {
                 debug!("Failed to recover BMA roots at x^{}", i);
                 return None;
             };
@@ -3523,8 +3572,6 @@ impl<E: PositiveExponent> MultivariatePolynomial<IntegerRing, E> {
             MultivariatePolynomial::<Zp64, PE>::new(p, None, images[0].variables().clone());
         let mut image_exp = vec![0; images[0].nvars()];
         let mut result_exp = vec![PE::zero(); images[0].nvars()];
-        let mut root_context = DenseFiniteFieldRootContext::new(p);
-
         for (e0, e1) in rows {
             image_exp[0] = e0;
             image_exp[1] = e1;
@@ -3549,7 +3596,7 @@ impl<E: PositiveExponent> MultivariatePolynomial<IntegerRing, E> {
                 .map(|coefficient| p.neg(coefficient))
                 .collect::<Vec<_>>();
             bma_coefficients.push(p.one());
-            let Some(roots) = root_context.find_distinct_nonzero_roots(&bma_coefficients) else {
+            let Some(roots) = Self::hu_monagan_recurrence_roots(p, &bma_coefficients) else {
                 debug!(
                     "Failed to recover BMA roots at bivariate row x^{} y^{}",
                     e0, e1
@@ -3743,29 +3790,56 @@ impl<E: PositiveExponent> MultivariatePolynomial<IntegerRing, E> {
                     betas.push(p.pow(&alpha, *power));
                 }
 
-                let (a_rows, a_term_evals) = Self::evaluate_terms(&p, &a_p, &betas);
-                let (b_rows, b_term_evals) = Self::evaluate_terms(&p, &b_p, &betas);
-
                 let shift = p.from_element(&p.sample_small_integer(&mut rng, 0..=i64::MAX - 1));
-                let mut a_current_evals = a_term_evals
+                let shifted_betas = betas
                     .iter()
-                    .zip(&a_p.coefficients)
-                    .map(|(x, coefficient)| p.mul(coefficient, &p.pow(x, shift)))
+                    .map(|beta| p.pow(beta, shift))
                     .collect::<Vec<_>>();
-                let mut b_current_evals = b_term_evals
-                    .iter()
-                    .zip(&b_p.coefficients)
-                    .map(|(x, coefficient)| p.mul(coefficient, &p.pow(x, shift)))
-                    .collect::<Vec<_>>();
+                let mut term_powers = Vec::with_capacity(betas.len());
+                let mut shifted_powers = Vec::with_capacity(betas.len());
+                for ((beta, shifted_beta), radix) in betas.iter().zip(&shifted_betas).zip(&r[1..]) {
+                    let mut term_power = p.one();
+                    let mut shifted_power = p.one();
+                    let cache_len = (*radix as usize).min(POW_CACHE_SIZE);
+                    let mut variable_term_powers = Vec::with_capacity(cache_len);
+                    let mut variable_shifted_powers = Vec::with_capacity(cache_len);
+                    for _ in 0..cache_len {
+                        variable_term_powers.push(term_power);
+                        variable_shifted_powers.push(shifted_power);
+                        p.mul_assign(&mut term_power, beta);
+                        p.mul_assign(&mut shifted_power, shifted_beta);
+                    }
+                    term_powers.push(variable_term_powers);
+                    shifted_powers.push(variable_shifted_powers);
+                }
+
+                let (a_rows, a_term_evals, mut a_current_evals) = Self::evaluate_terms(
+                    &p,
+                    &a_p,
+                    &betas,
+                    &shifted_betas,
+                    &term_powers,
+                    &shifted_powers,
+                );
+                let (b_rows, b_term_evals, mut b_current_evals) = Self::evaluate_terms(
+                    &p,
+                    &b_p,
+                    &betas,
+                    &shifted_betas,
+                    &term_powers,
+                    &shifted_powers,
+                );
 
                 let mut gcd_images = Vec::new();
                 let mut cofactor_images = Vec::new();
                 let mut sample_points = Vec::new();
                 let mut next_num_samples = 4usize;
+                let mut sample_point = p.pow(&alpha, shift);
 
                 let selected_image = 'new_sample: loop {
                     for _ in 0..2 {
-                        let sample_point = p.pow(&alpha, shift + gcd_images.len() as u64);
+                        let current_sample_point = sample_point;
+                        p.mul_assign(&mut sample_point, &alpha);
 
                         let a_j = Self::eval_geometric_image(
                             &a_p,
@@ -3806,14 +3880,22 @@ impl<E: PositiveExponent> MultivariatePolynomial<IntegerRing, E> {
                         gcd_images.push(g_j * &lc_a_j);
                         cofactor_images.push(a_cofactor_j);
 
-                        sample_points.push(sample_point);
+                        sample_points.push(current_sample_point);
                     }
 
                     if gcd_images.len() < next_num_samples {
                         continue 'new_sample;
                     }
 
-                    next_num_samples *= 2;
+                    // Doubling is useful while the recurrence is small, but it can oversample
+                    // substantially after a failed 64-point reconstruction. Continue in
+                    // quarter-size increments so moderately sparse images do not pay for the
+                    // next full power of two.
+                    next_num_samples += if next_num_samples < 64 {
+                        next_num_samples
+                    } else {
+                        next_num_samples / 4
+                    };
 
                     if image_kind.is_none() || image_kind == Some(ImageKind::GcdMultiple) {
                         let gcd_image = Self::hu_monagan_sparse_interpolate(
@@ -5316,6 +5398,46 @@ mod tests {
             hu_monagan_prime_lower_bound(u64::MAX, 1, &Integer::from(1)),
             u64::MAX
         );
+    }
+
+    #[test]
+    fn hu_geometric_term_setup_falls_back_beyond_the_power_cache() {
+        let field = Zp64::new(1_088_391_169);
+        let integer_polynomial =
+            parse!("3*x+5*x*y^1001+7*x^2*y^17").to_polynomial::<_, u16>(&Z, None);
+        assert_eq!(integer_polynomial.degree(1), 1001);
+        let polynomial = integer_polynomial.map_coeff(
+            |coefficient| coefficient.to_finite_field(&field),
+            field.clone(),
+        );
+        let term_base = field.to_element(7);
+        let shifted_base = field.pow(&term_base, 19);
+
+        // A one-element table contains only x^0 and forces every positive exponent through the
+        // same direct-power fallback used beyond POW_CACHE_SIZE.
+        let (_, ratios, current) = MultivariatePolynomial::<IntegerRing, u16>::evaluate_terms(
+            &field,
+            &polynomial,
+            &[term_base],
+            &[shifted_base],
+            &[vec![field.one()]],
+            &[vec![field.one()]],
+        );
+
+        for (((exponents, coefficient), ratio), current) in polynomial
+            .exponents
+            .chunks(polynomial.nvars())
+            .zip(&polynomial.coefficients)
+            .zip(&ratios)
+            .zip(&current)
+        {
+            let exponent = exponents[1].to_u32() as u64;
+            assert_eq!(*ratio, field.pow(&term_base, exponent));
+            assert_eq!(
+                *current,
+                field.mul(coefficient, &field.pow(&shifted_base, exponent))
+            );
+        }
     }
 
     #[test]
