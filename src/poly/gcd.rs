@@ -1060,16 +1060,28 @@ impl<F: Field, E: PositiveExponent> MultivariatePolynomial<F, E> {
 
         let mut failure_count = 0;
 
-        // store a table for variables raised to a certain power
-        let mut cache = (0..a.nvars())
-            .map(|i| {
-                vec![
-                    a.ring().zero();
-                    min(
-                        max(a.degree(i), b.degree(i)).to_u32() as usize + 1,
-                        POW_CACHE_SIZE
-                    )
-                ]
+        // Store powers only for the variables evaluated at this recursion level. Scan both
+        // exponent arrays once to find their required cache sizes.
+        let mut evaluated_degrees = vec![E::zero(); a.nvars()];
+        for polynomial in [a, b] {
+            for exponents in polynomial.exponents_iter() {
+                for &variable in vars {
+                    evaluated_degrees[variable] =
+                        evaluated_degrees[variable].max(exponents[variable]);
+                }
+            }
+        }
+        let mut cache = evaluated_degrees
+            .into_iter()
+            .map(|degree| {
+                if degree == E::zero() {
+                    Vec::new()
+                } else {
+                    vec![
+                        a.ring().zero();
+                        (degree.to_u32() as usize + 1).min(POW_CACHE_SIZE)
+                    ]
+                }
             })
             .collect::<Vec<_>>();
 
@@ -1143,8 +1155,8 @@ impl<F: Field, E: PositiveExponent> MultivariatePolynomial<F, E> {
             let a_rows = a.univariate_row_ranges(main_var);
             let b_rows = b.univariate_row_ranges(main_var);
 
-            let mut a_poly = a.zero_with_capacity(a.degree(main_var).to_u32() as usize + 1);
-            let mut b_poly = b.zero_with_capacity(b.degree(main_var).to_u32() as usize + 1);
+            let mut a_poly = a.zero_with_capacity(a_ldegree.to_u32() as usize + 1);
+            let mut b_poly = b.zero_with_capacity(b_ldegree.to_u32() as usize + 1);
 
             for sample_index in 0..samples_needed {
                 // sample at r^i
