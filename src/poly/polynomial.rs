@@ -2110,6 +2110,39 @@ impl<F: Ring, E: Exponent, O: MonomialOrder> MultivariatePolynomial<F, E, O> {
 }
 
 impl<F: Ring, E: PositiveExponent> MultivariatePolynomial<F, E, LexOrder> {
+    /// Evaluate a one-variable polynomial with Horner's method and return it as a constant.
+    fn replace_univariate_horner(&self, value: &F::Element) -> Self {
+        debug_assert_eq!(self.nvars(), 1);
+
+        let Some(last_term) = self.nterms().checked_sub(1) else {
+            return self.zero();
+        };
+
+        let ring = self.ring();
+        let mut result = self.coefficients[last_term].clone();
+        let mut previous_exponent = self.exponents[last_term];
+        for term in (0..last_term).rev() {
+            let exponent = self.exponents[term];
+            let gap = (previous_exponent - exponent).to_i32() as u64;
+            if gap == 1 {
+                ring.mul_assign(&mut result, value);
+            } else if gap > 1 {
+                ring.mul_assign(&mut result, &ring.pow(value, gap));
+            }
+            ring.add_assign(&mut result, &self.coefficients[term]);
+            previous_exponent = exponent;
+        }
+
+        let trailing_exponent = previous_exponent.to_i32() as u64;
+        if trailing_exponent == 1 {
+            ring.mul_assign(&mut result, value);
+        } else if trailing_exponent > 1 {
+            ring.mul_assign(&mut result, &ring.pow(value, trailing_exponent));
+        }
+
+        self.constant(result)
+    }
+
     /// Remove all non-occurring variables from the polynomial.
     pub fn condense(&mut self) {
         if self.nvars() == 0 {
@@ -2183,6 +2216,11 @@ impl<F: Ring, E: PositiveExponent> MultivariatePolynomial<F, E, LexOrder> {
     /// Replace the last active variable `n` in the polynomial by the ring element `v`.
     /// Variables after `n` must be absent from the polynomial.
     pub fn replace_last(&self, n: usize, v: &F::Element) -> MultivariatePolynomial<F, E, LexOrder> {
+        if self.nvars() == 1 {
+            debug_assert_eq!(n, 0);
+            return self.replace_univariate_horner(v);
+        }
+
         const MAX_EXP_BUF: usize = 100000;
         debug_assert!((n + 1..self.nvars()).all(|variable| self.degree(variable).is_zero()));
         let mut res = self.zero_with_capacity(self.nterms());
@@ -6145,6 +6183,22 @@ mod test {
         IntegerPolynomialCrtContext, MultivariatePolynomial, PolynomialRing,
         PolynomialSamplingPolicy, mixed_radix_dense_work_is_bounded,
     };
+
+    #[test]
+    fn replace_univariate_horner_matches_dense_evaluation() {
+        let polynomial = parse!("2-3*x+5*x^4-7*x^9").to_polynomial::<_, u16>(&Z, None);
+        let univariate = polynomial.to_univariate_from_univariate(0);
+
+        for value in [-3, 0, 1, 5].map(Integer::from) {
+            assert_eq!(
+                polynomial.replace(0, &value),
+                polynomial.constant(univariate.evaluate(&value))
+            );
+        }
+
+        let cancellation = parse!("x-1").to_polynomial::<_, u16>(&Z, None);
+        assert!(cancellation.replace(0, &Integer::from(1)).is_zero());
+    }
 
     #[test]
     fn integer_polynomial_crt_context_matches_generic_crt() {
