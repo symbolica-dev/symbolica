@@ -58,6 +58,30 @@ const ZIPPEL_SHAPE_INDEX_MAX_SPARSITY_RATIO: usize = 32;
 /// Maximum estimated coefficient size produced during recursive integer-heuristic substitution.
 const HEURISTIC_GCD_MAX_EVALUATED_COEFFICIENT_BITS: u64 = 32 * 1024;
 
+/// Estimated scalar images above this size use word-prime univariate GCDs. The estimate combines
+/// coefficient height and degree, which are the two main costs of the Horner/GMP path.
+const UNIVARIATE_MODULAR_GCD_MIN_EVALUATION_BITS: u64 = 8 * 1024;
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum UnivariateIntegerGcdAlgorithm {
+    Scalar,
+    Modular,
+}
+
+/// Chooses between one large scalar image and a sequence of word-prime images.
+fn select_univariate_integer_gcd(
+    scalar_heuristic_allowed: bool,
+    estimated_evaluation_bits: u64,
+) -> UnivariateIntegerGcdAlgorithm {
+    if !scalar_heuristic_allowed
+        || estimated_evaluation_bits >= UNIVARIATE_MODULAR_GCD_MIN_EVALUATION_BITS
+    {
+        UnivariateIntegerGcdAlgorithm::Modular
+    } else {
+        UnivariateIntegerGcdAlgorithm::Scalar
+    }
+}
+
 /// The upper bound of the range to be sampled during the computation of multiple gcds
 pub(crate) const MAX_RNG_PREFACTOR: u32 = 50000;
 
@@ -2845,6 +2869,176 @@ fn estimated_heuristic_gcd_evaluation_bits<E: PositiveExponent>(
     a_bits.max(b_bits)
 }
 
+/// Reconstructs a primitive univariate integer GCD from normalized 63-bit modular images.
+struct UnivariateModularGcdContext<'a, E: PositiveExponent> {
+    left: &'a MultivariatePolynomial<IntegerRing, E>,
+    right: &'a MultivariatePolynomial<IntegerRing, E>,
+    primitive_left: Cow<'a, MultivariatePolynomial<IntegerRing, E>>,
+    primitive_right: Cow<'a, MultivariatePolynomial<IntegerRing, E>>,
+    variable: usize,
+    content_gcd: Integer,
+    gamma: Integer,
+    reconstruction_start_bits: u64,
+}
+
+impl<'a, E: PositiveExponent> UnivariateModularGcdContext<'a, E> {
+    /// Removes the input contents and determines when coefficient reconstruction should start.
+    fn new(
+        left: &'a MultivariatePolynomial<IntegerRing, E>,
+        right: &'a MultivariatePolynomial<IntegerRing, E>,
+        variable: usize,
+    ) -> Self {
+        let left_content = left.content();
+        let right_content = right.content();
+        let content_gcd = Z.gcd(&left_content, &right_content);
+        let primitive_left = if Z.is_one(&left_content) {
+            Cow::Borrowed(left)
+        } else {
+            Cow::Owned(left.clone().div_coeff(&left_content))
+        };
+        let primitive_right = if Z.is_one(&right_content) {
+            Cow::Borrowed(right)
+        } else {
+            Cow::Owned(right.clone().div_coeff(&right_content))
+        };
+
+        let gamma = Z.gcd(&primitive_left.lcoeff(), &primitive_right.lcoeff());
+        let reconstruction_start_bits = gamma.significant_bits().saturating_add(2);
+
+        Self {
+            left,
+            right,
+            primitive_left,
+            primitive_right,
+            variable,
+            content_gcd,
+            gamma,
+            reconstruction_start_bits,
+        }
+    }
+
+    /// Removes the projective integer scale and restores the common input content.
+    fn reconstructed_candidate(
+        &self,
+        reconstruction: &MultivariatePolynomial<IntegerRing, E>,
+        degree: E,
+    ) -> Option<MultivariatePolynomial<IntegerRing, E>> {
+        if reconstruction.is_zero() || reconstruction.degree(self.variable) != degree {
+            return None;
+        }
+
+        let content = reconstruction.content();
+        if content.is_zero() {
+            return None;
+        }
+
+        let mut candidate = reconstruction.clone().div_coeff(&content);
+        if candidate.lcoeff().is_negative() {
+            candidate = -candidate;
+        }
+        Some(candidate.mul_coeff(self.content_gcd.clone()))
+    }
+
+    /// Merges modular GCD images until the reconstructed polynomial divides both inputs.
+    fn run(
+        self,
+    ) -> Option<(
+        MultivariatePolynomial<IntegerRing, E>,
+        MultivariatePolynomial<IntegerRing, E>,
+        MultivariatePolynomial<IntegerRing, E>,
+    )> {
+        let mut primes = ModularGcdPrimeIterator::for_workspace::<u64>();
+        let mut gcd_degree = None;
+        let mut reconstruction = self.left.zero();
+        let mut modulus = Integer::one();
+        let mut next_reconstruction_bits = self.reconstruction_start_bits;
+        let mut failed_probe_image_gap = 1u64;
+
+        loop {
+            let prime = primes.next()?;
+            let field = Zp64::new(prime);
+            let gamma_image = self.gamma.to_finite_field(&field);
+            if field.is_zero(&gamma_image) {
+                continue;
+            }
+
+            let left_image = self.primitive_left.map_coeff(
+                |coefficient| coefficient.to_finite_field(&field),
+                field.clone(),
+            );
+            let right_image = self.primitive_right.map_coeff(
+                |coefficient| coefficient.to_finite_field(&field),
+                field.clone(),
+            );
+            if left_image.degree(self.variable) != self.primitive_left.degree(self.variable)
+                || right_image.degree(self.variable) != self.primitive_right.degree(self.variable)
+            {
+                continue;
+            }
+
+            let mut image = left_image.univariate_gcd(&right_image);
+            let image_degree = image.degree(self.variable);
+            if image_degree.is_zero() {
+                let candidate = self.left.constant(self.content_gcd.clone());
+                let left_cofactor = self.left.clone().div_coeff(&self.content_gcd);
+                let right_cofactor = self.right.clone().div_coeff(&self.content_gcd);
+                return Some((candidate, left_cofactor, right_cofactor));
+            }
+
+            let image_scale = field.div(&gamma_image, &image.lcoeff());
+            image = image.mul_coeff(image_scale);
+            match gcd_degree {
+                Some(degree) if image_degree > degree => continue,
+                Some(degree) if image_degree == degree => {
+                    IntegerPolynomialCrtContext::new(&modulus, &field)
+                        .expect("univariate modular GCD prime repeated during CRT")
+                        .merge_assign(&mut reconstruction, &image);
+                    modulus *= prime;
+                }
+                _ => {
+                    debug!(
+                        "Starting univariate modular GCD reconstruction at degree {} modulo {}",
+                        image_degree, prime
+                    );
+                    gcd_degree = Some(image_degree);
+                    reconstruction =
+                        image.map_coeff(|coefficient| field.to_symmetric_integer(coefficient), Z);
+                    modulus = Integer::from(prime);
+                    next_reconstruction_bits = self.reconstruction_start_bits;
+                    failed_probe_image_gap = 1;
+                }
+            }
+
+            if modulus.significant_bits() < next_reconstruction_bits {
+                continue;
+            }
+
+            let Some(candidate) =
+                self.reconstructed_candidate(&reconstruction, gcd_degree.unwrap())
+            else {
+                continue;
+            };
+            if let Some(left_cofactor) = self.left.try_div(&candidate)
+                && let Some(right_cofactor) = self.right.try_div(&candidate)
+            {
+                // Preserving the input degrees and the nonzero image of `gamma` ensures that a
+                // modular GCD degree cannot be below the characteristic-zero GCD degree. Exact
+                // divisibility at that degree therefore certifies the complete GCD.
+                return Some((candidate, left_cofactor, right_cofactor));
+            }
+
+            // `gamma` provides a cheap first probe point, not a coefficient bound. Exact
+            // division is the correctness certificate; geometric backoff only limits the work
+            // spent probing an incomplete reconstruction.
+            let image_bits = Integer::from(prime).significant_bits();
+            next_reconstruction_bits = modulus
+                .significant_bits()
+                .saturating_add(image_bits.saturating_mul(failed_probe_image_gap));
+            failed_probe_image_gap = failed_probe_image_gap.saturating_mul(2);
+        }
+    }
+}
+
 impl<E: PositiveExponent> MultivariatePolynomial<IntegerRing, E> {
     /// Reconstruct an integer polynomial from the symmetric digits of `value` in base `xi`.
     fn interpolate_univariate_integer(
@@ -4790,9 +4984,6 @@ impl<E: PositiveExponent> PolynomialGCD<E> for IntegerRing {
         let heuristic_allowed = max_deg_a < 20
             || max_deg_b < 20
             || num_shared_vars < 3 && max_deg_a.min(max_deg_b) < 150;
-        if !heuristic_allowed {
-            return None;
-        }
 
         let mut active_variables = contains_a
             .iter()
@@ -4804,7 +4995,23 @@ impl<E: PositiveExponent> PolynomialGCD<E> for IntegerRing {
             && contains_a[variable]
             && contains_b[variable]
         {
-            return a.heuristic_gcd_univariate(b, variable).ok();
+            let evaluation_bits = estimated_heuristic_gcd_evaluation_bits(a, b);
+            match select_univariate_integer_gcd(heuristic_allowed, evaluation_bits) {
+                UnivariateIntegerGcdAlgorithm::Scalar => {
+                    return a.heuristic_gcd_univariate(b, variable).ok();
+                }
+                UnivariateIntegerGcdAlgorithm::Modular => {
+                    debug!(
+                        "Using modular univariate integer GCD for an estimated {}-bit scalar image",
+                        evaluation_bits
+                    );
+                    return UnivariateModularGcdContext::new(a, b, variable).run();
+                }
+            }
+        }
+
+        if !heuristic_allowed {
+            return None;
         }
 
         a.heuristic_gcd(b).ok()
@@ -5984,6 +6191,115 @@ mod tests {
         assert_eq!(scaled_gcd, common_factor.mul_coeff(Integer::from(2)));
         assert_eq!(&scaled_gcd * &scaled_left_cofactor, scaled_left);
         assert_eq!(&scaled_gcd * &scaled_right_cofactor, scaled_right);
+    }
+
+    #[test]
+    fn univariate_integer_gcd_selector_separates_scalar_and_modular_images() {
+        let [left_cofactor_32, right_cofactor_32, common_factor_32] = [
+            parse!("(1+3*x)^32-1").to_polynomial::<_, u16>(&Z, None),
+            parse!("(1-3*x)^32+1").to_polynomial::<_, u16>(&Z, None),
+            parse!("(1-3*x)^32+3").to_polynomial::<_, u16>(&Z, None),
+        ];
+        let left_32 = &left_cofactor_32 * &common_factor_32;
+        let right_32 = &right_cofactor_32 * &common_factor_32;
+        assert_eq!(
+            select_univariate_integer_gcd(
+                true,
+                estimated_heuristic_gcd_evaluation_bits(&left_32, &right_32),
+            ),
+            UnivariateIntegerGcdAlgorithm::Scalar,
+        );
+
+        let [left_cofactor_48, right_cofactor_48, common_factor_48] = [
+            parse!("(1+3*x)^48-1").to_polynomial::<_, u16>(&Z, None),
+            parse!("(1-3*x)^48+1").to_polynomial::<_, u16>(&Z, None),
+            parse!("(1-3*x)^48+3").to_polynomial::<_, u16>(&Z, None),
+        ];
+        let left_48 = &left_cofactor_48 * &common_factor_48;
+        let right_48 = &right_cofactor_48 * &common_factor_48;
+        assert_eq!(
+            select_univariate_integer_gcd(
+                true,
+                estimated_heuristic_gcd_evaluation_bits(&left_48, &right_48),
+            ),
+            UnivariateIntegerGcdAlgorithm::Modular,
+        );
+        let (actual_48, left_result_48, right_result_48) =
+            <IntegerRing as PolynomialGCD<u16>>::heuristic_gcd(&left_48, &right_48).unwrap();
+        assert_eq!(actual_48, common_factor_48);
+        assert_eq!(&actual_48 * &left_result_48, left_48);
+        assert_eq!(&actual_48 * &right_result_48, right_48);
+
+        // Generated degree-80 factors produce degree-160 inputs, which the scalar heuristic's
+        // existing degree gate rejects before considering the evaluation-size estimate.
+        let max_deg_left_80 = 2usize * 80 + 1;
+        let max_deg_right_80 = max_deg_left_80;
+        let num_shared_variables_80 = 1usize;
+        let scalar_heuristic_allowed_80 = max_deg_left_80 < 20
+            || max_deg_right_80 < 20
+            || num_shared_variables_80 < 3 && max_deg_left_80.min(max_deg_right_80) < 150;
+        assert_eq!(
+            select_univariate_integer_gcd(scalar_heuristic_allowed_80, 0),
+            UnivariateIntegerGcdAlgorithm::Modular,
+        );
+    }
+
+    #[test]
+    fn modular_univariate_integer_gcd_resets_an_unlucky_first_degree() {
+        let first_prime = ModularGcdPrimeIterator::for_workspace::<u64>()
+            .next()
+            .unwrap();
+        let common_factor = parse!("x+1").to_polynomial::<_, u16>(&Z, None);
+        let left_cofactor =
+            parse!("x+2").to_polynomial::<_, u16>(&Z, common_factor.variables().clone());
+        let right_cofactor = left_cofactor
+            .clone()
+            .add_constant(Integer::from(first_prime));
+        let left = &common_factor * &left_cofactor;
+        let right = &common_factor * &right_cofactor;
+
+        let (actual, left_result, right_result) =
+            UnivariateModularGcdContext::new(&left, &right, 0)
+                .run()
+                .unwrap();
+        assert_eq!(actual, common_factor);
+        assert_eq!(&actual * &left_result, left);
+        assert_eq!(&actual * &right_result, right);
+
+        let coprime_right = left_cofactor.clone().add_constant(Integer::from(1));
+        let (unit, unit_left_result, unit_right_result) =
+            UnivariateModularGcdContext::new(&left_cofactor, &coprime_right, 0)
+                .run()
+                .unwrap();
+        assert_eq!(unit, left_cofactor.one());
+        assert_eq!(&unit * &unit_left_result, left_cofactor);
+        assert_eq!(&unit * &unit_right_result, coprime_right);
+    }
+
+    #[test]
+    fn modular_univariate_integer_gcd_restores_content_with_an_inactive_variable() {
+        let variable_template = parse!("x").to_polynomial::<IntegerRing, u16>(&Z, None);
+        let variables = std::sync::Arc::new(vec![
+            PolyVariable::Temporary(0),
+            variable_template.variables()[0].clone(),
+        ]);
+        let [left_cofactor, right_cofactor, common_factor] = [
+            parse!("(1+3*x)^20-1").to_polynomial::<_, u16>(&Z, Some(variables.clone())),
+            parse!("(1-3*x)^20+1").to_polynomial::<_, u16>(&Z, Some(variables.clone())),
+            parse!("(1-3*x)^20+3").to_polynomial::<_, u16>(&Z, Some(variables)),
+        ];
+        let left = (&left_cofactor * &common_factor).mul_coeff(Integer::from(6));
+        let right = (&right_cofactor * &common_factor).mul_coeff(Integer::from(10));
+        assert_eq!(left.degree(0), 0);
+        assert_ne!(left.degree(1), 0);
+
+        let (actual, left_result, right_result) =
+            UnivariateModularGcdContext::new(&left, &right, 1)
+                .run()
+                .unwrap();
+        assert_eq!(actual, common_factor.mul_coeff(Integer::from(2)));
+        assert_eq!(&actual * &left_result, left);
+        assert_eq!(&actual * &right_result, right);
     }
 
     #[test]
