@@ -19,6 +19,7 @@ use crate::{
         integer::{Integer, IntegerRing, Z, gcd_unsigned},
         rational::{Q, RationalField},
     },
+    kernels::{DensePolynomialMulRequest, GeometricSequenceStepRequest},
     tensors::matrix::Vector,
 };
 
@@ -37,6 +38,15 @@ const INTEGER_FACTOR_BIVARIATE_SPARSE_BOX_DENSITY_THRESHOLD: f64 = 5.0;
 const INTEGER_FACTOR_UNIVARIATE_AUTO_RETRIES: usize = 3;
 // Number of small deterministic coordinate blocks tried before random sampling.
 const WANG_PRIME_SAMPLE_ATTEMPTS: usize = 3;
+// Maximum number of retained coefficient cells across the target and factor images
+// used by one evaluated Hensel stage.
+const MAX_EVALUATED_HENSEL_IMAGE_CELLS: usize = 1 << 22;
+// Maximum number of terms grouped into geometric sequences for one polynomial image.
+const MAX_EVALUATED_HENSEL_GROUPED_TERMS: usize = 1 << 20;
+// Maximum number of term advances across all geometric samples in one image rebuild.
+const MAX_EVALUATED_HENSEL_TERM_STEPS: usize = 1 << 24;
+// Maximum number of dense coefficient rows retained for either lifted factor.
+const MAX_EVALUATED_HENSEL_Y_ROWS: usize = 1 << 16;
 type ModularIntegerFactorization<E> = (Zp, Vec<MultivariatePolynomial<Zp, E, LexOrder>>);
 
 #[cfg(test)]
@@ -70,6 +80,73 @@ enum SparseDiophantineFallback {
     RetrySample,
 }
 
+/// Dense coefficient grid for a polynomial in two retained variables.
+/// Coefficients are stored by increasing `y` degree, then increasing `x` degree.
+#[derive(Clone, Debug, Eq, PartialEq)]
+struct DenseBivariateImage<T> {
+    x_len: usize,
+    y_len: usize,
+    coefficients: Vec<T>,
+}
+
+/// Nonzero coefficients of a univariate polynomial and their increasing degrees.
+struct DenseIndexedUnivariate<T> {
+    coefficients: Vec<T>,
+    indices: Vec<u32>,
+}
+
+/// Coefficients below the omitted leading one of a monic univariate polynomial.
+struct DenseMonicModulus<T> {
+    lower_coefficients: Vec<T>,
+}
+
+/// Data reused to solve the two modular correction equations at one image point.
+struct DenseTwoFactorCorrectionContext<T> {
+    multipliers: [DenseIndexedUnivariate<T>; 2],
+    moduli: [DenseMonicModulus<T>; 2],
+}
+
+impl<T> DenseBivariateImage<T> {
+    #[inline]
+    fn index(&self, x_degree: usize, y_degree: usize) -> usize {
+        debug_assert!(x_degree < self.x_len);
+        debug_assert!(y_degree < self.y_len);
+        y_degree * self.x_len + x_degree
+    }
+
+    #[inline]
+    fn coefficient(&self, x_degree: usize, y_degree: usize) -> &T {
+        &self.coefficients[self.index(x_degree, y_degree)]
+    }
+}
+
+/// Bézout coefficients for a pair of coprime univariate factor images.
+struct TwoFactorImageBezout<P> {
+    s: P,
+    t: P,
+}
+
+/// Stores the geometric interpolation base and univariate Bézout coefficients
+/// reused by the sparse Hensel corrections in one lifting stage.
+struct SparseDiophantineContext<P, C> {
+    two_factor_bezout: HashMap<(P, P), Option<TwoFactorImageBezout<P>>>,
+    two_factor_base_points: Option<Vec<(usize, C)>>,
+}
+
+impl<P, C> SparseDiophantineContext<P, C> {
+    fn new() -> Self {
+        Self {
+            two_factor_bezout: HashMap::default(),
+            two_factor_base_points: None,
+        }
+    }
+
+    fn clear_two_factor_images(&mut self) {
+        self.two_factor_bezout.clear();
+        self.two_factor_base_points = None;
+    }
+}
+
 /// Controls where a multivariate Hensel lift starts and how it handles a
 /// sparse correction that cannot be reconstructed exactly.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -89,7 +166,8 @@ impl MultivariateHenselContext {
     }
 
     /// Return an error for a failed higher-dimensional sparse correction so
-    /// that the caller can retry with a different evaluation sample.
+    /// that the caller can retry with a different evaluation sample. Evaluated
+    /// stages may then certify the completed unshifted lift once at the end.
     const fn retry_sample_on_sparse_failure(mut self) -> Self {
         self.sparse_diophantine_fallback = SparseDiophantineFallback::RetrySample;
         self
@@ -2179,13 +2257,14 @@ impl<F: Field + SampleableRing<SamplingPolicy = RangeInclusive<i64>>, E: Positiv
         error: &Self,
         skeletons: &[Self],
         order: &[usize],
+        context: &mut SparseDiophantineContext<Self, F::Element>,
     ) -> Option<Vec<Self>> {
         if prods.len() != skeletons.len() {
             return None;
         }
 
         if let Some(deltas) = Self::sparse_multivariate_diophantine_two_factor_by_sampling(
-            factors, prods, error, skeletons, order,
+            factors, prods, error, skeletons, order, context,
         ) {
             return Some(deltas);
         }
@@ -2228,12 +2307,583 @@ impl<F: Field + SampleableRing<SamplingPolicy = RangeInclusive<i64>>, E: Positiv
         }
     }
 
+    /// Evaluate all sampled variables along a geometric sequence while retaining
+    /// `x` and `y` as a dense bivariate coefficient grid. The first image uses
+    /// the base points themselves, and each following image raises them to the
+    /// next positive integer power.
+    fn evaluate_geometric_bivariate_images(
+        &self,
+        x: usize,
+        y: usize,
+        base_points: &[(usize, F::Element)],
+        sample_count: usize,
+        cache: &mut [Vec<F::Element>],
+    ) -> Vec<DenseBivariateImage<F::Element>> {
+        debug_assert_ne!(x, y);
+        debug_assert!(
+            base_points
+                .iter()
+                .all(|(variable, _)| *variable != x && *variable != y)
+        );
+
+        if sample_count == 0 {
+            return Vec::new();
+        }
+
+        let x_len = self.degree(x).to_u32() as usize + 1;
+        let y_len = self.degree(y).to_u32() as usize + 1;
+        let image_len = x_len
+            .checked_mul(y_len)
+            .expect("dense bivariate image is too large");
+
+        let mut offsets = vec![0usize; image_len + 1];
+        for term in self {
+            let x_degree = term.exponents[x].to_u32() as usize;
+            let y_degree = term.exponents[y].to_u32() as usize;
+            offsets[y_degree * x_len + x_degree + 1] += 1;
+        }
+        for index in 1..offsets.len() {
+            offsets[index] += offsets[index - 1];
+        }
+
+        // Group terms by output cell so that each sample sums and advances all
+        // geometric sequences in a cell with one coefficient-domain operation.
+        let mut positions = offsets[..image_len].to_vec();
+        let mut grouped = std::iter::repeat_with(|| None)
+            .take(self.nterms())
+            .collect::<Vec<Option<(F::Element, F::Element)>>>();
+        let ratios = self.evaluate_exponents(base_points, cache);
+        for (term, ratio) in self.into_iter().zip(ratios) {
+            let x_degree = term.exponents[x].to_u32() as usize;
+            let y_degree = term.exponents[y].to_u32() as usize;
+            let cell = y_degree * x_len + x_degree;
+            let position = positions[cell];
+            positions[cell] += 1;
+            let current = self.ring().mul(term.coefficient, &ratio);
+            grouped[position] = Some((current, ratio));
+        }
+        let mut current = Vec::with_capacity(grouped.len());
+        let mut ratios = Vec::with_capacity(grouped.len());
+        for entry in grouped {
+            let (value, ratio) = entry.expect("every image term must belong to one dense cell");
+            current.push(value);
+            ratios.push(ratio);
+        }
+
+        let geometric_sequence_kernels = self.ring().kernels().geometric_sequences();
+        let mut images = Vec::with_capacity(sample_count);
+        for sample_index in 0..sample_count {
+            let mut coefficients = vec![self.ring().zero(); image_len];
+            for (cell, range) in offsets.windows(2).enumerate() {
+                let [start, end] = [range[0], range[1]];
+                if start == end {
+                    continue;
+                }
+                let current_cell = &mut current[start..end];
+                let ratio_cell = &ratios[start..end];
+                coefficients[cell] = (sample_index + 1 < sample_count)
+                    .then(|| geometric_sequence_kernels)
+                    .flatten()
+                    .and_then(|kernels| {
+                        kernels.try_sum_and_advance_geometric_sequences(
+                            GeometricSequenceStepRequest {
+                                current: &mut *current_cell,
+                                ratios: ratio_cell,
+                            },
+                        )
+                    })
+                    .unwrap_or_else(|| {
+                        let mut coefficient = self.ring().zero();
+                        for (current, ratio) in current_cell.iter_mut().zip(ratio_cell) {
+                            self.ring().add_assign(&mut coefficient, &*current);
+                            if sample_index + 1 < sample_count {
+                                self.ring().mul_assign(current, ratio);
+                            }
+                        }
+                        coefficient
+                    });
+            }
+            images.push(DenseBivariateImage {
+                x_len,
+                y_len,
+                coefficients,
+            });
+        }
+
+        images
+    }
+
+    /// Convert one dense `x` row of a bivariate image to a polynomial that
+    /// contains only the retained variable `x`.
+    fn dense_bivariate_x_row_to_univariate(
+        &self,
+        image: &DenseBivariateImage<F::Element>,
+        x: usize,
+        y_degree: usize,
+    ) -> Self {
+        let mut row = self.zero_with_capacity(image.x_len);
+        if y_degree >= image.y_len {
+            return row;
+        }
+
+        let mut exponent = vec![E::zero(); self.nvars()];
+        for x_degree in 0..image.x_len {
+            let coefficient = image.coefficient(x_degree, y_degree);
+            if !self.ring().is_zero(coefficient) {
+                exponent[x] = E::from_u32(x_degree as u32);
+                row.append_monomial(coefficient.clone(), &exponent);
+                exponent[x] = E::zero();
+            }
+        }
+        row
+    }
+
+    /// Assemble a polynomial from coefficients in increasing powers of `y`.
+    fn from_dense_y_coefficients(&self, coefficients: &[Self], y: usize) -> Self {
+        let capacity = coefficients.iter().map(Self::nterms).sum();
+        let mut polynomial = self.zero_with_capacity(capacity);
+        for (y_degree, coefficient) in coefficients.iter().enumerate() {
+            for term in coefficient {
+                let mut exponent = term.exponents.to_vec();
+                debug_assert_eq!(exponent[y], E::zero());
+                exponent[y] = E::from_u32(y_degree as u32);
+                polynomial.append_monomial(term.coefficient.clone(), &exponent);
+            }
+        }
+        polynomial
+    }
+
+    /// Compute one coefficient row of `target - left * right` in the retained
+    /// variable `y`, with the row represented densely in `x`.
+    fn dense_bivariate_product_error_row(
+        &self,
+        target: &DenseBivariateImage<F::Element>,
+        left: &DenseBivariateImage<F::Element>,
+        right: &DenseBivariateImage<F::Element>,
+        y_degree: usize,
+    ) -> Vec<F::Element> {
+        let product_x_len = left
+            .x_len
+            .checked_add(right.x_len)
+            .and_then(|length| length.checked_sub(1))
+            .expect("dense bivariate product image is too large");
+        let x_len = target.x_len.max(product_x_len);
+        let mut error = vec![self.ring().zero(); x_len];
+
+        if y_degree < target.y_len {
+            for (x_degree, coefficient) in error.iter_mut().enumerate().take(target.x_len) {
+                *coefficient = target.coefficient(x_degree, y_degree).clone();
+            }
+        }
+
+        for left_y_degree in 0..=y_degree.min(left.y_len.saturating_sub(1)) {
+            let right_y_degree = y_degree - left_y_degree;
+            if right_y_degree >= right.y_len {
+                continue;
+            }
+
+            for left_x_degree in 0..left.x_len {
+                let left_coefficient = left.coefficient(left_x_degree, left_y_degree);
+                if self.ring().is_zero(left_coefficient) {
+                    continue;
+                }
+
+                for right_x_degree in 0..right.x_len {
+                    let right_coefficient = right.coefficient(right_x_degree, right_y_degree);
+                    if !self.ring().is_zero(right_coefficient) {
+                        let product = self.ring().mul(left_coefficient, right_coefficient);
+                        self.ring()
+                            .sub_assign(&mut error[left_x_degree + right_x_degree], product);
+                    }
+                }
+            }
+        }
+
+        error
+    }
+
+    /// Pack the nonzero coefficients of a dense univariate polynomial for the
+    /// coefficient-domain multiplication kernels.
+    fn dense_indexed_univariate_from_coefficients(
+        ring: &F,
+        coefficients: &[F::Element],
+    ) -> Option<DenseIndexedUnivariate<F::Element>> {
+        let mut packed_coefficients = Vec::new();
+        let mut indices = Vec::new();
+        for (degree, coefficient) in coefficients.iter().enumerate() {
+            if !ring.is_zero(coefficient) {
+                packed_coefficients.push(coefficient.clone());
+                indices.push(u32::try_from(degree).ok()?);
+            }
+        }
+        Some(DenseIndexedUnivariate {
+            coefficients: packed_coefficients,
+            indices,
+        })
+    }
+
+    /// Convert a polynomial containing only `x` to the packed univariate form
+    /// used by the dense correction solver.
+    fn dense_indexed_univariate(
+        &self,
+        polynomial: &Self,
+        x: usize,
+    ) -> Option<DenseIndexedUnivariate<F::Element>> {
+        if x >= polynomial.nvars() {
+            return None;
+        }
+
+        let mut coefficients = vec![self.ring().zero(); polynomial.degree(x).to_u32() as usize + 1];
+        for term in polynomial {
+            if term
+                .exponents
+                .iter()
+                .enumerate()
+                .any(|(variable, exponent)| variable != x && *exponent != E::zero())
+            {
+                return None;
+            }
+            let degree = term.exponents[x].to_u32() as usize;
+            self.ring()
+                .add_assign(&mut coefficients[degree], term.coefficient);
+        }
+        Self::dense_indexed_univariate_from_coefficients(&self.ring(), &coefficients)
+    }
+
+    /// Normalize the constant `y` row of an image to a monic polynomial in
+    /// `x`, omitting its leading coefficient because it is one.
+    fn dense_monic_modulus(
+        &self,
+        image: &DenseBivariateImage<F::Element>,
+    ) -> Option<DenseMonicModulus<F::Element>> {
+        if image.x_len == 0 || image.y_len == 0 {
+            return None;
+        }
+        let leading = image.coefficient(image.x_len - 1, 0);
+        if self.ring().is_zero(leading) {
+            return None;
+        }
+        let leading_inverse = self.ring().inv(leading);
+        let lower_coefficients = (0..image.x_len - 1)
+            .map(|degree| {
+                self.ring()
+                    .mul(image.coefficient(degree, 0), &leading_inverse)
+            })
+            .collect();
+        Some(DenseMonicModulus { lower_coefficients })
+    }
+
+    /// Multiply two packed univariate polynomials and return a dense
+    /// coefficient vector. Prime fields use their delayed-reduction kernel.
+    fn dense_univariate_mul(
+        ring: &F,
+        left: &DenseIndexedUnivariate<F::Element>,
+        right: &DenseIndexedUnivariate<F::Element>,
+    ) -> Option<Vec<F::Element>> {
+        let (Some(&left_degree), Some(&right_degree)) = (left.indices.last(), right.indices.last())
+        else {
+            return Some(Vec::new());
+        };
+        let output_len = (left_degree as usize)
+            .checked_add(right_degree as usize)?
+            .checked_add(1)?;
+
+        if let Some(product) = ring.kernels().polynomial().and_then(|kernels| {
+            kernels.try_dense_mul(DensePolynomialMulRequest {
+                output_len,
+                left_coefficients: &left.coefficients,
+                left_indices: &left.indices,
+                right_coefficients: &right.coefficients,
+                right_indices: &right.indices,
+            })
+        }) {
+            let mut coefficients = vec![ring.zero(); output_len];
+            for (degree, coefficient) in product {
+                let degree = degree as usize;
+                if degree >= output_len {
+                    return None;
+                }
+                coefficients[degree] = coefficient;
+            }
+            while coefficients
+                .last()
+                .is_some_and(|coefficient| ring.is_zero(coefficient))
+            {
+                coefficients.pop();
+            }
+            return Some(coefficients);
+        }
+
+        let mut coefficients = vec![ring.zero(); output_len];
+        for (left_coefficient, &left_degree) in left.coefficients.iter().zip(&left.indices) {
+            for (right_coefficient, &right_degree) in right.coefficients.iter().zip(&right.indices)
+            {
+                ring.add_mul_assign(
+                    &mut coefficients[left_degree as usize + right_degree as usize],
+                    left_coefficient,
+                    right_coefficient,
+                );
+            }
+        }
+        while coefficients
+            .last()
+            .is_some_and(|coefficient| ring.is_zero(coefficient))
+        {
+            coefficients.pop();
+        }
+        Some(coefficients)
+    }
+
+    /// Reduce a dense univariate polynomial in place modulo a cached monic
+    /// polynomial and return its canonical remainder.
+    fn dense_remainder_monic(
+        ring: &F,
+        mut coefficients: Vec<F::Element>,
+        modulus: &DenseMonicModulus<F::Element>,
+    ) -> Vec<F::Element> {
+        let modulus_degree = modulus.lower_coefficients.len();
+        if modulus_degree == 0 {
+            return Vec::new();
+        }
+
+        while coefficients.len() > modulus_degree {
+            let leading = coefficients.pop().unwrap();
+            if ring.is_zero(&leading) {
+                continue;
+            }
+            let shift = coefficients.len() - modulus_degree;
+            for (coefficient, modulus_coefficient) in coefficients[shift..]
+                .iter_mut()
+                .zip(&modulus.lower_coefficients)
+            {
+                ring.sub_mul_assign(coefficient, modulus_coefficient, &leading);
+            }
+        }
+        while coefficients
+            .last()
+            .is_some_and(|coefficient| ring.is_zero(coefficient))
+        {
+            coefficients.pop();
+        }
+        coefficients
+    }
+
+    /// Solve both modular correction equations for one sampled error row and
+    /// pad the remainders to their factor image widths.
+    fn dense_two_factor_corrections(
+        &self,
+        error: &[F::Element],
+        context: &DenseTwoFactorCorrectionContext<F::Element>,
+        output_lens: [usize; 2],
+    ) -> Option<[Vec<F::Element>; 2]> {
+        if error
+            .iter()
+            .all(|coefficient| self.ring().is_zero(coefficient))
+        {
+            return Some([
+                vec![self.ring().zero(); output_lens[0]],
+                vec![self.ring().zero(); output_lens[1]],
+            ]);
+        }
+        let error = Self::dense_indexed_univariate_from_coefficients(&self.ring(), error)?;
+        let solve = |factor_index: usize| {
+            let product = Self::dense_univariate_mul(
+                &self.ring(),
+                &context.multipliers[factor_index],
+                &error,
+            )?;
+            let mut correction =
+                Self::dense_remainder_monic(&self.ring(), product, &context.moduli[factor_index]);
+            if correction.len() > output_lens[factor_index] {
+                return None;
+            }
+            correction.resize(output_lens[factor_index], self.ring().zero());
+            Some(correction)
+        };
+        Some([solve(0)?, solve(1)?])
+    }
+
+    /// Compare `left * right` with `self` by accumulating coefficient
+    /// differences under exact mixed-radix exponent keys.
+    fn product_matches_by_packed_accumulation(&self, left: &Self, right: &Self) -> Option<bool> {
+        if self.nvars() != left.nvars()
+            || self.nvars() != right.nvars()
+            || self.ring() != left.ring()
+            || self.ring() != right.ring()
+            || self.variables() != left.variables()
+            || self.variables() != right.variables()
+            || !self.is_polynomial()
+            || !left.is_polynomial()
+            || !right.is_polynomial()
+        {
+            return None;
+        }
+
+        let mut strides = Vec::with_capacity(self.nvars());
+        let mut radices = Vec::with_capacity(self.nvars());
+        let mut stride = 1u128;
+        for variable in 0..self.nvars() {
+            let maximum_degree = left
+                .degree(variable)
+                .to_u32()
+                .checked_add(right.degree(variable).to_u32())?;
+            let radix = maximum_degree as u128 + 1;
+            strides.push(stride);
+            radices.push(radix);
+            stride = stride.checked_mul(radix)?;
+        }
+
+        let encode = |exponents: &[E]| {
+            let mut key = 0u128;
+            for ((exponent, &stride), &radix) in exponents.iter().zip(&strides).zip(&radices) {
+                let exponent = exponent.to_u32() as u128;
+                if exponent >= radix {
+                    return None;
+                }
+                key = key.checked_add(exponent.checked_mul(stride)?)?;
+            }
+            Some(key)
+        };
+
+        let left_keys = left
+            .exponents_iter()
+            .map(encode)
+            .collect::<Option<Vec<_>>>()?;
+        let right_keys = right
+            .exponents_iter()
+            .map(encode)
+            .collect::<Option<Vec<_>>>()?;
+
+        let mut differences: HashMap<u128, F::Element> = HashMap::default();
+        differences.reserve(self.nterms());
+        for term in self {
+            let key = encode(term.exponents)?;
+            if differences
+                .insert(key, self.ring().neg(term.coefficient))
+                .is_some()
+            {
+                return None;
+            }
+        }
+
+        for (left_coefficient, &left_key) in left.coefficients.iter().zip(&left_keys) {
+            for (right_coefficient, &right_key) in right.coefficients.iter().zip(&right_keys) {
+                let key = left_key.checked_add(right_key)?;
+                let difference = differences.entry(key).or_insert_with(|| self.ring().zero());
+                self.ring()
+                    .add_mul_assign(difference, left_coefficient, right_coefficient);
+            }
+        }
+
+        Some(
+            differences
+                .values()
+                .all(|difference| self.ring().is_zero(difference)),
+        )
+    }
+
+    /// Return whether exact product verification should accumulate sparse coefficient
+    /// products instead of constructing the product through the dense multiplier.
+    fn packed_product_accumulation_is_preferred(left: &Self, right: &Self) -> bool {
+        if left.nvars() != right.nvars()
+            || left.ring() != right.ring()
+            || left.variables() != right.variables()
+            || !left.is_polynomial()
+            || !right.is_polynomial()
+            || left.nterms() <= 1
+            || right.nterms() <= 1
+            || left.total_degree_dense_mul_is_bounded(right)
+        {
+            return false;
+        }
+
+        let mut output_len = Some(1usize);
+        let mut active_variables = 0;
+        for variable in 0..left.nvars() {
+            let Some(maximum_degree) = left
+                .degree(variable)
+                .to_u32()
+                .checked_add(right.degree(variable).to_u32())
+            else {
+                return false;
+            };
+            let radix = maximum_degree as usize + 1;
+            active_variables += usize::from(radix > 1);
+            output_len = output_len.and_then(|length| length.checked_mul(radix));
+        }
+
+        active_variables > 1
+            && output_len.is_none_or(|length| {
+                !super::polynomial::mixed_radix_dense_mul_is_bounded(
+                    length,
+                    left.nterms(),
+                    right.nterms(),
+                )
+            })
+    }
+
+    /// Check a sampled two-factor correction identity using dense coefficient
+    /// convolution in `x`.
+    #[cfg(debug_assertions)]
+    fn dense_two_factor_correction_matches(
+        &self,
+        error: &[F::Element],
+        left: &DenseBivariateImage<F::Element>,
+        right: &DenseBivariateImage<F::Element>,
+        corrections: &[Vec<F::Element>; 2],
+    ) -> bool {
+        let Some(first_len) = corrections[0]
+            .len()
+            .checked_add(right.x_len)
+            .and_then(|length| length.checked_sub(1))
+        else {
+            return false;
+        };
+        let Some(second_len) = corrections[1]
+            .len()
+            .checked_add(left.x_len)
+            .and_then(|length| length.checked_sub(1))
+        else {
+            return false;
+        };
+        let result_len = error.len().max(first_len).max(second_len);
+        let mut reconstructed = vec![self.ring().zero(); result_len];
+
+        for (correction, factor) in [(&corrections[0], right), (&corrections[1], left)] {
+            for (correction_degree, correction_coefficient) in correction.iter().enumerate() {
+                if self.ring().is_zero(correction_coefficient) {
+                    continue;
+                }
+                for factor_degree in 0..factor.x_len {
+                    let factor_coefficient = factor.coefficient(factor_degree, 0);
+                    if !self.ring().is_zero(factor_coefficient) {
+                        self.ring().add_mul_assign(
+                            &mut reconstructed[correction_degree + factor_degree],
+                            correction_coefficient,
+                            factor_coefficient,
+                        );
+                    }
+                }
+            }
+        }
+
+        reconstructed.iter().enumerate().all(|(degree, actual)| {
+            let difference = if let Some(expected) = error.get(degree) {
+                self.ring().sub(actual, expected)
+            } else {
+                actual.clone()
+            };
+            self.ring().is_zero(&difference)
+        })
+    }
+
     fn sparse_multivariate_diophantine_two_factor_by_sampling(
         factors: &[Self],
         prods: &[Self],
         error: &Self,
         skeletons: &[Self],
         order: &[usize],
+        context: &mut SparseDiophantineContext<Self, F::Element>,
     ) -> Option<Vec<Self>> {
         if factors.len() != 2 || prods.len() != 2 || skeletons.len() != 2 || order.len() < 2 {
             return None;
@@ -2274,9 +2924,25 @@ impl<F: Field + SampleableRing<SamplingPolicy = RangeInclusive<i64>>, E: Positiv
             return None;
         }
 
+        let cached_base_points = context.two_factor_base_points.take().filter(|points| {
+            points.len() == sample_vars.len()
+                && points
+                    .iter()
+                    .zip(sample_vars)
+                    .all(|((point_var, _), sample_var)| point_var == sample_var)
+        });
+        if cached_base_points.is_none() {
+            context.two_factor_bezout.clear();
+        }
+
         let mut rng = rng();
-        'sample_base: for _ in 0..SPARSE_MDP_SAMPLE_BASE_ATTEMPTS {
-            let base_points = Self::sparse_interpolation_base_points(error, sample_vars, &mut rng);
+        let sample_base_attempts =
+            SPARSE_MDP_SAMPLE_BASE_ATTEMPTS + usize::from(cached_base_points.is_some());
+        let mut cached_base_points = cached_base_points;
+        'sample_base: for _ in 0..sample_base_attempts {
+            let base_points = cached_base_points.take().unwrap_or_else(|| {
+                Self::sparse_interpolation_base_points(error, sample_vars, &mut rng)
+            });
 
             for (_, exponents, sample_generators) in &mut groups {
                 sample_generators.clear();
@@ -2288,11 +2954,14 @@ impl<F: Field + SampleableRing<SamplingPolicy = RangeInclusive<i64>>, E: Positiv
                         &generator,
                         sample_generators,
                     ) {
+                        context.clear_two_factor_images();
                         continue 'sample_base;
                     }
                     sample_generators.push(generator);
                 }
             }
+
+            context.two_factor_base_points = Some(base_points.clone());
 
             let mut rhs: Vec<Vec<F::Element>> = groups
                 .iter()
@@ -2339,15 +3008,19 @@ impl<F: Field + SampleableRing<SamplingPolicy = RangeInclusive<i64>>, E: Positiv
                     factor.evaluate_using_exponents_univariate_grouped(current, main_var, image);
                 }
 
-                let Some(deltas_image) =
-                    Self::try_univariate_diophantine(&mut factor_images, &error_image)
-                else {
+                let Some(delta_image) = Self::try_two_factor_univariate_correction(
+                    &mut factor_images,
+                    &error_image,
+                    sparse_factor,
+                    context,
+                ) else {
+                    context.clear_two_factor_images();
                     continue 'sample_base;
                 };
 
                 for (group_index, (degree, _, _)) in groups.iter().enumerate() {
                     rhs[group_index].push(Self::univariate_coefficient(
-                        &deltas_image[sparse_factor],
+                        &delta_image,
                         main_var,
                         *degree,
                     ));
@@ -2371,6 +3044,7 @@ impl<F: Field + SampleableRing<SamplingPolicy = RangeInclusive<i64>>, E: Positiv
             // Exact division reconstructs the other delta and verifies that the
             // interpolated sparse correction satisfies the Diophantine identity.
             let Some(dense_delta) = residual.try_div_owned(&prods[dense_factor]) else {
+                context.clear_two_factor_images();
                 continue;
             };
 
@@ -2624,6 +3298,41 @@ impl<F: Field + SampleableRing<SamplingPolicy = RangeInclusive<i64>>, E: Positiv
             .unwrap_or_else(|| poly.ring().zero())
     }
 
+    /// Solve the two-factor univariate Diophantine equation for one requested
+    /// correction. For `f0 * s + f1 * t = 1`, correction zero is
+    /// `t * rhs mod f0` and correction one is `s * rhs mod f1`.
+    fn try_two_factor_univariate_correction(
+        factors: &mut [Self],
+        rhs: &Self,
+        requested_factor: usize,
+        context: &mut SparseDiophantineContext<Self, F::Element>,
+    ) -> Option<Self> {
+        if factors.len() != 2
+            || requested_factor >= 2
+            || factors
+                .iter()
+                .any(|factor| factor.ring().is_zero(&factor.lcoeff()))
+        {
+            return None;
+        }
+
+        let key = (factors[0].clone(), factors[1].clone());
+        let bezout = context
+            .two_factor_bezout
+            .entry(key)
+            .or_insert_with(|| {
+                let (g, s, t) = factors[0].eea_univariate(&factors[1]);
+                g.is_one().then_some(TwoFactorImageBezout { s, t })
+            })
+            .as_ref()?;
+
+        if requested_factor == 0 {
+            Some((&bezout.t * rhs).quot_rem_univariate(&mut factors[0]).1)
+        } else {
+            Some((&bezout.s * rhs).quot_rem_univariate(&mut factors[1]).1)
+        }
+    }
+
     fn try_univariate_diophantine(factors: &mut [Self], rhs: &Self) -> Option<Vec<Self>> {
         if factors
             .iter()
@@ -2691,6 +3400,407 @@ impl<F: Field + SampleableRing<SamplingPolicy = RangeInclusive<i64>>, E: Positiv
         factors_with_true_lcoeff
     }
 
+    /// Lift two factors through the final variable using dense bivariate
+    /// geometric images. Sparse interpolation reconstructs both corrections at
+    /// each lifted coefficient. When `verify_product` is true, the completed
+    /// factors are also certified against the target before they are returned.
+    fn try_multivariate_hensel_step_two_factor_evaluated(
+        &self,
+        factors: &[Self],
+        order: &[usize],
+        last_degree: usize,
+        verify_product: bool,
+    ) -> Option<Vec<Self>> {
+        if factors.len() != 2 || order.len() <= 2 {
+            return None;
+        }
+
+        let characteristic = self.ring().characteristic();
+        if !characteristic.is_zero() && !characteristic.is_prime(0) {
+            return None;
+        }
+
+        let x = order[0];
+        let y = *order.last()?;
+        if x == y {
+            return None;
+        }
+        let y_rows = last_degree.checked_add(1)?;
+        if y_rows > MAX_EVALUATED_HENSEL_Y_ROWS {
+            return None;
+        }
+        let sample_vars = &order[1..order.len() - 1];
+
+        let mut u = Vec::with_capacity(2);
+        for factor in factors {
+            let mut coefficients = vec![self.zero(); y_rows];
+            for (coefficient, degree) in factor.to_univariate_polynomial_list(y) {
+                let degree = degree.to_u32() as usize;
+                if degree > last_degree {
+                    return None;
+                }
+                coefficients[degree] = coefficient;
+            }
+            u.push(coefficients);
+        }
+
+        let expected_factor_x_degrees = [
+            u[0][0].degree(x).to_u32() as usize,
+            u[1][0].degree(x).to_u32() as usize,
+        ];
+        if u.iter().any(|factor| factor[0].is_zero()) {
+            return None;
+        }
+
+        let mut rng = rng();
+        let base_points = Self::sparse_interpolation_base_points(self, sample_vars, &mut rng);
+        if base_points
+            .iter()
+            .any(|(_, point)| self.ring().is_zero(point))
+        {
+            return None;
+        }
+
+        let mut image_cache = Self::sample_cache(self, factors, &[]);
+        let mut target_images = Vec::new();
+        let mut factor_images = vec![Vec::new(), Vec::new()];
+        let mut factor_correction_contexts = Vec::new();
+        let mut sample_count = 0usize;
+
+        for k in 1..=last_degree {
+            let mut sampled_errors = Vec::with_capacity(sample_count);
+            if sample_count > 0 {
+                let mut sampled_error_is_zero = true;
+                for sample_index in 0..sample_count {
+                    let error = self.dense_bivariate_product_error_row(
+                        &target_images[sample_index],
+                        &factor_images[0][sample_index],
+                        &factor_images[1][sample_index],
+                        k,
+                    );
+                    let error_is_zero = error
+                        .iter()
+                        .all(|coefficient| self.ring().is_zero(coefficient));
+                    sampled_errors.push(error);
+                    if !error_is_zero {
+                        sampled_error_is_zero = false;
+                        break;
+                    }
+                }
+                if sampled_error_is_zero {
+                    continue;
+                }
+            }
+
+            let skeletons = [&u[0][k - 1], &u[1][k - 1]];
+            if skeletons.iter().any(|skeleton| skeleton.nterms() > 512) {
+                return None;
+            }
+
+            let mut groups: Vec<Vec<(E, Vec<Vec<E>>, Vec<F::Element>)>> = Vec::with_capacity(2);
+            let mut samples_needed = 0usize;
+            for skeleton in skeletons {
+                let mut factor_groups: Vec<(E, Vec<Vec<E>>, Vec<F::Element>)> = Vec::new();
+                for exponent in skeleton.exponents.chunks(skeleton.nvars()) {
+                    if exponent[y] != E::zero() {
+                        return None;
+                    }
+                    let x_degree = exponent[x];
+                    if let Some((_, exponents, _)) = factor_groups
+                        .iter_mut()
+                        .find(|(degree, _, _)| *degree == x_degree)
+                    {
+                        exponents.push(exponent.to_vec());
+                    } else {
+                        factor_groups.push((x_degree, vec![exponent.to_vec()], Vec::new()));
+                    }
+                }
+
+                for (_, exponents, generators) in &mut factor_groups {
+                    samples_needed = samples_needed.max(exponents.len());
+                    for exponent in exponents {
+                        let generator =
+                            Self::evaluate_monomial_exponent(&self.ring(), exponent, &base_points);
+                        if !Self::sparse_interpolation_generator_is_usable(
+                            self, &generator, generators,
+                        ) {
+                            return None;
+                        }
+                        generators.push(generator);
+                    }
+                }
+                groups.push(factor_groups);
+            }
+
+            if samples_needed == 0 {
+                return None;
+            }
+
+            if samples_needed > sample_count {
+                let current_factors = u
+                    .iter()
+                    .map(|coefficients| self.from_dense_y_coefficients(coefficients, y))
+                    .collect::<Vec<_>>();
+                let mut retained_image_cells = 0usize;
+                let mut term_steps = 0usize;
+                for polynomial in std::iter::once(self).chain(&current_factors) {
+                    if polynomial.nterms() > MAX_EVALUATED_HENSEL_GROUPED_TERMS {
+                        return None;
+                    }
+                    let x_len = (polynomial.degree(x).to_u32() as usize).checked_add(1)?;
+                    let image_cells = x_len.checked_mul(y_rows)?;
+                    retained_image_cells = retained_image_cells
+                        .checked_add(image_cells.checked_mul(samples_needed)?)?;
+                    term_steps =
+                        term_steps.checked_add(polynomial.nterms().checked_mul(samples_needed)?)?;
+                    if retained_image_cells > MAX_EVALUATED_HENSEL_IMAGE_CELLS
+                        || term_steps > MAX_EVALUATED_HENSEL_TERM_STEPS
+                    {
+                        return None;
+                    }
+                }
+                target_images = self.evaluate_geometric_bivariate_images(
+                    x,
+                    y,
+                    &base_points,
+                    samples_needed,
+                    &mut image_cache,
+                );
+                factor_images = current_factors
+                    .iter()
+                    .map(|factor| {
+                        factor.evaluate_geometric_bivariate_images(
+                            x,
+                            y,
+                            &base_points,
+                            samples_needed,
+                            &mut image_cache,
+                        )
+                    })
+                    .collect();
+
+                for image in target_images
+                    .iter_mut()
+                    .chain(factor_images.iter_mut().flatten())
+                {
+                    if image.y_len > y_rows {
+                        return None;
+                    }
+                    let image_len = image.x_len.checked_mul(y_rows)?;
+                    image.coefficients.resize(image_len, self.ring().zero());
+                    image.y_len = y_rows;
+                }
+
+                for sample_index in factor_correction_contexts.len()..samples_needed {
+                    let images = [
+                        self.dense_bivariate_x_row_to_univariate(
+                            &factor_images[0][sample_index],
+                            x,
+                            0,
+                        ),
+                        self.dense_bivariate_x_row_to_univariate(
+                            &factor_images[1][sample_index],
+                            x,
+                            0,
+                        ),
+                    ];
+                    for (factor_index, image) in images.iter().enumerate() {
+                        if image.is_zero()
+                            || image.degree(x).to_u32() as usize
+                                != expected_factor_x_degrees[factor_index]
+                        {
+                            return None;
+                        }
+                    }
+                    let (gcd, s, t) = images[0].eea_univariate(&images[1]);
+                    if !gcd.is_one() {
+                        return None;
+                    }
+                    factor_correction_contexts.push(DenseTwoFactorCorrectionContext {
+                        multipliers: [
+                            self.dense_indexed_univariate(&t, x)?,
+                            self.dense_indexed_univariate(&s, x)?,
+                        ],
+                        moduli: [
+                            self.dense_monic_modulus(&factor_images[0][sample_index])?,
+                            self.dense_monic_modulus(&factor_images[1][sample_index])?,
+                        ],
+                    });
+                }
+                sample_count = samples_needed;
+            }
+
+            let supported_x_degrees = groups
+                .iter()
+                .enumerate()
+                .map(|(factor_index, factor_groups)| {
+                    let x_len = factor_images[factor_index][0].x_len;
+                    let mut supported = vec![false; x_len];
+                    for (degree, _, _) in factor_groups {
+                        let degree = degree.to_u32() as usize;
+                        if degree >= x_len {
+                            return None;
+                        }
+                        supported[degree] = true;
+                    }
+                    Some(supported)
+                })
+                .collect::<Option<Vec<_>>>()?;
+
+            let mut rhs: Vec<Vec<Vec<F::Element>>> = groups
+                .iter()
+                .map(|factor_groups| {
+                    factor_groups
+                        .iter()
+                        .map(|_| Vec::with_capacity(samples_needed))
+                        .collect()
+                })
+                .collect();
+            sampled_errors.extend((sampled_errors.len()..samples_needed).map(|sample_index| {
+                self.dense_bivariate_product_error_row(
+                    &target_images[sample_index],
+                    &factor_images[0][sample_index],
+                    &factor_images[1][sample_index],
+                    k,
+                )
+            }));
+            for (sample_index, error_coefficients) in
+                sampled_errors.iter().take(samples_needed).enumerate()
+            {
+                let correction_coefficients = self.dense_two_factor_corrections(
+                    error_coefficients,
+                    &factor_correction_contexts[sample_index],
+                    [
+                        factor_images[0][sample_index].x_len,
+                        factor_images[1][sample_index].x_len,
+                    ],
+                );
+                let correction_coefficients = correction_coefficients?;
+                for factor_index in 0..2 {
+                    if correction_coefficients[factor_index]
+                        .iter()
+                        .enumerate()
+                        .any(|(degree, coefficient)| {
+                            !self.ring().is_zero(coefficient)
+                                && !supported_x_degrees[factor_index]
+                                    .get(degree)
+                                    .copied()
+                                    .unwrap_or(false)
+                        })
+                    {
+                        return None;
+                    }
+                }
+                #[cfg(debug_assertions)]
+                {
+                    if !self.dense_two_factor_correction_matches(
+                        error_coefficients,
+                        &factor_images[0][sample_index],
+                        &factor_images[1][sample_index],
+                        &correction_coefficients,
+                    ) {
+                        return None;
+                    }
+                }
+
+                for (factor_index, correction_coefficients) in
+                    correction_coefficients.into_iter().enumerate()
+                {
+                    for (group_index, (degree, _, _)) in groups[factor_index].iter().enumerate() {
+                        rhs[factor_index][group_index]
+                            .push(correction_coefficients[degree.to_u32() as usize].clone());
+                    }
+                }
+            }
+
+            let mut deltas = [self.zero(), self.zero()];
+            let geometric_sequence_kernels = self.ring().kernels().geometric_sequences();
+            for factor_index in 0..2 {
+                for (group_index, (degree, exponents, generators)) in
+                    groups[factor_index].iter().enumerate()
+                {
+                    let coefficients = self.solve_shifted_transposed_vandermonde(
+                        generators,
+                        &rhs[factor_index][group_index][..exponents.len()],
+                    );
+                    let mut current = coefficients
+                        .iter()
+                        .zip(generators)
+                        .map(|(coefficient, generator)| self.ring().mul(coefficient, generator))
+                        .collect::<Vec<_>>();
+                    let x_degree = degree.to_u32() as usize;
+                    for sample_index in 0..sample_count {
+                        let reconstructed = (sample_index + 1 < sample_count)
+                            .then(|| geometric_sequence_kernels)
+                            .flatten()
+                            .and_then(|kernels| {
+                                kernels.try_sum_and_advance_geometric_sequences(
+                                    GeometricSequenceStepRequest {
+                                        current: &mut current,
+                                        ratios: generators,
+                                    },
+                                )
+                            })
+                            .unwrap_or_else(|| {
+                                let mut reconstructed = self.ring().zero();
+                                for (current, generator) in current.iter_mut().zip(generators) {
+                                    self.ring().add_assign(&mut reconstructed, &*current);
+                                    if sample_index + 1 < sample_count {
+                                        self.ring().mul_assign(current, generator);
+                                    }
+                                }
+                                reconstructed
+                            });
+
+                        if sample_index < samples_needed {
+                            let expected = &rhs[factor_index][group_index][sample_index];
+                            let difference = self.ring().sub(&reconstructed, expected);
+                            if !self.ring().is_zero(&difference) {
+                                return None;
+                            }
+                        }
+
+                        if !self.ring().is_zero(&reconstructed) {
+                            let image = &mut factor_images[factor_index][sample_index];
+                            let index = image.index(x_degree, k);
+                            self.ring()
+                                .add_assign(&mut image.coefficients[index], reconstructed);
+                        }
+                    }
+
+                    for (coefficient, exponent) in coefficients.into_iter().zip(exponents) {
+                        if !self.ring().is_zero(&coefficient) {
+                            deltas[factor_index].append_monomial(coefficient, exponent);
+                        }
+                    }
+                }
+            }
+
+            for factor_index in 0..2 {
+                u[factor_index][k] = &u[factor_index][k] + &deltas[factor_index];
+            }
+        }
+
+        let lifted = u
+            .iter()
+            .map(|coefficients| self.from_dense_y_coefficients(coefficients, y))
+            .collect::<Vec<_>>();
+        if verify_product {
+            let product_matches =
+                Self::packed_product_accumulation_is_preferred(&lifted[0], &lifted[1])
+                    .then(|| self.product_matches_by_packed_accumulation(&lifted[0], &lifted[1]))
+                    .flatten()
+                    .unwrap_or_else(|| {
+                        let product = &lifted[0] * &lifted[1];
+                        &product == self
+                    });
+            if !product_matches {
+                return None;
+            }
+        }
+        Some(lifted)
+    }
+
     fn multivariate_hensel_lifting(
         &self,
         factors: &[Self],
@@ -2727,6 +3837,7 @@ impl<F: Field + SampleableRing<SamplingPolicy = RangeInclusive<i64>>, E: Positiv
         }
 
         let mut reconstructed_factors = factors.to_vec();
+        let mut used_evaluated_lift = false;
         for v in context.start_index..order.len() {
             // Replace the leading coefficient in x0 before this lift step.
             let mut factors_with_true_lcoeff = if let Some(true_lcoeffs) = true_lcoeffs {
@@ -2764,6 +3875,7 @@ impl<F: Field + SampleableRing<SamplingPolicy = RangeInclusive<i64>>, E: Positiv
                 &order[..=v],
                 &mut degrees[..=v],
                 context,
+                &mut used_evaluated_lift,
             )?;
 
             if !self.ring().is_zero(shift) {
@@ -2774,6 +3886,32 @@ impl<F: Field + SampleableRing<SamplingPolicy = RangeInclusive<i64>>, E: Positiv
 
             for f in &reconstructed_factors {
                 debug!("Reconstructed factor {}", f);
+            }
+        }
+
+        // Evaluated stages reconstruct from sampled sparse supports. Certify the
+        // completed, unshifted factors once after all nested stages have finished.
+        if used_evaluated_lift {
+            let product_matches = (reconstructed_factors.len() == 2
+                && Self::packed_product_accumulation_is_preferred(
+                    &reconstructed_factors[0],
+                    &reconstructed_factors[1],
+                ))
+            .then(|| {
+                self.product_matches_by_packed_accumulation(
+                    &reconstructed_factors[0],
+                    &reconstructed_factors[1],
+                )
+            })
+            .flatten()
+            .unwrap_or_else(|| {
+                let product = reconstructed_factors
+                    .iter()
+                    .fold(self.one(), |product, factor| &product * factor);
+                &product == self
+            });
+            if !product_matches {
+                return Err(MultivariateHenselError::SparseDiophantineFailed);
             }
         }
 
@@ -2789,9 +3927,36 @@ impl<F: Field + SampleableRing<SamplingPolicy = RangeInclusive<i64>>, E: Positiv
         order: &[usize],
         degrees: &mut [usize],
         context: MultivariateHenselContext,
+        used_evaluated_lift: &mut bool,
     ) -> Result<Vec<Self>, MultivariateHenselError> {
         let last_var = *order.last().unwrap();
         let last_degree = *degrees.last().unwrap();
+
+        let defer_product_verification =
+            context.sparse_diophantine_fallback == SparseDiophantineFallback::RetrySample;
+        if let Some(lifted) = self.try_multivariate_hensel_step_two_factor_evaluated(
+            factors,
+            order,
+            last_degree,
+            !defer_product_verification,
+        ) {
+            *used_evaluated_lift |= defer_product_verification;
+            return Ok(lifted);
+        }
+
+        // Before a generic stage consumes speculative factors, verify their
+        // constant row in the new lifting variable against the target row.
+        if *used_evaluated_lift {
+            let zero = self.ring().zero();
+            let target_at_zero = self.replace(last_var, &zero);
+            let product_at_zero = factors.iter().fold(self.one(), |product, factor| {
+                &product * &factor.replace(last_var, &zero)
+            });
+            if product_at_zero != target_at_zero {
+                return Err(MultivariateHenselError::SparseDiophantineFailed);
+            }
+        }
+
         let y_poly = self.to_univariate_polynomial_list(last_var);
 
         // extract coefficients in last_var
@@ -2840,6 +4005,8 @@ impl<F: Field + SampleableRing<SamplingPolicy = RangeInclusive<i64>>, E: Positiv
 
         debug!("in shift {}", self);
         debug!("deg {:?}", degrees);
+
+        let mut sparse_diophantine_context = SparseDiophantineContext::new();
 
         // create the polynomials (x_i-shift_i)^deg used for modding during Hensel lifting
         let mut mod_vars = Vec::with_capacity(order.len() - 2);
@@ -2891,6 +4058,7 @@ impl<F: Field + SampleableRing<SamplingPolicy = RangeInclusive<i64>>, E: Positiv
                 &e,
                 &skeletons,
                 &order[..order.len() - 1],
+                &mut sparse_diophantine_context,
             );
             let new_delta = match sparse_delta {
                 Some(delta) => delta,
@@ -4995,6 +6163,7 @@ impl<E: PositiveExponent> MultivariatePolynomial<IntegerRing, E, LexOrder> {
         let mut error = self - &product;
 
         let mut m = p_int.clone();
+        let mut sparse_diophantine_context = SparseDiophantineContext::new();
         while !error.is_zero() && &m <= max_p {
             let mut error_mod_p = factors_mod_p[0].zero();
             for term in &error {
@@ -5011,6 +6180,7 @@ impl<E: PositiveExponent> MultivariatePolynomial<IntegerRing, E, LexOrder> {
                 &error_mod_p,
                 &skeletons,
                 order,
+                &mut sparse_diophantine_context,
             )?;
 
             for (factor, delta) in factorization.iter_mut().zip(deltas) {
@@ -5628,13 +6798,16 @@ impl<E: PositiveExponent> MultivariatePolynomial<FiniteField<Integer>, E, LexOrd
 mod test {
     use std::sync::{Arc, Mutex, atomic::Ordering};
 
-    use super::{ExactPolynomialSquareRoot, QuadraticFactorization};
+    use super::{
+        DenseBivariateImage, DenseTwoFactorCorrectionContext, ExactPolynomialSquareRoot,
+        QuadraticFactorization, SparseDiophantineContext,
+    };
 
     use crate::{
         GLOBAL_SETTINGS,
         atom::AtomCore,
         domains::{
-            InternalOrdering,
+            InternalOrdering, Ring,
             algebraic::AlgebraicExtension,
             finite_field::{Z2, Zp},
             integer::{Integer, Z},
@@ -5646,6 +6819,501 @@ mod test {
     };
 
     static GLOBAL_FACTOR_SETTINGS_LOCK: Mutex<()> = Mutex::new(());
+
+    fn multiply_dense_bivariate<R: Ring>(
+        ring: &R,
+        left: &DenseBivariateImage<R::Element>,
+        right: &DenseBivariateImage<R::Element>,
+    ) -> DenseBivariateImage<R::Element> {
+        let x_len = left.x_len + right.x_len - 1;
+        let y_len = left.y_len + right.y_len - 1;
+        let mut product = DenseBivariateImage {
+            x_len,
+            y_len,
+            coefficients: vec![ring.zero(); x_len * y_len],
+        };
+
+        for left_y in 0..left.y_len {
+            for left_x in 0..left.x_len {
+                let left_coefficient = left.coefficient(left_x, left_y);
+                if ring.is_zero(left_coefficient) {
+                    continue;
+                }
+
+                for right_y in 0..right.y_len {
+                    for right_x in 0..right.x_len {
+                        let right_coefficient = right.coefficient(right_x, right_y);
+                        if !ring.is_zero(right_coefficient) {
+                            let index = product.index(left_x + right_x, left_y + right_y);
+                            ring.add_mul_assign(
+                                &mut product.coefficients[index],
+                                left_coefficient,
+                                right_coefficient,
+                            );
+                        }
+                    }
+                }
+            }
+        }
+
+        product
+    }
+
+    fn assert_dense_image_matches<R: Ring>(
+        expected: &MultivariatePolynomial<R, u8>,
+        image: &DenseBivariateImage<R::Element>,
+        x: usize,
+        y: usize,
+    ) {
+        let mut exponent = vec![0u8; expected.nvars()];
+        for y_degree in 0..image.y_len {
+            exponent[y] = y_degree as u8;
+            for x_degree in 0..image.x_len {
+                exponent[x] = x_degree as u8;
+                let coefficient = expected
+                    .coefficient(&exponent)
+                    .unwrap_or_else(|| expected.ring().zero());
+                assert_eq!(image.coefficient(x_degree, y_degree), &coefficient);
+            }
+            exponent[x] = 0;
+        }
+    }
+
+    #[test]
+    fn geometric_bivariate_images_match_direct_specialization() {
+        let field = Zp::new(101);
+        // Retained variables have nonzero, nonadjacent indices so the test also
+        // checks that image coordinates use variable indices rather than positions.
+        let vars = Some(Arc::new(vec![
+            symbol!("z").into(),
+            symbol!("x").into(),
+            symbol!("w").into(),
+            symbol!("y").into(),
+        ]));
+        let poly = parse!("3+5*x+7*y^3+11*x^2*y+3*z*x*y-2*w*x*y+17*z^2*w*x^3+19*z*w^2*x^2*y^2")
+            .to_polynomial::<_, u8>(&field, vars);
+        let x = 1;
+        let y = 3;
+        let base_points = vec![(0, field.nth(2.into())), (2, field.nth(3.into()))];
+        let mut cache = MultivariatePolynomial::sample_cache(&poly, &[], &[]);
+        let images = poly.evaluate_geometric_bivariate_images(x, y, &base_points, 4, &mut cache);
+
+        for (sample_index, image) in images.iter().enumerate() {
+            let mut expected = poly.clone();
+            for (variable, base) in &base_points {
+                let value = field.pow(base, (sample_index + 1) as u64);
+                expected = expected.replace(*variable, &value);
+            }
+            assert_dense_image_matches(&expected, image, x, y);
+        }
+
+        // At beta^1, 3*z*x*y - 2*w*x*y = 6*x*y - 6*x*y.
+        assert!(field.is_zero(images[0].coefficient(1, 1)));
+    }
+
+    #[test]
+    fn geometric_bivariate_images_preserve_products() {
+        let field = Zp::new(101);
+        let vars = Some(Arc::new(vec![
+            symbol!("z").into(),
+            symbol!("x").into(),
+            symbol!("w").into(),
+            symbol!("y").into(),
+        ]));
+        let left = parse!("1+x+z*y+w*x^2*y").to_polynomial::<_, u8>(&field, vars.clone());
+        let right = parse!("2+y+w*x+z*x*y^2").to_polynomial::<_, u8>(&field, vars);
+        let product = &left * &right;
+        let base_points = vec![(0, field.nth(2.into())), (2, field.nth(3.into()))];
+        let factors = [left.clone(), right.clone()];
+        let mut cache = MultivariatePolynomial::sample_cache(&product, &factors, &[]);
+        let left_images =
+            left.evaluate_geometric_bivariate_images(1, 3, &base_points, 4, &mut cache);
+        let right_images =
+            right.evaluate_geometric_bivariate_images(1, 3, &base_points, 4, &mut cache);
+        let product_images =
+            product.evaluate_geometric_bivariate_images(1, 3, &base_points, 4, &mut cache);
+
+        for ((left_image, right_image), product_image) in
+            left_images.iter().zip(&right_images).zip(&product_images)
+        {
+            assert_eq!(
+                multiply_dense_bivariate(&field, left_image, right_image),
+                *product_image
+            );
+        }
+    }
+
+    #[test]
+    fn evaluated_two_factor_hensel_step_reconstructs_four_variable_factors() {
+        let field = Zp::new(1_000_003);
+        let vars = Some(Arc::new(vec![
+            symbol!("x").into(),
+            symbol!("z").into(),
+            symbol!("w").into(),
+            symbol!("y").into(),
+        ]));
+        let polynomial = |input| {
+            parse!(input)
+                .expand()
+                .to_polynomial::<_, u8>(&field, vars.clone())
+        };
+        let expected = vec![
+            polynomial("x^2+(z+w)*x+1+((2*z+3*w)*x+4)*y+((5*z+7*w)*x+8)*y^2"),
+            polynomial("x^2+(z+w)*x+2+((11*z+13*w)*x+14)*y+((17*z+19*w)*x+20)*y^2"),
+        ];
+        let target = &expected[0] * &expected[1];
+        let initial = expected
+            .iter()
+            .map(|factor| factor.replace(3, &field.zero()))
+            .collect::<Vec<_>>();
+
+        let lifted = (0..8)
+            .find_map(|_| {
+                target.try_multivariate_hensel_step_two_factor_evaluated(
+                    &initial,
+                    &[0, 1, 2, 3],
+                    target.degree(3) as usize,
+                    true,
+                )
+            })
+            .expect("the evaluated two-factor lift should reconstruct both factors");
+
+        assert_eq!(lifted, expected);
+        assert_eq!(&lifted[0] * &lifted[1], target);
+    }
+
+    #[test]
+    fn evaluated_two_factor_hensel_step_verifies_unexamined_product_tail() {
+        let field = Zp::new(1_000_003);
+        let vars = Some(Arc::new(vec![
+            symbol!("x").into(),
+            symbol!("z").into(),
+            symbol!("y").into(),
+        ]));
+        let polynomial = |input| {
+            parse!(input)
+                .expand()
+                .to_polynomial::<_, u8>(&field, vars.clone())
+        };
+        let initial = vec![polynomial("x+z"), polynomial("x+2*z")];
+        let target = polynomial("(x+z)*(x+2*z)+(z*(x+2*z)+2*z*(x+z))*y");
+
+        let unchecked = (0..8)
+            .find_map(|_| {
+                target.try_multivariate_hensel_step_two_factor_evaluated(
+                    &initial,
+                    &[0, 1, 2],
+                    1,
+                    false,
+                )
+            })
+            .expect("the sampled corrections should reconstruct");
+        assert_ne!(&unchecked[0] * &unchecked[1], target);
+        assert!(
+            target
+                .try_multivariate_hensel_step_two_factor_evaluated(&initial, &[0, 1, 2], 1, true,)
+                .is_none()
+        );
+    }
+
+    #[test]
+    fn evaluated_two_factor_hensel_step_rejects_oversized_image_grid() {
+        let field = Zp::new(101);
+        let vars = Some(Arc::new(vec![
+            symbol!("x").into(),
+            symbol!("z").into(),
+            symbol!("y").into(),
+        ]));
+        let polynomial = |input| {
+            parse!(input)
+                .expand()
+                .to_polynomial::<_, u32>(&field, vars.clone())
+        };
+        let expected = vec![polynomial("x^5000000+z+z*y"), polynomial("x+2*z")];
+        let target = &expected[0] * &expected[1];
+        let initial = expected
+            .iter()
+            .map(|factor| factor.replace(2, &field.zero()))
+            .collect::<Vec<_>>();
+
+        assert!(
+            target
+                .try_multivariate_hensel_step_two_factor_evaluated(&initial, &[0, 1, 2], 1, true,)
+                .is_none()
+        );
+    }
+
+    #[test]
+    fn evaluated_two_factor_hensel_step_rejects_generator_collision() {
+        let field = Z2;
+        let vars = Some(Arc::new(vec![
+            symbol!("x").into(),
+            symbol!("z").into(),
+            symbol!("w").into(),
+            symbol!("y").into(),
+        ]));
+        let polynomial = |input| {
+            parse!(input)
+                .expand()
+                .to_polynomial::<_, u8>(&field, vars.clone())
+        };
+        let expected = vec![
+            polynomial("x^2+(z+w)*x+1+((z+w)*x+1)*y"),
+            polynomial("x^2+(z+w)*x+((z+w)*x+1)*y"),
+        ];
+        let target = &expected[0] * &expected[1];
+        let initial = expected
+            .iter()
+            .map(|factor| factor.replace(3, &field.zero()))
+            .collect::<Vec<_>>();
+
+        assert!(
+            target
+                .try_multivariate_hensel_step_two_factor_evaluated(
+                    &initial,
+                    &[0, 1, 2, 3],
+                    target.degree(3) as usize,
+                    true,
+                )
+                .is_none()
+        );
+    }
+
+    #[test]
+    fn dense_two_factor_corrections_match_generic_univariate_solver() {
+        let field = Zp::new(101);
+        let vars = Some(Arc::new(vec![symbol!("x").into(), symbol!("y").into()]));
+        let polynomial = |input| {
+            parse!(input)
+                .expand()
+                .to_polynomial::<_, u8>(&field, vars.clone())
+        };
+        let factors = [polynomial("3*x^3+2*x+1"), polynomial("5*x^2+7*x+4")];
+        let mut cache = MultivariatePolynomial::sample_cache(&factors[0], &factors, &[]);
+        let factor_images = factors
+            .iter()
+            .map(|factor| {
+                factor
+                    .evaluate_geometric_bivariate_images(0, 1, &[], 1, &mut cache)
+                    .pop()
+                    .unwrap()
+            })
+            .collect::<Vec<_>>();
+        let (gcd, s, t) = factors[0].eea_univariate(&factors[1]);
+        assert!(gcd.is_one());
+        let context = DenseTwoFactorCorrectionContext {
+            multipliers: [
+                factors[0].dense_indexed_univariate(&t, 0).unwrap(),
+                factors[0].dense_indexed_univariate(&s, 0).unwrap(),
+            ],
+            moduli: [
+                factors[0].dense_monic_modulus(&factor_images[0]).unwrap(),
+                factors[0].dense_monic_modulus(&factor_images[1]).unwrap(),
+            ],
+        };
+
+        for rhs in [
+            polynomial("0"),
+            polynomial("17"),
+            polynomial("11*x^4+13*x^3+17*x+19"),
+        ] {
+            let rhs_image = rhs
+                .evaluate_geometric_bivariate_images(0, 1, &[], 1, &mut cache)
+                .pop()
+                .unwrap();
+            let actual = rhs
+                .dense_two_factor_corrections(
+                    &rhs_image.coefficients,
+                    &context,
+                    [factor_images[0].x_len, factor_images[1].x_len],
+                )
+                .unwrap();
+            let expected =
+                MultivariatePolynomial::try_univariate_diophantine(&mut factors.to_vec(), &rhs)
+                    .unwrap();
+
+            for factor_index in 0..2 {
+                let expected_image = expected[factor_index]
+                    .evaluate_geometric_bivariate_images(0, 1, &[], 1, &mut cache)
+                    .pop()
+                    .unwrap();
+                let mut expected_coefficients = expected_image.coefficients;
+                expected_coefficients.resize(actual[factor_index].len(), field.zero());
+                assert_eq!(actual[factor_index], expected_coefficients);
+            }
+        }
+    }
+
+    #[test]
+    fn packed_product_accumulation_matches_exact_product() {
+        let field = Zp::new(101);
+        let vars = Some(Arc::new(vec![
+            symbol!("x").into(),
+            symbol!("z").into(),
+            symbol!("w").into(),
+            symbol!("y").into(),
+        ]));
+        let polynomial = |input| {
+            parse!(input)
+                .expand()
+                .to_polynomial::<_, u8>(&field, vars.clone())
+        };
+        let left = polynomial("1+x+z*x^2+w*y+x*z*y");
+        let right = polynomial("2+w*x+z*y+x^2*y+w*z*x");
+        let product = &left * &right;
+
+        assert_eq!(
+            product.product_matches_by_packed_accumulation(&left, &right),
+            Some(true)
+        );
+        let wrong_product = &product + &polynomial("1");
+        assert_eq!(
+            wrong_product.product_matches_by_packed_accumulation(&left, &right),
+            Some(false)
+        );
+    }
+
+    #[test]
+    fn packed_product_verification_preserves_total_degree_dense_dispatch() {
+        let field = Zp::new(101);
+        let vars = Some(Arc::new(vec![
+            symbol!("a").into(),
+            symbol!("b").into(),
+            symbol!("c").into(),
+            symbol!("d").into(),
+            symbol!("e").into(),
+            symbol!("f").into(),
+            symbol!("g").into(),
+            symbol!("h").into(),
+        ]));
+        let dense = parse!("(1+a+b+c+d+e+f+g+h)^5")
+            .expand()
+            .to_polynomial::<_, u8>(&field, vars);
+
+        assert!(dense.total_degree_dense_mul_is_bounded(&dense));
+        assert!(!MultivariatePolynomial::packed_product_accumulation_is_preferred(&dense, &dense,));
+    }
+
+    #[test]
+    fn two_factor_univariate_correction_reuses_bezout_for_both_components() {
+        let field = Zp::new(101);
+        let vars = Some(Arc::new(vec![symbol!("x").into()]));
+        let factors = ["x^2+2", "x+3"]
+            .iter()
+            .map(|factor| {
+                parse!(factor)
+                    .expand()
+                    .to_polynomial::<_, u8>(&field, vars.clone())
+            })
+            .collect::<Vec<_>>();
+        let rhs = ["7+5*x+11*x^2", "13+17*x+19*x^2"]
+            .iter()
+            .map(|rhs| {
+                parse!(rhs)
+                    .expand()
+                    .to_polynomial::<_, u8>(&field, vars.clone())
+            })
+            .collect::<Vec<_>>();
+        let mut context = SparseDiophantineContext::new();
+
+        for rhs in &rhs {
+            let expected =
+                MultivariatePolynomial::try_univariate_diophantine(&mut factors.clone(), rhs)
+                    .unwrap();
+
+            for requested_factor in 0..2 {
+                let correction = MultivariatePolynomial::try_two_factor_univariate_correction(
+                    &mut factors.clone(),
+                    rhs,
+                    requested_factor,
+                    &mut context,
+                )
+                .unwrap();
+                assert_eq!(correction, expected[requested_factor]);
+
+                let residual = rhs - &(&correction * &factors[1 - requested_factor]);
+                let remainder = residual
+                    .quot_rem_univariate(&mut factors[requested_factor].clone())
+                    .1;
+                assert!(remainder.is_zero());
+                assert_eq!(context.two_factor_bezout.len(), 1);
+            }
+        }
+    }
+
+    #[test]
+    fn two_factor_univariate_correction_caches_noncoprime_failure() {
+        let field = Zp::new(101);
+        let vars = Some(Arc::new(vec![symbol!("x").into()]));
+        let factors = ["(x+1)*(x+2)", "(x+1)*(x+3)"]
+            .iter()
+            .map(|factor| {
+                parse!(factor)
+                    .expand()
+                    .to_polynomial::<_, u8>(&field, vars.clone())
+            })
+            .collect::<Vec<_>>();
+        let rhs = parse!("1+x").to_polynomial::<_, u8>(&field, vars).clone();
+        let mut context = SparseDiophantineContext::new();
+
+        for requested_factor in 0..2 {
+            assert!(
+                MultivariatePolynomial::try_two_factor_univariate_correction(
+                    &mut factors.clone(),
+                    &rhs,
+                    requested_factor,
+                    &mut context,
+                )
+                .is_none()
+            );
+            assert_eq!(context.two_factor_bezout.len(), 1);
+            assert!(context.two_factor_bezout.values().next().unwrap().is_none());
+        }
+    }
+
+    #[test]
+    fn two_factor_sparse_correction_reuses_geometric_base() {
+        let field = Zp::new(101);
+        let vars = Some(Arc::new(vec![symbol!("x").into(), symbol!("z").into()]));
+        let polynomial = |input| {
+            parse!(input)
+                .expand()
+                .to_polynomial::<_, u8>(&field, vars.clone())
+        };
+        let factors = vec![polynomial("x+z"), polynomial("x+z+1")];
+        let prods = vec![factors[1].clone(), factors[0].clone()];
+        let skeletons = vec![polynomial("z"), polynomial("z")];
+        let corrections = [
+            vec![polynomial("2*z"), polynomial("3*z")],
+            vec![polynomial("5*z"), polynomial("7*z")],
+        ];
+        let mut context = SparseDiophantineContext::new();
+        let mut first_base = None;
+
+        for expected in corrections {
+            let error = &(&expected[0] * &prods[0]) + &(&expected[1] * &prods[1]);
+            let actual = MultivariatePolynomial::sparse_multivariate_diophantine_from_skeleton(
+                &factors,
+                &prods,
+                &error,
+                &skeletons,
+                &[0, 1],
+                &mut context,
+            )
+            .unwrap();
+
+            assert_eq!(actual, expected);
+            assert_eq!(&(&actual[0] * &prods[0]) + &(&actual[1] * &prods[1]), error);
+            assert_eq!(context.two_factor_bezout.len(), 1);
+
+            if let Some(base) = &first_base {
+                assert_eq!(context.two_factor_base_points.as_ref(), Some(base));
+            } else {
+                first_base = context.two_factor_base_points.clone();
+                assert!(first_base.is_some());
+            }
+        }
+    }
 
     struct FactorSettingsGuard {
         use_univariate: bool,

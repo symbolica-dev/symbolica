@@ -13,8 +13,11 @@ use std::sync::Arc;
 use rand::Rng;
 
 use crate::domains::algebraic::AlgebraicExtension;
+use crate::domains::finite_field::{
+    FiniteField, FiniteFieldCore, FiniteFieldElement, FiniteFieldWorkspace,
+};
 use crate::domains::float::FloatLike;
-use crate::domains::integer::{Integer, IntegerRing};
+use crate::domains::integer::{Integer, IntegerRing, Z};
 use crate::domains::rational::{Fraction, FractionField, FractionNormalization, Q, RationalField};
 use crate::domains::{
     Derivable, EuclideanDomain, Field, InternalOrdering, RealEmbedding, Ring, RingOps,
@@ -46,6 +49,17 @@ fn mixed_radix_dense_work_is_bounded(
 ) -> bool {
     let pair_products = left_terms.saturating_mul(right_terms);
     output_len <= pair_products.saturating_mul(MAX_MIXED_RADIX_DENSE_TO_PAIR_PRODUCT_RATIO)
+}
+
+/// Return whether a multivariate dense multiplication can use a bounded coefficient box.
+/// Sparse product checks use the same condition to avoid replacing this path with hashing.
+pub(super) fn mixed_radix_dense_mul_is_bounded(
+    output_len: usize,
+    left_terms: usize,
+    right_terms: usize,
+) -> bool {
+    output_len <= MAX_DENSE_MUL_BUFFER_SIZE
+        && mixed_radix_dense_work_is_bounded(output_len, left_terms, right_terms)
 }
 
 struct TotalDegreeRankTable {
@@ -2096,6 +2110,49 @@ impl<F: Ring, E: Exponent, O: MonomialOrder> MultivariatePolynomial<F, E, O> {
 }
 
 impl<F: Ring, E: PositiveExponent> MultivariatePolynomial<F, E, LexOrder> {
+    /// Evaluate a polynomial whose only active variable is `variable` with Horner's method.
+    pub(crate) fn evaluate_univariate_horner(
+        &self,
+        variable: usize,
+        value: &F::Element,
+    ) -> F::Element {
+        debug_assert!(variable < self.nvars());
+        debug_assert!(self.exponents_iter().all(|exponents| {
+            exponents
+                .iter()
+                .enumerate()
+                .all(|(index, exponent)| index == variable || exponent.is_zero())
+        }));
+
+        let Some(last_term) = self.nterms().checked_sub(1) else {
+            return self.ring().zero();
+        };
+
+        let ring = self.ring();
+        let mut result = self.coefficients[last_term].clone();
+        let mut previous_exponent = self.exponents(last_term)[variable];
+        for term in (0..last_term).rev() {
+            let exponent = self.exponents(term)[variable];
+            let gap = (previous_exponent - exponent).to_u32() as u64;
+            if gap == 1 {
+                ring.mul_assign(&mut result, value);
+            } else if gap > 1 {
+                ring.mul_assign(&mut result, &ring.pow(value, gap));
+            }
+            ring.add_assign(&mut result, &self.coefficients[term]);
+            previous_exponent = exponent;
+        }
+
+        let trailing_exponent = previous_exponent.to_u32() as u64;
+        if trailing_exponent == 1 {
+            ring.mul_assign(&mut result, value);
+        } else if trailing_exponent > 1 {
+            ring.mul_assign(&mut result, &ring.pow(value, trailing_exponent));
+        }
+
+        result
+    }
+
     /// Remove all non-occurring variables from the polynomial.
     pub fn condense(&mut self) {
         if self.nvars() == 0 {
@@ -2166,69 +2223,64 @@ impl<F: Ring, E: PositiveExponent> MultivariatePolynomial<F, E, LexOrder> {
         )
     }
 
-    /// Replace the last variable `n` in the polynomial by an element from
-    /// the ring `v`.
+    /// Replace the last active variable `n` in the polynomial by the ring element `v`.
+    /// Variables after `n` must be absent from the polynomial.
     pub fn replace_last(&self, n: usize, v: &F::Element) -> MultivariatePolynomial<F, E, LexOrder> {
+        if self.nvars() == 1 {
+            debug_assert_eq!(n, 0);
+            return self.constant(self.evaluate_univariate_horner(0, v));
+        }
+
         const MAX_EXP_BUF: usize = 100000;
+        debug_assert!((n + 1..self.nvars()).all(|variable| self.degree(variable).is_zero()));
         let mut res = self.zero_with_capacity(self.nterms());
-        let mut e = vec![E::zero(); self.nvars()];
-        let mut res_cache =
-            vec![self.ring().zero(); (self.degree(n).to_i32() as usize + 1).min(MAX_EXP_BUF)];
-
         let nvars = self.nvars();
+        let cache_size = (self.degree(n).to_u32() as usize + 1).min(MAX_EXP_BUF);
+        let mut power_cache = vec![self.ring().zero(); cache_size];
 
-        for t in self {
-            if t.exponents[n] == E::zero() {
-                res.append_monomial(t.coefficient.clone(), t.exponents);
-                continue;
+        // Lexicographic order makes terms with the same exponents before `n` contiguous when all
+        // later variables are absent. Evaluate each row into one output coefficient.
+        let mut row_start = 0;
+        while row_start < self.nterms() {
+            let row_exponents = self.exponents(row_start);
+            let mut row_end = row_start + 1;
+            while row_end < self.nterms() && self.exponents(row_end)[..n] == row_exponents[..n] {
+                row_end += 1;
             }
 
-            let ee = t.exponents[n].to_i32() as usize;
-
-            let c = if ee < MAX_EXP_BUF {
-                if self.ring().is_zero(&res_cache[ee]) {
-                    res_cache[ee] = self.ring().pow(v, ee as u64);
-                }
-
-                self.ring().mul(t.coefficient, &res_cache[ee])
-            } else {
-                self.ring()
-                    .mul(t.coefficient, &self.ring().pow(v, ee as u64))
-            };
-
-            if self.ring().is_zero(&c) {
-                continue;
-            }
-
-            e.copy_from_slice(t.exponents);
-            e[n] = E::zero();
-
-            let mut different = false;
-            if !res.is_zero() {
-                let start = (res.nterms() - 1) * nvars;
-
-                for i in (0..n).rev() {
-                    if unsafe { e.get_unchecked(i) != res.exponents.get_unchecked(start + i) } {
-                        different = true;
-                        break;
+            let mut coefficient = self.ring().zero();
+            for term_index in row_start..row_end {
+                let exponent = self.exponents(term_index)[n].to_u32() as usize;
+                if exponent == 0 {
+                    self.ring()
+                        .add_assign(&mut coefficient, &self.coefficients[term_index]);
+                } else if exponent < cache_size {
+                    if self.ring().is_zero(&power_cache[exponent]) {
+                        power_cache[exponent] = self.ring().pow(v, exponent as u64);
                     }
-                }
-            } else {
-                different = true;
-            }
-
-            if different {
-                res.coefficients.push(c);
-                res.exponents.extend_from_slice(&e);
-            } else {
-                let l = res.coefficients.last_mut().unwrap();
-                self.ring().add_assign(l, &c);
-
-                if self.ring().is_zero(l) {
-                    res.coefficients.pop();
-                    res.exponents.truncate(res.exponents.len() - self.nvars());
+                    self.ring().add_mul_assign(
+                        &mut coefficient,
+                        &self.coefficients[term_index],
+                        &power_cache[exponent],
+                    );
+                } else {
+                    let power = self.ring().pow(v, exponent as u64);
+                    self.ring().add_mul_assign(
+                        &mut coefficient,
+                        &self.coefficients[term_index],
+                        &power,
+                    );
                 }
             }
+
+            if !self.ring().is_zero(&coefficient) {
+                res.coefficients.push(coefficient);
+                res.exponents.extend_from_slice(row_exponents);
+                let output_exponent = res.exponents.len() - nvars + n;
+                res.exponents[output_exponent] = E::zero();
+            }
+
+            row_start = row_end;
         }
 
         res
@@ -3703,17 +3755,22 @@ impl<F: Ring, E: Exponent> MultivariatePolynomial<F, E, LexOrder> {
         res
     }
 
-    /// Multiply polynomials that densely occupy a bounded total-degree simplex.
-    ///
-    /// A full mixed-radix box is prohibitively large for many variables, even when the
-    /// number of total-degree monomials is modest. Split the exponent vector and use a
-    /// compact perfect-rank table for the simplex instead of maintaining a monomial heap.
-    fn try_total_degree_dense_mul(
+    /// Return the total degree and coefficient count for a bounded dense
+    /// total-degree multiplication, including the packed-exponent limits.
+    fn total_degree_dense_mul_shape(
         &self,
         other: &MultivariatePolynomial<F, E, LexOrder>,
-    ) -> Option<MultivariatePolynomial<F, E, LexOrder>> {
+    ) -> Option<(usize, usize)> {
         let variable_count = self.nvars();
-        if variable_count < 2 || variable_count > 8 {
+        if variable_count != other.nvars()
+            || !(2..=8).contains(&variable_count)
+            || !self.is_polynomial()
+            || !other.is_polynomial()
+            || (0..variable_count).any(|variable| {
+                self.degree(variable).to_i32() as i64 + other.degree(variable).to_i32() as i64
+                    > u8::MAX as i64
+            })
+        {
             return None;
         }
 
@@ -3752,6 +3809,29 @@ impl<F: Ring, E: Exponent> MultivariatePolynomial<F, E, LexOrder> {
         {
             return None;
         }
+
+        Some((total_degree, coefficient_count))
+    }
+
+    /// Return whether multiplication can use the bounded total-degree simplex workspace.
+    pub(super) fn total_degree_dense_mul_is_bounded(
+        &self,
+        other: &MultivariatePolynomial<F, E, LexOrder>,
+    ) -> bool {
+        self.total_degree_dense_mul_shape(other).is_some()
+    }
+
+    /// Multiply polynomials that densely occupy a bounded total-degree simplex.
+    ///
+    /// A full mixed-radix box is prohibitively large for many variables, even when the
+    /// number of total-degree monomials is modest. Split the exponent vector and use a
+    /// compact perfect-rank table for the simplex instead of maintaining a monomial heap.
+    fn try_total_degree_dense_mul(
+        &self,
+        other: &MultivariatePolynomial<F, E, LexOrder>,
+    ) -> Option<MultivariatePolynomial<F, E, LexOrder>> {
+        let variable_count = self.nvars();
+        let (total_degree, coefficient_count) = self.total_degree_dense_mul_shape(other)?;
 
         let rank_table = total_degree_rank_table(variable_count, total_degree)?;
         let radix = total_degree + 1;
@@ -5716,6 +5796,233 @@ impl<R: EuclideanDomain, E: Exponent> MultivariatePolynomial<AlgebraicExtension<
     }
 }
 
+/// Word operations used by one incremental integer-polynomial CRT merge.
+pub(super) trait WordCrt: FiniteFieldWorkspace + Copy {
+    /// Reduce an integer to the standard representative in `[0, modulus)`.
+    fn reduce_integer(value: &Integer, modulus: Self) -> Self;
+
+    /// Compute the symmetric word `t` satisfying
+    /// `t * accumulated_modulus = image - accumulated_coefficient (mod p)`.
+    fn correction(
+        field: &FiniteField<Self>,
+        image: &FiniteFieldElement<Self>,
+        accumulated_mod_p: Self,
+        modulus_inverse: &FiniteFieldElement<Self>,
+    ) -> i64
+    where
+        FiniteField<Self>: FiniteFieldCore<Self> + Set<Element = FiniteFieldElement<Self>> + Ring;
+}
+
+impl WordCrt for u32 {
+    #[inline(always)]
+    fn reduce_integer(value: &Integer, modulus: Self) -> Self {
+        match value {
+            Integer::Single(value) => value.rem_euclid(i64::from(modulus)) as u32,
+            Integer::Double(value) => value.get().rem_euclid(i128::from(modulus)) as u32,
+            Integer::Large(value) => value.mod_u(modulus),
+        }
+    }
+
+    #[inline(always)]
+    fn correction(
+        field: &FiniteField<Self>,
+        image: &FiniteFieldElement<Self>,
+        accumulated_mod_p: Self,
+        modulus_inverse: &FiniteFieldElement<Self>,
+    ) -> i64 {
+        let image = field.from_element(image);
+        let delta = if image >= accumulated_mod_p {
+            image - accumulated_mod_p
+        } else {
+            field.get_prime() - (accumulated_mod_p - image)
+        };
+
+        // `modulus_inverse` is in Montgomery form. Multiplying it by a standard residue performs
+        // exactly one Montgomery reduction and leaves the standard correction in the inner word.
+        let correction = *field
+            .mul(&FiniteFieldElement::from_inner(delta), modulus_inverse)
+            .inner();
+        if correction <= field.get_prime() / 2 {
+            i64::from(correction)
+        } else {
+            -i64::from(field.get_prime() - correction)
+        }
+    }
+}
+
+impl WordCrt for u64 {
+    #[inline(always)]
+    fn reduce_integer(value: &Integer, modulus: Self) -> Self {
+        match value {
+            &Integer::Single(value) => (i128::from(value)).rem_euclid(i128::from(modulus)) as u64,
+            &Integer::Double(value) => value.get().rem_euclid(i128::from(modulus)) as u64,
+            Integer::Large(value) => value.mod_u64(modulus),
+        }
+    }
+
+    #[inline(always)]
+    fn correction(
+        field: &FiniteField<Self>,
+        image: &FiniteFieldElement<Self>,
+        accumulated_mod_p: Self,
+        modulus_inverse: &FiniteFieldElement<Self>,
+    ) -> i64 {
+        let image = field.from_element(image);
+        let delta = if image >= accumulated_mod_p {
+            image - accumulated_mod_p
+        } else {
+            field.get_prime() - (accumulated_mod_p - image)
+        };
+
+        let correction = *field
+            .mul(&FiniteFieldElement::from_inner(delta), modulus_inverse)
+            .inner();
+        if correction <= field.get_prime() / 2 {
+            correction as i64
+        } else {
+            -((field.get_prime() - correction) as i64)
+        }
+    }
+}
+
+/// Precomputed data for merging one word-prime image into an integer polynomial.
+///
+/// For an accumulated modulus `M` and a new prime `p`, construction computes
+/// `(M mod p)^-1` once. Each coefficient then needs one word reduction and one fused update
+/// `a += M*t`, where `t` is chosen symmetrically modulo `p`.
+pub(super) struct IntegerPolynomialCrtContext<'a, UField>
+where
+    UField: WordCrt,
+    FiniteField<UField>: FiniteFieldCore<UField> + Set<Element = FiniteFieldElement<UField>> + Ring,
+{
+    modulus: &'a Integer,
+    field: &'a FiniteField<UField>,
+    modulus_inverse: FiniteFieldElement<UField>,
+}
+
+impl<'a, UField> IntegerPolynomialCrtContext<'a, UField>
+where
+    UField: WordCrt,
+    FiniteField<UField>: FiniteFieldCore<UField> + Set<Element = FiniteFieldElement<UField>> + Ring,
+{
+    /// Precompute the inverse needed by every coefficient in this CRT image.
+    pub(super) fn new(modulus: &'a Integer, field: &'a FiniteField<UField>) -> Option<Self> {
+        assert!(
+            !modulus.is_zero() && !modulus.is_negative(),
+            "the accumulated CRT modulus must be positive"
+        );
+        let reduced_modulus = UField::reduce_integer(modulus, field.get_prime());
+        let modulus_inverse = field.try_inv(&field.to_element(reduced_modulus))?;
+        Some(Self {
+            modulus,
+            field,
+            modulus_inverse,
+        })
+    }
+
+    #[inline(always)]
+    fn merge_coefficient(&self, accumulated: &mut Integer, image: &FiniteFieldElement<UField>) {
+        let accumulated_mod_p = UField::reduce_integer(accumulated, self.field.get_prime());
+        let correction =
+            UField::correction(self.field, image, accumulated_mod_p, &self.modulus_inverse);
+        if correction != 0 {
+            Z.add_mul_assign(accumulated, self.modulus, &Integer::Single(correction));
+        }
+    }
+
+    /// Merge `image` into `accumulator` while keeping every coefficient symmetric modulo `M*p`.
+    ///
+    /// The coefficients in `accumulator` must initially be symmetric modulo `M`. Equal supports
+    /// are updated in place. If a term vanished in one modular image, the sorted fallback merges
+    /// both supports and supplies a zero coefficient on the missing side.
+    pub(super) fn merge_assign<E: Exponent, O: MonomialOrder>(
+        &self,
+        accumulator: &mut MultivariatePolynomial<IntegerRing, E, O>,
+        image: &MultivariatePolynomial<FiniteField<UField>, E, O>,
+    ) {
+        assert_eq!(accumulator.variables(), image.variables());
+        assert!(
+            image.ring().get_prime() == self.field.get_prime(),
+            "the modular image must use the CRT context's prime"
+        );
+        debug_assert!(
+            accumulator
+                .coefficients
+                .iter()
+                .all(|coefficient| coefficient.abs() * Integer::from(2) <= *self.modulus)
+        );
+
+        if accumulator.exponents == image.exponents {
+            for (accumulated, image) in accumulator.coefficients.iter_mut().zip(&image.coefficients)
+            {
+                self.merge_coefficient(accumulated, image);
+                debug_assert!(!accumulated.is_zero());
+            }
+            return;
+        }
+
+        let mut result = accumulator.zero_with_capacity(accumulator.nterms() + image.nterms());
+        let zero_image = self.field.zero();
+        let mut accumulator_index = 0;
+        let mut image_index = 0;
+
+        while accumulator_index < accumulator.nterms() || image_index < image.nterms() {
+            let (exponents, mut coefficient, image_coefficient) =
+                if accumulator_index < accumulator.nterms() && image_index < image.nterms() {
+                    match O::cmp(
+                        accumulator.exponents(accumulator_index),
+                        image.exponents(image_index),
+                    ) {
+                        Ordering::Equal => {
+                            accumulator_index += 1;
+                            image_index += 1;
+                            (
+                                accumulator.exponents(accumulator_index - 1),
+                                accumulator.coefficients[accumulator_index - 1].clone(),
+                                &image.coefficients[image_index - 1],
+                            )
+                        }
+                        Ordering::Less => {
+                            accumulator_index += 1;
+                            (
+                                accumulator.exponents(accumulator_index - 1),
+                                accumulator.coefficients[accumulator_index - 1].clone(),
+                                &zero_image,
+                            )
+                        }
+                        Ordering::Greater => {
+                            image_index += 1;
+                            (
+                                image.exponents(image_index - 1),
+                                Integer::zero(),
+                                &image.coefficients[image_index - 1],
+                            )
+                        }
+                    }
+                } else if accumulator_index < accumulator.nterms() {
+                    accumulator_index += 1;
+                    (
+                        accumulator.exponents(accumulator_index - 1),
+                        accumulator.coefficients[accumulator_index - 1].clone(),
+                        &zero_image,
+                    )
+                } else {
+                    image_index += 1;
+                    (
+                        image.exponents(image_index - 1),
+                        Integer::zero(),
+                        &image.coefficients[image_index - 1],
+                    )
+                };
+
+            self.merge_coefficient(&mut coefficient, image_coefficient);
+            result.append_monomial(coefficient, exponents);
+        }
+
+        *accumulator = result;
+    }
+}
+
 impl<E: Exponent> MultivariatePolynomial<IntegerRing, E> {
     /// Compute the polynomial that is congruent to `self` modulo `m` and `other` modulo `p` using the Chinese Remainder Theorem.
     pub fn chinese_remainder(&self, other: &Self, m: &Integer, p: &Integer) -> Self {
@@ -5873,7 +6180,7 @@ mod test {
         domains::{
             Ring, SampleableRing,
             algebraic::AlgebraicExtension,
-            finite_field::{Zp, Zp64},
+            finite_field::{FiniteFieldCore, PrimeIteratorU64, Zp, Zp64},
             integer::{Integer, IntegerRing, Z},
             rational::{Q, RationalField},
         },
@@ -5883,9 +6190,166 @@ mod test {
     };
 
     use super::{
-        MultivariatePolynomial, PolynomialRing, PolynomialSamplingPolicy,
-        mixed_radix_dense_work_is_bounded,
+        IntegerPolynomialCrtContext, MultivariatePolynomial, PolynomialRing,
+        PolynomialSamplingPolicy, mixed_radix_dense_work_is_bounded,
     };
+
+    #[test]
+    fn replace_univariate_horner_matches_dense_evaluation() {
+        let polynomial = parse!("2-3*x+5*x^4-7*x^9").to_polynomial::<_, u16>(&Z, None);
+        let univariate = polynomial.to_univariate_from_univariate(0);
+
+        for value in [-3, 0, 1, 5].map(Integer::from) {
+            assert_eq!(
+                polynomial.replace(0, &value),
+                polynomial.constant(univariate.evaluate(&value))
+            );
+        }
+
+        let cancellation = parse!("x-1").to_polynomial::<_, u16>(&Z, None);
+        assert!(cancellation.replace(0, &Integer::from(1)).is_zero());
+    }
+
+    #[test]
+    fn integer_polynomial_crt_context_matches_generic_crt() {
+        let modulus = (Integer::from(1) << 200usize) + 123;
+        let half_modulus: Integer = &modulus / 2;
+
+        let mut accumulated = parse!("1+x+y").to_polynomial::<_, u16>(&Z, None);
+        accumulated.coefficients = vec![
+            half_modulus.clone() - 17,
+            -half_modulus.clone() + 29,
+            Integer::from(41),
+        ];
+        let image_integer =
+            parse!("5+7*x+11*y").to_polynomial::<_, u16>(&Z, accumulated.variables().clone());
+
+        let field32 = Zp::new(2_147_483_659);
+        let image32 = image_integer.map_coeff(|value| field32.nth(value.clone()), field32.clone());
+        let image32_integer = image32.map_coeff(|value| field32.to_symmetric_integer(value), Z);
+        let expected32 = accumulated.chinese_remainder(
+            &image32_integer,
+            &modulus,
+            &Integer::from(field32.get_prime()),
+        );
+        let mut actual32 = accumulated.clone();
+        IntegerPolynomialCrtContext::new(&modulus, &field32)
+            .unwrap()
+            .merge_assign(&mut actual32, &image32);
+        assert_eq!(actual32, expected32);
+
+        let field64 = Zp64::new(18_346_744_073_709_552_031);
+        let image64 = image_integer.map_coeff(|value| field64.nth(value.clone()), field64.clone());
+        let image64_integer = image64.map_coeff(|value| field64.to_symmetric_integer(value), Z);
+        let expected64 = accumulated.chinese_remainder(
+            &image64_integer,
+            &modulus,
+            &Integer::from(field64.get_prime()),
+        );
+        let mut actual64 = accumulated;
+        IntegerPolynomialCrtContext::new(&modulus, &field64)
+            .unwrap()
+            .merge_assign(&mut actual64, &image64);
+        assert_eq!(actual64, expected64);
+
+        let combined_modulus = &modulus * Integer::from(field64.get_prime());
+        assert!(
+            actual64
+                .coefficients
+                .iter()
+                .all(|coefficient| { coefficient.abs() * Integer::from(2) <= combined_modulus })
+        );
+    }
+
+    #[test]
+    fn integer_polynomial_crt_context_repeated_merges() {
+        let mut target = parse!("1+x+y").to_polynomial::<_, u16>(&Z, None);
+        target.coefficients = vec![
+            Integer::from(7),
+            (Integer::from(1) << 70usize) + 19,
+            (Integer::from(1) << 200usize) + 23,
+        ];
+
+        let first_prime = 2_147_483_659u32;
+        let first_field = Zp::new(first_prime);
+        let first_image = target.map_coeff(
+            |coefficient| first_field.nth(coefficient.clone()),
+            first_field.clone(),
+        );
+        let mut actual = first_image.map_coeff(
+            |coefficient| first_field.to_symmetric_integer(coefficient),
+            Z,
+        );
+        let mut modulus = Integer::from(first_prime);
+
+        for prime in PrimeIteratorU64::new(u64::from(first_prime)).take(8) {
+            let prime = u32::try_from(prime).unwrap();
+            let field = Zp::new(prime);
+            let image =
+                target.map_coeff(|coefficient| field.nth(coefficient.clone()), field.clone());
+            let image_as_integer =
+                image.map_coeff(|coefficient| field.to_symmetric_integer(coefficient), Z);
+            let expected =
+                actual.chinese_remainder(&image_as_integer, &modulus, &Integer::from(prime));
+
+            IntegerPolynomialCrtContext::new(&modulus, &field)
+                .unwrap()
+                .merge_assign(&mut actual, &image);
+            assert_eq!(actual, expected);
+
+            modulus *= prime;
+            assert!(
+                actual
+                    .coefficients
+                    .iter()
+                    .all(|coefficient| coefficient.abs() * Integer::from(2) <= modulus)
+            );
+        }
+
+        assert_eq!(actual, target);
+        assert!(
+            IntegerPolynomialCrtContext::new(&Integer::from(first_prime), &first_field).is_none()
+        );
+    }
+
+    #[test]
+    fn integer_polynomial_crt_context_merges_different_supports() {
+        let modulus = (Integer::from(1) << 130usize) + 51;
+        let variables = parse!("1+x+y")
+            .to_polynomial::<_, u16>(&Z, None)
+            .variables()
+            .clone();
+        let accumulated = parse!("1+x").to_polynomial::<_, u16>(&Z, variables.clone());
+        let image_integer = parse!("2+y").to_polynomial::<_, u16>(&Z, variables);
+        let field = Zp::new(2_147_483_659);
+        let image = image_integer.map_coeff(|value| field.nth(value.clone()), field.clone());
+        let image_as_integer = image.map_coeff(|value| field.to_symmetric_integer(value), Z);
+        let expected = accumulated.chinese_remainder(
+            &image_as_integer,
+            &modulus,
+            &Integer::from(field.get_prime()),
+        );
+
+        let mut actual = accumulated.clone();
+        IntegerPolynomialCrtContext::new(&modulus, &field)
+            .unwrap()
+            .merge_assign(&mut actual, &image);
+        assert_eq!(actual, expected);
+
+        let field64 = Zp64::new(18_346_744_073_709_552_031);
+        let image64 = image_integer.map_coeff(|value| field64.nth(value.clone()), field64.clone());
+        let image64_as_integer = image64.map_coeff(|value| field64.to_symmetric_integer(value), Z);
+        let expected64 = accumulated.chinese_remainder(
+            &image64_as_integer,
+            &modulus,
+            &Integer::from(field64.get_prime()),
+        );
+        let mut actual64 = accumulated;
+        IntegerPolynomialCrtContext::new(&modulus, &field64)
+            .unwrap()
+            .merge_assign(&mut actual64, &image64);
+        assert_eq!(actual64, expected64);
+    }
 
     #[cfg(feature = "bincode")]
     use crate::domains::float::{F64, FloatField};
@@ -6244,6 +6708,64 @@ mod test {
             r.to_expression(),
             parse!("1-v8-v8*v9-v7-v6-v5-v4+v3-4*v2+v2*v3^2+v2^2*v3")
         );
+    }
+
+    #[test]
+    fn replace_last_evaluates_contiguous_rows_and_removes_cancellations() {
+        let variables = Arc::new(vec![
+            symbol!("x").into(),
+            symbol!("y").into(),
+            symbol!("z").into(),
+            symbol!("w").into(),
+        ]);
+        let polynomial = parse!("x^2*z^4+3*x^2*z^2-4*x^2+y*z^3-y*z+5+x*z-2*x")
+            .to_polynomial::<_, u16>(&Z, variables);
+
+        let at_two = polynomial.replace_last(2, &Integer::from(2));
+        let expected_at_two =
+            parse!("24*x^2+6*y+5").to_polynomial::<_, u16>(&Z, polynomial.variables().clone());
+        assert_eq!(at_two, expected_at_two);
+
+        let at_zero = polynomial.replace_last(2, &Integer::from(0));
+        let expected_at_zero =
+            parse!("-4*x^2-2*x+5").to_polynomial::<_, u16>(&Z, polynomial.variables().clone());
+        assert_eq!(at_zero, expected_at_zero);
+    }
+
+    #[test]
+    fn replace_last_matches_independent_term_evaluation() {
+        let variables = Arc::new(vec![
+            symbol!("x").into(),
+            symbol!("y").into(),
+            symbol!("z").into(),
+            symbol!("w").into(),
+        ]);
+        let mut polynomial = MultivariatePolynomial::<IntegerRing, u16>::new(&Z, None, variables);
+        for x in 0..=4u16 {
+            for y in 0..=3u16 {
+                for z in 0..=6u16 {
+                    let coefficient = i64::from((3 * x + 5 * y + 7 * z) % 11) - 5;
+                    if coefficient != 0 && (x + 2 * y + 3 * z) % 4 != 0 {
+                        polynomial.append_monomial(Integer::from(coefficient), &[x, y, z, 0]);
+                    }
+                }
+            }
+        }
+
+        for value in -3..=3 {
+            let value = Integer::from(value);
+            let mut expected = polynomial.zero_with_capacity(polynomial.nterms());
+            for term in &polynomial {
+                let mut exponents = term.exponents.to_vec();
+                let exponent = exponents[2];
+                exponents[2] = 0;
+                let power = Z.pow(&value, u64::from(exponent));
+                let coefficient = term.coefficient * &power;
+                expected.append_monomial(coefficient, &exponents);
+            }
+
+            assert_eq!(polynomial.replace_last(2, &value), expected);
+        }
     }
 
     #[test]

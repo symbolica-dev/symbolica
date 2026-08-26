@@ -2,11 +2,108 @@
 
 use crate::{
     atom::AtomCore,
-    domains::{SampleableRing, integer::Z, rational::Q},
+    domains::{
+        Ring, RingOps, SampleableRing,
+        finite_field::{FiniteFieldCore, Zp, Zp64},
+        integer::Z,
+        rational::Q,
+    },
     parse,
-    poly::univariate::{UnivariatePolynomialRing, UnivariatePolynomialSamplingPolicy},
+    poly::univariate::{
+        DenseFiniteFieldRootContext, UnivariatePolynomialRing, UnivariatePolynomialSamplingPolicy,
+    },
 };
 use rand::{SeedableRng, rngs::StdRng};
+
+fn polynomial_with_roots(
+    field: &Zp64,
+    roots: &[u64],
+) -> Vec<<Zp64 as crate::domains::Set>::Element> {
+    let mut polynomial = vec![field.one()];
+    for root in roots {
+        let root = field.to_element(*root);
+        let mut product = vec![field.zero(); polynomial.len() + 1];
+        for (degree, coefficient) in polynomial.iter().enumerate() {
+            field.sub_mul_assign(&mut product[degree], coefficient, &root);
+            field.add_assign(&mut product[degree + 1], coefficient);
+        }
+        polynomial = product;
+    }
+    polynomial
+}
+
+#[test]
+fn dense_finite_field_root_context_finds_distinct_nonzero_roots() {
+    // Hu-Monagan starts its smooth-prime search here, above i64::MAX.
+    let field = Zp64::new(10_030_613_004_288_000_001);
+    let expected = [1, 2, 3, 5, 8, 13, 21, 34, 55, 89, 144, 233, 377];
+    let polynomial = polynomial_with_roots(&field, &expected);
+    let mut context = DenseFiniteFieldRootContext::new(&field);
+
+    let mut actual = context
+        .find_distinct_nonzero_roots(&polynomial)
+        .unwrap()
+        .iter()
+        .map(|root| field.from_element(root))
+        .collect::<Vec<_>>();
+    actual.sort_unstable();
+
+    assert_eq!(actual, expected);
+}
+
+#[test]
+fn dense_finite_field_root_context_uses_u32_fields() {
+    let field = Zp::new(1_088_391_169);
+    let expected = [1u32, 2, 3, 5, 8, 13, 21, 34, 55, 89, 144, 233, 377];
+    let mut polynomial = vec![field.one()];
+    for root in expected {
+        let root = field.to_element(root);
+        let mut product = vec![field.zero(); polynomial.len() + 1];
+        for (degree, coefficient) in polynomial.iter().enumerate() {
+            field.sub_mul_assign(&mut product[degree], coefficient, &root);
+            field.add_assign(&mut product[degree + 1], coefficient);
+        }
+        polynomial = product;
+    }
+
+    let mut context = DenseFiniteFieldRootContext::new(&field);
+    let mut actual = context
+        .find_distinct_nonzero_roots(&polynomial)
+        .unwrap()
+        .iter()
+        .map(|root| field.from_element(root))
+        .collect::<Vec<_>>();
+    actual.sort_unstable();
+
+    assert_eq!(actual, expected);
+}
+
+#[test]
+fn dense_finite_field_root_context_rejects_repeated_roots() {
+    let field = Zp64::new(17);
+    let polynomial = polynomial_with_roots(&field, &[3, 3]);
+    let mut context = DenseFiniteFieldRootContext::new(&field);
+
+    assert!(context.find_distinct_nonzero_roots(&polynomial).is_none());
+}
+
+#[test]
+fn dense_finite_field_root_context_rejects_zero_roots() {
+    let field = Zp64::new(17);
+    let polynomial = polynomial_with_roots(&field, &[0, 3]);
+    let mut context = DenseFiniteFieldRootContext::new(&field);
+
+    assert!(context.find_distinct_nonzero_roots(&polynomial).is_none());
+}
+
+#[test]
+fn dense_finite_field_root_context_rejects_nonsplit_polynomials() {
+    let field = Zp64::new(17);
+    let polynomial = vec![field.to_element(3), field.zero(), field.one()];
+    let mut context = DenseFiniteFieldRootContext::new(&field);
+
+    assert!(context.find_distinct_nonzero_roots(&polynomial).is_none());
+}
 
 #[test]
 fn samples_with_degree_and_coefficient_policies() {
