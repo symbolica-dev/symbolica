@@ -731,7 +731,7 @@ impl<'a, F: Field, E: PositiveExponent> DenseUnivariateGcdContext<'a, F, E> {
         let Some(variable) = self.variable else {
             return vec![polynomial.coefficients[0].clone()];
         };
-        let degree = polynomial.degree(variable).to_u32() as usize;
+        let degree = polynomial.last_exponents()[variable].to_u32() as usize;
         let mut coefficients = vec![polynomial.ring().zero(); degree + 1];
         for term in polynomial {
             coefficients[term.exponents[variable].to_u32() as usize] = term.coefficient.clone();
@@ -805,7 +805,7 @@ impl<'a, F: Field, E: PositiveExponent> DenseUnivariateGcdContext<'a, F, E> {
         for (degree, coefficient) in coefficients.into_iter().enumerate() {
             if !self.prototype.ring().is_zero(&coefficient) {
                 exponents[variable] = E::from_u32(degree as u32);
-                result.append_monomial(coefficient, &exponents);
+                result.append_monomial_back(coefficient, &exponents);
             }
         }
         result
