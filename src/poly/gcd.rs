@@ -168,6 +168,38 @@ trait ModularGcdWorkspace: FiniteFieldWorkspace + WordCrt {
     fn first_prime() -> u64;
 }
 
+/// Use 64-bit modular images once the reconstruction scale or input coefficient height is large
+/// enough that halving the number of CRT images outweighs the slower arithmetic in each image.
+#[cfg(not(feature = "binary_size"))]
+const U64_ZIPPEL_HEIGHT_BITS: u64 = 512;
+
+/// Returns whether any coefficient reaches the given significant-bit threshold.
+#[cfg(not(feature = "binary_size"))]
+#[inline]
+fn has_coefficient_with_bits<E: PositiveExponent>(
+    polynomial: &MultivariatePolynomial<IntegerRing, E>,
+    bits: u64,
+) -> bool {
+    polynomial
+        .coefficients
+        .iter()
+        .any(|coefficient| coefficient.significant_bits() >= bits)
+}
+
+/// Selects 64-bit modular images when the GCD scale or both input coefficient heights predict a
+/// long CRT reconstruction.
+#[cfg(not(feature = "binary_size"))]
+#[inline]
+fn should_use_u64_zippel<E: PositiveExponent>(
+    a: &MultivariatePolynomial<IntegerRing, E>,
+    b: &MultivariatePolynomial<IntegerRing, E>,
+    gamma: &Integer,
+) -> bool {
+    gamma.significant_bits() >= U64_ZIPPEL_HEIGHT_BITS
+        || (has_coefficient_with_bits(a, U64_ZIPPEL_HEIGHT_BITS)
+            && has_coefficient_with_bits(b, U64_ZIPPEL_HEIGHT_BITS))
+}
+
 impl ModularGcdWorkspace for u32 {
     fn first_prime() -> u64 {
         u32::get_large_prime() as u64
@@ -2456,7 +2488,42 @@ impl<E: PositiveExponent> MultivariatePolynomial<IntegerRing, E> {
         Some(candidate)
     }
 
-    /// Compute the gcd of two multivariate polynomials using Zippel's algorithm.
+    /// Compute the gcd of two multivariate polynomials using Zippel's algorithm with a selected
+    /// modular word size.
+    fn gcd_zippel_auto(
+        &self,
+        b: &Self,
+        vars: &[usize],
+        bounds: &mut [E],
+        tight_bounds: &mut [E],
+    ) -> Self {
+        let gamma = self
+            .ring()
+            .gcd(&self.lcoeff_varorder(vars), &b.lcoeff_varorder(vars));
+        debug!(
+            "gamma {} ({} significant bits)",
+            gamma,
+            gamma.significant_bits()
+        );
+
+        #[cfg(feature = "binary_size")]
+        {
+            Self::gcd_zippel::<u64>(self, b, vars, bounds, tight_bounds, &gamma)
+        }
+
+        #[cfg(not(feature = "binary_size"))]
+        {
+            if should_use_u64_zippel(self, b, &gamma) {
+                debug!("Using 64-bit modular images for Zippel GCD");
+                Self::gcd_zippel::<u64>(self, b, vars, bounds, tight_bounds, &gamma)
+            } else {
+                debug!("Using 32-bit modular images for Zippel GCD");
+                Self::gcd_zippel::<u32>(self, b, vars, bounds, tight_bounds, &gamma)
+            }
+        }
+    }
+
+    /// Compute the gcd using Zippel's algorithm and the supplied modular workspace.
     /// TODO: provide a parallel implementation?
     #[instrument(level = "debug", skip_all)]
     fn gcd_zippel<UField: ModularGcdWorkspace>(
@@ -2465,6 +2532,7 @@ impl<E: PositiveExponent> MultivariatePolynomial<IntegerRing, E> {
         vars: &[usize], // variables
         bounds: &mut [E],
         tight_bounds: &mut [E],
+        gamma: &Integer,
     ) -> Self
     where
         FiniteField<UField>: FiniteFieldCore<UField> + Set<Element = FiniteFieldElement<UField>>,
@@ -2477,12 +2545,6 @@ impl<E: PositiveExponent> MultivariatePolynomial<IntegerRing, E> {
             self.check_consistency();
             b.check_consistency();
         }
-
-        // compute scaling factor in Z
-        let gamma = self
-            .ring()
-            .gcd(&self.lcoeff_varorder(vars), &b.lcoeff_varorder(vars));
-        debug!("gamma {}", gamma);
 
         let mut primes = ModularGcdPrimeIterator::for_workspace::<UField>();
 
@@ -3200,17 +3262,7 @@ impl<E: PositiveExponent> MultivariatePolynomial<IntegerRing, E> {
             let mut tight_bounds: SmallVec<[E; INLINED_EXPONENTS]> =
                 bounds.iter().copied().collect();
 
-            #[cfg(feature = "binary_size")]
-            return Some(MultivariatePolynomial::gcd_zippel::<u64>(
-                self,
-                b,
-                &vars,
-                &mut bounds,
-                &mut tight_bounds,
-            ));
-
-            #[cfg(not(feature = "binary_size"))]
-            return Some(MultivariatePolynomial::gcd_zippel::<u32>(
+            return Some(MultivariatePolynomial::gcd_zippel_auto(
                 self,
                 b,
                 &vars,
@@ -3908,15 +3960,7 @@ impl<E: PositiveExponent> PolynomialGCD<E> for IntegerRing {
         }
 
         let mut tight_bounds: SmallVec<[E; INLINED_EXPONENTS]> = bounds.iter().cloned().collect();
-        if cfg!(feature = "binary_size") {
-            MultivariatePolynomial::gcd_zippel::<u64>(a, b, vars, bounds, &mut tight_bounds)
-        } else {
-            #[cfg(feature = "binary_size")]
-            unreachable!("binary_size builds only instantiate the u64 modular GCD path");
-
-            #[cfg(not(feature = "binary_size"))]
-            MultivariatePolynomial::gcd_zippel::<u32>(a, b, vars, bounds, &mut tight_bounds)
-        }
+        MultivariatePolynomial::gcd_zippel_auto(a, b, vars, bounds, &mut tight_bounds)
     }
 
     fn get_gcd_var_bounds(
@@ -4701,6 +4745,36 @@ mod tests {
         assert!(Integer::from(successor).is_prime(0));
     }
 
+    #[cfg(not(feature = "binary_size"))]
+    #[test]
+    fn zippel_word_selector_uses_high_gamma() {
+        let polynomial = parse!("x+1").to_polynomial::<_, u16>(&Z, None);
+        let gamma = Integer::from(1) << (U64_ZIPPEL_HEIGHT_BITS as usize - 1);
+        assert!(should_use_u64_zippel(&polynomial, &polynomial, &gamma));
+    }
+
+    #[cfg(not(feature = "binary_size"))]
+    #[test]
+    fn zippel_word_selector_uses_two_high_inputs() {
+        let coefficient = Integer::from(1) << (U64_ZIPPEL_HEIGHT_BITS as usize - 1);
+        let polynomial = parse!(&format!("{coefficient}*x+1")).to_polynomial::<_, u16>(&Z, None);
+        assert!(should_use_u64_zippel(
+            &polynomial,
+            &polynomial,
+            &Integer::from(1)
+        ));
+    }
+
+    #[cfg(not(feature = "binary_size"))]
+    #[test]
+    fn zippel_word_selector_keeps_one_high_input_on_u32() {
+        let coefficient = Integer::from(1) << (U64_ZIPPEL_HEIGHT_BITS as usize - 1);
+        let high = parse!(&format!("{coefficient}*x+1")).to_polynomial::<_, u16>(&Z, None);
+        let low = parse!("x+1").to_polynomial::<_, u16>(&Z, None);
+        assert!(!should_use_u64_zippel(&high, &low, &Integer::from(1)));
+        assert!(!should_use_u64_zippel(&low, &high, &Integer::from(1)));
+    }
+
     #[test]
     fn galois_gcd_upgrade_samples_outside_the_prime_subfield() {
         let field = AlgebraicExtension::galois_field(Z2, 2, PolyVariable::Temporary(0));
@@ -4805,6 +4879,7 @@ mod tests {
                 .map(|variable| gcd.degree(variable))
                 .collect::<Vec<_>>();
             let mut tight_bounds = bounds.clone();
+            let gamma = Z.gcd(&ag.lcoeff_varorder(&vars), &bg.lcoeff_varorder(&vars));
 
             let reconstructed = MultivariatePolynomial::gcd_zippel::<u32>(
                 &ag,
@@ -4812,6 +4887,7 @@ mod tests {
                 &vars,
                 &mut bounds,
                 &mut tight_bounds,
+                &gamma,
             );
             assert_eq!(reconstructed, gcd);
         }
