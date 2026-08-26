@@ -2869,6 +2869,172 @@ fn estimated_heuristic_gcd_evaluation_bits<E: PositiveExponent>(
     a_bits.max(b_bits)
 }
 
+/// Computes a normalized univariate GCD image in a dense `Zp64` coefficient workspace.
+struct DenseZp64UnivariateGcdImage<'a, E: PositiveExponent> {
+    field: &'a Zp64,
+    prototype: &'a MultivariatePolynomial<IntegerRing, E>,
+    variable: usize,
+    left: Vec<FiniteFieldElement<u64>>,
+    right: Vec<FiniteFieldElement<u64>>,
+}
+
+impl<'a, E: PositiveExponent> DenseZp64UnivariateGcdImage<'a, E> {
+    /// Converts both integer polynomials directly to bounded degree-indexed field coefficients.
+    fn new(
+        left: &'a MultivariatePolynomial<IntegerRing, E>,
+        right: &MultivariatePolynomial<IntegerRing, E>,
+        variable: usize,
+        field: &'a Zp64,
+    ) -> Option<Self> {
+        if left.is_zero()
+            || right.is_zero()
+            || left.nvars() != right.nvars()
+            || variable >= left.nvars()
+            || left
+                .exponents_iter()
+                .chain(right.exponents_iter())
+                .any(|exponents| {
+                    exponents
+                        .iter()
+                        .enumerate()
+                        .any(|(index, exponent)| index != variable && !exponent.is_zero())
+                })
+        {
+            return None;
+        }
+
+        let coefficient_count =
+            left.degree(variable).max(right.degree(variable)).to_u32() as usize + 1;
+        if coefficient_count > DENSE_UNIVARIATE_GCD_MAX_COEFFICIENTS
+            || coefficient_count
+                > left
+                    .nterms()
+                    .saturating_add(right.nterms())
+                    .saturating_mul(DENSE_UNIVARIATE_GCD_MAX_SPARSITY_RATIO)
+        {
+            return None;
+        }
+
+        let coefficients = |polynomial: &MultivariatePolynomial<IntegerRing, E>| {
+            let degree = polynomial.degree(variable).to_u32() as usize;
+            let mut coefficients = vec![field.zero(); degree + 1];
+            for term in polynomial {
+                coefficients[term.exponents[variable].to_u32() as usize] =
+                    term.coefficient.to_finite_field(field);
+            }
+            coefficients
+        };
+        let left_coefficients = coefficients(left);
+        let right_coefficients = coefficients(right);
+        if left_coefficients
+            .last()
+            .is_none_or(|coefficient| field.is_zero(coefficient))
+            || right_coefficients
+                .last()
+                .is_none_or(|coefficient| field.is_zero(coefficient))
+        {
+            return None;
+        }
+
+        Some(Self {
+            field,
+            prototype: left,
+            variable,
+            left: left_coefficients,
+            right: right_coefficients,
+        })
+    }
+
+    /// Replaces `dividend` by its remainder and returns the inverse of the divisor leading term.
+    fn remainder(
+        field: &Zp64,
+        dividend: &mut Vec<FiniteFieldElement<u64>>,
+        divisor: &[FiniteFieldElement<u64>],
+    ) -> FiniteFieldElement<u64> {
+        debug_assert!(!divisor.is_empty());
+        debug_assert!(dividend.len() >= divisor.len());
+        let divisor_degree = divisor.len() - 1;
+        let inverse_leading = field.inv(divisor.last().unwrap());
+
+        for degree in (divisor_degree..dividend.len()).rev() {
+            let leading = std::mem::replace(&mut dividend[degree], field.zero());
+            if field.is_zero(&leading) {
+                continue;
+            }
+
+            let quotient = field.mul(&leading, &inverse_leading);
+            let shift = degree - divisor_degree;
+            for (coefficient, divisor_coefficient) in dividend[shift..degree]
+                .iter_mut()
+                .zip(&divisor[..divisor_degree])
+            {
+                field.sub_mul_assign(coefficient, divisor_coefficient, &quotient);
+            }
+        }
+
+        dividend.truncate(divisor_degree);
+        while dividend
+            .last()
+            .is_some_and(|coefficient| field.is_zero(coefficient))
+        {
+            dividend.pop();
+        }
+        inverse_leading
+    }
+
+    /// Encodes dense coefficients as a polynomial in the retained input variable.
+    fn polynomial(
+        &self,
+        coefficients: Vec<FiniteFieldElement<u64>>,
+    ) -> MultivariatePolynomial<Zp64, E> {
+        let capacity = coefficients
+            .iter()
+            .filter(|coefficient| !self.field.is_zero(coefficient))
+            .count();
+        let mut result = MultivariatePolynomial::new(
+            self.field,
+            Some(capacity),
+            self.prototype.variables().clone(),
+        );
+        let mut exponents = vec![E::zero(); self.prototype.nvars()];
+        for (degree, coefficient) in coefficients.into_iter().enumerate() {
+            if !self.field.is_zero(&coefficient) {
+                exponents[self.variable] = E::from_u32(degree as u32);
+                result.append_monomial_back(coefficient, &exponents);
+            }
+        }
+        result
+    }
+
+    /// Runs Euclid's algorithm and gives the result the requested leading coefficient.
+    fn run(
+        mut self,
+        leading_coefficient: FiniteFieldElement<u64>,
+    ) -> MultivariatePolynomial<Zp64, E> {
+        debug_assert!(!self.field.is_zero(&leading_coefficient));
+        if self.left.len() < self.right.len() {
+            mem::swap(&mut self.left, &mut self.right);
+        }
+
+        loop {
+            if self.right.len() == 1 {
+                return self.polynomial(vec![leading_coefficient]);
+            }
+
+            let inverse_leading = Self::remainder(self.field, &mut self.left, &self.right);
+            if self.left.is_empty() {
+                let scale = self.field.mul(&leading_coefficient, &inverse_leading);
+                for coefficient in &mut self.right {
+                    self.field.mul_assign(coefficient, &scale);
+                }
+                let coefficients = mem::take(&mut self.right);
+                return self.polynomial(coefficients);
+            }
+            mem::swap(&mut self.left, &mut self.right);
+        }
+    }
+}
+
 /// Reconstructs a primitive univariate integer GCD from normalized 63-bit modular images.
 struct UnivariateModularGcdContext<'a, E: PositiveExponent> {
     left: &'a MultivariatePolynomial<IntegerRing, E>,
@@ -2962,21 +3128,40 @@ impl<'a, E: PositiveExponent> UnivariateModularGcdContext<'a, E> {
                 continue;
             }
 
-            let left_image = self.primitive_left.map_coeff(
-                |coefficient| coefficient.to_finite_field(&field),
-                field.clone(),
-            );
-            let right_image = self.primitive_right.map_coeff(
-                |coefficient| coefficient.to_finite_field(&field),
-                field.clone(),
-            );
-            if left_image.degree(self.variable) != self.primitive_left.degree(self.variable)
-                || right_image.degree(self.variable) != self.primitive_right.degree(self.variable)
-            {
+            let left_leading_image = self.primitive_left.lcoeff().to_finite_field(&field);
+            let right_leading_image = self.primitive_right.lcoeff().to_finite_field(&field);
+            if field.is_zero(&left_leading_image) || field.is_zero(&right_leading_image) {
                 continue;
             }
 
-            let mut image = left_image.univariate_gcd(&right_image);
+            let image = if let Some(dense_image) = DenseZp64UnivariateGcdImage::new(
+                self.primitive_left.as_ref(),
+                self.primitive_right.as_ref(),
+                self.variable,
+                &field,
+            ) {
+                dense_image.run(gamma_image)
+            } else {
+                let left_image = self.primitive_left.map_coeff(
+                    |coefficient| coefficient.to_finite_field(&field),
+                    field.clone(),
+                );
+                let right_image = self.primitive_right.map_coeff(
+                    |coefficient| coefficient.to_finite_field(&field),
+                    field.clone(),
+                );
+                debug_assert_eq!(
+                    left_image.degree(self.variable),
+                    self.primitive_left.degree(self.variable)
+                );
+                debug_assert_eq!(
+                    right_image.degree(self.variable),
+                    self.primitive_right.degree(self.variable)
+                );
+                left_image
+                    .univariate_gcd(&right_image)
+                    .mul_coeff(gamma_image)
+            };
             let image_degree = image.degree(self.variable);
             if image_degree.is_zero() {
                 let candidate = self.left.constant(self.content_gcd.clone());
@@ -2985,8 +3170,6 @@ impl<'a, E: PositiveExponent> UnivariateModularGcdContext<'a, E> {
                 return Some((candidate, left_cofactor, right_cofactor));
             }
 
-            let image_scale = field.div(&gamma_image, &image.lcoeff());
-            image = image.mul_coeff(image_scale);
             match gcd_degree {
                 Some(degree) if image_degree > degree => continue,
                 Some(degree) if image_degree == degree => {
@@ -6242,6 +6425,78 @@ mod tests {
             select_univariate_integer_gcd(scalar_heuristic_allowed_80, 0),
             UnivariateIntegerGcdAlgorithm::Modular,
         );
+    }
+
+    #[test]
+    fn dense_zp64_univariate_gcd_image_matches_monic_field_gcd() {
+        let field = Zp64::new(
+            ModularGcdPrimeIterator::for_workspace::<u64>()
+                .next()
+                .unwrap(),
+        );
+        let [left_cofactor, right_cofactor, common_factor] = [
+            parse!("(1-3*x)^11+5").to_polynomial::<_, u16>(&Z, None),
+            parse!("(1+5*x)^10+7").to_polynomial::<_, u16>(&Z, None),
+            parse!("(1+2*x)^12+3").to_polynomial::<_, u16>(&Z, None),
+        ];
+        let left = &left_cofactor * &common_factor;
+        let right = &right_cofactor * &common_factor;
+        let leading = Integer::from(37).to_finite_field(&field);
+
+        let actual = DenseZp64UnivariateGcdImage::new(&right, &left, 0, &field)
+            .unwrap()
+            .run(leading);
+        let left_image = left.map_coeff(
+            |coefficient| coefficient.to_finite_field(&field),
+            field.clone(),
+        );
+        let right_image = right.map_coeff(
+            |coefficient| coefficient.to_finite_field(&field),
+            field.clone(),
+        );
+        let expected = left_image.univariate_gcd(&right_image).mul_coeff(leading);
+        assert_eq!(actual, expected);
+        assert_eq!(actual.lcoeff(), leading);
+    }
+
+    #[test]
+    fn dense_zp64_univariate_gcd_image_handles_inactive_and_sparse_variables() {
+        let field = Zp64::new(
+            ModularGcdPrimeIterator::for_workspace::<u64>()
+                .next()
+                .unwrap(),
+        );
+        let variable_template = parse!("x").to_polynomial::<IntegerRing, u16>(&Z, None);
+        let variables = std::sync::Arc::new(vec![
+            PolyVariable::Temporary(0),
+            variable_template.variables()[0].clone(),
+        ]);
+        let left = parse!("(x+1)^15*(x+2)^8").to_polynomial::<_, u16>(&Z, Some(variables.clone()));
+        let right = parse!("(x+1)^15*(x+3)^7").to_polynomial::<_, u16>(&Z, Some(variables));
+        let leading = Integer::from(11).to_finite_field(&field);
+        let actual = DenseZp64UnivariateGcdImage::new(&left, &right, 1, &field)
+            .unwrap()
+            .run(leading);
+        let expected = parse!("(x+1)^15")
+            .to_polynomial::<_, u16>(&Z, Some(actual.variables().clone()))
+            .map_coeff(
+                |coefficient| coefficient.to_finite_field(&field),
+                field.clone(),
+            )
+            .mul_coeff(leading);
+        assert_eq!(actual, expected);
+        assert_eq!(actual.lcoeff(), leading);
+
+        let dropped_leading = parse!("x")
+            .to_polynomial::<IntegerRing, u16>(&Z, Some(actual.variables().clone()))
+            .mul_coeff(Integer::from(field.get_prime()))
+            .add_constant(Integer::one());
+        assert!(DenseZp64UnivariateGcdImage::new(&dropped_leading, &left, 1, &field).is_none());
+
+        let sparse_left = parse!("x^100000+1").to_polynomial::<IntegerRing, u32>(&Z, None);
+        let sparse_right = parse!("x^99999+2")
+            .to_polynomial::<IntegerRing, u32>(&Z, sparse_left.variables().clone());
+        assert!(DenseZp64UnivariateGcdImage::new(&sparse_left, &sparse_right, 0, &field).is_none());
     }
 
     #[test]
