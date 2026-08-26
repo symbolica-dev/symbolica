@@ -697,9 +697,7 @@ impl ToFiniteField<u64> for Integer {
             &Integer::Double(n) => {
                 field.to_element(n.get().rem_euclid(field.get_prime() as i128) as u64)
             }
-            Integer::Large(r) => {
-                field.to_element(r.rem_euc(field.get_prime()).complete().to_u64().unwrap())
-            }
+            Integer::Large(r) => field.to_element(r.mod_u64(field.get_prime())),
         }
     }
 }

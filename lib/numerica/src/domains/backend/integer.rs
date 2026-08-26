@@ -1,4 +1,6 @@
 mod implementation {
+    #[cfg(all(feature = "gmp", target_pointer_width = "64", not(windows)))]
+    use rug::integer::IntegerExt64;
     #[cfg(feature = "gmp")]
     use std::cell::RefCell;
     use std::{
@@ -219,7 +221,21 @@ mod implementation {
 
         #[inline]
         pub fn mod_u(&self, modulus: u32) -> u32 {
-            self.rem_euc(Self::from(modulus)).to_u64().unwrap() as u32
+            #[cfg(feature = "gmp")]
+            return self.0.mod_u(modulus);
+            #[cfg(feature = "no_gmp")]
+            return self.rem_euc(Self::from(modulus)).to_u64().unwrap() as u32;
+        }
+
+        #[inline]
+        pub fn mod_u64(&self, modulus: u64) -> u64 {
+            #[cfg(all(feature = "gmp", target_pointer_width = "64", not(windows)))]
+            return self.0.mod_u64(modulus);
+            #[cfg(any(
+                feature = "no_gmp",
+                all(feature = "gmp", any(not(target_pointer_width = "64"), windows))
+            ))]
+            return self.rem_euc(Self::from(modulus)).to_u64().unwrap();
         }
 
         #[inline]
@@ -237,17 +253,39 @@ mod implementation {
 
         #[inline]
         pub fn div_rem_euc<T: Into<Self>>(self, rhs: T) -> (Self, Self) {
-            let rhs = rhs.into();
-            let r = self.rem_euc(rhs.clone());
-            let q = (self.into_raw() - r.0.clone()) / rhs.into_raw();
-            (Self(q), r)
+            #[cfg(feature = "gmp")]
+            {
+                let mut quotient = self.into_raw();
+                let mut remainder = rhs.into().into_raw();
+                quotient.div_rem_euc_mut(&mut remainder);
+                return (Self(quotient), Self(remainder));
+            }
+            #[cfg(feature = "no_gmp")]
+            {
+                let rhs = rhs.into();
+                let r = self.rem_euc(rhs.clone());
+                let q = (self.into_raw() - r.0.clone()) / rhs.into_raw();
+                return (Self(q), r);
+            }
         }
 
         #[inline]
         pub fn div_rem_ref(&self, rhs: &Self) -> (Self, Self) {
-            let q = self.0.clone() / rhs.0.clone();
-            let r = self.0.clone() - q.clone() * rhs.0.clone();
-            (Self(q), Self(r))
+            #[cfg(feature = "gmp")]
+            {
+                use rug::Assign;
+
+                let mut quotient = Self::default();
+                let mut remainder = Self::default();
+                (&mut quotient.0, &mut remainder.0).assign(self.0.div_rem_ref(&rhs.0));
+                return (quotient, remainder);
+            }
+            #[cfg(feature = "no_gmp")]
+            {
+                let q = self.0.clone() / rhs.0.clone();
+                let r = self.0.clone() - q.clone() * rhs.0.clone();
+                return (Self(q), Self(r));
+            }
         }
 
         /// Divide in place when divisibility is guaranteed by the caller.
@@ -435,8 +473,17 @@ mod implementation {
         }
 
         fn rem_trunc(lhs: RawMultiPrecisionInteger, rhs: RawMultiPrecisionInteger) -> Self {
-            let q = lhs.clone() / rhs.clone();
-            Self(lhs - q * rhs)
+            #[cfg(feature = "gmp")]
+            {
+                let mut lhs = lhs;
+                lhs %= rhs;
+                return Self(lhs);
+            }
+            #[cfg(feature = "no_gmp")]
+            {
+                let q = lhs.clone() / rhs.clone();
+                return Self(lhs - q * rhs);
+            }
         }
 
         #[inline]
@@ -1095,14 +1142,28 @@ mod implementation {
     impl RemAssign for MultiPrecisionInteger {
         #[inline]
         fn rem_assign(&mut self, rhs: Self) {
-            *self = self.clone() % rhs;
+            #[cfg(feature = "gmp")]
+            {
+                self.0 %= rhs.into_raw();
+            }
+            #[cfg(feature = "no_gmp")]
+            {
+                *self = self.clone() % rhs;
+            }
         }
     }
 
     impl<'a> RemAssign<&'a MultiPrecisionInteger> for MultiPrecisionInteger {
         #[inline]
         fn rem_assign(&mut self, rhs: &'a MultiPrecisionInteger) {
-            *self = self.clone() % rhs;
+            #[cfg(feature = "gmp")]
+            {
+                self.0 %= &rhs.0;
+            }
+            #[cfg(feature = "no_gmp")]
+            {
+                *self = self.clone() % rhs;
+            }
         }
     }
 
@@ -1263,10 +1324,118 @@ mod implementation {
         }
     }
 
-    #[cfg(all(test, feature = "gmp"))]
+    #[cfg(test)]
     mod tests {
         use super::*;
 
+        #[test]
+        fn mod_u_matches_euclidean_remainder() {
+            let large = (MultiPrecisionInteger::from(1) << 1024usize)
+                + MultiPrecisionInteger::from(0xdead_beefu32);
+            let values = [
+                MultiPrecisionInteger::from(0),
+                MultiPrecisionInteger::from(23),
+                MultiPrecisionInteger::from(-23),
+                large.clone(),
+                -large,
+            ];
+            let moduli = [1, 2, 3, 17, 2_147_483_647, u32::MAX];
+
+            for value in values {
+                for modulus in moduli {
+                    let expected = value
+                        .rem_euc(MultiPrecisionInteger::from(modulus))
+                        .to_u64()
+                        .unwrap() as u32;
+                    assert_eq!(value.mod_u(modulus), expected, "{value} mod {modulus}");
+                }
+            }
+        }
+
+        #[test]
+        fn mod_u_returns_positive_representative_for_negative_input() {
+            assert_eq!(MultiPrecisionInteger::from(-23).mod_u(10), 7);
+        }
+
+        #[test]
+        fn mod_u64_matches_euclidean_remainder() {
+            let large = (MultiPrecisionInteger::from(1) << 1024usize)
+                + MultiPrecisionInteger::from(0xdead_beefu32);
+            let values = [
+                MultiPrecisionInteger::from(0),
+                MultiPrecisionInteger::from(23),
+                MultiPrecisionInteger::from(-23),
+                large.clone(),
+                -large,
+            ];
+            let moduli = [
+                1,
+                2,
+                3,
+                17,
+                2_147_483_647,
+                18_346_744_073_709_552_031,
+                u64::MAX,
+            ];
+
+            for value in values {
+                for modulus in moduli {
+                    let expected = value
+                        .rem_euc(MultiPrecisionInteger::from(modulus))
+                        .to_u64()
+                        .unwrap();
+                    assert_eq!(value.mod_u64(modulus), expected, "{value} mod {modulus}");
+                }
+            }
+        }
+
+        #[test]
+        fn mod_u64_returns_positive_representative_for_negative_input() {
+            assert_eq!(MultiPrecisionInteger::from(-23).mod_u64(10), 7);
+        }
+
+        #[test]
+        fn truncating_remainder_owned_and_in_place_agree() {
+            let large = (MultiPrecisionInteger::from(1) << 521usize)
+                + MultiPrecisionInteger::from(0xdead_beefu32);
+            let values = [large.clone(), -large, MultiPrecisionInteger::from(-23)];
+            let divisors = [
+                (MultiPrecisionInteger::from(1) << 193usize) + MultiPrecisionInteger::from(17),
+                MultiPrecisionInteger::from(-10),
+            ];
+
+            for value in values {
+                for divisor in &divisors {
+                    let quotient = value.clone() / divisor.clone();
+                    let expected = value.clone() - quotient * divisor;
+                    let owned = value.clone() % divisor.clone();
+                    let borrowed = value.clone() % divisor;
+                    let mut assigned_owned = value.clone();
+                    assigned_owned %= divisor.clone();
+                    let mut assigned_borrowed = value.clone();
+                    assigned_borrowed %= divisor;
+
+                    assert_eq!(owned, expected);
+                    assert_eq!(borrowed, expected);
+                    assert_eq!(assigned_owned, expected);
+                    assert_eq!(assigned_borrowed, expected);
+                }
+            }
+        }
+
+        #[test]
+        #[should_panic]
+        fn mod_u_rejects_zero_modulus() {
+            MultiPrecisionInteger::from(1).mod_u(0);
+        }
+
+        #[test]
+        #[should_panic]
+        fn mod_u64_rejects_zero_modulus() {
+            MultiPrecisionInteger::from(1).mod_u64(0);
+        }
+
+        #[cfg(feature = "gmp")]
         #[test]
         fn large_integer_cache_is_bounded_and_reused() {
             LARGE_INTEGER_CACHE.with(|cache| cache.borrow_mut().clear());

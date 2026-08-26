@@ -13,8 +13,11 @@ use std::sync::Arc;
 use rand::Rng;
 
 use crate::domains::algebraic::AlgebraicExtension;
+use crate::domains::finite_field::{
+    FiniteField, FiniteFieldCore, FiniteFieldElement, FiniteFieldWorkspace,
+};
 use crate::domains::float::FloatLike;
-use crate::domains::integer::{Integer, IntegerRing};
+use crate::domains::integer::{Integer, IntegerRing, Z};
 use crate::domains::rational::{Fraction, FractionField, FractionNormalization, Q, RationalField};
 use crate::domains::{
     Derivable, EuclideanDomain, Field, InternalOrdering, RealEmbedding, Ring, RingOps,
@@ -5755,6 +5758,233 @@ impl<R: EuclideanDomain, E: Exponent> MultivariatePolynomial<AlgebraicExtension<
     }
 }
 
+/// Word operations used by one incremental integer-polynomial CRT merge.
+pub(super) trait WordCrt: FiniteFieldWorkspace + Copy {
+    /// Reduce an integer to the standard representative in `[0, modulus)`.
+    fn reduce_integer(value: &Integer, modulus: Self) -> Self;
+
+    /// Compute the symmetric word `t` satisfying
+    /// `t * accumulated_modulus = image - accumulated_coefficient (mod p)`.
+    fn correction(
+        field: &FiniteField<Self>,
+        image: &FiniteFieldElement<Self>,
+        accumulated_mod_p: Self,
+        modulus_inverse: &FiniteFieldElement<Self>,
+    ) -> i64
+    where
+        FiniteField<Self>: FiniteFieldCore<Self> + Set<Element = FiniteFieldElement<Self>> + Ring;
+}
+
+impl WordCrt for u32 {
+    #[inline(always)]
+    fn reduce_integer(value: &Integer, modulus: Self) -> Self {
+        match value {
+            Integer::Single(value) => value.rem_euclid(i64::from(modulus)) as u32,
+            Integer::Double(value) => value.get().rem_euclid(i128::from(modulus)) as u32,
+            Integer::Large(value) => value.mod_u(modulus),
+        }
+    }
+
+    #[inline(always)]
+    fn correction(
+        field: &FiniteField<Self>,
+        image: &FiniteFieldElement<Self>,
+        accumulated_mod_p: Self,
+        modulus_inverse: &FiniteFieldElement<Self>,
+    ) -> i64 {
+        let image = field.from_element(image);
+        let delta = if image >= accumulated_mod_p {
+            image - accumulated_mod_p
+        } else {
+            field.get_prime() - (accumulated_mod_p - image)
+        };
+
+        // `modulus_inverse` is in Montgomery form. Multiplying it by a standard residue performs
+        // exactly one Montgomery reduction and leaves the standard correction in the inner word.
+        let correction = *field
+            .mul(&FiniteFieldElement::from_inner(delta), modulus_inverse)
+            .inner();
+        if correction <= field.get_prime() / 2 {
+            i64::from(correction)
+        } else {
+            -i64::from(field.get_prime() - correction)
+        }
+    }
+}
+
+impl WordCrt for u64 {
+    #[inline(always)]
+    fn reduce_integer(value: &Integer, modulus: Self) -> Self {
+        match value {
+            &Integer::Single(value) => (i128::from(value)).rem_euclid(i128::from(modulus)) as u64,
+            &Integer::Double(value) => value.get().rem_euclid(i128::from(modulus)) as u64,
+            Integer::Large(value) => value.mod_u64(modulus),
+        }
+    }
+
+    #[inline(always)]
+    fn correction(
+        field: &FiniteField<Self>,
+        image: &FiniteFieldElement<Self>,
+        accumulated_mod_p: Self,
+        modulus_inverse: &FiniteFieldElement<Self>,
+    ) -> i64 {
+        let image = field.from_element(image);
+        let delta = if image >= accumulated_mod_p {
+            image - accumulated_mod_p
+        } else {
+            field.get_prime() - (accumulated_mod_p - image)
+        };
+
+        let correction = *field
+            .mul(&FiniteFieldElement::from_inner(delta), modulus_inverse)
+            .inner();
+        if correction <= field.get_prime() / 2 {
+            correction as i64
+        } else {
+            -((field.get_prime() - correction) as i64)
+        }
+    }
+}
+
+/// Precomputed data for merging one word-prime image into an integer polynomial.
+///
+/// For an accumulated modulus `M` and a new prime `p`, construction computes
+/// `(M mod p)^-1` once. Each coefficient then needs one word reduction and one fused update
+/// `a += M*t`, where `t` is chosen symmetrically modulo `p`.
+pub(super) struct IntegerPolynomialCrtContext<'a, UField>
+where
+    UField: WordCrt,
+    FiniteField<UField>: FiniteFieldCore<UField> + Set<Element = FiniteFieldElement<UField>> + Ring,
+{
+    modulus: &'a Integer,
+    field: &'a FiniteField<UField>,
+    modulus_inverse: FiniteFieldElement<UField>,
+}
+
+impl<'a, UField> IntegerPolynomialCrtContext<'a, UField>
+where
+    UField: WordCrt,
+    FiniteField<UField>: FiniteFieldCore<UField> + Set<Element = FiniteFieldElement<UField>> + Ring,
+{
+    /// Precompute the inverse needed by every coefficient in this CRT image.
+    pub(super) fn new(modulus: &'a Integer, field: &'a FiniteField<UField>) -> Option<Self> {
+        assert!(
+            !modulus.is_zero() && !modulus.is_negative(),
+            "the accumulated CRT modulus must be positive"
+        );
+        let reduced_modulus = UField::reduce_integer(modulus, field.get_prime());
+        let modulus_inverse = field.try_inv(&field.to_element(reduced_modulus))?;
+        Some(Self {
+            modulus,
+            field,
+            modulus_inverse,
+        })
+    }
+
+    #[inline(always)]
+    fn merge_coefficient(&self, accumulated: &mut Integer, image: &FiniteFieldElement<UField>) {
+        let accumulated_mod_p = UField::reduce_integer(accumulated, self.field.get_prime());
+        let correction =
+            UField::correction(self.field, image, accumulated_mod_p, &self.modulus_inverse);
+        if correction != 0 {
+            Z.add_mul_assign(accumulated, self.modulus, &Integer::Single(correction));
+        }
+    }
+
+    /// Merge `image` into `accumulator` while keeping every coefficient symmetric modulo `M*p`.
+    ///
+    /// The coefficients in `accumulator` must initially be symmetric modulo `M`. Equal supports
+    /// are updated in place. If a term vanished in one modular image, the sorted fallback merges
+    /// both supports and supplies a zero coefficient on the missing side.
+    pub(super) fn merge_assign<E: Exponent, O: MonomialOrder>(
+        &self,
+        accumulator: &mut MultivariatePolynomial<IntegerRing, E, O>,
+        image: &MultivariatePolynomial<FiniteField<UField>, E, O>,
+    ) {
+        assert_eq!(accumulator.variables(), image.variables());
+        assert!(
+            image.ring().get_prime() == self.field.get_prime(),
+            "the modular image must use the CRT context's prime"
+        );
+        debug_assert!(
+            accumulator
+                .coefficients
+                .iter()
+                .all(|coefficient| coefficient.abs() * Integer::from(2) <= *self.modulus)
+        );
+
+        if accumulator.exponents == image.exponents {
+            for (accumulated, image) in accumulator.coefficients.iter_mut().zip(&image.coefficients)
+            {
+                self.merge_coefficient(accumulated, image);
+                debug_assert!(!accumulated.is_zero());
+            }
+            return;
+        }
+
+        let mut result = accumulator.zero_with_capacity(accumulator.nterms() + image.nterms());
+        let zero_image = self.field.zero();
+        let mut accumulator_index = 0;
+        let mut image_index = 0;
+
+        while accumulator_index < accumulator.nterms() || image_index < image.nterms() {
+            let (exponents, mut coefficient, image_coefficient) =
+                if accumulator_index < accumulator.nterms() && image_index < image.nterms() {
+                    match O::cmp(
+                        accumulator.exponents(accumulator_index),
+                        image.exponents(image_index),
+                    ) {
+                        Ordering::Equal => {
+                            accumulator_index += 1;
+                            image_index += 1;
+                            (
+                                accumulator.exponents(accumulator_index - 1),
+                                accumulator.coefficients[accumulator_index - 1].clone(),
+                                &image.coefficients[image_index - 1],
+                            )
+                        }
+                        Ordering::Less => {
+                            accumulator_index += 1;
+                            (
+                                accumulator.exponents(accumulator_index - 1),
+                                accumulator.coefficients[accumulator_index - 1].clone(),
+                                &zero_image,
+                            )
+                        }
+                        Ordering::Greater => {
+                            image_index += 1;
+                            (
+                                image.exponents(image_index - 1),
+                                Integer::zero(),
+                                &image.coefficients[image_index - 1],
+                            )
+                        }
+                    }
+                } else if accumulator_index < accumulator.nterms() {
+                    accumulator_index += 1;
+                    (
+                        accumulator.exponents(accumulator_index - 1),
+                        accumulator.coefficients[accumulator_index - 1].clone(),
+                        &zero_image,
+                    )
+                } else {
+                    image_index += 1;
+                    (
+                        image.exponents(image_index - 1),
+                        Integer::zero(),
+                        &image.coefficients[image_index - 1],
+                    )
+                };
+
+            self.merge_coefficient(&mut coefficient, image_coefficient);
+            result.append_monomial(coefficient, exponents);
+        }
+
+        *accumulator = result;
+    }
+}
+
 impl<E: Exponent> MultivariatePolynomial<IntegerRing, E> {
     /// Compute the polynomial that is congruent to `self` modulo `m` and `other` modulo `p` using the Chinese Remainder Theorem.
     pub fn chinese_remainder(&self, other: &Self, m: &Integer, p: &Integer) -> Self {
@@ -5912,7 +6142,7 @@ mod test {
         domains::{
             Ring, SampleableRing,
             algebraic::AlgebraicExtension,
-            finite_field::{Zp, Zp64},
+            finite_field::{FiniteFieldCore, PrimeIteratorU64, Zp, Zp64},
             integer::{Integer, IntegerRing, Z},
             rational::{Q, RationalField},
         },
@@ -5922,9 +6152,150 @@ mod test {
     };
 
     use super::{
-        MultivariatePolynomial, PolynomialRing, PolynomialSamplingPolicy,
-        mixed_radix_dense_work_is_bounded,
+        IntegerPolynomialCrtContext, MultivariatePolynomial, PolynomialRing,
+        PolynomialSamplingPolicy, mixed_radix_dense_work_is_bounded,
     };
+
+    #[test]
+    fn integer_polynomial_crt_context_matches_generic_crt() {
+        let modulus = (Integer::from(1) << 200usize) + 123;
+        let half_modulus: Integer = &modulus / 2;
+
+        let mut accumulated = parse!("1+x+y").to_polynomial::<_, u16>(&Z, None);
+        accumulated.coefficients = vec![
+            half_modulus.clone() - 17,
+            -half_modulus.clone() + 29,
+            Integer::from(41),
+        ];
+        let image_integer =
+            parse!("5+7*x+11*y").to_polynomial::<_, u16>(&Z, accumulated.variables().clone());
+
+        let field32 = Zp::new(2_147_483_659);
+        let image32 = image_integer.map_coeff(|value| field32.nth(value.clone()), field32.clone());
+        let image32_integer = image32.map_coeff(|value| field32.to_symmetric_integer(value), Z);
+        let expected32 = accumulated.chinese_remainder(
+            &image32_integer,
+            &modulus,
+            &Integer::from(field32.get_prime()),
+        );
+        let mut actual32 = accumulated.clone();
+        IntegerPolynomialCrtContext::new(&modulus, &field32)
+            .unwrap()
+            .merge_assign(&mut actual32, &image32);
+        assert_eq!(actual32, expected32);
+
+        let field64 = Zp64::new(18_346_744_073_709_552_031);
+        let image64 = image_integer.map_coeff(|value| field64.nth(value.clone()), field64.clone());
+        let image64_integer = image64.map_coeff(|value| field64.to_symmetric_integer(value), Z);
+        let expected64 = accumulated.chinese_remainder(
+            &image64_integer,
+            &modulus,
+            &Integer::from(field64.get_prime()),
+        );
+        let mut actual64 = accumulated;
+        IntegerPolynomialCrtContext::new(&modulus, &field64)
+            .unwrap()
+            .merge_assign(&mut actual64, &image64);
+        assert_eq!(actual64, expected64);
+
+        let combined_modulus = &modulus * Integer::from(field64.get_prime());
+        assert!(
+            actual64
+                .coefficients
+                .iter()
+                .all(|coefficient| { coefficient.abs() * Integer::from(2) <= combined_modulus })
+        );
+    }
+
+    #[test]
+    fn integer_polynomial_crt_context_repeated_merges() {
+        let mut target = parse!("1+x+y").to_polynomial::<_, u16>(&Z, None);
+        target.coefficients = vec![
+            Integer::from(7),
+            (Integer::from(1) << 70usize) + 19,
+            (Integer::from(1) << 200usize) + 23,
+        ];
+
+        let first_prime = 2_147_483_659u32;
+        let first_field = Zp::new(first_prime);
+        let first_image = target.map_coeff(
+            |coefficient| first_field.nth(coefficient.clone()),
+            first_field.clone(),
+        );
+        let mut actual = first_image.map_coeff(
+            |coefficient| first_field.to_symmetric_integer(coefficient),
+            Z,
+        );
+        let mut modulus = Integer::from(first_prime);
+
+        for prime in PrimeIteratorU64::new(u64::from(first_prime)).take(8) {
+            let prime = u32::try_from(prime).unwrap();
+            let field = Zp::new(prime);
+            let image =
+                target.map_coeff(|coefficient| field.nth(coefficient.clone()), field.clone());
+            let image_as_integer =
+                image.map_coeff(|coefficient| field.to_symmetric_integer(coefficient), Z);
+            let expected =
+                actual.chinese_remainder(&image_as_integer, &modulus, &Integer::from(prime));
+
+            IntegerPolynomialCrtContext::new(&modulus, &field)
+                .unwrap()
+                .merge_assign(&mut actual, &image);
+            assert_eq!(actual, expected);
+
+            modulus *= prime;
+            assert!(
+                actual
+                    .coefficients
+                    .iter()
+                    .all(|coefficient| coefficient.abs() * Integer::from(2) <= modulus)
+            );
+        }
+
+        assert_eq!(actual, target);
+        assert!(
+            IntegerPolynomialCrtContext::new(&Integer::from(first_prime), &first_field).is_none()
+        );
+    }
+
+    #[test]
+    fn integer_polynomial_crt_context_merges_different_supports() {
+        let modulus = (Integer::from(1) << 130usize) + 51;
+        let variables = parse!("1+x+y")
+            .to_polynomial::<_, u16>(&Z, None)
+            .variables()
+            .clone();
+        let accumulated = parse!("1+x").to_polynomial::<_, u16>(&Z, variables.clone());
+        let image_integer = parse!("2+y").to_polynomial::<_, u16>(&Z, variables);
+        let field = Zp::new(2_147_483_659);
+        let image = image_integer.map_coeff(|value| field.nth(value.clone()), field.clone());
+        let image_as_integer = image.map_coeff(|value| field.to_symmetric_integer(value), Z);
+        let expected = accumulated.chinese_remainder(
+            &image_as_integer,
+            &modulus,
+            &Integer::from(field.get_prime()),
+        );
+
+        let mut actual = accumulated.clone();
+        IntegerPolynomialCrtContext::new(&modulus, &field)
+            .unwrap()
+            .merge_assign(&mut actual, &image);
+        assert_eq!(actual, expected);
+
+        let field64 = Zp64::new(18_346_744_073_709_552_031);
+        let image64 = image_integer.map_coeff(|value| field64.nth(value.clone()), field64.clone());
+        let image64_as_integer = image64.map_coeff(|value| field64.to_symmetric_integer(value), Z);
+        let expected64 = accumulated.chinese_remainder(
+            &image64_as_integer,
+            &modulus,
+            &Integer::from(field64.get_prime()),
+        );
+        let mut actual64 = accumulated;
+        IntegerPolynomialCrtContext::new(&modulus, &field64)
+            .unwrap()
+            .merge_assign(&mut actual64, &image64);
+        assert_eq!(actual64, expected64);
+    }
 
     #[cfg(feature = "bincode")]
     use crate::domains::float::{F64, FloatField};

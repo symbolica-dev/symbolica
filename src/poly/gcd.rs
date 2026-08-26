@@ -26,7 +26,7 @@ use crate::tensors::matrix::{Matrix, MatrixError};
 use crate::{GLOBAL_SETTINGS, warn};
 
 use super::PositiveExponent;
-use super::polynomial::MultivariatePolynomial;
+use super::polynomial::{IntegerPolynomialCrtContext, MultivariatePolynomial, WordCrt};
 
 #[cfg(feature = "binary_size")]
 type ModularGcdFieldWorkspace = u64;
@@ -119,16 +119,53 @@ fn hu_monagan_kronecker_powers(radices: &[u32], start_index: usize) -> Option<(V
     Some((powers, product))
 }
 
-fn modular_gcd_prime_iterator() -> PrimeIteratorU64 {
-    PrimeIteratorU64::new(
-        <ModularGcdFieldWorkspace as FiniteFieldWorkspace>::get_large_prime()
-            .to_u64()
-            .unwrap_or(1 << 63),
-    )
+trait ModularGcdWorkspace: FiniteFieldWorkspace + WordCrt {
+    fn first_prime() -> u64;
+}
+
+impl ModularGcdWorkspace for u32 {
+    fn first_prime() -> u64 {
+        u32::get_large_prime() as u64
+    }
+}
+
+impl ModularGcdWorkspace for u64 {
+    fn first_prime() -> u64 {
+        // First prime above the u64 workspace's large-prime lower bound.
+        18_346_744_073_709_552_031
+    }
+}
+
+/// Yields a known modular GCD prime first, followed by its consecutive successors.
+struct ModularGcdPrimeIterator {
+    first: Option<u64>,
+    successors: PrimeIteratorU64,
+}
+
+impl ModularGcdPrimeIterator {
+    fn for_workspace<UField: ModularGcdWorkspace>() -> Self {
+        let first = UField::first_prime();
+        Self {
+            first: Some(first),
+            successors: PrimeIteratorU64::new(first),
+        }
+    }
+}
+
+impl Iterator for ModularGcdPrimeIterator {
+    type Item = u64;
+
+    fn next(&mut self) -> Option<Self::Item> {
+        self.first.take().or_else(|| self.successors.next())
+    }
+}
+
+fn modular_gcd_prime_iterator() -> ModularGcdPrimeIterator {
+    ModularGcdPrimeIterator::for_workspace::<ModularGcdFieldWorkspace>()
 }
 
 fn next_modular_gcd_prime(
-    primes: &mut PrimeIteratorU64,
+    primes: &mut ModularGcdPrimeIterator,
     context: &str,
 ) -> ModularGcdFieldWorkspace {
     let Some(p) = primes.next().and_then(|p| {
@@ -2342,10 +2379,42 @@ impl<E: PositiveExponent> MultivariatePolynomial<IntegerRing, E> {
         }
     }
 
+    /// Lift projectively normalized CRT coefficients with a reconstructed common denominator.
+    ///
+    /// If the modular coefficients represent `g_i / g_pivot`, multiplying them by the common
+    /// denominator makes every coefficient integral. A symmetric lift followed by removal of the
+    /// integer content then recovers the primitive GCD candidate. The caller verifies the result
+    /// by exact division because one reconstructed coefficient can expose only a proper divisor of
+    /// the full common denominator.
+    fn lift_projective_gcd(
+        modular_gcd: &Self,
+        modulus: &Integer,
+        denominator: &Integer,
+    ) -> Option<Self> {
+        let mut candidate = modular_gcd.clone();
+        for coefficient in &mut candidate.coefficients {
+            let lifted = (coefficient.clone() * denominator).symmetric_mod(modulus);
+            if lifted.is_zero() {
+                return None;
+            }
+            *coefficient = lifted;
+        }
+
+        let content = candidate.content();
+        if content.is_zero() {
+            return None;
+        }
+        candidate = candidate.div_coeff(&content);
+        if candidate.lcoeff().is_negative() {
+            candidate = candidate.mul_coeff(Integer::from(-1));
+        }
+        Some(candidate)
+    }
+
     /// Compute the gcd of two multivariate polynomials using Zippel's algorithm.
     /// TODO: provide a parallel implementation?
     #[instrument(level = "debug", skip_all)]
-    fn gcd_zippel<UField: FiniteFieldWorkspace + 'static>(
+    fn gcd_zippel<UField: ModularGcdWorkspace>(
         &self,
         b: &Self,
         vars: &[usize], // variables
@@ -2353,7 +2422,7 @@ impl<E: PositiveExponent> MultivariatePolynomial<IntegerRing, E> {
         tight_bounds: &mut [E],
     ) -> Self
     where
-        FiniteField<UField>: FiniteFieldCore<UField>,
+        FiniteField<UField>: FiniteFieldCore<UField> + Set<Element = FiniteFieldElement<UField>>,
         <FiniteField<UField> as Set>::Element: Copy,
         Integer: ToFiniteField<UField> + FromFiniteField<UField>,
     {
@@ -2370,8 +2439,7 @@ impl<E: PositiveExponent> MultivariatePolynomial<IntegerRing, E> {
             .gcd(&self.lcoeff_varorder(vars), &b.lcoeff_varorder(vars));
         debug!("gamma {}", gamma);
 
-        let mut primes =
-            PrimeIteratorU64::new(UField::get_large_prime().to_u64().unwrap_or(1 << 63));
+        let mut primes = ModularGcdPrimeIterator::for_workspace::<UField>();
 
         'newfirstprime: loop {
             let Some(p) = primes.next() else {
@@ -2477,59 +2545,132 @@ impl<E: PositiveExponent> MultivariatePolynomial<IntegerRing, E> {
             let mut m = Integer::from_prime(&finite_field); // size of finite field
 
             debug!("Projective GCD suggestion: {} mod {} ", gm, p);
-            let reconstruction_probe = (pivot_index != 0)
+            let mut reconstruction_probe = (pivot_index != 0)
                 .then_some(0)
                 .unwrap_or_else(|| if gp.nterms() > 1 { 1 } else { 0 });
+            let mut accepted_images = 1usize;
+            let mut next_reconstruction_image = 1usize;
+            let mut consecutive_probe_failures = 0usize;
+            let mut failed_full_reconstruction_probe = None;
 
             // add new primes until we can reconstruct the full gcd
             'newprime: loop {
                 // A single hard coefficient is a cheap screening test before reconstructing every
                 // coefficient. Exact division below remains the final correctness check.
-                if m.significant_bits() > 32
-                    && Rational::maximal_quotient_reconstruction(
+                'reconstruction_attempt: {
+                    if m.significant_bits() <= 32 || accepted_images < next_reconstruction_image {
+                        break 'reconstruction_attempt;
+                    }
+
+                    let reconstructed_probe = Rational::maximal_quotient_reconstruction(
                         &gm.coefficients[reconstruction_probe],
                         &m,
                         None,
-                    )
-                    .is_ok()
-                {
-                    let mut rational_coefficients = Vec::with_capacity(gm.nterms());
-                    for coefficient in &gm.coefficients {
-                        let Ok(coefficient) =
-                            Rational::maximal_quotient_reconstruction(coefficient, &m, None)
-                        else {
-                            rational_coefficients.clear();
-                            break;
-                        };
-                        if Q.is_zero(&coefficient) {
-                            rational_coefficients.clear();
-                            break;
-                        }
-                        rational_coefficients.push(coefficient);
-                    }
+                    );
 
-                    if rational_coefficients.len() == gm.nterms() {
-                        let rational_gcd = MultivariatePolynomial::from_parts(
-                            rational_coefficients,
-                            gm.exponents.clone(),
-                            Q,
-                            gm.variables().clone(),
-                        );
-                        let content = rational_gcd.content();
-                        let mut gc = rational_gcd
-                            .map_coeff(|coefficient| Q.div(coefficient, &content).numerator(), Z);
-                        if gc.lcoeff().is_negative() {
-                            gc = gc.mul_coeff(Integer::from(-1));
+                    let reconstructed_probe = match reconstructed_probe {
+                        Ok(coefficient) if !Q.is_zero(&coefficient) => coefficient,
+                        _ => {
+                            consecutive_probe_failures += 1;
+                            failed_full_reconstruction_probe = None;
+                            next_reconstruction_image = accepted_images
+                                + if consecutive_probe_failures >= 2 {
+                                    2
+                                } else {
+                                    1
+                                };
+                            break 'reconstruction_attempt;
                         }
+                    };
 
-                        debug!("Final projective GCD suggestion: {}", gc);
+                    consecutive_probe_failures = 0;
+
+                    // The reduced projective coefficient denominators all divide the primitive
+                    // pivot coefficient. When the probe exposes that common denominator, it can
+                    // lift the entire candidate without reconstructing every coefficient.
+                    if let Some(gc) =
+                        Self::lift_projective_gcd(&gm, &m, reconstructed_probe.denominator_ref())
+                    {
+                        debug!("Common-denominator GCD suggestion: {}", gc);
                         if gc.is_one() || (self.try_div(&gc).is_some() && b.try_div(&gc).is_some())
                         {
                             return gc;
                         }
                     }
 
-                    debug!("Projective reconstruction does not divide: more primes needed");
+                    let stable_after_failed_full_reconstruction = failed_full_reconstruction_probe
+                        .as_ref()
+                        .is_none_or(|previous| previous == &reconstructed_probe);
+                    if !stable_after_failed_full_reconstruction {
+                        failed_full_reconstruction_probe = Some(reconstructed_probe);
+                        next_reconstruction_image = accepted_images + 1;
+                    } else {
+                        failed_full_reconstruction_probe = None;
+                        let mut rational_coefficients = Vec::with_capacity(gm.nterms());
+                        let mut failed_coefficient = None;
+
+                        for (coefficient_index, coefficient) in gm.coefficients.iter().enumerate() {
+                            let reconstructed = if coefficient_index == reconstruction_probe {
+                                Ok(reconstructed_probe.clone())
+                            } else {
+                                Rational::maximal_quotient_reconstruction(coefficient, &m, None)
+                            };
+                            let Ok(coefficient) = reconstructed else {
+                                failed_coefficient = Some(coefficient_index);
+                                break;
+                            };
+                            if Q.is_zero(&coefficient) {
+                                failed_coefficient = Some(coefficient_index);
+                                break;
+                            }
+                            rational_coefficients.push(coefficient);
+                        }
+
+                        if let Some(coefficient_index) = failed_coefficient {
+                            // Probe the first coefficient that blocked the full sweep after the
+                            // next modular image has been accumulated.
+                            reconstruction_probe = coefficient_index;
+                            next_reconstruction_image = accepted_images + 1;
+                        } else {
+                            let hardest_coefficient = rational_coefficients
+                                .iter()
+                                .enumerate()
+                                .max_by_key(|(_, coefficient)| {
+                                    coefficient.numerator_ref().significant_bits()
+                                        + coefficient.denominator_ref().significant_bits()
+                                })
+                                .map(|(index, _)| index)
+                                .unwrap_or(reconstruction_probe);
+
+                            let rational_gcd = MultivariatePolynomial::from_parts(
+                                rational_coefficients,
+                                gm.exponents.clone(),
+                                Q,
+                                gm.variables().clone(),
+                            );
+                            let content = rational_gcd.content();
+                            let mut gc = rational_gcd.map_coeff(
+                                |coefficient| Q.div(coefficient, &content).numerator(),
+                                Z,
+                            );
+                            if gc.lcoeff().is_negative() {
+                                gc = gc.mul_coeff(Integer::from(-1));
+                            }
+
+                            debug!("Final projective GCD suggestion: {}", gc);
+                            if gc.is_one()
+                                || (self.try_div(&gc).is_some() && b.try_div(&gc).is_some())
+                            {
+                                return gc;
+                            }
+
+                            reconstruction_probe = hardest_coefficient;
+                            failed_full_reconstruction_probe =
+                                Some(rational_gcd.coefficients[hardest_coefficient].clone());
+                            next_reconstruction_image = accepted_images + 1;
+                            debug!("Projective reconstruction does not divide: more primes needed");
+                        }
+                    }
                 }
 
                 loop {
@@ -2628,11 +2769,13 @@ impl<E: PositiveExponent> MultivariatePolynomial<IntegerRing, E> {
                 gp = gp.mul_coeff(ap.ring().inv(&pivot_coefficient));
                 debug!("gp: {} mod {}", gp, gp.ring().get_prime());
 
-                let gp_i = gp.map_coeff(|c| gp.ring().to_integer(c), *self.ring());
-                gm = gm.chinese_remainder(&gp_i, &m, &gp.ring().get_prime().to_integer());
+                let crt = IntegerPolynomialCrtContext::new(&m, gp.ring())
+                    .expect("modular GCD prime repeated during CRT reconstruction");
+                crt.merge_assign(&mut gm, &gp);
 
                 self.ring()
                     .mul_assign(&mut m, &Integer::from_prime(&gp.ring()));
+                accepted_images += 1;
 
                 debug!("gm: {} from ring {}", gm, m);
             }
@@ -3259,14 +3402,15 @@ impl<E: PositiveExponent> MultivariatePolynomial<IntegerRing, E> {
                     }
                 };
 
-                let hz = selected_image.map_coeff(|c| p.to_symmetric_integer(c), Z);
                 let old_h = h.clone();
 
                 if m == 1 {
-                    h = hz;
+                    h = selected_image.map_coeff(|c| p.to_symmetric_integer(c), Z);
                     m = p.get_prime().into();
                 } else {
-                    h = h.chinese_remainder(&hz, &m, &p.get_prime().into());
+                    let crt = IntegerPolynomialCrtContext::new(&m, &p)
+                        .expect("Hu-Monagan prime repeated during CRT reconstruction");
+                    crt.merge_assign(&mut h, &selected_image);
                     m *= p.get_prime();
                 }
 
@@ -3363,12 +3507,7 @@ impl<E: PositiveExponent> MultivariatePolynomial<IntegerRing, E> {
             .collect();
 
         let delta = 1u32;
-        let mut d_0_1 = (
-            bounds[0].to_u32(),
-            bounds[1]
-                .to_u32()
-                .max(a.degree(1).min(b.degree(1)).to_u32()),
-        );
+        let mut d_0_1 = (bounds[0].to_u32(), bounds[1].to_u32());
         let mut smooth_prime_index = 204;
         let mut rng = rand::rng();
 
@@ -3555,14 +3694,15 @@ impl<E: PositiveExponent> MultivariatePolynomial<IntegerRing, E> {
                     }
                 };
 
-                let hz = selected_image.map_coeff(|c| p.to_symmetric_integer(c), Z);
                 let old_h = h.clone();
 
                 if m == 1 {
-                    h = hz;
+                    h = selected_image.map_coeff(|c| p.to_symmetric_integer(c), Z);
                     m = p.get_prime().into();
                 } else {
-                    h = h.chinese_remainder(&hz, &m, &p.get_prime().into());
+                    let crt = IntegerPolynomialCrtContext::new(&m, &p)
+                        .expect("Hu-Monagan prime repeated during CRT reconstruction");
+                    crt.merge_assign(&mut h, &selected_image);
                     m *= p.get_prime();
                 }
 
@@ -4521,6 +4661,27 @@ mod tests {
     use crate::poly::PolyVariable;
 
     #[test]
+    fn modular_gcd_primes_start_with_the_workspace_prime() {
+        let known_prime = u32::get_large_prime() as u64;
+        assert!(Integer::from(known_prime).is_prime(0));
+        let mut primes = ModularGcdPrimeIterator::for_workspace::<u32>();
+        assert_eq!(primes.next(), Some(known_prime));
+
+        let successor = primes.next().unwrap();
+        assert!(successor > known_prime);
+        assert!(Integer::from(successor).is_prime(0));
+
+        let u64_lower_bound = u64::get_large_prime();
+        let mut u64_primes = ModularGcdPrimeIterator::for_workspace::<u64>();
+        let first_u64_prime = u64_primes.next().unwrap();
+        assert!(first_u64_prime > u64_lower_bound);
+        assert!(Integer::from(first_u64_prime).is_prime(0));
+        let successor = u64_primes.next().unwrap();
+        assert!(successor > first_u64_prime);
+        assert!(Integer::from(successor).is_prime(0));
+    }
+
+    #[test]
     fn galois_gcd_upgrade_samples_outside_the_prime_subfield() {
         let field = AlgebraicExtension::galois_field(Z2, 2, PolyVariable::Temporary(0));
         let mut factors = [
@@ -4584,6 +4745,10 @@ mod tests {
                  +100000000000000000000000000000000000000000000000000000000033*y^2+5*z^2"
             )
             .to_polynomial::<_, u16>(&Z, None),
+            // The selected probe reconstructs 3/6 = 1/2, while another coefficient needs the
+            // denominator 3. The common-denominator lift must fail safely before full MQR returns
+            // the primitive polynomial.
+            parse!("2*x^2+3*y+6").to_polynomial::<_, u16>(&Z, None),
         ];
 
         for gcd in gcds {
