@@ -229,7 +229,7 @@ fn univariate_hensel_precision_schedule(target: usize) -> Vec<usize> {
     schedule
 }
 
-type IntegerUnivariatePolynomial<E> = MultivariatePolynomial<IntegerRing, E, LexOrder>;
+type DenseIntegerUnivariatePolynomial = Vec<Integer>;
 
 /// Mutable factors, subtree products, and Bezout cofactors for one
 /// synchronized univariate Hensel lift.
@@ -237,17 +237,18 @@ type IntegerUnivariatePolynomial<E> = MultivariatePolynomial<IntegerRing, E, Lex
 /// A node with children `u` and `w` stores cofactors `s` and `t` satisfying
 /// `s*u + t*w = 1` at the current prime-power precision. During a top-down
 /// lifting stage, the node's product is the target written by its parent.
-struct UnivariateHenselProductTreeLiftContext<E: PositiveExponent> {
+struct UnivariateHenselProductTreeLiftContext {
     topology: UnivariateHenselProductTreeTopology,
-    leaves: Vec<IntegerUnivariatePolynomial<E>>,
-    internal_products: Vec<IntegerUnivariatePolynomial<E>>,
-    bezout_cofactors: Vec<[IntegerUnivariatePolynomial<E>; 2]>,
+    leaves: Vec<DenseIntegerUnivariatePolynomial>,
+    internal_products: Vec<DenseIntegerUnivariatePolynomial>,
+    bezout_cofactors: Vec<[DenseIntegerUnivariatePolynomial; 2]>,
 }
 
-impl<E: PositiveExponent> UnivariateHenselProductTreeLiftContext<E> {
+impl UnivariateHenselProductTreeLiftContext {
     /// Builds all subtree products and Bezout relations over the base field,
-    /// then converts them to symmetric integer representatives.
-    fn new<UField: FiniteFieldWorkspace>(
+    /// then stores their symmetric integer coefficients in ascending degree
+    /// order.
+    fn new<UField: FiniteFieldWorkspace, E: PositiveExponent>(
         factors: &[MultivariatePolynomial<FiniteField<UField>, E, LexOrder>],
     ) -> Self
     where
@@ -292,22 +293,45 @@ impl<E: PositiveExponent> UnivariateHenselProductTreeLiftContext<E> {
             modular_bezout.push([s, t]);
         }
 
-        let to_integer = |polynomial: &MultivariatePolynomial<FiniteField<UField>, E, LexOrder>| {
-            polynomial.map_coeff(|coefficient| field.to_symmetric_integer(coefficient), Z)
-        };
+        let variable = modular_leaves[0]
+            .last_exponents()
+            .iter()
+            .position(|exponent| !exponent.is_zero())
+            .expect("a Hensel factor must be nonconstant");
+        let to_dense_integer =
+            |polynomial: &MultivariatePolynomial<FiniteField<UField>, E, LexOrder>| {
+                let degree = polynomial.degree(variable).to_u32() as usize;
+                let mut coefficients = vec![Integer::zero(); degree + 1];
+                for term in polynomial {
+                    debug_assert!(
+                        term.exponents
+                            .iter()
+                            .enumerate()
+                            .all(|(index, exponent)| { index == variable || exponent.is_zero() })
+                    );
+                    coefficients[term.exponents[variable].to_u32() as usize] =
+                        field.to_symmetric_integer(term.coefficient);
+                }
+                coefficients
+            };
         Self {
             topology,
-            leaves: modular_leaves.iter().map(&to_integer).collect(),
-            internal_products: modular_products.iter().map(&to_integer).collect(),
+            leaves: modular_leaves.iter().map(&to_dense_integer).collect(),
+            internal_products: modular_products.iter().map(&to_dense_integer).collect(),
             bezout_cofactors: modular_bezout
                 .iter()
-                .map(|cofactors| [to_integer(&cofactors[0]), to_integer(&cofactors[1])])
+                .map(|cofactors| {
+                    [
+                        to_dense_integer(&cofactors[0]),
+                        to_dense_integer(&cofactors[1]),
+                    ]
+                })
                 .collect(),
         }
     }
 
     /// Returns the current polynomial represented by a leaf or internal link.
-    fn value(&self, link: UnivariateHenselProductTreeLink) -> &IntegerUnivariatePolynomial<E> {
+    fn value(&self, link: UnivariateHenselProductTreeLink) -> &[Integer] {
         match link {
             UnivariateHenselProductTreeLink::Leaf(index) => &self.leaves[index],
             UnivariateHenselProductTreeLink::Internal(index) => &self.internal_products[index],
@@ -318,7 +342,7 @@ impl<E: PositiveExponent> UnivariateHenselProductTreeLiftContext<E> {
     fn set_value(
         &mut self,
         link: UnivariateHenselProductTreeLink,
-        value: IntegerUnivariatePolynomial<E>,
+        value: DenseIntegerUnivariatePolynomial,
     ) {
         match link {
             UnivariateHenselProductTreeLink::Leaf(index) => self.leaves[index] = value,
@@ -708,6 +732,343 @@ impl<R: EuclideanDomain, E: PositiveExponent> MultivariatePolynomial<R, E, LexOr
     }
 }
 
+/// Dense univariate integer arithmetic used by synchronized Hensel lifting.
+///
+/// Coefficients are stored from constant to leading degree. Products are
+/// computed over the integers so that Hensel residuals can be divided exactly;
+/// modular operations return trimmed canonical symmetric representatives.
+struct DenseIntegerModularUnivariateContext<'a, E: PositiveExponent> {
+    modulus: &'a Integer,
+    variable: usize,
+    template: &'a MultivariatePolynomial<IntegerRing, E, LexOrder>,
+    dense_indices: &'a [u32],
+}
+
+impl<'a, E: PositiveExponent> DenseIntegerModularUnivariateContext<'a, E> {
+    fn new(
+        modulus: &'a Integer,
+        variable: usize,
+        template: &'a MultivariatePolynomial<IntegerRing, E, LexOrder>,
+        dense_indices: &'a [u32],
+    ) -> Self {
+        assert!(!modulus.is_zero() && !modulus.is_negative());
+        debug_assert!(template.exponents_iter().all(|exponents| {
+            exponents
+                .iter()
+                .enumerate()
+                .all(|(index, exponent)| index == variable || exponent.is_zero())
+        }));
+        debug_assert!(
+            dense_indices
+                .iter()
+                .enumerate()
+                .all(|(index, dense_index)| *dense_index as usize == index)
+        );
+        Self {
+            modulus,
+            variable,
+            template,
+            dense_indices,
+        }
+    }
+
+    /// Removes all zero leading coefficients, representing the zero
+    /// polynomial by an empty vector.
+    fn trim(coefficients: &mut DenseIntegerUnivariatePolynomial) {
+        while coefficients.last().is_some_and(Integer::is_zero) {
+            coefficients.pop();
+        }
+    }
+
+    /// Converts a sparse univariate polynomial to ascending dense
+    /// coefficients without changing its integer representatives.
+    fn dense_coefficients(
+        &self,
+        polynomial: &MultivariatePolynomial<IntegerRing, E, LexOrder>,
+    ) -> DenseIntegerUnivariatePolynomial {
+        if polynomial.is_zero() {
+            return Vec::new();
+        }
+
+        let degree = polynomial.degree(self.variable).to_u32() as usize;
+        let mut coefficients = vec![Integer::zero(); degree + 1];
+        for term in polynomial {
+            debug_assert!(
+                term.exponents
+                    .iter()
+                    .enumerate()
+                    .all(|(index, exponent)| { index == self.variable || exponent.is_zero() })
+            );
+            coefficients[term.exponents[self.variable].to_u32() as usize] =
+                term.coefficient.clone();
+        }
+        coefficients
+    }
+
+    /// Converts ascending dense coefficients to the polynomial layout used by
+    /// the caller of the Hensel lift.
+    fn from_dense_coefficients(
+        &self,
+        coefficients: DenseIntegerUnivariatePolynomial,
+    ) -> MultivariatePolynomial<IntegerRing, E, LexOrder> {
+        let capacity = coefficients
+            .iter()
+            .filter(|coefficient| !coefficient.is_zero())
+            .count();
+        let mut polynomial = self.template.zero_with_capacity(capacity);
+        let mut exponents = vec![E::zero(); self.template.nvars()];
+        for (degree, coefficient) in coefficients.into_iter().enumerate() {
+            if coefficient.is_zero() {
+                continue;
+            }
+            exponents[self.variable] = E::from_u32(degree as u32);
+            polynomial.append_monomial_back(coefficient, &exponents);
+        }
+        polynomial
+    }
+
+    /// Canonicalizes every coefficient modulo this context's modulus and
+    /// removes zero leading cells.
+    fn reduce_in_place(&self, coefficients: &mut DenseIntegerUnivariatePolynomial) {
+        for coefficient in coefficients.iter_mut() {
+            let value = std::mem::replace(coefficient, Integer::zero());
+            *coefficient = value.symmetric_mod(self.modulus);
+        }
+        Self::trim(coefficients);
+    }
+
+    fn reduce(&self, coefficients: &[Integer]) -> DenseIntegerUnivariatePolynomial {
+        let mut reduced = coefficients.to_vec();
+        self.reduce_in_place(&mut reduced);
+        reduced
+    }
+
+    /// Multiplies two dense polynomials exactly over the integers.
+    ///
+    /// The integer polynomial kernel selects its bounded or multiprecision
+    /// convolution strategy. If it declines the request, the generic ring
+    /// loop accumulates the same convolution with fused integer products.
+    fn multiply_raw(
+        &self,
+        left: &[Integer],
+        right: &[Integer],
+    ) -> DenseIntegerUnivariatePolynomial {
+        if left.is_empty() || right.is_empty() {
+            return Vec::new();
+        }
+
+        let output_len = left
+            .len()
+            .checked_add(right.len())
+            .and_then(|length| length.checked_sub(1))
+            .expect("dense polynomial product length overflow");
+        assert!(left.len() <= self.dense_indices.len());
+        assert!(right.len() <= self.dense_indices.len());
+        assert!(output_len <= self.dense_indices.len());
+
+        // Lift buffers have contiguous, effectively dense support. Interior
+        // zero cells retain the contiguous indices used by dense convolution
+        // strategies.
+        if let Some(coefficients) = Z.kernels().polynomial().and_then(|kernels| {
+            kernels.try_dense_mul(DensePolynomialMulRequest {
+                output_len,
+                left_coefficients: left,
+                left_indices: &self.dense_indices[..left.len()],
+                right_coefficients: right,
+                right_indices: &self.dense_indices[..right.len()],
+            })
+        }) {
+            let mut product = vec![Integer::zero(); output_len];
+            for (index, coefficient) in coefficients {
+                product[index as usize] = coefficient;
+            }
+            Self::trim(&mut product);
+            return product;
+        }
+
+        let mut product = vec![Integer::zero(); output_len];
+        for (left_degree, left_coefficient) in left.iter().enumerate() {
+            if left_coefficient.is_zero() {
+                continue;
+            }
+            for (right_degree, right_coefficient) in right.iter().enumerate() {
+                if right_coefficient.is_zero() {
+                    continue;
+                }
+                Z.add_mul_assign(
+                    &mut product[left_degree + right_degree],
+                    left_coefficient,
+                    right_coefficient,
+                );
+            }
+        }
+        Self::trim(&mut product);
+        product
+    }
+
+    /// Multiplies and then canonicalizes the product in the context ring.
+    #[cfg(test)]
+    fn multiply_mod(
+        &self,
+        left: &[Integer],
+        right: &[Integer],
+    ) -> DenseIntegerUnivariatePolynomial {
+        let mut product = self.multiply_raw(left, right);
+        self.reduce_in_place(&mut product);
+        product
+    }
+
+    /// Reduces a dense polynomial modulo a monic dense divisor.
+    ///
+    /// Lower cells accumulate exact integer updates until they become pivots
+    /// or survive in the remainder, limiting modular reductions to one per
+    /// pivot and one per returned coefficient.
+    fn remainder_monic(
+        &self,
+        dividend: &[Integer],
+        divisor: &[Integer],
+    ) -> DenseIntegerUnivariatePolynomial {
+        assert!(divisor.last().is_some_and(Integer::is_one));
+        if dividend.is_empty() {
+            return Vec::new();
+        }
+
+        let mut remainder = dividend.to_vec();
+        if remainder.len() < divisor.len() {
+            self.reduce_in_place(&mut remainder);
+            return remainder;
+        }
+
+        let divisor_degree = divisor.len() - 1;
+        for power in (divisor_degree..remainder.len()).rev() {
+            let value = std::mem::replace(&mut remainder[power], Integer::zero());
+            let pivot = value.symmetric_mod(self.modulus);
+            if pivot.is_zero() {
+                continue;
+            }
+
+            let shift = power - divisor_degree;
+            for (offset, divisor_coefficient) in divisor.iter().take(divisor_degree).enumerate() {
+                Z.sub_mul_assign(&mut remainder[shift + offset], &pivot, divisor_coefficient);
+            }
+        }
+
+        remainder.truncate(divisor_degree);
+        self.reduce_in_place(&mut remainder);
+        remainder
+    }
+
+    /// Computes `(target-left*right)/divisor` exactly over the integers and
+    /// returns its canonical image modulo the correction modulus.
+    fn exact_product_residual_quotient_mod(
+        &self,
+        target: &[Integer],
+        left: &[Integer],
+        right: &[Integer],
+        divisor: &Integer,
+    ) -> DenseIntegerUnivariatePolynomial {
+        let mut residual = self.multiply_raw(left, right);
+        residual.resize(residual.len().max(target.len()), Integer::zero());
+        for (index, coefficient) in residual.iter_mut().enumerate() {
+            let product_coefficient = std::mem::replace(coefficient, Integer::zero());
+            let mut value =
+                target.get(index).cloned().unwrap_or_else(Integer::zero) - product_coefficient;
+            debug_assert!((&value % divisor).is_zero());
+            value /= divisor;
+            *coefficient = value.symmetric_mod(self.modulus);
+        }
+        Self::trim(&mut residual);
+        residual
+    }
+
+    /// Computes `(1-s*u-t*w)/divisor` exactly and returns its canonical image
+    /// modulo the correction modulus.
+    fn exact_bezout_residual_quotient_mod(
+        &self,
+        s: &[Integer],
+        u: &[Integer],
+        t: &[Integer],
+        w: &[Integer],
+        divisor: &Integer,
+    ) -> DenseIntegerUnivariatePolynomial {
+        let mut residual = self.multiply_raw(s, u);
+        for coefficient in &mut residual {
+            let value = std::mem::replace(coefficient, Integer::zero());
+            *coefficient = -value;
+        }
+        if residual.is_empty() {
+            residual.push(Integer::one());
+        } else {
+            residual[0] += 1;
+        }
+
+        let second_product = self.multiply_raw(t, w);
+        residual.resize(residual.len().max(second_product.len()), Integer::zero());
+        for (coefficient, product_coefficient) in residual.iter_mut().zip(second_product) {
+            *coefficient -= product_coefficient;
+        }
+        for coefficient in &mut residual {
+            debug_assert!((&*coefficient % divisor).is_zero());
+            *coefficient /= divisor;
+            let value = std::mem::replace(coefficient, Integer::zero());
+            *coefficient = value.symmetric_mod(self.modulus);
+        }
+        Self::trim(&mut residual);
+        residual
+    }
+
+    /// Applies a Hensel correction `old + scale*delta` and returns canonical
+    /// coefficients modulo the new precision.
+    fn lift_correction(
+        &self,
+        old: &[Integer],
+        delta: &[Integer],
+        scale: &Integer,
+    ) -> DenseIntegerUnivariatePolynomial {
+        let mut lifted = old.to_vec();
+        lifted.resize(lifted.len().max(delta.len()), Integer::zero());
+        for (coefficient, correction) in lifted.iter_mut().zip(delta) {
+            Z.add_mul_assign(coefficient, correction, scale);
+        }
+        self.reduce_in_place(&mut lifted);
+        lifted
+    }
+
+    #[cfg(debug_assertions)]
+    fn product_matches(&self, target: &[Integer], left: &[Integer], right: &[Integer]) -> bool {
+        let product = self.multiply_raw(left, right);
+        let length = target.len().max(product.len());
+        (0..length).all(|index| {
+            let target_coefficient = target.get(index).cloned().unwrap_or_else(Integer::zero);
+            let product_coefficient = product.get(index).cloned().unwrap_or_else(Integer::zero);
+            ((target_coefficient - product_coefficient) % self.modulus).is_zero()
+        })
+    }
+
+    #[cfg(debug_assertions)]
+    fn bezout_identity_matches(
+        &self,
+        s: &[Integer],
+        u: &[Integer],
+        t: &[Integer],
+        w: &[Integer],
+    ) -> bool {
+        let su = self.multiply_raw(s, u);
+        let tw = self.multiply_raw(t, w);
+        let length = su.len().max(tw.len()).max(1);
+        (0..length).all(|index| {
+            let expected = if index == 0 {
+                Integer::one()
+            } else {
+                Integer::zero()
+            };
+            let actual = su.get(index).cloned().unwrap_or_else(Integer::zero)
+                + tw.get(index).cloned().unwrap_or_else(Integer::zero);
+            ((actual - expected) % self.modulus).is_zero()
+        })
+    }
+}
+
 /// Arithmetic modulo an integer on dense univariate integer polynomials.
 ///
 /// Quadratic Hensel lifting uses this context for factor and Bezout corrections modulo the
@@ -866,6 +1227,7 @@ impl<'a, E: PositiveExponent> IntegerModularUnivariateContext<'a, E> {
     /// modular inverse. Updates to lower cells are accumulated as integers until those cells
     /// become pivots or survive in the final remainder, avoiding repeated modular reductions.
     /// The returned coefficients are canonical symmetric representatives.
+    #[cfg(test)]
     fn remainder_monic(
         &self,
         dividend: &MultivariatePolynomial<IntegerRing, E, LexOrder>,
@@ -4990,12 +5352,28 @@ impl<E: PositiveExponent> MultivariatePolynomial<IntegerRing, E, LexOrder> {
             "the Hensel target modulus must be a power of the base prime"
         );
 
+        let variable = self
+            .last_exponents()
+            .iter()
+            .position(|exponent| !exponent.is_zero())
+            .expect("a Hensel factor must be nonconstant");
+        let dense_length = self.degree(variable).to_u32() as usize + 1;
+        let intermediate_length = dense_length
+            .checked_mul(2)
+            .and_then(|length| length.checked_sub(1))
+            .expect("dense Hensel intermediate length overflow");
+        let dense_indices = (0..intermediate_length)
+            .map(|index| index as u32)
+            .collect::<Vec<_>>();
+        let target_context =
+            DenseIntegerModularUnivariateContext::new(max_p, variable, self, &dense_indices);
         let leading_inverse = self.lcoeff().mod_inverse(max_p);
-        let normalized_target = self.map_coeff(
-            |coefficient| (coefficient * &leading_inverse).symmetric_mod(max_p),
-            Z,
-        );
-        debug_assert!(normalized_target.lcoeff().is_one());
+        let mut normalized_target = target_context.dense_coefficients(self);
+        for coefficient in &mut normalized_target {
+            *coefficient *= &leading_inverse;
+        }
+        target_context.reduce_in_place(&mut normalized_target);
+        debug_assert!(normalized_target.last().is_some_and(Integer::is_one));
 
         let schedule = univariate_hensel_precision_schedule(target_digits);
         let mut lift = UnivariateHenselProductTreeLiftContext::new(hs);
@@ -5006,23 +5384,23 @@ impl<E: PositiveExponent> MultivariatePolynomial<IntegerRing, E, LexOrder> {
 
         #[cfg(debug_assertions)]
         {
-            let base_context = IntegerModularUnivariateContext::new(&prime, self);
-            let initial_error = &base_context.reduce(&normalized_target) - lift.value(root);
-            debug_assert!(
-                initial_error
-                    .coefficients
-                    .iter()
-                    .all(|coefficient| (coefficient % &prime).is_zero())
-            );
+            let base_context =
+                DenseIntegerModularUnivariateContext::new(&prime, variable, self, &dense_indices);
+            let base_target = base_context.reduce(&normalized_target);
+            let root_product = lift.value(root);
+            let length = base_target.len().max(root_product.len());
+            debug_assert!((0..length).all(|index| {
+                let target_coefficient = base_target
+                    .get(index)
+                    .cloned()
+                    .unwrap_or_else(Integer::zero);
+                let product_coefficient = root_product
+                    .get(index)
+                    .cloned()
+                    .unwrap_or_else(Integer::zero);
+                ((target_coefficient - product_coefficient) % &prime).is_zero()
+            }));
         }
-
-        let divide_coefficients_exact = |mut polynomial: Self, divisor: &Integer| {
-            for coefficient in &mut polynomial.coefficients {
-                debug_assert!((&*coefficient % divisor).is_zero());
-                *coefficient /= divisor;
-            }
-            polynomial
-        };
 
         let mut modulus = prime.clone();
         for (stage_index, exponents) in schedule.windows(2).enumerate() {
@@ -5037,99 +5415,103 @@ impl<E: PositiveExponent> MultivariatePolynomial<IntegerRing, E, LexOrder> {
             }
             debug_assert!((&modulus % &correction_modulus).is_zero());
             let next_modulus = &modulus * &correction_modulus;
-            let correction_context =
-                IntegerModularUnivariateContext::new(&correction_modulus, self);
-            let next_context = IntegerModularUnivariateContext::new(&next_modulus, self);
+            let correction_context = DenseIntegerModularUnivariateContext::new(
+                &correction_modulus,
+                variable,
+                self,
+                &dense_indices,
+            );
+            let next_context = DenseIntegerModularUnivariateContext::new(
+                &next_modulus,
+                variable,
+                self,
+                &dense_indices,
+            );
             lift.set_value(root, next_context.reduce(&normalized_target));
 
             let final_stage = stage_index + 1 == schedule.len() - 1;
             for node_index in (0..lift.topology.nodes.len()).rev() {
                 let node = lift.topology.nodes[node_index];
-                let target = lift.internal_products[node_index].clone();
                 let u_link = node.children[0];
                 let w_link = node.children[1];
-                let u = lift.value(u_link).clone();
-                let w = lift.value(w_link).clone();
-                let [s, t] = lift.bezout_cofactors[node_index].clone();
+                let (lifted_u, lifted_w, lifted_bezout) = {
+                    let target = &lift.internal_products[node_index];
+                    let u = lift.value(u_link);
+                    let w = lift.value(w_link);
+                    let cofactors = &lift.bezout_cofactors[node_index];
+                    let s = &cofactors[0];
+                    let t = &cofactors[1];
 
-                // E=(target-u*w)/m is integral because the child product is
-                // already correct at the old precision. Reducing E modulo the
-                // correction modulus determines both factor corrections.
-                let error_quotient = divide_coefficients_exact(&target - &(&u * &w), &modulus);
-                let error = correction_context.reduce(&error_quotient);
-                let u_mod = correction_context.reduce(&u);
-                let w_mod = correction_context.reduce(&w);
-                let s_mod = correction_context.reduce(&s);
-                let t_mod = correction_context.reduce(&t);
+                    // E=(target-u*w)/m is integral because the child product
+                    // is already correct at the old precision. Reducing E
+                    // modulo the correction modulus determines both factor
+                    // corrections.
+                    let error = correction_context
+                        .exact_product_residual_quotient_mod(target, u, w, &modulus);
+                    let u_mod = correction_context.reduce(u);
+                    let w_mod = correction_context.reduce(w);
+                    let s_mod = correction_context.reduce(s);
+                    let t_mod = correction_context.reduce(t);
 
-                // du=(E*t) rem u and dw=(E*s) rem w. Reducing E before each
-                // multiplication keeps the intermediate product below the
-                // degree of the corresponding child factor.
-                let error_mod_u = correction_context.remainder_monic(&error, &u_mod);
-                let du = correction_context
-                    .remainder_monic(&correction_context.multiply(&error_mod_u, &t_mod), &u_mod);
-                let error_mod_w = correction_context.remainder_monic(&error, &w_mod);
-                let dw = correction_context
-                    .remainder_monic(&correction_context.multiply(&error_mod_w, &s_mod), &w_mod);
+                    // du=(E*t) rem u and dw=(E*s) rem w. Reducing E before
+                    // each multiplication keeps the intermediate product
+                    // below the degree of the corresponding child factor.
+                    let error_mod_u = correction_context.remainder_monic(&error, &u_mod);
+                    let error_t = correction_context.multiply_raw(&error_mod_u, &t_mod);
+                    let du = correction_context.remainder_monic(&error_t, &u_mod);
+                    let error_mod_w = correction_context.remainder_monic(&error, &w_mod);
+                    let error_s = correction_context.multiply_raw(&error_mod_w, &s_mod);
+                    let dw = correction_context.remainder_monic(&error_s, &w_mod);
 
-                let lifted_u = next_context.reduce(&(u + du.mul_coeff(modulus.clone())));
-                let lifted_w = next_context.reduce(&(w + dw.mul_coeff(modulus.clone())));
-                debug_assert!(lifted_u.lcoeff().is_one());
-                debug_assert!(lifted_w.lcoeff().is_one());
-
-                #[cfg(debug_assertions)]
-                {
-                    let product_error = &target - &(&lifted_u * &lifted_w);
-                    debug_assert!(
-                        product_error
-                            .coefficients
-                            .iter()
-                            .all(|coefficient| (coefficient % &next_modulus).is_zero())
-                    );
-                }
-
-                lift.set_value(u_link, lifted_u.clone());
-                lift.set_value(w_link, lifted_w.clone());
-
-                if !final_stage {
-                    // B=(1-s*U-t*W)/m gives the correction to the Bezout
-                    // relation after U and W have been lifted.
-                    let bezout_error = lifted_u.one() - (&s * &lifted_u) - (&t * &lifted_w);
-                    let bezout_quotient = divide_coefficients_exact(bezout_error, &modulus);
-                    let bezout_error = correction_context.reduce(&bezout_quotient);
-                    let lifted_u_mod = correction_context.reduce(&lifted_u);
-                    let lifted_w_mod = correction_context.reduce(&lifted_w);
-
-                    // ds=(B*s) rem W and dt=(B*t) rem U preserve the degree
-                    // bounds of the two Bezout cofactors.
-                    let bezout_mod_w =
-                        correction_context.remainder_monic(&bezout_error, &lifted_w_mod);
-                    let delta_s = correction_context.remainder_monic(
-                        &correction_context.multiply(&bezout_mod_w, &s_mod),
-                        &lifted_w_mod,
-                    );
-                    let bezout_mod_u =
-                        correction_context.remainder_monic(&bezout_error, &lifted_u_mod);
-                    let delta_t = correction_context.remainder_monic(
-                        &correction_context.multiply(&bezout_mod_u, &t_mod),
-                        &lifted_u_mod,
-                    );
-                    let lifted_s = next_context.reduce(&(s + delta_s.mul_coeff(modulus.clone())));
-                    let lifted_t = next_context.reduce(&(t + delta_t.mul_coeff(modulus.clone())));
+                    let lifted_u = next_context.lift_correction(u, &du, &modulus);
+                    let lifted_w = next_context.lift_correction(w, &dw, &modulus);
+                    debug_assert!(lifted_u.last().is_some_and(Integer::is_one));
+                    debug_assert!(lifted_w.last().is_some_and(Integer::is_one));
 
                     #[cfg(debug_assertions)]
                     {
-                        let inverse_error =
-                            &lifted_s * &lifted_u + &lifted_t * &lifted_w - lifted_u.one();
-                        debug_assert!(
-                            inverse_error
-                                .coefficients
-                                .iter()
-                                .all(|coefficient| (coefficient % &next_modulus).is_zero())
-                        );
+                        debug_assert!(next_context.product_matches(target, &lifted_u, &lifted_w));
                     }
 
-                    lift.bezout_cofactors[node_index] = [lifted_s, lifted_t];
+                    let lifted_bezout = if final_stage {
+                        None
+                    } else {
+                        // B=(1-s*U-t*W)/m gives the correction to the Bezout
+                        // relation after U and W have been lifted.
+                        let bezout_error = correction_context.exact_bezout_residual_quotient_mod(
+                            s, &lifted_u, t, &lifted_w, &modulus,
+                        );
+                        let lifted_u_mod = correction_context.reduce(&lifted_u);
+                        let lifted_w_mod = correction_context.reduce(&lifted_w);
+
+                        // ds=(B*s) rem W and dt=(B*t) rem U preserve the
+                        // degree bounds of the two Bezout cofactors.
+                        let bezout_mod_w =
+                            correction_context.remainder_monic(&bezout_error, &lifted_w_mod);
+                        let bezout_s = correction_context.multiply_raw(&bezout_mod_w, &s_mod);
+                        let delta_s = correction_context.remainder_monic(&bezout_s, &lifted_w_mod);
+                        let bezout_mod_u =
+                            correction_context.remainder_monic(&bezout_error, &lifted_u_mod);
+                        let bezout_t = correction_context.multiply_raw(&bezout_mod_u, &t_mod);
+                        let delta_t = correction_context.remainder_monic(&bezout_t, &lifted_u_mod);
+                        let lifted_s = next_context.lift_correction(s, &delta_s, &modulus);
+                        let lifted_t = next_context.lift_correction(t, &delta_t, &modulus);
+
+                        #[cfg(debug_assertions)]
+                        {
+                            debug_assert!(next_context.bezout_identity_matches(
+                                &lifted_s, &lifted_u, &lifted_t, &lifted_w,
+                            ));
+                        }
+                        Some([lifted_s, lifted_t])
+                    };
+                    (lifted_u, lifted_w, lifted_bezout)
+                };
+
+                lift.set_value(u_link, lifted_u);
+                lift.set_value(w_link, lifted_w);
+                if let Some(cofactors) = lifted_bezout {
+                    lift.bezout_cofactors[node_index] = cofactors;
                 }
             }
 
@@ -5142,6 +5524,9 @@ impl<E: PositiveExponent> MultivariatePolynomial<IntegerRing, E, LexOrder> {
             (0..hs.len()).collect::<Vec<_>>()
         );
         lift.leaves
+            .into_iter()
+            .map(|factor| target_context.from_dense_coefficients(factor))
+            .collect()
     }
 
     /// Continue factoring one exact Hensel child with a coefficient bound local to that child.
@@ -7874,13 +8259,13 @@ mod test {
     use std::sync::{Arc, Mutex, atomic::Ordering};
 
     use super::{
-        BOUNDED_DDF_REJECTIONS, DenseBivariateImage, DenseTwoFactorCorrectionContext,
-        EXACT_HENSEL_SUBTREE_MODULUS_BITS, EXACT_HENSEL_SUBTREE_SPLITS, ExactPolynomialSquareRoot,
-        IntegerModularUnivariateContext, LAST_BOUNDED_DDF_REJECTION_DEGREE,
-        LAST_MODULAR_INTEGER_EDF_PRIME, LLL_RECOMBINATION_SUCCESSES,
-        LOCAL_HENSEL_RECOMBINATION_NODES, MODULAR_INTEGER_EDF_CALLS, ModularPrimeScreen,
-        PRODUCT_TREE_HENSEL_LIFT_CALLS, QUADRATIC_HENSEL_LIFT_CALLS, QuadraticFactorization,
-        SparseDiophantineContext, UnivariateHenselProductTreeBuildContext,
+        BOUNDED_DDF_REJECTIONS, DenseBivariateImage, DenseIntegerModularUnivariateContext,
+        DenseTwoFactorCorrectionContext, EXACT_HENSEL_SUBTREE_MODULUS_BITS,
+        EXACT_HENSEL_SUBTREE_SPLITS, ExactPolynomialSquareRoot, IntegerModularUnivariateContext,
+        LAST_BOUNDED_DDF_REJECTION_DEGREE, LAST_MODULAR_INTEGER_EDF_PRIME,
+        LLL_RECOMBINATION_SUCCESSES, LOCAL_HENSEL_RECOMBINATION_NODES, MODULAR_INTEGER_EDF_CALLS,
+        ModularPrimeScreen, PRODUCT_TREE_HENSEL_LIFT_CALLS, QUADRATIC_HENSEL_LIFT_CALLS,
+        QuadraticFactorization, SparseDiophantineContext, UnivariateHenselProductTreeBuildContext,
         UnivariateHenselProductTreeLink, UnivariateHenselProductTreeNode,
         univariate_hensel_precision_schedule,
     };
@@ -9158,6 +9543,90 @@ mod test {
         assert_eq!(factors, expected);
         LOCAL_HENSEL_RECOMBINATION_NODES.with(|nodes| assert!(nodes.get() > 0));
         LLL_RECOMBINATION_SUCCESSES.with(|successes| assert!(successes.get() > 0));
+    }
+
+    #[test]
+    fn dense_integer_modular_univariate_arithmetic_matches_reference() {
+        let variables = Some(Arc::new(vec![
+            symbol!("x").into(),
+            symbol!("y").into(),
+            symbol!("z").into(),
+        ]));
+        let left = parse!("340282366920938463463374607431768211507-37*y^2+109*y^7")
+            .to_polynomial::<_, u8>(&Z, variables.clone());
+        let right = parse!("-170141183460469231731687303715884105741+43*y^3-71*y^6")
+            .to_polynomial::<_, u8>(&Z, variables.clone());
+        let dividend = parse!(
+            "19-31*y+47*y^2+53*y^3-71*y^5+89*y^8+340282366920938463463374607431768211507*y^11"
+        )
+        .to_polynomial::<_, u8>(&Z, variables.clone());
+        let monic_divisor = parse!("17-29*y^2+23*y^4+y^6").to_polynomial::<_, u8>(&Z, variables);
+        let dense_indices = (0..32).collect::<Vec<u32>>();
+
+        for modulus in [Integer::from(5).pow(8), Integer::from(5).pow(65)] {
+            let context =
+                DenseIntegerModularUnivariateContext::new(&modulus, 1, &dividend, &dense_indices);
+            let left_dense = context.dense_coefficients(&left);
+            let right_dense = context.dense_coefficients(&right);
+            assert!(left_dense[1].is_zero());
+            assert!(right_dense[1].is_zero());
+
+            let raw_product = context.multiply_raw(&left_dense, &right_dense);
+            assert_eq!(context.from_dense_coefficients(raw_product), &left * &right);
+
+            let field = FiniteField::<Integer>::new_non_prime(modulus.clone());
+            let left_mod = left.map_coeff(
+                |coefficient| coefficient.to_finite_field(&field),
+                field.clone(),
+            );
+            let right_mod = right.map_coeff(
+                |coefficient| coefficient.to_finite_field(&field),
+                field.clone(),
+            );
+            let reference_product = (&left_mod * &right_mod)
+                .map_coeff(|coefficient| field.to_symmetric_integer(coefficient), Z);
+            let modular_product = context.multiply_mod(&left_dense, &right_dense);
+            assert_eq!(
+                context.from_dense_coefficients(modular_product),
+                reference_product
+            );
+
+            let dividend_dense = context.dense_coefficients(&dividend);
+            let divisor_dense = context.dense_coefficients(&monic_divisor);
+            let remainder = context.remainder_monic(&dividend_dense, &divisor_dense);
+            let dividend_mod = dividend.map_coeff(
+                |coefficient| coefficient.to_finite_field(&field),
+                field.clone(),
+            );
+            let mut divisor_mod = monic_divisor.map_coeff(
+                |coefficient| coefficient.to_finite_field(&field),
+                field.clone(),
+            );
+            let reference_remainder = dividend_mod
+                .quot_rem_univariate(&mut divisor_mod)
+                .1
+                .map_coeff(|coefficient| field.to_symmetric_integer(coefficient), Z);
+            assert_eq!(
+                context.from_dense_coefficients(remainder),
+                reference_remainder
+            );
+
+            let zero = Vec::<Integer>::new();
+            assert!(context.multiply_raw(&zero, &left_dense).is_empty());
+            assert!(context.multiply_mod(&left_dense, &zero).is_empty());
+            assert!(context.remainder_monic(&zero, &divisor_dense).is_empty());
+            assert!(
+                context
+                    .exact_bezout_residual_quotient_mod(
+                        &zero,
+                        &left_dense,
+                        &[Integer::one()],
+                        &[Integer::one()],
+                        &Integer::from(5),
+                    )
+                    .is_empty()
+            );
+        }
     }
 
     #[test]
