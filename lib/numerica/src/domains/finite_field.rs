@@ -818,13 +818,15 @@ impl Zp64 {
             panic!("Prime 2 is not supported: use Z2 instead.");
         }
 
+        let one = Self::get_one(p);
+        let r2 = (one as u128 * one as u128 % p as u128) as u64;
         FiniteField {
             p,
             m: Self::inv_2_64(p),
             r_mask: 0,
-            r2: 0,
+            r2,
             r_bits: 64,
-            one: FiniteFieldElement(Self::get_one(p)),
+            one: FiniteFieldElement(one),
             is_prime: false,
         }
     }
@@ -835,13 +837,15 @@ impl Zp64 {
             panic!("Prime 2 is not supported: use Z2 instead.");
         }
 
+        let one = Self::get_one(p);
+        let r2 = (one as u128 * one as u128 % p as u128) as u64;
         FiniteField {
             p,
             m: Self::inv_2_64(p),
             r_mask: 0,
-            r2: 0,
+            r2,
             r_bits: 64,
-            one: FiniteFieldElement(Self::get_one(p)),
+            one: FiniteFieldElement(one),
             is_prime: true,
         }
     }
@@ -895,8 +899,8 @@ impl FiniteFieldCore<u64> for Zp64 {
     /// Convert a number in a prime field a % n to Montgomory form.
     #[inline(always)]
     fn to_element(&self, a: u64) -> FiniteFieldElement<u64> {
-        // TODO: slow, faster alternatives may need assembly
-        FiniteFieldElement((((a as u128) << 64) % self.p as u128) as u64)
+        // Montgomery multiplication removes one factor of R, so REDC(a R^2) stores a R mod p.
+        self.mul(FiniteFieldElement(a), FiniteFieldElement(self.r2))
     }
 
     /// Convert a number from Montgomory form to standard form.
@@ -3783,6 +3787,44 @@ mod test {
         }
 
         assert_eq!(seen, [false, true, true]);
+    }
+
+    #[test]
+    fn zp64_montgomery_conversion_matches_direct_radix_remainder() {
+        let fields = [
+            Zp64::new(3),
+            Zp64::new(17),
+            Zp64::new(10_030_613_004_288_000_001),
+            Zp64::new(18_446_744_073_709_551_557),
+            Zp64::new_non_prime(9),
+            Zp64::new_non_prime((1u64 << 63) - 1),
+            Zp64::new_non_prime((1u64 << 63) + 1),
+            Zp64::new_non_prime(u64::MAX),
+        ];
+
+        for field in fields {
+            let modulus = field.get_prime();
+            let radix = ((1u128 << 64) % modulus as u128) as u64;
+            let expected_r2 = (radix as u128 * radix as u128 % modulus as u128) as u64;
+            assert_eq!(field.r2, expected_r2, "modulus {modulus}");
+
+            for value in [
+                0,
+                1,
+                2,
+                modulus / 2,
+                modulus - 1,
+                modulus,
+                modulus.saturating_add(1),
+                u64::MAX - 1,
+                u64::MAX,
+            ] {
+                let element = field.to_element(value);
+                let expected = (((value as u128) << 64) % modulus as u128) as u64;
+                assert_eq!(*element.inner(), expected, "value {value} mod {modulus}");
+                assert_eq!(field.from_element(&element), value % modulus);
+            }
+        }
     }
 
     fn assert_dense_polynomial_mul<R: Ring>(
