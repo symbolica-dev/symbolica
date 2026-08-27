@@ -971,10 +971,10 @@ impl<'a, E: PositiveExponent> DenseIntegerModularUnivariateContext<'a, E> {
         residual.resize(residual.len().max(target.len()), Integer::zero());
         for (index, coefficient) in residual.iter_mut().enumerate() {
             let product_coefficient = std::mem::replace(coefficient, Integer::zero());
-            let mut value =
+            let value =
                 target.get(index).cloned().unwrap_or_else(Integer::zero) - product_coefficient;
             debug_assert!((&value % divisor).is_zero());
-            value /= divisor;
+            let value = Z.exact_div_owned(value, divisor);
             *coefficient = value.symmetric_mod(self.modulus);
         }
         Self::trim(&mut residual);
@@ -1008,9 +1008,9 @@ impl<'a, E: PositiveExponent> DenseIntegerModularUnivariateContext<'a, E> {
             *coefficient -= product_coefficient;
         }
         for coefficient in &mut residual {
-            debug_assert!((&*coefficient % divisor).is_zero());
-            *coefficient /= divisor;
             let value = std::mem::replace(coefficient, Integer::zero());
+            debug_assert!((&value % divisor).is_zero());
+            let value = Z.exact_div_owned(value, divisor);
             *coefficient = value.symmetric_mod(self.modulus);
         }
         Self::trim(&mut residual);
