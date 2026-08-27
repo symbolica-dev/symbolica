@@ -27,9 +27,8 @@ transient binary names.
 
 ## Current continuation checkpoint: dense degree-64 modular factorization
 
-This section supersedes the older `Resume here` checkpoint below. The accepted `dev` head remains
-`9a1d9e2`; the following measured commits are still isolated on `codex/ddf-direct-gcd` and have not
-yet been fast-forwarded into `dev`:
+This section supersedes the older `Resume here` checkpoint below. The measured chain is integrated
+on `dev` through documentation commit `2fb7fac`:
 
 | Commit | Change | Source-matched degree-64 result |
 |---|---|---:|
@@ -37,8 +36,8 @@ yet been fast-forwarded into `dev`:
 | `052665d` | Keep bounded classical DDF multiplication and remainder state in dense `Zp` storage | `-9.696%` |
 | `7b849e3` | Extract exact univariate monomial factors before screening and reject zero-constant images | `-2.435850%` |
 
-All three source commits have author and committer `Ben Ruijl <ben@ruijl.ch>`. Their isolated
-worktree is `/tmp/symbolica-ddf-direct-gcd`; the measured source head is `7b849e3`. The combined
+All three source commits have author and committer `Ben Ruijl <ben@ruijl.ch>`. The measured source
+head is `7b849e3`; `2fb7fac` adds this checkpoint without changing the executable. The combined
 default-feature factor suite passes `63/63`; the no-GMP suite also passes `63/63` on its complete
 rerun. One earlier no-GMP
 `galois_upgrade` execution failed during randomized finite-field splitting, but its immediate
