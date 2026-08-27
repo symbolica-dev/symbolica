@@ -1,8 +1,8 @@
 # Polynomial performance continuation handoff
 
 This is the live continuation record for the single-core Symbolica/FLINT polynomial-performance
-work. It was refreshed on 2026-08-27 after measuring the first synchronized Hensel product-tree
-prototype on top of the exact-subproblem local-bound baseline.
+work. It was refreshed on 2026-08-27 after implementing the dense synchronized Hensel product-tree
+candidate through `6388bd3`. Definitive full-LTO timings and a new profile are still pending.
 Keep this file current whenever an experiment is accepted, rejected, or left partly complete. The
 purpose is that another agent can resume without reconstructing decisions from chat history or
 transient binary names.
@@ -56,10 +56,7 @@ Twelve alternating 100-sample processes reduce the degree-64 factor median from 
 unchanged within noise at `0.005929 ms` versus `0.005934 ms` for the control.
 
 The local-bound profile reduces Hensel cycles another 9.9% while modular screening remains within
-0.3%. The next small, contained experiment is a fused dense residual update, but its realistic
-ceiling is only about 2-5%. The next architectural target is coherent simultaneous lifting over a
-product tree; FLINT's degree-greedy tree has about 27.7% less degree-weighted internal work and
-updates precision in a small number of tree walks instead of independent near-global binary lifts.
+0.3%. It is the accepted baseline for the synchronized product-tree candidate described below.
 
 Residual and local-subtree validation completed before integration:
 
@@ -73,57 +70,105 @@ The combined local-subtree source passed `50/50` factor tests under both GMP and
 the final LLL test was added. That LLL test then passed separately under both backends; it is the
 only change after the release build.
 
-### In-progress synchronized Hensel product tree
+### Implemented synchronized Hensel product-tree candidate
 
-The isolated branch `codex/product-tree-topology` contains three unintegrated commits:
+The implementation is not yet on `dev`. The complete candidate is isolated at
+`codex/product-tree-dense-combined`, commit `6388bd3`, with this source chain:
 
 | Commit | Change |
 |---|---|
 | `b081091` | Build a degree-greedy Hensel product-tree topology |
 | `2e21a3c` | Add modular remainder by a monic polynomial |
-| `3c50b09` | Lift all factors through synchronized product-tree precision stages |
+| `3c50b09` | Lift all factors through synchronized Hensel precision stages |
+| `af06d09` | Keep product-tree arithmetic in a dense integer context |
+| `44c968b` | Recheck Hensel pressure after final prime selection and EDF |
+| `e288f35` | Reuse owned GMP storage for large-integer remainders |
+| `d4c6742` | Use `exact_div_owned` for exact dense Hensel residual quotients |
+| `738967d` | Retain nonnegative residues and reuse dead lift buffers |
+| `6388bd3` | Hide test-only Hensel topology helpers |
 
-The prototype uses the precision schedule `1,2,3,5,10,20,39,77`, walks internal nodes top-down,
-updates both factors and Bezout cofactors, and performs final global recombination. It retains the
-old binary/local-bound implementation as a fallback. The product-tree correctness suite passes
-under default features and `no_gmp,native_code_generation`, including `p=2`, nonmonic input,
-uneven leaf degrees, composite precision 41, agreement with binary lifted leaves, product
-congruence, and exact reconstruction.
+The tree combines the two lowest-degree nodes at each step. For the degree-64 fixture its modular
+leaf degrees `[1,1,2,10,10,10,30]` produce degree-weighted internal work `138`, versus `191` for
+the earlier count-midpoint tree. A precision schedule such as `1,2,3,5,10,20,39,77` walks every
+internal node top-down at each stage, updating factors and Bezout cofactors together; the final
+unused inverse update is skipped. Global recombination still uses the existing exact reconstruction
+tail, and unsupported or lower-pressure cases retain the binary/local-bound fallback.
 
-The first full-LTO candidate is
+Tree dispatch is now decided only after the final modular prime and complete equal-degree
+factorization are known. The shared pressure predicate requires degree at most 64, a coefficient
+bound of at least 256 bits, at least three factors, at least 64 lifting digits, and estimated work at
+least 256. The degree-63 fixture ultimately selects `p=65_000_011` and needs only 12 digits, so it
+rejects the tree. The degree-64 fixture selects `p=17` and needs 77 digits, so it uses the tree. This
+fixes the v1 mistake of dispatching from the initial small-prime estimate. Tree dispatch also
+requires more than four leaves, preserving the existing quadratic/binary path for smaller sets.
+
+`DenseIntegerModularUnivariateContext` stores leaves, internal products, and Bezout cofactors as
+trimmed `Vec<Integer>` values. It caches dense indices, calls the integer dense multiplication
+kernel when admitted, retains a generic quadratic fallback, implements owned monic remainder
+directly, and converts to sparse polynomials only at the boundary. Guaranteed exact product and
+Bezout residuals use `exact_div_owned` rather than generic division.
+
+All intermediate residues now use canonical representatives in `[0,m)`. When advancing from scale
+`s` to modulus `M`, `old` is in `[0,s)` and the correction `delta` is in `[0,M/s)`, so
+`old + s*delta` is already in `[0,M)` and needs no modular reduction. Only the final lifted leaves
+are symmetrized. Owned child, cofactor, remainder, and product buffers are reused after their old
+values become dead, while the normalized root target is borrowed across stages.
+
+The GMP-specific owned-remainder change avoids cloning both large operands when evaluating an owned
+large numerator modulo a borrowed large divisor. In 12 alternating one-million-operation release
+microbench processes, median time fell by `32.529%` at 156 bits and `27.705%` at 312 bits. Raw data
+is `/tmp/owned-remainder-v1-alternating.csv`, SHA-256
+`5d2a3d3926c6bfbcbb5cb4608a2dac242ebb759f4420a76a8bd4be95246e9a01`; the no-GMP backend retains
+its safe generic fallback.
+
+The complete factor-module suite passes `59/59` under default GMP features and `59/59` under
+`no_gmp,native_code_generation`. Coverage includes small primes, composite prime powers, uneven
+degrees, nonmonic targets, interior zeros, GMP-sized coefficients, product congruence, Bezout
+identities, exact residuals, and agreement with the binary lift.
+
+FLINT 3.6.0 source was inspected at `/tmp/flint-3.6.0-source`, commit `8d5454b96`.
+`hensel_build_tree.c` builds a degree-greedy tree; `hensel_lift_without_inverse.c` and
+`hensel_lift_only_inverse.c` keep dense `fmpz_poly` arrays, use low-level modular multiplication and
+remainder routines, and skip the final inverse lift. The candidate now matches those high-level
+topology and storage choices; the remaining implementation-level gap must be established by the
+next profile.
+
+The historical product-tree v1 full-LTO binary is
 `/tmp/flint-comparison-factor-product-tree-v1-screen`, SHA-256
 `84eedbc43629bbd9896340a832e70937e6dd7a0c9708a08e8adcf94d158aea10`. Twelve alternating
-100-sample processes on the total-degree-64 fixture reduce Symbolica's median from
-`11.083816 ms` to `7.805277 ms`, a paired median improvement of `29.606%`. The median paired ratio
-falls from `4.329997` to `3.032826`; the candidate wins all twelve processes. Its matched FLINT
-median is `2.574013 ms`.
+100-sample processes reduced the degree-64 median from `11.083816 ms` to `7.805277 ms`, a paired
+improvement of `29.606%`; its Symbolica/FLINT ratio was `3.032826`. Its broad selector regressed
+degree 63 by `11.994%`, which is why it was not integrated unchanged. A 500-call LBR profile of v1
+attributed `32.08%` of combined cycles to tree lifting, including `15.39%` in generic monic
+remainder, `5.67%` in generic reduction, and `6.83%` in integer polynomial multiplication. Those
+measurements motivated the dense context above.
 
-Do not integrate that dispatch policy unchanged. The same broad pressure guard routes the generated
-total-degree-63 fixture and regresses it in all twelve processes: Symbolica's median rises from
-`12.280443 ms` to `13.733505 ms`, a paired median regression of `11.994%`; the ratio rises from
-`4.086668` to `4.556213`. Instrumentation is in progress to compare the selected prime, modular
-leaf degrees, legacy versus greedy internal degree work, exact subtree splits, and local bounds for
-degrees 63 and 64. Select the tree with a cheap structural cost predicate, and require degree 63 to
-remain on the legacy path unless measurements demonstrate a win.
+The only newer timing so far is a 20-sample release screen at `d4c6742` with LTO disabled and 16
+codegen units, before the nonnegative storage and buffer-reuse follow-up. It reports Symbolica
+`7.622205 ms`, FLINT `2.574298 ms`, and a ratio of `2.960887` on degree 64. This is provisional and
+is not a definitive result for `6388bd3`.
 
-A 500-call LBR profile attributes `32.08%` of combined cycles to product-tree lifting. Generic
-`remainder_monic` alone is `15.39%` of combined cycles, generic coefficient reduction is `5.67%`,
-and integer polynomial multiplication is `6.83%`. This makes repeated sparse-to-dense conversion,
-modular reduction, and generic remainder handling a larger next target than the convolution itself.
-The in-progress `codex/product-tree-dense-v2` experiment will keep leaf products and Bezout
-cofactors as trimmed dense integer vectors, reuse dense indices and buffers, call the integer dense
-kernel for convolution, and perform monic remainder directly. It has not yet been implemented or
-benchmarked.
+Record the definitive evidence here when it exists; do not replace the accepted baseline with the
+quick screen:
+
+| Pending evidence | Status |
+|---|---|
+| Full-LTO degree-64 matrix for `6388bd3`, paired against v1 and the accepted local-bound baseline | **Pending** |
+| Degree 63/65, high-height degree 33, 2/3-variable, PolyBench #105/#178, product, and degree-64 GCD guards | **Pending** |
+| New LBR profile of the full-LTO winner, including a Symbolica/FLINT attribution | **Pending** |
 
 The complete default `cargo test --workspace` gate was last run on the preceding integrated chain;
-the residual edit is confined to linear Hensel lifting and received the two complete factor-module
-passes above.
+the isolated candidate has the two complete factor-module passes above.
 
 The exact worktree state is:
 
 | Worktree | Branch/head | State | Purpose |
 |---|---|---|---|
-| `/home/codexB/symbolica` | `dev`, `1a8b4d7` | only handoff Markdown modified | Integrated product/factor winner and live lab notebook |
+| `/home/codexB/symbolica` | `dev`, `8b6ef36` | clean at handoff refresh | Integrated winner plus product-tree status documentation |
+| `/tmp/symbolica-product-tree-dense-combined` | `codex/product-tree-dense-combined`, `6388bd3` | clean; full candidate | Dense synchronized Hensel tree awaiting definitive evidence |
+| `/tmp/symbolica-product-tree-topology` | `codex/product-tree-topology`, `3c50b09` | clean; historical v1 source | First synchronized-tree implementation |
+| `/tmp/symbolica-product-tree-dense-v2` | `codex/product-tree-dense-v2`, `af06d09` | clean; historical intermediate | Initial dense tree context |
+| `/tmp/symbolica-integer-owned-remainder` | `codex/integer-owned-remainder`, `3895df9` | clean; source reference | Original owned GMP remainder optimization |
 | `/tmp/symbolica-factor-residual-update` | `codex/factor-incremental-residual`, `f4f47be` | clean; accepted source commit | Isolated incremental-residual reference |
 | `/tmp/symbolica-factor-residual-control` | `codex/factor-residual-control`, `3b387a4` | clean except ignored lock | Source-matched full-LTO control |
 | `/tmp/symbolica-factor-local-subtree` | `codex/factor-local-subtree`, `3037a2a` | clean historical source | Pre-rebase local-bound experiment |
@@ -138,6 +183,7 @@ Before acting, confirm rather than assume:
 
 ```sh
 git -C /home/codexB/symbolica status --short --branch
+git -C /tmp/symbolica-product-tree-dense-combined status --short --branch
 git -C /tmp/symbolica-univariate-product status --short --branch
 git -C /tmp/symbolica-factor-large-prime status --short --branch
 ps -eo user,pid,pcpu,stat,args | \
@@ -1136,13 +1182,11 @@ leaves that top-level recombination interprets modulo the global modulus. A leaf
 the smaller child modulus is not generally a valid representative modulo the global modulus, and
 mixed exact nonmonic children violate the same recombination assumptions.
 
-The safe implementation is an exact-subproblem solver. It recursively treats `Ok` children as
-exact targets with local bounds; when a node returns `Err`, it completes that target's descendant
-lifts at one local modulus and recombines them locally against the exact target before returning
-exact integer factors. The existing LLL/subset recombination tail should first be extracted into a
-helper that explicitly consumes one exact target and one consistently lifted modular-factor set.
-Calling `factor_reconstruct` again on every exact child is correct but needlessly repeats prime
-selection, DDF, and EDF.
+The accepted exact-subproblem solver recursively treats `Ok` children as exact targets with local
+bounds. When a node returns `Err`, it completes that target's descendant lifts at one local modulus
+and recombines them locally against the exact target before returning exact integer factors. Its
+extracted LLL/subset recombination helper consumes one exact target and one consistently lifted
+modular-factor set, avoiding repeated prime selection, DDF, and EDF.
 
 For the degree-64 fixture at `p=17`, the current Gelfond bounds are:
 
@@ -1160,16 +1204,16 @@ split only falls from 77 to 74 digits. Consequently the safe local-modulus exper
 median-performance confidence; its largest saving occurs in the already lucky ordering, where a
 failed descendant inside the exact degree-20 target can fall from 77 to 23 digits.
 
-The larger strategic target is coherent simultaneous linear Hensel lifting over a product tree. It
-would update all leaves and product nodes for each p-adic digit rather than attempting fake binary
-integer factorizations at unlucky intermediate partitions. The observed fast/slow spread is about
-5.3 ms, so this has a materially larger ceiling than local bounds, at the cost of a substantially
-larger implementation. Tree sorting alone is unjustified because the three degree-10 modular
-factors are indistinguishable over `GF(17)`. A stabilization/exact-division shortcut also needs
-rational reconstruction or leading-coefficient allocation: nonmonic lifting scales both children
-to the full target leading coefficient, so the small primitive factor does not simply stabilize.
+This audit motivated the synchronized product-tree candidate documented under “Resume here.” It
+updates all leaves and product nodes at shared p-adic stages instead of attempting fake binary
+integer factorizations at unlucky intermediate partitions. The observed 5.3 ms fast/slow spread
+established a larger ceiling than local bounds. Degree sorting alone could not distinguish the
+three degree-10 factors over `GF(17)`; synchronized lifting removes the need to guess that integer
+partition. A separate stabilization/exact-division shortcut would still need rational
+reconstruction or leading-coefficient allocation because nonmonic lifting scales both children to
+the full target leading coefficient.
 
-A private dense univariate remainder context remains a later option. It would cache one monic
+A private dense DDF remainder context remains a later option. It would cache one monic
 modulus, retain dense coefficient/index buffers through binary exponentiation, use the existing
 coefficient-domain multiplication kernel, and materialize a polynomial only for each GCD. Its
 current DDF ceiling is about 27.5% of Symbolica time, so reassess it after the prime experiment.
@@ -1317,33 +1361,32 @@ comments that justify file organization by contrasting it with designs not prese
 
 ## Ordered next actions
 
-1. Finish the degree-63/64 structural audit and replace the prototype's broad pressure guard with a
-   measured selector. The degree-64 fixture must route to the product tree; the currently regressed
-   degree-63 fixture must retain the legacy binary/local-bound path unless the dense version reverses
-   the result. Run the degree-33/65, 2-variable, 3-variable, PolyBench #105/#178, and product rows as
-   guards before integration.
-2. Implement the dense synchronized-lift context described above. Differential-test raw and modular
-   products plus monic remainder at small and large composite prime powers, then repeat the default
-   and `no_gmp,native_code_generation` product-tree suites. Compare a full-LTO binary first against
-   product-tree v1 and then against the accepted local-bound baseline.
-3. A smaller independent experiment is the fused dense update
+1. Finish and freeze a full-LTO `flint_comparison` binary from `6388bd3`, then run twelve alternating
+   100-sample degree-64 processes against both product-tree v1 and the accepted local-bound baseline.
+   Hash the binary, dependency file, build log, and raw timing CSVs before interpreting the result.
+2. Run the degree-63/65, high-height degree-33, 2-variable, 3-variable, PolyBench #105/#178,
+   factor-product, and degree-64 GCD guards. Degree 63 must demonstrate that the final-prime selector
+   retains the legacy path without the v1 regression.
+3. Profile the full-LTO winner with LBR and compare its hot subtrees with both v1 and FLINT. Fill in
+   the explicit pending-evidence table above before integrating the candidate.
+4. A smaller independent experiment is the fused dense update
    `residual - tau*w - r*u'`. Put it behind `PolynomialKernels` and implement the integer operation
    through a short-lived context that admits the whole request before consuming coefficients. Its
    realistic profile ceiling is only 2-5%, so reject it if repeated whole-factor timings do not
    move.
-4. For the high-height degree-33 path, the smallest measured follow-up is to defer coefficient
+5. For the high-height degree-33 path, the smallest measured follow-up is to defer coefficient
    reduction inside `IntegerModularUnivariateContext::quot_rem`: leave non-pivot remainder cells
    unreduced during fused subtractions and symmetrically reduce only pivots and the final
    remainder. In the v3 profile quotient/remainder is about 52% of Hensel, and about 70% of that
    subtree is `symmetric_mod`. Differential-test this at small and large composite prime powers
    before benchmarking; do not infer the full profile ceiling as an expected gain.
-5. Keep the private dense DDF remainder context as a later option. Bounded prime screening reduced
+6. Keep the private dense DDF remainder context as a later option. Bounded prime screening reduced
    DDF's current degree-64 ceiling to about 27.5%, and both the 500M prime and root-only quadratic
    experiments show that moving work between modular factorization and Hensel lifting is not itself
    a win.
-6. Keep the one-variable product path as a regression guard: its target factor-fixture product is
+7. Keep the one-variable product path as a regression guard: its target factor-fixture product is
    about 9.5% slower than FLINT in the latest source-matched build. Return to dense univariate GCD
-   only after the degree-64 factor
-   prime/Hensel decision; current degree-64 GCD is about 19% slower than FLINT.
-7. Freeze and hash every accepted full-LTO binary and profile, integrate only measured winners with
+   only after the degree-64 factor prime/Hensel decision; current degree-64 GCD is about 19% slower
+   than FLINT.
+8. Freeze and hash every accepted full-LTO binary and profile, integrate only measured winners with
    Ben Ruijl's identity, and keep this file current after every accepted or rejected experiment.
