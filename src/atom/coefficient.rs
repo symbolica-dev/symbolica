@@ -94,15 +94,22 @@ const fn get_size_of_natural(num_type: u8) -> u8 {
 
 impl SerializedRationalPolynomial<'_> {
     pub fn deserialize(self) -> RationalPolynomial<IntegerRing, u16> {
+        let (index, _, _) = self.0.get_frac_u64();
+        let vars = State::get_variable_list(VariableListIndex(index as usize));
+        self.deserialize_with_variables(vars)
+    }
+
+    pub(crate) fn deserialize_with_variables(
+        self,
+        vars: std::sync::Arc<Vec<crate::poly::PolyVariable>>,
+    ) -> RationalPolynomial<IntegerRing, u16> {
         let mut source = self.0;
 
-        let index;
         let num_nterms;
         let den_nterms;
-        (index, num_nterms, source) = source.get_frac_u64();
+        (_, num_nterms, source) = source.get_frac_u64();
         (den_nterms, _, source) = source.get_frac_u64();
 
-        let vars = State::get_variable_list(VariableListIndex(index as usize));
         let nvars = vars.len();
 
         let mut poly = RationalPolynomial::new(&Z, vars);
