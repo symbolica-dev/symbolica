@@ -19,6 +19,12 @@ use rug::integer::Order as RugIntegerOrder;
 
 const MAX_DENSE_MODULAR_MUL_BUFFER_SIZE: usize = 1 << 20;
 
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub(super) enum U64AccumulationMode {
+    DirectMontgomeryReduction,
+    NativeRemainder,
+}
+
 #[inline]
 /// Validate the common shape and bounded-workspace requirements of a dense multiplication.
 ///
@@ -116,6 +122,30 @@ impl<'a> DenseZpMul<'a> {
                 )
             },
         )
+    }
+
+    /// Select the reduction used after accumulating exact output coefficients in `u64`.
+    ///
+    /// Returns `None` when the largest possible coefficient requires a `u128` accumulator.
+    #[inline]
+    pub(super) fn u64_accumulation_mode(&self) -> Option<U64AccumulationMode> {
+        let maximum_product = (self.field.p - 1) as u128 * (self.field.p - 1) as u128;
+        // Unique input indices imply that one output index receives at most one product for each
+        // term of either input, hence at most the length of the shorter input.
+        let maximum_collision_count = self
+            .request
+            .left_coefficients
+            .len()
+            .min(self.request.right_coefficients.len());
+        let maximum_coefficient = maximum_product.checked_mul(maximum_collision_count as u128)?;
+        if maximum_coefficient > u64::MAX as u128 {
+            return None;
+        }
+        if maximum_coefficient < (self.field.p as u128) << u32::BITS {
+            Some(U64AccumulationMode::DirectMontgomeryReduction)
+        } else {
+            Some(U64AccumulationMode::NativeRemainder)
+        }
     }
 
     /// Decode a compact simplex layout back to the polynomial layer's standard dense indices.
@@ -314,19 +344,11 @@ impl<'a> DenseZpMul<'a> {
 
         // Small moduli can accumulate the entire convolution in u64. Besides using a
         // smaller buffer, this avoids the compiler's generic 128-bit remainder helper.
-        let maximum_product = (self.field.p - 1) as u128 * (self.field.p - 1) as u128;
-        let output =
-            if maximum_product.checked_mul(self.number_of_products as u128)? <= u64::MAX as u128 {
-                let reduce_directly = maximum_product.checked_mul(
-                    self.request
-                        .left_coefficients
-                        .len()
-                        .min(self.request.right_coefficients.len()) as u128,
-                )? < (self.field.p as u128) << u32::BITS;
-                self.multiply_direct_u64(reduce_directly)
-            } else {
-                self.multiply_direct_u128()
-            };
+        let output = match self.u64_accumulation_mode() {
+            Some(U64AccumulationMode::DirectMontgomeryReduction) => self.multiply_direct_u64(true),
+            Some(U64AccumulationMode::NativeRemainder) => self.multiply_direct_u64(false),
+            None => self.multiply_direct_u128(),
+        };
         self.decode_output(output)
     }
 

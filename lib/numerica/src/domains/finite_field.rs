@@ -4049,6 +4049,21 @@ mod test {
         let field = Zp::new(17);
         let left = [1, 16, 7, 13].map(|value| field.to_element(value));
         let right = [15, 3, 16, 8].map(|value| field.to_element(value));
+        let operation = super::polynomial_kernels::DenseZpMul::new(
+            &field,
+            DensePolynomialMulRequest {
+                output_len: 15,
+                left_coefficients: &left,
+                left_indices: &[0, 2, 5, 7],
+                right_coefficients: &right,
+                right_indices: &[0, 1, 4, 7],
+            },
+        )
+        .unwrap();
+        assert_eq!(
+            operation.u64_accumulation_mode(),
+            Some(super::polynomial_kernels::U64AccumulationMode::DirectMontgomeryReduction)
+        );
         assert_dense_polynomial_mul(&field, &left, &[0, 2, 5, 7], &right, &[0, 1, 4, 7], 15);
         assert_dense_polynomial_mul(&field, &left, &[0, 2, 5, 7], &right, &[0, 1, 4, 7], 100);
         #[cfg(feature = "gmp")]
@@ -4090,9 +4105,71 @@ mod test {
             .map(|value| field.to_element(value));
         let right = [4_294_967_289, 4_294_967_100, 3_456_789_012, 987_654_321]
             .map(|value| field.to_element(value));
+        let operation = super::polynomial_kernels::DenseZpMul::new(
+            &field,
+            DensePolynomialMulRequest {
+                output_len: 15,
+                left_coefficients: &left,
+                left_indices: &[0, 2, 5, 7],
+                right_coefficients: &right,
+                right_indices: &[0, 1, 4, 7],
+            },
+        )
+        .unwrap();
+        assert_eq!(operation.u64_accumulation_mode(), None);
         assert_dense_polynomial_mul(&field, &left, &[0, 2, 5, 7], &right, &[0, 1, 4, 7], 15);
         #[cfg(feature = "gmp")]
         assert_ks2_zp_polynomial_mul(&field, &left, &[0, 2, 5, 7], &right, &[0, 1, 4, 7]);
+
+        for (prime, expected_mode) in [
+            (
+                65_000_011,
+                super::polynomial_kernels::U64AccumulationMode::DirectMontgomeryReduction,
+            ),
+            (
+                500_000_003,
+                super::polynomial_kernels::U64AccumulationMode::NativeRemainder,
+            ),
+        ] {
+            let field = Zp::new(prime);
+            let maximum_raw = super::FiniteFieldElement::from_inner(prime - 1);
+            let left = vec![maximum_raw; 129];
+            let right = vec![maximum_raw; 65];
+            let maximum_product = u128::from(prime - 1) * u128::from(prime - 1);
+            assert!(maximum_product * left.len() as u128 * right.len() as u128 > u64::MAX as u128);
+            assert!(maximum_product * right.len() as u128 <= u64::MAX as u128);
+            for stride in [1, 128] {
+                let left_indices = (0..left.len() as u32)
+                    .map(|index| 17 + stride * index)
+                    .collect::<Vec<_>>();
+                let right_indices = (0..right.len() as u32)
+                    .map(|index| 29 + stride * index)
+                    .collect::<Vec<_>>();
+                let output_len = *left_indices.last().unwrap() as usize
+                    + *right_indices.last().unwrap() as usize
+                    + 1;
+                let operation = super::polynomial_kernels::DenseZpMul::new(
+                    &field,
+                    DensePolynomialMulRequest {
+                        output_len,
+                        left_coefficients: &left,
+                        left_indices: &left_indices,
+                        right_coefficients: &right,
+                        right_indices: &right_indices,
+                    },
+                )
+                .unwrap();
+                assert_eq!(operation.u64_accumulation_mode(), Some(expected_mode));
+                assert_dense_polynomial_mul(
+                    &field,
+                    &left,
+                    &left_indices,
+                    &right,
+                    &right_indices,
+                    output_len,
+                );
+            }
+        }
 
         let field = Zp64::new(18_446_744_073_709_551_557);
         let left = [

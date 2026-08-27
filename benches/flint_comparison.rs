@@ -12,7 +12,7 @@ use support::cases::{
     FactorizationCase, FiniteFieldCase, FiniteFieldMultiplicationCase,
     FiniteFieldMultiplicationInput, GENERATED_FACTOR_CASES, GENERATED_GCD_CASES, GcdCaseConfig,
     INTEGER_MULTIPLICATION_CASES, IntegerMultiplicationCase, PoweredPolynomial, RESULTANT_CASES,
-    ResultantCase,
+    ResultantCase, U32_ACCUMULATION_FIELDS, U32_ACCUMULATION_MULTIPLICATION_CASE,
 };
 use support::flint::{
     FmpzMPoly, FmpzMPolyContext, GcdAlgorithm as FlintGcdAlgorithm, NmodMPoly, NmodMPolyContext,
@@ -333,6 +333,25 @@ mod finite_field_64_multiplication {
     #[divan::bench(args = FINITE_FIELD_MULTIPLICATION_CASES)]
     fn flint(bencher: divan::Bencher, case: FiniteFieldMultiplicationCase) {
         benchmark_flint_finite(bencher, FINITE_FIELDS[1].modulus, case);
+    }
+}
+
+#[divan::bench_group(sample_count = 20, sample_size = 1, skip_ext_time)]
+mod finite_field_u32_accumulation_multiplication {
+    use super::*;
+
+    #[divan::bench(args = U32_ACCUMULATION_FIELDS)]
+    fn symbolica(bencher: divan::Bencher, field: FiniteFieldCase) {
+        support::symbolica::benchmark_finite_multiplication(
+            bencher,
+            &Zp::new(u32::try_from(field.modulus).unwrap()),
+            U32_ACCUMULATION_MULTIPLICATION_CASE,
+        );
+    }
+
+    #[divan::bench(args = U32_ACCUMULATION_FIELDS)]
+    fn flint(bencher: divan::Bencher, field: FiniteFieldCase) {
+        benchmark_flint_finite(bencher, field.modulus, U32_ACCUMULATION_MULTIPLICATION_CASE);
     }
 }
 
@@ -666,6 +685,13 @@ fn paired_benchmarks() {
     paired_exact_division();
     paired_finite_field(&Zp::new(FINITE_FIELDS[0].modulus as u32), FINITE_FIELDS[0]);
     paired_finite_field(&Zp64::new(FINITE_FIELDS[1].modulus), FINITE_FIELDS[1]);
+    for field in U32_ACCUMULATION_FIELDS {
+        paired_finite_field_case(
+            &Zp::new(u32::try_from(field.modulus).unwrap()),
+            field,
+            U32_ACCUMULATION_MULTIPLICATION_CASE,
+        );
+    }
     paired_resultants();
     paired_gcd();
     paired_generated_gcd_regimes();
@@ -737,30 +763,40 @@ where
     R: EuclideanDomain + ConvertToRing,
 {
     for case in FINITE_FIELD_MULTIPLICATION_CASES {
-        let name = case.display_name(field);
-        let config = PairedConfig::from_env(case.default_samples);
-        if !config.matches(&name) {
-            continue;
-        }
-        let [symbolica_left, symbolica_right] = symbolica_finite_pair(ring, case);
-        let context = NmodMPolyContext::new(case.variables, field.modulus).unwrap();
-        let [flint_left, flint_right] = flint_finite_pair(&context, case);
-        let symbolica_expected = &symbolica_left * &symbolica_right;
-        assert_modular_results_equal(&flint_left, &symbolica_left, ring, "left operands");
-        assert_modular_results_equal(&flint_right, &symbolica_right, ring, "right operands");
-        assert_modular_results_equal(
-            &flint_left.mul(&flint_right),
-            &symbolica_expected,
-            ring,
-            "products",
-        );
-        run_paired(
-            &config,
-            &name,
-            || &symbolica_left * &symbolica_right,
-            || flint_left.mul(&flint_right),
-        );
+        paired_finite_field_case(ring, field, case);
     }
+}
+
+fn paired_finite_field_case<R>(
+    ring: &R,
+    field: FiniteFieldCase,
+    case: FiniteFieldMultiplicationCase,
+) where
+    R: EuclideanDomain + ConvertToRing,
+{
+    let name = case.display_name(field);
+    let config = PairedConfig::from_env(case.default_samples);
+    if !config.matches(&name) {
+        return;
+    }
+    let [symbolica_left, symbolica_right] = symbolica_finite_pair(ring, case);
+    let context = NmodMPolyContext::new(case.variables, field.modulus).unwrap();
+    let [flint_left, flint_right] = flint_finite_pair(&context, case);
+    let symbolica_expected = &symbolica_left * &symbolica_right;
+    assert_modular_results_equal(&flint_left, &symbolica_left, ring, "left operands");
+    assert_modular_results_equal(&flint_right, &symbolica_right, ring, "right operands");
+    assert_modular_results_equal(
+        &flint_left.mul(&flint_right),
+        &symbolica_expected,
+        ring,
+        "products",
+    );
+    run_paired(
+        &config,
+        &name,
+        || &symbolica_left * &symbolica_right,
+        || flint_left.mul(&flint_right),
+    );
 }
 
 fn paired_resultants() {

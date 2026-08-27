@@ -253,6 +253,18 @@ pub const FINITE_FIELDS: [FiniteFieldCase; 2] = [
     },
 ];
 
+/// Prime fields that exercise the 32-bit finite-field accumulator boundaries.
+pub const U32_ACCUMULATION_FIELDS: [FiniteFieldCase; 2] = [
+    FiniteFieldCase {
+        name: "GF(65000011)",
+        modulus: 65_000_011,
+    },
+    FiniteFieldCase {
+        name: "GF(500000003)",
+        modulus: 500_000_003,
+    },
+];
+
 /// The operands used by a finite-field multiplication case.
 #[derive(Clone, Copy, Debug)]
 pub enum FiniteFieldMultiplicationInput {
@@ -398,6 +410,22 @@ pub const FINITE_FIELD_MULTIPLICATION_CASES: [FiniteFieldMultiplicationCase; 6] 
         default_samples: 1,
     },
 ];
+
+/// An unbalanced convolution whose worst-case sum over all product pairs exceeds `u64` while the
+/// worst-case sum contributing to any one output coefficient still fits.
+pub const U32_ACCUMULATION_MULTIPLICATION_CASE: FiniteFieldMultiplicationCase =
+    FiniteFieldMultiplicationCase {
+        name: "dense univariate degrees 128/64 accumulator-bound multiplication",
+        variables: &X_VARIABLES,
+        input: FiniteFieldMultiplicationInput::DenseUnivariate {
+            left_degree: 128,
+            right_degree: 64,
+            left_stride: 499_999_937,
+            right_stride: 271_828_183,
+            coefficient_period: 500_000_002,
+        },
+        default_samples: 200,
+    };
 
 /// Two integer polynomials and the variable eliminated by the resultant.
 #[derive(Clone, Copy, Debug)]
