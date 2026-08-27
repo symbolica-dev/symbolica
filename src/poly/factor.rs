@@ -2186,7 +2186,7 @@ where
 
             h = h.exp_mod_univariate(self.ring().size().unwrap(), &mut f);
 
-            let mut g = f.gcd(&(&h - &x));
+            let mut g = f.univariate_gcd(&(&h - &x));
 
             if !g.is_one() {
                 f = f.quot_rem_univariate(&mut g).0;
@@ -5719,7 +5719,9 @@ impl<E: PositiveExponent> MultivariatePolynomial<IntegerRing, E, LexOrder> {
             |coefficient| coefficient.to_finite_field(&field),
             field.clone(),
         );
-        if image.degree(var) != self.degree(var) || !image.gcd(&image.derivative(var)).is_one() {
+        if image.degree(var) != self.degree(var)
+            || !image.univariate_gcd(&image.derivative(var)).is_one()
+        {
             return None;
         }
 
