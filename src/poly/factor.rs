@@ -4595,7 +4595,7 @@ impl<E: PositiveExponent> MultivariatePolynomial<IntegerRing, E, LexOrder> {
                 Self::linear_hensel_work(factors.len(), digits),
             )
         };
-        let high_linear_lift_pressure = d <= 32
+        let high_linear_lift_pressure = d <= 64
             && bound.significant_bits() >= 256
             && initial_factor_count >= 3
             && initial_digits >= 64
