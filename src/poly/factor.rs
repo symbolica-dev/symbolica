@@ -43,6 +43,8 @@ const WANG_PRIME_SAMPLE_ATTEMPTS: usize = 3;
 const MAX_EVALUATED_HENSEL_IMAGE_CELLS: usize = 1 << 22;
 // Maximum number of terms grouped into geometric sequences for one polynomial image.
 const MAX_EVALUATED_HENSEL_GROUPED_TERMS: usize = 1 << 20;
+// Minimum number of base-prime digits for using composite-modulus quadratic Hensel corrections.
+const MIN_QUADRATIC_HENSEL_DIGITS: usize = 64;
 // Maximum number of term advances across all geometric samples in one image rebuild.
 const MAX_EVALUATED_HENSEL_TERM_STEPS: usize = 1 << 24;
 // Maximum number of dense coefficient rows retained for either lifted factor.
@@ -52,6 +54,9 @@ type ModularIntegerFactorization<E> = (Zp, Vec<MultivariatePolynomial<Zp, E, Lex
 #[cfg(test)]
 std::thread_local! {
     pub(crate) static LLL_RECOMBINATION_SUCCESSES: std::cell::Cell<usize> = const {
+        std::cell::Cell::new(0)
+    };
+    static QUADRATIC_HENSEL_LIFT_CALLS: std::cell::Cell<usize> = const {
         std::cell::Cell::new(0)
     };
 }
@@ -398,6 +403,158 @@ impl<R: EuclideanDomain, E: PositiveExponent> MultivariatePolynomial<R, E, LexOr
         }
 
         all_monomials == all_monomials_in_factors
+    }
+}
+
+/// Arithmetic modulo an integer on dense univariate integer polynomials.
+///
+/// Quadratic Hensel lifting uses this context for factor and Bezout corrections modulo the
+/// current prime power. Polynomial products go through the integer multiplication dispatcher;
+/// division uses the inverse of the divisor's unit leading coefficient.
+struct IntegerModularUnivariateContext<'a, E: PositiveExponent> {
+    modulus: &'a Integer,
+    variable: usize,
+    template: &'a MultivariatePolynomial<IntegerRing, E, LexOrder>,
+}
+
+impl<'a, E: PositiveExponent> IntegerModularUnivariateContext<'a, E> {
+    fn new(
+        modulus: &'a Integer,
+        template: &'a MultivariatePolynomial<IntegerRing, E, LexOrder>,
+    ) -> Self {
+        assert!(!modulus.is_zero() && !modulus.is_negative());
+        let variable = template
+            .last_exponents()
+            .iter()
+            .position(|exponent| !exponent.is_zero())
+            .expect("a Hensel factor must be nonconstant");
+        debug_assert!(template.exponents_iter().all(|exponents| {
+            exponents
+                .iter()
+                .enumerate()
+                .all(|(index, exponent)| index == variable || exponent.is_zero())
+        }));
+        Self {
+            modulus,
+            variable,
+            template,
+        }
+    }
+
+    fn reduce(
+        &self,
+        polynomial: &MultivariatePolynomial<IntegerRing, E, LexOrder>,
+    ) -> MultivariatePolynomial<IntegerRing, E, LexOrder> {
+        polynomial.map_coeff(
+            |coefficient| coefficient.clone().symmetric_mod(self.modulus),
+            Z,
+        )
+    }
+
+    fn multiply(
+        &self,
+        left: &MultivariatePolynomial<IntegerRing, E, LexOrder>,
+        right: &MultivariatePolynomial<IntegerRing, E, LexOrder>,
+    ) -> MultivariatePolynomial<IntegerRing, E, LexOrder> {
+        self.reduce(&(left * right))
+    }
+
+    fn add(
+        &self,
+        left: &MultivariatePolynomial<IntegerRing, E, LexOrder>,
+        right: &MultivariatePolynomial<IntegerRing, E, LexOrder>,
+    ) -> MultivariatePolynomial<IntegerRing, E, LexOrder> {
+        self.reduce(&(left + right))
+    }
+
+    fn dense_coefficients(
+        &self,
+        polynomial: &MultivariatePolynomial<IntegerRing, E, LexOrder>,
+    ) -> Vec<Integer> {
+        let degree = polynomial.degree(self.variable).to_u32() as usize;
+        let mut coefficients = vec![Integer::zero(); degree + 1];
+        for term in polynomial {
+            debug_assert!(
+                term.exponents
+                    .iter()
+                    .enumerate()
+                    .all(|(index, exponent)| index == self.variable || exponent.is_zero())
+            );
+            coefficients[term.exponents[self.variable].to_u32() as usize] =
+                term.coefficient.clone().symmetric_mod(self.modulus);
+        }
+        coefficients
+    }
+
+    fn from_dense_coefficients(
+        &self,
+        coefficients: Vec<Integer>,
+    ) -> MultivariatePolynomial<IntegerRing, E, LexOrder> {
+        let capacity = coefficients
+            .iter()
+            .filter(|coefficient| !coefficient.is_zero())
+            .count();
+        let mut polynomial = self.template.zero_with_capacity(capacity);
+        let mut exponents = vec![E::zero(); self.template.nvars()];
+        for (degree, coefficient) in coefficients.into_iter().enumerate() {
+            if coefficient.is_zero() {
+                continue;
+            }
+            exponents[self.variable] = E::from_u32(degree as u32);
+            polynomial.append_monomial_back(coefficient, &exponents);
+        }
+        polynomial
+    }
+
+    /// Divide modulo the context modulus and return a canonical symmetric quotient and remainder.
+    ///
+    /// The divisor's leading coefficient must be invertible modulo the context modulus, as it is
+    /// for the modular factors used during Hensel lifting.
+    fn quot_rem(
+        &self,
+        dividend: &MultivariatePolynomial<IntegerRing, E, LexOrder>,
+        divisor: &MultivariatePolynomial<IntegerRing, E, LexOrder>,
+    ) -> (
+        MultivariatePolynomial<IntegerRing, E, LexOrder>,
+        MultivariatePolynomial<IntegerRing, E, LexOrder>,
+    ) {
+        assert!(!divisor.is_zero());
+        if dividend.is_zero() {
+            return (self.template.zero(), self.template.zero());
+        }
+
+        let mut remainder = self.dense_coefficients(dividend);
+        let divisor = self.dense_coefficients(divisor);
+        if remainder.len() < divisor.len() {
+            return (
+                self.template.zero(),
+                self.from_dense_coefficients(remainder),
+            );
+        }
+
+        let divisor_degree = divisor.len() - 1;
+        let leading_inverse = divisor[divisor_degree].mod_inverse(self.modulus);
+        let mut quotient = vec![Integer::zero(); remainder.len() - divisor_degree];
+        for power in (divisor_degree..remainder.len()).rev() {
+            let coefficient = (&remainder[power] * &leading_inverse).symmetric_mod(self.modulus);
+            if coefficient.is_zero() {
+                continue;
+            }
+            quotient[power - divisor_degree] = coefficient.clone();
+            for (offset, divisor_coefficient) in divisor.iter().enumerate() {
+                let index = power - divisor_degree + offset;
+                Z.sub_mul_assign(&mut remainder[index], &coefficient, divisor_coefficient);
+                let value = std::mem::replace(&mut remainder[index], Integer::zero());
+                remainder[index] = value.symmetric_mod(self.modulus);
+            }
+            debug_assert!(remainder[power].is_zero());
+        }
+
+        remainder.truncate(divisor_degree);
+        (
+            self.from_dense_coefficients(quotient),
+            self.from_dense_coefficients(remainder),
+        )
     }
 }
 
@@ -4149,10 +4306,25 @@ impl<E: PositiveExponent> MultivariatePolynomial<IntegerRing, E, LexOrder> {
     /// `Err((u,w))` where `u` and `w` are monic.
     pub fn hensel_lift<UField: FiniteFieldWorkspace>(
         &self,
+        u: MultivariatePolynomial<FiniteField<UField>, E, LexOrder>,
+        w: MultivariatePolynomial<FiniteField<UField>, E, LexOrder>,
+        gamma: Option<Integer>,
+        max_p: &Integer,
+    ) -> Result<(Self, Self), (Self, Self)>
+    where
+        FiniteField<UField>: Field + PolynomialGCD<E> + FiniteFieldCore<UField>,
+        Integer: ToFiniteField<UField>,
+    {
+        self.hensel_lift_with_strategy(u, w, gamma, max_p, true)
+    }
+
+    fn hensel_lift_with_strategy<UField: FiniteFieldWorkspace>(
+        &self,
         mut u: MultivariatePolynomial<FiniteField<UField>, E, LexOrder>,
         mut w: MultivariatePolynomial<FiniteField<UField>, E, LexOrder>,
         gamma: Option<Integer>,
         max_p: &Integer,
+        quadratic_lift_allowed: bool,
     ) -> Result<(Self, Self), (Self, Self)>
     where
         FiniteField<UField>: Field + PolynomialGCD<E> + FiniteFieldCore<UField>,
@@ -4185,21 +4357,109 @@ impl<E: PositiveExponent> MultivariatePolynomial<IntegerRing, E, LexOrder> {
 
         let mut m = p.clone();
 
-        while !e.is_zero() && &m < max_p {
-            let e_p = e.map_coeff(|c| (c / &m).to_finite_field(&field), field.clone());
-            let (q, r) = (&e_p * &s).quot_rem_univariate(&mut w);
-            let tau = &e_p * &t + q * &u;
+        let use_quadratic_lift = if !quadratic_lift_allowed || p == Integer::Single(2) {
+            false
+        } else {
+            let mut threshold_power = p.clone();
+            let mut reaches_threshold = true;
+            for _ in 1..MIN_QUADRATIC_HENSEL_DIGITS {
+                if &threshold_power >= max_p {
+                    reaches_threshold = false;
+                    break;
+                }
+                threshold_power *= &p;
+            }
+            reaches_threshold
+        };
 
-            u_i = u_i
-                + tau
-                    .map_coeff(|c| field.to_symmetric_integer(c), Z)
-                    .mul_coeff(m.clone());
-            w_i = w_i
-                + r.map_coeff(|c| field.to_symmetric_integer(c), Z)
-                    .mul_coeff(m.clone());
-            e = &a - &(&u_i * &w_i);
+        if use_quadratic_lift {
+            #[cfg(test)]
+            QUADRATIC_HENSEL_LIFT_CALLS.with(|calls| calls.set(calls.get() + 1));
+            let mut s_i = s.map_coeff(|c| field.to_symmetric_integer(c), Z);
+            let mut t_i = t.map_coeff(|c| field.to_symmetric_integer(c), Z);
 
-            m = &m * &p;
+            while !e.is_zero() && &m < max_p {
+                // A full round doubles the known p-adic precision. The last round can use the
+                // remaining divisor of m so that the resulting modulus is exactly max_p.
+                debug_assert!((max_p % &m).is_zero());
+                let squared_modulus = &m * &m;
+                let step_modulus = if &squared_modulus <= max_p {
+                    m.clone()
+                } else {
+                    max_p / &m
+                };
+                debug_assert!((&m % &step_modulus).is_zero());
+                let next_modulus = &m * &step_modulus;
+                let modular_context = IntegerModularUnivariateContext::new(&step_modulus, self);
+
+                let error_quotient = e.map_coeff(
+                    |coefficient| {
+                        debug_assert!((coefficient % &m).is_zero());
+                        coefficient / &m
+                    },
+                    Z,
+                );
+                let error_mod = modular_context.reduce(&error_quotient);
+                let u_mod = modular_context.reduce(&u_i);
+                let w_mod = modular_context.reduce(&w_i);
+                let s_mod = modular_context.reduce(&s_i);
+                let t_mod = modular_context.reduce(&t_i);
+
+                // If s*u + t*w = 1, division e*s = q*w + r gives
+                // e = (e*t + q*u)*w + r*u. These are the two factor corrections.
+                let error_times_s = modular_context.multiply(&error_mod, &s_mod);
+                let (q, r) = modular_context.quot_rem(&error_times_s, &w_mod);
+                let error_times_t = modular_context.multiply(&error_mod, &t_mod);
+                let q_times_u = modular_context.multiply(&q, &u_mod);
+                let tau = modular_context.add(&error_times_t, &q_times_u);
+                u_i = u_i + tau.mul_coeff(m.clone());
+                w_i = w_i + r.mul_coeff(m.clone());
+                e = &a - &(&u_i * &w_i);
+
+                if e.is_zero() || &next_modulus >= max_p {
+                    m = next_modulus;
+                    break;
+                }
+
+                // Lift the Bezout cofactors to the same doubled modulus. For
+                // b=(s*u+t*w-1)/m, solve ds*u+dt*w=-b modulo m and set
+                // s'=s+m*ds, t'=t+m*dt.
+                let bezout_error = &(&s_i * &u_i) + &(&t_i * &w_i) - u_i.one();
+                let negative_bezout_quotient = bezout_error.map_coeff(
+                    |coefficient| {
+                        debug_assert!((coefficient % &m).is_zero());
+                        -(coefficient / &m)
+                    },
+                    Z,
+                );
+                let bezout_mod = modular_context.reduce(&negative_bezout_quotient);
+                let w_mod = modular_context.reduce(&w_i);
+                let bezout_times_s = modular_context.multiply(&bezout_mod, &s_mod);
+                let (q, delta_s) = modular_context.quot_rem(&bezout_times_s, &w_mod);
+                let bezout_times_t = modular_context.multiply(&bezout_mod, &t_mod);
+                let q_times_u = modular_context.multiply(&q, &u_mod);
+                let delta_t = modular_context.add(&bezout_times_t, &q_times_u);
+                s_i = s_i + delta_s.mul_coeff(m.clone());
+                t_i = t_i + delta_t.mul_coeff(m.clone());
+                m = next_modulus;
+            }
+        } else {
+            while !e.is_zero() && &m < max_p {
+                let e_p = e.map_coeff(|c| (c / &m).to_finite_field(&field), field.clone());
+                let (q, r) = (&e_p * &s).quot_rem_univariate(&mut w);
+                let tau = &e_p * &t + q * &u;
+
+                u_i = u_i
+                    + tau
+                        .map_coeff(|c| field.to_symmetric_integer(c), Z)
+                        .mul_coeff(m.clone());
+                w_i = w_i
+                    + r.map_coeff(|c| field.to_symmetric_integer(c), Z)
+                        .mul_coeff(m.clone());
+                e = &a - &(&u_i * &w_i);
+
+                m = &m * &p;
+            }
         }
 
         if e.is_zero() {
@@ -4235,6 +4495,15 @@ impl<E: PositiveExponent> MultivariatePolynomial<IntegerRing, E, LexOrder> {
         hs: &[MultivariatePolynomial<Zp, E, LexOrder>],
         max_p: &Integer,
     ) -> Vec<Self> {
+        self.multi_factor_hensel_lift_with_strategy(hs, max_p, hs.len() <= 4)
+    }
+
+    fn multi_factor_hensel_lift_with_strategy(
+        &self,
+        hs: &[MultivariatePolynomial<Zp, E, LexOrder>],
+        max_p: &Integer,
+        quadratic_lift_allowed: bool,
+    ) -> Vec<Self> {
         if hs.len() == 1 {
             if self.lcoeff().is_one() {
                 return vec![self.clone()];
@@ -4257,10 +4526,17 @@ impl<E: PositiveExponent> MultivariatePolynomial<IntegerRing, E, LexOrder> {
             h = h * x;
         }
 
-        let (g_i, h_i) = self.hensel_lift(g, h, None, max_p).unwrap_or_else(|e| e);
+        let (g_i, h_i) = self
+            .hensel_lift_with_strategy(g, h, None, max_p, quadratic_lift_allowed)
+            .unwrap_or_else(|e| e);
 
-        let mut factors = g_i.multi_factor_hensel_lift(gs, max_p);
-        factors.extend(h_i.multi_factor_hensel_lift(hs, max_p));
+        let mut factors =
+            g_i.multi_factor_hensel_lift_with_strategy(gs, max_p, quadratic_lift_allowed);
+        factors.extend(h_i.multi_factor_hensel_lift_with_strategy(
+            hs,
+            max_p,
+            quadratic_lift_allowed,
+        ));
         factors
     }
 
@@ -6805,7 +7081,8 @@ mod test {
 
     use super::{
         DenseBivariateImage, DenseTwoFactorCorrectionContext, ExactPolynomialSquareRoot,
-        QuadraticFactorization, SparseDiophantineContext,
+        IntegerModularUnivariateContext, QUADRATIC_HENSEL_LIFT_CALLS, QuadraticFactorization,
+        SparseDiophantineContext,
     };
 
     use crate::{
@@ -6814,8 +7091,8 @@ mod test {
         domains::{
             InternalOrdering, Ring,
             algebraic::AlgebraicExtension,
-            finite_field::{Z2, Zp},
-            integer::{Integer, Z},
+            finite_field::{FiniteField, FiniteFieldCore, ToFiniteField, Z2, Zp},
+            integer::{Integer, IntegerRing, Z},
             rational::Q,
         },
         parse,
@@ -7529,6 +7806,164 @@ mod test {
         let mut r = poly.factor();
         r.sort_by(|a, b| a.0.internal_cmp(&b.0).then(a.1.cmp(&b.1)));
         assert_eq!(r, res);
+    }
+
+    #[test]
+    fn quadratic_hensel_lift_handles_partial_final_precision() {
+        let variables = Some(Arc::new(vec![symbol!("x").into()]));
+        let left = parse!("37+19*x+6*x^2").to_polynomial::<_, u8>(&Z, variables.clone());
+        let right = parse!("29-13*x+5*x^2+3*x^3").to_polynomial::<_, u8>(&Z, variables.clone());
+        let product = &left * &right;
+        let field = Zp::new(11);
+        let left_mod = left.map_coeff(
+            |coefficient| coefficient.to_finite_field(&field),
+            field.clone(),
+        );
+        let right_mod = right.map_coeff(
+            |coefficient| coefficient.to_finite_field(&field),
+            field.clone(),
+        );
+        let max_p = Integer::from(11).pow(65);
+
+        let quadratic = product
+            .hensel_lift_with_strategy(left_mod.clone(), right_mod.clone(), None, &max_p, true)
+            .unwrap();
+        let linear = product
+            .hensel_lift_with_strategy(left_mod, right_mod, None, &max_p, false)
+            .unwrap();
+
+        assert_eq!(&quadratic.0 * &quadratic.1, product);
+        assert_eq!(quadratic, linear);
+    }
+
+    #[test]
+    fn quadratic_hensel_lift_preserves_unsuccessful_congruence() {
+        let variables = Some(Arc::new(vec![symbol!("x").into()]));
+        let polynomial = parse!("1+x^2").to_polynomial::<_, u8>(&Z, variables.clone());
+        let field = Zp::new(5);
+        let left = parse!("x-2").to_polynomial::<_, u8>(&field, variables.clone());
+        let right = parse!("x+2").to_polynomial::<_, u8>(&field, variables);
+        let max_p = Integer::from(5).pow(65);
+
+        let quadratic = polynomial
+            .hensel_lift_with_strategy(left.clone(), right.clone(), None, &max_p, true)
+            .unwrap_err();
+        let linear = polynomial
+            .hensel_lift_with_strategy(left, right, None, &max_p, false)
+            .unwrap_err();
+        let normalize = |factor: MultivariatePolynomial<IntegerRing, u8>| {
+            factor.map_coeff(|coefficient| coefficient.clone().symmetric_mod(&max_p), Z)
+        };
+        let quadratic = (normalize(quadratic.0), normalize(quadratic.1));
+        let linear = (normalize(linear.0), normalize(linear.1));
+        let error = &polynomial - &(&quadratic.0 * &quadratic.1);
+
+        assert_eq!(quadratic, linear);
+        assert!(
+            error
+                .coefficients
+                .iter()
+                .all(|coefficient| (coefficient % &max_p).is_zero())
+        );
+    }
+
+    #[test]
+    fn integer_modular_univariate_arithmetic_matches_finite_field_reference() {
+        let variables = Some(Arc::new(vec![
+            symbol!("x").into(),
+            symbol!("y").into(),
+            symbol!("z").into(),
+        ]));
+        let dividend = parse!("19-31*y+47*y^2+53*y^3-71*y^5+89*y^8")
+            .to_polynomial::<_, u8>(&Z, variables.clone());
+        let divisor = parse!("17+23*y-29*y^2-3*y^3").to_polynomial::<_, u8>(&Z, variables);
+
+        for modulus in [Integer::from(5).pow(8), Integer::from(5).pow(65)] {
+            let context = IntegerModularUnivariateContext::new(&modulus, &dividend);
+            let reduced_dividend = context.reduce(&dividend);
+            let reduced_divisor = context.reduce(&divisor);
+            let (quotient, remainder) = context.quot_rem(&reduced_dividend, &reduced_divisor);
+
+            let field = FiniteField::<Integer>::new_non_prime(modulus.clone());
+            let dividend_mod = dividend.map_coeff(
+                |coefficient| coefficient.to_finite_field(&field),
+                field.clone(),
+            );
+            let divisor_mod = divisor.map_coeff(
+                |coefficient| coefficient.to_finite_field(&field),
+                field.clone(),
+            );
+            let reference_add = (&dividend_mod + &divisor_mod)
+                .map_coeff(|coefficient| field.to_symmetric_integer(coefficient), Z);
+            let reference_product = (&dividend_mod * &divisor_mod)
+                .map_coeff(|coefficient| field.to_symmetric_integer(coefficient), Z);
+            let mut divisor_for_division = divisor_mod.clone();
+            let (reference_quotient, reference_remainder) =
+                dividend_mod.quot_rem_univariate(&mut divisor_for_division);
+            let reference_quotient = reference_quotient
+                .map_coeff(|coefficient| field.to_symmetric_integer(coefficient), Z);
+            let reference_remainder = reference_remainder
+                .map_coeff(|coefficient| field.to_symmetric_integer(coefficient), Z);
+
+            assert_eq!(
+                context.add(&reduced_dividend, &reduced_divisor),
+                reference_add
+            );
+            assert_eq!(
+                context.multiply(&reduced_dividend, &reduced_divisor),
+                reference_product
+            );
+            assert_eq!(quotient, reference_quotient);
+            assert_eq!(remainder, reference_remainder);
+
+            let product = &quotient * &reduced_divisor;
+            let error = &(&reduced_dividend - &product) - &remainder;
+
+            assert!(remainder.degree(1) < reduced_divisor.degree(1));
+            assert!(
+                error
+                    .coefficients
+                    .iter()
+                    .all(|coefficient| (coefficient % &modulus).is_zero())
+            );
+        }
+    }
+
+    #[test]
+    fn factor_univariate_high_height_uses_quadratic_hensel_lift() {
+        QUADRATIC_HENSEL_LIFT_CALLS.with(|calls| calls.set(0));
+        let polynomial = parse!("((1+65537*x)^17-1)*((1-65539*x)^16+1)")
+            .expand()
+            .to_polynomial::<_, u8>(&Z, None);
+
+        let factors = polynomial.factor();
+        let expanded = factors
+            .iter()
+            .fold(polynomial.one(), |product, (factor, power)| {
+                &product * &factor.pow(*power)
+            });
+
+        assert!(factors.len() >= 3);
+        assert_eq!(expanded, polynomial);
+        QUADRATIC_HENSEL_LIFT_CALLS.with(|calls| assert!(calls.get() > 0));
+    }
+
+    #[test]
+    fn factor_univariate_many_modular_factors_keeps_linear_hensel_lift() {
+        QUADRATIC_HENSEL_LIFT_CALLS.with(|calls| calls.set(0));
+        let polynomial = parse!("((1+3*x)^32-1)*((1-5*x)^31+1)")
+            .expand()
+            .to_polynomial::<_, u8>(&Z, None);
+
+        let factors = polynomial.factor();
+        let expanded = factors
+            .iter()
+            .fold(polynomial.one(), |product, (factor, power)| {
+                &product * &factor.pow(*power)
+            });
+
+        assert_eq!(expanded, polynomial);
+        QUADRATIC_HENSEL_LIFT_CALLS.with(|calls| assert_eq!(calls.get(), 0));
     }
 
     #[test]
