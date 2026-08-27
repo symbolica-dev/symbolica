@@ -1,4 +1,6 @@
 mod implementation {
+    #[cfg(feature = "gmp")]
+    use gmp_mpfr_sys::gmp;
     #[cfg(all(feature = "gmp", target_pointer_width = "64", not(windows)))]
     use rug::integer::IntegerExt64;
     #[cfg(feature = "gmp")]
@@ -286,6 +288,33 @@ mod implementation {
                 let r = self.0.clone() - q.clone() * rhs.0.clone();
                 return (Self(q), Self(r));
             }
+        }
+
+        /// Divide an owned numerator by a borrowed divisor and write the truncating remainder
+        /// into `remainder`.
+        #[inline]
+        pub fn div_rem_owned_ref_assign(mut self, rhs: &Self, remainder: &mut Self) -> Self {
+            assert!(!rhs.is_zero(), "attempt to divide by zero");
+            #[cfg(feature = "gmp")]
+            {
+                let quotient = self.0.as_raw_mut();
+                unsafe {
+                    gmp::mpz_tdiv_qr(
+                        quotient,
+                        remainder.0.as_raw_mut(),
+                        quotient.cast_const(),
+                        rhs.0.as_raw(),
+                    );
+                }
+            }
+            #[cfg(feature = "no_gmp")]
+            {
+                let numerator = self.0;
+                let quotient = numerator.clone() / rhs.0.clone();
+                remainder.0 = numerator - quotient.clone() * rhs.0.clone();
+                self.0 = quotient;
+            }
+            self
         }
 
         /// Divide in place when divisibility is guaranteed by the caller.
@@ -1419,6 +1448,36 @@ mod implementation {
                     assert_eq!(borrowed, expected);
                     assert_eq!(assigned_owned, expected);
                     assert_eq!(assigned_borrowed, expected);
+                }
+            }
+        }
+
+        #[test]
+        fn owned_numerator_borrowed_divisor_assigns_truncating_remainder() {
+            let large = (MultiPrecisionInteger::from(1) << 521usize)
+                + MultiPrecisionInteger::from(0xdead_beefu32);
+            let divisors = [
+                (MultiPrecisionInteger::from(1) << 193usize) + MultiPrecisionInteger::from(17),
+                MultiPrecisionInteger::from(-10),
+            ];
+            let mut remainder =
+                (MultiPrecisionInteger::from(1) << 1024usize) + MultiPrecisionInteger::from(1);
+
+            for numerator in [
+                MultiPrecisionInteger::default(),
+                large.clone(),
+                -large,
+                MultiPrecisionInteger::from(-230),
+            ] {
+                for divisor in &divisors {
+                    let expected = numerator.div_rem_ref(divisor);
+                    let quotient = numerator
+                        .clone()
+                        .div_rem_owned_ref_assign(divisor, &mut remainder);
+                    assert_eq!(quotient, expected.0);
+                    assert_eq!(remainder, expected.1);
+                    assert_eq!(&quotient * divisor + &remainder, numerator);
+                    assert!(remainder.as_abs() < divisor.as_abs());
                 }
             }
         }

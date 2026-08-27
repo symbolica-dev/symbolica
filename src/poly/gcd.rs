@@ -15,7 +15,9 @@ use crate::domains::finite_field::{
     SMOOTH_PRIME_BASE, SMOOTH_PRIMES, ToFiniteField, Zp, Zp64, Zp64DiscreteLogContext,
 };
 use crate::domains::float::{FloatField, SingleFloat};
-use crate::domains::integer::{FromFiniteField, Integer, IntegerRing, SMALL_PRIMES, Z};
+use crate::domains::integer::{
+    FromFiniteField, Integer, IntegerRing, MultiPrecisionInteger, SMALL_PRIMES, Z,
+};
 use crate::domains::rational::{Q, Rational, RationalField};
 use crate::domains::{
     EuclideanDomain, Field, InternalOrdering, Ring, RingOps, SampleableRing, Set,
@@ -3035,6 +3037,143 @@ impl<'a, E: PositiveExponent> DenseZp64UnivariateGcdImage<'a, E> {
     }
 }
 
+/// Dense integer long division used to certify a reconstructed univariate GCD.
+struct DenseUnivariateIntegerDivisionContext {
+    variable: usize,
+    coefficients: Vec<MultiPrecisionInteger>,
+    degrees: Vec<usize>,
+    degree: usize,
+    division_remainder: MultiPrecisionInteger,
+}
+
+impl DenseUnivariateIntegerDivisionContext {
+    /// Construct a dense division workspace for a divisor and the two inputs it must divide.
+    fn new<E: PositiveExponent>(
+        divisor: &MultivariatePolynomial<IntegerRing, E>,
+        left: &MultivariatePolynomial<IntegerRing, E>,
+        right: &MultivariatePolynomial<IntegerRing, E>,
+        variable: usize,
+    ) -> Option<Self> {
+        if variable >= divisor.nvars()
+            || divisor.variables() != left.variables()
+            || divisor.variables() != right.variables()
+        {
+            return None;
+        }
+
+        fn dense_coefficient_count<E: PositiveExponent>(
+            polynomial: &MultivariatePolynomial<IntegerRing, E>,
+            variable: usize,
+        ) -> Option<usize> {
+            if polynomial.is_zero()
+                || polynomial.exponents_iter().any(|exponents| {
+                    exponents
+                        .iter()
+                        .enumerate()
+                        .any(|(index, exponent)| index != variable && !exponent.is_zero())
+                })
+            {
+                return None;
+            }
+
+            let coefficient_count = polynomial.degree(variable).to_u32() as usize + 1;
+            if coefficient_count > DENSE_UNIVARIATE_GCD_MAX_COEFFICIENTS
+                || coefficient_count
+                    > polynomial
+                        .nterms()
+                        .saturating_mul(DENSE_UNIVARIATE_GCD_MAX_SPARSITY_RATIO)
+            {
+                return None;
+            }
+            Some(coefficient_count)
+        }
+
+        dense_coefficient_count(divisor, variable)?;
+        dense_coefficient_count(left, variable)?;
+        dense_coefficient_count(right, variable)?;
+
+        let degrees = divisor
+            .exponents_iter()
+            .map(|exponents| exponents[variable].to_u32() as usize)
+            .collect::<Vec<_>>();
+        let degree = *degrees.last()?;
+        let coefficients = divisor
+            .coefficients
+            .iter()
+            .cloned()
+            .map(Integer::to_multi_prec)
+            .collect();
+        Some(Self {
+            variable,
+            coefficients,
+            degrees,
+            degree,
+            division_remainder: MultiPrecisionInteger::default(),
+        })
+    }
+
+    /// Divide one input and return its quotient only when every coefficient division is exact.
+    fn try_div<E: PositiveExponent>(
+        &mut self,
+        dividend: &MultivariatePolynomial<IntegerRing, E>,
+    ) -> Option<MultivariatePolynomial<IntegerRing, E>> {
+        let dividend_degree = dividend.degree(self.variable).to_u32() as usize;
+        let divisor_degree = self.degree;
+        if dividend_degree < divisor_degree {
+            return None;
+        }
+
+        let mut remainder = (0..=dividend_degree)
+            .map(|_| MultiPrecisionInteger::default())
+            .collect::<Vec<_>>();
+        for (coefficient, exponents) in dividend.coefficients.iter().zip(dividend.exponents_iter())
+        {
+            remainder[exponents[self.variable].to_u32() as usize] =
+                coefficient.clone().to_multi_prec();
+        }
+
+        let leading_divisor = self.coefficients.last().unwrap();
+        let mut quotient = Vec::with_capacity(dividend_degree - divisor_degree + 1);
+        for degree in (divisor_degree..=dividend_degree).rev() {
+            let leading_remainder = mem::take(&mut remainder[degree]);
+            if leading_remainder.is_zero() {
+                continue;
+            }
+
+            let coefficient = leading_remainder
+                .div_rem_owned_ref_assign(leading_divisor, &mut self.division_remainder);
+            if !self.division_remainder.is_zero() {
+                return None;
+            }
+
+            let shift = degree - divisor_degree;
+            for (&divisor_degree, divisor_coefficient) in self.degrees[..self.degrees.len() - 1]
+                .iter()
+                .zip(&self.coefficients[..self.coefficients.len() - 1])
+            {
+                let target = shift + divisor_degree;
+                debug_assert!(target < degree);
+                remainder[target].sub_mul_assign(&coefficient, divisor_coefficient);
+            }
+            quotient.push((shift, coefficient));
+        }
+        if remainder[..divisor_degree]
+            .iter()
+            .any(|coefficient| !coefficient.is_zero())
+        {
+            return None;
+        }
+
+        let mut result = dividend.zero_with_capacity(quotient.len());
+        let mut exponents = vec![E::zero(); dividend.nvars()];
+        for (degree, coefficient) in quotient.into_iter().rev() {
+            exponents[self.variable] = E::from_u32(degree as u32);
+            result.append_monomial_back(Integer::from(coefficient), &exponents);
+        }
+        Some(result)
+    }
+}
+
 /// Reconstructs a primitive univariate integer GCD from normalized 63-bit modular images.
 struct UnivariateModularGcdContext<'a, E: PositiveExponent> {
     left: &'a MultivariatePolynomial<IntegerRing, E>,
@@ -3201,9 +3340,25 @@ impl<'a, E: PositiveExponent> UnivariateModularGcdContext<'a, E> {
             else {
                 continue;
             };
-            if let Some(left_cofactor) = self.left.try_div(&candidate)
-                && let Some(right_cofactor) = self.right.try_div(&candidate)
-            {
+            let exact_cofactors = match DenseUnivariateIntegerDivisionContext::new(
+                &candidate,
+                self.left,
+                self.right,
+                self.variable,
+            ) {
+                Some(mut division) => match division.try_div(self.left) {
+                    Some(left_cofactor) => division
+                        .try_div(self.right)
+                        .map(|right_cofactor| (left_cofactor, right_cofactor)),
+                    None => None,
+                },
+                None => self.left.try_div(&candidate).and_then(|left_cofactor| {
+                    self.right
+                        .try_div(&candidate)
+                        .map(|right_cofactor| (left_cofactor, right_cofactor))
+                }),
+            };
+            if let Some((left_cofactor, right_cofactor)) = exact_cofactors {
                 // Preserving the input degrees and the nonzero image of `gamma` ensures that a
                 // modular GCD degree cannot be below the characteristic-zero GCD degree. Exact
                 // divisibility at that degree therefore certifies the complete GCD.
@@ -6555,6 +6710,78 @@ mod tests {
         assert_eq!(actual, common_factor.mul_coeff(Integer::from(2)));
         assert_eq!(&actual * &left_result, left);
         assert_eq!(&actual * &right_result, right);
+    }
+
+    #[test]
+    fn dense_univariate_integer_division_certificate_matches_generic_division() {
+        let variable_template = parse!("x").to_polynomial::<IntegerRing, u16>(&Z, None);
+        let variables = std::sync::Arc::new(vec![
+            PolyVariable::Temporary(0),
+            variable_template.variables()[0].clone(),
+        ]);
+        let scale = Integer::from(1) << 200usize;
+        let divisor = parse!("-2*x^5+3*x^2-7")
+            .to_polynomial::<_, u16>(&Z, Some(variables.clone()))
+            .mul_coeff(scale);
+        let quotient =
+            parse!("-5*x^7+11*x^3-13").to_polynomial::<_, u16>(&Z, Some(variables.clone()));
+        let dividend = &divisor * &quotient;
+        let mut division =
+            DenseUnivariateIntegerDivisionContext::new(&divisor, &dividend, &dividend, 1).unwrap();
+        let actual = division.try_div(&dividend).unwrap();
+        actual.check_consistency();
+        assert_eq!(actual, quotient);
+        assert_eq!(Some(actual), dividend.try_div(&divisor));
+
+        let leading_inexact_divisor =
+            parse!("2*x+1").to_polynomial::<_, u16>(&Z, Some(variables.clone()));
+        let leading_inexact_dividend =
+            parse!("x^2").to_polynomial::<_, u16>(&Z, Some(variables.clone()));
+        let mut leading_inexact = DenseUnivariateIntegerDivisionContext::new(
+            &leading_inexact_divisor,
+            &leading_inexact_dividend,
+            &leading_inexact_dividend,
+            1,
+        )
+        .unwrap();
+        assert!(leading_inexact.try_div(&leading_inexact_dividend).is_none());
+
+        let final_remainder_divisor =
+            parse!("x+1").to_polynomial::<_, u16>(&Z, Some(variables.clone()));
+        let final_remainder_dividend =
+            parse!("x^2+1").to_polynomial::<_, u16>(&Z, Some(variables.clone()));
+        let mut final_remainder = DenseUnivariateIntegerDivisionContext::new(
+            &final_remainder_divisor,
+            &final_remainder_dividend,
+            &final_remainder_dividend,
+            1,
+        )
+        .unwrap();
+        assert!(final_remainder.try_div(&final_remainder_dividend).is_none());
+
+        let sparse_divisor =
+            parse!("x^1000+1").to_polynomial::<_, u16>(&Z, Some(variables.clone()));
+        let sparse_dividend = &sparse_divisor * &quotient;
+        assert!(
+            DenseUnivariateIntegerDivisionContext::new(
+                &sparse_divisor,
+                &sparse_dividend,
+                &sparse_dividend,
+                1,
+            )
+            .is_none()
+        );
+
+        let off_variable = parse!("y+x+1").to_polynomial::<_, u16>(&Z, None);
+        assert!(
+            DenseUnivariateIntegerDivisionContext::new(
+                &off_variable,
+                &off_variable,
+                &off_variable,
+                0,
+            )
+            .is_none()
+        );
     }
 
     #[test]
