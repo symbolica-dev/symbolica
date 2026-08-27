@@ -88,6 +88,15 @@ std::thread_local! {
     static LAST_MODULAR_INTEGER_EDF_PRIME: std::cell::Cell<u32> = const {
         std::cell::Cell::new(0)
     };
+    static EXACT_HENSEL_SUBTREE_SPLITS: std::cell::Cell<usize> = const {
+        std::cell::Cell::new(0)
+    };
+    static LOCAL_HENSEL_RECOMBINATION_NODES: std::cell::Cell<usize> = const {
+        std::cell::Cell::new(0)
+    };
+    static EXACT_HENSEL_SUBTREE_MODULUS_BITS: std::cell::RefCell<Vec<u64>> = const {
+        std::cell::RefCell::new(Vec::new())
+    };
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -4589,16 +4598,12 @@ impl<E: PositiveExponent> MultivariatePolynomial<IntegerRing, E, LexOrder> {
         }
     }
 
-    /// Lift multiple factors by creating a binary tree and lifting each product.
-    fn multi_factor_hensel_lift(
-        &self,
-        hs: &[MultivariatePolynomial<Zp, E, LexOrder>],
-        max_p: &Integer,
-    ) -> Vec<Self> {
-        self.multi_factor_hensel_lift_with_strategy(hs, max_p, hs.len() <= 4)
-    }
-
-    fn multi_factor_hensel_lift_with_strategy(
+    /// Lift every leaf of a modular factor tree to the same prime-power modulus.
+    ///
+    /// `self` may only be a modular approximation to an exact integer factor. The returned
+    /// leaves therefore remain modular approximations and must be recombined against a known
+    /// exact polynomial before they can be used with a different modulus.
+    fn lift_modular_factor_tree(
         &self,
         hs: &[MultivariatePolynomial<Zp, E, LexOrder>],
         max_p: &Integer,
@@ -4630,14 +4635,90 @@ impl<E: PositiveExponent> MultivariatePolynomial<IntegerRing, E, LexOrder> {
             .hensel_lift_with_strategy(g, h, None, max_p, quadratic_lift_allowed)
             .unwrap_or_else(|e| e);
 
-        let mut factors =
-            g_i.multi_factor_hensel_lift_with_strategy(gs, max_p, quadratic_lift_allowed);
-        factors.extend(h_i.multi_factor_hensel_lift_with_strategy(
-            hs,
-            max_p,
-            quadratic_lift_allowed,
-        ));
+        let mut factors = g_i.lift_modular_factor_tree(gs, max_p, quadratic_lift_allowed);
+        factors.extend(h_i.lift_modular_factor_tree(hs, max_p, quadratic_lift_allowed));
         factors
+    }
+
+    /// Continue factoring one exact Hensel child with a coefficient bound local to that child.
+    fn factor_exact_hensel_child(
+        self,
+        hs: &[MultivariatePolynomial<Zp, E, LexOrder>],
+        prime: u32,
+        var: usize,
+    ) -> Vec<Self> {
+        if hs.len() == 1 {
+            return vec![self];
+        }
+
+        let bound = self.coefficient_bound();
+        let (_, max_p) = Self::linear_hensel_modulus(&bound, prime);
+        self.factor_hensel_subtree(hs, &max_p, &bound, var)
+    }
+
+    /// Factor a known exact integer polynomial through its retained modular-factor subtree.
+    ///
+    /// An exact two-factor split lets each exact child use a modulus derived from its own
+    /// coefficient bound. If the split is only a congruence, all descendants retain this node's
+    /// modulus and are recombined locally before exact factors are returned to the parent.
+    fn factor_hensel_subtree(
+        &self,
+        hs: &[MultivariatePolynomial<Zp, E, LexOrder>],
+        max_p: &Integer,
+        bound: &Integer,
+        var: usize,
+    ) -> Vec<Self> {
+        if hs.len() == 1 {
+            return vec![self.clone()];
+        }
+
+        #[cfg(test)]
+        EXACT_HENSEL_SUBTREE_MODULUS_BITS
+            .with(|bits| bits.borrow_mut().push(max_p.significant_bits()));
+
+        let (gs, hs) = hs.split_at(hs.len() / 2);
+        let mut g = gs[0].one();
+        for factor in gs {
+            g = g * factor;
+        }
+        let mut h = hs[0].one();
+        for factor in hs {
+            h = h * factor;
+        }
+
+        let quadratic_lift_allowed = gs.len() + hs.len() <= 4;
+        match self.hensel_lift_with_strategy(g, h, None, max_p, quadratic_lift_allowed) {
+            Ok((g_i, h_i)) => {
+                #[cfg(test)]
+                EXACT_HENSEL_SUBTREE_SPLITS.with(|splits| splits.set(splits.get() + 1));
+
+                let prime = gs[0].ring().get_prime();
+                let mut factors = g_i.factor_exact_hensel_child(gs, prime, var);
+                factors.extend(h_i.factor_exact_hensel_child(hs, prime, var));
+                factors
+            }
+            Err((g_i, h_i)) => {
+                #[cfg(test)]
+                LOCAL_HENSEL_RECOMBINATION_NODES.with(|nodes| nodes.set(nodes.get() + 1));
+
+                let mut factors = g_i.lift_modular_factor_tree(gs, max_p, quadratic_lift_allowed);
+                factors.extend(h_i.lift_modular_factor_tree(hs, max_p, quadratic_lift_allowed));
+
+                #[cfg(debug_assertions)]
+                for (factor, factor_p) in factors.iter().zip(gs.iter().chain(hs)) {
+                    let field = factor_p.ring().clone();
+                    let lifted_mod_p = factor
+                        .map_coeff(
+                            |coefficient| coefficient.to_finite_field(&field),
+                            field.clone(),
+                        )
+                        .make_monic();
+                    debug_assert_eq!(&lifted_mod_p, factor_p);
+                }
+
+                self.recombine_lifted_factors(factors, max_p, var, bound)
+            }
+        }
     }
 
     /// Compute distinct-degree data for a suitable univariate image modulo `prime`.
@@ -4945,6 +5026,90 @@ impl<E: PositiveExponent> MultivariatePolynomial<IntegerRing, E, LexOrder> {
         Some(result)
     }
 
+    /// Recombine modularly lifted leaves into exact factors of `self`.
+    ///
+    /// Every candidate is verified by exact division. The leaves may therefore be returned only
+    /// to this exact target; they are not valid inputs to a recombination at another modulus.
+    fn recombine_lifted_factors(
+        &self,
+        mut factors: Vec<Self>,
+        modulus: &Integer,
+        var: usize,
+        bound: &Integer,
+    ) -> Vec<Self> {
+        if factors.len() > 10
+            && let Some(recombined) = self.lll_factor_recombination(&factors, modulus, var)
+        {
+            return recombined;
+        }
+
+        let mut reconstructed = vec![];
+        let mut subset_size = 1;
+        let mut rest = self.clone();
+        'subset_size: while 2 * subset_size <= factors.len() {
+            let mut subsets = CombinationIterator::new(factors.len(), subset_size);
+            while let Some(indices) = subsets.next() {
+                if rest.exponents[..rest.nvars()]
+                    .iter()
+                    .all(|exponent| *exponent == E::zero())
+                {
+                    let mut selected_constant = rest.lcoeff();
+                    let mut complement_constant = rest.lcoeff();
+                    for (index, factor) in factors.iter().enumerate() {
+                        if factor.exponents[..rest.nvars()]
+                            .iter()
+                            .all(|exponent| *exponent == E::zero())
+                        {
+                            if indices.contains(&index) {
+                                selected_constant = (&selected_constant * &factor.coefficients[0])
+                                    .symmetric_mod(modulus);
+                            } else {
+                                complement_constant = (&complement_constant
+                                    * &factor.coefficients[0])
+                                    .symmetric_mod(modulus);
+                            }
+                        }
+                    }
+
+                    // TODO: improve check
+                    // for monic factors we can do selected_constant * complement_constant !=
+                    // rest.lcoeff() * rest.coefficients[0]
+                    if &(&selected_constant * &complement_constant).abs() > bound {
+                        continue;
+                    }
+                }
+
+                let mut candidate = rest.constant(rest.lcoeff());
+                for (index, factor) in factors.iter().enumerate() {
+                    if indices.contains(&index) {
+                        candidate = (&candidate * factor)
+                            .map_coeff(|coefficient| coefficient.clone().symmetric_mod(modulus), Z);
+                    }
+                }
+                let content = candidate.content();
+                candidate = candidate.div_coeff(&content);
+
+                let (quotient, remainder) = rest.quot_rem(&candidate, true);
+                if remainder.is_zero() {
+                    reconstructed.push(candidate);
+
+                    for index in indices.iter().rev() {
+                        factors.remove(*index);
+                    }
+
+                    let content = quotient.content();
+                    rest = quotient.div_coeff(&content);
+                    continue 'subset_size;
+                }
+            }
+
+            subset_size += 1;
+        }
+
+        reconstructed.push(rest);
+        reconstructed
+    }
+
     /// Factor a square-free univariate polynomial over the integers by Hensel lifting factors computed over
     /// a finite field image of the polynomial.
     fn factor_reconstruct(&self) -> Vec<Self> {
@@ -5149,88 +5314,7 @@ impl<E: PositiveExponent> MultivariatePolynomial<IntegerRing, E, LexOrder> {
         let (field, hs) = Self::complete_equal_degree_factorization(best_factorization);
 
         let (_, max_p) = Self::linear_hensel_modulus(&bound, field.get_prime());
-
-        let mut factors = self.multi_factor_hensel_lift(&hs, &max_p);
-
-        #[cfg(debug_assertions)]
-        for (h, h_p) in factors.iter().zip(&hs) {
-            let hh_p = h
-                .map_coeff(|c| c.to_finite_field(&field), field.clone())
-                .make_monic();
-            if &hh_p != h_p {
-                panic!("Mismatch of lifted factor: {hh_p} vs {h_p} in {self}");
-            }
-        }
-
-        if factors.len() > 10
-            && let Some(recombined) = self.lll_factor_recombination(&factors, &max_p, var)
-        {
-            return recombined;
-        }
-
-        let mut rec_factors = vec![];
-        // factor recombination
-        let mut s = 1;
-
-        let mut rest = self.clone();
-        'len: while 2 * s <= factors.len() {
-            let mut fs = CombinationIterator::new(factors.len(), s);
-            while let Some(cs) = fs.next() {
-                // check if the constant term matches
-                if rest.exponents[..rest.nvars()]
-                    .iter()
-                    .all(|e| *e == E::zero())
-                {
-                    let mut g1 = rest.lcoeff();
-                    let mut h1 = rest.lcoeff();
-                    for (i, f) in factors.iter().enumerate() {
-                        if f.exponents[..rest.nvars()].iter().all(|x| *x == E::zero()) {
-                            if cs.contains(&i) {
-                                g1 = (&g1 * &f.coefficients[0]).symmetric_mod(&max_p);
-                            } else {
-                                h1 = (&h1 * &f.coefficients[0]).symmetric_mod(&max_p);
-                            }
-                        }
-                    }
-
-                    // TODO: improve check
-                    // for monic factors we can do &g1 * &h1 != &rest.lcoeff() * &rest.coefficients[0]
-                    if (&g1 * &h1).abs() > bound {
-                        continue;
-                    }
-                }
-
-                let mut g = rest.constant(rest.lcoeff());
-                for (i, f) in factors.iter().enumerate() {
-                    if cs.contains(&i) {
-                        g = (&g * f).map_coeff(|i| i.clone().symmetric_mod(&max_p), Z);
-                    }
-                }
-                let c = g.content();
-                g = g.div_coeff(&c);
-
-                let (h, r) = rest.quot_rem(&g, true);
-
-                if r.is_zero() {
-                    // should always happen happen when |g1|_1 * |h1|_1 <= bound
-                    rec_factors.push(g);
-
-                    for i in cs.iter().rev() {
-                        factors.remove(*i);
-                    }
-
-                    let c = h.content();
-                    rest = h.div_coeff(&c);
-
-                    continue 'len;
-                }
-            }
-
-            s += 1;
-        }
-
-        rec_factors.push(rest);
-        rec_factors
+        self.factor_hensel_subtree(&hs, &max_p, &bound, var)
     }
 
     /// Lift a solution of `poly ≡ lcoeff * univariate_factors mod y mod p^k`
@@ -7275,8 +7359,9 @@ mod test {
 
     use super::{
         BOUNDED_DDF_REJECTIONS, DenseBivariateImage, DenseTwoFactorCorrectionContext,
-        ExactPolynomialSquareRoot, IntegerModularUnivariateContext,
-        LAST_BOUNDED_DDF_REJECTION_DEGREE, LAST_MODULAR_INTEGER_EDF_PRIME,
+        EXACT_HENSEL_SUBTREE_MODULUS_BITS, EXACT_HENSEL_SUBTREE_SPLITS, ExactPolynomialSquareRoot,
+        IntegerModularUnivariateContext, LAST_BOUNDED_DDF_REJECTION_DEGREE,
+        LAST_MODULAR_INTEGER_EDF_PRIME, LOCAL_HENSEL_RECOMBINATION_NODES,
         MODULAR_INTEGER_EDF_CALLS, ModularPrimeScreen, QUADRATIC_HENSEL_LIFT_CALLS,
         QuadraticFactorization, SparseDiophantineContext,
     };
@@ -8233,6 +8318,59 @@ mod test {
             )
             .unwrap();
         assert_eq!(&nonmonic_lift.0 * &nonmonic_lift.1, nonmonic_product);
+    }
+
+    #[test]
+    fn exact_hensel_subtrees_use_local_moduli_and_recombine_inexact_children() {
+        EXACT_HENSEL_SUBTREE_SPLITS.with(|splits| splits.set(0));
+        LOCAL_HENSEL_RECOMBINATION_NODES.with(|nodes| nodes.set(0));
+        EXACT_HENSEL_SUBTREE_MODULUS_BITS.with(|bits| bits.borrow_mut().clear());
+
+        let variables = Some(Arc::new(vec![symbol!("x").into()]));
+        let integer_factors = [
+            parse!("x^2+100").to_polynomial::<_, u8>(&Z, variables.clone()),
+            parse!("x^2+97").to_polynomial::<_, u8>(&Z, variables.clone()),
+            parse!("x^2+92").to_polynomial::<_, u8>(&Z, variables.clone()),
+            parse!("x^2+85").to_polynomial::<_, u8>(&Z, variables.clone()),
+        ];
+        let polynomial = integer_factors
+            .iter()
+            .fold(integer_factors[0].one(), |product, factor| {
+                &product * factor
+            });
+
+        // The first four modular factors multiply to the first two exact quadratics and the
+        // remaining four multiply to the other two. Within each four-factor child, the first
+        // split crosses the two irreducible quadratics and is therefore only a congruence.
+        let field = Zp::new(101);
+        let modular_factors = vec![
+            parse!("x-1").to_polynomial::<_, u8>(&field, variables.clone()),
+            parse!("x-2").to_polynomial::<_, u8>(&field, variables.clone()),
+            parse!("x+1").to_polynomial::<_, u8>(&field, variables.clone()),
+            parse!("x+2").to_polynomial::<_, u8>(&field, variables.clone()),
+            parse!("x-3").to_polynomial::<_, u8>(&field, variables.clone()),
+            parse!("x-4").to_polynomial::<_, u8>(&field, variables.clone()),
+            parse!("x+3").to_polynomial::<_, u8>(&field, variables.clone()),
+            parse!("x+4").to_polynomial::<_, u8>(&field, variables),
+        ];
+        let bound = polynomial.coefficient_bound();
+        let (_, max_p) =
+            MultivariatePolynomial::<IntegerRing, u8>::linear_hensel_modulus(&bound, 101);
+
+        let mut factors = polynomial.factor_hensel_subtree(&modular_factors, &max_p, &bound, 0);
+        let mut expected = integer_factors.to_vec();
+        factors.sort_by(|left, right| left.internal_cmp(right));
+        expected.sort_by(|left, right| left.internal_cmp(right));
+
+        assert_eq!(factors, expected);
+        EXACT_HENSEL_SUBTREE_SPLITS.with(|splits| assert_eq!(splits.get(), 1));
+        LOCAL_HENSEL_RECOMBINATION_NODES.with(|nodes| assert_eq!(nodes.get(), 2));
+        EXACT_HENSEL_SUBTREE_MODULUS_BITS.with(|bits| {
+            let bits = bits.borrow();
+            assert_eq!(bits.len(), 3);
+            assert!(bits[1] < bits[0], "left child did not lower its modulus");
+            assert!(bits[2] < bits[0], "right child did not lower its modulus");
+        });
     }
 
     #[test]
