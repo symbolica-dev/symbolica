@@ -736,6 +736,55 @@ impl<'a, E: PositiveExponent> IntegerModularUnivariateContext<'a, E> {
             self.from_dense_coefficients(remainder),
         )
     }
+
+    /// Reduce a dense univariate polynomial modulo a monic divisor.
+    ///
+    /// Each leading cell is reduced modulo the context modulus when it becomes the current
+    /// pivot. The monic leading term can then be cleared without computing a quotient or a
+    /// modular inverse. Updates to lower cells are accumulated as integers until those cells
+    /// become pivots or survive in the final remainder, avoiding repeated modular reductions.
+    /// The returned coefficients are canonical symmetric representatives.
+    fn remainder_monic(
+        &self,
+        dividend: &MultivariatePolynomial<IntegerRing, E, LexOrder>,
+        divisor: &MultivariatePolynomial<IntegerRing, E, LexOrder>,
+    ) -> MultivariatePolynomial<IntegerRing, E, LexOrder> {
+        assert!(!divisor.is_zero());
+        if dividend.is_zero() {
+            return self.template.zero();
+        }
+
+        let mut remainder = self.dense_coefficients(dividend);
+        let divisor = self.dense_coefficients(divisor);
+        assert!(
+            divisor.last().is_some_and(Integer::is_one),
+            "monic modular remainder requires a monic divisor"
+        );
+        if remainder.len() < divisor.len() {
+            return self.from_dense_coefficients(remainder);
+        }
+
+        let divisor_degree = divisor.len() - 1;
+        for power in (divisor_degree..remainder.len()).rev() {
+            let value = std::mem::replace(&mut remainder[power], Integer::zero());
+            let pivot = value.symmetric_mod(self.modulus);
+            if pivot.is_zero() {
+                continue;
+            }
+
+            let shift = power - divisor_degree;
+            for (offset, divisor_coefficient) in divisor.iter().take(divisor_degree).enumerate() {
+                Z.sub_mul_assign(&mut remainder[shift + offset], &pivot, divisor_coefficient);
+            }
+        }
+
+        remainder.truncate(divisor_degree);
+        for coefficient in &mut remainder {
+            let value = std::mem::replace(coefficient, Integer::zero());
+            *coefficient = value.symmetric_mod(self.modulus);
+        }
+        self.from_dense_coefficients(remainder)
+    }
 }
 
 impl<E: PositiveExponent> MultivariatePolynomial<IntegerRing, E, LexOrder> {
@@ -8722,10 +8771,20 @@ mod test {
         ]));
         let dividend = parse!("19-31*y+47*y^2+53*y^3-71*y^5+89*y^8")
             .to_polynomial::<_, u8>(&Z, variables.clone());
-        let divisor = parse!("17+23*y-29*y^2-3*y^3").to_polynomial::<_, u8>(&Z, variables);
+        let divisor = parse!("17+23*y-29*y^2-3*y^3").to_polynomial::<_, u8>(&Z, variables.clone());
+        let monic_divisor =
+            parse!("17+23*y-29*y^2+y^3").to_polynomial::<_, u8>(&Z, variables.clone());
+        let short_sparse_dividend =
+            parse!("-13+7*y^2").to_polynomial::<_, u8>(&Z, variables.clone());
+        let higher_degree_monic_divisor =
+            parse!("-3+11*y-19*y^2+23*y^4+y^6").to_polynomial::<_, u8>(&Z, variables);
+        let zero_dividend = dividend.zero();
+
+        assert!(short_sparse_dividend.degree(1) < higher_degree_monic_divisor.degree(1));
 
         for modulus in [Integer::from(5).pow(8), Integer::from(5).pow(65)] {
             let context = IntegerModularUnivariateContext::new(&modulus, &dividend);
+            assert_eq!(context.variable, 1);
             let reduced_dividend = context.reduce(&dividend);
             let reduced_divisor = context.reduce(&divisor);
             let (quotient, remainder) = context.quot_rem(&reduced_dividend, &reduced_divisor);
@@ -8772,6 +8831,32 @@ mod test {
                     .iter()
                     .all(|coefficient| (coefficient % &modulus).is_zero())
             );
+
+            for (monic_dividend, monic_divisor) in [
+                (&dividend, &monic_divisor),
+                (&short_sparse_dividend, &higher_degree_monic_divisor),
+                (&zero_dividend, &higher_degree_monic_divisor),
+            ] {
+                let remainder = context.remainder_monic(monic_dividend, monic_divisor);
+
+                let dividend_mod = monic_dividend.map_coeff(
+                    |coefficient| coefficient.to_finite_field(&field),
+                    field.clone(),
+                );
+                let mut divisor_mod = monic_divisor.map_coeff(
+                    |coefficient| coefficient.to_finite_field(&field),
+                    field.clone(),
+                );
+                let reference_remainder = dividend_mod
+                    .quot_rem_univariate(&mut divisor_mod)
+                    .1
+                    .map_coeff(|coefficient| field.to_symmetric_integer(coefficient), Z);
+
+                assert_eq!(remainder, reference_remainder);
+                assert!(remainder.coefficients.iter().all(|coefficient| {
+                    coefficient == &coefficient.clone().symmetric_mod(&modulus)
+                }));
+            }
         }
     }
 
