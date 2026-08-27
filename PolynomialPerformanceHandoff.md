@@ -845,12 +845,44 @@ that prices modular work rather than only factor count and lifting digits.
 | `/tmp/profile-factor-prime500-v1-d64-lbr.children-symbols.txt` | `9bd8e693ceb1d791bf1e7ee52c31e1ffb0fa45d9f7bfadfbeb6d3006add7dc70` |
 | `/tmp/profile-factor-prime500-v1-d64.csv` | `ef27c6b7d0387365451f270a238ead35893a33937424c3b0a95f97102785b135` |
 
-The per-output `u64` proof is independently sound and is being measured separately on unbalanced
-129-by-65 products. It is neutral on degree 64 because the existing 65M image's 4,225 total
-products already fit the old bound. The next Hensel experiment is root-only quadratic lifting for
-five through eight modular factors: keep the accepted recursive quadratic policy for at most four
-factors, permit one quadratic lift at the root for five through eight, and force descendants back
-to linear lifting.
+### Accepted per-output finite-field accumulator bound
+
+Commit `303381c` replaces `DenseZpMul`'s total-pair overflow estimate with the exact maximum number
+of products contributing to one output coefficient. Strictly increasing input indices imply at
+most `min(left_len, right_len)` collisions. A named strategy mode distinguishes direct Montgomery
+reduction, `u64` plus a native remainder, and the existing `u128` fallback. Differential tests use
+129-by-65 maximum raw residues with dense and touched-slot layouts at both `p=65_000_011` and
+`p=500_000_003`; the small-prime direct route and near-`u32::MAX` fallback are also asserted.
+
+The paired benchmark infrastructure now contains a dedicated dense-univariate degree-128 by
+degree-64 case for those two fields. Twelve alternating 1,000-sample process pairs measured:
+
+| Field and route | old Symbolica | new Symbolica | FLINT with new binary | old S/F | new S/F |
+|---|---:|---:|---:|---:|---:|
+| `GF(65000011)`, direct Montgomery | `12.254 us` | `6.930 us` | `7.238 us` | `1.539` | `0.960` |
+| `GF(500000003)`, native remainder | `12.264 us` | `8.137 us` | `7.959 us` | `1.395` | `1.023` |
+
+The absolute Symbolica gains are 43.4% and 33.6%; the paired-ratio gains are 37.6% and 26.7%.
+FLINT itself varied between the separately linked binaries, so retain both absolute and paired
+comparisons. Degree-64 factorization was neutral (`14.503 ms` versus `14.487 ms`) because its 65M
+image's 4,225 total products already fit the old bound. The degree-33/63/65, generated 2/3-variable,
+PolyBench #105/#178, GF(17) direct/KS, and 64-bit-field guards were all neutral; the largest
+observed Symbolica guard movement was +2.1% on the generated three-variable factor row.
+
+| Artifact | SHA-256 |
+|---|---|
+| `/tmp/flint-comparison-zp-collision-bench-v1-screen` | `73d74bfedbd9ffb1531e58260368c47aac5a41ec91df82e111596013ac6459d7` |
+| `/tmp/flint-comparison-zp-collision-bench-v1-screen.d` | `8896a6598fc26f38403156d627be5145a8bc5a59d8a176fed12f62a002db2613` |
+| `/tmp/flint-comparison-zp-collision-bench-v1-build.jsonl` | `d32859f538ff62c95289ad0b2d1985320e6b74a8db20e5e2a3cee05956a1f951` |
+| `/tmp/flint-comparison-zp-collision-old-bound-v1-screen` | `572c8fadc5dbfa8c0d8a103abf8b1482437fe3fca5978f72371aa1f1f51fca0b` |
+| `/tmp/flint-comparison-zp-collision-old-bound-v1-build.jsonl` | `ebf195a1e61ffc73247ee4c51906e17e08afb8a7fbab5c7461eaebc3f45940cd` |
+
+Raw files are `/tmp/zp-collision-bench-v1-p{65000011,500000003}-*-block-*.csv` and
+`/tmp/zp-collision-bench-v1-{d33h,d63,d65,factor2,factor3,pb105,pb178,gf17_*,gf64_*}-*-block-*.csv`;
+degree 64 is `/tmp/zp-collision-v1-d64-*-block-*.csv`.
+The next Hensel experiment is root-only quadratic lifting for five through eight modular factors:
+keep the accepted recursive quadratic policy for at most four factors, permit one quadratic lift at
+the root for five through eight, and force descendants back to linear lifting.
 
 A private dense univariate remainder context remains a later option. It would cache one monic
 modulus, retain dense coefficient/index buffers through binary exponentiation, use the existing
