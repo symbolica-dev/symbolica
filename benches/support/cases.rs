@@ -184,7 +184,7 @@ impl fmt::Display for FactorizationCase {
 }
 
 /// Low-dimensional factorization cases with comparable dense powered inputs.
-pub const GENERATED_FACTOR_CASES: [FactorizationCase; 3] = [
+pub const GENERATED_FACTOR_CASES: [FactorizationCase; 6] = [
     FactorizationCase {
         name: "dense 1-variable degrees 32/31",
         variables: &X1_VARIABLES,
@@ -205,6 +205,27 @@ pub const GENERATED_FACTOR_CASES: [FactorizationCase; 3] = [
         left: PoweredPolynomial::with_constant("1+3*x1+5*x2+7*x3", 6, -1),
         right: PoweredPolynomial::with_constant("1-3*x1+5*x2-7*x3", 5, 1),
         default_samples: 4,
+    },
+    FactorizationCase {
+        name: "dense high-height 1-variable degrees 17/16 total 33",
+        variables: &X1_VARIABLES,
+        left: PoweredPolynomial::with_constant("1+65537*x1", 17, -1),
+        right: PoweredPolynomial::with_constant("1-65539*x1", 16, 1),
+        default_samples: 2,
+    },
+    FactorizationCase {
+        name: "dense 1-variable degrees 33/31 total 64",
+        variables: &X1_VARIABLES,
+        left: PoweredPolynomial::with_constant("1+3*x1", 33, -1),
+        right: PoweredPolynomial::with_constant("1-5*x1", 31, 1),
+        default_samples: 2,
+    },
+    FactorizationCase {
+        name: "dense 1-variable degrees 33/32 total 65",
+        variables: &X1_VARIABLES,
+        left: PoweredPolynomial::with_constant("1+3*x1", 33, -1),
+        right: PoweredPolynomial::with_constant("1-5*x1", 32, 1),
+        default_samples: 2,
     },
 ];
 
