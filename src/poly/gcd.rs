@@ -2995,6 +2995,59 @@ impl<'a, E: PositiveExponent> DenseZp64UnivariateGcdImage<'a, E> {
         })
     }
 
+    /// Computes the Montgomery inverse used for the leading coefficient in dense division.
+    #[inline]
+    fn inverse_leading(
+        field: &Zp64,
+        coefficient: &FiniteFieldElement<u64>,
+    ) -> FiniteFieldElement<u64> {
+        debug_assert!(!field.is_zero(coefficient));
+
+        let raw_one = FiniteFieldElement::from_inner(1);
+        let residue = *field
+            .mul(&field.mul(coefficient, &raw_one), &raw_one)
+            .inner();
+        let modulus = field.get_prime();
+
+        // These are the Euclidean state after the known initial zero-quotient step for
+        // `residue < modulus`. The coefficient magnitudes alternate signs at every step.
+        let mut u1 = 0u64;
+        let mut v1 = 1u64;
+        let mut u3 = modulus;
+        let mut v3 = residue;
+        let mut u1_is_positive = false;
+
+        while v3 != 0 {
+            debug_assert!(u3 > v3);
+            let first_remainder = u3 - v3;
+            let (next_coefficient, remainder) = if first_remainder < v3 {
+                (u1 + v1, first_remainder)
+            } else {
+                let second_remainder = first_remainder - v3;
+                if second_remainder < v3 {
+                    (u1 + 2 * v1, second_remainder)
+                } else {
+                    let third_remainder = second_remainder - v3;
+                    if third_remainder < v3 {
+                        (u1 + 3 * v1, third_remainder)
+                    } else {
+                        let quotient = u3 / v3;
+                        (u1 + quotient * v1, u3 - quotient * v3)
+                    }
+                }
+            };
+
+            u1 = v1;
+            v1 = next_coefficient;
+            u3 = v3;
+            v3 = remainder;
+            u1_is_positive = !u1_is_positive;
+        }
+
+        debug_assert_eq!(u3, 1);
+        FiniteFieldElement::from_inner(if u1_is_positive { u1 } else { modulus - u1 })
+    }
+
     /// Replaces `dividend` by its remainder and returns the inverse of the divisor leading term.
     fn remainder(
         field: &Zp64,
@@ -3004,7 +3057,7 @@ impl<'a, E: PositiveExponent> DenseZp64UnivariateGcdImage<'a, E> {
         debug_assert!(!divisor.is_empty());
         debug_assert!(dividend.len() >= divisor.len());
         let divisor_degree = divisor.len() - 1;
-        let inverse_leading = field.inv(divisor.last().unwrap());
+        let inverse_leading = Self::inverse_leading(field, divisor.last().unwrap());
 
         for degree in (divisor_degree..dividend.len()).rev() {
             let leading = std::mem::replace(&mut dividend[degree], field.zero());
@@ -6641,6 +6694,40 @@ mod tests {
             select_univariate_integer_gcd(scalar_heuristic_allowed_80, 0),
             UnivariateIntegerGcdAlgorithm::Modular,
         );
+    }
+
+    #[test]
+    fn dense_zp64_leading_inverse_matches_field_inverse() {
+        for prime in univariate_modular_gcd_prime_iterator()
+            .take(UNIVARIATE_U64_MODULAR_GCD_PRIMES.len() + 4)
+        {
+            let field = Zp64::new(prime);
+            let mut residues = vec![1, 2, prime / 2, prime - 2, prime - 1];
+            let mut state = prime ^ 0xd1b5_4a32_d192_ed03;
+            for _ in 0..512 {
+                state = state
+                    .wrapping_mul(6_364_136_223_846_793_005)
+                    .wrapping_add(1_442_695_040_888_963_407);
+                let residue = if state >= prime { state - prime } else { state };
+                residues.push(residue.max(1));
+            }
+
+            for residue in residues {
+                let coefficient = field.to_element(residue);
+                let inverse =
+                    DenseZp64UnivariateGcdImage::<u16>::inverse_leading(&field, &coefficient);
+                assert_eq!(
+                    inverse,
+                    field.inv(&coefficient),
+                    "inverse of {residue} modulo {prime}",
+                );
+                assert_eq!(
+                    field.mul(&coefficient, &inverse),
+                    field.one(),
+                    "inverse product of {residue} modulo {prime}",
+                );
+            }
+        }
     }
 
     #[test]
