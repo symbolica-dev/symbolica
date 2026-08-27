@@ -100,6 +100,7 @@ struct UnivariateHenselProductTreeTopology {
 
 impl UnivariateHenselProductTreeTopology {
     /// Returns the degree represented by a leaf or internal product link.
+    #[cfg(test)]
     fn degree(&self, link: UnivariateHenselProductTreeLink) -> usize {
         match link {
             UnivariateHenselProductTreeLink::Leaf(index) => self.leaf_degrees[index],
@@ -109,6 +110,7 @@ impl UnivariateHenselProductTreeTopology {
 
     /// Visits internal products from the root toward the leaves, yielding each
     /// node before every internal child it references.
+    #[cfg(test)]
     fn internal_nodes_top_down(
         &self,
     ) -> impl Iterator<Item = (usize, &UnivariateHenselProductTreeNode)> {
