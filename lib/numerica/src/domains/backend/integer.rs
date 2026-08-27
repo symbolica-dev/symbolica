@@ -253,6 +253,34 @@ mod implementation {
             Self(remainder)
         }
 
+        /// Compute the Euclidean remainder of an owned value by a borrowed divisor.
+        ///
+        /// The numerator's existing allocation is reused for the remainder. This is the
+        /// ownership pattern used when reducing temporary large integer coefficients modulo a
+        /// shared modulus.
+        #[inline]
+        pub(crate) fn rem_euc_owned_ref(self, rhs: &Self) -> Self {
+            debug_assert!(!rhs.is_zero());
+            #[cfg(feature = "gmp")]
+            {
+                let mut remainder = self;
+                let negative_divisor = rhs.is_negative();
+                remainder %= rhs;
+                if remainder.is_negative() {
+                    if negative_divisor {
+                        remainder -= rhs;
+                    } else {
+                        remainder += rhs;
+                    }
+                }
+                return remainder;
+            }
+            #[cfg(feature = "no_gmp")]
+            {
+                self.rem_euc(rhs.clone())
+            }
+        }
+
         #[inline]
         pub fn div_rem_euc<T: Into<Self>>(self, rhs: T) -> (Self, Self) {
             #[cfg(feature = "gmp")]
@@ -1164,7 +1192,16 @@ mod implementation {
 
         #[inline]
         fn rem(self, rhs: &'a MultiPrecisionInteger) -> Self::Output {
-            Self::rem_trunc(self.into_raw(), rhs.0.clone())
+            #[cfg(feature = "gmp")]
+            {
+                let mut remainder = self;
+                remainder %= rhs;
+                return remainder;
+            }
+            #[cfg(feature = "no_gmp")]
+            {
+                Self::rem_trunc(self.into_raw(), rhs.0.clone())
+            }
         }
     }
 

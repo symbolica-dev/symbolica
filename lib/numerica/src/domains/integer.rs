@@ -3633,7 +3633,7 @@ impl<'a> Rem<&'a Integer> for Integer {
         match (self, rhs) {
             (Integer::Large(a), Integer::Single(b)) => Integer::from(a.rem_euc(*b)),
             (Integer::Large(a), Integer::Double(b)) => Integer::from(a.rem_euc(b.get())),
-            (Integer::Large(a), Integer::Large(b)) => Integer::from(a.rem_euc(b.clone())),
+            (Integer::Large(a), Integer::Large(b)) => Integer::from(a.rem_euc_owned_ref(b)),
             (x, _) => (&x).rem(rhs),
         }
     }
@@ -4631,6 +4631,31 @@ mod test {
         assert_eq!(&a * 3, Integer::from((i64::MAX as i128 + 1) * 3));
         assert_eq!(&b / 3, Integer::from((i64::MIN as i128 - 1) / 3));
         assert_eq!(&b % 3, Integer::from((i64::MIN as i128 - 1).rem_euclid(3)));
+    }
+
+    #[test]
+    fn owned_large_remainder_by_borrowed_large_divisor() {
+        let modulus = (Integer::one() << 200u32) + 123;
+        let numerator: Integer = &modulus * 7 + 45;
+        let negative_numerator = -&numerator;
+        let negative_modulus = -&modulus;
+        let negative_remainder = &modulus - 45;
+
+        for divisor in [&modulus, &negative_modulus] {
+            assert_eq!(numerator.clone() % divisor, Integer::from(45));
+            assert_eq!(negative_numerator.clone() % divisor, negative_remainder);
+            assert_eq!(numerator.clone() % divisor, &numerator % divisor);
+            assert_eq!(
+                negative_numerator.clone() % divisor,
+                &negative_numerator % divisor
+            );
+        }
+
+        assert_eq!(numerator.symmetric_mod(&modulus), Integer::from(45));
+        assert_eq!(
+            negative_numerator.symmetric_mod(&modulus),
+            Integer::from(-45)
+        );
     }
 
     #[test]
