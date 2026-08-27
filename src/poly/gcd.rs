@@ -582,11 +582,59 @@ impl ModularGcdWorkspace for u32 {
     }
 }
 
+/// Consecutive 64-bit primes used for univariate modular reconstruction before searching for
+/// further primes.
+const UNIVARIATE_U64_MODULAR_GCD_PRIMES: &[u64] = &[
+    18_346_744_073_709_552_031,
+    18_346_744_073_709_552_043,
+    18_346_744_073_709_552_047,
+    18_346_744_073_709_552_049,
+    18_346_744_073_709_552_353,
+    18_346_744_073_709_552_491,
+    18_346_744_073_709_552_521,
+    18_346_744_073_709_552_601,
+    18_346_744_073_709_552_673,
+    18_346_744_073_709_552_691,
+    18_346_744_073_709_552_701,
+    18_346_744_073_709_552_811,
+    18_346_744_073_709_552_829,
+    18_346_744_073_709_552_841,
+    18_346_744_073_709_552_857,
+    18_346_744_073_709_552_863,
+    18_346_744_073_709_552_923,
+    18_346_744_073_709_552_929,
+    18_346_744_073_709_552_973,
+    18_346_744_073_709_552_989,
+    18_346_744_073_709_553_009,
+    18_346_744_073_709_553_133,
+    18_346_744_073_709_553_169,
+    18_346_744_073_709_553_171,
+    18_346_744_073_709_553_199,
+    18_346_744_073_709_553_253,
+    18_346_744_073_709_553_309,
+    18_346_744_073_709_553_321,
+    18_346_744_073_709_553_331,
+    18_346_744_073_709_553_417,
+    18_346_744_073_709_553_451,
+    18_346_744_073_709_553_459,
+];
+
 impl ModularGcdWorkspace for u64 {
     fn first_prime() -> u64 {
-        // First prime above the u64 workspace's large-prime lower bound.
-        18_346_744_073_709_552_031
+        UNIVARIATE_U64_MODULAR_GCD_PRIMES[0]
     }
+}
+
+/// Yields prevalidated primes for univariate modular reconstruction, discovering further primes
+/// after the fixed sequence is exhausted.
+fn univariate_modular_gcd_prime_iterator() -> impl Iterator<Item = u64> {
+    let last = *UNIVARIATE_U64_MODULAR_GCD_PRIMES
+        .last()
+        .expect("univariate modular GCD prime table must not be empty");
+    UNIVARIATE_U64_MODULAR_GCD_PRIMES
+        .iter()
+        .copied()
+        .chain(PrimeIteratorU64::new(last))
 }
 
 /// Yields a known modular GCD prime first, followed by its consecutive successors.
@@ -3252,7 +3300,7 @@ impl<'a, E: PositiveExponent> UnivariateModularGcdContext<'a, E> {
         MultivariatePolynomial<IntegerRing, E>,
         MultivariatePolynomial<IntegerRing, E>,
     )> {
-        let mut primes = ModularGcdPrimeIterator::for_workspace::<u64>();
+        let mut primes = univariate_modular_gcd_prime_iterator();
         let mut gcd_degree = None;
         let mut reconstruction = self.left.zero();
         let mut modulus = Integer::one();
@@ -6219,6 +6267,19 @@ mod tests {
         let successor = u64_primes.next().unwrap();
         assert!(successor > first_u64_prime);
         assert!(Integer::from(successor).is_prime(0));
+    }
+
+    #[test]
+    fn univariate_modular_gcd_primes_match_dynamic_iterator() {
+        assert_eq!(UNIVARIATE_U64_MODULAR_GCD_PRIMES.len(), 32);
+
+        let mut actual = univariate_modular_gcd_prime_iterator();
+        let mut expected = PrimeIteratorU64::new(u64::get_large_prime());
+
+        // Compare every fixed prime and the first dynamically discovered fallback.
+        for _ in 0..=UNIVARIATE_U64_MODULAR_GCD_PRIMES.len() {
+            assert_eq!(actual.next(), expected.next());
+        }
     }
 
     #[cfg(not(feature = "binary_size"))]
