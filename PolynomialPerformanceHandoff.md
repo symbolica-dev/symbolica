@@ -1,11 +1,10 @@
 # Polynomial performance continuation handoff
 
 This is the live continuation record for the single-core Symbolica/FLINT polynomial-performance
-work. It was refreshed on 2026-08-27 after the final `f360be0` benchmark matrix and the
-high-height factorization profile. Keep this
-file current whenever an experiment is accepted, rejected, or left partly complete. The purpose is
-that another agent can resume without reconstructing decisions from chat history or transient
-binary names.
+work. It was refreshed on 2026-08-27 after integrating the quadratic Hensel lift at `4a2b9c7`.
+Keep this file current whenever an experiment is accepted, rejected, or left partly complete. The
+purpose is that another agent can resume without reconstructing decisions from chat history or
+transient binary names.
 
 ## Working contract
 
@@ -27,7 +26,7 @@ binary names.
 
 ## Resume here
 
-The accepted product and factor candidates are integrated on `dev` at `f360be0`. Do not
+The accepted product and factor candidates are integrated on `dev` at `4a2b9c7`. Do not
 cherry-pick their old worktree hashes again. The integrated chain is:
 
 | Integrated commit | Change |
@@ -38,30 +37,38 @@ cherry-pick their old worktree hashes again. The integrated chain is:
 | `598a628` | Extend the high-pressure factor-prime path through degree 64 |
 | `9609704` | Use a bounded roughly 26-bit prime so modular factorization stays in dense `u64` |
 | `f360be0` | Add total-degree 33, 64, and 65 factorization boundary benchmarks |
+| `4a2b9c7` | Use guarded quadratic Hensel lifting with integer modular operation contexts |
 
 The final source-matched full-LTO binary is
-`/tmp/flint-comparison-dev-f360be0-screen`. The target product is now within about 7% of FLINT and
-the original degree-63 factor row improved by 25.2% in absolute Symbolica time. The new degree-33
-high-height boundary row exposed a different, much larger loss: 84% of its profiled Symbolica
-factor call is under the linear Hensel lift. The next implementation experiment is therefore a
-bounded quadratic two-factor Hensel lift. The DDF dense monic-remainder context remains the next
-target for cases dominated by modular factorization.
+`/tmp/flint-comparison-dev-4a2b9c7-screen`. The target product remains within about 7% of FLINT.
+On the stable isolated build, the degree-33 high-height factor row fell from `37.490181 ms` before
+quadratic lifting to `10.105479 ms`, and from a Symbolica/FLINT ratio of `25.80` to `7.07`. The
+integrated binary independently reproduced the ratio improvement under a slower, thermally
+contaminated run; use the stable isolated absolute timings until an idle-host integrated rerun is
+available.
+
+The next degree-64 factor target is modular-prime screening, not the dense DDF remainder context:
+retain DDF blocks and their exact factor count, abort losing DDF candidates once their partial
+count cannot win, and run EDF only for the selected prime. The current degree-64 row does full
+DDF+EDF work for four primes and discards three of them.
 
 Validation on this integrated source completed before the final build:
 
-- Numerica GMP integer `25/25` and finite-field `12/12`;
-- Numerica `no_gmp` integer `16/16` and finite-field `12/12`;
-- root default GCD `28/28` and `no_gmp,native_code_generation` GCD `28/28`;
-- focused univariate factor/correction tests `4/4`;
-- the paired FLINT benchmark target passes `cargo check` with the three new boundary fixtures;
+- root factor module under default features `43/43`;
+- root factor module under `no_gmp,native_code_generation` `43/43`;
+- differential quadratic-versus-linear Hensel tests, including an unsuccessful full-precision
+  lift and a non-monic successful lift;
+- differential composite-modulus add/multiply/divide tests at `5^8` and `5^65`, with a negative
+  unit leading coefficient and active variable index one;
+- the complete default `cargo test --workspace` gate, including unit, integration, and doc tests;
 - `cargo fmt --check` and `git diff --check`.
 
 The exact worktree state is:
 
 | Worktree | Branch/head | State | Purpose |
 |---|---|---|---|
-| `/home/codexB/symbolica` | `dev`, `f360be0` | only handoff Markdown modified | Integrated product/factor winner and live lab notebook |
-| `/tmp/symbolica-quadratic-hensel` | `codex/quadratic-hensel`, `f360be0` | clean; design/profile stage | Isolated quadratic Hensel experiment |
+| `/home/codexB/symbolica` | `dev`, `4a2b9c7` | only handoff Markdown modified | Integrated product/factor winner and live lab notebook |
+| `/tmp/symbolica-quadratic-hensel` | `codex/quadratic-hensel`, `ed39caf` | clean; accepted source commit | Isolated quadratic Hensel reference |
 | `/tmp/symbolica-univariate-product` | `codex/univariate-product-kronecker`, `ddab46e` | clean; release build and profiling complete | Accepted product conversion plus retained fixed-width statistics follow-up |
 | `/tmp/symbolica-factor-large-prime` | `codex/factor-large-prime-degree64`, `dca8bd1` | clean; release build complete | Bounded dense-u64 factor-prime candidate based on `85be422` |
 | `/tmp/symbolica-zp64-r2` | `codex/zp64-hybrid-inverse`, `374b8e2` | clean | Source branch for the already integrated inverse; reference only |
@@ -644,19 +651,75 @@ selector or allocation-only change.
 | `/tmp/profile-factor-f360be0-d33-high-v2-lbr.children-symbols.txt` | `ef0af92422b26ec90b4a675227df2f06c42640ec09600d4f0f286c7c35b913bc` |
 | `/tmp/profile-factor-f360be0-d33-high-v2.csv` | `86b76f2868d5f6b1d8b642cda6bc3ba56c15706196a08bb3fe364b13636b810d` |
 
-The isolated quadratic-Hensel worktree is `/tmp/symbolica-quadratic-hensel` on
-`codex/quadratic-hensel` at `f360be0`. No source modification has been made there yet. Preserve a
-linear fallback for the even-prime case and for small lift depths until boundary measurements show
-that composite-modulus quadratic corrections are profitable.
+### Accepted quadratic Hensel lift
 
-### Next measured factor target: dense monic remainder
+Commit `4a2b9c7` adds a guarded quadratic two-factor lift. Each round lifts both the factors and
+their Bezout cofactors from modulus `m` to `m*q`, with `q=m` for a full precision-doubling round
+and `q=max_p/m` for the final partial round. It preserves the target's exact non-monic leading
+coefficients. The original linear path remains active for `p=2`, fewer than 64 base-prime digits,
+and every multi-factor tree whose root has more than four modular factors. The root permission is
+propagated unchanged so a large tree cannot reactivate quadratic lifting at a smaller child.
 
-The 15.91% flat `quot_rem_univariate_monic` cost is now attributed rather than guessed. For the
-selected prime `65_000_011`, distinct-degree factorization calls `exp_mod_univariate` for degrees
-1 through 15. The 26-bit prime has popcount 17, so each modular exponentiation makes 43 monic
-remainder calls. This gives 645 DDF exponentiation calls, four DDF factor-extraction divisions,
-and six EDF exact divisions. About 98.5% of the modular-factorization monic calls therefore come
-from the DDF exponentiation at `src/poly/factor.rs:1232`.
+The private `IntegerModularUnivariateContext` performs correction arithmetic modulo the current
+prime power. It sends polynomial products through the optimized integer multiplication dispatcher,
+then symmetrically reduces coefficients once. Its dense long division computes one inverse of the
+divisor's unit leading coefficient and uses fused integer subtraction/multiplication. This replaced
+generic pairwise `FiniteField<Integer>` polynomial arithmetic in the quadratic rounds.
+
+The stable candidate matrix used six sequential, balanced-order, 20-sample processes per binary;
+degree 64 used twelve. `v2` is the guarded quadratic lift before the integer modular context, and
+`control` is `f360be0` before quadratic lifting:
+
+| Case | Accepted Symbolica | FLINT | S/F | versus v2 | versus control |
+|---|---:|---:|---:|---:|---:|
+| high-height degree 33 | `10.105479 ms` | `1.409566 ms` | `7.068516` | `-29.53%` | `-73.04%` |
+| degree 63 | `15.736829 ms` | `3.096926 ms` | `5.091038` | `-3.86%` | `-5.53%` |
+| degree 64 | `21.730159 ms` | `2.572684 ms` | `8.432354` | `-1.23%` | `-2.93%` |
+| degree 65 | `22.700640 ms` | `3.049224 ms` | `7.445458` | `-1.70%` | `-2.02%` |
+| generated 2-variable factor | `6.139238 ms` | `9.833037 ms` | `0.624806` | `-0.69%` | `-0.57%` |
+| generated 3-variable factor | `8.263755 ms` | `4.167803 ms` | `1.967807` | `+0.17%` | `-1.79%` |
+| PolyBench #105 | `33.819908 ms` | `29.204045 ms` | `1.155242` | `-0.65%` | `-7.73%` |
+| PolyBench #178 | `42.827747 ms` | `14.389792 ms` | `2.971608` | `-0.09%` | `-0.12%` |
+
+Only the degree-33 change is attributed to the modular operation context; quadratic lifting is
+disabled by the root factor-count guard for degrees 63, 64, and 65. Their small movements are LTO
+layout/noise and are retained only as regression evidence. The first source-matched integrated run
+was performed while another compiler saturated the host and FLINT medians shifted by 40-100%; do
+not use its absolute times. Its high-height ratios were `6.55` integrated, `6.74` isolated, and
+`24.41` control, which independently confirms the structural win. Raw contaminated files are
+`/tmp/quadratic-hensel-integrated-*-block-*.csv`; rerun them on an idle host before replacing the
+stable table.
+
+A 500-sample v3 LBR profile measured `10.293209 ms` versus `1.506839 ms`, ratio `6.830995`.
+Hensel lifting fell from about 74% of Symbolica's factor call in v2 to about 56% in v3. In absolute
+terms its estimated contribution fell from roughly `10.4 ms` to `5.7 ms`. Generic
+`FiniteField<Integer>` polynomial multiplication disappeared. The remaining quadratic-lift cost is
+principally `IntegerModularUnivariateContext::quot_rem` and coefficientwise `symmetric_mod`;
+modular factorization is now about 44% of the Symbolica call.
+
+| Artifact | SHA-256 |
+|---|---|
+| `/tmp/flint-comparison-dev-4a2b9c7-screen` | `a4f671b28e2c97f0411f8d02f8e35c033d6c4a1eb58ae2a4deb99a74c8ebe2cf` |
+| `/tmp/flint-comparison-dev-4a2b9c7-screen.d` | `6d3a63a3bd02be4f8b9ab157f5d57856926ba26d2bdc1080c73fb0efcdc11f87` |
+| `/tmp/flint-comparison-dev-4a2b9c7-build.jsonl` | `2059b48064ea6de91defb79a61270682f393f3cdf2bf7ae132a75d5374111339` |
+| `/tmp/flint-comparison-quadratic-hensel-v3-screen` | `8944f90e972b149bf6fce303608ef210eafe826786346ad1669ff42dd9b637e8` |
+| `/tmp/flint-comparison-quadratic-hensel-v3-build.jsonl` | `fcc941b63a7adf8b05ee5a23ed30a5737256fcd444b9a80693958567c04c7145` |
+| `/tmp/profile-factor-quadratic-hensel-v3-d33-lbr.perf.data` | `e3194a871f98a0a993bb4f1b038886f29169eadf9c960e22b9d4c4d606518f95` |
+| `/tmp/profile-factor-quadratic-hensel-v3-d33-lbr.symbols.txt` | `448e79302c68a928d2281e6bd7c81f604e541166623f69a5c0949592087c9624` |
+| `/tmp/profile-factor-quadratic-hensel-v3-d33-lbr.children-symbols.txt` | `01503aeefe8ba241bd3ed0cc58be7c7a9de32bff6e048c11124866b6f50aade5` |
+| `/tmp/profile-factor-quadratic-hensel-v3-d33.csv` | `abd1d0f742e9d92bb80419211d92d9ed947c6527e936205532180bd0b73319d2` |
+
+Stable raw timing files are `/tmp/quadratic-hensel-v3-d33-block-*.csv` and
+`/tmp/quadratic-hensel-v3-matrix-*-block-*.csv`.
+
+### Modular factorization attribution and revised degree-64 target
+
+The degree-63 profile's 15.91% flat `quot_rem_univariate_monic` cost is attributed rather than
+guessed. For its selected prime `65_000_011`, distinct-degree factorization calls
+`exp_mod_univariate` for degrees 1 through 15. The 26-bit prime has popcount 17, so each modular
+exponentiation makes 43 monic remainder calls. This gives 645 DDF exponentiation calls, four DDF
+factor-extraction divisions, and six EDF exact divisions. About 98.5% of that image's
+modular-factorization monic calls therefore come from DDF exponentiation.
 
 The caller report agrees: 14.01 percentage points of the 15.91% flat cost lie below DDF, 13.59
 points specifically pass through `quot_rem_univariate` from exponentiation, 0.42 points are DDF
@@ -664,17 +727,24 @@ factor extraction, and 0.87 points are Hensel lifting. The concise report is
 `/tmp/profile-factor-dca8bd1-lbr.monic-callers-concise.txt`, SHA-256
 `650a0140fbf11c992d70fb5eb23e4db500f747ba65913d0457dad601a5217530`.
 
-The smallest structural follow-up is a private dense univariate remainder operation context, not
-a new `Ring` method. It should normalize/cache one monic modulus, retain dense coefficient and
-index buffers through binary exponentiation, call the existing coefficient-domain dense
-multiplication kernel, reduce in place, and materialize `MultivariatePolynomial` only for the GCD.
-Reset it when DDF divides a factor out. Start only at the DDF exponentiation call; EDF already uses
-the reciprocal `quot_rem_univariate_fast` path and should be measured separately. Allocation alone
-cannot remove this subtree because the coefficient reduction loop dominates; retaining dense
-state and omitting quotient/intermediate-polynomial construction is expected to save roughly 4-7%
-of Symbolica factor time. Required guards include monicity, the active variable, ring/variable
-identity, degree-one moduli, cancellation/trailing zeros, modulus resets, and generic sparse/high-
-degree fallback.
+The degree-64 audit changes the order of work. Both degree 63 and degree 64 currently perform about
+945 DDF remainder calls across four prime trials, because every trial completes DDF and EDF before
+the selector compares factor counts. Degree 64 tries primes `7`, `13`, `17`, and `65_000_011`,
+which yield `9`, `8`, `7`, and `20` factors; it retains `p=17`. For the final large-prime trial,
+the degree-one and degree-two DDF blocks already imply `4+15=19` factors, so it can be rejected
+after about 86 remainder calls instead of completing 645 DDF calls and EDF-splitting 20 discarded
+factors. Separating DDF screening from EDF and stopping losing DDF candidates is estimated to
+reduce degree-64 DDF remainder calls from about 945 to 386 and run EDF once for seven factors rather
+than four times for 44 total factors.
+
+A private dense univariate remainder operation context remains a useful second target, not a new
+`Ring` method. It should normalize/cache one monic modulus, retain dense coefficient and index
+buffers through binary exponentiation, call the existing coefficient-domain dense multiplication
+kernel, reduce in place, and materialize `MultivariatePolynomial` only for the GCD. Reset it when
+DDF divides a factor out. Allocation alone cannot remove this subtree because coefficient
+reduction dominates. Re-estimate its payoff after bounded screening removes most discarded DDF
+work. Required guards include monicity, the active variable, ring/variable identity, degree-one
+moduli, cancellation/trailing zeros, modulus resets, and generic sparse/high-degree fallback.
 
 A second Pareto point is prime `500_000_003`: it needs the same 11 digits as the 31-bit prime and
 can accumulate 65 collisions in `u64`, but needs a native `u64 % p` per output. Testing that prime
@@ -683,12 +753,9 @@ per-output collisions (`min(left_len, right_len)`). The kernel request contract 
 strictly increasing indices, so that bound is valid; add an unbalanced 129-by-65 max-residue
 differential test before using it. The primary 65M candidate needs no kernel change.
 
-If accepted, rebase or recreate the one-line factor change on top of the final product commit. Do
-not integrate it merely because the pressure estimate looks compelling. If it does not resolve
-the factor gap, the next evidence-based directions are staged Hensel lifting with early verified
-recombination, deferring equal-degree factorization until the modular prime is selected, and a
-product-tree/dense-univariate lifting context. The square-free GCD is Amdahl-limited and is not a
-useful next target.
+After bounded screening, profile degree 64 before choosing between the dense DDF context, the
+`500_000_003` prime, or a root-only quadratic lift for its seven-factor tree. The square-free GCD is
+Amdahl-limited and is not a useful factorization target.
 
 ## Benchmark infrastructure
 
@@ -798,6 +865,7 @@ Do not repeat these without a genuinely new mechanism:
 | Automatic CRT resultant | not generally competitive with direct Ducos | keep explicit `resultant_crt`, not default |
 | Brown PRS as general resultant default | not competitive regime-wide | keep explicit `resultant_brown` |
 | Sparse multivariate resultant interpolation prototype | reconstruction/bound work overwhelmed sparsity | not used as the general practical method |
+| Unguarded quadratic Hensel lifting | high-height degree 33 improved to about 14 ms, but degree 63 regressed from about 16 ms to 34-37 ms and degree 64 to about 35 ms | superseded by the 64-digit and root-wide four-factor guard in `4a2b9c7` |
 
 Historical frozen binaries and perf data remain under `/tmp`; it is ephemeral. The most useful
 older checksums and ratios are retained in Git history of this document at commits `386174d` and
@@ -831,22 +899,32 @@ comments that justify file organization by contrasting it with designs not prese
 
 ## Ordered next actions
 
-1. Implement a private quadratic two-factor Hensel path in
-   `/tmp/symbolica-quadratic-hensel`. Keep fixed leading coefficients, maintain the Bezout
-   cofactors modulo the current power, support a final partial exponent step, and fall back to the
-   existing linear lift for `p=2` and shallow lifts.
-2. Differential-test the quadratic path against the existing linear result, including non-monic
-   inputs, exact factors found before the bound, unsuccessful/recombination lifts, odd lift-digit
-   counts, and recursive multi-factor trees. Then run all focused and root factor tests under GMP
-   and `no_gmp` configurations.
-3. Screen total degrees 33/63/64/65 and the 2-/3-variable generated factors before paying for a
-   full-LTO build. Accept only if the 26x high-height case falls materially without regressing the
-   ordinary degree-63 or cheap multivariate rows.
-4. If quadratic lifting is accepted, profile the resulting high-height and degree-63 rows. For the
-   degree-63 row, implement the private dense univariate monic-remainder context first at DDF
-   exponentiation; do not alter EDF or add a `Ring` method until the isolated DDF result is known.
-5. Consider the `500_000_003` factor-prime point only after the per-output-collision u64 proof and
-   its unbalanced 129-by-65 differential test. The current 65-million prime already avoids
-   `__umodti3`, and prime selection does not explain the degree-33 Hensel profile.
-6. Keep this file current after every accepted or rejected quadratic-lift variant, including raw
-   ratios, source commit, artifact checksums, and the next measured bottleneck.
+1. Split modular-prime screening from equal-degree factorization for dense univariate integer
+   factorization. Retain DDF blocks plus the exact factor count
+   `sum(block_degree/distinct_degree)`, run EDF only after selecting the winning prime, and add a
+   bounded DDF mode that aborts once its partial factor-count lower bound cannot beat the current
+   candidate.
+2. Differential-test deferred EDF and bounded DDF against the current full factorization for the
+   degree-63/64/65 fixtures and random finite-field polynomials. Degree 64 currently tries primes
+   `7`, `13`, `17`, and `65_000_011`, with factor counts `9`, `8`, `7`, and `20`, and retains
+   `p=17`. The large-prime candidate can be rejected after its degree-one and degree-two DDF blocks
+   already imply 19 factors. The estimated DDF remainder count is `945 -> about 386`, with EDF run
+   for one seven-factor image instead of four images containing 44 factors total.
+3. Build and measure the screening candidate first on degree 64, then guard degrees 33/63/65,
+   1-/2-/3-variable factor rows, and PolyBench #105/#178. The inferred opportunity is 20-35% of
+   the entire degree-64 row; this must be verified because there is not yet a saved degree-64 factor
+   profile.
+4. Profile accepted degree-64 screening before implementing a dense DDF remainder context. The
+   latter remains useful, but early rejection removes roughly 59% of its current degree-64 work and
+   therefore changes its payoff.
+5. For the high-height degree-33 path, the smallest measured follow-up is to defer coefficient
+   reduction inside `IntegerModularUnivariateContext::quot_rem`: leave non-pivot remainder cells
+   unreduced during fused subtractions and symmetrically reduce only pivots and the final
+   remainder. In the v3 profile quotient/remainder is about 52% of Hensel, and about 70% of that
+   subtree is `symmetric_mod`. Differential-test this at small and large composite prime powers
+   before benchmarking; do not infer the full profile ceiling as an expected gain.
+6. Consider the `500_000_003` factor-prime point only after the per-output-collision u64 proof and
+   its unbalanced 129-by-65 differential test. It gives seven factors and only 11 lift digits on the
+   degree-64 fixture, but the current dense-u64 admission proof rejects it.
+7. Remeasure the integrated `4a2b9c7` matrix on an idle host, replace the thermally contaminated
+   absolute timings, and keep this file current after every accepted or rejected experiment.
