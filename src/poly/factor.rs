@@ -14,7 +14,8 @@ use crate::{
         EuclideanDomain, Field, InternalOrdering, Ring, RingOps, SampleableRing, Set,
         algebraic::{AlgebraicExtension, GaloisField},
         finite_field::{
-            FiniteField, FiniteFieldCore, FiniteFieldWorkspace, PrimeIteratorU64, ToFiniteField, Zp,
+            FiniteField, FiniteFieldCore, FiniteFieldElement, FiniteFieldWorkspace,
+            PrimeIteratorU64, ToFiniteField, Zp,
         },
         integer::{Integer, IntegerRing, Z, gcd_unsigned},
         rational::{Q, RationalField},
@@ -49,11 +50,362 @@ const MIN_QUADRATIC_HENSEL_DIGITS: usize = 64;
 const MAX_EVALUATED_HENSEL_TERM_STEPS: usize = 1 << 24;
 // Maximum number of dense coefficient rows retained for either lifted factor.
 const MAX_EVALUATED_HENSEL_Y_ROWS: usize = 1 << 16;
+// Largest univariate finite-field image retained in dense storage while
+// screening integer-factorization primes.
+const MAX_DENSE_ZP_DDF_COEFFICIENTS: usize = 256;
+// Sparse inputs below this density keep using the generic polynomial path.
+const MAX_DENSE_ZP_DDF_SPARSITY_RATIO: usize = 4;
 
 /// Distinct-degree blocks together with their exact number of irreducible factors.
 struct DistinctDegreeFactorization<P> {
     blocks: Vec<(usize, P)>,
     factor_count: usize,
+}
+
+/// Dense arithmetic for distinct-degree factorization over a 32-bit prime field.
+///
+/// The integer factorizer uses this context while screening univariate modular
+/// images. It retains the current monic divisor, degree indices, and
+/// multiplication workspaces while repeatedly computing Frobenius powers. A
+/// sparse polynomial is reconstructed only for the GCD that identifies the
+/// next distinct-degree block.
+struct DenseZpDistinctDegreeContext<'a, E: PositiveExponent> {
+    field: Zp,
+    variable: usize,
+    template: &'a MultivariatePolynomial<Zp, E, LexOrder>,
+    modulus: Vec<FiniteFieldElement<u32>>,
+    dense_indices: Vec<u32>,
+    power: Vec<FiniteFieldElement<u32>>,
+    multiplication_output: Vec<FiniteFieldElement<u32>>,
+}
+
+impl<'a, E: PositiveExponent> DenseZpDistinctDegreeContext<'a, E> {
+    /// Construct a bounded dense workspace for a monic univariate polynomial.
+    ///
+    /// Large or genuinely sparse inputs return `None` so their caller can use
+    /// the generic polynomial representation.
+    fn new(
+        polynomial: &'a MultivariatePolynomial<Zp, E, LexOrder>,
+        variable: usize,
+    ) -> Option<Self> {
+        if polynomial.is_zero()
+            || variable >= polynomial.nvars()
+            || polynomial.exponents_iter().any(|exponents| {
+                exponents
+                    .iter()
+                    .enumerate()
+                    .any(|(index, exponent)| index != variable && !exponent.is_zero())
+            })
+        {
+            return None;
+        }
+
+        let degree = polynomial.degree(variable).to_u32() as usize;
+        let coefficient_count = degree.checked_add(1)?;
+        if degree == 0
+            || coefficient_count > MAX_DENSE_ZP_DDF_COEFFICIENTS
+            || coefficient_count
+                > polynomial
+                    .nterms()
+                    .saturating_mul(MAX_DENSE_ZP_DDF_SPARSITY_RATIO)
+        {
+            return None;
+        }
+
+        let field = polynomial.ring().clone();
+        if !field.is_one(&polynomial.lcoeff()) {
+            return None;
+        }
+        let modulus = Self::dense_coefficients(polynomial, variable, &field);
+        debug_assert_eq!(modulus.len(), coefficient_count);
+        debug_assert!(
+            modulus
+                .last()
+                .is_some_and(|coefficient| field.is_one(coefficient))
+        );
+
+        Some(Self {
+            field,
+            variable,
+            template: polynomial,
+            modulus,
+            dense_indices: (0..degree as u32).collect(),
+            power: Vec::with_capacity(degree),
+            multiplication_output: Vec::with_capacity(2 * degree - 1),
+        })
+    }
+
+    /// Convert a univariate polynomial to ascending degree-indexed
+    /// coefficients, retaining zero cells between nonzero terms.
+    fn dense_coefficients(
+        polynomial: &MultivariatePolynomial<Zp, E, LexOrder>,
+        variable: usize,
+        field: &Zp,
+    ) -> Vec<FiniteFieldElement<u32>> {
+        let degree = polynomial.degree(variable).to_u32() as usize;
+        let mut coefficients = vec![field.zero(); degree + 1];
+        for term in polynomial {
+            debug_assert!(
+                term.exponents
+                    .iter()
+                    .enumerate()
+                    .all(|(index, exponent)| { index == variable || exponent.is_zero() })
+            );
+            coefficients[term.exponents[variable].to_u32() as usize] = *term.coefficient;
+        }
+        coefficients
+    }
+
+    /// Replace the divisor used by subsequent modular products after a
+    /// distinct-degree block has been removed.
+    fn set_modulus(&mut self, polynomial: &MultivariatePolynomial<Zp, E, LexOrder>) {
+        #[cfg(test)]
+        DENSE_ZP_DDF_MODULUS_UPDATES.with(|updates| updates.set(updates.get() + 1));
+        let coefficient_count = polynomial.degree(self.variable).to_u32() as usize + 1;
+        self.modulus.resize(coefficient_count, self.field.zero());
+        self.modulus.fill(self.field.zero());
+        for term in polynomial {
+            self.modulus[term.exponents[self.variable].to_u32() as usize] = *term.coefficient;
+        }
+        debug_assert!(
+            self.modulus
+                .last()
+                .is_some_and(|coefficient| self.field.is_one(coefficient))
+        );
+    }
+
+    /// Remove trailing zero cells from a dense coefficient vector.
+    fn trim(field: &Zp, coefficients: &mut Vec<FiniteFieldElement<u32>>) {
+        while coefficients
+            .last()
+            .is_some_and(|coefficient| field.is_zero(coefficient))
+        {
+            coefficients.pop();
+        }
+    }
+
+    /// Reduce an owned dense polynomial modulo a cached monic divisor.
+    fn remainder_monic(
+        field: &Zp,
+        dividend: &mut Vec<FiniteFieldElement<u32>>,
+        divisor: &[FiniteFieldElement<u32>],
+    ) {
+        debug_assert!(divisor.len() >= 2);
+        debug_assert!(
+            divisor
+                .last()
+                .is_some_and(|coefficient| field.is_one(coefficient))
+        );
+        if dividend.len() >= divisor.len() {
+            let divisor_degree = divisor.len() - 1;
+            for degree in (divisor_degree..dividend.len()).rev() {
+                let pivot = std::mem::replace(&mut dividend[degree], field.zero());
+                if field.is_zero(&pivot) {
+                    continue;
+                }
+
+                let shift = degree - divisor_degree;
+                for (coefficient, divisor_coefficient) in dividend[shift..degree]
+                    .iter_mut()
+                    .zip(&divisor[..divisor_degree])
+                {
+                    field.sub_mul_assign(coefficient, divisor_coefficient, &pivot);
+                }
+            }
+            dividend.truncate(divisor_degree);
+        }
+        Self::trim(field, dividend);
+    }
+
+    /// Multiply two dense polynomials and reduce the result modulo `modulus`.
+    ///
+    /// The finite-field dense kernel accumulates each convolution coefficient
+    /// before reducing it. The local quadratic loop is retained as a semantic
+    /// fallback when the coefficient-domain kernel declines the request.
+    fn multiply_mod_into(
+        field: &Zp,
+        dense_indices: &[u32],
+        modulus: &[FiniteFieldElement<u32>],
+        left: &[FiniteFieldElement<u32>],
+        right: &[FiniteFieldElement<u32>],
+        output: &mut Vec<FiniteFieldElement<u32>>,
+    ) {
+        if left.is_empty() || right.is_empty() {
+            output.clear();
+            return;
+        }
+
+        let output_len = left
+            .len()
+            .checked_add(right.len())
+            .and_then(|length| length.checked_sub(1))
+            .expect("dense finite-field product length overflow");
+        debug_assert!(left.len() <= dense_indices.len());
+        debug_assert!(right.len() <= dense_indices.len());
+        output.resize(output_len, field.zero());
+        output.fill(field.zero());
+
+        if let Some(coefficients) = field.kernels().polynomial().and_then(|kernels| {
+            kernels.try_dense_mul(DensePolynomialMulRequest {
+                output_len,
+                left_coefficients: left,
+                left_indices: &dense_indices[..left.len()],
+                right_coefficients: right,
+                right_indices: &dense_indices[..right.len()],
+            })
+        }) {
+            for (degree, coefficient) in coefficients {
+                output[degree as usize] = coefficient;
+            }
+        } else {
+            for (left_degree, left_coefficient) in left.iter().enumerate() {
+                for (right_degree, right_coefficient) in right.iter().enumerate() {
+                    field.add_mul_assign(
+                        &mut output[left_degree + right_degree],
+                        left_coefficient,
+                        right_coefficient,
+                    );
+                }
+            }
+        }
+
+        Self::remainder_monic(field, output, modulus);
+    }
+
+    /// Replace `value` by its `p`th power modulo the current divisor.
+    ///
+    /// Since every `Zp` used here has odd characteristic, the low exponent bit
+    /// is already represented by `value`; binary powering starts with
+    /// `value^2` and avoids multiplying a polynomial by one.
+    fn raise_to_characteristic(&mut self, value: &mut Vec<FiniteFieldElement<u32>>) {
+        Self::remainder_monic(&self.field, value, &self.modulus);
+        self.power.clone_from(value);
+        Self::multiply_mod_into(
+            &self.field,
+            &self.dense_indices,
+            &self.modulus,
+            &self.power,
+            &self.power,
+            &mut self.multiplication_output,
+        );
+        std::mem::swap(&mut self.power, &mut self.multiplication_output);
+
+        let mut exponent = self.field.get_prime() >> 1;
+        while exponent != 0 {
+            if exponent & 1 != 0 {
+                Self::multiply_mod_into(
+                    &self.field,
+                    &self.dense_indices,
+                    &self.modulus,
+                    value,
+                    &self.power,
+                    &mut self.multiplication_output,
+                );
+                std::mem::swap(value, &mut self.multiplication_output);
+            }
+            exponent >>= 1;
+            if exponent != 0 {
+                Self::multiply_mod_into(
+                    &self.field,
+                    &self.dense_indices,
+                    &self.modulus,
+                    &self.power,
+                    &self.power,
+                    &mut self.multiplication_output,
+                );
+                std::mem::swap(&mut self.power, &mut self.multiplication_output);
+            }
+        }
+    }
+
+    /// Materialize `value - x` for the GCD that extracts the next block.
+    fn polynomial_minus_x(
+        &self,
+        value: &[FiniteFieldElement<u32>],
+    ) -> MultivariatePolynomial<Zp, E, LexOrder> {
+        let coefficient_count = value.len().max(2);
+        let mut polynomial = self.template.zero_with_capacity(coefficient_count);
+        let mut exponents = vec![E::zero(); self.template.nvars()];
+        for degree in 0..coefficient_count {
+            let mut coefficient = value
+                .get(degree)
+                .copied()
+                .unwrap_or_else(|| self.field.zero());
+            if degree == 1 {
+                self.field.sub_assign(&mut coefficient, &self.field.one());
+            }
+            if self.field.is_zero(&coefficient) {
+                continue;
+            }
+            exponents[self.variable] = E::from_u32(degree as u32);
+            polynomial.append_monomial_back(coefficient, &exponents);
+        }
+        polynomial
+    }
+
+    /// Compute all distinct-degree blocks, stopping as soon as an optional
+    /// factor-count limit is proven to be exceeded.
+    fn factor(
+        mut self,
+        max_factor_count: Option<usize>,
+    ) -> Result<DistinctDegreeFactorization<MultivariatePolynomial<Zp, E, LexOrder>>, usize> {
+        let mut factors = Vec::new();
+        let mut factor_count = 0usize;
+        let mut h = vec![self.field.zero(), self.field.one()];
+        let mut f = self.template.clone();
+        let mut distinct_degree = 0usize;
+
+        if max_factor_count.is_some_and(|limit| limit == 0) {
+            #[cfg(test)]
+            {
+                BOUNDED_DDF_REJECTIONS.with(|rejections| rejections.set(rejections.get() + 1));
+                LAST_BOUNDED_DDF_REJECTION_DEGREE.with(|degree| degree.set(0));
+            }
+            return Err(1);
+        }
+
+        while !f.is_one() {
+            distinct_degree += 1;
+            self.raise_to_characteristic(&mut h);
+            let g = f.univariate_gcd(&self.polynomial_minus_x(&h));
+            let removed_block = !g.is_one();
+
+            if removed_block {
+                f = f.quot_rem_univariate_monic(&g).0;
+                let block_degree = g.degree(self.variable).to_u32() as usize;
+                debug_assert_eq!(block_degree % distinct_degree, 0);
+                factor_count += block_degree / distinct_degree;
+                factors.push((distinct_degree, g));
+            }
+
+            let factor_count_lower_bound = factor_count + usize::from(!f.is_constant());
+            if max_factor_count.is_some_and(|limit| factor_count_lower_bound > limit) {
+                #[cfg(test)]
+                {
+                    BOUNDED_DDF_REJECTIONS.with(|rejections| rejections.set(rejections.get() + 1));
+                    LAST_BOUNDED_DDF_REJECTION_DEGREE.with(|degree| degree.set(distinct_degree));
+                }
+                return Err(factor_count_lower_bound);
+            }
+
+            if f.last_exponents()[self.variable] < E::from_u32(2 * (distinct_degree as u32 + 1)) {
+                if !f.is_constant() {
+                    factor_count += 1;
+                    factors.push((f.degree(self.variable).to_u32() as usize, f));
+                }
+                break;
+            }
+
+            if removed_block {
+                self.set_modulus(&f);
+            }
+        }
+
+        Ok(DistinctDegreeFactorization {
+            blocks: factors,
+            factor_count,
+        })
+    }
 }
 
 /// A suitable finite-field image whose equal-degree factorization has been deferred.
@@ -383,6 +735,12 @@ std::thread_local! {
         std::cell::Cell::new(0)
     };
     static MODULAR_INTEGER_EDF_CALLS: std::cell::Cell<usize> = const {
+        std::cell::Cell::new(0)
+    };
+    static DENSE_ZP_DDF_SCREENS: std::cell::Cell<usize> = const {
+        std::cell::Cell::new(0)
+    };
+    static DENSE_ZP_DDF_MODULUS_UPDATES: std::cell::Cell<usize> = const {
         std::cell::Cell::new(0)
     };
     static BOUNDED_DDF_REJECTIONS: std::cell::Cell<usize> = const {
@@ -2186,10 +2544,10 @@ where
 
             h = h.exp_mod_univariate(self.ring().size().unwrap(), &mut f);
 
-            let mut g = f.univariate_gcd(&(&h - &x));
+            let g = f.univariate_gcd(&(&h - &x));
 
             if !g.is_one() {
-                f = f.quot_rem_univariate(&mut g).0;
+                f = f.quot_rem_univariate_monic(&g).0;
                 let block_degree = g.degree(var).to_u32() as usize;
                 debug_assert_eq!(block_degree % i, 0);
                 factor_count += block_degree / i;
@@ -5725,10 +6083,17 @@ impl<E: PositiveExponent> MultivariatePolynomial<IntegerRing, E, LexOrder> {
             return None;
         }
 
-        match image
-            .make_monic()
-            .distinct_degree_factorization_bounded(max_factor_count)
+        let image = image.make_monic();
+        let distinct_degree = if let Some(context) = DenseZpDistinctDegreeContext::new(&image, var)
         {
+            #[cfg(test)]
+            DENSE_ZP_DDF_SCREENS.with(|screens| screens.set(screens.get() + 1));
+            context.factor(max_factor_count)
+        } else {
+            image.distinct_degree_factorization_bounded(max_factor_count)
+        };
+
+        match distinct_degree {
             Ok(distinct_degree) => {
                 debug!(
                     "Prime {prime} yields {} modular factors",
@@ -8353,8 +8718,9 @@ mod test {
     use std::sync::{Arc, Mutex, atomic::Ordering};
 
     use super::{
-        BOUNDED_DDF_REJECTIONS, DenseBivariateImage, DenseIntegerModularUnivariateContext,
-        DenseTwoFactorCorrectionContext, EXACT_HENSEL_SUBTREE_MODULUS_BITS,
+        BOUNDED_DDF_REJECTIONS, DENSE_ZP_DDF_MODULUS_UPDATES, DENSE_ZP_DDF_SCREENS,
+        DenseBivariateImage, DenseIntegerModularUnivariateContext, DenseTwoFactorCorrectionContext,
+        DenseZpDistinctDegreeContext, EXACT_HENSEL_SUBTREE_MODULUS_BITS,
         EXACT_HENSEL_SUBTREE_SPLITS, ExactPolynomialSquareRoot, IntegerModularUnivariateContext,
         LAST_BOUNDED_DDF_REJECTION_DEGREE, LAST_MODULAR_INTEGER_EDF_PRIME,
         LLL_RECOMBINATION_SUCCESSES, LOCAL_HENSEL_RECOMBINATION_NODES, MODULAR_INTEGER_EDF_CALLS,
@@ -9346,7 +9712,95 @@ mod test {
     }
 
     #[test]
+    fn dense_zp_distinct_degree_factorization_matches_generic_path() {
+        let variables = Some(Arc::new(vec![
+            symbol!("x").into(),
+            symbol!("y").into(),
+            symbol!("z").into(),
+        ]));
+        let cases = [
+            (3, "(y+1)*(y^2+1)*(y^3+2*y+1)"),
+            (5, "(y+2)*(y^2+2)*(y^3+y+1)"),
+            (17, "(y+1)*(y+2)*(y+3)*(y^2+3)"),
+            (65_000_011, "(y+1)*(y+2)*(y+3)*(y^2+3)"),
+        ];
+
+        for (prime, expression) in cases {
+            DENSE_ZP_DDF_MODULUS_UPDATES.with(|updates| updates.set(0));
+            let field = Zp::new(prime);
+            let polynomial = parse!(expression)
+                .expand()
+                .to_polynomial::<_, u8>(&field, variables.clone());
+            assert!(
+                polynomial
+                    .univariate_gcd(&polynomial.derivative(1))
+                    .is_one()
+            );
+
+            let generic = polynomial
+                .distinct_degree_factorization_bounded(None)
+                .unwrap();
+            let dense = DenseZpDistinctDegreeContext::new(&polynomial, 1)
+                .expect("the dense small-prime case must be selected")
+                .factor(None)
+                .unwrap();
+            assert_eq!(dense.factor_count, generic.factor_count);
+            assert_eq!(dense.blocks, generic.blocks);
+            if prime == 3 {
+                assert_eq!(
+                    dense
+                        .blocks
+                        .iter()
+                        .map(|(degree, _)| *degree)
+                        .collect::<Vec<_>>(),
+                    [1, 2, 3]
+                );
+                DENSE_ZP_DDF_MODULUS_UPDATES.with(|updates| assert!(updates.get() > 0));
+            }
+            let reconstructed = dense
+                .blocks
+                .iter()
+                .fold(polynomial.one(), |product, (_, block)| &product * block);
+            assert_eq!(reconstructed, polynomial);
+
+            for limit in 0..=generic.factor_count {
+                let generic = polynomial.distinct_degree_factorization_bounded(Some(limit));
+                let dense = DenseZpDistinctDegreeContext::new(&polynomial, 1)
+                    .unwrap()
+                    .factor(Some(limit));
+                match (generic, dense) {
+                    (Ok(generic), Ok(dense)) => {
+                        assert_eq!(dense.factor_count, generic.factor_count);
+                        assert_eq!(dense.blocks, generic.blocks);
+                    }
+                    (Err(generic), Err(dense)) => assert_eq!(dense, generic),
+                    _ => panic!("dense and generic bounded DDF outcomes differ"),
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn sparse_modular_screen_keeps_generic_distinct_degree_path() {
+        DENSE_ZP_DDF_SCREENS.with(|screens| screens.set(0));
+        let polynomial = parse!("1+x+x^17").to_polynomial::<_, u8>(&Z, None);
+        let field = Zp::new(5);
+        let image = polynomial
+            .map_coeff(
+                |coefficient| coefficient.to_finite_field(&field),
+                field.clone(),
+            )
+            .make_monic();
+        assert!(DenseZpDistinctDegreeContext::new(&image, 0).is_none());
+
+        let screen = polynomial.screen_univariate_mod_prime(0, 5, None);
+        assert!(matches!(screen, Some(ModularPrimeScreen::Candidate(_))));
+        DENSE_ZP_DDF_SCREENS.with(|screens| assert_eq!(screens.get(), 0));
+    }
+
+    #[test]
     fn degree_64_modular_screening_counts_and_rejects_early() {
+        DENSE_ZP_DDF_SCREENS.with(|screens| screens.set(0));
         let polynomial = parse!("((1+3*x)^33-1)*((1-5*x)^31+1)")
             .expand()
             .to_polynomial::<_, u8>(&Z, None);
@@ -9368,6 +9822,7 @@ mod test {
         };
         assert_eq!(lower_bound, 20);
         LAST_BOUNDED_DDF_REJECTION_DEGREE.with(|degree| assert_eq!(degree.get(), 2));
+        DENSE_ZP_DDF_SCREENS.with(|screens| assert_eq!(screens.get(), 5));
     }
 
     #[test]
