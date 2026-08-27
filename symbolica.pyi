@@ -578,6 +578,27 @@ Rationals: SolveDomain
 Reals: SolveDomain
 Complexes: SolveDomain
 
+class SolutionValue:
+    """A root or open interval assigned to one variable of a solution branch."""
+
+    @property
+    def kind(self) -> Literal["root", "interval"]:
+        """The value kind."""
+
+    @property
+    def root(self) -> Expression | None:
+        """The exact root for a ``root`` value."""
+
+    @property
+    def lower_bound(self) -> Expression | None:
+        """The lower interval endpoint, or ``None`` when unbounded."""
+
+    @property
+    def upper_bound(self) -> Expression | None:
+        """The upper interval endpoint, or ``None`` when unbounded."""
+
+    def __repr__(self) -> str: ...
+
 class SolutionCondition:
     """A condition under which an exact solution branch is valid."""
 
@@ -607,12 +628,16 @@ class Solution:
     """
     One branch of an exact solution.
 
-    A solution behaves as a read-only mapping from requested variables to
-    exact values and retains free-variable, condition, and domain metadata.
+    A solution behaves as a read-only mapping for point values and retains
+    free-variable, condition, and domain metadata. ``variable_solutions()``
+    is the ordered root-or-interval representation for future CAD results.
     """
 
     def as_dict(self) -> dict[Expression, Expression]:
         """Convert this branch to a plain dictionary."""
+
+    def variable_solutions(self) -> list[tuple[Expression, SolutionValue]]:
+        """Return root or interval values in requested variable order."""
 
     def free_variables(self) -> list[Expression]:
         """Variables treated as free inputs on this branch."""
@@ -3603,7 +3628,7 @@ class Expression:
     @classmethod
     def solve(
         _cls,
-        system: Sequence[Expression],
+        system: Sequence[Expression | Condition],
         variables: Sequence[Expression],
         warn_if_underdetermined: bool = True,
         domain: SolveDomain | None = None,
@@ -3631,8 +3656,9 @@ class Expression:
 
         Parameters
         ----------
-        system: Sequence[Expression]
-            Expressions that are each understood to equal zero.
+        system: Sequence[Expression | Condition]
+            Expressions that are each understood to equal zero, or comparison
+            conditions. Strict inequalities require the future CAD backend.
         variables: Sequence[Expression]
             Variables to solve for, in lexicographic elimination order.
         warn_if_underdetermined: bool

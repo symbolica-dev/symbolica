@@ -1,4 +1,4 @@
-//! Exact solutions of systems of equations.
+//! Solve systems of equations and construct future inequality solve inputs.
 //!
 //! Start with [`AtomCore::solve`], select a domain with [`SolveBuilder::over`]
 //! if needed, and provide the variables with [`SolveBuilder::wrt`]. Each input
@@ -86,6 +86,9 @@ pub enum SolveError {
     EmptySystem,
     /// The input system is not linear in the requested variables.
     NonLinearSystem,
+    /// The input contains a strict inequality. The public API accepts these
+    /// constraints, but solving them requires the future CAD backend.
+    InequalitiesNotSupported,
     /// The system was underdetermined. The partial solution is returned.
     Underdetermined {
         /// Rank of the system.
@@ -111,6 +114,64 @@ pub enum SolveDomain {
 }
 
 pub use SolveDomain::{Complexes, Integers, Rationals, Reals};
+
+/// A solve constraint, normalized as an expression compared with zero.
+///
+/// Plain expressions convert to [`Inequality::Zero`], preserving the existing
+/// convention that every expression passed to [`AtomCore::solve`] is an
+/// equation whose right-hand side is zero. Strict inequalities can already be
+/// constructed and passed through the API, but executing them is deferred
+/// until the CAD solver is available.
+#[derive(Clone, Debug, PartialEq, Eq, Hash)]
+pub enum Inequality {
+    /// The expression is strictly less than zero.
+    LessThanZero(Atom),
+    /// The expression is equal to zero.
+    Zero(Atom),
+    /// The expression is strictly greater than zero.
+    GreaterThanZero(Atom),
+}
+
+impl Inequality {
+    /// Borrow the expression on the left-hand side of the comparison with zero.
+    pub fn expression(&self) -> &Atom {
+        match self {
+            Self::LessThanZero(expression)
+            | Self::Zero(expression)
+            | Self::GreaterThanZero(expression) => expression,
+        }
+    }
+
+    /// Consume the constraint and return its expression.
+    pub fn into_expression(self) -> Atom {
+        match self {
+            Self::LessThanZero(expression)
+            | Self::Zero(expression)
+            | Self::GreaterThanZero(expression) => expression,
+        }
+    }
+
+    /// Return whether this constraint is an equation.
+    pub fn is_equality(&self) -> bool {
+        matches!(self, Self::Zero(_))
+    }
+}
+
+impl<T: AtomCore> From<T> for Inequality {
+    fn from(expression: T) -> Self {
+        Self::Zero(expression.as_atom_view().to_owned())
+    }
+}
+
+impl std::fmt::Display for Inequality {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::LessThanZero(expression) => write!(f, "{expression} < 0"),
+            Self::Zero(expression) => write!(f, "{expression} = 0"),
+            Self::GreaterThanZero(expression) => write!(f, "{expression} > 0"),
+        }
+    }
+}
 
 #[doc(hidden)]
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -170,10 +231,48 @@ fn rational_denominator<E: PositiveExponent + 'static>(expression: AtomView<'_>)
     (!rational.denominator.is_one()).then(|| rational.denominator.to_expression())
 }
 
-/// One branch of an exact solution to a system of equations.
+/// The solution for one variable in an ordered exact-solution branch.
+///
+/// Equation solving currently produces only [`SolutionValue::Root`]. A CAD
+/// backend can also produce open intervals between consecutive roots. `None`
+/// denotes an unbounded end of such an interval.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum SolutionValue {
+    /// The variable is equal to one exact root.
+    Root(Atom),
+    /// The variable lies in an open interval between roots.
+    Interval {
+        /// Lower endpoint, or `None` when the interval is unbounded below.
+        lower_bound: Option<Atom>,
+        /// Upper endpoint, or `None` when the interval is unbounded above.
+        upper_bound: Option<Atom>,
+    },
+}
+
+/// An ordered variable and its corresponding point or interval solution.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct VariableSolution {
+    variable: PolyVariable,
+    value: SolutionValue,
+}
+
+impl VariableSolution {
+    /// The variable described by this coordinate of the solution.
+    pub fn variable(&self) -> &PolyVariable {
+        &self.variable
+    }
+
+    /// The point or interval assigned to the variable.
+    pub fn value(&self) -> &SolutionValue {
+        &self.value
+    }
+}
+
+/// One branch of an exact solution to a system of equations or inequalities.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct Solution {
     values: HashMap<PolyVariable, Atom>,
+    variable_solutions: Vec<VariableSolution>,
     free_variables: Vec<PolyVariable>,
     conditions: Vec<SolutionCondition>,
     domain: SolveDomain,
@@ -182,12 +281,24 @@ pub struct Solution {
 impl Solution {
     fn new(
         values: HashMap<PolyVariable, Atom>,
+        variables: &[PolyVariable],
         free_variables: Vec<PolyVariable>,
         conditions: Vec<SolutionCondition>,
         domain: SolveDomain,
     ) -> Self {
+        let variable_solutions = variables
+            .iter()
+            .filter_map(|variable| {
+                values.get(variable).map(|value| VariableSolution {
+                    variable: variable.clone(),
+                    value: SolutionValue::Root(value.clone()),
+                })
+            })
+            .collect();
+
         Self {
             values,
+            variable_solutions,
             free_variables,
             conditions,
             domain,
@@ -244,12 +355,25 @@ impl Solution {
         self.domain
     }
 
-    /// Borrow the variable-value map for this branch.
+    /// Requested variables and their solutions, in the exact order supplied
+    /// to [`SolveBuilder::wrt`].
+    ///
+    /// This ordered representation is the forward-compatible interface for
+    /// CAD cells, whose coordinates may be intervals rather than roots.
+    pub fn variable_solutions(&self) -> &[VariableSolution] {
+        &self.variable_solutions
+    }
+
+    /// Borrow the point-value projection of this branch.
+    ///
+    /// This contains every coordinate for equation solutions. A future CAD
+    /// branch may also contain interval coordinates, which are represented
+    /// only in [`Solution::variable_solutions`].
     pub fn as_map(&self) -> &HashMap<PolyVariable, Atom> {
         &self.values
     }
 
-    /// Consume the solution and return its variable-value map.
+    /// Consume the solution and return its point-value projection.
     pub fn into_values(self) -> HashMap<PolyVariable, Atom> {
         self.values
     }
@@ -281,15 +405,30 @@ impl std::fmt::Display for SolutionCondition {
 
 impl std::fmt::Display for Solution {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        let mut values = self.values.iter().collect::<Vec<_>>();
-        values.sort_by(|(left, _), (right, _)| left.cmp(right));
-
         f.write_str("{")?;
-        for (index, (variable, value)) in values.into_iter().enumerate() {
+        for (index, variable_solution) in self.variable_solutions.iter().enumerate() {
             if index > 0 {
                 f.write_str(", ")?;
             }
-            write!(f, "{variable} = {value}")?;
+            match variable_solution.value() {
+                SolutionValue::Root(value) => {
+                    write!(f, "{} = {value}", variable_solution.variable())?;
+                }
+                SolutionValue::Interval {
+                    lower_bound,
+                    upper_bound,
+                } => {
+                    let lower = lower_bound
+                        .as_ref()
+                        .map(ToString::to_string)
+                        .unwrap_or_else(|| "-infinity".to_owned());
+                    let upper = upper_bound
+                        .as_ref()
+                        .map(ToString::to_string)
+                        .unwrap_or_else(|| "infinity".to_owned());
+                    write!(f, "{lower} < {} < {upper}", variable_solution.variable())?;
+                }
+            }
         }
         f.write_str("}")?;
 
@@ -333,16 +472,19 @@ impl<'a> IntoIterator for &'a Solution {
     }
 }
 
-/// An exact solve operation waiting for the variables to solve for.
-pub struct SolveBuilder<'a, T: AtomCore> {
-    system: &'a [T],
+/// A pending exact solve operation.
+pub struct SolveBuilder {
+    system: Vec<Inequality>,
     domain: SolveDomain,
 }
 
-impl<'a, T: AtomCore> SolveBuilder<'a, T> {
-    pub(crate) fn new(system: &'a [T]) -> Self {
+impl SolveBuilder {
+    pub(crate) fn new<T>(system: &[T]) -> Self
+    where
+        T: Clone + Into<Inequality>,
+    {
         Self {
-            system,
+            system: system.iter().cloned().map(Into::into).collect(),
             domain: Complexes,
         }
     }
@@ -377,32 +519,43 @@ impl<'a, T: AtomCore> SolveBuilder<'a, T> {
         &self,
         variables: &[V],
     ) -> Result<Vec<Solution>, SolveError> {
+        if self
+            .system
+            .iter()
+            .any(|constraint| !constraint.is_equality())
+        {
+            return Err(SolveError::InequalitiesNotSupported);
+        }
+
+        let system = self
+            .system
+            .iter()
+            .map(|constraint| constraint.expression().clone())
+            .collect::<Vec<_>>();
         let polynomial_variables = variables
             .iter()
             .map(|variable| variable.as_atom_view().to_owned().try_into())
             .collect::<Result<Vec<PolyVariable>, String>>()
             .map_err(SolveError::Other)?;
 
-        let system_denominators = self
-            .system
+        let system_denominators = system
             .iter()
             .filter_map(|expression| rational_denominator::<E>(expression.as_atom_view()))
             .collect::<Vec<_>>();
 
-        let raw_solutions =
-            match AtomView::solve_impl::<E, _, _>(self.system, variables, self.domain) {
-                Ok(solutions) => solutions,
-                Err(SolveError::Underdetermined {
-                    partial_solution, ..
-                }) => vec![SolveBranch::unconditional(
-                    polynomial_variables
-                        .iter()
-                        .cloned()
-                        .zip(partial_solution)
-                        .collect(),
-                )],
-                Err(error) => return Err(error),
-            };
+        let raw_solutions = match AtomView::solve_impl::<E, _, _>(&system, variables, self.domain) {
+            Ok(solutions) => solutions,
+            Err(SolveError::Underdetermined {
+                partial_solution, ..
+            }) => vec![SolveBranch::unconditional(
+                polynomial_variables
+                    .iter()
+                    .cloned()
+                    .zip(partial_solution)
+                    .collect(),
+            )],
+            Err(error) => return Err(error),
+        };
 
         Ok(raw_solutions
             .into_iter()
@@ -464,6 +617,7 @@ impl<'a, T: AtomCore> SolveBuilder<'a, T> {
                 }
                 Some(Solution::new(
                     values,
+                    &polynomial_variables,
                     free_variables,
                     conditions,
                     self.domain,
@@ -504,6 +658,9 @@ impl std::fmt::Display for SolveError {
             SolveError::NoConvergence => f.write_str("Did not converge"),
             SolveError::EmptySystem => f.write_str("Empty system"),
             SolveError::NonLinearSystem => f.write_str("Not a linear system"),
+            SolveError::InequalitiesNotSupported => {
+                f.write_str("Solving inequalities requires the future CAD solver")
+            }
             SolveError::Underdetermined {
                 rank,
                 partial_solution,
@@ -1680,7 +1837,10 @@ mod test {
         },
         parse,
         poly::PolyVariable,
-        solve::{Complexes, Integers, Rationals, Reals, Solution, SolutionCondition, SolveError},
+        solve::{
+            Complexes, Inequality, Integers, Rationals, Reals, Solution, SolutionCondition,
+            SolutionValue, SolveError,
+        },
         symbol,
         tensors::matrix::Matrix,
         transcendental::root,
@@ -1724,6 +1884,60 @@ mod test {
         assert!(!solutions[0].is_underdetermined());
         assert_eq!(solutions[0].rank(), 2);
         assert_eq!(solutions[0].dimension(), 0);
+    }
+
+    #[test]
+    fn solve_inputs_scaffold_strict_inequalities() {
+        let expression = parse!("x^2-5");
+        assert_eq!(
+            Inequality::from(expression.clone()),
+            Inequality::Zero(expression.clone())
+        );
+        assert_eq!(
+            Inequality::from(expression.as_view()),
+            Inequality::Zero(expression.clone())
+        );
+        assert_eq!(
+            expression.less_than(3),
+            Inequality::LessThanZero(parse!("x^2-8"))
+        );
+        assert_eq!(
+            expression.greater_than(-2),
+            Inequality::GreaterThanZero(parse!("x^2-3"))
+        );
+
+        let system = [parse!("x-1").into(), parse!("x^2").lt_zero()];
+        let error = Atom::solve(&system)
+            .over(Reals)
+            .wrt(&[parse!("x")])
+            .unwrap_err();
+        assert_eq!(error, SolveError::InequalitiesNotSupported);
+        assert_eq!(
+            error.to_string(),
+            "Solving inequalities requires the future CAD solver"
+        );
+    }
+
+    #[test]
+    fn equality_constraints_keep_requested_variable_order() {
+        let x = symbol!("x");
+        let y = symbol!("y");
+        let system = [parse!("x-1").eq_zero(), parse!("y-2").eq_zero()];
+        let variables = [Atom::var(y), Atom::var(x)];
+
+        let solutions = Atom::solve(&system).wrt(&variables).unwrap();
+        let variable_solutions = solutions[0].variable_solutions();
+        assert_eq!(variable_solutions.len(), 2);
+        assert_eq!(variable_solutions[0].variable(), &PolyVariable::from(y));
+        assert_eq!(
+            variable_solutions[0].value(),
+            &SolutionValue::Root(Atom::num(2))
+        );
+        assert_eq!(variable_solutions[1].variable(), &PolyVariable::from(x));
+        assert_eq!(
+            variable_solutions[1].value(),
+            &SolutionValue::Root(Atom::num(1))
+        );
     }
 
     #[test]

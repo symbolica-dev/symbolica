@@ -178,8 +178,8 @@ pub mod prelude {
     };
 
     pub use crate::solve::{
-        Complexes, Integers, Rationals, Reals, Solution, SolutionCondition, SolveBuilder,
-        SolveDomain, SolveError,
+        Complexes, Inequality, Integers, Rationals, Reals, Solution, SolutionCondition,
+        SolutionValue, SolveBuilder, SolveDomain, SolveError, VariableSolution,
     };
 
     pub use crate::state::State;
