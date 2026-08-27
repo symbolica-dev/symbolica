@@ -5706,6 +5706,21 @@ impl<E: PositiveExponent> MultivariatePolynomial<IntegerRing, E, LexOrder> {
         factor_count.saturating_sub(1).saturating_mul(digits)
     }
 
+    /// Returns whether a modular factorization exceeds the degree, height,
+    /// factor-count, and precision thresholds for high-pressure Hensel paths.
+    fn has_high_linear_hensel_pressure(
+        degree: u32,
+        bound: &Integer,
+        factor_count: usize,
+        digits: usize,
+    ) -> bool {
+        degree <= 64
+            && bound.significant_bits() >= 256
+            && factor_count >= 3
+            && digits >= 64
+            && Self::linear_hensel_work(factor_count, digits) >= 256
+    }
+
     fn dense_coefficients_mod(&self, var: usize, modulus: &Integer) -> Vec<Integer> {
         let degree = self.degree(var).to_u32() as usize;
         let mut exponents = vec![E::zero(); self.nvars()];
@@ -6078,20 +6093,13 @@ impl<E: PositiveExponent> MultivariatePolynomial<IntegerRing, E, LexOrder> {
         // the current linear p-adic lift. Restrict it to low-degree, high-height
         // images where that saving clearly outweighs the more expensive finite-
         // field factorization.
-        let (initial_factor_count, initial_digits, initial_work) = {
+        let (initial_factor_count, initial_digits) = {
             let candidate = best_factorization.as_ref().unwrap();
             let (digits, _) = Self::linear_hensel_modulus(&bound, candidate.field.get_prime());
-            (
-                candidate.distinct_degree.factor_count,
-                digits,
-                Self::linear_hensel_work(candidate.distinct_degree.factor_count, digits),
-            )
+            (candidate.distinct_degree.factor_count, digits)
         };
-        let high_linear_lift_pressure = d <= 64
-            && bound.significant_bits() >= 256
-            && initial_factor_count >= 3
-            && initial_digits >= 64
-            && initial_work >= 256;
+        let high_linear_lift_pressure =
+            Self::has_high_linear_hensel_pressure(d, &bound, initial_factor_count, initial_digits);
 
         if high_linear_lift_pressure {
             // Compare three suitable small primes before considering the large
@@ -6209,9 +6217,11 @@ impl<E: PositiveExponent> MultivariatePolynomial<IntegerRing, E, LexOrder> {
         );
         let (field, hs) = Self::complete_equal_degree_factorization(best_factorization);
 
-        let (_, max_p) = Self::linear_hensel_modulus(&bound, field.get_prime());
+        let (final_digits, max_p) = Self::linear_hensel_modulus(&bound, field.get_prime());
+        let product_tree_lift_pressure =
+            Self::has_high_linear_hensel_pressure(d, &bound, hs.len(), final_digits);
         let quadratic_lift_allowed = hs.len() <= 4;
-        if high_linear_lift_pressure && hs.len() > 4 {
+        if product_tree_lift_pressure && hs.len() > 4 {
             let lifted = self.lift_modular_factor_product_tree(&hs, &max_p);
             return self.recombine_lifted_factors(lifted, &max_p, var, &bound);
         }
@@ -9225,6 +9235,72 @@ mod test {
         };
         assert_eq!(lower_bound, 20);
         LAST_BOUNDED_DDF_REJECTION_DEGREE.with(|degree| assert_eq!(degree.get(), 2));
+    }
+
+    #[test]
+    fn factor_univariate_degree_63_rechecks_product_tree_pressure_after_prime_selection() {
+        PRODUCT_TREE_HENSEL_LIFT_CALLS.with(|calls| calls.set(0));
+        let polynomial = parse!("((1+3*x)^32-1)*((1-5*x)^31+1)")
+            .expand()
+            .to_polynomial::<_, u8>(&Z, None);
+        let primitive = polynomial.clone().make_primitive();
+        let bound = primitive.coefficient_bound();
+
+        let Some(ModularPrimeScreen::Candidate(small_candidate)) =
+            primitive.screen_univariate_mod_prime(0, 11, None)
+        else {
+            panic!("prime 11 must produce a suitable modular image");
+        };
+        let small_factor_count = small_candidate.distinct_degree.factor_count;
+        let small_digits =
+            MultivariatePolynomial::<IntegerRing, u8>::linear_hensel_modulus(&bound, 11).0;
+        assert_eq!(small_factor_count, 11);
+        assert!(
+            MultivariatePolynomial::<IntegerRing, u8>::has_high_linear_hensel_pressure(
+                63,
+                &bound,
+                small_factor_count,
+                small_digits
+            )
+        );
+
+        let Some(ModularPrimeScreen::Candidate(final_candidate)) =
+            primitive.screen_univariate_mod_prime(0, 65_000_011, None)
+        else {
+            panic!("the dense-u64 prime must produce a suitable modular image");
+        };
+        let final_factor_count = final_candidate.distinct_degree.factor_count;
+        let final_digits =
+            MultivariatePolynomial::<IntegerRing, u8>::linear_hensel_modulus(&bound, 65_000_011).0;
+        assert_eq!(final_factor_count, 11);
+        assert_eq!(final_digits, 12);
+        assert!(
+            !MultivariatePolynomial::<IntegerRing, u8>::has_high_linear_hensel_pressure(
+                63,
+                &bound,
+                final_factor_count,
+                final_digits
+            )
+        );
+
+        let factors = polynomial.factor();
+        let reconstructed = factors
+            .iter()
+            .fold(polynomial.one(), |product, (factor, power)| {
+                &product * &factor.pow(*power)
+            });
+        assert_eq!(reconstructed, polynomial);
+        let mut degrees = factors
+            .iter()
+            .filter(|(factor, _)| !factor.is_constant())
+            .map(|(factor, power)| {
+                assert_eq!(*power, 1);
+                factor.degree(0)
+            })
+            .collect::<Vec<_>>();
+        degrees.sort_unstable();
+        assert_eq!(degrees, [1u8, 1, 1, 2, 4, 8, 16, 30]);
+        PRODUCT_TREE_HENSEL_LIFT_CALLS.with(|calls| assert_eq!(calls.get(), 0));
     }
 
     #[test]
