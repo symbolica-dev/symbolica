@@ -4646,6 +4646,7 @@ impl<E: PositiveExponent> MultivariatePolynomial<IntegerRing, E, LexOrder> {
         hs: &[MultivariatePolynomial<Zp, E, LexOrder>],
         prime: u32,
         var: usize,
+        quadratic_lift_allowed: bool,
     ) -> Vec<Self> {
         if hs.len() == 1 {
             return vec![self];
@@ -4653,7 +4654,7 @@ impl<E: PositiveExponent> MultivariatePolynomial<IntegerRing, E, LexOrder> {
 
         let bound = self.coefficient_bound();
         let (_, max_p) = Self::linear_hensel_modulus(&bound, prime);
-        self.factor_hensel_subtree(hs, &max_p, &bound, var)
+        self.factor_hensel_subtree(hs, &max_p, &bound, var, quadratic_lift_allowed)
     }
 
     /// Factor a known exact integer polynomial through its retained modular-factor subtree.
@@ -4667,6 +4668,7 @@ impl<E: PositiveExponent> MultivariatePolynomial<IntegerRing, E, LexOrder> {
         max_p: &Integer,
         bound: &Integer,
         var: usize,
+        quadratic_lift_allowed: bool,
     ) -> Vec<Self> {
         if hs.len() == 1 {
             return vec![self.clone()];
@@ -4686,15 +4688,20 @@ impl<E: PositiveExponent> MultivariatePolynomial<IntegerRing, E, LexOrder> {
             h = h * factor;
         }
 
-        let quadratic_lift_allowed = gs.len() + hs.len() <= 4;
         match self.hensel_lift_with_strategy(g, h, None, max_p, quadratic_lift_allowed) {
             Ok((g_i, h_i)) => {
                 #[cfg(test)]
                 EXACT_HENSEL_SUBTREE_SPLITS.with(|splits| splits.set(splits.get() + 1));
 
                 let prime = gs[0].ring().get_prime();
-                let mut factors = g_i.factor_exact_hensel_child(gs, prime, var);
-                factors.extend(h_i.factor_exact_hensel_child(hs, prime, var));
+                let mut factors =
+                    g_i.factor_exact_hensel_child(gs, prime, var, quadratic_lift_allowed);
+                factors.extend(h_i.factor_exact_hensel_child(
+                    hs,
+                    prime,
+                    var,
+                    quadratic_lift_allowed,
+                ));
                 factors
             }
             Err((g_i, h_i)) => {
@@ -5314,7 +5321,8 @@ impl<E: PositiveExponent> MultivariatePolynomial<IntegerRing, E, LexOrder> {
         let (field, hs) = Self::complete_equal_degree_factorization(best_factorization);
 
         let (_, max_p) = Self::linear_hensel_modulus(&bound, field.get_prime());
-        self.factor_hensel_subtree(&hs, &max_p, &bound, var)
+        let quadratic_lift_allowed = hs.len() <= 4;
+        self.factor_hensel_subtree(&hs, &max_p, &bound, var, quadratic_lift_allowed)
     }
 
     /// Lift a solution of `poly ≡ lcoeff * univariate_factors mod y mod p^k`
@@ -8357,7 +8365,8 @@ mod test {
         let (_, max_p) =
             MultivariatePolynomial::<IntegerRing, u8>::linear_hensel_modulus(&bound, 101);
 
-        let mut factors = polynomial.factor_hensel_subtree(&modular_factors, &max_p, &bound, 0);
+        let mut factors =
+            polynomial.factor_hensel_subtree(&modular_factors, &max_p, &bound, 0, false);
         let mut expected = integer_factors.to_vec();
         factors.sort_by(|left, right| left.internal_cmp(right));
         expected.sort_by(|left, right| left.internal_cmp(right));
@@ -8408,7 +8417,8 @@ mod test {
         let (_, max_p) =
             MultivariatePolynomial::<IntegerRing, u8>::linear_hensel_modulus(&bound, 101);
 
-        let mut factors = polynomial.factor_hensel_subtree(&modular_factors, &max_p, &bound, 0);
+        let mut factors =
+            polynomial.factor_hensel_subtree(&modular_factors, &max_p, &bound, 0, true);
         let mut expected = integer_factors.to_vec();
         factors.sort_by(|left, right| left.internal_cmp(right));
         expected.sort_by(|left, right| left.internal_cmp(right));
