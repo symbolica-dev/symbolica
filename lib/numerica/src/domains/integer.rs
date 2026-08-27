@@ -4279,6 +4279,89 @@ mod test {
 
     #[cfg(feature = "gmp")]
     #[test]
+    fn factor_fixture_kronecker_polynomial_multiplication() {
+        fn linear_power_coefficients(power: u32, scale: i128) -> Vec<Integer> {
+            let mut coefficient = 1i128;
+            let mut coefficients = vec![Integer::one()];
+            for exponent in 1..=power {
+                coefficient = coefficient
+                    .checked_mul(i128::from(power - exponent + 1))
+                    .and_then(|value| value.checked_mul(scale))
+                    .unwrap()
+                    / i128::from(exponent);
+                coefficients.push(Integer::from(coefficient));
+            }
+            coefficients
+        }
+
+        let left = linear_power_coefficients(32, 3)
+            .into_iter()
+            .skip(1)
+            .collect::<Vec<_>>();
+        let mut right = linear_power_coefficients(31, -5);
+        right[0] += Integer::one();
+        let left_indices = (1..=32).collect::<Vec<u32>>();
+        let right_indices = (0..32).collect::<Vec<u32>>();
+        let output_len = 64;
+
+        let actual_sparse = super::polynomial_kernels::DenseIntegerMul::try_kronecker_for_test(
+            output_len,
+            &left,
+            &left_indices,
+            &right,
+            &right_indices,
+        )
+        .unwrap();
+        let mut actual = vec![Integer::zero(); output_len];
+        for (index, coefficient) in actual_sparse {
+            actual[index as usize] = coefficient;
+        }
+
+        let mut expected = vec![Integer::zero(); output_len];
+        for (left_coefficient, &left_index) in left.iter().zip(&left_indices) {
+            for (right_coefficient, &right_index) in right.iter().zip(&right_indices) {
+                expected[left_index as usize + right_index as usize] +=
+                    left_coefficient * right_coefficient;
+            }
+        }
+        assert_eq!(actual, expected);
+    }
+
+    #[cfg(feature = "gmp")]
+    #[test]
+    fn contiguous_kronecker_selector_rejects_sparse_or_shifted_support() {
+        let scale = Integer::from(1) << 180u32;
+        let coefficients = (0..32)
+            .map(|index| &scale + Integer::from(index + 1))
+            .collect::<Vec<_>>();
+
+        let shifted_indices = (1000..1032).collect::<Vec<u32>>();
+        assert!(
+            super::polynomial_kernels::DenseIntegerMul::try_kronecker_for_test(
+                2063,
+                &coefficients,
+                &shifted_indices,
+                &coefficients,
+                &shifted_indices,
+            )
+            .is_none()
+        );
+
+        let sparse_indices = (0..32).map(|index| 2 * index).collect::<Vec<u32>>();
+        assert!(
+            super::polynomial_kernels::DenseIntegerMul::try_kronecker_for_test(
+                125,
+                &coefficients,
+                &sparse_indices,
+                &coefficients,
+                &sparse_indices,
+            )
+            .is_none()
+        );
+    }
+
+    #[cfg(feature = "gmp")]
+    #[test]
     fn dense_kronecker_polynomial_multiplication() {
         let scale = Integer::from(1) << 180u32;
         let left = (0..300)

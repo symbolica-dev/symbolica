@@ -342,7 +342,25 @@ impl<'a> DenseIntegerMul<'a> {
         let product_count = left_coefficients
             .len()
             .checked_mul(right_coefficients.len())?;
-        if product_count < 64 || packed_output_len.saturating_mul(128) >= product_count {
+        let high_collision_density = packed_output_len.saturating_mul(128) < product_count;
+
+        const MIN_CONTIGUOUS_KRONECKER_TERMS: usize = 32;
+        let consecutive_support = |indices: &[u32]| {
+            indices
+                .windows(2)
+                .all(|pair| pair[0].checked_add(1) == Some(pair[1]))
+        };
+        let active_output_span = left_coefficients
+            .len()
+            .checked_add(right_coefficients.len())?
+            .checked_sub(1)?;
+        let large_contiguous_support = left_coefficients.len().min(right_coefficients.len())
+            >= MIN_CONTIGUOUS_KRONECKER_TERMS
+            && consecutive_support(packed_left_indices)
+            && consecutive_support(packed_right_indices)
+            && packed_output_len <= active_output_span.saturating_mul(2);
+
+        if product_count < 64 || !(high_collision_density || large_contiguous_support) {
             return None;
         }
 
