@@ -25,6 +25,92 @@ transient binary names.
 - Small changes below roughly 3% need particularly strong, repeated evidence before their
   complexity is accepted.
 
+## Current continuation checkpoint: dense degree-64 modular factorization
+
+This section supersedes the older `Resume here` checkpoint below. The accepted `dev` head remains
+`9a1d9e2`; the following measured commits are still isolated on `codex/ddf-direct-gcd` and have not
+yet been fast-forwarded into `dev`:
+
+| Commit | Change | Source-matched degree-64 result |
+|---|---|---:|
+| `abd0add` | Call the direct univariate GCD path during modular screening and DDF | `-10.064%` |
+| `052665d` | Keep bounded classical DDF multiplication and remainder state in dense `Zp` storage | `-9.696%` |
+| `7b849e3` | Extract exact univariate monomial factors before screening and reject zero-constant images | `-2.435850%` |
+
+All three source commits have author and committer `Ben Ruijl <ben@ruijl.ch>`. Their isolated
+worktree is `/tmp/symbolica-ddf-direct-gcd`; the measured source head is `7b849e3`. The combined
+default-feature factor suite passes `63/63`; the no-GMP suite also passes `63/63` on its complete
+rerun. One earlier no-GMP
+`galois_upgrade` execution failed during randomized finite-field splitting, but its immediate
+isolated rerun and the subsequent complete suite both passed.
+
+Six alternating 100-sample full-LTO processes compare the combined binary with the dense-DDF-only
+binary. The combined median is `5.0231025 ms` versus `5.1552440 ms`; all six blocks win and the
+median paired change is `-2.435850%`. FLINT's median is `2.562000 ms`, so the current ratio is
+`1.9578535`. The original source-matched degree-64 baseline was `11.336475 ms`, and the accepted
+dense Hensel tree was `6.511109 ms`; the current chain has therefore removed about `55.69%` of the
+original time and another `22.85%` after the dense tree.
+
+The exact monomial extraction changes the production fixture from a degree-64 modular target with
+a modular `x` leaf to a degree-63 cofactor. Suitable-prime factor counts are now `8`, `7`, and `6`
+for `p=7,13,17`; the bounded large-prime count is `19`. Prime 11 is rejected before mapping because
+the exact cofactor's constant is zero modulo 11. The selected `p=17` modular leaf degrees are
+`[1,2,10,10,10,30]`; the exact `x` is returned separately.
+
+Six-process guard measurements against the accepted dense-tree binary are:
+
+| Case | Current | Previous | Paired change | Current S/F |
+|---|---:|---:|---:|---:|
+| degree 63 | `7.070403 ms` | `12.091458 ms` | `-41.345%` | `2.335` |
+| degree 64 | `5.080938 ms` | `6.401443 ms` | `-20.786%` | `1.960` |
+| degree 65 | `5.879263 ms` | `18.092294 ms` | `-67.534%` | `1.925` |
+| high-height degree 33 | `5.044321 ms` | `5.685261 ms` | `-11.399%` | `3.590` |
+| generated factor, 2 variables | `5.756274 ms` | `6.094812 ms` | `-5.272%` | `0.584` |
+| generated factor, 3 variables | `7.527340 ms` | `8.240099 ms` | `-8.997%` | `1.786` |
+| PolyBench #105 | `31.412176 ms` | `31.839948 ms` | `-1.237%` | `1.082` |
+| PolyBench #178 | `41.619279 ms` | `41.809230 ms` | `-0.537%` | `2.966` |
+| degree-64 input product | `0.0059515 ms` | `0.0060130 ms` | `-0.860%` | `1.086` |
+| degree-64 GCD, 12 blocks | `0.4172350 ms` | `0.4130085 ms` | `+1.032775%` | `1.183` |
+
+The standalone GCD slowdown is reproducible but the factor-only changes do not enter that execution
+path; retain it as a whole-program-LTO layout guard and revisit it during the one-variable GCD
+phase rather than attributing it to DDF.
+
+A fresh 500-call LBR profile of the combined binary measures `5.025657 ms` versus FLINT
+`2.586184 ms`. Normalized sampled cycles are approximately:
+
+| Stage | Symbolica | FLINT |
+|---|---:|---:|
+| complete factorization | `22.10 M` | `11.25 M` |
+| Hensel product tree | `9.28 M` | `5.86 M` |
+| modular prime screening | `8.29 M` | included below |
+| dense classical DDF | `8.08 M` | `1.77 M` |
+| DDF classical monic remainder | `4.03 M` | — |
+| DDF dense convolution | `2.56 M` | — |
+| DDF univariate GCD boundaries | `1.20 M` | — |
+| selected equal-degree factorization | `4.47 M` | about `2.72 M` |
+
+The next experiment is therefore a private cached reverse-modulus inverse with retained truncated
+dense convolution buffers inside `DenseZpDistinctDegreeContext`. It must keep the classical
+remainder for reduction after a modulus shrink, cover all `u32` accumulation regimes, and must not
+add a method to `Ring`. If this wins, Kaltofen-Shoup/BSGS DDF is still expected to be necessary:
+FLINT's algorithmic iteration count remains much lower.
+
+Current artifact provenance:
+
+| Artifact | SHA-256 |
+|---|---|
+| `/tmp/flint-comparison-dense-ddf-monomial-lto` | `0d000c3fcfebd00c089e7670ce33b0609a59027f43b25827f7d44c42b3d60e2b` |
+| `/tmp/flint-comparison-dense-ddf-monomial-lto.d` | `110205916d29fe6bbf11e8c89daedadc1288c9c27e9dce256739ee4c3b62a9ba` |
+| `/tmp/flint-comparison-dense-ddf-monomial-lto-build.jsonl` | `b70c90903f005bfb13245682f5ebf92777dfdcba53662ed5c5690cea92e9741c` |
+| `/tmp/monomial-d64-sha256.txt` | `5c6898e41a596ba3009aa66428a618424ef3e9b894de368b7d501e58e70733e9` |
+| `/tmp/monomial-generated-guards-sha256.txt` | `dcf57aeef087649a072e60be94da5bbc7f5f5886a9de38751a0a8a4ff857cc7f` |
+| `/tmp/monomial-polybench-sha256.txt` | `05faf0c6720b35415c39a114b96d8bbb19bd02a80edabe7bd7c615b1d3ce52eb` |
+| `/tmp/monomial-product-gcd-sha256.txt` | `90e17519c0117beac57c77812136930b1a4f8e4ec2fa7849f11bd41d048c9838` |
+| `/tmp/monomial-gcd64-sha256.txt` | `83ec184b510692a69b39fea2af1910fdbd4968bbd6e7260f40b5e9d335ecd61d` |
+| `/tmp/profile-factor-dense-ddf-monomial-d64-lbr.perf.data` | `cc7bc63a4f632fb24b44b984267bd615acc38189c80b7373bec971a91a94ba7e` |
+| `/tmp/profile-factor-dense-ddf-monomial-d64.children-symbols.txt` | `b6945903a2a739f479da95beeed1763c280ca1cbebd7050ac86c52f721201954` |
+
 ## Resume here
 
 The accepted product and factor candidates are integrated on `dev` through merge `3184631`. Do not
