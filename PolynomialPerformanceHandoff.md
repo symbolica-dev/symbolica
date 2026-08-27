@@ -880,9 +880,108 @@ observed Symbolica guard movement was +2.1% on the generated three-variable fact
 Raw files are `/tmp/zp-collision-bench-v1-p{65000011,500000003}-*-block-*.csv` and
 `/tmp/zp-collision-bench-v1-{d33h,d63,d65,factor2,factor3,pb105,pb178,gf17_*,gf64_*}-*-block-*.csv`;
 degree 64 is `/tmp/zp-collision-v1-d64-*-block-*.csv`.
-The next Hensel experiment is root-only quadratic lifting for five through eight modular factors:
-keep the accepted recursive quadratic policy for at most four factors, permit one quadratic lift at
-the root for five through eight, and force descendants back to linear lifting.
+
+### Rejected root-only quadratic Hensel experiment
+
+The experiment retained recursive quadratic lifting for at most four modular factors, permitted
+one quadratic lift at the root for five through eight factors, and forced all descendants back to
+linear lifting. Routing and reconstruction tests passed under the default and `no_gmp` feature
+sets, including exact call-count checks at the four-, five-, eight-, and nine-factor boundaries.
+It nevertheless made the seven-factor degree-64 fixture consistently slower.
+
+Twelve alternating 50-sample process pairs measured:
+
+| Path | Symbolica | FLINT | S/F |
+|---|---:|---:|---:|
+| accepted control | `13.852066 ms` | `2.568130 ms` | `5.401450` |
+| root-only quadratic lift | `14.657123 ms` | `2.566990 ms` | `5.707710` |
+
+Symbolica regressed by `0.805057 ms`, or 5.81%, while FLINT was stable. The candidate process
+medians occupied the narrow range `14.596027..14.785413 ms`. The median of each process's minimum
+also regressed by 9.65%, so the result is not explained by the fixture's occasional fast mode.
+
+A separate 500-sample LBR profile measured `14.741254 ms` versus `13.887101 ms`. Immediate-child
+accounting attributes essentially the full loss to the direct lift at the root:
+
+| Stage | accepted control | root-only candidate | change |
+|---|---:|---:|---:|
+| top multi-factor Hensel subtree | `8.9106 ms` | `9.7900 ms` | `+0.8793 ms` |
+| recursive multi-factor child | `7.4456 ms` | `7.4737 ms` | `+0.0281 ms` |
+| direct root Hensel lift | `1.4632 ms` | `2.3125 ms` | `+0.8493 ms` |
+| modular-prime screening | `3.6135 ms` | `3.5622 ms` | `-0.0512 ms` |
+| retained EDF | `1.1371 ms` | `1.2020 ms` | `+0.0650 ms` |
+
+The candidate direct root lift spends about `1.6428 ms` in
+`IntegerModularUnivariateContext::quot_rem`, including about `1.1353 ms` in `symmetric_mod` and
+`0.8739 ms` in `Integer::rem`; these rows are nested and must not be added. The corresponding
+finite-field quotient in the control costs about `0.2332 ms`. Candidate multiplication and
+subtraction became cheaper, but not enough to offset arbitrary-modulus quotient/reduction. Reject
+this policy: a quadratic root lift is only useful after its integer modular quotient path is made
+substantially cheaper.
+
+| Artifact | SHA-256 |
+|---|---|
+| `/tmp/flint-comparison-factor-root-only-v1-screen` | `d4f12840b868dfb50b6a73151370dbc93369d6bb2bfd03c492e8567d6e485863` |
+| `/tmp/flint-comparison-factor-root-only-v1-screen.d` | `6c6a050ca594f945542bafd61069ff932c58d01a285ed15edd735ec909ed623b` |
+| `/tmp/flint-comparison-factor-root-only-v1-build.jsonl` | `728a0d6cbdfc7cd0db97669a4026420b87db97f4b189fd9c09189a1889f47477` |
+| `/tmp/profile-factor-root-only-v1-d64-candidate-lbr.perf.data` | `f1e496da7aabfb933af640252886ed10f098b1478102b44d1f561598d9f921dc` |
+| `/tmp/profile-factor-root-only-v1-d64-candidate-lbr.symbols.txt` | `3f6790d7f913af0353b07885660a037a53f43140b2e2d18d3e211323e9e47af0` |
+| `/tmp/profile-factor-root-only-v1-d64-candidate-lbr.children-symbols.txt` | `e4eeb6270859727222437fe34623eb256bc70a048a64abd4267e251279bfe603` |
+| `/tmp/profile-factor-root-only-v1-d64-candidate.csv` | `130c04c7428e1d7839549ff53869094692edd3c04bd7eeca85f92dfb69c428ee` |
+| `/tmp/profile-factor-root-only-v1-d64-control-lbr.perf.data` | `345dc15bb4a6e15892f6171080e2708fdc4969a05e0e33b0d2386483044046a9` |
+| `/tmp/profile-factor-root-only-v1-d64-control-lbr.symbols.txt` | `74d0487bc6059aec0f0c91140bb15e4d89c8499fe9939cdb11d273eae940b31c` |
+| `/tmp/profile-factor-root-only-v1-d64-control-lbr.children-symbols.txt` | `12cc8cea50313560a0465c239c81133b909a2824e3646e656dc8c5e29688557d` |
+| `/tmp/profile-factor-root-only-v1-d64-control.csv` | `e92636bcba89d46e6b91a071b635effadaf779c1d3cc9f5836dcfa4449fe3f71` |
+
+The sorted SHA-256 manifests for the twelve candidate blocks, twelve control blocks, and all 24
+blocks are respectively `a912da263bbea52ca65533e9fb778133734cde6ae6a48680fff1460b778e0796`,
+`3f77e40d08d85e2e4548889583f5e31da0f9829be660eba455e1eef6911933f4`, and
+`ad5d372058a85d2e25c88f6dfaccee8ea2a04fe45f8e3fd9b9cf8eddecb7efeb`. Raw files are
+`/tmp/factor-root-only-v1-d64-{candidate,control}-block-*.csv`. The rejected source remains only in
+`/tmp/symbolica-factor-root-only`; it was not integrated.
+
+### Exact-subproblem modulus audit
+
+`hensel_lift_with_strategy` returns `Ok` only after the integer residual is literally zero, so an
+`Ok` split of an already exact target certifies exact integer child products. Those children may
+use independently computed coefficient bounds. A child-specific modulus cannot, however, be
+introduced by merely changing the recursive `max_p`: the existing routine returns monic modular
+leaves that top-level recombination interprets modulo the global modulus. A leaf lifted only modulo
+the smaller child modulus is not generally a valid representative modulo the global modulus, and
+mixed exact nonmonic children violate the same recombination assumptions.
+
+The safe implementation is an exact-subproblem solver. It recursively treats `Ok` children as
+exact targets with local bounds; when a node returns `Err`, it completes that target's descendant
+lifts at one local modulus and recombines them locally against the exact target before returning
+exact integer factors. The existing LLL/subset recombination tail should first be extracted into a
+helper that explicitly consumes one exact target and one consistently lifted modular-factor set.
+Calling `factor_reconstruct` again on every exact child is correct but needlessly repeats prime
+selection, DDF, and EDF.
+
+For the degree-64 fixture at `p=17`, the current Gelfond bounds are:
+
+| Exact target | bound bits | base-17 digits |
+|---|---:|---:|
+| full degree 64 | `312` | `77` |
+| root children, degrees 4 and 60 | `13`, `300` | `4`, `74` |
+| lucky right children, degrees 20 and 40 | `91`, `215` | `23`, `53` |
+
+The modular leaves have degrees `[1,1,2 | 10,10,10,30]`, so the root `4|60` split is always exact.
+Only one of the three equal-degree-factor orderings pairs the two degree-10 leaves belonging to the
+integer degree-20 factor. Successful exact splits already stop as soon as the residual is zero, so
+their lower ceiling alone saves no lift rounds. In the ordinary unlucky ordering, the failed right
+split only falls from 77 to 74 digits. Consequently the safe local-modulus experiment has modest
+median-performance confidence; its largest saving occurs in the already lucky ordering, where a
+failed descendant inside the exact degree-20 target can fall from 77 to 23 digits.
+
+The larger strategic target is coherent simultaneous linear Hensel lifting over a product tree. It
+would update all leaves and product nodes for each p-adic digit rather than attempting fake binary
+integer factorizations at unlucky intermediate partitions. The observed fast/slow spread is about
+5.3 ms, so this has a materially larger ceiling than local bounds, at the cost of a substantially
+larger implementation. Tree sorting alone is unjustified because the three degree-10 modular
+factors are indistinguishable over `GF(17)`. A stabilization/exact-division shortcut also needs
+rational reconstruction or leading-coefficient allocation: nonmonic lifting scales both children
+to the full target leading coefficient, so the small primitive factor does not simply stabilize.
 
 A private dense univariate remainder context remains a later option. It would cache one monic
 modulus, retain dense coefficient/index buffers through binary exponentiation, use the existing
@@ -1032,29 +1131,37 @@ comments that justify file organization by contrasting it with designs not prese
 
 ## Ordered next actions
 
-1. Change `DenseZpMul`'s direct-`u64` admission proof to bound the maximum number of products in one
-   output coefficient by `min(left_len, right_len)`, not the total pair count. Prove the bound for
-   the kernel's unique increasing indices and add an unbalanced 129-by-65 max-residue differential
-   test that exercises the newly admitted range.
-2. Add a guarded `500_000_003` factor-prime experiment for degree 64. The fixture has seven modular
-   factors at this prime and needs 11 linear-lift digits, versus seven factors and 77 digits at
-   `p=17`. Update the selector's direct-prime bound consistently with the new per-output proof;
-   preserve the current first-suitable semantics and every recombination guard.
-3. Build and measure that prime candidate against integrated `4f3b591`: twelve balanced processes
-   for degree 64, then degrees 33/63/65, 1-/2-/3-variable factor rows, and PolyBench #105/#178. A
-   larger prime makes DDF exponentiation more expensive, so accept it only on whole-factor timing,
-   not the lift-work estimate alone.
-4. Profile the winning degree-64 prime choice. If the 500M point loses, test a root-only quadratic
-   lift for the seven-factor tree before writing the larger dense DDF remainder context. The current
-   post-screening profile is approximately 62% Hensel, 28% screening, and 8% EDF.
+1. Test exact-subproblem Hensel recursion with a local coefficient-bound modulus. Preserve the
+   `Ok`/`Err` result of each binary lift instead of immediately discarding it. Only an `Ok` split
+   certifies exact integer child products and permits child-specific bounds. Each such child must be
+   recursively reconstructed and returned as exact integer factors at its local modulus; modular
+   leaves lifted only to a child modulus cannot be handed back to the existing global-modulus
+   recombination. Retain the inherited modulus after an `Err` split.
+2. Instrument the local-modulus candidate with each subtree's degree, coefficient bound, required
+   base-17 digits, exact-split status, and lift count. Verify the `77 -> 4/74` exact root bounds and,
+   when the EDF ordering is lucky, the `23/53` right-child bounds. Do not count a lower ceiling at a
+   split that already terminates on a zero residual as saved lift work.
+3. Differential-test exact reconstruction, unlucky splits, irreducible exact child products, local
+   `Err` termination, and bounds just below/at the required modulus. Then measure twelve alternating
+   degree-64 processes against integrated `b060bda`; accept only a whole-factor improvement and use
+   degrees 33/63/65 plus the generated and PolyBench factor rows as guards.
+4. If local subtree bounds do not win materially, design coherent simultaneous linear Hensel
+   lifting over a product tree. Reuse products and residual data across leaves at each p-adic digit
+   so an unlucky intermediate partition does not trigger a full fake binary factorization. Treat
+   early exact-side reconstruction as a later rational-reconstruction/leading-coefficient problem,
+   not a naive stabilization or exact-division check.
 5. For the high-height degree-33 path, the smallest measured follow-up is to defer coefficient
    reduction inside `IntegerModularUnivariateContext::quot_rem`: leave non-pivot remainder cells
    unreduced during fused subtractions and symmetrically reduce only pivots and the final
    remainder. In the v3 profile quotient/remainder is about 52% of Hensel, and about 70% of that
    subtree is `symmetric_mod`. Differential-test this at small and large composite prime powers
    before benchmarking; do not infer the full profile ceiling as an expected gain.
-6. Keep the one-variable product path as a regression guard: its target factor-fixture product is
+6. Keep the private dense DDF remainder context as a later option. Bounded prime screening reduced
+   DDF's current degree-64 ceiling to about 27.5%, and both the 500M prime and root-only quadratic
+   experiments show that moving work between modular factorization and Hensel lifting is not itself
+   a win.
+7. Keep the one-variable product path as a regression guard: its target factor-fixture product is
    already within about 7% of FLINT. Return to dense univariate GCD only after the degree-64 factor
    prime/Hensel decision; current degree-64 GCD is about 19% slower than FLINT.
-7. Freeze and hash every accepted full-LTO binary and profile, integrate only measured winners with
+8. Freeze and hash every accepted full-LTO binary and profile, integrate only measured winners with
    Ben Ruijl's identity, and keep this file current after every accepted or rejected experiment.
