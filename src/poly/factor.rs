@@ -4582,7 +4582,7 @@ impl<E: PositiveExponent> MultivariatePolynomial<IntegerRing, E, LexOrder> {
 
         let bound = self.coefficient_bound();
 
-        // A large machine prime reduces the number of full correction rounds in
+        // A wider machine prime reduces the number of full correction rounds in
         // the current linear p-adic lift. Restrict it to low-degree, high-height
         // images where that saving clearly outweighs the more expensive finite-
         // field factorization.
@@ -4629,13 +4629,18 @@ impl<E: PositiveExponent> MultivariatePolynomial<IntegerRing, E, LexOrder> {
                 }
             }
 
-            let mut large_primes =
-                PrimeIteratorU64::new(u32::get_large_prime().saturating_sub(1) as u64);
-            let large_candidate = loop {
-                let Some(p) = large_primes.next() else {
+            // Keep dense products of two degree-d images in the u64 accumulator kernel. The
+            // bound p * (d + 1) <= u32::MAX proves both that all (d + 1)^2 products fit in u64
+            // and that one Montgomery reduction is sufficient for each output coefficient.
+            let maximum_direct_prime = u64::from(u32::MAX) / (u64::from(d) + 1);
+            // This retains 26 bits per lifting digit and leaves room to skip unsuitable primes at
+            // degree 64 without crossing the direct-reduction bound.
+            let mut direct_primes = PrimeIteratorU64::new(65_000_000);
+            let direct_candidate = loop {
+                let Some(p) = direct_primes.next() else {
                     break None;
                 };
-                if p > u32::MAX as u64 {
+                if p > maximum_direct_prime {
                     break None;
                 }
                 if let Some(candidate) = self.factor_univariate_mod_prime(var, p as u32) {
@@ -4643,7 +4648,7 @@ impl<E: PositiveExponent> MultivariatePolynomial<IntegerRing, E, LexOrder> {
                 }
             };
 
-            if let Some(candidate) = large_candidate {
+            if let Some(candidate) = direct_candidate {
                 if candidate.1.len() == 1 {
                     return vec![self.clone()];
                 }
@@ -4663,7 +4668,7 @@ impl<E: PositiveExponent> MultivariatePolynomial<IntegerRing, E, LexOrder> {
 
                 if !crosses_recombination_boundary && (same_or_fewer_factors || one_extra_factor) {
                     debug!(
-                        "Selected a large modular prime: estimated linear Hensel work {best_work} -> {candidate_work}"
+                        "Selected a dense-u64 modular prime: estimated linear Hensel work {best_work} -> {candidate_work}"
                     );
                     best_factorization = Some(candidate);
                 }
