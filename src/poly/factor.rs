@@ -62,10 +62,38 @@ struct DistinctDegreeFactorization<P> {
     factor_count: usize,
 }
 
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum DenseZpAccumulationMode {
+    DirectMontgomeryReduction,
+    NativeRemainder,
+    WideRemainder,
+}
+
+/// Reusable buffers for dense products and reciprocal reduction over `Zp`.
+struct DenseZpMulModWorkspace {
+    u64_accumulators: Vec<u64>,
+    u128_accumulators: Vec<u128>,
+    reverse_dividend: Vec<FiniteFieldElement<u32>>,
+    reverse_quotient: Vec<FiniteFieldElement<u32>>,
+    low_product: Vec<FiniteFieldElement<u32>>,
+}
+
+impl DenseZpMulModWorkspace {
+    fn new(maximum_degree: usize) -> Self {
+        Self {
+            u64_accumulators: Vec::with_capacity(2 * maximum_degree - 1),
+            u128_accumulators: Vec::new(),
+            reverse_dividend: Vec::with_capacity(maximum_degree),
+            reverse_quotient: Vec::with_capacity(maximum_degree),
+            low_product: Vec::with_capacity(maximum_degree),
+        }
+    }
+}
+
 /// Dense arithmetic for distinct-degree factorization over a 32-bit prime field.
 ///
 /// The integer factorizer uses this context while screening univariate modular
-/// images. It retains the current monic divisor, degree indices, and
+/// images. It retains the current monic divisor, its reversed reciprocal, and
 /// multiplication workspaces while repeatedly computing Frobenius powers. A
 /// sparse polynomial is reconstructed only for the GCD that identifies the
 /// next distinct-degree block.
@@ -74,9 +102,10 @@ struct DenseZpDistinctDegreeContext<'a, E: PositiveExponent> {
     variable: usize,
     template: &'a MultivariatePolynomial<Zp, E, LexOrder>,
     modulus: Vec<FiniteFieldElement<u32>>,
-    dense_indices: Vec<u32>,
+    reverse_modulus_inverse: Vec<FiniteFieldElement<u32>>,
     power: Vec<FiniteFieldElement<u32>>,
     multiplication_output: Vec<FiniteFieldElement<u32>>,
+    multiplication_workspace: DenseZpMulModWorkspace,
 }
 
 impl<'a, E: PositiveExponent> DenseZpDistinctDegreeContext<'a, E> {
@@ -124,15 +153,18 @@ impl<'a, E: PositiveExponent> DenseZpDistinctDegreeContext<'a, E> {
                 .is_some_and(|coefficient| field.is_one(coefficient))
         );
 
-        Some(Self {
+        let mut context = Self {
             field,
             variable,
             template: polynomial,
             modulus,
-            dense_indices: (0..degree as u32).collect(),
+            reverse_modulus_inverse: Vec::with_capacity(degree),
             power: Vec::with_capacity(degree),
             multiplication_output: Vec::with_capacity(2 * degree - 1),
-        })
+            multiplication_workspace: DenseZpMulModWorkspace::new(degree),
+        };
+        context.refresh_reverse_modulus_inverse();
+        Some(context)
     }
 
     /// Convert a univariate polynomial to ascending degree-indexed
@@ -172,6 +204,28 @@ impl<'a, E: PositiveExponent> DenseZpDistinctDegreeContext<'a, E> {
                 .last()
                 .is_some_and(|coefficient| self.field.is_one(coefficient))
         );
+        self.refresh_reverse_modulus_inverse();
+    }
+
+    /// Cache the reciprocal of the reversed monic modulus through the degree
+    /// needed to recover a quotient from a product of reduced residues.
+    fn refresh_reverse_modulus_inverse(&mut self) {
+        let modulus_degree = self.modulus.len() - 1;
+        self.reverse_modulus_inverse
+            .resize(modulus_degree, self.field.zero());
+        self.reverse_modulus_inverse[0] = self.field.one();
+        for degree in 1..modulus_degree {
+            let (previous, coefficient) = self.reverse_modulus_inverse.split_at_mut(degree);
+            let mut value = self.field.zero();
+            for reverse_degree in 1..=degree {
+                self.field.sub_mul_assign(
+                    &mut value,
+                    &self.modulus[modulus_degree - reverse_degree],
+                    &previous[degree - reverse_degree],
+                );
+            }
+            coefficient[0] = value;
+        }
     }
 
     /// Remove trailing zero cells from a dense coefficient vector.
@@ -217,59 +271,353 @@ impl<'a, E: PositiveExponent> DenseZpDistinctDegreeContext<'a, E> {
         Self::trim(field, dividend);
     }
 
-    /// Multiply two dense polynomials and reduce the result modulo `modulus`.
-    ///
-    /// The finite-field dense kernel accumulates each convolution coefficient
-    /// before reducing it. The local quadratic loop is retained as a semantic
-    /// fallback when the coefficient-domain kernel declines the request.
+    /// Select an exact accumulator and reduction for a truncated convolution.
+    fn accumulation_mode(
+        field: &Zp,
+        left_len: usize,
+        right_len: usize,
+        output_len: usize,
+    ) -> DenseZpAccumulationMode {
+        let collision_count = left_len.min(right_len).min(output_len);
+        let maximum_product = u128::from(field.get_prime() - 1).pow(2);
+        let maximum_coefficient = maximum_product
+            .checked_mul(collision_count as u128)
+            .expect("dense finite-field convolution bound overflow");
+        if maximum_coefficient > u64::MAX as u128 {
+            DenseZpAccumulationMode::WideRemainder
+        } else if maximum_coefficient < u128::from(field.get_prime()) << u32::BITS {
+            DenseZpAccumulationMode::DirectMontgomeryReduction
+        } else {
+            DenseZpAccumulationMode::NativeRemainder
+        }
+    }
+
+    /// Convert an exact `u64` sum of raw Montgomery products to one field
+    /// coefficient.
+    #[inline]
+    fn reduce_u64_accumulator(
+        field: &Zp,
+        accumulator: u64,
+        reduce_directly: bool,
+    ) -> FiniteFieldElement<u32> {
+        let raw_one = FiniteFieldElement::from_inner(1);
+        if reduce_directly {
+            debug_assert!(u128::from(accumulator) < u128::from(field.get_prime()) << u32::BITS);
+            let mut coefficient =
+                field.mul(FiniteFieldElement::from_inner(accumulator as u32), raw_one);
+            let high = (accumulator >> u32::BITS) as u32;
+            debug_assert!(high < field.get_prime());
+            if high != 0 {
+                field.add_assign(&mut coefficient, FiniteFieldElement::from_inner(high));
+            }
+            coefficient
+        } else {
+            let residue = (accumulator % u64::from(field.get_prime())) as u32;
+            field.mul(FiniteFieldElement::from_inner(residue), raw_one)
+        }
+    }
+
+    /// Convert an exact `u128` sum of raw Montgomery products to one field
+    /// coefficient.
+    #[inline]
+    fn reduce_u128_accumulator(field: &Zp, accumulator: u128) -> FiniteFieldElement<u32> {
+        let residue = (accumulator % u128::from(field.get_prime())) as u32;
+        field.mul(
+            FiniteFieldElement::from_inner(residue),
+            FiniteFieldElement::from_inner(1),
+        )
+    }
+
+    /// Compute the requested low coefficients of a dense product, reducing
+    /// each exact convolution sum once into Montgomery representation.
+    fn multiply_low_into(
+        field: &Zp,
+        left: &[FiniteFieldElement<u32>],
+        right: &[FiniteFieldElement<u32>],
+        output_len: usize,
+        output: &mut Vec<FiniteFieldElement<u32>>,
+        u64_accumulators: &mut Vec<u64>,
+        u128_accumulators: &mut Vec<u128>,
+    ) {
+        if left.is_empty() || right.is_empty() || output_len == 0 {
+            output.clear();
+            return;
+        }
+        debug_assert!(output_len <= left.len() + right.len() - 1);
+        output.resize(output_len, field.zero());
+
+        let mode = Self::accumulation_mode(field, left.len(), right.len(), output_len);
+        match mode {
+            DenseZpAccumulationMode::DirectMontgomeryReduction
+            | DenseZpAccumulationMode::NativeRemainder => {
+                u64_accumulators.resize(output_len, 0);
+                u64_accumulators.fill(0);
+                for (left_degree, left_coefficient) in left.iter().enumerate() {
+                    if left_degree >= output_len {
+                        break;
+                    }
+                    let retained_right_len = right.len().min(output_len - left_degree);
+                    for (right_degree, right_coefficient) in
+                        right[..retained_right_len].iter().enumerate()
+                    {
+                        let product = u64::from(*left_coefficient.inner())
+                            * u64::from(*right_coefficient.inner());
+                        // `right_degree` is truncated so this index is below `output_len`.
+                        unsafe {
+                            *u64_accumulators.get_unchecked_mut(left_degree + right_degree) +=
+                                product;
+                        }
+                    }
+                }
+                let reduce_directly =
+                    matches!(mode, DenseZpAccumulationMode::DirectMontgomeryReduction);
+                for (coefficient, &accumulator) in output.iter_mut().zip(u64_accumulators.iter()) {
+                    *coefficient =
+                        Self::reduce_u64_accumulator(field, accumulator, reduce_directly);
+                }
+            }
+            DenseZpAccumulationMode::WideRemainder => {
+                u128_accumulators.resize(output_len, 0);
+                u128_accumulators.fill(0);
+                for (left_degree, left_coefficient) in left.iter().enumerate() {
+                    if left_degree >= output_len {
+                        break;
+                    }
+                    let retained_right_len = right.len().min(output_len - left_degree);
+                    for (right_degree, right_coefficient) in
+                        right[..retained_right_len].iter().enumerate()
+                    {
+                        let product = u128::from(*left_coefficient.inner())
+                            * u128::from(*right_coefficient.inner());
+                        // `right_degree` is truncated so this index is below `output_len`.
+                        unsafe {
+                            *u128_accumulators.get_unchecked_mut(left_degree + right_degree) +=
+                                product;
+                        }
+                    }
+                }
+                for (coefficient, &accumulator) in output.iter_mut().zip(u128_accumulators.iter()) {
+                    *coefficient = Self::reduce_u128_accumulator(field, accumulator);
+                }
+            }
+        }
+    }
+
+    /// Compute the requested low coefficients of a dense square, accumulating
+    /// each off-diagonal product twice.
+    fn square_low_into(
+        field: &Zp,
+        value: &[FiniteFieldElement<u32>],
+        output_len: usize,
+        output: &mut Vec<FiniteFieldElement<u32>>,
+        u64_accumulators: &mut Vec<u64>,
+        u128_accumulators: &mut Vec<u128>,
+    ) {
+        if value.is_empty() || output_len == 0 {
+            output.clear();
+            return;
+        }
+        debug_assert!(output_len <= 2 * value.len() - 1);
+        output.resize(output_len, field.zero());
+
+        let mode = Self::accumulation_mode(field, value.len(), value.len(), output_len);
+        match mode {
+            DenseZpAccumulationMode::DirectMontgomeryReduction
+            | DenseZpAccumulationMode::NativeRemainder => {
+                u64_accumulators.resize(output_len, 0);
+                u64_accumulators.fill(0);
+                for (left_degree, left_coefficient) in value.iter().enumerate() {
+                    if left_degree >= output_len {
+                        break;
+                    }
+                    if 2 * left_degree < output_len {
+                        let square = u64::from(*left_coefficient.inner()).pow(2);
+                        // The diagonal index was checked against `output_len` above.
+                        unsafe {
+                            *u64_accumulators.get_unchecked_mut(2 * left_degree) += square;
+                        }
+                    }
+                    let retained_right_len = value.len().min(output_len - left_degree);
+                    if left_degree + 1 < retained_right_len {
+                        for (right_degree, right_coefficient) in value
+                            [left_degree + 1..retained_right_len]
+                            .iter()
+                            .enumerate()
+                        {
+                            let product = 2
+                                * u64::from(*left_coefficient.inner())
+                                * u64::from(*right_coefficient.inner());
+                            let degree = 2 * left_degree + 1 + right_degree;
+                            // The right slice is truncated so this index is below `output_len`.
+                            unsafe {
+                                *u64_accumulators.get_unchecked_mut(degree) += product;
+                            }
+                        }
+                    }
+                }
+                let reduce_directly =
+                    matches!(mode, DenseZpAccumulationMode::DirectMontgomeryReduction);
+                for (coefficient, &accumulator) in output.iter_mut().zip(u64_accumulators.iter()) {
+                    *coefficient =
+                        Self::reduce_u64_accumulator(field, accumulator, reduce_directly);
+                }
+            }
+            DenseZpAccumulationMode::WideRemainder => {
+                u128_accumulators.resize(output_len, 0);
+                u128_accumulators.fill(0);
+                for (left_degree, left_coefficient) in value.iter().enumerate() {
+                    if left_degree >= output_len {
+                        break;
+                    }
+                    if 2 * left_degree < output_len {
+                        let square = u128::from(*left_coefficient.inner()).pow(2);
+                        // The diagonal index was checked against `output_len` above.
+                        unsafe {
+                            *u128_accumulators.get_unchecked_mut(2 * left_degree) += square;
+                        }
+                    }
+                    let retained_right_len = value.len().min(output_len - left_degree);
+                    if left_degree + 1 < retained_right_len {
+                        for (right_degree, right_coefficient) in value
+                            [left_degree + 1..retained_right_len]
+                            .iter()
+                            .enumerate()
+                        {
+                            let product = 2
+                                * u128::from(*left_coefficient.inner())
+                                * u128::from(*right_coefficient.inner());
+                            let degree = 2 * left_degree + 1 + right_degree;
+                            // The right slice is truncated so this index is below `output_len`.
+                            unsafe {
+                                *u128_accumulators.get_unchecked_mut(degree) += product;
+                            }
+                        }
+                    }
+                }
+                for (coefficient, &accumulator) in output.iter_mut().zip(u128_accumulators.iter()) {
+                    *coefficient = Self::reduce_u128_accumulator(field, accumulator);
+                }
+            }
+        }
+    }
+
+    /// Reduce a product of two current residues with the cached reversed
+    /// modulus reciprocal.
+    fn reduce_product(
+        field: &Zp,
+        modulus: &[FiniteFieldElement<u32>],
+        reverse_modulus_inverse: &[FiniteFieldElement<u32>],
+        product: &mut Vec<FiniteFieldElement<u32>>,
+        workspace: &mut DenseZpMulModWorkspace,
+    ) {
+        Self::trim(field, product);
+        let modulus_degree = modulus.len() - 1;
+        if product.len() <= modulus_degree {
+            return;
+        }
+        debug_assert!(product.len() <= 2 * modulus_degree - 1);
+        debug_assert_eq!(reverse_modulus_inverse.len(), modulus_degree);
+
+        let quotient_len = product.len() - modulus_degree;
+        workspace
+            .reverse_dividend
+            .resize(quotient_len, field.zero());
+        for (coefficient, product_coefficient) in workspace
+            .reverse_dividend
+            .iter_mut()
+            .zip(product[modulus_degree..].iter().rev())
+        {
+            *coefficient = *product_coefficient;
+        }
+        Self::multiply_low_into(
+            field,
+            &workspace.reverse_dividend,
+            reverse_modulus_inverse,
+            quotient_len,
+            &mut workspace.reverse_quotient,
+            &mut workspace.u64_accumulators,
+            &mut workspace.u128_accumulators,
+        );
+        workspace.reverse_quotient.reverse();
+        Self::multiply_low_into(
+            field,
+            &modulus[..modulus_degree],
+            &workspace.reverse_quotient,
+            modulus_degree,
+            &mut workspace.low_product,
+            &mut workspace.u64_accumulators,
+            &mut workspace.u128_accumulators,
+        );
+
+        for (coefficient, product_coefficient) in product[..modulus_degree]
+            .iter_mut()
+            .zip(&workspace.low_product)
+        {
+            field.sub_assign(coefficient, product_coefficient);
+        }
+        product.truncate(modulus_degree);
+        Self::trim(field, product);
+    }
+
+    /// Multiply two reduced dense residues and reduce their product modulo the
+    /// cached monic modulus.
     fn multiply_mod_into(
         field: &Zp,
-        dense_indices: &[u32],
         modulus: &[FiniteFieldElement<u32>],
+        reverse_modulus_inverse: &[FiniteFieldElement<u32>],
         left: &[FiniteFieldElement<u32>],
         right: &[FiniteFieldElement<u32>],
         output: &mut Vec<FiniteFieldElement<u32>>,
+        workspace: &mut DenseZpMulModWorkspace,
     ) {
         if left.is_empty() || right.is_empty() {
             output.clear();
             return;
         }
-
         let output_len = left
             .len()
             .checked_add(right.len())
             .and_then(|length| length.checked_sub(1))
             .expect("dense finite-field product length overflow");
-        debug_assert!(left.len() <= dense_indices.len());
-        debug_assert!(right.len() <= dense_indices.len());
-        output.resize(output_len, field.zero());
-        output.fill(field.zero());
+        debug_assert!(left.len() < modulus.len());
+        debug_assert!(right.len() < modulus.len());
+        Self::multiply_low_into(
+            field,
+            left,
+            right,
+            output_len,
+            output,
+            &mut workspace.u64_accumulators,
+            &mut workspace.u128_accumulators,
+        );
+        Self::reduce_product(field, modulus, reverse_modulus_inverse, output, workspace);
+    }
 
-        if let Some(coefficients) = field.kernels().polynomial().and_then(|kernels| {
-            kernels.try_dense_mul(DensePolynomialMulRequest {
-                output_len,
-                left_coefficients: left,
-                left_indices: &dense_indices[..left.len()],
-                right_coefficients: right,
-                right_indices: &dense_indices[..right.len()],
-            })
-        }) {
-            for (degree, coefficient) in coefficients {
-                output[degree as usize] = coefficient;
-            }
-        } else {
-            for (left_degree, left_coefficient) in left.iter().enumerate() {
-                for (right_degree, right_coefficient) in right.iter().enumerate() {
-                    field.add_mul_assign(
-                        &mut output[left_degree + right_degree],
-                        left_coefficient,
-                        right_coefficient,
-                    );
-                }
-            }
+    /// Square a reduced dense residue and reduce the result modulo the cached
+    /// monic modulus.
+    fn square_mod_into(
+        field: &Zp,
+        modulus: &[FiniteFieldElement<u32>],
+        reverse_modulus_inverse: &[FiniteFieldElement<u32>],
+        value: &[FiniteFieldElement<u32>],
+        output: &mut Vec<FiniteFieldElement<u32>>,
+        workspace: &mut DenseZpMulModWorkspace,
+    ) {
+        if value.is_empty() {
+            output.clear();
+            return;
         }
-
-        Self::remainder_monic(field, output, modulus);
+        let output_len = 2 * value.len() - 1;
+        debug_assert!(value.len() < modulus.len());
+        Self::square_low_into(
+            field,
+            value,
+            output_len,
+            output,
+            &mut workspace.u64_accumulators,
+            &mut workspace.u128_accumulators,
+        );
+        Self::reduce_product(field, modulus, reverse_modulus_inverse, output, workspace);
     }
 
     /// Replace `value` by its `p`th power modulo the current divisor.
@@ -279,39 +627,38 @@ impl<'a, E: PositiveExponent> DenseZpDistinctDegreeContext<'a, E> {
     /// `value^2` and avoids multiplying a polynomial by one.
     fn raise_to_characteristic(&mut self, value: &mut Vec<FiniteFieldElement<u32>>) {
         Self::remainder_monic(&self.field, value, &self.modulus);
-        self.power.clone_from(value);
-        Self::multiply_mod_into(
+        Self::square_mod_into(
             &self.field,
-            &self.dense_indices,
             &self.modulus,
-            &self.power,
-            &self.power,
-            &mut self.multiplication_output,
+            &self.reverse_modulus_inverse,
+            value,
+            &mut self.power,
+            &mut self.multiplication_workspace,
         );
-        std::mem::swap(&mut self.power, &mut self.multiplication_output);
 
         let mut exponent = self.field.get_prime() >> 1;
         while exponent != 0 {
             if exponent & 1 != 0 {
                 Self::multiply_mod_into(
                     &self.field,
-                    &self.dense_indices,
                     &self.modulus,
+                    &self.reverse_modulus_inverse,
                     value,
                     &self.power,
                     &mut self.multiplication_output,
+                    &mut self.multiplication_workspace,
                 );
                 std::mem::swap(value, &mut self.multiplication_output);
             }
             exponent >>= 1;
             if exponent != 0 {
-                Self::multiply_mod_into(
+                Self::square_mod_into(
                     &self.field,
-                    &self.dense_indices,
                     &self.modulus,
-                    &self.power,
+                    &self.reverse_modulus_inverse,
                     &self.power,
                     &mut self.multiplication_output,
+                    &mut self.multiplication_workspace,
                 );
                 std::mem::swap(&mut self.power, &mut self.multiplication_output);
             }
@@ -8765,12 +9112,13 @@ mod test {
     use super::{
         BOUNDED_DDF_REJECTIONS, DENSE_ZP_DDF_MODULUS_UPDATES, DENSE_ZP_DDF_SCREENS,
         DenseBivariateImage, DenseIntegerModularUnivariateContext, DenseTwoFactorCorrectionContext,
-        DenseZpDistinctDegreeContext, EXACT_HENSEL_SUBTREE_MODULUS_BITS,
-        EXACT_HENSEL_SUBTREE_SPLITS, ExactPolynomialSquareRoot, IntegerModularUnivariateContext,
-        LAST_BOUNDED_DDF_REJECTION_DEGREE, LAST_MODULAR_INTEGER_EDF_PRIME,
-        LLL_RECOMBINATION_SUCCESSES, LOCAL_HENSEL_RECOMBINATION_NODES, MODULAR_INTEGER_EDF_CALLS,
-        ModularPrimeScreen, PRODUCT_TREE_HENSEL_LIFT_CALLS, QUADRATIC_HENSEL_LIFT_CALLS,
-        QuadraticFactorization, SparseDiophantineContext, UnivariateHenselProductTreeBuildContext,
+        DenseZpAccumulationMode, DenseZpDistinctDegreeContext, DenseZpMulModWorkspace,
+        EXACT_HENSEL_SUBTREE_MODULUS_BITS, EXACT_HENSEL_SUBTREE_SPLITS, ExactPolynomialSquareRoot,
+        IntegerModularUnivariateContext, LAST_BOUNDED_DDF_REJECTION_DEGREE,
+        LAST_MODULAR_INTEGER_EDF_PRIME, LLL_RECOMBINATION_SUCCESSES,
+        LOCAL_HENSEL_RECOMBINATION_NODES, MODULAR_INTEGER_EDF_CALLS, ModularPrimeScreen,
+        PRODUCT_TREE_HENSEL_LIFT_CALLS, QUADRATIC_HENSEL_LIFT_CALLS, QuadraticFactorization,
+        SparseDiophantineContext, UnivariateHenselProductTreeBuildContext,
         UnivariateHenselProductTreeLink, UnivariateHenselProductTreeNode,
         univariate_hensel_precision_schedule,
     };
@@ -8781,7 +9129,9 @@ mod test {
         domains::{
             InternalOrdering, Ring,
             algebraic::AlgebraicExtension,
-            finite_field::{FiniteField, FiniteFieldCore, ToFiniteField, Z2, Zp},
+            finite_field::{
+                FiniteField, FiniteFieldCore, FiniteFieldElement, ToFiniteField, Z2, Zp,
+            },
             integer::{Integer, IntegerRing, Z},
             rational::Q,
         },
@@ -9719,6 +10069,273 @@ mod test {
         assert_eq!(r, res);
     }
 
+    fn dense_zp_test_polynomial(
+        prototype: &MultivariatePolynomial<Zp, u8>,
+        coefficients: &[FiniteFieldElement<u32>],
+    ) -> MultivariatePolynomial<Zp, u8> {
+        let mut polynomial = prototype.zero_with_capacity(coefficients.len());
+        let mut exponents = vec![0u8; prototype.nvars()];
+        for (degree, coefficient) in coefficients.iter().enumerate() {
+            if prototype.ring().is_zero(coefficient) {
+                continue;
+            }
+            exponents[0] = degree as u8;
+            polynomial.append_monomial_back(*coefficient, &exponents);
+        }
+        polynomial
+    }
+
+    fn generated_dense_zp_coefficients(
+        field: &Zp,
+        coefficient_count: usize,
+        seed: u64,
+    ) -> Vec<FiniteFieldElement<u32>> {
+        let nonzero_residue_count = u64::from(field.get_prime() - 1);
+        (0..coefficient_count)
+            .map(|index| {
+                let value = (17 * index as u64 + 29 * seed) % nonzero_residue_count + 1;
+                field.to_element(value as u32)
+            })
+            .collect()
+    }
+
+    fn generated_dense_zp_modulus(
+        prototype: &MultivariatePolynomial<Zp, u8>,
+        degree: usize,
+        seed: u64,
+    ) -> MultivariatePolynomial<Zp, u8> {
+        let mut coefficients = generated_dense_zp_coefficients(prototype.ring(), degree, seed);
+        coefficients.push(prototype.ring().one());
+        dense_zp_test_polynomial(prototype, &coefficients)
+    }
+
+    fn dense_zp_test_coefficients(
+        polynomial: &MultivariatePolynomial<Zp, u8>,
+    ) -> Vec<FiniteFieldElement<u32>> {
+        if polynomial.is_zero() {
+            Vec::new()
+        } else {
+            DenseZpDistinctDegreeContext::<u8>::dense_coefficients(polynomial, 0, polynomial.ring())
+        }
+    }
+
+    fn generic_dense_zp_product(
+        prototype: &MultivariatePolynomial<Zp, u8>,
+        left: &[FiniteFieldElement<u32>],
+        right: &[FiniteFieldElement<u32>],
+    ) -> Vec<FiniteFieldElement<u32>> {
+        let left = dense_zp_test_polynomial(prototype, left);
+        let right = dense_zp_test_polynomial(prototype, right);
+        dense_zp_test_coefficients(&(&left * &right))
+    }
+
+    fn generic_dense_zp_product_remainder(
+        prototype: &MultivariatePolynomial<Zp, u8>,
+        modulus: &MultivariatePolynomial<Zp, u8>,
+        left: &[FiniteFieldElement<u32>],
+        right: &[FiniteFieldElement<u32>],
+    ) -> Vec<FiniteFieldElement<u32>> {
+        let left = dense_zp_test_polynomial(prototype, left);
+        let right = dense_zp_test_polynomial(prototype, right);
+        let product = &left * &right;
+        dense_zp_test_coefficients(&product.quot_rem_univariate_monic(modulus).1)
+    }
+
+    #[test]
+    fn dense_zp_low_product_and_square_match_generic_multiplication() {
+        use DenseZpAccumulationMode::{DirectMontgomeryReduction, NativeRemainder, WideRemainder};
+
+        let cases = [
+            (3, 9, DirectMontgomeryReduction),
+            (17, 9, DirectMontgomeryReduction),
+            (65_000_011, 66, DirectMontgomeryReduction),
+            (65_000_011, 67, NativeRemainder),
+            (500_000_003, 74, WideRemainder),
+            (4_294_967_291, 1, DirectMontgomeryReduction),
+            (4_294_967_291, 2, WideRemainder),
+        ];
+        let mut workspace = DenseZpMulModWorkspace::new(255);
+        let mut actual = Vec::new();
+
+        for (prime, coefficient_count, expected_mode) in cases {
+            let field = Zp::new(prime);
+            let prototype = parse!("x").to_polynomial::<_, u8>(&field, None);
+            let maximum_raw = FiniteFieldElement::from_inner(prime - 1);
+            let left = vec![maximum_raw; coefficient_count];
+            let right = vec![maximum_raw; coefficient_count];
+            let product_len = 2 * coefficient_count - 1;
+            assert_eq!(
+                DenseZpDistinctDegreeContext::<u8>::accumulation_mode(
+                    &field,
+                    left.len(),
+                    right.len(),
+                    product_len,
+                ),
+                expected_mode
+            );
+
+            let generic_product = generic_dense_zp_product(&prototype, &left, &right);
+            for output_len in [
+                product_len,
+                1,
+                0,
+                product_len - 1,
+                coefficient_count,
+                product_len,
+            ] {
+                DenseZpDistinctDegreeContext::<u8>::multiply_low_into(
+                    &field,
+                    &left,
+                    &right,
+                    output_len,
+                    &mut actual,
+                    &mut workspace.u64_accumulators,
+                    &mut workspace.u128_accumulators,
+                );
+                let mut expected = generic_product.clone();
+                expected.resize(output_len, field.zero());
+                assert_eq!(
+                    actual, expected,
+                    "prime {prime}, product prefix {output_len}"
+                );
+            }
+
+            for output_len in [
+                product_len,
+                1,
+                0,
+                product_len - 1,
+                coefficient_count,
+                product_len,
+            ] {
+                DenseZpDistinctDegreeContext::<u8>::square_low_into(
+                    &field,
+                    &left,
+                    output_len,
+                    &mut actual,
+                    &mut workspace.u64_accumulators,
+                    &mut workspace.u128_accumulators,
+                );
+                let mut expected = generic_product.clone();
+                expected.resize(output_len, field.zero());
+                assert_eq!(
+                    actual, expected,
+                    "prime {prime}, square prefix {output_len}"
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn dense_zp_reciprocal_reduction_matches_generic_remainder() {
+        for (prime, modulus_degree) in [
+            (3, 1),
+            (17, 9),
+            (65_000_011, 66),
+            (65_000_011, 67),
+            (4_294_967_291, 4),
+        ] {
+            let field = Zp::new(prime);
+            let prototype = parse!("x").to_polynomial::<_, u8>(&field, None);
+            let modulus = generated_dense_zp_modulus(&prototype, modulus_degree, 1);
+            let mut context = DenseZpDistinctDegreeContext::new(&modulus, 0).unwrap();
+            let left = generated_dense_zp_coefficients(&field, modulus_degree, 2);
+            let right = generated_dense_zp_coefficients(&field, modulus_degree, 3);
+
+            let expected = generic_dense_zp_product_remainder(&prototype, &modulus, &left, &right);
+            let mut actual = Vec::new();
+            DenseZpDistinctDegreeContext::<u8>::multiply_mod_into(
+                &context.field,
+                &context.modulus,
+                &context.reverse_modulus_inverse,
+                &left,
+                &right,
+                &mut actual,
+                &mut context.multiplication_workspace,
+            );
+            assert_eq!(actual, expected, "prime {prime}, dense product remainder");
+
+            let expected_square =
+                generic_dense_zp_product_remainder(&prototype, &modulus, &left, &left);
+            DenseZpDistinctDegreeContext::<u8>::square_mod_into(
+                &context.field,
+                &context.modulus,
+                &context.reverse_modulus_inverse,
+                &left,
+                &mut actual,
+                &mut context.multiplication_workspace,
+            );
+            assert_eq!(
+                actual, expected_square,
+                "prime {prime}, dense square remainder"
+            );
+        }
+
+        let field = Zp::new(5);
+        let prototype = parse!("x").to_polynomial::<_, u8>(&field, None);
+        let modulus =
+            dense_zp_test_polynomial(&prototype, &[field.one(), field.zero(), field.one()]);
+        let mut context = DenseZpDistinctDegreeContext::new(&modulus, 0).unwrap();
+        let left = [field.to_element(3), field.one()];
+        let right = [field.to_element(2), field.one()];
+        let mut actual = Vec::new();
+        DenseZpDistinctDegreeContext::<u8>::multiply_mod_into(
+            &context.field,
+            &context.modulus,
+            &context.reverse_modulus_inverse,
+            &left,
+            &right,
+            &mut actual,
+            &mut context.multiplication_workspace,
+        );
+        assert!(actual.is_empty(), "(x-2)(x+2) must vanish modulo x^2+1");
+    }
+
+    #[test]
+    fn dense_zp_reciprocal_refreshes_after_modulus_shrink() {
+        let field = Zp::new(17);
+        let prototype = parse!("x").to_polynomial::<_, u8>(&field, None);
+        let initial_modulus = generated_dense_zp_modulus(&prototype, 8, 1);
+        let mut context = DenseZpDistinctDegreeContext::new(&initial_modulus, 0).unwrap();
+        let old_residue = generated_dense_zp_coefficients(&field, 8, 2);
+        let mut output = Vec::new();
+        DenseZpDistinctDegreeContext::<u8>::square_mod_into(
+            &context.field,
+            &context.modulus,
+            &context.reverse_modulus_inverse,
+            &old_residue,
+            &mut output,
+            &mut context.multiplication_workspace,
+        );
+
+        let smaller_modulus = generated_dense_zp_modulus(&prototype, 3, 3);
+        context.set_modulus(&smaller_modulus);
+        assert_eq!(context.reverse_modulus_inverse.len(), 3);
+        let left = generated_dense_zp_coefficients(&field, 3, 4);
+        let right = generated_dense_zp_coefficients(&field, 3, 5);
+        let expected =
+            generic_dense_zp_product_remainder(&prototype, &smaller_modulus, &left, &right);
+        DenseZpDistinctDegreeContext::<u8>::multiply_mod_into(
+            &context.field,
+            &context.modulus,
+            &context.reverse_modulus_inverse,
+            &left,
+            &right,
+            &mut output,
+            &mut context.multiplication_workspace,
+        );
+        assert_eq!(output, expected);
+
+        let mut expected_modulus = smaller_modulus.clone();
+        let expected = dense_zp_test_coefficients(
+            &dense_zp_test_polynomial(&prototype, &old_residue)
+                .exp_mod_univariate(Integer::from(field.get_prime()), &mut expected_modulus),
+        );
+        let mut actual = old_residue;
+        context.raise_to_characteristic(&mut actual);
+        assert_eq!(actual, expected);
+    }
+
     #[test]
     fn bounded_distinct_degree_factorization_reports_exact_factor_counts() {
         let field = Zp::new(11);
@@ -9768,6 +10385,7 @@ mod test {
             (5, "(y+2)*(y^2+2)*(y^3+y+1)"),
             (17, "(y+1)*(y+2)*(y+3)*(y^2+3)"),
             (65_000_011, "(y+1)*(y+2)*(y+3)*(y^2+3)"),
+            (4_294_967_291, "(y+1)*(y^2+1)"),
         ];
 
         for (prime, expression) in cases {
