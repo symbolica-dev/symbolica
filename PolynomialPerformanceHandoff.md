@@ -1,7 +1,8 @@
 # Polynomial performance continuation handoff
 
 This is the live continuation record for the single-core Symbolica/FLINT polynomial-performance
-work. It was refreshed on 2026-08-27 after integrating the quadratic Hensel lift at `4a2b9c7`.
+work. It was refreshed on 2026-08-27 after integrating bounded DDF prime screening and deferred EDF
+at `4f3b591`.
 Keep this file current whenever an experiment is accepted, rejected, or left partly complete. The
 purpose is that another agent can resume without reconstructing decisions from chat history or
 transient binary names.
@@ -26,7 +27,7 @@ transient binary names.
 
 ## Resume here
 
-The accepted product and factor candidates are integrated on `dev` at `4a2b9c7`. Do not
+The accepted product and factor candidates are integrated on `dev` at `4f3b591`. Do not
 cherry-pick their old worktree hashes again. The integrated chain is:
 
 | Integrated commit | Change |
@@ -38,24 +39,29 @@ cherry-pick their old worktree hashes again. The integrated chain is:
 | `9609704` | Use a bounded roughly 26-bit prime so modular factorization stays in dense `u64` |
 | `f360be0` | Add total-degree 33, 64, and 65 factorization boundary benchmarks |
 | `4a2b9c7` | Use guarded quadratic Hensel lifting with integer modular operation contexts |
+| `4f3b591` | Bound losing DDF images and defer EDF until after modular-prime selection |
 
-The final source-matched full-LTO binary is
+The latest measured full-LTO candidate binary is
+`/tmp/flint-comparison-factor-screening-v1-screen`; its source content is isolated commit
+`966deda`, integrated unchanged as `4f3b591`. The previous control is
 `/tmp/flint-comparison-dev-4a2b9c7-screen`. The target product remains within about 7% of FLINT.
-On the stable isolated build, the degree-33 high-height factor row fell from `37.490181 ms` before
-quadratic lifting to `10.105479 ms`, and from a Symbolica/FLINT ratio of `25.80` to `7.07`. The
-integrated binary independently reproduced the ratio improvement under a slower, thermally
-contaminated run; use the stable isolated absolute timings until an idle-host integrated rerun is
-available.
+Bounded screening reduces the degree-64 factor row from `21.586502 ms` to `14.528937 ms`, or
+32.69%, and its paired Symbolica/FLINT ratio from `8.357020` to `5.660441`. It also improves the
+high-height degree-33 paired ratio from `7.130152` to `4.393851`.
 
-The next degree-64 factor target is modular-prime screening, not the dense DDF remainder context:
-retain DDF blocks and their exact factor count, abort losing DDF candidates once their partial
-count cannot win, and run EDF only for the selected prime. The current degree-64 row does full
-DDF+EDF work for four primes and discards three of them.
+The new degree-64 profile puts about 62% of Symbolica time under Hensel lifting, 28% under modular
+screening/DDF, and 8% under the one retained EDF. Test the `500_000_003` prime point next: it keeps
+seven modular factors but reduces the linear lift from 77 base-prime digits to 11. This first needs
+the dense-`u64` multiplication admission proof to use the maximum per-output collision count and
+an unbalanced boundary test. Reassess the dense DDF context only after measuring that point.
 
 Validation on this integrated source completed before the final build:
 
-- root factor module under default features `43/43`;
-- root factor module under `no_gmp,native_code_generation` `43/43`;
+- root factor module under default features `46/46`;
+- root factor module under `no_gmp,native_code_generation` `46/46`;
+- exact DDF counts `9/8/7/20` for the degree-64 selector primes, rejection of the large-prime image
+  at DDF degree two with lower bound 20, one retained EDF at prime 17, and exact reconstruction of
+  factors with degrees `1/1/2/10/20/30`;
 - differential quadratic-versus-linear Hensel tests, including an unsuccessful full-precision
   lift and a non-monic successful lift;
 - differential composite-modulus add/multiply/divide tests at `5^8` and `5^65`, with a negative
@@ -67,7 +73,8 @@ The exact worktree state is:
 
 | Worktree | Branch/head | State | Purpose |
 |---|---|---|---|
-| `/home/codexB/symbolica` | `dev`, `4a2b9c7` | only handoff Markdown modified | Integrated product/factor winner and live lab notebook |
+| `/home/codexB/symbolica` | `dev`, `4f3b591` | only handoff Markdown modified | Integrated product/factor winner and live lab notebook |
+| `/tmp/symbolica-factor-screening` | `codex/factor-prime-screening`, `966deda` | clean; accepted source commit | Isolated bounded-DDF/deferred-EDF reference |
 | `/tmp/symbolica-quadratic-hensel` | `codex/quadratic-hensel`, `ed39caf` | clean; accepted source commit | Isolated quadratic Hensel reference |
 | `/tmp/symbolica-univariate-product` | `codex/univariate-product-kronecker`, `ddab46e` | clean; release build and profiling complete | Accepted product conversion plus retained fixed-width statistics follow-up |
 | `/tmp/symbolica-factor-large-prime` | `codex/factor-large-prime-degree64`, `dca8bd1` | clean; release build complete | Bounded dense-u64 factor-prime candidate based on `85be422` |
@@ -162,16 +169,18 @@ are single-core paired measurements with default release features, including `fa
 | PolyBench 5-variable uniform #11 | `1.040` | small remaining Zippel loss |
 | PolyBench 8-variable sharp #140 | `1.211` | residual Hu/Zippel loss |
 | factor fixture product, 1 variable, degrees 32/31 | `1.067` | within about 7% of FLINT |
-| factorization, 1 variable, degrees 32/31 | `5.294` | 25.2% lower Symbolica time than `55a758b` |
-| factorization, high-height 1 variable, total degree 33 | `26.115` | severe linear-Hensel regime; current priority |
-| factorization, 1 variable, total degree 64 | `8.567` | degree boundary included in selector |
-| factorization, 1 variable, total degree 65 | `7.577` | excluded selector boundary |
-| factorization, 2 variables, degrees 10/9 | `0.630` | faster than FLINT |
-| factorization, 3 variables, degrees 6/5 | `2.034` | later modular/multivariate target |
+| factorization, 1 variable, degrees 32/31 | `4.563` | bounded screening saves about 16% |
+| factorization, high-height 1 variable, total degree 33 | `4.394` | improved substantially; Hensel remains dominant |
+| factorization, 1 variable, total degree 64 | `5.660` | bounded screening saves 32.69% absolute time |
+| factorization, 1 variable, total degree 65 | `7.501` | excluded selector boundary; unchanged within noise |
+| factorization, 2 variables, degrees 10/9 | `0.622` | faster than FLINT |
+| factorization, 3 variables, degrees 6/5 | `1.964` | later modular/multivariate target |
+| PolyBench 8-variable uniform factor #105 | `1.091` | about 4.5% lower Symbolica time |
+| PolyBench 8-variable sharp factor #178 | `2.970` | unchanged |
 
-The table uses medians across five source-matched integrated processes. Earlier candidate-only
-ratios remain below as attribution evidence, but the integrated values above are the numbers to
-quote for the current `dev` source.
+The GCD and product rows use their retained source-matched measurements. The latest factor rows
+use the `966deda` full-LTO candidate: twelve balanced 20-sample processes for degree 64 and six for
+the guard rows. Earlier tables below remain as attribution evidence.
 
 ## Final integrated `f360be0` measurement
 
@@ -727,35 +736,82 @@ factor extraction, and 0.87 points are Hensel lifting. The concise report is
 `/tmp/profile-factor-dca8bd1-lbr.monic-callers-concise.txt`, SHA-256
 `650a0140fbf11c992d70fb5eb23e4db500f747ba65913d0457dad601a5217530`.
 
-The degree-64 audit changes the order of work. Both degree 63 and degree 64 currently perform about
-945 DDF remainder calls across four prime trials, because every trial completes DDF and EDF before
-the selector compares factor counts. Degree 64 tries primes `7`, `13`, `17`, and `65_000_011`,
-which yield `9`, `8`, `7`, and `20` factors; it retains `p=17`. For the final large-prime trial,
-the degree-one and degree-two DDF blocks already imply `4+15=19` factors, so it can be rejected
-after about 86 remainder calls instead of completing 645 DDF calls and EDF-splitting 20 discarded
-factors. Separating DDF screening from EDF and stopping losing DDF candidates is estimated to
-reduce degree-64 DDF remainder calls from about 945 to 386 and run EDF once for seven factors rather
-than four times for 44 total factors.
+Before `4f3b591`, both degree 63 and degree 64 performed about 945 DDF remainder calls across four
+prime trials because every trial completed DDF and EDF before the selector compared factor counts.
+Degree 64 tries primes `7`, `13`, `17`, and `65_000_011`, which yield `9`, `8`, `7`, and `20`
+factors; it retains `p=17`. For the final large-prime trial, the degree-one and degree-two DDF
+blocks already imply `4+15=19` factors and one nonconstant residual, so the exact lower bound is
+20. It can be rejected after about 86 remainder calls instead of completing 645 calls and then
+EDF-splitting 20 discarded factors.
 
-A private dense univariate remainder operation context remains a useful second target, not a new
-`Ring` method. It should normalize/cache one monic modulus, retain dense coefficient and index
-buffers through binary exponentiation, call the existing coefficient-domain dense multiplication
-kernel, reduce in place, and materialize `MultivariatePolynomial` only for the GCD. Reset it when
-DDF divides a factor out. Allocation alone cannot remove this subtree because coefficient
-reduction dominates. Re-estimate its payoff after bounded screening removes most discarded DDF
-work. Required guards include monicity, the active variable, ring/variable identity, degree-one
-moduli, cancellation/trailing zeros, modulus resets, and generic sparse/high-degree fallback.
+### Accepted bounded DDF screening and deferred EDF
 
-A second Pareto point is prime `500_000_003`: it needs the same 11 digits as the 31-bit prime and
-can accumulate 65 collisions in `u64`, but needs a native `u64 % p` per output. Testing that prime
-first requires changing the `DenseZpMul` u64 admission proof from total pair count to maximum
-per-output collisions (`min(left_len, right_len)`). The kernel request contract guarantees unique,
-strictly increasing indices, so that bound is valid; add an unbalanced 129-by-65 max-residue
-differential test before using it. The primary 65M candidate needs no kernel change.
+Commit `4f3b591` stores distinct-degree blocks with the exact count
+`sum(block_degree/distinct_degree)`. A bounded DDF returns as soon as the completed count plus one
+for a nonconstant residual exceeds an inclusive selector limit. Unsuitable primes remain distinct
+from suitable images that exceed the limit, preserving suitable-prime accounting and the original
+first-suitable direct-prime rule. Only the selected image undergoes equal-degree factorization.
 
-After bounded screening, profile degree 64 before choosing between the dense DDF context, the
-`500_000_003` prime, or a root-only quadratic lift for its seven-factor tree. The square-free GCD is
-Amdahl-limited and is not a useful factorization target.
+The degree-64 tests prove the exact counts `9/8/7/20`, reject `65_000_011` at DDF degree two with
+lower bound 20, select `p=17`, execute one EDF completion, and reconstruct six square-free integer
+factors of degrees `1/1/2/10/20/30`. The generic bounded-DDF test also covers mixed degree-one and
+degree-two blocks, exact-count admission, strict rejection, and the internal monic-one empty-block
+representation while preserving the legacy public constant result.
+
+The full-LTO candidate used balanced sequential process order and 20 samples per backend. Degree
+64 used twelve processes per binary; the other rows used six. The last column compares paired
+ratios, which is more reliable than absolute time for the thermally variable degree-33 processes:
+
+| Case | Accepted Symbolica | FLINT | S/F | Control S/F | ratio change |
+|---|---:|---:|---:|---:|---:|
+| high-height degree 33 | `7.054343 ms` | `1.547683 ms` | `4.393851` | `7.130152` | `-38.37%` |
+| degree 63 | `14.936981 ms` | `3.197383 ms` | `4.563498` | `5.470708` | `-16.58%` |
+| degree 64 | `14.528937 ms` | `2.568576 ms` | `5.660441` | `8.357020` | `-32.27%` |
+| degree 65 | `23.648133 ms` | `3.169588 ms` | `7.500939` | `7.342534` | `+2.16%` |
+| generated 2-variable factor | `6.295513 ms` | `10.116293 ms` | `0.622243` | `0.623644` | `-0.22%` |
+| generated 3-variable factor | `8.475188 ms` | `4.318369 ms` | `1.963720` | `1.961584` | `+0.11%` |
+| PolyBench #105 | `31.716480 ms` | `29.069148 ms` | `1.091498` | `1.142249` | `-4.44%` |
+| PolyBench #178 | `41.720974 ms` | `14.077220 ms` | `2.969817` | `2.961093` | `+0.29%` |
+
+For degree 64, where the FLINT medians match closely between binaries, absolute Symbolica time is
+`21.586502 -> 14.528937 ms`, a 32.69% reduction. The inferred DDF call reduction was about
+`945 -> 386`; the measured whole-row result confirms the original 20-35% opportunity estimate.
+The high-height absolute medians experienced frequency drift, but its paired ratio improvement is
+large and consistent with eliminating discarded modular factorizations.
+
+A 500-sample LBR profile measured `14.744165 ms` versus `2.601388 ms`, ratio `5.667807`. Of the
+paired cycles, 76.53% are in Symbolica factorization. Relative to that Symbolica subtree, Hensel
+lifting is about 62.17% (`~9.17 ms`), modular screening is 28.42% (`~4.19 ms`), DDF itself is
+27.49% (`~4.05 ms`), and retained EDF is 8.09% (`~1.19 ms`). Hensel lifting is therefore the next
+primary target; the dense DDF context no longer has the largest ceiling.
+
+| Artifact | SHA-256 |
+|---|---|
+| `/tmp/flint-comparison-factor-screening-v1-screen` | `7e96241378b4e8e93cdc19e2534c5e75694796eae31cd9bebdc3868baf11c6f5` |
+| `/tmp/flint-comparison-factor-screening-v1-screen.d` | `c8c0444a41613cf70d21e8f72745eb50f2810d7ab3dd63bbf69de10f75429a84` |
+| `/tmp/flint-comparison-factor-screening-v1-build.jsonl` | `c94dc3dbad0f4b43f7f35c74b7894887599e19d1767f82c8b6a97cd482528495` |
+| `/tmp/profile-factor-screening-v1-d64-lbr.perf.data` | `f5046c2999babcb550ea0497c01baac01b3a52c47326186cfc5a5c6e5c144ff9` |
+| `/tmp/profile-factor-screening-v1-d64-lbr.symbols.txt` | `551c50b63716ce41a5f57224132def4388473ad353ba230471951c6cf71a7886` |
+| `/tmp/profile-factor-screening-v1-d64-lbr.children-symbols.txt` | `574a34aa3913c2c0d93886312b3ec0f5dcad8e477d877947aa24ce0d25c1757c` |
+| `/tmp/profile-factor-screening-v1-d64.csv` | `3e447b96fb6f028e450fe92b7a278bdfa9778923b2bdef25ffff67082734cdc7` |
+
+The release build took 9m27s. Its pre-commit source diff SHA-256 is
+`3ee2b7d5f052e9976e521d9a5dd0f84a81141bb553e6315ad15d7ce4bf8c4124`; that content is commit
+`966deda`, cherry-picked unchanged as `4f3b591`. Raw timing files are
+`/tmp/factor-screening-v1-{d33h,d63,d64,d65,factor2,factor3,pb105,pb178}-*-block-*.csv`.
+
+The best next degree-64 experiment is prime `500_000_003`: it has the same seven factors as
+`p=17` but needs only 11 linear-lift digits instead of 77. It can accumulate 65 coefficient
+collisions in `u64`, but testing it first requires changing `DenseZpMul`'s admission proof from
+total pair count to the maximum per-output collision count (`min(left_len, right_len)`). The kernel
+request contract guarantees unique, strictly increasing indices. Add an unbalanced 129-by-65
+max-residue differential test before selecting the prime, then benchmark it against `4f3b591`.
+
+A private dense univariate remainder context remains a later option. It would cache one monic
+modulus, retain dense coefficient/index buffers through binary exponentiation, use the existing
+coefficient-domain multiplication kernel, and materialize a polynomial only for each GCD. Its
+current DDF ceiling is about 27.5% of Symbolica time, so reassess it after the prime experiment.
+The square-free GCD remains Amdahl-limited and is not a useful factorization target.
 
 ## Benchmark infrastructure
 
@@ -899,32 +955,29 @@ comments that justify file organization by contrasting it with designs not prese
 
 ## Ordered next actions
 
-1. Split modular-prime screening from equal-degree factorization for dense univariate integer
-   factorization. Retain DDF blocks plus the exact factor count
-   `sum(block_degree/distinct_degree)`, run EDF only after selecting the winning prime, and add a
-   bounded DDF mode that aborts once its partial factor-count lower bound cannot beat the current
-   candidate.
-2. Differential-test deferred EDF and bounded DDF against the current full factorization for the
-   degree-63/64/65 fixtures and random finite-field polynomials. Degree 64 currently tries primes
-   `7`, `13`, `17`, and `65_000_011`, with factor counts `9`, `8`, `7`, and `20`, and retains
-   `p=17`. The large-prime candidate can be rejected after its degree-one and degree-two DDF blocks
-   already imply 19 factors. The estimated DDF remainder count is `945 -> about 386`, with EDF run
-   for one seven-factor image instead of four images containing 44 factors total.
-3. Build and measure the screening candidate first on degree 64, then guard degrees 33/63/65,
-   1-/2-/3-variable factor rows, and PolyBench #105/#178. The inferred opportunity is 20-35% of
-   the entire degree-64 row; this must be verified because there is not yet a saved degree-64 factor
-   profile.
-4. Profile accepted degree-64 screening before implementing a dense DDF remainder context. The
-   latter remains useful, but early rejection removes roughly 59% of its current degree-64 work and
-   therefore changes its payoff.
+1. Change `DenseZpMul`'s direct-`u64` admission proof to bound the maximum number of products in one
+   output coefficient by `min(left_len, right_len)`, not the total pair count. Prove the bound for
+   the kernel's unique increasing indices and add an unbalanced 129-by-65 max-residue differential
+   test that exercises the newly admitted range.
+2. Add a guarded `500_000_003` factor-prime experiment for degree 64. The fixture has seven modular
+   factors at this prime and needs 11 linear-lift digits, versus seven factors and 77 digits at
+   `p=17`. Update the selector's direct-prime bound consistently with the new per-output proof;
+   preserve the current first-suitable semantics and every recombination guard.
+3. Build and measure that prime candidate against integrated `4f3b591`: twelve balanced processes
+   for degree 64, then degrees 33/63/65, 1-/2-/3-variable factor rows, and PolyBench #105/#178. A
+   larger prime makes DDF exponentiation more expensive, so accept it only on whole-factor timing,
+   not the lift-work estimate alone.
+4. Profile the winning degree-64 prime choice. If the 500M point loses, test a root-only quadratic
+   lift for the seven-factor tree before writing the larger dense DDF remainder context. The current
+   post-screening profile is approximately 62% Hensel, 28% screening, and 8% EDF.
 5. For the high-height degree-33 path, the smallest measured follow-up is to defer coefficient
    reduction inside `IntegerModularUnivariateContext::quot_rem`: leave non-pivot remainder cells
    unreduced during fused subtractions and symmetrically reduce only pivots and the final
    remainder. In the v3 profile quotient/remainder is about 52% of Hensel, and about 70% of that
    subtree is `symmetric_mod`. Differential-test this at small and large composite prime powers
    before benchmarking; do not infer the full profile ceiling as an expected gain.
-6. Consider the `500_000_003` factor-prime point only after the per-output-collision u64 proof and
-   its unbalanced 129-by-65 differential test. It gives seven factors and only 11 lift digits on the
-   degree-64 fixture, but the current dense-u64 admission proof rejects it.
-7. Remeasure the integrated `4a2b9c7` matrix on an idle host, replace the thermally contaminated
-   absolute timings, and keep this file current after every accepted or rejected experiment.
+6. Keep the one-variable product path as a regression guard: its target factor-fixture product is
+   already within about 7% of FLINT. Return to dense univariate GCD only after the degree-64 factor
+   prime/Hensel decision; current degree-64 GCD is about 19% slower than FLINT.
+7. Freeze and hash every accepted full-LTO binary and profile, integrate only measured winners with
+   Ben Ruijl's identity, and keep this file current after every accepted or rejected experiment.
