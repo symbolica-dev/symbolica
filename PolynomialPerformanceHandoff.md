@@ -800,12 +800,57 @@ The release build took 9m27s. Its pre-commit source diff SHA-256 is
 `966deda`, cherry-picked unchanged as `4f3b591`. Raw timing files are
 `/tmp/factor-screening-v1-{d33h,d63,d64,d65,factor2,factor3,pb105,pb178}-*-block-*.csv`.
 
-The best next degree-64 experiment is prime `500_000_003`: it has the same seven factors as
-`p=17` but needs only 11 linear-lift digits instead of 77. It can accumulate 65 coefficient
-collisions in `u64`, but testing it first requires changing `DenseZpMul`'s admission proof from
-total pair count to the maximum per-output collision count (`min(left_len, right_len)`). The kernel
-request contract guarantees unique, strictly increasing indices. Add an unbalanced 129-by-65
-max-residue differential test before selecting the prime, then benchmark it against `4f3b591`.
+### Rejected 500M modular-prime experiment
+
+Prime `500_000_003` has the same seven modular factors as `p=17`, but the primitive degree-64
+fixture needs only 11 linear-lift digits instead of 77. The experiment admitted `u64` accumulation
+using the exact per-output collision bound `min(left_len, right_len)`, tested both dense and
+touched-slot buffers on a 129-by-65 maximum-residue product, and selected the wider prime only for
+degree 64. The intended Hensel saving was real, but high-bit modular factorization cost more than
+it saved.
+
+Twelve alternating 50-sample process pairs measured:
+
+| Path | Symbolica | FLINT | S/F |
+|---|---:|---:|---:|
+| accepted bounded-DDF control | `14.497333 ms` | `2.572823 ms` | `5.621938` |
+| 500M prime | `19.630564 ms` | `2.575012 ms` | `7.638689` |
+
+Every process pair regressed. Symbolica was 35.41% slower and the paired ratio was 35.87% worse,
+while the FLINT median changed by only 0.09%. A separate 500-sample LBR profile measured
+`19.680943 ms` versus the control profile's `14.744165 ms`. Normalizing immediate children below
+the measured `factor_reconstruct` subtree gives the following approximate stage costs:
+
+| Stage | accepted control | 500M prime | change |
+|---|---:|---:|---:|
+| Hensel lifting | `9.17 ms` | `1.26 ms` | `-7.91 ms` |
+| modular-prime screening | `4.19 ms` | `10.00 ms` | `+5.81 ms` |
+| retained EDF | `1.19 ms` | `8.27 ms` | `+7.08 ms` |
+
+DDF is nested inside prime screening and must not be added to it. Recursive global LBR rows also
+double-count repeated frames; use the outermost immediate-child shares for comparisons. The flat
+`DenseZpMul::multiply_direct_u64` estimate rose from about `1.54 ms` to `6.74 ms`, and monic
+finite-field remainder work rose from about `3.15 ms` to `6.21 ms`. Thus the 500M policy moved the
+bottleneck out of Hensel lifting and into DDF/EDF powering and division. Do not retry a wider
+factorization prime without an independently faster high-bit DDF/EDF implementation or a selector
+that prices modular work rather than only factor count and lifting digits.
+
+| Artifact | SHA-256 |
+|---|---|
+| `/tmp/flint-comparison-factor-prime500-v1-screen` | `2211c2c541b9bb1540aa45043668a1016fc919c75f3c69663caa3e92a9070690` |
+| `/tmp/flint-comparison-factor-prime500-v1-screen.d` | `8896a6598fc26f38403156d627be5145a8bc5a59d8a176fed12f62a002db2613` |
+| `/tmp/flint-comparison-factor-prime500-v1-build.jsonl` | `6cceb0f3a3821c2151c47c261b4321bd2a9cb34c945fe3944bdaee0a7cbd8ea5` |
+| `/tmp/profile-factor-prime500-v1-d64-lbr.perf.data` | `f0c7d283f3788288aad4a668d313602a0fb298213bdf132dd7d6bc9848d13969` |
+| `/tmp/profile-factor-prime500-v1-d64-lbr.symbols.txt` | `b4efb9cdf5cb08a0ecc4ed40f203d3cf1e1e319eb54dfb6cd8a9fa63707e686e` |
+| `/tmp/profile-factor-prime500-v1-d64-lbr.children-symbols.txt` | `9bd8e693ceb1d791bf1e7ee52c31e1ffb0fa45d9f7bfadfbeb6d3006add7dc70` |
+| `/tmp/profile-factor-prime500-v1-d64.csv` | `ef27c6b7d0387365451f270a238ead35893a33937424c3b0a95f97102785b135` |
+
+The per-output `u64` proof is independently sound and is being measured separately on unbalanced
+129-by-65 products. It is neutral on degree 64 because the existing 65M image's 4,225 total
+products already fit the old bound. The next Hensel experiment is root-only quadratic lifting for
+five through eight modular factors: keep the accepted recursive quadratic policy for at most four
+factors, permit one quadratic lift at the root for five through eight, and force descendants back
+to linear lifting.
 
 A private dense univariate remainder context remains a later option. It would cache one monic
 modulus, retain dense coefficient/index buffers through binary exponentiation, use the existing
