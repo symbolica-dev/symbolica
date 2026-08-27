@@ -184,7 +184,7 @@ impl fmt::Display for FactorizationCase {
 }
 
 /// Low-dimensional factorization cases with comparable dense powered inputs.
-pub const GENERATED_FACTOR_CASES: [FactorizationCase; 3] = [
+pub const GENERATED_FACTOR_CASES: [FactorizationCase; 6] = [
     FactorizationCase {
         name: "dense 1-variable degrees 32/31",
         variables: &X1_VARIABLES,
@@ -205,6 +205,27 @@ pub const GENERATED_FACTOR_CASES: [FactorizationCase; 3] = [
         left: PoweredPolynomial::with_constant("1+3*x1+5*x2+7*x3", 6, -1),
         right: PoweredPolynomial::with_constant("1-3*x1+5*x2-7*x3", 5, 1),
         default_samples: 4,
+    },
+    FactorizationCase {
+        name: "dense high-height 1-variable degrees 17/16 total 33",
+        variables: &X1_VARIABLES,
+        left: PoweredPolynomial::with_constant("1+65537*x1", 17, -1),
+        right: PoweredPolynomial::with_constant("1-65539*x1", 16, 1),
+        default_samples: 2,
+    },
+    FactorizationCase {
+        name: "dense 1-variable degrees 33/31 total 64",
+        variables: &X1_VARIABLES,
+        left: PoweredPolynomial::with_constant("1+3*x1", 33, -1),
+        right: PoweredPolynomial::with_constant("1-5*x1", 31, 1),
+        default_samples: 2,
+    },
+    FactorizationCase {
+        name: "dense 1-variable degrees 33/32 total 65",
+        variables: &X1_VARIABLES,
+        left: PoweredPolynomial::with_constant("1+3*x1", 33, -1),
+        right: PoweredPolynomial::with_constant("1-5*x1", 32, 1),
+        default_samples: 2,
     },
 ];
 
@@ -229,6 +250,18 @@ pub const FINITE_FIELDS: [FiniteFieldCase; 2] = [
     FiniteFieldCase {
         name: "GF(18446744073709551557)",
         modulus: 18_446_744_073_709_551_557,
+    },
+];
+
+/// Prime fields that exercise the 32-bit finite-field accumulator boundaries.
+pub const U32_ACCUMULATION_FIELDS: [FiniteFieldCase; 2] = [
+    FiniteFieldCase {
+        name: "GF(65000011)",
+        modulus: 65_000_011,
+    },
+    FiniteFieldCase {
+        name: "GF(500000003)",
+        modulus: 500_000_003,
     },
 ];
 
@@ -377,6 +410,22 @@ pub const FINITE_FIELD_MULTIPLICATION_CASES: [FiniteFieldMultiplicationCase; 6] 
         default_samples: 1,
     },
 ];
+
+/// An unbalanced convolution whose worst-case sum over all product pairs exceeds `u64` while the
+/// worst-case sum contributing to any one output coefficient still fits.
+pub const U32_ACCUMULATION_MULTIPLICATION_CASE: FiniteFieldMultiplicationCase =
+    FiniteFieldMultiplicationCase {
+        name: "dense univariate degrees 128/64 accumulator-bound multiplication",
+        variables: &X_VARIABLES,
+        input: FiniteFieldMultiplicationInput::DenseUnivariate {
+            left_degree: 128,
+            right_degree: 64,
+            left_stride: 499_999_937,
+            right_stride: 271_828_183,
+            coefficient_period: 500_000_002,
+        },
+        default_samples: 200,
+    };
 
 /// Two integer polynomials and the variable eliminated by the resultant.
 #[derive(Clone, Copy, Debug)]

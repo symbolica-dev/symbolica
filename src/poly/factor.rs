@@ -43,15 +43,49 @@ const WANG_PRIME_SAMPLE_ATTEMPTS: usize = 3;
 const MAX_EVALUATED_HENSEL_IMAGE_CELLS: usize = 1 << 22;
 // Maximum number of terms grouped into geometric sequences for one polynomial image.
 const MAX_EVALUATED_HENSEL_GROUPED_TERMS: usize = 1 << 20;
+// Minimum number of base-prime digits for using composite-modulus quadratic Hensel corrections.
+const MIN_QUADRATIC_HENSEL_DIGITS: usize = 64;
 // Maximum number of term advances across all geometric samples in one image rebuild.
 const MAX_EVALUATED_HENSEL_TERM_STEPS: usize = 1 << 24;
 // Maximum number of dense coefficient rows retained for either lifted factor.
 const MAX_EVALUATED_HENSEL_Y_ROWS: usize = 1 << 16;
-type ModularIntegerFactorization<E> = (Zp, Vec<MultivariatePolynomial<Zp, E, LexOrder>>);
+
+/// Distinct-degree blocks together with their exact number of irreducible factors.
+struct DistinctDegreeFactorization<P> {
+    blocks: Vec<(usize, P)>,
+    factor_count: usize,
+}
+
+/// A suitable finite-field image whose equal-degree factorization has been deferred.
+struct ModularIntegerFactorization<E: PositiveExponent> {
+    field: Zp,
+    distinct_degree: DistinctDegreeFactorization<MultivariatePolynomial<Zp, E, LexOrder>>,
+}
+
+/// Result of screening a degree-preserving, square-free finite-field image.
+enum ModularPrimeScreen<E: PositiveExponent> {
+    Candidate(ModularIntegerFactorization<E>),
+    FactorLimitExceeded { lower_bound: usize },
+}
 
 #[cfg(test)]
 std::thread_local! {
     pub(crate) static LLL_RECOMBINATION_SUCCESSES: std::cell::Cell<usize> = const {
+        std::cell::Cell::new(0)
+    };
+    static QUADRATIC_HENSEL_LIFT_CALLS: std::cell::Cell<usize> = const {
+        std::cell::Cell::new(0)
+    };
+    static MODULAR_INTEGER_EDF_CALLS: std::cell::Cell<usize> = const {
+        std::cell::Cell::new(0)
+    };
+    static BOUNDED_DDF_REJECTIONS: std::cell::Cell<usize> = const {
+        std::cell::Cell::new(0)
+    };
+    static LAST_BOUNDED_DDF_REJECTION_DEGREE: std::cell::Cell<usize> = const {
+        std::cell::Cell::new(0)
+    };
+    static LAST_MODULAR_INTEGER_EDF_PRIME: std::cell::Cell<u32> = const {
         std::cell::Cell::new(0)
     };
 }
@@ -398,6 +432,158 @@ impl<R: EuclideanDomain, E: PositiveExponent> MultivariatePolynomial<R, E, LexOr
         }
 
         all_monomials == all_monomials_in_factors
+    }
+}
+
+/// Arithmetic modulo an integer on dense univariate integer polynomials.
+///
+/// Quadratic Hensel lifting uses this context for factor and Bezout corrections modulo the
+/// current prime power. Polynomial products go through the integer multiplication dispatcher;
+/// division uses the inverse of the divisor's unit leading coefficient.
+struct IntegerModularUnivariateContext<'a, E: PositiveExponent> {
+    modulus: &'a Integer,
+    variable: usize,
+    template: &'a MultivariatePolynomial<IntegerRing, E, LexOrder>,
+}
+
+impl<'a, E: PositiveExponent> IntegerModularUnivariateContext<'a, E> {
+    fn new(
+        modulus: &'a Integer,
+        template: &'a MultivariatePolynomial<IntegerRing, E, LexOrder>,
+    ) -> Self {
+        assert!(!modulus.is_zero() && !modulus.is_negative());
+        let variable = template
+            .last_exponents()
+            .iter()
+            .position(|exponent| !exponent.is_zero())
+            .expect("a Hensel factor must be nonconstant");
+        debug_assert!(template.exponents_iter().all(|exponents| {
+            exponents
+                .iter()
+                .enumerate()
+                .all(|(index, exponent)| index == variable || exponent.is_zero())
+        }));
+        Self {
+            modulus,
+            variable,
+            template,
+        }
+    }
+
+    fn reduce(
+        &self,
+        polynomial: &MultivariatePolynomial<IntegerRing, E, LexOrder>,
+    ) -> MultivariatePolynomial<IntegerRing, E, LexOrder> {
+        polynomial.map_coeff(
+            |coefficient| coefficient.clone().symmetric_mod(self.modulus),
+            Z,
+        )
+    }
+
+    fn multiply(
+        &self,
+        left: &MultivariatePolynomial<IntegerRing, E, LexOrder>,
+        right: &MultivariatePolynomial<IntegerRing, E, LexOrder>,
+    ) -> MultivariatePolynomial<IntegerRing, E, LexOrder> {
+        self.reduce(&(left * right))
+    }
+
+    fn add(
+        &self,
+        left: &MultivariatePolynomial<IntegerRing, E, LexOrder>,
+        right: &MultivariatePolynomial<IntegerRing, E, LexOrder>,
+    ) -> MultivariatePolynomial<IntegerRing, E, LexOrder> {
+        self.reduce(&(left + right))
+    }
+
+    fn dense_coefficients(
+        &self,
+        polynomial: &MultivariatePolynomial<IntegerRing, E, LexOrder>,
+    ) -> Vec<Integer> {
+        let degree = polynomial.degree(self.variable).to_u32() as usize;
+        let mut coefficients = vec![Integer::zero(); degree + 1];
+        for term in polynomial {
+            debug_assert!(
+                term.exponents
+                    .iter()
+                    .enumerate()
+                    .all(|(index, exponent)| index == self.variable || exponent.is_zero())
+            );
+            coefficients[term.exponents[self.variable].to_u32() as usize] =
+                term.coefficient.clone().symmetric_mod(self.modulus);
+        }
+        coefficients
+    }
+
+    fn from_dense_coefficients(
+        &self,
+        coefficients: Vec<Integer>,
+    ) -> MultivariatePolynomial<IntegerRing, E, LexOrder> {
+        let capacity = coefficients
+            .iter()
+            .filter(|coefficient| !coefficient.is_zero())
+            .count();
+        let mut polynomial = self.template.zero_with_capacity(capacity);
+        let mut exponents = vec![E::zero(); self.template.nvars()];
+        for (degree, coefficient) in coefficients.into_iter().enumerate() {
+            if coefficient.is_zero() {
+                continue;
+            }
+            exponents[self.variable] = E::from_u32(degree as u32);
+            polynomial.append_monomial_back(coefficient, &exponents);
+        }
+        polynomial
+    }
+
+    /// Divide modulo the context modulus and return a canonical symmetric quotient and remainder.
+    ///
+    /// The divisor's leading coefficient must be invertible modulo the context modulus, as it is
+    /// for the modular factors used during Hensel lifting.
+    fn quot_rem(
+        &self,
+        dividend: &MultivariatePolynomial<IntegerRing, E, LexOrder>,
+        divisor: &MultivariatePolynomial<IntegerRing, E, LexOrder>,
+    ) -> (
+        MultivariatePolynomial<IntegerRing, E, LexOrder>,
+        MultivariatePolynomial<IntegerRing, E, LexOrder>,
+    ) {
+        assert!(!divisor.is_zero());
+        if dividend.is_zero() {
+            return (self.template.zero(), self.template.zero());
+        }
+
+        let mut remainder = self.dense_coefficients(dividend);
+        let divisor = self.dense_coefficients(divisor);
+        if remainder.len() < divisor.len() {
+            return (
+                self.template.zero(),
+                self.from_dense_coefficients(remainder),
+            );
+        }
+
+        let divisor_degree = divisor.len() - 1;
+        let leading_inverse = divisor[divisor_degree].mod_inverse(self.modulus);
+        let mut quotient = vec![Integer::zero(); remainder.len() - divisor_degree];
+        for power in (divisor_degree..remainder.len()).rev() {
+            let coefficient = (&remainder[power] * &leading_inverse).symmetric_mod(self.modulus);
+            if coefficient.is_zero() {
+                continue;
+            }
+            quotient[power - divisor_degree] = coefficient.clone();
+            for (offset, divisor_coefficient) in divisor.iter().enumerate() {
+                let index = power - divisor_degree + offset;
+                Z.sub_mul_assign(&mut remainder[index], &coefficient, divisor_coefficient);
+                let value = std::mem::replace(&mut remainder[index], Integer::zero());
+                remainder[index] = value.symmetric_mod(self.modulus);
+            }
+            debug_assert!(remainder[power].is_zero());
+        }
+
+        remainder.truncate(divisor_degree);
+        (
+            self.from_dense_coefficients(quotient),
+            self.from_dense_coefficients(remainder),
+        )
     }
 }
 
@@ -1214,8 +1400,29 @@ where
 
     /// Perform distinct degree factorization on a monic, univariate and square-free polynomial.
     pub fn distinct_degree_factorization(&self) -> Vec<(usize, Self)> {
+        if self.is_constant() {
+            return vec![(0, self.clone())];
+        }
+
+        self.distinct_degree_factorization_bounded(None)
+            .unwrap()
+            .blocks
+    }
+
+    /// Compute distinct-degree blocks and their exact irreducible-factor count.
+    ///
+    /// If `max_factor_count` is present, return the first proven lower bound that exceeds this
+    /// inclusive limit instead of completing the remaining blocks.
+    fn distinct_degree_factorization_bounded(
+        &self,
+        max_factor_count: Option<usize>,
+    ) -> Result<DistinctDegreeFactorization<Self>, usize> {
         let Some(var) = self.last_exponents().iter().position(|x| *x > E::zero()) else {
-            return vec![(0, self.clone())]; // constant polynomial
+            debug_assert!(self.is_one(), "bounded DDF requires a monic polynomial");
+            return Ok(DistinctDegreeFactorization {
+                blocks: vec![],
+                factor_count: 0,
+            });
         };
 
         let mut e = self.last_exponents().to_vec();
@@ -1223,9 +1430,18 @@ where
         let x = self.monomial(self.ring().one(), e);
 
         let mut factors = vec![];
+        let mut factor_count = 0usize;
         let mut h = x.clone();
         let mut f = self.clone();
         let mut i: usize = 0;
+        if max_factor_count.is_some_and(|limit| limit == 0) {
+            #[cfg(test)]
+            {
+                BOUNDED_DDF_REJECTIONS.with(|rejections| rejections.set(rejections.get() + 1));
+                LAST_BOUNDED_DDF_REJECTION_DEGREE.with(|degree| degree.set(0));
+            }
+            return Err(1);
+        }
         while !f.is_one() {
             i += 1;
 
@@ -1235,19 +1451,36 @@ where
 
             if !g.is_one() {
                 f = f.quot_rem_univariate(&mut g).0;
+                let block_degree = g.degree(var).to_u32() as usize;
+                debug_assert_eq!(block_degree % i, 0);
+                factor_count += block_degree / i;
                 factors.push((i, g));
+            }
+
+            let factor_count_lower_bound = factor_count + usize::from(!f.is_constant());
+            if max_factor_count.is_some_and(|limit| factor_count_lower_bound > limit) {
+                #[cfg(test)]
+                {
+                    BOUNDED_DDF_REJECTIONS.with(|rejections| rejections.set(rejections.get() + 1));
+                    LAST_BOUNDED_DDF_REJECTION_DEGREE.with(|degree| degree.set(i));
+                }
+                return Err(factor_count_lower_bound);
             }
 
             if f.last_exponents()[var] < E::from_u32(2 * (i as u32 + 1)) {
                 // f cannot be split more
                 if !f.is_constant() {
+                    factor_count += 1;
                     factors.push((f.last_exponents()[var].to_u32() as usize, f));
                 }
                 break;
             }
         }
 
-        factors
+        Ok(DistinctDegreeFactorization {
+            blocks: factors,
+            factor_count,
+        })
     }
 
     /// Perform Cantor-Zassenhaus's probabilistic algorithm for
@@ -4149,10 +4382,25 @@ impl<E: PositiveExponent> MultivariatePolynomial<IntegerRing, E, LexOrder> {
     /// `Err((u,w))` where `u` and `w` are monic.
     pub fn hensel_lift<UField: FiniteFieldWorkspace>(
         &self,
+        u: MultivariatePolynomial<FiniteField<UField>, E, LexOrder>,
+        w: MultivariatePolynomial<FiniteField<UField>, E, LexOrder>,
+        gamma: Option<Integer>,
+        max_p: &Integer,
+    ) -> Result<(Self, Self), (Self, Self)>
+    where
+        FiniteField<UField>: Field + PolynomialGCD<E> + FiniteFieldCore<UField>,
+        Integer: ToFiniteField<UField>,
+    {
+        self.hensel_lift_with_strategy(u, w, gamma, max_p, true)
+    }
+
+    fn hensel_lift_with_strategy<UField: FiniteFieldWorkspace>(
+        &self,
         mut u: MultivariatePolynomial<FiniteField<UField>, E, LexOrder>,
         mut w: MultivariatePolynomial<FiniteField<UField>, E, LexOrder>,
         gamma: Option<Integer>,
         max_p: &Integer,
+        quadratic_lift_allowed: bool,
     ) -> Result<(Self, Self), (Self, Self)>
     where
         FiniteField<UField>: Field + PolynomialGCD<E> + FiniteFieldCore<UField>,
@@ -4185,21 +4433,109 @@ impl<E: PositiveExponent> MultivariatePolynomial<IntegerRing, E, LexOrder> {
 
         let mut m = p.clone();
 
-        while !e.is_zero() && &m < max_p {
-            let e_p = e.map_coeff(|c| (c / &m).to_finite_field(&field), field.clone());
-            let (q, r) = (&e_p * &s).quot_rem_univariate(&mut w);
-            let tau = &e_p * &t + q * &u;
+        let use_quadratic_lift = if !quadratic_lift_allowed || p == Integer::Single(2) {
+            false
+        } else {
+            let mut threshold_power = p.clone();
+            let mut reaches_threshold = true;
+            for _ in 1..MIN_QUADRATIC_HENSEL_DIGITS {
+                if &threshold_power >= max_p {
+                    reaches_threshold = false;
+                    break;
+                }
+                threshold_power *= &p;
+            }
+            reaches_threshold
+        };
 
-            u_i = u_i
-                + tau
-                    .map_coeff(|c| field.to_symmetric_integer(c), Z)
-                    .mul_coeff(m.clone());
-            w_i = w_i
-                + r.map_coeff(|c| field.to_symmetric_integer(c), Z)
-                    .mul_coeff(m.clone());
-            e = &a - &(&u_i * &w_i);
+        if use_quadratic_lift {
+            #[cfg(test)]
+            QUADRATIC_HENSEL_LIFT_CALLS.with(|calls| calls.set(calls.get() + 1));
+            let mut s_i = s.map_coeff(|c| field.to_symmetric_integer(c), Z);
+            let mut t_i = t.map_coeff(|c| field.to_symmetric_integer(c), Z);
 
-            m = &m * &p;
+            while !e.is_zero() && &m < max_p {
+                // A full round doubles the known p-adic precision. The last round can use the
+                // remaining divisor of m so that the resulting modulus is exactly max_p.
+                debug_assert!((max_p % &m).is_zero());
+                let squared_modulus = &m * &m;
+                let step_modulus = if &squared_modulus <= max_p {
+                    m.clone()
+                } else {
+                    max_p / &m
+                };
+                debug_assert!((&m % &step_modulus).is_zero());
+                let next_modulus = &m * &step_modulus;
+                let modular_context = IntegerModularUnivariateContext::new(&step_modulus, self);
+
+                let error_quotient = e.map_coeff(
+                    |coefficient| {
+                        debug_assert!((coefficient % &m).is_zero());
+                        coefficient / &m
+                    },
+                    Z,
+                );
+                let error_mod = modular_context.reduce(&error_quotient);
+                let u_mod = modular_context.reduce(&u_i);
+                let w_mod = modular_context.reduce(&w_i);
+                let s_mod = modular_context.reduce(&s_i);
+                let t_mod = modular_context.reduce(&t_i);
+
+                // If s*u + t*w = 1, division e*s = q*w + r gives
+                // e = (e*t + q*u)*w + r*u. These are the two factor corrections.
+                let error_times_s = modular_context.multiply(&error_mod, &s_mod);
+                let (q, r) = modular_context.quot_rem(&error_times_s, &w_mod);
+                let error_times_t = modular_context.multiply(&error_mod, &t_mod);
+                let q_times_u = modular_context.multiply(&q, &u_mod);
+                let tau = modular_context.add(&error_times_t, &q_times_u);
+                u_i = u_i + tau.mul_coeff(m.clone());
+                w_i = w_i + r.mul_coeff(m.clone());
+                e = &a - &(&u_i * &w_i);
+
+                if e.is_zero() || &next_modulus >= max_p {
+                    m = next_modulus;
+                    break;
+                }
+
+                // Lift the Bezout cofactors to the same doubled modulus. For
+                // b=(s*u+t*w-1)/m, solve ds*u+dt*w=-b modulo m and set
+                // s'=s+m*ds, t'=t+m*dt.
+                let bezout_error = &(&s_i * &u_i) + &(&t_i * &w_i) - u_i.one();
+                let negative_bezout_quotient = bezout_error.map_coeff(
+                    |coefficient| {
+                        debug_assert!((coefficient % &m).is_zero());
+                        -(coefficient / &m)
+                    },
+                    Z,
+                );
+                let bezout_mod = modular_context.reduce(&negative_bezout_quotient);
+                let w_mod = modular_context.reduce(&w_i);
+                let bezout_times_s = modular_context.multiply(&bezout_mod, &s_mod);
+                let (q, delta_s) = modular_context.quot_rem(&bezout_times_s, &w_mod);
+                let bezout_times_t = modular_context.multiply(&bezout_mod, &t_mod);
+                let q_times_u = modular_context.multiply(&q, &u_mod);
+                let delta_t = modular_context.add(&bezout_times_t, &q_times_u);
+                s_i = s_i + delta_s.mul_coeff(m.clone());
+                t_i = t_i + delta_t.mul_coeff(m.clone());
+                m = next_modulus;
+            }
+        } else {
+            while !e.is_zero() && &m < max_p {
+                let e_p = e.map_coeff(|c| (c / &m).to_finite_field(&field), field.clone());
+                let (q, r) = (&e_p * &s).quot_rem_univariate(&mut w);
+                let tau = &e_p * &t + q * &u;
+
+                u_i = u_i
+                    + tau
+                        .map_coeff(|c| field.to_symmetric_integer(c), Z)
+                        .mul_coeff(m.clone());
+                w_i = w_i
+                    + r.map_coeff(|c| field.to_symmetric_integer(c), Z)
+                        .mul_coeff(m.clone());
+                e = &a - &(&u_i * &w_i);
+
+                m = &m * &p;
+            }
         }
 
         if e.is_zero() {
@@ -4235,6 +4571,15 @@ impl<E: PositiveExponent> MultivariatePolynomial<IntegerRing, E, LexOrder> {
         hs: &[MultivariatePolynomial<Zp, E, LexOrder>],
         max_p: &Integer,
     ) -> Vec<Self> {
+        self.multi_factor_hensel_lift_with_strategy(hs, max_p, hs.len() <= 4)
+    }
+
+    fn multi_factor_hensel_lift_with_strategy(
+        &self,
+        hs: &[MultivariatePolynomial<Zp, E, LexOrder>],
+        max_p: &Integer,
+        quadratic_lift_allowed: bool,
+    ) -> Vec<Self> {
         if hs.len() == 1 {
             if self.lcoeff().is_one() {
                 return vec![self.clone()];
@@ -4257,20 +4602,31 @@ impl<E: PositiveExponent> MultivariatePolynomial<IntegerRing, E, LexOrder> {
             h = h * x;
         }
 
-        let (g_i, h_i) = self.hensel_lift(g, h, None, max_p).unwrap_or_else(|e| e);
+        let (g_i, h_i) = self
+            .hensel_lift_with_strategy(g, h, None, max_p, quadratic_lift_allowed)
+            .unwrap_or_else(|e| e);
 
-        let mut factors = g_i.multi_factor_hensel_lift(gs, max_p);
-        factors.extend(h_i.multi_factor_hensel_lift(hs, max_p));
+        let mut factors =
+            g_i.multi_factor_hensel_lift_with_strategy(gs, max_p, quadratic_lift_allowed);
+        factors.extend(h_i.multi_factor_hensel_lift_with_strategy(
+            hs,
+            max_p,
+            quadratic_lift_allowed,
+        ));
         factors
     }
 
-    /// Factor the square-free univariate image modulo `prime` when its degree
-    /// and leading coefficient are preserved.
-    fn factor_univariate_mod_prime(
+    /// Compute distinct-degree data for a suitable univariate image modulo `prime`.
+    ///
+    /// Equal-degree factorization is deferred until the prime selector retains this candidate.
+    /// A candidate whose proven factor-count lower bound exceeds the inclusive limit is reported
+    /// separately from a prime that changes the degree or destroys square-freeness.
+    fn screen_univariate_mod_prime(
         &self,
         var: usize,
         prime: u32,
-    ) -> Option<ModularIntegerFactorization<E>> {
+        max_factor_count: Option<usize>,
+    ) -> Option<ModularPrimeScreen<E>> {
         if (&self.lcoeff() % &Integer::Single(prime as i64)).is_zero() {
             return None;
         }
@@ -4284,9 +4640,50 @@ impl<E: PositiveExponent> MultivariatePolynomial<IntegerRing, E, LexOrder> {
             return None;
         }
 
-        let factors = image.factor_distinct_equal_degree();
-        debug!("Prime {prime} yields {} modular factors", factors.len());
-        Some((field, factors))
+        match image
+            .make_monic()
+            .distinct_degree_factorization_bounded(max_factor_count)
+        {
+            Ok(distinct_degree) => {
+                debug!(
+                    "Prime {prime} yields {} modular factors",
+                    distinct_degree.factor_count
+                );
+                Some(ModularPrimeScreen::Candidate(ModularIntegerFactorization {
+                    field,
+                    distinct_degree,
+                }))
+            }
+            Err(lower_bound) => {
+                debug!(
+                    "Prime {prime} exceeds the modular factor limit with lower bound {lower_bound}"
+                );
+                Some(ModularPrimeScreen::FactorLimitExceeded { lower_bound })
+            }
+        }
+    }
+
+    /// Split the retained distinct-degree blocks into monic irreducible factors.
+    fn complete_equal_degree_factorization(
+        candidate: ModularIntegerFactorization<E>,
+    ) -> (Zp, Vec<MultivariatePolynomial<Zp, E, LexOrder>>) {
+        #[cfg(test)]
+        {
+            MODULAR_INTEGER_EDF_CALLS.with(|calls| calls.set(calls.get() + 1));
+            LAST_MODULAR_INTEGER_EDF_PRIME.with(|prime| prime.set(candidate.field.get_prime()));
+        }
+
+        let factor_count = candidate.distinct_degree.factor_count;
+        let mut factors = Vec::with_capacity(factor_count);
+        for (degree, block) in candidate.distinct_degree.blocks {
+            debug!("DDF {} {}", block, degree);
+            for factor in block.equal_degree_factorization(degree) {
+                debug!("EDF {}", factor);
+                factors.push(factor);
+            }
+        }
+        debug_assert_eq!(factors.len(), factor_count);
+        (candidate.field, factors)
     }
 
     /// Return the number of base-prime digits and the prime power needed to
@@ -4554,27 +4951,37 @@ impl<E: PositiveExponent> MultivariatePolynomial<IntegerRing, E, LexOrder> {
             if p > u32::MAX as u64 {
                 panic!("Ran out of primes during factorization of {self}");
             }
-            let Some((field, factors)) = self.factor_univariate_mod_prime(var, p as u32) else {
+            let max_factor_count = best_factorization
+                .as_ref()
+                .map(|best| best.distinct_degree.factor_count.saturating_sub(1));
+            let Some(screen) = self.screen_univariate_mod_prime(var, p as u32, max_factor_count)
+            else {
                 continue;
             };
             suitable_primes += 1;
+            let candidate = match screen {
+                ModularPrimeScreen::Candidate(candidate) => candidate,
+                ModularPrimeScreen::FactorLimitExceeded { .. } => continue,
+            };
 
-            if factors.len() == 1 {
+            if candidate.distinct_degree.factor_count == 1 {
                 // Irreducibility modulo one prime proves irreducibility over Z.
                 return vec![self.clone()];
             }
 
             let replace_best = best_factorization
                 .as_ref()
-                .map(|(_, best)| factors.len() < best.len())
+                .map(|best| {
+                    candidate.distinct_degree.factor_count < best.distinct_degree.factor_count
+                })
                 .unwrap_or(true);
             if replace_best {
-                best_factorization = Some((field, factors));
+                best_factorization = Some(candidate);
             }
 
             if best_factorization
                 .as_ref()
-                .is_some_and(|(_, factors)| factors.len() <= 12)
+                .is_some_and(|best| best.distinct_degree.factor_count <= 12)
             {
                 break;
             }
@@ -4582,20 +4989,20 @@ impl<E: PositiveExponent> MultivariatePolynomial<IntegerRing, E, LexOrder> {
 
         let bound = self.coefficient_bound();
 
-        // A large machine prime reduces the number of full correction rounds in
+        // A wider machine prime reduces the number of full correction rounds in
         // the current linear p-adic lift. Restrict it to low-degree, high-height
         // images where that saving clearly outweighs the more expensive finite-
         // field factorization.
         let (initial_factor_count, initial_digits, initial_work) = {
-            let (field, factors) = best_factorization.as_ref().unwrap();
-            let (digits, _) = Self::linear_hensel_modulus(&bound, field.get_prime());
+            let candidate = best_factorization.as_ref().unwrap();
+            let (digits, _) = Self::linear_hensel_modulus(&bound, candidate.field.get_prime());
             (
-                factors.len(),
+                candidate.distinct_degree.factor_count,
                 digits,
-                Self::linear_hensel_work(factors.len(), digits),
+                Self::linear_hensel_work(candidate.distinct_degree.factor_count, digits),
             )
         };
-        let high_linear_lift_pressure = d <= 32
+        let high_linear_lift_pressure = d <= 64
             && bound.significant_bits() >= 256
             && initial_factor_count >= 3
             && initial_digits >= 64
@@ -4609,69 +5016,113 @@ impl<E: PositiveExponent> MultivariatePolynomial<IntegerRing, E, LexOrder> {
                 if p > u32::MAX as u64 {
                     panic!("Ran out of primes during factorization of {self}");
                 }
-                let Some(candidate) = self.factor_univariate_mod_prime(var, p as u32) else {
+                let candidate_digits = Self::linear_hensel_modulus(&bound, p as u32).0;
+                let best = best_factorization.as_ref().unwrap();
+                let best_digits = Self::linear_hensel_modulus(&bound, best.field.get_prime()).0;
+                let best_work =
+                    Self::linear_hensel_work(best.distinct_degree.factor_count, best_digits);
+                let max_factor_count =
+                    (best_work.saturating_sub(1) / candidate_digits).saturating_add(1);
+                let Some(screen) =
+                    self.screen_univariate_mod_prime(var, p as u32, Some(max_factor_count))
+                else {
                     continue;
                 };
                 suitable_primes += 1;
+                let candidate = match screen {
+                    ModularPrimeScreen::Candidate(candidate) => candidate,
+                    ModularPrimeScreen::FactorLimitExceeded { .. } => continue,
+                };
 
-                if candidate.1.len() == 1 {
+                if candidate.distinct_degree.factor_count == 1 {
                     return vec![self.clone()];
                 }
 
-                let candidate_digits =
-                    Self::linear_hensel_modulus(&bound, candidate.0.get_prime()).0;
-                let candidate_work = Self::linear_hensel_work(candidate.1.len(), candidate_digits);
-                let best = best_factorization.as_ref().unwrap();
-                let best_digits = Self::linear_hensel_modulus(&bound, best.0.get_prime()).0;
-                let best_work = Self::linear_hensel_work(best.1.len(), best_digits);
+                let candidate_work = Self::linear_hensel_work(
+                    candidate.distinct_degree.factor_count,
+                    candidate_digits,
+                );
                 if candidate_work < best_work {
                     best_factorization = Some(candidate);
                 }
             }
 
-            let mut large_primes =
-                PrimeIteratorU64::new(u32::get_large_prime().saturating_sub(1) as u64);
-            let large_candidate = loop {
-                let Some(p) = large_primes.next() else {
+            // Keep dense products of two degree-d images in the u64 accumulator kernel. The
+            // bound p * (d + 1) <= u32::MAX proves both that all (d + 1)^2 products fit in u64
+            // and that one Montgomery reduction is sufficient for each output coefficient.
+            let maximum_direct_prime = u64::from(u32::MAX) / (u64::from(d) + 1);
+            // This retains 26 bits per lifting digit and leaves room to skip unsuitable primes at
+            // degree 64 without crossing the direct-reduction bound.
+            let mut direct_primes = PrimeIteratorU64::new(65_000_000);
+            let best_factor_count = best_factorization
+                .as_ref()
+                .unwrap()
+                .distinct_degree
+                .factor_count;
+            let direct_factor_limit = if best_factor_count < 10 {
+                best_factor_count + 1
+            } else {
+                best_factor_count
+            };
+            let direct_candidate = loop {
+                let Some(p) = direct_primes.next() else {
                     break None;
                 };
-                if p > u32::MAX as u64 {
+                if p > maximum_direct_prime {
                     break None;
                 }
-                if let Some(candidate) = self.factor_univariate_mod_prime(var, p as u32) {
-                    break Some(candidate);
+                match self.screen_univariate_mod_prime(var, p as u32, Some(direct_factor_limit)) {
+                    None => {}
+                    Some(ModularPrimeScreen::Candidate(candidate)) => break Some(candidate),
+                    Some(ModularPrimeScreen::FactorLimitExceeded { lower_bound }) => {
+                        debug!(
+                            "Rejected the first suitable dense-u64 prime at modular factor lower bound {lower_bound}"
+                        );
+                        break None;
+                    }
                 }
             };
 
-            if let Some(candidate) = large_candidate {
-                if candidate.1.len() == 1 {
+            if let Some(candidate) = direct_candidate {
+                if candidate.distinct_degree.factor_count == 1 {
                     return vec![self.clone()];
                 }
 
                 let best = best_factorization.as_ref().unwrap();
-                let best_digits = Self::linear_hensel_modulus(&bound, best.0.get_prime()).0;
-                let best_work = Self::linear_hensel_work(best.1.len(), best_digits);
+                let best_digits = Self::linear_hensel_modulus(&bound, best.field.get_prime()).0;
+                let best_work =
+                    Self::linear_hensel_work(best.distinct_degree.factor_count, best_digits);
                 let candidate_digits =
-                    Self::linear_hensel_modulus(&bound, candidate.0.get_prime()).0;
-                let candidate_work = Self::linear_hensel_work(candidate.1.len(), candidate_digits);
-                let crosses_recombination_boundary = best.1.len() <= 10 && candidate.1.len() > 10;
-                let same_or_fewer_factors = candidate.1.len() <= best.1.len()
+                    Self::linear_hensel_modulus(&bound, candidate.field.get_prime()).0;
+                let candidate_work = Self::linear_hensel_work(
+                    candidate.distinct_degree.factor_count,
+                    candidate_digits,
+                );
+                let crosses_recombination_boundary = best.distinct_degree.factor_count <= 10
+                    && candidate.distinct_degree.factor_count > 10;
+                let same_or_fewer_factors = candidate.distinct_degree.factor_count
+                    <= best.distinct_degree.factor_count
                     && candidate_work.saturating_mul(2) <= best_work;
-                let one_extra_factor = candidate.1.len() == best.1.len() + 1
-                    && best.1.len() < 10
+                let one_extra_factor = candidate.distinct_degree.factor_count
+                    == best.distinct_degree.factor_count + 1
+                    && best.distinct_degree.factor_count < 10
                     && candidate_work.saturating_mul(4) <= best_work;
 
                 if !crosses_recombination_boundary && (same_or_fewer_factors || one_extra_factor) {
                     debug!(
-                        "Selected a large modular prime: estimated linear Hensel work {best_work} -> {candidate_work}"
+                        "Selected a dense-u64 modular prime: estimated linear Hensel work {best_work} -> {candidate_work}"
                     );
                     best_factorization = Some(candidate);
                 }
             }
         }
 
-        let (field, hs) = best_factorization.unwrap();
-        debug!("Selected modular factorization with {} factors", hs.len());
+        let best_factorization = best_factorization.unwrap();
+        debug!(
+            "Selected modular factorization with {} factors",
+            best_factorization.distinct_degree.factor_count
+        );
+        let (field, hs) = Self::complete_equal_degree_factorization(best_factorization);
 
         let (_, max_p) = Self::linear_hensel_modulus(&bound, field.get_prime());
 
@@ -6799,7 +7250,10 @@ mod test {
     use std::sync::{Arc, Mutex, atomic::Ordering};
 
     use super::{
-        DenseBivariateImage, DenseTwoFactorCorrectionContext, ExactPolynomialSquareRoot,
+        BOUNDED_DDF_REJECTIONS, DenseBivariateImage, DenseTwoFactorCorrectionContext,
+        ExactPolynomialSquareRoot, IntegerModularUnivariateContext,
+        LAST_BOUNDED_DDF_REJECTION_DEGREE, LAST_MODULAR_INTEGER_EDF_PRIME,
+        MODULAR_INTEGER_EDF_CALLS, ModularPrimeScreen, QUADRATIC_HENSEL_LIFT_CALLS,
         QuadraticFactorization, SparseDiophantineContext,
     };
 
@@ -6809,8 +7263,8 @@ mod test {
         domains::{
             InternalOrdering, Ring,
             algebraic::AlgebraicExtension,
-            finite_field::{Z2, Zp},
-            integer::{Integer, Z},
+            finite_field::{FiniteField, FiniteFieldCore, ToFiniteField, Z2, Zp},
+            integer::{Integer, IntegerRing, Z},
             rational::Q,
         },
         parse,
@@ -7524,6 +7978,258 @@ mod test {
         let mut r = poly.factor();
         r.sort_by(|a, b| a.0.internal_cmp(&b.0).then(a.1.cmp(&b.1)));
         assert_eq!(r, res);
+    }
+
+    #[test]
+    fn bounded_distinct_degree_factorization_reports_exact_factor_counts() {
+        let field = Zp::new(11);
+        let one = parse!("1").to_polynomial::<_, u8>(&field, None);
+        let bounded_one = one.distinct_degree_factorization_bounded(Some(0)).unwrap();
+        assert_eq!(bounded_one.factor_count, 0);
+        assert!(bounded_one.blocks.is_empty());
+        assert_eq!(one.distinct_degree_factorization(), vec![(0, one.clone())]);
+
+        let polynomial = parse!("x*(x+1)*(x^2+1)")
+            .expand()
+            .to_polynomial::<_, u8>(&field, None);
+
+        let complete = polynomial
+            .distinct_degree_factorization_bounded(None)
+            .unwrap();
+        assert_eq!(complete.factor_count, 3);
+        assert_eq!(complete.blocks.len(), 2);
+        let reconstructed = complete
+            .blocks
+            .iter()
+            .fold(polynomial.one(), |product, (_, block)| &product * block);
+        assert_eq!(reconstructed, polynomial);
+
+        let limited = polynomial.distinct_degree_factorization_bounded(Some(2));
+        let Err(lower_bound) = limited else {
+            panic!("a two-factor limit must reject three irreducible factors");
+        };
+        assert_eq!(lower_bound, 3);
+
+        let admitted = polynomial
+            .distinct_degree_factorization_bounded(Some(3))
+            .unwrap();
+        assert_eq!(admitted.factor_count, complete.factor_count);
+        assert_eq!(admitted.blocks, complete.blocks);
+    }
+
+    #[test]
+    fn degree_64_modular_screening_counts_and_rejects_early() {
+        let polynomial = parse!("((1+3*x)^33-1)*((1-5*x)^31+1)")
+            .expand()
+            .to_polynomial::<_, u8>(&Z, None);
+
+        for (prime, expected_count) in [(7, 9), (13, 8), (17, 7), (65_000_011, 20)] {
+            let Some(ModularPrimeScreen::Candidate(candidate)) =
+                polynomial.screen_univariate_mod_prime(0, prime, None)
+            else {
+                panic!("prime {prime} must produce a suitable modular image");
+            };
+            assert_eq!(candidate.distinct_degree.factor_count, expected_count);
+        }
+
+        LAST_BOUNDED_DDF_REJECTION_DEGREE.with(|degree| degree.set(0));
+        let Some(ModularPrimeScreen::FactorLimitExceeded { lower_bound }) =
+            polynomial.screen_univariate_mod_prime(0, 65_000_011, Some(8))
+        else {
+            panic!("the large-prime image must exceed the eight-factor limit");
+        };
+        assert_eq!(lower_bound, 20);
+        LAST_BOUNDED_DDF_REJECTION_DEGREE.with(|degree| assert_eq!(degree.get(), 2));
+    }
+
+    #[test]
+    fn factor_univariate_degree_64_defers_discarded_equal_degree_factorization() {
+        MODULAR_INTEGER_EDF_CALLS.with(|calls| calls.set(0));
+        BOUNDED_DDF_REJECTIONS.with(|rejections| rejections.set(0));
+        LAST_MODULAR_INTEGER_EDF_PRIME.with(|prime| prime.set(0));
+        let polynomial = parse!("((1+3*x)^33-1)*((1-5*x)^31+1)")
+            .expand()
+            .to_polynomial::<_, u8>(&Z, None);
+
+        let factors = polynomial.factor();
+        let reconstructed = factors
+            .iter()
+            .fold(polynomial.one(), |product, (factor, power)| {
+                &product * &factor.pow(*power)
+            });
+
+        assert_eq!(reconstructed, polynomial);
+        let mut degrees = factors
+            .iter()
+            .filter(|(factor, _)| !factor.is_constant())
+            .map(|(factor, power)| {
+                assert_eq!(*power, 1);
+                factor.degree(0)
+            })
+            .collect::<Vec<_>>();
+        degrees.sort_unstable();
+        assert_eq!(degrees, [1u8, 1, 2, 10, 20, 30]);
+        MODULAR_INTEGER_EDF_CALLS.with(|calls| assert_eq!(calls.get(), 1));
+        BOUNDED_DDF_REJECTIONS.with(|rejections| assert_eq!(rejections.get(), 1));
+        LAST_MODULAR_INTEGER_EDF_PRIME.with(|prime| assert_eq!(prime.get(), 17));
+    }
+
+    #[test]
+    fn quadratic_hensel_lift_handles_partial_final_precision() {
+        let variables = Some(Arc::new(vec![symbol!("x").into()]));
+        let left = parse!("37+19*x+6*x^2").to_polynomial::<_, u8>(&Z, variables.clone());
+        let right = parse!("29-13*x+5*x^2+3*x^3").to_polynomial::<_, u8>(&Z, variables.clone());
+        let product = &left * &right;
+        let field = Zp::new(11);
+        let left_mod = left.map_coeff(
+            |coefficient| coefficient.to_finite_field(&field),
+            field.clone(),
+        );
+        let right_mod = right.map_coeff(
+            |coefficient| coefficient.to_finite_field(&field),
+            field.clone(),
+        );
+        let max_p = Integer::from(11).pow(65);
+
+        let quadratic = product
+            .hensel_lift_with_strategy(left_mod.clone(), right_mod.clone(), None, &max_p, true)
+            .unwrap();
+        let linear = product
+            .hensel_lift_with_strategy(left_mod, right_mod, None, &max_p, false)
+            .unwrap();
+
+        assert_eq!(&quadratic.0 * &quadratic.1, product);
+        assert_eq!(quadratic, linear);
+    }
+
+    #[test]
+    fn quadratic_hensel_lift_preserves_unsuccessful_congruence() {
+        let variables = Some(Arc::new(vec![symbol!("x").into()]));
+        let polynomial = parse!("1+x^2").to_polynomial::<_, u8>(&Z, variables.clone());
+        let field = Zp::new(5);
+        let left = parse!("x-2").to_polynomial::<_, u8>(&field, variables.clone());
+        let right = parse!("x+2").to_polynomial::<_, u8>(&field, variables);
+        let max_p = Integer::from(5).pow(65);
+
+        let quadratic = polynomial
+            .hensel_lift_with_strategy(left.clone(), right.clone(), None, &max_p, true)
+            .unwrap_err();
+        let linear = polynomial
+            .hensel_lift_with_strategy(left, right, None, &max_p, false)
+            .unwrap_err();
+        let normalize = |factor: MultivariatePolynomial<IntegerRing, u8>| {
+            factor.map_coeff(|coefficient| coefficient.clone().symmetric_mod(&max_p), Z)
+        };
+        let quadratic = (normalize(quadratic.0), normalize(quadratic.1));
+        let linear = (normalize(linear.0), normalize(linear.1));
+        let error = &polynomial - &(&quadratic.0 * &quadratic.1);
+
+        assert_eq!(quadratic, linear);
+        assert!(
+            error
+                .coefficients
+                .iter()
+                .all(|coefficient| (coefficient % &max_p).is_zero())
+        );
+    }
+
+    #[test]
+    fn integer_modular_univariate_arithmetic_matches_finite_field_reference() {
+        let variables = Some(Arc::new(vec![
+            symbol!("x").into(),
+            symbol!("y").into(),
+            symbol!("z").into(),
+        ]));
+        let dividend = parse!("19-31*y+47*y^2+53*y^3-71*y^5+89*y^8")
+            .to_polynomial::<_, u8>(&Z, variables.clone());
+        let divisor = parse!("17+23*y-29*y^2-3*y^3").to_polynomial::<_, u8>(&Z, variables);
+
+        for modulus in [Integer::from(5).pow(8), Integer::from(5).pow(65)] {
+            let context = IntegerModularUnivariateContext::new(&modulus, &dividend);
+            let reduced_dividend = context.reduce(&dividend);
+            let reduced_divisor = context.reduce(&divisor);
+            let (quotient, remainder) = context.quot_rem(&reduced_dividend, &reduced_divisor);
+
+            let field = FiniteField::<Integer>::new_non_prime(modulus.clone());
+            let dividend_mod = dividend.map_coeff(
+                |coefficient| coefficient.to_finite_field(&field),
+                field.clone(),
+            );
+            let divisor_mod = divisor.map_coeff(
+                |coefficient| coefficient.to_finite_field(&field),
+                field.clone(),
+            );
+            let reference_add = (&dividend_mod + &divisor_mod)
+                .map_coeff(|coefficient| field.to_symmetric_integer(coefficient), Z);
+            let reference_product = (&dividend_mod * &divisor_mod)
+                .map_coeff(|coefficient| field.to_symmetric_integer(coefficient), Z);
+            let mut divisor_for_division = divisor_mod.clone();
+            let (reference_quotient, reference_remainder) =
+                dividend_mod.quot_rem_univariate(&mut divisor_for_division);
+            let reference_quotient = reference_quotient
+                .map_coeff(|coefficient| field.to_symmetric_integer(coefficient), Z);
+            let reference_remainder = reference_remainder
+                .map_coeff(|coefficient| field.to_symmetric_integer(coefficient), Z);
+
+            assert_eq!(
+                context.add(&reduced_dividend, &reduced_divisor),
+                reference_add
+            );
+            assert_eq!(
+                context.multiply(&reduced_dividend, &reduced_divisor),
+                reference_product
+            );
+            assert_eq!(quotient, reference_quotient);
+            assert_eq!(remainder, reference_remainder);
+
+            let product = &quotient * &reduced_divisor;
+            let error = &(&reduced_dividend - &product) - &remainder;
+
+            assert!(remainder.degree(1) < reduced_divisor.degree(1));
+            assert!(
+                error
+                    .coefficients
+                    .iter()
+                    .all(|coefficient| (coefficient % &modulus).is_zero())
+            );
+        }
+    }
+
+    #[test]
+    fn factor_univariate_high_height_uses_quadratic_hensel_lift() {
+        QUADRATIC_HENSEL_LIFT_CALLS.with(|calls| calls.set(0));
+        let polynomial = parse!("((1+65537*x)^17-1)*((1-65539*x)^16+1)")
+            .expand()
+            .to_polynomial::<_, u8>(&Z, None);
+
+        let factors = polynomial.factor();
+        let expanded = factors
+            .iter()
+            .fold(polynomial.one(), |product, (factor, power)| {
+                &product * &factor.pow(*power)
+            });
+
+        assert!(factors.len() >= 3);
+        assert_eq!(expanded, polynomial);
+        QUADRATIC_HENSEL_LIFT_CALLS.with(|calls| assert!(calls.get() > 0));
+    }
+
+    #[test]
+    fn factor_univariate_many_modular_factors_keeps_linear_hensel_lift() {
+        QUADRATIC_HENSEL_LIFT_CALLS.with(|calls| calls.set(0));
+        let polynomial = parse!("((1+3*x)^32-1)*((1-5*x)^31+1)")
+            .expand()
+            .to_polynomial::<_, u8>(&Z, None);
+
+        let factors = polynomial.factor();
+        let expanded = factors
+            .iter()
+            .fold(polynomial.one(), |product, (factor, power)| {
+                &product * &factor.pow(*power)
+            });
+
+        assert_eq!(expanded, polynomial);
+        QUADRATIC_HENSEL_LIFT_CALLS.with(|calls| assert_eq!(calls.get(), 0));
     }
 
     #[test]
