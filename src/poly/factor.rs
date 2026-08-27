@@ -4520,22 +4520,46 @@ impl<E: PositiveExponent> MultivariatePolynomial<IntegerRing, E, LexOrder> {
                 m = next_modulus;
             }
         } else {
-            while !e.is_zero() && &m < max_p {
-                let e_p = e.map_coeff(|c| (c / &m).to_finite_field(&field), field.clone());
+            // At precision m, error_quotient is exactly
+            // (a - u_i * w_i) / m. Updating it from the p-adic corrections
+            // avoids multiplying the two increasingly large lifted factors.
+            let divide_by_prime = |mut residual: Self| {
+                for coefficient in &mut residual.coefficients {
+                    debug_assert!((&*coefficient % &p).is_zero());
+                    *coefficient /= &p;
+                }
+                residual
+            };
+            let mut error_quotient = divide_by_prime(e);
+
+            while !error_quotient.is_zero() && &m < max_p {
+                let e_p = error_quotient.map_coeff(|c| c.to_finite_field(&field), field.clone());
                 let (q, r) = (&e_p * &s).quot_rem_univariate(&mut w);
                 let tau = &e_p * &t + q * &u;
 
-                u_i = u_i
-                    + tau
-                        .map_coeff(|c| field.to_symmetric_integer(c), Z)
-                        .mul_coeff(m.clone());
-                w_i = w_i
-                    + r.map_coeff(|c| field.to_symmetric_integer(c), Z)
-                        .mul_coeff(m.clone());
-                e = &a - &(&u_i * &w_i);
+                let tau_i = tau.map_coeff(|c| field.to_symmetric_integer(c), Z);
+                let r_i = r.map_coeff(|c| field.to_symmetric_integer(c), Z);
+
+                // For u' = u + m*tau and w' = w + m*r,
+                // (a - u'*w') / m = error_quotient - tau*w - r*u'. Here w is
+                // the old w_i and u' is the updated u_i. The right-hand side
+                // is divisible coefficient-wise by p.
+                let tau_times_w = &tau_i * &w_i;
+                u_i = u_i + tau_i.mul_coeff(m.clone());
+                let r_times_u = &r_i * &u_i;
+                error_quotient = divide_by_prime(error_quotient - tau_times_w - r_times_u);
+                w_i = w_i + r_i.mul_coeff(m.clone());
 
                 m = &m * &p;
+                debug_assert_eq!(
+                    error_quotient.clone().mul_coeff(m.clone()),
+                    &a - &(&u_i * &w_i)
+                );
             }
+
+            // Only the zero/nonzero state of e is used below. The scaled
+            // residual has the same state and avoids rebuilding a - u_i*w_i.
+            e = error_quotient;
         }
 
         if e.is_zero() {
@@ -8131,6 +8155,84 @@ mod test {
                 .iter()
                 .all(|coefficient| (coefficient % &max_p).is_zero())
         );
+    }
+
+    #[test]
+    fn linear_hensel_lift_handles_base_prime_precision() {
+        let variables = Some(Arc::new(vec![symbol!("x").into()]));
+        let field = Zp::new(5);
+        let left = parse!("x-2").to_polynomial::<_, u8>(&field, variables.clone());
+        let right = parse!("x+2").to_polynomial::<_, u8>(&field, variables.clone());
+        let max_p = Integer::from(5);
+
+        let exact = parse!("x^2-4").to_polynomial::<_, u8>(&Z, variables.clone());
+        let exact_lift = exact
+            .hensel_lift_with_strategy(left.clone(), right.clone(), None, &max_p, false)
+            .unwrap();
+        assert_eq!(&exact_lift.0 * &exact_lift.1, exact);
+
+        let inexact = parse!("1+x^2").to_polynomial::<_, u8>(&Z, variables);
+        let inexact_lift = inexact
+            .hensel_lift_with_strategy(left, right, None, &max_p, false)
+            .unwrap_err();
+        let error = &inexact - &(&inexact_lift.0 * &inexact_lift.1);
+        assert!(
+            error
+                .coefficients
+                .iter()
+                .all(|coefficient| (coefficient % &max_p).is_zero())
+        );
+    }
+
+    #[test]
+    fn linear_hensel_lift_handles_binary_prime_and_nontrivial_gamma() {
+        let variables = Some(Arc::new(vec![symbol!("x").into()]));
+
+        let binary_left = parse!("x+5").to_polynomial::<_, u8>(&Z, variables.clone());
+        let binary_right = parse!("x^2+3*x+3").to_polynomial::<_, u8>(&Z, variables.clone());
+        let binary_product = &binary_left * &binary_right;
+        let binary_field = Z2;
+        let binary_left_mod = binary_left.map_coeff(
+            |coefficient| coefficient.to_finite_field(&binary_field),
+            binary_field.clone(),
+        );
+        let binary_right_mod = binary_right.map_coeff(
+            |coefficient| coefficient.to_finite_field(&binary_field),
+            binary_field.clone(),
+        );
+        let binary_lift = binary_product
+            .hensel_lift_with_strategy(
+                binary_left_mod,
+                binary_right_mod,
+                None,
+                &Integer::from(2).pow(20),
+                true,
+            )
+            .unwrap();
+        assert_eq!(&binary_lift.0 * &binary_lift.1, binary_product);
+
+        let nonmonic_left = parse!("2*x+11").to_polynomial::<_, u8>(&Z, variables.clone());
+        let nonmonic_right = parse!("3*x+7").to_polynomial::<_, u8>(&Z, variables);
+        let nonmonic_product = &nonmonic_left * &nonmonic_right;
+        let nonmonic_field = Zp::new(5);
+        let nonmonic_left_mod = nonmonic_left.map_coeff(
+            |coefficient| coefficient.to_finite_field(&nonmonic_field),
+            nonmonic_field.clone(),
+        );
+        let nonmonic_right_mod = nonmonic_right.map_coeff(
+            |coefficient| coefficient.to_finite_field(&nonmonic_field),
+            nonmonic_field.clone(),
+        );
+        let nonmonic_lift = nonmonic_product
+            .hensel_lift_with_strategy(
+                nonmonic_left_mod,
+                nonmonic_right_mod,
+                Some(Integer::from(2)),
+                &Integer::from(5).pow(10),
+                false,
+            )
+            .unwrap();
+        assert_eq!(&nonmonic_lift.0 * &nonmonic_lift.1, nonmonic_product);
     }
 
     #[test]
