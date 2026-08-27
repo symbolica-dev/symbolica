@@ -414,7 +414,8 @@ struct ModularIntegerFactorization<E: PositiveExponent> {
     distinct_degree: DistinctDegreeFactorization<MultivariatePolynomial<Zp, E, LexOrder>>,
 }
 
-/// Result of screening a degree-preserving, square-free finite-field image.
+/// Result of screening a degree-preserving, square-free finite-field image
+/// with nonzero leading and constant coefficients.
 enum ModularPrimeScreen<E: PositiveExponent> {
     Candidate(ModularIntegerFactorization<E>),
     FactorLimitExceeded { lower_bound: usize },
@@ -6057,18 +6058,28 @@ impl<E: PositiveExponent> MultivariatePolynomial<IntegerRing, E, LexOrder> {
         }
     }
 
-    /// Compute distinct-degree data for a suitable univariate image modulo `prime`.
+    /// Compute distinct-degree data for a suitable monomial-free univariate image modulo `prime`.
     ///
     /// Equal-degree factorization is deferred until the prime selector retains this candidate.
     /// A candidate whose proven factor-count lower bound exceeds the inclusive limit is reported
-    /// separately from a prime that changes the degree or destroys square-freeness.
+    /// separately from a prime that changes the degree, introduces a zero constant coefficient,
+    /// or destroys square-freeness. Rejecting a zero constant avoids a modular factor `x` that is
+    /// absent from the exact monomial-free polynomial.
     fn screen_univariate_mod_prime(
         &self,
         var: usize,
         prime: u32,
         max_factor_count: Option<usize>,
     ) -> Option<ModularPrimeScreen<E>> {
-        if (&self.lcoeff() % &Integer::Single(prime as i64)).is_zero() {
+        let (Some(constant), Some(leading)) = (self.coefficients.first(), self.coefficients.last())
+        else {
+            return None;
+        };
+        let modulus = Integer::Single(prime as i64);
+        if !self.exponents(0).iter().all(|exponent| exponent.is_zero())
+            || (constant % &modulus).is_zero()
+            || (leading % &modulus).is_zero()
+        {
             return None;
         }
 
@@ -6470,6 +6481,26 @@ impl<E: PositiveExponent> MultivariatePolynomial<IntegerRing, E, LexOrder> {
         reconstructed
     }
 
+    /// Remove the greatest common power of `var` from every term.
+    ///
+    /// The returned exponent is the multiplicity of the exact variable factor,
+    /// and the returned polynomial is its cofactor. Coefficients and exponents
+    /// of all other variables are unchanged.
+    fn remove_univariate_monomial_factor(&self, var: usize) -> Option<(E, Self)> {
+        let (power, _) = self.degree_bounds(var);
+        if power == E::zero() {
+            return None;
+        }
+
+        let mut cofactor = self.clone();
+        for exponents in cofactor.exponents_iter_mut() {
+            debug_assert!(exponents[var] >= power);
+            exponents[var] = exponents[var] - power;
+        }
+
+        Some((power, cofactor))
+    }
+
     /// Factor a square-free univariate polynomial over the integers by Hensel lifting factors computed over
     /// a finite field image of the polynomial.
     fn factor_reconstruct(&self) -> Vec<Self> {
@@ -6480,6 +6511,20 @@ impl<E: PositiveExponent> MultivariatePolynomial<IntegerRing, E, LexOrder> {
 
         if d == 1 {
             return vec![self.clone()];
+        }
+
+        if let Some((power, cofactor)) = self.remove_univariate_monomial_factor(var) {
+            let mut variable_exponents = vec![E::zero(); self.nvars()];
+            variable_exponents[var] = E::one();
+            let variable = self.monomial(self.ring().one(), variable_exponents);
+            let power = power.to_u32() as usize;
+            let mut cofactor_factors = cofactor.factor_reconstruct();
+            let mut factors = Vec::with_capacity(power + cofactor_factors.len());
+            for _ in 0..power {
+                factors.push(variable.clone());
+            }
+            factors.append(&mut cofactor_factors);
+            return factors;
         }
 
         // Select a suitable prime. The number of modular factors controls the
@@ -9804,10 +9849,15 @@ mod test {
         let polynomial = parse!("((1+3*x)^33-1)*((1-5*x)^31+1)")
             .expand()
             .to_polynomial::<_, u8>(&Z, None);
+        let (_, cofactor) = polynomial
+            .remove_univariate_monomial_factor(0)
+            .expect("the degree-64 input has an exact factor x");
 
-        for (prime, expected_count) in [(7, 9), (13, 8), (17, 7), (65_000_011, 20)] {
+        assert!(cofactor.screen_univariate_mod_prime(0, 11, None).is_none());
+
+        for (prime, expected_count) in [(7, 8), (13, 7), (17, 6), (65_000_011, 19)] {
             let Some(ModularPrimeScreen::Candidate(candidate)) =
-                polynomial.screen_univariate_mod_prime(0, prime, None)
+                cofactor.screen_univariate_mod_prime(0, prime, None)
             else {
                 panic!("prime {prime} must produce a suitable modular image");
             };
@@ -9816,36 +9866,40 @@ mod test {
 
         LAST_BOUNDED_DDF_REJECTION_DEGREE.with(|degree| degree.set(0));
         let Some(ModularPrimeScreen::FactorLimitExceeded { lower_bound }) =
-            polynomial.screen_univariate_mod_prime(0, 65_000_011, Some(8))
+            cofactor.screen_univariate_mod_prime(0, 65_000_011, Some(8))
         else {
             panic!("the large-prime image must exceed the eight-factor limit");
         };
-        assert_eq!(lower_bound, 20);
+        assert_eq!(lower_bound, 19);
         LAST_BOUNDED_DDF_REJECTION_DEGREE.with(|degree| assert_eq!(degree.get(), 2));
         DENSE_ZP_DDF_SCREENS.with(|screens| assert_eq!(screens.get(), 5));
     }
 
     #[test]
-    fn factor_univariate_degree_63_rechecks_product_tree_pressure_after_prime_selection() {
+    fn factor_univariate_degree_63_rechecks_product_tree_pressure_after_monomial_removal() {
         PRODUCT_TREE_HENSEL_LIFT_CALLS.with(|calls| calls.set(0));
         let polynomial = parse!("((1+3*x)^32-1)*((1-5*x)^31+1)")
             .expand()
             .to_polynomial::<_, u8>(&Z, None);
         let primitive = polynomial.clone().make_primitive();
-        let bound = primitive.coefficient_bound();
+        let (_, factor_target) = primitive
+            .remove_univariate_monomial_factor(0)
+            .expect("the degree-63 input has an exact factor x");
+        assert_eq!(factor_target.degree(0), 62);
+        let bound = factor_target.coefficient_bound();
 
         let Some(ModularPrimeScreen::Candidate(small_candidate)) =
-            primitive.screen_univariate_mod_prime(0, 11, None)
+            factor_target.screen_univariate_mod_prime(0, 11, None)
         else {
             panic!("prime 11 must produce a suitable modular image");
         };
         let small_factor_count = small_candidate.distinct_degree.factor_count;
         let small_digits =
             MultivariatePolynomial::<IntegerRing, u8>::linear_hensel_modulus(&bound, 11).0;
-        assert_eq!(small_factor_count, 11);
+        assert_eq!(small_factor_count, 10);
         assert!(
             MultivariatePolynomial::<IntegerRing, u8>::has_high_linear_hensel_pressure(
-                63,
+                62,
                 &bound,
                 small_factor_count,
                 small_digits
@@ -9853,18 +9907,18 @@ mod test {
         );
 
         let Some(ModularPrimeScreen::Candidate(final_candidate)) =
-            primitive.screen_univariate_mod_prime(0, 65_000_011, None)
+            factor_target.screen_univariate_mod_prime(0, 65_000_011, None)
         else {
             panic!("the dense-u64 prime must produce a suitable modular image");
         };
         let final_factor_count = final_candidate.distinct_degree.factor_count;
         let final_digits =
             MultivariatePolynomial::<IntegerRing, u8>::linear_hensel_modulus(&bound, 65_000_011).0;
-        assert_eq!(final_factor_count, 11);
+        assert_eq!(final_factor_count, 10);
         assert_eq!(final_digits, 12);
         assert!(
             !MultivariatePolynomial::<IntegerRing, u8>::has_high_linear_hensel_pressure(
-                63,
+                62,
                 &bound,
                 final_factor_count,
                 final_digits
@@ -9901,6 +9955,20 @@ mod test {
             .expand()
             .to_polynomial::<_, u8>(&Z, None);
 
+        let (monomial_power, cofactor) = polynomial
+            .remove_univariate_monomial_factor(0)
+            .expect("the degree-64 input has an exact factor x");
+        assert_eq!(monomial_power, 1);
+        assert_eq!(cofactor.degree(0), 63);
+        assert_eq!(cofactor.clone().mul_exp(&[monomial_power]), polynomial);
+        assert!(cofactor.screen_univariate_mod_prime(0, 11, None).is_none());
+        let Some(ModularPrimeScreen::Candidate(prime_17_candidate)) =
+            cofactor.screen_univariate_mod_prime(0, 17, None)
+        else {
+            panic!("prime 17 must give the monomial-free cofactor a suitable image");
+        };
+        assert_eq!(prime_17_candidate.distinct_degree.factor_count, 6);
+
         let factors = polynomial.factor();
         let reconstructed = factors
             .iter()
@@ -9923,6 +9991,84 @@ mod test {
         BOUNDED_DDF_REJECTIONS.with(|rejections| assert_eq!(rejections.get(), 1));
         LAST_MODULAR_INTEGER_EDF_PRIME.with(|prime| assert_eq!(prime.get(), 17));
         PRODUCT_TREE_HENSEL_LIFT_CALLS.with(|calls| assert_eq!(calls.get(), 1));
+    }
+
+    #[test]
+    fn univariate_monomial_extraction_uses_the_full_power_and_active_variable() {
+        let variables = Some(Arc::new(vec![
+            symbol!("x").into(),
+            symbol!("y").into(),
+            symbol!("z").into(),
+        ]));
+        let polynomial = parse!("-3*y^4").to_polynomial::<_, u16>(&Z, variables.clone());
+
+        let (power, cofactor) = polynomial
+            .remove_univariate_monomial_factor(1)
+            .expect("every term contains y^4");
+        assert_eq!(power, 4);
+        assert_eq!(cofactor, polynomial.constant(Integer::from(-3)));
+        assert!(cofactor.remove_univariate_monomial_factor(1).is_none());
+
+        let mut shift = vec![0u16; polynomial.nvars()];
+        shift[1] = power;
+        assert_eq!(cofactor.clone().mul_exp(&shift), polynomial);
+
+        for expression in ["7", "-7"] {
+            let constant = parse!(expression).to_polynomial::<_, u16>(&Z, variables.clone());
+            assert!(constant.remove_univariate_monomial_factor(1).is_none());
+            assert_eq!(constant.factor_reconstruct(), vec![constant.clone()]);
+        }
+
+        let variable = parse!("y").to_polynomial::<_, u16>(&Z, variables);
+        let factors = polynomial.factor_reconstruct();
+        assert_eq!(
+            factors.iter().filter(|factor| **factor == variable).count(),
+            4
+        );
+        assert_eq!(
+            factors.iter().filter(|factor| factor.is_constant()).count(),
+            1
+        );
+        assert_eq!(
+            factors
+                .iter()
+                .fold(polynomial.one(), |product, factor| &product * factor),
+            polynomial
+        );
+    }
+
+    #[test]
+    fn extracted_variable_factor_inherits_square_free_multiplicity_and_sign() {
+        let variables = Some(Arc::new(vec![
+            symbol!("x").into(),
+            symbol!("y").into(),
+            symbol!("z").into(),
+        ]));
+        let polynomial = parse!("-6*(y*(y^2+1))^3")
+            .expand()
+            .to_polynomial::<_, u16>(&Z, variables.clone());
+        let mut expected = [("-6", 1), ("y", 3), ("y^2+1", 3)]
+            .into_iter()
+            .map(|(factor, multiplicity)| {
+                (
+                    parse!(factor).to_polynomial::<_, u16>(&Z, variables.clone()),
+                    multiplicity,
+                )
+            })
+            .collect::<Vec<_>>();
+        expected.sort_by(|left, right| left.0.internal_cmp(&right.0).then(left.1.cmp(&right.1)));
+
+        let mut factors = polynomial.factor();
+        factors.sort_by(|left, right| left.0.internal_cmp(&right.0).then(left.1.cmp(&right.1)));
+        assert_eq!(factors, expected);
+        assert_eq!(
+            factors
+                .iter()
+                .fold(polynomial.one(), |product, (factor, multiplicity)| {
+                    &product * &factor.pow(*multiplicity)
+                }),
+            polynomial
+        );
     }
 
     #[test]
