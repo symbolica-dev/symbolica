@@ -1,7 +1,7 @@
 //! Factorization methods for multivariate polynomials
 //! that implement [Factorize].
 
-use std::{borrow::Cow, cmp::Reverse, ops::RangeInclusive};
+use std::{borrow::Cow, cmp::Reverse, collections::BinaryHeap, ops::RangeInclusive};
 
 use ahash::{HashMap, HashSet, HashSetExt};
 use rand::{Rng, SeedableRng, rng, rngs::StdRng};
@@ -68,12 +68,318 @@ enum ModularPrimeScreen<E: PositiveExponent> {
     FactorLimitExceeded { lower_bound: usize },
 }
 
+/// Identifies either an input modular factor or a product built earlier in a
+/// univariate Hensel product tree.
+#[derive(Clone, Copy, Debug, Eq, Ord, PartialEq, PartialOrd)]
+enum UnivariateHenselProductTreeLink {
+    Leaf(usize),
+    Internal(usize),
+}
+
+/// Records one product of two coprime child factors.
+///
+/// Internal links address earlier entries in the topology's bottom-up node
+/// array, and leaf links address the original modular-factor slice.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+struct UnivariateHenselProductTreeNode {
+    children: [UnivariateHenselProductTreeLink; 2],
+    degree: usize,
+}
+
+/// Connectivity and degree metadata for simultaneous univariate Hensel
+/// lifting.
+///
+/// Nodes are stored in merge order, so multiplying their children from the
+/// start of `nodes` toward the root makes every referenced child available.
+#[derive(Clone, Debug, Eq, PartialEq)]
+struct UnivariateHenselProductTreeTopology {
+    leaf_degrees: Vec<usize>,
+    nodes: Vec<UnivariateHenselProductTreeNode>,
+    root: Option<UnivariateHenselProductTreeLink>,
+}
+
+impl UnivariateHenselProductTreeTopology {
+    /// Returns the degree represented by a leaf or internal product link.
+    #[cfg(test)]
+    fn degree(&self, link: UnivariateHenselProductTreeLink) -> usize {
+        match link {
+            UnivariateHenselProductTreeLink::Leaf(index) => self.leaf_degrees[index],
+            UnivariateHenselProductTreeLink::Internal(index) => self.nodes[index].degree,
+        }
+    }
+
+    /// Visits internal products from the root toward the leaves, yielding each
+    /// node before every internal child it references.
+    #[cfg(test)]
+    fn internal_nodes_top_down(
+        &self,
+    ) -> impl Iterator<Item = (usize, &UnivariateHenselProductTreeNode)> {
+        self.nodes.iter().enumerate().rev()
+    }
+
+    /// Returns the original modular-factor indices covered by the root in
+    /// input order.
+    fn leaf_indices_in_input_order(&self) -> Vec<usize> {
+        fn collect(
+            topology: &UnivariateHenselProductTreeTopology,
+            link: UnivariateHenselProductTreeLink,
+            indices: &mut Vec<usize>,
+        ) {
+            match link {
+                UnivariateHenselProductTreeLink::Leaf(index) => indices.push(index),
+                UnivariateHenselProductTreeLink::Internal(index) => {
+                    for child in topology.nodes[index].children {
+                        collect(topology, child, indices);
+                    }
+                }
+            }
+        }
+
+        let mut indices = Vec::with_capacity(self.leaf_degrees.len());
+        if let Some(root) = self.root {
+            collect(self, root, &mut indices);
+        }
+        indices.sort_unstable();
+        indices
+    }
+}
+
+/// One product waiting to be paired while constructing a degree-greedy tree.
+/// The insertion index resolves equal-degree choices reproducibly.
+#[derive(Clone, Copy, Debug, Eq, Ord, PartialEq, PartialOrd)]
+struct PendingUnivariateHenselProduct {
+    degree: usize,
+    insertion_index: usize,
+    link: UnivariateHenselProductTreeLink,
+}
+
+/// Reusable priority-queue storage for constructing univariate Hensel product
+/// trees from modular-factor degrees.
+#[derive(Default)]
+struct UnivariateHenselProductTreeBuildContext {
+    pending: BinaryHeap<Reverse<PendingUnivariateHenselProduct>>,
+}
+
+impl UnivariateHenselProductTreeBuildContext {
+    /// Repeatedly merges the two smallest pending degrees and returns the
+    /// resulting product-tree topology.
+    ///
+    /// Every input degree must be positive. Equal-degree leaves retain their
+    /// input order, while an internal product is ordered after all products
+    /// that were already pending when it was created.
+    fn build(&mut self, leaf_degrees: &[usize]) -> UnivariateHenselProductTreeTopology {
+        assert!(
+            leaf_degrees.iter().all(|degree| *degree > 0),
+            "Hensel product-tree leaves must be nonconstant"
+        );
+
+        self.pending.clear();
+        self.pending.reserve(leaf_degrees.len());
+        for (index, &degree) in leaf_degrees.iter().enumerate() {
+            self.pending.push(Reverse(PendingUnivariateHenselProduct {
+                degree,
+                insertion_index: index,
+                link: UnivariateHenselProductTreeLink::Leaf(index),
+            }));
+        }
+
+        let mut nodes = Vec::with_capacity(leaf_degrees.len().saturating_sub(1));
+        while self.pending.len() > 1 {
+            let Reverse(left) = self.pending.pop().unwrap();
+            let Reverse(right) = self.pending.pop().unwrap();
+            let degree = left
+                .degree
+                .checked_add(right.degree)
+                .expect("Hensel product-tree degree overflow");
+            let index = nodes.len();
+            nodes.push(UnivariateHenselProductTreeNode {
+                children: [left.link, right.link],
+                degree,
+            });
+            self.pending.push(Reverse(PendingUnivariateHenselProduct {
+                degree,
+                insertion_index: leaf_degrees.len() + index,
+                link: UnivariateHenselProductTreeLink::Internal(index),
+            }));
+        }
+
+        let root = self.pending.pop().map(|Reverse(product)| product.link);
+        UnivariateHenselProductTreeTopology {
+            leaf_degrees: leaf_degrees.to_vec(),
+            nodes,
+            root,
+        }
+    }
+}
+
+/// Returns the prime-power exponents used by synchronized Hensel lifting.
+///
+/// The schedule starts at the base-prime precision and reaches `target` by
+/// repeatedly increasing the current exponent by at most that exponent. This
+/// makes every correction modulus divide the already known modulus.
+fn univariate_hensel_precision_schedule(target: usize) -> Vec<usize> {
+    assert!(
+        target > 0,
+        "Hensel precision must contain a base-prime digit"
+    );
+
+    let mut schedule = vec![target];
+    while *schedule.last().unwrap() > 1 {
+        schedule.push(schedule.last().unwrap().div_ceil(2));
+    }
+    schedule.reverse();
+    schedule
+}
+
+type DenseIntegerUnivariatePolynomial = Vec<Integer>;
+
+/// Mutable factors, subtree products, and Bezout cofactors for one
+/// synchronized univariate Hensel lift.
+///
+/// A node with children `u` and `w` stores cofactors `s` and `t` satisfying
+/// `s*u + t*w = 1` at the current prime-power precision. During a top-down
+/// lifting stage, the node's product is the target written by its parent. All
+/// stored coefficients are the canonical nonnegative representatives at the
+/// current precision.
+struct UnivariateHenselProductTreeLiftContext {
+    topology: UnivariateHenselProductTreeTopology,
+    leaves: Vec<DenseIntegerUnivariatePolynomial>,
+    internal_products: Vec<DenseIntegerUnivariatePolynomial>,
+    bezout_cofactors: Vec<[DenseIntegerUnivariatePolynomial; 2]>,
+}
+
+impl UnivariateHenselProductTreeLiftContext {
+    /// Builds all subtree products and Bezout relations over the base field,
+    /// then stores their canonical nonnegative integer coefficients in
+    /// ascending degree order.
+    fn new<UField: FiniteFieldWorkspace, E: PositiveExponent>(
+        factors: &[MultivariatePolynomial<FiniteField<UField>, E, LexOrder>],
+    ) -> Self
+    where
+        FiniteField<UField>: Field + PolynomialGCD<E> + FiniteFieldCore<UField>,
+    {
+        assert!(factors.len() >= 2);
+        let field = factors[0].ring().clone();
+        debug_assert!(factors.iter().all(|factor| factor.ring() == &field));
+
+        let modular_leaves = factors
+            .iter()
+            .cloned()
+            .map(MultivariatePolynomial::make_monic)
+            .collect::<Vec<_>>();
+        let leaf_degrees = modular_leaves
+            .iter()
+            .map(|factor| {
+                factor
+                    .last_exponents()
+                    .iter()
+                    .copied()
+                    .max()
+                    .unwrap_or_else(E::zero)
+                    .to_u32() as usize
+            })
+            .collect::<Vec<_>>();
+        let topology = UnivariateHenselProductTreeBuildContext::default().build(&leaf_degrees);
+
+        let mut modular_products = Vec::with_capacity(topology.nodes.len());
+        let mut modular_bezout = Vec::with_capacity(topology.nodes.len());
+        for node in &topology.nodes {
+            let value = |link| match link {
+                UnivariateHenselProductTreeLink::Leaf(index) => &modular_leaves[index],
+                UnivariateHenselProductTreeLink::Internal(index) => &modular_products[index],
+            };
+            let u = value(node.children[0]);
+            let w = value(node.children[1]);
+            let (gcd, s, t) = u.eea_univariate(w);
+            assert!(gcd.is_one(), "Hensel leaves must be pairwise coprime");
+            debug_assert!((&s * u + &t * w).is_one());
+            modular_products.push(u * w);
+            modular_bezout.push([s, t]);
+        }
+
+        let variable = modular_leaves[0]
+            .last_exponents()
+            .iter()
+            .position(|exponent| !exponent.is_zero())
+            .expect("a Hensel factor must be nonconstant");
+        let to_dense_integer =
+            |polynomial: &MultivariatePolynomial<FiniteField<UField>, E, LexOrder>| {
+                let degree = polynomial.degree(variable).to_u32() as usize;
+                let mut coefficients = vec![Integer::zero(); degree + 1];
+                for term in polynomial {
+                    debug_assert!(
+                        term.exponents
+                            .iter()
+                            .enumerate()
+                            .all(|(index, exponent)| { index == variable || exponent.is_zero() })
+                    );
+                    coefficients[term.exponents[variable].to_u32() as usize] =
+                        field.to_integer(term.coefficient);
+                }
+                coefficients
+            };
+        Self {
+            topology,
+            leaves: modular_leaves.iter().map(&to_dense_integer).collect(),
+            internal_products: modular_products.iter().map(&to_dense_integer).collect(),
+            bezout_cofactors: modular_bezout
+                .iter()
+                .map(|cofactors| {
+                    [
+                        to_dense_integer(&cofactors[0]),
+                        to_dense_integer(&cofactors[1]),
+                    ]
+                })
+                .collect(),
+        }
+    }
+
+    /// Returns the current polynomial represented by a leaf or internal link.
+    fn value(&self, link: UnivariateHenselProductTreeLink) -> &[Integer] {
+        match link {
+            UnivariateHenselProductTreeLink::Leaf(index) => &self.leaves[index],
+            UnivariateHenselProductTreeLink::Internal(index) => &self.internal_products[index],
+        }
+    }
+
+    /// Replaces the current polynomial represented by a leaf or internal link.
+    fn set_value(
+        &mut self,
+        link: UnivariateHenselProductTreeLink,
+        value: DenseIntegerUnivariatePolynomial,
+    ) {
+        match link {
+            UnivariateHenselProductTreeLink::Leaf(index) => self.leaves[index] = value,
+            UnivariateHenselProductTreeLink::Internal(index) => {
+                self.internal_products[index] = value
+            }
+        }
+    }
+
+    /// Removes and returns the polynomial represented by a leaf or internal
+    /// link, leaving an empty buffer in its place.
+    fn take_value(
+        &mut self,
+        link: UnivariateHenselProductTreeLink,
+    ) -> DenseIntegerUnivariatePolynomial {
+        match link {
+            UnivariateHenselProductTreeLink::Leaf(index) => std::mem::take(&mut self.leaves[index]),
+            UnivariateHenselProductTreeLink::Internal(index) => {
+                std::mem::take(&mut self.internal_products[index])
+            }
+        }
+    }
+}
+
 #[cfg(test)]
 std::thread_local! {
     pub(crate) static LLL_RECOMBINATION_SUCCESSES: std::cell::Cell<usize> = const {
         std::cell::Cell::new(0)
     };
     static QUADRATIC_HENSEL_LIFT_CALLS: std::cell::Cell<usize> = const {
+        std::cell::Cell::new(0)
+    };
+    static PRODUCT_TREE_HENSEL_LIFT_CALLS: std::cell::Cell<usize> = const {
         std::cell::Cell::new(0)
     };
     static MODULAR_INTEGER_EDF_CALLS: std::cell::Cell<usize> = const {
@@ -87,6 +393,15 @@ std::thread_local! {
     };
     static LAST_MODULAR_INTEGER_EDF_PRIME: std::cell::Cell<u32> = const {
         std::cell::Cell::new(0)
+    };
+    static EXACT_HENSEL_SUBTREE_SPLITS: std::cell::Cell<usize> = const {
+        std::cell::Cell::new(0)
+    };
+    static LOCAL_HENSEL_RECOMBINATION_NODES: std::cell::Cell<usize> = const {
+        std::cell::Cell::new(0)
+    };
+    static EXACT_HENSEL_SUBTREE_MODULUS_BITS: std::cell::RefCell<Vec<u64>> = const {
+        std::cell::RefCell::new(Vec::new())
     };
 }
 
@@ -435,6 +750,380 @@ impl<R: EuclideanDomain, E: PositiveExponent> MultivariatePolynomial<R, E, LexOr
     }
 }
 
+/// Dense univariate integer arithmetic used by synchronized Hensel lifting.
+///
+/// Coefficients are stored from constant to leading degree. Products are
+/// computed over the integers so that Hensel residuals can be divided exactly;
+/// modular operations return trimmed representatives in `[0, modulus)`.
+struct DenseIntegerModularUnivariateContext<'a, E: PositiveExponent> {
+    modulus: &'a Integer,
+    variable: usize,
+    template: &'a MultivariatePolynomial<IntegerRing, E, LexOrder>,
+    dense_indices: &'a [u32],
+}
+
+impl<'a, E: PositiveExponent> DenseIntegerModularUnivariateContext<'a, E> {
+    fn new(
+        modulus: &'a Integer,
+        variable: usize,
+        template: &'a MultivariatePolynomial<IntegerRing, E, LexOrder>,
+        dense_indices: &'a [u32],
+    ) -> Self {
+        assert!(!modulus.is_zero() && !modulus.is_negative());
+        debug_assert!(template.exponents_iter().all(|exponents| {
+            exponents
+                .iter()
+                .enumerate()
+                .all(|(index, exponent)| index == variable || exponent.is_zero())
+        }));
+        debug_assert!(
+            dense_indices
+                .iter()
+                .enumerate()
+                .all(|(index, dense_index)| *dense_index as usize == index)
+        );
+        Self {
+            modulus,
+            variable,
+            template,
+            dense_indices,
+        }
+    }
+
+    /// Removes all zero leading coefficients, representing the zero
+    /// polynomial by an empty vector.
+    fn trim(coefficients: &mut DenseIntegerUnivariatePolynomial) {
+        while coefficients.last().is_some_and(Integer::is_zero) {
+            coefficients.pop();
+        }
+    }
+
+    /// Converts a sparse univariate polynomial to ascending dense
+    /// coefficients without changing its integer representatives.
+    fn dense_coefficients(
+        &self,
+        polynomial: &MultivariatePolynomial<IntegerRing, E, LexOrder>,
+    ) -> DenseIntegerUnivariatePolynomial {
+        if polynomial.is_zero() {
+            return Vec::new();
+        }
+
+        let degree = polynomial.degree(self.variable).to_u32() as usize;
+        let mut coefficients = vec![Integer::zero(); degree + 1];
+        for term in polynomial {
+            debug_assert!(
+                term.exponents
+                    .iter()
+                    .enumerate()
+                    .all(|(index, exponent)| { index == self.variable || exponent.is_zero() })
+            );
+            coefficients[term.exponents[self.variable].to_u32() as usize] =
+                term.coefficient.clone();
+        }
+        coefficients
+    }
+
+    /// Converts ascending dense coefficients to the polynomial layout used by
+    /// the caller of the Hensel lift.
+    fn from_dense_coefficients(
+        &self,
+        coefficients: DenseIntegerUnivariatePolynomial,
+    ) -> MultivariatePolynomial<IntegerRing, E, LexOrder> {
+        let capacity = coefficients
+            .iter()
+            .filter(|coefficient| !coefficient.is_zero())
+            .count();
+        let mut polynomial = self.template.zero_with_capacity(capacity);
+        let mut exponents = vec![E::zero(); self.template.nvars()];
+        for (degree, coefficient) in coefficients.into_iter().enumerate() {
+            if coefficient.is_zero() {
+                continue;
+            }
+            exponents[self.variable] = E::from_u32(degree as u32);
+            polynomial.append_monomial_back(coefficient, &exponents);
+        }
+        polynomial
+    }
+
+    /// Canonicalizes every coefficient into `[0, modulus)` and removes zero
+    /// leading cells.
+    fn reduce_in_place(&self, coefficients: &mut DenseIntegerUnivariatePolynomial) {
+        for coefficient in coefficients.iter_mut() {
+            let value = std::mem::replace(coefficient, Integer::zero());
+            *coefficient = value % self.modulus;
+        }
+        Self::trim(coefficients);
+    }
+
+    fn reduce(&self, coefficients: &[Integer]) -> DenseIntegerUnivariatePolynomial {
+        let mut reduced = coefficients.to_vec();
+        self.reduce_in_place(&mut reduced);
+        reduced
+    }
+
+    /// Converts canonical nonnegative coefficients to symmetric
+    /// representatives without another modular division.
+    fn symmetrize_in_place(&self, coefficients: &mut DenseIntegerUnivariatePolynomial) {
+        let half_modulus = self.modulus / 2;
+        for coefficient in coefficients {
+            debug_assert!(!coefficient.is_negative() && &*coefficient < self.modulus);
+            if *coefficient > half_modulus {
+                *coefficient -= self.modulus;
+            }
+        }
+    }
+
+    /// Multiplies two dense polynomials exactly over the integers.
+    ///
+    /// The integer polynomial kernel selects its bounded or multiprecision
+    /// convolution strategy. If it declines the request, the generic ring
+    /// loop accumulates the same convolution with fused integer products.
+    fn multiply_raw(
+        &self,
+        left: &[Integer],
+        right: &[Integer],
+    ) -> DenseIntegerUnivariatePolynomial {
+        if left.is_empty() || right.is_empty() {
+            return Vec::new();
+        }
+
+        let output_len = left
+            .len()
+            .checked_add(right.len())
+            .and_then(|length| length.checked_sub(1))
+            .expect("dense polynomial product length overflow");
+        assert!(left.len() <= self.dense_indices.len());
+        assert!(right.len() <= self.dense_indices.len());
+        assert!(output_len <= self.dense_indices.len());
+
+        // Lift buffers have contiguous, effectively dense support. Interior
+        // zero cells retain the contiguous indices used by dense convolution
+        // strategies.
+        if let Some(coefficients) = Z.kernels().polynomial().and_then(|kernels| {
+            kernels.try_dense_mul(DensePolynomialMulRequest {
+                output_len,
+                left_coefficients: left,
+                left_indices: &self.dense_indices[..left.len()],
+                right_coefficients: right,
+                right_indices: &self.dense_indices[..right.len()],
+            })
+        }) {
+            let mut product = vec![Integer::zero(); output_len];
+            for (index, coefficient) in coefficients {
+                product[index as usize] = coefficient;
+            }
+            Self::trim(&mut product);
+            return product;
+        }
+
+        let mut product = vec![Integer::zero(); output_len];
+        for (left_degree, left_coefficient) in left.iter().enumerate() {
+            if left_coefficient.is_zero() {
+                continue;
+            }
+            for (right_degree, right_coefficient) in right.iter().enumerate() {
+                if right_coefficient.is_zero() {
+                    continue;
+                }
+                Z.add_mul_assign(
+                    &mut product[left_degree + right_degree],
+                    left_coefficient,
+                    right_coefficient,
+                );
+            }
+        }
+        Self::trim(&mut product);
+        product
+    }
+
+    /// Multiplies and then canonicalizes the product in the context ring.
+    #[cfg(test)]
+    fn multiply_mod(
+        &self,
+        left: &[Integer],
+        right: &[Integer],
+    ) -> DenseIntegerUnivariatePolynomial {
+        let mut product = self.multiply_raw(left, right);
+        self.reduce_in_place(&mut product);
+        product
+    }
+
+    /// Reduces an owned dense polynomial modulo a monic dense divisor.
+    ///
+    /// Lower cells accumulate exact integer updates until they become pivots
+    /// or survive in the remainder, limiting modular reductions to one per
+    /// pivot and one per returned coefficient.
+    fn remainder_monic(
+        &self,
+        mut remainder: DenseIntegerUnivariatePolynomial,
+        divisor: &[Integer],
+    ) -> DenseIntegerUnivariatePolynomial {
+        assert!(divisor.last().is_some_and(Integer::is_one));
+        if remainder.is_empty() {
+            return remainder;
+        }
+
+        if remainder.len() < divisor.len() {
+            self.reduce_in_place(&mut remainder);
+            return remainder;
+        }
+
+        let divisor_degree = divisor.len() - 1;
+        for power in (divisor_degree..remainder.len()).rev() {
+            let value = std::mem::replace(&mut remainder[power], Integer::zero());
+            let pivot = value % self.modulus;
+            if pivot.is_zero() {
+                continue;
+            }
+
+            let shift = power - divisor_degree;
+            for (offset, divisor_coefficient) in divisor.iter().take(divisor_degree).enumerate() {
+                Z.sub_mul_assign(&mut remainder[shift + offset], &pivot, divisor_coefficient);
+            }
+        }
+
+        remainder.truncate(divisor_degree);
+        self.reduce_in_place(&mut remainder);
+        remainder
+    }
+
+    /// Computes `(target-left*right)/divisor` exactly over the integers and
+    /// returns its canonical image modulo the correction modulus.
+    fn exact_product_residual_quotient_mod(
+        &self,
+        target: &[Integer],
+        left: &[Integer],
+        right: &[Integer],
+        divisor: &Integer,
+    ) -> DenseIntegerUnivariatePolynomial {
+        let mut residual = self.multiply_raw(left, right);
+        residual.resize(residual.len().max(target.len()), Integer::zero());
+        for (index, coefficient) in residual.iter_mut().enumerate() {
+            let product_coefficient = std::mem::replace(coefficient, Integer::zero());
+            let mut value = -product_coefficient;
+            if let Some(target_coefficient) = target.get(index) {
+                value += target_coefficient;
+            }
+            debug_assert!((&value % divisor).is_zero());
+            let value = Z.exact_div_owned(value, divisor);
+            *coefficient = value % self.modulus;
+        }
+        Self::trim(&mut residual);
+        residual
+    }
+
+    /// Computes `(1-s*u-t*w)/divisor` exactly and returns its canonical image
+    /// modulo the correction modulus.
+    fn exact_bezout_residual_quotient_mod(
+        &self,
+        s: &[Integer],
+        u: &[Integer],
+        t: &[Integer],
+        w: &[Integer],
+        divisor: &Integer,
+    ) -> DenseIntegerUnivariatePolynomial {
+        let mut residual = self.multiply_raw(s, u);
+        for coefficient in &mut residual {
+            let value = std::mem::replace(coefficient, Integer::zero());
+            *coefficient = -value;
+        }
+        if residual.is_empty() {
+            residual.push(Integer::one());
+        } else {
+            residual[0] += 1;
+        }
+
+        let second_product = self.multiply_raw(t, w);
+        residual.resize(residual.len().max(second_product.len()), Integer::zero());
+        for (coefficient, product_coefficient) in residual.iter_mut().zip(second_product) {
+            *coefficient -= product_coefficient;
+        }
+        for coefficient in &mut residual {
+            let value = std::mem::replace(coefficient, Integer::zero());
+            debug_assert!((&value % divisor).is_zero());
+            let value = Z.exact_div_owned(value, divisor);
+            *coefficient = value % self.modulus;
+        }
+        Self::trim(&mut residual);
+        residual
+    }
+
+    /// Applies a Hensel correction `old + scale*delta` without modular
+    /// reduction.
+    ///
+    /// Every coefficient of `old` is in `[0, scale)`, every coefficient of
+    /// `delta` is in `[0, modulus / scale)`, and `scale` divides this context's
+    /// modulus. Consequently each corrected coefficient lies directly in
+    /// `[0, modulus)`:
+    ///
+    /// `old + scale*delta <= (scale-1) + scale*(modulus/scale-1) = modulus-1`.
+    fn lift_correction(
+        &self,
+        mut old: DenseIntegerUnivariatePolynomial,
+        delta: &[Integer],
+        scale: &Integer,
+    ) -> DenseIntegerUnivariatePolynomial {
+        debug_assert!(!scale.is_zero() && !scale.is_negative());
+        debug_assert!((self.modulus % scale).is_zero());
+        #[cfg(debug_assertions)]
+        {
+            let correction_modulus = self.modulus / scale;
+            debug_assert!(
+                old.iter()
+                    .all(|coefficient| !coefficient.is_negative() && coefficient < scale)
+            );
+            debug_assert!(delta.iter().all(|coefficient| {
+                !coefficient.is_negative() && coefficient < &correction_modulus
+            }));
+        }
+
+        old.resize(old.len().max(delta.len()), Integer::zero());
+        for (coefficient, correction) in old.iter_mut().zip(delta) {
+            Z.add_mul_assign(coefficient, correction, scale);
+        }
+        debug_assert!(
+            old.iter()
+                .all(|coefficient| !coefficient.is_negative() && coefficient < self.modulus)
+        );
+        Self::trim(&mut old);
+        old
+    }
+
+    #[cfg(debug_assertions)]
+    fn product_matches(&self, target: &[Integer], left: &[Integer], right: &[Integer]) -> bool {
+        let product = self.multiply_raw(left, right);
+        let length = target.len().max(product.len());
+        (0..length).all(|index| {
+            let target_coefficient = target.get(index).cloned().unwrap_or_else(Integer::zero);
+            let product_coefficient = product.get(index).cloned().unwrap_or_else(Integer::zero);
+            ((target_coefficient - product_coefficient) % self.modulus).is_zero()
+        })
+    }
+
+    #[cfg(debug_assertions)]
+    fn bezout_identity_matches(
+        &self,
+        s: &[Integer],
+        u: &[Integer],
+        t: &[Integer],
+        w: &[Integer],
+    ) -> bool {
+        let su = self.multiply_raw(s, u);
+        let tw = self.multiply_raw(t, w);
+        let length = su.len().max(tw.len()).max(1);
+        (0..length).all(|index| {
+            let expected = if index == 0 {
+                Integer::one()
+            } else {
+                Integer::zero()
+            };
+            let actual = su.get(index).cloned().unwrap_or_else(Integer::zero)
+                + tw.get(index).cloned().unwrap_or_else(Integer::zero);
+            ((actual - expected) % self.modulus).is_zero()
+        })
+    }
+}
+
 /// Arithmetic modulo an integer on dense univariate integer polynomials.
 ///
 /// Quadratic Hensel lifting uses this context for factor and Bezout corrections modulo the
@@ -584,6 +1273,56 @@ impl<'a, E: PositiveExponent> IntegerModularUnivariateContext<'a, E> {
             self.from_dense_coefficients(quotient),
             self.from_dense_coefficients(remainder),
         )
+    }
+
+    /// Reduce a dense univariate polynomial modulo a monic divisor.
+    ///
+    /// Each leading cell is reduced modulo the context modulus when it becomes the current
+    /// pivot. The monic leading term can then be cleared without computing a quotient or a
+    /// modular inverse. Updates to lower cells are accumulated as integers until those cells
+    /// become pivots or survive in the final remainder, avoiding repeated modular reductions.
+    /// The returned coefficients are canonical symmetric representatives.
+    #[cfg(test)]
+    fn remainder_monic(
+        &self,
+        dividend: &MultivariatePolynomial<IntegerRing, E, LexOrder>,
+        divisor: &MultivariatePolynomial<IntegerRing, E, LexOrder>,
+    ) -> MultivariatePolynomial<IntegerRing, E, LexOrder> {
+        assert!(!divisor.is_zero());
+        if dividend.is_zero() {
+            return self.template.zero();
+        }
+
+        let mut remainder = self.dense_coefficients(dividend);
+        let divisor = self.dense_coefficients(divisor);
+        assert!(
+            divisor.last().is_some_and(Integer::is_one),
+            "monic modular remainder requires a monic divisor"
+        );
+        if remainder.len() < divisor.len() {
+            return self.from_dense_coefficients(remainder);
+        }
+
+        let divisor_degree = divisor.len() - 1;
+        for power in (divisor_degree..remainder.len()).rev() {
+            let value = std::mem::replace(&mut remainder[power], Integer::zero());
+            let pivot = value.symmetric_mod(self.modulus);
+            if pivot.is_zero() {
+                continue;
+            }
+
+            let shift = power - divisor_degree;
+            for (offset, divisor_coefficient) in divisor.iter().take(divisor_degree).enumerate() {
+                Z.sub_mul_assign(&mut remainder[shift + offset], &pivot, divisor_coefficient);
+            }
+        }
+
+        remainder.truncate(divisor_degree);
+        for coefficient in &mut remainder {
+            let value = std::mem::replace(coefficient, Integer::zero());
+            *coefficient = value.symmetric_mod(self.modulus);
+        }
+        self.from_dense_coefficients(remainder)
     }
 }
 
@@ -4520,22 +5259,46 @@ impl<E: PositiveExponent> MultivariatePolynomial<IntegerRing, E, LexOrder> {
                 m = next_modulus;
             }
         } else {
-            while !e.is_zero() && &m < max_p {
-                let e_p = e.map_coeff(|c| (c / &m).to_finite_field(&field), field.clone());
+            // At precision m, error_quotient is exactly
+            // (a - u_i * w_i) / m. Updating it from the p-adic corrections
+            // avoids multiplying the two increasingly large lifted factors.
+            let divide_by_prime = |mut residual: Self| {
+                for coefficient in &mut residual.coefficients {
+                    debug_assert!((&*coefficient % &p).is_zero());
+                    *coefficient /= &p;
+                }
+                residual
+            };
+            let mut error_quotient = divide_by_prime(e);
+
+            while !error_quotient.is_zero() && &m < max_p {
+                let e_p = error_quotient.map_coeff(|c| c.to_finite_field(&field), field.clone());
                 let (q, r) = (&e_p * &s).quot_rem_univariate(&mut w);
                 let tau = &e_p * &t + q * &u;
 
-                u_i = u_i
-                    + tau
-                        .map_coeff(|c| field.to_symmetric_integer(c), Z)
-                        .mul_coeff(m.clone());
-                w_i = w_i
-                    + r.map_coeff(|c| field.to_symmetric_integer(c), Z)
-                        .mul_coeff(m.clone());
-                e = &a - &(&u_i * &w_i);
+                let tau_i = tau.map_coeff(|c| field.to_symmetric_integer(c), Z);
+                let r_i = r.map_coeff(|c| field.to_symmetric_integer(c), Z);
+
+                // For u' = u + m*tau and w' = w + m*r,
+                // (a - u'*w') / m = error_quotient - tau*w - r*u'. Here w is
+                // the old w_i and u' is the updated u_i. The right-hand side
+                // is divisible coefficient-wise by p.
+                let tau_times_w = &tau_i * &w_i;
+                u_i = u_i + tau_i.mul_coeff(m.clone());
+                let r_times_u = &r_i * &u_i;
+                error_quotient = divide_by_prime(error_quotient - tau_times_w - r_times_u);
+                w_i = w_i + r_i.mul_coeff(m.clone());
 
                 m = &m * &p;
+                debug_assert_eq!(
+                    error_quotient.clone().mul_coeff(m.clone()),
+                    &a - &(&u_i * &w_i)
+                );
             }
+
+            // Only the zero/nonzero state of e is used below. The scaled
+            // residual has the same state and avoids rebuilding a - u_i*w_i.
+            e = error_quotient;
         }
 
         if e.is_zero() {
@@ -4565,21 +5328,21 @@ impl<E: PositiveExponent> MultivariatePolynomial<IntegerRing, E, LexOrder> {
         }
     }
 
-    /// Lift multiple factors by creating a binary tree and lifting each product.
-    fn multi_factor_hensel_lift(
+    /// Lift every leaf of a modular factor tree to the same prime-power modulus.
+    ///
+    /// `self` may only be a modular approximation to an exact integer factor. The returned
+    /// leaves therefore remain modular approximations and must be recombined against a known
+    /// exact polynomial before they can be used with a different modulus.
+    fn lift_modular_factor_tree<UField: FiniteFieldWorkspace>(
         &self,
-        hs: &[MultivariatePolynomial<Zp, E, LexOrder>],
-        max_p: &Integer,
-    ) -> Vec<Self> {
-        self.multi_factor_hensel_lift_with_strategy(hs, max_p, hs.len() <= 4)
-    }
-
-    fn multi_factor_hensel_lift_with_strategy(
-        &self,
-        hs: &[MultivariatePolynomial<Zp, E, LexOrder>],
+        hs: &[MultivariatePolynomial<FiniteField<UField>, E, LexOrder>],
         max_p: &Integer,
         quadratic_lift_allowed: bool,
-    ) -> Vec<Self> {
+    ) -> Vec<Self>
+    where
+        FiniteField<UField>: Field + PolynomialGCD<E> + FiniteFieldCore<UField>,
+        Integer: ToFiniteField<UField>,
+    {
         if hs.len() == 1 {
             if self.lcoeff().is_one() {
                 return vec![self.clone()];
@@ -4606,14 +5369,334 @@ impl<E: PositiveExponent> MultivariatePolynomial<IntegerRing, E, LexOrder> {
             .hensel_lift_with_strategy(g, h, None, max_p, quadratic_lift_allowed)
             .unwrap_or_else(|e| e);
 
-        let mut factors =
-            g_i.multi_factor_hensel_lift_with_strategy(gs, max_p, quadratic_lift_allowed);
-        factors.extend(h_i.multi_factor_hensel_lift_with_strategy(
-            hs,
-            max_p,
-            quadratic_lift_allowed,
-        ));
+        let mut factors = g_i.lift_modular_factor_tree(gs, max_p, quadratic_lift_allowed);
+        factors.extend(h_i.lift_modular_factor_tree(hs, max_p, quadratic_lift_allowed));
         factors
+    }
+
+    /// Lifts all modular factors through one synchronized degree-greedy
+    /// product tree.
+    ///
+    /// At every stage all node products and Bezout relations advance from
+    /// `p^old` to `p^new`. The correction ring is `Z/(p^(new-old))`, whose
+    /// modulus divides `p^old`; this permits a ceiling-halving schedule and
+    /// skips the final, no-longer-needed Bezout update. Internal factors and
+    /// cofactors stay in `[0, p^old)`, so adding a correction in
+    /// `p^old * [0, p^(new-old))` produces a canonical coefficient at the new
+    /// precision without another modular reduction.
+    fn lift_modular_factor_product_tree<UField: FiniteFieldWorkspace>(
+        &self,
+        hs: &[MultivariatePolynomial<FiniteField<UField>, E, LexOrder>],
+        max_p: &Integer,
+    ) -> Vec<Self>
+    where
+        FiniteField<UField>: Field + PolynomialGCD<E> + FiniteFieldCore<UField>,
+        Integer: ToFiniteField<UField>,
+    {
+        #[cfg(test)]
+        PRODUCT_TREE_HENSEL_LIFT_CALLS.with(|calls| calls.set(calls.get() + 1));
+
+        assert!(hs.len() >= 2);
+        let prime = hs[0].ring().get_prime().to_integer();
+
+        let mut target_digits = 1usize;
+        let mut reconstructed_modulus = prime.clone();
+        while &reconstructed_modulus < max_p {
+            reconstructed_modulus *= &prime;
+            target_digits += 1;
+        }
+        assert_eq!(
+            &reconstructed_modulus, max_p,
+            "the Hensel target modulus must be a power of the base prime"
+        );
+
+        let variable = self
+            .last_exponents()
+            .iter()
+            .position(|exponent| !exponent.is_zero())
+            .expect("a Hensel factor must be nonconstant");
+        let dense_length = self.degree(variable).to_u32() as usize + 1;
+        let intermediate_length = dense_length
+            .checked_mul(2)
+            .and_then(|length| length.checked_sub(1))
+            .expect("dense Hensel intermediate length overflow");
+        let dense_indices = (0..intermediate_length)
+            .map(|index| index as u32)
+            .collect::<Vec<_>>();
+        let target_context =
+            DenseIntegerModularUnivariateContext::new(max_p, variable, self, &dense_indices);
+        let leading_inverse = self.lcoeff().mod_inverse(max_p);
+        let mut normalized_target = target_context.dense_coefficients(self);
+        for coefficient in &mut normalized_target {
+            *coefficient *= &leading_inverse;
+        }
+        target_context.reduce_in_place(&mut normalized_target);
+        debug_assert!(normalized_target.last().is_some_and(Integer::is_one));
+
+        let schedule = univariate_hensel_precision_schedule(target_digits);
+        let mut lift = UnivariateHenselProductTreeLiftContext::new(hs);
+        let root = lift
+            .topology
+            .root
+            .expect("a multi-factor Hensel product tree has a root");
+        let root_index = match root {
+            UnivariateHenselProductTreeLink::Internal(index) => index,
+            UnivariateHenselProductTreeLink::Leaf(_) => {
+                unreachable!("a multi-factor Hensel product tree has an internal root")
+            }
+        };
+
+        #[cfg(debug_assertions)]
+        {
+            let base_context =
+                DenseIntegerModularUnivariateContext::new(&prime, variable, self, &dense_indices);
+            let base_target = base_context.reduce(&normalized_target);
+            let root_product = lift.value(root);
+            let length = base_target.len().max(root_product.len());
+            debug_assert!((0..length).all(|index| {
+                let target_coefficient = base_target
+                    .get(index)
+                    .cloned()
+                    .unwrap_or_else(Integer::zero);
+                let product_coefficient = root_product
+                    .get(index)
+                    .cloned()
+                    .unwrap_or_else(Integer::zero);
+                ((target_coefficient - product_coefficient) % &prime).is_zero()
+            }));
+        }
+
+        let mut modulus = prime.clone();
+        for (stage_index, exponents) in schedule.windows(2).enumerate() {
+            let old_exponent = exponents[0];
+            let new_exponent = exponents[1];
+            let correction_exponent = new_exponent - old_exponent;
+            debug_assert!(correction_exponent <= old_exponent);
+
+            let mut correction_modulus = Integer::one();
+            for _ in 0..correction_exponent {
+                correction_modulus *= &prime;
+            }
+            debug_assert!((&modulus % &correction_modulus).is_zero());
+            let next_modulus = &modulus * &correction_modulus;
+            let correction_context = DenseIntegerModularUnivariateContext::new(
+                &correction_modulus,
+                variable,
+                self,
+                &dense_indices,
+            );
+            let next_context = DenseIntegerModularUnivariateContext::new(
+                &next_modulus,
+                variable,
+                self,
+                &dense_indices,
+            );
+
+            let final_stage = stage_index + 1 == schedule.len() - 1;
+            for node_index in (0..lift.topology.nodes.len()).rev() {
+                let node = lift.topology.nodes[node_index];
+                let u_link = node.children[0];
+                let w_link = node.children[1];
+                let (s_mod, t_mod, du, dw) = {
+                    let target = if node_index == root_index {
+                        normalized_target.as_slice()
+                    } else {
+                        &lift.internal_products[node_index]
+                    };
+                    let u = lift.value(u_link);
+                    let w = lift.value(w_link);
+                    let cofactors = &lift.bezout_cofactors[node_index];
+                    let s = &cofactors[0];
+                    let t = &cofactors[1];
+
+                    // E=(target-u*w)/m is integral because the child product
+                    // is already correct at the old precision. Reducing E
+                    // modulo the correction modulus determines both factor
+                    // corrections.
+                    let error = correction_context
+                        .exact_product_residual_quotient_mod(target, u, w, &modulus);
+                    let u_mod = correction_context.reduce(u);
+                    let w_mod = correction_context.reduce(w);
+                    let s_mod = correction_context.reduce(s);
+                    let t_mod = correction_context.reduce(t);
+
+                    // du=(E*t) rem u and dw=(E*s) rem w. Reducing E before
+                    // each multiplication keeps the intermediate product
+                    // below the degree of the corresponding child factor.
+                    let error_mod_u = correction_context.remainder_monic(error.clone(), &u_mod);
+                    let error_t = correction_context.multiply_raw(&error_mod_u, &t_mod);
+                    let du = correction_context.remainder_monic(error_t, &u_mod);
+                    let error_mod_w = correction_context.remainder_monic(error, &w_mod);
+                    let error_s = correction_context.multiply_raw(&error_mod_w, &s_mod);
+                    let dw = correction_context.remainder_monic(error_s, &w_mod);
+
+                    (s_mod, t_mod, du, dw)
+                };
+
+                // The old child and cofactor buffers are dead after this node
+                // advances, so the corrections reuse their owned storage.
+                let u = lift.take_value(u_link);
+                let w = lift.take_value(w_link);
+                let [s, t] = std::mem::take(&mut lift.bezout_cofactors[node_index]);
+                let lifted_u = next_context.lift_correction(u, &du, &modulus);
+                let lifted_w = next_context.lift_correction(w, &dw, &modulus);
+                debug_assert!(lifted_u.last().is_some_and(Integer::is_one));
+                debug_assert!(lifted_w.last().is_some_and(Integer::is_one));
+
+                #[cfg(debug_assertions)]
+                {
+                    let target = if node_index == root_index {
+                        normalized_target.as_slice()
+                    } else {
+                        &lift.internal_products[node_index]
+                    };
+                    debug_assert!(next_context.product_matches(target, &lifted_u, &lifted_w));
+                }
+
+                let lifted_bezout = if final_stage {
+                    None
+                } else {
+                    // B=(1-s*U-t*W)/m gives the correction to the Bezout
+                    // relation after U and W have been lifted.
+                    let bezout_error = correction_context
+                        .exact_bezout_residual_quotient_mod(&s, &lifted_u, &t, &lifted_w, &modulus);
+                    let lifted_u_mod = correction_context.reduce(&lifted_u);
+                    let lifted_w_mod = correction_context.reduce(&lifted_w);
+
+                    // ds=(B*s) rem W and dt=(B*t) rem U preserve the degree
+                    // bounds of the two Bezout cofactors.
+                    let bezout_mod_w =
+                        correction_context.remainder_monic(bezout_error.clone(), &lifted_w_mod);
+                    let bezout_s = correction_context.multiply_raw(&bezout_mod_w, &s_mod);
+                    let delta_s = correction_context.remainder_monic(bezout_s, &lifted_w_mod);
+                    let bezout_mod_u =
+                        correction_context.remainder_monic(bezout_error, &lifted_u_mod);
+                    let bezout_t = correction_context.multiply_raw(&bezout_mod_u, &t_mod);
+                    let delta_t = correction_context.remainder_monic(bezout_t, &lifted_u_mod);
+                    let lifted_s = next_context.lift_correction(s, &delta_s, &modulus);
+                    let lifted_t = next_context.lift_correction(t, &delta_t, &modulus);
+
+                    #[cfg(debug_assertions)]
+                    {
+                        debug_assert!(
+                            next_context.bezout_identity_matches(
+                                &lifted_s, &lifted_u, &lifted_t, &lifted_w,
+                            )
+                        );
+                    }
+                    Some([lifted_s, lifted_t])
+                };
+
+                lift.set_value(u_link, lifted_u);
+                lift.set_value(w_link, lifted_w);
+                if let Some(cofactors) = lifted_bezout {
+                    lift.bezout_cofactors[node_index] = cofactors;
+                }
+            }
+
+            modulus = next_modulus;
+        }
+
+        debug_assert_eq!(&modulus, max_p);
+        debug_assert_eq!(
+            lift.topology.leaf_indices_in_input_order(),
+            (0..hs.len()).collect::<Vec<_>>()
+        );
+        lift.leaves
+            .into_iter()
+            .map(|mut factor| {
+                target_context.symmetrize_in_place(&mut factor);
+                target_context.from_dense_coefficients(factor)
+            })
+            .collect()
+    }
+
+    /// Continue factoring one exact Hensel child with a coefficient bound local to that child.
+    fn factor_exact_hensel_child(
+        self,
+        hs: &[MultivariatePolynomial<Zp, E, LexOrder>],
+        prime: u32,
+        var: usize,
+        quadratic_lift_allowed: bool,
+    ) -> Vec<Self> {
+        if hs.len() == 1 {
+            return vec![self];
+        }
+
+        let bound = self.coefficient_bound();
+        let (_, max_p) = Self::linear_hensel_modulus(&bound, prime);
+        self.factor_hensel_subtree(hs, &max_p, &bound, var, quadratic_lift_allowed)
+    }
+
+    /// Factor a known exact integer polynomial through its retained modular-factor subtree.
+    ///
+    /// An exact two-factor split lets each exact child use a modulus derived from its own
+    /// coefficient bound. If the split is only a congruence, all descendants retain this node's
+    /// modulus and are recombined locally before exact factors are returned to the parent.
+    fn factor_hensel_subtree(
+        &self,
+        hs: &[MultivariatePolynomial<Zp, E, LexOrder>],
+        max_p: &Integer,
+        bound: &Integer,
+        var: usize,
+        quadratic_lift_allowed: bool,
+    ) -> Vec<Self> {
+        if hs.len() == 1 {
+            return vec![self.clone()];
+        }
+
+        #[cfg(test)]
+        EXACT_HENSEL_SUBTREE_MODULUS_BITS
+            .with(|bits| bits.borrow_mut().push(max_p.significant_bits()));
+
+        let (gs, hs) = hs.split_at(hs.len() / 2);
+        let mut g = gs[0].one();
+        for factor in gs {
+            g = g * factor;
+        }
+        let mut h = hs[0].one();
+        for factor in hs {
+            h = h * factor;
+        }
+
+        match self.hensel_lift_with_strategy(g, h, None, max_p, quadratic_lift_allowed) {
+            Ok((g_i, h_i)) => {
+                #[cfg(test)]
+                EXACT_HENSEL_SUBTREE_SPLITS.with(|splits| splits.set(splits.get() + 1));
+
+                let prime = gs[0].ring().get_prime();
+                let mut factors =
+                    g_i.factor_exact_hensel_child(gs, prime, var, quadratic_lift_allowed);
+                factors.extend(h_i.factor_exact_hensel_child(
+                    hs,
+                    prime,
+                    var,
+                    quadratic_lift_allowed,
+                ));
+                factors
+            }
+            Err((g_i, h_i)) => {
+                #[cfg(test)]
+                LOCAL_HENSEL_RECOMBINATION_NODES.with(|nodes| nodes.set(nodes.get() + 1));
+
+                let mut factors = g_i.lift_modular_factor_tree(gs, max_p, quadratic_lift_allowed);
+                factors.extend(h_i.lift_modular_factor_tree(hs, max_p, quadratic_lift_allowed));
+
+                #[cfg(debug_assertions)]
+                for (factor, factor_p) in factors.iter().zip(gs.iter().chain(hs)) {
+                    let field = factor_p.ring().clone();
+                    let lifted_mod_p = factor
+                        .map_coeff(
+                            |coefficient| coefficient.to_finite_field(&field),
+                            field.clone(),
+                        )
+                        .make_monic();
+                    debug_assert_eq!(&lifted_mod_p, factor_p);
+                }
+
+                self.recombine_lifted_factors(factors, max_p, var, bound)
+            }
+        }
     }
 
     /// Compute distinct-degree data for a suitable univariate image modulo `prime`.
@@ -4703,6 +5786,21 @@ impl<E: PositiveExponent> MultivariatePolynomial<IntegerRing, E, LexOrder> {
     /// tree of linear two-factor Hensel lifts.
     fn linear_hensel_work(factor_count: usize, digits: usize) -> usize {
         factor_count.saturating_sub(1).saturating_mul(digits)
+    }
+
+    /// Returns whether a modular factorization exceeds the degree, height,
+    /// factor-count, and precision thresholds for high-pressure Hensel paths.
+    fn has_high_linear_hensel_pressure(
+        degree: u32,
+        bound: &Integer,
+        factor_count: usize,
+        digits: usize,
+    ) -> bool {
+        degree <= 64
+            && bound.significant_bits() >= 256
+            && factor_count >= 3
+            && digits >= 64
+            && Self::linear_hensel_work(factor_count, digits) >= 256
     }
 
     fn dense_coefficients_mod(&self, var: usize, modulus: &Integer) -> Vec<Integer> {
@@ -4921,6 +6019,90 @@ impl<E: PositiveExponent> MultivariatePolynomial<IntegerRing, E, LexOrder> {
         Some(result)
     }
 
+    /// Recombine modularly lifted leaves into exact factors of `self`.
+    ///
+    /// Every candidate is verified by exact division. The leaves may therefore be returned only
+    /// to this exact target; they are not valid inputs to a recombination at another modulus.
+    fn recombine_lifted_factors(
+        &self,
+        mut factors: Vec<Self>,
+        modulus: &Integer,
+        var: usize,
+        bound: &Integer,
+    ) -> Vec<Self> {
+        if factors.len() > 10
+            && let Some(recombined) = self.lll_factor_recombination(&factors, modulus, var)
+        {
+            return recombined;
+        }
+
+        let mut reconstructed = vec![];
+        let mut subset_size = 1;
+        let mut rest = self.clone();
+        'subset_size: while 2 * subset_size <= factors.len() {
+            let mut subsets = CombinationIterator::new(factors.len(), subset_size);
+            while let Some(indices) = subsets.next() {
+                if rest.exponents[..rest.nvars()]
+                    .iter()
+                    .all(|exponent| *exponent == E::zero())
+                {
+                    let mut selected_constant = rest.lcoeff();
+                    let mut complement_constant = rest.lcoeff();
+                    for (index, factor) in factors.iter().enumerate() {
+                        if factor.exponents[..rest.nvars()]
+                            .iter()
+                            .all(|exponent| *exponent == E::zero())
+                        {
+                            if indices.contains(&index) {
+                                selected_constant = (&selected_constant * &factor.coefficients[0])
+                                    .symmetric_mod(modulus);
+                            } else {
+                                complement_constant = (&complement_constant
+                                    * &factor.coefficients[0])
+                                    .symmetric_mod(modulus);
+                            }
+                        }
+                    }
+
+                    // TODO: improve check
+                    // for monic factors we can do selected_constant * complement_constant !=
+                    // rest.lcoeff() * rest.coefficients[0]
+                    if &(&selected_constant * &complement_constant).abs() > bound {
+                        continue;
+                    }
+                }
+
+                let mut candidate = rest.constant(rest.lcoeff());
+                for (index, factor) in factors.iter().enumerate() {
+                    if indices.contains(&index) {
+                        candidate = (&candidate * factor)
+                            .map_coeff(|coefficient| coefficient.clone().symmetric_mod(modulus), Z);
+                    }
+                }
+                let content = candidate.content();
+                candidate = candidate.div_coeff(&content);
+
+                let (quotient, remainder) = rest.quot_rem(&candidate, true);
+                if remainder.is_zero() {
+                    reconstructed.push(candidate);
+
+                    for index in indices.iter().rev() {
+                        factors.remove(*index);
+                    }
+
+                    let content = quotient.content();
+                    rest = quotient.div_coeff(&content);
+                    continue 'subset_size;
+                }
+            }
+
+            subset_size += 1;
+        }
+
+        reconstructed.push(rest);
+        reconstructed
+    }
+
     /// Factor a square-free univariate polynomial over the integers by Hensel lifting factors computed over
     /// a finite field image of the polynomial.
     fn factor_reconstruct(&self) -> Vec<Self> {
@@ -4993,20 +6175,13 @@ impl<E: PositiveExponent> MultivariatePolynomial<IntegerRing, E, LexOrder> {
         // the current linear p-adic lift. Restrict it to low-degree, high-height
         // images where that saving clearly outweighs the more expensive finite-
         // field factorization.
-        let (initial_factor_count, initial_digits, initial_work) = {
+        let (initial_factor_count, initial_digits) = {
             let candidate = best_factorization.as_ref().unwrap();
             let (digits, _) = Self::linear_hensel_modulus(&bound, candidate.field.get_prime());
-            (
-                candidate.distinct_degree.factor_count,
-                digits,
-                Self::linear_hensel_work(candidate.distinct_degree.factor_count, digits),
-            )
+            (candidate.distinct_degree.factor_count, digits)
         };
-        let high_linear_lift_pressure = d <= 64
-            && bound.significant_bits() >= 256
-            && initial_factor_count >= 3
-            && initial_digits >= 64
-            && initial_work >= 256;
+        let high_linear_lift_pressure =
+            Self::has_high_linear_hensel_pressure(d, &bound, initial_factor_count, initial_digits);
 
         if high_linear_lift_pressure {
             // Compare three suitable small primes before considering the large
@@ -5124,89 +6299,15 @@ impl<E: PositiveExponent> MultivariatePolynomial<IntegerRing, E, LexOrder> {
         );
         let (field, hs) = Self::complete_equal_degree_factorization(best_factorization);
 
-        let (_, max_p) = Self::linear_hensel_modulus(&bound, field.get_prime());
-
-        let mut factors = self.multi_factor_hensel_lift(&hs, &max_p);
-
-        #[cfg(debug_assertions)]
-        for (h, h_p) in factors.iter().zip(&hs) {
-            let hh_p = h
-                .map_coeff(|c| c.to_finite_field(&field), field.clone())
-                .make_monic();
-            if &hh_p != h_p {
-                panic!("Mismatch of lifted factor: {hh_p} vs {h_p} in {self}");
-            }
+        let (final_digits, max_p) = Self::linear_hensel_modulus(&bound, field.get_prime());
+        let product_tree_lift_pressure =
+            Self::has_high_linear_hensel_pressure(d, &bound, hs.len(), final_digits);
+        let quadratic_lift_allowed = hs.len() <= 4;
+        if product_tree_lift_pressure && hs.len() > 4 {
+            let lifted = self.lift_modular_factor_product_tree(&hs, &max_p);
+            return self.recombine_lifted_factors(lifted, &max_p, var, &bound);
         }
-
-        if factors.len() > 10
-            && let Some(recombined) = self.lll_factor_recombination(&factors, &max_p, var)
-        {
-            return recombined;
-        }
-
-        let mut rec_factors = vec![];
-        // factor recombination
-        let mut s = 1;
-
-        let mut rest = self.clone();
-        'len: while 2 * s <= factors.len() {
-            let mut fs = CombinationIterator::new(factors.len(), s);
-            while let Some(cs) = fs.next() {
-                // check if the constant term matches
-                if rest.exponents[..rest.nvars()]
-                    .iter()
-                    .all(|e| *e == E::zero())
-                {
-                    let mut g1 = rest.lcoeff();
-                    let mut h1 = rest.lcoeff();
-                    for (i, f) in factors.iter().enumerate() {
-                        if f.exponents[..rest.nvars()].iter().all(|x| *x == E::zero()) {
-                            if cs.contains(&i) {
-                                g1 = (&g1 * &f.coefficients[0]).symmetric_mod(&max_p);
-                            } else {
-                                h1 = (&h1 * &f.coefficients[0]).symmetric_mod(&max_p);
-                            }
-                        }
-                    }
-
-                    // TODO: improve check
-                    // for monic factors we can do &g1 * &h1 != &rest.lcoeff() * &rest.coefficients[0]
-                    if (&g1 * &h1).abs() > bound {
-                        continue;
-                    }
-                }
-
-                let mut g = rest.constant(rest.lcoeff());
-                for (i, f) in factors.iter().enumerate() {
-                    if cs.contains(&i) {
-                        g = (&g * f).map_coeff(|i| i.clone().symmetric_mod(&max_p), Z);
-                    }
-                }
-                let c = g.content();
-                g = g.div_coeff(&c);
-
-                let (h, r) = rest.quot_rem(&g, true);
-
-                if r.is_zero() {
-                    // should always happen happen when |g1|_1 * |h1|_1 <= bound
-                    rec_factors.push(g);
-
-                    for i in cs.iter().rev() {
-                        factors.remove(*i);
-                    }
-
-                    let c = h.content();
-                    rest = h.div_coeff(&c);
-
-                    continue 'len;
-                }
-            }
-
-            s += 1;
-        }
-
-        rec_factors.push(rest);
-        rec_factors
+        self.factor_hensel_subtree(&hs, &max_p, &bound, var, quadratic_lift_allowed)
     }
 
     /// Lift a solution of `poly ≡ lcoeff * univariate_factors mod y mod p^k`
@@ -7250,11 +8351,15 @@ mod test {
     use std::sync::{Arc, Mutex, atomic::Ordering};
 
     use super::{
-        BOUNDED_DDF_REJECTIONS, DenseBivariateImage, DenseTwoFactorCorrectionContext,
-        ExactPolynomialSquareRoot, IntegerModularUnivariateContext,
+        BOUNDED_DDF_REJECTIONS, DenseBivariateImage, DenseIntegerModularUnivariateContext,
+        DenseTwoFactorCorrectionContext, EXACT_HENSEL_SUBTREE_MODULUS_BITS,
+        EXACT_HENSEL_SUBTREE_SPLITS, ExactPolynomialSquareRoot, IntegerModularUnivariateContext,
         LAST_BOUNDED_DDF_REJECTION_DEGREE, LAST_MODULAR_INTEGER_EDF_PRIME,
-        MODULAR_INTEGER_EDF_CALLS, ModularPrimeScreen, QUADRATIC_HENSEL_LIFT_CALLS,
-        QuadraticFactorization, SparseDiophantineContext,
+        LLL_RECOMBINATION_SUCCESSES, LOCAL_HENSEL_RECOMBINATION_NODES, MODULAR_INTEGER_EDF_CALLS,
+        ModularPrimeScreen, PRODUCT_TREE_HENSEL_LIFT_CALLS, QUADRATIC_HENSEL_LIFT_CALLS,
+        QuadraticFactorization, SparseDiophantineContext, UnivariateHenselProductTreeBuildContext,
+        UnivariateHenselProductTreeLink, UnivariateHenselProductTreeNode,
+        univariate_hensel_precision_schedule,
     };
 
     use crate::{
@@ -7273,6 +8378,227 @@ mod test {
     };
 
     static GLOBAL_FACTOR_SETTINGS_LOCK: Mutex<()> = Mutex::new(());
+
+    #[test]
+    fn univariate_hensel_product_tree_is_degree_greedy_and_deterministic() {
+        use UnivariateHenselProductTreeLink::{Internal, Leaf};
+
+        let mut context = UnivariateHenselProductTreeBuildContext::default();
+        let topology = context.build(&[1, 1, 2, 10, 10, 10, 30]);
+
+        assert_eq!(
+            topology.nodes,
+            [
+                UnivariateHenselProductTreeNode {
+                    children: [Leaf(0), Leaf(1)],
+                    degree: 2,
+                },
+                UnivariateHenselProductTreeNode {
+                    children: [Leaf(2), Internal(0)],
+                    degree: 4,
+                },
+                UnivariateHenselProductTreeNode {
+                    children: [Internal(1), Leaf(3)],
+                    degree: 14,
+                },
+                UnivariateHenselProductTreeNode {
+                    children: [Leaf(4), Leaf(5)],
+                    degree: 20,
+                },
+                UnivariateHenselProductTreeNode {
+                    children: [Internal(2), Internal(3)],
+                    degree: 34,
+                },
+                UnivariateHenselProductTreeNode {
+                    children: [Leaf(6), Internal(4)],
+                    degree: 64,
+                },
+            ]
+        );
+        assert_eq!(
+            topology
+                .nodes
+                .iter()
+                .map(|node| node.degree)
+                .collect::<Vec<_>>(),
+            [2, 4, 14, 20, 34, 64]
+        );
+        assert_eq!(
+            topology.nodes.iter().map(|node| node.degree).sum::<usize>(),
+            138
+        );
+        assert_eq!(topology.root, Some(Internal(5)));
+        assert_eq!(topology.degree(Internal(5)), 64);
+        assert_eq!(
+            topology
+                .internal_nodes_top_down()
+                .map(|(_, node)| node.degree)
+                .collect::<Vec<_>>(),
+            [64, 34, 20, 14, 4, 2]
+        );
+        for (parent_index, node) in topology.internal_nodes_top_down() {
+            for child in node.children {
+                if let Internal(child_index) = child {
+                    assert!(child_index < parent_index);
+                }
+            }
+        }
+        assert_eq!(
+            topology.leaf_indices_in_input_order(),
+            [0, 1, 2, 3, 4, 5, 6]
+        );
+
+        assert_eq!(context.build(&[1, 1, 2, 10, 10, 10, 30]), topology);
+    }
+
+    #[test]
+    fn univariate_hensel_product_tree_handles_empty_and_singleton_inputs() {
+        let mut context = UnivariateHenselProductTreeBuildContext::default();
+
+        let empty = context.build(&[]);
+        assert!(empty.nodes.is_empty());
+        assert_eq!(empty.root, None);
+        assert!(empty.leaf_indices_in_input_order().is_empty());
+
+        let singleton = context.build(&[17]);
+        assert!(singleton.nodes.is_empty());
+        assert_eq!(
+            singleton.root,
+            Some(UnivariateHenselProductTreeLink::Leaf(0))
+        );
+        assert_eq!(
+            singleton.degree(UnivariateHenselProductTreeLink::Leaf(0)),
+            17
+        );
+        assert_eq!(singleton.leaf_indices_in_input_order(), [0]);
+    }
+
+    #[test]
+    fn univariate_hensel_precision_schedule_uses_ceiling_halves() {
+        assert_eq!(univariate_hensel_precision_schedule(1), [1]);
+        assert_eq!(univariate_hensel_precision_schedule(2), [1, 2]);
+        assert_eq!(univariate_hensel_precision_schedule(3), [1, 2, 3]);
+        assert_eq!(univariate_hensel_precision_schedule(5), [1, 2, 3, 5]);
+        assert_eq!(
+            univariate_hensel_precision_schedule(77),
+            [1, 2, 3, 5, 10, 20, 39, 77]
+        );
+    }
+
+    #[test]
+    fn product_tree_hensel_lift_matches_binary_lift_at_binary_odd_precision() {
+        let variables = Some(Arc::new(vec![symbol!("x").into()]));
+        let integer_factors = ["3*x+2", "5*x+3", "x^2+x+1", "x^3+x+1", "x^3+x^2+1"]
+            .map(|factor| parse!(factor).to_polynomial::<_, u8>(&Z, variables.clone()));
+        let target = integer_factors
+            .iter()
+            .fold(integer_factors[0].one(), |product, factor| {
+                &product * factor
+            });
+        assert!(!target.lcoeff().is_one());
+
+        let field = Z2;
+        let modular_factors = integer_factors
+            .iter()
+            .map(|factor| {
+                factor
+                    .map_coeff(
+                        |coefficient| coefficient.to_finite_field(&field),
+                        field.clone(),
+                    )
+                    .make_monic()
+            })
+            .collect::<Vec<_>>();
+        assert_eq!(
+            modular_factors
+                .iter()
+                .map(|factor| factor.degree(0))
+                .collect::<Vec<_>>(),
+            [1u8, 1, 2, 3, 3]
+        );
+
+        let max_p = Integer::from(2).pow(41);
+        let product_tree = target.lift_modular_factor_product_tree(&modular_factors, &max_p);
+        let binary = target.lift_modular_factor_tree(&modular_factors, &max_p, false);
+        let reduce = |factor: &MultivariatePolynomial<IntegerRing, u8>| {
+            factor.map_coeff(|coefficient| coefficient.clone().symmetric_mod(&max_p), Z)
+        };
+        for (product_tree_factor, binary_factor) in product_tree.iter().zip(&binary) {
+            assert_eq!(reduce(product_tree_factor), reduce(binary_factor));
+        }
+
+        let normalized_target = target.map_coeff(
+            |coefficient| (coefficient * target.lcoeff().mod_inverse(&max_p)).symmetric_mod(&max_p),
+            Z,
+        );
+        let lifted_product = product_tree
+            .iter()
+            .fold(target.one(), |product, factor| &product * factor);
+        let product_error = &normalized_target - &lifted_product;
+        assert!(
+            product_error
+                .coefficients
+                .iter()
+                .all(|coefficient| (coefficient % &max_p).is_zero())
+        );
+
+        let bound = target.coefficient_bound();
+        assert!(max_p > bound);
+        let mut reconstructed = target.recombine_lifted_factors(product_tree, &max_p, 0, &bound);
+        let mut expected = integer_factors.to_vec();
+        reconstructed.sort_by(|left, right| left.internal_cmp(right));
+        expected.sort_by(|left, right| left.internal_cmp(right));
+        assert_eq!(reconstructed, expected);
+    }
+
+    #[test]
+    fn product_tree_hensel_lift_matches_binary_lift_over_small_odd_primes() {
+        fn check(prime: u32, exponent: u64, factor_texts: &[&str]) {
+            let variables = Some(Arc::new(vec![symbol!("x").into()]));
+            let integer_factors = factor_texts
+                .iter()
+                .map(|&factor| parse!(factor).to_polynomial::<_, u8>(&Z, variables.clone()))
+                .collect::<Vec<_>>();
+            let target = integer_factors
+                .iter()
+                .fold(integer_factors[0].one(), |product, factor| {
+                    &product * factor
+                });
+            let field = Zp::new(prime);
+            let modular_factors = integer_factors
+                .iter()
+                .map(|factor| {
+                    factor
+                        .map_coeff(
+                            |coefficient| coefficient.to_finite_field(&field),
+                            field.clone(),
+                        )
+                        .make_monic()
+                })
+                .collect::<Vec<_>>();
+            let max_p = Integer::from(prime).pow(exponent);
+
+            let product_tree = target.lift_modular_factor_product_tree(&modular_factors, &max_p);
+            let binary = target.lift_modular_factor_tree(&modular_factors, &max_p, false);
+            let symmetric = |factor: &MultivariatePolynomial<IntegerRing, u8>| {
+                factor.map_coeff(|coefficient| coefficient.clone().symmetric_mod(&max_p), Z)
+            };
+            for ((product_tree_factor, binary_factor), expected) in
+                product_tree.iter().zip(&binary).zip(&integer_factors)
+            {
+                assert_eq!(symmetric(product_tree_factor), symmetric(binary_factor));
+                assert_eq!(product_tree_factor, expected);
+            }
+
+            let lifted_product = product_tree
+                .iter()
+                .fold(target.one(), |product, factor| &product * factor);
+            assert_eq!(lifted_product, target);
+        }
+
+        check(5, 9, &["x", "x-1", "x-2", "x-3", "x-4"]);
+        check(17, 7, &["x", "x-1", "x-2", "x-3", "x-4"]);
+    }
 
     fn multiply_dense_bivariate<R: Ring>(
         ring: &R,
@@ -8043,10 +9369,77 @@ mod test {
     }
 
     #[test]
+    fn factor_univariate_degree_63_rechecks_product_tree_pressure_after_prime_selection() {
+        PRODUCT_TREE_HENSEL_LIFT_CALLS.with(|calls| calls.set(0));
+        let polynomial = parse!("((1+3*x)^32-1)*((1-5*x)^31+1)")
+            .expand()
+            .to_polynomial::<_, u8>(&Z, None);
+        let primitive = polynomial.clone().make_primitive();
+        let bound = primitive.coefficient_bound();
+
+        let Some(ModularPrimeScreen::Candidate(small_candidate)) =
+            primitive.screen_univariate_mod_prime(0, 11, None)
+        else {
+            panic!("prime 11 must produce a suitable modular image");
+        };
+        let small_factor_count = small_candidate.distinct_degree.factor_count;
+        let small_digits =
+            MultivariatePolynomial::<IntegerRing, u8>::linear_hensel_modulus(&bound, 11).0;
+        assert_eq!(small_factor_count, 11);
+        assert!(
+            MultivariatePolynomial::<IntegerRing, u8>::has_high_linear_hensel_pressure(
+                63,
+                &bound,
+                small_factor_count,
+                small_digits
+            )
+        );
+
+        let Some(ModularPrimeScreen::Candidate(final_candidate)) =
+            primitive.screen_univariate_mod_prime(0, 65_000_011, None)
+        else {
+            panic!("the dense-u64 prime must produce a suitable modular image");
+        };
+        let final_factor_count = final_candidate.distinct_degree.factor_count;
+        let final_digits =
+            MultivariatePolynomial::<IntegerRing, u8>::linear_hensel_modulus(&bound, 65_000_011).0;
+        assert_eq!(final_factor_count, 11);
+        assert_eq!(final_digits, 12);
+        assert!(
+            !MultivariatePolynomial::<IntegerRing, u8>::has_high_linear_hensel_pressure(
+                63,
+                &bound,
+                final_factor_count,
+                final_digits
+            )
+        );
+
+        let factors = polynomial.factor();
+        let reconstructed = factors
+            .iter()
+            .fold(polynomial.one(), |product, (factor, power)| {
+                &product * &factor.pow(*power)
+            });
+        assert_eq!(reconstructed, polynomial);
+        let mut degrees = factors
+            .iter()
+            .filter(|(factor, _)| !factor.is_constant())
+            .map(|(factor, power)| {
+                assert_eq!(*power, 1);
+                factor.degree(0)
+            })
+            .collect::<Vec<_>>();
+        degrees.sort_unstable();
+        assert_eq!(degrees, [1u8, 1, 1, 2, 4, 8, 16, 30]);
+        PRODUCT_TREE_HENSEL_LIFT_CALLS.with(|calls| assert_eq!(calls.get(), 0));
+    }
+
+    #[test]
     fn factor_univariate_degree_64_defers_discarded_equal_degree_factorization() {
         MODULAR_INTEGER_EDF_CALLS.with(|calls| calls.set(0));
         BOUNDED_DDF_REJECTIONS.with(|rejections| rejections.set(0));
         LAST_MODULAR_INTEGER_EDF_PRIME.with(|prime| prime.set(0));
+        PRODUCT_TREE_HENSEL_LIFT_CALLS.with(|calls| calls.set(0));
         let polynomial = parse!("((1+3*x)^33-1)*((1-5*x)^31+1)")
             .expand()
             .to_polynomial::<_, u8>(&Z, None);
@@ -8072,6 +9465,7 @@ mod test {
         MODULAR_INTEGER_EDF_CALLS.with(|calls| assert_eq!(calls.get(), 1));
         BOUNDED_DDF_REJECTIONS.with(|rejections| assert_eq!(rejections.get(), 1));
         LAST_MODULAR_INTEGER_EDF_PRIME.with(|prime| assert_eq!(prime.get(), 17));
+        PRODUCT_TREE_HENSEL_LIFT_CALLS.with(|calls| assert_eq!(calls.get(), 1));
     }
 
     #[test]
@@ -8134,6 +9528,400 @@ mod test {
     }
 
     #[test]
+    fn linear_hensel_lift_handles_base_prime_precision() {
+        let variables = Some(Arc::new(vec![symbol!("x").into()]));
+        let field = Zp::new(5);
+        let left = parse!("x-2").to_polynomial::<_, u8>(&field, variables.clone());
+        let right = parse!("x+2").to_polynomial::<_, u8>(&field, variables.clone());
+        let max_p = Integer::from(5);
+
+        let exact = parse!("x^2-4").to_polynomial::<_, u8>(&Z, variables.clone());
+        let exact_lift = exact
+            .hensel_lift_with_strategy(left.clone(), right.clone(), None, &max_p, false)
+            .unwrap();
+        assert_eq!(&exact_lift.0 * &exact_lift.1, exact);
+
+        let inexact = parse!("1+x^2").to_polynomial::<_, u8>(&Z, variables);
+        let inexact_lift = inexact
+            .hensel_lift_with_strategy(left, right, None, &max_p, false)
+            .unwrap_err();
+        let error = &inexact - &(&inexact_lift.0 * &inexact_lift.1);
+        assert!(
+            error
+                .coefficients
+                .iter()
+                .all(|coefficient| (coefficient % &max_p).is_zero())
+        );
+    }
+
+    #[test]
+    fn linear_hensel_lift_handles_binary_prime_and_nontrivial_gamma() {
+        let variables = Some(Arc::new(vec![symbol!("x").into()]));
+
+        let binary_left = parse!("x+5").to_polynomial::<_, u8>(&Z, variables.clone());
+        let binary_right = parse!("x^2+3*x+3").to_polynomial::<_, u8>(&Z, variables.clone());
+        let binary_product = &binary_left * &binary_right;
+        let binary_field = Z2;
+        let binary_left_mod = binary_left.map_coeff(
+            |coefficient| coefficient.to_finite_field(&binary_field),
+            binary_field.clone(),
+        );
+        let binary_right_mod = binary_right.map_coeff(
+            |coefficient| coefficient.to_finite_field(&binary_field),
+            binary_field.clone(),
+        );
+        let binary_lift = binary_product
+            .hensel_lift_with_strategy(
+                binary_left_mod,
+                binary_right_mod,
+                None,
+                &Integer::from(2).pow(20),
+                true,
+            )
+            .unwrap();
+        assert_eq!(&binary_lift.0 * &binary_lift.1, binary_product);
+
+        let nonmonic_left = parse!("2*x+11").to_polynomial::<_, u8>(&Z, variables.clone());
+        let nonmonic_right = parse!("3*x+7").to_polynomial::<_, u8>(&Z, variables);
+        let nonmonic_product = &nonmonic_left * &nonmonic_right;
+        let nonmonic_field = Zp::new(5);
+        let nonmonic_left_mod = nonmonic_left.map_coeff(
+            |coefficient| coefficient.to_finite_field(&nonmonic_field),
+            nonmonic_field.clone(),
+        );
+        let nonmonic_right_mod = nonmonic_right.map_coeff(
+            |coefficient| coefficient.to_finite_field(&nonmonic_field),
+            nonmonic_field.clone(),
+        );
+        let nonmonic_lift = nonmonic_product
+            .hensel_lift_with_strategy(
+                nonmonic_left_mod,
+                nonmonic_right_mod,
+                Some(Integer::from(2)),
+                &Integer::from(5).pow(10),
+                false,
+            )
+            .unwrap();
+        assert_eq!(&nonmonic_lift.0 * &nonmonic_lift.1, nonmonic_product);
+    }
+
+    #[test]
+    fn exact_hensel_subtrees_use_local_moduli_and_recombine_inexact_children() {
+        EXACT_HENSEL_SUBTREE_SPLITS.with(|splits| splits.set(0));
+        LOCAL_HENSEL_RECOMBINATION_NODES.with(|nodes| nodes.set(0));
+        EXACT_HENSEL_SUBTREE_MODULUS_BITS.with(|bits| bits.borrow_mut().clear());
+
+        let variables = Some(Arc::new(vec![symbol!("x").into()]));
+        let integer_factors = [
+            parse!("x^2+100").to_polynomial::<_, u8>(&Z, variables.clone()),
+            parse!("x^2+97").to_polynomial::<_, u8>(&Z, variables.clone()),
+            parse!("x^2+92").to_polynomial::<_, u8>(&Z, variables.clone()),
+            parse!("x^2+85").to_polynomial::<_, u8>(&Z, variables.clone()),
+        ];
+        let polynomial = integer_factors
+            .iter()
+            .fold(integer_factors[0].one(), |product, factor| {
+                &product * factor
+            });
+
+        // The first four modular factors multiply to the first two exact quadratics and the
+        // remaining four multiply to the other two. Within each four-factor child, the first
+        // split crosses the two irreducible quadratics and is therefore only a congruence.
+        let field = Zp::new(101);
+        let modular_factors = vec![
+            parse!("x-1").to_polynomial::<_, u8>(&field, variables.clone()),
+            parse!("x-2").to_polynomial::<_, u8>(&field, variables.clone()),
+            parse!("x+1").to_polynomial::<_, u8>(&field, variables.clone()),
+            parse!("x+2").to_polynomial::<_, u8>(&field, variables.clone()),
+            parse!("x-3").to_polynomial::<_, u8>(&field, variables.clone()),
+            parse!("x-4").to_polynomial::<_, u8>(&field, variables.clone()),
+            parse!("x+3").to_polynomial::<_, u8>(&field, variables.clone()),
+            parse!("x+4").to_polynomial::<_, u8>(&field, variables),
+        ];
+        let bound = polynomial.coefficient_bound();
+        let (_, max_p) =
+            MultivariatePolynomial::<IntegerRing, u8>::linear_hensel_modulus(&bound, 101);
+
+        let mut factors =
+            polynomial.factor_hensel_subtree(&modular_factors, &max_p, &bound, 0, false);
+        let mut expected = integer_factors.to_vec();
+        factors.sort_by(|left, right| left.internal_cmp(right));
+        expected.sort_by(|left, right| left.internal_cmp(right));
+
+        assert_eq!(factors, expected);
+        EXACT_HENSEL_SUBTREE_SPLITS.with(|splits| assert_eq!(splits.get(), 1));
+        LOCAL_HENSEL_RECOMBINATION_NODES.with(|nodes| assert_eq!(nodes.get(), 2));
+        EXACT_HENSEL_SUBTREE_MODULUS_BITS.with(|bits| {
+            let bits = bits.borrow();
+            assert_eq!(bits.len(), 3);
+            assert!(bits[1] < bits[0], "left child did not lower its modulus");
+            assert!(bits[2] < bits[0], "right child did not lower its modulus");
+        });
+    }
+
+    #[test]
+    fn exact_hensel_subtrees_handle_nonmonic_children_at_base_prime_precision() {
+        EXACT_HENSEL_SUBTREE_SPLITS.with(|splits| splits.set(0));
+        LOCAL_HENSEL_RECOMBINATION_NODES.with(|nodes| nodes.set(0));
+        EXACT_HENSEL_SUBTREE_MODULUS_BITS.with(|bits| bits.borrow_mut().clear());
+
+        let variables = Some(Arc::new(vec![symbol!("x").into()]));
+        let integer_factors = [
+            parse!("2*x+1").to_polynomial::<_, u8>(&Z, variables.clone()),
+            parse!("x+1").to_polynomial::<_, u8>(&Z, variables.clone()),
+            parse!("x+2").to_polynomial::<_, u8>(&Z, variables.clone()),
+            parse!("x+3").to_polynomial::<_, u8>(&Z, variables.clone()),
+        ];
+        let polynomial = integer_factors
+            .iter()
+            .fold(integer_factors[0].one(), |product, factor| {
+                &product * factor
+            });
+
+        let field = Zp::new(101);
+        let modular_factors = integer_factors
+            .iter()
+            .map(|factor| {
+                factor
+                    .map_coeff(
+                        |coefficient| coefficient.to_finite_field(&field),
+                        field.clone(),
+                    )
+                    .make_monic()
+            })
+            .collect::<Vec<_>>();
+        let bound = polynomial.coefficient_bound();
+        let (_, max_p) =
+            MultivariatePolynomial::<IntegerRing, u8>::linear_hensel_modulus(&bound, 101);
+
+        let mut factors =
+            polynomial.factor_hensel_subtree(&modular_factors, &max_p, &bound, 0, true);
+        let mut expected = integer_factors.to_vec();
+        factors.sort_by(|left, right| left.internal_cmp(right));
+        expected.sort_by(|left, right| left.internal_cmp(right));
+
+        assert_eq!(factors, expected);
+        EXACT_HENSEL_SUBTREE_SPLITS.with(|splits| assert_eq!(splits.get(), 3));
+        LOCAL_HENSEL_RECOMBINATION_NODES.with(|nodes| assert_eq!(nodes.get(), 0));
+        EXACT_HENSEL_SUBTREE_MODULUS_BITS.with(|bits| {
+            let bits = bits.borrow();
+            assert_eq!(bits.len(), 3);
+            assert!(bits[0] > bits[1]);
+            assert_eq!(bits[1], Integer::from(101).significant_bits());
+            assert_eq!(bits[2], Integer::from(101).significant_bits());
+        });
+    }
+
+    #[test]
+    fn local_hensel_recombination_supports_more_than_ten_modular_leaves() {
+        LLL_RECOMBINATION_SUCCESSES.with(|successes| successes.set(0));
+        LOCAL_HENSEL_RECOMBINATION_NODES.with(|nodes| nodes.set(0));
+
+        let variables = Some(Arc::new(vec![symbol!("x").into()]));
+        let integer_factors = [100, 97, 92, 85, 76, 65].map(|constant| {
+            parse!(format!("x^2+{constant}").as_str()).to_polynomial::<_, u8>(&Z, variables.clone())
+        });
+        let polynomial = integer_factors
+            .iter()
+            .fold(integer_factors[0].one(), |product, factor| {
+                &product * factor
+            });
+
+        let field = Zp::new(101);
+        let mut modular_factors = (1..=6)
+            .map(|root| {
+                parse!(format!("x-{root}").as_str())
+                    .to_polynomial::<_, u8>(&field, variables.clone())
+            })
+            .collect::<Vec<_>>();
+        modular_factors.extend((1..=6).map(|root| {
+            parse!(format!("x+{root}").as_str()).to_polynomial::<_, u8>(&field, variables.clone())
+        }));
+        let bound = polynomial.coefficient_bound();
+        let (_, max_p) =
+            MultivariatePolynomial::<IntegerRing, u8>::linear_hensel_modulus(&bound, 101);
+
+        let mut factors =
+            polynomial.factor_hensel_subtree(&modular_factors, &max_p, &bound, 0, false);
+        let mut expected = integer_factors.to_vec();
+        factors.sort_by(|left, right| left.internal_cmp(right));
+        expected.sort_by(|left, right| left.internal_cmp(right));
+
+        assert_eq!(factors, expected);
+        LOCAL_HENSEL_RECOMBINATION_NODES.with(|nodes| assert!(nodes.get() > 0));
+        LLL_RECOMBINATION_SUCCESSES.with(|successes| assert!(successes.get() > 0));
+    }
+
+    #[test]
+    fn dense_integer_modular_univariate_arithmetic_matches_reference() {
+        let variables = Some(Arc::new(vec![
+            symbol!("x").into(),
+            symbol!("y").into(),
+            symbol!("z").into(),
+        ]));
+        let left = parse!("340282366920938463463374607431768211507-37*y^2+109*y^7")
+            .to_polynomial::<_, u8>(&Z, variables.clone());
+        let right = parse!("-170141183460469231731687303715884105741+43*y^3-71*y^6")
+            .to_polynomial::<_, u8>(&Z, variables.clone());
+        let dividend = parse!(
+            "19-31*y+47*y^2+53*y^3-71*y^5+89*y^8+340282366920938463463374607431768211507*y^11"
+        )
+        .to_polynomial::<_, u8>(&Z, variables.clone());
+        let monic_divisor = parse!("17-29*y^2+23*y^4+y^6").to_polynomial::<_, u8>(&Z, variables);
+        let dense_indices = (0..32).collect::<Vec<u32>>();
+
+        for modulus in [Integer::from(5).pow(8), Integer::from(5).pow(65)] {
+            let context =
+                DenseIntegerModularUnivariateContext::new(&modulus, 1, &dividend, &dense_indices);
+            let left_dense = context.dense_coefficients(&left);
+            let right_dense = context.dense_coefficients(&right);
+            assert!(left_dense[1].is_zero());
+            assert!(right_dense[1].is_zero());
+
+            let raw_product = context.multiply_raw(&left_dense, &right_dense);
+            assert_eq!(context.from_dense_coefficients(raw_product), &left * &right);
+
+            let field = FiniteField::<Integer>::new_non_prime(modulus.clone());
+            let left_mod = left.map_coeff(
+                |coefficient| coefficient.to_finite_field(&field),
+                field.clone(),
+            );
+            let right_mod = right.map_coeff(
+                |coefficient| coefficient.to_finite_field(&field),
+                field.clone(),
+            );
+            let reference_product =
+                (&left_mod * &right_mod).map_coeff(|coefficient| field.to_integer(coefficient), Z);
+            let modular_product = context.multiply_mod(&left_dense, &right_dense);
+            assert_eq!(
+                context.from_dense_coefficients(modular_product),
+                reference_product
+            );
+
+            let dividend_dense = context.dense_coefficients(&dividend);
+            let divisor_dense = context.dense_coefficients(&monic_divisor);
+            let remainder = context.remainder_monic(dividend_dense, &divisor_dense);
+            let dividend_mod = dividend.map_coeff(
+                |coefficient| coefficient.to_finite_field(&field),
+                field.clone(),
+            );
+            let mut divisor_mod = monic_divisor.map_coeff(
+                |coefficient| coefficient.to_finite_field(&field),
+                field.clone(),
+            );
+            let reference_remainder = dividend_mod
+                .quot_rem_univariate(&mut divisor_mod)
+                .1
+                .map_coeff(|coefficient| field.to_integer(coefficient), Z);
+            assert_eq!(
+                context.from_dense_coefficients(remainder),
+                reference_remainder
+            );
+
+            let zero = Vec::<Integer>::new();
+            assert!(context.multiply_raw(&zero, &left_dense).is_empty());
+            assert!(context.multiply_mod(&left_dense, &zero).is_empty());
+            assert!(
+                context
+                    .remainder_monic(zero.clone(), &divisor_dense)
+                    .is_empty()
+            );
+            assert!(
+                context
+                    .exact_bezout_residual_quotient_mod(
+                        &zero,
+                        &left_dense,
+                        &[Integer::one()],
+                        &[Integer::one()],
+                        &Integer::from(5),
+                    )
+                    .is_empty()
+            );
+        }
+    }
+
+    #[test]
+    fn dense_hensel_residuals_and_corrections_match_exact_reference() {
+        let variables = Some(Arc::new(vec![symbol!("x").into(), symbol!("y").into()]));
+        let template = parse!("1+y^8").to_polynomial::<_, u8>(&Z, variables);
+        let dense_indices = (0..32).collect::<Vec<u32>>();
+
+        for (scale, correction_modulus) in [
+            (Integer::from(5).pow(3), Integer::from(5).pow(2)),
+            (Integer::from(5).pow(65), Integer::from(5).pow(33)),
+        ] {
+            assert!(correction_modulus <= scale);
+            let next_modulus = &scale * &correction_modulus;
+            let correction_context = DenseIntegerModularUnivariateContext::new(
+                &correction_modulus,
+                1,
+                &template,
+                &dense_indices,
+            );
+            let next_context = DenseIntegerModularUnivariateContext::new(
+                &next_modulus,
+                1,
+                &template,
+                &dense_indices,
+            );
+
+            let left = vec![&scale - 3, Integer::from(2), Integer::one()];
+            let right = vec![Integer::from(7), Integer::from(3), Integer::one()];
+            let error = vec![
+                &correction_modulus - 1,
+                Integer::from(11),
+                &correction_modulus - 2,
+                Integer::from(3),
+            ];
+            let mut target = correction_context.multiply_raw(&left, &right);
+            target.resize(target.len().max(error.len()), Integer::zero());
+            for (target_coefficient, error_coefficient) in target.iter_mut().zip(&error) {
+                *target_coefficient += error_coefficient * &scale;
+            }
+            let product_residual = correction_context
+                .exact_product_residual_quotient_mod(&target, &left, &right, &scale);
+            assert_eq!(product_residual, correction_context.reduce(&error));
+
+            // (scale-1)*(1+y) + (2+y) = 1 + scale*(1+y), so the
+            // Bezout residual quotient is exactly -(1+y).
+            let bezout_residual = correction_context.exact_bezout_residual_quotient_mod(
+                &[&scale - 1],
+                &[Integer::one(), Integer::one()],
+                &[Integer::one()],
+                &[Integer::from(2), Integer::one()],
+                &scale,
+            );
+            assert_eq!(
+                bezout_residual,
+                vec![&correction_modulus - 1, &correction_modulus - 1]
+            );
+
+            let old = vec![&scale - 1, &scale - 2, Integer::one()];
+            let delta = vec![&correction_modulus - 1, &correction_modulus - 2];
+            let mut expected = old.clone();
+            for (coefficient, correction) in expected.iter_mut().zip(&delta) {
+                *coefficient += correction * &scale;
+            }
+            let lifted = next_context.lift_correction(old, &delta, &scale);
+            assert_eq!(lifted, expected);
+            assert!(
+                lifted.iter().all(|coefficient| {
+                    !coefficient.is_negative() && coefficient < &next_modulus
+                })
+            );
+            assert_eq!(lifted[0], &next_modulus - 1);
+
+            let mut symmetric = lifted.clone();
+            next_context.symmetrize_in_place(&mut symmetric);
+            let expected_symmetric = lifted
+                .into_iter()
+                .map(|coefficient| coefficient.symmetric_mod(&next_modulus))
+                .collect::<Vec<_>>();
+            assert_eq!(symmetric, expected_symmetric);
+        }
+    }
+
+    #[test]
     fn integer_modular_univariate_arithmetic_matches_finite_field_reference() {
         let variables = Some(Arc::new(vec![
             symbol!("x").into(),
@@ -8142,10 +9930,20 @@ mod test {
         ]));
         let dividend = parse!("19-31*y+47*y^2+53*y^3-71*y^5+89*y^8")
             .to_polynomial::<_, u8>(&Z, variables.clone());
-        let divisor = parse!("17+23*y-29*y^2-3*y^3").to_polynomial::<_, u8>(&Z, variables);
+        let divisor = parse!("17+23*y-29*y^2-3*y^3").to_polynomial::<_, u8>(&Z, variables.clone());
+        let monic_divisor =
+            parse!("17+23*y-29*y^2+y^3").to_polynomial::<_, u8>(&Z, variables.clone());
+        let short_sparse_dividend =
+            parse!("-13+7*y^2").to_polynomial::<_, u8>(&Z, variables.clone());
+        let higher_degree_monic_divisor =
+            parse!("-3+11*y-19*y^2+23*y^4+y^6").to_polynomial::<_, u8>(&Z, variables);
+        let zero_dividend = dividend.zero();
+
+        assert!(short_sparse_dividend.degree(1) < higher_degree_monic_divisor.degree(1));
 
         for modulus in [Integer::from(5).pow(8), Integer::from(5).pow(65)] {
             let context = IntegerModularUnivariateContext::new(&modulus, &dividend);
+            assert_eq!(context.variable, 1);
             let reduced_dividend = context.reduce(&dividend);
             let reduced_divisor = context.reduce(&divisor);
             let (quotient, remainder) = context.quot_rem(&reduced_dividend, &reduced_divisor);
@@ -8192,6 +9990,32 @@ mod test {
                     .iter()
                     .all(|coefficient| (coefficient % &modulus).is_zero())
             );
+
+            for (monic_dividend, monic_divisor) in [
+                (&dividend, &monic_divisor),
+                (&short_sparse_dividend, &higher_degree_monic_divisor),
+                (&zero_dividend, &higher_degree_monic_divisor),
+            ] {
+                let remainder = context.remainder_monic(monic_dividend, monic_divisor);
+
+                let dividend_mod = monic_dividend.map_coeff(
+                    |coefficient| coefficient.to_finite_field(&field),
+                    field.clone(),
+                );
+                let mut divisor_mod = monic_divisor.map_coeff(
+                    |coefficient| coefficient.to_finite_field(&field),
+                    field.clone(),
+                );
+                let reference_remainder = dividend_mod
+                    .quot_rem_univariate(&mut divisor_mod)
+                    .1
+                    .map_coeff(|coefficient| field.to_symmetric_integer(coefficient), Z);
+
+                assert_eq!(remainder, reference_remainder);
+                assert!(remainder.coefficients.iter().all(|coefficient| {
+                    coefficient == &coefficient.clone().symmetric_mod(&modulus)
+                }));
+            }
         }
     }
 
