@@ -7369,9 +7369,9 @@ mod test {
         BOUNDED_DDF_REJECTIONS, DenseBivariateImage, DenseTwoFactorCorrectionContext,
         EXACT_HENSEL_SUBTREE_MODULUS_BITS, EXACT_HENSEL_SUBTREE_SPLITS, ExactPolynomialSquareRoot,
         IntegerModularUnivariateContext, LAST_BOUNDED_DDF_REJECTION_DEGREE,
-        LAST_MODULAR_INTEGER_EDF_PRIME, LOCAL_HENSEL_RECOMBINATION_NODES,
-        MODULAR_INTEGER_EDF_CALLS, ModularPrimeScreen, QUADRATIC_HENSEL_LIFT_CALLS,
-        QuadraticFactorization, SparseDiophantineContext,
+        LAST_MODULAR_INTEGER_EDF_PRIME, LLL_RECOMBINATION_SUCCESSES,
+        LOCAL_HENSEL_RECOMBINATION_NODES, MODULAR_INTEGER_EDF_CALLS, ModularPrimeScreen,
+        QUADRATIC_HENSEL_LIFT_CALLS, QuadraticFactorization, SparseDiophantineContext,
     };
 
     use crate::{
@@ -8433,6 +8433,46 @@ mod test {
             assert_eq!(bits[1], Integer::from(101).significant_bits());
             assert_eq!(bits[2], Integer::from(101).significant_bits());
         });
+    }
+
+    #[test]
+    fn local_hensel_recombination_supports_more_than_ten_modular_leaves() {
+        LLL_RECOMBINATION_SUCCESSES.with(|successes| successes.set(0));
+        LOCAL_HENSEL_RECOMBINATION_NODES.with(|nodes| nodes.set(0));
+
+        let variables = Some(Arc::new(vec![symbol!("x").into()]));
+        let integer_factors = [100, 97, 92, 85, 76, 65].map(|constant| {
+            parse!(format!("x^2+{constant}").as_str()).to_polynomial::<_, u8>(&Z, variables.clone())
+        });
+        let polynomial = integer_factors
+            .iter()
+            .fold(integer_factors[0].one(), |product, factor| {
+                &product * factor
+            });
+
+        let field = Zp::new(101);
+        let mut modular_factors = (1..=6)
+            .map(|root| {
+                parse!(format!("x-{root}").as_str())
+                    .to_polynomial::<_, u8>(&field, variables.clone())
+            })
+            .collect::<Vec<_>>();
+        modular_factors.extend((1..=6).map(|root| {
+            parse!(format!("x+{root}").as_str()).to_polynomial::<_, u8>(&field, variables.clone())
+        }));
+        let bound = polynomial.coefficient_bound();
+        let (_, max_p) =
+            MultivariatePolynomial::<IntegerRing, u8>::linear_hensel_modulus(&bound, 101);
+
+        let mut factors =
+            polynomial.factor_hensel_subtree(&modular_factors, &max_p, &bound, 0, false);
+        let mut expected = integer_factors.to_vec();
+        factors.sort_by(|left, right| left.internal_cmp(right));
+        expected.sort_by(|left, right| left.internal_cmp(right));
+
+        assert_eq!(factors, expected);
+        LOCAL_HENSEL_RECOMBINATION_NODES.with(|nodes| assert!(nodes.get() > 0));
+        LLL_RECOMBINATION_SUCCESSES.with(|successes| assert!(successes.get() > 0));
     }
 
     #[test]
