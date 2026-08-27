@@ -4329,6 +4329,109 @@ mod test {
 
     #[cfg(feature = "gmp")]
     #[test]
+    fn primitive_kronecker_packing_matches_direct_convolution_at_boundaries() {
+        let magnitude = 1i128 << 100;
+        let values = [
+            i128::MIN,
+            i128::MAX,
+            -magnitude - 3,
+            magnitude + 5,
+            i128::from(i64::MIN),
+            i128::from(i64::MAX),
+            -17,
+            19,
+        ];
+        let left = (0..32)
+            .map(|index| Integer::from_double(values[index % values.len()]))
+            .collect::<Vec<_>>();
+        let right = (0..32)
+            .map(|index| Integer::from_double(values[(5 * index + 3) % values.len()]))
+            .collect::<Vec<_>>();
+        let indices = (0..32).collect::<Vec<u32>>();
+        let output_len = 63;
+
+        let actual_sparse = super::polynomial_kernels::DenseIntegerMul::try_kronecker_for_test(
+            output_len, &left, &indices, &right, &indices,
+        )
+        .unwrap();
+        let mut actual = vec![Integer::zero(); output_len];
+        for (index, coefficient) in actual_sparse {
+            actual[index as usize] = coefficient;
+        }
+
+        let mut expected = vec![Integer::zero(); output_len];
+        for (left_coefficient, &left_index) in left.iter().zip(&indices) {
+            for (right_coefficient, &right_index) in right.iter().zip(&indices) {
+                expected[left_index as usize + right_index as usize] +=
+                    left_coefficient * right_coefficient;
+            }
+        }
+        assert_eq!(actual, expected);
+    }
+
+    #[cfg(feature = "gmp")]
+    #[test]
+    fn kronecker_native_decode_handles_radix_limb_boundaries() {
+        let indices = (0..32).collect::<Vec<u32>>();
+        let output_len = 63;
+
+        for digit_bits in [63usize, 64, 65, 127, 128, 129] {
+            // The alternating right-hand side makes the exact convolution coefficients only zero
+            // or `scale`, while the signed coefficient bound is exactly `digit_bits` wide.
+            let scale = 1i128 << (digit_bits - 7);
+            let coefficient_bound = 32 * scale.unsigned_abs();
+            assert_eq!(coefficient_bound.ilog2() as usize + 2, digit_bits);
+            let left = vec![Integer::from_double(scale); 32];
+            let right = (0..32)
+                .map(|index| Integer::from(if index % 2 == 0 { 1 } else { -1 }))
+                .collect::<Vec<_>>();
+
+            let actual_sparse = super::polynomial_kernels::DenseIntegerMul::try_kronecker_for_test(
+                output_len, &left, &indices, &right, &indices,
+            );
+            let actual_sparse = actual_sparse.unwrap();
+            let mut actual = vec![Integer::zero(); output_len];
+            for (index, coefficient) in actual_sparse {
+                actual[index as usize] = coefficient;
+            }
+
+            let mut expected = vec![Integer::zero(); output_len];
+            for (left_coefficient, &left_index) in left.iter().zip(&indices) {
+                for (right_coefficient, &right_index) in right.iter().zip(&indices) {
+                    expected[left_index as usize + right_index as usize] +=
+                        left_coefficient * right_coefficient;
+                }
+            }
+            assert_eq!(actual, expected, "failed for {digit_bits}-bit radix");
+        }
+
+        // The constant coefficient of this product is exactly i128::MIN. The remaining terms
+        // keep the coefficient bound at a 129-bit signed radix while staying inside i128.
+        let mut left = vec![Integer::one(); 32];
+        left[0] = Integer::from_double(i128::MIN);
+        let right = vec![Integer::one(); 32];
+        let actual_sparse = super::polynomial_kernels::DenseIntegerMul::try_kronecker_for_test(
+            output_len, &left, &indices, &right, &indices,
+        )
+        .unwrap();
+        let mut actual = vec![Integer::zero(); output_len];
+        for (index, coefficient) in actual_sparse {
+            actual[index as usize] = coefficient;
+        }
+
+        let mut expected = vec![Integer::zero(); output_len];
+        for (left_coefficient, &left_index) in left.iter().zip(&indices) {
+            for (right_coefficient, &right_index) in right.iter().zip(&indices) {
+                expected[left_index as usize + right_index as usize] +=
+                    left_coefficient * right_coefficient;
+            }
+        }
+        assert_eq!(actual, expected);
+        assert_eq!(actual[0], Integer::from_double(i128::MIN));
+    }
+
+    #[cfg(feature = "gmp")]
+    #[test]
     fn contiguous_kronecker_selector_rejects_sparse_or_shifted_support() {
         let scale = Integer::from(1) << 180u32;
         let coefficients = (0..32)

@@ -106,29 +106,37 @@ impl<'a> DenseIntegerMul<'a> {
             right_coefficients,
             right_indices,
         } = *self;
-        let left = left_coefficients
-            .iter()
-            .map(|coefficient| match coefficient {
-                Integer::Single(value) => Some(*value),
-                _ => None,
-            })
-            .collect::<Option<Vec<_>>>()?;
-        let right = right_coefficients
-            .iter()
-            .map(|coefficient| match coefficient {
-                Integer::Single(value) => Some(*value),
-                _ => None,
-            })
-            .collect::<Option<Vec<_>>>()?;
-
-        let max_left = left.iter().map(|value| value.unsigned_abs()).max()?;
-        let max_right = right.iter().map(|value| value.unsigned_abs()).max()?;
+        let maximum_single = |coefficients: &[Integer]| {
+            coefficients
+                .iter()
+                .try_fold(0u64, |maximum, coefficient| match coefficient {
+                    Integer::Single(value) => Some(maximum.max(value.unsigned_abs())),
+                    Integer::Double(_) | Integer::Large(_) => None,
+                })
+        };
+        let max_left = maximum_single(left_coefficients)?;
+        let max_right = maximum_single(right_coefficients)?;
         let coefficient_bound = u128::from(max_left)
             .checked_mul(u128::from(max_right))?
-            .checked_mul(left.len().min(right.len()) as u128)?;
+            .checked_mul(left_coefficients.len().min(right_coefficients.len()) as u128)?;
         if coefficient_bound > i64::MAX as u128 {
             return None;
         }
+
+        let left = left_coefficients
+            .iter()
+            .map(|coefficient| match coefficient {
+                Integer::Single(value) => *value,
+                Integer::Double(_) | Integer::Large(_) => unreachable!(),
+            })
+            .collect::<Vec<_>>();
+        let right = right_coefficients
+            .iter()
+            .map(|coefficient| match coefficient {
+                Integer::Single(value) => *value,
+                Integer::Double(_) | Integer::Large(_) => unreachable!(),
+            })
+            .collect::<Vec<_>>();
 
         const BLOCK_SIZE: usize = 32;
         let mut output = vec![0i64; output_len];
@@ -175,29 +183,37 @@ impl<'a> DenseIntegerMul<'a> {
             right_coefficients,
             right_indices,
         } = *self;
-        let left = left_coefficients
-            .iter()
-            .map(|coefficient| match coefficient {
-                Integer::Single(value) => Some(*value),
-                Integer::Double(_) | Integer::Large(_) => None,
-            })
-            .collect::<Option<Vec<_>>>()?;
-        let right = right_coefficients
-            .iter()
-            .map(|coefficient| match coefficient {
-                Integer::Single(value) => Some(*value),
-                Integer::Double(_) | Integer::Large(_) => None,
-            })
-            .collect::<Option<Vec<_>>>()?;
-
-        let max_left = left.iter().map(|value| value.unsigned_abs()).max()?;
-        let max_right = right.iter().map(|value| value.unsigned_abs()).max()?;
+        let maximum_single = |coefficients: &[Integer]| {
+            coefficients
+                .iter()
+                .try_fold(0u64, |maximum, coefficient| match coefficient {
+                    Integer::Single(value) => Some(maximum.max(value.unsigned_abs())),
+                    Integer::Double(_) | Integer::Large(_) => None,
+                })
+        };
+        let max_left = maximum_single(left_coefficients)?;
+        let max_right = maximum_single(right_coefficients)?;
         let coefficient_bound = u128::from(max_left)
             .checked_mul(u128::from(max_right))?
-            .checked_mul(left.len().min(right.len()) as u128)?;
+            .checked_mul(left_coefficients.len().min(right_coefficients.len()) as u128)?;
         if coefficient_bound > i128::MAX as u128 {
             return None;
         }
+
+        let left = left_coefficients
+            .iter()
+            .map(|coefficient| match coefficient {
+                Integer::Single(value) => *value,
+                Integer::Double(_) | Integer::Large(_) => unreachable!(),
+            })
+            .collect::<Vec<_>>();
+        let right = right_coefficients
+            .iter()
+            .map(|coefficient| match coefficient {
+                Integer::Single(value) => *value,
+                Integer::Double(_) | Integer::Large(_) => unreachable!(),
+            })
+            .collect::<Vec<_>>();
 
         const BLOCK_SIZE: usize = 128;
         let mut output = vec![0i128; output_len];
@@ -244,31 +260,33 @@ impl<'a> DenseIntegerMul<'a> {
             right_coefficients,
             right_indices,
         } = *self;
-        let left = left_coefficients
-            .iter()
-            .map(|coefficient| match coefficient {
-                Integer::Single(value) => Some(i128::from(*value)),
-                Integer::Double(value) => Some(value.get()),
-                Integer::Large(_) => None,
+        let fixed_value = |coefficient: &Integer| match coefficient {
+            Integer::Single(value) => Some(i128::from(*value)),
+            Integer::Double(value) => Some(value.get()),
+            Integer::Large(_) => None,
+        };
+        let maximum_fixed = |coefficients: &[Integer]| {
+            coefficients.iter().try_fold(0u128, |maximum, coefficient| {
+                Some(maximum.max(fixed_value(coefficient)?.unsigned_abs()))
             })
-            .collect::<Option<Vec<_>>>()?;
-        let right = right_coefficients
-            .iter()
-            .map(|coefficient| match coefficient {
-                Integer::Single(value) => Some(i128::from(*value)),
-                Integer::Double(value) => Some(value.get()),
-                Integer::Large(_) => None,
-            })
-            .collect::<Option<Vec<_>>>()?;
-
-        let max_left = left.iter().map(|value| value.unsigned_abs()).max()?;
-        let max_right = right.iter().map(|value| value.unsigned_abs()).max()?;
+        };
+        let max_left = maximum_fixed(left_coefficients)?;
+        let max_right = maximum_fixed(right_coefficients)?;
         let coefficient_bound = max_left
             .checked_mul(max_right)?
-            .checked_mul(left.len().min(right.len()) as u128)?;
+            .checked_mul(left_coefficients.len().min(right_coefficients.len()) as u128)?;
         if coefficient_bound > i128::MAX as u128 {
             return None;
         }
+
+        let left = left_coefficients
+            .iter()
+            .map(|coefficient| fixed_value(coefficient).unwrap())
+            .collect::<Vec<_>>();
+        let right = right_coefficients
+            .iter()
+            .map(|coefficient| fixed_value(coefficient).unwrap())
+            .collect::<Vec<_>>();
 
         const BLOCK_SIZE: usize = 32;
         let mut output = vec![0i128; output_len];
@@ -484,6 +502,39 @@ impl<'a> DenseIntegerMul<'a> {
                 }
             }
 
+            /// Encode a tagged fixed-width coefficient after applying the polynomial sign and the
+            /// borrow propagated by the preceding signed radix digit.
+            #[inline(always)]
+            fn encode_primitive_digit(
+                digit: &mut [u64],
+                coefficient: i128,
+                negate: bool,
+                borrow: bool,
+            ) -> bool {
+                digit.fill(0);
+                debug_assert!(!digit.is_empty());
+
+                let mut magnitude = coefficient.unsigned_abs();
+                let mut negative = magnitude != 0 && ((coefficient < 0) != negate);
+                if borrow {
+                    if negative {
+                        magnitude += 1;
+                    } else if magnitude == 0 {
+                        magnitude = 1;
+                        negative = true;
+                    } else {
+                        magnitude -= 1;
+                    }
+                }
+
+                debug_assert!(digit.len() > 1 || magnitude <= u128::from(u64::MAX));
+                digit[0] = magnitude as u64;
+                if digit.len() > 1 {
+                    digit[1] = (magnitude >> 64) as u64;
+                }
+                negative
+            }
+
             let mut reordered = None;
             if !indices.windows(2).all(|indices| indices[0] < indices[1]) {
                 let mut order = (0..indices.len()).collect::<Vec<_>>();
@@ -502,6 +553,8 @@ impl<'a> DenseIntegerMul<'a> {
             let mut limbs = vec![0u64; packed_bits.checked_add(63)? / 64];
             let mut next_index = 0usize;
             let mut borrow = false;
+            let mut digit = SmallVec::<[u64; 4]>::new();
+            digit.resize(digit_bits.div_ceil(64), 0);
 
             for position in 0..coefficients.len() {
                 let term = term_index(position);
@@ -512,24 +565,37 @@ impl<'a> DenseIntegerMul<'a> {
                     fill_ones(&mut limbs, next_index * digit_bits, index * digit_bits);
                 }
 
-                let mut value = coefficient.clone().to_multi_prec();
-                if leading_negative {
-                    value = -value;
-                }
-                if borrow {
-                    value -= 1i64;
-                }
+                let borrow_in = borrow;
+                borrow = match coefficient {
+                    Integer::Single(value) => encode_primitive_digit(
+                        &mut digit,
+                        i128::from(*value),
+                        leading_negative,
+                        borrow_in,
+                    ),
+                    Integer::Double(value) => {
+                        encode_primitive_digit(&mut digit, value.get(), leading_negative, borrow_in)
+                    }
+                    Integer::Large(value) => {
+                        let mut value = value.clone();
+                        if leading_negative {
+                            value = -value;
+                        }
+                        if borrow_in {
+                            value -= 1i64;
+                        }
 
-                borrow = value.is_negative();
-                if borrow {
-                    value = -value;
-                }
-
-                let mut digit = SmallVec::<[u64; 4]>::new();
-                digit.resize(digit_bits.div_ceil(64), 0);
-                let value_limbs = value.as_raw().as_limbs();
-                debug_assert!(value_limbs.len() <= digit.len());
-                digit[..value_limbs.len()].copy_from_slice(value_limbs);
+                        let negative = value.is_negative();
+                        if negative {
+                            value = -value;
+                        }
+                        digit.fill(0);
+                        let value_limbs = value.as_raw().as_limbs();
+                        debug_assert!(value_limbs.len() <= digit.len());
+                        digit[..value_limbs.len()].copy_from_slice(value_limbs);
+                        negative
+                    }
+                };
 
                 if borrow {
                     let mut carry = true;
@@ -557,24 +623,117 @@ impl<'a> DenseIntegerMul<'a> {
             Some(packed)
         }
 
+        /// Decode one signed radix digit with native arithmetic when its final magnitude fits in
+        /// `i128`. The returned boolean is the signed carry into the next digit.
+        #[inline(always)]
+        fn try_decode_i128_digit(
+            digit_limbs: &[u64],
+            digit_bits: usize,
+            carry_in: bool,
+            signed_coefficients: bool,
+            product_negative: bool,
+        ) -> Option<(i128, bool)> {
+            if digit_bits == 0 || digit_limbs.len() > 4 {
+                return None;
+            }
+
+            let mut words = [0u64; 4];
+            words[..digit_limbs.len()].copy_from_slice(digit_limbs);
+            let last = digit_limbs.len().checked_sub(1)?;
+            let trailing_bits = digit_bits % 64;
+            let mut overflow_radix = false;
+            if carry_in {
+                let mut carry = true;
+                for word in &mut words[..digit_limbs.len()] {
+                    let (value, overflow) = word.overflowing_add(u64::from(carry));
+                    *word = value;
+                    carry = overflow;
+                    if !carry {
+                        break;
+                    }
+                }
+
+                if trailing_bits == 0 {
+                    overflow_radix = carry;
+                } else {
+                    overflow_radix = words[last] >> trailing_bits != 0;
+                    words[last] &= (1u64 << trailing_bits) - 1;
+                }
+            }
+            if overflow_radix && !signed_coefficients {
+                return None;
+            }
+
+            let sign_bit_index = digit_bits - 1;
+            let negative = signed_coefficients
+                && words[sign_bit_index / 64] & (1u64 << (sign_bit_index % 64)) != 0;
+            let carry_out = signed_coefficients && (overflow_radix || negative);
+
+            if negative {
+                let mut carry = true;
+                for word in &mut words[..digit_limbs.len()] {
+                    let (value, overflow) = (!*word).overflowing_add(u64::from(carry));
+                    *word = value;
+                    carry = overflow;
+                }
+                debug_assert!(!carry);
+                if trailing_bits != 0 {
+                    words[last] &= (1u64 << trailing_bits) - 1;
+                }
+            }
+
+            if digit_limbs.len() > 2 && words[2..digit_limbs.len()].iter().any(|&word| word != 0) {
+                return None;
+            }
+            let magnitude = u128::from(words[0]) | (u128::from(words[1]) << 64);
+            let final_negative = magnitude != 0 && (negative != product_negative);
+            let value = if final_negative {
+                const I128_MIN_MAGNITUDE: u128 = 1u128 << 127;
+                if magnitude > I128_MIN_MAGNITUDE {
+                    return None;
+                }
+                if magnitude == I128_MIN_MAGNITUDE {
+                    i128::MIN
+                } else {
+                    -(magnitude as i128)
+                }
+            } else {
+                if magnitude > i128::MAX as u128 {
+                    return None;
+                }
+                magnitude as i128
+            };
+            Some((value, carry_out))
+        }
+
         let left = pack(left_coefficients, packed_left_indices, digit_bits_usize)?;
         let right = pack(right_coefficients, packed_right_indices, digit_bits_usize)?;
         let product = MultiPrecisionInteger::from_raw(RawMultiPrecisionInteger::from(
             left.as_raw() * right.as_raw(),
         ));
 
-        let radix = MultiPrecisionInteger::from(1u32) << digit_bits_usize;
         let product_negative = product.is_negative();
         let limbs = product.as_raw().as_limbs();
         let limbs_per_digit = digit_bits_usize.div_ceil(64);
         let mut carry = false;
+        let mut radix = None;
         let mut output = Vec::with_capacity(packed_output_len);
+        let mut digit_limbs = SmallVec::<[u64; 4]>::new();
+        digit_limbs.resize(limbs_per_digit, 0);
+        let output_index = |index: usize| {
+            if let Some(layout) = simplex_layout.as_ref() {
+                let decoded = *layout.decode_indices.get(index)?;
+                debug_assert_ne!(decoded, u32::MAX);
+                Some(decoded)
+            } else {
+                Some(index as u32)
+            }
+        };
         for index in 0..packed_output_len {
             let bit_index = index.checked_mul(digit_bits_usize)?;
             let limb_index = bit_index / 64;
             let shift = bit_index % 64;
-            let mut digit_limbs = SmallVec::<[u64; 4]>::new();
-            digit_limbs.resize(limbs_per_digit, 0);
+            digit_limbs.fill(0);
             for (offset, digit_limb) in digit_limbs.iter_mut().enumerate() {
                 *digit_limb = limbs.get(limb_index + offset).copied().unwrap_or(0) >> shift;
                 if shift != 0 {
@@ -585,6 +744,21 @@ impl<'a> DenseIntegerMul<'a> {
             if digit_bits_usize % 64 != 0 {
                 *digit_limbs.last_mut().unwrap() &= (1u64 << (digit_bits_usize % 64)) - 1;
             }
+
+            if let Some((value, carry_out)) = try_decode_i128_digit(
+                &digit_limbs,
+                digit_bits_usize,
+                carry,
+                signed_coefficients,
+                product_negative,
+            ) {
+                carry = carry_out;
+                if value != 0 {
+                    output.push((output_index(index)?, Integer::from_double(value)));
+                }
+                continue;
+            }
+
             let raw_digit =
                 RawMultiPrecisionInteger::from_digits(&digit_limbs, RugIntegerOrder::Lsf);
             let mut digit = MultiPrecisionInteger::from_raw(raw_digit);
@@ -596,20 +770,15 @@ impl<'a> DenseIntegerMul<'a> {
                 && (digit.significant_bits() > digit_bits
                     || digit.as_raw().get_bit(digit_bits_u32 - 1));
             if carry {
-                digit -= &radix;
+                let radix = radix
+                    .get_or_insert_with(|| MultiPrecisionInteger::from(1u32) << digit_bits_usize);
+                digit -= &*radix;
             }
             if product_negative {
                 digit = -digit;
             }
             if !digit.is_zero() {
-                let output_index = if let Some(layout) = simplex_layout.as_ref() {
-                    let decoded = *layout.decode_indices.get(index)?;
-                    debug_assert_ne!(decoded, u32::MAX);
-                    decoded
-                } else {
-                    index as u32
-                };
-                output.push((output_index, Integer::from(digit)));
+                output.push((output_index(index)?, Integer::from(digit)));
             }
         }
         debug_assert!(!carry);
