@@ -1,7 +1,7 @@
 //! Factorization methods for multivariate polynomials
 //! that implement [Factorize].
 
-use std::{borrow::Cow, cmp::Reverse, ops::RangeInclusive};
+use std::{borrow::Cow, cmp::Reverse, collections::BinaryHeap, ops::RangeInclusive};
 
 use ahash::{HashMap, HashSet, HashSetExt};
 use rand::{Rng, SeedableRng, rng, rngs::StdRng};
@@ -66,6 +66,148 @@ struct ModularIntegerFactorization<E: PositiveExponent> {
 enum ModularPrimeScreen<E: PositiveExponent> {
     Candidate(ModularIntegerFactorization<E>),
     FactorLimitExceeded { lower_bound: usize },
+}
+
+/// Identifies either an input modular factor or a product built earlier in a
+/// univariate Hensel product tree.
+#[derive(Clone, Copy, Debug, Eq, Ord, PartialEq, PartialOrd)]
+enum UnivariateHenselProductTreeLink {
+    Leaf(usize),
+    Internal(usize),
+}
+
+/// Records one product of two coprime child factors.
+///
+/// Internal links address earlier entries in the topology's bottom-up node
+/// array, and leaf links address the original modular-factor slice.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+struct UnivariateHenselProductTreeNode {
+    children: [UnivariateHenselProductTreeLink; 2],
+    degree: usize,
+}
+
+/// Connectivity and degree metadata for simultaneous univariate Hensel
+/// lifting.
+///
+/// Nodes are stored in merge order, so multiplying their children from the
+/// start of `nodes` toward the root makes every referenced child available.
+#[derive(Clone, Debug, Eq, PartialEq)]
+struct UnivariateHenselProductTreeTopology {
+    leaf_degrees: Vec<usize>,
+    nodes: Vec<UnivariateHenselProductTreeNode>,
+    root: Option<UnivariateHenselProductTreeLink>,
+}
+
+impl UnivariateHenselProductTreeTopology {
+    /// Returns the degree represented by a leaf or internal product link.
+    fn degree(&self, link: UnivariateHenselProductTreeLink) -> usize {
+        match link {
+            UnivariateHenselProductTreeLink::Leaf(index) => self.leaf_degrees[index],
+            UnivariateHenselProductTreeLink::Internal(index) => self.nodes[index].degree,
+        }
+    }
+
+    /// Visits internal products from the root toward the leaves, yielding each
+    /// node before every internal child it references.
+    fn internal_nodes_top_down(
+        &self,
+    ) -> impl Iterator<Item = (usize, &UnivariateHenselProductTreeNode)> {
+        self.nodes.iter().enumerate().rev()
+    }
+
+    /// Returns the original modular-factor indices covered by the root in
+    /// input order.
+    fn leaf_indices_in_input_order(&self) -> Vec<usize> {
+        fn collect(
+            topology: &UnivariateHenselProductTreeTopology,
+            link: UnivariateHenselProductTreeLink,
+            indices: &mut Vec<usize>,
+        ) {
+            match link {
+                UnivariateHenselProductTreeLink::Leaf(index) => indices.push(index),
+                UnivariateHenselProductTreeLink::Internal(index) => {
+                    for child in topology.nodes[index].children {
+                        collect(topology, child, indices);
+                    }
+                }
+            }
+        }
+
+        let mut indices = Vec::with_capacity(self.leaf_degrees.len());
+        if let Some(root) = self.root {
+            collect(self, root, &mut indices);
+        }
+        indices.sort_unstable();
+        indices
+    }
+}
+
+/// One product waiting to be paired while constructing a degree-greedy tree.
+/// The insertion index resolves equal-degree choices reproducibly.
+#[derive(Clone, Copy, Debug, Eq, Ord, PartialEq, PartialOrd)]
+struct PendingUnivariateHenselProduct {
+    degree: usize,
+    insertion_index: usize,
+    link: UnivariateHenselProductTreeLink,
+}
+
+/// Reusable priority-queue storage for constructing univariate Hensel product
+/// trees from modular-factor degrees.
+#[derive(Default)]
+struct UnivariateHenselProductTreeBuildContext {
+    pending: BinaryHeap<Reverse<PendingUnivariateHenselProduct>>,
+}
+
+impl UnivariateHenselProductTreeBuildContext {
+    /// Repeatedly merges the two smallest pending degrees and returns the
+    /// resulting product-tree topology.
+    ///
+    /// Every input degree must be positive. Equal-degree leaves retain their
+    /// input order, while an internal product is ordered after all products
+    /// that were already pending when it was created.
+    fn build(&mut self, leaf_degrees: &[usize]) -> UnivariateHenselProductTreeTopology {
+        assert!(
+            leaf_degrees.iter().all(|degree| *degree > 0),
+            "Hensel product-tree leaves must be nonconstant"
+        );
+
+        self.pending.clear();
+        self.pending.reserve(leaf_degrees.len());
+        for (index, &degree) in leaf_degrees.iter().enumerate() {
+            self.pending.push(Reverse(PendingUnivariateHenselProduct {
+                degree,
+                insertion_index: index,
+                link: UnivariateHenselProductTreeLink::Leaf(index),
+            }));
+        }
+
+        let mut nodes = Vec::with_capacity(leaf_degrees.len().saturating_sub(1));
+        while self.pending.len() > 1 {
+            let Reverse(left) = self.pending.pop().unwrap();
+            let Reverse(right) = self.pending.pop().unwrap();
+            let degree = left
+                .degree
+                .checked_add(right.degree)
+                .expect("Hensel product-tree degree overflow");
+            let index = nodes.len();
+            nodes.push(UnivariateHenselProductTreeNode {
+                children: [left.link, right.link],
+                degree,
+            });
+            self.pending.push(Reverse(PendingUnivariateHenselProduct {
+                degree,
+                insertion_index: leaf_degrees.len() + index,
+                link: UnivariateHenselProductTreeLink::Internal(index),
+            }));
+        }
+
+        let root = self.pending.pop().map(|Reverse(product)| product.link);
+        UnivariateHenselProductTreeTopology {
+            leaf_degrees: leaf_degrees.to_vec(),
+            nodes,
+            root,
+        }
+    }
 }
 
 #[cfg(test)]
@@ -7372,6 +7514,8 @@ mod test {
         LAST_MODULAR_INTEGER_EDF_PRIME, LLL_RECOMBINATION_SUCCESSES,
         LOCAL_HENSEL_RECOMBINATION_NODES, MODULAR_INTEGER_EDF_CALLS, ModularPrimeScreen,
         QUADRATIC_HENSEL_LIFT_CALLS, QuadraticFactorization, SparseDiophantineContext,
+        UnivariateHenselProductTreeBuildContext, UnivariateHenselProductTreeLink,
+        UnivariateHenselProductTreeNode,
     };
 
     use crate::{
@@ -7390,6 +7534,100 @@ mod test {
     };
 
     static GLOBAL_FACTOR_SETTINGS_LOCK: Mutex<()> = Mutex::new(());
+
+    #[test]
+    fn univariate_hensel_product_tree_is_degree_greedy_and_deterministic() {
+        use UnivariateHenselProductTreeLink::{Internal, Leaf};
+
+        let mut context = UnivariateHenselProductTreeBuildContext::default();
+        let topology = context.build(&[1, 1, 2, 10, 10, 10, 30]);
+
+        assert_eq!(
+            topology.nodes,
+            [
+                UnivariateHenselProductTreeNode {
+                    children: [Leaf(0), Leaf(1)],
+                    degree: 2,
+                },
+                UnivariateHenselProductTreeNode {
+                    children: [Leaf(2), Internal(0)],
+                    degree: 4,
+                },
+                UnivariateHenselProductTreeNode {
+                    children: [Internal(1), Leaf(3)],
+                    degree: 14,
+                },
+                UnivariateHenselProductTreeNode {
+                    children: [Leaf(4), Leaf(5)],
+                    degree: 20,
+                },
+                UnivariateHenselProductTreeNode {
+                    children: [Internal(2), Internal(3)],
+                    degree: 34,
+                },
+                UnivariateHenselProductTreeNode {
+                    children: [Leaf(6), Internal(4)],
+                    degree: 64,
+                },
+            ]
+        );
+        assert_eq!(
+            topology
+                .nodes
+                .iter()
+                .map(|node| node.degree)
+                .collect::<Vec<_>>(),
+            [2, 4, 14, 20, 34, 64]
+        );
+        assert_eq!(
+            topology.nodes.iter().map(|node| node.degree).sum::<usize>(),
+            138
+        );
+        assert_eq!(topology.root, Some(Internal(5)));
+        assert_eq!(topology.degree(Internal(5)), 64);
+        assert_eq!(
+            topology
+                .internal_nodes_top_down()
+                .map(|(_, node)| node.degree)
+                .collect::<Vec<_>>(),
+            [64, 34, 20, 14, 4, 2]
+        );
+        for (parent_index, node) in topology.internal_nodes_top_down() {
+            for child in node.children {
+                if let Internal(child_index) = child {
+                    assert!(child_index < parent_index);
+                }
+            }
+        }
+        assert_eq!(
+            topology.leaf_indices_in_input_order(),
+            [0, 1, 2, 3, 4, 5, 6]
+        );
+
+        assert_eq!(context.build(&[1, 1, 2, 10, 10, 10, 30]), topology);
+    }
+
+    #[test]
+    fn univariate_hensel_product_tree_handles_empty_and_singleton_inputs() {
+        let mut context = UnivariateHenselProductTreeBuildContext::default();
+
+        let empty = context.build(&[]);
+        assert!(empty.nodes.is_empty());
+        assert_eq!(empty.root, None);
+        assert!(empty.leaf_indices_in_input_order().is_empty());
+
+        let singleton = context.build(&[17]);
+        assert!(singleton.nodes.is_empty());
+        assert_eq!(
+            singleton.root,
+            Some(UnivariateHenselProductTreeLink::Leaf(0))
+        );
+        assert_eq!(
+            singleton.degree(UnivariateHenselProductTreeLink::Leaf(0)),
+            17
+        );
+        assert_eq!(singleton.leaf_indices_in_input_order(), [0]);
+    }
 
     fn multiply_dense_bivariate<R: Ring>(
         ring: &R,
