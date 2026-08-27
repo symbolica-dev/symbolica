@@ -2,7 +2,8 @@
 
 This is an operational handoff for the single-core Symbolica/FLINT performance work. It records
 the state on 2026-08-27, including code already on `dev`, isolated candidates, measurements,
-unsuccessful experiments, and the next experiments to run.
+unsuccessful experiments, exact benchmark recipes, and the next experiments to run. It is intended
+to let a new agent continue without needing the preceding conversation.
 
 The current priority order is:
 
@@ -16,21 +17,39 @@ single-core FLINT performance.
 
 ## Immediate resume point
 
-Do not restart the degree-64 investigation from the scalar baseline. The current best committed
-isolated chain ends at `b4db253` with a provisional ratio of `1.190`. Resume in
-`/tmp/symbolica-zp64-limb-conversion`, where one uncommitted file implements direct conversion of
-one- through four-limb integers to full-word `Zp64`. Finish its validation, commit and benchmark it,
-repeat the `b4db253` control on an idle host, then profile and integrate the fastest accepted chain.
-The literal commands and acceptance checks are in [Recommended next steps](#recommended-next-steps).
+Do not restart the degree-64 investigation from the scalar baseline, and do not resume the direct
+small-limb conversion experiment. That experiment is complete and rejected for only about 1%
+end-to-end improvement.
+
+Resume in `/tmp/symbolica-zp64-r2`, despite the old worktree name. It is clean, is now on branch
+`codex/zp64-hybrid-inverse`, and has head `b7727d9` (`Speed up dense Zp64 GCD inverses`). The
+candidate replaces the generic dense-image leading-coefficient inverse with a private Euclidean
+inverse that handles quotients 1, 2, and 3 by subtraction before using hardware division. Its first
+200-sample degree-64 screen measured ratio `1.148490`, versus a reproducible `b4db253` control
+median near `1.1914`. This is promising but not yet a decision-quality result: run four more
+candidate processes, interleave fresh control processes, record the raw outputs, then capture an
+LBR profile. The literal commands and acceptance checks are in
+[Recommended next steps](#recommended-next-steps).
+
+After the inverse verdict, integrate the accepted base chain through `b4db253` onto `dev` whether
+or not the inverse passes. If the inverse gain reproduces, first finish its remaining `no_gmp` and
+neighboring-regime validation, then append `b7727d9`:
+
+```text
+810875a -> ea09e01 -> f46fcff -> 7fdc099 -> b4db253 [-> b7727d9 if accepted]
+```
+
+Do not integrate `8440390` (direct limb conversion), `0f7fa97` (fused Q1), `bfed508` in addition to
+`f46fcff`, or `f3b13b4` in addition to `b4db253`.
 
 ## Repository state at handoff
 
-The main worktree is `/home/codexB/symbolica` on `dev`. It was clean when this handoff was
-finalized. Use `git status --short --branch` and `git log -3 --oneline` rather than relying on a
-hard-coded head or ahead count, since the commit containing this document necessarily changes
-both. The latest integrated polynomial-performance commit is `a3f721c` (`Specialize heuristic GCD
-for univariate integers`); later inequality-solver and handoff commits are unrelated to the
-performance implementation.
+The main worktree is `/home/codexB/symbolica` on `dev`. Before this document update it was clean at
+`386174d` and 54 commits ahead of `origin/dev`. Use `git status --short --branch` and
+`git log -3 --oneline` rather than relying on those values after this document is committed. The
+latest integrated polynomial-performance commit is `a3f721c` (`Specialize heuristic GCD for
+univariate integers`); later inequality-solver and handoff commits are unrelated to the performance
+implementation.
 
 Use author and committer `Ben Ruijl <ben@ruijl.ch>` for commits made for this work.
 
@@ -49,7 +68,9 @@ f46fcff  checked dense multiprecision certificate
   |
 b4db253  cached verified univariate primes
   |
-  +-- uncommitted direct 1-4-limb Integer -> Zp64 conversion
+  +-- b7727d9  private dense-image inverse (active candidate)
+  |
+  +-- 8440390  direct 1-4-limb Integer -> Zp64 conversion (rejected)
 ```
 
 `bfed508` is the certificate commit by itself on top of `810875a`; `f46fcff` is the same change
@@ -65,16 +86,22 @@ The important isolated worktrees are:
 | `/tmp/symbolica-univariate-dense-div` | `codex/univariate-dense-zp64-gcd`, `ea09e01` | clean | Direct dense `Zp64` image GCD; its `target/` is also the shared release target |
 | `/tmp/symbolica-univariate-borrowed-cert` | `codex/univariate-borrowed-divisor-cert`, `bfed508` | clean | Certificate-only candidate based on `810875a` |
 | `/tmp/symbolica-univariate-combined` | `codex/univariate-combined`, `f46fcff` | clean | Dense field image plus certificate |
-| `/tmp/symbolica-zp64-r2` | `codex/zp64-r2-conversion`, `b4db253` | clean | Current best committed chain: combined candidate plus R^2 and cached primes |
+| `/tmp/symbolica-zp64-r2` | `codex/zp64-hybrid-inverse`, `b7727d9` | clean | Active private dense-image inverse candidate on the complete accepted base chain |
 | `/tmp/symbolica-univariate-primes` | `codex/univariate-prime-table`, `f3b13b4` | clean | Cached-prime change without R^2; useful only for attribution |
-| `/tmp/symbolica-zp64-limb-conversion` | `codex/zp64-limb-conversion`, based on `b4db253` | **dirty: one file** | Current experiment: direct 1-4-limb integer-to-`Zp64` conversion |
+| `/tmp/symbolica-zp64-limb-conversion` | `codex/zp64-limb-conversion`, `8440390` | clean | Complete direct 1-4-limb integer-to-`Zp64` experiment; measured gain too small, reject |
 | `/tmp/symbolica-univariate-fused-q1` | `codex/univariate-fused-q1`, `0f7fa97` | clean | Correct but decisively slower fused adjacent-degree remainder; reject |
 | `/tmp/symbolica-univariate-dense-modular` | `codex/univariate-dense-modular`, `5a975f1` | clean | Superseded large combined experiment; reject |
 | `/tmp/symbolica-zippel-dense-image` | `codex/zippel-dense-image`, `c4748b6` | clean | Dense single-scale Zippel reconstruction; reject |
 
-All candidate commits descend from `a3f721c`. They must be cherry-picked or rebased onto current
-`dev` after the current limb experiment has been accepted or rejected. Every listed committed
-candidate has author and committer `Ben Ruijl <ben@ruijl.ch>`.
+All candidate commits descend from `a3f721c`. A read-only sequential merge audit found no textual
+conflicts when applying `810875a`, `ea09e01`, `f46fcff`, `7fdc099`, and `b4db253` to `dev` at
+`386174d`; `b7727d9` is a direct child of that chain. Recheck after any new `dev` changes and run
+the complete validation rather than treating a clean cherry-pick as proof of correctness. Every
+listed committed candidate has author and committer `Ben Ruijl <ben@ruijl.ch>`.
+
+Branch `codex/zp64-r2-conversion` still points cleanly at `b4db253`, but it is no longer checked
+out: `/tmp/symbolica-zp64-r2` now belongs to `codex/zp64-hybrid-inverse`. Use the branch name or the
+frozen control binary if the `b4db253` control must be rebuilt.
 
 ## Benchmark infrastructure and protocol
 
@@ -135,9 +162,11 @@ The paired filter is a case-sensitive substring. The presence of
 the alternating Symbolica-first/FLINT-first order is balanced. Historical tables in this document
 used 201 samples; new decision runs should use 200 or 202.
 
-The shared target currently contains more than one hashed executable, and the known
-`flint_comparison-0df1dfb2f578e077` entry was last built from the rejected fused-Q1 source. Ordinary
-`cargo build` does not print an unambiguous executable path. For a new build, add
+The shared target currently contains more than one hashed executable. The known
+`flint_comparison-0df1dfb2f578e077` entry currently matches the frozen `b7727d9` hybrid-inverse
+binary byte for byte and embeds `/tmp/symbolica-zp64-r2` plus version
+`symbolica-v2.2.0-131-gb7727d9`. A later build may overwrite it. Ordinary `cargo build` does not
+print an unambiguous executable path. For a new build, add
 `--message-format=json-render-diagnostics`, save the JSON stream, and extract the non-null
 `executable` from the `compiler-artifact` whose target name is `flint_comparison`. Immediately copy
 that executable and its matching `.d` sidecar to uniquely named `/tmp` artifacts.
@@ -257,7 +286,7 @@ faster. Small changes under about 3% should be treated as noise until reproduced
 | generated high-height cases | about `0.5` | Symbolica about 2 times faster |
 | PolyBench 5-variable uniform case #11 | `1.05`-`1.08` | small remaining Zippel loss |
 | PolyBench case #140 | about `1.13` | code-layout-sensitive remaining loss |
-| dense 1 variable, degree 64 on current `dev` | `2.225` | current primary loss; best committed isolated chain is provisionally `1.190` |
+| dense 1 variable, degree 64 on current `dev` | `2.225` | current primary loss; accepted-base chain is `1.191`, active inverse candidate first screened at `1.148` |
 
 ### Low-dimensional factorization overview
 
@@ -277,9 +306,10 @@ attributing the entire factorization loss to the factor algorithm.
 
 ### Result summary and attribution
 
-The following are five independent 201-sample paired processes pinned to core 8 unless marked
-preliminary. The ratio is `Symbolica / FLINT`; lower is better. Each binary was frozen immediately
-after its source-matched release build.
+Historical rows below use five independent 201-sample paired processes pinned to core 8. The later
+idle `b4db253` and `8440390` decision rows use five 200-sample processes, while `b7727d9` currently
+has only the one explicitly shown 200-sample process. The ratio is `Symbolica / FLINT`; lower is
+better. Each binary was frozen immediately after its source-matched release build.
 
 | Source | Degree-64 ratios | Median | Main change from previous row |
 |---|---|---:|---|
@@ -288,11 +318,16 @@ after its source-matched release build.
 | certificate only `bfed508` | `1.441165`, `1.425816`, `1.427506`, `1.427256`, `1.430441` | `1.428` | reusable pure-multiprecision exact certificate |
 | field plus certificate `f46fcff` | `1.330403`, `1.324185`, `1.321667`, `1.326932`, `1.333425` | `1.327` | direct dense `Zp64` image GCD composes with the certificate |
 | plus R^2 conversion `7fdc099` | `1.281967`, `1.288584`, `1.282771`, `1.283670`, `1.274269` | `1.283` | removes division-based conversion to Montgomery form |
-| plus cached primes `b4db253` | `1.189030`, `1.191018`, `1.189864`, `1.191163`, `1.188682` | `1.190` | avoids repeated dynamic next-prime search; **repeat idle** |
+| plus cached primes `b4db253`, earlier run | `1.189030`, `1.191018`, `1.189864`, `1.191163`, `1.188682` | `1.190` | avoids repeated dynamic next-prime search |
+| cached-prime control, later idle run | `1.193639`, `1.190578`, `1.195843`, `1.188940`, `1.191412` | `1.191412` | confirms the earlier result |
+| direct small-limb conversion `8440390` | `1.178260`, `1.179542`, `1.179371`, `1.194325`, `1.178938` | `1.179371` | only about 1% normalized gain; reject under the 3% threshold |
+| private hybrid inverse `b7727d9` | first process `1.148490` | **provisional** | promising; four more candidate processes plus fresh controls required |
 | fused adjacent-degree remainder `0f7fa97` | `1.487387`, `1.488532`, `1.471457`, `1.481061`, `1.483546` | `1.484` | decisive regression; reject |
 
 For scale, the `b4db253` screen put Symbolica near `0.428 ms`; the fused experiment was
-near `0.535 ms`. The latter is too large a regression to be explained by the host-load caveat.
+near `0.535 ms`. The latter is too large a regression to be explained by host noise. The first
+hybrid-inverse process measured Symbolica minimum/median `0.399472/0.409370 ms` and FLINT
+minimum/median `0.345555/0.356442 ms`, producing ratio `1.148490`.
 The largest isolated gain was the checked dense certificate. The first modular switch was next;
 the direct dense field image, R^2 conversion, and cached-prime changes then compounded to approach
 FLINT. Do not attribute this progress to allocation caching alone.
@@ -305,7 +340,13 @@ The current frozen binaries are:
 | `f46fcff` | `/tmp/univariate-combined-f46fcff-screen` | `76fc25fae540aac71516d5b5957cd54d5dcc9a039194c74a5c7cd43cca4f29a2` |
 | `7fdc099` | `/tmp/univariate-zp64-r2-7fdc099-screen` | `9af5a41ddb8288323fcc1585619ff2d3ed8ccd705630ec1c625b09c1a847429f` |
 | `b4db253` | `/tmp/univariate-prime-r2-b4db253-screen` | `c94b9c4d6a083d438cee123e1dc60254782307434c59a5ef0cd0079915b9a7e5` |
+| rejected `8440390` | `/tmp/univariate-zp64-limb-8440390-screen` | `59f5b16f6ec2362b85c0594c42d246fbf9e68ecb19c2418f27128ba67dbf79dd` |
+| active `b7727d9` | `/tmp/univariate-zp64-inverse-b7727d9-screen` | `83852a6af0bd1c2ce90373e03cfbc966c451ca051e5e29b28884e647d92976a5` |
 | rejected `0f7fa97` | `/tmp/univariate-fused-q1-0f7fa97-screen` | `db3f21e6f09dfbadb6e14a65232e292aef7ce50f64847d3bb1e993795f5ce2c2` |
+
+The matching dependency-sidecar SHA-256 values are
+`b4f62b3124c3379eab1c74862ab7a61abdc15eaba79513a93baf0ffe8cce04d2` for `8440390` and
+`c967ebd25431b91eee8f4f5cb8bd55abeff0c0a955d3415f8806bd5145a3793e` for `b7727d9`.
 
 The earlier scalar, modular, and field-image checksums remain documented below.
 
@@ -503,8 +544,8 @@ The certificate is already fairly close to FLINT: both checks take about `177 us
 `0.17 us`; reusing vector capacities alone would save less than `0.5 us`. Retaining GMP limb
 capacity in every workspace slot may save `3-5 us`, but the larger remaining cost is the 4,160
 scalar GMP multiply-subtract updates, roughly `129 us`. A thresholded divide-and-conquer exact
-polynomial division could have more headroom, but it should not be attempted until the current
-field/conversion path has been finished and profiled.
+polynomial division could have more headroom, but it is lower priority than finishing the inverse
+decision and the one-variable product/factorization work.
 
 ### R^2 Montgomery conversion (`7fdc099`)
 
@@ -522,15 +563,14 @@ the original dynamic iterator. This is deliberately a narrow
 `univariate_modular_gcd_prime_iterator`; the shared Hu/Zippel iterator is unchanged. A test checks
 all 32 entries and the first fallback against `PrimeIteratorU64`.
 
-The preliminary five-process degree-64 median is `1.190`, unusually stable across all runs. The
-host had an unrelated Rust job, so repeat this row idle before treating it as final. The result is
-still much too large and stable to dismiss as noise.
+The original five-process degree-64 median was `1.190`. A later five-process idle control measured
+`1.193639`, `1.190578`, `1.195843`, `1.188940`, and `1.191412`, with median `1.191412`, confirming
+the result.
 
-### Current direct-limb conversion experiment
+### Rejected direct-limb conversion (`8440390`)
 
-Continue from `/tmp/symbolica-zp64-limb-conversion`. It is based on `b4db253` and has one
-uncommitted change in `lib/numerica/src/domains/integer.rs` (`163` inserted lines). The private
-specialization:
+The clean branch `codex/zp64-limb-conversion` in `/tmp/symbolica-zp64-limb-conversion` implements a
+private direct conversion of small GMP-backed integers to full-word `Zp64`. The specialization:
 
 - is enabled only for GMP on 64-bit non-Windows targets with 64-bit GMP limbs and no nails;
 - handles positive and negative `Integer::Single`, `Integer::Double`, and borrowed
@@ -540,18 +580,64 @@ specialization:
 - has differential tests for signs, boundary values, `p-1`, `p`, `p+1`, forced one- through
   four-limb `Large` values, a five-limb fallback, and modulus boundaries.
 
-The focused GMP test
-`full_word_zp64_integer_conversion_matches_generic_remainder` passes after explicitly typing the
-raw zero field element and using `(*image.inner()).overflowing_add(limb)`. Broader Numerica integer
-and finite-field tests, the `no_gmp` build, a commit, release build, and performance measurements
-have **not** yet been completed. `cargo fmt --all` and `git diff --check` pass for the current diff.
-The frozen `b4db253` binary is the base and does not contain this experiment. This is the first
-task for the next agent.
+The complete GMP integer and finite-field test groups passed (`22/22` and `12/12`), as did the
+corresponding `no_gmp` groups (`16/16` and `12/12`). Formatting and diff checks passed. All 225
+stored coefficients in the degree-64 fixture take the specialized conversion: 22 `Single`, 57
+`Double`, one two-limb, 42 three-limb, and 103 four-limb values.
 
-The main remaining correctness/coverage risks are the absence of a randomized limb sweep and an
-exact `u64::MAX` modulus case. Performance is completely unmeasured: up to four Montgomery folds
-may or may not beat GMP's native remainder. Do not infer a gain from the specialized path merely
-existing.
+Five paired processes measured `1.178260`, `1.179542`, `1.179371`, `1.194325`, and `1.178938`,
+median `1.179371`, versus the control median `1.191412`. The median of the per-process Symbolica
+medians changed from `0.428919 ms` to `0.424228 ms`, only `4.691 us` or 1.09%. The median of the
+per-process minima changed from about `0.4139 ms` to `0.4132 ms`. The normalized ratio improvement
+is likewise only about 1%.
+Long LBR profiles show the conversion share falling from about 2.48% to 1.28%, roughly halving the
+phase, but that phase is too small for a material end-to-end win. Profile artifacts are:
+
+- `/tmp/profile-d64-b4db253-lbr.perf.data`, SHA-256
+  `675588de6a63d59ffc84538f5404209bd37e23dee4da6b6cd0880eacd884df35`, and its flat report,
+  SHA-256 `4f5f36fc97a2c211d1c21ef15aa9e5469808c733b5ea4f3f93bf4641b2b539b`;
+- `/tmp/profile-d64-limb-8440390-lbr.perf.data`, SHA-256
+  `4c958e3cfb433d4622bd662e3d6883faff1a5a950e922e2614822056045dc2ae`, and its flat report,
+  SHA-256 `b249fb410198218fa2b87626797d51d9117c74fd395c6cb1c35256d3c44e57a9`.
+
+Reject this commit under the 3% acceptance threshold and leave it off `dev`. It works as intended;
+the low result is an Amdahl-limit issue, not a missed selector or inlining failure. A more ambitious
+reciprocal/modulo context could have headroom, but is not the next experiment.
+
+### Active private dense inverse (`b7727d9`)
+
+The clean branch `codex/zp64-hybrid-inverse` in `/tmp/symbolica-zp64-r2` is based on `b4db253`.
+It adds `DenseZp64UnivariateGcdImage::inverse_leading`, used only by the private dense univariate
+image context. It preserves the existing Montgomery de-scaling, starts from the Euclidean state
+after the known initial zero-quotient step, handles quotients 1, 2, and 3 with subtraction chains,
+and uses hardware division for larger quotients. It makes no `Ring` or `Field` API change.
+
+The differential inverse test covers all 32 cached primes, boundary values, and 512 deterministic
+nonzero values per prime. That focused test and all `poly::gcd::tests` (`28/28`) pass with the
+license configured; formatting and diff checks pass. The default full GCD group was tested, but
+the relevant `no_gmp` validation has not yet been run.
+
+The source-matched release build took about 9 minutes with full LTO. Its first 200-sample paired
+degree-64 process measured Symbolica minimum/median `0.399472/0.409370 ms`, FLINT
+`0.345555/0.356442 ms`, and ratio `1.148490`. Relative to the control median ratio `1.191412`, this
+is about a 3.6% normalized improvement and therefore clears the acceptance threshold provisionally.
+One process is not sufficient for integration. Run four more candidate processes, preferably
+alternating with fresh control processes, and preserve every raw output. No raw CSV/stdout, build
+JSON stream, or hybrid perf artifact was saved for the first process; only the frozen executable,
+sidecar, recorded timing, and source provenance survive.
+
+The profile that motivated this change had the following flat shares:
+
+| Phase | `b4db253` | `8440390` | FLINT comparison |
+|---|---:|---:|---:|
+| Symbolica dense-image `run` self | 11.16% | 11.26% | FLINT Q1 kernel 7.46%/7.61% |
+| Symbolica `FiniteField<u64>::inv` | 10.65% | 11.01% | FLINT `n_gcdinv` 9.20%/8.98% |
+
+Disassembly showed Symbolica's generic inverse always reaching hardware division, while FLINT's
+inverse handles common small quotients with subtraction chains. Profile `b7727d9` for 20,000 or
+more samples with LBR call graphs and verify that inverse-exclusive cycles and divider samples
+fall while the dense remainder loop remains unchanged. If the timing reproduces, run degree guards
+32, 48, 64, and 80, then the full relevant GMP/`no_gmp` tests before integration.
 
 ## Rejected follow-up experiment
 
@@ -581,7 +667,8 @@ rediscover whether the isolated branches were sound:
 | `7fdc099` R^2 | focused conversion in GMP and `no_gmp`; finite-field module tests (`12/12`) in both configurations |
 | `b4db253` cached primes | static/dynamic iterator comparison; all GCD tests (`27/27`) |
 | fused-Q1 branch | focused tests and all GCD tests (`29/29`, or `30/30` with cached primes); performance rejected it |
-| uncommitted limb conversion | focused GMP differential test only |
+| `8440390` direct limb conversion | GMP integer (`22/22`) and finite-field (`12/12`) groups; `no_gmp` integer (`16/16`) and finite-field (`12/12`) groups; performance rejected it |
+| `b7727d9` private inverse | focused 32-prime differential test; all default GCD tests (`28/28`); `no_gmp` and neighboring-degree guards still required |
 
 ## Other rejected algorithms
 
@@ -606,52 +693,84 @@ and coefficient work overwhelmed the sparsity benefit on the tested cases.
 
 ## Recommended next steps
 
-### 1. Finish the direct-limb conversion candidate
+### 1. Finish the private-inverse decision
 
-Work only in `/tmp/symbolica-zp64-limb-conversion` until this candidate has a clean verdict. Start
-with the existing diff; do not recreate it. Using the shared debug target, run:
+Work in `/tmp/symbolica-zp64-r2` at clean commit `b7727d9`; do not recreate the patch. Confirm that
+no unrelated Rust build is running, then run four more candidate processes and at least two fresh
+controls, sequentially, pinned to core 8. Alternate candidate and control to reduce drift. For each
+process use the exact dense degree-64 environment below and change only the executable and output
+filename:
+
+```sh
+taskset -c 8 env \
+  SYMBOLICA_FLINT_BENCH_PAIRED=1 \
+  SYMBOLICA_FLINT_BENCH_FILTER='GCD auto: dense 1 variables degree 64' \
+  SYMBOLICA_FLINT_BENCH_SAMPLES=200 \
+  SYMBOLICA_FLINT_BENCH_CSV=1 \
+  GCD_BENCH_CASE=dense \
+  GCD_BENCH_NVARS=1 \
+  GCD_BENCH_DEGREE=64 \
+  GCD_BENCH_GAP=10 \
+  GCD_BENCH_COEFFICIENT_BITS=30 \
+  /tmp/univariate-zp64-inverse-b7727d9-screen \
+  > /tmp/d64-inverse-run-02.csv
+```
+
+The control executable is `/tmp/univariate-prime-r2-b4db253-screen`. Set `SYMBOLICA_LICENSE` in
+the calling environment; do not add it to the command saved in the repository. Compute the median
+of the five candidate process ratios and compare it with the control-process median. Accept only a
+repeatable improvement of at least 3%, without a worse absolute Symbolica median hidden by FLINT
+noise.
+
+If the five-process candidate median clears the threshold, capture a long profile:
+
+```sh
+/nix/store/lc3a14lcfrbii8f008kjgl45xibjm1w8-perf-linux-7.1.3/bin/perf record \
+  -e cycles:u -F 999 --call-graph lbr \
+  -o /tmp/profile-d64-inverse-b7727d9-lbr.perf.data -- \
+  taskset -c 8 env \
+    SYMBOLICA_FLINT_BENCH_PAIRED=1 \
+    SYMBOLICA_FLINT_BENCH_FILTER='GCD auto: dense 1 variables degree 64' \
+    SYMBOLICA_FLINT_BENCH_SAMPLES=20000 \
+    SYMBOLICA_FLINT_BENCH_CSV=1 \
+    GCD_BENCH_CASE=dense GCD_BENCH_NVARS=1 GCD_BENCH_DEGREE=64 \
+    GCD_BENCH_GAP=10 GCD_BENCH_COEFFICIENT_BITS=30 \
+    /tmp/univariate-zp64-inverse-b7727d9-screen \
+    > /tmp/profile-d64-inverse-b7727d9-lbr.stdout
+```
+
+Compare it with `/tmp/profile-d64-b4db253-lbr.perf.data`. The expected discriminator is lower
+inverse-exclusive time and fewer sampled divider instructions; the dense `run` remainder loop
+should not otherwise change. If the candidate does not reproduce, preserve branch and artifacts
+but leave it off `dev`; move to the product rather than reviving either rejected Q1 or limb patch.
+
+### 2. Validate and integrate the accepted degree-64 chain
+
+Always integrate the accepted base chain through `b4db253` after the inverse verdict; it remains
+isolated even if `b7727d9` fails. If `b7727d9` passes the timing decision, first run the full GCD
+tests and relevant `no_gmp` build/tests from its worktree, plus `cargo fmt --check` and
+`git diff --check`, and append it to the sequence:
 
 ```sh
 CARGO_TARGET_DIR=/tmp/symbolica-univariate-test-target \
-  cargo test -p numerica domains::integer::test::
+  cargo test poly::gcd::tests -- --test-threads=1
 CARGO_TARGET_DIR=/tmp/symbolica-univariate-test-target \
-  cargo test -p numerica domains::finite_field::test::
-CARGO_TARGET_DIR=/tmp/symbolica-univariate-test-target \
-  cargo test -p numerica --no-default-features --features no_gmp domains::integer::test::
-CARGO_TARGET_DIR=/tmp/symbolica-univariate-test-target \
-  cargo test -p numerica --no-default-features --features no_gmp domains::finite_field::test::
+  cargo test --no-default-features --features no_gmp poly::gcd::tests -- --test-threads=1
+cargo fmt --check
+git diff --check
 ```
 
-Then run `cargo fmt --check` and `git diff --check`. If all checks pass, commit with both author and
-committer set to `Ben Ruijl <ben@ruijl.ch>`, for example with subject
-`Speed up small-limb Zp64 integer conversion`.
-
-Build the release benchmark from that worktree using the shared target described above. Copy the
-new executable immediately, checksum it, and run five independent degree-64 processes. Compare it
-to `/tmp/univariate-prime-r2-b4db253-screen`. Also rerun `b4db253` itself on an idle host because
-its current `1.190` result is provisional. Accept the limb specialization only if the improvement
-is repeatable and its code size is justified; the expected `15-20 us` is a hypothesis, not a
-measured result.
-
-### 2. Profile the final degree-64 path and integrate it
-
-Once the limb verdict is known, profile the fastest accepted source-matched binary again. Update
-the phase accounting for certificate, field Euclid, integer-to-field conversion, prime selection,
-and CRT. In particular, verify that the old approximately `39.6 us` conversion bucket and its
-`__gmpz_fdiv_ui` descendants shrink; do not infer this from end-to-end timing alone. The old
-certificate profile is no longer representative of the full chain. Do not revive the fused-Q1
-implementation merely because FLINT exposes a Q1 symbol; its measured Rust version regressed by
-about 25%.
-
-If the full chain survives validation, cherry-pick the non-duplicated sequence onto current `dev`:
+The tests require `SYMBOLICA_LICENSE` in the calling environment. Do not put its value in the
+repository or committed logs. The integration sequence is:
 
 ```text
-810875a -> ea09e01 -> f46fcff -> 7fdc099 -> b4db253 -> optional limb commit
+810875a -> ea09e01 -> f46fcff -> 7fdc099 -> b4db253 [-> b7727d9 if accepted]
 ```
 
-Resolve against the unrelated commits after `a3f721c`, then rerun tests and source-match the
-release binary from `dev`. Do not cherry-pick `bfed508` in addition to `f46fcff`, or `f3b13b4` in
-addition to `b4db253`.
+The first five commits were already checked for textual conflicts against `dev` at `386174d`.
+Resolve any later changes carefully, rerun validation from `dev`, build a source-matched release
+binary, and preserve it before using the shared target again. Do not cherry-pick `8440390`,
+`0f7fa97`, `bfed508` in addition to `f46fcff`, or `f3b13b4` in addition to `b4db253`.
 
 ### 3. Guard the chosen GCD chain
 
@@ -695,10 +814,19 @@ The static dispatch trace is already known for this exact fixture:
   promoted GMP operations, whereas FLINT recognizes one variable and selects
   `_fmpz_poly_mul_KS`, performing one packed GMP multiplication.
 
-The smallest candidate fix is in the existing `DenseIntegerMul` context: allow Kronecker
-substitution for sufficiently large contiguous supports while preserving the stricter gate for
-sparse supports. Benchmark nearby degrees, coefficient heights, and sparse/high-gap inputs to
-guard the selector. This needs neither a global helper nor a new `Ring` method.
+The smallest candidate fix is in
+`lib/numerica/src/domains/integer/polynomial_kernels.rs`, in
+`DenseIntegerMul::try_kronecker`. The current rejection is the
+`product_count < 64 || packed_output_len.saturating_mul(128) >= product_count` gate. Allow
+Kronecker substitution for sufficiently large contiguous supports while preserving the stricter
+gate for sparse supports. Use the existing `DenseIntegerMul::try_kronecker_for_test` hook and
+Kronecker tests in `lib/numerica/src/domains/integer.rs`; add a targeted 32-by-32 contiguous-support
+test matching the factor fixture before relaxing the selector. The fixture table is
+`benches/support/cases.rs::GENERATED_FACTOR_CASES`, and paired construction is in
+`benches/flint_comparison.rs::paired_generated_factorization`.
+
+Benchmark nearby degrees, coefficient heights, and sparse/high-gap inputs to guard the selector.
+This needs neither a global helper nor a new `Ring` method.
 
 After copying the source-matched build to `/tmp/flint-comparison-candidate`, one complete paired
 process is:
@@ -730,6 +858,12 @@ After the product is improved, rerun `generated factorization: dense 1-variable 
 Profile the remaining factor-only time. The old median was host-bimodal, so compare process medians
 and minima and inspect algorithm selection. Do not count input construction, product formation, or
 factor expansion in the timed region.
+
+Before changing multiplication, preserve one source-matched integrated-control binary and use it
+for both the product and factor rows. The Symbolica factor timing entry is
+`benches/support/symbolica.rs::benchmark_factorization`, which calls `input.factor()`. Integer
+polynomial factor dispatch begins in `src/poly/factor.rs` at the `Factorize` implementation for
+`MultivariatePolynomial<IntegerRing>`.
 
 Potential areas to distinguish with evidence are square-free decomposition, modular factorization,
 Hensel/reconstruction, repeated exact division, and coefficient conversion. Do not assume the GCD
