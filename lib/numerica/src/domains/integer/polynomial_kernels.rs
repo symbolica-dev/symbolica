@@ -385,6 +385,28 @@ impl<'a> DenseIntegerMul<'a> {
         fn absolute_statistics(
             coefficients: &[Integer],
         ) -> (MultiPrecisionInteger, MultiPrecisionInteger) {
+            let mut fixed_sum = 0u128;
+            let mut fixed_maximum = 0u128;
+            let fixed_statistics = coefficients.iter().all(|coefficient| {
+                let magnitude = match coefficient {
+                    Integer::Single(value) => u128::from(value.unsigned_abs()),
+                    Integer::Double(value) => value.get().unsigned_abs(),
+                    Integer::Large(_) => return false,
+                };
+                let Some(sum) = fixed_sum.checked_add(magnitude) else {
+                    return false;
+                };
+                fixed_sum = sum;
+                fixed_maximum = fixed_maximum.max(magnitude);
+                true
+            });
+            if fixed_statistics {
+                return (
+                    MultiPrecisionInteger::from(fixed_sum),
+                    MultiPrecisionInteger::from(fixed_maximum),
+                );
+            }
+
             let mut sum = MultiPrecisionInteger::default();
             let mut maximum = Integer::zero();
             for coefficient in coefficients {
