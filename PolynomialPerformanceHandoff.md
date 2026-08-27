@@ -1,8 +1,8 @@
 # Polynomial performance continuation handoff
 
 This is the live continuation record for the single-core Symbolica/FLINT polynomial-performance
-work. It was refreshed on 2026-08-27 after integrating incremental linear-Hensel residual updates
-at `31d50a9`.
+work. It was refreshed on 2026-08-27 after integrating exact-subproblem local Hensel bounds through
+`1a8b4d7`.
 Keep this file current whenever an experiment is accepted, rejected, or left partly complete. The
 purpose is that another agent can resume without reconstructing decisions from chat history or
 transient binary names.
@@ -27,7 +27,7 @@ transient binary names.
 
 ## Resume here
 
-The accepted product and factor candidates are integrated on `dev` through `31d50a9`. Do not
+The accepted product and factor candidates are integrated on `dev` through `1a8b4d7`. Do not
 cherry-pick their old worktree hashes again. The integrated chain is:
 
 | Integrated commit | Change |
@@ -42,29 +42,36 @@ cherry-pick their old worktree hashes again. The integrated chain is:
 | `4f3b591` | Bound losing DDF images and defer EDF until after modular-prime selection |
 | `303381c` | Bound finite-field accumulators per output coefficient |
 | `31d50a9` | Maintain the scaled linear-Hensel residual incrementally |
+| `f367a8a` | Reconstruct exact Hensel subproblems at child-local coefficient bounds |
+| `817226b` | Cover non-monic exact children and base-prime local precision |
+| `ef0d716` | Preserve the root linear/quadratic strategy throughout exact subtrees |
+| `1a8b4d7` | Cover local LLL recombination with more than ten modular leaves |
 
 The latest measured full-LTO candidate binary is
-`/tmp/flint-comparison-factor-residual-v2-screen`; its runtime source was integrated as `31d50a9`.
-Its source-matched control is `/tmp/flint-comparison-factor-residual-control-v2-screen`, built from
-`3b387a4` with the same ignored `Cargo.lock`. Twelve alternating 100-sample processes reduce the
-degree-64 factor median from `13.926576 ms` to `11.504680 ms`, or 17.39%, and the paired ratio from
-`5.419751` to `4.499028`. The target product is unchanged within noise at `0.005942 ms` versus
-`0.005960 ms` for the control and is about 9.5% slower than FLINT.
+`/tmp/flint-comparison-factor-local-subtree-residual-v2-screen`; its runtime source is `ef0d716`
+and the later `1a8b4d7` changes tests only. Its source-matched control is
+`/tmp/flint-comparison-factor-residual-v2-screen`, built with the same ignored `Cargo.lock`.
+Twelve alternating 100-sample processes reduce the degree-64 factor median from `11.475622 ms` to
+`11.111040 ms`, or 3.18%, and the paired ratio from `4.481832` to `4.339923`. The target product is
+unchanged within noise at `0.005929 ms` versus `0.005934 ms` for the control.
 
-The matched profile puts about 61.6% of Symbolica factor time under Hensel lifting after this
-change, down from 71.0%. Hensel cycles fall 25.5% and whole-factor cycles 14.2%. The next small,
-contained experiment is a fused dense residual update, but its realistic ceiling is only about
-2-5%. The next architectural target is coherent simultaneous lifting over a product tree; FLINT's
-degree-greedy tree has about 27.7% less degree-weighted internal work and updates precision in a
-small number of tree walks instead of independent near-global binary lifts.
+The local-bound profile reduces Hensel cycles another 9.9% while modular screening remains within
+0.3%. The next small, contained experiment is a fused dense residual update, but its realistic
+ceiling is only about 2-5%. The next architectural target is coherent simultaneous lifting over a
+product tree; FLINT's degree-greedy tree has about 27.7% less degree-weighted internal work and
+updates precision in a small number of tree walks instead of independent near-global binary lifts.
 
-Residual-specific validation completed before integration:
+Residual and local-subtree validation completed before integration:
 
 - root factor module under default features `48/48`;
 - root factor module under `no_gmp,native_code_generation` `48/48`;
 - base-prime precision, binary-prime multi-round lifting, and non-monic nontrivial-`gamma` cases;
 - the exact scaled-residual invariant after every debug linear-lift round;
 - `cargo check --all-targets`, `cargo fmt --check`, and `git diff --check`.
+
+The combined local-subtree source passed `50/50` factor tests under both GMP and `no_gmp` before
+the final LLL test was added. That LLL test then passed separately under both backends; it is the
+only change after the release build.
 
 The complete default `cargo test --workspace` gate was last run on the preceding integrated chain;
 the residual edit is confined to linear Hensel lifting and received the two complete factor-module
@@ -74,10 +81,11 @@ The exact worktree state is:
 
 | Worktree | Branch/head | State | Purpose |
 |---|---|---|---|
-| `/home/codexB/symbolica` | `dev`, `31d50a9` | only handoff Markdown modified | Integrated product/factor winner and live lab notebook |
+| `/home/codexB/symbolica` | `dev`, `1a8b4d7` | only handoff Markdown modified | Integrated product/factor winner and live lab notebook |
 | `/tmp/symbolica-factor-residual-update` | `codex/factor-incremental-residual`, `f4f47be` | clean; accepted source commit | Isolated incremental-residual reference |
 | `/tmp/symbolica-factor-residual-control` | `codex/factor-residual-control`, `3b387a4` | clean except ignored lock | Source-matched full-LTO control |
-| `/tmp/symbolica-factor-local-subtree` | `codex/factor-local-subtree`, based on `3b387a4` | uncommitted candidate | Exact-subproblem/local-modulus experiment to layer on `31d50a9` |
+| `/tmp/symbolica-factor-local-subtree` | `codex/factor-local-subtree`, `3037a2a` | clean historical source | Pre-rebase local-bound experiment |
+| `/tmp/symbolica-factor-local-subtree-residual` | `codex/factor-local-subtree-residual`, `1a8b4d7` | clean; accepted source | Integrated residual plus local-bound reference |
 | `/tmp/symbolica-factor-screening` | `codex/factor-prime-screening`, `966deda` | clean; accepted source commit | Isolated bounded-DDF/deferred-EDF reference |
 | `/tmp/symbolica-quadratic-hensel` | `codex/quadratic-hensel`, `ed39caf` | clean; accepted source commit | Isolated quadratic Hensel reference |
 | `/tmp/symbolica-univariate-product` | `codex/univariate-product-kronecker`, `ddab46e` | clean; release build and profiling complete | Accepted product conversion plus retained fixed-width statistics follow-up |
@@ -172,20 +180,21 @@ are single-core paired measurements with default release features, including `fa
 | generated high-height GCD | about `0.5` | Symbolica about twice as fast |
 | PolyBench 5-variable uniform #11 | `1.040` | small remaining Zippel loss |
 | PolyBench 8-variable sharp #140 | `1.211` | residual Hu/Zippel loss |
-| factor fixture product, 1 variable, degrees 33/31 | `1.095` | source-matched residual/control rows are unchanged |
-| factorization, 1 variable, degrees 32/31 | `4.254` | robust 12-process guard improves about 2.6% |
-| factorization, high-height 1 variable, total degree 33 | `4.52` | quadratic path; residual change is neutral |
-| factorization, 1 variable, total degree 64 | `4.499` | incremental residual saves 17.39% after bounded screening |
-| factorization, 1 variable, total degree 65 | `5.872` | incremental residual saves about 21.6% |
-| factorization, 2 variables, degrees 10/9 | `0.622` | faster than FLINT |
-| factorization, 3 variables, degrees 6/5 | `1.964` | later modular/multivariate target |
-| PolyBench 8-variable uniform factor #105 | `1.091` | about 4.5% lower Symbolica time |
-| PolyBench 8-variable sharp factor #178 | `2.970` | unchanged |
+| factor fixture product, 1 variable, degrees 33/31 | `1.089` | unchanged by local Hensel bounds |
+| factorization, 1 variable, degrees 32/31 | `4.224` | local-bound guard is about 1% slower than its control |
+| factorization, high-height 1 variable, total degree 33 | `4.547` | local-bound guard improves about 0.9% |
+| factorization, 1 variable, total degree 64 | `4.340` | local bounds save another 3.18% after incremental residuals |
+| factorization, 1 variable, total degree 65 | `5.927` | local-bound change is neutral |
+| factorization, 2 variables, degrees 10/9 | `0.616` | faster than FLINT |
+| factorization, 3 variables, degrees 6/5 | `1.968` | later modular/multivariate target |
+| PolyBench 8-variable uniform factor #105 | `1.105` | local-bound change is neutral |
+| PolyBench 8-variable sharp factor #178 | `2.982` | local-bound change is neutral |
 
 The GCD rows use their retained source-matched measurements. The latest product and factor rows use
-the `31d50a9` runtime source: twelve alternating 100-sample processes for degrees 63 and 64, twelve
-alternating 5000-sample processes for the degree-64 input product, and six alternating 20-sample
-processes for the other guards. Earlier tables below remain as attribution evidence.
+the `ef0d716` runtime source: twelve alternating 100-sample processes for degree 64 and six
+alternating processes for the product and other guards. The degree-63 value is the six-process
+local-bound guard; the stronger residual-only measurement immediately before it was `4.254`.
+Earlier tables below remain as attribution evidence.
 
 ## Accepted incremental linear-Hensel residual
 
@@ -250,6 +259,72 @@ Artifact provenance:
 The candidate binary predates only test/comment/`debug_assert` additions; its release runtime code
 is identical to `31d50a9`. Its ignored lock has SHA-256
 `af8148d739e4e55630658a3f8a35d9676484ce198c535e5f503dbbde47db5511`.
+
+## Accepted exact-subproblem local Hensel bounds
+
+Commits `f367a8a` through `1a8b4d7` preserve the `Ok`/`Err` result at every binary Hensel split.
+An `Ok` result certifies literal integer equality, so each exact child is recursively factored at a
+modulus computed from that child's coefficient bound. An `Err` result remains a congruence at its
+parent modulus: its modular leaves are lifted at that same modulus and recombined against the exact
+parent before any result escapes. Every recombination candidate is verified by exact division.
+
+The first full-LTO candidate recomputed `quadratic_lift_allowed` at each child. That unintentionally
+activated the known-slow quadratic composite-modulus path inside the four-factor right subtree and
+regressed the degree-64 row to `12.75 ms`, about 11% slower than the residual-only control. Commit
+`ef0d716` restores the original policy: the root's linear/quadratic decision is propagated through
+the whole factor tree. Do not repeat the per-child policy change.
+
+With the strategy confound removed, twelve alternating 100-sample processes give:
+
+| Version | Symbolica minimum | Symbolica median | FLINT median | S/F |
+|---|---:|---:|---:|---:|
+| incremental-residual control | `6.826477 ms` | `11.475622 ms` | `2.560343 ms` | `4.481832` |
+| local exact-subproblem bounds | `6.017853 ms` | `11.111040 ms` | `2.560053 ms` | `4.339923` |
+
+This is an 11.85% minimum-time improvement, 3.18% median improvement, and 3.17% ratio improvement.
+Every one of the twelve paired processes favored the candidate. Raw rows are
+`/tmp/factor-local-subtree-residual-v2-d64-{candidate,control}-block-{1..12}.csv`.
+
+Six-process guards, shown as candidate versus residual-only control, are:
+
+| Case | Candidate | Control | Change |
+|---|---:|---:|---:|
+| high-height degree 33 | `6.318319 ms` | `6.375701 ms` | `-0.90%` |
+| degree 63 | `12.702184 ms` | `12.524596 ms` | `+1.42%` |
+| degree 65 | `18.028802 ms` | `17.970795 ms` | `+0.32%` |
+| generated factor, 2 variables | `6.020666 ms` | `6.111690 ms` | `-1.49%` |
+| generated factor, 3 variables | `8.160884 ms` | `8.325584 ms` | `-1.98%` |
+| PolyBench #105 | `32.005746 ms` | `31.948833 ms` | `+0.18%` |
+| PolyBench #178 | `41.705666 ms` | `41.703882 ms` | `+0.00%` |
+| degree-64 input product | `0.005929 ms` | `0.005934 ms` | `-0.09%` |
+
+The LBR candidate profile contains 500 calls per implementation. Total sampled cycles fall from
+`29.343 B` to `27.701 B`. Normalized Symbolica factor cycles are about `40.74 M` per call versus
+`44.55 M`, an 8.6% reduction; Hensel cycles are about `24.74 M` versus `27.46 M`, a 9.9%
+reduction. Modular screening is unchanged at about `13.82 M` versus `13.86 M`. The wall-time gain
+is smaller than the sampled-cycle change but is repeatable across all twelve primary processes.
+Inside Hensel, integer polynomial multiplication falls from about `9.44 M` to `8.06 M` cycles per
+call and explains roughly half of the Hensel saving; finite-field multiplication falls from about
+`4.06 M` to `3.64 M`.
+
+Validation includes exact/inexact child recombination, child-local moduli, non-monic exact
+children whose local modulus equals the base prime, and local LLL recombination with twelve modular
+leaves. The combined factor suite passed `50/50` under both GMP and `no_gmp`; the later LLL test
+passed separately under both backends.
+
+Artifact provenance:
+
+| Artifact | SHA-256 |
+|---|---|
+| `/tmp/flint-comparison-factor-local-subtree-residual-v1-screen` | `f9888c5f1322d4c9012ccc35f0840ccdef251ed95a313b313bcb2cf18b8a93d2` |
+| `/tmp/flint-comparison-factor-local-subtree-residual-v2-screen` | `af6ca9ab6d788afce0640cd218f08da45376f77f8b09b75eab5328f71adcfdc0` |
+| `/tmp/flint-comparison-factor-local-subtree-residual-v2-build.jsonl` | `ef15011b97816b718070465577e9a8d99194b1bd796729cbb3aaa1d0bd4682ff` |
+| `/tmp/profile-factor-local-subtree-residual-v2-d64-candidate-lbr.perf.data` | `95ffaa2ac625bd48002a01ff53bedd60e4ac342e95f9a7cfeed29d1bca345ab3` |
+| `/tmp/profile-factor-local-subtree-residual-v2-d64-candidate-lbr.children-symbols.txt` | `3d798ef951b6020d364057a586f2b3d9585c9ef889503b4854d2ed00c3cf372c` |
+| `/tmp/profile-factor-local-subtree-residual-v2-d64-candidate.csv` | `f05211165b12eb6af850e0399cbb24a9832bc91b8c0dbc767d043cceb5b86003` |
+
+The v2 release binary is runtime-identical to integrated `1a8b4d7`; the later source changes add
+only the LLL test. It uses the same ignored lock SHA-256 as the residual-only control.
 
 ## Final integrated `f360be0` measurement
 
@@ -1200,15 +1275,17 @@ comments that justify file organization by contrasting it with designs not prese
 
 ## Ordered next actions
 
-1. Layer `/tmp/symbolica-factor-local-subtree` on `31d50a9` without replacing the incremental
-   residual recurrence. Its source already preserves `Ok`/`Err` split certification and prevents
-   low-modulus modular leaves from escaping. Re-run both factor suites, then compare twelve
-   alternating degree-64 processes against `31d50a9`; accept only a repeatable whole-factor gain.
-2. If local subtree bounds do not clear the roughly 3% acceptance threshold, keep the experiment
-   isolated and implement coherent simultaneous linear Hensel lifting over a degree-greedy product
-   tree. Reuse products and residual data across leaves at each p-adic precision so an unlucky
-   intermediate partition does not trigger a full fake binary factorization. Start with monic,
-   pairwise-coprime univariate factors and preserve the existing binary fallback.
+1. Implement coherent simultaneous linear Hensel lifting over a degree-greedy product tree. Reuse
+   products and residual data across leaves at each p-adic precision so an unlucky intermediate
+   partition does not trigger a full fake binary factorization. Start with monic, pairwise-coprime
+   univariate factors and preserve the existing binary fallback. For fixture degrees
+   `[1,1,2,10,10,10,30]`, assert the degree-greedy internal degrees `[2,4,14,20,34,64]` and sum
+   `138`; the current count-split tree's sum is `191`.
+2. Use synchronized precision stages equivalent to `1 -> 2 -> 3 -> 5 -> 10 -> 20 -> 39 -> 77`
+   base-prime digits on the degree-64 fixture. Walk top-down so every child target is at the newly
+   reached precision. Use the two-monic-remainder factor and Bezout updates; a prototype using the
+   current generic composite-modulus quotient/remainder is a correctness step, not a
+   performance-ready endpoint.
 3. A smaller independent experiment is the fused dense update
    `residual - tau*w - r*u'`. Put it behind `PolynomialKernels` and implement the integer operation
    through a short-lived context that admits the whole request before consuming coefficients. Its
