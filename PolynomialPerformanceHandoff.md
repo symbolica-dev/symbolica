@@ -1,15 +1,12 @@
 # Polynomial performance continuation handoff
 
 This is the live continuation record for the single-core Symbolica/FLINT polynomial-performance
-work. It was refreshed on 2026-08-28 after accepting delayed modular reduction in the quadratic
-Hensel division path. Earlier current work accepted cached reciprocal reduction for dense
-distinct-degree factorization and bounded heap-result preallocation for sparse products, while the
-first dense baby-step/giant-step DDF, cache-aware Kronecker allocation, and private
-multiplication-context experiments were measured and rejected. The current `dev` source head
-before this documentation update is `11c878b`. The base Rust/FLINT comparison inventory was
-measured at performance-equivalent source head `b2e5d28`; its PolyBench construction-product rows,
-high-height factor/product rows, and PolyBench factor-operation rows are replaced below by repeated
-measurements of accepted candidates.
+work. It was refreshed on 2026-08-28 after closing the PolyBench factorization #176 gap with a
+certified quadratic prepass, direct sparse discriminant square root, and packed triangular square.
+The `dev` source head before this checkpoint is `3782eaf`; its implementation and report are kept
+together in one continuation commit. The base Rust/FLINT comparison inventory was measured at
+performance-equivalent source head `b2e5d28`, with
+later accepted rows replacing their exploratory predecessors as documented below.
 Keep this file current whenever an experiment is accepted, rejected, or left partly complete. The
 purpose is that another agent can resume without reconstructing decisions from chat history or
 transient binary names.
@@ -32,7 +29,162 @@ transient binary names.
 - Small changes below roughly 3% need particularly strong, repeated evidence before their
   complexity is accepted.
 
-## Current continuation checkpoint: delayed quadratic-Hensel division
+## Current continuation checkpoint: quadratic PolyBench cases #176 and #178
+
+PolyBench factor #176 was not slow because of coefficient height, GMP allocation, Hensel lifting,
+or an exponent-lattice dimension missed by Symbolica. The expanded eight-variable input has 2,092
+terms and a global `x5` factor. After removing that monomial, its degree vector is
+`[33, 5, 17, 4, 19, 2, 11, 3]`. Treating `x6` as the quadratic variable gives coefficient layers
+with `21`, `422`, and `1,649` terms. The discriminant has 64,367 terms but is the square of a
+422-term polynomial.
+
+FLINT compresses/shears the exponent representation and then uses Hart's heap-based sparse square
+root. The compression does not reduce this input's affine rank or variable count, and Symbolica
+already sees the degree-two variable. The decisive difference was that Symbolica proved the
+discriminant square by recursively running general multivariate square-free factorization and a
+large polynomial GCD on all 64,367 terms. A frozen pre-change profile measured 193.629 ms for
+Symbolica and 20.313 ms for FLINT, ratio `9.532x`. In that Symbolica profile, the quadratic subtree
+was 40.63% of Symbolica cycles, square-free factorization of the discriminant 26.37%, the separate
+outer square-free pass 29.94%, all heap division 22.52%, and heap multiplication 13.03%.
+
+The accepted implementation is private to integer polynomial factorization and consists of four
+parts:
+
+1. `SparsePolynomialSquareRootContext` reconstructs an exact root in descending lexicographic
+   order. It merges input terms with products of already recovered nonleading root terms; every
+   residual must divide exactly by twice the leading root coefficient. It supports nonnegative
+   exponents in at most eight packed bytes, checks global degree parity and half-degree bounds,
+   uses a one-shot context, and has separate cumulative-pair and live-map fallbacks. Unsupported or
+   bounded-out inputs retain the square-free-decomposition method.
+2. Integer square-free factorization extracts the coordinatewise common monomial before calling
+   `factor_separable`, emitting each variable with its exact multiplicity. This transformation is
+   algebraically useful but almost performance-neutral for #176 because the subsequent
+   eight-variable separability scan still runs.
+3. Large inputs with more than two active variables receive a split-only quadratic prepass. It
+   removes integer and monomial content, tries all degree-two variables in estimated cost order,
+   uses only the bounded direct square-root path, and accepts only two factors whose exact product
+   reconstructs the normalized core. A nonsquare, zero, unsupported, parity failure, or failed
+   division is inconclusive and falls back to the old square-free path. A linear child with unit
+   content in the selected variable is irreducible by Gauss's lemma; other children are factored
+   recursively. The packed prepass requires discriminant degrees at most 255 and falls back when
+   they do not fit. The later post-square-free quadratic route checks the actual exponent type; if
+   a discriminant product would overflow it, the quadratic calculation widens to `u32` and maps
+   the certified result back to the input exponent representation.
+4. `PackedSparsePolynomialSquareContext` forms the `b^2` part of a quadratic discriminant by
+   visiting each unordered term pair once. Diagonal and off-diagonal coefficient sums are kept
+   separately, so every coefficient product is computed once and the off-diagonal sum is doubled
+   afterward without creating a temporary GMP product for every pair. Dense mixed-radix and
+   total-degree layouts, exponents above 127, fewer than 64 terms, and pair counts above `2^20`
+   retain the general multiplication dispatch.
+
+The isolated progression on pinned core 2, default release features, one thread per backend, and
+FLINT 3.6.0 is:
+
+| Version | Symbolica median | FLINT median | S/F |
+|---|---:|---:|---:|
+| frozen pre-change profile | `193.628990 ms` | `20.312697 ms` | `9.532412` |
+| direct sparse discriminant root | `30.934655 ms` | `20.059765 ms` | `1.543190` |
+| monomial extraction plus root micro-optimizations, exploratory | `30.699388 ms` | `19.976017 ms` | `1.536812` |
+| certified pre-square-free split, exploratory | `24.315857 ms` | `19.970389 ms` | `1.217596` |
+| certified split plus packed triangular square | `19.891008 ms` | `19.933955 ms` | `0.998269` |
+| exact final source, including narrow-exponent widening | `20.395108 ms` | `20.151804 ms` | `1.007296` |
+
+The packed-kernel row is the median of six independent 50-sample processes. Per-process ratios
+range from `0.993533` to `1.002528`; the ratio of the process medians is `0.997846`. The exact final
+source was rebuilt after adding narrow-exponent safety and measured in another six 50-sample
+processes. Its per-process ratios range from `1.001435` to `1.029072`, with median `1.0072955`; the
+ratio of its listed process medians is `1.012074`. Both sequences are within the standing 3%
+parity threshold. Final-source Symbolica time falls by `89.47%` from the frozen profile and is
+`9.49x` faster than its old path. A separate 300-sample perf run on the packed-kernel source gives
+`20.334568 ms` versus `20.396429 ms`, ratio `0.996967`.
+
+The normalized LBR profile attributes 95.07% of Symbolica cycles to the certified split. Within
+Symbolica, the direct root reconstruction takes 41.30%, the packed square 30.68%, generic heap
+multiplication used for the remaining products 14.79%, and split reconstruction 4.30%; neither
+the old outer square-free pass nor discriminant square-free factorization appears in the profile.
+The packed and generic multiplication work totals about `9.25 ms`, essentially FLINT's
+`9.29 ms`. Symbolica's direct root is still about `3.3 ms` slower than FLINT's heap square root,
+but Symbolica reaches the quadratic directly and avoids FLINT's content, square-free, and exponent
+compression preprocessing. Wall-clock timings, rather than the LBR sampled-cycle ratio, are the
+acceptance measurement.
+
+Validation at this checkpoint passes `74/74` factor-module tests with default GMP features and
+`74/74` with `no_gmp,native_code_generation`; `cargo check --lib --tests`, `cargo fmt --check`, and
+`git diff --check` also pass. Coverage includes exact/nonsquare/canceling sparse roots, packed
+high-height squaring, signed content and common-monomial multiplicities, certified early splits,
+inconclusive fallbacks, exponent-capacity guards, and both irreducible and split quadratic
+discriminants that must widen from `u8` to `u32`.
+
+The same certified route improves PolyBench factor #178 from the preceding robust `3.1210205x` to
+an exploratory six-process median `0.2389645x`. The full 11-case factor sweep reconstructs every
+input. The apparent #84 regression in three-sample sweeps was checked with six interleaved
+10-sample processes against the frozen control: `166.094 ms` candidate versus `164.676 ms`
+control, only `0.86%`, below the 3% acceptance threshold. #84 remains the worst factor case and is
+the next independent algorithmic target.
+
+The accepted current factor-operation ratios are:
+
+| Case | Variables/regime | S/F |
+|---|---|---:|
+| #44 | 8v uniform | `0.100709` |
+| #159 | 8v uniform | `0.171694` |
+| #163 | 5v uniform | `0.224814` |
+| #178 | 8v sharp | `0.2389645` |
+| #92 | 8v sharp | `0.839857` |
+| #159 | 5v uniform | `0.996512` |
+| #176 | 8v sharp | `1.0072955` |
+| #105 | 8v uniform | `1.0926815` |
+| #32 | 5v uniform | `1.1340355` |
+| #131 | 5v uniform | `1.7405235` |
+| #84 | 8v sharp | `7.8842045` |
+
+Important rejected explanations and follow-ups:
+
+- FLINT's exponent compression is useful generally but does not reduce #176's dimension and is not
+  the missing shortcut here.
+- Coefficients in the discriminant are at most about 58 bits, so the old gap was not caused by the
+  large-`Integer` recycle cache or GMP allocation.
+- Common-monomial extraction and hash-entry/bound micro-optimizations moved #176 by only about 1%;
+  they did not replace the separability scan.
+- The remaining direct-root context eagerly stores nonleading pair products. A lazy FLINT-style
+  row heap would reduce worst-case memory from quadratic to linear in the recovered root length,
+  but it is no longer required for #176 performance.
+- A fused stream for `b^2-4ac` could avoid materializing the discriminant, but the measured case is
+  already at FLINT parity. Do not add that complexity without a new benchmark that needs it.
+
+### Next target: PolyBench factor #84
+
+#84 is now the worst measured row at `7.8842045x`: six 10-sample process medians give about
+`166.094 ms` for Symbolica and `21.05 ms` for FLINT. There is not yet a dedicated current profile,
+so the following is a static, testable hypothesis rather than a measured attribution.
+
+The 1,878-term product has degrees `[8, 10, 8, 32, 24, 5, 3, 3]` and no quadratic variable.
+Symbolica minimizes leading-layer term count and breaks ties toward higher degree, selecting the
+degree-32 `x4` followed by degree-24 `x5`. Its density heuristic then chooses bivariate start, and
+`find_sample` can factor roughly three degree-32-by-24 bivariate images before multivariate
+lifting. FLINT's exponent compression keeps eight variables but orders a degree-three variable
+first; its very-low-density route tries sparse Zippel lifting.
+
+The first A/B experiment should add a test-only order override and force zero-based order
+`[6, 3, 4, 1, 0, 2, 5, 7]`. With `x7` first, Symbolica's current density score switches to
+univariate start. Compare that order with the current order and separately force univariate start
+under the current order, while counting and timing outer square-free/separability work,
+`find_sample` attempts and nested bivariate factorizations, leading-coefficient reconstruction,
+sparse lifting, and final reconstruction. A successful hypothesis should eliminate the bivariate
+image factorizations, reduce variance, and substantially lower wall time. If it does not, profile
+sparse lifting and the outer coefficient-content GCDs before changing the production heuristic.
+
+Primary artifacts are:
+
+| Artifact | SHA-256 |
+|---|---|
+| `/tmp/flint-comparison-pb176-final-source-lto` | `42db9b79fac57488b686472e8b24f3d2e0db0c6bc80f12244ea4d46a0c1b82ac` |
+| `/tmp/flint-comparison-pb176-early-split-packed-square-lto` | `5280833a5d80d601ec9dcb9a345066b6f099368ff737b74545305f2351f41a37` |
+| `/tmp/profile-pb176-early-split-packed-square-lbr.perf.data` | `d040ea3c2390e58331adc9cde013a5fec31343ff46f9840a110a0e4411087761` |
+| `/tmp/profile-pb176-early-split-packed-square-normalized-summary.txt` | `e6d758c44bbf19f115ad5f1035608a56d04bb6ea0e6a8029f39677896268adb5` |
+| `/tmp/profile-pb176-d73f12d-lbr.perf.data` | `1309cd1f65b99dff92d7c08d514e31feea68864401eee44fc21d8c5221729114` |
+
+## Previous continuation checkpoint: delayed quadratic-Hensel division
 
 Commit `11c878b` keeps `IntegerModularUnivariateContext` private and changes its modular
 quotient/remainder schedule to match FLINT's classical basecase invariant. It reduces a cell when
@@ -73,7 +225,7 @@ factor guards moved by `2.60%` and `1.94%` in S/F, but test-only routing counter
 fixture executes quadratic Hensel lifting; these are full-LTO layout shifts. Degree-48/64/80 GCD
 candidate/control ratios are `0.995105`, `0.993553`, and `0.994587`. The complete widened
 PolyBench factor sweep reconstructs all 11 inputs; its current best, median, and worst S/F are
-`0.1029535`, `1.1722495`, and `9.631801`.
+`0.100709`, `0.996512`, and `7.8842045`.
 
 In the post-change paired cycle profile, Symbolica factorization occupies `68.60%` of total cycles
 and FLINT `27.54%`. Symbolica's Hensel subtree is still `59.14%` of the paired total, but the direct
@@ -173,14 +325,14 @@ the main Ducos entry point; Brown and CRT are alternative runs reported separate
 
 | Family | n | Best S/F and case | Median S/F | Worst S/F and case |
 |---|---:|---|---:|---|
-| all strict current rows | 122 | `0.028678`, high-gap 8v GCD d4/gap256 | `1.0308265` | `9.631801`, PolyBench factor #176 |
+| all strict current rows | 122 | `0.028678`, high-gap 8v GCD d4/gap256 | `0.9956765` | `7.8842045`, PolyBench factor #84 |
 | non-PolyBench rows | 76 | `0.028678`, high-gap 8v GCD | `0.895231` | `2.550696`, high-height univariate factor d33 |
-| PolyBench products plus operations | 46 | `0.1029535`, factor #44 | `1.622051` | `9.631801`, factor #176 |
-| PolyBench operations only | 23 | `0.1029535`, factor #44 | `0.828262` | `9.631801`, factor #176 |
+| PolyBench products plus operations | 46 | `0.100709`, factor #44 | `1.54263925` | `7.8842045`, factor #84 |
+| PolyBench operations only | 23 | `0.100709`, factor #44 | `0.748107` | `7.8842045`, factor #84 |
 | PolyBench construction products | 23 | `1.4934895`, factor #178 product | `1.795966` | `1.8567915`, factor #32 product |
 | PolyBench GCD operations | 12 | `0.387980`, #53 | `0.6583255` | `1.268240`, #140 |
 | PolyBench GCD products | 12 | `1.538292`, #53 | `1.78571925` | `1.820671`, uniform trivial #11 |
-| PolyBench factor operations | 11 | `0.1029535`, #44 | `1.1722495` | `9.631801`, #176 |
+| PolyBench factor operations | 11 | `0.100709`, #44 | `0.996512` | `7.8842045`, #84 |
 | PolyBench factor products | 11 | `1.4934895`, #178 | `1.795966` | `1.8567915`, #32 |
 | integer multiplication | 8 | `0.449493`, dense very-large | `0.9351165` | `1.348957`, 7v power-minus-one |
 | finite-field multiplication | 14 | `0.252283`, near-2^64 dense univariate d4912 | `0.5908955` | `1.137177`, near-2^64 dense-large |
@@ -194,11 +346,11 @@ the main Ducos entry point; Brown and CRT are alternative runs reported separate
 | all GCD operations | 30 | `0.028678`, high-gap 8v | `0.613736` | `1.268240`, PolyBench #140 |
 | generated factor operations | 6 | `0.575899`, dense 2v | `1.550977` | `2.550696`, high-height d33 |
 | generated factor products | 6 | `0.578774`, high-height d33 | `0.9919445` | `1.184942`, univariate d65 |
-| all factor operations | 17 | `0.1029535`, PolyBench #44 | `1.500788` | `9.631801`, PolyBench #176 |
+| all factor operations | 17 | `0.100709`, PolyBench #44 | `1.0926815` | `7.8842045`, PolyBench #84 |
 | all construction products | 44 | `0.291403`, generated dense 2v GCD | `1.64522875` | `1.917285`, generated high-gap 5v GCD |
 
 The overall best is generated high-gap GCD with 8 variables, degree 4, and gap 256 (`0.028678x`).
-The overall worst is PolyBench 8-variable sharp factorization #176 (`9.631801x`). The heterogeneous
+The overall worst is PolyBench 8-variable sharp factorization #84 (`7.8842045x`). The heterogeneous
 overall median is descriptive rather than workload weighted. The important PolyBench split is that
 the median core GCD/factor operation beats FLINT, while constructing the same inputs as products is
 uniformly slower and moves the combined median above one.
@@ -210,7 +362,7 @@ More detailed family medians are:
 - generated factorization `1.550977` after replacing degree 64 by the robust result, versus its
   product construction `0.9919445`;
 - PolyBench GCD operation `0.6583255`, versus its product construction `1.78571925`;
-- PolyBench factorization operation `1.1722495`, versus its product construction `1.795966`.
+- PolyBench factorization operation `0.996512`, versus its product construction `1.795966`.
 
 The fresh configured dense univariate GCD sweep uses five 200-sample processes per degree:
 
