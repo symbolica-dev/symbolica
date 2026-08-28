@@ -39,6 +39,17 @@ const SPARSE_MDP_SAMPLE_BASE_ATTEMPTS: usize = 1;
 // Maximum average number of input terms per bivariate degree-box position for
 // selecting the bivariate-start integer factorization algorithm.
 const INTEGER_FACTOR_BIVARIATE_SPARSE_BOX_DENSITY_THRESHOLD: f64 = 5.0;
+// Minimum term count for selecting a lower-degree main variable for sparse
+// univariate-start integer factorization.
+const INTEGER_FACTOR_SPARSE_UNIVARIATE_MIN_TERMS: usize = 256;
+// Minimum bivariate-box score for selecting univariate start with a margin
+// above the automatic method boundary.
+const INTEGER_FACTOR_SPARSE_UNIVARIATE_MIN_BOX_DENSITY: f64 =
+    2.0 * INTEGER_FACTOR_BIVARIATE_SPARSE_BOX_DENSITY_THRESHOLD;
+// Maximum leading-layer size relative to the smallest layer in the input.
+const INTEGER_FACTOR_SPARSE_UNIVARIATE_MAX_LCOEFF_RATIO: usize = 2;
+// Minimum reduction in main-variable degree required by the reordered image.
+const INTEGER_FACTOR_SPARSE_UNIVARIATE_MIN_DEGREE_RATIO: usize = 4;
 // Number of failed univariate lifting attempts before automatic integer
 // factorization retries the polynomial with the bivariate-start algorithm.
 const INTEGER_FACTOR_UNIVARIATE_AUTO_RETRIES: usize = 3;
@@ -770,7 +781,8 @@ impl<'a, E: PositiveExponent> DenseZpDistinctDegreeContext<'a, E> {
     }
 }
 
-/// Dense arithmetic for Cantor-Zassenhaus equal-degree factorization over `Zp`.
+/// Dense arithmetic for odd-characteristic Cantor-Zassenhaus equal-degree
+/// factorization over `Zp`.
 ///
 /// A split attempt samples one dense residue, checks it for an immediate GCD,
 /// and otherwise raises it to `(p^d - 1) / 2` modulo the current block. The
@@ -796,6 +808,8 @@ impl<'a, E: PositiveExponent> DenseZpEqualDegreeContext<'a, E> {
     ///
     /// The same density and degree limits as dense distinct-degree
     /// factorization keep allocation proportional to the sparse input size.
+    /// `Zp` represents odd prime fields; characteristic two uses the separate
+    /// `Z2` type and remains on the generic trace-based implementation.
     fn new(
         polynomial: &'a MultivariatePolynomial<Zp, E, LexOrder>,
         variable: usize,
@@ -906,18 +920,14 @@ impl<'a, E: PositiveExponent> DenseZpEqualDegreeContext<'a, E> {
     }
 
     /// Find one proper factor of the current equal-degree block.
-    fn split<R: Rng + ?Sized>(
-        &mut self,
-        rng: &mut R,
-    ) -> MultivariatePolynomial<Zp, E, LexOrder> {
+    fn split<R: Rng + ?Sized>(&mut self, rng: &mut R) -> MultivariatePolynomial<Zp, E, LexOrder> {
         let degree = self.modulus.len() - 1;
         let sampling_range = 0..=i64::from(self.field.get_prime() - 1);
 
         loop {
             self.random_residue.clear();
-            self.random_residue.extend(
-                (0..degree).map(|_| self.field.sample(rng, &sampling_range)),
-            );
+            self.random_residue
+                .extend((0..degree).map(|_| self.field.sample(rng, &sampling_range)));
             DenseZpDistinctDegreeContext::<E>::trim(&self.field, &mut self.random_residue);
             if self.random_residue.len() <= 1 {
                 continue;
@@ -978,20 +988,19 @@ impl<'a, E: PositiveExponent> DenseZpEqualDegreeContext<'a, E> {
                 continue;
             }
 
-            let factor = if let Some(mut context) =
-                DenseZpEqualDegreeContext::new(&block, variable, d)
-            {
-                #[cfg(test)]
-                if first_block {
-                    DENSE_ZP_EDF_BLOCKS.with(|blocks| blocks.set(blocks.get() + 1));
-                }
-                context.split(&mut rng)
-            } else if first_block {
-                return None;
-            } else {
-                factors.extend(block.equal_degree_factorization(d));
-                continue;
-            };
+            let factor =
+                if let Some(mut context) = DenseZpEqualDegreeContext::new(&block, variable, d) {
+                    #[cfg(test)]
+                    if first_block {
+                        DENSE_ZP_EDF_BLOCKS.with(|blocks| blocks.set(blocks.get() + 1));
+                    }
+                    context.split(&mut rng)
+                } else if first_block {
+                    return None;
+                } else {
+                    factors.extend(block.equal_degree_factorization(d));
+                    continue;
+                };
             first_block = false;
             let (cofactor, remainder) = block.quot_rem_univariate_monic(&factor);
             debug_assert!(remainder.is_zero());
@@ -1831,6 +1840,75 @@ fn integer_factor_start_mode() -> IntegerFactorStart {
         (false, true) => IntegerFactorStart::Bivariate,
         (false, false) => IntegerFactorStart::Disabled,
     }
+}
+
+/// Estimate how many input terms map to each exponent pair for two variables.
+/// Automatic integer factorization uses this score to select its initial
+/// bivariate or univariate image factorization.
+fn integer_factor_bivariate_box_density(
+    term_count: usize,
+    first_degree: usize,
+    second_degree: usize,
+) -> f64 {
+    term_count as f64 / ((first_degree as f64 + 1.0) * (second_degree as f64 + 1.0))
+}
+
+/// Move a low-degree variable to the front for an anisotropic sparse input.
+/// A small leading layer bounds leading-coefficient reconstruction work, while
+/// the candidate box score selects a low-degree univariate image with margin.
+fn reorder_integer_factor_variables_for_sparse_univariate(
+    automatic: bool,
+    term_count: usize,
+    degrees: &[usize],
+    leading_layer_lengths: &[usize],
+    order: &mut [usize],
+) -> bool {
+    debug_assert_eq!(degrees.len(), leading_layer_lengths.len());
+    debug_assert!(order.iter().all(|&variable| variable < degrees.len()));
+
+    if !automatic
+        || term_count < INTEGER_FACTOR_SPARSE_UNIVARIATE_MIN_TERMS
+        || order.len() < 2
+        || degrees.iter().any(|&degree| degree == 2)
+    {
+        return false;
+    }
+
+    let current_degree = degrees[order[0]];
+    let current_density =
+        integer_factor_bivariate_box_density(term_count, current_degree, degrees[order[1]]);
+    if current_density > INTEGER_FACTOR_BIVARIATE_SPARSE_BOX_DENSITY_THRESHOLD {
+        return false;
+    }
+
+    let minimum_leading_layer = order
+        .iter()
+        .map(|&variable| leading_layer_lengths[variable])
+        .min()
+        .unwrap();
+    let maximum_candidate_leading_layer =
+        minimum_leading_layer.saturating_mul(INTEGER_FACTOR_SPARSE_UNIVARIATE_MAX_LCOEFF_RATIO);
+
+    let candidate_position = (1..order.len())
+        .filter(|&position| {
+            let variable = order[position];
+            let degree = degrees[variable];
+            leading_layer_lengths[variable] <= maximum_candidate_leading_layer
+                && degree.saturating_mul(INTEGER_FACTOR_SPARSE_UNIVARIATE_MIN_DEGREE_RATIO)
+                    <= current_degree
+                && integer_factor_bivariate_box_density(term_count, degree, current_degree)
+                    >= INTEGER_FACTOR_SPARSE_UNIVARIATE_MIN_BOX_DENSITY
+        })
+        .min_by_key(|&position| {
+            let variable = order[position];
+            (degrees[variable], leading_layer_lengths[variable], position)
+        });
+
+    let Some(candidate_position) = candidate_position else {
+        return false;
+    };
+    order[..=candidate_position].rotate_right(1);
+    true
 }
 
 /// A polynomial that can be factorized.
@@ -3330,11 +3408,26 @@ impl<E: PositiveExponent> Factorize for MultivariatePolynomial<IntegerRing, E, L
                     });
 
                     let mut order: Vec<_> = order.into_iter().map(|(v, _)| v).collect();
+                    let bivariate_fallback_order = order.clone();
+                    let reordered_for_sparse_univariate =
+                        reorder_integer_factor_variables_for_sparse_univariate(
+                            integer_factor_start_mode() == IntegerFactorStart::Auto,
+                            f.nterms(),
+                            &degrees,
+                            &lcoeff_length,
+                            &mut order,
+                        );
 
                     factors.extend(
-                        f.multivariate_factorization(&mut order, 10, None)
-                            .into_iter()
-                            .map(|ff| (ff, p)),
+                        f.multivariate_factorization(
+                            &mut order,
+                            10,
+                            None,
+                            reordered_for_sparse_univariate
+                                .then_some(bivariate_fallback_order.as_slice()),
+                        )
+                        .into_iter()
+                        .map(|ff| (ff, p)),
                     )
                 }
             }
@@ -3392,7 +3485,9 @@ impl<E: PositiveExponent> Factorize for MultivariatePolynomial<IntegerRing, E, L
 
                 let mut order: Vec<_> = order.into_iter().map(|(v, _)| v).collect();
 
-                f.multivariate_factorization(&mut order, 10, None).len() == 1
+                f.multivariate_factorization(&mut order, 10, None, None)
+                    .len()
+                    == 1
             }
         }
     }
@@ -6811,16 +6906,11 @@ impl<F: Field + SampleableRing<SamplingPolicy = RangeInclusive<i64>>, E: Positiv
 
 impl<E: PositiveExponent> MultivariatePolynomial<IntegerRing, E, LexOrder> {
     fn integer_factor_start_auto_decision(&self, order: &[usize]) -> (bool, f64) {
-        let bivariate_degree_space = order
-            .iter()
-            .take(2)
-            .map(|&var| self.degree(var).to_u32() as f64 + 1.0)
-            .product::<f64>();
-        let bivariate_box_density = if bivariate_degree_space == 0.0 {
-            0.0
-        } else {
-            self.nterms() as f64 / bivariate_degree_space
-        };
+        let bivariate_box_density = integer_factor_bivariate_box_density(
+            self.nterms(),
+            self.degree(order[0]).to_u32() as usize,
+            self.degree(order[1]).to_u32() as usize,
+        );
 
         let use_bivariate =
             bivariate_box_density <= INTEGER_FACTOR_BIVARIATE_SPARSE_BOX_DENSITY_THRESHOLD;
@@ -9810,12 +9900,34 @@ impl<E: PositiveExponent> MultivariatePolynomial<IntegerRing, E, LexOrder> {
         order: &mut [usize],
         coefficient_upper_bound: i64,
         max_univariate_factors: Option<usize>,
+        bivariate_fallback_order: Option<&[usize]>,
     ) -> Vec<Self> {
         self.multivariate_factorization_with_retries(
             order,
             coefficient_upper_bound,
             max_univariate_factors,
             0,
+            bivariate_fallback_order,
+        )
+    }
+
+    /// Start bivariate factorization after restoring the variable order that
+    /// preceded a speculative sparse-univariate ordering.
+    fn multivariate_factorization_bivariate_fallback(
+        &self,
+        order: &mut [usize],
+        bivariate_fallback_order: Option<&[usize]>,
+        coefficient_upper_bound: i64,
+        max_bivariate_factors: Option<usize>,
+    ) -> Vec<Self> {
+        if let Some(fallback_order) = bivariate_fallback_order {
+            debug_assert_eq!(order.len(), fallback_order.len());
+            order.copy_from_slice(fallback_order);
+        }
+        self.multivariate_factorization_bivariate_start(
+            order,
+            coefficient_upper_bound,
+            max_bivariate_factors,
         )
     }
 
@@ -9825,6 +9937,7 @@ impl<E: PositiveExponent> MultivariatePolynomial<IntegerRing, E, LexOrder> {
         mut coefficient_upper_bound: i64,
         mut max_univariate_factors: Option<usize>,
         univariate_retries: usize,
+        bivariate_fallback_order: Option<&[usize]>,
     ) -> Vec<Self> {
         if let Some(m) = max_univariate_factors
             && m == 1
@@ -9836,8 +9949,9 @@ impl<E: PositiveExponent> MultivariatePolynomial<IntegerRing, E, LexOrder> {
         let use_bivariate_start = match integer_start_mode {
             IntegerFactorStart::Auto => {
                 if univariate_retries >= INTEGER_FACTOR_UNIVARIATE_AUTO_RETRIES {
-                    return self.multivariate_factorization_bivariate_start(
+                    return self.multivariate_factorization_bivariate_fallback(
                         order,
+                        bivariate_fallback_order,
                         coefficient_upper_bound,
                         max_univariate_factors,
                     );
@@ -9851,8 +9965,9 @@ impl<E: PositiveExponent> MultivariatePolynomial<IntegerRing, E, LexOrder> {
         };
 
         if use_bivariate_start {
-            return self.multivariate_factorization_bivariate_start(
+            return self.multivariate_factorization_bivariate_fallback(
                 order,
+                bivariate_fallback_order,
                 coefficient_upper_bound,
                 max_univariate_factors,
             );
@@ -9883,8 +9998,9 @@ impl<E: PositiveExponent> MultivariatePolynomial<IntegerRing, E, LexOrder> {
 
                 match integer_start_mode {
                     IntegerFactorStart::Auto | IntegerFactorStart::Bivariate => {
-                        return self.multivariate_factorization_bivariate_start(
+                        return self.multivariate_factorization_bivariate_fallback(
                             order,
+                            bivariate_fallback_order,
                             coefficient_upper_bound.saturating_add(10),
                             None,
                         );
@@ -10026,6 +10142,7 @@ impl<E: PositiveExponent> MultivariatePolynomial<IntegerRing, E, LexOrder> {
                 coefficient_upper_bound + 10,
                 max_univariate_factors,
                 univariate_retries + 1,
+                bivariate_fallback_order,
             );
         };
 
@@ -10048,6 +10165,7 @@ impl<E: PositiveExponent> MultivariatePolynomial<IntegerRing, E, LexOrder> {
                 coefficient_upper_bound + 10,
                 max_univariate_factors,
                 univariate_retries + 1,
+                bivariate_fallback_order,
             );
         };
 
@@ -10068,6 +10186,7 @@ impl<E: PositiveExponent> MultivariatePolynomial<IntegerRing, E, LexOrder> {
                 coefficient_upper_bound + 10,
                 max_univariate_factors,
                 univariate_retries + 1,
+                bivariate_fallback_order,
             );
         };
 
@@ -10115,6 +10234,7 @@ impl<E: PositiveExponent> MultivariatePolynomial<IntegerRing, E, LexOrder> {
                 coefficient_upper_bound + 10,
                 max_univariate_factors,
                 univariate_retries + 1,
+                bivariate_fallback_order,
             );
         }
     }
@@ -10156,19 +10276,18 @@ mod test {
 
     use super::{
         BOUNDED_DDF_REJECTIONS, DENSE_ZP_DDF_MODULUS_UPDATES, DENSE_ZP_DDF_SCREENS,
-        DENSE_ZP_EDF_BLOCKS,
-        DenseBivariateImage, DenseIntegerModularUnivariateContext, DenseTwoFactorCorrectionContext,
-        DenseZpAccumulationMode, DenseZpDistinctDegreeContext, DenseZpEqualDegreeContext,
-        DenseZpMulModWorkspace,
-        EXACT_HENSEL_SUBTREE_MODULUS_BITS, EXACT_HENSEL_SUBTREE_SPLITS, ExactPolynomialSquareRoot,
-        IntegerModularUnivariateContext, LAST_BOUNDED_DDF_REJECTION_DEGREE,
-        LAST_MODULAR_INTEGER_EDF_PRIME, LLL_RECOMBINATION_SUCCESSES,
-        LOCAL_HENSEL_RECOMBINATION_NODES, MIN_EARLY_QUADRATIC_FACTOR_TERMS,
-        MODULAR_INTEGER_EDF_CALLS, ModularPrimeScreen, PRODUCT_TREE_HENSEL_LIFT_CALLS,
-        PackedSparsePolynomialSquareContext, QUADRATIC_HENSEL_LIFT_CALLS,
-        QUADRATIC_HENSEL_NONUNIT_RETRIES, QuadraticFactorization, SparseDiophantineContext,
-        SparsePolynomialSquareRootContext, UnivariateHenselProductTreeBuildContext,
-        UnivariateHenselProductTreeLink, UnivariateHenselProductTreeNode,
+        DENSE_ZP_EDF_BLOCKS, DenseBivariateImage, DenseIntegerModularUnivariateContext,
+        DenseTwoFactorCorrectionContext, DenseZpAccumulationMode, DenseZpDistinctDegreeContext,
+        DenseZpEqualDegreeContext, DenseZpMulModWorkspace, EXACT_HENSEL_SUBTREE_MODULUS_BITS,
+        EXACT_HENSEL_SUBTREE_SPLITS, ExactPolynomialSquareRoot, IntegerModularUnivariateContext,
+        LAST_BOUNDED_DDF_REJECTION_DEGREE, LAST_MODULAR_INTEGER_EDF_PRIME,
+        LLL_RECOMBINATION_SUCCESSES, LOCAL_HENSEL_RECOMBINATION_NODES,
+        MIN_EARLY_QUADRATIC_FACTOR_TERMS, MODULAR_INTEGER_EDF_CALLS, ModularPrimeScreen,
+        PRODUCT_TREE_HENSEL_LIFT_CALLS, PackedSparsePolynomialSquareContext,
+        QUADRATIC_HENSEL_LIFT_CALLS, QUADRATIC_HENSEL_NONUNIT_RETRIES, QuadraticFactorization,
+        SparseDiophantineContext, SparsePolynomialSquareRootContext,
+        UnivariateHenselProductTreeBuildContext, UnivariateHenselProductTreeLink,
+        UnivariateHenselProductTreeNode, reorder_integer_factor_variables_for_sparse_univariate,
         univariate_hensel_precision_schedule,
     };
 
@@ -13149,7 +13268,7 @@ mod test {
         let mut order = (0..8).collect::<Vec<_>>();
         assert!(!poly.integer_factor_start_auto_decision(&order).0);
 
-        let factors = poly.multivariate_factorization(&mut order, 10, Some(0));
+        let factors = poly.multivariate_factorization(&mut order, 10, Some(0), None);
         let product = factors
             .iter()
             .fold(poly.one(), |product, factor| &product * factor);
@@ -13172,6 +13291,154 @@ mod test {
         let (use_bivariate, density) = poly.integer_factor_start_auto_decision(&order);
         assert_eq!(density, 4.0);
         assert!(use_bivariate);
+    }
+
+    #[test]
+    fn integer_factor_auto_reorders_polybench_8_sharp_84_geometry() {
+        let degrees = [8, 10, 8, 32, 24, 5, 3, 3];
+        let leading_layer_lengths = [3, 2, 2, 1, 1, 8, 2, 35];
+        let mut order = [3, 4, 1, 0, 2, 5, 6, 7];
+
+        assert!(reorder_integer_factor_variables_for_sparse_univariate(
+            true,
+            1878,
+            &degrees,
+            &leading_layer_lengths,
+            &mut order,
+        ));
+        assert_eq!(order, [6, 3, 4, 1, 0, 2, 5, 7]);
+    }
+
+    #[test]
+    fn sparse_univariate_bivariate_fallback_restores_original_order() {
+        let polynomial = parse!("1+x+y+z").to_polynomial::<_, u8>(&Z, None);
+        let original_order = [0, 1, 2];
+        let mut speculative_order = [2, 0, 1];
+
+        let factors = polynomial.multivariate_factorization_bivariate_fallback(
+            &mut speculative_order,
+            Some(&original_order),
+            10,
+            Some(1),
+        );
+
+        assert_eq!(speculative_order, original_order);
+        assert_eq!(factors, vec![polynomial]);
+    }
+
+    #[test]
+    fn integer_factor_auto_keeps_polybench_8_uniform_159_order() {
+        let degrees = [12, 15, 21, 13, 15, 14, 16, 16];
+        let leading_layer_lengths = [18, 2, 1, 2, 3, 4, 2, 2];
+        let mut order = [2, 6, 7, 1, 4, 5, 3, 0];
+        let original_order = order;
+
+        assert!(!reorder_integer_factor_variables_for_sparse_univariate(
+            true,
+            1813,
+            &degrees,
+            &leading_layer_lengths,
+            &mut order,
+        ));
+        assert_eq!(order, original_order);
+    }
+
+    #[test]
+    fn sparse_univariate_order_reordering_obeys_route_guards() {
+        let degrees = [8, 10, 8, 32, 24, 5, 3, 3];
+        let leading_layer_lengths = [3, 2, 2, 1, 1, 8, 2, 35];
+        let original_order = [3, 4, 1, 0, 2, 5, 6, 7];
+
+        let mut order = original_order;
+        assert!(!reorder_integer_factor_variables_for_sparse_univariate(
+            false,
+            1878,
+            &degrees,
+            &leading_layer_lengths,
+            &mut order,
+        ));
+        assert_eq!(order, original_order);
+
+        let mut quadratic_degrees = degrees;
+        quadratic_degrees[5] = 2;
+        let mut order = original_order;
+        assert!(!reorder_integer_factor_variables_for_sparse_univariate(
+            true,
+            1878,
+            &quadratic_degrees,
+            &leading_layer_lengths,
+            &mut order,
+        ));
+        assert_eq!(order, original_order);
+
+        let mut large_candidate_layer = leading_layer_lengths;
+        large_candidate_layer[6] = 3;
+        let mut order = original_order;
+        assert!(!reorder_integer_factor_variables_for_sparse_univariate(
+            true,
+            1878,
+            &degrees,
+            &large_candidate_layer,
+            &mut order,
+        ));
+        assert_eq!(order, original_order);
+
+        let small_degrees = [9, 24, 1, 5];
+        let small_layers = [1, 1, 2, 8];
+        let small_order = [0, 1, 3, 2];
+        let mut order = small_order;
+        assert!(!reorder_integer_factor_variables_for_sparse_univariate(
+            true,
+            255,
+            &small_degrees,
+            &small_layers,
+            &mut order,
+        ));
+        assert_eq!(order, small_order);
+
+        let degree_ratio_guard = [11, 24, 3, 5];
+        let degree_ratio_layers = [1, 1, 2, 8];
+        let degree_ratio_order = [0, 1, 3, 2];
+        let mut order = degree_ratio_order;
+        assert!(!reorder_integer_factor_variables_for_sparse_univariate(
+            true,
+            520,
+            &degree_ratio_guard,
+            &degree_ratio_layers,
+            &mut order,
+        ));
+        assert_eq!(order, degree_ratio_order);
+
+        let exact_degree_ratio = [12, 24, 3, 5];
+        let mut order = degree_ratio_order;
+        assert!(reorder_integer_factor_variables_for_sparse_univariate(
+            true,
+            520,
+            &exact_degree_ratio,
+            &degree_ratio_layers,
+            &mut order,
+        ));
+        assert_eq!(order, [2, 0, 1, 3]);
+
+        let mut order = original_order;
+        assert!(!reorder_integer_factor_variables_for_sparse_univariate(
+            true,
+            1319,
+            &degrees,
+            &leading_layer_lengths,
+            &mut order,
+        ));
+        assert_eq!(order, original_order);
+
+        let mut order = original_order;
+        assert!(!reorder_integer_factor_variables_for_sparse_univariate(
+            true,
+            4126,
+            &degrees,
+            &leading_layer_lengths,
+            &mut order,
+        ));
+        assert_eq!(order, original_order);
     }
 
     const WANG_RESIDUAL_CONTENT_FACTORS: [&str; 4] = [

@@ -6819,19 +6819,12 @@ mod test {
     #[test]
     fn packed_row_merge_matches_irregular_u16_polynomials() {
         let variables = packed_row_merge_variables();
-        let left = parse!(
-            "2*x1^130*x3^7+3*x2^125*x8^4-5*x4^80*x6^55+7*x5^64*x7^70"
-        )
-        .to_polynomial::<_, u16>(&Z, Some(variables.clone()));
-        let right = parse!(
-            "11*x1^100*x2^20-13*x3^120*x4^5+17*x5^90*x8^40-19*x6^110*x7^10+23"
-        )
-        .to_polynomial::<_, u16>(&Z, Some(variables));
+        let left = parse!("2*x1^130*x3^7+3*x2^125*x8^4-5*x4^80*x6^55+7*x5^64*x7^70")
+            .to_polynomial::<_, u16>(&Z, Some(variables.clone()));
+        let right = parse!("11*x1^100*x2^20-13*x3^120*x4^5+17*x5^90*x8^40-19*x6^110*x7^10+23")
+            .to_polynomial::<_, u16>(&Z, Some(variables));
 
-        assert!(packed_row_merge_is_bounded(
-            left.nterms(),
-            right.nterms()
-        ));
+        assert!(packed_row_merge_is_bounded(left.nterms(), right.nterms()));
         assert_eq!(&left * &right, reference_integer_product(&left, &right));
     }
 
