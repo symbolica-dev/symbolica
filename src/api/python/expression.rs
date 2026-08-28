@@ -2924,6 +2924,144 @@ impl<'py> FromPyObject<'_, 'py> for ConvertibleToPatternRestriction {
 #[cfg(feature = "python_stubgen")]
 impl_stub_type!(ConvertibleToPatternRestriction = PythonPatternRestriction | PythonCondition);
 
+fn solve_pattern_to_expression(pattern: &Pattern) -> Result<Atom, String> {
+    let expression = pattern
+        .to_atom()
+        .map_err(|error| format!("Solve conditions must compare concrete expressions: {error}"))?;
+
+    if expression
+        .get_all_symbols(true)
+        .iter()
+        .any(|symbol| symbol.get_wildcard_level() > 0)
+    {
+        return Err("Solve conditions cannot contain pattern wildcards".to_owned());
+    }
+
+    Ok(expression)
+}
+
+fn solve_relation_to_inequality(relation: &Relation) -> Result<Inequality, String> {
+    let (left, right) = match relation {
+        Relation::Eq(left, right) | Relation::Lt(left, right) | Relation::Gt(left, right) => {
+            (left, right)
+        }
+        Relation::Ne(_, _) => {
+            return Err(
+                "Solve input does not yet support !=; use strict < or > constraints".to_owned(),
+            );
+        }
+        Relation::Le(_, _) | Relation::Ge(_, _) => {
+            return Err("Solve input does not yet support non-strict inequalities".to_owned());
+        }
+        Relation::Contains(_, _) | Relation::IsType(_, _) | Relation::Matches(_, _, _, _) => {
+            return Err("This Condition is not an algebraic solve constraint".to_owned());
+        }
+    };
+
+    let expression = solve_pattern_to_expression(left)? - solve_pattern_to_expression(right)?;
+    Ok(match relation {
+        Relation::Eq(_, _) => Inequality::Zero(expression),
+        Relation::Lt(_, _) => Inequality::LessThanZero(expression),
+        Relation::Gt(_, _) => Inequality::GreaterThanZero(expression),
+        _ => unreachable!(),
+    })
+}
+
+fn solve_condition_to_inequalities(
+    condition: &Condition<Relation>,
+    inequalities: &mut Vec<Inequality>,
+) -> Result<(), String> {
+    match condition {
+        Condition::Yield(relation) => inequalities.push(solve_relation_to_inequality(relation)?),
+        Condition::And(conditions) => {
+            solve_condition_to_inequalities(&conditions.0, inequalities)?;
+            solve_condition_to_inequalities(&conditions.1, inequalities)?;
+        }
+        Condition::Or(_) | Condition::Not(_) => {
+            return Err(
+                "Solve input currently accepts only individual constraints or conjunctions"
+                    .to_owned(),
+            );
+        }
+        Condition::True | Condition::False => {
+            return Err("Boolean constants are not algebraic solve constraints".to_owned());
+        }
+    }
+    Ok(())
+}
+
+/// An expression or comparison condition accepted by ``Expression.solve``.
+pub struct ConvertibleToSolveInput(Vec<Inequality>);
+
+impl ConvertibleToSolveInput {
+    fn into_inequalities(self) -> Vec<Inequality> {
+        self.0
+    }
+}
+
+impl<'py> FromPyObject<'_, 'py> for ConvertibleToSolveInput {
+    type Error = PyErr;
+
+    fn extract(ob: Borrowed<'_, 'py, PyAny>) -> PyResult<Self> {
+        if let Ok(expression) = ob.extract::<ConvertibleToExpression>() {
+            return Ok(Self(vec![Inequality::Zero(
+                expression.to_expression().expr,
+            )]));
+        }
+        if let Ok(condition) = ob.extract::<PythonCondition>() {
+            let mut inequalities = Vec::new();
+            solve_condition_to_inequalities(&condition.condition, &mut inequalities)
+                .map_err(exceptions::PyTypeError::new_err)?;
+            return Ok(Self(inequalities));
+        }
+
+        Err(exceptions::PyTypeError::new_err(
+            "Solve input must be an expression or algebraic Condition",
+        ))
+    }
+}
+
+#[cfg(feature = "python_stubgen")]
+impl_stub_type!(ConvertibleToSolveInput = ConvertibleToExpression | PythonCondition);
+
+#[cfg(test)]
+mod solve_input_test {
+    use super::*;
+
+    #[test]
+    fn comparison_conditions_normalize_relative_to_zero() {
+        let less = Condition::Yield(Relation::Lt(
+            crate::parse!("x^2").to_pattern(),
+            Atom::num(1).to_pattern(),
+        ));
+        let greater = Condition::Yield(Relation::Gt(
+            crate::parse!("y").to_pattern(),
+            Atom::num(2).to_pattern(),
+        ));
+        let condition = Condition::And(Box::new((less, greater)));
+        let mut inequalities = Vec::new();
+
+        solve_condition_to_inequalities(&condition, &mut inequalities).unwrap();
+
+        assert_eq!(
+            inequalities,
+            vec![
+                Inequality::LessThanZero(crate::parse!("x^2-1")),
+                Inequality::GreaterThanZero(crate::parse!("y-2")),
+            ]
+        );
+
+        let non_strict = Condition::Yield(Relation::Le(
+            crate::parse!("x").to_pattern(),
+            Atom::num(1).to_pattern(),
+        ));
+        assert_eq!(
+            solve_condition_to_inequalities(&non_strict, &mut inequalities).unwrap_err(),
+            "Solve input does not yet support non-strict inequalities"
+        );
+    }
+}
+
 impl<'py> FromPyObject<'_, 'py> for ConvertibleToExpression {
     type Error = PyErr;
 
@@ -8065,8 +8203,10 @@ impl PythonExpression {
     ///
     /// Parameters
     /// ----------
-    /// system: Sequence[Expression]
-    ///     Left-hand sides of equations, each understood to equal zero.
+    /// system: Sequence[Expression | Condition]
+    ///     Expressions understood to equal zero, or comparison conditions.
+    ///     Strict inequalities are accepted by the API but require the future
+    ///     CAD backend to execute.
     /// variables: Sequence[Expression]
     ///     Variables whose values should be returned. In an underdetermined
     ///     system, variables later in this list are preferred as free inputs.
@@ -8084,14 +8224,14 @@ impl PythonExpression {
     #[classmethod]
     pub fn solve(
         _cls: &Bound<'_, PyType>,
-        system: Vec<ConvertibleToExpression>,
+        system: Vec<ConvertibleToSolveInput>,
         variables: Vec<PythonExpression>,
         warn_if_underdetermined: bool,
         domain: Option<PythonSolveDomain>,
     ) -> PyResult<Vec<PythonSolution>> {
         let system = system
             .into_iter()
-            .map(|expression| expression.to_expression().expr)
+            .flat_map(ConvertibleToSolveInput::into_inequalities)
             .collect::<Vec<_>>();
         let variables = variables
             .into_iter()

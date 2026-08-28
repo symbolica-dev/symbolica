@@ -101,7 +101,7 @@ use crate::{
         AtomPrinter, ColorMode, PrintMode, PrintOptions, PrintState, PrintUserData,
         PrintUserDataKey,
     },
-    solve::{Solution, SolutionCondition, SolveDomain, SolveError},
+    solve::{Inequality, Solution, SolutionCondition, SolutionValue, SolveDomain},
     state::{RecycledAtom, State, Workspace},
     streaming::{TermStreamer, TermStreamerConfig},
     tensors::matrix::Matrix,
@@ -262,6 +262,78 @@ impl From<SolveDomain> for PythonSolveDomain {
     }
 }
 
+/// A root or open interval assigned to one variable of a solution branch.
+#[cfg_attr(feature = "python_stubgen", gen_stub_pyclass)]
+#[pyclass(
+    frozen,
+    skip_from_py_object,
+    name = "SolutionValue",
+    module = "symbolica.core"
+)]
+#[derive(Clone)]
+pub struct PythonSolutionValue {
+    value: SolutionValue,
+}
+
+impl From<SolutionValue> for PythonSolutionValue {
+    fn from(value: SolutionValue) -> Self {
+        Self { value }
+    }
+}
+
+#[cfg_attr(feature = "python_stubgen", gen_stub_pymethods)]
+#[cfg_attr(not(feature = "python_stubgen"), remove_gen_stub)]
+#[pymethods]
+impl PythonSolutionValue {
+    /// The value kind: ``"root"`` or ``"interval"``.
+    #[getter]
+    pub fn kind(&self) -> &'static str {
+        match self.value {
+            SolutionValue::Root(_) => "root",
+            SolutionValue::Interval { .. } => "interval",
+        }
+    }
+
+    /// The exact root, when ``kind == "root"``.
+    #[getter]
+    pub fn root(&self) -> Option<PythonExpression> {
+        match &self.value {
+            SolutionValue::Root(root) => Some(root.clone().into()),
+            SolutionValue::Interval { .. } => None,
+        }
+    }
+
+    /// The lower endpoint of an interval, which may be negative infinity.
+    /// Returns ``None`` for a root value.
+    #[getter]
+    pub fn lower_bound(&self) -> Option<PythonExpression> {
+        match &self.value {
+            SolutionValue::Interval { lower_bound, .. } => Some(lower_bound.clone().into()),
+            SolutionValue::Root(_) => None,
+        }
+    }
+
+    /// The upper endpoint of an interval, which may be positive infinity.
+    /// Returns ``None`` for a root value.
+    #[getter]
+    pub fn upper_bound(&self) -> Option<PythonExpression> {
+        match &self.value {
+            SolutionValue::Interval { upper_bound, .. } => Some(upper_bound.clone().into()),
+            SolutionValue::Root(_) => None,
+        }
+    }
+
+    fn __repr__(&self) -> String {
+        match &self.value {
+            SolutionValue::Root(root) => format!("SolutionValue(root={root})"),
+            SolutionValue::Interval {
+                lower_bound,
+                upper_bound,
+            } => format!("SolutionValue(interval=({lower_bound}, {upper_bound}))"),
+        }
+    }
+}
+
 /// A condition under which an exact solution branch is valid.
 #[cfg_attr(feature = "python_stubgen", gen_stub_pyclass)]
 #[pyclass(
@@ -336,8 +408,10 @@ impl PythonSolutionCondition {
 
 /// One branch of an exact solution.
 ///
-/// This object implements the usual read-only mapping operations and retains
-/// free-variable, validity-condition, and requested-domain metadata.
+/// This object implements the usual read-only mapping operations for point
+/// values and retains free-variable, validity-condition, and requested-domain
+/// metadata. Use :meth:`Solution.variable_solutions` for the ordered root-or-
+/// interval representation used by future CAD results.
 #[cfg_attr(feature = "python_stubgen", gen_stub_pyclass)]
 #[pyclass(
     frozen,
@@ -357,10 +431,14 @@ impl From<Solution> for PythonSolution {
 }
 
 impl PythonSolution {
-    fn sorted_values(&self) -> Vec<(&PolyVariable, &Atom)> {
-        let mut values = self.solution.iter().collect::<Vec<_>>();
-        values.sort_by(|(left, _), (right, _)| left.cmp(right));
-        values
+    fn ordered_point_values(&self) -> impl Iterator<Item = (&PolyVariable, &Atom)> {
+        self.solution
+            .variable_solutions()
+            .iter()
+            .filter_map(|variable_solution| match variable_solution.value() {
+                SolutionValue::Root(root) => Some((variable_solution.variable(), root)),
+                SolutionValue::Interval { .. } => None,
+            })
     }
 
     fn atom_html(atom: &Atom) -> String {
@@ -434,10 +512,30 @@ impl PythonSolution {
 #[pymethods]
 impl PythonSolution {
     /// Convert this branch to a plain dictionary.
-    pub fn as_dict(&self) -> HashMap<PythonExpression, PythonExpression> {
+    #[gen_stub(override_return_type(type_repr = "dict[Expression, Expression]"))]
+    pub fn as_dict<'py>(&self, py: Python<'py>) -> PyResult<Bound<'py, PyDict>> {
+        let values = PyDict::new(py);
+        for (variable, value) in self.ordered_point_values() {
+            values.set_item(
+                PythonExpression::from(variable.to_atom()),
+                PythonExpression::from(value.clone()),
+            )?;
+        }
+        Ok(values)
+    }
+
+    /// Requested variables and their root or interval solutions, in the order
+    /// supplied to :meth:`Expression.solve`.
+    pub fn variable_solutions(&self) -> Vec<(PythonExpression, PythonSolutionValue)> {
         self.solution
+            .variable_solutions()
             .iter()
-            .map(|(variable, value)| (variable.to_atom().into(), value.clone().into()))
+            .map(|variable_solution| {
+                (
+                    variable_solution.variable().to_atom().into(),
+                    variable_solution.value().clone().into(),
+                )
+            })
             .collect()
     }
 
@@ -497,19 +595,19 @@ impl PythonSolution {
     }
 
     pub fn keys(&self) -> Vec<PythonExpression> {
-        self.solution
-            .keys()
-            .map(|variable| variable.to_atom().into())
+        self.ordered_point_values()
+            .map(|(variable, _)| variable.to_atom().into())
             .collect()
     }
 
     pub fn values(&self) -> Vec<PythonExpression> {
-        self.solution.values().cloned().map(Into::into).collect()
+        self.ordered_point_values()
+            .map(|(_, value)| value.clone().into())
+            .collect()
     }
 
     pub fn items(&self) -> Vec<(PythonExpression, PythonExpression)> {
-        self.solution
-            .iter()
+        self.ordered_point_values()
             .map(|(variable, value)| (variable.to_atom().into(), value.clone().into()))
             .collect()
     }
@@ -522,7 +620,10 @@ impl PythonSolution {
 
     fn __getitem__(&self, variable: &PythonExpression) -> PyResult<PythonExpression> {
         self.get(variable)?.ok_or_else(|| {
-            exceptions::PyKeyError::new_err(format!("Solution has no value for {}", variable.expr))
+            exceptions::PyKeyError::new_err(format!(
+                "Solution has no point value for {}",
+                variable.expr
+            ))
         })
     }
 
@@ -553,15 +654,30 @@ impl PythonSolution {
     /// Render this solution as HTML in notebook environments.
     fn _repr_html_(&self) -> String {
         let rows = self
-            .sorted_values()
-            .into_iter()
-            .map(|(variable, value)| {
-                format!(
-                    "<div class=\"symbolica-solution-value\"><span>{}</span>\
-                     <span style=\"padding:0 .5em\">=</span><span>{}</span></div>",
-                    Self::atom_html(&variable.to_atom()),
-                    Self::atom_html(value),
-                )
+            .solution
+            .variable_solutions()
+            .iter()
+            .map(|variable_solution| {
+                let variable = Self::atom_html(&variable_solution.variable().to_atom());
+                match variable_solution.value() {
+                    SolutionValue::Root(value) => format!(
+                        "<div class=\"symbolica-solution-value\"><span>{variable}</span>\
+                         <span style=\"padding:0 .5em\">=</span><span>{}</span></div>",
+                        Self::atom_html(value),
+                    ),
+                    SolutionValue::Interval {
+                        lower_bound,
+                        upper_bound,
+                    } => {
+                        let lower = Self::atom_html(lower_bound);
+                        let upper = Self::atom_html(upper_bound);
+                        format!(
+                            "<div class=\"symbolica-solution-value\"><span>{lower}</span>\
+                             <span style=\"padding:0 .5em\">&lt;</span><span>{variable}</span>\
+                             <span style=\"padding:0 .5em\">&lt;</span><span>{upper}</span></div>"
+                        )
+                    }
+                }
             })
             .collect::<String>();
 
@@ -587,14 +703,24 @@ impl PythonSolution {
     /// Render this solution as LaTeX in notebook environments.
     fn _repr_latex_(&self) -> String {
         let values = self
-            .sorted_values()
-            .into_iter()
-            .map(|(variable, value)| {
-                format!(
-                    "{} &= {}",
-                    Self::atom_latex(&variable.to_atom()),
-                    Self::atom_latex(value),
-                )
+            .solution
+            .variable_solutions()
+            .iter()
+            .map(|variable_solution| {
+                let variable = Self::atom_latex(&variable_solution.variable().to_atom());
+                match variable_solution.value() {
+                    SolutionValue::Root(value) => {
+                        format!("{variable} &= {}", Self::atom_latex(value))
+                    }
+                    SolutionValue::Interval {
+                        lower_bound,
+                        upper_bound,
+                    } => {
+                        let lower = Self::atom_latex(lower_bound);
+                        let upper = Self::atom_latex(upper_bound);
+                        format!("{lower} &< {variable} < {upper}")
+                    }
+                }
             })
             .collect::<Vec<_>>()
             .join(" \\\\ ");
@@ -769,6 +895,7 @@ pub fn create_symbolica_module<'a, 'b>(
     m.add_class::<PythonSymbolAttribute>()?;
     m.add_class::<PythonParseMode>()?;
     m.add_class::<PythonSolveDomain>()?;
+    m.add_class::<PythonSolutionValue>()?;
     m.add_class::<PythonSolutionCondition>()?;
     m.add_class::<PythonSolution>()?;
     m.add_class::<PythonPrintMode>()?;

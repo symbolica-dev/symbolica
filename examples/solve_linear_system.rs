@@ -16,6 +16,11 @@ fn solve() {
         .unwrap();
     let solution = &solutions[0];
 
+    for x in solution.variable_solutions() {
+        println!("{} = {}", x.variable(), x.value());
+    }
+
+    // TODO: what if the solution is a range?
     for (variable, value) in solution {
         println!("{variable} = {value}");
     }

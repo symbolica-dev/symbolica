@@ -39,7 +39,7 @@ use crate::{
         series::{Series, SeriesDepth},
     },
     printer::{AtomPrinter, CanonicalOrderingSettings, PrintOptions, PrintState},
-    solve::SolveError,
+    solve::{Inequality, SolveError},
     state::Workspace,
     tensors::{CanonicalTensor, matrix::Matrix},
     utils::{BorrowedOrOwned, Settable},
@@ -789,13 +789,57 @@ pub trait AtomCore: private::Sealed + Sized {
         AtomView::nsolve_system(system, vars, init, prec, max_iterations)
     }
 
-    /// Find the exact solutions of a system of equations.
+    /// Construct a solve constraint asserting that this expression is equal
+    /// to zero.
+    fn eq_zero(&self) -> Inequality {
+        Inequality::Zero(self.as_atom_view().to_owned())
+    }
+
+    /// Construct a solve constraint asserting that this expression is
+    /// strictly less than zero.
+    fn lt_zero(&self) -> Inequality {
+        Inequality::LessThanZero(self.as_atom_view().to_owned())
+    }
+
+    /// Construct a solve constraint asserting that this expression is
+    /// strictly greater than zero.
+    fn gt_zero(&self) -> Inequality {
+        Inequality::GreaterThanZero(self.as_atom_view().to_owned())
+    }
+
+    /// Construct a strict less-than solve constraint by moving `rhs` to the
+    /// left-hand side.
+    fn less_than<'a, T: Into<AtomOrView<'a>>>(&self, rhs: T) -> Inequality {
+        let lhs = self.as_atom_view().to_owned();
+        let rhs = rhs.into().into_owned();
+        Inequality::LessThanZero(lhs - rhs)
+    }
+
+    /// Construct a strict greater-than solve constraint by moving `rhs` to
+    /// the left-hand side.
+    fn greater_than<'a, T: Into<AtomOrView<'a>>>(&self, rhs: T) -> Inequality {
+        let lhs = self.as_atom_view().to_owned();
+        let rhs = rhs.into().into_owned();
+        Inequality::GreaterThanZero(lhs - rhs)
+    }
+
+    /// Build an exact solve operation for `system`.
     ///
-    /// Write each equation as an expression equal to zero, then specify the
-    /// variables with [`SolveBuilder::wrt`](crate::solve::SolveBuilder::wrt).
-    /// By default, solutions may be complex. Use
-    /// [`SolveBuilder::over`](crate::solve::SolveBuilder::over) to request only
-    /// integer, rational, or real solutions.
+    /// Linear systems use the linear-system solver. Polynomial nonlinear
+    /// systems over `Q` or `Q(parameters)` use a grevlex Gröbner basis, FGLM
+    /// conversion to lex, and exact algebraic roots. Positive-dimensional
+    /// systems use a maximal viable set of requested variables as inputs,
+    /// preferring variables later in `vars`, and map those inputs to
+    /// themselves. Plain expressions in `system` are understood to equal zero
+    /// and convert to [`Inequality::Zero`]. Strict inequality constraints can
+    /// be created with [`AtomCore::lt_zero`], [`AtomCore::gt_zero`],
+    /// [`AtomCore::less_than`], or [`AtomCore::greater_than`]. They are accepted
+    /// by the builder so that the API is ready for CAD, but currently return
+    /// [`SolveError::InequalitiesNotSupported`] when executed.
+    /// Rational powers involving the solve variables are polynomialized with
+    /// auxiliary variables, and non-principal branches are filtered from the
+    /// result. Rational denominators are cleared and their zero loci are
+    /// excluded.
     ///
     /// The result contains one [`Solution`](crate::solve::Solution) per solution
     /// branch. An empty vector means that there are no solutions in the requested
@@ -841,7 +885,10 @@ pub trait AtomCore: private::Sealed + Sized {
     ///     .unwrap();
     /// assert!(real_solutions.is_empty());
     /// ```
-    fn solve<T: AtomCore>(system: &[T]) -> crate::solve::SolveBuilder<'_, T> {
+    fn solve<T>(system: &[T]) -> crate::solve::SolveBuilder
+    where
+        T: Clone + Into<Inequality>,
+    {
         crate::solve::SolveBuilder::new(system)
     }
 
