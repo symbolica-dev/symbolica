@@ -3517,7 +3517,7 @@ impl<F: Ring, E: Exponent> MultivariatePolynomial<F, E, LexOrder> {
             }
         }
 
-        let mut res = self.zero_with_capacity(self.nterms().max(rhs.nterms()));
+        let mut res = self.zero_with_capacity(self.heap_mul_result_capacity(rhs));
 
         let mut cache: HashMap<_, Vec<(usize, usize)>> = HashMap::new();
         let mut q_cache: Vec<Vec<(usize, usize)>> = vec![];
@@ -3641,6 +3641,25 @@ impl<F: Ring, E: Exponent> MultivariatePolynomial<F, E, LexOrder> {
         res
     }
 
+    /// Estimate a bounded result capacity for heap multiplication.
+    ///
+    /// Every coefficient pair contributes to at most one output term. Reserve that upper bound
+    /// when the coefficient and exponent buffers together fit in one mebibyte; larger products
+    /// retain the input-sized reservation and grow according to the number of terms encountered.
+    fn heap_mul_result_capacity(&self, other: &MultivariatePolynomial<F, E, LexOrder>) -> usize {
+        const MAX_PREALLOCATED_BYTES: usize = 1 << 20;
+
+        let input_capacity = self.nterms().max(other.nterms());
+        let bytes_per_term = mem::size_of::<F::Element>()
+            .saturating_add(self.nvars().saturating_mul(mem::size_of::<E>()))
+            .max(1);
+        let maximum_terms = MAX_PREALLOCATED_BYTES / bytes_per_term;
+        self.nterms()
+            .checked_mul(other.nterms())
+            .filter(|pair_products| *pair_products <= maximum_terms)
+            .unwrap_or(input_capacity)
+    }
+
     /// Heap multiplication, but with the exponents packed into a `u64`.
     /// Each exponent is limited to 65535 if there are four or fewer variables,
     /// or 255 if there are 8 or fewer variables.
@@ -3653,7 +3672,7 @@ impl<F: Ring, E: Exponent> MultivariatePolynomial<F, E, LexOrder> {
             return result;
         }
 
-        let mut res = self.zero_with_capacity(self.nterms().max(other.nterms()));
+        let mut res = self.zero_with_capacity(self.heap_mul_result_capacity(other));
 
         let pack_a: Vec<_> = if pack_u8 {
             self.exponents_iter().map(|c| E::pack(c)).collect()
@@ -6575,6 +6594,19 @@ mod test {
             "16*v2^2*v3^2+8*v1^2*v2*v3+v1^4+24*v1^4*v2^4*v3^2+6*v1^6*v2^3*v3+9*v1^8*v2^6*v3^2"
         );
         assert_eq!(b.to_expression(), r)
+    }
+
+    #[test]
+    fn heap_result_preallocation_is_bounded() {
+        let left = parse!("1+x^3").to_polynomial::<_, u16>(&Z, None);
+        let right = parse!("1-x^5").to_polynomial::<_, u16>(&Z, left.variables().clone());
+        assert_eq!(left.heap_mul_result_capacity(&right), 4);
+
+        let mut large = left.zero_with_capacity(512);
+        for degree in 0..512 {
+            large.append_monomial(1.into(), &[degree]);
+        }
+        assert_eq!(large.heap_mul_result_capacity(&large), large.nterms());
     }
 
     #[test]
