@@ -3794,6 +3794,7 @@ impl<F: Ring, E: Exponent> MultivariatePolynomial<F, E, LexOrder> {
     /// A row fixes one term of the smaller polynomial and advances through the ordered terms of the
     /// larger polynomial. The heap exposes the next monomial from every row, so equal monomials can
     /// be accumulated before the next result term is emitted.
+    #[inline(always)]
     fn try_packed_u8_row_merge_mul(
         &self,
         other: &MultivariatePolynomial<F, E, LexOrder>,
@@ -3801,6 +3802,17 @@ impl<F: Ring, E: Exponent> MultivariatePolynomial<F, E, LexOrder> {
         if !packed_row_merge_is_bounded(self.nterms(), other.nterms()) {
             return None;
         }
+
+        Some(self.packed_u8_row_merge_mul_bounded(other))
+    }
+
+    /// Multiply a validated packed-`u8` product by merging its coefficient-product rows.
+    #[inline(never)]
+    fn packed_u8_row_merge_mul_bounded(
+        &self,
+        other: &MultivariatePolynomial<F, E, LexOrder>,
+    ) -> MultivariatePolynomial<F, E, LexOrder> {
+        debug_assert!(packed_row_merge_is_bounded(self.nterms(), other.nterms()));
 
         debug_assert_eq!(self.nvars(), other.nvars());
         debug_assert!(self.is_polynomial() && other.is_polynomial());
@@ -3824,53 +3836,43 @@ impl<F: Ring, E: Exponent> MultivariatePolynomial<F, E, LexOrder> {
         }
 
         #[inline(always)]
-        fn push_next(
+        fn take_head_and_advance(
             heap: &mut BinaryHeap<Reverse<(u64, usize, usize)>>,
             row_monomials: &[u64],
             column_monomials: &[u64],
-            monomial: u64,
-            row: usize,
-            column: usize,
-        ) {
-            if column + 1 < column_monomials.len() {
-                let next_column = column + 1;
-                let next_monomial = row_monomials[row] + column_monomials[next_column];
-                debug_assert!(next_monomial > monomial);
-                heap.push(Reverse((next_monomial, row, next_column)));
+        ) -> Option<(u64, usize, usize)> {
+            let mut head = heap.peek_mut()?;
+            let Reverse((monomial, row, column)) = *head;
+            let next_column = column + 1;
+            if next_column == column_monomials.len() {
+                std::collections::binary_heap::PeekMut::pop(head);
+                return Some((monomial, row, column));
             }
+
+            let next_monomial = row_monomials[row] + column_monomials[next_column];
+            debug_assert!(next_monomial > monomial);
+            *head = Reverse((next_monomial, row, next_column));
+            Some((monomial, row, column))
         }
 
         let mut result = self.zero_with_capacity(self.heap_mul_result_capacity(other));
-        while let Some(Reverse((monomial, row, column))) = heap.pop() {
+        while let Some((monomial, row, column)) =
+            take_head_and_advance(&mut heap, &row_monomials, &column_monomials)
+        {
             let mut coefficient = self
                 .ring()
                 .mul(&rows.coefficients[row], &columns.coefficients[column]);
-            push_next(
-                &mut heap,
-                &row_monomials,
-                &column_monomials,
-                monomial,
-                row,
-                column,
-            );
 
             while heap
                 .peek()
                 .is_some_and(|Reverse((next_monomial, _, _))| *next_monomial == monomial)
             {
-                let Reverse((_, row, column)) = heap.pop().unwrap();
+                let (_, row, column) =
+                    take_head_and_advance(&mut heap, &row_monomials, &column_monomials).unwrap();
                 self.ring().add_mul_assign(
                     &mut coefficient,
                     &rows.coefficients[row],
                     &columns.coefficients[column],
-                );
-                push_next(
-                    &mut heap,
-                    &row_monomials,
-                    &column_monomials,
-                    monomial,
-                    row,
-                    column,
                 );
             }
 
@@ -3887,7 +3889,7 @@ impl<F: Ring, E: Exponent> MultivariatePolynomial<F, E, LexOrder> {
             }
         }
 
-        Some(result)
+        result
     }
 
     /// Return the total degree and coefficient count for a bounded dense
@@ -6826,6 +6828,22 @@ mod test {
 
         assert!(packed_row_merge_is_bounded(left.nterms(), right.nterms()));
         assert_eq!(&left * &right, reference_integer_product(&left, &right));
+    }
+
+    #[test]
+    fn packed_row_merge_matches_a_collision_heavy_dense_box() {
+        let variables = packed_row_merge_variables();
+        let left = parse!("(1+x1+x2)^5")
+            .expand()
+            .to_polynomial::<_, u8>(&Z, Some(variables.clone()));
+        let right = parse!("(1-x1+2*x2)^5")
+            .expand()
+            .to_polynomial::<_, u8>(&Z, Some(variables));
+
+        assert_eq!(
+            left.try_packed_u8_row_merge_mul(&right).unwrap(),
+            reference_integer_product(&left, &right)
+        );
     }
 
     #[test]

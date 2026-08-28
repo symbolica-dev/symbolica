@@ -1191,6 +1191,35 @@ fn univariate_hensel_precision_schedule(target: usize) -> Vec<usize> {
     schedule
 }
 
+/// Orders three modular factors so the recursive Hensel root has the smallest
+/// possible degree imbalance.
+///
+/// Three-factor reconstruction isolates the first factor from the other two.
+/// Moving the factor closest to half of the total degree to the front reduces
+/// the root correction degrees and can expose an exact two-factor split before
+/// the remaining child is lifted at its local coefficient bound.
+fn balance_three_factor_hensel_root<R: Ring, E: PositiveExponent>(
+    factors: &mut [MultivariatePolynomial<R, E, LexOrder>],
+    variable: usize,
+) {
+    assert_eq!(factors.len(), 3);
+    let degrees = factors
+        .iter()
+        .map(|factor| factor.degree(variable).to_u32() as usize)
+        .collect::<Vec<_>>();
+    let total_degree = degrees
+        .iter()
+        .try_fold(0usize, |total, degree| total.checked_add(*degree))
+        .expect("Hensel factor degrees overflow");
+    let isolated_factor = degrees
+        .iter()
+        .enumerate()
+        .min_by_key(|(index, degree)| (degree.abs_diff(total_degree - **degree), *index))
+        .unwrap()
+        .0;
+    factors.swap(0, isolated_factor);
+}
+
 type DenseIntegerUnivariatePolynomial = Vec<Integer>;
 
 /// Mutable factors, subtree products, and Bezout cofactors for one
@@ -8191,11 +8220,14 @@ impl<E: PositiveExponent> MultivariatePolynomial<IntegerRing, E, LexOrder> {
             "Selected modular factorization with {} factors",
             best_factorization.distinct_degree.factor_count
         );
-        let (field, hs) = Self::complete_equal_degree_factorization(best_factorization);
+        let (field, mut hs) = Self::complete_equal_degree_factorization(best_factorization);
 
         let (final_digits, max_p) = Self::linear_hensel_modulus(&bound, field.get_prime());
         let product_tree_lift_pressure =
             Self::has_high_linear_hensel_pressure(d, &bound, hs.len(), final_digits);
+        if product_tree_lift_pressure && hs.len() == 3 {
+            balance_three_factor_hensel_root(&mut hs, var);
+        }
         let quadratic_lift_allowed = hs.len() <= 4;
         if product_tree_lift_pressure && hs.len() > 4 {
             let lifted = self.lift_modular_factor_product_tree(&hs, &max_p);
@@ -10287,7 +10319,8 @@ mod test {
         QUADRATIC_HENSEL_LIFT_CALLS, QUADRATIC_HENSEL_NONUNIT_RETRIES, QuadraticFactorization,
         SparseDiophantineContext, SparsePolynomialSquareRootContext,
         UnivariateHenselProductTreeBuildContext, UnivariateHenselProductTreeLink,
-        UnivariateHenselProductTreeNode, reorder_integer_factor_variables_for_sparse_univariate,
+        UnivariateHenselProductTreeNode, balance_three_factor_hensel_root,
+        reorder_integer_factor_variables_for_sparse_univariate,
         univariate_hensel_precision_schedule,
     };
 
@@ -10402,6 +10435,21 @@ mod test {
             17
         );
         assert_eq!(singleton.leaf_indices_in_input_order(), [0]);
+    }
+
+    #[test]
+    fn three_factor_hensel_root_is_degree_balanced() {
+        let variables = Some(Arc::new(vec![symbol!("x").into()]));
+        let field = Zp::new(5);
+        let mut factors = [
+            parse!("x^8+x+1").to_polynomial::<_, u8>(&field, variables.clone()),
+            parse!("x^8+2*x+1").to_polynomial::<_, u8>(&field, variables.clone()),
+            parse!("x^16+x+1").to_polynomial::<_, u8>(&field, variables),
+        ];
+
+        balance_three_factor_hensel_root(&mut factors, 0);
+
+        assert_eq!(factors.map(|factor| factor.degree(0).to_u32()), [16, 8, 8]);
     }
 
     #[test]
@@ -12718,6 +12766,10 @@ mod test {
     #[test]
     fn factor_univariate_high_height_uses_quadratic_hensel_lift() {
         QUADRATIC_HENSEL_LIFT_CALLS.with(|calls| calls.set(0));
+        LAST_MODULAR_INTEGER_EDF_PRIME.with(|prime| prime.set(0));
+        EXACT_HENSEL_SUBTREE_SPLITS.with(|splits| splits.set(0));
+        LOCAL_HENSEL_RECOMBINATION_NODES.with(|nodes| nodes.set(0));
+        EXACT_HENSEL_SUBTREE_MODULUS_BITS.with(|bits| bits.borrow_mut().clear());
         let polynomial = parse!("((1+65537*x)^17-1)*((1-65539*x)^16+1)")
             .expand()
             .to_polynomial::<_, u8>(&Z, None);
@@ -12729,8 +12781,25 @@ mod test {
                 &product * &factor.pow(*power)
             });
 
-        assert!(factors.len() >= 3);
+        let mut factor_degrees = factors
+            .iter()
+            .map(|(factor, _)| factor.degree(0).to_u32())
+            .filter(|degree| *degree > 0)
+            .collect::<Vec<_>>();
+        factor_degrees.sort_unstable();
+        assert_eq!(factor_degrees, [1, 16, 16]);
         assert_eq!(expanded, polynomial);
+        LAST_MODULAR_INTEGER_EDF_PRIME.with(|prime| assert_eq!(prime.get(), 5));
+        EXACT_HENSEL_SUBTREE_SPLITS.with(|splits| assert!(splits.get() > 0));
+        LOCAL_HENSEL_RECOMBINATION_NODES.with(|nodes| assert!(nodes.get() > 0));
+        EXACT_HENSEL_SUBTREE_MODULUS_BITS.with(|bits| {
+            let bits = bits.borrow();
+            assert!(bits.len() >= 2);
+            assert!(
+                bits[1..].iter().any(|child_bits| *child_bits < bits[0]),
+                "an exact child did not lower its Hensel modulus"
+            );
+        });
         QUADRATIC_HENSEL_LIFT_CALLS.with(|calls| assert!(calls.get() > 0));
     }
 
