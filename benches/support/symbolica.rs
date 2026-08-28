@@ -20,7 +20,7 @@ use super::polybench_cases::{PolybenchFactorCase, PolybenchGcdCase, PolybenchGcd
 
 pub type IntegerPolynomial = MultivariatePolynomial<IntegerRing, u16>;
 pub type IntegerUnivariatePolynomial = UnivariatePolynomial<PolynomialRing<IntegerRing, u16>>;
-pub type PolybenchIntegerPolynomial = MultivariatePolynomial<IntegerRing, u8>;
+pub type PolybenchIntegerPolynomial = MultivariatePolynomial<IntegerRing, u16>;
 
 /// Namespace used to give benchmark variables stable symbol identities.
 pub const BENCHMARK_NAMESPACE: &str = "polynomial_benchmark";
@@ -58,8 +58,10 @@ pub fn parse_integer_polynomial(expression: &str) -> IntegerPolynomial {
         .to_polynomial(&Z, None)
 }
 
-/// Parses a polybench fixture with the exact variable order and `u8` exponent
-/// representation used by the upstream Symbolica adapter.
+/// Parses a polybench fixture with the exact variable order used by the
+/// upstream Symbolica adapter. Although the expanded inputs fit in `u8`,
+/// factorization can construct intermediate exponents of at least 256, so the
+/// benchmark uses `u16` throughout construction, validation, and timing.
 pub fn parse_polybench_integer_polynomial(
     expression: &str,
     variable_names: &[&str],
@@ -443,10 +445,11 @@ pub fn resultant_inputs(
         parse_integer_polynomial(case.right),
     ];
     MultivariatePolynomial::unify_variables_list(&mut polynomials);
+    let elimination_variable = parse_integer_polynomial("x").variables()[0].clone();
     let variable = polynomials[0]
         .variables()
         .iter()
-        .position(|variable| variable == &PolyVariable::Symbol(symbol!("x")))
+        .position(|variable| variable == &elimination_variable)
         .expect("resultant cases must contain x");
     (
         polynomials[0].to_univariate(variable),
