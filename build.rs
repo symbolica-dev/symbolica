@@ -15,6 +15,8 @@ fn get_git_version() -> Option<String> {
 }
 
 fn main() {
+    println!("cargo:rerun-if-env-changed=SYMBOLICA_PYTHON_OEM_PUBLIC_KEY");
+
     let cargo_version = std::env::var("CARGO_PKG_VERSION").unwrap();
 
     let version = match get_git_version() {

@@ -21,7 +21,24 @@ def main(scenario: str) -> None:
     elif scenario == "plain-callback":
         print(pysecdec.use_plain_callback(plain_callback), flush=True)
     elif scenario == "symbolica-callback":
-        pysecdec.use_symbolica_callback(symbolica_callback)
+        print(pysecdec.use_symbolica_callback(symbolica_callback), flush=True)
+    elif scenario == "threads-at-limit":
+        print(len(pysecdec.run_threads(8)), flush=True)
+    elif scenario == "threads-over-limit":
+        pysecdec.run_threads(9)
+    elif scenario == "copied-token":
+        try:
+            from symbolica import oem_scope
+
+            with oem_scope(pysecdec.OEM_TOKEN):
+                E("copied_token")
+        except PermissionError as error:
+            print(error, flush=True)
+        else:
+            raise AssertionError("user.py unexpectedly activated the pysecdec OEM token")
+    elif scenario == "library-then-user":
+        pysecdec.library_expression()
+        E("direct_user_after_library")
     elif scenario == "direct-user":
         E("direct_user_value + 1")
     else:

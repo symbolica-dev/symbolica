@@ -92,11 +92,13 @@ graphica = { version = "2.0", default-features = false }
 
 ahash = "0.8.7"
 append-only-vec = "0.1"
+base64 = "0.22"
 bincode = { version = "2.0", optional = true }
 brotli = "8.0"
 byteorder = "1.5"
 bytes = "1.5"
 dyn-clone = "1.0"
+ed25519-dalek = { version = "2.2", default-features = false, features = ["std"] }
 getrandom = { version = "0.3", optional = true }
 inventory = "0.3"
 libloading = { version = "0.9", optional = true }

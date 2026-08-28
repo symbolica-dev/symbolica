@@ -58,7 +58,7 @@ use smartstring::{LazyCompact, SmartString};
 use pyo3::pymodule;
 
 use crate::{
-    LicenseManager, SkipLicenseGuard,
+    LicenseManager,
     atom::{
         Atom, AtomCore, AtomType, AtomView, DefaultNamespace, EvaluationInfo, Indeterminate,
         ListIterator, Symbol, SymbolAttribute, SymbolBuilder, UserData, UserDataKey,
@@ -91,6 +91,7 @@ use crate::{
         ReplaceWith, Replacement, WildcardRestriction,
     },
     numerical_integration::{ContinuousGrid, DiscreteGrid, Grid, MonteCarloRng, Probe, Sample},
+    oem::{OemClaims, OemScopeGuard},
     parser::{ParseMode, ParseSettings, Token},
     poly::{
         GrevLexOrder, INLINED_EXPONENTS, LexOrder, PolyVariable, factor::Factorize,
@@ -101,8 +102,8 @@ use crate::{
         AtomPrinter, ColorMode, PrintMode, PrintOptions, PrintState, PrintUserData,
         PrintUserDataKey,
     },
-    skip_license as skip_license_scope,
-    solve::{Solution, SolutionCondition, SolveDomain, SolveError},
+    skip_license_check_internal,
+    solve::{Solution, SolutionCondition, SolveDomain},
     state::{RecycledAtom, State, Workspace},
     streaming::{TermStreamer, TermStreamerConfig},
     tensors::matrix::Matrix,
@@ -749,9 +750,9 @@ pub fn create_symbolica_module<'a, 'b>(
     m: &'b Bound<'a, PyModule>,
 ) -> PyResult<&'b Bound<'a, PyModule>> {
     // Registering the Python API initializes some built-in Symbolica objects. Defer the first real
-    // license check until user code invokes an operation, so `skip_license()` and a module-level
-    // `SKIP_LICENSE` flag can take effect after the extension has been imported.
-    let _license_guard = skip_license_scope();
+    // license check until user code invokes an operation, so an OEM scope can be entered after the
+    // extension has been imported.
+    let _license_guard = skip_license_check_internal();
 
     m.add_class::<PythonFormattedOutput>()?;
     m.add_class::<PythonSymbol>()?;
@@ -797,7 +798,7 @@ pub fn create_symbolica_module<'a, 'b>(
     m.add_class::<PythonHalfEdge>()?;
     m.add_class::<PythonGraph>()?;
     m.add_class::<PythonInteger>()?;
-    m.add_class::<PythonSkipLicense>()?;
+    m.add_class::<PythonOemScope>()?;
 
     m.add("Integers", PythonSolveDomain::Integers)?;
     m.add("Rationals", PythonSolveDomain::Rationals)?;
@@ -821,7 +822,7 @@ pub fn create_symbolica_module<'a, 'b>(
     m.add_function(wrap_pyfunction!(use_custom_logger, m)?)?;
     m.add_function(wrap_pyfunction!(get_namespace, m)?)?;
     m.add_function(wrap_pyfunction!(set_namespace, m)?)?;
-    m.add_function(wrap_pyfunction!(python_skip_license, m)?)?;
+    m.add_function(wrap_pyfunction!(oem_scope, m)?)?;
 
     m.add("__version__", env!("CARGO_PKG_VERSION"))?;
 
@@ -1038,55 +1039,30 @@ pub fn get_namespace(py: Python) -> PyResult<&'static str> {
     )
 }
 
-/// Return whether the calling Python file has opted out of license checks.
-///
-/// This deliberately mirrors [get_namespace]: both inspect the globals of the Python frame that
-/// called into Symbolica. Only the boolean value `True` enables the opt-out.
-pub(crate) fn skip_license_from_python_globals() -> bool {
-    Python::try_attach(|py| {
-        let ptr = unsafe { pyo3::ffi::PyEval_GetGlobals() };
-
-        if ptr.is_null() {
-            return false;
-        }
-
-        let globals = unsafe { Bound::from_borrowed_ptr(py, ptr) };
-        let Ok(globals) = globals.cast::<PyDict>() else {
-            return false;
-        };
-
-        match globals.get_item("SKIP_LICENSE") {
-            Ok(Some(value)) => value.extract::<bool>().unwrap_or(false),
-            Ok(None) | Err(_) => false,
-        }
-    })
-    .unwrap_or(false)
-}
-
-/// A Python context manager that skips Symbolica license checks in its scope.
+/// A package-bound OEM scope with signed process and thread allowances.
 #[cfg_attr(feature = "python_stubgen", gen_stub_pyclass)]
-#[pyclass(unsendable, name = "SkipLicense", module = "symbolica.core")]
-pub struct PythonSkipLicense {
-    guard: Option<SkipLicenseGuard>,
+#[pyclass(unsendable, name = "OemScope", module = "symbolica.core")]
+pub struct PythonOemScope {
+    claims: OemClaims,
+    guard: Option<OemScopeGuard>,
 }
 
 #[cfg_attr(feature = "python_stubgen", gen_stub_pymethods)]
 #[cfg_attr(not(feature = "python_stubgen"), remove_gen_stub)]
 #[pymethods]
-impl PythonSkipLicense {
-    #[new]
-    fn new() -> Self {
-        Self { guard: None }
-    }
-
-    fn __enter__(&mut self) -> PyResult<()> {
+impl PythonOemScope {
+    fn __enter__(&mut self, py: Python) -> PyResult<()> {
         if self.guard.is_some() {
             return Err(exceptions::PyRuntimeError::new_err(
-                "skip_license context manager is already active",
+                "OEM context manager is already active",
             ));
         }
 
-        self.guard = Some(skip_license_scope());
+        validate_oem_caller(py, &self.claims)?;
+        self.guard = Some(
+            OemScopeGuard::activate(self.claims.clone())
+                .map_err(exceptions::PyRuntimeError::new_err)?,
+        );
         Ok(())
     }
 
@@ -1100,23 +1076,55 @@ impl PythonSkipLicense {
     }
 }
 
-/// Create a context manager that skips Symbolica license checks in its scope.
+fn validate_oem_caller(py: Python, claims: &OemClaims) -> PyResult<()> {
+    let ptr = unsafe { pyo3::ffi::PyEval_GetGlobals() };
+    if ptr.is_null() {
+        return Err(exceptions::PyRuntimeError::new_err(
+            "No active Python frame found for OEM package validation",
+        ));
+    }
+
+    let globals = unsafe { Bound::from_borrowed_ptr(py, ptr) };
+    let module = globals
+        .cast::<PyDict>()?
+        .get_item("__name__")?
+        .ok_or_else(|| exceptions::PyRuntimeError::new_err("Calling module has no __name__"))?
+        .extract::<PyBackedStr>()?;
+    let package_prefix = format!("{}.", claims.package);
+    if module.as_ref() != claims.package && !module.starts_with(&package_prefix) {
+        return Err(exceptions::PyPermissionError::new_err(format!(
+            "OEM token for package '{}' cannot be activated from module '{}'",
+            claims.package, module
+        )));
+    }
+
+    Ok(())
+}
+
+/// Create a package-bound OEM scope from a signed token.
 ///
-/// To skip checks for every Symbolica call originating in one Python file, set
-/// `SKIP_LICENSE = True` in that file's global scope.
+/// The token declares the package name and its maximum concurrent processes and Symbolica threads
+/// per process. It must be embedded by the library developer and can only be activated from a
+/// module in the declared package. Calls and callbacks within the dynamic scope share its OEM
+/// allowance.
 ///
-/// Examples
-/// --------
-///
-/// >>> with skip_license():
-/// ...     expression = E("x + 1")
+/// Parameters
+/// ----------
+/// token: str
+///     A signed Symbolica OEM token issued for the calling Python package.
 #[cfg_attr(
     feature = "python_stubgen",
     gen_stub_pyfunction(module = "symbolica.core")
 )]
-#[pyfunction(name = "skip_license")]
-pub fn python_skip_license() -> PythonSkipLicense {
-    PythonSkipLicense::new()
+#[pyfunction]
+pub fn oem_scope(py: Python, token: &str) -> PyResult<PythonOemScope> {
+    let claims = crate::oem::verify_token(token).map_err(exceptions::PyValueError::new_err)?;
+    validate_oem_caller(py, &claims)?;
+
+    Ok(PythonOemScope {
+        claims,
+        guard: None,
+    })
 }
 
 /// Symbolica is a blazing fast computer algebra system.

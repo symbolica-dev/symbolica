@@ -50,25 +50,25 @@ def set_namespace(namespace: str) -> None:
         The namespace to set for subsequently created symbols.
     """
 
-class SkipLicense:
-    """A context manager that skips Symbolica license checks in its scope."""
+class OemScope:
+    """A package-bound OEM scope with signed process and thread allowances."""
 
-    def __init__(self) -> None: ...
     def __enter__(self) -> None: ...
     def __exit__(self, exception_type: Any, exception_value: Any, traceback: Any) -> None: ...
 
-def skip_license() -> SkipLicense:
+def oem_scope(token: str) -> OemScope:
     """
-    Create a context manager that skips Symbolica license checks in its scope.
+    Create a package-bound OEM scope from a signed token.
 
-    To skip checks for every Symbolica call originating in one Python file, set
-    `SKIP_LICENSE = True` in that file's global scope.
+    The token declares the package name and its maximum concurrent processes and Symbolica threads
+    per process. It must be embedded by the library developer and can only be activated from a
+    module in the declared package. Calls and callbacks within the dynamic scope share its OEM
+    allowance.
 
-    Examples
-    --------
-
-    >>> with skip_license():
-    ...     expression = E("x + 1")
+    Parameters
+    ----------
+    token: str
+        A signed Symbolica OEM token issued for the calling Python package.
     """
 
 def get_version() -> str:

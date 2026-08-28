@@ -41,14 +41,13 @@ use std::{
     cell::Cell,
     collections::HashMap,
     env,
-    marker::PhantomData,
-    rc::Rc,
     sync::atomic::{AtomicBool, Ordering::Relaxed},
 };
 #[cfg(not(target_arch = "wasm32"))]
 use std::{
+    fs::File,
     io::{Read, Write},
-    net::{TcpListener, TcpStream, ToSocketAddrs},
+    net::{TcpStream, ToSocketAddrs},
     process::abort,
     thread::ThreadId,
     time::{Duration, SystemTime},
@@ -70,6 +69,8 @@ pub mod evaluate;
 mod expand;
 pub mod id;
 mod normalize;
+#[allow(dead_code)]
+mod oem;
 pub mod parser;
 pub mod poly;
 pub mod printer;
@@ -95,10 +96,10 @@ pub mod utils;
 /// ```
 pub mod prelude {
     pub use crate::{
-        LicenseManager, OperationCount, SkipLicenseGuard, create_hyperdual_from_components,
+        LicenseManager, OperationCount, create_hyperdual_from_components,
         create_hyperdual_single_derivative, function, get_symbol, hide_namespace, initialize,
-        namespace, parse, parse_lit, skip_license, symbol, symbol_group, tag, try_parse,
-        try_parse_lit, try_symbol, try_symbol_group,
+        namespace, parse, parse_lit, symbol, symbol_group, tag, try_parse, try_parse_lit,
+        try_symbol, try_symbol_group,
     };
 
     pub use crate::atom::{
@@ -291,22 +292,16 @@ static LICENSE_MANAGER: OnceCell<LicenseManager> = OnceCell::new();
 static LICENSED: AtomicBool = LicenseManager::init();
 
 std::thread_local! {
-    static SKIP_LICENSE_DEPTH: Cell<usize> = const { Cell::new(0) };
+    static INTERNAL_SKIP_LICENSE_DEPTH: Cell<usize> = const { Cell::new(0) };
 }
 
-/// A guard that skips Symbolica license checks on the current thread.
-///
-/// Create a guard with [skip_license] or [SkipLicenseGuard::new]. License checks resume when the
-/// guard is dropped. Guards may be nested, but they cannot be moved to another thread.
-#[must_use = "the license check is skipped only while the guard is alive"]
-pub struct SkipLicenseGuard {
-    _not_send: PhantomData<Rc<()>>,
-}
+#[allow(dead_code)]
+pub(crate) struct InternalLicenseSkipGuard;
 
-impl SkipLicenseGuard {
-    /// Skip Symbolica license checks on the current thread until the returned guard is dropped.
-    pub fn new() -> Self {
-        SKIP_LICENSE_DEPTH.with(|depth| {
+impl InternalLicenseSkipGuard {
+    #[allow(dead_code)]
+    pub(crate) fn new() -> Self {
+        INTERNAL_SKIP_LICENSE_DEPTH.with(|depth| {
             depth.set(
                 depth
                     .get()
@@ -314,22 +309,13 @@ impl SkipLicenseGuard {
                     .expect("license skip scope nesting overflow"),
             );
         });
-
-        Self {
-            _not_send: PhantomData,
-        }
+        Self
     }
 }
 
-impl Default for SkipLicenseGuard {
-    fn default() -> Self {
-        Self::new()
-    }
-}
-
-impl Drop for SkipLicenseGuard {
+impl Drop for InternalLicenseSkipGuard {
     fn drop(&mut self) {
-        SKIP_LICENSE_DEPTH.with(|depth| {
+        INTERNAL_SKIP_LICENSE_DEPTH.with(|depth| {
             let current = depth.get();
             debug_assert!(current > 0, "unbalanced license skip scope");
             depth.set(current.saturating_sub(1));
@@ -337,19 +323,9 @@ impl Drop for SkipLicenseGuard {
     }
 }
 
-/// Skip Symbolica license checks on the current thread until the returned guard is dropped.
-///
-/// License skip scopes may be nested.
-///
-/// ```
-/// use symbolica::{parse, skip_license};
-///
-/// let _guard = skip_license();
-/// let expression = parse!("x + 1");
-/// # drop(expression);
-/// ```
-pub fn skip_license() -> SkipLicenseGuard {
-    SkipLicenseGuard::new()
+#[allow(dead_code)]
+pub(crate) fn skip_license_check_internal() -> InternalLicenseSkipGuard {
+    InternalLicenseSkipGuard::new()
 }
 
 /// Global settings for Symbolica.
@@ -434,9 +410,7 @@ macro_rules! info {
 #[allow(dead_code)]
 pub struct LicenseManager {
     #[cfg(not(target_arch = "wasm32"))]
-    lock: Option<TcpListener>,
-    #[cfg(not(target_arch = "wasm32"))]
-    core_limit: Option<usize>,
+    lock: Option<File>,
     #[cfg(not(target_arch = "wasm32"))]
     pid: u32,
     #[cfg(not(target_arch = "wasm32"))]
@@ -535,16 +509,8 @@ macro_rules! activate_oem_license {
 impl LicenseManager {
     #[inline]
     fn is_check_skipped() -> bool {
-        if SKIP_LICENSE_DEPTH.with(|depth| depth.get() != 0) {
-            return true;
-        }
-
-        #[cfg(any(feature = "python_api", feature = "python_export"))]
-        if crate::api::python::skip_license_from_python_globals() {
-            return true;
-        }
-
-        false
+        INTERNAL_SKIP_LICENSE_DEPTH.with(|depth| depth.get() != 0)
+            || crate::oem::active_thread_limit().is_some()
     }
 
     /// Create a new license manager.
@@ -564,7 +530,6 @@ impl LicenseManager {
             Ok(()) => {
                 return LicenseManager {
                     lock: None,
-                    core_limit: None,
                     pid,
                     thread_id,
                     has_license: true,
@@ -603,48 +568,25 @@ impl LicenseManager {
             );
         }
 
-        let port = env::var("SYMBOLICA_PORT").unwrap_or_else(|_| "12011".to_owned());
-
-        match TcpListener::bind(format!("127.0.0.1:{port}")) {
-            Ok(o) => {
-                rayon::ThreadPoolBuilder::new()
+        match crate::oem::try_acquire_lock("symbolica-unlicensed.lock") {
+            Ok(Some(lock)) => {
+                let _ = rayon::ThreadPoolBuilder::new()
                     .num_threads(1)
-                    .build_global()
-                    .unwrap();
-
-                drop(o);
-
-                std::thread::spawn(move || {
-                    loop {
-                        let new_port =
-                            env::var("SYMBOLICA_PORT").unwrap_or_else(|_| "12011".to_owned());
-
-                        if port != new_port {
-                            println!("{MULTIPLE_INSTANCE_WARNING}");
-                            abort();
-                        }
-
-                        match TcpListener::bind(format!("127.0.0.1:{port}")) {
-                            Ok(_) => {
-                                std::thread::sleep(Duration::from_secs(1));
-                            }
-                            Err(_) => {
-                                println!("{MULTIPLE_INSTANCE_WARNING}");
-                                abort();
-                            }
-                        }
-                    }
-                });
+                    .build_global();
 
                 LicenseManager {
-                    lock: None,
-                    core_limit: Some(1),
+                    lock: Some(lock),
                     pid,
                     thread_id,
                     has_license: false,
                 }
             }
-            Err(_) => {
+            Ok(None) => {
+                println!("{MULTIPLE_INSTANCE_WARNING}");
+                abort();
+            }
+            Err(error) => {
+                eprintln!("Could not acquire Symbolica license lock: {error}");
                 println!("{MULTIPLE_INSTANCE_WARNING}");
                 abort();
             }
@@ -919,10 +861,12 @@ Error: {status}",
         true
     }
 
-    /// Returns `true` iff this instance has a valid license key set.
+    /// Returns `true` iff this instance has a valid license key or active OEM scope.
     #[cfg(not(target_arch = "wasm32"))]
     pub fn is_licensed() -> bool {
-        LICENSED.load(Relaxed) || Self::check_license_key().is_ok()
+        crate::oem::active_thread_limit().is_some()
+            || LICENSED.load(Relaxed)
+            || Self::check_license_key().is_ok()
     }
 
     /// Clamp a requested worker-thread count to what the current target and license allow.
@@ -934,6 +878,11 @@ Error: {status}",
 
         #[cfg(not(target_arch = "wasm32"))]
         {
+            if let Some((limit, occupied)) = crate::oem::active_thread_allowance() {
+                let available_workers = limit.saturating_sub(occupied).max(1);
+                return requested.min(available_workers);
+            }
+
             if Self::is_licensed() {
                 requested
             } else {
@@ -1050,17 +999,17 @@ mod license_skip_tests {
     use super::*;
 
     #[test]
-    fn skip_license_guard_is_nested_and_thread_local() {
+    fn internal_license_skip_guard_is_nested_and_thread_local() {
         assert!(!LicenseManager::is_check_skipped());
 
-        let outer = skip_license();
+        let outer = skip_license_check_internal();
         assert!(LicenseManager::is_check_skipped());
         assert!(
             crate::parser::Token::parse("x + 1", crate::parser::ParseSettings::default()).is_ok()
         );
 
         {
-            let _inner = SkipLicenseGuard::new();
+            let _inner = InternalLicenseSkipGuard::new();
             assert!(LicenseManager::is_check_skipped());
         }
 

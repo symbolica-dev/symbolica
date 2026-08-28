@@ -1102,7 +1102,8 @@ impl PythonTransformer {
             rep_chain.extend(p.chain);
         }
 
-        let pool = if n_cores < 2 || !LicenseManager::is_licensed() {
+        let n_cores = LicenseManager::max_threads(n_cores);
+        let pool = if n_cores < 2 {
             None
         } else {
             Some(Arc::new(
