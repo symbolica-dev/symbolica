@@ -17,7 +17,7 @@ branch. An exact dense-convolution-window prototype was correct and often beat S
 full-product fallback, but its Newton/Hensel integration regressed degree 64
 (`1.290968 -> 1.313523`), so both the integration and the otherwise-unused public kernel surface
 were rejected.
-The immutable copy is [CURRENT_STATUS_v3.md](CURRENT_STATUS_v3.md).
+The live latest view is [CURRENT_STATUS.md](CURRENT_STATUS.md).
 
 `S/F` is Symbolica's median time divided by FLINT's median time. Lower is better: a value below
 `1` means Symbolica is faster. Repeated-process rows use the median of the process-level paired
