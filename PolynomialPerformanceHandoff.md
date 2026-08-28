@@ -3,8 +3,9 @@
 This is the live continuation record for the single-core Symbolica/FLINT polynomial-performance
 work. It was refreshed on 2026-08-28 after accepting cached reciprocal reduction for dense
 distinct-degree factorization, rejecting the first dense baby-step/giant-step DDF implementation,
-and integrating overflow-safe DDF degree bounds at source head `79bcd16`. The full Rust/FLINT
-comparison inventory was measured at performance-equivalent source head `b2e5d28`.
+integrating overflow-safe DDF degree bounds, and rejecting a cache-aware Kronecker allocation
+experiment. The current `dev` source head before this documentation update is `2a82319`. The full
+Rust/FLINT comparison inventory was measured at performance-equivalent source head `b2e5d28`.
 Keep this file current whenever an experiment is accepted, rejected, or left partly complete. The
 purpose is that another agent can resume without reconstructing decisions from chat history or
 transient binary names.
@@ -239,9 +240,41 @@ The final candidate binary is `/tmp/flint-comparison-ddf-bsgs-v3-lto`, SHA-256
 control, guard, and profile manifest is `/tmp/ddf-bsgs-v3-artifacts-sha256.txt`, SHA-256
 `99456b1512f161e776677173e8b5a24f47b67c483d0e3c83d59cfb2580639ef1`.
 
-The next measured target is therefore the slower one-variable and PolyBench input-product path,
-followed by the high-height Hensel factorization case. Keep the existing single-core paired-process
-methodology and the 3% complexity threshold.
+### Rejected cache-aware Kronecker allocation experiment
+
+The first follow-up product experiment is preserved in `/tmp/symbolica-onevar-product`, branch
+`codex/onevar-product`, at `73e846e` (`Reuse cached integers in Kronecker conversion`); it is
+deliberately not on `dev`. The commit obtains packed and decoded GMP integers through the bounded
+`MultiPrecisionInteger` cache, assigns little-endian limbs into the reused allocation, and computes
+the packed product through the existing borrowed multiplication implementation. This covers three
+direct raw-GMP constructions that bypassed the cache. All seven focused Kronecker tests pass.
+
+Six alternating full-LTO processes used 10,000 paired samples per backend on the degree-64 product
+fixture. Process medians are:
+
+| Version | Symbolica median | FLINT median | Median process S/F | Paired Symbolica change |
+|---|---:|---:|---:|---:|
+| cache-aware candidate | `0.005853 ms` | `0.0053875 ms` | `1.085005` | `-0.97495%` |
+| accepted control | `0.005874 ms` | `0.005396 ms` | `1.0946575` | — |
+
+The candidate is faster in four of six paired blocks, but its approximately `1.0%` median gain is
+below the standing `3%` threshold and too small to distinguish confidently from whole-program-LTO
+layout and sub-microsecond timing effects. The extra conversion API and call-site changes are
+therefore rejected. An independent six-process control run gave `1.092838x`, consistent with the
+alternating control and replacing the exploratory three-sample `1.138626x` degree-64 product row as
+the robust current estimate.
+
+The frozen candidate binary is `/tmp/flint-comparison-product-cache-73e846e-lto`, SHA-256
+`2b2b118d48f13a6d3fee961258625832f5d3c14395c81da061eadbf7dfcd07b1`. The 15-file binary,
+build-log, and timing manifest is `/tmp/product-cache-73e846e-artifacts-sha256.txt`, SHA-256
+`08ca3c71ddbee25f56bfb276054c7c4dd8f8b3dfdf1c11cf01ebc7b995c9fa78`.
+
+The next measured product target is the univariate setup and reconstruction work around
+`DenseIntegerMul`: obtain the univariate leading degree without a coefficient scan and reconstruct
+its dense output without mixed-radix division. Keep this change isolated from the integer kernel so
+its small profile ceiling can be accepted or rejected independently. PolyBench input-product route
+selection follows; the high-height Hensel factorization case remains the next factor target. Keep
+the existing single-core paired-process methodology and the 3% complexity threshold.
 
 ## Previous checkpoint: dense degree-64 modular factorization
 
