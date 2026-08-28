@@ -1,6 +1,7 @@
 """Scenario driver representing user code that has not opted out of license checks."""
 
 import sys
+from threading import Thread
 
 import pysecdec
 from symbolica import E
@@ -15,6 +16,13 @@ def symbolica_callback() -> object:
     return E("user_callback_value + 1")
 
 
+def spawn_symbolica_thread() -> None:
+    """Start one user thread while all library thread reservations are occupied."""
+    thread = Thread(target=lambda: E("extra_user_thread + 1"))
+    thread.start()
+    thread.join()
+
+
 def main(scenario: str) -> None:
     if scenario == "library":
         print(pysecdec.library_expression(), flush=True)
@@ -25,7 +33,7 @@ def main(scenario: str) -> None:
     elif scenario == "threads-at-limit":
         print(len(pysecdec.run_threads(8)), flush=True)
     elif scenario == "threads-over-limit":
-        pysecdec.run_threads(9)
+        pysecdec.run_threads(8, spawn_symbolica_thread)
     elif scenario == "copied-token":
         try:
             from symbolica import oem_scope

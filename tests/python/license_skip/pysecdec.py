@@ -3,7 +3,7 @@
 from collections.abc import Callable
 from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
-from threading import Barrier
+from threading import Barrier, Event
 
 from symbolica import E, oem_scope
 
@@ -11,8 +11,6 @@ OEM_TOKEN = (
     "eyJ2ZXJzaW9uIjoxLCJwYWNrYWdlIjoicHlzZWNkZWMiLCJtYXhfcHJvY2Vzc2VzIjo0fQo."
     "BlpNuJqgYtiWDgokAZO2Q8udQUB9WTIJn6EueXmm35G85NSMCngcpMGkxdzFNRXGVP3m6nR-KyhOK64Y7sZHAw"
 )
-OEM_NEW_THREAD_COUNT = 8
-
 __all__ = [
     "library_expression",
     "run_threads",
@@ -40,17 +38,27 @@ def use_symbolica_callback(callback: Callable[[], object]) -> object:
         return callback()
 
 
-def run_threads(count: int) -> list[str]:
+def run_threads(count: int, callback: Callable[[], None] | None = None) -> list[str]:
     """Make `count` Python threads enter Symbolica concurrently under one OEM scope."""
-    barrier = Barrier(count)
+    all_workers_registered = Barrier(count + 1)
+    release_workers = Event()
 
     def work(index: int) -> str:
-        barrier.wait()
-        return str(E(f"thread_{index} + 1"))
+        result = str(E(f"thread_{index} + 1"))
+        all_workers_registered.wait()
+        release_workers.wait()
+        return result
 
-    with oem_scope(OEM_TOKEN, OEM_NEW_THREAD_COUNT):
+    with oem_scope(OEM_TOKEN, count):
         with ThreadPoolExecutor(max_workers=count) as executor:
-            return list(executor.map(work, range(count)))
+            futures = [executor.submit(work, index) for index in range(count)]
+            all_workers_registered.wait()
+            try:
+                if callback is not None:
+                    callback()
+            finally:
+                release_workers.set()
+            return [future.result() for future in futures]
 
 
 def hold_oem_process(ready_path: str) -> None:

@@ -101,7 +101,7 @@ class OemScopeConcurrencyTest(unittest.TestCase):
     def test_runtime_thread_reservation_succeeds(self) -> None:
         self.assertIn("8", self.assert_succeeds("threads-at-limit"))
 
-    def test_extra_thread_exceeds_oem_allowance(self) -> None:
+    def test_extra_user_thread_exceeds_library_reservation(self) -> None:
         result = self.run_user_scenario("threads-over-limit")
         self.assertNotEqual(result.returncode, 0, result.stdout + result.stderr)
         self.assertIn(OEM_CONCURRENCY_MESSAGE, result.stdout)
