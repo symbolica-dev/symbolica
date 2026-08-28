@@ -1,8 +1,8 @@
 # Polynomial performance continuation handoff
 
 This is the live continuation record for the single-core Symbolica/FLINT polynomial-performance
-work. It was refreshed on 2026-08-28 after removing redundant bivariate sample factorizations from
-the former worst canonical case. The latest implementation commit is `f39c09b`. The base
+work. It was refreshed on 2026-08-28 after extending packed row merging to few-row products that
+exceed the former global pair limit. The latest implementation commit is `b8b169f`. The base
 Rust/FLINT comparison inventory was measured at performance-equivalent source head `b2e5d28`, with
 later accepted rows replacing their exploratory predecessors as documented below.
 Keep this file current whenever an experiment is accepted, rejected, or left partly complete. The
@@ -11,7 +11,7 @@ transient binary names.
 
 The complete current Symbolica/FLINT scoreboard is in
 [CURRENT_STATUS.md](CURRENT_STATUS.md), with the latest immutable snapshot in
-[CURRENT_STATUS_v3.md](CURRENT_STATUS_v3.md). It contains 122 canonical comparisons and the 12
+[CURRENT_STATUS_v4.md](CURRENT_STATUS_v4.md). It contains 122 canonical comparisons and the 12
 duplicate Brown/CRT resultant measurements in one globally sorted table. After every accepted
 optimization, update the live file and create the next numbered snapshot with an opening paragraph
 that describes the changes from its predecessor.
@@ -34,32 +34,52 @@ that describes the changes from its predecessor.
 - Small changes below roughly 3% need particularly strong, repeated evidence before their
   complexity is accepted.
 
-## Current continuation checkpoint: sparse eight-variable product construction
+## Current continuation checkpoint: high-gap eight-variable product construction
 
-The former worst canonical row, `generated factorization: dense 3-variable degrees 6/5`, is now
-faster than FLINT. The ordered next target is `generated GCD products: sparse 8 variables degree
-5`, recorded at `1.905386` S/F in the cross-snapshot inventory. A fresh 2,000-sample probe of the
-exact `f39c09b` binary on core 2 measures `1.136450 ms` for Symbolica and `0.845350 ms` for FLINT,
-or `1.344354` S/F. The absolute FLINT timing moved relative to the historical row, so attribute the
-next change only with frozen source-matched control/candidate binaries on the same core.
+After commit `b8b169f`, the ordered worst canonical row is `generated GCD products: high-gap 8
+variables degree 4 gap 256` at `2.019693` S/F: `0.651666 ms` for Symbolica versus
+`0.322656 ms` for FLINT in the consistent 1,000-sample generated sweep.
 
-The case constructs both `a*g` and `b*g`. Each degree-five dense cofactor has 1,286 or 1,287 terms,
-while `g` has nine terms. The two products enumerate 11,574 and 11,583 coefficient pairs but yield
-11,546 and 11,547 terms: only 28 and 36 pairs collide, and no coefficient cancels. Coefficients stay
-within `Integer::Single` (inputs at most 26 bits, outputs at most 30 bits).
+The two dense degree-four cofactors contain 494 and 495 terms; the common factor has nine terms.
+Their products enumerate and retain exactly 4,446 and 4,455 terms, with no collisions or
+cancellations. All coefficients remain `Integer::Single`: the largest cofactor coefficient is
+875,160 (20 bits), and the largest product coefficient is 14,877,720 (24 bits). The issue is
+therefore exponent-key bookkeeping, not coefficient arithmetic.
 
-Mixed-radix dense multiplication rejects the `11^8` box, and total-degree dense multiplication
-rejects the 43,758-cell simplex as too large relative to the 11.6k coefficient pairs. The packed
-`u8` row merge is the appropriate representation, but `packed_row_merge_is_bounded` rejects it
-solely because its fixed pair limit is 4,096. The fallback maintains a `BTreeMap<u64,
-Vec<(usize, usize)>>` beside a binary heap even though almost every output key is unique.
+Every output variable reaches degree 260. That exceeds the existing packed-`u8` route, while the
+packed-`u16`/`u64` route only represents up to four variables. The case consequently uses the
+generic exponent-vector hash-map heap despite having only nine sorted row streams. It costs about
+73.2 ns per coefficient pair, versus FLINT's 36.25 ns. By comparison, the newly accepted packed
+`u8` sparse-eight case costs about 20.0 ns per pair.
 
-The next experiment is deliberately narrow: retain the 4,096-pair limit generally, but permit at
-most 16,384 pairs when the smaller operand supplies at most 16 row streams. This admits the 9-row
-sparse-eight and 6-row sparse-five generated products without broadening 17--64-row workloads.
-Add selector-boundary and exact-product tests, then measure the two sparse generated cases and all
-23 PolyBench product constructions against `/tmp/flint-comparison-f39c09b-system-lto` (SHA-256
-`a15be1b3118223e9f1a4e180f8b707f40c5c0e79e211cc2943ef03336b438ce2`).
+The next narrow experiment is a private five-to-eight-variable `u16` row merge with a `u128`
+monomial key. Pack variables 0--3 into the high `u64` and variables 4--7 into the low `u64`, so
+numeric `u128` ordering matches lexicographic exponent ordering. Add the halves independently to
+avoid a carry crossing the boundary, require nonnegative exponents and per-variable degree sums at
+most 65,535, and retain the same few-row work bound. Insert it after the packed-`u8` route and
+before the generic heap. The exact high-gap fixture, boundary cases, reversed operands, collision
+and cancellation behavior, 5--8-variable layouts, and rejection paths need tests before paired
+benchmarking.
+
+## Accepted few-row packed multiplication
+
+Commit `b8b169f` retains the original 4,096 coefficient-pair limit for general packed row merging,
+but allows up to 16,384 pairs when the smaller operand contributes at most 16 rows. The hot
+original selector remains inline; the extended predicate is cold and out of line, avoiding the
+code-layout movement seen in the first candidate.
+
+In the consistent generated sweep, sparse eight-variable degree-5 construction changes
+`1.905386 -> 0.780017` S/F (`0.463216 ms` versus FLINT's `0.593854 ms`), and sparse five-variable
+degree-7 changes `1.901314 -> 0.791465`. A 5,000-sample isolated source-matched comparison reduced
+the eight-variable Symbolica median from about `1.135 ms` to `0.466791 ms` and changed
+`1.340679 -> 0.552281` S/F. This is about a 59% reduction in Symbolica time.
+
+The exact candidate binary is `/tmp/flint-comparison-few-row-cold-candidate`, SHA-256
+`39edd985345a93b1c4d80909b6551a8fa6f7fae02759be2060867f3a867865b8`. Its frozen control is
+`/tmp/flint-comparison-f39c09b-system-lto`, SHA-256
+`a15be1b3118223e9f1a4e180f8b707f40c5c0e79e211cc2943ef03336b438ce2`. All 35 polynomial-module
+tests pass. All 23 refreshed PolyBench product rows remain faster than FLINT; their candidate
+medians are `0.613690` for GCD products and `0.617710` for factor products.
 
 ## Accepted initial primitive bivariate sample
 
