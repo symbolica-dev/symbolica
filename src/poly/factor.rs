@@ -11426,6 +11426,45 @@ mod test {
     }
 
     #[test]
+    fn sparse_modular_divisor_accepts_negative_symmetric_leading_coefficient() {
+        let variables = Some(Arc::new(vec![symbol!("x").into()]));
+        let divisor = parse!("1-x").to_polynomial::<_, u8>(&Z, variables.clone());
+        let value = parse!("1+2*x+x^3").to_polynomial::<_, u8>(&Z, variables.clone());
+        let multiplier = parse!("2-x+x^2").to_polynomial::<_, u8>(&Z, variables.clone());
+        let expected = parse!("-1").to_polynomial::<_, u8>(&Z, variables);
+        let modulus = Integer::from(3);
+        let context = IntegerModularUnivariateContext::new(&modulus, &divisor);
+
+        let prepared = context.prepare_divisor(&divisor);
+        assert_eq!(
+            prepared.coefficients,
+            vec![Integer::from(-1), Integer::one()]
+        );
+        let actual = context.multiply_remainder(&value, &multiplier, &prepared);
+
+        let field = Zp::new(3);
+        let value_mod = value.map_coeff(
+            |coefficient| coefficient.to_finite_field(&field),
+            field.clone(),
+        );
+        let multiplier_mod = multiplier.map_coeff(
+            |coefficient| coefficient.to_finite_field(&field),
+            field.clone(),
+        );
+        let mut divisor_mod = divisor.map_coeff(
+            |coefficient| coefficient.to_finite_field(&field),
+            field.clone(),
+        );
+        let reference = (&value_mod * &multiplier_mod)
+            .quot_rem_univariate(&mut divisor_mod)
+            .1
+            .map_coeff(|coefficient| field.to_symmetric_integer(coefficient), Z);
+
+        assert_eq!(actual, reference);
+        assert_eq!(actual, expected);
+    }
+
+    #[test]
     fn dense_integer_modular_univariate_arithmetic_matches_reference() {
         let variables = Some(Arc::new(vec![
             symbol!("x").into(),

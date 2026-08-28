@@ -2012,13 +2012,16 @@ impl Integer {
         if &c + &c > *p { c - p } else { c }
     }
 
-    /// Compute the modular inverse of `self` in the ring with size `n`.
+    /// Compute the modular inverse of any signed representative `self` in the ring with size `n`.
     /// `self` and `n` must be coprime.
     pub fn mod_inverse(&self, n: &Integer) -> Integer {
         let mut t0 = Integer::zero();
-        let mut t1 = Integer::one();
         let mut r0 = n.clone();
-        let mut r1 = self.clone();
+        let (mut t1, mut r1) = if self.is_negative() {
+            (-Integer::one(), -self.clone())
+        } else {
+            (Integer::one(), self.clone())
+        };
 
         while !r1.is_zero() {
             let (q, r) = Z.quot_rem(&r0, &r1);
@@ -4728,6 +4731,21 @@ mod test {
             Integer::from_str("1700675215712075116094879895131557158845440").unwrap(),
             rem
         );
+    }
+
+    #[test]
+    fn modular_inverse_accepts_negative_representatives() {
+        let modulus = Integer::from(3);
+        for value in [Integer::from(-1), Integer::from(-4)] {
+            let inverse = value.mod_inverse(&modulus);
+            assert_eq!(inverse, Integer::from(2));
+            assert_eq!((value * inverse) % &modulus, Integer::one());
+        }
+
+        let modulus = (Integer::one() << 130u32) + Integer::from(5);
+        let value = -(&modulus * Integer::from(7)) - Integer::from(2);
+        let inverse = value.mod_inverse(&modulus);
+        assert_eq!((value * inverse) % &modulus, Integer::one());
     }
 
     #[test]
