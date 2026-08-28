@@ -46,6 +46,8 @@ const MAX_EVALUATED_HENSEL_IMAGE_CELLS: usize = 1 << 22;
 const MAX_EVALUATED_HENSEL_GROUPED_TERMS: usize = 1 << 20;
 // Minimum number of base-prime digits for using composite-modulus quadratic Hensel corrections.
 const MIN_QUADRATIC_HENSEL_DIGITS: usize = 64;
+// Minimum dense convolution work for keeping quadratic Hensel corrections in dense storage.
+const MIN_DENSE_QUADRATIC_HENSEL_CORRECTION_WORK: usize = 256;
 // Maximum number of term advances across all geometric samples in one image rebuild.
 const MAX_EVALUATED_HENSEL_TERM_STEPS: usize = 1 << 24;
 // Maximum number of dense coefficient rows retained for either lifted factor.
@@ -1909,9 +1911,10 @@ impl<'a, E: PositiveExponent> DenseIntegerModularUnivariateContext<'a, E> {
     }
 }
 
-/// Sparse-polynomial reference arithmetic for testing modular univariate
-/// products, quotients, and remainders with symmetric representatives.
-#[cfg(test)]
+/// Sparse-polynomial modular univariate arithmetic with symmetric representatives.
+///
+/// Low-degree quadratic Hensel corrections use this context so their products retain only
+/// nonzero terms. The dense arithmetic tests also use it as an independent reference.
 struct IntegerModularUnivariateContext<'a, E: PositiveExponent> {
     modulus: &'a Integer,
     half_modulus: Integer,
@@ -1920,14 +1923,11 @@ struct IntegerModularUnivariateContext<'a, E: PositiveExponent> {
     template: &'a MultivariatePolynomial<IntegerRing, E, LexOrder>,
 }
 
-/// A monic dense divisor used by the sparse-polynomial modular reference
-/// arithmetic.
-#[cfg(test)]
+/// A monic dense divisor used by sparse-polynomial modular remainder arithmetic.
 struct IntegerModularUnivariateDivisor {
     coefficients: Vec<Integer>,
 }
 
-#[cfg(test)]
 impl<'a, E: PositiveExponent> IntegerModularUnivariateContext<'a, E> {
     fn new(
         modulus: &'a Integer,
@@ -2197,6 +2197,199 @@ impl<'a, E: PositiveExponent> IntegerModularUnivariateContext<'a, E> {
     ) -> MultivariatePolynomial<IntegerRing, E, LexOrder> {
         let divisor = self.prepare_divisor(divisor);
         self.remainder(dividend, &divisor)
+    }
+}
+
+/// A correction residue in the representation selected for one quadratic Hensel round.
+enum QuadraticHenselCorrectionResidue<E: PositiveExponent> {
+    Dense(DenseIntegerUnivariatePolynomial),
+    Sparse(MultivariatePolynomial<IntegerRing, E, LexOrder>),
+}
+
+/// Degree-bounded coefficients that reconstruct one correction residue as
+/// `coefficient_of_w*w + coefficient_of_u*u`.
+struct QuadraticHenselCorrections<E: PositiveExponent> {
+    coefficient_of_w: MultivariatePolynomial<IntegerRing, E, LexOrder>,
+    coefficient_of_u: MultivariatePolynomial<IntegerRing, E, LexOrder>,
+}
+
+/// Prepared arithmetic for both direct corrections in one quadratic Hensel round.
+///
+/// Each variant owns the modular images of the Bezout cofactors and prepared monic associates of
+/// the two factors. Both variants expose the same degree-bounded dual-remainder operation and
+/// return symmetric sparse corrections to the shared lifting loop.
+enum QuadraticHenselCorrectionContext<'a, E: PositiveExponent> {
+    Dense {
+        arithmetic: DenseIntegerModularUnivariateContext<'a, E>,
+        u_divisor: DenseIntegerModularUnivariateDivisor,
+        w_divisor: DenseIntegerModularUnivariateDivisor,
+        s_mod: DenseIntegerUnivariatePolynomial,
+        t_mod: DenseIntegerUnivariatePolynomial,
+    },
+    Sparse {
+        arithmetic: IntegerModularUnivariateContext<'a, E>,
+        u_divisor: IntegerModularUnivariateDivisor,
+        w_divisor: IntegerModularUnivariateDivisor,
+        s_mod: MultivariatePolynomial<IntegerRing, E, LexOrder>,
+        t_mod: MultivariatePolynomial<IntegerRing, E, LexOrder>,
+    },
+}
+
+impl<'a, E: PositiveExponent> QuadraticHenselCorrectionContext<'a, E> {
+    /// Select dense storage from the two factor degrees and the combined occupancy of the
+    /// factors and their Bezout cofactors.
+    ///
+    /// The two direct remainder products have quadratic work in the two divisor degrees. Dense
+    /// storage is only profitable once that work is large enough and at least half of the
+    /// retained coefficient cells are occupied.
+    fn uses_dense_storage(
+        u_degree: usize,
+        w_degree: usize,
+        occupied_cells: usize,
+        retained_cells: usize,
+    ) -> bool {
+        let correction_work = u_degree
+            .saturating_mul(u_degree)
+            .saturating_add(w_degree.saturating_mul(w_degree));
+        correction_work >= MIN_DENSE_QUADRATIC_HENSEL_CORRECTION_WORK
+            && occupied_cells.saturating_mul(2) >= retained_cells
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    fn new(
+        use_dense: bool,
+        modulus: &'a Integer,
+        variable: usize,
+        template: &'a MultivariatePolynomial<IntegerRing, E, LexOrder>,
+        dense_indices: &'a [u32],
+        u: &MultivariatePolynomial<IntegerRing, E, LexOrder>,
+        w: &MultivariatePolynomial<IntegerRing, E, LexOrder>,
+        s: &MultivariatePolynomial<IntegerRing, E, LexOrder>,
+        t: &MultivariatePolynomial<IntegerRing, E, LexOrder>,
+    ) -> Self {
+        if use_dense {
+            let arithmetic = DenseIntegerModularUnivariateContext::new(
+                modulus,
+                variable,
+                template,
+                dense_indices,
+            );
+            let u_divisor =
+                arithmetic.prepare_unit_leading_divisor(arithmetic.reduced_dense_coefficients(u));
+            let w_divisor =
+                arithmetic.prepare_unit_leading_divisor(arithmetic.reduced_dense_coefficients(w));
+            let s_mod = arithmetic.reduced_dense_coefficients(s);
+            let t_mod = arithmetic.reduced_dense_coefficients(t);
+            Self::Dense {
+                arithmetic,
+                u_divisor,
+                w_divisor,
+                s_mod,
+                t_mod,
+            }
+        } else {
+            let arithmetic = IntegerModularUnivariateContext::new(modulus, template);
+            let u_mod = arithmetic.reduce(u);
+            let w_mod = arithmetic.reduce(w);
+            let u_divisor = arithmetic.prepare_divisor(&u_mod);
+            let w_divisor = arithmetic.prepare_divisor(&w_mod);
+            let s_mod = arithmetic.reduce(s);
+            let t_mod = arithmetic.reduce(t);
+            Self::Sparse {
+                arithmetic,
+                u_divisor,
+                w_divisor,
+                s_mod,
+                t_mod,
+            }
+        }
+    }
+
+    /// Divide a polynomial coefficient-wise by an exact scalar and reduce it modulo the round's
+    /// correction modulus. `negate` selects the numerator sign without materializing its negation.
+    fn exact_scalar_quotient_mod(
+        &self,
+        numerator: &MultivariatePolynomial<IntegerRing, E, LexOrder>,
+        divisor: &Integer,
+        negate: bool,
+    ) -> QuadraticHenselCorrectionResidue<E> {
+        match self {
+            Self::Dense { arithmetic, .. } => {
+                let mut numerator = arithmetic.dense_coefficients(numerator);
+                if negate {
+                    for coefficient in &mut numerator {
+                        let value = std::mem::replace(coefficient, Integer::zero());
+                        *coefficient = -value;
+                    }
+                }
+                QuadraticHenselCorrectionResidue::Dense(
+                    arithmetic.exact_scalar_quotient_mod(numerator, divisor),
+                )
+            }
+            Self::Sparse { arithmetic, .. } => {
+                let quotient = numerator.map_coeff(
+                    |coefficient| {
+                        debug_assert!((coefficient % divisor).is_zero());
+                        let quotient = coefficient / divisor;
+                        arithmetic.symmetric_reduce(if negate { -quotient } else { quotient })
+                    },
+                    Z,
+                );
+                QuadraticHenselCorrectionResidue::Sparse(quotient)
+            }
+        }
+    }
+
+    /// Return degree-bounded coefficients of `w` and `u` that reconstruct `value` modulo the
+    /// correction modulus.
+    ///
+    /// The formulas are `coefficient_of_w=(value*t) rem u` and
+    /// `coefficient_of_u=(value*s) rem w`. Both results are returned as symmetric sparse
+    /// polynomials so factor and Bezout lifting share the same correction arithmetic.
+    fn two_corrections(
+        &self,
+        value: QuadraticHenselCorrectionResidue<E>,
+    ) -> QuadraticHenselCorrections<E> {
+        match (self, value) {
+            (
+                Self::Dense {
+                    arithmetic,
+                    u_divisor,
+                    w_divisor,
+                    s_mod,
+                    t_mod,
+                },
+                QuadraticHenselCorrectionResidue::Dense(value),
+            ) => {
+                let mut coefficient_of_u =
+                    arithmetic.multiply_remainder(value.clone(), s_mod, w_divisor);
+                let mut coefficient_of_w = arithmetic.multiply_remainder(value, t_mod, u_divisor);
+                arithmetic.symmetrize_in_place(&mut coefficient_of_w);
+                arithmetic.symmetrize_in_place(&mut coefficient_of_u);
+                QuadraticHenselCorrections {
+                    coefficient_of_w: arithmetic.from_dense_coefficients(coefficient_of_w),
+                    coefficient_of_u: arithmetic.from_dense_coefficients(coefficient_of_u),
+                }
+            }
+            (
+                Self::Sparse {
+                    arithmetic,
+                    u_divisor,
+                    w_divisor,
+                    s_mod,
+                    t_mod,
+                },
+                QuadraticHenselCorrectionResidue::Sparse(value),
+            ) => {
+                let coefficient_of_u = arithmetic.multiply_remainder(&value, s_mod, w_divisor);
+                let coefficient_of_w = arithmetic.multiply_remainder(&value, t_mod, u_divisor);
+                QuadraticHenselCorrections {
+                    coefficient_of_w,
+                    coefficient_of_u,
+                }
+            }
+            _ => unreachable!("a correction residue belongs to its operation context"),
+        }
     }
 }
 
@@ -6065,21 +6258,36 @@ impl<E: PositiveExponent> MultivariatePolynomial<IntegerRing, E, LexOrder> {
         if use_quadratic_lift {
             #[cfg(test)]
             QUADRATIC_HENSEL_LIFT_CALLS.with(|calls| calls.set(calls.get() + 1));
-            let mut s_i = s.map_coeff(|c| field.to_symmetric_integer(c), Z);
-            let mut t_i = t.map_coeff(|c| field.to_symmetric_integer(c), Z);
             let variable = self
                 .last_exponents()
                 .iter()
                 .position(|exponent| !exponent.is_zero())
                 .expect("a Hensel factor must be nonconstant");
-            let dense_length = self.degree(variable).to_u32() as usize + 1;
-            let intermediate_length = dense_length
-                .checked_mul(2)
-                .and_then(|length| length.checked_sub(1))
-                .expect("dense Hensel intermediate length overflow");
-            let dense_indices = (0..intermediate_length)
-                .map(|index| index as u32)
-                .collect::<Vec<_>>();
+            let retained_cells: usize = [&u, &w, &s, &t]
+                .into_iter()
+                .map(|polynomial| polynomial.degree(variable).to_u32() as usize + 1)
+                .sum();
+            let occupied_cells = u.nterms() + w.nterms() + s.nterms() + t.nterms();
+            let use_dense_corrections = QuadraticHenselCorrectionContext::<E>::uses_dense_storage(
+                u.degree(variable).to_u32() as usize,
+                w.degree(variable).to_u32() as usize,
+                occupied_cells,
+                retained_cells,
+            );
+            let dense_indices = if use_dense_corrections {
+                let dense_length = self.degree(variable).to_u32() as usize + 1;
+                let intermediate_length = dense_length
+                    .checked_mul(2)
+                    .and_then(|length| length.checked_sub(1))
+                    .expect("dense Hensel intermediate length overflow");
+                (0..intermediate_length)
+                    .map(|index| index as u32)
+                    .collect::<Vec<_>>()
+            } else {
+                Vec::new()
+            };
+            let mut s_i = s.map_coeff(|c| field.to_symmetric_integer(c), Z);
+            let mut t_i = t.map_coeff(|c| field.to_symmetric_integer(c), Z);
 
             while !e.is_zero() && &m < max_p {
                 // A full round doubles the known p-adic precision. The last round can use the
@@ -6093,32 +6301,25 @@ impl<E: PositiveExponent> MultivariatePolynomial<IntegerRing, E, LexOrder> {
                 };
                 debug_assert!((&m % &step_modulus).is_zero());
                 let next_modulus = &m * &step_modulus;
-                let modular_context = DenseIntegerModularUnivariateContext::new(
+                let correction_context = QuadraticHenselCorrectionContext::new(
+                    use_dense_corrections,
                     &step_modulus,
                     variable,
                     self,
                     &dense_indices,
+                    &u_i,
+                    &w_i,
+                    &s_i,
+                    &t_i,
                 );
-
-                let error_mod = modular_context
-                    .exact_scalar_quotient_mod(modular_context.dense_coefficients(&e), &m);
-                let u_mod = modular_context.reduced_dense_coefficients(&u_i);
-                let w_mod = modular_context.reduced_dense_coefficients(&w_i);
-                let s_mod = modular_context.reduced_dense_coefficients(&s_i);
-                let t_mod = modular_context.reduced_dense_coefficients(&t_i);
-
-                let u_divisor = modular_context.prepare_unit_leading_divisor(u_mod);
-                let w_divisor = modular_context.prepare_unit_leading_divisor(w_mod);
 
                 // Since s*u+t*w=1 modulo the correction modulus, reducing e*s modulo w and
                 // e*t modulo u gives degree-bounded corrections with e=tau*w+r*u.
-                let mut r =
-                    modular_context.multiply_remainder(error_mod.clone(), &s_mod, &w_divisor);
-                let mut tau = modular_context.multiply_remainder(error_mod, &t_mod, &u_divisor);
-                modular_context.symmetrize_in_place(&mut r);
-                modular_context.symmetrize_in_place(&mut tau);
-                let r = modular_context.from_dense_coefficients(r);
-                let tau = modular_context.from_dense_coefficients(tau);
+                let error_mod = correction_context.exact_scalar_quotient_mod(&e, &m, false);
+                let QuadraticHenselCorrections {
+                    coefficient_of_w: tau,
+                    coefficient_of_u: r,
+                } = correction_context.two_corrections(error_mod);
                 u_i = u_i + tau.mul_coeff(m.clone());
                 w_i = w_i + r.mul_coeff(m.clone());
                 e = &a - &(&u_i * &w_i);
@@ -6132,22 +6333,14 @@ impl<E: PositiveExponent> MultivariatePolynomial<IntegerRing, E, LexOrder> {
                 // b=(s*u+t*w-1)/m, solve ds*u+dt*w=-b modulo m and set
                 // s'=s+m*ds, t'=t+m*dt.
                 let bezout_error = &(&s_i * &u_i) + &(&t_i * &w_i) - u_i.one();
-                let mut bezout_numerator = modular_context.dense_coefficients(&bezout_error);
-                for coefficient in &mut bezout_numerator {
-                    let value = std::mem::replace(coefficient, Integer::zero());
-                    *coefficient = -value;
-                }
-                let bezout_mod = modular_context.exact_scalar_quotient_mod(bezout_numerator, &m);
+                let bezout_mod =
+                    correction_context.exact_scalar_quotient_mod(&bezout_error, &m, true);
                 // The lifted factors differ from the prepared divisors by multiples of m, which
                 // vanish modulo the correction modulus because that modulus divides m.
-                let mut delta_s =
-                    modular_context.multiply_remainder(bezout_mod.clone(), &s_mod, &w_divisor);
-                let mut delta_t =
-                    modular_context.multiply_remainder(bezout_mod, &t_mod, &u_divisor);
-                modular_context.symmetrize_in_place(&mut delta_s);
-                modular_context.symmetrize_in_place(&mut delta_t);
-                let delta_s = modular_context.from_dense_coefficients(delta_s);
-                let delta_t = modular_context.from_dense_coefficients(delta_t);
+                let QuadraticHenselCorrections {
+                    coefficient_of_w: delta_t,
+                    coefficient_of_u: delta_s,
+                } = correction_context.two_corrections(bezout_mod);
                 s_i = s_i + delta_s.mul_coeff(m.clone());
                 t_i = t_i + delta_t.mul_coeff(m.clone());
                 m = next_modulus;
@@ -9318,9 +9511,10 @@ mod test {
         LAST_MODULAR_INTEGER_EDF_PRIME, LLL_RECOMBINATION_SUCCESSES,
         LOCAL_HENSEL_RECOMBINATION_NODES, MODULAR_INTEGER_EDF_CALLS, ModularPrimeScreen,
         PRODUCT_TREE_HENSEL_LIFT_CALLS, QUADRATIC_HENSEL_LIFT_CALLS,
-        QUADRATIC_HENSEL_NONUNIT_RETRIES, QuadraticFactorization, SparseDiophantineContext,
-        UnivariateHenselProductTreeBuildContext, UnivariateHenselProductTreeLink,
-        UnivariateHenselProductTreeNode, univariate_hensel_precision_schedule,
+        QUADRATIC_HENSEL_NONUNIT_RETRIES, QuadraticFactorization, QuadraticHenselCorrectionContext,
+        SparseDiophantineContext, UnivariateHenselProductTreeBuildContext,
+        UnivariateHenselProductTreeLink, UnivariateHenselProductTreeNode,
+        univariate_hensel_precision_schedule,
     };
 
     use crate::{
@@ -11213,6 +11407,22 @@ mod test {
         assert_eq!(factors, expected);
         LOCAL_HENSEL_RECOMBINATION_NODES.with(|nodes| assert!(nodes.get() > 0));
         LLL_RECOMBINATION_SUCCESSES.with(|successes| assert!(successes.get() > 0));
+    }
+
+    #[test]
+    fn quadratic_hensel_correction_selector_checks_work_and_occupancy_boundaries() {
+        assert!(!QuadraticHenselCorrectionContext::<u8>::uses_dense_storage(
+            15, 5, 8, 8
+        ));
+        assert!(QuadraticHenselCorrectionContext::<u8>::uses_dense_storage(
+            16, 0, 1, 2
+        ));
+        assert!(QuadraticHenselCorrectionContext::<u8>::uses_dense_storage(
+            16, 1, 4, 8
+        ));
+        assert!(!QuadraticHenselCorrectionContext::<u8>::uses_dense_storage(
+            16, 1, 3, 8
+        ));
     }
 
     #[test]
