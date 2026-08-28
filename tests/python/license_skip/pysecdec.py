@@ -8,9 +8,10 @@ from threading import Barrier
 from symbolica import E, oem_scope
 
 OEM_TOKEN = (
-    "eyJ2ZXJzaW9uIjoxLCJwYWNrYWdlIjoicHlzZWNkZWMiLCJtYXhfcHJvY2Vzc2VzIjo0LCJtYXhfdGhyZWFkc19wZXJfcHJvY2VzcyI6OH0K."
-    "ce4TV4ICSXSNBESisJSbAheXXL5T5Fts6FPdMlSlHVCA0bJFIlLRj3s2iyobmIZk7yOR0Ix_vjVnufkULUjwCw"
+    "eyJ2ZXJzaW9uIjoxLCJwYWNrYWdlIjoicHlzZWNkZWMiLCJtYXhfcHJvY2Vzc2VzIjo0fQo."
+    "BlpNuJqgYtiWDgokAZO2Q8udQUB9WTIJn6EueXmm35G85NSMCngcpMGkxdzFNRXGVP3m6nR-KyhOK64Y7sZHAw"
 )
+OEM_NEW_THREAD_COUNT = 8
 
 __all__ = [
     "library_expression",
@@ -22,20 +23,20 @@ __all__ = [
 
 def library_expression() -> str:
     """Run and format a Symbolica operation entirely inside this module."""
-    with oem_scope(OEM_TOKEN):
+    with oem_scope(OEM_TOKEN, 0):
         return str(E("library_value + 1"))
 
 
 def use_plain_callback(callback: Callable[[], int]) -> tuple[int, str]:
     """Get plain user input, then resume skipped Symbolica work in this module."""
-    with oem_scope(OEM_TOKEN):
+    with oem_scope(OEM_TOKEN, 0):
         value = callback()
         return value, str(E("library_after_callback + 1"))
 
 
 def use_symbolica_callback(callback: Callable[[], object]) -> object:
     """Invoke user code within this library operation's OEM allowance."""
-    with oem_scope(OEM_TOKEN):
+    with oem_scope(OEM_TOKEN, 0):
         return callback()
 
 
@@ -47,14 +48,14 @@ def run_threads(count: int) -> list[str]:
         barrier.wait()
         return str(E(f"thread_{index} + 1"))
 
-    with oem_scope(OEM_TOKEN):
+    with oem_scope(OEM_TOKEN, OEM_NEW_THREAD_COUNT):
         with ThreadPoolExecutor(max_workers=count) as executor:
             return list(executor.map(work, range(count)))
 
 
 def hold_oem_process(ready_path: str) -> None:
     """Hold one token process slot until stdin closes."""
-    with oem_scope(OEM_TOKEN):
+    with oem_scope(OEM_TOKEN, 0):
         E("oem_process_holder")
         Path(ready_path).write_text("ready", encoding="utf-8")
         input()

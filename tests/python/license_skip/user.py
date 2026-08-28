@@ -30,7 +30,7 @@ def main(scenario: str) -> None:
         try:
             from symbolica import oem_scope
 
-            with oem_scope(pysecdec.OEM_TOKEN):
+            with oem_scope(pysecdec.OEM_TOKEN, 0):
                 E("copied_token")
         except PermissionError as error:
             print(error, flush=True)

@@ -98,7 +98,7 @@ class OemScopeConcurrencyTest(unittest.TestCase):
     def test_user_code_after_library_scope_collides(self) -> None:
         self.assert_unlicensed_collision("library-then-user")
 
-    def test_declared_thread_allowance_succeeds(self) -> None:
+    def test_runtime_thread_reservation_succeeds(self) -> None:
         self.assertIn("8", self.assert_succeeds("threads-at-limit"))
 
     def test_extra_thread_exceeds_oem_allowance(self) -> None:

@@ -51,24 +51,26 @@ def set_namespace(namespace: str) -> None:
     """
 
 class OemScope:
-    """A package-bound OEM scope with signed process and thread allowances."""
+    """A package-bound OEM scope with signed process authorization and a runtime thread reservation."""
 
     def __enter__(self) -> None: ...
     def __exit__(self, exception_type: Any, exception_value: Any, traceback: Any) -> None: ...
 
-def oem_scope(token: str) -> OemScope:
+def oem_scope(token: str, new_thread_count: int) -> OemScope:
     """
     Create a package-bound OEM scope from a signed token.
 
-    The token declares the package name and its maximum concurrent processes and Symbolica threads
-    per process. It must be embedded by the library developer and can only be activated from a
-    module in the declared package. Calls and callbacks within the dynamic scope share its OEM
-    allowance.
+    The token authorizes a package and declares its maximum concurrent processes. It must be
+    embedded by the library developer and can only be activated from a module in the declared
+    package. The calling thread and `new_thread_count` additional thread identities may use
+    Symbolica during the dynamic scope, including from user callbacks.
 
     Parameters
     ----------
     token: str
         A signed Symbolica OEM token issued for the calling Python package.
+    new_thread_count: int
+        The number of additional thread identities the library expects to enter Symbolica.
     """
 
 def get_version() -> str:

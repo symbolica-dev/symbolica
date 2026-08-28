@@ -1,5 +1,4 @@
 use std::{
-    cell::RefCell,
     collections::{HashMap, HashSet},
     fs::{File, OpenOptions, TryLockError},
     io,
@@ -16,9 +15,9 @@ const TEST_OEM_PUBLIC_KEY: &str = "zZ0TCRh69ahYSVwbj4I-n_2gB7xPF49l_19DV13OuyA";
 
 #[cfg(test)]
 pub(crate) const TEST_OEM_TOKEN: &str = concat!(
-    "eyJ2ZXJzaW9uIjoxLCJwYWNrYWdlIjoicHlzZWNkZWMiLCJtYXhfcHJvY2Vzc2VzIjo0LCJtYXhfdGhyZWFkc19wZXJfcHJvY2VzcyI6OH0K",
+    "eyJ2ZXJzaW9uIjoxLCJwYWNrYWdlIjoicHlzZWNkZWMiLCJtYXhfcHJvY2Vzc2VzIjo0fQo",
     ".",
-    "ce4TV4ICSXSNBESisJSbAheXXL5T5Fts6FPdMlSlHVCA0bJFIlLRj3s2iyobmIZk7yOR0Ix_vjVnufkULUjwCw"
+    "BlpNuJqgYtiWDgokAZO2Q8udQUB9WTIJn6EueXmm35G85NSMCngcpMGkxdzFNRXGVP3m6nR-KyhOK64Y7sZHAw"
 );
 
 const OEM_CONCURRENCY_WARNING: &str =
@@ -30,7 +29,6 @@ const OEM_CONCURRENCY_WARNING: &str =
 pub(crate) struct OemClaims {
     pub package: String,
     pub max_processes: usize,
-    pub max_threads_per_process: usize,
     token_id: String,
 }
 
@@ -38,31 +36,14 @@ struct ActiveOemLease {
     claims: OemClaims,
     pid: u32,
     active_scopes: usize,
+    reserved_new_threads: usize,
     _process_slot: File,
-    threads: HashSet<ThreadId>,
+    owner_threads: HashMap<ThreadId, usize>,
+    additional_threads: HashSet<ThreadId>,
 }
 
 static OEM_LEASES: LazyLock<Mutex<HashMap<String, ActiveOemLease>>> =
     LazyLock::new(|| Mutex::new(HashMap::new()));
-
-struct OemThreadRegistrations(RefCell<HashSet<String>>);
-
-impl Drop for OemThreadRegistrations {
-    fn drop(&mut self) {
-        let thread_id = std::thread::current().id();
-        let mut leases = OEM_LEASES.lock().unwrap();
-        for token_id in self.0.get_mut().drain() {
-            if let Some(lease) = leases.get_mut(&token_id) {
-                lease.threads.remove(&thread_id);
-            }
-        }
-    }
-}
-
-std::thread_local! {
-    static OEM_THREAD_REGISTRATIONS: OemThreadRegistrations =
-        OemThreadRegistrations(RefCell::new(HashSet::new()));
-}
 
 fn configured_public_key() -> Option<&'static str> {
     if let Some(key) = option_env!("SYMBOLICA_PYTHON_OEM_PUBLIC_KEY") {
@@ -155,7 +136,6 @@ pub(crate) fn verify_token(token: &str) -> Result<OemClaims, String> {
     Ok(OemClaims {
         package,
         max_processes: get_usize_claim(claims, "max_processes")?,
-        max_threads_per_process: get_usize_claim(claims, "max_threads_per_process")?,
         token_id: signature.to_owned(),
     })
 }
@@ -213,12 +193,15 @@ fn acquire_process_slot(claims: &OemClaims) -> Result<File, String> {
 pub(crate) struct OemScopeGuard {
     token_id: String,
     pid: u32,
+    owner_thread: ThreadId,
+    reserved_new_threads: usize,
 }
 
 impl OemScopeGuard {
-    pub(crate) fn activate(claims: OemClaims) -> Result<Self, String> {
+    pub(crate) fn activate(claims: OemClaims, reserved_new_threads: usize) -> Result<Self, String> {
         let token_id = claims.token_id.clone();
         let pid = std::process::id();
+        let owner_thread = std::thread::current().id();
         let mut leases = OEM_LEASES.lock().unwrap();
 
         if leases.get(&token_id).is_some_and(|lease| lease.pid != pid) {
@@ -229,22 +212,37 @@ impl OemScopeGuard {
             if lease.claims != claims {
                 return Err("Conflicting Symbolica OEM claims for the same token".to_owned());
             }
+            let new_reservation = lease
+                .reserved_new_threads
+                .checked_add(reserved_new_threads)
+                .ok_or_else(|| "OEM thread reservation overflow".to_owned())?;
             lease.active_scopes += 1;
+            lease.reserved_new_threads = new_reservation;
+            *lease.owner_threads.entry(owner_thread).or_default() += 1;
         } else {
             let process_slot = acquire_process_slot(&claims)?;
+            let mut owner_threads = HashMap::new();
+            owner_threads.insert(owner_thread, 1);
             leases.insert(
                 token_id.clone(),
                 ActiveOemLease {
                     claims,
                     pid,
                     active_scopes: 1,
+                    reserved_new_threads,
                     _process_slot: process_slot,
-                    threads: HashSet::new(),
+                    owner_threads,
+                    additional_threads: HashSet::new(),
                 },
             );
         }
 
-        Ok(Self { token_id, pid })
+        Ok(Self {
+            token_id,
+            pid,
+            owner_thread,
+            reserved_new_threads,
+        })
     }
 }
 
@@ -257,6 +255,15 @@ impl Drop for OemScopeGuard {
         let mut leases = OEM_LEASES.lock().unwrap();
         let remove = if let Some(lease) = leases.get_mut(&self.token_id) {
             lease.active_scopes -= 1;
+            lease.reserved_new_threads = lease
+                .reserved_new_threads
+                .saturating_sub(self.reserved_new_threads);
+            if let Some(count) = lease.owner_threads.get_mut(&self.owner_thread) {
+                *count -= 1;
+                if *count == 0 {
+                    lease.owner_threads.remove(&self.owner_thread);
+                }
+            }
             lease.active_scopes == 0
         } else {
             false
@@ -268,47 +275,37 @@ impl Drop for OemScopeGuard {
     }
 }
 
-/// Register the current thread with an active OEM lease and return its limit and occupied seats.
-pub(crate) fn active_thread_allowance() -> Option<(usize, usize)> {
+/// Register the current thread with an active OEM lease.
+///
+/// A scope's entering thread is covered automatically. Every other distinct thread identity
+/// consumes one of the runtime reservations until the outermost scope for the token closes.
+pub(crate) fn register_current_thread() -> bool {
     let pid = std::process::id();
     let thread_id = std::thread::current().id();
     let mut leases = OEM_LEASES.lock().unwrap();
     if !leases.values().any(|lease| lease.pid == pid) {
-        return None;
+        return false;
     }
 
-    let token_id = leases
-        .iter()
-        .find_map(|(token_id, lease)| {
-            (lease.pid == pid && lease.threads.contains(&thread_id)).then(|| token_id.clone())
-        })
-        .or_else(|| {
-            leases.iter().find_map(|(token_id, lease)| {
-                (lease.pid == pid && lease.threads.len() < lease.claims.max_threads_per_process)
-                    .then(|| token_id.clone())
-            })
-        });
+    if leases.values().any(|lease| {
+        lease.pid == pid
+            && (lease.owner_threads.contains_key(&thread_id)
+                || lease.additional_threads.contains(&thread_id))
+    }) {
+        return true;
+    }
 
-    let Some(token_id) = token_id else {
+    let lease = leases.values_mut().find(|lease| {
+        lease.pid == pid && lease.additional_threads.len() < lease.reserved_new_threads
+    });
+
+    let Some(lease) = lease else {
         println!("{OEM_CONCURRENCY_WARNING}");
         std::process::abort();
     };
 
-    let lease = leases.get_mut(&token_id).unwrap();
-    lease.threads.insert(thread_id);
-    let limit = lease.claims.max_threads_per_process;
-    let occupied = lease.threads.len();
-    drop(leases);
-
-    OEM_THREAD_REGISTRATIONS.with(|registrations| {
-        registrations.0.borrow_mut().insert(token_id);
-    });
-
-    Some((limit, occupied))
-}
-
-pub(crate) fn active_thread_limit() -> Option<usize> {
-    active_thread_allowance().map(|(limit, _)| limit)
+    lease.additional_threads.insert(thread_id);
+    true
 }
 
 #[cfg(test)]
@@ -322,7 +319,6 @@ mod tests {
             OemClaims {
                 package: "pysecdec".to_owned(),
                 max_processes: 4,
-                max_threads_per_process: 8,
                 token_id: TEST_OEM_TOKEN.split_once('.').unwrap().1.to_owned(),
             }
         );

@@ -510,7 +510,7 @@ impl LicenseManager {
     #[inline]
     fn is_check_skipped() -> bool {
         INTERNAL_SKIP_LICENSE_DEPTH.with(|depth| depth.get() != 0)
-            || crate::oem::active_thread_limit().is_some()
+            || crate::oem::register_current_thread()
     }
 
     /// Create a new license manager.
@@ -864,8 +864,8 @@ Error: {status}",
     /// Returns `true` iff this instance has a valid license key or active OEM scope.
     #[cfg(not(target_arch = "wasm32"))]
     pub fn is_licensed() -> bool {
-        crate::oem::active_thread_limit().is_some()
-            || LICENSED.load(Relaxed)
+        LICENSED.load(Relaxed)
+            || crate::oem::register_current_thread()
             || Self::check_license_key().is_ok()
     }
 
@@ -878,9 +878,8 @@ Error: {status}",
 
         #[cfg(not(target_arch = "wasm32"))]
         {
-            if let Some((limit, occupied)) = crate::oem::active_thread_allowance() {
-                let available_workers = limit.saturating_sub(occupied).max(1);
-                return requested.min(available_workers);
+            if crate::oem::register_current_thread() {
+                return requested;
             }
 
             if Self::is_licensed() {

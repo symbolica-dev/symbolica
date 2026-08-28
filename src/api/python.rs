@@ -1039,11 +1039,12 @@ pub fn get_namespace(py: Python) -> PyResult<&'static str> {
     )
 }
 
-/// A package-bound OEM scope with signed process and thread allowances.
+/// A package-bound OEM scope with signed process authorization and a runtime thread reservation.
 #[cfg_attr(feature = "python_stubgen", gen_stub_pyclass)]
 #[pyclass(unsendable, name = "OemScope", module = "symbolica.core")]
 pub struct PythonOemScope {
     claims: OemClaims,
+    new_thread_count: usize,
     guard: Option<OemScopeGuard>,
 }
 
@@ -1060,7 +1061,7 @@ impl PythonOemScope {
 
         validate_oem_caller(py, &self.claims)?;
         self.guard = Some(
-            OemScopeGuard::activate(self.claims.clone())
+            OemScopeGuard::activate(self.claims.clone(), self.new_thread_count)
                 .map_err(exceptions::PyRuntimeError::new_err)?,
         );
         Ok(())
@@ -1103,26 +1104,29 @@ fn validate_oem_caller(py: Python, claims: &OemClaims) -> PyResult<()> {
 
 /// Create a package-bound OEM scope from a signed token.
 ///
-/// The token declares the package name and its maximum concurrent processes and Symbolica threads
-/// per process. It must be embedded by the library developer and can only be activated from a
-/// module in the declared package. Calls and callbacks within the dynamic scope share its OEM
-/// allowance.
+/// The token authorizes a package and declares its maximum concurrent processes. It must be
+/// embedded by the library developer and can only be activated from a module in the declared
+/// package. The calling thread and `new_thread_count` additional thread identities may use
+/// Symbolica during the dynamic scope, including from user callbacks.
 ///
 /// Parameters
 /// ----------
 /// token: str
 ///     A signed Symbolica OEM token issued for the calling Python package.
+/// new_thread_count: int
+///     The number of additional thread identities the library expects to enter Symbolica.
 #[cfg_attr(
     feature = "python_stubgen",
     gen_stub_pyfunction(module = "symbolica.core")
 )]
 #[pyfunction]
-pub fn oem_scope(py: Python, token: &str) -> PyResult<PythonOemScope> {
+pub fn oem_scope(py: Python, token: &str, new_thread_count: usize) -> PyResult<PythonOemScope> {
     let claims = crate::oem::verify_token(token).map_err(exceptions::PyValueError::new_err)?;
     validate_oem_caller(py, &claims)?;
 
     Ok(PythonOemScope {
         claims,
+        new_thread_count,
         guard: None,
     })
 }
