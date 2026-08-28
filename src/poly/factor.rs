@@ -7363,7 +7363,7 @@ impl<E: PositiveExponent> MultivariatePolynomial<IntegerRing, E, LexOrder> {
                 let node = lift.topology.nodes[node_index];
                 let u_link = node.children[0];
                 let w_link = node.children[1];
-                let (s_mod, t_mod, du, dw) = {
+                let (u_mod, w_mod, s_mod, t_mod, du, dw) = {
                     let target = if node_index == root_index {
                         normalized_target.as_slice()
                     } else {
@@ -7396,7 +7396,7 @@ impl<E: PositiveExponent> MultivariatePolynomial<IntegerRing, E, LexOrder> {
                     let error_s = correction_context.multiply_raw(&error_mod_w, &s_mod);
                     let dw = correction_context.remainder_monic(error_s, &w_mod);
 
-                    (s_mod, t_mod, du, dw)
+                    (u_mod, w_mod, s_mod, t_mod, du, dw)
                 };
 
                 // The old child and cofactor buffers are dead after this node
@@ -7426,19 +7426,20 @@ impl<E: PositiveExponent> MultivariatePolynomial<IntegerRing, E, LexOrder> {
                     // relation after U and W have been lifted.
                     let bezout_error = correction_context
                         .exact_bezout_residual_quotient_mod(&s, &lifted_u, &t, &lifted_w, &modulus);
-                    let lifted_u_mod = correction_context.reduce(&lifted_u);
-                    let lifted_w_mod = correction_context.reduce(&lifted_w);
+
+                    // The correction modulus divides `modulus`, so adding
+                    // `modulus*du` and `modulus*dw` does not change these
+                    // canonical images used by the Bezout correction.
 
                     // ds=(B*s) rem W and dt=(B*t) rem U preserve the degree
                     // bounds of the two Bezout cofactors.
                     let bezout_mod_w =
-                        correction_context.remainder_monic(bezout_error.clone(), &lifted_w_mod);
+                        correction_context.remainder_monic(bezout_error.clone(), &w_mod);
                     let bezout_s = correction_context.multiply_raw(&bezout_mod_w, &s_mod);
-                    let delta_s = correction_context.remainder_monic(bezout_s, &lifted_w_mod);
-                    let bezout_mod_u =
-                        correction_context.remainder_monic(bezout_error, &lifted_u_mod);
+                    let delta_s = correction_context.remainder_monic(bezout_s, &w_mod);
+                    let bezout_mod_u = correction_context.remainder_monic(bezout_error, &u_mod);
                     let bezout_t = correction_context.multiply_raw(&bezout_mod_u, &t_mod);
-                    let delta_t = correction_context.remainder_monic(bezout_t, &lifted_u_mod);
+                    let delta_t = correction_context.remainder_monic(bezout_t, &u_mod);
                     let lifted_s = next_context.lift_correction(s, &delta_s, &modulus);
                     let lifted_t = next_context.lift_correction(t, &delta_t, &modulus);
 
@@ -12526,12 +12527,14 @@ mod test {
 
             let old = vec![&scale - 1, &scale - 2, Integer::one()];
             let delta = vec![&correction_modulus - 1, &correction_modulus - 2];
+            let old_mod_correction = correction_context.reduce(&old);
             let mut expected = old.clone();
             for (coefficient, correction) in expected.iter_mut().zip(&delta) {
                 *coefficient += correction * &scale;
             }
             let lifted = next_context.lift_correction(old, &delta, &scale);
             assert_eq!(lifted, expected);
+            assert_eq!(correction_context.reduce(&lifted), old_mod_correction);
             assert!(
                 lifted.iter().all(|coefficient| {
                     !coefficient.is_negative() && coefficient < &next_modulus
