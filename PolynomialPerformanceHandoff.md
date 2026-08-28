@@ -2,8 +2,9 @@
 
 This is the live continuation record for the single-core Symbolica/FLINT polynomial-performance
 work. It was refreshed on 2026-08-28 after accepting cached reciprocal reduction for dense
-distinct-degree factorization and rerunning the full Rust/FLINT comparison suite at source head
-`b2e5d28`.
+distinct-degree factorization, rejecting the first dense baby-step/giant-step DDF implementation,
+and integrating overflow-safe DDF degree bounds at source head `79bcd16`. The full Rust/FLINT
+comparison inventory was measured at performance-equivalent source head `b2e5d28`.
 Keep this file current whenever an experiment is accepted, rejected, or left partly complete. The
 purpose is that another agent can resume without reconstructing decisions from chat history or
 transient binary names.
@@ -28,7 +29,7 @@ transient binary names.
 
 ## Current continuation checkpoint: cached reciprocal DDF
 
-The accepted candidate is the five-commit chain through `b2e5d28`:
+The accepted implementation and follow-up chain is:
 
 | Commit | Change |
 |---|---|
@@ -37,6 +38,8 @@ The accepted candidate is the five-commit chain through `b2e5d28`:
 | `3f24ebd` | Widen PolyBench benchmark exponents from `u8` to `u16` |
 | `9f9e690` | Retry a nonunit quadratic Hensel lift with the linear strategy |
 | `b2e5d28` | Resolve resultant elimination variables in the benchmark polynomial namespace |
+| `d548756` | Document and checksum the accepted cached-reciprocal benchmark inventory |
+| `79bcd16` | Keep DDF termination bounds in `usize` at exponent-type boundaries |
 
 All commits have author and committer `Ben Ruijl <ben@ruijl.ch>`. The production DDF change is
 private to `DenseZpDistinctDegreeContext`; it does not add another method to `Ring`. The context
@@ -46,8 +49,9 @@ the reciprocal after a GCD shrinks the modulus. It selects direct Montgomery, na
 wide-remainder accumulation from an exact coefficient bound. The classical monic remainder remains
 available for unsupported cases and for reductions after a modulus change.
 
-The reciprocal path passes all `66/66` factor-module tests under the default GMP feature set and
-all `66/66` under `no_gmp,native_code_generation`; `cargo fmt --check` is clean. Tests cover all
+The reciprocal path and degree-bound correction pass all `66/66` factor-module tests under the
+default GMP feature set and all `66/66` under `no_gmp,native_code_generation`; `cargo fmt --check`
+is clean. Tests cover all
 accumulation modes, products and squares, modulus shrinkage, and a quotient such as `q=x`, whose
 constant coefficient must remain represented while performing reversed division.
 
@@ -99,27 +103,39 @@ still advances largely by classical Frobenius steps.
 
 Ratios below are Symbolica median divided by FLINT median, so lower is better. The suite uses the
 same full-LTO/default-feature binary at `b2e5d28`, with `faster_alloc`, GMP, FLINT 3.6.0, and one
-thread per implementation. The `*-s3.csv` family scans use three paired samples after warmup;
+thread per implementation. The later `79bcd16` change only widens two DDF bound computations to
+`usize` and avoids an O(n) degree scan; it is correctness-relevant at degrees 254/255 and is
+performance-neutral for these rows. The `*-s3.csv` family scans use three paired samples after warmup;
 the degree-64 factor result and degree-48/64/80 GCD sweep use repeated processes and replace their
 exploratory rows. Each configured operation or independently requested product is counted once.
 For resultants, the aggregate uses the main Ducos entry point; Brown and CRT are alternative runs
 reported separately.
 
-| Family | n | Best S/F | Median S/F | Worst S/F |
-|---|---:|---:|---:|---:|
-| all strict current rows | 122 | `0.028678` | `1.0308265` | `9.715828` |
-| non-PolyBench rows | 76 | `0.028678` | `0.895231` | `3.443308` |
-| PolyBench products plus operations | 46 | `0.102770` | `1.6831265` | `9.715828` |
-| PolyBench GCD/factor operations only | 23 | `0.102770` | `0.828262` | `9.715828` |
-| PolyBench input-product construction | 23 | `1.586414` | `1.834232` | `1.905304` |
-| all integer and finite-field multiplication | 22 | `0.252283` | `0.7449595` | `1.348957` |
-| exact integer polynomial division | 3 | `0.441603` | `0.442621` | `0.761777` |
-| main Ducos resultant | 6 | `0.519856` | `0.7161895` | `1.027247` |
-| Brown resultant alternative | 6 | `1.124006` | `1.650471` | `2.581685` |
-| CRT resultant alternative | 6 | `0.432838` | `1.189242` | `2.287301` |
-| all GCD operations | 30 | `0.028678` | `0.613736` | `1.268240` |
-| all factorization operations | 17 | `0.102770` | `1.500788` | `9.715828` |
-| all independently measured construction products | 44 | `0.291403` | `1.705581` | `1.917285` |
+| Family | n | Best S/F and case | Median S/F | Worst S/F and case |
+|---|---:|---|---:|---|
+| all strict current rows | 122 | `0.028678`, high-gap 8v GCD d4/gap256 | `1.0308265` | `9.715828`, PolyBench factor #176 |
+| non-PolyBench rows | 76 | `0.028678`, high-gap 8v GCD | `0.895231` | `3.443308`, high-height univariate factor d33 |
+| PolyBench products plus operations | 46 | `0.102770`, factor #44 | `1.6831265` | `9.715828`, factor #176 |
+| PolyBench operations only | 23 | `0.102770`, factor #44 | `0.828262` | `9.715828`, factor #176 |
+| PolyBench construction products | 23 | `1.586414`, factor #178 product | `1.834232` | `1.905304`, factor #159 product |
+| PolyBench GCD operations | 12 | `0.387980`, #53 | `0.6583255` | `1.268240`, #140 |
+| PolyBench GCD products | 12 | `1.612471`, #11 | `1.823035` | `1.880432`, #55 |
+| PolyBench factor operations | 11 | `0.102770`, #44 | `1.140041` | `9.715828`, #176 |
+| PolyBench factor products | 11 | `1.586414`, #178 | `1.847760` | `1.905304`, #159 |
+| integer multiplication | 8 | `0.449493`, dense very-large | `0.9351165` | `1.348957`, 7v power-minus-one |
+| finite-field multiplication | 14 | `0.252283`, near-2^64 dense univariate d4912 | `0.5908955` | `1.137177`, near-2^64 dense-large |
+| all multiplication | 22 | `0.252283`, near-2^64 univariate | `0.7449595` | `1.348957`, 7v power-minus-one |
+| exact integer polynomial division | 3 | `0.441603`, dense | `0.442621` | `0.761777`, high-height |
+| main Ducos resultant | 6 | `0.519856`, dense outer d7/6 | `0.7161895` | `1.027247`, outer-sparse d12/9 |
+| Brown resultant alternative | 6 | `1.124006`, nonunit-leading d9/7 | `1.650471` | `2.581685`, high-height d14/10 |
+| CRT resultant alternative | 6 | `0.432838`, outer-sparse d12/9 | `1.189242` | `2.287301`, lacunary d18/11 |
+| generated GCD operations | 14 | `0.028678`, high-gap 8v | `0.4536895` | `1.060731`, dense 2v |
+| generated GCD products | 14 | `0.291403`, dense 2v | `1.356885` | `1.917285`, high-gap 5v |
+| all GCD operations | 30 | `0.028678`, high-gap 8v | `0.613736` | `1.268240`, PolyBench #140 |
+| generated factor operations | 6 | `0.575899`, dense 2v | `1.550977` | `3.443308`, high-height d33 |
+| generated factor products | 6 | `0.738258`, dense 2v | `0.9919445` | `1.184942`, univariate d65 |
+| all factor operations | 17 | `0.102770`, PolyBench #44 | `1.500788` | `9.715828`, PolyBench #176 |
+| all construction products | 44 | `0.291403`, generated dense 2v GCD | `1.705581` | `1.917285`, generated high-gap 5v GCD |
 
 The overall best is generated high-gap GCD with 8 variables, degree 4, and gap 256 (`0.028678x`).
 The overall worst is PolyBench 8-variable sharp factorization #176 (`9.715828x`). The heterogeneous
@@ -167,15 +183,65 @@ The accepted profile artifacts are:
 | `/tmp/profile-factor-ddf-preinverse-final-d64.children-symbols.txt` | `50ae71d62eed02aa889baab4c614506d0b5714bfb8aa7e200edd9d2f0423fc27` |
 | `/tmp/profile-factor-ddf-preinverse-final-d64.flat-symbols.txt` | `d01763ddb411d425ff349bac56b090ee406f3afcc33eeedbf0731364ace73945` |
 
-The next factorization experiment should change the DDF iteration count, not tune the now-reduced
-classical remainder again. Keep a short classical prefix, then use a private dense modular-
-composition context and a guarded fixed-base baby-step/giant-step phase for sufficiently large
-residual degree (start screening around degree 48). A current operation-count estimate changes
-roughly 292 modular products and 47 GCD boundaries into about 218 products, seven block sweeps, and
-21 GCD boundaries on the degree-64 fixture. Require a repeated improvement above the normal 3%
-acceptance threshold and retain the classical path for small residuals. Do not add a method to
-`Ring`. After this DDF experiment, return to the slower one-variable/PolyBench input-product path
-and then the high-height Hensel factorization case.
+### Rejected dense baby-step/giant-step DDF experiment
+
+The first guarded Kaltofen-Shoup-style DDF implementation is preserved in
+`/tmp/symbolica-ddf-bsgs`, branch `codex/ddf-bsgs`, through `0acfcf9`; it is deliberately not on
+`dev`. Its five commits are `96439eb`, `1aa43aa`, `ae07efb`, `c868471`, and `0acfcf9`, all authored
+and committed by `Ben Ruijl <ben@ruijl.ch>`.
+
+The private dense context keeps a degree-one/two classical prefix, constructs baby and giant
+Frobenius steps, takes one coarse GCD per interval, refines nonempty intervals, and shrinks the
+modulus after extraction. A cost guard requires a residual degree of at least 48 and rejects
+unprofitable field/layout regimes. Dedicated tests compare it with classical DDF across the direct,
+native, and wide accumulator modes, partial final blocks, and degree boundaries 48, 49, 63, 64,
+65, 254, and 255. All factor-module tests pass in the candidate worktree.
+
+Six alternating processes with 100 samples per backend and degree give:
+
+| Degree | Candidate Symbolica | Candidate FLINT | Candidate S/F | Control S/F | Paired candidate change |
+|---:|---:|---:|---:|---:|---:|
+| 63 | `5.0264295 ms` | `2.9972965 ms` | `1.680326` | `1.797218` | `-7.211982%` |
+| 64 | `3.9769745 ms` | `2.559878 ms` | `1.554367` | `1.600751` | `-2.641298%` |
+| 65 | `4.895736 ms` | `3.026234 ms` | `1.616546` | `1.631055` | `-1.021248%` |
+
+The representative degree-64 gain is below the standing 3% acceptance threshold. The PolyBench
+guard processes also show that merely adding the approximately 800-line implementation changes
+full-LTO layout enough to regress unaffected cases:
+
+| Guard | Maximum product degree | Candidate S/F | Control S/F | Paired candidate change |
+|---|---:|---:|---:|---:|
+| factor #105 | 19 | `1.122494` | `1.1374615` | `-1.286135%` |
+| factor #178 | 29 | `3.1852305` | `3.088689` | `+3.239243%` |
+| factor #176 | 33 | `9.8575035` | `9.6955485` | `+1.717813%` |
+
+None of those guards reaches the degree-48 threshold, so their movement is not time spent in the
+BSGS algorithm. This combination of a sub-threshold representative gain and guard regressions is
+why the candidate was rejected.
+
+The profile explains the limited ceiling. DDF sampled work drops from about `2.025 B` to `1.972 B`
+cycles, only `2.6%`. Its GCD share falls from `3.95%` to about `2.36%`, but the flat share of
+`multiply_low_into` rises from `6.10%` to `7.75%`; batching replaces GCD boundaries with modular
+composition and interval products that use the same schoolbook dense kernel. The classical path
+also terminates near distinct degree 15 on this fixture rather than running to degree 32, shrinks
+its modulus as factors are extracted, and benefits from cheaper squarings. A simple abstract
+product/GCD count therefore overestimated the saving.
+
+The final candidate already fixes two important structural issues discovered during review: it
+uses O(1) leading-degree checks and shrinks the BSGS modulus after fine refinement. A future retry
+should first provide vector baby-step modular composition or a faster dense finite-field `mulmod`;
+threshold tuning alone is unlikely to make this implementation worthwhile. The independent O(1),
+overflow-safe degree-bound part was retained on `dev` as `79bcd16`.
+
+The final candidate binary is `/tmp/flint-comparison-ddf-bsgs-v3-lto`, SHA-256
+`2618e69d5086e90f9f4acb3c1d05a2fb85b81c28129e104fc2b09d1fed9ede92`. Its build log SHA-256 is
+`2006fffdea8584dc7bd057cdb8f84575cec5a3f2bb6c9571372a6061fbe93fc5`. The 79-file candidate,
+control, guard, and profile manifest is `/tmp/ddf-bsgs-v3-artifacts-sha256.txt`, SHA-256
+`99456b1512f161e776677173e8b5a24f47b67c483d0e3c83d59cfb2580639ef1`.
+
+The next measured target is therefore the slower one-variable and PolyBench input-product path,
+followed by the high-height Hensel factorization case. Keep the existing single-core paired-process
+methodology and the 3% complexity threshold.
 
 ## Previous checkpoint: dense degree-64 modular factorization
 
