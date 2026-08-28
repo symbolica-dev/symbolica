@@ -735,10 +735,11 @@ impl<'a, E: PositiveExponent> DenseZpDistinctDegreeContext<'a, E> {
                 return Err(factor_count_lower_bound);
             }
 
-            if f.last_exponents()[self.variable] < E::from_u32(2 * (distinct_degree as u32 + 1)) {
+            let residual_degree = f.last_exponents()[self.variable].to_u32() as usize;
+            if residual_degree < 2 * (distinct_degree + 1) {
                 if !f.is_constant() {
                     factor_count += 1;
-                    factors.push((f.degree(self.variable).to_u32() as usize, f));
+                    factors.push((residual_degree, f));
                 }
                 break;
             }
@@ -2915,11 +2916,12 @@ where
                 return Err(factor_count_lower_bound);
             }
 
-            if f.last_exponents()[var] < E::from_u32(2 * (i as u32 + 1)) {
+            let residual_degree = f.last_exponents()[var].to_u32() as usize;
+            if residual_degree < 2 * (i + 1) {
                 // f cannot be split more
                 if !f.is_constant() {
                     factor_count += 1;
-                    factors.push((f.last_exponents()[var].to_u32() as usize, f));
+                    factors.push((residual_degree, f));
                 }
                 break;
             }
