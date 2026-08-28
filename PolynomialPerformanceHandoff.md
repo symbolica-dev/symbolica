@@ -269,12 +269,51 @@ The frozen candidate binary is `/tmp/flint-comparison-product-cache-73e846e-lto`
 build-log, and timing manifest is `/tmp/product-cache-73e846e-artifacts-sha256.txt`, SHA-256
 `08ca3c71ddbee25f56bfb276054c7c4dd8f8b3dfdf1c11cf01ebc7b995c9fa78`.
 
-The next measured product target is the univariate setup and reconstruction work around
-`DenseIntegerMul`: obtain the univariate leading degree without a coefficient scan and reconstruct
-its dense output without mixed-radix division. Keep this change isolated from the integer kernel so
-its small profile ceiling can be accepted or rejected independently. PolyBench input-product route
-selection follows; the high-height Hensel factorization case remains the next factor target. Keep
-the existing single-core paired-process methodology and the 3% complexity threshold.
+### Rejected single-variable dense-layout experiment
+
+The polynomial-layer follow-up is preserved in `/tmp/symbolica-onevar-layout`, branch
+`codex/onevar-layout`, at `cf19544` (`Streamline single-variable dense multiplication`); it is
+deliberately not on `dev`. For a variable map of length one, it uses the last Lex-ordered exponent
+as the degree, copies the stored exponents directly into dense-kernel indices, and reconstructs
+output exponents directly from the kernel positions. It retains the existing polynomial-validity
+gate and all general multivariate behavior. Its focused regression test covers offset support,
+coefficient cancellation, zero operands, and `u8` outputs through degree 254.
+
+Six alternating full-LTO processes used 10,000 paired samples per backend on the degree-64 product:
+
+| Version | Symbolica median | FLINT median | Median process S/F | Paired Symbolica change |
+|---|---:|---:|---:|---:|
+| single-variable candidate | `0.0058415 ms` | `0.0053875 ms` | `1.083738` | `-0.834978%` |
+| accepted control | `0.0058675 ms` | `0.005403 ms` | `1.0878695` | — |
+
+The candidate is faster in four of six paired blocks, but the gain is again below `1%` and the
+`3%` acceptance threshold. The profile explains the low ceiling: one-variable
+`advance_uni_var` normally takes its no-carry branch and executes no division, while index-vector
+allocation and the integer kernel remain unchanged. The candidate is therefore rejected.
+
+The frozen candidate binary is `/tmp/flint-comparison-onevar-layout-cf19544-lto`, SHA-256
+`f11bca7dc4578f756d53b57597498f297f389b504a1e87b164f820ff5c723077`. The 15-file manifest is
+`/tmp/onevar-layout-cf19544-artifacts-sha256.txt`, SHA-256
+`84332b4f0de6d04ccafb7b8a7662aad560af79438324b7a53be6c0e8406c522a`.
+
+### PolyBench multiplication route audit
+
+All 35 constituent PolyBench products reject both dense layouts and use packed-`u8` heap
+multiplication. Their mixed-radix boxes contain `224,532` to `6,815,313,600` slots, with box to
+coefficient-pair ratios from `134` to about `3.23 million`; every ratio exceeds the current limit
+of `64`. Total-degree simplex sizes range from `7,624,512` to `7,392,009,768`, all above the
+`1,048,576` cap. Pair-product to output-term ratios are only `1.000` to `1.058`, so these products
+are genuinely sparse and relaxing the dense guard is not a broad solution. Raising its relative
+limit from `64` to `256` would change only the two products in 5-variable sharp GCD #11.
+
+Two isolated packed-heap experiments remain. First, bound result preallocation by the pair-product
+count: current PolyBench inputs reserve only `35` to `50` terms and return about `1,287` to `2,450`.
+Second, create a private polynomial multiplication context that scans support metadata once and
+passes positivity, per-variable degree bounds, maximum total degrees, mixed-radix length, and
+packing width through dense and heap selection. A heap-routed product currently repeats roughly
+seven full support traversals. Keep these experiments separate so allocation and scan gains remain
+attributable. The high-height Hensel factorization case remains the next factor target. Continue
+using the single-core paired-process methodology and the `3%` complexity threshold.
 
 ## Previous checkpoint: dense degree-64 modular factorization
 
