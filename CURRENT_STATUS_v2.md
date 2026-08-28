@@ -7,7 +7,7 @@ the true degree-64 tree. Source-matched S/F improves from `1.039401` to `1.02972
 case is neutral (`1.112776 -> 1.112701`). This version also refreshes stale `v1` measurements for
 those four factor cases (`1.175019/1.417999/1.312650/1.112455` become
 `1.029727/1.296474/1.164159/1.112701`) and for the degree-64 product
-(`1.138626 -> 1.094628`). The immutable copy is [CURRENT_STATUS_v2.md](CURRENT_STATUS_v2.md).
+(`1.138626 -> 1.094628`). The live latest view is [CURRENT_STATUS.md](CURRENT_STATUS.md).
 
 `S/F` is Symbolica's median time divided by FLINT's median time. Lower is better: a value below
 `1` means Symbolica is faster. Repeated-process rows use the median of the process-level paired

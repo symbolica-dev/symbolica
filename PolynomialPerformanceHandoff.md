@@ -1,18 +1,18 @@
 # Polynomial performance continuation handoff
 
 This is the live continuation record for the single-core Symbolica/FLINT polynomial-performance
-work. It was refreshed on 2026-08-28 after balancing three-factor Hensel reconstruction and
-reducing heap maintenance in bounded packed sparse products. The implementation commit is
-`24f57c6`. The base Rust/FLINT comparison inventory was measured at performance-equivalent source
-head `b2e5d28`, with later accepted rows replacing their exploratory predecessors as documented
-below.
+work. It was refreshed on 2026-08-28 after profiling the true degree-64 univariate factorization
+and reusing correction-modulus factor images during synchronized Hensel lifting. The implementation
+commit is `25569ba`. The base Rust/FLINT comparison inventory was measured at
+performance-equivalent source head `b2e5d28`, with later accepted rows replacing their exploratory
+predecessors as documented below.
 Keep this file current whenever an experiment is accepted, rejected, or left partly complete. The
 purpose is that another agent can resume without reconstructing decisions from chat history or
 transient binary names.
 
 The complete current Symbolica/FLINT scoreboard is in
-[CURRENT_STATUS.md](CURRENT_STATUS.md), with the initial immutable snapshot in
-[CURRENT_STATUS_v1.md](CURRENT_STATUS_v1.md). It contains 122 canonical comparisons and the 12
+[CURRENT_STATUS.md](CURRENT_STATUS.md), with the latest immutable snapshot in
+[CURRENT_STATUS_v2.md](CURRENT_STATUS_v2.md). It contains 122 canonical comparisons and the 12
 duplicate Brown/CRT resultant measurements in one globally sorted table. After every accepted
 optimization, update the live file and create the next numbered snapshot with an opening paragraph
 that describes the changes from its predecessor.
@@ -35,7 +35,124 @@ that describes the changes from its predecessor.
 - Small changes below roughly 3% need particularly strong, repeated evidence before their
   complexity is accepted.
 
-## Current continuation checkpoint: Hensel balance and packed-row heap advancement
+## Current continuation checkpoint: degree-64 Hensel remainder arithmetic
+
+The accepted source chain now ends with:
+
+| Commit | Change |
+|---|---|
+| `24f57c6` | Balance three-factor Hensel roots and advance packed-row heap heads in place |
+| `25569ba` | Reuse child-factor images at the correction modulus across each Hensel stage |
+
+### Current degree-64 timing and profile
+
+The true degree-64 fixture is `generated factorization: dense 1-variable degrees 33/31 total 64`.
+After extracting its exact factor `x`, the degree-63 cofactor selects `p=17` and the modular leaves
+`[1,2,10,10,10,30]`. The current accepted implementation measures `1.296474` S/F, approximately
+`3.314190 ms` for Symbolica versus `2.556886 ms` for FLINT. Its construction product is
+`1.094628` S/F, approximately `5.958 us` versus `5.436 us`.
+
+The most recent pinned-core LBR profile predates the small `25569ba` saving but profiles the same
+algorithm and fixture. Its 1,000 calls per backend measure `3.373043/2.580603 ms = 1.307076` and
+give the following inclusive per-call attribution:
+
+| Phase | Symbolica cycles | FLINT cycles | Difference |
+|---|---:|---:|---:|
+| complete factorization | `15.002 M` | `11.450 M` | `+3.552 M` |
+| Hensel reconstruction/tree | `9.363 M` | `5.903 M` | `+3.460 M` |
+| distinct-degree screening | `4.462 M` | `1.738 M` | `+2.724 M` |
+| equal-degree factorization | `0.780 M` | `2.926 M` | `-2.146 M` |
+
+Hensel therefore accounts for about 97% of the net cycle gap. Within Symbolica's Hensel subtree,
+`DenseIntegerModularUnivariateContext::remainder_monic` is `5.015 M` inclusive cycles per call and
+`multiply_raw` is `2.424 M`. Equal-degree factorization is already about `0.267x` FLINT's cost and
+is no longer the target. The five-node, seven-stage product tree makes about 260 monic remainders
+and 225 dense products for this fixture.
+
+Profile artifacts are:
+
+- binary `/tmp/flint-comparison-hensel-peek-final-system-lto`, SHA-256
+  `d1a02003b7bb6f12af759bfcce6fd85642b76c7fb4602c0a5416677ce6780b00`;
+- `/tmp/profile-d64-current-24f57c6-lbr.perf.data`, SHA-256
+  `ac4c3487262b88e1f5d642f81894d576407416c850a6b0b5dbc40c0b64358cba`;
+- `/tmp/profile-d64-current-24f57c6.csv`, SHA-256
+  `51142a9010733cb98d382dfa250ec4af7c9edb975c0e6f927f66e18f29fa2931`;
+- `/tmp/profile-d64-current-24f57c6-{children,flat}.txt`, with respective SHA-256 values
+  `8ef0ae1ba68ce865615e534d65b2f00eb81239beede5e9bbf2f6a1436e47a7a6` and
+  `49ab6b2fab5983bb52e733d15298b87d255ced94b1322ec38ed68410a99a2c55`.
+
+### Accepted correction-modulus image reuse
+
+For an old precision `m=p^old` and correction precision `c=p^(new-old)`, the ceiling-halved
+schedule guarantees `c` divides `m`. A lifted child is `U=u+m*du`, hence `U` and `u` have exactly
+the same canonical image modulo `c`; the same holds for `W=w+m*dw`. The factor-correction half of
+the stage already computes those images. Commit `25569ba` retains them for the subsequent Bezout
+correction instead of reducing both lifted children again. The correction degrees are below their
+monic divisors, so the leading ones are unchanged.
+
+This removes 60 dense-vector reductions, approximately 852 coefficient `%` operations, from the
+degree-64 tree. Although the gain is below the usual 3% threshold, it is retained because the
+change only removes provably redundant work, its invariant has a direct small- and GMP-modulus
+test, and all three adjacent dense degrees improve in repeated source-matched runs:
+
+| Fixture | Candidate Symbolica | Control Symbolica | Candidate S/F | Control S/F | Absolute change |
+|---|---:|---:|---:|---:|---:|
+| degree 63 | `3.078308 ms` | `3.107922 ms` | `1.029727` | `1.039401` | `-0.95%` |
+| degree 64, 12 processes | `3.314190 ms` | `3.336628 ms` | `1.296474` | `1.306468` | `-0.67%` |
+| degree 65 | `3.521314 ms` | `3.550522 ms` | `1.164159` | `1.171766` | `-0.82%` |
+| high-height degree 33 | `1.531238 ms` | `1.533379 ms` | `1.112701` | `1.112776` | `-0.14%` |
+
+Every process uses 200 paired samples, pinned-core sequential execution, default release features
+including `faster_alloc`, and system FLINT 3.6.0. Raw files are
+`/tmp/{d63,d65,highheight}-reusemod-{candidate,control}-{1..6}.csv` and
+`/tmp/d64-reusemod-{candidate,control}-{1..12}.csv`. The candidate binary is
+`/tmp/flint-comparison-d64-reusemod-system-lto`, SHA-256
+`9674b4640edcb5d304a1bc22b18e3b18feb94bdc41496028d38102a6fe343bb5`; its build log SHA-256 is
+`6e569da59e9f7c6ea51e319735fefe0162972532bfb15ea397e31ca166c349ad`.
+All 81 factor-module tests and `cargo fmt --check` pass.
+
+### Rejected batched classical remainder
+
+A separate candidate reordered monic long division into one owned integer dot product for each
+quotient and remainder coefficient. It was correct, kept the GMP accumulator large across the
+whole dot product, reduced once per coefficient, and avoided cloning the discarded quotient.
+However, it still performed `quotient_length * divisor_degree` coefficient products and could no
+longer skip an entire update row when a quotient pivot was zero.
+
+Six alternating 200-sample processes per case gave:
+
+| Fixture | Candidate Symbolica | Control Symbolica | Candidate S/F | Control S/F | Absolute change |
+|---|---:|---:|---:|---:|---:|
+| degree 63 | `3.109843 ms` | `3.105289 ms` | `1.039564` | `1.037742` | `+0.15%` |
+| degree 64 | `3.303800 ms` | `3.345429 ms` | `1.281515` | `1.305739` | `-1.24%` |
+| degree 65 | `3.472808 ms` | `3.556066 ms` | `1.147178` | `1.174235` | `-2.34%` |
+| high-height degree 33 | `1.522095 ms` | `1.529497 ms` | `1.103676` | `1.110492` | `-0.48%` |
+
+The gains are too small and inconsistent for the added recurrence and sparse-pivot risk, so the
+candidate was reverted without a commit. Raw files are
+`/tmp/{d63,d65,highheight}-dotrem-{candidate,control}-{1..6}.csv` and
+`/tmp/d64-dotrem-{candidate,control}-{1..6}.csv`. The rejected binary is
+`/tmp/flint-comparison-d64-dotrem-system-lto`, SHA-256
+`a0904b66e79efeffb5b635cb2d14e87dead626af16586e404dff1c4f3320acd2`; its build log SHA-256 is
+`891a4e51712c816f1dede8a8bd40351bd40ef70f872796691bbec1501d70def9`.
+
+### Next degree-64 implementation target
+
+FLINT uses coefficient-at-a-time division only when the divisor length is at most 30 or the degree
+gap is at most 10. Larger Hensel remainders use Newton division with genuine low and middle
+convolution windows. Symbolica's rejected reciprocal prototype `d675fd8` regressed 29.17% because
+it formed complete products and truncated them afterward; do not restore it unchanged.
+
+The next implementation should add one exact contiguous `[output_start, output_end)` convolution
+capability to `PolynomialKernels`, not another method to `Ring`. A private integer operation
+context should initially enumerate only pairs contributing to the requested coefficients and keep
+one fused fixed-width or GMP accumulator per output cell. The same capability expresses both
+`mullow` and `mulmid`. Benchmark it independently at lengths 8, 16, 24, 30, 31, 32, 48, and 64,
+degree gaps around 10/11, and coefficient heights from 16 through 1024 bits. Only after the exact
+degree-64 windows beat full-product-and-truncate should it be used for cached reciprocal extension,
+quotient recovery, and the low remainder product behind FLINT's `lenB > 30 && gap > 10` guard.
+
+## Previous continuation checkpoint: Hensel balance and packed-row heap advancement
 
 The accepted source chain is:
 
@@ -2354,6 +2471,8 @@ older checksums and ratios are retained in Git history of this document at commi
   selector is around `high_linear_lift_pressure`, and the guarded #84 order selection is
   `reorder_integer_factor_variables_for_sparse_univariate`.
 - Shared polynomial operation kernels: `src/poly/kernels.rs`.
+- Coefficient-domain polynomial kernel capabilities: `lib/numerica/src/kernels.rs`; the integer
+  implementation is `lib/numerica/src/domains/integer/polynomial_kernels.rs`.
 - Generated and PolyBench fixtures: `benches/support/cases.rs` and
   `benches/support/polybench_cases.rs`.
 
@@ -2369,29 +2488,26 @@ comments that justify file organization by contrasting it with designs not prese
 
 ## Current ordered next actions
 
-1. Profile the generated dense three-variable degree-6/5 factorization, now the canonical worst
-   row at `1.915064x` FLINT. Measure the operation separately from its product, which is already
-   essentially tied at `1.009108x`, before changing factorization dispatch.
-2. Investigate the remaining multiplication-heavy generated GCD constructions. Sparse 8v, sparse
-   5v, dense 5v, and high-gap 8v products are `1.88--1.91x` FLINT, while the narrowly matching
-   high-gap 5v product now wins at `0.799572x`. Attribute dispatch, monomial merge, and coefficient
-   work per shape; do not broaden the new heap update without source-matched guards.
-3. For dense degree 64, treat the accepted dense EDF as complete. The remaining measured pressure
-   is Hensel/tree followed by DDF. Do not revive full reciprocal/Newton polynomial remainders at
-   degree 30: the retained commit/revert experiment regressed Symbolica by `29.17%`. Consider only
-   bounded or truncated formulations whose primitive operation wins independently at these
-   lengths.
-4. Keep `try_packed_u8_row_merge_mul` bounded. Broaden its row or pair limits, or add a `u16`
-   coordinate variant, only when a source-matched multiplication case demonstrates a win and the
-   current 23 PolyBench construction rows remain guarded. All 23 now beat FLINT, with a current
-   median of `0.601621x`.
-5. Extend the #84 ordering heuristic only for measured matching geometries. The current Auto-only
-   guards change one of 11 PolyBench factor fixtures, preserve the original bivariate order for
-   terminal fallback, and leave #159 within `0.89%` in repeated A/B timing. Similar slow cases
-   should first be audited by degrees, leading-layer sizes, and the two competing density scores.
-6. Add finite-field and rational differential coverage for the generic packed-row path and an
-   end-to-end factor test that forces all speculative univariate retries to fail before bivariate
-   fallback. These are coverage improvements, not known correctness failures.
+1. Implement and independently benchmark one exact contiguous dense-convolution window capability
+   on `PolynomialKernels`, with a private integer operation context. Start with pair-truncated
+   fixed-width and fused-GMP dot products; do not add a method to `Ring` or alter the established
+   full-product path.
+2. Only if the exact degree-64 low/middle windows win, use them in a guarded cached-reciprocal
+   remainder for Hensel lifting. Start at FLINT's divisor-length 30 and degree-gap 10 boundaries,
+   retain classical division below them, and recheck degrees 63/64/65 plus high-height degree 33.
+   Do not restore the full-product Newton prototype, which regressed 29.17%.
+3. Reprofile degree 64 after the Hensel experiment. If distinct-degree screening remains material,
+   test a bounded retained Frobenius table/operator rather than the rejected scalar BSGS loop.
+   Equal-degree factorization is complete for this fixture.
+4. Continue the one-variable work with the degree-64 construction product, currently `1.094628x`
+   FLINT. Its profile is `DenseIntegerMul` versus FLINT's dense univariate KS path; keep any change
+   local to contiguous integer multiplication and guard adjacent degrees and coefficient heights.
+5. After the degree-64 and one-variable work, profile the dense three-variable degree-6/5
+   factorization, the canonical worst row at `1.915064x`. Its construction product is already
+   essentially tied at `1.009108x`, so measure the factor operation separately.
+6. Keep `try_packed_u8_row_merge_mul` bounded. Broaden its row/pair limits or add a `u16` coordinate
+   variant only when a source-matched multiplication case demonstrates a win and the current 23
+   PolyBench construction rows remain guarded.
 7. Freeze and hash every accepted full-LTO binary and profile, integrate only measured winners with
    Ben Ruijl's identity, update [CURRENT_STATUS.md](CURRENT_STATUS.md), and create the next immutable
    `CURRENT_STATUS_v<i>.md` snapshot after every accepted improvement.
