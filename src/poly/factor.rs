@@ -1401,6 +1401,12 @@ std::thread_local! {
     static LOCAL_HENSEL_RECOMBINATION_NODES: std::cell::Cell<usize> = const {
         std::cell::Cell::new(0)
     };
+    static BIVARIATE_SAMPLE_FACTORIZATIONS: std::cell::Cell<usize> = const {
+        std::cell::Cell::new(0)
+    };
+    static BIVARIATE_FIRST_SAMPLE_ACCEPTANCES: std::cell::Cell<usize> = const {
+        std::cell::Cell::new(0)
+    };
     static EXACT_HENSEL_SUBTREE_MODULUS_BITS: std::cell::RefCell<Vec<u64>> = const {
         std::cell::RefCell::new(Vec::new())
     };
@@ -9261,6 +9267,8 @@ impl<E: PositiveExponent> MultivariatePolynomial<IntegerRing, E, LexOrder> {
         let mut best: Option<(Integer, Vec<Self>, Vec<(usize, Integer)>, i64, Self)> = None;
 
         let uni_lcoeff = self.univariate_lcoeff(order[0]);
+        let can_accept_first_primitive_image =
+            max_factors_num.is_none() && uni_lcoeff.is_constant();
         let mut lcoeff_square_free = self.one();
         for (f, _) in uni_lcoeff.square_free_factorization() {
             lcoeff_square_free = &lcoeff_square_free * &f;
@@ -9348,8 +9356,30 @@ impl<E: PositiveExponent> MultivariatePolynomial<IntegerRing, E, LexOrder> {
                     continue;
                 }
 
+                #[cfg(test)]
+                BIVARIATE_SAMPLE_FACTORIZATIONS.with(|count| count.set(count.get() + 1));
                 bivariate_factors = cur_biv_f.factor().into_iter().map(|f| f.0).collect();
                 bivariate_factors.retain(|f| !f.is_constant());
+
+                // A one-factor admissible image certifies irreducibility. An
+                // initial primitive image with constant leading coefficient is
+                // ready for reconstruction; a failed reconstruction retries
+                // with an explicit factor bound and uses the samples below.
+                let accepts_first_reconstruction = !bivariate_factors.is_empty()
+                    && can_accept_first_primitive_image
+                    && c.get_constant().abs().is_one();
+                if bivariate_factors.len() == 1 || accepts_first_reconstruction {
+                    #[cfg(test)]
+                    if bivariate_factors.len() > 1 {
+                        BIVARIATE_FIRST_SAMPLE_ACCEPTANCES.with(|count| count.set(count.get() + 1));
+                    }
+                    return (
+                        bivariate_factors,
+                        cur_sample_points,
+                        coefficient_upper_bound,
+                        cur_uni_f,
+                    );
+                }
 
                 if max_factors_num.is_none() {
                     max_factors_num = Some(bivariate_factors.len());
@@ -10308,6 +10338,7 @@ mod test {
     use std::sync::{Arc, Mutex, atomic::Ordering};
 
     use super::{
+        BIVARIATE_FIRST_SAMPLE_ACCEPTANCES, BIVARIATE_SAMPLE_FACTORIZATIONS,
         BOUNDED_DDF_REJECTIONS, DENSE_ZP_DDF_MODULUS_UPDATES, DENSE_ZP_DDF_SCREENS,
         DENSE_ZP_EDF_BLOCKS, DenseBivariateImage, DenseIntegerModularUnivariateContext,
         DenseTwoFactorCorrectionContext, DenseZpAccumulationMode, DenseZpDistinctDegreeContext,
@@ -11134,6 +11165,52 @@ mod test {
             .use_bivariate_factorization
             .store(false, Ordering::Relaxed);
         assert_eq!(poly.factor(), vec![(poly, 1)]);
+    }
+
+    #[test]
+    fn bivariate_sampling_uses_one_admissible_image_on_initial_primitive_attempt() {
+        let variables = Some(Arc::new(vec![
+            symbol!("x").into(),
+            symbol!("y").into(),
+            symbol!("z").into(),
+        ]));
+        let polynomial = parse!("(x+y+z+1)*(2*x+3*y+5*z+1)")
+            .expand()
+            .to_polynomial::<_, u8>(&Z, variables);
+
+        BIVARIATE_SAMPLE_FACTORIZATIONS.with(|count| count.set(0));
+        BIVARIATE_FIRST_SAMPLE_ACCEPTANCES.with(|count| count.set(0));
+        let mut order = vec![0, 1, 2];
+        let (factors, _, _, _) = polynomial.find_sample(&mut order, 10, None);
+        assert_eq!(factors.len(), 2);
+        BIVARIATE_SAMPLE_FACTORIZATIONS.with(|count| assert_eq!(count.get(), 1));
+        BIVARIATE_FIRST_SAMPLE_ACCEPTANCES.with(|count| assert_eq!(count.get(), 1));
+
+        BIVARIATE_SAMPLE_FACTORIZATIONS.with(|count| count.set(0));
+        BIVARIATE_FIRST_SAMPLE_ACCEPTANCES.with(|count| count.set(0));
+        let mut order = vec![0, 1, 2];
+        let (factors, _, _, _) = polynomial.find_sample(&mut order, 10, Some(2));
+        assert_eq!(factors.len(), 2);
+        BIVARIATE_SAMPLE_FACTORIZATIONS.with(|count| assert_eq!(count.get(), 3));
+        BIVARIATE_FIRST_SAMPLE_ACCEPTANCES.with(|count| assert_eq!(count.get(), 0));
+    }
+
+    #[test]
+    fn bivariate_sampling_accepts_irreducible_image_with_a_bounded_retry() {
+        let variables = Some(Arc::new(vec![
+            symbol!("x").into(),
+            symbol!("y").into(),
+            symbol!("z").into(),
+        ]));
+        let polynomial = parse!("x*y+z+1").to_polynomial::<_, u8>(&Z, variables);
+
+        BIVARIATE_SAMPLE_FACTORIZATIONS.with(|count| count.set(0));
+        BIVARIATE_FIRST_SAMPLE_ACCEPTANCES.with(|count| count.set(0));
+        let mut order = vec![0, 1, 2];
+        let (factors, _, _, _) = polynomial.find_sample(&mut order, 10, Some(2));
+        assert_eq!(factors.len(), 1);
+        BIVARIATE_SAMPLE_FACTORIZATIONS.with(|count| assert_eq!(count.get(), 1));
+        BIVARIATE_FIRST_SAMPLE_ACCEPTANCES.with(|count| assert_eq!(count.get(), 0));
     }
 
     #[test]
