@@ -1,8 +1,8 @@
 # Polynomial performance continuation handoff
 
 This is the live continuation record for the single-core Symbolica/FLINT polynomial-performance
-work. It was refreshed on 2026-08-28 after extending packed row merging to few-row products that
-exceed the former global pair limit. The latest implementation commit is `b8b169f`. The base
+work. It was refreshed on 2026-08-28 after adding a wide packed row merge for high-gap products.
+The latest implementation commit is `843ce58`. The base
 Rust/FLINT comparison inventory was measured at performance-equivalent source head `b2e5d28`, with
 later accepted rows replacing their exploratory predecessors as documented below.
 Keep this file current whenever an experiment is accepted, rejected, or left partly complete. The
@@ -11,7 +11,7 @@ transient binary names.
 
 The complete current Symbolica/FLINT scoreboard is in
 [CURRENT_STATUS.md](CURRENT_STATUS.md), with the latest immutable snapshot in
-[CURRENT_STATUS_v4.md](CURRENT_STATUS_v4.md). It contains 122 canonical comparisons and the 12
+[CURRENT_STATUS_v5.md](CURRENT_STATUS_v5.md). It contains 122 canonical comparisons and the 12
 duplicate Brown/CRT resultant measurements in one globally sorted table. After every accepted
 optimization, update the live file and create the next numbered snapshot with an opening paragraph
 that describes the changes from its predecessor.
@@ -34,32 +34,47 @@ that describes the changes from its predecessor.
 - Small changes below roughly 3% need particularly strong, repeated evidence before their
   complexity is accepted.
 
-## Current continuation checkpoint: high-gap eight-variable product construction
+## Current continuation checkpoint: PolyBench factorization #131
 
-After commit `b8b169f`, the ordered worst canonical row is `generated GCD products: high-gap 8
-variables degree 4 gap 256` at `2.019693` S/F: `0.651666 ms` for Symbolica versus
-`0.322656 ms` for FLINT in the consistent 1,000-sample generated sweep.
+The ordered worst canonical row is now `polybench factorization: polybench 5v uniform nontrivial
+factor #131`. The exact final `843ce58` binary measures `81.725573 ms` for Symbolica versus
+`46.814936 ms` for FLINT over 500 paired samples, or `1.745716` S/F.
 
-The two dense degree-four cofactors contain 494 and 495 terms; the common factor has nine terms.
-Their products enumerate and retain exactly 4,446 and 4,455 terms, with no collisions or
-cancellations. All coefficients remain `Integer::Single`: the largest cofactor coefficient is
-875,160 (20 bits), and the largest product coefficient is 14,877,720 (24 bits). The issue is
-therefore exponent-key bookkeeping, not coefficient arithmetic.
+The input is the product of two 41-term integer polynomials and contains 1,665 terms. Its separate
+construction benchmark is `0.613128` S/F, so multiplying the known factors is already faster than
+FLINT and cannot explain the factorization gap. Continue by profiling the factorization route,
+recording its selected variable order, bivariate image count, modular factor degrees, lifting
+work, and final reconstruction/verification cost. The next change must be gated by a shape or
+route property specific enough not to disturb the already-fast PolyBench factorization cases.
 
-Every output variable reaches degree 260. That exceeds the existing packed-`u8` route, while the
-packed-`u16`/`u64` route only represents up to four variables. The case consequently uses the
-generic exponent-vector hash-map heap despite having only nine sorted row streams. It costs about
-73.2 ns per coefficient pair, versus FLINT's 36.25 ns. By comparison, the newly accepted packed
-`u8` sparse-eight case costs about 20.0 ns per pair.
+## Accepted wide packed high-gap multiplication
 
-The next narrow experiment is a private five-to-eight-variable `u16` row merge with a `u128`
-monomial key. Pack variables 0--3 into the high `u64` and variables 4--7 into the low `u64`, so
-numeric `u128` ordering matches lexicographic exponent ordering. Add the halves independently to
-avoid a carry crossing the boundary, require nonnegative exponents and per-variable degree sums at
-most 65,535, and retain the same few-row work bound. Insert it after the packed-`u8` route and
-before the generic heap. The exact high-gap fixture, boundary cases, reversed operands, collision
-and cancellation behavior, 5--8-variable layouts, and rejection paths need tests before paired
-benchmarking.
+Commit `843ce58` represents five-to-eight-variable polynomial monomials with a `u128` key made
+from two independently added packed-`u16` words. The bounded row heap therefore avoids allocating
+and hashing a full exponent vector for every coefficient pair when output degrees exceed 255.
+
+The former worst canonical high-gap eight-variable degree-4 row changes
+`2.019693 -> 0.524530` S/F. The final 5,000-sample measurement is `0.200774 ms` for Symbolica
+versus `0.382769 ms` for FLINT. The frozen source-matched control measured `0.645276 ms` for
+Symbolica and `1.654253` S/F, so Symbolica time fell 68.9%. A degree-5 stress variant changes
+`1.561459 -> 0.475039` S/F, with the Symbolica median falling `1.854737 -> 0.503020 ms`.
+
+The selector requires five through eight variables, nonnegative polynomial exponents, every output
+degree representable in both 16 bits and `E`, and the existing few-row work bound. High and low
+`u64` halves are added independently, preventing a carry between variables 4 and 5. Tests cover
+the exact target in both operand orders, partial and full low words, sums at 65,535 and rejection
+at 65,536, `u8` and `i16` representability rejection, collisions, cancellation, and a finite-field
+image. All 37 polynomial tests pass.
+
+The exact final binary is `/tmp/flint-comparison-wide-u16-final`, SHA-256
+`0642e60e02f9cd86f4e64bd9135b2e02f9919209b7bd85840d65c3930b36a54c`. The frozen control is
+`/tmp/flint-comparison-few-row-cold-candidate`, SHA-256
+`39edd985345a93b1c4d80909b6551a8fa6f7fae02759be2060867f3a867865b8`.
+
+Two older packed paths have separate pre-existing signed-width correctness gaps: an `i8` output
+sum from 128 through 254 and a four-or-fewer-variable `i16` sum from 32,768 through 65,534 can be
+packed and then unpacked through a narrowing cast. The new wide selector explicitly rejects these
+cases; fixing the older routes is outside this performance change.
 
 ## Accepted few-row packed multiplication
 
