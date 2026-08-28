@@ -445,10 +445,11 @@ pub fn resultant_inputs(
         parse_integer_polynomial(case.right),
     ];
     MultivariatePolynomial::unify_variables_list(&mut polynomials);
+    let elimination_variable = parse_integer_polynomial("x").variables()[0].clone();
     let variable = polynomials[0]
         .variables()
         .iter()
-        .position(|variable| variable == &PolyVariable::Symbol(symbol!("x")))
+        .position(|variable| variable == &elimination_variable)
         .expect("resultant cases must contain x");
     (
         polynomials[0].to_univariate(variable),
