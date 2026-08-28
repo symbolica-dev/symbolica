@@ -770,9 +770,245 @@ impl<'a, E: PositiveExponent> DenseZpDistinctDegreeContext<'a, E> {
     }
 }
 
+/// Dense arithmetic for Cantor-Zassenhaus equal-degree factorization over `Zp`.
+///
+/// A split attempt samples one dense residue, checks it for an immediate GCD,
+/// and otherwise raises it to `(p^d - 1) / 2` modulo the current block. The
+/// modulus reciprocal and all product buffers are retained across the binary
+/// powering steps. Polynomials are materialized only for the GCDs that can
+/// produce a factor.
+struct DenseZpEqualDegreeContext<'a, E: PositiveExponent> {
+    field: Zp,
+    variable: usize,
+    template: &'a MultivariatePolynomial<Zp, E, LexOrder>,
+    modulus: Vec<FiniteFieldElement<u32>>,
+    reverse_modulus_inverse: Vec<FiniteFieldElement<u32>>,
+    exponent_bits: Vec<bool>,
+    random_residue: Vec<FiniteFieldElement<u32>>,
+    power: Vec<FiniteFieldElement<u32>>,
+    result: Vec<FiniteFieldElement<u32>>,
+    multiplication_output: Vec<FiniteFieldElement<u32>>,
+    multiplication_workspace: DenseZpMulModWorkspace,
+}
+
+impl<'a, E: PositiveExponent> DenseZpEqualDegreeContext<'a, E> {
+    /// Prepare a bounded dense workspace for an equal-degree block.
+    ///
+    /// The same density and degree limits as dense distinct-degree
+    /// factorization keep allocation proportional to the sparse input size.
+    fn new(
+        polynomial: &'a MultivariatePolynomial<Zp, E, LexOrder>,
+        variable: usize,
+        equal_degree: usize,
+    ) -> Option<Self> {
+        let DenseZpDistinctDegreeContext {
+            field,
+            variable,
+            template,
+            modulus,
+            reverse_modulus_inverse,
+            power,
+            multiplication_output,
+            multiplication_workspace,
+        } = DenseZpDistinctDegreeContext::new(polynomial, variable)?;
+
+        let degree = modulus.len() - 1;
+        if equal_degree == 0 || degree <= equal_degree || !degree.is_multiple_of(equal_degree) {
+            return None;
+        }
+
+        let characteristic = field.size().unwrap();
+        let mut exponent =
+            (&characteristic.pow(equal_degree as u64) - &Integer::one()) / &Integer::from(2);
+        let mut exponent_bits = Vec::new();
+        while !exponent.is_zero() {
+            exponent_bits.push((&exponent % &Integer::Single(2)).is_one());
+            exponent /= 2;
+        }
+        debug_assert!(!exponent_bits.is_empty());
+
+        Some(Self {
+            field,
+            variable,
+            template,
+            modulus,
+            reverse_modulus_inverse,
+            exponent_bits,
+            random_residue: Vec::with_capacity(degree),
+            power,
+            result: Vec::with_capacity(degree),
+            multiplication_output,
+            multiplication_workspace,
+        })
+    }
+
+    /// Convert ascending dense coefficients into a sparse polynomial for a
+    /// univariate GCD.
+    fn polynomial(
+        &self,
+        coefficients: &[FiniteFieldElement<u32>],
+    ) -> MultivariatePolynomial<Zp, E, LexOrder> {
+        let mut polynomial = self.template.zero_with_capacity(coefficients.len());
+        let mut exponents = vec![E::zero(); self.template.nvars()];
+        for (degree, coefficient) in coefficients.iter().enumerate() {
+            if self.field.is_zero(coefficient) {
+                continue;
+            }
+            exponents[self.variable] = E::from_u32(degree as u32);
+            polynomial.append_monomial_back(*coefficient, &exponents);
+        }
+        polynomial
+    }
+
+    /// Raise `base` to the cached Cantor-Zassenhaus exponent modulo the block.
+    ///
+    /// The first set exponent bit copies the corresponding power into the
+    /// result, avoiding a polynomial multiplication by one.
+    fn power_to_half_group_order(&mut self, base: &[FiniteFieldElement<u32>]) {
+        self.power.clear();
+        self.power.extend_from_slice(base);
+        self.result.clear();
+        let mut result_initialized = false;
+
+        for (bit_index, bit) in self.exponent_bits.iter().copied().enumerate() {
+            if bit {
+                if result_initialized {
+                    DenseZpDistinctDegreeContext::<E>::multiply_mod_into(
+                        &self.field,
+                        &self.modulus,
+                        &self.reverse_modulus_inverse,
+                        &self.result,
+                        &self.power,
+                        &mut self.multiplication_output,
+                        &mut self.multiplication_workspace,
+                    );
+                    std::mem::swap(&mut self.result, &mut self.multiplication_output);
+                } else {
+                    self.result.extend_from_slice(&self.power);
+                    result_initialized = true;
+                }
+            }
+
+            if bit_index + 1 < self.exponent_bits.len() {
+                DenseZpDistinctDegreeContext::<E>::square_mod_into(
+                    &self.field,
+                    &self.modulus,
+                    &self.reverse_modulus_inverse,
+                    &self.power,
+                    &mut self.multiplication_output,
+                    &mut self.multiplication_workspace,
+                );
+                std::mem::swap(&mut self.power, &mut self.multiplication_output);
+            }
+        }
+
+        debug_assert!(result_initialized);
+    }
+
+    /// Find one proper factor of the current equal-degree block.
+    fn split<R: Rng + ?Sized>(
+        &mut self,
+        rng: &mut R,
+    ) -> MultivariatePolynomial<Zp, E, LexOrder> {
+        let degree = self.modulus.len() - 1;
+        let sampling_range = 0..=i64::from(self.field.get_prime() - 1);
+
+        loop {
+            self.random_residue.clear();
+            self.random_residue.extend(
+                (0..degree).map(|_| self.field.sample(rng, &sampling_range)),
+            );
+            DenseZpDistinctDegreeContext::<E>::trim(&self.field, &mut self.random_residue);
+            if self.random_residue.len() <= 1 {
+                continue;
+            }
+            *self.random_residue.last_mut().unwrap() = self.field.one();
+
+            let random_polynomial = self.polynomial(&self.random_residue);
+            let gcd = random_polynomial.univariate_gcd(self.template);
+            if !gcd.is_one() {
+                return gcd;
+            }
+
+            let random_residue = std::mem::take(&mut self.random_residue);
+            self.power_to_half_group_order(&random_residue);
+            self.random_residue = random_residue;
+            if self.result.is_empty() {
+                self.result.push(self.field.zero());
+            }
+            self.field
+                .sub_assign(&mut self.result[0], &self.field.one());
+            DenseZpDistinctDegreeContext::<E>::trim(&self.field, &mut self.result);
+            if self.result.len() <= 1 {
+                continue;
+            }
+
+            let gcd = self.polynomial(&self.result).univariate_gcd(self.template);
+            if !gcd.is_one() && &gcd != self.template {
+                return gcd;
+            }
+        }
+    }
+
+    /// Split a dense block into its monic irreducible factors of degree `d`.
+    ///
+    /// Recursive factors that become too sparse for bounded dense storage use
+    /// the generic polynomial implementation.
+    fn factor(
+        polynomial: &MultivariatePolynomial<Zp, E, LexOrder>,
+        variable: usize,
+        d: usize,
+    ) -> Option<Vec<MultivariatePolynomial<Zp, E, LexOrder>>> {
+        let polynomial = polynomial.clone().make_monic();
+        let degree = polynomial.degree(variable).to_u32() as usize;
+        if d == 0 || degree < d || !degree.is_multiple_of(d) {
+            return None;
+        }
+        if degree == d {
+            return Some(vec![polynomial]);
+        }
+
+        let mut rng = rng();
+        let mut pending = vec![polynomial];
+        let mut factors = Vec::new();
+        let mut first_block = true;
+        while let Some(block) = pending.pop() {
+            if block.degree(variable).to_u32() as usize == d {
+                factors.push(block);
+                continue;
+            }
+
+            let factor = if let Some(mut context) =
+                DenseZpEqualDegreeContext::new(&block, variable, d)
+            {
+                #[cfg(test)]
+                if first_block {
+                    DENSE_ZP_EDF_BLOCKS.with(|blocks| blocks.set(blocks.get() + 1));
+                }
+                context.split(&mut rng)
+            } else if first_block {
+                return None;
+            } else {
+                factors.extend(block.equal_degree_factorization(d));
+                continue;
+            };
+            first_block = false;
+            let (cofactor, remainder) = block.quot_rem_univariate_monic(&factor);
+            debug_assert!(remainder.is_zero());
+            // The stack processes the factor subtree before the cofactor subtree, matching the
+            // recursive generic algorithm's factor order for downstream Hensel tie-breaking.
+            pending.push(cofactor);
+            pending.push(factor);
+        }
+
+        Some(factors)
+    }
+}
+
 /// A suitable finite-field image whose equal-degree factorization has been deferred.
 struct ModularIntegerFactorization<E: PositiveExponent> {
     field: Zp,
+    variable: usize,
     distinct_degree: DistinctDegreeFactorization<MultivariatePolynomial<Zp, E, LexOrder>>,
 }
 
@@ -1107,6 +1343,9 @@ std::thread_local! {
         std::cell::Cell::new(0)
     };
     static DENSE_ZP_DDF_MODULUS_UPDATES: std::cell::Cell<usize> = const {
+        std::cell::Cell::new(0)
+    };
+    static DENSE_ZP_EDF_BLOCKS: std::cell::Cell<usize> = const {
         std::cell::Cell::new(0)
     };
     static BOUNDED_DDF_REJECTIONS: std::cell::Cell<usize> = const {
@@ -7261,6 +7500,7 @@ impl<E: PositiveExponent> MultivariatePolynomial<IntegerRing, E, LexOrder> {
                 );
                 Some(ModularPrimeScreen::Candidate(ModularIntegerFactorization {
                     field,
+                    variable: var,
                     distinct_degree,
                 }))
             }
@@ -7287,7 +7527,10 @@ impl<E: PositiveExponent> MultivariatePolynomial<IntegerRing, E, LexOrder> {
         let mut factors = Vec::with_capacity(factor_count);
         for (degree, block) in candidate.distinct_degree.blocks {
             debug!("DDF {} {}", block, degree);
-            for factor in block.equal_degree_factorization(degree) {
+            let block_factors =
+                DenseZpEqualDegreeContext::factor(&block, candidate.variable, degree)
+                    .unwrap_or_else(|| block.equal_degree_factorization(degree));
+            for factor in block_factors {
                 debug!("EDF {}", factor);
                 factors.push(factor);
             }
@@ -9913,8 +10156,10 @@ mod test {
 
     use super::{
         BOUNDED_DDF_REJECTIONS, DENSE_ZP_DDF_MODULUS_UPDATES, DENSE_ZP_DDF_SCREENS,
+        DENSE_ZP_EDF_BLOCKS,
         DenseBivariateImage, DenseIntegerModularUnivariateContext, DenseTwoFactorCorrectionContext,
-        DenseZpAccumulationMode, DenseZpDistinctDegreeContext, DenseZpMulModWorkspace,
+        DenseZpAccumulationMode, DenseZpDistinctDegreeContext, DenseZpEqualDegreeContext,
+        DenseZpMulModWorkspace,
         EXACT_HENSEL_SUBTREE_MODULUS_BITS, EXACT_HENSEL_SUBTREE_SPLITS, ExactPolynomialSquareRoot,
         IntegerModularUnivariateContext, LAST_BOUNDED_DDF_REJECTION_DEGREE,
         LAST_MODULAR_INTEGER_EDF_PRIME, LLL_RECOMBINATION_SUCCESSES,
@@ -11184,6 +11429,63 @@ mod test {
     }
 
     #[test]
+    fn dense_zp_equal_degree_power_matches_generic_remainder() {
+        let field = Zp::new(17);
+        let prototype = parse!("x").to_polynomial::<_, u8>(&field, None);
+        let modulus = generated_dense_zp_modulus(&prototype, 30, 1);
+        let base = generated_dense_zp_coefficients(&field, 30, 2);
+        let mut context = DenseZpEqualDegreeContext::new(&modulus, 0, 10)
+            .expect("the degree-30 dense block must use the bounded workspace");
+
+        context.power_to_half_group_order(&base);
+
+        let characteristic = Integer::from(field.get_prime());
+        let exponent = (&characteristic.pow(10) - &Integer::one()) / &Integer::from(2);
+        let base_polynomial = dense_zp_test_polynomial(&prototype, &base);
+        let mut generic_modulus = modulus.clone();
+        let expected = dense_zp_test_coefficients(
+            &base_polynomial.exp_mod_univariate(exponent, &mut generic_modulus),
+        );
+        assert_eq!(context.result, expected);
+    }
+
+    #[test]
+    fn dense_zp_equal_degree_factorization_matches_generic_degree_64_block() {
+        let polynomial = parse!("((1+3*x)^33-1)*((1-5*x)^31+1)")
+            .expand()
+            .to_polynomial::<_, u8>(&Z, None);
+        let (_, cofactor) = polynomial
+            .remove_univariate_monomial_factor(0)
+            .expect("the degree-64 input has an exact factor x");
+        let Some(ModularPrimeScreen::Candidate(candidate)) =
+            cofactor.screen_univariate_mod_prime(0, 17, None)
+        else {
+            panic!("prime 17 must produce the retained modular image");
+        };
+        let (_, block) = candidate
+            .distinct_degree
+            .blocks
+            .into_iter()
+            .find(|(degree, _)| *degree == 10)
+            .expect("the retained image must have a degree-10 block");
+        assert_eq!(block.degree(0), 30);
+
+        let mut expected = block.equal_degree_factorization(10);
+        DENSE_ZP_EDF_BLOCKS.with(|blocks| blocks.set(0));
+        let mut actual = DenseZpEqualDegreeContext::factor(&block, 0, 10)
+            .expect("the retained block must use dense equal-degree factorization");
+        expected.sort_by(|left, right| left.internal_cmp(right));
+        actual.sort_by(|left, right| left.internal_cmp(right));
+        assert_eq!(actual, expected);
+        DENSE_ZP_EDF_BLOCKS.with(|blocks| assert_eq!(blocks.get(), 1));
+
+        let reconstructed = actual
+            .iter()
+            .fold(block.one(), |product, factor| &product * factor);
+        assert_eq!(reconstructed, block);
+    }
+
+    #[test]
     fn bounded_distinct_degree_factorization_reports_exact_factor_counts() {
         let field = Zp::new(11);
         let one = parse!("1").to_polynomial::<_, u8>(&field, None);
@@ -11413,6 +11715,7 @@ mod test {
     #[test]
     fn factor_univariate_degree_64_defers_discarded_equal_degree_factorization() {
         MODULAR_INTEGER_EDF_CALLS.with(|calls| calls.set(0));
+        DENSE_ZP_EDF_BLOCKS.with(|blocks| blocks.set(0));
         BOUNDED_DDF_REJECTIONS.with(|rejections| rejections.set(0));
         LAST_MODULAR_INTEGER_EDF_PRIME.with(|prime| prime.set(0));
         PRODUCT_TREE_HENSEL_LIFT_CALLS.with(|calls| calls.set(0));
@@ -11453,6 +11756,7 @@ mod test {
         degrees.sort_unstable();
         assert_eq!(degrees, [1u8, 1, 2, 10, 20, 30]);
         MODULAR_INTEGER_EDF_CALLS.with(|calls| assert_eq!(calls.get(), 1));
+        DENSE_ZP_EDF_BLOCKS.with(|blocks| assert_eq!(blocks.get(), 1));
         BOUNDED_DDF_REJECTIONS.with(|rejections| assert_eq!(rejections.get(), 1));
         LAST_MODULAR_INTEGER_EDF_PRIME.with(|prime| assert_eq!(prime.get(), 17));
         PRODUCT_TREE_HENSEL_LIFT_CALLS.with(|calls| assert_eq!(calls.get(), 1));
