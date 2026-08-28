@@ -1079,6 +1079,9 @@ std::thread_local! {
     static QUADRATIC_HENSEL_LIFT_CALLS: std::cell::Cell<usize> = const {
         std::cell::Cell::new(0)
     };
+    static QUADRATIC_HENSEL_NONUNIT_RETRIES: std::cell::Cell<usize> = const {
+        std::cell::Cell::new(0)
+    };
     static PRODUCT_TREE_HENSEL_LIFT_CALLS: std::cell::Cell<usize> = const {
         std::cell::Cell::new(0)
     };
@@ -6020,6 +6023,18 @@ impl<E: PositiveExponent> MultivariatePolynomial<IntegerRing, E, LexOrder> {
 
             Ok((u_i, w_i))
         } else {
+            if use_quadratic_lift
+                && ((u_i.lcoeff() % &p).is_zero() || (w_i.lcoeff() % &p).is_zero())
+            {
+                #[cfg(test)]
+                QUADRATIC_HENSEL_NONUNIT_RETRIES.with(|retries| retries.set(retries.get() + 1));
+
+                // An unsuccessful quadratic lift can add a higher-degree correction whose
+                // leading coefficient is divisible by p. It cannot be normalized modulo p^k,
+                // so recompute the approximation with the degree-preserving linear lift.
+                return self.hensel_lift_with_strategy(u, w, Some(gamma), max_p, false);
+            }
+
             if !u_i.lcoeff().is_one() {
                 let inv = u_i.lcoeff().mod_inverse(&m);
                 u_i = u_i.map_coeff(|c| (c * &inv).symmetric_mod(&m), Z);
@@ -9117,10 +9132,10 @@ mod test {
         IntegerModularUnivariateContext, LAST_BOUNDED_DDF_REJECTION_DEGREE,
         LAST_MODULAR_INTEGER_EDF_PRIME, LLL_RECOMBINATION_SUCCESSES,
         LOCAL_HENSEL_RECOMBINATION_NODES, MODULAR_INTEGER_EDF_CALLS, ModularPrimeScreen,
-        PRODUCT_TREE_HENSEL_LIFT_CALLS, QUADRATIC_HENSEL_LIFT_CALLS, QuadraticFactorization,
-        SparseDiophantineContext, UnivariateHenselProductTreeBuildContext,
-        UnivariateHenselProductTreeLink, UnivariateHenselProductTreeNode,
-        univariate_hensel_precision_schedule,
+        PRODUCT_TREE_HENSEL_LIFT_CALLS, QUADRATIC_HENSEL_LIFT_CALLS,
+        QUADRATIC_HENSEL_NONUNIT_RETRIES, QuadraticFactorization, SparseDiophantineContext,
+        UnivariateHenselProductTreeBuildContext, UnivariateHenselProductTreeLink,
+        UnivariateHenselProductTreeNode, univariate_hensel_precision_schedule,
     };
 
     use crate::{
@@ -10740,6 +10755,7 @@ mod test {
 
     #[test]
     fn quadratic_hensel_lift_preserves_unsuccessful_congruence() {
+        QUADRATIC_HENSEL_NONUNIT_RETRIES.with(|retries| retries.set(0));
         let variables = Some(Arc::new(vec![symbol!("x").into()]));
         let polynomial = parse!("1+x^2").to_polynomial::<_, u8>(&Z, variables.clone());
         let field = Zp::new(5);
@@ -10767,6 +10783,7 @@ mod test {
                 .iter()
                 .all(|coefficient| (coefficient % &max_p).is_zero())
         );
+        QUADRATIC_HENSEL_NONUNIT_RETRIES.with(|retries| assert_eq!(retries.get(), 0));
     }
 
     #[test]
