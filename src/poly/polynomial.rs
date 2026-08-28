@@ -38,6 +38,8 @@ const MAX_DENSE_DIV_BUFFER_SIZE: usize = 1 << 20;
 const MAX_MIXED_RADIX_DENSE_TO_PAIR_PRODUCT_RATIO: usize = 64;
 const MAX_PACKED_ROW_MERGE_TERMS: usize = 64;
 const MAX_PACKED_ROW_MERGE_PAIR_PRODUCTS: usize = 4096;
+const MAX_PACKED_ROW_MERGE_FEW_ROWS: usize = 16;
+const MAX_PACKED_ROW_MERGE_FEW_ROW_PAIR_PRODUCTS: usize = 16384;
 thread_local! { static DENSE_MUL_BUFFER: Cell<Vec<u32>> = const { Cell::new(Vec::new()) }; }
 
 /// Return whether scanning a full mixed-radix coefficient box is bounded relative to the
@@ -67,10 +69,23 @@ pub(super) fn mixed_radix_dense_mul_is_bounded(
 /// Return whether a packed sparse product is small enough to enumerate with a bounded row heap.
 #[inline]
 fn packed_row_merge_is_bounded(left_terms: usize, right_terms: usize) -> bool {
-    left_terms.min(right_terms) <= MAX_PACKED_ROW_MERGE_TERMS
-        && left_terms
-            .checked_mul(right_terms)
-            .is_some_and(|products| products <= MAX_PACKED_ROW_MERGE_PAIR_PRODUCTS)
+    let row_count = left_terms.min(right_terms);
+    if row_count > MAX_PACKED_ROW_MERGE_TERMS {
+        return false;
+    }
+    let Some(pair_products) = left_terms.checked_mul(right_terms) else {
+        return false;
+    };
+    pair_products <= MAX_PACKED_ROW_MERGE_PAIR_PRODUCTS
+        || packed_row_merge_few_rows_is_bounded(row_count, pair_products)
+}
+
+/// Extend the row merge to larger products whose small row heap bounds its bookkeeping state.
+#[cold]
+#[inline(never)]
+fn packed_row_merge_few_rows_is_bounded(row_count: usize, pair_products: usize) -> bool {
+    row_count <= MAX_PACKED_ROW_MERGE_FEW_ROWS
+        && pair_products <= MAX_PACKED_ROW_MERGE_FEW_ROW_PAIR_PRODUCTS
 }
 
 struct TotalDegreeRankTable {
@@ -6328,7 +6343,8 @@ mod test {
 
     use super::{
         IntegerPolynomialCrtContext, MultivariatePolynomial, PolynomialRing,
-        PolynomialSamplingPolicy, mixed_radix_dense_work_is_bounded, packed_row_merge_is_bounded,
+        PolynomialSamplingPolicy, mixed_radix_dense_mul_is_bounded,
+        mixed_radix_dense_work_is_bounded, packed_row_merge_is_bounded,
     };
 
     #[test]
@@ -6848,6 +6864,10 @@ mod test {
 
     #[test]
     fn packed_row_merge_guard_preserves_the_existing_large_product_path() {
+        assert!(packed_row_merge_is_bounded(9, 1287));
+        assert!(packed_row_merge_is_bounded(16, 1024));
+        assert!(!packed_row_merge_is_bounded(16, 1025));
+        assert!(!packed_row_merge_is_bounded(17, 241));
         assert!(packed_row_merge_is_bounded(64, 64));
         assert!(!packed_row_merge_is_bounded(64, 65));
 
@@ -6866,6 +6886,37 @@ mod test {
         let actual = &left * &right;
         actual.check_consistency();
         assert_eq!(actual, expected);
+    }
+
+    #[test]
+    fn packed_row_merge_handles_a_large_product_with_few_rows() {
+        let variables = packed_row_merge_variables();
+        let dense = parse!("(1+x1+x2+x3+x4+x5+x6+x7+x8)^5")
+            .expand()
+            .to_polynomial::<_, u8>(&Z, Some(variables.clone()));
+        let sparse = parse!("1+x1^5+2*x2^5+3*x3^5+5*x4^5+7*x5^5+11*x6^5+13*x7^5+17*x8^5")
+            .to_polynomial::<_, u8>(&Z, Some(variables));
+        assert_eq!(dense.nterms(), 1287);
+        assert_eq!(sparse.nterms(), 9);
+        assert!(packed_row_merge_is_bounded(dense.nterms(), sparse.nterms()));
+        assert!(!dense.total_degree_dense_mul_is_bounded(&sparse));
+        assert!(!mixed_radix_dense_mul_is_bounded(
+            11usize.pow(8),
+            dense.nterms(),
+            sparse.nterms()
+        ));
+
+        let expected = reference_integer_product(&dense, &sparse);
+        assert_eq!(
+            dense.try_packed_u8_row_merge_mul(&sparse).unwrap(),
+            expected
+        );
+        assert_eq!(
+            sparse.try_packed_u8_row_merge_mul(&dense).unwrap(),
+            expected
+        );
+        assert_eq!(&dense * &sparse, expected);
+        assert_eq!(&sparse * &dense, expected);
     }
 
     #[test]
