@@ -10289,6 +10289,27 @@ mod test {
             &mut context.multiplication_workspace,
         );
         assert!(actual.is_empty(), "(x-2)(x+2) must vanish modulo x^2+1");
+
+        let modulus = dense_zp_test_polynomial(
+            &prototype,
+            &[field.one(), field.zero(), field.zero(), field.one()],
+        );
+        context.set_modulus(&modulus);
+        let x_squared = [field.zero(), field.zero(), field.one()];
+        DenseZpDistinctDegreeContext::<u8>::multiply_mod_into(
+            &context.field,
+            &context.modulus,
+            &context.reverse_modulus_inverse,
+            &x_squared,
+            &x_squared,
+            &mut actual,
+            &mut context.multiplication_workspace,
+        );
+        assert_eq!(
+            actual,
+            [field.zero(), field.to_element(4)],
+            "x^4 modulo x^3+1 must retain a zero-padded quotient"
+        );
     }
 
     #[test]
