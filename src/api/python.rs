@@ -303,24 +303,22 @@ impl PythonSolutionValue {
         }
     }
 
-    /// The lower endpoint of an interval, or ``None`` when it is unbounded.
+    /// The lower endpoint of an interval, which may be negative infinity.
+    /// Returns ``None`` for a root value.
     #[getter]
     pub fn lower_bound(&self) -> Option<PythonExpression> {
         match &self.value {
-            SolutionValue::Interval { lower_bound, .. } => {
-                lower_bound.as_ref().cloned().map(Into::into)
-            }
+            SolutionValue::Interval { lower_bound, .. } => Some(lower_bound.clone().into()),
             SolutionValue::Root(_) => None,
         }
     }
 
-    /// The upper endpoint of an interval, or ``None`` when it is unbounded.
+    /// The upper endpoint of an interval, which may be positive infinity.
+    /// Returns ``None`` for a root value.
     #[getter]
     pub fn upper_bound(&self) -> Option<PythonExpression> {
         match &self.value {
-            SolutionValue::Interval { upper_bound, .. } => {
-                upper_bound.as_ref().cloned().map(Into::into)
-            }
+            SolutionValue::Interval { upper_bound, .. } => Some(upper_bound.clone().into()),
             SolutionValue::Root(_) => None,
         }
     }
@@ -331,17 +329,7 @@ impl PythonSolutionValue {
             SolutionValue::Interval {
                 lower_bound,
                 upper_bound,
-            } => {
-                let lower = lower_bound
-                    .as_ref()
-                    .map(ToString::to_string)
-                    .unwrap_or_else(|| "-infinity".to_owned());
-                let upper = upper_bound
-                    .as_ref()
-                    .map(ToString::to_string)
-                    .unwrap_or_else(|| "infinity".to_owned());
-                format!("SolutionValue(interval=({lower}, {upper}))")
-            }
+            } => format!("SolutionValue(interval=({lower_bound}, {upper_bound}))"),
         }
     }
 }
@@ -681,14 +669,8 @@ impl PythonSolution {
                         lower_bound,
                         upper_bound,
                     } => {
-                        let lower = lower_bound
-                            .as_ref()
-                            .map(Self::atom_html)
-                            .unwrap_or_else(|| "−∞".to_owned());
-                        let upper = upper_bound
-                            .as_ref()
-                            .map(Self::atom_html)
-                            .unwrap_or_else(|| "∞".to_owned());
+                        let lower = Self::atom_html(lower_bound);
+                        let upper = Self::atom_html(upper_bound);
                         format!(
                             "<div class=\"symbolica-solution-value\"><span>{lower}</span>\
                              <span style=\"padding:0 .5em\">&lt;</span><span>{variable}</span>\
@@ -734,14 +716,8 @@ impl PythonSolution {
                         lower_bound,
                         upper_bound,
                     } => {
-                        let lower = lower_bound
-                            .as_ref()
-                            .map(Self::atom_latex)
-                            .unwrap_or_else(|| "-\\infty".to_owned());
-                        let upper = upper_bound
-                            .as_ref()
-                            .map(Self::atom_latex)
-                            .unwrap_or_else(|| "\\infty".to_owned());
+                        let lower = Self::atom_latex(lower_bound);
+                        let upper = Self::atom_latex(upper_bound);
                         format!("{lower} &< {variable} < {upper}")
                     }
                 }

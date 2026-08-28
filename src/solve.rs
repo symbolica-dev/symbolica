@@ -234,19 +234,32 @@ fn rational_denominator<E: PositiveExponent + 'static>(expression: AtomView<'_>)
 /// The solution for one variable in an ordered exact-solution branch.
 ///
 /// Equation solving currently produces only [`SolutionValue::Root`]. A CAD
-/// backend can also produce open intervals between consecutive roots. `None`
-/// denotes an unbounded end of such an interval.
+/// backend can also produce open intervals between consecutive roots. An
+/// unbounded endpoint is represented by an atom containing
+/// [`Coefficient::Infinity`].
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum SolutionValue {
     /// The variable is equal to one exact root.
     Root(Atom),
     /// The variable lies in an open interval between roots.
     Interval {
-        /// Lower endpoint, or `None` when the interval is unbounded below.
-        lower_bound: Option<Atom>,
-        /// Upper endpoint, or `None` when the interval is unbounded above.
-        upper_bound: Option<Atom>,
+        /// Lower endpoint, possibly negative infinity.
+        lower_bound: Atom,
+        /// Upper endpoint, possibly positive infinity.
+        upper_bound: Atom,
     },
+}
+
+impl std::fmt::Display for SolutionValue {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::Root(value) => write!(f, "{value}"),
+            Self::Interval {
+                lower_bound,
+                upper_bound,
+            } => write!(f, "({lower_bound}, {upper_bound})"),
+        }
+    }
 }
 
 /// An ordered variable and its corresponding point or interval solution.
@@ -265,6 +278,18 @@ impl VariableSolution {
     /// The point or interval assigned to the variable.
     pub fn value(&self) -> &SolutionValue {
         &self.value
+    }
+}
+
+impl std::fmt::Display for VariableSolution {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match &self.value {
+            SolutionValue::Root(value) => write!(f, "{} = {value}", self.variable),
+            SolutionValue::Interval {
+                lower_bound,
+                upper_bound,
+            } => write!(f, "{lower_bound} < {} < {upper_bound}", self.variable),
+        }
     }
 }
 
@@ -410,25 +435,7 @@ impl std::fmt::Display for Solution {
             if index > 0 {
                 f.write_str(", ")?;
             }
-            match variable_solution.value() {
-                SolutionValue::Root(value) => {
-                    write!(f, "{} = {value}", variable_solution.variable())?;
-                }
-                SolutionValue::Interval {
-                    lower_bound,
-                    upper_bound,
-                } => {
-                    let lower = lower_bound
-                        .as_ref()
-                        .map(ToString::to_string)
-                        .unwrap_or_else(|| "-infinity".to_owned());
-                    let upper = upper_bound
-                        .as_ref()
-                        .map(ToString::to_string)
-                        .unwrap_or_else(|| "infinity".to_owned());
-                    write!(f, "{lower} < {} < {upper}", variable_solution.variable())?;
-                }
-            }
+            write!(f, "{variable_solution}")?;
         }
         f.write_str("}")?;
 
@@ -1827,6 +1834,7 @@ mod test {
 
     use crate::{
         atom::{Atom, AtomCore, AtomView, representation::InlineVar},
+        coefficient::Coefficient,
         domains::{
             Ring,
             algebraic::AlgebraicContext,
@@ -1839,7 +1847,7 @@ mod test {
         poly::PolyVariable,
         solve::{
             Complexes, Inequality, Integers, Rationals, Reals, Solution, SolutionCondition,
-            SolutionValue, SolveError,
+            SolutionValue, SolveError, VariableSolution,
         },
         symbol,
         tensors::matrix::Matrix,
@@ -1937,6 +1945,41 @@ mod test {
         assert_eq!(
             variable_solutions[1].value(),
             &SolutionValue::Root(Atom::num(1))
+        );
+    }
+
+    #[test]
+    fn solution_values_and_variables_have_human_readable_displays() {
+        let x = PolyVariable::from(symbol!("x"));
+        let root = SolutionValue::Root(Atom::num(2));
+        assert_eq!(root.to_string(), "2");
+        assert_eq!(
+            VariableSolution {
+                variable: x.clone(),
+                value: root,
+            }
+            .to_string(),
+            "x = 2"
+        );
+
+        let bounded_interval = SolutionValue::Interval {
+            lower_bound: Atom::num(1),
+            upper_bound: Atom::num(3),
+        };
+        assert_eq!(bounded_interval.to_string(), "(1, 3)");
+
+        let unbounded_interval = SolutionValue::Interval {
+            lower_bound: Atom::num(-Coefficient::positive_infinity()),
+            upper_bound: Atom::num(Coefficient::positive_infinity()),
+        };
+        assert_eq!(unbounded_interval.to_string(), "(-∞, ∞)");
+        assert_eq!(
+            VariableSolution {
+                variable: x,
+                value: unbounded_interval,
+            }
+            .to_string(),
+            "-∞ < x < ∞"
         );
     }
 

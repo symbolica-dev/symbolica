@@ -591,11 +591,13 @@ class SolutionValue:
 
     @property
     def lower_bound(self) -> Expression | None:
-        """The lower interval endpoint, or ``None`` when unbounded."""
+        """The lower interval endpoint, which may be negative infinity.
+        Returns ``None`` for a root value."""
 
     @property
     def upper_bound(self) -> Expression | None:
-        """The upper interval endpoint, or ``None`` when unbounded."""
+        """The upper interval endpoint, which may be positive infinity.
+        Returns ``None`` for a root value."""
 
     def __repr__(self) -> str: ...
 
