@@ -54,7 +54,7 @@ The `polybench_*` groups contain exact 5- and 8-variable inputs regenerated from
 [polybench 0.4.3](https://github.com/tueda/polybench/tree/f3a25498883a80462c6278a87c9dfc93630d8a06)
 with seed 42. The fixture set includes uniform and sharp exponent distributions, trivial and
 nontrivial GCDs, published Symbolica 2.2 outliers, and inputs from the 8-variable factorization
-failure sequence. Both benchmark targets use `MultivariatePolynomial<Z, u8>`, the explicit
+failure sequence. Both benchmark targets use `MultivariatePolynomial<Z, u16>`, the explicit
 `x1,...,xn` variable order, and lexicographic monomial order used by the upstream adapters.
 
 The representative additions are nearest-rank p10, p50, and p90 anchors from selected published

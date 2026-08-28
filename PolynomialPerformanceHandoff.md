@@ -5,7 +5,8 @@ work. It was refreshed on 2026-08-28 after accepting cached reciprocal reduction
 distinct-degree factorization, rejecting the first dense baby-step/giant-step DDF implementation,
 integrating overflow-safe DDF degree bounds, and rejecting a cache-aware Kronecker allocation
 experiment. It now also includes accepted bounded heap-result preallocation for sparse products.
-The current `dev` source head before this documentation update is `687f46a`. The base Rust/FLINT
+The follow-up private multiplication-context experiment was measured and rejected. The current
+`dev` source head before this documentation update is `a66d6a4`. The base Rust/FLINT
 comparison inventory was measured at performance-equivalent source head `b2e5d28`; its PolyBench
 construction-product rows are replaced below by repeated measurements of the accepted candidate.
 Keep this file current whenever an experiment is accepted, rejected, or left partly complete. The
@@ -348,11 +349,56 @@ The default-feature polynomial module passes `28/28` tests and the focused
 manifest is `/tmp/polybench-prealloc-final-artifacts-sha256.txt`, SHA-256
 `5e8d266bee4ddf8f24d474a4d7b744161c0334f116647173c455366e108506d1`.
 
-The remaining packed-heap experiment is a private polynomial multiplication context that scans
-support metadata once and passes positivity, per-variable degree bounds, maximum total degrees,
-mixed-radix length, and packing width through dense and heap selection. A heap-routed product
-currently repeats roughly seven full support traversals. The high-height Hensel factorization case
-remains the next factor target. Continue using the single-core paired-process methodology and the
+### Rejected one-scan polynomial multiplication context
+
+The completed experiment is preserved in `/tmp/symbolica-mul-context`, branch
+`codex/mul-context`, at `e7d4894` (`Reuse multiplication support metadata`); it is deliberately not
+on `dev`. The private `PolynomialMulContext` holds both operands and scans each support once. It
+retains per-variable minima and maxima inline through eight variables, polynomial/Laurent status,
+and maximum total degrees. The context then coordinates mixed-radix dense, total-degree dense,
+packed-heap, and generic-heap dispatch without adding a `Ring` or kernel method.
+
+The extrema also make exponent overflow handling route-independent. Both the lowest and highest
+possible coordinate sums are checked before multiplication, catching unsigned overflow and signed
+Laurent underflow. This exposed an existing correctness issue: the generic heap uses unchecked
+exponent addition, so release builds can wrap, and a packed route can likewise select storage wider
+than the polynomial exponent type. Because the context was rejected for performance, that
+correctness fix is not on `dev`; a future standalone fix should preserve the established
+`overflow in adding exponents` panic without adding per-product checks to the hot heap loop.
+
+The default polynomial module passes `32/32` tests. New independent-reference tests cover Laurent
+products, `u8` and signed `i8` overflow, packed `u8`/`u16` boundaries, generic fallback, asymmetric
+heap operand ordering, and public total-degree-simplex dispatch. Default and explicit `no_gmp`
+library checks are clean. The no-default-feature test target itself assumes native-code-generation
+APIs in an unrelated evaluation test module, so the no-GMP guard used `cargo check --lib`.
+
+Six alternating full-LTO processes used 100 paired samples for all 23 PolyBench construction rows:
+
+| Slice | Candidate S/F | Control S/F | Paired candidate change | Rows won |
+|---|---:|---:|---:|---:|
+| all PolyBench products | `1.8036085` | `1.8026630` | `+0.238853%` | `4/23` |
+| PolyBench GCD products | `1.78939225` | `1.78079275` | `+0.264074%` | — |
+| PolyBench factor products | `1.8036085` | `1.8066765` | `+0.201811%` | — |
+
+The best paired movement is only `-0.242748%` on factor product #44. The worst is `+3.141571%`
+on factor product #178. A separate six-process, 10,000-sample degree-64 univariate product guard
+regresses by `2.267363%`: candidate Symbolica/FLINT is `1.124837`, versus `1.0939175` for the
+accepted control. A three-process scan of all 22 dedicated multiplication rows has a median paired
+regression of `0.959433%`, with the same large independently linked LTO-layout shifts already seen
+in the preallocation experiment. There is no systematic gain to justify the larger dispatch
+refactor or the extra eager total-degree/extrema work, so the candidate is rejected.
+
+The frozen candidate binary is `/tmp/flint-comparison-mul-context-e7d4894-lto`, SHA-256
+`c75ae629c02572a0b8ea3642a8846b682b64896f6cc42ae34d1144be7b93f1e5`. Its dependency sidecar
+SHA-256 is `06db120092629360016cc5203099ff2fbe3c2635824dc5953e2cf2d3e5150d33`, and its build-log
+SHA-256 is `01be9d0586e90c2f682e8af47caa1ebe93133d98d5f1aed40b2c122b9db665df`. The 49-file manifest is
+`/tmp/mul-context-e7d4894-artifacts-sha256.txt`, SHA-256
+`92199c00901a85077437086b259b042d03674dcff9844acf645311c4ecb65fad`.
+
+The high-height Hensel factorization remains the next factor target. Its strongest known structural
+gap is `IntegerModularUnivariateContext::quot_rem`: Symbolica reduces every inner subtraction and
+multiplication, while FLINT's corresponding dense modular division delays more reductions around
+the pivot and final remainder. Continue using the single-core paired-process methodology and the
 `3%` complexity threshold, with same-binary controls when expected gains are small.
 
 ## Previous checkpoint: dense degree-64 modular factorization
