@@ -50,6 +50,27 @@ def set_namespace(namespace: str) -> None:
         The namespace to set for subsequently created symbols.
     """
 
+class SkipLicense:
+    """A context manager that skips Symbolica license checks in its scope."""
+
+    def __init__(self) -> None: ...
+    def __enter__(self) -> None: ...
+    def __exit__(self, exception_type: Any, exception_value: Any, traceback: Any) -> None: ...
+
+def skip_license() -> SkipLicense:
+    """
+    Create a context manager that skips Symbolica license checks in its scope.
+
+    To skip checks for every Symbolica call originating in one Python file, set
+    `SKIP_LICENSE = True` in that file's global scope.
+
+    Examples
+    --------
+
+    >>> with skip_license():
+    ...     expression = E("x + 1")
+    """
+
 def get_version() -> str:
     """
     Get the current Symbolica version.

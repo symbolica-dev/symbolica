@@ -58,7 +58,7 @@ use smartstring::{LazyCompact, SmartString};
 use pyo3::pymodule;
 
 use crate::{
-    LicenseManager,
+    LicenseManager, SkipLicenseGuard,
     atom::{
         Atom, AtomCore, AtomType, AtomView, DefaultNamespace, EvaluationInfo, Indeterminate,
         ListIterator, Symbol, SymbolAttribute, SymbolBuilder, UserData, UserDataKey,
@@ -101,6 +101,7 @@ use crate::{
         AtomPrinter, ColorMode, PrintMode, PrintOptions, PrintState, PrintUserData,
         PrintUserDataKey,
     },
+    skip_license as skip_license_scope,
     solve::{Solution, SolutionCondition, SolveDomain, SolveError},
     state::{RecycledAtom, State, Workspace},
     streaming::{TermStreamer, TermStreamerConfig},
@@ -747,6 +748,11 @@ impl PythonFormattedOutput {
 pub fn create_symbolica_module<'a, 'b>(
     m: &'b Bound<'a, PyModule>,
 ) -> PyResult<&'b Bound<'a, PyModule>> {
+    // Registering the Python API initializes some built-in Symbolica objects. Defer the first real
+    // license check until user code invokes an operation, so `skip_license()` and a module-level
+    // `SKIP_LICENSE` flag can take effect after the extension has been imported.
+    let _license_guard = skip_license_scope();
+
     m.add_class::<PythonFormattedOutput>()?;
     m.add_class::<PythonSymbol>()?;
     m.add_class::<PythonExpression>()?;
@@ -791,6 +797,7 @@ pub fn create_symbolica_module<'a, 'b>(
     m.add_class::<PythonHalfEdge>()?;
     m.add_class::<PythonGraph>()?;
     m.add_class::<PythonInteger>()?;
+    m.add_class::<PythonSkipLicense>()?;
 
     m.add("Integers", PythonSolveDomain::Integers)?;
     m.add("Rationals", PythonSolveDomain::Rationals)?;
@@ -814,6 +821,7 @@ pub fn create_symbolica_module<'a, 'b>(
     m.add_function(wrap_pyfunction!(use_custom_logger, m)?)?;
     m.add_function(wrap_pyfunction!(get_namespace, m)?)?;
     m.add_function(wrap_pyfunction!(set_namespace, m)?)?;
+    m.add_function(wrap_pyfunction!(python_skip_license, m)?)?;
 
     m.add("__version__", env!("CARGO_PKG_VERSION"))?;
 
@@ -1028,6 +1036,87 @@ pub fn get_namespace(py: Python) -> PyResult<&'static str> {
             Ok(None) => "python",
         },
     )
+}
+
+/// Return whether the calling Python file has opted out of license checks.
+///
+/// This deliberately mirrors [get_namespace]: both inspect the globals of the Python frame that
+/// called into Symbolica. Only the boolean value `True` enables the opt-out.
+pub(crate) fn skip_license_from_python_globals() -> bool {
+    Python::try_attach(|py| {
+        let ptr = unsafe { pyo3::ffi::PyEval_GetGlobals() };
+
+        if ptr.is_null() {
+            return false;
+        }
+
+        let globals = unsafe { Bound::from_borrowed_ptr(py, ptr) };
+        let Ok(globals) = globals.cast::<PyDict>() else {
+            return false;
+        };
+
+        match globals.get_item("SKIP_LICENSE") {
+            Ok(Some(value)) => value.extract::<bool>().unwrap_or(false),
+            Ok(None) | Err(_) => false,
+        }
+    })
+    .unwrap_or(false)
+}
+
+/// A Python context manager that skips Symbolica license checks in its scope.
+#[cfg_attr(feature = "python_stubgen", gen_stub_pyclass)]
+#[pyclass(unsendable, name = "SkipLicense", module = "symbolica.core")]
+pub struct PythonSkipLicense {
+    guard: Option<SkipLicenseGuard>,
+}
+
+#[cfg_attr(feature = "python_stubgen", gen_stub_pymethods)]
+#[cfg_attr(not(feature = "python_stubgen"), remove_gen_stub)]
+#[pymethods]
+impl PythonSkipLicense {
+    #[new]
+    fn new() -> Self {
+        Self { guard: None }
+    }
+
+    fn __enter__(&mut self) -> PyResult<()> {
+        if self.guard.is_some() {
+            return Err(exceptions::PyRuntimeError::new_err(
+                "skip_license context manager is already active",
+            ));
+        }
+
+        self.guard = Some(skip_license_scope());
+        Ok(())
+    }
+
+    fn __exit__(
+        &mut self,
+        _exception_type: &Bound<'_, PyAny>,
+        _exception_value: &Bound<'_, PyAny>,
+        _traceback: &Bound<'_, PyAny>,
+    ) {
+        self.guard = None;
+    }
+}
+
+/// Create a context manager that skips Symbolica license checks in its scope.
+///
+/// To skip checks for every Symbolica call originating in one Python file, set
+/// `SKIP_LICENSE = True` in that file's global scope.
+///
+/// Examples
+/// --------
+///
+/// >>> with skip_license():
+/// ...     expression = E("x + 1")
+#[cfg_attr(
+    feature = "python_stubgen",
+    gen_stub_pyfunction(module = "symbolica.core")
+)]
+#[pyfunction(name = "skip_license")]
+pub fn python_skip_license() -> PythonSkipLicense {
+    PythonSkipLicense::new()
 }
 
 /// Symbolica is a blazing fast computer algebra system.

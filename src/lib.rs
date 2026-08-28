@@ -38,8 +38,11 @@
 #![cfg_attr(docsrs, feature(doc_cfg))]
 
 use std::{
+    cell::Cell,
     collections::HashMap,
     env,
+    marker::PhantomData,
+    rc::Rc,
     sync::atomic::{AtomicBool, Ordering::Relaxed},
 };
 #[cfg(not(target_arch = "wasm32"))]
@@ -92,10 +95,10 @@ pub mod utils;
 /// ```
 pub mod prelude {
     pub use crate::{
-        LicenseManager, OperationCount, create_hyperdual_from_components,
+        LicenseManager, OperationCount, SkipLicenseGuard, create_hyperdual_from_components,
         create_hyperdual_single_derivative, function, get_symbol, hide_namespace, initialize,
-        namespace, parse, parse_lit, symbol, symbol_group, tag, try_parse, try_parse_lit,
-        try_symbol, try_symbol_group,
+        namespace, parse, parse_lit, skip_license, symbol, symbol_group, tag, try_parse,
+        try_parse_lit, try_symbol, try_symbol_group,
     };
 
     pub use crate::atom::{
@@ -287,6 +290,68 @@ static LICENSE_KEY: OnceCell<String> = OnceCell::new();
 static LICENSE_MANAGER: OnceCell<LicenseManager> = OnceCell::new();
 static LICENSED: AtomicBool = LicenseManager::init();
 
+std::thread_local! {
+    static SKIP_LICENSE_DEPTH: Cell<usize> = const { Cell::new(0) };
+}
+
+/// A guard that skips Symbolica license checks on the current thread.
+///
+/// Create a guard with [skip_license] or [SkipLicenseGuard::new]. License checks resume when the
+/// guard is dropped. Guards may be nested, but they cannot be moved to another thread.
+#[must_use = "the license check is skipped only while the guard is alive"]
+pub struct SkipLicenseGuard {
+    _not_send: PhantomData<Rc<()>>,
+}
+
+impl SkipLicenseGuard {
+    /// Skip Symbolica license checks on the current thread until the returned guard is dropped.
+    pub fn new() -> Self {
+        SKIP_LICENSE_DEPTH.with(|depth| {
+            depth.set(
+                depth
+                    .get()
+                    .checked_add(1)
+                    .expect("license skip scope nesting overflow"),
+            );
+        });
+
+        Self {
+            _not_send: PhantomData,
+        }
+    }
+}
+
+impl Default for SkipLicenseGuard {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
+impl Drop for SkipLicenseGuard {
+    fn drop(&mut self) {
+        SKIP_LICENSE_DEPTH.with(|depth| {
+            let current = depth.get();
+            debug_assert!(current > 0, "unbalanced license skip scope");
+            depth.set(current.saturating_sub(1));
+        });
+    }
+}
+
+/// Skip Symbolica license checks on the current thread until the returned guard is dropped.
+///
+/// License skip scopes may be nested.
+///
+/// ```
+/// use symbolica::{parse, skip_license};
+///
+/// let _guard = skip_license();
+/// let expression = parse!("x + 1");
+/// # drop(expression);
+/// ```
+pub fn skip_license() -> SkipLicenseGuard {
+    SkipLicenseGuard::new()
+}
+
 /// Global settings for Symbolica.
 pub struct GlobalSettings {
     /// Set whether a default tracing subscriber is initialized upon the first call to a logging macro.
@@ -468,6 +533,20 @@ macro_rules! activate_oem_license {
 }
 
 impl LicenseManager {
+    #[inline]
+    fn is_check_skipped() -> bool {
+        if SKIP_LICENSE_DEPTH.with(|depth| depth.get() != 0) {
+            return true;
+        }
+
+        #[cfg(any(feature = "python_api", feature = "python_export"))]
+        if crate::api::python::skip_license_from_python_globals() {
+            return true;
+        }
+
+        false
+    }
+
     /// Create a new license manager.
     #[cfg(target_arch = "wasm32")]
     pub(crate) fn new() -> LicenseManager {
@@ -746,7 +825,7 @@ Error: {status}",
     #[inline(always)]
     #[cfg(not(target_arch = "wasm32"))]
     fn check() {
-        if LICENSED.load(Relaxed) {
+        if LICENSED.load(Relaxed) || Self::is_check_skipped() {
             return;
         }
 
@@ -963,5 +1042,36 @@ Error: {status}",
         let mut m: HashMap<String, JsonValue> = HashMap::default();
         m.insert("email".to_owned(), email.to_owned().into());
         Self::request_license_email(m)
+    }
+}
+
+#[cfg(test)]
+mod license_skip_tests {
+    use super::*;
+
+    #[test]
+    fn skip_license_guard_is_nested_and_thread_local() {
+        assert!(!LicenseManager::is_check_skipped());
+
+        let outer = skip_license();
+        assert!(LicenseManager::is_check_skipped());
+        assert!(
+            crate::parser::Token::parse("x + 1", crate::parser::ParseSettings::default()).is_ok()
+        );
+
+        {
+            let _inner = SkipLicenseGuard::new();
+            assert!(LicenseManager::is_check_skipped());
+        }
+
+        assert!(LicenseManager::is_check_skipped());
+        assert!(
+            std::thread::spawn(|| !LicenseManager::is_check_skipped())
+                .join()
+                .unwrap()
+        );
+
+        drop(outer);
+        assert!(!LicenseManager::is_check_skipped());
     }
 }
