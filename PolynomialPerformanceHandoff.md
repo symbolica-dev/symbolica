@@ -1,14 +1,15 @@
 # Polynomial performance continuation handoff
 
 This is the live continuation record for the single-core Symbolica/FLINT polynomial-performance
-work. It was refreshed on 2026-08-28 after accepting cached reciprocal reduction for dense
-distinct-degree factorization, rejecting the first dense baby-step/giant-step DDF implementation,
-integrating overflow-safe DDF degree bounds, and rejecting a cache-aware Kronecker allocation
-experiment. It now also includes accepted bounded heap-result preallocation for sparse products.
-The follow-up private multiplication-context experiment was measured and rejected. The current
-`dev` source head before this documentation update is `a66d6a4`. The base Rust/FLINT
-comparison inventory was measured at performance-equivalent source head `b2e5d28`; its PolyBench
-construction-product rows are replaced below by repeated measurements of the accepted candidate.
+work. It was refreshed on 2026-08-28 after accepting delayed modular reduction in the quadratic
+Hensel division path. Earlier current work accepted cached reciprocal reduction for dense
+distinct-degree factorization and bounded heap-result preallocation for sparse products, while the
+first dense baby-step/giant-step DDF, cache-aware Kronecker allocation, and private
+multiplication-context experiments were measured and rejected. The current `dev` source head
+before this documentation update is `11c878b`. The base Rust/FLINT comparison inventory was
+measured at performance-equivalent source head `b2e5d28`; its PolyBench construction-product rows,
+high-height factor/product rows, and PolyBench factor-operation rows are replaced below by repeated
+measurements of accepted candidates.
 Keep this file current whenever an experiment is accepted, rejected, or left partly complete. The
 purpose is that another agent can resume without reconstructing decisions from chat history or
 transient binary names.
@@ -31,7 +32,60 @@ transient binary names.
 - Small changes below roughly 3% need particularly strong, repeated evidence before their
   complexity is accepted.
 
-## Current continuation checkpoint: cached reciprocal DDF
+## Current continuation checkpoint: delayed quadratic-Hensel division
+
+Commit `11c878b` keeps `IntegerModularUnivariateContext` private and changes its modular
+quotient/remainder schedule to match FLINT's classical basecase invariant. It reduces a cell when
+the cell becomes the current pivot, computes the quotient coefficient once, accumulates exact
+fused subtractions into lower cells, discards the eliminated leading cell, and symmetrically
+reduces only the final remainder. A cached symmetric interval returns already canonical values
+without a modular division. The pivot multiplication owns its left operand, and lower updates use
+`Z.sub_mul_assign`, so the path does not create borrowed-by-borrowed GMP product temporaries.
+
+For a dense degree-16 divisor and 32 quotient positions, the former loop performed about `576`
+modular reductions per call. The delayed schedule needs `79`: one quotient reduction per pivot,
+one reduction when each accumulated cell becomes the next pivot, and one for every surviving
+remainder coefficient. FLINT 3.6 uses the same schedule in
+`fmpz_mod_poly/divrem_basecase.c`; this fixture cannot reach FLINT's Newton division because its
+balanced divisor lengths are at most 18.
+
+The factor module passes `67/67` tests with default GMP features and `67/67` with
+`no_gmp,native_code_generation`. New differential coverage includes `5^8` and `5^65`, odd/even
+symmetric-representative boundaries, a dense degree-16 divisor with a degree-31 quotient and
+interior zero coefficients, constant divisors, and degree-short dividends. The high-height route
+still proves that quadratic Hensel lifting executes and reconstructs the original polynomial.
+
+Twelve alternating full-LTO processes with 20 paired samples give:
+
+| Version | Symbolica median | FLINT median | S/F |
+|---|---:|---:|---:|
+| delayed-reduction candidate | `3.574496 ms` | `1.399899 ms` | `2.550696` |
+| source-matched control | `5.001481 ms` | `1.4000325 ms` | `3.5696655` |
+
+All twelve blocks favor the candidate. Absolute Symbolica time falls by `28.44%`; the median of
+the per-block S/F changes is `-28.32%`. A separate 500-sample cycle profile gives `3.556181 ms`
+versus `1.401596 ms`, ratio `2.537237`.
+
+The high-height construction product is independently neutral candidate/control
+(`0.999881x` Symbolica time) and now measures `0.578774x` FLINT over twelve 10,000-sample blocks.
+The factor speedup therefore comes from Hensel lifting, not construction. Degree-63 and degree-65
+factor guards moved by `2.60%` and `1.94%` in S/F, but test-only routing counters prove that neither
+fixture executes quadratic Hensel lifting; these are full-LTO layout shifts. Degree-48/64/80 GCD
+candidate/control ratios are `0.995105`, `0.993553`, and `0.994587`. The complete widened
+PolyBench factor sweep reconstructs all 11 inputs; its current best, median, and worst S/F are
+`0.1029535`, `1.1722495`, and `9.631801`.
+
+In the post-change paired cycle profile, Symbolica factorization occupies `68.60%` of total cycles
+and FLINT `27.54%`. Symbolica's Hensel subtree is still `59.14%` of the paired total, but the direct
+quadratic `quot_rem` subtree has fallen to `9.54%`. Dense integer multiplication under the direct
+quadratic lift is `9.49%`, modular input reduction is `7.10%`, and the recursively continued lift
+still contributes another `20.76%`. The next isolated experiment should replace the quotient
+identities with FLINT-like dual-remainder corrections already used by Symbolica's dense product
+tree. That can remove quotient reconstruction and the `q*u` multiply/add without changing the
+general polynomial or `Ring` interfaces. Only after measuring that change should a private cached
+large-modulus reciprocal be considered.
+
+## Previous continuation checkpoint: cached reciprocal DDF
 
 The accepted implementation and follow-up chain is:
 
@@ -109,23 +163,24 @@ still advances largely by classical Frobenius steps.
 Ratios below are Symbolica median divided by FLINT median, so lower is better. The base suite uses
 the full-LTO/default-feature binary at `b2e5d28`, with `faster_alloc`, GMP, FLINT 3.6.0, and one
 thread per implementation. The PolyBench construction-product rows use the accepted
-performance-equivalent `06a51ea` binary and six 100-sample processes. The later DDF bound change is
-performance-neutral for these rows. The `*-s3.csv` family scans use three paired samples after
-warmup; the degree-64 product and factor results, degree-48/64/80 GCD sweep, and PolyBench products
-use repeated processes and replace their exploratory rows. Each configured operation or
-independently requested product is counted once. For resultants, the aggregate uses the main Ducos
-entry point; Brown and CRT are alternative runs reported separately.
+performance-equivalent `06a51ea` binary and six 100-sample processes. High-height factorization and
+its product use the accepted `3436c42` binary and twelve alternating processes; current PolyBench
+factor operations use six alternating processes. The later DDF bound change is
+performance-neutral for the remaining rows. The `*-s3.csv` family scans use three paired samples
+after warmup; robust repeated rows replace their exploratory counterparts. Each configured
+operation or independently requested product is counted once. For resultants, the aggregate uses
+the main Ducos entry point; Brown and CRT are alternative runs reported separately.
 
 | Family | n | Best S/F and case | Median S/F | Worst S/F and case |
 |---|---:|---|---:|---|
-| all strict current rows | 122 | `0.028678`, high-gap 8v GCD d4/gap256 | `1.0308265` | `9.715828`, PolyBench factor #176 |
-| non-PolyBench rows | 76 | `0.028678`, high-gap 8v GCD | `0.895231` | `3.443308`, high-height univariate factor d33 |
-| PolyBench products plus operations | 46 | `0.102770`, factor #44 | `1.622051` | `9.715828`, factor #176 |
-| PolyBench operations only | 23 | `0.102770`, factor #44 | `0.828262` | `9.715828`, factor #176 |
+| all strict current rows | 122 | `0.028678`, high-gap 8v GCD d4/gap256 | `1.0308265` | `9.631801`, PolyBench factor #176 |
+| non-PolyBench rows | 76 | `0.028678`, high-gap 8v GCD | `0.895231` | `2.550696`, high-height univariate factor d33 |
+| PolyBench products plus operations | 46 | `0.1029535`, factor #44 | `1.622051` | `9.631801`, factor #176 |
+| PolyBench operations only | 23 | `0.1029535`, factor #44 | `0.828262` | `9.631801`, factor #176 |
 | PolyBench construction products | 23 | `1.4934895`, factor #178 product | `1.795966` | `1.8567915`, factor #32 product |
 | PolyBench GCD operations | 12 | `0.387980`, #53 | `0.6583255` | `1.268240`, #140 |
 | PolyBench GCD products | 12 | `1.538292`, #53 | `1.78571925` | `1.820671`, uniform trivial #11 |
-| PolyBench factor operations | 11 | `0.102770`, #44 | `1.140041` | `9.715828`, #176 |
+| PolyBench factor operations | 11 | `0.1029535`, #44 | `1.1722495` | `9.631801`, #176 |
 | PolyBench factor products | 11 | `1.4934895`, #178 | `1.795966` | `1.8567915`, #32 |
 | integer multiplication | 8 | `0.449493`, dense very-large | `0.9351165` | `1.348957`, 7v power-minus-one |
 | finite-field multiplication | 14 | `0.252283`, near-2^64 dense univariate d4912 | `0.5908955` | `1.137177`, near-2^64 dense-large |
@@ -137,13 +192,13 @@ entry point; Brown and CRT are alternative runs reported separately.
 | generated GCD operations | 14 | `0.028678`, high-gap 8v | `0.4536895` | `1.060731`, dense 2v |
 | generated GCD products | 14 | `0.291403`, dense 2v | `1.356885` | `1.917285`, high-gap 5v |
 | all GCD operations | 30 | `0.028678`, high-gap 8v | `0.613736` | `1.268240`, PolyBench #140 |
-| generated factor operations | 6 | `0.575899`, dense 2v | `1.550977` | `3.443308`, high-height d33 |
-| generated factor products | 6 | `0.738258`, dense 2v | `0.9919445` | `1.184942`, univariate d65 |
-| all factor operations | 17 | `0.102770`, PolyBench #44 | `1.500788` | `9.715828`, PolyBench #176 |
+| generated factor operations | 6 | `0.575899`, dense 2v | `1.550977` | `2.550696`, high-height d33 |
+| generated factor products | 6 | `0.578774`, high-height d33 | `0.9919445` | `1.184942`, univariate d65 |
+| all factor operations | 17 | `0.1029535`, PolyBench #44 | `1.500788` | `9.631801`, PolyBench #176 |
 | all construction products | 44 | `0.291403`, generated dense 2v GCD | `1.64522875` | `1.917285`, generated high-gap 5v GCD |
 
 The overall best is generated high-gap GCD with 8 variables, degree 4, and gap 256 (`0.028678x`).
-The overall worst is PolyBench 8-variable sharp factorization #176 (`9.715828x`). The heterogeneous
+The overall worst is PolyBench 8-variable sharp factorization #176 (`9.631801x`). The heterogeneous
 overall median is descriptive rather than workload weighted. The important PolyBench split is that
 the median core GCD/factor operation beats FLINT, while constructing the same inputs as products is
 uniformly slower and moves the combined median above one.
@@ -155,7 +210,7 @@ More detailed family medians are:
 - generated factorization `1.550977` after replacing degree 64 by the robust result, versus its
   product construction `0.9919445`;
 - PolyBench GCD operation `0.6583255`, versus its product construction `1.78571925`;
-- PolyBench factorization operation `1.140041`, versus its product construction `1.795966`.
+- PolyBench factorization operation `1.1722495`, versus its product construction `1.795966`.
 
 The fresh configured dense univariate GCD sweep uses five 200-sample processes per degree:
 
@@ -168,12 +223,28 @@ The fresh configured dense univariate GCD sweep uses five 200-sample processes p
 Coefficient-height coverage includes 5-variable GCD products and operations at 128, 256, 512,
 and 1024 bits plus an 8-variable 256-bit case. Product ratios range from `1.012638` to `1.499961`
 with median `1.056738`; GCD ratios range from `0.429881` to `0.472101` with median `0.437142`.
-The generated high-height factor product is `0.887591`, but factorization is `3.443308`; high-height
+The generated high-height factor product is `0.578774`, while factorization is `2.550696`; high-height
 exact division is `0.761777`, and the main high-height Ducos resultant is `0.861806`.
 
 ### Artifacts and next experiment
 
-The exact release binary is `/tmp/flint-comparison-ddf-preinverse-final-lto`, SHA-256
+The accepted delayed-reduction artifacts are:
+
+| Artifact | SHA-256 |
+|---|---|
+| `/tmp/flint-comparison-hensel-quotrem-3436c42-lto` | `4dc16b559a537f7b9640c668162a7b5dfb325814674c638627a4521b70560069` |
+| `/tmp/flint-comparison-hensel-quotrem-3436c42-lto.d` | `812b0a38e559b0198733ed19ef968135ef60f0a99567991e7a99b6a8000f561a` |
+| `/tmp/flint-comparison-hensel-quotrem-3436c42-build.jsonl` | `b786951333ea1af2c8b354520cc2b61656bf9059b126937a8dfa5b518db94fe6` |
+| `/tmp/hensel-quotrem-3436c42-artifact-manifest-sha256.txt` | `942cf9db97c873e6883943ddf883a54e1e13f2d1df8bb699f336133374913918` |
+| `/tmp/profile-hensel-quotrem-3436c42-highheight-lbr.perf.data` | `b2da99d9a05d2581d30afa8f7c982f22320c8cce366d54f0a30ee7d8029ff7c8` |
+| `/tmp/profile-hensel-quotrem-3436c42-highheight.csv` | `e9d212b0532f653f6698f4965a4d4762bd1add1e0b924f1fa6ebc9a9f70fe7c6` |
+| `/tmp/profile-hensel-quotrem-3436c42-highheight-children-symbols.txt` | `f04c0f795c1597056db80101c7f09423c4cd69ef9b343658906c3f0498970de7` |
+| `/tmp/profile-hensel-quotrem-3436c42-highheight-flat-symbols.txt` | `ff3e26cdd696e84a8b513b35a67f2dbf6d034f69fef65ce0e3b3ca5853a1a27b` |
+
+The build took 9m26s. The manifest covers 179 raw timing and summary artifacts. The frozen binary
+identifies source commit `3436c42`; the same content is integrated on `dev` as `11c878b`.
+
+The preceding DDF release binary is `/tmp/flint-comparison-ddf-preinverse-final-lto`, SHA-256
 `ef3cb4d8177817f1db2b2d236e701c3339704c2001a95e2945b65d6e0dc1c654`. Its build log is
 `/tmp/flint-comparison-ddf-preinverse-final-lto-build.jsonl`, SHA-256
 `5fcb0d4a87353f248622f6d6b23004f020cba9214fee1d4aa620e86d9824db90`. The complete 42-file
@@ -1874,25 +1945,27 @@ comments that justify file organization by contrasting it with designs not prese
 
 ## Ordered next actions
 
-1. Continue the integer input-product path with a private `PolynomialMulContext` that computes
-   positivity, per-variable bounds, maximum total degree, mixed-radix size, and packing width in one
-   support scan. PolyBench construction now has median `1.795966x`, versus `0.828262x` for the
-   corresponding GCD/factor operations.
-2. Measure the context on all 23 PolyBench construction rows and the 22 dedicated multiplication
-   guards. Use a same-binary switch if the expected median gain is below 3%, because the accepted
-   preallocation experiment demonstrated full-LTO shifts as large as about 10% on unchanged paths.
-3. For the high-height degree-33 path, defer coefficient
-   reduction inside `IntegerModularUnivariateContext::quot_rem`: leave non-pivot remainder cells
-   unreduced during fused subtractions and symmetrically reduce only pivots and the final
-   remainder. In the v3 profile quotient/remainder is about 52% of Hensel, and about 70% of that
-   subtree is `symmetric_mod`. Differential-test this at small and large composite prime powers
-   before benchmarking; do not infer the full profile ceiling as an expected gain.
-4. Recheck the high-height product separately from factorization; its product already beats FLINT
-   at `0.887591x`, so a factor gain must come from the Hensel path rather than input construction.
+1. In a separate candidate, replace the quadratic-Hensel quotient identities with direct
+   dual-remainder corrections. Compute corrections such as `((E rem w) * s) rem w` and the
+   corresponding correction modulo `u`, matching the identities already used by the dense product
+   tree. This should remove quotient reconstruction and the `q*u` multiply/add. Preserve nonunit
+   unit-leading divisors through the delayed general remainder path; do not normalize factors in a
+   way that changes the lifted leading-coefficient allocation.
+2. Differential-test the new correction formulas against the retained quotient formulation at
+   small and large composite prime powers, partial final precision, unsuccessful congruences, and
+   nonunit modular leading coefficients. Keep the implementation private to the Hensel operation
+   context and add no `Ring` methods.
+3. Measure high-height degree 33 against the accepted delayed-division binary, then recheck its
+   product, degree-63/64/65 factor boundaries, 2- and 3-variable factors, the widened PolyBench
+   factor sweep, and degree-48/64/80 GCD. Profile only a full-LTO winner.
+4. If direct remainders leave large-modulus division dominant, test a private cached reciprocal for
+   the correction modulus. FLINT caches a reciprocal for very large `fmpz_mod_ctx` moduli; Newton
+   polynomial division is not relevant to the degree-33 divisor sizes.
 5. For dense degree 64, the next larger factor candidates are a guarded reciprocal/Newton remainder
    at FLINT's divisor/quotient-size threshold and a private dense finite-field EDF context. Keep
    these separate from the high-height quotient change.
-6. Recheck degree-63/64/65 factor boundaries, 2- and 3-variable factors, the widened PolyBench
-   factor sweep, and degree-48/64/80 GCD guards on final full-LTO builds.
+6. Return to the integer input-product path only with a mechanism different from the rejected
+   one-scan `PolynomialMulContext`; that candidate regressed the PolyBench construction median by
+   `0.24%`, the dedicated multiplication median by `0.96%`, and the degree-64 product by `2.27%`.
 7. Freeze and hash every accepted full-LTO binary and profile, integrate only measured winners with
    Ben Ruijl's identity, and keep this file current after every accepted or rejected experiment.
