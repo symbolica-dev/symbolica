@@ -51,6 +51,10 @@ const MAX_EVALUATED_HENSEL_IMAGE_CELLS: usize = 1 << 22;
 const MAX_EVALUATED_HENSEL_GROUPED_TERMS: usize = 1 << 20;
 // Minimum number of base-prime digits for using composite-modulus quadratic Hensel corrections.
 const MIN_QUADRATIC_HENSEL_DIGITS: usize = 64;
+// The crossover used by FLINT's fmpz_mod_poly division dispatcher. Smaller
+// divisors and short quotients retain the coefficient-at-a-time remainder.
+const NEWTON_REMAINDER_DIVISOR_LENGTH_CUTOFF: usize = 30;
+const NEWTON_REMAINDER_QUOTIENT_DEGREE_CUTOFF: usize = 10;
 // Maximum number of term advances across all geometric samples in one image rebuild.
 const MAX_EVALUATED_HENSEL_TERM_STEPS: usize = 1 << 24;
 // Maximum number of dense coefficient rows retained for either lifted factor.
@@ -2051,12 +2055,14 @@ struct DenseIntegerModularUnivariateContext<'a, E: PositiveExponent> {
     dense_indices: &'a [u32],
 }
 
-/// A dense monic associate prepared for repeated remainders modulo a unit-leading divisor.
+/// A dense monic divisor prepared for repeated modular remainders.
 ///
-/// Scaling by the inverse of the leading coefficient preserves the divisor's generated ideal.
-/// The remainder loop can then clear each pivot without computing another modular inverse.
+/// `reverse_inverse` contains the reciprocal power series of the reversed
+/// divisor. It recovers quotient coefficients from the high coefficients of a
+/// dividend when the reciprocal remainder crossover is reached.
 struct DenseIntegerModularUnivariateDivisor {
     coefficients: DenseIntegerUnivariatePolynomial,
+    reverse_inverse: Option<DenseIntegerUnivariatePolynomial>,
 }
 
 impl<'a, E: PositiveExponent> DenseIntegerModularUnivariateContext<'a, E> {
@@ -2142,13 +2148,19 @@ impl<'a, E: PositiveExponent> DenseIntegerModularUnivariateContext<'a, E> {
         polynomial
     }
 
-    /// Canonicalizes every coefficient into `[0, modulus)` and removes zero
-    /// leading cells.
-    fn reduce_in_place(&self, coefficients: &mut DenseIntegerUnivariatePolynomial) {
-        for coefficient in coefficients.iter_mut() {
+    /// Canonicalizes every coefficient into `[0, modulus)` while retaining the
+    /// coefficient-vector length.
+    fn reduce_cells_in_place(&self, coefficients: &mut [Integer]) {
+        for coefficient in coefficients {
             let value = std::mem::replace(coefficient, Integer::zero());
             *coefficient = value % self.modulus;
         }
+    }
+
+    /// Canonicalizes every coefficient into `[0, modulus)` and removes zero
+    /// leading cells.
+    fn reduce_in_place(&self, coefficients: &mut DenseIntegerUnivariatePolynomial) {
+        self.reduce_cells_in_place(coefficients);
         Self::trim(coefficients);
     }
 
@@ -2256,7 +2268,8 @@ impl<'a, E: PositiveExponent> DenseIntegerModularUnivariateContext<'a, E> {
         product
     }
 
-    /// Reduces an owned dense polynomial modulo a monic dense divisor.
+    /// Reduces an owned dense polynomial with coefficient-at-a-time monic
+    /// division.
     ///
     /// Lower cells accumulate exact integer updates until they become pivots
     /// or survive in the remainder, limiting modular reductions to one per
@@ -2295,6 +2308,151 @@ impl<'a, E: PositiveExponent> DenseIntegerModularUnivariateContext<'a, E> {
         remainder
     }
 
+    /// Computes the reciprocal power series of the reversed monic divisor.
+    ///
+    /// Newton doubling maintains `reverse(divisor) * inverse = 1 mod x^k`
+    /// and extends the identity through `target_length` quotient coefficients.
+    fn reverse_monic_inverse(
+        &self,
+        divisor: &[Integer],
+        target_length: usize,
+    ) -> DenseIntegerUnivariatePolynomial {
+        debug_assert!(divisor.last().is_some_and(Integer::is_one));
+        if target_length == 0 {
+            return Vec::new();
+        }
+
+        let reversed_divisor = divisor.iter().rev().cloned().collect::<Vec<_>>();
+        let mut inverse = vec![Integer::one()];
+        while inverse.len() < target_length {
+            let next_length = inverse.len().saturating_mul(2).min(target_length);
+            let mut error = self.multiply_raw(
+                &reversed_divisor[..reversed_divisor.len().min(next_length)],
+                &inverse,
+            );
+            error.truncate(next_length);
+            error.resize(next_length, Integer::zero());
+            for (degree, coefficient) in error.iter_mut().enumerate() {
+                let value = std::mem::replace(coefficient, Integer::zero());
+                *coefficient = if degree == 0 {
+                    (Integer::from(2) - value) % self.modulus
+                } else {
+                    (-value) % self.modulus
+                };
+            }
+
+            let mut next_inverse = self.multiply_raw(&inverse, &error);
+            next_inverse.truncate(next_length);
+            next_inverse.resize(next_length, Integer::zero());
+            self.reduce_cells_in_place(&mut next_inverse);
+            inverse = next_inverse;
+        }
+
+        inverse
+    }
+
+    /// Reduces a dividend by recovering its quotient from the reversed
+    /// dividend and the cached reciprocal of the reversed monic divisor.
+    ///
+    /// The quotient product is subtracted only through the divisor degree,
+    /// because higher coefficients cancel by construction.
+    fn remainder_monic_newton(
+        &self,
+        mut dividend: DenseIntegerUnivariatePolynomial,
+        divisor: &DenseIntegerModularUnivariateDivisor,
+    ) -> DenseIntegerUnivariatePolynomial {
+        let divisor_degree = divisor.coefficients.len() - 1;
+        let quotient_length = dividend.len() - divisor.coefficients.len() + 1;
+        let reverse_inverse = divisor
+            .reverse_inverse
+            .as_ref()
+            .expect("the Newton remainder requires a cached divisor reciprocal");
+        debug_assert!(quotient_length <= reverse_inverse.len());
+
+        let mut reversed_dividend = dividend[dividend.len() - quotient_length..]
+            .iter()
+            .rev()
+            .cloned()
+            .collect::<Vec<_>>();
+        self.reduce_cells_in_place(&mut reversed_dividend);
+
+        let mut reversed_quotient =
+            self.multiply_raw(&reversed_dividend, &reverse_inverse[..quotient_length]);
+        reversed_quotient.truncate(quotient_length);
+        reversed_quotient.resize(quotient_length, Integer::zero());
+        self.reduce_cells_in_place(&mut reversed_quotient);
+        reversed_quotient.reverse();
+
+        let mut low_product = self.multiply_raw(
+            &reversed_quotient,
+            &divisor.coefficients[..divisor_degree],
+        );
+        low_product.truncate(divisor_degree);
+        dividend.truncate(divisor_degree);
+        dividend.resize(divisor_degree, Integer::zero());
+        for (coefficient, product_coefficient) in dividend.iter_mut().zip(low_product) {
+            *coefficient -= product_coefficient;
+        }
+        self.reduce_in_place(&mut dividend);
+        dividend
+    }
+
+    /// Reduces an owned dense polynomial modulo a prepared monic divisor.
+    ///
+    /// Large divisors with a sufficiently long quotient use the cached
+    /// reciprocal. Other shapes use coefficient-at-a-time monic division.
+    fn remainder_prepared_monic(
+        &self,
+        remainder: DenseIntegerUnivariatePolynomial,
+        divisor: &DenseIntegerModularUnivariateDivisor,
+    ) -> DenseIntegerUnivariatePolynomial {
+        if remainder.len() >= divisor.coefficients.len()
+            && divisor.coefficients.len() > NEWTON_REMAINDER_DIVISOR_LENGTH_CUTOFF
+            && remainder.len() - divisor.coefficients.len()
+                > NEWTON_REMAINDER_QUOTIENT_DEGREE_CUTOFF
+        {
+            let quotient_length = remainder.len() - divisor.coefficients.len() + 1;
+            if divisor
+                .reverse_inverse
+                .as_ref()
+                .is_some_and(|inverse| quotient_length <= inverse.len())
+            {
+                return self.remainder_monic_newton(remainder, divisor);
+            }
+        }
+
+        self.remainder_monic(remainder, &divisor.coefficients)
+    }
+
+    /// Prepares a canonical monic divisor and caches the reversed reciprocal
+    /// used by long repeated remainders. The reciprocal covers both products
+    /// of reduced residues and dividends through the template polynomial's
+    /// degree.
+    fn prepare_monic_divisor(
+        &self,
+        mut coefficients: DenseIntegerUnivariatePolynomial,
+    ) -> DenseIntegerModularUnivariateDivisor {
+        assert!(coefficients.last().is_some_and(Integer::is_one));
+        self.reduce_in_place(&mut coefficients);
+        assert!(coefficients.last().is_some_and(Integer::is_one));
+        let divisor_degree = coefficients.len() - 1;
+        let template_length = if self.template.is_zero() {
+            0
+        } else {
+            self.template.degree(self.variable).to_u32() as usize + 1
+        };
+        let maximum_template_quotient_length = template_length
+            .checked_sub(coefficients.len())
+            .map_or(0, |degree_gap| degree_gap + 1);
+        let reciprocal_length = divisor_degree.max(maximum_template_quotient_length);
+        let reverse_inverse = (coefficients.len() > NEWTON_REMAINDER_DIVISOR_LENGTH_CUTOFF)
+            .then(|| self.reverse_monic_inverse(&coefficients, reciprocal_length));
+        DenseIntegerModularUnivariateDivisor {
+            coefficients,
+            reverse_inverse,
+        }
+    }
+
     /// Prepares the monic associate of a canonical dense divisor whose leading coefficient is
     /// invertible modulo the context modulus.
     fn prepare_unit_leading_divisor(
@@ -2315,7 +2473,7 @@ impl<'a, E: PositiveExponent> DenseIntegerModularUnivariateContext<'a, E> {
             *coefficient = value % self.modulus;
         }
         debug_assert!(coefficients.last().is_some_and(Integer::is_one));
-        DenseIntegerModularUnivariateDivisor { coefficients }
+        self.prepare_monic_divisor(coefficients)
     }
 
     /// Computes `((value rem divisor) * multiplier) rem divisor` in the
@@ -2330,9 +2488,9 @@ impl<'a, E: PositiveExponent> DenseIntegerModularUnivariateContext<'a, E> {
         multiplier: &[Integer],
         divisor: &DenseIntegerModularUnivariateDivisor,
     ) -> DenseIntegerUnivariatePolynomial {
-        let reduced_value = self.remainder_monic(value, &divisor.coefficients);
+        let reduced_value = self.remainder_prepared_monic(value, divisor);
         let product = self.multiply_raw(&reduced_value, multiplier);
-        self.remainder_monic(product, &divisor.coefficients)
+        self.remainder_prepared_monic(product, divisor)
     }
 
     /// Divides every coefficient exactly by `divisor`, then returns its
@@ -7266,16 +7424,22 @@ impl<E: PositiveExponent> MultivariatePolynomial<IntegerRing, E, LexOrder> {
                     let w_mod = correction_context.reduce(w);
                     let s_mod = correction_context.reduce(s);
                     let t_mod = correction_context.reduce(t);
+                    let u_divisor = correction_context.prepare_monic_divisor(u_mod);
+                    let w_divisor = correction_context.prepare_monic_divisor(w_mod);
 
                     // du=(E*t) rem u and dw=(E*s) rem w. Reducing E before
                     // each multiplication keeps the intermediate product
                     // below the degree of the corresponding child factor.
-                    let error_mod_u = correction_context.remainder_monic(error.clone(), &u_mod);
+                    let error_mod_u =
+                        correction_context.remainder_prepared_monic(error.clone(), &u_divisor);
                     let error_t = correction_context.multiply_raw(&error_mod_u, &t_mod);
-                    let du = correction_context.remainder_monic(error_t, &u_mod);
-                    let error_mod_w = correction_context.remainder_monic(error, &w_mod);
+                    let du =
+                        correction_context.remainder_prepared_monic(error_t, &u_divisor);
+                    let error_mod_w =
+                        correction_context.remainder_prepared_monic(error, &w_divisor);
                     let error_s = correction_context.multiply_raw(&error_mod_w, &s_mod);
-                    let dw = correction_context.remainder_monic(error_s, &w_mod);
+                    let dw =
+                        correction_context.remainder_prepared_monic(error_s, &w_divisor);
 
                     (s_mod, t_mod, du, dw)
                 };
@@ -7309,17 +7473,23 @@ impl<E: PositiveExponent> MultivariatePolynomial<IntegerRing, E, LexOrder> {
                         .exact_bezout_residual_quotient_mod(&s, &lifted_u, &t, &lifted_w, &modulus);
                     let lifted_u_mod = correction_context.reduce(&lifted_u);
                     let lifted_w_mod = correction_context.reduce(&lifted_w);
+                    let lifted_u_divisor =
+                        correction_context.prepare_monic_divisor(lifted_u_mod);
+                    let lifted_w_divisor =
+                        correction_context.prepare_monic_divisor(lifted_w_mod);
 
                     // ds=(B*s) rem W and dt=(B*t) rem U preserve the degree
                     // bounds of the two Bezout cofactors.
-                    let bezout_mod_w =
-                        correction_context.remainder_monic(bezout_error.clone(), &lifted_w_mod);
+                    let bezout_mod_w = correction_context
+                        .remainder_prepared_monic(bezout_error.clone(), &lifted_w_divisor);
                     let bezout_s = correction_context.multiply_raw(&bezout_mod_w, &s_mod);
-                    let delta_s = correction_context.remainder_monic(bezout_s, &lifted_w_mod);
-                    let bezout_mod_u =
-                        correction_context.remainder_monic(bezout_error, &lifted_u_mod);
+                    let delta_s = correction_context
+                        .remainder_prepared_monic(bezout_s, &lifted_w_divisor);
+                    let bezout_mod_u = correction_context
+                        .remainder_prepared_monic(bezout_error, &lifted_u_divisor);
                     let bezout_t = correction_context.multiply_raw(&bezout_mod_u, &t_mod);
-                    let delta_t = correction_context.remainder_monic(bezout_t, &lifted_u_mod);
+                    let delta_t = correction_context
+                        .remainder_prepared_monic(bezout_t, &lifted_u_divisor);
                     let lifted_s = next_context.lift_correction(s, &delta_s, &modulus);
                     let lifted_t = next_context.lift_correction(t, &delta_t, &modulus);
 
@@ -12289,6 +12459,52 @@ mod test {
                     )
                     .is_empty()
             );
+        }
+    }
+
+    #[test]
+    fn dense_integer_newton_remainder_matches_classical_remainder() {
+        let template = parse!("1+x^64").to_polynomial::<_, u8>(&Z, None);
+        let dense_indices = (0..129).collect::<Vec<u32>>();
+
+        for modulus in [Integer::from(5).pow(8), Integer::from(5).pow(65)] {
+            let context =
+                DenseIntegerModularUnivariateContext::new(&modulus, 0, &template, &dense_indices);
+            let mut divisor = (0..31)
+                .map(|degree| Integer::from((degree * 29 % 103) as i64 - 51))
+                .collect::<Vec<_>>();
+            *divisor.last_mut().unwrap() = Integer::one();
+            let divisor = context.prepare_monic_divisor(divisor);
+            assert_eq!(
+                divisor.reverse_inverse.as_ref().map(Vec::len),
+                Some(35)
+            );
+
+            for dividend_length in [41, 42, 60, 64, 65, 66] {
+                let dividend = (0..dividend_length)
+                    .map(|degree| {
+                        let offset = Integer::from((degree * 43 % 127) as i64 - 63);
+                        match degree % 3 {
+                            0 => &modulus * &Integer::from(2) + offset,
+                            1 => -&modulus + offset,
+                            _ => offset,
+                        }
+                    })
+                    .collect::<Vec<_>>();
+                let expected =
+                    context.remainder_monic(dividend.clone(), &divisor.coefficients);
+                let actual = context.remainder_prepared_monic(dividend.clone(), &divisor);
+                assert_eq!(actual, expected, "dividend length {dividend_length}");
+
+                let quotient_length = dividend_length - divisor.coefficients.len() + 1;
+                if quotient_length <= divisor.reverse_inverse.as_ref().unwrap().len()
+                    && dividend_length - divisor.coefficients.len()
+                        > super::NEWTON_REMAINDER_QUOTIENT_DEGREE_CUTOFF
+                {
+                    let direct = context.remainder_monic_newton(dividend, &divisor);
+                    assert_eq!(direct, expected, "Newton dividend length {dividend_length}");
+                }
+            }
         }
     }
 
