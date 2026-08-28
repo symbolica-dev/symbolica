@@ -1841,6 +1841,8 @@ impl<'a, E: PositiveExponent> DenseIntegerModularUnivariateContext<'a, E> {
 /// division uses the inverse of the divisor's unit leading coefficient.
 struct IntegerModularUnivariateContext<'a, E: PositiveExponent> {
     modulus: &'a Integer,
+    half_modulus: Integer,
+    minimum_symmetric: Integer,
     variable: usize,
     template: &'a MultivariatePolynomial<IntegerRing, E, LexOrder>,
 }
@@ -1862,10 +1864,32 @@ impl<'a, E: PositiveExponent> IntegerModularUnivariateContext<'a, E> {
                 .enumerate()
                 .all(|(index, exponent)| index == variable || exponent.is_zero())
         }));
+        let half_modulus = modulus / 2;
+        let minimum_symmetric = &half_modulus + Integer::one() - modulus;
         Self {
             modulus,
+            half_modulus,
+            minimum_symmetric,
             variable,
             template,
+        }
+    }
+
+    /// Return the canonical representative in the interval selected by `Integer::symmetric_mod`.
+    /// Values already in that interval are returned without a modular division.
+    fn symmetric_reduce(&self, value: Integer) -> Integer {
+        if value >= self.minimum_symmetric && value <= self.half_modulus {
+            return value;
+        }
+        if !value.is_negative() && value < *self.modulus {
+            return value - self.modulus;
+        }
+
+        let value = value % self.modulus;
+        if value > self.half_modulus {
+            value - self.modulus
+        } else {
+            value
         }
     }
 
@@ -1873,10 +1897,7 @@ impl<'a, E: PositiveExponent> IntegerModularUnivariateContext<'a, E> {
         &self,
         polynomial: &MultivariatePolynomial<IntegerRing, E, LexOrder>,
     ) -> MultivariatePolynomial<IntegerRing, E, LexOrder> {
-        polynomial.map_coeff(
-            |coefficient| coefficient.clone().symmetric_mod(self.modulus),
-            Z,
-        )
+        polynomial.map_coeff(|coefficient| self.symmetric_reduce(coefficient.clone()), Z)
     }
 
     fn multiply(
@@ -1909,7 +1930,7 @@ impl<'a, E: PositiveExponent> IntegerModularUnivariateContext<'a, E> {
                     .all(|(index, exponent)| index == self.variable || exponent.is_zero())
             );
             coefficients[term.exponents[self.variable].to_u32() as usize] =
-                term.coefficient.clone().symmetric_mod(self.modulus);
+                self.symmetric_reduce(term.coefficient.clone());
         }
         coefficients
     }
@@ -1937,7 +1958,10 @@ impl<'a, E: PositiveExponent> IntegerModularUnivariateContext<'a, E> {
     /// Divide modulo the context modulus and return a canonical symmetric quotient and remainder.
     ///
     /// The divisor's leading coefficient must be invertible modulo the context modulus, as it is
-    /// for the modular factors used during Hensel lifting.
+    /// for the modular factors used during Hensel lifting. Each cell is reduced when it becomes
+    /// the current pivot. Subtractions into lower cells remain exact integers until those cells
+    /// become pivots or survive in the final remainder, avoiding a modular division after every
+    /// coefficient update.
     fn quot_rem(
         &self,
         dividend: &MultivariatePolynomial<IntegerRing, E, LexOrder>,
@@ -1961,24 +1985,33 @@ impl<'a, E: PositiveExponent> IntegerModularUnivariateContext<'a, E> {
         }
 
         let divisor_degree = divisor.len() - 1;
-        let leading_inverse = divisor[divisor_degree].mod_inverse(self.modulus);
+        let leading_inverse =
+            self.symmetric_reduce(divisor[divisor_degree].mod_inverse(self.modulus));
         let mut quotient = vec![Integer::zero(); remainder.len() - divisor_degree];
         for power in (divisor_degree..remainder.len()).rev() {
-            let coefficient = (&remainder[power] * &leading_inverse).symmetric_mod(self.modulus);
+            let pivot =
+                self.symmetric_reduce(std::mem::replace(&mut remainder[power], Integer::zero()));
+            if pivot.is_zero() {
+                continue;
+            }
+
+            let coefficient = self.symmetric_reduce(pivot * &leading_inverse);
             if coefficient.is_zero() {
                 continue;
             }
-            quotient[power - divisor_degree] = coefficient.clone();
-            for (offset, divisor_coefficient) in divisor.iter().enumerate() {
+
+            for (offset, divisor_coefficient) in divisor.iter().take(divisor_degree).enumerate() {
                 let index = power - divisor_degree + offset;
                 Z.sub_mul_assign(&mut remainder[index], &coefficient, divisor_coefficient);
-                let value = std::mem::replace(&mut remainder[index], Integer::zero());
-                remainder[index] = value.symmetric_mod(self.modulus);
             }
-            debug_assert!(remainder[power].is_zero());
+            quotient[power - divisor_degree] = coefficient;
         }
 
         remainder.truncate(divisor_degree);
+        for coefficient in &mut remainder {
+            let value = std::mem::replace(coefficient, Integer::zero());
+            *coefficient = self.symmetric_reduce(value);
+        }
         (
             self.from_dense_coefficients(quotient),
             self.from_dense_coefficients(remainder),
@@ -2016,7 +2049,7 @@ impl<'a, E: PositiveExponent> IntegerModularUnivariateContext<'a, E> {
         let divisor_degree = divisor.len() - 1;
         for power in (divisor_degree..remainder.len()).rev() {
             let value = std::mem::replace(&mut remainder[power], Integer::zero());
-            let pivot = value.symmetric_mod(self.modulus);
+            let pivot = self.symmetric_reduce(value);
             if pivot.is_zero() {
                 continue;
             }
@@ -2030,7 +2063,7 @@ impl<'a, E: PositiveExponent> IntegerModularUnivariateContext<'a, E> {
         remainder.truncate(divisor_degree);
         for coefficient in &mut remainder {
             let value = std::mem::replace(coefficient, Integer::zero());
-            *coefficient = value.symmetric_mod(self.modulus);
+            *coefficient = self.symmetric_reduce(value);
         }
         self.from_dense_coefficients(remainder)
     }
@@ -11183,6 +11216,41 @@ mod test {
     }
 
     #[test]
+    fn integer_modular_univariate_symmetric_reduction_matches_integer() {
+        let template = parse!("1+x").to_polynomial::<_, u8>(&Z, None);
+
+        for modulus in [Integer::from(4), Integer::from(5).pow(65)] {
+            let context = IntegerModularUnivariateContext::new(&modulus, &template);
+            let half_modulus: Integer = &modulus / 2;
+            let minimum_symmetric: Integer = &half_modulus + Integer::one() - &modulus;
+
+            for multiplier in -2..=2 {
+                for offset in -2..=2 {
+                    let value: Integer = &modulus * multiplier + offset;
+                    assert_eq!(
+                        context.symmetric_reduce(value.clone()),
+                        value.symmetric_mod(&modulus)
+                    );
+                }
+            }
+
+            for value in [
+                &minimum_symmetric - 1,
+                minimum_symmetric.clone(),
+                &minimum_symmetric + 1,
+                &half_modulus - 1,
+                half_modulus.clone(),
+                &half_modulus + 1,
+            ] {
+                assert_eq!(
+                    context.symmetric_reduce(value.clone()),
+                    value.symmetric_mod(&modulus)
+                );
+            }
+        }
+    }
+
+    #[test]
     fn integer_modular_univariate_arithmetic_matches_finite_field_reference() {
         let variables = Some(Arc::new(vec![
             symbol!("x").into(),
@@ -11251,6 +11319,76 @@ mod test {
                     .iter()
                     .all(|coefficient| (coefficient % &modulus).is_zero())
             );
+
+            let half_modulus = &modulus / 2;
+            let near_half: Integer = &half_modulus - 1;
+            let dense_divisor = context.from_dense_coefficients(
+                (0..=16)
+                    .map(|index| {
+                        if index == 16 {
+                            Integer::from(2)
+                        } else if index % 2 == 0 {
+                            near_half.clone()
+                        } else {
+                            -&near_half
+                        }
+                    })
+                    .collect(),
+            );
+            let dense_quotient = context.from_dense_coefficients(
+                (0..=31)
+                    .map(|index| {
+                        if index % 7 == 2 {
+                            Integer::zero()
+                        } else if index % 2 == 0 {
+                            near_half.clone()
+                        } else {
+                            -&near_half
+                        }
+                    })
+                    .collect(),
+            );
+            let dense_remainder = context.from_dense_coefficients(
+                (0..16)
+                    .map(|index| {
+                        if index % 2 == 0 {
+                            near_half.clone()
+                        } else {
+                            -&near_half
+                        }
+                    })
+                    .collect(),
+            );
+            let dense_dividend = context.add(
+                &context.multiply(&dense_quotient, &dense_divisor),
+                &dense_remainder,
+            );
+            let (actual_quotient, actual_remainder) =
+                context.quot_rem(&dense_dividend, &dense_divisor);
+            assert_eq!(actual_quotient, dense_quotient);
+            assert_eq!(actual_remainder, dense_remainder);
+            assert!(
+                actual_quotient
+                    .coefficients
+                    .iter()
+                    .chain(&actual_remainder.coefficients)
+                    .all(|coefficient| coefficient == &coefficient.clone().symmetric_mod(&modulus))
+            );
+
+            let constant_divisor = context.from_dense_coefficients(vec![Integer::from(2)]);
+            let (constant_quotient, constant_remainder) =
+                context.quot_rem(&dense_dividend, &constant_divisor);
+            assert!(constant_remainder.is_zero());
+            assert_eq!(
+                context.multiply(&constant_quotient, &constant_divisor),
+                dense_dividend
+            );
+
+            let reduced_short_dividend = context.reduce(&short_sparse_dividend);
+            let (short_quotient, short_remainder) =
+                context.quot_rem(&reduced_short_dividend, &reduced_divisor);
+            assert!(short_quotient.is_zero());
+            assert_eq!(short_remainder, reduced_short_dividend);
 
             for (monic_dividend, monic_divisor) in [
                 (&dividend, &monic_divisor),
