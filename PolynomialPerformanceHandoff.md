@@ -1,14 +1,21 @@
 # Polynomial performance continuation handoff
 
 This is the live continuation record for the single-core Symbolica/FLINT polynomial-performance
-work. It was refreshed on 2026-08-28 after accelerating dense equal-degree factorization, bounded
-packed sparse products, and PolyBench factorization #84. The implementation head before this
-documentation update is `41302eb`. The base Rust/FLINT comparison inventory was measured at
-performance-equivalent source head `b2e5d28`, with later accepted rows replacing their
-exploratory predecessors as documented below.
+work. It was refreshed on 2026-08-28 after balancing three-factor Hensel reconstruction and
+reducing heap maintenance in bounded packed sparse products. The implementation commit is
+`24f57c6`. The base Rust/FLINT comparison inventory was measured at performance-equivalent source
+head `b2e5d28`, with later accepted rows replacing their exploratory predecessors as documented
+below.
 Keep this file current whenever an experiment is accepted, rejected, or left partly complete. The
 purpose is that another agent can resume without reconstructing decisions from chat history or
 transient binary names.
+
+The complete current Symbolica/FLINT scoreboard is in
+[CURRENT_STATUS.md](CURRENT_STATUS.md), with the initial immutable snapshot in
+[CURRENT_STATUS_v1.md](CURRENT_STATUS_v1.md). It contains 122 canonical comparisons and the 12
+duplicate Brown/CRT resultant measurements in one globally sorted table. After every accepted
+optimization, update the live file and create the next numbered snapshot with an opening paragraph
+that describes the changes from its predecessor.
 
 ## Working contract
 
@@ -28,7 +35,7 @@ transient binary names.
 - Small changes below roughly 3% need particularly strong, repeated evidence before their
   complexity is accepted.
 
-## Current continuation checkpoint: dense EDF, packed products, and PolyBench #84
+## Current continuation checkpoint: Hensel balance and packed-row heap advancement
 
 The accepted source chain is:
 
@@ -39,9 +46,81 @@ The accepted source chain is:
 | `e68a1d0` | Revert the slower reciprocal/Newton Hensel prototype |
 | `5be1daa` | Merge bounded packed sparse multiplication rows |
 | `41302eb` | Select guarded sparse-univariate factor orders and preserve bivariate fallback order |
+| `24f57c6` | Balance three-factor Hensel roots and advance packed-row heap heads in place |
 
 All commits use author and committer `Ben Ruijl <ben@ruijl.ch>`. The Newton experiment and its
 revert are intentionally retained in history so the negative result is discoverable.
+
+### Balanced three-factor Hensel root
+
+The high-height univariate degree-33 factorization is
+
+```text
+((1+65537*x)^17-1) * ((1-65539*x)^16+1).
+```
+
+After the exact linear factor is removed, screening at the selected prime `p=5` produces modular
+leaf degrees `[8,8,16]`. The former factor order split the recursive Hensel root as `8|24`. That
+root split is not exact, so it lifts the remaining `8|16` child all the way to the roughly
+1,060-bit global bound. FLINT combines the two degree-eight leaves first, making the root
+`(8+8)|16`; this split is exact and lets the remaining child use its lower local coefficient
+bound.
+
+When high linear-Hensel pressure has selected exactly three modular factors, Symbolica now moves
+the factor closest to half of the total degree to the first position. This minimizes the root
+degree imbalance without changing the general reconstruction algorithm. A regression test checks
+the `[8,8,16] -> [16,8,8]` order and the full high-height test verifies reconstruction, the selected
+prime, an exact subtree split, local recombination, a lower child modulus, and use of quadratic
+Hensel lifting.
+
+Six alternating 200-sample processes with the current system-FLINT full-LTO binary give a median
+S/F of `1.112455`, down from the source-matched control's `1.997930`. Median Symbolica time is about
+`1.53 ms`, versus about `1.38 ms` for FLINT; Symbolica absolute time fell by roughly `40%`. The
+constituent product is already faster than FLINT at `0.573810` S/F, about `8.3 us` versus
+`14.3 us`, so multiplication is not the remaining gap in this case.
+
+Raw final timings are `/tmp/final-factor-highheight-{1..6}.csv` and
+`/tmp/final-product-highheight-{1..6}.csv`. The measured binary is
+`/tmp/flint-comparison-hensel-peek-final-system-lto`, SHA-256
+`d1a02003b7bb6f12af759bfcce6fd85642b76c7fb4602c0a5416677ce6780b00`.
+
+### Bounded in-place packed-row heap advancement
+
+The packed-`u8` row merge previously removed every nonterminal heap head and then inserted the
+next entry in that row. For sparse output geometries, replacing the mutable heap root with the next
+larger row key performs one heap repair instead of a separate removal and insertion. Equal keys
+are still accumulated before an output term is emitted, and an exhausted row still removes its
+root.
+
+Every product that reaches this bounded packed-row path uses the in-place update. Compact,
+collision-heavy boxes have already been accepted by the earlier mixed-radix dense kernel; a
+separate pop-and-push branch here would therefore be unreachable through public multiplication.
+The row kernel is isolated in a non-inlined bounded helper so generic dense multiplication call
+sites do not absorb its code. Differential tests cover replacement, cancellation, terminal
+removal, asymmetric supports, the packed-byte boundary, the large-product fallback, irregular
+`u16` storage, and a collision-heavy row merge.
+
+On the generated high-gap five-variable degree-5/gap-64 product, six alternating 10,000-sample
+processes give `0.799572` S/F, down from the source-matched old path's `1.040981`; the ratio improves
+by `23.2%`. All 23 current PolyBench product rows now beat FLINT. Their current S/F
+best/median/worst are `0.585393/0.604569/0.730825` for the 12 GCD products and
+`0.566138/0.601621/0.710007` for the 11 factor products.
+
+Lowering the integer Kronecker threshold from 32 to 16 terms is rejected. The 17-by-17
+high-height product regressed from about `0.00820 ms` on the existing array path to `0.01262 ms`.
+Reusing the destination allocation while importing GMP limbs improved that Kronecker candidate to
+`0.01180 ms`, but it remained roughly `44%` slower than the array path and made the complete
+factorization roughly `14%` slower. The current array kernel already avoids a temporary GMP
+product for all 233 of the 289 coefficient pairs involving a large integer, so allocation reuse is
+secondary for this shape.
+
+Raw current product timings are `/tmp/final-product-highgap5-{1..6}.csv` and
+`/tmp/final-pb-{gcd,factor}-products-{1..6}.csv`.
+
+Final-source validation passes all `81/81` factor-module tests and all `6/6` packed-row tests with
+default features in the test profile. The full-LTO paired harness also validates every measured
+Symbolica product and factorization against FLINT before timing. `cargo fmt --check` and
+`git diff --check` pass.
 
 ### Dense equal-degree factorization
 
@@ -491,7 +570,12 @@ work is slightly faster in Symbolica. Current DDF contains about `1.85 M` cycles
 `quot_rem_univariate_fast`. FLINT's DDF profile includes Brent-Kung modular composition; Symbolica
 still advances largely by classical Frobenius steps.
 
-### Current Symbolica/FLINT benchmark inventory
+### Historical benchmark inventory at `41302eb` (superseded)
+
+The tables in this subsection preserve the checkpoint before the balanced-Hensel and in-place
+heap-advance changes. Do not use them as the current scoreboard. The complete refreshed inventory,
+including every replacement and a mandatory update protocol, is
+[CURRENT_STATUS.md](CURRENT_STATUS.md).
 
 Ratios below are Symbolica median divided by FLINT median, so lower is better. The retained base
 rows use the full-LTO/default-feature binary at `b2e5d28`, with `faster_alloc`, GMP, FLINT 3.6.0,
@@ -2285,28 +2369,32 @@ comments that justify file organization by contrasting it with designs not prese
 
 ## Current ordered next actions
 
-1. Profile the current high-height univariate degree-33 factorization, now the strict-inventory
-   worst row at `2.0059855x` FLINT. Its construction product is already `0.578774x`, so keep input
-   multiplication outside the factorization investigation and separate DDF, EDF, Hensel/tree, and
-   recombination work before changing code.
-2. For dense degree 64, treat the accepted dense EDF as complete. The remaining measured pressure
+1. Profile the generated dense three-variable degree-6/5 factorization, now the canonical worst
+   row at `1.915064x` FLINT. Measure the operation separately from its product, which is already
+   essentially tied at `1.009108x`, before changing factorization dispatch.
+2. Investigate the remaining multiplication-heavy generated GCD constructions. Sparse 8v, sparse
+   5v, dense 5v, and high-gap 8v products are `1.88--1.91x` FLINT, while the narrowly matching
+   high-gap 5v product now wins at `0.799572x`. Attribute dispatch, monomial merge, and coefficient
+   work per shape; do not broaden the new heap update without source-matched guards.
+3. For dense degree 64, treat the accepted dense EDF as complete. The remaining measured pressure
    is Hensel/tree followed by DDF. Do not revive full reciprocal/Newton polynomial remainders at
    degree 30: the retained commit/revert experiment regressed Symbolica by `29.17%`. Consider only
    bounded or truncated formulations whose primitive operation wins independently at these
    lengths.
-3. Keep `try_packed_u8_row_merge_mul` bounded. Broaden its row or pair limits, or add a `u16`
+4. Keep `try_packed_u8_row_merge_mul` bounded. Broaden its row or pair limits, or add a `u16`
    coordinate variant, only when a source-matched multiplication case demonstrates a win and the
-   current 23 PolyBench construction rows remain guarded. The accepted path already removes the
-   allocation-heavy map-of-vectors structure from the small, nearly collision-free regime.
-4. Extend the #84 ordering heuristic only for measured matching geometries. The current Auto-only
+   current 23 PolyBench construction rows remain guarded. All 23 now beat FLINT, with a current
+   median of `0.601621x`.
+5. Extend the #84 ordering heuristic only for measured matching geometries. The current Auto-only
    guards change one of 11 PolyBench factor fixtures, preserve the original bivariate order for
    terminal fallback, and leave #159 within `0.89%` in repeated A/B timing. Similar slow cases
    should first be audited by degrees, leading-layer sizes, and the two competing density scores.
-5. Add finite-field and rational differential coverage for the generic packed-row path and an
+6. Add finite-field and rational differential coverage for the generic packed-row path and an
    end-to-end factor test that forces all speculative univariate retries to fail before bivariate
    fallback. These are coverage improvements, not known correctness failures.
-6. Freeze and hash every accepted full-LTO binary and profile, integrate only measured winners with
-   Ben Ruijl's identity, and keep this file current after every accepted or rejected experiment.
+7. Freeze and hash every accepted full-LTO binary and profile, integrate only measured winners with
+   Ben Ruijl's identity, update [CURRENT_STATUS.md](CURRENT_STATUS.md), and create the next immutable
+   `CURRENT_STATUS_v<i>.md` snapshot after every accepted improvement.
 
 ## Historical ordered next actions
 
