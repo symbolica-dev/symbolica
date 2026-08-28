@@ -1460,7 +1460,7 @@ impl<R: EuclideanDomain, E: PositiveExponent> MultivariatePolynomial<R, E, LexOr
     }
 }
 
-/// Dense univariate integer arithmetic used by synchronized Hensel lifting.
+/// Dense univariate integer arithmetic used by quadratic and synchronized Hensel lifting.
 ///
 /// Coefficients are stored from constant to leading degree. Products are
 /// computed over the integers so that Hensel residuals can be divided exactly;
@@ -1470,6 +1470,14 @@ struct DenseIntegerModularUnivariateContext<'a, E: PositiveExponent> {
     variable: usize,
     template: &'a MultivariatePolynomial<IntegerRing, E, LexOrder>,
     dense_indices: &'a [u32],
+}
+
+/// A dense monic associate prepared for repeated remainders modulo a unit-leading divisor.
+///
+/// Scaling by the inverse of the leading coefficient preserves the divisor's generated ideal.
+/// The remainder loop can then clear each pivot without computing another modular inverse.
+struct DenseIntegerModularUnivariateDivisor {
+    coefficients: DenseIntegerUnivariatePolynomial,
 }
 
 impl<'a, E: PositiveExponent> DenseIntegerModularUnivariateContext<'a, E> {
@@ -1569,6 +1577,17 @@ impl<'a, E: PositiveExponent> DenseIntegerModularUnivariateContext<'a, E> {
         let mut reduced = coefficients.to_vec();
         self.reduce_in_place(&mut reduced);
         reduced
+    }
+
+    /// Converts a sparse polynomial to canonical dense coefficients in the
+    /// context ring.
+    fn reduced_dense_coefficients(
+        &self,
+        polynomial: &MultivariatePolynomial<IntegerRing, E, LexOrder>,
+    ) -> DenseIntegerUnivariatePolynomial {
+        let mut coefficients = self.dense_coefficients(polynomial);
+        self.reduce_in_place(&mut coefficients);
+        coefficients
     }
 
     /// Converts canonical nonnegative coefficients to symmetric
@@ -1695,6 +1714,62 @@ impl<'a, E: PositiveExponent> DenseIntegerModularUnivariateContext<'a, E> {
         remainder.truncate(divisor_degree);
         self.reduce_in_place(&mut remainder);
         remainder
+    }
+
+    /// Prepares the monic associate of a canonical dense divisor whose leading coefficient is
+    /// invertible modulo the context modulus.
+    fn prepare_unit_leading_divisor(
+        &self,
+        mut coefficients: DenseIntegerUnivariatePolynomial,
+    ) -> DenseIntegerModularUnivariateDivisor {
+        debug_assert!(
+            coefficients
+                .iter()
+                .all(|coefficient| { !coefficient.is_negative() && coefficient < self.modulus })
+        );
+        let leading_inverse = coefficients
+            .last()
+            .expect("a Hensel divisor must be nonzero modulo the correction modulus")
+            .mod_inverse(self.modulus);
+        for coefficient in &mut coefficients {
+            let value = std::mem::replace(coefficient, Integer::zero()) * &leading_inverse;
+            *coefficient = value % self.modulus;
+        }
+        debug_assert!(coefficients.last().is_some_and(Integer::is_one));
+        DenseIntegerModularUnivariateDivisor { coefficients }
+    }
+
+    /// Computes `((value rem divisor) * multiplier) rem divisor` in the
+    /// context ring.
+    ///
+    /// Reducing `value` before the multiplication bounds the intermediate
+    /// degree by the divisor and multiplier degrees. The returned dense
+    /// coefficients are canonical representatives in `[0, modulus)`.
+    fn multiply_remainder(
+        &self,
+        value: DenseIntegerUnivariatePolynomial,
+        multiplier: &[Integer],
+        divisor: &DenseIntegerModularUnivariateDivisor,
+    ) -> DenseIntegerUnivariatePolynomial {
+        let reduced_value = self.remainder_monic(value, &divisor.coefficients);
+        let product = self.multiply_raw(&reduced_value, multiplier);
+        self.remainder_monic(product, &divisor.coefficients)
+    }
+
+    /// Divides every coefficient exactly by `divisor`, then returns its
+    /// canonical image in the context ring.
+    fn exact_scalar_quotient_mod(
+        &self,
+        mut numerator: DenseIntegerUnivariatePolynomial,
+        divisor: &Integer,
+    ) -> DenseIntegerUnivariatePolynomial {
+        for coefficient in &mut numerator {
+            let value = std::mem::replace(coefficient, Integer::zero());
+            debug_assert!((&value % divisor).is_zero());
+            *coefficient = Z.exact_div_owned(value, divisor) % self.modulus;
+        }
+        Self::trim(&mut numerator);
+        numerator
     }
 
     /// Computes `(target-left*right)/divisor` exactly over the integers and
@@ -1834,11 +1909,9 @@ impl<'a, E: PositiveExponent> DenseIntegerModularUnivariateContext<'a, E> {
     }
 }
 
-/// Arithmetic modulo an integer on dense univariate integer polynomials.
-///
-/// Quadratic Hensel lifting uses this context for factor and Bezout corrections modulo the
-/// current prime power. Polynomial products go through the integer multiplication dispatcher;
-/// division uses the inverse of the divisor's unit leading coefficient.
+/// Sparse-polynomial reference arithmetic for testing modular univariate
+/// products, quotients, and remainders with symmetric representatives.
+#[cfg(test)]
 struct IntegerModularUnivariateContext<'a, E: PositiveExponent> {
     modulus: &'a Integer,
     half_modulus: Integer,
@@ -1847,15 +1920,14 @@ struct IntegerModularUnivariateContext<'a, E: PositiveExponent> {
     template: &'a MultivariatePolynomial<IntegerRing, E, LexOrder>,
 }
 
-/// A dense monic representative of a unit-leading divisor modulo an integer.
-///
-/// Quadratic Hensel corrections repeatedly take remainders modulo the same two factors. Scaling
-/// each factor by the inverse of its leading coefficient preserves its generated ideal and lets
-/// every subsequent remainder clear a leading cell without another modular inverse.
+/// A monic dense divisor used by the sparse-polynomial modular reference
+/// arithmetic.
+#[cfg(test)]
 struct IntegerModularUnivariateDivisor {
     coefficients: Vec<Integer>,
 }
 
+#[cfg(test)]
 impl<'a, E: PositiveExponent> IntegerModularUnivariateContext<'a, E> {
     fn new(
         modulus: &'a Integer,
@@ -5995,6 +6067,19 @@ impl<E: PositiveExponent> MultivariatePolynomial<IntegerRing, E, LexOrder> {
             QUADRATIC_HENSEL_LIFT_CALLS.with(|calls| calls.set(calls.get() + 1));
             let mut s_i = s.map_coeff(|c| field.to_symmetric_integer(c), Z);
             let mut t_i = t.map_coeff(|c| field.to_symmetric_integer(c), Z);
+            let variable = self
+                .last_exponents()
+                .iter()
+                .position(|exponent| !exponent.is_zero())
+                .expect("a Hensel factor must be nonconstant");
+            let dense_length = self.degree(variable).to_u32() as usize + 1;
+            let intermediate_length = dense_length
+                .checked_mul(2)
+                .and_then(|length| length.checked_sub(1))
+                .expect("dense Hensel intermediate length overflow");
+            let dense_indices = (0..intermediate_length)
+                .map(|index| index as u32)
+                .collect::<Vec<_>>();
 
             while !e.is_zero() && &m < max_p {
                 // A full round doubles the known p-adic precision. The last round can use the
@@ -6008,28 +6093,32 @@ impl<E: PositiveExponent> MultivariatePolynomial<IntegerRing, E, LexOrder> {
                 };
                 debug_assert!((&m % &step_modulus).is_zero());
                 let next_modulus = &m * &step_modulus;
-                let modular_context = IntegerModularUnivariateContext::new(&step_modulus, self);
-
-                let error_quotient = e.map_coeff(
-                    |coefficient| {
-                        debug_assert!((coefficient % &m).is_zero());
-                        coefficient / &m
-                    },
-                    Z,
+                let modular_context = DenseIntegerModularUnivariateContext::new(
+                    &step_modulus,
+                    variable,
+                    self,
+                    &dense_indices,
                 );
-                let error_mod = modular_context.reduce(&error_quotient);
-                let u_mod = modular_context.reduce(&u_i);
-                let w_mod = modular_context.reduce(&w_i);
-                let s_mod = modular_context.reduce(&s_i);
-                let t_mod = modular_context.reduce(&t_i);
 
-                let u_divisor = modular_context.prepare_divisor(&u_mod);
-                let w_divisor = modular_context.prepare_divisor(&w_mod);
+                let error_mod = modular_context
+                    .exact_scalar_quotient_mod(modular_context.dense_coefficients(&e), &m);
+                let u_mod = modular_context.reduced_dense_coefficients(&u_i);
+                let w_mod = modular_context.reduced_dense_coefficients(&w_i);
+                let s_mod = modular_context.reduced_dense_coefficients(&s_i);
+                let t_mod = modular_context.reduced_dense_coefficients(&t_i);
+
+                let u_divisor = modular_context.prepare_unit_leading_divisor(u_mod);
+                let w_divisor = modular_context.prepare_unit_leading_divisor(w_mod);
 
                 // Since s*u+t*w=1 modulo the correction modulus, reducing e*s modulo w and
                 // e*t modulo u gives degree-bounded corrections with e=tau*w+r*u.
-                let r = modular_context.multiply_remainder(&error_mod, &s_mod, &w_divisor);
-                let tau = modular_context.multiply_remainder(&error_mod, &t_mod, &u_divisor);
+                let mut r =
+                    modular_context.multiply_remainder(error_mod.clone(), &s_mod, &w_divisor);
+                let mut tau = modular_context.multiply_remainder(error_mod, &t_mod, &u_divisor);
+                modular_context.symmetrize_in_place(&mut r);
+                modular_context.symmetrize_in_place(&mut tau);
+                let r = modular_context.from_dense_coefficients(r);
+                let tau = modular_context.from_dense_coefficients(tau);
                 u_i = u_i + tau.mul_coeff(m.clone());
                 w_i = w_i + r.mul_coeff(m.clone());
                 e = &a - &(&u_i * &w_i);
@@ -6043,16 +6132,22 @@ impl<E: PositiveExponent> MultivariatePolynomial<IntegerRing, E, LexOrder> {
                 // b=(s*u+t*w-1)/m, solve ds*u+dt*w=-b modulo m and set
                 // s'=s+m*ds, t'=t+m*dt.
                 let bezout_error = &(&s_i * &u_i) + &(&t_i * &w_i) - u_i.one();
-                let negative_bezout_quotient = bezout_error.map_coeff(
-                    |coefficient| {
-                        debug_assert!((coefficient % &m).is_zero());
-                        -(coefficient / &m)
-                    },
-                    Z,
-                );
-                let bezout_mod = modular_context.reduce(&negative_bezout_quotient);
-                let delta_s = modular_context.multiply_remainder(&bezout_mod, &s_mod, &w_divisor);
-                let delta_t = modular_context.multiply_remainder(&bezout_mod, &t_mod, &u_divisor);
+                let mut bezout_numerator = modular_context.dense_coefficients(&bezout_error);
+                for coefficient in &mut bezout_numerator {
+                    let value = std::mem::replace(coefficient, Integer::zero());
+                    *coefficient = -value;
+                }
+                let bezout_mod = modular_context.exact_scalar_quotient_mod(bezout_numerator, &m);
+                // The lifted factors differ from the prepared divisors by multiples of m, which
+                // vanish modulo the correction modulus because that modulus divides m.
+                let mut delta_s =
+                    modular_context.multiply_remainder(bezout_mod.clone(), &s_mod, &w_divisor);
+                let mut delta_t =
+                    modular_context.multiply_remainder(bezout_mod, &t_mod, &u_divisor);
+                modular_context.symmetrize_in_place(&mut delta_s);
+                modular_context.symmetrize_in_place(&mut delta_t);
+                let delta_s = modular_context.from_dense_coefficients(delta_s);
+                let delta_t = modular_context.from_dense_coefficients(delta_t);
                 s_i = s_i + delta_s.mul_coeff(m.clone());
                 t_i = t_i + delta_t.mul_coeff(m.clone());
                 m = next_modulus;
@@ -11135,6 +11230,8 @@ mod test {
             "19-31*y+47*y^2+53*y^3-71*y^5+89*y^8+340282366920938463463374607431768211507*y^11"
         )
         .to_polynomial::<_, u8>(&Z, variables.clone());
+        let unit_leading_divisor =
+            parse!("17-29*y^2+23*y^4+2*y^6").to_polynomial::<_, u8>(&Z, variables.clone());
         let monic_divisor = parse!("17-29*y^2+23*y^4+y^6").to_polynomial::<_, u8>(&Z, variables);
         let dense_indices = (0..32).collect::<Vec<u32>>();
 
@@ -11168,7 +11265,7 @@ mod test {
 
             let dividend_dense = context.dense_coefficients(&dividend);
             let divisor_dense = context.dense_coefficients(&monic_divisor);
-            let remainder = context.remainder_monic(dividend_dense, &divisor_dense);
+            let remainder = context.remainder_monic(dividend_dense.clone(), &divisor_dense);
             let dividend_mod = dividend.map_coeff(
                 |coefficient| coefficient.to_finite_field(&field),
                 field.clone(),
@@ -11184,6 +11281,24 @@ mod test {
             assert_eq!(
                 context.from_dense_coefficients(remainder),
                 reference_remainder
+            );
+
+            let mut unit_leading_divisor_dense = context.dense_coefficients(&unit_leading_divisor);
+            context.reduce_in_place(&mut unit_leading_divisor_dense);
+            let prepared_divisor = context.prepare_unit_leading_divisor(unit_leading_divisor_dense);
+            let product_remainder =
+                context.multiply_remainder(dividend_dense.clone(), &right_dense, &prepared_divisor);
+            let mut unit_leading_divisor_mod = unit_leading_divisor.map_coeff(
+                |coefficient| coefficient.to_finite_field(&field),
+                field.clone(),
+            );
+            let reference_product_remainder = (&dividend_mod * &right_mod)
+                .quot_rem_univariate(&mut unit_leading_divisor_mod)
+                .1
+                .map_coeff(|coefficient| field.to_integer(coefficient), Z);
+            assert_eq!(
+                context.from_dense_coefficients(product_remainder),
+                reference_product_remainder
             );
 
             let zero = Vec::<Integer>::new();
@@ -11249,6 +11364,15 @@ mod test {
             let product_residual = correction_context
                 .exact_product_residual_quotient_mod(&target, &left, &right, &scale);
             assert_eq!(product_residual, correction_context.reduce(&error));
+
+            let scaled_error = error
+                .iter()
+                .map(|coefficient| coefficient * &scale)
+                .collect::<Vec<_>>();
+            assert_eq!(
+                correction_context.exact_scalar_quotient_mod(scaled_error, &scale),
+                correction_context.reduce(&error)
+            );
 
             // (scale-1)*(1+y) + (2+y) = 1 + scale*(1+y), so the
             // Bezout residual quotient is exactly -(1+y).
