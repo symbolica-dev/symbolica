@@ -1847,6 +1847,15 @@ struct IntegerModularUnivariateContext<'a, E: PositiveExponent> {
     template: &'a MultivariatePolynomial<IntegerRing, E, LexOrder>,
 }
 
+/// A dense monic representative of a unit-leading divisor modulo an integer.
+///
+/// Quadratic Hensel corrections repeatedly take remainders modulo the same two factors. Scaling
+/// each factor by the inverse of its leading coefficient preserves its generated ideal and lets
+/// every subsequent remainder clear a leading cell without another modular inverse.
+struct IntegerModularUnivariateDivisor {
+    coefficients: Vec<Integer>,
+}
+
 impl<'a, E: PositiveExponent> IntegerModularUnivariateContext<'a, E> {
     fn new(
         modulus: &'a Integer,
@@ -1900,6 +1909,7 @@ impl<'a, E: PositiveExponent> IntegerModularUnivariateContext<'a, E> {
         polynomial.map_coeff(|coefficient| self.symmetric_reduce(coefficient.clone()), Z)
     }
 
+    #[cfg(test)]
     fn multiply(
         &self,
         left: &MultivariatePolynomial<IntegerRing, E, LexOrder>,
@@ -1908,6 +1918,7 @@ impl<'a, E: PositiveExponent> IntegerModularUnivariateContext<'a, E> {
         self.reduce(&(left * right))
     }
 
+    #[cfg(test)]
     fn add(
         &self,
         left: &MultivariatePolynomial<IntegerRing, E, LexOrder>,
@@ -1955,6 +1966,86 @@ impl<'a, E: PositiveExponent> IntegerModularUnivariateContext<'a, E> {
         polynomial
     }
 
+    /// Prepare a divisor whose leading coefficient is invertible modulo the context modulus.
+    fn prepare_divisor(
+        &self,
+        divisor: &MultivariatePolynomial<IntegerRing, E, LexOrder>,
+    ) -> IntegerModularUnivariateDivisor {
+        assert!(!divisor.is_zero());
+        let mut coefficients = self.dense_coefficients(divisor);
+        let leading_inverse = coefficients
+            .last()
+            .expect("a nonzero divisor has a leading coefficient")
+            .mod_inverse(self.modulus);
+        for coefficient in &mut coefficients {
+            let value = std::mem::replace(coefficient, Integer::zero()) * &leading_inverse;
+            *coefficient = self.symmetric_reduce(value);
+        }
+        debug_assert!(coefficients.last().is_some_and(Integer::is_one));
+        IntegerModularUnivariateDivisor { coefficients }
+    }
+
+    /// Return the canonical symmetric remainder modulo a prepared divisor.
+    ///
+    /// Dense conversion canonicalizes each input coefficient once. Updates to lower cells are
+    /// then accumulated as exact integers until those cells become pivots or survive in the final
+    /// remainder.
+    fn remainder(
+        &self,
+        dividend: &MultivariatePolynomial<IntegerRing, E, LexOrder>,
+        divisor: &IntegerModularUnivariateDivisor,
+    ) -> MultivariatePolynomial<IntegerRing, E, LexOrder> {
+        if dividend.is_zero() {
+            return self.template.zero();
+        }
+
+        let mut remainder = self.dense_coefficients(dividend);
+        if divisor.coefficients.len() == 1 {
+            return self.template.zero();
+        }
+        if remainder.len() < divisor.coefficients.len() {
+            return self.from_dense_coefficients(remainder);
+        }
+
+        let divisor_degree = divisor.coefficients.len() - 1;
+        for power in (divisor_degree..remainder.len()).rev() {
+            let value = std::mem::replace(&mut remainder[power], Integer::zero());
+            let pivot = self.symmetric_reduce(value);
+            if pivot.is_zero() {
+                continue;
+            }
+
+            let shift = power - divisor_degree;
+            for (offset, divisor_coefficient) in
+                divisor.coefficients.iter().take(divisor_degree).enumerate()
+            {
+                Z.sub_mul_assign(&mut remainder[shift + offset], &pivot, divisor_coefficient);
+            }
+        }
+
+        remainder.truncate(divisor_degree);
+        for coefficient in &mut remainder {
+            let value = std::mem::replace(coefficient, Integer::zero());
+            *coefficient = self.symmetric_reduce(value);
+        }
+        self.from_dense_coefficients(remainder)
+    }
+
+    /// Compute `((value rem divisor) * multiplier) rem divisor` modulo the context modulus.
+    ///
+    /// This is the degree-bounded multiplication used by the direct factor and Bezout correction
+    /// formulas in quadratic Hensel lifting. The intermediate product is formed exactly and its
+    /// coefficients are canonicalized once when the following remainder consumes it.
+    fn multiply_remainder(
+        &self,
+        value: &MultivariatePolynomial<IntegerRing, E, LexOrder>,
+        multiplier: &MultivariatePolynomial<IntegerRing, E, LexOrder>,
+        divisor: &IntegerModularUnivariateDivisor,
+    ) -> MultivariatePolynomial<IntegerRing, E, LexOrder> {
+        let reduced_value = self.remainder(value, divisor);
+        self.remainder(&(&reduced_value * multiplier), divisor)
+    }
+
     /// Divide modulo the context modulus and return a canonical symmetric quotient and remainder.
     ///
     /// The divisor's leading coefficient must be invertible modulo the context modulus, as it is
@@ -1962,6 +2053,7 @@ impl<'a, E: PositiveExponent> IntegerModularUnivariateContext<'a, E> {
     /// the current pivot. Subtractions into lower cells remain exact integers until those cells
     /// become pivots or survive in the final remainder, avoiding a modular division after every
     /// coefficient update.
+    #[cfg(test)]
     fn quot_rem(
         &self,
         dividend: &MultivariatePolynomial<IntegerRing, E, LexOrder>,
@@ -2031,41 +2123,8 @@ impl<'a, E: PositiveExponent> IntegerModularUnivariateContext<'a, E> {
         dividend: &MultivariatePolynomial<IntegerRing, E, LexOrder>,
         divisor: &MultivariatePolynomial<IntegerRing, E, LexOrder>,
     ) -> MultivariatePolynomial<IntegerRing, E, LexOrder> {
-        assert!(!divisor.is_zero());
-        if dividend.is_zero() {
-            return self.template.zero();
-        }
-
-        let mut remainder = self.dense_coefficients(dividend);
-        let divisor = self.dense_coefficients(divisor);
-        assert!(
-            divisor.last().is_some_and(Integer::is_one),
-            "monic modular remainder requires a monic divisor"
-        );
-        if remainder.len() < divisor.len() {
-            return self.from_dense_coefficients(remainder);
-        }
-
-        let divisor_degree = divisor.len() - 1;
-        for power in (divisor_degree..remainder.len()).rev() {
-            let value = std::mem::replace(&mut remainder[power], Integer::zero());
-            let pivot = self.symmetric_reduce(value);
-            if pivot.is_zero() {
-                continue;
-            }
-
-            let shift = power - divisor_degree;
-            for (offset, divisor_coefficient) in divisor.iter().take(divisor_degree).enumerate() {
-                Z.sub_mul_assign(&mut remainder[shift + offset], &pivot, divisor_coefficient);
-            }
-        }
-
-        remainder.truncate(divisor_degree);
-        for coefficient in &mut remainder {
-            let value = std::mem::replace(coefficient, Integer::zero());
-            *coefficient = self.symmetric_reduce(value);
-        }
-        self.from_dense_coefficients(remainder)
+        let divisor = self.prepare_divisor(divisor);
+        self.remainder(dividend, &divisor)
     }
 }
 
@@ -5964,13 +6023,13 @@ impl<E: PositiveExponent> MultivariatePolynomial<IntegerRing, E, LexOrder> {
                 let s_mod = modular_context.reduce(&s_i);
                 let t_mod = modular_context.reduce(&t_i);
 
-                // If s*u + t*w = 1, division e*s = q*w + r gives
-                // e = (e*t + q*u)*w + r*u. These are the two factor corrections.
-                let error_times_s = modular_context.multiply(&error_mod, &s_mod);
-                let (q, r) = modular_context.quot_rem(&error_times_s, &w_mod);
-                let error_times_t = modular_context.multiply(&error_mod, &t_mod);
-                let q_times_u = modular_context.multiply(&q, &u_mod);
-                let tau = modular_context.add(&error_times_t, &q_times_u);
+                let u_divisor = modular_context.prepare_divisor(&u_mod);
+                let w_divisor = modular_context.prepare_divisor(&w_mod);
+
+                // Since s*u+t*w=1 modulo the correction modulus, reducing e*s modulo w and
+                // e*t modulo u gives degree-bounded corrections with e=tau*w+r*u.
+                let r = modular_context.multiply_remainder(&error_mod, &s_mod, &w_divisor);
+                let tau = modular_context.multiply_remainder(&error_mod, &t_mod, &u_divisor);
                 u_i = u_i + tau.mul_coeff(m.clone());
                 w_i = w_i + r.mul_coeff(m.clone());
                 e = &a - &(&u_i * &w_i);
@@ -5992,12 +6051,8 @@ impl<E: PositiveExponent> MultivariatePolynomial<IntegerRing, E, LexOrder> {
                     Z,
                 );
                 let bezout_mod = modular_context.reduce(&negative_bezout_quotient);
-                let w_mod = modular_context.reduce(&w_i);
-                let bezout_times_s = modular_context.multiply(&bezout_mod, &s_mod);
-                let (q, delta_s) = modular_context.quot_rem(&bezout_times_s, &w_mod);
-                let bezout_times_t = modular_context.multiply(&bezout_mod, &t_mod);
-                let q_times_u = modular_context.multiply(&q, &u_mod);
-                let delta_t = modular_context.add(&bezout_times_t, &q_times_u);
+                let delta_s = modular_context.multiply_remainder(&bezout_mod, &s_mod, &w_divisor);
+                let delta_t = modular_context.multiply_remainder(&bezout_mod, &t_mod, &u_divisor);
                 s_i = s_i + delta_s.mul_coeff(m.clone());
                 t_i = t_i + delta_t.mul_coeff(m.clone());
                 m = next_modulus;
@@ -10762,6 +10817,7 @@ mod test {
 
     #[test]
     fn quadratic_hensel_lift_handles_partial_final_precision() {
+        QUADRATIC_HENSEL_NONUNIT_RETRIES.with(|retries| retries.set(0));
         let variables = Some(Arc::new(vec![symbol!("x").into()]));
         let left = parse!("37+19*x+6*x^2").to_polynomial::<_, u8>(&Z, variables.clone());
         let right = parse!("29-13*x+5*x^2+3*x^3").to_polynomial::<_, u8>(&Z, variables.clone());
@@ -10786,6 +10842,7 @@ mod test {
 
         assert_eq!(&quadratic.0 * &quadratic.1, product);
         assert_eq!(quadratic, linear);
+        QUADRATIC_HENSEL_NONUNIT_RETRIES.with(|retries| assert_eq!(retries.get(), 0));
     }
 
     #[test]
@@ -10849,7 +10906,7 @@ mod test {
     }
 
     #[test]
-    fn linear_hensel_lift_handles_binary_prime_and_nontrivial_gamma() {
+    fn hensel_lift_handles_binary_prime_and_nontrivial_gamma() {
         let variables = Some(Arc::new(vec![symbol!("x").into()]));
 
         let binary_left = parse!("x+5").to_polynomial::<_, u8>(&Z, variables.clone());
@@ -10875,8 +10932,10 @@ mod test {
             .unwrap();
         assert_eq!(&binary_lift.0 * &binary_lift.1, binary_product);
 
-        let nonmonic_left = parse!("2*x+11").to_polynomial::<_, u8>(&Z, variables.clone());
-        let nonmonic_right = parse!("3*x+7").to_polynomial::<_, u8>(&Z, variables);
+        QUADRATIC_HENSEL_LIFT_CALLS.with(|calls| calls.set(0));
+        QUADRATIC_HENSEL_NONUNIT_RETRIES.with(|retries| retries.set(0));
+        let nonmonic_left = parse!("2*x+131").to_polynomial::<_, u8>(&Z, variables.clone());
+        let nonmonic_right = parse!("3*x+127").to_polynomial::<_, u8>(&Z, variables);
         let nonmonic_product = &nonmonic_left * &nonmonic_right;
         let nonmonic_field = Zp::new(5);
         let nonmonic_left_mod = nonmonic_left.map_coeff(
@@ -10887,16 +10946,31 @@ mod test {
             |coefficient| coefficient.to_finite_field(&nonmonic_field),
             nonmonic_field.clone(),
         );
-        let nonmonic_lift = nonmonic_product
+        let quadratic_nonmonic_lift = nonmonic_product
+            .hensel_lift_with_strategy(
+                nonmonic_left_mod.clone(),
+                nonmonic_right_mod.clone(),
+                Some(Integer::from(2)),
+                &Integer::from(5).pow(65),
+                true,
+            )
+            .unwrap();
+        let linear_nonmonic_lift = nonmonic_product
             .hensel_lift_with_strategy(
                 nonmonic_left_mod,
                 nonmonic_right_mod,
                 Some(Integer::from(2)),
-                &Integer::from(5).pow(10),
+                &Integer::from(5).pow(65),
                 false,
             )
             .unwrap();
-        assert_eq!(&nonmonic_lift.0 * &nonmonic_lift.1, nonmonic_product);
+        assert_eq!(quadratic_nonmonic_lift, linear_nonmonic_lift);
+        assert_eq!(
+            &quadratic_nonmonic_lift.0 * &quadratic_nonmonic_lift.1,
+            nonmonic_product
+        );
+        QUADRATIC_HENSEL_LIFT_CALLS.with(|calls| assert!(calls.get() > 0));
+        QUADRATIC_HENSEL_NONUNIT_RETRIES.with(|retries| assert_eq!(retries.get(), 0));
     }
 
     #[test]
@@ -11374,6 +11448,17 @@ mod test {
                     .chain(&actual_remainder.coefficients)
                     .all(|coefficient| coefficient == &coefficient.clone().symmetric_mod(&modulus))
             );
+
+            let prepared_divisor = context.prepare_divisor(&reduced_divisor);
+            let direct_product_remainder =
+                context.multiply_remainder(&reduced_dividend, &dense_quotient, &prepared_divisor);
+            let reference_product_remainder = context
+                .quot_rem(
+                    &context.multiply(&reduced_dividend, &dense_quotient),
+                    &reduced_divisor,
+                )
+                .1;
+            assert_eq!(direct_product_remainder, reference_product_remainder);
 
             let constant_divisor = context.from_dense_coefficients(vec![Integer::from(2)]);
             let (constant_quotient, constant_remainder) =
