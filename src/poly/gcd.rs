@@ -3275,7 +3275,35 @@ impl DenseUnivariateIntegerDivisionContext {
     }
 }
 
-/// Reconstructs a primitive univariate integer GCD from normalized 63-bit modular images.
+/// Selects an integer coefficient that fixes the scale of every modular GCD image.
+enum UnivariateGcdProjectiveNormalization {
+    Leading(Integer),
+    Constant { constant: Integer, leading: Integer },
+}
+
+impl UnivariateGcdProjectiveNormalization {
+    /// Return the integer value assigned to the selected coefficient in every modular image.
+    fn coefficient(&self) -> &Integer {
+        match self {
+            Self::Leading(coefficient) => coefficient,
+            Self::Constant { constant, .. } => constant,
+        }
+    }
+
+    /// Return the leading projective-coordinate value used by the fallback reconstruction.
+    fn leading_coefficient(&self) -> &Integer {
+        match self {
+            Self::Leading(leading) | Self::Constant { leading, .. } => leading,
+        }
+    }
+
+    /// Return whether modular images are normalized by their constant coefficient.
+    fn uses_constant(&self) -> bool {
+        matches!(self, Self::Constant { .. })
+    }
+}
+
+/// Reconstructs a primitive univariate integer GCD from normalized 64-bit modular images.
 struct UnivariateModularGcdContext<'a, E: PositiveExponent> {
     left: &'a MultivariatePolynomial<IntegerRing, E>,
     right: &'a MultivariatePolynomial<IntegerRing, E>,
@@ -3283,7 +3311,7 @@ struct UnivariateModularGcdContext<'a, E: PositiveExponent> {
     primitive_right: Cow<'a, MultivariatePolynomial<IntegerRing, E>>,
     variable: usize,
     content_gcd: Integer,
-    gamma: Integer,
+    normalization: UnivariateGcdProjectiveNormalization,
     reconstruction_start_bits: u64,
 }
 
@@ -3308,8 +3336,36 @@ impl<'a, E: PositiveExponent> UnivariateModularGcdContext<'a, E> {
             Cow::Owned(right.clone().div_coeff(&right_content))
         };
 
-        let gamma = Z.gcd(&primitive_left.lcoeff(), &primitive_right.lcoeff());
-        let reconstruction_start_bits = gamma.significant_bits().saturating_add(2);
+        let leading_gcd = Z.gcd(&primitive_left.lcoeff(), &primitive_right.lcoeff());
+        let probe_images = |coefficient: &Integer| {
+            coefficient
+                .significant_bits()
+                .saturating_add(2)
+                .saturating_add(u64::BITS as u64 - 1)
+                / u64::BITS as u64
+        };
+        let leading_probe_images = probe_images(&leading_gcd);
+        let constant_gcd = if leading_probe_images > 1 {
+            Z.gcd(
+                &primitive_left.get_constant(),
+                &primitive_right.get_constant(),
+            )
+        } else {
+            Integer::zero()
+        };
+        let normalization =
+            if !constant_gcd.is_zero() && probe_images(&constant_gcd) < leading_probe_images {
+                UnivariateGcdProjectiveNormalization::Constant {
+                    constant: constant_gcd,
+                    leading: leading_gcd,
+                }
+            } else {
+                UnivariateGcdProjectiveNormalization::Leading(leading_gcd)
+            };
+        let reconstruction_start_bits = normalization
+            .coefficient()
+            .significant_bits()
+            .saturating_add(2);
 
         Self {
             left,
@@ -3318,7 +3374,7 @@ impl<'a, E: PositiveExponent> UnivariateModularGcdContext<'a, E> {
             primitive_right,
             variable,
             content_gcd,
-            gamma,
+            normalization,
             reconstruction_start_bits,
         }
     }
@@ -3345,6 +3401,59 @@ impl<'a, E: PositiveExponent> UnivariateModularGcdContext<'a, E> {
         Some(candidate.mul_coeff(self.content_gcd.clone()))
     }
 
+    /// Certify a reconstructed GCD by exact division into both original inputs.
+    fn certified_reconstruction(
+        &self,
+        reconstruction: &MultivariatePolynomial<IntegerRing, E>,
+        degree: E,
+    ) -> Option<(
+        MultivariatePolynomial<IntegerRing, E>,
+        MultivariatePolynomial<IntegerRing, E>,
+        MultivariatePolynomial<IntegerRing, E>,
+    )> {
+        let candidate = self.reconstructed_candidate(reconstruction, degree)?;
+        let exact_cofactors = match DenseUnivariateIntegerDivisionContext::new(
+            &candidate,
+            self.left,
+            self.right,
+            self.variable,
+        ) {
+            Some(mut division) => match division.try_div(self.left) {
+                Some(left_cofactor) => division
+                    .try_div(self.right)
+                    .map(|right_cofactor| (left_cofactor, right_cofactor)),
+                None => None,
+            },
+            None => self.left.try_div(&candidate).and_then(|left_cofactor| {
+                self.right
+                    .try_div(&candidate)
+                    .map(|right_cofactor| (left_cofactor, right_cofactor))
+            }),
+        }?;
+        Some((candidate, exact_cofactors.0, exact_cofactors.1))
+    }
+
+    /// Rescale a constant-normalized CRT polynomial to the leading-coordinate representative.
+    fn leading_reconstruction(
+        &self,
+        reconstruction: &MultivariatePolynomial<IntegerRing, E>,
+        modulus: &Integer,
+    ) -> MultivariatePolynomial<IntegerRing, E> {
+        let leading = reconstruction.lcoeff();
+        debug_assert!(Z.is_one(&Z.gcd(&leading, modulus)));
+        let scale = (self
+            .normalization
+            .leading_coefficient()
+            .clone()
+            .symmetric_mod(modulus)
+            * leading.mod_inverse(modulus))
+        .symmetric_mod(modulus);
+        reconstruction.map_coeff(
+            |coefficient| (coefficient * &scale).symmetric_mod(modulus),
+            Z,
+        )
+    }
+
     /// Merges modular GCD images until the reconstructed polynomial divides both inputs.
     fn run(
         self,
@@ -3359,12 +3468,22 @@ impl<'a, E: PositiveExponent> UnivariateModularGcdContext<'a, E> {
         let mut modulus = Integer::one();
         let mut next_reconstruction_bits = self.reconstruction_start_bits;
         let mut failed_probe_image_gap = 1u64;
+        let leading_reconstruction_start_bits = self
+            .normalization
+            .leading_coefficient()
+            .significant_bits()
+            .saturating_add(2);
+        let mut next_leading_reconstruction_bits = self
+            .normalization
+            .uses_constant()
+            .then_some(leading_reconstruction_start_bits);
+        let mut failed_leading_probe_image_gap = 1u64;
 
         loop {
             let prime = primes.next()?;
             let field = Zp64::new(prime);
-            let gamma_image = self.gamma.to_finite_field(&field);
-            if field.is_zero(&gamma_image) {
+            let normalization_image = self.normalization.coefficient().to_finite_field(&field);
+            if field.is_zero(&normalization_image) {
                 continue;
             }
 
@@ -3374,13 +3493,19 @@ impl<'a, E: PositiveExponent> UnivariateModularGcdContext<'a, E> {
                 continue;
             }
 
-            let image = if let Some(dense_image) = DenseZp64UnivariateGcdImage::new(
+            let normalize_constant = self.normalization.uses_constant();
+            let requested_leading = if normalize_constant {
+                field.one()
+            } else {
+                normalization_image
+            };
+            let mut image = if let Some(dense_image) = DenseZp64UnivariateGcdImage::new(
                 self.primitive_left.as_ref(),
                 self.primitive_right.as_ref(),
                 self.variable,
                 &field,
             ) {
-                dense_image.run(gamma_image)
+                dense_image.run(requested_leading)
             } else {
                 let left_image = self.primitive_left.map_coeff(
                     |coefficient| coefficient.to_finite_field(&field),
@@ -3400,8 +3525,17 @@ impl<'a, E: PositiveExponent> UnivariateModularGcdContext<'a, E> {
                 );
                 left_image
                     .univariate_gcd(&right_image)
-                    .mul_coeff(gamma_image)
+                    .mul_coeff(requested_leading)
             };
+            if normalize_constant {
+                let constant_image = image.get_constant();
+                if field.is_zero(&constant_image) {
+                    continue;
+                }
+                let constant_inverse =
+                    DenseZp64UnivariateGcdImage::<E>::inverse_leading(&field, &constant_image);
+                image = image.mul_coeff(field.mul(&normalization_image, &constant_inverse));
+            }
             let image_degree = image.degree(self.variable);
             if image_degree.is_zero() {
                 let candidate = self.left.constant(self.content_gcd.clone());
@@ -3429,51 +3563,54 @@ impl<'a, E: PositiveExponent> UnivariateModularGcdContext<'a, E> {
                     modulus = Integer::from(prime);
                     next_reconstruction_bits = self.reconstruction_start_bits;
                     failed_probe_image_gap = 1;
+                    next_leading_reconstruction_bits = self
+                        .normalization
+                        .uses_constant()
+                        .then_some(leading_reconstruction_start_bits);
+                    failed_leading_probe_image_gap = 1;
                 }
             }
 
-            if modulus.significant_bits() < next_reconstruction_bits {
+            let modulus_bits = modulus.significant_bits();
+            let selected_reconstruction_due = modulus_bits >= next_reconstruction_bits;
+            let leading_reconstruction_due =
+                next_leading_reconstruction_bits.is_some_and(|next_bits| modulus_bits >= next_bits);
+            if !selected_reconstruction_due && !leading_reconstruction_due {
                 continue;
             }
 
-            let Some(candidate) =
-                self.reconstructed_candidate(&reconstruction, gcd_degree.unwrap())
-            else {
-                continue;
-            };
-            let exact_cofactors = match DenseUnivariateIntegerDivisionContext::new(
-                &candidate,
-                self.left,
-                self.right,
-                self.variable,
-            ) {
-                Some(mut division) => match division.try_div(self.left) {
-                    Some(left_cofactor) => division
-                        .try_div(self.right)
-                        .map(|right_cofactor| (left_cofactor, right_cofactor)),
-                    None => None,
-                },
-                None => self.left.try_div(&candidate).and_then(|left_cofactor| {
-                    self.right
-                        .try_div(&candidate)
-                        .map(|right_cofactor| (left_cofactor, right_cofactor))
-                }),
-            };
-            if let Some((left_cofactor, right_cofactor)) = exact_cofactors {
-                // Preserving the input degrees and the nonzero image of `gamma` ensures that a
-                // modular GCD degree cannot be below the characteristic-zero GCD degree. Exact
-                // divisibility at that degree therefore certifies the complete GCD.
-                return Some((candidate, left_cofactor, right_cofactor));
-            }
-
-            // `gamma` provides a cheap first probe point, not a coefficient bound. Exact
-            // division is the correctness certificate; geometric backoff only limits the work
-            // spent probing an incomplete reconstruction.
+            let degree = gcd_degree.unwrap();
             let image_bits = Integer::from(prime).significant_bits();
-            next_reconstruction_bits = modulus
-                .significant_bits()
-                .saturating_add(image_bits.saturating_mul(failed_probe_image_gap));
-            failed_probe_image_gap = failed_probe_image_gap.saturating_mul(2);
+            if selected_reconstruction_due {
+                if let Some(result) = self.certified_reconstruction(&reconstruction, degree) {
+                    // Nonzero input leading terms preserve the characteristic-zero GCD degree.
+                    // Exact divisibility at that degree certifies the complete GCD.
+                    return Some(result);
+                }
+
+                // The selected projective coordinate provides a cheap first probe point, not a
+                // coefficient bound. Geometric backoff limits exact divisions of incomplete CRT
+                // reconstructions.
+                next_reconstruction_bits =
+                    modulus_bits.saturating_add(image_bits.saturating_mul(failed_probe_image_gap));
+                failed_probe_image_gap = failed_probe_image_gap.saturating_mul(2);
+            }
+
+            if leading_reconstruction_due {
+                let leading_reconstruction = self.leading_reconstruction(&reconstruction, &modulus);
+                if (!selected_reconstruction_due || leading_reconstruction != reconstruction)
+                    && let Some(result) =
+                        self.certified_reconstruction(&leading_reconstruction, degree)
+                {
+                    return Some(result);
+                }
+
+                next_leading_reconstruction_bits = Some(
+                    modulus_bits
+                        .saturating_add(image_bits.saturating_mul(failed_leading_probe_image_gap)),
+                );
+                failed_leading_probe_image_gap = failed_leading_probe_image_gap.saturating_mul(2);
+            }
         }
     }
 }
@@ -6807,19 +6944,24 @@ mod tests {
         let first_prime = ModularGcdPrimeIterator::for_workspace::<u64>()
             .next()
             .unwrap();
-        let common_factor = parse!("x+1").to_polynomial::<_, u16>(&Z, None);
+        let common_factor = parse!("x")
+            .to_polynomial::<_, u16>(&Z, None)
+            .mul_coeff(Integer::one() << 80usize)
+            .add_constant(Integer::from(-1));
         let left_cofactor =
-            parse!("x+2").to_polynomial::<_, u16>(&Z, common_factor.variables().clone());
+            parse!("5*x+1").to_polynomial::<_, u16>(&Z, common_factor.variables().clone());
         let right_cofactor = left_cofactor
             .clone()
             .add_constant(Integer::from(first_prime));
         let left = &common_factor * &left_cofactor;
         let right = &common_factor * &right_cofactor;
 
-        let (actual, left_result, right_result) =
-            UnivariateModularGcdContext::new(&left, &right, 0)
-                .run()
-                .unwrap();
+        let context = UnivariateModularGcdContext::new(&left, &right, 0);
+        assert!(matches!(
+            &context.normalization,
+            UnivariateGcdProjectiveNormalization::Constant { .. }
+        ));
+        let (actual, left_result, right_result) = context.run().unwrap();
         assert_eq!(actual, common_factor);
         assert_eq!(&actual * &left_result, left);
         assert_eq!(&actual * &right_result, right);
@@ -6835,6 +6977,83 @@ mod tests {
     }
 
     #[test]
+    fn modular_univariate_integer_gcd_uses_leading_coordinate_for_zero_constants() {
+        let common_factor = parse!("x").to_polynomial::<_, u16>(&Z, None);
+        let left_cofactor =
+            parse!("6*x+1").to_polynomial::<_, u16>(&Z, common_factor.variables().clone());
+        let right_cofactor =
+            parse!("10*x+1").to_polynomial::<_, u16>(&Z, common_factor.variables().clone());
+        let left = &common_factor * &left_cofactor;
+        let right = &common_factor * &right_cofactor;
+
+        let context = UnivariateModularGcdContext::new(&left, &right, 0);
+        assert!(matches!(
+            &context.normalization,
+            UnivariateGcdProjectiveNormalization::Leading(_)
+        ));
+        let (actual, left_result, right_result) = context.run().unwrap();
+        assert_eq!(actual, common_factor);
+        assert_eq!(&actual * &left_result, left);
+        assert_eq!(&actual * &right_result, right);
+    }
+
+    #[test]
+    fn modular_univariate_integer_gcd_retains_leading_coordinate_fallback() {
+        let leading = Integer::one() << 384usize;
+        let constant = Integer::one() << 192usize;
+        let common_factor = parse!("x")
+            .to_polynomial::<_, u16>(&Z, None)
+            .mul_coeff(leading)
+            .add_constant(Integer::one());
+        let left_cofactor = parse!("x^2+x")
+            .to_polynomial::<_, u16>(&Z, common_factor.variables().clone())
+            .add_constant(constant.clone());
+        let right_cofactor = parse!("x^2+2*x")
+            .to_polynomial::<_, u16>(&Z, common_factor.variables().clone())
+            .add_constant(constant.clone());
+        let left = &common_factor * &left_cofactor;
+        let right = &common_factor * &right_cofactor;
+
+        let context = UnivariateModularGcdContext::new(&left, &right, 0);
+        assert!(matches!(
+            &context.normalization,
+            UnivariateGcdProjectiveNormalization::Constant { .. }
+        ));
+
+        let mut modulus = Integer::one();
+        for prime in univariate_modular_gcd_prime_iterator().take(7) {
+            modulus *= prime;
+        }
+        let constant_reconstruction = common_factor
+            .clone()
+            .mul_coeff(constant)
+            .map_coeff(|coefficient| coefficient.clone().symmetric_mod(&modulus), Z);
+        assert!(
+            context
+                .certified_reconstruction(&constant_reconstruction, 1u16)
+                .is_none()
+        );
+        let leading_reconstruction =
+            context.leading_reconstruction(&constant_reconstruction, &modulus);
+        assert_eq!(leading_reconstruction, common_factor);
+        assert_eq!(
+            context
+                .certified_reconstruction(&leading_reconstruction, 1u16)
+                .unwrap()
+                .0,
+            common_factor
+        );
+
+        let (actual, left_result, right_result) =
+            UnivariateModularGcdContext::new(&left, &right, 0)
+                .run()
+                .unwrap();
+        assert_eq!(actual, common_factor);
+        assert_eq!(&actual * &left_result, left);
+        assert_eq!(&actual * &right_result, right);
+    }
+
+    #[test]
     fn modular_univariate_integer_gcd_restores_content_with_an_inactive_variable() {
         let variable_template = parse!("x").to_polynomial::<IntegerRing, u16>(&Z, None);
         let variables = std::sync::Arc::new(vec![
@@ -6842,19 +7061,21 @@ mod tests {
             variable_template.variables()[0].clone(),
         ]);
         let [left_cofactor, right_cofactor, common_factor] = [
-            parse!("(1+3*x)^20-1").to_polynomial::<_, u16>(&Z, Some(variables.clone())),
-            parse!("(1-3*x)^20+1").to_polynomial::<_, u16>(&Z, Some(variables.clone())),
-            parse!("(1-3*x)^20+3").to_polynomial::<_, u16>(&Z, Some(variables)),
+            parse!("(1+3*x)^24-1").to_polynomial::<_, u16>(&Z, Some(variables.clone())),
+            parse!("(1-3*x)^24+1").to_polynomial::<_, u16>(&Z, Some(variables.clone())),
+            parse!("(1-3*x)^24+3").to_polynomial::<_, u16>(&Z, Some(variables)),
         ];
         let left = (&left_cofactor * &common_factor).mul_coeff(Integer::from(6));
         let right = (&right_cofactor * &common_factor).mul_coeff(Integer::from(10));
         assert_eq!(left.degree(0), 0);
         assert_ne!(left.degree(1), 0);
 
-        let (actual, left_result, right_result) =
-            UnivariateModularGcdContext::new(&left, &right, 1)
-                .run()
-                .unwrap();
+        let context = UnivariateModularGcdContext::new(&left, &right, 1);
+        assert!(matches!(
+            &context.normalization,
+            UnivariateGcdProjectiveNormalization::Constant { .. }
+        ));
+        let (actual, left_result, right_result) = context.run().unwrap();
         assert_eq!(actual, common_factor.mul_coeff(Integer::from(2)));
         assert_eq!(&actual * &left_result, left);
         assert_eq!(&actual * &right_result, right);
