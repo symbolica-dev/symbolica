@@ -39,11 +39,33 @@ const SPARSE_MDP_SAMPLE_BASE_ATTEMPTS: usize = 1;
 // Maximum average number of input terms per bivariate degree-box position for
 // selecting the bivariate-start integer factorization algorithm.
 const INTEGER_FACTOR_BIVARIATE_SPARSE_BOX_DENSITY_THRESHOLD: f64 = 5.0;
+// Minimum term count for selecting a lower-degree main variable for sparse
+// univariate-start integer factorization.
+const INTEGER_FACTOR_SPARSE_UNIVARIATE_MIN_TERMS: usize = 256;
+// Minimum bivariate-box score for selecting univariate start with a margin
+// above the automatic method boundary.
+const INTEGER_FACTOR_SPARSE_UNIVARIATE_MIN_BOX_DENSITY: f64 =
+    2.0 * INTEGER_FACTOR_BIVARIATE_SPARSE_BOX_DENSITY_THRESHOLD;
+// Maximum leading-layer size relative to the smallest layer in the input.
+const INTEGER_FACTOR_SPARSE_UNIVARIATE_MAX_LCOEFF_RATIO: usize = 2;
+// Minimum reduction in main-variable degree required by the reordered image.
+const INTEGER_FACTOR_SPARSE_UNIVARIATE_MIN_DEGREE_RATIO: usize = 4;
 // Number of failed univariate lifting attempts before automatic integer
 // factorization retries the polynomial with the bivariate-start algorithm.
 const INTEGER_FACTOR_UNIVARIATE_AUTO_RETRIES: usize = 3;
 // Number of small deterministic coordinate blocks tried before random sampling.
 const WANG_PRIME_SAMPLE_ATTEMPTS: usize = 3;
+// Number of cyclic rotations of the fixed bivariate Wang prime coordinates.
+const BIVARIATE_WANG_PRIME_SAMPLE_ROTATIONS: usize = 3;
+// Lower boundary for the selected bivariate-box score used by one-image Wang
+// leading-coefficient reconstruction; the score must be strictly above it.
+const INTEGER_FACTOR_BIVARIATE_WANG_MIN_BOX_DENSITY: f64 = 4.0;
+// Maximum number of active variables in a bivariate-start image whose monomial
+// leading coefficient is reconstructed from distinct-prime evaluations.
+const INTEGER_FACTOR_BIVARIATE_WANG_MAX_VARIABLES: usize = 5;
+// Maximum sum of degrees in coordinates evaluated by a deterministic
+// bivariate Wang sample.
+const INTEGER_FACTOR_BIVARIATE_WANG_MAX_EVALUATED_TOTAL_DEGREE: u32 = 96;
 // Maximum number of retained coefficient cells across the target and factor images
 // used by one evaluated Hensel stage.
 const MAX_EVALUATED_HENSEL_IMAGE_CELLS: usize = 1 << 22;
@@ -51,6 +73,14 @@ const MAX_EVALUATED_HENSEL_IMAGE_CELLS: usize = 1 << 22;
 const MAX_EVALUATED_HENSEL_GROUPED_TERMS: usize = 1 << 20;
 // Minimum number of base-prime digits for using composite-modulus quadratic Hensel corrections.
 const MIN_QUADRATIC_HENSEL_DIGITS: usize = 64;
+// Minimum factor-bound height for reducing a two-factor bivariate lift with a wide base prime.
+const BIVARIATE_WIDE_PRIME_MIN_BOUND_BITS: u64 = 256;
+// Largest main-variable degree for which the wide-prime convolution bound stays in u64.
+const BIVARIATE_WIDE_PRIME_MAX_DEGREE: u32 = 64;
+// Start of the prime range that supplies about 26 bits per p-adic correction digit.
+const BIVARIATE_WIDE_PRIME_START: u64 = 65_000_000;
+// Number of wide candidates tried before resuming the complete small-prime search.
+const BIVARIATE_WIDE_PRIME_ATTEMPTS: usize = 8;
 // Maximum number of term advances across all geometric samples in one image rebuild.
 const MAX_EVALUATED_HENSEL_TERM_STEPS: usize = 1 << 24;
 // Maximum number of dense coefficient rows retained for either lifted factor.
@@ -770,7 +800,8 @@ impl<'a, E: PositiveExponent> DenseZpDistinctDegreeContext<'a, E> {
     }
 }
 
-/// Dense arithmetic for Cantor-Zassenhaus equal-degree factorization over `Zp`.
+/// Dense arithmetic for odd-characteristic Cantor-Zassenhaus equal-degree
+/// factorization over `Zp`.
 ///
 /// A split attempt samples one dense residue, checks it for an immediate GCD,
 /// and otherwise raises it to `(p^d - 1) / 2` modulo the current block. The
@@ -796,6 +827,8 @@ impl<'a, E: PositiveExponent> DenseZpEqualDegreeContext<'a, E> {
     ///
     /// The same density and degree limits as dense distinct-degree
     /// factorization keep allocation proportional to the sparse input size.
+    /// `Zp` represents odd prime fields; characteristic two uses the separate
+    /// `Z2` type and remains on the generic trace-based implementation.
     fn new(
         polynomial: &'a MultivariatePolynomial<Zp, E, LexOrder>,
         variable: usize,
@@ -906,18 +939,14 @@ impl<'a, E: PositiveExponent> DenseZpEqualDegreeContext<'a, E> {
     }
 
     /// Find one proper factor of the current equal-degree block.
-    fn split<R: Rng + ?Sized>(
-        &mut self,
-        rng: &mut R,
-    ) -> MultivariatePolynomial<Zp, E, LexOrder> {
+    fn split<R: Rng + ?Sized>(&mut self, rng: &mut R) -> MultivariatePolynomial<Zp, E, LexOrder> {
         let degree = self.modulus.len() - 1;
         let sampling_range = 0..=i64::from(self.field.get_prime() - 1);
 
         loop {
             self.random_residue.clear();
-            self.random_residue.extend(
-                (0..degree).map(|_| self.field.sample(rng, &sampling_range)),
-            );
+            self.random_residue
+                .extend((0..degree).map(|_| self.field.sample(rng, &sampling_range)));
             DenseZpDistinctDegreeContext::<E>::trim(&self.field, &mut self.random_residue);
             if self.random_residue.len() <= 1 {
                 continue;
@@ -978,20 +1007,19 @@ impl<'a, E: PositiveExponent> DenseZpEqualDegreeContext<'a, E> {
                 continue;
             }
 
-            let factor = if let Some(mut context) =
-                DenseZpEqualDegreeContext::new(&block, variable, d)
-            {
-                #[cfg(test)]
-                if first_block {
-                    DENSE_ZP_EDF_BLOCKS.with(|blocks| blocks.set(blocks.get() + 1));
-                }
-                context.split(&mut rng)
-            } else if first_block {
-                return None;
-            } else {
-                factors.extend(block.equal_degree_factorization(d));
-                continue;
-            };
+            let factor =
+                if let Some(mut context) = DenseZpEqualDegreeContext::new(&block, variable, d) {
+                    #[cfg(test)]
+                    if first_block {
+                        DENSE_ZP_EDF_BLOCKS.with(|blocks| blocks.set(blocks.get() + 1));
+                    }
+                    context.split(&mut rng)
+                } else if first_block {
+                    return None;
+                } else {
+                    factors.extend(block.equal_degree_factorization(d));
+                    continue;
+                };
             first_block = false;
             let (cofactor, remainder) = block.quot_rem_univariate_monic(&factor);
             debug_assert!(remainder.is_zero());
@@ -1025,6 +1053,13 @@ enum ModularPrimeScreen<E: PositiveExponent> {
 enum UnivariateHenselProductTreeLink {
     Leaf(usize),
     Internal(usize),
+}
+
+/// Either lifted modular leaves at the requested precision or exact factors
+/// certified before that precision was reached.
+enum UnivariateHenselProductTreeLiftResult<P> {
+    Lifted(Vec<P>),
+    Exact(Vec<P>),
 }
 
 /// Records one product of two coprime child factors.
@@ -1090,6 +1125,29 @@ impl UnivariateHenselProductTreeTopology {
         if let Some(root) = self.root {
             collect(self, root, &mut indices);
         }
+        indices.sort_unstable();
+        indices
+    }
+
+    /// Returns the input-factor indices represented by one tree link.
+    fn leaf_indices_below(&self, link: UnivariateHenselProductTreeLink) -> Vec<usize> {
+        fn collect(
+            topology: &UnivariateHenselProductTreeTopology,
+            link: UnivariateHenselProductTreeLink,
+            indices: &mut Vec<usize>,
+        ) {
+            match link {
+                UnivariateHenselProductTreeLink::Leaf(index) => indices.push(index),
+                UnivariateHenselProductTreeLink::Internal(index) => {
+                    for child in topology.nodes[index].children {
+                        collect(topology, child, indices);
+                    }
+                }
+            }
+        }
+
+        let mut indices = Vec::new();
+        collect(self, link, &mut indices);
         indices.sort_unstable();
         indices
     }
@@ -1180,6 +1238,35 @@ fn univariate_hensel_precision_schedule(target: usize) -> Vec<usize> {
     }
     schedule.reverse();
     schedule
+}
+
+/// Orders three modular factors so the recursive Hensel root has the smallest
+/// possible degree imbalance.
+///
+/// Three-factor reconstruction isolates the first factor from the other two.
+/// Moving the factor closest to half of the total degree to the front reduces
+/// the root correction degrees and can expose an exact two-factor split before
+/// the remaining child is lifted at its local coefficient bound.
+fn balance_three_factor_hensel_root<R: Ring, E: PositiveExponent>(
+    factors: &mut [MultivariatePolynomial<R, E, LexOrder>],
+    variable: usize,
+) {
+    assert_eq!(factors.len(), 3);
+    let degrees = factors
+        .iter()
+        .map(|factor| factor.degree(variable).to_u32() as usize)
+        .collect::<Vec<_>>();
+    let total_degree = degrees
+        .iter()
+        .try_fold(0usize, |total, degree| total.checked_add(*degree))
+        .expect("Hensel factor degrees overflow");
+    let isolated_factor = degrees
+        .iter()
+        .enumerate()
+        .min_by_key(|(index, degree)| (degree.abs_diff(total_degree - **degree), *index))
+        .unwrap()
+        .0;
+    factors.swap(0, isolated_factor);
 }
 
 type DenseIntegerUnivariatePolynomial = Vec<Integer>;
@@ -1336,6 +1423,15 @@ std::thread_local! {
     static PRODUCT_TREE_HENSEL_LIFT_CALLS: std::cell::Cell<usize> = const {
         std::cell::Cell::new(0)
     };
+    static PRODUCT_TREE_EARLY_RECONSTRUCTION_ATTEMPTS: std::cell::Cell<usize> = const {
+        std::cell::Cell::new(0)
+    };
+    static PRODUCT_TREE_EARLY_RECONSTRUCTION_SUCCESSES: std::cell::Cell<usize> = const {
+        std::cell::Cell::new(0)
+    };
+    static PRODUCT_TREE_EARLY_RECONSTRUCTION_EXPONENT: std::cell::Cell<usize> = const {
+        std::cell::Cell::new(0)
+    };
     static MODULAR_INTEGER_EDF_CALLS: std::cell::Cell<usize> = const {
         std::cell::Cell::new(0)
     };
@@ -1357,10 +1453,22 @@ std::thread_local! {
     static LAST_MODULAR_INTEGER_EDF_PRIME: std::cell::Cell<u32> = const {
         std::cell::Cell::new(0)
     };
+    static LAST_BIVARIATE_RECONSTRUCTION_PRIME: std::cell::Cell<u32> = const {
+        std::cell::Cell::new(0)
+    };
     static EXACT_HENSEL_SUBTREE_SPLITS: std::cell::Cell<usize> = const {
         std::cell::Cell::new(0)
     };
     static LOCAL_HENSEL_RECOMBINATION_NODES: std::cell::Cell<usize> = const {
+        std::cell::Cell::new(0)
+    };
+    static BIVARIATE_SAMPLE_FACTORIZATIONS: std::cell::Cell<usize> = const {
+        std::cell::Cell::new(0)
+    };
+    static BIVARIATE_FIRST_SAMPLE_ACCEPTANCES: std::cell::Cell<usize> = const {
+        std::cell::Cell::new(0)
+    };
+    static BIVARIATE_WANG_SAMPLE_TRIES: std::cell::Cell<usize> = const {
         std::cell::Cell::new(0)
     };
     static EXACT_HENSEL_SUBTREE_MODULUS_BITS: std::cell::RefCell<Vec<u64>> = const {
@@ -1831,6 +1939,86 @@ fn integer_factor_start_mode() -> IntegerFactorStart {
         (false, true) => IntegerFactorStart::Bivariate,
         (false, false) => IntegerFactorStart::Disabled,
     }
+}
+
+/// Estimate how many input terms map to each exponent pair for two variables.
+/// Automatic integer factorization uses this score to select its initial
+/// bivariate or univariate image factorization.
+fn integer_factor_bivariate_box_density(
+    term_count: usize,
+    first_degree: usize,
+    second_degree: usize,
+) -> f64 {
+    term_count as f64 / ((first_degree as f64 + 1.0) * (second_degree as f64 + 1.0))
+}
+
+/// Return whether the selected bivariate degree-box score is high enough for
+/// one-image Wang leading-coefficient reconstruction.
+fn integer_factor_bivariate_wang_density_supported(
+    term_count: usize,
+    first_degree: usize,
+    second_degree: usize,
+) -> bool {
+    integer_factor_bivariate_box_density(term_count, first_degree, second_degree)
+        > INTEGER_FACTOR_BIVARIATE_WANG_MIN_BOX_DENSITY
+}
+
+/// Move a low-degree variable to the front for an anisotropic sparse input.
+/// A small leading layer bounds leading-coefficient reconstruction work, while
+/// the candidate box score selects a low-degree univariate image with margin.
+fn reorder_integer_factor_variables_for_sparse_univariate(
+    automatic: bool,
+    term_count: usize,
+    degrees: &[usize],
+    leading_layer_lengths: &[usize],
+    order: &mut [usize],
+) -> bool {
+    debug_assert_eq!(degrees.len(), leading_layer_lengths.len());
+    debug_assert!(order.iter().all(|&variable| variable < degrees.len()));
+
+    if !automatic
+        || term_count < INTEGER_FACTOR_SPARSE_UNIVARIATE_MIN_TERMS
+        || order.len() < 2
+        || degrees.iter().any(|&degree| degree == 2)
+    {
+        return false;
+    }
+
+    let current_degree = degrees[order[0]];
+    let current_density =
+        integer_factor_bivariate_box_density(term_count, current_degree, degrees[order[1]]);
+    if current_density > INTEGER_FACTOR_BIVARIATE_SPARSE_BOX_DENSITY_THRESHOLD {
+        return false;
+    }
+
+    let minimum_leading_layer = order
+        .iter()
+        .map(|&variable| leading_layer_lengths[variable])
+        .min()
+        .unwrap();
+    let maximum_candidate_leading_layer =
+        minimum_leading_layer.saturating_mul(INTEGER_FACTOR_SPARSE_UNIVARIATE_MAX_LCOEFF_RATIO);
+
+    let candidate_position = (1..order.len())
+        .filter(|&position| {
+            let variable = order[position];
+            let degree = degrees[variable];
+            leading_layer_lengths[variable] <= maximum_candidate_leading_layer
+                && degree.saturating_mul(INTEGER_FACTOR_SPARSE_UNIVARIATE_MIN_DEGREE_RATIO)
+                    <= current_degree
+                && integer_factor_bivariate_box_density(term_count, degree, current_degree)
+                    >= INTEGER_FACTOR_SPARSE_UNIVARIATE_MIN_BOX_DENSITY
+        })
+        .min_by_key(|&position| {
+            let variable = order[position];
+            (degrees[variable], leading_layer_lengths[variable], position)
+        });
+
+    let Some(candidate_position) = candidate_position else {
+        return false;
+    };
+    order[..=candidate_position].rotate_right(1);
+    true
 }
 
 /// A polynomial that can be factorized.
@@ -3330,11 +3518,26 @@ impl<E: PositiveExponent> Factorize for MultivariatePolynomial<IntegerRing, E, L
                     });
 
                     let mut order: Vec<_> = order.into_iter().map(|(v, _)| v).collect();
+                    let bivariate_fallback_order = order.clone();
+                    let reordered_for_sparse_univariate =
+                        reorder_integer_factor_variables_for_sparse_univariate(
+                            integer_factor_start_mode() == IntegerFactorStart::Auto,
+                            f.nterms(),
+                            &degrees,
+                            &lcoeff_length,
+                            &mut order,
+                        );
 
                     factors.extend(
-                        f.multivariate_factorization(&mut order, 10, None)
-                            .into_iter()
-                            .map(|ff| (ff, p)),
+                        f.multivariate_factorization(
+                            &mut order,
+                            10,
+                            None,
+                            reordered_for_sparse_univariate
+                                .then_some(bivariate_fallback_order.as_slice()),
+                        )
+                        .into_iter()
+                        .map(|ff| (ff, p)),
                     )
                 }
             }
@@ -3392,7 +3595,9 @@ impl<E: PositiveExponent> Factorize for MultivariatePolynomial<IntegerRing, E, L
 
                 let mut order: Vec<_> = order.into_iter().map(|(v, _)| v).collect();
 
-                f.multivariate_factorization(&mut order, 10, None).len() == 1
+                f.multivariate_factorization(&mut order, 10, None, None)
+                    .len()
+                    == 1
             }
         }
     }
@@ -6811,16 +7016,11 @@ impl<F: Field + SampleableRing<SamplingPolicy = RangeInclusive<i64>>, E: Positiv
 
 impl<E: PositiveExponent> MultivariatePolynomial<IntegerRing, E, LexOrder> {
     fn integer_factor_start_auto_decision(&self, order: &[usize]) -> (bool, f64) {
-        let bivariate_degree_space = order
-            .iter()
-            .take(2)
-            .map(|&var| self.degree(var).to_u32() as f64 + 1.0)
-            .product::<f64>();
-        let bivariate_box_density = if bivariate_degree_space == 0.0 {
-            0.0
-        } else {
-            self.nterms() as f64 / bivariate_degree_space
-        };
+        let bivariate_box_density = integer_factor_bivariate_box_density(
+            self.nterms(),
+            self.degree(order[0]).to_u32() as usize,
+            self.degree(order[1]).to_u32() as usize,
+        );
 
         let use_bivariate =
             bivariate_box_density <= INTEGER_FACTOR_BIVARIATE_SPARSE_BOX_DENSITY_THRESHOLD;
@@ -7121,6 +7321,107 @@ impl<E: PositiveExponent> MultivariatePolynomial<IntegerRing, E, LexOrder> {
         factors
     }
 
+    /// Reconstructs one primitive exact factor from a lifted monic product and
+    /// verifies it by exact division of this polynomial.
+    fn try_reconstruct_lifted_factor(
+        &self,
+        lifted: DenseIntegerUnivariatePolynomial,
+        context: &DenseIntegerModularUnivariateContext<E>,
+        modulus: &Integer,
+        variable: usize,
+    ) -> Option<(Self, Self)> {
+        let lifted = context.from_dense_coefficients(lifted);
+        let mut candidate = (&self.constant(self.lcoeff()) * &lifted)
+            .map_coeff(|coefficient| coefficient.clone().symmetric_mod(modulus), Z);
+        let content = candidate.content();
+        if content.is_zero() {
+            return None;
+        }
+        candidate = candidate.div_coeff(&content);
+        if candidate.is_constant() || candidate.degree(variable) >= self.degree(variable) {
+            return None;
+        }
+
+        let (quotient, remainder) = self.quot_rem(&candidate, true);
+        if !remainder.is_zero() {
+            return None;
+        }
+        let quotient_content = quotient.content();
+        if quotient_content.is_zero() {
+            return None;
+        }
+        Some((candidate, quotient.div_coeff(&quotient_content)))
+    }
+
+    /// Certifies a root split whose one child is a single irreducible modular
+    /// factor, then recombines the other child once its local coefficient
+    /// bound is covered by the current modulus.
+    fn try_reconstruct_product_tree_root(
+        &self,
+        lift: &UnivariateHenselProductTreeLiftContext,
+        root_index: usize,
+        context: &DenseIntegerModularUnivariateContext<E>,
+        modulus: &Integer,
+        prime: u32,
+        variable: usize,
+    ) -> Option<Vec<Self>> {
+        let root = lift.topology.nodes[root_index];
+        let (leaf_index, leaf_link, complement_link) = match root.children {
+            [
+                leaf @ UnivariateHenselProductTreeLink::Leaf(index),
+                complement,
+            ] => (index, leaf, complement),
+            [
+                complement,
+                leaf @ UnivariateHenselProductTreeLink::Leaf(index),
+            ] => (index, leaf, complement),
+            _ => return None,
+        };
+
+        let (leaf_factor, complement) = self.try_reconstruct_lifted_factor(
+            lift.value(leaf_link).to_vec(),
+            context,
+            modulus,
+            variable,
+        )?;
+        if leaf_factor.degree(variable).to_u32() as usize != lift.topology.leaf_degrees[leaf_index]
+        {
+            return None;
+        }
+
+        if let UnivariateHenselProductTreeLink::Leaf(index) = complement_link {
+            if complement.degree(variable).to_u32() as usize != lift.topology.leaf_degrees[index] {
+                return None;
+            }
+            return Some(vec![leaf_factor, complement]);
+        }
+
+        let complement_bound = complement.coefficient_bound();
+        let (_, complement_modulus) = Self::linear_hensel_modulus(&complement_bound, prime);
+        if modulus < &complement_modulus {
+            return None;
+        }
+
+        let lifted_factors = lift
+            .topology
+            .leaf_indices_below(complement_link)
+            .into_iter()
+            .map(|index| {
+                let mut coefficients = lift.leaves[index].clone();
+                context.symmetrize_in_place(&mut coefficients);
+                context.from_dense_coefficients(coefficients)
+            })
+            .collect();
+        let mut factors = complement.recombine_lifted_factors(
+            lifted_factors,
+            modulus,
+            variable,
+            &complement_bound,
+        );
+        factors.push(leaf_factor);
+        Some(factors)
+    }
+
     /// Lifts all modular factors through one synchronized degree-greedy
     /// product tree.
     ///
@@ -7135,7 +7436,7 @@ impl<E: PositiveExponent> MultivariatePolynomial<IntegerRing, E, LexOrder> {
         &self,
         hs: &[MultivariatePolynomial<FiniteField<UField>, E, LexOrder>],
         max_p: &Integer,
-    ) -> Vec<Self>
+    ) -> UnivariateHenselProductTreeLiftResult<Self>
     where
         FiniteField<UField>: Field + PolynomialGCD<E> + FiniteFieldCore<UField>,
         Integer: ToFiniteField<UField>,
@@ -7144,7 +7445,14 @@ impl<E: PositiveExponent> MultivariatePolynomial<IntegerRing, E, LexOrder> {
         PRODUCT_TREE_HENSEL_LIFT_CALLS.with(|calls| calls.set(calls.get() + 1));
 
         assert!(hs.len() >= 2);
-        let prime = hs[0].ring().get_prime().to_integer();
+        let prime_workspace = hs[0].ring().get_prime();
+        let prime = prime_workspace.to_integer();
+        let prime_u32 = u32::try_from(
+            prime_workspace
+                .to_u64()
+                .expect("a synchronized integer Hensel prime must fit in u64"),
+        )
+        .expect("a synchronized integer Hensel prime must fit in u32");
 
         let mut target_digits = 1usize;
         let mut reconstructed_modulus = prime.clone();
@@ -7244,7 +7552,7 @@ impl<E: PositiveExponent> MultivariatePolynomial<IntegerRing, E, LexOrder> {
                 let node = lift.topology.nodes[node_index];
                 let u_link = node.children[0];
                 let w_link = node.children[1];
-                let (s_mod, t_mod, du, dw) = {
+                let (u_mod, w_mod, s_mod, t_mod, du, dw) = {
                     let target = if node_index == root_index {
                         normalized_target.as_slice()
                     } else {
@@ -7277,7 +7585,7 @@ impl<E: PositiveExponent> MultivariatePolynomial<IntegerRing, E, LexOrder> {
                     let error_s = correction_context.multiply_raw(&error_mod_w, &s_mod);
                     let dw = correction_context.remainder_monic(error_s, &w_mod);
 
-                    (s_mod, t_mod, du, dw)
+                    (u_mod, w_mod, s_mod, t_mod, du, dw)
                 };
 
                 // The old child and cofactor buffers are dead after this node
@@ -7307,19 +7615,20 @@ impl<E: PositiveExponent> MultivariatePolynomial<IntegerRing, E, LexOrder> {
                     // relation after U and W have been lifted.
                     let bezout_error = correction_context
                         .exact_bezout_residual_quotient_mod(&s, &lifted_u, &t, &lifted_w, &modulus);
-                    let lifted_u_mod = correction_context.reduce(&lifted_u);
-                    let lifted_w_mod = correction_context.reduce(&lifted_w);
+
+                    // The correction modulus divides `modulus`, so adding
+                    // `modulus*du` and `modulus*dw` does not change these
+                    // canonical images used by the Bezout correction.
 
                     // ds=(B*s) rem W and dt=(B*t) rem U preserve the degree
                     // bounds of the two Bezout cofactors.
                     let bezout_mod_w =
-                        correction_context.remainder_monic(bezout_error.clone(), &lifted_w_mod);
+                        correction_context.remainder_monic(bezout_error.clone(), &w_mod);
                     let bezout_s = correction_context.multiply_raw(&bezout_mod_w, &s_mod);
-                    let delta_s = correction_context.remainder_monic(bezout_s, &lifted_w_mod);
-                    let bezout_mod_u =
-                        correction_context.remainder_monic(bezout_error, &lifted_u_mod);
+                    let delta_s = correction_context.remainder_monic(bezout_s, &w_mod);
+                    let bezout_mod_u = correction_context.remainder_monic(bezout_error, &u_mod);
                     let bezout_t = correction_context.multiply_raw(&bezout_mod_u, &t_mod);
-                    let delta_t = correction_context.remainder_monic(bezout_t, &lifted_u_mod);
+                    let delta_t = correction_context.remainder_monic(bezout_t, &u_mod);
                     let lifted_s = next_context.lift_correction(s, &delta_s, &modulus);
                     let lifted_t = next_context.lift_correction(t, &delta_t, &modulus);
 
@@ -7341,6 +7650,30 @@ impl<E: PositiveExponent> MultivariatePolynomial<IntegerRing, E, LexOrder> {
                 }
             }
 
+            const MIN_EARLY_PRODUCT_TREE_RECONSTRUCTION_BITS: u64 = 128;
+            if next_modulus.significant_bits() >= MIN_EARLY_PRODUCT_TREE_RECONSTRUCTION_BITS {
+                #[cfg(test)]
+                {
+                    PRODUCT_TREE_EARLY_RECONSTRUCTION_ATTEMPTS
+                        .with(|attempts| attempts.set(attempts.get() + 1));
+                    PRODUCT_TREE_EARLY_RECONSTRUCTION_EXPONENT
+                        .with(|exponent| exponent.set(new_exponent));
+                }
+                if let Some(factors) = self.try_reconstruct_product_tree_root(
+                    &lift,
+                    root_index,
+                    &next_context,
+                    &next_modulus,
+                    prime_u32,
+                    variable,
+                ) {
+                    #[cfg(test)]
+                    PRODUCT_TREE_EARLY_RECONSTRUCTION_SUCCESSES
+                        .with(|successes| successes.set(successes.get() + 1));
+                    return UnivariateHenselProductTreeLiftResult::Exact(factors);
+                }
+            }
+
             modulus = next_modulus;
         }
 
@@ -7349,13 +7682,15 @@ impl<E: PositiveExponent> MultivariatePolynomial<IntegerRing, E, LexOrder> {
             lift.topology.leaf_indices_in_input_order(),
             (0..hs.len()).collect::<Vec<_>>()
         );
-        lift.leaves
-            .into_iter()
-            .map(|mut factor| {
-                target_context.symmetrize_in_place(&mut factor);
-                target_context.from_dense_coefficients(factor)
-            })
-            .collect()
+        UnivariateHenselProductTreeLiftResult::Lifted(
+            lift.leaves
+                .into_iter()
+                .map(|mut factor| {
+                    target_context.symmetrize_in_place(&mut factor);
+                    target_context.from_dense_coefficients(factor)
+                })
+                .collect(),
+        )
     }
 
     /// Continue factoring one exact Hensel child with a coefficient bound local to that child.
@@ -8101,15 +8436,22 @@ impl<E: PositiveExponent> MultivariatePolynomial<IntegerRing, E, LexOrder> {
             "Selected modular factorization with {} factors",
             best_factorization.distinct_degree.factor_count
         );
-        let (field, hs) = Self::complete_equal_degree_factorization(best_factorization);
+        let (field, mut hs) = Self::complete_equal_degree_factorization(best_factorization);
 
         let (final_digits, max_p) = Self::linear_hensel_modulus(&bound, field.get_prime());
         let product_tree_lift_pressure =
             Self::has_high_linear_hensel_pressure(d, &bound, hs.len(), final_digits);
+        if product_tree_lift_pressure && hs.len() == 3 {
+            balance_three_factor_hensel_root(&mut hs, var);
+        }
         let quadratic_lift_allowed = hs.len() <= 4;
         if product_tree_lift_pressure && hs.len() > 4 {
-            let lifted = self.lift_modular_factor_product_tree(&hs, &max_p);
-            return self.recombine_lifted_factors(lifted, &max_p, var, &bound);
+            return match self.lift_modular_factor_product_tree(&hs, &max_p) {
+                UnivariateHenselProductTreeLiftResult::Lifted(lifted) => {
+                    self.recombine_lifted_factors(lifted, &max_p, var, &bound)
+                }
+                UnivariateHenselProductTreeLiftResult::Exact(factors) => factors,
+            };
         }
         self.factor_hensel_subtree(&hs, &max_p, &bound, var, quadratic_lift_allowed)
     }
@@ -8244,26 +8586,43 @@ impl<E: PositiveExponent> MultivariatePolynomial<IntegerRing, E, LexOrder> {
             i += 1;
         }
 
-        // factor the univariate polynomial
-        let mut uni_fs: Vec<_> = uni_f
-            .factor()
-            .into_iter()
-            .map(|(f, p)| {
-                debug_assert_eq!(p, 1);
-                f
-            })
-            .collect();
+        // The sample is square-free by the GCD check above. Remove its integer content and use
+        // the reconstruction stage directly instead of repeating square-free decomposition.
+        let mut factor_target = uni_f.clone().make_primitive();
+        if factor_target.lcoeff().is_negative() {
+            factor_target = -factor_target;
+        }
+        let uni_fs = factor_target.factor_reconstruct();
 
-        // strip potential content
-        uni_fs.retain_mut(|f| !f.is_constant());
+        let shifted_poly = if !sample_point.is_zero() {
+            self.shift_var(interpolation_var, &sample_point)
+        } else {
+            self.clone()
+        };
 
-        // select a suitable prime
-        // we try small primes first as the distinct and equal degree algorithms
-        // scale as log(p)
-        let mut pi = PrimeIteratorU64::new(101);
+        // The factor bound determines how many linear p-adic correction rounds are needed.
+        let bound = shifted_poly.coefficient_bound();
+
+        // Select a suitable prime. High-height two-factor images first try a few wide primes whose
+        // convolution coefficients still fit the direct u64 Montgomery-reduction bound.
+        let main_degree = self.degree(main_var).to_u32();
+        let use_wide_prime = uni_fs.len() == 2
+            && main_degree <= BIVARIATE_WIDE_PRIME_MAX_DEGREE
+            && bound.significant_bits() >= BIVARIATE_WIDE_PRIME_MIN_BOUND_BITS;
+        let maximum_direct_prime = u64::from(u32::MAX) / (u64::from(main_degree).saturating_add(1));
+        let mut wide_primes = use_wide_prime.then(|| {
+            PrimeIteratorU64::new(BIVARIATE_WIDE_PRIME_START).take(BIVARIATE_WIDE_PRIME_ATTEMPTS)
+        });
+        let mut small_primes = PrimeIteratorU64::new(101);
         let mut field;
         'new_prime: loop {
-            let p = pi.next().unwrap();
+            let p = match wide_primes.as_mut().and_then(Iterator::next) {
+                Some(p) if p <= maximum_direct_prime => p,
+                Some(_) | None => {
+                    wide_primes = None;
+                    small_primes.next().unwrap()
+                }
+            };
             if p > u32::MAX as u64 {
                 panic!("Ran out of primes during factorization of {self}");
             }
@@ -8292,14 +8651,8 @@ impl<E: PositiveExponent> MultivariatePolynomial<IntegerRing, E, LexOrder> {
             break;
         }
 
-        let shifted_poly = if !sample_point.is_zero() {
-            self.shift_var(interpolation_var, &sample_point)
-        } else {
-            self.clone()
-        };
-
-        // TODO: if bound is less than u64, we may also use Zp64 for the computation
-        let bound = shifted_poly.coefficient_bound();
+        #[cfg(test)]
+        LAST_BIVARIATE_RECONSTRUCTION_PRIME.with(|prime| prime.set(field.get_prime()));
 
         let p = field.get_prime().to_integer();
         let mut max_p = p.clone();
@@ -8309,7 +8662,7 @@ impl<E: PositiveExponent> MultivariatePolynomial<IntegerRing, E, LexOrder> {
             k += 1;
         }
 
-        let mod_field = FiniteField::<Integer>::new(max_p.clone());
+        let mod_field = FiniteField::<Integer>::new_non_prime(max_p.clone());
 
         // make all factors monic, this is possible since the lcoeff is invertible mod p^k
         let uni_fs_mod: Vec<_> = uni_fs
@@ -8560,14 +8913,18 @@ impl<E: PositiveExponent> MultivariatePolynomial<IntegerRing, E, LexOrder> {
                 .any(|exponent| *exponent == E::one())
     }
 
-    fn reconstruct_lcoeffs_from_univariate_sample(
+    /// Assign the irreducible factors of `lcoeff` to sampled polynomial
+    /// factors and return their exact multivariate leading coefficients. The
+    /// returned integer is the remaining unit relating their product to
+    /// `lcoeff` after `univariate_content` is restored.
+    fn reconstruct_lcoeffs_from_univariate_sample_up_to_unit(
         &self,
         lcoeff: &Self,
         lcoeff_factorization: &[(Self, usize)],
         univariate_factors: &[Self],
         sample_points: &[(usize, Integer)],
         univariate_content: &Integer,
-    ) -> Option<Vec<Self>> {
+    ) -> Option<(Integer, Vec<Self>)> {
         let lcoeff_content = lcoeff.content().abs();
         let mut lcoeff_factors = Vec::new();
         for (f, pow) in lcoeff_factorization {
@@ -8653,14 +9010,38 @@ impl<E: PositiveExponent> MultivariatePolynomial<IntegerRing, E, LexOrder> {
             product = &product * l;
         }
 
-        if product.clone().mul_coeff(univariate_content.clone()) == *lcoeff {
-            Some(true_lcoeffs)
+        let reconstructed = product.mul_coeff(univariate_content.clone());
+        if reconstructed == *lcoeff {
+            Some((Integer::one(), true_lcoeffs))
+        } else if -reconstructed == *lcoeff {
+            Some((Integer::from(-1), true_lcoeffs))
         } else {
             None
         }
     }
 
-    #[allow(dead_code)]
+    /// Reconstruct sampled factor leading coefficients when their product has
+    /// exactly the requested sign.
+    fn reconstruct_lcoeffs_from_univariate_sample(
+        &self,
+        lcoeff: &Self,
+        lcoeff_factorization: &[(Self, usize)],
+        univariate_factors: &[Self],
+        sample_points: &[(usize, Integer)],
+        univariate_content: &Integer,
+    ) -> Option<Vec<Self>> {
+        let (unit, true_lcoeffs) = self.reconstruct_lcoeffs_from_univariate_sample_up_to_unit(
+            lcoeff,
+            lcoeff_factorization,
+            univariate_factors,
+            sample_points,
+            univariate_content,
+        )?;
+        unit.is_one().then_some(true_lcoeffs)
+    }
+
+    /// Reconstruct and align factor leading coefficients from one admissible
+    /// bivariate Wang image, rescaling the image factors for Hensel lifting.
     fn wang_lcoeff_precomputation(
         &self,
         bivariate_factors: &[Self],
@@ -8668,7 +9049,12 @@ impl<E: PositiveExponent> MultivariatePolynomial<IntegerRing, E, LexOrder> {
         order: &[usize],
     ) -> Result<(Integer, Vec<Self>, Vec<Self>), usize> {
         let lcoeff = self.univariate_lcoeff(order[0]);
-        let lcoeff_factorization = lcoeff.factor();
+        let normalized_lcoeff = if lcoeff.lcoeff().is_negative() {
+            -lcoeff.clone()
+        } else {
+            lcoeff.clone()
+        };
+        let lcoeff_factorization = normalized_lcoeff.factor();
         let sorted_biv_factors = Self::canonical_sort(bivariate_factors, order[1], sample_points)
             .into_iter()
             .map(|(f, _, _)| f)
@@ -8685,18 +9071,20 @@ impl<E: PositiveExponent> MultivariatePolynomial<IntegerRing, E, LexOrder> {
             })
             .collect::<Vec<_>>();
 
-        let Some(mut true_lcoeffs) = self.reconstruct_lcoeffs_from_univariate_sample(
-            &lcoeff,
-            &lcoeff_factorization,
-            &univariate_factor_images,
-            sample_points,
-            &Integer::one(),
-        ) else {
+        let Some((lcoeff_unit, mut true_lcoeffs)) = self
+            .reconstruct_lcoeffs_from_univariate_sample_up_to_unit(
+                &lcoeff,
+                &lcoeff_factorization,
+                &univariate_factor_images,
+                sample_points,
+                &Integer::one(),
+            )
+        else {
             return Err(sorted_biv_factors.len());
         };
 
         let mut sorted_biv_factors = sorted_biv_factors;
-        let mut lcoeff_left = self.one();
+        let mut lcoeff_left = self.constant(lcoeff_unit);
         for (f, b) in true_lcoeffs.iter_mut().zip(&mut sorted_biv_factors) {
             let mut b_eval = b.clone();
             for (v, p) in sample_points {
@@ -8710,9 +9098,12 @@ impl<E: PositiveExponent> MultivariatePolynomial<IntegerRing, E, LexOrder> {
             }
             let f_lc = f_eval.lcoeff();
 
+            debug_assert_eq!(b_lc, f_lc);
             let lcm = b_lc.lcm(&f_lc);
             let b_cor = &lcm / &b_lc;
             let f_cor = lcm / &f_lc;
+            debug_assert!(b_cor.abs().is_one());
+            debug_assert!(f_cor.abs().is_one());
 
             *b = b.clone().mul_coeff(b_cor);
             lcoeff_left = lcoeff_left.div_coeff(&f_cor);
@@ -9118,13 +9509,22 @@ impl<E: PositiveExponent> MultivariatePolynomial<IntegerRing, E, LexOrder> {
         true
     }
 
+    /// Find an admissible bivariate factorization image. A successful
+    /// deterministic Wang sample also returns the factor leading coefficients
+    /// needed by the subsequent Hensel lift.
     #[allow(dead_code)]
     fn find_sample(
         &self,
         order: &mut [usize],
         mut coefficient_upper_bound: i64,
         mut max_factors_num: Option<usize>,
-    ) -> (Vec<Self>, Vec<(usize, Integer)>, i64, Self) {
+    ) -> (
+        Vec<Self>,
+        Vec<(usize, Integer)>,
+        i64,
+        Self,
+        Option<(Integer, Vec<Self>)>,
+    ) {
         debug!("Find sample for {} with order {:?}", self, order);
 
         // select a suitable evaluation point, as small as possible as to not change the coefficient bound
@@ -9138,6 +9538,44 @@ impl<E: PositiveExponent> MultivariatePolynomial<IntegerRing, E, LexOrder> {
         let mut best: Option<(Integer, Vec<Self>, Vec<(usize, Integer)>, i64, Self)> = None;
 
         let uni_lcoeff = self.univariate_lcoeff(order[0]);
+        let can_accept_first_primitive_image =
+            max_factors_num.is_none() && uni_lcoeff.is_constant();
+        let can_reconstruct_monomial_lcoeff = integer_factor_start_mode()
+            == IntegerFactorStart::Auto
+            && max_factors_num.is_none()
+            && order.len() <= INTEGER_FACTOR_BIVARIATE_WANG_MAX_VARIABLES
+            && order[1..].iter().fold(0u32, |total, variable| {
+                total.saturating_add(self.degree(*variable).to_u32())
+            }) <= INTEGER_FACTOR_BIVARIATE_WANG_MAX_EVALUATED_TOTAL_DEGREE
+            && integer_factor_bivariate_wang_density_supported(
+                self.nterms(),
+                self.degree(order[0]).to_u32() as usize,
+                self.degree(order[1]).to_u32() as usize,
+            )
+            && uni_lcoeff.nterms() == 1
+            && !uni_lcoeff.is_constant();
+        let lcoeff_content = uni_lcoeff.content().abs();
+        let lcoeff_factorization = can_reconstruct_monomial_lcoeff.then(|| uni_lcoeff.factor());
+        let mut wang_sample_attempts = 0;
+        let wang_sample_primes = if can_reconstruct_monomial_lcoeff {
+            let mut primes = PrimeIteratorU64::new(1);
+            (0..cur_sample_points.len())
+                .map(|_| {
+                    loop {
+                        let prime = Integer::from(primes.next().unwrap());
+                        if !(&lcoeff_content % &prime).is_zero() {
+                            break prime;
+                        }
+                    }
+                })
+                .collect::<Vec<_>>()
+        } else {
+            vec![]
+        };
+        let wang_sample_attempt_limit =
+            BIVARIATE_WANG_PRIME_SAMPLE_ROTATIONS.min(wang_sample_primes.len());
+        let initial_coefficient_upper_bound = coefficient_upper_bound;
+        let mut initialized_random_fallback = false;
         let mut lcoeff_square_free = self.one();
         for (f, _) in uni_lcoeff.square_free_factorization() {
             lcoeff_square_free = &lcoeff_square_free * &f;
@@ -9146,9 +9584,45 @@ impl<E: PositiveExponent> MultivariatePolynomial<IntegerRing, E, LexOrder> {
         let mut content_try_count = 0;
         let mut lcoeff_try_count = 0;
         'new_sample: loop {
-            for s in &mut cur_sample_points {
-                s.1 = Integer::Single(rng.random_range(0..=coefficient_upper_bound));
-                debug!("Sample x{} {}", s.0, s.1);
+            let use_wang_sample = can_reconstruct_monomial_lcoeff
+                && max_factors_num.is_none()
+                && wang_sample_attempts < wang_sample_attempt_limit;
+            if can_reconstruct_monomial_lcoeff
+                && !use_wang_sample
+                && max_factors_num.is_none()
+                && wang_sample_attempts > 0
+                && !initialized_random_fallback
+            {
+                coefficient_upper_bound = initial_coefficient_upper_bound;
+                content_try_count = 0;
+                lcoeff_try_count = 0;
+                initialized_random_fallback = true;
+            }
+            if use_wang_sample {
+                #[cfg(test)]
+                BIVARIATE_WANG_SAMPLE_TRIES.with(|count| count.set(count.get() + 1));
+                let rotation = wang_sample_attempts;
+                wang_sample_attempts += 1;
+                for (index, sample) in cur_sample_points.iter_mut().enumerate() {
+                    sample.1 =
+                        wang_sample_primes[(index + rotation) % wang_sample_primes.len()].clone();
+                }
+
+                if !Self::lcoeff_sample_supports_wang_reconstruction(
+                    lcoeff_factorization.as_ref().unwrap(),
+                    &lcoeff_content,
+                    &cur_sample_points,
+                ) {
+                    continue;
+                }
+            } else {
+                for sample in &mut cur_sample_points {
+                    sample.1 = Integer::Single(rng.random_range(0..=coefficient_upper_bound));
+                }
+            }
+
+            for sample in &cur_sample_points {
+                debug!("Sample x{} {}", sample.0, sample.1);
             }
 
             cur_biv_f = self.clone();
@@ -9189,6 +9663,10 @@ impl<E: PositiveExponent> MultivariatePolynomial<IntegerRing, E, LexOrder> {
             }
             lcoeff_try_count = 0;
 
+            if use_wang_sample && !cur_biv_f.content().abs().is_one() {
+                continue;
+            }
+
             let biv_df = cur_biv_f.derivative(order[0]);
 
             cur_uni_f = cur_biv_f.replace(cur_sample_points[0].0, &cur_sample_points[0].1);
@@ -9202,6 +9680,10 @@ impl<E: PositiveExponent> MultivariatePolynomial<IntegerRing, E, LexOrder> {
                 let c = cur_biv_f.univariate_content(order[0]);
 
                 if !c.is_constant() {
+                    if use_wang_sample {
+                        continue;
+                    }
+
                     content_try_count += 1;
                     coefficient_upper_bound += 10;
 
@@ -9225,8 +9707,75 @@ impl<E: PositiveExponent> MultivariatePolynomial<IntegerRing, E, LexOrder> {
                     continue;
                 }
 
-                bivariate_factors = cur_biv_f.factor().into_iter().map(|f| f.0).collect();
-                bivariate_factors.retain(|f| !f.is_constant());
+                if use_wang_sample && !c.get_constant().abs().is_one() {
+                    continue;
+                }
+
+                #[cfg(test)]
+                BIVARIATE_SAMPLE_FACTORIZATIONS.with(|count| count.set(count.get() + 1));
+                let retained_variables_start_at_zero = [order[0], order[1]]
+                    .into_iter()
+                    .all(|variable| cur_biv_f.degree_bounds(variable).0 == E::zero());
+                bivariate_factors =
+                    if c.get_constant().abs().is_one() && retained_variables_start_at_zero {
+                        cur_biv_f.bivariate_factor_reconstruct(order[0], order[1])
+                    } else {
+                        let mut factors = cur_biv_f
+                            .factor()
+                            .into_iter()
+                            .map(|factor| factor.0)
+                            .collect::<Vec<_>>();
+                        factors.retain(|factor| !factor.is_constant());
+                        factors
+                    };
+
+                // A one-factor admissible image certifies irreducibility. An
+                // initial primitive image with constant leading coefficient or
+                // a certified Wang leading-coefficient assignment is ready for
+                // reconstruction. Other images feed the bounded retries below.
+                let accepts_first_reconstruction = !bivariate_factors.is_empty()
+                    && can_accept_first_primitive_image
+                    && c.get_constant().abs().is_one();
+                let wang_lcoeffs = (bivariate_factors.len() > 1
+                    && use_wang_sample
+                    && c.get_constant().abs().is_one())
+                .then(|| {
+                    self.wang_lcoeff_precomputation(&bivariate_factors, &cur_sample_points, order)
+                        .ok()
+                })
+                .flatten();
+                let accepts_first_wang_reconstruction = wang_lcoeffs.is_some();
+                if use_wang_sample
+                    && bivariate_factors.len() > 1
+                    && !accepts_first_wang_reconstruction
+                {
+                    continue;
+                }
+                if bivariate_factors.len() == 1
+                    || accepts_first_reconstruction
+                    || accepts_first_wang_reconstruction
+                {
+                    #[cfg(test)]
+                    if bivariate_factors.len() > 1 {
+                        BIVARIATE_FIRST_SAMPLE_ACCEPTANCES.with(|count| count.set(count.get() + 1));
+                    }
+                    if let Some((leftover_lc, sorted_biv_factors, true_lcoeffs)) = wang_lcoeffs {
+                        return (
+                            sorted_biv_factors,
+                            cur_sample_points,
+                            coefficient_upper_bound,
+                            cur_uni_f,
+                            Some((leftover_lc, true_lcoeffs)),
+                        );
+                    }
+                    return (
+                        bivariate_factors,
+                        cur_sample_points,
+                        coefficient_upper_bound,
+                        cur_uni_f,
+                        None,
+                    );
+                }
 
                 if max_factors_num.is_none() {
                     max_factors_num = Some(bivariate_factors.len());
@@ -9281,6 +9830,7 @@ impl<E: PositiveExponent> MultivariatePolynomial<IntegerRing, E, LexOrder> {
             cur_sample_points,
             coefficient_upper_bound,
             cur_uni_f,
+            None,
         )
     }
 
@@ -9478,19 +10028,35 @@ impl<E: PositiveExponent> MultivariatePolynomial<IntegerRing, E, LexOrder> {
         factors_with_true_lcoeff
     }
 
-    fn sparse_coefficient_hensel_lift_mod_prime(
+    /// Lift modular factor coefficients until their exact product equals the target.
+    ///
+    /// A factorization that is already exact is returned immediately. `coefficient_bound` is
+    /// evaluated only when another p-adic coefficient-lifting step is required.
+    fn sparse_coefficient_hensel_lift_mod_prime<B>(
         &self,
         mut factorization: Vec<Self>,
         true_lcoeffs: &[Self],
         p: u32,
-        max_p: &Integer,
         order: &[usize],
-    ) -> Option<Vec<Self>> {
-        let field = Zp::new(p);
-        let p_int: Integer = (p as u64).into();
+        coefficient_bound: B,
+    ) -> Option<Vec<Self>>
+    where
+        B: FnOnce() -> Integer,
+    {
         factorization =
             self.impose_true_lcoeffs_on_integer_factors(&factorization, true_lcoeffs, order);
 
+        let mut product = self.one();
+        for f in &factorization {
+            product = &product * f;
+        }
+        let mut error = self - &product;
+        if error.is_zero() {
+            return Some(factorization);
+        }
+
+        let field = Zp::new(p);
+        let p_int: Integer = (p as u64).into();
         let factors_mod_p: Vec<_> = factorization
             .iter()
             .map(|f| f.map_coeff(|c| c.to_finite_field(&field), field.clone()))
@@ -9512,15 +10078,15 @@ impl<E: PositiveExponent> MultivariatePolynomial<IntegerRing, E, LexOrder> {
             })
             .collect();
 
-        let mut product = self.one();
-        for f in &factorization {
-            product = &product * f;
+        let bound = coefficient_bound();
+        let mut max_p = p_int.clone();
+        while &max_p * 2 < bound {
+            max_p = &max_p * &p_int;
         }
-        let mut error = self - &product;
 
         let mut m = p_int.clone();
         let mut sparse_diophantine_context = SparseDiophantineContext::new();
-        while !error.is_zero() && &m <= max_p {
+        while !error.is_zero() && &m <= &max_p {
             let mut error_mod_p = factors_mod_p[0].zero();
             for term in &error {
                 if !(term.coefficient % &m).is_zero() {
@@ -9572,12 +10138,13 @@ impl<E: PositiveExponent> MultivariatePolynomial<IntegerRing, E, LexOrder> {
             return vec![self.clone()];
         }
 
-        let (bivariate_factors, sample_points, uni_f) = loop {
-            let (bivariate_factors, sample_points, coeff_b, uni_f) = self.find_sample(
-                order,
-                coefficient_upper_bound.max(10),
-                max_bivariate_factors,
-            );
+        let (bivariate_factors, sample_points, uni_f, wang_lcoeffs) = loop {
+            let (bivariate_factors, sample_points, coeff_b, uni_f, wang_lcoeffs) = self
+                .find_sample(
+                    order,
+                    coefficient_upper_bound.max(10),
+                    max_bivariate_factors,
+                );
 
             coefficient_upper_bound = coeff_b;
 
@@ -9601,7 +10168,7 @@ impl<E: PositiveExponent> MultivariatePolynomial<IntegerRing, E, LexOrder> {
                 max_bivariate_factors = Some(bivariate_factors.len());
             }
 
-            break (bivariate_factors, sample_points, uni_f);
+            break (bivariate_factors, sample_points, uni_f, wang_lcoeffs);
         };
 
         let mut prime_iter = PrimeIteratorU64::new(1 << 31);
@@ -9648,24 +10215,28 @@ impl<E: PositiveExponent> MultivariatePolynomial<IntegerRing, E, LexOrder> {
         }
         let p32 = p as u32;
 
-        let p_int = field.get_prime().to_integer();
-        let mut lcoeff_max_p = p_int.clone();
-        let mut k = 1;
-        let lcoeff_bound = self.coefficient_bound();
-        while &lcoeff_max_p * 2 < lcoeff_bound {
-            lcoeff_max_p = &lcoeff_max_p * &p_int;
-            k += 1;
-        }
-
-        let (leftover_lc, mut sorted_biv_factors, mut true_lcoeffs) = match self
-            .lcoeff_precomputation(
+        let wang_sample = wang_lcoeffs.is_some();
+        let lcoeff_precomputation = if let Some((leftover_lc, true_lcoeffs)) = wang_lcoeffs {
+            Ok((leftover_lc, bivariate_factors, true_lcoeffs))
+        } else {
+            let p_int = field.get_prime().to_integer();
+            let mut lcoeff_max_p = p_int.clone();
+            let mut k = 1;
+            let lcoeff_bound = self.coefficient_bound();
+            while &lcoeff_max_p * 2 < lcoeff_bound {
+                lcoeff_max_p = &lcoeff_max_p * &p_int;
+                k += 1;
+            }
+            self.lcoeff_precomputation(
                 &bivariate_factors,
                 &sample_points,
                 order,
                 lcoeff_max_p,
                 p32,
                 k,
-            ) {
+            )
+        };
+        let (leftover_lc, mut sorted_biv_factors, mut true_lcoeffs) = match lcoeff_precomputation {
             Ok((leftover_lc, sorted_biv_factors, true_lcoeffs)) => {
                 (leftover_lc, sorted_biv_factors, true_lcoeffs)
             }
@@ -9678,7 +10249,11 @@ impl<E: PositiveExponent> MultivariatePolynomial<IntegerRing, E, LexOrder> {
             }
         };
 
-        let rescaled = if leftover_lc != 1 {
+        let rescaled = if leftover_lc == -1 {
+            sorted_biv_factors[0] = -sorted_biv_factors[0].clone();
+            true_lcoeffs[0] = -true_lcoeffs[0].clone();
+            Cow::Borrowed(self)
+        } else if leftover_lc != 1 {
             for (b, l) in sorted_biv_factors.iter_mut().zip(&mut true_lcoeffs) {
                 *b = b.clone().mul_coeff(leftover_lc.clone());
                 *l = l.clone().mul_coeff(leftover_lc.clone());
@@ -9691,12 +10266,6 @@ impl<E: PositiveExponent> MultivariatePolynomial<IntegerRing, E, LexOrder> {
         } else {
             Cow::Borrowed(self)
         };
-
-        let bound = rescaled.coefficient_bound();
-        let mut max_p = p_int.clone();
-        while &max_p * 2 < bound {
-            max_p = &max_p * &p_int;
-        }
 
         for (b, l) in sorted_biv_factors.iter().zip(&true_lcoeffs) {
             debug!("Bivariate factor {} with true lcoeff {}", b, l);
@@ -9727,6 +10296,11 @@ impl<E: PositiveExponent> MultivariatePolynomial<IntegerRing, E, LexOrder> {
             order,
             &sample_points_p,
         );
+        let hensel_context = if wang_sample {
+            MultivariateHenselContext::new(2).retry_sample_on_sparse_failure()
+        } else {
+            MultivariateHenselContext::new(2)
+        };
 
         let Ok(factorization_p) = poly_p.multivariate_hensel_lifting(
             &sorted_biv_factors_p,
@@ -9735,7 +10309,7 @@ impl<E: PositiveExponent> MultivariatePolynomial<IntegerRing, E, LexOrder> {
             &sample_points_p,
             Some(&true_lcoeffs_p),
             order,
-            MultivariateHenselContext::new(2),
+            hensel_context,
         ) else {
             return self.multivariate_factorization_bivariate_start(
                 order,
@@ -9753,8 +10327,8 @@ impl<E: PositiveExponent> MultivariatePolynomial<IntegerRing, E, LexOrder> {
             factorization_z,
             &true_lcoeffs,
             p32,
-            &max_p,
             order,
+            || rescaled.coefficient_bound(),
         ) else {
             return self.multivariate_factorization_bivariate_start(
                 order,
@@ -9810,12 +10384,34 @@ impl<E: PositiveExponent> MultivariatePolynomial<IntegerRing, E, LexOrder> {
         order: &mut [usize],
         coefficient_upper_bound: i64,
         max_univariate_factors: Option<usize>,
+        bivariate_fallback_order: Option<&[usize]>,
     ) -> Vec<Self> {
         self.multivariate_factorization_with_retries(
             order,
             coefficient_upper_bound,
             max_univariate_factors,
             0,
+            bivariate_fallback_order,
+        )
+    }
+
+    /// Start bivariate factorization after restoring the variable order that
+    /// preceded a speculative sparse-univariate ordering.
+    fn multivariate_factorization_bivariate_fallback(
+        &self,
+        order: &mut [usize],
+        bivariate_fallback_order: Option<&[usize]>,
+        coefficient_upper_bound: i64,
+        max_bivariate_factors: Option<usize>,
+    ) -> Vec<Self> {
+        if let Some(fallback_order) = bivariate_fallback_order {
+            debug_assert_eq!(order.len(), fallback_order.len());
+            order.copy_from_slice(fallback_order);
+        }
+        self.multivariate_factorization_bivariate_start(
+            order,
+            coefficient_upper_bound,
+            max_bivariate_factors,
         )
     }
 
@@ -9825,6 +10421,7 @@ impl<E: PositiveExponent> MultivariatePolynomial<IntegerRing, E, LexOrder> {
         mut coefficient_upper_bound: i64,
         mut max_univariate_factors: Option<usize>,
         univariate_retries: usize,
+        bivariate_fallback_order: Option<&[usize]>,
     ) -> Vec<Self> {
         if let Some(m) = max_univariate_factors
             && m == 1
@@ -9836,8 +10433,9 @@ impl<E: PositiveExponent> MultivariatePolynomial<IntegerRing, E, LexOrder> {
         let use_bivariate_start = match integer_start_mode {
             IntegerFactorStart::Auto => {
                 if univariate_retries >= INTEGER_FACTOR_UNIVARIATE_AUTO_RETRIES {
-                    return self.multivariate_factorization_bivariate_start(
+                    return self.multivariate_factorization_bivariate_fallback(
                         order,
+                        bivariate_fallback_order,
                         coefficient_upper_bound,
                         max_univariate_factors,
                     );
@@ -9851,8 +10449,9 @@ impl<E: PositiveExponent> MultivariatePolynomial<IntegerRing, E, LexOrder> {
         };
 
         if use_bivariate_start {
-            return self.multivariate_factorization_bivariate_start(
+            return self.multivariate_factorization_bivariate_fallback(
                 order,
+                bivariate_fallback_order,
                 coefficient_upper_bound,
                 max_univariate_factors,
             );
@@ -9883,8 +10482,9 @@ impl<E: PositiveExponent> MultivariatePolynomial<IntegerRing, E, LexOrder> {
 
                 match integer_start_mode {
                     IntegerFactorStart::Auto | IntegerFactorStart::Bivariate => {
-                        return self.multivariate_factorization_bivariate_start(
+                        return self.multivariate_factorization_bivariate_fallback(
                             order,
+                            bivariate_fallback_order,
                             coefficient_upper_bound.saturating_add(10),
                             None,
                         );
@@ -9993,13 +10593,6 @@ impl<E: PositiveExponent> MultivariatePolynomial<IntegerRing, E, LexOrder> {
         }
         let scaled_self = self.clone().mul_coeff(scale_pow);
 
-        let bound = scaled_self.coefficient_bound();
-        let p_int = field.get_prime().to_integer();
-        let mut max_p = p_int.clone();
-        while &max_p * 2 < bound {
-            max_p = &max_p * &p_int;
-        }
-
         for (u, l) in univariate_factors.iter().zip(&lc_divs) {
             debug!("Univariate factor {} with true lcoeff {}", u, l);
         }
@@ -10026,6 +10619,7 @@ impl<E: PositiveExponent> MultivariatePolynomial<IntegerRing, E, LexOrder> {
                 coefficient_upper_bound + 10,
                 max_univariate_factors,
                 univariate_retries + 1,
+                bivariate_fallback_order,
             );
         };
 
@@ -10048,6 +10642,7 @@ impl<E: PositiveExponent> MultivariatePolynomial<IntegerRing, E, LexOrder> {
                 coefficient_upper_bound + 10,
                 max_univariate_factors,
                 univariate_retries + 1,
+                bivariate_fallback_order,
             );
         };
 
@@ -10060,14 +10655,15 @@ impl<E: PositiveExponent> MultivariatePolynomial<IntegerRing, E, LexOrder> {
             factorization_z,
             &scaled_true_lcoeffs,
             p32,
-            &max_p,
             order,
+            || scaled_self.coefficient_bound(),
         ) else {
             return self.multivariate_factorization_with_retries(
                 order,
                 coefficient_upper_bound + 10,
                 max_univariate_factors,
                 univariate_retries + 1,
+                bivariate_fallback_order,
             );
         };
 
@@ -10115,6 +10711,7 @@ impl<E: PositiveExponent> MultivariatePolynomial<IntegerRing, E, LexOrder> {
                 coefficient_upper_bound + 10,
                 max_univariate_factors,
                 univariate_retries + 1,
+                bivariate_fallback_order,
             );
         }
     }
@@ -10155,20 +10752,27 @@ mod test {
     use std::sync::{Arc, Mutex, atomic::Ordering};
 
     use super::{
-        BOUNDED_DDF_REJECTIONS, DENSE_ZP_DDF_MODULUS_UPDATES, DENSE_ZP_DDF_SCREENS,
-        DENSE_ZP_EDF_BLOCKS,
+        BIVARIATE_FIRST_SAMPLE_ACCEPTANCES, BIVARIATE_SAMPLE_FACTORIZATIONS,
+        BIVARIATE_WANG_SAMPLE_TRIES, BIVARIATE_WIDE_PRIME_ATTEMPTS,
+        BIVARIATE_WIDE_PRIME_MIN_BOUND_BITS, BIVARIATE_WIDE_PRIME_START, BOUNDED_DDF_REJECTIONS,
+        DENSE_ZP_DDF_MODULUS_UPDATES, DENSE_ZP_DDF_SCREENS, DENSE_ZP_EDF_BLOCKS,
         DenseBivariateImage, DenseIntegerModularUnivariateContext, DenseTwoFactorCorrectionContext,
         DenseZpAccumulationMode, DenseZpDistinctDegreeContext, DenseZpEqualDegreeContext,
-        DenseZpMulModWorkspace,
-        EXACT_HENSEL_SUBTREE_MODULUS_BITS, EXACT_HENSEL_SUBTREE_SPLITS, ExactPolynomialSquareRoot,
-        IntegerModularUnivariateContext, LAST_BOUNDED_DDF_REJECTION_DEGREE,
-        LAST_MODULAR_INTEGER_EDF_PRIME, LLL_RECOMBINATION_SUCCESSES,
-        LOCAL_HENSEL_RECOMBINATION_NODES, MIN_EARLY_QUADRATIC_FACTOR_TERMS,
-        MODULAR_INTEGER_EDF_CALLS, ModularPrimeScreen, PRODUCT_TREE_HENSEL_LIFT_CALLS,
+        DenseZpMulModWorkspace, EXACT_HENSEL_SUBTREE_MODULUS_BITS, EXACT_HENSEL_SUBTREE_SPLITS,
+        ExactPolynomialSquareRoot, INTEGER_FACTOR_BIVARIATE_WANG_MIN_BOX_DENSITY,
+        IntegerModularUnivariateContext, LAST_BIVARIATE_RECONSTRUCTION_PRIME,
+        LAST_BOUNDED_DDF_REJECTION_DEGREE, LAST_MODULAR_INTEGER_EDF_PRIME,
+        LLL_RECOMBINATION_SUCCESSES, LOCAL_HENSEL_RECOMBINATION_NODES,
+        MIN_EARLY_QUADRATIC_FACTOR_TERMS, MODULAR_INTEGER_EDF_CALLS, ModularPrimeScreen,
+        PRODUCT_TREE_EARLY_RECONSTRUCTION_ATTEMPTS, PRODUCT_TREE_EARLY_RECONSTRUCTION_EXPONENT,
+        PRODUCT_TREE_EARLY_RECONSTRUCTION_SUCCESSES, PRODUCT_TREE_HENSEL_LIFT_CALLS,
         PackedSparsePolynomialSquareContext, QUADRATIC_HENSEL_LIFT_CALLS,
         QUADRATIC_HENSEL_NONUNIT_RETRIES, QuadraticFactorization, SparseDiophantineContext,
         SparsePolynomialSquareRootContext, UnivariateHenselProductTreeBuildContext,
-        UnivariateHenselProductTreeLink, UnivariateHenselProductTreeNode,
+        UnivariateHenselProductTreeLiftResult, UnivariateHenselProductTreeLink,
+        UnivariateHenselProductTreeNode, balance_three_factor_hensel_root,
+        integer_factor_bivariate_wang_density_supported,
+        reorder_integer_factor_variables_for_sparse_univariate,
         univariate_hensel_precision_schedule,
     };
 
@@ -10179,7 +10783,8 @@ mod test {
             InternalOrdering, Ring,
             algebraic::AlgebraicExtension,
             finite_field::{
-                FiniteField, FiniteFieldCore, FiniteFieldElement, ToFiniteField, Z2, Zp,
+                FiniteField, FiniteFieldCore, FiniteFieldElement, PrimeIteratorU64, ToFiniteField,
+                Z2, Zp,
             },
             integer::{Integer, IntegerRing, Z},
             rational::Q,
@@ -10286,6 +10891,21 @@ mod test {
     }
 
     #[test]
+    fn three_factor_hensel_root_is_degree_balanced() {
+        let variables = Some(Arc::new(vec![symbol!("x").into()]));
+        let field = Zp::new(5);
+        let mut factors = [
+            parse!("x^8+x+1").to_polynomial::<_, u8>(&field, variables.clone()),
+            parse!("x^8+2*x+1").to_polynomial::<_, u8>(&field, variables.clone()),
+            parse!("x^16+x+1").to_polynomial::<_, u8>(&field, variables),
+        ];
+
+        balance_three_factor_hensel_root(&mut factors, 0);
+
+        assert_eq!(factors.map(|factor| factor.degree(0).to_u32()), [16, 8, 8]);
+    }
+
+    #[test]
     fn univariate_hensel_precision_schedule_uses_ceiling_halves() {
         assert_eq!(univariate_hensel_precision_schedule(1), [1]);
         assert_eq!(univariate_hensel_precision_schedule(2), [1, 2]);
@@ -10330,7 +10950,11 @@ mod test {
         );
 
         let max_p = Integer::from(2).pow(41);
-        let product_tree = target.lift_modular_factor_product_tree(&modular_factors, &max_p);
+        let UnivariateHenselProductTreeLiftResult::Lifted(product_tree) =
+            target.lift_modular_factor_product_tree(&modular_factors, &max_p)
+        else {
+            panic!("the low-precision comparison must return modular leaves");
+        };
         let binary = target.lift_modular_factor_tree(&modular_factors, &max_p, false);
         let reduce = |factor: &MultivariatePolynomial<IntegerRing, u8>| {
             factor.map_coeff(|coefficient| coefficient.clone().symmetric_mod(&max_p), Z)
@@ -10390,7 +11014,11 @@ mod test {
                 .collect::<Vec<_>>();
             let max_p = Integer::from(prime).pow(exponent);
 
-            let product_tree = target.lift_modular_factor_product_tree(&modular_factors, &max_p);
+            let UnivariateHenselProductTreeLiftResult::Lifted(product_tree) =
+                target.lift_modular_factor_product_tree(&modular_factors, &max_p)
+            else {
+                panic!("the low-precision comparison must return modular leaves");
+            };
             let binary = target.lift_modular_factor_tree(&modular_factors, &max_p, false);
             let symmetric = |factor: &MultivariatePolynomial<IntegerRing, u8>| {
                 factor.map_coeff(|coefficient| coefficient.clone().symmetric_mod(&max_p), Z)
@@ -10966,6 +11594,209 @@ mod test {
             .use_bivariate_factorization
             .store(false, Ordering::Relaxed);
         assert_eq!(poly.factor(), vec![(poly, 1)]);
+    }
+
+    #[test]
+    fn bivariate_sampling_uses_one_admissible_image_on_initial_primitive_attempt() {
+        let variables = Some(Arc::new(vec![
+            symbol!("x").into(),
+            symbol!("y").into(),
+            symbol!("z").into(),
+        ]));
+        let polynomial = parse!("(x+y+z+1)*(2*x+3*y+5*z+1)")
+            .expand()
+            .to_polynomial::<_, u8>(&Z, variables);
+
+        BIVARIATE_SAMPLE_FACTORIZATIONS.with(|count| count.set(0));
+        BIVARIATE_FIRST_SAMPLE_ACCEPTANCES.with(|count| count.set(0));
+        let mut order = vec![0, 1, 2];
+        let (factors, _, _, _, _) = polynomial.find_sample(&mut order, 10, None);
+        assert_eq!(factors.len(), 2);
+        BIVARIATE_SAMPLE_FACTORIZATIONS.with(|count| assert_eq!(count.get(), 1));
+        BIVARIATE_FIRST_SAMPLE_ACCEPTANCES.with(|count| assert_eq!(count.get(), 1));
+
+        BIVARIATE_SAMPLE_FACTORIZATIONS.with(|count| count.set(0));
+        BIVARIATE_FIRST_SAMPLE_ACCEPTANCES.with(|count| count.set(0));
+        let mut order = vec![0, 1, 2];
+        let (factors, _, _, _, _) = polynomial.find_sample(&mut order, 10, Some(2));
+        assert_eq!(factors.len(), 2);
+        BIVARIATE_SAMPLE_FACTORIZATIONS.with(|count| assert_eq!(count.get(), 3));
+        BIVARIATE_FIRST_SAMPLE_ACCEPTANCES.with(|count| assert_eq!(count.get(), 0));
+    }
+
+    fn dense_bivariate_wang_test_polynomial() -> MultivariatePolynomial<IntegerRing, u8> {
+        let variables = Some(Arc::new(vec![
+            symbol!("x").into(),
+            symbol!("y").into(),
+            symbol!("z").into(),
+        ]));
+        let left = parse!("2*x*y*z^6+(1+2*y)+(3+5*y)*z+(7+11*y)*z^2+(13+17*y)*z^3+(19+23*y)*z^4")
+            .expand()
+            .to_polynomial::<_, u8>(&Z, variables.clone());
+        let right = parse!(
+            "3*x*y*z^7+(30+31*y)+(37+41*y)*z+(43+47*y)*z^2+(53+59*y)*z^3+(61+67*y)*z^4+(71+73*y)*z^5"
+        )
+        .expand()
+        .to_polynomial::<_, u8>(&Z, variables);
+        &left * &right
+    }
+
+    #[test]
+    fn bivariate_sampling_reconstructs_a_monomial_lcoeff_from_one_prime_image() {
+        let _lock = GLOBAL_FACTOR_SETTINGS_LOCK.lock().unwrap();
+        let _guard = FactorSettingsGuard::new();
+        GLOBAL_SETTINGS
+            .use_univariate_factorization
+            .store(true, Ordering::Relaxed);
+        GLOBAL_SETTINGS
+            .use_bivariate_factorization
+            .store(true, Ordering::Relaxed);
+
+        let polynomial = dense_bivariate_wang_test_polynomial();
+        let (_, density) = polynomial.integer_factor_start_auto_decision(&[0, 1, 2]);
+        assert!(density > INTEGER_FACTOR_BIVARIATE_WANG_MIN_BOX_DENSITY);
+
+        BIVARIATE_SAMPLE_FACTORIZATIONS.with(|count| count.set(0));
+        BIVARIATE_FIRST_SAMPLE_ACCEPTANCES.with(|count| count.set(0));
+        BIVARIATE_WANG_SAMPLE_TRIES.with(|count| count.set(0));
+        let mut order = vec![0, 1, 2];
+        let (factors, sample_points, _, _, wang_lcoeffs) =
+            polynomial.find_sample(&mut order, 10, None);
+        assert_eq!(factors.len(), 2);
+        assert!(wang_lcoeffs.is_some());
+        assert_eq!(
+            sample_points,
+            [(1, Integer::from(5)), (2, Integer::from(7))]
+        );
+        BIVARIATE_SAMPLE_FACTORIZATIONS.with(|count| assert_eq!(count.get(), 1));
+        BIVARIATE_FIRST_SAMPLE_ACCEPTANCES.with(|count| assert_eq!(count.get(), 1));
+        BIVARIATE_WANG_SAMPLE_TRIES.with(|count| assert_eq!(count.get(), 1));
+
+        let mut factor_order = vec![0, 1, 2];
+        let factors = polynomial.multivariate_factorization(&mut factor_order, 10, None, None);
+        assert_eq!(factors.len(), 2);
+        let reconstructed = factors
+            .into_iter()
+            .fold(polynomial.one(), |product, factor| &product * &factor);
+        assert_eq!(reconstructed, polynomial);
+
+        let negative = -polynomial.clone();
+        let mut order = vec![0, 1, 2];
+        let (_, _, _, _, negative_wang_lcoeffs) = negative.find_sample(&mut order, 10, None);
+        assert_eq!(negative_wang_lcoeffs.unwrap().0, Integer::from(-1));
+        let mut factor_order = vec![0, 1, 2];
+        let factors = negative.multivariate_factorization(&mut factor_order, 10, None, None);
+        assert_eq!(factors.len(), 2);
+        let reconstructed = factors
+            .into_iter()
+            .fold(negative.one(), |product, factor| &product * &factor);
+        assert_eq!(reconstructed, negative);
+
+        BIVARIATE_SAMPLE_FACTORIZATIONS.with(|count| count.set(0));
+        BIVARIATE_FIRST_SAMPLE_ACCEPTANCES.with(|count| count.set(0));
+        BIVARIATE_WANG_SAMPLE_TRIES.with(|count| count.set(0));
+        let mut order = vec![0, 1, 2];
+        let (factors, _, _, _, wang_lcoeffs) = polynomial.find_sample(&mut order, 10, Some(2));
+        assert_eq!(factors.len(), 2);
+        assert!(wang_lcoeffs.is_none());
+        BIVARIATE_SAMPLE_FACTORIZATIONS.with(|count| assert_eq!(count.get(), 3));
+        BIVARIATE_FIRST_SAMPLE_ACCEPTANCES.with(|count| assert_eq!(count.get(), 0));
+        BIVARIATE_WANG_SAMPLE_TRIES.with(|count| assert_eq!(count.get(), 0));
+
+        GLOBAL_SETTINGS
+            .use_univariate_factorization
+            .store(false, Ordering::Relaxed);
+        BIVARIATE_WANG_SAMPLE_TRIES.with(|count| count.set(0));
+        let mut order = vec![0, 1, 2];
+        let (_, _, _, _, wang_lcoeffs) = polynomial.find_sample(&mut order, 10, None);
+        assert!(wang_lcoeffs.is_none());
+        BIVARIATE_WANG_SAMPLE_TRIES.with(|count| assert_eq!(count.get(), 0));
+    }
+
+    #[test]
+    fn bivariate_wang_sampling_keeps_the_bounded_path_for_nonunit_content() {
+        let _lock = GLOBAL_FACTOR_SETTINGS_LOCK.lock().unwrap();
+        let _guard = FactorSettingsGuard::new();
+        GLOBAL_SETTINGS
+            .use_univariate_factorization
+            .store(true, Ordering::Relaxed);
+        GLOBAL_SETTINGS
+            .use_bivariate_factorization
+            .store(true, Ordering::Relaxed);
+
+        let polynomial = dense_bivariate_wang_test_polynomial().mul_coeff(Integer::from(2));
+        let (_, density) = polynomial.integer_factor_start_auto_decision(&[0, 1, 2]);
+        assert!(density > INTEGER_FACTOR_BIVARIATE_WANG_MIN_BOX_DENSITY);
+
+        BIVARIATE_SAMPLE_FACTORIZATIONS.with(|count| count.set(0));
+        BIVARIATE_FIRST_SAMPLE_ACCEPTANCES.with(|count| count.set(0));
+        BIVARIATE_WANG_SAMPLE_TRIES.with(|count| count.set(0));
+        let mut order = vec![0, 1, 2];
+        let (factors, _, _, _, wang_lcoeffs) = polynomial.find_sample(&mut order, 10, None);
+        assert_eq!(factors.len(), 2);
+        assert!(wang_lcoeffs.is_none());
+        BIVARIATE_SAMPLE_FACTORIZATIONS.with(|count| assert_eq!(count.get(), 3));
+        BIVARIATE_FIRST_SAMPLE_ACCEPTANCES.with(|count| assert_eq!(count.get(), 0));
+        BIVARIATE_WANG_SAMPLE_TRIES.with(|count| assert_eq!(count.get(), 2));
+    }
+
+    #[test]
+    fn bivariate_wang_sampling_rotates_past_nonprimitive_prime_images() {
+        let _lock = GLOBAL_FACTOR_SETTINGS_LOCK.lock().unwrap();
+        let _guard = FactorSettingsGuard::new();
+        GLOBAL_SETTINGS
+            .use_univariate_factorization
+            .store(true, Ordering::Relaxed);
+        GLOBAL_SETTINGS
+            .use_bivariate_factorization
+            .store(true, Ordering::Relaxed);
+
+        let variables = Some(Arc::new(vec![
+            symbol!("x").into(),
+            symbol!("y").into(),
+            symbol!("z").into(),
+        ]));
+        let polynomial = parse!(
+            "(x^2*y*z+z+3+(z-3)*(2+2*y+5*z+7*y*z+11*z^2+13*y*z^2+17*z^3+19*y*z^3))*(x*y*z+23+29*y+31*z+37*y*z+41*z^2+43*y*z^2+47*z^3+53*y*z^3+59*z^4+61*y*z^4+67*z^5+71*y*z^5)"
+        )
+            .expand()
+            .to_polynomial::<_, u8>(&Z, variables);
+        let (_, density) = polynomial.integer_factor_start_auto_decision(&[0, 1, 2]);
+        assert!(density > INTEGER_FACTOR_BIVARIATE_WANG_MIN_BOX_DENSITY);
+
+        BIVARIATE_SAMPLE_FACTORIZATIONS.with(|count| count.set(0));
+        BIVARIATE_FIRST_SAMPLE_ACCEPTANCES.with(|count| count.set(0));
+        BIVARIATE_WANG_SAMPLE_TRIES.with(|count| count.set(0));
+        let mut order = vec![0, 1, 2];
+        let (factors, sample_points, _, _, wang_lcoeffs) =
+            polynomial.find_sample(&mut order, 10, None);
+        assert_eq!(factors.len(), 2);
+        assert!(wang_lcoeffs.is_some());
+        assert_eq!(
+            sample_points,
+            [(1, Integer::from(3)), (2, Integer::from(2))]
+        );
+        BIVARIATE_SAMPLE_FACTORIZATIONS.with(|count| assert_eq!(count.get(), 1));
+        BIVARIATE_FIRST_SAMPLE_ACCEPTANCES.with(|count| assert_eq!(count.get(), 1));
+        BIVARIATE_WANG_SAMPLE_TRIES.with(|count| assert_eq!(count.get(), 2));
+    }
+
+    #[test]
+    fn bivariate_sampling_accepts_irreducible_image_with_a_bounded_retry() {
+        let variables = Some(Arc::new(vec![
+            symbol!("x").into(),
+            symbol!("y").into(),
+            symbol!("z").into(),
+        ]));
+        let polynomial = parse!("x*y+z+1").to_polynomial::<_, u8>(&Z, variables);
+
+        BIVARIATE_SAMPLE_FACTORIZATIONS.with(|count| count.set(0));
+        BIVARIATE_FIRST_SAMPLE_ACCEPTANCES.with(|count| count.set(0));
+        let mut order = vec![0, 1, 2];
+        let (factors, _, _, _, _) = polynomial.find_sample(&mut order, 10, Some(2));
+        assert_eq!(factors.len(), 1);
+        BIVARIATE_SAMPLE_FACTORIZATIONS.with(|count| assert_eq!(count.get(), 1));
+        BIVARIATE_FIRST_SAMPLE_ACCEPTANCES.with(|count| assert_eq!(count.get(), 0));
     }
 
     #[test]
@@ -11645,6 +12476,7 @@ mod test {
     #[test]
     fn factor_univariate_degree_63_rechecks_product_tree_pressure_after_monomial_removal() {
         PRODUCT_TREE_HENSEL_LIFT_CALLS.with(|calls| calls.set(0));
+        PRODUCT_TREE_EARLY_RECONSTRUCTION_ATTEMPTS.with(|attempts| attempts.set(0));
         let polynomial = parse!("((1+3*x)^32-1)*((1-5*x)^31+1)")
             .expand()
             .to_polynomial::<_, u8>(&Z, None);
@@ -11710,6 +12542,7 @@ mod test {
         degrees.sort_unstable();
         assert_eq!(degrees, [1u8, 1, 1, 2, 4, 8, 16, 30]);
         PRODUCT_TREE_HENSEL_LIFT_CALLS.with(|calls| assert_eq!(calls.get(), 0));
+        PRODUCT_TREE_EARLY_RECONSTRUCTION_ATTEMPTS.with(|attempts| assert_eq!(attempts.get(), 0));
     }
 
     #[test]
@@ -11719,6 +12552,9 @@ mod test {
         BOUNDED_DDF_REJECTIONS.with(|rejections| rejections.set(0));
         LAST_MODULAR_INTEGER_EDF_PRIME.with(|prime| prime.set(0));
         PRODUCT_TREE_HENSEL_LIFT_CALLS.with(|calls| calls.set(0));
+        PRODUCT_TREE_EARLY_RECONSTRUCTION_ATTEMPTS.with(|attempts| attempts.set(0));
+        PRODUCT_TREE_EARLY_RECONSTRUCTION_SUCCESSES.with(|successes| successes.set(0));
+        PRODUCT_TREE_EARLY_RECONSTRUCTION_EXPONENT.with(|exponent| exponent.set(0));
         let polynomial = parse!("((1+3*x)^33-1)*((1-5*x)^31+1)")
             .expand()
             .to_polynomial::<_, u8>(&Z, None);
@@ -11760,6 +12596,10 @@ mod test {
         BOUNDED_DDF_REJECTIONS.with(|rejections| assert_eq!(rejections.get(), 1));
         LAST_MODULAR_INTEGER_EDF_PRIME.with(|prime| assert_eq!(prime.get(), 17));
         PRODUCT_TREE_HENSEL_LIFT_CALLS.with(|calls| assert_eq!(calls.get(), 1));
+        PRODUCT_TREE_EARLY_RECONSTRUCTION_ATTEMPTS.with(|attempts| assert_eq!(attempts.get(), 1));
+        PRODUCT_TREE_EARLY_RECONSTRUCTION_SUCCESSES
+            .with(|successes| assert_eq!(successes.get(), 1));
+        PRODUCT_TREE_EARLY_RECONSTRUCTION_EXPONENT.with(|exponent| assert_eq!(exponent.get(), 39));
     }
 
     #[test]
@@ -12359,12 +13199,14 @@ mod test {
 
             let old = vec![&scale - 1, &scale - 2, Integer::one()];
             let delta = vec![&correction_modulus - 1, &correction_modulus - 2];
+            let old_mod_correction = correction_context.reduce(&old);
             let mut expected = old.clone();
             for (coefficient, correction) in expected.iter_mut().zip(&delta) {
                 *coefficient += correction * &scale;
             }
             let lifted = next_context.lift_correction(old, &delta, &scale);
             assert_eq!(lifted, expected);
+            assert_eq!(correction_context.reduce(&lifted), old_mod_correction);
             assert!(
                 lifted.iter().all(|coefficient| {
                     !coefficient.is_negative() && coefficient < &next_modulus
@@ -12599,6 +13441,10 @@ mod test {
     #[test]
     fn factor_univariate_high_height_uses_quadratic_hensel_lift() {
         QUADRATIC_HENSEL_LIFT_CALLS.with(|calls| calls.set(0));
+        LAST_MODULAR_INTEGER_EDF_PRIME.with(|prime| prime.set(0));
+        EXACT_HENSEL_SUBTREE_SPLITS.with(|splits| splits.set(0));
+        LOCAL_HENSEL_RECOMBINATION_NODES.with(|nodes| nodes.set(0));
+        EXACT_HENSEL_SUBTREE_MODULUS_BITS.with(|bits| bits.borrow_mut().clear());
         let polynomial = parse!("((1+65537*x)^17-1)*((1-65539*x)^16+1)")
             .expand()
             .to_polynomial::<_, u8>(&Z, None);
@@ -12610,8 +13456,25 @@ mod test {
                 &product * &factor.pow(*power)
             });
 
-        assert!(factors.len() >= 3);
+        let mut factor_degrees = factors
+            .iter()
+            .map(|(factor, _)| factor.degree(0).to_u32())
+            .filter(|degree| *degree > 0)
+            .collect::<Vec<_>>();
+        factor_degrees.sort_unstable();
+        assert_eq!(factor_degrees, [1, 16, 16]);
         assert_eq!(expanded, polynomial);
+        LAST_MODULAR_INTEGER_EDF_PRIME.with(|prime| assert_eq!(prime.get(), 5));
+        EXACT_HENSEL_SUBTREE_SPLITS.with(|splits| assert!(splits.get() > 0));
+        LOCAL_HENSEL_RECOMBINATION_NODES.with(|nodes| assert!(nodes.get() > 0));
+        EXACT_HENSEL_SUBTREE_MODULUS_BITS.with(|bits| {
+            let bits = bits.borrow();
+            assert!(bits.len() >= 2);
+            assert!(
+                bits[1..].iter().any(|child_bits| *child_bits < bits[0]),
+                "an exact child did not lower its Hensel modulus"
+            );
+        });
         QUADRATIC_HENSEL_LIFT_CALLS.with(|calls| assert!(calls.get() > 0));
     }
 
@@ -12661,6 +13524,75 @@ mod test {
         let mut r = poly.factor();
         r.sort_by(|a, b| a.0.internal_cmp(&b.0).then(a.1.cmp(&b.1)));
         assert_eq!(r, res);
+    }
+
+    #[test]
+    fn high_height_two_factor_bivariate_reconstruction_uses_a_wide_prime() {
+        let variables = Some(Arc::new(vec![symbol!("x").into(), symbol!("y").into()]));
+        let height = Integer::from(2).pow(130);
+        let left = parse!("x+y")
+            .to_polynomial::<_, u8>(&Z, variables.clone())
+            .add_constant(height.clone());
+        let right = parse!("x+2*y")
+            .to_polynomial::<_, u8>(&Z, variables)
+            .add_constant(height + Integer::from(1));
+        let polynomial = &left * &right;
+
+        assert!(!polynomial.bivariate_irreducibility_test());
+        assert!(
+            polynomial.coefficient_bound().significant_bits()
+                >= BIVARIATE_WIDE_PRIME_MIN_BOUND_BITS
+        );
+        LAST_BIVARIATE_RECONSTRUCTION_PRIME.with(|prime| prime.set(0));
+
+        let factors = polynomial.bivariate_factor_reconstruct(0, 1);
+
+        LAST_BIVARIATE_RECONSTRUCTION_PRIME.with(|prime| {
+            assert!(prime.get() > BIVARIATE_WIDE_PRIME_START as u32);
+        });
+        assert_eq!(factors.len(), 2);
+        assert!(
+            factors
+                .iter()
+                .all(|factor| factor.degree(0) == 1 && factor.degree(1) == 1)
+        );
+        let reconstructed = factors
+            .iter()
+            .fold(polynomial.one(), |product, factor| &product * factor);
+        assert_eq!(reconstructed, polynomial);
+    }
+
+    #[test]
+    fn high_height_bivariate_reconstruction_falls_back_after_rejected_wide_primes() {
+        let variables = Some(Arc::new(vec![symbol!("x").into(), symbol!("y").into()]));
+        let rejected_prime_product = PrimeIteratorU64::new(BIVARIATE_WIDE_PRIME_START)
+            .take(BIVARIATE_WIDE_PRIME_ATTEMPTS)
+            .fold(Integer::one(), |product, prime| {
+                product * Integer::from(prime)
+            });
+        let height = Integer::from(2).pow(130);
+        let left = parse!(format!("{rejected_prime_product}*x+y+{height}").as_str())
+            .to_polynomial::<_, u8>(&Z, variables.clone());
+        let right = parse!(format!("x+2*y+{}", &height + Integer::from(1)).as_str())
+            .to_polynomial::<_, u8>(&Z, variables);
+        let polynomial = &left * &right;
+
+        assert!(
+            polynomial.coefficient_bound().significant_bits()
+                >= BIVARIATE_WIDE_PRIME_MIN_BOUND_BITS
+        );
+        LAST_BIVARIATE_RECONSTRUCTION_PRIME.with(|prime| prime.set(0));
+
+        let factors = polynomial.bivariate_factor_reconstruct(0, 1);
+
+        LAST_BIVARIATE_RECONSTRUCTION_PRIME.with(|prime| {
+            assert!(prime.get() < BIVARIATE_WIDE_PRIME_START as u32);
+        });
+        assert_eq!(factors.len(), 2);
+        let reconstructed = factors
+            .iter()
+            .fold(polynomial.one(), |product, factor| &product * factor);
+        assert_eq!(reconstructed, polynomial);
     }
 
     #[test]
@@ -13149,7 +14081,7 @@ mod test {
         let mut order = (0..8).collect::<Vec<_>>();
         assert!(!poly.integer_factor_start_auto_decision(&order).0);
 
-        let factors = poly.multivariate_factorization(&mut order, 10, Some(0));
+        let factors = poly.multivariate_factorization(&mut order, 10, Some(0), None);
         let product = factors
             .iter()
             .fold(poly.one(), |product, factor| &product * factor);
@@ -13172,6 +14104,168 @@ mod test {
         let (use_bivariate, density) = poly.integer_factor_start_auto_decision(&order);
         assert_eq!(density, 4.0);
         assert!(use_bivariate);
+    }
+
+    #[test]
+    fn bivariate_wang_density_keeps_dense_polybench_geometries() {
+        assert!(!integer_factor_bivariate_wang_density_supported(36, 2, 2));
+        assert!(integer_factor_bivariate_wang_density_supported(
+            2329, 21, 21
+        ));
+        assert!(integer_factor_bivariate_wang_density_supported(
+            1665, 17, 19
+        ));
+        assert!(!integer_factor_bivariate_wang_density_supported(
+            1803, 24, 20
+        ));
+    }
+
+    #[test]
+    fn integer_factor_auto_reorders_polybench_8_sharp_84_geometry() {
+        let degrees = [8, 10, 8, 32, 24, 5, 3, 3];
+        let leading_layer_lengths = [3, 2, 2, 1, 1, 8, 2, 35];
+        let mut order = [3, 4, 1, 0, 2, 5, 6, 7];
+
+        assert!(reorder_integer_factor_variables_for_sparse_univariate(
+            true,
+            1878,
+            &degrees,
+            &leading_layer_lengths,
+            &mut order,
+        ));
+        assert_eq!(order, [6, 3, 4, 1, 0, 2, 5, 7]);
+    }
+
+    #[test]
+    fn sparse_univariate_bivariate_fallback_restores_original_order() {
+        let polynomial = parse!("1+x+y+z").to_polynomial::<_, u8>(&Z, None);
+        let original_order = [0, 1, 2];
+        let mut speculative_order = [2, 0, 1];
+
+        let factors = polynomial.multivariate_factorization_bivariate_fallback(
+            &mut speculative_order,
+            Some(&original_order),
+            10,
+            Some(1),
+        );
+
+        assert_eq!(speculative_order, original_order);
+        assert_eq!(factors, vec![polynomial]);
+    }
+
+    #[test]
+    fn integer_factor_auto_keeps_polybench_8_uniform_159_order() {
+        let degrees = [12, 15, 21, 13, 15, 14, 16, 16];
+        let leading_layer_lengths = [18, 2, 1, 2, 3, 4, 2, 2];
+        let mut order = [2, 6, 7, 1, 4, 5, 3, 0];
+        let original_order = order;
+
+        assert!(!reorder_integer_factor_variables_for_sparse_univariate(
+            true,
+            1813,
+            &degrees,
+            &leading_layer_lengths,
+            &mut order,
+        ));
+        assert_eq!(order, original_order);
+    }
+
+    #[test]
+    fn sparse_univariate_order_reordering_obeys_route_guards() {
+        let degrees = [8, 10, 8, 32, 24, 5, 3, 3];
+        let leading_layer_lengths = [3, 2, 2, 1, 1, 8, 2, 35];
+        let original_order = [3, 4, 1, 0, 2, 5, 6, 7];
+
+        let mut order = original_order;
+        assert!(!reorder_integer_factor_variables_for_sparse_univariate(
+            false,
+            1878,
+            &degrees,
+            &leading_layer_lengths,
+            &mut order,
+        ));
+        assert_eq!(order, original_order);
+
+        let mut quadratic_degrees = degrees;
+        quadratic_degrees[5] = 2;
+        let mut order = original_order;
+        assert!(!reorder_integer_factor_variables_for_sparse_univariate(
+            true,
+            1878,
+            &quadratic_degrees,
+            &leading_layer_lengths,
+            &mut order,
+        ));
+        assert_eq!(order, original_order);
+
+        let mut large_candidate_layer = leading_layer_lengths;
+        large_candidate_layer[6] = 3;
+        let mut order = original_order;
+        assert!(!reorder_integer_factor_variables_for_sparse_univariate(
+            true,
+            1878,
+            &degrees,
+            &large_candidate_layer,
+            &mut order,
+        ));
+        assert_eq!(order, original_order);
+
+        let small_degrees = [9, 24, 1, 5];
+        let small_layers = [1, 1, 2, 8];
+        let small_order = [0, 1, 3, 2];
+        let mut order = small_order;
+        assert!(!reorder_integer_factor_variables_for_sparse_univariate(
+            true,
+            255,
+            &small_degrees,
+            &small_layers,
+            &mut order,
+        ));
+        assert_eq!(order, small_order);
+
+        let degree_ratio_guard = [11, 24, 3, 5];
+        let degree_ratio_layers = [1, 1, 2, 8];
+        let degree_ratio_order = [0, 1, 3, 2];
+        let mut order = degree_ratio_order;
+        assert!(!reorder_integer_factor_variables_for_sparse_univariate(
+            true,
+            520,
+            &degree_ratio_guard,
+            &degree_ratio_layers,
+            &mut order,
+        ));
+        assert_eq!(order, degree_ratio_order);
+
+        let exact_degree_ratio = [12, 24, 3, 5];
+        let mut order = degree_ratio_order;
+        assert!(reorder_integer_factor_variables_for_sparse_univariate(
+            true,
+            520,
+            &exact_degree_ratio,
+            &degree_ratio_layers,
+            &mut order,
+        ));
+        assert_eq!(order, [2, 0, 1, 3]);
+
+        let mut order = original_order;
+        assert!(!reorder_integer_factor_variables_for_sparse_univariate(
+            true,
+            1319,
+            &degrees,
+            &leading_layer_lengths,
+            &mut order,
+        ));
+        assert_eq!(order, original_order);
+
+        let mut order = original_order;
+        assert!(!reorder_integer_factor_variables_for_sparse_univariate(
+            true,
+            4126,
+            &degrees,
+            &leading_layer_lengths,
+            &mut order,
+        ));
+        assert_eq!(order, original_order);
     }
 
     const WANG_RESIDUAL_CONTENT_FACTORS: [&str; 4] = [
