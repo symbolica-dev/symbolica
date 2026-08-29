@@ -1055,6 +1055,13 @@ enum UnivariateHenselProductTreeLink {
     Internal(usize),
 }
 
+/// Either lifted modular leaves at the requested precision or exact factors
+/// certified before that precision was reached.
+enum UnivariateHenselProductTreeLiftResult<P> {
+    Lifted(Vec<P>),
+    Exact(Vec<P>),
+}
+
 /// Records one product of two coprime child factors.
 ///
 /// Internal links address earlier entries in the topology's bottom-up node
@@ -1118,6 +1125,29 @@ impl UnivariateHenselProductTreeTopology {
         if let Some(root) = self.root {
             collect(self, root, &mut indices);
         }
+        indices.sort_unstable();
+        indices
+    }
+
+    /// Returns the input-factor indices represented by one tree link.
+    fn leaf_indices_below(&self, link: UnivariateHenselProductTreeLink) -> Vec<usize> {
+        fn collect(
+            topology: &UnivariateHenselProductTreeTopology,
+            link: UnivariateHenselProductTreeLink,
+            indices: &mut Vec<usize>,
+        ) {
+            match link {
+                UnivariateHenselProductTreeLink::Leaf(index) => indices.push(index),
+                UnivariateHenselProductTreeLink::Internal(index) => {
+                    for child in topology.nodes[index].children {
+                        collect(topology, child, indices);
+                    }
+                }
+            }
+        }
+
+        let mut indices = Vec::new();
+        collect(self, link, &mut indices);
         indices.sort_unstable();
         indices
     }
@@ -1391,6 +1421,15 @@ std::thread_local! {
         std::cell::Cell::new(0)
     };
     static PRODUCT_TREE_HENSEL_LIFT_CALLS: std::cell::Cell<usize> = const {
+        std::cell::Cell::new(0)
+    };
+    static PRODUCT_TREE_EARLY_RECONSTRUCTION_ATTEMPTS: std::cell::Cell<usize> = const {
+        std::cell::Cell::new(0)
+    };
+    static PRODUCT_TREE_EARLY_RECONSTRUCTION_SUCCESSES: std::cell::Cell<usize> = const {
+        std::cell::Cell::new(0)
+    };
+    static PRODUCT_TREE_EARLY_RECONSTRUCTION_EXPONENT: std::cell::Cell<usize> = const {
         std::cell::Cell::new(0)
     };
     static MODULAR_INTEGER_EDF_CALLS: std::cell::Cell<usize> = const {
@@ -7282,6 +7321,107 @@ impl<E: PositiveExponent> MultivariatePolynomial<IntegerRing, E, LexOrder> {
         factors
     }
 
+    /// Reconstructs one primitive exact factor from a lifted monic product and
+    /// verifies it by exact division of this polynomial.
+    fn try_reconstruct_lifted_factor(
+        &self,
+        lifted: DenseIntegerUnivariatePolynomial,
+        context: &DenseIntegerModularUnivariateContext<E>,
+        modulus: &Integer,
+        variable: usize,
+    ) -> Option<(Self, Self)> {
+        let lifted = context.from_dense_coefficients(lifted);
+        let mut candidate = (&self.constant(self.lcoeff()) * &lifted)
+            .map_coeff(|coefficient| coefficient.clone().symmetric_mod(modulus), Z);
+        let content = candidate.content();
+        if content.is_zero() {
+            return None;
+        }
+        candidate = candidate.div_coeff(&content);
+        if candidate.is_constant() || candidate.degree(variable) >= self.degree(variable) {
+            return None;
+        }
+
+        let (quotient, remainder) = self.quot_rem(&candidate, true);
+        if !remainder.is_zero() {
+            return None;
+        }
+        let quotient_content = quotient.content();
+        if quotient_content.is_zero() {
+            return None;
+        }
+        Some((candidate, quotient.div_coeff(&quotient_content)))
+    }
+
+    /// Certifies a root split whose one child is a single irreducible modular
+    /// factor, then recombines the other child once its local coefficient
+    /// bound is covered by the current modulus.
+    fn try_reconstruct_product_tree_root(
+        &self,
+        lift: &UnivariateHenselProductTreeLiftContext,
+        root_index: usize,
+        context: &DenseIntegerModularUnivariateContext<E>,
+        modulus: &Integer,
+        prime: u32,
+        variable: usize,
+    ) -> Option<Vec<Self>> {
+        let root = lift.topology.nodes[root_index];
+        let (leaf_index, leaf_link, complement_link) = match root.children {
+            [
+                leaf @ UnivariateHenselProductTreeLink::Leaf(index),
+                complement,
+            ] => (index, leaf, complement),
+            [
+                complement,
+                leaf @ UnivariateHenselProductTreeLink::Leaf(index),
+            ] => (index, leaf, complement),
+            _ => return None,
+        };
+
+        let (leaf_factor, complement) = self.try_reconstruct_lifted_factor(
+            lift.value(leaf_link).to_vec(),
+            context,
+            modulus,
+            variable,
+        )?;
+        if leaf_factor.degree(variable).to_u32() as usize != lift.topology.leaf_degrees[leaf_index]
+        {
+            return None;
+        }
+
+        if let UnivariateHenselProductTreeLink::Leaf(index) = complement_link {
+            if complement.degree(variable).to_u32() as usize != lift.topology.leaf_degrees[index] {
+                return None;
+            }
+            return Some(vec![leaf_factor, complement]);
+        }
+
+        let complement_bound = complement.coefficient_bound();
+        let (_, complement_modulus) = Self::linear_hensel_modulus(&complement_bound, prime);
+        if modulus < &complement_modulus {
+            return None;
+        }
+
+        let lifted_factors = lift
+            .topology
+            .leaf_indices_below(complement_link)
+            .into_iter()
+            .map(|index| {
+                let mut coefficients = lift.leaves[index].clone();
+                context.symmetrize_in_place(&mut coefficients);
+                context.from_dense_coefficients(coefficients)
+            })
+            .collect();
+        let mut factors = complement.recombine_lifted_factors(
+            lifted_factors,
+            modulus,
+            variable,
+            &complement_bound,
+        );
+        factors.push(leaf_factor);
+        Some(factors)
+    }
+
     /// Lifts all modular factors through one synchronized degree-greedy
     /// product tree.
     ///
@@ -7296,7 +7436,7 @@ impl<E: PositiveExponent> MultivariatePolynomial<IntegerRing, E, LexOrder> {
         &self,
         hs: &[MultivariatePolynomial<FiniteField<UField>, E, LexOrder>],
         max_p: &Integer,
-    ) -> Vec<Self>
+    ) -> UnivariateHenselProductTreeLiftResult<Self>
     where
         FiniteField<UField>: Field + PolynomialGCD<E> + FiniteFieldCore<UField>,
         Integer: ToFiniteField<UField>,
@@ -7305,7 +7445,14 @@ impl<E: PositiveExponent> MultivariatePolynomial<IntegerRing, E, LexOrder> {
         PRODUCT_TREE_HENSEL_LIFT_CALLS.with(|calls| calls.set(calls.get() + 1));
 
         assert!(hs.len() >= 2);
-        let prime = hs[0].ring().get_prime().to_integer();
+        let prime_workspace = hs[0].ring().get_prime();
+        let prime = prime_workspace.to_integer();
+        let prime_u32 = u32::try_from(
+            prime_workspace
+                .to_u64()
+                .expect("a synchronized integer Hensel prime must fit in u64"),
+        )
+        .expect("a synchronized integer Hensel prime must fit in u32");
 
         let mut target_digits = 1usize;
         let mut reconstructed_modulus = prime.clone();
@@ -7503,6 +7650,30 @@ impl<E: PositiveExponent> MultivariatePolynomial<IntegerRing, E, LexOrder> {
                 }
             }
 
+            const MIN_EARLY_PRODUCT_TREE_RECONSTRUCTION_BITS: u64 = 128;
+            if next_modulus.significant_bits() >= MIN_EARLY_PRODUCT_TREE_RECONSTRUCTION_BITS {
+                #[cfg(test)]
+                {
+                    PRODUCT_TREE_EARLY_RECONSTRUCTION_ATTEMPTS
+                        .with(|attempts| attempts.set(attempts.get() + 1));
+                    PRODUCT_TREE_EARLY_RECONSTRUCTION_EXPONENT
+                        .with(|exponent| exponent.set(new_exponent));
+                }
+                if let Some(factors) = self.try_reconstruct_product_tree_root(
+                    &lift,
+                    root_index,
+                    &next_context,
+                    &next_modulus,
+                    prime_u32,
+                    variable,
+                ) {
+                    #[cfg(test)]
+                    PRODUCT_TREE_EARLY_RECONSTRUCTION_SUCCESSES
+                        .with(|successes| successes.set(successes.get() + 1));
+                    return UnivariateHenselProductTreeLiftResult::Exact(factors);
+                }
+            }
+
             modulus = next_modulus;
         }
 
@@ -7511,13 +7682,15 @@ impl<E: PositiveExponent> MultivariatePolynomial<IntegerRing, E, LexOrder> {
             lift.topology.leaf_indices_in_input_order(),
             (0..hs.len()).collect::<Vec<_>>()
         );
-        lift.leaves
-            .into_iter()
-            .map(|mut factor| {
-                target_context.symmetrize_in_place(&mut factor);
-                target_context.from_dense_coefficients(factor)
-            })
-            .collect()
+        UnivariateHenselProductTreeLiftResult::Lifted(
+            lift.leaves
+                .into_iter()
+                .map(|mut factor| {
+                    target_context.symmetrize_in_place(&mut factor);
+                    target_context.from_dense_coefficients(factor)
+                })
+                .collect(),
+        )
     }
 
     /// Continue factoring one exact Hensel child with a coefficient bound local to that child.
@@ -8273,8 +8446,12 @@ impl<E: PositiveExponent> MultivariatePolynomial<IntegerRing, E, LexOrder> {
         }
         let quadratic_lift_allowed = hs.len() <= 4;
         if product_tree_lift_pressure && hs.len() > 4 {
-            let lifted = self.lift_modular_factor_product_tree(&hs, &max_p);
-            return self.recombine_lifted_factors(lifted, &max_p, var, &bound);
+            return match self.lift_modular_factor_product_tree(&hs, &max_p) {
+                UnivariateHenselProductTreeLiftResult::Lifted(lifted) => {
+                    self.recombine_lifted_factors(lifted, &max_p, var, &bound)
+                }
+                UnivariateHenselProductTreeLiftResult::Exact(factors) => factors,
+            };
         }
         self.factor_hensel_subtree(&hs, &max_p, &bound, var, quadratic_lift_allowed)
     }
@@ -10587,10 +10764,12 @@ mod test {
         LAST_BOUNDED_DDF_REJECTION_DEGREE, LAST_MODULAR_INTEGER_EDF_PRIME,
         LLL_RECOMBINATION_SUCCESSES, LOCAL_HENSEL_RECOMBINATION_NODES,
         MIN_EARLY_QUADRATIC_FACTOR_TERMS, MODULAR_INTEGER_EDF_CALLS, ModularPrimeScreen,
-        PRODUCT_TREE_HENSEL_LIFT_CALLS, PackedSparsePolynomialSquareContext,
-        QUADRATIC_HENSEL_LIFT_CALLS, QUADRATIC_HENSEL_NONUNIT_RETRIES, QuadraticFactorization,
-        SparseDiophantineContext, SparsePolynomialSquareRootContext,
-        UnivariateHenselProductTreeBuildContext, UnivariateHenselProductTreeLink,
+        PRODUCT_TREE_EARLY_RECONSTRUCTION_ATTEMPTS, PRODUCT_TREE_EARLY_RECONSTRUCTION_EXPONENT,
+        PRODUCT_TREE_EARLY_RECONSTRUCTION_SUCCESSES, PRODUCT_TREE_HENSEL_LIFT_CALLS,
+        PackedSparsePolynomialSquareContext, QUADRATIC_HENSEL_LIFT_CALLS,
+        QUADRATIC_HENSEL_NONUNIT_RETRIES, QuadraticFactorization, SparseDiophantineContext,
+        SparsePolynomialSquareRootContext, UnivariateHenselProductTreeBuildContext,
+        UnivariateHenselProductTreeLiftResult, UnivariateHenselProductTreeLink,
         UnivariateHenselProductTreeNode, balance_three_factor_hensel_root,
         integer_factor_bivariate_wang_density_supported,
         reorder_integer_factor_variables_for_sparse_univariate,
@@ -10771,7 +10950,11 @@ mod test {
         );
 
         let max_p = Integer::from(2).pow(41);
-        let product_tree = target.lift_modular_factor_product_tree(&modular_factors, &max_p);
+        let UnivariateHenselProductTreeLiftResult::Lifted(product_tree) =
+            target.lift_modular_factor_product_tree(&modular_factors, &max_p)
+        else {
+            panic!("the low-precision comparison must return modular leaves");
+        };
         let binary = target.lift_modular_factor_tree(&modular_factors, &max_p, false);
         let reduce = |factor: &MultivariatePolynomial<IntegerRing, u8>| {
             factor.map_coeff(|coefficient| coefficient.clone().symmetric_mod(&max_p), Z)
@@ -10831,7 +11014,11 @@ mod test {
                 .collect::<Vec<_>>();
             let max_p = Integer::from(prime).pow(exponent);
 
-            let product_tree = target.lift_modular_factor_product_tree(&modular_factors, &max_p);
+            let UnivariateHenselProductTreeLiftResult::Lifted(product_tree) =
+                target.lift_modular_factor_product_tree(&modular_factors, &max_p)
+            else {
+                panic!("the low-precision comparison must return modular leaves");
+            };
             let binary = target.lift_modular_factor_tree(&modular_factors, &max_p, false);
             let symmetric = |factor: &MultivariatePolynomial<IntegerRing, u8>| {
                 factor.map_coeff(|coefficient| coefficient.clone().symmetric_mod(&max_p), Z)
@@ -12289,6 +12476,7 @@ mod test {
     #[test]
     fn factor_univariate_degree_63_rechecks_product_tree_pressure_after_monomial_removal() {
         PRODUCT_TREE_HENSEL_LIFT_CALLS.with(|calls| calls.set(0));
+        PRODUCT_TREE_EARLY_RECONSTRUCTION_ATTEMPTS.with(|attempts| attempts.set(0));
         let polynomial = parse!("((1+3*x)^32-1)*((1-5*x)^31+1)")
             .expand()
             .to_polynomial::<_, u8>(&Z, None);
@@ -12354,6 +12542,7 @@ mod test {
         degrees.sort_unstable();
         assert_eq!(degrees, [1u8, 1, 1, 2, 4, 8, 16, 30]);
         PRODUCT_TREE_HENSEL_LIFT_CALLS.with(|calls| assert_eq!(calls.get(), 0));
+        PRODUCT_TREE_EARLY_RECONSTRUCTION_ATTEMPTS.with(|attempts| assert_eq!(attempts.get(), 0));
     }
 
     #[test]
@@ -12363,6 +12552,9 @@ mod test {
         BOUNDED_DDF_REJECTIONS.with(|rejections| rejections.set(0));
         LAST_MODULAR_INTEGER_EDF_PRIME.with(|prime| prime.set(0));
         PRODUCT_TREE_HENSEL_LIFT_CALLS.with(|calls| calls.set(0));
+        PRODUCT_TREE_EARLY_RECONSTRUCTION_ATTEMPTS.with(|attempts| attempts.set(0));
+        PRODUCT_TREE_EARLY_RECONSTRUCTION_SUCCESSES.with(|successes| successes.set(0));
+        PRODUCT_TREE_EARLY_RECONSTRUCTION_EXPONENT.with(|exponent| exponent.set(0));
         let polynomial = parse!("((1+3*x)^33-1)*((1-5*x)^31+1)")
             .expand()
             .to_polynomial::<_, u8>(&Z, None);
@@ -12404,6 +12596,10 @@ mod test {
         BOUNDED_DDF_REJECTIONS.with(|rejections| assert_eq!(rejections.get(), 1));
         LAST_MODULAR_INTEGER_EDF_PRIME.with(|prime| assert_eq!(prime.get(), 17));
         PRODUCT_TREE_HENSEL_LIFT_CALLS.with(|calls| assert_eq!(calls.get(), 1));
+        PRODUCT_TREE_EARLY_RECONSTRUCTION_ATTEMPTS.with(|attempts| assert_eq!(attempts.get(), 1));
+        PRODUCT_TREE_EARLY_RECONSTRUCTION_SUCCESSES
+            .with(|successes| assert_eq!(successes.get(), 1));
+        PRODUCT_TREE_EARLY_RECONSTRUCTION_EXPONENT.with(|exponent| assert_eq!(exponent.get(), 39));
     }
 
     #[test]
