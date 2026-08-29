@@ -1,8 +1,9 @@
 # Polynomial performance continuation handoff
 
 This is the live continuation record for the single-core Symbolica/FLINT polynomial-performance
-work. It was refreshed on 2026-08-28 after adding a wide packed row merge for high-gap products.
-The latest implementation commit is `843ce58`. The base
+work. It was refreshed on 2026-08-29 after adding one-image Wang leading-coefficient
+reconstruction for dense multivariate factorization. The latest implementation commit is
+`54e1fcb`. The base
 Rust/FLINT comparison inventory was measured at performance-equivalent source head `b2e5d28`, with
 later accepted rows replacing their exploratory predecessors as documented below.
 Keep this file current whenever an experiment is accepted, rejected, or left partly complete. The
@@ -11,10 +12,11 @@ transient binary names.
 
 The complete current Symbolica/FLINT scoreboard is in
 [CURRENT_STATUS.md](CURRENT_STATUS.md), with the latest immutable snapshot in
-[CURRENT_STATUS_v5.md](CURRENT_STATUS_v5.md). It contains 122 canonical comparisons and the 12
-duplicate Brown/CRT resultant measurements in one globally sorted table. After every accepted
-optimization, update the live file and create the next numbered snapshot with an opening paragraph
-that describes the changes from its predecessor.
+[CURRENT_STATUS_v6.md](CURRENT_STATUS_v6.md). Its primary statistics contain 116 non-resultant
+comparisons. The six Ducos, six Brown, and six CRT measurements are retained only in a compact
+appendix and do not affect primary ranks or summary statistics. After every accepted optimization,
+update the live file and create the next numbered snapshot with an opening paragraph that describes
+the changes from its predecessor.
 
 ## Working contract
 
@@ -34,18 +36,71 @@ that describes the changes from its predecessor.
 - Small changes below roughly 3% need particularly strong, repeated evidence before their
   complexity is accepted.
 
-## Current continuation checkpoint: PolyBench factorization #131
+## Current continuation checkpoint: dense five-variable GCD products
 
-The ordered worst canonical row is now `polybench factorization: polybench 5v uniform nontrivial
-factor #131`. The exact final `843ce58` binary measures `81.725573 ms` for Symbolica versus
-`46.814936 ms` for FLINT over 500 paired samples, or `1.745716` S/F.
+The ordered worst primary row is now `generated GCD products: dense 5 variables degree 7` at
+`1.706529` S/F. It constructs `a*g` and `b*g` from 791/792-term total-degree-7 inputs. Each product
+performs about 627,000 coefficient pairs and produces only 6,000--7,000 terms.
 
-The input is the product of two 41-term integer polynomials and contains 1,665 terms. Its separate
-construction benchmark is `0.613128` S/F, so multiplying the known factors is already faster than
-FLINT and cannot explain the factorization gap. Continue by profiling the factorization route,
-recording its selected variable order, bivariate image count, modular factor degrees, lifting
-work, and final reconstruction/verification cost. The next change must be gated by a shape or
-route property specific enough not to disturb the already-fast PolyBench factorization cases.
+The current selector accepts a full mixed-radix `15^5 = 759,375` box and uses an `i128`
+accumulator, allocating and scanning about 12.15 MB per product. The total-degree simplex has only
+`C(19,5) = 11,628` cells, a 65.3x smaller workspace, but its current integer implementation uses
+GMP multiplication even for the one-word input coefficients in this case. The next decisive pass
+should add fixed-width accumulation to `TotalDegreeIntegerMul` and prefer that compact route before
+the mixed-radix box only when the existing total-degree density test and a large box/simplex ratio
+both hold. Recheck the dense eight-variable and dense seven-variable product rows, which are the
+next two primary outliers at `1.610087` and `1.584134` S/F.
+
+## Accepted one-image Wang leading-coefficient reconstruction
+
+Commit `54e1fcb` removes repeated leading-coefficient image searches for dense automatic
+bivariate-start factorization when the main-variable leading coefficient is one nonconstant
+monomial. The old #131 profile spent 49.3% in `find_sample`, 39.0% in
+`lcoeff_precomputation`, and 83.6% in the repeated bivariate reconstruction subtree. The selected
+order was `[x2,x4,x5,x1,x3]`; the old path factored roughly six bivariate images before lifting.
+
+The new path evaluates sampled coordinates at distinct small primes, factors one admissible
+primitive bivariate image, and assigns the irreducible factors of the monomial leading coefficient
+from their pairwise-coprime evaluations. It certifies that the reconstructed leading coefficients
+multiply to the target up to the integer unit `+1` or `-1`, carries that unit into the existing
+Hensel scaling identity, and otherwise returns to the old random three-image path with its bounds
+and retry counters reset. Downstream lift or product-verification failures recurse with an explicit
+factor bound, which disables the shortcut.
+
+The selector requires Auto mode, no existing factor bound, at most five active variables, a
+bivariate-box score strictly above `4.0`, and at most 96 total degree across sampled coordinates.
+The density guard keeps the two measured wins (#131 at `4.625`, #32 at `4.812`) and excludes #159
+at `3.434`. The degree guard prevents fixed-prime evaluation from creating very large images on
+high-gap inputs. Debug assertions verify that aligned sampled and reconstructed factor leading
+coefficients are equal and all rescaling corrections are units.
+
+The final 500-sample #131 measurement is `22.252255 ms` for Symbolica versus `46.491802 ms` for
+FLINT, or `0.478628` S/F. The v5 Symbolica median was `81.725573 ms`, so time fell 72.8% and the
+former 1.75x loss became a 2.09x win. The 200-sample #32 row is `24.829520 ms` versus
+`90.962032 ms`, or `0.272966` S/F; its frozen Symbolica control was `103.603116 ms` and its v5
+ratio was `1.124230`.
+
+A broader <=5-variable candidate was rejected because #159 changed from a source-matched
+`107.901595 ms` control to `109.223013 ms`, a repeatable 1.2% regression. The density guard restores
+the final row to `106.208527 ms` versus FLINT's `108.056071 ms`, or `0.982902` S/F. Other final
+guards are #163 at `0.216817`, generated dense three-variable factorization at `0.680827`, and
+eight-variable #84 at `0.691758`.
+
+The exact final binary is `/tmp/flint-comparison-wang-final`, SHA-256
+`b8d2ef9762f44d283087db05be833a5acf0809d1f42d2a986927028df623b137`; its build JSON has SHA-256
+`ae4c6847df6ac814b19d4b75294feea89331c79d64e431d0dabc68331620c670`. The rejected broad binary
+is `/tmp/flint-comparison-wang-lcoeff-v2`, SHA-256
+`981237843c1877b9bc048160ad4c5ca8bdf442850fb12f7d7daf7a3a4ae24140`. The first release candidate
+silently fell back because it compared a reconstructed positive leading coefficient against the
+negative square-free core without allowing the unit `-1`; its binary is
+`/tmp/flint-comparison-wang-lcoeff-candidate`, SHA-256
+`9fa9b81240eca6fb19c3e30da3b48a5bdb5bf259a1b2dd663786992d9af3ec3e`.
+
+All 87 sequential factor-module tests pass. They cover a first-image certificate, cyclic prime
+rotation, signed lifting, nonunit-content fallback, bounded and forced-bivariate exclusions, the
+strict density boundary, and the exact PolyBench density geometries. The old profile is
+`/tmp/profile-pb131-wide-u16-lbr.perf.data`; the rejected sign candidate is
+`/tmp/profile-pb131-wang-candidate-lbr.perf.data`.
 
 ## Accepted wide packed high-gap multiplication
 
@@ -2608,20 +2663,24 @@ comments that justify file organization by contrasting it with designs not prese
 
 ## Current ordered next actions
 
-1. Attack `generated GCD products: sparse 8 variables degree 5`, the current worst canonical row.
-   Let the packed row merge enumerate at most 16,384 coefficient pairs only when the smaller
-   operand has at most 16 terms; retain the existing 4,096 limit for all larger row counts.
-2. Add selector-boundary tests and an exact 9-by-1,286-style product check. Measure the sparse
-   eight-variable target, sparse five-variable guard, and all 23 PolyBench product constructions
-   against the frozen `f39c09b` binary. Revert unless the worst row gains decisively without a
-   material guard regression.
-3. Re-sort the canonical inventory after that measurement and immediately attack its new worst
-   row. The current next candidates are sparse-five, dense-five, and high-gap-eight generated GCD
-   product constructions at `1.901314`, `1.889336`, and `1.878681` historical S/F.
-4. Keep the degree-64 remainder work parked: the true convolution-window integration was correct
+1. Attack `generated GCD products: dense 5 variables degree 7`, the current worst primary row at
+   `1.706529` S/F. Add fixed-width `i64` input / `i128` accumulator strategies to the existing
+   `TotalDegreeIntegerMul` operation context.
+2. Prefer the total-degree simplex before mixed-radix dense multiplication only for five or more
+   variables, a large mixed box, the existing dense pair/simplex score, and a decisive box/simplex
+   reduction. The target is 759,375 mixed cells versus 11,628 simplex cells. Preserve the existing
+   mixed-radix and GMP fallbacks.
+3. Differential-test fixed-width total-degree accumulation against generic integer
+   multiplication, including cancellation, negative coefficients, exact i64/i128 boundaries,
+   overflow rejection, and exponent-rank boundaries. Measure the dense-five target plus dense-eight
+   and dense-seven product rows; also retain dense-three and large-integer guards.
+4. Re-sort the 116-row primary inventory and immediately attack its new worst. After dense-five,
+   the current candidates are dense-eight products at `1.610087`, dense-seven products at
+   `1.584134`, and high-height five-variable 128-bit products at `1.576901` S/F.
+5. Keep the degree-64 remainder work parked: the true convolution-window integration was correct
    but slower, and its API has no production caller. Revisit only with a different modular
    convolution mechanism, not another exact-integer window followed by `%`.
-5. Freeze and hash every accepted full-LTO binary and profile, integrate only measured winners with
+6. Freeze and hash every accepted full-LTO binary and profile, integrate only measured winners with
    Ben Ruijl's identity, update [CURRENT_STATUS.md](CURRENT_STATUS.md), and create the next immutable
    `CURRENT_STATUS_v<i>.md` snapshot after every accepted improvement.
 
