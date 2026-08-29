@@ -24,7 +24,8 @@ use crate::domains::{
     SampleableRing, SelfRing, Set,
 };
 use crate::kernels::{
-    DensePolynomialExactDivisionRequest, DensePolynomialMulRequest, TotalDegreePolynomialMulRequest,
+    ChunkedDensePolynomialMulRequest, DensePolynomialExactDivisionRequest,
+    DensePolynomialMulRequest, TotalDegreePolynomialMulRequest,
 };
 use crate::printer::{AtomPrinter, PrintOptions, PrintState};
 
@@ -36,6 +37,11 @@ use smallvec::{SmallVec, smallvec};
 const MAX_DENSE_MUL_BUFFER_SIZE: usize = 1 << 24;
 const MAX_DENSE_DIV_BUFFER_SIZE: usize = 1 << 20;
 const MAX_MIXED_RADIX_DENSE_TO_PAIR_PRODUCT_RATIO: usize = 64;
+const MIN_CHUNKED_DENSE_VARIABLES: usize = 5;
+const MIN_MIXED_RADIX_TO_SIMPLEX_RATIO: usize = 64;
+const MIN_CHUNKED_DENSE_OUTPUT_LEN: usize = 1 << 18;
+const MAX_CHUNKED_DENSE_INNER_LEN: usize = 1 << 16;
+const MIN_CHUNKED_DENSE_OUTER_LEN: usize = 8;
 const MAX_PACKED_ROW_MERGE_TERMS: usize = 64;
 const MAX_PACKED_ROW_MERGE_PAIR_PRODUCTS: usize = 4096;
 const MAX_PACKED_ROW_MERGE_FEW_ROWS: usize = 16;
@@ -53,6 +59,30 @@ fn mixed_radix_dense_work_is_bounded(
 ) -> bool {
     let pair_products = left_terms.saturating_mul(right_terms);
     output_len <= pair_products.saturating_mul(MAX_MIXED_RADIX_DENSE_TO_PAIR_PRODUCT_RATIO)
+}
+
+/// Return whether mixed-radix multiplication benefits from a reusable inner chunk.
+///
+/// The complete coefficient box must be large and mostly empty outside a much smaller total-degree
+/// simplex, while the carry-free inner chunk and outer convolution both remain bounded.
+#[inline]
+fn chunked_dense_mul_is_preferred(
+    variable_count: usize,
+    mixed_radix_len: usize,
+    pair_products: usize,
+    simplex_len: usize,
+    inner_len: usize,
+) -> bool {
+    variable_count >= MIN_CHUNKED_DENSE_VARIABLES
+        && mixed_radix_len >= MIN_CHUNKED_DENSE_OUTPUT_LEN
+        && mixed_radix_len > pair_products
+        && inner_len > 0
+        && inner_len <= MAX_CHUNKED_DENSE_INNER_LEN
+        && mixed_radix_len.is_multiple_of(inner_len)
+        && mixed_radix_len / inner_len >= MIN_CHUNKED_DENSE_OUTER_LEN
+        && simplex_len
+            .checked_mul(MIN_MIXED_RADIX_TO_SIMPLEX_RATIO)
+            .is_some_and(|minimum| mixed_radix_len >= minimum)
 }
 
 /// Return whether a multivariate dense multiplication can use a bounded coefficient box.
@@ -3313,6 +3343,26 @@ impl<F: Ring, E: Exponent> MultivariatePolynomial<F, E, LexOrder> {
             return None;
         }
 
+        let pair_products = self.nterms().saturating_mul(rhs.nterms());
+        let chunked_inner_len = if self.nvars() >= MIN_CHUNKED_DENSE_VARIABLES
+            && total > pair_products
+            && let Some(outer) = max_degs_rev.iter().rposition(|radix| *radix > 1)
+            && let Some(inner_len) = max_degs_rev[..outer]
+                .iter()
+                .try_fold(1usize, |product, radix| product.checked_mul(*radix))
+            && let Some(shape) = self.total_degree_dense_mul_shape(rhs)
+            && chunked_dense_mul_is_preferred(
+                self.nvars(),
+                total,
+                pair_products,
+                shape.1,
+                inner_len,
+            ) {
+            Some(inner_len)
+        } else {
+            None
+        };
+
         #[inline(always)]
         fn to_uni_var<E: Exponent>(s: &[E], max_degs_rev: &[usize]) -> u32 {
             let mut shift = 1;
@@ -3363,13 +3413,28 @@ impl<F: Ring, E: Exponent> MultivariatePolynomial<F, E, LexOrder> {
         }
 
         if let Some(coefficients) = self.ring().kernels().polynomial().and_then(|kernels| {
-            kernels.try_dense_mul(DensePolynomialMulRequest {
-                output_len: total,
-                left_coefficients: &self.coefficients,
-                left_indices: &uni_exp_self,
-                right_coefficients: &rhs.coefficients,
-                right_indices: &uni_exp_rhs,
-            })
+            chunked_inner_len
+                .and_then(|inner_len| {
+                    kernels.try_chunked_dense_mul(ChunkedDensePolynomialMulRequest {
+                        dense: DensePolynomialMulRequest {
+                            output_len: total,
+                            left_coefficients: &self.coefficients,
+                            left_indices: &uni_exp_self,
+                            right_coefficients: &rhs.coefficients,
+                            right_indices: &uni_exp_rhs,
+                        },
+                        inner_len,
+                    })
+                })
+                .or_else(|| {
+                    kernels.try_dense_mul(DensePolynomialMulRequest {
+                        output_len: total,
+                        left_coefficients: &self.coefficients,
+                        left_indices: &uni_exp_self,
+                        right_coefficients: &rhs.coefficients,
+                        right_indices: &uni_exp_rhs,
+                    })
+                })
         }) {
             let mut exp = vec![E::zero(); self.nvars()];
             let mut result = self.zero_with_capacity(coefficients.len());
@@ -4153,7 +4218,6 @@ impl<F: Ring, E: Exponent> MultivariatePolynomial<F, E, LexOrder> {
         let left_codes = encode_terms(self);
         let right_codes = encode_terms(other);
 
-        let mut coefficients = vec![self.ring().zero(); coefficient_count];
         let specialized = self.ring().kernels().polynomial().and_then(|kernels| {
             kernels.try_total_degree_mul(TotalDegreePolynomialMulRequest {
                 output_len: coefficient_count,
@@ -4168,6 +4232,7 @@ impl<F: Ring, E: Exponent> MultivariatePolynomial<F, E, LexOrder> {
             })
         });
 
+        let mut coefficients = vec![self.ring().zero(); coefficient_count];
         if let Some(specialized) = specialized {
             for (rank, coefficient) in specialized {
                 *coefficients.get_mut(rank as usize)? = coefficient;
@@ -6482,7 +6547,7 @@ mod test {
 
     use super::{
         IntegerPolynomialCrtContext, MultivariatePolynomial, PolynomialRing,
-        PolynomialSamplingPolicy, mixed_radix_dense_mul_is_bounded,
+        PolynomialSamplingPolicy, chunked_dense_mul_is_preferred, mixed_radix_dense_mul_is_bounded,
         mixed_radix_dense_work_is_bounded, packed_row_merge_is_bounded,
     };
 
@@ -7234,6 +7299,25 @@ mod test {
     }
 
     #[test]
+    fn chunked_dense_dispatch_selects_only_bounded_dominant_chunks() {
+        assert!(chunked_dense_mul_is_preferred(
+            5, 759_375, 627_264, 11_628, 50_625,
+        ));
+        assert!(!chunked_dense_mul_is_preferred(
+            4, 759_375, 627_264, 11_628, 50_625,
+        ));
+        assert!(!chunked_dense_mul_is_preferred(
+            5, 11_881_376, 53_004_029, 142_506, 456_976,
+        ));
+        assert!(chunked_dense_mul_is_preferred(
+            5, 262_144, 262_143, 4_096, 32_768,
+        ));
+        assert!(!chunked_dense_mul_is_preferred(
+            5, 262_144, 262_143, 4_097, 32_768,
+        ));
+    }
+
+    #[test]
     fn mul_full() {
         let p1 = parse!("v1^2+v2^3*v3*+3*v1^4+4*v2*v3+v4+v5+v6*v1*v2+v7*v5+v8+v9*v8")
             .to_polynomial::<_, u8>(&Z, None);
@@ -7293,6 +7377,27 @@ mod test {
         let right =
             parse!("(1-a+b+c-d-e+f+g-h)^5+1").to_polynomial::<_, u8>(&Z, left.variables().clone());
         assert_product(&left, &right);
+
+        let left = parse!("1000000000*(1+a+b+c+d+e)^6").to_polynomial::<_, u8>(&Z, None);
+        let right = parse!("1000000000*(1-a+2*b-c+2*d-e)^6")
+            .to_polynomial::<_, u8>(&Z, left.variables().clone());
+        let actual = left.try_total_degree_dense_mul(&right).unwrap();
+        let expected = left.mul_dense(&right).unwrap();
+        assert_eq!(actual, expected);
+        assert!(
+            actual
+                .coefficients
+                .iter()
+                .any(|coefficient| matches!(coefficient, Integer::Double(_)))
+        );
+
+        let left = parse!("(1+3*a+5*b+7*c+9*d+11*e)^7-1").to_polynomial::<_, u8>(&Z, None);
+        let right = parse!("(1+3*a+5*b+7*c+9*d-11*e)^7+3")
+            .to_polynomial::<_, u8>(&Z, left.variables().clone());
+        let chunked = &left * &right;
+        let compact = left.try_total_degree_dense_mul(&right).unwrap();
+        assert_eq!(chunked, compact);
+        assert_eq!(chunked.nterms(), 6_967);
     }
 
     #[test]

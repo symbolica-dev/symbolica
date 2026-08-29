@@ -4075,9 +4075,124 @@ mod test {
         float::F64,
         integer::{IntegerRing, extended_gcd, extended_gcd_i128},
     };
-    use crate::kernels::{DensePolynomialExactDivisionRequest, DensePolynomialMulRequest};
+    use crate::kernels::{
+        ChunkedDensePolynomialMulRequest, DensePolynomialExactDivisionRequest,
+        DensePolynomialMulRequest,
+    };
 
     use super::{DoubleInteger, Integer, MultiPrecisionInteger};
+
+    fn chunked_dense_mul(
+        output_len: usize,
+        inner_len: usize,
+        left_coefficients: &[Integer],
+        left_indices: &[u32],
+        right_coefficients: &[Integer],
+        right_indices: &[u32],
+    ) -> Option<Vec<(u32, Integer)>> {
+        super::polynomial_kernels::try_chunked_dense_mul_for_test(
+            ChunkedDensePolynomialMulRequest {
+                dense: DensePolynomialMulRequest {
+                    output_len,
+                    left_coefficients,
+                    left_indices,
+                    right_coefficients,
+                    right_indices,
+                },
+                inner_len,
+            },
+        )
+    }
+
+    #[test]
+    fn chunked_dense_integer_multiplication() {
+        let left_coefficients = [
+            Integer::from(1_000_000_000i64),
+            Integer::from(-2_000_000_000i64),
+            Integer::from(1_000_000_000i64),
+            Integer::from(-1_000_000_000i64),
+        ];
+        let right_coefficients = [
+            Integer::from(-1_000_000_000i64),
+            Integer::from(2_000_000_000i64),
+            Integer::from(1_000_000_000i64),
+            Integer::from(-3_000_000_000i64),
+        ];
+        let actual = chunked_dense_mul(
+            32,
+            8,
+            &left_coefficients,
+            &[0, 2, 8, 11],
+            &right_coefficients,
+            &[0, 1, 8, 10],
+        )
+        .unwrap();
+        let expected = [
+            (0, -1),
+            (1, 2),
+            (2, 2),
+            (3, -4),
+            (9, 2),
+            (10, -5),
+            (11, 1),
+            (12, 4),
+            (16, 1),
+            (18, -3),
+            (19, -1),
+            (21, 3),
+        ]
+        .map(|(index, coefficient)| {
+            (
+                index,
+                Integer::from_double(coefficient * 1_000_000_000_000_000_000i128),
+            )
+        });
+        assert_eq!(actual, expected);
+    }
+
+    #[test]
+    fn chunked_dense_integer_multiplication_rejects_invalid_or_unneeded_layouts() {
+        let large = [Integer::from(4_000_000_000i64)];
+        assert!(chunked_dense_mul(8, 0, &large, &[0], &large, &[0]).is_none());
+        assert!(chunked_dense_mul(32, 6, &large, &[0], &large, &[0]).is_none());
+        assert!(chunked_dense_mul(16, 8, &large, &[7], &large, &[1]).is_none());
+        assert!(
+            chunked_dense_mul(
+                16,
+                8,
+                &[large[0].clone(), large[0].clone()],
+                &[2, 1],
+                &large,
+                &[0],
+            )
+            .is_none()
+        );
+        assert!(
+            chunked_dense_mul(
+                16,
+                8,
+                &[large[0].clone(), large[0].clone()],
+                &[1, 1],
+                &large,
+                &[0],
+            )
+            .is_none()
+        );
+        assert!(chunked_dense_mul(257, 1, &large, &[0], &large, &[0]).is_none());
+
+        let small = [Integer::from(3)];
+        assert!(chunked_dense_mul(8, 8, &small, &[0], &small, &[0]).is_none());
+
+        let minimums = [
+            Integer::from(i64::MIN),
+            Integer::from(i64::MIN),
+            Integer::from(i64::MIN),
+            Integer::from(i64::MIN),
+        ];
+        assert!(
+            chunked_dense_mul(8, 8, &minimums, &[0, 1, 2, 3], &minimums, &[0, 1, 2, 3]).is_none()
+        );
+    }
 
     #[test]
     fn multi_precision_integer_raw_roundtrip_and_common_bit_count() {

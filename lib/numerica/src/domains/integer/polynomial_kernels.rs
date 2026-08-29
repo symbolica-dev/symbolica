@@ -14,8 +14,8 @@ use super::{MultiPrecisionInteger, RawMultiPrecisionInteger};
 #[cfg(feature = "gmp")]
 use crate::domains::polynomial_layouts::try_simplex_kronecker_layout;
 use crate::kernels::{
-    DensePolynomialExactDivisionRequest, DensePolynomialMulRequest, PolynomialKernels,
-    TotalDegreePolynomialMulRequest,
+    ChunkedDensePolynomialMulRequest, DensePolynomialExactDivisionRequest,
+    DensePolynomialMulRequest, PolynomialKernels, TotalDegreePolynomialMulRequest,
 };
 #[cfg(feature = "gmp")]
 use gmp_mpfr_sys::gmp;
@@ -939,6 +939,181 @@ impl<'a> DenseIntegerMul<'a> {
     }
 }
 
+/// One integer multiplication evaluated through reusable mixed-radix coefficient chunks.
+struct ChunkedDenseIntegerMul<'a> {
+    dense: DenseIntegerMul<'a>,
+    inner_len: usize,
+}
+
+impl<'a> ChunkedDenseIntegerMul<'a> {
+    /// Validate the dense layout and its carry-free split into outer and inner indices.
+    fn new(request: ChunkedDensePolynomialMulRequest<'a, Integer>) -> Option<Self> {
+        const MAX_INNER_LEN: usize = 1 << 20;
+        const MAX_OUTER_CHUNKS: usize = 256;
+
+        let inner_len = request.inner_len;
+        let dense = DenseIntegerMul::new(request.dense)?;
+        if inner_len == 0
+            || inner_len > MAX_INNER_LEN
+            || !dense.output_len.is_multiple_of(inner_len)
+            || dense.output_len / inner_len > MAX_OUTER_CHUNKS
+            || dense
+                .left_indices
+                .windows(2)
+                .any(|indices| indices[0] >= indices[1])
+            || dense
+                .right_indices
+                .windows(2)
+                .any(|indices| indices[0] >= indices[1])
+        {
+            return None;
+        }
+
+        if let (Some(left_inner), Some(right_inner)) = (
+            dense
+                .left_indices
+                .iter()
+                .map(|index| *index as usize % inner_len)
+                .max(),
+            dense
+                .right_indices
+                .iter()
+                .map(|index| *index as usize % inner_len)
+                .max(),
+        ) {
+            if left_inner.checked_add(right_inner)? >= inner_len {
+                return None;
+            }
+        }
+
+        Some(Self { dense, inner_len })
+    }
+
+    /// Multiply `i64` coefficients through a reusable `i128` inner accumulator.
+    ///
+    /// Terms are grouped by their outer index. Each compatible pair of outer groups contributes
+    /// to one output chunk, whose inner indices remain additive and can be accumulated without
+    /// decoding exponent vectors.
+    fn run(self) -> Option<Vec<(u32, Integer)>> {
+        const BLOCK_SIZE: usize = 128;
+
+        let Self { dense, inner_len } = self;
+        if dense.left_coefficients.is_empty() || dense.right_coefficients.is_empty() {
+            return Some(Vec::new());
+        }
+
+        let collect_single = |coefficients: &[Integer]| {
+            let mut values = Vec::with_capacity(coefficients.len());
+            let mut maximum = 0u64;
+            for coefficient in coefficients {
+                let Integer::Single(value) = coefficient else {
+                    return None;
+                };
+                maximum = maximum.max(value.unsigned_abs());
+                values.push(*value);
+            }
+            Some((values, maximum))
+        };
+        let (left_coefficients, maximum_left) = collect_single(dense.left_coefficients)?;
+        let (right_coefficients, maximum_right) = collect_single(dense.right_coefficients)?;
+        let coefficient_bound = u128::from(maximum_left)
+            .checked_mul(u128::from(maximum_right))?
+            .checked_mul(left_coefficients.len().min(right_coefficients.len()) as u128)?;
+        if coefficient_bound <= i64::MAX as u128 || coefficient_bound > i128::MAX as u128 {
+            return None;
+        }
+
+        let outer_count = dense.output_len / inner_len;
+        let group_ranges = |indices: &[u32]| {
+            let mut ranges = vec![(0usize, 0usize); outer_count];
+            let mut position = 0usize;
+            for (outer, range) in ranges.iter_mut().enumerate() {
+                let start = position;
+                while position < indices.len() && indices[position] as usize / inner_len == outer {
+                    position += 1;
+                }
+                *range = (start, position);
+            }
+            (position == indices.len()).then_some(ranges)
+        };
+        let left_ranges = group_ranges(dense.left_indices)?;
+        let right_ranges = group_ranges(dense.right_indices)?;
+        let left_inner = dense
+            .left_indices
+            .iter()
+            .map(|index| *index as usize % inner_len)
+            .collect::<Vec<_>>();
+        let right_inner = dense
+            .right_indices
+            .iter()
+            .map(|index| *index as usize % inner_len)
+            .collect::<Vec<_>>();
+
+        let mut accumulator = vec![0i128; inner_len];
+        let mut output = Vec::with_capacity(
+            dense
+                .left_coefficients
+                .len()
+                .saturating_add(dense.right_coefficients.len())
+                .saturating_mul(8)
+                .min(dense.output_len),
+        );
+        for output_outer in 0..outer_count {
+            let mut active_inner_len = 0usize;
+            for left_outer in 0..=output_outer.min(outer_count - 1) {
+                let right_outer = output_outer - left_outer;
+                if right_outer >= outer_count {
+                    continue;
+                }
+                let (left_start, left_end) = left_ranges[left_outer];
+                let (right_start, right_end) = right_ranges[right_outer];
+                if left_start == left_end || right_start == right_end {
+                    continue;
+                }
+                active_inner_len = active_inner_len.max(
+                    unsafe { *left_inner.get_unchecked(left_end - 1) }
+                        + unsafe { *right_inner.get_unchecked(right_end - 1) }
+                        + 1,
+                );
+                for left_block in (left_start..left_end).step_by(BLOCK_SIZE) {
+                    for right_block in (right_start..right_end).step_by(BLOCK_SIZE) {
+                        for left_index in left_block..(left_block + BLOCK_SIZE).min(left_end) {
+                            let left_coefficient =
+                                unsafe { *left_coefficients.get_unchecked(left_index) };
+                            let left_position = unsafe { *left_inner.get_unchecked(left_index) };
+                            for right_index in
+                                right_block..(right_block + BLOCK_SIZE).min(right_end)
+                            {
+                                let position = left_position
+                                    + unsafe { *right_inner.get_unchecked(right_index) };
+                                unsafe {
+                                    *accumulator.get_unchecked_mut(position) +=
+                                        i128::from(left_coefficient)
+                                            * i128::from(
+                                                *right_coefficients.get_unchecked(right_index),
+                                            );
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+
+            let output_base = output_outer * inner_len;
+            for (inner, coefficient) in accumulator[..active_inner_len].iter_mut().enumerate() {
+                let coefficient = std::mem::take(coefficient);
+                if coefficient != 0 {
+                    output.push((
+                        (output_base + inner) as u32,
+                        Integer::from_double(coefficient),
+                    ));
+                }
+            }
+        }
+        Some(output)
+    }
+}
+
 /// One integer multiplication supported on a compact total-degree simplex.
 struct TotalDegreeIntegerMul<'a> {
     request: TotalDegreePolynomialMulRequest<'a, Integer>,
@@ -1453,6 +1628,14 @@ impl<'a> DenseIntegerExactDivision<'a> {
 
 impl PolynomialKernels<Integer> for IntegerRing {
     #[inline]
+    fn try_chunked_dense_mul(
+        &self,
+        request: ChunkedDensePolynomialMulRequest<'_, Integer>,
+    ) -> Option<Vec<(u32, Integer)>> {
+        ChunkedDenseIntegerMul::new(request)?.run()
+    }
+
+    #[inline]
     fn try_total_degree_mul(
         &self,
         request: TotalDegreePolynomialMulRequest<'_, Integer>,
@@ -1475,4 +1658,11 @@ impl PolynomialKernels<Integer> for IntegerRing {
     ) -> Option<Vec<(u32, Integer)>> {
         DenseIntegerExactDivision::new(request).run()
     }
+}
+
+#[cfg(test)]
+pub(super) fn try_chunked_dense_mul_for_test(
+    request: ChunkedDensePolynomialMulRequest<'_, Integer>,
+) -> Option<Vec<(u32, Integer)>> {
+    ChunkedDenseIntegerMul::new(request)?.run()
 }

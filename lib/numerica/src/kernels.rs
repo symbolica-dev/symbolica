@@ -13,11 +13,24 @@ pub struct DensePolynomialMulRequest<'a, E> {
     pub right_indices: &'a [u32],
 }
 
+/// A dense-indexed multiplication split into cache-sized inner coefficient chunks.
+///
+/// `dense` supplies the additive mixed-radix indices. `inner_len` is positive, divides
+/// `dense.output_len`, and decomposes every index as `outer * inner_len + inner`. The sum of any
+/// left and right inner index is smaller than `inner_len`, so a kernel can accumulate one outer
+/// coefficient chunk at a time and reuse the same inner workspace.
+pub struct ChunkedDensePolynomialMulRequest<'a, E> {
+    pub dense: DensePolynomialMulRequest<'a, E>,
+    pub inner_len: usize,
+}
+
 /// A multiplication request for polynomials supported on total-degree simplices.
 ///
 /// Each exponent vector is split into additive prefix and suffix codes. `prefix_rank`,
 /// `prefix_remaining`, and `suffix_rank` map sums of those codes to compact lexicographic simplex
-/// ranks.
+/// ranks. Each coefficient slice has the same length as its code slice, every code describes one
+/// distinct polynomial term, and every pair of left and right codes maps to a rank below
+/// `output_len`.
 pub struct TotalDegreePolynomialMulRequest<'a, E> {
     pub output_len: usize,
     pub left_coefficients: &'a [E],
@@ -80,6 +93,17 @@ pub trait PolynomialKernels<E> {
     /// indices are strictly increasing, and every possible summed index fits in
     /// `request.output_len`.
     fn try_dense_mul(&self, _request: DensePolynomialMulRequest<'_, E>) -> Option<Vec<(u32, E)>> {
+        None
+    }
+
+    /// Multiply dense-indexed coefficients one outer chunk at a time.
+    ///
+    /// On success, the result has the same sorted sparse representation as
+    /// [`Self::try_dense_mul`].
+    fn try_chunked_dense_mul(
+        &self,
+        _request: ChunkedDensePolynomialMulRequest<'_, E>,
+    ) -> Option<Vec<(u32, E)>> {
         None
     }
 
