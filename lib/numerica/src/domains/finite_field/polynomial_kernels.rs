@@ -12,11 +12,11 @@ use super::montgomery::{montgomery_reduce_u32, montgomery_reduce_u64};
 use super::{FiniteField, FiniteFieldElement, Zp, Zp64};
 use crate::domains::RingOps;
 use crate::domains::integer::{Integer, Z};
-#[cfg(feature = "gmp")]
+#[cfg(feature = "integer-gmp")]
 use crate::domains::integer::{MultiPrecisionInteger, RawMultiPrecisionInteger};
 use crate::domains::polynomial_layouts::{SimplexKroneckerLayout, try_simplex_kronecker_layout};
 use crate::kernels::{DensePolynomialMulRequest, PolynomialKernels};
-#[cfg(feature = "gmp")]
+#[cfg(feature = "integer-gmp")]
 use rug::integer::Order as RugIntegerOrder;
 
 const MAX_DENSE_MODULAR_MUL_BUFFER_SIZE: usize = 1 << 20;
@@ -273,7 +273,7 @@ impl<'a> DenseZpMul<'a> {
         Some(output)
     }
 
-    #[cfg(feature = "gmp")]
+    #[cfg(feature = "integer-gmp")]
     /// Multiply this operation's `Zp` polynomials with two-evaluation Kronecker substitution.
     ///
     /// The inputs are packed at positive and negative powers of a binary radix. Two GMP products then
@@ -441,7 +441,7 @@ impl<'a> DenseZpMul<'a> {
             return Some(Vec::new());
         }
 
-        #[cfg(feature = "gmp")]
+        #[cfg(feature = "integer-gmp")]
         if self.number_of_products >= 1_000_000
             && self.output_len().saturating_mul(64) < self.number_of_products
             && let Some(output) = self.try_ks2()
@@ -765,7 +765,7 @@ impl<'a> DenseZp64Mul<'a> {
         Some(output)
     }
 
-    #[cfg(feature = "gmp")]
+    #[cfg(feature = "integer-gmp")]
     #[inline(never)]
     /// Multiply this operation's `Zp64` polynomials with four GMP evaluation products.
     ///
@@ -1088,7 +1088,7 @@ impl<'a> DenseZp64Mul<'a> {
         )
     }
 
-    #[cfg(feature = "gmp")]
+    #[cfg(feature = "integer-gmp")]
     #[inline(never)]
     /// Multiply this operation's `Zp64` polynomials with positive/negative Kronecker evaluations.
     ///
@@ -1250,7 +1250,7 @@ impl<'a> DenseZp64Mul<'a> {
             return Some(Vec::new());
         }
 
-        #[cfg(feature = "gmp")]
+        #[cfg(feature = "integer-gmp")]
         if self.product_count >= 1_000_000
             && self.product_count >= self.output_len().saturating_mul(128)
         {

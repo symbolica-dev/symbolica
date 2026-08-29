@@ -1,23 +1,25 @@
 # Polynomial performance continuation handoff
 
 This is the live continuation record for the single-core Symbolica/FLINT polynomial-performance
-work. It was refreshed on 2026-08-29 after adding constant-coordinate projective reconstruction
-to dense univariate integer GCD. The accepted pass moves the configured degree-64 GCD from
-`1.181340` to `0.853224` S/F while leaving the degree-64 product and neighboring factorization
-guards materially unchanged. The latest implementation commit is `e58e876`. The base Rust/FLINT
-comparison inventory was measured at performance-equivalent source head `b2e5d28`, with later
-accepted rows replacing their exploratory predecessors as documented below.
+work. It was refreshed on 2026-08-29 after adding fixed-width contiguous Kronecker packing and
+guarded geometric factor-prime sampling. The final post-rebase rows move the dense degree-64
+product from `1.094628` to `1.017409` S/F and its factorization from `1.128065` to `1.031329`
+S/F. The base Rust/FLINT comparison inventory was measured at performance-equivalent source head
+`b2e5d28`, with later accepted rows replacing their exploratory predecessors as documented below.
 Keep this file current whenever an experiment is accepted, rejected, or left partly complete. The
 purpose is that another agent can resume without reconstructing decisions from chat history or
 transient binary names.
 
 The complete current Symbolica/FLINT scoreboard is in
 [CURRENT_STATUS.md](CURRENT_STATUS.md), with the latest immutable snapshot in
-[CURRENT_STATUS_v10.md](CURRENT_STATUS_v10.md). Its primary statistics contain 116 non-resultant
-comparisons: 90 favor Symbolica and 26 favor FLINT. The six Ducos, six Brown, and six CRT
+[CURRENT_STATUS_v11.md](CURRENT_STATUS_v11.md). Its primary statistics contain 116 non-resultant
+comparisons: 91 favor Symbolica and 25 favor FLINT. The six Ducos, six Brown, and six CRT
 measurements are retained only in a compact appendix note and do not affect primary ranks or
 summary statistics. After every accepted optimization, update the live file and create the next
 numbered snapshot with an opening paragraph that describes the changes from its predecessor.
+Historical alternative-backend validation labels below are normalized to the current
+`integer-malachite,float-astro` feature names; their test counts remain the original checkpoint
+results unless a post-rebase rerun is stated explicitly.
 
 ## Working contract
 
@@ -860,7 +862,7 @@ new implementation. Use the build-time source state and SHA above for provenance
 version string.
 
 The final source passes all `80/80` release factor-module tests with the default GMP/faster-alloc
-features and all `80/80` with `no_gmp,native_code_generation`. All `5/5` packed-row differential
+features and all `80/80` with `integer-malachite,float-astro,native_code_generation`. All `5/5` packed-row differential
 tests pass in release mode. Run `cargo fmt --check` and `git diff --check` again after editing this
 handoff and before the documentation commit.
 
@@ -944,7 +946,7 @@ compression preprocessing. Wall-clock timings, rather than the LBR sampled-cycle
 acceptance measurement.
 
 Validation at this checkpoint passes `74/74` factor-module tests with default GMP features and
-`74/74` with `no_gmp,native_code_generation`; `cargo check --lib --tests`, `cargo fmt --check`, and
+`74/74` with `integer-malachite,float-astro,native_code_generation`; `cargo check --lib --tests`, `cargo fmt --check`, and
 `git diff --check` also pass. Coverage includes exact/nonsquare/canceling sparse roots, packed
 high-height squaring, signed content and common-monomial multiplicities, certified early splits,
 inconclusive fallbacks, exponent-capacity guards, and both irreducible and split quadratic
@@ -1039,7 +1041,7 @@ remainder coefficient. FLINT 3.6 uses the same schedule in
 balanced divisor lengths are at most 18.
 
 The factor module passes `67/67` tests with default GMP features and `67/67` with
-`no_gmp,native_code_generation`. New differential coverage includes `5^8` and `5^65`, odd/even
+`integer-malachite,float-astro,native_code_generation`. New differential coverage includes `5^8` and `5^65`, odd/even
 symmetric-representative boundaries, a dense degree-16 divisor with a degree-31 quotient and
 interior zero coefficients, constant divisors, and degree-short dividends. The high-height route
 still proves that quadratic Hensel lifting executes and reconstructs the original polynomial.
@@ -1098,7 +1100,7 @@ wide-remainder accumulation from an exact coefficient bound. The classical monic
 available for unsupported cases and for reductions after a modulus change.
 
 The reciprocal path and degree-bound correction pass all `66/66` factor-module tests under the
-default GMP feature set and all `66/66` under `no_gmp,native_code_generation`; `cargo fmt --check`
+default GMP feature set and all `66/66` under `integer-malachite,float-astro,native_code_generation`; `cargo fmt --check`
 is clean. Tests cover all
 accumulation modes, products and squares, modulus shrinkage, and a quotient such as `q=x`, whose
 constant coefficient must remain represented while performing reversed division.
@@ -1409,7 +1411,7 @@ commit `3e88257` therefore added a `OnceLock` benchmark switch and was used to o
 same-binary comparison above; that switch is not integrated.
 
 The default-feature polynomial module passes `28/28` tests and the focused
-`no_gmp,native_code_generation` capacity test passes. The production binary is
+`integer-malachite,float-astro,native_code_generation` capacity test passes. The production binary is
 `/tmp/flint-comparison-polybench-prealloc-06a51ea-lto`, SHA-256
 `0b53b850d29246c0966ae848433eb0e5f396556465af0665f18e88537fdf9d24`. The same-binary control is
 `/tmp/flint-comparison-polybench-prealloc-toggle-3e88257-lto`, SHA-256
@@ -1436,7 +1438,7 @@ correctness fix is not on `dev`; a future standalone fix should preserve the est
 
 The default polynomial module passes `32/32` tests. New independent-reference tests cover Laurent
 products, `u8` and signed `i8` overflow, packed `u8`/`u16` boundaries, generic fallback, asymmetric
-heap operand ordering, and public total-degree-simplex dispatch. Default and explicit `no_gmp`
+heap operand ordering, and public total-degree-simplex dispatch. Default and explicit `integer-malachite`
 library checks are clean. The no-default-feature test target itself assumes native-code-generation
 APIs in an unrelated evaluation test module, so the no-GMP guard used `cargo check --lib`.
 
@@ -1588,12 +1590,12 @@ with a median paired improvement of `18.229%`. The source-matched local-bound ba
 Residual and local-subtree validation completed before integration:
 
 - root factor module under default features `48/48`;
-- root factor module under `no_gmp,native_code_generation` `48/48`;
+- root factor module under `integer-malachite,float-astro,native_code_generation` `48/48`;
 - base-prime precision, binary-prime multi-round lifting, and non-monic nontrivial-`gamma` cases;
 - the exact scaled-residual invariant after every debug linear-lift round;
 - `cargo check --all-targets`, `cargo fmt --check`, and `git diff --check`.
 
-The combined local-subtree source passed `50/50` factor tests under both GMP and `no_gmp` before
+The combined local-subtree source passed `50/50` factor tests under both GMP and `integer-malachite` before
 the final LLL test was added. That LLL test then passed separately under both backends; it is the
 only change after the release build.
 
@@ -1650,7 +1652,7 @@ is `/tmp/owned-remainder-v1-alternating.csv`, SHA-256
 its safe generic fallback.
 
 The complete factor-module suite passes `59/59` under default GMP features and `59/59` under
-`no_gmp,native_code_generation`. Coverage includes small primes, composite prime powers, uneven
+`integer-malachite,float-astro,native_code_generation`. Coverage includes small primes, composite prime powers, uneven
 degrees, nonmonic targets, interior zeros, GMP-sized coefficients, product congruence, Bezout
 identities, exact residuals, and agreement with the binary lift.
 
@@ -1737,7 +1739,7 @@ Artifact provenance:
 | `/tmp/profile-factor-product-tree-dense-final-d64-lbr.children-symbols.txt` | `f0a91729f6adfa3c822be0d269c8d04b4a44448f262becc597ccebb056774375` |
 
 After merge, the factor module again passes `59/59` with default GMP features and `59/59` with
-`--no-default-features --features no_gmp,native_code_generation`, both single-threaded and using
+`--no-default-features --features integer-malachite,float-astro,native_code_generation`, both single-threaded and using
 the main worktree's pre-existing ignored lockfile. The complete default `cargo test --workspace`
 gate was last run on the preceding integrated chain.
 
@@ -1798,14 +1800,14 @@ the code was cherry-picked as `55a758b`.
 Validation completed on integrated `dev`:
 
 - all default `poly::gcd::tests`: `28/28`;
-- `poly::gcd::tests` with `--no-default-features --features no_gmp,native_code_generation`:
+- `poly::gcd::tests` with `--no-default-features --features integer-malachite,float-astro,native_code_generation`:
   `28/28`;
 - Numerica GMP integer tests: `21/21`, finite-field tests: `12/12`;
-- Numerica `no_gmp` integer tests: `16/16`, finite-field tests: `12/12`;
+- Numerica `integer-malachite` integer tests: `16/16`, finite-field tests: `12/12`;
 - `cargo fmt --check` and `git diff --check`.
 
-The bare root `no_gmp` configuration without `native_code_generation` currently trips an unrelated
-evaluator test configuration. The supported root check above is the relevant one for this chain.
+The former bare alternative-backend test configuration at that checkpoint tripped an unrelated
+evaluator test configuration. The current post-rebase build checks are recorded below.
 
 ### Other retained polynomial work
 
@@ -1978,7 +1980,7 @@ call and explains roughly half of the Hensel saving; finite-field multiplication
 
 Validation includes exact/inexact child recombination, child-local moduli, non-monic exact
 children whose local modulus equals the base prime, and local LLL recombination with twelve modular
-leaves. The combined factor suite passed `50/50` under both GMP and `no_gmp`; the later LLL test
+leaves. The combined factor suite passed `50/50` under both GMP and `integer-malachite`; the later LLL test
 passed separately under both backends.
 
 Artifact provenance:
@@ -2222,11 +2224,11 @@ Validation completed from the product worktree:
 - five focused Kronecker fixture, primitive-boundary, radix-boundary, large-GMP fallback, and
   selector-rejection tests;
 - all GMP integer-domain tests: `25/25`;
-- all `no_gmp` integer-domain tests: `16/16`;
+- all `integer-malachite` integer-domain tests: `16/16`;
 - signed-radix differential cases at 63/64/65 and 127/128/129 bits, an exact `i128::MIN` output,
   primitive values whose outputs require GMP fallback, and existing 180-bit `Large` inputs.
 
-The specialized code is `#[cfg(feature = "gmp")]`, so the `no_gmp` run primarily guards fallback
+The specialized code is `#[cfg(feature = "integer-gmp")]`, so the `integer-malachite` run primarily guards fallback
 compilation and semantics.
 
 The full-LTO build completed in 9m33s. Its artifacts are:
@@ -2266,7 +2268,7 @@ existing primitive-boundary test exercises sum overflow and the existing 180-bit
 
 - all seven Kronecker tests;
 - all GMP integer-domain tests, `25/25`;
-- all `no_gmp` integer-domain tests, `16/16`;
+- all `integer-malachite` integer-domain tests, `16/16`;
 - `cargo fmt --check` and `git diff --check`.
 
 Its full-LTO build completed in 9m14s. The artifacts are:
@@ -2698,7 +2700,7 @@ degree 64 is `/tmp/zp-collision-v1-d64-*-block-*.csv`.
 
 The experiment retained recursive quadratic lifting for at most four modular factors, permitted
 one quadratic lift at the root for five through eight factors, and forced all descendants back to
-linear lifting. Routing and reconstruction tests passed under the default and `no_gmp` feature
+linear lifting. Routing and reconstruction tests passed under the default and `integer-malachite` feature
 sets, including exact call-count checks at the four-, five-, eight-, and nine-factor boundaries.
 It nevertheless made the seven-factor degree-64 fixture consistently slower.
 
@@ -2798,6 +2800,137 @@ the full target leading coefficient.
 The private dense DDF context described here was subsequently implemented and then extended with
 cached reciprocal reduction; see the current checkpoint. The square-free GCD remained
 Amdahl-limited and was not a useful target for this factorization fixture.
+
+## Accepted contiguous Kronecker packing and geometric prime sampling
+
+### Dense one-variable integer products
+
+The current degree-64 product profile measured `0.005913 ms` for Symbolica and `0.005377 ms` for
+FLINT. Symbolica's `DenseIntegerMul::run` occupied 42.75% of paired cycles: GMP multiplication was
+17.06%, coefficient packing 8.23%, and the remaining self time included decoding and selector
+work. FLINT's corresponding KS path spent 17.52% in multiplication, 17.86% unpacking, and 5.41%
+packing. GMP multiplication was therefore not the gap; Symbolica's generic packer and wrapper were
+the bounded target.
+
+The total-degree-64 fixture has 33 left terms at indices `1..=33`, 32 right terms at indices
+`0..=31`, a 145-bit signed radix digit, and 64 nonzero output coefficients. Sixty-two outputs fit
+in signed `i128`; only two require `Integer::Large`. The accepted kernel:
+
+- removes the starting-index offsets when both supports are consecutive and restores their sum
+  while decoding;
+- packs one-, two-, and three-limb digits from `Integer::Single` and `Integer::Double` through a
+  fixed stack array;
+- retains the general reordered/GMP-backed packer for sparse support, wider digits, and
+  `Integer::Large` inputs.
+
+Six alternating pinned processes with 10,000 samples per backend measured the source-matched
+kernel change:
+
+| Product | Control Symbolica | Candidate Symbolica | Candidate S/F | Symbolica change |
+|---|---:|---:|---:|---:|
+| degrees 32/31, total 63 | `5.627 us` | `5.140 us` | `0.992008` | `-8.66%` |
+| degrees 33/31, total 64 | `5.927 us` | `5.475 us` | `1.019703` | `-7.62%` |
+| degrees 33/32, total 65 | `6.319 us` | `5.846 us` | `1.087568` | `-7.49%` |
+
+The final linked binary refreshes these inventory ratios to `0.973974`, `1.001645`, and
+`1.070910`. The degree-64 product is now effectively tied with FLINT. Degree-64 GCD and the
+degree-33/63/64/65 factor guards were neutral when only this kernel changed.
+
+### Dense degree-64 factor-prime selection
+
+Before changing the selector, a 1,000-sample LBR profile measured `2.903360 ms` for Symbolica and
+`2.576247 ms` for FLINT, or `1.126973` S/F. Of all paired cycles, synchronized product-tree Hensel
+lifting occupied 30.22%, modular-prime screening 17.84%, and retained EDF 2.91%. Relative to the
+Symbolica factor subtree, these are approximately 58%, 34%, and 6%, respectively.
+
+The proposed `17^10` subset reconstruction was tested before changing prime selection. At 41 bits
+it reconstructed only the exact degree-2 factor and left five modular leaves. The same happened at
+82 bits. At `17^39` (160 bits), degree-1, degree-2, degree-10, and degree-30 candidates reconstructed
+but two degree-10 leaves remained; the existing root certificate still completed the factorization
+at that stage. The experiment did not shorten lifting and its extra exact divisions were removed.
+
+For the retained target, the first suitable image is `p=7` with eight modular factors. Sequential
+selection then factors discarded images at `p=13` with seven factors and `p=17` with six factors,
+retaining `p=17`. The accepted selector probes a prime at least one bit wider immediately. It ends
+the small-prime search only when the wider image improves estimated lift work without increasing
+factor count. Otherwise it backfills the skipped prime range. This extra condition matters for the
+total-degree-65 guard: its `p=7`, `p=13`, and `p=17` images have 9, 7, and 12 factors. A broad
+geometric rule incorrectly selected `p=17` and regressed that row to about `2.17` S/F; the final
+rule backfills and retains the seven-factor image.
+
+Six alternating pinned processes with 500 samples per backend measured the final rule against the
+product-only control:
+
+| Factorization | Control Symbolica | Candidate Symbolica | Candidate S/F | Symbolica change |
+|---|---:|---:|---:|---:|
+| high-height total degree 33 | `1.535 ms` | `1.531 ms` | `1.111896` | neutral |
+| total degree 63 | `3.083 ms` | `3.125 ms` | `1.042068` | `+1.35%` guard |
+| total degree 64 | `2.881 ms` | `2.628 ms` | `1.028278` | `-8.78%` |
+| total degree 65 | `3.516 ms` | `3.541 ms` | `1.171321` | `+0.73%` guard |
+
+The final 1,000-sample profile measured `2.640321 ms` against FLINT's `2.577169 ms`, or
+`1.024504` S/F. Prime screening fell from 17.84% to 13.97% of paired cycles. Product-tree Hensel
+lifting is now the largest remaining Symbolica component, but the whole operation is within about
+3% of FLINT and is closed for the current single-core pass.
+
+| Artifact | SHA-256 |
+|---|---|
+| `/tmp/flint-comparison-d64-constant-pivot-final` | `3ae577b8aa9480eb7c82009a70e01bd1e0cfe063cefecda77d55057ba3569b6f` |
+| `/tmp/flint-comparison-d64-product-contiguous-pack` | `8fd9d0ab345e610fef7e19be1909fad17210902807ea753094898f12139e8deb` |
+| `/tmp/flint-comparison-d64-product-contiguous-pack-build.jsonl` | `24f78e018dd497467d9c8091d48948396aa81cacb5aa30d33298742f42c19378` |
+| `/tmp/profile-d64-product-current-lbr.perf.data` | `f4c6a3327de573550392bd5461de2677fadd5d5f4eb5dc7f6de0acaf5af0c87d` |
+| `/tmp/profile-d64-product-current-lbr.flat.txt` | `46f17eaf2a16f4e069eb073961c89239ebce368079854bca66cc6008cd5b101e` |
+| `/tmp/profile-d64-product-current-lbr.children.txt` | `a05bc9b9ada9eba61d16998e9aa6d90f14b0b44b13cb7bfb8fef407cbebe999b` |
+| `/tmp/flint-comparison-d64-geometric-nonincreasing` | `453b6817a255a9815c3672cef22cd0160a15a021d1bc3d6c58a2add83b8303cc` |
+| `/tmp/flint-comparison-d64-geometric-nonincreasing-build.jsonl` | `532e2411d9e49735bfea13c831ffaf2d6cb21289981a2a493649313a633b7d37` |
+| `/tmp/profile-d64-factor-geometric-nonincreasing-lbr.perf.data` | `dd64b73906a49c677707af4120f2641db8093b11810dd77fa33fd3425f963c93` |
+| `/tmp/profile-d64-factor-geometric-nonincreasing-lbr.flat-symbols.txt` | `f42a5f57e0da33177e9f02479b8babc8be64321e8e44af2a85382ef51ab66430` |
+| `/tmp/profile-d64-factor-geometric-nonincreasing-lbr.children-symbols.txt` | `c880497cf7124a8ea5bd9ebdc0b1ad72ca5ef8774e7e2188e884b011ca29fa7a` |
+| `/tmp/profile-d64-factor-geometric-nonincreasing.csv` | `c7e04022053fbb832d7761d72bb4614a41dac31471aa1a89f79d5b59714e89b0` |
+
+Raw timing manifests are `465e20ab0927b23c83c5a1d782d585187b37eaeb27159370cbe251066ed21186`
+for the product-kernel A/B files, `e4fc6627e5b980b2ec77b2bce2c25b1672f1f57cdc18ebd938a457c89066810d`
+for final factor guards, `887ee47b40ff365a214ee56666bb139733877f98e19ccccbd3b650bda9ecf0f9`
+for final products, and `f6fc31d23019f853af2a2a8c0ef471210c430127f0e2b216f94924b3a6086031`
+for the final degree-64 GCD guard. The corresponding files are under `/tmp` with prefixes
+`d64-product-contiguous-pack`, `nonincreasing`, `final-product`, and `final-gcd-d64`.
+
+Validation passes all eight Kronecker-focused Numerica tests and the degree-63, degree-64, and
+degree-65 univariate factorization tests, all single-threaded. The complete 89-test factor module
+run had only the previously observed order-dependent `galois_upgrade` failure; its immediate exact
+single-test rerun passed. The degree-65 regression test exercises the sequential backfill and
+checks exact reconstruction with factor degrees 1, 2, 10, 20, and 32. A Symbolica check with
+`--no-default-features --features integer-malachite,float-astro` also passes.
+
+### Final post-rebase publication guard
+
+The unpublished performance series was rebased onto `origin/dev` at `f9f7562`, which introduced
+the split `integer-gmp`/`integer-malachite` and `float-mpfr`/`float-astro` backend features. All
+locally added integer and finite-field conditionals use the new integer feature names. Default
+GMP/MPFR and no-default Malachite/Astro checks both pass. Post-rebase focused tests pass all three
+dense degree-63/64/65 factorization cases, all eight Kronecker tests, and all 47 solve-filtered
+tests that cover the rebase conflict resolution.
+
+A fresh full-LTO binary from the rebased source used default features, including `faster_alloc`,
+and FLINT 3.6.0. Six sequential pinned processes give:
+
+| Current-source guard | Samples per process | Pre-rebase row | Post-rebase S/F | Shift |
+|---|---:|---:|---:|---:|
+| PolyBench 5v uniform factorization #131 | 300 | `0.277201` | `0.279220` | `+0.73%` |
+| dense total-degree-64 factorization | 500 | `1.028278` | `1.031329` | `+0.30%` |
+| dense total-degree-64 product | 10,000 | `1.001645` | `1.017409` | `+1.57%` |
+
+These are guard-sized shifts rather than attributed regressions. The `v11` primary rows use the
+post-rebase values so the live scoreboard describes the exact published source. #131 remains
+3.58x faster than FLINT; degree-64 factorization and product remain within 3.2% and 1.7% of FLINT.
+
+The frozen binary is `/tmp/flint-comparison-final-rebased`, SHA-256
+`637386f8d4d58072ad23f49b6a1ff89254ec94ab6ab8b3914f3cff09a3ceadf2`. Its build JSON is
+`/tmp/flint-comparison-final-rebased-build.jsonl`, SHA-256
+`e51f60e214d92e3e371e7fc04ecba73a6f90e15969f29294f843675630fd0f53`. Raw files use the
+`/tmp/final-rebased-{pb131,factor-d64,product-d64}-{01..06}.csv` prefixes; their checksum manifest
+is `/tmp/final-rebased-guards-sha256.txt`, SHA-256
+`8193936446a2842f92e582404ae875c1a80cb47c13fe67c8c8c5c1e3a993fc96`.
 
 ## Benchmark infrastructure
 
@@ -2912,6 +3045,8 @@ Do not repeat these without a genuinely new mechanism:
 | Sparse multivariate resultant interpolation prototype | reconstruction/bound work overwhelmed sparsity | not used as the general practical method |
 | Unguarded quadratic Hensel lifting | high-height degree 33 improved to about 14 ms, but degree 63 regressed from about 16 ms to 34-37 ms and degree 64 to about 35 ms | superseded by the 64-digit and root-wide four-factor guard in `4a2b9c7` |
 | Exact integer convolution windows for Newton Hensel remainders | window microkernels often beat Symbolica's full fallback, but degree-64 factorization regressed from `1.290968` to `1.313523` S/F | reject the integration; the unused public window API and 48 diagnostic rows were removed |
+| Product-tree subset reconstruction at `17^10` | only the degree-2 factor reconstructed at 41 and 82 bits; the complete certificate remained at `17^39` | reject; failed exact divisions add work without shortening the lift |
+| Broad geometric factor-prime sampling | degree 64 improved to about `1.03` S/F, but degree 65 regressed to about `2.17` because a 12-factor `p=17` image displaced the 7-factor `p=13` image | superseded by the non-increasing-factor-count rule with sequential backfill |
 | Three bivariate images on every initial sample | dense three-variable factorization spent 87.5% of Symbolica cycles selecting samples; one certified initial image reduced its median 61.4% | superseded by the guarded initial shortcut in `f39c09b`; retain three images on bounded retries |
 | Compact fixed-width total-degree multiplication for dense-five degree 7 | `1.658863` S/F; rank-table work replaced the saved flat-array clearing cost | reject for this regime; use the accepted carry-free mixed-radix chunks in `ec6a131` |
 
@@ -2957,7 +3092,7 @@ comments that justify file organization by contrasting it with designs not prese
 
 ## Current ordered next actions
 
-1. Treat the configured degree-48 and degree-64 GCD cases as closed at `0.889777` and `0.853224`
+1. Treat the configured degree-48 and degree-64 GCD cases as closed at `0.889777` and `0.852433`
    S/F unless a smaller mechanism gives another decisive gain. Degree 80 remains `1.075107`; profile
    it before changing the reconstruction selector again because the remaining gap may be outside
    CRT image count.
@@ -2965,12 +3100,11 @@ comments that justify file organization by contrasting it with designs not prese
    degree-5 GCD product construction at `1.610087` S/F. The next two worst rows are also
    multiplication-heavy, so prefer a bounded product-layout improvement with guards over GCD-route
    heuristics.
-3. Dense degree-64 factorization remains `1.128065`. If returning to that family, test certified
-   subset recombination at the `17^10` Hensel stage: the exact degree-1, degree-2, degree-10, and
-   degree-20 factors may allow one degree-30 residual and skip lifts through exponents 20 and 39.
-4. The degree-64 integer product remains near `1.09` S/F. A future product pass should investigate
-   fixed-width contiguous Kronecker packing; the rejected one-scan generic multiplication context
-   and direct-limb conversion do not justify repetition.
+3. Treat dense degree-64 factorization as closed at `1.031329` S/F. The tested `17^10` subset
+   reconstruction does not shorten the lift; profile a different mechanism before revisiting it.
+4. Treat the degree-64 integer product as closed at `1.017409` S/F. The accepted fixed-width
+   contiguous packer covers this regime; do not repeat the rejected one-scan generic context or
+   direct-limb-only conversion.
 5. Preserve the constant-coordinate selector's strict-win rule and lazy leading fallback. Any
    broader projective-coordinate selection needs a proof that the selected coefficient is nonzero
    in every retained image and an exact-division certificate.

@@ -1,9 +1,9 @@
 mod implementation {
-    #[cfg(feature = "gmp")]
+    #[cfg(feature = "integer-gmp")]
     use gmp_mpfr_sys::gmp;
-    #[cfg(all(feature = "gmp", target_pointer_width = "64", not(windows)))]
+    #[cfg(all(feature = "integer-gmp", target_pointer_width = "64", not(windows)))]
     use rug::integer::IntegerExt64;
-    #[cfg(feature = "gmp")]
+    #[cfg(feature = "integer-gmp")]
     use std::cell::RefCell;
     use std::{
         fmt::{Debug, Display, Formatter, UpperHex},
@@ -28,12 +28,12 @@ mod implementation {
     #[cfg(feature = "integer-gmp")]
     pub type RawMultiPrecisionInteger = rug::Integer;
 
-    #[cfg(feature = "gmp")]
+    #[cfg(feature = "integer-gmp")]
     const LARGE_INTEGER_CACHE_SIZE: usize = 32;
-    #[cfg(feature = "gmp")]
+    #[cfg(feature = "integer-gmp")]
     const LARGE_INTEGER_CACHE_MAX_BITS: usize = 1 << 20;
 
-    #[cfg(feature = "gmp")]
+    #[cfg(feature = "integer-gmp")]
     thread_local! {
         /// A bounded cache of cleared arbitrary-precision integers. Keeping the backing limb
         /// allocation alive avoids repeatedly entering the allocator for short-lived results.
@@ -54,7 +54,7 @@ mod implementation {
     impl Clone for MultiPrecisionInteger {
         #[inline]
         fn clone(&self) -> Self {
-            #[cfg(feature = "gmp")]
+            #[cfg(feature = "integer-gmp")]
             {
                 use rug::Assign;
 
@@ -62,7 +62,7 @@ mod implementation {
                 result.0.assign(&self.0);
                 result
             }
-            #[cfg(feature = "no_gmp")]
+            #[cfg(feature = "integer-malachite")]
             {
                 Self(self.0.clone())
             }
@@ -72,7 +72,7 @@ mod implementation {
     impl Default for MultiPrecisionInteger {
         #[inline]
         fn default() -> Self {
-            #[cfg(feature = "gmp")]
+            #[cfg(feature = "integer-gmp")]
             {
                 let value = LARGE_INTEGER_CACHE
                     .try_with(|cache| cache.try_borrow_mut().ok()?.pop())
@@ -81,14 +81,14 @@ mod implementation {
                     .unwrap_or_default();
                 Self(value)
             }
-            #[cfg(feature = "no_gmp")]
+            #[cfg(feature = "integer-malachite")]
             {
                 Self(RawMultiPrecisionInteger::default())
             }
         }
     }
 
-    #[cfg(feature = "gmp")]
+    #[cfg(feature = "integer-gmp")]
     impl Drop for MultiPrecisionInteger {
         #[inline]
         fn drop(&mut self) {
@@ -223,19 +223,22 @@ mod implementation {
 
         #[inline]
         pub fn mod_u(&self, modulus: u32) -> u32 {
-            #[cfg(feature = "gmp")]
+            #[cfg(feature = "integer-gmp")]
             return self.0.mod_u(modulus);
-            #[cfg(feature = "no_gmp")]
+            #[cfg(feature = "integer-malachite")]
             return self.rem_euc(Self::from(modulus)).to_u64().unwrap() as u32;
         }
 
         #[inline]
         pub fn mod_u64(&self, modulus: u64) -> u64 {
-            #[cfg(all(feature = "gmp", target_pointer_width = "64", not(windows)))]
+            #[cfg(all(feature = "integer-gmp", target_pointer_width = "64", not(windows)))]
             return self.0.mod_u64(modulus);
             #[cfg(any(
-                feature = "no_gmp",
-                all(feature = "gmp", any(not(target_pointer_width = "64"), windows))
+                feature = "integer-malachite",
+                all(
+                    feature = "integer-gmp",
+                    any(not(target_pointer_width = "64"), windows)
+                )
             ))]
             return self.rem_euc(Self::from(modulus)).to_u64().unwrap();
         }
@@ -261,7 +264,7 @@ mod implementation {
         #[inline]
         pub(crate) fn rem_euc_owned_ref(self, rhs: &Self) -> Self {
             debug_assert!(!rhs.is_zero());
-            #[cfg(feature = "gmp")]
+            #[cfg(feature = "integer-gmp")]
             {
                 let mut remainder = self;
                 let negative_divisor = rhs.is_negative();
@@ -275,7 +278,7 @@ mod implementation {
                 }
                 return remainder;
             }
-            #[cfg(feature = "no_gmp")]
+            #[cfg(feature = "integer-malachite")]
             {
                 self.rem_euc(rhs.clone())
             }
@@ -283,14 +286,14 @@ mod implementation {
 
         #[inline]
         pub fn div_rem_euc<T: Into<Self>>(self, rhs: T) -> (Self, Self) {
-            #[cfg(feature = "gmp")]
+            #[cfg(feature = "integer-gmp")]
             {
                 let mut quotient = self.into_raw();
                 let mut remainder = rhs.into().into_raw();
                 quotient.div_rem_euc_mut(&mut remainder);
                 return (Self(quotient), Self(remainder));
             }
-            #[cfg(feature = "no_gmp")]
+            #[cfg(feature = "integer-malachite")]
             {
                 let rhs = rhs.into();
                 let r = self.rem_euc(rhs.clone());
@@ -301,7 +304,7 @@ mod implementation {
 
         #[inline]
         pub fn div_rem_ref(&self, rhs: &Self) -> (Self, Self) {
-            #[cfg(feature = "gmp")]
+            #[cfg(feature = "integer-gmp")]
             {
                 use rug::Assign;
 
@@ -310,7 +313,7 @@ mod implementation {
                 (&mut quotient.0, &mut remainder.0).assign(self.0.div_rem_ref(&rhs.0));
                 return (quotient, remainder);
             }
-            #[cfg(feature = "no_gmp")]
+            #[cfg(feature = "integer-malachite")]
             {
                 let q = self.0.clone() / rhs.0.clone();
                 let r = self.0.clone() - q.clone() * rhs.0.clone();
@@ -323,7 +326,7 @@ mod implementation {
         #[inline]
         pub fn div_rem_owned_ref_assign(mut self, rhs: &Self, remainder: &mut Self) -> Self {
             assert!(!rhs.is_zero(), "attempt to divide by zero");
-            #[cfg(feature = "gmp")]
+            #[cfg(feature = "integer-gmp")]
             {
                 let quotient = self.0.as_raw_mut();
                 unsafe {
@@ -335,7 +338,7 @@ mod implementation {
                     );
                 }
             }
-            #[cfg(feature = "no_gmp")]
+            #[cfg(feature = "integer-malachite")]
             {
                 let numerator = self.0;
                 let quotient = numerator.clone() / rhs.0.clone();
@@ -348,9 +351,9 @@ mod implementation {
         /// Divide in place when divisibility is guaranteed by the caller.
         #[inline]
         pub fn div_exact_owned(mut self, rhs: &Self) -> Self {
-            #[cfg(feature = "gmp")]
+            #[cfg(feature = "integer-gmp")]
             self.0.div_exact_mut(&rhs.0);
-            #[cfg(feature = "no_gmp")]
+            #[cfg(feature = "integer-malachite")]
             {
                 self /= rhs;
             }
@@ -450,11 +453,11 @@ mod implementation {
 
         #[inline(always)]
         pub fn add_i64_mul_assign(&mut self, b: i64, c: &Self) {
-            #[cfg(feature = "gmp")]
+            #[cfg(feature = "integer-gmp")]
             {
                 self.0 += &c.0 * b;
             }
-            #[cfg(feature = "no_gmp")]
+            #[cfg(feature = "integer-malachite")]
             {
                 self.0 += &c.0 * RawMultiPrecisionInteger::from(b);
             }
@@ -462,11 +465,11 @@ mod implementation {
 
         #[inline(always)]
         pub fn sub_i64_mul_assign(&mut self, b: i64, c: &Self) {
-            #[cfg(feature = "gmp")]
+            #[cfg(feature = "integer-gmp")]
             {
                 self.0 -= &c.0 * b;
             }
-            #[cfg(feature = "no_gmp")]
+            #[cfg(feature = "integer-malachite")]
             {
                 self.0 -= &c.0 * RawMultiPrecisionInteger::from(b);
             }
@@ -474,11 +477,11 @@ mod implementation {
 
         #[inline(always)]
         pub fn add_i128_mul_assign(&mut self, b: i128, c: &Self) {
-            #[cfg(feature = "gmp")]
+            #[cfg(feature = "integer-gmp")]
             {
                 self.0 += &c.0 * b;
             }
-            #[cfg(feature = "no_gmp")]
+            #[cfg(feature = "integer-malachite")]
             {
                 self.0 += &c.0 * RawMultiPrecisionInteger::from(b);
             }
@@ -486,11 +489,11 @@ mod implementation {
 
         #[inline(always)]
         pub fn sub_i128_mul_assign(&mut self, b: i128, c: &Self) {
-            #[cfg(feature = "gmp")]
+            #[cfg(feature = "integer-gmp")]
             {
                 self.0 -= &c.0 * b;
             }
-            #[cfg(feature = "no_gmp")]
+            #[cfg(feature = "integer-malachite")]
             {
                 self.0 -= &c.0 * RawMultiPrecisionInteger::from(b);
             }
@@ -530,13 +533,13 @@ mod implementation {
         }
 
         fn rem_trunc(lhs: RawMultiPrecisionInteger, rhs: RawMultiPrecisionInteger) -> Self {
-            #[cfg(feature = "gmp")]
+            #[cfg(feature = "integer-gmp")]
             {
                 let mut lhs = lhs;
                 lhs %= rhs;
                 return Self(lhs);
             }
-            #[cfg(feature = "no_gmp")]
+            #[cfg(feature = "integer-malachite")]
             {
                 let q = lhs.clone() / rhs.clone();
                 return Self(lhs - q * rhs);
@@ -594,7 +597,7 @@ mod implementation {
                 impl From<$t> for MultiPrecisionInteger {
                     #[inline]
                     fn from(value: $t) -> Self {
-                        #[cfg(feature = "gmp")]
+                        #[cfg(feature = "integer-gmp")]
                         {
                             use rug::Assign;
 
@@ -602,7 +605,7 @@ mod implementation {
                             result.0.assign(value);
                             result
                         }
-                        #[cfg(feature = "no_gmp")]
+                        #[cfg(feature = "integer-malachite")]
                         {
                             Self(RawMultiPrecisionInteger::from(value))
                         }
@@ -700,7 +703,7 @@ mod implementation {
 
                 #[inline]
                 fn $method(self, rhs: &'a MultiPrecisionInteger) -> Self::Output {
-                    #[cfg(feature = "gmp")]
+                    #[cfg(feature = "integer-gmp")]
                     {
                         use rug::Assign;
 
@@ -708,7 +711,7 @@ mod implementation {
                         result.0.assign((&self.0).$method(&rhs.0));
                         result
                     }
-                    #[cfg(feature = "no_gmp")]
+                    #[cfg(feature = "integer-malachite")]
                     {
                         MultiPrecisionInteger(RawMultiPrecisionInteger::from(
                             (&self.0).$method(&rhs.0),
@@ -746,11 +749,11 @@ mod implementation {
 
                     #[inline]
                     fn add(self, rhs: $t) -> Self::Output {
-                        #[cfg(feature = "gmp")]
+                        #[cfg(feature = "integer-gmp")]
                         {
                             Self(self.into_raw() + rhs)
                         }
-                        #[cfg(feature = "no_gmp")]
+                        #[cfg(feature = "integer-malachite")]
                         {
                             self + Self::from(rhs)
                         }
@@ -771,11 +774,11 @@ mod implementation {
 
                     #[inline]
                     fn sub(self, rhs: $t) -> Self::Output {
-                        #[cfg(feature = "gmp")]
+                        #[cfg(feature = "integer-gmp")]
                         {
                             Self(self.into_raw() - rhs)
                         }
-                        #[cfg(feature = "no_gmp")]
+                        #[cfg(feature = "integer-malachite")]
                         {
                             self - Self::from(rhs)
                         }
@@ -796,11 +799,11 @@ mod implementation {
 
                     #[inline]
                     fn mul(self, rhs: $t) -> Self::Output {
-                        #[cfg(feature = "gmp")]
+                        #[cfg(feature = "integer-gmp")]
                         {
                             Self(self.into_raw() * rhs)
                         }
-                        #[cfg(feature = "no_gmp")]
+                        #[cfg(feature = "integer-malachite")]
                         {
                             self * Self::from(rhs)
                         }
@@ -821,11 +824,11 @@ mod implementation {
 
                     #[inline]
                     fn div(self, rhs: $t) -> Self::Output {
-                        #[cfg(feature = "gmp")]
+                        #[cfg(feature = "integer-gmp")]
                         {
                             Self(self.into_raw() / rhs)
                         }
-                        #[cfg(feature = "no_gmp")]
+                        #[cfg(feature = "integer-malachite")]
                         {
                             self / Self::from(rhs)
                         }
@@ -862,9 +865,9 @@ mod implementation {
                 impl AddAssign<$t> for MultiPrecisionInteger {
                     #[inline]
                     fn add_assign(&mut self, rhs: $t) {
-                        #[cfg(feature = "gmp")]
+                        #[cfg(feature = "integer-gmp")]
                         self.0.add_assign(rhs);
-                        #[cfg(feature = "no_gmp")]
+                        #[cfg(feature = "integer-malachite")]
                         self.0.add_assign(RawMultiPrecisionInteger::from(rhs));
                     }
                 }
@@ -872,9 +875,9 @@ mod implementation {
                 impl SubAssign<$t> for MultiPrecisionInteger {
                     #[inline]
                     fn sub_assign(&mut self, rhs: $t) {
-                        #[cfg(feature = "gmp")]
+                        #[cfg(feature = "integer-gmp")]
                         self.0.sub_assign(rhs);
-                        #[cfg(feature = "no_gmp")]
+                        #[cfg(feature = "integer-malachite")]
                         self.0.sub_assign(RawMultiPrecisionInteger::from(rhs));
                     }
                 }
@@ -882,9 +885,9 @@ mod implementation {
                 impl MulAssign<$t> for MultiPrecisionInteger {
                     #[inline]
                     fn mul_assign(&mut self, rhs: $t) {
-                        #[cfg(feature = "gmp")]
+                        #[cfg(feature = "integer-gmp")]
                         self.0.mul_assign(rhs);
-                        #[cfg(feature = "no_gmp")]
+                        #[cfg(feature = "integer-malachite")]
                         self.0.mul_assign(RawMultiPrecisionInteger::from(rhs));
                     }
                 }
@@ -892,9 +895,9 @@ mod implementation {
                 impl DivAssign<$t> for MultiPrecisionInteger {
                     #[inline]
                     fn div_assign(&mut self, rhs: $t) {
-                        #[cfg(feature = "gmp")]
+                        #[cfg(feature = "integer-gmp")]
                         self.0.div_assign(rhs);
-                        #[cfg(feature = "no_gmp")]
+                        #[cfg(feature = "integer-malachite")]
                         self.0.div_assign(RawMultiPrecisionInteger::from(rhs));
                     }
                 }
@@ -902,9 +905,9 @@ mod implementation {
                 impl BitAndAssign<$t> for MultiPrecisionInteger {
                     #[inline]
                     fn bitand_assign(&mut self, rhs: $t) {
-                        #[cfg(feature = "gmp")]
+                        #[cfg(feature = "integer-gmp")]
                         self.0.bitand_assign(rhs);
-                        #[cfg(feature = "no_gmp")]
+                        #[cfg(feature = "integer-malachite")]
                         self.0
                             .bitand_assign(RawMultiPrecisionInteger::from(rhs));
                     }
@@ -1192,13 +1195,13 @@ mod implementation {
 
         #[inline]
         fn rem(self, rhs: &'a MultiPrecisionInteger) -> Self::Output {
-            #[cfg(feature = "gmp")]
+            #[cfg(feature = "integer-gmp")]
             {
                 let mut remainder = self;
                 remainder %= rhs;
                 return remainder;
             }
-            #[cfg(feature = "no_gmp")]
+            #[cfg(feature = "integer-malachite")]
             {
                 Self::rem_trunc(self.into_raw(), rhs.0.clone())
             }
@@ -1208,11 +1211,11 @@ mod implementation {
     impl RemAssign for MultiPrecisionInteger {
         #[inline]
         fn rem_assign(&mut self, rhs: Self) {
-            #[cfg(feature = "gmp")]
+            #[cfg(feature = "integer-gmp")]
             {
                 self.0 %= rhs.into_raw();
             }
-            #[cfg(feature = "no_gmp")]
+            #[cfg(feature = "integer-malachite")]
             {
                 *self = self.clone() % rhs;
             }
@@ -1222,11 +1225,11 @@ mod implementation {
     impl<'a> RemAssign<&'a MultiPrecisionInteger> for MultiPrecisionInteger {
         #[inline]
         fn rem_assign(&mut self, rhs: &'a MultiPrecisionInteger) {
-            #[cfg(feature = "gmp")]
+            #[cfg(feature = "integer-gmp")]
             {
                 self.0 %= &rhs.0;
             }
-            #[cfg(feature = "no_gmp")]
+            #[cfg(feature = "integer-malachite")]
             {
                 *self = self.clone() % rhs;
             }
@@ -1531,7 +1534,7 @@ mod implementation {
             MultiPrecisionInteger::from(1).mod_u64(0);
         }
 
-        #[cfg(feature = "gmp")]
+        #[cfg(feature = "integer-gmp")]
         #[test]
         fn large_integer_cache_is_bounded_and_reused() {
             LARGE_INTEGER_CACHE.with(|cache| cache.borrow_mut().clear());

@@ -1432,6 +1432,9 @@ std::thread_local! {
     static PRODUCT_TREE_EARLY_RECONSTRUCTION_EXPONENT: std::cell::Cell<usize> = const {
         std::cell::Cell::new(0)
     };
+    static GEOMETRIC_SMALL_PRIME_BACKFILLS: std::cell::Cell<usize> = const {
+        std::cell::Cell::new(0)
+    };
     static MODULAR_INTEGER_EDF_CALLS: std::cell::Cell<usize> = const {
         std::cell::Cell::new(0)
     };
@@ -8323,8 +8326,19 @@ impl<E: PositiveExponent> MultivariatePolynomial<IntegerRing, E, LexOrder> {
             Self::has_high_linear_hensel_pressure(d, &bound, initial_factor_count, initial_digits);
 
         if high_linear_lift_pressure {
-            // Compare three suitable small primes before considering the large
-            // candidate, since their modular factor counts can differ sharply.
+            // High-degree product-tree lifts compare the first suitable image with a prime at
+            // least one bit wider. Intervening primes provide nearly the same p-adic precision per
+            // digit while requiring another complete distinct-degree factorization. If the wider
+            // image does not improve the estimated lift work, the skipped range is still searched.
+            let geometric_small_prime_trial = d >= 48 && initial_factor_count > 4;
+            let first_small_prime = best_factorization.as_ref().unwrap().field.get_prime();
+            if geometric_small_prime_trial {
+                pi = PrimeIteratorU64::new(
+                    u64::from(first_small_prime)
+                        .saturating_mul(2)
+                        .saturating_add(1),
+                );
+            }
             while suitable_primes < 3 {
                 let p = pi.next().unwrap();
                 if p > u32::MAX as u64 {
@@ -8333,8 +8347,8 @@ impl<E: PositiveExponent> MultivariatePolynomial<IntegerRing, E, LexOrder> {
                 let candidate_digits = Self::linear_hensel_modulus(&bound, p as u32).0;
                 let best = best_factorization.as_ref().unwrap();
                 let best_digits = Self::linear_hensel_modulus(&bound, best.field.get_prime()).0;
-                let best_work =
-                    Self::linear_hensel_work(best.distinct_degree.factor_count, best_digits);
+                let best_factor_count = best.distinct_degree.factor_count;
+                let best_work = Self::linear_hensel_work(best_factor_count, best_digits);
                 let max_factor_count =
                     (best_work.saturating_sub(1) / candidate_digits).saturating_add(1);
                 let Some(screen) =
@@ -8343,21 +8357,33 @@ impl<E: PositiveExponent> MultivariatePolynomial<IntegerRing, E, LexOrder> {
                     continue;
                 };
                 suitable_primes += 1;
-                let candidate = match screen {
-                    ModularPrimeScreen::Candidate(candidate) => candidate,
-                    ModularPrimeScreen::FactorLimitExceeded { .. } => continue,
-                };
+                if let ModularPrimeScreen::Candidate(candidate) = screen {
+                    if candidate.distinct_degree.factor_count == 1 {
+                        return vec![self.clone()];
+                    }
 
-                if candidate.distinct_degree.factor_count == 1 {
-                    return vec![self.clone()];
+                    let candidate_work = Self::linear_hensel_work(
+                        candidate.distinct_degree.factor_count,
+                        candidate_digits,
+                    );
+                    let geometric_probe = geometric_small_prime_trial && suitable_primes == 2;
+                    let factor_count_did_not_increase =
+                        candidate.distinct_degree.factor_count <= best_factor_count;
+                    if candidate_work < best_work
+                        && (!geometric_probe || factor_count_did_not_increase)
+                    {
+                        best_factorization = Some(candidate);
+                    }
                 }
 
-                let candidate_work = Self::linear_hensel_work(
-                    candidate.distinct_degree.factor_count,
-                    candidate_digits,
-                );
-                if candidate_work < best_work {
-                    best_factorization = Some(candidate);
+                if geometric_small_prime_trial && suitable_primes == 2 {
+                    if best_factorization.as_ref().unwrap().field.get_prime() != first_small_prime {
+                        break;
+                    }
+                    #[cfg(test)]
+                    GEOMETRIC_SMALL_PRIME_BACKFILLS
+                        .with(|backfills| backfills.set(backfills.get() + 1));
+                    pi = PrimeIteratorU64::new(u64::from(first_small_prime).saturating_add(1));
                 }
             }
 
@@ -10759,19 +10785,19 @@ mod test {
         DenseBivariateImage, DenseIntegerModularUnivariateContext, DenseTwoFactorCorrectionContext,
         DenseZpAccumulationMode, DenseZpDistinctDegreeContext, DenseZpEqualDegreeContext,
         DenseZpMulModWorkspace, EXACT_HENSEL_SUBTREE_MODULUS_BITS, EXACT_HENSEL_SUBTREE_SPLITS,
-        ExactPolynomialSquareRoot, INTEGER_FACTOR_BIVARIATE_WANG_MIN_BOX_DENSITY,
-        IntegerModularUnivariateContext, LAST_BIVARIATE_RECONSTRUCTION_PRIME,
-        LAST_BOUNDED_DDF_REJECTION_DEGREE, LAST_MODULAR_INTEGER_EDF_PRIME,
-        LLL_RECOMBINATION_SUCCESSES, LOCAL_HENSEL_RECOMBINATION_NODES,
-        MIN_EARLY_QUADRATIC_FACTOR_TERMS, MODULAR_INTEGER_EDF_CALLS, ModularPrimeScreen,
-        PRODUCT_TREE_EARLY_RECONSTRUCTION_ATTEMPTS, PRODUCT_TREE_EARLY_RECONSTRUCTION_EXPONENT,
-        PRODUCT_TREE_EARLY_RECONSTRUCTION_SUCCESSES, PRODUCT_TREE_HENSEL_LIFT_CALLS,
-        PackedSparsePolynomialSquareContext, QUADRATIC_HENSEL_LIFT_CALLS,
-        QUADRATIC_HENSEL_NONUNIT_RETRIES, QuadraticFactorization, SparseDiophantineContext,
-        SparsePolynomialSquareRootContext, UnivariateHenselProductTreeBuildContext,
-        UnivariateHenselProductTreeLiftResult, UnivariateHenselProductTreeLink,
-        UnivariateHenselProductTreeNode, balance_three_factor_hensel_root,
-        integer_factor_bivariate_wang_density_supported,
+        ExactPolynomialSquareRoot, GEOMETRIC_SMALL_PRIME_BACKFILLS,
+        INTEGER_FACTOR_BIVARIATE_WANG_MIN_BOX_DENSITY, IntegerModularUnivariateContext,
+        LAST_BIVARIATE_RECONSTRUCTION_PRIME, LAST_BOUNDED_DDF_REJECTION_DEGREE,
+        LAST_MODULAR_INTEGER_EDF_PRIME, LLL_RECOMBINATION_SUCCESSES,
+        LOCAL_HENSEL_RECOMBINATION_NODES, MIN_EARLY_QUADRATIC_FACTOR_TERMS,
+        MODULAR_INTEGER_EDF_CALLS, ModularPrimeScreen, PRODUCT_TREE_EARLY_RECONSTRUCTION_ATTEMPTS,
+        PRODUCT_TREE_EARLY_RECONSTRUCTION_EXPONENT, PRODUCT_TREE_EARLY_RECONSTRUCTION_SUCCESSES,
+        PRODUCT_TREE_HENSEL_LIFT_CALLS, PackedSparsePolynomialSquareContext,
+        QUADRATIC_HENSEL_LIFT_CALLS, QUADRATIC_HENSEL_NONUNIT_RETRIES, QuadraticFactorization,
+        SparseDiophantineContext, SparsePolynomialSquareRootContext,
+        UnivariateHenselProductTreeBuildContext, UnivariateHenselProductTreeLiftResult,
+        UnivariateHenselProductTreeLink, UnivariateHenselProductTreeNode,
+        balance_three_factor_hensel_root, integer_factor_bivariate_wang_density_supported,
         reorder_integer_factor_variables_for_sparse_univariate,
         univariate_hensel_precision_schedule,
     };
@@ -12555,6 +12581,7 @@ mod test {
         PRODUCT_TREE_EARLY_RECONSTRUCTION_ATTEMPTS.with(|attempts| attempts.set(0));
         PRODUCT_TREE_EARLY_RECONSTRUCTION_SUCCESSES.with(|successes| successes.set(0));
         PRODUCT_TREE_EARLY_RECONSTRUCTION_EXPONENT.with(|exponent| exponent.set(0));
+        GEOMETRIC_SMALL_PRIME_BACKFILLS.with(|backfills| backfills.set(0));
         let polynomial = parse!("((1+3*x)^33-1)*((1-5*x)^31+1)")
             .expand()
             .to_polynomial::<_, u8>(&Z, None);
@@ -12600,6 +12627,34 @@ mod test {
         PRODUCT_TREE_EARLY_RECONSTRUCTION_SUCCESSES
             .with(|successes| assert_eq!(successes.get(), 1));
         PRODUCT_TREE_EARLY_RECONSTRUCTION_EXPONENT.with(|exponent| assert_eq!(exponent.get(), 39));
+        GEOMETRIC_SMALL_PRIME_BACKFILLS.with(|backfills| assert_eq!(backfills.get(), 0));
+    }
+
+    #[test]
+    fn factor_univariate_degree_65_backfills_geometric_prime_gap() {
+        GEOMETRIC_SMALL_PRIME_BACKFILLS.with(|backfills| backfills.set(0));
+        let polynomial = parse!("((1+3*x)^33-1)*((1-5*x)^32+1)")
+            .expand()
+            .to_polynomial::<_, u8>(&Z, None);
+
+        let factors = polynomial.factor();
+        let reconstructed = factors
+            .iter()
+            .fold(polynomial.one(), |product, (factor, power)| {
+                &product * &factor.pow(*power)
+            });
+        assert_eq!(reconstructed, polynomial);
+        let mut degrees = factors
+            .iter()
+            .filter(|(factor, _)| !factor.is_constant())
+            .map(|(factor, power)| {
+                assert_eq!(*power, 1);
+                factor.degree(0)
+            })
+            .collect::<Vec<_>>();
+        degrees.sort_unstable();
+        assert_eq!(degrees, [1u8, 2, 10, 20, 32]);
+        GEOMETRIC_SMALL_PRIME_BACKFILLS.with(|backfills| assert!(backfills.get() > 0));
     }
 
     #[test]

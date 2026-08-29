@@ -9,19 +9,19 @@
 //! hold and that the context should try another strategy or the generic polynomial implementation.
 
 use super::{Integer, IntegerRing};
-#[cfg(feature = "gmp")]
+#[cfg(feature = "integer-gmp")]
 use super::{MultiPrecisionInteger, RawMultiPrecisionInteger};
-#[cfg(feature = "gmp")]
+#[cfg(feature = "integer-gmp")]
 use crate::domains::polynomial_layouts::try_simplex_kronecker_layout;
 use crate::kernels::{
     ChunkedDensePolynomialMulRequest, DensePolynomialExactDivisionRequest,
     DensePolynomialMulRequest, PolynomialKernels, TotalDegreePolynomialMulRequest,
 };
-#[cfg(feature = "gmp")]
+#[cfg(feature = "integer-gmp")]
 use gmp_mpfr_sys::gmp;
-#[cfg(feature = "gmp")]
+#[cfg(feature = "integer-gmp")]
 use rug::integer::Order as RugIntegerOrder;
-#[cfg(feature = "gmp")]
+#[cfg(feature = "integer-gmp")]
 use smallvec::SmallVec;
 
 /// One dense-indexed integer multiplication operation.
@@ -79,14 +79,14 @@ impl<'a> DenseIntegerMul<'a> {
             return Some(output);
         }
 
-        #[cfg(feature = "gmp")]
+        #[cfg(feature = "integer-gmp")]
         {
             if let Some(output) = self.try_kronecker() {
                 return Some(output);
             }
             self.try_large_array()
         }
-        #[cfg(feature = "no_gmp")]
+        #[cfg(feature = "integer-malachite")]
         {
             None
         }
@@ -320,7 +320,7 @@ impl<'a> DenseIntegerMul<'a> {
         )
     }
 
-    #[cfg(feature = "gmp")]
+    #[cfg(feature = "integer-gmp")]
     /// Multiply a dense-indexed convolution by Kronecker substitution.
     ///
     /// Each coefficient is encoded as a sufficiently wide signed radix digit, the two complete
@@ -381,6 +381,26 @@ impl<'a> DenseIntegerMul<'a> {
         if product_count < 64 || !(high_collision_density || large_contiguous_support) {
             return None;
         }
+
+        let normalize_contiguous_indices = simplex_layout.is_none()
+            && consecutive_support(packed_left_indices)
+            && consecutive_support(packed_right_indices);
+        let left_index_offset = if normalize_contiguous_indices {
+            *packed_left_indices.first()?
+        } else {
+            0
+        };
+        let right_index_offset = if normalize_contiguous_indices {
+            *packed_right_indices.first()?
+        } else {
+            0
+        };
+        let output_index_offset = left_index_offset.checked_add(right_index_offset)?;
+        let decoded_output_len = if normalize_contiguous_indices {
+            active_output_span
+        } else {
+            packed_output_len
+        };
 
         fn absolute_statistics(
             coefficients: &[Integer],
@@ -463,10 +483,20 @@ impl<'a> DenseIntegerMul<'a> {
         );
 
         const MAX_PACKED_BITS: usize = 1 << 29;
-        let left_packed_bits = (packed_left_indices.iter().copied().max()? as usize + 1)
-            .checked_mul(digit_bits_usize)?;
-        let right_packed_bits = (packed_right_indices.iter().copied().max()? as usize + 1)
-            .checked_mul(digit_bits_usize)?;
+        let left_packed_bits = (packed_left_indices
+            .iter()
+            .copied()
+            .max()?
+            .checked_sub(left_index_offset)? as usize
+            + 1)
+        .checked_mul(digit_bits_usize)?;
+        let right_packed_bits = (packed_right_indices
+            .iter()
+            .copied()
+            .max()?
+            .checked_sub(right_index_offset)? as usize
+            + 1)
+        .checked_mul(digit_bits_usize)?;
         if left_packed_bits > MAX_PACKED_BITS || right_packed_bits > MAX_PACKED_BITS {
             return None;
         }
@@ -474,6 +504,7 @@ impl<'a> DenseIntegerMul<'a> {
         fn pack(
             coefficients: &[Integer],
             indices: &[u32],
+            index_offset: u32,
             digit_bits: usize,
         ) -> Option<MultiPrecisionInteger> {
             debug_assert_eq!(coefficients.len(), indices.len());
@@ -557,6 +588,84 @@ impl<'a> DenseIntegerMul<'a> {
                 negative
             }
 
+            /// Pack consecutive single- and double-width coefficients with a fixed stack digit.
+            ///
+            /// This path is used by dense univariate products whose signed radix digit occupies at
+            /// most three limbs. The general packer below handles sparse supports and GMP-backed
+            /// coefficients.
+            #[inline]
+            fn pack_contiguous_fixed<const LIMBS: usize>(
+                coefficients: &[Integer],
+                indices: &[u32],
+                index_offset: u32,
+                digit_bits: usize,
+            ) -> Option<MultiPrecisionInteger> {
+                if coefficients.len() != indices.len()
+                    || coefficients.is_empty()
+                    || digit_bits.div_ceil(64) != LIMBS
+                    || !indices
+                        .windows(2)
+                        .all(|pair| pair[0].checked_add(1) == Some(pair[1]))
+                {
+                    return None;
+                }
+
+                let fixed_coefficient = |coefficient: &Integer| match coefficient {
+                    Integer::Single(value) => Some(i128::from(*value)),
+                    Integer::Double(value) => Some(value.get()),
+                    Integer::Large(_) => None,
+                };
+                let leading_negative = fixed_coefficient(coefficients.last()?)? < 0;
+                let digit_count = indices.last()?.checked_sub(index_offset)? as usize + 1;
+                let packed_bits = digit_count.checked_mul(digit_bits)?;
+                let mut packed_limbs = vec![0u64; packed_bits.checked_add(63)? / 64];
+                let mut borrow = false;
+
+                for (coefficient, &index) in coefficients.iter().zip(indices) {
+                    let mut digit = [0u64; LIMBS];
+                    let borrow_in = borrow;
+                    borrow = encode_primitive_digit(
+                        &mut digit,
+                        fixed_coefficient(coefficient)?,
+                        leading_negative,
+                        borrow_in,
+                    );
+                    if borrow {
+                        let mut carry = true;
+                        for limb in &mut digit {
+                            let (value, overflow) = (!*limb).overflowing_add(u64::from(carry));
+                            *limb = value;
+                            carry = overflow;
+                        }
+                        debug_assert!(!carry);
+                    }
+                    if digit_bits % 64 != 0 {
+                        *digit.last_mut()? &= low_mask(digit_bits % 64);
+                    }
+                    let local_index = index.checked_sub(index_offset)? as usize;
+                    write_digit(&mut packed_limbs, local_index * digit_bits, &digit);
+                }
+                debug_assert!(!borrow);
+
+                let mut packed = MultiPrecisionInteger::from_raw(
+                    RawMultiPrecisionInteger::from_digits(&packed_limbs, RugIntegerOrder::Lsf),
+                );
+                if leading_negative {
+                    packed = -packed;
+                }
+                Some(packed)
+            }
+
+            let fixed_contiguous = match digit_bits.div_ceil(64) {
+                1 => pack_contiguous_fixed::<1>(coefficients, indices, index_offset, digit_bits),
+                2 => pack_contiguous_fixed::<2>(coefficients, indices, index_offset, digit_bits),
+                3 => pack_contiguous_fixed::<3>(coefficients, indices, index_offset, digit_bits),
+                _ => None,
+            };
+            if fixed_contiguous.is_some() {
+                return fixed_contiguous;
+            }
+
             let mut reordered = None;
             if !indices.windows(2).all(|indices| indices[0] < indices[1]) {
                 let mut order = (0..indices.len()).collect::<Vec<_>>();
@@ -570,7 +679,8 @@ impl<'a> DenseIntegerMul<'a> {
             };
 
             let leading_negative = coefficients[term_index(coefficients.len() - 1)].is_negative();
-            let digit_count = indices[term_index(indices.len() - 1)] as usize + 1;
+            let digit_count =
+                indices[term_index(indices.len() - 1)].checked_sub(index_offset)? as usize + 1;
             let packed_bits = digit_count.checked_mul(digit_bits)?;
             let mut limbs = vec![0u64; packed_bits.checked_add(63)? / 64];
             let mut next_index = 0usize;
@@ -581,7 +691,8 @@ impl<'a> DenseIntegerMul<'a> {
             for position in 0..coefficients.len() {
                 let term = term_index(position);
                 let coefficient = unsafe { coefficients.get_unchecked(term) };
-                let index = unsafe { *indices.get_unchecked(term) } as usize;
+                let index =
+                    unsafe { *indices.get_unchecked(term) }.checked_sub(index_offset)? as usize;
                 debug_assert!(index >= next_index);
                 if borrow {
                     fill_ones(&mut limbs, next_index * digit_bits, index * digit_bits);
@@ -728,8 +839,18 @@ impl<'a> DenseIntegerMul<'a> {
             Some((value, carry_out))
         }
 
-        let left = pack(left_coefficients, packed_left_indices, digit_bits_usize)?;
-        let right = pack(right_coefficients, packed_right_indices, digit_bits_usize)?;
+        let left = pack(
+            left_coefficients,
+            packed_left_indices,
+            left_index_offset,
+            digit_bits_usize,
+        )?;
+        let right = pack(
+            right_coefficients,
+            packed_right_indices,
+            right_index_offset,
+            digit_bits_usize,
+        )?;
         let product = MultiPrecisionInteger::from_raw(RawMultiPrecisionInteger::from(
             left.as_raw() * right.as_raw(),
         ));
@@ -739,7 +860,7 @@ impl<'a> DenseIntegerMul<'a> {
         let limbs_per_digit = digit_bits_usize.div_ceil(64);
         let mut carry = false;
         let mut radix = None;
-        let mut output = Vec::with_capacity(packed_output_len);
+        let mut output = Vec::with_capacity(decoded_output_len);
         let mut digit_limbs = SmallVec::<[u64; 4]>::new();
         digit_limbs.resize(limbs_per_digit, 0);
         let output_index = |index: usize| {
@@ -748,10 +869,10 @@ impl<'a> DenseIntegerMul<'a> {
                 debug_assert_ne!(decoded, u32::MAX);
                 Some(decoded)
             } else {
-                Some(index as u32)
+                u32::try_from(index).ok()?.checked_add(output_index_offset)
             }
         };
-        for index in 0..packed_output_len {
+        for index in 0..decoded_output_len {
             let bit_index = index.checked_mul(digit_bits_usize)?;
             let limb_index = bit_index / 64;
             let shift = bit_index % 64;
@@ -812,7 +933,7 @@ impl<'a> DenseIntegerMul<'a> {
         Some(output)
     }
 
-    #[cfg(feature = "gmp")]
+    #[cfg(feature = "integer-gmp")]
     /// Multiply into a dense array of reusable GMP integer accumulators.
     ///
     /// This strategy requires at least one [`Integer::Large`] input coefficient. It dispatches
@@ -920,7 +1041,7 @@ impl<'a> DenseIntegerMul<'a> {
     }
 
     /// Run only the Kronecker strategy so its packing and decoding can be tested in isolation.
-    #[cfg(all(feature = "gmp", test))]
+    #[cfg(all(feature = "integer-gmp", test))]
     pub(super) fn try_kronecker_for_test(
         output_len: usize,
         left_coefficients: &'a [Integer],
@@ -1127,11 +1248,11 @@ impl<'a> TotalDegreeIntegerMul<'a> {
 
     /// Run the specialized total-degree strategy when GMP limb operations are available.
     fn run(self) -> Option<Vec<(u32, Integer)>> {
-        #[cfg(feature = "gmp")]
+        #[cfg(feature = "integer-gmp")]
         {
             self.try_limb()
         }
-        #[cfg(feature = "no_gmp")]
+        #[cfg(feature = "integer-malachite")]
         {
             let Self { request } = self;
             let _ = request;
@@ -1139,7 +1260,7 @@ impl<'a> TotalDegreeIntegerMul<'a> {
         }
     }
 
-    #[cfg(feature = "gmp")]
+    #[cfg(feature = "integer-gmp")]
     /// Multiply with fixed-width limb accumulators.
     ///
     /// Input coefficients are flattened once into sign-and-magnitude GMP limbs. The supplied
@@ -1469,11 +1590,11 @@ impl<'a> DenseIntegerExactDivision<'a> {
 
     /// Run the dense GMP-workspace strategy when it is applicable.
     fn run(self) -> Option<Vec<(u32, Integer)>> {
-        #[cfg(feature = "gmp")]
+        #[cfg(feature = "integer-gmp")]
         {
             self.try_large_array()
         }
-        #[cfg(feature = "no_gmp")]
+        #[cfg(feature = "integer-malachite")]
         {
             let Self {
                 total,
@@ -1493,7 +1614,7 @@ impl<'a> DenseIntegerExactDivision<'a> {
         }
     }
 
-    #[cfg(feature = "gmp")]
+    #[cfg(feature = "integer-gmp")]
     /// Exactly divide in a dense array of GMP accumulators.
     ///
     /// The dividend is expanded into dense multiprecision storage and processed from its leading

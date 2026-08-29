@@ -4289,7 +4289,7 @@ mod test {
         assert_eq!(dividend, before);
     }
 
-    #[cfg(feature = "gmp")]
+    #[cfg(feature = "integer-gmp")]
     #[test]
     fn simplex_kronecker_layout_is_additive() {
         let left_degree = 4usize;
@@ -4331,7 +4331,7 @@ mod test {
         assert!(layout.output_len < radix.pow(3));
     }
 
-    #[cfg(feature = "gmp")]
+    #[cfg(feature = "integer-gmp")]
     #[test]
     fn simplex_kronecker_polynomial_multiplication() {
         let left_degree = 24usize;
@@ -4395,7 +4395,7 @@ mod test {
         );
     }
 
-    #[cfg(feature = "gmp")]
+    #[cfg(feature = "integer-gmp")]
     #[test]
     fn factor_fixture_kronecker_polynomial_multiplication() {
         fn linear_power_coefficients(power: u32, scale: i128) -> Vec<Integer> {
@@ -4445,7 +4445,7 @@ mod test {
         assert_eq!(actual, expected);
     }
 
-    #[cfg(feature = "gmp")]
+    #[cfg(feature = "integer-gmp")]
     #[test]
     fn contiguous_kronecker_selector_accepts_31_terms() {
         let make_coefficients = |length: usize, offset: i128| {
@@ -4495,7 +4495,7 @@ mod test {
         );
     }
 
-    #[cfg(feature = "gmp")]
+    #[cfg(feature = "integer-gmp")]
     #[test]
     fn primitive_kronecker_packing_matches_direct_convolution_at_boundaries() {
         let magnitude = 1i128 << 100;
@@ -4537,7 +4537,7 @@ mod test {
         assert_eq!(actual, expected);
     }
 
-    #[cfg(feature = "gmp")]
+    #[cfg(feature = "integer-gmp")]
     #[test]
     fn kronecker_native_decode_handles_radix_limb_boundaries() {
         let indices = (0..32).collect::<Vec<u32>>();
@@ -4598,7 +4598,7 @@ mod test {
         assert_eq!(actual[0], Integer::from_double(i128::MIN));
     }
 
-    #[cfg(feature = "gmp")]
+    #[cfg(feature = "integer-gmp")]
     #[test]
     fn contiguous_kronecker_selector_rejects_sparse_or_shifted_support() {
         let scale = Integer::from(1) << 180u32;
@@ -4631,7 +4631,7 @@ mod test {
         );
     }
 
-    #[cfg(feature = "gmp")]
+    #[cfg(feature = "integer-gmp")]
     #[test]
     fn dense_kronecker_polynomial_multiplication() {
         let scale = Integer::from(1) << 180u32;
@@ -4692,7 +4692,7 @@ mod test {
         assert_eq!(actual, expected);
     }
 
-    #[cfg(feature = "gmp")]
+    #[cfg(feature = "integer-gmp")]
     #[test]
     fn dense_large_array_polynomial_multiplication() {
         let scale = Integer::from(1) << 180u32;

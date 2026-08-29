@@ -3872,7 +3872,7 @@ mod test {
         assert_eq!(actual, expected);
     }
 
-    #[cfg(feature = "gmp")]
+    #[cfg(feature = "integer-gmp")]
     fn assert_ks2_zp_polynomial_mul(
         field: &Zp,
         left: &[super::FiniteFieldElement<u32>],
@@ -3912,7 +3912,7 @@ mod test {
         assert_eq!(actual, expected);
     }
 
-    #[cfg(feature = "gmp")]
+    #[cfg(feature = "integer-gmp")]
     fn assert_ks4_polynomial_mul(
         field: &Zp64,
         left: &[super::FiniteFieldElement<u64>],
@@ -3952,7 +3952,7 @@ mod test {
         assert_eq!(actual, expected);
     }
 
-    #[cfg(feature = "gmp")]
+    #[cfg(feature = "integer-gmp")]
     fn assert_ks2_zp64_polynomial_mul(
         field: &Zp64,
         left: &[super::FiniteFieldElement<u64>],
@@ -4073,7 +4073,7 @@ mod test {
         );
         assert_dense_polynomial_mul(&field, &left, &[0, 2, 5, 7], &right, &[0, 1, 4, 7], 15);
         assert_dense_polynomial_mul(&field, &left, &[0, 2, 5, 7], &right, &[0, 1, 4, 7], 100);
-        #[cfg(feature = "gmp")]
+        #[cfg(feature = "integer-gmp")]
         {
             assert_ks2_zp_polynomial_mul(&field, &left, &[0, 2, 5, 7], &right, &[0, 1, 4, 7]);
             assert_ks2_zp_polynomial_mul(&field, &left, &[0, 7, 2, 5], &right, &[7, 1, 4, 0]);
@@ -4125,7 +4125,7 @@ mod test {
         .unwrap();
         assert_eq!(operation.u64_accumulation_mode(), None);
         assert_dense_polynomial_mul(&field, &left, &[0, 2, 5, 7], &right, &[0, 1, 4, 7], 15);
-        #[cfg(feature = "gmp")]
+        #[cfg(feature = "integer-gmp")]
         assert_ks2_zp_polynomial_mul(&field, &left, &[0, 2, 5, 7], &right, &[0, 1, 4, 7]);
 
         for (prime, expected_mode) in [
@@ -4195,7 +4195,7 @@ mod test {
         .map(|value| field.to_element(value));
         assert_dense_polynomial_mul(&field, &left, &[0, 2, 5, 7], &right, &[0, 1, 4, 7], 15);
 
-        #[cfg(feature = "gmp")]
+        #[cfg(feature = "integer-gmp")]
         {
             assert_ks4_polynomial_mul(&field, &left, &[0, 2, 5, 7], &right, &[0, 1, 4, 7]);
             assert_ks4_polynomial_mul(&field, &left, &[0, 2, 5, 7], &right[..3], &[0, 1, 4]);
@@ -4207,7 +4207,7 @@ mod test {
         let indices = (0..64).collect::<Vec<_>>();
         assert_dense_polynomial_mul(&field, &raw, &indices, &raw, &indices, 127);
 
-        #[cfg(feature = "gmp")]
+        #[cfg(feature = "integer-gmp")]
         {
             assert_ks4_polynomial_mul(&field, &raw, &indices, &raw, &indices);
             assert_ks4_polynomial_mul(&field, &raw, &indices, &raw[..63], &indices[..63]);
