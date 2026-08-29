@@ -1,10 +1,10 @@
 # Polynomial performance continuation handoff
 
 This is the live continuation record for the single-core Symbolica/FLINT polynomial-performance
-work. It was refreshed on 2026-08-29 after adding bounded dense polynomial multiplication for
-arbitrary-size Montgomery coefficient rings and completing the accepted degree-64 Hensel passes.
-The new multiplication kernel reduces PolyBench five-variable uniform factorization #131 from
-`0.347488` to `0.277201` S/F. The latest implementation commit is `f14d182`. The base Rust/FLINT
+work. It was refreshed on 2026-08-29 after adding constant-coordinate projective reconstruction
+to dense univariate integer GCD. The accepted pass moves the configured degree-64 GCD from
+`1.181340` to `0.853224` S/F while leaving the degree-64 product and neighboring factorization
+guards materially unchanged. The latest implementation commit is `e58e876`. The base Rust/FLINT
 comparison inventory was measured at performance-equivalent source head `b2e5d28`, with later
 accepted rows replacing their exploratory predecessors as documented below.
 Keep this file current whenever an experiment is accepted, rejected, or left partly complete. The
@@ -13,11 +13,11 @@ transient binary names.
 
 The complete current Symbolica/FLINT scoreboard is in
 [CURRENT_STATUS.md](CURRENT_STATUS.md), with the latest immutable snapshot in
-[CURRENT_STATUS_v9.md](CURRENT_STATUS_v9.md). Its primary statistics contain 116 non-resultant
-comparisons. The six Ducos, six Brown, and six CRT measurements are retained only in a compact
-appendix note and do not affect primary ranks or summary statistics. After every accepted
-optimization, update the live file and create the next numbered snapshot with an opening paragraph
-that describes the changes from its predecessor.
+[CURRENT_STATUS_v10.md](CURRENT_STATUS_v10.md). Its primary statistics contain 116 non-resultant
+comparisons: 90 favor Symbolica and 26 favor FLINT. The six Ducos, six Brown, and six CRT
+measurements are retained only in a compact appendix note and do not affect primary ranks or
+summary statistics. After every accepted optimization, update the live file and create the next
+numbered snapshot with an opening paragraph that describes the changes from its predecessor.
 
 ## Working contract
 
@@ -36,6 +36,81 @@ that describes the changes from its predecessor.
   this file, source, committed logs, or benchmark commands saved in the repository.
 - Small changes below roughly 3% need particularly strong, repeated evidence before their
   complexity is accepted.
+
+## Accepted constant-coordinate modular GCD reconstruction
+
+Commit `e58e876` lets `UnivariateModularGcdContext` normalize its modular images by the gcd of
+the primitive inputs' constant coefficients when that coordinate predicts strictly fewer 64-bit
+images than the leading coordinate. Exact division into both inputs remains the correctness
+certificate. The selector retains leading normalization when either constant coefficient gcd is
+zero, when the estimates tie, or when leading normalization already predicts one image.
+
+For a true primitive gcd `G`, the two projective representatives are
+`H_d = (gamma_d / lc(G)) G` and `H_0 = (gamma_0 / G(0)) G`, where `gamma_d` and `gamma_0` are the
+gcds of the corresponding primitive input coefficients. The configured degree-64 fixture has a
+roughly 225-bit `H_d` and a roughly 126-bit `H_0 = 2G`; the selected reconstruction therefore
+finishes after two modular images instead of four. Constant normalization computes the ordinary
+monic modular GCD image, inverts its nonzero constant coefficient, and scales that image to
+`gamma_0` before the existing CRT merge.
+
+The coordinate-gcd estimate is not a coefficient bound because the unknown `lc(G)` and `G(0)`
+can reverse the apparent ordering. The implementation therefore keeps the old leading threshold
+on an independent geometric schedule. When that schedule is due, it derives a temporary leading
+representative from the current constant-normalized CRT polynomial `R_0` using
+`gamma_d / lc(R_0) mod M`, then applies the same exact-division certificate. This needs neither a
+second modular GCD nor a second CRT accumulator. Both schedules reset after an unlucky lower-degree
+image. The adversarial test uses `G = 2^384*x + 1`, cofactors with constant `2^192`, and proves that
+the selected constant representative can still be incomplete when the derived leading
+representative is exact.
+
+Six alternating source-matched 1,000-sample processes, pinned to one core, give:
+
+| Degree | Frozen-control Symbolica | Candidate Symbolica | Candidate FLINT | Control S/F | Candidate S/F | Symbolica change |
+|---:|---:|---:|---:|---:|---:|---:|
+| 32 | `0.082731 ms` | `0.082140 ms` | `0.083212 ms` | `0.999046` | `0.986571` | `-0.71%` |
+| 48 | `0.252478 ms` | `0.210098 ms` | `0.235995 ms` | `1.067784` | `0.889777` | `-16.79%` |
+| 64 | `0.409735 ms` | `0.300099 ms` | `0.351792 ms` | `1.161142` | `0.853224` | `-26.76%` |
+| 80 | `0.726356 ms` | `0.632327 ms` | `0.587998 ms` | `1.231297` | `1.075107` | `-12.95%` |
+
+The scoreboard compares the final ratios to its preceding `v9` rows: degree 48 changes
+`1.072266 -> 0.889777`, degree 64 `1.181340 -> 0.853224`, and degree 80
+`1.234835 -> 1.075107`. Degree 32 was a guard rather than an existing configurable scoreboard
+row. Symbolica is now faster than FLINT at degrees 48 and 64; degree 80 remains 7.5% slower.
+
+The final binary is `/tmp/flint-comparison-d64-constant-pivot-final`, SHA-256
+`3ae577b8aa9480eb7c82009a70e01bd1e0cfe063cefecda77d55057ba3569b6f`. Its build JSON is
+`/tmp/flint-comparison-d64-constant-pivot-final-build.jsonl`, SHA-256
+`42518a445c61bbb4ab43b0493145e2e6669ca537178c1835e0166f05359fc924`. The frozen control is
+`/tmp/flint-comparison-pb131-integer-montgomery-final`, SHA-256
+`11c0e4d3d7866e11c7c76a56e6050b097a16ad84f9257f3e25329a05e21b4428`. Raw GCD runs are
+`/tmp/dense-gcd-constant-pivot-final-d{32,48,64,80}-{candidate,control}-{01..06}.csv`.
+
+The four 500-sample factorization guards are materially neutral: degree 33 is `1.112958`, degree
+63 `1.030347`, degree 64 `1.128065`, and degree 65 `1.161896` S/F. Their raw files are
+`/tmp/constant-pivot-final-factor-{d33hh,d63,d64,d65}-{candidate,control}-{01..06}.csv`. The
+10,000-sample degree-64 product guard is `1.099408` versus the frozen control's `1.088238`; the
+1.54% absolute Symbolica shift is noise for code that does not enter multiplication, so the
+stronger existing `1.094628` inventory row remains current. Product raw files are
+`/tmp/constant-pivot-final-product-d64-{candidate,control}-{01..06}.csv`.
+
+The pre-change LBR profile is `/tmp/profile-d64-current-gcd-lbr.perf.data`, SHA-256
+`a0db8cda609ae6ace27920a2caa2f3faedecd3a966d60609528c5f6114a57ebb`. It attributed 53.43% of
+combined samples to Symbolica's GCD and 46.18% to FLINT's; Symbolica's dense `Zp64` modular-GCD
+work accounted for 22.33% versus 17.16% in FLINT's `nmod` Euclidean work, while exact division
+was nearly tied at 21.61% versus 20.90%. Reducing the modular-image count attacks the measured
+dominant difference rather than the already comparable certificate.
+
+An earlier signed-centered fusion of adjacent quotient updates was rejected. Six alternating
+degree-64 processes changed Symbolica from `0.409653 ms` to `0.494380 ms`, or 20.68% slower,
+despite retiring 1.5% fewer instructions. Across 10,000 paired iterations, branch misses rose from
+`286,667,275` to `416,241,973` (+45.2%) and cycles rose 10.4%. The unpredictable signed product
+comparison outweighed the saved Montgomery work. Raw runs are
+`/tmp/dense-gcd-signed-pair-v1-d64-{candidate,control}-{01..06}.csv`; counters are in
+`/tmp/d64-signed-pair-{candidate,control}.perfstat`. No part of that experiment remains in source.
+
+All 30 `poly::gcd::tests` and all 89 `poly::factor::test` unit tests pass single-threaded. Focused
+coverage includes constant selection, zero-constant leading selection, unlucky first-degree reset,
+inactive-variable content restoration, and the adversarial lazy leading fallback.
 
 ## Accepted bounded dense Montgomery multiplication for #131
 
@@ -2821,6 +2896,7 @@ Do not repeat these without a genuinely new mechanism:
 
 | Experiment | Evidence | Decision |
 |---|---|---|
+| Signed-centered adjacent quotient fusion | degree-64 GCD rose from `0.409653 ms` to `0.494380 ms`; branch misses increased 45.2% | reject; signed product branching costs more than the saved Montgomery reductions |
 | Direct 1-4-limb `Integer` to `Zp64` conversion, `8440390` | degree-64 median `1.179371` versus `1.191412`; only about 1% | correct but Amdahl-limited; leave off `dev` |
 | Fused adjacent-degree/Q1 modular remainder, `e0430d5` | ratio regressed to about `1.484` | reject; three-limb reduction cost exceeds two Montgomery reductions |
 | Dense single-scale Zippel reconstruction, `c4748b6` | PolyBench #11 improved only about 1.3% | too much code for gain |
@@ -2881,24 +2957,27 @@ comments that justify file organization by contrasting it with designs not prese
 
 ## Current ordered next actions
 
-1. Treat #131 as closed at `0.277201` S/F unless another narrow pass gives a decisive gain. It is
-   now 3.61x faster than FLINT, and the accepted kernel already removes the dominant generic
-   large-modulus product overhead.
-2. If work remains explicitly restricted to #131, profile a private Bernardin operation context
-   for its monic quotient/remainder recurrence or optimize `shift_var_cached`. Keep the existing
-   three logical factors: the leading-coefficient pseudo-factor plus both reconstructed factors.
-   Do not add division methods to `Ring` or `PolynomialKernels`.
-3. Preserve the 4,096-cell sparse-span rejection and generic fallback. Broaden the dense
-   large-modulus kernel only after an independently measured dense case shows a decisive gain.
-4. Keep the three-process factor sweeps as guard evidence. Promote another row only after a
-   dedicated repeated measurement; the stronger degree-63/64/65 rows already take precedence over
-   the shorter generated sweep.
-5. Keep all algorithm-specific resultant measurements in the historical appendix and outside the
-   116-row primary statistics. The global dense-eight GCD checkpoint remains deferred while the
-   user's focus is #131.
-6. Freeze and hash every accepted full-LTO binary and profile, integrate only measured winners with
-   Ben Ruijl's identity, update [CURRENT_STATUS.md](CURRENT_STATUS.md), and create the next immutable
-   `CURRENT_STATUS_v<i>.md` snapshot after every accepted improvement.
+1. Treat the configured degree-48 and degree-64 GCD cases as closed at `0.889777` and `0.853224`
+   S/F unless a smaller mechanism gives another decisive gain. Degree 80 remains `1.075107`; profile
+   it before changing the reconstruction selector again because the remaining gap may be outside
+   CRT image count.
+2. Attack the primary scoreboard's current worst row next: generated dense eight-variable
+   degree-5 GCD product construction at `1.610087` S/F. The next two worst rows are also
+   multiplication-heavy, so prefer a bounded product-layout improvement with guards over GCD-route
+   heuristics.
+3. Dense degree-64 factorization remains `1.128065`. If returning to that family, test certified
+   subset recombination at the `17^10` Hensel stage: the exact degree-1, degree-2, degree-10, and
+   degree-20 factors may allow one degree-30 residual and skip lifts through exponents 20 and 39.
+4. The degree-64 integer product remains near `1.09` S/F. A future product pass should investigate
+   fixed-width contiguous Kronecker packing; the rejected one-scan generic multiplication context
+   and direct-limb conversion do not justify repetition.
+5. Preserve the constant-coordinate selector's strict-win rule and lazy leading fallback. Any
+   broader projective-coordinate selection needs a proof that the selected coefficient is nonzero
+   in every retained image and an exact-division certificate.
+6. Keep all algorithm-specific resultant measurements in the historical appendix and outside the
+   116-row primary statistics. Freeze and hash every accepted full-LTO binary and profile, commit
+   with Ben Ruijl's identity, and create the next immutable `CURRENT_STATUS_v<i>.md` snapshot after
+   every accepted improvement.
 
 ## Historical ordered next actions
 
