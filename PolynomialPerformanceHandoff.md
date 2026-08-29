@@ -1,10 +1,9 @@
 # Polynomial performance continuation handoff
 
 This is the live continuation record for the single-core Symbolica/FLINT polynomial-performance
-work. It was refreshed on 2026-08-29 after adding one-image Wang leading-coefficient
-reconstruction for dense multivariate factorization. The latest implementation commit is
-`54e1fcb`. The base
-Rust/FLINT comparison inventory was measured at performance-equivalent source head `b2e5d28`, with
+work. It was refreshed on 2026-08-29 after adding cache-sized chunked mixed-radix multiplication
+for dense integer polynomials. The latest implementation commit is `ec6a131`. The base Rust/FLINT
+comparison inventory was measured at performance-equivalent source head `b2e5d28`, with
 later accepted rows replacing their exploratory predecessors as documented below.
 Keep this file current whenever an experiment is accepted, rejected, or left partly complete. The
 purpose is that another agent can resume without reconstructing decisions from chat history or
@@ -12,7 +11,7 @@ transient binary names.
 
 The complete current Symbolica/FLINT scoreboard is in
 [CURRENT_STATUS.md](CURRENT_STATUS.md), with the latest immutable snapshot in
-[CURRENT_STATUS_v6.md](CURRENT_STATUS_v6.md). Its primary statistics contain 116 non-resultant
+[CURRENT_STATUS_v7.md](CURRENT_STATUS_v7.md). Its primary statistics contain 116 non-resultant
 comparisons. The six Ducos, six Brown, and six CRT measurements are retained only in a compact
 appendix and do not affect primary ranks or summary statistics. After every accepted optimization,
 update the live file and create the next numbered snapshot with an opening paragraph that describes
@@ -36,20 +35,81 @@ the changes from its predecessor.
 - Small changes below roughly 3% need particularly strong, repeated evidence before their
   complexity is accepted.
 
-## Current continuation checkpoint: dense five-variable GCD products
+## Accepted chunked mixed-radix integer multiplication
 
-The ordered worst primary row is now `generated GCD products: dense 5 variables degree 7` at
-`1.706529` S/F. It constructs `a*g` and `b*g` from 791/792-term total-degree-7 inputs. Each product
-performs about 627,000 coefficient pairs and produces only 6,000--7,000 terms.
+Commit `ec6a131` replaces the full mixed-radix accumulator only for the former worst generated
+dense five-variable degree-7 GCD products. Each operand has 791 or 792 total-degree terms, each
+product performs about 627,000 coefficient pairs, and the output contains 6,228--6,967 terms. The
+old path allocated a flat `15^5 = 759,375`-entry `i128` array, about 11.59 MiB, for every product.
 
-The current selector accepts a full mixed-radix `15^5 = 759,375` box and uses an `i128`
-accumulator, allocating and scanning about 12.15 MB per product. The total-degree simplex has only
-`C(19,5) = 11,628` cells, a 65.3x smaller workspace, but its current integer implementation uses
-GMP multiplication even for the one-word input coefficients in this case. The next decisive pass
-should add fixed-width accumulation to `TotalDegreeIntegerMul` and prefer that compact route before
-the mixed-radix box only when the existing total-degree density test and a large box/simplex ratio
-both hold. Recheck the dense eight-variable and dense seven-variable product rows, which are the
-next two primary outliers at `1.610087` and `1.584134` S/F.
+`ChunkedDenseIntegerMul` pulls out the most-significant active lexicographic variable. It convolves
+the eight input rows into fifteen output rows and reuses one `15^4 = 50,625`-entry `i128`
+accumulator, about 0.77 MiB, for their inner variables. The mixed-radix inner indices remain
+additive, so the hot update is still one direct coefficient product into
+`accumulator[left_inner + right_inner]`. The implementation processes 128-by-128 term blocks and
+scans and clears only the active prefix after each output row.
+
+The request validates strictly increasing input indices, a positive inner length dividing the
+output box, at most 256 outer rows, and
+`max(left_inner) + max(right_inner) < inner_len`; the last condition proves that inner addition
+cannot carry into the outer row. It accepts only one-word input coefficients and uses the existing
+conservative absolute coefficient bound to prove `i128` accumulation safe. Bounds that fit `i64`
+decline this route so the faster flat `i64` kernel remains first. Every rejection uses the previous
+dense or generic fallback.
+
+Polynomial dispatch selects the route only with at least five variables, a mixed box of at least
+`2^18` cells that is larger than the coefficient-pair count, an inner chunk of at most `2^16`
+cells, at least eight outer rows, and a mixed-box/simplex ratio of at least 64. The selector derives
+the chunk from the most-significant active variable, not blindly from the first declared variable.
+No measured finite-field, high-height, sparse, or lower-variable case enters this integer kernel.
+
+Six alternating source-matched processes with 500 samples per backend give these process-median
+results:
+
+| Source | Symbolica median | FLINT median | S/F |
+|---|---:|---:|---:|
+| frozen pre-change control | `4.363303 ms` | `2.599683 ms` | `1.679650` |
+| chunked candidate | `1.907774 ms` | `2.551780 ms` | `0.748808` |
+
+Symbolica time falls 56.27%, the ratio falls 55.42%, and Symbolica is now about 1.34x faster than
+FLINT. The exact final binary independently validates at `1.915284 ms` versus `2.549281 ms`, or
+`0.751304` S/F, over 500 samples. Its path is
+`/tmp/flint-comparison-chunked-dense5-final`, SHA-256
+`a4e7e2df9a33f1a91cf4234ba6b32bb2a12ea13994d15c2599a4fb7603b0bac4`; the build JSON SHA-256 is
+`e452febeb49f8f2b42f30a3424c01880870391ce2ee92b4cacfe4a64c87189e0`. The six paired raw files
+are `/tmp/dense5-chunk-ab-{01..06}-{control,candidate}.csv`; the exact final validation is
+`/tmp/dense5-chunk-final.csv`.
+
+The first compact-simplex attempt was rejected. A fixed-width `i64` by `i64` to `i128`
+`TotalDegreeIntegerMul` reduced the workspace to `C(19,5) = 11,628` entries, but its candidate was
+still `4.392562 ms` versus FLINT's `2.647936 ms`, or `1.658863` S/F. The old flat profile spent
+46.07% of cycles in `DenseIntegerMul::run`, including 14.52% in `memset` while clearing the flat
+array. The compact profile spent 45.91% in `TotalDegreeIntegerMul::run`: rank-table loads and
+validity branches replaced the saved zeroing cost. The rejected binary is
+`/tmp/flint-comparison-total-degree-i128-v1`, SHA-256
+`0957fef6b4eb89c96b444b6b5ecccc771e00edf8519f9f0d9d98299d76796940`; profiles are
+`/tmp/profile-dense5-{v6-control,total-degree-v1}.perf.data`. That production prototype was removed.
+
+FLINT's corresponding algorithm is the chunked LEX array multiplication selected in its
+`fmpz_mpoly/mul.c`, implemented in `fmpz_mpoly/mul_array.c`, with its main-variable split in
+`mpoly/main_variable_split.c`. FLINT additionally chooses one- or two-word accumulation per output
+row from coefficient bounds; the uniform `i128` Symbolica route is already faster on this target,
+so that extra complexity was not copied.
+
+All 121 numerica unit tests and 22 numerica doctests pass. The Symbolica library suite passes 507
+of 508 tests; the only failure is the previously documented root-isolation fixture accepting a
+different valid interval than its hard-coded expectation. New tests cover cancellation and sorted
+output, invalid/carrying/unsorted layouts, excessive rows, conservative overflow fallback, selector
+boundaries, and the exact 6,967-term product against the independent total-degree implementation.
+
+## Current continuation checkpoint: dense eight-variable GCD products
+
+After the accepted dense-five replacement, the ordered worst primary row is generated dense
+eight-variable degree-5 GCD products at `1.610087` S/F. It has not been investigated in this pass.
+The next pass should profile its exact current multiplication route before broadening any selector;
+the new chunked path intentionally does not apply to its geometry. Dense seven-variable degree-7
+products at `1.584134` and high-height five-variable 128-bit products at `1.576901` are the next
+guards.
 
 ## Accepted one-image Wang leading-coefficient reconstruction
 
@@ -2624,6 +2684,7 @@ Do not repeat these without a genuinely new mechanism:
 | Unguarded quadratic Hensel lifting | high-height degree 33 improved to about 14 ms, but degree 63 regressed from about 16 ms to 34-37 ms and degree 64 to about 35 ms | superseded by the 64-digit and root-wide four-factor guard in `4a2b9c7` |
 | Exact integer convolution windows for Newton Hensel remainders | window microkernels often beat Symbolica's full fallback, but degree-64 factorization regressed from `1.290968` to `1.313523` S/F | reject the integration; the unused public window API and 48 diagnostic rows were removed |
 | Three bivariate images on every initial sample | dense three-variable factorization spent 87.5% of Symbolica cycles selecting samples; one certified initial image reduced its median 61.4% | superseded by the guarded initial shortcut in `f39c09b`; retain three images on bounded retries |
+| Compact fixed-width total-degree multiplication for dense-five degree 7 | `1.658863` S/F; rank-table work replaced the saved flat-array clearing cost | reject for this regime; use the accepted carry-free mixed-radix chunks in `ec6a131` |
 
 Historical frozen binaries and perf data remain under `/tmp`; it is ephemeral. The most useful
 older checksums and ratios are retained in Git history of this document at commits `386174d` and
@@ -2631,9 +2692,9 @@ older checksums and ratios are retained in Git history of this document at commi
 
 ## Code map and design preferences
 
-- Integer multiplication dispatch and Kronecker conversion:
-  `lib/numerica/src/domains/integer/polynomial_kernels.rs`, especially `DenseIntegerMul` and
-  `try_kronecker`.
+- Integer multiplication dispatch, chunked mixed-radix accumulation, and Kronecker conversion:
+  `lib/numerica/src/domains/integer/polynomial_kernels.rs`, especially `DenseIntegerMul`,
+  `ChunkedDenseIntegerMul`, and `try_kronecker`.
 - Integer multiplication differential tests:
   `lib/numerica/src/domains/integer.rs`.
 - Bounded packed-row sparse multiplication and its selector:
@@ -2663,20 +2724,16 @@ comments that justify file organization by contrasting it with designs not prese
 
 ## Current ordered next actions
 
-1. Attack `generated GCD products: dense 5 variables degree 7`, the current worst primary row at
-   `1.706529` S/F. Add fixed-width `i64` input / `i128` accumulator strategies to the existing
-   `TotalDegreeIntegerMul` operation context.
-2. Prefer the total-degree simplex before mixed-radix dense multiplication only for five or more
-   variables, a large mixed box, the existing dense pair/simplex score, and a decisive box/simplex
-   reduction. The target is 759,375 mixed cells versus 11,628 simplex cells. Preserve the existing
-   mixed-radix and GMP fallbacks.
-3. Differential-test fixed-width total-degree accumulation against generic integer
-   multiplication, including cancellation, negative coefficients, exact i64/i128 boundaries,
-   overflow rejection, and exponent-rank boundaries. Measure the dense-five target plus dense-eight
-   and dense-seven product rows; also retain dense-three and large-integer guards.
-4. Re-sort the 116-row primary inventory and immediately attack its new worst. After dense-five,
-   the current candidates are dense-eight products at `1.610087`, dense-seven products at
-   `1.584134`, and high-height five-variable 128-bit products at `1.576901` S/F.
+1. Attack `generated GCD products: dense 8 variables degree 5`, the current worst primary row at
+   `1.610087` S/F. First profile its exact current multiplication route against FLINT's selected
+   route; do not assume the dense-five cache mechanism transfers to this geometry.
+2. Preserve the dense-five chunk selector and its fallback boundaries. Broaden it only after an
+   independently measured case has carry-free cache-sized chunks and shows a decisive gain.
+3. Measure dense-seven degree-7 products at `1.584134` and high-height five-variable 128-bit
+   products at `1.576901` as guards for any next multiplication change. Large-integer inputs do not
+   enter the current one-word chunked kernel.
+4. Re-sort the 116-row primary inventory after the next accepted change. Keep all algorithm-specific
+   resultant rows in the appendix and outside the main statistics.
 5. Keep the degree-64 remainder work parked: the true convolution-window integration was correct
    but slower, and its API has no production caller. Revisit only with a different modular
    convolution mechanism, not another exact-integer window followed by `%`.
