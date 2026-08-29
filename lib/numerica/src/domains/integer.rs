@@ -4447,6 +4447,56 @@ mod test {
 
     #[cfg(feature = "gmp")]
     #[test]
+    fn contiguous_kronecker_selector_accepts_31_terms() {
+        let make_coefficients = |length: usize, offset: i128| {
+            (0..length)
+                .map(|index| {
+                    let value = (1i128 << 70) + offset + index as i128;
+                    Integer::from_double(if index % 3 == 0 { -value } else { value })
+                })
+                .collect::<Vec<_>>()
+        };
+        let left = make_coefficients(31, 7);
+        let right = make_coefficients(34, 101);
+        let left_indices = (0..31).collect::<Vec<u32>>();
+        let right_indices = (0..34).collect::<Vec<u32>>();
+
+        let actual_sparse = super::polynomial_kernels::DenseIntegerMul::try_kronecker_for_test(
+            64,
+            &left,
+            &left_indices,
+            &right,
+            &right_indices,
+        )
+        .expect("a contiguous 31-by-34 product must use Kronecker substitution");
+        let mut actual = vec![Integer::zero(); 64];
+        for (index, coefficient) in actual_sparse {
+            actual[index as usize] = coefficient;
+        }
+
+        let mut expected = vec![Integer::zero(); 64];
+        for (left_degree, left_coefficient) in left.iter().enumerate() {
+            for (right_degree, right_coefficient) in right.iter().enumerate() {
+                expected[left_degree + right_degree] += left_coefficient * right_coefficient;
+            }
+        }
+        assert_eq!(actual, expected);
+
+        assert!(
+            super::polynomial_kernels::DenseIntegerMul::try_kronecker_for_test(
+                63,
+                &left[..30],
+                &left_indices[..30],
+                &right,
+                &right_indices,
+            )
+            .is_none(),
+            "the contiguous shortcut must retain its 31-term lower bound"
+        );
+    }
+
+    #[cfg(feature = "gmp")]
+    #[test]
     fn primitive_kronecker_packing_matches_direct_convolution_at_boundaries() {
         let magnitude = 1i128 << 100;
         let values = [

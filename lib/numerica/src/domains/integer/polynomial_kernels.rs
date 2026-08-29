@@ -362,7 +362,7 @@ impl<'a> DenseIntegerMul<'a> {
             .checked_mul(right_coefficients.len())?;
         let high_collision_density = packed_output_len.saturating_mul(128) < product_count;
 
-        const MIN_CONTIGUOUS_KRONECKER_TERMS: usize = 32;
+        const MIN_CONTIGUOUS_KRONECKER_TERMS: usize = 31;
         let consecutive_support = |indices: &[u32]| {
             indices
                 .windows(2)
