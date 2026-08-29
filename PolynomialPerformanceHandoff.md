@@ -1,21 +1,23 @@
 # Polynomial performance continuation handoff
 
 This is the live continuation record for the single-core Symbolica/FLINT polynomial-performance
-work. It was refreshed on 2026-08-29 after accelerating high-height bivariate factor
-reconstruction and Wang-certified lifting. The latest implementation commit is `0632274`. The
-base Rust/FLINT comparison inventory was measured at performance-equivalent source head `b2e5d28`, with
-later accepted rows replacing their exploratory predecessors as documented below.
+work. It was refreshed on 2026-08-29 after adding bounded dense polynomial multiplication for
+arbitrary-size Montgomery coefficient rings and completing the accepted degree-64 Hensel passes.
+The new multiplication kernel reduces PolyBench five-variable uniform factorization #131 from
+`0.347488` to `0.277201` S/F. The latest implementation commit is `f14d182`. The base Rust/FLINT
+comparison inventory was measured at performance-equivalent source head `b2e5d28`, with later
+accepted rows replacing their exploratory predecessors as documented below.
 Keep this file current whenever an experiment is accepted, rejected, or left partly complete. The
 purpose is that another agent can resume without reconstructing decisions from chat history or
 transient binary names.
 
 The complete current Symbolica/FLINT scoreboard is in
 [CURRENT_STATUS.md](CURRENT_STATUS.md), with the latest immutable snapshot in
-[CURRENT_STATUS_v8.md](CURRENT_STATUS_v8.md). Its primary statistics contain 116 non-resultant
+[CURRENT_STATUS_v9.md](CURRENT_STATUS_v9.md). Its primary statistics contain 116 non-resultant
 comparisons. The six Ducos, six Brown, and six CRT measurements are retained only in a compact
-appendix note and do not affect primary ranks or summary statistics. After every accepted optimization,
-update the live file and create the next numbered snapshot with an opening paragraph that describes
-the changes from its predecessor.
+appendix note and do not affect primary ranks or summary statistics. After every accepted
+optimization, update the live file and create the next numbered snapshot with an opening paragraph
+that describes the changes from its predecessor.
 
 ## Working contract
 
@@ -35,7 +37,83 @@ the changes from its predecessor.
 - Small changes below roughly 3% need particularly strong, repeated evidence before their
   complexity is accepted.
 
-## Accepted #131 bivariate reconstruction and Wang lifting pass
+## Accepted bounded dense Montgomery multiplication for #131
+
+Commit `f14d182` gives `FiniteField<Integer>` a bounded dense-index polynomial multiplication
+kernel. `DenseIntegerMontgomeryMul` accumulates Montgomery-form coefficient products exactly in
+`Integer` output cells with fused multiply-adds, then performs one Montgomery reduction per
+nonzero output coefficient. If `C * (p - 1) <= R - 1`, where `C` bounds collisions in one output
+cell, then `C * (p - 1)^2 < pR` and the exact accumulator is a valid direct Montgomery-reduction
+input. Otherwise the kernel first takes one remainder modulo `p`. A request with an output span
+above 4,096 cells and above four times the coefficient-pair count declines the kernel and retains
+the existing polynomial-dispatch fallback.
+
+Six alternating source-matched 300-sample processes give:
+
+| Source | Symbolica median | FLINT median | Median process S/F |
+|---|---:|---:|---:|
+| frozen `0632274` control | `16.032689 ms` | `46.365158 ms` | `0.345860` |
+| dense-Montgomery candidate | `12.842260 ms` | `46.353227 ms` | `0.276987` |
+
+Symbolica time falls 19.90% in the alternating experiment. Six independent final 300-sample
+processes measure `12.827604 ms` versus `46.280535 ms`, with median process ratio `0.277201`;
+against the frozen control's Symbolica median this is a 19.99% reduction. Symbolica is now 3.61x
+faster than FLINT on #131. Relative to the original `1.745716` result, S/F has fallen 84.12%.
+
+The performance-equivalent final binary is
+`/tmp/flint-comparison-pb131-integer-montgomery-final`, SHA-256
+`11c0e4d3d7866e11c7c76a56e6050b097a16ad84f9257f3e25329a05e21b4428`; its build JSON SHA-256 is
+`4d182a8e5d5606463a38042b6db853a8affde662702effbfd76af22159561616`. The only production-code
+difference between this binary and committed source is checked request validation; the
+multiplication loop is identical, and the remaining changes are tests and documentation. Raw
+final runs are `/tmp/pb131-integer-montgomery-final-{1..6}.csv`; alternating runs are
+`/tmp/pb131-integer-montgomery-{1..6}-{control,candidate}.csv`.
+
+The final LBR profile is `/tmp/profile-pb131-integer-montgomery-final-lbr.perf.data`, SHA-256
+`81301f21149540652917c60180791719bdab996d55c22c6b6fd846ddc8a843c1`; its 300-sample paired
+factorization timing is `14.655552 ms` versus `53.288973 ms`, or `0.275020` S/F. The capture also
+contains the much smaller #131 product row at `0.052940 ms` versus `0.085145 ms`. Relative to the
+preceding profile, the Bernardin subtree falls from 11.30% to 6.15% of combined cycles, roughly
+`7.1 -> 4.2 ms`, and the large-modulus polynomial-multiplication subtree falls from 7.08% to the
+new kernel's 2.06%, roughly `4.5 -> 1.4 ms`. The profile therefore localizes the gain to the
+intended bivariate modular-product work rather than a factorization-route change.
+
+Tests cover direct reduction with modulus `2^64 + 13`, one-remainder reduction with modulus
+`2^127 - 1`, modular cancellation to zero in both modes, and rejection of a 10,001-cell sparse
+span. All 122 default-feature Numerica library tests, all 89 default-feature factor tests, the
+focused no-GMP Numerica test, and all 89 no-GMP factor tests pass. Formatting and diff checks pass.
+
+Three sequential guard sweeps are in
+`/tmp/pb131-integer-montgomery-polybench-factor-{1..3}.csv` and
+`/tmp/pb131-integer-montgomery-generated-factor-{1..3}.csv`. Their median process ratios are:
+
+| Guard family | Current S/F values |
+|---|---|
+| PolyBench 5v | #32 `0.180831`; #159 `0.600275`; #163 `0.216464`; #131 `0.276987` |
+| PolyBench 8v | #178 `0.221585`; #92 `0.833277`; #84 `0.685930`; #176 `1.002582`; #44 `0.096734`; #105 `1.085467`; #159 `0.118053` |
+| Generated | 1v d63 `1.026392`; 2v `0.400541`; 3v `0.549458`; high-height d33 `1.085990`; d64 `1.126503`; d65 `1.163216` |
+
+No guard shows a material regression. Several bivariate rows improve, but these three-process
+50/100-sample sweeps remain regression evidence rather than replacing stronger dedicated
+scoreboard measurements in the focused `v9` snapshot.
+
+## Accepted dense degree-64 root certification
+
+Commits `afcab02` and `e9db27b` admit the exact 31-by-34 Kronecker product at the root of the
+dense degree-64 Hensel tree, then certify the root factor exactly at exponent 39 and avoid lifting
+it to exponent 77. Twelve 500-sample processes measure `2.876536 ms` for Symbolica and
+`2.552049 ms` for FLINT, or `1.126451` S/F. The fresh predecessor was `1.319908`, so Symbolica
+time falls 14.88%. Neighboring final ratios are degree 63 `1.034949`, degree 65 `1.159761`, and
+high-height degree 33 `1.108418`. The final binary is `/tmp/flint-comparison-early-root`, SHA-256
+`faf9c69f6106c4638ae26953cd21d526cd44f4bb39247e6c64c624b4bd5f03a6`; its LBR profile is
+`/tmp/profile-early-root-d64-factor-lbr.perf.data`, SHA-256
+`e8a6b6a4ef4cd75a01afe3253e060d50902dff85417c2f7ecc10d469edb81cb0`.
+
+## Superseded #131 bivariate reconstruction and Wang lifting baseline (`0.347488` S/F)
+
+Commit `0632274` remains an active prerequisite of the current #131 route. This section records
+the immediately preceding checkpoint; its `0.347488` measurement is superseded by the bounded
+dense-Montgomery result above and must not be used as the current scoreboard row.
 
 Commit `0632274` focuses on PolyBench five-variable uniform factorization #131. The old
 `1.745716` S/F result had already become `0.478628` through one-image Wang leading-coefficient
@@ -76,7 +154,7 @@ The measured checkpoints are:
 | bounded 26-bit bivariate prime, 6x500 | `18.369984 ms` | `46.487771 ms` | `0.395320` |
 | deferred Wang product verification, final 6x500 | `16.088614 ms` | `46.299843 ms` | `0.347488` |
 
-The final binary is `/tmp/flint-comparison-pb131-deferred-verify`, SHA-256
+The checkpoint binary is `/tmp/flint-comparison-pb131-deferred-verify`, SHA-256
 `85c2463a10612a717bbaddfdb5f65e24a0004e31d890f7c13b12147cda7432d0`; its build JSON SHA-256 is
 `0f22c3b9d7fadab57e2a0efc47947d6a2703066e54b6e5e901a8d61815291e71`. Raw final runs are
 `/tmp/pb131-deferred-final-{01..06}.csv`. The frozen fresh control is
@@ -84,14 +162,13 @@ The final binary is `/tmp/flint-comparison-pb131-deferred-verify`, SHA-256
 `a4e7e2df9a33f1a91cf4234ba6b32bb2a12ea13994d15c2599a4fb7603b0bac4`; its raw runs are
 `/tmp/pb131-ec6a131-baseline-{01..06}.csv`.
 
-The final 300-sample LBR profile is `/tmp/profile-pb131-deferred-final-lbr.perf.data`, SHA-256
+The checkpoint 300-sample LBR profile is `/tmp/profile-pb131-deferred-final-lbr.perf.data`, SHA-256
 `4f5e45f6e1047d80e6e13f63e9c5594b0d223a3870aab7b9c618e9ba94213f2e`; its paired timing is
 `16.180866 ms` versus `46.739298 ms`. Relative to the fresh profile, the linear univariate
 Diophantine lift falls from 4.17% to 1.14% of combined cycles. Relative to the pre-defer 26-bit
 profile, multivariate Hensel falls from 11.28% to 8.18%, and the 3.61% per-stage product subtree
-disappears. Bivariate Bernardin lifting remains the largest Symbolica subtree at 11.30% of
-combined cycles; a dense two-factor Bernardin context would be the next #131-specific mechanism,
-but #131 is no longer a performance gap.
+disappears. Bivariate Bernardin lifting remained the largest Symbolica subtree at 11.30% of
+combined cycles. The dense arbitrary-modulus kernel documented above implements that next step.
 
 Guard measurements are source-matched, sequential, and single-threaded. #32 changes
 `0.272966 -> 0.222788`; #159 changes `0.982902 -> 0.899827`; generated dense three-variable
@@ -178,7 +255,7 @@ different valid interval than its hard-coded expectation. New tests cover cancel
 output, invalid/carrying/unsorted layouts, excessive rows, conservative overflow fallback, selector
 boundaries, and the exact 6,967-term product against the independent total-degree implementation.
 
-## Current continuation checkpoint: dense eight-variable GCD products
+## Deferred global checkpoint: dense eight-variable GCD products
 
 After the accepted dense-five replacement, the ordered worst primary row is generated dense
 eight-variable degree-5 GCD products at `1.610087` S/F. It has not been investigated in this pass.
@@ -2785,6 +2862,10 @@ older checksums and ratios are retained in Git history of this document at commi
 - Shared polynomial operation kernels: `src/poly/kernels.rs`.
 - Coefficient-domain polynomial kernel capabilities: `lib/numerica/src/kernels.rs`; the integer
   implementation is `lib/numerica/src/domains/integer/polynomial_kernels.rs`.
+- Large-modulus finite-field and modular-ring multiplication:
+  `lib/numerica/src/domains/finite_field/polynomial_kernels.rs`, especially
+  `DenseIntegerMontgomeryMul`; `FiniteField<Integer>::kernels` exposes it through the existing
+  `PolynomialKernels` capability.
 - Generated and PolyBench fixtures: `benches/support/cases.rs` and
   `benches/support/polybench_cases.rs`.
 
@@ -2800,19 +2881,21 @@ comments that justify file organization by contrasting it with designs not prese
 
 ## Current ordered next actions
 
-1. Attack `generated GCD products: dense 8 variables degree 5`, the current worst primary row at
-   `1.610087` S/F. First profile its exact current multiplication route against FLINT's selected
-   route; do not assume the dense-five cache mechanism transfers to this geometry.
-2. Preserve the dense-five chunk selector and its fallback boundaries. Broaden it only after an
-   independently measured case has carry-free cache-sized chunks and shows a decisive gain.
-3. Measure dense-seven degree-7 products at `1.584134` and high-height five-variable 128-bit
-   products at `1.576901` as guards for any next multiplication change. Large-integer inputs do not
-   enter the current one-word chunked kernel.
-4. Re-sort the 116-row primary inventory after the next accepted change. Keep all algorithm-specific
-   resultant rows in the appendix and outside the main statistics.
-5. Keep the degree-64 remainder work parked: the true convolution-window integration was correct
-   but slower, and its API has no production caller. Revisit only with a different modular
-   convolution mechanism, not another exact-integer window followed by `%`.
+1. Treat #131 as closed at `0.277201` S/F unless another narrow pass gives a decisive gain. It is
+   now 3.61x faster than FLINT, and the accepted kernel already removes the dominant generic
+   large-modulus product overhead.
+2. If work remains explicitly restricted to #131, profile a private Bernardin operation context
+   for its monic quotient/remainder recurrence or optimize `shift_var_cached`. Keep the existing
+   three logical factors: the leading-coefficient pseudo-factor plus both reconstructed factors.
+   Do not add division methods to `Ring` or `PolynomialKernels`.
+3. Preserve the 4,096-cell sparse-span rejection and generic fallback. Broaden the dense
+   large-modulus kernel only after an independently measured dense case shows a decisive gain.
+4. Keep the three-process factor sweeps as guard evidence. Promote another row only after a
+   dedicated repeated measurement; the stronger degree-63/64/65 rows already take precedence over
+   the shorter generated sweep.
+5. Keep all algorithm-specific resultant measurements in the historical appendix and outside the
+   116-row primary statistics. The global dense-eight GCD checkpoint remains deferred while the
+   user's focus is #131.
 6. Freeze and hash every accepted full-LTO binary and profile, integrate only measured winners with
    Ben Ruijl's identity, update [CURRENT_STATUS.md](CURRENT_STATUS.md), and create the next immutable
    `CURRENT_STATUS_v<i>.md` snapshot after every accepted improvement.
