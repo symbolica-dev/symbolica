@@ -1,9 +1,9 @@
 # Polynomial performance continuation handoff
 
 This is the live continuation record for the single-core Symbolica/FLINT polynomial-performance
-work. It was refreshed on 2026-08-29 after adding cache-sized chunked mixed-radix multiplication
-for dense integer polynomials. The latest implementation commit is `ec6a131`. The base Rust/FLINT
-comparison inventory was measured at performance-equivalent source head `b2e5d28`, with
+work. It was refreshed on 2026-08-29 after accelerating high-height bivariate factor
+reconstruction and Wang-certified lifting. The latest implementation commit is `0632274`. The
+base Rust/FLINT comparison inventory was measured at performance-equivalent source head `b2e5d28`, with
 later accepted rows replacing their exploratory predecessors as documented below.
 Keep this file current whenever an experiment is accepted, rejected, or left partly complete. The
 purpose is that another agent can resume without reconstructing decisions from chat history or
@@ -11,9 +11,9 @@ transient binary names.
 
 The complete current Symbolica/FLINT scoreboard is in
 [CURRENT_STATUS.md](CURRENT_STATUS.md), with the latest immutable snapshot in
-[CURRENT_STATUS_v7.md](CURRENT_STATUS_v7.md). Its primary statistics contain 116 non-resultant
+[CURRENT_STATUS_v8.md](CURRENT_STATUS_v8.md). Its primary statistics contain 116 non-resultant
 comparisons. The six Ducos, six Brown, and six CRT measurements are retained only in a compact
-appendix and do not affect primary ranks or summary statistics. After every accepted optimization,
+appendix note and do not affect primary ranks or summary statistics. After every accepted optimization,
 update the live file and create the next numbered snapshot with an opening paragraph that describes
 the changes from its predecessor.
 
@@ -34,6 +34,82 @@ the changes from its predecessor.
   this file, source, committed logs, or benchmark commands saved in the repository.
 - Small changes below roughly 3% need particularly strong, repeated evidence before their
   complexity is accepted.
+
+## Accepted #131 bivariate reconstruction and Wang lifting pass
+
+Commit `0632274` focuses on PolyBench five-variable uniform factorization #131. The old
+`1.745716` S/F result had already become `0.478628` through one-image Wang leading-coefficient
+reconstruction. A fresh source-matched control at `ec6a131` measured `22.084579 ms` for Symbolica
+and `46.647846 ms` for FLINT, or `0.473178` S/F. Six final 500-sample processes measure
+`16.088614 ms` and `46.299843 ms`, with median process ratio `0.347488`. Symbolica time falls
+27.15% in this pass and 80.31% from the old `81.725573 ms` state; Symbolica is now 2.88x faster
+than FLINT on #131.
+
+The accepted changes are deliberately narrow:
+
+- Wang sampling rejects a scalar-content image before derivative and polynomial-GCD screens. The
+  full univariate-content test remains at the original successful-screen point, so non-Wang paths
+  keep their old cost ordering.
+- An image already certified square-free, primitive, and free of retained-variable monomial
+  content enters `bivariate_factor_reconstruct` directly. Its square-free univariate sample calls
+  `factor_reconstruct` after primitive/sign normalization instead of repeating the generic
+  square-free decomposition.
+- `sparse_coefficient_hensel_lift_mod_prime` imposes the true leading coefficients and checks the
+  exact product before allocating modular factors, complementary products, or a coefficient bound.
+  The bound is supplied lazily only if a p-adic correction is actually necessary.
+- A Wang leftover unit `-1` is absorbed into one image factor and one true leading coefficient;
+  the 1,665-term target is no longer cloned and negated.
+- A two-factor bivariate image of main degree at most 64 and factor-bound height at least 256 bits
+  tries eight primes above 65,000,000. The proof `p * (degree + 1) <= u32::MAX` retains direct
+  `u64` Montgomery accumulation. Rejected wide candidates fall back to the complete prime search
+  above 101. The coefficient modulus `p^k` is constructed as a composite modular ring.
+- Wang-certified multivariate Hensel stages use the existing retry context. Sparse stages defer
+  intermediate product checks, and the complete unshifted factorization is certified once at the
+  end. A sparse failure or failed certificate takes the existing bounded bivariate retry.
+
+The measured checkpoints are:
+
+| Checkpoint | Symbolica median | FLINT median | S/F |
+|---|---:|---:|---:|
+| fresh `ec6a131` control, 6x500 | `22.084579 ms` | `46.647846 ms` | `0.473178` |
+| sampling/direct-dispatch/lazy-setup fast paths, 6x500 | `20.265904 ms` | `46.469836 ms` | `0.436629` |
+| bounded 26-bit bivariate prime, 6x500 | `18.369984 ms` | `46.487771 ms` | `0.395320` |
+| deferred Wang product verification, final 6x500 | `16.088614 ms` | `46.299843 ms` | `0.347488` |
+
+The final binary is `/tmp/flint-comparison-pb131-deferred-verify`, SHA-256
+`85c2463a10612a717bbaddfdb5f65e24a0004e31d890f7c13b12147cda7432d0`; its build JSON SHA-256 is
+`0f22c3b9d7fadab57e2a0efc47947d6a2703066e54b6e5e901a8d61815291e71`. Raw final runs are
+`/tmp/pb131-deferred-final-{01..06}.csv`. The frozen fresh control is
+`/tmp/flint-comparison-chunked-dense5-final`, SHA-256
+`a4e7e2df9a33f1a91cf4234ba6b32bb2a12ea13994d15c2599a4fb7603b0bac4`; its raw runs are
+`/tmp/pb131-ec6a131-baseline-{01..06}.csv`.
+
+The final 300-sample LBR profile is `/tmp/profile-pb131-deferred-final-lbr.perf.data`, SHA-256
+`4f5e45f6e1047d80e6e13f63e9c5594b0d223a3870aab7b9c618e9ba94213f2e`; its paired timing is
+`16.180866 ms` versus `46.739298 ms`. Relative to the fresh profile, the linear univariate
+Diophantine lift falls from 4.17% to 1.14% of combined cycles. Relative to the pre-defer 26-bit
+profile, multivariate Hensel falls from 11.28% to 8.18%, and the 3.61% per-stage product subtree
+disappears. Bivariate Bernardin lifting remains the largest Symbolica subtree at 11.30% of
+combined cycles; a dense two-factor Bernardin context would be the next #131-specific mechanism,
+but #131 is no longer a performance gap.
+
+Guard measurements are source-matched, sequential, and single-threaded. #32 changes
+`0.272966 -> 0.222788`; #159 changes `0.982902 -> 0.899827`; generated dense three-variable
+factorization changes `0.680827 -> 0.623487`; #163 is unchanged within noise at `0.217709`.
+The corresponding raw files are `/tmp/pb131-guard-*` and `/tmp/pb32-deferred-ab-*`.
+
+The exact high-height reconstruction tests prove both wide-prime selection and fallback after all
+eight wide candidates divide the sampled leading coefficient. All targeted Wang, signed-unit,
+bivariate, and evaluated-Hensel tests pass. The 88 other factor tests pass; the unrelated
+`galois_upgrade` test is nondeterministic in the aggregate run and passes immediately in isolation.
+The full library run excluding that test passes 508 of 509 tests; the only failure is the already
+documented root-isolation fixture accepting a different valid isolating interval.
+
+An unbounded prime start near `2^31` was not retained. Three 200-sample processes measured median
+`0.395389` S/F, statistically the same as the bounded 26-bit policy, but large finite-field
+products leave direct `u64` Montgomery accumulation and the search could exhaust the upper half
+of the `u32` prime range. Its binary is `/tmp/flint-comparison-pb131-wide-prime`, SHA-256
+`08d4ef5c91c8a20f89858622a0378c43a36e33b12d5a863aec6398620f66d0e7`.
 
 ## Accepted chunked mixed-radix integer multiplication
 
@@ -2669,7 +2745,7 @@ Do not repeat these without a genuinely new mechanism:
 | Experiment | Evidence | Decision |
 |---|---|---|
 | Direct 1-4-limb `Integer` to `Zp64` conversion, `8440390` | degree-64 median `1.179371` versus `1.191412`; only about 1% | correct but Amdahl-limited; leave off `dev` |
-| Fused adjacent-degree/Q1 modular remainder, `0f7fa97` | ratio regressed to about `1.484` | reject; three-limb reduction cost exceeds two Montgomery reductions |
+| Fused adjacent-degree/Q1 modular remainder, `e0430d5` | ratio regressed to about `1.484` | reject; three-limb reduction cost exceeds two Montgomery reductions |
 | Dense single-scale Zippel reconstruction, `c4748b6` | PolyBench #11 improved only about 1.3% | too much code for gain |
 | Broad dense modular GCD experiment, `5a975f1` | little gain at degree 64, degree-80 regression | superseded by smaller dense-image/certificate contexts |
 | Borrowed versus by-value finite-field calls | no measurable difference | not the source of the old unexplained `1.325` result |
