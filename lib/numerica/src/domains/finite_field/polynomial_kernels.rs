@@ -1,4 +1,4 @@
-//! Representation-specific bulk kernels for prime-field polynomial arithmetic.
+//! Representation-specific bulk kernels for finite-field and modular-ring polynomial arithmetic.
 //!
 //! Coefficients are stored in Montgomery form. These kernels accumulate exact integer products
 //! for as long as their fixed-width bounds permit, then perform one modular/Montgomery reduction
@@ -9,7 +9,9 @@
 //! the context can try another strategy or polynomial dispatch can fall back.
 
 use super::montgomery::{montgomery_reduce_u32, montgomery_reduce_u64};
-use super::{FiniteFieldElement, Zp, Zp64};
+use super::{FiniteField, FiniteFieldElement, Zp, Zp64};
+use crate::domains::RingOps;
+use crate::domains::integer::{Integer, Z};
 #[cfg(feature = "gmp")]
 use crate::domains::integer::{MultiPrecisionInteger, RawMultiPrecisionInteger};
 use crate::domains::polynomial_layouts::{SimplexKroneckerLayout, try_simplex_kronecker_layout};
@@ -18,6 +20,7 @@ use crate::kernels::{DensePolynomialMulRequest, PolynomialKernels};
 use rug::integer::Order as RugIntegerOrder;
 
 const MAX_DENSE_MODULAR_MUL_BUFFER_SIZE: usize = 1 << 20;
+const MAX_SPARSE_INTEGER_MONTGOMERY_OUTPUT_LEN: usize = 1 << 12;
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub(super) enum U64AccumulationMode {
@@ -44,13 +47,117 @@ fn validate_dense_polynomial_mul<UField>(
         return None;
     }
 
-    if let (Some(&left_max), Some(&right_max)) = (left_indices.last(), right_indices.last())
-        && left_max as usize + right_max as usize >= output_len
-    {
-        return None;
+    if let (Some(&left_max), Some(&right_max)) = (left_indices.last(), right_indices.last()) {
+        let maximum_index = left_max.checked_add(right_max)?;
+        if maximum_index as usize >= output_len {
+            return None;
+        }
     }
 
     Some(())
+}
+
+/// One validated dense-indexed multiplication over an arbitrary-size odd modulus.
+///
+/// Coefficients are stored in Montgomery form. The context accumulates their exact products in
+/// [`Integer`] output cells and performs one Montgomery reduction for each nonzero coefficient.
+/// If the complete convolution coefficient can exceed the Montgomery reduction range, it is
+/// first reduced modulo the field modulus.
+pub(super) struct DenseIntegerMontgomeryMul<'a> {
+    field: &'a FiniteField<Integer>,
+    request: DensePolynomialMulRequest<'a, FiniteFieldElement<Integer>>,
+    pub(super) direct_montgomery_reduction: bool,
+}
+
+impl<'a> DenseIntegerMontgomeryMul<'a> {
+    /// Validate the dense multiplication and determine whether its exact sums fit one Montgomery
+    /// reduction without a preceding modular remainder.
+    #[inline]
+    pub(super) fn new(
+        field: &'a FiniteField<Integer>,
+        request: DensePolynomialMulRequest<'a, FiniteFieldElement<Integer>>,
+    ) -> Option<Self> {
+        validate_dense_polynomial_mul(
+            request.output_len,
+            request.left_coefficients,
+            request.left_indices,
+            request.right_coefficients,
+            request.right_indices,
+        )?;
+
+        let number_of_products = request
+            .left_coefficients
+            .len()
+            .saturating_mul(request.right_coefficients.len());
+        // Widely separated supports can have a large dense span but only a few actual products.
+        // Decline the exact-accumulator kernel when its dense buffer would be disproportionate.
+        if !request.left_coefficients.is_empty()
+            && !request.right_coefficients.is_empty()
+            && request.output_len > MAX_SPARSE_INTEGER_MONTGOMERY_OUTPUT_LEN
+            && request.output_len > number_of_products.saturating_mul(4)
+        {
+            return None;
+        }
+
+        // Unique input indices bound the number of products in one output coefficient by the
+        // shorter input. For raw Montgomery representatives below p, C * (p - 1) < R proves
+        // C * (p - 1)^2 < pR, the input range accepted by one Montgomery reduction.
+        let maximum_collision_count = request
+            .left_coefficients
+            .len()
+            .min(request.right_coefficients.len());
+        let mut maximum_scaled_input = &field.p - &Integer::one();
+        maximum_scaled_input *= &Integer::from(maximum_collision_count as u64);
+        let direct_montgomery_reduction = maximum_scaled_input <= field.r_mask;
+
+        Some(Self {
+            field,
+            request,
+            direct_montgomery_reduction,
+        })
+    }
+
+    /// Multiply the request, returning nonzero coefficients in increasing dense-index order.
+    fn run(self) -> Vec<(u32, FiniteFieldElement<Integer>)> {
+        if self.request.left_coefficients.is_empty() || self.request.right_coefficients.is_empty() {
+            return Vec::new();
+        }
+
+        let mut accumulators = vec![Integer::zero(); self.request.output_len];
+        for (left, &left_index) in self
+            .request
+            .left_coefficients
+            .iter()
+            .zip(self.request.left_indices)
+        {
+            for (right, &right_index) in self
+                .request
+                .right_coefficients
+                .iter()
+                .zip(self.request.right_indices)
+            {
+                let output_index = left_index as usize + right_index as usize;
+                Z.add_mul_assign(&mut accumulators[output_index], &left.0, &right.0);
+            }
+        }
+
+        let mut result = Vec::new();
+        for (position, accumulator) in accumulators.into_iter().enumerate() {
+            if accumulator.is_zero() {
+                continue;
+            }
+            let input = if self.direct_montgomery_reduction {
+                accumulator
+            } else {
+                accumulator % &self.field.p
+            };
+            let coefficient = self.field.montgomery_reduce_integer(input);
+            if !coefficient.is_zero() {
+                result.push((position as u32, FiniteFieldElement(coefficient)));
+            }
+        }
+        result
+    }
 }
 
 /// One validated dense-indexed multiplication over a 32-bit prime field.
@@ -1256,5 +1363,15 @@ impl PolynomialKernels<FiniteFieldElement<u64>> for Zp64 {
         request: DensePolynomialMulRequest<'_, FiniteFieldElement<u64>>,
     ) -> Option<Vec<(u32, FiniteFieldElement<u64>)>> {
         DenseZp64Mul::new(self, request)?.run()
+    }
+}
+
+impl PolynomialKernels<FiniteFieldElement<Integer>> for FiniteField<Integer> {
+    #[inline]
+    fn try_dense_mul(
+        &self,
+        request: DensePolynomialMulRequest<'_, FiniteFieldElement<Integer>>,
+    ) -> Option<Vec<(u32, FiniteFieldElement<Integer>)>> {
+        Some(DenseIntegerMontgomeryMul::new(self, request)?.run())
     }
 }

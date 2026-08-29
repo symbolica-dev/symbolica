@@ -2591,6 +2591,11 @@ impl Ring for FiniteField<Integer> {
         self.try_inv(b).map(|r| self.mul(a, &r))
     }
 
+    #[inline]
+    fn kernels(&self) -> RingKernels<'_, Self::Element> {
+        RingKernels::empty().with_polynomial(self)
+    }
+
     fn format<W: std::fmt::Write>(
         &self,
         element: &Self::Element,
@@ -3771,7 +3776,9 @@ mod test {
         finite_field::{FiniteField, PrimitiveRootIterator, Zp64, Zp64DiscreteLogContext},
         integer::{Integer, MultiPrecisionInteger},
     };
-    use crate::kernels::{DensePolynomialMulRequest, GeometricSequenceStepRequest};
+    use crate::kernels::{
+        DensePolynomialMulRequest, GeometricSequenceStepRequest, PolynomialKernels,
+    };
 
     #[test]
     fn sampling_policy_uses_canonical_field_representatives() {
@@ -4213,6 +4220,150 @@ mod test {
             assert_ks2_zp64_polynomial_mul(&field, &small, &indices, &raw, &indices);
             assert_ks2_zp64_polynomial_mul(&field, &raw, &indices, &small, &indices);
         }
+
+        let modulus = Integer::from((1u128 << 64) + 13);
+        let integer_field = FiniteField::<Integer>::new_non_prime(modulus);
+        let left = [1u64, 17, 123_456_789, 9_876_543_210]
+            .map(|value| integer_field.to_element(Integer::from(value)));
+        let right = [11u64, 23, 987_654_321, 8_765_432_109]
+            .map(|value| integer_field.to_element(Integer::from(value)));
+        let operation = super::polynomial_kernels::DenseIntegerMontgomeryMul::new(
+            &integer_field,
+            DensePolynomialMulRequest {
+                output_len: 15,
+                left_coefficients: &left,
+                left_indices: &[0, 2, 5, 7],
+                right_coefficients: &right,
+                right_indices: &[0, 1, 4, 7],
+            },
+        )
+        .unwrap();
+        assert!(operation.direct_montgomery_reduction);
+        assert_dense_polynomial_mul(
+            &integer_field,
+            &left,
+            &[0, 2, 5, 7],
+            &right,
+            &[0, 1, 4, 7],
+            15,
+        );
+
+        let cancellation_left =
+            [1u64, 1].map(|value| integer_field.to_element(Integer::from(value)));
+        let cancellation_right = [Integer::one(), &integer_field.p - &Integer::one()]
+            .map(|value| integer_field.to_element(value));
+        let cancellation = super::polynomial_kernels::DenseIntegerMontgomeryMul::new(
+            &integer_field,
+            DensePolynomialMulRequest {
+                output_len: 3,
+                left_coefficients: &cancellation_left,
+                left_indices: &[0, 1],
+                right_coefficients: &cancellation_right,
+                right_indices: &[0, 1],
+            },
+        )
+        .unwrap();
+        assert!(cancellation.direct_montgomery_reduction);
+        assert_eq!(
+            integer_field
+                .try_dense_mul(DensePolynomialMulRequest {
+                    output_len: 3,
+                    left_coefficients: &cancellation_left,
+                    left_indices: &[0, 1],
+                    right_coefficients: &cancellation_right,
+                    right_indices: &[0, 1],
+                })
+                .unwrap()
+                .iter()
+                .map(|(index, _)| *index)
+                .collect::<Vec<_>>(),
+            [0, 2]
+        );
+
+        // A modulus immediately below its binary Montgomery radix forces the exact convolution
+        // through the one-remainder-per-output path.
+        let modulus = Integer::from(2u64).pow(127) - &Integer::one();
+        let integer_field = FiniteField::<Integer>::new_non_prime(modulus.clone());
+        let maximum = &modulus - &Integer::one();
+        let left = (0..4)
+            .map(|offset| integer_field.to_element(&maximum - &Integer::from(offset as u64)))
+            .collect::<Vec<_>>();
+        let right = (4..8)
+            .map(|offset| integer_field.to_element(&maximum - &Integer::from(offset as u64)))
+            .collect::<Vec<_>>();
+        let operation = super::polynomial_kernels::DenseIntegerMontgomeryMul::new(
+            &integer_field,
+            DensePolynomialMulRequest {
+                output_len: 7,
+                left_coefficients: &left,
+                left_indices: &[0, 1, 2, 3],
+                right_coefficients: &right,
+                right_indices: &[0, 1, 2, 3],
+            },
+        )
+        .unwrap();
+        assert!(!operation.direct_montgomery_reduction);
+        assert_dense_polynomial_mul(
+            &integer_field,
+            &left,
+            &[0, 1, 2, 3],
+            &right,
+            &[0, 1, 2, 3],
+            7,
+        );
+
+        let cancellation_left = (0..4)
+            .map(|_| integer_field.to_element(Integer::one()))
+            .collect::<Vec<_>>();
+        let cancellation_right = [
+            Integer::one(),
+            &modulus - &Integer::one(),
+            Integer::one(),
+            &modulus - &Integer::one(),
+        ]
+        .map(|value| integer_field.to_element(value));
+        let cancellation = super::polynomial_kernels::DenseIntegerMontgomeryMul::new(
+            &integer_field,
+            DensePolynomialMulRequest {
+                output_len: 7,
+                left_coefficients: &cancellation_left,
+                left_indices: &[0, 1, 2, 3],
+                right_coefficients: &cancellation_right,
+                right_indices: &[0, 1, 2, 3],
+            },
+        )
+        .unwrap();
+        assert!(!cancellation.direct_montgomery_reduction);
+        assert_eq!(
+            integer_field
+                .try_dense_mul(DensePolynomialMulRequest {
+                    output_len: 7,
+                    left_coefficients: &cancellation_left,
+                    left_indices: &[0, 1, 2, 3],
+                    right_coefficients: &cancellation_right,
+                    right_indices: &[0, 1, 2, 3],
+                })
+                .unwrap()
+                .iter()
+                .map(|(index, _)| *index)
+                .collect::<Vec<_>>(),
+            [0, 2, 4, 6]
+        );
+
+        let sparse_indices = [0, 5000];
+        assert!(
+            super::polynomial_kernels::DenseIntegerMontgomeryMul::new(
+                &integer_field,
+                DensePolynomialMulRequest {
+                    output_len: 10_001,
+                    left_coefficients: &left[..2],
+                    left_indices: &sparse_indices,
+                    right_coefficients: &right[..2],
+                    right_indices: &sparse_indices,
+                },
+            )
+            .is_none()
+        );
 
         let total_degree = 47usize;
         let radix = total_degree + 1;
