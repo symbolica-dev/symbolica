@@ -25,7 +25,7 @@ use crate::domains::{
 };
 use crate::kernels::{
     ChunkedDensePolynomialMulRequest, DensePolynomialExactDivisionRequest,
-    DensePolynomialMulRequest, TotalDegreePolynomialMulRequest,
+    DensePolynomialMulRequest, PolynomialKernels, TotalDegreePolynomialMulRequest,
 };
 use crate::printer::{AtomPrinter, PrintOptions, PrintState};
 
@@ -39,6 +39,8 @@ const MAX_DENSE_DIV_BUFFER_SIZE: usize = 1 << 20;
 const MAX_MIXED_RADIX_DENSE_TO_PAIR_PRODUCT_RATIO: usize = 64;
 const MIN_CHUNKED_DENSE_VARIABLES: usize = 5;
 const MIN_MIXED_RADIX_TO_SIMPLEX_RATIO: usize = 64;
+const MIN_PREFERRED_TOTAL_DEGREE_WORKSPACE_RATIO: usize = 8;
+const MIN_TOTAL_DEGREE_PRODUCTS_PER_COEFFICIENT: usize = 32;
 const MIN_CHUNKED_DENSE_OUTPUT_LEN: usize = 1 << 18;
 const MAX_CHUNKED_DENSE_INNER_LEN: usize = 1 << 16;
 const MIN_CHUNKED_DENSE_OUTER_LEN: usize = 8;
@@ -83,6 +85,15 @@ fn chunked_dense_mul_is_preferred(
         && simplex_len
             .checked_mul(MIN_MIXED_RADIX_TO_SIMPLEX_RATIO)
             .is_some_and(|minimum| mixed_radix_len >= minimum)
+}
+
+/// Return whether a compact total-degree kernel saves enough workspace to precede mixed-radix
+/// dense multiplication.
+#[inline]
+fn total_degree_kernel_precedes_mixed_radix(mixed_radix_len: usize, simplex_len: usize) -> bool {
+    simplex_len
+        .checked_mul(MIN_PREFERRED_TOTAL_DEGREE_WORKSPACE_RATIO)
+        .is_some_and(|minimum| mixed_radix_len >= minimum)
 }
 
 /// Return whether a multivariate dense multiplication can use a bounded coefficient box.
@@ -1785,7 +1796,9 @@ impl<'a, F: Ring, E: Exponent> Mul<&'a MultivariatePolynomial<F, E, LexOrder>>
                 .mul_monomial(&rhs.coefficients[0], &rhs.exponents);
         }
 
-        if let Some(r) = self.mul_dense(rhs) {
+        if let Some(r) = self.try_preferred_total_degree_mul_before_mixed_radix(rhs) {
+            r
+        } else if let Some(r) = self.mul_dense(rhs) {
             r
         } else {
             self.heap_mul(rhs)
@@ -4111,12 +4124,16 @@ impl<F: Ring, E: Exponent> MultivariatePolynomial<F, E, LexOrder> {
         result
     }
 
-    /// Return the total degree and coefficient count for a bounded dense
-    /// total-degree multiplication, including the packed-exponent limits.
-    fn total_degree_dense_mul_shape(
+    /// Return the total degree and coefficient count for a bounded dense total-degree
+    /// multiplication at the requested minimum product density.
+    fn total_degree_dense_mul_shape_with_density(
         &self,
         other: &MultivariatePolynomial<F, E, LexOrder>,
+        minimum_products_per_coefficient: usize,
     ) -> Option<(usize, usize)> {
+        if minimum_products_per_coefficient == 0 {
+            return None;
+        }
         let variable_count = self.nvars();
         if variable_count != other.nvars()
             || !(2..=8).contains(&variable_count)
@@ -4161,12 +4178,59 @@ impl<F: Ring, E: Exponent> MultivariatePolynomial<F, E, LexOrder> {
         let coefficient_count = checked_binomial(total_degree + variable_count, variable_count)?;
         let product_count = self.nterms().checked_mul(other.nterms())?;
         if coefficient_count > MAX_DENSE_DIV_BUFFER_SIZE
-            || product_count < coefficient_count.saturating_mul(32)
+            || product_count < coefficient_count.saturating_mul(minimum_products_per_coefficient)
         {
             return None;
         }
 
         Some((total_degree, coefficient_count))
+    }
+
+    /// Return the shape selected by the ordinary compact total-degree multiplication heuristic.
+    fn total_degree_dense_mul_shape(
+        &self,
+        other: &MultivariatePolynomial<F, E, LexOrder>,
+    ) -> Option<(usize, usize)> {
+        self.total_degree_dense_mul_shape_with_density(
+            other,
+            MIN_TOTAL_DEGREE_PRODUCTS_PER_COEFFICIENT,
+        )
+    }
+
+    /// Try a compact coefficient-domain kernel before mixed-radix dense multiplication when the
+    /// ordinary total-degree density threshold is not reached but the compact workspace is much
+    /// smaller than the full coefficient box.
+    #[inline(always)]
+    fn try_preferred_total_degree_mul_before_mixed_radix(
+        &self,
+        other: &MultivariatePolynomial<F, E, LexOrder>,
+    ) -> Option<MultivariatePolynomial<F, E, LexOrder>> {
+        let kernels = self.ring().kernels();
+        let minimum_density = kernels.preferred_total_degree_mul_density()?;
+        let polynomial_kernel = kernels.polynomial()?;
+        let (_, simplex_len) =
+            self.total_degree_dense_mul_shape_with_density(other, minimum_density)?;
+        let product_count = self.nterms().checked_mul(other.nterms())?;
+        if product_count >= simplex_len.saturating_mul(MIN_TOTAL_DEGREE_PRODUCTS_PER_COEFFICIENT) {
+            return None;
+        }
+
+        let mixed_radix_len = (0..self.nvars()).try_fold(1usize, |product, variable| {
+            let radix = 1usize
+                .checked_add(self.degree(variable).to_i32() as usize)?
+                .checked_add(other.degree(variable).to_i32() as usize)?;
+            product.checked_mul(radix)
+        })?;
+        if !total_degree_kernel_precedes_mixed_radix(mixed_radix_len, simplex_len) {
+            return None;
+        }
+
+        self.try_total_degree_dense_mul_with_density_and_kernel(
+            other,
+            minimum_density,
+            true,
+            Some(polynomial_kernel),
+        )
     }
 
     /// Return whether multiplication can use the bounded total-degree simplex workspace.
@@ -4186,8 +4250,43 @@ impl<F: Ring, E: Exponent> MultivariatePolynomial<F, E, LexOrder> {
         &self,
         other: &MultivariatePolynomial<F, E, LexOrder>,
     ) -> Option<MultivariatePolynomial<F, E, LexOrder>> {
+        self.try_total_degree_dense_mul_with_density(
+            other,
+            MIN_TOTAL_DEGREE_PRODUCTS_PER_COEFFICIENT,
+            false,
+        )
+    }
+
+    /// Multiply on a compact total-degree simplex at a specified product density.
+    ///
+    /// When `specialized_only` is true, this builds a result only when a coefficient-domain kernel
+    /// accepts the request. Otherwise it performs the generic ring-operation fallback as well.
+    fn try_total_degree_dense_mul_with_density(
+        &self,
+        other: &MultivariatePolynomial<F, E, LexOrder>,
+        minimum_products_per_coefficient: usize,
+        specialized_only: bool,
+    ) -> Option<MultivariatePolynomial<F, E, LexOrder>> {
+        let kernels = self.ring().kernels();
+        self.try_total_degree_dense_mul_with_density_and_kernel(
+            other,
+            minimum_products_per_coefficient,
+            specialized_only,
+            kernels.polynomial(),
+        )
+    }
+
+    /// Multiply on a compact total-degree simplex using the supplied coefficient-domain kernel.
+    fn try_total_degree_dense_mul_with_density_and_kernel(
+        &self,
+        other: &MultivariatePolynomial<F, E, LexOrder>,
+        minimum_products_per_coefficient: usize,
+        specialized_only: bool,
+        polynomial_kernel: Option<&dyn PolynomialKernels<F::Element>>,
+    ) -> Option<MultivariatePolynomial<F, E, LexOrder>> {
         let variable_count = self.nvars();
-        let (total_degree, coefficient_count) = self.total_degree_dense_mul_shape(other)?;
+        let (total_degree, coefficient_count) = self
+            .total_degree_dense_mul_shape_with_density(other, minimum_products_per_coefficient)?;
 
         let rank_table = total_degree_rank_table(variable_count, total_degree)?;
         let radix = total_degree + 1;
@@ -4218,7 +4317,7 @@ impl<F: Ring, E: Exponent> MultivariatePolynomial<F, E, LexOrder> {
         let left_codes = encode_terms(self);
         let right_codes = encode_terms(other);
 
-        let specialized = self.ring().kernels().polynomial().and_then(|kernels| {
+        let specialized = polynomial_kernel.and_then(|kernels| {
             kernels.try_total_degree_mul(TotalDegreePolynomialMulRequest {
                 output_len: coefficient_count,
                 left_coefficients: &self.coefficients,
@@ -4231,39 +4330,6 @@ impl<F: Ring, E: Exponent> MultivariatePolynomial<F, E, LexOrder> {
                 suffix_code_count,
             })
         });
-
-        let mut coefficients = vec![self.ring().zero(); coefficient_count];
-        if let Some(specialized) = specialized {
-            for (rank, coefficient) in specialized {
-                *coefficients.get_mut(rank as usize)? = coefficient;
-            }
-        } else {
-            for (left_coefficient, &(left_prefix, left_suffix)) in
-                self.coefficients.iter().zip(&left_codes)
-            {
-                for (right_coefficient, &(right_prefix, right_suffix)) in
-                    other.coefficients.iter().zip(&right_codes)
-                {
-                    let prefix = left_prefix + right_prefix;
-                    let suffix = left_suffix + right_suffix;
-                    let remaining_degree =
-                        unsafe { *rank_table.prefix_remaining.get_unchecked(prefix) } as usize;
-                    debug_assert_ne!(remaining_degree, u8::MAX as usize);
-                    let rank = unsafe { *rank_table.prefix_rank.get_unchecked(prefix) } as usize
-                        + unsafe {
-                            *rank_table
-                                .suffix_rank
-                                .get_unchecked(remaining_degree * suffix_code_count + suffix)
-                        } as usize;
-                    debug_assert!(rank < coefficient_count);
-                    self.ring().add_mul_assign(
-                        unsafe { coefficients.get_unchecked_mut(rank) },
-                        left_coefficient,
-                        right_coefficient,
-                    );
-                }
-            }
-        }
 
         fn unrank(
             mut rank: usize,
@@ -4293,6 +4359,58 @@ impl<F: Ring, E: Exponent> MultivariatePolynomial<F, E, LexOrder> {
 
         let choose = |n: usize, k: usize| rank_table.choose(n, k);
         let mut digits = vec![0usize; variable_count];
+
+        if let Some(specialized) = specialized {
+            let mut result = self.zero_with_capacity(specialized.len());
+            let mut previous_rank = None;
+            for (rank, coefficient) in specialized {
+                let rank = rank as usize;
+                if rank >= coefficient_count
+                    || previous_rank.is_some_and(|previous| rank <= previous)
+                    || self.ring().is_zero(&coefficient)
+                {
+                    return None;
+                }
+                previous_rank = Some(rank);
+                unrank(rank, total_degree, &mut digits, choose);
+                result.coefficients.push(coefficient);
+                result
+                    .exponents
+                    .extend(digits.iter().map(|&exponent| E::from_i32(exponent as i32)));
+            }
+            return Some(result);
+        }
+        if specialized_only {
+            return None;
+        }
+
+        let mut coefficients = vec![self.ring().zero(); coefficient_count];
+        for (left_coefficient, &(left_prefix, left_suffix)) in
+            self.coefficients.iter().zip(&left_codes)
+        {
+            for (right_coefficient, &(right_prefix, right_suffix)) in
+                other.coefficients.iter().zip(&right_codes)
+            {
+                let prefix = left_prefix + right_prefix;
+                let suffix = left_suffix + right_suffix;
+                let remaining_degree =
+                    unsafe { *rank_table.prefix_remaining.get_unchecked(prefix) } as usize;
+                debug_assert_ne!(remaining_degree, u8::MAX as usize);
+                let rank = unsafe { *rank_table.prefix_rank.get_unchecked(prefix) } as usize
+                    + unsafe {
+                        *rank_table
+                            .suffix_rank
+                            .get_unchecked(remaining_degree * suffix_code_count + suffix)
+                    } as usize;
+                debug_assert!(rank < coefficient_count);
+                self.ring().add_mul_assign(
+                    unsafe { coefficients.get_unchecked_mut(rank) },
+                    left_coefficient,
+                    right_coefficient,
+                );
+            }
+        }
+
         let mut result = self.zero_with_capacity(coefficient_count);
         for (rank, coefficient) in coefficients.into_iter().enumerate() {
             if self.ring().is_zero(&coefficient) {
@@ -6549,6 +6667,7 @@ mod test {
         IntegerPolynomialCrtContext, MultivariatePolynomial, PolynomialRing,
         PolynomialSamplingPolicy, chunked_dense_mul_is_preferred, mixed_radix_dense_mul_is_bounded,
         mixed_radix_dense_work_is_bounded, packed_row_merge_is_bounded,
+        total_degree_kernel_precedes_mixed_radix,
     };
 
     #[test]
@@ -7318,6 +7437,22 @@ mod test {
     }
 
     #[test]
+    fn preferred_total_degree_kernel_requires_a_smaller_workspace() {
+        assert!(total_degree_kernel_precedes_mixed_radix(
+            9usize.pow(5),
+            1_287,
+        ));
+        assert!(!total_degree_kernel_precedes_mixed_radix(
+            13usize.pow(2),
+            91,
+        ));
+        assert!(!total_degree_kernel_precedes_mixed_radix(
+            usize::MAX,
+            usize::MAX,
+        ));
+    }
+
+    #[test]
     fn mul_full() {
         let p1 = parse!("v1^2+v2^3*v3*+3*v1^4+4*v2*v3+v4+v5+v6*v1*v2+v7*v5+v8+v9*v8")
             .to_polynomial::<_, u8>(&Z, None);
@@ -7378,11 +7513,11 @@ mod test {
             parse!("(1-a+b+c-d-e+f+g-h)^5+1").to_polynomial::<_, u8>(&Z, left.variables().clone());
         assert_product(&left, &right);
 
-        let left = parse!("1000000000*(1+a+b+c+d+e)^6").to_polynomial::<_, u8>(&Z, None);
-        let right = parse!("1000000000*(1-a+2*b-c+2*d-e)^6")
+        let left = parse!("1000000000*(1+a+b+c+d+e)^8").to_polynomial::<_, u8>(&Z, None);
+        let right = parse!("1000000000*(1-a+2*b-c+2*d-e)^8")
             .to_polynomial::<_, u8>(&Z, left.variables().clone());
         let actual = left.try_total_degree_dense_mul(&right).unwrap();
-        let expected = left.mul_dense(&right).unwrap();
+        let expected = reference_integer_product(&left, &right);
         assert_eq!(actual, expected);
         assert!(
             actual
@@ -7394,10 +7529,46 @@ mod test {
         let left = parse!("(1+3*a+5*b+7*c+9*d+11*e)^7-1").to_polynomial::<_, u8>(&Z, None);
         let right = parse!("(1+3*a+5*b+7*c+9*d-11*e)^7+3")
             .to_polynomial::<_, u8>(&Z, left.variables().clone());
+        assert!(
+            left.try_preferred_total_degree_mul_before_mixed_radix(&right)
+                .is_none()
+        );
         let chunked = &left * &right;
         let compact = left.try_total_degree_dense_mul(&right).unwrap();
         assert_eq!(chunked, compact);
         assert_eq!(chunked.nterms(), 6_967);
+    }
+
+    #[cfg(feature = "integer-gmp")]
+    #[test]
+    fn total_degree_limb_multiplication_precedes_sparse_mixed_radix_workspace() {
+        let left = parse!(
+            "(1+100000000000000000000000000000000000000*a+100000000000000000000000000000000000003*b+100000000000000000000000000000000000007*c+100000000000000000000000000000000000009*d+100000000000000000000000000000000000021*e)^4-1"
+        )
+        .to_polynomial::<_, u8>(&Z, None);
+        let right = parse!(
+            "(1-100000000000000000000000000000000000033*a+100000000000000000000000000000000000037*b-100000000000000000000000000000000000039*c+100000000000000000000000000000000000051*d-100000000000000000000000000000000000063*e)^4+1"
+        )
+        .to_polynomial::<_, u8>(&Z, left.variables().clone());
+
+        assert!(
+            left.total_degree_dense_mul_shape_with_density(&right, 32)
+                .is_none()
+        );
+        assert!(
+            left.total_degree_dense_mul_shape_with_density(&right, 8)
+                .is_some()
+        );
+        assert!(
+            left.try_preferred_total_degree_mul_before_mixed_radix(&right)
+                .is_some()
+        );
+        let compact = left
+            .try_total_degree_dense_mul_with_density(&right, 8, true)
+            .unwrap();
+        let expected = reference_integer_product(&left, &right);
+        assert_eq!(compact, expected);
+        assert_eq!(&left * &right, expected);
     }
 
     #[test]

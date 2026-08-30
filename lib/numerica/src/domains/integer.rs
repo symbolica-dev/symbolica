@@ -2458,7 +2458,15 @@ impl Ring for IntegerRing {
 
     #[inline]
     fn kernels(&self) -> RingKernels<'_, Self::Element> {
-        RingKernels::empty().with_polynomial(self)
+        let kernels = RingKernels::empty().with_polynomial(self);
+        #[cfg(feature = "integer-gmp")]
+        {
+            kernels.with_preferred_total_degree_mul_density(8)
+        }
+        #[cfg(feature = "integer-malachite")]
+        {
+            kernels
+        }
     }
 
     #[inline]

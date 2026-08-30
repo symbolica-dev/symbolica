@@ -1,19 +1,20 @@
 # Polynomial performance continuation handoff
 
 This is the live continuation record for the single-core Symbolica/FLINT polynomial-performance
-work. It was refreshed on 2026-08-29 after adding fixed-width contiguous Kronecker packing and
-guarded geometric factor-prime sampling. The final post-rebase rows move the dense degree-64
-product from `1.094628` to `1.017409` S/F and its factorization from `1.128065` to `1.031329`
-S/F. The base Rust/FLINT comparison inventory was measured at performance-equivalent source head
-`b2e5d28`, with later accepted rows replacing their exploratory predecessors as documented below.
+work. It was refreshed on 2026-08-29 after adding native fixed-width compact-simplex integer
+accumulation and guarded early total-degree routing. The new path moves dense eight-variable
+degree-5 and dense seven-variable degree-7 product construction from `1.610087` and `1.584134`
+to `0.326626` and `0.423081` S/F. The base Rust/FLINT comparison inventory was measured at
+performance-equivalent source head `b2e5d28`, with later accepted rows replacing their exploratory
+predecessors as documented below.
 Keep this file current whenever an experiment is accepted, rejected, or left partly complete. The
 purpose is that another agent can resume without reconstructing decisions from chat history or
 transient binary names.
 
 The complete current Symbolica/FLINT scoreboard is in
 [CURRENT_STATUS.md](CURRENT_STATUS.md), with the latest immutable snapshot in
-[CURRENT_STATUS_v11.md](CURRENT_STATUS_v11.md). Its primary statistics contain 116 non-resultant
-comparisons: 91 favor Symbolica and 25 favor FLINT. The six Ducos, six Brown, and six CRT
+[CURRENT_STATUS_v12.md](CURRENT_STATUS_v12.md). Its primary statistics contain 116 non-resultant
+comparisons: 97 favor Symbolica and 19 favor FLINT. The six Ducos, six Brown, and six CRT
 measurements are retained only in a compact appendix note and do not affect primary ranks or
 summary statistics. After every accepted optimization, update the live file and create the next
 numbered snapshot with an opening paragraph that describes the changes from its predecessor.
@@ -3023,6 +3024,100 @@ Perf is available at:
 Use `cycles:u`, 999 Hz, and `--call-graph lbr` for profiles. Save stdout and `sha256sum` for both
 the perf data and generated reports.
 
+## Accepted compact-simplex integer multiplication
+
+The dense eight-variable degree-5 factors contain 1,286--1,287 terms each, so each product forms
+about 1.65 million coefficient pairs but only 43,758 possible total-degree output cells. Every
+input coefficient is `Integer::Single`, and a conservative collision bound fits the accumulated
+coefficients in fixed native storage. The old total-degree kernel nevertheless flattened the
+inputs to GMP limbs and called low-level GMP multiplication for every pair. A pre-change LBR
+profile attributed 31.67% of the combined Symbolica/FLINT samples directly to
+`TotalDegreeIntegerMul`, with GMP multiply/add/subtract routines dominating that subtree. FLINT's
+corresponding one-word Johnson path uses a small signed accumulator instead of a GMP object per
+pair.
+
+`TotalDegreeIntegerMul` now tries a machine-integer strategy before its retained GMP-limb
+strategy. It scans both coefficient arrays once, requiring every value to be `Integer::Single`,
+and proves
+
+`max_abs(left) * max_abs(right) * min(left_terms, right_terms) <= i128::MAX`.
+
+Distinct input monomials imply that at most `min(left_terms, right_terms)` pairs can contribute to
+one output monomial, so this also bounds every partial sum. The kernel selects `i64` when possible
+and otherwise `i128`; unsupported coefficients or bounds continue through the existing GMP path.
+The rank-table layout is validated before unsafe inner loops, output ranks use checked arithmetic,
+and the compact workspace is capped at `2^20` cells. The rank scan emits only nonzero
+`(rank, coefficient)` pairs in increasing order. Polynomial reconstruction consumes those pairs
+directly, removing the former second dense `Vec<Integer>` and scan.
+
+High-height inputs need a different improvement because their coefficients are already GMP-backed.
+`RingKernels` now lets a coefficient domain advertise the minimum compact output density at which
+its total-degree multiplication kernel should precede mixed-radix dense multiplication. GMP
+integers select density 8. The polynomial dispatcher takes this early route only when the ordinary
+density-32 total-degree selector has not already applied and the mixed-radix workspace is at least
+eight times larger than the compact simplex. These are support geometry and domain-capability
+tests; they contain no benchmark names, fixed variable choice, or coefficient-value fingerprint.
+Malachite integers and finite fields do not advertise the preference and retain their old route.
+
+The first broad placement put the preference inside generic `mul_dense`. It produced the direct
+product wins but regressed dense seven-variable end-to-end GCD from about `1.61 s` to `1.83 s`.
+Profiles localized the loss to finite-field `construct_new_image_single_scale`, not to the native
+integer kernel. That version was rejected. The final placement is an integer-domain opt-in before
+`mul_dense`; the generic dense implementation is source-identical to its control. Raw rejected
+A/B runs are `/tmp/dense7d7-gcd-ab-0{1..6}-{control,candidate}.csv`. The rejected candidate profile
+is `/tmp/profile-dense7d7-gcd-total-degree-v3.perf.data`, SHA-256
+`86ea30186730b2499e620921fdd92b3b654e52e96cd0a1dcaf35e87816a19fbc`; its control is
+`/tmp/profile-dense7d7-gcd-control.perf.data`, SHA-256
+`b7c46ced85faa9106ab14772c7471c0322dc60340c116f6a5369f418a1fef3f3`.
+
+An initially defensive `2^20` pair-product floor on native accumulation was also removed after a
+source-matched route experiment. On compact-simplex inputs that genuinely enter this kernel, six
+alternating 100-sample processes give:
+
+| Shape | Limb-control Symbolica | Native Symbolica | Reduction |
+|---|---:|---:|---:|
+| dense 5 variables degree 4 | `0.653795 ms` | `0.166174 ms` | `74.58%` |
+| dense 8 variables degree 3 | `1.245218 ms` | `0.372313 ms` | `70.10%` |
+
+Raw files are `/tmp/native-small-simplex-{5v4,8v3}-{candidate,control}-{01..06}.csv`. Earlier
+three- and four-variable crossover probes were invalid as kernel comparisons because those shapes
+continued through the preferred mixed-radix dense implementation; their small timing differences
+were route-external noise and must not be used to restore the pair-count floor.
+
+Six final repeated processes, pinned sequentially to core 8, give:
+
+| Primary product row | Symbolica | FLINT | S/F | Previous S/F |
+|---|---:|---:|---:|---:|
+| dense 8 variables degree 5 | `10.117325 ms` | `30.944390 ms` | `0.326626` | `1.610087` |
+| dense 7 variables degree 7 | `86.610154 ms` | `204.985350 ms` | `0.423081` | `1.584134` |
+| seven-variable power-minus-one | `45.841458 ms` | `102.265095 ms` | `0.448043` | `1.348957` |
+| high-height 5v d4, 128 bits | `1.857376 ms` | `2.171416 ms` | `0.857372` | `1.576901` |
+| high-height 5v d4, 256 bits | `4.505168 ms` | `4.793389 ms` | `0.940781` | `1.246310` |
+| high-height 5v d4, 512 bits | `14.849971 ms` | `14.082343 ms` | `1.054182` | `1.059355` |
+| high-height 5v d4, 1024 bits | `41.013601 ms` | `40.324222 ms` | `1.017696` | `1.019191` |
+| high-height 8v d3, 256 bits | `5.484608 ms` | `6.004982 ms` | `0.913425` | `1.054112` |
+
+Raw product files use `/tmp/final-v5-<case>-<run>.csv`, with cases `dense8-product`,
+`dense7-product`, `power7`, `high5-product`, and `high8-product`, and runs `01..06`.
+End-to-end guards are `0.608434` for dense 8v, `0.927916` for
+dense 7v, `0.473474` for high-height 8v, and `0.432587, 0.436824, 0.440813, 0.475476` for
+high-height 5v at 128--1024 bits. All shifts are below 3%; the scoreboard retains the preceding
+robust operation rows. Guard files use the same pattern with cases `dense8-gcd`, `dense7-gcd`,
+`high5-gcd`, and `high8-gcd`.
+
+The exact final full-LTO benchmark binary is `/tmp/flint-comparison-total-degree-fixed-v5`,
+SHA-256 `1c99192014cb39bd618bff98e11fcd6ff1c611062fb128d6aa97cd19aa38ea04`; its build JSON is
+`/tmp/flint-comparison-total-degree-fixed-v5-build.jsonl`, SHA-256
+`1048895be29b47a9fb73d42377e565e962682c255366fa9bb7058b864b36e63e`. The pre-change dense-8
+profile is `/tmp/profile-dense8d5-current-lbr.perf.data`, SHA-256
+`8ba16391e9968f58d2dd22c0271edd54d9c847423d00caab73fbf16faab537e5`.
+
+Focused default-GMP tests pass 4/4, including native `i64`, native `i128`, GMP-limb, route, and
+chunked-route preservation cases. The corresponding Malachite test passes 1/1 with
+`integer-malachite,float-astro,native_code_generation`. The current immutable scoreboard is
+`CURRENT_STATUS_v12.md`: 97 of 116 primary rows favor Symbolica, 19 favor FLINT, and the median is
+`0.640412` S/F.
+
 ## Rejected or low-value experiments
 
 Do not repeat these without a genuinely new mechanism:
@@ -3092,23 +3187,36 @@ comments that justify file organization by contrasting it with designs not prese
 
 ## Current ordered next actions
 
-1. Treat the configured degree-48 and degree-64 GCD cases as closed at `0.889777` and `0.852433`
+1. Attack the current worst primary row, PolyBench eight-variable sharp GCD #140 at `1.268240`
+   S/F. Its current Hu plan uses about 80 images. The most promising generic selector measures, for
+   each variable and input, the maximum number of terms in one coefficient row. Preserve the
+   existing variable unless another variable/input anchor reduces that maximum by at least 4x,
+   corresponding to two full Hu sampling doublings. On 600 withheld generated sparse-product
+   supports this conservative rule improved 40 schedules, left 560 unchanged, and regressed none;
+   it predicts #140 and sharp #11 falling from 80 to 16 images. Implement it only in Hu planning,
+   then guard all 11 nontrivial PolyBench GCD fixtures plus generated sparse/high-gap/dense cases.
+2. Benchmark the independent off-by-one correction in `terms_with_max_degree` separately. It
+   currently omits the first term and reports zero for a one-term polynomial. The correction is
+   semantic, but it changes the existing Zippel variable ordering and must not be conflated with
+   the Hu-specific selector.
+3. The next remaining rows are dense degree-65 factorization (`1.171321`), near-`2^64` finite-field
+   dense multiplication (`1.137177`), high-height degree-33 factorization (`1.111896`), and
+   PolyBench factorization #105 (`1.106606`). For #105, first try an exact two-sparsest-layer GCD
+   certificate in `factor_separable`: a constant pair GCD proves the complete coefficient content
+   is constant; a nonconstant result can replace the pair before the unchanged full fallback.
+4. Treat the configured degree-48 and degree-64 GCD cases as closed at `0.889777` and `0.852433`
    S/F unless a smaller mechanism gives another decisive gain. Degree 80 remains `1.075107`; profile
    it before changing the reconstruction selector again because the remaining gap may be outside
    CRT image count.
-2. Attack the primary scoreboard's current worst row next: generated dense eight-variable
-   degree-5 GCD product construction at `1.610087` S/F. The next two worst rows are also
-   multiplication-heavy, so prefer a bounded product-layout improvement with guards over GCD-route
-   heuristics.
-3. Treat dense degree-64 factorization as closed at `1.031329` S/F. The tested `17^10` subset
+5. Treat dense degree-64 factorization as closed at `1.031329` S/F. The tested `17^10` subset
    reconstruction does not shorten the lift; profile a different mechanism before revisiting it.
-4. Treat the degree-64 integer product as closed at `1.017409` S/F. The accepted fixed-width
+6. Treat the degree-64 integer product as closed at `1.017409` S/F. The accepted fixed-width
    contiguous packer covers this regime; do not repeat the rejected one-scan generic context or
    direct-limb-only conversion.
-5. Preserve the constant-coordinate selector's strict-win rule and lazy leading fallback. Any
+7. Preserve the constant-coordinate selector's strict-win rule and lazy leading fallback. Any
    broader projective-coordinate selection needs a proof that the selected coefficient is nonzero
    in every retained image and an exact-division certificate.
-6. Keep all algorithm-specific resultant measurements in the historical appendix and outside the
+8. Keep all algorithm-specific resultant measurements in the historical appendix and outside the
    116-row primary statistics. Freeze and hash every accepted full-LTO binary and profile, commit
    with Ben Ruijl's identity, and create the next immutable `CURRENT_STATUS_v<i>.md` snapshot after
    every accepted improvement.

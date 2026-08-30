@@ -1241,13 +1241,19 @@ struct TotalDegreeIntegerMul<'a> {
 }
 
 impl<'a> TotalDegreeIntegerMul<'a> {
+    const MAX_OUTPUT_CELLS: usize = 1 << 20;
+
     /// Retain the layout and coefficient slices for one total-degree multiplication.
     fn new(request: TotalDegreePolynomialMulRequest<'a, Integer>) -> Self {
         Self { request }
     }
 
-    /// Run the specialized total-degree strategy when GMP limb operations are available.
+    /// Run the first applicable compact total-degree multiplication strategy.
     fn run(self) -> Option<Vec<(u32, Integer)>> {
+        if let Some(output) = self.try_single() {
+            return Some(output);
+        }
+
         #[cfg(feature = "integer-gmp")]
         {
             self.try_limb()
@@ -1258,6 +1264,201 @@ impl<'a> TotalDegreeIntegerMul<'a> {
             let _ = request;
             None
         }
+    }
+
+    /// Check the compact rank tables and every encoded input range used by the inner loops.
+    fn layout_is_valid(&self) -> bool {
+        let request = &self.request;
+        if request.left_codes.len() != request.left_coefficients.len()
+            || request.right_codes.len() != request.right_coefficients.len()
+            || request.left_coefficients.is_empty()
+            || request.right_coefficients.is_empty()
+            || request.output_len == 0
+            || request.output_len > Self::MAX_OUTPUT_CELLS
+            || u32::try_from(request.output_len.saturating_sub(1)).is_err()
+            || request.prefix_rank.len() != request.prefix_remaining.len()
+            || request.suffix_code_count == 0
+            || !request
+                .suffix_rank
+                .len()
+                .is_multiple_of(request.suffix_code_count)
+        {
+            return false;
+        }
+
+        let suffix_rows = request.suffix_rank.len() / request.suffix_code_count;
+        if request
+            .prefix_remaining
+            .iter()
+            .copied()
+            .filter(|remaining| *remaining != u8::MAX)
+            .any(|remaining| remaining as usize >= suffix_rows)
+        {
+            return false;
+        }
+
+        let Some(maximum_prefix) =
+            request
+                .left_codes
+                .iter()
+                .map(|code| code.0)
+                .max()
+                .and_then(|left| {
+                    request
+                        .right_codes
+                        .iter()
+                        .map(|code| code.0)
+                        .max()
+                        .and_then(|right| left.checked_add(right))
+                })
+        else {
+            return false;
+        };
+        let Some(maximum_suffix) =
+            request
+                .left_codes
+                .iter()
+                .map(|code| code.1)
+                .max()
+                .and_then(|left| {
+                    request
+                        .right_codes
+                        .iter()
+                        .map(|code| code.1)
+                        .max()
+                        .and_then(|right| left.checked_add(right))
+                })
+        else {
+            return false;
+        };
+
+        maximum_prefix < request.prefix_rank.len() && maximum_suffix < request.suffix_code_count
+    }
+
+    /// Multiply machine-size input coefficients in native fixed-width output cells.
+    ///
+    /// This path serves total-degree products whose tagged coefficients are all
+    /// [`Integer::Single`]. A bound on the largest product times the maximum collision count proves
+    /// that every partial sum fits in either `i64` or `i128`; wider cases retain the limb kernel.
+    fn try_single(&self) -> Option<Vec<(u32, Integer)>> {
+        const BLOCK_SIZE: usize = 32;
+
+        if !self.layout_is_valid() {
+            return None;
+        }
+        let request = &self.request;
+        let collect_single = |coefficients: &[Integer]| {
+            let mut values = Vec::with_capacity(coefficients.len());
+            let mut maximum = 0u64;
+            for coefficient in coefficients {
+                let Integer::Single(value) = coefficient else {
+                    return None;
+                };
+                maximum = maximum.max(value.unsigned_abs());
+                values.push(*value);
+            }
+            Some((values, maximum))
+        };
+        let (left_coefficients, maximum_left) = collect_single(request.left_coefficients)?;
+        let (right_coefficients, maximum_right) = collect_single(request.right_coefficients)?;
+        let coefficient_bound = u128::from(maximum_left)
+            .checked_mul(u128::from(maximum_right))?
+            .checked_mul(left_coefficients.len().min(right_coefficients.len()) as u128)?;
+        if coefficient_bound > i128::MAX as u128 {
+            return None;
+        }
+
+        /// Accumulate one compact-simplex product in the fixed type selected by the proven bound.
+        fn multiply_fixed<T>(
+            request: &TotalDegreePolynomialMulRequest<'_, Integer>,
+            left_coefficients: &[T],
+            right_coefficients: &[T],
+            into_integer: impl Fn(T) -> Integer,
+        ) -> Option<Vec<(u32, Integer)>>
+        where
+            T: Copy + Default + PartialEq + std::ops::AddAssign + std::ops::Mul<Output = T>,
+        {
+            let mut coefficients = vec![T::default(); request.output_len];
+            for left_block in (0..left_coefficients.len()).step_by(BLOCK_SIZE) {
+                for right_block in (0..right_coefficients.len()).step_by(BLOCK_SIZE) {
+                    for left_index in
+                        left_block..(left_block + BLOCK_SIZE).min(left_coefficients.len())
+                    {
+                        let left_coefficient =
+                            unsafe { *left_coefficients.get_unchecked(left_index) };
+                        let (left_prefix, left_suffix) =
+                            unsafe { *request.left_codes.get_unchecked(left_index) };
+                        for right_index in
+                            right_block..(right_block + BLOCK_SIZE).min(right_coefficients.len())
+                        {
+                            let (right_prefix, right_suffix) =
+                                unsafe { *request.right_codes.get_unchecked(right_index) };
+                            let prefix = left_prefix + right_prefix;
+                            let suffix = left_suffix + right_suffix;
+                            let remaining_degree =
+                                unsafe { *request.prefix_remaining.get_unchecked(prefix) };
+                            if remaining_degree == u8::MAX {
+                                return None;
+                            }
+                            let suffix_rank = unsafe {
+                                *request.suffix_rank.get_unchecked(
+                                    remaining_degree as usize * request.suffix_code_count + suffix,
+                                )
+                            };
+                            if suffix_rank == u32::MAX {
+                                return None;
+                            }
+                            let prefix_rank = unsafe { *request.prefix_rank.get_unchecked(prefix) };
+                            if prefix_rank == u32::MAX {
+                                return None;
+                            }
+                            let rank = usize::try_from(prefix_rank)
+                                .ok()?
+                                .checked_add(usize::try_from(suffix_rank).ok()?)?;
+                            if rank >= request.output_len {
+                                return None;
+                            }
+                            unsafe {
+                                *coefficients.get_unchecked_mut(rank) += left_coefficient
+                                    * *right_coefficients.get_unchecked(right_index);
+                            }
+                        }
+                    }
+                }
+            }
+
+            let mut output = Vec::with_capacity(request.output_len);
+            for (rank, coefficient) in coefficients.into_iter().enumerate() {
+                if coefficient != T::default() {
+                    output.push((u32::try_from(rank).ok()?, into_integer(coefficient)));
+                }
+            }
+            Some(output)
+        }
+
+        if coefficient_bound <= i64::MAX as u128 {
+            return multiply_fixed(
+                request,
+                &left_coefficients,
+                &right_coefficients,
+                Integer::from,
+            );
+        }
+
+        let left_coefficients = left_coefficients
+            .into_iter()
+            .map(i128::from)
+            .collect::<Vec<_>>();
+        let right_coefficients = right_coefficients
+            .into_iter()
+            .map(i128::from)
+            .collect::<Vec<_>>();
+        multiply_fixed(
+            request,
+            &left_coefficients,
+            &right_coefficients,
+            Integer::from_double,
+        )
     }
 
     #[cfg(feature = "integer-gmp")]
@@ -1281,6 +1482,9 @@ impl<'a> TotalDegreeIntegerMul<'a> {
             return None;
         }
 
+        if !self.layout_is_valid() {
+            return None;
+        }
         let TotalDegreePolynomialMulRequest {
             output_len,
             left_coefficients,
@@ -1292,26 +1496,6 @@ impl<'a> TotalDegreeIntegerMul<'a> {
             suffix_rank,
             suffix_code_count,
         } = self.request;
-        if left_codes.len() != left_coefficients.len()
-            || right_codes.len() != right_coefficients.len()
-            || left_coefficients.is_empty()
-            || right_coefficients.is_empty()
-            || prefix_rank.len() != prefix_remaining.len()
-            || suffix_code_count == 0
-            || !suffix_rank.len().is_multiple_of(suffix_code_count)
-        {
-            return None;
-        }
-        let suffix_rows = suffix_rank.len() / suffix_code_count;
-        if prefix_remaining
-            .iter()
-            .copied()
-            .filter(|remaining| *remaining != u8::MAX)
-            .any(|remaining| remaining as usize >= suffix_rows)
-        {
-            return None;
-        }
-
         #[derive(Clone, Copy)]
         struct LimbRange {
             offset: u32,
@@ -1378,16 +1562,6 @@ impl<'a> TotalDegreeIntegerMul<'a> {
         let limbs_per_coefficient = usize::try_from(output_bits.div_ceil(64)).ok()?.max(1);
         let output_limb_count = output_len.checked_mul(limbs_per_coefficient)?;
         if output_limb_count > MAX_OUTPUT_LIMBS {
-            return None;
-        }
-
-        let maximum_left_prefix = left_codes.iter().map(|code| code.0).max()?;
-        let maximum_right_prefix = right_codes.iter().map(|code| code.0).max()?;
-        let maximum_left_suffix = left_codes.iter().map(|code| code.1).max()?;
-        let maximum_right_suffix = right_codes.iter().map(|code| code.1).max()?;
-        if maximum_left_prefix.checked_add(maximum_right_prefix)? >= prefix_rank.len()
-            || maximum_left_suffix.checked_add(maximum_right_suffix)? >= suffix_code_count
-        {
             return None;
         }
 
@@ -1512,7 +1686,9 @@ impl<'a> TotalDegreeIntegerMul<'a> {
                         if prefix_rank == u32::MAX {
                             return None;
                         }
-                        let rank = prefix_rank as usize + suffix_rank as usize;
+                        let rank = usize::try_from(prefix_rank)
+                            .ok()?
+                            .checked_add(usize::try_from(suffix_rank).ok()?)?;
                         if rank >= output_len {
                             return None;
                         }
@@ -1561,7 +1737,7 @@ impl<'a> TotalDegreeIntegerMul<'a> {
             if negative {
                 value = -value;
             }
-            output.push((index as u32, Integer::from(value)));
+            output.push((u32::try_from(index).ok()?, Integer::from(value)));
         }
         Some(output)
     }

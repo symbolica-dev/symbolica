@@ -110,7 +110,8 @@ pub trait PolynomialKernels<E> {
     /// Multiply coefficients on total-degree simplices.
     ///
     /// Compact simplex ranks are not additive. The request's code and rank tables map each product
-    /// directly to its compact output rank.
+    /// directly to its compact output rank. On success, the result contains only nonzero
+    /// `(rank, coefficient)` pairs in strictly increasing rank order.
     fn try_total_degree_mul(
         &self,
         _request: TotalDegreePolynomialMulRequest<'_, E>,
@@ -134,6 +135,7 @@ pub trait PolynomialKernels<E> {
 pub struct RingKernels<'a, E> {
     polynomial: Option<&'a dyn PolynomialKernels<E>>,
     geometric_sequences: Option<&'a dyn GeometricSequenceKernels<E>>,
+    preferred_total_degree_mul_density: Option<usize>,
 }
 
 impl<'a, E> RingKernels<'a, E> {
@@ -143,6 +145,7 @@ impl<'a, E> RingKernels<'a, E> {
         Self {
             polynomial: None,
             geometric_sequences: None,
+            preferred_total_degree_mul_density: None,
         }
     }
 
@@ -165,6 +168,15 @@ impl<'a, E> RingKernels<'a, E> {
         self
     }
 
+    /// Try the coefficient domain's total-degree multiplication kernel before mixed-radix dense
+    /// multiplication once this many coefficient products contribute per compact output cell.
+    #[inline]
+    #[must_use]
+    pub fn with_preferred_total_degree_mul_density(mut self, density: usize) -> Self {
+        self.preferred_total_degree_mul_density = (density > 0).then_some(density);
+        self
+    }
+
     /// Return polynomial multiplication and division kernels, when available.
     #[inline]
     pub fn polynomial(&self) -> Option<&'a dyn PolynomialKernels<E>> {
@@ -175,5 +187,11 @@ impl<'a, E> RingKernels<'a, E> {
     #[inline]
     pub fn geometric_sequences(&self) -> Option<&'a dyn GeometricSequenceKernels<E>> {
         self.geometric_sequences
+    }
+
+    /// Return the product-density threshold for an early total-degree kernel attempt.
+    #[inline]
+    pub fn preferred_total_degree_mul_density(&self) -> Option<usize> {
+        self.polynomial.and(self.preferred_total_degree_mul_density)
     }
 }
