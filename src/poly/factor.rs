@@ -1062,6 +1062,20 @@ enum UnivariateHenselProductTreeLiftResult<P> {
     Exact(Vec<P>),
 }
 
+/// An exact two-part decomposition certified from two lifted leaves and its
+/// complementary leaves.
+///
+/// Each part retains the modular leaves that reduce to it. Once the current
+/// modulus covers both local coefficient bounds, those two groups can be
+/// recombined independently without lifting to the original polynomial's
+/// larger global bound.
+struct UnivariateHenselExactPartition<P> {
+    exact_parts: [P; 2],
+    leaf_indices: [Vec<usize>; 2],
+    coefficient_bounds: [Integer; 2],
+    required_exponent: usize,
+}
+
 /// Records one product of two coprime child factors.
 ///
 /// Internal links address earlier entries in the topology's bottom-up node
@@ -1086,12 +1100,61 @@ struct UnivariateHenselProductTreeTopology {
 
 impl UnivariateHenselProductTreeTopology {
     /// Returns the degree represented by a leaf or internal product link.
-    #[cfg(test)]
     fn degree(&self, link: UnivariateHenselProductTreeLink) -> usize {
         match link {
             UnivariateHenselProductTreeLink::Leaf(index) => self.leaf_degrees[index],
             UnivariateHenselProductTreeLink::Internal(index) => self.nodes[index].degree,
         }
+    }
+
+    /// Selects the pair of leaves whose product is closest in degree to its
+    /// complement, with input indices resolving equal-degree choices.
+    fn most_balanced_leaf_pair(&self) -> Option<[usize; 2]> {
+        let total_degree = self
+            .leaf_degrees
+            .iter()
+            .try_fold(0usize, |total, degree| total.checked_add(*degree))?;
+        (0..self.leaf_degrees.len())
+            .flat_map(|left| (left + 1..self.leaf_degrees.len()).map(move |right| [left, right]))
+            .min_by_key(|[left, right]| {
+                let pair_degree = self.leaf_degrees[*left]
+                    .checked_add(self.leaf_degrees[*right])
+                    .expect("Hensel factor degrees overflow");
+                (
+                    pair_degree.abs_diff(total_degree - pair_degree),
+                    *left,
+                    *right,
+                )
+            })
+    }
+
+    /// Selects a two-leaf split that is more degree-balanced than the current
+    /// internal/internal root split.
+    fn balanced_leaf_pair_improving_root(&self) -> Option<[usize; 2]> {
+        let root = match self.root? {
+            UnivariateHenselProductTreeLink::Internal(index) => self.nodes[index],
+            UnivariateHenselProductTreeLink::Leaf(_) => return None,
+        };
+        if root
+            .children
+            .iter()
+            .any(|child| matches!(child, UnivariateHenselProductTreeLink::Leaf(_)))
+        {
+            return None;
+        }
+
+        let root_imbalance = self
+            .degree(root.children[0])
+            .abs_diff(self.degree(root.children[1]));
+        let pair = self.most_balanced_leaf_pair()?;
+        let pair_degree = self.leaf_degrees[pair[0]]
+            .checked_add(self.leaf_degrees[pair[1]])
+            .expect("Hensel factor degrees overflow");
+        let total_degree = self
+            .degree(root.children[0])
+            .checked_add(self.degree(root.children[1]))
+            .expect("Hensel factor degrees overflow");
+        (pair_degree.abs_diff(total_degree - pair_degree) < root_imbalance).then_some(pair)
     }
 
     /// Visits internal products from the root toward the leaves, yielding each
@@ -1238,6 +1301,21 @@ fn univariate_hensel_precision_schedule(target: usize) -> Vec<usize> {
     }
     schedule.reverse();
     schedule
+}
+
+/// Returns a smaller terminal exponent when a certified local decomposition
+/// removes at least half of the remaining global precision work.
+fn univariate_hensel_shortened_target(
+    current: usize,
+    required: usize,
+    global: usize,
+) -> Option<usize> {
+    if current >= global || required <= current || required >= global {
+        return None;
+    }
+    let local_work = required - current;
+    let global_work = global - current;
+    (local_work.saturating_mul(2) <= global_work).then_some(required)
 }
 
 /// Orders three modular factors so the recursive Hensel root has the smallest
@@ -1430,6 +1508,15 @@ std::thread_local! {
         std::cell::Cell::new(0)
     };
     static PRODUCT_TREE_EARLY_RECONSTRUCTION_EXPONENT: std::cell::Cell<usize> = const {
+        std::cell::Cell::new(0)
+    };
+    static PRODUCT_TREE_BALANCED_PAIR_ATTEMPTS: std::cell::Cell<usize> = const {
+        std::cell::Cell::new(0)
+    };
+    static PRODUCT_TREE_BALANCED_PAIR_CERTIFICATES: std::cell::Cell<usize> = const {
+        std::cell::Cell::new(0)
+    };
+    static PRODUCT_TREE_BALANCED_PAIR_TARGET_EXPONENT: std::cell::Cell<usize> = const {
         std::cell::Cell::new(0)
     };
     static GEOMETRIC_SMALL_PRIME_BACKFILLS: std::cell::Cell<usize> = const {
@@ -7356,6 +7443,93 @@ impl<E: PositiveExponent> MultivariatePolynomial<IntegerRing, E, LexOrder> {
         Some((candidate, quotient.div_coeff(&quotient_content)))
     }
 
+    /// Certifies an exact factor represented by two lifted leaves and records
+    /// the complementary modular leaves and the local reconstruction bounds.
+    fn try_reconstruct_balanced_leaf_pair(
+        &self,
+        lift: &UnivariateHenselProductTreeLiftContext,
+        leaf_indices: [usize; 2],
+        context: &DenseIntegerModularUnivariateContext<E>,
+        modulus: &Integer,
+        prime: u32,
+        variable: usize,
+    ) -> Option<UnivariateHenselExactPartition<Self>> {
+        debug_assert!(leaf_indices[0] < leaf_indices[1]);
+        debug_assert!(leaf_indices[1] < lift.leaves.len());
+
+        let mut lifted_product =
+            context.multiply_raw(&lift.leaves[leaf_indices[0]], &lift.leaves[leaf_indices[1]]);
+        context.reduce_in_place(&mut lifted_product);
+        let (factor, complement) =
+            self.try_reconstruct_lifted_factor(lifted_product, context, modulus, variable)?;
+
+        let factor_degree = lift.topology.leaf_degrees[leaf_indices[0]]
+            .checked_add(lift.topology.leaf_degrees[leaf_indices[1]])
+            .expect("Hensel factor degrees overflow");
+        if factor.degree(variable).to_u32() as usize != factor_degree {
+            return None;
+        }
+        let total_degree = self.degree(variable).to_u32() as usize;
+        if complement.degree(variable).to_u32() as usize != total_degree - factor_degree {
+            return None;
+        }
+
+        let complement_indices = (0..lift.leaves.len())
+            .filter(|index| !leaf_indices.contains(index))
+            .collect::<Vec<_>>();
+        let factor_bound = factor.coefficient_bound();
+        let complement_bound = complement.coefficient_bound();
+        let required_exponent = Self::linear_hensel_modulus(&factor_bound, prime)
+            .0
+            .max(Self::linear_hensel_modulus(&complement_bound, prime).0);
+
+        Some(UnivariateHenselExactPartition {
+            exact_parts: [factor, complement],
+            leaf_indices: [leaf_indices.to_vec(), complement_indices],
+            coefficient_bounds: [factor_bound, complement_bound],
+            required_exponent,
+        })
+    }
+
+    /// Recombines both sides of a certified exact partition from their current
+    /// lifted leaves using the coefficient bound local to each side.
+    fn recombine_exact_product_tree_partition(
+        partition: UnivariateHenselExactPartition<Self>,
+        lift: &UnivariateHenselProductTreeLiftContext,
+        context: &DenseIntegerModularUnivariateContext<E>,
+        modulus: &Integer,
+        variable: usize,
+    ) -> Vec<Self> {
+        let UnivariateHenselExactPartition {
+            exact_parts,
+            leaf_indices,
+            coefficient_bounds,
+            ..
+        } = partition;
+        let mut reconstructed = Vec::new();
+        for ((part, indices), bound) in exact_parts
+            .into_iter()
+            .zip(leaf_indices)
+            .zip(coefficient_bounds)
+        {
+            let lifted_factors = indices
+                .into_iter()
+                .map(|index| {
+                    let mut coefficients = lift.leaves[index].clone();
+                    context.symmetrize_in_place(&mut coefficients);
+                    context.from_dense_coefficients(coefficients)
+                })
+                .collect();
+            reconstructed.extend(part.recombine_lifted_factors(
+                lifted_factors,
+                modulus,
+                variable,
+                &bound,
+            ));
+        }
+        reconstructed
+    }
+
     /// Certifies a root split whose one child is a single irreducible modular
     /// factor, then recombines the other child once its local coefficient
     /// bound is covered by the current modulus.
@@ -7491,7 +7665,8 @@ impl<E: PositiveExponent> MultivariatePolynomial<IntegerRing, E, LexOrder> {
         target_context.reduce_in_place(&mut normalized_target);
         debug_assert!(normalized_target.last().is_some_and(Integer::is_one));
 
-        let schedule = univariate_hensel_precision_schedule(target_digits);
+        let mut schedule = univariate_hensel_precision_schedule(target_digits);
+        let mut pending_exact_partition: Option<UnivariateHenselExactPartition<Self>> = None;
         let mut lift = UnivariateHenselProductTreeLiftContext::new(hs);
         let root = lift
             .topology
@@ -7525,9 +7700,10 @@ impl<E: PositiveExponent> MultivariatePolynomial<IntegerRing, E, LexOrder> {
         }
 
         let mut modulus = prime.clone();
-        for (stage_index, exponents) in schedule.windows(2).enumerate() {
-            let old_exponent = exponents[0];
-            let new_exponent = exponents[1];
+        let mut stage_index = 0;
+        while stage_index + 1 < schedule.len() {
+            let old_exponent = schedule[stage_index];
+            let new_exponent = schedule[stage_index + 1];
             let correction_exponent = new_exponent - old_exponent;
             debug_assert!(correction_exponent <= old_exponent);
 
@@ -7550,7 +7726,7 @@ impl<E: PositiveExponent> MultivariatePolynomial<IntegerRing, E, LexOrder> {
                 &dense_indices,
             );
 
-            let final_stage = stage_index + 1 == schedule.len() - 1;
+            let final_stage = stage_index + 2 == schedule.len();
             for node_index in (0..lift.topology.nodes.len()).rev() {
                 let node = lift.topology.nodes[node_index];
                 let u_link = node.children[0];
@@ -7653,6 +7829,18 @@ impl<E: PositiveExponent> MultivariatePolynomial<IntegerRing, E, LexOrder> {
                 }
             }
 
+            if let Some(partition) = pending_exact_partition.take() {
+                debug_assert_eq!(partition.required_exponent, new_exponent);
+                let factors = Self::recombine_exact_product_tree_partition(
+                    partition,
+                    &lift,
+                    &next_context,
+                    &next_modulus,
+                    variable,
+                );
+                return UnivariateHenselProductTreeLiftResult::Exact(factors);
+            }
+
             const MIN_EARLY_PRODUCT_TREE_RECONSTRUCTION_BITS: u64 = 128;
             if next_modulus.significant_bits() >= MIN_EARLY_PRODUCT_TREE_RECONSTRUCTION_BITS {
                 #[cfg(test)]
@@ -7675,9 +7863,57 @@ impl<E: PositiveExponent> MultivariatePolynomial<IntegerRing, E, LexOrder> {
                         .with(|successes| successes.set(successes.get() + 1));
                     return UnivariateHenselProductTreeLiftResult::Exact(factors);
                 }
+
+                let at_penultimate_global_precision = stage_index + 3 == schedule.len();
+                if at_penultimate_global_precision
+                    && let Some(leaf_indices) = lift.topology.balanced_leaf_pair_improving_root()
+                {
+                    #[cfg(test)]
+                    PRODUCT_TREE_BALANCED_PAIR_ATTEMPTS
+                        .with(|attempts| attempts.set(attempts.get() + 1));
+                    if let Some(partition) = self.try_reconstruct_balanced_leaf_pair(
+                        &lift,
+                        leaf_indices,
+                        &next_context,
+                        &next_modulus,
+                        prime_u32,
+                        variable,
+                    ) {
+                        #[cfg(test)]
+                        {
+                            PRODUCT_TREE_BALANCED_PAIR_CERTIFICATES
+                                .with(|certificates| certificates.set(certificates.get() + 1));
+                            PRODUCT_TREE_BALANCED_PAIR_TARGET_EXPONENT
+                                .with(|exponent| exponent.set(partition.required_exponent));
+                        }
+
+                        if partition.required_exponent <= new_exponent {
+                            let factors = Self::recombine_exact_product_tree_partition(
+                                partition,
+                                &lift,
+                                &next_context,
+                                &next_modulus,
+                                variable,
+                            );
+                            return UnivariateHenselProductTreeLiftResult::Exact(factors);
+                        }
+
+                        if let Some(shortened_target) = univariate_hensel_shortened_target(
+                            new_exponent,
+                            partition.required_exponent,
+                            target_digits,
+                        ) {
+                            debug_assert!(shortened_target - new_exponent <= new_exponent);
+                            schedule.truncate(stage_index + 2);
+                            schedule.push(shortened_target);
+                            pending_exact_partition = Some(partition);
+                        }
+                    }
+                }
             }
 
             modulus = next_modulus;
+            stage_index += 1;
         }
 
         debug_assert_eq!(&modulus, max_p);
@@ -10790,16 +11026,18 @@ mod test {
         LAST_BIVARIATE_RECONSTRUCTION_PRIME, LAST_BOUNDED_DDF_REJECTION_DEGREE,
         LAST_MODULAR_INTEGER_EDF_PRIME, LLL_RECOMBINATION_SUCCESSES,
         LOCAL_HENSEL_RECOMBINATION_NODES, MIN_EARLY_QUADRATIC_FACTOR_TERMS,
-        MODULAR_INTEGER_EDF_CALLS, ModularPrimeScreen, PRODUCT_TREE_EARLY_RECONSTRUCTION_ATTEMPTS,
-        PRODUCT_TREE_EARLY_RECONSTRUCTION_EXPONENT, PRODUCT_TREE_EARLY_RECONSTRUCTION_SUCCESSES,
-        PRODUCT_TREE_HENSEL_LIFT_CALLS, PackedSparsePolynomialSquareContext,
-        QUADRATIC_HENSEL_LIFT_CALLS, QUADRATIC_HENSEL_NONUNIT_RETRIES, QuadraticFactorization,
-        SparseDiophantineContext, SparsePolynomialSquareRootContext,
-        UnivariateHenselProductTreeBuildContext, UnivariateHenselProductTreeLiftResult,
+        MODULAR_INTEGER_EDF_CALLS, ModularPrimeScreen, PRODUCT_TREE_BALANCED_PAIR_ATTEMPTS,
+        PRODUCT_TREE_BALANCED_PAIR_CERTIFICATES, PRODUCT_TREE_BALANCED_PAIR_TARGET_EXPONENT,
+        PRODUCT_TREE_EARLY_RECONSTRUCTION_ATTEMPTS, PRODUCT_TREE_EARLY_RECONSTRUCTION_EXPONENT,
+        PRODUCT_TREE_EARLY_RECONSTRUCTION_SUCCESSES, PRODUCT_TREE_HENSEL_LIFT_CALLS,
+        PackedSparsePolynomialSquareContext, QUADRATIC_HENSEL_LIFT_CALLS,
+        QUADRATIC_HENSEL_NONUNIT_RETRIES, QuadraticFactorization, SparseDiophantineContext,
+        SparsePolynomialSquareRootContext, UnivariateHenselProductTreeBuildContext,
+        UnivariateHenselProductTreeLiftContext, UnivariateHenselProductTreeLiftResult,
         UnivariateHenselProductTreeLink, UnivariateHenselProductTreeNode,
         balance_three_factor_hensel_root, integer_factor_bivariate_wang_density_supported,
         reorder_integer_factor_variables_for_sparse_univariate,
-        univariate_hensel_precision_schedule,
+        univariate_hensel_precision_schedule, univariate_hensel_shortened_target,
     };
 
     use crate::{
@@ -10917,6 +11155,29 @@ mod test {
     }
 
     #[test]
+    fn univariate_hensel_balanced_leaf_pair_is_deterministic() {
+        let mut context = UnivariateHenselProductTreeBuildContext::default();
+
+        let degree_64 = context.build(&[1, 1, 10, 10, 10, 16, 16]);
+        assert_eq!(degree_64.most_balanced_leaf_pair(), Some([5, 6]));
+        assert_eq!(degree_64.balanced_leaf_pair_improving_root(), Some([5, 6]));
+
+        // This independent shape has a unique closest-to-half pair despite
+        // having neither equal leaf degrees nor an even total degree.
+        let independent = context.build(&[2, 3, 5, 7, 11, 13]);
+        assert_eq!(independent.most_balanced_leaf_pair(), Some([3, 5]));
+        assert_eq!(
+            independent.balanced_leaf_pair_improving_root(),
+            Some([3, 5])
+        );
+
+        // Both degree sums 12 and 13 have imbalance one. Input indices make
+        // the degree-12 pair the reproducible choice.
+        let tied = context.build(&[1, 2, 4, 5, 6, 7]);
+        assert_eq!(tied.most_balanced_leaf_pair(), Some([3, 5]));
+    }
+
+    #[test]
     fn three_factor_hensel_root_is_degree_balanced() {
         let variables = Some(Arc::new(vec![symbol!("x").into()]));
         let field = Zp::new(5);
@@ -10941,6 +11202,51 @@ mod test {
             univariate_hensel_precision_schedule(77),
             [1, 2, 3, 5, 10, 20, 39, 77]
         );
+    }
+
+    #[test]
+    fn univariate_hensel_shortened_target_requires_a_decisive_saving() {
+        assert_eq!(univariate_hensel_shortened_target(43, 51, 86), Some(51));
+        assert_eq!(univariate_hensel_shortened_target(43, 64, 86), Some(64));
+        assert_eq!(univariate_hensel_shortened_target(43, 65, 86), None);
+        assert_eq!(univariate_hensel_shortened_target(43, 43, 86), None);
+        assert_eq!(univariate_hensel_shortened_target(43, 86, 86), None);
+    }
+
+    #[test]
+    fn balanced_leaf_pair_rejects_a_spurious_modular_split_and_falls_back() {
+        let variables = Some(Arc::new(vec![symbol!("x").into()]));
+        let target = parse!("x^4+1").to_polynomial::<_, u8>(&Z, variables.clone());
+        let field = Zp::new(17);
+        let modular_target = target.map_coeff(
+            |coefficient| coefficient.to_finite_field(&field),
+            field.clone(),
+        );
+        let modular_factors = modular_target.equal_degree_factorization(1);
+        assert_eq!(modular_factors.len(), 4);
+
+        let lift = UnivariateHenselProductTreeLiftContext::new(&modular_factors);
+        let modulus = Integer::from(17);
+        let dense_indices = (0..9).collect::<Vec<u32>>();
+        let context =
+            DenseIntegerModularUnivariateContext::new(&modulus, 0, &target, &dense_indices);
+        let leaf_indices = lift.topology.most_balanced_leaf_pair().unwrap();
+        assert!(
+            target
+                .try_reconstruct_balanced_leaf_pair(&lift, leaf_indices, &context, &modulus, 17, 0,)
+                .is_none()
+        );
+
+        let bound = target.coefficient_bound();
+        let (_, max_p) =
+            MultivariatePolynomial::<IntegerRing, u8>::linear_hensel_modulus(&bound, 17);
+        let factors = match target.lift_modular_factor_product_tree(&modular_factors, &max_p) {
+            UnivariateHenselProductTreeLiftResult::Lifted(lifted) => {
+                target.recombine_lifted_factors(lifted, &max_p, 0, &bound)
+            }
+            UnivariateHenselProductTreeLiftResult::Exact(factors) => factors,
+        };
+        assert_eq!(factors, [target]);
     }
 
     #[test]
@@ -12581,6 +12887,7 @@ mod test {
         PRODUCT_TREE_EARLY_RECONSTRUCTION_ATTEMPTS.with(|attempts| attempts.set(0));
         PRODUCT_TREE_EARLY_RECONSTRUCTION_SUCCESSES.with(|successes| successes.set(0));
         PRODUCT_TREE_EARLY_RECONSTRUCTION_EXPONENT.with(|exponent| exponent.set(0));
+        PRODUCT_TREE_BALANCED_PAIR_ATTEMPTS.with(|attempts| attempts.set(0));
         GEOMETRIC_SMALL_PRIME_BACKFILLS.with(|backfills| backfills.set(0));
         let polynomial = parse!("((1+3*x)^33-1)*((1-5*x)^31+1)")
             .expand()
@@ -12627,12 +12934,16 @@ mod test {
         PRODUCT_TREE_EARLY_RECONSTRUCTION_SUCCESSES
             .with(|successes| assert_eq!(successes.get(), 1));
         PRODUCT_TREE_EARLY_RECONSTRUCTION_EXPONENT.with(|exponent| assert_eq!(exponent.get(), 39));
+        PRODUCT_TREE_BALANCED_PAIR_ATTEMPTS.with(|attempts| assert_eq!(attempts.get(), 0));
         GEOMETRIC_SMALL_PRIME_BACKFILLS.with(|backfills| assert_eq!(backfills.get(), 0));
     }
 
     #[test]
     fn factor_univariate_degree_65_backfills_geometric_prime_gap() {
         GEOMETRIC_SMALL_PRIME_BACKFILLS.with(|backfills| backfills.set(0));
+        PRODUCT_TREE_BALANCED_PAIR_ATTEMPTS.with(|attempts| attempts.set(0));
+        PRODUCT_TREE_BALANCED_PAIR_CERTIFICATES.with(|certificates| certificates.set(0));
+        PRODUCT_TREE_BALANCED_PAIR_TARGET_EXPONENT.with(|exponent| exponent.set(0));
         let polynomial = parse!("((1+3*x)^33-1)*((1-5*x)^32+1)")
             .expand()
             .to_polynomial::<_, u8>(&Z, None);
@@ -12655,6 +12966,10 @@ mod test {
         degrees.sort_unstable();
         assert_eq!(degrees, [1u8, 2, 10, 20, 32]);
         GEOMETRIC_SMALL_PRIME_BACKFILLS.with(|backfills| assert!(backfills.get() > 0));
+        PRODUCT_TREE_BALANCED_PAIR_ATTEMPTS.with(|attempts| assert_eq!(attempts.get(), 1));
+        PRODUCT_TREE_BALANCED_PAIR_CERTIFICATES
+            .with(|certificates| assert_eq!(certificates.get(), 1));
+        PRODUCT_TREE_BALANCED_PAIR_TARGET_EXPONENT.with(|exponent| assert_eq!(exponent.get(), 51));
     }
 
     #[test]

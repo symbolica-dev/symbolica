@@ -1,20 +1,20 @@
 # Polynomial performance continuation handoff
 
 This is the live continuation record for the single-core Symbolica/FLINT polynomial-performance
-work. It was refreshed on 2026-08-30 after accepting generic pre-content Hu-Monagan main-variable
-planning. The former worst primary row, PolyBench eight-variable sharp GCD #140, moves from
-`1.268240` to `0.479027` S/F, and eight-variable sharp GCD #11 moves from `0.748107` to `0.409963`.
-The current 116-row non-resultant inventory has 98 Symbolica wins and 18 losses, a `0.638180`
-median, and a new worst row of `1.171321` for dense univariate degree-65 factorization. Rows were
-measured across accepted source snapshots, with each replacement and its source-matched evidence
-documented below.
+work. It was refreshed on 2026-08-30 after accepting generic balanced two-leaf Hensel
+reconstruction. Dense univariate degree-65 factorization changes from `1.171321` to `1.106499`
+S/F; in a source-matched alternating run, Symbolica time changes from `3.531218 ms` to
+`3.343246 ms` (`-5.32%`). The current 116-row non-resultant inventory still has 98 Symbolica wins
+and 18 losses with a `0.638180` median. Its new worst row is near-`2^64` finite-field dense-large
+multiplication at `1.137177`. Rows were measured across accepted source snapshots, with each
+replacement and its source-matched evidence documented below.
 Keep this file current whenever an experiment is accepted, rejected, or left partly complete. The
 purpose is that another agent can resume without reconstructing decisions from chat history or
 transient binary names.
 
 The complete current Symbolica/FLINT scoreboard is in
 [CURRENT_STATUS.md](CURRENT_STATUS.md), with the latest immutable snapshot in
-[CURRENT_STATUS_v13.md](CURRENT_STATUS_v13.md). Its primary statistics contain 116 non-resultant
+[CURRENT_STATUS_v14.md](CURRENT_STATUS_v14.md). Its primary statistics contain 116 non-resultant
 comparisons: 98 favor Symbolica and 18 favor FLINT. The six Ducos, six Brown, and six CRT
 measurements are retained only in a compact appendix note and do not affect primary ranks or
 summary statistics. After every accepted optimization, update the live file and create the next
@@ -180,6 +180,94 @@ common exponent compression. A default root run excluding the `isolate` name fil
 tests; rerunning the pre-existing univariate-root isolation failure alone reproduces its unrelated
 interval mismatch (`[3/16, 9/32]` versus `[15/64, 9/32]`). Numerica passes 124/124 tests. With
 `integer-malachite,float-astro,native_code_generation`, all 35 polynomial-GCD tests pass.
+
+## Accepted balanced two-leaf Hensel reconstruction
+
+The synchronized univariate Hensel product tree normally lifts every modular leaf to the global
+coefficient bound before recombination. A product of a small subset of leaves can sometimes be
+certified as an exact integer factor much earlier, and that factor and its complement can have
+substantially smaller local coefficient bounds. The accepted path tests one deterministic
+two-leaf partition near the end of an otherwise unchanged lift and shortens only the terminal
+precision schedule when the certificate and work bound both succeed.
+
+`UnivariateHenselProductTreeTopology::most_balanced_leaf_pair` selects the leaf pair whose degree
+sum is closest to half the total degree; original leaf indices resolve ties. The route is considered
+only when the product-tree root has two internal children and this pair gives a strictly smaller
+degree imbalance than that existing root split. It never loops over every degree-two combination
+looking for one that happens to reconstruct. These topology rules are independent of the chosen
+prime, polynomial degree, coefficient values, and benchmark identity.
+
+At the penultimate global-precision stage, after the existing whole-root early reconstruction has
+failed, the implementation multiplies the selected lifted leaves using the current dense modular
+context. It centers and primitive-normalizes that product, then divides the original integer
+polynomial exactly by it. Zero content, a constant or full-degree candidate, a degree mismatch, or
+a nonzero remainder rejects the partition and preserves the original schedule. Exact division is
+the correctness certificate; a modular coincidence cannot change the returned factorization.
+
+For a certified pair, `UnivariateHenselExactPartition` records the exact factor and quotient, the
+modular leaves belonging to each side, and each side's own coefficient bound. The required
+prime-power exponent is the maximum of those two local reconstruction requirements. The terminal
+schedule is shortened only when
+
+`2 * (required_exponent - current_exponent) <= global_exponent - current_exponent`.
+
+Thus the two local continuations consume no more than half the remaining global precision work.
+The implementation retains the already lifted leaf and Bezout buffers, truncates the existing
+schedule, and appends only the locally required terminal exponent. At that exponent it recombines
+the two certified sides independently using their local bounds. No earlier Hensel stage, product-
+tree construction, prime selector, or general recombination path is replaced. If the root shape,
+balance test, exact certificate, local target, or work guard fails, lifting continues to the
+original global target.
+
+For the degree-65 fixture, prime 13 gives modular leaf degrees `[1, 1, 10, 10, 10, 16, 16]`.
+The two degree-16 leaves form the unique closest-to-half pair. Their product divides exactly at
+`13^43`; the certified local bounds require `13^51`, while the old complete tree continued to
+`13^86`. This is an observed instance of the generic degree-balance, local-bound, and exact-
+division rules, not a special case in the selector.
+
+The motivating pre-change profile is `/tmp/profile-d65-audit-current-lbr.perf.data`, SHA-256
+`9ffe6abbe0f391f01be87e5836d718638dbe3d2e49bb928227c093427bcf99cc`. Synchronized Hensel
+lifting accounted for 34.70% of paired cycles versus 24.61% for FLINT's factor tree, so shortening
+certified lift precision directly targets the measured gap.
+
+Six alternating 500-sample processes, pinned sequentially to core 8, give:
+
+| Source | Symbolica median | FLINT median | Median process S/F |
+|---|---:|---:|---:|
+| frozen pre-change control | `3.531218 ms` | `3.025285 ms` | `1.167612` |
+| balanced-pair candidate | `3.343246 ms` | `3.020529 ms` | `1.106499` |
+
+Symbolica time falls 5.32% in the source-matched comparison. The scoreboard replaces its stronger
+preceding degree-65 row `1.171321 -> 1.106499`; the case remains slower than FLINT, so the primary
+win/loss count and `0.638180` median do not change.
+
+Three alternating 100-sample generated-factor guard processes show neighboring Symbolica shifts
+of `+1.10%` at degree 63, `+0.29%` for dense 2v, `-0.54%` for dense 3v, `+0.26%` for high-height
+degree 33, and `+1.75%` at degree 64. The same short guard measures the intended degree-65 row at
+`-4.52%`; the six-process result above is authoritative. In the broad 20-sample PolyBench sweep,
+the ten rows other than five-variable #159 remain within about 2%. The initially noisy #159 guard
+was repeated in two 100-sample processes: candidate and control Symbolica means are
+`65.624250 ms` and `65.022330 ms`, respectively, a `+0.93%` shift. Factor-input product timings
+remain neutral: this reconstruction runs after the input product, and their absolute differences
+are at the sub-microsecond scale.
+
+The final candidate is `/tmp/flint-comparison-d65-balanced-v1`, SHA-256
+`cb90434fa2132af0d655391ab8bd6a9c2a59c73acb851d3d85b2847b1e3e9d1a`; its dependency file is
+`/tmp/flint-comparison-d65-balanced-v1.d`, SHA-256
+`bca17cd465a45cdadad6fdfc93944f842eda47f993116ef25df6a8f1cf805867`, and its build JSON is
+`/tmp/flint-comparison-d65-balanced-v1-build.jsonl`, SHA-256
+`4b4bd863ab2acd170f1aa224c51ae97961aeef20f992b797a217b6aac6443dcb`. Raw source-matched files
+are `/tmp/d65-balanced-v1-{candidate,control}-01..06.csv`. Generated, PolyBench, long #159, and
+product guards are `/tmp/d65-balanced-v1-generated-factor-{candidate,control}-01..03.csv`,
+`/tmp/d65-balanced-v1-polybench-factor-{candidate,control}-01..03.csv`,
+`/tmp/d65-balanced-v1-pb159-{candidate,control}-01..02.csv`, and
+`/tmp/d65-balanced-v1-factor-product-{candidate,control}-01..03.csv`.
+
+All 93 default-feature `poly::factor::test` tests pass single-threaded. Focused coverage proves
+deterministic closest-to-half selection including ties and an unrelated leaf-degree family, strict
+root-balance improvement, the exact work-guard boundary, and fallback after a spurious modular
+split fails exact division. All 93 factor tests also pass with
+`--no-default-features --features integer-malachite,float-astro,native_code_generation`.
 
 ## Accepted constant-coordinate modular GCD reconstruction
 
@@ -3315,6 +3403,10 @@ older checksums and ratios are retained in Git history of this document at commi
   selection is `find_sample`, the active pressure selector is around `high_linear_lift_pressure`,
   and the guarded #84 order selection is
   `reorder_integer_factor_variables_for_sparse_univariate`.
+- Balanced two-leaf Hensel reconstruction: `src/poly/factor.rs`, especially
+  `UnivariateHenselProductTreeTopology::{most_balanced_leaf_pair,balanced_leaf_pair_improving_root}`,
+  `UnivariateHenselExactPartition`, `univariate_hensel_shortened_target`,
+  `try_reconstruct_balanced_leaf_pair`, and `recombine_exact_product_tree_partition`.
 - Shared polynomial operation kernels: `src/poly/kernels.rs`.
 - Coefficient-domain polynomial kernel capabilities: `lib/numerica/src/kernels.rs`; the integer
   implementation is `lib/numerica/src/domains/integer/polynomial_kernels.rs`.
@@ -3337,48 +3429,52 @@ comments that justify file organization by contrasting it with designs not prese
 
 ## Current ordered next actions
 
-1. Attack the current worst row, dense one-variable degree-65 factorization at `1.171321` S/F, with
-   a deterministic balanced two-leaf exact reconstruction. At the selected prime 13, the modular
-   leaf degrees are `[1, 1, 10, 10, 10, 16, 16]`. The product of the two degree-16 leaves already
-   divides the integer input exactly at exponent 43. Its local coefficient bound requires only
-   exponent 51, while the current complete tree target is exponent 86. Choose the two-leaf pair
-   generically by minimizing the degree imbalance between the pair and its complement, center and
-   certify the candidate with exact division, and derive its target from the pair's own coefficient
-   bound. Enter this route only when the conservative work inequality
-   `2 * (required - current) <= global - current` holds; a failed reconstruction or certificate
-   continues the existing complete-tree lift. The current profile is
-   `/tmp/profile-d65-audit-current-lbr.perf.data`, SHA-256
-   `9ffe6abbe0f391f01be87e5836d718638dbe3d2e49bb928227c093427bcf99cc`; synchronized Hensel
-   lifting accounts for 34.70% of paired cycles versus 24.61% for FLINT's factor tree.
-2. After degree 65, continue strictly down the current scoreboard: near-`2^64` finite-field dense
-   multiplication (`1.137177`), PolyBench 5v uniform GCD #11 (`1.121593`), high-height degree-33
-   factorization (`1.111896`), PolyBench factorization #105 (`1.106606`), configured degree-80 GCD
-   (`1.075107`), the degree-65 input product (`1.070910`), dense 2v GCD (`1.060731`), generic dense
-   large multiplication (`1.056183`), and GF(17) dense very-large multiplication (`1.055155`).
-   Re-profile the first row before each implementation round rather than assuming an earlier
-   bottleneck still dominates.
-3. For #105, the first bounded experiment remains an exact two-sparsest-layer GCD certificate in
+1. Attack the new worst row, near-`2^64` finite-field dense-large multiplication at `1.137177`
+   S/F. First profile the current Symbolica and FLINT multiplication subtrees in the same full-LTO
+   binary and separate polynomial dispatch, dense-index construction, coefficient multiplication,
+   and modular reduction. Any new route must be selected from modulus width, input/output spans,
+   collision bounds, and measured work; it must also guard smaller primes, sparse layouts, and
+   arbitrary-precision moduli.
+2. Next is PolyBench 5v uniform GCD #11 at `1.121593`. The accepted Hu selector does not execute
+   on this uniform support, while same-binary plan-on/plan-off measurements were nearly neutral.
+   Reproduce and localize the full-LTO shift in `construct_new_image_single_scale` before changing
+   GCD heuristics. Accept a code-layout or image-construction change only if generated dense 3v,
+   5v, and 8v families show the same mechanism.
+3. Re-profile high-height degree-33 factorization at `1.111896`, then target its largest remaining
+   integer/Hensel subtree. Preserve coefficient-height and local-bound guards across the degree
+   63--65 boundary; the generic balanced-pair path is not active on a shape that fails its topology
+   and decisive-work tests.
+4. For #105 at `1.106606`, the first bounded experiment remains an exact two-sparsest-layer GCD
+   certificate in
    `factor_separable`: a constant pair GCD proves the complete coefficient content is constant; a
    nonconstant result may replace the pair before the unchanged full fallback. Selection must use
    layer support and exact divisibility, not the fixture number.
-4. Benchmark the independent off-by-one correction in `terms_with_max_degree` separately. It
+5. Degree-65 factorization is now `1.106499`. Profile the accepted terminal schedule before adding
+   another reconstruction attempt. Do not try every leaf pair: any extension must retain a bounded,
+   deterministic candidate count, prove a stricter work reduction than its extra products and exact
+   divisions, and guard neighboring modular-factor topologies.
+6. The following slower-than-FLINT rows are configured degree-80 GCD (`1.075107`), the degree-65
+   input product (`1.070910`), dense 2v GCD (`1.060731`), generic dense-large multiplication
+   (`1.056183`), and GF(17) dense very-large multiplication (`1.055155`). Continue in scoreboard
+   order and re-profile the current worst row before each implementation round.
+7. Benchmark the independent off-by-one correction in `terms_with_max_degree` separately. It
    currently omits the first term and reports zero for a one-term polynomial. The correction is
    semantic, but it changes existing Zippel ordering and must not be conflated with Hu planning.
-5. Treat configured degree-48 and degree-64 GCD as closed at `0.889777` and `0.852433` S/F unless a
+8. Treat configured degree-48 and degree-64 GCD as closed at `0.889777` and `0.852433` S/F unless a
    new profile identifies a separate decisive mechanism. Degree 80 remains open because it is
    slower than FLINT, but profile it before changing CRT selection. Treat dense degree-64
    factorization (`1.031329`) and its product (`1.017409`) similarly: the tested subset
    reconstruction, one-scan generic multiplication context, and direct-limb-only conversion have
    already been rejected.
-6. Every selector must be justified by algebraic or computational quantities that define a class
+9. Every selector must be justified by algebraic or computational quantities that define a class
    of inputs: degrees, support geometry, coefficient bounds, modular feasibility, predicted work,
    and an exact certificate. Benchmark IDs and exact fixture dimensions are reporting labels only.
    Validate each route on generated families spanning variables, supports, and coefficient heights,
    plus withheld PolyBench cases, and retain the generic fallback on every failed guard.
-7. Preserve the constant-coordinate selector's strict-win rule and lazy leading fallback. Any
+10. Preserve the constant-coordinate selector's strict-win rule and lazy leading fallback. Any
    broader projective-coordinate selection needs a proof that the selected coefficient is nonzero
    in every retained image and an exact-division certificate.
-8. Keep all algorithm-specific resultant measurements in the historical appendix and outside the
+11. Keep all algorithm-specific resultant measurements in the historical appendix and outside the
    116-row primary statistics. Freeze and hash every accepted full-LTO binary and profile, commit
    with Ben Ruijl's identity, and create the next immutable `CURRENT_STATUS_v<i>.md` snapshot after
    every accepted improvement.
