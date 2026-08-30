@@ -1528,6 +1528,9 @@ std::thread_local! {
     static PRODUCT_TREE_EARLY_RECONSTRUCTION_EXPONENT: std::cell::Cell<usize> = const {
         std::cell::Cell::new(0)
     };
+    static PRODUCT_TREE_LAST_BEZOUT_UPDATE_EXPONENT: std::cell::Cell<usize> = const {
+        std::cell::Cell::new(0)
+    };
     static PRODUCT_TREE_BALANCED_PAIR_ATTEMPTS: std::cell::Cell<usize> = const {
         std::cell::Cell::new(0)
     };
@@ -7949,7 +7952,20 @@ impl<E: PositiveExponent> MultivariatePolynomial<IntegerRing, E, LexOrder> {
                 &dense_indices,
             );
 
+            struct DeferredBezoutUpdate {
+                node_index: usize,
+                u_mod: Vec<Integer>,
+                w_mod: Vec<Integer>,
+                s_mod: Vec<Integer>,
+                t_mod: Vec<Integer>,
+            }
+
             let final_stage = stage_index + 2 == schedule.len();
+            let mut deferred_bezout_updates = Vec::with_capacity(if final_stage {
+                0
+            } else {
+                lift.topology.nodes.len()
+            });
             for node_index in (0..lift.topology.nodes.len()).rev() {
                 let node = lift.topology.nodes[node_index];
                 let u_link = node.children[0];
@@ -7990,11 +8006,10 @@ impl<E: PositiveExponent> MultivariatePolynomial<IntegerRing, E, LexOrder> {
                     (u_mod, w_mod, s_mod, t_mod, du, dw)
                 };
 
-                // The old child and cofactor buffers are dead after this node
-                // advances, so the corrections reuse their owned storage.
+                // The old child buffers are dead after this node advances, so
+                // the factor corrections reuse their owned storage.
                 let u = lift.take_value(u_link);
                 let w = lift.take_value(w_link);
-                let [s, t] = std::mem::take(&mut lift.bezout_cofactors[node_index]);
                 let lifted_u = next_context.lift_correction(u, &du, &modulus);
                 let lifted_w = next_context.lift_correction(w, &dw, &modulus);
                 debug_assert!(lifted_u.last().is_some_and(Integer::is_one));
@@ -8010,45 +8025,16 @@ impl<E: PositiveExponent> MultivariatePolynomial<IntegerRing, E, LexOrder> {
                     debug_assert!(next_context.product_matches(target, &lifted_u, &lifted_w));
                 }
 
-                let lifted_bezout = if final_stage {
-                    None
-                } else {
-                    // B=(1-s*U-t*W)/m gives the correction to the Bezout
-                    // relation after U and W have been lifted.
-                    let bezout_error = correction_context
-                        .exact_bezout_residual_quotient_mod(&s, &lifted_u, &t, &lifted_w, &modulus);
-
-                    // The correction modulus divides `modulus`, so adding
-                    // `modulus*du` and `modulus*dw` does not change these
-                    // canonical images used by the Bezout correction.
-
-                    // ds=(B*s) rem W and dt=(B*t) rem U preserve the degree
-                    // bounds of the two Bezout cofactors.
-                    let bezout_mod_w =
-                        correction_context.remainder_monic(bezout_error.clone(), &w_mod);
-                    let bezout_s = correction_context.multiply_raw(&bezout_mod_w, &s_mod);
-                    let delta_s = correction_context.remainder_monic(bezout_s, &w_mod);
-                    let bezout_mod_u = correction_context.remainder_monic(bezout_error, &u_mod);
-                    let bezout_t = correction_context.multiply_raw(&bezout_mod_u, &t_mod);
-                    let delta_t = correction_context.remainder_monic(bezout_t, &u_mod);
-                    let lifted_s = next_context.lift_correction(s, &delta_s, &modulus);
-                    let lifted_t = next_context.lift_correction(t, &delta_t, &modulus);
-
-                    #[cfg(debug_assertions)]
-                    {
-                        debug_assert!(
-                            next_context.bezout_identity_matches(
-                                &lifted_s, &lifted_u, &lifted_t, &lifted_w,
-                            )
-                        );
-                    }
-                    Some([lifted_s, lifted_t])
-                };
-
                 lift.set_value(u_link, lifted_u);
                 lift.set_value(w_link, lifted_w);
-                if let Some(cofactors) = lifted_bezout {
-                    lift.bezout_cofactors[node_index] = cofactors;
+                if !final_stage {
+                    deferred_bezout_updates.push(DeferredBezoutUpdate {
+                        node_index,
+                        u_mod,
+                        w_mod,
+                        s_mod,
+                        t_mod,
+                    });
                 }
             }
 
@@ -8133,6 +8119,51 @@ impl<E: PositiveExponent> MultivariatePolynomial<IntegerRing, E, LexOrder> {
                         }
                     }
                 }
+            }
+
+            // A successful exact reconstruction makes the next Hensel stage
+            // unnecessary. Update the Bezout relations only after every
+            // available certificate has failed and another stage is needed.
+            for update in deferred_bezout_updates {
+                let node = lift.topology.nodes[update.node_index];
+                let [s, t] = std::mem::take(&mut lift.bezout_cofactors[update.node_index]);
+                let lifted_u = lift.value(node.children[0]);
+                let lifted_w = lift.value(node.children[1]);
+
+                // B=(1-s*U-t*W)/m gives the correction to the Bezout
+                // relation after U and W have been lifted.
+                let bezout_error = correction_context
+                    .exact_bezout_residual_quotient_mod(&s, lifted_u, &t, lifted_w, &modulus);
+
+                // The correction modulus divides `modulus`, so adding
+                // `modulus*du` and `modulus*dw` does not change these
+                // canonical images used by the Bezout correction.
+
+                // ds=(B*s) rem W and dt=(B*t) rem U preserve the degree
+                // bounds of the two Bezout cofactors.
+                let bezout_mod_w =
+                    correction_context.remainder_monic(bezout_error.clone(), &update.w_mod);
+                let bezout_s = correction_context.multiply_raw(&bezout_mod_w, &update.s_mod);
+                let delta_s = correction_context.remainder_monic(bezout_s, &update.w_mod);
+                let bezout_mod_u = correction_context.remainder_monic(bezout_error, &update.u_mod);
+                let bezout_t = correction_context.multiply_raw(&bezout_mod_u, &update.t_mod);
+                let delta_t = correction_context.remainder_monic(bezout_t, &update.u_mod);
+                let lifted_s = next_context.lift_correction(s, &delta_s, &modulus);
+                let lifted_t = next_context.lift_correction(t, &delta_t, &modulus);
+
+                #[cfg(debug_assertions)]
+                {
+                    debug_assert!(
+                        next_context
+                            .bezout_identity_matches(&lifted_s, lifted_u, &lifted_t, lifted_w,)
+                    );
+                }
+                lift.bezout_cofactors[update.node_index] = [lifted_s, lifted_t];
+            }
+            #[cfg(test)]
+            if !final_stage {
+                PRODUCT_TREE_LAST_BEZOUT_UPDATE_EXPONENT
+                    .with(|exponent| exponent.set(new_exponent));
             }
 
             modulus = next_modulus;
@@ -11299,8 +11330,8 @@ mod test {
         PRODUCT_TREE_BALANCED_PAIR_CERTIFICATES, PRODUCT_TREE_BALANCED_PAIR_TARGET_EXPONENT,
         PRODUCT_TREE_EARLY_RECONSTRUCTION_ATTEMPTS, PRODUCT_TREE_EARLY_RECONSTRUCTION_EXPONENT,
         PRODUCT_TREE_EARLY_RECONSTRUCTION_SUCCESSES, PRODUCT_TREE_HENSEL_LIFT_CALLS,
-        PackedSparsePolynomialSquareContext, QUADRATIC_HENSEL_LIFT_CALLS,
-        QUADRATIC_HENSEL_NONUNIT_RETRIES, QuadraticFactorization,
+        PRODUCT_TREE_LAST_BEZOUT_UPDATE_EXPONENT, PackedSparsePolynomialSquareContext,
+        QUADRATIC_HENSEL_LIFT_CALLS, QUADRATIC_HENSEL_NONUNIT_RETRIES, QuadraticFactorization,
         SEPARABLE_CONTENT_NONTRIVIAL_MONOMIAL_FALLBACKS,
         SEPARABLE_CONTENT_PAIR_MONOMIAL_CERTIFICATES, SEPARABLE_CONTENT_PAIR_PROBES,
         SEPARABLE_CONTENT_PAIR_REPLACEMENTS, SEPARABLE_CONTENT_SINGLE_MONOMIAL_CERTIFICATES,
@@ -11627,9 +11658,9 @@ mod test {
                 .is_none()
         );
 
+        PRODUCT_TREE_LAST_BEZOUT_UPDATE_EXPONENT.with(|exponent| exponent.set(0));
         let bound = target.coefficient_bound();
-        let (_, max_p) =
-            MultivariatePolynomial::<IntegerRing, u8>::linear_hensel_modulus(&bound, 17);
+        let max_p = Integer::from(17).pow(80);
         let factors = match target.lift_modular_factor_product_tree(&modular_factors, &max_p) {
             UnivariateHenselProductTreeLiftResult::Lifted(lifted) => {
                 target.recombine_lifted_factors(lifted, &max_p, 0, &bound)
@@ -11637,6 +11668,7 @@ mod test {
             UnivariateHenselProductTreeLiftResult::Exact(factors) => factors,
         };
         assert_eq!(factors, [target]);
+        PRODUCT_TREE_LAST_BEZOUT_UPDATE_EXPONENT.with(|exponent| assert_eq!(exponent.get(), 40));
     }
 
     #[test]
@@ -13277,6 +13309,7 @@ mod test {
         PRODUCT_TREE_EARLY_RECONSTRUCTION_ATTEMPTS.with(|attempts| attempts.set(0));
         PRODUCT_TREE_EARLY_RECONSTRUCTION_SUCCESSES.with(|successes| successes.set(0));
         PRODUCT_TREE_EARLY_RECONSTRUCTION_EXPONENT.with(|exponent| exponent.set(0));
+        PRODUCT_TREE_LAST_BEZOUT_UPDATE_EXPONENT.with(|exponent| exponent.set(0));
         PRODUCT_TREE_BALANCED_PAIR_ATTEMPTS.with(|attempts| attempts.set(0));
         GEOMETRIC_SMALL_PRIME_BACKFILLS.with(|backfills| backfills.set(0));
         let polynomial = parse!("((1+3*x)^33-1)*((1-5*x)^31+1)")
@@ -13324,6 +13357,7 @@ mod test {
         PRODUCT_TREE_EARLY_RECONSTRUCTION_SUCCESSES
             .with(|successes| assert_eq!(successes.get(), 1));
         PRODUCT_TREE_EARLY_RECONSTRUCTION_EXPONENT.with(|exponent| assert_eq!(exponent.get(), 39));
+        PRODUCT_TREE_LAST_BEZOUT_UPDATE_EXPONENT.with(|exponent| assert_eq!(exponent.get(), 20));
         PRODUCT_TREE_BALANCED_PAIR_ATTEMPTS.with(|attempts| assert_eq!(attempts.get(), 0));
         GEOMETRIC_SMALL_PRIME_BACKFILLS.with(|backfills| assert_eq!(backfills.get(), 0));
     }

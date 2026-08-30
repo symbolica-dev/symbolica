@@ -24,6 +24,28 @@ use rug::integer::Order as RugIntegerOrder;
 #[cfg(feature = "integer-gmp")]
 use smallvec::SmallVec;
 
+#[cfg(feature = "integer-gmp")]
+/// Return the exact number of significant bits in a `u128` product without allocating an integer.
+pub(super) fn u128_product_significant_bits(left: u128, right: u128) -> u64 {
+    if let Some(product) = left.checked_mul(right) {
+        return u64::from(u128::BITS - product.leading_zeros());
+    }
+
+    const LOW_MASK: u128 = u64::MAX as u128;
+    let left_low = left & LOW_MASK;
+    let left_high = left >> u64::BITS;
+    let right_low = right & LOW_MASK;
+    let right_high = right >> u64::BITS;
+
+    // Accumulate the four 64-by-64 products just far enough to recover the high 128 bits.
+    let low_product = left_low * right_low;
+    let lower_cross = left_high * right_low + (low_product >> u64::BITS);
+    let upper_cross = left_low * right_high + (lower_cross & LOW_MASK);
+    let high = left_high * right_high + (lower_cross >> u64::BITS) + (upper_cross >> u64::BITS);
+    debug_assert_ne!(high, 0);
+    u64::from(u128::BITS) + u64::from(u128::BITS - high.leading_zeros())
+}
+
 /// One dense-indexed integer multiplication operation.
 ///
 /// Construction checks the invariants shared by every multiplication strategy. The context then
@@ -402,9 +424,18 @@ impl<'a> DenseIntegerMul<'a> {
             packed_output_len
         };
 
-        fn absolute_statistics(
-            coefficients: &[Integer],
-        ) -> (MultiPrecisionInteger, MultiPrecisionInteger) {
+        enum AbsoluteStatistics {
+            Fixed {
+                sum: u128,
+                maximum: u128,
+            },
+            Large {
+                sum: MultiPrecisionInteger,
+                maximum: MultiPrecisionInteger,
+            },
+        }
+
+        fn absolute_statistics(coefficients: &[Integer]) -> AbsoluteStatistics {
             let mut fixed_sum = 0u128;
             let mut fixed_maximum = 0u128;
             let fixed_statistics = coefficients.iter().all(|coefficient| {
@@ -421,10 +452,10 @@ impl<'a> DenseIntegerMul<'a> {
                 true
             });
             if fixed_statistics {
-                return (
-                    MultiPrecisionInteger::from(fixed_sum),
-                    MultiPrecisionInteger::from(fixed_maximum),
-                );
+                return AbsoluteStatistics::Fixed {
+                    sum: fixed_sum,
+                    maximum: fixed_maximum,
+                };
             }
 
             let mut sum = MultiPrecisionInteger::default();
@@ -441,33 +472,52 @@ impl<'a> DenseIntegerMul<'a> {
                 }
             }
 
-            (sum, maximum.to_multi_prec())
+            AbsoluteStatistics::Large {
+                sum,
+                maximum: maximum.to_multi_prec(),
+            }
         }
 
-        let (left_sum, left_maximum) = absolute_statistics(left_coefficients);
-        let (right_sum, right_maximum) = absolute_statistics(right_coefficients);
-        let collision_count = left_coefficients.len().min(right_coefficients.len());
+        let left_statistics = absolute_statistics(left_coefficients);
+        let right_statistics = absolute_statistics(right_coefficients);
         let signed_coefficients = left_coefficients
             .iter()
             .chain(right_coefficients)
             .any(Integer::is_negative);
 
-        // Bound every output coefficient in three ways and use the tightest exact bound:
-        //   min(n) max(a) max(b), ||a||_1 max(b), and ||b||_1 max(a).
-        // This is commonly several bits tighter than rounding every factor up to a power of two.
-        let mut coefficient_bound = &left_maximum * &right_maximum;
-        coefficient_bound *= u64::try_from(collision_count).ok()?;
-        let left_l1_bound = &left_sum * &right_maximum;
-        if left_l1_bound < coefficient_bound {
-            coefficient_bound = left_l1_bound;
-        }
-        let right_l1_bound = &right_sum * &left_maximum;
-        if right_l1_bound < coefficient_bound {
-            coefficient_bound = right_l1_bound;
-        }
-        let digit_bits = coefficient_bound
-            .significant_bits()
-            .checked_add(u64::from(signed_coefficients))?;
+        // Every convolution coefficient is bounded both by ||a||_1 max(b) and by
+        // ||b||_1 max(a). The usual collision-count bound cannot improve their minimum: the
+        // l1 norm of the shorter input is at most its term count times its maximum coefficient.
+        let coefficient_bound_bits = match (left_statistics, right_statistics) {
+            (
+                AbsoluteStatistics::Fixed {
+                    sum: left_sum,
+                    maximum: left_maximum,
+                },
+                AbsoluteStatistics::Fixed {
+                    sum: right_sum,
+                    maximum: right_maximum,
+                },
+            ) => u128_product_significant_bits(left_sum, right_maximum)
+                .min(u128_product_significant_bits(right_sum, left_maximum)),
+            (left_statistics, right_statistics) => {
+                let into_large = |statistics| match statistics {
+                    AbsoluteStatistics::Fixed { sum, maximum } => (
+                        MultiPrecisionInteger::from(sum),
+                        MultiPrecisionInteger::from(maximum),
+                    ),
+                    AbsoluteStatistics::Large { sum, maximum } => (sum, maximum),
+                };
+                let (left_sum, left_maximum) = into_large(left_statistics);
+                let (right_sum, right_maximum) = into_large(right_statistics);
+                let left_l1_bound = &left_sum * &right_maximum;
+                let right_l1_bound = &right_sum * &left_maximum;
+                left_l1_bound
+                    .significant_bits()
+                    .min(right_l1_bound.significant_bits())
+            }
+        };
+        let digit_bits = coefficient_bound_bits.checked_add(u64::from(signed_coefficients))?;
         let digit_bits_u32 = u32::try_from(digit_bits).ok()?;
         let digit_bits_usize = usize::try_from(digit_bits).ok()?;
 

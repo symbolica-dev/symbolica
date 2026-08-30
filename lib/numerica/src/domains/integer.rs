@@ -4405,6 +4405,52 @@ mod test {
 
     #[cfg(feature = "integer-gmp")]
     #[test]
+    fn u128_product_bit_length_matches_multiprecision() {
+        let values = [
+            0,
+            1,
+            2,
+            1u128 << 63,
+            1u128 << 64,
+            1u128 << 127,
+            u128::MAX - 1,
+            u128::MAX,
+        ];
+        for left in values {
+            for right in values {
+                let expected = (&MultiPrecisionInteger::from(left)
+                    * &MultiPrecisionInteger::from(right))
+                    .significant_bits();
+                assert_eq!(
+                    super::polynomial_kernels::u128_product_significant_bits(left, right),
+                    expected,
+                    "bit length of {left} * {right}",
+                );
+            }
+        }
+
+        let mut state = 0xd1b5_4a32_d192_ed03u64;
+        for _ in 0..512 {
+            let mut next = || {
+                state = state
+                    .wrapping_mul(6_364_136_223_846_793_005)
+                    .wrapping_add(1_442_695_040_888_963_407);
+                state
+            };
+            let left = (u128::from(next()) << 64) | u128::from(next());
+            let right = (u128::from(next()) << 64) | u128::from(next());
+            let expected = (&MultiPrecisionInteger::from(left)
+                * &MultiPrecisionInteger::from(right))
+                .significant_bits();
+            assert_eq!(
+                super::polynomial_kernels::u128_product_significant_bits(left, right),
+                expected,
+            );
+        }
+    }
+
+    #[cfg(feature = "integer-gmp")]
+    #[test]
     fn factor_fixture_kronecker_polynomial_multiplication() {
         fn linear_power_coefficients(power: u32, scale: i128) -> Vec<Integer> {
             let mut coefficient = 1i128;

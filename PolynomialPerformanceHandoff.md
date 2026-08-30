@@ -3728,12 +3728,118 @@ chunked-route preservation cases. The corresponding Malachite test passes 1/1 wi
 `CURRENT_STATUS_v12.md`: 97 of 116 primary rows favor Symbolica, 19 favor FLINT, and the median is
 `0.640412` S/F.
 
+## Current dense-univariate checkpoint (`v19`)
+
+This round started from exact source `0ea1d9ba69619e8ea0605d722708ee10e8ad83ec` and the frozen
+full-LTO binary `/tmp/flint-comparison-head-0ea1d9b`, SHA-256
+`195ee49aacca925a8e976d7b4feee504a32fd5782f0e3f9b3510e13f413d2e8c`. All timings below are
+sequential paired measurements pinned to logical CPU 8, with Rayon and FLINT restricted to one
+thread and default features including `faster_alloc`.
+
+### Dense degree-64 GCD audit
+
+A 2,000-sample LBR profile places 43.48% of all paired cycles in
+`UnivariateModularGcdContext::run`. Within the paired profile, certified reconstruction occupies
+27.55% and `DenseUnivariateIntegerDivisionContext::try_div` 25.77%. GMP add/subtract-multiply work
+inside the checked exact-division certificate accounts for about 20.16 percentage points, while
+`__gmpz_tdiv_qr` is only 0.75 points and divisor conversion about 0.52 points. FLINT certifies with
+recursive `__fmpz_poly_divrem_divconquer`; Symbolica's checked certificate is basecase.
+
+The existing `DenseIntegerExactDivision` kernel cannot replace this certificate: its contract
+assumes divisibility and calls exact coefficient division, whereas an intermediate CRT candidate
+may be wrong and must produce a checked remainder. An endpoint-adaptive experiment that divided
+from the low endpoint when its coefficient looked cheaper was also rejected. It moved Symbolica
+time by `+9.00%`, `+10.75%`, and `+8.79%` at degrees 48, 64, and 80. Low-to-high division replaced
+cheap quotient/remainder operations by products involving the large leading endpoint. Raw files
+are `/tmp/endpoint-div-d{48,64,80}-{baseline,candidate}-{1..6}.csv`; the rejected binary is
+`/tmp/flint-comparison-endpoint-div`, SHA-256
+`67cff74d7f04f17caec55ff58846c0ed657ddc9701ec8801347df3fe6e072411`.
+
+No GCD source change was retained. The final combined binary gives `0.893922`, `0.853611`, and
+`1.075259` S/F at degrees 48, 64, and 80. A meaningful next step would be a private *checked*
+divide-and-conquer certificate, not reuse of the exact-only domain kernel. The profile is
+`/tmp/profile-head-0ea1d9b-gcd-d64-lbr.perf.data`, SHA-256
+`32fcaebdec588c8cb97add1727af194a523b006adf3e974d4c89987ede964ed5`.
+
+### Deferred product-tree Bezout updates
+
+Each Hensel stage previously updated every internal node's Bezout cofactors before trying root or
+balanced exact reconstruction. Those cofactors are needed only for a subsequent lifting stage.
+The retained implementation first lifts all factors and product-tree values, tries every exact
+certificate, and performs the unchanged cofactor corrections only if every certificate fails and
+another stage remains. The correction modulus divides the old modulus, so lifted children have the
+same images needed by the saved old cofactors.
+
+On the degree-64 fixture exact reconstruction succeeds at exponent 39; the final cofactor update is
+now exponent 20. A forced irreducible probe at `17^40` verifies the failure path updates cofactors
+and continues to `17^80`. Product-tree/binary differential tests cover odd and binary precision.
+Six alternating 500-sample processes against exact current HEAD give:
+
+| Factorization | Control Symbolica | Deferred Symbolica | Deferred S/F | Paired candidate/control |
+|---|---:|---:|---:|---:|
+| total degree 63 | `3.137201 ms` | `3.132702 ms` | `1.046569` | `1.000769` |
+| total degree 64 | `2.697291 ms` | `2.188260 ms` | `0.857851` | `0.811924` |
+| total degree 65 | `3.366768 ms` | `3.308651 ms` | `1.093720` | `0.982174` |
+| high-height total degree 33 | `1.372767 ms` | `1.354936 ms` | `0.982928` | `0.987763` |
+
+The degree-64 gain is 18.8% and changes it from a small loss to a 1.17x Symbolica win. Raw files
+are `/tmp/deferred-bezout-{d63,d64,d65,d33h}-{baseline,candidate}-{1..6}.csv`. The factor-only
+binary is `/tmp/flint-comparison-deferred-bezout`, SHA-256
+`bf7a25b296200d6e6cf9a3a518519928783dca2f8c7464149952fa1301e22715`; its build JSON has SHA-256
+`24a5276f59bf52437ae43093a577af3c233a6cb903de777320ce7cccb51c1aa2`.
+
+### Allocation-free Kronecker bound sizing
+
+For fixed-size input coefficients, the old Kronecker selector converted L1 sums and maxima into
+GMP integers and allocated products although it consumed only their significant-bit counts. The
+new helper computes the exact bit length of a `u128` by `u128` product from four 64-bit partial
+products. The selector uses
+`min(bits(||a||_1 max(b)), bits(||b||_1 max(a)))`. Its former collision-count bound is redundant:
+the L1 norm of the shorter input is at most its term count times its maximum. Inputs containing a
+large integer retain the exact GMP fallback.
+
+Six alternating 10,000-sample processes isolate this change against the factor-only binary:
+
+| Product | Control Symbolica | Final Symbolica | Final S/F | Symbolica change |
+|---|---:|---:|---:|---:|
+| total degree 63 | `5.3735 us` | `5.1370 us` | `0.995256` | `-4.40%` |
+| total degree 64 | `5.6600 us` | `5.5075 us` | `1.027605` | `-2.69%` |
+| total degree 65 | `6.0685 us` | `5.9220 us` | `1.102061` | `-2.41%` |
+| high-height total degree 33 | `8.3330 us` | `8.2925 us` | `0.580402` | `-0.49%` guard |
+
+Raw product files are `/tmp/native-bound-{d63,d64,d65,d33h}-{baseline,candidate}-{1..6}.csv`.
+Factor guards use `/tmp/native-bound-factor-*`; GCD guards use `/tmp/native-bound-gcd-*`. In the
+combined binary factorization remains neutral relative to the factor-only candidate and measures
+`1.047138`, `0.853381`, `1.093223`, and `0.986543` S/F for degree 63, 64, 65, and high-height 33.
+
+The final binary is `/tmp/flint-comparison-deferred-bezout-native-bound`, SHA-256
+`edc543e82e9bef78f06d30dd516e5f4a9e93eeea0d25898c8f2022191f4fe467`. Its build JSON is
+`/tmp/flint-comparison-deferred-bezout-native-bound-build.jsonl`, SHA-256
+`bfdd4f88136954f7b174b9a80268b6e63694558fe6fa421086e756bb79a28579`. Validation passes all 126
+Numerica unit tests and 22 doctests, all 98 factor tests on the clean rerun, all 36 GCD tests, and
+`cargo fmt --check`. A no-default-features check with
+`integer-malachite,float-astro,native_code_generation` also passes. The first factor-suite run had
+the unrelated order-sensitive
+`galois_upgrade` failure; its exact rerun and the complete clean rerun both passed.
+
+### Why the headline worst rose after `v14`
+
+The v14 and v18 primary-table intersection contains exactly 116 shared rows. Version v17 added
+four asymmetric eight-variable configurations with separate product and GCD measurements, hence
+eight new rows and no removals. The present `1.327830` worst is the newly added multiplication of
+8/45-term cofactors by a 165-term common factor. Its six process ratios are `1.3223..1.3354`, so it
+is stable, but it has no v14 counterpart. On v14's fixed population, the v19 worst is `1.102061`,
+versus `1.137177` in v14; the comparable envelope improved. The new product progression is
+`1.327830` at 165 common-factor terms, `1.295551` at 495, and `0.746378` at 1,287, indicating a
+small/medium compact total-degree crossover that still needs its own CPU profile.
+
 ## Rejected or low-value experiments
 
 Do not repeat these without a genuinely new mechanism:
 
 | Experiment | Evidence | Decision |
 |---|---|---|
+| Endpoint-adaptive checked dense integer division | degree-48/64/80 Symbolica times rose 9.00%, 10.75%, and 8.79% | reject; a small low endpoint does not help when low-to-high division multiplies by the large leading divisor coefficient |
 | Signed-centered adjacent quotient fusion | degree-64 GCD rose from `0.409653 ms` to `0.494380 ms`; branch misses increased 45.2% | reject; signed product branching costs more than the saved Montgomery reductions |
 | Direct 1-4-limb `Integer` to `Zp64` conversion, `8440390` | degree-64 median `1.179371` versus `1.191412`; only about 1% | correct but Amdahl-limited; leave off `dev` |
 | Fused adjacent-degree/Q1 modular remainder, `e0430d5` | ratio regressed to about `1.484` | reject; three-limb reduction cost exceeds two Montgomery reductions |
@@ -3772,7 +3878,7 @@ older checksums and ratios are retained in Git history of this document at commi
 
 - Integer multiplication dispatch, chunked mixed-radix accumulation, and Kronecker conversion:
   `lib/numerica/src/domains/integer/polynomial_kernels.rs`, especially `DenseIntegerMul`,
-  `ChunkedDenseIntegerMul`, and `try_kronecker`.
+  `ChunkedDenseIntegerMul`, `try_kronecker`, and `u128_product_significant_bits`.
 - Integer multiplication differential tests:
   `lib/numerica/src/domains/integer.rs`.
 - Bounded packed-row sparse multiplication and its selector:
@@ -3791,7 +3897,8 @@ older checksums and ratios are retained in Git history of this document at commi
 - Integer factor selection/reconstruction/Hensel lifting: `src/poly/factor.rs`; bivariate image
   selection is `find_sample`, the active pressure selector is around `high_linear_lift_pressure`,
   and the guarded #84 order selection is
-  `reorder_integer_factor_variables_for_sparse_univariate`.
+  `reorder_integer_factor_variables_for_sparse_univariate`. Product-tree lifting defers its
+  Bezout-cofactor updates until exact reconstruction probes have failed.
 - Balanced two-leaf Hensel reconstruction: `src/poly/factor.rs`, especially
   `UnivariateHenselProductTreeTopology::{most_balanced_leaf_pair,balanced_leaf_pair_improving_root}`,
   `UnivariateHenselExactPartition`, `univariate_hensel_shortened_target`,
@@ -3823,8 +3930,8 @@ comments that justify file organization by contrasting it with designs not prese
    `1.295551`, and `1.174073`. Profile the generic integer multiplication route before changing
    factorization or GCD. The mechanism must apply to the support geometry or coefficient-height
    class, and must guard the already-fast 1,287-term and ordinary-height constructions.
-2. The worst fixed-fixture timed operation is dense degree-65 factorization at `1.098172`, followed
-   by configured degree-80 GCD at `1.075107`, dense two-variable GCD at `1.060731`, dense-large
+2. The worst fixed-fixture timed operation is dense degree-65 factorization at `1.093223`, followed
+   by configured degree-80 GCD at `1.075259`, dense two-variable GCD at `1.060731`, dense-large
    multiplication at `1.056183`, and GF(17) dense-very-large multiplication at `1.055155`.
    Continue in scoreboard order and re-profile the exact current source before each implementation
    round.
@@ -3848,10 +3955,10 @@ comments that justify file organization by contrasting it with designs not prese
 7. Benchmark the independent off-by-one correction in `terms_with_max_degree` separately. It
    currently omits the first term and reports zero for a one-term polynomial. The correction is
    semantic, but it changes existing Zippel ordering and must not be conflated with Hu planning.
-8. Treat configured degree-48 and degree-64 GCD as closed at `0.889777` and `0.852433` S/F unless a
-   new profile identifies a separate decisive mechanism. Treat dense degree-64 factorization
-   (`1.031329`) and its product (`1.017409`) similarly: the tested subset reconstruction, one-scan
-   generic multiplication context, and direct-limb-only conversion have already been rejected.
+8. Treat configured degree-48 and degree-64 GCD as closed at `0.893922` and `0.853611` S/F unless a
+   new profile identifies a separate decisive mechanism. Dense degree-64 factorization is now a
+   clear win at `0.853381`; retain deferred Bezout updates. Its product remains a small loss at
+   `1.027605`, after native bound sizing reduced current-source Symbolica time another 2.69%.
 9. Every selector must be justified by algebraic or computational quantities that define a class
    of inputs: degrees, support geometry, coefficient bounds, modular feasibility, predicted work,
    and an exact certificate. Benchmark IDs and exact fixture dimensions are reporting labels only.
