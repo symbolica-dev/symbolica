@@ -1,20 +1,21 @@
 # Polynomial performance continuation handoff
 
 This is the live continuation record for the single-core Symbolica/FLINT polynomial-performance
-work. It was refreshed on 2026-08-29 after adding native fixed-width compact-simplex integer
-accumulation and guarded early total-degree routing. The new path moves dense eight-variable
-degree-5 and dense seven-variable degree-7 product construction from `1.610087` and `1.584134`
-to `0.326626` and `0.423081` S/F. The base Rust/FLINT comparison inventory was measured at
-performance-equivalent source head `b2e5d28`, with later accepted rows replacing their exploratory
-predecessors as documented below.
+work. It was refreshed on 2026-08-30 after accepting generic pre-content Hu-Monagan main-variable
+planning. The former worst primary row, PolyBench eight-variable sharp GCD #140, moves from
+`1.268240` to `0.479027` S/F, and eight-variable sharp GCD #11 moves from `0.748107` to `0.409963`.
+The current 116-row non-resultant inventory has 98 Symbolica wins and 18 losses, a `0.638180`
+median, and a new worst row of `1.171321` for dense univariate degree-65 factorization. Rows were
+measured across accepted source snapshots, with each replacement and its source-matched evidence
+documented below.
 Keep this file current whenever an experiment is accepted, rejected, or left partly complete. The
 purpose is that another agent can resume without reconstructing decisions from chat history or
 transient binary names.
 
 The complete current Symbolica/FLINT scoreboard is in
 [CURRENT_STATUS.md](CURRENT_STATUS.md), with the latest immutable snapshot in
-[CURRENT_STATUS_v12.md](CURRENT_STATUS_v12.md). Its primary statistics contain 116 non-resultant
-comparisons: 97 favor Symbolica and 19 favor FLINT. The six Ducos, six Brown, and six CRT
+[CURRENT_STATUS_v13.md](CURRENT_STATUS_v13.md). Its primary statistics contain 116 non-resultant
+comparisons: 98 favor Symbolica and 18 favor FLINT. The six Ducos, six Brown, and six CRT
 measurements are retained only in a compact appendix note and do not affect primary ranks or
 summary statistics. After every accepted optimization, update the live file and create the next
 numbered snapshot with an opening paragraph that describes the changes from its predecessor.
@@ -39,6 +40,146 @@ results unless a post-rebase rerun is stated explicitly.
   this file, source, committed logs, or benchmark commands saved in the repository.
 - Small changes below roughly 3% need particularly strong, repeated evidence before their
   complexity is accepted.
+
+## Accepted pre-content Hu-Monagan main-variable planning
+
+The generic GCD path formerly selected its initial main coordinate and immediately removed
+univariate content in that coordinate. Hu-Monagan then inherited this choice even when the
+anchored input had a much smaller coefficient row in another active variable. On anisotropic
+supports this can multiply the geometric sampling schedule: #140's original main coordinate has
+a maximum row of 1,441 terms, while the selected coordinate has a maximum row of 119 terms.
+
+The accepted implementation gives `PolynomialGCD` a narrow `gcd_with_precontent_plan` hook. The
+generic caller supplies the active variables, degree bounds, and per-input degrees already found
+by its metadata scan. Only the integer-domain implementation overrides the hook. A successful
+hook must return the complete GCD in the original coordinate order, including polynomial content;
+the generic caller then restores only the shared monomial shift and common exponent scale. A
+declined or unsuccessful plan returns `None` and resumes the unchanged content-removal and GCD
+path. This keeps the capability on the GCD interface and adds no method to the base `Ring` trait.
+
+`HuMonaganPlanningContext` fixes the smaller input as the interpolation anchor for the entire
+operation, using the left input on a term-count tie. Eligibility and execution use that same
+anchor. Planning runs only when the current order already satisfies Hu's sparsity test and has a
+nonconstant main variable plus at least two nonconstant interpolation variables. It then accepts
+an alternative main variable only when all of these input-derived conditions hold:
+
+- Its largest anchored-input coefficient row is at most one quarter of the current row. The 4x
+  threshold removes at least two complete levels from Hu's doubling schedule.
+- Its degree-weighted image estimate,
+  `(anchored_degree + other_degree + 2) * maximum_row_support`, does not increase.
+- Removing the candidate coordinate from the exponent encoding gives a strictly smaller
+  mixed-radix Kronecker range, and twice that range fits below the largest available smooth-prime
+  modulus.
+- The candidate has a nonzero GCD degree bound, remains fully Hu-applicable in the permuted
+  coordinates, and retains the fourfold row advantage after content extraction.
+
+Before building a row histogram, the planner uses the exact pigeonhole lower bound
+`ceil(term_count / (degree + 1))` to reject a candidate that cannot meet the support threshold.
+The bounded counter stops at the first oversized row. It stores low exponent indices densely and
+migrates exactly to a hash map when a gap would make the dense span exceed the polynomial's term
+count, so its storage remains O(term count). Hu's box and cofactor sparsity arithmetic uses exact
+checked `u128` operations in the common case and falls back to `Integer` only on overflow.
+
+For an accepted coordinate, `PreparedHuMonaganGcd` computes both univariate contents in that
+coordinate, takes their GCD, makes both inputs primitive, permutes the variables and bounds, and
+runs Hu with the preapproved fixed anchor. It inverse-permutes the result, multiplies the content
+back, and normalizes it. Every preparation or reconstruction failure falls through to the legacy
+route. Selection depends on degrees, supports, interpolation work, exponent range, and modulus
+feasibility; it contains no benchmark identifier, exact variable-count branch, or fixture
+coefficient fingerprint.
+
+A deterministic 600-support sweep covers three-, five-, and eight-variable uniform, clustered,
+and anisotropic families. Of 597 inputs eligible for the current Hu path, the selector changes 198
+plans, improves all 198 predicted schedules, leaves 399 unchanged, and regresses none. Total
+predicted samples fall from 7,968 to 2,672 (`-66.5%`). The selected three-, five-, and
+eight-variable subsets change `2336 -> 712` over 64 cases, `2464 -> 936` over 67 cases, and
+`3168 -> 1024` over 67 cases. No uniform or clustered input switches, and all 198 selected plans
+also have a strictly smaller Kronecker range.
+
+Six alternating 100-sample full-LTO processes, pinned sequentially to core 8, give the following
+PolyBench GCD operation results. `Change` compares Symbolica time in the final candidate with the
+frozen `v12` binary; negative values are improvements.
+
+| PolyBench GCD row | Candidate S/F | Frozen S/F | Change |
+|---|---:|---:|---:|
+| 5v uniform #11 | `1.121593` | `1.075969` | `+4.151%` |
+| 5v sharp #11 | `0.525423` | `0.518498` | `+1.368%` |
+| 8v uniform #11 | `0.679912` | `0.673357` | `+0.970%` |
+| 8v uniform #55 | `0.839509` | `0.832288` | `+0.841%` |
+| 8v uniform #56 | `0.451333` | `0.448195` | `+0.753%` |
+| 8v uniform #168 | `0.546446` | `0.542210` | `+0.819%` |
+| 8v uniform #188 | `0.462498` | `0.460475` | `+0.493%` |
+| 8v sharp #11 | `0.409963` | `0.747412` | `-45.145%` |
+| 8v sharp #53 | `0.395224` | `0.392195` | `+0.818%` |
+| 8v sharp #35 | `0.647601` | `0.643469` | `+0.627%` |
+| 8v sharp #140 | `0.479027` | `1.263872` | `-62.563%` |
+| 8v uniform trivial #11 | `0.957213` | `0.957296` | `-0.059%` |
+
+#140 changes its observed Hu schedule from 80 images to 16; sharp #11 has the same 80-to-16
+change. The scoreboard replaces the older robust rows `1.268240 -> 0.479027` and
+`0.748107 -> 0.409963`. It also records the final frozen-binary five-variable uniform result
+`1.097676 -> 1.121593` rather than hiding the cross-binary regression.
+
+Three alternating 20-sample process pairs give these generated GCD guards:
+
+| Generated GCD row | Candidate S/F | Frozen S/F | Change |
+|---|---:|---:|---:|
+| dense 1v degree 32 | `0.997344` | `0.988546` | `+1.096%` |
+| dense 2v degree 5 | `1.063973` | `1.054802` | `+1.041%` |
+| dense 3v degree 7 | `0.197415` | `0.197698` | `+0.442%` |
+| dense 5v degree 7 | `0.820838` | `0.770883` | `+6.325%` |
+| dense 8v degree 5 | `0.688010` | `0.604876` | `+13.517%` |
+| sparse 5v degree 7 | `0.637127` | `0.629221` | `+1.219%` |
+| sparse 8v degree 5 | `0.361034` | `0.351518` | `+2.693%` |
+| high-gap 5v degree 5, gap 64 | `0.074374` | `0.072728` | `+2.364%` |
+| high-gap 8v degree 4, gap 256 | `0.029005` | `0.028213` | `+2.719%` |
+| high-height 5v degree 4, 128 bits | `0.428465` | `0.434061` | `-1.292%` |
+| high-height 5v degree 4, 256 bits | `0.433884` | `0.439503` | `-1.372%` |
+| high-height 5v degree 4, 512 bits | `0.437428` | `0.442556` | `-1.244%` |
+| high-height 5v degree 4, 1024 bits | `0.471647` | `0.475337` | `-0.570%` |
+| high-height 8v degree 3, 256 bits | `0.465732` | `0.475451` | `-2.286%` |
+
+The scoreboard conservatively replaces dense 5v `0.750982 -> 0.820838` and dense 8v
+`0.591952 -> 0.688010`; guard shifts below 3% do not replace stronger existing rows. These two
+larger regressions, and the five-variable uniform result above, are not planner-allocation cost.
+Runtime plan-on/plan-off measurements in the same trace-enabled binary change Symbolica by only
+`+0.20%`, `+1.15%`, and `+0.15%`, respectively. Across separate full-LTO binaries, an LBR profile
+instead moves existing Zippel `construct_new_image_single_scale` work from 14.20% to 16.02% of
+combined samples, with no planning or allocation hotspot large enough to explain the difference.
+The current evidence points to whole-program LTO code placement/code generation in the existing
+Zippel image constructor. The frozen-binary regressions remain reported because they are real,
+even though the accepted selector does not execute on those dense/uniform guards.
+
+The final binary is `/tmp/flint-comparison-hu-precontent-final-v15`, SHA-256
+`9150daeb152ece2480994383bf0aaf60f9e2f4cb34aeff4fb7a8ab321e21426c`; its build JSON is
+`/tmp/flint-comparison-hu-precontent-final-v15-build.jsonl`, SHA-256
+`ea44e9a7e96b01bde6d0a6af855a5f9d2aa51daba1f26bc9c159c51ba5495711`. Raw PolyBench files are
+`/tmp/hu-strict-v15-polybench-01..06.csv` with controls
+`/tmp/hu-strict-base-polybench-01..06.csv`; their summary is
+`/tmp/hu-strict-v15-polybench-summary.csv`. Generated files use
+`/tmp/hu-strict-v15-generated-01..03.csv` and `/tmp/hu-strict-base-generated-01..03.csv`, summarized
+in `/tmp/hu-strict-v15-generated-summary.csv`.
+
+The sweep output is `/tmp/hu_fixed_anchor_guarded_sweep_raw.txt`, SHA-256
+`6704dfe0ddec66e19d5b7d7e16393a7a081f2048ec36eb70bcd01528107d8cbd`; its generator is
+`/tmp/hu_fixed_anchor_sweep.rs`, SHA-256
+`f4c1b5ff1c6b4bd68529c6200fb527c0f05a0d63009e267f2fae415c479f6ff4`. The trace binary is
+`/tmp/flint-comparison-hu-precontent-trace-v3`, SHA-256
+`f9e4fe69fa89d9661709cbb81c98704ef7516a00bd4923fe4f0474032793c0b0`. The candidate and control
+five-variable uniform profiles are `/tmp/profile-hu-prefilter-5v-uniform.perf.data`, SHA-256
+`e65a32ba92b9a4cf958b9749665e27c6b473d8cdf77c32c4868cb31e34e11500`, and
+`/tmp/profile-hu-v12-5v-uniform.perf.data`, SHA-256
+`cc9510ba16ea46f63cb5aeca99aebbbec12d097238016c8db4570f2335c749ff`.
+
+`cargo check --lib` is warning-free. Focused validation passes all three `hu_planning` tests, the
+pre-content minimum-geometry test, the adaptive counter migration test, and all four
+`hu_monagan` tests. Coverage includes the exact 4x boundary and its rejection below the boundary,
+image-work and Kronecker-range adversaries, left/right/tied anchors, content restoration, complete
+Hu applicability, and end-to-end public `gcd` calls in both input orders with monomial shifts and
+common exponent compression. A default root run excluding the `isolate` name filter passes 520
+tests; rerunning the pre-existing univariate-root isolation failure alone reproduces its unrelated
+interval mismatch (`[3/16, 9/32]` versus `[15/64, 9/32]`). Numerica passes 124/124 tests. With
+`integer-malachite,float-astro,native_code_generation`, all 35 polynomial-GCD tests pass.
 
 ## Accepted constant-coordinate modular GCD reconstruction
 
@@ -3128,6 +3269,11 @@ Do not repeat these without a genuinely new mechanism:
 | Direct 1-4-limb `Integer` to `Zp64` conversion, `8440390` | degree-64 median `1.179371` versus `1.191412`; only about 1% | correct but Amdahl-limited; leave off `dev` |
 | Fused adjacent-degree/Q1 modular remainder, `e0430d5` | ratio regressed to about `1.484` | reject; three-limb reduction cost exceeds two Montgomery reductions |
 | Dense single-scale Zippel reconstruction, `c4748b6` | PolyBench #11 improved only about 1.3% | too much code for gain |
+| Late, post-content Hu main-variable planning | #140 Symbolica time changed about `6.1273 -> 5.485 ms`, but the old main-coordinate `univariate_content` still consumed 26.50% of combined profile samples | superseded by the accepted pre-content hook, which avoids doing discarded-coordinate content work |
+| Full Hu coefficient-row histograms, planner v4 | every candidate row was counted even when its degree made the 4x threshold impossible | reject the unconditional scan; use the exact pigeonhole lower bound and stop a bounded count at the first oversized row |
+| Hu prefilter/dense/adaptive/reordered planner layouts, v5/v7/v9/v10 | the intermediate implementations selected the intended anisotropic schedules but did not give stable dense/uniform guard improvements across full-LTO binaries | reject those layouts; retain only the final degree prefilter, O(term-count) adaptive counter, fixed anchor, and pre-content placement |
+| Cold generic pre-content wrapper, v13 | did not recover the dense/uniform guard shifts; binary SHA-256 `27fa54fa1bf985293016cf3d16f592bfe824c61480876e05dd8dd3c37320f933`, build JSON `44c27427e3e0eada66dee195be9bedcdf7f891f55505b97d631b3360218480e6` | reject; source was reverted |
+| Cold integer pre-content entry, v14 | likewise did not recover the guards; binary SHA-256 `4b277840c17beab15b18abc7aaec9aa90f4a6923fbfc7c4ff25b453628e2b5d3`, build JSON `c60872c53a92b06b2ddd448e031a8001b1e4ba078aa85ff3ae1ccd351ab9846e` | reject; source was reverted and the final result reports the cross-binary LTO sensitivity |
 | Broad dense modular GCD experiment, `5a975f1` | little gain at degree 64, degree-80 regression | superseded by smaller dense-image/certificate contexts |
 | Borrowed versus by-value finite-field calls | no measurable difference | not the source of the old unexplained `1.325` result |
 | Divide-and-conquer univariate attempt | degree-64 ratio about `2.736` | decisive regression |
@@ -3161,6 +3307,10 @@ older checksums and ratios are retained in Git history of this document at commi
 - Dense univariate modular GCD and exact certificate contexts:
   `src/poly/gcd.rs`, especially `DenseZp64UnivariateGcdImage`,
   `DenseUnivariateIntegerDivisionContext`, and `UnivariateModularGcdContext`.
+- Pre-content Hu-Monagan main-variable planning: `src/poly/gcd.rs`, especially
+  `HuMonaganAnchor`, `HuMonaganPlanningContext`, `CoefficientRowCounter`, and
+  `PreparedHuMonaganGcd`. The same file contains the generic pre-content call site and the narrow
+  `PolynomialGCD::gcd_with_precontent_plan` hook; only `IntegerRing` overrides it.
 - Integer factor selection/reconstruction/Hensel lifting: `src/poly/factor.rs`; bivariate image
   selection is `find_sample`, the active pressure selector is around `high_linear_lift_pressure`,
   and the guarded #84 order selection is
@@ -3187,32 +3337,44 @@ comments that justify file organization by contrasting it with designs not prese
 
 ## Current ordered next actions
 
-1. Attack the current worst primary row, PolyBench eight-variable sharp GCD #140 at `1.268240`
-   S/F. Its current Hu plan uses about 80 images. The most promising generic selector measures, for
-   each variable and input, the maximum number of terms in one coefficient row. Preserve the
-   existing variable unless another variable/input anchor reduces that maximum by at least 4x,
-   corresponding to two full Hu sampling doublings. On 600 withheld generated sparse-product
-   supports this conservative rule improved 40 schedules, left 560 unchanged, and regressed none;
-   it predicts #140 and sharp #11 falling from 80 to 16 images. Implement it only in Hu planning,
-   then guard all 11 nontrivial PolyBench GCD fixtures plus generated sparse/high-gap/dense cases.
-2. Benchmark the independent off-by-one correction in `terms_with_max_degree` separately. It
+1. Attack the current worst row, dense one-variable degree-65 factorization at `1.171321` S/F, with
+   a deterministic balanced two-leaf exact reconstruction. At the selected prime 13, the modular
+   leaf degrees are `[1, 1, 10, 10, 10, 16, 16]`. The product of the two degree-16 leaves already
+   divides the integer input exactly at exponent 43. Its local coefficient bound requires only
+   exponent 51, while the current complete tree target is exponent 86. Choose the two-leaf pair
+   generically by minimizing the degree imbalance between the pair and its complement, center and
+   certify the candidate with exact division, and derive its target from the pair's own coefficient
+   bound. Enter this route only when the conservative work inequality
+   `2 * (required - current) <= global - current` holds; a failed reconstruction or certificate
+   continues the existing complete-tree lift. The current profile is
+   `/tmp/profile-d65-audit-current-lbr.perf.data`, SHA-256
+   `9ffe6abbe0f391f01be87e5836d718638dbe3d2e49bb928227c093427bcf99cc`; synchronized Hensel
+   lifting accounts for 34.70% of paired cycles versus 24.61% for FLINT's factor tree.
+2. After degree 65, continue strictly down the current scoreboard: near-`2^64` finite-field dense
+   multiplication (`1.137177`), PolyBench 5v uniform GCD #11 (`1.121593`), high-height degree-33
+   factorization (`1.111896`), PolyBench factorization #105 (`1.106606`), configured degree-80 GCD
+   (`1.075107`), the degree-65 input product (`1.070910`), dense 2v GCD (`1.060731`), generic dense
+   large multiplication (`1.056183`), and GF(17) dense very-large multiplication (`1.055155`).
+   Re-profile the first row before each implementation round rather than assuming an earlier
+   bottleneck still dominates.
+3. For #105, the first bounded experiment remains an exact two-sparsest-layer GCD certificate in
+   `factor_separable`: a constant pair GCD proves the complete coefficient content is constant; a
+   nonconstant result may replace the pair before the unchanged full fallback. Selection must use
+   layer support and exact divisibility, not the fixture number.
+4. Benchmark the independent off-by-one correction in `terms_with_max_degree` separately. It
    currently omits the first term and reports zero for a one-term polynomial. The correction is
-   semantic, but it changes the existing Zippel variable ordering and must not be conflated with
-   the Hu-specific selector.
-3. The next remaining rows are dense degree-65 factorization (`1.171321`), near-`2^64` finite-field
-   dense multiplication (`1.137177`), high-height degree-33 factorization (`1.111896`), and
-   PolyBench factorization #105 (`1.106606`). For #105, first try an exact two-sparsest-layer GCD
-   certificate in `factor_separable`: a constant pair GCD proves the complete coefficient content
-   is constant; a nonconstant result can replace the pair before the unchanged full fallback.
-4. Treat the configured degree-48 and degree-64 GCD cases as closed at `0.889777` and `0.852433`
-   S/F unless a smaller mechanism gives another decisive gain. Degree 80 remains `1.075107`; profile
-   it before changing the reconstruction selector again because the remaining gap may be outside
-   CRT image count.
-5. Treat dense degree-64 factorization as closed at `1.031329` S/F. The tested `17^10` subset
-   reconstruction does not shorten the lift; profile a different mechanism before revisiting it.
-6. Treat the degree-64 integer product as closed at `1.017409` S/F. The accepted fixed-width
-   contiguous packer covers this regime; do not repeat the rejected one-scan generic context or
-   direct-limb-only conversion.
+   semantic, but it changes existing Zippel ordering and must not be conflated with Hu planning.
+5. Treat configured degree-48 and degree-64 GCD as closed at `0.889777` and `0.852433` S/F unless a
+   new profile identifies a separate decisive mechanism. Degree 80 remains open because it is
+   slower than FLINT, but profile it before changing CRT selection. Treat dense degree-64
+   factorization (`1.031329`) and its product (`1.017409`) similarly: the tested subset
+   reconstruction, one-scan generic multiplication context, and direct-limb-only conversion have
+   already been rejected.
+6. Every selector must be justified by algebraic or computational quantities that define a class
+   of inputs: degrees, support geometry, coefficient bounds, modular feasibility, predicted work,
+   and an exact certificate. Benchmark IDs and exact fixture dimensions are reporting labels only.
+   Validate each route on generated families spanning variables, supports, and coefficient heights,
+   plus withheld PolyBench cases, and retain the generic fallback on every failed guard.
 7. Preserve the constant-coordinate selector's strict-win rule and lazy leading fallback. Any
    broader projective-coordinate selection needs a proof that the selected coefficient is nonzero
    in every retained image and an exact-division certificate.

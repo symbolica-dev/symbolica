@@ -423,39 +423,550 @@ impl<E: PositiveExponent> GcdInputMetadata<E> {
     }
 }
 
-fn should_use_hu_monagan<E: PositiveExponent>(
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum HuMonaganAnchor {
+    Left,
+    Right,
+}
+
+impl HuMonaganAnchor {
+    /// Selects the smaller input whose cofactor is interpolated alongside the GCD.
+    fn from_inputs<E: PositiveExponent>(
+        left: &MultivariatePolynomial<IntegerRing, E>,
+        right: &MultivariatePolynomial<IntegerRing, E>,
+    ) -> Self {
+        if left.nterms() <= right.nterms() {
+            Self::Left
+        } else {
+            Self::Right
+        }
+    }
+
+    /// Returns the anchored input first and the other GCD input second.
+    fn order_inputs<'a, E: PositiveExponent>(
+        self,
+        left: &'a MultivariatePolynomial<IntegerRing, E>,
+        right: &'a MultivariatePolynomial<IntegerRing, E>,
+    ) -> (
+        &'a MultivariatePolynomial<IntegerRing, E>,
+        &'a MultivariatePolynomial<IntegerRing, E>,
+    ) {
+        match self {
+            Self::Left => (left, right),
+            Self::Right => (right, left),
+        }
+    }
+}
+
+/// Checks that Hu-Monagan has a main variable and at least two interpolation variables.
+fn hu_monagan_has_minimum_geometry<E: PositiveExponent>(vars: &[usize], bounds: &[E]) -> bool {
+    vars.len() >= 3
+        && vars
+            .first()
+            .and_then(|variable| bounds.get(*variable))
+            .is_some_and(|bound| *bound > E::zero())
+        && bounds.get(vars[1]).is_some_and(|bound| *bound > E::zero())
+        && bounds.get(vars[2]).is_some_and(|bound| *bound > E::zero())
+}
+
+/// Tests whether a variable order has sufficiently sparse interpolation geometry for Hu-Monagan.
+fn hu_monagan_plan_is_applicable<E: PositiveExponent>(
     a: &MultivariatePolynomial<IntegerRing, E>,
     b: &MultivariatePolynomial<IntegerRing, E>,
     vars: &[usize],
     bounds: &[E],
+    anchor: HuMonaganAnchor,
 ) -> bool {
-    if vars.len() < 3
-        || vars.first() != Some(&0)
-        || bounds[0] <= E::zero()
-        || bounds.get(vars[1]).is_none_or(|b| *b == E::zero())
-        || bounds.get(vars[2]).is_none_or(|b| *b == E::zero())
-    {
+    let (anchored_input, _) = anchor.order_inputs(a, b);
+    hu_monagan_plan_is_applicable_with_degree(a, b, vars, bounds, |variable| {
+        anchored_input.degree(variable)
+    })
+}
+
+/// Tests Hu-Monagan interpolation geometry using degrees already known by GCD planning.
+fn hu_monagan_plan_is_applicable_with_degrees<E: PositiveExponent>(
+    a: &MultivariatePolynomial<IntegerRing, E>,
+    b: &MultivariatePolynomial<IntegerRing, E>,
+    vars: &[usize],
+    bounds: &[E],
+    anchored_degrees: &[E],
+) -> bool {
+    debug_assert_eq!(anchored_degrees.len(), a.nvars());
+    debug_assert_eq!(a.nvars(), b.nvars());
+    hu_monagan_plan_is_applicable_with_degree(a, b, vars, bounds, |variable| {
+        anchored_degrees[variable]
+    })
+}
+
+/// Tests Hu-Monagan interpolation geometry with a supplied anchored-input degree lookup.
+fn hu_monagan_plan_is_applicable_with_degree<E, F>(
+    a: &MultivariatePolynomial<IntegerRing, E>,
+    b: &MultivariatePolynomial<IntegerRing, E>,
+    vars: &[usize],
+    bounds: &[E],
+    mut anchored_degree: F,
+) -> bool
+where
+    E: PositiveExponent,
+    F: FnMut(usize) -> E,
+{
+    if !hu_monagan_has_minimum_geometry(vars, bounds) {
         return false;
     }
 
     let nterms = a.nterms() + b.nterms();
     const SPARSITY_MARGIN: u32 = 8;
 
+    let mut box_size_u128 = Some(1u128);
+    let mut cofactor_box_size_u128 = Some(1u128);
+    for variable in vars.iter().copied().skip(1) {
+        let bound = bounds[variable].to_u32();
+        box_size_u128 = box_size_u128.and_then(|size| size.checked_mul(u128::from(bound) + 1));
+        let cofactor_degree = anchored_degree(variable).to_u32().checked_sub(bound);
+        cofactor_box_size_u128 = cofactor_box_size_u128
+            .zip(cofactor_degree)
+            .and_then(|(size, degree)| size.checked_mul(u128::from(degree) + 1));
+    }
+    if let (Some(box_size), Some(cofactor_box_size)) = (box_size_u128, cofactor_box_size_u128) {
+        let largest_sparse_size = (box_size - 1) / u128::from(SPARSITY_MARGIN);
+        return cofactor_box_size <= largest_sparse_size || nterms as u128 <= largest_sparse_size;
+    }
+
     let mut box_size = Integer::from(1);
     let mut cofactor_box_size = Integer::from(1);
     for v in vars.iter().skip(1) {
         let bound = bounds[*v].to_u32();
         box_size *= bound + 1;
-
-        if a.nterms() < b.nterms() {
-            cofactor_box_size *= Integer::from(a.degree(*v).to_u32()) - bound + 1;
-        } else {
-            cofactor_box_size *= Integer::from(b.degree(*v).to_u32()) - bound + 1;
-        }
+        cofactor_box_size *= Integer::from(anchored_degree(*v).to_u32()) - bound + 1;
     }
 
     cofactor_box_size * SPARSITY_MARGIN < box_size
         || Integer::from(nterms) * SPARSITY_MARGIN < box_size
+}
+
+fn should_use_hu_monagan_with_anchor<E: PositiveExponent>(
+    a: &MultivariatePolynomial<IntegerRing, E>,
+    b: &MultivariatePolynomial<IntegerRing, E>,
+    vars: &[usize],
+    bounds: &[E],
+    anchor: HuMonaganAnchor,
+) -> bool {
+    vars.first() == Some(&0) && hu_monagan_plan_is_applicable(a, b, vars, bounds, anchor)
+}
+
+fn should_use_hu_monagan<E: PositiveExponent>(
+    a: &MultivariatePolynomial<IntegerRing, E>,
+    b: &MultivariatePolynomial<IntegerRing, E>,
+    vars: &[usize],
+    bounds: &[E],
+) -> bool {
+    should_use_hu_monagan_with_anchor(a, b, vars, bounds, HuMonaganAnchor::from_inputs(a, b))
+}
+
+/// Minimum row reduction that removes two levels from Hu's geometric sample schedule.
+const HU_MONAGAN_MAIN_VARIABLE_ROW_REDUCTION: usize = 4;
+
+/// Plans the main-variable change for one Hu-Monagan GCD operation.
+struct HuMonaganPlanningContext<'a, E: PositiveExponent> {
+    left: &'a MultivariatePolynomial<IntegerRing, E>,
+    right: &'a MultivariatePolynomial<IntegerRing, E>,
+    variables: &'a [usize],
+    bounds: &'a [E],
+    anchor: HuMonaganAnchor,
+    anchored_degrees: SmallVec<[E; INLINED_EXPONENTS]>,
+    other_degrees: SmallVec<[E; INLINED_EXPONENTS]>,
+    maximum_row_supports: SmallVec<[usize; INLINED_EXPONENTS]>,
+}
+
+impl<'a, E: PositiveExponent> HuMonaganPlanningContext<'a, E> {
+    /// Computes the input degrees and coefficient-row supports used by the plan.
+    #[cfg(test)]
+    fn new(
+        left: &'a MultivariatePolynomial<IntegerRing, E>,
+        right: &'a MultivariatePolynomial<IntegerRing, E>,
+        variables: &'a [usize],
+        bounds: &'a [E],
+        anchor: HuMonaganAnchor,
+    ) -> Self {
+        let left_degrees = polynomial_degrees(left);
+        let right_degrees = polynomial_degrees(right);
+        Self::new_with_degrees(
+            left,
+            right,
+            variables,
+            bounds,
+            anchor,
+            &left_degrees,
+            &right_degrees,
+        )
+    }
+
+    /// Computes coefficient-row supports using degrees from the generic GCD input scan.
+    fn new_with_degrees(
+        left: &'a MultivariatePolynomial<IntegerRing, E>,
+        right: &'a MultivariatePolynomial<IntegerRing, E>,
+        variables: &'a [usize],
+        bounds: &'a [E],
+        anchor: HuMonaganAnchor,
+        left_degrees: &[E],
+        right_degrees: &[E],
+    ) -> Self {
+        debug_assert_eq!(left_degrees.len(), left.nvars());
+        debug_assert_eq!(right_degrees.len(), right.nvars());
+        let (anchored_input, _) = anchor.order_inputs(left, right);
+        let (anchored_degrees, other_degrees) = match anchor {
+            HuMonaganAnchor::Left => (left_degrees, right_degrees),
+            HuMonaganAnchor::Right => (right_degrees, left_degrees),
+        };
+        let anchored_degrees: SmallVec<[E; INLINED_EXPONENTS]> =
+            anchored_degrees.iter().copied().collect();
+        let other_degrees: SmallVec<[E; INLINED_EXPONENTS]> =
+            other_degrees.iter().copied().collect();
+
+        // `usize::MAX` marks variables whose row support is already proven too large.
+        let mut maximum_row_supports: SmallVec<[usize; INLINED_EXPONENTS]> =
+            smallvec![usize::MAX; anchored_input.nvars()];
+        if let Some(current_variable) = variables.first().copied() {
+            let current_support = maximum_coefficient_row_support_bounded(
+                anchored_input,
+                current_variable,
+                usize::MAX,
+            )
+            .unwrap();
+            maximum_row_supports[current_variable] = current_support;
+            let maximum_candidate_support =
+                current_support / HU_MONAGAN_MAIN_VARIABLE_ROW_REDUCTION;
+
+            if maximum_candidate_support > 0 {
+                let current_image_work = hu_monagan_main_image_work(
+                    &anchored_degrees,
+                    &other_degrees,
+                    current_variable,
+                    current_support,
+                );
+                let current_range = hu_monagan_kronecker_range(
+                    variables,
+                    bounds,
+                    &anchored_degrees,
+                    &other_degrees,
+                    current_variable,
+                );
+                let maximum_modulus = SMOOTH_PRIMES.last().map(|prime| prime.0);
+
+                for variable in variables.iter().copied().skip(1) {
+                    if bounds[variable] == E::zero() {
+                        continue;
+                    }
+
+                    // With degree d, N terms occupy at most d + 1 exponent rows, so the
+                    // pigeonhole principle gives a lower bound on the largest row.
+                    let row_count = u128::from(anchored_degrees[variable].to_u32()) + 1;
+                    let minimum_support = (anchored_input.nterms() as u128).div_ceil(row_count);
+                    if minimum_support > maximum_candidate_support as u128
+                        || hu_monagan_main_image_work(
+                            &anchored_degrees,
+                            &other_degrees,
+                            variable,
+                            minimum_support as usize,
+                        ) > current_image_work
+                    {
+                        continue;
+                    }
+
+                    let range_is_feasible = hu_monagan_kronecker_range(
+                        variables,
+                        bounds,
+                        &anchored_degrees,
+                        &other_degrees,
+                        variable,
+                    )
+                    .is_some_and(|candidate_range| {
+                        current_range.is_none_or(|range| candidate_range <= range)
+                            && candidate_range.checked_mul(2).is_some_and(|bound| {
+                                maximum_modulus.is_some_and(|modulus| bound <= modulus)
+                            })
+                    });
+                    if !range_is_feasible {
+                        continue;
+                    }
+
+                    if let Some(support) = maximum_coefficient_row_support_bounded(
+                        anchored_input,
+                        variable,
+                        maximum_candidate_support,
+                    ) {
+                        maximum_row_supports[variable] = support;
+                    }
+                }
+            }
+        }
+
+        Self {
+            left,
+            right,
+            variables,
+            bounds,
+            anchor,
+            anchored_degrees,
+            other_degrees,
+            maximum_row_supports,
+        }
+    }
+
+    /// Orders the active variables with `main_variable` first and the interpolation variables by
+    /// descending GCD degree bound.
+    fn variable_order(&self, main_variable: usize) -> SmallVec<[usize; INLINED_EXPONENTS]> {
+        let mut order: SmallVec<[_; INLINED_EXPONENTS]> = self.variables.iter().copied().collect();
+        let main_index = order
+            .iter()
+            .position(|variable| *variable == main_variable)
+            .expect("Hu main variable is active");
+        order.swap(0, main_index);
+        order[1..].sort_by(|left, right| self.bounds[*right].cmp(&self.bounds[*left]));
+        order
+    }
+
+    /// Estimates the univariate image work for one main variable.
+    fn main_image_work(&self, variable: usize) -> u128 {
+        hu_monagan_main_image_work(
+            &self.anchored_degrees,
+            &self.other_degrees,
+            variable,
+            self.maximum_row_supports[variable],
+        )
+    }
+
+    /// Returns the mixed-radix range used to encode all variables except the main variable.
+    fn kronecker_range(&self, main_variable: usize) -> Option<u64> {
+        hu_monagan_kronecker_range(
+            self.variables,
+            self.bounds,
+            &self.anchored_degrees,
+            &self.other_degrees,
+            main_variable,
+        )
+    }
+
+    /// Selects a main variable with a substantially smaller row and a strictly smaller
+    /// mixed-radix interpolation range.
+    fn alternative_main_variable(&self) -> Option<usize> {
+        let current_variable = *self.variables.first()?;
+        let current_support = self.maximum_row_supports[current_variable];
+        let maximum_candidate_support = current_support / HU_MONAGAN_MAIN_VARIABLE_ROW_REDUCTION;
+        let current_image_work = self.main_image_work(current_variable);
+        let current_range = self.kronecker_range(current_variable);
+        let maximum_modulus = SMOOTH_PRIMES.last()?.0;
+
+        self.variables
+            .iter()
+            .copied()
+            .filter(|variable| {
+                *variable != current_variable
+                    && self.bounds[*variable] > E::zero()
+                    && self.maximum_row_supports[*variable] <= maximum_candidate_support
+                    && self.main_image_work(*variable) <= current_image_work
+            })
+            .filter(|variable| {
+                self.kronecker_range(*variable)
+                    .is_some_and(|candidate_range| {
+                        current_range.is_none_or(|range| candidate_range < range)
+                            && candidate_range
+                                .checked_mul(2)
+                                .is_some_and(|bound| bound <= maximum_modulus)
+                    })
+            })
+            .min_by_key(|variable| self.maximum_row_supports[*variable])
+    }
+
+    /// Extracts content in the selected main variable and prepares the permuted Hu inputs.
+    fn prepare(&self, main_variable: usize) -> Option<PreparedHuMonaganGcd<E>> {
+        let left_content = self.left.univariate_content(main_variable);
+        let right_content = self.right.univariate_content(main_variable);
+        let content = left_content.gcd(&right_content);
+
+        let left_primitive = if left_content.is_one() {
+            Cow::Borrowed(self.left)
+        } else {
+            Cow::Owned(self.left / &left_content)
+        };
+        let right_primitive = if right_content.is_one() {
+            Cow::Borrowed(self.right)
+        } else {
+            Cow::Owned(self.right / &right_content)
+        };
+
+        let order = self.variable_order(main_variable);
+        let left = left_primitive.rearrange_impl(&order, false, false);
+        let right = right_primitive.rearrange_impl(&order, false, false);
+        let mut bounds: SmallVec<[_; INLINED_EXPONENTS]> = smallvec![E::zero(); self.bounds.len()];
+        for (new_variable, old_variable) in order.iter().copied().enumerate() {
+            bounds[new_variable] = self.bounds[old_variable];
+        }
+        let variables = bounds
+            .iter()
+            .enumerate()
+            .filter_map(|(variable, bound)| (*bound > E::zero()).then_some(variable))
+            .collect::<SmallVec<[_; INLINED_EXPONENTS]>>();
+        if variables.len() < 3 || variables.first() != Some(&0) {
+            return None;
+        }
+
+        let (anchored_input, _) = self.anchor.order_inputs(&left, &right);
+        let selected_support = maximum_coefficient_row_support(anchored_input, 0);
+        // Candidate content can change its row geometry. Retain the plan only if the selected
+        // primitive input still has the required advantage over the original current row.
+        if selected_support
+            > self.maximum_row_supports[self.variables[0]] / HU_MONAGAN_MAIN_VARIABLE_ROW_REDUCTION
+        {
+            return None;
+        }
+
+        Some(PreparedHuMonaganGcd {
+            left,
+            right,
+            bounds,
+            order,
+            content,
+            anchor: self.anchor,
+        })
+    }
+}
+
+/// Estimates the cost of the univariate images for one main variable.
+fn hu_monagan_main_image_work<E: PositiveExponent>(
+    anchored_degrees: &[E],
+    other_degrees: &[E],
+    variable: usize,
+    row_support: usize,
+) -> u128 {
+    let degree_span = u128::from(anchored_degrees[variable].to_u32())
+        + u128::from(other_degrees[variable].to_u32())
+        + 2;
+    degree_span * row_support as u128
+}
+
+/// Returns the mixed-radix range for every active variable except `main_variable`.
+fn hu_monagan_kronecker_range<E: PositiveExponent>(
+    variables: &[usize],
+    bounds: &[E],
+    anchored_degrees: &[E],
+    other_degrees: &[E],
+    main_variable: usize,
+) -> Option<u64> {
+    let mut range = 1u64;
+    for variable in variables.iter().copied() {
+        if variable == main_variable {
+            continue;
+        }
+
+        let radix = anchored_degrees[variable]
+            .max(other_degrees[variable])
+            .max(bounds[variable])
+            .to_u32()
+            .checked_add(1)?;
+        range = range.checked_mul(u64::from(radix))?;
+    }
+    Some(range)
+}
+
+/// Returns the largest number of terms that share one exponent in `variable`.
+fn maximum_coefficient_row_support<E: PositiveExponent>(
+    polynomial: &MultivariatePolynomial<IntegerRing, E>,
+    variable: usize,
+) -> usize {
+    maximum_coefficient_row_support_bounded(polynomial, variable, usize::MAX).unwrap()
+}
+
+/// Returns the largest row, or `None` as soon as one exponent row exceeds `maximum` terms.
+fn maximum_coefficient_row_support_bounded<E: PositiveExponent>(
+    polynomial: &MultivariatePolynomial<IntegerRing, E>,
+    variable: usize,
+    maximum: usize,
+) -> Option<usize> {
+    let mut rows = CoefficientRowCounter::default();
+    for exponents in polynomial.exponents_iter() {
+        if rows.increment(exponents[variable].to_u32(), polynomial.nterms()) > maximum {
+            return None;
+        }
+    }
+    Some(rows.largest)
+}
+
+/// Counts low exponent indices densely and switches to a map when the dense span would exceed the
+/// polynomial's term count.
+#[derive(Default)]
+struct CoefficientRowCounter {
+    dense: Vec<usize>,
+    sparse: Option<HashMap<u32, usize>>,
+    largest: usize,
+}
+
+impl CoefficientRowCounter {
+    /// Increments one exponent row while keeping the number of stored counters O(term count).
+    fn increment(&mut self, exponent: u32, term_count: usize) -> usize {
+        let count = if let Some(sparse) = &mut self.sparse {
+            sparse.entry(exponent).or_insert(0)
+        } else if let Ok(index) = usize::try_from(exponent)
+            && index < term_count
+        {
+            if self.dense.len() <= index {
+                self.dense.resize(index + 1, 0);
+            }
+            &mut self.dense[index]
+        } else {
+            let mut sparse = HashMap::<u32, usize>::default();
+            for (index, count) in std::mem::take(&mut self.dense).into_iter().enumerate() {
+                if count != 0 {
+                    sparse.insert(index as u32, count);
+                }
+            }
+            self.sparse = Some(sparse);
+            self.sparse.as_mut().unwrap().entry(exponent).or_insert(0)
+        };
+        *count += 1;
+        self.largest = self.largest.max(*count);
+        *count
+    }
+}
+
+/// Computes every variable degree in one traversal of the exponent matrix.
+#[cfg(test)]
+fn polynomial_degrees<E: PositiveExponent>(
+    polynomial: &MultivariatePolynomial<IntegerRing, E>,
+) -> SmallVec<[E; INLINED_EXPONENTS]> {
+    let mut degrees: SmallVec<[E; INLINED_EXPONENTS]> = smallvec![E::zero(); polynomial.nvars()];
+    for exponents in polynomial.exponents_iter() {
+        for (degree, exponent) in degrees.iter_mut().zip(exponents) {
+            *degree = (*degree).max(*exponent);
+        }
+    }
+    degrees
+}
+
+/// Primitive, permuted inputs for one Hu-Monagan main-variable plan.
+struct PreparedHuMonaganGcd<E: PositiveExponent> {
+    left: MultivariatePolynomial<IntegerRing, E>,
+    right: MultivariatePolynomial<IntegerRing, E>,
+    bounds: SmallVec<[E; INLINED_EXPONENTS]>,
+    order: SmallVec<[usize; INLINED_EXPONENTS]>,
+    content: MultivariatePolynomial<IntegerRing, E>,
+    anchor: HuMonaganAnchor,
+}
+
+impl<E: PositiveExponent> PreparedHuMonaganGcd<E> {
+    /// Runs Hu in the selected coordinates, restores the original variables, and restores content.
+    fn run(self) -> Option<MultivariatePolynomial<IntegerRing, E>> {
+        let mut gcd = self.left.gcd_hu_monagan_with_preapproved_plan(
+            &self.right,
+            &self.bounds,
+            self.anchor,
+        )?;
+        gcd = gcd.rearrange_impl(&self.order, true, false);
+        if !self.content.is_one() {
+            gcd = gcd * &self.content;
+        }
+        Some(<IntegerRing as PolynomialGCD<E>>::normalize(gcd))
+    }
 }
 
 /// Returns the minimum modulus for a Hu-Monagan interpolation image.
@@ -2782,6 +3293,31 @@ impl<R: EuclideanDomain + PolynomialGCD<E>, E: PositiveExponent> MultivariatePol
         vars[1..].sort_by(|&i, &j| bounds[j].cmp(&bounds[i])); // sort descending
         debug!("Order: {:?}", vars);
 
+        let normalized_degrees = |metadata: &GcdInputMetadata<E>| {
+            metadata
+                .variables
+                .iter()
+                .zip(&base_degree)
+                .map(|(variable, base)| {
+                    base.map_or(variable.max_degree - variable.min_degree, |base| {
+                        (variable.max_degree - variable.min_degree) / base
+                    })
+                })
+                .collect::<SmallVec<[E; INLINED_EXPONENTS]>>()
+        };
+        let a_degrees = normalized_degrees(&a_metadata);
+        let b_degrees = normalized_degrees(&b_metadata);
+        if let Some(g) = PolynomialGCD::gcd_with_precontent_plan(
+            a.as_ref(),
+            b.as_ref(),
+            &vars,
+            &bounds,
+            &a_degrees,
+            &b_degrees,
+        ) {
+            return rescale_gcd(g, &shared_degree, &base_degree, &a.one());
+        }
+
         // strip the gcd of the univariate contents wrt the new first variable
         let content = if vars.len() > 1 {
             let c_a = a.univariate_content(vars[0]);
@@ -4859,6 +5395,37 @@ impl<E: PositiveExponent> MultivariatePolynomial<IntegerRing, E> {
     /// - "A fast parallel sparse polynomial GCD algorithm" by Jiaxiong Hu and Michael Monagan
     #[instrument(level = "debug", skip_all)]
     pub fn gcd_hu_monagan(&self, b: &Self, bounds: &[E]) -> Option<Self> {
+        self.gcd_hu_monagan_with_anchor(b, bounds, HuMonaganAnchor::from_inputs(self, b))
+    }
+
+    /// Runs Hu-Monagan while interpolating the cofactor of the selected input.
+    fn gcd_hu_monagan_with_anchor(
+        &self,
+        b: &Self,
+        bounds: &[E],
+        anchor: HuMonaganAnchor,
+    ) -> Option<Self> {
+        self.gcd_hu_monagan_with_plan(b, bounds, anchor, false)
+    }
+
+    /// Runs a main-variable plan whose coefficient-row reduction was checked after content removal.
+    fn gcd_hu_monagan_with_preapproved_plan(
+        &self,
+        b: &Self,
+        bounds: &[E],
+        anchor: HuMonaganAnchor,
+    ) -> Option<Self> {
+        self.gcd_hu_monagan_with_plan(b, bounds, anchor, true)
+    }
+
+    /// Executes Hu-Monagan with an explicit anchor and an optional preapproved sparse-row plan.
+    fn gcd_hu_monagan_with_plan(
+        &self,
+        b: &Self,
+        bounds: &[E],
+        anchor: HuMonaganAnchor,
+        plan_is_preapproved: bool,
+    ) -> Option<Self> {
         debug!(
             "Hu-Monagan gcd of {} and {} with bounds {:?}",
             self, b, bounds
@@ -4869,7 +5436,9 @@ impl<E: PositiveExponent> MultivariatePolynomial<IntegerRing, E> {
         let vars = (0..self.nvars())
             .filter(|&variable| bounds[variable] > E::zero())
             .collect::<SmallVec<[_; INLINED_EXPONENTS]>>();
-        if !should_use_hu_monagan(self, b, &vars, bounds) {
+        if !plan_is_preapproved
+            && !should_use_hu_monagan_with_anchor(self, b, &vars, bounds, anchor)
+        {
             let mut bounds = bounds.to_vec();
             let mut tight_bounds: SmallVec<[E; INLINED_EXPONENTS]> =
                 bounds.iter().copied().collect();
@@ -4889,11 +5458,7 @@ impl<E: PositiveExponent> MultivariatePolynomial<IntegerRing, E> {
             CofactorMultiple,
         }
 
-        let (a, b) = if self.nterms() <= b.nterms() {
-            (self, b)
-        } else {
-            (b, self)
-        };
+        let (a, b) = anchor.order_inputs(self, b);
         let h_zero = MultivariatePolynomial::<_, E>::new(&IntegerRing, None, a.variables().clone());
 
         let largest_coeff = a
@@ -5484,6 +6049,25 @@ pub trait PolynomialGCD<E: PositiveExponent>: Ring {
         Self::try_div_exact(dividend, divisor).is_some()
     }
 
+    /// Tries a coefficient-domain GCD plan before generic univariate content removal.
+    ///
+    /// `vars` gives the active input coordinates with the generic main variable first, and
+    /// `bounds` gives the GCD degree bound in every input coordinate. A returned polynomial must
+    /// be the complete GCD of `a` and `b`, including coefficient content, in their coordinate
+    /// order. `a_degrees` and `b_degrees` describe the inputs after monomial shifts and common
+    /// exponent scales have been removed. Each degree slice has one entry per input coordinate in
+    /// the same coordinate order as its polynomial.
+    fn gcd_with_precontent_plan(
+        _a: &MultivariatePolynomial<Self, E>,
+        _b: &MultivariatePolynomial<Self, E>,
+        _vars: &[usize],
+        _bounds: &[E],
+        _a_degrees: &[E],
+        _b_degrees: &[E],
+    ) -> Option<MultivariatePolynomial<Self, E>> {
+        None
+    }
+
     fn heuristic_gcd(
         a: &MultivariatePolynomial<Self, E>,
         b: &MultivariatePolynomial<Self, E>,
@@ -5508,6 +6092,84 @@ pub trait PolynomialGCD<E: PositiveExponent>: Ring {
 }
 
 impl<E: PositiveExponent> PolynomialGCD<E> for IntegerRing {
+    #[inline(never)]
+    fn gcd_with_precontent_plan(
+        a: &MultivariatePolynomial<Self, E>,
+        b: &MultivariatePolynomial<Self, E>,
+        vars: &[usize],
+        bounds: &[E],
+        a_degrees: &[E],
+        b_degrees: &[E],
+    ) -> Option<MultivariatePolynomial<Self, E>> {
+        let hu_enabled = GLOBAL_SETTINGS
+            .force_hu_monagan_poly_gcd
+            .load(std::sync::atomic::Ordering::Relaxed)
+            || GLOBAL_SETTINGS
+                .use_hu_monagan_poly_gcd
+                .load(std::sync::atomic::Ordering::Relaxed);
+        if !hu_enabled {
+            return None;
+        }
+        if a_degrees.len() != a.nvars() || b_degrees.len() != b.nvars() || a.nvars() != b.nvars() {
+            return None;
+        }
+        if !hu_monagan_has_minimum_geometry(vars, bounds) {
+            return None;
+        }
+
+        let anchor = HuMonaganAnchor::from_inputs(a, b);
+        let (anchored_degrees, other_degrees) = match anchor {
+            HuMonaganAnchor::Left => (a_degrees, b_degrees),
+            HuMonaganAnchor::Right => (b_degrees, a_degrees),
+        };
+        if !hu_monagan_plan_is_applicable_with_degrees(a, b, vars, bounds, anchored_degrees) {
+            return None;
+        }
+        let current_variable = *vars.first()?;
+        let current_range = hu_monagan_kronecker_range(
+            vars,
+            bounds,
+            anchored_degrees,
+            other_degrees,
+            current_variable,
+        );
+        let maximum_modulus = SMOOTH_PRIMES.last()?.0;
+        // Making a different variable main must remove a larger radix than it adds. This reduces
+        // the interpolation exponent lattice independently of the later coefficient-row test.
+        let has_smaller_range = vars.iter().copied().skip(1).any(|variable| {
+            bounds[variable] > E::zero()
+                && hu_monagan_kronecker_range(
+                    vars,
+                    bounds,
+                    anchored_degrees,
+                    other_degrees,
+                    variable,
+                )
+                .is_some_and(|candidate_range| {
+                    current_range.is_none_or(|range| candidate_range < range)
+                        && candidate_range
+                            .checked_mul(2)
+                            .is_some_and(|bound| bound <= maximum_modulus)
+                })
+        });
+        if !has_smaller_range {
+            return None;
+        }
+        let planning = HuMonaganPlanningContext::new_with_degrees(
+            a, b, vars, bounds, anchor, a_degrees, b_degrees,
+        );
+        let main_variable = planning.alternative_main_variable()?;
+        let prepared = planning.prepare(main_variable)?;
+        debug!(
+            "Hu main variable {} with maximum coefficient row {} replaces {} with row {}",
+            main_variable,
+            planning.maximum_row_supports[main_variable],
+            vars[0],
+            planning.maximum_row_supports[vars[0]],
+        );
+        prepared.run()
+    }
+
     fn heuristic_gcd(
         a: &MultivariatePolynomial<Self, E>,
         b: &MultivariatePolynomial<Self, E>,
@@ -5605,9 +6267,10 @@ impl<E: PositiveExponent> PolynomialGCD<E> for IntegerRing {
         vars: &[usize],
         bounds: &mut [E],
     ) -> MultivariatePolynomial<Self, E> {
-        if GLOBAL_SETTINGS
+        let force_hu = GLOBAL_SETTINGS
             .force_hu_monagan_poly_gcd
-            .load(std::sync::atomic::Ordering::Relaxed)
+            .load(std::sync::atomic::Ordering::Relaxed);
+        if force_hu
             || (GLOBAL_SETTINGS
                 .use_hu_monagan_poly_gcd
                 .load(std::sync::atomic::Ordering::Relaxed)
@@ -5627,7 +6290,8 @@ impl<E: PositiveExponent> PolynomialGCD<E> for IntegerRing {
             //     //     return g;
             //     // }
             // } else
-            if let Some(g) = a.gcd_hu_monagan(b, bounds) {
+            let anchor = HuMonaganAnchor::from_inputs(a, b);
+            if let Some(g) = a.gcd_hu_monagan_with_anchor(b, bounds, anchor) {
                 return g;
             }
         }
@@ -6363,6 +7027,215 @@ mod tests {
     use crate::domains::finite_field::Z2;
     use crate::parse;
     use crate::poly::PolyVariable;
+
+    fn hu_planning_fixture(expression: &str) -> MultivariatePolynomial<IntegerRing, u8> {
+        let variables = ["x", "y", "z"]
+            .map(|variable| {
+                parse!(variable)
+                    .to_polynomial::<IntegerRing, u8>(&Z, None)
+                    .variables()[0]
+                    .clone()
+            })
+            .to_vec();
+        parse!(expression).to_polynomial::<_, u8>(&Z, Some(std::sync::Arc::new(variables)))
+    }
+
+    #[test]
+    fn coefficient_row_counter_migrates_without_losing_counts() {
+        let mut rows = CoefficientRowCounter::default();
+        assert_eq!(rows.increment(0, 4), 1);
+        assert_eq!(rows.increment(2, 4), 1);
+        assert_eq!(rows.increment(0, 4), 2);
+        assert!(rows.sparse.is_none());
+
+        assert_eq!(rows.increment(100, 4), 1);
+        assert_eq!(rows.increment(2, 4), 2);
+        assert_eq!(rows.increment(100, 4), 2);
+        assert_eq!(rows.largest, 2);
+        assert!(rows.dense.is_empty());
+        assert_eq!(rows.sparse.as_ref().unwrap().len(), 3);
+    }
+
+    #[test]
+    fn hu_planning_requires_two_sampling_doublings() {
+        let left = hu_planning_fixture("1+z+y+y*z^2+y^2*z+y^2*z^3+y^3*z^2+y^3*z^4+x*y^4*z^3");
+        let right =
+            hu_planning_fixture("1+z+y+y*z^2+y^2*z+y^2*z^3+y^3*z^2+y^3*z^4+x*y^4*z^3+x*z^4");
+        let variables = [0, 1, 2];
+        let bounds = [1, 4, 4];
+        let anchor = HuMonaganAnchor::from_inputs(&left, &right);
+        let planning = HuMonaganPlanningContext::new(&left, &right, &variables, &bounds, anchor);
+
+        assert_eq!(anchor, HuMonaganAnchor::Left);
+        assert_eq!(planning.maximum_row_supports.as_slice(), [8, 2, 2]);
+        assert_eq!(planning.alternative_main_variable(), Some(1));
+
+        let below_threshold = hu_planning_fixture("1+z+y+y*z^2+y^2*z+y^2*z^3+y^3*z^2+x*y^4*z^3");
+        let larger = hu_planning_fixture("1+z+y+y*z^2+y^2*z+y^2*z^3+y^3*z^2+x*y^4*z^3+x*z^4");
+        let planning = HuMonaganPlanningContext::new(
+            &below_threshold,
+            &larger,
+            &variables,
+            &bounds,
+            HuMonaganAnchor::Left,
+        );
+        assert_eq!(planning.maximum_row_supports[0], 7);
+        assert_eq!(planning.maximum_row_supports[1], usize::MAX);
+        assert_eq!(planning.alternative_main_variable(), None);
+
+        let uniform = hu_planning_fixture("(1+x+x^2)*(1+y+y^2)*(1+z+z^2)");
+        let larger = hu_planning_fixture("(1+x+x^2)*(1+y+y^2)*(1+z+z^2)+x^3*y^3*z^3");
+        let planning = HuMonaganPlanningContext::new(
+            &uniform,
+            &larger,
+            &variables,
+            &bounds,
+            HuMonaganAnchor::Left,
+        );
+        assert_eq!(planning.maximum_row_supports[0], 9);
+        assert_eq!(planning.maximum_row_supports[1], usize::MAX);
+        assert_eq!(planning.maximum_row_supports[2], usize::MAX);
+        assert_eq!(planning.alternative_main_variable(), None);
+    }
+
+    #[test]
+    fn hu_planning_accounts_for_image_degree_and_kronecker_range() {
+        let variables = [0, 1, 2];
+        let bounds = [1, 1, 1];
+
+        let high_image_degree = hu_planning_fixture("1+y^30+y^60+y^90+y^120+y^150+y^180+y^210+x*z");
+        let larger = hu_planning_fixture("1+y^30+y^60+y^90+y^120+y^150+y^180+y^210+x*z+x*z^2");
+        let planning = HuMonaganPlanningContext::new(
+            &high_image_degree,
+            &larger,
+            &variables,
+            &bounds,
+            HuMonaganAnchor::Left,
+        );
+        assert_eq!(planning.maximum_row_supports[0], 8);
+        assert_eq!(planning.maximum_row_supports[1], usize::MAX);
+        assert!(
+            hu_monagan_main_image_work(&planning.anchored_degrees, &planning.other_degrees, 1, 2,)
+                > planning.main_image_work(0)
+        );
+        assert!(planning.kronecker_range(1) < planning.kronecker_range(0));
+        assert_eq!(planning.alternative_main_variable(), None);
+
+        let larger_kronecker_range = hu_planning_fixture("1+y+y^2+y^3+y^4+y^5+y^6+y^7+x^100*z");
+        let larger = hu_planning_fixture("1+y+y^2+y^3+y^4+y^5+y^6+y^7+x^100*z+x^100*z^2");
+        let planning = HuMonaganPlanningContext::new(
+            &larger_kronecker_range,
+            &larger,
+            &variables,
+            &bounds,
+            HuMonaganAnchor::Left,
+        );
+        assert_eq!(planning.maximum_row_supports[0], 8);
+        assert_eq!(planning.maximum_row_supports[1], usize::MAX);
+        assert!(
+            hu_monagan_main_image_work(&planning.anchored_degrees, &planning.other_degrees, 1, 2,)
+                < planning.main_image_work(0)
+        );
+        assert!(planning.kronecker_range(1) > planning.kronecker_range(0));
+        assert_eq!(planning.alternative_main_variable(), None);
+    }
+
+    #[test]
+    fn hu_planning_preserves_anchor_and_restores_new_main_content() {
+        let mut polynomials = [
+            hu_planning_fixture("1+z"),
+            hu_planning_fixture("1+z+z^2"),
+            hu_planning_fixture(
+                "(1+z^8)*(1+z+y+y*z^2+y^2*z+y^2*z^3+y^3*z^2+y^3*z^4+x^2*y^4*z^3+x^3*y^4*z^4)",
+            ),
+        ];
+        MultivariatePolynomial::unify_variables_list(&mut polynomials);
+        let [left_cofactor, right_cofactor, common_factor] = polynomials;
+        let left = &left_cofactor * &common_factor;
+        let right = &right_cofactor * &common_factor;
+        let variables = [0, 1, 2];
+        let bounds = [3, 4, 12];
+        let anchor = HuMonaganAnchor::from_inputs(&left, &right);
+        assert!(
+            variables
+                .iter()
+                .all(|variable| left.degree(*variable) > 1 && right.degree(*variable) > 1)
+        );
+        assert!(<IntegerRing as PolynomialGCD<u8>>::heuristic_gcd(&left, &right).is_none());
+        assert_eq!(
+            HuMonaganAnchor::from_inputs(&right, &left),
+            HuMonaganAnchor::Right
+        );
+        assert_eq!(
+            HuMonaganAnchor::from_inputs(&left, &left),
+            HuMonaganAnchor::Left
+        );
+        let planning = HuMonaganPlanningContext::new(&left, &right, &variables, &bounds, anchor);
+        let prepared = planning.prepare(1).unwrap();
+
+        assert_eq!(prepared.anchor, anchor);
+        assert!(prepared.left.univariate_content(0).is_one());
+        assert!(prepared.right.univariate_content(0).is_one());
+        assert_eq!(prepared.run(), Some(common_factor.clone()));
+
+        let optimized = <IntegerRing as PolynomialGCD<u8>>::gcd_with_precontent_plan(
+            &left,
+            &right,
+            &variables,
+            &bounds,
+            &polynomial_degrees(&left),
+            &polynomial_degrees(&right),
+        );
+        assert_eq!(optimized, Some(common_factor.clone()));
+
+        let transform = |mut polynomial: MultivariatePolynomial<IntegerRing, u8>,
+                         shift: [u8; 3]| {
+            for exponents in polynomial.exponents_iter_mut() {
+                for ((exponent, scale), offset) in exponents.iter_mut().zip([2, 3, 2]).zip(shift) {
+                    *exponent = *exponent * scale + offset;
+                }
+            }
+            polynomial
+        };
+        let shifted_left = transform(left, [3, 2, 1]);
+        let shifted_right = transform(right, [1, 4, 2]);
+        let expected = transform(common_factor, [1, 2, 1]);
+        assert_eq!(shifted_left.gcd(&shifted_right), expected);
+        assert_eq!(shifted_right.gcd(&shifted_left), expected);
+    }
+
+    #[test]
+    fn hu_precontent_plan_requires_sparse_interpolation_geometry() {
+        let left = hu_planning_fixture("1+z+y+y*z^2+y^2*z+y^2*z^3+y^3*z^2+y^3*z^4+x*y^4*z^3");
+        let right =
+            hu_planning_fixture("1+z+y+y*z^2+y^2*z+y^2*z^3+y^3*z^2+y^3*z^4+x*y^4*z^3+x*z^4");
+        let variables = [0, 1, 2];
+        let bounds = [1, 1, 1];
+        let anchor = HuMonaganAnchor::from_inputs(&left, &right);
+        let left_degrees = polynomial_degrees(&left);
+        let right_degrees = polynomial_degrees(&right);
+        let planning = HuMonaganPlanningContext::new(&left, &right, &variables, &bounds, anchor);
+
+        assert_eq!(planning.alternative_main_variable(), Some(1));
+        assert!(!hu_monagan_plan_is_applicable_with_degrees(
+            &left,
+            &right,
+            &variables,
+            &bounds,
+            &left_degrees,
+        ));
+        assert_eq!(
+            <IntegerRing as PolynomialGCD<u8>>::gcd_with_precontent_plan(
+                &left,
+                &right,
+                &variables,
+                &bounds,
+                &left_degrees,
+                &right_degrees,
+            ),
+            None,
+        );
+    }
 
     #[test]
     fn dense_univariate_gcd_handles_sparse_images_and_constants() {
