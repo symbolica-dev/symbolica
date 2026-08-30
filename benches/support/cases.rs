@@ -542,7 +542,12 @@ impl std::str::FromStr for GcdCaseKind {
 pub struct GcdCaseConfig {
     pub kind: GcdCaseKind,
     pub variable_count: usize,
-    pub degree: u32,
+    /// Degree of the cofactor multiplied into the first input.
+    pub left_cofactor_degree: u32,
+    /// Degree of the cofactor multiplied into the second input.
+    pub right_cofactor_degree: u32,
+    /// Degree of the known common factor for dense and sparse cases.
+    pub common_factor_degree: u32,
     pub gap: u32,
     pub coefficient_bits: u32,
 }
@@ -552,7 +557,9 @@ impl Default for GcdCaseConfig {
         Self {
             kind: GcdCaseKind::Dense,
             variable_count: 7,
-            degree: 7,
+            left_cofactor_degree: 7,
+            right_cofactor_degree: 7,
+            common_factor_degree: 7,
             gap: 10,
             coefficient_bits: 30,
         }
@@ -561,102 +568,166 @@ impl Default for GcdCaseConfig {
 
 /// Fixed generated cases that exercise support shape, dimension, exponent span,
 /// and coefficient height independently of the imported polybench fixtures.
-pub const GENERATED_GCD_CASES: [GcdCaseConfig; 14] = [
+pub const GENERATED_GCD_CASES: [GcdCaseConfig; 18] = [
     GcdCaseConfig {
         kind: GcdCaseKind::Dense,
         variable_count: 1,
-        degree: 32,
+        left_cofactor_degree: 32,
+        right_cofactor_degree: 32,
+        common_factor_degree: 32,
         gap: 10,
         coefficient_bits: 30,
     },
     GcdCaseConfig {
         kind: GcdCaseKind::Dense,
         variable_count: 2,
-        degree: 5,
+        left_cofactor_degree: 5,
+        right_cofactor_degree: 5,
+        common_factor_degree: 5,
         gap: 10,
         coefficient_bits: 30,
     },
     GcdCaseConfig {
         kind: GcdCaseKind::Dense,
         variable_count: 3,
-        degree: 7,
+        left_cofactor_degree: 7,
+        right_cofactor_degree: 7,
+        common_factor_degree: 7,
         gap: 10,
         coefficient_bits: 30,
     },
     GcdCaseConfig {
         kind: GcdCaseKind::Dense,
         variable_count: 5,
-        degree: 7,
+        left_cofactor_degree: 7,
+        right_cofactor_degree: 7,
+        common_factor_degree: 7,
         gap: 10,
         coefficient_bits: 30,
     },
     GcdCaseConfig {
         kind: GcdCaseKind::Dense,
         variable_count: 8,
-        degree: 5,
+        left_cofactor_degree: 5,
+        right_cofactor_degree: 5,
+        common_factor_degree: 5,
+        gap: 10,
+        coefficient_bits: 30,
+    },
+    GcdCaseConfig {
+        kind: GcdCaseKind::Dense,
+        variable_count: 8,
+        left_cofactor_degree: 1,
+        right_cofactor_degree: 2,
+        common_factor_degree: 3,
+        gap: 10,
+        coefficient_bits: 30,
+    },
+    GcdCaseConfig {
+        kind: GcdCaseKind::Dense,
+        variable_count: 8,
+        left_cofactor_degree: 1,
+        right_cofactor_degree: 2,
+        common_factor_degree: 4,
+        gap: 10,
+        coefficient_bits: 30,
+    },
+    GcdCaseConfig {
+        kind: GcdCaseKind::Dense,
+        variable_count: 8,
+        left_cofactor_degree: 1,
+        right_cofactor_degree: 2,
+        common_factor_degree: 5,
         gap: 10,
         coefficient_bits: 30,
     },
     GcdCaseConfig {
         kind: GcdCaseKind::Sparse,
         variable_count: 5,
-        degree: 7,
+        left_cofactor_degree: 7,
+        right_cofactor_degree: 7,
+        common_factor_degree: 7,
         gap: 10,
         coefficient_bits: 30,
     },
     GcdCaseConfig {
         kind: GcdCaseKind::Sparse,
         variable_count: 8,
-        degree: 5,
+        left_cofactor_degree: 5,
+        right_cofactor_degree: 5,
+        common_factor_degree: 5,
         gap: 10,
         coefficient_bits: 30,
     },
     GcdCaseConfig {
         kind: GcdCaseKind::HighGap,
         variable_count: 5,
-        degree: 5,
+        left_cofactor_degree: 5,
+        right_cofactor_degree: 5,
+        common_factor_degree: 5,
         gap: 64,
         coefficient_bits: 30,
     },
     GcdCaseConfig {
         kind: GcdCaseKind::HighGap,
         variable_count: 8,
-        degree: 4,
+        left_cofactor_degree: 4,
+        right_cofactor_degree: 4,
+        common_factor_degree: 4,
         gap: 256,
         coefficient_bits: 30,
     },
     GcdCaseConfig {
         kind: GcdCaseKind::HighHeight,
         variable_count: 5,
-        degree: 4,
+        left_cofactor_degree: 4,
+        right_cofactor_degree: 4,
+        common_factor_degree: 4,
         gap: 10,
         coefficient_bits: 128,
     },
     GcdCaseConfig {
         kind: GcdCaseKind::HighHeight,
         variable_count: 5,
-        degree: 4,
+        left_cofactor_degree: 4,
+        right_cofactor_degree: 4,
+        common_factor_degree: 4,
         gap: 10,
         coefficient_bits: 256,
     },
     GcdCaseConfig {
         kind: GcdCaseKind::HighHeight,
         variable_count: 5,
-        degree: 4,
+        left_cofactor_degree: 4,
+        right_cofactor_degree: 4,
+        common_factor_degree: 4,
         gap: 10,
         coefficient_bits: 512,
     },
     GcdCaseConfig {
         kind: GcdCaseKind::HighHeight,
         variable_count: 5,
-        degree: 4,
+        left_cofactor_degree: 4,
+        right_cofactor_degree: 4,
+        common_factor_degree: 4,
         gap: 10,
         coefficient_bits: 1024,
     },
     GcdCaseConfig {
         kind: GcdCaseKind::HighHeight,
         variable_count: 8,
-        degree: 3,
+        left_cofactor_degree: 3,
+        right_cofactor_degree: 3,
+        common_factor_degree: 3,
+        gap: 10,
+        coefficient_bits: 256,
+    },
+    GcdCaseConfig {
+        kind: GcdCaseKind::HighHeight,
+        variable_count: 8,
+        left_cofactor_degree: 1,
+        right_cofactor_degree: 2,
+        common_factor_degree: 3,
         gap: 10,
         coefficient_bits: 256,
     },
@@ -667,8 +738,17 @@ impl GcdCaseConfig {
         if !(1..=8).contains(&self.variable_count) {
             return Err("GCD variable count must be between 1 and 8".to_owned());
         }
-        if self.degree == 0 || self.degree > u16::MAX as u32 {
-            return Err(format!("GCD degree must be between 1 and {}", u16::MAX));
+        for (label, degree) in [
+            ("left cofactor", self.left_cofactor_degree),
+            ("right cofactor", self.right_cofactor_degree),
+            ("common factor", self.common_factor_degree),
+        ] {
+            if degree == 0 || degree > u16::MAX as u32 {
+                return Err(format!(
+                    "GCD {label} degree must be between 1 and {}",
+                    u16::MAX
+                ));
+            }
         }
         if self.gap == 0 {
             return Err("GCD exponent gap must be positive".to_owned());
@@ -695,33 +775,65 @@ impl GcdCaseConfig {
 
         let gcd = match self.kind {
             GcdCaseKind::Dense | GcdCaseKind::HighHeight => {
-                powered_expression(&gcd_linear, self.degree, 3)
+                powered_expression(&gcd_linear, self.common_factor_degree, 3)
             }
-            GcdCaseKind::Sparse => sparse_expression(self.variable_count, self.degree),
+            GcdCaseKind::Sparse => {
+                sparse_expression(self.variable_count, self.common_factor_degree)
+            }
             GcdCaseKind::HighGap => sparse_expression(self.variable_count, self.gap),
         };
 
         Ok(GeneratedGcdCase {
             config: self,
-            left_cofactor: powered_expression(&left_linear, self.degree, -1),
-            right_cofactor: powered_expression(&right_linear, self.degree, 1),
+            left_cofactor: powered_expression(&left_linear, self.left_cofactor_degree, -1),
+            right_cofactor: powered_expression(&right_linear, self.right_cofactor_degree, 1),
             gcd,
         })
     }
 
     pub fn display_name(self) -> String {
+        if self.left_cofactor_degree != self.right_cofactor_degree
+            || self.left_cofactor_degree != self.common_factor_degree
+        {
+            let left_terms = dense_power_term_count(self.variable_count, self.left_cofactor_degree)
+                .saturating_sub(1);
+            let right_terms =
+                dense_power_term_count(self.variable_count, self.right_cofactor_degree);
+            let common_terms =
+                dense_power_term_count(self.variable_count, self.common_factor_degree);
+            return match self.kind {
+                GcdCaseKind::HighHeight => format!(
+                    "{} {} variables asymmetric cofactor terms {left_terms}/{right_terms} common terms {common_terms} degrees {}/{}/{} coefficient bits {}",
+                    self.kind,
+                    self.variable_count,
+                    self.left_cofactor_degree,
+                    self.right_cofactor_degree,
+                    self.common_factor_degree,
+                    self.coefficient_bits,
+                ),
+                _ => format!(
+                    "{} {} variables asymmetric cofactor terms {left_terms}/{right_terms} common terms {common_terms} degrees {}/{}/{}",
+                    self.kind,
+                    self.variable_count,
+                    self.left_cofactor_degree,
+                    self.right_cofactor_degree,
+                    self.common_factor_degree,
+                ),
+            };
+        }
+
         match self.kind {
             GcdCaseKind::Dense | GcdCaseKind::Sparse => format!(
                 "{} {} variables degree {}",
-                self.kind, self.variable_count, self.degree
+                self.kind, self.variable_count, self.left_cofactor_degree
             ),
             GcdCaseKind::HighGap => format!(
                 "{} {} variables degree {} gap {}",
-                self.kind, self.variable_count, self.degree, self.gap
+                self.kind, self.variable_count, self.left_cofactor_degree, self.gap
             ),
             GcdCaseKind::HighHeight => format!(
                 "{} {} variables degree {} coefficient bits {}",
-                self.kind, self.variable_count, self.degree, self.coefficient_bits
+                self.kind, self.variable_count, self.left_cofactor_degree, self.coefficient_bits
             ),
         }
     }
@@ -805,6 +917,18 @@ fn powered_expression(linear: &str, degree: u32, constant: i32) -> String {
     )
 }
 
+/// Returns the number of monomials in a dense power of a linear polynomial.
+fn dense_power_term_count(variable_count: usize, degree: u32) -> usize {
+    let mut terms = 1u128;
+    for index in 1..=variable_count as u128 {
+        let Some(product) = terms.checked_mul(degree as u128 + index) else {
+            return usize::MAX;
+        };
+        terms = product / index;
+    }
+    usize::try_from(terms).unwrap_or(usize::MAX)
+}
+
 fn sparse_expression(variable_count: usize, degree: u32) -> String {
     const COEFFICIENTS: [u64; 8] = [1, 2, 3, 5, 7, 11, 13, 17];
 
@@ -862,7 +986,9 @@ mod tests {
         let dense = GcdCaseConfig {
             kind: GcdCaseKind::Dense,
             variable_count: 2,
-            degree: 2,
+            left_cofactor_degree: 2,
+            right_cofactor_degree: 2,
+            common_factor_degree: 2,
             gap: 10,
             coefficient_bits: 30,
         }
@@ -894,13 +1020,46 @@ mod tests {
         let generated = GcdCaseConfig {
             kind: GcdCaseKind::HighHeight,
             variable_count: 2,
-            degree: 1,
+            left_cofactor_degree: 1,
+            right_cofactor_degree: 1,
+            common_factor_degree: 1,
             gap: 10,
             coefficient_bits: 8,
         }
         .generate()
         .unwrap();
         assert_eq!(generated.left_cofactor, "(1+135*x1+137*x2)^1-1");
+    }
+
+    #[test]
+    fn generated_asymmetric_gcd_case_reports_support_sizes() {
+        let config = GcdCaseConfig {
+            kind: GcdCaseKind::Dense,
+            variable_count: 8,
+            left_cofactor_degree: 1,
+            right_cofactor_degree: 2,
+            common_factor_degree: 4,
+            gap: 10,
+            coefficient_bits: 30,
+        };
+        let generated = config.generate().unwrap();
+
+        assert_eq!(
+            config.display_name(),
+            "dense 8 variables asymmetric cofactor terms 8/45 common terms 495 degrees 1/2/4"
+        );
+        assert_eq!(
+            generated.left_cofactor,
+            "(1+3*x1+5*x2+7*x3+9*x4+11*x5+13*x6+15*x7+17*x8)^1-1"
+        );
+        assert_eq!(
+            generated.right_cofactor,
+            "(1-3*x1-5*x2-7*x3+9*x4-11*x5-13*x6+15*x7-17*x8)^2+1"
+        );
+        assert_eq!(
+            generated.gcd,
+            "(1+3*x1+5*x2+7*x3+9*x4+11*x5+13*x6+15*x7-17*x8)^4+3"
+        );
     }
 
     #[test]

@@ -1,0 +1,31 @@
+2026-08-30 13:19:50 [  INFO  ] Environment platform = Linux-6.18.37-x86_64-with-glibc2.42
+2026-08-30 13:19:51 [  INFO  ] Environment python_version = 3.12.13.final.0 (64 bit)
+2026-08-30 13:19:51 [  INFO  ] Environment cpu_brand = Intel(R) Xeon(R) W-2135 CPU @ 3.70GHz
+2026-08-30 13:19:51 [  INFO  ] Environment cpu_count = 6 (logical: 12)
+2026-08-30 13:19:51 [  INFO  ] Environment total_memory = 62.5GB
+2026-08-30 13:19:51 [  INFO  ] Config      problem_type = trivial-gcd
+2026-08-30 13:19:51 [  INFO  ] Config      n_warmups = 10
+2026-08-30 13:19:51 [  INFO  ] Config      n_problems = 200
+2026-08-30 13:19:51 [  INFO  ] Config      exp_dist = sharp
+2026-08-30 13:19:51 [  INFO  ] Config      n_vars = 8
+2026-08-30 13:19:51 [  INFO  ] Config      min_n_terms = 37
+2026-08-30 13:19:51 [  INFO  ] Config      max_n_terms = 50
+2026-08-30 13:19:51 [  INFO  ] Config      min_degree = 0
+2026-08-30 13:19:51 [  INFO  ] Config      max_degree = 30
+2026-08-30 13:19:51 [  INFO  ] Config      min_coeff = -16384
+2026-08-30 13:19:51 [  INFO  ] Config      max_coeff = 16384
+2026-08-30 13:19:51 [  INFO  ] Config      build_dir = /tmp/symbolica-polybench-0.4.3-9QLH94/build
+2026-08-30 13:19:51 [  INFO  ] Config      output_dir = /tmp/symbolica-polybench-0.4.3-9QLH94/final-post-route/08
+2026-08-30 13:19:51 [  INFO  ] Config      job_id = 0005
+2026-08-30 13:19:51 [  INFO  ] Config      seed = 42
+2026-08-30 13:19:51 [  INFO  ] Config      timeout = 21600
+2026-08-30 13:19:51 [  INFO  ] Config      build_only = False
+2026-08-30 13:19:51 [  INFO  ] Config      fail_on_setup_failure = True
+2026-08-30 13:19:51 [  INFO  ] Config      keep_temp = False
+2026-08-30 13:19:51 [  INFO  ] Config      debug = False
+2026-08-30 13:19:54 [  INFO  ] FLINT       flint 3.5.0, gcc (GNU) 15.2.0
+2026-08-30 13:19:54 [  INFO  ] Symbolica   2.2.0, rustc 1.97.0 (2d8144b78 2026-07-07)
+2026-08-30 13:19:57 [  INFO  ] FLINT       1.119 sec (mean: 0.000 sec, SD: 0.000 sec, slowest: 0.001 sec on Prob. 199)
+2026-08-30 13:20:00 [  INFO  ] Symbolica   2.622 sec (mean: 0.001 sec, SD: 0.001 sec, slowest: 0.006 sec on Prob. 50)
+2026-08-30 13:20:00 [  INFO  ] Bench       output_csv_file = /tmp/symbolica-polybench-0.4.3-9QLH94/final-post-route/08/0005.csv
+2026-08-30 13:20:00 [  INFO  ] Bench       figures are in /tmp/symbolica-polybench-0.4.3-9QLH94/final-post-route/08/0005.figures

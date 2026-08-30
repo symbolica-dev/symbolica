@@ -977,8 +977,9 @@ impl<E: PositiveExponent> PreparedHuMonaganGcd<E> {
 /// The Kronecker range bound keeps the encoded exponents distinct in the
 /// multiplicative group. When twice the largest input coefficient fits below
 /// `2^32`, the same modulus also preserves its symmetric integer
-/// representative. Larger coefficients are reconstructed from multiple
-/// modular images by CRT.
+/// representative. Larger coefficients are reconstructed by CRT; the
+/// coefficient-height bound chooses word primes large enough to target at
+/// most eight images without exceeding the usable `u64` field range.
 fn hu_monagan_prime_lower_bound(
     kronecker_range: u64,
     delta: u32,
@@ -988,7 +989,14 @@ fn hu_monagan_prime_lower_bound(
     if twice_largest_coefficient < &(1i64 << 32) {
         interpolation_bound.max(twice_largest_coefficient.to_u64().unwrap())
     } else {
-        interpolation_bound
+        const TARGET_CRT_IMAGES: u64 = 8;
+        const MAX_TARGET_PRIME_BITS: u64 = 63;
+        let target_prime_bits = twice_largest_coefficient
+            .significant_bits()
+            .div_ceil(TARGET_CRT_IMAGES)
+            .min(MAX_TARGET_PRIME_BITS);
+        let coefficient_height_bound = 1u64 << target_prime_bits;
+        interpolation_bound.max(coefficient_height_bound)
     }
 }
 
@@ -8174,11 +8182,19 @@ mod tests {
             2_000
         );
 
-        // Coefficients at this height are recovered by CRT, so they do not
-        // force every individual image to use a word-sized prime.
+        // This height still needs no larger prime than the interpolation
+        // lattice because eight small images already cover its bits.
         assert_eq!(
             hu_monagan_prime_lower_bound(1_000, 1, &Integer::from(1u64 << 32)),
             2_000
+        );
+        assert_eq!(
+            hu_monagan_prime_lower_bound(1_000, 1, &(Integer::one() << 255usize)),
+            1u64 << 32
+        );
+        assert_eq!(
+            hu_monagan_prime_lower_bound(1_000, 1, &(Integer::one() << 1023usize)),
+            1u64 << 63
         );
         assert_eq!(
             hu_monagan_prime_lower_bound(u64::MAX, 1, &Integer::from(1)),

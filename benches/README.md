@@ -18,9 +18,11 @@ FLINT's multivariate resultant on the same inputs.
 
 The `generated_gcd_regimes` group is a fixed synthetic suite covering dense low-dimensional cases
 in one, two, and three variables, dense and sparse supports in five and eight variables, a 64/256
-exponent-gap pair, and a
-128/256/512/1024-bit coefficient-height ladder. The bivariate degree-5 case exercises the point at
-which the modular GCD path replaces the small-input heuristic. The group reports the two
+exponent-gap pair, and a 128/256/512/1024-bit coefficient-height ladder. It also contains an
+eight-variable asymmetric ladder where an 8-term cofactor and a 45-term cofactor share a dense
+165-, 495-, or 1287-term common factor, plus a 256-bit-coefficient variant. These cases isolate the
+regime where the common factor dominates both inputs. The bivariate degree-5 case exercises the
+point at which the modular GCD path replaces the small-input heuristic. The group reports the two
 input-construction products separately from the automatic GCD, making it possible to distinguish
 arithmetic throughput from the GCD algorithm itself. The older `polynomial_gcd` group remains
 configurable through the `GCD_BENCH_*` environment variables.

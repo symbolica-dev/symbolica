@@ -545,10 +545,13 @@ where
 pub fn gcd_case_config() -> GcdCaseConfig {
     static CONFIG: OnceLock<GcdCaseConfig> = OnceLock::new();
     *CONFIG.get_or_init(|| {
+        let degree = parse_env("GCD_BENCH_DEGREE", 7);
         let config = GcdCaseConfig {
             kind: parse_env("GCD_BENCH_CASE", GcdCaseKind::Dense),
             variable_count: parse_env("GCD_BENCH_NVARS", 7),
-            degree: parse_env("GCD_BENCH_DEGREE", 7),
+            left_cofactor_degree: degree,
+            right_cofactor_degree: degree,
+            common_factor_degree: degree,
             gap: parse_env("GCD_BENCH_GAP", 10),
             coefficient_bits: parse_env("GCD_BENCH_COEFFICIENT_BITS", 30),
         };

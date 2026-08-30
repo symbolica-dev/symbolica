@@ -1,21 +1,25 @@
 # Polynomial performance continuation handoff
 
 This is the live continuation record for the single-core Symbolica/FLINT polynomial-performance
-work. It was refreshed on 2026-08-30 after accepting batched shifted-Vandermonde inversion and a
-reusable last-variable evaluation context in modular Zippel/Hu interpolation. PolyBench
-five-variable uniform GCD #11 changes from `1.121593` to `0.978321` S/F and becomes a Symbolica
-win. The current 116-row non-resultant inventory has 100 Symbolica wins and 16 losses with a
-`0.638180` median. Its new worst row is dense high-height degree-33 factorization at `1.111896`.
-Rows were measured across accepted source snapshots, with each replacement and its source-matched
-evidence documented below.
+work. It was refreshed on 2026-08-30 after accepting coefficient-height-aware Hu prime sizing and
+completing the full PolyBench 0.4.3 five- and eight-variable distribution sweep. The 256-bit
+asymmetric eight-variable GCD changes from `1.631601` to `0.942832` S/F, with Symbolica time down
+42.06%. The current 124-row fixed-fixture non-resultant inventory has 108 Symbolica wins and 16
+losses with a `0.636158` median. Its worst row is an asymmetric eight-variable product construction
+at `1.327830`; the worst timed operation is dense degree-65 factorization at `1.098172`. The
+separate 3,200-problem PolyBench distribution has a `0.962614` paired median and 1,832 Symbolica
+wins. Two deterministic PolyBench inputs also exposed unbounded factorization retries; the retry
+paths are now iterative and automatic bivariate starts cross to the univariate route after three
+completed reconstruction failures. Rows were measured across accepted source snapshots, with each
+replacement and its source-matched evidence documented below.
 Keep this file current whenever an experiment is accepted, rejected, or left partly complete. The
 purpose is that another agent can resume without reconstructing decisions from chat history or
 transient binary names.
 
 The complete current Symbolica/FLINT scoreboard is in
 [CURRENT_STATUS.md](CURRENT_STATUS.md), with the latest immutable snapshot in
-[CURRENT_STATUS_v16.md](CURRENT_STATUS_v16.md). Its primary statistics contain 116 non-resultant
-comparisons: 100 favor Symbolica and 16 favor FLINT. The six Ducos, six Brown, and six CRT
+[CURRENT_STATUS_v18.md](CURRENT_STATUS_v18.md). Its primary statistics contain 124 non-resultant
+comparisons: 108 favor Symbolica and 16 favor FLINT. The six Ducos, six Brown, and six CRT
 measurements are retained only in a compact appendix note and do not affect primary ranks or
 summary statistics. After every accepted optimization, update the live file and create the next
 numbered snapshot with an opening paragraph that describes the changes from its predecessor.
@@ -40,6 +44,214 @@ results unless a post-rebase rerun is stated explicitly.
   this file, source, committed logs, or benchmark commands saved in the repository.
 - Small changes below roughly 3% need particularly strong, repeated evidence before their
   complexity is accepted.
+
+## Accepted dense-state quadratic Hensel lifting
+
+The quadratic univariate Hensel path formerly converted the lifted factors and Bezout cofactors
+between sparse multivariate polynomials and dense coefficient vectors every round. It also formed
+the exact residual through generic polynomial multiplication and addition even though the active
+polynomials are univariate in one known coordinate.
+
+`DenseIntegerModularUnivariateContext` now keeps the target, both factors, both Bezout cofactors,
+and the exact product residual as `Vec<Integer>` values for the complete quadratic lift. Its exact
+residual helper computes `target-left*right` directly; its scaled-update helper uses
+`Z.add_mul_assign` for `old + scale*delta`. The two prepared modular divisors share one leading
+coefficient inverse only when their canonical leading residues are exactly equal. The lifted
+factors are converted back to multivariate form once, at the exit. Linear Hensel lifting, partial
+final precision, nonunit retries, the `p=2` path, and exact/inexact reconstruction exits retain
+their previous algorithms.
+
+There is no new dispatch heuristic. The existing quadratic-lift decision still uses the prime,
+p-adic precision schedule, and existing permission checks. The change specializes the internal
+representation only after that algebraic path has already been selected.
+
+Six alternating 500-sample processes against the exact preceding source give:
+
+| Source | Symbolica median | FLINT median | Median process S/F |
+|---|---:|---:|---:|
+| matched control | `1.561047 ms` | `1.379257 ms` | `1.130004` |
+| dense-state lift | `1.369634 ms` | `1.380469 ms` | `0.993222` |
+
+Symbolica time falls `12.26%`. A final six-process, 500-sample refresh from the complete v17
+artifact gives `1.360815 ms` versus `1.376199 ms`, or `0.987690` S/F. The corresponding product
+row remains a Symbolica win at `0.573810`, so both construction and complete factorization are now
+faster than FLINT.
+
+The first accepted binary is `/tmp/flint-comparison-quadratic-dense-state-v1`, SHA-256
+`0887ae8ddbb7407c77df1761477e3d0ae7aea0584be15d2487318e457793dbf6`; its dependency file SHA is
+`bca17cd465a45cdadad6fdfc93944f842eda47f993116ef25df6a8f1cf805867`. Its build JSON is
+`/tmp/flint-comparison-quadratic-dense-state-v1-build.jsonl`, SHA-256
+`2ba4ab7d750b264f23921b3dac9c872d516e98f49826bc16277bf98aee413ce1`. Raw A/B files are
+`/tmp/qhensel-dense-state-d33-{candidate,control}-0{1..6}.csv`; final refresh files are
+`/tmp/final-factor-d33-0{1..6}.csv`.
+
+Focused exact-residual, signed-correction, binary-prime, nontrivial-gamma, partial-final-precision,
+and high-height route tests pass. The complete factor module passes 96 deterministic tests; its
+pre-existing randomized `galois_upgrade` test failed once and passed immediately in isolation.
+
+## Accepted coefficient-content operation context
+
+`factor_separable` used to call `PolynomialGCD::gcd_multiple` over every coefficient layer for
+every candidate variable. On PolyBench #105 this content preprocessing accounted for about
+`7--9 ms`: the exact-source profile placed `factor_separable` at 21.45% of paired cycles,
+`gcd_multiple` at 20.95%, and the nested GCD at 19.32%, while the later factor reconstruction was
+not the bottleneck.
+
+`SeparableCoefficientContentContext` now records whether the current polynomial has a trivial
+global common monomial: its minimum exponent is zero in every coordinate. Its
+`nonconstant_content` operation applies these exact certificates and reductions:
+
+- Any constant coefficient layer proves that the complete coefficient content is constant.
+- If the global common monomial is trivial, any one-term layer proves constant content. Every
+  divisor of a monomial is a monomial, and a nonconstant common monomial would contradict one of
+  the zero coordinatewise minima.
+- With more than two layers, the two sparsest layers are probed only when the second support is at
+  most one eighth of the support accumulated by the unchanged first `gcd_multiple` stage. The
+  common first-layer support cancels from both product proxies, so the comparison neither
+  overflows nor depends on a fixture scale.
+- A constant exact pair GCD returns immediately. A monomial exact pair GCD uses the same global
+  monomial proof. Otherwise the exact pair GCD replaces its two inputs only when its support is no
+  larger than the supports it summarizes, and the original `gcd_multiple` remains the fallback.
+
+The one-eighth admission is a decisive work margin for amortizing an extra exact GCD. Selection
+uses only exponent minima and support-work bounds; it contains no benchmark identifier, exact
+variable count, degree fingerprint, or coefficient values. All speculative results are exact,
+and every inconclusive case retains the previous algorithm.
+
+Six alternating 100-sample processes on PolyBench #105 give:
+
+| Source | Symbolica median | FLINT median | Median process S/F |
+|---|---:|---:|---:|
+| dense-Hensel control | `31.383993 ms` | `29.225538 ms` | `1.073561` |
+| content context | `16.604782 ms` | `28.816486 ms` | `0.576212` |
+
+Symbolica time falls `47.09%` against the exact preceding source and is now 1.74x faster than
+FLINT. Raw files are `/tmp/separable-monomial-pb105-{candidate,control}-0{1..6}.csv`.
+
+The complete 11-case PolyBench factor screen validates every result. Its final operation ratios
+are `0.986146` (#176), `0.652104` (#92), `0.586252` (5v #159), `0.576212` (#105), `0.421076`
+(#84), `0.256988` (#131), `0.224514` (#178), `0.164792` (#32), `0.161334` (#163), `0.094995`
+(8v #159), and `0.063263` (#44). Generated one-variable cases remain within 0.8% of their exact
+source control; generated two- and three-variable factorization refresh to `0.401383` and
+`0.554623` S/F. Product-only guards do not call the new context and remain within the noise floor.
+
+The content-context binary is `/tmp/flint-comparison-separable-monomial-v1`, SHA-256
+`a4524b87bbbda791cd6c471da225c45de6b80d37d678a29e2978db995914ee7b`; its dependency file SHA is
+`bca17cd465a45cdadad6fdfc93944f842eda47f993116ef25df6a8f1cf805867`, and its build JSON SHA is
+`5f28c3470463c788f3b62aa7cc171fa34a93b58eb59d7e3f0faf47ade9ad6a16`. The exact-source diff SHA
+at build time is `d9888409d0d03a4d42cdfe1c1f370dde88744ccd4f122d8c486d3901b047451d`.
+
+Focused tests cover the one-term certificate, the exact one-eighth boundary and rejection below
+it, a genuine global common monomial that must use the complete fallback, and an exact pair-GCD
+replacement that preserves nonconstant content. The full library suite passes 531 of 532 tests;
+the sole failure is the known unrelated root-isolation test accepting a different valid dyadic
+endpoint. Integer, rational, finite-field, and algebraic factor tests all pass.
+
+## Added asymmetric dominant-GCD benchmarks
+
+`GcdCaseConfig` now records the two cofactor degrees and common-factor degree independently.
+Existing balanced generated cases retain their expressions and display names. Four new
+eight-variable cases use an 8-term degree-one cofactor, a 45-term degree-two cofactor, and dense
+common factors of 165, 495, or 1287 terms; the fourth repeats the 165-term geometry with 256-bit
+linear weights. Each paired row validates Symbolica's GCD against the known factor and verifies
+FLINT returns the same factor before timing. Product construction is reported separately.
+
+Six sequential 100-sample processes pinned to core 8 give:
+
+| Regime | Product S/F | GCD S/F |
+|---|---:|---:|
+| dense, common degree 3 / 165 terms | `1.327831` | `0.445428` |
+| dense, common degree 4 / 495 terms | `1.295552` | `0.460421` |
+| dense, common degree 5 / 1287 terms | `0.746378` | `0.467658` |
+| 256-bit weights, common degree 3 / 165 terms | `1.174073` | `1.631601` |
+
+The small-height cases show that Symbolica's automatic GCD route handles a large common factor
+and very small cofactor well. The coefficient-height change reverses that result and creates the
+new overall worst row, so it is the next worst-first profiling target rather than a reason for a
+fixture-specific selector.
+
+The exact final binary is `/tmp/flint-comparison-separable-monomial-asymmetric-gcd-v2`, SHA-256
+`c836647c2ed4d6e47c4d598962610d7bcf9fef07e7dd38c08397723184ff74ab`; its dependency file SHA is
+`bca17cd465a45cdadad6fdfc93944f842eda47f993116ef25df6a8f1cf805867`. Its build JSON is
+`/tmp/flint-comparison-separable-monomial-asymmetric-gcd-v2-build.jsonl`, SHA-256
+`4b6c8146f9bfe216895b3733dc896c43585cb19454c5d4e3922d6cf472c7e3be`. The full workspace diff
+at build time has SHA-256 `36de494a7fee88934c19d4ccd0701883d38a521f01f14caa0f8124b7600a4ddd`.
+Raw files are `/tmp/asymmetric-large-gcd-0{1..6}.csv`; their aggregate summary is
+`/tmp/asymmetric-large-gcd-summary.csv`, SHA-256
+`9f82b16e213a060fb22c6e477e0c604f1ae55afefe46ad7658d3ab8cbecb717d`.
+
+## Accepted coefficient-height-aware Hu prime sizing
+
+The high-height asymmetric GCD required many more CRT images than its interpolation geometry
+alone predicted. For coefficient bounds of at least 32 significant bits, Hu's initial prime size
+now also targets completion in at most eight images: the height target is
+`ceil(significant_bits / 8).min(63)`, and the selected bit count is the maximum of that value and
+the existing interpolation lower bound. Smaller coefficients retain the preceding selection.
+This is a height/work bound rather than a fixture property; the exact modular algorithm,
+reconstruction certificate, and fallback remain unchanged.
+
+Six alternating 100-sample processes on the 256-bit asymmetric eight-variable GCD give:
+
+| Source | Symbolica median | FLINT median | Median process S/F |
+|---|---:|---:|---:|
+| matched control | `15.4896580 ms` | `9.4926955 ms` | `1.6317470` |
+| height-aware prime | `8.9752725 ms` | `9.5195510 ms` | `0.9428320` |
+
+Symbolica time falls 42.06%, and all four asymmetric GCD operation rows now favor Symbolica. Broad
+GCD and product guards stayed within 2%; the only larger relative movements were sub-0.1-ms rows
+dominated by timer noise. The accepted binary is
+`/tmp/flint-comparison-hu-prime-height-v1`, SHA-256
+`45ec7f480762b81d3b8870bc7a3637143289821b8433d7c4a27b28fd102ea12f`. The operation-guard summary
+is `/tmp/hu-prime-height-operation-guard-summary.txt`, SHA-256
+`459c434bb4db69ae168f2b25270ad9773cda2e783012c62e0e56b9fe56a40547`; the product-guard summary
+is `/tmp/hu-prime-height-product-guard-summary.txt`, SHA-256
+`f742635d293bd76e036fde1049e5b455c6d377032ccdc150d3bcb3f3029798bf`.
+
+## PolyBench 0.4.3 full distribution and bounded retry repair
+
+The complete upstream `0001`--`0008` matrix was run for five and eight variables with PolyBench
+0.4.3 (`f3a25498883a80462c6278a87c9dfc93630d8a06`). Every setup used seed 42, 10 warmups, 200
+measured problems, 37--50 requested terms, coefficients in `-16384..=16384`, and a 21,600-second
+per-solver timeout. Uniform coordinate degrees were 22--30 and sharp coordinate degrees were
+0--30. Runs were sequential, pinned to core 8, and used `RAYON_NUM_THREADS=1`. The Symbolica
+adapter used a plain release/default-feature build, including `faster_alloc`; FLINT was the exact
+upstream vcpkg-built 3.5.0 adapter. The temporary adapter manifest contained only local workspace
+path patches and its lockfile was regenerated for the current dependency graph.
+
+The initial sweep found two deterministic Symbolica stack overflows: five-variable `0004`
+problem 11 and five-variable `0008` problem 25. Four failed bivariate reconstruction exits could
+tail-recurse into the same route after advancing the deterministic sample bound, and the analogous
+univariate retry was recursive as well. Both paths now retry iteratively. When automatic selection
+initially chooses the bivariate route, it permits three completed reconstruction failures, then
+restores the saved route-local univariate variable order and original coefficient cursor before a
+one-way univariate fallback. Explicit bivariate and univariate requests retain their existing
+terminal behavior. The bivariate failure edges covered are leading-coefficient precomputation,
+modular Hensel lifting, sparse coefficient lifting, and final exact-product mismatch.
+
+The repaired problems complete in 93.845 ms and 79.881 ms respectively, instead of aborting after
+roughly four and a half minutes. The stack-overflow profile is
+`/tmp/profile-polybench-05-0004-problem11-stack-overflow.perf.data`. The deeper likely issue is
+repeated post-modular reconstruction failure: sparse coefficient lifting returns no reconstruction
+or the final exact product certificate fails. A future repair should type those failure reasons,
+then choose between a general Diophantine correction and continued p-adic precision from exact
+evidence rather than retrying a fixed number of samples.
+
+The final 16 setups and all 3,200 measured problems completed without wrong or inconsistent
+answers. The median paired S/F is `0.962614`, the geometric mean is `0.906571`, the summed-time
+ratio is `0.517296`, and Symbolica wins 1,832 problems. The five-variable paired median is
+`1.047351`; the eight-variable paired median is `0.722134`. Eight of the 16 setup medians favor
+Symbolica. Curated CSVs, run logs, checksums, summary images, and every
+`FLINT_vs_Symbolica.png` are in
+[`benchmark-results/polybench-0.4.3-current`](benchmark-results/polybench-0.4.3-current/README.md).
+The final Symbolica adapter has SHA-256
+`ba97e01eee517f2ec43b73f0fbca116959dcd1fc0f3bdf3f16ad95fb2e52834e`.
+
+All final problem streams match the initial seed-42 streams byte for byte. The two failure-stream
+SHA-256 values are `a3da7fb4f0e89f0a879f8072714d541b642a879c689ccccfb4b1972ff9d11ede`
+for five-variable `0004` and `8fe91053cc23ff27762313843a2f5034637d84ec3ef9e0c76393a0717f0c23ee`
+for five-variable `0008`. Focused retry-state and order-restoration tests pass; the final factor
+module run passes all 98 tests. Its randomized `galois_upgrade` test had failed once in an earlier
+run and passed immediately in isolation as well as in the final module run.
 
 ## Accepted four-way direct `DenseZp64` accumulation
 
@@ -3607,40 +3819,39 @@ comments that justify file organization by contrasting it with designs not prese
 
 ## Current ordered next actions
 
-1. Re-profile high-height degree-33 factorization at `1.111896`, then target its largest remaining
-   integer/Hensel subtree. Preserve coefficient-height and local-bound guards across the degree
-   63--65 boundary; the generic balanced-pair path is not active on a shape that fails its topology
-   and decisive-work tests.
-2. For #105 at `1.106606`, the first bounded experiment remains an exact two-sparsest-layer GCD
-   certificate in `factor_separable`: a constant pair GCD proves the complete coefficient content
-   is constant; a nonconstant result may replace the pair before the unchanged full fallback.
-   Selection must use
-   layer support and exact divisibility, not the fixture number.
-3. Degree-65 factorization is now `1.106499`. Profile the accepted terminal schedule before adding
-   another reconstruction attempt. Do not try every leaf pair: any extension must retain a bounded,
-   deterministic candidate count, prove a stricter work reduction than its extra products and exact
-   divisions, and guard neighboring modular-factor topologies.
-4. The following slower-than-FLINT rows are configured degree-80 GCD (`1.075107`), the degree-65
-   input product (`1.070910`), dense 2v GCD (`1.060731`), generic dense-large multiplication
-   (`1.056183`), and GF(17) dense very-large multiplication (`1.055155`). Continue in scoreboard
-   order and re-profile the current worst row before each implementation round.
+1. The fixed-fixture worst rows are asymmetric eight-variable product constructions at `1.327830`,
+   `1.295551`, and `1.174073`. Profile the generic integer multiplication route before changing
+   factorization or GCD. The mechanism must apply to the support geometry or coefficient-height
+   class, and must guard the already-fast 1,287-term and ordinary-height constructions.
+2. The worst fixed-fixture timed operation is dense degree-65 factorization at `1.098172`, followed
+   by configured degree-80 GCD at `1.075107`, dense two-variable GCD at `1.060731`, dense-large
+   multiplication at `1.056183`, and GF(17) dense-very-large multiplication at `1.055155`.
+   Continue in scoreboard order and re-profile the exact current source before each implementation
+   round.
+3. In the full PolyBench distributions, the current worst setup is five-variable sharp trivial
+   factorization `0007` at `1.595357`, followed by five-variable uniform trivial factorization
+   `0003` at `1.425747`, five-variable sharp nontrivial factorization `0008` at `1.364144`, and
+   five-variable uniform nontrivial GCD `0002` at `1.323497`. Investigate generic work classes in
+   those distributions; do not select on setup ID, exact variable count, or problem number.
+4. Type the direct-bivariate reconstruction failure exits. Distinguish unavailable sparse
+   coefficient lift from a failed final exact product certificate, record achieved p-adic
+   precision, and use that evidence to decide whether to continue precision or invoke a general
+   Diophantine correction. The three-retry automatic fallback remains the safe bound until a
+   deeper repair is measured.
 5. Treat PolyBench five-variable uniform GCD #11 as closed at `0.978321` unless a fresh profile
-   identifies another broad mechanism. Preserve the batch-inversion algebra, the predicted-image
-   reuse rule, the bounded power table, and direct one-image fallback. Do not add a high-height or
-   fixture-specific exception for whole-program-LTO placement noise.
+   identifies another broad mechanism. Preserve the batch-inversion algebra, predicted-image
+   reuse, bounded power table, and direct one-image fallback.
 6. Treat the accepted near-`2^64` dense-large multiplication row as closed at `0.992282` unless a
-   fresh profile reveals another broad mechanism. Preserve the existing strategy dispatch and the
-   million-product direct-loop boundary; any further instruction-level change must repeat the full
+   fresh profile reveals another broad mechanism. Preserve the strategy dispatch and million-
+   product direct-loop boundary; any further instruction-level change must repeat the full
    14-case finite-field screen.
 7. Benchmark the independent off-by-one correction in `terms_with_max_degree` separately. It
    currently omits the first term and reports zero for a one-term polynomial. The correction is
    semantic, but it changes existing Zippel ordering and must not be conflated with Hu planning.
 8. Treat configured degree-48 and degree-64 GCD as closed at `0.889777` and `0.852433` S/F unless a
-   new profile identifies a separate decisive mechanism. Degree 80 remains open because it is
-   slower than FLINT, but profile it before changing CRT selection. Treat dense degree-64
-   factorization (`1.031329`) and its product (`1.017409`) similarly: the tested subset
-   reconstruction, one-scan generic multiplication context, and direct-limb-only conversion have
-   already been rejected.
+   new profile identifies a separate decisive mechanism. Treat dense degree-64 factorization
+   (`1.031329`) and its product (`1.017409`) similarly: the tested subset reconstruction, one-scan
+   generic multiplication context, and direct-limb-only conversion have already been rejected.
 9. Every selector must be justified by algebraic or computational quantities that define a class
    of inputs: degrees, support geometry, coefficient bounds, modular feasibility, predicted work,
    and an exact certificate. Benchmark IDs and exact fixture dimensions are reporting labels only.
@@ -3650,7 +3861,7 @@ comments that justify file organization by contrasting it with designs not prese
    broader projective-coordinate selection needs a proof that the selected coefficient is nonzero
    in every retained image and an exact-division certificate.
 11. Keep all algorithm-specific resultant measurements in the historical appendix and outside the
-   116-row primary statistics. Freeze and hash every accepted full-LTO binary and profile, commit
+   124-row primary statistics. Freeze and hash every accepted full-LTO binary and profile, commit
    with Ben Ruijl's identity, and create the next immutable `CURRENT_STATUS_v<i>.md` snapshot after
    every accepted improvement.
 
