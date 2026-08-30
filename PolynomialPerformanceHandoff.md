@@ -1,21 +1,21 @@
 # Polynomial performance continuation handoff
 
 This is the live continuation record for the single-core Symbolica/FLINT polynomial-performance
-work. It was refreshed on 2026-08-30 after accepting generic balanced two-leaf Hensel
-reconstruction. Dense univariate degree-65 factorization changes from `1.171321` to `1.106499`
-S/F; in a source-matched alternating run, Symbolica time changes from `3.531218 ms` to
-`3.343246 ms` (`-5.32%`). The current 116-row non-resultant inventory still has 98 Symbolica wins
-and 18 losses with a `0.638180` median. Its new worst row is near-`2^64` finite-field dense-large
-multiplication at `1.137177`. Rows were measured across accepted source snapshots, with each
-replacement and its source-matched evidence documented below.
+work. It was refreshed on 2026-08-30 after accepting batched shifted-Vandermonde inversion and a
+reusable last-variable evaluation context in modular Zippel/Hu interpolation. PolyBench
+five-variable uniform GCD #11 changes from `1.121593` to `0.978321` S/F and becomes a Symbolica
+win. The current 116-row non-resultant inventory has 100 Symbolica wins and 16 losses with a
+`0.638180` median. Its new worst row is dense high-height degree-33 factorization at `1.111896`.
+Rows were measured across accepted source snapshots, with each replacement and its source-matched
+evidence documented below.
 Keep this file current whenever an experiment is accepted, rejected, or left partly complete. The
 purpose is that another agent can resume without reconstructing decisions from chat history or
 transient binary names.
 
 The complete current Symbolica/FLINT scoreboard is in
 [CURRENT_STATUS.md](CURRENT_STATUS.md), with the latest immutable snapshot in
-[CURRENT_STATUS_v14.md](CURRENT_STATUS_v14.md). Its primary statistics contain 116 non-resultant
-comparisons: 98 favor Symbolica and 18 favor FLINT. The six Ducos, six Brown, and six CRT
+[CURRENT_STATUS_v16.md](CURRENT_STATUS_v16.md). Its primary statistics contain 116 non-resultant
+comparisons: 100 favor Symbolica and 16 favor FLINT. The six Ducos, six Brown, and six CRT
 measurements are retained only in a compact appendix note and do not affect primary ranks or
 summary statistics. After every accepted optimization, update the live file and create the next
 numbered snapshot with an opening paragraph that describes the changes from its predecessor.
@@ -40,6 +40,175 @@ results unless a post-rebase rerun is stated explicitly.
   this file, source, committed logs, or benchmark commands saved in the repository.
 - Small changes below roughly 3% need particularly strong, repeated evidence before their
   complexity is accepted.
+
+## Accepted four-way direct `DenseZp64` accumulation
+
+The near-`2^64` dense-large fixture was already using `DenseZp64Mul::multiply_direct`: each output
+coefficient is an exact little-endian three-limb accumulator, and Montgomery reduction happens
+only after the convolution. Its hot row loop nevertheless completed one 64-by-64-bit product and
+its dependent add/carry chain before issuing the next multiplication. This serialized independent
+work even though neighboring products normally update different output cells.
+
+`add_u64_product_row_unrolled4` now reads four right coefficients and output offsets, issues their
+four `u128` products, and then applies four independent three-limb add/carry chains. A scalar tail
+handles the final zero to three terms. The surrounding kernel still proves that every exact output
+coefficient fits its three limbs, so the unroll changes instruction scheduling but not arithmetic,
+layout, or reduction frequency.
+
+There is no new dispatch heuristic. The helper is called unconditionally only inside the blocked
+direct branch that was already selected when `product_count >= 1_000_000`. Kronecker substitution
+is tried before direct multiplication and returns before this loop when applicable. Requests below
+the existing million-product threshold retain the scalar direct loop; sparse multiplication,
+other dense dispatch, and every other coefficient domain are unchanged. The boundary is therefore
+an existing measured-work class rather than a benchmark name, modulus fingerprint, or
+variable-count special case.
+
+Six alternating 500-sample full-LTO processes, pinned sequentially to core 8, give:
+
+| Source | Symbolica median | FLINT median | Median process S/F |
+|---|---:|---:|---:|
+| matched control | `10.8102935 ms` | `9.3227025 ms` | `1.1601025` |
+| four-way candidate | `9.2343605 ms` | `9.308868 ms` | `0.992282` |
+
+Symbolica time falls `14.578078%`. The scoreboard replaces its preceding robust row
+`1.137177 -> 0.992282`, making Symbolica slightly faster than FLINT in this regime. The primary
+inventory therefore moves from 98/18 to 99/17 Symbolica wins/losses; its median remains
+`0.638180`.
+
+The final LBR profile measures `9.276851 ms` versus `9.385683 ms`, or `0.988404` S/F. Symbolica's
+`DenseZp64Mul::multiply_direct` accounts for 48.02% of paired cycles; FLINT's
+`_nmod_mpoly_addmul_array1_ulong3` accounts for 47.39%, and FLINT's array append for 2.16%.
+Annotated assembly shows four `mulq` instructions issued before four separate `add/adc/adc`
+chains, confirming that the compiler preserved the intended independent work rather than folding
+the source back into a scalar dependency chain.
+
+A 14-case finite-field multiplication screen changes only the intended near-`2^64` dense-large
+row materially. The candidate and control CSVs are
+`/tmp/zp64-unroll-finite-all-candidate-20.csv`, SHA-256
+`1511024ddf67f9190bae56265498bae2a28d72c4b144fd4981ecf253f8243cc3`, and
+`/tmp/zp64-unroll-finite-all-control-20.csv`, SHA-256
+`a0461ed279a115f1d515601ccf9cdc0cffd470c206ca8852cc1bac7abbc735d0`. The guards cover small and
+large primes, dense univariate, dense multivariate, sparse, total-degree, very-large, and
+accumulator-bound cases; all remain stable.
+
+The accepted binary is `/tmp/flint-comparison-zp64-unroll4-v1`, SHA-256
+`d5d759c6422255d67626809305b8466a388148812bad362ede1ce697d09475b1`; its dependency file is
+`/tmp/flint-comparison-zp64-unroll4-v1.d`, SHA-256
+`bca17cd465a45cdadad6fdfc93944f842eda47f993116ef25df6a8f1cf805867`. The build JSON is
+`/tmp/flint-comparison-zp64-unroll4-build.jsonl`, SHA-256
+`9ee3bc1e05d9e209d42ead61907f4009e1e9cde2cc4430dc430a9a7aae1f1bc3`. Raw alternating files are
+`/tmp/near64-unroll-{candidate,control}-0{1..6}.csv`.
+
+The profile is `/tmp/profile-near64-unroll4-v1-lbr.perf.data`, SHA-256
+`e41373a84604ce1ca205f3da4407f23e2125abad637d2281ea69f2ba20b6d5b5`. Its timing CSV SHA-256 is
+`bb25ffe27a2f78f4099ab9633e101750c1f30b35e03ef4b854745c46bf4f0011`, its report SHA-256 is
+`779a491ade6fc2d72ff4feaba705589ec552a7c9faeedaf5d36da7b491cc2360`, and its annotated-assembly
+SHA-256 is `acf3f0a252169e78489cd99d212831848d7114bf2064b2939bf5580303cc2307`.
+
+Validation passes all 125 Numerica library tests, all 22 Numerica doctests, and all 40 focused root
+polynomial tests. The focused Malachite-backend finite-field multiplication test also passes.
+
+## Accepted batched shifted-Vandermonde inversion
+
+`solve_shifted_transposed_vandermonde` reconstructs coefficients from samples
+`rhs[k] = sum_i c_i x_i^(k+1)`. Its denominator for coefficient `i` is
+
+`d_i = x_i * product_{j != i}(x_i - x_j)`.
+
+The previous implementation divided by the ordinary Vandermonde norm and by `x_i` separately for
+every coefficient. For a finite field, the new implementation forms all `d_i`, builds prefix
+products, inverts their total product once, and walks backward with suffix products to recover
+every reciprocal. This replaces `2n` field inversions with one inversion and linear-many
+multiplications. Infinite rings retain one exact combined division per coefficient so the change
+does not introduce coefficient-growth work there. Duplicate points still fail explicitly, and a
+zero point remains singular through the same failed inversion semantics.
+
+The selector is the algebraic property `ring.size().is_some()`: bounded finite rings benefit from
+trading inversions for multiplication, while infinite domains retain direct division. It does not
+inspect polynomial shape, a benchmark label, a modulus fingerprint, or a fixed variable count.
+The focused test reconstructs empty systems and lengths 1 through 12, including zero target
+coefficients. An independent algebra audit covered finite extensions, unit denominators in
+composite modular rings, duplicate points, and zero points.
+
+Six alternating 500-sample full-LTO processes for PolyBench five-variable uniform GCD #11 give:
+
+| Source | Symbolica median | Median process S/F |
+|---|---:|---:|
+| pre-batch control | `10.708840 ms` | `1.086416` |
+| batched inversion | `10.285017 ms` | `1.043121` |
+
+Symbolica time falls `3.957%`. The accepted batch binary is
+`/tmp/flint-comparison-vandermonde-batch-v1`, SHA-256
+`f3cd42f1a8ca22d02e66a41161d4831cbccea8633a34c646de8bd5202c59fa07`; its dependency file
+SHA-256 is `bca17cd465a45cdadad6fdfc93944f842eda47f993116ef25df6a8f1cf805867`. The build JSON is
+`/tmp/flint-comparison-vandermonde-batch-build.jsonl`, SHA-256
+`426da0ecd05d292a2762f7a3022041b7fc2be0d234910d8abc8e88ce24fe4e35`. Raw files are
+`/tmp/pb11-vbatch-{candidate,control}-0{1..6}.csv`.
+
+## Accepted reusable last-variable evaluation context
+
+Recursive Zippel interpolation repeatedly substitutes new values into the same last active
+variable of both inputs. The former `replace_last` path rediscovered every lexicographic
+coefficient row, allocated fresh output vectors, and recomputed identical powers independently for
+the two inputs on every image.
+
+`LastVariableEvaluationContext` now records lexicographic row ranges and maximum degree once,
+retains its output allocation, and evaluates each row into that buffer. The pair-level
+`RepeatedLastVariableEvaluationContext` shares a generation-stamped power table across both inputs
+for each sample value. A zero power is cached correctly because validity is represented by the
+generation rather than by the coefficient value. The table is bounded at 100,000 entries; larger
+sparse exponents use direct exponentiation, preserving bounded memory. The leading-coefficient
+polynomial `gamma`, which is univariate in the sampled variable, is evaluated with Horner's method,
+and the accepted sample value is reused for normalization.
+
+Reuse is selected only when the interpolation degree bound plus the leading-coefficient degree
+predicts more than one image. One-image calls retain direct `replace_last`; if two failed attempts
+relax the degree bound, the same work rule can enable reuse for the subsequent images. These are
+predicted repeated work, support order, and exponent bounds. There is no benchmark identifier,
+exact variable-count branch, coefficient fingerprint, or high-height exception.
+
+Six alternating 500-sample processes against the batch-only binary reduce #11 by a further
+`5.98%`; the first context binary gives a median `0.981326` S/F. The exact final source was then
+built again and compared in six final processes:
+
+| Final row | Symbolica median | FLINT median | Median process S/F |
+|---|---:|---:|---:|
+| PolyBench 5v uniform nontrivial GCD #11 | `9.641149 ms` | `9.861558 ms` | `0.978321` |
+
+The exact final binary is `/tmp/flint-comparison-lastvar-context-final`, SHA-256
+`6d351bcb00c16d6e893e3c53a0047446db8e86e98f8d1bfee18390b5d8c4486b`; its dependency file
+SHA-256 is `bca17cd465a45cdadad6fdfc93944f842eda47f993116ef25df6a8f1cf805867`. The build JSON is
+`/tmp/flint-comparison-lastvar-context-final-build.jsonl`, SHA-256
+`cab13020ec52ba47496510822ea136b41990772b9e30df4bd7de29d5ed52463e`. Its `.text` section is
+byte-identical to the profiled first context binary, SHA-256
+`728f3223ee04dba45b8c8003451de0f0aeca9cd5c1cac8ada96e30200fec374b`. Final raw files are
+`/tmp/pb11-lastvar-context-final-{candidate,control}-0{1..6}.csv`.
+
+The exact-source 20-sample PolyBench screen is
+`/tmp/lastvar-final-polybench-gcd-20.csv`: all 12 cases validate and #11 measures `0.981196` in
+that short screen. The corresponding 14-regime generated screen is
+`/tmp/lastvar-final-generated-gcd-10.csv`; it spans one to eight variables, dense, sparse,
+high-gap, and 128--1024-bit high-height inputs. Focused validation passes the repeated-evaluation
+test, all 36 GCD tests, zero and repeated substitution values, cancellation, a degree above the
+power-cache cap, and a substituted variable with a physically trailing absent variable.
+
+The one-image high-height eight-variable guard does not activate cached evaluation. Six final
+50-sample processes measure `39.090454 ms` and `0.450165` S/F, versus `38.177243 ms` and
+`0.439926` for the batch-only binary. Profiles attribute only 0.15% of the candidate to context
+evaluation versus 0.18% to the old `replace_last`. The hot first `u64`
+`construct_new_image_single_scale` copy remains exactly `0x48b9` bytes, but its start moves from
+address modulo 64 `0x20` to `0x30`; its paired share moves from 11.47% to 12.26%. This is a
+whole-program-LTO placement effect rather than extra selected work, so a fixture-specific
+high-height exclusion was rejected. Profiles are
+`/tmp/profile-highheight8-lastvar-{candidate,control}.perf.data`; final guard files are
+`/tmp/highheight8-lastvar-final-{candidate,control}-0{1..6}.csv`.
+
+Final validation passes all 125 Numerica library tests, all 22 Numerica doctests, all 36 focused
+GCD tests, and the repeated last-variable evaluation test. The full root library suite passes
+527 of 528 tests. The unrelated `poly::univariate::roots::tests::isolate` test expects the exact
+dyadic interval `[15/64, 9/32]` for one simple root, while this checkout deterministically returns
+the also-valid isolating interval `[3/16, 9/32]`; none of this round's changed files touch root
+isolation.
 
 ## Accepted pre-content Hu-Monagan main-variable planning
 
@@ -3357,6 +3526,9 @@ Do not repeat these without a genuinely new mechanism:
 | Direct 1-4-limb `Integer` to `Zp64` conversion, `8440390` | degree-64 median `1.179371` versus `1.191412`; only about 1% | correct but Amdahl-limited; leave off `dev` |
 | Fused adjacent-degree/Q1 modular remainder, `e0430d5` | ratio regressed to about `1.484` | reject; three-limb reduction cost exceeds two Montgomery reductions |
 | Dense single-scale Zippel reconstruction, `c4748b6` | PolyBench #11 improved only about 1.3% | too much code for gain |
+| Four-way `u32` geometric-image unroll | #11 measured `10.968324 ms`, `1.110136` S/F versus `10.727240 ms`, `1.087192` control; generated code added scalar/SSE shuffle work | reject and revert; independent products in this loop did not map to the profitable carry-chain schedule of the `u64` accumulator kernel |
+| Owned/borrowed evaluated-pair enum | six #11 processes measured median `9.840455 ms`, `0.998494` S/F versus `9.643931 ms`, `0.978386` for the closure-form control | reject and revert; outlining a generic pair-return method changed hot layout and gave back 2.04% without changing arithmetic or selection |
+| High-height-specific last-variable reuse exclusion | the one-image 8v guard does not enable reuse; context evaluation is 0.15% of the profile and the unchanged `0x48b9` image constructor shifted alignment | reject a fixture-specific gate; the 2.39% wall movement is whole-program-LTO placement and the final row remains `0.450165` S/F |
 | Late, post-content Hu main-variable planning | #140 Symbolica time changed about `6.1273 -> 5.485 ms`, but the old main-coordinate `univariate_content` still consumed 26.50% of combined profile samples | superseded by the accepted pre-content hook, which avoids doing discarded-coordinate content work |
 | Full Hu coefficient-row histograms, planner v4 | every candidate row was counted even when its degree made the 4x threshold impossible | reject the unconditional scan; use the exact pigeonhole lower bound and stop a bounded count at the first oversized row |
 | Hu prefilter/dense/adaptive/reordered planner layouts, v5/v7/v9/v10 | the intermediate implementations selected the intended anisotropic schedules but did not give stable dense/uniform guard improvements across full-LTO binaries | reject those layouts; retain only the final degree prefilter, O(term-count) adaptive counter, fixed anchor, and pre-content placement |
@@ -3365,6 +3537,7 @@ Do not repeat these without a genuinely new mechanism:
 | Broad dense modular GCD experiment, `5a975f1` | little gain at degree 64, degree-80 regression | superseded by smaller dense-image/certificate contexts |
 | Borrowed versus by-value finite-field calls | no measurable difference | not the source of the old unexplained `1.325` result |
 | Divide-and-conquer univariate attempt | degree-64 ratio about `2.736` | decisive regression |
+| Cache-sized chunks inside direct `DenseZp64` multiplication | candidate measured `11.261875 ms` versus FLINT `9.306603 ms`, or `1.210095` S/F; 53.24% of paired profile cycles remained in `ChunkedDenseZp64Mul::run` because per-product chunk addressing replaced the intended cache benefit | reject; source was removed. Binary SHA-256 `5e7dc9c2a33b23feda0288e4c4eabf75594919c645bea971e4a112961b046049`, build JSON `48b2ba4d27d084456a4662eac55c9d23314dca7841b625935f41fd3b2ad8a55c`, profile `f856e521cafe9867124343163c59f08c7c8a1df77af816f2ecb8757ca304be95` |
 | Direct-limb conversion as the whole product answer | current product profile shows packing/unpacking, not GMP multiply, dominates | target conversion as an operation context; do not redesign `Ring` |
 | Large-integer recycled storage alone | reduces allocation-heavy paths but did not close FLINT gaps | retain it, but algorithm/data layout matter more |
 | Product selector `85be422` as a factorization fix | product improved 16-17%; factor row did not materially move | factor input product is outside timed region |
@@ -3395,6 +3568,10 @@ older checksums and ratios are retained in Git history of this document at commi
 - Dense univariate modular GCD and exact certificate contexts:
   `src/poly/gcd.rs`, especially `DenseZp64UnivariateGcdImage`,
   `DenseUnivariateIntegerDivisionContext`, and `UnivariateModularGcdContext`.
+- Repeated Zippel image evaluation: `src/poly/polynomial.rs`, especially
+  `LastVariablePowerWorkspace` and `LastVariableEvaluationContext`; pair-level selection and
+  shifted-Vandermonde batch inversion are in `src/poly/gcd.rs`, especially
+  `RepeatedLastVariableEvaluationContext` and `solve_shifted_transposed_vandermonde`.
 - Pre-content Hu-Monagan main-variable planning: `src/poly/gcd.rs`, especially
   `HuMonaganAnchor`, `HuMonaganPlanningContext`, `CoefficientRowCounter`, and
   `PreparedHuMonaganGcd`. The same file contains the generic pre-content call site and the narrow
@@ -3411,9 +3588,10 @@ older checksums and ratios are retained in Git history of this document at commi
 - Coefficient-domain polynomial kernel capabilities: `lib/numerica/src/kernels.rs`; the integer
   implementation is `lib/numerica/src/domains/integer/polynomial_kernels.rs`.
 - Large-modulus finite-field and modular-ring multiplication:
-  `lib/numerica/src/domains/finite_field/polynomial_kernels.rs`, especially
-  `DenseIntegerMontgomeryMul`; `FiniteField<Integer>::kernels` exposes it through the existing
-  `PolynomialKernels` capability.
+  `lib/numerica/src/domains/finite_field/polynomial_kernels.rs`. The 64-bit-prime direct path is
+  `DenseZp64Mul::multiply_direct` with `add_u64_product_row_unrolled4`; arbitrary-size moduli use
+  `DenseIntegerMontgomeryMul`. Both are exposed through the existing `PolynomialKernels`
+  capability.
 - Generated and PolyBench fixtures: `benches/support/cases.rs` and
   `benches/support/polybench_cases.rs`.
 
@@ -3429,34 +3607,31 @@ comments that justify file organization by contrasting it with designs not prese
 
 ## Current ordered next actions
 
-1. Attack the new worst row, near-`2^64` finite-field dense-large multiplication at `1.137177`
-   S/F. First profile the current Symbolica and FLINT multiplication subtrees in the same full-LTO
-   binary and separate polynomial dispatch, dense-index construction, coefficient multiplication,
-   and modular reduction. Any new route must be selected from modulus width, input/output spans,
-   collision bounds, and measured work; it must also guard smaller primes, sparse layouts, and
-   arbitrary-precision moduli.
-2. Next is PolyBench 5v uniform GCD #11 at `1.121593`. The accepted Hu selector does not execute
-   on this uniform support, while same-binary plan-on/plan-off measurements were nearly neutral.
-   Reproduce and localize the full-LTO shift in `construct_new_image_single_scale` before changing
-   GCD heuristics. Accept a code-layout or image-construction change only if generated dense 3v,
-   5v, and 8v families show the same mechanism.
-3. Re-profile high-height degree-33 factorization at `1.111896`, then target its largest remaining
+1. Re-profile high-height degree-33 factorization at `1.111896`, then target its largest remaining
    integer/Hensel subtree. Preserve coefficient-height and local-bound guards across the degree
    63--65 boundary; the generic balanced-pair path is not active on a shape that fails its topology
    and decisive-work tests.
-4. For #105 at `1.106606`, the first bounded experiment remains an exact two-sparsest-layer GCD
-   certificate in
-   `factor_separable`: a constant pair GCD proves the complete coefficient content is constant; a
-   nonconstant result may replace the pair before the unchanged full fallback. Selection must use
+2. For #105 at `1.106606`, the first bounded experiment remains an exact two-sparsest-layer GCD
+   certificate in `factor_separable`: a constant pair GCD proves the complete coefficient content
+   is constant; a nonconstant result may replace the pair before the unchanged full fallback.
+   Selection must use
    layer support and exact divisibility, not the fixture number.
-5. Degree-65 factorization is now `1.106499`. Profile the accepted terminal schedule before adding
+3. Degree-65 factorization is now `1.106499`. Profile the accepted terminal schedule before adding
    another reconstruction attempt. Do not try every leaf pair: any extension must retain a bounded,
    deterministic candidate count, prove a stricter work reduction than its extra products and exact
    divisions, and guard neighboring modular-factor topologies.
-6. The following slower-than-FLINT rows are configured degree-80 GCD (`1.075107`), the degree-65
+4. The following slower-than-FLINT rows are configured degree-80 GCD (`1.075107`), the degree-65
    input product (`1.070910`), dense 2v GCD (`1.060731`), generic dense-large multiplication
    (`1.056183`), and GF(17) dense very-large multiplication (`1.055155`). Continue in scoreboard
    order and re-profile the current worst row before each implementation round.
+5. Treat PolyBench five-variable uniform GCD #11 as closed at `0.978321` unless a fresh profile
+   identifies another broad mechanism. Preserve the batch-inversion algebra, the predicted-image
+   reuse rule, the bounded power table, and direct one-image fallback. Do not add a high-height or
+   fixture-specific exception for whole-program-LTO placement noise.
+6. Treat the accepted near-`2^64` dense-large multiplication row as closed at `0.992282` unless a
+   fresh profile reveals another broad mechanism. Preserve the existing strategy dispatch and the
+   million-product direct-loop boundary; any further instruction-level change must repeat the full
+   14-case finite-field screen.
 7. Benchmark the independent off-by-one correction in `terms_with_max_degree` separately. It
    currently omits the first term and reports zero for a one-term polynomial. The correction is
    semantic, but it changes existing Zippel ordering and must not be conflated with Hu planning.

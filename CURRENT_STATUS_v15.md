@@ -1,25 +1,17 @@
 # Current Symbolica/FLINT polynomial performance
 
-Version `v16` adds one-inversion transposed-Vandermonde solves and reusable last-variable
-evaluation to the modular Zippel/Hu interpolation path relative to `v15`. PolyBench five-variable
-uniform GCD #11 changes from `1.121593 -> 0.978321` S/F and moves from the worst primary loss to a
-Symbolica win. The staged source-matched measurements reduce Symbolica by `3.957%` for batch
-inversion and a further `5.98%` for repeated evaluation; six final alternating 500-sample
-processes give `9.641149 ms` and `0.978321` S/F.
+Version `v15` records four-way accumulator unrolling in the existing blocked direct `DenseZp64`
+multiplication kernel relative to `v14`. The near-`2^64` finite-field dense-large row changes from
+`1.137177 -> 0.992282` S/F. Across six source-matched alternating 500-sample processes, Symbolica's
+median falls from `10.8102935 ms` to `9.2343605 ms` (`-14.578078%`); the matched control is
+`1.1601025` S/F and the candidate is `0.992282` S/F.
 
-Both selectors follow algebraic work. Finite fields obtain every shifted-Vandermonde reciprocal
-from prefix products, one field inversion, and a reverse pass. Repeated evaluation is enabled only
-when the interpolation bounds predict more than one image; it then reuses lexicographic row
-boundaries, output storage, and a bounded generation-stamped power table across both inputs.
-Univariate leading-coefficient images use Horner evaluation. No benchmark identity, exact variable
-count, coefficient fingerprint, or fixture-specific exception participates in these choices.
-
-The exact-source high-height eight-variable GCD guard is refreshed from `0.472101` to `0.450165`
-S/F. Against the immediately preceding batch-only binary its Symbolica wall time moves
-`38.177243 -> 39.090454 ms` (`+2.39%`), while remaining 2.22x faster than FLINT. Profiles show no
-extra algorithmic work: the one-image case does not activate reuse, and the movement comes from
-whole-program-LTO placement of the unchanged hot image-construction code. A fixture-specific gate
-was therefore rejected.
+There is no new algorithm selector. Once the existing dispatcher has selected blocked direct
+`DenseZp64` multiplication with at least 1,000,000 coefficient products, its inner loop handles
+four products per iteration so the processor can overlap four independent multiply/add-carry
+chains. Small and sparse multiplication, other coefficient domains, other dense dispatch, and
+Kronecker-substitution routes are unchanged. A 14-case finite-field screen moves only the intended
+dense-large regime materially; its guards remain stable.
 
 Ducos, Brown, and CRT resultant measurements remain a historical appendix note and never
 participate in the primary ranks or summary.
@@ -41,9 +33,9 @@ Detailed optimization decisions, profiles, and rejected experiments are in
 | Measure | Current result |
 |---|---:|
 | Primary comparisons | 116 |
-| Symbolica faster than FLINT | 100 |
-| Symbolica slower than FLINT | 16 |
-| Worst primary S/F | **1.111896** — generated dense high-height degree-33 factorization |
+| Symbolica faster than FLINT | 99 |
+| Symbolica slower than FLINT | 17 |
+| Worst primary S/F | **1.121593** — PolyBench five-variable uniform GCD #11 |
 | Median primary S/F | **0.638180** |
 | Best primary S/F | **0.028678** — generated high-gap eight-variable GCD |
 | Focused #131 S/F | **0.277201** — Symbolica is 3.61x faster than FLINT |
@@ -57,25 +49,25 @@ Resultant backends are excluded from this table and its statistics.
 
 | Rank | S/F | Category | Benchmark |
 |---:|---:|---|---|
-| 1 | 1.111896 | `generated_factor_operation` | generated factorization: dense high-height 1-variable degrees 17/16 total 33 |
-| 2 | 1.106606 | `polybench_factor_operation` | polybench factorization: polybench 8v uniform nontrivial factor #105 |
-| 3 | 1.106499 | `generated_factor_operation` | generated factorization: dense 1-variable degrees 33/32 total 65 |
-| 4 | 1.075107 | `dense_gcd_operation` | configured dense univariate GCD degree 80 |
-| 5 | 1.070910 | `generated_factor_product` | generated factor product: dense 1-variable degrees 33/32 total 65 |
-| 6 | 1.060731 | `generated_gcd_operation` | generated GCD auto: dense 2 variables degree 5 |
-| 7 | 1.056183 | `dedicated_multiplication` | dense large multiplication |
-| 8 | 1.055155 | `dedicated_multiplication` | GF(17) dense very large multiplication |
-| 9 | 1.054182 | `generated_gcd_product` | generated GCD products: high-height 5 variables degree 4 coefficient bits 512 |
-| 10 | 1.042068 | `generated_factor_operation` | generated factorization: dense 1-variable degrees 32/31 |
-| 11 | 1.031329 | `generated_factor_operation` | generated factorization: dense 1-variable degrees 33/31 total 64 |
-| 12 | 1.029726 | `generated_gcd_product` | generated GCD products: dense 1 variables degree 32 |
-| 13 | 1.017696 | `generated_gcd_product` | generated GCD products: high-height 5 variables degree 4 coefficient bits 1024 |
-| 14 | 1.017409 | `generated_factor_product` | generated factor product: dense 1-variable degrees 33/31 total 64 |
-| 15 | 1.009108 | `generated_factor_product` | generated factor product: dense 3-variable degrees 6/5 |
-| 16 | 1.005858 | `polybench_factor_operation` | polybench factorization: polybench 8v sharp nontrivial factor #176 |
-| 17 | 0.994841 | `generated_gcd_operation` | generated GCD auto: dense 1 variables degree 32 |
-| 18 | 0.992282 | `dedicated_multiplication` | GF(18446744073709551557) dense large multiplication |
-| 19 | 0.978321 | `polybench_gcd_operation` | polybench GCD: polybench 5v uniform nontrivial GCD #11 |
+| 1 | 1.121593 | `polybench_gcd_operation` | polybench GCD: polybench 5v uniform nontrivial GCD #11 |
+| 2 | 1.111896 | `generated_factor_operation` | generated factorization: dense high-height 1-variable degrees 17/16 total 33 |
+| 3 | 1.106606 | `polybench_factor_operation` | polybench factorization: polybench 8v uniform nontrivial factor #105 |
+| 4 | 1.106499 | `generated_factor_operation` | generated factorization: dense 1-variable degrees 33/32 total 65 |
+| 5 | 1.075107 | `dense_gcd_operation` | configured dense univariate GCD degree 80 |
+| 6 | 1.070910 | `generated_factor_product` | generated factor product: dense 1-variable degrees 33/32 total 65 |
+| 7 | 1.060731 | `generated_gcd_operation` | generated GCD auto: dense 2 variables degree 5 |
+| 8 | 1.056183 | `dedicated_multiplication` | dense large multiplication |
+| 9 | 1.055155 | `dedicated_multiplication` | GF(17) dense very large multiplication |
+| 10 | 1.054182 | `generated_gcd_product` | generated GCD products: high-height 5 variables degree 4 coefficient bits 512 |
+| 11 | 1.042068 | `generated_factor_operation` | generated factorization: dense 1-variable degrees 32/31 |
+| 12 | 1.031329 | `generated_factor_operation` | generated factorization: dense 1-variable degrees 33/31 total 64 |
+| 13 | 1.029726 | `generated_gcd_product` | generated GCD products: dense 1 variables degree 32 |
+| 14 | 1.017696 | `generated_gcd_product` | generated GCD products: high-height 5 variables degree 4 coefficient bits 1024 |
+| 15 | 1.017409 | `generated_factor_product` | generated factor product: dense 1-variable degrees 33/31 total 64 |
+| 16 | 1.009108 | `generated_factor_product` | generated factor product: dense 3-variable degrees 6/5 |
+| 17 | 1.005858 | `polybench_factor_operation` | polybench factorization: polybench 8v sharp nontrivial factor #176 |
+| 18 | 0.994841 | `generated_gcd_operation` | generated GCD auto: dense 1 variables degree 32 |
+| 19 | 0.992282 | `dedicated_multiplication` | GF(18446744073709551557) dense large multiplication |
 | 20 | 0.973974 | `generated_factor_product` | generated factor product: dense 1-variable degrees 32/31 |
 | 21 | 0.968978 | `polybench_gcd_operation` | polybench GCD: polybench 8v uniform trivial GCD #11 |
 | 22 | 0.966693 | `dedicated_multiplication` | dense high multiplication |
@@ -142,9 +134,9 @@ Resultant backends are excluded from this table and its statistics.
 | 83 | 0.514253 | `polybench_gcd_operation` | polybench GCD: polybench 5v sharp nontrivial GCD #11 |
 | 84 | 0.513866 | `dedicated_multiplication` | GF(18446744073709551557) dense very large multiplication |
 | 85 | 0.479027 | `polybench_gcd_operation` | polybench GCD: polybench 8v sharp nontrivial GCD #140 |
-| 86 | 0.470237 | `generated_gcd_operation` | generated GCD auto: high-height 5 variables degree 4 coefficient bits 1024 |
-| 87 | 0.458120 | `polybench_gcd_operation` | polybench GCD: polybench 8v uniform nontrivial GCD #188 |
-| 88 | 0.450165 | `generated_gcd_operation` | generated GCD auto: high-height 8 variables degree 3 coefficient bits 256 |
+| 86 | 0.472101 | `generated_gcd_operation` | generated GCD auto: high-height 8 variables degree 3 coefficient bits 256 |
+| 87 | 0.470237 | `generated_gcd_operation` | generated GCD auto: high-height 5 variables degree 4 coefficient bits 1024 |
+| 88 | 0.458120 | `polybench_gcd_operation` | polybench GCD: polybench 8v uniform nontrivial GCD #188 |
 | 89 | 0.449493 | `dedicated_multiplication` | dense very large multiplication |
 | 90 | 0.448043 | `dedicated_multiplication` | seven-variable power-minus-one multiplication |
 | 91 | 0.447907 | `polybench_gcd_operation` | polybench GCD: polybench 8v uniform nontrivial GCD #56 |
@@ -178,7 +170,6 @@ Resultant backends are excluded from this table and its statistics.
 
 | Optimization | Earlier/reference S/F | Current S/F | Result |
 |---|---:|---:|---|
-| Batched Vandermonde inversion and reusable last-variable images, PolyBench 5v GCD #11 | 1.121593 | 0.978321 | One inversion replaces linear-many finite-field inversions, and repeated images reuse row/power/output storage; Symbolica is now 1.02x faster than FLINT |
 | Four-way direct `DenseZp64` accumulation, near-`2^64` dense-large multiplication | 1.137177 | 0.992282 | Source-matched Symbolica median falls 14.58%; the kernel now overlaps four independent carry chains |
 | Balanced two-leaf Hensel exact reconstruction, dense degree 65 | 1.171321 | 1.106499 | Source-matched Symbolica median falls 5.32%; the exact pair leaves `p^51` rather than `p^86` root precision |
 | Pre-content Hu main-variable planning, PolyBench 8v sharp GCD #140 / #11 | 1.268240 / 0.748107 | 0.479027 / 0.409963 | Both schedules use 16 rather than 80 images; Symbolica is now 2.09x and 2.44x faster than FLINT |
@@ -243,6 +234,6 @@ After every accepted performance change:
 6. Record benchmark binary hashes, raw timing artifacts, profiles, accepted changes, and rejected
    experiments in [PolynomialPerformanceHandoff.md](PolynomialPerformanceHandoff.md).
 
-The `v16` inventory was programmatically checked for 116 unique primary rows, 100 rows faster than
-FLINT, 16 rows slower than FLINT, median `0.638180`, and monotonically descending S/F values. The
+The `v15` inventory was programmatically checked for 116 unique primary rows, 99 rows faster than
+FLINT, 17 rows slower than FLINT, median `0.638180`, and monotonically descending S/F values. The
 18 resultant measurements remain six appendix workloads by three explicit algorithms.

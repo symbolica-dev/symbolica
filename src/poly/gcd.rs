@@ -28,7 +28,10 @@ use crate::tensors::matrix::{Matrix, MatrixError};
 use crate::{GLOBAL_SETTINGS, warn};
 
 use super::PositiveExponent;
-use super::polynomial::{IntegerPolynomialCrtContext, MultivariatePolynomial, WordCrt};
+use super::polynomial::{
+    IntegerPolynomialCrtContext, LastVariableEvaluationContext, LastVariablePowerWorkspace,
+    MultivariatePolynomial, WordCrt,
+};
 use super::univariate::DenseFiniteFieldRootContext;
 
 #[cfg(feature = "binary_size")]
@@ -1294,6 +1297,74 @@ struct DenseUnivariateGcdContext<'a, F: Field, E: PositiveExponent> {
     variable: Option<usize>,
 }
 
+/// Supplies repeated evaluations of a polynomial pair in their last active variable.
+///
+/// Calls that require several images cache row boundaries, powers, and output buffers. A single
+/// image is evaluated directly because it cannot amortize the metadata scan.
+struct RepeatedLastVariableEvaluationContext<'a, F: Field, E: PositiveExponent> {
+    left: &'a MultivariatePolynomial<F, E>,
+    right: &'a MultivariatePolynomial<F, E>,
+    variable: usize,
+    cached: Option<(
+        LastVariableEvaluationContext<'a, F, E>,
+        LastVariableEvaluationContext<'a, F, E>,
+        LastVariablePowerWorkspace<F>,
+    )>,
+}
+
+impl<'a, F: Field, E: PositiveExponent> RepeatedLastVariableEvaluationContext<'a, F, E> {
+    fn new(
+        left: &'a MultivariatePolynomial<F, E>,
+        right: &'a MultivariatePolynomial<F, E>,
+        variable: usize,
+        expected_evaluations: usize,
+    ) -> Self {
+        let mut context = Self {
+            left,
+            right,
+            variable,
+            cached: None,
+        };
+        if expected_evaluations > 1 {
+            context.enable_reuse();
+        }
+        context
+    }
+
+    /// Prepare cached row metadata and buffers before an interpolation needs multiple images.
+    fn enable_reuse(&mut self) {
+        if self.cached.is_some() {
+            return;
+        }
+
+        let left_context = LastVariableEvaluationContext::new(self.left, self.variable);
+        let right_context = LastVariableEvaluationContext::new(self.right, self.variable);
+        let maximum_degree = left_context
+            .maximum_degree()
+            .max(right_context.maximum_degree());
+        let powers = LastVariablePowerWorkspace::new(self.left.ring(), maximum_degree);
+        self.cached = Some((left_context, right_context, powers));
+    }
+
+    /// Evaluate both inputs at `value` and pass the results to `operation`.
+    fn with_evaluations<T>(
+        &mut self,
+        value: &F::Element,
+        operation: impl FnOnce(&MultivariatePolynomial<F, E>, &MultivariatePolynomial<F, E>) -> T,
+    ) -> T {
+        if let Some((left, right, powers)) = &mut self.cached {
+            powers.start_value(value);
+            let left = left.evaluate(powers);
+            let right = right.evaluate(powers);
+            operation(left, right)
+        } else {
+            let left = self.left.replace_last(self.variable, value);
+            let right = self.right.replace_last(self.variable, value);
+            operation(&left, &right)
+        }
+    }
+}
+
 /// Maps a sampled univariate degree to its coefficient in the known GCD shape.
 enum ZippelShapeIndex<E: PositiveExponent> {
     Dense {
@@ -1772,6 +1843,7 @@ impl<F: Field, E: PositiveExponent> MultivariatePolynomial<F, E> {
                 }
 
                 let mut sol = Vec::with_capacity(len);
+                let mut denominators = Vec::with_capacity(len);
                 for (i, s) in x.iter().enumerate() {
                     // sample master/(1-s_i) by using the factorized form
                     let mut norm = self.ring().one();
@@ -1793,13 +1865,38 @@ impl<F: Field, E: PositiveExponent> MultivariatePolynomial<F, E> {
                         self.ring().add_mul_assign(&mut coeff, &last_q, rhs);
                     }
 
-                    self.ring().div_assign(&mut coeff, &norm);
-
-                    // Convert from the ordinary transposed Vandermonde basis
-                    // sample_generators[i]^k to the shifted basis sample_generators[i]^(k+1).
-                    self.ring().div_assign(&mut coeff, &x[i]);
-
+                    // Multiplying by x[i] converts the ordinary transposed Vandermonde
+                    // denominator for powers k into the shifted denominator for powers k + 1.
+                    self.ring().mul_assign(&mut norm, &x[i]);
+                    denominators.push(norm);
                     sol.push(coeff);
+                }
+
+                if self.ring().size().is_some() {
+                    // In a finite field, recover every reciprocal from one inversion and a pair
+                    // of prefix/suffix multiplication passes.
+                    let mut prefixes = Vec::with_capacity(len);
+                    prefixes.push(self.ring().one());
+                    let mut product = denominators[0].clone();
+                    for denominator in &denominators[1..] {
+                        prefixes.push(product.clone());
+                        self.ring().mul_assign(&mut product, denominator);
+                    }
+
+                    let mut inverse_suffix = self.ring().inv(&product);
+                    for index in (1..len).rev() {
+                        let inverse_denominator =
+                            self.ring().mul(&prefixes[index], &inverse_suffix);
+                        self.ring()
+                            .mul_assign(&mut sol[index], &inverse_denominator);
+                        self.ring()
+                            .mul_assign(&mut inverse_suffix, &denominators[index]);
+                    }
+                    self.ring().mul_assign(&mut sol[0], &inverse_suffix);
+                } else {
+                    for (coefficient, denominator) in sol.iter_mut().zip(&denominators) {
+                        self.ring().div_assign(coefficient, denominator);
+                    }
                 }
 
                 sol
@@ -2591,6 +2688,11 @@ impl<
         let gamma = a
             .lcoeff_last_varorder(vars)
             .univariate_gcd(&b.lcoeff_last_varorder(vars));
+        let expected_evaluations = (tight_bounds[lastvar].to_u32() as usize)
+            .saturating_add(gamma.ldegree_max().to_u32() as usize)
+            .saturating_add(1);
+        let mut evaluation_context =
+            RepeatedLastVariableEvaluationContext::new(a, b, lastvar, expected_evaluations);
 
         let mut rng = rand::rng();
 
@@ -2605,6 +2707,12 @@ impl<
                     lastvar, tight_bounds[lastvar], bounds[lastvar]
                 );
                 tight_bounds[lastvar] = bounds[lastvar];
+                let relaxed_evaluations = (tight_bounds[lastvar].to_u32() as usize)
+                    .saturating_add(gamma.ldegree_max().to_u32() as usize)
+                    .saturating_add(1);
+                if relaxed_evaluations > 1 {
+                    evaluation_context.enable_reuse();
+                }
             }
             failure_count += 1;
 
@@ -2616,10 +2724,11 @@ impl<
             }
 
             let mut sample_fail_count = 0i64;
-            let v = loop {
+            let (v, gamma_value) = loop {
                 let r = sample_nonzero_field_element(a.ring(), &mut rng);
-                if !gamma.replace_last(lastvar, &r).is_zero() {
-                    break r;
+                let gamma_value = gamma.evaluate_univariate_horner(lastvar, &r);
+                if !gamma.ring().is_zero(&gamma_value) {
+                    break (r, gamma_value);
                 }
 
                 sample_fail_count += 1;
@@ -2632,31 +2741,31 @@ impl<
             };
 
             debug!("Chosen variable: {}", a.ring().printer(&v));
-            let av = a.replace_last(lastvar, &v);
-            let bv = b.replace_last(lastvar, &v);
 
             // performance dense reconstruction
-            let mut gv = if vars.len() > 2 {
-                MultivariatePolynomial::gcd_shape_modular(
-                    &av,
-                    &bv,
-                    &vars[..vars.len() - 1],
-                    bounds,
-                    tight_bounds,
-                )?
-            } else {
-                let gg = av.univariate_gcd(&bv);
-                if gg.degree(vars[0]) > bounds[vars[0]] {
-                    debug!(
-                        "Unexpectedly high GCD bound: {} vs {}",
-                        gg.degree(vars[0]),
-                        bounds[vars[0]]
-                    );
-                    return None;
+            let mut gv = evaluation_context.with_evaluations(&v, |av, bv| {
+                if vars.len() > 2 {
+                    MultivariatePolynomial::gcd_shape_modular(
+                        av,
+                        bv,
+                        &vars[..vars.len() - 1],
+                        bounds,
+                        tight_bounds,
+                    )
+                } else {
+                    let gg = av.univariate_gcd(bv);
+                    if gg.degree(vars[0]) > bounds[vars[0]] {
+                        debug!(
+                            "Unexpectedly high GCD bound: {} vs {}",
+                            gg.degree(vars[0]),
+                            bounds[vars[0]]
+                        );
+                        return None;
+                    }
+                    bounds[vars[0]] = gg.degree(vars[0]); // update degree bound
+                    Some(gg)
                 }
-                bounds[vars[0]] = gg.degree(vars[0]); // update degree bound
-                gg
-            };
+            })?;
 
             debug!(
                 "GCD shape suggestion for sample point {} and gamma {}: {}",
@@ -2695,13 +2804,7 @@ impl<
 
             let mut lc = gv.lcoeff_varorder(vars);
 
-            let mut gseq = vec![
-                gv.clone().mul_coeff(
-                    gamma
-                        .ring()
-                        .div(&gamma.replace_last(lastvar, &v).coefficients[0], &lc),
-                ),
-            ];
+            let mut gseq = vec![gv.clone().mul_coeff(gamma.ring().div(&gamma_value, &lc))];
             let mut vseq = vec![v];
 
             // sparse reconstruction
@@ -2717,12 +2820,13 @@ impl<
                     break;
                 }
 
-                let v = loop {
+                let (v, gamma_value) = loop {
                     let v = sample_nonzero_field_element(a.ring(), &mut rng);
-                    if !gamma.replace_last(lastvar, &v).is_zero() {
+                    let gamma_value = gamma.evaluate_univariate_horner(lastvar, &v);
+                    if !gamma.ring().is_zero(&gamma_value) {
                         // we need unique sampling points
                         if !vseq.contains(&v) {
-                            break v;
+                            break (v, gamma_value);
                         }
                     }
 
@@ -2737,36 +2841,35 @@ impl<
                     }
                 };
 
-                let av = a.replace_last(lastvar, &v);
-                let bv = b.replace_last(lastvar, &v);
-
-                let rec = if let Some(single_scale) = single_scale {
-                    Self::construct_new_image_single_scale(
-                        &av,
-                        &bv,
-                        av.degree(vars[0]),
-                        bv.degree(vars[0]),
-                        bounds,
-                        single_scale,
-                        &vars[1..vars.len() - 1],
-                        vars[0],
-                        &gfu,
-                    )
-                } else {
-                    Self::construct_new_image_multiple_scales(
-                        &av,
-                        &bv,
-                        // NOTE: different from paper where they use a.degree(..)
-                        // it could be that the degree in av is lower than that of a
-                        // which means the sampling will never terminate
-                        av.degree(vars[0]),
-                        bv.degree(vars[0]),
-                        bounds,
-                        &vars[1..vars.len() - 1],
-                        vars[0],
-                        &gfu,
-                    )
-                };
+                let rec = evaluation_context.with_evaluations(&v, |av, bv| {
+                    if let Some(single_scale) = single_scale {
+                        Self::construct_new_image_single_scale(
+                            av,
+                            bv,
+                            av.degree(vars[0]),
+                            bv.degree(vars[0]),
+                            bounds,
+                            single_scale,
+                            &vars[1..vars.len() - 1],
+                            vars[0],
+                            &gfu,
+                        )
+                    } else {
+                        Self::construct_new_image_multiple_scales(
+                            av,
+                            bv,
+                            // NOTE: different from paper where they use a.degree(..)
+                            // it could be that the degree in av is lower than that of a
+                            // which means the sampling will never terminate
+                            av.degree(vars[0]),
+                            bv.degree(vars[0]),
+                            bounds,
+                            &vars[1..vars.len() - 1],
+                            vars[0],
+                            &gfu,
+                        )
+                    }
+                });
 
                 match rec {
                     Ok(r) => {
@@ -2793,13 +2896,7 @@ impl<
 
                 lc = gv.lcoeff_varorder(vars);
 
-                gseq.push(
-                    gv.clone().mul_coeff(
-                        gamma
-                            .ring()
-                            .div(&gamma.replace_last(lastvar, &v).coefficients[0], &lc),
-                    ),
-                );
+                gseq.push(gv.clone().mul_coeff(gamma.ring().div(&gamma_value, &lc)));
                 vseq.push(v);
             }
 
@@ -7275,6 +7372,46 @@ mod tests {
             !DenseUnivariateGcdContext::new(&sparse_left, &sparse_right)
                 .storage_is_bounded(&sparse_left, &sparse_right)
         );
+    }
+
+    #[test]
+    fn shifted_transposed_vandermonde_recovers_coefficients() {
+        let field = Zp::new(2_147_483_659);
+        let polynomial = parse!("x").to_polynomial::<_, u8>(&field, None);
+        assert!(
+            polynomial
+                .solve_shifted_transposed_vandermonde(&[], &[])
+                .is_empty()
+        );
+
+        for len in 1..=12 {
+            let points = (0..len)
+                .map(|index| field.to_element(index as u32 + 2))
+                .collect::<Vec<_>>();
+            let expected = (0..len)
+                .map(|index| field.to_element(if index % 4 == 0 { 0 } else { index as u32 + 11 }))
+                .collect::<Vec<_>>();
+            let rhs = (0..len)
+                .map(|power| {
+                    points.iter().zip(&expected).fold(
+                        field.zero(),
+                        |mut value, (point, coefficient)| {
+                            field.add_mul_assign(
+                                &mut value,
+                                coefficient,
+                                &field.pow(point, power as u64 + 1),
+                            );
+                            value
+                        },
+                    )
+                })
+                .collect::<Vec<_>>();
+
+            assert_eq!(
+                polynomial.solve_shifted_transposed_vandermonde(&points, &rhs),
+                expected
+            );
+        }
     }
 
     #[test]

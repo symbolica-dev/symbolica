@@ -4052,6 +4052,36 @@ mod test {
     }
 
     #[test]
+    fn four_way_zp64_product_row_handles_remainder() {
+        let left = u64::MAX - 2;
+        let right_terms = [
+            (u64::MAX - 4, 0),
+            (17, 3),
+            (u64::MAX / 3, 6),
+            (1, 9),
+            (u64::MAX - 10, 12),
+            (29, 15),
+            (u64::MAX / 7, 18),
+        ];
+        let mut actual = vec![0u64; right_terms.len() * 3];
+        unsafe {
+            super::polynomial_kernels::add_u64_product_row_unrolled4(
+                actual.as_mut_ptr(),
+                left,
+                &right_terms,
+            )
+        };
+
+        for (position, &(right, offset)) in right_terms.iter().enumerate() {
+            assert_eq!(offset, position * 3);
+            let product = left as u128 * right as u128;
+            assert_eq!(actual[offset], product as u64);
+            assert_eq!(actual[offset + 1], (product >> 64) as u64);
+            assert_eq!(actual[offset + 2], 0);
+        }
+    }
+
+    #[test]
     fn dense_polynomial_multiplication() {
         let field = Zp::new(17);
         let left = [1, 16, 7, 13].map(|value| field.to_element(value));

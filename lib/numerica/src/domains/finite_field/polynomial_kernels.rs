@@ -676,6 +676,46 @@ unsafe fn add_u128_to_three_limbs(accumulator: *mut u64, product: u128) {
     }
 }
 
+/// Add one fixed left coefficient times a row of right coefficients to three-limb output cells.
+///
+/// Four independent products are issued per iteration so the processor can overlap their
+/// multiplication and carry chains. The final zero to three terms are accumulated by the scalar
+/// remainder loop.
+///
+/// # Safety
+///
+/// Every right-term offset must address three writable limbs from `accumulator_base`, and every
+/// exact accumulated coefficient must fit in those three limbs.
+#[inline(always)]
+pub(super) unsafe fn add_u64_product_row_unrolled4(
+    accumulator_base: *mut u64,
+    left: u64,
+    right_terms: &[(u64, usize)],
+) {
+    let left = left as u128;
+    let mut chunks = right_terms.chunks_exact(4);
+    for chunk in &mut chunks {
+        let (right0, offset0) = unsafe { *chunk.get_unchecked(0) };
+        let (right1, offset1) = unsafe { *chunk.get_unchecked(1) };
+        let (right2, offset2) = unsafe { *chunk.get_unchecked(2) };
+        let (right3, offset3) = unsafe { *chunk.get_unchecked(3) };
+        let product0 = left * right0 as u128;
+        let product1 = left * right1 as u128;
+        let product2 = left * right2 as u128;
+        let product3 = left * right3 as u128;
+        unsafe {
+            add_u128_to_three_limbs(accumulator_base.add(offset0), product0);
+            add_u128_to_three_limbs(accumulator_base.add(offset1), product1);
+            add_u128_to_three_limbs(accumulator_base.add(offset2), product2);
+            add_u128_to_three_limbs(accumulator_base.add(offset3), product3);
+        }
+    }
+
+    for &(right, offset) in chunks.remainder() {
+        unsafe { add_u128_to_three_limbs(accumulator_base.add(offset), left * right as u128) };
+    }
+}
+
 /// One validated dense-indexed multiplication over a 64-bit prime field.
 ///
 /// The context owns request validation, optional simplex remapping, strategy selection, and output
@@ -1306,13 +1346,11 @@ impl<'a> DenseZp64Mul<'a> {
                         let left = unsafe { left_coefficients.get_unchecked(left_term) };
                         let left_offset =
                             unsafe { *left_indices.get_unchecked(left_term) as usize } * 3;
-                        for &(right, right_offset) in right_block {
-                            let product = left.0 as u128 * right as u128;
-                            let accumulator = unsafe {
-                                accumulators.as_mut_ptr().add(left_offset + right_offset)
-                            };
-                            unsafe { add_u128_to_three_limbs(accumulator, product) };
-                        }
+                        let accumulator_base =
+                            unsafe { accumulators.as_mut_ptr().add(left_offset) };
+                        unsafe {
+                            add_u64_product_row_unrolled4(accumulator_base, left.0, right_block)
+                        };
                     }
                 }
             }

@@ -2178,6 +2178,160 @@ impl<F: Ring, E: Exponent, O: MonomialOrder> MultivariatePolynomial<F, E, O> {
     }
 }
 
+const MAX_LAST_VARIABLE_POWER_CACHE: usize = 100_000;
+
+/// Stores powers of one substitution value for repeated last-variable evaluations.
+///
+/// Generation stamps distinguish values that have not been computed for the current substitution,
+/// including powers whose value is zero.
+pub(crate) struct LastVariablePowerWorkspace<F: Ring> {
+    ring: F,
+    value: F::Element,
+    powers: Vec<F::Element>,
+    generations: Vec<u32>,
+    generation: u32,
+}
+
+impl<F: Ring> LastVariablePowerWorkspace<F> {
+    pub(crate) fn new(ring: &F, maximum_degree: usize) -> Self {
+        let cache_size = maximum_degree
+            .saturating_add(1)
+            .min(MAX_LAST_VARIABLE_POWER_CACHE);
+        Self {
+            ring: ring.clone(),
+            value: ring.zero(),
+            powers: vec![ring.zero(); cache_size],
+            generations: vec![0; cache_size],
+            generation: 0,
+        }
+    }
+
+    /// Start evaluating at `value` while retaining the allocated power buffers.
+    pub(crate) fn start_value(&mut self, value: &F::Element) {
+        self.value.clone_from(value);
+        self.generation = self.generation.wrapping_add(1);
+        if self.generation == 0 {
+            self.generations.fill(0);
+            self.generation = 1;
+        }
+    }
+
+    /// Return `value^exponent` when the exponent fits in the bounded power cache.
+    fn power(&mut self, exponent: usize) -> Option<&F::Element> {
+        if exponent >= self.powers.len() {
+            return None;
+        }
+        if self.generations[exponent] != self.generation {
+            self.powers[exponent] = self.ring.pow(&self.value, exponent as u64);
+            self.generations[exponent] = self.generation;
+        }
+        Some(&self.powers[exponent])
+    }
+
+    fn value(&self) -> &F::Element {
+        &self.value
+    }
+}
+
+/// Evaluates one fixed polynomial repeatedly in its last active variable.
+///
+/// Lexicographic row boundaries are recorded once. Each evaluation reuses the output allocation
+/// and emits one term for every row whose evaluated coefficient is nonzero.
+pub(crate) struct LastVariableEvaluationContext<'a, F: Ring, E: PositiveExponent> {
+    source: &'a MultivariatePolynomial<F, E, LexOrder>,
+    variable: usize,
+    rows: Vec<(usize, usize)>,
+    maximum_degree: usize,
+    output: MultivariatePolynomial<F, E, LexOrder>,
+}
+
+impl<'a, F: Ring, E: PositiveExponent> LastVariableEvaluationContext<'a, F, E> {
+    pub(crate) fn new(source: &'a MultivariatePolynomial<F, E, LexOrder>, variable: usize) -> Self {
+        assert!(variable < source.nvars());
+        debug_assert!((variable + 1..source.nvars()).all(|index| source.degree(index).is_zero()));
+
+        let mut rows = Vec::new();
+        let mut maximum_degree = 0;
+        let mut row_start = 0;
+        while row_start < source.nterms() {
+            let row_exponents = source.exponents(row_start);
+            maximum_degree = maximum_degree.max(row_exponents[variable].to_u32() as usize);
+            let mut row_end = row_start + 1;
+            while row_end < source.nterms()
+                && source.exponents(row_end)[..variable] == row_exponents[..variable]
+            {
+                maximum_degree =
+                    maximum_degree.max(source.exponents(row_end)[variable].to_u32() as usize);
+                row_end += 1;
+            }
+            rows.push((row_start, row_end));
+            row_start = row_end;
+        }
+
+        let output = source.zero_with_capacity(rows.len());
+        Self {
+            source,
+            variable,
+            rows,
+            maximum_degree,
+            output,
+        }
+    }
+
+    pub(crate) fn maximum_degree(&self) -> usize {
+        self.maximum_degree
+    }
+
+    /// Evaluate the source at the value most recently installed in `powers`.
+    pub(crate) fn evaluate(
+        &mut self,
+        powers: &mut LastVariablePowerWorkspace<F>,
+    ) -> &MultivariatePolynomial<F, E, LexOrder> {
+        debug_assert_eq!(self.source.ring(), &powers.ring);
+        debug_assert!(
+            powers.generation != 0,
+            "a substitution value must be installed before evaluation"
+        );
+        self.output.clear();
+        let ring = self.source.ring();
+        let nvars = self.source.nvars();
+
+        for &(row_start, row_end) in &self.rows {
+            let mut coefficient = ring.zero();
+            for term_index in row_start..row_end {
+                let exponent = self.source.exponents(term_index)[self.variable].to_u32() as usize;
+                if exponent == 0 {
+                    ring.add_assign(&mut coefficient, &self.source.coefficients[term_index]);
+                } else if let Some(power) = powers.power(exponent) {
+                    ring.add_mul_assign(
+                        &mut coefficient,
+                        &self.source.coefficients[term_index],
+                        power,
+                    );
+                } else {
+                    let power = ring.pow(powers.value(), exponent as u64);
+                    ring.add_mul_assign(
+                        &mut coefficient,
+                        &self.source.coefficients[term_index],
+                        &power,
+                    );
+                }
+            }
+
+            if !ring.is_zero(&coefficient) {
+                self.output.coefficients.push(coefficient);
+                self.output
+                    .exponents
+                    .extend_from_slice(self.source.exponents(row_start));
+                let output_exponent = self.output.exponents.len() - nvars + self.variable;
+                self.output.exponents[output_exponent] = E::zero();
+            }
+        }
+
+        &self.output
+    }
+}
+
 impl<F: Ring, E: PositiveExponent> MultivariatePolynomial<F, E, LexOrder> {
     /// Evaluate a polynomial whose only active variable is `variable` with Horner's method.
     pub(crate) fn evaluate_univariate_horner(
@@ -6664,8 +6818,9 @@ mod test {
     };
 
     use super::{
-        IntegerPolynomialCrtContext, MultivariatePolynomial, PolynomialRing,
-        PolynomialSamplingPolicy, chunked_dense_mul_is_preferred, mixed_radix_dense_mul_is_bounded,
+        IntegerPolynomialCrtContext, LastVariableEvaluationContext, LastVariablePowerWorkspace,
+        MultivariatePolynomial, PolynomialRing, PolynomialSamplingPolicy,
+        chunked_dense_mul_is_preferred, mixed_radix_dense_mul_is_bounded,
         mixed_radix_dense_work_is_bounded, packed_row_merge_is_bounded,
         total_degree_kernel_precedes_mixed_radix,
     };
@@ -7684,6 +7839,40 @@ mod test {
             }
 
             assert_eq!(polynomial.replace_last(2, &value), expected);
+        }
+    }
+
+    #[test]
+    fn repeated_last_variable_evaluation_matches_replace_last() {
+        let field = Zp::new(2_147_483_659);
+        let variables = Arc::new(vec![
+            symbol!("x").into(),
+            symbol!("y").into(),
+            symbol!("z").into(),
+            symbol!("w").into(),
+        ]);
+        let mut polynomials = [
+            parse!("x*z^100001+3*x*z^4-4*x+y*z^3-y*z+5")
+                .to_polynomial::<_, u32>(&field, Some(variables.clone())),
+            parse!("2*x^2*z^17-7*x^2*z+11*y*z^9+13")
+                .to_polynomial::<_, u32>(&field, Some(variables)),
+        ];
+        MultivariatePolynomial::unify_variables_list(&mut polynomials);
+        let [left, right] = &polynomials;
+        let mut left_context = LastVariableEvaluationContext::new(left, 2);
+        let mut right_context = LastVariableEvaluationContext::new(right, 2);
+        let maximum_degree = left_context
+            .maximum_degree()
+            .max(right_context.maximum_degree());
+        let mut powers = LastVariablePowerWorkspace::new(&field, maximum_degree);
+
+        for value in [0, 2, 7, 2] {
+            let value = field.to_element(value);
+            powers.start_value(&value);
+            let actual_left = left_context.evaluate(&mut powers);
+            let actual_right = right_context.evaluate(&mut powers);
+            assert_eq!(actual_left, &left.replace_last(2, &value));
+            assert_eq!(actual_right, &right.replace_last(2, &value));
         }
     }
 
