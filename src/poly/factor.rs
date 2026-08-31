@@ -79,6 +79,9 @@ const MAX_EVALUATED_HENSEL_IMAGE_CELLS: usize = 1 << 22;
 const MAX_EVALUATED_HENSEL_GROUPED_TERMS: usize = 1 << 20;
 // Minimum number of base-prime digits for using composite-modulus quadratic Hensel corrections.
 const MIN_QUADRATIC_HENSEL_DIGITS: usize = 64;
+// Minimum retained modular factor count for spending another distinct-degree
+// factorization on a wide prime after the small-prime search.
+const MIN_DENSE_U64_PRIME_FACTOR_COUNT: usize = 10;
 // Minimum factor-bound height for reducing a two-factor bivariate lift with a wide base prime.
 const BIVARIATE_WIDE_PRIME_MIN_BOUND_BITS: u64 = 256;
 // Largest main-variable degree for which the wide-prime convolution bound stays in u64.
@@ -9206,8 +9209,9 @@ impl<E: PositiveExponent> MultivariatePolynomial<IntegerRing, E, LexOrder> {
             // is then bounded at the largest factor count that could still change the final
             // selection, so favorable or irreducible small images are retained without completing
             // a factorization that cannot win.
-            let can_probe_direct_first =
-                geometric_small_prime_trial && suitable_primes == 2 && initial_factor_count >= 10;
+            let can_probe_direct_first = geometric_small_prime_trial
+                && suitable_primes == 2
+                && initial_factor_count >= MIN_DENSE_U64_PRIME_FACTOR_COUNT;
             let mut direct_candidate = None;
             let mut direct_rejection_lower_bound = None;
             let mut direct_search_exhausted = false;
@@ -9269,6 +9273,7 @@ impl<E: PositiveExponent> MultivariatePolynomial<IntegerRing, E, LexOrder> {
                 let best_work = Self::linear_hensel_work(best_factor_count, best_digits);
                 let ordinary_factor_limit =
                     (best_work.saturating_sub(1) / candidate_digits).saturating_add(1);
+                let geometric_probe = geometric_small_prime_trial && suitable_primes == 1;
                 let competitive_factor_limit = direct_can_bound_third_image.then(|| {
                     let (direct, direct_digits) = direct_candidate.as_ref().unwrap();
                     Self::competitive_small_prime_factor_limit(
@@ -9282,7 +9287,12 @@ impl<E: PositiveExponent> MultivariatePolynomial<IntegerRing, E, LexOrder> {
                 });
                 let max_factor_count = competitive_factor_limit
                     .map(|limit| limit.min(ordinary_factor_limit))
-                    .unwrap_or(ordinary_factor_limit);
+                    .unwrap_or(ordinary_factor_limit)
+                    .min(if geometric_probe {
+                        best_factor_count
+                    } else {
+                        usize::MAX
+                    });
                 let Some(screen) =
                     self.screen_univariate_mod_prime(var, p as u32, Some(max_factor_count))
                 else {
@@ -9299,7 +9309,6 @@ impl<E: PositiveExponent> MultivariatePolynomial<IntegerRing, E, LexOrder> {
                             candidate.distinct_degree.factor_count,
                             candidate_digits,
                         );
-                        let geometric_probe = geometric_small_prime_trial && suitable_primes == 2;
                         let factor_count_did_not_increase =
                             candidate.distinct_degree.factor_count <= best_factor_count;
                         if candidate_work < best_work
@@ -9342,9 +9351,10 @@ impl<E: PositiveExponent> MultivariatePolynomial<IntegerRing, E, LexOrder> {
                 } else {
                     best_factor_count
                 };
-                let should_screen = !can_probe_direct_first
-                    || direct_rejection_lower_bound
-                        .is_some_and(|lower_bound| lower_bound <= direct_factor_limit);
+                let should_screen = best_factor_count >= MIN_DENSE_U64_PRIME_FACTOR_COUNT
+                    && (!can_probe_direct_first
+                        || direct_rejection_lower_bound
+                            .is_some_and(|lower_bound| lower_bound <= direct_factor_limit));
                 if should_screen {
                     match self.screen_dense_u64_prime(
                         var,
@@ -13939,7 +13949,7 @@ mod test {
         assert_eq!(degrees, [1u8, 1, 2, 10, 20, 30]);
         MODULAR_INTEGER_EDF_CALLS.with(|calls| assert_eq!(calls.get(), 1));
         DENSE_ZP_EDF_BLOCKS.with(|blocks| assert_eq!(blocks.get(), 1));
-        BOUNDED_DDF_REJECTIONS.with(|rejections| assert_eq!(rejections.get(), 1));
+        BOUNDED_DDF_REJECTIONS.with(|rejections| assert_eq!(rejections.get(), 0));
         LAST_MODULAR_INTEGER_EDF_PRIME.with(|prime| assert_eq!(prime.get(), 17));
         PRODUCT_TREE_HENSEL_LIFT_CALLS.with(|calls| assert_eq!(calls.get(), 1));
         PRODUCT_TREE_EARLY_RECONSTRUCTION_ATTEMPTS.with(|attempts| assert_eq!(attempts.get(), 1));
@@ -13955,6 +13965,9 @@ mod test {
     #[test]
     fn factor_univariate_degree_65_backfills_geometric_prime_gap() {
         DENSE_INTEGER_I128_MULTIPLY_REMAINDERS.with(|operations| operations.set(0));
+        DENSE_ZP_DDF_SCREENS.with(|screens| screens.set(0));
+        BOUNDED_DDF_REJECTIONS.with(|rejections| rejections.set(0));
+        LAST_BOUNDED_DDF_REJECTION_DEGREE.with(|degree| degree.set(0));
         GEOMETRIC_SMALL_PRIME_BACKFILLS.with(|backfills| backfills.set(0));
         COMPETITIVE_SMALL_PRIME_DDF_REJECTIONS.with(|rejections| rejections.set(0));
         LAST_MODULAR_INTEGER_EDF_PRIME.with(|prime| prime.set(0));
@@ -13982,6 +13995,9 @@ mod test {
             .collect::<Vec<_>>();
         degrees.sort_unstable();
         assert_eq!(degrees, [1u8, 2, 10, 20, 32]);
+        DENSE_ZP_DDF_SCREENS.with(|screens| assert_eq!(screens.get(), 3));
+        BOUNDED_DDF_REJECTIONS.with(|rejections| assert_eq!(rejections.get(), 1));
+        LAST_BOUNDED_DDF_REJECTION_DEGREE.with(|degree| assert_eq!(degree.get(), 4));
         GEOMETRIC_SMALL_PRIME_BACKFILLS.with(|backfills| assert!(backfills.get() > 0));
         COMPETITIVE_SMALL_PRIME_DDF_REJECTIONS.with(|rejections| assert_eq!(rejections.get(), 0));
         LAST_MODULAR_INTEGER_EDF_PRIME.with(|prime| assert_eq!(prime.get(), 13));

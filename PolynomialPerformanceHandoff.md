@@ -1,11 +1,12 @@
 # Polynomial performance continuation handoff
 
 This is the live continuation record for the single-core Symbolica/FLINT polynomial-performance
-work. It was refreshed on 2026-08-31 after the `v23` near-balanced dense-GCD certificate round.
-The current 125-row fixed-fixture non-resultant inventory has 124 Symbolica wins and one loss with
-a `0.636796` median. Its worst row is generated dense bivariate GCD at `1.022443`. Dense
-degree-48/64/80 GCD now measure `0.904854/0.711750/0.993433`. Dense one-variable degree-63/64/65
-factorization measures `0.985446/0.765733/0.993885`, and the matching products measure
+work. It was refreshed on 2026-08-31 after the `v24` bounded modular-prime search round. The
+current 125-row fixed-fixture non-resultant inventory has 123 Symbolica wins and two losses with a
+`0.636796` median. Its worst row is dense degree-63 factorization at `1.076190`; generated dense
+bivariate GCD follows at `1.022443`. Dense degree-48/64/80 GCD measure
+`0.904854/0.711750/0.993433`. Dense one-variable degree-63/64/65 factorization measures
+`1.076190/0.700836/0.945536`, and the stable matching products measure
 `0.814256/0.815238/0.841130`. The mixed current 3,200-problem PolyBench distribution has a
 `0.726631` paired median with 2,277 Symbolica wins. Rows are measured across accepted source
 snapshots, with each replacement and its source-matched evidence documented below.
@@ -15,8 +16,8 @@ transient binary names.
 
 The complete current Symbolica/FLINT scoreboard is in
 [CURRENT_STATUS.md](CURRENT_STATUS.md), with the latest immutable snapshot in
-[CURRENT_STATUS_v23.md](CURRENT_STATUS_v23.md). Its primary statistics contain 125 non-resultant
-comparisons: 124 favor Symbolica and one favors FLINT. The six Ducos, six Brown, and six CRT
+[CURRENT_STATUS_v24.md](CURRENT_STATUS_v24.md). Its primary statistics contain 125 non-resultant
+comparisons: 123 favor Symbolica and two favor FLINT. The six Ducos, six Brown, and six CRT
 measurements are retained only in a compact appendix note and do not affect primary ranks or
 summary statistics. After every accepted optimization, update the live file and create the next
 numbered snapshot with an opening paragraph that describes the changes from its predecessor.
@@ -4406,6 +4407,83 @@ Verification passes all 37 `poly::gcd::tests`, the three degree-63/64/65 factor-
 is [CURRENT_STATUS_v23.md](CURRENT_STATUS_v23.md), mirrored by
 [CURRENT_STATUS.md](CURRENT_STATUS.md).
 
+## v24 bounded post-small-prime search
+
+The degree-65 screen trace exposed two complete modular images that could not become the retained
+factorization. After extracting the exact factor `x`, the degree-64 cofactor takes this route:
+
+| Prime | Bound | DDF outcome | Selection |
+|---:|---:|---|---|
+| 3, 5 | none | rejected before DDF | unsuitable |
+| 7 | none | 9 factors | initial best |
+| 17 | 9 | lower bound 10 at distinct degree 4 | geometric image cannot improve factor count |
+| 11 | 10 | rejected before DDF | unsuitable |
+| 13 | 11 | 7 factors | retained |
+| 65,000,011 | skipped | formerly lower bound 18 at distinct degree 2 | fourth image is outside the low-factor search budget |
+
+Before v24, prime 17 was completed with 12 factors and discarded, then the dense-u64 image was
+screened with limit 8 and discarded. A compile-time experiment that omitted only the final wide
+screen changed the six-process degree-65 Symbolica median `3.052915 -> 2.775970 ms` (`-9.07%`)
+and paired S/F `0.996431 -> 0.956879`. This proved that selector work, not another allocation
+rewrite, was the first target. The experimental binary is `/tmp/flint-comparison-v24-no-wide`,
+SHA-256 `92d5df8fbd0ce9428c9a1240d2f594dad80a2ea673dfe320e28e45a9ea0175d7`; its build JSON is
+`/tmp/v24-no-wide-build.jsonl`, SHA-256
+`c3fd60636cf984879f971129c14ccb015960afd4f7347292f87840e84f997349`.
+
+The retained rule uses the existing high-factor regime rather than a fixture signature. After
+three suitable small-prime images, a dense-u64 screen is attempted only if at least ten modular
+factors remain. Degree 63 retains ten factors and therefore preserves its profitable wide image.
+Degree 64, degree 65, and high-height degree 33 retain six, seven, and three factors and stop after
+the small-prime search. During the geometric second image, DDF now stops once its factor-count
+lower bound exceeds the current best because the subsequent selection rule already refuses an
+increased count.
+
+Six final full-LTO processes per row give:
+
+| Factorization | v24 Symbolica | v24 FLINT | v24 S/F | v23/control Symbolica | Symbolica change |
+|---|---:|---:|---:|---:|---:|
+| dense degree 63 | `3.025931 ms` | `2.818974 ms` | `1.076190` | `2.955895 ms` | `+2.37%` guard |
+| dense degree 64 | `1.715859 ms` | `2.448305 ms` | `0.700836` | `1.964610 ms` | `-12.66%` |
+| dense degree 65 | `2.739569 ms` | `2.898279 ms` | `0.945536` | `3.052915 ms` | `-10.26%` |
+| high-height degree 33 | `1.267397 ms` | `1.340424 ms` | `0.945894` | `1.348807 ms` | `-6.04%` |
+
+The degree-63 algorithmic route is unchanged and its Symbolica movement remains inside the 3%
+whole-program-LTO band. In the strictly alternating A/B run, the FLINT median changes
+`2.993279 -> 2.818974 ms` (`-5.82%`) between linked binaries. The exact v24 ratio is retained in
+the scoreboard and is the next standalone factorization target; it must not be described as a
+wide-prime selector regression.
+
+The unchanged degree-63/64/65 products have exact v24 S/F ratios
+`0.970816/0.965768/0.977305`. Their Symbolica medians move only
+`0.004240/0.004333/0.004448 -> 0.004312/0.004405/0.004534 ms`, all below 2%; the larger paired
+ratio movement comes from FLINT placement. The final-binary dense degree-64 GCD is
+`0.266446/0.349917 ms`, or `0.761340` S/F, versus the v23 control
+`0.281320/0.396383 ms`. Its source is unchanged and the primary table retains the more stable
+v23 GCD and product rows.
+
+The accepted binary is `/tmp/flint-comparison-v24-prime-budget`, SHA-256
+`7e1c3daaed25c54fa25f52700c6080baf75a504375339a0ead19b1c0114bea4e`; its build JSON is
+`/tmp/v24-prime-budget-build.jsonl`, SHA-256
+`67911d68772186d70035d360c48e6e7f9222f420693f60a726a4aa24ccc78ef9`. The 62-file timing
+manifest is `/tmp/v24-prime-budget-SHA256SUMS`, SHA-256
+`6b76ba8e43c8b25930e4e714b930bc2e0614868d3b00fa40e9d3f6e284cdf61b`. Raw files use
+`/tmp/v24-prime-budget-{factor-d63-ab,factor-d64,factor-d65,factor-high33,products,gcd-d64}*`.
+
+All 104 default-GMP factor tests pass. The degree-65 route test also passes with
+`integer-malachite,float-astro,native_code_generation`. Route assertions prove three dense DDF
+screens at degree 65, one bounded geometric rejection at distinct degree 4, retained prime 13,
+and unchanged reconstruction. Formatting and diff checks pass.
+
+The current d65 profile also produced a viable but deferred arithmetic design. A cached Frobenius
+operation must store the complete linear map with columns `x^(ip) mod f`; caching only
+`x^p mod f` is insufficient because applying Frobenius is modular composition, not multiplication.
+For small `p < degree`, columns can be built by monomial shifts followed by the existing reciprocal
+reducer. A two-dimensional raw-product/reduction estimate gives break-even reuse counts four at
+degree 62 and three at degree 32 for the retained `p=13` image. The map must be invalidated when
+the DDF modulus shrinks. This is a genuine future mechanism, but it was not implemented after the
+selector change already delivered a double-digit gain. Do not retry the rejected dense-buffer or
+Kaltofen-Shoup rearrangements under the name of this map.
+
 ## Rejected or low-value experiments
 
 Do not repeat these without a genuinely new mechanism:
@@ -4527,12 +4605,14 @@ comments that justify file organization by contrasting it with designs not prese
 
 ## Current ordered next actions
 
-1. The dense degree-64 GCD decision is complete at `0.711750` S/F. The next one-variable operation
-   target is degree-65 factorization at `0.993885`; profile retained DDF arithmetic and Hensel
-   reconstruction before changing either. Require a source-matched gain above the 3% layout band.
-2. Keep the degree-63/64/65 products as guards at `0.814256/0.815238/0.841130`. Do not add another
-   product abstraction without a mechanism different from the rejected broad multiplication
-   contexts; multiplication is no longer the limiting one-variable operation.
+1. The dense degree-64 GCD decision is complete at `0.711750` S/F, and degree-64/65 factorization
+   is now `0.700836/0.945536`. Profile the unchanged wide-prime degree-63 factor route, whose exact
+   v24 ratio is `1.076190`. Separate wide-image DDF, EDF, Hensel, and reconstruction before changing
+   it; require a source-matched Symbolica gain above the 3% layout band.
+2. Keep the degree-63/64/65 products as guards at their stable primary values
+   `0.814256/0.815238/0.841130`; the exact v24 linked-binary ratios are
+   `0.970816/0.965768/0.977305`. Do not add another product abstraction without a mechanism
+   different from the rejected broad multiplication contexts.
 3. Then attack 05/0002 uniform nontrivial GCD. Add phase/work counters and profiles for retained
    problems 74, 116, and 176, separating Zippel image construction, interpolation, CRT or rational
    reconstruction, exact certificates, and multiplication. The broad population gap rules out a
@@ -4549,9 +4629,9 @@ comments that justify file organization by contrasting it with designs not prese
 6. Profile sharp trivial GCD tails 05/0005 problem 130 and 08/0005 problem 50 with backend,
    prime/image, collision, and rejection counters. Do not trade broad throughput for these small
    absolute gaps; their medians already favor Symbolica.
-7. Keep the generated dense bivariate GCD at `1.022443` as the primary same-process guard and next
-   standalone operation target. The dense degree-80 product is now `0.998814`; pursue its exact
-   top-bit correction only after the larger distribution gaps.
+7. After the degree-63 factor row, keep the generated dense bivariate GCD at `1.022443` as the
+   second standalone loss. The dense degree-80 product is `0.998814`; pursue its exact top-bit
+   correction only after the larger distribution gaps.
 8. Keep resultants in the historical appendix, freeze and hash each accepted full-LTO binary, and
    create the next immutable `CURRENT_STATUS_v<i>.md` snapshot after every accepted round.
 
