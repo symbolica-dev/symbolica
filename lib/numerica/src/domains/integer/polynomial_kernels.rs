@@ -1752,31 +1752,14 @@ impl<'a> ChunkedDenseIntegerMul<'a> {
             return None;
         }
 
-        if let (Some(left_inner), Some(right_inner)) = (
-            dense
-                .left_indices
-                .iter()
-                .map(|index| *index as usize % inner_len)
-                .max(),
-            dense
-                .right_indices
-                .iter()
-                .map(|index| *index as usize % inner_len)
-                .max(),
-        ) {
-            if left_inner.checked_add(right_inner)? >= inner_len {
-                return None;
-            }
-        }
-
         Some(Self { dense, inner_len })
     }
 
-    /// Multiply `i64` coefficients through a reusable `i128` inner accumulator.
+    /// Multiply machine-size coefficients through a reusable inner accumulator.
     ///
-    /// Terms are grouped by their outer index. Each compatible pair of outer groups contributes
-    /// to one output chunk, whose inner indices remain additive and can be accumulated without
-    /// decoding exponent vectors.
+    /// Terms are grouped into monotone outer rows without division or remainder operations. Each
+    /// compatible row pair contributes to one output chunk, whose inner indices remain additive.
+    /// The proven coefficient bound selects either `i64` or `i128` accumulator cells.
     fn run(self) -> Option<Vec<(u32, Integer)>> {
         const BLOCK_SIZE: usize = 128;
 
@@ -1785,62 +1768,73 @@ impl<'a> ChunkedDenseIntegerMul<'a> {
             return Some(Vec::new());
         }
 
-        let collect_single = |coefficients: &[Integer]| {
-            let mut values = Vec::with_capacity(coefficients.len());
+        let outer_count = dense.output_len / inner_len;
+        let prepare = |coefficients: &[Integer],
+                       indices: &[u32],
+                       values: &mut SmallVec<[i64; 128]>,
+                       ranges: &mut SmallVec<[(usize, usize); 32]>| {
             let mut maximum = 0u64;
-            for coefficient in coefficients {
-                let Integer::Single(value) = coefficient else {
-                    return None;
-                };
-                maximum = maximum.max(value.unsigned_abs());
-                values.push(*value);
+            let mut maximum_inner = 0usize;
+            let mut maximum_row_len = 0usize;
+            let mut position = 0usize;
+            for outer in 0..outer_count {
+                let row_start = position;
+                let base = outer.checked_mul(inner_len)?;
+                let end = base.checked_add(inner_len)?;
+                while position < indices.len() && (indices[position] as usize) < end {
+                    let index = indices[position] as usize;
+                    if index < base {
+                        return None;
+                    }
+                    let Integer::Single(coefficient) = coefficients[position] else {
+                        return None;
+                    };
+                    let inner = index - base;
+                    maximum = maximum.max(coefficient.unsigned_abs());
+                    maximum_inner = maximum_inner.max(inner);
+                    values.push(coefficient);
+                    position += 1;
+                }
+                maximum_row_len = maximum_row_len.max(position - row_start);
+                ranges.push((row_start, position));
             }
-            Some((values, maximum))
+            (position == indices.len()).then_some((maximum, maximum_inner, maximum_row_len))
         };
-        let (left_coefficients, maximum_left) = collect_single(dense.left_coefficients)?;
-        let (right_coefficients, maximum_right) = collect_single(dense.right_coefficients)?;
-        let coefficient_bound = u128::from(maximum_left)
-            .checked_mul(u128::from(maximum_right))?
-            .checked_mul(left_coefficients.len().min(right_coefficients.len()) as u128)?;
-        if coefficient_bound <= i64::MAX as u128 || coefficient_bound > i128::MAX as u128 {
+
+        let mut left_values = SmallVec::<[i64; 128]>::new();
+        left_values.reserve_exact(dense.left_coefficients.len());
+        let mut left_ranges = SmallVec::<[(usize, usize); 32]>::new();
+        left_ranges.reserve_exact(outer_count);
+        let (maximum_left, maximum_left_inner, maximum_left_row_len) = prepare(
+            dense.left_coefficients,
+            dense.left_indices,
+            &mut left_values,
+            &mut left_ranges,
+        )?;
+        let mut right_values = SmallVec::<[i64; 128]>::new();
+        right_values.reserve_exact(dense.right_coefficients.len());
+        let mut right_ranges = SmallVec::<[(usize, usize); 32]>::new();
+        right_ranges.reserve_exact(outer_count);
+        let (maximum_right, maximum_right_inner, maximum_right_row_len) = prepare(
+            dense.right_coefficients,
+            dense.right_indices,
+            &mut right_values,
+            &mut right_ranges,
+        )?;
+        if maximum_left_inner.checked_add(maximum_right_inner)? >= inner_len {
             return None;
         }
 
-        let outer_count = dense.output_len / inner_len;
-        let group_ranges = |indices: &[u32]| {
-            let mut ranges = vec![(0usize, 0usize); outer_count];
-            let mut position = 0usize;
-            for (outer, range) in ranges.iter_mut().enumerate() {
-                let start = position;
-                while position < indices.len() && indices[position] as usize / inner_len == outer {
-                    position += 1;
-                }
-                *range = (start, position);
-            }
-            (position == indices.len()).then_some(ranges)
-        };
-        let left_ranges = group_ranges(dense.left_indices)?;
-        let right_ranges = group_ranges(dense.right_indices)?;
-        let left_inner = dense
-            .left_indices
-            .iter()
-            .map(|index| *index as usize % inner_len)
-            .collect::<Vec<_>>();
-        let right_inner = dense
-            .right_indices
-            .iter()
-            .map(|index| *index as usize % inner_len)
-            .collect::<Vec<_>>();
+        let coefficient_bound = u128::from(maximum_left)
+            .checked_mul(u128::from(maximum_right))?
+            .checked_mul(left_values.len().min(right_values.len()) as u128)?;
+        if coefficient_bound > i128::MAX as u128 {
+            return None;
+        }
 
-        let mut accumulator = vec![0i128; inner_len];
-        let mut output = Vec::with_capacity(
-            dense
-                .left_coefficients
-                .len()
-                .saturating_add(dense.right_coefficients.len())
-                .saturating_mul(8)
-                .min(dense.output_len),
-        );
+        let mut active_inner_lengths = SmallVec::<[usize; 32]>::new();
+        active_inner_lengths.reserve_exact(outer_count);
+        let mut active_scan = 0usize;
         for output_outer in 0..outer_count {
             let mut active_inner_len = 0usize;
             for left_outer in 0..=output_outer.min(outer_count - 1) {
@@ -1853,47 +1847,202 @@ impl<'a> ChunkedDenseIntegerMul<'a> {
                 if left_start == left_end || right_start == right_end {
                     continue;
                 }
+                let left_base = left_outer * inner_len;
+                let right_base = right_outer * inner_len;
                 active_inner_len = active_inner_len.max(
-                    unsafe { *left_inner.get_unchecked(left_end - 1) }
-                        + unsafe { *right_inner.get_unchecked(right_end - 1) }
+                    unsafe { *dense.left_indices.get_unchecked(left_end - 1) as usize } - left_base
+                        + unsafe { *dense.right_indices.get_unchecked(right_end - 1) as usize }
+                        - right_base
                         + 1,
                 );
-                for left_block in (left_start..left_end).step_by(BLOCK_SIZE) {
-                    for right_block in (right_start..right_end).step_by(BLOCK_SIZE) {
-                        for left_index in left_block..(left_block + BLOCK_SIZE).min(left_end) {
+            }
+            active_scan = active_scan.checked_add(active_inner_len)?;
+            active_inner_lengths.push(active_inner_len);
+        }
+        if active_scan.checked_mul(2)? > dense.output_len {
+            return None;
+        }
+        let outer_pair_probes = outer_count.checked_mul(outer_count.checked_add(1)?)? / 2;
+        if outer_pair_probes.checked_mul(2)? > dense.output_len {
+            return None;
+        }
+
+        fn multiply_fixed<T>(
+            output_len: usize,
+            inner_len: usize,
+            outer_count: usize,
+            active_scan: usize,
+            active_inner_lengths: &[usize],
+            accumulator: &mut [T],
+            left_values: &[i64],
+            left_indices: &[u32],
+            left_ranges: &[(usize, usize)],
+            right_values: &[i64],
+            right_indices: &[u32],
+            right_ranges: &[(usize, usize)],
+            use_blocking: bool,
+            into_integer: impl Fn(T) -> Integer,
+        ) -> Vec<(u32, Integer)>
+        where
+            T: Copy
+                + Default
+                + PartialEq
+                + From<i64>
+                + std::ops::AddAssign
+                + std::ops::Mul<Output = T>,
+        {
+            debug_assert_eq!(accumulator.len(), inner_len);
+            let mut output = Vec::with_capacity(active_scan.min(output_len));
+
+            for output_outer in 0..outer_count {
+                for left_outer in 0..=output_outer.min(outer_count - 1) {
+                    let right_outer = output_outer - left_outer;
+                    if right_outer >= outer_count {
+                        continue;
+                    }
+                    let (left_start, left_end) = left_ranges[left_outer];
+                    let (right_start, right_end) = right_ranges[right_outer];
+                    if left_start == left_end || right_start == right_end {
+                        continue;
+                    }
+
+                    let output_base = output_outer * inner_len;
+                    if use_blocking {
+                        for left_block in (left_start..left_end).step_by(BLOCK_SIZE) {
+                            for right_block in (right_start..right_end).step_by(BLOCK_SIZE) {
+                                for left_index in
+                                    left_block..(left_block + BLOCK_SIZE).min(left_end)
+                                {
+                                    let left_coefficient =
+                                        T::from(unsafe { *left_values.get_unchecked(left_index) });
+                                    let left_position =
+                                        unsafe { *left_indices.get_unchecked(left_index) as usize };
+                                    for right_index in
+                                        right_block..(right_block + BLOCK_SIZE).min(right_end)
+                                    {
+                                        let position = left_position
+                                            + unsafe {
+                                                *right_indices.get_unchecked(right_index) as usize
+                                            }
+                                            - output_base;
+                                        unsafe {
+                                            *accumulator.get_unchecked_mut(position) +=
+                                                left_coefficient
+                                                    * T::from(
+                                                        *right_values.get_unchecked(right_index),
+                                                    );
+                                        }
+                                    }
+                                }
+                            }
+                        }
+                    } else {
+                        for left_index in left_start..left_end {
                             let left_coefficient =
-                                unsafe { *left_coefficients.get_unchecked(left_index) };
-                            let left_position = unsafe { *left_inner.get_unchecked(left_index) };
-                            for right_index in
-                                right_block..(right_block + BLOCK_SIZE).min(right_end)
-                            {
+                                T::from(unsafe { *left_values.get_unchecked(left_index) });
+                            let left_position =
+                                unsafe { *left_indices.get_unchecked(left_index) as usize };
+                            for right_index in right_start..right_end {
                                 let position = left_position
-                                    + unsafe { *right_inner.get_unchecked(right_index) };
+                                    + unsafe { *right_indices.get_unchecked(right_index) as usize }
+                                    - output_base;
                                 unsafe {
-                                    *accumulator.get_unchecked_mut(position) +=
-                                        i128::from(left_coefficient)
-                                            * i128::from(
-                                                *right_coefficients.get_unchecked(right_index),
-                                            );
+                                    *accumulator.get_unchecked_mut(position) += left_coefficient
+                                        * T::from(*right_values.get_unchecked(right_index));
                                 }
                             }
                         }
                     }
                 }
-            }
 
-            let output_base = output_outer * inner_len;
-            for (inner, coefficient) in accumulator[..active_inner_len].iter_mut().enumerate() {
-                let coefficient = std::mem::take(coefficient);
-                if coefficient != 0 {
-                    output.push((
-                        (output_base + inner) as u32,
-                        Integer::from_double(coefficient),
-                    ));
+                let output_base = output_outer * inner_len;
+                let active_inner_len = active_inner_lengths[output_outer];
+                for (inner, coefficient) in accumulator[..active_inner_len].iter_mut().enumerate() {
+                    let coefficient = std::mem::take(coefficient);
+                    if coefficient != T::default() {
+                        output.push(((output_base + inner) as u32, into_integer(coefficient)));
+                    }
                 }
             }
+            output
         }
-        Some(output)
+
+        let use_blocking = maximum_left_row_len > BLOCK_SIZE || maximum_right_row_len > BLOCK_SIZE;
+        if coefficient_bound <= i64::MAX as u128 {
+            if inner_len <= 256 {
+                let mut accumulator = [0i64; 256];
+                return Some(multiply_fixed::<i64>(
+                    dense.output_len,
+                    inner_len,
+                    outer_count,
+                    active_scan,
+                    &active_inner_lengths,
+                    &mut accumulator[..inner_len],
+                    &left_values,
+                    dense.left_indices,
+                    &left_ranges,
+                    &right_values,
+                    dense.right_indices,
+                    &right_ranges,
+                    use_blocking,
+                    Integer::from,
+                ));
+            }
+            let mut accumulator = vec![0i64; inner_len];
+            return Some(multiply_fixed::<i64>(
+                dense.output_len,
+                inner_len,
+                outer_count,
+                active_scan,
+                &active_inner_lengths,
+                &mut accumulator,
+                &left_values,
+                dense.left_indices,
+                &left_ranges,
+                &right_values,
+                dense.right_indices,
+                &right_ranges,
+                use_blocking,
+                Integer::from,
+            ));
+        }
+
+        if inner_len <= 256 {
+            let mut accumulator = [0i128; 256];
+            return Some(multiply_fixed::<i128>(
+                dense.output_len,
+                inner_len,
+                outer_count,
+                active_scan,
+                &active_inner_lengths,
+                &mut accumulator[..inner_len],
+                &left_values,
+                dense.left_indices,
+                &left_ranges,
+                &right_values,
+                dense.right_indices,
+                &right_ranges,
+                use_blocking,
+                Integer::from_double,
+            ));
+        }
+        let mut accumulator = vec![0i128; inner_len];
+        Some(multiply_fixed::<i128>(
+            dense.output_len,
+            inner_len,
+            outer_count,
+            active_scan,
+            &active_inner_lengths,
+            &mut accumulator,
+            &left_values,
+            dense.left_indices,
+            &left_ranges,
+            &right_values,
+            dense.right_indices,
+            &right_ranges,
+            use_blocking,
+            Integer::from_double,
+        ))
     }
 }
 

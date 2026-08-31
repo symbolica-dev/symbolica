@@ -1,13 +1,13 @@
 # Polynomial performance continuation handoff
 
 This is the live continuation record for the single-core Symbolica/FLINT polynomial-performance
-work. It was refreshed on 2026-08-31 after the `v20` integer-product and Hensel round. The current
-125-row fixed-fixture non-resultant inventory has 116 Symbolica wins and nine losses with a
-`0.636796` median. Its worst row is the 11 us dense three-variable factor-input product at
-`1.109145`; the worst timed operation is configured dense degree-80 GCD at `1.072572`. Ordinary
-asymmetric eight-variable products that were `1.327830` and `1.295551` in `v19` are now
-`0.973857` and `0.871657`. The separate frozen 3,200-problem PolyBench distribution remains at a
-`0.962614` paired median with 1,832 Symbolica wins. Rows are measured across accepted source
+work. It was refreshed on 2026-08-31 after the `v21` dense-division, cache-chunk, and Montgomery
+round. The current 125-row fixed-fixture non-resultant inventory has 121 Symbolica wins and four
+losses with a `0.636796` median. Its worst row is the 256-bit asymmetric eight-variable product at
+`1.025828`; the worst timed operation is generated dense bivariate GCD at `1.022443`. Dense
+degree-64/80 GCD now measure `0.792087/0.986902`, and the corrected dense three-variable
+factor-input product measures `0.809770`. The separate frozen 3,200-problem PolyBench distribution
+remains at a `0.962614` paired median with 1,832 Symbolica wins. Rows are measured across accepted source
 snapshots, with each replacement and its source-matched evidence documented below.
 Keep this file current whenever an experiment is accepted, rejected, or left partly complete. The
 purpose is that another agent can resume without reconstructing decisions from chat history or
@@ -15,8 +15,8 @@ transient binary names.
 
 The complete current Symbolica/FLINT scoreboard is in
 [CURRENT_STATUS.md](CURRENT_STATUS.md), with the latest immutable snapshot in
-[CURRENT_STATUS_v20.md](CURRENT_STATUS_v20.md). Its primary statistics contain 125 non-resultant
-comparisons: 116 favor Symbolica and nine favor FLINT. The six Ducos, six Brown, and six CRT
+[CURRENT_STATUS_v21.md](CURRENT_STATUS_v21.md). Its primary statistics contain 125 non-resultant
+comparisons: 121 favor Symbolica and four favor FLINT. The six Ducos, six Brown, and six CRT
 measurements are retained only in a compact appendix note and do not affect primary ranks or
 summary statistics. After every accepted optimization, update the live file and create the next
 numbered snapshot with an opening paragraph that describes the changes from its predecessor.
@@ -3946,12 +3946,229 @@ worst `1.109145`, and best `0.028678`. The next changes should follow the ordere
    still uses a row heap. Test bounded GMP-only compact admission below density five together with
    a two-entry rank-table cache; the 45-by-165 half already uses the compact kernel.
 
+## Current worst-first checkpoint (`v21`)
+
+### Dense univariate diagnosis and rejected preliminaries
+
+The initial degree-64 profile measured factorization at `0.782204` S/F, its input product at
+`0.882885`, and GCD at `0.853816`. In the GCD profile,
+`DenseUnivariateIntegerDivisionContext::try_div` occupied 25.36% of paired cycles while FLINT's
+corresponding `_fmpz_poly_divides` subtree occupied 22.48% and used recursive divide-and-conquer
+division. In the factor profile, dense distinct-degree factorization and Hensel reconstruction
+were the substantial Symbolica subtrees; square-free/GCD work was not the missing mechanism.
+
+The diagnostic timing files are `/tmp/v21-baseline-{factor-d64,product-d64,gcd-d64}-0{1..6}.csv`.
+Profiles are `/tmp/profile-v21-d64-{factor,gcd}-lbr.perf.data`, with reports under
+`/tmp/codex-readonly-v21-{factor,gcd}-{flat,children}.txt`.
+
+Three preliminary changes were not retained as the final mechanism:
+
+- A dense-DDF change moved degree-64 factorization only `0.779187 -> 0.774422` S/F, below the
+  evidence threshold. Its binary is `/tmp/flint-comparison-v21-dense-ddf`, SHA-256
+  `bd5e5fc33e556b61eca277f87c348043e39a78bf7e3fbd1357d08eb03ffd6d67`; its build JSON
+  `/tmp/flint-comparison-v21-dense-ddf-build.jsonl` has SHA-256
+  `d2d3b8aeefdbe87af1dc00c6d0577d473faf24d8678cf8072248c3a7557c64b5`. Raw files are
+  `/tmp/v21-dense-ddf-factor-d64-{baseline,candidate}-0{1..6}.csv`.
+- A private one-level checked division improved degree 64 `0.853801 -> 0.836601` and degree 80
+  `1.073632 -> 1.033246`, but was superseded by the stronger two-ended certificate below. Its
+  binary is `/tmp/flint-comparison-v21-divconquer-product-probe`, SHA-256
+  `77d4a3768426a82777fcc2145fa0f0f63b38bdb0d1c1c1445125c60854cf0189`; build JSON
+  `/tmp/flint-comparison-v21-divconquer-product-probe-build.jsonl` has SHA-256
+  `ac98deb22d65bbac69122bf81d9d68c53355165ade1593a48a26b0cf76018a77`. Raw files use
+  `/tmp/v21-divconquer-gcd-d{64,80}-{baseline,candidate}-0{1..6}.csv`.
+- A genuinely recursive checked division regressed degree 80 `1.073506 -> 1.158099`. Its algebra
+  survived independent exact and perturbed model checks, but sub-31 coefficient products missed
+  Kronecker substitution and paid generic GMP addmul, allocation, and pair-reconstruction costs.
+  The binary is `/tmp/flint-comparison-v21-recursive-divconquer`, SHA-256
+  `a43907009395faa412a49119a1d3e265b013206f90f2ef8edadf395803ff39e4`; build JSON
+  `/tmp/flint-comparison-v21-recursive-divconquer-build.jsonl` has SHA-256
+  `60c31c01852a9bab8f1089b55f95426c569cbe5a21475149834562b26956d02d`. Raw files are
+  `/tmp/v21-recursive-gcd-d80-{baseline,candidate}-0{1..6}.csv`.
+
+### Accepted balanced two-ended checked division
+
+`DenseUnivariateIntegerDivisionContext` now recognizes a dense balanced division with divisor
+length `n` and dividend length `2n-1`. It solves the low `floor(n/2)` quotient coefficients from
+the same number of low product equations using the nonzero constant pivot. It independently solves
+the remaining high coefficients from the leading equations. Cross terms cannot reach either
+retained endpoint interval, and one complete dense integer product then checks every coefficient,
+including the omitted middle equations.
+
+The route requires the GMP integer backend, divisor length at least 64, a fully dense divisor, the
+balanced `2n-1` shape, and at least 75% stored-term density in the dividend. A failed pivot or
+product comparison proves inexactness; an unsupported shape uses the existing classical checked
+division. The specialization is private to the dense univariate operation context and adds no
+method to `Ring`.
+
+Six alternating source-matched processes give:
+
+| GCD | Control S/F | Two-ended S/F |
+|---|---:|---:|
+| dense degree 64 | `0.853675` | `0.799476` |
+| dense degree 80 | `1.073332` | `0.990435` |
+
+Degree 48 does not meet the gate and stayed a clear win; dense degree-63/64/65 and high-height
+degree-33 factor guards moved only within small whole-program layout shifts. The final combined
+GCD rows are `0.894660/0.792087/0.986902` at degrees 48/64/80.
+
+The accepted binary is `/tmp/flint-comparison-v21-two-ended`, SHA-256
+`ae4bcbcd9e0dbb544cec254197cc62c523eaa514c651e1203f508c9d683bcce3`; build JSON
+`/tmp/flint-comparison-v21-two-ended-build.jsonl` has SHA-256
+`31d9744f05b47e8fc111d634ce8f0f05d605e2641517952d1e2222d8847f9acc`. Raw GCD files are
+`/tmp/v21-two-ended-gcd-d{48,64,80}-{baseline,candidate}-0{1..6}.csv`; factor guards use
+`/tmp/v21-two-ended-factor-{d63,d64,d65,d33h}-{baseline,candidate}-0{1..6}.csv`.
+Focused tests cover odd and even quotient lengths, a zero constant quotient, perturbations at the
+constant, middle, and leading coefficients, below-threshold and sparse fallbacks, and a 200-bit
+GMP divisor.
+
+### Accepted cache-sized chunked integer multiplication
+
+The old worst product multiplies 83 and 56 terms in three active variables. Its mixed-radix output
+box has `12^3 = 1,728` cells. FLINT splits one lexicographic variable into 12 outer rows and reuses
+a 144-cell inner accumulator, scanning only the active prefix of each output row. The pre-change
+paired profile attributed 50.79% of children to Symbolica multiplication and 45.58% to FLINT;
+Symbolica's dense kernel had 16.04% self time, while FLINT's chunked array arithmetic and append
+path dominated its side.
+
+The integer dense kernel now admits a cache-sized chunk route at any carry-free mixed-radix
+boundary. Selection requires at least three active variables, at least 1,024 output cells, an inner
+slice of at most 256 cells, 8--256 outer rows, at least two coefficient products per output cell,
+and triangular outer-probe work no larger than half the output box. The kernel then verifies the
+exact active-prefix scan bound. The largest qualifying inner prefix is used, minimizing the outer
+grid. Existing large sparse chunk selection remains a separate fallback.
+
+Prepared coefficients and row ranges are constructed monotonically without per-term division or
+remainder. Caller-owned stable slices avoid an inline/heap branch in every multiply-add. A proven
+coefficient bound chooses `i64` or `i128`; inner slices of at most 256 cells use a fixed stack
+accumulator, rows shorter than 128 terms use a direct loop, and only larger rows enter the blocked
+loop. Active-prefix emission preserves sorted output and avoids clearing unused cells.
+
+The first generic prototype regressed the target `1.091145 -> 1.126096`: generic `SmallVec`
+accumulator code copied more than 10 KiB of inline state and retained the inline/heap branch in the
+hot loop. The final package changes a clean alternating A/B `1.091013 -> 0.967059`; Symbolica's
+median falls from `0.010837` to `0.009574 ms`, or about 11.65%. The exact rejection of preferred
+total-degree routing below four declared variables also avoids a futile scan: a three-variable
+box/simplex ratio is strictly below six and cannot meet the integer route's required ratio eight.
+
+The accepted pre-namespace binary is
+`/tmp/flint-comparison-v21-two-ended-chunked-i64-fixed`, SHA-256
+`6c92fe08d83b190c35938c73ed54f4b33846bac54f4adc5db0ad8e8f6b76a3f4`; build JSON
+`/tmp/flint-comparison-v21-two-ended-chunked-i64-fixed-build.jsonl` has SHA-256
+`1cb8c409bcf11ce0dad7719191d99ce74c5e843a80129ec1dc65c50d687c90ee`. Raw clean A/B files are
+`/tmp/v21-chunked-i64-fixed-factor-product-3v-{baseline,candidate}-0{1..6}.csv`. The rejected first
+prototype and its profile use `/tmp/flint-comparison-v21-two-ended-chunked-i64`,
+`/tmp/flint-comparison-v21-two-ended-chunked-i64-build.jsonl`,
+`/tmp/v21-chunked-i64-factor-product-3v-{baseline,candidate}-0{1..6}.csv`, and
+`/tmp/profile-v21-chunked-i64-3v-lbr.perf.data`. Their binary, build JSON, and profile SHA-256
+values are `4f757a82585e22c41528ce4ab462805eebb134ded5fefb733dd6f73d8baef20c`,
+`072201d34279c2d2f0e97bb267e8347f3c5bfe44ad2736a27aeebdfc7f4190a3`, and
+`1c0a3d40e9a4c91dd6ccfdee5a43e7989a518d3fe2f03d9553a2cf3b4de043b2`.
+
+Tests compare both `i64` and `i128` chunk accumulation with a heap product, exercise invalid
+layouts and active-scan rejection, and check the exact 83/56/360-term target. The generalized
+selector also covers an eight-variable radix-boundary example rather than recognizing a fixture
+identity.
+
+### Generated-factor benchmark namespace correction
+
+`factorization_factors` parsed each base in the `polynomial_benchmark` namespace but previously
+constructed its explicit variable map from unqualified symbols. The parsed symbols were therefore
+appended after unused global symbols: nominal one-, two-, and three-variable cases stored two,
+four, and six coordinates. FLINT always received only the declared variables. The map now uses
+the same qualified symbols as the parser and asserts that both factors have exactly the declared
+variable count.
+
+This is a benchmark correctness repair, not a Symbolica library optimization. It requires all six
+generated factor products and all six factor operations to replace their old canonical rows. The
+final products are `0.821422/0.796646/0.809770/0.566259/0.812227/0.839533` for degree 63,
+bivariate, three-variable, high-height degree 33, degree 64, and degree 65. The corresponding final
+operations after the Montgomery change below are
+`1.011864/0.395402/0.526129/0.941478/0.762465/0.989525`.
+
+The clean chunk-kernel A/B remains valid library attribution because both compared binaries used
+the same old six-coordinate/three-active-coordinate representation. The canonical 3v product
+`0.809770` must not be compared directly with v20's `1.109145` as a library-only speedup. Its
+dedicated six-process, 20,000-sample files are
+`/tmp/v21-final-factor-product-3v-0{1..6}.csv`; the other corrected products are in
+`/tmp/v21-final-generated-factor-products-0{1..6}.csv`.
+
+### Accepted one-step bounded Montgomery reduction
+
+The post-chunk dense degree-63 profile measured `1.038451` S/F. Symbolica spent 24.64% of paired
+cycles in modular-prime screening, including 23.63% in `DenseZpDistinctDegreeContext::factor`;
+the Hensel subtree accounted for 16.71%. The earlier direct DDF edit had saved only about 0.6%, so
+the next target was the arithmetic repeated by all dense DDF products rather than another local
+DDF rearrangement. The profile is `/tmp/profile-v21-final-factor-d63-lbr.perf.data`, SHA-256
+`c8dd69f3dc37dda95899b6265db0cad8f3071746fc061397b97905742b89057a`; its callgraph report is
+`/tmp/profile-v21-final-factor-d63-callgraph.txt`, SHA-256
+`5deb579932b50c976f0a9cf0c1b1e1e3180cfad55641374abab6ad92f8fe200c`.
+
+`DenseZpDistinctDegreeContext` already proves for its direct accumulation mode that the exact sum
+of raw Montgomery products satisfies `t < p*2^32`. It previously split `t` into high and low words,
+performed a field multiplication on the low word, and added the high word. `Zp` now exposes
+`reduce_montgomery_product_sum(t)`, which applies the inherent 32-bit Montgomery reduction once to
+the proven-bounded accumulator. Other bounds still use native `% p` or the wide fallback. This is
+a domain operation with an explicit representation invariant, so it adds no generic `Ring` API.
+
+Six clean alternating processes give:
+
+| Source | Symbolica median | Median S/F |
+|---|---:|---:|
+| matched baseline | `2.964018 ms` | `1.044007` |
+| one-step reduction | `2.879359 ms` | `1.013325` |
+
+Symbolica time falls 2.856%. Final generated-factor guards are `0.395402` for bivariate,
+`0.526129` for three-variable, `0.941478` for high-height degree 33, `0.762465` for degree 64, and
+`0.989525` for degree 65. The accepted binary is `/tmp/flint-comparison-v21-montred`, SHA-256
+`70f3c477effca92937c0ba042ddff88f21685992448eac3de1e56a175dd811d7`; build JSON
+`/tmp/flint-comparison-v21-montred-build.jsonl` has SHA-256
+`74e26f588ed380389472f476e7d109415e16dc059f1103168476eb479031cb23`. Raw A/B files are
+`/tmp/v21-montred-factor-d63-{baseline,candidate}-0{1..6}.csv`; guard files are
+`/tmp/v21-montred-generated-factorizations-0{1..6}.csv`.
+
+The deterministic screening trace is `p=7` with 15 factors, `p=11` with 10 factors, `p=29` with
+13 factors and therefore discarded, then `p=65000011` with 10 factors and retained. Probing the
+existing direct-width prime before the geometric/backfill sequence could avoid discarded small
+images when predicted lift pressure is already high, but that reordering was not implemented or
+benchmarked in this round. It remains a future principled experiment, not an accepted result.
+
+### Final v21 inventory and artifacts
+
+The primary table now has 125 unique non-resultant rows, 121 Symbolica wins, four losses, median
+`0.636796`, worst `1.025828`, and best `0.028678`. The worst operation is generated dense
+bivariate GCD at `1.022443`. On the exact 116-row v14-compatible population it is also the worst,
+below v14's `1.137177`. Resultants remain an appendix-only historical comparison.
+
+The final pre-Montgomery combined binary is `/tmp/flint-comparison-v21-final`, SHA-256
+`d4406d09928e17e12bf0e9b70cab233a5fec7abc21648329437e5113a3c1f3ce`; its build JSON
+`/tmp/flint-comparison-v21-final-build.jsonl` has SHA-256
+`b2601a05c2facb4acb99ea7e54cacd607f48cf903dcdc03dd76416947fb6ec49`. Final refresh files use
+`/tmp/v21-final-*`; they cover all generated factor products and operations, the high-height
+asymmetric 8v product, GF(17) dense-very-large multiplication, dense GCD degrees 48/64/80, the
+dense degree-80 product, dense bivariate GCD, and dense-large integer multiplication. The accepted
+Montgomery artifact and its guards above provide the final factor-operation rows.
+
+The exact final source was rebuilt after documentation-visibility and test-only review changes.
+Its binary is `/tmp/flint-comparison-v21-commit`, SHA-256
+`83fa559d384b791324de92d40cc49e590a6e26c174834947839d48d7f3ca06f3`; build JSON
+`/tmp/flint-comparison-v21-commit-build.jsonl` has SHA-256
+`22fca6077dfa38bcc18cd8ae3ff26f7c51b9df8fac87b638428e294abf5c47c6`. Its six-process,
+1,000-sample degree-63 refresh is `1.011864` S/F with a `2.879888 ms` Symbolica median; raw files
+are `/tmp/v21-commit-factor-d63-0{1..6}.csv`.
+
+The current immutable scoreboard is [CURRENT_STATUS_v21.md](CURRENT_STATUS_v21.md), mirrored by
+[CURRENT_STATUS.md](CURRENT_STATUS.md).
+
 ## Rejected or low-value experiments
 
 Do not repeat these without a genuinely new mechanism:
 
 | Experiment | Evidence | Decision |
 |---|---|---|
+| Dense DDF rearrangement in the v21 degree-64 factor pass | `0.779187 -> 0.774422` S/F, about 0.6% | reject; too small for the code and the later one-step Montgomery reduction attacks arithmetic shared by the whole DDF loop |
+| One-level checked dense integer division | degree 64 `0.853801 -> 0.836601`, degree 80 `1.073632 -> 1.033246` | superseded by the simpler and faster two-ended certificate |
+| Recursive checked dense integer division | degree 80 `1.073506 -> 1.158099` | reject; small recursive products miss Kronecker and add GMP update, allocation, and reconstruction costs |
+| First generic cache-sized chunk accumulator | dense 3v product `1.091145 -> 1.126096` | reject; copied more than 10 KiB of inline state and branched on inline/heap storage inside the multiply-add loop; the stable-slice implementation is retained |
 | Enlarged byte-bounded large-integer cache | dense degree-80 product changed `0.094992 -> 0.097946 ms` (`+3.11%`) | reject; retaining substantially more limbs worsens locality |
 | Owned packed values with delayed cache clearing | dense degree-80 product changed `0.094919 -> 0.094877 ms`, about `0.04%` | reject; below the evidence threshold |
 | Packed exact-division certificate | degree-80 GCD changed `1.076663 -> 1.958108` S/F and Symbolica `0.632408 -> 1.149124 ms` | reject; packing and full-product comparison add more work than classical checked division |
@@ -3999,6 +4216,9 @@ older checksums and ratios are retained in Git history of this document at commi
   `lib/numerica/src/domains/integer/polynomial_kernels.rs`, especially `DenseIntegerMul`,
   `ChunkedDenseIntegerMul`, `TotalDegreeIntegerMul`, `try_kronecker`,
   `try_fixed_limb_absolute_bit_statistics`, and `try_decode_fixed_kronecker_digits`.
+- Cache-sized chunk selection and carry-free radix-boundary planning:
+  `src/poly/polynomial.rs`, especially `cache_sized_chunked_dense_mul_is_preferred` and
+  `MultivariatePolynomial::mul_dense`.
 - Cached GMP integer construction from decoded native magnitudes:
   `lib/numerica/src/domains/backend/integer.rs::MultiPrecisionInteger::try_from_lsf_limbs`.
 - Integer multiplication differential tests:
@@ -4007,7 +4227,8 @@ older checksums and ratios are retained in Git history of this document at commi
   `src/poly/polynomial.rs::{packed_row_merge_is_bounded,try_packed_u8_row_merge_mul}`.
 - Dense univariate modular GCD and exact certificate contexts:
   `src/poly/gcd.rs`, especially `DenseZp64UnivariateGcdImage`,
-  `DenseUnivariateIntegerDivisionContext`, and `UnivariateModularGcdContext`.
+  `DenseUnivariateIntegerDivisionContext::{low_triangular_quotient,triangular_quotient,
+  try_div_balanced_two_ended}`, and `UnivariateModularGcdContext`.
 - Repeated Zippel image evaluation: `src/poly/polynomial.rs`, especially
   `LastVariablePowerWorkspace` and `LastVariableEvaluationContext`; pair-level selection and
   shifted-Vandermonde batch inversion are in `src/poly/gcd.rs`, especially
@@ -4035,8 +4256,12 @@ older checksums and ratios are retained in Git history of this document at commi
   `DenseZp64Mul::multiply_direct` with `add_u64_product_row_unrolled4`; arbitrary-size moduli use
   `DenseIntegerMontgomeryMul`. Both are exposed through the existing `PolynomialKernels`
   capability.
+- Bounded one-step 32-bit Montgomery reduction:
+  `lib/numerica/src/domains/finite_field.rs::Zp::reduce_montgomery_product_sum`; its dense DDF
+  consumer is `src/poly/factor.rs::DenseZpDistinctDegreeContext::reduce_accumulator`.
 - Generated and PolyBench fixtures: `benches/support/cases.rs` and
-  `benches/support/polybench_cases.rs`.
+  `benches/support/polybench_cases.rs`; generated-factor variable-map construction and its
+  namespace assertion are in `benches/support/symbolica.rs::factorization_factors`.
 
 Prefer short-lived operation-context structs that own reusable buffers and precomputed metadata.
 Keep multiplication kernels attached to the integer domain where they need tagged integer/GMP
@@ -4050,32 +4275,30 @@ comments that justify file organization by contrasting it with designs not prese
 
 ## Current ordered next actions
 
-1. Profile the 11 us dense three-variable factor-input product's dispatch, dense-index
-   construction, and result reconstruction. Stack-backed input conversion improves a dedicated
-   dense-small product by about 5.1% but this row by only about 1.3%, so allocator work alone is not
-   the decisive mechanism.
-2. On dense degree-80 GCD, add exact constant-term and `x=1` divisibility filters before allocating
-   a dense remainder, as FLINT does. Then test a private one-level checked divide-and-conquer
-   certificate. For lengths 161/81 it reduces classical sub-multiply updates from 6,480 to about
-   3,200 and moves cross-work into two existing contiguous integer convolutions. Return a private
-   unavailable/inexact/exact result; this does not require a new `Ring` method.
-3. Let dense `Zp` multiplication use the validated compact three-variable simplex embedding under
-   a checked span/work selector. The GF(17) dense-very-large case's packed span falls from roughly
-   512,000 to 256,040 positions, making this the strongest finite-field opportunity.
-4. For the remaining high-height asymmetric eight-variable product, test bounded GMP-only compact
-   admission down to density two. Pair it with a two-entry total-degree rank-table cache because
-   the degree-four and degree-five halves alternate. The selector must remain based on support
-   density, accumulator bounds, and predicted workspace.
-5. Re-profile dense degree-63 factorization. Moving the already-used direct 26-bit prime probe
-   before geometric/backfill probes is plausible only when existing predicted-work pressure says
-   that the early small-prime images are expensive or collision-prone.
-6. Compute the exact top bit of fixed-limb Kronecker bounds near limb boundaries. The present bound
+1. For the current worst, the high-height asymmetric eight-variable product at `1.025828`, first
+   advance exponent vectors directly when consecutive nonzero output ranks differ by one, using
+   the existing combinatorial unrank only across gaps. Repeated unranking accounts for about 5.5%
+   of timed Symbolica work on this row. Construct GMP outputs through the existing recycled
+   writable-limb path, and retain both alternating degree-four and degree-five rank tables in a
+   byte-bounded two-entry MRU. After those changes, test GMP-only compact admission down to density
+   two; density admission alone is unlikely to close the gap. The selector must remain based on
+   support density, accumulator bounds, and predicted workspace. The profile is
+   `/tmp/profile-v21-asym-highheight-product-lbr.perf.data`.
+2. Profile the generated dense bivariate GCD at `1.022443`, now the worst timed operation. Separate
+   input construction, modular image work, reconstruction, and exact certificates before changing
+   selection; retain a general support/degree/work rule rather than a two-variable fixture gate.
+3. For dense degree-63 factorization, evaluate moving the already-used direct 26-bit prime probe
+   before geometric/backfill probes only when predicted lift pressure justifies it. The observed
+   trace is `7:15`, `11:10`, discarded `29:13`, retained `65000011:10`; the reordering has not yet
+   been implemented or measured.
+4. On the dense degree-80 input product at `1.007868`, compute the exact top bit of fixed-limb
+   Kronecker bounds near limb boundaries. The present bound
    can overestimate the packed width by one bit even though it is otherwise exact; avoid a general
    GMP sum or product when correcting it.
-7. In the full PolyBench distributions, continue from the worst setup classes, but select only on
+5. In the full PolyBench distributions, continue from the worst setup classes, but select only on
    degrees, support geometry, coefficient bounds, modular feasibility, predicted work, or exact
    certificates. Benchmark IDs and exact fixtures remain reporting labels only.
-8. Keep resultants in the historical appendix, freeze and hash each accepted full-LTO binary, and
+6. Keep resultants in the historical appendix, freeze and hash each accepted full-LTO binary, and
    create the next immutable `CURRENT_STATUS_v<i>.md` snapshot after every accepted round.
 
 ## Historical ordered next actions

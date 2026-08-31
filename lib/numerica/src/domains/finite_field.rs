@@ -229,6 +229,21 @@ impl Zp {
         }
     }
 
+    /// Reduce an exact sum of products of raw Montgomery representatives.
+    ///
+    /// Dense multiplication kernels use this after proving that `accumulator` is smaller than
+    /// `p * 2^32`. The result is the corresponding field coefficient in Montgomery
+    /// representation.
+    #[doc(hidden)]
+    #[inline(always)]
+    pub fn reduce_montgomery_product_sum(&self, accumulator: u64) -> FiniteFieldElement<u32> {
+        debug_assert!(
+            u128::from(accumulator) < (u128::from(self.p) << u32::BITS),
+            "a Montgomery product sum must be smaller than p * 2^32"
+        );
+        FiniteFieldElement(montgomery::montgomery_reduce_u32(self, accumulator))
+    }
+
     /// Returns the unit element in Montgomory form, ie.e 1 + 2^32 mod a.
     fn get_one(a: u32) -> u32 {
         if a as u64 <= 1u64 << 31 {
@@ -3770,7 +3785,7 @@ mod test {
 
     use rand::{SeedableRng, rngs::StdRng};
 
-    use super::{FiniteFieldCore, Zp};
+    use super::{FiniteFieldCore, FiniteFieldElement, Zp};
     use crate::domains::{
         Field, Ring, RingOps, SampleableRing,
         finite_field::{FiniteField, PrimitiveRootIterator, Zp64, Zp64DiscreteLogContext},
@@ -3794,6 +3809,36 @@ mod test {
         }
 
         assert_eq!(seen, [false, true, true]);
+    }
+
+    #[test]
+    fn zp_montgomery_product_sum_matches_reduced_reference_at_bounds() {
+        for prime in [3, 17, 65_000_011, 4_294_967_291] {
+            let field = Zp::new(prime);
+            let limit = u64::from(prime) << u32::BITS;
+            let accumulators = [
+                0,
+                1,
+                u64::from(prime - 1),
+                u64::from(u32::MAX),
+                1u64 << u32::BITS,
+                limit / 2,
+                limit - 1,
+            ];
+
+            for accumulator in accumulators {
+                let residue = (accumulator % u64::from(prime)) as u32;
+                let expected = field.mul(
+                    FiniteFieldElement::from_inner(residue),
+                    FiniteFieldElement::from_inner(1),
+                );
+                assert_eq!(
+                    field.reduce_montgomery_product_sum(accumulator),
+                    expected,
+                    "prime {prime}, accumulator {accumulator}"
+                );
+            }
+        }
     }
 
     #[test]

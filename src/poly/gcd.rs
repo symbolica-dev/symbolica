@@ -22,7 +22,7 @@ use crate::domains::rational::{Q, Rational, RationalField};
 use crate::domains::{
     EuclideanDomain, Field, InternalOrdering, Ring, RingOps, SampleableRing, Set,
 };
-use crate::kernels::GeometricSequenceStepRequest;
+use crate::kernels::{DensePolynomialMulRequest, GeometricSequenceStepRequest};
 use crate::poly::INLINED_EXPONENTS;
 use crate::tensors::matrix::{Matrix, MatrixError};
 use crate::{GLOBAL_SETTINGS, warn};
@@ -53,6 +53,13 @@ const DENSE_UNIVARIATE_GCD_MAX_COEFFICIENTS: usize = 4096;
 
 /// Maximum coefficient-buffer length relative to the number of stored input terms.
 const DENSE_UNIVARIATE_GCD_MAX_SPARSITY_RATIO: usize = 8;
+
+/// Minimum divisor length for recovering a balanced checked quotient from both endpoints.
+const DENSE_UNIVARIATE_CHECKED_TWO_ENDED_MIN_COEFFICIENTS: usize = 64;
+
+/// Minimum stored-term density admitted for a balanced two-ended checked dividend.
+const DENSE_UNIVARIATE_CHECKED_TWO_ENDED_MIN_DENSITY_NUMERATOR: usize = 3;
+const DENSE_UNIVARIATE_CHECKED_TWO_ENDED_MIN_DENSITY_DENOMINATOR: usize = 4;
 
 /// Largest direct degree-to-shape table used during Zippel interpolation.
 const ZIPPEL_SHAPE_INDEX_MAX_DEGREE_SPAN: usize = 4096;
@@ -3779,19 +3786,28 @@ impl<'a, E: PositiveExponent> DenseZp64UnivariateGcdImage<'a, E> {
     }
 }
 
+/// Outcome of an optional checked dense-division strategy.
+enum DenseUnivariateCheckedDivision<T> {
+    Unavailable,
+    Inexact,
+    Exact(T),
+}
+
 /// Dense integer long division used to certify a reconstructed univariate GCD.
-struct DenseUnivariateIntegerDivisionContext {
+struct DenseUnivariateIntegerDivisionContext<'a> {
     variable: usize,
     coefficients: Vec<MultiPrecisionInteger>,
     degrees: Vec<usize>,
+    dense_coefficients: Option<&'a [Integer]>,
+    dense_indices: Vec<u32>,
     degree: usize,
     division_remainder: MultiPrecisionInteger,
 }
 
-impl DenseUnivariateIntegerDivisionContext {
+impl<'a> DenseUnivariateIntegerDivisionContext<'a> {
     /// Construct a dense division workspace for a divisor and the two inputs it must divide.
     fn new<E: PositiveExponent>(
-        divisor: &MultivariatePolynomial<IntegerRing, E>,
+        divisor: &'a MultivariatePolynomial<IntegerRing, E>,
         left: &MultivariatePolynomial<IntegerRing, E>,
         right: &MultivariatePolynomial<IntegerRing, E>,
         variable: usize,
@@ -3830,9 +3846,9 @@ impl DenseUnivariateIntegerDivisionContext {
             Some(coefficient_count)
         }
 
-        dense_coefficient_count(divisor, variable)?;
-        dense_coefficient_count(left, variable)?;
-        dense_coefficient_count(right, variable)?;
+        let divisor_coefficient_count = dense_coefficient_count(divisor, variable)?;
+        let left_coefficient_count = dense_coefficient_count(left, variable)?;
+        let right_coefficient_count = dense_coefficient_count(right, variable)?;
 
         let degrees = divisor
             .exponents_iter()
@@ -3845,13 +3861,260 @@ impl DenseUnivariateIntegerDivisionContext {
             .cloned()
             .map(Integer::to_multi_prec)
             .collect();
+        let balanced_dense_input = |polynomial: &MultivariatePolynomial<IntegerRing, E>,
+                                    coefficient_count: usize| {
+            coefficient_count
+                == divisor_coefficient_count
+                    .saturating_mul(2)
+                    .saturating_sub(1)
+                && coefficient_count
+                    .saturating_mul(DENSE_UNIVARIATE_CHECKED_TWO_ENDED_MIN_DENSITY_NUMERATOR)
+                    <= polynomial
+                        .nterms()
+                        .saturating_mul(DENSE_UNIVARIATE_CHECKED_TWO_ENDED_MIN_DENSITY_DENOMINATOR)
+        };
+        let use_two_ended = cfg!(feature = "integer-gmp")
+            && divisor_coefficient_count >= DENSE_UNIVARIATE_CHECKED_TWO_ENDED_MIN_COEFFICIENTS
+            && divisor.nterms() == divisor_coefficient_count
+            && (balanced_dense_input(left, left_coefficient_count)
+                || balanced_dense_input(right, right_coefficient_count));
+        let dense_coefficients = use_two_ended.then_some(divisor.coefficients.as_slice());
+        let dense_indices = if use_two_ended {
+            (0..divisor_coefficient_count)
+                .map(|index| index as u32)
+                .collect()
+        } else {
+            Vec::new()
+        };
         Some(Self {
             variable,
             coefficients,
             degrees,
+            dense_coefficients,
+            dense_indices,
             degree,
             division_remainder: MultiPrecisionInteger::default(),
         })
+    }
+
+    /// Recover a quotient from the leading half of a balanced division problem.
+    ///
+    /// `high_dividend` contains the `n` leading coefficient equations of a conceptual dividend of
+    /// length `2n - 1`, and `divisor` has length `n`. Only products that can affect those retained
+    /// equations are subtracted. A non-exact pivot division proves that the complete polynomial
+    /// division is inexact; the omitted low coefficients are checked later by full product
+    /// comparison.
+    fn triangular_quotient(
+        high_dividend: &[Integer],
+        divisor: &[MultiPrecisionInteger],
+        division_remainder: &mut MultiPrecisionInteger,
+    ) -> Option<Vec<Integer>> {
+        debug_assert_eq!(high_dividend.len(), divisor.len());
+        debug_assert!(!divisor.is_empty());
+        debug_assert!(!divisor.last().unwrap().is_zero());
+
+        let mut high_remainder = high_dividend
+            .iter()
+            .cloned()
+            .map(Integer::to_multi_prec)
+            .collect::<Vec<_>>();
+        let mut quotient = (0..divisor.len())
+            .map(|_| Integer::zero())
+            .collect::<Vec<_>>();
+        let divisor_degree = divisor.len() - 1;
+
+        for shift in (0..divisor.len()).rev() {
+            let leading_remainder = mem::take(&mut high_remainder[shift]);
+            if leading_remainder.is_zero() {
+                continue;
+            }
+
+            let quotient_coefficient = leading_remainder
+                .div_rem_owned_ref_assign(&divisor[divisor_degree], division_remainder);
+            if !division_remainder.is_zero() {
+                return None;
+            }
+
+            let first_retained_divisor_degree = divisor_degree - shift;
+            for divisor_coefficient_degree in first_retained_divisor_degree..divisor_degree {
+                let target = shift + divisor_coefficient_degree - divisor_degree;
+                high_remainder[target]
+                    .sub_mul_assign(&quotient_coefficient, &divisor[divisor_coefficient_degree]);
+            }
+            quotient[shift] = Integer::from(quotient_coefficient);
+        }
+
+        Some(quotient)
+    }
+
+    /// Recover the low quotient coefficients from the same number of low dividend equations.
+    ///
+    /// Coefficient `k` of a product depends only on divisor and quotient coefficients through
+    /// degree `k`. Solving these equations from the constant term therefore recovers a low
+    /// quotient prefix without multiplying it by the unused high divisor coefficients.
+    fn low_triangular_quotient(
+        low_dividend: &[Integer],
+        divisor: &[MultiPrecisionInteger],
+        division_remainder: &mut MultiPrecisionInteger,
+    ) -> Option<Vec<Integer>> {
+        debug_assert!(!low_dividend.is_empty());
+        debug_assert!(low_dividend.len() <= divisor.len());
+        debug_assert!(!divisor.first().unwrap().is_zero());
+
+        let mut low_remainder = low_dividend
+            .iter()
+            .cloned()
+            .map(Integer::to_multi_prec)
+            .collect::<Vec<_>>();
+        let mut quotient = Vec::with_capacity(low_dividend.len());
+
+        for shift in 0..low_dividend.len() {
+            let constant_remainder = mem::take(&mut low_remainder[shift]);
+            if constant_remainder.is_zero() {
+                quotient.push(Integer::zero());
+                continue;
+            }
+
+            let quotient_coefficient =
+                constant_remainder.div_rem_owned_ref_assign(&divisor[0], division_remainder);
+            if !division_remainder.is_zero() {
+                return None;
+            }
+
+            let retained_divisor_len = low_dividend.len() - shift;
+            for divisor_degree in 1..retained_divisor_len {
+                low_remainder[shift + divisor_degree]
+                    .sub_mul_assign(&quotient_coefficient, &divisor[divisor_degree]);
+            }
+            quotient.push(Integer::from(quotient_coefficient));
+        }
+
+        Some(quotient)
+    }
+
+    /// Multiply two contiguous dense integer coefficient vectors.
+    ///
+    /// The integer-domain kernel handles bounded and packed products. The fused generic loop is
+    /// used when the kernel declines the size or coefficient representation.
+    fn multiply_dense(dense_indices: &[u32], left: &[Integer], right: &[Integer]) -> Vec<Integer> {
+        if left.is_empty() || right.is_empty() {
+            return Vec::new();
+        }
+        let output_len = left.len() + right.len() - 1;
+        debug_assert!(left.len() <= dense_indices.len());
+        debug_assert!(right.len() <= dense_indices.len());
+
+        if let Some(coefficients) = Z.kernels().polynomial().and_then(|kernels| {
+            kernels.try_dense_mul(DensePolynomialMulRequest {
+                output_len,
+                left_coefficients: left,
+                left_indices: &dense_indices[..left.len()],
+                right_coefficients: right,
+                right_indices: &dense_indices[..right.len()],
+            })
+        }) {
+            let mut product = vec![Integer::zero(); output_len];
+            for (degree, coefficient) in coefficients {
+                product[degree as usize] = coefficient;
+            }
+            return product;
+        }
+
+        let mut product = vec![Integer::zero(); output_len];
+        for (left_degree, left_coefficient) in left.iter().enumerate() {
+            if left_coefficient.is_zero() {
+                continue;
+            }
+            for (right_degree, right_coefficient) in right.iter().enumerate() {
+                if right_coefficient.is_zero() {
+                    continue;
+                }
+                Z.add_mul_assign(
+                    &mut product[left_degree + right_degree],
+                    left_coefficient,
+                    right_coefficient,
+                );
+            }
+        }
+        product
+    }
+
+    /// Certify a balanced dense division by recovering the quotient from both endpoints.
+    ///
+    /// The low product equations determine the low quotient half without using high divisor
+    /// coefficients, and the high equations independently determine the high half. One complete
+    /// dense product then verifies every coefficient, including the middle equations omitted by
+    /// both triangular solves.
+    fn try_div_balanced_two_ended<E: PositiveExponent>(
+        &mut self,
+        dividend: &MultivariatePolynomial<IntegerRing, E>,
+    ) -> DenseUnivariateCheckedDivision<MultivariatePolynomial<IntegerRing, E>> {
+        let divisor_len = self.degree + 1;
+        let dividend_len = dividend.degree(self.variable).to_u32() as usize + 1;
+        let Some(dense_divisor) = self.dense_coefficients else {
+            return DenseUnivariateCheckedDivision::Unavailable;
+        };
+        if dividend_len != divisor_len.saturating_mul(2).saturating_sub(1)
+            || dividend_len.saturating_mul(DENSE_UNIVARIATE_CHECKED_TWO_ENDED_MIN_DENSITY_NUMERATOR)
+                > dividend
+                    .nterms()
+                    .saturating_mul(DENSE_UNIVARIATE_CHECKED_TWO_ENDED_MIN_DENSITY_DENOMINATOR)
+        {
+            return DenseUnivariateCheckedDivision::Unavailable;
+        }
+
+        let mut dense_dividend = vec![Integer::zero(); dividend_len];
+        for (coefficient, exponents) in dividend.coefficients.iter().zip(dividend.exponents_iter())
+        {
+            debug_assert!(
+                exponents
+                    .iter()
+                    .enumerate()
+                    .all(|(index, exponent)| index == self.variable || exponent.is_zero())
+            );
+            dense_dividend[exponents[self.variable].to_u32() as usize] = coefficient.clone();
+        }
+
+        let low_len = divisor_len / 2;
+        let high_len = divisor_len - low_len;
+        let mut quotient = match Self::low_triangular_quotient(
+            &dense_dividend[..low_len],
+            &self.coefficients,
+            &mut self.division_remainder,
+        ) {
+            Some(quotient) => quotient,
+            None => return DenseUnivariateCheckedDivision::Inexact,
+        };
+        let high_dividend_start = dividend_len - high_len;
+        let high_quotient = match Self::triangular_quotient(
+            &dense_dividend[high_dividend_start..],
+            &self.coefficients[low_len..],
+            &mut self.division_remainder,
+        ) {
+            Some(quotient) => quotient,
+            None => return DenseUnivariateCheckedDivision::Inexact,
+        };
+        quotient.extend(high_quotient);
+
+        let product = Self::multiply_dense(&self.dense_indices, dense_divisor, &quotient);
+        if product != dense_dividend {
+            return DenseUnivariateCheckedDivision::Inexact;
+        }
+
+        let capacity = quotient
+            .iter()
+            .filter(|coefficient| !coefficient.is_zero())
+            .count();
+        let mut result = dividend.zero_with_capacity(capacity);
+        let mut exponents = vec![E::zero(); dividend.nvars()];
+        for (degree, coefficient) in quotient.into_iter().enumerate() {
+            if coefficient.is_zero() {
+                continue;
+            }
+            exponents[self.variable] = E::from_u32(degree as u32);
+            result.append_monomial_back(coefficient, &exponents);
+        }
+        DenseUnivariateCheckedDivision::Exact(result)
     }
 
     /// Divide one input and return its quotient only when every coefficient division is exact.
@@ -3863,6 +4126,12 @@ impl DenseUnivariateIntegerDivisionContext {
         let divisor_degree = self.degree;
         if dividend_degree < divisor_degree {
             return None;
+        }
+
+        match self.try_div_balanced_two_ended(dividend) {
+            DenseUnivariateCheckedDivision::Exact(quotient) => return Some(quotient),
+            DenseUnivariateCheckedDivision::Inexact => return None,
+            DenseUnivariateCheckedDivision::Unavailable => {}
         }
 
         let mut remainder = (0..=dividend_degree)
@@ -8169,6 +8438,151 @@ mod tests {
             )
             .is_none()
         );
+    }
+
+    #[cfg(feature = "integer-gmp")]
+    #[test]
+    fn balanced_two_ended_integer_division_certificate_checks_full_product() {
+        let template = parse!("x").to_polynomial::<IntegerRing, u16>(&Z, None);
+        let dense_polynomial = |degree: usize, salt: usize| {
+            let mut polynomial = template.zero_with_capacity(degree + 1);
+            let mut exponents = vec![0u16];
+            for term_degree in 0..=degree {
+                exponents[0] = term_degree as u16;
+                let magnitude = 1 + (term_degree * (salt + 2) + salt) % 17;
+                let coefficient = if salt % 2 == 0 {
+                    magnitude as i64
+                } else {
+                    -(magnitude as i64)
+                };
+                polynomial.append_monomial_back(Integer::from(coefficient), &exponents);
+            }
+            polynomial
+        };
+
+        for divisor_degree in [63, 64] {
+            let divisor = dense_polynomial(divisor_degree, 1);
+            let mut quotient = dense_polynomial(divisor_degree, 4);
+            if divisor_degree == 64 {
+                let constant = quotient.get_constant();
+                quotient = quotient.add_constant(-constant);
+            }
+            let dividend = &divisor * &quotient;
+            let mut division =
+                DenseUnivariateIntegerDivisionContext::new(&divisor, &dividend, &dividend, 0)
+                    .unwrap();
+
+            match division.try_div_balanced_two_ended(&dividend) {
+                DenseUnivariateCheckedDivision::Exact(actual) => assert_eq!(actual, quotient),
+                DenseUnivariateCheckedDivision::Unavailable => {
+                    panic!("the dense balanced division must use the checked split")
+                }
+                DenseUnivariateCheckedDivision::Inexact => {
+                    panic!("an exact dense balanced division was rejected")
+                }
+            }
+
+            let inexact_dividend = dividend.clone().add_constant(Integer::one());
+            let mut inexact = DenseUnivariateIntegerDivisionContext::new(
+                &divisor,
+                &inexact_dividend,
+                &inexact_dividend,
+                0,
+            )
+            .unwrap();
+            assert!(matches!(
+                inexact.try_div_balanced_two_ended(&inexact_dividend),
+                DenseUnivariateCheckedDivision::Inexact
+            ));
+            assert!(inexact.try_div(&inexact_dividend).is_none());
+
+            if divisor_degree == 63 {
+                let mut middle_inexact_dividend = dividend.clone();
+                *middle_inexact_dividend
+                    .coefficients
+                    .get_mut(divisor_degree)
+                    .unwrap() += 1;
+                let mut middle_inexact = DenseUnivariateIntegerDivisionContext::new(
+                    &divisor,
+                    &middle_inexact_dividend,
+                    &middle_inexact_dividend,
+                    0,
+                )
+                .unwrap();
+                assert!(matches!(
+                    middle_inexact.try_div_balanced_two_ended(&middle_inexact_dividend),
+                    DenseUnivariateCheckedDivision::Inexact
+                ));
+
+                let mut leading_inexact_dividend = dividend.clone();
+                *leading_inexact_dividend.coefficients.last_mut().unwrap() += 1;
+                let mut leading_inexact = DenseUnivariateIntegerDivisionContext::new(
+                    &divisor,
+                    &leading_inexact_dividend,
+                    &leading_inexact_dividend,
+                    0,
+                )
+                .unwrap();
+                assert!(matches!(
+                    leading_inexact.try_div_balanced_two_ended(&leading_inexact_dividend),
+                    DenseUnivariateCheckedDivision::Inexact
+                ));
+            }
+        }
+
+        let short_divisor = dense_polynomial(62, 2);
+        let short_quotient = dense_polynomial(62, 5);
+        let short_dividend = &short_divisor * &short_quotient;
+        let mut short = DenseUnivariateIntegerDivisionContext::new(
+            &short_divisor,
+            &short_dividend,
+            &short_dividend,
+            0,
+        )
+        .unwrap();
+        assert!(matches!(
+            short.try_div_balanced_two_ended(&short_dividend),
+            DenseUnivariateCheckedDivision::Unavailable
+        ));
+        assert_eq!(short.try_div(&short_dividend).unwrap(), short_quotient);
+
+        let sparse_divisor = dense_polynomial(63, 1);
+        let mut sparse_quotient = template.zero_with_capacity(1);
+        sparse_quotient.append_monomial_back(Integer::from(7), &[63u16]);
+        let sparse_dividend = &sparse_divisor * &sparse_quotient;
+        let mut sparse = DenseUnivariateIntegerDivisionContext::new(
+            &sparse_divisor,
+            &sparse_dividend,
+            &sparse_dividend,
+            0,
+        )
+        .unwrap();
+        assert!(matches!(
+            sparse.try_div_balanced_two_ended(&sparse_dividend),
+            DenseUnivariateCheckedDivision::Unavailable
+        ));
+        assert_eq!(sparse.try_div(&sparse_dividend).unwrap(), sparse_quotient);
+
+        let large_scale = (Integer::one() << 200usize) + Integer::from(37);
+        let large_divisor = dense_polynomial(63, 3).mul_coeff(large_scale);
+        let large_quotient = dense_polynomial(63, 2);
+        let large_dividend = &large_divisor * &large_quotient;
+        let mut large = DenseUnivariateIntegerDivisionContext::new(
+            &large_divisor,
+            &large_dividend,
+            &large_dividend,
+            0,
+        )
+        .unwrap();
+        match large.try_div_balanced_two_ended(&large_dividend) {
+            DenseUnivariateCheckedDivision::Exact(actual) => assert_eq!(actual, large_quotient),
+            DenseUnivariateCheckedDivision::Unavailable => {
+                panic!("the GMP-backed balanced division must use the two-ended certificate")
+            }
+            DenseUnivariateCheckedDivision::Inexact => {
+                panic!("an exact GMP-backed balanced division was rejected")
+            }
+        }
     }
 
     #[test]

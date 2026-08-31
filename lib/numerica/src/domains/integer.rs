@@ -4156,10 +4156,58 @@ mod test {
             )
         });
         assert_eq!(actual, expected);
+
+        let small_left = [1, -2, 1, -1].map(Integer::from);
+        let small_right = [-1, 2, 1, -3].map(Integer::from);
+        let small_actual = chunked_dense_mul(
+            32,
+            8,
+            &small_left,
+            &[0, 2, 8, 11],
+            &small_right,
+            &[0, 1, 8, 10],
+        )
+        .unwrap();
+        let small_expected = [
+            (0, -1),
+            (1, 2),
+            (2, 2),
+            (3, -4),
+            (9, 2),
+            (10, -5),
+            (11, 1),
+            (12, 4),
+            (16, 1),
+            (18, -3),
+            (19, -1),
+            (21, 3),
+        ]
+        .map(|(index, coefficient)| (index, Integer::from(coefficient)));
+        assert_eq!(small_actual, small_expected);
     }
 
     #[test]
-    fn chunked_dense_integer_multiplication_rejects_invalid_or_unneeded_layouts() {
+    fn chunked_dense_integer_multiplication_uses_large_blocked_accumulator() {
+        let coefficient = Integer::from(1_000_000_000i64);
+        let coefficients = (0..150).map(|_| coefficient.clone()).collect::<Vec<_>>();
+        let indices = (0..150).collect::<Vec<_>>();
+        let actual =
+            chunked_dense_mul(600, 300, &coefficients, &indices, &coefficients, &indices).unwrap();
+        let scale = 1_000_000_000_000_000_000i128;
+        let expected = (0..299)
+            .map(|index| {
+                let collisions = if index < 150 { index + 1 } else { 299 - index };
+                (
+                    index as u32,
+                    Integer::from_double(collisions as i128 * scale),
+                )
+            })
+            .collect::<Vec<_>>();
+        assert_eq!(actual, expected);
+    }
+
+    #[test]
+    fn chunked_dense_integer_multiplication_validates_layout_and_work_bounds() {
         let large = [Integer::from(4_000_000_000i64)];
         assert!(chunked_dense_mul(8, 0, &large, &[0], &large, &[0]).is_none());
         assert!(chunked_dense_mul(32, 6, &large, &[0], &large, &[0]).is_none());
@@ -4189,7 +4237,16 @@ mod test {
         assert!(chunked_dense_mul(257, 1, &large, &[0], &large, &[0]).is_none());
 
         let small = [Integer::from(3)];
-        assert!(chunked_dense_mul(8, 8, &small, &[0], &small, &[0]).is_none());
+        assert_eq!(
+            chunked_dense_mul(8, 8, &small, &[0], &small, &[0]).unwrap(),
+            [(0, Integer::from(9))]
+        );
+
+        let dense_indices = (0..8).collect::<Vec<_>>();
+        let dense_coefficients = (0..8).map(|_| Integer::one()).collect::<Vec<_>>();
+        assert!(
+            chunked_dense_mul(8, 8, &dense_coefficients, &dense_indices, &small, &[0],).is_none()
+        );
 
         let minimums = [
             Integer::from(i64::MIN),

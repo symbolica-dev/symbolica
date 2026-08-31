@@ -45,6 +45,10 @@ const MIN_TOTAL_DEGREE_PRODUCTS_PER_COEFFICIENT: usize = 32;
 const MIN_CHUNKED_DENSE_OUTPUT_LEN: usize = 1 << 18;
 const MAX_CHUNKED_DENSE_INNER_LEN: usize = 1 << 16;
 const MIN_CHUNKED_DENSE_OUTER_LEN: usize = 8;
+const MIN_CACHE_CHUNKED_DENSE_OUTPUT_LEN: usize = 1 << 10;
+const MAX_CACHE_CHUNKED_DENSE_INNER_LEN: usize = 256;
+const MAX_CACHE_CHUNKED_DENSE_OUTER_LEN: usize = 256;
+const MIN_CACHE_CHUNKED_PAIR_PRODUCTS_PER_CELL: usize = 2;
 const MAX_PACKED_ROW_MERGE_TERMS: usize = 64;
 const MAX_PACKED_ROW_MERGE_PAIR_PRODUCTS: usize = 4096;
 const MAX_PACKED_ROW_MERGE_FEW_ROWS: usize = 16;
@@ -86,6 +90,36 @@ fn chunked_dense_mul_is_preferred(
         && simplex_len
             .checked_mul(MIN_MIXED_RADIX_TO_SIMPLEX_RATIO)
             .is_some_and(|minimum| mixed_radix_len >= minimum)
+}
+
+/// Return whether dense multiplication should reuse a small inner coefficient chunk.
+///
+/// This route applies when at least three active variables create several outer rows, the inner
+/// accumulator fits in a few KiB, and the coefficient products are dense enough to amortize row
+/// grouping. The coefficient kernel performs a second exact check on the number of cells scanned.
+#[inline]
+fn cache_sized_chunked_dense_mul_is_preferred(
+    active_variable_count: usize,
+    mixed_radix_len: usize,
+    pair_products: usize,
+    inner_len: usize,
+) -> bool {
+    let outer_len = mixed_radix_len.checked_div(inner_len).unwrap_or(0);
+    let outer_pair_probes = outer_len
+        .checked_mul(outer_len.saturating_add(1))
+        .map(|product| product / 2);
+    active_variable_count >= 3
+        && mixed_radix_len >= MIN_CACHE_CHUNKED_DENSE_OUTPUT_LEN
+        && inner_len > 0
+        && inner_len <= MAX_CACHE_CHUNKED_DENSE_INNER_LEN
+        && mixed_radix_len.is_multiple_of(inner_len)
+        && (MIN_CHUNKED_DENSE_OUTER_LEN..=MAX_CACHE_CHUNKED_DENSE_OUTER_LEN).contains(&outer_len)
+        && outer_pair_probes
+            .and_then(|probes| probes.checked_mul(2))
+            .is_some_and(|probes| probes <= mixed_radix_len)
+        && mixed_radix_len
+            .checked_mul(MIN_CACHE_CHUNKED_PAIR_PRODUCTS_PER_CELL)
+            .is_some_and(|minimum| pair_products >= minimum)
 }
 
 /// Return whether a compact total-degree kernel saves enough workspace to precede mixed-radix
@@ -3494,7 +3528,8 @@ impl<F: Ring, E: Exponent> MultivariatePolynomial<F, E, LexOrder> {
             .map(|i| 1 + self.degree(i).to_i32() as usize + rhs.degree(i).to_i32() as usize)
             .collect::<Vec<_>>();
 
-        let univariate = max_degs_rev.iter().filter(|x| **x > 1).count() == 1;
+        let active_variable_count = max_degs_rev.iter().filter(|radix| **radix > 1).count();
+        let univariate = active_variable_count == 1;
         let use_generic_univariate_dense = max_degs_rev.iter().sum::<usize>() < 10000;
 
         let mut total: usize = 1;
@@ -3519,10 +3554,27 @@ impl<F: Ring, E: Exponent> MultivariatePolynomial<F, E, LexOrder> {
         }
 
         let pair_products = self.nterms().saturating_mul(rhs.nterms());
-        let chunked_inner_len = if self.nvars() >= MIN_CHUNKED_DENSE_VARIABLES
+        let last_active_radix = max_degs_rev.iter().rposition(|radix| *radix > 1);
+        let cache_sized_chunked_inner_len = last_active_radix.and_then(|last_active| {
+            let mut inner_len = 1usize;
+            let mut preferred = None;
+            for radix in &max_degs_rev[..last_active] {
+                inner_len = inner_len.checked_mul(*radix)?;
+                if cache_sized_chunked_dense_mul_is_preferred(
+                    active_variable_count,
+                    total,
+                    pair_products,
+                    inner_len,
+                ) {
+                    preferred = Some(inner_len);
+                }
+            }
+            preferred
+        });
+        let sparse_large_chunked_inner_len = if self.nvars() >= MIN_CHUNKED_DENSE_VARIABLES
             && total > pair_products
-            && let Some(outer) = max_degs_rev.iter().rposition(|radix| *radix > 1)
-            && let Some(inner_len) = max_degs_rev[..outer]
+            && let Some(last_active) = last_active_radix
+            && let Some(inner_len) = max_degs_rev[..last_active]
                 .iter()
                 .try_fold(1usize, |product, radix| product.checked_mul(*radix))
             && let Some(shape) = self.total_degree_dense_mul_shape(rhs)
@@ -3537,6 +3589,7 @@ impl<F: Ring, E: Exponent> MultivariatePolynomial<F, E, LexOrder> {
         } else {
             None
         };
+        let chunked_inner_len = cache_sized_chunked_inner_len.or(sparse_large_chunked_inner_len);
 
         #[inline(always)]
         fn to_uni_var<E: Exponent>(s: &[E], max_degs_rev: &[usize]) -> u32 {
@@ -4367,11 +4420,13 @@ impl<F: Ring, E: Exponent> MultivariatePolynomial<F, E, LexOrder> {
         &self,
         other: &MultivariatePolynomial<F, E, LexOrder>,
     ) -> Option<MultivariatePolynomial<F, E, LexOrder>> {
-        let kernels = self.ring().kernels();
-        let minimum_density = kernels.preferred_total_degree_mul_density()?;
-        if !(2..=8).contains(&self.nvars()) {
+        // With fewer than four variables, the mixed-radix box cannot be eight times larger than
+        // its containing total-degree simplex, so this route cannot meet its workspace bound.
+        if !(4..=8).contains(&self.nvars()) {
             return None;
         }
+        let kernels = self.ring().kernels();
+        let minimum_density = kernels.preferred_total_degree_mul_density()?;
         let polynomial_kernel = kernels.polynomial()?;
         let (total_degree, simplex_len) =
             self.total_degree_dense_mul_shape_with_density(other, minimum_density)?;
@@ -6870,9 +6925,9 @@ mod test {
     use super::{
         IntegerPolynomialCrtContext, LastVariableEvaluationContext, LastVariablePowerWorkspace,
         MultivariatePolynomial, PolynomialRing, PolynomialSamplingPolicy,
-        chunked_dense_mul_is_preferred, mixed_radix_dense_mul_is_bounded,
-        mixed_radix_dense_work_is_bounded, packed_row_merge_is_bounded,
-        total_degree_kernel_precedes_mixed_radix,
+        cache_sized_chunked_dense_mul_is_preferred, chunked_dense_mul_is_preferred,
+        mixed_radix_dense_mul_is_bounded, mixed_radix_dense_work_is_bounded,
+        packed_row_merge_is_bounded, total_degree_kernel_precedes_mixed_radix,
     };
 
     #[test]
@@ -7639,6 +7694,39 @@ mod test {
         assert!(!chunked_dense_mul_is_preferred(
             5, 262_144, 262_143, 4_097, 32_768,
         ));
+
+        assert!(cache_sized_chunked_dense_mul_is_preferred(
+            3, 1_728, 4_648, 144,
+        ));
+        assert!(!cache_sized_chunked_dense_mul_is_preferred(
+            2, 1_728, 4_648, 144,
+        ));
+        assert!(!cache_sized_chunked_dense_mul_is_preferred(
+            3, 1_728, 3_455, 144,
+        ));
+        assert!(!cache_sized_chunked_dense_mul_is_preferred(
+            3, 1_728, 4_648, 288,
+        ));
+        assert!(cache_sized_chunked_dense_mul_is_preferred(
+            8, 6_561, 20_000, 243,
+        ));
+        assert!(!cache_sized_chunked_dense_mul_is_preferred(
+            3, 1_024, 2_048, 4,
+        ));
+    }
+
+    #[test]
+    fn cache_sized_chunked_dense_multiplication_matches_heap_product() {
+        let left = parse!("(1+3*x+5*y+7*z)^6-1").to_polynomial::<_, u8>(&Z, None);
+        let right =
+            parse!("(1-3*x+5*y-7*z)^5+1").to_polynomial::<_, u8>(&Z, left.variables().clone());
+        assert_eq!(left.nterms(), 83);
+        assert_eq!(right.nterms(), 56);
+
+        let expected = left.heap_mul(&right);
+        let actual = &left * &right;
+        assert_eq!(actual, expected);
+        assert_eq!(actual.nterms(), 360);
     }
 
     #[test]

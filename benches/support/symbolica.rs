@@ -308,13 +308,20 @@ pub fn factorization_factors(case: FactorizationCase) -> [IntegerPolynomial; 2] 
     let variables: Arc<Vec<PolyVariable>> = Arc::new(
         case.variables
             .iter()
-            .map(|name| PolyVariable::Symbol(symbol!(name)))
+            .map(|name| PolyVariable::Symbol(symbol!(format!("{BENCHMARK_NAMESPACE}::{name}"))))
             .collect(),
     );
-    [
+    let factors = [
         powered_polynomial_with_variable_map(&Z, case.left, Some(variables.clone())),
         powered_polynomial_with_variable_map(&Z, case.right, Some(variables)),
-    ]
+    ];
+    assert!(
+        factors
+            .iter()
+            .all(|factor| factor.nvars() == case.variables.len()),
+        "generated factor inputs must use exactly their declared variables"
+    );
+    factors
 }
 
 /// Verifies that a generated factorization expands to its original polynomial.

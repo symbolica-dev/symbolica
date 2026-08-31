@@ -347,20 +347,15 @@ impl<'a, E: PositiveExponent> DenseZpDistinctDegreeContext<'a, E> {
         accumulator: u64,
         reduce_directly: bool,
     ) -> FiniteFieldElement<u32> {
-        let raw_one = FiniteFieldElement::from_inner(1);
         if reduce_directly {
             debug_assert!(u128::from(accumulator) < u128::from(field.get_prime()) << u32::BITS);
-            let mut coefficient =
-                field.mul(FiniteFieldElement::from_inner(accumulator as u32), raw_one);
-            let high = (accumulator >> u32::BITS) as u32;
-            debug_assert!(high < field.get_prime());
-            if high != 0 {
-                field.add_assign(&mut coefficient, FiniteFieldElement::from_inner(high));
-            }
-            coefficient
+            field.reduce_montgomery_product_sum(accumulator)
         } else {
             let residue = (accumulator % u64::from(field.get_prime())) as u32;
-            field.mul(FiniteFieldElement::from_inner(residue), raw_one)
+            field.mul(
+                FiniteFieldElement::from_inner(residue),
+                FiniteFieldElement::from_inner(1),
+            )
         }
     }
 
