@@ -150,6 +150,38 @@ mod implementation {
             Self(value)
         }
 
+        /// Construct an integer by copying a little-endian native magnitude into GMP storage.
+        ///
+        /// The writable-limb interface reuses a cached allocation when available and avoids an
+        /// intermediate GMP import. Trailing zero limbs and negative zero are normalized.
+        #[cfg(feature = "integer-gmp")]
+        #[inline]
+        pub(crate) fn try_from_lsf_limbs(limbs: &[u64], negative: bool) -> Option<Self> {
+            if gmp::NUMB_BITS != 64 || gmp::NAIL_BITS != 0 {
+                return None;
+            }
+            let significant_len = limbs
+                .iter()
+                .rposition(|&limb| limb != 0)
+                .map_or(0, |position| position + 1);
+            if significant_len == 0 {
+                return Some(Self::default());
+            }
+
+            let limb_count = gmp::size_t::try_from(significant_len).ok()?;
+            let mut value = Self::default();
+            // GMP makes exactly `limb_count` writable native limbs available. The platform gate
+            // establishes the `u64` representation, and `mpz_limbs_finish` restores a normalized
+            // signed integer before the value can be observed.
+            unsafe {
+                let raw = value.0.as_raw_mut();
+                let destination = gmp::mpz_limbs_write(raw, limb_count).cast::<u64>();
+                std::ptr::copy_nonoverlapping(limbs.as_ptr(), destination, significant_len);
+                gmp::mpz_limbs_finish(raw, if negative { -limb_count } else { limb_count });
+            }
+            Some(value)
+        }
+
         /// Borrow the value from the selected arbitrary-precision backend.
         #[inline]
         pub fn as_raw(&self) -> &RawMultiPrecisionInteger {
@@ -1532,6 +1564,30 @@ mod implementation {
         #[should_panic]
         fn mod_u64_rejects_zero_modulus() {
             MultiPrecisionInteger::from(1).mod_u64(0);
+        }
+
+        #[cfg(feature = "integer-gmp")]
+        #[test]
+        fn writable_limb_constructor_normalizes_sign_and_zero() {
+            if gmp::NUMB_BITS != 64 || gmp::NAIL_BITS != 0 {
+                return;
+            }
+            for (limbs, negative) in [
+                (&[][..], false),
+                (&[0][..], true),
+                (&[1][..], false),
+                (&[1][..], true),
+                (&[u64::MAX, 0, 7][..], false),
+                (&[u64::MAX, 0, 7, 0][..], true),
+            ] {
+                let actual = MultiPrecisionInteger::try_from_lsf_limbs(limbs, negative).unwrap();
+                let mut expected =
+                    RawMultiPrecisionInteger::from_digits(limbs, rug::integer::Order::Lsf);
+                if negative {
+                    expected = -expected;
+                }
+                assert_eq!(actual.as_raw(), &expected);
+            }
         }
 
         #[cfg(feature = "integer-gmp")]

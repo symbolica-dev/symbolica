@@ -21,7 +21,6 @@ use crate::kernels::{
 use gmp_mpfr_sys::gmp;
 #[cfg(feature = "integer-gmp")]
 use rug::integer::Order as RugIntegerOrder;
-#[cfg(feature = "integer-gmp")]
 use smallvec::SmallVec;
 
 #[cfg(feature = "integer-gmp")]
@@ -44,6 +43,527 @@ pub(super) fn u128_product_significant_bits(left: u128, right: u128) -> u64 {
     let high = left_high * right_high + (lower_cross >> u64::BITS) + (upper_cross >> u64::BITS);
     debug_assert_ne!(high, 0);
     u64::from(u128::BITS) + u64::from(u128::BITS - high.leading_zeros())
+}
+
+#[cfg(feature = "integer-gmp")]
+#[derive(Clone, Copy)]
+struct FixedLimbAbsoluteBitStatistics {
+    l1_bits: u64,
+    maximum_bits: u64,
+}
+
+#[cfg(feature = "integer-gmp")]
+/// Compute L1-sum and maximum-magnitude bit lengths with a bounded native-limb accumulator.
+///
+/// This supplies a safe Kronecker digit bound without allocating GMP sums when every coefficient
+/// magnitude occupies at most eight limbs and their complete sum fits in nine limbs.
+fn try_fixed_limb_absolute_bit_statistics(
+    coefficients: &[Integer],
+) -> Option<FixedLimbAbsoluteBitStatistics> {
+    const MAX_COEFFICIENT_LIMBS: usize = 8;
+    let mut sum = [0u64; MAX_COEFFICIENT_LIMBS + 1];
+    let mut maximum_bits = 0u64;
+
+    #[inline(always)]
+    fn add_magnitude(sum: &mut [u64; 9], magnitude: &[u64]) -> Option<u64> {
+        if magnitude.len() > 8 {
+            return None;
+        }
+        let significant_len = magnitude
+            .iter()
+            .rposition(|&limb| limb != 0)
+            .map_or(0, |position| position + 1);
+        if significant_len == 0 {
+            return Some(0);
+        }
+
+        let mut carry = false;
+        for (position, &limb) in magnitude[..significant_len].iter().enumerate() {
+            let (value, add_overflow) = sum[position].overflowing_add(limb);
+            let (value, carry_overflow) = value.overflowing_add(u64::from(carry));
+            sum[position] = value;
+            carry = add_overflow || carry_overflow;
+        }
+        let mut position = significant_len;
+        while carry {
+            let slot = sum.get_mut(position)?;
+            let (value, overflow) = slot.overflowing_add(1);
+            *slot = value;
+            carry = overflow;
+            position += 1;
+        }
+
+        let high = magnitude[significant_len - 1];
+        Some(
+            (significant_len as u64 - 1) * u64::from(u64::BITS)
+                + u64::from(u64::BITS - high.leading_zeros()),
+        )
+    }
+
+    for coefficient in coefficients {
+        let coefficient_bits = match coefficient {
+            Integer::Single(value) => {
+                let magnitude = value.unsigned_abs();
+                add_magnitude(&mut sum, std::slice::from_ref(&magnitude))?
+            }
+            Integer::Double(value) => {
+                let magnitude = value.get().unsigned_abs();
+                let words = [magnitude as u64, (magnitude >> 64) as u64];
+                add_magnitude(&mut sum, &words)?
+            }
+            Integer::Large(value) => add_magnitude(&mut sum, value.as_raw().as_limbs())?,
+        };
+        maximum_bits = maximum_bits.max(coefficient_bits);
+    }
+
+    let sum_len = sum
+        .iter()
+        .rposition(|&limb| limb != 0)
+        .map_or(0, |position| position + 1);
+    let l1_bits = if sum_len == 0 {
+        0
+    } else {
+        (sum_len as u64 - 1) * u64::from(u64::BITS)
+            + u64::from(u64::BITS - sum[sum_len - 1].leading_zeros())
+    };
+    Some(FixedLimbAbsoluteBitStatistics {
+        l1_bits,
+        maximum_bits,
+    })
+}
+
+#[cfg(feature = "integer-gmp")]
+#[inline]
+fn bit_bound_from_factor_bits(left_bits: u64, right_bits: u64) -> Option<u64> {
+    if left_bits == 0 || right_bits == 0 {
+        Some(0)
+    } else {
+        left_bits.checked_add(right_bits)
+    }
+}
+
+#[cfg(feature = "integer-gmp")]
+/// Encode one GMP-backed coefficient as a sign and native magnitude limbs for radix packing.
+///
+/// `negate` applies the sign chosen for the complete packed polynomial. `borrow` subtracts the
+/// carry propagated from the preceding signed radix digit. The caller converts a negative
+/// magnitude to its fixed-width two's-complement representation.
+#[inline(always)]
+fn try_encode_large_kronecker_digit(
+    digit: &mut [u64],
+    coefficient: &MultiPrecisionInteger,
+    negate: bool,
+    borrow: bool,
+) -> Option<bool> {
+    if digit.is_empty() {
+        return None;
+    }
+
+    digit.fill(0);
+    let magnitude_limbs = coefficient.as_raw().as_limbs();
+    if magnitude_limbs.len() > digit.len() {
+        return None;
+    }
+    digit[..magnitude_limbs.len()].copy_from_slice(magnitude_limbs);
+
+    let nonzero = !magnitude_limbs.is_empty();
+    let mut negative = nonzero && (coefficient.is_negative() != negate);
+    if !borrow {
+        return Some(negative);
+    }
+
+    if negative {
+        let mut carry = true;
+        for limb in digit.iter_mut() {
+            let (value, overflow) = limb.overflowing_add(u64::from(carry));
+            *limb = value;
+            carry = overflow;
+            if !carry {
+                break;
+            }
+        }
+        if carry {
+            return None;
+        }
+    } else if nonzero {
+        let mut borrow = true;
+        for limb in digit.iter_mut() {
+            let (value, overflow) = limb.overflowing_sub(u64::from(borrow));
+            *limb = value;
+            borrow = overflow;
+            if !borrow {
+                break;
+            }
+        }
+        debug_assert!(!borrow);
+    } else {
+        digit[0] = 1;
+        negative = true;
+    }
+
+    Some(negative)
+}
+
+#[cfg(feature = "integer-gmp")]
+enum NormalizedKroneckerDigit {
+    Fixed(i128),
+    Large { limb_count: usize, negative: bool },
+}
+
+#[cfg(feature = "integer-gmp")]
+enum DecodedKroneckerDigit {
+    Fixed {
+        value: i128,
+        carry_out: bool,
+    },
+    Large {
+        magnitude_limbs: [u64; 8],
+        limb_count: usize,
+        negative: bool,
+        carry_out: bool,
+    },
+}
+
+#[cfg(feature = "integer-gmp")]
+#[inline(always)]
+fn try_normalize_fixed_kronecker_digit<const LIMBS: usize>(
+    words: &mut [u64; LIMBS],
+    digit_bits: usize,
+    carry_in: bool,
+    signed_coefficients: bool,
+    product_negative: bool,
+) -> Option<(NormalizedKroneckerDigit, bool)> {
+    if digit_bits == 0 || LIMBS == 0 || LIMBS > 8 || digit_bits.div_ceil(64) != LIMBS {
+        return None;
+    }
+
+    let last = LIMBS - 1;
+    let trailing_bits = digit_bits % 64;
+    debug_assert!(
+        trailing_bits == 0 || words[last] >> trailing_bits == 0,
+        "the extracted radix digit must be masked to its partial final limb",
+    );
+
+    let mut overflow_radix = false;
+    if carry_in {
+        let mut carry = true;
+        for word in words.iter_mut() {
+            let (value, overflow) = word.overflowing_add(u64::from(carry));
+            *word = value;
+            carry = overflow;
+            if !carry {
+                break;
+            }
+        }
+
+        if trailing_bits == 0 {
+            overflow_radix = carry;
+        } else {
+            overflow_radix = words[last] >> trailing_bits != 0;
+            words[last] &= (1u64 << trailing_bits) - 1;
+        }
+    }
+    if overflow_radix && !signed_coefficients {
+        return None;
+    }
+
+    let sign_bit_index = digit_bits - 1;
+    let radix_negative =
+        signed_coefficients && words[sign_bit_index / 64] & (1u64 << (sign_bit_index % 64)) != 0;
+    let carry_out = signed_coefficients && (overflow_radix || radix_negative);
+
+    if radix_negative {
+        let mut carry = true;
+        for word in words.iter_mut() {
+            let (value, overflow) = (!*word).overflowing_add(u64::from(carry));
+            *word = value;
+            carry = overflow;
+        }
+        debug_assert!(!carry);
+        if trailing_bits != 0 {
+            words[last] &= (1u64 << trailing_bits) - 1;
+        }
+    }
+
+    let magnitude_fits_u128 = LIMBS <= 2 || words[2..].iter().all(|&word| word == 0);
+    let magnitude = magnitude_fits_u128.then(|| {
+        u128::from(words[0])
+            | if LIMBS > 1 {
+                u128::from(words[1]) << 64
+            } else {
+                0
+            }
+    });
+    let final_negative = magnitude.map_or(radix_negative != product_negative, |magnitude| {
+        magnitude != 0 && (radix_negative != product_negative)
+    });
+    let fixed = magnitude.and_then(|magnitude| {
+        if final_negative {
+            const I128_MIN_MAGNITUDE: u128 = 1u128 << 127;
+            if magnitude > I128_MIN_MAGNITUDE {
+                None
+            } else if magnitude == I128_MIN_MAGNITUDE {
+                Some(i128::MIN)
+            } else {
+                Some(-(magnitude as i128))
+            }
+        } else if magnitude <= i128::MAX as u128 {
+            Some(magnitude as i128)
+        } else {
+            None
+        }
+    });
+    if let Some(value) = fixed {
+        return Some((NormalizedKroneckerDigit::Fixed(value), carry_out));
+    }
+
+    let significant_limb_count = words.iter().rposition(|&word| word != 0)? + 1;
+    Some((
+        NormalizedKroneckerDigit::Large {
+            limb_count: significant_limb_count,
+            negative: final_negative,
+        },
+        carry_out,
+    ))
+}
+
+#[cfg(feature = "integer-gmp")]
+#[inline(always)]
+fn try_decode_fixed_kronecker_digit<const LIMBS: usize>(
+    mut words: [u64; LIMBS],
+    digit_bits: usize,
+    carry_in: bool,
+    signed_coefficients: bool,
+    product_negative: bool,
+) -> Option<DecodedKroneckerDigit> {
+    let (normalized, carry_out) = try_normalize_fixed_kronecker_digit(
+        &mut words,
+        digit_bits,
+        carry_in,
+        signed_coefficients,
+        product_negative,
+    )?;
+    match normalized {
+        NormalizedKroneckerDigit::Fixed(value) => {
+            Some(DecodedKroneckerDigit::Fixed { value, carry_out })
+        }
+        NormalizedKroneckerDigit::Large {
+            limb_count,
+            negative,
+        } => {
+            let mut magnitude_limbs = [0u64; 8];
+            magnitude_limbs[..LIMBS].copy_from_slice(&words);
+            Some(DecodedKroneckerDigit::Large {
+                magnitude_limbs,
+                limb_count,
+                negative,
+                carry_out,
+            })
+        }
+    }
+}
+
+#[cfg(feature = "integer-gmp")]
+/// Normalize one signed radix digit using native limbs.
+///
+/// The incoming carry is applied before the radix sign is read. Values outside `i128` retain
+/// their normalized sign-magnitude limbs so the caller can construct the final GMP coefficient
+/// without repeating carry propagation or subtracting the radix.
+#[inline(always)]
+fn try_decode_small_kronecker_digit(
+    digit_limbs: &[u64],
+    digit_bits: usize,
+    carry_in: bool,
+    signed_coefficients: bool,
+    product_negative: bool,
+) -> Option<DecodedKroneckerDigit> {
+    if digit_bits == 0 || digit_limbs.len() != digit_bits.div_ceil(64) {
+        return None;
+    }
+
+    match digit_limbs.len() {
+        1 => try_decode_fixed_kronecker_digit(
+            [digit_limbs[0]],
+            digit_bits,
+            carry_in,
+            signed_coefficients,
+            product_negative,
+        ),
+        2 => try_decode_fixed_kronecker_digit(
+            [digit_limbs[0], digit_limbs[1]],
+            digit_bits,
+            carry_in,
+            signed_coefficients,
+            product_negative,
+        ),
+        3 => try_decode_fixed_kronecker_digit(
+            [digit_limbs[0], digit_limbs[1], digit_limbs[2]],
+            digit_bits,
+            carry_in,
+            signed_coefficients,
+            product_negative,
+        ),
+        4 => try_decode_fixed_kronecker_digit(
+            [
+                digit_limbs[0],
+                digit_limbs[1],
+                digit_limbs[2],
+                digit_limbs[3],
+            ],
+            digit_bits,
+            carry_in,
+            signed_coefficients,
+            product_negative,
+        ),
+        5 => try_decode_fixed_kronecker_digit(
+            [
+                digit_limbs[0],
+                digit_limbs[1],
+                digit_limbs[2],
+                digit_limbs[3],
+                digit_limbs[4],
+            ],
+            digit_bits,
+            carry_in,
+            signed_coefficients,
+            product_negative,
+        ),
+        6 => try_decode_fixed_kronecker_digit(
+            [
+                digit_limbs[0],
+                digit_limbs[1],
+                digit_limbs[2],
+                digit_limbs[3],
+                digit_limbs[4],
+                digit_limbs[5],
+            ],
+            digit_bits,
+            carry_in,
+            signed_coefficients,
+            product_negative,
+        ),
+        7 => try_decode_fixed_kronecker_digit(
+            [
+                digit_limbs[0],
+                digit_limbs[1],
+                digit_limbs[2],
+                digit_limbs[3],
+                digit_limbs[4],
+                digit_limbs[5],
+                digit_limbs[6],
+            ],
+            digit_bits,
+            carry_in,
+            signed_coefficients,
+            product_negative,
+        ),
+        8 => try_decode_fixed_kronecker_digit(
+            [
+                digit_limbs[0],
+                digit_limbs[1],
+                digit_limbs[2],
+                digit_limbs[3],
+                digit_limbs[4],
+                digit_limbs[5],
+                digit_limbs[6],
+                digit_limbs[7],
+            ],
+            digit_bits,
+            carry_in,
+            signed_coefficients,
+            product_negative,
+        ),
+        _ => None,
+    }
+}
+
+#[cfg(feature = "integer-gmp")]
+/// Decode consecutive bounded-width radix digits directly from a product limb slice.
+///
+/// A fixed limb count lets the compiler unroll extraction and normalization. The bit cursor is
+/// advanced from the preceding position so each output avoids recomputing a multiplication,
+/// division, and dynamic digit-buffer size.
+#[inline]
+fn try_decode_fixed_kronecker_digits<const LIMBS: usize, F>(
+    limbs: &[u64],
+    digit_bits: usize,
+    output_len: usize,
+    signed_coefficients: bool,
+    product_negative: bool,
+    mut output_index: F,
+) -> Option<Vec<(u32, Integer)>>
+where
+    F: FnMut(usize) -> Option<u32>,
+{
+    if digit_bits == 0 || LIMBS == 0 || LIMBS > 8 || digit_bits.div_ceil(64) != LIMBS {
+        return None;
+    }
+
+    let trailing_bits = digit_bits % 64;
+    let mut carry = false;
+    let mut limb_index = 0usize;
+    let mut shift = 0usize;
+    let mut output = Vec::with_capacity(output_len);
+    for index in 0..output_len {
+        let mut words = [0u64; LIMBS];
+        let required_end = limb_index.checked_add(LIMBS)?;
+        let direct = required_end <= limbs.len() && (shift == 0 || required_end < limbs.len());
+        if direct {
+            for (offset, word) in words.iter_mut().enumerate() {
+                // SAFETY: `direct` checks the last low limb and, for nonzero shifts, the last high
+                // limb needed by every iteration of this fixed-size loop.
+                let low = unsafe { *limbs.get_unchecked(limb_index + offset) };
+                *word = low >> shift;
+                if shift != 0 {
+                    *word |=
+                        unsafe { *limbs.get_unchecked(limb_index + offset + 1) } << (64 - shift);
+                }
+            }
+        } else {
+            for (offset, word) in words.iter_mut().enumerate() {
+                *word = limbs.get(limb_index + offset).copied().unwrap_or(0) >> shift;
+                if shift != 0 {
+                    *word |=
+                        limbs.get(limb_index + offset + 1).copied().unwrap_or(0) << (64 - shift);
+                }
+            }
+        }
+        if trailing_bits != 0 {
+            words[LIMBS - 1] &= (1u64 << trailing_bits) - 1;
+        }
+
+        let (normalized, carry_out) = try_normalize_fixed_kronecker_digit(
+            &mut words,
+            digit_bits,
+            carry,
+            signed_coefficients,
+            product_negative,
+        )?;
+        match normalized {
+            NormalizedKroneckerDigit::Fixed(value) => {
+                carry = carry_out;
+                if value != 0 {
+                    output.push((output_index(index)?, Integer::from_double(value)));
+                }
+            }
+            NormalizedKroneckerDigit::Large {
+                limb_count,
+                negative,
+            } => {
+                carry = carry_out;
+                let digit =
+                    MultiPrecisionInteger::try_from_lsf_limbs(&words[..limb_count], negative)?;
+                debug_assert!(digit.to_i128().is_none());
+                output.push((output_index(index)?, Integer::Large(digit)));
+            }
+        }
+
+        let advanced_shift = shift.checked_add(digit_bits)?;
+        limb_index = limb_index.checked_add(advanced_shift / 64)?;
+        shift = advanced_shift % 64;
+    }
+    debug_assert!(!carry);
+    Some(output)
 }
 
 /// One dense-indexed integer multiplication operation.
@@ -145,20 +665,19 @@ impl<'a> DenseIntegerMul<'a> {
             return None;
         }
 
-        let left = left_coefficients
-            .iter()
-            .map(|coefficient| match coefficient {
-                Integer::Single(value) => *value,
-                Integer::Double(_) | Integer::Large(_) => unreachable!(),
-            })
-            .collect::<Vec<_>>();
-        let right = right_coefficients
-            .iter()
-            .map(|coefficient| match coefficient {
-                Integer::Single(value) => *value,
-                Integer::Double(_) | Integer::Large(_) => unreachable!(),
-            })
-            .collect::<Vec<_>>();
+        // Most fixed-coefficient dense products are short enough to keep both converted inputs
+        // on the stack. Larger inputs spill transparently while retaining the same convolution.
+        let collect_single = |coefficients: &[Integer]| {
+            coefficients
+                .iter()
+                .map(|coefficient| match coefficient {
+                    Integer::Single(value) => *value,
+                    Integer::Double(_) | Integer::Large(_) => unreachable!(),
+                })
+                .collect::<SmallVec<[i64; 128]>>()
+        };
+        let left = collect_single(left_coefficients);
+        let right = collect_single(right_coefficients);
 
         const BLOCK_SIZE: usize = 32;
         let mut output = vec![0i64; output_len];
@@ -346,9 +865,9 @@ impl<'a> DenseIntegerMul<'a> {
     /// Multiply a dense-indexed convolution by Kronecker substitution.
     ///
     /// Each coefficient is encoded as a sufficiently wide signed radix digit, the two complete
-    /// polynomials are packed into GMP integers, and one GMP multiplication computes the
-    /// convolution. A compact additive embedding is used when the supplied indices describe a
-    /// sufficiently large total-degree simplex with large holes in its mixed-radix box. The
+    /// polynomials are packed into native limb vectors, and one GMP limb multiplication computes
+    /// the convolution. A compact additive embedding is used when the supplied indices describe
+    /// a sufficiently large total-degree simplex with large holes in its mixed-radix box. The
     /// result is unpacked exactly, including signed carries.
     ///
     /// Returns `None` for small or insufficiently dense products, when a safe digit width cannot
@@ -361,6 +880,9 @@ impl<'a> DenseIntegerMul<'a> {
             right_coefficients,
             right_indices,
         } = *self;
+        if gmp::NUMB_BITS != 64 || gmp::NAIL_BITS != 0 {
+            return None;
+        }
         // Constructing and sorting the compact layout only pays off once the packed product is
         // large. Below this point GMP's multiplication is already cheap enough that layout setup
         // dominates the saved limbs.
@@ -459,7 +981,7 @@ impl<'a> DenseIntegerMul<'a> {
             }
 
             let mut sum = MultiPrecisionInteger::default();
-            let mut maximum = Integer::zero();
+            let mut maximum = None::<&Integer>;
             for coefficient in coefficients {
                 match coefficient {
                     Integer::Single(value) => sum += value.unsigned_abs(),
@@ -467,54 +989,109 @@ impl<'a> DenseIntegerMul<'a> {
                     Integer::Large(value) if value.is_negative() => sum -= value,
                     Integer::Large(value) => sum += value,
                 }
-                if coefficient.abs_cmp(&maximum).is_gt() {
-                    maximum = coefficient.abs();
+                if maximum.is_none_or(|current| coefficient.abs_cmp(current).is_gt()) {
+                    maximum = Some(coefficient);
                 }
             }
 
-            AbsoluteStatistics::Large {
-                sum,
-                maximum: maximum.to_multi_prec(),
+            let mut maximum = maximum.unwrap().clone().to_multi_prec();
+            if maximum.is_negative() {
+                maximum = -maximum;
             }
+
+            AbsoluteStatistics::Large { sum, maximum }
         }
 
-        let left_statistics = absolute_statistics(left_coefficients);
-        let right_statistics = absolute_statistics(right_coefficients);
-        let signed_coefficients = left_coefficients
-            .iter()
-            .chain(right_coefficients)
-            .any(Integer::is_negative);
+        let mut signed_coefficients = false;
+        let mut contains_large = false;
+        for coefficient in left_coefficients.iter().chain(right_coefficients) {
+            signed_coefficients |= coefficient.is_negative();
+            contains_large |= matches!(coefficient, Integer::Large(_));
+        }
+
+        let fixed_limb_bound = if contains_large {
+            match (
+                try_fixed_limb_absolute_bit_statistics(left_coefficients),
+                try_fixed_limb_absolute_bit_statistics(right_coefficients),
+            ) {
+                (Some(left), Some(right)) => Some(
+                    bit_bound_from_factor_bits(left.l1_bits, right.maximum_bits)?.min(
+                        bit_bound_from_factor_bits(right.l1_bits, left.maximum_bits)?,
+                    ),
+                ),
+                _ => None,
+            }
+        } else {
+            None
+        };
+
+        // Wider values fall back to a max-bit/collision bound only when its logarithmic slack is
+        // at most one thirty-second of the two coefficient widths. This caps the possible radix
+        // inflation while avoiding a multiprecision L1 pass. Height-skewed inputs retain the
+        // tighter exact calculation below.
+        let bounded_collision_bound = if contains_large && fixed_limb_bound.is_none() {
+            let maximum_bits = |coefficients: &[Integer]| {
+                coefficients
+                    .iter()
+                    .map(Integer::significant_bits)
+                    .max()
+                    .unwrap_or(0)
+            };
+            let maximum_product_bits =
+                maximum_bits(left_coefficients).checked_add(maximum_bits(right_coefficients))?;
+            let collision_count = left_coefficients.len().min(right_coefficients.len());
+            let collision_slack = if collision_count <= 1 {
+                0
+            } else {
+                u64::from(usize::BITS - (collision_count - 1).leading_zeros())
+            };
+            collision_slack
+                .checked_mul(32)
+                .is_some_and(|scaled| scaled <= maximum_product_bits)
+                .then(|| maximum_product_bits.checked_add(collision_slack))
+                .flatten()
+        } else {
+            None
+        };
 
         // Every convolution coefficient is bounded both by ||a||_1 max(b) and by
-        // ||b||_1 max(a). The usual collision-count bound cannot improve their minimum: the
-        // l1 norm of the shorter input is at most its term count times its maximum coefficient.
-        let coefficient_bound_bits = match (left_statistics, right_statistics) {
-            (
-                AbsoluteStatistics::Fixed {
-                    sum: left_sum,
-                    maximum: left_maximum,
-                },
-                AbsoluteStatistics::Fixed {
-                    sum: right_sum,
-                    maximum: right_maximum,
-                },
-            ) => u128_product_significant_bits(left_sum, right_maximum)
-                .min(u128_product_significant_bits(right_sum, left_maximum)),
-            (left_statistics, right_statistics) => {
-                let into_large = |statistics| match statistics {
-                    AbsoluteStatistics::Fixed { sum, maximum } => (
-                        MultiPrecisionInteger::from(sum),
-                        MultiPrecisionInteger::from(maximum),
-                    ),
-                    AbsoluteStatistics::Large { sum, maximum } => (sum, maximum),
-                };
-                let (left_sum, left_maximum) = into_large(left_statistics);
-                let (right_sum, right_maximum) = into_large(right_statistics);
-                let left_l1_bound = &left_sum * &right_maximum;
-                let right_l1_bound = &right_sum * &left_maximum;
-                left_l1_bound
-                    .significant_bits()
-                    .min(right_l1_bound.significant_bits())
+        // ||b||_1 max(a). Fixed coefficients use exact `u128` products; exceptional wide values
+        // use the same exact multiprecision products as before.
+        let coefficient_bound_bits = if let Some(bound) = fixed_limb_bound {
+            bound
+        } else if let Some(bound) = bounded_collision_bound {
+            bound
+        } else {
+            let left_statistics = absolute_statistics(left_coefficients);
+            let right_statistics = absolute_statistics(right_coefficients);
+            match (left_statistics, right_statistics) {
+                (
+                    AbsoluteStatistics::Fixed {
+                        sum: left_sum,
+                        maximum: left_maximum,
+                    },
+                    AbsoluteStatistics::Fixed {
+                        sum: right_sum,
+                        maximum: right_maximum,
+                    },
+                ) => u128_product_significant_bits(left_sum, right_maximum)
+                    .min(u128_product_significant_bits(right_sum, left_maximum)),
+                (left_statistics, right_statistics) => {
+                    let into_large = |statistics| match statistics {
+                        AbsoluteStatistics::Fixed { sum, maximum } => (
+                            MultiPrecisionInteger::from(sum),
+                            MultiPrecisionInteger::from(maximum),
+                        ),
+                        AbsoluteStatistics::Large { sum, maximum } => (sum, maximum),
+                    };
+                    let (left_sum, left_maximum) = into_large(left_statistics);
+                    let (right_sum, right_maximum) = into_large(right_statistics);
+                    let left_l1_bound = &left_sum * &right_maximum;
+                    let right_l1_bound = &right_sum * &left_maximum;
+                    left_l1_bound
+                        .significant_bits()
+                        .min(right_l1_bound.significant_bits())
+                }
             }
         };
         let digit_bits = coefficient_bound_bits.checked_add(u64::from(signed_coefficients))?;
@@ -551,12 +1128,17 @@ impl<'a> DenseIntegerMul<'a> {
             return None;
         }
 
+        struct PackedKronecker {
+            limbs: Vec<u64>,
+            negative: bool,
+        }
+
         fn pack(
             coefficients: &[Integer],
             indices: &[u32],
             index_offset: u32,
             digit_bits: usize,
-        ) -> Option<MultiPrecisionInteger> {
+        ) -> Option<PackedKronecker> {
             debug_assert_eq!(coefficients.len(), indices.len());
 
             #[inline(always)]
@@ -638,18 +1220,18 @@ impl<'a> DenseIntegerMul<'a> {
                 negative
             }
 
-            /// Pack consecutive single- and double-width coefficients with a fixed stack digit.
+            /// Pack consecutive coefficients with a fixed stack digit.
             ///
             /// This path is used by dense univariate products whose signed radix digit occupies at
-            /// most three limbs. The general packer below handles sparse supports and GMP-backed
+            /// most eight limbs. The general packer below handles sparse supports and wider
             /// coefficients.
             #[inline]
-            fn pack_contiguous_fixed<const LIMBS: usize>(
+            fn pack_contiguous<const LIMBS: usize>(
                 coefficients: &[Integer],
                 indices: &[u32],
                 index_offset: u32,
                 digit_bits: usize,
-            ) -> Option<MultiPrecisionInteger> {
+            ) -> Option<PackedKronecker> {
                 if coefficients.len() != indices.len()
                     || coefficients.is_empty()
                     || digit_bits.div_ceil(64) != LIMBS
@@ -660,26 +1242,37 @@ impl<'a> DenseIntegerMul<'a> {
                     return None;
                 }
 
-                let fixed_coefficient = |coefficient: &Integer| match coefficient {
-                    Integer::Single(value) => Some(i128::from(*value)),
-                    Integer::Double(value) => Some(value.get()),
-                    Integer::Large(_) => None,
-                };
-                let leading_negative = fixed_coefficient(coefficients.last()?)? < 0;
+                let leading_negative = coefficients.last()?.is_negative();
                 let digit_count = indices.last()?.checked_sub(index_offset)? as usize + 1;
                 let packed_bits = digit_count.checked_mul(digit_bits)?;
                 let mut packed_limbs = vec![0u64; packed_bits.checked_add(63)? / 64];
                 let mut borrow = false;
+                let mut bit_index = (indices.first()?.checked_sub(index_offset)? as usize)
+                    .checked_mul(digit_bits)?;
 
-                for (coefficient, &index) in coefficients.iter().zip(indices) {
+                for coefficient in coefficients {
                     let mut digit = [0u64; LIMBS];
                     let borrow_in = borrow;
-                    borrow = encode_primitive_digit(
-                        &mut digit,
-                        fixed_coefficient(coefficient)?,
-                        leading_negative,
-                        borrow_in,
-                    );
+                    borrow = match coefficient {
+                        Integer::Single(value) => Some(encode_primitive_digit(
+                            &mut digit,
+                            i128::from(*value),
+                            leading_negative,
+                            borrow_in,
+                        )),
+                        Integer::Double(value) => Some(encode_primitive_digit(
+                            &mut digit,
+                            value.get(),
+                            leading_negative,
+                            borrow_in,
+                        )),
+                        Integer::Large(value) => try_encode_large_kronecker_digit(
+                            &mut digit,
+                            value,
+                            leading_negative,
+                            borrow_in,
+                        ),
+                    }?;
                     if borrow {
                         let mut carry = true;
                         for limb in &mut digit {
@@ -692,24 +1285,46 @@ impl<'a> DenseIntegerMul<'a> {
                     if digit_bits % 64 != 0 {
                         *digit.last_mut()? &= low_mask(digit_bits % 64);
                     }
-                    let local_index = index.checked_sub(index_offset)? as usize;
-                    write_digit(&mut packed_limbs, local_index * digit_bits, &digit);
-                }
-                debug_assert!(!borrow);
 
-                let mut packed = MultiPrecisionInteger::from_raw(
-                    RawMultiPrecisionInteger::from_digits(&packed_limbs, RugIntegerOrder::Lsf),
-                );
-                if leading_negative {
-                    packed = -packed;
+                    let limb_index = bit_index / 64;
+                    let shift = bit_index % 64;
+                    if shift == 0 {
+                        packed_limbs[limb_index..limb_index + LIMBS].copy_from_slice(&digit);
+                    } else {
+                        let preserved_low = packed_limbs[limb_index] & low_mask(shift);
+                        packed_limbs[limb_index] = preserved_low | (digit[0] << shift);
+                        for offset in 1..LIMBS {
+                            packed_limbs[limb_index + offset] =
+                                (digit[offset - 1] >> (64 - shift)) | (digit[offset] << shift);
+                        }
+                        if let Some(high) = packed_limbs.get_mut(limb_index + LIMBS) {
+                            *high = digit[LIMBS - 1] >> (64 - shift);
+                        }
+                    }
+                    bit_index = bit_index.checked_add(digit_bits)?;
                 }
-                Some(packed)
+                if borrow {
+                    return None;
+                }
+
+                while packed_limbs.last() == Some(&0) {
+                    packed_limbs.pop();
+                }
+                (!packed_limbs.is_empty()).then_some(PackedKronecker {
+                    limbs: packed_limbs,
+                    negative: leading_negative,
+                })
             }
 
             let fixed_contiguous = match digit_bits.div_ceil(64) {
-                1 => pack_contiguous_fixed::<1>(coefficients, indices, index_offset, digit_bits),
-                2 => pack_contiguous_fixed::<2>(coefficients, indices, index_offset, digit_bits),
-                3 => pack_contiguous_fixed::<3>(coefficients, indices, index_offset, digit_bits),
+                1 => pack_contiguous::<1>(coefficients, indices, index_offset, digit_bits),
+                2 => pack_contiguous::<2>(coefficients, indices, index_offset, digit_bits),
+                3 => pack_contiguous::<3>(coefficients, indices, index_offset, digit_bits),
+                4 => pack_contiguous::<4>(coefficients, indices, index_offset, digit_bits),
+                5 => pack_contiguous::<5>(coefficients, indices, index_offset, digit_bits),
+                6 => pack_contiguous::<6>(coefficients, indices, index_offset, digit_bits),
+                7 => pack_contiguous::<7>(coefficients, indices, index_offset, digit_bits),
+                8 => pack_contiguous::<8>(coefficients, indices, index_offset, digit_bits),
                 _ => None,
             };
             if fixed_contiguous.is_some() {
@@ -750,35 +1365,25 @@ impl<'a> DenseIntegerMul<'a> {
 
                 let borrow_in = borrow;
                 borrow = match coefficient {
-                    Integer::Single(value) => encode_primitive_digit(
+                    Integer::Single(value) => Some(encode_primitive_digit(
                         &mut digit,
                         i128::from(*value),
                         leading_negative,
                         borrow_in,
+                    )),
+                    Integer::Double(value) => Some(encode_primitive_digit(
+                        &mut digit,
+                        value.get(),
+                        leading_negative,
+                        borrow_in,
+                    )),
+                    Integer::Large(value) => try_encode_large_kronecker_digit(
+                        &mut digit,
+                        value,
+                        leading_negative,
+                        borrow_in,
                     ),
-                    Integer::Double(value) => {
-                        encode_primitive_digit(&mut digit, value.get(), leading_negative, borrow_in)
-                    }
-                    Integer::Large(value) => {
-                        let mut value = value.clone();
-                        if leading_negative {
-                            value = -value;
-                        }
-                        if borrow_in {
-                            value -= 1i64;
-                        }
-
-                        let negative = value.is_negative();
-                        if negative {
-                            value = -value;
-                        }
-                        digit.fill(0);
-                        let value_limbs = value.as_raw().as_limbs();
-                        debug_assert!(value_limbs.len() <= digit.len());
-                        digit[..value_limbs.len()].copy_from_slice(value_limbs);
-                        negative
-                    }
-                };
+                }?;
 
                 if borrow {
                     let mut carry = true;
@@ -795,98 +1400,17 @@ impl<'a> DenseIntegerMul<'a> {
                 write_digit(&mut limbs, index * digit_bits, &digit);
                 next_index = index + 1;
             }
-            debug_assert!(!borrow);
-
-            let mut packed = MultiPrecisionInteger::from_raw(
-                RawMultiPrecisionInteger::from_digits(&limbs, RugIntegerOrder::Lsf),
-            );
-            if leading_negative {
-                packed = -packed;
-            }
-            Some(packed)
-        }
-
-        /// Decode one signed radix digit with native arithmetic when its final magnitude fits in
-        /// `i128`. The returned boolean is the signed carry into the next digit.
-        #[inline(always)]
-        fn try_decode_i128_digit(
-            digit_limbs: &[u64],
-            digit_bits: usize,
-            carry_in: bool,
-            signed_coefficients: bool,
-            product_negative: bool,
-        ) -> Option<(i128, bool)> {
-            if digit_bits == 0 || digit_limbs.len() > 4 {
+            if borrow {
                 return None;
             }
 
-            let mut words = [0u64; 4];
-            words[..digit_limbs.len()].copy_from_slice(digit_limbs);
-            let last = digit_limbs.len().checked_sub(1)?;
-            let trailing_bits = digit_bits % 64;
-            let mut overflow_radix = false;
-            if carry_in {
-                let mut carry = true;
-                for word in &mut words[..digit_limbs.len()] {
-                    let (value, overflow) = word.overflowing_add(u64::from(carry));
-                    *word = value;
-                    carry = overflow;
-                    if !carry {
-                        break;
-                    }
-                }
-
-                if trailing_bits == 0 {
-                    overflow_radix = carry;
-                } else {
-                    overflow_radix = words[last] >> trailing_bits != 0;
-                    words[last] &= (1u64 << trailing_bits) - 1;
-                }
+            while limbs.last() == Some(&0) {
+                limbs.pop();
             }
-            if overflow_radix && !signed_coefficients {
-                return None;
-            }
-
-            let sign_bit_index = digit_bits - 1;
-            let negative = signed_coefficients
-                && words[sign_bit_index / 64] & (1u64 << (sign_bit_index % 64)) != 0;
-            let carry_out = signed_coefficients && (overflow_radix || negative);
-
-            if negative {
-                let mut carry = true;
-                for word in &mut words[..digit_limbs.len()] {
-                    let (value, overflow) = (!*word).overflowing_add(u64::from(carry));
-                    *word = value;
-                    carry = overflow;
-                }
-                debug_assert!(!carry);
-                if trailing_bits != 0 {
-                    words[last] &= (1u64 << trailing_bits) - 1;
-                }
-            }
-
-            if digit_limbs.len() > 2 && words[2..digit_limbs.len()].iter().any(|&word| word != 0) {
-                return None;
-            }
-            let magnitude = u128::from(words[0]) | (u128::from(words[1]) << 64);
-            let final_negative = magnitude != 0 && (negative != product_negative);
-            let value = if final_negative {
-                const I128_MIN_MAGNITUDE: u128 = 1u128 << 127;
-                if magnitude > I128_MIN_MAGNITUDE {
-                    return None;
-                }
-                if magnitude == I128_MIN_MAGNITUDE {
-                    i128::MIN
-                } else {
-                    -(magnitude as i128)
-                }
-            } else {
-                if magnitude > i128::MAX as u128 {
-                    return None;
-                }
-                magnitude as i128
-            };
-            Some((value, carry_out))
+            (!limbs.is_empty()).then_some(PackedKronecker {
+                limbs,
+                negative: leading_negative,
+            })
         }
 
         let left = pack(
@@ -901,13 +1425,85 @@ impl<'a> DenseIntegerMul<'a> {
             right_index_offset,
             digit_bits_usize,
         )?;
-        let product = MultiPrecisionInteger::from_raw(RawMultiPrecisionInteger::from(
-            left.as_raw() * right.as_raw(),
-        ));
-
-        let product_negative = product.is_negative();
-        let limbs = product.as_raw().as_limbs();
+        let product_negative = left.negative != right.negative;
+        let (long, short) = if left.limbs.len() >= right.limbs.len() {
+            (left.limbs.as_slice(), right.limbs.as_slice())
+        } else {
+            (right.limbs.as_slice(), left.limbs.as_slice())
+        };
+        let product_limb_count = long.len().checked_add(short.len())?;
+        let long_limb_count = gmp::size_t::try_from(long.len()).ok()?;
+        let short_limb_count = gmp::size_t::try_from(short.len()).ok()?;
+        let mut product_limbs = Vec::<u64>::with_capacity(product_limb_count);
+        // Both packed operands are normalized nonzero magnitudes and the 2^29-bit workspace
+        // bound makes their checked GMP sizes representable. On this 64-bit, nail-free path the
+        // native limb pointers have the same representation as `u64`. GMP initializes exactly
+        // the sum-length, nonoverlapping destination before its vector length is exposed.
+        unsafe {
+            gmp::mpn_mul(
+                product_limbs.as_mut_ptr().cast(),
+                long.as_ptr().cast(),
+                long_limb_count,
+                short.as_ptr().cast(),
+                short_limb_count,
+            );
+            product_limbs.set_len(product_limb_count);
+        }
+        drop(left);
+        drop(right);
+        if product_limbs.last() == Some(&0) {
+            product_limbs.pop();
+        }
+        debug_assert!(!product_limbs.is_empty());
+        let limbs = product_limbs.as_slice();
         let limbs_per_digit = digit_bits_usize.div_ceil(64);
+
+        macro_rules! decode_fixed_digits {
+            ($limb_count:literal) => {{
+                if let Some(layout) = simplex_layout.as_ref() {
+                    try_decode_fixed_kronecker_digits::<$limb_count, _>(
+                        limbs,
+                        digit_bits_usize,
+                        decoded_output_len,
+                        signed_coefficients,
+                        product_negative,
+                        |index| {
+                            let decoded = *layout.decode_indices.get(index)?;
+                            debug_assert_ne!(decoded, u32::MAX);
+                            Some(decoded)
+                        },
+                    )
+                } else {
+                    try_decode_fixed_kronecker_digits::<$limb_count, _>(
+                        limbs,
+                        digit_bits_usize,
+                        decoded_output_len,
+                        signed_coefficients,
+                        product_negative,
+                        |index| u32::try_from(index).ok()?.checked_add(output_index_offset),
+                    )
+                }
+            }};
+        }
+
+        let fixed_output = match limbs_per_digit {
+            1 => decode_fixed_digits!(1),
+            2 => decode_fixed_digits!(2),
+            3 => decode_fixed_digits!(3),
+            4 => decode_fixed_digits!(4),
+            5 => decode_fixed_digits!(5),
+            6 => decode_fixed_digits!(6),
+            7 => decode_fixed_digits!(7),
+            8 => decode_fixed_digits!(8),
+            _ => None,
+        };
+        if let Some(mut output) = fixed_output {
+            if simplex_layout.is_some() {
+                output.sort_unstable_by_key(|term| term.0);
+            }
+            return Some(output);
+        }
+
         let mut carry = false;
         let mut radix = None;
         let mut output = Vec::with_capacity(decoded_output_len);
@@ -938,23 +1534,39 @@ impl<'a> DenseIntegerMul<'a> {
                 *digit_limbs.last_mut().unwrap() &= (1u64 << (digit_bits_usize % 64)) - 1;
             }
 
-            if let Some((value, carry_out)) = try_decode_i128_digit(
+            if let Some(decoded) = try_decode_small_kronecker_digit(
                 &digit_limbs,
                 digit_bits_usize,
                 carry,
                 signed_coefficients,
                 product_negative,
             ) {
-                carry = carry_out;
-                if value != 0 {
-                    output.push((output_index(index)?, Integer::from_double(value)));
+                match decoded {
+                    DecodedKroneckerDigit::Fixed { value, carry_out } => {
+                        carry = carry_out;
+                        if value != 0 {
+                            output.push((output_index(index)?, Integer::from_double(value)));
+                        }
+                    }
+                    DecodedKroneckerDigit::Large {
+                        magnitude_limbs,
+                        limb_count,
+                        negative,
+                        carry_out,
+                    } => {
+                        carry = carry_out;
+                        let digit = MultiPrecisionInteger::try_from_lsf_limbs(
+                            &magnitude_limbs[..limb_count],
+                            negative,
+                        )?;
+                        debug_assert!(digit.to_i128().is_none());
+                        output.push((output_index(index)?, Integer::Large(digit)));
+                    }
                 }
                 continue;
             }
 
-            let raw_digit =
-                RawMultiPrecisionInteger::from_digits(&digit_limbs, RugIntegerOrder::Lsf);
-            let mut digit = MultiPrecisionInteger::from_raw(raw_digit);
+            let mut digit = MultiPrecisionInteger::try_from_lsf_limbs(&digit_limbs, false)?;
             if carry {
                 digit += 1i64;
             }
@@ -1524,7 +2136,7 @@ impl<'a> TotalDegreeIntegerMul<'a> {
     /// input width, GMP does not use 64-bit limbs without nails, or the bounded workspace would be
     /// too large.
     fn try_limb(self) -> Option<Vec<(u32, Integer)>> {
-        const MAX_INPUT_LIMBS: usize = 32;
+        const MAX_INPUT_LIMBS: usize = 128;
         const MAX_OUTPUT_LIMBS: usize = 1 << 26;
         const BLOCK_SIZE: usize = 32;
 
@@ -2004,6 +2616,412 @@ impl PolynomialKernels<Integer> for IntegerRing {
         request: DensePolynomialExactDivisionRequest<'_, Integer>,
     ) -> Option<Vec<(u32, Integer)>> {
         DenseIntegerExactDivision::new(request).run()
+    }
+
+    #[inline]
+    fn preferred_total_degree_mul_workspace_ratio(
+        &self,
+        left_coefficients: &[Integer],
+        right_coefficients: &[Integer],
+        output_len: usize,
+    ) -> Option<usize> {
+        const FIXED_I128_ACCUMULATOR_WORKSPACE_RATIO: usize = 16;
+        #[cfg(feature = "integer-gmp")]
+        const LIMB_ACCUMULATOR_WORKSPACE_RATIO: usize = 8;
+
+        if preferred_fixed_i128_dense_accumulator_is_bounded(left_coefficients, right_coefficients)
+        {
+            return Some(FIXED_I128_ACCUMULATOR_WORKSPACE_RATIO);
+        }
+
+        #[cfg(feature = "integer-gmp")]
+        {
+            total_degree_limb_workspace_is_bounded(
+                left_coefficients,
+                right_coefficients,
+                output_len,
+            )
+            .then_some(LIMB_ACCUMULATOR_WORKSPACE_RATIO)
+        }
+        #[cfg(feature = "integer-malachite")]
+        {
+            let _ = (left_coefficients, right_coefficients, output_len);
+            None
+        }
+    }
+}
+
+/// Return whether mixed-radix multiplication could accumulate these coefficients in `i128` cells.
+fn preferred_fixed_i128_dense_accumulator_is_bounded(
+    left_coefficients: &[Integer],
+    right_coefficients: &[Integer],
+) -> bool {
+    let maximum_fixed = |coefficients: &[Integer]| {
+        coefficients.iter().try_fold(0u128, |maximum, coefficient| {
+            let value = match coefficient {
+                Integer::Single(value) => i128::from(*value),
+                Integer::Double(value) => value.get(),
+                Integer::Large(_) => return None,
+            };
+            Some(maximum.max(value.unsigned_abs()))
+        })
+    };
+    let Some(maximum_left) = maximum_fixed(left_coefficients) else {
+        return false;
+    };
+    let Some(maximum_right) = maximum_fixed(right_coefficients) else {
+        return false;
+    };
+    maximum_left
+        .checked_mul(maximum_right)
+        .and_then(|bound| {
+            bound.checked_mul(left_coefficients.len().min(right_coefficients.len()) as u128)
+        })
+        .is_some_and(|bound| bound <= i128::MAX as u128)
+}
+
+#[cfg(feature = "integer-gmp")]
+/// Return whether the compact limb kernel can represent these inputs and its complete output.
+fn total_degree_limb_workspace_is_bounded(
+    left_coefficients: &[Integer],
+    right_coefficients: &[Integer],
+    output_len: usize,
+) -> bool {
+    const MAX_INPUT_LIMBS: u64 = 128;
+    const MAX_OUTPUT_LIMBS: usize = 1 << 26;
+
+    if gmp::NUMB_BITS != 64 || gmp::NAIL_BITS != 0 {
+        return false;
+    }
+    let maximum_bits = |coefficients: &[Integer]| {
+        coefficients
+            .iter()
+            .map(Integer::significant_bits)
+            .max()
+            .unwrap_or(0)
+    };
+    let maximum_left_bits = maximum_bits(left_coefficients);
+    let maximum_right_bits = maximum_bits(right_coefficients);
+    if maximum_left_bits.div_ceil(64) > MAX_INPUT_LIMBS
+        || maximum_right_bits.div_ceil(64) > MAX_INPUT_LIMBS
+    {
+        return false;
+    }
+
+    let products_per_coefficient = left_coefficients.len().min(right_coefficients.len());
+    let accumulation_bits = usize::BITS - products_per_coefficient.leading_zeros();
+    maximum_left_bits
+        .checked_add(maximum_right_bits)
+        .and_then(|bits| bits.checked_add(u64::from(accumulation_bits)))
+        .and_then(|bits| bits.checked_add(1))
+        .and_then(|bits| usize::try_from(bits.div_ceil(64)).ok())
+        .map(|limbs_per_coefficient| limbs_per_coefficient.max(1))
+        .and_then(|limbs_per_coefficient| output_len.checked_mul(limbs_per_coefficient))
+        .is_some_and(|output_limb_count| output_limb_count <= MAX_OUTPUT_LIMBS)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[cfg(feature = "integer-gmp")]
+    #[test]
+    fn fixed_limb_absolute_statistics_match_integer_arithmetic() {
+        let large = Integer::from(
+            (MultiPrecisionInteger::from(1u32) << 200u32) + MultiPrecisionInteger::from(37u32),
+        );
+        let coefficients = vec![
+            Integer::zero(),
+            Integer::from(-17),
+            Integer::from_double(i128::MIN),
+            large.clone(),
+            -large,
+        ];
+        let statistics = try_fixed_limb_absolute_bit_statistics(&coefficients).unwrap();
+        let mut sum = MultiPrecisionInteger::default();
+        let mut maximum_bits = 0;
+        for coefficient in &coefficients {
+            let mut magnitude = coefficient.clone().to_multi_prec();
+            if magnitude.is_negative() {
+                magnitude = -magnitude;
+            }
+            maximum_bits = maximum_bits.max(magnitude.significant_bits());
+            sum += magnitude;
+        }
+        assert_eq!(statistics.l1_bits, sum.significant_bits());
+        assert_eq!(statistics.maximum_bits, maximum_bits);
+
+        let too_wide = Integer::from(MultiPrecisionInteger::from(1u32) << 512u32);
+        assert!(try_fixed_limb_absolute_bit_statistics(&[too_wide]).is_none());
+    }
+
+    #[cfg(feature = "integer-gmp")]
+    #[test]
+    fn large_kronecker_encoder_applies_sign_and_borrow_in_native_limbs() {
+        let magnitude =
+            (MultiPrecisionInteger::from(1u32) << 180u32) + MultiPrecisionInteger::from(37u32);
+        let values = [
+            MultiPrecisionInteger::from(0u32),
+            MultiPrecisionInteger::from(1u32),
+            MultiPrecisionInteger::from(-1i32),
+            magnitude.clone(),
+            -magnitude,
+        ];
+
+        for coefficient in values {
+            for negate in [false, true] {
+                for borrow in [false, true] {
+                    let mut digit = [0u64; 4];
+                    let negative =
+                        try_encode_large_kronecker_digit(&mut digit, &coefficient, negate, borrow)
+                            .unwrap();
+                    let mut actual = MultiPrecisionInteger::from_raw(
+                        RawMultiPrecisionInteger::from_digits(&digit, RugIntegerOrder::Lsf),
+                    );
+                    if negative {
+                        actual = -actual;
+                    }
+
+                    let mut expected = coefficient.clone();
+                    if negate {
+                        expected = -expected;
+                    }
+                    if borrow {
+                        expected -= 1u32;
+                    }
+                    assert_eq!(actual, expected);
+                }
+            }
+        }
+
+        let overflow = -MultiPrecisionInteger::from(u64::MAX);
+        assert!(try_encode_large_kronecker_digit(&mut [0u64; 1], &overflow, false, true).is_none());
+    }
+
+    #[cfg(feature = "integer-gmp")]
+    #[test]
+    fn small_kronecker_decoder_applies_carry_before_the_radix_sign() {
+        const DIGIT_BITS: usize = 130;
+
+        let sign_threshold_minus_one = [u64::MAX, u64::MAX, 1];
+        let decoded = try_decode_small_kronecker_digit(
+            &sign_threshold_minus_one,
+            DIGIT_BITS,
+            true,
+            true,
+            false,
+        );
+        match decoded {
+            Some(DecodedKroneckerDigit::Large {
+                magnitude_limbs,
+                limb_count,
+                negative,
+                carry_out,
+            }) => {
+                assert_eq!(limb_count, 3);
+                assert_eq!(&magnitude_limbs[..limb_count], &[0, 0, 2]);
+                assert!(negative);
+                assert!(carry_out);
+            }
+            _ => panic!("carry must cross the sign threshold before the digit is classified"),
+        }
+
+        let radix_minus_one = [u64::MAX, u64::MAX, 3];
+        assert!(matches!(
+            try_decode_small_kronecker_digit(&radix_minus_one, DIGIT_BITS, true, true, false,),
+            Some(DecodedKroneckerDigit::Fixed {
+                value: 0,
+                carry_out: true,
+            })
+        ));
+    }
+
+    #[cfg(feature = "integer-gmp")]
+    #[test]
+    fn small_kronecker_decoder_classifies_both_signs_of_two_to_127() {
+        const DIGIT_BITS: usize = 130;
+        const HIGH_I128_BIT: u64 = 1u64 << 63;
+
+        let positive = [0, HIGH_I128_BIT, 0];
+        match try_decode_small_kronecker_digit(&positive, DIGIT_BITS, false, true, false) {
+            Some(DecodedKroneckerDigit::Large {
+                magnitude_limbs,
+                limb_count,
+                negative,
+                carry_out,
+            }) => {
+                assert_eq!(limb_count, 2);
+                assert_eq!(&magnitude_limbs[..limb_count], &[0, HIGH_I128_BIT]);
+                assert!(!negative);
+                assert!(!carry_out);
+            }
+            _ => panic!("positive 2^127 must use the large representation"),
+        }
+        assert!(matches!(
+            try_decode_small_kronecker_digit(&positive, DIGIT_BITS, false, true, true,),
+            Some(DecodedKroneckerDigit::Fixed {
+                value: i128::MIN,
+                carry_out: false,
+            })
+        ));
+
+        let negative = [0, HIGH_I128_BIT, 3];
+        assert!(matches!(
+            try_decode_small_kronecker_digit(&negative, DIGIT_BITS, false, true, false,),
+            Some(DecodedKroneckerDigit::Fixed {
+                value: i128::MIN,
+                carry_out: true,
+            })
+        ));
+        match try_decode_small_kronecker_digit(&negative, DIGIT_BITS, false, true, true) {
+            Some(DecodedKroneckerDigit::Large {
+                magnitude_limbs,
+                limb_count,
+                negative,
+                carry_out,
+            }) => {
+                assert_eq!(limb_count, 2);
+                assert_eq!(&magnitude_limbs[..limb_count], &[0, HIGH_I128_BIT]);
+                assert!(!negative);
+                assert!(carry_out);
+            }
+            _ => panic!("negating i128::MIN must produce positive 2^127"),
+        }
+    }
+
+    #[cfg(feature = "integer-gmp")]
+    #[test]
+    fn small_kronecker_decoder_matches_integer_arithmetic_at_limb_boundaries() {
+        fn decoded_value(decoded: DecodedKroneckerDigit) -> (Integer, bool) {
+            match decoded {
+                DecodedKroneckerDigit::Fixed { value, carry_out } => {
+                    (Integer::from_double(value), carry_out)
+                }
+                DecodedKroneckerDigit::Large {
+                    magnitude_limbs,
+                    limb_count,
+                    negative,
+                    carry_out,
+                } => {
+                    let raw = RawMultiPrecisionInteger::from_digits(
+                        &magnitude_limbs[..limb_count],
+                        RugIntegerOrder::Lsf,
+                    );
+                    let mut value = MultiPrecisionInteger::from_raw(raw);
+                    if negative {
+                        value = -value;
+                    }
+                    (Integer::from(value), carry_out)
+                }
+            }
+        }
+
+        for digit_bits in [
+            64usize, 65, 127, 128, 129, 191, 192, 193, 255, 256, 257, 319, 320, 321, 383, 384, 385,
+            447, 448, 449, 511, 512,
+        ] {
+            let radix = MultiPrecisionInteger::from(1u32) << digit_bits;
+            let sign_threshold = MultiPrecisionInteger::from(1u32) << (digit_bits - 1);
+            let mut sign_threshold_minus_one = sign_threshold.clone();
+            sign_threshold_minus_one -= 1u32;
+            let mut radix_minus_one = radix.clone();
+            radix_minus_one -= 1u32;
+            let values = [
+                MultiPrecisionInteger::from(0u32),
+                sign_threshold_minus_one,
+                sign_threshold.clone(),
+                radix_minus_one,
+            ];
+
+            for raw_value in values {
+                let mut digit_limbs = vec![0u64; digit_bits.div_ceil(64)];
+                let raw_limbs = raw_value.as_raw().as_limbs();
+                digit_limbs[..raw_limbs.len()].copy_from_slice(raw_limbs);
+
+                for signed_coefficients in [false, true] {
+                    for carry_in in [false, true] {
+                        let mut adjusted = raw_value.clone();
+                        adjusted += u32::from(carry_in);
+                        let overflow_radix = adjusted >= radix;
+                        if overflow_radix && !signed_coefficients {
+                            assert!(
+                                try_decode_small_kronecker_digit(
+                                    &digit_limbs,
+                                    digit_bits,
+                                    carry_in,
+                                    signed_coefficients,
+                                    false,
+                                )
+                                .is_none()
+                            );
+                            continue;
+                        }
+
+                        let carry_out =
+                            signed_coefficients && (overflow_radix || adjusted >= sign_threshold);
+                        if carry_out {
+                            adjusted -= &radix;
+                        }
+                        for product_negative in [false, true] {
+                            let mut expected = adjusted.clone();
+                            if product_negative {
+                                expected = -expected;
+                            }
+                            let decoded = try_decode_small_kronecker_digit(
+                                &digit_limbs,
+                                digit_bits,
+                                carry_in,
+                                signed_coefficients,
+                                product_negative,
+                            )
+                            .expect("at most eight limbs must use the bounded decoder");
+                            let (actual, actual_carry_out) = decoded_value(decoded);
+                            assert_eq!(actual, Integer::from(expected));
+                            assert_eq!(actual_carry_out, carry_out);
+                        }
+                    }
+                }
+            }
+        }
+
+        assert!(try_decode_small_kronecker_digit(&[0; 9], 513, false, true, false).is_none());
+    }
+
+    #[test]
+    fn preferred_fixed_i128_accumulator_checks_width_and_collisions() {
+        assert!(preferred_fixed_i128_dense_accumulator_is_bounded(
+            &[Integer::from(i128::MAX)],
+            &[Integer::from(1)],
+        ));
+        assert!(!preferred_fixed_i128_dense_accumulator_is_bounded(
+            &[Integer::from(i128::MAX)],
+            &[Integer::from(2)],
+        ));
+        let collision_heavy = vec![Integer::from(i64::MAX); 3];
+        assert!(!preferred_fixed_i128_dense_accumulator_is_bounded(
+            &collision_heavy,
+            &collision_heavy,
+        ));
+    }
+
+    #[cfg(feature = "integer-gmp")]
+    #[test]
+    fn total_degree_limb_workspace_accepts_wide_bounded_coefficients() {
+        let left = vec![
+            Integer::from(MultiPrecisionInteger::from(1u32) << 4096u32),
+            Integer::from(-(MultiPrecisionInteger::from(1u32) << 4095u32)),
+        ];
+        let right = vec![
+            Integer::from((MultiPrecisionInteger::from(1u32) << 4094u32) + 3u32),
+            Integer::from(-17),
+        ];
+
+        assert!(total_degree_limb_workspace_is_bounded(&left, &right, 1_287,));
+        assert!(!total_degree_limb_workspace_is_bounded(
+            &[Integer::from(MultiPrecisionInteger::from(1u32) << 8192u32,)],
+            &right,
+            1_287,
+        ));
     }
 }
 

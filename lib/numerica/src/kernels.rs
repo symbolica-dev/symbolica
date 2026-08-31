@@ -129,6 +129,24 @@ pub trait PolynomialKernels<E> {
     ) -> Option<Vec<(u32, E)>> {
         None
     }
+
+    /// Return a stricter mixed-radix-to-simplex workspace ratio for an early compact total-degree
+    /// attempt below the unconditional product-density threshold.
+    ///
+    /// The coefficient slices and compact output length are supplied before the rank tables are
+    /// built, allowing a kernel with several accumulator representations to select the workspace
+    /// threshold for one that can handle the complete request. Returning `None` leaves mixed-radix
+    /// multiplication first. The caller has already checked its standard workspace threshold, so
+    /// implementations should return at least that ratio. Requests at or above the unconditional
+    /// density threshold retain the standard workspace rule without calling this method.
+    fn preferred_total_degree_mul_workspace_ratio(
+        &self,
+        _left_coefficients: &[E],
+        _right_coefficients: &[E],
+        _output_len: usize,
+    ) -> Option<usize> {
+        Some(8)
+    }
 }
 
 /// Coefficient-domain kernels returned by [`crate::domains::Ring::kernels`].

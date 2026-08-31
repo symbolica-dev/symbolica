@@ -2461,7 +2461,7 @@ impl Ring for IntegerRing {
         let kernels = RingKernels::empty().with_polynomial(self);
         #[cfg(feature = "integer-gmp")]
         {
-            kernels.with_preferred_total_degree_mul_density(8)
+            kernels.with_preferred_total_degree_mul_density(5)
         }
         #[cfg(feature = "integer-malachite")]
         {
@@ -4650,6 +4650,94 @@ mod test {
         }
         assert_eq!(actual, expected);
         assert_eq!(actual[0], Integer::from_double(i128::MIN));
+    }
+
+    #[cfg(feature = "integer-gmp")]
+    #[test]
+    fn kronecker_decode_keeps_two_to_127_coefficients_canonical() {
+        if gmp_mpfr_sys::gmp::NUMB_BITS != 64 || gmp_mpfr_sys::gmp::NAIL_BITS != 0 {
+            return;
+        }
+        let indices = (0..32).collect::<Vec<u32>>();
+        let scale = 1i128 << 123;
+        let left = vec![Integer::from_double(scale); 32];
+        let right = (0..32)
+            .map(|index| Integer::from(if index < 16 { 1 } else { -1 }))
+            .collect::<Vec<_>>();
+
+        let actual_sparse = super::polynomial_kernels::DenseIntegerMul::try_kronecker_for_test(
+            63, &left, &indices, &right, &indices,
+        )
+        .unwrap();
+        let mut actual = vec![Integer::zero(); 63];
+        for (index, coefficient) in actual_sparse {
+            actual[index as usize] = coefficient;
+        }
+
+        let mut expected = vec![Integer::zero(); 63];
+        for (left_coefficient, &left_index) in left.iter().zip(&indices) {
+            for (right_coefficient, &right_index) in right.iter().zip(&indices) {
+                expected[left_index as usize + right_index as usize] +=
+                    left_coefficient * right_coefficient;
+            }
+        }
+        assert_eq!(actual, expected);
+
+        let positive_boundary = Integer::from(MultiPrecisionInteger::from(1u32) << 127u32);
+        assert_eq!(actual[15], positive_boundary);
+        assert!(matches!(&actual[15], Integer::Large(_)));
+        assert_eq!(actual[47], Integer::from_double(i128::MIN));
+        assert!(matches!(&actual[47], Integer::Double(_)));
+        assert_eq!(actual[31], Integer::zero());
+    }
+
+    #[cfg(feature = "integer-gmp")]
+    #[test]
+    fn contiguous_kronecker_limb_pipeline_matches_direct_convolution() {
+        if gmp_mpfr_sys::gmp::NUMB_BITS != 64 || gmp_mpfr_sys::gmp::NAIL_BITS != 0 {
+            return;
+        }
+        let left_indices = (0..31).collect::<Vec<u32>>();
+        let right_indices = (0..37).collect::<Vec<u32>>();
+        let output_len = left_indices.len() + right_indices.len() - 1;
+
+        for coefficient_bits in [0u32, 32, 64, 96, 128, 160, 192, 224] {
+            let scale = Integer::one() << coefficient_bits;
+            let left = (0..left_indices.len())
+                .map(|index| {
+                    let value = &scale + Integer::from(2 * index + 1);
+                    if index % 3 == 0 { -value } else { value }
+                })
+                .collect::<Vec<_>>();
+            let right = (0..right_indices.len())
+                .map(|index| {
+                    let value = &scale + Integer::from(3 * index + 2);
+                    if index % 4 == 1 { -value } else { value }
+                })
+                .collect::<Vec<_>>();
+
+            let actual_sparse = super::polynomial_kernels::DenseIntegerMul::try_kronecker_for_test(
+                output_len,
+                &left,
+                &left_indices,
+                &right,
+                &right_indices,
+            )
+            .unwrap();
+            let mut actual = vec![Integer::zero(); output_len];
+            for (index, coefficient) in actual_sparse {
+                actual[index as usize] = coefficient;
+            }
+
+            let mut expected = vec![Integer::zero(); output_len];
+            for (left_coefficient, &left_index) in left.iter().zip(&left_indices) {
+                for (right_coefficient, &right_index) in right.iter().zip(&right_indices) {
+                    expected[left_index as usize + right_index as usize] +=
+                        left_coefficient * right_coefficient;
+                }
+            }
+            assert_eq!(actual, expected, "failed at {coefficient_bits} input bits");
+        }
     }
 
     #[cfg(feature = "integer-gmp")]

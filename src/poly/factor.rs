@@ -1540,6 +1540,9 @@ std::thread_local! {
     static PRODUCT_TREE_BALANCED_PAIR_TARGET_EXPONENT: std::cell::Cell<usize> = const {
         std::cell::Cell::new(0)
     };
+    static DENSE_INTEGER_I128_MULTIPLY_REMAINDERS: std::cell::Cell<usize> = const {
+        std::cell::Cell::new(0)
+    };
     static GEOMETRIC_SMALL_PRIME_BACKFILLS: std::cell::Cell<usize> = const {
         std::cell::Cell::new(0)
     };
@@ -2793,6 +2796,141 @@ impl<'a, E: PositiveExponent> DenseIntegerModularUnivariateContext<'a, E> {
         }
     }
 
+    /// Computes `((value rem divisor) * multiplier) rem divisor` with native `i128`
+    /// accumulators when a checked bound covers both long divisions and the intervening
+    /// convolution.
+    ///
+    /// Every input coefficient must already be canonical modulo this context. During monic long
+    /// division, one cell receives at most `degree(divisor)` products of a canonical pivot and a
+    /// divisor coefficient. The precheck bounds those updates, the convolution, and the second
+    /// division before converting any coefficient.
+    fn try_i128_multiply_remainder_monic(
+        &self,
+        value: &[Integer],
+        multiplier: &[Integer],
+        divisor: &[Integer],
+    ) -> Option<DenseIntegerUnivariatePolynomial> {
+        if !divisor.last().is_some_and(Integer::is_one) {
+            return None;
+        }
+        if value.is_empty() || multiplier.is_empty() || divisor.len() == 1 {
+            return Some(Vec::new());
+        }
+
+        let fixed_value = |coefficient: &Integer| match coefficient {
+            Integer::Single(value) => Some(i128::from(*value)),
+            Integer::Double(value) => Some(value.get()),
+            Integer::Large(_) => None,
+        };
+        let modulus = fixed_value(self.modulus)?;
+        if modulus <= 0 {
+            return None;
+        }
+
+        let divisor_degree = divisor.len() - 1;
+        let maximum_pivot = (modulus - 1) as u128;
+        let maximum_product = maximum_pivot.checked_mul(maximum_pivot)?;
+        let division_updates = (divisor_degree as u128).checked_mul(maximum_product)?;
+        let first_remainder_bound = maximum_pivot.checked_add(division_updates)?;
+        let reduced_value_len = value.len().min(divisor_degree);
+        let collision_count = reduced_value_len.min(multiplier.len()) as u128;
+        let second_remainder_bound = collision_count
+            .checked_mul(maximum_product)?
+            .checked_add(division_updates)?;
+        if first_remainder_bound > i128::MAX as u128 || second_remainder_bound > i128::MAX as u128 {
+            return None;
+        }
+
+        let convert_canonical = |coefficients: &[Integer]| {
+            let mut converted = Vec::with_capacity(coefficients.len());
+            for coefficient in coefficients {
+                let coefficient = fixed_value(coefficient)?;
+                if coefficient < 0 || coefficient >= modulus {
+                    return None;
+                }
+                converted.push(coefficient);
+            }
+            Some(converted)
+        };
+        let mut value = convert_canonical(value)?;
+        let multiplier = convert_canonical(multiplier)?;
+        let divisor = convert_canonical(divisor)?;
+
+        #[inline]
+        fn remainder_monic_i128(
+            mut remainder: Vec<i128>,
+            divisor: &[i128],
+            modulus: i128,
+        ) -> Vec<i128> {
+            let divisor_degree = divisor.len() - 1;
+            if remainder.len() >= divisor.len() {
+                for power in (divisor_degree..remainder.len()).rev() {
+                    let pivot = std::mem::replace(&mut remainder[power], 0).rem_euclid(modulus);
+                    if pivot == 0 {
+                        continue;
+                    }
+
+                    let shift = power - divisor_degree;
+                    for (coefficient, divisor_coefficient) in remainder[shift..power]
+                        .iter_mut()
+                        .zip(&divisor[..divisor_degree])
+                    {
+                        *coefficient -= pivot * divisor_coefficient;
+                    }
+                }
+                remainder.truncate(divisor_degree);
+            }
+            for coefficient in &mut remainder {
+                *coefficient = coefficient.rem_euclid(modulus);
+            }
+            while remainder
+                .last()
+                .is_some_and(|coefficient| *coefficient == 0)
+            {
+                remainder.pop();
+            }
+            remainder
+        }
+
+        value = remainder_monic_i128(value, &divisor, modulus);
+        if value.is_empty() {
+            return Some(Vec::new());
+        }
+
+        let output_len = value
+            .len()
+            .checked_add(multiplier.len())
+            .and_then(|length| length.checked_sub(1))?;
+        let mut product = vec![0i128; output_len];
+        for (left_degree, left_coefficient) in value.into_iter().enumerate() {
+            for (right_degree, right_coefficient) in multiplier.iter().copied().enumerate() {
+                product[left_degree + right_degree] += left_coefficient * right_coefficient;
+            }
+        }
+        let remainder = remainder_monic_i128(product, &divisor, modulus);
+        #[cfg(test)]
+        DENSE_INTEGER_I128_MULTIPLY_REMAINDERS
+            .with(|operations| operations.set(operations.get() + 1));
+        Some(remainder.into_iter().map(Integer::from_double).collect())
+    }
+
+    /// Computes a dense modular product and remainder against an already-monic divisor.
+    fn multiply_remainder_monic(
+        &self,
+        value: DenseIntegerUnivariatePolynomial,
+        multiplier: &[Integer],
+        divisor: &[Integer],
+    ) -> DenseIntegerUnivariatePolynomial {
+        if let Some(remainder) = self.try_i128_multiply_remainder_monic(&value, multiplier, divisor)
+        {
+            return remainder;
+        }
+
+        let reduced_value = self.remainder_monic(value, divisor);
+        let product = self.multiply_raw(&reduced_value, multiplier);
+        self.remainder_monic(product, divisor)
+    }
+
     /// Computes `((value rem divisor) * multiplier) rem divisor` in the
     /// context ring.
     ///
@@ -2805,9 +2943,7 @@ impl<'a, E: PositiveExponent> DenseIntegerModularUnivariateContext<'a, E> {
         multiplier: &[Integer],
         divisor: &DenseIntegerModularUnivariateDivisor,
     ) -> DenseIntegerUnivariatePolynomial {
-        let reduced_value = self.remainder_monic(value, &divisor.coefficients);
-        let product = self.multiply_raw(&reduced_value, multiplier);
-        self.remainder_monic(product, &divisor.coefficients)
+        self.multiply_remainder_monic(value, multiplier, &divisor.coefficients)
     }
 
     /// Divides every coefficient exactly by `divisor`, then returns its
@@ -7996,12 +8132,9 @@ impl<E: PositiveExponent> MultivariatePolynomial<IntegerRing, E, LexOrder> {
                     // du=(E*t) rem u and dw=(E*s) rem w. Reducing E before
                     // each multiplication keeps the intermediate product
                     // below the degree of the corresponding child factor.
-                    let error_mod_u = correction_context.remainder_monic(error.clone(), &u_mod);
-                    let error_t = correction_context.multiply_raw(&error_mod_u, &t_mod);
-                    let du = correction_context.remainder_monic(error_t, &u_mod);
-                    let error_mod_w = correction_context.remainder_monic(error, &w_mod);
-                    let error_s = correction_context.multiply_raw(&error_mod_w, &s_mod);
-                    let dw = correction_context.remainder_monic(error_s, &w_mod);
+                    let du =
+                        correction_context.multiply_remainder_monic(error.clone(), &t_mod, &u_mod);
+                    let dw = correction_context.multiply_remainder_monic(error, &s_mod, &w_mod);
 
                     (u_mod, w_mod, s_mod, t_mod, du, dw)
                 };
@@ -8141,13 +8274,16 @@ impl<E: PositiveExponent> MultivariatePolynomial<IntegerRing, E, LexOrder> {
 
                 // ds=(B*s) rem W and dt=(B*t) rem U preserve the degree
                 // bounds of the two Bezout cofactors.
-                let bezout_mod_w =
-                    correction_context.remainder_monic(bezout_error.clone(), &update.w_mod);
-                let bezout_s = correction_context.multiply_raw(&bezout_mod_w, &update.s_mod);
-                let delta_s = correction_context.remainder_monic(bezout_s, &update.w_mod);
-                let bezout_mod_u = correction_context.remainder_monic(bezout_error, &update.u_mod);
-                let bezout_t = correction_context.multiply_raw(&bezout_mod_u, &update.t_mod);
-                let delta_t = correction_context.remainder_monic(bezout_t, &update.u_mod);
+                let delta_s = correction_context.multiply_remainder_monic(
+                    bezout_error.clone(),
+                    &update.s_mod,
+                    &update.w_mod,
+                );
+                let delta_t = correction_context.multiply_remainder_monic(
+                    bezout_error,
+                    &update.t_mod,
+                    &update.u_mod,
+                );
                 let lifted_s = next_context.lift_correction(s, &delta_s, &modulus);
                 let lifted_t = next_context.lift_correction(t, &delta_t, &modulus);
 
@@ -11317,11 +11453,12 @@ mod test {
         BIVARIATE_FIRST_SAMPLE_ACCEPTANCES, BIVARIATE_SAMPLE_FACTORIZATIONS,
         BIVARIATE_WANG_SAMPLE_TRIES, BIVARIATE_WIDE_PRIME_ATTEMPTS,
         BIVARIATE_WIDE_PRIME_MIN_BOUND_BITS, BIVARIATE_WIDE_PRIME_START, BOUNDED_DDF_REJECTIONS,
-        BivariateFactorRetryContext, DENSE_ZP_DDF_MODULUS_UPDATES, DENSE_ZP_DDF_SCREENS,
-        DENSE_ZP_EDF_BLOCKS, DenseBivariateImage, DenseIntegerModularUnivariateContext,
-        DenseTwoFactorCorrectionContext, DenseZpAccumulationMode, DenseZpDistinctDegreeContext,
-        DenseZpEqualDegreeContext, DenseZpMulModWorkspace, EXACT_HENSEL_SUBTREE_MODULUS_BITS,
-        EXACT_HENSEL_SUBTREE_SPLITS, ExactPolynomialSquareRoot, GEOMETRIC_SMALL_PRIME_BACKFILLS,
+        BivariateFactorRetryContext, DENSE_INTEGER_I128_MULTIPLY_REMAINDERS,
+        DENSE_ZP_DDF_MODULUS_UPDATES, DENSE_ZP_DDF_SCREENS, DENSE_ZP_EDF_BLOCKS,
+        DenseBivariateImage, DenseIntegerModularUnivariateContext, DenseTwoFactorCorrectionContext,
+        DenseZpAccumulationMode, DenseZpDistinctDegreeContext, DenseZpEqualDegreeContext,
+        DenseZpMulModWorkspace, EXACT_HENSEL_SUBTREE_MODULUS_BITS, EXACT_HENSEL_SUBTREE_SPLITS,
+        ExactPolynomialSquareRoot, GEOMETRIC_SMALL_PRIME_BACKFILLS,
         INTEGER_FACTOR_BIVARIATE_WANG_MIN_BOX_DENSITY, IntegerModularUnivariateContext,
         LAST_BIVARIATE_RECONSTRUCTION_PRIME, LAST_BOUNDED_DDF_REJECTION_DEGREE,
         LAST_MODULAR_INTEGER_EDF_PRIME, LLL_RECOMBINATION_SUCCESSES,
@@ -13364,6 +13501,7 @@ mod test {
 
     #[test]
     fn factor_univariate_degree_65_backfills_geometric_prime_gap() {
+        DENSE_INTEGER_I128_MULTIPLY_REMAINDERS.with(|operations| operations.set(0));
         GEOMETRIC_SMALL_PRIME_BACKFILLS.with(|backfills| backfills.set(0));
         PRODUCT_TREE_BALANCED_PAIR_ATTEMPTS.with(|attempts| attempts.set(0));
         PRODUCT_TREE_BALANCED_PAIR_CERTIFICATES.with(|certificates| certificates.set(0));
@@ -13394,6 +13532,8 @@ mod test {
         PRODUCT_TREE_BALANCED_PAIR_CERTIFICATES
             .with(|certificates| assert_eq!(certificates.get(), 1));
         PRODUCT_TREE_BALANCED_PAIR_TARGET_EXPONENT.with(|exponent| assert_eq!(exponent.get(), 51));
+        DENSE_INTEGER_I128_MULTIPLY_REMAINDERS
+            .with(|operations| assert!((128..=130).contains(&operations.get())));
     }
 
     #[test]
@@ -13816,6 +13956,144 @@ mod test {
 
         assert_eq!(actual, reference);
         assert_eq!(actual, expected);
+    }
+
+    #[test]
+    fn bounded_i128_multiply_remainder_checks_width_and_canonical_inputs() {
+        let template = parse!("1+x^3").to_polynomial::<_, u8>(&Z, None);
+        let dense_indices = (0..16).collect::<Vec<u32>>();
+        let reference = |context: &DenseIntegerModularUnivariateContext<u8>,
+                         value: &[Integer],
+                         multiplier: &[Integer],
+                         divisor: &[Integer]| {
+            let reduced = context.remainder_monic(value.to_vec(), divisor);
+            let product = context.multiply_raw(&reduced, multiplier);
+            context.remainder_monic(product, divisor)
+        };
+
+        let accepted_modulus_value = 1i128 << 63;
+        let accepted_modulus = Integer::from(accepted_modulus_value);
+        let accepted_context = DenseIntegerModularUnivariateContext::new(
+            &accepted_modulus,
+            0,
+            &template,
+            &dense_indices,
+        );
+        let accepted_maximum = Integer::from(accepted_modulus_value - 1);
+        let accepted_value = vec![accepted_maximum.clone(), accepted_maximum.clone()];
+        let accepted_multiplier = vec![accepted_maximum.clone()];
+        let accepted_divisor = vec![accepted_maximum.clone(), Integer::one()];
+        let expected = reference(
+            &accepted_context,
+            &accepted_value,
+            &accepted_multiplier,
+            &accepted_divisor,
+        );
+        DENSE_INTEGER_I128_MULTIPLY_REMAINDERS.with(|operations| operations.set(0));
+        let actual = accepted_context
+            .try_i128_multiply_remainder_monic(
+                &accepted_value,
+                &accepted_multiplier,
+                &accepted_divisor,
+            )
+            .expect("the checked bound immediately below 2^127 must fit");
+        assert_eq!(actual, expected);
+        DENSE_INTEGER_I128_MULTIPLY_REMAINDERS.with(|operations| assert_eq!(operations.get(), 1));
+
+        let rejected_modulus_value = accepted_modulus_value + 1;
+        let rejected_modulus = Integer::from(rejected_modulus_value);
+        let rejected_context = DenseIntegerModularUnivariateContext::new(
+            &rejected_modulus,
+            0,
+            &template,
+            &dense_indices,
+        );
+        let rejected_maximum = Integer::from(rejected_modulus_value - 1);
+        let rejected_value = vec![rejected_maximum.clone(), rejected_maximum.clone()];
+        let rejected_multiplier = vec![rejected_maximum.clone()];
+        let rejected_divisor = vec![rejected_maximum, Integer::one()];
+        assert!(
+            rejected_context
+                .try_i128_multiply_remainder_monic(
+                    &rejected_value,
+                    &rejected_multiplier,
+                    &rejected_divisor,
+                )
+                .is_none()
+        );
+        let expected = reference(
+            &rejected_context,
+            &rejected_value,
+            &rejected_multiplier,
+            &rejected_divisor,
+        );
+        let actual = rejected_context.multiply_remainder_monic(
+            rejected_value,
+            &rejected_multiplier,
+            &rejected_divisor,
+        );
+        assert_eq!(actual, expected);
+        DENSE_INTEGER_I128_MULTIPLY_REMAINDERS.with(|operations| assert_eq!(operations.get(), 1));
+
+        assert!(
+            accepted_context
+                .try_i128_multiply_remainder_monic(
+                    &[Integer::from(-1)],
+                    &accepted_multiplier,
+                    &accepted_divisor,
+                )
+                .is_none()
+        );
+        assert!(
+            accepted_context
+                .try_i128_multiply_remainder_monic(
+                    std::slice::from_ref(&accepted_modulus),
+                    &accepted_multiplier,
+                    &accepted_divisor,
+                )
+                .is_none()
+        );
+        assert!(
+            accepted_context
+                .try_i128_multiply_remainder_monic(
+                    &accepted_value,
+                    &accepted_multiplier,
+                    &[Integer::from(2), Integer::from(2)],
+                )
+                .is_none()
+        );
+        assert_eq!(
+            accepted_context.try_i128_multiply_remainder_monic(
+                &[],
+                &accepted_multiplier,
+                &accepted_divisor,
+            ),
+            Some(Vec::new())
+        );
+        assert_eq!(
+            accepted_context.try_i128_multiply_remainder_monic(
+                &accepted_value,
+                &[],
+                &accepted_divisor,
+            ),
+            Some(Vec::new())
+        );
+        assert_eq!(
+            accepted_context.try_i128_multiply_remainder_monic(
+                &accepted_value,
+                &accepted_multiplier,
+                &[Integer::one()],
+            ),
+            Some(Vec::new())
+        );
+        assert_eq!(
+            accepted_context.try_i128_multiply_remainder_monic(
+                &[Integer::zero(), Integer::zero()],
+                &accepted_multiplier,
+                &accepted_divisor,
+            ),
+            Some(Vec::new())
+        );
     }
 
     #[test]

@@ -39,6 +39,7 @@ const MAX_DENSE_DIV_BUFFER_SIZE: usize = 1 << 20;
 const MAX_MIXED_RADIX_DENSE_TO_PAIR_PRODUCT_RATIO: usize = 64;
 const MIN_CHUNKED_DENSE_VARIABLES: usize = 5;
 const MIN_MIXED_RADIX_TO_SIMPLEX_RATIO: usize = 64;
+const MIN_UNCONDITIONAL_PREFERRED_TOTAL_DEGREE_DENSITY: usize = 8;
 const MIN_PREFERRED_TOTAL_DEGREE_WORKSPACE_RATIO: usize = 8;
 const MIN_TOTAL_DEGREE_PRODUCTS_PER_COEFFICIENT: usize = 32;
 const MIN_CHUNKED_DENSE_OUTPUT_LEN: usize = 1 << 18;
@@ -90,9 +91,16 @@ fn chunked_dense_mul_is_preferred(
 /// Return whether a compact total-degree kernel saves enough workspace to precede mixed-radix
 /// dense multiplication.
 #[inline]
-fn total_degree_kernel_precedes_mixed_radix(mixed_radix_len: usize, simplex_len: usize) -> bool {
+fn total_degree_kernel_precedes_mixed_radix(
+    mixed_radix_len: usize,
+    simplex_len: usize,
+    minimum_workspace_ratio: usize,
+) -> bool {
+    if minimum_workspace_ratio == 0 {
+        return false;
+    }
     simplex_len
-        .checked_mul(MIN_PREFERRED_TOTAL_DEGREE_WORKSPACE_RATIO)
+        .checked_mul(minimum_workspace_ratio)
         .is_some_and(|minimum| mixed_radix_len >= minimum)
 }
 
@@ -4361,11 +4369,29 @@ impl<F: Ring, E: Exponent> MultivariatePolynomial<F, E, LexOrder> {
     ) -> Option<MultivariatePolynomial<F, E, LexOrder>> {
         let kernels = self.ring().kernels();
         let minimum_density = kernels.preferred_total_degree_mul_density()?;
+        if !(2..=8).contains(&self.nvars()) {
+            return None;
+        }
         let polynomial_kernel = kernels.polynomial()?;
-        let (_, simplex_len) =
+        let (total_degree, simplex_len) =
             self.total_degree_dense_mul_shape_with_density(other, minimum_density)?;
         let product_count = self.nterms().checked_mul(other.nterms())?;
         if product_count >= simplex_len.saturating_mul(MIN_TOTAL_DEGREE_PRODUCTS_PER_COEFFICIENT) {
+            return None;
+        }
+
+        // Every coordinate radix is at most one plus the combined total degree. If even that
+        // upper-bound box is too small relative to the simplex, the exact mixed-radix shape cannot
+        // justify building compact rank tables. This avoids a second pass over all terms for
+        // balanced low-dimensional products.
+        let mixed_radix_upper_bound = total_degree
+            .checked_add(1)?
+            .checked_pow(u32::try_from(self.nvars()).ok()?)?;
+        if !total_degree_kernel_precedes_mixed_radix(
+            mixed_radix_upper_bound,
+            simplex_len,
+            MIN_PREFERRED_TOTAL_DEGREE_WORKSPACE_RATIO,
+        ) {
             return None;
         }
 
@@ -4375,7 +4401,29 @@ impl<F: Ring, E: Exponent> MultivariatePolynomial<F, E, LexOrder> {
                 .checked_add(other.degree(variable).to_i32() as usize)?;
             product.checked_mul(radix)
         })?;
-        if !total_degree_kernel_precedes_mixed_radix(mixed_radix_len, simplex_len) {
+        if !total_degree_kernel_precedes_mixed_radix(
+            mixed_radix_len,
+            simplex_len,
+            MIN_PREFERRED_TOTAL_DEGREE_WORKSPACE_RATIO,
+        ) {
+            return None;
+        }
+        let minimum_workspace_ratio = if product_count
+            >= simplex_len.saturating_mul(MIN_UNCONDITIONAL_PREFERRED_TOTAL_DEGREE_DENSITY)
+        {
+            MIN_PREFERRED_TOTAL_DEGREE_WORKSPACE_RATIO
+        } else {
+            polynomial_kernel.preferred_total_degree_mul_workspace_ratio(
+                &self.coefficients,
+                &other.coefficients,
+                simplex_len,
+            )?
+        };
+        if !total_degree_kernel_precedes_mixed_radix(
+            mixed_radix_len,
+            simplex_len,
+            minimum_workspace_ratio,
+        ) {
             return None;
         }
 
@@ -6803,6 +6851,8 @@ mod test {
 
     use rand::{SeedableRng, rngs::StdRng};
 
+    #[cfg(feature = "integer-gmp")]
+    use crate::domains::integer::MultiPrecisionInteger;
     use crate::{
         atom::AtomCore,
         domains::{
@@ -7596,14 +7646,17 @@ mod test {
         assert!(total_degree_kernel_precedes_mixed_radix(
             9usize.pow(5),
             1_287,
+            8,
         ));
         assert!(!total_degree_kernel_precedes_mixed_radix(
             13usize.pow(2),
             91,
+            8,
         ));
         assert!(!total_degree_kernel_precedes_mixed_radix(
             usize::MAX,
             usize::MAX,
+            8,
         ));
     }
 
@@ -7723,6 +7776,170 @@ mod test {
             .unwrap();
         let expected = reference_integer_product(&left, &right);
         assert_eq!(compact, expected);
+        assert_eq!(&left * &right, expected);
+    }
+
+    #[cfg(feature = "integer-gmp")]
+    #[test]
+    fn preferred_total_degree_density_handles_an_asymmetric_simplex_product() {
+        let variables = packed_row_merge_variables();
+        let cofactor = parse!("(1+2*x1+3*x2+5*x3+7*x4+11*x5+13*x6+17*x7+19*x8)^2")
+            .to_polynomial::<_, u8>(&Z, Some(variables.clone()));
+        let common = parse!("(1-x1+2*x2-3*x3+5*x4-7*x5+11*x6-13*x7+17*x8)^3")
+            .to_polynomial::<_, u8>(&Z, Some(variables));
+        assert_eq!(cofactor.nterms(), 45);
+        assert_eq!(common.nterms(), 165);
+        assert!(
+            cofactor
+                .total_degree_dense_mul_shape_with_density(&common, 8)
+                .is_none()
+        );
+        assert!(
+            cofactor
+                .total_degree_dense_mul_shape_with_density(&common, 5)
+                .is_some()
+        );
+        assert!(!mixed_radix_dense_mul_is_bounded(
+            6usize.pow(8),
+            cofactor.nterms(),
+            common.nterms()
+        ));
+        assert!(cofactor.mul_dense(&common).is_none());
+        assert!(
+            cofactor
+                .try_preferred_total_degree_mul_before_mixed_radix(&common)
+                .is_some()
+        );
+
+        let expected = reference_integer_product(&cofactor, &common);
+        let compact = cofactor
+            .try_total_degree_dense_mul_with_density(&common, 5, true)
+            .unwrap();
+        compact.check_consistency();
+        assert_eq!(compact, expected);
+        assert_eq!(&cofactor * &common, expected);
+        assert_eq!(&common * &cofactor, expected);
+    }
+
+    #[cfg(feature = "integer-gmp")]
+    #[test]
+    fn higher_workspace_ratio_preserves_balanced_mixed_radix_products() {
+        let variables = Arc::new(
+            packed_row_merge_variables()
+                .iter()
+                .take(4)
+                .cloned()
+                .collect::<Vec<_>>(),
+        );
+        let left = parse!("(1+x1+x2+x3+x4)^3").to_polynomial::<_, u8>(&Z, Some(variables.clone()));
+        let right = parse!("(1+2*x1-3*x2+5*x3-7*x4)^3").to_polynomial::<_, u8>(&Z, Some(variables));
+        assert_eq!(left.nterms(), 35);
+        assert_eq!(right.nterms(), 35);
+        assert!(
+            left.total_degree_dense_mul_shape_with_density(&right, 8)
+                .is_none()
+        );
+        assert!(
+            left.total_degree_dense_mul_shape_with_density(&right, 5)
+                .is_some()
+        );
+        assert!(mixed_radix_dense_mul_is_bounded(
+            7usize.pow(4),
+            left.nterms(),
+            right.nterms()
+        ));
+        assert!(
+            left.try_preferred_total_degree_mul_before_mixed_radix(&right)
+                .is_none()
+        );
+
+        let expected = reference_integer_product(&left, &right);
+        assert_eq!(left.mul_dense(&right).unwrap(), expected);
+        assert_eq!(&left * &right, expected);
+    }
+
+    #[cfg(feature = "integer-gmp")]
+    #[test]
+    fn limb_total_degree_kernel_uses_a_smaller_workspace_ratio() {
+        let variables = Arc::new(
+            packed_row_merge_variables()
+                .iter()
+                .take(4)
+                .cloned()
+                .collect::<Vec<_>>(),
+        );
+        let established_left =
+            parse!("(1+x1+x2+x3+x4)^4").to_polynomial::<_, u8>(&Z, Some(variables.clone()));
+        let established_right =
+            parse!("(1+2*x1-3*x2+5*x3-7*x4)^4").to_polynomial::<_, u8>(&Z, Some(variables.clone()));
+        assert!(
+            established_left
+                .try_preferred_total_degree_mul_before_mixed_radix(&established_right)
+                .is_some()
+        );
+
+        let small_left =
+            parse!("(1+x1+x2+x3+x4)^3").to_polynomial::<_, u8>(&Z, Some(variables.clone()));
+        let small_right =
+            parse!("(1+2*x1-3*x2+5*x3-7*x4)^3").to_polynomial::<_, u8>(&Z, Some(variables.clone()));
+        assert_eq!(small_left.nterms(), 35);
+        assert_eq!(small_right.nterms(), 35);
+        assert!(
+            small_left
+                .try_preferred_total_degree_mul_before_mixed_radix(&small_right)
+                .is_none()
+        );
+
+        let left = parse!("10000000000000000000000000000000000000000*(1+x1+x2+x3+x4)^3")
+            .to_polynomial::<_, u8>(&Z, Some(variables.clone()));
+        let right = parse!("10000000000000000000000000000000000000003*(1+2*x1-3*x2+5*x3-7*x4)^3")
+            .to_polynomial::<_, u8>(&Z, Some(variables));
+        assert!(
+            left.coefficients
+                .iter()
+                .chain(&right.coefficients)
+                .all(|coefficient| matches!(coefficient, Integer::Large(_)))
+        );
+        assert!(mixed_radix_dense_mul_is_bounded(
+            7usize.pow(4),
+            left.nterms(),
+            right.nterms()
+        ));
+        assert!(
+            left.try_preferred_total_degree_mul_before_mixed_radix(&right)
+                .is_some()
+        );
+
+        let expected = reference_integer_product(&left, &right);
+        assert_eq!(&left * &right, expected);
+    }
+
+    #[cfg(feature = "integer-gmp")]
+    #[test]
+    fn total_degree_limb_kernel_multiplies_wide_coefficients() {
+        let variables = Arc::new(
+            packed_row_merge_variables()
+                .iter()
+                .take(4)
+                .cloned()
+                .collect::<Vec<_>>(),
+        );
+        let left_scale = Integer::from(MultiPrecisionInteger::from(1u32) << 4096u32);
+        let right_scale = Integer::from(
+            (MultiPrecisionInteger::from(1u32) << 4095u32) + MultiPrecisionInteger::from(37u32),
+        );
+        let left = parse!("(1+x1+x2+x3+x4)^4")
+            .to_polynomial::<_, u8>(&Z, Some(variables.clone()))
+            .mul_coeff(left_scale);
+        let right = parse!("(1+2*x1-3*x2+5*x3-7*x4)^4")
+            .to_polynomial::<_, u8>(&Z, Some(variables))
+            .mul_coeff(right_scale);
+
+        assert!(
+            left.try_preferred_total_degree_mul_before_mixed_radix(&right)
+                .is_some()
+        );
+        let expected = reference_integer_product(&left, &right);
         assert_eq!(&left * &right, expected);
     }
 
