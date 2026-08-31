@@ -13,6 +13,7 @@ use crate::domains::algebraic::{AlgebraicExtension, GaloisField};
 use crate::domains::finite_field::{
     FiniteField, FiniteFieldCore, FiniteFieldElement, FiniteFieldWorkspace, PrimeIteratorU64,
     SMOOTH_PRIME_BASE, SMOOTH_PRIMES, ToFiniteField, Zp, Zp64, Zp64DiscreteLogContext,
+    ZpDiscreteLogContext,
 };
 use crate::domains::float::{FloatField, SingleFloat};
 use crate::domains::integer::{
@@ -32,7 +33,7 @@ use super::polynomial::{
     IntegerPolynomialCrtContext, LastVariableEvaluationContext, LastVariablePowerWorkspace,
     MultivariatePolynomial, WordCrt,
 };
-use super::univariate::DenseFiniteFieldRootContext;
+use super::univariate::{DenseFiniteFieldRootContext, DenseRootPrimeField};
 
 #[cfg(feature = "binary_size")]
 type ModularGcdFieldWorkspace = u64;
@@ -439,6 +440,21 @@ enum HuMonaganAnchor {
     Right,
 }
 
+#[derive(Debug, PartialEq, Eq, Copy, Clone)]
+enum HuMonaganBivariateImageKind {
+    GcdMultiple,
+    CofactorMultiple,
+}
+
+enum HuMonaganBivariatePrimeResult<P> {
+    Accepted {
+        previous_reconstruction: P,
+        samples_used: usize,
+    },
+    RetryWithNewImage,
+    RetryWithNewKroneckerMap,
+}
+
 impl HuMonaganAnchor {
     /// Selects the smaller input whose cofactor is interpolated alongside the GCD.
     fn from_inputs<E: PositiveExponent>(
@@ -575,6 +591,333 @@ fn should_use_hu_monagan<E: PositiveExponent>(
 
 /// Minimum row reduction that removes two levels from Hu's geometric sample schedule.
 const HU_MONAGAN_MAIN_VARIABLE_ROW_REDUCTION: usize = 4;
+
+/// Safety factor applied to the full input-box density admitted by bivariate Hu-Monagan.
+const HU_MONAGAN_BIVARIATE_SPARSITY_MARGIN: u128 = 8;
+
+/// Number of bivariate images computed before the first sparse reconstruction attempt.
+const HU_MONAGAN_BIVARIATE_INITIAL_SAMPLES: usize = 4;
+
+/// Number of modular images targeted when Hu-Monagan chooses a reconstruction prime size.
+const HU_MONAGAN_TARGET_CRT_IMAGES: u64 = 8;
+
+/// Additional equal reconstruction needed to certify that CRT coefficients have stabilized.
+const HU_MONAGAN_CRT_STABILIZATION_IMAGES: u64 = 1;
+
+/// Maximum projected support density admitted for the reconstructed GCD or cofactor.
+const HU_MONAGAN_BIVARIATE_PROJECTION_MARGIN: u128 = 4;
+
+/// Minimum projected interpolation work relative to the retained bivariate input box.
+const HU_MONAGAN_BIVARIATE_IMAGE_AMORTIZATION_MARGIN: u128 = 2;
+
+/// Maximum input-support ratio for evaluating both operands in every automatic bivariate image.
+const HU_MONAGAN_BIVARIATE_INPUT_BALANCE_MARGIN: u128 = 2;
+
+/// Scale used by FLINT's two-main-variable score to make large leading rows affect degree ties.
+const HU_MONAGAN_BIVARIATE_LEADING_ROW_SCALE: u128 = 256;
+
+/// Work limits used when bivariate Hu-Monagan is selected automatically.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+struct HuMonaganBivariateAutomaticBudget {
+    sample_limit: usize,
+    prime_attempt_limit: usize,
+}
+
+/// Selects the two main variables from their input degrees and leading-row sizes.
+fn hu_monagan_bivariate_main_variables<E: PositiveExponent>(
+    variables: &[usize],
+    left_degrees: &[E],
+    right_degrees: &[E],
+    left_leading_rows: &[usize],
+    right_leading_rows: &[usize],
+) -> Option<[usize; 2]> {
+    let mut candidates: SmallVec<[_; INLINED_EXPONENTS]> = variables
+        .iter()
+        .copied()
+        .filter(|variable| {
+            *variable < left_degrees.len()
+                && *variable < right_degrees.len()
+                && *variable < left_leading_rows.len()
+                && *variable < right_leading_rows.len()
+        })
+        .collect();
+    if candidates.len() != variables.len() || candidates.len() < 2 {
+        return None;
+    }
+
+    candidates.sort_unstable_by_key(|variable| {
+        let degree = left_degrees[*variable]
+            .max(right_degrees[*variable])
+            .to_u32();
+        let leading_row = left_leading_rows[*variable].min(right_leading_rows[*variable]);
+        (
+            u128::from(degree) + leading_row as u128 / HU_MONAGAN_BIVARIATE_LEADING_ROW_SCALE,
+            *variable,
+        )
+    });
+    Some([candidates[0], candidates[1]])
+}
+
+/// Counts terms on the maximum exponent row of every requested variable.
+fn hu_monagan_leading_row_counts<E: PositiveExponent>(
+    polynomial: &MultivariatePolynomial<IntegerRing, E>,
+    variables: &[usize],
+    degrees: &[E],
+) -> Option<SmallVec<[usize; INLINED_EXPONENTS]>> {
+    if degrees.len() != polynomial.nvars()
+        || variables
+            .iter()
+            .any(|variable| *variable >= polynomial.nvars())
+    {
+        return None;
+    }
+
+    let mut counts = smallvec![0usize; polynomial.nvars()];
+    for exponents in polynomial.exponents_iter() {
+        for variable in variables.iter().copied() {
+            if exponents[variable] == degrees[variable] {
+                counts[variable] += 1;
+            }
+        }
+    }
+    Some(counts)
+}
+
+/// Plans a bivariate Hu-Monagan GCD from normalized input geometry.
+struct HuMonaganBivariatePlanningContext<'a, E: PositiveExponent> {
+    left: &'a MultivariatePolynomial<IntegerRing, E>,
+    right: &'a MultivariatePolynomial<IntegerRing, E>,
+    variables: &'a [usize],
+    bounds: &'a [E],
+    left_degrees: &'a [E],
+    right_degrees: &'a [E],
+}
+
+impl<'a, E: PositiveExponent> HuMonaganBivariatePlanningContext<'a, E> {
+    /// Uses degrees already computed by generic GCD preprocessing.
+    fn new_with_degrees(
+        left: &'a MultivariatePolynomial<IntegerRing, E>,
+        right: &'a MultivariatePolynomial<IntegerRing, E>,
+        variables: &'a [usize],
+        bounds: &'a [E],
+        left_degrees: &'a [E],
+        right_degrees: &'a [E],
+    ) -> Self {
+        Self {
+            left,
+            right,
+            variables,
+            bounds,
+            left_degrees,
+            right_degrees,
+        }
+    }
+
+    /// Chooses the two main variables using exact leading-row counts.
+    fn main_variables(&self) -> Option<[usize; 2]> {
+        let left_leading_rows =
+            hu_monagan_leading_row_counts(self.left, self.variables, self.left_degrees)?;
+        let right_leading_rows =
+            hu_monagan_leading_row_counts(self.right, self.variables, self.right_degrees)?;
+        hu_monagan_bivariate_main_variables(
+            self.variables,
+            self.left_degrees,
+            self.right_degrees,
+            &left_leading_rows,
+            &right_leading_rows,
+        )
+    }
+
+    /// Checks the bivariate interpolation geometry and derives automatic work limits.
+    fn automatic_budget(
+        &self,
+        main_variables: [usize; 2],
+    ) -> Option<HuMonaganBivariateAutomaticBudget> {
+        if self.variables.len() < 3
+            || self.bounds.len() != self.left.nvars()
+            || self.left_degrees.len() != self.left.nvars()
+            || self.right_degrees.len() != self.right.nvars()
+            || self.left.nvars() != self.right.nvars()
+            || main_variables[0] == main_variables[1]
+            || main_variables
+                .iter()
+                .any(|variable| !self.variables.contains(variable))
+            || main_variables
+                .iter()
+                .any(|variable| self.bounds[*variable] == E::zero())
+        {
+            return None;
+        }
+
+        let checked_box = |degrees: &[E]| {
+            self.variables
+                .iter()
+                .copied()
+                .try_fold(1u128, |size, variable| {
+                    size.checked_mul(u128::from(degrees[variable].to_u32()) + 1)
+                })
+        };
+        let left_box = checked_box(self.left_degrees)?;
+        let right_box = checked_box(self.right_degrees)?;
+        let density_sum = (self.left.nterms() as u128)
+            .checked_mul(right_box)
+            .and_then(|left| {
+                (self.right.nterms() as u128)
+                    .checked_mul(left_box)
+                    .and_then(|right| left.checked_add(right))
+            })?;
+        let density_lhs = density_sum
+            .checked_mul(self.variables.len() as u128)
+            .and_then(|value| value.checked_mul(HU_MONAGAN_BIVARIATE_SPARSITY_MARGIN))?;
+        let density_rhs = left_box.checked_mul(right_box)?;
+        if density_lhs > density_rhs {
+            return None;
+        }
+
+        let pair_area = main_variables
+            .iter()
+            .copied()
+            .try_fold(1u128, |size, variable| {
+                let degree = self.left_degrees[variable]
+                    .max(self.right_degrees[variable])
+                    .to_u32();
+                size.checked_mul(u128::from(degree) + 1)
+            })?;
+        let minimum_image_work =
+            pair_area.checked_mul(HU_MONAGAN_BIVARIATE_INITIAL_SAMPLES as u128)?;
+        let input_terms = (self.left.nterms() as u128).checked_add(self.right.nterms() as u128)?;
+        if minimum_image_work > input_terms {
+            return None;
+        }
+        let smaller_input_terms = self.left.nterms().min(self.right.nterms()) as u128;
+        let larger_input_terms = self.left.nterms().max(self.right.nterms()) as u128;
+        // A much smaller operand gives one-main-variable Hu a cheap cofactor target; bivariate Hu
+        // would still evaluate the larger operand and compute a bivariate GCD at every sample.
+        if larger_input_terms
+            > smaller_input_terms.checked_mul(HU_MONAGAN_BIVARIATE_INPUT_BALANCE_MARGIN)?
+        {
+            return None;
+        }
+
+        let mut kronecker_range = 1u64;
+        let mut gcd_projection = 1u128;
+        let mut left_cofactor_projection = 1u128;
+        let mut right_cofactor_projection = 1u128;
+        for variable in self.variables.iter().copied() {
+            if main_variables.contains(&variable) {
+                continue;
+            }
+
+            let bound = self.bounds[variable].to_u32();
+            let left_degree = self.left_degrees[variable].to_u32();
+            let right_degree = self.right_degrees[variable].to_u32();
+            let left_cofactor_degree = left_degree.checked_sub(bound)?;
+            let right_cofactor_degree = right_degree.checked_sub(bound)?;
+            let radix = left_degree.max(right_degree).max(bound).checked_add(1)?;
+            kronecker_range = kronecker_range.checked_mul(u64::from(radix))?;
+            gcd_projection = gcd_projection.checked_mul(u128::from(bound) + 1)?;
+            left_cofactor_projection =
+                left_cofactor_projection.checked_mul(u128::from(left_cofactor_degree) + 1)?;
+            right_cofactor_projection =
+                right_cofactor_projection.checked_mul(u128::from(right_cofactor_degree) + 1)?;
+        }
+
+        let interpolation_bound = kronecker_range.checked_mul(2)?;
+        if SMOOTH_PRIMES
+            .last()
+            .is_none_or(|prime| interpolation_bound > prime.0)
+        {
+            return None;
+        }
+
+        let left_target = gcd_projection.min(left_cofactor_projection);
+        let right_target = gcd_projection.min(right_cofactor_projection);
+        let projected_target = match self.left.nterms().cmp(&self.right.nterms()) {
+            Ordering::Less => left_target,
+            Ordering::Greater => right_target,
+            Ordering::Equal => left_target.max(right_target),
+        };
+        // A bivariate GCD is paid for at every sample. When its retained degree box is much larger
+        // than the complete projected interpolation target, ordinary sparse Zippel has too little
+        // interpolation work for that per-image cost to be amortized.
+        if projected_target.checked_mul(HU_MONAGAN_BIVARIATE_IMAGE_AMORTIZATION_MARGIN)? < pair_area
+        {
+            return None;
+        }
+        let projected_work =
+            projected_target.checked_mul(HU_MONAGAN_BIVARIATE_PROJECTION_MARGIN)?;
+        if projected_work > u128::from(kronecker_range) {
+            return None;
+        }
+
+        let sample_limit = projected_target
+            .checked_add(1)?
+            .checked_mul(2)?
+            .max(HU_MONAGAN_BIVARIATE_INITIAL_SAMPLES as u128);
+        // Cap the projected number of sampled images by the combined input support. The support
+        // learned from the first accepted image normally lowers this limit for later primes.
+        if sample_limit > input_terms {
+            return None;
+        }
+        let sample_limit = usize::try_from(sample_limit).ok()?;
+
+        let failed_image_allowance = (input_terms / minimum_image_work).max(1);
+        let prime_attempt_limit = failed_image_allowance
+            .checked_add(u128::from(HU_MONAGAN_TARGET_CRT_IMAGES))?
+            .checked_add(u128::from(HU_MONAGAN_CRT_STABILIZATION_IMAGES))?;
+        let prime_attempt_limit = usize::try_from(prime_attempt_limit).ok()?;
+
+        Some(HuMonaganBivariateAutomaticBudget {
+            sample_limit,
+            prime_attempt_limit,
+        })
+    }
+
+    /// Reports whether the selector admits this main-variable pair.
+    #[cfg(test)]
+    fn is_applicable(&self, main_variables: [usize; 2]) -> bool {
+        self.automatic_budget(main_variables).is_some()
+    }
+
+    /// Permutes an admitted pair into the first two coordinates.
+    fn prepare(&self) -> Option<PreparedHuMonaganBivariateGcd<E>> {
+        let main_variables = self.main_variables()?;
+        let budget = self.automatic_budget(main_variables)?;
+
+        let mut order: SmallVec<[_; INLINED_EXPONENTS]> =
+            SmallVec::with_capacity(self.left.nvars());
+        order.extend(main_variables);
+        order.extend(
+            self.variables
+                .iter()
+                .copied()
+                .filter(|variable| !main_variables.contains(variable)),
+        );
+        for variable in 0..self.left.nvars() {
+            if !order.contains(&variable) {
+                order.push(variable);
+            }
+        }
+        if order.len() != self.left.nvars() {
+            return None;
+        }
+
+        let left = self.left.rearrange_impl(&order, false, false);
+        let right = self.right.rearrange_impl(&order, false, false);
+        let mut bounds: SmallVec<[_; INLINED_EXPONENTS]> = smallvec![E::zero(); self.bounds.len()];
+        for (new_variable, old_variable) in order.iter().copied().enumerate() {
+            bounds[new_variable] = self.bounds[old_variable];
+        }
+
+        Some(PreparedHuMonaganBivariateGcd {
+            left,
+            right,
+            bounds,
+            order,
+            budget,
+        })
+    }
+}
 
 /// Plans the main-variable change for one Hu-Monagan GCD operation.
 struct HuMonaganPlanningContext<'a, E: PositiveExponent> {
@@ -979,6 +1322,28 @@ impl<E: PositiveExponent> PreparedHuMonaganGcd<E> {
     }
 }
 
+/// Inputs and coordinate map for an admitted bivariate Hu-Monagan GCD.
+struct PreparedHuMonaganBivariateGcd<E: PositiveExponent> {
+    left: MultivariatePolynomial<IntegerRing, E>,
+    right: MultivariatePolynomial<IntegerRing, E>,
+    bounds: SmallVec<[E; INLINED_EXPONENTS]>,
+    order: SmallVec<[usize; INLINED_EXPONENTS]>,
+    budget: HuMonaganBivariateAutomaticBudget,
+}
+
+impl<E: PositiveExponent> PreparedHuMonaganBivariateGcd<E> {
+    /// Runs bivariate Hu-Monagan and restores the original coordinate order.
+    fn run(self) -> Option<MultivariatePolynomial<IntegerRing, E>> {
+        let mut gcd = self.left.gcd_hu_monagan_bivariate_with_budget(
+            &self.right,
+            &self.bounds,
+            Some(self.budget),
+        )?;
+        gcd = gcd.rearrange_impl(&self.order, true, false);
+        Some(<IntegerRing as PolynomialGCD<E>>::normalize(gcd))
+    }
+}
+
 /// Returns the minimum modulus for a Hu-Monagan interpolation image.
 ///
 /// The Kronecker range bound keeps the encoded exponents distinct in the
@@ -996,11 +1361,10 @@ fn hu_monagan_prime_lower_bound(
     if twice_largest_coefficient < &(1i64 << 32) {
         interpolation_bound.max(twice_largest_coefficient.to_u64().unwrap())
     } else {
-        const TARGET_CRT_IMAGES: u64 = 8;
         const MAX_TARGET_PRIME_BITS: u64 = 63;
         let target_prime_bits = twice_largest_coefficient
             .significant_bits()
-            .div_ceil(TARGET_CRT_IMAGES)
+            .div_ceil(HU_MONAGAN_TARGET_CRT_IMAGES)
             .min(MAX_TARGET_PRIME_BITS);
         let coefficient_height_bound = 1u64 << target_prime_bits;
         interpolation_bound.max(coefficient_height_bound)
@@ -1151,6 +1515,65 @@ const UNIVARIATE_U64_MODULAR_GCD_PRIMES: &[u64] = &[
 impl ModularGcdWorkspace for u64 {
     fn first_prime() -> u64 {
         UNIVARIATE_U64_MODULAR_GCD_PRIMES[0]
+    }
+}
+
+/// Discrete logarithms used to decode Hu-Monagan's Kronecker exponents.
+trait HuMonaganDiscreteLog<UField: FiniteFieldWorkspace> {
+    fn discrete_log(&self, value: &FiniteFieldElement<UField>) -> u64;
+}
+
+impl HuMonaganDiscreteLog<u32> for ZpDiscreteLogContext<'_> {
+    fn discrete_log(&self, value: &FiniteFieldElement<u32>) -> u64 {
+        self.discrete_log(value)
+    }
+}
+
+impl HuMonaganDiscreteLog<u64> for Zp64DiscreteLogContext<'_> {
+    fn discrete_log(&self, value: &FiniteFieldElement<u64>) -> u64 {
+        self.discrete_log(value)
+    }
+}
+
+/// Fixed-width prime words supported by bivariate Hu-Monagan interpolation.
+trait HuMonaganWorkspace: ModularGcdWorkspace {
+    type DiscreteLogContext<'a>: HuMonaganDiscreteLog<Self>
+    where
+        Self: 'a;
+
+    fn discrete_log_context<'a>(
+        field: &'a FiniteField<Self>,
+        base: &FiniteFieldElement<Self>,
+        totient: u64,
+        totient_primes: &[(u64, u32)],
+    ) -> Self::DiscreteLogContext<'a>
+    where
+        FiniteField<Self>: FiniteFieldCore<Self> + Set<Element = FiniteFieldElement<Self>>;
+}
+
+impl HuMonaganWorkspace for u32 {
+    type DiscreteLogContext<'a> = ZpDiscreteLogContext<'a>;
+
+    fn discrete_log_context<'a>(
+        field: &'a Zp,
+        base: &FiniteFieldElement<u32>,
+        totient: u64,
+        totient_primes: &[(u64, u32)],
+    ) -> Self::DiscreteLogContext<'a> {
+        ZpDiscreteLogContext::new(field, base, totient, totient_primes)
+    }
+}
+
+impl HuMonaganWorkspace for u64 {
+    type DiscreteLogContext<'a> = Zp64DiscreteLogContext<'a>;
+
+    fn discrete_log_context<'a>(
+        field: &'a Zp64,
+        base: &FiniteFieldElement<u64>,
+        totient: u64,
+        totient_primes: &[(u64, u32)],
+    ) -> Self::DiscreteLogContext<'a> {
+        Zp64DiscreteLogContext::new(field, base, totient, totient_primes)
     }
 }
 
@@ -5438,11 +5861,15 @@ impl<E: PositiveExponent> MultivariatePolynomial<IntegerRing, E> {
         image
     }
 
-    fn evaluate_terms_bivariate<PE: PositiveExponent>(
-        p: &Zp64,
-        poly: &MultivariatePolynomial<Zp64, PE>,
-        betas: &[FiniteFieldElement<u64>],
-    ) -> (Vec<(PE, PE)>, Vec<(usize, FiniteFieldElement<u64>)>) {
+    fn evaluate_terms_bivariate<UField: FiniteFieldWorkspace, PE: PositiveExponent>(
+        p: &FiniteField<UField>,
+        poly: &MultivariatePolynomial<FiniteField<UField>, PE>,
+        betas: &[FiniteFieldElement<UField>],
+    ) -> (Vec<(PE, PE)>, Vec<(usize, FiniteFieldElement<UField>)>)
+    where
+        FiniteField<UField>: FiniteFieldCore<UField> + Set<Element = FiniteFieldElement<UField>>,
+        FiniteFieldElement<UField>: Copy,
+    {
         let mut unique_indices = vec![];
         let mut index_map = HashMap::default();
         for p in poly.exponents_iter() {
@@ -5474,13 +5901,17 @@ impl<E: PositiveExponent> MultivariatePolynomial<IntegerRing, E> {
         )
     }
 
-    fn evaluate_geometric_image_bivariate<PE: PositiveExponent>(
-        p: &Zp64,
-        poly: &MultivariatePolynomial<Zp64, PE>,
+    fn evaluate_geometric_image_bivariate<UField: FiniteFieldWorkspace, PE: PositiveExponent>(
+        p: &FiniteField<UField>,
+        poly: &MultivariatePolynomial<FiniteField<UField>, PE>,
         row_exponents: &[(PE, PE)],
-        term_evals: &[(usize, FiniteFieldElement<u64>)],
-        current_evals: &mut [FiniteFieldElement<u64>],
-    ) -> MultivariatePolynomial<Zp64, u32> {
+        term_evals: &[(usize, FiniteFieldElement<UField>)],
+        current_evals: &mut [FiniteFieldElement<UField>],
+    ) -> MultivariatePolynomial<FiniteField<UField>, u32>
+    where
+        FiniteField<UField>: FiniteFieldCore<UField> + Set<Element = FiniteFieldElement<UField>>,
+        FiniteFieldElement<UField>: Copy,
+    {
         let mut coefficients = vec![p.zero(); row_exponents.len()];
         let mut exp = vec![0; poly.nvars() * row_exponents.len()];
         for (index, (exponent0, exponent1)) in row_exponents.iter().enumerate() {
@@ -5515,9 +5946,19 @@ impl<E: PositiveExponent> MultivariatePolynomial<IntegerRing, E> {
         MultivariatePolynomial::from_parts(coefficients, exp, p.clone(), poly.variables().clone())
     }
 
-    /// Recover recurrence roots with 32-bit arithmetic whenever the Hu interpolation prime fits
-    /// in a `u32`, then convert the roots back to the surrounding 64-bit field representation.
-    fn hu_monagan_recurrence_roots(
+    /// Recover the distinct nonzero roots of a Hu recurrence polynomial.
+    fn hu_monagan_recurrence_roots<F: DenseRootPrimeField>(
+        p: &F,
+        coefficients: &[F::Element],
+    ) -> Option<Vec<F::Element>>
+    where
+        F::Element: Copy + PartialEq,
+    {
+        DenseFiniteFieldRootContext::new(p).find_distinct_nonzero_roots(coefficients)
+    }
+
+    /// Recover roots with 32-bit arithmetic when a surrounding 64-bit field uses a small prime.
+    fn hu_monagan_recurrence_roots_wide(
         p: &Zp64,
         coefficients: &[FiniteFieldElement<u64>],
     ) -> Option<Vec<FiniteFieldElement<u64>>> {
@@ -5527,18 +5968,17 @@ impl<E: PositiveExponent> MultivariatePolynomial<IntegerRing, E> {
                 .iter()
                 .map(|coefficient| small_field.to_element(p.from_element(coefficient) as u32))
                 .collect::<Vec<_>>();
-            let mut root_context = DenseFiniteFieldRootContext::new(&small_field);
-            return root_context
-                .find_distinct_nonzero_roots(&small_coefficients)
-                .map(|roots| {
+            return Self::hu_monagan_recurrence_roots(&small_field, &small_coefficients).map(
+                |roots| {
                     roots
                         .iter()
                         .map(|root| p.to_element(small_field.from_element(root) as u64))
                         .collect()
-                });
+                },
+            );
         }
 
-        DenseFiniteFieldRootContext::new(p).find_distinct_nonzero_roots(coefficients)
+        Self::hu_monagan_recurrence_roots(p, coefficients)
     }
 
     fn hu_monagan_sparse_interpolate<PE: PositiveExponent>(
@@ -5588,7 +6028,7 @@ impl<E: PositiveExponent> MultivariatePolynomial<IntegerRing, E> {
                 .map(|coefficient| p.neg(coefficient))
                 .collect::<Vec<_>>();
             bma_coefficients.push(p.one());
-            let Some(roots) = Self::hu_monagan_recurrence_roots(p, &bma_coefficients) else {
+            let Some(roots) = Self::hu_monagan_recurrence_roots_wide(p, &bma_coefficients) else {
                 debug!("Failed to recover BMA roots at x^{}", i);
                 return None;
             };
@@ -5648,16 +6088,22 @@ impl<E: PositiveExponent> MultivariatePolynomial<IntegerRing, E> {
         Some(res)
     }
 
-    fn hu_monagan_sparse_interpolate_bivariate<PE: PositiveExponent>(
-        p: &Zp64,
-        images: &[MultivariatePolynomial<Zp64, u32>],
-        sample_points: &[FiniteFieldElement<u64>],
-        alpha: &FiniteFieldElement<u64>,
-        discrete_log_context: &Zp64DiscreteLogContext<'_>,
+    fn hu_monagan_sparse_interpolate_bivariate<UField: HuMonaganWorkspace, PE: PositiveExponent>(
+        p: &FiniteField<UField>,
+        images: &[MultivariatePolynomial<FiniteField<UField>, u32>],
+        sample_points: &[FiniteFieldElement<UField>],
+        alpha: &FiniteFieldElement<UField>,
+        discrete_log_context: &UField::DiscreteLogContext<'_>,
         kronecker: &HuMonaganKroneckerMap,
         d_0_1: (u32, u32),
-    ) -> Option<MultivariatePolynomial<Zp64, PE>> {
-        if images.len() < 4 || !images.len().is_multiple_of(2) {
+    ) -> Option<MultivariatePolynomial<FiniteField<UField>, PE>>
+    where
+        FiniteField<UField>: FiniteFieldCore<UField>
+            + DenseRootPrimeField<Element = FiniteFieldElement<UField>>
+            + Set<Element = FiniteFieldElement<UField>>,
+        FiniteFieldElement<UField>: Copy + PartialEq,
+    {
+        if images.len() < HU_MONAGAN_BIVARIATE_INITIAL_SAMPLES || !images.len().is_multiple_of(2) {
             return None;
         }
 
@@ -5676,8 +6122,11 @@ impl<E: PositiveExponent> MultivariatePolynomial<IntegerRing, E> {
         let mut rows = rows.into_iter().collect::<Vec<_>>();
         rows.sort_unstable();
 
-        let mut res =
-            MultivariatePolynomial::<Zp64, PE>::new(p, None, images[0].variables().clone());
+        let mut res = MultivariatePolynomial::<FiniteField<UField>, PE>::new(
+            p,
+            None,
+            images[0].variables().clone(),
+        );
         let mut image_exp = vec![0; images[0].nvars()];
         let mut result_exp = vec![PE::zero(); images[0].nvars()];
         for (e0, e1) in rows {
@@ -6120,15 +6569,293 @@ impl<E: PositiveExponent> MultivariatePolynomial<IntegerRing, E> {
         }
     }
 
-    /// Compute the gcd using the Hu-Monagan algorithm that
-    /// uses a bivariate image and interpolates the gcd and a cofactor
-    /// at the same time.
-    #[instrument(level = "debug", skip_all)]
+    /// Computes a sampled bivariate GCD using supplied characteristic-zero degree bounds.
+    ///
+    /// Hu produces many polynomials in only the first two variables. The finite-field shape
+    /// routine avoids repeating the public GCD entry point's variable scans, bound sampling, and
+    /// coordinate planning for every sample while retaining its unlucky-image checks.
+    fn hu_monagan_bivariate_image_gcd<UField: HuMonaganWorkspace>(
+        left: &MultivariatePolynomial<FiniteField<UField>, u32>,
+        right: &MultivariatePolynomial<FiniteField<UField>, u32>,
+        degree_bound: (u32, u32),
+    ) -> Option<MultivariatePolynomial<FiniteField<UField>, u32>>
+    where
+        FiniteField<UField>: FiniteFieldCore<UField> + Set<Element = FiniteFieldElement<UField>>,
+        FiniteFieldElement<UField>: Copy + PartialEq,
+    {
+        let left_content = left.univariate_content(0);
+        let right_content = right.univariate_content(0);
+        let content_gcd = left_content.univariate_gcd(&right_content);
+        let left_primitive = if left_content.is_one() {
+            Cow::Borrowed(left)
+        } else {
+            Cow::Owned(left / &left_content)
+        };
+        let right_primitive = if right_content.is_one() {
+            Cow::Borrowed(right)
+        } else {
+            Cow::Owned(right / &right_content)
+        };
+
+        let primitive_second_degree_bound = degree_bound.1.checked_sub(content_gcd.degree(1))?;
+        let mut bounds: SmallVec<[u32; INLINED_EXPONENTS]> = smallvec![0u32; left.nvars()];
+        bounds[0] = degree_bound.0;
+        bounds[1] = primitive_second_degree_bound;
+        let mut tight_bounds = bounds.clone();
+        let primitive_gcd = MultivariatePolynomial::gcd_shape_modular(
+            &left_primitive,
+            &right_primitive,
+            &[0, 1],
+            &mut bounds,
+            &mut tight_bounds,
+        )?;
+        Some((primitive_gcd * &content_gcd).make_monic())
+    }
+
+    /// Computes and merges one bivariate Hu-Monagan image over a fixed-width prime field.
+    fn hu_monagan_bivariate_prime_image<UField: HuMonaganWorkspace>(
+        a: &Self,
+        b: &Self,
+        p: FiniteField<UField>,
+        alpha: FiniteFieldElement<UField>,
+        totient_primes: &[(u64, u32)],
+        kronecker: &HuMonaganKroneckerMap,
+        start_exp: usize,
+        d_0_1: &mut (u32, u32),
+        sample_limit: Option<usize>,
+        rng: &mut impl rand::RngCore,
+        image_kind: &mut Option<HuMonaganBivariateImageKind>,
+        h: &mut Self,
+        m: &mut Integer,
+    ) -> HuMonaganBivariatePrimeResult<Self>
+    where
+        FiniteField<UField>: FiniteFieldCore<UField>
+            + DenseRootPrimeField<Element = FiniteFieldElement<UField>>
+            + Set<Element = FiniteFieldElement<UField>>,
+        FiniteFieldElement<UField>: Copy + PartialEq,
+        Integer: ToFiniteField<UField>,
+    {
+        let a_p = a.map_coeff(|c| c.to_finite_field(&p), p.clone());
+        let b_p = b.map_coeff(|c| c.to_finite_field(&p), p.clone());
+
+        let a_degrees = (a.degree(0), a.degree(1));
+        let b_degrees = (b.degree(0), b.degree(1));
+        if a_p.is_zero()
+            || b_p.is_zero()
+            || a_p.degree(0) < a_degrees.0
+            || a_p.degree(1) < a_degrees.1
+            || b_p.degree(0) < b_degrees.0
+            || b_p.degree(1) < b_degrees.1
+        {
+            debug!("Bad prime {}", p.get_prime());
+            return HuMonaganBivariatePrimeResult::RetryWithNewImage;
+        }
+        let a_p_degrees = (a_p.degree(0).to_u32(), a_p.degree(1).to_u32());
+        let b_p_degrees = (b_p.degree(0).to_u32(), b_p.degree(1).to_u32());
+
+        let discrete_log_context = UField::discrete_log_context(
+            &p,
+            &alpha,
+            p.get_prime().to_u64().expect("word prime fits in u64") - 1,
+            totient_primes,
+        );
+
+        let mut betas = Vec::with_capacity(a.nvars() - start_exp);
+        betas.push(alpha);
+        for power in kronecker
+            .powers()
+            .iter()
+            .take(a.nvars().saturating_sub(start_exp + 1))
+        {
+            betas.push(p.pow(&alpha, *power));
+        }
+
+        let (a_row_exponents, a_term_evals) = Self::evaluate_terms_bivariate(&p, &a_p, &betas);
+        let (b_row_exponents, b_term_evals) = Self::evaluate_terms_bivariate(&p, &b_p, &betas);
+
+        let shift = p
+            .from_element(&p.sample_small_integer(rng, 0..=i64::MAX - 1))
+            .to_u64()
+            .expect("word field representative fits in u64");
+        let mut a_current_evals = a_term_evals
+            .iter()
+            .zip(&a_p.coefficients)
+            .map(|((_, x), coefficient)| p.mul(coefficient, &p.pow(x, shift)))
+            .collect::<Vec<_>>();
+        let mut b_current_evals = b_term_evals
+            .iter()
+            .zip(&b_p.coefficients)
+            .map(|((_, x), coefficient)| p.mul(coefficient, &p.pow(x, shift)))
+            .collect::<Vec<_>>();
+
+        let mut gcd_images = Vec::new();
+        let mut cofactor_images = Vec::new();
+        let mut sample_points = Vec::new();
+        let mut next_num_samples = HU_MONAGAN_BIVARIATE_INITIAL_SAMPLES;
+
+        let selected_image = 'new_sample: loop {
+            for _ in 0..2 {
+                let sample_point = p.pow(&alpha, shift + gcd_images.len() as u64);
+
+                let a_j = Self::evaluate_geometric_image_bivariate(
+                    &p,
+                    &a_p,
+                    &a_row_exponents,
+                    &a_term_evals,
+                    &mut a_current_evals,
+                );
+                let b_j = Self::evaluate_geometric_image_bivariate(
+                    &p,
+                    &b_p,
+                    &b_row_exponents,
+                    &b_term_evals,
+                    &mut b_current_evals,
+                );
+
+                if a_j.is_zero()
+                    || b_j.is_zero()
+                    || a_j.degree(0) < a_p_degrees.0
+                    || a_j.degree(1) < a_p_degrees.1
+                    || b_j.degree(0) < b_p_degrees.0
+                    || b_j.degree(1) < b_p_degrees.1
+                {
+                    debug!("Bad bivariate Kronecker image, trying new prime");
+                    return HuMonaganBivariatePrimeResult::RetryWithNewImage;
+                }
+
+                let Some(g_j) = Self::hu_monagan_bivariate_image_gcd(&a_j, &b_j, *d_0_1) else {
+                    debug!("Failed to compute a bounded bivariate GCD image");
+                    return HuMonaganBivariatePrimeResult::RetryWithNewImage;
+                };
+                let g_degree = (g_j.degree(0), g_j.degree(1));
+                if g_degree.0 < d_0_1.0 || g_degree.1 < d_0_1.1 {
+                    debug!(
+                        "Unlucky bivariate degree bound: {:?} vs {:?}",
+                        g_degree, d_0_1
+                    );
+                    *d_0_1 = (g_degree.0.min(d_0_1.0), g_degree.1.min(d_0_1.1));
+                    return HuMonaganBivariatePrimeResult::RetryWithNewKroneckerMap;
+                }
+                if g_degree.0 > d_0_1.0 || g_degree.1 > d_0_1.1 {
+                    debug!("Unlucky bivariate evaluation point, trying new prime");
+                    return HuMonaganBivariatePrimeResult::RetryWithNewImage;
+                }
+
+                let lc_a_j = a_j.bivariate_lcoeff();
+                let Some(a_cofactor_j) = a_j.try_div(&g_j) else {
+                    debug!("Bivariate image division failed for a, trying new prime");
+                    return HuMonaganBivariatePrimeResult::RetryWithNewImage;
+                };
+
+                gcd_images.push(g_j * &lc_a_j);
+                cofactor_images.push(a_cofactor_j);
+                sample_points.push(sample_point);
+            }
+
+            if gcd_images.len() < next_num_samples {
+                continue 'new_sample;
+            }
+
+            if image_kind.is_none()
+                || *image_kind == Some(HuMonaganBivariateImageKind::CofactorMultiple)
+            {
+                let a_deg = (a_p.degree(0), a_p.degree(1));
+                let cofactor_image = Self::hu_monagan_sparse_interpolate_bivariate(
+                    &p,
+                    &cofactor_images,
+                    &sample_points,
+                    &alpha,
+                    &discrete_log_context,
+                    kronecker,
+                    (
+                        a_deg.0.to_u32().saturating_sub(d_0_1.0),
+                        a_deg.1.to_u32().saturating_sub(d_0_1.1),
+                    ),
+                );
+
+                if let Some(cofactor_image) = cofactor_image {
+                    *image_kind = Some(HuMonaganBivariateImageKind::CofactorMultiple);
+                    break 'new_sample cofactor_image;
+                }
+            }
+
+            if image_kind.is_none() || *image_kind == Some(HuMonaganBivariateImageKind::GcdMultiple)
+            {
+                let gcd_image = Self::hu_monagan_sparse_interpolate_bivariate(
+                    &p,
+                    &gcd_images,
+                    &sample_points,
+                    &alpha,
+                    &discrete_log_context,
+                    kronecker,
+                    *d_0_1,
+                );
+
+                if let Some(gcd_image) = gcd_image {
+                    *image_kind = Some(HuMonaganBivariateImageKind::GcdMultiple);
+                    break 'new_sample gcd_image;
+                }
+            }
+
+            if sample_limit.is_some_and(|limit| gcd_images.len() >= limit) {
+                debug!("Bivariate sparse interpolation exceeded the automatic sample budget");
+                return HuMonaganBivariatePrimeResult::RetryWithNewImage;
+            }
+            let Some(doubled_samples) = next_num_samples.checked_mul(2) else {
+                return HuMonaganBivariatePrimeResult::RetryWithNewImage;
+            };
+            next_num_samples =
+                sample_limit.map_or(doubled_samples, |limit| doubled_samples.min(limit));
+        };
+
+        let samples_used = gcd_images.len();
+
+        let previous_reconstruction = h.clone();
+        if *m == 1 {
+            *h = selected_image.map_coeff(|c| p.to_symmetric_integer(c), Z);
+            *m = p.get_prime().to_integer();
+        } else {
+            let crt = IntegerPolynomialCrtContext::new(m, &p)
+                .expect("Hu-Monagan prime repeated during CRT reconstruction");
+            crt.merge_assign(h, &selected_image);
+            *m *= p.get_prime().to_integer();
+        }
+
+        HuMonaganBivariatePrimeResult::Accepted {
+            previous_reconstruction,
+            samples_used,
+        }
+    }
+
+    /// Computes a GCD with bivariate Hu-Monagan interpolation.
+    ///
+    /// Every sampled image retains the first two variables and evaluates the remaining variables
+    /// on a geometric sequence. The method reconstructs whichever of the GCD and an input
+    /// cofactor has the smaller sampled support, then certifies the result by exact division.
+    ///
+    /// Both operands must be nonzero, use the same variable layout, and contain more than two
+    /// variables. `bounds` must contain one characteristic-zero GCD-degree bound per variable,
+    /// with positive bounds for the first two variables. The method returns `None` when an image
+    /// is unlucky or sparse reconstruction cannot be certified.
     pub fn gcd_hu_monagan_bivariate(&self, b: &Self, bounds: &[E]) -> Option<Self> {
+        self.gcd_hu_monagan_bivariate_with_budget(b, bounds, None)
+    }
+
+    /// Runs bivariate Hu-Monagan with optional limits for an automatically selected plan.
+    #[instrument(level = "debug", skip_all)]
+    fn gcd_hu_monagan_bivariate_with_budget(
+        &self,
+        b: &Self,
+        bounds: &[E],
+        automatic_budget: Option<HuMonaganBivariateAutomaticBudget>,
+    ) -> Option<Self> {
         debug!(
             "Bivariate Hu-Monagan2 gcd of {} and {} with bounds {:?}",
             self, b, bounds
         );
+        assert!(!self.is_zero() && !b.is_zero());
+        assert_eq!(self.variables(), b.variables());
+        assert_eq!(bounds.len(), self.nvars());
         assert!(bounds[0] > E::zero());
         assert!(bounds[1] > E::zero());
         assert!(self.nvars() > 2);
@@ -6136,19 +6863,16 @@ impl<E: PositiveExponent> MultivariatePolynomial<IntegerRing, E> {
         let a_content = self.bivariate_content(0, 1);
         let b_content = b.bivariate_content(0, 1);
         if !a_content.is_one() || !b_content.is_one() {
-            if let Some(g) = (self / &a_content).gcd_hu_monagan_bivariate(&(b / &b_content), bounds)
-            {
+            if let Some(g) = (self / &a_content).gcd_hu_monagan_bivariate_with_budget(
+                &(b / &b_content),
+                bounds,
+                automatic_budget,
+            ) {
                 let content = a_content.gcd(&b_content);
                 return Some(content * &g);
             } else {
                 return None;
             }
-        }
-
-        #[derive(Debug, PartialEq, Eq, Copy, Clone)]
-        enum ImageKind {
-            GcdMultiple,
-            CofactorMultiple,
         }
 
         let (a, b) = if self.nterms() <= b.nterms() {
@@ -6176,6 +6900,8 @@ impl<E: PositiveExponent> MultivariatePolynomial<IntegerRing, E> {
         let mut d_0_1 = (bounds[0].to_u32(), bounds[1].to_u32());
         let mut smooth_prime_index = 0;
         let mut rng = rand::rng();
+        let mut remaining_prime_attempts =
+            automatic_budget.map(|budget| budget.prime_attempt_limit);
 
         'kronecker_prime: loop {
             for rr in &mut r {
@@ -6190,12 +6916,13 @@ impl<E: PositiveExponent> MultivariatePolynomial<IntegerRing, E> {
             let mut h = h_zero.clone();
             let mut m = Integer::one();
             let mut image_kind = None;
+            let mut learned_sample_limit = None;
 
             'new_image: loop {
                 let prime_bound =
                     hu_monagan_prime_lower_bound(kronecker.range(), delta, &largest_coeff);
 
-                let (p, totient_primes, alpha, a_p, b_p) = 'new_prime: loop {
+                let (prime, alpha, factors) = loop {
                     let Some((p, alpha, fs)) = SMOOTH_PRIMES.get(smooth_prime_index) else {
                         warn!(
                             "Ran out of smooth primes for bivariate Hu-Monagan2 GCD.\ngcd({},{})",
@@ -6210,172 +6937,99 @@ impl<E: PositiveExponent> MultivariatePolynomial<IntegerRing, E> {
                         continue;
                     }
 
-                    let field = Zp64::new(*p);
-                    let a_p = a.map_coeff(|c| c.to_finite_field(&field), field.clone());
-                    let b_p = b.map_coeff(|c| c.to_finite_field(&field), field.clone());
-
-                    let a_deg = a.bivariate_deg();
-                    let b_deg = b.bivariate_deg();
-                    if a_p.bivariate_deg() < a_deg || b_p.bivariate_deg() < b_deg {
-                        debug!("Bad prime {}", p);
-                        continue 'new_prime;
-                    }
-
-                    let mut totient_primes = vec![];
-                    for (f, prime) in fs.iter().zip(&SMOOTH_PRIME_BASE) {
-                        if *f > 0 {
-                            totient_primes.push((*prime, *f as u32));
-                        }
-                    }
-
-                    let alpha = field.to_element(*alpha as u64);
-                    break (field, totient_primes, alpha, a_p, b_p);
+                    break (*p, *alpha, *fs);
                 };
-                let discrete_log_context =
-                    Zp64DiscreteLogContext::new(&p, &alpha, p.get_prime() - 1, &totient_primes);
-
-                let mut betas = Vec::with_capacity(a.nvars() - start_exp);
-                betas.push(alpha);
-                for power in kronecker
-                    .powers()
+                let totient_primes = factors
                     .iter()
-                    .take(a.nvars().saturating_sub(start_exp + 1))
-                {
-                    betas.push(p.pow(&alpha, *power));
+                    .zip(&SMOOTH_PRIME_BASE)
+                    .filter_map(|(exponent, factor)| {
+                        (*exponent > 0).then_some((*factor, *exponent as u32))
+                    })
+                    .collect::<Vec<_>>();
+
+                if let Some(remaining) = &mut remaining_prime_attempts {
+                    if *remaining == 0 {
+                        debug!("Bivariate Hu-Monagan exhausted its automatic prime-image budget");
+                        return None;
+                    }
+                    *remaining -= 1;
                 }
 
-                let (a_row_exponents, a_term_evals) =
-                    Self::evaluate_terms_bivariate(&p, &a_p, &betas);
-                let (b_row_exponents, b_term_evals) =
-                    Self::evaluate_terms_bivariate(&p, &b_p, &betas);
-
-                let shift = p.from_element(&p.sample_small_integer(&mut rng, 0..=i64::MAX - 1));
-                let mut a_current_evals = a_term_evals
-                    .iter()
-                    .zip(&a_p.coefficients)
-                    .map(|((_, x), coefficient)| p.mul(coefficient, &p.pow(x, shift)))
-                    .collect::<Vec<_>>();
-                let mut b_current_evals = b_term_evals
-                    .iter()
-                    .zip(&b_p.coefficients)
-                    .map(|((_, x), coefficient)| p.mul(coefficient, &p.pow(x, shift)))
-                    .collect::<Vec<_>>();
-
-                let mut gcd_images = Vec::new();
-                let mut cofactor_images = Vec::new();
-                let mut sample_points = Vec::new();
-                let mut next_num_samples = 4usize;
-
-                let selected_image = 'new_sample: loop {
-                    for _ in 0..2 {
-                        let sample_point = p.pow(&alpha, shift + gcd_images.len() as u64);
-
-                        let a_j = Self::evaluate_geometric_image_bivariate(
-                            &p,
-                            &a_p,
-                            &a_row_exponents,
-                            &a_term_evals,
-                            &mut a_current_evals,
-                        );
-                        let b_j = Self::evaluate_geometric_image_bivariate(
-                            &p,
-                            &b_p,
-                            &b_row_exponents,
-                            &b_term_evals,
-                            &mut b_current_evals,
-                        );
-
-                        let a_p_deg = a_p.bivariate_deg();
-                        let b_p_deg = b_p.bivariate_deg();
-                        if a_j.bivariate_deg() < (a_p_deg.0.to_u32(), a_p_deg.1.to_u32())
-                            || b_j.bivariate_deg() < (b_p_deg.0.to_u32(), b_p_deg.1.to_u32())
-                        {
-                            debug!("Bad bivariate Kronecker image, trying new prime");
-                            continue 'new_image;
-                        }
-
-                        let g_j = a_j.gcd(&b_j);
-                        let g_degree = (g_j.degree(0), g_j.degree(1));
-                        if g_degree.0 < d_0_1.0 || g_degree.1 < d_0_1.1 {
-                            debug!(
-                                "Unlucky bivariate degree bound: {:?} vs {:?}",
-                                g_degree, d_0_1
-                            );
-                            d_0_1 = (g_degree.0.min(d_0_1.0), g_degree.1.min(d_0_1.1));
-                            continue 'kronecker_prime;
-                        }
-                        if g_degree.0 > d_0_1.0 || g_degree.1 > d_0_1.1 {
-                            debug!("Unlucky bivariate evaluation point, trying new prime");
-                            continue 'new_image;
-                        }
-
-                        let lc_a_j = a_j.bivariate_lcoeff();
-                        let Some(a_cofactor_j) = a_j.try_div(&g_j) else {
-                            debug!("Bivariate image division failed for a, trying new prime");
-                            continue 'new_image;
-                        };
-
-                        gcd_images.push(g_j * &lc_a_j);
-                        cofactor_images.push(a_cofactor_j);
-                        sample_points.push(sample_point);
-                    }
-
-                    if gcd_images.len() < next_num_samples {
-                        continue 'new_sample;
-                    }
-
-                    next_num_samples *= 2;
-
-                    if image_kind.is_none() || image_kind == Some(ImageKind::CofactorMultiple) {
-                        let a_deg = (a_p.degree(0), a_p.degree(1));
-                        let cofactor_image = Self::hu_monagan_sparse_interpolate_bivariate(
-                            &p,
-                            &cofactor_images,
-                            &sample_points,
-                            &alpha,
-                            &discrete_log_context,
-                            &kronecker,
-                            (
-                                a_deg.0.to_u32().saturating_sub(d_0_1.0),
-                                a_deg.1.to_u32().saturating_sub(d_0_1.1),
-                            ),
-                        );
-
-                        if let Some(cofactor_image) = cofactor_image {
-                            image_kind = Some(ImageKind::CofactorMultiple);
-                            break 'new_sample cofactor_image;
-                        }
-                    }
-
-                    if image_kind.is_none() || image_kind == Some(ImageKind::GcdMultiple) {
-                        let gcd_image = Self::hu_monagan_sparse_interpolate_bivariate(
-                            &p,
-                            &gcd_images,
-                            &sample_points,
-                            &alpha,
-                            &discrete_log_context,
-                            &kronecker,
-                            d_0_1,
-                        );
-
-                        if let Some(gcd_image) = gcd_image {
-                            image_kind = Some(ImageKind::GcdMultiple);
-                            break 'new_sample gcd_image;
-                        }
-                    }
-                };
-
-                let old_h = h.clone();
-
-                if m == 1 {
-                    h = selected_image.map_coeff(|c| p.to_symmetric_integer(c), Z);
-                    m = p.get_prime().into();
+                #[cfg(not(feature = "binary_size"))]
+                let prime_result = if let Ok(prime) = u32::try_from(prime) {
+                    let field = Zp::new(prime);
+                    let alpha = field.to_element(u32::from(alpha));
+                    Self::hu_monagan_bivariate_prime_image(
+                        a,
+                        b,
+                        field,
+                        alpha,
+                        &totient_primes,
+                        &kronecker,
+                        start_exp,
+                        &mut d_0_1,
+                        learned_sample_limit.or(automatic_budget.map(|budget| budget.sample_limit)),
+                        &mut rng,
+                        &mut image_kind,
+                        &mut h,
+                        &mut m,
+                    )
                 } else {
-                    let crt = IntegerPolynomialCrtContext::new(&m, &p)
-                        .expect("Hu-Monagan prime repeated during CRT reconstruction");
-                    crt.merge_assign(&mut h, &selected_image);
-                    m *= p.get_prime();
-                }
+                    let field = Zp64::new(prime);
+                    let alpha = field.to_element(u64::from(alpha));
+                    Self::hu_monagan_bivariate_prime_image(
+                        a,
+                        b,
+                        field,
+                        alpha,
+                        &totient_primes,
+                        &kronecker,
+                        start_exp,
+                        &mut d_0_1,
+                        learned_sample_limit.or(automatic_budget.map(|budget| budget.sample_limit)),
+                        &mut rng,
+                        &mut image_kind,
+                        &mut h,
+                        &mut m,
+                    )
+                };
+
+                #[cfg(feature = "binary_size")]
+                let prime_result = {
+                    let field = Zp64::new(prime);
+                    let alpha = field.to_element(u64::from(alpha));
+                    Self::hu_monagan_bivariate_prime_image(
+                        a,
+                        b,
+                        field,
+                        alpha,
+                        &totient_primes,
+                        &kronecker,
+                        start_exp,
+                        &mut d_0_1,
+                        learned_sample_limit.or(automatic_budget.map(|budget| budget.sample_limit)),
+                        &mut rng,
+                        &mut image_kind,
+                        &mut h,
+                        &mut m,
+                    )
+                };
+
+                let old_h = match prime_result {
+                    HuMonaganBivariatePrimeResult::Accepted {
+                        previous_reconstruction,
+                        samples_used,
+                    } => {
+                        if automatic_budget.is_some() && learned_sample_limit.is_none() {
+                            learned_sample_limit = Some(samples_used);
+                        }
+                        previous_reconstruction
+                    }
+                    HuMonaganBivariatePrimeResult::RetryWithNewImage => continue 'new_image,
+                    HuMonaganBivariatePrimeResult::RetryWithNewKroneckerMap => {
+                        continue 'kronecker_prime;
+                    }
+                };
 
                 if h != old_h && !old_h.is_zero() {
                     continue 'new_image;
@@ -6385,23 +7039,30 @@ impl<E: PositiveExponent> MultivariatePolynomial<IntegerRing, E> {
                 let content = image_poly.bivariate_content(0, 1);
                 let primitive = image_poly / &content;
 
-                let gcd_candidate = match image_kind.unwrap() {
-                    ImageKind::GcdMultiple => PolynomialGCD::normalize(primitive),
-                    ImageKind::CofactorMultiple => {
+                let (gcd_candidate, a_already_certified) = match image_kind.unwrap() {
+                    HuMonaganBivariateImageKind::GcdMultiple => {
+                        (PolynomialGCD::normalize(primitive), false)
+                    }
+                    HuMonaganBivariateImageKind::CofactorMultiple => {
                         let cofactor_candidate = PolynomialGCD::normalize(primitive);
                         if let Some(q) = a.try_div(&cofactor_candidate) {
-                            PolynomialGCD::normalize(q)
+                            (PolynomialGCD::normalize(q), true)
                         } else if old_h.is_zero() {
                             debug!("Cofactor image does not divide a yet");
                             continue 'new_image;
                         } else {
                             debug!("Stable cofactor image does not divide a");
+                            if automatic_budget.is_some() {
+                                return None;
+                            }
                             continue 'kronecker_prime;
                         }
                     }
                 };
 
-                if a.try_div(&gcd_candidate).is_some() && b.try_div(&gcd_candidate).is_some() {
+                if (a_already_certified || a.try_div(&gcd_candidate).is_some())
+                    && b.try_div(&gcd_candidate).is_some()
+                {
                     debug!("Found bivariate GCD: {}", gcd_candidate);
                     return Some(PolynomialGCD::normalize(gcd_candidate));
                 }
@@ -6409,6 +7070,9 @@ impl<E: PositiveExponent> MultivariatePolynomial<IntegerRing, E> {
                 debug!("Non-division of {}, trying new image", gcd_candidate);
 
                 if !old_h.is_zero() {
+                    if automatic_budget.is_some() {
+                        return None;
+                    }
                     continue 'kronecker_prime;
                 }
             }
@@ -6488,9 +7152,10 @@ impl<E: PositiveExponent> PolynomialGCD<E> for IntegerRing {
         a_degrees: &[E],
         b_degrees: &[E],
     ) -> Option<MultivariatePolynomial<Self, E>> {
-        let hu_enabled = GLOBAL_SETTINGS
+        let force_hu = GLOBAL_SETTINGS
             .force_hu_monagan_poly_gcd
-            .load(std::sync::atomic::Ordering::Relaxed)
+            .load(std::sync::atomic::Ordering::Relaxed);
+        let hu_enabled = force_hu
             || GLOBAL_SETTINGS
                 .use_hu_monagan_poly_gcd
                 .load(std::sync::atomic::Ordering::Relaxed);
@@ -6502,6 +7167,17 @@ impl<E: PositiveExponent> PolynomialGCD<E> for IntegerRing {
         }
         if !hu_monagan_has_minimum_geometry(vars, bounds) {
             return None;
+        }
+
+        if !force_hu {
+            let bivariate_planning = HuMonaganBivariatePlanningContext::new_with_degrees(
+                a, b, vars, bounds, a_degrees, b_degrees,
+            );
+            if let Some(prepared) = bivariate_planning.prepare()
+                && let Some(gcd) = prepared.run()
+            {
+                return Some(gcd);
+            }
         }
 
         let anchor = HuMonaganAnchor::from_inputs(a, b);
@@ -6663,20 +7339,6 @@ impl<E: PositiveExponent> PolynomialGCD<E> for IntegerRing {
                 .load(std::sync::atomic::Ordering::Relaxed)
                 && should_use_hu_monagan(a, b, vars, bounds))
         {
-            // TODO: find out when the bivariate case is faster
-            // currently it can be much slower due to the call to bivariate Zippel,
-            // that may involve a costly Newton interpolation that has to be called
-            // for every sample. Full Zippel would only call it once, since it stores
-            // the shape of the polynomial and can reuse it for all samples.
-            // if a.nvars() > 3
-            //     && vars[1] == 1
-            //     && bounds.get(1).is_some_and(|b| *b > E::zero())
-            //     && bounds.get(vars[2]).is_some_and(|b| *b > E::zero())
-            // {
-            //     // if let Some(g) = a.gcd_hu_monagan_bivariate(b, bounds) {
-            //     //     return g;
-            //     // }
-            // } else
             let anchor = HuMonaganAnchor::from_inputs(a, b);
             if let Some(g) = a.gcd_hu_monagan_with_anchor(b, bounds, anchor) {
                 return g;
@@ -7411,12 +8073,24 @@ impl<T: SingleFloat + std::hash::Hash + Eq + InternalOrdering, E: PositiveExpone
 mod tests {
     use super::*;
     use crate::atom::AtomCore;
-    use crate::domains::finite_field::Z2;
+    use crate::domains::finite_field::{Z2, Zp};
     use crate::parse;
     use crate::poly::PolyVariable;
 
     fn hu_planning_fixture(expression: &str) -> MultivariatePolynomial<IntegerRing, u8> {
         let variables = ["x", "y", "z"]
+            .map(|variable| {
+                parse!(variable)
+                    .to_polynomial::<IntegerRing, u8>(&Z, None)
+                    .variables()[0]
+                    .clone()
+            })
+            .to_vec();
+        parse!(expression).to_polynomial::<_, u8>(&Z, Some(std::sync::Arc::new(variables)))
+    }
+
+    fn hu_bivariate_planning_fixture(expression: &str) -> MultivariatePolynomial<IntegerRing, u8> {
+        let variables = ["x", "y", "z", "u", "v"]
             .map(|variable| {
                 parse!(variable)
                     .to_polynomial::<IntegerRing, u8>(&Z, None)
@@ -7441,6 +8115,367 @@ mod tests {
         assert_eq!(rows.largest, 2);
         assert!(rows.dense.is_empty());
         assert_eq!(rows.sparse.as_ref().unwrap().len(), 3);
+    }
+
+    #[test]
+    fn bivariate_hu_pair_selection_prefers_two_low_cost_variables() {
+        let variables = [0, 1, 2, 3, 4];
+        let cases = [
+            (
+                [18u8, 17, 20, 18, 15],
+                [18u8, 17, 19, 18, 17],
+                [1usize, 1, 1, 4, 4],
+                [1usize, 1, 1, 2, 1],
+                [1, 4],
+            ),
+            (
+                [18u8, 16, 21, 15, 19],
+                [17u8, 15, 20, 17, 17],
+                [1usize, 2, 3, 2, 2],
+                [1usize, 6, 1, 2, 1],
+                [1, 3],
+            ),
+            (
+                [18u8, 16, 16, 17, 19],
+                [18u8, 14, 16, 17, 19],
+                [1usize, 1, 2, 4, 3],
+                [1usize, 1, 1, 3, 3],
+                [1, 2],
+            ),
+        ];
+
+        for (left_degrees, right_degrees, left_rows, right_rows, expected) in cases {
+            assert_eq!(
+                hu_monagan_bivariate_main_variables(
+                    &variables,
+                    &left_degrees,
+                    &right_degrees,
+                    &left_rows,
+                    &right_rows,
+                ),
+                Some(expected),
+            );
+        }
+    }
+
+    #[test]
+    fn bivariate_hu_planning_rejects_dense_input_boxes() {
+        let left = hu_planning_fixture("(1+x+x^2)*(1+y+y^2)*(1+z+z^2)");
+        let right = hu_planning_fixture("(1+2*x+3*x^2)*(1+5*y+7*y^2)*(1+11*z+13*z^2)");
+        let variables = [0, 1, 2];
+        let bounds = [1u8, 1, 1];
+        let left_degrees = polynomial_degrees(&left);
+        let right_degrees = polynomial_degrees(&right);
+        let planning = HuMonaganBivariatePlanningContext::new_with_degrees(
+            &left,
+            &right,
+            &variables,
+            &bounds,
+            &left_degrees,
+            &right_degrees,
+        );
+
+        let main_variables = planning.main_variables().unwrap();
+        assert_eq!(main_variables, [0, 1]);
+        assert!(!planning.is_applicable(main_variables));
+        assert!(planning.prepare().is_none());
+    }
+
+    #[test]
+    fn bivariate_hu_planning_rejects_unbounded_sample_schedule() {
+        let left = hu_bivariate_planning_fixture("1+x+y+x*y+z^10+u^10+v^10+z^10*u^10*v^10");
+        let right = hu_bivariate_planning_fixture(
+            "2+3*x+5*y+7*x*y+11*z^10+13*u^10+17*v^10+19*z^10*u^10*v^10",
+        );
+        let variables = [0, 1, 2, 3, 4];
+        let bounds = [1u8; 5];
+        let left_degrees = polynomial_degrees(&left);
+        let right_degrees = polynomial_degrees(&right);
+        let planning = HuMonaganBivariatePlanningContext::new_with_degrees(
+            &left,
+            &right,
+            &variables,
+            &bounds,
+            &left_degrees,
+            &right_degrees,
+        );
+
+        assert_eq!(planning.main_variables(), Some([0, 1]));
+        assert!(!planning.is_applicable([0, 1]));
+    }
+
+    #[test]
+    fn bivariate_hu_planning_rejects_unbalanced_input_supports() {
+        let left = hu_bivariate_planning_fixture("1+x+y+x*y+z^10+u^10+v^10+z^10*u^10*v^10+x*z^9");
+        let right = hu_bivariate_planning_fixture(
+            "2+3*x+5*y+7*x*y+11*z^10+13*u^10+17*v^10+19*z^10*u^10*v^10+23*x*z^9+29*x*u^9+31*y*v^9+37*x*z^8+41*y*u^8+43*x*v^8+47*y*z^7+53*x*u^7+59*y*v^7+61*x*z^6+67*y*u^6",
+        );
+        let variables = [0, 1, 2, 3, 4];
+        let bounds = [1u8; 5];
+        let left_degrees = polynomial_degrees(&left);
+        let right_degrees = polynomial_degrees(&right);
+        let forward = HuMonaganBivariatePlanningContext::new_with_degrees(
+            &left,
+            &right,
+            &variables,
+            &bounds,
+            &left_degrees,
+            &right_degrees,
+        );
+        let reverse = HuMonaganBivariatePlanningContext::new_with_degrees(
+            &right,
+            &left,
+            &variables,
+            &bounds,
+            &right_degrees,
+            &left_degrees,
+        );
+
+        assert_eq!(forward.main_variables(), Some([0, 1]));
+        assert_eq!(reverse.main_variables(), Some([0, 1]));
+        assert!(!forward.is_applicable([0, 1]));
+        assert!(!reverse.is_applicable([0, 1]));
+    }
+
+    #[test]
+    fn bivariate_hu_planning_rejects_unamortized_image_boxes() {
+        let left = hu_bivariate_planning_fixture(
+            "(1+x+x^2+x^3+x^4+x^5+x^6+x^7+x^8+x^9)*(1+y+y^2+y^3+y^4+y^5+y^6+y^7+y^8+y^9)*(1+z^20)*(1+u^20)*(1+v^20)",
+        );
+        let right = hu_bivariate_planning_fixture(
+            "(1+2*x+3*x^2+5*x^3+7*x^4+11*x^5+13*x^6+17*x^7+19*x^8+23*x^9)*(1+29*y+31*y^2+37*y^3+41*y^4+43*y^5+47*y^6+53*y^7+59*y^8+61*y^9)*(1+67*z^20)*(1+71*u^20)*(1+73*v^20)",
+        );
+        let variables = [0, 1, 2, 3, 4];
+        let bounds = [1u8; 5];
+        let left_degrees = polynomial_degrees(&left);
+        let right_degrees = polynomial_degrees(&right);
+        let planning = HuMonaganBivariatePlanningContext::new_with_degrees(
+            &left,
+            &right,
+            &variables,
+            &bounds,
+            &left_degrees,
+            &right_degrees,
+        );
+
+        assert_eq!(planning.main_variables(), Some([0, 1]));
+        assert!(!planning.is_applicable([0, 1]));
+    }
+
+    #[test]
+    fn bivariate_hu_planning_is_symmetric_for_equal_length_inputs() {
+        let left = hu_bivariate_planning_fixture("1+x+y+x*y+z^10+u^10+v^10+z^10*u^10*v^10+x*z^9");
+        let right = hu_bivariate_planning_fixture(
+            "2+3*x+5*y+7*x*y+11*z^10+13*u^10+17*v^10+19*z^10*u^10*v^10+23*x*z^9",
+        );
+        let variables = [0, 1, 2, 3, 4];
+        let bounds = [1u8, 1, 1, 1, 1];
+        let left_degrees = polynomial_degrees(&left);
+        let right_degrees = polynomial_degrees(&right);
+        let forward = HuMonaganBivariatePlanningContext::new_with_degrees(
+            &left,
+            &right,
+            &variables,
+            &bounds,
+            &left_degrees,
+            &right_degrees,
+        );
+        let reverse = HuMonaganBivariatePlanningContext::new_with_degrees(
+            &right,
+            &left,
+            &variables,
+            &bounds,
+            &right_degrees,
+            &left_degrees,
+        );
+
+        assert_eq!(forward.main_variables(), Some([0, 1]));
+        assert_eq!(reverse.main_variables(), Some([0, 1]));
+        assert!(forward.is_applicable([0, 1]));
+        assert!(reverse.is_applicable([0, 1]));
+        assert!(forward.prepare().is_some());
+        assert!(reverse.prepare().is_some());
+    }
+
+    #[test]
+    fn bivariate_hu_planning_is_symmetric_for_unequal_length_inputs() {
+        let left = hu_bivariate_planning_fixture("1+x+y+x*y+z^10+u^10+v^10+z^10*u^10*v^10+x*z^9");
+        let right = hu_bivariate_planning_fixture(
+            "2+3*x+5*y+7*x*y+11*z^6+13*u^6+17*v^6+19*z^6*u^6*v^6+23*z^5*u^4+29*y*u^5",
+        );
+        let variables = [0, 1, 2, 3, 4];
+        let bounds = [1u8; 5];
+        let left_degrees = polynomial_degrees(&left);
+        let right_degrees = polynomial_degrees(&right);
+        let forward = HuMonaganBivariatePlanningContext::new_with_degrees(
+            &left,
+            &right,
+            &variables,
+            &bounds,
+            &left_degrees,
+            &right_degrees,
+        )
+        .prepare()
+        .unwrap();
+        let reverse = HuMonaganBivariatePlanningContext::new_with_degrees(
+            &right,
+            &left,
+            &variables,
+            &bounds,
+            &right_degrees,
+            &left_degrees,
+        )
+        .prepare()
+        .unwrap();
+
+        assert_eq!(forward.order, reverse.order);
+        assert_eq!(forward.bounds, reverse.bounds);
+        assert_eq!(forward.budget, reverse.budget);
+        assert_eq!(forward.budget.sample_limit, 18);
+        assert_eq!(forward.budget.prime_attempt_limit, 10);
+    }
+
+    #[test]
+    fn prepared_bivariate_hu_restores_original_coordinates() {
+        let mut polynomials = [
+            hu_planning_fixture("1+x^2+2*y^2+3*z^2"),
+            hu_planning_fixture("1+5*x^3+7*y^3+11*z^3"),
+            hu_planning_fixture("1+13*x+17*y+19*z"),
+        ];
+        MultivariatePolynomial::unify_variables_list(&mut polynomials);
+        let [left_cofactor, right_cofactor, common_factor] = polynomials;
+        let left = &left_cofactor * &common_factor;
+        let right = &right_cofactor * &common_factor;
+        let order = smallvec![1usize, 0, 2];
+        let prepared = PreparedHuMonaganBivariateGcd {
+            left: left.rearrange_impl(&order, false, false),
+            right: right.rearrange_impl(&order, false, false),
+            bounds: smallvec![1u8, 1, 1],
+            order,
+            budget: HuMonaganBivariateAutomaticBudget {
+                sample_limit: 8,
+                prime_attempt_limit: 10,
+            },
+        };
+
+        assert_eq!(prepared.run(), Some(common_factor));
+    }
+
+    #[test]
+    fn bounded_bivariate_hu_image_restores_second_variable_content() {
+        let mut polynomials = [
+            parse!("(x+1)*(y+1)").to_polynomial::<IntegerRing, u32>(&Z, None),
+            parse!("x+2*y+3").to_polynomial::<IntegerRing, u32>(&Z, None),
+            parse!("2*x+3*y+5").to_polynomial::<IntegerRing, u32>(&Z, None),
+        ];
+        MultivariatePolynomial::unify_variables_list(&mut polynomials);
+        let [common_factor, left_cofactor, right_cofactor] = polynomials;
+        let field = Zp::new(577);
+        let common_factor = common_factor.map_coeff(
+            |coefficient| coefficient.to_finite_field(&field),
+            field.clone(),
+        );
+        let left = (&common_factor
+            * &left_cofactor.map_coeff(
+                |coefficient| coefficient.to_finite_field(&field),
+                field.clone(),
+            ))
+            .make_monic();
+        let right = (&common_factor
+            * &right_cofactor.map_coeff(
+                |coefficient| coefficient.to_finite_field(&field),
+                field.clone(),
+            ))
+            .make_monic();
+
+        assert_eq!(
+            MultivariatePolynomial::<IntegerRing, u8>::hu_monagan_bivariate_image_gcd(
+                &left,
+                &right,
+                (1, 1),
+            ),
+            Some(common_factor.make_monic())
+        );
+    }
+
+    #[test]
+    fn bivariate_hu_runs_word_width_dispatch_and_crt_images() {
+        fn sparse_fixture(
+            exponent: u32,
+            factor_coefficient: Integer,
+            left_coefficient: Integer,
+            right_coefficient: Integer,
+        ) -> (
+            MultivariatePolynomial<IntegerRing, u32>,
+            MultivariatePolynomial<IntegerRing, u32>,
+            MultivariatePolynomial<IntegerRing, u32>,
+        ) {
+            let template = parse!("x+y+z+w").to_polynomial::<IntegerRing, u32>(&Z, None);
+            let monomial = |coefficient, exponents: [u32; 4]| {
+                template.monomial(coefficient, exponents.to_vec())
+            };
+            let common_factor = template.one()
+                + monomial(Integer::one(), [1, 0, 0, 0])
+                + monomial(Integer::one(), [0, 1, 0, 0])
+                + monomial(factor_coefficient, [0, 0, exponent, exponent]);
+            let left_cofactor = template.one() + monomial(left_coefficient, [1, 0, 0, 0]);
+            let right_cofactor = template.one() + monomial(right_coefficient, [0, 1, 0, 0]);
+            (
+                &common_factor * &left_cofactor,
+                &common_factor * &right_cofactor,
+                common_factor,
+            )
+        }
+
+        let first_prime_for_radix = |radix: u64| {
+            let lower_bound = radix.checked_mul(radix).unwrap().checked_mul(2).unwrap();
+            SMOOTH_PRIMES
+                .iter()
+                .find(|prime| prime.0 >= lower_bound)
+                .unwrap()
+                .0
+        };
+        assert!(u32::try_from(first_prime_for_radix(45_000)).is_ok());
+        assert!(u32::try_from(first_prime_for_radix(47_000)).is_err());
+
+        for (case_index, (exponent, factor_coefficient, left_coefficient, right_coefficient)) in [
+            (44_999, Integer::one(), Integer::from(2), Integer::from(3)),
+            (46_999, Integer::one(), Integer::from(2), Integer::from(3)),
+            (
+                44_999,
+                (Integer::one() << 100usize) + Integer::one(),
+                (Integer::one() << 100usize) + Integer::from(3),
+                (Integer::one() << 100usize) + Integer::from(5),
+            ),
+        ]
+        .into_iter()
+        .enumerate()
+        {
+            let (left, right, expected) = sparse_fixture(
+                exponent,
+                factor_coefficient,
+                left_coefficient,
+                right_coefficient,
+            );
+            let bounds = [1, 1, exponent, exponent];
+            assert_eq!(
+                left.gcd_hu_monagan_bivariate(&right, &bounds),
+                Some(expected)
+            );
+            if case_index == 0 {
+                assert_eq!(
+                    left.gcd_hu_monagan_bivariate_with_budget(
+                        &right,
+                        &bounds,
+                        Some(HuMonaganBivariateAutomaticBudget {
+                            sample_limit: HU_MONAGAN_BIVARIATE_INITIAL_SAMPLES,
+                            prime_attempt_limit: 0,
+                        }),
+                    ),
+                    None
+                );
+            }
+        }
     }
 
     #[test]

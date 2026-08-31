@@ -1,14 +1,15 @@
 # Polynomial performance continuation handoff
 
 This is the live continuation record for the single-core Symbolica/FLINT polynomial-performance
-work. It was refreshed on 2026-08-31 after the `v25` paid-for dense Frobenius-map round. The
+work. It was refreshed on 2026-08-31 after the `v26` bounded automatic bivariate Hu-Monagan GCD
+round. The
 current 125-row fixed-fixture non-resultant inventory has 124 Symbolica wins and one loss with a
 `0.636796` median. Its worst row is generated dense bivariate GCD at `1.022443`. Dense
 degree-48/64/80 GCD measure
 `0.904854/0.711750/0.993433`. Dense one-variable degree-63/64/65 factorization measures
 `0.910657/0.700836/0.945536`, and the stable matching products measure
 `0.814256/0.815238/0.841130`. The mixed current 3,200-problem PolyBench distribution has a
-`0.726631` paired median with 2,277 Symbolica wins. Rows are measured across accepted source
+`0.699823` paired median with 2,441 Symbolica wins. Rows are measured across accepted source
 snapshots, with each replacement and its source-matched evidence documented below.
 Keep this file current whenever an experiment is accepted, rejected, or left partly complete. The
 purpose is that another agent can resume without reconstructing decisions from chat history or
@@ -16,7 +17,7 @@ transient binary names.
 
 The complete current Symbolica/FLINT scoreboard is in
 [CURRENT_STATUS.md](CURRENT_STATUS.md), with the latest immutable snapshot in
-[CURRENT_STATUS_v25.md](CURRENT_STATUS_v25.md). Its primary statistics contain 125 non-resultant
+[CURRENT_STATUS_v26.md](CURRENT_STATUS_v26.md). Its primary statistics contain 125 non-resultant
 comparisons: 124 favor Symbolica and one favors FLINT. The six Ducos, six Brown, and six CRT
 measurements are retained only in a compact appendix note and do not affect primary ranks or
 summary statistics. After every accepted optimization, update the live file and create the next
@@ -4263,11 +4264,15 @@ nontrivial-factor gains above. The scout remains bounded to degree 64 and is inv
 paths that are either about to construct a late quadratic discriminant or are planned to start
 bivariate.
 
-### Full-distribution interpretation and next queue
+### Historical v22 full-distribution interpretation and then-next queue
+
+This subsection records the queue as it stood after v22. The v26 bivariate Hu round resolves its
+`05/0002` target and supersedes the current-action wording below; retain the figures only as the
+before-state for that work.
 
 Combining the eight fresh factor rows with the eight unchanged GCD rows gives 2,277 wins out of
 3,200 problems, paired median `0.726631`, and summed-time ratio `0.305399`. Twelve of sixteen setup
-medians now favor Symbolica. This is a mixed current checkpoint, not a claim that the eight GCD
+medians favored Symbolica at that point. This was a mixed v22 checkpoint, not a claim that the eight GCD
 rows were rerun by the v22 adapter.
 
 Do not use one scalar ordering as the work queue. Keep three views:
@@ -4559,12 +4564,93 @@ All 107 default-GMP factor tests pass. The focused degree-63 route test also pas
 Frobenius map is constructed. Formatting and diff checks pass. The immutable scoreboard is
 [CURRENT_STATUS_v25.md](CURRENT_STATUS_v25.md).
 
+## v26 bounded automatic bivariate Hu-Monagan GCD
+
+The accepted route keeps two main variables in every modular image and evaluates all remaining
+coordinates on one geometric sequence. Each image computes a bivariate finite-field GCD. Sparse
+Berlekamp-Massey/root recovery and transposed Vandermonde interpolation reconstruct either the GCD
+multiple or the smaller input's cofactor, CRT combines integer images until their coefficients
+stabilize, and exact division certifies the result. A failed bounded automatic attempt returns to
+the existing one-main-variable Hu/Zippel path; the explicit public bivariate method remains
+uncapped.
+
+`HuMonaganBivariatePlanningContext` scores candidate pairs by maximum input degree plus one unit
+per 256 terms in the smaller leading row, with coordinate order as the deterministic tie-breaker.
+An automatic plan is admitted only when all of the following input-derived conditions hold:
+
+- at least three variables are active and both retained variables have positive GCD-degree bounds;
+- the two full input boxes are sparse under the existing factor-eight density margin;
+- four initial images satisfy `4 * pair_area <= left_terms + right_terms`;
+- operand support is balanced: `max(left_terms, right_terms) <= 2 * min(left_terms, right_terms)`;
+- twice the Kronecker exponent range fits the smooth-prime table;
+- the projected GCD/cofactor support is at most one quarter of that Kronecker range;
+- the retained image is amortized by projection work: `2 * projected_target >= pair_area`;
+- `sample_limit = max(4, 2 * (projected_target + 1))` fits within combined input support.
+
+Prime attempts are bounded by eight target CRT images, one stabilization image, and at most
+`max(1, combined_terms / (4 * pair_area))` failed-image allowance. The first accepted prime also
+caps later primes at its actual sample count. A stable reconstruction that fails certification
+causes immediate fallback instead of consuming the remaining smooth-prime table.
+
+The bivariate image helper receives known characteristic-zero degree bounds, strips each image's
+content in the first retained variable, computes and restores their content GCD in the second
+variable, and calls the known-shape modular routine without repeating public variable scans and
+planning. Independent degree checks for both retained variables reject a prime or evaluation that
+drops either leading face. Smooth primes fitting in `u32` now use `Zp`; larger primes use `Zp64`,
+with one generic bivariate workspace. `ZpDiscreteLogContext` and `Zp64DiscreteLogContext` reuse the
+Pohlig-Hellman digit tables and CRT idempotents across every reconstructed root at one prime.
+
+The final image-amortization gate came from an explicit harmful-plan audit. Before that gate, 132
+of 148 eligible `05/0006` plans were admitted. Problems 11 and 25 had bivariate-candidate/control
+ratios `1.729x` and `2.381x`; their retained pair areas dominated their complete projected
+interpolation targets. Requiring `2 * projected_target >= pair_area` rejects exactly those two,
+leaving 130 admitted plans, and rejects no uniform `05/0002` plan. Earlier support/balance/sample
+gates reject the measured 8v candidates, so their established one-main-variable routes remain
+unchanged. This is a cost-geometry rule, not a setup or problem identifier.
+
+Final measurements are:
+
+| Workload | v25/reference S/F | v26 S/F | v26 total S/F | v26 wins |
+|---|---:|---:|---:|---:|
+| PolyBench 5v `0002`, uniform nontrivial GCD | 1.323497 | 0.749068 | 0.783395 | 185/200 |
+| PolyBench 5v `0006`, sharp nontrivial GCD | 1.213492 | 0.983951 | 1.043248 | 103/200 |
+| same-process 5v uniform nontrivial GCD #11 | 0.978321 | 0.765008 | n/a | 6/6 processes |
+| same-process 5v sharp nontrivial GCD #11 guard | 0.514253 | 0.518311 | n/a | 6/6 processes |
+
+The direct known-bound image helper was separately measured before automatic dispatch: problems
+74 and 116 reduced direct bivariate Hu time by 6.4% and 17.8%, while problem 176 was neutral. The
+final 12-case same-process guard has a `0.530297` median S/F; its slowest case is the 8v uniform
+trivial GCD at `0.956630`. Across eight final GCD distributions plus eight retained v22 factor
+distributions, the 3,200-problem median is `0.699823`, summed-time S/F is `0.288438`, Symbolica
+wins 2,441 problems, and 14 of 16 setup medians favor Symbolica. The previous worst `05/0002`
+distribution is now a broad win; `08/0008` factorization is the new worst setup at `1.065408`.
+
+The final same-process binary is `/tmp/flint-comparison-v26-bivariate-hu-final`, SHA-256
+`3d32f46f6d077e48c772da80c87c2ff1116d1b54abde6c081148ab9651b2bff5`; its six CSVs are
+`/tmp/v26-bivariate-hu-final-polybench-gcd-00{1..6}.csv`. The final full-distribution adapter is
+`/tmp/polybench-symbolica-v26-bivariate-hu-final`, SHA-256
+`80eb2155cee27952bd794af5cf0bf6a323eada6871511e7884e529958454f3f0`, with outputs under
+`/tmp/polybench-v26-final/{05,08}`. The build record is
+`/tmp/v26-bivariate-hu-final-build.jsonl`, SHA-256
+`5f1f52b1e02d64dacdabb83e28c391d41a49331f4fedf0536ba097ffbce4e744`. The complete manifest is
+`/tmp/v26-bivariate-hu-final-SHA256SUMS`, SHA-256
+`9c8d7e329e30445b2cde5193276cbc23fdd5d488aa6c492beb19194cded83dda`. Polynomial result payloads
+match the preceding complete replay for all 1,600 GCD problems.
+
+The reusable discrete-log test, all 47 GCD-module tests, the `binary_size` library check, formatting,
+and diff checks pass. The complete 559-test library run has 558 passes and one unrelated existing
+exact-interval expectation failure in `poly::univariate::roots::tests::isolate`; an isolated rerun
+reproduces the same mismatch, as does the untouched v25 commit `d7d8da9`. The immutable scoreboard for this round is
+[CURRENT_STATUS_v26.md](CURRENT_STATUS_v26.md).
+
 ## Rejected or low-value experiments
 
 Do not repeat these without a genuinely new mechanism:
 
 | Experiment | Evidence | Decision |
 |---|---|---|
+| Broad automatic bivariate Hu without support, balance, and sample budgets | helped the targeted 5v projected-sparse family but admitted costly 8v images | reject the broad selector; retain the bounded input-geometry plan |
+| Bivariate admission before the retained-image amortization test | `05/0006` problems 11 and 25 measured `1.729x/2.381x` candidate/control because `pair_area` dominated projected work | superseded by `2 * projected_target >= pair_area` |
 | Eager predicted-tail Frobenius-map gate | dense degree-63 factorization reached about `0.840` S/F | reject; a predicted tail can end before construction is repaid |
 | Accumulated-work Frobenius-map gate | dense degree-63 factorization reached `0.892129` S/F, but degree 64 over `GF(5)` could build a 62-product map before a 3-product next step | superseded by the accepted one-step break-even rule |
 | Reusable dense DDF GCD/division buffers in the v23 degree-64 factor pass | Symbolica `1.950995 -> 1.948138 ms`, only `-0.15%` across six 1,000-sample processes | reject and remove; materialization and temporary GCD/division buffers are not the remaining DDF bottleneck |
@@ -4641,6 +4727,14 @@ older checksums and ratios are retained in Git history of this document at commi
   `HuMonaganAnchor`, `HuMonaganPlanningContext`, `CoefficientRowCounter`, and
   `PreparedHuMonaganGcd`. The same file contains the generic pre-content call site and the narrow
   `PolynomialGCD::gcd_with_precontent_plan` hook; only `IntegerRing` overrides it.
+- Automatic two-main-variable Hu-Monagan planning and execution: `src/poly/gcd.rs`, especially
+  `HuMonaganBivariatePlanningContext`, `PreparedHuMonaganBivariateGcd`,
+  `gcd_hu_monagan_bivariate`, `hu_monagan_bivariate_prime_image`,
+  `hu_monagan_bivariate_image_gcd`, and `hu_monagan_sparse_interpolate_bivariate`. The bounded
+  automatic route shares the public implementation but supplies sample and prime-attempt budgets.
+- Reusable fixed-word Pohlig-Hellman contexts: `lib/numerica/src/domains/finite_field.rs`, especially
+  `FiniteFieldDiscreteLogContext`, `ZpDiscreteLogContext`, and `Zp64DiscreteLogContext`. The
+  bivariate Hu workspace and `DenseRootPrimeField` bridge both word widths in `src/poly/gcd.rs`.
 - Integer factor selection/reconstruction/Hensel lifting: `src/poly/factor.rs`; bivariate image
   selection is `find_sample`, the active pressure selector is around `high_linear_lift_pressure`,
   and the guarded #84 order selection is
@@ -4686,34 +4780,31 @@ comments that justify file organization by contrasting it with designs not prese
 
 ## Current ordered next actions
 
-1. The dense degree-63 factorization decision is complete at `0.910657` S/F. Its paid-for
-   Frobenius map reduces source-matched Symbolica time by 8.24%; degree-64/65 factorization remains
-   `0.700836/0.945536`.
-2. Attack 05/0002 uniform nontrivial GCD. Use phase/work counters and operation-only profiles for
-   retained problems 74, 116, and 176, separating recursive Zippel image construction,
-   interpolation, CRT or rational reconstruction, exact certificates, and multiplication. The
-   broad population gap rules out a fixture-specific fallback; require a mechanism shared by the
-   balanced 3.5k--4.4k-term inputs.
-3. Keep the degree-63/64/65 products as guards at their stable primary values
-   `0.814256/0.815238/0.841130`; the exact v24 linked-binary ratios are
-   `0.970816/0.965768/0.977305`. Do not add another product abstraction without a mechanism
+1. Attack `08/0008`, the current worst setup at `1.065408` median, `7.942770` p90, and
+   `+185.726 ms`. Prototype a one-sided modular nonsquare certificate before
+   `factor_quadratic_before_square_free` constructs `b^2-4ac`: a nonsquare value at any
+   deterministic prime/point proves the exact discriminant is not a square, while square or zero
+   remains inconclusive. Measure problems 51/127 and reducible quadratic guards.
+2. Treat `05/0001` (`1.027028`, only `+2.514 ms`) and the generated dense bivariate GCD
+   (`1.022443`) as fixed-overhead work. For the dense primary row, first test FLINT's deterministic
+   evaluation-divisibility prefilter and the near-balanced two-ended certificate generalization;
+   do not introduce a new broad backend for a 2.2% gap.
+3. Profile sharp trivial GCD tails `05/0005` problem 130 and `08/0005` problem 50 with backend,
+   prime/image, collision, rejection, and exact-certificate counters. Their medians already favor
+   Symbolica, but total S/F `2.181255/2.106076` identifies concentrated expensive failures.
+4. Audit the remaining positive-delta `05/0006` cases after the accepted selector. Its median is
+   now `0.983951`, but total S/F is `1.043248`. Any widening must use projected support and image
+   cost, retain the amortization gate, and preserve both rejected problem geometries without
+   referring to their IDs.
+5. `05/0002` is complete for this round at `0.749068` median and `0.783395` total S/F with 185/200
+   wins. If this family is revisited, remove the sparse-polynomial round trip inside known-shape
+   bivariate images with a reusable dense image context; do not loosen the proven automatic gates.
+6. Keep degree-63/64/65 products as guards at their stable primary values
+   `0.814256/0.815238/0.841130`, and dense degree-63/64/65 factorization at
+   `0.910657/0.700836/0.945536`. Do not add another product abstraction without a mechanism
    different from the rejected broad multiplication contexts.
-4. Continue with 05/0006 only after a 05/0002 result. Compare problem 203 and tail problem 174 using
-   projected pair support and predicted image/interpolation work for every candidate main
-   coordinate. Any planner change must preserve the current dense/uniform choices and use only
-   input geometry, not setup or problem IDs.
-5. As a separate factor-tail lane, prototype a one-sided modular nonsquare certificate
-   before `factor_quadratic_before_square_free` forms `b^2-4ac`. Use deterministic bounded primes
-   and points; nonsquare proves the exact discriminant is not a square, while square/zero must fall
-   through unchanged. Measure 08/0008 problems 51/127 and 05/0007 problem 153 plus reducible
-   quadratic guards.
-6. Profile sharp trivial GCD tails 05/0005 problem 130 and 08/0005 problem 50 with backend,
-   prime/image, collision, and rejection counters. Do not trade broad throughput for these small
-   absolute gaps; their medians already favor Symbolica.
-7. The generated dense bivariate GCD at `1.022443` is now the only standalone primary loss. Test
-   the deterministic evaluation divisibility prefilter and near-balanced two-ended certificate
-   generalization identified in the FLINT comparison, but prioritize the larger 05/0002 aggregate
-   gap. The dense degree-80 product is `0.998814`; pursue its exact top-bit correction later.
+7. The dense degree-80 product is `0.998814`; defer its exact top-bit correction until the larger
+   factor and GCD tails are resolved.
 8. Keep resultants in the historical appendix, freeze and hash each accepted full-LTO binary, and
    create the next immutable `CURRENT_STATUS_v<i>.md` snapshot after every accepted round.
 
