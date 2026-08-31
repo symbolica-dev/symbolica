@@ -4159,6 +4159,191 @@ are `/tmp/v21-commit-factor-d63-0{1..6}.csv`.
 The current immutable scoreboard is [CURRENT_STATUS_v21.md](CURRENT_STATUS_v21.md), mirrored by
 [CURRENT_STATUS.md](CURRENT_STATUS.md).
 
+## v22 compact output, bounded prime selection, and post-separable factor routing
+
+### Compact total-degree output and dense-integer scan fusion
+
+The v21 worst primary row was the high-height asymmetric eight-variable product with 8/45
+cofactor terms, 165 common-factor terms, degrees 1/2/3, and 256-bit coefficients at `1.025828`
+S/F. Its compact-simplex arithmetic was already competitive, but the output path independently
+unranked every nonzero coefficient. An LBR profile attributed about 5.5% of timed Symbolica work to
+that repeated combinatorial decoding.
+
+`TotalDegreeExponentCursor` now owns the current weak composition and previous compact rank. The
+first rank and every rank after a gap still use the exact binomial table. An adjacent rank advances
+the existing composition directly, which covers the dense output pattern without changing layout
+or selector rules. `TotalDegreeIntegerMul` also converts a negative two's-complement coefficient
+slice in place and calls `MultiPrecisionInteger::try_from_lsf_limbs`; it no longer copies every
+large result through a temporary `SmallVec` and Rug integer import.
+
+Six alternating 1,000-sample processes on the pre-cursor and cursor binaries changed the former
+worst row from `1.038237` to `0.954632`, an 8.05% ratio reduction. The exact final-source refresh is
+`0.950184`, with process-median Symbolica/FLINT times `0.701282/0.738084 ms`. Generated product
+guards also remained wins; the highest of three candidate-only processes was `0.981627` for the
+5-variable 1024-bit product.
+
+The dense Kronecker admission scan separately revisited every coefficient to discover signs before
+computing bounded native-limb L1 and maximum statistics. `FixedLimbAbsoluteBitStatistics` now
+returns `has_negative`. The preliminary scan stops at the first GMP coefficient; successful
+bounded statistics supply the complete sign flag, and a failed bounded pass resumes after the
+first large coefficient instead of rescanning the prefix. A regression test covers a negative
+coefficient after both a supported and an over-wide GMP value. The clean dense degree-80 product
+comparison changed `1.000782 -> 0.995977`; the exact final-source refresh is `0.998814`, with
+process-median times `0.075208/0.075263 ms`.
+
+### Bounded competitive direct-prime selection
+
+Dense degree-63 factorization previously completed a third small modular image even after the
+existing direct-width prime had become a competitive Hensel base. The final selector screens the
+direct-width image and computes the largest small-image factor count that could still improve the
+predicted linear lift work. The next small-prime DDF is bounded by that count. It still completes
+an irreducibility certificate and any unusually favorable small image, but stops once the proven
+factor-count lower bound cannot win.
+
+This is a work comparison, not a degree-63 or benchmark-identity gate. Forced factorization modes
+and the existing backfill rule are unchanged. Six alternating 1,000-sample processes changed the
+source-matched degree-63 row from `1.014866` to `0.974875`. The exact final-source refresh is
+`0.962829`, with process-median Symbolica/FLINT times `2.882831/2.992872 ms`.
+
+### Post-separable univariate scout
+
+The old full PolyBench distributions exposed one common factorization pathology: the automatic
+box-density score increasingly preferred a bivariate start as degrees grew, even when a cheap
+univariate image could decide the component. The retained factor control flow already supplies the
+algebraic condition needed for a safe shortcut. After `factor_separable`, every nonconstant true
+factor contains every active variable.
+
+For an active variable of degree one, that condition directly certifies irreducibility. For minimum
+active degree 2 through 64, the new scout evaluates every other variable at one. If the degree in
+the selected variable is preserved, additivity forces every hypothetical factor to preserve its
+positive selected-variable degree. An irreducible primitive univariate image therefore certifies
+the multivariate component. Before using the square-free-only univariate reconstruction, the scout
+checks `gcd(image, image')`; a repeated image is classified as `ReducibleImage`, not passed through
+the square-free routine.
+
+`ReducibleImage` deliberately does not imply that the target is reducible: specialization can make
+an irreducible target image reducible. It is only a measured route signal. If Auto would otherwise
+choose the bivariate start, a reducible image prefers the univariate start for the bounded retry
+window; the existing bivariate fallback remains available. `Inconclusive` preserves the previous
+route. Forced Univariate, Bivariate, and Disabled settings never call the scout and override the
+preference exactly as before.
+
+The scout factors the minimum-degree variable while the subsequent univariate route uses its
+existing independently selected `order[0]`. The pilot work is therefore not reused and may inspect
+a different coordinate. This is accepted because the image result is used as route evidence, not
+as a reconstruction seed; unconditional reordering would bypass the existing sparse-univariate
+guards. Counter-based tests prove that a reducible scout redirects a geometry whose production
+density rule selects bivariate, and that forced modes execute zero scouts.
+
+Fresh plain-release replays of all eight factor distributions against the retained exact FLINT
+3.5.0 timings give:
+
+| Distribution | Old paired median | v22 paired median | Old total S/F | v22 total S/F | Old wins | v22 wins |
+|---|---:|---:|---:|---:|---:|---:|
+| 05/0003 uniform trivial factor | 1.425747 | 0.447450 | 1.467039 | 0.474846 | 26 | 191 |
+| 05/0004 uniform nontrivial factor | 0.266315 | 0.150398 | 0.436369 | 0.141560 | 173 | 199 |
+| 05/0007 sharp trivial factor | 1.595357 | 0.449566 | 2.215536 | 0.766674 | 56 | 173 |
+| 05/0008 sharp nontrivial factor | 1.364144 | 0.681384 | 1.940402 | 0.576983 | 89 | 135 |
+| 08/0003 uniform trivial factor | 0.515150 | 0.479156 | 0.570522 | 0.505254 | 183 | 187 |
+| 08/0004 uniform nontrivial factor | 0.472376 | 0.239445 | 0.193007 | 0.142893 | 186 | 197 |
+| 08/0007 sharp trivial factor | 1.001295 | 0.501118 | 1.322808 | 0.809394 | 100 | 167 |
+| 08/0008 sharp nontrivial factor | 1.234940 | 1.065408 | 1.530509 | 1.148495 | 84 | 93 |
+
+The route-control adapter established why the reducible-image outcome must guide rather than merely
+observe the route. Forced univariate changed 05/0004 to `0.175403` paired median and `0.163558`
+total S/F, and 05/0008 to `0.721317/0.639252`. It was worse than the certificate-guided Auto path
+on the trivial setups: 05/0003 was `0.653008/0.665963` and 05/0007 was
+`1.049850/1.403100`. A global univariate preference is therefore rejected; the exact image outcome
+is the principled discriminator.
+
+An earlier gated scout without the reducible-image route improved 05/0003 and 05/0007 but left a
+2--3% regression on 05/0004. The combined pilot removes that regression and delivers the large
+nontrivial-factor gains above. The scout remains bounded to degree 64 and is invoked only on Auto
+paths that are either about to construct a late quadratic discriminant or are planned to start
+bivariate.
+
+### Full-distribution interpretation and next queue
+
+Combining the eight fresh factor rows with the eight unchanged GCD rows gives 2,277 wins out of
+3,200 problems, paired median `0.726631`, and summed-time ratio `0.305399`. Twelve of sixteen setup
+medians now favor Symbolica. This is a mixed current checkpoint, not a claim that the eight GCD
+rows were rerun by the v22 adapter.
+
+Do not use one scalar ordering as the work queue. Keep three views:
+
+- paired p50 for broad-path efficiency;
+- total S/F together with absolute aggregate excess for throughput;
+- p90/p99 and concentration of excess for failure-path tails.
+
+The next broad target is 05/0002 uniform nontrivial GCD: p50 `1.323497`, p90 `1.628273`, total
+`1.324827`, and `+442.954 ms` aggregate excess. The five largest cases explain only about 6.2% of
+the net excess, so this is a systemic Zippel/kernel deficit rather than one heuristic tail. Use
+retained problems 74 (median path), 116 (worst ratio, `2.212x`), and 176 (largest Symbolica time,
+`13.148 ms`) from
+`/tmp/symbolica-polybench-0.4.3-9QLH94/final-post-route/05/0002.problems.log`.
+
+The second GCD target is 05/0006: p50 `1.213492`, total `1.140903`, and `+111.352 ms`. Profile
+problem 203 for the median and 174 for the largest absolute excess; problems 100 and 13 are repeat
+tail guards. The median geometry has degree vector `[9,34,30,30,4]`, while the tail is
+`[11,36,11,28,4]`, making projected support and variable order plausible input-derived selectors.
+
+The remaining factor deficit is a separate quadratic tail lane. 08/0008 improves broadly but has
+p90 `7.942770`; problems 51 and 127 have minimum degree two, and 05/0007 problem 153 has degrees
+`[29,31,11,25,2]`. They enter `factor_quadratic_before_square_free` before the post-separable scout.
+A bounded modular discriminant-residuosity prefilter is the next principled experiment: evaluate
+`b^2-4ac` at a deterministic point modulo a small prime without constructing the polynomial. A
+nonsquare value proves that the exact polynomial discriminant is not a square and safely skips the
+speculative product. Square or zero is only inconclusive and retains the exact path.
+
+Sharp trivial GCD 05/0005 and 08/0005 have total ratios `2.103359/2.096462` but medians
+`0.978281/0.950340`; their aggregate excess is only `62.282/108.117 ms`. Profile problem 130 and
+problem 50 with prime/image rejection and backend counters after the broad 05/0002 work. Uniform
+trivial GCD 05/0001 is last: its `1.018250` median corresponds to only `1.199 ms` excess across all
+200 cases.
+
+### v22 artifacts and verification
+
+The factor-distribution adapter is `/tmp/polybench-symbolica-v22-pilot-route`, SHA-256
+`839fae218300e99e40c196fb2a812a934d6b619b8163efd655e7910334b48fa9`. Raw 210-problem output
+files are `/tmp/polybench-v22-pilot-results/{05,08}-000{3,4,7,8}.output.csv`; their SHA-256 values
+are, in that order by variable count and setup:
+
+```text
+05/0003 26f4b397ef47b6388384438e1c0870e3fcd8235f7ad47ef0be019022d4801dc2
+05/0004 624261da0c7d3c7fb9f8e09e7fa753ad960c296f22aa2466f5101e531c05dadb
+05/0007 1614711f809a4faba1ac4b155cdc10145d952c950f4ebc7e946d496f2a369327
+05/0008 299a43ee93b405caa84fba798264fe89872b2f5ed1a60b1305b32b35a93918ff
+08/0003 d4c9ce9589dcb443828f5d4bef84c2feedc43cd74b276e906c63b8298d8443b2
+08/0004 80a1b211bebb7022e6d95b106cec0aa27b6bc6b09355ab79e853b83f55c3940f
+08/0007 9258d2a6eb53c131ea511b4b16f8c5d54fc991104c801c7c2eab6748b836543c
+08/0008 d687d89ba333a1f1d96d09268efaf98202fdb7f446bd721e0d77f641728bb854
+```
+
+The exact final-source full-LTO binary is `/tmp/flint-comparison-v22-commit`, SHA-256
+`38fb06ec5e8e38d2d3543b0245426859ef9a554abee776f2d3cf5ca7430455d6`; its dependency sidecar
+SHA-256 is `aa0d39d3519e71525b34ab1cec7cfd8677775b2d720c364d127bc287552d82df`. Build JSON
+`/tmp/flint-comparison-v22-commit-build.jsonl` has SHA-256
+`7c3cfe8ec4d164955724746eb6210ee4175a06e6222bc7e33f828046c3a11541`. Six-process raw files are
+`/tmp/v22-commit-factor-d63-0{1..6}.csv`, `/tmp/v22-commit-product-d80-0{1..6}.csv`, and
+`/tmp/v22-commit-asym-highheight-product-0{1..6}.csv`; checksum manifest
+`/tmp/v22-commit-key-rows-sha256.txt` has SHA-256
+`834c3cf89dd9b2fde6c857ec49e0ab7db5ba72fe1e6029ea30b12d120825c22e`.
+
+Verification passed:
+
+- all 104 `poly::factor::test` tests;
+- all 139 Numerica library tests;
+- the exhaustive adjacent/gapped compact-rank cursor comparison for 1--8 variables;
+- default GMP factor/scout focused tests including the repeated-image regression and global-setting
+  race guards;
+- `cargo check --no-default-features --features integer-malachite,float-astro`;
+- `cargo fmt` and `git diff --check`.
+
+The v22 primary inventory has 125 rows, 124 Symbolica wins, one loss, median `0.636796`, worst
+`1.022443`, and best `0.028678`. The one loss is the generated dense bivariate GCD. The immutable
+scoreboard is [CURRENT_STATUS_v22.md](CURRENT_STATUS_v22.md), mirrored by
+[CURRENT_STATUS.md](CURRENT_STATUS.md).
+
 ## Rejected or low-value experiments
 
 Do not repeat these without a genuinely new mechanism:
@@ -4218,7 +4403,8 @@ older checksums and ratios are retained in Git history of this document at commi
   `try_fixed_limb_absolute_bit_statistics`, and `try_decode_fixed_kronecker_digits`.
 - Cache-sized chunk selection and carry-free radix-boundary planning:
   `src/poly/polynomial.rs`, especially `cache_sized_chunked_dense_mul_is_preferred` and
-  `MultivariatePolynomial::mul_dense`.
+  `MultivariatePolynomial::mul_dense`. Compact-simplex output rank decoding is
+  `TotalDegreeExponentCursor`.
 - Cached GMP integer construction from decoded native magnitudes:
   `lib/numerica/src/domains/backend/integer.rs::MultiPrecisionInteger::try_from_lsf_limbs`.
 - Integer multiplication differential tests:
@@ -4243,7 +4429,10 @@ older checksums and ratios are retained in Git history of this document at commi
   `reorder_integer_factor_variables_for_sparse_univariate`. Product-tree lifting defers its
   Bezout-cofactor updates until exact reconstruction probes have failed. Native bounded factor
   and Bezout corrections are implemented by
-  `DenseIntegerModularUnivariateContext::try_i128_multiply_remainder_monic`.
+  `DenseIntegerModularUnivariateContext::try_i128_multiply_remainder_monic`. The v22 post-separable
+  certificate and route signal are in `univariate_specialization_factorization`; direct-prime
+  competition is controlled by `competitive_small_prime_factor_limit` and
+  `preferred_dense_u64_factorization_work`.
 - Balanced two-leaf Hensel reconstruction: `src/poly/factor.rs`, especially
   `UnivariateHenselProductTreeTopology::{most_balanced_leaf_pair,balanced_leaf_pair_improving_root}`,
   `UnivariateHenselExactPartition`, `univariate_hensel_shortened_target`,
@@ -4275,29 +4464,25 @@ comments that justify file organization by contrasting it with designs not prese
 
 ## Current ordered next actions
 
-1. For the current worst, the high-height asymmetric eight-variable product at `1.025828`, first
-   advance exponent vectors directly when consecutive nonzero output ranks differ by one, using
-   the existing combinatorial unrank only across gaps. Repeated unranking accounts for about 5.5%
-   of timed Symbolica work on this row. Construct GMP outputs through the existing recycled
-   writable-limb path, and retain both alternating degree-four and degree-five rank tables in a
-   byte-bounded two-entry MRU. After those changes, test GMP-only compact admission down to density
-   two; density admission alone is unlikely to close the gap. The selector must remain based on
-   support density, accumulator bounds, and predicted workspace. The profile is
-   `/tmp/profile-v21-asym-highheight-product-lbr.perf.data`.
-2. Profile the generated dense bivariate GCD at `1.022443`, now the worst timed operation. Separate
-   input construction, modular image work, reconstruction, and exact certificates before changing
-   selection; retain a general support/degree/work rule rather than a two-variable fixture gate.
-3. For dense degree-63 factorization, evaluate moving the already-used direct 26-bit prime probe
-   before geometric/backfill probes only when predicted lift pressure justifies it. The observed
-   trace is `7:15`, `11:10`, discarded `29:13`, retained `65000011:10`; the reordering has not yet
-   been implemented or measured.
-4. On the dense degree-80 input product at `1.007868`, compute the exact top bit of fixed-limb
-   Kronecker bounds near limb boundaries. The present bound
-   can overestimate the packed width by one bit even though it is otherwise exact; avoid a general
-   GMP sum or product when correcting it.
-5. In the full PolyBench distributions, continue from the worst setup classes, but select only on
-   degrees, support geometry, coefficient bounds, modular feasibility, predicted work, or exact
-   certificates. Benchmark IDs and exact fixtures remain reporting labels only.
+1. Attack 05/0002 uniform nontrivial GCD first. Add phase/work counters and profiles for retained
+   problems 74, 116, and 176, separating Zippel image construction, interpolation, CRT or rational
+   reconstruction, exact certificates, and multiplication. The broad population gap rules out a
+   fixture-specific fallback; require a mechanism shared by the balanced 3.5k--4.4k-term inputs.
+2. Continue with 05/0006 only after a 05/0002 result. Compare problem 203 and tail problem 174 using
+   projected pair support and predicted image/interpolation work for every candidate main
+   coordinate. Any planner change must preserve the current dense/uniform choices and use only
+   input geometry, not setup or problem IDs.
+3. In parallel as a separate factor-tail lane, prototype a one-sided modular nonsquare certificate
+   before `factor_quadratic_before_square_free` forms `b^2-4ac`. Use deterministic bounded primes
+   and points; nonsquare proves the exact discriminant is not a square, while square/zero must fall
+   through unchanged. Measure 08/0008 problems 51/127 and 05/0007 problem 153 plus reducible
+   quadratic guards.
+4. Profile sharp trivial GCD tails 05/0005 problem 130 and 08/0005 problem 50 with backend,
+   prime/image, collision, and rejection counters. Do not trade broad throughput for these small
+   absolute gaps; their medians already favor Symbolica.
+5. Keep the generated dense bivariate GCD at `1.022443` as the primary same-process guard and next
+   standalone operation target. The dense degree-80 product is now `0.998814`; pursue its exact
+   top-bit correction only after the larger distribution gaps.
 6. Keep resultants in the historical appendix, freeze and hash each accepted full-LTO binary, and
    create the next immutable `CURRENT_STATUS_v<i>.md` snapshot after every accepted round.
 

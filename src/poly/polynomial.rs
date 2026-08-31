@@ -185,6 +185,103 @@ struct TotalDegreeRankTable {
     suffix_rank: Vec<u32>,
 }
 
+/// Reconstruct exponent vectors from increasing compact total-degree ranks.
+///
+/// The first rank and every rank after a gap are unranked through the binomial table. Consecutive
+/// ranks advance the existing weak composition directly, which is the common output pattern for
+/// dense compact-simplex multiplication.
+struct TotalDegreeExponentCursor<'a> {
+    table: &'a TotalDegreeRankTable,
+    previous_rank: Option<usize>,
+    remaining_degree: usize,
+    exponents: Vec<usize>,
+}
+
+impl<'a> TotalDegreeExponentCursor<'a> {
+    fn new(table: &'a TotalDegreeRankTable) -> Self {
+        Self {
+            table,
+            previous_rank: None,
+            remaining_degree: 0,
+            exponents: vec![0; table.variable_count],
+        }
+    }
+
+    /// Decode one rank through the binomial counts and return the unused total degree.
+    fn unrank(&mut self, mut rank: usize) -> Option<usize> {
+        let total_degree = self.table.total_degree;
+        let variable_count = self.exponents.len();
+        if rank
+            >= self
+                .table
+                .choose(variable_count + total_degree, variable_count)
+        {
+            return None;
+        }
+
+        let mut available_degree = total_degree;
+        for (index, exponent) in self.exponents.iter_mut().enumerate() {
+            let remaining_variables = variable_count - index - 1;
+            let mut selected = false;
+            for value in 0..=available_degree {
+                let count = self.table.choose(
+                    remaining_variables + available_degree - value,
+                    remaining_variables,
+                );
+                if rank < count {
+                    *exponent = value;
+                    available_degree -= value;
+                    selected = true;
+                    break;
+                }
+                rank -= count;
+            }
+            if !selected {
+                return None;
+            }
+        }
+        (rank == 0).then_some(available_degree)
+    }
+
+    /// Advance to the next weak composition in the rank table's lexicographic order.
+    fn advance(&mut self) -> Option<usize> {
+        if self.remaining_degree > 0 {
+            let last = self.exponents.last_mut()?;
+            *last = last.checked_add(1)?;
+            return Some(self.remaining_degree - 1);
+        }
+
+        let carry_index = (1..self.exponents.len())
+            .rev()
+            .find(|&index| self.exponents[index] != 0)?;
+        let released_degree = self.exponents[carry_index];
+        self.exponents[carry_index] = 0;
+        self.exponents[carry_index - 1] = self.exponents[carry_index - 1].checked_add(1)?;
+        Some(released_degree - 1)
+    }
+
+    /// Position the cursor at a strictly increasing rank and return its exponent vector.
+    fn position(&mut self, rank: usize) -> Option<&[usize]> {
+        if self
+            .previous_rank
+            .is_some_and(|previous_rank| rank <= previous_rank)
+        {
+            return None;
+        }
+        self.remaining_degree = if self
+            .previous_rank
+            .and_then(|previous_rank| previous_rank.checked_add(1))
+            == Some(rank)
+        {
+            self.advance()?
+        } else {
+            self.unrank(rank)?
+        };
+        self.previous_rank = Some(rank);
+        Some(&self.exponents)
+    }
+}
+
 thread_local! {
     static TOTAL_DEGREE_RANK_TABLE: RefCell<Option<Arc<TotalDegreeRankTable>>> = const {
         RefCell::new(None)
@@ -4588,52 +4685,22 @@ impl<F: Ring, E: Exponent> MultivariatePolynomial<F, E, LexOrder> {
             })
         });
 
-        fn unrank(
-            mut rank: usize,
-            total_degree: usize,
-            exponents: &mut [usize],
-            choose: impl Fn(usize, usize) -> usize,
-        ) {
-            let mut available_degree = total_degree;
-            let variable_count = exponents.len();
-            for (index, exponent) in exponents.iter_mut().enumerate() {
-                let remaining_variables = variable_count - index - 1;
-                for value in 0..=available_degree {
-                    let count = choose(
-                        remaining_variables + available_degree - value,
-                        remaining_variables,
-                    );
-                    if rank < count {
-                        *exponent = value;
-                        available_degree -= value;
-                        break;
-                    }
-                    rank -= count;
-                }
-            }
-            debug_assert_eq!(rank, 0);
-        }
-
-        let choose = |n: usize, k: usize| rank_table.choose(n, k);
-        let mut digits = vec![0usize; variable_count];
+        let mut exponent_cursor = TotalDegreeExponentCursor::new(&rank_table);
 
         if let Some(specialized) = specialized {
             let mut result = self.zero_with_capacity(specialized.len());
-            let mut previous_rank = None;
             for (rank, coefficient) in specialized {
                 let rank = rank as usize;
-                if rank >= coefficient_count
-                    || previous_rank.is_some_and(|previous| rank <= previous)
-                    || self.ring().is_zero(&coefficient)
-                {
+                if rank >= coefficient_count || self.ring().is_zero(&coefficient) {
                     return None;
                 }
-                previous_rank = Some(rank);
-                unrank(rank, total_degree, &mut digits, choose);
+                let exponents = exponent_cursor.position(rank)?;
                 result.coefficients.push(coefficient);
-                result
-                    .exponents
-                    .extend(digits.iter().map(|&exponent| E::from_i32(exponent as i32)));
+                result.exponents.extend(
+                    exponents
+                        .iter()
+                        .map(|&exponent| E::from_i32(exponent as i32)),
+                );
             }
             return Some(result);
         }
@@ -4673,11 +4740,13 @@ impl<F: Ring, E: Exponent> MultivariatePolynomial<F, E, LexOrder> {
             if self.ring().is_zero(&coefficient) {
                 continue;
             }
-            unrank(rank, total_degree, &mut digits, choose);
+            let exponents = exponent_cursor.position(rank)?;
             result.coefficients.push(coefficient);
-            result
-                .exponents
-                .extend(digits.iter().map(|&exponent| E::from_i32(exponent as i32)));
+            result.exponents.extend(
+                exponents
+                    .iter()
+                    .map(|&exponent| E::from_i32(exponent as i32)),
+            );
         }
         Some(result)
     }
@@ -6925,10 +6994,48 @@ mod test {
     use super::{
         IntegerPolynomialCrtContext, LastVariableEvaluationContext, LastVariablePowerWorkspace,
         MultivariatePolynomial, PolynomialRing, PolynomialSamplingPolicy,
-        cache_sized_chunked_dense_mul_is_preferred, chunked_dense_mul_is_preferred,
-        mixed_radix_dense_mul_is_bounded, mixed_radix_dense_work_is_bounded,
-        packed_row_merge_is_bounded, total_degree_kernel_precedes_mixed_radix,
+        TotalDegreeExponentCursor, cache_sized_chunked_dense_mul_is_preferred,
+        chunked_dense_mul_is_preferred, mixed_radix_dense_mul_is_bounded,
+        mixed_radix_dense_work_is_bounded, packed_row_merge_is_bounded,
+        total_degree_kernel_precedes_mixed_radix, total_degree_rank_table,
     };
+
+    #[test]
+    fn total_degree_exponent_cursor_matches_fresh_unranking() {
+        for variable_count in 1..=8 {
+            for total_degree in 0..=6 {
+                let table = total_degree_rank_table(variable_count, total_degree).unwrap();
+                let coefficient_count = table.choose(variable_count + total_degree, variable_count);
+                let mut cursor = TotalDegreeExponentCursor::new(&table);
+                for rank in 0..coefficient_count {
+                    let actual = cursor.position(rank).unwrap().to_vec();
+                    let mut fresh = TotalDegreeExponentCursor::new(&table);
+                    assert_eq!(actual, fresh.position(rank).unwrap());
+                }
+                assert!(cursor.position(coefficient_count).is_none());
+            }
+        }
+
+        let table = total_degree_rank_table(5, 6).unwrap();
+        let coefficient_count = table.choose(11, 5);
+        let ranks = [
+            0,
+            1,
+            7,
+            8,
+            41,
+            42,
+            coefficient_count - 2,
+            coefficient_count - 1,
+        ];
+        let mut cursor = TotalDegreeExponentCursor::new(&table);
+        for rank in ranks {
+            let actual = cursor.position(rank).unwrap().to_vec();
+            let mut fresh = TotalDegreeExponentCursor::new(&table);
+            assert_eq!(actual, fresh.position(rank).unwrap());
+        }
+        assert!(cursor.position(coefficient_count - 1).is_none());
+    }
 
     #[test]
     fn replace_univariate_horner_matches_dense_evaluation() {

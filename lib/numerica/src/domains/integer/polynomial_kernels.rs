@@ -8,9 +8,11 @@
 //! strategy returning `None` means that its representation, size, or memory assumptions do not
 //! hold and that the context should try another strategy or the generic polynomial implementation.
 
-use super::{Integer, IntegerRing};
 #[cfg(feature = "integer-gmp")]
-use super::{MultiPrecisionInteger, RawMultiPrecisionInteger};
+use super::MultiPrecisionInteger;
+#[cfg(all(test, feature = "integer-gmp"))]
+use super::RawMultiPrecisionInteger;
+use super::{Integer, IntegerRing};
 #[cfg(feature = "integer-gmp")]
 use crate::domains::polynomial_layouts::try_simplex_kronecker_layout;
 use crate::kernels::{
@@ -19,7 +21,7 @@ use crate::kernels::{
 };
 #[cfg(feature = "integer-gmp")]
 use gmp_mpfr_sys::gmp;
-#[cfg(feature = "integer-gmp")]
+#[cfg(all(test, feature = "integer-gmp"))]
 use rug::integer::Order as RugIntegerOrder;
 use smallvec::SmallVec;
 
@@ -50,10 +52,12 @@ pub(super) fn u128_product_significant_bits(left: u128, right: u128) -> u64 {
 struct FixedLimbAbsoluteBitStatistics {
     l1_bits: u64,
     maximum_bits: u64,
+    has_negative: bool,
 }
 
 #[cfg(feature = "integer-gmp")]
-/// Compute L1-sum and maximum-magnitude bit lengths with a bounded native-limb accumulator.
+/// Compute L1-sum and maximum-magnitude bit lengths plus sign presence with a bounded
+/// native-limb accumulator.
 ///
 /// This supplies a safe Kronecker digit bound without allocating GMP sums when every coefficient
 /// magnitude occupies at most eight limbs and their complete sum fits in nine limbs.
@@ -63,6 +67,7 @@ fn try_fixed_limb_absolute_bit_statistics(
     const MAX_COEFFICIENT_LIMBS: usize = 8;
     let mut sum = [0u64; MAX_COEFFICIENT_LIMBS + 1];
     let mut maximum_bits = 0u64;
+    let mut has_negative = false;
 
     #[inline(always)]
     fn add_magnitude(sum: &mut [u64; 9], magnitude: &[u64]) -> Option<u64> {
@@ -101,19 +106,27 @@ fn try_fixed_limb_absolute_bit_statistics(
     }
 
     for coefficient in coefficients {
-        let coefficient_bits = match coefficient {
+        let (coefficient_bits, negative) = match coefficient {
             Integer::Single(value) => {
                 let magnitude = value.unsigned_abs();
-                add_magnitude(&mut sum, std::slice::from_ref(&magnitude))?
+                (
+                    add_magnitude(&mut sum, std::slice::from_ref(&magnitude))?,
+                    *value < 0,
+                )
             }
             Integer::Double(value) => {
-                let magnitude = value.get().unsigned_abs();
+                let value = value.get();
+                let magnitude = value.unsigned_abs();
                 let words = [magnitude as u64, (magnitude >> 64) as u64];
-                add_magnitude(&mut sum, &words)?
+                (add_magnitude(&mut sum, &words)?, value < 0)
             }
-            Integer::Large(value) => add_magnitude(&mut sum, value.as_raw().as_limbs())?,
+            Integer::Large(value) => (
+                add_magnitude(&mut sum, value.as_raw().as_limbs())?,
+                value.is_negative(),
+            ),
         };
         maximum_bits = maximum_bits.max(coefficient_bits);
+        has_negative |= negative;
     }
 
     let sum_len = sum
@@ -129,6 +142,7 @@ fn try_fixed_limb_absolute_bit_statistics(
     Some(FixedLimbAbsoluteBitStatistics {
         l1_bits,
         maximum_bits,
+        has_negative,
     })
 }
 
@@ -1002,24 +1016,41 @@ impl<'a> DenseIntegerMul<'a> {
             AbsoluteStatistics::Large { sum, maximum }
         }
 
+        // Fixed-limb statistics revisit every coefficient of a GMP-backed input and return the
+        // complete sign flag, so this preliminary scan can stop at the first large coefficient.
+        // If bounded statistics fail, the fallback below resumes after that coefficient.
         let mut signed_coefficients = false;
-        let mut contains_large = false;
-        for coefficient in left_coefficients.iter().chain(right_coefficients) {
-            signed_coefficients |= coefficient.is_negative();
-            contains_large |= matches!(coefficient, Integer::Large(_));
-        }
+        let first_large_index =
+            left_coefficients
+                .iter()
+                .chain(right_coefficients)
+                .position(|coefficient| {
+                    signed_coefficients |= coefficient.is_negative();
+                    matches!(coefficient, Integer::Large(_))
+                });
+        let contains_large = first_large_index.is_some();
 
         let fixed_limb_bound = if contains_large {
             match (
                 try_fixed_limb_absolute_bit_statistics(left_coefficients),
                 try_fixed_limb_absolute_bit_statistics(right_coefficients),
             ) {
-                (Some(left), Some(right)) => Some(
-                    bit_bound_from_factor_bits(left.l1_bits, right.maximum_bits)?.min(
-                        bit_bound_from_factor_bits(right.l1_bits, left.maximum_bits)?,
-                    ),
-                ),
-                _ => None,
+                (Some(left), Some(right)) => {
+                    signed_coefficients = left.has_negative || right.has_negative;
+                    Some(
+                        bit_bound_from_factor_bits(left.l1_bits, right.maximum_bits)?.min(
+                            bit_bound_from_factor_bits(right.l1_bits, left.maximum_bits)?,
+                        ),
+                    )
+                }
+                _ => {
+                    signed_coefficients |= left_coefficients
+                        .iter()
+                        .chain(right_coefficients)
+                        .skip(first_large_index.unwrap() + 1)
+                        .any(Integer::is_negative);
+                    None
+                }
             }
         } else {
             None
@@ -2523,31 +2554,31 @@ impl<'a> TotalDegreeIntegerMul<'a> {
         }
 
         let mut output = Vec::with_capacity(output_len);
-        for (index, coefficient) in coefficients.chunks_exact(limbs_per_coefficient).enumerate() {
+        for (index, coefficient) in coefficients
+            .chunks_exact_mut(limbs_per_coefficient)
+            .enumerate()
+        {
             let negative = coefficient.last().copied().unwrap() >> 63 != 0;
-            let mut magnitude = SmallVec::<[gmp::limb_t; 128]>::from_slice(coefficient);
             if negative {
                 let mut carry = true;
-                for limb in &mut magnitude {
+                for limb in coefficient.iter_mut() {
                     let (value, overflow) = (!*limb).overflowing_add(gmp::limb_t::from(carry));
                     *limb = value;
                     carry = overflow;
                 }
                 debug_assert!(!carry);
             }
-            while magnitude.last() == Some(&0) {
-                magnitude.pop();
-            }
-            if magnitude.is_empty() {
+            let significant_len = coefficient
+                .iter()
+                .rposition(|&limb| limb != 0)
+                .map_or(0, |position| position + 1);
+            if significant_len == 0 {
                 continue;
             }
-            let mut value = MultiPrecisionInteger::from_raw(RawMultiPrecisionInteger::from_digits(
-                &magnitude,
-                RugIntegerOrder::Lsf,
-            ));
-            if negative {
-                value = -value;
-            }
+            let value = MultiPrecisionInteger::try_from_lsf_limbs(
+                &coefficient[..significant_len],
+                negative,
+            )?;
             output.push((u32::try_from(index).ok()?, Integer::from(value)));
         }
         Some(output)
@@ -2899,9 +2930,57 @@ mod tests {
         }
         assert_eq!(statistics.l1_bits, sum.significant_bits());
         assert_eq!(statistics.maximum_bits, maximum_bits);
+        assert!(statistics.has_negative);
+
+        let positive = Integer::from(MultiPrecisionInteger::from(1u32) << 200u32);
+        assert!(
+            !try_fixed_limb_absolute_bit_statistics(&[positive])
+                .unwrap()
+                .has_negative
+        );
 
         let too_wide = Integer::from(MultiPrecisionInteger::from(1u32) << 512u32);
         assert!(try_fixed_limb_absolute_bit_statistics(&[too_wide]).is_none());
+    }
+
+    #[cfg(feature = "integer-gmp")]
+    #[test]
+    fn kronecker_sign_scan_remains_complete_after_first_large_coefficient() {
+        fn assert_matches_direct(mut left: Vec<Integer>) {
+            const LENGTH: usize = 32;
+            left[LENGTH - 1] = Integer::from(-1);
+            let right = vec![Integer::one(); LENGTH];
+            let indices = (0..LENGTH as u32).collect::<Vec<_>>();
+            let output_len = LENGTH * 2 - 1;
+
+            let actual = DenseIntegerMul::try_kronecker_for_test(
+                output_len, &left, &indices, &right, &indices,
+            )
+            .unwrap();
+            let mut expected = vec![Integer::zero(); output_len];
+            for (left_index, left_coefficient) in left.iter().enumerate() {
+                for right_index in 0..LENGTH {
+                    expected[left_index + right_index] += left_coefficient;
+                }
+            }
+            let mut actual_dense = vec![Integer::zero(); output_len];
+            for (index, coefficient) in actual {
+                actual_dense[index as usize] = coefficient;
+            }
+            assert_eq!(actual_dense, expected);
+        }
+
+        assert_matches_direct(vec![Integer::one(); 32]);
+
+        let bounded_large = Integer::from(MultiPrecisionInteger::from(1u32) << 200u32);
+        let mut bounded = vec![Integer::one(); 32];
+        bounded[0] = bounded_large;
+        assert_matches_direct(bounded);
+
+        let too_wide = Integer::from(MultiPrecisionInteger::from(1u32) << 512u32);
+        let mut fallback = vec![Integer::one(); 32];
+        fallback[0] = too_wide;
+        assert_matches_direct(fallback);
     }
 
     #[cfg(feature = "integer-gmp")]

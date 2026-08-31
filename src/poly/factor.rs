@@ -69,6 +69,9 @@ const INTEGER_FACTOR_BIVARIATE_WANG_MAX_VARIABLES: usize = 5;
 // Maximum sum of degrees in coordinates evaluated by a deterministic
 // bivariate Wang sample.
 const INTEGER_FACTOR_BIVARIATE_WANG_MAX_EVALUATED_TOTAL_DEGREE: u32 = 96;
+// Largest degree factored in a one-shot univariate image used only to certify
+// that a post-separable multivariate component is irreducible.
+const INTEGER_FACTOR_IRREDUCIBILITY_SCOUT_MAX_DEGREE: usize = 64;
 // Maximum number of retained coefficient cells across the target and factor images
 // used by one evaluated Hensel stage.
 const MAX_EVALUATED_HENSEL_IMAGE_CELLS: usize = 1 << 22;
@@ -1541,6 +1544,9 @@ std::thread_local! {
     static GEOMETRIC_SMALL_PRIME_BACKFILLS: std::cell::Cell<usize> = const {
         std::cell::Cell::new(0)
     };
+    static COMPETITIVE_SMALL_PRIME_DDF_REJECTIONS: std::cell::Cell<usize> = const {
+        std::cell::Cell::new(0)
+    };
     static MODULAR_INTEGER_EDF_CALLS: std::cell::Cell<usize> = const {
         std::cell::Cell::new(0)
     };
@@ -1580,6 +1586,15 @@ std::thread_local! {
     static BIVARIATE_WANG_SAMPLE_TRIES: std::cell::Cell<usize> = const {
         std::cell::Cell::new(0)
     };
+    static LINEAR_VARIABLE_IRREDUCIBILITY_CERTIFICATES: std::cell::Cell<usize> = const {
+        std::cell::Cell::new(0)
+    };
+    static UNIVARIATE_IRREDUCIBILITY_SCOUTS: std::cell::Cell<usize> = const {
+        std::cell::Cell::new(0)
+    };
+    static UNIVARIATE_IRREDUCIBILITY_CERTIFICATES: std::cell::Cell<usize> = const {
+        std::cell::Cell::new(0)
+    };
     static EXACT_HENSEL_SUBTREE_MODULUS_BITS: std::cell::RefCell<Vec<u64>> = const {
         std::cell::RefCell::new(Vec::new())
     };
@@ -1596,6 +1611,13 @@ enum IntegerFactorStart {
 enum ExactPolynomialSquareRoot<P> {
     Root(P),
     NotSquare,
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum UnivariateSpecializationFactorization {
+    Irreducible,
+    ReducibleImage,
+    Inconclusive,
 }
 
 /// Accumulates the square of a sparse integer polynomial by visiting each
@@ -3808,6 +3830,79 @@ impl<E: PositiveExponent> MultivariatePolynomial<IntegerRing, E, LexOrder> {
         })
     }
 
+    /// Certify that a component returned by `factor_separable` is irreducible
+    /// from a degree-preserving univariate specialization.
+    ///
+    /// Every nonconstant factor of such a component contains every active
+    /// variable. A variable of degree one therefore proves irreducibility
+    /// directly. Otherwise, evaluating all other variables at one preserves a
+    /// hypothetical factorization whenever it preserves the degree in that
+    /// variable, so an irreducible primitive image certifies the component.
+    fn univariate_specialization_factorization(
+        &self,
+        degrees: &[usize],
+    ) -> UnivariateSpecializationFactorization {
+        let Some((variable, degree)) = degrees
+            .iter()
+            .copied()
+            .enumerate()
+            .filter(|(_, degree)| *degree > 0)
+            .min_by_key(|(_, degree)| *degree)
+        else {
+            return UnivariateSpecializationFactorization::Inconclusive;
+        };
+
+        if degree == 1 {
+            #[cfg(test)]
+            LINEAR_VARIABLE_IRREDUCIBILITY_CERTIFICATES.with(|count| count.set(count.get() + 1));
+            return UnivariateSpecializationFactorization::Irreducible;
+        }
+        if degree > INTEGER_FACTOR_IRREDUCIBILITY_SCOUT_MAX_DEGREE {
+            return UnivariateSpecializationFactorization::Inconclusive;
+        }
+
+        #[cfg(test)]
+        UNIVARIATE_IRREDUCIBILITY_SCOUTS.with(|count| count.set(count.get() + 1));
+
+        let mut coefficients = vec![Integer::zero(); degree + 1];
+        for term in self {
+            let image_degree = term.exponents[variable].to_u32() as usize;
+            Z.add_assign(&mut coefficients[image_degree], term.coefficient);
+        }
+        if coefficients[degree].is_zero() {
+            return UnivariateSpecializationFactorization::Inconclusive;
+        }
+
+        let mut image = self.zero_with_capacity(coefficients.len());
+        let mut exponents = vec![E::zero(); self.nvars()];
+        for (image_degree, coefficient) in coefficients.into_iter().enumerate() {
+            if coefficient.is_zero() {
+                continue;
+            }
+            exponents[variable] = E::from_u32(image_degree as u32);
+            image.append_monomial_back(coefficient, &exponents);
+        }
+
+        let content = image.content();
+        let mut primitive = image.div_coeff(&content);
+        if primitive.lcoeff().is_negative() {
+            primitive = -primitive;
+        }
+        if !primitive.gcd(&primitive.derivative(variable)).is_constant() {
+            return UnivariateSpecializationFactorization::ReducibleImage;
+        }
+        let irreducible = primitive.factor_reconstruct().len() == 1;
+        #[cfg(test)]
+        if irreducible {
+            UNIVARIATE_IRREDUCIBILITY_CERTIFICATES.with(|count| count.set(count.get() + 1));
+        }
+        if irreducible {
+            UnivariateSpecializationFactorization::Irreducible
+        } else {
+            UnivariateSpecializationFactorization::ReducibleImage
+        }
+    }
+
     /// Factor using the degree-two variable whose discriminant has the smallest
     /// estimated coefficient-product count. After `factor_separable`, every
     /// irreducible factor has positive degree in this variable. Those degrees
@@ -3895,6 +3990,20 @@ impl<E: PositiveExponent> Factorize for MultivariatePolynomial<IntegerRing, E, L
                 }
             }
 
+            let minimum_active_degree = degrees.iter().copied().filter(|degree| *degree > 0).min();
+            let early_specialization = if var_count > 2
+                && integer_factor_start_mode() == IntegerFactorStart::Auto
+                && minimum_active_degree.is_some_and(|degree| degree <= 2)
+            {
+                f.univariate_specialization_factorization(&degrees)
+            } else {
+                UnivariateSpecializationFactorization::Inconclusive
+            };
+            if early_specialization == UnivariateSpecializationFactorization::Irreducible {
+                factors.push((f, p));
+                continue;
+            }
+
             match var_count {
                 0 | 1 => factors.extend(f.factor_reconstruct().into_iter().map(|ff| (ff, p))),
                 2 => {
@@ -3970,6 +4079,24 @@ impl<E: PositiveExponent> Factorize for MultivariatePolynomial<IntegerRing, E, L
                             &mut order,
                         );
 
+                    let planned_bivariate_start = integer_factor_start_mode()
+                        == IntegerFactorStart::Auto
+                        && f.integer_factor_start_auto_decision(&order).0;
+                    let specialization = if minimum_active_degree.is_some_and(|degree| degree > 2)
+                        && integer_factor_start_mode() == IntegerFactorStart::Auto
+                        && planned_bivariate_start
+                    {
+                        f.univariate_specialization_factorization(&degrees)
+                    } else {
+                        UnivariateSpecializationFactorization::Inconclusive
+                    };
+                    if specialization == UnivariateSpecializationFactorization::Irreducible {
+                        factors.push((f, p));
+                        continue;
+                    }
+                    let prefer_univariate_start =
+                        specialization == UnivariateSpecializationFactorization::ReducibleImage;
+
                     factors.extend(
                         f.multivariate_factorization(
                             &mut order,
@@ -3977,6 +4104,7 @@ impl<E: PositiveExponent> Factorize for MultivariatePolynomial<IntegerRing, E, L
                             None,
                             reordered_for_sparse_univariate
                                 .then_some(bivariate_fallback_order.as_slice()),
+                            prefer_univariate_start,
                         )
                         .into_iter()
                         .map(|ff| (ff, p)),
@@ -4003,6 +4131,19 @@ impl<E: PositiveExponent> Factorize for MultivariatePolynomial<IntegerRing, E, L
             if *d > 0 {
                 var_count += 1;
             }
+        }
+
+        let minimum_active_degree = degrees.iter().copied().filter(|degree| *degree > 0).min();
+        let early_specialization = if var_count > 2
+            && integer_factor_start_mode() == IntegerFactorStart::Auto
+            && minimum_active_degree.is_some_and(|degree| degree <= 2)
+        {
+            f.univariate_specialization_factorization(&degrees)
+        } else {
+            UnivariateSpecializationFactorization::Inconclusive
+        };
+        if early_specialization == UnivariateSpecializationFactorization::Irreducible {
+            return true;
         }
 
         match var_count {
@@ -4037,8 +4178,29 @@ impl<E: PositiveExponent> Factorize for MultivariatePolynomial<IntegerRing, E, L
 
                 let mut order: Vec<_> = order.into_iter().map(|(v, _)| v).collect();
 
-                f.multivariate_factorization(&mut order, 10, None, None)
-                    .len()
+                let planned_bivariate_start = integer_factor_start_mode()
+                    == IntegerFactorStart::Auto
+                    && f.integer_factor_start_auto_decision(&order).0;
+                let specialization = if minimum_active_degree.is_some_and(|degree| degree > 2)
+                    && integer_factor_start_mode() == IntegerFactorStart::Auto
+                    && planned_bivariate_start
+                {
+                    f.univariate_specialization_factorization(&degrees)
+                } else {
+                    UnivariateSpecializationFactorization::Inconclusive
+                };
+                if specialization == UnivariateSpecializationFactorization::Irreducible {
+                    return true;
+                }
+
+                f.multivariate_factorization(
+                    &mut order,
+                    10,
+                    None,
+                    None,
+                    specialization == UnivariateSpecializationFactorization::ReducibleImage,
+                )
+                .len()
                     == 1
             }
         }
@@ -8472,6 +8634,30 @@ impl<E: PositiveExponent> MultivariatePolynomial<IntegerRing, E, LexOrder> {
         }
     }
 
+    /// Screen the first suitable prime in the dense-u64 range.
+    ///
+    /// At the degrees where this is used, the prime bound ensures that dense modular
+    /// multiplication accumulates every output coefficient in one `u64` before reduction.
+    fn screen_dense_u64_prime(
+        &self,
+        var: usize,
+        maximum_prime: u64,
+        max_factor_count: usize,
+    ) -> Option<ModularPrimeScreen<E>> {
+        let mut primes = PrimeIteratorU64::new(65_000_000);
+        loop {
+            let prime = primes.next()?;
+            if prime > maximum_prime {
+                return None;
+            }
+            if let Some(screen) =
+                self.screen_univariate_mod_prime(var, prime as u32, Some(max_factor_count))
+            {
+                return Some(screen);
+            }
+        }
+    }
+
     /// Split the retained distinct-degree blocks into monic irreducible factors.
     fn complete_equal_degree_factorization(
         candidate: ModularIntegerFactorization<E>,
@@ -8530,6 +8716,62 @@ impl<E: PositiveExponent> MultivariatePolynomial<IntegerRing, E, LexOrder> {
             && factor_count >= 3
             && digits >= 64
             && Self::linear_hensel_work(factor_count, digits) >= 256
+    }
+
+    /// Return the estimated lift work when a dense-u64 image should replace another image.
+    ///
+    /// The candidate must reduce the number of full Hensel corrections by the
+    /// factor-count-dependent margin used by the modular-prime selector.
+    fn preferred_dense_u64_factorization_work(
+        best_factor_count: usize,
+        best_digits: usize,
+        candidate_factor_count: usize,
+        candidate_digits: usize,
+    ) -> Option<(usize, usize)> {
+        let best_work = Self::linear_hensel_work(best_factor_count, best_digits);
+        let candidate_work = Self::linear_hensel_work(candidate_factor_count, candidate_digits);
+        let same_or_fewer_factors = candidate_factor_count <= best_factor_count
+            && candidate_work.saturating_mul(2) <= best_work;
+        let one_extra_factor = candidate_factor_count == best_factor_count + 1
+            && best_factor_count < 10
+            && candidate_work.saturating_mul(4) <= best_work;
+
+        (same_or_fewer_factors || one_extra_factor).then_some((best_work, candidate_work))
+    }
+
+    /// Return the largest factor count for which the next small-prime image could
+    /// still prevent the already-screened dense-u64 image from being selected.
+    ///
+    /// A bounded distinct-degree factorization may stop once its proven lower
+    /// bound exceeds this value. Counts at or below the returned limit are completed,
+    /// preserving irreducibility proofs and unusually favorable small images.
+    fn competitive_small_prime_factor_limit(
+        degree: usize,
+        best_factor_count: usize,
+        best_digits: usize,
+        direct_factor_count: usize,
+        direct_digits: usize,
+        small_prime_digits: usize,
+    ) -> usize {
+        let best_work = Self::linear_hensel_work(best_factor_count, best_digits);
+        let largest_improving_count =
+            ((best_work.saturating_sub(1) / small_prime_digits).saturating_add(1)).min(degree);
+        let mut competitive_limit = 0;
+        for small_factor_count in 1..=largest_improving_count {
+            let small_work = Self::linear_hensel_work(small_factor_count, small_prime_digits);
+            if small_work < best_work
+                && Self::preferred_dense_u64_factorization_work(
+                    small_factor_count,
+                    small_prime_digits,
+                    direct_factor_count,
+                    direct_digits,
+                )
+                .is_none()
+            {
+                competitive_limit = small_factor_count;
+            }
+        }
+        competitive_limit
     }
 
     fn dense_coefficients_mod(&self, var: usize, modulus: &Integer) -> Vec<Integer> {
@@ -8953,6 +9195,61 @@ impl<E: PositiveExponent> MultivariatePolynomial<IntegerRing, E, LexOrder> {
             // image does not improve the estimated lift work, the skipped range is still searched.
             let geometric_small_prime_trial = d >= 48 && initial_factor_count > 4;
             let first_small_prime = best_factorization.as_ref().unwrap().field.get_prime();
+
+            // Keep dense products of two degree-d images in the u64 accumulator kernel. The
+            // bound p * (d + 1) <= u32::MAX proves both that all (d + 1)^2 products fit in u64
+            // and that one Montgomery reduction is sufficient for each output coefficient.
+            let maximum_direct_prime = u64::from(u32::MAX) / (u64::from(d) + 1);
+
+            // Once two suitable small-prime images have exposed at least ten factors, a wide
+            // image is screened before the third image. The third distinct-degree factorization
+            // is then bounded at the largest factor count that could still change the final
+            // selection, so favorable or irreducible small images are retained without completing
+            // a factorization that cannot win.
+            let can_probe_direct_first =
+                geometric_small_prime_trial && suitable_primes == 2 && initial_factor_count >= 10;
+            let mut direct_candidate = None;
+            let mut direct_rejection_lower_bound = None;
+            let mut direct_search_exhausted = false;
+            if can_probe_direct_first {
+                match self.screen_dense_u64_prime(var, maximum_direct_prime, initial_factor_count) {
+                    Some(ModularPrimeScreen::Candidate(candidate)) => {
+                        let digits =
+                            Self::linear_hensel_modulus(&bound, candidate.field.get_prime()).0;
+                        direct_candidate = Some((candidate, digits));
+                    }
+                    Some(ModularPrimeScreen::FactorLimitExceeded { lower_bound }) => {
+                        direct_rejection_lower_bound = Some(lower_bound);
+                    }
+                    None => direct_search_exhausted = true,
+                }
+            }
+            if direct_candidate
+                .as_ref()
+                .is_some_and(|(candidate, _)| candidate.distinct_degree.factor_count == 1)
+            {
+                return vec![self.clone()];
+            }
+
+            let direct_can_bound_third_image =
+                direct_candidate
+                    .as_ref()
+                    .is_some_and(|(candidate, candidate_digits)| {
+                        Self::preferred_dense_u64_factorization_work(
+                            initial_factor_count,
+                            initial_digits,
+                            candidate.distinct_degree.factor_count,
+                            *candidate_digits,
+                        )
+                        .is_some()
+                            && !Self::has_high_linear_hensel_pressure(
+                                d,
+                                &bound,
+                                candidate.distinct_degree.factor_count,
+                                *candidate_digits,
+                            )
+                    });
+
             if geometric_small_prime_trial {
                 pi = PrimeIteratorU64::new(
                     u64::from(first_small_prime)
@@ -8970,30 +9267,56 @@ impl<E: PositiveExponent> MultivariatePolynomial<IntegerRing, E, LexOrder> {
                 let best_digits = Self::linear_hensel_modulus(&bound, best.field.get_prime()).0;
                 let best_factor_count = best.distinct_degree.factor_count;
                 let best_work = Self::linear_hensel_work(best_factor_count, best_digits);
-                let max_factor_count =
+                let ordinary_factor_limit =
                     (best_work.saturating_sub(1) / candidate_digits).saturating_add(1);
+                let competitive_factor_limit = direct_can_bound_third_image.then(|| {
+                    let (direct, direct_digits) = direct_candidate.as_ref().unwrap();
+                    Self::competitive_small_prime_factor_limit(
+                        d as usize,
+                        best_factor_count,
+                        best_digits,
+                        direct.distinct_degree.factor_count,
+                        *direct_digits,
+                        candidate_digits,
+                    )
+                });
+                let max_factor_count = competitive_factor_limit
+                    .map(|limit| limit.min(ordinary_factor_limit))
+                    .unwrap_or(ordinary_factor_limit);
                 let Some(screen) =
                     self.screen_univariate_mod_prime(var, p as u32, Some(max_factor_count))
                 else {
                     continue;
                 };
                 suitable_primes += 1;
-                if let ModularPrimeScreen::Candidate(candidate) = screen {
-                    if candidate.distinct_degree.factor_count == 1 {
-                        return vec![self.clone()];
-                    }
+                match screen {
+                    ModularPrimeScreen::Candidate(candidate) => {
+                        if candidate.distinct_degree.factor_count == 1 {
+                            return vec![self.clone()];
+                        }
 
-                    let candidate_work = Self::linear_hensel_work(
-                        candidate.distinct_degree.factor_count,
-                        candidate_digits,
-                    );
-                    let geometric_probe = geometric_small_prime_trial && suitable_primes == 2;
-                    let factor_count_did_not_increase =
-                        candidate.distinct_degree.factor_count <= best_factor_count;
-                    if candidate_work < best_work
-                        && (!geometric_probe || factor_count_did_not_increase)
-                    {
-                        best_factorization = Some(candidate);
+                        let candidate_work = Self::linear_hensel_work(
+                            candidate.distinct_degree.factor_count,
+                            candidate_digits,
+                        );
+                        let geometric_probe = geometric_small_prime_trial && suitable_primes == 2;
+                        let factor_count_did_not_increase =
+                            candidate.distinct_degree.factor_count <= best_factor_count;
+                        if candidate_work < best_work
+                            && (!geometric_probe || factor_count_did_not_increase)
+                        {
+                            best_factorization = Some(candidate);
+                        }
+                    }
+                    ModularPrimeScreen::FactorLimitExceeded { lower_bound } => {
+                        if let Some(limit) = competitive_factor_limit
+                            && limit < ordinary_factor_limit
+                        {
+                            debug_assert!(lower_bound > limit);
+                            #[cfg(test)]
+                            COMPETITIVE_SMALL_PRIME_DDF_REJECTIONS
+                                .with(|rejections| rejections.set(rejections.get() + 1));
+                        }
                     }
                 }
 
@@ -9008,68 +9331,58 @@ impl<E: PositiveExponent> MultivariatePolynomial<IntegerRing, E, LexOrder> {
                 }
             }
 
-            // Keep dense products of two degree-d images in the u64 accumulator kernel. The
-            // bound p * (d + 1) <= u32::MAX proves both that all (d + 1)^2 products fit in u64
-            // and that one Montgomery reduction is sufficient for each output coefficient.
-            let maximum_direct_prime = u64::from(u32::MAX) / (u64::from(d) + 1);
-            // This retains 26 bits per lifting digit and leaves room to skip unsuitable primes at
-            // degree 64 without crossing the direct-reduction bound.
-            let mut direct_primes = PrimeIteratorU64::new(65_000_000);
-            let best_factor_count = best_factorization
-                .as_ref()
-                .unwrap()
-                .distinct_degree
-                .factor_count;
-            let direct_factor_limit = if best_factor_count < 10 {
-                best_factor_count + 1
-            } else {
-                best_factor_count
-            };
-            let direct_candidate = loop {
-                let Some(p) = direct_primes.next() else {
-                    break None;
+            if direct_candidate.is_none() && !direct_search_exhausted {
+                let best_factor_count = best_factorization
+                    .as_ref()
+                    .unwrap()
+                    .distinct_degree
+                    .factor_count;
+                let direct_factor_limit = if best_factor_count < 10 {
+                    best_factor_count + 1
+                } else {
+                    best_factor_count
                 };
-                if p > maximum_direct_prime {
-                    break None;
-                }
-                match self.screen_univariate_mod_prime(var, p as u32, Some(direct_factor_limit)) {
-                    None => {}
-                    Some(ModularPrimeScreen::Candidate(candidate)) => break Some(candidate),
-                    Some(ModularPrimeScreen::FactorLimitExceeded { lower_bound }) => {
-                        debug!(
-                            "Rejected the first suitable dense-u64 prime at modular factor lower bound {lower_bound}"
-                        );
-                        break None;
+                let should_screen = !can_probe_direct_first
+                    || direct_rejection_lower_bound
+                        .is_some_and(|lower_bound| lower_bound <= direct_factor_limit);
+                if should_screen {
+                    match self.screen_dense_u64_prime(
+                        var,
+                        maximum_direct_prime,
+                        direct_factor_limit,
+                    ) {
+                        Some(ModularPrimeScreen::Candidate(candidate)) => {
+                            let digits =
+                                Self::linear_hensel_modulus(&bound, candidate.field.get_prime()).0;
+                            direct_candidate = Some((candidate, digits));
+                        }
+                        Some(ModularPrimeScreen::FactorLimitExceeded { lower_bound }) => {
+                            debug!(
+                                "Rejected the first suitable dense-u64 prime at modular factor lower bound {lower_bound}"
+                            );
+                        }
+                        None => {}
                     }
                 }
-            };
+            }
 
-            if let Some(candidate) = direct_candidate {
-                if candidate.distinct_degree.factor_count == 1 {
-                    return vec![self.clone()];
-                }
-
+            if direct_candidate
+                .as_ref()
+                .is_some_and(|(candidate, _)| candidate.distinct_degree.factor_count == 1)
+            {
+                return vec![self.clone()];
+            }
+            if let Some((candidate, candidate_digits)) = direct_candidate {
                 let best = best_factorization.as_ref().unwrap();
                 let best_digits = Self::linear_hensel_modulus(&bound, best.field.get_prime()).0;
-                let best_work =
-                    Self::linear_hensel_work(best.distinct_degree.factor_count, best_digits);
-                let candidate_digits =
-                    Self::linear_hensel_modulus(&bound, candidate.field.get_prime()).0;
-                let candidate_work = Self::linear_hensel_work(
-                    candidate.distinct_degree.factor_count,
-                    candidate_digits,
-                );
-                let crosses_recombination_boundary = best.distinct_degree.factor_count <= 10
-                    && candidate.distinct_degree.factor_count > 10;
-                let same_or_fewer_factors = candidate.distinct_degree.factor_count
-                    <= best.distinct_degree.factor_count
-                    && candidate_work.saturating_mul(2) <= best_work;
-                let one_extra_factor = candidate.distinct_degree.factor_count
-                    == best.distinct_degree.factor_count + 1
-                    && best.distinct_degree.factor_count < 10
-                    && candidate_work.saturating_mul(4) <= best_work;
-
-                if !crosses_recombination_boundary && (same_or_fewer_factors || one_extra_factor) {
+                if let Some((best_work, candidate_work)) =
+                    Self::preferred_dense_u64_factorization_work(
+                        best.distinct_degree.factor_count,
+                        best_digits,
+                        candidate.distinct_degree.factor_count,
+                        candidate_digits,
+                    )
+                {
                     debug!(
                         "Selected a dense-u64 modular prime: estimated linear Hensel work {best_work} -> {candidate_work}"
                     );
@@ -10910,6 +11223,7 @@ impl<E: PositiveExponent> MultivariatePolynomial<IntegerRing, E, LexOrder> {
                                 max_bivariate_factors,
                                 0,
                                 None,
+                                false,
                                 IntegerFactorStart::Univariate,
                             );
                         }
@@ -10988,6 +11302,7 @@ impl<E: PositiveExponent> MultivariatePolynomial<IntegerRing, E, LexOrder> {
                         max_bivariate_factors,
                         0,
                         None,
+                        false,
                         IntegerFactorStart::Univariate,
                     );
                 }
@@ -11015,6 +11330,7 @@ impl<E: PositiveExponent> MultivariatePolynomial<IntegerRing, E, LexOrder> {
                         max_bivariate_factors,
                         0,
                         None,
+                        false,
                         IntegerFactorStart::Univariate,
                     );
                 }
@@ -11064,6 +11380,7 @@ impl<E: PositiveExponent> MultivariatePolynomial<IntegerRing, E, LexOrder> {
                         max_bivariate_factors,
                         0,
                         None,
+                        false,
                         IntegerFactorStart::Univariate,
                     );
                 }
@@ -11079,6 +11396,7 @@ impl<E: PositiveExponent> MultivariatePolynomial<IntegerRing, E, LexOrder> {
         coefficient_upper_bound: i64,
         max_univariate_factors: Option<usize>,
         bivariate_fallback_order: Option<&[usize]>,
+        prefer_univariate_start: bool,
     ) -> Vec<Self> {
         self.multivariate_factorization_with_retries(
             order,
@@ -11086,6 +11404,7 @@ impl<E: PositiveExponent> MultivariatePolynomial<IntegerRing, E, LexOrder> {
             max_univariate_factors,
             0,
             bivariate_fallback_order,
+            prefer_univariate_start,
             integer_factor_start_mode(),
         )
     }
@@ -11119,6 +11438,7 @@ impl<E: PositiveExponent> MultivariatePolynomial<IntegerRing, E, LexOrder> {
         mut max_univariate_factors: Option<usize>,
         mut univariate_retries: usize,
         bivariate_fallback_order: Option<&[usize]>,
+        prefer_univariate_start: bool,
         integer_start_mode: IntegerFactorStart,
     ) -> Vec<Self> {
         'retry: loop {
@@ -11139,8 +11459,11 @@ impl<E: PositiveExponent> MultivariatePolynomial<IntegerRing, E, LexOrder> {
                             None,
                         );
                     }
-                    let (use_bivariate, _) = self.integer_factor_start_auto_decision(order);
-                    use_bivariate
+                    if prefer_univariate_start {
+                        false
+                    } else {
+                        self.integer_factor_start_auto_decision(order).0
+                    }
                 }
                 IntegerFactorStart::Univariate => false,
                 IntegerFactorStart::Bivariate => true,
@@ -11448,31 +11771,33 @@ mod test {
         BIVARIATE_FIRST_SAMPLE_ACCEPTANCES, BIVARIATE_SAMPLE_FACTORIZATIONS,
         BIVARIATE_WANG_SAMPLE_TRIES, BIVARIATE_WIDE_PRIME_ATTEMPTS,
         BIVARIATE_WIDE_PRIME_MIN_BOUND_BITS, BIVARIATE_WIDE_PRIME_START, BOUNDED_DDF_REJECTIONS,
-        BivariateFactorRetryContext, DENSE_INTEGER_I128_MULTIPLY_REMAINDERS,
-        DENSE_ZP_DDF_MODULUS_UPDATES, DENSE_ZP_DDF_SCREENS, DENSE_ZP_EDF_BLOCKS,
-        DenseBivariateImage, DenseIntegerModularUnivariateContext, DenseTwoFactorCorrectionContext,
-        DenseZpAccumulationMode, DenseZpDistinctDegreeContext, DenseZpEqualDegreeContext,
-        DenseZpMulModWorkspace, EXACT_HENSEL_SUBTREE_MODULUS_BITS, EXACT_HENSEL_SUBTREE_SPLITS,
-        ExactPolynomialSquareRoot, GEOMETRIC_SMALL_PRIME_BACKFILLS,
+        BivariateFactorRetryContext, COMPETITIVE_SMALL_PRIME_DDF_REJECTIONS,
+        DENSE_INTEGER_I128_MULTIPLY_REMAINDERS, DENSE_ZP_DDF_MODULUS_UPDATES, DENSE_ZP_DDF_SCREENS,
+        DENSE_ZP_EDF_BLOCKS, DenseBivariateImage, DenseIntegerModularUnivariateContext,
+        DenseTwoFactorCorrectionContext, DenseZpAccumulationMode, DenseZpDistinctDegreeContext,
+        DenseZpEqualDegreeContext, DenseZpMulModWorkspace, EXACT_HENSEL_SUBTREE_MODULUS_BITS,
+        EXACT_HENSEL_SUBTREE_SPLITS, ExactPolynomialSquareRoot, GEOMETRIC_SMALL_PRIME_BACKFILLS,
         INTEGER_FACTOR_BIVARIATE_WANG_MIN_BOX_DENSITY, IntegerModularUnivariateContext,
         LAST_BIVARIATE_RECONSTRUCTION_PRIME, LAST_BOUNDED_DDF_REJECTION_DEGREE,
-        LAST_MODULAR_INTEGER_EDF_PRIME, LLL_RECOMBINATION_SUCCESSES,
-        LOCAL_HENSEL_RECOMBINATION_NODES, MIN_EARLY_QUADRATIC_FACTOR_TERMS,
-        MODULAR_INTEGER_EDF_CALLS, ModularPrimeScreen, PRODUCT_TREE_BALANCED_PAIR_ATTEMPTS,
-        PRODUCT_TREE_BALANCED_PAIR_CERTIFICATES, PRODUCT_TREE_BALANCED_PAIR_TARGET_EXPONENT,
-        PRODUCT_TREE_EARLY_RECONSTRUCTION_ATTEMPTS, PRODUCT_TREE_EARLY_RECONSTRUCTION_EXPONENT,
-        PRODUCT_TREE_EARLY_RECONSTRUCTION_SUCCESSES, PRODUCT_TREE_HENSEL_LIFT_CALLS,
-        PRODUCT_TREE_LAST_BEZOUT_UPDATE_EXPONENT, PackedSparsePolynomialSquareContext,
-        QUADRATIC_HENSEL_LIFT_CALLS, QUADRATIC_HENSEL_NONUNIT_RETRIES, QuadraticFactorization,
+        LAST_MODULAR_INTEGER_EDF_PRIME, LINEAR_VARIABLE_IRREDUCIBILITY_CERTIFICATES,
+        LLL_RECOMBINATION_SUCCESSES, LOCAL_HENSEL_RECOMBINATION_NODES,
+        MIN_EARLY_QUADRATIC_FACTOR_TERMS, MODULAR_INTEGER_EDF_CALLS, ModularPrimeScreen,
+        PRODUCT_TREE_BALANCED_PAIR_ATTEMPTS, PRODUCT_TREE_BALANCED_PAIR_CERTIFICATES,
+        PRODUCT_TREE_BALANCED_PAIR_TARGET_EXPONENT, PRODUCT_TREE_EARLY_RECONSTRUCTION_ATTEMPTS,
+        PRODUCT_TREE_EARLY_RECONSTRUCTION_EXPONENT, PRODUCT_TREE_EARLY_RECONSTRUCTION_SUCCESSES,
+        PRODUCT_TREE_HENSEL_LIFT_CALLS, PRODUCT_TREE_LAST_BEZOUT_UPDATE_EXPONENT,
+        PackedSparsePolynomialSquareContext, QUADRATIC_HENSEL_LIFT_CALLS,
+        QUADRATIC_HENSEL_NONUNIT_RETRIES, QuadraticFactorization,
         SEPARABLE_CONTENT_NONTRIVIAL_MONOMIAL_FALLBACKS,
         SEPARABLE_CONTENT_PAIR_MONOMIAL_CERTIFICATES, SEPARABLE_CONTENT_PAIR_PROBES,
         SEPARABLE_CONTENT_PAIR_REPLACEMENTS, SEPARABLE_CONTENT_SINGLE_MONOMIAL_CERTIFICATES,
         SeparableCoefficientContentContext, SparseDiophantineContext,
-        SparsePolynomialSquareRootContext, UnivariateFactorFallbackState,
+        SparsePolynomialSquareRootContext, UNIVARIATE_IRREDUCIBILITY_CERTIFICATES,
+        UNIVARIATE_IRREDUCIBILITY_SCOUTS, UnivariateFactorFallbackState,
         UnivariateHenselProductTreeBuildContext, UnivariateHenselProductTreeLiftContext,
         UnivariateHenselProductTreeLiftResult, UnivariateHenselProductTreeLink,
-        UnivariateHenselProductTreeNode, balance_three_factor_hensel_root,
-        integer_factor_bivariate_wang_density_supported,
+        UnivariateHenselProductTreeNode, UnivariateSpecializationFactorization,
+        balance_three_factor_hensel_root, integer_factor_bivariate_wang_density_supported,
         reorder_integer_factor_variables_for_sparse_univariate,
         univariate_hensel_precision_schedule, univariate_hensel_shortened_target,
     };
@@ -12451,6 +12776,100 @@ mod test {
     }
 
     #[test]
+    fn linear_active_variable_certifies_post_separable_irreducibility() {
+        let _lock = GLOBAL_FACTOR_SETTINGS_LOCK.lock().unwrap();
+        let _guard = FactorSettingsGuard::new();
+        GLOBAL_SETTINGS
+            .use_univariate_factorization
+            .store(true, Ordering::Relaxed);
+        GLOBAL_SETTINGS
+            .use_bivariate_factorization
+            .store(true, Ordering::Relaxed);
+        let polynomial = parse!("x+y*z+z^2+1").to_polynomial::<_, u8>(&Z, None);
+
+        LINEAR_VARIABLE_IRREDUCIBILITY_CERTIFICATES.with(|count| count.set(0));
+        UNIVARIATE_IRREDUCIBILITY_SCOUTS.with(|count| count.set(0));
+        assert_eq!(polynomial.factor(), vec![(polynomial.clone(), 1)]);
+        LINEAR_VARIABLE_IRREDUCIBILITY_CERTIFICATES.with(|count| assert_eq!(count.get(), 1));
+        UNIVARIATE_IRREDUCIBILITY_SCOUTS.with(|count| assert_eq!(count.get(), 0));
+    }
+
+    #[test]
+    fn irreducible_univariate_image_certifies_multivariate_component() {
+        let _lock = GLOBAL_FACTOR_SETTINGS_LOCK.lock().unwrap();
+        let _guard = FactorSettingsGuard::new();
+        GLOBAL_SETTINGS
+            .use_univariate_factorization
+            .store(true, Ordering::Relaxed);
+        GLOBAL_SETTINGS
+            .use_bivariate_factorization
+            .store(true, Ordering::Relaxed);
+        let polynomial = parse!("x^2+y^2+z^2+1").to_polynomial::<_, u8>(&Z, None);
+
+        UNIVARIATE_IRREDUCIBILITY_SCOUTS.with(|count| count.set(0));
+        UNIVARIATE_IRREDUCIBILITY_CERTIFICATES.with(|count| count.set(0));
+        assert_eq!(polynomial.factor(), vec![(polynomial.clone(), 1)]);
+        UNIVARIATE_IRREDUCIBILITY_SCOUTS.with(|count| assert_eq!(count.get(), 1));
+        UNIVARIATE_IRREDUCIBILITY_CERTIFICATES.with(|count| assert_eq!(count.get(), 1));
+    }
+
+    #[test]
+    fn reducible_univariate_image_prefers_univariate_factorization() {
+        let _lock = GLOBAL_FACTOR_SETTINGS_LOCK.lock().unwrap();
+        let _guard = FactorSettingsGuard::new();
+        GLOBAL_SETTINGS
+            .use_univariate_factorization
+            .store(true, Ordering::Relaxed);
+        GLOBAL_SETTINGS
+            .use_bivariate_factorization
+            .store(true, Ordering::Relaxed);
+        let reducible = parse!("(x^2+y^2+z^2+1)*(x+y+2*z+1)")
+            .expand()
+            .to_polynomial::<_, u8>(&Z, None);
+
+        assert!(reducible.integer_factor_start_auto_decision(&[0, 1, 2]).0);
+        UNIVARIATE_IRREDUCIBILITY_SCOUTS.with(|count| count.set(0));
+        UNIVARIATE_IRREDUCIBILITY_CERTIFICATES.with(|count| count.set(0));
+        BIVARIATE_SAMPLE_FACTORIZATIONS.with(|count| count.set(0));
+        let factors = reducible.factor();
+        assert_eq!(factors.len(), 2);
+        assert_eq!(
+            factors
+                .iter()
+                .fold(reducible.one(), |product, (factor, power)| {
+                    &product * &factor.pow(*power)
+                }),
+            reducible
+        );
+        UNIVARIATE_IRREDUCIBILITY_SCOUTS.with(|count| assert_eq!(count.get(), 1));
+        UNIVARIATE_IRREDUCIBILITY_CERTIFICATES.with(|count| assert_eq!(count.get(), 0));
+        BIVARIATE_SAMPLE_FACTORIZATIONS.with(|count| assert_eq!(count.get(), 0));
+    }
+
+    #[test]
+    fn degree_dropping_univariate_image_is_inconclusive() {
+        let degree_drop = parse!("x^2*y^3-x^2+x+y+z^4")
+            .expand()
+            .to_polynomial::<_, u8>(&Z, None);
+
+        assert_eq!(
+            degree_drop.univariate_specialization_factorization(&[2, 3, 4]),
+            UnivariateSpecializationFactorization::Inconclusive
+        );
+    }
+
+    #[test]
+    fn repeated_univariate_specialization_is_classified_as_reducible() {
+        let polynomial = parse!("x^2+2*x+y^2+z^2-1").to_polynomial::<_, u8>(&Z, None);
+
+        assert_eq!(
+            polynomial.univariate_specialization_factorization(&[2, 2, 2]),
+            UnivariateSpecializationFactorization::ReducibleImage
+        );
+        assert_eq!(polynomial.factor(), vec![(polynomial.clone(), 1)]);
+    }
+
+    #[test]
     fn integer_factorization_respects_global_start_settings() {
         let _lock = GLOBAL_FACTOR_SETTINGS_LOCK.lock().unwrap();
         let _guard = FactorSettingsGuard::new();
@@ -12463,7 +12882,9 @@ mod test {
         GLOBAL_SETTINGS
             .use_bivariate_factorization
             .store(false, Ordering::Relaxed);
+        UNIVARIATE_IRREDUCIBILITY_SCOUTS.with(|count| count.set(0));
         assert_eq!(poly.factor().len(), 2);
+        UNIVARIATE_IRREDUCIBILITY_SCOUTS.with(|count| assert_eq!(count.get(), 0));
 
         GLOBAL_SETTINGS
             .use_univariate_factorization
@@ -12471,7 +12892,9 @@ mod test {
         GLOBAL_SETTINGS
             .use_bivariate_factorization
             .store(true, Ordering::Relaxed);
+        UNIVARIATE_IRREDUCIBILITY_SCOUTS.with(|count| count.set(0));
         assert_eq!(poly.factor().len(), 2);
+        UNIVARIATE_IRREDUCIBILITY_SCOUTS.with(|count| assert_eq!(count.get(), 0));
 
         GLOBAL_SETTINGS
             .use_univariate_factorization
@@ -12479,7 +12902,9 @@ mod test {
         GLOBAL_SETTINGS
             .use_bivariate_factorization
             .store(false, Ordering::Relaxed);
+        UNIVARIATE_IRREDUCIBILITY_SCOUTS.with(|count| count.set(0));
         assert_eq!(poly.factor(), vec![(poly, 1)]);
+        UNIVARIATE_IRREDUCIBILITY_SCOUTS.with(|count| assert_eq!(count.get(), 0));
     }
 
     #[test]
@@ -12559,7 +12984,8 @@ mod test {
         BIVARIATE_WANG_SAMPLE_TRIES.with(|count| assert_eq!(count.get(), 1));
 
         let mut factor_order = vec![0, 1, 2];
-        let factors = polynomial.multivariate_factorization(&mut factor_order, 10, None, None);
+        let factors =
+            polynomial.multivariate_factorization(&mut factor_order, 10, None, None, false);
         assert_eq!(factors.len(), 2);
         let reconstructed = factors
             .into_iter()
@@ -12571,7 +12997,7 @@ mod test {
         let (_, _, _, _, negative_wang_lcoeffs) = negative.find_sample(&mut order, 10, None);
         assert_eq!(negative_wang_lcoeffs.unwrap().0, Integer::from(-1));
         let mut factor_order = vec![0, 1, 2];
-        let factors = negative.multivariate_factorization(&mut factor_order, 10, None, None);
+        let factors = negative.multivariate_factorization(&mut factor_order, 10, None, None, false);
         assert_eq!(factors.len(), 2);
         let reconstructed = factors
             .into_iter()
@@ -13360,9 +13786,10 @@ mod test {
     }
 
     #[test]
-    fn factor_univariate_degree_63_rechecks_product_tree_pressure_after_monomial_removal() {
+    fn factor_univariate_degree_63_bounds_third_small_image_before_selecting_wide_prime() {
         PRODUCT_TREE_HENSEL_LIFT_CALLS.with(|calls| calls.set(0));
         PRODUCT_TREE_EARLY_RECONSTRUCTION_ATTEMPTS.with(|attempts| attempts.set(0));
+        COMPETITIVE_SMALL_PRIME_DDF_REJECTIONS.with(|rejections| rejections.set(0));
         let polynomial = parse!("((1+3*x)^32-1)*((1-5*x)^31+1)")
             .expand()
             .to_polynomial::<_, u8>(&Z, None);
@@ -13409,7 +13836,33 @@ mod test {
                 final_digits
             )
         );
+        let third_digits =
+            MultivariatePolynomial::<IntegerRing, u8>::linear_hensel_modulus(&bound, 29).0;
+        let ordinary_limit = (MultivariatePolynomial::<IntegerRing, u8>::linear_hensel_work(
+            small_factor_count,
+            small_digits,
+        ) - 1)
+            / third_digits
+            + 1;
+        let competitive_limit =
+            MultivariatePolynomial::<IntegerRing, u8>::competitive_small_prime_factor_limit(
+                factor_target.degree(0) as usize,
+                small_factor_count,
+                small_digits,
+                final_factor_count,
+                final_digits,
+                third_digits,
+            );
+        assert!(competitive_limit < ordinary_limit);
+        let Some(ModularPrimeScreen::FactorLimitExceeded { lower_bound }) =
+            factor_target.screen_univariate_mod_prime(0, 29, Some(competitive_limit))
+        else {
+            panic!("prime 29 must exceed the competitive factor limit");
+        };
+        assert!(lower_bound > competitive_limit);
 
+        DENSE_ZP_DDF_SCREENS.with(|screens| screens.set(0));
+        LAST_MODULAR_INTEGER_EDF_PRIME.with(|prime| prime.set(0));
         let factors = polynomial.factor();
         let reconstructed = factors
             .iter()
@@ -13427,6 +13880,9 @@ mod test {
             .collect::<Vec<_>>();
         degrees.sort_unstable();
         assert_eq!(degrees, [1u8, 1, 1, 2, 4, 8, 16, 30]);
+        COMPETITIVE_SMALL_PRIME_DDF_REJECTIONS.with(|rejections| assert_eq!(rejections.get(), 1));
+        DENSE_ZP_DDF_SCREENS.with(|screens| assert_eq!(screens.get(), 4));
+        LAST_MODULAR_INTEGER_EDF_PRIME.with(|prime| assert_eq!(prime.get(), 65_000_011));
         PRODUCT_TREE_HENSEL_LIFT_CALLS.with(|calls| assert_eq!(calls.get(), 0));
         PRODUCT_TREE_EARLY_RECONSTRUCTION_ATTEMPTS.with(|attempts| assert_eq!(attempts.get(), 0));
     }
@@ -13444,6 +13900,7 @@ mod test {
         PRODUCT_TREE_LAST_BEZOUT_UPDATE_EXPONENT.with(|exponent| exponent.set(0));
         PRODUCT_TREE_BALANCED_PAIR_ATTEMPTS.with(|attempts| attempts.set(0));
         GEOMETRIC_SMALL_PRIME_BACKFILLS.with(|backfills| backfills.set(0));
+        COMPETITIVE_SMALL_PRIME_DDF_REJECTIONS.with(|rejections| rejections.set(0));
         let polynomial = parse!("((1+3*x)^33-1)*((1-5*x)^31+1)")
             .expand()
             .to_polynomial::<_, u8>(&Z, None);
@@ -13492,12 +13949,15 @@ mod test {
         PRODUCT_TREE_LAST_BEZOUT_UPDATE_EXPONENT.with(|exponent| assert_eq!(exponent.get(), 20));
         PRODUCT_TREE_BALANCED_PAIR_ATTEMPTS.with(|attempts| assert_eq!(attempts.get(), 0));
         GEOMETRIC_SMALL_PRIME_BACKFILLS.with(|backfills| assert_eq!(backfills.get(), 0));
+        COMPETITIVE_SMALL_PRIME_DDF_REJECTIONS.with(|rejections| assert_eq!(rejections.get(), 0));
     }
 
     #[test]
     fn factor_univariate_degree_65_backfills_geometric_prime_gap() {
         DENSE_INTEGER_I128_MULTIPLY_REMAINDERS.with(|operations| operations.set(0));
         GEOMETRIC_SMALL_PRIME_BACKFILLS.with(|backfills| backfills.set(0));
+        COMPETITIVE_SMALL_PRIME_DDF_REJECTIONS.with(|rejections| rejections.set(0));
+        LAST_MODULAR_INTEGER_EDF_PRIME.with(|prime| prime.set(0));
         PRODUCT_TREE_BALANCED_PAIR_ATTEMPTS.with(|attempts| attempts.set(0));
         PRODUCT_TREE_BALANCED_PAIR_CERTIFICATES.with(|certificates| certificates.set(0));
         PRODUCT_TREE_BALANCED_PAIR_TARGET_EXPONENT.with(|exponent| exponent.set(0));
@@ -13523,6 +13983,8 @@ mod test {
         degrees.sort_unstable();
         assert_eq!(degrees, [1u8, 2, 10, 20, 32]);
         GEOMETRIC_SMALL_PRIME_BACKFILLS.with(|backfills| assert!(backfills.get() > 0));
+        COMPETITIVE_SMALL_PRIME_DDF_REJECTIONS.with(|rejections| assert_eq!(rejections.get(), 0));
+        LAST_MODULAR_INTEGER_EDF_PRIME.with(|prime| assert_eq!(prime.get(), 13));
         PRODUCT_TREE_BALANCED_PAIR_ATTEMPTS.with(|attempts| assert_eq!(attempts.get(), 1));
         PRODUCT_TREE_BALANCED_PAIR_CERTIFICATES
             .with(|certificates| assert_eq!(certificates.get(), 1));
@@ -15168,7 +15630,7 @@ mod test {
         let mut order = (0..8).collect::<Vec<_>>();
         assert!(!poly.integer_factor_start_auto_decision(&order).0);
 
-        let factors = poly.multivariate_factorization(&mut order, 10, Some(0), None);
+        let factors = poly.multivariate_factorization(&mut order, 10, Some(0), None, false);
         let product = factors
             .iter()
             .fold(poly.one(), |product, factor| &product * factor);
