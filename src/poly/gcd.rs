@@ -3805,6 +3805,19 @@ struct DenseUnivariateIntegerDivisionContext<'a> {
 }
 
 impl<'a> DenseUnivariateIntegerDivisionContext<'a> {
+    /// Returns the quotient length when both endpoint solves fit inside the divisor.
+    ///
+    /// The two-ended certificate splits the quotient into low and high parts. Each part must be no
+    /// longer than the divisor slice that determines its endpoint equations. The admitted shapes
+    /// have equal divisor and quotient lengths, or differ by one coefficient after a monomial
+    /// shift. These near-balanced products replace classical long division by two triangular
+    /// solves and one packed product.
+    fn two_ended_quotient_len(divisor_len: usize, dividend_len: usize) -> Option<usize> {
+        let quotient_len = dividend_len.checked_sub(divisor_len)?.checked_add(1)?;
+        (quotient_len <= divisor_len && divisor_len.saturating_sub(quotient_len) <= 1)
+            .then_some(quotient_len)
+    }
+
     /// Construct a dense division workspace for a divisor and the two inputs it must divide.
     fn new<E: PositiveExponent>(
         divisor: &'a MultivariatePolynomial<IntegerRing, E>,
@@ -3863,10 +3876,7 @@ impl<'a> DenseUnivariateIntegerDivisionContext<'a> {
             .collect();
         let balanced_dense_input = |polynomial: &MultivariatePolynomial<IntegerRing, E>,
                                     coefficient_count: usize| {
-            coefficient_count
-                == divisor_coefficient_count
-                    .saturating_mul(2)
-                    .saturating_sub(1)
+            Self::two_ended_quotient_len(divisor_coefficient_count, coefficient_count).is_some()
                 && coefficient_count
                     .saturating_mul(DENSE_UNIVARIATE_CHECKED_TWO_ENDED_MIN_DENSITY_NUMERATOR)
                     <= polynomial
@@ -4039,7 +4049,7 @@ impl<'a> DenseUnivariateIntegerDivisionContext<'a> {
         product
     }
 
-    /// Certify a balanced dense division by recovering the quotient from both endpoints.
+    /// Certify a near-balanced dense division by recovering the quotient from both endpoints.
     ///
     /// The low product equations determine the low quotient half without using high divisor
     /// coefficients, and the high equations independently determine the high half. One complete
@@ -4054,11 +4064,13 @@ impl<'a> DenseUnivariateIntegerDivisionContext<'a> {
         let Some(dense_divisor) = self.dense_coefficients else {
             return DenseUnivariateCheckedDivision::Unavailable;
         };
-        if dividend_len != divisor_len.saturating_mul(2).saturating_sub(1)
-            || dividend_len.saturating_mul(DENSE_UNIVARIATE_CHECKED_TWO_ENDED_MIN_DENSITY_NUMERATOR)
-                > dividend
-                    .nterms()
-                    .saturating_mul(DENSE_UNIVARIATE_CHECKED_TWO_ENDED_MIN_DENSITY_DENOMINATOR)
+        let Some(quotient_len) = Self::two_ended_quotient_len(divisor_len, dividend_len) else {
+            return DenseUnivariateCheckedDivision::Unavailable;
+        };
+        if dividend_len.saturating_mul(DENSE_UNIVARIATE_CHECKED_TWO_ENDED_MIN_DENSITY_NUMERATOR)
+            > dividend
+                .nterms()
+                .saturating_mul(DENSE_UNIVARIATE_CHECKED_TWO_ENDED_MIN_DENSITY_DENOMINATOR)
         {
             return DenseUnivariateCheckedDivision::Unavailable;
         }
@@ -4075,8 +4087,8 @@ impl<'a> DenseUnivariateIntegerDivisionContext<'a> {
             dense_dividend[exponents[self.variable].to_u32() as usize] = coefficient.clone();
         }
 
-        let low_len = divisor_len / 2;
-        let high_len = divisor_len - low_len;
+        let low_len = quotient_len / 2;
+        let high_len = quotient_len - low_len;
         let mut quotient = match Self::low_triangular_quotient(
             &dense_dividend[..low_len],
             &self.coefficients,
@@ -4086,9 +4098,10 @@ impl<'a> DenseUnivariateIntegerDivisionContext<'a> {
             None => return DenseUnivariateCheckedDivision::Inexact,
         };
         let high_dividend_start = dividend_len - high_len;
+        let high_divisor_start = divisor_len - high_len;
         let high_quotient = match Self::triangular_quotient(
             &dense_dividend[high_dividend_start..],
-            &self.coefficients[low_len..],
+            &self.coefficients[high_divisor_start..],
             &mut self.division_remainder,
         ) {
             Some(quotient) => quotient,
@@ -8529,6 +8542,68 @@ mod tests {
                 ));
             }
         }
+
+        let near_balanced_divisor = dense_polynomial(64, 3);
+        let near_balanced_quotient = dense_polynomial(63, 6);
+        let near_balanced_dividend = &near_balanced_divisor * &near_balanced_quotient;
+        let mut near_balanced = DenseUnivariateIntegerDivisionContext::new(
+            &near_balanced_divisor,
+            &near_balanced_dividend,
+            &near_balanced_dividend,
+            0,
+        )
+        .unwrap();
+        match near_balanced.try_div_balanced_two_ended(&near_balanced_dividend) {
+            DenseUnivariateCheckedDivision::Exact(actual) => {
+                assert_eq!(actual, near_balanced_quotient)
+            }
+            DenseUnivariateCheckedDivision::Unavailable => {
+                panic!("the near-balanced division must use the two-ended certificate")
+            }
+            DenseUnivariateCheckedDivision::Inexact => {
+                panic!("an exact near-balanced division was rejected")
+            }
+        }
+
+        let mut near_balanced_inexact_dividend = near_balanced_dividend.clone();
+        *near_balanced_inexact_dividend
+            .coefficients
+            .get_mut(near_balanced_divisor.degree(0).to_u32() as usize)
+            .unwrap() += 1;
+        let mut near_balanced_inexact = DenseUnivariateIntegerDivisionContext::new(
+            &near_balanced_divisor,
+            &near_balanced_inexact_dividend,
+            &near_balanced_inexact_dividend,
+            0,
+        )
+        .unwrap();
+        assert!(matches!(
+            near_balanced_inexact.try_div_balanced_two_ended(&near_balanced_inexact_dividend),
+            DenseUnivariateCheckedDivision::Inexact
+        ));
+        assert!(
+            near_balanced_inexact
+                .try_div(&near_balanced_inexact_dividend)
+                .is_none()
+        );
+
+        let narrower_quotient = dense_polynomial(62, 7);
+        let narrower_dividend = &near_balanced_divisor * &narrower_quotient;
+        let mut narrower = DenseUnivariateIntegerDivisionContext::new(
+            &near_balanced_divisor,
+            &narrower_dividend,
+            &narrower_dividend,
+            0,
+        )
+        .unwrap();
+        assert!(matches!(
+            narrower.try_div_balanced_two_ended(&narrower_dividend),
+            DenseUnivariateCheckedDivision::Unavailable
+        ));
+        assert_eq!(
+            narrower.try_div(&narrower_dividend),
+            Some(narrower_quotient)
+        );
 
         let short_divisor = dense_polynomial(62, 2);
         let short_quotient = dense_polynomial(62, 5);

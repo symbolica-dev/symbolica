@@ -1,13 +1,13 @@
 # Polynomial performance continuation handoff
 
 This is the live continuation record for the single-core Symbolica/FLINT polynomial-performance
-work. It was refreshed on 2026-08-31 after the `v21` dense-division, cache-chunk, and Montgomery
-round. The current 125-row fixed-fixture non-resultant inventory has 121 Symbolica wins and four
-losses with a `0.636796` median. Its worst row is the 256-bit asymmetric eight-variable product at
-`1.025828`; the worst timed operation is generated dense bivariate GCD at `1.022443`. Dense
-degree-64/80 GCD now measure `0.792087/0.986902`, and the corrected dense three-variable
-factor-input product measures `0.809770`. The separate frozen 3,200-problem PolyBench distribution
-remains at a `0.962614` paired median with 1,832 Symbolica wins. Rows are measured across accepted source
+work. It was refreshed on 2026-08-31 after the `v23` near-balanced dense-GCD certificate round.
+The current 125-row fixed-fixture non-resultant inventory has 124 Symbolica wins and one loss with
+a `0.636796` median. Its worst row is generated dense bivariate GCD at `1.022443`. Dense
+degree-48/64/80 GCD now measure `0.904854/0.711750/0.993433`. Dense one-variable degree-63/64/65
+factorization measures `0.985446/0.765733/0.993885`, and the matching products measure
+`0.814256/0.815238/0.841130`. The mixed current 3,200-problem PolyBench distribution has a
+`0.726631` paired median with 2,277 Symbolica wins. Rows are measured across accepted source
 snapshots, with each replacement and its source-matched evidence documented below.
 Keep this file current whenever an experiment is accepted, rejected, or left partly complete. The
 purpose is that another agent can resume without reconstructing decisions from chat history or
@@ -15,8 +15,8 @@ transient binary names.
 
 The complete current Symbolica/FLINT scoreboard is in
 [CURRENT_STATUS.md](CURRENT_STATUS.md), with the latest immutable snapshot in
-[CURRENT_STATUS_v21.md](CURRENT_STATUS_v21.md). Its primary statistics contain 125 non-resultant
-comparisons: 121 favor Symbolica and four favor FLINT. The six Ducos, six Brown, and six CRT
+[CURRENT_STATUS_v23.md](CURRENT_STATUS_v23.md). Its primary statistics contain 125 non-resultant
+comparisons: 124 favor Symbolica and one favors FLINT. The six Ducos, six Brown, and six CRT
 measurements are retained only in a compact appendix note and do not affect primary ranks or
 summary statistics. After every accepted optimization, update the live file and create the next
 numbered snapshot with an opening paragraph that describes the changes from its predecessor.
@@ -4156,8 +4156,8 @@ Its binary is `/tmp/flint-comparison-v21-commit`, SHA-256
 1,000-sample degree-63 refresh is `1.011864` S/F with a `2.879888 ms` Symbolica median; raw files
 are `/tmp/v21-commit-factor-d63-0{1..6}.csv`.
 
-The current immutable scoreboard is [CURRENT_STATUS_v21.md](CURRENT_STATUS_v21.md), mirrored by
-[CURRENT_STATUS.md](CURRENT_STATUS.md).
+The immutable scoreboard for this checkpoint is
+[CURRENT_STATUS_v21.md](CURRENT_STATUS_v21.md).
 
 ## v22 compact output, bounded prime selection, and post-separable factor routing
 
@@ -4340,8 +4340,70 @@ Verification passed:
 - `cargo fmt` and `git diff --check`.
 
 The v22 primary inventory has 125 rows, 124 Symbolica wins, one loss, median `0.636796`, worst
-`1.022443`, and best `0.028678`. The one loss is the generated dense bivariate GCD. The immutable
-scoreboard is [CURRENT_STATUS_v22.md](CURRENT_STATUS_v22.md), mirrored by
+`1.022443`, and best `0.028678`. The one loss is the generated dense bivariate GCD. Its immutable
+checkpoint is [CURRENT_STATUS_v22.md](CURRENT_STATUS_v22.md); the live scoreboard has since
+advanced to v23.
+
+## v23 near-balanced dense GCD certificate
+
+The accepted two-ended certificate previously required a divisor of `n` coefficients and a
+dividend of `2n-1` coefficients, hence an `n`-coefficient quotient. The degree-64 fixture has a
+second exact division whose quotient has `n-1` coefficients after its monomial shift. That input
+still used classical checked long division.
+
+`DenseUnivariateIntegerDivisionContext::two_ended_quotient_len` now admits quotient length `n` or
+`n-1`. It splits a quotient of length `q` into `floor(q/2)` low coefficients and the remaining high
+coefficients. The high solve uses the last `high` divisor coefficients rather than assuming its
+start is the low split. One complete dense integer product still compares every dividend
+coefficient, so endpoint solves cannot accept an incorrect quotient. The existing GMP, minimum
+length 64, fully dense divisor, and 75%-dense dividend gates remain. Quotients shorter than `n-1`
+fall through to classical checked division.
+
+Six alternating full-LTO processes use 5,000 paired samples per GCD backend. The exact final-source
+and v22 results are:
+
+| GCD | v23 Symbolica | v23 FLINT | v23 S/F | v22 Symbolica | v22 S/F | Symbolica change |
+|---|---:|---:|---:|---:|---:|---:|
+| dense degree 48 | `0.189653 ms` | `0.209607 ms` | `0.904854` | `0.188515 ms` | `0.896055` | `+0.60%` guard |
+| dense degree 64 | `0.278830 ms` | `0.391166 ms` | `0.711750` | `0.312692 ms` | `0.792789` | `-10.83%` |
+| dense degree 80 | `0.585045 ms` | `0.589469 ms` | `0.993433` | `0.583851 ms` | `0.988098` | `+0.20%` guard |
+
+The one-variable product and factorization triangle was refreshed from the exact same binary:
+
+| Total degree | Product S/F | Factor S/F | Factor Symbolica/FLINT |
+|---:|---:|---:|---:|
+| 63 | `0.814256` | `0.985446` | `2.949644/2.991130 ms` |
+| 64 | `0.815238` | `0.765733` | `1.954782/2.551953 ms` |
+| 65 | `0.841130` | `0.993885` | `3.006729/3.024720 ms` |
+
+Degree-64 factorization is neutral relative to v22 (`1.953616 -> 1.954782 ms`). Degree 65 moves
+`3.001008 -> 3.006729 ms`. Degree 63 moves `2.885640 -> 2.949644 ms`, a 2.22% guard movement below
+the standing 3% threshold. A direct final-versus-near-balanced replay reproduces
+`2.950847/2.890511 ms`, while the new checked division is absent from the degree-63 factor profile.
+The hot `DenseZpDistinctDegreeContext<u16>::multiply_low_into` address changes from an aligned
+`0x...600` in v22 and `0x...560` in the intermediate binary to `0x...530` in the final binary.
+This attributes the guard movement to deterministic whole-program LTO placement rather than a new
+factorization route. All three operations remain faster than FLINT.
+
+A larger dense-DDF experiment retained the modular residual in dense storage, reused dense GCD and
+division buffers, and materialized only discovered blocks. Six alternating 1,000-sample degree-64
+factor processes changed Symbolica only `1.950995 -> 1.948138 ms` (`-0.15%`) and S/F
+`0.765473 -> 0.763286`; the apparent ratio movement was dominated by the independently measured
+FLINT columns. The factor change and its tests were removed.
+
+The final binary is `/tmp/flint-comparison-v23-final`, SHA-256
+`7273a731b53e6a9804e2afb3f80b122176ff07be80abf6b79569b5416b40dce1`. Build JSON
+`/tmp/flint-comparison-v23-final-build.jsonl` has SHA-256
+`d4ae3aecbbf3d0845a7690ed0ded126684baf9f5ff159941941702d915b455e0`; the pre-documentation GCD
+source diff has SHA-256 `e222bdd9696669003c20e0ce40627069f88e007e8d6f006c6c89dad71679f3a6`.
+Raw timings use `/tmp/v23-final-{gcd-d48,gcd-d64,gcd-d80,product-d63,product-d64,product-d65,
+factor-d63,factor-d64,factor-d65}-{final,v22}-*.csv`. The rejected DDF binary is
+`/tmp/flint-comparison-v23-dense-ddf`, SHA-256
+`9430cb394ab0e67390a716c0ea52ee54167c3b0707122532fe4f7fad4c7e8398`.
+
+Verification passes all 37 `poly::gcd::tests`, the three degree-63/64/65 factor-route tests, the
+`integer-malachite,float-astro` check, `cargo fmt`, and `git diff --check`. The immutable scoreboard
+is [CURRENT_STATUS_v23.md](CURRENT_STATUS_v23.md), mirrored by
 [CURRENT_STATUS.md](CURRENT_STATUS.md).
 
 ## Rejected or low-value experiments
@@ -4350,6 +4412,7 @@ Do not repeat these without a genuinely new mechanism:
 
 | Experiment | Evidence | Decision |
 |---|---|---|
+| Reusable dense DDF GCD/division buffers in the v23 degree-64 factor pass | Symbolica `1.950995 -> 1.948138 ms`, only `-0.15%` across six 1,000-sample processes | reject and remove; materialization and temporary GCD/division buffers are not the remaining DDF bottleneck |
 | Dense DDF rearrangement in the v21 degree-64 factor pass | `0.779187 -> 0.774422` S/F, about 0.6% | reject; too small for the code and the later one-step Montgomery reduction attacks arithmetic shared by the whole DDF loop |
 | One-level checked dense integer division | degree 64 `0.853801 -> 0.836601`, degree 80 `1.073632 -> 1.033246` | superseded by the simpler and faster two-ended certificate |
 | Recursive checked dense integer division | degree 80 `1.073506 -> 1.158099` | reject; small recursive products miss Kronecker and add GMP update, allocation, and reconstruction costs |
@@ -4464,26 +4527,32 @@ comments that justify file organization by contrasting it with designs not prese
 
 ## Current ordered next actions
 
-1. Attack 05/0002 uniform nontrivial GCD first. Add phase/work counters and profiles for retained
+1. The dense degree-64 GCD decision is complete at `0.711750` S/F. The next one-variable operation
+   target is degree-65 factorization at `0.993885`; profile retained DDF arithmetic and Hensel
+   reconstruction before changing either. Require a source-matched gain above the 3% layout band.
+2. Keep the degree-63/64/65 products as guards at `0.814256/0.815238/0.841130`. Do not add another
+   product abstraction without a mechanism different from the rejected broad multiplication
+   contexts; multiplication is no longer the limiting one-variable operation.
+3. Then attack 05/0002 uniform nontrivial GCD. Add phase/work counters and profiles for retained
    problems 74, 116, and 176, separating Zippel image construction, interpolation, CRT or rational
    reconstruction, exact certificates, and multiplication. The broad population gap rules out a
    fixture-specific fallback; require a mechanism shared by the balanced 3.5k--4.4k-term inputs.
-2. Continue with 05/0006 only after a 05/0002 result. Compare problem 203 and tail problem 174 using
+4. Continue with 05/0006 only after a 05/0002 result. Compare problem 203 and tail problem 174 using
    projected pair support and predicted image/interpolation work for every candidate main
    coordinate. Any planner change must preserve the current dense/uniform choices and use only
    input geometry, not setup or problem IDs.
-3. In parallel as a separate factor-tail lane, prototype a one-sided modular nonsquare certificate
+5. As a separate factor-tail lane, prototype a one-sided modular nonsquare certificate
    before `factor_quadratic_before_square_free` forms `b^2-4ac`. Use deterministic bounded primes
    and points; nonsquare proves the exact discriminant is not a square, while square/zero must fall
    through unchanged. Measure 08/0008 problems 51/127 and 05/0007 problem 153 plus reducible
    quadratic guards.
-4. Profile sharp trivial GCD tails 05/0005 problem 130 and 08/0005 problem 50 with backend,
+6. Profile sharp trivial GCD tails 05/0005 problem 130 and 08/0005 problem 50 with backend,
    prime/image, collision, and rejection counters. Do not trade broad throughput for these small
    absolute gaps; their medians already favor Symbolica.
-5. Keep the generated dense bivariate GCD at `1.022443` as the primary same-process guard and next
+7. Keep the generated dense bivariate GCD at `1.022443` as the primary same-process guard and next
    standalone operation target. The dense degree-80 product is now `0.998814`; pursue its exact
    top-bit correction only after the larger distribution gaps.
-6. Keep resultants in the historical appendix, freeze and hash each accepted full-LTO binary, and
+8. Keep resultants in the historical appendix, freeze and hash each accepted full-LTO binary, and
    create the next immutable `CURRENT_STATUS_v<i>.md` snapshot after every accepted round.
 
 ## Historical ordered next actions
