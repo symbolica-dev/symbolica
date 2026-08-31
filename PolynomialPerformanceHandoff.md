@@ -1,12 +1,12 @@
 # Polynomial performance continuation handoff
 
 This is the live continuation record for the single-core Symbolica/FLINT polynomial-performance
-work. It was refreshed on 2026-08-31 after the `v24` bounded modular-prime search round. The
-current 125-row fixed-fixture non-resultant inventory has 123 Symbolica wins and two losses with a
-`0.636796` median. Its worst row is dense degree-63 factorization at `1.076190`; generated dense
-bivariate GCD follows at `1.022443`. Dense degree-48/64/80 GCD measure
+work. It was refreshed on 2026-08-31 after the `v25` paid-for dense Frobenius-map round. The
+current 125-row fixed-fixture non-resultant inventory has 124 Symbolica wins and one loss with a
+`0.636796` median. Its worst row is generated dense bivariate GCD at `1.022443`. Dense
+degree-48/64/80 GCD measure
 `0.904854/0.711750/0.993433`. Dense one-variable degree-63/64/65 factorization measures
-`1.076190/0.700836/0.945536`, and the stable matching products measure
+`0.910657/0.700836/0.945536`, and the stable matching products measure
 `0.814256/0.815238/0.841130`. The mixed current 3,200-problem PolyBench distribution has a
 `0.726631` paired median with 2,277 Symbolica wins. Rows are measured across accepted source
 snapshots, with each replacement and its source-matched evidence documented below.
@@ -16,8 +16,8 @@ transient binary names.
 
 The complete current Symbolica/FLINT scoreboard is in
 [CURRENT_STATUS.md](CURRENT_STATUS.md), with the latest immutable snapshot in
-[CURRENT_STATUS_v24.md](CURRENT_STATUS_v24.md). Its primary statistics contain 125 non-resultant
-comparisons: 123 favor Symbolica and two favor FLINT. The six Ducos, six Brown, and six CRT
+[CURRENT_STATUS_v25.md](CURRENT_STATUS_v25.md). Its primary statistics contain 125 non-resultant
+comparisons: 124 favor Symbolica and one favors FLINT. The six Ducos, six Brown, and six CRT
 measurements are retained only in a compact appendix note and do not affect primary ranks or
 summary statistics. After every accepted optimization, update the live file and create the next
 numbered snapshot with an opening paragraph that describes the changes from its predecessor.
@@ -4484,12 +4484,89 @@ the DDF modulus shrinks. This is a genuine future mechanism, but it was not impl
 selector change already delivered a double-digit gain. Do not retry the rejected dense-buffer or
 Kaltofen-Shoup rearrangements under the name of this map.
 
+## v25 paid-for dense Frobenius map
+
+The degree-63 profile localized the remaining factorization loss to repeated characteristic
+powers in the wide-prime DDF screen. At `p=65,000,011`, each classical update computes a `p`th
+power with 41 dense modular products. `DenseZpFrobeniusContext` instead stores column `i` as
+`x^(i*p) mod f` and applies the resulting linear map to the dense coefficient vector. Over
+`GF(p)`, the linear combination is exactly `a(x)^p mod f`.
+
+Map construction uses the existing dense multiplication/remainder workspace. Application sums raw
+Montgomery products with the same proved accumulator bounds as dense multiplication: the direct
+Montgomery and native-remainder cases use `u64`, while the wide-remainder case uses `u128`.
+Columns stay attached to the monic construction modulus. If DDF later removes a block, the current
+residual modulus divides that construction modulus, so applying the old map and then reducing by
+the residual computes the same residue as rebuilding the map. Tests cover that modulus shrink and
+all three accumulator modes.
+
+The selector deliberately does not estimate how many DDF steps remain. It keeps the first four
+steps classical and constructs a map only when
+
+```text
+(current residual degree - 2) construction products + 1 application
+    <= products in the very next classical pth power.
+```
+
+Thus the first use already repays construction in the same dense-product cost model. On the
+degree-63 fixture, the degree-eight block shrinks the residual degree from 46 to 30. One map is
+then built and serves DDF steps 9 through 15. The same gate rejects a degree-64 residual over
+`GF(5)`: its 62 construction products plus an application cannot replace a three-product
+characteristic power.
+
+Two more aggressive policies were measured and rejected during review. An optimistic future-tail
+bound reached about `0.840` S/F but could build immediately before DDF terminated. A policy that
+treated completed classical work as rent reached `0.892129`, but the `GF(5)` counterexample showed
+that past work did not imply future payback. The accepted one-step rule is weaker on the measured
+tail but has a local input-dependent break-even guarantee.
+
+Six independent 1,000-sample processes on the final full-LTO binary give:
+
+| Process | Symbolica | FLINT | S/F |
+|---:|---:|---:|---:|
+| 1 | `2.714916 ms` | `2.988737 ms` | `0.908382` |
+| 2 | `2.732489 ms` | `2.993067 ms` | `0.912939` |
+| 3 | `2.717666 ms` | `2.994666 ms` | `0.907502` |
+| 4 | `2.734103 ms` | `2.994862 ms` | `0.912931` |
+| 5 | `2.739730 ms` | `3.018154 ms` | `0.907750` |
+| 6 | `2.778094 ms` | `3.041444 ms` | `0.913413` |
+| median | `2.733296 ms` | `2.994764 ms` | `0.910657` |
+
+The clean frozen-source control has a `2.978711 ms` Symbolica median, so source-matched Symbolica
+time falls 8.24%, beyond the 3% linked-layout band. The generated bivariate, three-variable,
+high-height, degree-64, and degree-65 factor guards show no repeatable regression; their stable
+primary measurements remain in the scoreboard.
+
+The final weighted perf attribution is `12.234` million Symbolica cycles per call versus `13.314`
+million for FLINT, or `0.918906`. The v24 profile had measured `16.333` million Symbolica cycles
+versus `14.896` million for FLINT. Map application itself was below 0.31% in the more aggressive
+diagnostic profile, so flattening the column storage does not have a useful present ceiling.
+
+The accepted binary is `/tmp/flint-comparison-v25-frobenius-break-even`, SHA-256
+`b0e7a7404a8c1fb3a3648dde9cb39a64249941693a821849828256a97512bad4`. Build JSON
+`/tmp/v25-frobenius-break-even-build.jsonl` has SHA-256
+`4326c459f8a813eff231199b63260ba9b832f0c47d346e6c0363df181597b9bb`. Raw timing files are
+`/tmp/v25-frobenius-break-even-d63-00{1..6}.csv`. The final profile is
+`/tmp/profile-v25-frobenius-break-even-d63.perf.data`, SHA-256
+`1b56d6bed76812b4a1a1d70f0a325f9147648dfd6cee3e2913a9ceb4de43c545`; its flat and children
+reports have SHA-256 `d497b186c8ad7fcb8cea27542d9542ffd4480040bb3afa536e80aacbe2e2e7fe` and
+`f6f70e9563f5f17c3129c2f273b587287e5da0a3556918c92335f4c11d2d3aa6`. The artifact manifest is
+`/tmp/v25-frobenius-break-even-SHA256SUMS`, SHA-256
+`ed1a36ccc715da8c5ebf41bc570812fc08587c125c1706fa4c32fd387767d894`.
+
+All 107 default-GMP factor tests pass. The focused degree-63 route test also passes with
+`integer-malachite,float-astro,native_code_generation`, including the assertion that exactly one
+Frobenius map is constructed. Formatting and diff checks pass. The immutable scoreboard is
+[CURRENT_STATUS_v25.md](CURRENT_STATUS_v25.md).
+
 ## Rejected or low-value experiments
 
 Do not repeat these without a genuinely new mechanism:
 
 | Experiment | Evidence | Decision |
 |---|---|---|
+| Eager predicted-tail Frobenius-map gate | dense degree-63 factorization reached about `0.840` S/F | reject; a predicted tail can end before construction is repaid |
+| Accumulated-work Frobenius-map gate | dense degree-63 factorization reached `0.892129` S/F, but degree 64 over `GF(5)` could build a 62-product map before a 3-product next step | superseded by the accepted one-step break-even rule |
 | Reusable dense DDF GCD/division buffers in the v23 degree-64 factor pass | Symbolica `1.950995 -> 1.948138 ms`, only `-0.15%` across six 1,000-sample processes | reject and remove; materialization and temporary GCD/division buffers are not the remaining DDF bottleneck |
 | Dense DDF rearrangement in the v21 degree-64 factor pass | `0.779187 -> 0.774422` S/F, about 0.6% | reject; too small for the code and the later one-step Montgomery reduction attacks arithmetic shared by the whole DDF loop |
 | One-level checked dense integer division | degree 64 `0.853801 -> 0.836601`, degree 80 `1.073632 -> 1.033246` | superseded by the simpler and faster two-ended certificate |
@@ -4589,6 +4666,10 @@ older checksums and ratios are retained in Git history of this document at commi
 - Bounded one-step 32-bit Montgomery reduction:
   `lib/numerica/src/domains/finite_field.rs::Zp::reduce_montgomery_product_sum`; its dense DDF
   consumer is `src/poly/factor.rs::DenseZpDistinctDegreeContext::reduce_accumulator`.
+- Dense high-characteristic DDF powering: `src/poly/factor.rs`, especially
+  `DenseZpFrobeniusContext`, `DenseZpDistinctDegreeContext::characteristic_power_product_count`,
+  and `should_cache_frobenius`. The cache stores the Frobenius linear map for one construction
+  modulus and remains correct after reduction to a factor of that modulus.
 - Generated and PolyBench fixtures: `benches/support/cases.rs` and
   `benches/support/polybench_cases.rs`; generated-factor variable-map construction and its
   namespace assertion are in `benches/support/symbolica.rs::factorization_factors`.
@@ -4605,18 +4686,18 @@ comments that justify file organization by contrasting it with designs not prese
 
 ## Current ordered next actions
 
-1. The dense degree-64 GCD decision is complete at `0.711750` S/F, and degree-64/65 factorization
-   is now `0.700836/0.945536`. Profile the unchanged wide-prime degree-63 factor route, whose exact
-   v24 ratio is `1.076190`. Separate wide-image DDF, EDF, Hensel, and reconstruction before changing
-   it; require a source-matched Symbolica gain above the 3% layout band.
-2. Keep the degree-63/64/65 products as guards at their stable primary values
+1. The dense degree-63 factorization decision is complete at `0.910657` S/F. Its paid-for
+   Frobenius map reduces source-matched Symbolica time by 8.24%; degree-64/65 factorization remains
+   `0.700836/0.945536`.
+2. Attack 05/0002 uniform nontrivial GCD. Use phase/work counters and operation-only profiles for
+   retained problems 74, 116, and 176, separating recursive Zippel image construction,
+   interpolation, CRT or rational reconstruction, exact certificates, and multiplication. The
+   broad population gap rules out a fixture-specific fallback; require a mechanism shared by the
+   balanced 3.5k--4.4k-term inputs.
+3. Keep the degree-63/64/65 products as guards at their stable primary values
    `0.814256/0.815238/0.841130`; the exact v24 linked-binary ratios are
    `0.970816/0.965768/0.977305`. Do not add another product abstraction without a mechanism
    different from the rejected broad multiplication contexts.
-3. Then attack 05/0002 uniform nontrivial GCD. Add phase/work counters and profiles for retained
-   problems 74, 116, and 176, separating Zippel image construction, interpolation, CRT or rational
-   reconstruction, exact certificates, and multiplication. The broad population gap rules out a
-   fixture-specific fallback; require a mechanism shared by the balanced 3.5k--4.4k-term inputs.
 4. Continue with 05/0006 only after a 05/0002 result. Compare problem 203 and tail problem 174 using
    projected pair support and predicted image/interpolation work for every candidate main
    coordinate. Any planner change must preserve the current dense/uniform choices and use only
@@ -4629,9 +4710,10 @@ comments that justify file organization by contrasting it with designs not prese
 6. Profile sharp trivial GCD tails 05/0005 problem 130 and 08/0005 problem 50 with backend,
    prime/image, collision, and rejection counters. Do not trade broad throughput for these small
    absolute gaps; their medians already favor Symbolica.
-7. After the degree-63 factor row, keep the generated dense bivariate GCD at `1.022443` as the
-   second standalone loss. The dense degree-80 product is `0.998814`; pursue its exact top-bit
-   correction only after the larger distribution gaps.
+7. The generated dense bivariate GCD at `1.022443` is now the only standalone primary loss. Test
+   the deterministic evaluation divisibility prefilter and near-balanced two-ended certificate
+   generalization identified in the FLINT comparison, but prioritize the larger 05/0002 aggregate
+   gap. The dense degree-80 product is `0.998814`; pursue its exact top-bit correction later.
 8. Keep resultants in the historical appendix, freeze and hash each accepted full-LTO binary, and
    create the next immutable `CURRENT_STATUS_v<i>.md` snapshot after every accepted round.
 
