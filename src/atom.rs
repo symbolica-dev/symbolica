@@ -3751,6 +3751,21 @@ impl_function_arguments!(
     (L, l)
 );
 
+impl<T: FunctionArgument> FunctionArguments for &[T] {
+    fn add_args_to_function_builder(self, mut f: FunctionBuilder) -> FunctionBuilder {
+        for x in self {
+            f = x.add_arg_to_function_builder(f);
+        }
+        f
+    }
+}
+
+impl<T: FunctionArgument> FunctionArguments for &Vec<T> {
+    fn add_args_to_function_builder(self, f: FunctionBuilder) -> FunctionBuilder {
+        self.as_slice().add_args_to_function_builder(f)
+    }
+}
+
 impl FunctionArgument for Atom {
     fn add_arg_to_function_builder(&self, f: FunctionBuilder) -> FunctionBuilder {
         f.add_arg(self.as_view())

@@ -41,6 +41,9 @@ pub enum EvaluationError {
         expected: usize,
         actual: usize,
     },
+    FunctionRedefined {
+        function: Atom,
+    },
     NumericalTypeDoesNotSupportImaginaryUnit,
     EvaluationFailed {
         expression: Atom,
@@ -129,6 +132,10 @@ impl std::fmt::Display for EvaluationError {
                 "function {} cannot be registered with {actual} tag(s); it was already registered with {expected} tag(s)",
                 function.get_name()
             ),
+            EvaluationError::FunctionRedefined { function } => {
+                write!(f, "function {} is redefined", function.to_plain_string())
+            }
+
             EvaluationError::NumericalTypeDoesNotSupportImaginaryUnit => {
                 f.write_str("numerical type does not support imaginary unit")
             }

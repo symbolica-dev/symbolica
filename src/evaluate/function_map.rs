@@ -207,6 +207,13 @@ impl FunctionMap {
             _ => {}
         }
 
+        let key = (name, tags.clone());
+        if self.tagged_fn_map.contains_key(&key) {
+            return Err(EvaluationError::FunctionRedefined {
+                function: name.call(&tags),
+            });
+        }
+
         let id = self.tagged_fn_map.len();
         let tag_len = tags.len();
         self.tagged_fn_map
