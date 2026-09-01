@@ -541,18 +541,27 @@ where
         if e > u32::MAX as u64 {
             panic!("Power of exponentiation is larger than 2^32: {e}");
         }
-        let e = e as u32;
 
-        // TODO: do binary exponentiation
-        let mut poly = RationalPolynomial {
+        let mut exponent = e as u32;
+        let mut result = RationalPolynomial {
             numerator: self.numerator.one(),
             denominator: self.denominator.one(),
         };
-
-        for _ in 0..e {
-            poly = &poly * self;
+        if exponent == 0 {
+            return result;
         }
-        poly
+
+        let mut base = self.clone();
+        while exponent > 0 {
+            if exponent & 1 == 1 {
+                result = &result * &base;
+            }
+            exponent >>= 1;
+            if exponent > 0 {
+                base = &base * &base;
+            }
+        }
+        result
     }
 
     pub fn gcd(&self, other: &Self) -> Self {
@@ -876,23 +885,7 @@ where
     }
 
     fn pow(&self, b: &Self::Element, e: u64) -> Self::Element {
-        if e > u32::MAX as u64 {
-            panic!("Power of exponentiation is larger than 2^32: {e}");
-        }
-        let e = e as u32;
-
-        // TODO: do binary exponentiation
-        let mut poly = RationalPolynomial {
-            numerator: b.numerator.zero(),
-            denominator: b.denominator.zero(),
-        };
-        poly.numerator = poly.numerator.add_constant(self.ring.one());
-        poly.denominator = poly.denominator.add_constant(self.ring.one());
-
-        for _ in 0..e {
-            poly = self.mul(&poly, b);
-        }
-        poly
+        b.pow(e)
     }
 
     fn is_zero(&self, a: &Self::Element) -> bool {
