@@ -3391,6 +3391,80 @@ impl<
 }
 
 impl<R: EuclideanDomain + PolynomialGCD<E>, E: PositiveExponent> MultivariatePolynomial<R, E> {
+    /// Returns the scalar GCD of two polynomials when degree-preserving images prove that no
+    /// polynomial variable occurs in their common divisor.
+    fn try_constant_gcd_from_bounds(
+        left: &Self,
+        right: &Self,
+        variables: &[usize],
+    ) -> Option<Self> {
+        let bounds = R::get_gcd_var_bounds(left, right, variables);
+        if variables
+            .iter()
+            .any(|variable| !bounds[*variable].is_zero())
+        {
+            return None;
+        }
+
+        let content = left.ring().gcd(&left.content(), &right.content());
+        Some(PolynomialGCD::normalize(left.constant(content)))
+    }
+
+    /// Estimates whether testing the full polynomial GCD for constantness is cheaper than
+    /// recursively computing the two coefficient layers of a linear input.
+    fn should_screen_before_linear_content(
+        left: &Self,
+        right: &Self,
+        left_metadata: &GcdInputMetadata<E>,
+        right_metadata: &GcdInputMetadata<E>,
+        base_degrees: &[Option<E>],
+        variables: &[usize],
+    ) -> bool {
+        if variables.len() < 3 {
+            return false;
+        }
+
+        let normalized_degree = |metadata: &GcdInputMetadata<E>, variable: usize| {
+            let degree = metadata.shifted_degree(variable);
+            base_degrees[variable].map_or(degree, |base| degree / base)
+        };
+        if variables.iter().any(|variable| {
+            normalized_degree(left_metadata, *variable).to_u32() as usize
+                > FUSED_GCD_BOUND_MAX_DEGREE
+                || normalized_degree(right_metadata, *variable).to_u32() as usize
+                    > FUSED_GCD_BOUND_MAX_DEGREE
+        }) {
+            return false;
+        }
+
+        let mut coefficient_gcd_work = None;
+        for (polynomial, metadata) in [(left, left_metadata), (right, right_metadata)] {
+            if let Some(variable) =
+                (0..polynomial.nvars()).find(|v| normalized_degree(metadata, *v) == E::one())
+            {
+                let leading_terms = polynomial.terms_with_max_degree(variable);
+                let trailing_terms = polynomial.nterms().saturating_sub(leading_terms);
+                coefficient_gcd_work =
+                    Some((leading_terms as u128).saturating_mul(trailing_terms as u128));
+                break;
+            }
+        }
+        let Some(coefficient_gcd_work) = coefficient_gcd_work.filter(|work| *work > 0) else {
+            return false;
+        };
+
+        let scan_width = variables.len().saturating_mul(2).saturating_add(1) as u128;
+        let scan_work =
+            (left.nterms().saturating_add(right.nterms()) as u128).saturating_mul(scan_width);
+        let dense_image_work = variables.iter().fold(0u128, |work, variable| {
+            let left_degree = normalized_degree(left_metadata, *variable).to_u32() as u128 + 1;
+            let right_degree = normalized_degree(right_metadata, *variable).to_u32() as u128 + 1;
+            work.saturating_add(left_degree.saturating_mul(right_degree))
+        });
+        let bound_work = scan_work.saturating_add(dense_image_work);
+        coefficient_gcd_work >= bound_work
+    }
+
     /// Get the content of a multivariate polynomial viewed as a
     /// univariate polynomial in `x`.
     pub fn univariate_content(&self, x: usize) -> MultivariatePolynomial<R, E> {
@@ -3729,6 +3803,24 @@ impl<R: EuclideanDomain + PolynomialGCD<E>, E: PositiveExponent> MultivariatePol
             );
         }
 
+        let mut vars: SmallVec<[_; INLINED_EXPONENTS]> = scratch
+            .iter()
+            .enumerate()
+            .filter_map(|(i, v)| if *v == 3 { Some(i) } else { None })
+            .collect();
+
+        if Self::should_screen_before_linear_content(
+            &a,
+            &b,
+            &a_metadata,
+            &b_metadata,
+            &base_degree,
+            &vars,
+        ) && let Some(gcd) = Self::try_constant_gcd_from_bounds(&a, &b, &vars)
+        {
+            return rescale_gcd(gcd, &shared_degree, &base_degree, &a.one());
+        }
+
         // try if b divides a or vice versa, doing a heuristical length check first
         if a.nterms() >= b.nterms() && a.try_div(&b).is_some() {
             return rescale_gcd(b.into_owned(), &shared_degree, &base_degree, &a.one());
@@ -3748,8 +3840,13 @@ impl<R: EuclideanDomain + PolynomialGCD<E>, E: PositiveExponent> MultivariatePol
                 let p1_prim = p1.as_ref() / &cont;
 
                 if !cont.is_one() || !R::one_is_gcd_unit() {
-                    let cont_p2 = p2.univariate_content(var);
-                    cont = cont.gcd(&cont_p2);
+                    if cont.is_constant() {
+                        let scalar_content = p2.ring().gcd(&cont.get_constant(), &p2.content());
+                        cont = cont.constant(scalar_content);
+                    } else {
+                        let cont_p2 = p2.univariate_content(var);
+                        cont = cont.gcd(&cont_p2);
+                    }
                 }
 
                 if p2.try_div(&p1_prim).is_some() {
@@ -3764,12 +3861,6 @@ impl<R: EuclideanDomain + PolynomialGCD<E>, E: PositiveExponent> MultivariatePol
                 }
             }
         }
-
-        let mut vars: SmallVec<[_; INLINED_EXPONENTS]> = scratch
-            .iter()
-            .enumerate()
-            .filter_map(|(i, v)| if *v == 3 { Some(i) } else { None })
-            .collect();
 
         // find upper bounds for all variables
         let mut bounds = R::get_gcd_var_bounds(&a, &b, &vars);
@@ -5291,13 +5382,70 @@ impl<E: PositiveExponent> MultivariatePolynomial<IntegerRing, E> {
         }
     }
 
-    /// Compute the gcd of multiple polynomials efficiently.
-    /// `gcd(f0,f1,f2,...)=gcd(f0,f1+k2*f(2)+k3*f(3))`
-    /// with high likelihood.
+    /// Returns the exact GCD of a polynomial collection when a partial collection GCD is a
+    /// monomial.
+    ///
+    /// Every common divisor of the collection divides the partial GCD. When that candidate has one
+    /// term, only its coefficient content and monomial exponents can remain common. Intersecting
+    /// those values with the other entries therefore determines the complete collection GCD.
+    fn try_gcd_multiple_from_monomial_candidate(
+        candidate: &Self,
+        remaining: &[Self],
+    ) -> Option<Self> {
+        if remaining
+            .iter()
+            .any(|polynomial| polynomial.variables() != candidate.variables())
+        {
+            return None;
+        }
+        if candidate.is_one() {
+            return Some(candidate.one());
+        }
+        if candidate.nterms() != 1 {
+            return None;
+        }
+
+        let mut content = candidate.content();
+        let mut exponents = candidate.exponents(0).to_vec();
+        for polynomial in remaining {
+            content = polynomial.ring().gcd(&content, &polynomial.content());
+            let metadata = GcdInputMetadata::scan(polynomial);
+            for (exponent, variable) in exponents.iter_mut().zip(metadata.variables) {
+                *exponent = (*exponent).min(variable.min_degree);
+            }
+
+            if polynomial.ring().is_one(&content)
+                && exponents.iter().all(|exponent| exponent.is_zero())
+            {
+                break;
+            }
+        }
+
+        Some(PolynomialGCD::normalize(
+            candidate.monomial(content, exponents),
+        ))
+    }
+
+    /// Computes the GCD of a nonempty collection of polynomials.
+    ///
+    /// When the sparsest entries are much smaller than the sampled aggregate, a bounded sequence
+    /// of exact GCDs is used to detect whether the collection GCD is a monomial. Otherwise, the
+    /// first candidate is obtained from `gcd(f0, f1 + k2*f2 + k3*f3 + ...)`. Every nontrivial
+    /// candidate is checked against the remaining entries, and the process is repeated until it
+    /// divides the full collection.
     pub fn gcd_multiple(
         mut f: Vec<MultivariatePolynomial<IntegerRing, E>>,
     ) -> MultivariatePolynomial<IntegerRing, E> {
         assert!(!f.is_empty());
+        let zero = f[0].zero();
+        let had_zero = f.iter().any(MultivariatePolynomial::is_zero);
+        f.retain(|polynomial| !polynomial.is_zero());
+        if f.is_empty() {
+            return zero;
+        }
+        if had_zero && f.len() == 1 {
+            return PolynomialGCD::normalize(f.swap_remove(0));
+        }
 
         let mut prime_index = 1; // skip prime 2
         let mut loop_counter = 0;
@@ -5326,20 +5474,54 @@ impl<E: PositiveExponent> MultivariatePolynomial<IntegerRing, E> {
             f.sort_unstable_by(|a, b| b.nterms().cmp(&a.nterms())); // sort in decreasing order
 
             let a = f.pop().unwrap();
+            let sampled_term_bound = f.iter().rev().take(20).map(|x| x.nterms()).sum::<usize>();
+            let largest_sampled_entry = f.iter().rev().take(20).map(|x| x.nterms()).max().unwrap();
 
-            // add all other polynomials
-            let term_bound = f.iter().map(|x| x.nterms()).sum();
-            let mut b = a.zero_with_capacity(term_bound);
+            // Repeatedly intersect the sparsest entry with a prefix whose input support is at most
+            // one quarter of the sampled aggregate. A monomial candidate confines the collection
+            // GCD to that monomial, so intersecting its exponents and content with the other
+            // entries completes the GCD. Stop if the intermediate GCD itself becomes too large;
+            // if the bounded prefix stays multi-term, use the aggregate candidate below.
+            if f.last()
+                .is_some_and(|b| b.nterms().saturating_mul(4) <= largest_sampled_entry)
+            {
+                let mut probed_terms = 0usize;
+                let mut candidate: Option<Self> = None;
+                for (probe_index, polynomial) in f.iter().rev().take(20).enumerate() {
+                    let next_probed_terms = probed_terms.saturating_add(polynomial.nterms());
+                    if next_probed_terms.saturating_mul(4) > sampled_term_bound {
+                        break;
+                    }
+                    probed_terms = next_probed_terms;
 
-            // prevent sampling f[i] and f[i+prime_len] with the same
-            // prefactor every iteration
+                    let next_candidate = match candidate.take() {
+                        Some(candidate) => candidate.gcd(polynomial),
+                        None => a.gcd(polynomial),
+                    };
+                    let candidate_ref = candidate.insert(next_candidate);
+
+                    if let Some(gcd) = Self::try_gcd_multiple_from_monomial_candidate(
+                        candidate_ref,
+                        &f[..f.len() - probe_index - 1],
+                    ) {
+                        return gcd;
+                    }
+                    if candidate_ref.nterms().saturating_mul(4) > sampled_term_bound {
+                        break;
+                    }
+                }
+            }
+
+            let mut b = a.zero_with_capacity(sampled_term_bound);
+
+            // Prevent sampling f[i] and f[i+prime_len] with the same prefactor every iteration.
             let num_primes = if f.len().is_multiple_of(SMALL_PRIMES.len()) {
                 SMALL_PRIMES.len() - 1
             } else {
                 SMALL_PRIMES.len()
             };
 
-            // try the 20 smallest chunks
+            // Try the 20 smallest chunks.
             for p in f.iter().rev().take(20) {
                 let k = Integer::Single(SMALL_PRIMES[prime_index % num_primes]);
                 prime_index += 1;
@@ -8976,6 +9158,270 @@ mod tests {
             "5+x1*x8+x2*x7+x3*x6+x4*x5",
             &[7, 2, 5, 0, 6, 1, 4, 3],
         );
+    }
+
+    #[test]
+    fn linear_content_bound_screen_preserves_scalar_and_polynomial_content() {
+        let mut polynomials = [
+            parse!("y*(1+x+z+w)^9+(1+2*x+3*z+5*w)^9").to_polynomial::<_, u8>(&Z, None),
+            parse!("y").to_polynomial::<_, u8>(&Z, None),
+            parse!("1+x+z+w").to_polynomial::<_, u8>(&Z, None),
+        ];
+        MultivariatePolynomial::unify_variables_list(&mut polynomials);
+        let [linear, y, common_factor] = polynomials;
+        let linear_variable = (0..y.nvars())
+            .find(|variable| y.degree(*variable) > 0)
+            .unwrap();
+        let right = (&y * &linear)
+            .add_constant(Integer::one())
+            .mul_coeff(Integer::from(15));
+        let left = linear.mul_coeff(Integer::from(6));
+        let left_metadata = GcdInputMetadata::scan(&left);
+        let right_metadata = GcdInputMetadata::scan(&right);
+        let base_degrees: SmallVec<[Option<u8>; INLINED_EXPONENTS]> =
+            smallvec![Some(1u8); left.nvars()];
+        let variables = (0..left.nvars()).collect::<SmallVec<[_; INLINED_EXPONENTS]>>();
+        assert_eq!(left_metadata.shifted_degree(linear_variable), 1u8);
+        assert!(MultivariatePolynomial::should_screen_before_linear_content(
+            &left,
+            &right,
+            &left_metadata,
+            &right_metadata,
+            &base_degrees,
+            &variables,
+        ));
+        assert_eq!(left.gcd(&right), left.constant(Integer::from(3)));
+
+        let left_with_factor = &left * &common_factor;
+        let right_with_factor = &right * &common_factor;
+        assert_eq!(
+            left_with_factor.gcd(&right_with_factor),
+            common_factor.mul_coeff(Integer::from(3))
+        );
+    }
+
+    #[test]
+    fn constant_linear_content_uses_the_other_scalar_content() {
+        let mut polynomials = [
+            parse!("6*(y*(1+x)^75+(1+2*x)^75)").to_polynomial::<_, u8>(&Z, None),
+            parse!("15*(y*(1+3*x)^75+(1+5*x)^75)").to_polynomial::<_, u8>(&Z, None),
+            parse!("y").to_polynomial::<_, u8>(&Z, None),
+        ];
+        MultivariatePolynomial::unify_variables_list(&mut polynomials);
+        let [left, right, y] = polynomials;
+        let linear_variable = (0..y.nvars())
+            .find(|variable| y.degree(*variable) > 0)
+            .unwrap();
+        let left_metadata = GcdInputMetadata::scan(&left);
+        let right_metadata = GcdInputMetadata::scan(&right);
+        let base_degrees: SmallVec<[Option<u8>; INLINED_EXPONENTS]> =
+            smallvec![Some(1u8); left.nvars()];
+        let variables = (0..left.nvars()).collect::<SmallVec<[_; INLINED_EXPONENTS]>>();
+
+        assert_eq!(variables.len(), 2);
+        assert_eq!(left_metadata.shifted_degree(linear_variable), 1u8);
+        assert!(
+            !MultivariatePolynomial::should_screen_before_linear_content(
+                &left,
+                &right,
+                &left_metadata,
+                &right_metadata,
+                &base_degrees,
+                &variables,
+            )
+        );
+        assert!(<IntegerRing as PolynomialGCD<u8>>::heuristic_gcd(&left, &right).is_none());
+
+        let content = left.univariate_content(linear_variable);
+        assert!(content.is_constant());
+        assert_eq!(content.get_constant(), Integer::from(6));
+        assert_eq!(right.content(), Integer::from(15));
+        assert_eq!(left.gcd(&right), left.constant(Integer::from(3)));
+    }
+
+    #[test]
+    fn integer_gcd_multiple_ignores_zero_entries() {
+        let mut polynomials = [
+            parse!("0").to_polynomial::<_, u8>(&Z, None),
+            parse!("6*(x+1)*(y+1)").to_polynomial::<_, u8>(&Z, None),
+            parse!("10*(x+1)*(z+1)").to_polynomial::<_, u8>(&Z, None),
+            parse!("2*(x+1)").to_polynomial::<_, u8>(&Z, None),
+            parse!("-2*(x+1)").to_polynomial::<_, u8>(&Z, None),
+        ];
+        MultivariatePolynomial::unify_variables_list(&mut polynomials);
+        let [zero, left, right, expected, negative] = polynomials;
+        assert_eq!(
+            MultivariatePolynomial::gcd_multiple(vec![zero.clone(), left, right]),
+            expected.clone()
+        );
+        assert_eq!(
+            MultivariatePolynomial::gcd_multiple(vec![zero.clone(), zero.clone(), zero.clone()]),
+            zero.clone()
+        );
+        assert_eq!(
+            MultivariatePolynomial::gcd_multiple(vec![zero, negative]),
+            expected
+        );
+
+        let zero_with_q_layout = parse!("q").to_polynomial::<_, u8>(&Z, None).zero();
+        let negative_with_x_layout = parse!("-6*(x+1)").to_polynomial::<_, u8>(&Z, None);
+        let expected_with_x_layout = parse!("6*(x+1)").to_polynomial::<_, u8>(&Z, None);
+        let actual =
+            MultivariatePolynomial::gcd_multiple(vec![zero_with_q_layout, negative_with_x_layout]);
+        assert_eq!(actual.variables(), expected_with_x_layout.variables());
+        assert_eq!(actual, expected_with_x_layout);
+    }
+
+    #[test]
+    fn integer_gcd_multiple_uses_scalar_sparse_pair_certificate() {
+        let mut polynomials = [
+            parse!("6*(x+1)").to_polynomial::<_, u8>(&Z, None),
+            parse!("10*(x+2)").to_polynomial::<_, u8>(&Z, None),
+            parse!("14*(1+z+z^2+z^3+z^4+z^5+z^6+z^7+z^8+z^9)").to_polynomial::<_, u8>(&Z, None),
+            parse!("15*(1+z+z^2+z^3+z^4+z^5+z^6+z^7+z^8+z^9)").to_polynomial::<_, u8>(&Z, None),
+            parse!("2").to_polynomial::<_, u8>(&Z, None),
+            parse!("1").to_polynomial::<_, u8>(&Z, None),
+        ];
+        MultivariatePolynomial::unify_variables_list(&mut polynomials);
+        let [
+            sparse_left,
+            sparse_right,
+            dense_even,
+            dense_odd,
+            expected_even,
+            expected_odd,
+        ] = polynomials;
+
+        let pair_gcd = sparse_left.gcd(&sparse_right);
+        assert!(pair_gcd.is_constant());
+        assert_eq!(pair_gcd, sparse_left.constant(Integer::from(2)));
+        assert_eq!(
+            MultivariatePolynomial::gcd_multiple(vec![
+                dense_even,
+                sparse_left.clone(),
+                sparse_right.clone()
+            ]),
+            expected_even
+        );
+        assert_eq!(
+            MultivariatePolynomial::gcd_multiple(vec![dense_odd, sparse_left, sparse_right]),
+            expected_odd
+        );
+    }
+
+    #[test]
+    fn integer_gcd_multiple_intersects_a_monomial_sparse_pair() {
+        let mut polynomials = [
+            parse!("6*x*y").to_polynomial::<_, u8>(&Z, None),
+            parse!("10*x*(y+1)").to_polynomial::<_, u8>(&Z, None),
+            parse!("14*(1+z+z^2+z^3+z^4+z^5+z^6+z^7+z^8+z^9)").to_polynomial::<_, u8>(&Z, None),
+            parse!("14*x*(1+z+z^2+z^3+z^4+z^5+z^6+z^7+z^8+z^9)").to_polynomial::<_, u8>(&Z, None),
+            parse!("2").to_polynomial::<_, u8>(&Z, None),
+            parse!("2*x").to_polynomial::<_, u8>(&Z, None),
+        ];
+        MultivariatePolynomial::unify_variables_list(&mut polynomials);
+        let [
+            sparse_left,
+            sparse_right,
+            dense_scalar,
+            dense_monomial,
+            expected_scalar,
+            expected_monomial,
+        ] = polynomials;
+
+        assert_eq!(sparse_left.gcd(&sparse_right), expected_monomial.clone());
+        assert_eq!(
+            MultivariatePolynomial::gcd_multiple(vec![
+                dense_scalar,
+                sparse_left.clone(),
+                sparse_right.clone()
+            ]),
+            expected_scalar
+        );
+        assert_eq!(
+            MultivariatePolynomial::gcd_multiple(vec![dense_monomial, sparse_left, sparse_right]),
+            expected_monomial
+        );
+    }
+
+    #[test]
+    fn integer_gcd_multiple_probes_a_bounded_sparse_prefix() {
+        let mut polynomials = [
+            parse!("6*x*(y+1)").to_polynomial::<_, u8>(&Z, None),
+            parse!("10*x*(y+1)").to_polynomial::<_, u8>(&Z, None),
+            parse!("14*x*(z+1+z^2+z^3)").to_polynomial::<_, u8>(&Z, None),
+            parse!("22*(1+w)^31").to_polynomial::<_, u8>(&Z, None),
+            parse!("2*x*(y+1)").to_polynomial::<_, u8>(&Z, None),
+            parse!("2*x").to_polynomial::<_, u8>(&Z, None),
+            parse!("2").to_polynomial::<_, u8>(&Z, None),
+        ];
+        MultivariatePolynomial::unify_variables_list(&mut polynomials);
+        let [
+            sparse_left,
+            sparse_right,
+            next_sparse,
+            dense,
+            pair_gcd,
+            prefix_gcd,
+            expected,
+        ] = polynomials;
+
+        assert_eq!(sparse_left.gcd(&sparse_right), pair_gcd);
+        assert_eq!(pair_gcd.gcd(&next_sparse), prefix_gcd);
+        assert_eq!(
+            MultivariatePolynomial::gcd_multiple(vec![
+                dense,
+                next_sparse,
+                sparse_left,
+                sparse_right
+            ]),
+            expected
+        );
+    }
+
+    #[test]
+    fn integer_gcd_multiple_rejects_an_accidental_sparse_pair_factor() {
+        let mut polynomials = [
+            parse!("6*(x+1)*(y+1)").to_polynomial::<_, u8>(&Z, None),
+            parse!("10*(x+1)*(y+1)").to_polynomial::<_, u8>(&Z, None),
+            parse!("15*(x+1)*(1+z+z^2+z^3+z^4+z^5+z^6+z^7+z^8+z^9)")
+                .to_polynomial::<_, u8>(&Z, None),
+            parse!("x+1").to_polynomial::<_, u8>(&Z, None),
+            parse!("2*(x+1)*(y+1)").to_polynomial::<_, u8>(&Z, None),
+        ];
+        MultivariatePolynomial::unify_variables_list(&mut polynomials);
+        let [sparse_left, sparse_right, dense, expected, accidental] = polynomials;
+
+        let mut supports = [sparse_left.nterms(), sparse_right.nterms(), dense.nterms()];
+        supports.sort_unstable_by(|left, right| right.cmp(left));
+        assert_eq!(supports, [20, 4, 4]);
+        assert!(supports[1].saturating_mul(4) <= supports[0]);
+        assert_eq!(sparse_left.gcd(&sparse_right), accidental);
+
+        let accidental_content = accidental.content();
+        let primitive_accidental = accidental.div_coeff(&accidental_content);
+        assert!(dense.try_div(&primitive_accidental).is_none());
+        assert_eq!(
+            MultivariatePolynomial::gcd_multiple(vec![dense, sparse_left, sparse_right]),
+            expected
+        );
+    }
+
+    #[test]
+    fn integer_gcd_multiple_preserves_an_untouched_variable_layout() {
+        let sparse_left = parse!("x+1").to_polynomial::<_, u8>(&Z, None);
+        let sparse_right = parse!("x+2").to_polynomial::<_, u8>(&Z, None);
+        let dense = parse!("1+z+z^2+z^3+z^4+z^5+z^6+z^7+z^8+z^9").to_polynomial::<_, u8>(&Z, None);
+        let expected = sparse_left.gcd(&dense).gcd(&sparse_right);
+
+        assert!(sparse_left.gcd(&sparse_right).is_one());
+        assert_eq!([dense.nterms(), sparse_left.nterms()], [10, 2]);
+        assert!(sparse_left.nterms().saturating_mul(4) <= dense.nterms());
+
+        let actual = MultivariatePolynomial::gcd_multiple(vec![dense, sparse_left, sparse_right]);
+        assert!(actual.is_one());
+        assert_eq!(actual.variables(), expected.variables());
+        assert_eq!(actual, expected);
     }
 
     #[test]
