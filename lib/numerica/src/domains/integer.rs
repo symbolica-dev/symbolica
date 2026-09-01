@@ -3947,7 +3947,7 @@ impl SampleableRing for MultiPrecisionIntegerRing {
         rng: &mut R,
         policy: &Self::SamplingPolicy,
     ) -> Self::Element {
-        SampleableRing::sample(&Z, rng, policy).to_multi_prec()
+        Z.sample(rng, policy).to_multi_prec()
     }
 }
 

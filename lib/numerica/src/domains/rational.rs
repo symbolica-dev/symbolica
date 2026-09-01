@@ -587,7 +587,7 @@ where
         policy: &Self::SamplingPolicy,
     ) -> Self::Element {
         Fraction {
-            numerator: SampleableRing::sample(&self.ring, rng, policy),
+            numerator: self.ring.sample(rng, policy),
             denominator: self.ring.one(),
         }
     }

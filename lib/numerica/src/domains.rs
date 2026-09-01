@@ -163,11 +163,6 @@ pub trait Ring:
     fn one(&self) -> Self::Element;
     /// Return the nth element by computing `n * 1`.
     fn nth(&self, n: Integer) -> Self::Element;
-    /// Compatibility bridge for callers that still use integer-range sampling.
-    #[deprecated(note = "use SampleableRing::sample or Ring::sample_small_integer")]
-    fn sample(&self, rng: &mut impl RngCore, range: (i64, i64)) -> Self::Element {
-        self.sample_small_integer(rng, range.0..=range.1)
-    }
     /// Uniformly sample a small integer from an inclusive range and embed it in this ring.
     ///
     /// # Panics
@@ -193,7 +188,7 @@ pub trait Ring:
         rng: &mut R,
         range: RangeInclusive<Integer>,
     ) -> Self::Element {
-        self.nth(SampleableRing::sample(&Z, rng, &range))
+        self.nth(Z.sample(rng, &range))
     }
     /// Return `b` raised to the power of `e`.
     fn pow(&self, b: &Self::Element, e: u64) -> Self::Element;
