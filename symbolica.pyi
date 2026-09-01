@@ -9446,8 +9446,8 @@ class FunctionDefinition:
         function: Expression,
         arguments: Sequence[Expression],
         body: Expression,
-        inlining: Literal["always", "never", "auto"] = "always",
-    ) -> FunctionDefinition:
+        inlining: Literal["always", "never", "auto"] = "auto",
+    ) -> Self:
         """
         Define a function for an evaluator. The function may either
         be a symbol (e.g. `f`) or a function call, where each argument is considered a tag.

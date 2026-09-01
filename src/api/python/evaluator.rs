@@ -3,11 +3,7 @@ use crate::evaluate::{FunctionRegistrationOptions, InliningPolicy};
 
 /// A function definition and its evaluator registration settings.
 #[cfg_attr(feature = "python_stubgen", gen_stub_pyclass)]
-#[pyclass(
-    from_py_object,
-    name = "FunctionDefinition",
-    module = "symbolica.core"
-)]
+#[pyclass(from_py_object, name = "FunctionDefinition", module = "symbolica.core")]
 #[derive(Clone)]
 pub struct PythonFunctionDefinition {
     function: PolyVariable,
@@ -27,9 +23,7 @@ impl PythonFunctionDefinition {
         let arguments = arguments
             .into_iter()
             .map(|argument| match argument {
-                PolyVariable::Symbol(symbol) => {
-                    Ok(Indeterminate::Symbol(symbol, symbol.into()))
-                }
+                PolyVariable::Symbol(symbol) => Ok(Indeterminate::Symbol(symbol, symbol.into())),
                 PolyVariable::Function(symbol, function) => {
                     Ok(Indeterminate::Function(symbol, function))
                 }
@@ -50,9 +44,8 @@ impl PythonFunctionDefinition {
                     .iter()
                     .map(|tag| tag.to_owned())
                     .collect();
-                function_map.add_tagged_function_with_options(
-                    symbol, tags, arguments, body, options,
-                )
+                function_map
+                    .add_tagged_function_with_options(symbol, tags, arguments, body, options)
             }
             _ => {
                 return Err(exceptions::PyValueError::new_err(format!(
@@ -70,10 +63,9 @@ impl PythonFunctionDefinition {
 impl PythonFunctionDefinition {
     /// Define a function for an evaluator.
     ///
-    /// `inlining` can be `"always"`, `"never"`, or `"auto"`. The `"auto"` policy currently
-    /// behaves like `"always"`.
+    /// `inlining` can be `"always"`, `"never"`, or `"auto"`.
     #[new]
-    #[pyo3(signature = (function, arguments, body, inlining = "always"))]
+    #[pyo3(signature = (function, arguments, body, inlining = "auto"))]
     fn new(
         function: PolyVariable,
         arguments: Vec<PolyVariable>,
@@ -156,11 +148,7 @@ pub struct PythonEvaluatorInstructions {
 
 /// A non-inlined function evaluator referenced by an instruction stream.
 #[cfg_attr(feature = "python_stubgen", gen_stub_pyclass)]
-#[pyclass(
-    from_py_object,
-    name = "EvaluatorFunction",
-    module = "symbolica.core"
-)]
+#[pyclass(from_py_object, name = "EvaluatorFunction", module = "symbolica.core")]
 #[derive(Clone)]
 pub struct PythonEvaluatorFunction {
     function: Symbol,
