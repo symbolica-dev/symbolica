@@ -50,6 +50,22 @@ def set_namespace(namespace: str) -> None:
         The namespace to set for subsequently created symbols.
     """
 
+def register_library_unlock(token: str) -> None:
+    """
+    Register a signed library unlock for the calling Python package.
+
+    Once registered, a Symbolica operation is unlocked whenever its active Python call stack
+    contains a frame belonging to the signed package. This includes package-owned thread workers
+    and synchronous callbacks invoked by the package. Spawned Python processes register again when
+    they import the package. The token's license identifier is checked asynchronously for
+    revocation once per process.
+
+    Parameters
+    ----------
+    token: str
+        A signed Symbolica library unlock token issued for the calling Python package.
+    """
+
 def get_version() -> str:
     """
     Get the current Symbolica version.

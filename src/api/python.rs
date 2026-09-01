@@ -8,7 +8,10 @@ use std::{
     hash::{Hash, Hasher},
     io::{BufReader, BufWriter},
     ops::{Deref, Neg},
-    sync::{Arc, Mutex},
+    sync::{
+        Arc, LazyLock, Mutex, RwLock,
+        atomic::{AtomicU32, Ordering::Relaxed},
+    },
 };
 
 use ahash::{HashMap, HashSet};
@@ -21,6 +24,7 @@ use pyo3::{
     Borrowed, Bound, FromPyObject, IntoPyObject, IntoPyObjectExt, Py, PyAny, PyErr, PyRef,
     PyResult, PyTypeInfo, Python,
     exceptions::{self, PyIndexError},
+    intern,
     pybacked::PyBackedStr,
     pyclass::CompareOp,
     pyfunction, pymethods,
@@ -101,13 +105,16 @@ use crate::{
         AtomPrinter, ColorMode, PrintMode, PrintOptions, PrintState, PrintUserData,
         PrintUserDataKey,
     },
+    bypass_license_check_internal,
     solve::{Inequality, Solution, SolutionCondition, SolutionValue, SolveDomain},
     state::{RecycledAtom, State, Workspace},
     streaming::{TermStreamer, TermStreamerConfig},
     tensors::matrix::Matrix,
     transcendental::TranscendentalFunctions,
     transformer::{StatsOptions, Transformer, TransformerError, TransformerState},
-    try_parse, warn,
+    try_parse,
+    unlock::UnlockClaims,
+    warn,
 };
 
 #[cfg(feature = "native_code_generation")]
@@ -873,6 +880,11 @@ impl PythonFormattedOutput {
 pub fn create_symbolica_module<'a, 'b>(
     m: &'b Bound<'a, PyModule>,
 ) -> PyResult<&'b Bound<'a, PyModule>> {
+    // Registering the Python API initializes some built-in Symbolica objects. Defer the first real
+    // license check until user code invokes an operation, so a library can register its unlock
+    // after the extension has been imported.
+    let _license_guard = bypass_license_check_internal();
+
     m.add_class::<PythonFormattedOutput>()?;
     m.add_class::<PythonSymbol>()?;
     m.add_class::<PythonExpression>()?;
@@ -944,6 +956,7 @@ pub fn create_symbolica_module<'a, 'b>(
     m.add_function(wrap_pyfunction!(use_custom_logger, m)?)?;
     m.add_function(wrap_pyfunction!(get_namespace, m)?)?;
     m.add_function(wrap_pyfunction!(set_namespace, m)?)?;
+    m.add_function(wrap_pyfunction!(register_library_unlock, m)?)?;
 
     m.add("__version__", env!("CARGO_PKG_VERSION"))?;
 
@@ -1158,6 +1171,217 @@ pub fn get_namespace(py: Python) -> PyResult<&'static str> {
             Ok(None) => "python",
         },
     )
+}
+
+struct RegisteredLibraryUnlock {
+    claims: UnlockClaims,
+    module_globals: Vec<Py<PyDict>>,
+    checked_pid: AtomicU32,
+}
+
+impl RegisteredLibraryUnlock {
+    fn ensure_license_checked(&self) {
+        let pid = std::process::id();
+        if self.checked_pid.swap(pid, Relaxed) != pid {
+            crate::unlock::start_license_check(&self.claims);
+        }
+    }
+}
+
+static REGISTERED_LIBRARY_UNLOCKS: LazyLock<RwLock<Vec<RegisteredLibraryUnlock>>> =
+    LazyLock::new(|| RwLock::new(Vec::new()));
+
+fn is_loaded_module_globals(
+    py: Python,
+    module_name: &str,
+    globals: &Bound<'_, PyDict>,
+) -> PyResult<bool> {
+    let modules = PyModule::import(py, "sys")?
+        .getattr("modules")?
+        .cast_into::<PyDict>()?;
+    let Some(module) = modules.get_item(module_name)? else {
+        return Ok(false);
+    };
+    Ok(module.getattr("__dict__")?.is(globals))
+}
+
+fn register_library_unlock_module(
+    claims: UnlockClaims,
+    globals: &Bound<'_, PyDict>,
+) -> PyResult<()> {
+    let mut packages = REGISTERED_LIBRARY_UNLOCKS.write().unwrap();
+    if let Some(registered) = packages
+        .iter_mut()
+        .find(|registered| registered.claims.package == claims.package)
+    {
+        if registered.claims != claims {
+            return Err(exceptions::PyPermissionError::new_err(format!(
+                "Conflicting Symbolica library unlock token registered for package '{}'",
+                claims.package
+            )));
+        }
+        if !registered
+            .module_globals
+            .iter()
+            .any(|registered_globals| registered_globals.as_ptr() == globals.as_ptr())
+        {
+            registered.module_globals.push(globals.clone().unbind());
+        }
+    } else {
+        packages.push(RegisteredLibraryUnlock {
+            claims,
+            module_globals: vec![globals.clone().unbind()],
+            checked_pid: AtomicU32::new(std::process::id()),
+        });
+    }
+    Ok(())
+}
+
+fn is_registered_module_globals(py: Python, globals: &Bound<'_, PyDict>) -> PyResult<bool> {
+    {
+        let packages = REGISTERED_LIBRARY_UNLOCKS.read().unwrap();
+        if let Some(registered) = packages.iter().find(|registered| {
+            registered
+                .module_globals
+                .iter()
+                .any(|registered_globals| registered_globals.as_ptr() == globals.as_ptr())
+        }) {
+            registered.ensure_license_checked();
+            return Ok(true);
+        }
+    }
+
+    let Some(module_name) = globals.get_item(intern!(py, "__name__"))? else {
+        return Ok(false);
+    };
+    let module_name = module_name.extract::<PyBackedStr>()?;
+    let module_name_str: &str = &module_name;
+    let matching_package = {
+        let packages = REGISTERED_LIBRARY_UNLOCKS.read().unwrap();
+        packages.iter().position(|registered| {
+            module_name_str == registered.claims.package
+                || module_name_str
+                    .strip_prefix(&registered.claims.package)
+                    .is_some_and(|suffix| suffix.starts_with('.'))
+        })
+    };
+    let Some(matching_package) = matching_package else {
+        return Ok(false);
+    };
+
+    // Do not trust a frame's mutable `__name__` alone. Require its globals to be the dictionary of
+    // the correspondingly named loaded module before caching the pointer-identity fast path.
+    if !is_loaded_module_globals(py, module_name_str, globals)? {
+        return Ok(false);
+    }
+
+    let mut packages = REGISTERED_LIBRARY_UNLOCKS.write().unwrap();
+    let Some(registered) = packages.get_mut(matching_package) else {
+        return Ok(false);
+    };
+    registered.ensure_license_checked();
+    if !registered
+        .module_globals
+        .iter()
+        .any(|registered_globals| registered_globals.as_ptr() == globals.as_ptr())
+    {
+        registered.module_globals.push(globals.clone().unbind());
+    }
+    Ok(true)
+}
+
+fn has_library_unlock_frame_attached(py: Python) -> PyResult<bool> {
+    let frame = unsafe { pyo3::ffi::PyEval_GetFrame() };
+    if frame.is_null() {
+        return Ok(false);
+    }
+
+    let mut frame = unsafe {
+        Bound::<PyAny>::from_borrowed_ptr(py, frame.cast())
+            .clone()
+            .unbind()
+    };
+    loop {
+        let frame_bound = frame.bind(py);
+        let globals = frame_bound
+            .getattr(intern!(py, "f_globals"))?
+            .cast_into::<PyDict>()?;
+        if is_registered_module_globals(py, &globals)? {
+            return Ok(true);
+        }
+
+        let back = frame_bound.getattr(intern!(py, "f_back"))?;
+        if back.is_none() {
+            return Ok(false);
+        }
+        frame = back.unbind();
+    }
+}
+
+/// Return whether the current Python call stack contains a library unlock frame.
+pub(crate) fn has_library_unlock_frame() -> bool {
+    if REGISTERED_LIBRARY_UNLOCKS.read().unwrap().is_empty() {
+        return false;
+    }
+    Python::try_attach(|py| has_library_unlock_frame_attached(py).unwrap_or(false)).unwrap_or(false)
+}
+
+fn validated_library_unlock_caller_globals<'py>(
+    py: Python<'py>,
+    claims: &UnlockClaims,
+) -> PyResult<Bound<'py, PyDict>> {
+    let ptr = unsafe { pyo3::ffi::PyEval_GetGlobals() };
+    if ptr.is_null() {
+        return Err(exceptions::PyRuntimeError::new_err(
+            "No active Python frame found for library unlock validation",
+        ));
+    }
+
+    let globals = unsafe { Bound::from_borrowed_ptr(py, ptr) }.cast_into::<PyDict>()?;
+    let module = globals
+        .get_item("__name__")?
+        .ok_or_else(|| exceptions::PyRuntimeError::new_err("Calling module has no __name__"))?
+        .extract::<PyBackedStr>()?;
+    let package_prefix = format!("{}.", claims.package);
+    if module.as_ref() != claims.package && !module.starts_with(&package_prefix) {
+        return Err(exceptions::PyPermissionError::new_err(format!(
+            "Library unlock token for package '{}' cannot be activated from module '{}'",
+            claims.package, module
+        )));
+    }
+    if !is_loaded_module_globals(py, &module, &globals)? {
+        return Err(exceptions::PyPermissionError::new_err(format!(
+            "Library unlock token for package '{}' cannot be activated from globals that do not belong to loaded module '{}'",
+            claims.package, module
+        )));
+    }
+
+    Ok(globals)
+}
+
+/// Register a signed library unlock for the calling Python package.
+///
+/// Once registered, a Symbolica operation is unlocked whenever its active Python call stack
+/// contains a frame belonging to the signed package. This includes package-owned thread workers
+/// and synchronous callbacks invoked by the package. Spawned Python processes register again when
+/// they import the package. The token's license identifier is checked asynchronously for
+/// revocation once per process.
+///
+/// Parameters
+/// ----------
+/// token: str
+///     A signed Symbolica library unlock token issued for the calling Python package.
+#[cfg_attr(
+    feature = "python_stubgen",
+    gen_stub_pyfunction(module = "symbolica.core")
+)]
+#[pyfunction]
+pub fn register_library_unlock(py: Python, token: &str) -> PyResult<()> {
+    let claims = crate::unlock::verify_token(token).map_err(exceptions::PyValueError::new_err)?;
+    let globals = validated_library_unlock_caller_globals(py, &claims)?;
+    register_library_unlock_module(claims.clone(), &globals)?;
+    crate::unlock::start_license_check(&claims);
+    Ok(())
 }
 
 /// Symbolica is a blazing fast computer algebra system.

@@ -38,16 +38,17 @@
 #![cfg_attr(docsrs, feature(doc_cfg))]
 
 use std::{
+    cell::{Cell, RefCell},
     collections::HashMap,
     env,
     sync::atomic::{AtomicBool, Ordering::Relaxed},
 };
 #[cfg(not(target_arch = "wasm32"))]
 use std::{
+    fs::File,
     io::{Read, Write},
-    net::{TcpListener, TcpStream, ToSocketAddrs},
+    net::{TcpStream, ToSocketAddrs},
     process::abort,
-    thread::ThreadId,
     time::{Duration, SystemTime},
 };
 
@@ -76,6 +77,7 @@ pub mod streaming;
 pub mod tensors;
 pub mod transcendental;
 pub mod transformer;
+pub mod unlock;
 pub mod utils;
 
 /// Common imports for working with Symbolica.
@@ -292,6 +294,43 @@ static LICENSE_KEY: OnceCell<String> = OnceCell::new();
 static LICENSE_MANAGER: OnceCell<LicenseManager> = OnceCell::new();
 static LICENSED: AtomicBool = LicenseManager::init();
 
+std::thread_local! {
+    static INTERNAL_LICENSE_BYPASS_DEPTH: Cell<usize> = const { Cell::new(0) };
+}
+
+#[allow(dead_code)]
+pub(crate) struct InternalLicenseBypassGuard;
+
+impl InternalLicenseBypassGuard {
+    #[allow(dead_code)]
+    pub(crate) fn new() -> Self {
+        INTERNAL_LICENSE_BYPASS_DEPTH.with(|depth| {
+            depth.set(
+                depth
+                    .get()
+                    .checked_add(1)
+                    .expect("license bypass scope nesting overflow"),
+            );
+        });
+        Self
+    }
+}
+
+impl Drop for InternalLicenseBypassGuard {
+    fn drop(&mut self) {
+        INTERNAL_LICENSE_BYPASS_DEPTH.with(|depth| {
+            let current = depth.get();
+            debug_assert!(current > 0, "unbalanced license bypass scope");
+            depth.set(current.saturating_sub(1));
+        });
+    }
+}
+
+#[allow(dead_code)]
+pub(crate) fn bypass_license_check_internal() -> InternalLicenseBypassGuard {
+    InternalLicenseBypassGuard::new()
+}
+
 /// Global settings for Symbolica.
 pub struct GlobalSettings {
     /// Set whether a default tracing subscriber is initialized upon the first call to a logging macro.
@@ -373,15 +412,18 @@ macro_rules! info {
 /// Manage the license of the Symbolica instance.
 #[allow(dead_code)]
 pub struct LicenseManager {
-    #[cfg(not(target_arch = "wasm32"))]
-    lock: Option<TcpListener>,
-    #[cfg(not(target_arch = "wasm32"))]
-    core_limit: Option<usize>,
-    #[cfg(not(target_arch = "wasm32"))]
-    pid: u32,
-    #[cfg(not(target_arch = "wasm32"))]
-    thread_id: ThreadId,
     has_license: bool,
+}
+
+#[cfg(not(target_arch = "wasm32"))]
+struct RestrictedThreadPermit {
+    pid: u32,
+    _lock: File,
+}
+
+#[cfg(not(target_arch = "wasm32"))]
+std::thread_local! {
+    static RESTRICTED_THREAD_PERMIT: RefCell<Option<RestrictedThreadPermit>> = const { RefCell::new(None) };
 }
 
 /// Runtime capabilities that depend on the current target and enabled features.
@@ -400,9 +442,9 @@ pub struct ExecutionCapabilities {
 }
 
 #[cfg(not(target_arch = "wasm32"))]
-const MULTIPLE_INSTANCE_WARNING: &str = "┌───────────────────────────────────────────────────────────────────────────────────────────────────────────┐
-│ Cannot start new unlicensed Symbolica instance since there is already another one running on the machine. │
-└───────────────────────────────────────────────────────────────────────────────────────────────────────────┘"
+const RESTRICTED_THREAD_WARNING: &str = "┌──────────────────────────────────────────────────────────────────────────────────────────────────┐
+│ Cannot start another restricted Symbolica thread while this user's thread allowance is in use. │
+└──────────────────────────────────────────────────────────────────────────────────────────────────┘"
 ;
 
 #[cfg(not(target_arch = "wasm32"))]
@@ -472,7 +514,38 @@ macro_rules! activate_oem_license {
     }};
 }
 
+/// Verify and register a signed library unlock token for the calling Rust crate.
+///
+/// The token's package claim must match `CARGO_CRATE_NAME`. Store the returned
+/// [`unlock::LibraryUnlock`] and enter a guard around each library operation.
+#[macro_export]
+macro_rules! register_library_unlock {
+    ($token:expr) => {{ $crate::unlock::LibraryUnlock::for_crate($token, env!("CARGO_CRATE_NAME")) }};
+}
+
 impl LicenseManager {
+    #[inline]
+    fn is_library_unlocked() -> bool {
+        if crate::unlock::current_thread_has_guard() {
+            return true;
+        }
+
+        #[cfg(any(feature = "python_api", feature = "python_export"))]
+        {
+            if crate::api::python::has_library_unlock_frame() {
+                return true;
+            }
+        }
+
+        false
+    }
+
+    #[inline]
+    fn is_check_bypassed() -> bool {
+        INTERNAL_LICENSE_BYPASS_DEPTH.with(|depth| depth.get() != 0)
+            || Self::is_library_unlocked()
+    }
+
     /// Create a new license manager.
     #[cfg(target_arch = "wasm32")]
     pub(crate) fn new() -> LicenseManager {
@@ -483,18 +556,9 @@ impl LicenseManager {
     /// Create a new license manager.
     #[cfg(not(target_arch = "wasm32"))]
     pub(crate) fn new() -> LicenseManager {
-        let pid = std::process::id();
-        let thread_id = std::thread::current().id();
-
         match Self::check_license_key() {
             Ok(()) => {
-                return LicenseManager {
-                    lock: None,
-                    core_limit: None,
-                    pid,
-                    thread_id,
-                    has_license: true,
-                };
+                return LicenseManager { has_license: true };
             }
             Err(e) => {
                 if !e.contains("missing") {
@@ -509,7 +573,7 @@ impl LicenseManager {
 │ You are running a restricted Symbolica instance.       │
 │                                                        │
 │ This mode is only permitted for non-commercial use and │
-│ is limited to one instance and core per machine.       │
+│ is limited to one Symbolica thread per user.           │
 │                                                        │
 │ {} can easily acquire a {} license key        │
 │ that unlocks all cores and removes this banner:        │
@@ -529,52 +593,39 @@ impl LicenseManager {
             );
         }
 
-        let port = env::var("SYMBOLICA_PORT").unwrap_or_else(|_| "12011".to_owned());
+        let _ = rayon::ThreadPoolBuilder::new()
+            .num_threads(1)
+            .build_global();
 
-        match TcpListener::bind(format!("127.0.0.1:{port}")) {
-            Ok(o) => {
-                rayon::ThreadPoolBuilder::new()
-                    .num_threads(1)
-                    .build_global()
-                    .unwrap();
+        LicenseManager { has_license: false }
+    }
 
-                drop(o);
+    #[cfg(not(target_arch = "wasm32"))]
+    fn acquire_restricted_thread_permit() {
+        let pid = std::process::id();
+        RESTRICTED_THREAD_PERMIT.with(|permit| {
+            let mut permit = permit.borrow_mut();
+            if permit.as_ref().is_some_and(|permit| permit.pid == pid) {
+                return;
+            }
 
-                std::thread::spawn(move || {
-                    loop {
-                        let new_port =
-                            env::var("SYMBOLICA_PORT").unwrap_or_else(|_| "12011".to_owned());
-
-                        if port != new_port {
-                            println!("{MULTIPLE_INSTANCE_WARNING}");
-                            abort();
-                        }
-
-                        match TcpListener::bind(format!("127.0.0.1:{port}")) {
-                            Ok(_) => {
-                                std::thread::sleep(Duration::from_secs(1));
-                            }
-                            Err(_) => {
-                                println!("{MULTIPLE_INSTANCE_WARNING}");
-                                abort();
-                            }
-                        }
-                    }
-                });
-
-                LicenseManager {
-                    lock: None,
-                    core_limit: Some(1),
-                    pid,
-                    thread_id,
-                    has_license: false,
+            // A forked child must not share its parent's inherited lock description.
+            *permit = None;
+            match crate::unlock::try_acquire_lock("symbolica-restricted-thread-0.lock") {
+                Ok(Some(lock)) => {
+                    *permit = Some(RestrictedThreadPermit { pid, _lock: lock });
+                }
+                Ok(None) => {
+                    println!("{RESTRICTED_THREAD_WARNING}");
+                    abort();
+                }
+                Err(error) => {
+                    eprintln!("Could not acquire Symbolica thread permit: {error}");
+                    println!("{RESTRICTED_THREAD_WARNING}");
+                    abort();
                 }
             }
-            Err(_) => {
-                println!("{MULTIPLE_INSTANCE_WARNING}");
-                abort();
-            }
-        }
+        });
     }
 
     const fn init() -> AtomicBool {
@@ -742,6 +793,17 @@ Error: {status}",
         }
     }
 
+    pub(crate) fn check_library_unlock_registration(key: String) {
+        std::thread::spawn(|| {
+            if let Err(error) = Self::check_registration(key)
+                && error.contains("Unknown license")
+            {
+                println!("{error}");
+                abort();
+            }
+        });
+    }
+
     #[inline(always)]
     #[cfg(target_arch = "wasm32")]
     fn check() {
@@ -751,7 +813,7 @@ Error: {status}",
     #[inline(always)]
     #[cfg(not(target_arch = "wasm32"))]
     fn check() {
-        if LICENSED.load(Relaxed) {
+        if LICENSED.load(Relaxed) || Self::is_check_bypassed() {
             return;
         }
 
@@ -766,13 +828,7 @@ Error: {status}",
             return;
         }
 
-        let pid = std::process::id();
-        let thread_id = std::thread::current().id();
-
-        if manager.pid != pid || manager.thread_id != thread_id {
-            println!("{MULTIPLE_INSTANCE_WARNING}");
-            abort();
-        }
+        Self::acquire_restricted_thread_permit();
     }
 
     /// Set the license key. Can only be called before calling any other Symbolica functions.
@@ -822,15 +878,7 @@ Error: {status}",
 
         if key1 == format!("SYMBOLICA_OEM_KEY_{h:x}") {
             LICENSED.store(true, Relaxed);
-
-            std::thread::spawn(|| {
-                if let Err(e) = Self::check_registration(oom_key.to_owned())
-                    && e.contains("Unknown license")
-                {
-                    println!("{e}");
-                    abort();
-                }
-            });
+            Self::check_library_unlock_registration(oom_key.to_owned());
 
             Ok(())
         } else {
@@ -845,10 +893,10 @@ Error: {status}",
         true
     }
 
-    /// Returns `true` iff this instance has a valid license key set.
+    /// Returns `true` iff this instance has a valid license key or active library unlock.
     #[cfg(not(target_arch = "wasm32"))]
     pub fn is_licensed() -> bool {
-        LICENSED.load(Relaxed) || Self::check_license_key().is_ok()
+        LICENSED.load(Relaxed) || Self::is_library_unlocked() || Self::check_license_key().is_ok()
     }
 
     /// Clamp a requested worker-thread count to what the current target and license allow.
@@ -860,6 +908,10 @@ Error: {status}",
 
         #[cfg(not(target_arch = "wasm32"))]
         {
+            if Self::is_library_unlocked() {
+                return requested;
+            }
+
             if Self::is_licensed() {
                 requested
             } else {
@@ -968,5 +1020,36 @@ Error: {status}",
         let mut m: HashMap<String, JsonValue> = HashMap::default();
         m.insert("email".to_owned(), email.to_owned().into());
         Self::request_license_email(m)
+    }
+}
+
+#[cfg(test)]
+mod license_bypass_tests {
+    use super::*;
+
+    #[test]
+    fn internal_license_bypass_guard_is_nested_and_thread_local() {
+        assert!(!LicenseManager::is_check_bypassed());
+
+        let outer = bypass_license_check_internal();
+        assert!(LicenseManager::is_check_bypassed());
+        assert!(
+            crate::parser::Token::parse("x + 1", crate::parser::ParseSettings::default()).is_ok()
+        );
+
+        {
+            let _inner = InternalLicenseBypassGuard::new();
+            assert!(LicenseManager::is_check_bypassed());
+        }
+
+        assert!(LicenseManager::is_check_bypassed());
+        assert!(
+            std::thread::spawn(|| !LicenseManager::is_check_bypassed())
+                .join()
+                .unwrap()
+        );
+
+        drop(outer);
+        assert!(!LicenseManager::is_check_bypassed());
     }
 }
