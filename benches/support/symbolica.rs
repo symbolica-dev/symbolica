@@ -308,13 +308,20 @@ pub fn factorization_factors(case: FactorizationCase) -> [IntegerPolynomial; 2] 
     let variables: Arc<Vec<PolyVariable>> = Arc::new(
         case.variables
             .iter()
-            .map(|name| PolyVariable::Symbol(symbol!(name)))
+            .map(|name| PolyVariable::Symbol(symbol!(format!("{BENCHMARK_NAMESPACE}::{name}"))))
             .collect(),
     );
-    [
+    let factors = [
         powered_polynomial_with_variable_map(&Z, case.left, Some(variables.clone())),
         powered_polynomial_with_variable_map(&Z, case.right, Some(variables)),
-    ]
+    ];
+    assert!(
+        factors
+            .iter()
+            .all(|factor| factor.nvars() == case.variables.len()),
+        "generated factor inputs must use exactly their declared variables"
+    );
+    factors
 }
 
 /// Verifies that a generated factorization expands to its original polynomial.
@@ -545,10 +552,13 @@ where
 pub fn gcd_case_config() -> GcdCaseConfig {
     static CONFIG: OnceLock<GcdCaseConfig> = OnceLock::new();
     *CONFIG.get_or_init(|| {
+        let degree = parse_env("GCD_BENCH_DEGREE", 7);
         let config = GcdCaseConfig {
             kind: parse_env("GCD_BENCH_CASE", GcdCaseKind::Dense),
             variable_count: parse_env("GCD_BENCH_NVARS", 7),
-            degree: parse_env("GCD_BENCH_DEGREE", 7),
+            left_cofactor_degree: degree,
+            right_cofactor_degree: degree,
+            common_factor_degree: degree,
             gap: parse_env("GCD_BENCH_GAP", 10),
             coefficient_bits: parse_env("GCD_BENCH_COEFFICIENT_BITS", 30),
         };
