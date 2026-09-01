@@ -5,6 +5,7 @@ pub mod gcd;
 pub mod groebner;
 pub mod polynomial;
 mod resultant;
+pub use resultant::PolynomialResultant;
 pub mod series;
 pub mod univariate;
 

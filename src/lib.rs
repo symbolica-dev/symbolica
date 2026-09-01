@@ -158,7 +158,7 @@ pub mod prelude {
 
     pub use crate::poly::{
         CoefficientToExpression, Exponent, GrevLexOrder, IntoVariableMap, LexOrder, MonomialOrder,
-        PolyVariable, PositiveExponent,
+        PolyVariable, PolynomialResultant, PositiveExponent,
         factor::Factorize,
         gcd::PolynomialGCD,
         groebner::{
