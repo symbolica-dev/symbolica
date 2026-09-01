@@ -1,15 +1,15 @@
 # Polynomial performance continuation handoff
 
 This is the live continuation record for the single-core Symbolica/FLINT polynomial-performance
-work. It was refreshed on 2026-08-31 after the `v26` bounded automatic bivariate Hu-Monagan GCD
-round. The
-current 125-row fixed-fixture non-resultant inventory has 124 Symbolica wins and one loss with a
+work. It was refreshed on 2026-08-31 after the `v27` dense-GCD reconstruction screen and
+pre-separable factor-tail round. The
+current 125-row fixed-fixture non-resultant inventory has 123 Symbolica wins and two losses with a
 `0.636796` median. Its worst row is generated dense bivariate GCD at `1.022443`. Dense
 degree-48/64/80 GCD measure
-`0.904854/0.711750/0.993433`. Dense one-variable degree-63/64/65 factorization measures
+`0.904854/0.674185/0.993433`. Dense one-variable degree-63/64/65 factorization measures
 `0.910657/0.700836/0.945536`, and the stable matching products measure
 `0.814256/0.815238/0.841130`. The mixed current 3,200-problem PolyBench distribution has a
-`0.699823` paired median with 2,441 Symbolica wins. Rows are measured across accepted source
+`0.645714` paired median, `0.251555` total S/F, and 2,503 Symbolica wins. Rows are measured across accepted source
 snapshots, with each replacement and its source-matched evidence documented below.
 Keep this file current whenever an experiment is accepted, rejected, or left partly complete. The
 purpose is that another agent can resume without reconstructing decisions from chat history or
@@ -17,8 +17,8 @@ transient binary names.
 
 The complete current Symbolica/FLINT scoreboard is in
 [CURRENT_STATUS.md](CURRENT_STATUS.md), with the latest immutable snapshot in
-[CURRENT_STATUS_v26.md](CURRENT_STATUS_v26.md). Its primary statistics contain 125 non-resultant
-comparisons: 124 favor Symbolica and one favors FLINT. The six Ducos, six Brown, and six CRT
+[CURRENT_STATUS_v27.md](CURRENT_STATUS_v27.md). Its primary statistics contain 125 non-resultant
+comparisons: 123 favor Symbolica and two favor FLINT. The six Ducos, six Brown, and six CRT
 measurements are retained only in a compact appendix note and do not affect primary ranks or
 summary statistics. After every accepted optimization, update the live file and create the next
 numbered snapshot with an opening paragraph that describes the changes from its predecessor.
@@ -4778,25 +4778,151 @@ a narrow trait, not the base ring interface.
 Comments should say what a function computes, its input invariants, and where it is used. Avoid
 comments that justify file organization by contrasting it with designs not present in the code.
 
+## Accepted v27 reconstruction and factor-tail screens
+
+Dense univariate modular GCD now caches the two input evaluations at one. Each reconstructed
+integer candidate is also evaluated at one before `DenseUnivariateIntegerDivisionContext` is
+created. If the candidate value is nonzero, it must divide both input values; if it is zero, both
+input values must also be zero. Passing is only necessary and always continues to complete exact
+polynomial division. The final six-process, 5,000-sample degree-64 refresh changes
+`0.711750 -> 0.674185` S/F, a 5.28% improvement; the six process ratios are
+`0.673796/0.673343/0.674751/0.674412/0.675028/0.673958`. Raw files are
+`/tmp/v27-outofline-d64-{1..6}.csv`. Degree-32/48/80 source-matched guards improved about
+1.3%/1.9%/2.5%. A direct large-integer divisibility primitive was not added because remainder
+construction was negligible in the measured profile.
+
+The former `08/0008` p90 tail was structural. Of 114 inputs entering the early quadratic route,
+51 had a true factor omitting at least one variable. Those 51 had a 5.814 paired-ratio median and
+contained all 22 cases above 7x; the 22 cases contributed 74.49% of the setup's gross positive
+excess. Disabling the early quadratic route changed representative problems #127/#64/#35/#51
+from about 53.6/12.3/44.3/54.9 ms to 2.4/2.3/1.6/2.9 ms, proving that the tail was speculative
+quadratic-discriminant work rather than multiplication noise.
+
+`EarlyFactorModularProbeContext` evaluates the three quadratic coefficient layers over
+`GF(65,519)`. It retains the highest-degree nonquadratic variable and evaluates every other
+coordinate at a deterministic nonzero value, producing a dense univariate image of `b^2-4ac`.
+The dense square test reconstructs the only possible root from its leading coefficient and then
+squares it for an exact finite-field check. If this image is not a polynomial square, the exact
+multivariate discriminant cannot be a square and the expensive integer construction is skipped.
+A square image is deliberately inconclusive and continues to a certified path.
+
+For each sufficiently expensive quadratic candidate, the same term pass can also collect every
+coefficient-layer support and cache each coefficient's finite-field reduction and evaluation.
+Nonsquare discriminant images discard that candidate and its cache; the exact content scout runs
+at most once, on the first sufficiently expensive candidate whose discriminant image is square.
+It ranks nonquadratic variables by the product of their two sparsest layer supports and checks at
+most two views. Inverse power tables transform the cached term values into each pair of univariate
+coefficient-layer images without reducing every integer again. A coprime modular pair skips that
+optional exact scout; an inconclusive modular image continues. The exact pair GCD is never accepted
+alone: it replaces the two layers, `gcd_multiple` intersects it with every remaining layer, and
+exact division certifies the split. Thus specialization collisions can only miss an early
+optimization, not change the factorization result.
+
+Admission is independent of problem identity. The early route still requires at least 256 terms,
+at most eight variables, and a degree-two active variable. The content scout is limited to two
+views and requires at least 32 estimated discriminant products per input term. A degree box with
+all coordinates at most 127 has an immediate packed-exponent proof; wider sparse boxes receive a
+layer-specific fit check before any dense probe-power table is allocated. The scout's layer table
+is itself capped at 256 entries. A one-term layer on a primitive core is an immediate no-content
+certificate. Unsupported shapes return to the established factorization path.
+
+The two-view order was audited across every former >7x case. Excluding the current quadratic
+variable finds all 12 genuine-square omitted-variable tails in at most two views; including it
+would miss #50 and roughly double guard work on #176. Earlier schedules with four scalar
+discriminant evaluations and separately scanned content views were rejected: they repeated full
+polynomial scans and left too much work on exact-square inputs. Fusing support collection with the
+univariate image, and reusing cached term images through inverse powers, removes about fifteen
+full scans on an eight-variable input.
+
+The old direct guard cost about 0.20 ms per #176 call. Within that guard, redundant per-variable
+degree/support scans accounted for 42.87%, discriminant specialization for 33.99%, pair-image
+construction for 12.36%, and common setup for 7.76%. No guard LBR sample landed in an allocator or
+`memset`; allocator-family symbols were only 1.44% of the complete paired factorization and mostly
+belonged to the established exact route. The measured issue was repeated traversal, not temporary
+allocation. The profile is `/tmp/profile-v27-univariate-probe-factor176.perf.data` (SHA-256
+`a0048f6596dfc78fb02aedb702847099fcf325001483fb365177bf8e186de670`), with raw paired timing in
+`/tmp/profile-v27-univariate-probe-factor176.csv` and reports in the matching `-flat.txt`,
+`-children.txt`, and `-early-lbr.txt` files.
+
+Both optional operation-context methods are `#[inline(never)]`. This reduced the final
+`try_early_factor_split` monomorphizations from the roughly 15.5 KiB inlined candidate to about
+2.6--3.7 KiB. It also recovered the six-process #176 ratio from `1.029881` to `1.018128`.
+
+Focused source-current runs after in-process warmup give:
+
+| Problem | v26/control median range | Final v27 median | Interpretation |
+|---|---:|---:|---|
+| 08/0008 #127 | `43.8--45.6 ms` | `0.930 ms` | exact omitted-variable content split |
+| 08/0008 #51 | `48.8--52.6 ms` | `1.127 ms` | exact omitted-variable content split |
+| 08/0008 #35 | `36.1--38.5 ms` | `1.068 ms` | exact omitted-variable content split bypasses the square discriminant |
+| 08/0008 #64 | `11.8 ms` | `2.334 ms` | nonsquare univariate discriminant image |
+| 05/0007 #153 | `14.7--15.1 ms` | `0.934 ms` | nonsquare univariate discriminant image |
+
+The genuine all-variable #176 fixed fixture is the relevant guard. Six sequential 500-sample
+same-process measurements give ratios
+`1.021734/1.015987/1.017997/1.018259/1.017231/1.018267`, with median `1.018128`. This is a 3.24%
+regression from its v26 `0.986146`, so the guard is not described as neutral; the retained trade is
+the decisive distribution-tail and total-throughput gain below.
+
+All eight factor distributions were replayed on the same 210-problem seed-42 streams, retaining
+the first ten as warmups and the same FLINT 3.5.0 columns. The important changes are:
+
+| Distribution | v26 paired/p90/total | v27 paired/p90/total | v27 wins |
+|---|---:|---:|---:|
+| 08/0008 sharp nontrivial factor | `1.065408 / 7.942770 / 1.148495` | `0.993472 / 2.375570 / 0.727796` | 102/200 |
+| 05/0007 sharp trivial factor | `0.449566 / 1.093388 / 0.766674` | `0.328802 / 0.684374 / 0.285526` | 192/200 |
+| 08/0007 sharp trivial factor | `0.501118 / 1.193437 / 0.809394` | `0.319921 / 0.635930 / 0.305778` | 195/200 |
+| 05/0008 sharp nontrivial factor | `0.681384 / 2.757742 / 0.576983` | `0.695330 / 2.255196 / 0.553936` | 138/200 |
+
+The other four factor medians are `0.445366` (05/0003), `0.141331` (05/0004), `0.492436`
+(08/0003), and `0.230147` (08/0004); all their total S/F values are at most 0.50. Across eight v26
+GCD distributions and eight v27 factor distributions, the 3,200-problem paired median is
+`0.645714`, total S/F is `0.251555`, and Symbolica wins 2,503 cases. Fifteen of sixteen setup
+medians favor Symbolica. Every one of the 1,600 normalized factor multisets is byte-identical to
+the prior verified replay.
+
+The final plain-release adapter is `/tmp/polybench-symbolica-v27-outofline-scout`, SHA-256
+`51023ddcea33d93b80935e11c78069eb788756a7ee07989473c3ab26ebbafd1d`. The twelve-run `08/0008`
+per-case median file is `/tmp/v27-outofline-08-0008-case-medians-12.csv`, SHA-256
+`8f17ad0aceea5c61810a4840b990104e10e1bd74069be2076dc10a66ccdbf187`; complete other-factor
+replays are `/tmp/v27-outofline-{05,08}-000{3,4,7,8}-replay.out`, with `08/0008` stored as
+`/tmp/v27-outofline-08-0008-{1..12}.out`.
+
+The final full-LTO same-process binary is `/tmp/flint-comparison-v27-outofline-scout-final`,
+SHA-256 `2f4560b0e9a0db61fbd2af74c4ea994dbab570a83fe4574cbbde68eb25c11971`; its build JSON SHA-256 is
+`53adc14087bf725fbf7b5e224ebbb5610ae84095db8e66ec3f4508b6c2706351`. The #176 and degree-64
+raw files are `/tmp/v27-outofline-factor176-{1..6}.csv` and
+`/tmp/v27-outofline-d64-{1..6}.csv`. The final 48-file checksum manifest is
+`/tmp/v27-outofline-artifacts.sha256`, SHA-256
+`d5927c58e87fbdd5fba07e54c107cb76c7856b5747d76890b6d74b6e846d8c2e`.
+
+Formatting and all focused factor/GCD tests pass. A full single-threaded library run passes 563 of
+564 tests. The sole failure is the unrelated root-isolation fixture that requires the left endpoint
+`15/64`; the implementation returns `3/16` with the same `9/32` right endpoint and still isolates
+the same root. Running the suite with that fixture skipped passes every remaining test. During the
+full run an existing degree-dropping-image test also exposed that its manually supplied `[x,y,z]`
+degree vector depended on global symbol-registration order; it now derives the degree vector from
+the polynomial, and the production specialization loop remains unchanged.
+
 ## Current ordered next actions
 
-1. Attack `08/0008`, the current worst setup at `1.065408` median, `7.942770` p90, and
-   `+185.726 ms`. Prototype a one-sided modular nonsquare certificate before
-   `factor_quadratic_before_square_free` constructs `b^2-4ac`: a nonsquare value at any
-   deterministic prime/point proves the exact discriminant is not a square, while square or zero
-   remains inconclusive. Measure problems 51/127 and reducible quadratic guards.
-2. Treat `05/0001` (`1.027028`, only `+2.514 ms`) and the generated dense bivariate GCD
-   (`1.022443`) as fixed-overhead work. For the dense primary row, first test FLINT's deterministic
-   evaluation-divisibility prefilter and the near-balanced two-ended certificate generalization;
-   do not introduce a new broad backend for a 2.2% gap.
-3. Profile sharp trivial GCD tails `05/0005` problem 130 and `08/0005` problem 50 with backend,
+1. Profile sharp trivial GCD tails `05/0005` problem 130 and `08/0005` problem 50 with backend,
    prime/image, collision, rejection, and exact-certificate counters. Their medians already favor
-   Symbolica, but total S/F `2.181255/2.106076` identifies concentrated expensive failures.
-4. Audit the remaining positive-delta `05/0006` cases after the accepted selector. Its median is
+   Symbolica, but p90 `6.396855/5.177667` and total S/F `2.181255/2.106076` are now the largest
+   distribution tails. Identify a shared structural failure before changing a selector.
+2. Treat `05/0001` (`1.027028`, only `+2.514 ms`), the generated dense bivariate GCD
+   (`1.022443`), and the #176 fixed guard (`1.018128`) as fixed-overhead work. The dense univariate
+   evaluation screen is complete; do not generalize it to unrelated multivariate routes without
+   evidence.
+3. Audit the remaining positive-delta `05/0006` cases after the accepted selector. Its median is
    now `0.983951`, but total S/F is `1.043248`. Any widening must use projected support and image
    cost, retain the amortization gate, and preserve both rejected problem geometries without
    referring to their IDs.
-5. `05/0002` is complete for this round at `0.749068` median and `0.783395` total S/F with 185/200
+4. The structural `08/0008` quadratic tail is complete for this round at `0.993472` median,
+   `2.375570` p90, and `0.727796` total S/F. If revisited, profile problem 123 separately: it remains
+   about 64 ms in both v22 and v27 and is not explained by the removed omitted-variable path. Most
+   other residual high ratios are only 2--4 ms Symbolica times against sub-millisecond FLINT times.
+5. `05/0002` remains complete at `0.749068` median and `0.783395` total S/F with 185/200
    wins. If this family is revisited, remove the sparse-polynomial round trip inside known-shape
    bivariate images with a reusable dense image context; do not loosen the proven automatic gates.
 6. Keep degree-63/64/65 products as guards at their stable primary values

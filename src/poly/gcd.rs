@@ -4659,9 +4659,31 @@ struct UnivariateModularGcdContext<'a, E: PositiveExponent> {
     content_gcd: Integer,
     normalization: UnivariateGcdProjectiveNormalization,
     reconstruction_start_bits: u64,
+    input_values_at_one: [Integer; 2],
 }
 
 impl<'a, E: PositiveExponent> UnivariateModularGcdContext<'a, E> {
+    /// Evaluates every polynomial variable at one by summing the coefficients.
+    fn value_at_one(polynomial: &MultivariatePolynomial<IntegerRing, E>) -> Integer {
+        let mut value = Integer::zero();
+        for coefficient in &polynomial.coefficients {
+            value += coefficient;
+        }
+        value
+    }
+
+    /// Tests the necessary integer divisibility condition induced by evaluation at one.
+    fn passes_one_evaluation(&self, candidate: &MultivariatePolynomial<IntegerRing, E>) -> bool {
+        let candidate_value = Self::value_at_one(candidate);
+        if candidate_value.is_zero() {
+            return self.input_values_at_one.iter().all(Integer::is_zero);
+        }
+
+        self.input_values_at_one
+            .iter()
+            .all(|input_value| (input_value % &candidate_value).is_zero())
+    }
+
     /// Removes the input contents and determines when coefficient reconstruction should start.
     fn new(
         left: &'a MultivariatePolynomial<IntegerRing, E>,
@@ -4712,6 +4734,7 @@ impl<'a, E: PositiveExponent> UnivariateModularGcdContext<'a, E> {
             .coefficient()
             .significant_bits()
             .saturating_add(2);
+        let input_values_at_one = [Self::value_at_one(left), Self::value_at_one(right)];
 
         Self {
             left,
@@ -4722,6 +4745,7 @@ impl<'a, E: PositiveExponent> UnivariateModularGcdContext<'a, E> {
             content_gcd,
             normalization,
             reconstruction_start_bits,
+            input_values_at_one,
         }
     }
 
@@ -4758,6 +4782,9 @@ impl<'a, E: PositiveExponent> UnivariateModularGcdContext<'a, E> {
         MultivariatePolynomial<IntegerRing, E>,
     )> {
         let candidate = self.reconstructed_candidate(reconstruction, degree)?;
+        if !self.passes_one_evaluation(&candidate) {
+            return None;
+        }
         let exact_cofactors = match DenseUnivariateIntegerDivisionContext::new(
             &candidate,
             self.left,
@@ -9330,6 +9357,45 @@ mod tests {
         assert_eq!(actual, common_factor);
         assert_eq!(&actual * &left_result, left);
         assert_eq!(&actual * &right_result, right);
+    }
+
+    #[test]
+    fn modular_univariate_integer_gcd_screens_reconstructions_at_one() {
+        let common_factor = parse!("x+1").to_polynomial::<_, u16>(&Z, None);
+        let left_cofactor =
+            parse!("x+2").to_polynomial::<_, u16>(&Z, common_factor.variables().clone());
+        let right_cofactor =
+            parse!("x+3").to_polynomial::<_, u16>(&Z, common_factor.variables().clone());
+        let left = &common_factor * &left_cofactor;
+        let right = &common_factor * &right_cofactor;
+        let context = UnivariateModularGcdContext::new(&left, &right, 0);
+
+        assert!(context.passes_one_evaluation(&common_factor));
+        assert!(!context.passes_one_evaluation(&left_cofactor));
+        let scalar_only =
+            parse!("2*x").to_polynomial::<_, u16>(&Z, common_factor.variables().clone());
+        assert!(context.passes_one_evaluation(&scalar_only));
+        assert!(left.try_div(&scalar_only).is_none());
+        let unit_at_one =
+            parse!("x-2").to_polynomial::<_, u16>(&Z, common_factor.variables().clone());
+        assert!(context.passes_one_evaluation(&unit_at_one));
+        let zero_at_one =
+            parse!("x-1").to_polynomial::<_, u16>(&Z, common_factor.variables().clone());
+        assert!(!context.passes_one_evaluation(&zero_at_one));
+
+        let zero_input = &zero_at_one * &left_cofactor;
+        let zero_context = UnivariateModularGcdContext::new(&zero_input, &zero_input, 0);
+        assert!(zero_context.passes_one_evaluation(&zero_at_one));
+
+        let large = Integer::one() << 200usize;
+        let large_factor = parse!("x")
+            .to_polynomial::<_, u16>(&Z, common_factor.variables().clone())
+            .add_constant(large);
+        let large_left = &large_factor * &left_cofactor;
+        let large_right = &large_factor * &right_cofactor;
+        let large_context = UnivariateModularGcdContext::new(&large_left, &large_right, 0);
+        assert!(large_context.passes_one_evaluation(&large_factor));
+        assert!(!large_context.passes_one_evaluation(&left_cofactor));
     }
 
     #[test]

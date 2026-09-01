@@ -111,6 +111,16 @@ const MAX_PACKED_SPARSE_SQUARE_PAIRS: usize = 1 << 20;
 // Minimum input size for trying a certified quadratic split before the general
 // separability and square-free passes.
 const MIN_EARLY_QUADRATIC_FACTOR_TERMS: usize = 256;
+// Number of high-support coefficient views checked for a factor that omits a
+// variable before an exact quadratic discriminant is constructed.
+const EARLY_SEPARABLE_CONTENT_PAIR_PROBES: usize = 2;
+// Minimum estimated discriminant products per input term before coefficient
+// content is cheaper to scout than constructing the exact discriminant.
+const EARLY_SEPARABLE_CONTENT_MIN_PRODUCT_RATIO: usize = 32;
+// Prime used by the univariate finite-field images that screen early
+// discriminants and coefficient-layer GCDs. It is 3 modulo 4, so a square
+// root of a quadratic residue needs one exponentiation.
+const EARLY_FACTOR_PROBE_PRIME: u32 = 65_519;
 
 /// Distinct-degree blocks together with their exact number of irreducible factors.
 struct DistinctDegreeFactorization<P> {
@@ -1771,6 +1781,12 @@ std::thread_local! {
     static UNIVARIATE_IRREDUCIBILITY_CERTIFICATES: std::cell::Cell<usize> = const {
         std::cell::Cell::new(0)
     };
+    static EARLY_SEPARABLE_PAIR_PROBE_CALLS: std::cell::Cell<usize> = const {
+        std::cell::Cell::new(0)
+    };
+    static EARLY_SEPARABLE_PAIR_SPLITS: std::cell::Cell<usize> = const {
+        std::cell::Cell::new(0)
+    };
     static EXACT_HENSEL_SUBTREE_MODULUS_BITS: std::cell::RefCell<Vec<u64>> = const {
         std::cell::RefCell::new(Vec::new())
     };
@@ -1787,6 +1803,357 @@ enum IntegerFactorStart {
 enum ExactPolynomialSquareRoot<P> {
     Root(P),
     NotSquare,
+}
+
+/// An exact split found before the general separability and square-free pass.
+enum EarlyIntegerFactorSplit<P> {
+    Quadratic { variable: usize, factors: [P; 2] },
+    Separable([P; 2]),
+}
+
+/// Finite-field powers reused by the early quadratic and coefficient-content
+/// screens.
+struct EarlyFactorModularProbeContext {
+    field: Zp,
+    powers: Vec<Vec<FiniteFieldElement<u32>>>,
+    inverse_powers: Vec<Vec<FiniteFieldElement<u32>>>,
+    degrees: Vec<usize>,
+}
+
+/// Data shared by the modular discriminant and coefficient-content screens for
+/// one quadratic variable.
+struct EarlyFactorModularImage {
+    quadratic_variable: usize,
+    base_retained_variable: Option<usize>,
+    term_values: Vec<FiniteFieldElement<u32>>,
+    layer_supports: Option<Vec<Vec<usize>>>,
+}
+
+enum EarlyQuadraticDiscriminantProbe {
+    Nonsquare(EarlyFactorModularImage),
+    Square(EarlyFactorModularImage),
+}
+
+impl EarlyFactorModularProbeContext {
+    /// Cache one deterministic finite-field coordinate power table for the
+    /// input degree box.
+    fn new(degrees: &[usize]) -> Self {
+        let field = Zp::new(EARLY_FACTOR_PROBE_PRIME);
+        let (powers, inverse_powers) = degrees
+            .iter()
+            .enumerate()
+            .map(|(variable, degree)| {
+                let coordinate = 3 + (variable as u32 + 1) * (variable as u32 + 3);
+                let coordinate = field.to_element(coordinate % EARLY_FACTOR_PROBE_PRIME);
+                let inverse_coordinate = field.inv(&coordinate);
+                let mut powers = Vec::with_capacity(degree + 1);
+                let mut inverse_powers = Vec::with_capacity(degree + 1);
+                powers.push(field.one());
+                inverse_powers.push(field.one());
+                for exponent in 1..=*degree {
+                    powers.push(field.mul(&powers[exponent - 1], &coordinate));
+                    inverse_powers
+                        .push(field.mul(&inverse_powers[exponent - 1], &inverse_coordinate));
+                }
+                (powers, inverse_powers)
+            })
+            .unzip();
+        Self {
+            field,
+            powers,
+            inverse_powers,
+            degrees: degrees.to_vec(),
+        }
+    }
+
+    /// Build one finite-field specialization for a quadratic variable and
+    /// test its discriminant. The quadratic variable and one retained variable
+    /// are omitted from each cached term value, which evaluates both at one.
+    /// When requested, coefficient-layer support counts and these term values
+    /// are retained so coefficient-content probes can reuse the same integer
+    /// reductions and evaluations of every other variable.
+    #[inline(never)]
+    fn probe_quadratic_discriminant<E: PositiveExponent>(
+        &self,
+        polynomial: &MultivariatePolynomial<IntegerRing, E, LexOrder>,
+        quadratic_variable: usize,
+        collect_content_data: bool,
+    ) -> EarlyQuadraticDiscriminantProbe {
+        debug_assert_eq!(polynomial.degree(quadratic_variable).to_u32(), 2);
+
+        let retained_variable = self
+            .degrees
+            .iter()
+            .copied()
+            .enumerate()
+            .filter(|(variable, degree)| *variable != quadratic_variable && *degree > 0)
+            .max_by_key(|(variable, degree)| (*degree, Reverse(*variable)))
+            .map(|(variable, _)| variable);
+        let retained_length = retained_variable
+            .map(|variable| self.degrees[variable] + 1)
+            .unwrap_or(1);
+        let mut evaluated_layers: [Vec<FiniteFieldElement<u32>>; 3] =
+            std::array::from_fn(|_| vec![self.field.zero(); retained_length]);
+        let mut term_values = collect_content_data.then(|| Vec::with_capacity(polynomial.nterms()));
+        let mut layer_supports = collect_content_data.then(|| {
+            self.degrees
+                .iter()
+                .map(|degree| {
+                    degree
+                        .checked_add(1)
+                        .filter(|count| *degree > 0 && *count <= 256)
+                        .map_or_else(Vec::new, |count| vec![0usize; count])
+                })
+                .collect::<Vec<_>>()
+        });
+
+        for term in polynomial {
+            let layer = term.exponents[quadratic_variable].to_u32() as usize;
+            debug_assert!(layer <= 2);
+            let retained_degree = retained_variable
+                .map(|variable| term.exponents[variable].to_u32() as usize)
+                .unwrap_or(0);
+            let mut value = term.coefficient.to_finite_field(&self.field);
+            for (variable, exponent) in term.exponents.iter().enumerate() {
+                let exponent = exponent.to_u32() as usize;
+                if let Some(layer_supports) = &mut layer_supports {
+                    if !layer_supports[variable].is_empty() {
+                        layer_supports[variable][exponent] += 1;
+                    }
+                }
+                if variable == quadratic_variable
+                    || Some(variable) == retained_variable
+                    || exponent == 0
+                {
+                    continue;
+                }
+                self.field
+                    .mul_assign(&mut value, &self.powers[variable][exponent]);
+            }
+            self.field
+                .add_assign(&mut evaluated_layers[layer][retained_degree], &value);
+            if let Some(term_values) = &mut term_values {
+                term_values.push(value);
+            }
+        }
+
+        let mut discriminant = self.dense_product(&evaluated_layers[1], &evaluated_layers[1]);
+        let product = self.dense_product(&evaluated_layers[2], &evaluated_layers[0]);
+        if discriminant.len() < product.len() {
+            discriminant.resize(product.len(), self.field.zero());
+        }
+        let four = self.field.to_element(4);
+        for (coefficient, product_coefficient) in discriminant.iter_mut().zip(product) {
+            let product_coefficient = self.field.mul(&product_coefficient, &four);
+            self.field.sub_assign(coefficient, &product_coefficient);
+        }
+        let modular_image = EarlyFactorModularImage {
+            quadratic_variable,
+            base_retained_variable: retained_variable,
+            term_values: term_values.unwrap_or_default(),
+            layer_supports,
+        };
+        if self.dense_polynomial_is_square(discriminant) {
+            EarlyQuadraticDiscriminantProbe::Square(modular_image)
+        } else {
+            EarlyQuadraticDiscriminantProbe::Nonsquare(modular_image)
+        }
+    }
+
+    fn trim(&self, polynomial: &mut Vec<FiniteFieldElement<u32>>) {
+        while polynomial
+            .last()
+            .is_some_and(|coefficient| self.field.is_zero(coefficient))
+        {
+            polynomial.pop();
+        }
+    }
+
+    /// Multiply two dense finite-field polynomials stored in increasing degree
+    /// order.
+    fn dense_product(
+        &self,
+        left: &[FiniteFieldElement<u32>],
+        right: &[FiniteFieldElement<u32>],
+    ) -> Vec<FiniteFieldElement<u32>> {
+        if left.is_empty() || right.is_empty() {
+            return Vec::new();
+        }
+
+        let mut product = vec![self.field.zero(); left.len() + right.len() - 1];
+        for (left_degree, left_coefficient) in left.iter().enumerate() {
+            if self.field.is_zero(left_coefficient) {
+                continue;
+            }
+            for (right_degree, right_coefficient) in right.iter().enumerate() {
+                if self.field.is_zero(right_coefficient) {
+                    continue;
+                }
+                let term = self.field.mul(left_coefficient, right_coefficient);
+                self.field
+                    .add_assign(&mut product[left_degree + right_degree], &term);
+            }
+        }
+        self.trim(&mut product);
+        product
+    }
+
+    /// Return whether a dense polynomial is a square over the probe field.
+    /// The leading coefficient determines the root recursively; a final square
+    /// verifies every coefficient.
+    fn dense_polynomial_is_square(&self, mut polynomial: Vec<FiniteFieldElement<u32>>) -> bool {
+        self.trim(&mut polynomial);
+        if polynomial.is_empty() {
+            return true;
+        }
+
+        let degree = polynomial.len() - 1;
+        if !degree.is_multiple_of(2) {
+            return false;
+        }
+
+        let root_degree = degree / 2;
+        let leading_root = self.field.pow(
+            polynomial.last().unwrap(),
+            ((EARLY_FACTOR_PROBE_PRIME + 1) / 4) as u64,
+        );
+        if self.field.mul(&leading_root, &leading_root) != *polynomial.last().unwrap() {
+            return false;
+        }
+
+        let mut root = vec![self.field.zero(); root_degree + 1];
+        root[root_degree] = leading_root;
+        let denominator = self
+            .field
+            .mul(&self.field.to_element(2), &root[root_degree]);
+        for root_index in (0..root_degree).rev() {
+            let coefficient_degree = root_degree + root_index;
+            let mut residual = polynomial[coefficient_degree];
+            for left_index in root_index + 1..=root_degree {
+                let right_index = coefficient_degree - left_index;
+                if right_index <= root_index || right_index > root_degree {
+                    continue;
+                }
+                let product = self.field.mul(&root[left_index], &root[right_index]);
+                self.field.sub_assign(&mut residual, &product);
+            }
+            root[root_index] = self.field.div(&residual, &denominator);
+        }
+
+        self.dense_product(&root, &root) == polynomial
+    }
+
+    fn dense_remainder(
+        &self,
+        mut dividend: Vec<FiniteFieldElement<u32>>,
+        divisor: &[FiniteFieldElement<u32>],
+    ) -> Vec<FiniteFieldElement<u32>> {
+        debug_assert!(!divisor.is_empty());
+        let inverse_leading = self.field.inv(divisor.last().unwrap());
+        while dividend.len() >= divisor.len() {
+            let shift = dividend.len() - divisor.len();
+            let quotient = self.field.mul(dividend.last().unwrap(), &inverse_leading);
+            for (degree, coefficient) in divisor.iter().enumerate() {
+                let product = self.field.mul(&quotient, coefficient);
+                self.field
+                    .sub_assign(&mut dividend[shift + degree], &product);
+            }
+            self.trim(&mut dividend);
+        }
+        dividend
+    }
+
+    /// Construct univariate finite-field images of two coefficient layers from
+    /// the cached quadratic specialization. Variables omitted from the cache
+    /// are evaluated at one; every other non-retained variable uses its cached
+    /// deterministic coordinate.
+    fn coefficient_pair_images<E: PositiveExponent>(
+        &self,
+        polynomial: &MultivariatePolynomial<IntegerRing, E, LexOrder>,
+        coefficient_variable: usize,
+        coefficient_degrees: [u32; 2],
+        modular_image: &EarlyFactorModularImage,
+    ) -> Option<[Vec<FiniteFieldElement<u32>>; 2]> {
+        let Some(retained_variable) = self
+            .degrees
+            .iter()
+            .copied()
+            .enumerate()
+            .filter(|(variable, degree)| *variable != coefficient_variable && *degree > 0)
+            .max_by_key(|(variable, degree)| (*degree, Reverse(*variable)))
+            .map(|(variable, _)| variable)
+        else {
+            return None;
+        };
+        if modular_image.term_values.len() != polynomial.nterms() {
+            return None;
+        }
+
+        let mut images: [Vec<FiniteFieldElement<u32>>; 2] =
+            std::array::from_fn(|_| vec![self.field.zero(); self.degrees[retained_variable] + 1]);
+        for (term, cached_value) in polynomial.into_iter().zip(&modular_image.term_values) {
+            let coefficient_degree = term.exponents[coefficient_variable].to_u32();
+            let Some(image_index) = coefficient_degrees
+                .iter()
+                .position(|degree| *degree == coefficient_degree)
+            else {
+                continue;
+            };
+
+            let mut value = *cached_value;
+            for variable in [coefficient_variable, retained_variable] {
+                if variable == modular_image.quadratic_variable
+                    || Some(variable) == modular_image.base_retained_variable
+                {
+                    continue;
+                }
+                let exponent = term.exponents[variable].to_u32() as usize;
+                if exponent != 0 {
+                    self.field
+                        .mul_assign(&mut value, &self.inverse_powers[variable][exponent]);
+                }
+            }
+            let retained_degree = term.exponents[retained_variable].to_u32() as usize;
+            self.field
+                .add_assign(&mut images[image_index][retained_degree], &value);
+        }
+        for image in &mut images {
+            self.trim(image);
+        }
+        Some(images)
+    }
+
+    /// Return false when the selected specialization has coprime coefficient
+    /// layers. Such a specialization is sufficient to skip this optional
+    /// early content scout; returning true asks the caller to compute the exact
+    /// multivariate GCD of the layers.
+    fn coefficient_pair_may_have_common_factor<E: PositiveExponent>(
+        &self,
+        polynomial: &MultivariatePolynomial<IntegerRing, E, LexOrder>,
+        coefficient_variable: usize,
+        coefficient_degrees: [u32; 2],
+        modular_image: &EarlyFactorModularImage,
+    ) -> bool {
+        let Some(images) = self.coefficient_pair_images(
+            polynomial,
+            coefficient_variable,
+            coefficient_degrees,
+            modular_image,
+        ) else {
+            return true;
+        };
+        if images.iter().any(Vec::is_empty) {
+            return true;
+        }
+
+        let [mut left, mut right] = images;
+        while !right.is_empty() {
+            let remainder = self.dense_remainder(left, &right);
+            left = right;
+            right = remainder;
+        }
+        left.len() > 1
+    }
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -2398,6 +2765,14 @@ impl SeparableCoefficientContentContext {
         }
     }
 
+    /// Construct the coefficient-content context after the common monomial
+    /// has been divided from the polynomial.
+    fn after_common_monomial_removal() -> Self {
+        Self {
+            has_trivial_common_monomial: true,
+        }
+    }
+
     /// Return the nonconstant GCD of the coefficient layers, if one exists.
     ///
     /// A constant layer proves constant content immediately. A monomial layer
@@ -2481,6 +2856,106 @@ impl SeparableCoefficientContentContext {
 
         let gcd = PolynomialGCD::gcd_multiple(layers);
         if gcd.is_constant() { None } else { Some(gcd) }
+    }
+
+    /// Try the two coefficient views whose two sparsest layers have the
+    /// largest support products, returning an exact factor that omits the
+    /// corresponding variable.
+    ///
+    /// A factor independent of a variable multiplies every coefficient layer,
+    /// so even the two sparsest layers in that view tend to remain well
+    /// supported. Their GCD is intersected with every remaining layer before
+    /// the factor is accepted, then exact division certifies the split.
+    #[inline(never)]
+    fn split_from_well_supported_layer_pairs<E: PositiveExponent>(
+        &self,
+        polynomial: &MultivariatePolynomial<IntegerRing, E, LexOrder>,
+        excluded_variable: usize,
+        modular_probe_context: &EarlyFactorModularProbeContext,
+        modular_image: &EarlyFactorModularImage,
+    ) -> Option<[MultivariatePolynomial<IntegerRing, E, LexOrder>; 2]> {
+        let layer_supports = modular_image
+            .layer_supports
+            .as_ref()
+            .expect("coefficient-content data was requested for this modular image");
+        let mut candidates = Vec::with_capacity(polynomial.nvars().saturating_sub(1));
+        for variable in 0..polynomial.nvars() {
+            if variable == excluded_variable || layer_supports[variable].is_empty() {
+                continue;
+            }
+            let mut supported_layers = layer_supports[variable]
+                .iter()
+                .copied()
+                .enumerate()
+                .filter(|(_, support)| *support != 0)
+                .collect::<Vec<_>>();
+            if supported_layers.len() < 2 {
+                continue;
+            }
+            supported_layers.sort_unstable_by_key(|(degree, support)| (*support, *degree));
+            if self.has_trivial_common_monomial && supported_layers[0].1 == 1 {
+                continue;
+            }
+            let score = supported_layers[0].1.saturating_mul(supported_layers[1].1);
+            candidates.push((
+                score,
+                variable,
+                [supported_layers[0].0 as u32, supported_layers[1].0 as u32],
+            ));
+        }
+        candidates.sort_unstable_by_key(|(score, variable, _)| (Reverse(*score), *variable));
+
+        for (_, variable, coefficient_degrees) in candidates
+            .into_iter()
+            .take(EARLY_SEPARABLE_CONTENT_PAIR_PROBES)
+        {
+            #[cfg(test)]
+            EARLY_SEPARABLE_PAIR_PROBE_CALLS.with(|count| count.set(count.get() + 1));
+
+            if !modular_probe_context.coefficient_pair_may_have_common_factor(
+                polynomial,
+                variable,
+                coefficient_degrees,
+                modular_image,
+            ) {
+                continue;
+            }
+
+            let mut layers = polynomial
+                .to_univariate_polynomial_list(variable)
+                .into_iter()
+                .map(|(coefficient, _)| coefficient)
+                .collect::<Vec<_>>();
+            let mut support_order = (0..layers.len()).collect::<Vec<_>>();
+            support_order.sort_unstable_by_key(|&index| (layers[index].nterms(), index));
+            let left_index = support_order[0];
+            let right_index = support_order[1];
+            let pair_gcd = layers[left_index].gcd(&layers[right_index]);
+            if pair_gcd.is_constant()
+                || (self.has_trivial_common_monomial && pair_gcd.nterms() == 1)
+            {
+                continue;
+            }
+
+            let larger_index = left_index.max(right_index);
+            let smaller_index = left_index.min(right_index);
+            layers.swap_remove(larger_index);
+            layers.swap_remove(smaller_index);
+            layers.push(pair_gcd);
+            let content = PolynomialGCD::gcd_multiple(layers);
+            if content.is_constant() {
+                continue;
+            }
+            let Some(quotient) = polynomial.try_div(&content) else {
+                continue;
+            };
+
+            #[cfg(test)]
+            EARLY_SEPARABLE_PAIR_SPLITS.with(|count| count.set(count.get() + 1));
+            return Some([content, quotient]);
+        }
+
+        None
     }
 }
 
@@ -3658,9 +4133,9 @@ impl<E: PositiveExponent> MultivariatePolynomial<IntegerRing, E, LexOrder> {
         }
     }
 
-    /// Try to split a large integer polynomial through a degree-two variable
-    /// before the general separability scan. Only an exact discriminant square
-    /// and an exactly reconstructed product are accepted.
+    /// Try to split a large integer polynomial before the general separability
+    /// scan. The split is certified either by exact coefficient content or by
+    /// an exact quadratic discriminant square and reconstructed product.
     fn factor_quadratic_before_square_free(&self) -> Option<Vec<(Self, usize)>> {
         if self.is_zero()
             || self.nterms() < MIN_EARLY_QUADRATIC_FACTOR_TERMS
@@ -3693,7 +4168,7 @@ impl<E: PositiveExponent> MultivariatePolynomial<IntegerRing, E, LexOrder> {
             core = -core;
         }
 
-        let (quadratic_variable, split) = core.try_sparse_quadratic_split(&degrees)?;
+        let split = core.try_early_factor_split(&degrees)?;
         let mut factors = Vec::with_capacity(core.nvars() + 3);
         if !integer_content.is_one() {
             Self::append_integer_factor(&mut factors, self.constant(integer_content), 1);
@@ -3712,13 +4187,27 @@ impl<E: PositiveExponent> MultivariatePolynomial<IntegerRing, E, LexOrder> {
             );
         }
 
-        for factor in split {
-            let content = factor.univariate_content(quadratic_variable);
-            if content.is_constant() && content.get_constant().abs().is_one() {
-                Self::append_integer_factor(&mut factors, factor, 1);
-            } else {
-                for (nested_factor, multiplicity) in factor.factor() {
-                    Self::append_integer_factor(&mut factors, nested_factor, multiplicity);
+        match split {
+            EarlyIntegerFactorSplit::Quadratic {
+                variable,
+                factors: split,
+            } => {
+                for factor in split {
+                    let content = factor.univariate_content(variable);
+                    if content.is_constant() && content.get_constant().abs().is_one() {
+                        Self::append_integer_factor(&mut factors, factor, 1);
+                    } else {
+                        for (nested_factor, multiplicity) in factor.factor() {
+                            Self::append_integer_factor(&mut factors, nested_factor, multiplicity);
+                        }
+                    }
+                }
+            }
+            EarlyIntegerFactorSplit::Separable(split) => {
+                for factor in split {
+                    for (nested_factor, multiplicity) in factor.factor() {
+                        Self::append_integer_factor(&mut factors, nested_factor, multiplicity);
+                    }
                 }
             }
         }
@@ -3816,6 +4305,27 @@ impl<E: PositiveExponent> MultivariatePolynomial<IntegerRing, E, LexOrder> {
             .saturating_add(terms[2].saturating_mul(terms[0]))
     }
 
+    /// Check that every discriminant exponent fits the packed sparse
+    /// square-root representation used by this early shortcut.
+    fn quadratic_discriminant_fits_packed(&self, var: usize) -> bool {
+        let mut layer_degrees = vec![[0u32; 3]; self.nvars()];
+        for exponents in self.exponents_iter() {
+            let layer = exponents[var].to_u32() as usize;
+            debug_assert!(layer <= 2);
+            for (variable, exponent) in exponents.iter().enumerate() {
+                layer_degrees[variable][layer] =
+                    layer_degrees[variable][layer].max(exponent.to_u32());
+            }
+        }
+
+        layer_degrees.into_iter().all(|degrees| {
+            degrees[1]
+                .checked_mul(2)
+                .zip(degrees[2].checked_add(degrees[0]))
+                .is_some_and(|(square, product)| square.max(product) <= u8::MAX as u32)
+        })
+    }
+
     /// Check that both products used by `b^2 - 4*a*c` fit the polynomial's
     /// exponent representation in every variable.
     fn quadratic_discriminant_fits_exponents(a: &Self, b: &Self, c: &Self) -> bool {
@@ -3891,35 +4401,62 @@ impl<E: PositiveExponent> MultivariatePolynomial<IntegerRing, E, LexOrder> {
         None
     }
 
-    /// Try every degree-two variable, cheapest discriminant first, and return
-    /// the first split certified by the packed sparse square-root path.
-    fn try_sparse_quadratic_split(&self, degrees: &[usize]) -> Option<(usize, [Self; 2])> {
+    /// Try degree-two variables in estimated discriminant-cost order. Modular
+    /// nonresidues discard impossible discriminants; before the first exact
+    /// discriminant, two coefficient-layer pairs are checked for a factor that
+    /// omits another variable.
+    fn try_early_factor_split(&self, degrees: &[usize]) -> Option<EarlyIntegerFactorSplit<Self>> {
+        let degree_box_fits_packed = degrees.iter().all(|degree| *degree <= u8::MAX as usize / 2);
         let mut candidates = degrees
             .iter()
             .enumerate()
             .filter_map(|(var, degree)| {
-                (*degree == 2).then(|| (self.quadratic_discriminant_cost(var), var))
+                (*degree == 2
+                    && (degree_box_fits_packed || self.quadratic_discriminant_fits_packed(var)))
+                .then(|| (self.quadratic_discriminant_cost(var), var))
             })
             .collect::<Vec<_>>();
         candidates.sort_unstable();
+        if candidates.is_empty() {
+            return None;
+        }
+        let modular_probe_context = EarlyFactorModularProbeContext::new(degrees);
+        let content_context = SeparableCoefficientContentContext::after_common_monomial_removal();
+        let mut content_scouted = false;
 
-        for (_, var) in candidates {
+        for (discriminant_cost, var) in candidates {
+            let scout_content = !content_scouted
+                && discriminant_cost
+                    >= self
+                        .nterms()
+                        .saturating_mul(EARLY_SEPARABLE_CONTENT_MIN_PRODUCT_RATIO);
+            let modular_image = match modular_probe_context.probe_quadratic_discriminant(
+                self,
+                var,
+                scout_content,
+            ) {
+                EarlyQuadraticDiscriminantProbe::Nonsquare(image) => {
+                    drop(image);
+                    continue;
+                }
+                EarlyQuadraticDiscriminantProbe::Square(image) => image,
+            };
+
+            if scout_content {
+                content_scouted = true;
+                if let Some(factors) = content_context.split_from_well_supported_layer_pairs(
+                    self,
+                    var,
+                    &modular_probe_context,
+                    &modular_image,
+                ) {
+                    return Some(EarlyIntegerFactorSplit::Separable(factors));
+                }
+            }
+
             let (a, b, c) = self
                 .quadratic_coefficients(var)
                 .expect("a degree-two variable has three quadratic coefficient layers");
-            let discriminant_fits = (0..self.nvars()).all(|variable| {
-                let square_degree = b.degree(variable).to_u32().checked_mul(2);
-                let product_degree = a
-                    .degree(variable)
-                    .to_u32()
-                    .checked_add(c.degree(variable).to_u32());
-                square_degree
-                    .zip(product_degree)
-                    .is_some_and(|(square, product)| square.max(product) <= u8::MAX as u32)
-            });
-            if !discriminant_fits {
-                continue;
-            }
 
             let discriminant =
                 b.square_for_quadratic_discriminant() - (&a * &c).mul_coeff(Integer::from(4));
@@ -3935,8 +4472,11 @@ impl<E: PositiveExponent> MultivariatePolynomial<IntegerRing, E, LexOrder> {
                 | None => continue,
             };
 
-            if let Some(split) = self.reconstruct_quadratic_split(var, &a, &b, &c, square_root) {
-                return Some((var, split));
+            if let Some(factors) = self.reconstruct_quadratic_split(var, &a, &b, &c, square_root) {
+                return Some(EarlyIntegerFactorSplit::Quadratic {
+                    variable: var,
+                    factors,
+                });
             }
         }
 
@@ -11959,19 +12499,21 @@ mod test {
         DENSE_ZP_EDF_BLOCKS, DENSE_ZP_FROBENIUS_MAP_BUILDS, DenseBivariateImage,
         DenseIntegerModularUnivariateContext, DenseTwoFactorCorrectionContext,
         DenseZpAccumulationMode, DenseZpDistinctDegreeContext, DenseZpEqualDegreeContext,
-        DenseZpFrobeniusContext, DenseZpMulModWorkspace, EXACT_HENSEL_SUBTREE_MODULUS_BITS,
-        EXACT_HENSEL_SUBTREE_SPLITS, ExactPolynomialSquareRoot, GEOMETRIC_SMALL_PRIME_BACKFILLS,
-        INTEGER_FACTOR_BIVARIATE_WANG_MIN_BOX_DENSITY, IntegerModularUnivariateContext,
-        LAST_BIVARIATE_RECONSTRUCTION_PRIME, LAST_BOUNDED_DDF_REJECTION_DEGREE,
-        LAST_MODULAR_INTEGER_EDF_PRIME, LINEAR_VARIABLE_IRREDUCIBILITY_CERTIFICATES,
-        LLL_RECOMBINATION_SUCCESSES, LOCAL_HENSEL_RECOMBINATION_NODES,
-        MIN_EARLY_QUADRATIC_FACTOR_TERMS, MODULAR_INTEGER_EDF_CALLS, ModularPrimeScreen,
-        PRODUCT_TREE_BALANCED_PAIR_ATTEMPTS, PRODUCT_TREE_BALANCED_PAIR_CERTIFICATES,
-        PRODUCT_TREE_BALANCED_PAIR_TARGET_EXPONENT, PRODUCT_TREE_EARLY_RECONSTRUCTION_ATTEMPTS,
-        PRODUCT_TREE_EARLY_RECONSTRUCTION_EXPONENT, PRODUCT_TREE_EARLY_RECONSTRUCTION_SUCCESSES,
-        PRODUCT_TREE_HENSEL_LIFT_CALLS, PRODUCT_TREE_LAST_BEZOUT_UPDATE_EXPONENT,
-        PackedSparsePolynomialSquareContext, QUADRATIC_HENSEL_LIFT_CALLS,
-        QUADRATIC_HENSEL_NONUNIT_RETRIES, QuadraticFactorization,
+        DenseZpFrobeniusContext, DenseZpMulModWorkspace, EARLY_SEPARABLE_PAIR_PROBE_CALLS,
+        EARLY_SEPARABLE_PAIR_SPLITS, EXACT_HENSEL_SUBTREE_MODULUS_BITS,
+        EXACT_HENSEL_SUBTREE_SPLITS, EarlyFactorModularProbeContext,
+        EarlyQuadraticDiscriminantProbe, ExactPolynomialSquareRoot,
+        GEOMETRIC_SMALL_PRIME_BACKFILLS, INTEGER_FACTOR_BIVARIATE_WANG_MIN_BOX_DENSITY,
+        IntegerModularUnivariateContext, LAST_BIVARIATE_RECONSTRUCTION_PRIME,
+        LAST_BOUNDED_DDF_REJECTION_DEGREE, LAST_MODULAR_INTEGER_EDF_PRIME,
+        LINEAR_VARIABLE_IRREDUCIBILITY_CERTIFICATES, LLL_RECOMBINATION_SUCCESSES,
+        LOCAL_HENSEL_RECOMBINATION_NODES, MIN_EARLY_QUADRATIC_FACTOR_TERMS,
+        MODULAR_INTEGER_EDF_CALLS, ModularPrimeScreen, PRODUCT_TREE_BALANCED_PAIR_ATTEMPTS,
+        PRODUCT_TREE_BALANCED_PAIR_CERTIFICATES, PRODUCT_TREE_BALANCED_PAIR_TARGET_EXPONENT,
+        PRODUCT_TREE_EARLY_RECONSTRUCTION_ATTEMPTS, PRODUCT_TREE_EARLY_RECONSTRUCTION_EXPONENT,
+        PRODUCT_TREE_EARLY_RECONSTRUCTION_SUCCESSES, PRODUCT_TREE_HENSEL_LIFT_CALLS,
+        PRODUCT_TREE_LAST_BEZOUT_UPDATE_EXPONENT, PackedSparsePolynomialSquareContext,
+        QUADRATIC_HENSEL_LIFT_CALLS, QUADRATIC_HENSEL_NONUNIT_RETRIES, QuadraticFactorization,
         SEPARABLE_CONTENT_NONTRIVIAL_MONOMIAL_FALLBACKS,
         SEPARABLE_CONTENT_PAIR_MONOMIAL_CERTIFICATES, SEPARABLE_CONTENT_PAIR_PROBES,
         SEPARABLE_CONTENT_PAIR_REPLACEMENTS, SEPARABLE_CONTENT_SINGLE_MONOMIAL_CERTIFICATES,
@@ -11990,7 +12532,7 @@ mod test {
         GLOBAL_SETTINGS,
         atom::AtomCore,
         domains::{
-            InternalOrdering, Ring,
+            InternalOrdering, Ring, RingOps,
             algebraic::AlgebraicExtension,
             finite_field::{
                 FiniteField, FiniteFieldCore, FiniteFieldElement, PrimeIteratorU64, ToFiniteField,
@@ -13035,9 +13577,12 @@ mod test {
         let degree_drop = parse!("x^2*y^3-x^2+x+y+z^4")
             .expand()
             .to_polynomial::<_, u8>(&Z, None);
+        let degrees = (0..degree_drop.nvars())
+            .map(|variable| degree_drop.degree(variable).to_u32() as usize)
+            .collect::<Vec<_>>();
 
         assert_eq!(
-            degree_drop.univariate_specialization_factorization(&[2, 3, 4]),
+            degree_drop.univariate_specialization_factorization(&degrees),
             UnivariateSpecializationFactorization::Inconclusive
         );
     }
@@ -15569,6 +16114,8 @@ mod test {
             .expand()
             .to_polynomial::<_, u16>(&Z, None);
         assert!(polynomial.nterms() >= MIN_EARLY_QUADRATIC_FACTOR_TERMS);
+        EARLY_SEPARABLE_PAIR_PROBE_CALLS.with(|count| count.set(0));
+        EARLY_SEPARABLE_PAIR_SPLITS.with(|count| count.set(0));
 
         let factors = polynomial
             .factor_quadratic_before_square_free()
@@ -15588,23 +16135,191 @@ mod test {
                 .iter()
                 .any(|(factor, multiplicity)| factor == &w && *multiplicity == 3)
         );
+        EARLY_SEPARABLE_PAIR_PROBE_CALLS.with(|count| assert_eq!(count.get(), 0));
+        EARLY_SEPARABLE_PAIR_SPLITS.with(|count| assert_eq!(count.get(), 0));
+    }
+
+    #[test]
+    fn early_separable_pair_scout_recovers_an_omitted_variable_factor() {
+        let variables = Some(Arc::new(vec![
+            symbol!("x").into(),
+            symbol!("y").into(),
+            symbol!("a").into(),
+            symbol!("b").into(),
+            symbol!("c").into(),
+            symbol!("d").into(),
+        ]));
+        let polynomial = parse!("((1+a+b+c+d)^4+a*b*c*d)*(x+y+1)*(x+2*y+3)")
+            .expand()
+            .to_polynomial::<_, u16>(&Z, variables);
+        assert!(polynomial.nterms() >= MIN_EARLY_QUADRATIC_FACTOR_TERMS);
+        EARLY_SEPARABLE_PAIR_PROBE_CALLS.with(|count| count.set(0));
+        EARLY_SEPARABLE_PAIR_SPLITS.with(|count| count.set(0));
+
+        let factors = polynomial
+            .factor_quadratic_before_square_free()
+            .expect("the well-supported y layers share the factor that omits y");
+        let reconstructed = factors
+            .iter()
+            .fold(polynomial.one(), |product, (factor, power)| {
+                &product * &factor.pow(*power)
+            });
+        assert_eq!(reconstructed, polynomial);
+        assert!(factors.iter().any(|(factor, _)| factor.degree(1) == 0));
+        EARLY_SEPARABLE_PAIR_PROBE_CALLS.with(|count| assert!(count.get() <= 2));
+        EARLY_SEPARABLE_PAIR_SPLITS.with(|count| assert_eq!(count.get(), 1));
+    }
+
+    #[test]
+    fn early_separable_pair_scout_intersects_every_coefficient_layer() {
+        let polynomial = parse!("(x+1)*(1+y)+(x^2+x+1)*y^2")
+            .expand()
+            .to_polynomial::<_, u8>(&Z, None);
+        let context = SeparableCoefficientContentContext::new(&polynomial);
+        let degrees = (0..polynomial.nvars())
+            .map(|variable| polynomial.degree(variable).to_u32() as usize)
+            .collect::<Vec<_>>();
+        let modular_probe_context = EarlyFactorModularProbeContext::new(&degrees);
+        let modular_image =
+            match modular_probe_context.probe_quadratic_discriminant(&polynomial, 0, true) {
+                EarlyQuadraticDiscriminantProbe::Nonsquare(image)
+                | EarlyQuadraticDiscriminantProbe::Square(image) => image,
+            };
+
+        assert!(
+            context
+                .split_from_well_supported_layer_pairs(
+                    &polynomial,
+                    0,
+                    &modular_probe_context,
+                    &modular_image,
+                )
+                .is_none()
+        );
+    }
+
+    #[test]
+    fn quadratic_discriminant_modular_probes_only_reject_nonsquares() {
+        let variables = Some(Arc::new(vec![
+            symbol!("x").into(),
+            symbol!("y").into(),
+            symbol!("z").into(),
+        ]));
+        let exact_split = parse!("(x+(1+y+z)^3)*(x+(2+3*y-z)^2)")
+            .expand()
+            .to_polynomial::<_, u8>(&Z, variables.clone());
+        let degrees = (0..exact_split.nvars())
+            .map(|variable| exact_split.degree(variable).to_u32() as usize)
+            .collect::<Vec<_>>();
+        let context = EarlyFactorModularProbeContext::new(&degrees);
+        assert!(matches!(
+            context.probe_quadratic_discriminant(&exact_split, 0, false),
+            EarlyQuadraticDiscriminantProbe::Square(_)
+        ));
+
+        let zero_discriminant = parse!("(x+y+1)^2")
+            .expand()
+            .to_polynomial::<_, u8>(&Z, variables);
+        let degrees = (0..zero_discriminant.nvars())
+            .map(|variable| zero_discriminant.degree(variable).to_u32() as usize)
+            .collect::<Vec<_>>();
+        let context = EarlyFactorModularProbeContext::new(&degrees);
+        assert!(matches!(
+            context.probe_quadratic_discriminant(&zero_discriminant, 0, false),
+            EarlyQuadraticDiscriminantProbe::Square(_)
+        ));
+
+        let nonsquare = parse!("x^2+y").to_polynomial::<_, u8>(&Z, None);
+        let degrees = (0..nonsquare.nvars())
+            .map(|variable| nonsquare.degree(variable).to_u32() as usize)
+            .collect::<Vec<_>>();
+        let context = EarlyFactorModularProbeContext::new(&degrees);
+        let quadratic_variable = degrees.iter().position(|degree| *degree == 2).unwrap();
+        assert!(matches!(
+            context.probe_quadratic_discriminant(&nonsquare, quadratic_variable, false),
+            EarlyQuadraticDiscriminantProbe::Nonsquare(_)
+        ));
+    }
+
+    #[test]
+    fn cached_coefficient_pair_images_match_direct_specialization() {
+        let variables = Some(Arc::new(vec![
+            symbol!("x").into(),
+            symbol!("y").into(),
+            symbol!("z").into(),
+            symbol!("w").into(),
+        ]));
+        let polynomial = parse!("(1+x+x^2)*(1+y+y^5+z^3+y^2*z^2+w^4+2*z*w^2+65519*z^2*w)")
+            .expand()
+            .to_polynomial::<_, u8>(&Z, variables);
+        let degrees = (0..polynomial.nvars())
+            .map(|variable| polynomial.degree(variable).to_u32() as usize)
+            .collect::<Vec<_>>();
+        let context = EarlyFactorModularProbeContext::new(&degrees);
+        let modular_image = match context.probe_quadratic_discriminant(&polynomial, 0, true) {
+            EarlyQuadraticDiscriminantProbe::Nonsquare(image)
+            | EarlyQuadraticDiscriminantProbe::Square(image) => image,
+        };
+        assert_eq!(modular_image.quadratic_variable, 0);
+        assert_eq!(modular_image.base_retained_variable, Some(1));
+
+        let coefficient_variable = 1;
+        let retained_variable = 3;
+        let coefficient_degrees = [0, 1];
+        let actual = context
+            .coefficient_pair_images(
+                &polynomial,
+                coefficient_variable,
+                coefficient_degrees,
+                &modular_image,
+            )
+            .unwrap();
+        let mut expected: [Vec<FiniteFieldElement<u32>>; 2] =
+            std::array::from_fn(|_| vec![context.field.zero(); degrees[retained_variable] + 1]);
+        for term in &polynomial {
+            let coefficient_degree = term.exponents[coefficient_variable].to_u32();
+            let Some(image_index) = coefficient_degrees
+                .iter()
+                .position(|degree| *degree == coefficient_degree)
+            else {
+                continue;
+            };
+            let mut value = term.coefficient.to_finite_field(&context.field);
+            for (variable, exponent) in term.exponents.iter().enumerate() {
+                if variable == coefficient_variable
+                    || variable == retained_variable
+                    || variable == modular_image.quadratic_variable
+                    || Some(variable) == modular_image.base_retained_variable
+                {
+                    continue;
+                }
+                context.field.mul_assign(
+                    &mut value,
+                    &context.powers[variable][exponent.to_u32() as usize],
+                );
+            }
+            context.field.add_assign(
+                &mut expected[image_index][term.exponents[retained_variable].to_u32() as usize],
+                &value,
+            );
+        }
+        for image in &mut expected {
+            context.trim(image);
+        }
+        assert_eq!(actual, expected);
     }
 
     #[test]
     fn early_quadratic_split_falls_back_on_inconclusive_discriminants() {
         for polynomial in [
-            parse!("(y+1)*(x^2+z)")
-                .expand()
-                .to_polynomial::<_, u8>(&Z, None),
-            parse!("(x+y)^2*(z+1)")
-                .expand()
-                .to_polynomial::<_, u8>(&Z, None),
+            parse!("x^2+y+z").to_polynomial::<_, u8>(&Z, None),
+            parse!("x^2+y*x+z").to_polynomial::<_, u8>(&Z, None),
             parse!("x^2+y^200*x+1").to_polynomial::<_, u8>(&Z, None),
         ] {
             let degrees = (0..polynomial.nvars())
                 .map(|var| polynomial.degree(var).to_u32() as usize)
                 .collect::<Vec<_>>();
-            assert!(polynomial.try_sparse_quadratic_split(&degrees).is_none());
+            assert!(polynomial.try_early_factor_split(&degrees).is_none());
         }
     }
 
