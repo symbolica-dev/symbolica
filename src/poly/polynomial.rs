@@ -5405,9 +5405,12 @@ impl<F: Ring, E: Exponent> MultivariatePolynomial<F, E, LexOrder> {
             return self.quot_rem_univariate_monic(div);
         }
 
-        if (assume_exact || abort_on_remainder)
-            && let Some((bases, total)) = self.dense_division_layout()
-        {
+        // Checked division is frequently speculative, notably when cancelling factors in a
+        // factorized rational polynomial. Building and scanning a dense coefficient box before
+        // discovering that the divisor does not divide is substantially more expensive than the
+        // packed heap's early exit. Keep the dense path for divisions whose caller guarantees
+        // exactness; try_div and try_div_owned use the packed heap below.
+        if assume_exact && let Some((bases, total)) = self.dense_division_layout() {
             return self.dense_division(div, &bases, total, assume_exact);
         }
 
@@ -5430,7 +5433,7 @@ impl<F: Ring, E: Exponent> MultivariatePolynomial<F, E, LexOrder> {
 
     /// Select a fixed coefficient array when the dividend occupies a reasonably dense
     /// multivariate box. This avoids maintaining a monomial heap and map for every intermediate
-    /// product. Callers that do not guarantee exactness abort on the first remainder.
+    /// product in divisions that are known to be exact.
     fn dense_division_layout(&self) -> Option<(Vec<usize>, usize)> {
         let mut bases = Vec::with_capacity(self.nvars());
         let mut total = 1usize;
@@ -8289,18 +8292,19 @@ mod test {
     }
 
     #[test]
-    fn dense_checked_division_accepts_exact_and_rejects_inexact_inputs() {
+    fn checked_division_accepts_exact_and_rejects_inexact_inputs() {
         let quotient = parse!("(1+x+y+z)^8").to_polynomial::<_, u8>(&Z, None);
         let divisor =
             parse!("(1+2*x-y+3*z)^5").to_polynomial::<_, u8>(&Z, quotient.variables().clone());
         let dividend = &quotient * &divisor;
+        assert_eq!(dividend.clone().exact_div_owned(&divisor), quotient.clone());
         assert_eq!(
             dividend.clone().try_div_owned(&divisor),
             Some(quotient.clone())
         );
 
         // This perturbation is zero both at the origin and at (1, 1, 1), so it passes the cheap
-        // evaluation filters and exercises the checked dense coefficient loop.
+        // evaluation filters and exercises the checked polynomial-division path.
         let perturbation = parse!("x-y").to_polynomial::<_, u8>(&Z, dividend.variables().clone());
         assert!((dividend + perturbation).try_div_owned(&divisor).is_none());
     }
