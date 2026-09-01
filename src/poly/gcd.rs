@@ -53,7 +53,7 @@ where
     };
     let policy = 0..=upper;
     loop {
-        let value = SampleableRing::sample(ring, rng, &policy);
+        let value = ring.sample(rng, &policy);
         if !ring.is_zero(&value) {
             return value;
         }

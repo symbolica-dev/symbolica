@@ -20,7 +20,7 @@ fn samples_with_degree_and_coefficient_policies() {
     };
     let mut rng = StdRng::seed_from_u64(1);
 
-    let sample = SampleableRing::sample(&ring, &mut rng, &policy);
+    let sample = ring.sample(&mut rng, &policy);
 
     assert_eq!(sample.degree(), 3);
     assert!(

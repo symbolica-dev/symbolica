@@ -475,7 +475,7 @@ impl<R: SampleableRing, E: Exponent> SampleableRing for PolynomialRing<R, E> {
         let mut polynomial =
             MultivariatePolynomial::new(&self.ring, Some(term_count), policy.variables.clone());
         for _ in 0..term_count {
-            let coefficient = SampleableRing::sample(&self.ring, rng, &policy.coefficient);
+            let coefficient = self.ring.sample(rng, &policy.coefficient);
             let exponents = policy
                 .degree_bounds
                 .iter()
@@ -5981,7 +5981,7 @@ mod test {
         };
         let mut rng = StdRng::seed_from_u64(1);
 
-        let sample = SampleableRing::sample(&ring, &mut rng, &policy);
+        let sample = ring.sample(&mut rng, &policy);
 
         assert_eq!(sample.variables(), &variables);
         assert!(sample.nterms() <= 5);

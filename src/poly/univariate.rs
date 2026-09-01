@@ -234,7 +234,7 @@ impl<R: SampleableRing> SampleableRing for UnivariatePolynomialRing<R> {
     ) -> Self::Element {
         let degree = rng.random_range(policy.degree.clone());
         let coefficients = (0..=degree)
-            .map(|_| SampleableRing::sample(&self.ring, rng, &policy.coefficient))
+            .map(|_| self.ring.sample(rng, &policy.coefficient))
             .collect();
 
         UnivariatePolynomial::from_coefficients(&self.ring, coefficients, self.variable.clone())

@@ -1208,11 +1208,9 @@ where
 
             for i in 0..n {
                 let upper_bound = characteristic.to_i64().unwrap_or(i64::MAX);
-                let r = SampleableRing::sample(
-                    self.ring(),
-                    &mut rng,
-                    &(0..=upper_bound.saturating_sub(1)),
-                );
+                let r = self
+                    .ring()
+                    .sample(&mut rng, &(0..=upper_bound.saturating_sub(1)));
                 if !self.ring().is_zero(&r) {
                     exp[var] = E::from_u32(i as u32);
                     random_poly.append_monomial(r, &exp);
@@ -1429,7 +1427,7 @@ where
                 break;
             }
 
-            sample_point = SampleableRing::sample(self.ring(), &mut rng, &(0..=i));
+            sample_point = self.ring().sample(&mut rng, &(0..=i));
             uni_f = self.replace(interpolation_var, &sample_point);
         }
 
@@ -2558,10 +2556,10 @@ impl<F: Field + SampleableRing<SamplingPolicy = RangeInclusive<i64>>, E: Positiv
         sample_vars
             .iter()
             .map(|v| {
-                let mut value = SampleableRing::sample(poly.ring(), rng, &policy);
+                let mut value = poly.ring().sample(rng, &policy);
                 let mut attempts = 0;
                 while poly.ring().is_zero(&value) && attempts < 8 {
-                    value = SampleableRing::sample(poly.ring(), rng, &policy);
+                    value = poly.ring().sample(rng, &policy);
                     attempts += 1;
                 }
                 (*v, value)

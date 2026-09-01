@@ -2106,7 +2106,7 @@ where
         policy: &Self::SamplingPolicy,
     ) -> Self::Element {
         let coeffs: Vec<_> = (0..self.poly.degree(0))
-            .map(|_| SampleableRing::sample(self.poly.ring(), rng, policy))
+            .map(|_| self.poly.ring().sample(rng, policy))
             .collect();
 
         let mut poly = self.poly.zero_with_capacity(coeffs.len());
@@ -2392,7 +2392,7 @@ where
         rng: &mut G,
         policy: &Self::SamplingPolicy,
     ) -> Self::Element {
-        SampleableRing::sample(&self.as_extension(), rng, policy)
+        self.as_extension().sample(rng, policy)
     }
 }
 
