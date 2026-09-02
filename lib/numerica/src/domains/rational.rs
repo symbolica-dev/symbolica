@@ -18,6 +18,7 @@ use super::{
         FiniteField, FiniteFieldCore, FiniteFieldWorkspace, PrimeIteratorU64, ToFiniteField, Two,
         Z2, Zp,
     },
+    float::RealLike,
     integer::{Integer, IntegerRing, Z},
 };
 
@@ -980,9 +981,21 @@ impl Rational {
     }
 
     pub fn to_f64(&self) -> f64 {
-        let numerator = self.numerator.to_string().parse::<f64>().unwrap();
-        let denominator = self.denominator.to_string().parse::<f64>().unwrap();
-        numerator / denominator
+        fn fixed_to_f64(value: &Integer) -> Option<f64> {
+            match value {
+                Integer::Single(value) => Some(*value as f64),
+                Integer::Double(value) => Some(value.get() as f64),
+                Integer::Large(_) => None,
+            }
+        }
+
+        match (
+            fixed_to_f64(&self.numerator),
+            fixed_to_f64(&self.denominator),
+        ) {
+            (Some(numerator), Some(denominator)) => numerator / denominator,
+            _ => self.to_multi_prec_float(f64::MANTISSA_DIGITS).to_f64(),
+        }
     }
 
     /// Return a best approximation of the rational number where the denominator
@@ -1430,7 +1443,7 @@ mod test {
     use crate::domains::{
         Field, OrderedRing, RealEmbedding, Ring, RingOps,
         float::{Float, Real},
-        integer::Z,
+        integer::{Integer, Z},
         rational::{FractionField, Rational},
     };
 
@@ -1476,5 +1489,13 @@ mod test {
         assert_eq!(f.sign(&Rational::zero()), std::cmp::Ordering::Equal);
         assert_eq!(f.cmp(&half, &two_thirds), std::cmp::Ordering::Less);
         assert_eq!(f.try_cmp(&half, &two_thirds), Ok(std::cmp::Ordering::Less));
+    }
+
+    #[test]
+    fn rational_to_f64_with_large_components() {
+        let scale = Integer::one() << 4096u32;
+        let rational = Rational::from_int_unchecked(&scale * 3, scale * 2);
+
+        assert_eq!(rational.to_f64(), 1.5);
     }
 }
