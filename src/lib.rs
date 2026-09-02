@@ -484,6 +484,9 @@ const MISSING_LICENSE_ERROR: &str = "
 │ Symbolica license key missing │
 └───────────────────────────────┘";
 
+#[cfg(not(target_arch = "wasm32"))]
+const EXPIRED_OFFLINE_LICENSE_WARNING: &str = "Warning: the offline Symbolica license has expired, but its underlying license is still valid. Request a new offline key with get_license_key.";
+
 impl Default for LicenseManager {
     fn default() -> Self {
         Self::new()
@@ -542,8 +545,7 @@ impl LicenseManager {
 
     #[inline]
     fn is_check_bypassed() -> bool {
-        INTERNAL_LICENSE_BYPASS_DEPTH.with(|depth| depth.get() != 0)
-            || Self::is_library_unlocked()
+        INTERNAL_LICENSE_BYPASS_DEPTH.with(|depth| depth.get() != 0) || Self::is_library_unlocked()
     }
 
     /// Create a new license manager.
@@ -691,22 +693,19 @@ impl LicenseManager {
                 .map_err(|_| ACTIVATION_ERROR.to_owned())
                 .unwrap();
 
-            if t > t2 {
-                Err("┌───────────────────────────────────┐
-│ The Symbolica license has expired │
-└───────────────────────────────────┘"
-                    .to_owned())?;
-            }
-
             key = f3.to_owned();
-            std::thread::spawn(|| {
-                if let Err(e) = Self::check_registration(key)
-                    && e.contains("expired")
-                {
-                    println!("{e}");
-                    abort();
-                }
-            });
+            if t > t2 {
+                Self::check_expired_offline_license(key, Self::check_registration)?;
+            } else {
+                std::thread::spawn(|| {
+                    if let Err(e) = Self::check_registration(key)
+                        && e.contains("expired")
+                    {
+                        println!("{e}");
+                        abort();
+                    }
+                });
+            }
         } else {
             Self::check_registration(key)?;
         }
@@ -791,6 +790,16 @@ impl LicenseManager {
 Error: {status}",
             ))
         }
+    }
+
+    #[cfg(not(target_arch = "wasm32"))]
+    fn check_expired_offline_license(
+        key: String,
+        check_registration: impl FnOnce(String) -> Result<(), String>,
+    ) -> Result<(), String> {
+        check_registration(key)?;
+        eprintln!("{EXPIRED_OFFLINE_LICENSE_WARNING}");
+        Ok(())
     }
 
     pub(crate) fn check_library_unlock_registration(key: String) {
@@ -1051,5 +1060,31 @@ mod license_bypass_tests {
 
         drop(outer);
         assert!(!LicenseManager::is_check_bypassed());
+    }
+}
+
+#[cfg(test)]
+mod offline_license_tests {
+    use super::*;
+
+    #[test]
+    fn expired_offline_license_checks_underlying_key() {
+        let mut checked = false;
+        LicenseManager::check_expired_offline_license("underlying-key".to_owned(), |key| {
+            assert_eq!(key, "underlying-key");
+            checked = true;
+            Ok(())
+        })
+        .unwrap();
+        assert!(checked);
+    }
+
+    #[test]
+    fn expired_offline_license_propagates_registration_failure() {
+        let error = LicenseManager::check_expired_offline_license("expired-key".to_owned(), |_| {
+            Err("underlying license expired".to_owned())
+        })
+        .unwrap_err();
+        assert_eq!(error, "underlying license expired");
     }
 }
