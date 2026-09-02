@@ -625,14 +625,24 @@ impl<'a> DenseIntegerMul<'a> {
             return Some(Vec::new());
         }
 
-        if let Some(output) = self.try_i64() {
-            return Some(output);
-        }
-        if let Some(output) = self.try_i64_i128() {
-            return Some(output);
-        }
-        if let Some(output) = self.try_i128() {
-            return Some(output);
+        // Fixed-width strategies allocate and scan the entire mixed-radix coefficient box. For
+        // sparse boxes the generic polynomial fallback is cheaper: it keeps only a dense u32
+        // index and materializes coefficients that are actually reached. Small boxes are cheap
+        // unconditionally; larger boxes require at least one coefficient product per cell.
+        let product_count = self
+            .left_coefficients
+            .len()
+            .checked_mul(self.right_coefficients.len())?;
+        if self.output_len <= product_count.max(1024) {
+            if let Some(output) = self.try_i64() {
+                return Some(output);
+            }
+            if let Some(output) = self.try_i64_i128() {
+                return Some(output);
+            }
+            if let Some(output) = self.try_i128() {
+                return Some(output);
+            }
         }
 
         #[cfg(feature = "integer-gmp")]

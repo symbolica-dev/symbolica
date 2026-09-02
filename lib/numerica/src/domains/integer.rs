@@ -4334,6 +4334,26 @@ mod test {
     }
 
     #[test]
+    fn fixed_dense_multiplication_rejects_sparse_coefficient_boxes() {
+        let coefficients = [Integer::from(2), Integer::from(3)];
+        let indices = [0, 1000];
+        assert!(
+            IntegerRing
+                .kernels()
+                .polynomial()
+                .unwrap()
+                .try_dense_mul(DensePolynomialMulRequest {
+                    output_len: 2001,
+                    left_coefficients: &coefficients,
+                    left_indices: &indices,
+                    right_coefficients: &coefficients,
+                    right_indices: &indices,
+                })
+                .is_none()
+        );
+    }
+
+    #[test]
     fn declined_exact_division_preserves_dividend() {
         let mut dividend = vec![Integer::from(3), Integer::from(5)];
         let before = dividend.clone();
