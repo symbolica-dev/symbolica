@@ -1,15 +1,12 @@
 use std::{
+    cell::Cell,
     collections::{HashMap, HashSet},
     fs::{DirBuilder, File, OpenOptions, TryLockError},
     io,
     marker::PhantomData,
     path::{Path, PathBuf},
     rc::Rc,
-    sync::{
-        Arc, LazyLock, Mutex,
-        atomic::{AtomicU32, Ordering::Relaxed},
-    },
-    thread::ThreadId,
+    sync::{LazyLock, Mutex},
 };
 
 use base64::{Engine as _, engine::general_purpose::URL_SAFE_NO_PAD};
@@ -39,15 +36,12 @@ pub(crate) struct UnlockClaims {
     token_id: String,
 }
 
-struct ActiveUnlockGuards {
-    pid: u32,
-    owner_threads: HashMap<ThreadId, usize>,
-}
-
-static ACTIVE_UNLOCK_GUARDS: LazyLock<Mutex<HashMap<String, ActiveUnlockGuards>>> =
-    LazyLock::new(|| Mutex::new(HashMap::new()));
 static CHECKED_UNLOCK_LICENSES: LazyLock<Mutex<HashSet<(u32, String)>>> =
     LazyLock::new(|| Mutex::new(HashSet::new()));
+
+thread_local! {
+    static LIBRARY_UNLOCK_DEPTH: Cell<usize> = const { Cell::new(0) };
+}
 
 fn verify_signature(
     public_key: &str,
@@ -271,12 +265,24 @@ pub(crate) fn try_acquire_lock(name: &str) -> io::Result<Option<File>> {
 
 /// A verified unlock for a Rust library.
 ///
-/// Construct this through [`crate::register_library_unlock!`], then call [`Self::enter`] around every
-/// synchronous library operation. Worker closures must enter their own guard.
+/// Construct this through [`crate::register_library_unlock!`], then call [`Self::unlock`] around every
+/// synchronous library operation. Library-owned worker closures must unlock their own thread;
+/// Symbolica propagates an active unlock to threads it creates internally.
+///
+/// # Examples
+///
+/// ```
+/// pub(crate) static UNLOCK: LazyLock<LibraryUnlock> = LazyLock::new(|| {
+///     register_library_unlock!("YOUR_KEY").unwrap()
+/// });
+///
+/// fn main() {
+///     let _unlock = UNLOCK.unlock();
+/// }
+/// ```
 #[derive(Clone, Debug)]
 pub struct LibraryUnlock {
-    claims: UnlockClaims,
-    checked_pid: Arc<AtomicU32>,
+    _private: (),
 }
 
 impl LibraryUnlock {
@@ -291,95 +297,75 @@ impl LibraryUnlock {
             ));
         }
         start_license_check(&claims);
-        Ok(Self {
-            claims,
-            checked_pid: Arc::new(AtomicU32::new(std::process::id())),
-        })
+        Ok(Self { _private: () })
     }
 
     /// Authorize Symbolica calls on the current thread until the returned guard is dropped.
-    pub fn enter(&self) -> LibraryUnlockGuard {
-        let pid = std::process::id();
-        if self.checked_pid.swap(pid, Relaxed) != pid {
-            start_license_check(&self.claims);
-        }
-        LibraryUnlockGuard::activate(&self.claims)
+    #[inline]
+    pub fn unlock(&self) -> LibraryUnlockGuard {
+        LibraryUnlockGuard::activate()
     }
 }
 
 /// A thread-bound Rust library unlock guard.
 ///
 /// Same-thread callbacks inherit the authorization. The guard is deliberately not `Send`; worker
-/// threads must enter their own guard from a cloned [`LibraryUnlock`].
+/// threads owned by the library must call [`LibraryUnlock::unlock`] themselves.
+#[must_use = "the library is unlocked only while this guard is alive"]
 pub struct LibraryUnlockGuard {
-    token_id: String,
-    pid: u32,
-    owner_thread: ThreadId,
     _not_send: PhantomData<Rc<()>>,
 }
 
 impl LibraryUnlockGuard {
-    fn activate(claims: &UnlockClaims) -> Self {
-        let token_id = claims.token_id.clone();
-        let pid = std::process::id();
-        let owner_thread = std::thread::current().id();
-        let mut guards = ACTIVE_UNLOCK_GUARDS.lock().unwrap();
-
-        if guards.get(&token_id).is_some_and(|guard| guard.pid != pid) {
-            guards.remove(&token_id);
-        }
-
-        if let Some(active) = guards.get_mut(&token_id) {
-            *active.owner_threads.entry(owner_thread).or_default() += 1;
-        } else {
-            let mut owner_threads = HashMap::new();
-            owner_threads.insert(owner_thread, 1);
-            guards.insert(token_id.clone(), ActiveUnlockGuards { pid, owner_threads });
-        }
-
+    #[inline]
+    fn activate() -> Self {
+        LIBRARY_UNLOCK_DEPTH.with(|depth| {
+            depth.set(
+                depth
+                    .get()
+                    .checked_add(1)
+                    .expect("library unlock scope nesting overflow"),
+            );
+        });
         Self {
-            token_id,
-            pid,
-            owner_thread,
             _not_send: PhantomData,
         }
     }
 }
 
 impl Drop for LibraryUnlockGuard {
+    #[inline]
     fn drop(&mut self) {
-        if self.pid != std::process::id() {
-            return;
-        }
-
-        let mut guards = ACTIVE_UNLOCK_GUARDS.lock().unwrap();
-        let remove = if let Some(active) = guards.get_mut(&self.token_id) {
-            if let Some(count) = active.owner_threads.get_mut(&self.owner_thread) {
-                *count -= 1;
-                if *count == 0 {
-                    active.owner_threads.remove(&self.owner_thread);
-                }
-            }
-            active.owner_threads.is_empty()
-        } else {
-            false
-        };
-
-        if remove {
-            guards.remove(&self.token_id);
-        }
+        LIBRARY_UNLOCK_DEPTH.with(|depth| {
+            let current = depth.get();
+            debug_assert!(current > 0, "unbalanced library unlock scope");
+            depth.set(current.saturating_sub(1));
+        });
     }
 }
 
-/// Return whether the current Rust thread owns an active library unlock guard.
-pub(crate) fn current_thread_has_guard() -> bool {
-    let pid = std::process::id();
-    let thread_id = std::thread::current().id();
-    ACTIVE_UNLOCK_GUARDS
-        .lock()
-        .unwrap()
-        .values()
-        .any(|active| active.pid == pid && active.owner_threads.contains_key(&thread_id))
+/// Return whether the current Rust thread is inside a library unlock scope.
+#[inline]
+pub(crate) fn current_thread_is_unlocked() -> bool {
+    LIBRARY_UNLOCK_DEPTH.with(|depth| depth.get() != 0)
+}
+
+/// Authorization captured before Symbolica dispatches work to one of its own threads.
+#[derive(Clone, Copy)]
+pub(crate) struct InheritedLibraryUnlock(bool);
+
+impl InheritedLibraryUnlock {
+    /// Capture both Rust guard and Python package-frame authorization on the calling thread.
+    #[inline]
+    pub(crate) fn capture() -> Self {
+        Self(crate::LicenseManager::is_library_unlocked())
+    }
+
+    /// Establish captured authorization on the worker for the lifetime of the returned guard.
+    #[inline]
+    pub(crate) fn activate(self) -> Option<LibraryUnlockGuard> {
+        self.0.then(LibraryUnlockGuard::activate)
+    }
 }
 
 #[cfg(test)]
@@ -416,13 +402,65 @@ mod tests {
     #[test]
     fn rust_guard_is_thread_bound() {
         let registration = LibraryUnlock::for_crate(TEST_UNLOCK_TOKEN, "pysecdec").unwrap();
-        assert!(!current_thread_has_guard());
+        assert!(!current_thread_is_unlocked());
         {
-            let _guard = registration.enter();
-            assert!(current_thread_has_guard());
-            assert!(!std::thread::spawn(current_thread_has_guard).join().unwrap());
+            let _guard = registration.unlock();
+            assert!(current_thread_is_unlocked());
+            assert!(
+                !std::thread::spawn(current_thread_is_unlocked)
+                    .join()
+                    .unwrap()
+            );
         }
-        assert!(!current_thread_has_guard());
+        assert!(!current_thread_is_unlocked());
+    }
+
+    #[test]
+    fn rust_guard_is_nested() {
+        let registration = LibraryUnlock::for_crate(TEST_UNLOCK_TOKEN, "pysecdec").unwrap();
+        let outer = registration.unlock();
+        {
+            let _inner = registration.unlock();
+            assert!(current_thread_is_unlocked());
+        }
+        assert!(current_thread_is_unlocked());
+        drop(outer);
+        assert!(!current_thread_is_unlocked());
+    }
+
+    #[test]
+    fn symbolica_worker_can_inherit_unlock() {
+        let registration = LibraryUnlock::for_crate(TEST_UNLOCK_TOKEN, "pysecdec").unwrap();
+        let _guard = registration.unlock();
+        let inherited = InheritedLibraryUnlock::capture();
+
+        assert!(
+            std::thread::spawn(move || {
+                assert!(!current_thread_is_unlocked());
+                let _guard = inherited.activate();
+                current_thread_is_unlocked()
+            })
+            .join()
+            .unwrap()
+        );
+    }
+
+    #[test]
+    fn parallel_symbolica_callback_inherits_unlock() {
+        use crate::atom::AtomCore;
+
+        let registration = LibraryUnlock::for_crate(TEST_UNLOCK_TOKEN, "pysecdec").unwrap();
+        let _guard = registration.unlock();
+        let expression = crate::parse!("a+b+c+d+e+f+g+h");
+
+        let result = expression.map_terms(
+            |term| {
+                assert!(current_thread_is_unlocked());
+                term.to_owned()
+            },
+            4,
+        );
+        assert_eq!(result, expression);
     }
 
     #[cfg(not(target_arch = "wasm32"))]

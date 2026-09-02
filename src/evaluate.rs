@@ -550,20 +550,19 @@ mod test {
     #[test]
     fn jit_compiles_non_inlined_function_registered_with_options() {
         let function = symbol!("symbolica::sub_eval::jit_options");
-        let evaluator = parse!(
-            "symbolica::sub_eval::jit_options(x) + symbolica::sub_eval::jit_options(x + 1)"
-        )
-        .evaluator(&[parse!("x")])
-        .add_function_with_options(
-            function,
-            vec![symbol!("y")],
-            parse!("y^2 + 2"),
-            FunctionRegistrationOptions::new().inlining(InliningPolicy::Never),
-        )
-        .unwrap()
-        .build()
-        .unwrap()
-        .map_coeff(&|coefficient| coefficient.re.to_f64());
+        let evaluator =
+            parse!("symbolica::sub_eval::jit_options(x) + symbolica::sub_eval::jit_options(x + 1)")
+                .evaluator(&[parse!("x")])
+                .add_function_with_options(
+                    function,
+                    vec![symbol!("y")],
+                    parse!("y^2 + 2"),
+                    FunctionRegistrationOptions::new().inlining(InliningPolicy::Never),
+                )
+                .unwrap()
+                .build()
+                .unwrap()
+                .map_coeff(&|coefficient| coefficient.re.to_f64());
 
         let mut compiled = evaluator
             .jit_compile(JITCompilationSettings::default())

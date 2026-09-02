@@ -443,7 +443,7 @@ pub struct ExecutionCapabilities {
 
 #[cfg(not(target_arch = "wasm32"))]
 const RESTRICTED_THREAD_WARNING: &str = "┌──────────────────────────────────────────────────────────────────────────────────────────────────┐
-│ Cannot start another restricted Symbolica thread while this user's thread allowance is in use. │
+│ Cannot start another restricted Symbolica thread while this user's thread allowance is in use.   │
 └──────────────────────────────────────────────────────────────────────────────────────────────────┘"
 ;
 
@@ -519,8 +519,21 @@ macro_rules! activate_oem_license {
 
 /// Verify and register a signed library unlock token for the calling Rust crate.
 ///
-/// The token's package claim must match `CARGO_CRATE_NAME`. Store the returned
-/// [`unlock::LibraryUnlock`] and enter a guard around each library operation.
+/// Store the returned [`unlock::LibraryUnlock`] and unlock each library operation with a guard.
+///
+/// A static `LibraryUnlock` must not be exported beyond the crate.
+///
+/// # Examples
+///
+/// ```
+/// pub(crate) static UNLOCK: LazyLock<LibraryUnlock> = LazyLock::new(|| {
+///     register_library_unlock!("YOUR_KEY").unwrap()
+/// });
+///
+/// fn main() {
+///     let _unlock = UNLOCK.unlock();
+/// }
+/// ```
 #[macro_export]
 macro_rules! register_library_unlock {
     ($token:expr) => {{ $crate::unlock::LibraryUnlock::for_crate($token, env!("CARGO_CRATE_NAME")) }};
@@ -529,7 +542,7 @@ macro_rules! register_library_unlock {
 impl LicenseManager {
     #[inline]
     fn is_library_unlocked() -> bool {
-        if crate::unlock::current_thread_has_guard() {
+        if crate::unlock::current_thread_is_unlocked() {
             return true;
         }
 

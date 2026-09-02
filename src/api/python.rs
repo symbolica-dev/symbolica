@@ -67,6 +67,7 @@ use crate::{
         Atom, AtomCore, AtomType, AtomView, DefaultNamespace, EvaluationInfo, Indeterminate,
         ListIterator, Symbol, SymbolAttribute, SymbolBuilder, UserData, UserDataKey,
     },
+    bypass_license_check_internal,
     coefficient::{Coefficient, CoefficientView, ConvertToRing},
     domains::{
         Ring, RingOps, SelfRing,
@@ -105,7 +106,6 @@ use crate::{
         AtomPrinter, ColorMode, PrintMode, PrintOptions, PrintState, PrintUserData,
         PrintUserDataKey,
     },
-    bypass_license_check_internal,
     solve::{Inequality, Solution, SolutionCondition, SolutionValue, SolveDomain},
     state::{RecycledAtom, State, Workspace},
     streaming::{TermStreamer, TermStreamerConfig},
