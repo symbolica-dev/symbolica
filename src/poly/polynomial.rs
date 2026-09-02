@@ -4446,6 +4446,11 @@ impl<F: Ring, E: Exponent> MultivariatePolynomial<F, E, LexOrder> {
         if minimum_products_per_coefficient == 0 {
             return None;
         }
+
+        if self.nterms().min(other.nterms()) < minimum_products_per_coefficient {
+            return None;
+        }
+
         let variable_count = self.nvars();
         if variable_count != other.nvars()
             || !(2..=8).contains(&variable_count)
