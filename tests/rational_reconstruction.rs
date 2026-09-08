@@ -28,6 +28,7 @@ fn check(num: &str, den: &str, names: &[&str], seed: u64) {
             &ReconstructionOptions {
                 seed,
                 max_degree: 40,
+                degree_race: true,
                 ..Default::default()
             },
         )
@@ -58,7 +59,12 @@ fn balanced_meets_paper_probe_budget() {
         parse!("(d+13)^30*(y^2+9)^7+1").to_polynomial(&field, vars.clone());
     let d: MultivariatePolynomial<_, u16> =
         parse!("(d-4)^29*(y^2-1)^5").to_polynomial(&field, vars.clone());
-    for (method, budget) in [(BalancedZippel, 509), (BalancedZippelSeparated, 306)] {
+    for (method, degree_race, budget) in [
+        (BalancedZippel, false, 451),
+        (BalancedZippel, true, 448),
+        (BalancedZippelSeparated, false, 306),
+        (BalancedZippelSeparated, true, 303),
+    ] {
         for seed in 0..10 {
             let mut calls = 0;
             let (r, stats) = reconstruct_rational_function(
@@ -73,6 +79,7 @@ fn balanced_meets_paper_probe_budget() {
                 &ReconstructionOptions {
                     seed,
                     max_degree: 64,
+                    degree_race,
                     max_probes: budget,
                     ..Default::default()
                 },
@@ -81,6 +88,46 @@ fn balanced_meets_paper_probe_budget() {
             assert_eq!(&r.numerator * &d, &r.denominator * &n);
             assert_eq!(calls, stats.probes);
         }
+    }
+}
+
+#[test]
+fn unbalanced_degree_race_and_numerator_completion() {
+    let field = Zp64::new(2_305_843_009_213_693_951);
+    let vars = Arc::new(vec![symbol!("x").into()]);
+    let n: MultivariatePolynomial<_, u16> = parse!("x^30+3").to_polynomial(&field, vars.clone());
+    let d: MultivariatePolynomial<_, u16> = parse!("x^3+5").to_polynomial(&field, vars.clone());
+    for seed in 0..8 {
+        let (r, _) = reconstruct_rational_function(
+            field.clone(),
+            vars.clone(),
+            |f, x| {
+                let dv = d.replace_all(x);
+                (!f.is_zero(&dv)).then(|| f.div(&n.replace_all(x), &dv))
+            },
+            BalancedZippel,
+            &ReconstructionOptions {
+                seed,
+                max_degree: 40,
+                degree_race: true,
+                max_probes: 40,
+                ..Default::default()
+            },
+        )
+        .unwrap();
+        assert_eq!(&r.numerator * &d, &r.denominator * &n);
+        check(
+            "(x+1)*(y^5+3)",
+            "x^4*(y^4+2)+x^2*(y+5)+3",
+            &["x", "y"],
+            seed,
+        );
+        check(
+            "x^4*(y^4+2)+x^2*(y+5)+3",
+            "(x+1)*(y^5+3)",
+            &["x", "y"],
+            seed,
+        );
     }
 }
 
@@ -311,6 +358,7 @@ fn generated_sparse_functions_over_a_smaller_prime() {
                 method,
                 &ReconstructionOptions {
                     max_degree: 16,
+                    degree_race: true,
                     seed: case as u64,
                     ..Default::default()
                 },

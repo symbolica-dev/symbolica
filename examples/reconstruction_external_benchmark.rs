@@ -74,6 +74,7 @@ fn main() {
                 let opts = ReconstructionOptions {
                     seed,
                     max_degree: 64,
+                    degree_race: std::env::var_os("RECONSTRUCTION_DEGREE_RACE").is_some(),
                     ..Default::default()
                 };
                 let start = Instant::now();

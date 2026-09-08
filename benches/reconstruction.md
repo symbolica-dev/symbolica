@@ -1,7 +1,8 @@
 # Rational function reconstruction experiment
 
-Latest update: [matching the reference probe counts](reconstruction-probes.md)
-adds degree-bounded balanced rows and verified denominator separation.
+Latest update: [further probe reductions and public stress tests](reconstruction-stress.md)
+adds early numerator/denominator completion and an optional unbalanced-degree search.
+The earlier [reference comparison](reconstruction-probes.md) records the preceding version.
 
 Worktree: `/common/dev/symbolica-reconstruction`, branch `codex/rational-reconstruction`,
 based on `d78823e`. Implementations are in `src/poly/reconstruction.rs` and its

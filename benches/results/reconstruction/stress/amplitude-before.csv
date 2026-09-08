@@ -1,0 +1,2 @@
+case,method,seed,order,status,setup_ms,elapsed_us,probes,attempts,num_terms,den_terms,degree_race
+aajamp,BalancedZippel,1,original,time_limit,5552.953,180006727.671,73069,0,23260,7231,0
