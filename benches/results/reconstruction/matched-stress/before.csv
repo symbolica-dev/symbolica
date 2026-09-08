@@ -1,0 +1,13 @@
+case,method,seed,status,elapsed_us,probes,prime,oracle,degree_race,num_terms,den_terms,setup_ms
+coeff_prop_4l,FireFly_default,1,ok,17070787.046,16375,9223372036854775783,cached_powers,0,6671,6051,
+coeff_prop_4l,BalancedZippel,1,ok,985628.341,12899,9223372036854775783,cached_powers,0,6671,6051,62.385
+aajamp,FireFly_default,1,time_limit,68023782.005,50038,9223372036854775783,cached_powers,0,23260,7231,
+aajamp,BalancedZippel,1,ok,44538426.839,76076,9223372036854775783,cached_powers,0,23260,7231,5343.037
+firefly_f1,FireFly_default,1,ok,147815.732,3191,9223372036854775783,cached_powers,0,20,20,
+firefly_f1,BalancedZippel,1,ok,66102.834,8464,9223372036854775783,cached_powers,0,20,20,0.406
+firefly_f2,FireFly_default,1,ok,1118101.698,2457,9223372036854775783,cached_powers,0,3,2,
+firefly_f2,BalancedZippel,1,ok,71799.527,2048,9223372036854775783,cached_powers,0,3,2,0.335
+firefly_f3,FireFly_default,1,time_limit,60074096.453,26695,9223372036854775783,cached_powers,0,26333,3,
+firefly_f3,BalancedZippel,1,ok,51698900.649,124524,9223372036854775783,cached_powers,0,26333,3,28.203
+firefly_f4,FireFly_default,1,time_limit,60000630.521,24792,9223372036854775783,cached_powers,0,53129,3,
+firefly_f4,BalancedZippel,1,time_limit,60001534.872,82772,9223372036854775783,cached_powers,0,53129,3,79.461

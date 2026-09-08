@@ -1,0 +1,2 @@
+case,method,seed,order,status,setup_ms,elapsed_us,probes,attempts,num_terms,den_terms
+aajamp,BalancedZippel,1,original,ok,4782.089,40198383.761,76076,1,23260,7231

@@ -1,0 +1,29 @@
+# To display the perf.data header info, please use --header/--header-only options.
+#
+#
+# Total Lost Samples: 0
+#
+# Samples: 9K of event 'cycles:u'
+# Event count (approx.): 132946357102
+#
+# Overhead  Command        Shared Object         Symbol
+# ........  .............  ....................  .........................................................................................................................................................................................................................................................................................................
+#
+    74.72%  cached-before  cached-before         [.] reconstruction_stress_benchmark::CachedOracle::evaluate
+            |
+            ---reconstruction_stress_benchmark::CachedOracle::evaluate
+               0x9c3
+
+     6.08%  cached-before  cached-before         [.] symbolica::poly::gcd::<impl symbolica::poly::polynomial::MultivariatePolynomial<F,E>>::solve_shifted_transposed_vandermonde
+            |
+            ---symbolica::poly::gcd::<impl symbolica::poly::polynomial::MultivariatePolynomial<F,E>>::solve_shifted_transposed_vandermonde
+
+     3.20%  cached-before  cached-before         [.] symbolica::poly::polynomial::MultivariatePolynomial<F,E>::heap_division_packed_exp
+            |
+            ---symbolica::poly::polynomial::MultivariatePolynomial<F,E>::heap_division_packed_exp
+
+
+
+#
+# (Tip: To browse sample contexts use perf report --sample 10 and select in context menu)
+#

@@ -1,0 +1,6 @@
+case,method,seed,status,elapsed_us,probes,prime,oracle,degree_race,num_terms,den_terms,setup_ms
+coeff_prop_4l,BalancedZippel,1,ok,1100501.860,12822,9223372036854775783,cached_powers,0,6671,6051,68.647
+aajamp,BalancedZippel,1,ok,31007369.592,73156,9223372036854775783,cached_powers,0,23260,7231,3873.442
+firefly_f1,BalancedZippel,1,ok,48362.006,8464,9223372036854775783,cached_powers,0,20,20,0.578
+firefly_f2,BalancedZippel,1,ok,65836.027,2044,9223372036854775783,cached_powers,0,3,2,0.263
+firefly_f3,BalancedZippel,1,ok,51538988.472,124524,9223372036854775783,cached_powers,0,26333,3,41.668

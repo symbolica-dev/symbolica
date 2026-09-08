@@ -369,6 +369,7 @@ impl<F: FnMut(&Zp64, &[Element]) -> Option<Element>> Context<'_, F> {
         point: &[Element],
         known: Element,
         degrees: (u16, u16),
+        min_degrees: (u16, u16),
         denominator: Option<&Polynomial>,
         reciprocal: bool,
     ) -> Result<Fraction> {
@@ -381,8 +382,12 @@ impl<F: FnMut(&Zp64, &[Element]) -> Option<Element>> Context<'_, F> {
         );
         let mut interpolant = dense.zero();
         let mut modulus = dense.one();
+        // A monomial factor seen in the first generic row predicts zero low
+        // coefficients in later rows. Remove it from the interpolation problem;
+        // the unchanged final identity checks guard exceptional specializations.
+        let degrees = (degrees.0 - min_degrees.0, degrees.1 - min_degrees.1);
         let known_denominator = denominator.map(|p| {
-            let cs = (0..=p.degree(variable))
+            let cs = (min_degrees.1..=p.degree(variable))
                 .map(|d| coefficient(p, variable, d))
                 .collect();
             UnivariatePolynomial::from_coefficients(&f, cs, dense.variable.clone())
@@ -421,6 +426,16 @@ impl<F: FnMut(&Zp64, &[Element]) -> Option<Element>> Context<'_, F> {
                 }
                 (t, if reciprocal { f.inv(&y) } else { y })
             };
+            let y = if min_degrees.0 != 0 {
+                f.div(&y, &f.pow(&t, min_degrees.0 as u64))
+            } else {
+                y
+            };
+            let y = if min_degrees.1 != 0 {
+                f.mul(&y, &f.pow(&t, min_degrees.1 as u64))
+            } else {
+                y
+            };
             let polynomial_value = known_denominator
                 .as_ref()
                 .map_or(y, |d| f.mul(&y, &d.evaluate(&t)));
@@ -442,7 +457,7 @@ impl<F: FnMut(&Zp64, &[Element]) -> Option<Element>> Context<'_, F> {
         }
         if let Some(denominator) = denominator {
             return Ok(Fraction {
-                numerator: embed(&self.template, variable, interpolant),
+                numerator: embed_shifted(&self.template, variable, interpolant, min_degrees.0),
                 denominator: denominator.clone(),
             });
         }
@@ -466,8 +481,8 @@ impl<F: FnMut(&Zp64, &[Element]) -> Option<Element>> Context<'_, F> {
             return unlucky();
         }
         Ok(Fraction::from_num_den(
-            embed(&self.template, variable, r1),
-            embed(&self.template, variable, q1),
+            embed_shifted(&self.template, variable, r1, min_degrees.0),
+            embed_shifted(&self.template, variable, q1, min_degrees.1),
             &f,
             true,
         ))
@@ -492,6 +507,7 @@ impl<F: FnMut(&Zp64, &[Element]) -> Option<Element>> Context<'_, F> {
             }
             let mut rows: Vec<Fraction> = Vec::new();
             let mut degrees: Option<(u16, u16)> = None;
+            let mut min_degrees = (0, 0);
             let mut completed: [Option<Polynomial>; 2] = [None, None];
             for i in 1..=z {
                 let mut point = anchors.clone();
@@ -528,8 +544,20 @@ impl<F: FnMut(&Zp64, &[Element]) -> Option<Element>> Context<'_, F> {
                     } else {
                         degrees
                     };
-                    let mut row =
-                        self.degree_row(variable, &point, known, degrees, denominator, reciprocal)?;
+                    let min_degrees = if reciprocal {
+                        (min_degrees.1, min_degrees.0)
+                    } else {
+                        min_degrees
+                    };
+                    let mut row = self.degree_row(
+                        variable,
+                        &point,
+                        known,
+                        degrees,
+                        min_degrees,
+                        denominator,
+                        reciprocal,
+                    )?;
                     if reciprocal {
                         std::mem::swap(&mut row.numerator, &mut row.denominator);
                     }
@@ -545,6 +573,15 @@ impl<F: FnMut(&Zp64, &[Element]) -> Option<Element>> Context<'_, F> {
                         Some((point[variable], known)),
                     )?
                 };
+                if degrees.is_none() {
+                    let min = |p: &Polynomial| {
+                        p.into_iter()
+                            .map(|m| m.exponents[variable])
+                            .min()
+                            .unwrap_or(0)
+                    };
+                    min_degrees = (min(&row.numerator), min(&row.denominator));
+                }
                 degrees.get_or_insert((
                     row.numerator.degree(variable),
                     row.denominator.degree(variable),
@@ -861,10 +898,19 @@ fn lift_rows(
 }
 
 fn embed(template: &Polynomial, variable: usize, dense: UnivariatePolynomial<Zp64>) -> Polynomial {
+    embed_shifted(template, variable, dense, 0)
+}
+
+fn embed_shifted(
+    template: &Polynomial,
+    variable: usize,
+    dense: UnivariatePolynomial<Zp64>,
+    shift: u16,
+) -> Polynomial {
     let mut p = template.zero();
     let mut ex = vec![0; p.nvars()];
     for (d, c) in dense.coefficients.into_iter().enumerate() {
-        ex[variable] = d as u16;
+        ex[variable] = d as u16 + shift;
         p.append_monomial(c, &ex);
     }
     p

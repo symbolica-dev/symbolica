@@ -1,7 +1,10 @@
 # Rational function reconstruction experiment
 
-Latest update: [further probe reductions and public stress tests](reconstruction-stress.md)
-adds early numerator/denominator completion and an optional unbalanced-degree search.
+Latest update: [matched public stress benchmarks](reconstruction-matched-stress.md)
+compares actual FireFly and FIRE7 on public coefficients and removes learned
+monomial factors from later interpolation rows.
+The [preceding update](reconstruction-stress.md) adds early numerator/denominator
+completion and an optional unbalanced-degree search.
 The earlier [reference comparison](reconstruction-probes.md) records the preceding version.
 
 Worktree: `/common/dev/symbolica-reconstruction`, branch `codex/rational-reconstruction`,
