@@ -1,0 +1,105 @@
+--- a/src/poly/reconstruction.rs
++++ b/src/poly/reconstruction.rs
+@@ -23,0 +24,2 @@
++
++
+@@ -155,0 +158 @@
++        monomial: None,
+@@ -196,0 +200 @@
++    monomial: Option<[Vec<u16>; 2]>,
+@@ -223,0 +228,15 @@
++        let Some(mut value) = self.probe_raw(point)? else { return Ok(None); };
++        if let Some(powers) = &self.monomial {
++            let f = &self.field;
++            for ((x, n), d) in point.iter().zip(&powers[0]).zip(&powers[1]) {
++                if n > d {
++                    if f.is_zero(x) { return Ok(None); }
++                    value = f.div(&value, &f.pow(x, (n - d) as u64));
++                } else if d > n {
++                    value = f.mul(&value, &f.pow(x, (d - n) as u64));
++                }
++            }
++        }
++        Ok(Some(value))
++    }
++    fn probe_raw(&mut self, point: &[Element]) -> Result<Option<Element>> {
+@@ -655,0 +675 @@
++        let mut minimum = [Vec::new(), Vec::new()];
+@@ -664 +684,18 @@
+-        }
++            for (side, p) in [&slice.numerator, &slice.denominator].into_iter().enumerate() {
++                let lo = if prune { p.into_iter().map(|m| m.exponents[variable]).min().unwrap_or(0) } else { 0 };
++                minimum[side].push(lo);
++                bounds[side][variable] -= lo;
++            }
++        }
++        self.monomial = prune.then(|| minimum.clone());
++        let result = self.cuyt_lee_bounded(prune, &bounds);
++        self.monomial = None;
++        result.map(|mut r| {
++            r.numerator = &r.numerator * &self.template.monomial(f.one(), minimum[0].clone());
++            r.denominator = &r.denominator * &self.template.monomial(f.one(), minimum[1].clone());
++            r
++        })
++    }
++
++    fn cuyt_lee_bounded(&mut self, prune: bool, bounds: &[Vec<u16>; 2]) -> Result<Fraction> {
++        let f = self.field.clone();
+@@ -763,0 +801,3 @@
++        if std::env::var_os("RECONSTRUCTION_DESCENDING").is_some() {
++            return self.cuyt_lee_descending(shift, anchors, first, bounds);
++        }
+@@ -864,0 +905,53 @@
++    fn cuyt_lee_descending(
++        &mut self,
++        shift: &[Element],
++        anchors: &[Element],
++        first: Fraction,
++        bounds: &[Vec<u16>; 2],
++    ) -> Result<Fraction> {
++        let f = self.field.clone();
++        let degrees = [first.numerator.degree(0), first.denominator.degree(0)];
++        let mut powers: [Vec<u16>; 2] = [(0..=degrees[0]).collect(), (1..=degrees[1]).collect()];
++        let mut lines = HashMap::from([(anchors.to_vec(), first)]);
++        let mut known = [self.template.zero(), self.template.zero()];
++        let mut output = [self.template.zero(), self.template.zero()];
++        let sizes = [homogeneous_sizes(&bounds[0], degrees[0]), homogeneous_sizes(&bounds[1], degrees[1])];
++        let mut remaining = [Some(degrees[0]), Some(degrees[1])];
++        while remaining.iter().any(Option::is_some) {
++            let side = (0..2).filter(|&s| remaining[s].is_some())
++                .min_by_key(|&s| (sizes[s][remaining[s].unwrap() as usize], 1-s)).unwrap();
++            let d = remaining[side].unwrap();
++            let previous_probes = self.stats.probes;
++            let template = self.template.clone();
++            let correction = homogeneous_part(&known[side], d);
++            let component = zippel(&template, anchors, d, &bounds[side], self.options.verification_points,
++                |direction| {
++                    if !lines.contains_key(direction) {
++                        let mut fixed = [homogeneous_line(&known[0], direction), homogeneous_line(&known[1], direction)];
++                        fixed[1][0] = f.one();
++                        let r = self.line_solve(shift, direction, &powers[0], &powers[1], Some(&fixed))?;
++                        lines.insert(direction.to_vec(), r);
++                    }
++                    let r = &lines[direction];
++                    Ok(f.sub(&coefficient(if side == 0 { &r.numerator } else { &r.denominator }, 0, d), &correction.replace_all(direction)))
++                })?;
++            let mut homogeneous = self.template.zero();
++            for m in &component {
++                let sum: u32 = m.exponents.iter().skip(1).map(|e| *e as u32).sum();
++                if sum > d as u32 { return unlucky(); }
++                let mut ex = m.exponents.to_vec();
++                ex[0] = d - sum as u16;
++                homogeneous.append_monomial(*m.coefficient, &ex);
++            }
++            known[side] = &known[side] + &translate(&homogeneous, shift);
++            output[side] = &output[side] + &homogeneous;
++            if std::env::var_os("RECONSTRUCTION_TRACE").is_some() {
++                eprintln!("component,{side},{d},{},{}", homogeneous.nterms(), self.stats.probes - previous_probes);
++            }
++            powers[side].retain(|power| *power != d);
++            remaining[side] = d.checked_sub(1);
++        }
++        let [numerator, denominator] = output;
++        Ok(Fraction { numerator, denominator })
++    }
++

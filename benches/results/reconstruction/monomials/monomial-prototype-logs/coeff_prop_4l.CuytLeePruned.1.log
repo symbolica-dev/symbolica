@@ -1,0 +1,2 @@
+case,method,seed,order,status,setup_ms,elapsed_us,probes,attempts,num_terms,den_terms
+coeff_prop_4l,CuytLeePruned,1,original,ok,81.566,2168931.255,13089,1,6671,6051

@@ -1,0 +1,2 @@
+case,method,seed,order,status,setup_ms,elapsed_us,probes,attempts,num_terms,den_terms
+aajamp,CuytLeePruned,3,original,ok,4052.029,17392057.429,43922,1,23260,7231

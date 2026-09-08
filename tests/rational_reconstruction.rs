@@ -139,6 +139,108 @@ fn completed_homogeneous_components_reduce_probes() {
 }
 
 #[test]
+fn homogeneous_reconstruction_removes_monomial_factors() {
+    let field = Zp64::new(2_305_843_009_213_693_951);
+    let vars = Arc::new(vec![
+        symbol!("x").into(),
+        symbol!("y").into(),
+        symbol!("z").into(),
+    ]);
+    for (ns, ds) in [
+        ("(1+x+y+z)^6", "x^6*y^5*z^4*(1+x*y+y*z+z*x)"),
+        ("x^6*y^5*z^4*(1+x*y+y*z+z*x)", "(1+x+y+z)^6"),
+        ("x^4*(1+x+y+z)^6", "y^5*z^6*(1+x*y+y*z+z*x)"),
+    ] {
+        let n: MultivariatePolynomial<_, u16> = parse!(ns).to_polynomial(&field, vars.clone());
+        let d: MultivariatePolynomial<_, u16> = parse!(ds).to_polynomial(&field, vars.clone());
+        for seed in 0..5 {
+            let mut calls = 0;
+            let (r, stats) = reconstruct_rational_function(
+                field.clone(),
+                vars.clone(),
+                |f, p| {
+                    calls += 1;
+                    let dv = d.replace_all(p);
+                    (!f.is_zero(&dv)).then(|| f.div(&n.replace_all(p), &dv))
+                },
+                CuytLeePruned,
+                &ReconstructionOptions {
+                    seed,
+                    max_degree: 32,
+                    max_probes: 500,
+                    ..Default::default()
+                },
+            )
+            .unwrap();
+            assert_eq!(&r.numerator * &d, &r.denominator * &n);
+            assert_eq!(stats.probes, calls);
+            assert_eq!(stats.attempts, 1);
+        }
+    }
+}
+
+#[test]
+fn homogeneous_monomial_factors_are_cleared_after_an_unlucky_slice() {
+    use rand::{Rng, SeedableRng, rngs::StdRng};
+    let field = Zp64::new(1_000_003);
+    let vars = Arc::new(vec![symbol!("x").into(), symbol!("y").into()]);
+    for seed in 0..5 {
+        let mut rng = StdRng::seed_from_u64(seed);
+        let _ = rng.random_range(1..1_000_003u64);
+        let unlucky_y = field.to_element(rng.random_range(1..1_000_003u64));
+        // At the first degree-profile slice, x^2*((y-unlucky_y)*x^4+1)
+        // loses four degrees. The attempt fails after activating the factors.
+        let mut n = MultivariatePolynomial::<_, u16>::new(&field, None, vars.clone());
+        n.append_monomial(field.one(), &[6, 1]);
+        n.append_monomial(field.neg(&unlucky_y), &[6, 0]);
+        n.append_monomial(field.one(), &[2, 0]);
+        let d: MultivariatePolynomial<_, u16> =
+            parse!("y^3*(x+2)").to_polynomial(&field, vars.clone());
+        let (r, stats) = reconstruct_rational_function(
+            field.clone(),
+            vars.clone(),
+            |f, p| {
+                let dv = d.replace_all(p);
+                (!f.is_zero(&dv)).then(|| f.div(&n.replace_all(p), &dv))
+            },
+            CuytLeePruned,
+            &ReconstructionOptions {
+                seed,
+                max_degree: 16,
+                max_attempts: 2,
+                ..Default::default()
+            },
+        )
+        .unwrap();
+        assert_eq!(stats.attempts, 2);
+        assert_eq!(&r.numerator * &d, &r.denominator * &n);
+    }
+}
+
+#[test]
+fn homogeneous_degree_limit_includes_removed_factors() {
+    let field = Zp64::new(1_000_003);
+    let vars = Arc::new(vec![symbol!("x").into(), symbol!("y").into()]);
+    let n: MultivariatePolynomial<_, u16> =
+        parse!("x^6*y^6*(x+y+1)").to_polynomial(&field, vars.clone());
+    let result = reconstruct_rational_function(
+        field,
+        vars,
+        |_, p| Some(n.replace_all(p)),
+        CuytLeePruned,
+        &ReconstructionOptions {
+            max_degree: 8,
+            max_attempts: 1,
+            ..Default::default()
+        },
+    );
+    assert!(matches!(
+        result,
+        Err(ReconstructionError::AttemptsExhausted)
+    ));
+}
+
+#[test]
 fn balanced_removes_learned_monomial_factors() {
     let field = Zp64::new(2_305_843_009_213_693_951);
     let vars = Arc::new(vec![symbol!("x").into(), symbol!("y").into()]);

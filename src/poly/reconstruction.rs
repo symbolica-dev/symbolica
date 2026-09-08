@@ -35,7 +35,8 @@ pub enum ReconstructionMethod {
     /// Homogenization, Thiele degree discovery, linear solves and polynomial Zippel.
     CuytLee,
     /// Reconstruct inexpensive shifted homogeneous components first, removing
-    /// completed components from later line solves. Tries sparse shifts first.
+    /// completed components from later line solves. Removes learned monomial
+    /// factors and tries sparse shifts first.
     CuytLeePruned,
     /// Thiele degree discovery, degree-bounded rows and balanced sparse lifting.
     BalancedZippel,
@@ -153,6 +154,7 @@ where
         rng: StdRng::seed_from_u64(options.seed),
         cache: HashMap::new(),
         stats: Default::default(),
+        monomial_factors: None,
     };
     for attempt in 0..options.max_attempts {
         ctx.stats.attempts = attempt + 1;
@@ -194,6 +196,9 @@ struct Context<'a, F> {
     rng: StdRng,
     cache: HashMap<Vec<Element>, Option<Element>>,
     stats: ReconstructionStats,
+    // Only active inside the pruned homogeneous reconstruction. The cache and
+    // validation always retain the original oracle values.
+    monomial_factors: Option<[Vec<u16>; 2]>,
 }
 
 fn unlucky<T>() -> Result<T> {
@@ -221,6 +226,27 @@ impl<F: FnMut(&Zp64, &[Element]) -> Option<Element>> Context<'_, F> {
         (0..self.template.nvars()).map(|_| self.random()).collect()
     }
     fn probe(&mut self, point: &[Element]) -> Result<Option<Element>> {
+        let Some(mut value) = self.probe_raw(point)? else {
+            return Ok(None);
+        };
+        if let Some(powers) = &self.monomial_factors {
+            let f = &self.field;
+            for ((x, n), d) in point.iter().zip(&powers[0]).zip(&powers[1]) {
+                if n != d && f.is_zero(x) {
+                    // A removable zero or pole needs a limit, which a raw
+                    // black-box value does not supply. Use another point.
+                    return Ok(None);
+                }
+                if n > d {
+                    value = f.div(&value, &f.pow(x, (n - d) as u64));
+                } else if d > n {
+                    value = f.mul(&value, &f.pow(x, (d - n) as u64));
+                }
+            }
+        }
+        Ok(Some(value))
+    }
+    fn probe_raw(&mut self, point: &[Element]) -> Result<Option<Element>> {
         if let Some(v) = self.cache.get(point) {
             self.stats.cache_hits += 1;
             return Ok(*v);
@@ -241,7 +267,7 @@ impl<F: FnMut(&Zp64, &[Element]) -> Option<Element>> Context<'_, F> {
             if self.cache.contains_key(&point) {
                 continue;
             }
-            if let Some(v) = self.probe(&point)? {
+            if let Some(v) = self.probe_raw(&point)? {
                 if value(r, &point) != Some(v) {
                     return Ok(false);
                 }
@@ -653,6 +679,7 @@ impl<F: FnMut(&Zp64, &[Element]) -> Option<Element>> Context<'_, F> {
         let f = self.field.clone();
         let degree_anchor = self.point();
         let mut bounds = [Vec::new(), Vec::new()];
+        let mut minimum = [Vec::new(), Vec::new()];
         for variable in 0..self.template.nvars() {
             let slice = self.thiele(variable, |t| {
                 let mut p = degree_anchor.clone();
@@ -661,7 +688,40 @@ impl<F: FnMut(&Zp64, &[Element]) -> Option<Element>> Context<'_, F> {
             })?;
             bounds[0].push(slice.numerator.degree(variable));
             bounds[1].push(slice.denominator.degree(variable));
+            for (side, p) in [&slice.numerator, &slice.denominator]
+                .into_iter()
+                .enumerate()
+            {
+                let lo = if prune {
+                    p.into_iter()
+                        .map(|m| m.exponents[variable])
+                        .min()
+                        .unwrap_or(0)
+                } else {
+                    0
+                };
+                minimum[side].push(lo);
+                bounds[side][variable] -= lo;
+            }
         }
+        // Generic slices expose factors shared by every term. Reduce the
+        // degrees before homogenization, without additional discovery probes.
+        self.monomial_factors = minimum.iter().flatten().any(|d| *d != 0).then_some(minimum);
+        let result = self.cuyt_lee_bounded(prune, &bounds);
+        // Clear the transformation on errors too, before another attempt can
+        // reuse the original cached probes for degree discovery.
+        let factors = self.monomial_factors.take();
+        result.map(|mut r| {
+            if let Some([n, d]) = factors {
+                r.numerator = &r.numerator * &self.template.monomial(f.one(), n);
+                r.denominator = &r.denominator * &self.template.monomial(f.one(), d);
+            }
+            r
+        })
+    }
+
+    fn cuyt_lee_bounded(&mut self, prune: bool, bounds: &[Vec<u16>; 2]) -> Result<Fraction> {
+        let f = self.field.clone();
         let mut shift = vec![f.zero(); self.template.nvars()];
         if self.probe(&shift)?.is_none() {
             if prune {
@@ -696,9 +756,18 @@ impl<F: FnMut(&Zp64, &[Element]) -> Option<Element>> Context<'_, F> {
         let first = self.thiele(0, |t| line_point(&f, &shift, &anchors, t))?;
         let nd = first.numerator.degree(0);
         let dd = first.denominator.degree(0);
+        if let Some(factors) = &self.monomial_factors {
+            for (degree, powers) in [nd, dd].into_iter().zip(factors) {
+                if degree as u64 + powers.iter().map(|d| *d as u64).sum::<u64>()
+                    > self.options.max_degree as u64
+                {
+                    return unlucky();
+                }
+            }
+        }
         let first = normalize_constant(first)?;
         if prune {
-            return self.cuyt_lee_components(&shift, &anchors, first, &bounds);
+            return self.cuyt_lee_components(&shift, &anchors, first, bounds);
         }
         let num_powers: Vec<_> = (&first.numerator)
             .into_iter()
