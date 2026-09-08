@@ -1,0 +1,4 @@
+case,method,seed,status,elapsed_us,probes,prime,oracle,degree_race,num_terms,den_terms,setup_ms
+coeff_prop_4l,FIRE7_learned_batch,1,ok,2065745.048,13718,9223372036854775783,cached_powers,0,6671,6051,
+coeff_prop_4l,FIRE7_learned_batch,2,ok,2046780.751,13718,9223372036854775783,cached_powers,0,6671,6051,
+coeff_prop_4l,FIRE7_learned_batch,3,ok,2050533.495,13718,9223372036854775783,cached_powers,0,6671,6051,

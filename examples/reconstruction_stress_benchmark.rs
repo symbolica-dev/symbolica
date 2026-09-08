@@ -1,8 +1,8 @@
 //! One bounded reconstruction of a public or generated stress-test function.
 //! Usage: reconstruction_stress_benchmark CASE METHOD SEED [variables in reverse order: reverse]
-use std::{cell::Cell, sync::Arc, time::Instant};
+use std::{cell::Cell, io::Write, sync::Arc, time::Instant};
 use symbolica::{
-    domains::finite_field::Zp64,
+    domains::finite_field::{FiniteFieldCore, FiniteFieldElement, Zp64},
     poly::{
         PolyVariable,
         reconstruction::{
@@ -14,6 +14,55 @@ use symbolica::{
 
 #[derive(Debug)]
 struct TimeLimit;
+
+// Benchmark-only oracle: identical power-table/term-loop algorithm to the
+// external FireFly adapter. Source supports are never given to reconstruction.
+struct CachedOracle {
+    powers: Vec<Vec<FiniteFieldElement<u64>>>,
+}
+
+impl CachedOracle {
+    fn new(r: &RationalPolynomial<Zp64, u16>) -> Self {
+        Self {
+            powers: (0..r.numerator.nvars())
+                .map(|i| {
+                    vec![
+                        r.numerator.ring().one();
+                        1 + r.numerator.degree(i).max(r.denominator.degree(i)) as usize
+                    ]
+                })
+                .collect(),
+        }
+    }
+
+    fn evaluate(
+        &mut self,
+        r: &RationalPolynomial<Zp64, u16>,
+        point: &[FiniteFieldElement<u64>],
+    ) -> Option<FiniteFieldElement<u64>> {
+        let f = r.numerator.ring();
+        for (powers, x) in self.powers.iter_mut().zip(point) {
+            for i in 1..powers.len() {
+                powers[i] = f.mul(&powers[i - 1], x);
+            }
+        }
+        let eval = |p: &MultivariatePolynomial<Zp64, u16>| {
+            let mut result = f.zero();
+            for term in p {
+                let mut c = *term.coefficient;
+                for (powers, &e) in self.powers.iter().zip(term.exponents) {
+                    if e != 0 {
+                        f.mul_assign(&mut c, &powers[e as usize]);
+                    }
+                }
+                f.add_assign(&mut result, &c);
+            }
+            result
+        };
+        let d = eval(&r.denominator);
+        (!f.is_zero(&d)).then(|| f.div(&eval(&r.numerator), &d))
+    }
+}
 
 fn main() {
     let args: Vec<_> = std::env::args().collect();
@@ -38,12 +87,52 @@ fn main() {
     if reverse {
         names.reverse();
     }
-    let field = Zp64::new(2_305_843_009_213_693_951);
+    let field = Zp64::new(
+        std::env::var("BENCH_PRIME")
+            .map(|s| s.parse().unwrap())
+            .unwrap_or(2_305_843_009_213_693_951),
+    );
     let vars: Arc<Vec<PolyVariable>> =
         Arc::new(names.iter().map(|s| symbol!(s.as_str()).into()).collect());
     let setup = Instant::now();
     let original: RationalPolynomial<_, u16> = parse!(source.trim().trim_end_matches(';'))
         .to_rational_polynomial(&field, &field, Some(vars.clone()));
+    if let Ok(path) = std::env::var("EXPORT_ORACLE") {
+        let mut out = std::io::BufWriter::new(std::fs::File::create(path).unwrap());
+        writeln!(
+            out,
+            "{} {} {} {}",
+            names.len(),
+            field.get_prime(),
+            original.numerator.nterms(),
+            original.denominator.nterms()
+        )
+        .unwrap();
+        writeln!(out, "{}", names.join(" ")).unwrap();
+        for p in [&original.numerator, &original.denominator] {
+            for term in p {
+                write!(out, "{}", field.from_element(term.coefficient)).unwrap();
+                for e in term.exponents {
+                    write!(out, " {e}").unwrap();
+                }
+                writeln!(out).unwrap();
+            }
+        }
+        return;
+    }
+    let mut cached = std::env::var_os("CACHED_ORACLE").map(|_| CachedOracle::new(&original));
+    // Compare the optimized oracle to the original before entering the timer.
+    if let Some(cached) = &mut cached {
+        for seed in 1..=8 {
+            let point: Vec<_> = (0..names.len())
+                .map(|i| field.nth((1009 + seed * 31 + i * 17).into()))
+                .collect();
+            let d = original.denominator.replace_all(&point);
+            let expected = (!field.is_zero(&d))
+                .then(|| field.div(&original.numerator.replace_all(&point), &d));
+            assert_eq!(cached.evaluate(&original, &point), expected);
+        }
+    }
     let setup_ms = setup.elapsed().as_secs_f64() * 1000.;
     let timeout = std::env::var("BENCH_TIMEOUT")
         .map(|s| s.parse::<f64>().unwrap())
@@ -75,6 +164,9 @@ fn main() {
                     std::panic::panic_any(TimeLimit);
                 }
                 calls.set(calls.get() + 1);
+                if let Some(cached) = &mut cached {
+                    return cached.evaluate(&original, p);
+                }
                 let d = original.denominator.replace_all(p);
                 (!f.is_zero(&d)).then(|| f.div(&original.numerator.replace_all(p), &d))
             },

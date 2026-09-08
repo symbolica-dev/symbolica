@@ -16,7 +16,7 @@ repeats = int(os.environ.get("RECONSTRUCTION_REPEATS", "1"))
 affinity = ["taskset", "-c", os.environ["BENCH_CPU"]] if "BENCH_CPU" in os.environ else []
 fields = "case,method,seed,order,status,setup_ms,elapsed_us,probes,attempts,num_terms,den_terms".split(",")
 with output.open("w") as stream:
-    writer = csv.DictWriter(stream, fields + ["degree_race"], lineterminator="\n")
+    writer = csv.DictWriter(stream, fields + ["degree_race", "prime", "oracle"], lineterminator="\n")
     writer.writeheader()
     for seed in range(1, repeats + 1):
         for case in cases:
@@ -35,6 +35,8 @@ with output.open("w") as stream:
                 except subprocess.TimeoutExpired:
                     row = dict(case=case,method=method,seed=seed,order=order,status="process_timeout")
                 row["degree_race"] = int("RECONSTRUCTION_DEGREE_RACE" in os.environ)
+                row["prime"] = os.environ.get("BENCH_PRIME", "2305843009213693951")
+                row["oracle"] = "cached_powers" if "CACHED_ORACLE" in os.environ else "expanded"
                 writer.writerow(row)
                 stream.flush()
                 print(case,method,seed,row["status"],row.get("probes",""),flush=True)

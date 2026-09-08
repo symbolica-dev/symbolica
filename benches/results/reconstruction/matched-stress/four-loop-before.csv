@@ -1,0 +1,10 @@
+case,method,seed,status,elapsed_us,probes,prime,oracle,degree_race,num_terms,den_terms,setup_ms
+coeff_prop_4l,FireFly_default,1,ok,17461343.655,16375,9223372036854775783,cached_powers,0,6671,6051,
+coeff_prop_4l,FIRE7_learned_batch,1,ok,2071229.795,13718,9223372036854775783,cached_powers,0,6671,6051,
+coeff_prop_4l,BalancedZippel,1,ok,1082797.569,12899,9223372036854775783,cached_powers,0,6671,6051,79.041
+coeff_prop_4l,FIRE7_learned_batch,2,ok,2095808.784,13718,9223372036854775783,cached_powers,0,6671,6051,
+coeff_prop_4l,BalancedZippel,2,ok,1099560.386,12899,9223372036854775783,cached_powers,0,6671,6051,70.565
+coeff_prop_4l,FireFly_default,2,ok,17407807.264,16374,9223372036854775783,cached_powers,0,6671,6051,
+coeff_prop_4l,BalancedZippel,3,ok,1003151.514,12899,9223372036854775783,cached_powers,0,6671,6051,82.172
+coeff_prop_4l,FireFly_default,3,ok,17166583.038,16374,9223372036854775783,cached_powers,0,6671,6051,
+coeff_prop_4l,FIRE7_learned_batch,3,ok,1942800.940,13718,9223372036854775783,cached_powers,0,6671,6051,

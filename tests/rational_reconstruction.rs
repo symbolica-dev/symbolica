@@ -92,6 +92,39 @@ fn balanced_meets_paper_probe_budget() {
 }
 
 #[test]
+fn balanced_removes_learned_monomial_factors() {
+    let field = Zp64::new(2_305_843_009_213_693_951);
+    let vars = Arc::new(vec![symbol!("x").into(), symbol!("y").into()]);
+    let n: MultivariatePolynomial<_, u16> =
+        parse!("y^20*(x^4+x^3*y+x^2*y^2+x*y^3+y^4)").to_polynomial(&field, vars.clone());
+    let d: MultivariatePolynomial<_, u16> =
+        parse!("x^3+x^2*y+x*y^2+y^3+1").to_polynomial(&field, vars.clone());
+    for seed in 0..10 {
+        for inverse in [false, true] {
+            let (n, d) = if inverse { (&d, &n) } else { (&n, &d) };
+            let (r, stats) = reconstruct_rational_function(
+                field.clone(),
+                vars.clone(),
+                |f, x| {
+                    let dv = d.replace_all(x);
+                    (!f.is_zero(&dv)).then(|| f.div(&n.replace_all(x), &dv))
+                },
+                BalancedZippel,
+                &ReconstructionOptions {
+                    seed,
+                    max_degree: 40,
+                    max_probes: 100,
+                    ..Default::default()
+                },
+            )
+            .unwrap();
+            assert_eq!(&r.numerator * d, &r.denominator * n);
+            assert_eq!(stats.attempts, 1);
+        }
+    }
+}
+
+#[test]
 fn unbalanced_degree_race_and_numerator_completion() {
     let field = Zp64::new(2_305_843_009_213_693_951);
     let vars = Arc::new(vec![symbol!("x").into()]);
