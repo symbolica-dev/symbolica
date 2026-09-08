@@ -1,6 +1,7 @@
 //! Reproducible comparison of the two in-tree reconstruction implementations.
 //! Run `cargo run --release --example reconstruction_benchmark -- [case-filter]`.
 //! Optional environment: RECONSTRUCTION_REPEATS (default 5), PROBE_WORK (default 0).
+//! Set RECONSTRUCTION_SEPARATED to also benchmark verified denominator separation.
 //! PROBE_WORK adds that many dependent finite-field multiplications per oracle
 //! call, solely as a controlled model of expensive probes; it is not an IBP solve.
 use std::{hint::black_box, sync::Arc, time::Instant};
@@ -71,7 +72,7 @@ fn main() {
         ),
     ];
     println!(
-        "case,method,seed,probe_work,elapsed_us,probes,poles,attempts,thiele,linear_solves,num_terms,den_terms"
+        "case,method,seed,probe_work,elapsed_us,probes,poles,attempts,thiele,linear_solves,num_terms,den_terms,degree_rows,separation_fallbacks"
     );
     for (name, num, den, names) in cases {
         if !name.contains(&filter) {
@@ -83,11 +84,15 @@ fn main() {
         let d: MultivariatePolynomial<_, u16> = parse!(den).to_polynomial(&field, vars.clone());
         // One warm-up per method, then identical seeds in alternating method order.
         for run in 0..=repeats {
-            let methods = if run % 2 == 0 {
+            let mut methods = Vec::from(if run % 2 == 0 {
                 [CuytLee, BalancedZippel]
             } else {
                 [BalancedZippel, CuytLee]
-            };
+            });
+            if std::env::var_os("RECONSTRUCTION_SEPARATED").is_some() {
+                methods.push(BalancedZippelSeparated);
+                methods.rotate_left((run % 3) as usize);
+            }
             for method in methods {
                 let options = ReconstructionOptions {
                     seed: run,
@@ -120,14 +125,16 @@ fn main() {
                 );
                 if run > 0 {
                     println!(
-                        "{name},{method:?},{run},{probe_work},{elapsed:.3},{},{},{},{},{},{},{}",
+                        "{name},{method:?},{run},{probe_work},{elapsed:.3},{},{},{},{},{},{},{},{},{}",
                         stats.probes,
                         stats.poles,
                         stats.attempts,
                         stats.univariate_interpolations,
                         stats.linear_solves,
                         result.numerator.nterms(),
-                        result.denominator.nterms()
+                        result.denominator.nterms(),
+                        stats.degree_interpolations,
+                        stats.separation_fallbacks
                     );
                 }
             }

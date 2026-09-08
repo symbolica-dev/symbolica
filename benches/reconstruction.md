@@ -1,5 +1,8 @@
 # Rational function reconstruction experiment
 
+Latest update: [matching the reference probe counts](reconstruction-probes.md)
+adds degree-bounded balanced rows and verified denominator separation.
+
 Worktree: `/common/dev/symbolica-reconstruction`, branch `codex/rational-reconstruction`,
 based on `d78823e`. Implementations are in `src/poly/reconstruction.rs` and its
 `rational` submodule. The original worktree's uncommitted changes are not included.
@@ -85,9 +88,9 @@ numbers are a reference, not an assertion about expected identical counts.
   including removal of completed terms from polynomial Zippel systems. It still
   lacks removal of solved homogeneous coefficients from rational line systems,
   Ben-Or/Tiwari racing, and FireFly 2's hybrid strategy.
-- Balanced Zippel does not yet exploit a separable denominator or shared sampling
-  across Thiele rows. It currently runs Thiele on each row instead of switching to
-  learned-degree solves. Variable order can greatly affect work.
+- Balanced Zippel now reuses row intersections and learned degrees; optional
+  verified denominator separation is available. Variable order can greatly affect
+  work. Neither automatic ordering nor selection of the separation mode is implemented.
 - There is no asynchronous/batched oracle, vector-valued reconstruction, parallel
   scheduling, automatic variable reordering, or support reuse between primes.
 - The initial API fixes 64-bit prime fields and `u16` exponents. The degree limit
@@ -154,7 +157,7 @@ cross-product identities for the papers' examples, zero/constants, polynomials,
 univariate degree imbalance, cancellation, unused variables, variable order,
 multiple seeds, generated sparse functions over a smaller prime, poles, bounded
 failure, deliberately unlucky anchors, large rational coefficients and recovery
-from an unlucky prime during CRT lifting. The Q example reconstructs Eq. (3) in
+from an unlucky prime during CRT lifting. In the first version, the Q example reconstructs Eq. (3) in
 24 probes across two primes.
 The ten existing tests in `tests/rational_polynomial.rs` also pass. Each benchmark
 checks the reconstructed result exactly outside the timer, including all 324

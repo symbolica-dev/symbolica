@@ -61,11 +61,15 @@ fn main() {
         let n: MultivariatePolynomial<_, u16> = parse!(num).to_polynomial(&Z, vars.clone());
         let d: MultivariatePolynomial<_, u16> = parse!(den).to_polynomial(&Z, vars.clone());
         for seed in 0..=repeats {
-            let methods = if seed % 2 == 0 {
+            let mut methods = Vec::from(if seed % 2 == 0 {
                 [CuytLee, BalancedZippel]
             } else {
                 [BalancedZippel, CuytLee]
-            };
+            });
+            if std::env::var_os("RECONSTRUCTION_SEPARATED").is_some() {
+                methods.push(BalancedZippelSeparated);
+                methods.rotate_left((seed % 3) as usize);
+            }
             for method in methods {
                 let opts = ReconstructionOptions {
                     seed,

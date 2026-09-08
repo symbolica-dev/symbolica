@@ -34,8 +34,11 @@ type Fraction = RationalPolynomial<Zp64, u16>;
 pub enum ReconstructionMethod {
     /// Homogenization, Thiele degree discovery, linear solves and polynomial Zippel.
     CuytLee,
-    /// Variable-by-variable Thiele interpolation with balanced sparse lifting.
+    /// Thiele degree discovery, degree-bounded rows and balanced sparse lifting.
     BalancedZippel,
+    /// Try a denominator separable in the last variable, validate the result,
+    /// and fall back to ordinary balanced Zippel if that hypothesis fails.
+    BalancedZippelSeparated,
 }
 
 /// Resource bounds and reproducible random sampling controls.
@@ -73,6 +76,10 @@ pub struct ReconstructionStats {
     pub poles: usize,
     pub cache_hits: usize,
     pub univariate_interpolations: usize,
+    /// Univariate rows interpolated using degrees learned from an earlier row.
+    pub degree_interpolations: usize,
+    /// Rejected separable-denominator candidates followed by ordinary balancing.
+    pub separation_fallbacks: usize,
     pub linear_solves: usize,
     pub attempts: usize,
 }
@@ -142,17 +149,30 @@ where
     };
     for attempt in 0..options.max_attempts {
         ctx.stats.attempts = attempt + 1;
-        let result = match method {
-            ReconstructionMethod::CuytLee => ctx.cuyt_lee(),
-            ReconstructionMethod::BalancedZippel => ctx.balanced(),
+        let candidates: &[bool] = if method == ReconstructionMethod::BalancedZippelSeparated {
+            &[true, false]
+        } else {
+            &[false]
         };
-        match result {
-            Ok(r) if ctx.verify(&r)? => {
-                let r = Fraction::from_num_den(r.numerator, r.denominator, &ctx.field, true);
-                return Ok((r, ctx.stats));
+        for &separate in candidates {
+            let result = match method {
+                ReconstructionMethod::CuytLee => ctx.cuyt_lee(),
+                ReconstructionMethod::BalancedZippel
+                | ReconstructionMethod::BalancedZippelSeparated => ctx.balanced(separate),
+            };
+            match result {
+                Ok(r) if ctx.verify(&r)? => {
+                    let r = Fraction::from_num_den(r.numerator, r.denominator, &ctx.field, true);
+                    return Ok((r, ctx.stats));
+                }
+                Err(ReconstructionError::ProbeLimit) => {
+                    return Err(ReconstructionError::ProbeLimit);
+                }
+                _ => {}
             }
-            Err(ReconstructionError::ProbeLimit) => return Err(ReconstructionError::ProbeLimit),
-            _ => {}
+            if separate {
+                ctx.stats.separation_fallbacks += 1;
+            }
         }
     }
     Err(ReconstructionError::AttemptsExhausted)
@@ -232,6 +252,15 @@ impl<F: FnMut(&Zp64, &[Element]) -> Option<Element>> Context<'_, F> {
         variable: usize,
         map: impl Fn(Element) -> Vec<Element>,
     ) -> Result<Fraction> {
+        self.thiele_seeded(variable, map, None)
+    }
+
+    fn thiele_seeded(
+        &mut self,
+        variable: usize,
+        map: impl Fn(Element) -> Vec<Element>,
+        mut known: Option<(Element, Element)>,
+    ) -> Result<Fraction> {
         self.stats.univariate_interpolations += 1;
         let f = self.field.clone();
         let mut nodes = Vec::new();
@@ -248,27 +277,30 @@ impl<F: FnMut(&Zp64, &[Element]) -> Option<Element>> Context<'_, F> {
         let mut q = dense.one();
         let mut checks = 0;
         for _ in 0..8 * (self.options.max_degree as usize + self.options.verification_points + 8) {
-            let t = self.random();
+            // An already reconstructed slice supplies its intersection with
+            // this row. This is derived data, not another black-box call.
+            let sample = known.take();
+            let t = sample.map_or_else(|| self.random(), |(t, _)| t);
             if !seen.insert(t) {
                 continue;
             }
-            let Some(y) = self.probe(&map(t))? else {
+            let Some(y) = (if let Some((_, y)) = sample {
+                Some(y)
+            } else {
+                self.probe(&map(t))?
+            }) else {
                 continue;
             };
             let dv = q.evaluate(&t);
             if !nodes.is_empty() && !f.is_zero(&dv) && f.mul(&y, &dv) == p.evaluate(&t) {
                 checks += 1;
                 if checks == self.options.verification_points {
-                    let embed = |dense: UnivariatePolynomial<Zp64>| {
-                        let mut p = self.template.zero();
-                        let mut ex = vec![0; p.nvars()];
-                        for (d, c) in dense.coefficients.into_iter().enumerate() {
-                            ex[variable] = d as u16;
-                            p.append_monomial(c, &ex);
-                        }
-                        p
-                    };
-                    return Ok(Fraction::from_num_den(embed(p), embed(q), &f, true));
+                    return Ok(Fraction::from_num_den(
+                        embed(&self.template, variable, p),
+                        embed(&self.template, variable, q),
+                        &f,
+                        true,
+                    ));
                 }
                 continue;
             }
@@ -308,7 +340,109 @@ impl<F: FnMut(&Zp64, &[Element]) -> Option<Element>> Context<'_, F> {
         unlucky()
     }
 
-    fn balanced(&mut self) -> Result<Fraction> {
+    // Rational interpolation at learned degrees: interpolate the samples as a
+    // polynomial, then use a partial extended Euclidean algorithm to recover
+    // P/Q modulo the product of (x-x_i). This costs O((deg P + deg Q)^2)
+    // field operations rather than a dense rational linear solve.
+    fn degree_row(
+        &mut self,
+        variable: usize,
+        point: &[Element],
+        known: Element,
+        degrees: (u16, u16),
+        denominator: Option<&Polynomial>,
+    ) -> Result<Fraction> {
+        self.stats.degree_interpolations += 1;
+        let f = self.field.clone();
+        let dense = UnivariatePolynomial::new(
+            &f,
+            None,
+            Arc::new(self.template.variables()[variable].clone()),
+        );
+        let mut interpolant = dense.zero();
+        let mut modulus = dense.one();
+        let known_denominator = denominator.map(|p| {
+            let cs = (0..=p.degree(variable))
+                .map(|d| coefficient(p, variable, d))
+                .collect();
+            UnivariatePolynomial::from_coefficients(&f, cs, dense.variable.clone())
+        });
+        let count = degrees.0 as usize
+            + if denominator.is_some() {
+                0
+            } else {
+                degrees.1 as usize
+            }
+            + 1;
+        let mut samples = Vec::with_capacity(count);
+        let mut seen = HashSet::new();
+        for _ in 0..count * 16 + 16 {
+            let (t, y) = if samples.is_empty() {
+                seen.insert(point[variable]);
+                (point[variable], known)
+            } else {
+                let t = self.random();
+                if !seen.insert(t) {
+                    continue;
+                }
+                let mut p = point.to_vec();
+                p[variable] = t;
+                let Some(y) = self.probe(&p)? else {
+                    continue;
+                };
+                (t, y)
+            };
+            let polynomial_value = known_denominator
+                .as_ref()
+                .map_or(y, |d| f.mul(&y, &d.evaluate(&t)));
+            let c = f.div(
+                &f.sub(&polynomial_value, &interpolant.evaluate(&t)),
+                &modulus.evaluate(&t),
+            );
+            interpolant = interpolant + modulus.clone().mul_coeff(&c);
+            modulus = modulus * &(dense.monomial(f.one(), 1) - dense.constant(t));
+            samples.push((t, y));
+            if samples.len() == count {
+                break;
+            }
+        }
+        if samples.len() != count {
+            return unlucky();
+        }
+        if let Some(denominator) = denominator {
+            return Ok(Fraction {
+                numerator: embed(&self.template, variable, interpolant),
+                denominator: denominator.clone(),
+            });
+        }
+        let (mut r0, mut r1) = (modulus, interpolant);
+        let (mut q0, mut q1) = (dense.zero(), dense.one());
+        while !r1.is_zero() && r1.degree() > degrees.0 as usize {
+            let (quotient, remainder) = r0.quot_rem(&r1);
+            (r0, r1) = (r1, remainder);
+            let next = q0 - &quotient * &q1;
+            (q0, q1) = (q1, next);
+        }
+        if q1.is_zero() || q1.degree() > degrees.1 as usize {
+            return unlucky();
+        }
+        // These checks use the existing samples. Fresh full-dimensional checks
+        // remain mandatory before any reconstruction is returned to the caller.
+        if samples.iter().any(|(t, y)| {
+            let d = q1.evaluate(t);
+            f.is_zero(&d) || r1.evaluate(t) != f.mul(y, &d)
+        }) {
+            return unlucky();
+        }
+        Ok(Fraction::from_num_den(
+            embed(&self.template, variable, r1),
+            embed(&self.template, variable, q1),
+            &f,
+            true,
+        ))
+    }
+
+    fn balanced(&mut self, separate: bool) -> Result<Fraction> {
         let anchors = self.point();
         let mut result = self.thiele(0, |t| {
             let mut p = anchors.clone();
@@ -325,17 +459,38 @@ impl<F: FnMut(&Zp64, &[Element]) -> Option<Element>> Context<'_, F> {
                 distinct_nonzero(&self.field, &x)?;
                 nodes.push(x);
             }
-            let mut rows = Vec::new();
+            let mut rows: Vec<Fraction> = Vec::new();
+            let mut degrees = None;
             for i in 1..=z {
                 let mut point = anchors.clone();
                 for j in 0..variable {
                     point[j] = self.field.pow(&base[j], i as u64);
                 }
-                let mut row = self.thiele(variable, |t| {
-                    let mut p = point.clone();
-                    p[variable] = t;
-                    p
-                })?;
+                let known = value(&result, &point).ok_or(ReconstructionError::AttemptsExhausted)?;
+                let mut row = if let Some(degrees) = degrees {
+                    // The first row predicts the last-variable denominator
+                    // factor. Fresh final verification guards this hypothesis.
+                    let denominator = if separate && variable + 1 == self.template.nvars() {
+                        Some(&rows[0].denominator)
+                    } else {
+                        None
+                    };
+                    self.degree_row(variable, &point, known, degrees, denominator)?
+                } else {
+                    self.thiele_seeded(
+                        variable,
+                        |t| {
+                            let mut p = point.clone();
+                            p[variable] = t;
+                            p
+                        },
+                        Some((point[variable], known)),
+                    )?
+                };
+                degrees.get_or_insert((
+                    row.numerator.degree(variable),
+                    row.denominator.degree(variable),
+                ));
                 let den = row.denominator.replace_all(&point);
                 let num = row.numerator.replace_all(&point);
                 let scale = if !self.field.is_zero(&den) {
@@ -542,6 +697,16 @@ impl<F: FnMut(&Zp64, &[Element]) -> Option<Element>> Context<'_, F> {
             denominator: den,
         })
     }
+}
+
+fn embed(template: &Polynomial, variable: usize, dense: UnivariatePolynomial<Zp64>) -> Polynomial {
+    let mut p = template.zero();
+    let mut ex = vec![0; p.nvars()];
+    for (d, c) in dense.coefficients.into_iter().enumerate() {
+        ex[variable] = d as u16;
+        p.append_monomial(c, &ex);
+    }
+    p
 }
 
 fn normalize_constant(mut r: Fraction) -> Result<Fraction> {
