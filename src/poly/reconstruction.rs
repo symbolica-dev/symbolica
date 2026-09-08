@@ -55,6 +55,9 @@ pub struct ReconstructionOptions {
     pub max_attempts: usize,
     /// Seed for reproducibility; use different seeds for independent confirmations.
     pub seed: u64,
+    /// Race Thiele against unbalanced low-denominator-degree candidates using
+    /// the same probes. Saves evaluations at additional arithmetic cost.
+    pub degree_race: bool,
 }
 
 impl Default for ReconstructionOptions {
@@ -65,6 +68,7 @@ impl Default for ReconstructionOptions {
             verification_points: 3,
             max_attempts: 4,
             seed: 0x7265636f6e737472,
+            degree_race: false,
         }
     }
 }
@@ -276,6 +280,10 @@ impl<F: FnMut(&Zp64, &[Element]) -> Option<Element>> Context<'_, F> {
         let mut p = dense.zero();
         let mut q = dense.one();
         let mut checks = 0;
+        let mut race = self
+            .options
+            .degree_race
+            .then(|| DegreeRace::new(&dense, self.options.max_degree as usize));
         for _ in 0..8 * (self.options.max_degree as usize + self.options.verification_points + 8) {
             // An already reconstructed slice supplies its intersection with
             // this row. This is derived data, not another black-box call.
@@ -291,6 +299,17 @@ impl<F: FnMut(&Zp64, &[Element]) -> Option<Element>> Context<'_, F> {
             }) else {
                 continue;
             };
+            if let Some((p, q)) = race
+                .as_mut()
+                .and_then(|race| race.add(t, y, self.options.verification_points))
+            {
+                return Ok(Fraction::from_num_den(
+                    embed(&self.template, variable, p),
+                    embed(&self.template, variable, q),
+                    &f,
+                    true,
+                ));
+            }
             let dv = q.evaluate(&t);
             if !nodes.is_empty() && !f.is_zero(&dv) && f.mul(&y, &dv) == p.evaluate(&t) {
                 checks += 1;
@@ -351,6 +370,7 @@ impl<F: FnMut(&Zp64, &[Element]) -> Option<Element>> Context<'_, F> {
         known: Element,
         degrees: (u16, u16),
         denominator: Option<&Polynomial>,
+        reciprocal: bool,
     ) -> Result<Fraction> {
         self.stats.degree_interpolations += 1;
         let f = self.field.clone();
@@ -379,7 +399,13 @@ impl<F: FnMut(&Zp64, &[Element]) -> Option<Element>> Context<'_, F> {
         for _ in 0..count * 16 + 16 {
             let (t, y) = if samples.is_empty() {
                 seen.insert(point[variable]);
-                (point[variable], known)
+                if reciprocal && f.is_zero(&known) {
+                    return unlucky();
+                }
+                (
+                    point[variable],
+                    if reciprocal { f.inv(&known) } else { known },
+                )
             } else {
                 let t = self.random();
                 if !seen.insert(t) {
@@ -390,7 +416,10 @@ impl<F: FnMut(&Zp64, &[Element]) -> Option<Element>> Context<'_, F> {
                 let Some(y) = self.probe(&p)? else {
                     continue;
                 };
-                (t, y)
+                if reciprocal && f.is_zero(&y) {
+                    continue;
+                }
+                (t, if reciprocal { f.inv(&y) } else { y })
             };
             let polynomial_value = known_denominator
                 .as_ref()
@@ -399,7 +428,9 @@ impl<F: FnMut(&Zp64, &[Element]) -> Option<Element>> Context<'_, F> {
                 &f.sub(&polynomial_value, &interpolant.evaluate(&t)),
                 &modulus.evaluate(&t),
             );
-            interpolant = interpolant + modulus.clone().mul_coeff(&c);
+            if !f.is_zero(&c) {
+                interpolant = interpolant + modulus.clone().mul_coeff(&c);
+            }
             modulus = modulus * &(dense.monomial(f.one(), 1) - dense.constant(t));
             samples.push((t, y));
             if samples.len() == count {
@@ -460,7 +491,8 @@ impl<F: FnMut(&Zp64, &[Element]) -> Option<Element>> Context<'_, F> {
                 nodes.push(x);
             }
             let mut rows: Vec<Fraction> = Vec::new();
-            let mut degrees = None;
+            let mut degrees: Option<(u16, u16)> = None;
+            let mut completed: [Option<Polynomial>; 2] = [None, None];
             for i in 1..=z {
                 let mut point = anchors.clone();
                 for j in 0..variable {
@@ -470,12 +502,38 @@ impl<F: FnMut(&Zp64, &[Element]) -> Option<Element>> Context<'_, F> {
                 let mut row = if let Some(degrees) = degrees {
                     // The first row predicts the last-variable denominator
                     // factor. Fresh final verification guards this hypothesis.
-                    let denominator = if separate && variable + 1 == self.template.nvars() {
+                    let fixed = completed[1].as_ref().map(|p| (false, p)).or_else(|| {
+                        completed[0]
+                            .as_ref()
+                            .filter(|p| !p.is_zero())
+                            .map(|p| (true, p))
+                    });
+                    let specialized = fixed.map(|(inverse, p)| {
+                        let mut p = p.clone();
+                        for (j, x) in point.iter().enumerate().take(variable) {
+                            p = p.replace(j, x);
+                        }
+                        (inverse, p)
+                    });
+                    let reciprocal = specialized.as_ref().is_some_and(|(inverse, _)| *inverse);
+                    let denominator = if let Some((_, p)) = &specialized {
+                        Some(p)
+                    } else if separate && variable + 1 == self.template.nvars() {
                         Some(&rows[0].denominator)
                     } else {
                         None
                     };
-                    self.degree_row(variable, &point, known, degrees, denominator)?
+                    let degrees = if reciprocal {
+                        (degrees.1, degrees.0)
+                    } else {
+                        degrees
+                    };
+                    let mut row =
+                        self.degree_row(variable, &point, known, degrees, denominator, reciprocal)?;
+                    if reciprocal {
+                        std::mem::swap(&mut row.numerator, &mut row.denominator);
+                    }
+                    row
                 } else {
                     self.thiele_seeded(
                         variable,
@@ -507,41 +565,22 @@ impl<F: FnMut(&Zp64, &[Element]) -> Option<Element>> Context<'_, F> {
                 row.numerator = row.numerator.mul_coeff(scale);
                 row.denominator = row.denominator.mul_coeff(scale);
                 rows.push(row);
-            }
-            let mut lifted = Vec::new();
-            for (side, old) in polys.iter().enumerate() {
-                let parts: Vec<_> = rows
-                    .iter()
-                    .map(|r| {
-                        if side == 0 {
-                            &r.numerator
-                        } else {
-                            &r.denominator
-                        }
-                    })
-                    .collect();
-                let degree = parts.iter().map(|p| p.degree(variable)).max().unwrap();
-                let mut p = self.template.zero();
-                for d in 0..=degree {
-                    let rhs: Vec<_> = parts
-                        .iter()
-                        .take(old.nterms())
-                        .map(|r| coefficient(r, variable, d))
-                        .collect();
-                    let cs = self
-                        .template
-                        .solve_shifted_transposed_vandermonde(&nodes[side], &rhs);
-                    for (c, m) in cs.into_iter().zip(*old) {
-                        let mut ex = m.exponents.to_vec();
-                        ex[variable] = d;
-                        p.append_monomial(c, &ex);
+                for side in 0..2 {
+                    if completed[side].is_none() && rows.len() >= polys[side].nterms() {
+                        completed[side] = Some(lift_rows(
+                            &self.template,
+                            polys[side],
+                            &rows,
+                            &nodes[side],
+                            variable,
+                            side,
+                        ));
                     }
                 }
-                lifted.push(p);
             }
             result = Fraction {
-                numerator: lifted.remove(0),
-                denominator: lifted.remove(0),
+                numerator: completed[0].take().unwrap(),
+                denominator: completed[1].take().unwrap(),
             };
         }
         Ok(result)
@@ -697,6 +736,128 @@ impl<F: FnMut(&Zp64, &[Element]) -> Option<Element>> Context<'_, F> {
             denominator: den,
         })
     }
+}
+
+// Race Thiele against unbalanced approximants with small denominator degree.
+// These use exactly the same samples. All winning candidates must satisfy the
+// stored samples and the usual number of subsequent independent checks.
+struct DegreeRace {
+    interpolant: UnivariatePolynomial<Zp64>,
+    modulus: UnivariatePolynomial<Zp64>,
+    samples: Vec<(Element, Element)>,
+    candidates: Vec<(
+        UnivariatePolynomial<Zp64>,
+        UnivariatePolynomial<Zp64>,
+        usize,
+    )>,
+    max_degree: usize,
+}
+
+impl DegreeRace {
+    fn new(template: &UnivariatePolynomial<Zp64>, max_degree: usize) -> Self {
+        Self {
+            interpolant: template.zero(),
+            modulus: template.one(),
+            samples: Vec::new(),
+            candidates: Vec::new(),
+            max_degree,
+        }
+    }
+    fn add(
+        &mut self,
+        x: Element,
+        y: Element,
+        checks: usize,
+    ) -> Option<(UnivariatePolynomial<Zp64>, UnivariatePolynomial<Zp64>)> {
+        let f = self.interpolant.coefficient_ring().clone();
+        self.candidates.retain_mut(|(p, q, good)| {
+            let d = q.evaluate(&x);
+            if f.is_zero(&d) || p.evaluate(&x) != f.mul(&y, &d) {
+                return false;
+            }
+            *good += 1;
+            true
+        });
+        for (p, q, good) in &self.candidates {
+            if *good >= checks
+                && self.samples.iter().all(|(t, v)| {
+                    let d = q.evaluate(t);
+                    !f.is_zero(&d) && p.evaluate(t) == f.mul(v, &d)
+                })
+            {
+                return Some((p.clone(), q.clone()));
+            }
+        }
+        let c = f.div(
+            &f.sub(&y, &self.interpolant.evaluate(&x)),
+            &self.modulus.evaluate(&x),
+        );
+        // mul_coeff(0) need not canonicalize the dense representation. Avoid
+        // feeding an all-zero coefficient vector to Euclidean division.
+        if !f.is_zero(&c) {
+            self.interpolant = &self.interpolant + &self.modulus.clone().mul_coeff(&c);
+        }
+        self.modulus =
+            &self.modulus * &(self.modulus.monomial(f.one(), 1) - self.modulus.constant(x));
+        self.samples.push((x, y));
+        let (mut r0, mut r1) = (self.modulus.clone(), self.interpolant.clone());
+        let (mut q0, mut q1) = (self.modulus.zero(), self.modulus.one());
+        // Balanced degrees are already handled efficiently by Thiele. The
+        // bounded race targets polynomial-like rows without changing probes.
+        while !r1.is_zero() && q1.degree() <= 16.min(self.max_degree) {
+            if r1.degree() > q1.degree() + 1
+                && r1.degree() <= self.max_degree
+                && r1.degree() + q1.degree() < self.samples.len()
+                && !self
+                    .candidates
+                    .iter()
+                    .any(|(p, q, _)| p.degree() == r1.degree() && q.degree() == q1.degree())
+            {
+                self.candidates.push((r1.clone(), q1.clone(), 0));
+            }
+            let (a, r) = r0.quot_rem(&r1);
+            (r0, r1) = (r1, r);
+            let q = q0 - &a * &q1;
+            (q0, q1) = (q1, q);
+        }
+        None
+    }
+}
+
+fn lift_rows(
+    template: &Polynomial,
+    old: &Polynomial,
+    rows: &[Fraction],
+    nodes: &[Element],
+    variable: usize,
+    side: usize,
+) -> Polynomial {
+    let parts: Vec<_> = rows
+        .iter()
+        .take(old.nterms())
+        .map(|r| {
+            if side == 0 {
+                &r.numerator
+            } else {
+                &r.denominator
+            }
+        })
+        .collect();
+    let degree = parts.iter().map(|p| p.degree(variable)).max().unwrap_or(0);
+    let mut p = template.zero();
+    if old.is_zero() {
+        return p;
+    }
+    for d in 0..=degree {
+        let rhs: Vec<_> = parts.iter().map(|r| coefficient(r, variable, d)).collect();
+        let cs = template.solve_shifted_transposed_vandermonde(nodes, &rhs);
+        for (c, m) in cs.into_iter().zip(old) {
+            let mut ex = m.exponents.to_vec();
+            ex[variable] = d;
+            p.append_monomial(c, &ex);
+        }
+    }
+    p
 }
 
 fn embed(template: &Polynomial, variable: usize, dense: UnivariatePolynomial<Zp64>) -> Polynomial {
