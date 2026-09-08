@@ -1,8 +1,11 @@
 # Rational function reconstruction experiment
 
-Latest update: [matched public stress benchmarks](reconstruction-matched-stress.md)
-compares actual FireFly and FIRE7 on public coefficients and removes learned
-monomial factors from later interpolation rows.
+Latest update: [homogeneous component pruning](reconstruction-components.md)
+adds a selectable method that closes the dense `f3`/`f4` probe gap against
+FireFly and reduces the amplitude coefficient count.
+The [matched public stress benchmarks](reconstruction-matched-stress.md) compare
+actual FireFly and FIRE7 on public coefficients and remove learned monomial
+factors from later interpolation rows.
 The [preceding update](reconstruction-stress.md) adds early numerator/denominator
 completion and an optional unbalanced-degree search.
 The earlier [reference comparison](reconstruction-probes.md) records the preceding version.

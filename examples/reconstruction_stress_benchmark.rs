@@ -69,9 +69,12 @@ fn main() {
     let case = args.get(1).expect("case");
     let method = match args.get(2).map(String::as_str) {
         Some("CuytLee") => ReconstructionMethod::CuytLee,
+        Some("CuytLeePruned") => ReconstructionMethod::CuytLeePruned,
         Some("BalancedZippel") => ReconstructionMethod::BalancedZippel,
         Some("BalancedZippelSeparated") => ReconstructionMethod::BalancedZippelSeparated,
-        _ => panic!("method must be CuytLee, BalancedZippel, or BalancedZippelSeparated"),
+        _ => panic!(
+            "method must be CuytLee, CuytLeePruned, BalancedZippel, or BalancedZippelSeparated"
+        ),
     };
     let seed = args.get(3).expect("seed").parse::<u64>().unwrap();
     let (source, mut names): (String, Vec<String>) = match case.as_str() {

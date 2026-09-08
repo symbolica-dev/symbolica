@@ -23,7 +23,7 @@ env.pop("RECONSTRUCTION_DEGREE_RACE", None)
 env.pop("BENCH_ORDER", None)
 env.pop("FIRE7_LEARN_BATCH", None)
 methods = os.environ.get("BENCH_METHODS", "BalancedZippel,FireFly_default").split(",")
-assert set(methods) <= {"BalancedZippel", "BalancedZippelSeparated", "CuytLee", "BalancedZippelRace", "FireFly_default", "FIRE7_balanced_adapter", "FIRE7_learned_batch"}
+assert set(methods) <= {"BalancedZippel", "BalancedZippelSeparated", "CuytLee", "CuytLeePruned", "CuytLeePrunedRace", "BalancedZippelRace", "FireFly_default", "FIRE7_balanced_adapter", "FIRE7_learned_batch"}
 fields = "case,method,seed,status,elapsed_us,probes,prime,oracle,degree_race,num_terms,den_terms,setup_ms".split(",")
 with output.open("w") as out:
     writer = csv.DictWriter(out, fields, lineterminator="\n")
@@ -41,7 +41,7 @@ with output.open("w") as out:
                 if method.startswith("FIRE7_") and nv != "2":
                     continue
                 external_method = method == "FireFly_default" or method.startswith("FIRE7_")
-                race = method == "BalancedZippelRace"
+                race = method in {"BalancedZippelRace", "CuytLeePrunedRace"}
                 job_env = {**env, "FIREFLY_BENCH_SEED": str(seed)}
                 if race:
                     job_env["RECONSTRUCTION_DEGREE_RACE"] = "1"
@@ -50,7 +50,7 @@ with output.open("w") as out:
                 binary = "firefly-stress" if method == "FireFly_default" else "fire7-stress"
                 args = (loader + [str(external / binary), str(oracle), case, str(seed)]
                         if external_method else
-                        [str(rust), case, "BalancedZippel" if race else method, str(seed)])
+                        [str(rust), case, method.removesuffix("Race") if race else method, str(seed)])
                 row = dict(case=case, method=method, seed=seed, prime=prime, oracle="cached_powers",
                            degree_race=int(race), num_terms=ns, den_terms=ds)
                 try:

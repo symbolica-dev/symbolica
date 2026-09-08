@@ -1,0 +1,2 @@
+case,method,seed,order,status,setup_ms,elapsed_us,probes,attempts,num_terms,den_terms
+firefly_f3,CuytLee,1,original,time_limit,28.508,30003572.223,90919,0,26333,3

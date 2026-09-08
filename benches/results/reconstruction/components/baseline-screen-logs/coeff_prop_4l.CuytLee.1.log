@@ -1,0 +1,2 @@
+case,method,seed,order,status,setup_ms,elapsed_us,probes,attempts,num_terms,den_terms
+coeff_prop_4l,CuytLee,1,original,time_limit,59.521,36990904.968,25428,0,6671,6051

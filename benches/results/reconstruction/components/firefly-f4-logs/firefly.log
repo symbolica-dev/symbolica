@@ -1,0 +1,12 @@
+
+Promote to new prime field: F(9223372036854775783)
+Time for the first black-box probe: 0.002007 s
+Probe: 53608 | Done: 0 / 1 | Requires new prime field: 1 / 1
+Completed current prime field in 225.599306 s | 53608 probes in total
+Average time of the black-box probe: 0.002027 s
+
+Promote to new prime field: F(9223372036854775643)
+Disable shift
+Completed reconstruction in 225.947321 s | 53609 probes in total
+Required prime fields: 1 + 1
+Average time of the black-box probe: 0.002027 s
