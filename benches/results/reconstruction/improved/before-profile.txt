@@ -1,0 +1,22 @@
+# To display the perf.data header info, please use --header/--header-only options.
+#
+#
+# Total Lost Samples: 0
+#
+# Samples: 3K of event 'cpu/cycles/Pu'
+# Event count (approx.): 228449132
+#
+# Overhead  Symbol                                                                                                                                                                                                                               IPC   [IPC Coverage]
+# ........  ...................................................................................................................................................................................................................................  ....................
+#
+    48.09%  [.] symbolica::poly::polynomial::MultivariatePolynomial<F,E>::replace_all                                                                                                                                                            -      -            
+            |          
+             --2.60%--0x1
+
+    39.17%  [.] numerica::tensors::matrix::Matrix<F>::solve                                                                                                                                                                                      -      -            
+     3.06%  [.] <numerica::domains::finite_field::FiniteField<u64> as numerica::domains::Field>::inv                                                                                                                                             -      -            
+
+
+#
+# (Tip: To group events which need to be collected together for accuracy use {}: perf record -e {cycles,branches}' ...)
+#

@@ -23,6 +23,18 @@ fn main() {
     };
 
     println!("cargo:rustc-env=SYMBOLICA_VERSION=symbolica-{}", version);
-    println!("cargo:rerun-if-changed=.git/HEAD");
+    // In a linked worktree .git is a file. Watching the nonexistent .git/HEAD
+    // makes Cargo rebuild the entire library on every invocation.
+    for name in ["HEAD", "refs", "packed-refs"] {
+        if let Ok(output) = Command::new("git")
+            .args(["rev-parse", "--git-path", name])
+            .output()
+            && output.status.success()
+            && let Ok(path) = String::from_utf8(output.stdout)
+            && std::path::Path::new(path.trim()).exists()
+        {
+            println!("cargo:rerun-if-changed={}", path.trim());
+        }
+    }
     println!("cargo:rerun-if-changed=build.rs");
 }

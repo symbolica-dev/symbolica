@@ -21,7 +21,8 @@ against the preceding slice. A transposed Vandermonde solve lifts each coefficie
 of that variable; this is algebraically equivalent to applying those linear solves
 to values and then Newton-interpolating.
 
-These are new in-tree implementations, **not timings of Kira, FireFly, or FIRE**.
+The initial measurements below time new in-tree implementations. The later
+[performance update](#performance-update) also compares actual FireFly and FIRE7 code.
 They reuse Symbolica's polynomial representation, Newton interpolation, shifted
 transposed Vandermonde solver (including batched inversions), finite-field matrix
 solver, polynomial GCD, CRT and maximal-quotient rational reconstruction.
@@ -79,11 +80,11 @@ numbers are a reference, not an assertion about expected identical counts.
 
 ## Known limitations and next steps
 
-- The Cuyt–Lee implementation uses total-degree bounds for Newton interpolation.
-  It does not yet implement early/dense pruning, removal of solved coefficients
-  from subsequent line systems, Ben-Or/Tiwari racing, or FireFly 2's hybrid strategy.
-  This can substantially inflate its probe count. Comparisons measure these two
-  prototypes, not the best possible performance of the algorithm families.
+- The first version used total-degree bounds for Newton interpolation. The
+  performance update adds individual-degree and homogeneous-support pruning,
+  including removal of completed terms from polynomial Zippel systems. It still
+  lacks removal of solved homogeneous coefficients from rational line systems,
+  Ben-Or/Tiwari racing, and FireFly 2's hybrid strategy.
 - Balanced Zippel does not yet exploit a separable denominator or shared sampling
   across Thiele rows. It currently runs Thiele on each row instead of switching to
   learned-degree solves. Variable order can greatly affect work.
@@ -95,7 +96,7 @@ numbers are a reference, not an assertion about expected identical counts.
   specialization and validation can fail with small probability. Field elements
   returned by the callback must belong to the requested field.
 
-## Results
+## First-version results (commit `4d2752b`)
 
 On an AMD EPYC 9754, pinned to CPU 24, using Rust 1.92.0 and the build flags above,
 the nine-seed per-prime measurements show:
@@ -164,3 +165,48 @@ in `src/poly/factor.rs:11833`. With that lint allowed on the command line, Clipp
 finishes (248 existing library warnings) and reports no diagnostics in the new
 reconstruction sources or examples. The existing code was not modified to silence
 these diagnostics.
+
+## Performance update
+
+After first-version commit `4d2752b`, Thiele convergents use Symbolica's existing
+dense univariate polynomials and Horner evaluation. Cuyt–Lee learns individual
+variable degrees from black-box slices. Homogeneity then supplies lower and upper
+bounds on each coefficient's next-variable power. Factoring out the lower power
+reduces Newton work; completed terms are subtracted from subsequent polynomial
+Zippel systems. Univariate inputs go straight to Thiele.
+
+A baseline executable saved before these changes was rerun on the same CPU and
+build settings. Nine-seed medians with the original expanded-polynomial oracle:
+
+| Case / method | Before ms | After ms | Before probes | After probes | Speedup |
+|---|---:|---:|---:|---:|---:|
+| Eq. (28), `(y,d)`, Cuyt–Lee | 106.462 | 37.141 | 3791 | 1365 | 2.87× |
+| Eq. (28), `(y,d)`, balanced | 11.753 | 10.720 | 538 | 538 | 1.10× |
+| Dense box, Cuyt–Lee | 2.989 | 0.840 | 649 | 228 | 3.56× |
+| Sparse3, balanced | 0.361 | 0.270 | 121 | 121 | 1.34× |
+| Sparse3, Cuyt–Lee | 0.317 | 0.347 | 147 | 175 | 0.91× |
+| Eq. (3), Cuyt–Lee | 0.030 | 0.033 | 20 | 28 | 0.91× |
+
+Degree discovery costs extra probes: it regresses some small or already sparse
+Cuyt–Lee cases. Adaptive selection of whether to perform these slices is a useful
+next optimization. The baseline profile attributed about 48% of sampled CPU time
+to polynomial evaluation and 39% to linear solves on Eq. (28), motivating both
+the reduced line count and a separate factored-oracle comparison.
+
+Raw measurements and summaries are under
+[`results/reconstruction/improved/`](results/reconstruction/improved/).
+The improved expanded-oracle Q benchmark uses 4098 Cuyt–Lee probes versus 11376
+in the first version; balanced remains at 1617. Both still use three CRT images
+and a fresh verification prime. All 18 targeted tests pass, as do every benchmark's
+exact identity checks. A repeated release build now finishes in 0.12 seconds:
+`build.rs` resolves Git's actual metadata paths, avoiding the nonexistent
+`.git/HEAD` watch that caused complete rebuilds in linked worktrees.
+
+Actual external implementations were also built and benchmarked. With matched
+factored black boxes, Eq. (28) takes 3.56 ms for Symbolica balanced Zippel, 15.26 ms
+for the FIRE7 balanced-Zippel adapter, and 76.31 ms for default FireFly, per prime.
+Over Q, Symbolica balanced takes 11.52 ms and FireFly with factor/shift scans takes
+108.30 ms. These measure the stated configurations and synthetic function only;
+they do not establish an IBP-workload speedup. See the
+[external benchmark report](external/README.md) for pinned sources, complete
+timing tables, sampling differences, limitations and reproduction commands.
