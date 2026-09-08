@@ -1,0 +1,627 @@
+//! Black-box rational function reconstruction over a 64-bit prime field.
+//!
+//! Two experimental, sequential implementations share Thiele interpolation and
+//! Symbolica polynomial arithmetic: Cuyt–Lee with Zippel interpolation (the
+//! algorithm used by Kira through FireFly, arXiv:1904.00009, section 2.2), and
+//! balanced Zippel (Smirnov–Zeng, arXiv:2409.19099, section 2.5).
+//! Results are probabilistic: fresh probes check the result and failed attempts
+//! restart with new anchors. Degree and probe limits make failure bounded.
+
+use crate::{
+    domains::{
+        Field, Ring, RingOps,
+        finite_field::{FiniteFieldCore, FiniteFieldElement, Zp64},
+        rational_polynomial::{FromNumeratorAndDenominator, RationalPolynomial},
+    },
+    poly::{PolyVariable, polynomial::MultivariatePolynomial},
+    tensors::matrix::Matrix,
+};
+use rand::{Rng, SeedableRng, rngs::StdRng};
+use std::{
+    collections::{HashMap, HashSet},
+    sync::Arc,
+};
+
+mod rational;
+pub use rational::{RationalReconstructionStats, reconstruct_rational_function_over_q};
+
+type Element = FiniteFieldElement<u64>;
+type Polynomial = MultivariatePolynomial<Zp64, u16>;
+type Fraction = RationalPolynomial<Zp64, u16>;
+
+/// Reconstruction strategy. Neither variant is a binding to the external codes.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum ReconstructionMethod {
+    /// Homogenization, Thiele degree discovery, linear solves and polynomial Zippel.
+    CuytLee,
+    /// Variable-by-variable Thiele interpolation with balanced sparse lifting.
+    BalancedZippel,
+}
+
+/// Resource bounds and reproducible random sampling controls.
+#[derive(Clone, Debug)]
+pub struct ReconstructionOptions {
+    /// Maximum degree of either univariate numerator or denominator.
+    /// For Cuyt–Lee this bounds total degree, for balanced Zippel individual degree.
+    pub max_degree: u16,
+    /// Maximum number of distinct black-box calls, including poles and retries.
+    pub max_probes: usize,
+    /// Number of fresh successful checks for Thiele termination and final validation.
+    pub verification_points: usize,
+    /// Maximum number of attempts with independently sampled anchors.
+    pub max_attempts: usize,
+    /// Seed for reproducibility; use different seeds for independent confirmations.
+    pub seed: u64,
+}
+
+impl Default for ReconstructionOptions {
+    fn default() -> Self {
+        Self {
+            max_degree: 128,
+            max_probes: 1_000_000,
+            verification_points: 3,
+            max_attempts: 4,
+            seed: 0x7265636f6e737472,
+        }
+    }
+}
+
+/// Costs include unsuccessful attempts and validation. Cached probes are free.
+#[derive(Clone, Debug, Default)]
+pub struct ReconstructionStats {
+    pub probes: usize,
+    pub poles: usize,
+    pub cache_hits: usize,
+    pub univariate_interpolations: usize,
+    pub linear_solves: usize,
+    pub attempts: usize,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum ReconstructionError {
+    InvalidOptions,
+    ProbeLimit,
+    /// Too few prime images to lift and independently validate the coefficients.
+    PrimeLimit,
+    /// Degree limit, exceptional specializations, or verification failure.
+    AttemptsExhausted,
+}
+
+impl std::fmt::Display for ReconstructionError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(match self {
+            Self::InvalidOptions => "reconstruction requires variables, positive limits, and a sufficiently large prime field",
+            Self::ProbeLimit => "rational reconstruction exhausted its black-box probe budget",
+            Self::PrimeLimit => "rational reconstruction exhausted its prime budget",
+            Self::AttemptsExhausted => "rational reconstruction failed: increase the degree/attempt limit or change the seed/prime",
+        })
+    }
+}
+impl std::error::Error for ReconstructionError {}
+
+type Result<T> = std::result::Result<T, ReconstructionError>;
+
+/// Reconstruct a rational function from evaluations only. `None` reports a pole
+/// or an otherwise unusable evaluation. The oracle must return consistent values
+/// in `field`. Variable order is significant for performance.
+///
+/// `field` must have an odd prime modulus (as required by `Zp64`); this function
+/// does not prove primality. No degrees or monomial supports are supplied by the
+/// caller. Returned numerator and denominator are coprime and denominator-monic.
+/// Three random checks are the default, not a deterministic identity proof.
+pub fn reconstruct_rational_function<F>(
+    field: Zp64,
+    variables: Arc<Vec<PolyVariable>>,
+    mut black_box: F,
+    method: ReconstructionMethod,
+    options: &ReconstructionOptions,
+) -> Result<(Fraction, ReconstructionStats)>
+where
+    F: FnMut(&Zp64, &[Element]) -> Option<Element>,
+{
+    if variables.is_empty()
+        || options.max_degree == 0
+        || options.max_degree > u16::MAX / 2
+        || options.max_probes == 0
+        || options.verification_points == 0
+        || options.max_attempts == 0
+        || field.get_prime()
+            < 8 * (options.max_degree as u64 + options.verification_points as u64 + 1)
+    {
+        return Err(ReconstructionError::InvalidOptions);
+    }
+    let template = Polynomial::new(&field, None, variables);
+    let mut ctx = Context {
+        field,
+        template,
+        black_box: &mut black_box,
+        options,
+        rng: StdRng::seed_from_u64(options.seed),
+        cache: HashMap::new(),
+        stats: Default::default(),
+    };
+    for attempt in 0..options.max_attempts {
+        ctx.stats.attempts = attempt + 1;
+        let result = match method {
+            ReconstructionMethod::CuytLee => ctx.cuyt_lee(),
+            ReconstructionMethod::BalancedZippel => ctx.balanced(),
+        };
+        match result {
+            Ok(r) if ctx.verify(&r)? => {
+                let r = Fraction::from_num_den(r.numerator, r.denominator, &ctx.field, true);
+                return Ok((r, ctx.stats));
+            }
+            Err(ReconstructionError::ProbeLimit) => return Err(ReconstructionError::ProbeLimit),
+            _ => {}
+        }
+    }
+    Err(ReconstructionError::AttemptsExhausted)
+}
+
+struct Context<'a, F> {
+    field: Zp64,
+    template: Polynomial,
+    black_box: &'a mut F,
+    options: &'a ReconstructionOptions,
+    rng: StdRng,
+    cache: HashMap<Vec<Element>, Option<Element>>,
+    stats: ReconstructionStats,
+}
+
+fn unlucky<T>() -> Result<T> {
+    Err(ReconstructionError::AttemptsExhausted)
+}
+
+fn coefficient(p: &Polynomial, variable: usize, degree: u16) -> Element {
+    p.into_iter()
+        .find(|m| m.exponents[variable] == degree)
+        .map_or_else(|| p.ring().zero(), |m| *m.coefficient)
+}
+
+fn value(r: &Fraction, point: &[Element]) -> Option<Element> {
+    let f = r.numerator.ring();
+    let d = r.denominator.replace_all(point);
+    (!f.is_zero(&d)).then(|| f.div(&r.numerator.replace_all(point), &d))
+}
+
+impl<F: FnMut(&Zp64, &[Element]) -> Option<Element>> Context<'_, F> {
+    fn random(&mut self) -> Element {
+        self.field
+            .to_element(self.rng.random_range(1..self.field.get_prime()))
+    }
+    fn point(&mut self) -> Vec<Element> {
+        (0..self.template.nvars()).map(|_| self.random()).collect()
+    }
+    fn probe(&mut self, point: &[Element]) -> Result<Option<Element>> {
+        if let Some(v) = self.cache.get(point) {
+            self.stats.cache_hits += 1;
+            return Ok(*v);
+        }
+        if self.stats.probes >= self.options.max_probes {
+            return Err(ReconstructionError::ProbeLimit);
+        }
+        self.stats.probes += 1;
+        let v = (self.black_box)(&self.field, point);
+        self.stats.poles += usize::from(v.is_none());
+        self.cache.insert(point.to_vec(), v);
+        Ok(v)
+    }
+    fn verify(&mut self, r: &Fraction) -> Result<bool> {
+        let mut good = 0;
+        for _ in 0..self.options.verification_points * 16 {
+            let point = self.point();
+            if self.cache.contains_key(&point) {
+                continue;
+            }
+            if let Some(v) = self.probe(&point)? {
+                if value(r, &point) != Some(v) {
+                    return Ok(false);
+                }
+                good += 1;
+                if good == self.options.verification_points {
+                    return Ok(true);
+                }
+            }
+        }
+        Ok(false)
+    }
+
+    // Eq. (22)-(25) of FireFly. Convergents are built with Symbolica polynomials.
+    fn thiele(
+        &mut self,
+        variable: usize,
+        map: impl Fn(Element) -> Vec<Element>,
+    ) -> Result<Fraction> {
+        self.stats.univariate_interpolations += 1;
+        let f = self.field.clone();
+        let mut nodes = Vec::new();
+        let mut differences = Vec::new();
+        let mut seen = HashSet::new();
+        let mut p_prev = self.template.one();
+        let mut q_prev = self.template.zero();
+        let mut p = self.template.zero();
+        let mut q = self.template.one();
+        let mut checks = 0;
+        for _ in 0..8 * (self.options.max_degree as usize + self.options.verification_points + 8) {
+            let t = self.random();
+            if !seen.insert(t) {
+                continue;
+            }
+            let Some(y) = self.probe(&map(t))? else {
+                continue;
+            };
+            let mut eval = vec![f.zero(); self.template.nvars()];
+            eval[variable] = t;
+            let dv = q.replace_all(&eval);
+            if !nodes.is_empty() && !f.is_zero(&dv) && f.mul(&y, &dv) == p.replace_all(&eval) {
+                checks += 1;
+                if checks == self.options.verification_points {
+                    return Ok(Fraction::from_num_den(p, q, &f, true));
+                }
+                continue;
+            }
+            checks = 0;
+            let mut b = y;
+            let mut valid = true;
+            for (x, a) in nodes.iter().zip(&differences) {
+                let den = f.sub(&b, a);
+                if f.is_zero(&den) {
+                    valid = false;
+                    break;
+                }
+                b = f.div(&f.sub(&t, x), &den);
+            }
+            if !valid {
+                continue;
+            }
+            if nodes.is_empty() {
+                p = self.template.constant(b);
+            } else {
+                let mut ex = vec![0; self.template.nvars()];
+                ex[variable] = 1;
+                let factor = self.template.monomial(f.one(), ex)
+                    - self.template.constant(*nodes.last().unwrap());
+                let next_p = p.clone().mul_coeff(b) + &factor * &p_prev;
+                let next_q = q.clone().mul_coeff(b) + &factor * &q_prev;
+                p_prev = p;
+                q_prev = q;
+                p = next_p;
+                q = next_q;
+            }
+            nodes.push(t);
+            differences.push(b);
+            if p.degree(variable) > self.options.max_degree
+                || q.degree(variable) > self.options.max_degree
+            {
+                return unlucky();
+            }
+        }
+        unlucky()
+    }
+
+    fn balanced(&mut self) -> Result<Fraction> {
+        let anchors = self.point();
+        let mut result = self.thiele(0, |t| {
+            let mut p = anchors.clone();
+            p[0] = t;
+            p
+        })?;
+        for variable in 1..self.template.nvars() {
+            let base = self.point();
+            let polys = [&result.numerator, &result.denominator];
+            let z = polys.iter().map(|p| p.nterms()).max().unwrap();
+            let mut nodes = Vec::new();
+            for p in polys {
+                let x = monomial_nodes(p, &base, variable);
+                distinct_nonzero(&self.field, &x)?;
+                nodes.push(x);
+            }
+            let mut rows = Vec::new();
+            for i in 1..=z {
+                let mut point = anchors.clone();
+                for j in 0..variable {
+                    point[j] = self.field.pow(&base[j], i as u64);
+                }
+                let mut row = self.thiele(variable, |t| {
+                    let mut p = point.clone();
+                    p[variable] = t;
+                    p
+                })?;
+                let den = row.denominator.replace_all(&point);
+                let num = row.numerator.replace_all(&point);
+                let scale = if !self.field.is_zero(&den) {
+                    self.field
+                        .div(&result.denominator.replace_all(&point), &den)
+                } else if !self.field.is_zero(&num) {
+                    self.field.div(&result.numerator.replace_all(&point), &num)
+                } else {
+                    return unlucky();
+                };
+                if self.field.is_zero(&scale) {
+                    return unlucky();
+                }
+                row.numerator = row.numerator.mul_coeff(scale);
+                row.denominator = row.denominator.mul_coeff(scale);
+                rows.push(row);
+            }
+            let mut lifted = Vec::new();
+            for (side, old) in polys.iter().enumerate() {
+                let parts: Vec<_> = rows
+                    .iter()
+                    .map(|r| {
+                        if side == 0 {
+                            &r.numerator
+                        } else {
+                            &r.denominator
+                        }
+                    })
+                    .collect();
+                let degree = parts.iter().map(|p| p.degree(variable)).max().unwrap();
+                let mut p = self.template.zero();
+                for d in 0..=degree {
+                    let rhs: Vec<_> = parts
+                        .iter()
+                        .take(old.nterms())
+                        .map(|r| coefficient(r, variable, d))
+                        .collect();
+                    let cs = self
+                        .template
+                        .solve_shifted_transposed_vandermonde(&nodes[side], &rhs);
+                    for (c, m) in cs.into_iter().zip(*old) {
+                        let mut ex = m.exponents.to_vec();
+                        ex[variable] = d;
+                        p.append_monomial(c, &ex);
+                    }
+                }
+                lifted.push(p);
+            }
+            result = Fraction {
+                numerator: lifted.remove(0),
+                denominator: lifted.remove(0),
+            };
+        }
+        Ok(result)
+    }
+
+    fn cuyt_lee(&mut self) -> Result<Fraction> {
+        let f = self.field.clone();
+        let mut shift = vec![f.zero(); self.template.nvars()];
+        if self.probe(&shift)?.is_none() {
+            shift = self.point();
+        }
+        let mut anchors = self.point();
+        anchors[0] = f.one();
+        let first = self.thiele(0, |t| line_point(&f, &shift, &anchors, t))?;
+        let nd = first.numerator.degree(0);
+        let dd = first.denominator.degree(0);
+        let first = normalize_constant(first)?;
+        let num_powers: Vec<_> = (&first.numerator)
+            .into_iter()
+            .map(|m| m.exponents[0])
+            .collect();
+        let den_powers: Vec<_> = (&first.denominator)
+            .into_iter()
+            .map(|m| m.exponents[0])
+            .filter(|d| *d != 0)
+            .collect();
+        let mut lines = HashMap::from([(anchors.clone(), first)]);
+        let mut reconstructed = Vec::new();
+        for (side, degree) in [(0, nd), (1, dd)] {
+            let mut output = self.template.zero();
+            let mut corrections = self.template.zero();
+            for d in (0..=degree).rev() {
+                let template = self.template.clone();
+                let correction = homogeneous_part(&corrections, d);
+                let component = zippel(&template, &anchors, d, |direction| {
+                    if !lines.contains_key(direction) {
+                        let r = self.line_solve(&shift, direction, &num_powers, &den_powers)?;
+                        lines.insert(direction.to_vec(), r);
+                    }
+                    let r = &lines[direction];
+                    let p = if side == 0 {
+                        &r.numerator
+                    } else {
+                        &r.denominator
+                    };
+                    Ok(f.sub(&coefficient(p, 0, d), &correction.replace_all(direction)))
+                })?;
+                let mut homogeneous = self.template.zero();
+                for m in &component {
+                    let sum: u32 = m.exponents.iter().skip(1).map(|e| *e as u32).sum();
+                    if sum > d as u32 {
+                        return unlucky();
+                    }
+                    let mut ex = m.exponents.to_vec();
+                    ex[0] = d - sum as u16;
+                    homogeneous.append_monomial(*m.coefficient, &ex);
+                }
+                // Remove shifts degree by degree to preserve the original sparse support.
+                let translated = translate(&homogeneous, &shift);
+                corrections = corrections + (&translated - &homogeneous);
+                output = output + homogeneous;
+            }
+            reconstructed.push(output);
+        }
+        Ok(Fraction {
+            numerator: reconstructed.remove(0),
+            denominator: reconstructed.remove(0),
+        })
+    }
+
+    // FireFly Eq. (27), after Thiele has discovered the degrees. The constant
+    // denominator coefficient fixes the scale on every homogenized line.
+    fn line_solve(
+        &mut self,
+        shift: &[Element],
+        direction: &[Element],
+        num_powers: &[u16],
+        den_powers: &[u16],
+    ) -> Result<Fraction> {
+        let f = self.field.clone();
+        let n = num_powers.len() + den_powers.len();
+        let degree = num_powers
+            .iter()
+            .chain(den_powers)
+            .copied()
+            .max()
+            .unwrap_or(0);
+        let mut data = Vec::new();
+        let mut rhs = Vec::new();
+        let mut seen = HashSet::new();
+        for _ in 0..n * 16 + 16 {
+            let t = self.random();
+            if !seen.insert(t) {
+                continue;
+            }
+            let Some(y) = self.probe(&line_point(&f, shift, direction, t))? else {
+                continue;
+            };
+            let mut powers = vec![f.one(); degree as usize + 1];
+            for j in 1..powers.len() {
+                powers[j] = f.mul(&powers[j - 1], &t);
+            }
+            data.extend(num_powers.iter().map(|j| powers[*j as usize]));
+            data.extend(
+                den_powers
+                    .iter()
+                    .map(|j| f.neg(&f.mul(&y, &powers[*j as usize]))),
+            );
+            rhs.push(y);
+            if rhs.len() == n {
+                break;
+            }
+        }
+        if rhs.len() != n {
+            return unlucky();
+        }
+        self.stats.linear_solves += 1;
+        let matrix = Matrix::from_linear(data, n as u32, n as u32, f.clone()).unwrap();
+        let solution = matrix
+            .solve(&Matrix::new_vec(rhs, f))
+            .map_err(|_| ReconstructionError::AttemptsExhausted)?;
+        let mut num = self.template.zero();
+        let mut den = self.template.one();
+        for i in 0..n {
+            let mut ex = vec![0; self.template.nvars()];
+            ex[0] = if i < num_powers.len() {
+                num_powers[i]
+            } else {
+                den_powers[i - num_powers.len()]
+            };
+            if i < num_powers.len() {
+                num.append_monomial(solution[(i as u32, 0)], &ex);
+            } else {
+                den.append_monomial(solution[(i as u32, 0)], &ex);
+            }
+        }
+        Ok(Fraction {
+            numerator: num,
+            denominator: den,
+        })
+    }
+}
+
+fn normalize_constant(mut r: Fraction) -> Result<Fraction> {
+    let c = r.denominator.get_constant();
+    if r.denominator.ring().is_zero(&c) {
+        return unlucky();
+    }
+    r.numerator = r.numerator.div_coeff(&c);
+    r.denominator = r.denominator.div_coeff(&c);
+    Ok(r)
+}
+fn line_point(f: &Zp64, shift: &[Element], direction: &[Element], t: Element) -> Vec<Element> {
+    shift
+        .iter()
+        .zip(direction)
+        .map(|(s, z)| f.add(s, &f.mul(&t, z)))
+        .collect()
+}
+fn homogeneous_part(p: &Polynomial, degree: u16) -> Polynomial {
+    let mut r = p.zero();
+    for m in p {
+        if m.exponents.iter().map(|e| *e as u32).sum::<u32>() == degree as u32 {
+            r.append_monomial(*m.coefficient, m.exponents);
+        }
+    }
+    r
+}
+fn translate(p: &Polynomial, shift: &[Element]) -> Polynomial {
+    let mut r = p.clone();
+    for (i, s) in shift.iter().enumerate() {
+        if p.ring().is_zero(s) {
+            continue;
+        }
+        let mut ex = vec![0; p.nvars()];
+        ex[i] = 1;
+        r = r.replace_with_poly(i, &(p.monomial(p.ring().one(), ex) + p.constant(*s)));
+    }
+    r
+}
+fn monomial_nodes(p: &Polynomial, anchors: &[Element], end: usize) -> Vec<Element> {
+    let f = p.ring();
+    p.into_iter()
+        .map(|m| {
+            (0..end).fold(f.one(), |r, j| {
+                f.mul(&r, &f.pow(&anchors[j], m.exponents[j] as u64))
+            })
+        })
+        .collect()
+}
+fn distinct_nonzero(f: &Zp64, x: &[Element]) -> Result<()> {
+    let mut seen = HashSet::new();
+    if x.iter().any(|v| f.is_zero(v) || !seen.insert(*v)) {
+        return unlucky();
+    }
+    Ok(())
+}
+
+// Polynomial Zippel, with x_0 = 1 and a known total-degree bound. The previous
+// slice supplies only its nonzero support. Symbolica solves the transposed
+// Vandermonde systems and expands the Newton interpolant.
+fn zippel(
+    template: &Polynomial,
+    anchors: &[Element],
+    degree: u16,
+    mut oracle: impl FnMut(&[Element]) -> Result<Element>,
+) -> Result<Polynomial> {
+    let f = template.ring();
+    let mut p = template.constant(oracle(anchors)?);
+    for variable in 1..template.nvars() {
+        if p.is_zero() {
+            return Ok(p);
+        }
+        let nodes = monomial_nodes(&p, anchors, variable);
+        distinct_nonzero(f, &nodes)?;
+        let mut xs = Vec::new();
+        let mut samples = Vec::new();
+        for j in 0..=degree {
+            let x = f.pow(&anchors[variable], j as u64 + 1);
+            if xs.contains(&x) {
+                return unlucky();
+            }
+            xs.push(x);
+            if j == 0 {
+                samples.push(p.clone());
+                continue;
+            }
+            let mut rhs = Vec::new();
+            for i in 1..=p.nterms() {
+                let mut point = anchors.to_vec();
+                for k in 1..variable {
+                    point[k] = f.pow(&anchors[k], i as u64);
+                }
+                point[variable] = x;
+                rhs.push(oracle(&point)?);
+            }
+            let cs = template.solve_shifted_transposed_vandermonde(&nodes, &rhs);
+            let mut sample = template.zero();
+            for (c, m) in cs.into_iter().zip(&p) {
+                sample.append_monomial(c, m.exponents);
+            }
+            samples.push(sample);
+        }
+        p = Polynomial::newton_interpolation(&xs, &samples, variable);
+    }
+    Ok(p)
+}

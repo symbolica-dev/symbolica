@@ -1,0 +1,34 @@
+rustc 1.92.0 (ded5c06cf 2025-12-08)
+cargo 1.92.0 (344c4567c 2025-10-21)
+d78823e2c7f888a05cc42fdfb37934cd95e81281
+Linux 6.18.45 x86_64 GNU/Linux
+Architecture:                            x86_64
+CPU op-mode(s):                          32-bit, 64-bit
+Address sizes:                           52 bits physical, 57 bits virtual
+Byte Order:                              Little Endian
+CPU(s):                                  384
+On-line CPU(s) list:                     0-383
+Vendor ID:                               AuthenticAMD
+Model name:                              AMD EPYC 9754 128-Core Processor
+CPU family:                              25
+Model:                                   160
+Thread(s) per core:                      2
+Core(s) per socket:                      128
+Socket(s):                               2
+Stepping:                                2
+Microcode version:                       0xaa00215
+Frequency boost:                         enabled
+CPU(s) scaling MHz:                      80%
+CPU max MHz:                             3102.7300
+CPU min MHz:                             401.5300
+BogoMIPS:                                4500.14
+Flags:                                   fpu vme de pse tsc msr pae mce cx8 apic sep mtrr pge mca cmov pat pse36 clflush mmx fxsr sse sse2 ht syscall nx mmxext fxsr_opt pdpe1gb rdtscp lm constant_tsc rep_good amd_lbr_v2 nopl xtopology nonstop_tsc cpuid extd_apicid aperfmperf rapl pni pclmulqdq monitor ssse3 fma cx16 pcid sse4_1 sse4_2 x2apic movbe popcnt aes xsave avx f16c rdrand lahf_lm cmp_legacy svm extapic cr8_legacy abm sse4a misalignsse 3dnowprefetch osvw ibs skinit wdt tce topoext perfctr_core perfctr_nb bpext perfctr_llc mwaitx cpuid_fault cpb cat_l3 cdp_l3 hw_pstate ssbd mba perfmon_v2 ibrs ibpb stibp ibrs_enhanced vmmcall fsgsbase bmi1 avx2 smep bmi2 erms invpcid cqm rdt_a avx512f avx512dq rdseed adx smap avx512ifma clflushopt clwb avx512cd sha_ni avx512bw avx512vl xsaveopt xsavec xgetbv1 xsaves cqm_llc cqm_occup_llc cqm_mbm_total cqm_mbm_local user_shstk avx512_bf16 clzero irperf xsaveerptr rdpru wbnoinvd amd_ppin cppc arat npt lbrv svm_lock nrip_save tsc_scale vmcb_clean flushbyasid decodeassists pausefilter pfthreshold avic v_vmsave_vmload vgif x2avic v_spec_ctrl vnmi avx512vbmi umip pku ospke avx512_vbmi2 gfni vaes vpclmulqdq avx512_vnni avx512_bitalg avx512_vpopcntdq la57 rdpid overflow_recov succor smca fsrm flush_l1d debug_swap
+Virtualization:                          AMD-V
+L1d cache:                               8 MiB (256 instances)
+L1i cache:                               8 MiB (256 instances)
+
+Benchmark build: release, opt-level=3, lto=false, codegen-units=16; default features.
+Benchmark affinity: CPU 24.
+Finite-field benchmark: one warm-up and nine measured seeds per case and method.
+Q benchmark: one warm-up and five measured seeds per case and method.
+Source polynomials parsed outside timers; exact cross-products checked outside timers.

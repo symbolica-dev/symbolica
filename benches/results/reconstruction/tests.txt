@@ -1,0 +1,16 @@
+   Compiling symbolica v2.2.0 (/common/dev/symbolica-reconstruction)
+    Finished `test` profile [unoptimized + debuginfo] target(s) in 7.87s
+     Running tests/rational_reconstruction.rs (target/debug/deps/rational_reconstruction-7a426ee136877741)
+
+running 8 tests
+test unlucky_anchor_is_retried ... ok
+test bounded_failure_and_poles ... ok
+test lifting_recovers_after_an_unlucky_prime ... ok
+test lift_large_rational_coefficients ... ok
+test zero_constants_polynomials_and_cancellation ... ok
+test paper_examples_and_normalization ... ok
+test many_seeds_and_variable_orders ... ok
+test generated_sparse_functions_over_a_smaller_prime ... ok
+
+test result: ok. 8 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.15s
+

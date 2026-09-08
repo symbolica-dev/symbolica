@@ -1,0 +1,5 @@
+   Compiling symbolica v2.2.0 (/common/dev/symbolica-reconstruction)
+    Finished `dev` profile [unoptimized + debuginfo] target(s) in 7.63s
+     Running `target/debug/examples/rational_function_reconstruction`
+f(x,y) = (2+x*y)/(4-2*x+x*y)
+24 probes across 2 primes
