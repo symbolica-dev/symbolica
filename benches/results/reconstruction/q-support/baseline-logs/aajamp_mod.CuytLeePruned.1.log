@@ -1,0 +1,2 @@
+case,method,seed,status,elapsed_us,probes,primes,images,probes_by_prime,setup_ms,num_terms,den_terms
+aajamp_mod,CuytLeePruned,1,ok,16992427.096,43923,2,1,2305843009213693967:43920;2305843009213693973:3,6168.562,23260,7231

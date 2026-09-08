@@ -21,7 +21,9 @@ fn main() {
     let repeats = std::env::var("RECONSTRUCTION_REPEATS")
         .map(|s| s.parse::<u64>().unwrap())
         .unwrap_or(5);
-    println!("case,method,seed,elapsed_us,probes,primes,images,support_resets");
+    println!(
+        "case,method,seed,elapsed_us,probes,primes,images,support_resets,support_reuses,support_fallbacks"
+    );
     for (name, num, den, names) in [
         ("paper_eq3", "x*y+2", "x*y-2*x+4", ["x", "y"]),
         (
@@ -81,8 +83,13 @@ fn main() {
                 assert_eq!(&r.numerator * &d, &r.denominator * &n, "{name}/{method:?}");
                 if seed > 0 {
                     println!(
-                        "{name},{method:?},{seed},{elapsed:.3},{},{},{},{}",
-                        stats.probes, stats.primes, stats.successful_images, stats.support_resets
+                        "{name},{method:?},{seed},{elapsed:.3},{},{},{},{},{},{}",
+                        stats.probes,
+                        stats.primes,
+                        stats.successful_images,
+                        stats.support_resets,
+                        stats.support_reuses,
+                        stats.support_fallbacks
                     );
                 }
             }

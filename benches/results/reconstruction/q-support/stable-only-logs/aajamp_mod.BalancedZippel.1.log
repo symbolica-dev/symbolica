@@ -1,0 +1,2 @@
+case,method,seed,status,elapsed_us,probes,primes,images,support_reuses,support_fallbacks,probes_by_prime,setup_ms,num_terms,den_terms
+aajamp_mod,BalancedZippel,1,ok,31477985.059,73159,2,1,0,0,2305843009213693967:73156;2305843009213693973:3,5730.176,23260,7231

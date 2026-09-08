@@ -14,6 +14,11 @@ pub struct RationalReconstructionStats {
     pub successful_images: usize,
     /// Restarts caused by changing modular support (e.g. an unlucky prime).
     pub support_resets: usize,
+    /// Images reconstructed using learned support and rational coefficient hypotheses.
+    pub support_reuses: usize,
+    /// Rejected support/coefficient hypotheses followed by ordinary reconstruction
+    /// when the remaining per-prime probe budget permits it.
+    pub support_fallbacks: usize,
 }
 
 /// Reconstruct over Q by CRT and maximal-quotient coefficient reconstruction.
@@ -22,6 +27,9 @@ pub struct RationalReconstructionStats {
 /// Primes start above 2^61; `max_primes` includes verification primes. The probe
 /// bound in `options` applies separately to each reconstructed image. Failed
 /// modular interpolations and changing supports are retried within this bound.
+/// Learned support and coefficient hypotheses with repeated agreement or a
+/// conservative size margin are reused when a known component fixes the scale. Reused
+/// images are independently checked, with ordinary reconstruction as fallback.
 /// A candidate is accepted only after checking at a prime unused in its CRT.
 /// This is a probabilistic identity check, not a coefficient-height proof.
 pub fn reconstruct_rational_function_over_q<F>(
@@ -43,6 +51,8 @@ where
     let mut primes = PrimeIteratorU64::new(1 << 61);
     let mut stats = RationalReconstructionStats::default();
     let mut support = Vec::new();
+    let mut previous_guesses: Vec<Option<Rational>> = Vec::new();
+    let mut frozen: Vec<Option<Rational>> = Vec::new();
     let mut residues: Vec<Integer> = Vec::new();
     let mut modulus = Integer::one();
     let mut rng = StdRng::seed_from_u64(options.seed ^ 0x637274);
@@ -52,16 +62,49 @@ where
         let field = Zp64::new(prime);
         let mut image_options = options.clone();
         image_options.seed = rng.random();
-        let image = reconstruct_rational_function(
-            field.clone(),
-            variables.clone(),
-            |f, p| {
-                stats.probes += 1;
-                black_box(f, p)
-            },
-            method,
-            &image_options,
-        );
+        let calls = std::cell::Cell::new(0usize);
+        let mut oracle = |f: &Zp64, p: &[Element]| {
+            calls.set(calls.get() + 1);
+            black_box(f, p)
+        };
+        let reused = options
+            .reuse_coefficients
+            .then(|| {
+                super::support::reconstruct(
+                    field.clone(),
+                    variables.clone(),
+                    &mut oracle,
+                    &image_options,
+                    &support,
+                    &frozen,
+                )
+            })
+            .flatten();
+        let image = match reused {
+            Some(Ok(image)) => {
+                stats.support_reuses += 1;
+                Ok(image)
+            }
+            attempt => {
+                if attempt.is_some() {
+                    stats.support_fallbacks += 1;
+                    image_options.max_probes -= calls.get();
+                    image_options.seed = rng.random();
+                }
+                if image_options.max_probes == 0 {
+                    Err(ReconstructionError::ProbeLimit)
+                } else {
+                    reconstruct_rational_function(
+                        field.clone(),
+                        variables.clone(),
+                        &mut oracle,
+                        method,
+                        &image_options,
+                    )
+                }
+            }
+        };
+        stats.probes += calls.get();
         let (image, _) = match image {
             Ok(r) => r,
             Err(ReconstructionError::InvalidOptions) => {
@@ -85,6 +128,8 @@ where
         if image_support != support {
             stats.support_resets += usize::from(!support.is_empty());
             support = image_support;
+            previous_guesses.clear();
+            frozen.clear();
             residues = cs;
             modulus = prime.into();
         } else {
@@ -95,11 +140,40 @@ where
             }
             modulus *= &p;
         }
-        let candidate: std::result::Result<Vec<_>, _> = residues
+        let reconstruct =
+            |r: &Integer| Rational::maximal_quotient_reconstruction(r, &modulus, None).ok();
+        let guesses: Vec<_> = if options.reuse_coefficients {
+            residues.iter().map(reconstruct).collect()
+        } else {
+            // Preserve short-circuiting when coefficient reuse is disabled.
+            let Some(cs) = residues.iter().map(reconstruct).collect::<Option<Vec<_>>>() else {
+                continue;
+            };
+            cs.into_iter().map(Some).collect()
+        };
+        // A size margin permits small coefficients to be tried before another
+        // whole image is available. This is a guarded hypothesis, not an
+        // identity proof: every resulting image receives fresh oracle checks,
+        // and rejected hypotheses fall back to ordinary reconstruction.
+        let guess_bound = modulus.quot_rem(&Integer::from(1u64 << 32)).0;
+        frozen = guesses
             .iter()
-            .map(|r| Rational::maximal_quotient_reconstruction(r, &modulus, None))
+            .enumerate()
+            .map(|(i, c)| {
+                if c.is_some()
+                    && (previous_guesses.get(i) == Some(c)
+                        || c.as_ref().is_some_and(|c| {
+                            c.numerator_ref().abs() * c.denominator_ref() < guess_bound
+                        }))
+                {
+                    c.clone()
+                } else {
+                    None
+                }
+            })
             .collect();
-        let Ok(coefficients) = candidate else {
+        previous_guesses = guesses.clone();
+        let Some(coefficients) = guesses.into_iter().collect::<Option<Vec<_>>>() else {
             continue;
         };
         if stats.primes == max_primes {

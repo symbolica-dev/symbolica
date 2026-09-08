@@ -1,0 +1,29 @@
+   Compiling symbolica v2.2.0 (/common/dev/symbolica-reconstruction)
+    Finished `test` profile [unoptimized + debuginfo] target(s) in 13.06s
+     Running tests/rational_reconstruction.rs (target/debug/deps/rational_reconstruction-7a426ee136877741)
+
+running 22 tests
+test lifting_rejects_a_small_but_wrong_coefficient_guess ... ok
+test lifting_recovers_after_an_unlucky_prime ... ok
+test homogeneous_degree_limit_includes_removed_factors ... ok
+test unlucky_anchor_is_retried ... ok
+test rejected_denominator_separation_falls_back_within_one_attempt ... ok
+test lifting_falls_back_when_learned_support_changes ... ok
+test lift_large_rational_coefficients ... ok
+test lifting_reuses_sparse_homogeneous_support_without_an_origin_value ... ok
+test homogeneous_monomial_factors_are_cleared_after_an_unlucky_slice ... ok
+test bounded_failure_and_poles ... ok
+test zero_constants_polynomials_and_cancellation ... ok
+test balanced_removes_learned_monomial_factors ... ok
+test paper_examples_and_normalization ... ok
+test reciprocal_degree_race_handles_an_initial_zero ... ok
+test homogeneous_reconstruction_removes_monomial_factors ... ok
+test many_seeds_and_variable_orders ... ok
+test degree_race_covers_medium_degree_denominators ... ok
+test generated_sparse_functions_over_a_smaller_prime ... ok
+test rational_lifting_keeps_the_eq28_probe_budgets ... ok
+test completed_homogeneous_components_reduce_probes ... ok
+test unbalanced_degree_race_and_numerator_completion ... ok
+test balanced_meets_paper_probe_budget ... ok
+
+test result: ok. 22 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 2.65s

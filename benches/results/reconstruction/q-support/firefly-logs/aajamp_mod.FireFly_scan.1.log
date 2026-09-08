@@ -1,0 +1,2 @@
+case,method,seed,status,elapsed_us,probes,primes,images,probes_by_prime
+aajamp_mod,FireFly_scan,1,ok,61067915.881,48627,2,,9223372036854775643:115;9223372036854775783:48512
