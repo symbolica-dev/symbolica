@@ -13,7 +13,7 @@ use crate::{
         finite_field::{FiniteFieldCore, FiniteFieldElement, Zp64},
         rational_polynomial::{FromNumeratorAndDenominator, RationalPolynomial},
     },
-    poly::{PolyVariable, polynomial::MultivariatePolynomial},
+    poly::{PolyVariable, polynomial::MultivariatePolynomial, univariate::UnivariatePolynomial},
     tensors::matrix::Matrix,
 };
 use rand::{Rng, SeedableRng, rngs::StdRng};
@@ -237,10 +237,15 @@ impl<F: FnMut(&Zp64, &[Element]) -> Option<Element>> Context<'_, F> {
         let mut nodes = Vec::new();
         let mut differences = Vec::new();
         let mut seen = HashSet::new();
-        let mut p_prev = self.template.one();
-        let mut q_prev = self.template.zero();
-        let mut p = self.template.zero();
-        let mut q = self.template.one();
+        let dense = UnivariatePolynomial::new(
+            &f,
+            None,
+            Arc::new(self.template.variables()[variable].clone()),
+        );
+        let mut p_prev = dense.one();
+        let mut q_prev = dense.zero();
+        let mut p = dense.zero();
+        let mut q = dense.one();
         let mut checks = 0;
         for _ in 0..8 * (self.options.max_degree as usize + self.options.verification_points + 8) {
             let t = self.random();
@@ -250,13 +255,20 @@ impl<F: FnMut(&Zp64, &[Element]) -> Option<Element>> Context<'_, F> {
             let Some(y) = self.probe(&map(t))? else {
                 continue;
             };
-            let mut eval = vec![f.zero(); self.template.nvars()];
-            eval[variable] = t;
-            let dv = q.replace_all(&eval);
-            if !nodes.is_empty() && !f.is_zero(&dv) && f.mul(&y, &dv) == p.replace_all(&eval) {
+            let dv = q.evaluate(&t);
+            if !nodes.is_empty() && !f.is_zero(&dv) && f.mul(&y, &dv) == p.evaluate(&t) {
                 checks += 1;
                 if checks == self.options.verification_points {
-                    return Ok(Fraction::from_num_den(p, q, &f, true));
+                    let embed = |dense: UnivariatePolynomial<Zp64>| {
+                        let mut p = self.template.zero();
+                        let mut ex = vec![0; p.nvars()];
+                        for (d, c) in dense.coefficients.into_iter().enumerate() {
+                            ex[variable] = d as u16;
+                            p.append_monomial(c, &ex);
+                        }
+                        p
+                    };
+                    return Ok(Fraction::from_num_den(embed(p), embed(q), &f, true));
                 }
                 continue;
             }
@@ -275,14 +287,11 @@ impl<F: FnMut(&Zp64, &[Element]) -> Option<Element>> Context<'_, F> {
                 continue;
             }
             if nodes.is_empty() {
-                p = self.template.constant(b);
+                p = dense.constant(b);
             } else {
-                let mut ex = vec![0; self.template.nvars()];
-                ex[variable] = 1;
-                let factor = self.template.monomial(f.one(), ex)
-                    - self.template.constant(*nodes.last().unwrap());
-                let next_p = p.clone().mul_coeff(b) + &factor * &p_prev;
-                let next_q = q.clone().mul_coeff(b) + &factor * &q_prev;
+                let factor = &dense.monomial(f.one(), 1) - &dense.constant(*nodes.last().unwrap());
+                let next_p = p.clone().mul_coeff(&b) + &factor * &p_prev;
+                let next_q = q.clone().mul_coeff(&b) + &factor * &q_prev;
                 p_prev = p;
                 q_prev = q;
                 p = next_p;
@@ -290,8 +299,8 @@ impl<F: FnMut(&Zp64, &[Element]) -> Option<Element>> Context<'_, F> {
             }
             nodes.push(t);
             differences.push(b);
-            if p.degree(variable) > self.options.max_degree
-                || q.degree(variable) > self.options.max_degree
+            if p.degree() > self.options.max_degree as usize
+                || q.degree() > self.options.max_degree as usize
             {
                 return unlucky();
             }
@@ -384,7 +393,21 @@ impl<F: FnMut(&Zp64, &[Element]) -> Option<Element>> Context<'_, F> {
     }
 
     fn cuyt_lee(&mut self) -> Result<Fraction> {
+        if self.template.nvars() == 1 {
+            return self.thiele(0, |t| vec![t]);
+        }
         let f = self.field.clone();
+        let degree_anchor = self.point();
+        let mut bounds = [Vec::new(), Vec::new()];
+        for variable in 0..self.template.nvars() {
+            let slice = self.thiele(variable, |t| {
+                let mut p = degree_anchor.clone();
+                p[variable] = t;
+                p
+            })?;
+            bounds[0].push(slice.numerator.degree(variable));
+            bounds[1].push(slice.denominator.degree(variable));
+        }
         let mut shift = vec![f.zero(); self.template.nvars()];
         if self.probe(&shift)?.is_none() {
             shift = self.point();
@@ -412,7 +435,7 @@ impl<F: FnMut(&Zp64, &[Element]) -> Option<Element>> Context<'_, F> {
             for d in (0..=degree).rev() {
                 let template = self.template.clone();
                 let correction = homogeneous_part(&corrections, d);
-                let component = zippel(&template, &anchors, d, |direction| {
+                let component = zippel(&template, &anchors, d, &bounds[side], |direction| {
                     if !lines.contains_key(direction) {
                         let r = self.line_solve(&shift, direction, &num_powers, &den_powers)?;
                         lines.insert(direction.to_vec(), r);
@@ -583,6 +606,7 @@ fn zippel(
     template: &Polynomial,
     anchors: &[Element],
     degree: u16,
+    bounds: &[u16],
     mut oracle: impl FnMut(&[Element]) -> Result<Element>,
 ) -> Result<Polynomial> {
     let f = template.ring();
@@ -593,35 +617,72 @@ fn zippel(
         }
         let nodes = monomial_nodes(&p, anchors, variable);
         distinct_nonzero(f, &nodes)?;
+        let exponents: Vec<_> = (&p).into_iter().map(|m| m.exponents.to_vec()).collect();
+        // Homogeneity supplies both a lower and an upper bound. Factoring out
+        // x_k^lower before Newton interpolation is particularly effective for
+        // a high-total-degree coefficient with small individual degrees.
+        let remaining: u32 = bounds[0] as u32
+            + bounds[variable + 1..]
+                .iter()
+                .map(|d| *d as u32)
+                .sum::<u32>();
+        let mut lower = Vec::new();
+        let mut widths = Vec::new();
+        for ex in &exponents {
+            let used: u32 = ex.iter().map(|d| *d as u32).sum();
+            if used > degree as u32 {
+                return unlucky();
+            }
+            let hi = (bounds[variable] as u32).min(degree as u32 - used);
+            let lo = (degree as u32).saturating_sub(used + remaining);
+            if lo > hi {
+                return unlucky();
+            }
+            lower.push(lo as u16);
+            widths.push((hi - lo) as usize);
+        }
+        let mut active: Vec<_> = (0..p.nterms()).collect();
+        let mut values: Vec<Vec<Polynomial>> = vec![Vec::new(); p.nterms()];
+        let mut solved = template.zero();
         let mut xs = Vec::new();
-        let mut samples = Vec::new();
-        for j in 0..=degree {
+        for j in 0..=widths.iter().copied().max().unwrap() {
             let x = f.pow(&anchors[variable], j as u64 + 1);
             if xs.contains(&x) {
                 return unlucky();
             }
             xs.push(x);
-            if j == 0 {
-                samples.push(p.clone());
-                continue;
-            }
-            let mut rhs = Vec::new();
-            for i in 1..=p.nterms() {
-                let mut point = anchors.to_vec();
-                for k in 1..variable {
-                    point[k] = f.pow(&anchors[k], i as u64);
+            let cs = if j == 0 {
+                p.coefficients.clone()
+            } else {
+                let active_nodes: Vec<_> = active.iter().map(|i| nodes[*i]).collect();
+                let mut rhs = Vec::new();
+                for i in 1..=active.len() {
+                    let mut point = anchors.to_vec();
+                    for k in 1..variable {
+                        point[k] = f.pow(&anchors[k], i as u64);
+                    }
+                    point[variable] = x;
+                    rhs.push(f.sub(&oracle(&point)?, &solved.replace_all(&point)));
                 }
-                point[variable] = x;
-                rhs.push(oracle(&point)?);
+                template.solve_shifted_transposed_vandermonde(&active_nodes, &rhs)
+            };
+            for (index, c) in active.iter().copied().zip(cs) {
+                let c = f.div(&c, &f.pow(&x, lower[index] as u64));
+                values[index].push(template.constant(c));
+                if j == widths[index] {
+                    let coefficient =
+                        Polynomial::newton_interpolation(&xs, &values[index], variable);
+                    let mut ex = exponents[index].clone();
+                    ex[variable] = lower[index];
+                    solved = solved + coefficient * &template.monomial(f.one(), ex);
+                }
             }
-            let cs = template.solve_shifted_transposed_vandermonde(&nodes, &rhs);
-            let mut sample = template.zero();
-            for (c, m) in cs.into_iter().zip(&p) {
-                sample.append_monomial(c, m.exponents);
+            active.retain(|i| widths[*i] > j);
+            if active.is_empty() {
+                break;
             }
-            samples.push(sample);
         }
-        p = Polynomial::newton_interpolation(&xs, &samples, variable);
+        p = solved;
     }
     Ok(p)
 }

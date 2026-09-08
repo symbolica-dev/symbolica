@@ -1,0 +1,35 @@
+diff --git a/source/RatReconst.cpp b/source/RatReconst.cpp
+index 02f5a97..6d4c73b 100644
+--- a/source/RatReconst.cpp
++++ b/source/RatReconst.cpp
+@@ -28,7 +28,7 @@
+ #include <sys/stat.h>
+ 
+ #ifdef FLINT
+-#include "/usr/include/flint/nmod_poly_factor.h"
++#include <flint/nmod_poly_factor.h>
+ #endif
+ 
+ namespace firefly {
+diff --git a/source/include/firefly/Reconstructor.hpp b/source/include/firefly/Reconstructor.hpp
+index 5932418..0dc48f3 100644
+--- a/source/include/firefly/Reconstructor.hpp
++++ b/source/include/firefly/Reconstructor.hpp
+@@ -391,7 +391,7 @@ namespace firefly {
+ 
+     FFInt::set_new_prime(primes()[prime_it]);
+     bb.prime_changed_internal();
+-    uint64_t seed = static_cast<uint64_t>(std::time(0));
++    uint64_t seed = (std::getenv("FIREFLY_BENCH_SEED") ? std::stoull(std::getenv("FIREFLY_BENCH_SEED")) : static_cast<uint64_t>(std::time(0)));
+     BaseReconst().set_seed(seed);
+     tmp_rec = RatReconst(n);
+ 
+@@ -433,7 +433,7 @@ namespace firefly {
+ 
+     FFInt::set_new_prime(primes()[prime_it]);
+     bb.prime_changed_internal();
+-    uint64_t seed = static_cast<uint64_t>(std::time(0));
++    uint64_t seed = (std::getenv("FIREFLY_BENCH_SEED") ? std::stoull(std::getenv("FIREFLY_BENCH_SEED")) : static_cast<uint64_t>(std::time(0)));
+     BaseReconst().set_seed(seed);
+     tmp_rec = RatReconst(n);
+ 
