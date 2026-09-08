@@ -1,0 +1,2 @@
+case,method,seed,order,status,setup_ms,elapsed_us,probes,attempts,num_terms,den_terms
+firefly_f1,CuytLeePruned,1,original,ok,0.338,75921.220,3741,1,20,20

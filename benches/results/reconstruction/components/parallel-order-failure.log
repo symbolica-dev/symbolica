@@ -1,0 +1,33 @@
+   Compiling symbolica v2.2.0 (/common/dev/symbolica-reconstruction)
+    Finished `test` profile [unoptimized + debuginfo] target(s) in 3.63s
+     Running tests/rational_polynomial.rs (target/debug/deps/rational_polynomial-fa0908191b4a2d30)
+
+running 10 tests
+test split_exponential_sums ... FAILED
+test split_additive_power_exponents ... ok
+test integer_content_of_rational_and_complex_exponents ... ok
+test common_rational_power_basis ... ok
+test rational_polynomial_power_uses_exact_binary_exponentiation ... ok
+test default_exponent_and_variable_inputs ... ok
+test integer_factors_in_non_polynomial_exponents ... ok
+test large_gcd_multiple_scales ... ok
+test large_gcd_single_scale ... ok
+test factorized_rational_poly_large ... ok
+
+failures:
+
+---- split_exponential_sums stdout ----
+
+thread 'split_exponential_sums' (3299436) panicked at tests/rational_polynomial.rs:131:5:
+assertion `left == right` failed
+  left: [Power(𝑒^rational_polynomial::y), Power(𝑒^rational_polynomial::x)]
+ right: [Power(𝑒^rational_polynomial::x), Power(𝑒^rational_polynomial::y)]
+note: run with `RUST_BACKTRACE=1` environment variable to display a backtrace
+
+
+failures:
+    split_exponential_sums
+
+test result: FAILED. 9 passed; 1 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.49s
+
+error: test failed, to rerun pass `--test rational_polynomial`

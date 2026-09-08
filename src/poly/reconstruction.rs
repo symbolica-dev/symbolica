@@ -29,11 +29,14 @@ type Element = FiniteFieldElement<u64>;
 type Polynomial = MultivariatePolynomial<Zp64, u16>;
 type Fraction = RationalPolynomial<Zp64, u16>;
 
-/// Reconstruction strategy. Neither variant is a binding to the external codes.
+/// Reconstruction strategy. These are implementations, not external-code bindings.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum ReconstructionMethod {
     /// Homogenization, Thiele degree discovery, linear solves and polynomial Zippel.
     CuytLee,
+    /// Reconstruct inexpensive shifted homogeneous components first, removing
+    /// completed components from later line solves. Tries sparse shifts first.
+    CuytLeePruned,
     /// Thiele degree discovery, degree-bounded rows and balanced sparse lifting.
     BalancedZippel,
     /// Try a denominator separable in the last variable, validate the result,
@@ -49,14 +52,14 @@ pub struct ReconstructionOptions {
     pub max_degree: u16,
     /// Maximum number of distinct black-box calls, including poles and retries.
     pub max_probes: usize,
-    /// Number of fresh successful checks for Thiele termination and final validation.
+    /// Number of fresh successful checks for early termination and final validation.
     pub verification_points: usize,
     /// Maximum number of attempts with independently sampled anchors.
     pub max_attempts: usize,
     /// Seed for reproducibility; use different seeds for independent confirmations.
     pub seed: u64,
-    /// Race Thiele against unbalanced low-denominator-degree candidates using
-    /// the same probes. Saves evaluations at additional arithmetic cost.
+    /// Race Thiele against unbalanced candidates with a small numerator or
+    /// denominator, using the same probes at additional arithmetic cost.
     pub degree_race: bool,
 }
 
@@ -160,7 +163,8 @@ where
         };
         for &separate in candidates {
             let result = match method {
-                ReconstructionMethod::CuytLee => ctx.cuyt_lee(),
+                ReconstructionMethod::CuytLee => ctx.cuyt_lee(false),
+                ReconstructionMethod::CuytLeePruned => ctx.cuyt_lee(true),
                 ReconstructionMethod::BalancedZippel
                 | ReconstructionMethod::BalancedZippelSeparated => ctx.balanced(separate),
             };
@@ -284,6 +288,10 @@ impl<F: FnMut(&Zp64, &[Element]) -> Option<Element>> Context<'_, F> {
             .options
             .degree_race
             .then(|| DegreeRace::new(&dense, self.options.max_degree as usize));
+        let mut reciprocal_race = self
+            .options
+            .degree_race
+            .then(|| DegreeRace::new(&dense, self.options.max_degree as usize));
         for _ in 0..8 * (self.options.max_degree as usize + self.options.verification_points + 8) {
             // An already reconstructed slice supplies its intersection with
             // this row. This is derived data, not another black-box call.
@@ -306,6 +314,21 @@ impl<F: FnMut(&Zp64, &[Element]) -> Option<Element>> Context<'_, F> {
                 return Ok(Fraction::from_num_den(
                     embed(&self.template, variable, p),
                     embed(&self.template, variable, q),
+                    &f,
+                    true,
+                ));
+            }
+            // The reciprocal covers large denominator degree with a small
+            // numerator. Its poles are zeros of the original oracle; skip them
+            // without extra calls. Final full-dimensional checks are unchanged.
+            if !f.is_zero(&y)
+                && let Some((p, q)) = reciprocal_race
+                    .as_mut()
+                    .and_then(|race| race.add(t, f.inv(&y), self.options.verification_points))
+            {
+                return Ok(Fraction::from_num_den(
+                    embed(&self.template, variable, q),
+                    embed(&self.template, variable, p),
                     &f,
                     true,
                 ));
@@ -623,7 +646,7 @@ impl<F: FnMut(&Zp64, &[Element]) -> Option<Element>> Context<'_, F> {
         Ok(result)
     }
 
-    fn cuyt_lee(&mut self) -> Result<Fraction> {
+    fn cuyt_lee(&mut self, prune: bool) -> Result<Fraction> {
         if self.template.nvars() == 1 {
             return self.thiele(0, |t| vec![t]);
         }
@@ -641,7 +664,32 @@ impl<F: FnMut(&Zp64, &[Element]) -> Option<Element>> Context<'_, F> {
         }
         let mut shift = vec![f.zero(); self.template.nvars()];
         if self.probe(&shift)?.is_none() {
-            shift = self.point();
+            if prune {
+                let trial = self.point();
+                let mut found = false;
+                for i in 0..shift.len() {
+                    shift[i] = trial[i];
+                    if self.probe(&shift)?.is_some() {
+                        found = true;
+                        break;
+                    }
+                    shift[i] = f.zero();
+                }
+                if !found {
+                    for i in 0..shift.len() {
+                        shift[i] = trial[i];
+                        if self.probe(&shift)?.is_some() {
+                            found = true;
+                            break;
+                        }
+                    }
+                }
+                if !found {
+                    return unlucky();
+                }
+            } else {
+                shift = self.point();
+            }
         }
         let mut anchors = self.point();
         anchors[0] = f.one();
@@ -649,6 +697,9 @@ impl<F: FnMut(&Zp64, &[Element]) -> Option<Element>> Context<'_, F> {
         let nd = first.numerator.degree(0);
         let dd = first.denominator.degree(0);
         let first = normalize_constant(first)?;
+        if prune {
+            return self.cuyt_lee_components(&shift, &anchors, first, &bounds);
+        }
         let num_powers: Vec<_> = (&first.numerator)
             .into_iter()
             .map(|m| m.exponents[0])
@@ -666,9 +717,10 @@ impl<F: FnMut(&Zp64, &[Element]) -> Option<Element>> Context<'_, F> {
             for d in (0..=degree).rev() {
                 let template = self.template.clone();
                 let correction = homogeneous_part(&corrections, d);
-                let component = zippel(&template, &anchors, d, &bounds[side], |direction| {
+                let component = zippel(&template, &anchors, d, &bounds[side], 0, |direction| {
                     if !lines.contains_key(direction) {
-                        let r = self.line_solve(&shift, direction, &num_powers, &den_powers)?;
+                        let r =
+                            self.line_solve(&shift, direction, &num_powers, &den_powers, None)?;
                         lines.insert(direction.to_vec(), r);
                     }
                     let r = &lines[direction];
@@ -702,6 +754,114 @@ impl<F: FnMut(&Zp64, &[Element]) -> Option<Element>> Context<'_, F> {
         })
     }
 
+    fn cuyt_lee_components(
+        &mut self,
+        shift: &[Element],
+        anchors: &[Element],
+        first: Fraction,
+        bounds: &[Vec<u16>; 2],
+    ) -> Result<Fraction> {
+        let f = self.field.clone();
+        let mut powers: [Vec<u16>; 2] = [
+            (&first.numerator)
+                .into_iter()
+                .map(|m| m.exponents[0])
+                .collect(),
+            (&first.denominator)
+                .into_iter()
+                .map(|m| m.exponents[0])
+                .filter(|d| *d != 0)
+                .collect(),
+        ];
+        for p in &mut powers {
+            p.sort_unstable();
+        }
+        let mut lines = HashMap::from([(anchors.to_vec(), first)]);
+        let mut known = [self.template.zero(), self.template.one()];
+        // Degree bounds predict an upper bound on each component's support.
+        // Small components on either side can finish before large ones need
+        // new directions. No support is supplied by the source function.
+        let sizes = [
+            homogeneous_sizes(&bounds[0], powers[0].iter().copied().max().unwrap_or(0)),
+            homogeneous_sizes(&bounds[1], powers[1].iter().copied().max().unwrap_or(0)),
+        ];
+        let mut components: Vec<_> = powers
+            .iter()
+            .enumerate()
+            .flat_map(|(s, ds)| ds.iter().map(move |d| (s, *d)))
+            .collect();
+        let denominator_work = powers[1]
+            .iter()
+            .fold(0u64, |n, &d| n.saturating_add(sizes[1][d as usize]));
+        let largest_numerator = powers[0]
+            .iter()
+            .map(|&d| sizes[0][d as usize])
+            .max()
+            .unwrap_or(0);
+        // Finishing an inexpensive denominator avoids carrying its unknowns
+        // through a large numerator component. Otherwise interleave both sides.
+        let denominator_first = denominator_work < largest_numerator;
+        components.sort_by_key(|&(side, d)| {
+            (
+                usize::from(denominator_first && side == 0),
+                sizes[side][d as usize],
+                d,
+                1 - side,
+            )
+        });
+        for (side, d) in components {
+            let template = self.template.clone();
+            let component = zippel(
+                &template,
+                anchors,
+                d,
+                &bounds[side],
+                self.options.verification_points,
+                |direction| {
+                    if !lines.contains_key(direction) {
+                        let fixed = [
+                            homogeneous_line(&known[0], direction),
+                            homogeneous_line(&known[1], direction),
+                        ];
+                        let r = self.line_solve(
+                            shift,
+                            direction,
+                            &powers[0],
+                            &powers[1],
+                            Some(&fixed),
+                        )?;
+                        lines.insert(direction.to_vec(), r);
+                    }
+                    let r = &lines[direction];
+                    Ok(coefficient(
+                        if side == 0 {
+                            &r.numerator
+                        } else {
+                            &r.denominator
+                        },
+                        0,
+                        d,
+                    ))
+                },
+            )?;
+            for m in &component {
+                let sum: u32 = m.exponents.iter().skip(1).map(|e| *e as u32).sum();
+                if sum > d as u32 {
+                    return unlucky();
+                }
+                let mut ex = m.exponents.to_vec();
+                ex[0] = d - sum as u16;
+                known[side].append_monomial(*m.coefficient, &ex);
+            }
+            powers[side].retain(|power| *power != d);
+        }
+        let inverse_shift: Vec<_> = shift.iter().map(|x| f.neg(x)).collect();
+        Ok(Fraction {
+            numerator: translate(&known[0], &inverse_shift),
+            denominator: translate(&known[1], &inverse_shift),
+        })
+    }
+
     // FireFly Eq. (27), after Thiele has discovered the degrees. The constant
     // denominator coefficient fixes the scale on every homogenized line.
     fn line_solve(
@@ -710,6 +870,7 @@ impl<F: FnMut(&Zp64, &[Element]) -> Option<Element>> Context<'_, F> {
         direction: &[Element],
         num_powers: &[u16],
         den_powers: &[u16],
+        known: Option<&[Vec<Element>; 2]>,
     ) -> Result<Fraction> {
         let f = self.field.clone();
         let n = num_powers.len() + den_powers.len();
@@ -718,7 +879,10 @@ impl<F: FnMut(&Zp64, &[Element]) -> Option<Element>> Context<'_, F> {
             .chain(den_powers)
             .copied()
             .max()
-            .unwrap_or(0);
+            .unwrap_or(0) as usize;
+        let degree = degree.max(known.map_or(0, |v| {
+            v.iter().map(|p| p.len().saturating_sub(1)).max().unwrap()
+        }));
         let mut data = Vec::new();
         let mut rhs = Vec::new();
         let mut seen = HashSet::new();
@@ -730,7 +894,7 @@ impl<F: FnMut(&Zp64, &[Element]) -> Option<Element>> Context<'_, F> {
             let Some(y) = self.probe(&line_point(&f, shift, direction, t))? else {
                 continue;
             };
-            let mut powers = vec![f.one(); degree as usize + 1];
+            let mut powers = vec![f.one(); degree + 1];
             for j in 1..powers.len() {
                 powers[j] = f.mul(&powers[j - 1], &t);
             }
@@ -740,7 +904,16 @@ impl<F: FnMut(&Zp64, &[Element]) -> Option<Element>> Context<'_, F> {
                     .iter()
                     .map(|j| f.neg(&f.mul(&y, &powers[*j as usize]))),
             );
-            rhs.push(y);
+            rhs.push(if let Some(known) = known {
+                let eval = |p: &[Element]| {
+                    p.iter()
+                        .zip(&powers)
+                        .fold(f.zero(), |v, (c, t)| f.add(&v, &f.mul(c, t)))
+                };
+                f.sub(&f.mul(&y, &eval(&known[1])), &eval(&known[0]))
+            } else {
+                y
+            });
             if rhs.len() == n {
                 break;
             }
@@ -754,7 +927,18 @@ impl<F: FnMut(&Zp64, &[Element]) -> Option<Element>> Context<'_, F> {
             .solve(&Matrix::new_vec(rhs, f))
             .map_err(|_| ReconstructionError::AttemptsExhausted)?;
         let mut num = self.template.zero();
-        let mut den = self.template.one();
+        let mut den = self.template.zero();
+        if let Some(known) = known {
+            for (p, cs) in [&mut num, &mut den].into_iter().zip(known) {
+                for (d, c) in cs.iter().enumerate() {
+                    let mut ex = vec![0; self.template.nvars()];
+                    ex[0] = d as u16;
+                    p.append_monomial(*c, &ex);
+                }
+            }
+        } else {
+            den = self.template.one();
+        }
         for i in 0..n {
             let mut ex = vec![0; self.template.nvars()];
             ex[0] = if i < num_powers.len() {
@@ -841,7 +1025,7 @@ impl DegreeRace {
         let (mut q0, mut q1) = (self.modulus.zero(), self.modulus.one());
         // Balanced degrees are already handled efficiently by Thiele. The
         // bounded race targets polynomial-like rows without changing probes.
-        while !r1.is_zero() && q1.degree() <= 16.min(self.max_degree) {
+        while !r1.is_zero() && q1.degree() <= 32.min(self.max_degree) {
             if r1.degree() > q1.degree() + 1
                 && r1.degree() <= self.max_degree
                 && r1.degree() + q1.degree() < self.samples.len()
@@ -941,15 +1125,69 @@ fn homogeneous_part(p: &Polynomial, degree: u16) -> Polynomial {
     }
     r
 }
+
+// Number of possible monomials of each total degree at the learned bounds.
+// Saturation affects scheduling only, never an interpolation bound.
+fn homogeneous_sizes(bounds: &[u16], degree: u16) -> Vec<u64> {
+    let mut counts = vec![0u64; degree as usize + 1];
+    counts[0] = 1;
+    for &bound in bounds {
+        let mut next = vec![0u64; counts.len()];
+        for (d, n) in next.iter_mut().enumerate() {
+            for e in 0..=d.min(bound as usize) {
+                *n = n.saturating_add(counts[d - e]);
+            }
+        }
+        counts = next;
+    }
+    counts
+}
+
+// Coefficients of p(t * direction), using only reconstructed components.
+fn homogeneous_line(p: &Polynomial, direction: &[Element]) -> Vec<Element> {
+    let f = p.ring();
+    let mut bounds = vec![0; p.nvars()];
+    let mut degree = 0;
+    for m in p {
+        let mut total = 0;
+        for (bound, &e) in bounds.iter_mut().zip(m.exponents) {
+            *bound = (*bound).max(e as usize);
+            total += e as usize;
+        }
+        degree = degree.max(total);
+    }
+    let powers: Vec<Vec<_>> = bounds
+        .iter()
+        .zip(direction)
+        .map(|(&bound, x)| {
+            let mut powers = vec![f.one(); bound + 1];
+            for i in 1..powers.len() {
+                powers[i] = f.mul(&powers[i - 1], x);
+            }
+            powers
+        })
+        .collect();
+    let mut result = vec![f.zero(); degree + 1];
+    for m in p {
+        let mut c = *m.coefficient;
+        let mut degree = 0;
+        for (&e, powers) in m.exponents.iter().zip(&powers) {
+            degree += e as usize;
+            if e != 0 {
+                f.mul_assign(&mut c, &powers[e as usize]);
+            }
+        }
+        f.add_assign(&mut result[degree], &c);
+    }
+    result
+}
 fn translate(p: &Polynomial, shift: &[Element]) -> Polynomial {
     let mut r = p.clone();
     for (i, s) in shift.iter().enumerate() {
         if p.ring().is_zero(s) {
             continue;
         }
-        let mut ex = vec![0; p.nvars()];
-        ex[i] = 1;
-        r = r.replace_with_poly(i, &(p.monomial(p.ring().one(), ex) + p.constant(*s)));
+        r = r.shift_var_cached(i, s);
     }
     r
 }
@@ -979,6 +1217,7 @@ fn zippel(
     anchors: &[Element],
     degree: u16,
     bounds: &[u16],
+    early_checks: usize,
     mut oracle: impl FnMut(&[Element]) -> Result<Element>,
 ) -> Result<Polynomial> {
     let f = template.ring();
@@ -1015,6 +1254,9 @@ fn zippel(
         }
         let mut active: Vec<_> = (0..p.nterms()).collect();
         let mut values: Vec<Vec<Polynomial>> = vec![Vec::new(); p.nterms()];
+        let mut differences: Vec<Vec<Element>> = vec![Vec::new(); p.nterms()];
+        let mut zero_runs = vec![0; p.nterms()];
+        let mut finished = vec![false; p.nterms()];
         let mut solved = template.zero();
         let mut xs = Vec::new();
         for j in 0..=widths.iter().copied().max().unwrap() {
@@ -1038,18 +1280,36 @@ fn zippel(
                 }
                 template.solve_shifted_transposed_vandermonde(&active_nodes, &rhs)
             };
+            let inverse_differences: Vec<_> = if early_checks > 0 {
+                xs[..j].iter().map(|t| f.inv(&f.sub(&x, t))).collect()
+            } else {
+                Vec::new()
+            };
             for (index, c) in active.iter().copied().zip(cs) {
                 let c = f.div(&c, &f.pow(&x, lower[index] as u64));
                 values[index].push(template.constant(c));
-                if j == widths[index] {
+                if early_checks > 0 {
+                    let mut delta = c;
+                    for (old, inverse) in differences[index].iter().zip(&inverse_differences) {
+                        delta = f.mul(&f.sub(&delta, old), inverse);
+                    }
+                    zero_runs[index] = if f.is_zero(&delta) {
+                        zero_runs[index] + 1
+                    } else {
+                        0
+                    };
+                    differences[index].push(delta);
+                }
+                if j == widths[index] || (early_checks > 0 && zero_runs[index] >= early_checks) {
                     let coefficient =
                         Polynomial::newton_interpolation(&xs, &values[index], variable);
                     let mut ex = exponents[index].clone();
                     ex[variable] = lower[index];
                     solved = solved + coefficient * &template.monomial(f.one(), ex);
+                    finished[index] = true;
                 }
             }
-            active.retain(|i| widths[*i] > j);
+            active.retain(|i| !finished[*i]);
             if active.is_empty() {
                 break;
             }

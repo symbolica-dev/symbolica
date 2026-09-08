@@ -93,6 +93,11 @@ fn main() {
                 methods.push(BalancedZippelSeparated);
                 methods.rotate_left((run % 3) as usize);
             }
+            if std::env::var_os("RECONSTRUCTION_PRUNED").is_some() {
+                methods.push(CuytLeePruned);
+                let rotation = run as usize % methods.len();
+                methods.rotate_left(rotation);
+            }
             for method in methods {
                 let options = ReconstructionOptions {
                     seed: run,

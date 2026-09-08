@@ -14,7 +14,12 @@ fn check(num: &str, den: &str, names: &[&str], seed: u64) {
         Arc::new(names.iter().map(|s| symbol!(s).into()).collect());
     let n: MultivariatePolynomial<_, u16> = parse!(num).to_polynomial(&field, vars.clone());
     let d: MultivariatePolynomial<_, u16> = parse!(den).to_polynomial(&field, vars.clone());
-    for method in [CuytLee, BalancedZippel, BalancedZippelSeparated] {
+    for method in [
+        CuytLee,
+        CuytLeePruned,
+        BalancedZippel,
+        BalancedZippelSeparated,
+    ] {
         let calls = Cell::new(0);
         let (r, stats) = reconstruct_rational_function(
             field.clone(),
@@ -92,6 +97,48 @@ fn balanced_meets_paper_probe_budget() {
 }
 
 #[test]
+fn completed_homogeneous_components_reduce_probes() {
+    let field = Zp64::new(2_305_843_009_213_693_951);
+    let vars = Arc::new(vec![
+        symbol!("x").into(),
+        symbol!("y").into(),
+        symbol!("z").into(),
+    ]);
+    for (ns, ds) in [
+        ("(1+x+y+z)^6", "1"),
+        ("(1+x)^8+y^8+z^8", "1"),
+        ("(1+x+y+z)^6-1", "y-z+(x*y*z)^3"),
+    ] {
+        let n: MultivariatePolynomial<_, u16> = parse!(ns).to_polynomial(&field, vars.clone());
+        let d: MultivariatePolynomial<_, u16> = parse!(ds).to_polynomial(&field, vars.clone());
+        for seed in 0..5 {
+            let mut counts = Vec::new();
+            for method in [CuytLee, CuytLeePruned] {
+                let (r, s) = reconstruct_rational_function(
+                    field.clone(),
+                    vars.clone(),
+                    |f, p| {
+                        let dv = d.replace_all(p);
+                        (!f.is_zero(&dv)).then(|| f.div(&n.replace_all(p), &dv))
+                    },
+                    method,
+                    &ReconstructionOptions {
+                        seed,
+                        max_degree: 32,
+                        ..Default::default()
+                    },
+                )
+                .unwrap();
+                assert_eq!(&r.numerator * &d, &r.denominator * &n);
+                assert_eq!(s.attempts, 1);
+                counts.push(s.probes);
+            }
+            assert!(counts[1] < counts[0], "{ns}/{ds}: {counts:?}");
+        }
+    }
+}
+
+#[test]
 fn balanced_removes_learned_monomial_factors() {
     let field = Zp64::new(2_305_843_009_213_693_951);
     let vars = Arc::new(vec![symbol!("x").into(), symbol!("y").into()]);
@@ -125,30 +172,98 @@ fn balanced_removes_learned_monomial_factors() {
 }
 
 #[test]
+fn degree_race_covers_medium_degree_denominators() {
+    let field = Zp64::new(2_305_843_009_213_693_951);
+    let vars = Arc::new(vec![symbol!("x").into()]);
+    let n: MultivariatePolynomial<_, u16> = parse!("x^50+5").to_polynomial(&field, vars.clone());
+    let d: MultivariatePolynomial<_, u16> = parse!("x^20+3").to_polynomial(&field, vars.clone());
+    for seed in 0..3 {
+        for (n, d) in [(&n, &d), (&d, &n)] {
+            let (r, _) = reconstruct_rational_function(
+                field.clone(),
+                vars.clone(),
+                |f, p| {
+                    let dv = d.replace_all(p);
+                    (!f.is_zero(&dv)).then(|| f.div(&n.replace_all(p), &dv))
+                },
+                BalancedZippel,
+                &ReconstructionOptions {
+                    seed,
+                    degree_race: true,
+                    max_degree: 64,
+                    max_probes: 80,
+                    ..Default::default()
+                },
+            )
+            .unwrap();
+            assert_eq!(&r.numerator * d, &r.denominator * n);
+        }
+    }
+}
+
+#[test]
+fn reciprocal_degree_race_handles_an_initial_zero() {
+    let field = Zp64::new(2_305_843_009_213_693_951);
+    let vars = Arc::new(vec![symbol!("x").into()]);
+    let x: MultivariatePolynomial<_, u16> = parse!("x").to_polynomial(&field, vars.clone());
+    let d: MultivariatePolynomial<_, u16> = parse!("x^30+5").to_polynomial(&field, vars.clone());
+    for seed in 0..8 {
+        // Choose the numerator root at the first query, then keep this same
+        // rational function for every subsequent query and the exact checker.
+        let root = Cell::new(None);
+        let (r, _) = reconstruct_rational_function(
+            field.clone(),
+            vars.clone(),
+            |f, p| {
+                let root_value = root.get().unwrap_or_else(|| {
+                    root.set(Some(p[0]));
+                    p[0]
+                });
+                let dv = d.replace_all(p);
+                (!f.is_zero(&dv)).then(|| f.div(&f.sub(&p[0], &root_value), &dv))
+            },
+            BalancedZippel,
+            &ReconstructionOptions {
+                seed,
+                degree_race: true,
+                max_degree: 40,
+                max_probes: 45,
+                ..Default::default()
+            },
+        )
+        .unwrap();
+        let n = &x - &x.constant(root.get().unwrap());
+        assert_eq!(&r.numerator * &d, &r.denominator * &n);
+    }
+}
+
+#[test]
 fn unbalanced_degree_race_and_numerator_completion() {
     let field = Zp64::new(2_305_843_009_213_693_951);
     let vars = Arc::new(vec![symbol!("x").into()]);
     let n: MultivariatePolynomial<_, u16> = parse!("x^30+3").to_polynomial(&field, vars.clone());
     let d: MultivariatePolynomial<_, u16> = parse!("x^3+5").to_polynomial(&field, vars.clone());
     for seed in 0..8 {
-        let (r, _) = reconstruct_rational_function(
-            field.clone(),
-            vars.clone(),
-            |f, x| {
-                let dv = d.replace_all(x);
-                (!f.is_zero(&dv)).then(|| f.div(&n.replace_all(x), &dv))
-            },
-            BalancedZippel,
-            &ReconstructionOptions {
-                seed,
-                max_degree: 40,
-                degree_race: true,
-                max_probes: 40,
-                ..Default::default()
-            },
-        )
-        .unwrap();
-        assert_eq!(&r.numerator * &d, &r.denominator * &n);
+        for (n, d) in [(&n, &d), (&d, &n)] {
+            let (r, _) = reconstruct_rational_function(
+                field.clone(),
+                vars.clone(),
+                |f, x| {
+                    let dv = d.replace_all(x);
+                    (!f.is_zero(&dv)).then(|| f.div(&n.replace_all(x), &dv))
+                },
+                BalancedZippel,
+                &ReconstructionOptions {
+                    seed,
+                    max_degree: 40,
+                    degree_race: true,
+                    max_probes: 40,
+                    ..Default::default()
+                },
+            )
+            .unwrap();
+            assert_eq!(&r.numerator * d, &r.denominator * n);
+        }
         check(
             "(x+1)*(y^5+3)",
             "x^4*(y^4+2)+x^2*(y+5)+3",
@@ -232,7 +347,12 @@ fn many_seeds_and_variable_orders() {
 fn bounded_failure_and_poles() {
     let field = Zp64::new(1_000_003);
     let vars: Arc<Vec<symbolica::poly::PolyVariable>> = Arc::new(vec![symbol!("x").into()]);
-    for method in [CuytLee, BalancedZippel, BalancedZippelSeparated] {
+    for method in [
+        CuytLee,
+        CuytLeePruned,
+        BalancedZippel,
+        BalancedZippelSeparated,
+    ] {
         let mut calls = 0;
         let r = reconstruct_rational_function(
             field.clone(),
@@ -300,7 +420,12 @@ fn lift_large_rational_coefficients() {
             .to_polynomial(&Q, vars.clone());
     let d: MultivariatePolynomial<_, u16> =
         parse!("13*x*y+17/23*y^2+29").to_polynomial(&Q, vars.clone());
-    for method in [CuytLee, BalancedZippel, BalancedZippelSeparated] {
+    for method in [
+        CuytLee,
+        CuytLeePruned,
+        BalancedZippel,
+        BalancedZippelSeparated,
+    ] {
         let mut calls = 0;
         let (r, stats) = reconstruct_rational_function_over_q(
             vars.clone(),
@@ -380,7 +505,12 @@ fn generated_sparse_functions_over_a_smaller_prime() {
             }
         }
         assert!(!d.is_zero());
-        for method in [CuytLee, BalancedZippel, BalancedZippelSeparated] {
+        for method in [
+            CuytLee,
+            CuytLeePruned,
+            BalancedZippel,
+            BalancedZippelSeparated,
+        ] {
             let (r, _) = reconstruct_rational_function(
                 field.clone(),
                 vars.clone(),

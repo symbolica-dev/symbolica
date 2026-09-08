@@ -1,0 +1,2 @@
+case,method,seed,status,elapsed_us,probes,prime,oracle,degree_race,num_terms,den_terms,setup_ms
+firefly_f4,FireFly_default,1,ok,225998352.331,53609,9223372036854775783,cached_powers,0,53129,3,
