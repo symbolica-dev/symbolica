@@ -1,0 +1,7 @@
+case,method,seed,status,elapsed_us,probes,prime,oracle,degree_race,num_terms,den_terms,setup_ms
+aajamp,CuytLeePrunedRace,1,ok,17014423.765,43908,9223372036854775783,cached_powers,1,23260,7231,4386.702
+aajamp,CuytLeePruned,1,ok,17027526.456,43922,9223372036854775783,cached_powers,0,23260,7231,3958.898
+aajamp,CuytLeePruned,2,ok,16801999.102,43922,9223372036854775783,cached_powers,0,23260,7231,4158.458
+aajamp,CuytLeePrunedRace,2,ok,16401743.327,43908,9223372036854775783,cached_powers,1,23260,7231,3908.882
+aajamp,CuytLeePrunedRace,3,ok,16694245.121,43908,9223372036854775783,cached_powers,1,23260,7231,4004.071
+aajamp,CuytLeePruned,3,ok,17392057.429,43922,9223372036854775783,cached_powers,0,23260,7231,4052.029

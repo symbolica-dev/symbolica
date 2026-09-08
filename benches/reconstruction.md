@@ -1,6 +1,9 @@
 # Rational function reconstruction experiment
 
-Latest update: [homogeneous component pruning](reconstruction-components.md)
+Latest update: [monomial removal before homogenization](reconstruction-monomials.md)
+reduces probes on the amplitude coefficient using factors learned from existing
+degree-profile slices.
+The [homogeneous component pruning update](reconstruction-components.md)
 adds a selectable method that closes the dense `f3`/`f4` probe gap against
 FireFly and reduces the amplitude coefficient count.
 The [matched public stress benchmarks](reconstruction-matched-stress.md) compare

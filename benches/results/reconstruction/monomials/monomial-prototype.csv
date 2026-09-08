@@ -1,0 +1,5 @@
+case,method,seed,status,elapsed_us,probes,prime,oracle,degree_race,num_terms,den_terms,setup_ms
+aajamp,CuytLeePruned,1,ok,16962088.505,43922,9223372036854775783,cached_powers,0,23260,7231,4075.175
+coeff_prop_4l,CuytLeePruned,1,ok,2168931.255,13089,9223372036854775783,cached_powers,0,6671,6051,81.566
+firefly_f3,CuytLeePruned,1,ok,11796424.604,26669,9223372036854775783,cached_powers,0,26333,3,81.216
+firefly_f2,CuytLeePruned,1,ok,17338977.145,112567,9223372036854775783,cached_powers,0,3,2,0.245
