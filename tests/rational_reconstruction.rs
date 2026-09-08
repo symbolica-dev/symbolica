@@ -547,6 +547,7 @@ fn lift_large_rational_coefficients() {
         )
         .unwrap();
         assert!(stats.successful_images >= 2);
+        assert!(stats.support_reuses > 0);
         assert_eq!(stats.probes, calls);
         let rn = r.numerator.map_coeff(|c| Rational::from(c.clone()), Q);
         let rd = r.denominator.map_coeff(|c| Rational::from(c.clone()), Q);
@@ -665,4 +666,181 @@ fn lifting_recovers_after_an_unlucky_prime() {
     .unwrap();
     assert!(stats.support_resets > 0);
     assert_eq!(&r.numerator * &d, &r.denominator * &n);
+}
+
+#[test]
+fn lifting_falls_back_when_learned_support_changes() {
+    use symbolica::domains::finite_field::{PrimeIteratorU64, ToFiniteField};
+    use symbolica::poly::reconstruction::reconstruct_rational_function_over_q;
+    let mut primes = PrimeIteratorU64::new(1 << 61);
+    let vanished = Integer::from(primes.next().unwrap()) * Integer::from(primes.next().unwrap());
+    let vars = Arc::new(vec![symbol!("x").into()]);
+    let x: MultivariatePolynomial<_, u16> = parse!("x").to_polynomial(&Z, vars.clone());
+    let huge: Integer = "10000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000039".parse().unwrap();
+    let n = (&x * &x).mul_coeff(vanished) + x.clone().mul_coeff(huge) + x.one();
+    let d = &x + &x.constant(3.into());
+    let mut counts = std::collections::HashMap::new();
+    let (r, stats) = reconstruct_rational_function_over_q(
+        vars,
+        |f, p| {
+            *counts.entry(f.get_prime()).or_insert(0usize) += 1;
+            let nv = n
+                .map_coeff(|c| c.to_finite_field(f), f.clone())
+                .replace_all(p);
+            let dv = d
+                .map_coeff(|c| c.to_finite_field(f), f.clone())
+                .replace_all(p);
+            (!f.is_zero(&dv)).then(|| f.div(&nv, &dv))
+        },
+        BalancedZippel,
+        &ReconstructionOptions {
+            max_probes: 25,
+            ..Default::default()
+        },
+        20,
+    )
+    .unwrap();
+    assert!(stats.support_fallbacks > 0);
+    assert!(stats.support_resets > 0);
+    assert!(stats.support_reuses > 0);
+    assert!(counts.values().all(|n| *n <= 25));
+    assert_eq!(stats.probes, counts.values().sum::<usize>());
+    assert_eq!(&r.numerator * &d, &r.denominator * &n);
+}
+
+#[test]
+fn lifting_reuses_sparse_homogeneous_support_without_an_origin_value() {
+    use symbolica::domains::finite_field::ToFiniteField;
+    use symbolica::poly::reconstruction::reconstruct_rational_function_over_q;
+    let vars = Arc::new(vec![
+        symbol!("x").into(),
+        symbol!("y").into(),
+        symbol!("z").into(),
+    ]);
+    let n: MultivariatePolynomial<_, u16> = parse!("10000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000039*x^3*y+5*x*y^3+7*x^2*z^2+11*y*z+13*x^2+17*z^2").to_polynomial(&Z, vars.clone());
+    let d: MultivariatePolynomial<_, u16> = parse!("x^2+3*y*z").to_polynomial(&Z, vars.clone());
+    let mut counts = std::collections::HashMap::new();
+    let (r, stats) = reconstruct_rational_function_over_q(
+        vars,
+        |f, p| {
+            *counts.entry(f.get_prime()).or_insert(0usize) += 1;
+            let nv = n
+                .map_coeff(|c| c.to_finite_field(f), f.clone())
+                .replace_all(p);
+            let dv = d
+                .map_coeff(|c| c.to_finite_field(f), f.clone())
+                .replace_all(p);
+            (!f.is_zero(&dv)).then(|| f.div(&nv, &dv))
+        },
+        BalancedZippel,
+        &ReconstructionOptions::default(),
+        20,
+    )
+    .unwrap();
+    assert!(stats.support_reuses >= 2);
+    assert_eq!(stats.support_fallbacks, 0);
+    // Once the small coefficients are stable, only one coefficient is unknown:
+    // one interpolation probe and the three independent validation probes.
+    assert!(counts.values().filter(|n| **n == 4).count() >= 2);
+    assert_eq!(&r.numerator * &d, &r.denominator * &n);
+}
+
+#[test]
+fn lifting_rejects_a_small_but_wrong_coefficient_guess() {
+    use symbolica::domains::finite_field::{PrimeIteratorU64, ToFiniteField};
+    use symbolica::poly::reconstruction::reconstruct_rational_function_over_q;
+    let first_prime = PrimeIteratorU64::new(1 << 61).next().unwrap();
+    let vars = Arc::new(vec![symbol!("x").into()]);
+    let x: MultivariatePolynomial<_, u16> = parse!("x").to_polynomial(&Z, vars.clone());
+    let huge: Integer = "10000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000039".parse().unwrap();
+    // The first image suggests the very small coefficient 7, although the
+    // actual coefficient differs by a whole prime. Its support does not change.
+    let n = (&x * &x).mul_coeff(Integer::from(first_prime) + Integer::from(7))
+        + x.clone().mul_coeff(huge)
+        + x.one();
+    let d = &x + &x.constant(3.into());
+    let mut counts = std::collections::HashMap::new();
+    let (r, stats) = reconstruct_rational_function_over_q(
+        vars,
+        |f, p| {
+            *counts.entry(f.get_prime()).or_insert(0usize) += 1;
+            let nv = n
+                .map_coeff(|c| c.to_finite_field(f), f.clone())
+                .replace_all(p);
+            let dv = d
+                .map_coeff(|c| c.to_finite_field(f), f.clone())
+                .replace_all(p);
+            (!f.is_zero(&dv)).then(|| f.div(&nv, &dv))
+        },
+        BalancedZippel,
+        &ReconstructionOptions {
+            max_probes: 25,
+            ..Default::default()
+        },
+        20,
+    )
+    .unwrap();
+    assert!(stats.support_fallbacks > 0);
+    assert_eq!(stats.support_resets, 0);
+    assert!(stats.support_reuses > 0);
+    assert!(counts.values().all(|n| *n <= 25));
+    assert_eq!(stats.probes, counts.values().sum::<usize>());
+    assert_eq!(&r.numerator * &d, &r.denominator * &n);
+}
+
+#[test]
+fn rational_lifting_keeps_the_eq28_probe_budgets() {
+    use symbolica::poly::reconstruction::reconstruct_rational_function_over_q;
+    let vars = Arc::new(vec![symbol!("y").into(), symbol!("d").into()]);
+    let n: MultivariatePolynomial<_, u16> =
+        parse!("(d+13)^30*(y^2+9)^7+1").to_polynomial(&Z, vars.clone());
+    let d: MultivariatePolynomial<_, u16> =
+        parse!("(d-4)^29*(y^2-1)^5").to_polynomial(&Z, vars.clone());
+    for (method, budget, reuse) in [
+        (BalancedZippel, 1356, true),
+        (BalancedZippelSeparated, 921, true),
+        (BalancedZippel, 1356, false),
+        (BalancedZippelSeparated, 921, false),
+    ] {
+        let (r, stats) = reconstruct_rational_function_over_q(
+            vars.clone(),
+            |f, p| {
+                let c = |n: i64| f.nth(n.into());
+                let nv = f.add(
+                    &f.mul(
+                        &f.pow(&f.add(&p[1], &c(13)), 30),
+                        &f.pow(&f.add(&f.pow(&p[0], 2), &c(9)), 7),
+                    ),
+                    &c(1),
+                );
+                let dv = f.mul(
+                    &f.pow(&f.sub(&p[1], &c(4)), 29),
+                    &f.pow(&f.sub(&f.pow(&p[0], 2), &c(1)), 5),
+                );
+                (!f.is_zero(&dv)).then(|| f.div(&nv, &dv))
+            },
+            method,
+            &ReconstructionOptions {
+                seed: 1,
+                max_degree: 64,
+                reuse_coefficients: reuse,
+                ..Default::default()
+            },
+            12,
+        )
+        .unwrap();
+        assert!(
+            stats.probes <= budget,
+            "{method:?}: {} probes",
+            stats.probes
+        );
+        if reuse {
+            assert!(stats.support_fallbacks > 0);
+        } else {
+            assert_eq!(stats.probes, budget);
+            assert_eq!(stats.support_reuses, 0);
+            assert_eq!(stats.support_fallbacks, 0);
+        }
+        assert_eq!(&r.numerator * &d, &r.denominator * &n);
+    }
 }

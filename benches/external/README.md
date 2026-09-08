@@ -134,3 +134,16 @@ Raw runs: [`external-cpp.csv`](../results/reconstruction/improved/external-cpp.c
 [`external-symbolica-q.csv`](../results/reconstruction/improved/external-symbolica-q.csv).
 Per-process diagnostic logs are retained locally under
 `target/reconstruction-external/runs/`.
+
+## Large coefficients over Q
+
+`build_stress.sh` also builds `firefly-q-stress`. The corresponding
+`run_q_stress.py` driver exports exact integer coefficients from Symbolica and
+records total probes, probes by prime, failures and each library's native prime
+policy. `FireFly_scan` enables shift and factor scans; its complete result,
+including restored factors and ordering, is checked exactly over Q with FLINT.
+Concurrent runs use separate exported oracle files.
+
+See the [large-Q comparison and coefficient-reuse report](../reconstruction-q-support.md)
+for commands, scope, validation and results. These runs complement the modular
+FIRE7 adapter; they do not add a full-Q FIRE7 table-workflow benchmark.

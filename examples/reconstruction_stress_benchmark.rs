@@ -12,6 +12,9 @@ use symbolica::{
     prelude::*,
 };
 
+#[path = "support/reconstruction_q.rs"]
+mod q_benchmark;
+
 #[derive(Debug)]
 struct TimeLimit;
 
@@ -97,6 +100,10 @@ fn main() {
     );
     let vars: Arc<Vec<PolyVariable>> =
         Arc::new(names.iter().map(|s| symbol!(s.as_str()).into()).collect());
+    if std::env::var_os("RECONSTRUCTION_OVER_Q").is_some() {
+        q_benchmark::run(case, &source, &names, vars, method, seed);
+        return;
+    }
     let setup = Instant::now();
     let original: RationalPolynomial<_, u16> = parse!(source.trim().trim_end_matches(';'))
         .to_rational_polynomial(&field, &field, Some(vars.clone()));

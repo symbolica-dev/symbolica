@@ -1,6 +1,9 @@
 # Rational function reconstruction experiment
 
-Latest update: [monomial removal before homogenization](reconstruction-monomials.md)
+Latest update: [coefficient reuse during rational lifting](reconstruction-q-support.md)
+compares complete Q reconstruction on the large public coefficients and reduces
+the four-loop probe count below factor-scanned FireFly.
+The [monomial removal update](reconstruction-monomials.md)
 reduces probes on the amplitude coefficient using factors learned from existing
 degree-profile slices.
 The [homogeneous component pruning update](reconstruction-components.md)

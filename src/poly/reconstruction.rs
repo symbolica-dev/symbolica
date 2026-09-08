@@ -23,6 +23,7 @@ use std::{
 };
 
 mod rational;
+mod support;
 pub use rational::{RationalReconstructionStats, reconstruct_rational_function_over_q};
 
 type Element = FiniteFieldElement<u64>;
@@ -62,6 +63,9 @@ pub struct ReconstructionOptions {
     /// Race Thiele against unbalanced candidates with a small numerator or
     /// denominator, using the same probes at additional arithmetic cost.
     pub degree_race: bool,
+    /// Reuse learned support and coefficient hypotheses when lifting over Q.
+    /// Reduces probes at additional interpolation cost; unused for one prime.
+    pub reuse_coefficients: bool,
 }
 
 impl Default for ReconstructionOptions {
@@ -73,6 +77,7 @@ impl Default for ReconstructionOptions {
             max_attempts: 4,
             seed: 0x7265636f6e737472,
             degree_race: false,
+            reuse_coefficients: true,
         }
     }
 }

@@ -1,0 +1,79 @@
+--- a/src/poly/reconstruction/support.rs
++++ b/src/poly/reconstruction/support.rs
+@@ -60,10 +60,13 @@
+-    // A rejected coefficient hypothesis is unlikely to improve with another
+-    // direction. Fall back immediately; ordinary reconstruction owns retries.
+-    ctx.stats.attempts = 1;
+-    Some(
+-        reconstruct_components(&mut ctx, &known, &components).and_then(|r| {
+-            if ctx.verify(&r)? {
+-                let r = Fraction::from_num_den(r.numerator, r.denominator, &ctx.field, true);
+-                Ok((r, ctx.stats))
+-            } else {
+-                unlucky()
++    for attempt in 0..options.max_attempts {
++        ctx.stats.attempts = attempt + 1;
++        match reconstruct_components(&mut ctx, &known, &components) {
++            Ok(r) => match ctx.verify(&r) {
++                Ok(true) => {
++                    let r = Fraction::from_num_den(r.numerator, r.denominator, &ctx.field, true);
++                    return Some(Ok((r, ctx.stats)));
++                }
++                Err(e) => return Some(Err(e)),
++                _ => {}
++            },
++            Err(ReconstructionError::ProbeLimit) => {
++                return Some(Err(ReconstructionError::ProbeLimit));
+@@ -71,2 +74,4 @@
+-        }),
+-    )
++            _ => {}
++        }
++    }
++    Some(unlucky())
+@@ -93,4 +97,0 @@
+-    // Check the first line early when substantial interpolation remains. This
+-    // rejects wrong fully known components before paying for every direction.
+-    let check_first_line = components.iter().map(|(_, ex)| ex.len()).sum::<usize>()
+-        > components.len() + ctx.options.verification_points;
+@@ -116,6 +117,7 @@
+-                let line =
+-                    ctx.line_solve(&shift, &direction, &powers[0], &powers[1], Some(&fixed))?;
+-                if lines.is_empty() && check_first_line {
+-                    verify_line(ctx, &direction, &line)?;
+-                }
+-                lines.push(line);
++                lines.push(ctx.line_solve(
++                    &shift,
++                    &direction,
++                    &powers[0],
++                    &powers[1],
++                    Some(&fixed),
++                )?);
+@@ -148,26 +149,0 @@
+-
+-fn verify_line<F>(ctx: &mut Context<'_, F>, direction: &[Element], line: &Fraction) -> Result<()>
+-where
+-    F: FnMut(&Zp64, &[Element]) -> Option<Element>,
+-{
+-    let f = ctx.field.clone();
+-    let mut checked = 0;
+-    for _ in 0..ctx.options.verification_points * 16 {
+-        let t = ctx.random();
+-        let point: Vec<_> = direction.iter().map(|x| f.mul(x, &t)).collect();
+-        if ctx.cache.contains_key(&point) {
+-            continue;
+-        }
+-        if let Some(y) = ctx.probe(&point)? {
+-            // direction[0] = 1, and the line is stored as a polynomial in x_0.
+-            if value(line, &point) != Some(y) {
+-                return unlucky();
+-            }
+-            checked += 1;
+-            if checked == ctx.options.verification_points {
+-                return Ok(());
+-            }
+-        }
+-    }
+-    unlucky()
+-}
