@@ -1,5 +1,9 @@
 # FireFly and Smirnov–Zeng implementation comparison
 
+The tables here describe the performance checkpoint `306c375`. See the
+[probe-count update](../reconstruction-probes.md) for the subsequent Symbolica
+improvements; external implementations and their recorded runs are unchanged.
+
 These benchmarks call actual external implementation code. They complement the
 original expanded-polynomial-oracle comparisons; their timings should not be
 mixed with those older measurements.

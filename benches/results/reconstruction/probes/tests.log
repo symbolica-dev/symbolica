@@ -1,0 +1,34 @@
+   Compiling symbolica v2.2.0 (/common/dev/symbolica-reconstruction)
+    Finished `test` profile [unoptimized + debuginfo] target(s) in 1.29s
+     Running tests/rational_polynomial.rs (target/debug/deps/rational_polynomial-fa0908191b4a2d30)
+
+running 10 tests
+test split_exponential_sums ... ok
+test split_additive_power_exponents ... ok
+test integer_content_of_rational_and_complex_exponents ... ok
+test common_rational_power_basis ... ok
+test default_exponent_and_variable_inputs ... ok
+test rational_polynomial_power_uses_exact_binary_exponentiation ... ok
+test integer_factors_in_non_polynomial_exponents ... ok
+test large_gcd_multiple_scales ... ok
+test large_gcd_single_scale ... ok
+test factorized_rational_poly_large ... ok
+
+test result: ok. 10 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.56s
+
+     Running tests/rational_reconstruction.rs (target/debug/deps/rational_reconstruction-7a426ee136877741)
+
+running 10 tests
+test unlucky_anchor_is_retried ... ok
+test rejected_denominator_separation_falls_back_within_one_attempt ... ok
+test lifting_recovers_after_an_unlucky_prime ... ok
+test bounded_failure_and_poles ... ok
+test lift_large_rational_coefficients ... ok
+test zero_constants_polynomials_and_cancellation ... ok
+test paper_examples_and_normalization ... ok
+test many_seeds_and_variable_orders ... ok
+test generated_sparse_functions_over_a_smaller_prime ... ok
+test balanced_meets_paper_probe_budget ... ok
+
+test result: ok. 10 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 1.16s
+
