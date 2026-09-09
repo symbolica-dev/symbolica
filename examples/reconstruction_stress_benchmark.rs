@@ -1,5 +1,6 @@
 //! One bounded reconstruction of a public or generated stress-test function.
 //! Usage: reconstruction_stress_benchmark CASE METHOD SEED [variables in reverse order: reverse]
+//! Custom cases read BENCH_INPUT_DIR/CASE and its whitespace-separated CASE.variables sidecar.
 use std::{cell::Cell, io::Write, sync::Arc, time::Instant};
 use symbolica::{
     domains::finite_field::{FiniteFieldCore, FiniteFieldElement, Zp64},
@@ -89,7 +90,16 @@ fn main() {
         "fire7_nb0_largest" => (std::fs::read_to_string("target/reconstruction-external/fire-table-inputs/fire7_nb0_largest").unwrap(), ["u","v","w","d"].map(String::from).to_vec()),
         "mixed_sparse5" => ("(x^37*y^3+7*y^29*z^2+11*z^23*w+13*w^19*v^2+17*v^17*x+19*x*y*z*w*v+23)/(x^11*z^7+3*y^13*w^2+5*z^9*v^3+7*w^7*x^2+11*v^5*y+13)".into(), ["x","y","z","w","v"].map(String::from).to_vec()),
         "separated_dense4" => ("((x+2)^5*(y+3)^4*(z+5)^3*(w+7)^8+x*y*z+1)/((x+y+3)^3*(z+5)^2*(w-11)^7)".into(), ["x","y","z","w"].map(String::from).to_vec()),
-        _ => panic!("unknown case"),
+        _ => {
+            let directory = std::path::PathBuf::from(
+                std::env::var("BENCH_INPUT_DIR").expect("unknown case; set BENCH_INPUT_DIR for custom inputs"),
+            );
+            let source = std::fs::read_to_string(directory.join(case)).expect("custom expression file");
+            let names = std::fs::read_to_string(directory.join(format!("{case}.variables")))
+                .expect("custom variable-order file")
+                .split_whitespace().map(String::from).collect();
+            (source, names)
+        },
     };
     let reverse = args.get(4).is_some_and(|x| x == "reverse");
     if reverse {

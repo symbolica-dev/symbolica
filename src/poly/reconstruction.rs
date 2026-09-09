@@ -178,6 +178,7 @@ where
         cache: HashMap::new(),
         stats: Default::default(),
         monomial_factors: None,
+        balanced_pilot: None,
     };
     for attempt in 0..options.max_attempts {
         ctx.stats.attempts = attempt + 1;
@@ -246,6 +247,8 @@ struct Context<'a, F> {
     // Only active inside the pruned homogeneous reconstruction. The cache and
     // validation always retain the original oracle values.
     monomial_factors: Option<[Vec<u16>; 2]>,
+    // A final-variable slice already reconstructed during method selection.
+    balanced_pilot: Option<(Vec<Element>, Fraction)>,
 }
 
 fn unlucky<T>() -> Result<T> {
@@ -618,6 +621,7 @@ impl<F: FnMut(&Zp64, &[Element]) -> Option<Element>> Context<'_, F> {
     }
 
     fn balanced(&mut self, separate: bool) -> Result<Fraction> {
+        let mut pilot = self.balanced_pilot.take();
         let anchors = self.point();
         let mut result = self.thiele(0, |t| {
             let mut p = anchors.clone();
@@ -625,7 +629,14 @@ impl<F: FnMut(&Zp64, &[Element]) -> Option<Element>> Context<'_, F> {
             p
         })?;
         for variable in 1..self.template.nvars() {
-            let base = self.point();
+            let last = variable + 1 == self.template.nvars();
+            // At geometric power one, this base reproduces the pilot's fixed
+            // coordinates. Its row can therefore be reused without new probes.
+            let base = if last && let Some((point, _)) = &pilot {
+                point.clone()
+            } else {
+                self.point()
+            };
             let polys = [&result.numerator, &result.denominator];
             let z = polys.iter().map(|p| p.nterms()).max().unwrap();
             let mut nodes = Vec::new();
@@ -645,7 +656,9 @@ impl<F: FnMut(&Zp64, &[Element]) -> Option<Element>> Context<'_, F> {
                     point[j] = self.field.pow(&base[j], i as u64);
                 }
                 let known = value(&result, &point).ok_or(ReconstructionError::AttemptsExhausted)?;
-                let mut row = if let Some(degrees) = degrees {
+                let mut row = if last && i == 1 && pilot.is_some() {
+                    pilot.take().unwrap().1
+                } else if let Some(degrees) = degrees {
                     // The first row predicts the last-variable denominator
                     // factor. Fresh final verification guards this hypothesis.
                     let fixed = completed[1].as_ref().map(|p| (false, p)).or_else(|| {

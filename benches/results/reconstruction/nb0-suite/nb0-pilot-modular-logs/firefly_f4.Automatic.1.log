@@ -1,0 +1,2 @@
+case,method,seed,order,status,setup_ms,elapsed_us,probes,attempts,num_terms,den_terms,selected_methods,selection_probes,sparse_rows,sparse_row_fallbacks
+firefly_f4,Automatic,1,original,ok,58.772,43116388.479,53535,1,53129,3,CuytLeePruned,258,0,0

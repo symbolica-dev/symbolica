@@ -175,3 +175,10 @@ Sparse balanced-row interpolation is enabled by default. Select
 disable it for a comparison using the same executable. The modular CSV includes
 accepted sparse rows and fallback counts. See the
 [sparse-row comparison](../reconstruction-sparse-rows.md) for results and checks.
+
+Use `extract_fire_tables.py --suite` to export a deterministic 32-coefficient
+sample from the pinned `nb0` table. Set `BENCH_INPUT_DIR` to the export directory
+and pass case names from its `suite-cases.txt` to either stress runner. Custom
+inputs consist of an expression file named after the case and a whitespace-separated
+variable-order sidecar named `CASE.variables`. See the
+[broader IBP suite and pilot-row reuse report](../reconstruction-nb0-suite.md).

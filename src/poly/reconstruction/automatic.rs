@@ -14,6 +14,7 @@ where
         &mut self,
     ) -> Result<(ReconstructionMethod, Option<DegreeProfile>)> {
         use ReconstructionMethod::*;
+        self.balanced_pilot = None;
         let nv = self.template.nvars();
         if nv <= 2 {
             return Ok((BalancedZippel, None));
@@ -35,6 +36,7 @@ where
         // This is only a hypothesis; ordinary final validation and fallback
         // remain responsible for accepting the reconstructed function.
         if slice.denominator == other.denominator {
+            self.balanced_pilot = Some((anchor, slice));
             return Ok((BalancedZippelSeparated, None));
         }
         let mut profile = DegreeProfile {

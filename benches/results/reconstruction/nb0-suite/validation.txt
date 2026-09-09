@@ -1,0 +1,20 @@
+Base reconstruction: e4f006a; baseline example adds only generic input loading.
+Source: FIRE7 d132e5365dd2a13db9cd9dbaf5c200b53d489cfd, nb0/intsde-nb0.tables.
+Source SHA256: cebddb9e7b6695a3dccb0e91ebe6e821f5093b060107a957a70a60cb6090ea42.
+Suite extraction deterministic; all 32 expression hashes and sidecar variable orders checked.
+Rank 1 equals preceding fire7_nb0_largest expression byte for byte.
+Both release builds completed successfully with Rust 1.92 and existing optimization flags.
+All 26 rational_reconstruction tests passed, including the new three-seed pilot-reuse test.
+Clippy completed with -A clippy::never_loop and the preceding 249 library warnings.
+128 baseline suite runs and 384 final suite runs passed exact Q identities.
+All four methods have stable probe counts over the three final seeds on all 32 inputs.
+Every Automatic case reduces probes; all other seed-one counts and prime distributions unchanged.
+All 32 exported exact Q oracles match between baseline and final builds.
+Per-prime accounting sums to total probes for all 512 suite rows.
+Three additional method-screen runs passed on rank0897; no tested explicit method beats FireFly scans there.
+All seven large corpus regressions passed exact checks, with counts matching the sparse-row checkpoint.
+process-logs.tar.gz contains 515 individual suite and gap-screen process outputs.
+Remaining gap: rank0897 is 261 Automatic vs 163 FireFly scans; constant one is 24 vs 14.
+Rank0897's exact oracle has numerator only in d and proportional denominator coefficient groups in d.
+Python extractor syntax and git diff whitespace checks passed.
+Archived Clippy/test diagnostics have trailing whitespace and trailing empty lines removed.

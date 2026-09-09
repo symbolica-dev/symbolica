@@ -1,0 +1,4 @@
+case,method,seed,status,elapsed_us,probes,primes,images,support_reuses,support_fallbacks,probes_by_prime,prime_policy,oracle,num_terms,den_terms,setup_ms,selected_methods
+fire7_nb0_rank0897,BalancedZippel,1,ok,1061.173,247,2,1,0,0,2305843009213693967:244;2305843009213693973:3,Symbolica_default,cached_powers_Q,6,100,0.441,BalancedZippel
+fire7_nb0_rank0897,CuytLee,1,ok,5810.270,1522,2,1,0,0,2305843009213693967:1519;2305843009213693973:3,Symbolica_default,cached_powers_Q,6,100,0.406,CuytLee
+fire7_nb0_rank0897,CuytLeePruned,1,ok,2898.100,550,2,1,0,0,2305843009213693967:547;2305843009213693973:3,Symbolica_default,cached_powers_Q,6,100,0.437,CuytLeePruned
