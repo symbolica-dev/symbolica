@@ -22,6 +22,10 @@ pub struct RationalReconstructionStats {
     /// Rejected support/coefficient hypotheses followed by ordinary reconstruction
     /// when the remaining per-prime probe budget permits it.
     pub support_fallbacks: usize,
+    /// Confirmed small-factor transforms used to reduce the lifted support.
+    pub factor_reductions: usize,
+    /// Small-factor hypotheses submitted for confirmation in another image.
+    pub factor_hypotheses: usize,
 }
 
 /// Reconstruct over Q by CRT and maximal-quotient coefficient reconstruction.
@@ -33,6 +37,10 @@ pub struct RationalReconstructionStats {
 /// Learned support and coefficient hypotheses with repeated agreement or a
 /// conservative size margin are reused when a known component fixes the scale. Reused
 /// images are independently checked, with ordinary reconstruction as fallback.
+/// When lifting remains unresolved, small univariate factor hypotheses can be
+/// confirmed by divisibility in another image and removed from subsequent
+/// probes. Their quotient coefficients are lifted and the factors restored
+/// before verification against the original oracle.
 /// A candidate is accepted only after checking at a prime unused in its CRT.
 /// This is a probabilistic identity check, not a coefficient-height proof.
 pub fn reconstruct_rational_function_over_q<F>(
@@ -58,6 +66,9 @@ where
     let mut frozen: Vec<Option<Rational>> = Vec::new();
     let mut residues: Vec<Integer> = Vec::new();
     let mut modulus = Integer::one();
+    let mut factors: Option<super::rational_factors::Factors> = None;
+    let mut pending_factors: Option<(super::rational_factors::Factors, Fraction)> = None;
+    let mut factor_search_done = false;
     let mut rng = StdRng::seed_from_u64(options.seed ^ 0x637274);
     while stats.primes < max_primes {
         let prime = primes.next().ok_or(ReconstructionError::PrimeLimit)?;
@@ -66,9 +77,17 @@ where
         let mut image_options = options.clone();
         image_options.seed = rng.random();
         let calls = std::cell::Cell::new(0usize);
+        let modular_factors = factors.as_ref().map(|factors| factors.modular(&field));
         let mut oracle = |f: &Zp64, p: &[Element]| {
             calls.set(calls.get() + 1);
-            black_box(f, p)
+            let raw = black_box(f, p)?;
+            if let Some([numerator, denominator]) = &modular_factors {
+                let n = numerator.replace_all(p);
+                let d = denominator.replace_all(p);
+                (!f.is_zero(&n) && !f.is_zero(&d)).then(|| f.div(&f.mul(&raw, &d), &n))
+            } else {
+                Some(raw)
+            }
         };
         let reused = options
             .reuse_coefficients
@@ -108,7 +127,7 @@ where
             }
         };
         stats.probes += calls.get();
-        let (image, image_stats) = match image {
+        let (mut image, image_stats) = match image {
             Ok(r) => r,
             Err(ReconstructionError::InvalidOptions) => {
                 return Err(ReconstructionError::InvalidOptions);
@@ -118,6 +137,35 @@ where
         stats.successful_images += 1;
         if let Some(method) = image_stats.selected_method {
             stats.selected_methods.push(method);
+        }
+        if let Some((candidate, previous)) = pending_factors.take() {
+            // A second independently reconstructed prime image must be
+            // divisible by the same integer factors. Retain the previous
+            // quotient image so confirmation does not discard its CRT work.
+            if let Some(reduced) = candidate.reduce(&image) {
+                let previous = candidate
+                    .reduce(&previous)
+                    .expect("candidate divided its discovery image");
+                support = [&previous.numerator, &previous.denominator]
+                    .into_iter()
+                    .enumerate()
+                    .flat_map(|(side, p)| p.into_iter().map(move |m| (side, m.exponents.to_vec())))
+                    .collect();
+                let previous_field = previous.numerator.ring();
+                residues = previous
+                    .numerator
+                    .coefficients
+                    .iter()
+                    .chain(&previous.denominator.coefficients)
+                    .map(|c| Integer::from(previous_field.from_element(c)))
+                    .collect();
+                modulus = previous_field.get_prime().into();
+                previous_guesses.clear();
+                frozen.clear();
+                image = reduced;
+                factors = Some(candidate);
+                stats.factor_reductions += 1;
+            }
         }
         let image_support: Vec<_> = [&image.numerator, &image.denominator]
             .into_iter()
@@ -180,6 +228,16 @@ where
             .collect();
         previous_guesses = guesses.clone();
         let Some(coefficients) = guesses.into_iter().collect::<Option<Vec<_>>>() else {
+            if options.reuse_coefficients
+                && options.reuse_rational_factors
+                && !factor_search_done
+                && stats.successful_images >= 3
+            {
+                factor_search_done = true;
+                pending_factors = super::rational_factors::Factors::discover(&image)
+                    .map(|candidate| (candidate, image));
+                stats.factor_hypotheses += usize::from(pending_factors.is_some());
+            }
             continue;
         };
         if stats.primes == max_primes {
@@ -193,6 +251,9 @@ where
             } else {
                 denominator.append_monomial(c, ex);
             }
+        }
+        if let Some(factors) = &factors {
+            factors.restore(&mut numerator, &mut denominator);
         }
         let prime = primes.next().ok_or(ReconstructionError::PrimeLimit)?;
         stats.primes += 1;

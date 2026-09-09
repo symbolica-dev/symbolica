@@ -1,9 +1,13 @@
 #!/usr/bin/env python3
 """Full Q reconstruction of shared exact inputs; retain prime costs and failures."""
 import csv
+import fcntl
+import hashlib
+import json
 import os
 from pathlib import Path
 import subprocess
+import shutil
 import sys
 
 root = Path(__file__).resolve().parents[2]
@@ -12,17 +16,22 @@ output = root / sys.argv[1]
 output.parent.mkdir(parents=True, exist_ok=True)
 run_dir = output.parent / (output.stem + "-logs")
 run_dir.mkdir(exist_ok=True)
+run_lock = (run_dir / ".run.lock").open("w")
+fcntl.flock(run_lock, fcntl.LOCK_EX | fcntl.LOCK_NB)
 cases = sys.argv[2:] or ["coeff_prop_4l", "aajamp"]
-rust = root / os.environ.get("SYMBOLICA_STRESS_BINARY", "target/release/examples/reconstruction_stress_benchmark")
+rust_source = root / os.environ.get("SYMBOLICA_STRESS_BINARY", "target/release/examples/reconstruction_stress_benchmark")
+rust = run_dir / "symbolica-stress"
+shutil.copy2(rust_source, rust)
+(run_dir / "symbolica-binary.json").write_text(json.dumps({"source": str(rust_source), "snapshot": str(rust), "sha256": hashlib.sha256(rust.read_bytes()).hexdigest()}, indent=2) + "\n")
 affinity = ["taskset", "-c", os.environ["BENCH_CPU"]] if "BENCH_CPU" in os.environ else []
 loader = ([os.environ["EXTERNAL_LOADER"], "--library-path", os.environ["EXTERNAL_LIBRARY_PATH"]]
           if "EXTERNAL_LOADER" in os.environ else [])
 env = {**os.environ, "RECONSTRUCTION_OVER_Q": "1", "CACHED_ORACLE": "1"}
-for key in ["EXPORT_ORACLE", "RECONSTRUCTION_DEGREE_RACE", "RECONSTRUCTION_NO_REUSE", "RECONSTRUCTION_DENSE_ROWS", "BENCH_ORDER"]:
+for key in ["EXPORT_ORACLE", "RECONSTRUCTION_DEGREE_RACE", "RECONSTRUCTION_NO_REUSE", "RECONSTRUCTION_NO_FACTOR_REUSE", "RECONSTRUCTION_DENSE_ROWS", "BENCH_ORDER"]:
     env.pop(key, None)
 methods = os.environ.get("BENCH_METHODS", "CuytLeePruned,BalancedZippel,FireFly_default,FireFly_scan").split(",")
-assert set(methods) <= {"AutomaticDenseRows", "BalancedZippelDenseRows", "Automatic", "CuytLee", "CuytLeePruned", "CuytLeePrunedRace", "BalancedZippel", "BalancedZippelRace", "BalancedZippelSeparated", "FireFly_default", "FireFly_scan", "BalancedZippelNoReuse", "CuytLeePrunedNoReuse", "FIRE7_Q", "FIRE7_Q_learned", "Rare_scaling"}
-fields = "case,method,seed,status,elapsed_us,probes,primes,images,support_reuses,support_fallbacks,probes_by_prime,prime_policy,oracle,num_terms,den_terms,setup_ms,selected_methods".split(",")
+assert set(methods) <= {"AutomaticDenseRows", "BalancedZippelDenseRows", "Automatic", "AutomaticNoFactorReuse", "CuytLee", "CuytLeePruned", "CuytLeePrunedRace", "BalancedZippel", "BalancedZippelRace", "BalancedZippelSeparated", "FireFly_default", "FireFly_scan", "BalancedZippelNoReuse", "CuytLeePrunedNoReuse", "FIRE7_Q", "FIRE7_Q_learned", "Rare_scaling"}
+fields = "case,method,seed,status,elapsed_us,probes,primes,images,support_reuses,support_fallbacks,probes_by_prime,prime_policy,oracle,num_terms,den_terms,setup_ms,selected_methods,factor_reductions".split(",")
 with output.open("w") as out:
     writer = csv.DictWriter(out, fields, lineterminator="\n")
     writer.writeheader()
@@ -48,10 +57,12 @@ with output.open("w") as out:
                     job_env["RECONSTRUCTION_DEGREE_RACE"] = "1"
                 if method.endswith("NoReuse"):
                     job_env["RECONSTRUCTION_NO_REUSE"] = "1"
+                if method.endswith("NoFactorReuse"):
+                    job_env["RECONSTRUCTION_NO_FACTOR_REUSE"] = "1"
                 args = ([str(external / "rare-q-stress"), str(oracle), case, str(seed), str(run_dir / f"{case}.{method}.{seed}.result")]
                         if is_rare else loader + [str(external / "fire7-q-stress"), str(oracle), case, str(seed), "learned" if method.endswith("learned") else "default"]
                         if is_fire7 else loader + [str(external / "firefly-q-stress"), str(oracle), case, str(seed), method.removeprefix("FireFly_")]
-                        if is_external else [str(rust), case, method.removesuffix("DenseRows").removesuffix("NoReuse").removesuffix("Race"), str(seed)])
+                        if is_external else [str(rust), case, method.removesuffix("DenseRows").removesuffix("NoReuse").removesuffix("Race").removesuffix("NoFactorReuse"), str(seed)])
                 row = dict(case=case, method=method, seed=seed, oracle="cached_powers_Q",
                            prime_policy="Rare_native_60" if is_rare else "FIRE7_native_64" if is_fire7 else "FireFly_default" if is_external else "Symbolica_default",
                            num_terms=ns, den_terms=ds)
@@ -84,7 +95,7 @@ with output.open("w") as out:
                         parsed = list(csv.DictReader(lines[start:]))
                         if len(parsed) != 1:
                             raise ValueError(result.stdout)
-                        for key in ["status", "elapsed_us", "probes", "primes", "images", "support_reuses", "support_fallbacks", "probes_by_prime", "setup_ms", "selected_methods"]:
+                        for key in ["status", "elapsed_us", "probes", "primes", "images", "support_reuses", "support_fallbacks", "probes_by_prime", "setup_ms", "selected_methods", "factor_reductions"]:
                             if key in parsed[0]:
                                 row[key] = parsed[0][key]
                 except subprocess.TimeoutExpired as e:

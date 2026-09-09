@@ -1,0 +1,13 @@
+case,method,seed,status,elapsed_us,probes,primes,images,support_reuses,support_fallbacks,probes_by_prime,prime_policy,oracle,num_terms,den_terms,setup_ms,selected_methods,factor_reductions
+ibp_diamond3l_rank0001,Automatic,1,ok,844.313,122,2,1,0,0,2305843009213693967:119;2305843009213693973:3,Symbolica_default,cached_powers_Q,60,45,0.564,BalancedZippelSeparated,0
+ibp_diamond3l_rank0001,Automatic,2,ok,1092.624,122,2,1,0,0,2305843009213693967:119;2305843009213693973:3,Symbolica_default,cached_powers_Q,60,45,0.926,BalancedZippelSeparated,0
+ibp_diamond3l_rank0001,Automatic,3,ok,1282.855,122,2,1,0,0,2305843009213693967:119;2305843009213693973:3,Symbolica_default,cached_powers_Q,60,45,0.685,BalancedZippelSeparated,0
+ibp_diamond3l_rank0002,Automatic,1,ok,1223.335,129,2,1,0,0,2305843009213693967:126;2305843009213693973:3,Symbolica_default,cached_powers_Q,60,45,1.016,BalancedZippelSeparated,0
+ibp_diamond3l_rank0002,Automatic,2,ok,1230.915,129,2,1,0,0,2305843009213693967:126;2305843009213693973:3,Symbolica_default,cached_powers_Q,60,45,0.715,BalancedZippelSeparated,0
+ibp_diamond3l_rank0002,Automatic,3,ok,892.573,129,2,1,0,0,2305843009213693967:126;2305843009213693973:3,Symbolica_default,cached_powers_Q,60,45,0.538,BalancedZippelSeparated,0
+ibp_diamond3l_rank0003,Automatic,1,ok,847.863,127,2,1,0,0,2305843009213693967:124;2305843009213693973:3,Symbolica_default,cached_powers_Q,60,45,0.971,BalancedZippelSeparated,0
+ibp_diamond3l_rank0003,Automatic,2,ok,1037.144,127,2,1,0,0,2305843009213693967:124;2305843009213693973:3,Symbolica_default,cached_powers_Q,60,45,0.854,BalancedZippelSeparated,0
+ibp_diamond3l_rank0003,Automatic,3,ok,1013.235,127,2,1,0,0,2305843009213693967:124;2305843009213693973:3,Symbolica_default,cached_powers_Q,60,45,0.680,BalancedZippelSeparated,0
+ibp_diamond3l_rank0004,Automatic,1,ok,1710.137,187,2,1,0,0,2305843009213693967:184;2305843009213693973:3,Symbolica_default,cached_powers_Q,112,60,1.096,BalancedZippelSeparated,0
+ibp_diamond3l_rank0004,Automatic,2,ok,1716.567,187,2,1,0,0,2305843009213693967:184;2305843009213693973:3,Symbolica_default,cached_powers_Q,112,60,1.256,BalancedZippelSeparated,0
+ibp_diamond3l_rank0004,Automatic,3,ok,1406.535,187,2,1,0,0,2305843009213693967:184;2305843009213693973:3,Symbolica_default,cached_powers_Q,112,60,1.446,BalancedZippelSeparated,0

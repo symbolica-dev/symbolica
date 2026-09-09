@@ -232,11 +232,20 @@ fn main() {
         assert_eq!(results.len(), originals.len());
     }
     assert_eq!(trace.calls() as usize, cache.len());
+    let mut distribution = std::collections::BTreeMap::<u64, usize>::new();
+    for (prime, _) in cache.keys() {
+        *distribution.entry(*prime).or_default() += 1;
+    }
+    let distribution = distribution
+        .iter()
+        .map(|(prime, calls)| format!("{prime}:{calls}"))
+        .collect::<Vec<_>>()
+        .join(";");
     println!(
-        "method,seed,status,elapsed_us,probes,scalar_requests,cache_hits,outputs,completed,incremental_probes"
+        "method,seed,status,elapsed_us,probes,scalar_requests,cache_hits,outputs,completed,incremental_probes,probes_by_prime"
     );
     println!(
-        "Symbolica_joint_cache,{seed},{status},{elapsed:.3},{},{requests},{},{},{},{}",
+        "Symbolica_joint_cache,{seed},{status},{elapsed:.3},{},{requests},{},{},{},{},{distribution}",
         trace.calls(),
         cache_hits,
         cases.len(),

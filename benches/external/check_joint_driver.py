@@ -67,6 +67,7 @@ for method in ["rust", "firefly"]:
         parsed = list(csv.DictReader(lines[start:]))
         assert len(parsed) == 1
         row = parsed[0]
+        assert sum(int(pair.split(":")[1]) for pair in row["probes_by_prime"].split(";") if pair) == int(row["probes"])
         expected = "ok" if control == "valid" else "probe_limit" if control == "budget" or method == "rust" else "trace_" + control
         assert row["status"] == expected, row
         if control != "valid":

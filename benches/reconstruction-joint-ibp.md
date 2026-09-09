@@ -97,9 +97,10 @@ adapter passes 34 exact reconstructions, six failure controls and two checker
 rejection controls. The Rust example builds and passes clippy with the existing
 library allowance and warnings; changed Rust files pass formatting checks.
 
-Repeated joint trace benchmarks for `tth2l_b25` and `xbox2l2m` are running
-separately from the completed tables above. Their completion and comparison
-are outstanding. The first complete `tth2l_b25` seed uses 31,503 vector probes
+Repeated joint trace benchmarks for `tth2l_b25` and `xbox2l2m` are now complete;
+their results and the subsequent optimization are recorded in the
+[factor-lifting update](reconstruction-factor-lifting.md). The first complete
+`tth2l_b25` seed at this checkpoint uses 31,503 vector probes
 and 202.270 seconds for Symbolica, versus 16,107 probes and 130.630 seconds for
 FireFly scan. Symbolica saves 6,217 of its 37,720 scalar requests through the
 cache, but this does not close the joint reconstruction gap. This is a single

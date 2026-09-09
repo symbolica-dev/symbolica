@@ -1,0 +1,69 @@
+   Compiling symbolica v2.2.0 (/common/dev/symbolica-reconstruction)
+    Finished `release` profile [optimized] target(s) in 8m 45s
+     Running tests/rational_reconstruction.rs (target/release/deps/rational_reconstruction-931658184be69843)
+
+running 48 tests
+test homogeneous_degree_limit_includes_removed_factors ... ok
+test automatic_failed_first_survey_uses_a_consistent_fallback_anchor ... ok
+test lifting_rejects_a_small_but_wrong_coefficient_guess ... ok
+test lifting_recovers_after_an_unlucky_prime ... ok
+test automatic_bivariate_selection_reuses_the_first_slice ... ok
+test automatic_reuses_its_separated_pilot_row ... ok
+test lifting_falls_back_when_learned_support_changes ... ok
+test rejected_bivariate_denominator_prediction_keeps_the_shared_budget ... ok
+test automatic_removes_sampled_univariate_factors ... ok
+test lifting_reuses_sparse_homogeneous_support_without_an_origin_value ... ok
+test lift_large_rational_coefficients ... ok
+test reordered_coordinates_remain_consistent_across_prime_images ... ok
+test automatic_univariate_candidates_are_checked_in_full_dimension ... ok
+test bounded_failure_and_poles ... ok
+test unlucky_anchor_is_retried ... ok
+test rejected_denominator_separation_falls_back_within_one_attempt ... ok
+test automatic_constant_candidates_are_checked_in_full_dimension ... ok
+test homogeneous_monomial_factors_are_cleared_after_an_unlucky_slice ... ok
+test rejected_whole_factor_separation_recovers_within_one_attempt ... ok
+test sparse_row_support_saves_probes_with_fixed_and_reciprocal_rows ... ok
+test automatic_reuses_ordinary_balanced_survey_rows ... ok
+test automatic_reused_survey_retries_hidden_support ... ok
+test automatic_uses_homogeneous_reconstruction_after_factor_separation ... ok
+test rejected_residual_strategy_restores_unrestricted_probes ... ok
+test sampled_factors_hidden_on_two_slices_retry_the_original_oracle ... ok
+test balanced_removes_learned_monomial_factors ... ok
+test a_factor_appearing_only_at_the_discovery_prime_is_rejected ... ok
+test low_degree_residual_reuses_the_survey_in_balanced_rows ... ok
+test sparse_row_support_recovers_from_a_missing_power ... ok
+test paper_examples_and_normalization ... ok
+test completed_numerator_combines_with_separated_denominator_rows ... ok
+test automatic_reorders_a_separated_factor_and_restores_caller_coordinates ... ok
+test rational_factor_reuse_reduces_high_height_lifting_and_restores_the_function ... FAILED
+test zero_constants_polynomials_and_cancellation ... ok
+test reciprocal_degree_race_handles_an_initial_zero ... ok
+test homogeneous_reconstruction_removes_monomial_factors ... ok
+test automatic_lifts_a_separated_rational_factor ... ok
+test rejected_common_numerator_factor_restores_the_original_oracle ... ok
+test completed_homogeneous_components_reduce_probes ... ok
+test degree_race_covers_medium_degree_denominators ... ok
+test automatic_selection_validates_structure_and_preserves_probe_limits ... ok
+test many_seeds_and_variable_orders ... ok
+test automatic_removes_a_common_numerator_factor ... ok
+test generated_sparse_functions_over_a_smaller_prime ... ok
+test unbalanced_degree_race_and_numerator_completion ... ok
+test sampled_factors_are_restored_before_multi_prime_lifting ... ok
+test rational_lifting_keeps_the_eq28_probe_budgets ... ok
+test balanced_meets_paper_probe_budget ... ok
+
+failures:
+
+---- rational_factor_reuse_reduces_high_height_lifting_and_restores_the_function stdout ----
+
+thread 'rational_factor_reuse_reduces_high_height_lifting_and_restores_the_function' (404602) panicked at tests/rational_reconstruction.rs:1999:9:
+factor reuse costs [208, 165]
+note: run with `RUST_BACKTRACE=1` environment variable to display a backtrace
+
+
+failures:
+    rational_factor_reuse_reduces_high_height_lifting_and_restores_the_function
+
+test result: FAILED. 47 passed; 1 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.37s
+
+error: test failed, to rerun pass `--test rational_reconstruction`

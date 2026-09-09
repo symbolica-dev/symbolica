@@ -70,6 +70,7 @@ pub(super) fn run(
             .unwrap_or(200_000),
         degree_race: std::env::var_os("RECONSTRUCTION_DEGREE_RACE").is_some(),
         reuse_coefficients: std::env::var_os("RECONSTRUCTION_NO_REUSE").is_none(),
+        reuse_rational_factors: std::env::var_os("RECONSTRUCTION_NO_FACTOR_REUSE").is_none(),
         reuse_row_support: std::env::var_os("RECONSTRUCTION_DENSE_ROWS").is_none(),
         ..Default::default()
     };
@@ -128,8 +129,10 @@ pub(super) fn run(
         assert_eq!(trace.calls(), calls);
     }
     let mut selected = String::new();
+    let mut factor_reductions = String::new();
     let (status, primes, images, reuses, fallbacks) = match result {
         Ok(Ok((r, stats))) => {
+            factor_reductions = stats.factor_reductions.to_string();
             selected = stats
                 .selected_methods
                 .iter()
@@ -178,10 +181,10 @@ pub(super) fn run(
         .collect::<Vec<_>>()
         .join(";");
     println!(
-        "case,method,seed,status,elapsed_us,probes,primes,images,support_reuses,support_fallbacks,probes_by_prime,setup_ms,num_terms,den_terms,selected_methods"
+        "case,method,seed,status,elapsed_us,probes,primes,images,support_reuses,support_fallbacks,probes_by_prime,setup_ms,num_terms,den_terms,selected_methods,factor_reductions"
     );
     println!(
-        "{case},{method:?},{seed},{status},{elapsed_us:.3},{calls},{primes},{images},{reuses},{fallbacks},{distribution},{setup_ms:.3},{},{},{selected}",
+        "{case},{method:?},{seed},{status},{elapsed_us:.3},{calls},{primes},{images},{reuses},{fallbacks},{distribution},{setup_ms:.3},{},{},{selected},{factor_reductions}",
         original.numerator.nterms(),
         original.denominator.nterms()
     );
