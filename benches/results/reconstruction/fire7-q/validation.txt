@@ -1,0 +1,9 @@
+C++ build_stress.sh: exit 0
+Q adapter controls: 16 exact reconstructions and 4 resource-limit checks passed
+FIRE7 full-Q four-loop comparisons: 12 exact reconstructions passed
+NB0 screen: 5 exact reconstructions passed
+NB0 three-seed comparison: 15 exact reconstructions passed
+All CSV per-prime probe sums, prime counts and unique seed rows checked
+All exact oracle exports matched recorded hashes across runs
+FIRE7 reconstruction.cpp and primes.cpp unchanged from pinned revision
+Changed Rust formatting, Python syntax and shell syntax checks passed

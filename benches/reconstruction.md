@@ -1,6 +1,9 @@
 # Rational function reconstruction experiment
 
-Latest update: [coefficient reuse during rational lifting](reconstruction-q-support.md)
+Latest update: [full-Q FIRE7 comparison and an additional IBP table](reconstruction-fire7-q.md)
+adds the authors' coefficient-lifting routine to the reference adapter and tests
+a separate four-variable public IBP coefficient.
+The [coefficient-reuse update](reconstruction-q-support.md)
 compares complete Q reconstruction on the large public coefficients and reduces
 the four-loop probe count below factor-scanned FireFly.
 The [monomial removal update](reconstruction-monomials.md)

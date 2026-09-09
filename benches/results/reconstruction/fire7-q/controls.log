@@ -1,0 +1,20 @@
+eq3 FireFly_default 14 exact check passed
+eq3 FireFly_scan 41 exact check passed
+eq3 FIRE7_Q 57 exact check passed
+eq3 FIRE7_Q_learned 41 exact check passed
+large FireFly_default 20 exact check passed
+large FireFly_scan 47 exact check passed
+large FIRE7_Q 111 exact check passed
+large FIRE7_Q_learned 71 exact check passed
+origin_pole FireFly_default 15 exact check passed
+origin_pole FireFly_scan 43 exact check passed
+origin_pole FIRE7_Q 111 exact check passed
+origin_pole FIRE7_Q_learned 74 exact check passed
+eq28 FireFly_default 1922 exact check passed
+eq28 FireFly_scan 1694 exact check passed
+eq28 FIRE7_Q 2191 exact check passed
+eq28 FIRE7_Q_learned 2089 exact check passed
+firefly-q-stress probes probe_limit
+firefly-q-stress primes prime_limit
+fire7-q-stress probes probe_limit
+fire7-q-stress primes prime_limit

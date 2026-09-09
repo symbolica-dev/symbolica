@@ -1,0 +1,2 @@
+case,method,seed,status,elapsed_us,probes,primes,images,probes_by_prime
+fire7_nb0_largest,FireFly_scan,1,ok,614791.742,8180,3,,9223372036854775549:1;9223372036854775643:1657;9223372036854775783:6522

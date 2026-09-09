@@ -85,6 +85,7 @@ fn main() {
         "firefly_f2" | "firefly_f3" | "firefly_f4" => (std::fs::read_to_string(format!("target/reconstruction-external/firefly/benchmarks/{}.m", &case[8..])).unwrap(), (1..=5).map(|i| format!("x{i}")).collect()),
         "aajamp" | "aajamp_mod" => (std::fs::read_to_string(format!("target/reconstruction-external/scaling-rec/data/{case}")).unwrap(), ["x23","x34","x45","x51"].map(String::from).to_vec()),
         "coeff_prop_4l" | "coeff_prop_4l_mod" => (std::fs::read_to_string(format!("target/reconstruction-external/scaling-rec/data/{case}")).unwrap(), ["z","d"].map(String::from).to_vec()),
+        "fire7_nb0_largest" => (std::fs::read_to_string("target/reconstruction-external/fire-table-inputs/fire7_nb0_largest").unwrap(), ["u","v","w","d"].map(String::from).to_vec()),
         "mixed_sparse5" => ("(x^37*y^3+7*y^29*z^2+11*z^23*w+13*w^19*v^2+17*v^17*x+19*x*y*z*w*v+23)/(x^11*z^7+3*y^13*w^2+5*z^9*v^3+7*w^7*x^2+11*v^5*y+13)".into(), ["x","y","z","w","v"].map(String::from).to_vec()),
         "separated_dense4" => ("((x+2)^5*(y+3)^4*(z+5)^3*(w+7)^8+x*y*z+1)/((x+y+3)^3*(z+5)^2*(w-11)^7)".into(), ["x","y","z","w"].map(String::from).to_vec()),
         _ => panic!("unknown case"),

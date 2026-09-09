@@ -1,0 +1,2 @@
+case,method,seed,status,elapsed_us,probes,primes,images,probes_by_prime
+eq3,FireFly_default,1,ok,2040.604,14,2,,9223372036854775643:1;9223372036854775783:13

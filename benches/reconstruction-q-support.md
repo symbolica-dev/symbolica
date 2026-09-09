@@ -8,6 +8,9 @@ diphoton-plus-jet amplitude. The authors' variants with monomial factors removed
 are also included; they are modified versions of those coefficients, not new
 physical reductions.
 
+The subsequent [FIRE7 Q comparison](reconstruction-fire7-q.md) adds the authors'
+coefficient-lifting routine and an additional public IBP table to the benchmark.
+
 ## Why change the lifting stage
 
 At `856aec5`, Symbolica reconstructed every prime image independently. The

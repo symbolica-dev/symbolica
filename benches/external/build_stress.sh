@@ -23,3 +23,8 @@ fuel="$external/fire/FIRE7/extra/fuel"
     -I "$external/fire/FIRE7/sources/tools" benches/external/fire7_stress.cpp \
     "$external"/fire-objects/*.o "$fuel/library/libfuel.a" \
     -Wl,--gc-sections "${libraries[@]}" -lgmpxx -ldl -o "$external/fire7-stress"
+"${CXX:-g++}" -O3 -std=c++17 -DENABLE_FLINT -fopenmp \
+    -ffunction-sections -fdata-sections -include flint/fmpq.h "${includes[@]}" \
+    -I "$external/fire/FIRE7/sources/tools" benches/external/fire7_q_stress.cpp \
+    "$external"/fire-objects/*.o "$fuel/library/libfuel.a" \
+    -Wl,--gc-sections "${libraries[@]}" -lgmpxx -ldl -o "$external/fire7-q-stress"

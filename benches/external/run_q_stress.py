@@ -21,7 +21,7 @@ env = {**os.environ, "RECONSTRUCTION_OVER_Q": "1", "CACHED_ORACLE": "1"}
 for key in ["EXPORT_ORACLE", "RECONSTRUCTION_DEGREE_RACE", "RECONSTRUCTION_NO_REUSE", "BENCH_ORDER"]:
     env.pop(key, None)
 methods = os.environ.get("BENCH_METHODS", "CuytLeePruned,BalancedZippel,FireFly_default,FireFly_scan").split(",")
-assert set(methods) <= {"CuytLee", "CuytLeePruned", "CuytLeePrunedRace", "BalancedZippel", "BalancedZippelRace", "BalancedZippelSeparated", "FireFly_default", "FireFly_scan", "BalancedZippelNoReuse", "CuytLeePrunedNoReuse"}
+assert set(methods) <= {"CuytLee", "CuytLeePruned", "CuytLeePrunedRace", "BalancedZippel", "BalancedZippelRace", "BalancedZippelSeparated", "FireFly_default", "FireFly_scan", "BalancedZippelNoReuse", "CuytLeePrunedNoReuse", "FIRE7_Q", "FIRE7_Q_learned"}
 fields = "case,method,seed,status,elapsed_us,probes,primes,images,support_reuses,support_fallbacks,probes_by_prime,prime_policy,oracle,num_terms,den_terms,setup_ms".split(",")
 with output.open("w") as out:
     writer = csv.DictWriter(out, fields, lineterminator="\n")
@@ -37,17 +37,19 @@ with output.open("w") as out:
         assert marker == "0"
         for seed in range(1, int(os.environ.get("RECONSTRUCTION_REPEATS", "1")) + 1):
             for method in methods[seed % len(methods):] + methods[:seed % len(methods)]:
-                is_external = method.startswith("FireFly_")
+                is_fire7 = method.startswith("FIRE7_")
+                is_external = method.startswith("FireFly_") or is_fire7
                 job_env = {**env, "FIREFLY_BENCH_SEED": str(seed)}
                 race = method.endswith("Race")
                 if race:
                     job_env["RECONSTRUCTION_DEGREE_RACE"] = "1"
                 if method.endswith("NoReuse"):
                     job_env["RECONSTRUCTION_NO_REUSE"] = "1"
-                args = (loader + [str(external / "firefly-q-stress"), str(oracle), case, str(seed), method.removeprefix("FireFly_")]
+                args = (loader + [str(external / "fire7-q-stress"), str(oracle), case, str(seed), "learned" if method.endswith("learned") else "default"]
+                        if is_fire7 else loader + [str(external / "firefly-q-stress"), str(oracle), case, str(seed), method.removeprefix("FireFly_")]
                         if is_external else [str(rust), case, method.removesuffix("NoReuse").removesuffix("Race"), str(seed)])
                 row = dict(case=case, method=method, seed=seed, oracle="cached_powers_Q",
-                           prime_policy="FireFly_default" if is_external else "Symbolica_default",
+                           prime_policy="FIRE7_native_64" if is_fire7 else "FireFly_default" if is_external else "Symbolica_default",
                            num_terms=ns, den_terms=ds)
                 try:
                     result = subprocess.run(affinity + args, cwd=run_dir if is_external else root,
