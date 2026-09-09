@@ -1,0 +1,2 @@
+case,method,seed,status,elapsed_us,probes,primes,images,probes_by_prime
+large,FireFly_default,1,prime_limit,951.172,18,3,,9223372036854775549:1;9223372036854775643:4;9223372036854775783:13

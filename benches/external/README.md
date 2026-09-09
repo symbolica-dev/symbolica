@@ -146,4 +146,17 @@ Concurrent runs use separate exported oracle files.
 
 See the [large-Q comparison and coefficient-reuse report](../reconstruction-q-support.md)
 for commands, scope, validation and results. These runs complement the modular
-FIRE7 adapter; they do not add a full-Q FIRE7 table-workflow benchmark.
+FIRE7 adapter.
+
+`fire7-q-stress` now adds a full-Q bivariate comparison through the authors'
+unchanged Thiele, balanced-Zippel and coefficient-lifting routines. Select
+`FIRE7_Q` or `FIRE7_Q_learned` in `run_q_stress.py`; the latter retains learned
+batch sizes across rows and primes. This is an adapter comparison, not a timing
+of the entire FIRE table workflow. `check_q_adapters.py` checks both C++ adapters
+on small exact inputs and verifies resource-limit reporting.
+
+`extract_fire_tables.py` deterministically extracts the largest coefficient string
+from the pinned `nb0` IBP table, with source hashes and integral identifiers.
+It enables the `fire7_nb0_largest` case. See the
+[FIRE7 Q and additional IBP report](../reconstruction-fire7-q.md) for scope,
+commands and results.
