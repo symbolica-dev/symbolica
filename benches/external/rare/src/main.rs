@@ -188,7 +188,7 @@ fn reconstruct<const N: usize>(
         }
     };
     // Native prime order; upstream's demonstration uses the first ten.
-    seq! { M in 0..16 {{
+    seq! { M in 0..114 {{
         if M >= first_scaling_prime && M < stats.max_primes {
             const P: u64 = LARGE_PRIMES[M];
             let mut image = Image::<P, N>::new(input);
@@ -292,8 +292,8 @@ fn main() {
     };
     assert!(stats.timeout.is_finite() && stats.timeout >= 0.0);
     assert!(
-        stats.max_primes <= 16,
-        "adapter supports at most sixteen native primes"
+        stats.max_primes <= LARGE_PRIMES.len(),
+        "adapter supports at most 114 native primes"
     );
     // End timing before serialization and independent exact identity checking.
     let (candidate, elapsed) = match input.names.len() {

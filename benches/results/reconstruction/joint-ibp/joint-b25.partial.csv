@@ -1,0 +1,4 @@
+family,method,seed,status,elapsed_us,probes,scalar_requests,cache_hits,outputs,completed,incremental_probes
+tth2l_b25,FireFly_joint_scan,1,ok,130629636.273,16107,,,4,4,
+tth2l_b25,FireFly_joint_default,1,ok,164821595.893,23564,,,4,4,
+tth2l_b25,Symbolica_joint_cache,1,ok,202270259.641,31503,37720,6217,4,4,2368;578;22110;6447

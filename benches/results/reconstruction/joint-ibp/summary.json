@@ -1,0 +1,40 @@
+{
+  "complete_suites": {
+    "joint-b16": {
+      "runs": 9,
+      "successful": 9
+    },
+    "joint-b16-all": {
+      "runs": 9,
+      "successful": 9
+    },
+    "joint-b25-scalar-final": {
+      "runs": 20,
+      "successful": 19
+    }
+  },
+  "pending_suites": {
+    "joint-b25": {
+      "recorded_runs": 3,
+      "planned_runs": 9
+    },
+    "joint-xbox": {
+      "recorded_runs": 0,
+      "planned_runs": 9
+    }
+  },
+  "median_seconds": {
+    "joint-b16:FireFly_joint_scan": 1.5695653189999998,
+    "joint-b16:Symbolica_joint_cache": 0.38656572899999997,
+    "joint-b16:FireFly_joint_default": 3.988197532,
+    "joint-b16-all:FireFly_joint_scan": 1.4327762279999998,
+    "joint-b16-all:Symbolica_joint_cache": 0.871856814,
+    "joint-b16-all:FireFly_joint_default": 3.978357361
+  },
+  "limitations": [
+    "Complete output sets refer to a single target integral, not a complete IBP reduction.",
+    "Rare's largest b25 coefficient exhausts its full 114-prime table.",
+    "The 128-prime FIRE7 diagnostic is an invalid configuration, superseded by the 114-prime final comparison.",
+    "Pending trace suites are snapshots, not completed evidence."
+  ]
+}

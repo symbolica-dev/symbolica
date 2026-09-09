@@ -21,8 +21,7 @@ struct Oracle {
     }
 };
 
-extern "C" {
-void* rr_open(const char* path) {
+static void* open_trace(const char* path, bool single) {
     try {
         auto oracle = std::make_unique<Oracle>();
         FILE* file = fopen(path, "rb");
@@ -30,8 +29,10 @@ void* rr_open(const char* path) {
         int status = tr_mergeimport_FILE(oracle->trace, file);
         fclose(file);
         tr_flush(oracle->trace);
-        if (status || oracle->trace.noutputs != 1 || code_size(oracle->trace.code)
-            || oracle->trace.outputs[0] >= oracle->trace.nextloc) return nullptr;
+        if (status || !oracle->trace.noutputs || (single && oracle->trace.noutputs != 1)
+            || code_size(oracle->trace.code)) return nullptr;
+        for (auto output : oracle->trace.outputs)
+            if (output >= oracle->trace.nextloc) return nullptr;
         size_t size = oracle->trace.fincode.filesize;
         // The upstream interpreter requires zero padding after its last page.
         oracle->code.resize(size + CODE_PAGELUFT, 0);
@@ -45,18 +46,28 @@ void* rr_open(const char* path) {
         return oracle.release();
     } catch (...) { return nullptr; }
 }
+extern "C" {
+void* rr_open(const char* path) { return open_trace(path, true); }
+void* rr_open_many(const char* path) { return open_trace(path, false); }
 void rr_close(void* handle) { delete static_cast<Oracle*>(handle); }
 size_t rr_inputs(void* handle) { return static_cast<Oracle*>(handle)->trace.ninputs; }
+size_t rr_outputs(void* handle) { return static_cast<Oracle*>(handle)->trace.noutputs; }
+const char* rr_output_name(void* handle, size_t index) {
+    auto& names = static_cast<Oracle*>(handle)->trace.output_names;
+    return index < names.size() ? names[index].c_str() : nullptr;
+}
 const char* rr_input_name(void* handle, size_t index) {
     auto& names = static_cast<Oracle*>(handle)->trace.input_names;
     return index < names.size() ? names[index].c_str() : nullptr;
 }
 uint64_t rr_calls(void* handle) { return static_cast<Oracle*>(handle)->calls; }
 // 0: success; 1: undefined intermediate inverse; -1: invalid input/interpreter error.
-int rr_evaluate(void* handle, uint64_t prime, const uint64_t* point, size_t count, uint64_t* output) {
+int rr_evaluate_many(void* handle, uint64_t prime, const uint64_t* point, size_t count,
+                     uint64_t* output, size_t outputs) {
     static_assert(sizeof(ncoef_t) == sizeof(uint64_t));
     auto& oracle = *static_cast<Oracle*>(handle);
-    if (prime < 3 || prime >= (uint64_t(1) << 63) || !(prime & 1) || count != oracle.trace.ninputs)
+    if (prime < 3 || prime >= (uint64_t(1) << 63) || !(prime & 1) || count != oracle.trace.ninputs
+        || outputs != oracle.trace.noutputs)
         return -1;
     for (size_t i = 0; i < count; ++i) if (point[i] >= prime) return -1;
     if (oracle.modulus.n != prime) nmod_init(&oracle.modulus, prime);
@@ -65,7 +76,10 @@ int rr_evaluate(void* handle, uint64_t prime, const uint64_t* point, size_t coun
         point, oracle.trace.constants.data(), oracle.data.data(), oracle.modulus);
     if (status == 2 || status == 3) return 1;
     if (status) return -1;
-    *output = oracle.data[oracle.trace.outputs[0]];
+    for (size_t i = 0; i < outputs; ++i) output[i] = oracle.data[oracle.trace.outputs[i]];
     return 0;
+}
+int rr_evaluate(void* handle, uint64_t prime, const uint64_t* point, size_t count, uint64_t* output) {
+    return rr_evaluate_many(handle, prime, point, count, output, 1);
 }
 }

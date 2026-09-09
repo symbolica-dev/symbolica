@@ -1,0 +1,7 @@
+rust valid ok 10
+rust budget probe_limit 1
+rust pole probe_limit 1
+firefly valid ok 5
+firefly budget probe_limit 1
+firefly pole trace_pole 1
+firefly error trace_error 1

@@ -52,6 +52,8 @@ def run(name, seed, limits=None):
     result = subprocess.run([str(external/"rare-q-stress"), str(cases[name]), name, str(seed), str(output/f"{name}.{seed}.result")],
                             cwd=root, env={**env, **(limits or {})}, text=True, capture_output=True, timeout=120)
     label = name + "." + str(seed) + ("." + "-".join(limits) if limits else "")
+    if limits and "MAX_PRIMES" in limits:
+        label += "-" + limits["MAX_PRIMES"]
     (output/f"{label}.log").write_text(result.stdout + result.stderr)
     assert result.returncode == 0, (label, result.stderr)
     lines = result.stdout.splitlines()
@@ -72,6 +74,15 @@ for name in cases:
         row, diagnostic = run(name, seed)
         assert row["status"] == "ok", row
         assert "exact Q identity verified" in diagnostic
+
+# Exercise prime dispatch beyond the old sixteen-prime adapter ceiling.
+cases["high_height"] = export("high_height", ["x", "y"],
+    {(1, 0): 10**400 + 37, (0, 1): -11, (0, 0): 5}, {(1, 0): 1, (0, 1): 3})
+row, _ = run("high_height", 1, {"MAX_PRIMES": "16"})
+assert row["status"] == "prime_limit"
+row, diagnostic = run("high_height", 1, {"MAX_PRIMES": "114"})
+assert row["status"] == "ok" and int(row["primes"]) > 16
+assert "exact Q identity verified" in diagnostic
 
 for limits, status, probes in [
     ({"MAX_TOTAL_PROBES": "1"}, "probe_limit", 1),
@@ -98,4 +109,5 @@ with (output/"controls.csv").open("w") as fp:
     writer = csv.DictWriter(fp, list(rows[0]), lineterminator="\n")
     writer.writeheader()
     writer.writerows(rows)
-print(f"{3 * len(cases)} exact reconstructions, 5 adapter failure controls, 2 checker rejection controls passed")
+successes = sum(row["status"] == "ok" for row in rows)
+print(f"{successes} exact reconstructions, {len(rows) - successes} adapter failure controls, 2 checker rejection controls passed")

@@ -140,6 +140,10 @@ symjit = { version = "2.25", optional = true }
 divan = { version = "0.1.21", optional = true }
 flint3-sys = { version = "3.6.1", optional = true, features = ["gmp-mpfr-sys"] }
 
+[[example]]
+name = "reconstruction_joint_benchmark"
+required-features = ["native_code_generation"]
+
 [[bench]]
 name = "flint_comparison"
 harness = false
