@@ -1,0 +1,2 @@
+case,num_terms,den_terms,baseline,current,firefly_default,firefly_scan,firefly_best,fire7_learned,change
+fire7_nb0_rank2457,4,14,69,72,73,91,73,272,3

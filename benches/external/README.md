@@ -187,3 +187,9 @@ variable-order sidecar named `CASE.variables`. See the
 string into `fire-table-inputs/all`, with a separate manifest and case list.
 The [whole-table factor-lifting comparison](../reconstruction-factor-lift.md)
 records the complete screen, improvements and remaining reference gaps.
+
+The [common-factor update](../reconstruction-common-factors.md) extends this
+screen with default FireFly for all 3,319 coefficients, compares against the
+better of the two FireFly settings, and tests common numerator factor removal
+and selection of the method for the remaining variables. It retains the small
+reference gaps and the one probe-count regression.

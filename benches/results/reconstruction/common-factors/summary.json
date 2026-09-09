@@ -1,0 +1,61 @@
+{
+  "baseline_commit": "0361fad0",
+  "coefficients": 3319,
+  "tests": 36,
+  "exact_benchmark_runs": 14275,
+  "final_probes": 509173,
+  "baseline": {
+    "lower": 2195,
+    "equal": 1123,
+    "higher": 1,
+    "reference_probes": 571020
+  },
+  "firefly_default": {
+    "lower": 2977,
+    "equal": 25,
+    "higher": 317,
+    "reference_probes": 2253840
+  },
+  "firefly_scan": {
+    "lower": 3314,
+    "equal": 2,
+    "higher": 3,
+    "reference_probes": 1211689
+  },
+  "firefly_best_per_case": {
+    "lower": 2977,
+    "equal": 25,
+    "higher": 317,
+    "reference_probes": 1181647
+  },
+  "fire7_learned": {
+    "lower": 3319,
+    "equal": 0,
+    "higher": 0,
+    "reference_probes": 1927034
+  },
+  "timing_seconds": {
+    "all.csv": 6.967360231,
+    "baseline.csv": 8.293946156,
+    "firefly-default.csv": 134.73960089599998,
+    "seeds.csv": 89.10268114399999,
+    "regression-seeds.csv": 0.019776618,
+    "regression-baseline.csv": 0.012012789999999999,
+    "q-regression.csv": 51.493414317,
+    "modular-regression.csv": 57.19178952
+  },
+  "timing_median_us": {
+    "all.csv": 647.332,
+    "baseline.csv": 721.732,
+    "firefly-default.csv": 9831.734,
+    "seeds.csv": 1052.969,
+    "regression-seeds.csv": 1487.52,
+    "regression-baseline.csv": 234.241,
+    "q-regression.csv": 17203853.078,
+    "modular-regression.csv": 5464051.355
+  },
+  "seed_cases": 359,
+  "seed_probe_counts_stable": true,
+  "largest_firefly_gap_combined_terms": 23,
+  "archived_process_logs": 14275
+}

@@ -1,0 +1,13 @@
+case,method,seed,status,elapsed_us,probes,primes,images,support_reuses,support_fallbacks,probes_by_prime,prime_policy,oracle,num_terms,den_terms,setup_ms,selected_methods
+fire7_nb0_rank2457,BalancedZippelSeparated,1,ok,221.600,59,2,1,0,0,2305843009213693967:56;2305843009213693973:3,Symbolica_default,cached_powers_Q,4,14,0.194,BalancedZippelSeparated
+fire7_nb0_rank2457,FireFly_default,1,ok,2534.849,73,2,,,,9223372036854775643:1;9223372036854775783:72,FireFly_default,cached_powers_Q,4,14,,
+fire7_nb0_rank2457,FireFly_scan,1,ok,3305.371,91,2,,,,9223372036854775643:13;9223372036854775783:78,FireFly_default,cached_powers_Q,4,14,,
+fire7_nb0_rank2457,Automatic,1,ok,347.971,72,2,1,0,0,2305843009213693967:69;2305843009213693973:3,Symbolica_default,cached_powers_Q,4,14,0.409,BalancedZippelSeparated
+fire7_nb0_rank2457,FireFly_default,2,ok,2471.968,73,2,,,,9223372036854775643:1;9223372036854775783:72,FireFly_default,cached_powers_Q,4,14,,
+fire7_nb0_rank2457,FireFly_scan,2,ok,3543.742,91,2,,,,9223372036854775643:13;9223372036854775783:78,FireFly_default,cached_powers_Q,4,14,,
+fire7_nb0_rank2457,Automatic,2,ok,503.072,72,2,1,0,0,2305843009213693967:69;2305843009213693973:3,Symbolica_default,cached_powers_Q,4,14,0.263,BalancedZippelSeparated
+fire7_nb0_rank2457,BalancedZippelSeparated,2,ok,255.012,59,2,1,0,0,2305843009213693967:56;2305843009213693973:3,Symbolica_default,cached_powers_Q,4,14,0.378,BalancedZippelSeparated
+fire7_nb0_rank2457,FireFly_scan,3,ok,3452.752,91,2,,,,9223372036854775643:13;9223372036854775783:78,FireFly_default,cached_powers_Q,4,14,,
+fire7_nb0_rank2457,Automatic,3,ok,351.421,72,2,1,0,0,2305843009213693967:69;2305843009213693973:3,Symbolica_default,cached_powers_Q,4,14,0.263,BalancedZippelSeparated
+fire7_nb0_rank2457,BalancedZippelSeparated,3,ok,248.231,59,2,1,0,0,2305843009213693967:56;2305843009213693973:3,Symbolica_default,cached_powers_Q,4,14,0.258,BalancedZippelSeparated
+fire7_nb0_rank2457,FireFly_default,3,ok,2540.629,73,2,,,,9223372036854775643:1;9223372036854775783:72,FireFly_default,cached_powers_Q,4,14,,

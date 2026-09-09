@@ -57,6 +57,8 @@ where
         stats: Default::default(),
         monomial_factors: None,
         balanced_pilot: None,
+        removed_numerator_factor: None,
+        fixed_last_variable: None,
     };
     // A rejected coefficient hypothesis is unlikely to improve with another
     // direction. Fall back immediately; ordinary reconstruction owns retries.

@@ -1,7 +1,10 @@
 # Rational function reconstruction experiment
 
-Latest optimization: [lift separated rational factors](reconstruction-factor-lift.md)
-and screen all 3,319 distinct coefficient strings in the public `nb0` table.
+Latest optimization: [remove common numerator factors and select the remaining-variable method](reconstruction-common-factors.md)
+reduces total probes by 10.8% across all 3,319 distinct `nb0` coefficients and
+adds a complete comparison with default FireFly as well as its scan mode.
+The preceding [separated-factor update](reconstruction-factor-lift.md)
+introduced the complete-table screen.
 The preceding [automatic-selection row reuse update](reconstruction-nb0-suite.md)
 compares a deterministic 32-coefficient sample from that table.
 Latest reference update: [multivariate FIRE7 over Q](reconstruction-fire7-multivariate.md)
