@@ -4,6 +4,7 @@ use super::*;
 pub(super) struct DegreeProfile {
     pub bounds: [Vec<u16>; 2],
     pub minimum: [Vec<u16>; 2],
+    pub factor_hint: Option<Fraction>,
 }
 
 impl<F> Context<'_, F>
@@ -95,6 +96,11 @@ where
         let mut profile = DegreeProfile {
             bounds: [vec![0; nv], vec![0; nv]],
             minimum: [vec![0; nv], vec![0; nv]],
+            factor_hint: {
+                let common = factors::common_factors(&slice, &other, last);
+                (common.numerator.degree(last) > 0 || common.denominator.degree(last) > 0)
+                    .then_some(common)
+            },
         };
         let mut term_counts = [vec![0u64; nv], vec![0u64; nv]];
         let intersection = value(&slice, &anchor);

@@ -1,0 +1,13 @@
+case,method,seed,status,elapsed_us,probes,primes,images,support_reuses,support_fallbacks,probes_by_prime,prime_policy,oracle,num_terms,den_terms,setup_ms,selected_methods
+fire7_nb0_rank0001_shear_d,Automatic,1,ok,1334455.510,15297,2,1,0,0,2305843009213693967:15294;2305843009213693973:3,Symbolica_default,cached_powers_Q,5148,2070,41.783,CuytLeePruned
+fire7_nb0_rank0001_shear_d,Automatic,2,ok,1336622.078,15297,2,1,0,0,2305843009213693967:15294;2305843009213693973:3,Symbolica_default,cached_powers_Q,5148,2070,42.783,CuytLeePruned
+fire7_nb0_rank0001_shear_d,Automatic,3,ok,1343430.644,15297,2,1,0,0,2305843009213693967:15294;2305843009213693973:3,Symbolica_default,cached_powers_Q,5148,2070,46.636,CuytLeePruned
+fire7_nb0_rank0002_shear_d,Automatic,1,ok,1440823.992,16138,2,1,0,0,2305843009213693967:16135;2305843009213693973:3,Symbolica_default,cached_powers_Q,5247,2070,48.551,CuytLeePruned
+fire7_nb0_rank0002_shear_d,Automatic,2,ok,1442806.900,16138,2,1,0,0,2305843009213693967:16135;2305843009213693973:3,Symbolica_default,cached_powers_Q,5247,2070,48.205,CuytLeePruned
+fire7_nb0_rank0002_shear_d,Automatic,3,ok,1438982.015,16138,2,1,0,0,2305843009213693967:16135;2305843009213693973:3,Symbolica_default,cached_powers_Q,5247,2070,48.735,CuytLeePruned
+fire7_nb0_rank0003_shear_d,Automatic,1,ok,900485.711,12535,2,1,0,0,2305843009213693967:12532;2305843009213693973:3,Symbolica_default,cached_powers_Q,4488,1215,36.004,CuytLeePruned
+fire7_nb0_rank0003_shear_d,Automatic,2,ok,905369.300,12535,2,1,0,0,2305843009213693967:12532;2305843009213693973:3,Symbolica_default,cached_powers_Q,4488,1215,35.593,CuytLeePruned
+fire7_nb0_rank0003_shear_d,Automatic,3,ok,912796.998,12535,2,1,0,0,2305843009213693967:12532;2305843009213693973:3,Symbolica_default,cached_powers_Q,4488,1215,35.635,CuytLeePruned
+fire7_nb0_rank0004_shear_d,Automatic,1,ok,798310.425,11671,2,1,0,0,2305843009213693967:11668;2305843009213693973:3,Symbolica_default,cached_powers_Q,4312,1215,32.664,CuytLeePruned
+fire7_nb0_rank0004_shear_d,Automatic,2,ok,805647.313,11671,2,1,0,0,2305843009213693967:11668;2305843009213693973:3,Symbolica_default,cached_powers_Q,4312,1215,30.008,CuytLeePruned
+fire7_nb0_rank0004_shear_d,Automatic,3,ok,809863.599,11671,2,1,0,0,2305843009213693967:11668;2305843009213693973:3,Symbolica_default,cached_powers_Q,4312,1215,32.588,CuytLeePruned

@@ -1,0 +1,5 @@
+case,method,seed,status,elapsed_us,probes,primes,images,support_reuses,support_fallbacks,probes_by_prime,prime_policy,oracle,num_terms,den_terms,setup_ms,selected_methods
+ibp_box2l_rank0001,Automatic,1,ok,12278.397,107,2,1,0,0,2305843009213693967:104;2305843009213693973:3,Symbolica_default,cached_powers_Q,38,8,3.006,BalancedZippel
+ibp_box2l_rank0002,Automatic,1,ok,56346.324,525,2,1,0,0,2305843009213693967:522;2305843009213693973:3,Symbolica_default,cached_powers_Q,257,111,11.497,BalancedZippel
+ibp_box2l_rank0003,Automatic,1,ok,28757.838,368,2,1,0,0,2305843009213693967:365;2305843009213693973:3,Symbolica_default,cached_powers_Q,153,60,8.641,BalancedZippel
+ibp_box2l_rank0004,Automatic,1,ok,35198.994,324,2,1,0,0,2305843009213693967:321;2305843009213693973:3,Symbolica_default,cached_powers_Q,165,60,9.229,BalancedZippel

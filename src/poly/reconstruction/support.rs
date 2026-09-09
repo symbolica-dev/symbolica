@@ -59,6 +59,7 @@ where
         balanced_pilot: None,
         balanced_initial: None,
         balanced_survey: Vec::new(),
+        removed_factors: Vec::new(),
         removed_numerator_factor: None,
         fixed_last_variable: None,
     };

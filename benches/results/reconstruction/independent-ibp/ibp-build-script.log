@@ -1,0 +1,488 @@
+Cleaning... 0 files.
+The Meson build system
+Version: 1.9.1
+Source dir: /common/dev/symbolica-reconstruction/target/reconstruction-external/kira
+Build dir: /common/dev/symbolica-reconstruction/target/reconstruction-external/kira-build
+Build type: native build
+Project name: Kira
+Project version: 3.1
+C compiler for the host machine: cc (gcc 15.2.0 "gcc (GCC) 15.2.0")
+C linker for the host machine: cc ld.bfd 2.44
+C++ compiler for the host machine: c++ (gcc 15.2.0 "g++ (GCC) 15.2.0")
+C++ linker for the host machine: c++ ld.bfd 2.44
+Host machine cpu family: x86_64
+Host machine cpu: x86_64
+Compiler for C supports arguments -Wno-maybe-uninitialized: YES (cached)
+Dependency ginac found: YES 1.8.10 (cached)
+Dependency threads found: YES unknown (cached)
+Dependency zlib found: YES 1.3.1 (cached)
+Dependency yaml-cpp found: YES 0.8.0 (cached)
+Library dl found: YES
+Configuring config.h.in using configuration
+Program run.sh found: YES (/common/dev/symbolica-reconstruction/target/reconstruction-external/kira/tests/run.sh)
+Build targets in project: 4
+
+Kira 3.1
+
+  User defined options
+    firefly  : false
+    flint    : false
+    wrap_mode: nofallback
+
+Found ninja-1.13.2 at /nix/store/4siii6hvzs9ymbq37k04vcpx6xnybz21-ninja-1.13.2/bin/ninja
+ninja: Entering directory `/common/dev/symbolica-reconstruction/target/reconstruction-external/kira-build'
+[1/25] Generating src/pyred/config.h with a custom command
+CMake Deprecation Warning at CMakeLists.txt:1 (cmake_minimum_required):
+  Compatibility with CMake < 3.10 will be removed from a future version of
+  CMake.
+
+  Update the VERSION argument <min> value.  Or, use the <min>...<max> syntax
+  to tell CMake that the project requires at least <min> but has been updated
+  to work with policies introduced by <max> or earlier.
+
+
+-- Could NOT find Doxygen (missing: DOXYGEN_EXECUTABLE) 
+-- Configuring done (1.0s)
+-- Generating done (0.0s)
+-- Build files have been written to: /common/dev/symbolica-reconstruction/target/reconstruction-external/ratracer-firefly/build
+[  4%] Building CXX object CMakeFiles/FireFly_static.dir/source/BaseReconst.cpp.o
+[  9%] Building CXX object CMakeFiles/FireFly_static.dir/source/AmplitudeParser.cpp.o
+[ 14%] Building CXX object CMakeFiles/FireFly_static.dir/source/FFInt.cpp.o
+[ 19%] Building CXX object CMakeFiles/FireFly_static.dir/source/FFIntVec.cpp.o
+[ 23%] Building CXX object CMakeFiles/FireFly_static.dir/source/FFThieleInterpolator.cpp.o
+[ 28%] Building CXX object CMakeFiles/FireFly_static.dir/source/gzstream.cpp.o
+In file included from /common/dev/symbolica-reconstruction/target/reconstruction-external/ratracer-include/flint/fmpzxx.h:22,
+                 from /common/dev/symbolica-reconstruction/target/reconstruction-external/ratracer-firefly/source/include/firefly/FFInt.hpp:27,
+                 from /common/dev/symbolica-reconstruction/target/reconstruction-external/ratracer-firefly/source/FFInt.cpp:19:
+/common/dev/symbolica-reconstruction/target/reconstruction-external/ratracer-include/flintxx/frandxx.h: In constructor ‘flint::frandxx::frandxx()’:
+/common/dev/symbolica-reconstruction/target/reconstruction-external/ratracer-include/flintxx/frandxx.h:30:30: warning: ‘void flint_randinit(flint_rand_struct*)’ is deprecated [-Wdeprecated-declarations]
+   30 |     frandxx() {flint_randinit(inner);}
+      |                ~~~~~~~~~~~~~~^~~~~~~
+In file included from /nix/store/k1hb5mgjbaiq1sx65zpbd9a1sfy0jl6n-flint-3.6.0/include/flint/limb_types.h:15,
+                 from /nix/store/k1hb5mgjbaiq1sx65zpbd9a1sfy0jl6n-flint-3.6.0/include/flint/ulong_extras.h:25,
+                 from /common/dev/symbolica-reconstruction/target/reconstruction-external/ratracer-firefly/source/include/firefly/FFInt.hpp:23:
+/nix/store/k1hb5mgjbaiq1sx65zpbd9a1sfy0jl6n-flint-3.6.0/include/flint/flint.h:305:23: note: declared here
+  305 | FLINT_DEPRECATED void flint_randinit(flint_rand_t);
+      |                       ^~~~~~~~~~~~~~
+/common/dev/symbolica-reconstruction/target/reconstruction-external/ratracer-include/flintxx/frandxx.h: In destructor ‘flint::frandxx::~frandxx()’:
+/common/dev/symbolica-reconstruction/target/reconstruction-external/ratracer-include/flintxx/frandxx.h:31:32: warning: ‘void flint_randclear(flint_rand_struct*)’ is deprecated [-Wdeprecated-declarations]
+   31 |     ~frandxx() {flint_randclear(inner);}
+      |                 ~~~~~~~~~~~~~~~^~~~~~~
+/nix/store/k1hb5mgjbaiq1sx65zpbd9a1sfy0jl6n-flint-3.6.0/include/flint/flint.h:306:23: note: declared here
+  306 | FLINT_DEPRECATED void flint_randclear(flint_rand_t);
+      |                       ^~~~~~~~~~~~~~~
+In file included from /common/dev/symbolica-reconstruction/target/reconstruction-external/ratracer-include/flint/fmpzxx.h:22,
+                 from /common/dev/symbolica-reconstruction/target/reconstruction-external/ratracer-firefly/source/include/firefly/FFInt.hpp:27,
+                 from /common/dev/symbolica-reconstruction/target/reconstruction-external/ratracer-firefly/source/include/firefly/FFIntVec.hpp:22,
+                 from /common/dev/symbolica-reconstruction/target/reconstruction-external/ratracer-firefly/source/FFIntVec.cpp:19:
+/common/dev/symbolica-reconstruction/target/reconstruction-external/ratracer-include/flintxx/frandxx.h: In constructor ‘flint::frandxx::frandxx()’:
+/common/dev/symbolica-reconstruction/target/reconstruction-external/ratracer-include/flintxx/frandxx.h:30:30: warning: ‘void flint_randinit(flint_rand_struct*)’ is deprecated [-Wdeprecated-declarations]
+   30 |     frandxx() {flint_randinit(inner);}
+      |                ~~~~~~~~~~~~~~^~~~~~~
+In file included from /nix/store/k1hb5mgjbaiq1sx65zpbd9a1sfy0jl6n-flint-3.6.0/include/flint/limb_types.h:15,
+                 from /nix/store/k1hb5mgjbaiq1sx65zpbd9a1sfy0jl6n-flint-3.6.0/include/flint/ulong_extras.h:25,
+                 from /common/dev/symbolica-reconstruction/target/reconstruction-external/ratracer-firefly/source/include/firefly/FFInt.hpp:23:
+/nix/store/k1hb5mgjbaiq1sx65zpbd9a1sfy0jl6n-flint-3.6.0/include/flint/flint.h:305:23: note: declared here
+  305 | FLINT_DEPRECATED void flint_randinit(flint_rand_t);
+      |                       ^~~~~~~~~~~~~~
+/common/dev/symbolica-reconstruction/target/reconstruction-external/ratracer-include/flintxx/frandxx.h: In destructor ‘flint::frandxx::~frandxx()’:
+/common/dev/symbolica-reconstruction/target/reconstruction-external/ratracer-include/flintxx/frandxx.h:31:32: warning: ‘void flint_randclear(flint_rand_struct*)’ is deprecated [-Wdeprecated-declarations]
+   31 |     ~frandxx() {flint_randclear(inner);}
+      |                 ~~~~~~~~~~~~~~~^~~~~~~
+/nix/store/k1hb5mgjbaiq1sx65zpbd9a1sfy0jl6n-flint-3.6.0/include/flint/flint.h:306:23: note: declared here
+  306 | FLINT_DEPRECATED void flint_randclear(flint_rand_t);
+      |                       ^~~~~~~~~~~~~~~
+In file included from /common/dev/symbolica-reconstruction/target/reconstruction-external/ratracer-include/flint/fmpzxx.h:22,
+                 from /common/dev/symbolica-reconstruction/target/reconstruction-external/ratracer-firefly/source/include/firefly/FFInt.hpp:27,
+                 from /common/dev/symbolica-reconstruction/target/reconstruction-external/ratracer-firefly/source/AmplitudeParser.cpp:19:
+/common/dev/symbolica-reconstruction/target/reconstruction-external/ratracer-include/flintxx/frandxx.h: In constructor ‘flint::frandxx::frandxx()’:
+/common/dev/symbolica-reconstruction/target/reconstruction-external/ratracer-include/flintxx/frandxx.h:30:30: warning: ‘void flint_randinit(flint_rand_struct*)’ is deprecated [-Wdeprecated-declarations]
+   30 |     frandxx() {flint_randinit(inner);}
+      |                ~~~~~~~~~~~~~~^~~~~~~
+In file included from /nix/store/k1hb5mgjbaiq1sx65zpbd9a1sfy0jl6n-flint-3.6.0/include/flint/limb_types.h:15,
+                 from /nix/store/k1hb5mgjbaiq1sx65zpbd9a1sfy0jl6n-flint-3.6.0/include/flint/ulong_extras.h:25,
+                 from /common/dev/symbolica-reconstruction/target/reconstruction-external/ratracer-firefly/source/include/firefly/FFInt.hpp:23:
+/nix/store/k1hb5mgjbaiq1sx65zpbd9a1sfy0jl6n-flint-3.6.0/include/flint/flint.h:305:23: note: declared here
+  305 | FLINT_DEPRECATED void flint_randinit(flint_rand_t);
+      |                       ^~~~~~~~~~~~~~
+/common/dev/symbolica-reconstruction/target/reconstruction-external/ratracer-include/flintxx/frandxx.h: In destructor ‘flint::frandxx::~frandxx()’:
+/common/dev/symbolica-reconstruction/target/reconstruction-external/ratracer-include/flintxx/frandxx.h:31:32: warning: ‘void flint_randclear(flint_rand_struct*)’ is deprecated [-Wdeprecated-declarations]
+   31 |     ~frandxx() {flint_randclear(inner);}
+      |                 ~~~~~~~~~~~~~~~^~~~~~~
+/nix/store/k1hb5mgjbaiq1sx65zpbd9a1sfy0jl6n-flint-3.6.0/include/flint/flint.h:306:23: note: declared here
+  306 | FLINT_DEPRECATED void flint_randclear(flint_rand_t);
+      |                       ^~~~~~~~~~~~~~~
+In file included from /common/dev/symbolica-reconstruction/target/reconstruction-external/ratracer-include/flint/fmpzxx.h:22,
+                 from /common/dev/symbolica-reconstruction/target/reconstruction-external/ratracer-firefly/source/include/firefly/FFInt.hpp:27,
+                 from /common/dev/symbolica-reconstruction/target/reconstruction-external/ratracer-firefly/source/include/firefly/BaseReconst.hpp:22,
+                 from /common/dev/symbolica-reconstruction/target/reconstruction-external/ratracer-firefly/source/BaseReconst.cpp:19:
+/common/dev/symbolica-reconstruction/target/reconstruction-external/ratracer-include/flintxx/frandxx.h: In constructor ‘flint::frandxx::frandxx()’:
+/common/dev/symbolica-reconstruction/target/reconstruction-external/ratracer-include/flintxx/frandxx.h:30:30: warning: ‘void flint_randinit(flint_rand_struct*)’ is deprecated [-Wdeprecated-declarations]
+   30 |     frandxx() {flint_randinit(inner);}
+      |                ~~~~~~~~~~~~~~^~~~~~~
+In file included from /nix/store/k1hb5mgjbaiq1sx65zpbd9a1sfy0jl6n-flint-3.6.0/include/flint/limb_types.h:15,
+                 from /nix/store/k1hb5mgjbaiq1sx65zpbd9a1sfy0jl6n-flint-3.6.0/include/flint/ulong_extras.h:25,
+                 from /common/dev/symbolica-reconstruction/target/reconstruction-external/ratracer-firefly/source/include/firefly/FFInt.hpp:23:
+/nix/store/k1hb5mgjbaiq1sx65zpbd9a1sfy0jl6n-flint-3.6.0/include/flint/flint.h:305:23: note: declared here
+  305 | FLINT_DEPRECATED void flint_randinit(flint_rand_t);
+      |                       ^~~~~~~~~~~~~~
+/common/dev/symbolica-reconstruction/target/reconstruction-external/ratracer-include/flintxx/frandxx.h: In destructor ‘flint::frandxx::~frandxx()’:
+/common/dev/symbolica-reconstruction/target/reconstruction-external/ratracer-include/flintxx/frandxx.h:31:32: warning: ‘void flint_randclear(flint_rand_struct*)’ is deprecated [-Wdeprecated-declarations]
+   31 |     ~frandxx() {flint_randclear(inner);}
+      |                 ~~~~~~~~~~~~~~~^~~~~~~
+/nix/store/k1hb5mgjbaiq1sx65zpbd9a1sfy0jl6n-flint-3.6.0/include/flint/flint.h:306:23: note: declared here
+  306 | FLINT_DEPRECATED void flint_randclear(flint_rand_t);
+      |                       ^~~~~~~~~~~~~~~
+In file included from /common/dev/symbolica-reconstruction/target/reconstruction-external/ratracer-include/flint/fmpzxx.h:22,
+                 from /common/dev/symbolica-reconstruction/target/reconstruction-external/ratracer-firefly/source/include/firefly/FFInt.hpp:27,
+                 from /common/dev/symbolica-reconstruction/target/reconstruction-external/ratracer-firefly/source/include/firefly/RationalNumber.hpp:22,
+                 from /common/dev/symbolica-reconstruction/target/reconstruction-external/ratracer-firefly/source/include/firefly/PolynomialFF.hpp:22,
+                 from /common/dev/symbolica-reconstruction/target/reconstruction-external/ratracer-firefly/source/include/firefly/FFThieleInterpolator.hpp:22,
+                 from /common/dev/symbolica-reconstruction/target/reconstruction-external/ratracer-firefly/source/FFThieleInterpolator.cpp:19:
+/common/dev/symbolica-reconstruction/target/reconstruction-external/ratracer-include/flintxx/frandxx.h: In constructor ‘flint::frandxx::frandxx()’:
+/common/dev/symbolica-reconstruction/target/reconstruction-external/ratracer-include/flintxx/frandxx.h:30:30: warning: ‘void flint_randinit(flint_rand_struct*)’ is deprecated [-Wdeprecated-declarations]
+   30 |     frandxx() {flint_randinit(inner);}
+      |                ~~~~~~~~~~~~~~^~~~~~~
+In file included from /nix/store/k1hb5mgjbaiq1sx65zpbd9a1sfy0jl6n-flint-3.6.0/include/flint/limb_types.h:15,
+                 from /nix/store/k1hb5mgjbaiq1sx65zpbd9a1sfy0jl6n-flint-3.6.0/include/flint/ulong_extras.h:25,
+                 from /common/dev/symbolica-reconstruction/target/reconstruction-external/ratracer-firefly/source/include/firefly/FFInt.hpp:23:
+/nix/store/k1hb5mgjbaiq1sx65zpbd9a1sfy0jl6n-flint-3.6.0/include/flint/flint.h:305:23: note: declared here
+  305 | FLINT_DEPRECATED void flint_randinit(flint_rand_t);
+      |                       ^~~~~~~~~~~~~~
+/common/dev/symbolica-reconstruction/target/reconstruction-external/ratracer-include/flintxx/frandxx.h: In destructor ‘flint::frandxx::~frandxx()’:
+/common/dev/symbolica-reconstruction/target/reconstruction-external/ratracer-include/flintxx/frandxx.h:31:32: warning: ‘void flint_randclear(flint_rand_struct*)’ is deprecated [-Wdeprecated-declarations]
+   31 |     ~frandxx() {flint_randclear(inner);}
+      |                 ~~~~~~~~~~~~~~~^~~~~~~
+/nix/store/k1hb5mgjbaiq1sx65zpbd9a1sfy0jl6n-flint-3.6.0/include/flint/flint.h:306:23: note: declared here
+  306 | FLINT_DEPRECATED void flint_randclear(flint_rand_t);
+      |                       ^~~~~~~~~~~~~~~
+[ 33%] Building CXX object CMakeFiles/FireFly_static.dir/source/HornerGenerator.cpp.o
+[ 38%] Building CXX object CMakeFiles/FireFly_static.dir/source/Monomial.cpp.o
+In file included from /common/dev/symbolica-reconstruction/target/reconstruction-external/ratracer-include/flint/fmpzxx.h:22,
+                 from /common/dev/symbolica-reconstruction/target/reconstruction-external/ratracer-firefly/source/include/firefly/FFInt.hpp:27,
+                 from /common/dev/symbolica-reconstruction/target/reconstruction-external/ratracer-firefly/source/include/firefly/RationalNumber.hpp:22,
+                 from /common/dev/symbolica-reconstruction/target/reconstruction-external/ratracer-firefly/source/include/firefly/PolynomialFF.hpp:22,
+                 from /common/dev/symbolica-reconstruction/target/reconstruction-external/ratracer-firefly/source/include/firefly/Polynomial.hpp:22,
+                 from /common/dev/symbolica-reconstruction/target/reconstruction-external/ratracer-firefly/source/include/firefly/HornerGenerator.hpp:22,
+                 from /common/dev/symbolica-reconstruction/target/reconstruction-external/ratracer-firefly/source/HornerGenerator.cpp:19:
+/common/dev/symbolica-reconstruction/target/reconstruction-external/ratracer-include/flintxx/frandxx.h: In constructor ‘flint::frandxx::frandxx()’:
+/common/dev/symbolica-reconstruction/target/reconstruction-external/ratracer-include/flintxx/frandxx.h:30:30: warning: ‘void flint_randinit(flint_rand_struct*)’ is deprecated [-Wdeprecated-declarations]
+   30 |     frandxx() {flint_randinit(inner);}
+      |                ~~~~~~~~~~~~~~^~~~~~~
+In file included from /nix/store/k1hb5mgjbaiq1sx65zpbd9a1sfy0jl6n-flint-3.6.0/include/flint/limb_types.h:15,
+                 from /nix/store/k1hb5mgjbaiq1sx65zpbd9a1sfy0jl6n-flint-3.6.0/include/flint/ulong_extras.h:25,
+                 from /common/dev/symbolica-reconstruction/target/reconstruction-external/ratracer-firefly/source/include/firefly/FFInt.hpp:23:
+/nix/store/k1hb5mgjbaiq1sx65zpbd9a1sfy0jl6n-flint-3.6.0/include/flint/flint.h:305:23: note: declared here
+  305 | FLINT_DEPRECATED void flint_randinit(flint_rand_t);
+      |                       ^~~~~~~~~~~~~~
+/common/dev/symbolica-reconstruction/target/reconstruction-external/ratracer-include/flintxx/frandxx.h: In destructor ‘flint::frandxx::~frandxx()’:
+/common/dev/symbolica-reconstruction/target/reconstruction-external/ratracer-include/flintxx/frandxx.h:31:32: warning: ‘void flint_randclear(flint_rand_struct*)’ is deprecated [-Wdeprecated-declarations]
+   31 |     ~frandxx() {flint_randclear(inner);}
+      |                 ~~~~~~~~~~~~~~~^~~~~~~
+/nix/store/k1hb5mgjbaiq1sx65zpbd9a1sfy0jl6n-flint-3.6.0/include/flint/flint.h:306:23: note: declared here
+  306 | FLINT_DEPRECATED void flint_randclear(flint_rand_t);
+      |                       ^~~~~~~~~~~~~~~
+In file included from /common/dev/symbolica-reconstruction/target/reconstruction-external/ratracer-include/flint/fmpzxx.h:22,
+                 from /common/dev/symbolica-reconstruction/target/reconstruction-external/ratracer-firefly/source/include/firefly/FFInt.hpp:27,
+                 from /common/dev/symbolica-reconstruction/target/reconstruction-external/ratracer-firefly/source/include/firefly/RationalNumber.hpp:22,
+                 from /common/dev/symbolica-reconstruction/target/reconstruction-external/ratracer-firefly/source/include/firefly/Monomial.hpp:22,
+                 from /common/dev/symbolica-reconstruction/target/reconstruction-external/ratracer-firefly/source/Monomial.cpp:19:
+/common/dev/symbolica-reconstruction/target/reconstruction-external/ratracer-include/flintxx/frandxx.h: In constructor ‘flint::frandxx::frandxx()’:
+/common/dev/symbolica-reconstruction/target/reconstruction-external/ratracer-include/flintxx/frandxx.h:30:30: warning: ‘void flint_randinit(flint_rand_struct*)’ is deprecated [-Wdeprecated-declarations]
+   30 |     frandxx() {flint_randinit(inner);}
+      |                ~~~~~~~~~~~~~~^~~~~~~
+In file included from /nix/store/k1hb5mgjbaiq1sx65zpbd9a1sfy0jl6n-flint-3.6.0/include/flint/limb_types.h:15,
+                 from /nix/store/k1hb5mgjbaiq1sx65zpbd9a1sfy0jl6n-flint-3.6.0/include/flint/ulong_extras.h:25,
+                 from /common/dev/symbolica-reconstruction/target/reconstruction-external/ratracer-firefly/source/include/firefly/FFInt.hpp:23:
+/nix/store/k1hb5mgjbaiq1sx65zpbd9a1sfy0jl6n-flint-3.6.0/include/flint/flint.h:305:23: note: declared here
+  305 | FLINT_DEPRECATED void flint_randinit(flint_rand_t);
+      |                       ^~~~~~~~~~~~~~
+/common/dev/symbolica-reconstruction/target/reconstruction-external/ratracer-include/flintxx/frandxx.h: In destructor ‘flint::frandxx::~frandxx()’:
+/common/dev/symbolica-reconstruction/target/reconstruction-external/ratracer-include/flintxx/frandxx.h:31:32: warning: ‘void flint_randclear(flint_rand_struct*)’ is deprecated [-Wdeprecated-declarations]
+   31 |     ~frandxx() {flint_randclear(inner);}
+      |                 ~~~~~~~~~~~~~~~^~~~~~~
+/nix/store/k1hb5mgjbaiq1sx65zpbd9a1sfy0jl6n-flint-3.6.0/include/flint/flint.h:306:23: note: declared here
+  306 | FLINT_DEPRECATED void flint_randclear(flint_rand_t);
+      |                       ^~~~~~~~~~~~~~~
+[ 42%] Building CXX object CMakeFiles/FireFly_static.dir/source/ParserUtils.cpp.o
+In file included from /common/dev/symbolica-reconstruction/target/reconstruction-external/ratracer-include/flint/fmpzxx.h:22,
+                 from /common/dev/symbolica-reconstruction/target/reconstruction-external/ratracer-firefly/source/include/firefly/FFInt.hpp:27,
+                 from /common/dev/symbolica-reconstruction/target/reconstruction-external/ratracer-firefly/source/include/firefly/ParserUtils.hpp:22,
+                 from /common/dev/symbolica-reconstruction/target/reconstruction-external/ratracer-firefly/source/ParserUtils.cpp:20:
+/common/dev/symbolica-reconstruction/target/reconstruction-external/ratracer-include/flintxx/frandxx.h: In constructor ‘flint::frandxx::frandxx()’:
+/common/dev/symbolica-reconstruction/target/reconstruction-external/ratracer-include/flintxx/frandxx.h:30:30: warning: ‘void flint_randinit(flint_rand_struct*)’ is deprecated [-Wdeprecated-declarations]
+   30 |     frandxx() {flint_randinit(inner);}
+      |                ~~~~~~~~~~~~~~^~~~~~~
+In file included from /nix/store/k1hb5mgjbaiq1sx65zpbd9a1sfy0jl6n-flint-3.6.0/include/flint/limb_types.h:15,
+                 from /nix/store/k1hb5mgjbaiq1sx65zpbd9a1sfy0jl6n-flint-3.6.0/include/flint/ulong_extras.h:25,
+                 from /common/dev/symbolica-reconstruction/target/reconstruction-external/ratracer-firefly/source/include/firefly/FFInt.hpp:23:
+/nix/store/k1hb5mgjbaiq1sx65zpbd9a1sfy0jl6n-flint-3.6.0/include/flint/flint.h:305:23: note: declared here
+  305 | FLINT_DEPRECATED void flint_randinit(flint_rand_t);
+      |                       ^~~~~~~~~~~~~~
+/common/dev/symbolica-reconstruction/target/reconstruction-external/ratracer-include/flintxx/frandxx.h: In destructor ‘flint::frandxx::~frandxx()’:
+/common/dev/symbolica-reconstruction/target/reconstruction-external/ratracer-include/flintxx/frandxx.h:31:32: warning: ‘void flint_randclear(flint_rand_struct*)’ is deprecated [-Wdeprecated-declarations]
+   31 |     ~frandxx() {flint_randclear(inner);}
+      |                 ~~~~~~~~~~~~~~~^~~~~~~
+/nix/store/k1hb5mgjbaiq1sx65zpbd9a1sfy0jl6n-flint-3.6.0/include/flint/flint.h:306:23: note: declared here
+  306 | FLINT_DEPRECATED void flint_randclear(flint_rand_t);
+      |                       ^~~~~~~~~~~~~~~
+[ 47%] Building CXX object CMakeFiles/FireFly_static.dir/source/Poly.cpp.o
+In file included from /common/dev/symbolica-reconstruction/target/reconstruction-external/ratracer-include/flint/fmpzxx.h:22,
+                 from /common/dev/symbolica-reconstruction/target/reconstruction-external/ratracer-firefly/source/include/firefly/FFInt.hpp:27,
+                 from /common/dev/symbolica-reconstruction/target/reconstruction-external/ratracer-firefly/source/include/firefly/Poly.hpp:22,
+                 from /common/dev/symbolica-reconstruction/target/reconstruction-external/ratracer-firefly/source/Poly.cpp:19:
+/common/dev/symbolica-reconstruction/target/reconstruction-external/ratracer-include/flintxx/frandxx.h: In constructor ‘flint::frandxx::frandxx()’:
+/common/dev/symbolica-reconstruction/target/reconstruction-external/ratracer-include/flintxx/frandxx.h:30:30: warning: ‘void flint_randinit(flint_rand_struct*)’ is deprecated [-Wdeprecated-declarations]
+   30 |     frandxx() {flint_randinit(inner);}
+      |                ~~~~~~~~~~~~~~^~~~~~~
+In file included from /nix/store/k1hb5mgjbaiq1sx65zpbd9a1sfy0jl6n-flint-3.6.0/include/flint/limb_types.h:15,
+                 from /nix/store/k1hb5mgjbaiq1sx65zpbd9a1sfy0jl6n-flint-3.6.0/include/flint/ulong_extras.h:25,
+                 from /common/dev/symbolica-reconstruction/target/reconstruction-external/ratracer-firefly/source/include/firefly/FFInt.hpp:23:
+/nix/store/k1hb5mgjbaiq1sx65zpbd9a1sfy0jl6n-flint-3.6.0/include/flint/flint.h:305:23: note: declared here
+  305 | FLINT_DEPRECATED void flint_randinit(flint_rand_t);
+      |                       ^~~~~~~~~~~~~~
+/common/dev/symbolica-reconstruction/target/reconstruction-external/ratracer-include/flintxx/frandxx.h: In destructor ‘flint::frandxx::~frandxx()’:
+/common/dev/symbolica-reconstruction/target/reconstruction-external/ratracer-include/flintxx/frandxx.h:31:32: warning: ‘void flint_randclear(flint_rand_struct*)’ is deprecated [-Wdeprecated-declarations]
+   31 |     ~frandxx() {flint_randclear(inner);}
+      |                 ~~~~~~~~~~~~~~~^~~~~~~
+/nix/store/k1hb5mgjbaiq1sx65zpbd9a1sfy0jl6n-flint-3.6.0/include/flint/flint.h:306:23: note: declared here
+  306 | FLINT_DEPRECATED void flint_randclear(flint_rand_t);
+      |                       ^~~~~~~~~~~~~~~
+[ 52%] Building CXX object CMakeFiles/FireFly_static.dir/source/Polynomial.cpp.o
+[ 57%] Building CXX object CMakeFiles/FireFly_static.dir/source/PolynomialFF.cpp.o
+In file included from /common/dev/symbolica-reconstruction/target/reconstruction-external/ratracer-include/flint/fmpzxx.h:22,
+                 from /common/dev/symbolica-reconstruction/target/reconstruction-external/ratracer-firefly/source/include/firefly/FFInt.hpp:27,
+                 from /common/dev/symbolica-reconstruction/target/reconstruction-external/ratracer-firefly/source/include/firefly/RationalNumber.hpp:22,
+                 from /common/dev/symbolica-reconstruction/target/reconstruction-external/ratracer-firefly/source/include/firefly/PolynomialFF.hpp:22,
+                 from /common/dev/symbolica-reconstruction/target/reconstruction-external/ratracer-firefly/source/include/firefly/Polynomial.hpp:22,
+                 from /common/dev/symbolica-reconstruction/target/reconstruction-external/ratracer-firefly/source/Polynomial.cpp:19:
+/common/dev/symbolica-reconstruction/target/reconstruction-external/ratracer-include/flintxx/frandxx.h: In constructor ‘flint::frandxx::frandxx()’:
+/common/dev/symbolica-reconstruction/target/reconstruction-external/ratracer-include/flintxx/frandxx.h:30:30: warning: ‘void flint_randinit(flint_rand_struct*)’ is deprecated [-Wdeprecated-declarations]
+   30 |     frandxx() {flint_randinit(inner);}
+      |                ~~~~~~~~~~~~~~^~~~~~~
+In file included from /nix/store/k1hb5mgjbaiq1sx65zpbd9a1sfy0jl6n-flint-3.6.0/include/flint/limb_types.h:15,
+                 from /nix/store/k1hb5mgjbaiq1sx65zpbd9a1sfy0jl6n-flint-3.6.0/include/flint/ulong_extras.h:25,
+                 from /common/dev/symbolica-reconstruction/target/reconstruction-external/ratracer-firefly/source/include/firefly/FFInt.hpp:23:
+/nix/store/k1hb5mgjbaiq1sx65zpbd9a1sfy0jl6n-flint-3.6.0/include/flint/flint.h:305:23: note: declared here
+  305 | FLINT_DEPRECATED void flint_randinit(flint_rand_t);
+      |                       ^~~~~~~~~~~~~~
+/common/dev/symbolica-reconstruction/target/reconstruction-external/ratracer-include/flintxx/frandxx.h: In destructor ‘flint::frandxx::~frandxx()’:
+/common/dev/symbolica-reconstruction/target/reconstruction-external/ratracer-include/flintxx/frandxx.h:31:32: warning: ‘void flint_randclear(flint_rand_struct*)’ is deprecated [-Wdeprecated-declarations]
+   31 |     ~frandxx() {flint_randclear(inner);}
+      |                 ~~~~~~~~~~~~~~~^~~~~~~
+/nix/store/k1hb5mgjbaiq1sx65zpbd9a1sfy0jl6n-flint-3.6.0/include/flint/flint.h:306:23: note: declared here
+  306 | FLINT_DEPRECATED void flint_randclear(flint_rand_t);
+      |                       ^~~~~~~~~~~~~~~
+In file included from /common/dev/symbolica-reconstruction/target/reconstruction-external/ratracer-include/flint/fmpzxx.h:22,
+                 from /common/dev/symbolica-reconstruction/target/reconstruction-external/ratracer-firefly/source/include/firefly/FFInt.hpp:27,
+                 from /common/dev/symbolica-reconstruction/target/reconstruction-external/ratracer-firefly/source/include/firefly/RationalNumber.hpp:22,
+                 from /common/dev/symbolica-reconstruction/target/reconstruction-external/ratracer-firefly/source/include/firefly/PolynomialFF.hpp:22,
+                 from /common/dev/symbolica-reconstruction/target/reconstruction-external/ratracer-firefly/source/PolynomialFF.cpp:19:
+/common/dev/symbolica-reconstruction/target/reconstruction-external/ratracer-include/flintxx/frandxx.h: In constructor ‘flint::frandxx::frandxx()’:
+/common/dev/symbolica-reconstruction/target/reconstruction-external/ratracer-include/flintxx/frandxx.h:30:30: warning: ‘void flint_randinit(flint_rand_struct*)’ is deprecated [-Wdeprecated-declarations]
+   30 |     frandxx() {flint_randinit(inner);}
+      |                ~~~~~~~~~~~~~~^~~~~~~
+In file included from /nix/store/k1hb5mgjbaiq1sx65zpbd9a1sfy0jl6n-flint-3.6.0/include/flint/limb_types.h:15,
+                 from /nix/store/k1hb5mgjbaiq1sx65zpbd9a1sfy0jl6n-flint-3.6.0/include/flint/ulong_extras.h:25,
+                 from /common/dev/symbolica-reconstruction/target/reconstruction-external/ratracer-firefly/source/include/firefly/FFInt.hpp:23:
+/nix/store/k1hb5mgjbaiq1sx65zpbd9a1sfy0jl6n-flint-3.6.0/include/flint/flint.h:305:23: note: declared here
+  305 | FLINT_DEPRECATED void flint_randinit(flint_rand_t);
+      |                       ^~~~~~~~~~~~~~
+/common/dev/symbolica-reconstruction/target/reconstruction-external/ratracer-include/flintxx/frandxx.h: In destructor ‘flint::frandxx::~frandxx()’:
+/common/dev/symbolica-reconstruction/target/reconstruction-external/ratracer-include/flintxx/frandxx.h:31:32: warning: ‘void flint_randclear(flint_rand_struct*)’ is deprecated [-Wdeprecated-declarations]
+   31 |     ~frandxx() {flint_randclear(inner);}
+      |                 ~~~~~~~~~~~~~~~^~~~~~~
+/nix/store/k1hb5mgjbaiq1sx65zpbd9a1sfy0jl6n-flint-3.6.0/include/flint/flint.h:306:23: note: declared here
+  306 | FLINT_DEPRECATED void flint_randclear(flint_rand_t);
+      |                       ^~~~~~~~~~~~~~~
+[ 61%] Building CXX object CMakeFiles/FireFly_static.dir/source/PolyReconst.cpp.o
+In file included from /common/dev/symbolica-reconstruction/target/reconstruction-external/ratracer-include/flint/fmpzxx.h:22,
+                 from /common/dev/symbolica-reconstruction/target/reconstruction-external/ratracer-firefly/source/include/firefly/FFInt.hpp:27,
+                 from /common/dev/symbolica-reconstruction/target/reconstruction-external/ratracer-firefly/source/include/firefly/BaseReconst.hpp:22,
+                 from /common/dev/symbolica-reconstruction/target/reconstruction-external/ratracer-firefly/source/include/firefly/PolyReconst.hpp:22,
+                 from /common/dev/symbolica-reconstruction/target/reconstruction-external/ratracer-firefly/source/PolyReconst.cpp:19:
+/common/dev/symbolica-reconstruction/target/reconstruction-external/ratracer-include/flintxx/frandxx.h: In constructor ‘flint::frandxx::frandxx()’:
+/common/dev/symbolica-reconstruction/target/reconstruction-external/ratracer-include/flintxx/frandxx.h:30:30: warning: ‘void flint_randinit(flint_rand_struct*)’ is deprecated [-Wdeprecated-declarations]
+   30 |     frandxx() {flint_randinit(inner);}
+      |                ~~~~~~~~~~~~~~^~~~~~~
+In file included from /nix/store/k1hb5mgjbaiq1sx65zpbd9a1sfy0jl6n-flint-3.6.0/include/flint/limb_types.h:15,
+                 from /nix/store/k1hb5mgjbaiq1sx65zpbd9a1sfy0jl6n-flint-3.6.0/include/flint/ulong_extras.h:25,
+                 from /common/dev/symbolica-reconstruction/target/reconstruction-external/ratracer-firefly/source/include/firefly/FFInt.hpp:23:
+/nix/store/k1hb5mgjbaiq1sx65zpbd9a1sfy0jl6n-flint-3.6.0/include/flint/flint.h:305:23: note: declared here
+  305 | FLINT_DEPRECATED void flint_randinit(flint_rand_t);
+      |                       ^~~~~~~~~~~~~~
+/common/dev/symbolica-reconstruction/target/reconstruction-external/ratracer-include/flintxx/frandxx.h: In destructor ‘flint::frandxx::~frandxx()’:
+/common/dev/symbolica-reconstruction/target/reconstruction-external/ratracer-include/flintxx/frandxx.h:31:32: warning: ‘void flint_randclear(flint_rand_struct*)’ is deprecated [-Wdeprecated-declarations]
+   31 |     ~frandxx() {flint_randclear(inner);}
+      |                 ~~~~~~~~~~~~~~~^~~~~~~
+/nix/store/k1hb5mgjbaiq1sx65zpbd9a1sfy0jl6n-flint-3.6.0/include/flint/flint.h:306:23: note: declared here
+  306 | FLINT_DEPRECATED void flint_randclear(flint_rand_t);
+      |                       ^~~~~~~~~~~~~~~
+[ 66%] Building CXX object CMakeFiles/FireFly_static.dir/source/RationalFunction.cpp.o
+In file included from /common/dev/symbolica-reconstruction/target/reconstruction-external/ratracer-include/flint/fmpzxx.h:22,
+                 from /common/dev/symbolica-reconstruction/target/reconstruction-external/ratracer-firefly/source/include/firefly/FFInt.hpp:27,
+                 from /common/dev/symbolica-reconstruction/target/reconstruction-external/ratracer-firefly/source/include/firefly/RationalNumber.hpp:22,
+                 from /common/dev/symbolica-reconstruction/target/reconstruction-external/ratracer-firefly/source/include/firefly/PolynomialFF.hpp:22,
+                 from /common/dev/symbolica-reconstruction/target/reconstruction-external/ratracer-firefly/source/include/firefly/Polynomial.hpp:22,
+                 from /common/dev/symbolica-reconstruction/target/reconstruction-external/ratracer-firefly/source/include/firefly/RationalFunction.hpp:22,
+                 from /common/dev/symbolica-reconstruction/target/reconstruction-external/ratracer-firefly/source/RationalFunction.cpp:19:
+/common/dev/symbolica-reconstruction/target/reconstruction-external/ratracer-include/flintxx/frandxx.h: In constructor ‘flint::frandxx::frandxx()’:
+/common/dev/symbolica-reconstruction/target/reconstruction-external/ratracer-include/flintxx/frandxx.h:30:30: warning: ‘void flint_randinit(flint_rand_struct*)’ is deprecated [-Wdeprecated-declarations]
+   30 |     frandxx() {flint_randinit(inner);}
+      |                ~~~~~~~~~~~~~~^~~~~~~
+[ 71%] Building CXX object CMakeFiles/FireFly_static.dir/source/RationalFunctionFF.cpp.o
+In file included from /nix/store/k1hb5mgjbaiq1sx65zpbd9a1sfy0jl6n-flint-3.6.0/include/flint/limb_types.h:15,
+                 from /nix/store/k1hb5mgjbaiq1sx65zpbd9a1sfy0jl6n-flint-3.6.0/include/flint/ulong_extras.h:25,
+                 from /common/dev/symbolica-reconstruction/target/reconstruction-external/ratracer-firefly/source/include/firefly/FFInt.hpp:23:
+/nix/store/k1hb5mgjbaiq1sx65zpbd9a1sfy0jl6n-flint-3.6.0/include/flint/flint.h:305:23: note: declared here
+  305 | FLINT_DEPRECATED void flint_randinit(flint_rand_t);
+      |                       ^~~~~~~~~~~~~~
+/common/dev/symbolica-reconstruction/target/reconstruction-external/ratracer-include/flintxx/frandxx.h: In destructor ‘flint::frandxx::~frandxx()’:
+/common/dev/symbolica-reconstruction/target/reconstruction-external/ratracer-include/flintxx/frandxx.h:31:32: warning: ‘void flint_randclear(flint_rand_struct*)’ is deprecated [-Wdeprecated-declarations]
+   31 |     ~frandxx() {flint_randclear(inner);}
+      |                 ~~~~~~~~~~~~~~~^~~~~~~
+/nix/store/k1hb5mgjbaiq1sx65zpbd9a1sfy0jl6n-flint-3.6.0/include/flint/flint.h:306:23: note: declared here
+  306 | FLINT_DEPRECATED void flint_randclear(flint_rand_t);
+      |                       ^~~~~~~~~~~~~~~
+[ 76%] Building CXX object CMakeFiles/FireFly_static.dir/source/RationalNumber.cpp.o
+In file included from /common/dev/symbolica-reconstruction/target/reconstruction-external/ratracer-include/flint/fmpzxx.h:22,
+                 from /common/dev/symbolica-reconstruction/target/reconstruction-external/ratracer-firefly/source/include/firefly/FFInt.hpp:27,
+                 from /common/dev/symbolica-reconstruction/target/reconstruction-external/ratracer-firefly/source/include/firefly/RationalNumber.hpp:22,
+                 from /common/dev/symbolica-reconstruction/target/reconstruction-external/ratracer-firefly/source/include/firefly/PolynomialFF.hpp:22,
+                 from /common/dev/symbolica-reconstruction/target/reconstruction-external/ratracer-firefly/source/include/firefly/RationalFunctionFF.hpp:22,
+                 from /common/dev/symbolica-reconstruction/target/reconstruction-external/ratracer-firefly/source/RationalFunctionFF.cpp:19:
+/common/dev/symbolica-reconstruction/target/reconstruction-external/ratracer-include/flintxx/frandxx.h: In constructor ‘flint::frandxx::frandxx()’:
+/common/dev/symbolica-reconstruction/target/reconstruction-external/ratracer-include/flintxx/frandxx.h:30:30: warning: ‘void flint_randinit(flint_rand_struct*)’ is deprecated [-Wdeprecated-declarations]
+   30 |     frandxx() {flint_randinit(inner);}
+      |                ~~~~~~~~~~~~~~^~~~~~~
+In file included from /nix/store/k1hb5mgjbaiq1sx65zpbd9a1sfy0jl6n-flint-3.6.0/include/flint/limb_types.h:15,
+                 from /nix/store/k1hb5mgjbaiq1sx65zpbd9a1sfy0jl6n-flint-3.6.0/include/flint/ulong_extras.h:25,
+                 from /common/dev/symbolica-reconstruction/target/reconstruction-external/ratracer-firefly/source/include/firefly/FFInt.hpp:23:
+/nix/store/k1hb5mgjbaiq1sx65zpbd9a1sfy0jl6n-flint-3.6.0/include/flint/flint.h:305:23: note: declared here
+  305 | FLINT_DEPRECATED void flint_randinit(flint_rand_t);
+      |                       ^~~~~~~~~~~~~~
+/common/dev/symbolica-reconstruction/target/reconstruction-external/ratracer-include/flintxx/frandxx.h: In destructor ‘flint::frandxx::~frandxx()’:
+/common/dev/symbolica-reconstruction/target/reconstruction-external/ratracer-include/flintxx/frandxx.h:31:32: warning: ‘void flint_randclear(flint_rand_struct*)’ is deprecated [-Wdeprecated-declarations]
+   31 |     ~frandxx() {flint_randclear(inner);}
+      |                 ~~~~~~~~~~~~~~~^~~~~~~
+/nix/store/k1hb5mgjbaiq1sx65zpbd9a1sfy0jl6n-flint-3.6.0/include/flint/flint.h:306:23: note: declared here
+  306 | FLINT_DEPRECATED void flint_randclear(flint_rand_t);
+      |                       ^~~~~~~~~~~~~~~
+In file included from /common/dev/symbolica-reconstruction/target/reconstruction-external/ratracer-include/flint/fmpzxx.h:22,
+                 from /common/dev/symbolica-reconstruction/target/reconstruction-external/ratracer-firefly/source/include/firefly/FFInt.hpp:27,
+                 from /common/dev/symbolica-reconstruction/target/reconstruction-external/ratracer-firefly/source/include/firefly/RationalNumber.hpp:22,
+                 from /common/dev/symbolica-reconstruction/target/reconstruction-external/ratracer-firefly/source/RationalNumber.cpp:19:
+/common/dev/symbolica-reconstruction/target/reconstruction-external/ratracer-include/flintxx/frandxx.h: In constructor ‘flint::frandxx::frandxx()’:
+/common/dev/symbolica-reconstruction/target/reconstruction-external/ratracer-include/flintxx/frandxx.h:30:30: warning: ‘void flint_randinit(flint_rand_struct*)’ is deprecated [-Wdeprecated-declarations]
+   30 |     frandxx() {flint_randinit(inner);}
+      |                ~~~~~~~~~~~~~~^~~~~~~
+In file included from /nix/store/k1hb5mgjbaiq1sx65zpbd9a1sfy0jl6n-flint-3.6.0/include/flint/limb_types.h:15,
+                 from /nix/store/k1hb5mgjbaiq1sx65zpbd9a1sfy0jl6n-flint-3.6.0/include/flint/ulong_extras.h:25,
+                 from /common/dev/symbolica-reconstruction/target/reconstruction-external/ratracer-firefly/source/include/firefly/FFInt.hpp:23:
+/nix/store/k1hb5mgjbaiq1sx65zpbd9a1sfy0jl6n-flint-3.6.0/include/flint/flint.h:305:23: note: declared here
+  305 | FLINT_DEPRECATED void flint_randinit(flint_rand_t);
+      |                       ^~~~~~~~~~~~~~
+/common/dev/symbolica-reconstruction/target/reconstruction-external/ratracer-include/flintxx/frandxx.h: In destructor ‘flint::frandxx::~frandxx()’:
+/common/dev/symbolica-reconstruction/target/reconstruction-external/ratracer-include/flintxx/frandxx.h:31:32: warning: ‘void flint_randclear(flint_rand_struct*)’ is deprecated [-Wdeprecated-declarations]
+   31 |     ~frandxx() {flint_randclear(inner);}
+      |                 ~~~~~~~~~~~~~~~^~~~~~~
+/nix/store/k1hb5mgjbaiq1sx65zpbd9a1sfy0jl6n-flint-3.6.0/include/flint/flint.h:306:23: note: declared here
+  306 | FLINT_DEPRECATED void flint_randclear(flint_rand_t);
+      |                       ^~~~~~~~~~~~~~~
+[ 80%] Building CXX object CMakeFiles/FireFly_static.dir/source/RatReconst.cpp.o
+In file included from /common/dev/symbolica-reconstruction/target/reconstruction-external/ratracer-include/flint/fmpzxx.h:22,
+                 from /common/dev/symbolica-reconstruction/target/reconstruction-external/ratracer-firefly/source/include/firefly/FFInt.hpp:27,
+                 from /common/dev/symbolica-reconstruction/target/reconstruction-external/ratracer-firefly/source/include/firefly/RationalNumber.hpp:22,
+                 from /common/dev/symbolica-reconstruction/target/reconstruction-external/ratracer-firefly/source/include/firefly/PolynomialFF.hpp:22,
+                 from /common/dev/symbolica-reconstruction/target/reconstruction-external/ratracer-firefly/source/include/firefly/FFThieleInterpolator.hpp:22,
+                 from /common/dev/symbolica-reconstruction/target/reconstruction-external/ratracer-firefly/source/include/firefly/RatReconst.hpp:22,
+                 from /common/dev/symbolica-reconstruction/target/reconstruction-external/ratracer-firefly/source/RatReconst.cpp:19:
+/common/dev/symbolica-reconstruction/target/reconstruction-external/ratracer-include/flintxx/frandxx.h: In constructor ‘flint::frandxx::frandxx()’:
+/common/dev/symbolica-reconstruction/target/reconstruction-external/ratracer-include/flintxx/frandxx.h:30:30: warning: ‘void flint_randinit(flint_rand_struct*)’ is deprecated [-Wdeprecated-declarations]
+   30 |     frandxx() {flint_randinit(inner);}
+      |                ~~~~~~~~~~~~~~^~~~~~~
+In file included from /nix/store/k1hb5mgjbaiq1sx65zpbd9a1sfy0jl6n-flint-3.6.0/include/flint/limb_types.h:15,
+                 from /nix/store/k1hb5mgjbaiq1sx65zpbd9a1sfy0jl6n-flint-3.6.0/include/flint/ulong_extras.h:25,
+                 from /common/dev/symbolica-reconstruction/target/reconstruction-external/ratracer-firefly/source/include/firefly/FFInt.hpp:23:
+/nix/store/k1hb5mgjbaiq1sx65zpbd9a1sfy0jl6n-flint-3.6.0/include/flint/flint.h:305:23: note: declared here
+  305 | FLINT_DEPRECATED void flint_randinit(flint_rand_t);
+      |                       ^~~~~~~~~~~~~~
+/common/dev/symbolica-reconstruction/target/reconstruction-external/ratracer-include/flintxx/frandxx.h: In destructor ‘flint::frandxx::~frandxx()’:
+/common/dev/symbolica-reconstruction/target/reconstruction-external/ratracer-include/flintxx/frandxx.h:31:32: warning: ‘void flint_randclear(flint_rand_struct*)’ is deprecated [-Wdeprecated-declarations]
+   31 |     ~frandxx() {flint_randclear(inner);}
+      |                 ~~~~~~~~~~~~~~~^~~~~~~
+/nix/store/k1hb5mgjbaiq1sx65zpbd9a1sfy0jl6n-flint-3.6.0/include/flint/flint.h:306:23: note: declared here
+  306 | FLINT_DEPRECATED void flint_randclear(flint_rand_t);
+      |                       ^~~~~~~~~~~~~~~
+[ 85%] Building CXX object CMakeFiles/FireFly_static.dir/source/ReconstHelper.cpp.o
+[ 90%] Building CXX object CMakeFiles/FireFly_static.dir/source/ShuntingYardParser.cpp.o
+[ 95%] Building CXX object CMakeFiles/FireFly_static.dir/source/utils.cpp.o
+In file included from /common/dev/symbolica-reconstruction/target/reconstruction-external/ratracer-include/flint/fmpzxx.h:22,
+                 from /common/dev/symbolica-reconstruction/target/reconstruction-external/ratracer-firefly/source/include/firefly/FFInt.hpp:27,
+                 from /common/dev/symbolica-reconstruction/target/reconstruction-external/ratracer-firefly/source/include/firefly/ShuntingYardParser.hpp:22,
+                 from /common/dev/symbolica-reconstruction/target/reconstruction-external/ratracer-firefly/source/ShuntingYardParser.cpp:19:
+/common/dev/symbolica-reconstruction/target/reconstruction-external/ratracer-include/flintxx/frandxx.h: In constructor ‘flint::frandxx::frandxx()’:
+/common/dev/symbolica-reconstruction/target/reconstruction-external/ratracer-include/flintxx/frandxx.h:30:30: warning: ‘void flint_randinit(flint_rand_struct*)’ is deprecated [-Wdeprecated-declarations]
+   30 |     frandxx() {flint_randinit(inner);}
+      |                ~~~~~~~~~~~~~~^~~~~~~
+In file included from /nix/store/k1hb5mgjbaiq1sx65zpbd9a1sfy0jl6n-flint-3.6.0/include/flint/limb_types.h:15,
+                 from /nix/store/k1hb5mgjbaiq1sx65zpbd9a1sfy0jl6n-flint-3.6.0/include/flint/ulong_extras.h:25,
+                 from /common/dev/symbolica-reconstruction/target/reconstruction-external/ratracer-firefly/source/include/firefly/FFInt.hpp:23:
+/nix/store/k1hb5mgjbaiq1sx65zpbd9a1sfy0jl6n-flint-3.6.0/include/flint/flint.h:305:23: note: declared here
+  305 | FLINT_DEPRECATED void flint_randinit(flint_rand_t);
+      |                       ^~~~~~~~~~~~~~
+/common/dev/symbolica-reconstruction/target/reconstruction-external/ratracer-include/flintxx/frandxx.h: In destructor ‘flint::frandxx::~frandxx()’:
+/common/dev/symbolica-reconstruction/target/reconstruction-external/ratracer-include/flintxx/frandxx.h:31:32: warning: ‘void flint_randclear(flint_rand_struct*)’ is deprecated [-Wdeprecated-declarations]
+   31 |     ~frandxx() {flint_randclear(inner);}
+      |                 ~~~~~~~~~~~~~~~^~~~~~~
+/nix/store/k1hb5mgjbaiq1sx65zpbd9a1sfy0jl6n-flint-3.6.0/include/flint/flint.h:306:23: note: declared here
+  306 | FLINT_DEPRECATED void flint_randclear(flint_rand_t);
+      |                       ^~~~~~~~~~~~~~~
+In file included from /common/dev/symbolica-reconstruction/target/reconstruction-external/ratracer-include/flint/fmpzxx.h:22,
+                 from /common/dev/symbolica-reconstruction/target/reconstruction-external/ratracer-firefly/source/include/firefly/FFInt.hpp:27,
+                 from /common/dev/symbolica-reconstruction/target/reconstruction-external/ratracer-firefly/source/include/firefly/RationalNumber.hpp:22,
+                 from /common/dev/symbolica-reconstruction/target/reconstruction-external/ratracer-firefly/source/include/firefly/PolynomialFF.hpp:22,
+                 from /common/dev/symbolica-reconstruction/target/reconstruction-external/ratracer-firefly/source/include/firefly/utils.hpp:22,
+                 from /common/dev/symbolica-reconstruction/target/reconstruction-external/ratracer-firefly/source/utils.cpp:19:
+/common/dev/symbolica-reconstruction/target/reconstruction-external/ratracer-include/flintxx/frandxx.h: In constructor ‘flint::frandxx::frandxx()’:
+/common/dev/symbolica-reconstruction/target/reconstruction-external/ratracer-include/flintxx/frandxx.h:30:30: warning: ‘void flint_randinit(flint_rand_struct*)’ is deprecated [-Wdeprecated-declarations]
+   30 |     frandxx() {flint_randinit(inner);}
+      |                ~~~~~~~~~~~~~~^~~~~~~
+In file included from /nix/store/k1hb5mgjbaiq1sx65zpbd9a1sfy0jl6n-flint-3.6.0/include/flint/limb_types.h:15,
+                 from /nix/store/k1hb5mgjbaiq1sx65zpbd9a1sfy0jl6n-flint-3.6.0/include/flint/ulong_extras.h:25,
+                 from /common/dev/symbolica-reconstruction/target/reconstruction-external/ratracer-firefly/source/include/firefly/FFInt.hpp:23:
+/nix/store/k1hb5mgjbaiq1sx65zpbd9a1sfy0jl6n-flint-3.6.0/include/flint/flint.h:305:23: note: declared here
+  305 | FLINT_DEPRECATED void flint_randinit(flint_rand_t);
+      |                       ^~~~~~~~~~~~~~
+/common/dev/symbolica-reconstruction/target/reconstruction-external/ratracer-include/flintxx/frandxx.h: In destructor ‘flint::frandxx::~frandxx()’:
+/common/dev/symbolica-reconstruction/target/reconstruction-external/ratracer-include/flintxx/frandxx.h:31:32: warning: ‘void flint_randclear(flint_rand_struct*)’ is deprecated [-Wdeprecated-declarations]
+   31 |     ~frandxx() {flint_randclear(inner);}
+      |                 ~~~~~~~~~~~~~~~^~~~~~~
+/nix/store/k1hb5mgjbaiq1sx65zpbd9a1sfy0jl6n-flint-3.6.0/include/flint/flint.h:306:23: note: declared here
+  306 | FLINT_DEPRECATED void flint_randclear(flint_rand_t);
+      |                       ^~~~~~~~~~~~~~~
+[100%] Linking CXX static library libfirefly.a
+[100%] Built target FireFly_static
+In file included from /common/dev/symbolica-reconstruction/target/reconstruction-external/ratracer-include/flint/fmpzxx.h:22,
+                 from /common/dev/symbolica-reconstruction/target/reconstruction-external/ratracer-firefly/source/include/firefly/FFInt.hpp:27,
+                 from /common/dev/symbolica-reconstruction/target/reconstruction-external/ratracer-firefly/source/include/firefly/FFIntVec.hpp:22,
+                 from /common/dev/symbolica-reconstruction/target/reconstruction-external/ratracer-firefly/source/include/firefly/Reconstructor.hpp:23,
+                 from /common/dev/symbolica-reconstruction/target/reconstruction-external/ratracer/ratracer.cpp:1098:
+/common/dev/symbolica-reconstruction/target/reconstruction-external/ratracer-include/flintxx/frandxx.h: In constructor ‘flint::frandxx::frandxx()’:
+/common/dev/symbolica-reconstruction/target/reconstruction-external/ratracer-include/flintxx/frandxx.h:30:30: warning: ‘void flint_randinit(flint_rand_struct*)’ is deprecated [-Wdeprecated-declarations]
+   30 |     frandxx() {flint_randinit(inner);}
+      |                ~~~~~~~~~~~~~~^~~~~~~
+In file included from /nix/store/k1hb5mgjbaiq1sx65zpbd9a1sfy0jl6n-flint-3.6.0/include/flint/fmpz_types.h:15,
+                 from /nix/store/k1hb5mgjbaiq1sx65zpbd9a1sfy0jl6n-flint-3.6.0/include/flint/fmpz.h:21,
+                 from /common/dev/symbolica-reconstruction/target/reconstruction-external/ratracer/ratracer.h:12,
+                 from /common/dev/symbolica-reconstruction/target/reconstruction-external/ratracer/ratracer.cpp:275:
+/nix/store/k1hb5mgjbaiq1sx65zpbd9a1sfy0jl6n-flint-3.6.0/include/flint/flint.h:305:23: note: declared here
+  305 | FLINT_DEPRECATED void flint_randinit(flint_rand_t);
+      |                       ^~~~~~~~~~~~~~
+/common/dev/symbolica-reconstruction/target/reconstruction-external/ratracer-include/flintxx/frandxx.h: In destructor ‘flint::frandxx::~frandxx()’:
+/common/dev/symbolica-reconstruction/target/reconstruction-external/ratracer-include/flintxx/frandxx.h:31:32: warning: ‘void flint_randclear(flint_rand_struct*)’ is deprecated [-Wdeprecated-declarations]
+   31 |     ~frandxx() {flint_randclear(inner);}
+      |                 ~~~~~~~~~~~~~~~^~~~~~~
+/nix/store/k1hb5mgjbaiq1sx65zpbd9a1sfy0jl6n-flint-3.6.0/include/flint/flint.h:306:23: note: declared here
+  306 | FLINT_DEPRECATED void flint_randclear(flint_rand_t);
+      |                       ^~~~~~~~~~~~~~~

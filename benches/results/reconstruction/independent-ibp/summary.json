@@ -1,0 +1,60 @@
+{
+  "baseline": "d85dbb2d",
+  "final_runs": 4330,
+  "archived_completed_runs": 4528,
+  "all_completed_runs_pass_exact_identities": true,
+  "regressions": [
+    {
+      "suite": "nb0",
+      "runs": 3319,
+      "probes": 505874,
+      "comparison": "unchanged probes, per-prime counts, selected methods and available row/selection counters"
+    },
+    {
+      "suite": "graph5",
+      "runs": 945,
+      "probes": 20311,
+      "comparison": "unchanged probes, per-prime counts, selected methods and available row/selection counters"
+    },
+    {
+      "suite": "sparse",
+      "runs": 12,
+      "probes": 250065,
+      "comparison": "unchanged probes, per-prime counts, selected methods and available row/selection counters"
+    },
+    {
+      "suite": "q",
+      "runs": 15,
+      "probes": 695043,
+      "comparison": "unchanged probes, per-prime counts, selected methods and available row/selection counters"
+    },
+    {
+      "suite": "sheared",
+      "runs": 12,
+      "probes": 166923,
+      "comparison": "unchanged probes, per-prime counts, selected methods and available row/selection counters"
+    }
+  ],
+  "new_case_probe_counts": {
+    "ibp_box2l_rank0001": 83,
+    "ibp_box2l_rank0002": 472,
+    "ibp_box2l_rank0003": 323,
+    "ibp_box2l_rank0004": 282,
+    "ibp_xbox2l2m_rank0001": 8303,
+    "ibp_xbox2l2m_rank0002": 11597,
+    "ibp_xbox2l2m_rank0003": 18029,
+    "ibp_xbox2l2m_rank0004": 1862
+  },
+  "seeds": [
+    1,
+    2,
+    3
+  ],
+  "oracle": "shared expanded-polynomial cached-power oracle; not the Ratracer trace during timing",
+  "reference_policies": "native primes and native coefficient confirmations",
+  "timing_caveat": "shared host; exploratory debug timings are not compared to release timings",
+  "setup_failures": [
+    "Preferred-master nonplanar target rejected before timing.",
+    "Initial complete graph5 invocation used the sample input directory and stopped at rank 18 during export; final run uses graph5/all and covers all 945 cases."
+  ]
+}

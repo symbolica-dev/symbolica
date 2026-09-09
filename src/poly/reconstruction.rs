@@ -23,6 +23,7 @@ use std::{
 };
 
 mod automatic;
+mod factors;
 mod rational;
 mod sparse_row;
 mod support;
@@ -36,8 +37,10 @@ type Fraction = RationalPolynomial<Zp64, u16>;
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum ReconstructionMethod {
     /// Choose from learned slice structure and estimated dense interpolation
-    /// costs. Selection probes count toward the shared budget. Uses balanced
-    /// Zippel directly for one or two variables.
+    /// costs. A shared univariate factor in the last-variable pilot triggers
+    /// factor removal and balanced reconstruction with reused survey rows. All discovery
+    /// probes count toward the shared budget. Uses balanced Zippel directly
+    /// for one or two variables.
     Automatic,
     /// Homogenization, Thiele degree discovery, linear solves and polynomial Zippel.
     CuytLee,
@@ -181,6 +184,7 @@ where
         balanced_pilot: None,
         balanced_initial: None,
         balanced_survey: Vec::new(),
+        removed_factors: Vec::new(),
         removed_numerator_factor: None,
         fixed_last_variable: None,
     };
@@ -213,7 +217,7 @@ where
                 ReconstructionMethod::CuytLee => ctx.cuyt_lee(false),
                 ReconstructionMethod::CuytLeePruned => {
                     if let Some(profile) = profile.take() {
-                        ctx.cuyt_lee_profile(true, profile.bounds, profile.minimum)
+                        ctx.reconstruct_profile(profile)
                     } else {
                         ctx.cuyt_lee(true)
                     }
@@ -265,6 +269,8 @@ struct Context<'a, F> {
     balanced_initial: Option<(Vec<Element>, Fraction)>,
     // Other slices from the same survey anchor, consumed as geometric row one.
     balanced_survey: Vec<Option<Fraction>>,
+    // Sampled univariate factors, active only during a factored reconstruction.
+    removed_factors: Vec<(usize, [UnivariatePolynomial<Zp64>; 2])>,
     // A last-variable factor hypothesized from generic numerator slices.
     removed_numerator_factor: Option<UnivariatePolynomial<Zp64>>,
     // Restrict probes while reconstructing the remaining variables of a factor.
@@ -310,6 +316,16 @@ impl<F: FnMut(&Zp64, &[Element]) -> Option<Element>> Context<'_, F> {
         let Some(mut value) = self.probe_raw(point)? else {
             return Ok(None);
         };
+        for (variable, factors) in &self.removed_factors {
+            let numerator = factors[0].evaluate(&point[*variable]);
+            let denominator = factors[1].evaluate(&point[*variable]);
+            if self.field.is_zero(&numerator) || self.field.is_zero(&denominator) {
+                return Ok(None);
+            }
+            value = self
+                .field
+                .div(&self.field.mul(&value, &denominator), &numerator);
+        }
         if let Some(factor) = &self.removed_numerator_factor {
             let divisor = factor.evaluate(point.last().unwrap());
             if self.field.is_zero(&divisor) {
@@ -988,7 +1004,14 @@ impl<F: FnMut(&Zp64, &[Element]) -> Option<Element>> Context<'_, F> {
             rows[variable] = Some(row);
         }
         // The final variable is fixed in the oracle and has support bound zero.
-        Ok((automatic::DegreeProfile { bounds, minimum }, rows))
+        Ok((
+            automatic::DegreeProfile {
+                bounds,
+                minimum,
+                factor_hint: None,
+            },
+            rows,
+        ))
     }
 
     fn cuyt_lee(&mut self, prune: bool) -> Result<Fraction> {
