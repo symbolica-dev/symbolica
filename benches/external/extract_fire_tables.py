@@ -5,6 +5,11 @@ import json
 from pathlib import Path
 import re
 import subprocess
+import argparse
+
+parser = argparse.ArgumentParser(description=__doc__)
+parser.add_argument("--suite", action="store_true", help="also export 32 distinct coefficients spanning the table")
+args = parser.parse_args()
 
 root = Path(__file__).resolve().parents[2]
 fire = root / "target/reconstruction-external/fire"
@@ -32,3 +37,30 @@ manifest = dict(revision=revision, source=str(source.relative_to(fire)), source_
                 output_sha256=hashlib.sha256(data).hexdigest())
 (out / "manifest.json").write_text(json.dumps(manifest, indent=2) + "\n")
 print(json.dumps(manifest, indent=2))
+
+if args.suite:
+    # Deduplicate exact source strings, preserving the first table occurrence.
+    unique = {}
+    for item in coefficients:
+        unique.setdefault(item[2], item)
+    ranked = sorted(unique.values(), key=lambda item: -len(item[2]))
+    assert len(ranked) >= 32
+    # Largest 16, then 16 evenly spaced ranks in the remaining size range.
+    ranks = list(range(16)) + [16 + i * (len(ranked) - 17) // 15 for i in range(16)]
+    entries = []
+    for rank in ranks:
+        row, master, expression = ranked[rank]
+        assert set(re.findall(r"[A-Za-z]+", expression)) <= {"u", "v", "w", "d"}
+        case = f"fire7_nb0_rank{rank + 1:04d}"
+        data = (expression + "\n").encode()
+        (out / case).write_bytes(data)
+        (out / f"{case}.variables").write_text("u v w d\n")
+        entries.append(dict(case=case, rank=rank + 1, row=str(row), master=str(master),
+                            expression_bytes=len(expression), output_sha256=hashlib.sha256(data).hexdigest()))
+    suite = dict(revision=revision, source=manifest["source"], source_sha256=digest,
+                 coefficient_count=len(coefficients), distinct_source_strings=len(ranked),
+                 selection="first 16 descending string-length ranks, then 16 evenly spaced remaining ranks; first table occurrence breaks ties",
+                 variables=["u", "v", "w", "d"], entries=entries)
+    (out / "suite-manifest.json").write_text(json.dumps(suite, indent=2) + "\n")
+    (out / "suite-cases.txt").write_text("\n".join(entry["case"] for entry in entries) + "\n")
+    print(f"Exported {len(entries)} suite cases from {len(ranked)} distinct source strings")

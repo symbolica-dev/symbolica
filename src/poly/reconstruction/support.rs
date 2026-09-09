@@ -56,6 +56,7 @@ where
         cache: HashMap::new(),
         stats: Default::default(),
         monomial_factors: None,
+        balanced_pilot: None,
     };
     // A rejected coefficient hypothesis is unlikely to improve with another
     // direction. Fall back immediately; ordinary reconstruction owns retries.

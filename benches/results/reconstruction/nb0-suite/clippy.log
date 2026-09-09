@@ -1,0 +1,4147 @@
+warning: unnecessary `>= y + 1` or `x - 1 >=`
+   --> lib/numerica/src/domains/finite_field/polynomial_kernels.rs:304:43
+    |
+304 |           let direct_montgomery_reduction = coefficient_bits
+    |  ___________________________________________^
+305 | |             <= (u32::BITS - field.p.leading_zeros()) as usize + u32::BITS as usize - 1;
+    | |______________________________________________________________________________________^ help: change it to: `coefficient_bits < (u32::BITS - field.p.leading_zeros()) as usize + u32::BITS as usize`
+    |
+    = help: for further information visit https://rust-lang.github.io/rust-clippy/rust-1.92.0/index.html#int_plus_one
+    = note: `#[warn(clippy::int_plus_one)]` on by default
+
+warning: using tabs in doc comments is not recommended
+ --> lib/numerica/src/tensors/sparse.rs:8:5
+  |
+8 | //!     integer::{IntegerRing, Integer},
+  |     ^^^^ help: consider using four spaces per tab
+  |
+  = help: for further information visit https://rust-lang.github.io/rust-clippy/rust-1.92.0/index.html#tabs_in_doc_comments
+  = note: `#[warn(clippy::tabs_in_doc_comments)]` on by default
+
+warning: redundant field names in struct initialization
+  --> lib/numerica/src/tensors/sparse.rs:61:13
+   |
+61 |             len: len,
+   |             ^^^^^^^^ help: replace it with: `len`
+   |
+   = help: for further information visit https://rust-lang.github.io/rust-clippy/rust-1.92.0/index.html#redundant_field_names
+   = note: `#[warn(clippy::redundant_field_names)]` on by default
+
+warning: redundant field names in struct initialization
+  --> lib/numerica/src/tensors/sparse.rs:62:13
+   |
+62 |             field: field,
+   |             ^^^^^^^^^^^^ help: replace it with: `field`
+   |
+   = help: for further information visit https://rust-lang.github.io/rust-clippy/rust-1.92.0/index.html#redundant_field_names
+
+warning: redundant field names in struct initialization
+   --> lib/numerica/src/tensors/sparse.rs:557:13
+    |
+557 |             nrows: nrows,
+    |             ^^^^^^^^^^^^ help: replace it with: `nrows`
+    |
+    = help: for further information visit https://rust-lang.github.io/rust-clippy/rust-1.92.0/index.html#redundant_field_names
+
+warning: redundant field names in struct initialization
+   --> lib/numerica/src/tensors/sparse.rs:559:13
+    |
+559 |             field: field,
+    |             ^^^^^^^^^^^^ help: replace it with: `field`
+    |
+    = help: for further information visit https://rust-lang.github.io/rust-clippy/rust-1.92.0/index.html#redundant_field_names
+
+warning: redundant field names in struct initialization
+    --> lib/numerica/src/tensors/sparse.rs:1552:13
+     |
+1552 |             mode: mode,
+     |             ^^^^^^^^^^ help: replace it with: `mode`
+     |
+     = help: for further information visit https://rust-lang.github.io/rust-clippy/rust-1.92.0/index.html#redundant_field_names
+
+warning: redundant field names in struct initialization
+    --> lib/numerica/src/tensors/sparse.rs:1583:13
+     |
+1583 |             mode: mode,
+     |             ^^^^^^^^^^ help: replace it with: `mode`
+     |
+     = help: for further information visit https://rust-lang.github.io/rust-clippy/rust-1.92.0/index.html#redundant_field_names
+
+warning: redundant field names in struct initialization
+    --> lib/numerica/src/tensors/sparse.rs:1620:13
+     |
+1620 |             mode: mode,
+     |             ^^^^^^^^^^ help: replace it with: `mode`
+     |
+     = help: for further information visit https://rust-lang.github.io/rust-clippy/rust-1.92.0/index.html#redundant_field_names
+
+warning: redundant field names in struct initialization
+    --> lib/numerica/src/tensors/sparse.rs:1654:13
+     |
+1654 |             mode: mode,
+     |             ^^^^^^^^^^ help: replace it with: `mode`
+     |
+     = help: for further information visit https://rust-lang.github.io/rust-clippy/rust-1.92.0/index.html#redundant_field_names
+
+warning: redundant field names in struct initialization
+    --> lib/numerica/src/tensors/sparse.rs:1683:13
+     |
+1683 |             mode: mode,
+     |             ^^^^^^^^^^ help: replace it with: `mode`
+     |
+     = help: for further information visit https://rust-lang.github.io/rust-clippy/rust-1.92.0/index.html#redundant_field_names
+
+warning: method `next` can be confused for the standard trait method `std::iter::Iterator::next`
+   --> lib/numerica/src/combinatorics.rs:85:5
+    |
+ 85 | /     pub fn next(&mut self) -> Option<&[usize]> {
+ 86 | |         if self.indices.is_empty() || self.indices.len() > self.n {
+ 87 | |             return None;
+...   |
+113 | |         if done { None } else { Some(&self.indices) }
+114 | |     }
+    | |_____^
+    |
+    = help: consider implementing the trait `std::iter::Iterator` or choosing a less ambiguous method name
+    = help: for further information visit https://rust-lang.github.io/rust-clippy/rust-1.92.0/index.html#should_implement_trait
+    = note: `#[warn(clippy::should_implement_trait)]` on by default
+
+warning: method `next` can be confused for the standard trait method `std::iter::Iterator::next`
+   --> lib/numerica/src/combinatorics.rs:151:5
+    |
+151 | /     pub fn next(&mut self) -> Option<&[u32]> {
+152 | |         if self.indices.is_empty() {
+153 | |             return None;
+...   |
+196 | |         Some(&self.indices)
+197 | |     }
+    | |_____^
+    |
+    = help: consider implementing the trait `std::iter::Iterator` or choosing a less ambiguous method name
+    = help: for further information visit https://rust-lang.github.io/rust-clippy/rust-1.92.0/index.html#should_implement_trait
+
+warning: very complex type used. Consider factoring parts into `type` definitions
+   --> lib/numerica/src/combinatorics.rs:290:6
+    |
+290 | ) -> Vec<(Integer, Vec<(B, Vec<T>)>)> {
+    |      ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+    |
+    = help: for further information visit https://rust-lang.github.io/rust-clippy/rust-1.92.0/index.html#type_complexity
+    = note: `#[warn(clippy::type_complexity)]` on by default
+
+warning: very complex type used. Consider factoring parts into `type` definitions
+   --> lib/numerica/src/combinatorics.rs:363:17
+    |
+363 |         result: &mut Vec<(Integer, Vec<(B, Vec<T>)>)>,
+    |                 ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+    |
+    = help: for further information visit https://rust-lang.github.io/rust-clippy/rust-1.92.0/index.html#type_complexity
+
+warning: the function `fill_rec` doesn't need a mutable reference
+   --> lib/numerica/src/combinatorics.rs:413:9
+    |
+413 |         &mut sorted_bins,
+    |         ^^^^^^^^^^^^^^^^
+    |
+    = help: for further information visit https://rust-lang.github.io/rust-clippy/rust-1.92.0/index.html#unnecessary_mut_passed
+    = note: `#[warn(clippy::unnecessary_mut_passed)]` on by default
+help: remove this `mut`
+    |
+413 -         &mut sorted_bins,
+413 +         &sorted_bins,
+    |
+
+warning: useless conversion to the same type: `usize`
+  --> lib/numerica/src/domains/backend/integer.rs:98:20
+   |
+98 |                 && usize::try_from(value.capacity()).unwrap_or(usize::MAX)
+   |                    ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+   |
+   = help: consider removing `usize::try_from()`
+   = help: for further information visit https://rust-lang.github.io/rust-clippy/rust-1.92.0/index.html#useless_conversion
+   = note: `#[warn(clippy::useless_conversion)]` on by default
+
+warning: unneeded `return` statement
+   --> lib/numerica/src/domains/backend/integer.rs:311:17
+    |
+311 |                 return remainder;
+    |                 ^^^^^^^^^^^^^^^^
+    |
+    = help: for further information visit https://rust-lang.github.io/rust-clippy/rust-1.92.0/index.html#needless_return
+    = note: `#[warn(clippy::needless_return)]` on by default
+help: remove `return`
+    |
+311 -                 return remainder;
+311 +                 remainder
+    |
+
+warning: unneeded `return` statement
+   --> lib/numerica/src/domains/backend/integer.rs:326:17
+    |
+326 |                 return (Self(quotient), Self(remainder));
+    |                 ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+    |
+    = help: for further information visit https://rust-lang.github.io/rust-clippy/rust-1.92.0/index.html#needless_return
+help: remove `return`
+    |
+326 -                 return (Self(quotient), Self(remainder));
+326 +                 (Self(quotient), Self(remainder))
+    |
+
+warning: unneeded `return` statement
+   --> lib/numerica/src/domains/backend/integer.rs:346:17
+    |
+346 |                 return (quotient, remainder);
+    |                 ^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+    |
+    = help: for further information visit https://rust-lang.github.io/rust-clippy/rust-1.92.0/index.html#needless_return
+help: remove `return`
+    |
+346 -                 return (quotient, remainder);
+346 +                 (quotient, remainder)
+    |
+
+warning: unneeded `return` statement
+   --> lib/numerica/src/domains/backend/integer.rs:399:17
+    |
+399 |                 return Self(self.0.clone().root(e));
+    |                 ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+    |
+    = help: for further information visit https://rust-lang.github.io/rust-clippy/rust-1.92.0/index.html#needless_return
+help: remove `return`
+    |
+399 -                 return Self(self.0.clone().root(e));
+399 +                 Self(self.0.clone().root(e))
+    |
+
+warning: unneeded `return` statement
+   --> lib/numerica/src/domains/backend/integer.rs:422:17
+    |
+422 |                 return Self(self.0.clone().gcd(&rhs.0));
+    |                 ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+    |
+    = help: for further information visit https://rust-lang.github.io/rust-clippy/rust-1.92.0/index.html#needless_return
+help: remove `return`
+    |
+422 -                 return Self(self.0.clone().gcd(&rhs.0));
+422 +                 Self(self.0.clone().gcd(&rhs.0))
+    |
+
+warning: unneeded `return` statement
+   --> lib/numerica/src/domains/backend/integer.rs:440:17
+    |
+440 |                 return (Self(g), Self(s), Self(t));
+    |                 ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+    |
+    = help: for further information visit https://rust-lang.github.io/rust-clippy/rust-1.92.0/index.html#needless_return
+help: remove `return`
+    |
+440 -                 return (Self(g), Self(s), Self(t));
+440 +                 (Self(g), Self(s), Self(t))
+    |
+
+warning: this returns a `Result<_, ()>`
+   --> lib/numerica/src/domains/backend/integer.rs:450:9
+    |
+450 |         pub fn invert(&self, modulus: &Self) -> Result<Self, ()> {
+    |         ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+    |
+    = help: use a custom `Error` type instead
+    = help: for further information visit https://rust-lang.github.io/rust-clippy/rust-1.92.0/index.html#result_unit_err
+    = note: `#[warn(clippy::result_unit_err)]` on by default
+
+warning: unneeded `return` statement
+   --> lib/numerica/src/domains/backend/integer.rs:453:17
+    |
+453 |                 return self.0.clone().invert(&modulus.0).map(Self).map_err(|_| ());
+    |                 ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+    |
+    = help: for further information visit https://rust-lang.github.io/rust-clippy/rust-1.92.0/index.html#needless_return
+help: remove `return`
+    |
+453 -                 return self.0.clone().invert(&modulus.0).map(Self).map_err(|_| ());
+453 +                 self.0.clone().invert(&modulus.0).map(Self).map_err(|_| ())
+    |
+
+warning: unneeded `return` statement
+   --> lib/numerica/src/domains/backend/integer.rs:539:17
+    |
+539 |                 return Self(self.into_raw().pow(e));
+    |                 ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+    |
+    = help: for further information visit https://rust-lang.github.io/rust-clippy/rust-1.92.0/index.html#needless_return
+help: remove `return`
+    |
+539 -                 return Self(self.into_raw().pow(e));
+539 +                 Self(self.into_raw().pow(e))
+    |
+
+warning: unneeded `return` statement
+   --> lib/numerica/src/domains/backend/integer.rs:572:17
+    |
+572 |                 return Self(lhs);
+    |                 ^^^^^^^^^^^^^^^^
+    |
+    = help: for further information visit https://rust-lang.github.io/rust-clippy/rust-1.92.0/index.html#needless_return
+help: remove `return`
+    |
+572 -                 return Self(lhs);
+572 +                 Self(lhs)
+    |
+
+warning: this creates an owned instance just for comparison
+   --> lib/numerica/src/domains/backend/integer.rs:674:35
+    |
+674 |                         self.0 == RawMultiPrecisionInteger::from(*other)
+    |                                   ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^ help: try: `*other`
+...
+702 |     impl_cmp_primitive!(i32, i64, i128, u32, u64, u128);
+    |     --------------------------------------------------- in this macro invocation
+    |
+    = help: for further information visit https://rust-lang.github.io/rust-clippy/rust-1.92.0/index.html#cmp_owned
+    = note: `#[warn(clippy::cmp_owned)]` on by default
+    = note: this warning originates in the macro `impl_cmp_primitive` (in Nightly builds, run with -Z macro-backtrace for more info)
+
+warning: this creates an owned instance just for comparison
+   --> lib/numerica/src/domains/backend/integer.rs:681:25
+    |
+681 |                         RawMultiPrecisionInteger::from(*self) == other.0
+    |                         ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^ help: try: `*self`
+...
+702 |     impl_cmp_primitive!(i32, i64, i128, u32, u64, u128);
+    |     --------------------------------------------------- in this macro invocation
+    |
+    = help: for further information visit https://rust-lang.github.io/rust-clippy/rust-1.92.0/index.html#cmp_owned
+    = note: this warning originates in the macro `impl_cmp_primitive` (in Nightly builds, run with -Z macro-backtrace for more info)
+
+warning: this creates an owned instance just for comparison
+   --> lib/numerica/src/domains/backend/integer.rs:674:35
+    |
+674 |                         self.0 == RawMultiPrecisionInteger::from(*other)
+    |                                   ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^ help: try: `*other`
+...
+702 |     impl_cmp_primitive!(i32, i64, i128, u32, u64, u128);
+    |     --------------------------------------------------- in this macro invocation
+    |
+    = help: for further information visit https://rust-lang.github.io/rust-clippy/rust-1.92.0/index.html#cmp_owned
+    = note: this warning originates in the macro `impl_cmp_primitive` (in Nightly builds, run with -Z macro-backtrace for more info)
+
+warning: unneeded `return` statement
+    --> lib/numerica/src/domains/backend/integer.rs:1234:17
+     |
+1234 |                 return remainder;
+     |                 ^^^^^^^^^^^^^^^^
+     |
+     = help: for further information visit https://rust-lang.github.io/rust-clippy/rust-1.92.0/index.html#needless_return
+help: remove `return`
+     |
+1234 -                 return remainder;
+1234 +                 remainder
+     |
+
+warning: needless `fn main` in doctest
+  --> lib/numerica/src/domains/dual.rs:4:5
+   |
+ 4 |   //! use numerica::{
+   |  _____^
+ 5 | | //! create_hyperdual_from_components, create_hyperdual_single_derivative,
+ 6 | | //! domains::{float::FloatLike, rational::Rational},
+ 7 | | //! };
+...  |
+33 | | //! println!("{}", t3.inv());
+34 | | //! }
+   | |_____^
+   |
+   = help: for further information visit https://rust-lang.github.io/rust-clippy/rust-1.92.0/index.html#needless_doctest_main
+   = note: `#[warn(clippy::needless_doctest_main)]` on by default
+
+warning: suspicious use of `*` in `Div` impl
+    --> lib/numerica/src/domains/dual.rs:1771:14
+     |
+1771 |         self * rhs.inv()
+     |              ^
+     |
+     = help: for further information visit https://rust-lang.github.io/rust-clippy/rust-1.92.0/index.html#suspicious_arithmetic_impl
+     = note: `#[warn(clippy::suspicious_arithmetic_impl)]` on by default
+
+warning: suspicious use of `*` in `Div` impl
+    --> lib/numerica/src/domains/dual.rs:1789:14
+     |
+1789 |         self * rhs.inv()
+     |              ^
+     |
+     = help: for further information visit https://rust-lang.github.io/rust-clippy/rust-1.92.0/index.html#suspicious_arithmetic_impl
+
+warning: suspicious use of `*` in `Div` impl
+    --> lib/numerica/src/domains/dual.rs:1799:14
+     |
+1799 |         self * rhs.inv()
+     |              ^
+     |
+     = help: for further information visit https://rust-lang.github.io/rust-clippy/rust-1.92.0/index.html#suspicious_arithmetic_impl
+
+warning: suspicious use of `*` in `DivAssign` impl
+    --> lib/numerica/src/domains/dual.rs:1881:27
+     |
+1881 |         *self = rhs.inv() * &*self;
+     |                           ^
+     |
+     = help: for further information visit https://rust-lang.github.io/rust-clippy/rust-1.92.0/index.html#suspicious_op_assign_impl
+     = note: `#[warn(clippy::suspicious_op_assign_impl)]` on by default
+
+warning: suspicious use of `*` in `DivAssign` impl
+    --> lib/numerica/src/domains/dual.rs:1889:27
+     |
+1889 |         *self = rhs.inv() * &*self;
+     |                           ^
+     |
+     = help: for further information visit https://rust-lang.github.io/rust-clippy/rust-1.92.0/index.html#suspicious_op_assign_impl
+
+warning: unneeded `return` statement
+    --> lib/numerica/src/domains/dual.rs:2114:13
+     |
+2114 |             return self.clone();
+     |             ^^^^^^^^^^^^^^^^^^^
+     |
+     = help: for further information visit https://rust-lang.github.io/rust-clippy/rust-1.92.0/index.html#needless_return
+help: remove `return`
+     |
+2114 -             return self.clone();
+2114 +             self.clone()
+     |
+
+warning: casting to the same type is unnecessary (`usize` -> `usize`)
+    --> lib/numerica/src/domains/dual.rs:2137:76
+     |
+2137 |             num = num.clone() * (num.from_usize(2).inv() - &num.from_usize(p as usize - 1));
+     |                                                                            ^^^^^^^^^^ help: try: `p`
+     |
+     = help: for further information visit https://rust-lang.github.io/rust-clippy/rust-1.92.0/index.html#unnecessary_cast
+     = note: `#[warn(clippy::unnecessary_cast)]` on by default
+
+warning: this function has too many arguments (9/7)
+   --> lib/numerica/src/domains/finite_field/polynomial_kernels.rs:959:9
+    |
+959 | /         fn recover_coefficients(
+960 | |             field: &Zp64,
+961 | |             output: &mut [u64],
+962 | |             stride: usize,
+...   |
+968 | |             digit_bits: usize,
+969 | |         ) {
+    | |_________^
+    |
+    = help: for further information visit https://rust-lang.github.io/rust-clippy/rust-1.92.0/index.html#too_many_arguments
+    = note: `#[warn(clippy::too_many_arguments)]` on by default
+
+warning: methods called `from_*` usually take no `self`
+   --> lib/numerica/src/domains/finite_field.rs:141:21
+    |
+141 |     fn from_element(&self, a: &Self::Element) -> UField;
+    |                     ^^^^^
+    |
+    = help: consider choosing a less ambiguous name
+    = help: for further information visit https://rust-lang.github.io/rust-clippy/rust-1.92.0/index.html#wrong_self_convention
+    = note: `#[warn(clippy::wrong_self_convention)]` on by default
+
+warning: casting to the same type is unnecessary (`u32` -> `u32`)
+    --> lib/numerica/src/domains/finite_field.rs:2022:13
+     |
+2022 |             u1 as u32
+     |             ^^^^^^^^^ help: try: `u1`
+     |
+     = help: for further information visit https://rust-lang.github.io/rust-clippy/rust-1.92.0/index.html#unnecessary_cast
+
+warning: casting to the same type is unnecessary (`u32` -> `u32`)
+    --> lib/numerica/src/domains/finite_field.rs:2024:33
+     |
+2024 |             Mersenne32::PRIME - u1 as u32
+     |                                 ^^^^^^^^^ help: try: `u1`
+     |
+     = help: for further information visit https://rust-lang.github.io/rust-clippy/rust-1.92.0/index.html#unnecessary_cast
+
+warning: useless conversion to the same type: `domains::integer::Integer`
+    --> lib/numerica/src/domains/finite_field.rs:2485:9
+     |
+2485 |         self.from_element(a).into()
+     |         ^^^^^^^^^^^^^^^^^^^^^^^^^^^ help: consider removing `.into()`: `self.from_element(a)`
+     |
+     = help: for further information visit https://rust-lang.github.io/rust-clippy/rust-1.92.0/index.html#useless_conversion
+
+warning: useless conversion to the same type: `domains::backend::integer::implementation::MultiPrecisionInteger`
+    --> lib/numerica/src/domains/finite_field.rs:2750:9
+     |
+2750 |         MultiPrecisionInteger::from(Integer::get_large_prime().to_multi_prec())
+     |         ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^ help: consider removing `MultiPrecisionInteger::from()`: `Integer::get_large_prime().to_multi_prec()`
+     |
+     = help: for further information visit https://rust-lang.github.io/rust-clippy/rust-1.92.0/index.html#useless_conversion
+
+warning: this expression creates a reference which is immediately dereferenced by the compiler
+    --> lib/numerica/src/domains/finite_field.rs:3229:40
+     |
+3229 |             let cf = c.to_finite_field(&self);
+     |                                        ^^^^^ help: change this to: `self`
+     |
+     = help: for further information visit https://rust-lang.github.io/rust-clippy/rust-1.92.0/index.html#needless_borrow
+     = note: `#[warn(clippy::needless_borrow)]` on by default
+
+warning: method `next` can be confused for the standard trait method `std::iter::Iterator::next`
+    --> lib/numerica/src/domains/finite_field.rs:3402:5
+     |
+3402 | /     pub fn next(&mut self) -> Option<(u64, &[u64])> {
+3403 | |         if self.done {
+3404 | |             return None;
+...    |
+3409 | |             .map(|p| (p, self.pows.as_slice()))
+3410 | |     }
+     | |_____^
+     |
+     = help: consider implementing the trait `std::iter::Iterator` or choosing a less ambiguous method name
+     = help: for further information visit https://rust-lang.github.io/rust-clippy/rust-1.92.0/index.html#should_implement_trait
+
+warning: this expression creates a reference which is immediately dereferenced by the compiler
+   --> lib/numerica/src/domains/float/complex.rs:986:22
+    |
+986 |                 .lcm(&other.re.denominator_ref())
+    |                      ^^^^^^^^^^^^^^^^^^^^^^^^^^^ help: change this to: `other.re.denominator_ref()`
+    |
+    = help: for further information visit https://rust-lang.github.io/rust-clippy/rust-1.92.0/index.html#needless_borrow
+
+warning: this expression creates a reference which is immediately dereferenced by the compiler
+   --> lib/numerica/src/domains/float/complex.rs:987:22
+    |
+987 |                 .lcm(&self.im.denominator_ref())
+    |                      ^^^^^^^^^^^^^^^^^^^^^^^^^^ help: change this to: `self.im.denominator_ref()`
+    |
+    = help: for further information visit https://rust-lang.github.io/rust-clippy/rust-1.92.0/index.html#needless_borrow
+
+warning: suspicious use of `*` in `Div` impl
+   --> lib/numerica/src/domains/float/error.rs:215:14
+    |
+215 |         self * rhs.inv()
+    |              ^
+    |
+    = help: for further information visit https://rust-lang.github.io/rust-clippy/rust-1.92.0/index.html#suspicious_arithmetic_impl
+
+warning: this boolean expression can be simplified
+   --> lib/numerica/src/domains/float/field.rs:640:13
+    |
+640 | /             (state.in_product || state.in_exp || state.in_exp_base) && !re_zero && !im_zero
+641 | |                 || (state.in_exp || state.in_exp_base) && !im_zero;
+    | |__________________________________________________________________^
+    |
+    = help: for further information visit https://rust-lang.github.io/rust-clippy/rust-1.92.0/index.html#nonminimal_bool
+    = note: `#[warn(clippy::nonminimal_bool)]` on by default
+help: try
+    |
+640 -             (state.in_product || state.in_exp || state.in_exp_base) && !re_zero && !im_zero
+641 -                 || (state.in_exp || state.in_exp_base) && !im_zero;
+640 +             !(im_zero || !state.in_product && !state.in_exp && !state.in_exp_base || !state.in_exp && !state.in_exp_base && re_zero);
+    |
+640 -             (state.in_product || state.in_exp || state.in_exp_base) && !re_zero && !im_zero
+641 -                 || (state.in_exp || state.in_exp_base) && !im_zero;
+640 +             (!re_zero || state.in_exp_base || state.in_exp) && (state.in_exp_base || state.in_exp || state.in_product) && !im_zero;
+    |
+
+warning: this expression creates a reference which is immediately dereferenced by the compiler
+   --> lib/numerica/src/domains/float/multiprecision.rs:461:31
+    |
+461 |             let e2 = get_bits(&rhs.numerator_ref());
+    |                               ^^^^^^^^^^^^^^^^^^^^ help: change this to: `rhs.numerator_ref()`
+    |
+    = help: for further information visit https://rust-lang.github.io/rust-clippy/rust-1.92.0/index.html#needless_borrow
+
+warning: casting to the same type is unnecessary (`i32` -> `i32`)
+   --> lib/numerica/src/domains/float/multiprecision.rs:465:43
+    |
+465 |                 self.set_prec(old_prec + (e2 as i32 - e1) as u32 + 1);
+    |                                           ^^^^^^^^^ help: try: `e2`
+    |
+    = help: for further information visit https://rust-lang.github.io/rust-clippy/rust-1.92.0/index.html#unnecessary_cast
+
+warning: methods called `from_*` usually take no `self`
+  --> lib/numerica/src/domains/float.rs:76:19
+   |
+76 |     fn from_usize(&self, a: usize) -> Self;
+   |                   ^^^^^
+   |
+   = help: consider choosing a less ambiguous name
+   = help: for further information visit https://rust-lang.github.io/rust-clippy/rust-1.92.0/index.html#wrong_self_convention
+
+warning: methods called `from_*` usually take no `self`
+  --> lib/numerica/src/domains/float.rs:77:17
+   |
+77 |     fn from_i64(&self, a: i64) -> Self;
+   |                 ^^^^^
+   |
+   = help: consider choosing a less ambiguous name
+   = help: for further information visit https://rust-lang.github.io/rust-clippy/rust-1.92.0/index.html#wrong_self_convention
+
+warning: methods called `from_*` usually take no `self`
+  --> lib/numerica/src/domains/float.rs:99:22
+   |
+99 |     fn from_rational(&self, rat: &Rational) -> Self;
+   |                      ^^^^^
+   |
+   = help: consider choosing a less ambiguous name
+   = help: for further information visit https://rust-lang.github.io/rust-clippy/rust-1.92.0/index.html#wrong_self_convention
+
+warning: this `if` statement can be collapsed
+   --> lib/numerica/src/domains/integer/polynomial_kernels.rs:611:9
+    |
+611 | /         if let (Some(left_max), Some(right_max)) = (
+612 | |             context.left_indices.iter().copied().max(),
+613 | |             context.right_indices.iter().copied().max(),
+614 | |         ) {
+...   |
+618 | |         }
+    | |_________^
+    |
+    = help: for further information visit https://rust-lang.github.io/rust-clippy/rust-1.92.0/index.html#collapsible_if
+    = note: `#[warn(clippy::collapsible_if)]` on by default
+help: collapse nested if block
+    |
+614 ~         )
+615 ~             && left_max as usize + right_max as usize >= context.output_len {
+616 |                 return None;
+617 ~             }
+    |
+
+warning: usage of `bool::then` in `filter_map`
+   --> lib/numerica/src/domains/integer/polynomial_kernels.rs:731:18
+    |
+731 |                   .filter_map(|(index, coefficient)| {
+    |  __________________^
+732 | |                     (coefficient != 0).then(|| (index as u32, Integer::Single(coefficient)))
+733 | |                 })
+    | |__________________^ help: use `filter` then `map` instead: `filter(|&(index, coefficient)| (coefficient != 0)).map(|(index, coefficient)| (index as u32, Integer::Single(coefficient)))`
+    |
+    = help: for further information visit https://rust-lang.github.io/rust-clippy/rust-1.92.0/index.html#filter_map_bool_then
+    = note: `#[warn(clippy::filter_map_bool_then)]` on by default
+
+warning: usage of `bool::then` in `filter_map`
+   --> lib/numerica/src/domains/integer/polynomial_kernels.rs:808:18
+    |
+808 |                   .filter_map(|(index, coefficient)| {
+    |  __________________^
+809 | |                     (coefficient != 0).then(|| (index as u32, Integer::from_double(coefficient)))
+810 | |                 })
+    | |__________________^ help: use `filter` then `map` instead: `filter(|&(index, coefficient)| (coefficient != 0)).map(|(index, coefficient)| (index as u32, Integer::from_double(coefficient)))`
+    |
+    = help: for further information visit https://rust-lang.github.io/rust-clippy/rust-1.92.0/index.html#filter_map_bool_then
+
+warning: usage of `bool::then` in `filter_map`
+   --> lib/numerica/src/domains/integer/polynomial_kernels.rs:881:18
+    |
+881 |                   .filter_map(|(index, coefficient)| {
+    |  __________________^
+882 | |                     (coefficient != 0).then(|| (index as u32, Integer::from_double(coefficient)))
+883 | |                 })
+    | |__________________^ help: use `filter` then `map` instead: `filter(|&(index, coefficient)| (coefficient != 0)).map(|(index, coefficient)| (index as u32, Integer::from_double(coefficient)))`
+    |
+    = help: for further information visit https://rust-lang.github.io/rust-clippy/rust-1.92.0/index.html#filter_map_bool_then
+
+warning: manual implementation of `.is_multiple_of()`
+    --> lib/numerica/src/domains/integer/polynomial_kernels.rs:1326:24
+     |
+1326 |                     if digit_bits % 64 != 0 {
+     |                        ^^^^^^^^^^^^^^^^^^^^ help: replace with: `!digit_bits.is_multiple_of(64)`
+     |
+     = help: for further information visit https://rust-lang.github.io/rust-clippy/rust-1.92.0/index.html#manual_is_multiple_of
+     = note: `#[warn(clippy::manual_is_multiple_of)]` on by default
+
+warning: manual implementation of `.is_multiple_of()`
+    --> lib/numerica/src/domains/integer/polynomial_kernels.rs:1438:20
+     |
+1438 |                 if digit_bits % 64 != 0 {
+     |                    ^^^^^^^^^^^^^^^^^^^^ help: replace with: `!digit_bits.is_multiple_of(64)`
+     |
+     = help: for further information visit https://rust-lang.github.io/rust-clippy/rust-1.92.0/index.html#manual_is_multiple_of
+
+warning: this function has too many arguments (14/7)
+    --> lib/numerica/src/domains/integer/polynomial_kernels.rs:1911:9
+     |
+1911 | /         fn multiply_fixed<T>(
+1912 | |             output_len: usize,
+1913 | |             inner_len: usize,
+1914 | |             outer_count: usize,
+...    |
+1932 | |                 + std::ops::AddAssign
+1933 | |                 + std::ops::Mul<Output = T>,
+     | |____________________________________________^
+     |
+     = help: for further information visit https://rust-lang.github.io/rust-clippy/rust-1.92.0/index.html#too_many_arguments
+
+warning: the loop variable `output_outer` is used to index `active_inner_lengths`
+    --> lib/numerica/src/domains/integer/polynomial_kernels.rs:1938:33
+     |
+1938 |             for output_outer in 0..outer_count {
+     |                                 ^^^^^^^^^^^^^^
+     |
+     = help: for further information visit https://rust-lang.github.io/rust-clippy/rust-1.92.0/index.html#needless_range_loop
+     = note: `#[warn(clippy::needless_range_loop)]` on by default
+help: consider using an iterator and enumerate()
+     |
+1938 -             for output_outer in 0..outer_count {
+1938 +             for (output_outer, <item>) in active_inner_lengths.iter().enumerate().take(outer_count) {
+     |
+
+warning: the loop variable `left_outer` is used to index `left_ranges`
+    --> lib/numerica/src/domains/integer/polynomial_kernels.rs:1939:35
+     |
+1939 |                 for left_outer in 0..=output_outer.min(outer_count - 1) {
+     |                                   ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+     |
+     = help: for further information visit https://rust-lang.github.io/rust-clippy/rust-1.92.0/index.html#needless_range_loop
+help: consider using an iterator and enumerate()
+     |
+1939 -                 for left_outer in 0..=output_outer.min(outer_count - 1) {
+1939 +                 for (left_outer, <item>) in left_ranges.iter().enumerate().take(output_outer.min(outer_count - 1) + 1) {
+     |
+
+warning: this `if` has identical blocks
+   --> lib/numerica/src/domains/integer.rs:571:30
+    |
+571 |           if usize::BITS == 32 {
+    |  ______________________________^
+572 | |             Integer::Single(value as i64)
+573 | |         } else if usize::BITS == 64 {
+    | |_________^
+    |
+note: same as this
+   --> lib/numerica/src/domains/integer.rs:573:37
+    |
+573 |           } else if usize::BITS == 64 {
+    |  _____________________________________^
+574 | |             Integer::Single(value as i64)
+575 | |         } else if usize::BITS == 128 {
+    | |_________^
+    = help: for further information visit https://rust-lang.github.io/rust-clippy/rust-1.92.0/index.html#if_same_then_else
+    = note: `#[warn(clippy::if_same_then_else)]` on by default
+
+warning: useless conversion to the same type: `domains::integer::Integer`
+    --> lib/numerica/src/domains/integer.rs:1150:20
+     |
+1150 |             return Zp64::new_non_prime(c).pollard_brent_rho().into();
+     |                    ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^ help: consider removing `.into()`: `Zp64::new_non_prime(c).pollard_brent_rho()`
+     |
+     = help: for further information visit https://rust-lang.github.io/rust-clippy/rust-1.92.0/index.html#useless_conversion
+
+warning: non-canonical implementation of `partial_cmp` on an `Ord` type
+    --> lib/numerica/src/domains/integer.rs:2252:1
+     |
+2252 | /  impl PartialOrd for Integer {
+2253 | |      fn partial_cmp(&self, other: &Self) -> Option<std::cmp::Ordering> {
+     | | _______________________________________________________________________-
+2254 | ||         match (self, other) {
+2255 | ||             (Integer::Single(n1), Integer::Single(n2)) => n1.partial_cmp(n2),
+2256 | ||             (Integer::Single(n1), Integer::Large(n2)) => n1.partial_cmp(n2),
+...    ||
+2265 | ||     }
+     | ||_____- help: change this to: `{ Some(self.cmp(other)) }`
+2266 | |  }
+     | |__^
+     |
+     = help: for further information visit https://rust-lang.github.io/rust-clippy/rust-1.92.0/index.html#non_canonical_partial_ord_impl
+     = note: `#[warn(clippy::non_canonical_partial_ord_impl)]` on by default
+
+warning: unneeded `return` statement
+   --> lib/numerica/src/domains/rational.rs:861:13
+    |
+861 | /             return Q.to_element(
+862 | |                 MultiPrecisionInteger::from_raw(num).into(),
+863 | |                 MultiPrecisionInteger::from_raw(den).into(),
+864 | |                 false,
+865 | |             );
+    | |_____________^
+    |
+    = help: for further information visit https://rust-lang.github.io/rust-clippy/rust-1.92.0/index.html#needless_return
+help: remove `return`
+    |
+861 ~             Q.to_element(
+862 +                 MultiPrecisionInteger::from_raw(num).into(),
+863 +                 MultiPrecisionInteger::from_raw(den).into(),
+864 +                 false,
+865 ~             )
+    |
+
+warning: useless conversion to the same type: `u64`
+    --> lib/numerica/src/domains/rational.rs:1141:42
+     |
+1141 |                     Integer::Large(n) => n.significant_bits().into(),
+     |                                          ^^^^^^^^^^^^^^^^^^^^^^^^^^^ help: consider removing `.into()`: `n.significant_bits()`
+     |
+     = help: for further information visit https://rust-lang.github.io/rust-clippy/rust-1.92.0/index.html#useless_conversion
+
+warning: methods with the following characteristics: (`to_*` and `self` type is not `Copy`) usually take `self` by reference
+   --> lib/numerica/src/numerical_integration.rs:421:25
+    |
+421 |     fn to_discrete_grid(&mut self) -> (&mut T, &mut usize, &mut Option<Box<Sample<T>>>) {
+    |                         ^^^^^^^^^
+    |
+    = help: consider choosing a less ambiguous name
+    = help: for further information visit https://rust-lang.github.io/rust-clippy/rust-1.92.0/index.html#wrong_self_convention
+
+warning: methods with the following characteristics: (`to_*` and `self` type is not `Copy`) usually take `self` by reference
+   --> lib/numerica/src/numerical_integration.rs:435:27
+    |
+435 |     fn to_continuous_grid(&mut self) -> (&mut T, &mut Vec<T>) {
+    |                           ^^^^^^^^^
+    |
+    = help: consider choosing a less ambiguous name
+    = help: for further information visit https://rust-lang.github.io/rust-clippy/rust-1.92.0/index.html#wrong_self_convention
+
+warning: methods with the following characteristics: (`to_*` and `self` type is not `Copy`) usually take `self` by reference
+   --> lib/numerica/src/numerical_integration.rs:449:35
+    |
+449 |     fn to_continuous_with_uniform(&mut self) -> Vec<usize> {
+    |                                   ^^^^^^^^^
+    |
+    = help: consider choosing a less ambiguous name
+    = help: for further information visit https://rust-lang.github.io/rust-clippy/rust-1.92.0/index.html#wrong_self_convention
+
+warning: struct `Vector` has a public `len` method, but no `is_empty` method
+  --> lib/numerica/src/tensors/matrix.rs:73:5
+   |
+73 |     pub fn len(&self) -> usize {
+   |     ^^^^^^^^^^^^^^^^^^^^^^^^^^
+   |
+   = help: for further information visit https://rust-lang.github.io/rust-clippy/rust-1.92.0/index.html#len_without_is_empty
+   = note: `#[warn(clippy::len_without_is_empty)]` on by default
+
+warning: struct `SparseVector` has a public `len` method, but no `is_empty` method
+   --> lib/numerica/src/tensors/sparse.rs:161:5
+    |
+161 |     pub fn len(&self) -> u32 {
+    |     ^^^^^^^^^^^^^^^^^^^^^^^^
+    |
+    = help: for further information visit https://rust-lang.github.io/rust-clippy/rust-1.92.0/index.html#len_without_is_empty
+
+warning: this expression creates a reference which is immediately dereferenced by the compiler
+   --> lib/numerica/src/tensors/sparse.rs:175:65
+    |
+175 |                 let val_printer = RingPrinter::new(&self.field, &val);
+    |                                                                 ^^^^ help: change this to: `val`
+    |
+    = help: for further information visit https://rust-lang.github.io/rust-clippy/rust-1.92.0/index.html#needless_borrow
+
+warning: casting to the same type is unnecessary (`u32` -> `u32`)
+   --> lib/numerica/src/tensors/sparse.rs:565:9
+    |
+565 |         self.nrows as u32
+    |         ^^^^^^^^^^^^^^^^^ help: try: `self.nrows`
+    |
+    = help: for further information visit https://rust-lang.github.io/rust-clippy/rust-1.92.0/index.html#unnecessary_cast
+
+warning: casting to the same type is unnecessary (`u32` -> `u32`)
+   --> lib/numerica/src/tensors/sparse.rs:570:9
+    |
+570 |         self.ncols as u32
+    |         ^^^^^^^^^^^^^^^^^ help: try: `self.ncols`
+    |
+    = help: for further information visit https://rust-lang.github.io/rust-clippy/rust-1.92.0/index.html#unnecessary_cast
+
+warning: unneeded unit return type
+   --> lib/numerica/src/tensors/sparse.rs:622:75
+    |
+622 |     pub fn add_row(&mut self, values: Vec<F::Element>, col_idcs: Vec<u32>) -> () {
+    |                                                                           ^^^^^^ help: remove the `-> ()`
+    |
+    = help: for further information visit https://rust-lang.github.io/rust-clippy/rust-1.92.0/index.html#unused_unit
+    = note: `#[warn(clippy::unused_unit)]` on by default
+
+warning: unneeded unit return type
+   --> lib/numerica/src/tensors/sparse.rs:633:51
+    |
+633 |     pub fn add_cols(&mut self, col_pos: &Vec<u32>) -> () {
+    |                                                   ^^^^^^ help: remove the `-> ()`
+    |
+    = help: for further information visit https://rust-lang.github.io/rust-clippy/rust-1.92.0/index.html#unused_unit
+
+warning: writing `&Vec` instead of `&[_]` involves a new object where a slice will do
+   --> lib/numerica/src/tensors/sparse.rs:633:41
+    |
+633 |     pub fn add_cols(&mut self, col_pos: &Vec<u32>) -> () {
+    |                                         ^^^^^^^^^ help: change this to: `&[u32]`
+    |
+    = help: for further information visit https://rust-lang.github.io/rust-clippy/rust-1.92.0/index.html#ptr_arg
+    = note: `#[warn(clippy::ptr_arg)]` on by default
+
+warning: unneeded unit return type
+   --> lib/numerica/src/tensors/sparse.rs:656:55
+    |
+656 |     pub fn append_col(&mut self, col: SparseVector<F>) -> () {
+    |                                                       ^^^^^^ help: remove the `-> ()`
+    |
+    = help: for further information visit https://rust-lang.github.io/rust-clippy/rust-1.92.0/index.html#unused_unit
+
+warning: explicit call to `.into_iter()` in function argument accepting `IntoIterator`
+   --> lib/numerica/src/tensors/sparse.rs:668:53
+    |
+668 |         let mut col_iter = col.idcs.into_iter().zip(col.values.into_iter());
+    |                                                     ^^^^^^^^^^------------
+    |                                                               |
+    |                                                               help: consider removing the `.into_iter()`
+    |
+note: this parameter accepts any `IntoIterator`, so you don't need to call `.into_iter()`
+   --> /nix/store/8y1kl315sa4zgc61w2yp93imc9bdrxl7-rust-stable-with-components-2025-12-11/lib/rustlib/src/rust/library/core/src/iter/traits/iterator.rs:616:12
+    |
+616 |         U: IntoIterator,
+    |            ^^^^^^^^^^^^
+    = help: for further information visit https://rust-lang.github.io/rust-clippy/rust-1.92.0/index.html#useless_conversion
+
+warning: this `map_or` can be simplified
+   --> lib/numerica/src/tensors/sparse.rs:686:16
+    |
+686 |               if current_col
+    |  ________________^
+687 | |                 .as_ref()
+688 | |                 .map_or(false, |&(idx, _)| idx as usize == row)
+    | |_______________________________________________________________^
+    |
+    = help: for further information visit https://rust-lang.github.io/rust-clippy/rust-1.92.0/index.html#unnecessary_map_or
+    = note: `#[warn(clippy::unnecessary_map_or)]` on by default
+help: use is_some_and instead
+    |
+688 -                 .map_or(false, |&(idx, _)| idx as usize == row)
+688 +                 .is_some_and(|&(idx, _)| idx as usize == row)
+    |
+
+warning: unneeded unit return type
+   --> lib/numerica/src/tensors/sparse.rs:705:38
+    |
+705 |     pub fn append_identity(&mut self) -> () {
+    |                                      ^^^^^^ help: remove the `-> ()`
+    |
+    = help: for further information visit https://rust-lang.github.io/rust-clippy/rust-1.92.0/index.html#unused_unit
+
+warning: unneeded unit return type
+   --> lib/numerica/src/tensors/sparse.rs:744:49
+    |
+744 |     pub(crate) fn take_rev_right_half(&mut self) -> () {
+    |                                                 ^^^^^^ help: remove the `-> ()`
+    |
+    = help: for further information visit https://rust-lang.github.io/rust-clippy/rust-1.92.0/index.html#unused_unit
+
+warning: manual implementation of `.is_multiple_of()`
+   --> lib/numerica/src/tensors/sparse.rs:745:17
+    |
+745 |         assert!(self.ncols % 2 == 0);
+    |                 ^^^^^^^^^^^^^^^^^^^ help: replace with: `self.ncols.is_multiple_of(2)`
+    |
+    = help: for further information visit https://rust-lang.github.io/rust-clippy/rust-1.92.0/index.html#manual_is_multiple_of
+
+warning: writing `&Vec` instead of `&[_]` involves a new object where a slice will do
+   --> lib/numerica/src/tensors/sparse.rs:820:47
+    |
+820 |     pub fn last_column_by_pivot(self, pivots: &Vec<Option<u32>>) -> SparseVector<F> {
+    |                                               ^^^^^^^^^^^^^^^^^ help: change this to: `&[Option<u32>]`
+    |
+    = help: for further information visit https://rust-lang.github.io/rust-clippy/rust-1.92.0/index.html#ptr_arg
+
+warning: very complex type used. Consider factoring parts into `type` definitions
+   --> lib/numerica/src/tensors/sparse.rs:841:31
+    |
+841 |     pub fn last_row(&self) -> Option<(u32, &[u32], &[F::Element])> {
+    |                               ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+    |
+    = help: for further information visit https://rust-lang.github.io/rust-clippy/rust-1.92.0/index.html#type_complexity
+
+warning: casting to the same type is unnecessary (`usize` -> `usize`)
+   --> lib/numerica/src/tensors/sparse.rs:845:29
+    |
+845 |             let row_start = self.row_ptrs[self.row_ptrs.len() - 2] as usize;
+    |                             ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^ help: try: `self.row_ptrs[self.row_ptrs.len() - 2]`
+    |
+    = help: for further information visit https://rust-lang.github.io/rust-clippy/rust-1.92.0/index.html#unnecessary_cast
+
+warning: casting to the same type is unnecessary (`usize` -> `usize`)
+   --> lib/numerica/src/tensors/sparse.rs:846:27
+    |
+846 |             let row_end = self.row_ptrs[self.row_ptrs.len() - 1] as usize;
+    |                           ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^ help: try: `self.row_ptrs[self.row_ptrs.len() - 1]`
+    |
+    = help: for further information visit https://rust-lang.github.io/rust-clippy/rust-1.92.0/index.html#unnecessary_cast
+
+warning: unneeded unit return type
+   --> lib/numerica/src/tensors/sparse.rs:888:31
+    |
+888 |     fn erase_zeroes(&mut self) -> () {
+    |                               ^^^^^^ help: remove the `-> ()`
+    |
+    = help: for further information visit https://rust-lang.github.io/rust-clippy/rust-1.92.0/index.html#unused_unit
+
+warning: unnecessary `if let` since only the `Some` variant of the iterator element is used
+   --> lib/numerica/src/tensors/sparse.rs:964:9
+    |
+964 | /         for pivot in pivots {
+965 | |             if let Some(row) = pivot {
+966 | |                 let start = self.row_ptrs[*row as usize];
+967 | |                 let end = self.row_ptrs[(row + 1) as usize];
+...   |
+974 | |         }
+    | |_________^
+    |
+help: try `.flatten()` and remove the `if let` statement in the for loop
+   --> lib/numerica/src/tensors/sparse.rs:965:13
+    |
+965 | /             if let Some(row) = pivot {
+966 | |                 let start = self.row_ptrs[*row as usize];
+967 | |                 let end = self.row_ptrs[(row + 1) as usize];
+968 | |                 for px in start..end {
+...   |
+972 | |                 new_row_ptrs.push(new_values.len());
+973 | |             }
+    | |_____________^
+    = help: for further information visit https://rust-lang.github.io/rust-clippy/rust-1.92.0/index.html#manual_flatten
+    = note: `#[warn(clippy::manual_flatten)]` on by default
+help: try
+    |
+964 ~         for row in pivots.iter().flatten() {
+965 +             let start = self.row_ptrs[*row as usize];
+966 +             let end = self.row_ptrs[(row + 1) as usize];
+967 +             for px in start..end {
+968 +                 new_values.push(std::mem::replace(&mut self.values[px], self.field.zero()));
+969 +                 new_col_idcs.push(self.col_idcs[px]);
+970 +             }
+971 +             new_row_ptrs.push(new_values.len());
+972 +         }
+    |
+
+warning: you seem to use `.enumerate()` and immediately discard the index
+    --> lib/numerica/src/tensors/sparse.rs:1171:14
+     |
+1171 |             .enumerate()
+     |              ^^^^^^^^^^^
+     |
+     = help: for further information visit https://rust-lang.github.io/rust-clippy/rust-1.92.0/index.html#unused_enumerate_index
+     = note: `#[warn(clippy::unused_enumerate_index)]` on by default
+help: remove the `.enumerate()` call
+     |
+1170 ~             .into_iter()
+1171 ~             .map(|(a, b)| {
+     |
+
+warning: this expression creates a reference which is immediately dereferenced by the compiler
+    --> lib/numerica/src/tensors/sparse.rs:1454:40
+     |
+1454 |                 if !self.field.is_zero(&val) {
+     |                                        ^^^^ help: change this to: `val`
+     |
+     = help: for further information visit https://rust-lang.github.io/rust-clippy/rust-1.92.0/index.html#needless_borrow
+
+warning: redundant pattern matching, consider using `is_some()`
+    --> lib/numerica/src/tensors/sparse.rs:1588:20
+     |
+1588 |               if let Some(_) =
+     |  _____________-      ^^^^^^^
+1589 | |                 ret.forward_solve_row(&mat.values[row[0]..row[1]], &mat.col_idcs[row[0]..row[1]])
+     | |_________________________________________________________________________________________________- help: try: `if ret.forward_solve_row(&mat.values[row[0]..row[1]], &mat.col_idcs[row[0]..row[1]]).is_some()`
+     |
+     = help: for further information visit https://rust-lang.github.io/rust-clippy/rust-1.92.0/index.html#redundant_pattern_matching
+     = note: `#[warn(clippy::redundant_pattern_matching)]` on by default
+
+warning: redundant pattern matching, consider using `is_some()`
+    --> lib/numerica/src/tensors/sparse.rs:1625:20
+     |
+1625 |             if let Some(_) = ret.forward_solve_row_with_back_subs(
+     |                    ^^^^^^^
+     |
+     = help: for further information visit https://rust-lang.github.io/rust-clippy/rust-1.92.0/index.html#redundant_pattern_matching
+help: try
+     |
+1625 ~             if ret.forward_solve_row_with_back_subs(
+1626 +                 &mat.values[row[0]..row[1]],
+1627 +                 &mat.col_idcs[row[0]..row[1]],
+1628 ~             ).is_some() {
+     |
+
+warning: this block may be rewritten with the `?` operator
+    --> lib/numerica/src/tensors/sparse.rs:1659:13
+     |
+1659 | /             if ret
+1660 | |                 .forward_solve_row(&mat.values[row[0]..row[1]], &mat.col_idcs[row[0]..row[1]])
+1661 | |                 .is_none()
+...    |
+1664 | |             }
+     | |_____________^
+     |
+     = help: for further information visit https://rust-lang.github.io/rust-clippy/rust-1.92.0/index.html#question_mark
+     = note: `#[warn(clippy::question_mark)]` on by default
+help: replace it with
+     |
+1659 ~             ret
+1660 +                 .forward_solve_row(&mat.values[row[0]..row[1]], &mat.col_idcs[row[0]..row[1]])?;
+     |
+
+warning: this block may be rewritten with the `?` operator
+    --> lib/numerica/src/tensors/sparse.rs:1688:13
+     |
+1688 | /             if ret
+1689 | |                 .forward_solve_row_with_back_subs(
+1690 | |                     &mat.values[row[0]..row[1]],
+1691 | |                     &mat.col_idcs[row[0]..row[1]],
+...    |
+1695 | |                 return None;
+1696 | |             }
+     | |_____________^
+     |
+     = help: for further information visit https://rust-lang.github.io/rust-clippy/rust-1.92.0/index.html#question_mark
+help: replace it with
+     |
+1688 ~             ret
+1689 +                 .forward_solve_row_with_back_subs(
+1690 +                     &mat.values[row[0]..row[1]],
+1691 +                     &mat.col_idcs[row[0]..row[1]],
+1692 +                 )?;
+     |
+
+warning: unneeded unit return type
+    --> lib/numerica/src/tensors/sparse.rs:1807:51
+     |
+1807 |     pub fn add_cols(&mut self, col_pos: &Vec<u32>) -> () {
+     |                                                   ^^^^^^ help: remove the `-> ()`
+     |
+     = help: for further information visit https://rust-lang.github.io/rust-clippy/rust-1.92.0/index.html#unused_unit
+
+warning: unneeded unit return type
+    --> lib/numerica/src/tensors/sparse.rs:1838:38
+     |
+1838 |     pub fn back_substitute(&mut self) -> () {
+     |                                      ^^^^^^ help: remove the `-> ()`
+     |
+     = help: for further information visit https://rust-lang.github.io/rust-clippy/rust-1.92.0/index.html#unused_unit
+
+warning: this expression creates a reference which is immediately dereferenced by the compiler
+    --> lib/numerica/src/tensors/sparse.rs:1900:54
+     |
+1900 |             let leading_coeff_inv = self.u.field.inv(&leading_coeff);
+     |                                                      ^^^^^^^^^^^^^^ help: change this to: `leading_coeff`
+     |
+     = help: for further information visit https://rust-lang.github.io/rust-clippy/rust-1.92.0/index.html#needless_borrow
+
+warning: this expression creates a reference which is immediately dereferenced by the compiler
+    --> lib/numerica/src/tensors/sparse.rs:1902:47
+     |
+1902 |             self.u.col_idcs.extend_from_slice(&col_idcs);
+     |                                               ^^^^^^^^^ help: change this to: `col_idcs`
+     |
+     = help: for further information visit https://rust-lang.github.io/rust-clippy/rust-1.92.0/index.html#needless_borrow
+
+warning: this expression creates a reference which is immediately dereferenced by the compiler
+    --> lib/numerica/src/tensors/sparse.rs:1904:49
+     |
+1904 |                 self.u.values.extend_from_slice(&values);
+     |                                                 ^^^^^^^ help: change this to: `values`
+     |
+     = help: for further information visit https://rust-lang.github.io/rust-clippy/rust-1.92.0/index.html#needless_borrow
+
+warning: this expression creates a reference which is immediately dereferenced by the compiler
+    --> lib/numerica/src/tensors/sparse.rs:2024:54
+     |
+2024 |             let leading_coeff_inv = self.u.field.inv(&leading_coeff);
+     |                                                      ^^^^^^^^^^^^^^ help: change this to: `leading_coeff`
+     |
+     = help: for further information visit https://rust-lang.github.io/rust-clippy/rust-1.92.0/index.html#needless_borrow
+
+warning: this expression creates a reference which is immediately dereferenced by the compiler
+    --> lib/numerica/src/tensors/sparse.rs:2104:54
+     |
+2104 |             let leading_coeff_inv = self.u.field.inv(&leading_coeff);
+     |                                                      ^^^^^^^^^^^^^^ help: change this to: `leading_coeff`
+     |
+     = help: for further information visit https://rust-lang.github.io/rust-clippy/rust-1.92.0/index.html#needless_borrow
+
+warning: this expression creates a reference which is immediately dereferenced by the compiler
+    --> lib/numerica/src/tensors/sparse.rs:2106:47
+     |
+2106 |             self.u.col_idcs.extend_from_slice(&col_idcs);
+     |                                               ^^^^^^^^^ help: change this to: `col_idcs`
+     |
+     = help: for further information visit https://rust-lang.github.io/rust-clippy/rust-1.92.0/index.html#needless_borrow
+
+warning: this expression creates a reference which is immediately dereferenced by the compiler
+    --> lib/numerica/src/tensors/sparse.rs:2108:49
+     |
+2108 |                 self.u.values.extend_from_slice(&values);
+     |                                                 ^^^^^^^ help: change this to: `values`
+     |
+     = help: for further information visit https://rust-lang.github.io/rust-clippy/rust-1.92.0/index.html#needless_borrow
+
+warning: this expression creates a reference which is immediately dereferenced by the compiler
+    --> lib/numerica/src/tensors/sparse.rs:2224:54
+     |
+2224 |             let leading_coeff_inv = self.u.field.inv(&leading_coeff);
+     |                                                      ^^^^^^^^^^^^^^ help: change this to: `leading_coeff`
+     |
+     = help: for further information visit https://rust-lang.github.io/rust-clippy/rust-1.92.0/index.html#needless_borrow
+
+warning: writing `&mut Vec` instead of `&mut [_]` involves a new object where a slice will do
+    --> lib/numerica/src/tensors/sparse.rs:2361:12
+     |
+2361 |         x: &mut Vec<F::Element>,
+     |            ^^^^^^^^^^^^^^^^^^^^ help: change this to: `&mut [F::Element]`
+     |
+     = help: for further information visit https://rust-lang.github.io/rust-clippy/rust-1.92.0/index.html#ptr_arg
+
+warning: this expression creates a reference which is immediately dereferenced by the compiler
+    --> lib/numerica/src/tensors/sparse.rs:2368:59
+     |
+2368 |             x[*col as usize] = field.add(&field.mul(beta, &val), &x[*col as usize]);
+     |                                                           ^^^^ help: change this to: `val`
+     |
+     = help: for further information visit https://rust-lang.github.io/rust-clippy/rust-1.92.0/index.html#needless_borrow
+
+warning: writing `&mut Vec` instead of `&mut [_]` involves a new object where a slice will do
+    --> lib/numerica/src/tensors/sparse.rs:2382:12
+     |
+2382 |         x: &mut Vec<F::Element>,
+     |            ^^^^^^^^^^^^^^^^^^^^ help: change this to: `&mut [F::Element]`
+     |
+     = help: for further information visit https://rust-lang.github.io/rust-clippy/rust-1.92.0/index.html#ptr_arg
+
+warning: writing `&mut Vec` instead of `&mut [_]` involves a new object where a slice will do
+    --> lib/numerica/src/tensors/sparse.rs:2387:18
+     |
+2387 |         touched: &mut Vec<bool>,
+     |                  ^^^^^^^^^^^^^^ help: change this to: `&mut [bool]`
+     |
+     = help: for further information visit https://rust-lang.github.io/rust-clippy/rust-1.92.0/index.html#ptr_arg
+
+warning: this expression creates a reference which is immediately dereferenced by the compiler
+    --> lib/numerica/src/tensors/sparse.rs:2390:59
+     |
+2390 |             x[*col as usize] = field.add(&field.mul(beta, &val), &x[*col as usize]);
+     |                                                           ^^^^ help: change this to: `val`
+     |
+     = help: for further information visit https://rust-lang.github.io/rust-clippy/rust-1.92.0/index.html#needless_borrow
+
+warning: unnecessary `if let` since only the `Some` variant of the iterator element is used
+    --> lib/numerica/src/tensors/sparse.rs:2401:9
+     |
+2401 | /         for pivot in self.pivots.iter().rev() {
+2402 | |             if let Some(row) = pivot {
+2403 | |                 let mut max: u32 = 0;
+2404 | |                 for j in self.u.row_ptrs[*row as usize]..self.u.row_ptrs[(*row as usize) + 1] {
+...    |
+2414 | |         }
+     | |_________^
+     |
+help: try `.flatten()` and remove the `if let` statement in the for loop
+    --> lib/numerica/src/tensors/sparse.rs:2402:13
+     |
+2402 | /             if let Some(row) = pivot {
+2403 | |                 let mut max: u32 = 0;
+2404 | |                 for j in self.u.row_ptrs[*row as usize]..self.u.row_ptrs[(*row as usize) + 1] {
+2405 | |                     let col_idx = self.u.col_idcs[j];
+...    |
+2412 | |                 ret[*row as usize] = max;
+2413 | |             }
+     | |_____________^
+     = help: for further information visit https://rust-lang.github.io/rust-clippy/rust-1.92.0/index.html#manual_flatten
+help: try
+     |
+2401 ~         for row in self.pivots.iter().rev().flatten() {
+2402 +             let mut max: u32 = 0;
+2403 +             for j in self.u.row_ptrs[*row as usize]..self.u.row_ptrs[(*row as usize) + 1] {
+2404 +                 let col_idx = self.u.col_idcs[j];
+2405 +                 let pivot_row = self.pivots[col_idx as usize];
+2406 +
+2407 +                 if let Some(row2) = pivot_row {
+2408 +                     max = max.max(ret[row2 as usize] + 1);
+2409 +                 }
+2410 +             }
+2411 +             ret[*row as usize] = max;
+2412 +         }
+     |
+
+warning: very complex type used. Consider factoring parts into `type` definitions
+    --> lib/numerica/src/tensors/sparse.rs:2459:26
+     |
+2459 |             let results: Vec<(SparseMatrix<F>, Vec<(u32, u32)>)> = level
+     |                          ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+     |
+     = help: for further information visit https://rust-lang.github.io/rust-clippy/rust-1.92.0/index.html#type_complexity
+
+warning: this expression creates a reference which is immediately dereferenced by the compiler
+  --> lib/numerica/src/utils.rs:19:9
+   |
+19 |         &self.value
+   |         ^^^^^^^^^^^ help: change this to: `self.value`
+   |
+   = help: for further information visit https://rust-lang.github.io/rust-clippy/rust-1.92.0/index.html#needless_borrow
+
+warning: `numerica` (lib) generated 126 warnings (9 duplicates) (run `cargo clippy --fix --lib -p numerica` to apply 79 suggestions)
+   Compiling symbolica v2.2.0 (/common/dev/symbolica-reconstruction)
+warning: using `clone` on type `BackEdge` which implements the `Copy` trait
+   --> lib/graphica/src/lib.rs:336:33
+    |
+336 |                 let back_edge = back_edge.clone();
+    |                                 ^^^^^^^^^^^^^^^^^ help: try dereferencing it: `*back_edge`
+    |
+    = help: for further information visit https://rust-lang.github.io/rust-clippy/rust-1.92.0/index.html#clone_on_copy
+    = note: `#[warn(clippy::clone_on_copy)]` on by default
+
+warning: very complex type used. Consider factoring parts into `type` definitions
+   --> lib/graphica/src/lib.rs:860:10
+    |
+860 |     ) -> Result<HashMap<Graph<N, E>, Integer>, HashMap<Graph<N, E>, Integer>> {
+    |          ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+    |
+    = help: for further information visit https://rust-lang.github.io/rust-clippy/rust-1.92.0/index.html#type_complexity
+    = note: `#[warn(clippy::type_complexity)]` on by default
+
+warning: this function has too many arguments (9/7)
+    --> lib/graphica/src/lib.rs:1126:5
+     |
+1126 | /     fn distribute_edges(
+1127 | |         &mut self,
+1128 | |         source: usize,
+1129 | |         cur_target: usize,
+...    |
+1135 | |         out: &mut HashMap<Graph<N, E>, Integer>,
+1136 | |     ) -> Result<(), ()> {
+     | |_______________________^
+     |
+     = help: for further information visit https://rust-lang.github.io/rust-clippy/rust-1.92.0/index.html#too_many_arguments
+     = note: `#[warn(clippy::too_many_arguments)]` on by default
+
+warning: very complex type used. Consider factoring parts into `type` definitions
+    --> lib/graphica/src/lib.rs:1409:31
+     |
+1409 |         let mut current_best: Option<(Graph<&N, &E>, Vec<I>, Vec<Invariant<I>>)> = None;
+     |                               ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+     |
+     = help: for further information visit https://rust-lang.github.io/rust-clippy/rust-1.92.0/index.html#type_complexity
+
+warning: `graphica` (lib) generated 4 warnings (run `cargo clippy --fix --lib -p graphica` to apply 1 suggestion)
+warning: digits of hex, binary or octal literal not in groups of equal size
+  --> src/atom/representation.rs:32:23
+   |
+32 | const TYPE_MASK: u8 = 0b00000_111;
+   |                       ^^^^^^^^^^^ help: consider: `0b0000_0111`
+   |
+   = help: for further information visit https://rust-lang.github.io/rust-clippy/rust-1.92.0/index.html#unusual_byte_groupings
+   = note: `#[warn(clippy::unusual_byte_groupings)]` on by default
+
+warning: digits of hex, binary or octal literal not in groups of equal size
+  --> src/atom/representation.rs:33:28
+   |
+33 | const NOT_NORMALIZED: u8 = 0b10000_000;
+   |                            ^^^^^^^^^^^ help: consider: `0b1000_0000`
+   |
+   = help: for further information visit https://rust-lang.github.io/rust-clippy/rust-1.92.0/index.html#unusual_byte_groupings
+
+warning: digits of hex, binary or octal literal not in groups of equal size
+  --> src/atom/representation.rs:34:29
+   |
+34 | const SYM_LINEAR_FLAG: u8 = 0b01000_000;
+   |                             ^^^^^^^^^^^ help: consider: `0b0100_0000`
+   |
+   = help: for further information visit https://rust-lang.github.io/rust-clippy/rust-1.92.0/index.html#unusual_byte_groupings
+
+warning: digits of hex, binary or octal literal not in groups of equal size
+  --> src/atom/representation.rs:35:32
+   |
+35 | const SYM_SYMMETRIC_FLAG: u8 = 0b00100_000;
+   |                                ^^^^^^^^^^^ help: consider: `0b0010_0000`
+   |
+   = help: for further information visit https://rust-lang.github.io/rust-clippy/rust-1.92.0/index.html#unusual_byte_groupings
+
+warning: digits of hex, binary or octal literal not in groups of equal size
+  --> src/atom/representation.rs:36:36
+   |
+36 | const SYM_ANTISYMMETRIC_FLAG: u8 = 0b00010_000;
+   |                                    ^^^^^^^^^^^ help: consider: `0b0001_0000`
+   |
+   = help: for further information visit https://rust-lang.github.io/rust-clippy/rust-1.92.0/index.html#unusual_byte_groupings
+
+warning: digits of hex, binary or octal literal not in groups of equal size
+  --> src/atom/representation.rs:38:37
+   |
+38 | const SYM_CYCLESYMMETRIC_FLAG: u8 = 0b00110_000;
+   |                                     ^^^^^^^^^^^ help: consider: `0b0011_0000`
+   |
+   = help: for further information visit https://rust-lang.github.io/rust-clippy/rust-1.92.0/index.html#unusual_byte_groupings
+
+warning: digits of hex, binary or octal literal not in groups of equal size
+  --> src/atom/representation.rs:39:29
+   |
+39 | const SYM_SCALAR_FLAG: u8 = 0b00001_000;
+   |                             ^^^^^^^^^^^ help: consider: `0b0000_1000`
+   |
+   = help: for further information visit https://rust-lang.github.io/rust-clippy/rust-1.92.0/index.html#unusual_byte_groupings
+
+warning: digits of hex, binary or octal literal not in groups of equal size
+  --> src/atom/representation.rs:47:34
+   |
+47 | const SYM_EXTRA_FLAT_FLAG: u32 = 0b1_00_000;
+   |                                  ^^^^^^^^^^ help: consider: `0b10_0000`
+   |
+   = help: for further information visit https://rust-lang.github.io/rust-clippy/rust-1.92.0/index.html#unusual_byte_groupings
+
+warning: unnecessary `>= y + 1` or `x - 1 >=`
+   --> src/poly/factor.rs:528:23
+    |
+528 |         debug_assert!(output_len <= left.len() + right.len() - 1);
+    |                       ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^ help: change it to: `output_len < left.len() + right.len()`
+    |
+    = help: for further information visit https://rust-lang.github.io/rust-clippy/rust-1.92.0/index.html#int_plus_one
+    = note: `#[warn(clippy::int_plus_one)]` on by default
+
+warning: unnecessary `>= y + 1` or `x - 1 >=`
+   --> src/poly/factor.rs:602:23
+    |
+602 |         debug_assert!(output_len <= 2 * value.len() - 1);
+    |                       ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^ help: change it to: `output_len < 2 * value.len()`
+    |
+    = help: for further information visit https://rust-lang.github.io/rust-clippy/rust-1.92.0/index.html#int_plus_one
+
+warning: unnecessary `>= y + 1` or `x - 1 >=`
+   --> src/poly/factor.rs:700:23
+    |
+700 |         debug_assert!(product.len() <= 2 * modulus_degree - 1);
+    |                       ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^ help: change it to: `product.len() < 2 * modulus_degree`
+    |
+    = help: for further information visit https://rust-lang.github.io/rust-clippy/rust-1.92.0/index.html#int_plus_one
+
+warning: needless `fn main` in doctest
+  --> src/lib.rs:14:5
+   |
+14 |   //! use symbolica::prelude::*;
+   |  _____^
+15 | | //!
+16 | | //! fn main() {
+17 | | //!     let input = parse!("x^2*log(2*x + y) + exp(3*x)");
+18 | | //!     let a = input.derivative(symbol!("x"));
+19 | | //!     println!("d/dx {} = {}:", input, a);
+20 | | //! }
+   | |_____^
+   |
+   = help: for further information visit https://rust-lang.github.io/rust-clippy/rust-1.92.0/index.html#needless_doctest_main
+   = note: `#[warn(clippy::needless_doctest_main)]` on by default
+
+warning: this returns a `Result<_, ()>`
+   --> src/atom/alias.rs:196:5
+    |
+196 |     pub fn rename_alias(&mut self, old: Atom, new: Atom) -> Result<bool, ()> {
+    |     ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+    |
+    = help: use a custom `Error` type instead
+    = help: for further information visit https://rust-lang.github.io/rust-clippy/rust-1.92.0/index.html#result_unit_err
+    = note: `#[warn(clippy::result_unit_err)]` on by default
+
+warning: this `if` statement can be collapsed
+   --> src/atom/alias.rs:205:9
+    |
+205 | /         if let Some(existing) = self.aliases.get(&new) {
+206 | |             if existing != &original {
+207 | |                 return Err(());
+208 | |             }
+209 | |         }
+    | |_________^
+    |
+    = help: for further information visit https://rust-lang.github.io/rust-clippy/rust-1.92.0/index.html#collapsible_if
+    = note: `#[warn(clippy::collapsible_if)]` on by default
+help: collapse nested if block
+    |
+205 ~         if let Some(existing) = self.aliases.get(&new)
+206 ~             && existing != &original {
+207 |                 return Err(());
+208 ~             }
+    |
+
+warning: the following explicit lifetimes could be elided: 'a
+   --> src/atom/alias.rs:408:21
+    |
+408 |     fn fuse_aliases<'a>(&mut self, rhs: &'a Self, resolve: impl Fn(AtomView) -> Atom) -> Atom {
+    |                     ^^                   ^^
+    |
+    = help: for further information visit https://rust-lang.github.io/rust-clippy/rust-1.92.0/index.html#needless_lifetimes
+    = note: `#[warn(clippy::needless_lifetimes)]` on by default
+help: elide the lifetimes
+    |
+408 -     fn fuse_aliases<'a>(&mut self, rhs: &'a Self, resolve: impl Fn(AtomView) -> Atom) -> Atom {
+408 +     fn fuse_aliases(&mut self, rhs: &Self, resolve: impl Fn(AtomView) -> Atom) -> Atom {
+    |
+
+warning: this expression creates a reference which is immediately dereferenced by the compiler
+   --> src/atom/alias.rs:419:53
+    |
+419 |                 if rhs.aliases.contains_key::<[u8]>(&a.get_data()) {
+    |                                                     ^^^^^^^^^^^^^ help: change this to: `a.get_data()`
+    |
+    = help: for further information visit https://rust-lang.github.io/rust-clippy/rust-1.92.0/index.html#needless_borrow
+    = note: `#[warn(clippy::needless_borrow)]` on by default
+
+warning: this lifetime isn't used in the function definition
+   --> src/atom/core.rs:307:23
+    |
+307 |     fn collect_horner<'a, V: Into<Indeterminate> + Clone>(
+    |                       ^^
+    |
+    = help: for further information visit https://rust-lang.github.io/rust-clippy/rust-1.92.0/index.html#extra_unused_lifetimes
+    = note: `#[warn(clippy::extra_unused_lifetimes)]` on by default
+
+warning: very complex type used. Consider factoring parts into `type` definitions
+   --> src/atom/core.rs:917:10
+    |
+917 |       ) -> Result<
+    |  __________^
+918 | |         (
+919 | |             Matrix<RationalPolynomialField<Z, E>>,
+920 | |             Matrix<RationalPolynomialField<Z, E>>,
+921 | |         ),
+922 | |         SolveError,
+923 | |     > {
+    | |_____^
+    |
+    = help: for further information visit https://rust-lang.github.io/rust-clippy/rust-1.92.0/index.html#type_complexity
+    = note: `#[warn(clippy::type_complexity)]` on by default
+
+warning: non-canonical implementation of `partial_cmp` on an `Ord` type
+   --> src/atom/representation.rs:327:1
+    |
+327 | /  impl PartialOrd for InlineVar {
+328 | |      fn partial_cmp(&self, other: &Self) -> Option<Ordering> {
+    | | _____________________________________________________________-
+329 | ||         Some(self.as_view().cmp(&other.as_view()))
+330 | ||     }
+    | ||_____- help: change this to: `{ Some(self.cmp(other)) }`
+331 | |  }
+    | |__^
+    |
+    = help: for further information visit https://rust-lang.github.io/rust-clippy/rust-1.92.0/index.html#non_canonical_partial_ord_impl
+    = note: `#[warn(clippy::non_canonical_partial_ord_impl)]` on by default
+
+warning: non-canonical implementation of `partial_cmp` on an `Ord` type
+   --> src/atom/representation.rs:410:1
+    |
+410 | /  impl PartialOrd for InlineNum {
+411 | |      fn partial_cmp(&self, other: &Self) -> Option<Ordering> {
+    | | _____________________________________________________________-
+412 | ||         Some(self.as_view().cmp(&other.as_view()))
+413 | ||     }
+    | ||_____- help: change this to: `{ Some(self.cmp(other)) }`
+414 | |  }
+    | |__^
+    |
+    = help: for further information visit https://rust-lang.github.io/rust-clippy/rust-1.92.0/index.html#non_canonical_partial_ord_impl
+
+warning: very complex type used. Consider factoring parts into `type` definitions
+   --> src/atom/representation.rs:580:22
+    |
+580 |         conflict_fn: Option<Box<dyn Fn(&str) -> String>>,
+    |                      ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+    |
+    = help: for further information visit https://rust-lang.github.io/rust-clippy/rust-1.92.0/index.html#type_complexity
+
+warning: manual implementation of `Option::map`
+    --> src/atom/representation.rs:2060:31
+     |
+2060 |                   let mut fun = if let Some(s) = state_map.symbols.get(&f.get_symbol_id()) {
+     |  _______________________________^
+2061 | |                     Some(out.to_fun(*s))
+2062 | |                 } else {
+2063 | |                     None
+2064 | |                 };
+     | |_________________^ help: try: `state_map.symbols.get(&f.get_symbol_id()).map(|s| out.to_fun(*s))`
+     |
+     = help: for further information visit https://rust-lang.github.io/rust-clippy/rust-1.92.0/index.html#manual_map
+     = note: `#[warn(clippy::manual_map)]` on by default
+
+warning: struct `ListIterator` has a public `len` method, but no `is_empty` method
+    --> src/atom/representation.rs:2257:5
+     |
+2257 |     pub fn len(&self) -> usize {
+     |     ^^^^^^^^^^^^^^^^^^^^^^^^^^
+     |
+     = help: for further information visit https://rust-lang.github.io/rust-clippy/rust-1.92.0/index.html#len_without_is_empty
+     = note: `#[warn(clippy::len_without_is_empty)]` on by default
+
+warning: struct `ListSlice` has a public `len` method, but no `is_empty` method
+    --> src/atom/representation.rs:2371:5
+     |
+2371 |     pub fn len(&self) -> usize {
+     |     ^^^^^^^^^^^^^^^^^^^^^^^^^^
+     |
+     = help: for further information visit https://rust-lang.github.io/rust-clippy/rust-1.92.0/index.html#len_without_is_empty
+
+warning: very complex type used. Consider factoring parts into `type` definitions
+   --> src/atom.rs:418:15
+    |
+418 |     Generated(Box<dyn Fn(&str, &[AtomView]) -> String + Send + Sync>),
+    |               ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+    |
+    = help: for further information visit https://rust-lang.github.io/rust-clippy/rust-1.92.0/index.html#type_complexity
+
+warning: you should consider adding a `Default` implementation for `EvaluationInfo`
+   --> src/atom.rs:435:5
+    |
+435 | /     pub fn new() -> Self {
+436 | |         Self {
+437 | |             tag_count: 0,
+438 | |             constant_eval: None,
+...   |
+443 | |     }
+    | |_____^
+    |
+    = help: for further information visit https://rust-lang.github.io/rust-clippy/rust-1.92.0/index.html#new_without_default
+    = note: `#[warn(clippy::new_without_default)]` on by default
+help: try adding this
+    |
+426 + impl Default for EvaluationInfo {
+427 +     fn default() -> Self {
+428 +         Self::new()
+429 +     }
+430 + }
+    |
+
+warning: very complex type used. Consider factoring parts into `type` definitions
+   --> src/atom.rs:883:16
+    |
+883 |     generator: Option<Box<dyn Fn(&[Symbol], SymbolBuilder) -> SymbolBuilder + Send + Sync>>,
+    |                ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+    |
+    = help: for further information visit https://rust-lang.github.io/rust-clippy/rust-1.92.0/index.html#type_complexity
+
+warning: very complex type used. Consider factoring parts into `type` definitions
+    --> src/atom.rs:1802:10
+     |
+1802 |       ) -> Result<
+     |  __________^
+1803 | |         (
+1804 | |             String,
+1805 | |             String,
+...    |
+1812 | |         std::io::Error,
+1813 | |     > {
+     | |_____^
+     |
+     = help: for further information visit https://rust-lang.github.io/rust-clippy/rust-1.92.0/index.html#type_complexity
+
+warning: this function has too many arguments (11/7)
+    --> src/atom.rs:1990:5
+     |
+1990 | /     pub(crate) const fn raw_fn(
+1991 | |         id: u32,
+1992 | |         wildcard_level: u8,
+1993 | |         is_symmetric: bool,
+...    |
+2001 | |         is_positive: bool,
+2002 | |     ) -> Self {
+     | |_____________^
+     |
+     = help: for further information visit https://rust-lang.github.io/rust-clippy/rust-1.92.0/index.html#too_many_arguments
+     = note: `#[warn(clippy::too_many_arguments)]` on by default
+
+warning: method `as_mut` can be confused for the standard trait method `std::convert::AsMut::as_mut`
+    --> src/atom.rs:2884:5
+     |
+2884 | /     pub fn as_mut(&mut self) -> &mut Atom {
+2885 | |         match self {
+2886 | |             AtomOrView::Atom(a) => a,
+2887 | |             AtomOrView::InlineVar(v) => {
+...    |
+2906 | |     }
+     | |_____^
+     |
+     = help: consider implementing the trait `std::convert::AsMut` or choosing a less ambiguous method name
+     = help: for further information visit https://rust-lang.github.io/rust-clippy/rust-1.92.0/index.html#should_implement_trait
+     = note: `#[warn(clippy::should_implement_trait)]` on by default
+
+warning: methods with the following characteristics: (`to_*` and `self` type is `Copy`) usually take `self` by value
+    --> src/coefficient.rs:3235:33
+     |
+3235 |     pub(crate) fn to_float_into(&self, decimal_prec: u32, out: &mut Atom) {
+     |                                 ^^^^^
+     |
+     = help: consider choosing a less ambiguous name
+     = help: for further information visit https://rust-lang.github.io/rust-clippy/rust-1.92.0/index.html#wrong_self_convention
+     = note: `#[warn(clippy::wrong_self_convention)]` on by default
+
+warning: methods with the following characteristics: (`to_*` and `self` type is `Copy`) usually take `self` by value
+    --> src/coefficient.rs:3242:9
+     |
+3242 |         &self,
+     |         ^^^^^
+     |
+     = help: consider choosing a less ambiguous name
+     = help: for further information visit https://rust-lang.github.io/rust-clippy/rust-1.92.0/index.html#wrong_self_convention
+
+warning: very complex type used. Consider factoring parts into `type` definitions
+   --> src/collect.rs:104:18
+    |
+104 |         key_map: Option<&dyn Fn(AtomView, &mut Settable<'_, Atom>)>,
+    |                  ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+    |
+    = help: for further information visit https://rust-lang.github.io/rust-clippy/rust-1.92.0/index.html#type_complexity
+
+warning: very complex type used. Consider factoring parts into `type` definitions
+   --> src/collect.rs:105:20
+    |
+105 |         coeff_map: Option<&dyn Fn(AtomView, &mut Settable<'_, Atom>)>,
+    |                    ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+    |
+    = help: for further information visit https://rust-lang.github.io/rust-clippy/rust-1.92.0/index.html#type_complexity
+
+warning: very complex type used. Consider factoring parts into `type` definitions
+   --> src/collect.rs:117:22
+    |
+117 |             key_map: Option<&dyn Fn(AtomView, &mut Settable<'_, Atom>)>,
+    |                      ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+    |
+    = help: for further information visit https://rust-lang.github.io/rust-clippy/rust-1.92.0/index.html#type_complexity
+
+warning: very complex type used. Consider factoring parts into `type` definitions
+   --> src/collect.rs:118:24
+    |
+118 |             coeff_map: Option<&dyn Fn(AtomView, &mut Settable<'_, Atom>)>,
+    |                        ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+    |
+    = help: for further information visit https://rust-lang.github.io/rust-clippy/rust-1.92.0/index.html#type_complexity
+
+warning: this `if` statement can be collapsed
+    --> src/collect.rs:1206:20
+     |
+1206 |               } else if let AtomView::Mul(m) = term {
+     |  ____________________^
+1207 | |                 if let Some(c) = m.get_coefficient() {
+1208 | |                     let l = unique_constants.len();
+1209 | |                     let g = unique_constants.entry(c).or_insert((l, 0));
+...    |
+1212 | |             }
+     | |_____________^
+     |
+     = help: for further information visit https://rust-lang.github.io/rust-clippy/rust-1.92.0/index.html#collapsible_if
+help: collapse nested if block
+     |
+1206 ~             } else if let AtomView::Mul(m) = term
+1207 ~                 && let Some(c) = m.get_coefficient() {
+1208 |                     let l = unique_constants.len();
+1209 |                     let g = unique_constants.entry(c).or_insert((l, 0));
+1210 |                     g.1 += 1;
+1211 ~                 }
+     |
+
+warning: this `if` statement can be collapsed
+    --> src/collect.rs:1238:20
+     |
+1238 |               } else if let AtomView::Mul(m) = t {
+     |  ____________________^
+1239 | |                 if let Some(c) = m.get_coefficient() {
+1240 | |                     if let Some(d) = unique_constants.get(&c) {
+1241 | |                         if m.get_nargs() == 2 {
+...    |
+1256 | |             }
+     | |_____________^
+     |
+     = help: for further information visit https://rust-lang.github.io/rust-clippy/rust-1.92.0/index.html#collapsible_if
+help: collapse nested if block
+     |
+1238 ~             } else if let AtomView::Mul(m) = t
+1239 ~                 && let Some(c) = m.get_coefficient() {
+1240 |                     if let Some(d) = unique_constants.get(&c) {
+ ...
+1254 |                     }
+1255 ~                 }
+     |
+
+warning: this `if` statement can be collapsed
+    --> src/collect.rs:1239:17
+     |
+1239 | /                 if let Some(c) = m.get_coefficient() {
+1240 | |                     if let Some(d) = unique_constants.get(&c) {
+1241 | |                         if m.get_nargs() == 2 {
+1242 | |                             let f = m.iter().skip(1).next().unwrap();
+...    |
+1255 | |                 }
+     | |_________________^
+     |
+     = help: for further information visit https://rust-lang.github.io/rust-clippy/rust-1.92.0/index.html#collapsible_if
+help: collapse nested if block
+     |
+1239 ~                 if let Some(c) = m.get_coefficient()
+1240 ~                     && let Some(d) = unique_constants.get(&c) {
+1241 |                         if m.get_nargs() == 2 {
+ ...
+1253 |                         continue;
+1254 ~                     }
+     |
+
+warning: called `skip(..).next()` on an iterator
+    --> src/collect.rs:1242:45
+     |
+1242 | ...                   let f = m.iter().skip(1).next().unwrap();
+     |                                       ^^^^^^^^^^^^^^^ help: use `nth` instead: `.nth(1)`
+     |
+     = help: for further information visit https://rust-lang.github.io/rust-clippy/rust-1.92.0/index.html#iter_skip_next
+     = note: `#[warn(clippy::iter_skip_next)]` on by default
+
+warning: this lifetime isn't used in the function definition
+    --> src/collect.rs:1491:33
+     |
+1491 |     pub(crate) fn horner_scheme<'b>(
+     |                                 ^^
+     |
+     = help: for further information visit https://rust-lang.github.io/rust-clippy/rust-1.92.0/index.html#extra_unused_lifetimes
+
+warning: this lifetime isn't used in the function definition
+    --> src/collect.rs:1521:38
+     |
+1521 |     pub(crate) fn horner_scheme_impl<'b>(
+     |                                      ^^
+     |
+     = help: for further information visit https://rust-lang.github.io/rust-clippy/rust-1.92.0/index.html#extra_unused_lifetimes
+
+warning: this expression creates a reference which is immediately dereferenced by the compiler
+   --> src/domains/algebraic.rs:400:52
+    |
+400 |             poly.append_monomial(r.to_finite_field(&self.poly.ring()), &[pow]);
+    |                                                    ^^^^^^^^^^^^^^^^^ help: change this to: `self.poly.ring()`
+    |
+    = help: for further information visit https://rust-lang.github.io/rust-clippy/rust-1.92.0/index.html#needless_borrow
+
+warning: this expression creates a reference which is immediately dereferenced by the compiler
+    --> src/domains/algebraic.rs:1000:70
+     |
+1000 |                     let mut term = self.polynomial_from_images(term, &result.variables())?;
+     |                                                                      ^^^^^^^^^^^^^^^^^^^ help: change this to: `result.variables()`
+     |
+     = help: for further information visit https://rust-lang.github.io/rust-clippy/rust-1.92.0/index.html#needless_borrow
+
+warning: this expression creates a reference which is immediately dereferenced by the compiler
+    --> src/domains/algebraic.rs:1010:74
+     |
+1010 |                     let mut factor = self.polynomial_from_images(factor, &result.variables())?;
+     |                                                                          ^^^^^^^^^^^^^^^^^^^ help: change this to: `result.variables()`
+     |
+     = help: for further information visit https://rust-lang.github.io/rust-clippy/rust-1.92.0/index.html#needless_borrow
+
+warning: this expression creates a reference which is immediately dereferenced by the compiler
+    --> src/domains/algebraic.rs:1048:68
+     |
+1048 |                         self.rational_polynomial_from_images(term, &result.numerator.variables())?;
+     |                                                                    ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^ help: change this to: `result.numerator.variables()`
+     |
+     = help: for further information visit https://rust-lang.github.io/rust-clippy/rust-1.92.0/index.html#needless_borrow
+
+warning: this expression creates a reference which is immediately dereferenced by the compiler
+    --> src/domains/algebraic.rs:1059:66
+     |
+1059 |                         .rational_polynomial_from_images(factor, &result.numerator.variables())?;
+     |                                                                  ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^ help: change this to: `result.numerator.variables()`
+     |
+     = help: for further information visit https://rust-lang.github.io/rust-clippy/rust-1.92.0/index.html#needless_borrow
+
+warning: this expression creates a reference which is immediately dereferenced by the compiler
+    --> src/domains/algebraic.rs:1263:53
+     |
+1263 |                 let base_converted = b.to_algebraic(&ring)?;
+     |                                                     ^^^^^ help: change this to: `ring`
+     |
+     = help: for further information visit https://rust-lang.github.io/rust-clippy/rust-1.92.0/index.html#needless_borrow
+
+warning: this expression creates a reference which is immediately dereferenced by the compiler
+    --> src/domains/algebraic.rs:1325:63
+     |
+1325 |                     ring.mul_assign(&mut res, &a.to_algebraic(&ring)?);
+     |                                                               ^^^^^ help: change this to: `ring`
+     |
+     = help: for further information visit https://rust-lang.github.io/rust-clippy/rust-1.92.0/index.html#needless_borrow
+
+warning: this expression creates a reference which is immediately dereferenced by the compiler
+    --> src/domains/algebraic.rs:1332:63
+     |
+1332 |                     ring.add_assign(&mut res, &a.to_algebraic(&ring)?);
+     |                                                               ^^^^^ help: change this to: `ring`
+     |
+     = help: for further information visit https://rust-lang.github.io/rust-clippy/rust-1.92.0/index.html#needless_borrow
+
+warning: unneeded `return` statement
+    --> src/domains/algebraic.rs:1757:9
+     |
+1757 |         return res;
+     |         ^^^^^^^^^^
+     |
+     = help: for further information visit https://rust-lang.github.io/rust-clippy/rust-1.92.0/index.html#needless_return
+     = note: `#[warn(clippy::needless_return)]` on by default
+help: remove `return`
+     |
+1757 -         return res;
+1757 +         res
+     |
+
+warning: very complex type used. Consider factoring parts into `type` definitions
+    --> src/domains/algebraic.rs:2679:10
+     |
+2679 |       ) -> (
+     |  __________^
+2680 | |         AlgebraicExtension<R>,
+2681 | |         <AlgebraicExtension<R> as Set>::Element,
+2682 | |         <AlgebraicExtension<R> as Set>::Element,
+2683 | |         usize,
+2684 | |     )
+     | |_____^
+     |
+     = help: for further information visit https://rust-lang.github.io/rust-clippy/rust-1.92.0/index.html#type_complexity
+
+warning: very complex type used. Consider factoring parts into `type` definitions
+    --> src/domains/algebraic.rs:2727:10
+     |
+2727 |       ) -> (
+     |  __________^
+2728 | |         usize,
+2729 | |         usize,
+2730 | |         MultivariatePolynomial<R, E>,
+2731 | |         MultivariatePolynomial<R, E>,
+2732 | |         Option<(MultivariatePolynomial<R, E>, MultivariatePolynomial<R, E>)>,
+2733 | |     ) {
+     | |_____^
+     |
+     = help: for further information visit https://rust-lang.github.io/rust-clippy/rust-1.92.0/index.html#type_complexity
+
+warning: very complex type used. Consider factoring parts into `type` definitions
+    --> src/domains/algebraic.rs:3234:10
+     |
+3234 |       ) -> (
+     |  __________^
+3235 | |         AlgebraicExtension<Q>,
+3236 | |         <AlgebraicExtension<Q> as Set>::Element,
+3237 | |         <AlgebraicExtension<Q> as Set>::Element,
+3238 | |         AlgebraicExtension<Q>,
+3239 | |     ) {
+     | |_____^
+     |
+     = help: for further information visit https://rust-lang.github.io/rust-clippy/rust-1.92.0/index.html#type_complexity
+
+warning: very complex type used. Consider factoring parts into `type` definitions
+    --> src/domains/algebraic.rs:3289:10
+     |
+3289 |       ) -> (
+     |  __________^
+3290 | |         Vec<AlgebraicExtension<Q>>,
+3291 | |         <AlgebraicExtension<Q> as Set>::Element,
+3292 | |         <AlgebraicExtension<Q> as Set>::Element,
+3293 | |         MultivariatePolynomial<Q, u16>,
+3294 | |         Vec<usize>,
+3295 | |     ) {
+     | |_____^
+     |
+     = help: for further information visit https://rust-lang.github.io/rust-clippy/rust-1.92.0/index.html#type_complexity
+
+warning: very complex type used. Consider factoring parts into `type` definitions
+    --> src/domains/algebraic.rs:3774:14
+     |
+3774 |     entries: RwLock<HashMap<MultivariatePolynomial<AlgebraicExtension<Q>, u16>, Arc<RootListSlot>>>,
+     |              ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+     |
+     = help: for further information visit https://rust-lang.github.io/rust-clippy/rust-1.92.0/index.html#type_complexity
+
+warning: this expression creates a reference which is immediately dereferenced by the compiler
+    --> src/domains/factorized_rational_polynomial.rs:1203:69
+     |
+1203 |             FactorizedRationalPolynomial::from_num_den(num, vec![], &self.numerator.ring(), false);
+     |                                                                     ^^^^^^^^^^^^^^^^^^^^^^ help: change this to: `self.numerator.ring()`
+     |
+     = help: for further information visit https://rust-lang.github.io/rust-clippy/rust-1.92.0/index.html#needless_borrow
+
+warning: this expression creates a reference which is immediately dereferenced by the compiler
+    --> src/domains/factorized_rational_polynomial.rs:1403:13
+     |
+1403 |             &self.numerator.ring(),
+     |             ^^^^^^^^^^^^^^^^^^^^^^ help: change this to: `self.numerator.ring()`
+     |
+     = help: for further information visit https://rust-lang.github.io/rust-clippy/rust-1.92.0/index.html#needless_borrow
+
+warning: this expression creates a reference which is immediately dereferenced by the compiler
+    --> src/domains/factorized_rational_polynomial.rs:1458:66
+     |
+1458 |             FactorizedRationalPolynomial::from_num_den(num, den, &self.numerator.ring(), false);
+     |                                                                  ^^^^^^^^^^^^^^^^^^^^^^ help: change this to: `self.numerator.ring()`
+     |
+     = help: for further information visit https://rust-lang.github.io/rust-clippy/rust-1.92.0/index.html#needless_borrow
+
+warning: this expression creates a reference which is immediately dereferenced by the compiler
+    --> src/domains/factorized_rational_polynomial.rs:1495:25
+     |
+1495 |                         &self.numerator.ring(),
+     |                         ^^^^^^^^^^^^^^^^^^^^^^ help: change this to: `self.numerator.ring()`
+     |
+     = help: for further information visit https://rust-lang.github.io/rust-clippy/rust-1.92.0/index.html#needless_borrow
+
+warning: this expression creates a reference which is immediately dereferenced by the compiler
+    --> src/domains/factorized_rational_polynomial.rs:1522:29
+     |
+1522 | ...                   &self.numerator.ring(),
+     |                       ^^^^^^^^^^^^^^^^^^^^^^ help: change this to: `self.numerator.ring()`
+     |
+     = help: for further information visit https://rust-lang.github.io/rust-clippy/rust-1.92.0/index.html#needless_borrow
+
+warning: this expression creates a reference which is immediately dereferenced by the compiler
+    --> src/domains/factorized_rational_polynomial.rs:1534:21
+     |
+1534 |                     &self.numerator.ring(),
+     |                     ^^^^^^^^^^^^^^^^^^^^^^ help: change this to: `self.numerator.ring()`
+     |
+     = help: for further information visit https://rust-lang.github.io/rust-clippy/rust-1.92.0/index.html#needless_borrow
+
+warning: this expression creates a reference which is immediately dereferenced by the compiler
+   --> src/domains/rational_polynomial.rs:174:13
+    |
+174 |             &self.numerator.ring(),
+    |             ^^^^^^^^^^^^^^^^^^^^^^ help: change this to: `self.numerator.ring()`
+    |
+    = help: for further information visit https://rust-lang.github.io/rust-clippy/rust-1.92.0/index.html#needless_borrow
+
+warning: this expression creates a reference which is immediately dereferenced by the compiler
+   --> src/domains/rational_polynomial.rs:181:13
+    |
+181 |             &other.numerator.ring(),
+    |             ^^^^^^^^^^^^^^^^^^^^^^^ help: change this to: `other.numerator.ring()`
+    |
+    = help: for further information visit https://rust-lang.github.io/rust-clippy/rust-1.92.0/index.html#needless_borrow
+
+warning: this expression creates a reference which is immediately dereferenced by the compiler
+   --> src/domains/rational_polynomial.rs:199:9
+    |
+199 |         &self.numerator.variables()
+    |         ^^^^^^^^^^^^^^^^^^^^^^^^^^^ help: change this to: `self.numerator.variables()`
+    |
+    = help: for further information visit https://rust-lang.github.io/rust-clippy/rust-1.92.0/index.html#needless_borrow
+
+warning: this expression creates a reference which is immediately dereferenced by the compiler
+   --> src/domains/rational_polynomial.rs:660:17
+    |
+660 |                 &self.denominator.ring(),
+    |                 ^^^^^^^^^^^^^^^^^^^^^^^^ help: change this to: `self.denominator.ring()`
+    |
+    = help: for further information visit https://rust-lang.github.io/rust-clippy/rust-1.92.0/index.html#needless_borrow
+
+warning: suspicious use of `*` in `Div` impl
+    --> src/domains/rational_polynomial.rs:1182:14
+     |
+1182 |         self * &other.clone().inv()
+     |              ^
+     |
+     = help: for further information visit https://rust-lang.github.io/rust-clippy/rust-1.92.0/index.html#suspicious_arithmetic_impl
+     = note: `#[warn(clippy::suspicious_arithmetic_impl)]` on by default
+
+warning: this expression creates a reference which is immediately dereferenced by the compiler
+    --> src/domains/rational_polynomial.rs:1722:29
+     |
+1722 | ...                   &a.coefficients[0].ring(),
+     |                       ^^^^^^^^^^^^^^^^^^^^^^^^^ help: change this to: `a.coefficients[0].ring()`
+     |
+     = help: for further information visit https://rust-lang.github.io/rust-clippy/rust-1.92.0/index.html#needless_borrow
+
+warning: very complex type used. Consider factoring parts into `type` definitions
+   --> src/evaluate/backend.rs:672:20
+    |
+672 |             let r: Box<Box<dyn Fn(&[Self]) -> Self + Send + Sync>> = Box::new(imp);
+    |                    ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+    |
+    = help: for further information visit https://rust-lang.github.io/rust-clippy/rust-1.92.0/index.html#type_complexity
+
+warning: very complex type used. Consider factoring parts into `type` definitions
+   --> src/evaluate/backend.rs:918:20
+    |
+918 |             let r: Box<Box<dyn Fn(&[Self]) -> Self + Send + Sync>> = Box::new(imp);
+    |                    ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+    |
+    = help: for further information visit https://rust-lang.github.io/rust-clippy/rust-1.92.0/index.html#type_complexity
+
+warning: transmute used without annotations
+    --> src/evaluate/backend.rs:1105:46
+     |
+1105 |                 let ars = unsafe { std::mem::transmute(x) };
+     |                                              ^^^^^^^^^ help: consider adding missing annotations: `transmute::<&[symjit::Complex<f64>], &[numerica::domains::float::Complex<f64>]>`
+     |
+     = help: for further information visit https://rust-lang.github.io/rust-clippy/rust-1.92.0/index.html#missing_transmute_annotations
+     = note: `#[warn(clippy::missing_transmute_annotations)]` on by default
+
+warning: transmute used without annotations
+    --> src/evaluate/backend.rs:1251:46
+     |
+1251 |                 let ars = unsafe { std::mem::transmute(x) };
+     |                                              ^^^^^^^^^ help: consider adding missing annotations: `transmute::<&[symjit::Complex<wide::f64x4>], &[numerica::domains::float::Complex<wide::f64x4>]>`
+     |
+     = help: for further information visit https://rust-lang.github.io/rust-clippy/rust-1.92.0/index.html#missing_transmute_annotations
+
+warning: direct implementation of `ToString`
+    --> src/evaluate/backend.rs:3013:1
+     |
+3013 | / impl ToString for CompileOptions {
+3014 | |     /// Convert the compilation options to the string that would be used
+3015 | |     /// in the compiler call.
+3016 | |     fn to_string(&self) -> String {
+...    |
+3045 | | }
+     | |_^
+     |
+     = help: prefer implementing `Display` instead
+     = help: for further information visit https://rust-lang.github.io/rust-clippy/rust-1.92.0/index.html#to_string_trait_impl
+     = note: `#[warn(clippy::to_string_trait_impl)]` on by default
+
+warning: the loop variable `i` is used to index `res`
+   --> src/evaluate/domain.rs:125:26
+    |
+125 |                 for i in 0..4 {
+    |                          ^^^^
+    |
+    = help: for further information visit https://rust-lang.github.io/rust-clippy/rust-1.92.0/index.html#needless_range_loop
+    = note: `#[warn(clippy::needless_range_loop)]` on by default
+help: consider using an iterator and enumerate()
+    |
+125 -                 for i in 0..4 {
+125 +                 for (i, <item>) in res.iter_mut().enumerate() {
+    |
+
+warning: the loop variable `i` is used to index `res`
+   --> src/evaluate/domain.rs:170:26
+    |
+170 |                 for i in 0..8 {
+    |                          ^^^^
+    |
+    = help: for further information visit https://rust-lang.github.io/rust-clippy/rust-1.92.0/index.html#needless_range_loop
+help: consider using an iterator and enumerate()
+    |
+170 -                 for i in 0..8 {
+170 +                 for (i, <item>) in res.iter_mut().enumerate() {
+    |
+
+warning: the loop variable `j` is only used to index `a`
+   --> src/evaluate/dual.rs:504:22
+    |
+504 |             for j in 0..a.len() {
+    |                      ^^^^^^^^^^
+    |
+    = help: for further information visit https://rust-lang.github.io/rust-clippy/rust-1.92.0/index.html#needless_range_loop
+help: consider using an iterator
+    |
+504 -             for j in 0..a.len() {
+504 +             for <item> in &a {
+    |
+
+warning: length comparison to zero
+   --> src/evaluate/evaluator.rs:524:12
+    |
+524 |         if self.external_fns.len() > 0 {
+    |            ^^^^^^^^^^^^^^^^^^^^^^^^^^^ help: using `!is_empty` is clearer and more explicit: `!self.external_fns.is_empty()`
+    |
+    = help: for further information visit https://rust-lang.github.io/rust-clippy/rust-1.92.0/index.html#len_zero
+    = note: `#[warn(clippy::len_zero)]` on by default
+
+warning: name `CSE` contains a capitalized acronym
+   --> src/evaluate/evaluator.rs:692:14
+    |
+692 |         enum CSE<'a> {
+    |              ^^^ help: consider making the acronym lowercase, except the initial letter: `Cse`
+    |
+    = help: for further information visit https://rust-lang.github.io/rust-clippy/rust-1.92.0/index.html#upper_case_acronyms
+    = note: `#[warn(clippy::upper_case_acronyms)]` on by default
+
+warning: this boolean expression can be simplified
+   --> src/evaluate/export.rs:841:13
+    |
+841 |             !(!self.stack.iter().all(|x| x.is_real()) && number_class == NumberClass::RealF64),
+    |             ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^ help: try: `self.stack.iter().all(|x| x.is_real()) || number_class != NumberClass::RealF64`
+    |
+    = help: for further information visit https://rust-lang.github.io/rust-clippy/rust-1.92.0/index.html#nonminimal_bool
+    = note: `#[warn(clippy::nonminimal_bool)]` on by default
+
+warning: the loop variable `i` is only used to index `last_use`
+   --> src/evaluate/optimize.rs:521:18
+    |
+521 |         for i in 0..self.reserved_indices {
+    |                  ^^^^^^^^^^^^^^^^^^^^^^^^
+    |
+    = help: for further information visit https://rust-lang.github.io/rust-clippy/rust-1.92.0/index.html#needless_range_loop
+help: consider using an iterator
+    |
+521 -         for i in 0..self.reserved_indices {
+521 +         for <item> in last_use.iter_mut().take(self.reserved_indices) {
+    |
+
+warning: this function has too many arguments (9/7)
+   --> src/evaluate/tree.rs:814:5
+    |
+814 | /     fn linearize_impl(
+815 | |         &self,
+816 | |         fn_map: &'a FunctionMap,
+817 | |         params: &mut HashMap<AtomView<'a>, Vec<Slot>>,
+...   |
+823 | |         subexpressions: &mut HashMap<AtomView<'a>, Slot>,
+824 | |     ) -> Result<Slot, EvaluationError> {
+    | |______________________________________^
+    |
+    = help: for further information visit https://rust-lang.github.io/rust-clippy/rust-1.92.0/index.html#too_many_arguments
+
+warning: this `if` statement can be collapsed
+   --> src/evaluate/tree.rs:825:9
+    |
+825 | /         if matches!(*self, AtomView::Var(_) | AtomView::Fun(_)) {
+826 | |             if let Some(p) = params.get(self)
+827 | |                 && let Some(v) = p.last()
+...   |
+831 | |         }
+    | |_________^
+    |
+    = help: for further information visit https://rust-lang.github.io/rust-clippy/rust-1.92.0/index.html#collapsible_if
+help: collapse nested if block
+    |
+825 ~         if matches!(*self, AtomView::Var(_) | AtomView::Fun(_))
+826 ~             && let Some(p) = params.get(self)
+827 |                 && let Some(v) = p.last()
+828 |             {
+829 |                 return Ok(*v);
+830 ~             }
+    |
+
+warning: this function has too many arguments (9/7)
+    --> src/evaluate/tree.rs:2133:5
+     |
+2133 | /     fn linearize_impl(
+2134 | |         &self,
+2135 | |         tree: &Expression<Complex<Rational>>,
+2136 | |         subexpressions: &[Expression<Complex<Rational>>],
+...    |
+2142 | |         reserved_indices: usize,
+2143 | |     ) -> usize {
+     | |______________^
+     |
+     = help: for further information visit https://rust-lang.github.io/rust-clippy/rust-1.92.0/index.html#too_many_arguments
+
+warning: methods with the following characteristics: (`to_*` and `self` type is `Copy`) usually take `self` by value
+    --> src/evaluate/tree.rs:3678:9
+     |
+3678 |         &self,
+     |         ^^^^^
+     |
+     = help: consider choosing a less ambiguous name
+     = help: for further information visit https://rust-lang.github.io/rust-clippy/rust-1.92.0/index.html#wrong_self_convention
+
+warning: very complex type used. Consider factoring parts into `type` definitions
+    --> src/evaluate/tree.rs:3683:16
+     |
+3683 |           funcs: &mut Vec<(
+     |  ________________^
+3684 | |             String,
+3685 | |             Vec<Indeterminate>,
+3686 | |             SplitExpression<Complex<Rational>>,
+3687 | |         )>,
+     | |__________^
+     |
+     = help: for further information visit https://rust-lang.github.io/rust-clippy/rust-1.92.0/index.html#type_complexity
+
+warning: casting to the same type is unnecessary (`u64` -> `u64`)
+    --> src/evaluate/tree.rs:4400:46
+     |
+4400 |                         Ok(ring.pow(&b_eval, num as u64))
+     |                                              ^^^^^^^^^^ help: try: `num`
+     |
+     = help: for further information visit https://rust-lang.github.io/rust-clippy/rust-1.92.0/index.html#unnecessary_cast
+     = note: `#[warn(clippy::unnecessary_cast)]` on by default
+
+warning: this `else { if .. }` block can be collapsed
+   --> src/expand.rs:139:24
+    |
+139 |                   } else {
+    |  ________________________^
+140 | |                     if let Ok(p) = self.try_to_polynomial::<_, E>(&Q, None) {
+141 | |                         *out = p.to_expression();
+142 | |                     } else {
+...   |
+145 | |                 }
+    | |_________________^
+    |
+    = help: for further information visit https://rust-lang.github.io/rust-clippy/rust-1.92.0/index.html#collapsible_else_if
+    = note: `#[warn(clippy::collapsible_else_if)]` on by default
+help: collapse nested if block
+    |
+139 ~                 } else if let Ok(p) = self.try_to_polynomial::<_, E>(&Q, None) {
+140 +                     *out = p.to_expression();
+141 +                 } else {
+142 +                     self.expand_into(var, out);
+143 +                 }
+    |
+
+warning: this `else { if .. }` block can be collapsed
+   --> src/expand.rs:150:24
+    |
+150 |                   } else {
+    |  ________________________^
+151 | |                     if let Ok(p) = self.try_to_polynomial::<_, E>(&Q, None) {
+152 | |                         *out = p.to_expression();
+153 | |                     } else {
+...   |
+156 | |                 }
+    | |_________________^
+    |
+    = help: for further information visit https://rust-lang.github.io/rust-clippy/rust-1.92.0/index.html#collapsible_else_if
+help: collapse nested if block
+    |
+150 ~                 } else if let Ok(p) = self.try_to_polynomial::<_, E>(&Q, None) {
+151 +                     *out = p.to_expression();
+152 +                 } else {
+153 +                     self.expand_into(var, out);
+154 +                 }
+    |
+
+warning: this expression borrows a value the compiler would automatically borrow
+  --> src/id.rs:79:42
+   |
+79 |         Workspace::get_local().with(|ws| (&self).mul(&rhs.into(), ws))
+   |                                          ^^^^^^^ help: change this to: `self`
+   |
+   = help: for further information visit https://rust-lang.github.io/rust-clippy/rust-1.92.0/index.html#needless_borrow
+
+warning: this expression borrows a value the compiler would automatically borrow
+  --> src/id.rs:95:42
+   |
+95 |         Workspace::get_local().with(|ws| (&self).add(&rhs.into(), ws))
+   |                                          ^^^^^^^ help: change this to: `self`
+   |
+   = help: for further information visit https://rust-lang.github.io/rust-clippy/rust-1.92.0/index.html#needless_borrow
+
+warning: this expression borrows a value the compiler would automatically borrow
+   --> src/id.rs:111:42
+    |
+111 |         Workspace::get_local().with(|ws| (&self).div(&rhs.into(), ws))
+    |                                          ^^^^^^^ help: change this to: `self`
+    |
+    = help: for further information visit https://rust-lang.github.io/rust-clippy/rust-1.92.0/index.html#needless_borrow
+
+warning: this `if` statement can be collapsed
+   --> src/id.rs:631:9
+    |
+631 | /         if !self.match_settings.allow_new_wildcards_on_rhs {
+632 | |             if let Some(w) = self.pattern.find_new_wildcard(rhs.borrow()) {
+633 | |                 return Err(w);
+634 | |             }
+635 | |         }
+    | |_________^
+    |
+    = help: for further information visit https://rust-lang.github.io/rust-clippy/rust-1.92.0/index.html#collapsible_if
+help: collapse nested if block
+    |
+631 ~         if !self.match_settings.allow_new_wildcards_on_rhs
+632 ~             && let Some(w) = self.pattern.find_new_wildcard(rhs.borrow()) {
+633 |                 return Err(w);
+634 ~             }
+    |
+
+warning: this lifetime isn't used in the function definition
+   --> src/id.rs:700:21
+    |
+700 |     pub fn with_map<'c, R: MatchMap + 'static>(&self, rhs: R) -> Atom {
+    |                     ^^
+    |
+    = help: for further information visit https://rust-lang.github.io/rust-clippy/rust-1.92.0/index.html#extra_unused_lifetimes
+
+warning: match expression looks like `matches!` macro
+   --> src/id.rs:990:33
+    |
+990 |               AtomView::Var(v) => match v.get_symbol_id() {
+    |  _________________________________^
+991 | |                 Symbol::PI_ID | Symbol::E_ID => true,
+992 | |                 _ => false,
+993 | |             },
+    | |_____________^ help: try: `matches!(v.get_symbol_id(), Symbol::PI_ID | Symbol::E_ID)`
+    |
+    = help: for further information visit https://rust-lang.github.io/rust-clippy/rust-1.92.0/index.html#match_like_matches_macro
+    = note: `#[warn(clippy::match_like_matches_macro)]` on by default
+
+warning: usage of `Iterator::fold` on a type that implements `Try`
+    --> src/id.rs:2138:42
+     |
+2138 |           let max_level = atom_iter.iter().fold(Some((0, true)), |acc, (_, stack)| {
+     |  __________________________________________^
+2139 | |             acc.and_then(|(max_level, tree)| {
+2140 | |                 stack.settings.level_range.1.map(|level| {
+...    |
+2146 | |             })
+2147 | |         });
+     | |__________^ help: use `try_fold` instead: `try_fold((0, true), |acc, (_, stack)| ...)`
+     |
+     = help: for further information visit https://rust-lang.github.io/rust-clippy/rust-1.92.0/index.html#manual_try_fold
+     = note: `#[warn(clippy::manual_try_fold)]` on by default
+
+warning: very complex type used. Consider factoring parts into `type` definitions
+    --> src/id.rs:2186:20
+     |
+2186 |         rhs_cache: &mut HashMap<(usize, Vec<(Symbol, Match<'a>)>), Atom>,
+     |                    ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+     |
+     = help: for further information visit https://rust-lang.github.io/rust-clippy/rust-1.92.0/index.html#type_complexity
+
+warning: this function has too many arguments (8/7)
+    --> src/id.rs:2179:5
+     |
+2179 | /     fn replace_node<'b, T: BorrowReplacement>(
+2180 | |         &self,
+2181 | |         replacements: &'b [T],
+2182 | |         atom_match_iterators: &mut [(AtomMatchIterator<'a, 'b>, WrappedMatchStack<'a, 'b>)],
+...    |
+2187 | |         out: &mut Settable<Atom>,
+2188 | |     ) -> bool {
+     | |_____________^
+     |
+     = help: for further information visit https://rust-lang.github.io/rust-clippy/rust-1.92.0/index.html#too_many_arguments
+
+warning: very complex type used. Consider factoring parts into `type` definitions
+    --> src/id.rs:2323:20
+     |
+2323 |         rhs_cache: &mut HashMap<(usize, Vec<(Symbol, Match<'a>)>), Atom>,
+     |                    ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+     |
+     = help: for further information visit https://rust-lang.github.io/rust-clippy/rust-1.92.0/index.html#type_complexity
+
+warning: this function has too many arguments (10/7)
+    --> src/id.rs:2315:5
+     |
+2315 | /     fn replace_no_norm<'b, T: BorrowReplacement>(
+2316 | |         &self,
+2317 | |         replacements: &'b [T],
+2318 | |         atom_match_iterators: &mut [(AtomMatchIterator<'a, 'b>, WrappedMatchStack<'a, 'b>)],
+...    |
+2325 | |         out: &mut Settable<Atom>,
+2326 | |     ) {
+     | |_____^
+     |
+     = help: for further information visit https://rust-lang.github.io/rust-clippy/rust-1.92.0/index.html#too_many_arguments
+
+warning: this function has too many arguments (8/7)
+    --> src/id.rs:2605:5
+     |
+2605 | /     pub(crate) fn replace_with_ws_into(
+2606 | |         &self,
+2607 | |         pattern: &Pattern,
+2608 | |         rhs: &ReplaceWith,
+...    |
+2613 | |         out: &mut Atom,
+2614 | |     ) -> bool {
+     | |_____________^
+     |
+     = help: for further information visit https://rust-lang.github.io/rust-clippy/rust-1.92.0/index.html#too_many_arguments
+
+warning: usage of `Iterator::fold` on a type that implements `Try`
+    --> src/id.rs:2635:42
+     |
+2635 |           let max_level = atom_iter.iter().fold(Some((0, true)), |acc, (_, stack)| {
+     |  __________________________________________^
+2636 | |             acc.and_then(|(max_level, tree)| {
+2637 | |                 stack.settings.level_range.1.map(|level| {
+...    |
+2643 | |             })
+2644 | |         });
+     | |__________^ help: use `try_fold` instead: `try_fold((0, true), |acc, (_, stack)| ...)`
+     |
+     = help: for further information visit https://rust-lang.github.io/rust-clippy/rust-1.92.0/index.html#manual_try_fold
+
+warning: this lifetime isn't used in the function definition
+    --> src/id.rs:3063:29
+     |
+3063 |     pub fn replace_with_map<'c, R: MatchMap + 'static>(self, rhs: R) -> Replacement {
+     |                             ^^
+     |
+     = help: for further information visit https://rust-lang.github.io/rust-clippy/rust-1.92.0/index.html#extra_unused_lifetimes
+
+warning: this `if` statement can be collapsed
+    --> src/id.rs:3119:13
+     |
+3119 | /             if new_found.is_none()
+3120 | |                 && let Pattern::Wildcard(w, _) = p
+3121 | |             {
+3122 | |                 if wildcards.insert(*w) {
+3123 | |                     new_found = Some(*w);
+3124 | |                 };
+3125 | |             }
+     | |_____________^
+     |
+     = help: for further information visit https://rust-lang.github.io/rust-clippy/rust-1.92.0/index.html#collapsible_if
+help: collapse nested if block
+     |
+3120 ~                 && let Pattern::Wildcard(w, _) = p
+3121 ~                 && wildcards.insert(*w) {
+3122 |                     new_found = Some(*w);
+3123 ~                 };
+     |
+
+warning: using `clone` on type `Symbol` which implements the `Copy` trait
+    --> src/id.rs:3312:43
+     |
+3312 |                         Pattern::Wildcard(w.clone(), true)
+     |                                           ^^^^^^^^^ help: try dereferencing it: `*w`
+     |
+     = help: for further information visit https://rust-lang.github.io/rust-clippy/rust-1.92.0/index.html#clone_on_copy
+     = note: `#[warn(clippy::clone_on_copy)]` on by default
+
+warning: useless use of `format!`
+    --> src/id.rs:3440:28
+     |
+3440 |                   return Err(format!(
+     |  ____________________________^
+3441 | |                     "Encountered alternative during substitution of wildcards from a map",
+3442 | |                 ));
+     | |_________________^ help: consider using `.to_string()`: `"Encountered alternative during substitution of wildcards from a map".to_string()`
+     |
+     = help: for further information visit https://rust-lang.github.io/rust-clippy/rust-1.92.0/index.html#useless_format
+     = note: `#[warn(clippy::useless_format)]` on by default
+
+warning: useless use of `format!`
+    --> src/id.rs:3445:28
+     |
+3445 |                   return Err(format!(
+     |  ____________________________^
+3446 | |                     "Encountered transformer during substitution of wildcards from a map",
+3447 | |                 ));
+     | |_________________^ help: consider using `.to_string()`: `"Encountered transformer during substitution of wildcards from a map".to_string()`
+     |
+     = help: for further information visit https://rust-lang.github.io/rust-clippy/rust-1.92.0/index.html#useless_format
+
+warning: this `if let` can be collapsed into the outer `if let`
+    --> src/id.rs:3491:29
+     |
+3491 | / ...                   if let AtomView::Var(v) = a {
+3492 | | ...                       name = v.get_symbol();
+3493 | | ...                   } else {
+3494 | | ...                       Err(TransformerError::ValueError(format!(
+...    |
+3497 | | ...                       )))?;
+3498 | | ...                   }
+     | |_______________________^
+     |
+help: the outer pattern can be modified to include the inner pattern
+    --> src/id.rs:3490:53
+     |
+3490 |                         } else if let Match::Single(a) = w {
+     |                                                     ^ replace this binding
+3491 |                             if let AtomView::Var(v) = a {
+     |                                    ^^^^^^^^^^^^^^^^ with this pattern
+     = help: for further information visit https://rust-lang.github.io/rust-clippy/rust-1.92.0/index.html#collapsible_match
+     = note: `#[warn(clippy::collapsible_match)]` on by default
+
+warning: struct `WrappedMatchStack` has a public `len` method, but no `is_empty` method
+    --> src/id.rs:4936:5
+     |
+4936 |     pub fn len(&self) -> usize {
+     |     ^^^^^^^^^^^^^^^^^^^^^^^^^^
+     |
+     = help: for further information visit https://rust-lang.github.io/rust-clippy/rust-1.92.0/index.html#len_without_is_empty
+
+warning: redundant closure
+    --> src/id.rs:5125:22
+     |
+5125 |                 .map(|pattern| AtomMatchIterator::new(pattern))
+     |                      ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^ help: replace the closure with the associated function itself: `AtomMatchIterator::new`
+     |
+     = help: for further information visit https://rust-lang.github.io/rust-clippy/rust-1.92.0/index.html#redundant_closure
+     = note: `#[warn(clippy::redundant_closure)]` on by default
+
+warning: you seem to be trying to use `match` for destructuring a single pattern. Consider using `if let`
+    --> src/id.rs:6219:33
+     |
+6219 | / ...                   match s.next_result(match_stack) {
+6220 | | ...                       Ok(_) => {
+6221 | | ...                           continue 'next_match;
+...    |
+6224 | | ...                   }
+     | |_______________________^
+     |
+     = help: for further information visit https://rust-lang.github.io/rust-clippy/rust-1.92.0/index.html#single_match
+     = note: `#[warn(clippy::single_match)]` on by default
+help: try
+     |
+6219 ~                                 if let Ok(_) = s.next_result(match_stack) {
+6220 +                                     continue 'next_match;
+6221 +                                 }
+     |
+
+warning: method `cmp` can be confused for the standard trait method `std::cmp::Ord::cmp`
+   --> src/normalize.rs:46:5
+    |
+ 46 | /     pub fn cmp(&self, other: &AtomView<'_>) -> Ordering {
+ 47 | |         if self == other {
+ 48 | |             // equality comparison is a fast check
+ 49 | |             return Ordering::Equal;
+...   |
+147 | |     }
+    | |_____^
+    |
+    = help: consider implementing the trait `std::cmp::Ord` or choosing a less ambiguous method name
+    = help: for further information visit https://rust-lang.github.io/rust-clippy/rust-1.92.0/index.html#should_implement_trait
+
+warning: this `if` statement can be collapsed
+    --> src/normalize.rs:1088:25
+     |
+1088 | /                         if b == InlineVar::new(Symbol::E).as_view() {
+1089 | |                             if e.is_real() {
+1090 | |                                 let mut buffer = workspace.new_atom();
+1091 | |                                 buffer.set_from_view(&e);
+...    |
+1095 | |                         }
+     | |_________________________^
+     |
+     = help: for further information visit https://rust-lang.github.io/rust-clippy/rust-1.92.0/index.html#collapsible_if
+help: collapse nested if block
+     |
+1088 ~                         if b == InlineVar::new(Symbol::E).as_view()
+1089 ~                             && e.is_real() {
+1090 |                                 let mut buffer = workspace.new_atom();
+ ...
+1093 |                                 return;
+1094 ~                             }
+     |
+
+warning: this lifetime isn't used in the function definition
+    --> src/normalize.rs:1870:40
+     |
+1870 |     pub(crate) fn add_normalized_slice<'a, T: AtomCore>(
+     |                                        ^^
+     |
+     = help: for further information visit https://rust-lang.github.io/rust-clippy/rust-1.92.0/index.html#extra_unused_lifetimes
+
+warning: unneeded late initialization
+    --> src/parser.rs:1108:25
+     |
+1108 |                         let level;
+     |                         ^^^^^^^^^^
+     |
+     = help: for further information visit https://rust-lang.github.io/rust-clippy/rust-1.92.0/index.html#needless_late_init
+     = note: `#[warn(clippy::needless_late_init)]` on by default
+help: move the declaration `level` here and remove the assignments from the `match` arms
+     |
+1108 ~
+1109 ~                         let level = match wt.as_str() {
+1110 |                             "Blank" => {
+1111 ~                                 1
+1112 |                             }
+1113 |                             "BlankSequence" => {
+1114 ~                                 2
+1115 |                             }
+1116 |                             "BlankNullSequence" => {
+1117 ~                                 3
+1118 |                             }
+ ...
+1121 |                             }
+1122 ~                         };
+     |
+
+warning: very complex type used. Consider factoring parts into `type` definitions
+    --> src/parser.rs:1203:24
+     |
+1203 |           mut atom_info: Option<(
+     |  ________________________^
+1204 | |             &DefaultNamespace<T>,
+1205 | |             &mut HashMap<SmartString<LazyCompact>, Symbol>,
+1206 | |             &Workspace,
+1207 | |         )>,
+     | |__________^
+     |
+     = help: for further information visit https://rust-lang.github.io/rust-clippy/rust-1.92.0/index.html#type_complexity
+
+warning: this `else { if .. }` block can be collapsed
+    --> src/parser.rs:1761:44
+     |
+1761 |   ...                   } else {
+     |  ______________________________^
+1762 | | ...                       if settings.convert_mul_to_atom
+1763 | | ...                           && o_mid == Operator::Mul
+1764 | | ...                           && let Some((ns, name_map, ws)) = &mut atom_info
+...    |
+1789 | | ...                   }
+     | |_______________________^
+     |
+     = help: for further information visit https://rust-lang.github.io/rust-clippy/rust-1.92.0/index.html#collapsible_else_if
+help: collapse nested if block
+     |
+1761 ~                                     } else if settings.convert_mul_to_atom
+1762 +                                         && o_mid == Operator::Mul
+1763 +                                         && let Some((ns, name_map, ws)) = &mut atom_info
+1764 +                                     {
+1765 +                                         // convert a finished multiplication sandwiched between
+1766 +                                         // two additions (a term) into an atom
+1767 +                                         // this representation will be more memory efficient
+1768 +                                         let t = Token::Op(false, false, o_mid, m_mid);
+1769 +
+1770 +                                         let mut atom = ws.new_atom();
+1771 +
+1772 +                                         {
+1773 +                                             let mut state =
+1774 +                                                 State::get_global_state().write().unwrap();
+1775 +                                             // do not normalize to prevent potential deadlocks
+1776 +                                             t.to_atom_with_output_no_norm(
+1777 +                                                 ns, name_map, &mut state, ws, &mut atom,
+1778 +                                             )?;
+1779 +                                         }
+1780 +
+1781 +                                         let mut norm = ws.new_atom();
+1782 +                                         atom.as_view().normalize(ws, &mut norm);
+1783 +
+1784 +                                         m.push(Token::ParsedMul(Box::new(norm)));
+1785 +                                     } else {
+1786 +                                         m.push(Token::Op(false, false, o_mid, m_mid));
+1787 +                                     }
+     |
+
+warning: this `if` statement can be collapsed
+    --> src/poly/factor.rs:1919:17
+     |
+1919 | /                 if let Some(layer_supports) = &mut layer_supports {
+1920 | |                     if !layer_supports[variable].is_empty() {
+1921 | |                         layer_supports[variable][exponent] += 1;
+1922 | |                     }
+1923 | |                 }
+     | |_________________^
+     |
+     = help: for further information visit https://rust-lang.github.io/rust-clippy/rust-1.92.0/index.html#collapsible_if
+help: collapse nested if block
+     |
+1919 ~                 if let Some(layer_supports) = &mut layer_supports
+1920 ~                     && !layer_supports[variable].is_empty() {
+1921 |                         layer_supports[variable][exponent] += 1;
+1922 ~                     }
+     |
+
+warning: this `let...else` may be rewritten with the `?` operator
+    --> src/poly/factor.rs:2077:9
+     |
+2077 | /         let Some(retained_variable) = self
+2078 | |             .degrees
+2079 | |             .iter()
+2080 | |             .copied()
+...    |
+2086 | |             return None;
+2087 | |         };
+     | |__________^
+     |
+     = help: for further information visit https://rust-lang.github.io/rust-clippy/rust-1.92.0/index.html#question_mark
+     = note: `#[warn(clippy::question_mark)]` on by default
+help: replace it with
+     |
+2077 ~         let retained_variable = self
+2078 +             .degrees
+2079 +             .iter()
+2080 +             .copied()
+2081 +             .enumerate()
+2082 +             .filter(|(variable, degree)| *variable != coefficient_variable && *degree > 0)
+2083 +             .max_by_key(|(variable, degree)| (*degree, Reverse(*variable)))
+2084 +             .map(|(variable, _)| variable)?;
+     |
+
+warning: manual implementation of `.is_multiple_of()`
+    --> src/poly/factor.rs:2357:16
+     |
+2357 |             if degree % 2 != 0 {
+     |                ^^^^^^^^^^^^^^^ help: replace with: `!degree.is_multiple_of(2)`
+     |
+     = help: for further information visit https://rust-lang.github.io/rust-clippy/rust-1.92.0/index.html#manual_is_multiple_of
+     = note: `#[warn(clippy::manual_is_multiple_of)]` on by default
+
+warning: using `contains()` instead of `iter().any()` is more efficient
+    --> src/poly/factor.rs:2694:12
+     |
+2694 |         || degrees.iter().any(|&degree| degree == 2)
+     |            ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^ help: try: `degrees.contains(&2)`
+     |
+     = help: for further information visit https://rust-lang.github.io/rust-clippy/rust-1.92.0/index.html#manual_contains
+     = note: `#[warn(clippy::manual_contains)]` on by default
+
+warning: this `if` statement can be collapsed
+    --> src/poly/factor.rs:2828:17
+     |
+2828 | /                 if pair_gcd.nterms() == 1 {
+2829 | |                     if self.has_trivial_common_monomial {
+2830 | |                         #[cfg(test)]
+2831 | |                         SEPARABLE_CONTENT_PAIR_MONOMIAL_CERTIFICATES
+...    |
+2838 | |                         .with(|count| count.set(count.get() + 1));
+2839 | |                 }
+     | |_________________^
+     |
+     = help: for further information visit https://rust-lang.github.io/rust-clippy/rust-1.92.0/index.html#collapsible_if
+help: collapse nested if block
+     |
+2828 ~                 if pair_gcd.nterms() == 1
+2829 ~                     && self.has_trivial_common_monomial {
+2830 |                         #[cfg(test)]
+ ...
+2837 |                     SEPARABLE_CONTENT_NONTRIVIAL_MONOMIAL_FALLBACKS
+2838 ~                         .with(|count| count.set(count.get() + 1));
+     |
+
+warning: the loop variable `variable` is used to index `layer_supports`
+    --> src/poly/factor.rs:2882:25
+     |
+2882 |         for variable in 0..polynomial.nvars() {
+     |                         ^^^^^^^^^^^^^^^^^^^^^
+     |
+     = help: for further information visit https://rust-lang.github.io/rust-clippy/rust-1.92.0/index.html#needless_range_loop
+help: consider using an iterator and enumerate()
+     |
+2882 -         for variable in 0..polynomial.nvars() {
+2882 +         for (variable, <item>) in layer_supports.iter().enumerate().take(polynomial.nvars()) {
+     |
+
+warning: methods called `from_*` usually take no `self`
+    --> src/poly/factor.rs:3240:9
+     |
+3240 |         &self,
+     |         ^^^^^
+     |
+     = help: consider choosing a less ambiguous name
+     = help: for further information visit https://rust-lang.github.io/rust-clippy/rust-1.92.0/index.html#wrong_self_convention
+
+warning: usage of `bool::then` in `filter_map`
+    --> src/poly/factor.rs:4413:14
+     |
+4413 |               .filter_map(|(var, degree)| {
+     |  ______________^
+4414 | |                 (*degree == 2
+4415 | |                     && (degree_box_fits_packed || self.quadratic_discriminant_fits_packed(var)))
+4416 | |                 .then(|| (self.quadratic_discriminant_cost(var), var))
+4417 | |             })
+     | |______________^
+     |
+     = help: for further information visit https://rust-lang.github.io/rust-clippy/rust-1.92.0/index.html#filter_map_bool_then
+     = note: `#[warn(clippy::filter_map_bool_then)]` on by default
+help: use `filter` then `map` instead
+     |
+4413 ~             .filter(|&(var, degree)| (*degree == 2
+4414 +                     && (degree_box_fits_packed || self.quadratic_discriminant_fits_packed(var)))).map(|(var, degree)| (self.quadratic_discriminant_cost(var), var))
+     |
+
+warning: usage of `bool::then` in `filter_map`
+    --> src/poly/factor.rs:4631:14
+     |
+4631 |               .filter_map(|(var, degree)| {
+     |  ______________^
+4632 | |                 (*degree == 2).then(|| (self.quadratic_discriminant_cost(var), var))
+4633 | |             })
+     | |______________^ help: use `filter` then `map` instead: `filter(|&(var, degree)| (*degree == 2)).map(|(var, degree)| (self.quadratic_discriminant_cost(var), var))`
+     |
+     = help: for further information visit https://rust-lang.github.io/rust-clippy/rust-1.92.0/index.html#filter_map_bool_then
+
+warning: this expression creates a reference which is immediately dereferenced by the compiler
+    --> src/poly/factor.rs:5056:45
+     |
+5056 |             let mut g_f = g.to_number_field(&self.ring());
+     |                                             ^^^^^^^^^^^^ help: change this to: `self.ring()`
+     |
+     = help: for further information visit https://rust-lang.github.io/rust-clippy/rust-1.92.0/index.html#needless_borrow
+
+warning: this expression creates a reference which is immediately dereferenced by the compiler
+    --> src/poly/factor.rs:5069:47
+     |
+5069 |                     let f = f.to_number_field(&self.ring());
+     |                                               ^^^^^^^^^^^^ help: change this to: `self.ring()`
+     |
+     = help: for further information visit https://rust-lang.github.io/rust-clippy/rust-1.92.0/index.html#needless_borrow
+
+warning: this expression creates a reference which is immediately dereferenced by the compiler
+    --> src/poly/factor.rs:5079:38
+     |
+5079 |                     .to_number_field(&self.ring());
+     |                                      ^^^^^^^^^^^^ help: change this to: `self.ring()`
+     |
+     = help: for further information visit https://rust-lang.github.io/rust-clippy/rust-1.92.0/index.html#needless_borrow
+
+warning: the loop variable `v` is used to index `degrees`
+    --> src/poly/factor.rs:5146:22
+     |
+5146 |             for v in 0..self.nvars() {
+     |                      ^^^^^^^^^^^^^^^
+     |
+     = help: for further information visit https://rust-lang.github.io/rust-clippy/rust-1.92.0/index.html#needless_range_loop
+help: consider using an iterator and enumerate()
+     |
+5146 -             for v in 0..self.nvars() {
+5146 +             for (v, <item>) in degrees.iter_mut().enumerate().take(self.nvars()) {
+     |
+
+warning: the loop variable `v` is used to index `degrees`
+    --> src/poly/factor.rs:5216:18
+     |
+5216 |         for v in 0..self.nvars() {
+     |                  ^^^^^^^^^^^^^^^
+     |
+     = help: for further information visit https://rust-lang.github.io/rust-clippy/rust-1.92.0/index.html#needless_range_loop
+help: consider using an iterator and enumerate()
+     |
+5216 -         for v in 0..self.nvars() {
+5216 +         for (v, <item>) in degrees.iter_mut().enumerate().take(self.nvars()) {
+     |
+
+warning: this function has too many arguments (8/7)
+    --> src/poly/factor.rs:6345:5
+     |
+6345 | /     fn multivariate_diophantine(
+6346 | |         univariate_deltas: &[Self],
+6347 | |         univariate_factors: &mut [Self],
+6348 | |         prods: &[Self],
+...    |
+6353 | |         mod_vars: &[MultivariatePolynomial<F, E, LexOrder>],
+6354 | |     ) -> Vec<Self> {
+     | |__________________^
+     |
+     = help: for further information visit https://rust-lang.github.io/rust-clippy/rust-1.92.0/index.html#too_many_arguments
+
+warning: this `if` statement can be collapsed
+    --> src/poly/factor.rs:6485:9
+     |
+6485 | /         if factors.len() > 2 {
+6486 | |             if let Some(deltas) = Self::sparse_multivariate_diophantine_by_sampling(
+6487 | |                 factors, prods, error, skeletons, order,
+6488 | |             ) {
+...    |
+6491 | |         }
+     | |_________^
+     |
+     = help: for further information visit https://rust-lang.github.io/rust-clippy/rust-1.92.0/index.html#collapsible_if
+help: collapse nested if block
+     |
+6485 ~         if factors.len() > 2
+6486 ~             && let Some(deltas) = Self::sparse_multivariate_diophantine_by_sampling(
+6487 |                 factors, prods, error, skeletons, order,
+6488 |             ) {
+6489 |                 return Some(deltas);
+6490 ~             }
+     |
+
+warning: unnecessary closure used with `bool::then`
+    --> src/poly/factor.rs:6597:38
+     |
+6597 |                   coefficients[cell] = (sample_index + 1 < sample_count)
+     |  ______________________________________^
+6598 | |                     .then(|| geometric_sequence_kernels)
+     | |________________________________________________________^
+     |
+     = help: for further information visit https://rust-lang.github.io/rust-clippy/rust-1.92.0/index.html#unnecessary_lazy_evaluations
+     = note: `#[warn(clippy::unnecessary_lazy_evaluations)]` on by default
+help: use `then_some` instead
+     |
+6598 -                     .then(|| geometric_sequence_kernels)
+6598 +                     .then_some(geometric_sequence_kernels)
+     |
+
+warning: methods called `from_*` usually take no `self`
+    --> src/poly/factor.rs:6655:34
+     |
+6655 |     fn from_dense_y_coefficients(&self, coefficients: &[Self], y: usize) -> Self {
+     |                                  ^^^^^
+     |
+     = help: consider choosing a less ambiguous name
+     = help: for further information visit https://rust-lang.github.io/rust-clippy/rust-1.92.0/index.html#wrong_self_convention
+
+warning: this expression creates a reference which is immediately dereferenced by the compiler
+    --> src/poly/factor.rs:6763:58
+     |
+6763 |         Self::dense_indexed_univariate_from_coefficients(&self.ring(), &coefficients)
+     |                                                          ^^^^^^^^^^^^ help: change this to: `self.ring()`
+     |
+     = help: for further information visit https://rust-lang.github.io/rust-clippy/rust-1.92.0/index.html#needless_borrow
+
+warning: this expression creates a reference which is immediately dereferenced by the compiler
+    --> src/poly/factor.rs:6901:70
+     |
+6901 |         let error = Self::dense_indexed_univariate_from_coefficients(&self.ring(), error)?;
+     |                                                                      ^^^^^^^^^^^^ help: change this to: `self.ring()`
+     |
+     = help: for further information visit https://rust-lang.github.io/rust-clippy/rust-1.92.0/index.html#needless_borrow
+
+warning: this expression creates a reference which is immediately dereferenced by the compiler
+    --> src/poly/factor.rs:6904:17
+     |
+6904 |                 &self.ring(),
+     |                 ^^^^^^^^^^^^ help: change this to: `self.ring()`
+     |
+     = help: for further information visit https://rust-lang.github.io/rust-clippy/rust-1.92.0/index.html#needless_borrow
+
+warning: this expression creates a reference which is immediately dereferenced by the compiler
+    --> src/poly/factor.rs:6909:45
+     |
+6909 |                 Self::dense_remainder_monic(&self.ring(), product, &context.moduli[factor_index]);
+     |                                             ^^^^^^^^^^^^ help: change this to: `self.ring()`
+     |
+     = help: for further information visit https://rust-lang.github.io/rust-clippy/rust-1.92.0/index.html#needless_borrow
+
+warning: very complex type used. Consider factoring parts into `type` definitions
+    --> src/poly/factor.rs:7121:25
+     |
+7121 |         let mut groups: Vec<(E, Vec<Vec<E>>, Vec<F::Element>)> = Vec::new();
+     |                         ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+     |
+     = help: for further information visit https://rust-lang.github.io/rust-clippy/rust-1.92.0/index.html#type_complexity
+
+warning: this expression creates a reference which is immediately dereferenced by the compiler
+    --> src/poly/factor.rs:7164:58
+     |
+7164 |                         Self::evaluate_monomial_exponent(&error.ring(), exponent, &base_points);
+     |                                                          ^^^^^^^^^^^^^ help: change this to: `error.ring()`
+     |
+     = help: for further information visit https://rust-lang.github.io/rust-clippy/rust-1.92.0/index.html#needless_borrow
+
+warning: very complex type used. Consider factoring parts into `type` definitions
+    --> src/poly/factor.rs:7291:36
+     |
+7291 |             let mut factor_groups: Vec<(E, Vec<Vec<E>>, Vec<F::Element>)> = Vec::new();
+     |                                    ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+     |
+     = help: for further information visit https://rust-lang.github.io/rust-clippy/rust-1.92.0/index.html#type_complexity
+
+warning: this expression creates a reference which is immediately dereferenced by the compiler
+    --> src/poly/factor.rs:7323:62
+     |
+7323 | ...                   Self::evaluate_monomial_exponent(&error.ring(), exponent, &base_points);
+     |                                                        ^^^^^^^^^^^^^ help: change this to: `error.ring()`
+     |
+     = help: for further information visit https://rust-lang.github.io/rust-clippy/rust-1.92.0/index.html#needless_borrow
+
+warning: very complex type used. Consider factoring parts into `type` definitions
+    --> src/poly/factor.rs:7713:29
+     |
+7713 |             let mut groups: Vec<Vec<(E, Vec<Vec<E>>, Vec<F::Element>)>> = Vec::with_capacity(2);
+     |                             ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+     |
+     = help: for further information visit https://rust-lang.github.io/rust-clippy/rust-1.92.0/index.html#type_complexity
+
+warning: very complex type used. Consider factoring parts into `type` definitions
+    --> src/poly/factor.rs:7716:40
+     |
+7716 |                 let mut factor_groups: Vec<(E, Vec<Vec<E>>, Vec<F::Element>)> = Vec::new();
+     |                                        ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+     |
+     = help: for further information visit https://rust-lang.github.io/rust-clippy/rust-1.92.0/index.html#type_complexity
+
+warning: this expression creates a reference which is immediately dereferenced by the compiler
+    --> src/poly/factor.rs:7736:62
+     |
+7736 | ...                   Self::evaluate_monomial_exponent(&self.ring(), exponent, &base_points);
+     |                                                        ^^^^^^^^^^^^ help: change this to: `self.ring()`
+     |
+     = help: for further information visit https://rust-lang.github.io/rust-clippy/rust-1.92.0/index.html#needless_borrow
+
+warning: the loop variable `sample_index` is only used to index `factor_images`
+    --> src/poly/factor.rs:7807:37
+     |
+7807 |                 for sample_index in factor_correction_contexts.len()..samples_needed {
+     |                                     ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+     |
+     = help: for further information visit https://rust-lang.github.io/rust-clippy/rust-1.92.0/index.html#needless_range_loop
+help: consider using an iterator
+     |
+7807 -                 for sample_index in factor_correction_contexts.len()..samples_needed {
+7807 +                 for <item> in factor_images.iter().take(samples_needed).skip(factor_correction_contexts.len()) {
+     |
+
+warning: unnecessary closure used with `bool::then`
+    --> src/poly/factor.rs:7946:45
+     |
+7946 |                           let reconstructed = (sample_index + 1 < sample_count)
+     |  _____________________________________________^
+7947 | |                             .then(|| geometric_sequence_kernels)
+     | |________________________________________________________________^
+     |
+     = help: for further information visit https://rust-lang.github.io/rust-clippy/rust-1.92.0/index.html#unnecessary_lazy_evaluations
+help: use `then_some` instead
+     |
+7947 -                             .then(|| geometric_sequence_kernels)
+7947 +                             .then_some(geometric_sequence_kernels)
+     |
+
+warning: this function has too many arguments (8/7)
+    --> src/poly/factor.rs:8017:5
+     |
+8017 | /     fn multivariate_hensel_lifting(
+8018 | |         &self,
+8019 | |         factors: &[Self],
+8020 | |         univariate_factors: &mut [Self],
+...    |
+8025 | |         context: MultivariateHenselContext,
+8026 | |     ) -> Result<Vec<Self>, MultivariateHenselError> {
+     | |___________________________________________________^
+     |
+     = help: for further information visit https://rust-lang.github.io/rust-clippy/rust-1.92.0/index.html#too_many_arguments
+
+warning: this function has too many arguments (9/7)
+    --> src/poly/factor.rs:8134:5
+     |
+8134 | /     fn multivariate_hensel_step(
+8135 | |         &self,
+8136 | |         univariate_deltas: &[Self],
+8137 | |         univariate_factors: &mut [Self],
+...    |
+8143 | |         used_evaluated_lift: &mut bool,
+8144 | |     ) -> Result<Vec<Self>, MultivariateHenselError> {
+     | |___________________________________________________^
+     |
+     = help: for further information visit https://rust-lang.github.io/rust-clippy/rust-1.92.0/index.html#too_many_arguments
+
+warning: this expression creates a reference which is immediately dereferenced by the compiler
+    --> src/poly/factor.rs:8386:47
+     |
+8386 |         let lcoeff_p = lcoeff.to_finite_field(&u.ring());
+     |                                               ^^^^^^^^^ help: change this to: `u.ring()`
+     |
+     = help: for further information visit https://rust-lang.github.io/rust-clippy/rust-1.92.0/index.html#needless_borrow
+
+warning: this expression creates a reference which is immediately dereferenced by the compiler
+    --> src/poly/factor.rs:8387:45
+     |
+8387 |         let gamma_p = gamma.to_finite_field(&u.ring());
+     |                                             ^^^^^^^^^ help: change this to: `u.ring()`
+     |
+     = help: for further information visit https://rust-lang.github.io/rust-clippy/rust-1.92.0/index.html#needless_borrow
+
+warning: this expression creates a reference which is immediately dereferenced by the compiler
+     --> src/poly/factor.rs:10466:71
+      |
+10466 |                     |c| field.to_symmetric_integer(c).to_finite_field(&rhs.ring()),
+      |                                                                       ^^^^^^^^^^^ help: change this to: `rhs.ring()`
+      |
+      = help: for further information visit https://rust-lang.github.io/rust-clippy/rust-1.92.0/index.html#needless_borrow
+
+warning: this expression creates a reference which is immediately dereferenced by the compiler
+     --> src/poly/factor.rs:10505:83
+      |
+10505 |                         |c| (&field.to_symmetric_integer(c) * &m).to_finite_field(&rhs.ring()),
+      |                                                                                   ^^^^^^^^^^^ help: change this to: `rhs.ring()`
+      |
+      = help: for further information visit https://rust-lang.github.io/rust-clippy/rust-1.92.0/index.html#needless_borrow
+
+warning: very complex type used. Consider factoring parts into `type` definitions
+     --> src/poly/factor.rs:11204:10
+      |
+11204 |       ) -> (
+      |  __________^
+11205 | |         Vec<Self>,
+11206 | |         Vec<(usize, Integer)>,
+11207 | |         i64,
+11208 | |         Self,
+11209 | |         Option<(Integer, Vec<Self>)>,
+11210 | |     ) {
+      | |_____^
+      |
+      = help: for further information visit https://rust-lang.github.io/rust-clippy/rust-1.92.0/index.html#type_complexity
+
+warning: very complex type used. Consider factoring parts into `type` definitions
+     --> src/poly/factor.rs:11221:23
+      |
+11221 |         let mut best: Option<(Integer, Vec<Self>, Vec<(usize, Integer)>, i64, Self)> = None;
+      |                       ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+      |
+      = help: for further information visit https://rust-lang.github.io/rust-clippy/rust-1.92.0/index.html#type_complexity
+
+warning: very complex type used. Consider factoring parts into `type` definitions
+     --> src/poly/factor.rs:11525:10
+      |
+11525 |       ) -> Option<(
+      |  __________^
+11526 | |         Vec<Self>,
+11527 | |         Vec<Self>,
+11528 | |         Vec<(usize, Integer)>,
+...     |
+11531 | |         Integer,
+11532 | |     )> {
+      | |______^
+      |
+      = help: for further information visit https://rust-lang.github.io/rust-clippy/rust-1.92.0/index.html#type_complexity
+
+warning: manual implementation of `.is_multiple_of()`
+     --> src/poly/factor.rs:11585:42
+      |
+11585 |                 if random_attempt > 0 && random_attempt % ATTEMPTS_PER_BOUND == 0 {
+      |                                          ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^ help: replace with: `random_attempt.is_multiple_of(ATTEMPTS_PER_BOUND)`
+      |
+      = help: for further information visit https://rust-lang.github.io/rust-clippy/rust-1.92.0/index.html#manual_is_multiple_of
+
+warning: needlessly taken reference of both operands
+     --> src/poly/factor.rs:11772:35
+      |
+11772 |         while !error.is_zero() && &m <= &max_p {
+      |                                   ^^^^^^^^^^^^
+      |
+      = help: for further information visit https://rust-lang.github.io/rust-clippy/rust-1.92.0/index.html#op_ref
+      = note: `#[warn(clippy::op_ref)]` on by default
+help: use the values directly
+      |
+11772 -         while !error.is_zero() && &m <= &max_p {
+11772 +         while !error.is_zero() && m <= max_p {
+      |
+
+warning: this function has too many arguments (8/7)
+     --> src/poly/factor.rs:12157:5
+      |
+12157 | /     fn multivariate_factorization_with_retries(
+12158 | |         &self,
+12159 | |         order: &mut [usize],
+12160 | |         mut coefficient_upper_bound: i64,
+...     |
+12165 | |         integer_start_mode: IntegerFactorStart,
+12166 | |     ) -> Vec<Self> {
+      | |__________________^
+      |
+      = help: for further information visit https://rust-lang.github.io/rust-clippy/rust-1.92.0/index.html#too_many_arguments
+
+warning: very complex type used. Consider factoring parts into `type` definitions
+    --> src/poly/gcd.rs:1746:13
+     |
+1746 |       cached: Option<(
+     |  _____________^
+1747 | |         LastVariableEvaluationContext<'a, F, E>,
+1748 | |         LastVariableEvaluationContext<'a, F, E>,
+1749 | |         LastVariablePowerWorkspace<F>,
+1750 | |     )>,
+     | |______^
+     |
+     = help: for further information visit https://rust-lang.github.io/rust-clippy/rust-1.92.0/index.html#type_complexity
+
+warning: this function has too many arguments (9/7)
+    --> src/poly/gcd.rs:2393:5
+     |
+2393 | /     fn construct_new_image_single_scale(
+2394 | |         a: &MultivariatePolynomial<F, E>,
+2395 | |         b: &MultivariatePolynomial<F, E>,
+2396 | |         a_ldegree: E,
+...    |
+2404 | |     where
+2405 | |         F: SampleableRing<SamplingPolicy = RangeInclusive<i64>>,
+     | |________________________________________________________________^
+     |
+     = help: for further information visit https://rust-lang.github.io/rust-clippy/rust-1.92.0/index.html#too_many_arguments
+
+warning: this function has too many arguments (8/7)
+    --> src/poly/gcd.rs:2663:5
+     |
+2663 | /     fn construct_new_image_multiple_scales(
+2664 | |         a: &MultivariatePolynomial<F, E>,
+2665 | |         b: &MultivariatePolynomial<F, E>,
+2666 | |         a_ldegree: E,
+...    |
+2673 | |     where
+2674 | |         F: SampleableRing<SamplingPolicy = RangeInclusive<i64>>,
+     | |________________________________________________________________^
+     |
+     = help: for further information visit https://rust-lang.github.io/rust-clippy/rust-1.92.0/index.html#too_many_arguments
+
+warning: the loop variable `sample_index` is used to index `samples`
+    --> src/poly/gcd.rs:2911:41
+     |
+2911 |                     for sample_index in 0..samples_needed {
+     |                                         ^^^^^^^^^^^^^^^^^
+     |
+     = help: for further information visit https://rust-lang.github.io/rust-clippy/rust-1.92.0/index.html#needless_range_loop
+help: consider using an iterator and enumerate()
+     |
+2911 -                     for sample_index in 0..samples_needed {
+2911 +                     for (sample_index, <item>) in samples.iter().enumerate().take(samples_needed) {
+     |
+
+warning: the loop variable `divisor_coefficient_degree` is used to index `divisor`
+    --> src/poly/gcd.rs:4466:47
+     |
+4466 |             for divisor_coefficient_degree in first_retained_divisor_degree..divisor_degree {
+     |                                               ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+     |
+     = help: for further information visit https://rust-lang.github.io/rust-clippy/rust-1.92.0/index.html#needless_range_loop
+help: consider using an iterator and enumerate()
+     |
+4466 -             for divisor_coefficient_degree in first_retained_divisor_degree..divisor_degree {
+4466 +             for (divisor_coefficient_degree, <item>) in divisor.iter().enumerate().take(divisor_degree).skip(first_retained_divisor_degree) {
+     |
+
+warning: very complex type used. Consider factoring parts into `type` definitions
+    --> src/poly/gcd.rs:4873:10
+     |
+4873 |       ) -> Option<(
+     |  __________^
+4874 | |         MultivariatePolynomial<IntegerRing, E>,
+4875 | |         MultivariatePolynomial<IntegerRing, E>,
+4876 | |         MultivariatePolynomial<IntegerRing, E>,
+4877 | |     )> {
+     | |______^
+     |
+     = help: for further information visit https://rust-lang.github.io/rust-clippy/rust-1.92.0/index.html#type_complexity
+
+warning: very complex type used. Consider factoring parts into `type` definitions
+    --> src/poly/gcd.rs:4927:10
+     |
+4927 |       ) -> Option<(
+     |  __________^
+4928 | |         MultivariatePolynomial<IntegerRing, E>,
+4929 | |         MultivariatePolynomial<IntegerRing, E>,
+4930 | |         MultivariatePolynomial<IntegerRing, E>,
+4931 | |     )> {
+     | |______^
+     |
+     = help: for further information visit https://rust-lang.github.io/rust-clippy/rust-1.92.0/index.html#type_complexity
+
+warning: consider using `sort_unstable_by_key`
+    --> src/poly/gcd.rs:5477:13
+     |
+5477 |             f.sort_unstable_by(|a, b| b.nterms().cmp(&a.nterms())); // sort in decreasing order
+     |             ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^ help: try: `f.sort_unstable_by_key(|b| std::cmp::Reverse(b.nterms()))`
+     |
+     = help: for further information visit https://rust-lang.github.io/rust-clippy/rust-1.92.0/index.html#unnecessary_sort_by
+     = note: `#[warn(clippy::unnecessary_sort_by)]` on by default
+
+warning: using `clone` on type `UField` which implements the `Copy` trait
+    --> src/poly/gcd.rs:5678:63
+     |
+5678 |             let mut finite_field = FiniteField::<UField>::new(p.clone());
+     |                                                               ^^^^^^^^^ help: try removing the `clone` call: `p`
+     |
+     = help: for further information visit https://rust-lang.github.io/rust-clippy/rust-1.92.0/index.html#clone_on_copy
+
+warning: this method chain can be written more clearly with `if .. else ..`
+    --> src/poly/gcd.rs:5774:44
+     |
+5774 |               let mut reconstruction_probe = (pivot_index != 0)
+     |  ____________________________________________^
+5775 | |                 .then_some(0)
+5776 | |                 .unwrap_or_else(|| if gp.nterms() > 1 { 1 } else { 0 });
+     | |_______________________________________________________________________^ help: try: `if pivot_index != 0 { 0 } else { if gp.nterms() > 1 { 1 } else { 0 } }`
+     |
+     = help: for further information visit https://rust-lang.github.io/rust-clippy/rust-1.92.0/index.html#obfuscated_if_else
+     = note: `#[warn(clippy::obfuscated_if_else)]` on by default
+
+warning: using `clone` on type `UField` which implements the `Copy` trait
+    --> src/poly/gcd.rs:5918:63
+     |
+5918 |                     finite_field = FiniteField::<UField>::new(p.clone());
+     |                                                               ^^^^^^^^^ help: try removing the `clone` call: `p`
+     |
+     = help: for further information visit https://rust-lang.github.io/rust-clippy/rust-1.92.0/index.html#clone_on_copy
+
+warning: this expression creates a reference which is immediately dereferenced by the compiler
+    --> src/poly/gcd.rs:6007:62
+     |
+6007 |                     .mul_assign(&mut m, &Integer::from_prime(&gp.ring()));
+     |                                                              ^^^^^^^^^^ help: change this to: `gp.ring()`
+     |
+     = help: for further information visit https://rust-lang.github.io/rust-clippy/rust-1.92.0/index.html#needless_borrow
+
+warning: very complex type used. Consider factoring parts into `type` definitions
+    --> src/poly/gcd.rs:6024:10
+     |
+6024 |       ) -> (
+     |  __________^
+6025 | |         Vec<(PE, usize, usize)>,
+6026 | |         Vec<FiniteFieldElement<u64>>,
+6027 | |         Vec<FiniteFieldElement<u64>>,
+6028 | |     ) {
+     | |_____^
+     |
+     = help: for further information visit https://rust-lang.github.io/rust-clippy/rust-1.92.0/index.html#type_complexity
+
+warning: very complex type used. Consider factoring parts into `type` definitions
+    --> src/poly/gcd.rs:6080:10
+     |
+6080 |     ) -> (Vec<(PE, PE)>, Vec<(usize, FiniteFieldElement<UField>)>)
+     |          ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+     |
+     = help: for further information visit https://rust-lang.github.io/rust-clippy/rust-1.92.0/index.html#type_complexity
+
+warning: this function has too many arguments (13/7)
+    --> src/poly/gcd.rs:6828:5
+     |
+6828 | /     fn hu_monagan_bivariate_prime_image<UField: HuMonaganWorkspace>(
+6829 | |         a: &Self,
+6830 | |         b: &Self,
+6831 | |         p: FiniteField<UField>,
+...    |
+6847 | |         FiniteFieldElement<UField>: Copy + PartialEq,
+6848 | |         Integer: ToFiniteField<UField>,
+     | |_______________________________________^
+     |
+     = help: for further information visit https://rust-lang.github.io/rust-clippy/rust-1.92.0/index.html#too_many_arguments
+
+warning: very complex type used. Consider factoring parts into `type` definitions
+    --> src/poly/gcd.rs:7337:10
+     |
+7337 |       ) -> Option<(
+     |  __________^
+7338 | |         MultivariatePolynomial<Self, E>,
+7339 | |         MultivariatePolynomial<Self, E>,
+7340 | |         MultivariatePolynomial<Self, E>,
+7341 | |     )>;
+     | |______^
+     |
+     = help: for further information visit https://rust-lang.github.io/rust-clippy/rust-1.92.0/index.html#type_complexity
+
+warning: very complex type used. Consider factoring parts into `type` definitions
+   --> src/poly/groebner.rs:560:10
+    |
+560 |       ) -> (
+    |  __________^
+561 | |         Arc<ParametricExtension<E>>,
+562 | |         AlgebraicNumber<ParameterField<E>>,
+563 | |         Arc<Vec<usize>>,
+564 | |     ) {
+    | |_____^
+    |
+    = help: for further information visit https://rust-lang.github.io/rust-clippy/rust-1.92.0/index.html#type_complexity
+
+warning: very complex type used. Consider factoring parts into `type` definitions
+   --> src/poly/groebner.rs:686:10
+    |
+686 |       ) -> (
+    |  __________^
+687 | |         Arc<ParametricExtension<E>>,
+688 | |         Arc<Vec<usize>>,
+689 | |         HashMap<PolyVariable, AlgebraicNumber<ParameterField<E>>>,
+690 | |     ) {
+    | |_____^
+    |
+    = help: for further information visit https://rust-lang.github.io/rust-clippy/rust-1.92.0/index.html#type_complexity
+
+warning: very complex type used. Consider factoring parts into `type` definitions
+   --> src/poly/groebner.rs:758:14
+    |
+758 |         tab: &mut Vec<(Vec<E>, Rc<MultivariatePolynomial<R, E, O>>)>,
+    |              ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+    |
+    = help: for further information visit https://rust-lang.github.io/rust-clippy/rust-1.92.0/index.html#type_complexity
+
+warning: very complex type used. Consider factoring parts into `type` definitions
+    --> src/poly/groebner.rs:1099:16
+     |
+1099 |         basis: &mut Vec<(usize, Rc<MultivariatePolynomial<R, E, O>>)>,
+     |                ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+     |
+     = help: for further information visit https://rust-lang.github.io/rust-clippy/rust-1.92.0/index.html#type_complexity
+
+warning: very complex type used. Consider factoring parts into `type` definitions
+    --> src/poly/groebner.rs:1844:10
+     |
+1844 |       ) -> Result<
+     |  __________^
+1845 | |         Vec<MultivariatePolynomial<RationalPolynomialField<IntegerRing, E>, u16, LexOrder>>,
+1846 | |         String,
+1847 | |     > {
+     | |_____^
+     |
+     = help: for further information visit https://rust-lang.github.io/rust-clippy/rust-1.92.0/index.html#type_complexity
+
+warning: very complex type used. Consider factoring parts into `type` definitions
+    --> src/poly/groebner.rs:1893:10
+     |
+1893 |       ) -> Vec<(
+     |  __________^
+1894 | |         MultivariatePolynomial<AlgebraicQuotient<ParameterField<E>>, u16>,
+1895 | |         usize,
+1896 | |     )> {
+     | |______^
+     |
+     = help: for further information visit https://rust-lang.github.io/rust-clippy/rust-1.92.0/index.html#type_complexity
+
+warning: very complex type used. Consider factoring parts into `type` definitions
+    --> src/poly/groebner.rs:1924:10
+     |
+1924 |     ) -> Result<Vec<MultivariatePolynomial<AlgebraicQuotient<ParameterField<E>>, u16>>, String>
+     |          ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+     |
+     = help: for further information visit https://rust-lang.github.io/rust-clippy/rust-1.92.0/index.html#type_complexity
+
+warning: very complex type used. Consider factoring parts into `type` definitions
+    --> src/poly/groebner.rs:2038:10
+     |
+2038 |       ) -> Result<
+     |  __________^
+2039 | |         Option<
+2040 | |             MultivariatePolynomial<AlgebraicQuotient<RationalPolynomialField<IntegerRing, E>>, u16>,
+2041 | |         >,
+2042 | |         String,
+2043 | |     > {
+     | |_____^
+     |
+     = help: for further information visit https://rust-lang.github.io/rust-clippy/rust-1.92.0/index.html#type_complexity
+
+warning: this function has too many arguments (10/7)
+    --> src/poly/groebner.rs:2455:1
+     |
+2455 | / fn echelonize<R: Echelonize, E: Exponent, O: MonomialOrder>(
+2456 | |     matrix: &mut Vec<Vec<(R::Element, usize)>>,
+2457 | |     zp_matrix: &mut Vec<Vec<(i64, usize)>>,
+2458 | |     selected_polys: &mut Vec<Rc<MultivariatePolynomial<R, E, O>>>,
+...    |
+2465 | |     print_stats: bool,
+2466 | | ) {
+     | |_^
+     |
+     = help: for further information visit https://rust-lang.github.io/rust-clippy/rust-1.92.0/index.html#too_many_arguments
+
+warning: this function has too many arguments (8/7)
+    --> src/poly/groebner.rs:2500:1
+     |
+2500 | / fn echelonize_default<R: Field, E: Exponent, O: MonomialOrder>(
+2501 | |     matrix: &mut Vec<Vec<(R::Element, usize)>>,
+2502 | |     selected_polys: &mut Vec<Rc<MultivariatePolynomial<R, E, O>>>,
+2503 | |     all_monomials: &HashMap<Vec<E>, MonomialData>,
+...    |
+2508 | |     print_stats: bool,
+2509 | | ) {
+     | |_^
+     |
+     = help: for further information visit https://rust-lang.github.io/rust-clippy/rust-1.92.0/index.html#too_many_arguments
+
+warning: the loop variable `r` is used to index `matrix`
+    --> src/poly/groebner.rs:2530:14
+     |
+2530 |     for r in 0..matrix.len() {
+     |              ^^^^^^^^^^^^^^^
+     |
+     = help: for further information visit https://rust-lang.github.io/rust-clippy/rust-1.92.0/index.html#needless_range_loop
+help: consider using an iterator and enumerate()
+     |
+2530 -     for r in 0..matrix.len() {
+2530 +     for (r, <item>) in matrix.iter_mut().enumerate() {
+     |
+
+warning: this function has too many arguments (9/7)
+    --> src/poly/groebner.rs:2610:1
+     |
+2610 | / fn echelonize_zp<E: Exponent, O: MonomialOrder>(
+2611 | |     matrix: &mut Vec<Vec<(<Zp as Set>::Element, usize)>>,
+2612 | |     integer_matrix: &mut Vec<Vec<(i64, usize)>>,
+2613 | |     selected_polys: &mut Vec<Rc<MultivariatePolynomial<Zp, E, O>>>,
+...    |
+2619 | |     print_stats: bool,
+2620 | | ) {
+     | |_^
+     |
+     = help: for further information visit https://rust-lang.github.io/rust-clippy/rust-1.92.0/index.html#too_many_arguments
+
+warning: the loop variable `r` is used to index `integer_matrix`
+    --> src/poly/groebner.rs:2648:14
+     |
+2648 |     for r in 0..integer_matrix.len() {
+     |              ^^^^^^^^^^^^^^^^^^^^^^^
+     |
+     = help: for further information visit https://rust-lang.github.io/rust-clippy/rust-1.92.0/index.html#needless_range_loop
+help: consider using an iterator and enumerate()
+     |
+2648 -     for r in 0..integer_matrix.len() {
+2648 +     for (r, <item>) in integer_matrix.iter_mut().enumerate() {
+     |
+
+warning: attempt to mutate range bound within loop
+   --> src/poly/polynomial.rs:235:21
+    |
+235 |                     available_degree -= value;
+    |                     ^^^^^^^^^^^^^^^^
+    |
+    = note: the range of the loop is unchanged
+    = help: for further information visit https://rust-lang.github.io/rust-clippy/rust-1.92.0/index.html#mut_range_bound
+    = note: `#[warn(clippy::mut_range_bound)]` on by default
+
+warning: suspicious use of `+` in `Sub` impl
+    --> src/poly/polynomial.rs:1885:14
+     |
+1885 |         self + &other.clone().neg() // TODO: improve
+     |              ^
+     |
+     = help: for further information visit https://rust-lang.github.io/rust-clippy/rust-1.92.0/index.html#suspicious_arithmetic_impl
+
+warning: this expression creates a reference which is immediately dereferenced by the compiler
+    --> src/poly/polynomial.rs:2590:13
+     |
+2590 |             &self.ring(),
+     |             ^^^^^^^^^^^^ help: change this to: `self.ring()`
+     |
+     = help: for further information visit https://rust-lang.github.io/rust-clippy/rust-1.92.0/index.html#needless_borrow
+
+warning: mutable key type
+    --> src/poly/polynomial.rs:3955:9
+     |
+3955 |         let mut cache: HashMap<_, Vec<(usize, usize)>> = HashMap::new();
+     |         ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+     |
+     = note: ... because it contains `Key<'_, E>`, which has interior mutability
+     = note: ... because it contains `&UnsafeCell<(usize, Vec<E>)>`, which has interior mutability
+     = note: ... because it contains `UnsafeCell<(usize, Vec<E>)>`, which has interior mutability
+     = help: for further information visit https://rust-lang.github.io/rust-clippy/rust-1.92.0/index.html#mutable_key_type
+     = note: `#[warn(clippy::mutable_key_type)]` on by default
+
+warning: the loop variable `row` is used to index `row_monomials`
+    --> src/poly/polynomial.rs:4256:20
+     |
+4256 |         for row in 0..rows.nterms() {
+     |                    ^^^^^^^^^^^^^^^^
+     |
+     = help: for further information visit https://rust-lang.github.io/rust-clippy/rust-1.92.0/index.html#needless_range_loop
+help: consider using an iterator and enumerate()
+     |
+4256 -         for row in 0..rows.nterms() {
+4256 +         for (row, <item>) in row_monomials.iter().enumerate().take(rows.nterms()) {
+     |
+
+warning: the loop variable `row` is used to index `row_monomials`
+    --> src/poly/polynomial.rs:4389:20
+     |
+4389 |         for row in 0..rows.nterms() {
+     |                    ^^^^^^^^^^^^^^^^
+     |
+     = help: for further information visit https://rust-lang.github.io/rust-clippy/rust-1.92.0/index.html#needless_range_loop
+help: consider using an iterator and enumerate()
+     |
+4389 -         for row in 0..rows.nterms() {
+4389 +         for (row, <item>) in row_monomials.iter().enumerate().take(rows.nterms()) {
+     |
+
+warning: this block may be rewritten with the `?` operator
+    --> src/poly/polynomial.rs:5258:17
+     |
+5258 | /                 if self.ring().try_div(&num, &den).is_none() {
+5259 | |                     return None;
+5260 | |                 }
+     | |_________________^ help: replace it with: `self.ring().try_div(&num, &den)?;`
+     |
+     = help: for further information visit https://rust-lang.github.io/rust-clippy/rust-1.92.0/index.html#question_mark
+
+warning: this block may be rewritten with the `?` operator
+    --> src/poly/polynomial.rs:5345:17
+     |
+5345 | /                 if self
+5346 | |                     .ring()
+5347 | |                     .try_div(&numerator_value, &divisor_value)
+5348 | |                     .is_none()
+5349 | |                 {
+5350 | |                     return None;
+5351 | |                 }
+     | |_________________^
+     |
+     = help: for further information visit https://rust-lang.github.io/rust-clippy/rust-1.92.0/index.html#question_mark
+help: replace it with
+     |
+5345 ~                 self
+5346 +                     .ring()
+5347 +                     .try_div(&numerator_value, &divisor_value)?;
+     |
+
+warning: this `if` statement can be collapsed
+    --> src/poly/polynomial.rs:5464:9
+     |
+5464 | /         if div.ring().is_one(&div.lcoeff()) {
+5465 | |             if degrees
+5466 | |                 .iter()
+5467 | |                 .zip(divisor_degrees)
+...    |
+5474 | |         }
+     | |_________^
+     |
+     = help: for further information visit https://rust-lang.github.io/rust-clippy/rust-1.92.0/index.html#collapsible_if
+help: collapse nested if block
+     |
+5464 ~         if div.ring().is_one(&div.lcoeff())
+5465 ~             && degrees
+5466 |                 .iter()
+ ...
+5472 |                 return self.quot_rem_univariate_monic(div);
+5473 ~             }
+     |
+
+warning: this function has too many arguments (9/7)
+   --> src/poly/reconstruction.rs:465:5
+    |
+465 | /     fn degree_row(
+466 | |         &mut self,
+467 | |         variable: usize,
+468 | |         point: &[Element],
+...   |
+474 | |         powers: &[Vec<u16>; 2],
+475 | |     ) -> Result<Fraction> {
+    | |_________________________^
+    |
+    = help: for further information visit https://rust-lang.github.io/rust-clippy/rust-1.92.0/index.html#too_many_arguments
+
+warning: very complex type used. Consider factoring parts into `type` definitions
+   --> src/poly/resultant.rs:454:10
+    |
+454 |     ) -> (F::Element, Option<(F::Element, F::Element)>) {
+    |          ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+    |
+    = help: for further information visit https://rust-lang.github.io/rust-clippy/rust-1.92.0/index.html#type_complexity
+
+warning: this lifetime isn't used in the impl
+   --> src/poly/series.rs:688:6
+    |
+688 | impl<'a, R: Ring> IntoIterator for Series<R> {
+    |      ^^
+    |
+    = help: for further information visit https://rust-lang.github.io/rust-clippy/rust-1.92.0/index.html#extra_unused_lifetimes
+
+warning: very complex type used. Consider factoring parts into `type` definitions
+    --> src/poly/univariate/roots.rs:2248:10
+     |
+2248 |     ) -> Result<Vec<(Complex<F>, usize)>, Vec<(Complex<F>, usize)>> {
+     |          ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+     |
+     = help: for further information visit https://rust-lang.github.io/rust-clippy/rust-1.92.0/index.html#type_complexity
+
+warning: very complex type used. Consider factoring parts into `type` definitions
+    --> src/poly/univariate.rs:1286:10
+     |
+1286 |     ) -> Result<Vec<(Complex<F>, usize)>, Vec<(Complex<F>, usize)>> {
+     |          ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+     |
+     = help: for further information visit https://rust-lang.github.io/rust-clippy/rust-1.92.0/index.html#type_complexity
+
+warning: methods with the following characteristics: (`to_*` and `self` type is `Copy`) usually take `self` by value
+    --> src/poly.rs:1088:9
+     |
+1088 |         &self,
+     |         ^^^^^
+     |
+     = help: consider choosing a less ambiguous name
+     = help: for further information visit https://rust-lang.github.io/rust-clippy/rust-1.92.0/index.html#wrong_self_convention
+
+warning: methods with the following characteristics: (`to_*` and `self` type is `Copy`) usually take `self` by value
+    --> src/poly.rs:1341:9
+     |
+1341 |         &self,
+     |         ^^^^^
+     |
+     = help: consider choosing a less ambiguous name
+     = help: for further information visit https://rust-lang.github.io/rust-clippy/rust-1.92.0/index.html#wrong_self_convention
+
+warning: this expression creates a reference which is immediately dereferenced by the compiler
+    --> src/poly.rs:1384:56
+     |
+1384 | ...                   .to_polynomial_impl(field, &result.variables())?;
+     |                                                  ^^^^^^^^^^^^^^^^^^^ help: change this to: `result.variables()`
+     |
+     = help: for further information visit https://rust-lang.github.io/rust-clippy/rust-1.92.0/index.html#needless_borrow
+
+warning: this expression creates a reference which is immediately dereferenced by the compiler
+    --> src/poly.rs:1470:67
+     |
+1470 |                     let mut arg_r = arg.to_polynomial_impl(field, &r.variables())?;
+     |                                                                   ^^^^^^^^^^^^^^ help: change this to: `r.variables()`
+     |
+     = help: for further information visit https://rust-lang.github.io/rust-clippy/rust-1.92.0/index.html#needless_borrow
+
+warning: this expression creates a reference which is immediately dereferenced by the compiler
+    --> src/poly.rs:1479:67
+     |
+1479 |                     let mut arg_r = arg.to_polynomial_impl(field, &r.variables())?;
+     |                                                                   ^^^^^^^^^^^^^^ help: change this to: `r.variables()`
+     |
+     = help: for further information visit https://rust-lang.github.io/rust-clippy/rust-1.92.0/index.html#needless_borrow
+
+warning: methods with the following characteristics: (`to_*` and `self` type is `Copy`) usually take `self` by value
+    --> src/poly.rs:1494:9
+     |
+1494 |         &self,
+     |         ^^^^^
+     |
+     = help: consider choosing a less ambiguous name
+     = help: for further information visit https://rust-lang.github.io/rust-clippy/rust-1.92.0/index.html#wrong_self_convention
+
+warning: methods with the following characteristics: (`to_*` and `self` type is `Copy`) usually take `self` by value
+    --> src/poly.rs:1509:9
+     |
+1509 |         &self,
+     |         ^^^^^
+     |
+     = help: consider choosing a less ambiguous name
+     = help: for further information visit https://rust-lang.github.io/rust-clippy/rust-1.92.0/index.html#wrong_self_convention
+
+warning: this expression creates a reference which is immediately dereferenced by the compiler
+    --> src/poly.rs:1530:57
+     |
+1530 | ...                   .to_polynomial_in_vars_impl(&result.variables(), poly);
+     |                                                   ^^^^^^^^^^^^^^^^^^^ help: change this to: `result.variables()`
+     |
+     = help: for further information visit https://rust-lang.github.io/rust-clippy/rust-1.92.0/index.html#needless_borrow
+
+warning: this expression creates a reference which is immediately dereferenced by the compiler
+    --> src/poly.rs:1583:64
+     |
+1583 |                     let arg_r = arg.to_polynomial_in_vars_impl(&r.variables(), poly);
+     |                                                                ^^^^^^^^^^^^^^ help: change this to: `r.variables()`
+     |
+     = help: for further information visit https://rust-lang.github.io/rust-clippy/rust-1.92.0/index.html#needless_borrow
+
+warning: this expression creates a reference which is immediately dereferenced by the compiler
+    --> src/poly.rs:1591:64
+     |
+1591 |                     let arg_r = arg.to_polynomial_in_vars_impl(&r.variables(), poly);
+     |                                                                ^^^^^^^^^^^^^^ help: change this to: `r.variables()`
+     |
+     = help: for further information visit https://rust-lang.github.io/rust-clippy/rust-1.92.0/index.html#needless_borrow
+
+warning: methods with the following characteristics: (`to_*` and `self` type is `Copy`) usually take `self` by value
+    --> src/poly.rs:1664:9
+     |
+1664 |         &self,
+     |         ^^^^^
+     |
+     = help: consider choosing a less ambiguous name
+     = help: for further information visit https://rust-lang.github.io/rust-clippy/rust-1.92.0/index.html#wrong_self_convention
+
+warning: this expression creates a reference which is immediately dereferenced by the compiler
+    --> src/poly.rs:1740:29
+     |
+1740 | ...                   &result.numerator.variables(),
+     |                       ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^ help: change this to: `result.numerator.variables()`
+     |
+     = help: for further information visit https://rust-lang.github.io/rust-clippy/rust-1.92.0/index.html#needless_borrow
+
+warning: this expression creates a reference which is immediately dereferenced by the compiler
+    --> src/poly.rs:1828:25
+     |
+1828 |                         &r.numerator.variables(),
+     |                         ^^^^^^^^^^^^^^^^^^^^^^^^ help: change this to: `r.numerator.variables()`
+     |
+     = help: for further information visit https://rust-lang.github.io/rust-clippy/rust-1.92.0/index.html#needless_borrow
+
+warning: this expression creates a reference which is immediately dereferenced by the compiler
+    --> src/poly.rs:1841:25
+     |
+1841 |                         &r.numerator.variables(),
+     |                         ^^^^^^^^^^^^^^^^^^^^^^^^ help: change this to: `r.numerator.variables()`
+     |
+     = help: for further information visit https://rust-lang.github.io/rust-clippy/rust-1.92.0/index.html#needless_borrow
+
+warning: this expression creates a reference which is immediately dereferenced by the compiler
+    --> src/poly.rs:1937:29
+     |
+1937 | ...                   &result.numerator.variables(),
+     |                       ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^ help: change this to: `result.numerator.variables()`
+     |
+     = help: for further information visit https://rust-lang.github.io/rust-clippy/rust-1.92.0/index.html#needless_borrow
+
+warning: this expression creates a reference which is immediately dereferenced by the compiler
+    --> src/poly.rs:2030:25
+     |
+2030 |                         &r.numerator.variables(),
+     |                         ^^^^^^^^^^^^^^^^^^^^^^^^ help: change this to: `r.numerator.variables()`
+     |
+     = help: for further information visit https://rust-lang.github.io/rust-clippy/rust-1.92.0/index.html#needless_borrow
+
+warning: this expression creates a reference which is immediately dereferenced by the compiler
+    --> src/poly.rs:2043:25
+     |
+2043 |                         &r.numerator.variables(),
+     |                         ^^^^^^^^^^^^^^^^^^^^^^^^ help: change this to: `r.numerator.variables()`
+     |
+     = help: for further information visit https://rust-lang.github.io/rust-clippy/rust-1.92.0/index.html#needless_borrow
+
+warning: this creates an owned instance just for comparison
+    --> src/poly.rs:2199:18
+     |
+2199 |                 (Atom::from(variable.clone()) == base).then(Rational::one)
+     |                  ^^^^^^^^^^^^^^^^^^^^^^^^^^^^ help: try: `variable.clone()`
+     |
+     = help: for further information visit https://rust-lang.github.io/rust-clippy/rust-1.92.0/index.html#cmp_owned
+     = note: `#[warn(clippy::cmp_owned)]` on by default
+
+warning: this expression creates a reference which is immediately dereferenced by the compiler
+    --> src/poly.rs:2276:17
+     |
+2276 |                 &self.ring(),
+     |                 ^^^^^^^^^^^^ help: change this to: `self.ring()`
+     |
+     = help: for further information visit https://rust-lang.github.io/rust-clippy/rust-1.92.0/index.html#needless_borrow
+
+warning: this expression creates a reference which is immediately dereferenced by the compiler
+    --> src/poly.rs:2359:44
+     |
+2359 |                 .coefficient_to_expression(&self.ring(), &mut num_h);
+     |                                            ^^^^^^^^^^^^ help: change this to: `self.ring()`
+     |
+     = help: for further information visit https://rust-lang.github.io/rust-clippy/rust-1.92.0/index.html#needless_borrow
+
+warning: this expression creates a reference which is immediately dereferenced by the compiler
+    --> src/poly.rs:2429:15
+     |
+2429 |             f(&self.ring(), monomial.coefficient, &mut coeff);
+     |               ^^^^^^^^^^^^ help: change this to: `self.ring()`
+     |
+     = help: for further information visit https://rust-lang.github.io/rust-clippy/rust-1.92.0/index.html#needless_borrow
+
+warning: methods with the following characteristics: (`to_*` and `self` type is `Copy`) usually take `self` by value
+   --> src/printer.rs:587:9
+    |
+587 |         &self,
+    |         ^^^^^
+    |
+    = help: consider choosing a less ambiguous name
+    = help: for further information visit https://rust-lang.github.io/rust-clippy/rust-1.92.0/index.html#wrong_self_convention
+
+warning: methods with the following characteristics: (`to_*` and `self` type is `Copy`) usually take `self` by value
+   --> src/printer.rs:595:39
+    |
+595 |     pub(crate) fn to_canonical_string(&self) -> String {
+    |                                       ^^^^^
+    |
+    = help: consider choosing a less ambiguous name
+    = help: for further information visit https://rust-lang.github.io/rust-clippy/rust-1.92.0/index.html#wrong_self_convention
+
+warning: methods with the following characteristics: (`to_*` and `self` type is `Copy`) usually take `self` by value
+   --> src/printer.rs:603:38
+    |
+603 |     fn to_canonical_string_symmetric(&self, settings: &CanonicalOrderingSettings) -> String {
+    |                                      ^^^^^
+    |
+    = help: consider choosing a less ambiguous name
+    = help: for further information visit https://rust-lang.github.io/rust-clippy/rust-1.92.0/index.html#wrong_self_convention
+
+warning: methods with the following characteristics: (`to_*` and `self` type is `Copy`) usually take `self` by value
+   --> src/printer.rs:713:31
+    |
+713 |     fn to_canonical_view_impl(&self, settings: &CanonicalOrderingSettings, out: &mut String) {
+    |                               ^^^^^
+    |
+    = help: consider choosing a less ambiguous name
+    = help: for further information visit https://rust-lang.github.io/rust-clippy/rust-1.92.0/index.html#wrong_self_convention
+
+warning: this `else { if .. }` block can be collapsed
+    --> src/printer.rs:1698:32
+     |
+1698 |                           } else {
+     |  ________________________________^
+1699 | |                             if superscript_exponent {
+1700 | |                                 new_print_state.in_exp = false;
+1701 | |                                 new_print_state.superscript = true;
+...    |
+1711 | |                         }
+     | |_________________________^
+     |
+     = help: for further information visit https://rust-lang.github.io/rust-clippy/rust-1.92.0/index.html#collapsible_else_if
+help: collapse nested if block
+     |
+1698 ~                         } else if superscript_exponent {
+1699 +                             new_print_state.in_exp = false;
+1700 +                             new_print_state.superscript = true;
+1701 +                             AtomPrinter::format_digits(
+1702 +                                 num.unsigned_abs().to_string(),
+1703 +                                 opts,
+1704 +                                 &new_print_state,
+1705 +                                 f,
+1706 +                             )?;
+1707 +                         } else {
+1708 +                             exp.format(opts, new_print_state, f)?;
+1709 +                         }
+     |
+
+warning: usage of `bool::then` in `filter_map`
+    --> src/solve.rs:1011:14
+     |
+1011 |               .filter_map(|(variable, value)| {
+     |  ______________^
+1012 | |                 (!matches!(variable, PolyVariable::Temporary(_)))
+1013 | |                     .then(|| (variable.to_atom(), value))
+1014 | |             })
+     | |______________^ help: use `filter` then `map` instead: `filter(|&(variable, value)| (!matches!(variable, PolyVariable::Temporary(_)))).map(|(variable, value)| (variable.to_atom(), value))`
+     |
+     = help: for further information visit https://rust-lang.github.io/rust-clippy/rust-1.92.0/index.html#filter_map_bool_then
+
+warning: very complex type used. Consider factoring parts into `type` definitions
+    --> src/solve.rs:1560:10
+     |
+1560 |       ) -> Result<
+     |  __________^
+1561 | |         (
+1562 | |             Matrix<RationalPolynomialField<Z, E>>,
+1563 | |             Matrix<RationalPolynomialField<Z, E>>,
+1564 | |         ),
+1565 | |         SolveError,
+1566 | |     > {
+     | |_____^
+     |
+     = help: for further information visit https://rust-lang.github.io/rust-clippy/rust-1.92.0/index.html#type_complexity
+
+warning: very complex type used. Consider factoring parts into `type` definitions
+    --> src/solve.rs:1582:10
+     |
+1582 |       ) -> Result<
+     |  __________^
+1583 | |         (
+1584 | |             Matrix<RationalPolynomialField<Z, E>>,
+1585 | |             Matrix<RationalPolynomialField<Z, E>>,
+1586 | |         ),
+1587 | |         SolveError,
+1588 | |     > {
+     | |_____^
+     |
+     = help: for further information visit https://rust-lang.github.io/rust-clippy/rust-1.92.0/index.html#type_complexity
+
+warning: the loop variable `i` is only used to index `vars`
+    --> src/solve.rs:1817:26
+     |
+1817 |                 for i in var_index as usize..vars.len() {
+     |                          ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+     |
+     = help: for further information visit https://rust-lang.github.io/rust-clippy/rust-1.92.0/index.html#needless_range_loop
+help: consider using an iterator
+     |
+1817 -                 for i in var_index as usize..vars.len() {
+1817 +                 for <item> in vars.iter().skip(var_index as usize) {
+     |
+
+warning: unsafe function's docs are missing a `# Safety` section
+   --> src/state.rs:691:5
+    |
+691 |     pub unsafe fn reset() {
+    |     ^^^^^^^^^^^^^^^^^^^^^
+    |
+    = help: for further information visit https://rust-lang.github.io/rust-clippy/rust-1.92.0/index.html#missing_safety_doc
+    = note: `#[warn(clippy::missing_safety_doc)]` on by default
+
+warning: this function has too many arguments (12/7)
+   --> src/state.rs:811:5
+    |
+811 | /     pub(crate) fn get_symbol_with_attributes(
+812 | |         &mut self,
+813 | |         name: NamespacedSymbol,
+814 | |         attributes: &[SymbolAttribute],
+...   |
+823 | |         user_data: Option<UserData>,
+824 | |     ) -> Result<Symbol, String> {
+    | |_______________________________^
+    |
+    = help: for further information visit https://rust-lang.github.io/rust-clippy/rust-1.92.0/index.html#too_many_arguments
+
+warning: very complex type used. Consider factoring parts into `type` definitions
+    --> src/state.rs:1387:22
+     |
+1387 |         conflict_fn: Option<Box<dyn Fn(&str) -> String>>,
+     |                      ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+     |
+     = help: for further information visit https://rust-lang.github.io/rust-clippy/rust-1.92.0/index.html#type_complexity
+
+warning: this can be `std::io::Error::other(_)`
+   --> src/streaming.rs:317:48
+    |
+317 |           let f = self.file_buf.last_mut().ok_or(std::io::Error::new(
+    |  ________________________________________________^
+318 | |             std::io::ErrorKind::Other,
+319 | |             "no file buffer",
+320 | |         ))?;
+    | |_________^
+    |
+    = help: for further information visit https://rust-lang.github.io/rust-clippy/rust-1.92.0/index.html#io_other_error
+    = note: `#[warn(clippy::io_other_error)]` on by default
+help: use `std::io::Error::other`
+    |
+317 ~         let f = self.file_buf.last_mut().ok_or(std::io::Error::other(
+318 ~             "no file buffer",
+    |
+
+warning: very complex type used. Consider factoring parts into `type` definitions
+   --> src/streaming.rs:338:22
+    |
+338 |         conflict_fn: Option<Box<dyn Fn(&str) -> SmartString<LazyCompact>>>,
+    |                      ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+    |
+    = help: for further information visit https://rust-lang.github.io/rust-clippy/rust-1.92.0/index.html#type_complexity
+
+warning: very complex type used. Consider factoring parts into `type` definitions
+    --> src/transcendental.rs:2519:16
+     |
+2519 |     evaluator: fn(&Complex<Float>, &Complex<Float>, u32) -> Option<Complex<Float>>,
+     |                ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+     |
+     = help: for further information visit https://rust-lang.github.io/rust-clippy/rust-1.92.0/index.html#type_complexity
+
+warning: very complex type used. Consider factoring parts into `type` definitions
+    --> src/transcendental.rs:2535:16
+     |
+2535 |     evaluator: fn(&Complex<Float>, &Complex<Float>, u32) -> Option<Complex<Float>>,
+     |                ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+     |
+     = help: for further information visit https://rust-lang.github.io/rust-clippy/rust-1.92.0/index.html#type_complexity
+
+warning: very complex type used. Consider factoring parts into `type` definitions
+    --> src/transcendental.rs:2645:16
+     |
+2645 |     evaluator: fn(&Complex<Float>, &Complex<Float>, u32) -> Option<Complex<Float>>,
+     |                ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+     |
+     = help: for further information visit https://rust-lang.github.io/rust-clippy/rust-1.92.0/index.html#type_complexity
+
+warning: very complex type used. Consider factoring parts into `type` definitions
+    --> src/transcendental.rs:2665:16
+     |
+2665 |     evaluator: fn(&Complex<Float>, &Complex<Float>, u32) -> Option<Complex<Float>>,
+     |                ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+     |
+     = help: for further information visit https://rust-lang.github.io/rust-clippy/rust-1.92.0/index.html#type_complexity
+
+warning: very complex type used. Consider factoring parts into `type` definitions
+    --> src/transcendental.rs:2857:16
+     |
+2857 |     evaluator: fn(&Complex<Float>, &Complex<Float>, u32) -> Option<Complex<Float>>,
+     |                ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+     |
+     = help: for further information visit https://rust-lang.github.io/rust-clippy/rust-1.92.0/index.html#type_complexity
+
+warning: this `let...else` may be rewritten with the `?` operator
+    --> src/transcendental.rs:3019:9
+     |
+3019 | /         let Some(bernoulli_index) = n.checked_neg().and_then(|x| x.checked_add(1)) else {
+3020 | |             return None;
+3021 | |         };
+     | |__________^ help: replace it with: `let bernoulli_index = n.checked_neg().and_then(|x| x.checked_add(1))?;`
+     |
+     = help: for further information visit https://rust-lang.github.io/rust-clippy/rust-1.92.0/index.html#question_mark
+
+warning: very complex type used. Consider factoring parts into `type` definitions
+    --> src/transcendental.rs:3370:16
+     |
+3370 |     evaluator: fn(&Complex<Float>, &Complex<Float>, u32) -> Option<Complex<Float>>,
+     |                ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+     |
+     = help: for further information visit https://rust-lang.github.io/rust-clippy/rust-1.92.0/index.html#type_complexity
+
+warning: very complex type used. Consider factoring parts into `type` definitions
+   --> src/transformer.rs:697:37
+    |
+697 |                     let key_map_fn: Option<Box<dyn Fn(AtomView, &mut Settable<'_, Atom>)>> =
+    |                                     ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+    |
+    = help: for further information visit https://rust-lang.github.io/rust-clippy/rust-1.92.0/index.html#type_complexity
+
+warning: very complex type used. Consider factoring parts into `type` definitions
+   --> src/transformer.rs:708:39
+    |
+708 |                     let coeff_map_fn: Option<Box<dyn Fn(AtomView, &mut Settable<'_, Atom>)>> =
+    |                                       ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+    |
+    = help: for further information visit https://rust-lang.github.io/rust-clippy/rust-1.92.0/index.html#type_complexity
+
+warning: very complex type used. Consider factoring parts into `type` definitions
+   --> src/transformer.rs:731:41
+    |
+731 |                         let key_map_fn: Box<dyn Fn(AtomView, &mut Settable<'_, Atom>)> =
+    |                                         ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+    |
+    = help: for further information visit https://rust-lang.github.io/rust-clippy/rust-1.92.0/index.html#type_complexity
+
+warning: very complex type used. Consider factoring parts into `type` definitions
+   --> src/transformer.rs:742:43
+    |
+742 |                         let coeff_map_fn: Box<dyn Fn(AtomView, &mut Settable<'_, Atom>)> =
+    |                                           ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+    |
+    = help: for further information visit https://rust-lang.github.io/rust-clippy/rust-1.92.0/index.html#type_complexity
+
+warning: method `borrow` can be confused for the standard trait method `std::borrow::Borrow::borrow`
+  --> src/utils.rs:78:5
+   |
+78 | /     pub fn borrow(&self) -> &T {
+79 | |         match self {
+80 | |             BorrowedOrOwned::Owned(t) => t,
+81 | |             BorrowedOrOwned::Borrowed(t) => t,
+82 | |         }
+83 | |     }
+   | |_____^
+   |
+   = help: consider implementing the trait `std::borrow::Borrow` or choosing a less ambiguous method name
+   = help: for further information visit https://rust-lang.github.io/rust-clippy/rust-1.92.0/index.html#should_implement_trait
+
+warning: `symbolica` (lib) generated 249 warnings (run `cargo clippy --fix --lib -p symbolica` to apply 100 suggestions)
+    Finished `dev` profile [unoptimized + debuginfo] target(s) in 9.18s

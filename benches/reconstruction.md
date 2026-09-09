@@ -1,5 +1,7 @@
 # Rational function reconstruction experiment
 
+Latest optimization: [reuse automatic-selection rows](reconstruction-nb0-suite.md)
+and compare a deterministic 32-coefficient sample from the public `nb0` IBP table.
 Latest reference update: [multivariate FIRE7 over Q](reconstruction-fire7-multivariate.md)
 extends the authors' implementation comparison to the four-variable amplitude
 and `nb0` coefficients.

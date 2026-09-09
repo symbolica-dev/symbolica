@@ -909,6 +909,45 @@ fn automatic_selection_validates_structure_and_preserves_probe_limits() {
 }
 
 #[test]
+fn automatic_reuses_its_separated_pilot_row() {
+    let field = Zp64::new(2_305_843_009_213_693_951);
+    let vars = Arc::new(["x", "y", "z"].map(|s| symbol!(s).into()).to_vec());
+    let n: MultivariatePolynomial<_, u16> =
+        parse!("(x+2)^3*(y+3)^2*(z+4)^7+x*y+1").to_polynomial(&field, vars.clone());
+    let d: MultivariatePolynomial<_, u16> =
+        parse!("(x+y+2)*(z+5)^5").to_polynomial(&field, vars.clone());
+    for seed in [1, 17, 41] {
+        let mut costs = Vec::new();
+        for method in [BalancedZippelSeparated, Automatic] {
+            let calls = Cell::new(0);
+            let (r, stats) = reconstruct_rational_function(
+                field.clone(),
+                vars.clone(),
+                |f, p| {
+                    calls.set(calls.get() + 1);
+                    let dv = d.replace_all(p);
+                    (!f.is_zero(&dv)).then(|| f.div(&n.replace_all(p), &dv))
+                },
+                method,
+                &ReconstructionOptions {
+                    seed,
+                    max_degree: 20,
+                    ..Default::default()
+                },
+            )
+            .unwrap();
+            assert_eq!(&r.numerator * &d, &r.denominator * &n);
+            assert_eq!(stats.probes, calls.get());
+            assert_eq!(stats.separation_fallbacks, 0);
+            costs.push((stats.probes, stats.selection_probes));
+        }
+        // Selection has already reconstructed the final-variable row. Its
+        // reuse must repay at least ten probes of the pilot's measured cost.
+        assert!(costs[1].0 + 10 <= costs[0].0 + costs[1].1, "{costs:?}");
+    }
+}
+
+#[test]
 fn sparse_row_support_saves_probes_with_fixed_and_reciprocal_rows() {
     let field = Zp64::new(2_305_843_009_213_693_951);
     let vars: Arc<Vec<symbolica::poly::PolyVariable>> =
