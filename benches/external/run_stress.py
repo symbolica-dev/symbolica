@@ -18,13 +18,14 @@ affinity = ["taskset", "-c", os.environ["BENCH_CPU"]] if "BENCH_CPU" in os.envir
 loader = ([os.environ["EXTERNAL_LOADER"], "--library-path", os.environ["EXTERNAL_LIBRARY_PATH"]]
           if "EXTERNAL_LOADER" in os.environ else [])
 env = {**os.environ, "BENCH_PRIME": "9223372036854775783", "CACHED_ORACLE": "1"}
+env.pop("RECONSTRUCTION_DENSE_ROWS", None)
 env.pop("EXPORT_ORACLE", None)
 env.pop("RECONSTRUCTION_DEGREE_RACE", None)
 env.pop("BENCH_ORDER", None)
 env.pop("FIRE7_LEARN_BATCH", None)
 methods = os.environ.get("BENCH_METHODS", "BalancedZippel,FireFly_default").split(",")
-assert set(methods) <= {"Automatic", "BalancedZippel", "BalancedZippelSeparated", "CuytLee", "CuytLeePruned", "CuytLeePrunedRace", "BalancedZippelRace", "FireFly_default", "FIRE7_balanced_adapter", "FIRE7_learned_batch"}
-fields = "case,method,seed,status,elapsed_us,probes,prime,oracle,degree_race,num_terms,den_terms,setup_ms,selected_methods,selection_probes".split(",")
+assert set(methods) <= {"AutomaticDenseRows", "BalancedZippelDenseRows", "Automatic", "BalancedZippel", "BalancedZippelSeparated", "CuytLee", "CuytLeePruned", "CuytLeePrunedRace", "BalancedZippelRace", "FireFly_default", "FIRE7_balanced_adapter", "FIRE7_learned_batch"}
+fields = "case,method,seed,status,elapsed_us,probes,prime,oracle,degree_race,num_terms,den_terms,setup_ms,selected_methods,selection_probes,sparse_rows,sparse_row_fallbacks".split(",")
 with output.open("w") as out:
     writer = csv.DictWriter(out, fields, lineterminator="\n")
     writer.writeheader()
@@ -43,6 +44,8 @@ with output.open("w") as out:
                 external_method = method == "FireFly_default" or method.startswith("FIRE7_")
                 race = method in {"BalancedZippelRace", "CuytLeePrunedRace"}
                 job_env = {**env, "FIREFLY_BENCH_SEED": str(seed)}
+                if method.endswith("DenseRows"):
+                    job_env["RECONSTRUCTION_DENSE_ROWS"] = "1"
                 if race:
                     job_env["RECONSTRUCTION_DEGREE_RACE"] = "1"
                 if method == "FIRE7_learned_batch":
@@ -50,7 +53,7 @@ with output.open("w") as out:
                 binary = "firefly-stress" if method == "FireFly_default" else "fire7-stress"
                 args = (loader + [str(external / binary), str(oracle), case, str(seed)]
                         if external_method else
-                        [str(rust), case, method.removesuffix("Race") if race else method, str(seed)])
+                        [str(rust), case, method.removesuffix("DenseRows").removesuffix("Race"), str(seed)])
                 row = dict(case=case, method=method, seed=seed, prime=prime, oracle="cached_powers",
                            degree_race=int(race), num_terms=ns, den_terms=ds)
                 try:
@@ -66,7 +69,7 @@ with output.open("w") as out:
                         parsed = list(csv.DictReader(lines[start:]))
                         if len(parsed) != 1:
                             raise ValueError(result.stdout)
-                        for key in ["status", "elapsed_us", "probes", "setup_ms", "selected_methods", "selection_probes"]:
+                        for key in ["status", "elapsed_us", "probes", "setup_ms", "selected_methods", "selection_probes", "sparse_rows", "sparse_row_fallbacks"]:
                             if key in parsed[0]:
                                 row[key] = parsed[0][key]
                 except subprocess.TimeoutExpired as e:

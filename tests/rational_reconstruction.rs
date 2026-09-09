@@ -907,3 +907,106 @@ fn automatic_selection_validates_structure_and_preserves_probe_limits() {
         assert_eq!(calls.get(), 5);
     }
 }
+
+#[test]
+fn sparse_row_support_saves_probes_with_fixed_and_reciprocal_rows() {
+    let field = Zp64::new(2_305_843_009_213_693_951);
+    let vars: Arc<Vec<symbolica::poly::PolyVariable>> =
+        Arc::new(["x", "y", "z"].iter().map(|s| symbol!(*s).into()).collect());
+    let n: MultivariatePolynomial<_, u16> =
+        parse!("x^20+y^20+z^20").to_polynomial(&field, vars.clone());
+    for den in ["x^20-y^20+2*z^20", "(x^20+1)*(y^20+1)*(z^20+1)"] {
+        let d: MultivariatePolynomial<_, u16> = parse!(den).to_polynomial(&field, vars.clone());
+        for method in [BalancedZippel, BalancedZippelSeparated] {
+            let mut costs = Vec::new();
+            for reuse in [false, true] {
+                let calls = Cell::new(0);
+                let (r, stats) = reconstruct_rational_function(
+                    field.clone(),
+                    vars.clone(),
+                    |f, p| {
+                        calls.set(calls.get() + 1);
+                        let dv = d.replace_all(p);
+                        (!f.is_zero(&dv)).then(|| f.div(&n.replace_all(p), &dv))
+                    },
+                    method,
+                    &ReconstructionOptions {
+                        seed: 17,
+                        max_degree: 32,
+                        reuse_row_support: reuse,
+                        ..Default::default()
+                    },
+                )
+                .unwrap();
+                assert_eq!(&r.numerator * &d, &r.denominator * &n);
+                assert_eq!(calls.get(), stats.probes);
+                if reuse {
+                    assert!(stats.sparse_rows > 0);
+                } else {
+                    assert_eq!(stats.sparse_rows, 0);
+                }
+                costs.push(stats.probes);
+            }
+            assert!(costs[1] < costs[0], "{method:?}/{den}: {costs:?}");
+        }
+    }
+}
+
+#[test]
+fn sparse_row_support_recovers_from_a_missing_power() {
+    let field = Zp64::new(2_305_843_009_213_693_951);
+    let vars = Arc::new(vec![symbol!("x").into(), symbol!("y").into()]);
+    let n: MultivariatePolynomial<_, u16> =
+        parse!("x^20+y^20+1").to_polynomial(&field, vars.clone());
+    let d: MultivariatePolynomial<_, u16> =
+        parse!("x^20-y^20+3").to_polynomial(&field, vars.clone());
+    let x: MultivariatePolynomial<_, u16> = parse!("x").to_polynomial(&field, vars.clone());
+    let y: MultivariatePolynomial<_, u16> = parse!("y").to_polynomial(&field, vars.clone());
+    let a = Cell::new(None);
+    let b = Cell::new(None);
+    let calls = Cell::new(0);
+    let (r, stats) = reconstruct_rational_function(
+        field.clone(),
+        vars,
+        |f, p| {
+            calls.set(calls.get() + 1);
+            let anchor_y = b.get().unwrap_or_else(|| {
+                b.set(Some(p[1]));
+                p[1]
+            });
+            // Until the second slice, every query has y=b. Choose a at the
+            // first query off that slice. Thus (x-a)*(y-b)*y vanishes on all
+            // preceding queries and on the entire first y-row: the oracle
+            // remains one consistent polynomial, with missing learned powers.
+            if a.get().is_none() && p[1] != anchor_y {
+                a.set(Some(p[0]));
+            }
+            let extra = a.get().map_or_else(
+                || f.zero(),
+                |anchor_x| {
+                    f.mul(
+                        &f.mul(&f.sub(&p[0], &anchor_x), &f.sub(&p[1], &anchor_y)),
+                        &p[1],
+                    )
+                },
+            );
+            let dv = d.replace_all(p);
+            (!f.is_zero(&dv)).then(|| f.div(&f.add(&n.replace_all(p), &extra), &dv))
+        },
+        BalancedZippel,
+        &ReconstructionOptions {
+            seed: 31,
+            max_degree: 32,
+            max_probes: 2000,
+            ..Default::default()
+        },
+    )
+    .unwrap();
+    let target =
+        n + (&x - &x.constant(a.get().unwrap())) * &(&y - &y.constant(b.get().unwrap())) * &y;
+    assert_eq!(&r.numerator * &d, &r.denominator * &target);
+    assert_eq!(stats.probes, calls.get());
+    assert!(stats.sparse_row_fallbacks > 0);
+    assert!(stats.sparse_rows > 0);
+    assert!(stats.probes <= 2000);
+}

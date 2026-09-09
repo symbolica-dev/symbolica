@@ -60,6 +60,7 @@ pub(super) fn run(
             .unwrap_or(200_000),
         degree_race: std::env::var_os("RECONSTRUCTION_DEGREE_RACE").is_some(),
         reuse_coefficients: std::env::var_os("RECONSTRUCTION_NO_REUSE").is_none(),
+        reuse_row_support: std::env::var_os("RECONSTRUCTION_DENSE_ROWS").is_none(),
         ..Default::default()
     };
     let mut image: Option<(u64, RationalPolynomial<Zp64, u16>, CachedOracle)> = None;

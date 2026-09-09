@@ -165,3 +165,9 @@ Both stress runners accept `BENCH_METHODS=Automatic`, using Symbolica's generic
 slice-based method selector. The modular CSV records the chosen method and
 selection probes; Q records methods used by successful ordinary prime images.
 See the [automatic-selection report](../reconstruction-automatic.md).
+
+Sparse balanced-row interpolation is enabled by default. Select
+`AutomaticDenseRows` or `BalancedZippelDenseRows` in either stress runner to
+disable it for a comparison using the same executable. The modular CSV includes
+accepted sparse rows and fallback counts. See the
+[sparse-row comparison](../reconstruction-sparse-rows.md) for results and checks.
