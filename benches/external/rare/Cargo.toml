@@ -1,0 +1,18 @@
+[package]
+name = "symbolica-rare-benchmark"
+version = "0.1.0"
+edition = "2021"
+publish = false
+
+[workspace]
+
+[dependencies]
+rare = { git = "https://github.com/a-maier/rare.git", tag = "0.9.2", features = ["thiele-multivar"] }
+rand = "0.8.5"
+rand_xoshiro = "0.6.0"
+rug = { version = "1.25.0", default-features = false, features = ["std", "integer", "gmp-mpfr-sys"] }
+seq-macro = "0.3.5"
+
+[profile.release]
+lto = false
+codegen-units = 16

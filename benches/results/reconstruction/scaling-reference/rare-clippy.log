@@ -1,0 +1,25 @@
+    Checking cfg-if v1.0.0
+    Checking byteorder v1.5.0
+    Checking libc v0.2.155
+    Checking num-traits v0.2.19
+    Checking libm v0.2.8
+    Checking az v1.2.1
+    Checking either v1.13.0
+    Checking thiserror v1.0.63
+    Checking log v0.4.22
+    Checking array-init v2.1.0
+    Checking zerocopy v0.7.35
+    Checking itertools v0.12.1
+    Checking getrandom v0.2.15
+    Checking gmp-mpfr-sys v1.6.4
+    Checking num-integer v0.1.46
+    Checking ppv-lite86 v0.2.20
+    Checking rand_core v0.6.4
+    Checking rand_xoshiro v0.6.0
+    Checking rug v1.25.0
+    Checking rand_chacha v0.3.1
+    Checking rand v0.8.5
+    Checking ffnt v0.8.0
+    Checking rare v0.9.2 (https://github.com/a-maier/rare.git?tag=0.9.2#ed358c18)
+    Checking symbolica-rare-benchmark v0.1.0 (/common/dev/symbolica-reconstruction/benches/external/rare)
+    Finished `release` profile [optimized] target(s) in 6.41s

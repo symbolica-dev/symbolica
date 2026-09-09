@@ -1,0 +1,172 @@
+{
+  "baseline_commit": "9e47f9d9",
+  "tests": 38,
+  "rows": {
+    "division-free-thiele": {
+      "count": 90,
+      "statuses": {
+        "ok": 90
+      }
+    },
+    "division-free-q": {
+      "count": 5,
+      "statuses": {
+        "ok": 5
+      }
+    },
+    "division-free-modular": {
+      "count": 4,
+      "statuses": {
+        "ok": 4
+      }
+    },
+    "division-free-nb0": {
+      "count": 3319,
+      "statuses": {
+        "ok": 3319
+      }
+    },
+    "division-free-graph5": {
+      "count": 945,
+      "statuses": {
+        "ok": 945
+      }
+    },
+    "rare-large": {
+      "count": 10,
+      "statuses": {
+        "ok": 8,
+        "time_limit": 2
+      }
+    },
+    "rare-amplitude-extended": {
+      "count": 2,
+      "statuses": {
+        "ok": 2
+      }
+    },
+    "rare-graph5": {
+      "count": 192,
+      "statuses": {
+        "ok": 192
+      }
+    },
+    "rare-nb0": {
+      "count": 32,
+      "statuses": {
+        "ok": 32
+      }
+    },
+    "rare-runner-smoke": {
+      "count": 5,
+      "statuses": {
+        "ok": 5
+      }
+    },
+    "division-free-timeout-control": {
+      "count": 10,
+      "statuses": {
+        "process_timeout": 10
+      }
+    }
+  },
+  "full_table_preservation": {
+    "nb0": {
+      "cases": 3319,
+      "probes": 505874,
+      "all_counts_and_methods_unchanged": true
+    },
+    "graph5": {
+      "cases": 945,
+      "probes": 20311,
+      "all_counts_and_methods_unchanged": true
+    }
+  },
+  "thiele": [
+    {
+      "case": "thiele_dense_32",
+      "pairs": 9,
+      "probes": 71,
+      "baseline_median_us": 512.402,
+      "current_median_us": 222.561,
+      "median_paired_speedup": 2.464620230976986
+    },
+    {
+      "case": "thiele_dense_64",
+      "pairs": 9,
+      "probes": 135,
+      "baseline_median_us": 2071.197,
+      "current_median_us": 720.063,
+      "median_paired_speedup": 2.8869562963346986
+    },
+    {
+      "case": "thiele_dense_128",
+      "pairs": 9,
+      "probes": 263,
+      "baseline_median_us": 21098.237,
+      "current_median_us": 16002.838,
+      "median_paired_speedup": 1.318021583397379
+    },
+    {
+      "case": "thiele_dense_256",
+      "pairs": 9,
+      "probes": 519,
+      "baseline_median_us": 40535.897,
+      "current_median_us": 20637.665,
+      "median_paired_speedup": 1.9243358945003994
+    },
+    {
+      "case": "thiele_dense_512",
+      "pairs": 9,
+      "probes": 1031,
+      "baseline_median_us": 123938.269,
+      "current_median_us": 45608.775,
+      "median_paired_speedup": 2.7560665177918344
+    }
+  ],
+  "reference_samples": {
+    "graph5": {
+      "runs_per_method": 96,
+      "wins": {
+        "Symbolica": 81,
+        "rare": 15
+      },
+      "probes": {
+        "Symbolica": 3096,
+        "rare": 4977
+      }
+    },
+    "nb0": {
+      "runs_per_method": 32,
+      "wins": {
+        "Symbolica": 31,
+        "tie": 1
+      },
+      "probes": {
+        "Symbolica": 23084,
+        "rare": 429093
+      }
+    }
+  },
+  "successful_benchmark_reconstructions": 4602,
+  "reference_revisions": {
+    "rare": "ed358c18d1129482afa51b9debb66ceef169f642",
+    "scaling-rec": "e79e8886f9a50a577029f7fe98dc538ab5b6e0f3",
+    "FIRE7": "d132e5365dd2a13db9cd9dbaf5c200b53d489cfd",
+    "FUEL": "8627acefec5be237080e94c1ea903a52c680aa32",
+    "FireFly": "4ce258e5ace6361513c4bdaac93a247cc0e3fdbb"
+  },
+  "environment": {
+    "date_utc": "2026-09-09",
+    "host": "shared AMD EPYC 9754",
+    "rust": "1.92.0",
+    "gcc": "15.2.0",
+    "release_lto": false,
+    "release_codegen_units": 16,
+    "rare_gmp": "6.3.0",
+    "rare_mpfr": "4.2.1",
+    "rare_extra_points": 1,
+    "symbolica_verification_points": 3,
+    "controlled_host_load": false
+  }
+}

@@ -458,19 +458,26 @@ impl<F: FnMut(&Zp64, &[Element]) -> Option<Element>> Context<'_, F> {
                 continue;
             }
             checks = 0;
-            let mut b = y;
+            // Division-free reciprocal differences (arXiv:2409.08757, Eq. 6-7).
+            // Keeping b = numerator/denominator replaces one inversion per
+            // previous node with a single final inversion. Check intermediate
+            // zero denominators exactly as in the ordinary Thiele recurrence.
+            let mut numerator = y;
+            let mut denominator = f.one();
             let mut valid = true;
             for (x, a) in nodes.iter().zip(&differences) {
-                let den = f.sub(&b, a);
+                let den = f.sub(&numerator, &f.mul(a, &denominator));
                 if f.is_zero(&den) {
                     valid = false;
                     break;
                 }
-                b = f.div(&f.sub(&t, x), &den);
+                numerator = f.mul(&f.sub(&t, x), &denominator);
+                denominator = den;
             }
             if !valid {
                 continue;
             }
+            let b = f.div(&numerator, &denominator);
             if nodes.is_empty() {
                 p = dense.constant(b);
             } else {

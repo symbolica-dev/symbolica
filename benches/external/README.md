@@ -1,4 +1,29 @@
-# FireFly and Smirnov–Zeng implementation comparison
+# FireFly, Smirnov–Zeng and scaling implementation comparison
+
+The [scaling reference update](../reconstruction-scaling-reference.md) adds the
+actual `rare` 0.9.2 implementation as a standalone benchmark dependency. Build
+it and the independent FLINT result checker with
+`bash benches/external/build_rare.sh`, then run
+`python3 benches/external/check_rare_adapter.py`. The shared `run_q_stress.py`
+runner accepts `Rare_scaling` in `BENCH_METHODS`, including alongside
+`Automatic,FireFly_default,FireFly_scan,FIRE7_Q_learned`.
+
+`rare` uses its native 60-bit primes, one extra confirmation point, and a seeded
+version of the authors' scaling driver. The adapter supports one to four
+variables and at most sixteen primes; `MAX_PRIMES`, `MAX_TOTAL_PROBES` and
+`BENCH_TIMEOUT` set its limits. `PROCESS_TIMEOUT` limits the entire process.
+Only an independently verified exact Q identity reports `ok`; failed and
+incomplete runs retain their status and measured probe counts. Reconstructed
+expressions and checker output remain beside the CSV in its logs directory.
+The existing external-loader variables also apply to the result checker.
+
+`compare_thiele.py OUTPUT.csv` runs an interleaved arithmetic comparison against
+the executable selected by `SYMBOLICA_BASELINE` (default
+`target/reconstruction-external/division-free-baseline`). Save that executable
+from commit `9e47f9d9` before rebuilding. The script generates deterministic
+dense univariate inputs, stores their hashes and both binary hashes, and retains
+all results. `SYMBOLICA_STRESS_BINARY`, `BENCH_CPU`, `RECONSTRUCTION_REPEATS`
+and `PROCESS_TIMEOUT` control the current binary and execution.
 
 The tables here describe the performance checkpoint `306c375`. See the
 [probe-count update](../reconstruction-probes.md) for the subsequent Symbolica

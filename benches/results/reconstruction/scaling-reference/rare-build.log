@@ -1,0 +1,5 @@
+   Compiling gmp-mpfr-sys v1.6.4
+   Compiling rug v1.25.0
+   Compiling rare v0.9.2 (https://github.com/a-maier/rare.git?tag=0.9.2#ed358c18)
+   Compiling symbolica-rare-benchmark v0.1.0 (/common/dev/symbolica-reconstruction/benches/external/rare)
+    Finished `release` profile [optimized] target(s) in 1m 39s

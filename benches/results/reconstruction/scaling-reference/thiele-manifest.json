@@ -1,0 +1,45 @@
+{
+  "coefficient_rule": "SHA256('Thiele:20260909:SIDE:POWER'), first 8 bytes big-endian modulo 1000003 minus 500001; replace zero with one",
+  "variables": [
+    "x"
+  ],
+  "prime": 9223372036854775783,
+  "method": "BalancedZippel",
+  "entries": [
+    {
+      "case": "thiele_dense_32",
+      "degree": 32,
+      "sha256": "f7073f4eacc7b3ca2f8a7bced237cbdcd988779a65ac83e0a3e0e1912bd649fd"
+    },
+    {
+      "case": "thiele_dense_64",
+      "degree": 64,
+      "sha256": "e7949a5f21ead83191006bcb26df13b6dbcaf33cd857b339a41282bc0f2fffb2"
+    },
+    {
+      "case": "thiele_dense_128",
+      "degree": 128,
+      "sha256": "7facee183655b03ee1a0190dfc25f831ae41b053bf30daccfc847178bf301a60"
+    },
+    {
+      "case": "thiele_dense_256",
+      "degree": 256,
+      "sha256": "1c472394c753b7bc14babcf2e699244779c41c0b7be72662c8569cdd12ac687c"
+    },
+    {
+      "case": "thiele_dense_512",
+      "degree": 512,
+      "sha256": "3da88c78ada0b10245c46c7deef0717cfdb4430b8d826c8df4c6be4bdcac2bc1"
+    }
+  ],
+  "binaries": {
+    "baseline": {
+      "path": "/common/dev/symbolica-reconstruction/target/reconstruction-external/division-free-baseline",
+      "sha256": "b090cdfad44c392396706f1a6a9b5e47c31d2762c1329233f6e268c65db79b95"
+    },
+    "current": {
+      "path": "/common/dev/symbolica-reconstruction/target/release/examples/reconstruction_stress_benchmark",
+      "sha256": "a7f5bb182687d0aeae321cd74c674bfda0726ff1223c5fd21d1a2c6c0d829ee7"
+    }
+  }
+}

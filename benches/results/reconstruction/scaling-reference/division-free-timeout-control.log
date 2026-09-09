@@ -1,0 +1,10 @@
+thiele_dense_32 baseline 1 process_timeout None
+thiele_dense_32 current 1 process_timeout None
+thiele_dense_64 baseline 1 process_timeout None
+thiele_dense_64 current 1 process_timeout None
+thiele_dense_128 baseline 1 process_timeout None
+thiele_dense_128 current 1 process_timeout None
+thiele_dense_256 baseline 1 process_timeout None
+thiele_dense_256 current 1 process_timeout None
+thiele_dense_512 baseline 1 process_timeout None
+thiele_dense_512 current 1 process_timeout None
