@@ -16,7 +16,7 @@ read -r -a libraries <<< "$(pkg-config --libs flint zlib)"
 "${CXX:-g++}" -O3 -std=c++17 -pthread "${includes[@]}" \
     -I "$external/firefly/source/include" -I "$external/firefly/build/include" \
     benches/external/firefly_q_stress.cpp "$external/firefly/build/libfirefly.a" \
-    "${libraries[@]}" -lgmpxx -o "$external/firefly-q-stress"
+    "${libraries[@]}" -lgmpxx -ldl -o "$external/firefly-q-stress"
 fuel="$external/fire/FIRE7/extra/fuel"
 "${CXX:-g++}" -O3 -std=c++17 -DENABLE_FLINT -fopenmp \
     -ffunction-sections -fdata-sections -include flint/fmpq.h "${includes[@]}" \

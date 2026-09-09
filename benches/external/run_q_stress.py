@@ -55,6 +55,22 @@ with output.open("w") as out:
                 row = dict(case=case, method=method, seed=seed, oracle="cached_powers_Q",
                            prime_policy="Rare_native_60" if is_rare else "FIRE7_native_64" if is_fire7 else "FireFly_default" if is_external else "Symbolica_default",
                            num_terms=ns, den_terms=ds)
+                if "TRACE_ORACLE_DIR" in env or "TRACE_ORACLE_PATH" in env:
+                    row["oracle"] = "ratracer_trace"
+                    if "TRACE_ORACLE_DIR" in env:
+                        job_env["TRACE_ORACLE_PATH"] = str(Path(env["TRACE_ORACLE_DIR"]) / (case + ".trace"))
+                    if is_fire7 or is_rare:
+                        row["status"] = "unsupported_trace_backend"
+                        writer.writerow(row)
+                        out.flush()
+                        continue
+                    if not is_external:
+                        args = loader + args
+                if is_rare and int(nv) > 8:
+                    row["status"] = "unsupported_variable_count"
+                    writer.writerow(row)
+                    out.flush()
+                    continue
                 try:
                     result = subprocess.run(affinity + args, cwd=run_dir if is_external else root,
                                             env=job_env, text=True, capture_output=True,

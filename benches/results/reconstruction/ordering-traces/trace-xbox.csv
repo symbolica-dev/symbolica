@@ -1,0 +1,13 @@
+case,method,seed,status,elapsed_us,probes,primes,images,support_reuses,support_fallbacks,probes_by_prime,prime_policy,oracle,num_terms,den_terms,setup_ms,selected_methods
+ibp_xbox2l2m_rank0001,FireFly_scan,1,ok,26382443.026,11353,2,,,,9223372036854775643:171;9223372036854775783:11182,FireFly_default,ratracer_trace,7019,4586,,
+ibp_xbox2l2m_rank0001,FireFly_default,1,ok,61027042.009,24375,2,,,,9223372036854775643:1;9223372036854775783:24374,FireFly_default,ratracer_trace,7019,4586,,
+ibp_xbox2l2m_rank0001,Automatic,1,ok,18904675.376,8303,2,1,0,0,2305843009213693967:8300;2305843009213693973:3,Symbolica_default,ratracer_trace,7019,4586,221.354,BalancedZippel
+ibp_xbox2l2m_rank0002,FireFly_scan,1,ok,51180132.262,18908,2,,,,9223372036854775643:177;9223372036854775783:18731,FireFly_default,ratracer_trace,7877,5810,,
+ibp_xbox2l2m_rank0002,FireFly_default,1,ok,79544206.066,28925,2,,,,9223372036854775643:1;9223372036854775783:28924,FireFly_default,ratracer_trace,7877,5810,,
+ibp_xbox2l2m_rank0002,Automatic,1,ok,24017201.756,11597,2,1,0,0,2305843009213693967:11594;2305843009213693973:3,Symbolica_default,ratracer_trace,7877,5810,110.467,BalancedZippel
+ibp_xbox2l2m_rank0003,FireFly_scan,1,ok,47129457.169,23581,2,,,,9223372036854775643:147;9223372036854775783:23434,FireFly_default,ratracer_trace,14045,9070,,
+ibp_xbox2l2m_rank0003,FireFly_default,1,ok,178913544.389,75118,3,,,,9223372036854775549:1;9223372036854775643:27972;9223372036854775783:47145,FireFly_default,ratracer_trace,14045,9070,,
+ibp_xbox2l2m_rank0003,Automatic,1,ok,32871375.487,18029,2,1,0,0,2305843009213693967:18026;2305843009213693973:3,Symbolica_default,ratracer_trace,14045,9070,100.926,BalancedZippel
+ibp_xbox2l2m_rank0004,FireFly_scan,1,ok,2553462.981,2319,2,,,,9223372036854775643:135;9223372036854775783:2184,FireFly_default,ratracer_trace,1631,1059,,
+ibp_xbox2l2m_rank0004,FireFly_default,1,ok,10503661.413,6984,2,,,,9223372036854775643:1;9223372036854775783:6983,FireFly_default,ratracer_trace,1631,1059,,
+ibp_xbox2l2m_rank0004,Automatic,1,ok,2844961.104,1862,2,1,0,0,2305843009213693967:1859;2305843009213693973:3,Symbolica_default,ratracer_trace,1631,1059,112.692,BalancedZippelSeparated

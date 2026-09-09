@@ -60,6 +60,7 @@ where
         balanced_initial: None,
         balanced_survey: Vec::new(),
         removed_factors: Vec::new(),
+        swapped_variable: None,
         removed_numerator_factor: None,
         fixed_last_variable: None,
     };
@@ -161,7 +162,7 @@ where
     for _ in 0..ctx.options.verification_points * 16 {
         let t = ctx.random();
         let point: Vec<_> = direction.iter().map(|x| f.mul(x, &t)).collect();
-        if ctx.cache.contains_key(&point) {
+        if ctx.has_cached_probe(&point) {
             continue;
         }
         if let Some(y) = ctx.probe(&point)? {

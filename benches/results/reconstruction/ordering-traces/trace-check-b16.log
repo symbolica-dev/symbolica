@@ -1,0 +1,4 @@
+{'case': 'ibp_tth2l_b16_rank0001', 'finite_agreements': 55, 'intermediate_poles': 41, 'removable_poles': 16, 'interpreter_calls': 96}
+{'case': 'ibp_tth2l_b16_rank0002', 'finite_agreements': 62, 'intermediate_poles': 34, 'removable_poles': 9, 'interpreter_calls': 96}
+{'case': 'ibp_tth2l_b16_rank0003', 'finite_agreements': 69, 'intermediate_poles': 27, 'removable_poles': 6, 'interpreter_calls': 96}
+{'case': 'ibp_tth2l_b16_rank0004', 'finite_agreements': 68, 'intermediate_poles': 28, 'removable_poles': 5, 'interpreter_calls': 96}

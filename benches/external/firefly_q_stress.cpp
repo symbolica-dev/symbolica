@@ -1,6 +1,7 @@
 // Exact integer-coefficient input shared with Symbolica's Q stress benchmark.
 #include "firefly/Reconstructor.hpp"
 #include "q_stress_input.hpp"
+#include "trace_oracle.hpp"
 #include <atomic>
 #include <chrono>
 #include <cstdlib>
@@ -34,18 +35,52 @@ struct State {
 struct BlackBox : firefly::BlackBoxBase<BlackBox> {
     std::shared_ptr<QInput> input;
     std::shared_ptr<State> state;
-    BlackBox(std::shared_ptr<QInput> i, std::shared_ptr<State> s) : input(i),state(s) {}
+    std::shared_ptr<TraceOracle> trace;
+    BlackBox(std::shared_ptr<QInput> i, std::shared_ptr<State> s) : input(i),state(s) {
+        if (std::getenv("TRACE_ORACLE_PATH")) trace = std::make_shared<TraceOracle>(input->names);
+    }
+    static size_t lanes(const firefly::FFInt&) { return 1; }
+    template<int N> static size_t lanes(const firefly::FFIntVec<N>&) { return N; }
+    firefly::FFInt trace_value(const std::vector<firefly::FFInt>& x) {
+        std::vector<uint64_t> point;
+        for (const auto& v : x) point.push_back(v.n);
+        return firefly::FFInt(trace->evaluate(input->prime,point));
+    }
+    template<int N> firefly::FFIntVec<N> trace_value(const std::vector<firefly::FFIntVec<N>>& x) {
+        firefly::FFIntVec<N> result;
+        std::vector<firefly::FFInt> point(x.size());
+        for (int lane=0; lane<N; ++lane) {
+            for (size_t i=0; i<x.size(); ++i) point[i]=x[i].vec[lane];
+            result.vec[lane]=trace_value(point);
+        }
+        return result;
+    }
     template<class T> std::vector<T> operator()(const std::vector<T>& x) {
         double elapsed=std::chrono::duration<double,std::micro>(Clock::now()-state->start).count();
-        if(elapsed > state->timeout*1e6 || state->probes >= state->cap) {
+        size_t points = lanes(x[0]);
+        if(elapsed > state->timeout*1e6 || points > state->cap - state->probes) {
             state->report(elapsed > state->timeout*1e6 ? "time_limit" : "probe_limit",elapsed);
             std::_Exit(0);
         }
-        ++state->probes;
-        ++state->distribution[input->prime];
+        state->probes += points;
+        state->distribution[input->prime] += points;
+        if (trace) {
+            try { return {trace_value(x)}; }
+            catch (const std::domain_error&) {
+                state->report("trace_pole", std::chrono::duration<double,std::micro>(Clock::now()-state->start).count());
+                std::_Exit(0);
+            }
+            catch (const std::runtime_error&) {
+                state->report("trace_error", std::chrono::duration<double,std::micro>(Clock::now()-state->start).count());
+                std::_Exit(0);
+            }
+        }
         return {input->evaluate(x)};
     }
-    void prime_changed() { input->set_prime(firefly::FFInt::p); }
+    void prime_changed() {
+        if (trace) input->prime=firefly::FFInt::p;
+        else input->set_prime(firefly::FFInt::p);
+    }
 };
 
 
@@ -70,6 +105,7 @@ int main(int argc,char** argv) {
     rec.reconstruct(max_primes);
     auto result=rec.get_result();
     double elapsed=std::chrono::duration<double,std::micro>(Clock::now()-state->start).count();
+    if (bb.trace && bb.trace->calls()!=state->probes) throw std::runtime_error("trace probe accounting mismatch");
     if(result.empty()) { state->report("prime_limit",elapsed); return 0; }
     if(result.size()!=1) throw std::runtime_error("unexpected reconstruction result count");
     // Serialization restores scanned factors and internal variable ordering.

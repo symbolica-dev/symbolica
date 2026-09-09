@@ -1,0 +1,13 @@
+case,method,seed,status,elapsed_us,probes,primes,images,support_reuses,support_fallbacks,probes_by_prime,prime_policy,oracle,num_terms,den_terms,setup_ms,selected_methods
+ibp_box2l_rank0001,Automatic,1,ok,1175.474,83,2,1,0,0,2305843009213693967:80;2305843009213693973:3,Symbolica_default,cached_powers_Q,38,8,0.282,BalancedZippel
+ibp_box2l_rank0001,Automatic,2,ok,676.522,83,2,1,0,0,2305843009213693967:80;2305843009213693973:3,Symbolica_default,cached_powers_Q,38,8,0.302,BalancedZippel
+ibp_box2l_rank0001,Automatic,3,ok,497.182,83,2,1,0,0,2305843009213693967:80;2305843009213693973:3,Symbolica_default,cached_powers_Q,38,8,0.259,BalancedZippel
+ibp_box2l_rank0002,Automatic,1,ok,4730.588,472,2,1,0,0,2305843009213693967:469;2305843009213693973:3,Symbolica_default,cached_powers_Q,257,111,2.871,BalancedZippel
+ibp_box2l_rank0002,Automatic,2,ok,4529.246,472,2,1,0,0,2305843009213693967:469;2305843009213693973:3,Symbolica_default,cached_powers_Q,257,111,3.708,BalancedZippel
+ibp_box2l_rank0002,Automatic,3,ok,4517.257,472,2,1,0,0,2305843009213693967:469;2305843009213693973:3,Symbolica_default,cached_powers_Q,257,111,3.778,BalancedZippel
+ibp_box2l_rank0003,Automatic,1,ok,3510.953,323,2,1,0,0,2305843009213693967:320;2305843009213693973:3,Symbolica_default,cached_powers_Q,153,60,1.109,BalancedZippel
+ibp_box2l_rank0003,Automatic,2,ok,4087.545,323,2,1,0,0,2305843009213693967:320;2305843009213693973:3,Symbolica_default,cached_powers_Q,153,60,1.718,BalancedZippel
+ibp_box2l_rank0003,Automatic,3,ok,4261.205,323,2,1,0,0,2305843009213693967:320;2305843009213693973:3,Symbolica_default,cached_powers_Q,153,60,1.505,BalancedZippel
+ibp_box2l_rank0004,Automatic,1,ok,4077.235,282,2,1,0,0,2305843009213693967:279;2305843009213693973:3,Symbolica_default,cached_powers_Q,165,60,1.483,BalancedZippel
+ibp_box2l_rank0004,Automatic,2,ok,3262.962,282,2,1,0,0,2305843009213693967:279;2305843009213693973:3,Symbolica_default,cached_powers_Q,165,60,1.082,BalancedZippel
+ibp_box2l_rank0004,Automatic,3,ok,3090.702,282,2,1,0,0,2305843009213693967:279;2305843009213693973:3,Symbolica_default,cached_powers_Q,165,60,0.937,BalancedZippel

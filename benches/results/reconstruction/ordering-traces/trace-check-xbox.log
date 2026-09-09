@@ -1,0 +1,4 @@
+{'case': 'ibp_xbox2l2m_rank0001', 'finite_agreements': 52, 'intermediate_poles': 32, 'removable_poles': 15, 'interpreter_calls': 84}
+{'case': 'ibp_xbox2l2m_rank0002', 'finite_agreements': 52, 'intermediate_poles': 32, 'removable_poles': 14, 'interpreter_calls': 84}
+{'case': 'ibp_xbox2l2m_rank0003', 'finite_agreements': 53, 'intermediate_poles': 31, 'removable_poles': 17, 'interpreter_calls': 84}
+{'case': 'ibp_xbox2l2m_rank0004', 'finite_agreements': 55, 'intermediate_poles': 29, 'removable_poles': 13, 'interpreter_calls': 84}

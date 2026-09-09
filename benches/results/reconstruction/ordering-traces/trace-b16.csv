@@ -1,0 +1,13 @@
+case,method,seed,status,elapsed_us,probes,primes,images,support_reuses,support_fallbacks,probes_by_prime,prime_policy,oracle,num_terms,den_terms,setup_ms,selected_methods
+ibp_tth2l_b16_rank0001,FireFly_scan,1,ok,1262091.028,6032,2,,,,9223372036854775643:87;9223372036854775783:5945,FireFly_default,ratracer_trace,1102,35,,
+ibp_tth2l_b16_rank0001,FireFly_default,1,ok,3151905.650,10695,2,,,,9223372036854775643:1;9223372036854775783:10694,FireFly_default,ratracer_trace,1102,35,,
+ibp_tth2l_b16_rank0001,Automatic,1,ok,182117.846,1136,2,1,0,0,2305843009213693967:1133;2305843009213693973:3,Symbolica_default,ratracer_trace,1102,35,12.657,BalancedZippelSeparated
+ibp_tth2l_b16_rank0002,FireFly_scan,1,ok,55715.811,476,2,,,,9223372036854775643:55;9223372036854775783:421,FireFly_default,ratracer_trace,108,9,,
+ibp_tth2l_b16_rank0002,FireFly_default,1,ok,169219.260,1429,2,,,,9223372036854775643:1;9223372036854775783:1428,FireFly_default,ratracer_trace,108,9,,
+ibp_tth2l_b16_rank0002,Automatic,1,ok,17043.582,212,2,1,0,0,2305843009213693967:209;2305843009213693973:3,Symbolica_default,ratracer_trace,108,9,8.710,BalancedZippelSeparated
+ibp_tth2l_b16_rank0003,FireFly_scan,1,ok,127940.181,1206,2,,,,9223372036854775643:63;9223372036854775783:1143,FireFly_default,ratracer_trace,270,28,,
+ibp_tth2l_b16_rank0003,FireFly_default,1,ok,236325.202,2019,2,,,,9223372036854775643:1;9223372036854775783:2018,FireFly_default,ratracer_trace,270,28,,
+ibp_tth2l_b16_rank0003,Automatic,1,ok,27807.500,378,2,1,0,0,2305843009213693967:375;2305843009213693973:3,Symbolica_default,ratracer_trace,270,28,9.967,BalancedZippelSeparated
+ibp_tth2l_b16_rank0004,FireFly_scan,1,ok,121913.189,1243,2,,,,9223372036854775643:61;9223372036854775783:1182,FireFly_default,ratracer_trace,224,28,,
+ibp_tth2l_b16_rank0004,FireFly_default,1,ok,190599.898,1765,2,,,,9223372036854775643:1;9223372036854775783:1764,FireFly_default,ratracer_trace,224,28,,
+ibp_tth2l_b16_rank0004,Automatic,1,ok,24704.289,380,2,1,0,0,2305843009213693967:377;2305843009213693973:3,Symbolica_default,ratracer_trace,224,28,9.345,BalancedZippelSeparated

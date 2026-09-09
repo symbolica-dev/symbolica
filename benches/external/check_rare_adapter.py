@@ -34,6 +34,17 @@ cases = {
     "trivariate": export("trivariate", ["x", "y", "z"], {(1,1,0): 3, (0,0,1): 1, (0,0,0): 1}, {(1,1,0): 1, (0,1,1): 1, (1,0,1): 1, (0,0,0): 2}),
     "order": export("order", ["z", "a", "m", "b"], {(2,0,0,1): 5, (0,1,1,0): 10**40+7, (0,0,0,0): 1}, {(0,0,0,0): 3, (1,0,1,0): 1, (0,1,0,1): -2}),
 }
+for n in range(5, 9):
+    names = [f"x{i}" for i in reversed(range(n))]
+    numerator = {tuple([0] * n): 11}
+    denominator = {tuple([0] * n): 13}
+    for i in range(n):
+        ex = [0] * n
+        ex[i] = 1
+        denominator[tuple(ex)] = 2 * i + 3
+        ex[(i + 1) % n] = 1
+        numerator[tuple(ex)] = 3 * i + 5
+    cases[f"variables{n}"] = export(f"variables{n}", names, numerator, denominator)
 rows = []
 
 
@@ -87,4 +98,4 @@ with (output/"controls.csv").open("w") as fp:
     writer = csv.DictWriter(fp, list(rows[0]), lineterminator="\n")
     writer.writeheader()
     writer.writerows(rows)
-print("21 exact reconstructions, 5 adapter failure controls, 2 checker rejection controls passed")
+print(f"{3 * len(cases)} exact reconstructions, 5 adapter failure controls, 2 checker rejection controls passed")
