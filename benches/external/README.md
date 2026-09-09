@@ -1,5 +1,44 @@
 # FireFly, Smirnov–Zeng and scaling implementation comparison
 
+The [independent IBP family comparison](../reconstruction-independent-ibp.md)
+generates coefficients from the public Ratracer benchmark configurations using
+Kira equation export and Ratracer elimination. Build the pinned tools with
+`bash benches/external/build_ibp_tools.sh`. This requires C++17, OpenMP, Meson,
+Ninja, CMake, pkg-config, GiNaC, CLN, yaml-cpp, FLINT, GMP and zlib. Set
+`FERMATPATH` to a Fermat executable for Kira's startup check; equation export
+does not invoke it. The build uses a separate, pinned Ratracer-compatible
+FireFly fork for input preparation, preserving the ordinary FireFly reference.
+
+```sh
+python3 benches/external/prepare_ibp_benchmark.py box2l \
+  'basis[1,1,1,1,1,1,1,-1,-1]'
+python3 benches/external/prepare_ibp_benchmark.py xbox2l2m \
+  'basis[1,1,1,1,1,1,1,-2,0]'
+for family in box2l xbox2l2m; do
+  python3 benches/external/validate_ibp_benchmark.py "$family"
+  export BENCH_INPUT_DIR="$PWD/target/reconstruction-external/ibp-inputs/$family"
+  mapfile -t cases < "$BENCH_INPUT_DIR/suite-cases.txt"
+  BENCH_METHODS=Automatic,FireFly_default,FireFly_scan,FIRE7_Q_learned,Rare_scaling \
+    python3 benches/external/run_q_stress.py \
+      "target/reconstruction-external/ibp-$family.csv" "${cases[@]}"
+done
+```
+
+Preparation retains source revisions, equation hashes, selected integral,
+coefficient ranking, expressions, trace hashes, commands and logs. Four
+coefficients are selected by optimized single-output trace instruction size
+before measuring reconstruction. The validator compares every expression to
+its trace at eight exact rational points. These are probabilistic provenance
+checks; benchmark drivers additionally verify reconstructed expressions by
+exact polynomial identities. Benchmark oracles evaluate the shared expanded
+expressions, so their timings are not end-to-end IBP reduction timings.
+
+`IBP_THREADS` (default 4), `BENCH_CPU_SET` and `IBP_PREPARE_TIMEOUT` (default
+600 seconds per native process) control preparation. `EXTERNAL_LOADER` and
+`EXTERNAL_LIBRARY_PATH` apply to both preparation and validation where needed.
+Preparations for different families may run concurrently; do not prepare the
+same family concurrently in one checkout.
+
 The [ordinary survey reuse update](../reconstruction-survey-reuse.md) adds
 `python3 benches/external/shear_ibp_inputs.py`. It exports the four largest
 pinned `nb0` coefficient strings with the invertible substitution `d -> d+u`

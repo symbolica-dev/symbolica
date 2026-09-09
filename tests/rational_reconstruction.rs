@@ -1747,3 +1747,128 @@ fn sparse_row_support_recovers_from_a_missing_power() {
     assert!(stats.sparse_rows > 0);
     assert!(stats.probes <= 2000);
 }
+
+#[test]
+fn automatic_removes_sampled_univariate_factors() {
+    let field = Zp64::new(2_305_843_009_213_693_951);
+    let vars = Arc::new(["x", "y", "z"].map(|s| symbol!(s).into()).to_vec());
+    let n: MultivariatePolynomial<_, u16> =
+        parse!("x^2*(x+2)^3*(y-3)^2*(z+4)^3*(1+x+y+z)^3").to_polynomial(&field, vars.clone());
+    let d: MultivariatePolynomial<_, u16> =
+        parse!("y*(x-5)^2*(y+6)^3*(z-7)^2*(2+x+2*y+3*z)^2").to_polynomial(&field, vars.clone());
+    for seed in [1, 17, 41] {
+        let calls = Cell::new(0);
+        let (r, stats) = reconstruct_rational_function(
+            field.clone(),
+            vars.clone(),
+            |f, p| {
+                calls.set(calls.get() + 1);
+                let dv = d.replace_all(p);
+                (!f.is_zero(&dv)).then(|| f.div(&n.replace_all(p), &dv))
+            },
+            Automatic,
+            &ReconstructionOptions {
+                seed,
+                max_degree: 20,
+                max_attempts: 1,
+                max_probes: 160,
+                ..Default::default()
+            },
+        )
+        .unwrap();
+        assert_eq!(&r.numerator * &d, &r.denominator * &n);
+        assert_eq!(stats.probes, calls.get());
+        assert_eq!(stats.selected_method, Some(BalancedZippel));
+        assert!(stats.probes <= 160, "{stats:?}");
+    }
+}
+
+#[test]
+fn sampled_factors_hidden_on_two_slices_retry_the_original_oracle() {
+    let field = Zp64::new(2_305_843_009_213_693_951);
+    let vars = Arc::new(["x", "y", "z"].map(|s| symbol!(s).into()).to_vec());
+    let n: MultivariatePolynomial<_, u16> =
+        parse!("(x+2)^2*(z+4)^3*(1+x+y+z)^3").to_polynomial(&field, vars.clone());
+    let d: MultivariatePolynomial<_, u16> =
+        parse!("(y+6)^2*(z-7)^2*(2+x+2*y+3*z)^2").to_polynomial(&field, vars.clone());
+    let x: MultivariatePolynomial<_, u16> = parse!("x").to_polynomial(&field, vars.clone());
+    let a = Cell::new(None);
+    let b = Cell::new(None);
+    let calls = Cell::new(0);
+    let (r, stats) = reconstruct_rational_function(
+        field.clone(),
+        vars.clone(),
+        |f, p| {
+            calls.set(calls.get() + 1);
+            let first = a.get().unwrap_or_else(|| {
+                a.set(Some(p[0]));
+                p[0]
+            });
+            if b.get().is_none() && p[0] != first {
+                b.set(Some(p[0]));
+            }
+            // One consistent function: this perturbation vanishes on both
+            // initial z-slices, which falsely suggest a numerator factor.
+            let extra = b.get().map_or_else(
+                || f.zero(),
+                |second| f.mul(&f.sub(&p[0], &first), &f.sub(&p[0], &second)),
+            );
+            let dv = d.replace_all(p);
+            (!f.is_zero(&dv)).then(|| f.div(&f.add(&n.replace_all(p), &extra), &dv))
+        },
+        Automatic,
+        &ReconstructionOptions {
+            seed: 17,
+            max_degree: 20,
+            max_attempts: 3,
+            max_probes: 5000,
+            ..Default::default()
+        },
+    )
+    .unwrap();
+    let target = n + (&x - &x.constant(a.get().unwrap())) * &(&x - &x.constant(b.get().unwrap()));
+    assert_eq!(&r.numerator * &d, &r.denominator * &target);
+    assert_eq!(stats.probes, calls.get());
+    assert!(stats.attempts > 1, "{stats:?}");
+}
+
+#[test]
+fn sampled_factors_are_restored_before_multi_prime_lifting() {
+    use symbolica::domains::finite_field::ToFiniteField;
+    use symbolica::poly::reconstruction::reconstruct_rational_function_over_q;
+    let vars = Arc::new(["x", "y", "z"].map(|s| symbol!(s).into()).to_vec());
+    let n: MultivariatePolynomial<_, u16> = parse!(
+        "12345678901234567890123456789012345678901234567/37*x^2*(x+2)^3*(y-3)^2*(z+4)^3*(1+x+y+z)^3"
+    )
+    .to_polynomial(&Q, vars.clone());
+    let d: MultivariatePolynomial<_, u16> =
+        parse!("y*(x-5)^2*(y+6)^3*(z-7)^2*(2+x+2*y+3*z)^2").to_polynomial(&Q, vars.clone());
+    let mut calls = 0;
+    let (r, stats) = reconstruct_rational_function_over_q(
+        vars,
+        |f, p| {
+            calls += 1;
+            let nv = n
+                .map_coeff(|c| c.to_finite_field(f), f.clone())
+                .replace_all(p);
+            let dv = d
+                .map_coeff(|c| c.to_finite_field(f), f.clone())
+                .replace_all(p);
+            (!f.is_zero(&dv)).then(|| f.div(&nv, &dv))
+        },
+        Automatic,
+        &ReconstructionOptions {
+            max_degree: 20,
+            ..Default::default()
+        },
+        12,
+    )
+    .unwrap();
+    assert!(stats.successful_images >= 3);
+    assert!(stats.support_reuses > 0);
+    assert_eq!(stats.selected_methods[0], BalancedZippel);
+    assert_eq!(stats.probes, calls);
+    let rn = r.numerator.map_coeff(|c| Rational::from(c.clone()), Q);
+    let rd = r.denominator.map_coeff(|c| Rational::from(c.clone()), Q);
+    assert_eq!(&rn * &d, &rd * &n);
+}

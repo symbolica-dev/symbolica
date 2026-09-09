@@ -1,0 +1,13 @@
+case,method,seed,status,elapsed_us,probes,primes,images,support_reuses,support_fallbacks,probes_by_prime,prime_policy,oracle,num_terms,den_terms,setup_ms,selected_methods
+ibp_xbox2l2m_rank0001,Automatic,1,ok,2119852.988,15913,2,1,0,0,2305843009213693967:15910;2305843009213693973:3,Symbolica_default,cached_powers_Q,7019,4586,31.721,CuytLeePruned
+ibp_xbox2l2m_rank0001,Automatic,2,ok,2115795.443,15913,2,1,0,0,2305843009213693967:15910;2305843009213693973:3,Symbolica_default,cached_powers_Q,7019,4586,43.907,CuytLeePruned
+ibp_xbox2l2m_rank0001,Automatic,3,ok,2109783.370,15913,2,1,0,0,2305843009213693967:15910;2305843009213693973:3,Symbolica_default,cached_powers_Q,7019,4586,31.899,CuytLeePruned
+ibp_xbox2l2m_rank0002,Automatic,1,ok,3371029.887,21448,2,1,0,0,2305843009213693967:21445;2305843009213693973:3,Symbolica_default,cached_powers_Q,7877,5810,46.968,CuytLeePruned
+ibp_xbox2l2m_rank0002,Automatic,2,ok,3341962.617,21448,2,1,0,0,2305843009213693967:21445;2305843009213693973:3,Symbolica_default,cached_powers_Q,7877,5810,45.896,CuytLeePruned
+ibp_xbox2l2m_rank0002,Automatic,3,ok,3343392.253,21448,2,1,0,0,2305843009213693967:21445;2305843009213693973:3,Symbolica_default,cached_powers_Q,7877,5810,45.950,CuytLeePruned
+ibp_xbox2l2m_rank0003,Automatic,1,ok,8136884.338,31651,2,1,0,0,2305843009213693967:31648;2305843009213693973:3,Symbolica_default,cached_powers_Q,14045,9070,71.521,CuytLeePruned
+ibp_xbox2l2m_rank0003,Automatic,2,ok,8106746.916,31651,2,1,0,0,2305843009213693967:31648;2305843009213693973:3,Symbolica_default,cached_powers_Q,14045,9070,80.082,CuytLeePruned
+ibp_xbox2l2m_rank0003,Automatic,3,ok,8105358.002,31651,2,1,0,0,2305843009213693967:31648;2305843009213693973:3,Symbolica_default,cached_powers_Q,14045,9070,71.732,CuytLeePruned
+ibp_xbox2l2m_rank0004,Automatic,1,ok,112937.758,1862,2,1,0,0,2305843009213693967:1859;2305843009213693973:3,Symbolica_default,cached_powers_Q,1631,1059,5.003,BalancedZippelSeparated
+ibp_xbox2l2m_rank0004,Automatic,2,ok,108267.780,1862,2,1,0,0,2305843009213693967:1859;2305843009213693973:3,Symbolica_default,cached_powers_Q,1631,1059,4.877,BalancedZippelSeparated
+ibp_xbox2l2m_rank0004,Automatic,3,ok,108105.190,1862,2,1,0,0,2305843009213693967:1859;2305843009213693973:3,Symbolica_default,cached_powers_Q,1631,1059,4.928,BalancedZippelSeparated

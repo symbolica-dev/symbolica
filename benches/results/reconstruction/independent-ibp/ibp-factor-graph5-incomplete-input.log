@@ -1,0 +1,33 @@
+fire7_graph5_rank0001 Automatic 1 ok 51
+fire7_graph5_rank0002 Automatic 1 ok 55
+fire7_graph5_rank0003 Automatic 1 ok 48
+fire7_graph5_rank0004 Automatic 1 ok 50
+fire7_graph5_rank0005 Automatic 1 ok 43
+fire7_graph5_rank0006 Automatic 1 ok 48
+fire7_graph5_rank0007 Automatic 1 ok 46
+fire7_graph5_rank0008 Automatic 1 ok 37
+fire7_graph5_rank0009 Automatic 1 ok 37
+fire7_graph5_rank0010 Automatic 1 ok 40
+fire7_graph5_rank0011 Automatic 1 ok 40
+fire7_graph5_rank0012 Automatic 1 ok 40
+fire7_graph5_rank0013 Automatic 1 ok 34
+fire7_graph5_rank0014 Automatic 1 ok 40
+fire7_graph5_rank0015 Automatic 1 ok 37
+fire7_graph5_rank0016 Automatic 1 ok 37
+fire7_graph5_rank0017 Automatic 1 ok 40
+
+thread 'main' (3435592) panicked at examples/reconstruction_stress_benchmark.rs:97:72:
+custom expression file: Os { code: 2, kind: NotFound, message: "No such file or directory" }
+note: run with `RUST_BACKTRACE=1` environment variable to display a backtrace
+Traceback (most recent call last):
+  File "/common/dev/symbolica-reconstruction/benches/external/run_q_stress.py", line 32, in <module>
+    subprocess.run([str(rust), case, "BalancedZippel", "1"], cwd=root,
+    ~~~~~~~~~~~~~~^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+                   env={**env, "EXPORT_ORACLE": str(oracle)}, check=True, timeout=180,
+                   ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+                   stdout=subprocess.DEVNULL)
+                   ^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "/nix/store/3lll9y925zz9393sa59h653xik66srjb-python3-3.13.9/lib/python3.13/subprocess.py", line 577, in run
+    raise CalledProcessError(retcode, process.args,
+                             output=stdout, stderr=stderr)
+subprocess.CalledProcessError: Command '['/common/dev/symbolica-reconstruction/target/release/examples/reconstruction_stress_benchmark', 'fire7_graph5_rank0018', 'BalancedZippel', '1']' returned non-zero exit status 101.

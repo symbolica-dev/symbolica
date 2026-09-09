@@ -1,0 +1,17 @@
+case,method,seed,status,elapsed_us,probes,primes,images,support_reuses,support_fallbacks,probes_by_prime,prime_policy,oracle,num_terms,den_terms,setup_ms,selected_methods
+ibp_xbox2l2m_rank0001,BalancedZippel,1,ok,3187385.425,12390,2,1,0,0,2305843009213693967:12387;2305843009213693973:3,Symbolica_default,cached_powers_Q,7019,4586,56.514,BalancedZippel
+ibp_xbox2l2m_rank0001,BalancedZippelSeparated,1,ok,5650830.665,20955,2,1,0,0,2305843009213693967:20952;2305843009213693973:3,Symbolica_default,cached_powers_Q,7019,4586,81.777,BalancedZippel
+ibp_xbox2l2m_rank0001,CuytLeePruned,1,ok,3410463.060,15902,2,1,0,0,2305843009213693967:15899;2305843009213693973:3,Symbolica_default,cached_powers_Q,7019,4586,53.748,CuytLeePruned
+ibp_xbox2l2m_rank0001,Automatic,1,ok,3355112.080,15913,2,1,0,0,2305843009213693967:15910;2305843009213693973:3,Symbolica_default,cached_powers_Q,7019,4586,244.681,CuytLeePruned
+ibp_xbox2l2m_rank0002,BalancedZippel,1,ok,4130552.203,14506,2,1,0,0,2305843009213693967:14503;2305843009213693973:3,Symbolica_default,cached_powers_Q,7877,5810,78.085,BalancedZippel
+ibp_xbox2l2m_rank0002,BalancedZippelSeparated,1,ok,6937104.960,24033,2,1,0,0,2305843009213693967:24030;2305843009213693973:3,Symbolica_default,cached_powers_Q,7877,5810,79.899,BalancedZippel
+ibp_xbox2l2m_rank0002,CuytLeePruned,1,ok,5053492.832,21435,2,1,0,0,2305843009213693967:21432;2305843009213693973:3,Symbolica_default,cached_powers_Q,7877,5810,76.063,CuytLeePruned
+ibp_xbox2l2m_rank0002,Automatic,1,ok,5070969.080,21448,2,1,0,0,2305843009213693967:21445;2305843009213693973:3,Symbolica_default,cached_powers_Q,7877,5810,75.143,CuytLeePruned
+ibp_xbox2l2m_rank0003,BalancedZippel,1,ok,10660699.714,24600,2,1,0,0,2305843009213693967:24597;2305843009213693973:3,Symbolica_default,cached_powers_Q,14045,9070,115.963,BalancedZippel
+ibp_xbox2l2m_rank0003,BalancedZippelSeparated,1,ok,18452809.594,41257,2,1,0,0,2305843009213693967:41254;2305843009213693973:3,Symbolica_default,cached_powers_Q,14045,9070,476.855,BalancedZippel
+ibp_xbox2l2m_rank0003,CuytLeePruned,1,ok,12142213.199,31635,2,1,0,0,2305843009213693967:31632;2305843009213693973:3,Symbolica_default,cached_powers_Q,14045,9070,478.092,CuytLeePruned
+ibp_xbox2l2m_rank0003,Automatic,1,ok,12232965.758,31651,2,1,0,0,2305843009213693967:31648;2305843009213693973:3,Symbolica_default,cached_powers_Q,14045,9070,115.158,CuytLeePruned
+ibp_xbox2l2m_rank0004,BalancedZippel,1,ok,287843.518,3102,2,1,0,0,2305843009213693967:3099;2305843009213693973:3,Symbolica_default,cached_powers_Q,1631,1059,70.875,BalancedZippel
+ibp_xbox2l2m_rank0004,BalancedZippelSeparated,1,ok,216968.011,2398,2,1,0,0,2305843009213693967:2395;2305843009213693973:3,Symbolica_default,cached_powers_Q,1631,1059,63.952,BalancedZippelSeparated
+ibp_xbox2l2m_rank0004,CuytLeePruned,1,ok,210795.457,3753,2,1,0,0,2305843009213693967:3750;2305843009213693973:3,Symbolica_default,cached_powers_Q,1631,1059,62.305,CuytLeePruned
+ibp_xbox2l2m_rank0004,Automatic,1,ok,164361.352,1862,2,1,0,0,2305843009213693967:1859;2305843009213693973:3,Symbolica_default,cached_powers_Q,1631,1059,7.794,BalancedZippelSeparated

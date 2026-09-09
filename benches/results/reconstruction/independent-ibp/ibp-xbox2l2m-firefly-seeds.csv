@@ -1,0 +1,13 @@
+case,method,seed,status,elapsed_us,probes,primes,images,support_reuses,support_fallbacks,probes_by_prime,prime_policy,oracle,num_terms,den_terms,setup_ms,selected_methods
+ibp_xbox2l2m_rank0001,FireFly_scan,1,ok,5863861.753,11353,2,,,,9223372036854775643:171;9223372036854775783:11182,FireFly_default,cached_powers_Q,7019,4586,,
+ibp_xbox2l2m_rank0001,FireFly_scan,2,ok,5797990.433,11353,2,,,,9223372036854775643:171;9223372036854775783:11182,FireFly_default,cached_powers_Q,7019,4586,,
+ibp_xbox2l2m_rank0001,FireFly_scan,3,ok,5820889.502,11353,2,,,,9223372036854775643:171;9223372036854775783:11182,FireFly_default,cached_powers_Q,7019,4586,,
+ibp_xbox2l2m_rank0002,FireFly_scan,1,ok,11350956.350,18908,2,,,,9223372036854775643:177;9223372036854775783:18731,FireFly_default,cached_powers_Q,7877,5810,,
+ibp_xbox2l2m_rank0002,FireFly_scan,2,ok,11427510.463,18908,2,,,,9223372036854775643:177;9223372036854775783:18731,FireFly_default,cached_powers_Q,7877,5810,,
+ibp_xbox2l2m_rank0002,FireFly_scan,3,ok,11411092.443,18908,2,,,,9223372036854775643:177;9223372036854775783:18731,FireFly_default,cached_powers_Q,7877,5810,,
+ibp_xbox2l2m_rank0003,FireFly_scan,1,ok,22612721.167,23581,2,,,,9223372036854775643:147;9223372036854775783:23434,FireFly_default,cached_powers_Q,14045,9070,,
+ibp_xbox2l2m_rank0003,FireFly_scan,2,ok,22261489.933,23581,2,,,,9223372036854775643:147;9223372036854775783:23434,FireFly_default,cached_powers_Q,14045,9070,,
+ibp_xbox2l2m_rank0003,FireFly_scan,3,ok,19211143.148,23581,2,,,,9223372036854775643:147;9223372036854775783:23434,FireFly_default,cached_powers_Q,14045,9070,,
+ibp_xbox2l2m_rank0004,FireFly_scan,1,ok,275872.787,2319,2,,,,9223372036854775643:135;9223372036854775783:2184,FireFly_default,cached_powers_Q,1631,1059,,
+ibp_xbox2l2m_rank0004,FireFly_scan,2,ok,275485.175,2319,2,,,,9223372036854775643:135;9223372036854775783:2184,FireFly_default,cached_powers_Q,1631,1059,,
+ibp_xbox2l2m_rank0004,FireFly_scan,3,ok,274925.973,2319,2,,,,9223372036854775643:135;9223372036854775783:2184,FireFly_default,cached_powers_Q,1631,1059,,
