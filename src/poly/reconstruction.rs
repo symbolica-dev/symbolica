@@ -179,6 +179,7 @@ where
         stats: Default::default(),
         monomial_factors: None,
         balanced_pilot: None,
+        balanced_initial: None,
         removed_numerator_factor: None,
         fixed_last_variable: None,
     };
@@ -259,6 +260,8 @@ struct Context<'a, F> {
     monomial_factors: Option<[Vec<u16>; 2]>,
     // A final-variable slice already reconstructed during method selection.
     balanced_pilot: Option<BalancedPilot>,
+    // First balanced slice used for two-variable method selection.
+    balanced_initial: Option<(Vec<Element>, Fraction)>,
     // A last-variable factor hypothesized from generic numerator slices.
     removed_numerator_factor: Option<UnivariatePolynomial<Zp64>>,
     // Restrict probes while reconstructing the remaining variables of a factor.
@@ -691,22 +694,29 @@ impl<F: FnMut(&Zp64, &[Element]) -> Option<Element>> Context<'_, F> {
         }
         // Intersect the first row with the pilot already paid for during
         // selection. It uses the same numerator-factor transformation as the oracle.
-        let anchors = pilot
-            .as_ref()
-            .map_or_else(|| self.point(), |p| p.point.clone());
-        let known = pilot
-            .as_ref()
-            .and_then(|p| value(&p.row, &anchors))
-            .map(|v| (anchors[0], v));
-        let mut result = self.thiele_seeded(
-            0,
-            |t| {
-                let mut p = anchors.clone();
-                p[0] = t;
-                p
-            },
-            known,
-        )?;
+        let (anchors, mut result) = if let Some(initial) = self.balanced_initial.take() {
+            // A rejected prediction may have hidden support on this slice.
+            // Consume it so ordinary fallback chooses a fresh anchor.
+            initial
+        } else {
+            let anchors = pilot
+                .as_ref()
+                .map_or_else(|| self.point(), |p| p.point.clone());
+            let known = pilot
+                .as_ref()
+                .and_then(|p| value(&p.row, &anchors))
+                .map(|v| (anchors[0], v));
+            let result = self.thiele_seeded(
+                0,
+                |t| {
+                    let mut p = anchors.clone();
+                    p[0] = t;
+                    p
+                },
+                known,
+            )?;
+            (anchors, result)
+        };
         let mut surveyed_rows: Vec<Option<Fraction>> = Vec::new();
         // A dense denominator with a constant numerator predicts expensive
         // balanced rows for a reciprocal polynomial. Reconstruct the remaining

@@ -15,9 +15,33 @@ where
     ) -> Result<(ReconstructionMethod, Option<DegreeProfile>)> {
         use ReconstructionMethod::*;
         self.balanced_pilot = None;
+        self.balanced_initial = None;
         let nv = self.template.nvars();
-        if nv <= 2 {
+        if nv == 1 {
             return Ok((BalancedZippel, None));
+        }
+        if nv == 2 {
+            let anchor = self.point();
+            let slice = self.thiele(0, |t| vec![t, anchor[1]])?;
+            // A monic denominator with small integer coefficients after a
+            // generic specialization predicts independence from the other
+            // variable. Mixed-variable coefficients normally become generic
+            // field elements. This is a hypothesis, checked by ordinary final
+            // validation with balanced fallback, not a height bound or proof.
+            let prime = self.field.get_prime();
+            let simple = slice.denominator.coefficients.iter().all(|c| {
+                let c = self.field.from_element(c);
+                c <= 16 || c >= prime - 16
+            });
+            self.balanced_initial = Some((anchor, slice));
+            return Ok((
+                if simple {
+                    BalancedZippelSeparated
+                } else {
+                    BalancedZippel
+                },
+                None,
+            ));
         }
         let anchor = self.point();
         let last = nv - 1;

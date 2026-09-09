@@ -1,0 +1,120 @@
+{
+  "baseline_commit": "d47ee1f2",
+  "tests": 38,
+  "benchmark_runs": 6545,
+  "graph5_baseline": {
+    "lower": 369,
+    "equal": 576,
+    "higher": 0,
+    "current_probes": 20311,
+    "reference_probes": 21157
+  },
+  "graph5_BalancedZippelSeparated": {
+    "lower": 0,
+    "equal": 945,
+    "higher": 0,
+    "current_probes": 20311,
+    "reference_probes": 20311
+  },
+  "graph5_FireFly_default": {
+    "lower": 380,
+    "equal": 47,
+    "higher": 518,
+    "current_probes": 20311,
+    "reference_probes": 20754
+  },
+  "graph5_FireFly_scan": {
+    "lower": 928,
+    "equal": 0,
+    "higher": 17,
+    "current_probes": 20311,
+    "reference_probes": 49711
+  },
+  "graph5_FIRE7_Q_learned": {
+    "lower": 945,
+    "equal": 0,
+    "higher": 0,
+    "current_probes": 20311,
+    "reference_probes": 45519
+  },
+  "graph5_firefly_best": {
+    "lower": 380,
+    "equal": 47,
+    "higher": 518,
+    "current_probes": 20311,
+    "reference_probes": 20754
+  },
+  "graph5_selected_methods": {
+    "BalancedZippelSeparated": 945
+  },
+  "nb0_baseline": {
+    "lower": 0,
+    "equal": 3319,
+    "higher": 0,
+    "current_probes": 505874,
+    "reference_probes": 505874
+  },
+  "reverse_Automatic": {
+    "lower": 1,
+    "equal": 31,
+    "higher": 0,
+    "current_probes": 1431,
+    "reference_probes": 1433
+  },
+  "reverse_FireFly_default": {
+    "lower": 16,
+    "equal": 4,
+    "higher": 12,
+    "current_probes": 1431,
+    "reference_probes": 1471
+  },
+  "reverse_FireFly_scan": {
+    "lower": 31,
+    "equal": 0,
+    "higher": 1,
+    "current_probes": 1431,
+    "reference_probes": 3368
+  },
+  "varying_seed_counts": {
+    "graph5.csv": {},
+    "reverse.csv": {},
+    "reverse-baseline.csv": {}
+  },
+  "larger_controls": {
+    "coeff_prop_4l": {
+      "baseline_probes": 71019,
+      "probes": 71019,
+      "selected_methods": "BalancedZippel"
+    },
+    "aajamp": {
+      "baseline_probes": 43957,
+      "probes": 43957,
+      "selected_methods": "CuytLeePruned"
+    },
+    "aajamp_mod": {
+      "baseline_probes": 43955,
+      "probes": 43955,
+      "selected_methods": "CuytLeePruned"
+    },
+    "firefly_f1": {
+      "baseline_probes": 1945,
+      "probes": 1945,
+      "selected_methods": "BalancedZippel"
+    },
+    "firefly_f2": {
+      "baseline_probes": 1478,
+      "probes": 1478,
+      "selected_methods": "BalancedZippel"
+    },
+    "firefly_f3": {
+      "baseline_probes": 26702,
+      "probes": 26702,
+      "selected_methods": "CuytLeePruned"
+    },
+    "firefly_f4": {
+      "baseline_probes": 53531,
+      "probes": 53531,
+      "selected_methods": "CuytLeePruned"
+    }
+  }
+}

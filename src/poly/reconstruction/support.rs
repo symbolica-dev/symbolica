@@ -57,6 +57,7 @@ where
         stats: Default::default(),
         monomial_factors: None,
         balanced_pilot: None,
+        balanced_initial: None,
         removed_numerator_factor: None,
         fixed_last_variable: None,
     };

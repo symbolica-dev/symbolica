@@ -1,6 +1,9 @@
 # Rational function reconstruction experiment
 
-Latest optimization: [reuse intersections between reconstructed slices](reconstruction-intersections.md)
+Latest optimization: [select two-variable separation from the first slice](reconstruction-bivariate-selection.md)
+reduces the complete `graph5` probe total by 4.0% without regressing the four-loop
+control, the full `nb0` table, or the opposite-order sample.
+The preceding [intersection reuse update](reconstruction-intersections.md)
 also compares all 945 distinct coefficients in the public two-variable `graph5` table.
 The preceding [common numerator factors and remaining-variable method update](reconstruction-common-factors.md)
 reduces total probes by 10.8% across all 3,319 distinct `nb0` coefficients and
