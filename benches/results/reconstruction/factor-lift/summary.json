@@ -1,0 +1,11 @@
+{
+  "coefficients": 3319,
+  "baseline_probes": 574222,
+  "final_probes": 571020,
+  "improved": 512,
+  "unchanged": 2807,
+  "regressed": 0,
+  "firefly_gaps": 22,
+  "exact_benchmark_runs": 13601,
+  "tests": 29
+}

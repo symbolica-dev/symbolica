@@ -1,0 +1,18 @@
+{
+  "revision": "d132e5365dd2a13db9cd9dbaf5c200b53d489cfd",
+  "source": "FIRE7/examples/nb0/intsde-nb0.tables",
+  "source_sha256": "cebddb9e7b6695a3dccb0e91ebe6e821f5093b060107a957a70a60cb6090ea42",
+  "selection": "longest coefficient string, first in table order on ties",
+  "coefficient_count": 3540,
+  "row": "113002000000000000000000000000",
+  "master": "2127127128128128127127127127",
+  "variables": [
+    "u",
+    "v",
+    "w",
+    "d"
+  ],
+  "expression_bytes": 31460,
+  "output_sha256": "3ac8ad501d52eb72d3c99b78d748365be159cf769abb3da9a5068c05208fdbbf"
+}
+Exported 3319 suite cases from 3319 distinct source strings
