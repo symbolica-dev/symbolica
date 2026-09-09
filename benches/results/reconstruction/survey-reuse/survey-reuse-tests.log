@@ -1,0 +1,48 @@
+   Compiling symbolica v2.2.0 (/common/dev/symbolica-reconstruction)
+    Finished `test` profile [unoptimized + debuginfo] target(s) in 11.40s
+     Running tests/rational_reconstruction.rs (target/debug/deps/rational_reconstruction-7a426ee136877741)
+
+running 41 tests
+test lifting_falls_back_when_learned_support_changes ... ok
+test lifting_rejects_a_small_but_wrong_coefficient_guess ... ok
+test automatic_constant_candidates_are_checked_in_full_dimension ... ok
+test unlucky_anchor_is_retried ... ok
+test lifting_recovers_after_an_unlucky_prime ... ok
+test rejected_bivariate_denominator_prediction_keeps_the_shared_budget ... ok
+test rejected_denominator_separation_falls_back_within_one_attempt ... ok
+test homogeneous_degree_limit_includes_removed_factors ... ok
+test homogeneous_monomial_factors_are_cleared_after_an_unlucky_slice ... ok
+test automatic_bivariate_selection_reuses_the_first_slice ... ok
+test automatic_univariate_candidates_are_checked_in_full_dimension ... ok
+test bounded_failure_and_poles ... ok
+test sparse_row_support_recovers_from_a_missing_power ... ok
+test automatic_failed_first_survey_uses_a_consistent_fallback_anchor ... ok
+test rejected_whole_factor_separation_recovers_within_one_attempt ... ok
+test lifting_reuses_sparse_homogeneous_support_without_an_origin_value ... ok
+test rejected_common_numerator_factor_restores_the_original_oracle ... ok
+test lift_large_rational_coefficients ... ok
+test automatic_reuses_ordinary_balanced_survey_rows ... ok
+test low_degree_residual_reuses_the_survey_in_balanced_rows ... ok
+test automatic_uses_homogeneous_reconstruction_after_factor_separation ... ok
+test automatic_reused_survey_retries_hidden_support ... ok
+test automatic_selection_validates_structure_and_preserves_probe_limits ... ok
+test balanced_removes_learned_monomial_factors ... ok
+test zero_constants_polynomials_and_cancellation ... ok
+test rejected_residual_strategy_restores_unrestricted_probes ... ok
+test sparse_row_support_saves_probes_with_fixed_and_reciprocal_rows ... ok
+test reciprocal_degree_race_handles_an_initial_zero ... ok
+test paper_examples_and_normalization ... ok
+test completed_numerator_combines_with_separated_denominator_rows ... ok
+test automatic_reuses_its_separated_pilot_row ... ok
+test homogeneous_reconstruction_removes_monomial_factors ... ok
+test rational_lifting_keeps_the_eq28_probe_budgets ... ok
+test degree_race_covers_medium_degree_denominators ... ok
+test automatic_lifts_a_separated_rational_factor ... ok
+test many_seeds_and_variable_orders ... ok
+test completed_homogeneous_components_reduce_probes ... ok
+test generated_sparse_functions_over_a_smaller_prime ... ok
+test unbalanced_degree_race_and_numerator_completion ... ok
+test automatic_removes_a_common_numerator_factor ... ok
+test balanced_meets_paper_probe_budget ... ok
+
+test result: ok. 41 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 2.96s

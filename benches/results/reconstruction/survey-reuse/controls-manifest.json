@@ -1,0 +1,19 @@
+{
+  "variables": [
+    "x",
+    "y",
+    "z"
+  ],
+  "entries": [
+    {
+      "case": "ordinary_early_survey",
+      "expression": "(x^20+y^20+z^20)/(x^20-y^20+2*z^20)",
+      "sha256": "53e5aef8b2904bad54e8d456615df270b86cc26ae96e9dbc3dbdbe9e4e8b33c2"
+    },
+    {
+      "case": "ordinary_late_survey",
+      "expression": "(x+y^20+z^20)/(x-2*y^20+3*z^20)",
+      "sha256": "15e4da255937a7814449595a5561ee3a58ce9d7d258d45cc18824617f52b2d4e"
+    }
+  ]
+}

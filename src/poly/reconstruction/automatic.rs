@@ -16,6 +16,7 @@ where
         use ReconstructionMethod::*;
         self.balanced_pilot = None;
         self.balanced_initial = None;
+        self.balanced_survey.clear();
         let nv = self.template.nvars();
         if nv == 1 {
             return Ok((BalancedZippel, None));
@@ -97,6 +98,10 @@ where
         };
         let mut term_counts = [vec![0u64; nv], vec![0u64; nv]];
         let intersection = value(&slice, &anchor);
+        // If this survey selects balanced reconstruction, its slices are
+        // already the first geometric rows at this anchor. Keep them even
+        // when a sparse slice ends the survey early. Each is consumed once;
+        // a failed attempt clears them before selecting fresh anchors.
         for variable in 0..nv {
             let row = if variable == last {
                 slice.clone()
@@ -111,6 +116,13 @@ where
                     intersection.map(|v| (anchor[variable], v)),
                 )?
             };
+            if variable == 0 {
+                self.balanced_initial = Some((anchor.clone(), row.clone()));
+                self.balanced_survey = vec![None; nv];
+                self.balanced_survey[last] = Some(slice.clone());
+            } else {
+                self.balanced_survey[variable] = Some(row.clone());
+            }
             for (side, p) in [&row.numerator, &row.denominator].into_iter().enumerate() {
                 let lo = p
                     .into_iter()
