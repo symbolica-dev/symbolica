@@ -8,6 +8,8 @@ import subprocess
 import argparse
 
 parser = argparse.ArgumentParser(description=__doc__)
+parser.add_argument("--table", choices=["nb0", "graph5"], default="nb0",
+                    help="pinned analytic table to export (default: nb0)")
 selection = parser.add_mutually_exclusive_group()
 selection.add_argument("--suite", action="store_true", help="also export 32 distinct coefficients spanning the table")
 selection.add_argument("--all", dest="all_coefficients", action="store_true", help="export every distinct coefficient string into the all subdirectory")
@@ -17,25 +19,38 @@ root = Path(__file__).resolve().parents[2]
 fire = root / "target/reconstruction-external/fire"
 revision = "d132e5365dd2a13db9cd9dbaf5c200b53d489cfd"
 assert subprocess.check_output(["git", "-C", str(fire), "rev-parse", "HEAD"], text=True).strip() == revision
-source = fire / "FIRE7/examples/nb0/intsde-nb0.tables"
+table_sources = {
+    "nb0": ("FIRE7/examples/nb0/intsde-nb0.tables",
+            "cebddb9e7b6695a3dccb0e91ebe6e821f5093b060107a957a70a60cb6090ea42",
+            ["u", "v", "w", "d"]),
+    "graph5": ("FIRE7/examples/graph5.tables",
+               "3f514ae8dd8ceb8477eb605172f85f580dddf3c1b303a0d6f8dbd8bc559df2f3",
+               ["y", "d"]),
+}
+source_name, expected_digest, variables = table_sources[args.table]
+source = fire / source_name
 raw = source.read_bytes()
 digest = hashlib.sha256(raw).hexdigest()
-assert digest == "cebddb9e7b6695a3dccb0e91ebe6e821f5093b060107a957a70a60cb6090ea42"
+assert digest == expected_digest
 # This table contains lists, integer identifiers and quoted polynomial strings.
 # Polynomial strings contain no braces, so converting the list delimiters is exact.
 assert not re.search(r'"[^"\n]*[{}][^"\n]*"', raw.decode())
 table = json.loads(raw.decode().replace("{", "[").replace("}", "]"))
 coefficients = [(row, master, expression) for row, terms in table[0] for master, expression in terms]
 row, master, expression = max(coefficients, key=lambda c: len(c[2]))
-assert set(re.findall(r"[A-Za-z]+", expression)) == {"u", "v", "w", "d"}
+assert set(re.findall(r"[A-Za-z]+", expression)) == set(variables)
 out = root / "target/reconstruction-external/fire-table-inputs"
-out.mkdir(exist_ok=True)
+if args.table != "nb0":
+    out = out / args.table
+out.mkdir(parents=True, exist_ok=True)
 data = (expression + "\n").encode()
-(out / "fire7_nb0_largest").write_bytes(data)
+largest_case = f"fire7_{args.table}_largest"
+(out / largest_case).write_bytes(data)
+(out / f"{largest_case}.variables").write_text(" ".join(variables) + "\n")
 manifest = dict(revision=revision, source=str(source.relative_to(fire)), source_sha256=digest,
                 selection="longest coefficient string, first in table order on ties",
                 coefficient_count=len(coefficients), row=str(row), master=str(master),
-                variables=["u", "v", "w", "d"], expression_bytes=len(expression),
+                variables=variables, expression_bytes=len(expression),
                 output_sha256=hashlib.sha256(data).hexdigest())
 (out / "manifest.json").write_text(json.dumps(manifest, indent=2) + "\n")
 print(json.dumps(manifest, indent=2))
@@ -59,17 +74,17 @@ if args.suite or args.all_coefficients:
     entries = []
     for rank in ranks:
         row, master, expression = ranked[rank]
-        assert set(re.findall(r"[A-Za-z]+", expression)) <= {"u", "v", "w", "d"}
-        case = f"fire7_nb0_rank{rank + 1:04d}"
+        assert set(re.findall(r"[A-Za-z]+", expression)) <= set(variables)
+        case = f"fire7_{args.table}_rank{rank + 1:04d}"
         data = (expression + "\n").encode()
         (suite_out / case).write_bytes(data)
-        (suite_out / f"{case}.variables").write_text("u v w d\n")
+        (suite_out / f"{case}.variables").write_text(" ".join(variables) + "\n")
         entries.append(dict(case=case, rank=rank + 1, row=str(row), master=str(master),
                             expression_bytes=len(expression), output_sha256=hashlib.sha256(data).hexdigest()))
     suite = dict(revision=revision, source=manifest["source"], source_sha256=digest,
                  coefficient_count=len(coefficients), distinct_source_strings=len(ranked),
                  selection=rule,
-                 variables=["u", "v", "w", "d"], entries=entries)
+                 variables=variables, entries=entries)
     (suite_out / "suite-manifest.json").write_text(json.dumps(suite, indent=2) + "\n")
     (suite_out / "suite-cases.txt").write_text("\n".join(entry["case"] for entry in entries) + "\n")
     print(f"Exported {len(entries)} suite cases from {len(ranked)} distinct source strings")

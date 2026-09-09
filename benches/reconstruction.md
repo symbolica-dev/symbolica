@@ -1,6 +1,8 @@
 # Rational function reconstruction experiment
 
-Latest optimization: [remove common numerator factors and select the remaining-variable method](reconstruction-common-factors.md)
+Latest optimization: [reuse intersections between reconstructed slices](reconstruction-intersections.md)
+also compares all 945 distinct coefficients in the public two-variable `graph5` table.
+The preceding [common numerator factors and remaining-variable method update](reconstruction-common-factors.md)
 reduces total probes by 10.8% across all 3,319 distinct `nb0` coefficients and
 adds a complete comparison with default FireFly as well as its scan mode.
 The preceding [separated-factor update](reconstruction-factor-lift.md)

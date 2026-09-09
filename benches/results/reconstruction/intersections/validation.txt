@@ -1,0 +1,19 @@
+Baseline: 2b9e16c6 release binary saved before source edits.
+36 reconstruction tests passed, including deliberately rejected hypotheses and fallback.
+Release build passed with Rust 1.92, LTO disabled and 16 codegen units.
+Clippy passed with -A clippy::never_loop and the existing 249 warnings.
+Changed Rust files pass rustfmt --edition 2024 --check --config skip_children=true.
+The extended exporter preserves the nb0 manifest and all 3319 expression hashes.
+The graph5 source SHA-256 and all 945 exported expression hashes verified.
+4725 baseline graph5 reconstructions passed exact Q identity checks.
+3319 final nb0 and 945 final graph5 reconstructions passed exact Q checks.
+1077 seed checks passed; all 359 cases have stable counts across three seeds.
+One four-loop separated-strategy comparison and seven larger controls passed.
+All full-Q per-prime probe distributions sum to the reported total probes.
+Final table oracle exports match their baseline bytes; seed exports match the full screen.
+3299 nb0 coefficients improve by one probe, 20 are unchanged, zero regressions.
+Total nb0 probes: 509173 baseline, 505874 current.
+Final graph5 counts are identical to baseline; its two-variable selector is unchanged.
+All 10074 successful benchmark process outputs are retained in process-logs.tar.gz.
+Reference gaps, the expensive four-loop separated strategy and all cases are retained.
+Validation logs have trailing whitespace and terminal blank lines removed.

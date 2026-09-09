@@ -689,12 +689,24 @@ impl<F: FnMut(&Zp64, &[Element]) -> Option<Element>> Context<'_, F> {
             // The caller still performs fresh full-dimensional verification.
             return Ok(pilot.take().unwrap().row);
         }
-        let anchors = self.point();
-        let mut result = self.thiele(0, |t| {
-            let mut p = anchors.clone();
-            p[0] = t;
-            p
-        })?;
+        // Intersect the first row with the pilot already paid for during
+        // selection. It uses the same numerator-factor transformation as the oracle.
+        let anchors = pilot
+            .as_ref()
+            .map_or_else(|| self.point(), |p| p.point.clone());
+        let known = pilot
+            .as_ref()
+            .and_then(|p| value(&p.row, &anchors))
+            .map(|v| (anchors[0], v));
+        let mut result = self.thiele_seeded(
+            0,
+            |t| {
+                let mut p = anchors.clone();
+                p[0] = t;
+                p
+            },
+            known,
+        )?;
         let mut surveyed_rows: Vec<Option<Fraction>> = Vec::new();
         // A dense denominator with a constant numerator predicts expensive
         // balanced rows for a reciprocal polynomial. Reconstruct the remaining

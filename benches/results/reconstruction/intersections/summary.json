@@ -1,0 +1,86 @@
+{
+  "baseline_commit": "2b9e16c6",
+  "tests": 36,
+  "benchmark_runs": 10074,
+  "nb0_baseline": {
+    "lower": 3299,
+    "equal": 20,
+    "higher": 0,
+    "current_probes": 505874,
+    "reference_probes": 509173
+  },
+  "nb0_firefly_best": {
+    "lower": 3002,
+    "equal": 16,
+    "higher": 301,
+    "current_probes": 505874,
+    "reference_probes": 1181647
+  },
+  "graph5_Automatic": {
+    "lower": 0,
+    "equal": 945,
+    "higher": 0,
+    "current_probes": 21157,
+    "reference_probes": 21157
+  },
+  "graph5_BalancedZippelSeparated": {
+    "lower": 0,
+    "equal": 576,
+    "higher": 369,
+    "current_probes": 21157,
+    "reference_probes": 20311
+  },
+  "graph5_FireFly_default": {
+    "lower": 344,
+    "equal": 25,
+    "higher": 576,
+    "current_probes": 21157,
+    "reference_probes": 20754
+  },
+  "graph5_FireFly_scan": {
+    "lower": 928,
+    "equal": 0,
+    "higher": 17,
+    "current_probes": 21157,
+    "reference_probes": 49711
+  },
+  "graph5_FIRE7_Q_learned": {
+    "lower": 945,
+    "equal": 0,
+    "higher": 0,
+    "current_probes": 21157,
+    "reference_probes": 45519
+  },
+  "seed_cases": 359,
+  "varying_seed_counts": {},
+  "larger_controls": {
+    "coeff_prop_4l": {
+      "probes": 71019,
+      "baseline_probes": 71019
+    },
+    "aajamp": {
+      "probes": 43957,
+      "baseline_probes": 43960
+    },
+    "aajamp_mod": {
+      "probes": 43955,
+      "baseline_probes": 43958
+    },
+    "firefly_f1": {
+      "probes": 1945,
+      "baseline_probes": 1946
+    },
+    "firefly_f2": {
+      "probes": 1478,
+      "baseline_probes": 1479
+    },
+    "firefly_f3": {
+      "probes": 26702,
+      "baseline_probes": 26706
+    },
+    "firefly_f4": {
+      "probes": 53531,
+      "baseline_probes": 53535
+    }
+  }
+}
