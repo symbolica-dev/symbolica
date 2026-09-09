@@ -1,0 +1,4 @@
+family,method,seed,status,elapsed_us,probes,scalar_requests,cache_hits,outputs,completed,incremental_probes,probes_by_prime
+xbox2l2m_all,FireFly_joint_scan,1,ok,186151412.102,26503,,,71,71,,9223372036854775643:203;9223372036854775783:26300
+xbox2l2m_all,FireFly_joint_scan,2,ok,192322187.966,26503,,,71,71,,9223372036854775643:203;9223372036854775783:26300
+xbox2l2m_all,FireFly_joint_scan,3,ok,189583925.858,26503,,,71,71,,9223372036854775643:203;9223372036854775783:26300

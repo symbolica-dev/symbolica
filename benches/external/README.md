@@ -1,5 +1,12 @@
 # FireFly, Smirnov–Zeng and scaling implementation comparison
 
+The [initial-image sharing update](../reconstruction-row-streams.md) isolates
+interpolation-row sample streams so vector outputs can share probes despite
+different rational degrees. It adds all 71 outputs of the nonplanar `xbox2l2m`
+target to the full-output comparisons. `run_row_stream_regressions.py` replays
+the preceding 4,325-case scalar screen; `archive_row_streams.py` checks complete
+result counts and retains the logs, input provenance and executable hashes.
+
 The [factor-lifting update](../reconstruction-factor-lifting.md) retains small
 factors across prime images and aligns reused interpolation-line samples
 between outputs. The Q runner accepts `AutomaticNoFactorReuse` as an explicit

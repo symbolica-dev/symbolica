@@ -1,0 +1,5 @@
+case,method,seed,status,elapsed_us,probes,primes,images,support_reuses,support_fallbacks,probes_by_prime,prime_policy,oracle,num_terms,den_terms,setup_ms,selected_methods,factor_reductions
+fire7_nb0_rank0001_shear_d,Automatic,1,ok,1623142.470,15297,2,1,0,0,2305843009213693967:15294;2305843009213693973:3,Symbolica_default,cached_powers_Q,5148,2070,58.093,CuytLeePruned,0
+fire7_nb0_rank0002_shear_d,Automatic,1,ok,1740307.953,16138,2,1,0,0,2305843009213693967:16135;2305843009213693973:3,Symbolica_default,cached_powers_Q,5247,2070,46.094,CuytLeePruned,0
+fire7_nb0_rank0003_shear_d,Automatic,1,ok,1081423.122,12535,2,1,0,0,2305843009213693967:12532;2305843009213693973:3,Symbolica_default,cached_powers_Q,4488,1215,41.698,CuytLeePruned,0
+fire7_nb0_rank0004_shear_d,Automatic,1,ok,964307.349,11671,2,1,0,0,2305843009213693967:11668;2305843009213693973:3,Symbolica_default,cached_powers_Q,4312,1215,42.387,CuytLeePruned,0

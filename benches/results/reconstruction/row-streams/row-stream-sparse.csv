@@ -1,0 +1,5 @@
+case,method,seed,status,elapsed_us,probes,prime,oracle,degree_race,num_terms,den_terms,setup_ms,selected_methods,selection_probes,sparse_rows,sparse_row_fallbacks
+firefly_f1,Automatic,1,ok,13118.461,1858,9223372036854775783,cached_powers,0,20,20,0.691,BalancedZippel,131,190,0
+firefly_f2,Automatic,1,ok,17379.557,1264,9223372036854775783,cached_powers,0,3,2,0.395,BalancedZippel,226,3,0
+firefly_f3,Automatic,1,ok,12155580.799,26702,9223372036854775783,cached_powers,0,26333,3,30.568,CuytLeePruned,218,0,0
+firefly_f4,Automatic,1,ok,47554514.931,53531,9223372036854775783,cached_powers,0,53129,3,63.311,CuytLeePruned,254,0,0

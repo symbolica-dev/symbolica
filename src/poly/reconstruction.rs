@@ -20,6 +20,7 @@ use rand::{Rng, SeedableRng, rngs::StdRng};
 use std::{
     borrow::Cow,
     collections::{HashMap, HashSet},
+    hash::{DefaultHasher, Hash, Hasher},
     sync::Arc,
 };
 
@@ -443,6 +444,9 @@ impl<F: FnMut(&Zp64, &[Element]) -> Option<Element>> Context<'_, F> {
         map: impl Fn(Element) -> Vec<Element>,
         mut known: Option<(Element, Element)>,
     ) -> Result<Fraction> {
+        // Consume one structural seed, irrespective of the discovered degree.
+        // Later anchors then agree between outputs with different row lengths.
+        let mut sample_rng = StdRng::seed_from_u64(self.rng.random::<u64>() ^ 0x746869656c65726f);
         self.stats.univariate_interpolations += 1;
         let f = self.field.clone();
         let mut nodes = Vec::new();
@@ -470,7 +474,10 @@ impl<F: FnMut(&Zp64, &[Element]) -> Option<Element>> Context<'_, F> {
             // An already reconstructed slice supplies its intersection with
             // this row. This is derived data, not another black-box call.
             let sample = known.take();
-            let t = sample.map_or_else(|| self.random(), |(t, _)| t);
+            let t = sample.map_or_else(
+                || f.to_element(sample_rng.random_range(1..f.get_prime())),
+                |(t, _)| t,
+            );
             if !seen.insert(t) {
                 continue;
             }
@@ -568,6 +575,37 @@ impl<F: FnMut(&Zp64, &[Element]) -> Option<Element>> Context<'_, F> {
     // P/Q modulo the product of (x-x_i). This costs O((deg P + deg Q)^2)
     // field operations rather than a dense rational linear solve.
     fn degree_row(
+        &mut self,
+        variable: usize,
+        point: &[Element],
+        known: Element,
+        degrees: (u16, u16),
+        min_degrees: (u16, u16),
+        denominator: Option<&Polynomial>,
+        reciprocal: bool,
+        powers: &[Vec<u16>; 2],
+    ) -> Result<Fraction> {
+        // Key sampling to the geometric row rather than its position in the
+        // control flow. Outputs may need different numbers of earlier rows.
+        // Keep the enclosing stream independent for later anchors and checks.
+        let mut key = DefaultHasher::new();
+        (0x646567726565726fu64, self.options.seed, variable, point).hash(&mut key);
+        let outer_rng = std::mem::replace(&mut self.rng, StdRng::seed_from_u64(key.finish()));
+        let result = self.degree_row_inner(
+            variable,
+            point,
+            known,
+            degrees,
+            min_degrees,
+            denominator,
+            reciprocal,
+            powers,
+        );
+        self.rng = outer_rng;
+        result
+    }
+
+    fn degree_row_inner(
         &mut self,
         variable: usize,
         point: &[Element],

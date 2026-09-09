@@ -1,0 +1,21 @@
+{
+  "baseline": "1fbc3a6f7a7cc68cc9c22eb30b94658dcc1d6d22",
+  "rustc": "rustc 1.92.0 (ded5c06cf 2025-12-08)\nbinary: rustc\ncommit-hash: ded5c06cf21d2b93bffd5d884aa6e96934ee4234\ncommit-date: 2025-12-08\nhost: x86_64-unknown-linux-gnu\nrelease: 1.92.0\nLLVM version: 21.1.3",
+  "platform": {
+    "system": "Linux",
+    "release": "6.18.45",
+    "machine": "x86_64"
+  },
+  "release_profile": {
+    "lto": false,
+    "codegen_units": 16
+  },
+  "affinity": {
+    "nonplanar_FireFly_and_scalar_comparison": 28,
+    "nonplanar_Symbolica": 29,
+    "full_b25_both_methods": 30,
+    "scalar_regressions_and_b16": 31
+  },
+  "max_primes": 114,
+  "timing_limitation": "Shared host; unrelated workloads were active. Native prime policies differ."
+}

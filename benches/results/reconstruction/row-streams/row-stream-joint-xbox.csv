@@ -1,0 +1,2 @@
+family,method,seed,status,elapsed_us,probes,scalar_requests,cache_hits,outputs,completed,incremental_probes,probes_by_prime
+xbox2l2m,Symbolica_joint_cache,1,ok,113266421.646,19718,39791,20073,4,4,1862;7728;3604;6524,2305843009213693967:19715;2305843009213693973:3

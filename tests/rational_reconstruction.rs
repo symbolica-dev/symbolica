@@ -8,6 +8,61 @@ use symbolica::{
     prelude::*,
 };
 
+#[test]
+fn initial_images_share_rows_between_different_output_degrees() {
+    let field = Zp64::new(2_305_843_009_213_693_951);
+    let vars = Arc::new(vec![
+        symbol!("x").into(),
+        symbol!("y").into(),
+        symbol!("z").into(),
+    ]);
+    let numerators: [MultivariatePolynomial<_, u16>; 2] = [
+        parse!("(x+y+z+3)^3+1").to_polynomial(&field, vars.clone()),
+        parse!("(x+2*y+3*z+5)^5+1").to_polynomial(&field, vars.clone()),
+    ];
+    let denominator: MultivariatePolynomial<_, u16> =
+        parse!("(x+y+2*z+7)^2").to_polynomial(&field, vars.clone());
+    for seed in [3, 19] {
+        for order in [[0, 1], [1, 0]] {
+            let mut cache = std::collections::HashMap::new();
+            let mut requests = [0; 2];
+            for output in order {
+                let (result, stats) = reconstruct_rational_function(
+                    field.clone(),
+                    vars.clone(),
+                    |f, point| {
+                        requests[output] += 1;
+                        let values = cache.entry(point.to_vec()).or_insert_with(|| {
+                            let d = denominator.replace_all(point);
+                            numerators
+                                .each_ref()
+                                .map(|n| (!f.is_zero(&d)).then(|| f.div(&n.replace_all(point), &d)))
+                        });
+                        values[output]
+                    },
+                    BalancedZippel,
+                    &ReconstructionOptions {
+                        seed,
+                        max_degree: 32,
+                        ..Default::default()
+                    },
+                )
+                .unwrap();
+                assert_eq!(
+                    &result.numerator * &denominator,
+                    &result.denominator * &numerators[output]
+                );
+                assert_eq!(stats.probes, requests[output]);
+            }
+            let hits = requests.iter().sum::<usize>() - cache.len();
+            assert!(
+                hits * 5 > requests[0] * 3,
+                "seed={seed}, order={order:?}, requests={requests:?}, hits={hits}"
+            );
+        }
+    }
+}
+
 fn check(num: &str, den: &str, names: &[&str], seed: u64) {
     let field = Zp64::new(2_305_843_009_213_693_951);
     let vars: Arc<Vec<symbolica::poly::PolyVariable>> =

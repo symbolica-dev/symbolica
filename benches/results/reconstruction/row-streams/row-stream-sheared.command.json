@@ -1,0 +1,9 @@
+[
+  "/nix/store/3lll9y925zz9393sa59h653xik66srjb-python3-3.13.9/bin/python3",
+  "/common/dev/symbolica-reconstruction/benches/external/run_q_stress.py",
+  "/common/dev/symbolica-reconstruction/target/reconstruction-external/row-stream-sheared.csv",
+  "fire7_nb0_rank0001_shear_d",
+  "fire7_nb0_rank0002_shear_d",
+  "fire7_nb0_rank0003_shear_d",
+  "fire7_nb0_rank0004_shear_d"
+]
