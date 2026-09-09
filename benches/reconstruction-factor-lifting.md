@@ -1,5 +1,8 @@
 # Retaining factors during rational coefficient lifting
 
+The [following checkpoint](reconstruction-row-streams.md) addresses initial-image
+sharing and expands the nonplanar comparison to all 71 outputs of its target.
+
 The preceding `tth2l_b25` benchmark exposed a large repeated lifting cost.
 Symbolica reconstructed the expanded numerator and denominator coefficients
 at every prime, while scanned FireFly could retain factors. This update

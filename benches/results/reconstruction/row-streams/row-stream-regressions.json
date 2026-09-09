@@ -1,0 +1,83 @@
+{
+  "nb0": {
+    "exact_successes": 3319,
+    "previous_probes": 505874,
+    "current_probes": 505874,
+    "lower": 0,
+    "equal": 3319,
+    "higher": 0,
+    "changes": []
+  },
+  "graph5": {
+    "exact_successes": 945,
+    "previous_probes": 20311,
+    "current_probes": 20311,
+    "lower": 0,
+    "equal": 945,
+    "higher": 0,
+    "changes": []
+  },
+  "q": {
+    "exact_successes": 5,
+    "previous_probes": 231681,
+    "current_probes": 231681,
+    "lower": 0,
+    "equal": 5,
+    "higher": 0,
+    "changes": []
+  },
+  "sheared": {
+    "exact_successes": 4,
+    "previous_probes": 55641,
+    "current_probes": 55641,
+    "lower": 0,
+    "equal": 4,
+    "higher": 0,
+    "changes": []
+  },
+  "sparse": {
+    "exact_successes": 4,
+    "previous_probes": 83355,
+    "current_probes": 83355,
+    "lower": 0,
+    "equal": 4,
+    "higher": 0,
+    "changes": []
+  },
+  "box2l": {
+    "exact_successes": 12,
+    "previous_probes": 3480,
+    "current_probes": 3480,
+    "lower": 0,
+    "equal": 12,
+    "higher": 0,
+    "changes": []
+  },
+  "xbox2l2m": {
+    "exact_successes": 12,
+    "previous_probes": 119373,
+    "current_probes": 119373,
+    "lower": 0,
+    "equal": 12,
+    "higher": 0,
+    "changes": []
+  },
+  "diamond3l": {
+    "exact_successes": 12,
+    "previous_probes": 1695,
+    "current_probes": 1695,
+    "lower": 0,
+    "equal": 12,
+    "higher": 0,
+    "changes": []
+  },
+  "tth2l_b16": {
+    "exact_successes": 12,
+    "previous_probes": 6318,
+    "current_probes": 6318,
+    "lower": 0,
+    "equal": 12,
+    "higher": 0,
+    "changes": []
+  }
+}

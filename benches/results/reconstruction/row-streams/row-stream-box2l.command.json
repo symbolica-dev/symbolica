@@ -1,0 +1,9 @@
+[
+  "/nix/store/3lll9y925zz9393sa59h653xik66srjb-python3-3.13.9/bin/python3",
+  "/common/dev/symbolica-reconstruction/benches/external/run_q_stress.py",
+  "/common/dev/symbolica-reconstruction/target/reconstruction-external/row-stream-box2l.csv",
+  "ibp_box2l_rank0001",
+  "ibp_box2l_rank0002",
+  "ibp_box2l_rank0003",
+  "ibp_box2l_rank0004"
+]

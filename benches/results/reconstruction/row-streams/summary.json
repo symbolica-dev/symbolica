@@ -1,0 +1,81 @@
+{
+  "baseline": "1fbc3a6f",
+  "tests": 50,
+  "successful_recorded_runs": 4354,
+  "tables": {
+    "row-stream-b25-scalar": 12,
+    "row-stream-box2l": 12,
+    "row-stream-diamond3l": 12,
+    "row-stream-graph5": 945,
+    "row-stream-joint-b16-all": 3,
+    "row-stream-joint-b25-all": 6,
+    "row-stream-joint-b25": 1,
+    "row-stream-joint-xbox-all": 3,
+    "row-stream-joint-xbox": 1,
+    "row-stream-nb0": 3319,
+    "row-stream-q": 5,
+    "row-stream-sheared": 4,
+    "row-stream-sparse": 4,
+    "row-stream-tth2l_b16": 12,
+    "row-stream-xbox-all-reference": 3,
+    "row-stream-xbox2l2m": 12
+  },
+  "joint": {
+    "row-stream-joint-b16-all:Symbolica_joint_cache": {
+      "runs": 3,
+      "outputs": 32,
+      "median_probes": 1580,
+      "min_probes": 1580,
+      "max_probes": 1580,
+      "median_seconds": 0.362665169
+    },
+    "row-stream-joint-b25-all:FireFly_joint_scan": {
+      "runs": 3,
+      "outputs": 147,
+      "median_probes": 16107,
+      "min_probes": 16107,
+      "max_probes": 16107,
+      "median_seconds": 195.45840414199998
+    },
+    "row-stream-joint-b25-all:Symbolica_joint_cache": {
+      "runs": 3,
+      "outputs": 147,
+      "median_probes": 14383,
+      "min_probes": 14383,
+      "max_probes": 14383,
+      "median_seconds": 146.5983186
+    },
+    "row-stream-joint-b25:Symbolica_joint_cache": {
+      "runs": 1,
+      "outputs": 4,
+      "median_probes": 14248,
+      "min_probes": 14248,
+      "max_probes": 14248,
+      "median_seconds": 97.008141674
+    },
+    "row-stream-joint-xbox-all:Symbolica_joint_cache": {
+      "runs": 3,
+      "outputs": 71,
+      "median_probes": 20264,
+      "min_probes": 20262,
+      "max_probes": 20264,
+      "median_seconds": 137.629589176
+    },
+    "row-stream-joint-xbox:Symbolica_joint_cache": {
+      "runs": 1,
+      "outputs": 4,
+      "median_probes": 19718,
+      "min_probes": 19718,
+      "max_probes": 19718,
+      "median_seconds": 113.266421646
+    },
+    "row-stream-xbox-all-reference:FireFly_joint_scan": {
+      "runs": 3,
+      "outputs": 71,
+      "median_probes": 26503,
+      "min_probes": 26503,
+      "max_probes": 26503,
+      "median_seconds": 189.58392585800001
+    }
+  }
+}

@@ -1,0 +1,13 @@
+case,method,seed,status,elapsed_us,probes,primes,images,support_reuses,support_fallbacks,probes_by_prime,prime_policy,oracle,num_terms,den_terms,setup_ms,selected_methods,factor_reductions
+ibp_box2l_rank0001,Automatic,1,ok,2785.161,83,2,1,0,0,2305843009213693967:80;2305843009213693973:3,Symbolica_default,cached_powers_Q,38,8,0.331,BalancedZippel,0
+ibp_box2l_rank0001,Automatic,2,ok,796.913,83,2,1,0,0,2305843009213693967:80;2305843009213693973:3,Symbolica_default,cached_powers_Q,38,8,0.273,BalancedZippel,0
+ibp_box2l_rank0001,Automatic,3,ok,631.022,83,2,1,0,0,2305843009213693967:80;2305843009213693973:3,Symbolica_default,cached_powers_Q,38,8,0.258,BalancedZippel,0
+ibp_box2l_rank0002,Automatic,1,ok,3380.663,472,2,1,0,0,2305843009213693967:469;2305843009213693973:3,Symbolica_default,cached_powers_Q,257,111,1.744,BalancedZippel,0
+ibp_box2l_rank0002,Automatic,2,ok,3637.684,472,2,1,0,0,2305843009213693967:469;2305843009213693973:3,Symbolica_default,cached_powers_Q,257,111,1.391,BalancedZippel,0
+ibp_box2l_rank0002,Automatic,3,ok,3465.303,472,2,1,0,0,2305843009213693967:469;2305843009213693973:3,Symbolica_default,cached_powers_Q,257,111,1.556,BalancedZippel,0
+ibp_box2l_rank0003,Automatic,1,ok,2215.099,323,2,1,0,0,2305843009213693967:320;2305843009213693973:3,Symbolica_default,cached_powers_Q,153,60,1.071,BalancedZippel,0
+ibp_box2l_rank0003,Automatic,2,ok,1931.687,323,2,1,0,0,2305843009213693967:320;2305843009213693973:3,Symbolica_default,cached_powers_Q,153,60,1.155,BalancedZippel,0
+ibp_box2l_rank0003,Automatic,3,ok,2050.788,323,2,1,0,0,2305843009213693967:320;2305843009213693973:3,Symbolica_default,cached_powers_Q,153,60,1.006,BalancedZippel,0
+ibp_box2l_rank0004,Automatic,1,ok,1810.747,282,2,1,0,0,2305843009213693967:279;2305843009213693973:3,Symbolica_default,cached_powers_Q,165,60,1.126,BalancedZippel,0
+ibp_box2l_rank0004,Automatic,2,ok,1796.137,282,2,1,0,0,2305843009213693967:279;2305843009213693973:3,Symbolica_default,cached_powers_Q,165,60,1.089,BalancedZippel,0
+ibp_box2l_rank0004,Automatic,3,ok,1927.178,282,2,1,0,0,2305843009213693967:279;2305843009213693973:3,Symbolica_default,cached_powers_Q,165,60,0.928,BalancedZippel,0

@@ -1,0 +1,10 @@
+[
+  "/nix/store/3lll9y925zz9393sa59h653xik66srjb-python3-3.13.9/bin/python3",
+  "/common/dev/symbolica-reconstruction/benches/external/run_q_stress.py",
+  "/common/dev/symbolica-reconstruction/target/reconstruction-external/row-stream-q.csv",
+  "coeff_prop_4l",
+  "coeff_prop_4l_mod",
+  "aajamp",
+  "aajamp_mod",
+  "fire7_nb0_largest"
+]
