@@ -1,0 +1,10 @@
+family,method,seed,status,elapsed_us,probes,scalar_requests,cache_hits,outputs,completed,incremental_probes
+tth2l_b16_all,FireFly_joint_scan,1,ok,1499914.908,4963,,,32,32,
+tth2l_b16_all,FireFly_joint_default,1,ok,3978357.361,10698,,,32,32,
+tth2l_b16_all,Symbolica_joint_cache,1,ok,867812.388,4222,5484,1262,32,32,67;67;31;98;57;40;57;34;31;25;0;64;13;21;33;38;36;20;43;216;351;249;178;322;73;59;49;327;54;302;1098;169
+tth2l_b16_all,FireFly_joint_default,2,ok,3957021.408,10698,,,32,32,
+tth2l_b16_all,Symbolica_joint_cache,2,ok,871856.814,4222,5484,1262,32,32,67;67;31;98;57;40;57;34;31;25;0;64;13;21;33;38;36;20;43;216;351;249;178;322;73;59;49;327;54;302;1098;169
+tth2l_b16_all,FireFly_joint_scan,2,ok,1428119.080,4963,,,32,32,
+tth2l_b16_all,Symbolica_joint_cache,3,ok,872632.917,4222,5484,1262,32,32,67;67;31;98;57;40;57;34;31;25;0;64;13;21;33;38;36;20;43;216;351;249;178;322;73;59;49;327;54;302;1098;169
+tth2l_b16_all,FireFly_joint_scan,3,ok,1432776.228,4963,,,32,32,
+tth2l_b16_all,FireFly_joint_default,3,ok,4237743.168,10698,,,32,32,

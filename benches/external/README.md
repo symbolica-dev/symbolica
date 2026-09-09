@@ -1,5 +1,58 @@
 # FireFly, Smirnov–Zeng and scaling implementation comparison
 
+Joint-output measurements use the same trace interpreter for Symbolica and
+FireFly. Symbolica currently runs its scalar reconstructor for each output in
+trace order, caching the complete vector at every distinct prime/point pair.
+FireFly uses its native joint reconstructor. Reported probes count interpreter
+evaluations returning the entire vector; they are not sums of scalar counts.
+The drivers validate input and output order and check every result by exact
+polynomial identity outside the reconstruction timer.
+
+```sh
+bash benches/external/build_trace_oracle.sh
+bash benches/external/build_joint_stress.sh
+cargo build --release --example reconstruction_joint_benchmark
+python3 benches/external/check_joint_driver.py
+python3 benches/external/check_joint_trace.py tth2l_b16
+RECONSTRUCTION_REPEATS=3 python3 benches/external/run_joint_stress.py \
+  tth2l_b16 target/reconstruction-external/joint-b16.csv
+```
+
+`JOINT_METHODS` selects `Symbolica_joint_cache`, `FireFly_joint_scan`, and/or
+`FireFly_joint_default`. The runner retains named output order, binary and
+trace hashes, commands, failures and incremental Symbolica probe counts.
+`MAX_PRIMES`, `MAX_TOTAL_PROBES`, `BENCH_TIMEOUT`, `PROCESS_TIMEOUT` and
+the external loader/CPU settings apply as in the scalar runner. The cache is
+benchmark infrastructure, not yet a public multi-output reconstruction API.
+
+The published `tth2l_b25` setup has two symbolic variables and very large
+rational coefficients. Its first two selected coefficients exceed the default
+32-prime budget. Use 114 primes for a common sufficiently large cap across
+Symbolica, FireFly, FIRE7 and rare; FIRE7 supports at most 127 and rare 114.
+The rare adapter now exposes all 114 entries of its unchanged native table,
+while keeping sixteen as its default budget.
+
+```sh
+python3 benches/external/prepare_ibp_benchmark.py tth2l_b25 \
+  'basis[2,1,1,1,1,1,1,1,0,0,0]'
+python3 benches/external/validate_ibp_benchmark.py tth2l_b25
+MAX_PRIMES=114 python3 benches/external/run_joint_stress.py \
+  tth2l_b25 target/reconstruction-external/joint-b25.csv
+```
+
+`--label` preserves a separate preparation when changing the coefficient
+selection. For example, the pentabubble target has 32 outputs; selecting all
+32 measures every coefficient of this integral together. This is still one
+integral, not the complete reduction table.
+
+```sh
+python3 benches/external/prepare_ibp_benchmark.py tth2l_b16 \
+  'basis[2,1,1,1,1,1,0,0,0,0,0]' --count 32 --label tth2l_b16_all
+python3 benches/external/validate_ibp_benchmark.py tth2l_b16_all
+python3 benches/external/run_joint_stress.py tth2l_b16_all \
+  target/reconstruction-external/joint-b16-all.csv
+```
+
 The [variable-order and trace-oracle update](../reconstruction-ordering-traces.md)
 adds a seven-variable pentabubble and a three-loop diamond family. Prepare
 them with the existing Kira/Ratracer build:
@@ -113,7 +166,7 @@ runner accepts `Rare_scaling` in `BENCH_METHODS`, including alongside
 
 `rare` uses its native 60-bit primes, one extra confirmation point, and a seeded
 version of the authors' scaling driver. The adapter supports one to eight
-variables and at most sixteen primes; `MAX_PRIMES`, `MAX_TOTAL_PROBES` and
+variables and at most 114 primes (sixteen by default); `MAX_PRIMES`, `MAX_TOTAL_PROBES` and
 `BENCH_TIMEOUT` set its limits. `PROCESS_TIMEOUT` limits the entire process.
 Only an independently verified exact Q identity reports `ok`; failed and
 incomplete runs retain their status and measured probe counts. Reconstructed

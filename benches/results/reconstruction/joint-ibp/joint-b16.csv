@@ -1,0 +1,10 @@
+family,method,seed,status,elapsed_us,probes,scalar_requests,cache_hits,outputs,completed,incremental_probes
+tth2l_b16,FireFly_joint_scan,1,ok,1462448.044,6032,,,4,4,
+tth2l_b16,FireFly_joint_default,1,ok,3711721.721,10695,,,4,4,
+tth2l_b16,Symbolica_joint_cache,1,ok,387310.183,2005,2106,101,4,4,380;323;1121;181
+tth2l_b16,FireFly_joint_default,2,ok,3988197.532,10695,,,4,4,
+tth2l_b16,Symbolica_joint_cache,2,ok,386165.078,2005,2106,101,4,4,380;323;1121;181
+tth2l_b16,FireFly_joint_scan,2,ok,1569565.319,6032,,,4,4,
+tth2l_b16,Symbolica_joint_cache,3,ok,386565.729,2005,2106,101,4,4,380;323;1121;181
+tth2l_b16,FireFly_joint_scan,3,ok,1611367.970,6032,,,4,4,
+tth2l_b16,FireFly_joint_default,3,ok,4046072.283,10695,,,4,4,

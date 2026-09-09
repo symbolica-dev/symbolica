@@ -16,8 +16,11 @@ parser = argparse.ArgumentParser(description=__doc__)
 parser.add_argument("family", choices=["box1l", "box2l", "diamond2l", "diamond3l", "tth2l_b16", "tth2l_b25", "xbox2l2m"])
 parser.add_argument("integral", help="one integral in the author's mandatory list, e.g. basis[1,1,1,1,1,1,1,-1,-1]")
 parser.add_argument("--count", type=int, default=4)
+parser.add_argument("--label", help="separate work/input label for another selection of the same family")
 args = parser.parse_args()
 assert args.count > 0
+label = args.label or args.family
+assert re.fullmatch(r"[A-Za-z0-9_]+", label), "label must be a simple directory name"
 root = Path(__file__).resolve().parents[2]
 external = root / "target/reconstruction-external"
 source = external / "ibp-benchmark"
@@ -25,7 +28,7 @@ pins = {"ibp-benchmark": "f518de1f4f89cc716a31d5d9a9a9ba0a3b72f458", "kira": "aa
 for name, revision in pins.items():
     assert subprocess.check_output(["git", "-C", str(external/name), "rev-parse", "HEAD"], text=True).strip() == revision
 template = source / "problems" / (args.family + ".kira-ratracer")
-work = external / "ibp-work" / args.family
+work = external / "ibp-work" / label
 work.mkdir(parents=True, exist_ok=True)
 logs = work / "preparation-logs"
 logs.mkdir(exist_ok=True)
@@ -96,13 +99,13 @@ entries.sort(key=lambda e: (-e["instruction_bytes"], e["output"]))
 assert len(entries) >= args.count
 selected = entries[:args.count]
 for rank, entry in enumerate(selected, 1):
-    entry["case"] = f"ibp_{args.family}_rank{rank:04d}"
+    entry["case"] = f"ibp_{label}_rank{rank:04d}"
 (work / "selected.outputs").write_text("\n".join(e["name"] for e in selected) + "\n")
 (work / "selected.names").write_text("".join(f"{i} {e['case']}\n" for i, e in enumerate(sorted(selected, key=lambda e: e["output"]))))
 run("reference", tracer, ["load-trace", "top.trace", "unfinalize", "keep-outputs", "selected.outputs", "rename-outputs", "selected.names", "optimize", "finalize", "save-trace", "selected.trace", "reconstruct", "--inmem", "--threads=" + os.environ.get("IBP_THREADS", "4"), "--factor-scan", "--shift-scan", "--to=selected.results"])
 expressions = dict(re.findall(r"(\w+)\s*=\s*(.*?);", (work / "selected.results").read_text(), flags=re.S))
 assert set(expressions) == {e["case"] for e in selected}
-output = external / "ibp-inputs" / args.family
+output = external / "ibp-inputs" / label
 output.mkdir(parents=True, exist_ok=True)
 for entry in selected:
     expression = expressions[entry["case"]].strip() + "\n"
@@ -113,7 +116,7 @@ for entry in selected:
         trace_link.unlink()
     trace_link.symlink_to(os.path.relpath(coefficients / (str(entry["output"]) + ".trace"), output))
     entry["expression_sha256"] = hashlib.sha256(expression.encode()).hexdigest()
-manifest = dict(revisions=pins, family=args.family, integral=args.integral,
+manifest = dict(revisions=pins, family=args.family, label=label, integral=args.integral,
                 limits=dict(zip("rsd", map(int, limits))), variables=variables,
                 selection="largest finalized single-output instruction byte counts after unfinalizing and optimizing; output index breaks ties",
                 entries=entries, selected_cases=[e["case"] for e in selected],
