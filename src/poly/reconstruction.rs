@@ -24,6 +24,7 @@ use std::{
 
 mod automatic;
 mod rational;
+mod sparse_row;
 mod support;
 pub use rational::{RationalReconstructionStats, reconstruct_rational_function_over_q};
 
@@ -71,6 +72,9 @@ pub struct ReconstructionOptions {
     /// Reuse learned support and coefficient hypotheses when lifting over Q.
     /// Reduces probes at additional interpolation cost; unused for one prime.
     pub reuse_coefficients: bool,
+    /// Reuse univariate powers observed in an earlier balanced row when they
+    /// are sparse enough to save probes, with fresh row checks and fallback.
+    pub reuse_row_support: bool,
 }
 
 impl Default for ReconstructionOptions {
@@ -83,6 +87,7 @@ impl Default for ReconstructionOptions {
             seed: 0x7265636f6e737472,
             degree_race: false,
             reuse_coefficients: true,
+            reuse_row_support: true,
         }
     }
 }
@@ -94,6 +99,10 @@ pub struct ReconstructionStats {
     pub selected_method: Option<ReconstructionMethod>,
     /// Oracle calls spent selecting a method, including rejected pilots.
     pub selection_probes: usize,
+    /// Accepted sparse-row hypotheses, including rows in later-failed attempts.
+    pub sparse_rows: usize,
+    /// Rejected sparse rows followed by the existing degree-bounded solver.
+    pub sparse_row_fallbacks: usize,
     pub probes: usize,
     pub poles: usize,
     pub cache_hits: usize,
@@ -459,8 +468,41 @@ impl<F: FnMut(&Zp64, &[Element]) -> Option<Element>> Context<'_, F> {
         min_degrees: (u16, u16),
         denominator: Option<&Polynomial>,
         reciprocal: bool,
+        powers: &[Vec<u16>; 2],
     ) -> Result<Fraction> {
         self.stats.degree_interpolations += 1;
+        let ordered: [&[u16]; 2] = if reciprocal {
+            [&powers[1], &powers[0]]
+        } else {
+            [&powers[0], &powers[1]]
+        };
+        let sparse_count = ordered[0].len()
+            + if denominator.is_some() {
+                0
+            } else {
+                ordered[1].len().saturating_sub(1)
+            };
+        let dense_count = usize::from(degrees.0 - min_degrees.0)
+            + if denominator.is_some() {
+                0
+            } else {
+                usize::from(degrees.1 - min_degrees.1)
+            }
+            + 1;
+        if self.options.reuse_row_support
+            && 2 * (sparse_count + self.options.verification_points) < dense_count
+        {
+            match self.sparse_row(variable, point, known, ordered, denominator, reciprocal) {
+                Ok(row) => {
+                    self.stats.sparse_rows += 1;
+                    return Ok(row);
+                }
+                Err(ReconstructionError::ProbeLimit) => {
+                    return Err(ReconstructionError::ProbeLimit);
+                }
+                Err(_) => self.stats.sparse_row_fallbacks += 1,
+            }
+        }
         let f = self.field.clone();
         let dense = UnivariatePolynomial::new(
             &f,
@@ -595,6 +637,7 @@ impl<F: FnMut(&Zp64, &[Element]) -> Option<Element>> Context<'_, F> {
             let mut rows: Vec<Fraction> = Vec::new();
             let mut degrees: Option<(u16, u16)> = None;
             let mut min_degrees = (0, 0);
+            let mut row_powers = [Vec::new(), Vec::new()];
             let mut completed: [Option<Polynomial>; 2] = [None, None];
             for i in 1..=z {
                 let mut point = anchors.clone();
@@ -644,6 +687,7 @@ impl<F: FnMut(&Zp64, &[Element]) -> Option<Element>> Context<'_, F> {
                         min_degrees,
                         denominator,
                         reciprocal,
+                        &row_powers,
                     )?;
                     if reciprocal {
                         std::mem::swap(&mut row.numerator, &mut row.denominator);
@@ -661,6 +705,10 @@ impl<F: FnMut(&Zp64, &[Element]) -> Option<Element>> Context<'_, F> {
                     )?
                 };
                 if degrees.is_none() {
+                    for (side, p) in [&row.numerator, &row.denominator].into_iter().enumerate() {
+                        row_powers[side] = p.into_iter().map(|m| m.exponents[variable]).collect();
+                        row_powers[side].sort_unstable();
+                    }
                     let min = |p: &Polynomial| {
                         p.into_iter()
                             .map(|m| m.exponents[variable])

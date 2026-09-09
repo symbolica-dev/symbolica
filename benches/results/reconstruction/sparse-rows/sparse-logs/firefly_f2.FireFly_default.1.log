@@ -1,0 +1,2 @@
+case,method,seed,status,elapsed_us,probes
+firefly_f2,FireFly_default,1,ok,788890.424,2457

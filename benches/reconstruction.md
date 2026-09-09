@@ -1,6 +1,9 @@
 # Rational function reconstruction experiment
 
-Latest update: [automatic method selection](reconstruction-automatic.md)
+Latest update: [reusing sparse powers in balanced rows](reconstruction-sparse-rows.md)
+closes the remaining `f1` probe gap and reduces the high-degree `f2` count while
+preserving the dense and full-Q IBP probe counts.
+The [automatic method selection update](reconstruction-automatic.md)
 chooses a reconstruction method from generic oracle slices and accounts for
 selection probes in the shared budget.
 The [full-Q FIRE7 comparison and additional IBP table](reconstruction-fire7-q.md)

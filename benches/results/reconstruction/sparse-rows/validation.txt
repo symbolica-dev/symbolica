@@ -1,0 +1,10 @@
+25 reconstruction tests passed
+18 paired sparse/reference runs passed exact identities
+6 dense modular runs passed exact identities and preserved previous probe counts
+15 full-Q IBP runs passed exact identities and preserved previous probe counts
+24 small-Q control runs passed exact identities and preserved previous probe counts
+All nine exact oracle exports matched preceding checkpoint hashes
+All final CSV row/seed counts, Q prime counts and probe sums checked
+Release build completed: LTO disabled, 16 codegen units
+Clippy completed with existing never_loop allowance: 249 library warnings
+Python syntax and Rust formatting checks passed

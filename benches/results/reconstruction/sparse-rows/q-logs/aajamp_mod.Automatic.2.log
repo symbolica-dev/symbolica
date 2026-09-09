@@ -1,0 +1,2 @@
+case,method,seed,status,elapsed_us,probes,primes,images,support_reuses,support_fallbacks,probes_by_prime,setup_ms,num_terms,den_terms,selected_methods
+aajamp_mod,Automatic,2,ok,15613171.610,43958,2,1,0,0,2305843009213693967:43955;2305843009213693973:3,5180.628,23260,7231,CuytLeePruned

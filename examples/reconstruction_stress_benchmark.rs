@@ -153,6 +153,7 @@ fn main() {
         seed,
         max_degree: 512,
         degree_race: std::env::var_os("RECONSTRUCTION_DEGREE_RACE").is_some(),
+        reuse_row_support: std::env::var_os("RECONSTRUCTION_DENSE_ROWS").is_none(),
         max_probes: std::env::var("MAX_PROBES")
             .map(|s| s.parse().unwrap())
             .unwrap_or(200_000),
@@ -187,8 +188,12 @@ fn main() {
         )
     }));
     let elapsed_ms = start.elapsed().as_secs_f64() * 1000.;
+    let mut sparse_rows = String::new();
+    let mut sparse_fallbacks = String::new();
     let (status, attempts, selected, selection_probes) = match result {
         Ok(Ok((r, s))) => {
+            sparse_rows = s.sparse_rows.to_string();
+            sparse_fallbacks = s.sparse_row_fallbacks.to_string();
             assert_eq!(s.probes, calls.get());
             assert_eq!(
                 &r.numerator * &original.denominator,
@@ -206,10 +211,10 @@ fn main() {
         Err(e) => std::panic::resume_unwind(e),
     };
     println!(
-        "case,method,seed,order,status,setup_ms,elapsed_us,probes,attempts,num_terms,den_terms,selected_methods,selection_probes"
+        "case,method,seed,order,status,setup_ms,elapsed_us,probes,attempts,num_terms,den_terms,selected_methods,selection_probes,sparse_rows,sparse_row_fallbacks"
     );
     println!(
-        "{case},{method:?},{seed},{},{status},{setup_ms:.3},{:.3},{},{},{},{},{selected},{selection_probes}",
+        "{case},{method:?},{seed},{},{status},{setup_ms:.3},{:.3},{},{},{},{},{selected},{selection_probes},{sparse_rows},{sparse_fallbacks}",
         if reverse { "reverse" } else { "original" },
         elapsed_ms * 1000.,
         calls.get(),
