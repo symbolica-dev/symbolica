@@ -9,6 +9,9 @@ use crate::domains::{
 /// Total work across prime fields, including independent verification primes.
 #[derive(Clone, Debug, Default)]
 pub struct RationalReconstructionStats {
+    /// Methods used by successful ordinary images. Support-reuse images do not
+    /// select a method and are omitted; failed images are also omitted.
+    pub selected_methods: Vec<ReconstructionMethod>,
     pub primes: usize,
     pub probes: usize,
     pub successful_images: usize,
@@ -105,7 +108,7 @@ where
             }
         };
         stats.probes += calls.get();
-        let (image, _) = match image {
+        let (image, image_stats) = match image {
             Ok(r) => r,
             Err(ReconstructionError::InvalidOptions) => {
                 return Err(ReconstructionError::InvalidOptions);
@@ -113,6 +116,9 @@ where
             Err(_) => continue,
         };
         stats.successful_images += 1;
+        if let Some(method) = image_stats.selected_method {
+            stats.selected_methods.push(method);
+        }
         let image_support: Vec<_> = [&image.numerator, &image.denominator]
             .into_iter()
             .enumerate()

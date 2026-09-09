@@ -1,0 +1,43 @@
+--- a/src/poly/reconstruction/automatic.rs
++++ b/src/poly/reconstruction/automatic.rs
+@@ -79,29 +78,0 @@
+-        let mut prefix = [1u64; 2];
+-        let mut balanced = 0u64;
+-        for (variable, &num_degree) in profile.bounds[0].iter().enumerate() {
+-            let row = u64::from(num_degree) + u64::from(profile.bounds[1][variable]) + 1;
+-            balanced = balanced.saturating_add(prefix[0].max(prefix[1]).saturating_mul(row));
+-            for (side, count) in prefix.iter_mut().enumerate() {
+-                *count = count.saturating_mul(term_counts[side][variable]);
+-            }
+-        }
+-        // If even the full degree box is cheaper, refining it with an affine
+-        // line cannot change the cost-model decision. Avoid those oracle calls.
+-        let box_bound = profile.bounds.iter().fold(0u64, |sum, bounds| {
+-            sum.saturating_add(
+-                bounds
+-                    .iter()
+-                    .fold(1u64, |n, d| n.saturating_mul(u64::from(*d) + 1)),
+-            )
+-        });
+-        let degrees_fit = (0..2).all(|side| {
+-            profile.bounds[side]
+-                .iter()
+-                .zip(&profile.minimum[side])
+-                .map(|(hi, lo)| u64::from(*hi) + u64::from(*lo))
+-                .sum::<u64>()
+-                <= u64::from(self.options.max_degree)
+-        });
+-        if degrees_fit && box_bound < balanced {
+-            return Ok((CuytLeePruned, Some(profile)));
+-        }
+@@ -131,0 +103,10 @@
++        let mut prefix = [1u64; 2];
++        let mut balanced = 0u64;
++        for variable in 0..nv {
++            let row =
++                u64::from(profile.bounds[0][variable]) + u64::from(profile.bounds[1][variable]) + 1;
++            balanced = balanced.saturating_add(prefix[0].max(prefix[1]).saturating_mul(row));
++            for (side, count) in prefix.iter_mut().enumerate() {
++                *count = count.saturating_mul(term_counts[side][variable]);
++            }
++        }

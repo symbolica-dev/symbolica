@@ -108,8 +108,15 @@ pub(super) fn run(
         )
     }));
     let elapsed_us = start.elapsed().as_secs_f64() * 1e6;
+    let mut selected = String::new();
     let (status, primes, images, reuses, fallbacks) = match result {
         Ok(Ok((r, stats))) => {
+            selected = stats
+                .selected_methods
+                .iter()
+                .map(|m| format!("{m:?}"))
+                .collect::<Vec<_>>()
+                .join(";");
             assert_eq!(stats.probes, calls);
             assert_eq!(
                 &r.numerator * &original.denominator,
@@ -152,10 +159,10 @@ pub(super) fn run(
         .collect::<Vec<_>>()
         .join(";");
     println!(
-        "case,method,seed,status,elapsed_us,probes,primes,images,support_reuses,support_fallbacks,probes_by_prime,setup_ms,num_terms,den_terms"
+        "case,method,seed,status,elapsed_us,probes,primes,images,support_reuses,support_fallbacks,probes_by_prime,setup_ms,num_terms,den_terms,selected_methods"
     );
     println!(
-        "{case},{method:?},{seed},{status},{elapsed_us:.3},{calls},{primes},{images},{reuses},{fallbacks},{distribution},{setup_ms:.3},{},{}",
+        "{case},{method:?},{seed},{status},{elapsed_us:.3},{calls},{primes},{images},{reuses},{fallbacks},{distribution},{setup_ms:.3},{},{},{selected}",
         original.numerator.nterms(),
         original.denominator.nterms()
     );

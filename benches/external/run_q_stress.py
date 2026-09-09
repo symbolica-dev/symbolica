@@ -21,8 +21,8 @@ env = {**os.environ, "RECONSTRUCTION_OVER_Q": "1", "CACHED_ORACLE": "1"}
 for key in ["EXPORT_ORACLE", "RECONSTRUCTION_DEGREE_RACE", "RECONSTRUCTION_NO_REUSE", "BENCH_ORDER"]:
     env.pop(key, None)
 methods = os.environ.get("BENCH_METHODS", "CuytLeePruned,BalancedZippel,FireFly_default,FireFly_scan").split(",")
-assert set(methods) <= {"CuytLee", "CuytLeePruned", "CuytLeePrunedRace", "BalancedZippel", "BalancedZippelRace", "BalancedZippelSeparated", "FireFly_default", "FireFly_scan", "BalancedZippelNoReuse", "CuytLeePrunedNoReuse", "FIRE7_Q", "FIRE7_Q_learned"}
-fields = "case,method,seed,status,elapsed_us,probes,primes,images,support_reuses,support_fallbacks,probes_by_prime,prime_policy,oracle,num_terms,den_terms,setup_ms".split(",")
+assert set(methods) <= {"Automatic", "CuytLee", "CuytLeePruned", "CuytLeePrunedRace", "BalancedZippel", "BalancedZippelRace", "BalancedZippelSeparated", "FireFly_default", "FireFly_scan", "BalancedZippelNoReuse", "CuytLeePrunedNoReuse", "FIRE7_Q", "FIRE7_Q_learned"}
+fields = "case,method,seed,status,elapsed_us,probes,primes,images,support_reuses,support_fallbacks,probes_by_prime,prime_policy,oracle,num_terms,den_terms,setup_ms,selected_methods".split(",")
 with output.open("w") as out:
     writer = csv.DictWriter(out, fields, lineterminator="\n")
     writer.writeheader()
@@ -64,7 +64,7 @@ with output.open("w") as out:
                         parsed = list(csv.DictReader(lines[start:]))
                         if len(parsed) != 1:
                             raise ValueError(result.stdout)
-                        for key in ["status", "elapsed_us", "probes", "primes", "images", "support_reuses", "support_fallbacks", "probes_by_prime", "setup_ms"]:
+                        for key in ["status", "elapsed_us", "probes", "primes", "images", "support_reuses", "support_fallbacks", "probes_by_prime", "setup_ms", "selected_methods"]:
                             if key in parsed[0]:
                                 row[key] = parsed[0][key]
                 except subprocess.TimeoutExpired as e:

@@ -71,12 +71,13 @@ fn main() {
     let args: Vec<_> = std::env::args().collect();
     let case = args.get(1).expect("case");
     let method = match args.get(2).map(String::as_str) {
+        Some("Automatic") => ReconstructionMethod::Automatic,
         Some("CuytLee") => ReconstructionMethod::CuytLee,
         Some("CuytLeePruned") => ReconstructionMethod::CuytLeePruned,
         Some("BalancedZippel") => ReconstructionMethod::BalancedZippel,
         Some("BalancedZippelSeparated") => ReconstructionMethod::BalancedZippelSeparated,
         _ => panic!(
-            "method must be CuytLee, CuytLeePruned, BalancedZippel, or BalancedZippelSeparated"
+            "method must be Automatic, CuytLee, CuytLeePruned, BalancedZippel, or BalancedZippelSeparated"
         ),
     };
     let seed = args.get(3).expect("seed").parse::<u64>().unwrap();
@@ -186,24 +187,29 @@ fn main() {
         )
     }));
     let elapsed_ms = start.elapsed().as_secs_f64() * 1000.;
-    let (status, attempts) = match result {
+    let (status, attempts, selected, selection_probes) = match result {
         Ok(Ok((r, s))) => {
             assert_eq!(s.probes, calls.get());
             assert_eq!(
                 &r.numerator * &original.denominator,
                 &r.denominator * &original.numerator
             );
-            ("ok".to_string(), s.attempts)
+            (
+                "ok".to_string(),
+                s.attempts,
+                format!("{:?}", s.selected_method.unwrap()),
+                s.selection_probes.to_string(),
+            )
         }
-        Ok(Err(e)) => (format!("{e:?}"), 0),
-        Err(e) if e.is::<TimeLimit>() => ("time_limit".into(), 0),
+        Ok(Err(e)) => (format!("{e:?}"), 0, String::new(), String::new()),
+        Err(e) if e.is::<TimeLimit>() => ("time_limit".into(), 0, String::new(), String::new()),
         Err(e) => std::panic::resume_unwind(e),
     };
     println!(
-        "case,method,seed,order,status,setup_ms,elapsed_us,probes,attempts,num_terms,den_terms"
+        "case,method,seed,order,status,setup_ms,elapsed_us,probes,attempts,num_terms,den_terms,selected_methods,selection_probes"
     );
     println!(
-        "{case},{method:?},{seed},{},{status},{setup_ms:.3},{:.3},{},{},{},{}",
+        "{case},{method:?},{seed},{},{status},{setup_ms:.3},{:.3},{},{},{},{},{selected},{selection_probes}",
         if reverse { "reverse" } else { "original" },
         elapsed_ms * 1000.,
         calls.get(),

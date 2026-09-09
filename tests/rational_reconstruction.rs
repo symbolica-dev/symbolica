@@ -15,6 +15,7 @@ fn check(num: &str, den: &str, names: &[&str], seed: u64) {
     let n: MultivariatePolynomial<_, u16> = parse!(num).to_polynomial(&field, vars.clone());
     let d: MultivariatePolynomial<_, u16> = parse!(den).to_polynomial(&field, vars.clone());
     for method in [
+        Automatic,
         CuytLee,
         CuytLeePruned,
         BalancedZippel,
@@ -523,6 +524,7 @@ fn lift_large_rational_coefficients() {
     let d: MultivariatePolynomial<_, u16> =
         parse!("13*x*y+17/23*y^2+29").to_polynomial(&Q, vars.clone());
     for method in [
+        Automatic,
         CuytLee,
         CuytLeePruned,
         BalancedZippel,
@@ -842,5 +844,66 @@ fn rational_lifting_keeps_the_eq28_probe_budgets() {
             assert_eq!(stats.support_fallbacks, 0);
         }
         assert_eq!(&r.numerator * &d, &r.denominator * &n);
+    }
+}
+
+#[test]
+fn automatic_selection_validates_structure_and_preserves_probe_limits() {
+    let field = Zp64::new(2_305_843_009_213_693_951);
+    let vars: Arc<Vec<symbolica::poly::PolyVariable>> =
+        Arc::new(["x", "y", "z"].iter().map(|s| symbol!(*s).into()).collect());
+    for (num, den, degree, selected) in [
+        ("x^2+y*z+1", "(z+1)*(x+y+2)", 10, BalancedZippelSeparated),
+        ("(x+y+z+1)^5", "(x+2*y+3*z+1)^4", 10, CuytLeePruned),
+        ("(x+y+z+1)^5", "x-y+(x*y*z)^3", 10, CuytLeePruned),
+        ("x-y+(x*y*z)^3", "(x+y+z+1)^5", 10, CuytLeePruned),
+        ("x^20+y^20+z^20", "x^20-y^20+2*z^20", 40, BalancedZippel),
+        ("x^4*y^4*z^4*(x+y+z+1)^3", "(x+y+z)^3", 10, BalancedZippel),
+        // The affine degree forecast exceeds the limit, but each individual
+        // degree fits. Automatic selection must still try balanced Zippel.
+        ("x*y*z+1", "x+y*z+2", 2, BalancedZippel),
+    ] {
+        let n: MultivariatePolynomial<_, u16> = parse!(num).to_polynomial(&field, vars.clone());
+        let d: MultivariatePolynomial<_, u16> = parse!(den).to_polynomial(&field, vars.clone());
+        let calls = Cell::new(0);
+        let options = ReconstructionOptions {
+            seed: 41,
+            max_degree: degree,
+            max_probes: 2000,
+            ..Default::default()
+        };
+        let (r, stats) = reconstruct_rational_function(
+            field.clone(),
+            vars.clone(),
+            |f, p| {
+                calls.set(calls.get() + 1);
+                let dv = d.replace_all(p);
+                (!f.is_zero(&dv)).then(|| f.div(&n.replace_all(p), &dv))
+            },
+            Automatic,
+            &options,
+        )
+        .unwrap();
+        assert_eq!(&r.numerator * &d, &r.denominator * &n);
+        assert_eq!(stats.probes, calls.get());
+        assert_eq!(stats.selected_method, Some(selected));
+        assert!(stats.selection_probes > 0);
+        calls.set(0);
+        let limited = reconstruct_rational_function(
+            field.clone(),
+            vars.clone(),
+            |f, p| {
+                calls.set(calls.get() + 1);
+                let dv = d.replace_all(p);
+                (!f.is_zero(&dv)).then(|| f.div(&n.replace_all(p), &dv))
+            },
+            Automatic,
+            &ReconstructionOptions {
+                max_probes: 5,
+                ..options
+            },
+        );
+        assert_eq!(limited.unwrap_err(), ReconstructionError::ProbeLimit);
+        assert_eq!(calls.get(), 5);
     }
 }

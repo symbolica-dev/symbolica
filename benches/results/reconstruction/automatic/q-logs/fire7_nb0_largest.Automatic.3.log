@@ -1,0 +1,2 @@
+case,method,seed,status,elapsed_us,probes,primes,images,support_reuses,support_fallbacks,probes_by_prime,setup_ms,num_terms,den_terms,selected_methods
+fire7_nb0_largest,Automatic,3,ok,36838.831,1985,2,1,0,0,2305843009213693967:1982;2305843009213693973:3,4.624,858,414,BalancedZippelSeparated
