@@ -1,0 +1,16 @@
+{
+  "revision": "d132e5365dd2a13db9cd9dbaf5c200b53d489cfd",
+  "source": "FIRE7/examples/graph5.tables",
+  "source_sha256": "3f514ae8dd8ceb8477eb605172f85f580dddf3c1b303a0d6f8dbd8bc559df2f3",
+  "selection": "longest coefficient string, first in table order on ties",
+  "coefficient_count": 1013,
+  "row": "321005004001001000000000000000",
+  "master": "2127128127127128128128127127",
+  "variables": [
+    "y",
+    "d"
+  ],
+  "expression_bytes": 435,
+  "output_sha256": "085064c0c5718505b830643ca99722de156229e1c1cf7fe20e0d01ab639faa8b"
+}
+Exported 945 suite cases from 945 distinct source strings

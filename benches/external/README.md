@@ -193,3 +193,9 @@ screen with default FireFly for all 3,319 coefficients, compares against the
 better of the two FireFly settings, and tests common numerator factor removal
 and selection of the method for the remaining variables. It retains the small
 reference gaps and the one probe-count regression.
+
+`extract_fire_tables.py --table graph5 --all` exports the second pinned public
+table into `fire-table-inputs/graph5/all`. See the
+[intersection reuse and graph5 comparison](../reconstruction-intersections.md)
+for all 945 distinct coefficients, the unchanged native-prime comparisons, and
+the separate four-loop control that limits an unconditional separation strategy.

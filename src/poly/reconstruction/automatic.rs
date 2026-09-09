@@ -72,15 +72,20 @@ where
             minimum: [vec![0; nv], vec![0; nv]],
         };
         let mut term_counts = [vec![0u64; nv], vec![0u64; nv]];
+        let intersection = value(&slice, &anchor);
         for variable in 0..nv {
             let row = if variable == last {
                 slice.clone()
             } else {
-                self.thiele(variable, |t| {
-                    let mut p = anchor.clone();
-                    p[variable] = t;
-                    p
-                })?
+                self.thiele_seeded(
+                    variable,
+                    |t| {
+                        let mut p = anchor.clone();
+                        p[variable] = t;
+                        p
+                    },
+                    intersection.map(|v| (anchor[variable], v)),
+                )?
             };
             for (side, p) in [&row.numerator, &row.denominator].into_iter().enumerate() {
                 let lo = p
