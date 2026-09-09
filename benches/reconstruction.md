@@ -1,6 +1,9 @@
 # Rational function reconstruction experiment
 
-Latest update: [full-Q FIRE7 comparison and an additional IBP table](reconstruction-fire7-q.md)
+Latest update: [automatic method selection](reconstruction-automatic.md)
+chooses a reconstruction method from generic oracle slices and accounts for
+selection probes in the shared budget.
+The [full-Q FIRE7 comparison and additional IBP table](reconstruction-fire7-q.md)
 adds the authors' coefficient-lifting routine to the reference adapter and tests
 a separate four-variable public IBP coefficient.
 The [coefficient-reuse update](reconstruction-q-support.md)

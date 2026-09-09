@@ -160,3 +160,8 @@ from the pinned `nb0` IBP table, with source hashes and integral identifiers.
 It enables the `fire7_nb0_largest` case. See the
 [FIRE7 Q and additional IBP report](../reconstruction-fire7-q.md) for scope,
 commands and results.
+
+Both stress runners accept `BENCH_METHODS=Automatic`, using Symbolica's generic
+slice-based method selector. The modular CSV records the chosen method and
+selection probes; Q records methods used by successful ordinary prime images.
+See the [automatic-selection report](../reconstruction-automatic.md).

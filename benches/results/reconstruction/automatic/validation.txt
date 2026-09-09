@@ -1,0 +1,9 @@
+23 reconstruction tests passed
+27 final benchmark runs passed exact polynomial identity checks
+9 initial-selector benchmark runs passed exact identity checks
+All final per-case probe counts and method choices identical over three seeds
+All Q per-prime probe sums and image/method counts checked
+All Q exact exports match the preceding reference and initial selector exports
+Release build completed with LTO disabled and 16 codegen units
+Clippy completed with the existing never_loop allowance: 249 library warnings
+Rust formatting, Python syntax and policy reproduction patch checks passed

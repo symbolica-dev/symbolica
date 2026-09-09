@@ -22,6 +22,7 @@ use std::{
     sync::Arc,
 };
 
+mod automatic;
 mod rational;
 mod support;
 pub use rational::{RationalReconstructionStats, reconstruct_rational_function_over_q};
@@ -33,6 +34,10 @@ type Fraction = RationalPolynomial<Zp64, u16>;
 /// Reconstruction strategy. These are implementations, not external-code bindings.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum ReconstructionMethod {
+    /// Choose from learned slice structure and estimated dense interpolation
+    /// costs. Selection probes count toward the shared budget. Uses balanced
+    /// Zippel directly for one or two variables.
+    Automatic,
     /// Homogenization, Thiele degree discovery, linear solves and polynomial Zippel.
     CuytLee,
     /// Reconstruct inexpensive shifted homogeneous components first, removing
@@ -85,6 +90,10 @@ impl Default for ReconstructionOptions {
 /// Costs include unsuccessful attempts and validation. Cached probes are free.
 #[derive(Clone, Debug, Default)]
 pub struct ReconstructionStats {
+    /// Method used by the successful attempt (including automatic selection).
+    pub selected_method: Option<ReconstructionMethod>,
+    /// Oracle calls spent selecting a method, including rejected pilots.
+    pub selection_probes: usize,
     pub probes: usize,
     pub poles: usize,
     pub cache_hits: usize,
@@ -163,15 +172,38 @@ where
     };
     for attempt in 0..options.max_attempts {
         ctx.stats.attempts = attempt + 1;
-        let candidates: &[bool] = if method == ReconstructionMethod::BalancedZippelSeparated {
+        let (selected, mut profile) = if method == ReconstructionMethod::Automatic {
+            let before = ctx.stats.probes;
+            let choice = ctx.select_method();
+            ctx.stats.selection_probes += ctx.stats.probes - before;
+            match choice {
+                Ok(choice) => choice,
+                Err(ReconstructionError::ProbeLimit) => {
+                    return Err(ReconstructionError::ProbeLimit);
+                }
+                // A failed degree forecast need not prevent balanced reconstruction.
+                Err(_) => (ReconstructionMethod::BalancedZippel, None),
+            }
+        } else {
+            (method, None)
+        };
+        ctx.stats.selected_method = Some(selected);
+        let candidates: &[bool] = if selected == ReconstructionMethod::BalancedZippelSeparated {
             &[true, false]
         } else {
             &[false]
         };
         for &separate in candidates {
-            let result = match method {
+            let result = match selected {
+                ReconstructionMethod::Automatic => unreachable!(),
                 ReconstructionMethod::CuytLee => ctx.cuyt_lee(false),
-                ReconstructionMethod::CuytLeePruned => ctx.cuyt_lee(true),
+                ReconstructionMethod::CuytLeePruned => {
+                    if let Some(profile) = profile.take() {
+                        ctx.cuyt_lee_profile(true, profile.bounds, profile.minimum)
+                    } else {
+                        ctx.cuyt_lee(true)
+                    }
+                }
                 ReconstructionMethod::BalancedZippel
                 | ReconstructionMethod::BalancedZippelSeparated => ctx.balanced(separate),
             };
@@ -187,6 +219,7 @@ where
             }
             if separate {
                 ctx.stats.separation_fallbacks += 1;
+                ctx.stats.selected_method = Some(ReconstructionMethod::BalancedZippel);
             }
         }
     }
@@ -681,7 +714,6 @@ impl<F: FnMut(&Zp64, &[Element]) -> Option<Element>> Context<'_, F> {
         if self.template.nvars() == 1 {
             return self.thiele(0, |t| vec![t]);
         }
-        let f = self.field.clone();
         let degree_anchor = self.point();
         let mut bounds = [Vec::new(), Vec::new()];
         let mut minimum = [Vec::new(), Vec::new()];
@@ -709,6 +741,16 @@ impl<F: FnMut(&Zp64, &[Element]) -> Option<Element>> Context<'_, F> {
                 bounds[side][variable] -= lo;
             }
         }
+        self.cuyt_lee_profile(prune, bounds, minimum)
+    }
+
+    fn cuyt_lee_profile(
+        &mut self,
+        prune: bool,
+        bounds: [Vec<u16>; 2],
+        minimum: [Vec<u16>; 2],
+    ) -> Result<Fraction> {
+        let f = self.field.clone();
         // Generic slices expose factors shared by every term. Reduce the
         // degrees before homogenization, without additional discovery probes.
         self.monomial_factors = minimum.iter().flatten().any(|d| *d != 0).then_some(minimum);

@@ -1,0 +1,2 @@
+case,method,seed,order,status,setup_ms,elapsed_us,probes,attempts,num_terms,den_terms,selected_methods,selection_probes
+firefly_f2,Automatic,3,original,ok,0.215,68356.986,2271,1,3,2,BalancedZippel,227

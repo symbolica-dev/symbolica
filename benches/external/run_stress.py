@@ -23,8 +23,8 @@ env.pop("RECONSTRUCTION_DEGREE_RACE", None)
 env.pop("BENCH_ORDER", None)
 env.pop("FIRE7_LEARN_BATCH", None)
 methods = os.environ.get("BENCH_METHODS", "BalancedZippel,FireFly_default").split(",")
-assert set(methods) <= {"BalancedZippel", "BalancedZippelSeparated", "CuytLee", "CuytLeePruned", "CuytLeePrunedRace", "BalancedZippelRace", "FireFly_default", "FIRE7_balanced_adapter", "FIRE7_learned_batch"}
-fields = "case,method,seed,status,elapsed_us,probes,prime,oracle,degree_race,num_terms,den_terms,setup_ms".split(",")
+assert set(methods) <= {"Automatic", "BalancedZippel", "BalancedZippelSeparated", "CuytLee", "CuytLeePruned", "CuytLeePrunedRace", "BalancedZippelRace", "FireFly_default", "FIRE7_balanced_adapter", "FIRE7_learned_batch"}
+fields = "case,method,seed,status,elapsed_us,probes,prime,oracle,degree_race,num_terms,den_terms,setup_ms,selected_methods,selection_probes".split(",")
 with output.open("w") as out:
     writer = csv.DictWriter(out, fields, lineterminator="\n")
     writer.writeheader()
@@ -66,7 +66,7 @@ with output.open("w") as out:
                         parsed = list(csv.DictReader(lines[start:]))
                         if len(parsed) != 1:
                             raise ValueError(result.stdout)
-                        for key in ["status", "elapsed_us", "probes", "setup_ms"]:
+                        for key in ["status", "elapsed_us", "probes", "setup_ms", "selected_methods", "selection_probes"]:
                             if key in parsed[0]:
                                 row[key] = parsed[0][key]
                 except subprocess.TimeoutExpired as e:
