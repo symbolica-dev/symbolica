@@ -179,6 +179,8 @@ where
         stats: Default::default(),
         monomial_factors: None,
         balanced_pilot: None,
+        removed_numerator_factor: None,
+        fixed_last_variable: None,
     };
     for attempt in 0..options.max_attempts {
         ctx.stats.attempts = attempt + 1;
@@ -240,7 +242,8 @@ struct BalancedPilot {
     point: Vec<Element>,
     row: Fraction,
     factorizes: bool,
-    constant: bool,
+    univariate: bool,
+    numerator_factor: Option<Polynomial>,
 }
 
 struct Context<'a, F> {
@@ -256,6 +259,10 @@ struct Context<'a, F> {
     monomial_factors: Option<[Vec<u16>; 2]>,
     // A final-variable slice already reconstructed during method selection.
     balanced_pilot: Option<BalancedPilot>,
+    // A last-variable factor hypothesized from generic numerator slices.
+    removed_numerator_factor: Option<UnivariatePolynomial<Zp64>>,
+    // Restrict probes while reconstructing the remaining variables of a factor.
+    fixed_last_variable: Option<Element>,
 }
 
 fn unlucky<T>() -> Result<T> {
@@ -283,9 +290,27 @@ impl<F: FnMut(&Zp64, &[Element]) -> Option<Element>> Context<'_, F> {
         (0..self.template.nvars()).map(|_| self.random()).collect()
     }
     fn probe(&mut self, point: &[Element]) -> Result<Option<Element>> {
+        let fixed;
+        let point = if let Some(anchor) = self.fixed_last_variable {
+            fixed = {
+                let mut p = point.to_vec();
+                *p.last_mut().unwrap() = anchor;
+                p
+            };
+            fixed.as_slice()
+        } else {
+            point
+        };
         let Some(mut value) = self.probe_raw(point)? else {
             return Ok(None);
         };
+        if let Some(factor) = &self.removed_numerator_factor {
+            let divisor = factor.evaluate(point.last().unwrap());
+            if self.field.is_zero(&divisor) {
+                return Ok(None);
+            }
+            value = self.field.div(&value, &divisor);
+        }
         if let Some(powers) = &self.monomial_factors {
             let f = &self.field;
             for ((x, n), d) in point.iter().zip(&powers[0]).zip(&powers[1]) {
@@ -629,8 +654,38 @@ impl<F: FnMut(&Zp64, &[Element]) -> Option<Element>> Context<'_, F> {
 
     fn balanced(&mut self, separate: bool) -> Result<Fraction> {
         let mut pilot = self.balanced_pilot.take();
-        if separate && pilot.as_ref().is_some_and(|p| p.constant) {
-            // Agreement of two constant slices predicts a constant function.
+        let factor = if separate {
+            pilot.as_mut().and_then(|p| p.numerator_factor.take())
+        } else {
+            None
+        };
+        if let Some(factor) = &factor {
+            let row = &mut pilot.as_mut().unwrap().row;
+            row.numerator = row
+                .numerator
+                .try_div(factor)
+                .ok_or(ReconstructionError::AttemptsExhausted)?;
+            self.removed_numerator_factor =
+                Some(factor.to_univariate_from_univariate(self.template.nvars() - 1));
+        }
+        let result = self.balanced_with_pilot(separate, pilot);
+        // Clear the transformed oracle even on error, before ordinary fallback.
+        self.removed_numerator_factor = None;
+        result.map(|mut result| {
+            if let Some(factor) = factor {
+                result.numerator = &result.numerator * &factor;
+            }
+            result
+        })
+    }
+
+    fn balanced_with_pilot(
+        &mut self,
+        separate: bool,
+        mut pilot: Option<BalancedPilot>,
+    ) -> Result<Fraction> {
+        if separate && pilot.as_ref().is_some_and(|p| p.univariate) {
+            // Identical slices predict dependence on only the last variable.
             // The caller still performs fresh full-dimensional verification.
             return Ok(pilot.take().unwrap().row);
         }
@@ -640,6 +695,42 @@ impl<F: FnMut(&Zp64, &[Element]) -> Option<Element>> Context<'_, F> {
             p[0] = t;
             p
         })?;
+        let mut surveyed_rows: Vec<Option<Fraction>> = Vec::new();
+        // A dense denominator with a constant numerator predicts expensive
+        // balanced rows for a reciprocal polynomial. Reconstruct the remaining
+        // variables with the bounded homogeneous method instead.
+        if separate
+            && self.template.nvars() > 3
+            && pilot.as_ref().is_some_and(|p| p.factorizes)
+            && result.numerator.degree(0) == 0
+            && result.denominator.degree(0) >= 3
+            && result.denominator.nterms() == usize::from(result.denominator.degree(0)) + 1
+        {
+            let last = self.template.nvars() - 1;
+            self.fixed_last_variable = Some(anchors[last]);
+            let before = self.stats.probes;
+            let survey = self.survey_remaining_variables(&result, &anchors);
+            self.stats.selection_probes += self.stats.probes - before;
+            self.fixed_last_variable = None;
+            let (profile, rows) = survey?;
+            if profile.bounds[1][last - 1] >= 3 {
+                self.fixed_last_variable = Some(anchors[last]);
+                let remaining = self.cuyt_lee_profile(true, profile.bounds, profile.minimum);
+                self.fixed_last_variable = None;
+                result = remaining?;
+                let row = &pilot.as_ref().unwrap().row;
+                let at_anchor = value(row, &anchors)
+                    .filter(|v| !self.field.is_zero(v))
+                    .ok_or(ReconstructionError::AttemptsExhausted)?;
+                return Ok(Fraction {
+                    numerator: &result.numerator * &row.numerator,
+                    denominator: (&result.denominator * &row.denominator).mul_coeff(at_anchor),
+                });
+            }
+            // Low degree in the final remaining variable favors balanced rows.
+            // Reuse the survey itself as geometric row one at each stage.
+            surveyed_rows = rows;
+        }
         for variable in 1..self.template.nvars() {
             let last = variable + 1 == self.template.nvars();
             if last
@@ -662,7 +753,9 @@ impl<F: FnMut(&Zp64, &[Element]) -> Option<Element>> Context<'_, F> {
             }
             // At geometric power one, this base reproduces the pilot's fixed
             // coordinates. Its row can therefore be reused without new probes.
-            let base = if last && let Some(pilot) = &pilot {
+            let base = if surveyed_rows.get(variable).is_some_and(Option::is_some) {
+                anchors.clone()
+            } else if last && let Some(pilot) = &pilot {
                 pilot.point.clone()
             } else {
                 self.point()
@@ -686,8 +779,34 @@ impl<F: FnMut(&Zp64, &[Element]) -> Option<Element>> Context<'_, F> {
                     point[j] = self.field.pow(&base[j], i as u64);
                 }
                 let known = value(&result, &point).ok_or(ReconstructionError::AttemptsExhausted)?;
-                let mut row = if last && i == 1 && pilot.is_some() {
+                let mut row = if i == 1 && surveyed_rows.get(variable).is_some_and(Option::is_some)
+                {
+                    surveyed_rows[variable].take().unwrap()
+                } else if last && i == 1 && pilot.is_some() {
                     pilot.take().unwrap().row
+                } else if last
+                    && separate
+                    && let Some(numerator) = &completed[0]
+                {
+                    // Both row shapes are now known: the completed numerator
+                    // and the hypothesized separated denominator. The previous
+                    // slice fixes the denominator's scale without another probe.
+                    let mut numerator = numerator.clone();
+                    for (j, x) in point.iter().enumerate().take(variable) {
+                        numerator = numerator.replace(j, x);
+                    }
+                    let denominator = rows[0].denominator.clone();
+                    let at_anchor = denominator.replace_all(&point);
+                    if self.field.is_zero(&at_anchor) {
+                        return unlucky();
+                    }
+                    let scale = self
+                        .field
+                        .div(&result.denominator.replace_all(&point), &at_anchor);
+                    Fraction {
+                        numerator,
+                        denominator: denominator.mul_coeff(scale),
+                    }
                 } else if let Some(degrees) = degrees {
                     // The first row predicts the last-variable denominator
                     // factor. Fresh final verification guards this hypothesis.
@@ -799,6 +918,45 @@ impl<F: FnMut(&Zp64, &[Element]) -> Option<Element>> Context<'_, F> {
             };
         }
         Ok(result)
+    }
+
+    fn survey_remaining_variables(
+        &mut self,
+        first: &Fraction,
+        anchors: &[Element],
+    ) -> Result<(automatic::DegreeProfile, Vec<Option<Fraction>>)> {
+        let nv = self.template.nvars();
+        let mut bounds = [vec![0; nv], vec![0; nv]];
+        let mut minimum = [vec![0; nv], vec![0; nv]];
+        let mut rows = vec![None; nv];
+        let known = value(first, anchors).ok_or(ReconstructionError::AttemptsExhausted)?;
+        for variable in 0..nv - 1 {
+            let row = if variable == 0 {
+                first.clone()
+            } else {
+                self.thiele_seeded(
+                    variable,
+                    |t| {
+                        let mut p = anchors.to_vec();
+                        p[variable] = t;
+                        p
+                    },
+                    Some((anchors[variable], known)),
+                )?
+            };
+            for (side, p) in [&row.numerator, &row.denominator].into_iter().enumerate() {
+                let lo = p
+                    .into_iter()
+                    .map(|m| m.exponents[variable])
+                    .min()
+                    .unwrap_or(0);
+                minimum[side][variable] = lo;
+                bounds[side][variable] = p.degree(variable) - lo;
+            }
+            rows[variable] = Some(row);
+        }
+        // The final variable is fixed in the oracle and has support bound zero.
+        Ok((automatic::DegreeProfile { bounds, minimum }, rows))
     }
 
     fn cuyt_lee(&mut self, prune: bool) -> Result<Fraction> {

@@ -36,9 +36,7 @@ where
         // This is only a hypothesis; ordinary final validation and fallback
         // remain responsible for accepting the reconstructed function.
         if slice.denominator == other.denominator {
-            let constant = slice.numerator.degree(last) == 0
-                && slice.denominator.degree(last) == 0
-                && slice.numerator == other.numerator;
+            let univariate = slice.numerator == other.numerator;
             // Proportional numerators predict separation of the whole
             // rational factor, including its numerator's variable dependence.
             let factorizes = !slice.numerator.is_zero()
@@ -53,10 +51,19 @@ where
                     slice.numerator.degree(last),
                 ));
             self.balanced_pilot = Some(BalancedPilot {
+                numerator_factor: if !factorizes
+                    && !slice.numerator.is_zero()
+                    && !other.numerator.is_zero()
+                {
+                    let factor = slice.numerator.gcd(&other.numerator);
+                    (factor.degree(last) > 0).then_some(factor)
+                } else {
+                    None
+                },
                 point: anchor,
                 row: slice,
                 factorizes,
-                constant,
+                univariate,
             });
             return Ok((BalancedZippelSeparated, None));
         }

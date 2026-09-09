@@ -1,0 +1,24 @@
+Baseline: 0361fad0 release binary, copied before source edits.
+36 rational reconstruction tests passed, including deliberately rejected factor
+and restricted-coordinate hypotheses with exact recovery in one bounded attempt.
+Final release build passed with Rust 1.92, LTO disabled, 16 codegen units.
+Clippy passed with -A clippy::never_loop and the existing 249 warnings.
+Changed Rust files pass rustfmt --edition 2024 --check --config skip_children=true.
+Repository-wide formatting check reports an existing src/transcendental.rs difference.
+All 3319 source expression hashes and the pinned FIRE table hash verified.
+3319 current + 3319 rerun baseline + 3319 default-FireFly exact Q checks passed.
+The rerun baseline's probe counts match the previously archived baseline exactly.
+4296 seed checks (358 cases, four methods, three seeds) passed with stable counts.
+12 additional rank2457 seed checks and 3 saved-baseline checks passed.
+7 larger Q/modular controls passed with unchanged probe counts.
+All full-table exact oracle exports match the preceding archive byte for byte.
+Default FireFly, rerun baseline, and seed-check exports match the current exports.
+All full-Q per-prime probe distributions sum to total oracle calls.
+2195 coefficients improve, 1123 unchanged, one regresses from 69 to 72 probes.
+317 cases retain an advantage for the better of default/scanned FireFly.
+3 cases retain an advantage for scanned FireFly alone; no cases were excluded.
+Total probes: 571020 baseline, 509173 current, 1181647 best FireFly per case.
+Compressed process archive contains all 14275 successful benchmark outputs.
+Scan-enabled FireFly and learned-batch FIRE7 references remain in ../factor-lift/references.csv.
+Timing is reported with shared-host limitations and the earlier baseline's variability.
+Archived build/test/Clippy logs have trailing whitespace and terminal blank lines removed.

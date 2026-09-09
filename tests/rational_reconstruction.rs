@@ -957,7 +957,7 @@ fn automatic_lifts_a_separated_rational_factor() {
         parse!("(x+y+w+1)^4*(x+2*y+w+3)*(z+2)^4").to_polynomial(&field, vars.clone());
     for seed in [1, 17, 41] {
         let mut costs = Vec::new();
-        for method in [BalancedZippelSeparated, Automatic] {
+        for method in [BalancedZippel, Automatic] {
             let calls = Cell::new(0);
             let (r, stats) = reconstruct_rational_function(
                 field.clone(),
@@ -1092,6 +1092,332 @@ fn automatic_constant_candidates_are_checked_in_full_dimension() {
         assert_eq!(r.numerator, &r.denominator * &target);
         assert_eq!(stats.probes, calls.get());
         assert_eq!(stats.attempts, 1);
+    }
+}
+
+#[test]
+fn automatic_removes_a_common_numerator_factor() {
+    let field = Zp64::new(2_305_843_009_213_693_951);
+    let vars = Arc::new(["x", "y", "w", "z"].map(|s| symbol!(s).into()).to_vec());
+    let n: MultivariatePolynomial<_, u16> =
+        parse!("(z+7)^6*((x+y+w+1)^5*z+(x+2*y+w+3)^4)").to_polynomial(&field, vars.clone());
+    let d: MultivariatePolynomial<_, u16> =
+        parse!("(z+3)^3*(x+y+w+2)").to_polynomial(&field, vars.clone());
+    for seed in [1, 17, 41] {
+        let mut costs = Vec::new();
+        for method in [BalancedZippelSeparated, Automatic] {
+            let calls = Cell::new(0);
+            let (r, stats) = reconstruct_rational_function(
+                field.clone(),
+                vars.clone(),
+                |f, p| {
+                    calls.set(calls.get() + 1);
+                    let dv = d.replace_all(p);
+                    (!f.is_zero(&dv)).then(|| f.div(&n.replace_all(p), &dv))
+                },
+                method,
+                &ReconstructionOptions {
+                    seed,
+                    max_degree: 20,
+                    ..Default::default()
+                },
+            )
+            .unwrap();
+            assert_eq!(&r.numerator * &d, &r.denominator * &n);
+            assert_eq!(stats.probes, calls.get());
+            assert_eq!(stats.separation_fallbacks, 0);
+            costs.push(stats.probes);
+        }
+        assert!(costs[1] + 40 < costs[0], "{costs:?}");
+    }
+}
+
+#[test]
+fn rejected_common_numerator_factor_restores_the_original_oracle() {
+    let field = Zp64::new(2_305_843_009_213_693_951);
+    let vars = Arc::new(["x", "y", "z"].map(|s| symbol!(s).into()).to_vec());
+    let n: MultivariatePolynomial<_, u16> =
+        parse!("(x*z+y+1)*(z+7)^4").to_polynomial(&field, vars.clone());
+    let d: MultivariatePolynomial<_, u16> =
+        parse!("(x+y+3)*(z+2)").to_polynomial(&field, vars.clone());
+    let x: MultivariatePolynomial<_, u16> = parse!("x").to_polynomial(&field, vars.clone());
+    let z: MultivariatePolynomial<_, u16> = parse!("z").to_polynomial(&field, vars.clone());
+    let a = Cell::new(None);
+    let b = Cell::new(None);
+    let calls = Cell::new(0);
+    let (r, stats) = reconstruct_rational_function(
+        field.clone(),
+        vars,
+        |f, p| {
+            calls.set(calls.get() + 1);
+            let first = a.get().unwrap_or_else(|| {
+                a.set(Some(p[0]));
+                p[0]
+            });
+            if b.get().is_none() && p[0] != first {
+                b.set(Some(p[0]));
+            }
+            // One polynomial has the learned factor on both pilot slices,
+            // while its extra term prevents that factor from dividing globally.
+            let extra = b.get().map_or_else(
+                || f.zero(),
+                |second| f.mul(&f.mul(&f.sub(&p[0], &first), &f.sub(&p[0], &second)), &p[2]),
+            );
+            let dv = d.replace_all(p);
+            (!f.is_zero(&dv)).then(|| f.div(&f.add(&n.replace_all(p), &extra), &dv))
+        },
+        Automatic,
+        &ReconstructionOptions {
+            seed: 19,
+            max_degree: 12,
+            max_attempts: 1,
+            max_probes: 2000,
+            ..Default::default()
+        },
+    )
+    .unwrap();
+    let target =
+        n + (&x - &x.constant(a.get().unwrap())) * &(&x - &x.constant(b.get().unwrap())) * &z;
+    assert_eq!(&r.numerator * &d, &r.denominator * &target);
+    assert_eq!(stats.probes, calls.get());
+    assert_eq!(stats.attempts, 1);
+    assert_eq!(stats.separation_fallbacks, 1);
+    assert_eq!(stats.selected_method, Some(BalancedZippel));
+}
+
+#[test]
+fn automatic_univariate_candidates_are_checked_in_full_dimension() {
+    let field = Zp64::new(2_305_843_009_213_693_951);
+    let vars = Arc::new(["x", "y", "z"].map(|s| symbol!(s).into()).to_vec());
+    let n: MultivariatePolynomial<_, u16> = parse!("z^2+z+1").to_polynomial(&field, vars.clone());
+    let d: MultivariatePolynomial<_, u16> = parse!("z+3").to_polynomial(&field, vars.clone());
+    let x: MultivariatePolynomial<_, u16> = parse!("x").to_polynomial(&field, vars.clone());
+    for hidden in [false, true] {
+        let a = Cell::new(None);
+        let b = Cell::new(None);
+        let calls = Cell::new(0);
+        let (r, stats) = reconstruct_rational_function(
+            field.clone(),
+            vars.clone(),
+            |f, p| {
+                calls.set(calls.get() + 1);
+                let first = a.get().unwrap_or_else(|| {
+                    a.set(Some(p[0]));
+                    p[0]
+                });
+                if b.get().is_none() && p[0] != first {
+                    b.set(Some(p[0]));
+                }
+                let extra = if hidden {
+                    b.get().map_or_else(
+                        || f.zero(),
+                        |second| f.mul(&f.sub(&p[0], &first), &f.sub(&p[0], &second)),
+                    )
+                } else {
+                    f.zero()
+                };
+                let dv = d.replace_all(p);
+                (!f.is_zero(&dv)).then(|| f.div(&f.add(&n.replace_all(p), &extra), &dv))
+            },
+            Automatic,
+            &ReconstructionOptions {
+                seed: 29,
+                max_degree: 8,
+                max_attempts: 1,
+                max_probes: 300,
+                ..Default::default()
+            },
+        )
+        .unwrap();
+        let target = if hidden {
+            n.clone() + (&x - &x.constant(a.get().unwrap())) * &(&x - &x.constant(b.get().unwrap()))
+        } else {
+            n.clone()
+        };
+        assert_eq!(&r.numerator * &d, &r.denominator * &target);
+        assert_eq!(stats.probes, calls.get());
+        assert_eq!(stats.separation_fallbacks, usize::from(hidden));
+        if !hidden {
+            assert!(stats.probes <= 20, "{}", stats.probes);
+        }
+    }
+}
+
+#[test]
+fn automatic_uses_homogeneous_reconstruction_after_factor_separation() {
+    let field = Zp64::new(2_305_843_009_213_693_951);
+    let vars = Arc::new(["x", "y", "w", "z"].map(|s| symbol!(s).into()).to_vec());
+    let n: MultivariatePolynomial<_, u16> = parse!("(z+3)^5").to_polynomial(&field, vars.clone());
+    let d: MultivariatePolynomial<_, u16> =
+        parse!("(x+w)*(x+y+w)^4*(z+2)^4").to_polynomial(&field, vars.clone());
+    for seed in [1, 17, 41] {
+        let calls = Cell::new(0);
+        let (r, stats) = reconstruct_rational_function(
+            field.clone(),
+            vars.clone(),
+            |f, p| {
+                calls.set(calls.get() + 1);
+                let dv = d.replace_all(p);
+                (!f.is_zero(&dv)).then(|| f.div(&n.replace_all(p), &dv))
+            },
+            Automatic,
+            &ReconstructionOptions {
+                seed,
+                max_degree: 20,
+                ..Default::default()
+            },
+        )
+        .unwrap();
+        assert_eq!(&r.numerator * &d, &r.denominator * &n);
+        assert_eq!(stats.probes, calls.get());
+        assert_eq!(stats.separation_fallbacks, 0);
+        assert!(stats.probes <= 160, "seed {seed}: {}", stats.probes);
+    }
+}
+
+#[test]
+fn rejected_residual_strategy_restores_unrestricted_probes() {
+    let field = Zp64::new(2_305_843_009_213_693_951);
+    let vars = Arc::new(["x", "y", "w", "z"].map(|s| symbol!(s).into()).to_vec());
+    let n: MultivariatePolynomial<_, u16> = parse!("(z+3)^5").to_polynomial(&field, vars.clone());
+    let d: MultivariatePolynomial<_, u16> =
+        parse!("(x+w)*(x+y+w)^4*(z+2)^4").to_polynomial(&field, vars.clone());
+    let x: MultivariatePolynomial<_, u16> = parse!("x").to_polynomial(&field, vars.clone());
+    let w: MultivariatePolynomial<_, u16> = parse!("w").to_polynomial(&field, vars.clone());
+    let z: MultivariatePolynomial<_, u16> = parse!("z").to_polynomial(&field, vars.clone());
+    let a = Cell::new(None);
+    let b = Cell::new(None);
+    let c = Cell::new(None);
+    let calls = Cell::new(0);
+    let (r, stats) = reconstruct_rational_function(
+        field.clone(),
+        vars,
+        |f, p| {
+            calls.set(calls.get() + 1);
+            let first = a.get().unwrap_or_else(|| {
+                a.set(Some(p[0]));
+                p[0]
+            });
+            if b.get().is_none() && p[0] != first {
+                b.set(Some(p[0]));
+            }
+            if let Some(second) = b.get()
+                && p[0] != first
+                && p[0] != second
+                && c.get().is_none()
+            {
+                c.set(Some(p[2]));
+            }
+            // The perturbation vanishes on both pilots and the first x-row,
+            // predicting a separated factor with a reciprocal-polynomial remainder.
+            let extra = c.get().map_or_else(
+                || f.zero(),
+                |third| {
+                    f.mul(
+                        &f.mul(&f.sub(&p[0], &first), &f.sub(&p[0], &b.get().unwrap())),
+                        &f.mul(&f.sub(&p[2], &third), &p[3]),
+                    )
+                },
+            );
+            let dv = d.replace_all(p);
+            (!f.is_zero(&dv)).then(|| f.div(&f.add(&n.replace_all(p), &extra), &dv))
+        },
+        Automatic,
+        &ReconstructionOptions {
+            seed: 19,
+            max_degree: 20,
+            max_attempts: 1,
+            max_probes: 2000,
+            ..Default::default()
+        },
+    )
+    .unwrap();
+    let target = n
+        + (&x - &x.constant(a.get().unwrap()))
+            * &(&x - &x.constant(b.get().unwrap()))
+            * &(&w - &w.constant(c.get().unwrap()))
+            * &z;
+    assert_eq!(&r.numerator * &d, &r.denominator * &target);
+    assert_eq!(stats.probes, calls.get());
+    assert_eq!(stats.separation_fallbacks, 1);
+    assert_eq!(stats.attempts, 1);
+    assert_eq!(stats.selected_method, Some(BalancedZippel));
+}
+
+#[test]
+fn completed_numerator_combines_with_separated_denominator_rows() {
+    let field = Zp64::new(2_305_843_009_213_693_951);
+    let vars = Arc::new(["x", "y", "w", "z"].map(|s| symbol!(s).into()).to_vec());
+    for (num, den, fallback) in [
+        ("x*z+y+1", "(x+y+w+1)^4*(z+3)^2", false),
+        ("1", "(x+y+w+1)^3*(z+3)^2+w*z", true),
+    ] {
+        let n: MultivariatePolynomial<_, u16> = parse!(num).to_polynomial(&field, vars.clone());
+        let d: MultivariatePolynomial<_, u16> = parse!(den).to_polynomial(&field, vars.clone());
+        let mut costs = Vec::new();
+        for method in [BalancedZippel, BalancedZippelSeparated] {
+            let calls = Cell::new(0);
+            let (r, stats) = reconstruct_rational_function(
+                field.clone(),
+                vars.clone(),
+                |f, p| {
+                    calls.set(calls.get() + 1);
+                    let dv = d.replace_all(p);
+                    (!f.is_zero(&dv)).then(|| f.div(&n.replace_all(p), &dv))
+                },
+                method,
+                &ReconstructionOptions {
+                    seed: 41,
+                    max_degree: 12,
+                    max_attempts: 1,
+                    max_probes: 10000,
+                    ..Default::default()
+                },
+            )
+            .unwrap();
+            assert_eq!(&r.numerator * &d, &r.denominator * &n);
+            assert_eq!(stats.probes, calls.get());
+            assert_eq!(
+                stats.separation_fallbacks,
+                usize::from(fallback && method == BalancedZippelSeparated)
+            );
+            costs.push(stats.probes);
+        }
+        if !fallback {
+            assert!(costs[1] + 40 < costs[0], "{costs:?}");
+        }
+    }
+}
+
+#[test]
+fn low_degree_residual_reuses_the_survey_in_balanced_rows() {
+    let field = Zp64::new(2_305_843_009_213_693_951);
+    let vars = Arc::new(["x", "y", "w", "z"].map(|s| symbol!(s).into()).to_vec());
+    let n: MultivariatePolynomial<_, u16> = parse!("(z+3)^4").to_polynomial(&field, vars.clone());
+    let d: MultivariatePolynomial<_, u16> =
+        parse!("(x+y)^3*(x+y+w)*(z+5)").to_polynomial(&field, vars.clone());
+    for seed in [1, 17, 41] {
+        let calls = Cell::new(0);
+        let (r, stats) = reconstruct_rational_function(
+            field.clone(),
+            vars.clone(),
+            |f, p| {
+                calls.set(calls.get() + 1);
+                let dv = d.replace_all(p);
+                (!f.is_zero(&dv)).then(|| f.div(&n.replace_all(p), &dv))
+            },
+            Automatic,
+            &ReconstructionOptions {
+                seed,
+                max_degree: 20,
+                ..Default::default()
+            },
+        )
+        .unwrap();
+        assert_eq!(&r.numerator * &d, &r.denominator * &n);
+        assert_eq!(stats.probes, calls.get());
+        assert_eq!(stats.separation_fallbacks, 0);
+        assert!(stats.probes <= 77, "seed {seed}: {}", stats.probes);
     }
 }
 
