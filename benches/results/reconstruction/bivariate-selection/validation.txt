@@ -1,0 +1,22 @@
+Baseline: d47ee1f2 release binary saved before source edits.
+38 reconstruction tests passed, including three-seed selection/accounting controls.
+A consistent hidden-support denominator prediction is rejected and recovered exactly
+with a fresh fallback anchor, one attempt, and a shared 150-probe cap.
+Release build passed with Rust 1.92, LTO disabled and 16 codegen units.
+Clippy passed with -A clippy::never_loop and the existing 249 warnings.
+All changed Rust files pass their formatting check.
+2835 graph5 reconstructions passed: all 945 cases with seeds 1-3.
+3319 nb0 reconstructions passed with unchanged counts.
+288 reversed-order baseline/reference and 96 final reconstructions passed.
+All measured original/reversed graph5 configurations have stable counts across seeds.
+Seven larger controls passed with unchanged counts and methods.
+The four-loop case retains ordinary balanced Zippel and 71019 probes.
+All full-Q per-prime probe distributions sum to reported totals.
+All corresponding Q oracle exports match their baseline bytes exactly.
+The reverse exporter reproduces the control manifest and all expression hashes.
+Without --reverse, the exporter preserves both original manifests and all 4264 hashes.
+369 graph5 coefficients improve, 576 are unchanged, zero regressions.
+Graph5 total probes: 21157 baseline, 20311 current.
+518 graph5 cases still favor default FireFly and remain in the comparison.
+All 6545 successful benchmark outputs are retained in process-logs.tar.gz.
+Archived validation logs have trailing whitespace and terminal blank lines removed.

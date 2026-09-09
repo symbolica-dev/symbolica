@@ -199,3 +199,8 @@ table into `fire-table-inputs/graph5/all`. See the
 [intersection reuse and graph5 comparison](../reconstruction-intersections.md)
 for all 945 distinct coefficients, the unchanged native-prime comparisons, and
 the separate four-loop control that limits an unconditional separation strategy.
+
+The [two-variable selector update](../reconstruction-bivariate-selection.md)
+reuses the first balanced slice to predict a simple separated denominator without
+extra probes. `extract_fire_tables.py --table graph5 --suite --reverse` reproduces
+the opposite-order controls in a separate directory with distinct case names.

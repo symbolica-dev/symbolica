@@ -948,6 +948,102 @@ fn automatic_reuses_its_separated_pilot_row() {
 }
 
 #[test]
+fn automatic_bivariate_selection_reuses_the_first_slice() {
+    let field = Zp64::new(2_305_843_009_213_693_951);
+    let vars = Arc::new(["x", "z"].map(|s| symbol!(s).into()).to_vec());
+    for (num, den, expected) in [
+        (
+            "x^4+x*z+z^3+2",
+            "(x^2-1)*(z^4+2*z+3)",
+            BalancedZippelSeparated,
+        ),
+        ("x^3+z+1", "x*z+x^2+2", BalancedZippel),
+        ("x^3+z^4+1", "x^7*(z+3)", BalancedZippelSeparated),
+    ] {
+        let n: MultivariatePolynomial<_, u16> = parse!(num).to_polynomial(&field, vars.clone());
+        let d: MultivariatePolynomial<_, u16> = parse!(den).to_polynomial(&field, vars.clone());
+        for seed in [1, 17, 41] {
+            let mut costs = Vec::new();
+            for method in [expected, Automatic] {
+                let calls = Cell::new(0);
+                let (r, stats) = reconstruct_rational_function(
+                    field.clone(),
+                    vars.clone(),
+                    |f, p| {
+                        calls.set(calls.get() + 1);
+                        let dv = d.replace_all(p);
+                        (!f.is_zero(&dv)).then(|| f.div(&n.replace_all(p), &dv))
+                    },
+                    method,
+                    &ReconstructionOptions {
+                        seed,
+                        max_degree: 12,
+                        ..Default::default()
+                    },
+                )
+                .unwrap();
+                assert_eq!(&r.numerator * &d, &r.denominator * &n);
+                assert_eq!(stats.probes, calls.get());
+                assert_eq!(stats.selected_method, Some(expected));
+                assert_eq!(stats.separation_fallbacks, 0);
+                if method == Automatic {
+                    assert!(stats.selection_probes > 0);
+                }
+                costs.push(stats.probes);
+            }
+            // Selection uses the same first row and random stream as explicit
+            // reconstruction: it must not pay for a second discovery slice.
+            assert_eq!(costs[0], costs[1], "{num}/{den}, seed {seed}");
+        }
+    }
+}
+
+#[test]
+fn rejected_bivariate_denominator_prediction_keeps_the_shared_budget() {
+    let field = Zp64::new(2_305_843_009_213_693_951);
+    let vars = Arc::new(["x", "z"].map(|s| symbol!(s).into()).to_vec());
+    let n: MultivariatePolynomial<_, u16> = parse!("x^2+z+5").to_polynomial(&field, vars.clone());
+    let d: MultivariatePolynomial<_, u16> =
+        parse!("(x^2-1)*(z+3)").to_polynomial(&field, vars.clone());
+    let x: MultivariatePolynomial<_, u16> = parse!("x").to_polynomial(&field, vars.clone());
+    let z: MultivariatePolynomial<_, u16> = parse!("z").to_polynomial(&field, vars.clone());
+    let anchor = Cell::new(None);
+    let calls = Cell::new(0);
+    let (r, stats) = reconstruct_rational_function(
+        field.clone(),
+        vars,
+        |f, p| {
+            calls.set(calls.get() + 1);
+            let a = anchor.get().unwrap_or_else(|| {
+                anchor.set(Some(p[1]));
+                p[1]
+            });
+            // A single consistent rational function has the simple denominator
+            // x^2-1 on the initial slice, but a mixed factor away from that slice.
+            let extra = f.mul(&f.sub(&p[1], &a), &f.add(&p[0], &f.one()));
+            let dv = f.add(&d.replace_all(p), &extra);
+            (!f.is_zero(&dv)).then(|| f.div(&n.replace_all(p), &dv))
+        },
+        Automatic,
+        &ReconstructionOptions {
+            seed: 19,
+            max_degree: 12,
+            max_attempts: 1,
+            max_probes: 150,
+            ..Default::default()
+        },
+    )
+    .unwrap();
+    let target = d + (&z - &z.constant(anchor.get().unwrap())) * &(&x + &x.one());
+    assert_eq!(&r.numerator * &target, &r.denominator * &n);
+    assert_eq!(stats.probes, calls.get());
+    assert!(stats.probes <= 150);
+    assert_eq!(stats.attempts, 1);
+    assert_eq!(stats.separation_fallbacks, 1);
+    assert_eq!(stats.selected_method, Some(BalancedZippel));
+}
+
+#[test]
 fn automatic_lifts_a_separated_rational_factor() {
     let field = Zp64::new(2_305_843_009_213_693_951);
     let vars = Arc::new(["x", "y", "w", "z"].map(|s| symbol!(s).into()).to_vec());

@@ -10,6 +10,8 @@ import argparse
 parser = argparse.ArgumentParser(description=__doc__)
 parser.add_argument("--table", choices=["nb0", "graph5"], default="nb0",
                     help="pinned analytic table to export (default: nb0)")
+parser.add_argument("--reverse", action="store_true",
+                    help="export the opposite variable order in a separate directory")
 selection = parser.add_mutually_exclusive_group()
 selection.add_argument("--suite", action="store_true", help="also export 32 distinct coefficients spanning the table")
 selection.add_argument("--all", dest="all_coefficients", action="store_true", help="export every distinct coefficient string into the all subdirectory")
@@ -28,6 +30,8 @@ table_sources = {
                ["y", "d"]),
 }
 source_name, expected_digest, variables = table_sources[args.table]
+if args.reverse:
+    variables = list(reversed(variables))
 source = fire / source_name
 raw = source.read_bytes()
 digest = hashlib.sha256(raw).hexdigest()
@@ -42,9 +46,12 @@ assert set(re.findall(r"[A-Za-z]+", expression)) == set(variables)
 out = root / "target/reconstruction-external/fire-table-inputs"
 if args.table != "nb0":
     out = out / args.table
+if args.reverse:
+    out = out / "reverse"
 out.mkdir(parents=True, exist_ok=True)
 data = (expression + "\n").encode()
-largest_case = f"fire7_{args.table}_largest"
+suffix = "_reverse" if args.reverse else ""
+largest_case = f"fire7_{args.table}_largest{suffix}"
 (out / largest_case).write_bytes(data)
 (out / f"{largest_case}.variables").write_text(" ".join(variables) + "\n")
 manifest = dict(revision=revision, source=str(source.relative_to(fire)), source_sha256=digest,
@@ -71,11 +78,13 @@ if args.suite or args.all_coefficients:
         rule = "all distinct coefficient strings, descending string-length ranks; first table occurrence breaks ties"
         suite_out = out / "all"
         suite_out.mkdir(exist_ok=True)
+    if args.reverse:
+        rule += "; reversed variable order only"
     entries = []
     for rank in ranks:
         row, master, expression = ranked[rank]
         assert set(re.findall(r"[A-Za-z]+", expression)) <= set(variables)
-        case = f"fire7_{args.table}_rank{rank + 1:04d}"
+        case = f"fire7_{args.table}_rank{rank + 1:04d}{suffix}"
         data = (expression + "\n").encode()
         (suite_out / case).write_bytes(data)
         (suite_out / f"{case}.variables").write_text(" ".join(variables) + "\n")
