@@ -148,12 +148,16 @@ See the [large-Q comparison and coefficient-reuse report](../reconstruction-q-su
 for commands, scope, validation and results. These runs complement the modular
 FIRE7 adapter.
 
-`fire7-q-stress` now adds a full-Q bivariate comparison through the authors'
+`fire7-q-stress` now adds a full-Q multivariate comparison through the authors'
 unchanged Thiele, balanced-Zippel and coefficient-lifting routines. Select
 `FIRE7_Q` or `FIRE7_Q_learned` in `run_q_stress.py`; the latter retains learned
 batch sizes across rows and primes. This is an adapter comparison, not a timing
 of the entire FIRE table workflow. `check_q_adapters.py` checks both C++ adapters
 on small exact inputs and verifies resource-limit reporting.
+The adapter reconstructs one additional variable at each stage and accepts up
+to 16 variables, matching the upstream coefficient-lifting buffers. See the
+[multivariate FIRE7 comparison](../reconstruction-fire7-multivariate.md) for
+four-variable controls and comparisons on the amplitude and `nb0` coefficients.
 
 `extract_fire_tables.py` deterministically extracts the largest coefficient string
 from the pinned `nb0` IBP table, with source hashes and integral identifiers.

@@ -17,13 +17,14 @@ for key in ["FIRE7_LEARN_BATCH", "FIREFLY_BENCH_SEED"]:
     env.pop(key, None)
 
 
-def export(name, numerator, denominator):
+def export(name, numerator, denominator, names=("x", "y")):
     path = output / f"{name}.q-oracle"
     with path.open("w") as out:
-        out.write(f"2 0 {len(numerator)} {len(denominator)}\nx y\n")
+        out.write(f"{len(names)} 0 {len(numerator)} {len(denominator)}\n" + " ".join(names) + "\n")
         for poly in [numerator, denominator]:
-            for (x, y), coefficient in sorted(poly.items(), reverse=True):
-                out.write(f"{coefficient} {x} {y}\n")
+            for exponents, coefficient in sorted(poly.items(), reverse=True):
+                assert len(exponents) == len(names)
+                out.write(str(coefficient) + " " + " ".join(map(str, exponents)) + "\n")
     return path
 
 
@@ -32,6 +33,11 @@ cases = {
     "large": export("large", {(1, 1): 10**50 + 13, (0, 0): 2}, {(1, 1): 1, (1, 0): -2, (0, 0): 4}),
     "origin_pole": export("origin_pole", {(2, 0): 10**50 + 13, (0, 1): -7, (0, 0): 1}, {(1, 0): 1, (0, 1): 3}),
 }
+cases["univariate"] = export("univariate", {(3,): 10**40+7, (0,): 2}, {(1,): 1, (0,): 3}, ("d",))
+cases["trivariate"] = export("trivariate", {(1,1,0): 3, (0,0,1): 1, (0,0,0): 1},
+    {(1,1,0): 1, (0,1,1): 1, (1,0,1): 1, (0,0,0): 2}, ("x","y","z"))
+cases["four_variable_order"] = export("four_variable_order", {(2,0,0,1): 5, (0,1,1,0): 10**40+7, (0,0,0,0): 1},
+    {(0,0,0,0): 3, (1,0,1,0): 1, (0,1,0,1): -2}, ("z","a","m","b"))
 n = {(2*i, j): comb(7, i)*9**(7-i)*comb(30, j)*13**(30-j) for i in range(8) for j in range(31)}
 n[0, 0] += 1
 d = {(2*i, j): comb(5, i)*(-1)**(5-i)*comb(29, j)*(-4)**(29-j) for i in range(6) for j in range(30)}
@@ -65,6 +71,15 @@ for binary in ["firefly-q-stress", "fire7-q-stress"]:
         (output / f"limit-{label}.{binary}.log").write_text(result.stdout + result.stderr)
         assert result.returncode == 0 and f",{expected}," in result.stdout, result
         print(binary, label, expected, flush=True)
+
+# Reject dimensions that exceed the authors' fixed coefficient-lifting buffers.
+names = tuple(f"x{i}" for i in range(17))
+unsupported = export("too_many_variables", {(0,)*17: 1}, {(0,)*17: 1}, names)
+result = subprocess.run(loader + [str(external/"fire7-q-stress"), str(unsupported), "dimension_limit", "1", "default"],
+                        env=env, cwd=output, text=True, capture_output=True, timeout=120)
+(output / "limit-variables.fire7-q-stress.log").write_text(result.stdout + result.stderr)
+assert result.returncode != 0 and "at most 16 variables" in result.stderr, result
+print("fire7-q-stress variables rejected", flush=True)
 
 fields = "case,method,seed,status,elapsed_us,probes,primes,images,probes_by_prime".split(",")
 with (output / "results.csv").open("w") as out:

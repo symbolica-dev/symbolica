@@ -1,0 +1,3 @@
+case,method,seed,status,elapsed_us,probes,primes,images,probes_by_prime
+univariate,FireFly_scan,1,ok,3166.297,58,6,,9223372036854775421:8;9223372036854775433:9;9223372036854775507:9;9223372036854775549:9;9223372036854775643:9;9223372036854775783:14
+[0;31mFireFly warning: [0mScan disabled for a univariate rational function.

@@ -1,5 +1,9 @@
 # Full-Q FIRE7 comparison and an additional IBP table
 
+The subsequent [multivariate extension](reconstruction-fire7-multivariate.md)
+adds FIRE7 comparisons for the amplitude and `nb0` coefficients. This report
+retains the two-variable adapter contract and results at its original checkpoint.
+
 This extends the [coefficient-reuse checkpoint](reconstruction-q-support.md)
 with a full-Q bivariate FIRE7 adapter and an independent four-variable input
 from the public FIRE7 `nb0` IBP table. The Symbolica reconstruction algorithms

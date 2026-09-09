@@ -1,0 +1,2 @@
+case,method,seed,status,elapsed_us,probes,primes,images,probes_by_prime
+eq3,FIRE7_Q,1,ok,768.652,57,3,2,18446744073709551521:3;18446744073709551533:27;18446744073709551557:27

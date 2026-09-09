@@ -1,6 +1,9 @@
 # Rational function reconstruction experiment
 
-Latest update: [reusing sparse powers in balanced rows](reconstruction-sparse-rows.md)
+Latest reference update: [multivariate FIRE7 over Q](reconstruction-fire7-multivariate.md)
+extends the authors' implementation comparison to the four-variable amplitude
+and `nb0` coefficients.
+The [sparse powers update](reconstruction-sparse-rows.md)
 closes the remaining `f1` probe gap and reduces the high-degree `f2` count while
 preserving the dense and full-Q IBP probe counts.
 The [automatic method selection update](reconstruction-automatic.md)

@@ -1,4 +1,4 @@
-// Full-Q bivariate adapter using the authors' unchanged interpolation and
+// Full-Q multivariate adapter using the authors' unchanged interpolation and
 // coefficient-lifting routines. Sampling and independent checks live here.
 #include "reconstruction.h"
 #include "primes.h"
@@ -31,7 +31,7 @@ struct Mod {
     }
 };
 static std::unique_ptr<QInput> input;
-static std::map<std::pair<U,U>,U> cache;
+static std::map<std::vector<U>,U> cache;
 static std::map<U,uint64_t> distribution;
 static std::map<std::string,size_t> hints;
 static Clock::time_point started;
@@ -52,8 +52,7 @@ void report(const char* status, double elapsed) {
     }
     std::cout << std::endl;
 }
-U oracle(U x,U y) {
-    const auto key=std::make_pair(x,y);
+U oracle(const std::vector<U>& key) {
     if(auto it=cache.find(key);it!=cache.end()) return it->second;
     double elapsed=std::chrono::duration<double,std::micro>(Clock::now()-started).count();
     if(elapsed>timeout*1e6 || probes>=cap) {
@@ -61,7 +60,7 @@ U oracle(U x,U y) {
         std::_Exit(0);
     }
     ++probes; ++distribution[prime];
-    return cache[key]=input->evaluate(std::vector<Mod>{x,y}).n;
+    return cache[key]=input->evaluate(std::vector<Mod>(key.begin(),key.end())).n;
 }
 void set_prime(U p) {
     prime=flint_prime=p;
@@ -86,59 +85,85 @@ std::string slice(const std::string& var,U offset,const std::function<U(U)>& eva
     }
     throw std::runtime_error("Thiele failed within sample budget");
 }
-std::string modular_image(std::mt19937_64& rng) {
+std::vector<const char*> variable_names() {
+    std::vector<const char*> names;
+    for(const auto& name : input->names) names.push_back(name.c_str());
+    return names;
+}
+std::vector<U> random_point(std::mt19937_64& rng) {
     std::uniform_int_distribution<U> random(1,prime-4096);
-    U a=random(rng), b=random(rng), offset=random(rng);
-    std::string x=input->names[0],y=input->names[1];
-    if(!fuel::initialize({x,y},1,true,prime)) throw std::runtime_error("FUEL initialization failed");
+    std::vector<U> point(input->variables);
+    for(auto& x : point) x=random(rng);
+    return point;
+}
+std::string modular_image(std::mt19937_64& rng) {
+    const auto nv=input->variables;
+    std::uniform_int_distribution<U> random(1,prime-4096);
+    // Preserve the former bivariate adapter's a,b,offset draw order.
+    std::vector<U> bases(nv-1), anchors(nv,1);
+    for(auto& x : bases) x=random(rng);
+    for(size_t i=1;i<nv;++i) anchors[i]=random(rng);
+    U offset=random(rng);
+    if(!fuel::initialize(input->names,1,true,prime)) throw std::runtime_error("FUEL initialization failed");
     fuel::switchToConventional();
-    std::string skeleton=slice(x,offset,[&](U t){return oracle(t,b);});
-    auto nd=numerator_denominator(skeleton);
-    const char* names[]={x.c_str(),y.c_str()};
+    std::string skeleton=slice(input->names[0],offset,[&](U t){
+        auto point=anchors; point[0]=t; return oracle(point);
+    });
+    auto names=variable_names();
     nmod_mpoly_ctx_t ctx;
-    nmod_mpoly_ctx_init(ctx,2,ORD_LEX,prime);
+    nmod_mpoly_ctx_init(ctx,nv,ORD_LEX,prime);
     nmod_mpoly_t n,d;
     nmod_mpoly_init(n,ctx); nmod_mpoly_init(d,ctx);
-    if(nmod_mpoly_set_str_pretty(n,nd.first.c_str(),names,ctx) ||
-       nmod_mpoly_set_str_pretty(d,nd.second.c_str(),names,ctx)) throw std::runtime_error("invalid skeleton");
-    size_t rows=std::max(nmod_mpoly_length(n,ctx),nmod_mpoly_length(d,ctx));
-    std::vector<std::string> points,values;
-    unsigned degree=0;
-    for(size_t i=1;i<=rows;++i) {
-        U xi=nmod_pow_ui(a,i,flint_mod);
-        values.push_back(slice(y,offset,[&](U t){return oracle(xi,t);}));
-        points.push_back(std::to_string(i));
-        auto row=numerator_denominator(values.back());
-        degree=std::max(degree,static_cast<unsigned>(std::max(exponent(row.first,y),exponent(row.second,y))));
+    auto parse_result=[&](const std::string& expression) {
+        auto nd=numerator_denominator(expression);
+        if(nmod_mpoly_set_str_pretty(n,nd.first.c_str(),names.data(),ctx) ||
+           nmod_mpoly_set_str_pretty(d,nd.second.c_str(),names.data(),ctx))
+            throw std::runtime_error("invalid modular expression");
+    };
+    for(size_t variable=1;variable<nv;++variable) {
+        parse_result(skeleton);
+        size_t rows=std::max(nmod_mpoly_length(n,ctx),nmod_mpoly_length(d,ctx));
+        std::vector<std::string> points,values;
+        unsigned degree=0;
+        std::string symbol=input->names[variable];
+        for(size_t i=1;i<=rows;++i) {
+            auto point=anchors;
+            for(size_t j=0;j<variable;++j) point[j]=nmod_pow_ui(bases[j],i,flint_mod);
+            values.push_back(slice(symbol,offset,[&](U t){
+                point[variable]=t; return oracle(point);
+            }));
+            points.push_back(std::to_string(i));
+            auto row=numerator_denominator(values.back());
+            degree=std::max(degree,static_cast<unsigned>(std::max(exponent(row.first,symbol),exponent(row.second,symbol))));
+        }
+        skel_var_value=std::to_string(anchors[variable]); skel_var_power=degree+3;
+        std::map<std::string,std::string> balancing;
+        for(size_t j=0;j<variable;++j) balancing.emplace(input->names[j],std::to_string(bases[j]));
+        auto result=balanced_zippel(skeleton,points,values,symbol,balancing,true,true);
+        if(result.second<0) throw std::runtime_error("balanced Zippel failed");
+        skeleton=std::move(result.first);
     }
-    skel_var_value=std::to_string(b); skel_var_power=degree+3;
-    std::map<std::string,std::string> balancing={{x,std::to_string(a)}};
-    auto result=balanced_zippel(skeleton,points,values,y,balancing,true,true);
-    if(result.second<0) throw std::runtime_error("balanced Zippel failed");
-    nd=numerator_denominator(result.first);
-    if(nmod_mpoly_set_str_pretty(n,nd.first.c_str(),names,ctx) ||
-       nmod_mpoly_set_str_pretty(d,nd.second.c_str(),names,ctx)) throw std::runtime_error("invalid modular result");
+    parse_result(skeleton);
     for(size_t i=0;i<3;++i) {
-        U p[]={random(rng),random(rng)};
-        U nv=nmod_mpoly_evaluate_all_ui(n,p,ctx),dv=nmod_mpoly_evaluate_all_ui(d,p,ctx);
-        if(!dv || nv!=nmod_mul(oracle(p[0],p[1]),dv,flint_mod)) throw std::runtime_error("modular validation failed");
+        auto p=random_point(rng);
+        U num=nmod_mpoly_evaluate_all_ui(n,p.data(),ctx),den=nmod_mpoly_evaluate_all_ui(d,p.data(),ctx);
+        if(!den || num!=nmod_mul(oracle(p),den,flint_mod)) throw std::runtime_error("modular validation failed");
     }
     nmod_mpoly_clear(n,ctx); nmod_mpoly_clear(d,ctx); nmod_mpoly_ctx_clear(ctx);
-    return result.first;
+    return skeleton;
 }
 bool validate_candidate(const std::string& candidate,std::mt19937_64& rng) {
     auto nd=numerator_denominator(candidate);
-    const char* names[]={input->names[0].c_str(),input->names[1].c_str()};
-    nmod_mpoly_ctx_t ctx; nmod_mpoly_ctx_init(ctx,2,ORD_LEX,prime);
+    auto names=variable_names();
+    nmod_mpoly_ctx_t ctx; nmod_mpoly_ctx_init(ctx,input->variables,ORD_LEX,prime);
     nmod_mpoly_t n,d; nmod_mpoly_init(n,ctx); nmod_mpoly_init(d,ctx);
-    if(nmod_mpoly_set_str_pretty(n,nd.first.c_str(),names,ctx) ||
-       nmod_mpoly_set_str_pretty(d,nd.second.c_str(),names,ctx)) throw std::runtime_error("invalid Q candidate");
-    std::uniform_int_distribution<U> random(1,prime-4096);
+    if(nmod_mpoly_set_str_pretty(n,nd.first.c_str(),names.data(),ctx) ||
+       nmod_mpoly_set_str_pretty(d,nd.second.c_str(),names.data(),ctx)) throw std::runtime_error("invalid Q candidate");
     bool ok=true;
     for(size_t i=0;i<3;++i) {
-        U p[]={random(rng),random(rng)};
-        U nv=nmod_mpoly_evaluate_all_ui(n,p,ctx),dv=nmod_mpoly_evaluate_all_ui(d,p,ctx);
-        if(!dv || nv!=nmod_mul(oracle(p[0],p[1]),dv,flint_mod)) {ok=false; break;}
+        auto p=random_point(rng);
+        U num=nmod_mpoly_evaluate_all_ui(n,p.data(),ctx),den=nmod_mpoly_evaluate_all_ui(d,p.data(),ctx);
+        if(!den || num!=nmod_mul(oracle(p),den,flint_mod)) {ok=false; break;}
     }
     nmod_mpoly_clear(n,ctx); nmod_mpoly_clear(d,ctx); nmod_mpoly_ctx_clear(ctx);
     return ok;
@@ -146,7 +171,8 @@ bool validate_candidate(const std::string& candidate,std::mt19937_64& rng) {
 int main(int argc,char** argv) {
     if(argc!=5) throw std::runtime_error("usage: fire7-q-stress ORACLE_FILE CASE SEED default|learned");
     input=std::make_unique<QInput>(argv[1]);
-    if(input->variables!=2) throw std::runtime_error("FIRE7 Q adapter requires two variables");
+    // The upstream coefficient-lifting routine uses fixed 16-entry exponent buffers.
+    if(input->variables>16) throw std::runtime_error("FIRE7 Q adapter supports at most 16 variables");
     case_name=argv[2]; seed_name=argv[3]; learned=std::string(argv[4])=="learned";
     if(!learned && std::string(argv[4])!="default") throw std::runtime_error("unknown mode");
     timeout=std::getenv("BENCH_TIMEOUT") ? std::stod(std::getenv("BENCH_TIMEOUT")) : 180.;

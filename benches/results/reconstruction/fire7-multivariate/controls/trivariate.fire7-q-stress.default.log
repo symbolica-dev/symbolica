@@ -1,0 +1,2 @@
+case,method,seed,status,elapsed_us,probes,primes,images,probes_by_prime
+trivariate,FIRE7_Q,1,ok,1076.602,121,3,2,18446744073709551521:3;18446744073709551533:59;18446744073709551557:59
