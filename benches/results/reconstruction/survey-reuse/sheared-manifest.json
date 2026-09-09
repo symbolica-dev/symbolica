@@ -1,0 +1,74 @@
+{
+  "revision": "d132e5365dd2a13db9cd9dbaf5c200b53d489cfd",
+  "source": "FIRE7/examples/nb0/intsde-nb0.tables",
+  "source_sha256": "cebddb9e7b6695a3dccb0e91ebe6e821f5093b060107a957a70a60cb6090ea42",
+  "coefficient_count": 3540,
+  "distinct_source_strings": 3319,
+  "selection": "first four descending source-length ranks from the full nb0 table",
+  "variables": [
+    "u",
+    "v",
+    "w",
+    "d"
+  ],
+  "substitution": {
+    "d": "d+u"
+  },
+  "inverse_substitution": {
+    "d": "d-u"
+  },
+  "entries": [
+    {
+      "case": "fire7_nb0_rank0001_shear_d",
+      "original": {
+        "case": "fire7_nb0_rank0001",
+        "rank": 1,
+        "row": "113002000000000000000000000000",
+        "master": "2127127128128128127127127127",
+        "expression_bytes": 31460,
+        "output_sha256": "3ac8ad501d52eb72d3c99b78d748365be159cf769abb3da9a5068c05208fdbbf"
+      },
+      "replacements": 1148,
+      "output_sha256": "a7570a1719bae684cc6a57b776dfbf17eafd12bcad036abbbdf75a7e56047364"
+    },
+    {
+      "case": "fire7_nb0_rank0002_shear_d",
+      "original": {
+        "case": "fire7_nb0_rank0002",
+        "rank": 2,
+        "row": "112002000000001000000000000000",
+        "master": "2127127128128128127127127127",
+        "expression_bytes": 30752,
+        "output_sha256": "b4b3b5315f6ebf90094e3b317c26a8c1ebad2c04e71db430d5e059d9a9fb502a"
+      },
+      "replacements": 1165,
+      "output_sha256": "c2a57ccfcd32f93b9415d617a41ed4cd0f424030087647df2fdde138b53307c5"
+    },
+    {
+      "case": "fire7_nb0_rank0003_shear_d",
+      "original": {
+        "case": "fire7_nb0_rank0003",
+        "rank": 3,
+        "row": "112002000000001000000000000000",
+        "master": "2127128127128128127127127127",
+        "expression_bytes": 23515,
+        "output_sha256": "8d666fa72f0ef1718c814146d160e27765a27927bc6b69d35fa1cf6704ecbfe5"
+      },
+      "replacements": 900,
+      "output_sha256": "e253846f593d02de5cce229cb9c18fb396d8fb265588e15c107c99a68db7c2af"
+    },
+    {
+      "case": "fire7_nb0_rank0004_shear_d",
+      "original": {
+        "case": "fire7_nb0_rank0004",
+        "rank": 4,
+        "row": "113002000000000000000000000000",
+        "master": "2127128127128128127127127127",
+        "expression_bytes": 23208,
+        "output_sha256": "a7acb379c14ab541a8cd6b3c0333d55d9db1f4363727f1575cd30b747a999700"
+      },
+      "replacements": 872,
+      "output_sha256": "52c006c64c32ff0b098fa303c334a5743fd3f2dfb37fd4a82773f32c6ce65a26"
+    }
+  ]
+}

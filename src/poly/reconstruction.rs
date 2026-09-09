@@ -180,6 +180,7 @@ where
         monomial_factors: None,
         balanced_pilot: None,
         balanced_initial: None,
+        balanced_survey: Vec::new(),
         removed_numerator_factor: None,
         fixed_last_variable: None,
     };
@@ -260,8 +261,10 @@ struct Context<'a, F> {
     monomial_factors: Option<[Vec<u16>; 2]>,
     // A final-variable slice already reconstructed during method selection.
     balanced_pilot: Option<BalancedPilot>,
-    // First balanced slice used for two-variable method selection.
+    // First balanced slice already reconstructed during method selection.
     balanced_initial: Option<(Vec<Element>, Fraction)>,
+    // Other slices from the same survey anchor, consumed as geometric row one.
+    balanced_survey: Vec<Option<Fraction>>,
     // A last-variable factor hypothesized from generic numerator slices.
     removed_numerator_factor: Option<UnivariatePolynomial<Zp64>>,
     // Restrict probes while reconstructing the remaining variables of a factor.
@@ -724,7 +727,7 @@ impl<F: FnMut(&Zp64, &[Element]) -> Option<Element>> Context<'_, F> {
             )?;
             (anchors, result)
         };
-        let mut surveyed_rows: Vec<Option<Fraction>> = Vec::new();
+        let mut surveyed_rows = std::mem::take(&mut self.balanced_survey);
         // A dense denominator with a constant numerator predicts expensive
         // balanced rows for a reciprocal polynomial. Reconstruct the remaining
         // variables with the bounded homogeneous method instead.

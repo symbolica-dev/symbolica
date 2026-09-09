@@ -1,5 +1,14 @@
 # FireFly, Smirnov–Zeng and scaling implementation comparison
 
+The [ordinary survey reuse update](../reconstruction-survey-reuse.md) adds
+`python3 benches/external/shear_ibp_inputs.py`. It exports the four largest
+pinned `nb0` coefficient strings with the invertible substitution `d -> d+u`
+into `target/reconstruction-external/fire-table-inputs/sheared`. Set
+`BENCH_INPUT_DIR` to that directory and pass its `suite-cases.txt` to the shared
+Q runner. The manifest records the source hashes, substitution and fixed
+selection rule. These controls deliberately remove convenient variable
+separation; they remain derived from the same public table.
+
 The [scaling reference update](../reconstruction-scaling-reference.md) adds the
 actual `rare` 0.9.2 implementation as a standalone benchmark dependency. Build
 it and the independent FLINT result checker with

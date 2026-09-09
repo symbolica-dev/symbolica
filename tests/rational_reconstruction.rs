@@ -909,6 +909,134 @@ fn automatic_selection_validates_structure_and_preserves_probe_limits() {
 }
 
 #[test]
+fn automatic_reuses_ordinary_balanced_survey_rows() {
+    let field = Zp64::new(2_305_843_009_213_693_951);
+    let vars: Arc<Vec<symbolica::poly::PolyVariable>> =
+        Arc::new(["x", "y", "z"].iter().map(|s| symbol!(*s).into()).collect());
+    for seed in 1..=3 {
+        let n: MultivariatePolynomial<_, u16> =
+            parse!("x^20+y^20+z^20").to_polynomial(&field, vars.clone());
+        let d: MultivariatePolynomial<_, u16> =
+            parse!("x^20-y^20+2*z^20").to_polynomial(&field, vars.clone());
+        let mut calls = 0;
+        let (r, stats) = reconstruct_rational_function(
+            field.clone(),
+            vars.clone(),
+            |f, p| {
+                calls += 1;
+                let dv = d.replace_all(p);
+                (!f.is_zero(&dv)).then(|| f.div(&n.replace_all(p), &dv))
+            },
+            Automatic,
+            &ReconstructionOptions {
+                seed,
+                max_degree: 40,
+                max_probes: 192,
+                ..Default::default()
+            },
+        )
+        .unwrap();
+        assert_eq!(&r.numerator * &d, &r.denominator * &n);
+        assert_eq!(calls, stats.probes);
+        assert_eq!(stats.selected_method, Some(BalancedZippel));
+        assert_eq!(stats.attempts, 1);
+        assert!(stats.probes <= 192);
+    }
+}
+
+#[test]
+fn automatic_reused_survey_retries_hidden_support() {
+    let field = Zp64::new(2_305_843_009_213_693_951);
+    let vars: Arc<Vec<symbolica::poly::PolyVariable>> =
+        Arc::new(["x", "y", "z"].iter().map(|s| symbol!(*s).into()).collect());
+    let n: MultivariatePolynomial<_, u16> =
+        parse!("x^20+y^20+z^20").to_polynomial(&field, vars.clone());
+    let d: MultivariatePolynomial<_, u16> =
+        parse!("x^20-y^20+2*z^20").to_polynomial(&field, vars.clone());
+    let x: MultivariatePolynomial<_, u16> = parse!("x").to_polynomial(&field, vars.clone());
+    let y: MultivariatePolynomial<_, u16> = parse!("y").to_polynomial(&field, vars.clone());
+    for seed in 1..=3 {
+        let anchor = Cell::new(None);
+        let mut calls = 0;
+        let (r, stats) = reconstruct_rational_function(
+            field.clone(),
+            vars.clone(),
+            |f, p| {
+                calls += 1;
+                // The first pilot fixes y. This single polynomial hides x^7
+                // on the reused first-variable slice, but not globally.
+                let a = anchor.get().unwrap_or_else(|| {
+                    anchor.set(Some(p[1]));
+                    p[1]
+                });
+                let extra = f.mul(&f.sub(&p[1], &a), &f.pow(&p[0], 7));
+                let dv = d.replace_all(p);
+                (!f.is_zero(&dv)).then(|| f.div(&f.add(&n.replace_all(p), &extra), &dv))
+            },
+            Automatic,
+            &ReconstructionOptions {
+                seed,
+                max_degree: 40,
+                max_probes: 1500,
+                max_attempts: 3,
+                ..Default::default()
+            },
+        )
+        .unwrap();
+        let target = &n + &((&y - &y.constant(anchor.get().unwrap())) * &x.pow(7));
+        assert_eq!(&r.numerator * &d, &r.denominator * &target);
+        assert_eq!(calls, stats.probes);
+        assert!(stats.attempts >= 2);
+        assert_eq!(stats.selected_method, Some(BalancedZippel));
+    }
+}
+
+#[test]
+fn automatic_failed_first_survey_uses_a_consistent_fallback_anchor() {
+    use rand::{Rng, SeedableRng, rngs::StdRng};
+    let field = Zp64::new(2_305_843_009_213_693_951);
+    let vars: Arc<Vec<symbolica::poly::PolyVariable>> =
+        Arc::new(["x", "y", "z"].iter().map(|s| symbol!(*s).into()).collect());
+    let n: MultivariatePolynomial<_, u16> = parse!("x+y+z+1").to_polynomial(&field, vars.clone());
+    let z: MultivariatePolynomial<_, u16> = parse!("z").to_polynomial(&field, vars.clone());
+    for seed in 1..=3 {
+        // Put the first fixed z anchor on a pole plane. Last-variable pilots
+        // remain usable, but every first-variable survey probe is a pole.
+        let mut rng = StdRng::seed_from_u64(seed);
+        let anchor: Vec<_> = (0..3)
+            .map(|_| field.to_element(rng.random_range(1..field.get_prime())))
+            .collect();
+        let mixed: MultivariatePolynomial<_, u16> =
+            parse!("x-y+z+5").to_polynomial(&field, vars.clone());
+        let d = (&z - &z.constant(anchor[2])) * &mixed;
+        let mut calls = 0;
+        let (r, stats) = reconstruct_rational_function(
+            field.clone(),
+            vars.clone(),
+            |f, p| {
+                calls += 1;
+                let dv = d.replace_all(p);
+                (!f.is_zero(&dv)).then(|| f.div(&n.replace_all(p), &dv))
+            },
+            Automatic,
+            &ReconstructionOptions {
+                seed,
+                max_degree: 8,
+                max_probes: 400,
+                max_attempts: 1,
+                ..Default::default()
+            },
+        )
+        .unwrap();
+        assert_eq!(&r.numerator * &d, &r.denominator * &n);
+        assert_eq!(calls, stats.probes);
+        assert!(stats.poles >= 152);
+        assert_eq!(stats.attempts, 1);
+        assert_eq!(stats.selected_method, Some(BalancedZippel));
+    }
+}
+
+#[test]
 fn automatic_reuses_its_separated_pilot_row() {
     let field = Zp64::new(2_305_843_009_213_693_951);
     let vars = Arc::new(["x", "y", "z"].map(|s| symbol!(s).into()).to_vec());

@@ -1,0 +1,28 @@
+Baseline: a7b9ee79, saved before edits; source and binary hashes retained.
+41 reconstruction tests passed with all new controls over seeds 1-3.
+Ordinary balanced sparse control succeeds within a 192-probe shared cap.
+A consistent hidden-support polynomial requires and completes a fresh attempt.
+A pole plane invalidates the complete first-variable survey; exact ordinary
+fallback succeeds within one attempt and a 400-probe shared cap.
+Final release build passed with LTO disabled and 16 codegen units.
+Core Clippy passed with the existing -A clippy::never_loop allowance and 249 warnings.
+All changed Rust sources pass rustfmt --check; Python exporter parses and runs.
+4333 successful exact benchmark reconstructions are archived.
+Final f1 probes 1945 -> 1858 and f2 1478 -> 1264, stable over seeds 1-3.
+Early/later survey-exit controls improve 279 -> 192 and 246 -> 154 over three seeds.
+Both final dense modular controls retain counts 26702 and 53531.
+All five final large full-Q controls retain counts, methods and prime distributions.
+All 3319 nb0 and 945 graph5 coefficients pass exact final reconstruction;
+all probe counts, prime distributions and methods match the previous checkpoint.
+The complete table totals remain 505874 and 20311 probes.
+Four sheared nb0 coefficients pass all five reconstruction configurations.
+Final Symbolica and scanned FireFly sheared counts are stable over seeds 1-3.
+All measured full-Q per-prime costs sum to their reported totals.
+Final/reference matching Q oracle exports are byte-identical.
+Eight independent FLINT checks verify the shear exports and inverse identities.
+FLINT pretty-input requires removing the trailing newline from source expressions;
+the initial format rejection and the successful serialized controls are retained.
+84 additional solver configurations were generated from an unmodified pinned
+public ibp-benchmark checkout; these reductions have not been run.
+Top-level text logs have trailing whitespace and final blank lines normalized.
+Compressed process outputs and independent controls retain original bytes.

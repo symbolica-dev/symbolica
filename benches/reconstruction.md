@@ -1,9 +1,12 @@
 # Rational function reconstruction experiment
 
+Latest probe update: [reuse ordinary balanced surveys](reconstruction-survey-reuse.md)
+cuts f1/f2 probes by 4.5%/14.5% and adds four mixed-variable controls derived
+from public IBP coefficients, compared with all three external implementations.
 Latest arithmetic and reference update: [scaling reference and division-free Thiele](reconstruction-scaling-reference.md)
 adds the actual `rare` implementation, exact full-Q comparisons and interleaved
 timings while preserving the existing probe counts.
-Latest probe optimization: [select two-variable separation from the first slice](reconstruction-bivariate-selection.md)
+The preceding probe optimization, [select two-variable separation from the first slice](reconstruction-bivariate-selection.md),
 reduces the complete `graph5` probe total by 4.0% without regressing the four-loop
 control, the full `nb0` table, or the opposite-order sample.
 The preceding [intersection reuse update](reconstruction-intersections.md)

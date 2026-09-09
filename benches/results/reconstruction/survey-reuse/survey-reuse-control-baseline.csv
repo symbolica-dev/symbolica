@@ -1,0 +1,7 @@
+case,method,seed,status,elapsed_us,probes,prime,oracle,degree_race,num_terms,den_terms,setup_ms,selected_methods,selection_probes,sparse_rows,sparse_row_fallbacks
+ordinary_early_survey,Automatic,1,ok,1653.688,279,9223372036854775783,cached_powers,0,3,3,0.223,BalancedZippel,131,3,0
+ordinary_early_survey,Automatic,2,ok,918.914,279,9223372036854775783,cached_powers,0,3,3,0.247,BalancedZippel,131,3,0
+ordinary_early_survey,Automatic,3,ok,897.804,279,9223372036854775783,cached_powers,0,3,3,0.215,BalancedZippel,131,3,0
+ordinary_late_survey,Automatic,1,ok,832.204,246,9223372036854775783,cached_powers,0,3,3,0.254,BalancedZippel,136,3,0
+ordinary_late_survey,Automatic,2,ok,646.923,246,9223372036854775783,cached_powers,0,3,3,0.167,BalancedZippel,136,3,0
+ordinary_late_survey,Automatic,3,ok,492.203,246,9223372036854775783,cached_powers,0,3,3,0.159,BalancedZippel,136,3,0

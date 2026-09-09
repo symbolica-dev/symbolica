@@ -1,0 +1,111 @@
+{
+  "baseline_commit": "a7b9ee79",
+  "tests": 41,
+  "successful_benchmark_reconstructions": 4333,
+  "rows": {
+    "survey-reuse-final-controls": 6,
+    "survey-reuse-final-sparse": 6,
+    "survey-reuse-final-dense": 2,
+    "survey-reuse-final-sheared": 12,
+    "survey-reuse-final-q": 5,
+    "survey-reuse-final-nb0": 3319,
+    "survey-reuse-final-graph5": 945,
+    "sheared-reference": 20,
+    "sheared-firefly-seeds": 12,
+    "survey-reuse-control-baseline": 6
+  },
+  "preserved_tables": {
+    "nb0": {
+      "cases": 3319,
+      "probes": 505874
+    },
+    "graph5": {
+      "cases": 945,
+      "probes": 20311
+    }
+  },
+  "reductions": [
+    {
+      "case": "ordinary_early_survey",
+      "baseline": 279,
+      "current": 192,
+      "seeds": 3,
+      "reduction_percent": 31.182795698924732
+    },
+    {
+      "case": "ordinary_late_survey",
+      "baseline": 246,
+      "current": 154,
+      "seeds": 3,
+      "reduction_percent": 37.39837398373984
+    },
+    {
+      "case": "firefly_f1",
+      "baseline": 1945,
+      "current": 1858,
+      "seeds": 3,
+      "reduction_percent": 4.473007712082262
+    },
+    {
+      "case": "firefly_f2",
+      "baseline": 1478,
+      "current": 1264,
+      "seeds": 3,
+      "reduction_percent": 14.479025710419485
+    },
+    {
+      "case": "firefly_f3",
+      "baseline": 26702,
+      "current": 26702,
+      "seeds": 1,
+      "reduction_percent": 0.0
+    },
+    {
+      "case": "firefly_f4",
+      "baseline": 53531,
+      "current": 53531,
+      "seeds": 1,
+      "reduction_percent": 0.0
+    }
+  ],
+  "sheared_comparison": [
+    {
+      "case": "fire7_nb0_rank0001_shear_d",
+      "Symbolica": 15297,
+      "FireFly_default": 40327,
+      "FireFly_scan": 29895,
+      "FIRE7_Q_learned": 45109,
+      "Rare_scaling": 57888,
+      "Symbolica_and_FireFly_scan_seed_stability": true
+    },
+    {
+      "case": "fire7_nb0_rank0002_shear_d",
+      "Symbolica": 16138,
+      "FireFly_default": 41106,
+      "FireFly_scan": 30437,
+      "FIRE7_Q_learned": 47200,
+      "Rare_scaling": 58995,
+      "Symbolica_and_FireFly_scan_seed_stability": true
+    },
+    {
+      "case": "fire7_nb0_rank0003_shear_d",
+      "Symbolica": 12535,
+      "FireFly_default": 30685,
+      "FireFly_scan": 25192,
+      "FIRE7_Q_learned": 39787,
+      "Rare_scaling": 49486,
+      "Symbolica_and_FireFly_scan_seed_stability": true
+    },
+    {
+      "case": "fire7_nb0_rank0004_shear_d",
+      "Symbolica": 11671,
+      "FireFly_default": 29546,
+      "FireFly_scan": 23478,
+      "FIRE7_Q_learned": 37276,
+      "Rare_scaling": 45527,
+      "Symbolica_and_FireFly_scan_seed_stability": true
+    }
+  ],
+  "native_prime_and_confirmation_policies": "Unchanged from scaling-reference; Symbolica three checks, rare one extra point, native primes retained.",
+  "timing_environment": "Shared AMD EPYC 9754, uncontrolled host load; final Symbolica CPU24/25/26, reference CPU24 and scan seed controls CPU27."
+}
