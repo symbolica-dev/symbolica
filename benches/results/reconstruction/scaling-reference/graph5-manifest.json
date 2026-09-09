@@ -1,0 +1,270 @@
+{
+  "revision": "d132e5365dd2a13db9cd9dbaf5c200b53d489cfd",
+  "source": "FIRE7/examples/graph5.tables",
+  "source_sha256": "3f514ae8dd8ceb8477eb605172f85f580dddf3c1b303a0d6f8dbd8bc559df2f3",
+  "coefficient_count": 1013,
+  "distinct_source_strings": 945,
+  "selection": "first 16 descending string-length ranks, then 16 evenly spaced remaining ranks; first table occurrence breaks ties",
+  "variables": [
+    "y",
+    "d"
+  ],
+  "entries": [
+    {
+      "case": "fire7_graph5_rank0001",
+      "rank": 1,
+      "row": "321005004001001000000000000000",
+      "master": "2127128127127128128128127127",
+      "expression_bytes": 435,
+      "output_sha256": "085064c0c5718505b830643ca99722de156229e1c1cf7fe20e0d01ab639faa8b"
+    },
+    {
+      "case": "fire7_graph5_rank0002",
+      "rank": 2,
+      "row": "321005004001000000001000000000",
+      "master": "2127127127128128128128127127",
+      "expression_bytes": 426,
+      "output_sha256": "cb47fdbe29776b1473cf537f7f53df5f6d28e83b89ea561651ecd8170a297bd6"
+    },
+    {
+      "case": "fire7_graph5_rank0003",
+      "rank": 3,
+      "row": "321005004001001000000000000000",
+      "master": "2127127127128128128128127127",
+      "expression_bytes": 408,
+      "output_sha256": "f2607824524065ab497c35a8e220a4b41be7eb50a7804b9c2f828203c3a423f7"
+    },
+    {
+      "case": "fire7_graph5_rank0004",
+      "rank": 4,
+      "row": "321004004000000000000000000000",
+      "master": "2127127127128128128128127127",
+      "expression_bytes": 379,
+      "output_sha256": "4336e6017734a6ee02102c4b7a32e83b4730065bdd56629472fdb3ecc8793cf1"
+    },
+    {
+      "case": "fire7_graph5_rank0005",
+      "rank": 5,
+      "row": "177004003000000000001000000000",
+      "master": "2127127127128128128128127127",
+      "expression_bytes": 329,
+      "output_sha256": "ac0edf3c0d24d69c2ea201dfc64880f6bb77c94c2e26549cc45397d581b2a48c"
+    },
+    {
+      "case": "fire7_graph5_rank0006",
+      "rank": 6,
+      "row": "321005004001000000001000000000",
+      "master": "2127128127127128128128127127",
+      "expression_bytes": 326,
+      "output_sha256": "213b537e0e1d46a9df792837610d552becb20cdce10754a31f06798d9113c3bc"
+    },
+    {
+      "case": "fire7_graph5_rank0007",
+      "rank": 7,
+      "row": "321004004000000000000000000000",
+      "master": "2127128127127128128128127127",
+      "expression_bytes": 316,
+      "output_sha256": "47013c512e27f7b798993db2c205c8e0ead2ddae37f7a90777f8e694121de99c"
+    },
+    {
+      "case": "fire7_graph5_rank0008",
+      "rank": 8,
+      "row": "321004003002001000000000000000",
+      "master": "2127128127127128128128127127",
+      "expression_bytes": 298,
+      "output_sha256": "7e3ee9a9b5827b1b40251aecfb5832d3cb6410f8cf64f1c10f9654bfe1a638d3"
+    },
+    {
+      "case": "fire7_graph5_rank0009",
+      "rank": 9,
+      "row": "321004003002001000000000000000",
+      "master": "2127127127128128128128127127",
+      "expression_bytes": 297,
+      "output_sha256": "59a76c8c4da5fb1874407a4e776cf4a38d4ead0a11742ce22d347e4c0d0b83b2"
+    },
+    {
+      "case": "fire7_graph5_rank0010",
+      "rank": 10,
+      "row": "177004003000000000001000000000",
+      "master": "2127128127127128128128127127",
+      "expression_bytes": 294,
+      "output_sha256": "a6c719b342a0336b2d4148cc842aaa2f58780bc8d02999a3bda4f4390db5e1e7"
+    },
+    {
+      "case": "fire7_graph5_rank0011",
+      "rank": 11,
+      "row": "231003003003000000000000000000",
+      "master": "2127127128127128128128127127",
+      "expression_bytes": 286,
+      "output_sha256": "df70bcd69f1e330e89c0cf8f71c27569c7993b8327b1efca6fb1690122092ffd"
+    },
+    {
+      "case": "fire7_graph5_rank0012",
+      "rank": 12,
+      "row": "321005004001001000000000000000",
+      "master": "2127128129127128128128127127",
+      "expression_bytes": 242,
+      "output_sha256": "80ace333ffaff016a70ffc9c088ccaf743583aa4430ab2f07d78fb46e1ee4726"
+    },
+    {
+      "case": "fire7_graph5_rank0013",
+      "rank": 13,
+      "row": "321005004001000000001000000000",
+      "master": "2127127127128128128127127128",
+      "expression_bytes": 241,
+      "output_sha256": "ba322d0fc6c3794cc3ab3c7c96434042d6374f7ad813c9fe8ce94249fcbf6ee8"
+    },
+    {
+      "case": "fire7_graph5_rank0014",
+      "rank": 14,
+      "row": "231003003000000000000000000000",
+      "master": "2127127127128128128128127127",
+      "expression_bytes": 238,
+      "output_sha256": "54596303a27de10a56c70c0efa38a8361799e5d081080609bd9f9989e1246c2f"
+    },
+    {
+      "case": "fire7_graph5_rank0015",
+      "rank": 15,
+      "row": "321004003002000000001000000000",
+      "master": "2127127127128128128128127127",
+      "expression_bytes": 234,
+      "output_sha256": "31a5b7fcf79e7c344796a9929b04ffd3b0b1c2aead55923527e0e412f4537a6a"
+    },
+    {
+      "case": "fire7_graph5_rank0016",
+      "rank": 16,
+      "row": "321004003002000000001000000000",
+      "master": "2127128127127128128128127127",
+      "expression_bytes": 223,
+      "output_sha256": "3f0d23aa3ab9b8aac29d770c8fb68664193c79d0fb81c9d56e0ae400c0b6e674"
+    },
+    {
+      "case": "fire7_graph5_rank0017",
+      "rank": 17,
+      "row": "225003003003000000000000000000",
+      "master": "2127127128127128128128127127",
+      "expression_bytes": 220,
+      "output_sha256": "10035740c0c91ec225d24cd35c3f9a0b48155397423a8fcb22645c629bdef72b"
+    },
+    {
+      "case": "fire7_graph5_rank0078",
+      "rank": 78,
+      "row": "177003002001000001000000000000",
+      "master": "2127127129128128128128127127",
+      "expression_bytes": 137,
+      "output_sha256": "5ba5521901caee10e32a597014ee446ddd1c68a0805ad57ebee467d0e2ad5184"
+    },
+    {
+      "case": "fire7_graph5_rank0140",
+      "rank": 140,
+      "row": "321004003002000000001000000000",
+      "master": "2127128127127127128128127128",
+      "expression_bytes": 111,
+      "output_sha256": "57a564286d73bf426593db153913f9f10ac62717e3183c9baf2290efb6e2c805"
+    },
+    {
+      "case": "fire7_graph5_rank0202",
+      "rank": 202,
+      "row": "321002002002000000000000000000",
+      "master": "2127129128127128128128127127",
+      "expression_bytes": 94,
+      "output_sha256": "622c85724b4eb102a8e64ea470dfd91fbc5d1fc62cbb2b6f047029418cbd24fb"
+    },
+    {
+      "case": "fire7_graph5_rank0264",
+      "rank": 264,
+      "row": "229003003003000000000000000000",
+      "master": "2127128127127128128128127127",
+      "expression_bytes": 80,
+      "output_sha256": "93d91d5bbfec02746111fa8bc7ccecae2a68e33954607e4047569003e2852b12"
+    },
+    {
+      "case": "fire7_graph5_rank0326",
+      "rank": 326,
+      "row": "321004003002001000000000000000",
+      "master": "2127128128128128128128127127",
+      "expression_bytes": 68,
+      "output_sha256": "24ab8f3642e5a4f60a42c6b4cb572c56f3f0f6acf16f72dc44b8324a30cd9486"
+    },
+    {
+      "case": "fire7_graph5_rank0388",
+      "rank": 388,
+      "row": "119004004003000000000000000000",
+      "master": "2127127127128128128128127127",
+      "expression_bytes": 60,
+      "output_sha256": "01067d59db5becc03c1dd4999eb669527fb1f89135b15dcc4dde33ed15fb31ed"
+    },
+    {
+      "case": "fire7_graph5_rank0450",
+      "rank": 450,
+      "row": "119003003002002001000000000000",
+      "master": "2127127127128128128127127128",
+      "expression_bytes": 54,
+      "output_sha256": "38fc747be9d78260947d252171584ee5429ac917185fb712bb2225e2f346920a"
+    },
+    {
+      "case": "fire7_graph5_rank0511",
+      "rank": 511,
+      "row": "177004003000000000001000000000",
+      "master": "2127128128128128128128127127",
+      "expression_bytes": 47,
+      "output_sha256": "a5fb3dc33d84f4cbd6c11bf0976a359445534bcd7010812836bddaea5ac3c31e"
+    },
+    {
+      "case": "fire7_graph5_rank0573",
+      "rank": 573,
+      "row": "99003002000000000001000000000",
+      "master": "2127127127128128128127127128",
+      "expression_bytes": 42,
+      "output_sha256": "3e4d5f0ccce169f35f8798dcae2e8a9cf520e905eb51195108ad87ca8ee39a76"
+    },
+    {
+      "case": "fire7_graph5_rank0635",
+      "rank": 635,
+      "row": "115002002002000002002000000000",
+      "master": "2127128127127127128128127128",
+      "expression_bytes": 36,
+      "output_sha256": "0bab16cf8f926cbeddbb96466839c6d33c0430dae0df4278b3eb1f67300f7737"
+    },
+    {
+      "case": "fire7_graph5_rank0697",
+      "rank": 697,
+      "row": "117002001001001001000000000000",
+      "master": "2127127128127128128128127127",
+      "expression_bytes": 31,
+      "output_sha256": "50b8a908b7d35b98fe9f9ecff1d5e4ac58f31480a6bf11e59d3f906ff98ca543"
+    },
+    {
+      "case": "fire7_graph5_rank0759",
+      "rank": 759,
+      "row": "225003003001000000000000000000",
+      "master": "2127129128127128128128127127",
+      "expression_bytes": 27,
+      "output_sha256": "4b30aec03e2f3f57c0c5132ea36d22f4d9e31eda7dacd3253dbb3ce0f44e0afc"
+    },
+    {
+      "case": "fire7_graph5_rank0821",
+      "rank": 821,
+      "row": "211002001000000000001000000000",
+      "master": "2127127128129128128127127128",
+      "expression_bytes": 22,
+      "output_sha256": "dff74f99eb128c914f37b7b9d01d9bd02934cc7c5f571d37c48c23722ac3ab35"
+    },
+    {
+      "case": "fire7_graph5_rank0883",
+      "rank": 883,
+      "row": "119002002002001000000000000000",
+      "master": "2127127127128128128128127127",
+      "expression_bytes": 15,
+      "output_sha256": "4247f71134f4e5ca80e32b395bb64812fd028f08887c3382d84e97b83d08b9d3"
+    },
+    {
+      "case": "fire7_graph5_rank0945",
+      "rank": 945,
+      "row": "2127129128127128128128127127",
+      "master": "2127129128127128128128127127",
+      "expression_bytes": 1,
+      "output_sha256": "4355a46b19d348dc2f57c046f8ef63d4538ebb936000f3c9ee954a27460dd865"
+    }
+  ]
+}

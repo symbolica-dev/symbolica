@@ -1,0 +1,27 @@
+zero.1 ok 8
+zero.7 ok 8
+zero.19 ok 8
+constant.1 ok 8
+constant.7 ok 8
+constant.19 ok 8
+univariate.1 ok 9
+univariate.7 ok 9
+univariate.19 ok 9
+mixed.1 ok 16
+mixed.7 ok 16
+mixed.19 ok 16
+large.1 ok 134
+large.7 ok 134
+large.19 ok 134
+trivariate.1 ok 27
+trivariate.7 ok 27
+trivariate.19 ok 27
+order.1 ok 117
+order.7 ok 117
+order.19 ok 117
+large.1.MAX_TOTAL_PROBES probe_limit 1
+large.1.MAX_PRIMES prime_limit 0
+large.1.MAX_PRIMES prime_limit 24
+large.1.BENCH_TIMEOUT time_limit 0
+large.1.RARE_Q_CHECKER identity_check_failed 134
+21 exact reconstructions, 5 adapter failure controls, 2 checker rejection controls passed

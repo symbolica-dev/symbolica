@@ -1,0 +1,10 @@
+Diff in /common/dev/symbolica-reconstruction/src/transcendental.rs:4873:
+                     // Independent Wronskian identities exercise both integer
+                     // limits without comparing two perturbed approximations.
+                     let one = complex_one(prec);
+-                    let y_residual = j_next * y - j * y_next
++                    let y_residual = j_next * y
++                        - j * y_next
+                         - (one.clone() + one.clone()) / (complex_pi(prec) * z.clone());
+                     let k_residual = i * k_next + i_next * k - one / z.clone();
+                     for residual in [y_residual, k_residual] {

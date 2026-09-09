@@ -1,0 +1,3 @@
+case,method,seed,status,elapsed_us,probes,primes,images,support_reuses,support_fallbacks,probes_by_prime,prime_policy,oracle,num_terms,den_terms,setup_ms,selected_methods
+aajamp,Rare_scaling,1,ok,298079188.501,169134,2,,,,1152921504606846883:169132;1152921504606846869:2,Rare_native_60,cached_powers_Q,23260,7231,,
+aajamp_mod,Rare_scaling,1,ok,297490374.350,169134,2,,,,1152921504606846883:169132;1152921504606846869:2,Rare_native_60,cached_powers_Q,23260,7231,,

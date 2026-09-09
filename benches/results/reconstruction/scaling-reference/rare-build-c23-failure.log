@@ -1,0 +1,75 @@
+   Compiling proc-macro2 v1.0.86
+   Compiling unicode-ident v1.0.12
+   Compiling libc v0.2.155
+   Compiling cfg-if v1.0.0
+   Compiling autocfg v1.3.0
+   Compiling byteorder v1.5.0
+   Compiling gmp-mpfr-sys v1.6.4
+   Compiling paste v1.0.15
+   Compiling libm v0.2.8
+   Compiling az v1.2.1
+   Compiling thiserror v1.0.63
+   Compiling rug v1.25.0
+   Compiling num-traits v0.2.19
+   Compiling either v1.13.0
+   Compiling itertools v0.12.1
+   Compiling seq-macro v0.3.5
+   Compiling quote v1.0.36
+   Compiling syn v2.0.74
+   Compiling getrandom v0.2.15
+   Compiling log v0.4.22
+   Compiling rand_core v0.6.4
+   Compiling array-init v2.1.0
+   Compiling num-integer v0.1.46
+   Compiling rand_xoshiro v0.6.0
+   Compiling zerocopy-derive v0.7.35
+   Compiling thiserror-impl v1.0.63
+   Compiling zerocopy v0.7.35
+   Compiling ppv-lite86 v0.2.20
+   Compiling rand_chacha v0.3.1
+   Compiling rand v0.8.5
+   Compiling ffnt v0.8.0
+error: failed to run custom build command for `gmp-mpfr-sys v1.6.4`
+
+Caused by:
+  process didn't exit successfully: `/common/dev/symbolica-reconstruction/target/reconstruction-external/rare-target/release/build/gmp-mpfr-sys-d610fdea051a81b3/build-script-build` (exit status: 101)
+  --- stdout
+  cargo:rerun-if-env-changed=GMP_MPFR_SYS_CACHE
+  $ mkdir -p "/common/dev/symbolica-reconstruction/target/reconstruction-external/rare-target/release/build/gmp-mpfr-sys-88829b04ae993570/out/lib"
+  $ mkdir -p "/common/dev/symbolica-reconstruction/target/reconstruction-external/rare-target/release/build/gmp-mpfr-sys-88829b04ae993570/out/include"
+  $ mkdir -p "/common/dev/symbolica-reconstruction/target/reconstruction-external/rare-target/release/build/gmp-mpfr-sys-88829b04ae993570/out/build"
+  $ ln -s "/tmp/slow-fac-cargo/registry/src/index.crates.io-1949cf8c6b5b557f/gmp-mpfr-sys-1.6.4/gmp-6.3.0-c" "/common/dev/symbolica-reconstruction/target/reconstruction-external/rare-target/release/build/gmp-mpfr-sys-88829b04ae993570/out/build/gmp-src"
+  $ mkdir -p "/common/dev/symbolica-reconstruction/target/reconstruction-external/rare-target/release/build/gmp-mpfr-sys-88829b04ae993570/out/build/gmp-build"
+  $ cd "/common/dev/symbolica-reconstruction/target/reconstruction-external/rare-target/release/build/gmp-mpfr-sys-88829b04ae993570/out/build/gmp-build"
+  $ cd "/common/dev/symbolica-reconstruction/target/reconstruction-external/rare-target/release/build/gmp-mpfr-sys-88829b04ae993570/out/build/gmp-build" && "sh" "-c" "../gmp-src/configure --enable-fat --disable-shared --with-pic"
+  checking build system type... zen4-pc-linux-gnu
+  checking host system type... zen4-pc-linux-gnu
+  checking for a BSD-compatible install... /run/current-system/sw/bin/install -c
+  checking whether build environment is sane... yes
+  checking for a thread-safe mkdir -p... /run/current-system/sw/bin/mkdir -p
+  checking for gawk... gawk
+  checking whether make sets $(MAKE)... yes
+  checking whether make supports nested variables... yes
+  checking whether to enable maintainer-specific portions of Makefiles... no
+  checking ABI=64
+  checking compiler gcc -O2 -pedantic -fomit-frame-pointer -m64 ... no, long long reliability test 1
+  checking whether cc is gcc... yes
+  checking compiler cc -O2 -pedantic -fomit-frame-pointer -m64 ... no, long long reliability test 1
+  checking ABI=x32
+  checking compiler gcc -O2 -pedantic -fomit-frame-pointer -mx32 ... no
+  checking whether cc is gcc... yes
+  checking compiler cc -O2 -pedantic -fomit-frame-pointer -mx32 ... no
+  checking ABI=32
+  checking compiler gcc -m32 -O2 -pedantic -fomit-frame-pointer ... no
+  checking compiler gcc -O2 -pedantic -fomit-frame-pointer ... no, long long reliability test 1
+  checking compiler icc -no-gcc ... no
+  checking whether cc is gcc... yes
+  checking compiler cc -m32 -O2 -pedantic -fomit-frame-pointer ... no
+  checking compiler cc -O2 -pedantic -fomit-frame-pointer ... no, long long reliability test 1
+
+  --- stderr
+  configure: error: could not find a working compiler, see config.log for details
+
+  thread 'main' (2438609) panicked at /tmp/slow-fac-cargo/registry/src/index.crates.io-1949cf8c6b5b557f/gmp-mpfr-sys-1.6.4/build.rs:1217:13:
+  Program failed with code 1: cd "/common/dev/symbolica-reconstruction/target/reconstruction-external/rare-target/release/build/gmp-mpfr-sys-88829b04ae993570/out/build/gmp-build" && "sh" "-c" "../gmp-src/configure --enable-fat --disable-shared --with-pic"
+  note: run with `RUST_BACKTRACE=1` environment variable to display a backtrace

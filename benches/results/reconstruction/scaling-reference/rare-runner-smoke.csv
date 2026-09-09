@@ -1,0 +1,6 @@
+case,method,seed,status,elapsed_us,probes,primes,images,support_reuses,support_fallbacks,probes_by_prime,prime_policy,oracle,num_terms,den_terms,setup_ms,selected_methods
+fire7_graph5_rank0001,Rare_scaling,1,ok,263.350,98,2,,,,1152921504606846883:96;1152921504606846869:2,Rare_native_60,cached_powers_Q,26,14,,
+fire7_graph5_rank0001,FireFly_default,1,ok,3368.562,94,2,,,,9223372036854775643:1;9223372036854775783:93,FireFly_default,cached_powers_Q,26,14,,
+fire7_graph5_rank0001,FireFly_scan,1,ok,7465.417,187,2,,,,9223372036854775643:43;9223372036854775783:144,FireFly_default,cached_powers_Q,26,14,,
+fire7_graph5_rank0001,FIRE7_Q_learned,1,ok,2159.058,151,3,2,,,18446744073709551521:3;18446744073709551533:63;18446744073709551557:85,FIRE7_native_64,cached_powers_Q,26,14,,
+fire7_graph5_rank0001,Automatic,1,ok,308.302,51,2,1,0,0,2305843009213693967:48;2305843009213693973:3,Symbolica_default,cached_powers_Q,26,14,0.457,BalancedZippelSeparated

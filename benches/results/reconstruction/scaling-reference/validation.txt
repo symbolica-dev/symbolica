@@ -1,0 +1,23 @@
+Baseline: 9e47f9d9; saved release executable hash is in sources-and-binaries.sha256.
+38 reconstruction tests passed.
+Final 3319 nb0 and 945 graph5 exact reconstructions preserve all counts,
+per-prime costs and selected methods against the preceding archive.
+All nine larger final controls preserve probe counts and selected methods.
+90 interleaved exact reconstructions: all 45 paired probe counts agree.
+4602 successful benchmark reconstructions archived, excluding adapter controls.
+Both original rare amplitude timeouts and both extended successes retained.
+All 32 nb0 rare sample runs and 192 graph5 comparison runs pass exact checks.
+Graph5 counts are stable across seeds 1-3 for both methods.
+All full-Q per-prime distributions sum to reported probe totals.
+All matching final/reference oracle exports are byte-identical.
+21 successful adapter controls, five expected adapter failures,
+and two independent checker rejection controls passed.
+Ten forced interleaved-runner process timeouts retained with unknown counts.
+All five methods pass the shared-runner smoke test with independent exact checks.
+Core Clippy completes with the existing allowance and 249 warnings.
+Standalone adapter Clippy passes with -D warnings.
+Changed Rust sources pass formatting; root cargo fmt reports a pre-existing
+unrelated difference in src/transcendental.rs, retained in division-free-fmt.log.
+Release build, Python syntax and shell syntax pass.
+Top-level text logs have trailing whitespace and final blank lines normalized;
+compressed process logs and reconstructed results retain their original bytes.
