@@ -182,3 +182,8 @@ and pass case names from its `suite-cases.txt` to either stress runner. Custom
 inputs consist of an expression file named after the case and a whitespace-separated
 variable-order sidecar named `CASE.variables`. See the
 [broader IBP suite and pilot-row reuse report](../reconstruction-nb0-suite.md).
+
+`extract_fire_tables.py --all` additionally exports every distinct coefficient
+string into `fire-table-inputs/all`, with a separate manifest and case list.
+The [whole-table factor-lifting comparison](../reconstruction-factor-lift.md)
+records the complete screen, improvements and remaining reference gaps.

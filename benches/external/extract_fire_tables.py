@@ -8,7 +8,9 @@ import subprocess
 import argparse
 
 parser = argparse.ArgumentParser(description=__doc__)
-parser.add_argument("--suite", action="store_true", help="also export 32 distinct coefficients spanning the table")
+selection = parser.add_mutually_exclusive_group()
+selection.add_argument("--suite", action="store_true", help="also export 32 distinct coefficients spanning the table")
+selection.add_argument("--all", dest="all_coefficients", action="store_true", help="export every distinct coefficient string into the all subdirectory")
 args = parser.parse_args()
 
 root = Path(__file__).resolve().parents[2]
@@ -38,7 +40,7 @@ manifest = dict(revision=revision, source=str(source.relative_to(fire)), source_
 (out / "manifest.json").write_text(json.dumps(manifest, indent=2) + "\n")
 print(json.dumps(manifest, indent=2))
 
-if args.suite:
+if args.suite or args.all_coefficients:
     # Deduplicate exact source strings, preserving the first table occurrence.
     unique = {}
     for item in coefficients:
@@ -47,20 +49,27 @@ if args.suite:
     assert len(ranked) >= 32
     # Largest 16, then 16 evenly spaced ranks in the remaining size range.
     ranks = list(range(16)) + [16 + i * (len(ranked) - 17) // 15 for i in range(16)]
+    rule = "first 16 descending string-length ranks, then 16 evenly spaced remaining ranks; first table occurrence breaks ties"
+    suite_out = out
+    if args.all_coefficients:
+        ranks = range(len(ranked))
+        rule = "all distinct coefficient strings, descending string-length ranks; first table occurrence breaks ties"
+        suite_out = out / "all"
+        suite_out.mkdir(exist_ok=True)
     entries = []
     for rank in ranks:
         row, master, expression = ranked[rank]
         assert set(re.findall(r"[A-Za-z]+", expression)) <= {"u", "v", "w", "d"}
         case = f"fire7_nb0_rank{rank + 1:04d}"
         data = (expression + "\n").encode()
-        (out / case).write_bytes(data)
-        (out / f"{case}.variables").write_text("u v w d\n")
+        (suite_out / case).write_bytes(data)
+        (suite_out / f"{case}.variables").write_text("u v w d\n")
         entries.append(dict(case=case, rank=rank + 1, row=str(row), master=str(master),
                             expression_bytes=len(expression), output_sha256=hashlib.sha256(data).hexdigest()))
     suite = dict(revision=revision, source=manifest["source"], source_sha256=digest,
                  coefficient_count=len(coefficients), distinct_source_strings=len(ranked),
-                 selection="first 16 descending string-length ranks, then 16 evenly spaced remaining ranks; first table occurrence breaks ties",
+                 selection=rule,
                  variables=["u", "v", "w", "d"], entries=entries)
-    (out / "suite-manifest.json").write_text(json.dumps(suite, indent=2) + "\n")
-    (out / "suite-cases.txt").write_text("\n".join(entry["case"] for entry in entries) + "\n")
+    (suite_out / "suite-manifest.json").write_text(json.dumps(suite, indent=2) + "\n")
+    (suite_out / "suite-cases.txt").write_text("\n".join(entry["case"] for entry in entries) + "\n")
     print(f"Exported {len(entries)} suite cases from {len(ranked)} distinct source strings")

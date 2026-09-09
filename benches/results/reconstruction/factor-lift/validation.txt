@@ -1,0 +1,17 @@
+Baseline: ef17f7ee release binary, copied before source edits.
+29 rational reconstruction tests passed.
+New tests cover three seeds, nonconstant separated factors, zero/nonzero constants,
+and rejected whole-factor/constant hypotheses recovering in one bounded attempt.
+Final release build passed with Rust 1.92, LTO disabled, 16 codegen units.
+Clippy passed with -A clippy::never_loop and the existing 249 warnings.
+Full export is deterministic; all 3319 expression hashes verified.
+Original 32-case manifest and expression bytes preserved.
+3319 baseline + 3319 final + 6638 reference full-table runs passed exact Q checks.
+318 additional seed checks passed with unchanged counts across three seeds.
+7 larger regressions passed exact checks with counts unchanged from ef17f7ee.
+All 3319 exact oracle exports match byte for byte across baseline/final/reference screens.
+All full-table and seed-check per-prime distributions sum to their total probes.
+512 coefficients improve, 2807 unchanged, zero regressions in the measured seed-one screen.
+22 cases retain a FireFly scan probe advantage; recorded without exclusion.
+Compressed process archive contains all 13601 benchmark outputs.
+Archived build/test/Clippy logs have trailing whitespace and terminal blank lines removed.

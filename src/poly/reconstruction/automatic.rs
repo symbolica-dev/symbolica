@@ -36,7 +36,28 @@ where
         // This is only a hypothesis; ordinary final validation and fallback
         // remain responsible for accepting the reconstructed function.
         if slice.denominator == other.denominator {
-            self.balanced_pilot = Some((anchor, slice));
+            let constant = slice.numerator.degree(last) == 0
+                && slice.denominator.degree(last) == 0
+                && slice.numerator == other.numerator;
+            // Proportional numerators predict separation of the whole
+            // rational factor, including its numerator's variable dependence.
+            let factorizes = !slice.numerator.is_zero()
+                && !other.numerator.is_zero()
+                && slice.numerator.clone().mul_coeff(coefficient(
+                    &other.numerator,
+                    last,
+                    other.numerator.degree(last),
+                )) == other.numerator.clone().mul_coeff(coefficient(
+                    &slice.numerator,
+                    last,
+                    slice.numerator.degree(last),
+                ));
+            self.balanced_pilot = Some(BalancedPilot {
+                point: anchor,
+                row: slice,
+                factorizes,
+                constant,
+            });
             return Ok((BalancedZippelSeparated, None));
         }
         let mut profile = DegreeProfile {

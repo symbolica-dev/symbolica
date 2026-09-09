@@ -109,7 +109,7 @@ pub struct ReconstructionStats {
     pub univariate_interpolations: usize,
     /// Univariate rows interpolated using degrees learned from an earlier row.
     pub degree_interpolations: usize,
-    /// Rejected separable-denominator candidates followed by ordinary balancing.
+    /// Rejected denominator or whole-factor separation followed by ordinary balancing.
     pub separation_fallbacks: usize,
     pub linear_solves: usize,
     pub attempts: usize,
@@ -236,6 +236,13 @@ where
     Err(ReconstructionError::AttemptsExhausted)
 }
 
+struct BalancedPilot {
+    point: Vec<Element>,
+    row: Fraction,
+    factorizes: bool,
+    constant: bool,
+}
+
 struct Context<'a, F> {
     field: Zp64,
     template: Polynomial,
@@ -248,7 +255,7 @@ struct Context<'a, F> {
     // validation always retain the original oracle values.
     monomial_factors: Option<[Vec<u16>; 2]>,
     // A final-variable slice already reconstructed during method selection.
-    balanced_pilot: Option<(Vec<Element>, Fraction)>,
+    balanced_pilot: Option<BalancedPilot>,
 }
 
 fn unlucky<T>() -> Result<T> {
@@ -622,6 +629,11 @@ impl<F: FnMut(&Zp64, &[Element]) -> Option<Element>> Context<'_, F> {
 
     fn balanced(&mut self, separate: bool) -> Result<Fraction> {
         let mut pilot = self.balanced_pilot.take();
+        if separate && pilot.as_ref().is_some_and(|p| p.constant) {
+            // Agreement of two constant slices predicts a constant function.
+            // The caller still performs fresh full-dimensional verification.
+            return Ok(pilot.take().unwrap().row);
+        }
         let anchors = self.point();
         let mut result = self.thiele(0, |t| {
             let mut p = anchors.clone();
@@ -630,10 +642,28 @@ impl<F: FnMut(&Zp64, &[Element]) -> Option<Element>> Context<'_, F> {
         })?;
         for variable in 1..self.template.nvars() {
             let last = variable + 1 == self.template.nvars();
+            if last
+                && separate
+                && let Some(pilot) = &pilot
+                && pilot.factorizes
+            {
+                // If f(x,t)=g(x)*h(t), the preceding result is g(x)*h(a).
+                // Restore t by multiplying by h(t)/h(a). The two pilot slices
+                // only predict this factorization; final verification and the
+                // ordinary balanced fallback remain mandatory.
+                let at_anchor = value(&pilot.row, &anchors)
+                    .filter(|v| !self.field.is_zero(v))
+                    .ok_or(ReconstructionError::AttemptsExhausted)?;
+                return Ok(Fraction {
+                    numerator: &result.numerator * &pilot.row.numerator,
+                    denominator: (&result.denominator * &pilot.row.denominator)
+                        .mul_coeff(at_anchor),
+                });
+            }
             // At geometric power one, this base reproduces the pilot's fixed
             // coordinates. Its row can therefore be reused without new probes.
-            let base = if last && let Some((point, _)) = &pilot {
-                point.clone()
+            let base = if last && let Some(pilot) = &pilot {
+                pilot.point.clone()
             } else {
                 self.point()
             };
@@ -657,7 +687,7 @@ impl<F: FnMut(&Zp64, &[Element]) -> Option<Element>> Context<'_, F> {
                 }
                 let known = value(&result, &point).ok_or(ReconstructionError::AttemptsExhausted)?;
                 let mut row = if last && i == 1 && pilot.is_some() {
-                    pilot.take().unwrap().1
+                    pilot.take().unwrap().row
                 } else if let Some(degrees) = degrees {
                     // The first row predicts the last-variable denominator
                     // factor. Fresh final verification guards this hypothesis.
