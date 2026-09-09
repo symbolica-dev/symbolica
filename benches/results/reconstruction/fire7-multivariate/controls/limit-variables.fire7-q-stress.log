@@ -1,0 +1,2 @@
+terminate called after throwing an instance of 'std::runtime_error'
+  what():  FIRE7 Q adapter supports at most 16 variables

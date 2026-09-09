@@ -1,0 +1,2 @@
+case,method,seed,status,elapsed_us,probes,primes,images,probes_by_prime
+fire7_nb0_largest,FIRE7_Q_learned,1,ok,198056.233,6721,3,2,18446744073709551521:3;18446744073709551533:3341;18446744073709551557:3377

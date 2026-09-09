@@ -1,0 +1,2 @@
+case,method,seed,status,elapsed_us,probes,primes,images,probes_by_prime
+origin_pole,FireFly_default,1,ok,1162.083,15,4,,9223372036854775507:1;9223372036854775549:1;9223372036854775643:4;9223372036854775783:9

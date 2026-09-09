@@ -1,0 +1,20 @@
+Symbolica base: 2f61c8e (core code and release binary unchanged).
+FIRE7: d132e5365dd2a13db9cd9dbaf5c200b53d489cfd
+FUEL: 8627acefec5be237080e94c1ea903a52c680aa32
+FireFly: 4ce258e5ace6361513c4bdaac93a247cc0e3fdbb
+FIRE7 reconstruction.cpp and primes.cpp have no source changes.
+FireFly retains only the existing portability and seed patches.
+Final fire7_q_stress.cpp compiled and linked successfully with the build_stress.sh flags.
+GCC 15.2.0, C++17, -O3, FLINT 3.6.0; empty build.log means no diagnostics.
+28 small exact-Q adapter controls passed.
+16 preceding small controls preserve probe counts and full prime distributions.
+Four probe/prime limit controls passed; 17-variable rejection control passed.
+Six reference screen runs passed exact checks.
+Twelve interleaved nb0 runs passed exact checks, stable counts over seeds 1,2,3.
+Four fresh amplitude peer runs passed exact checks.
+Two large bivariate regressions passed exact checks; counts/images/distributions unchanged.
+All four large exact oracle exports match the preceding checkpoint byte for byte.
+All eight hashes in benches/external/stress-inputs.sha256 passed.
+The nb0 source hash remains cebddb9e7b6695a3dccb0e91ebe6e821f5093b060107a957a70a60cb6090ea42.
+Python AST syntax checks passed for check_q_adapters.py and run_q_stress.py.
+No Symbolica core test rerun: this checkpoint changes only external benchmark tooling/docs.

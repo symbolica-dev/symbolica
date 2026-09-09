@@ -1,0 +1,2 @@
+case,method,seed,status,elapsed_us,probes,primes,images,probes_by_prime
+trivariate,FireFly_default,1,ok,1072.942,20,2,,9223372036854775643:1;9223372036854775783:19
