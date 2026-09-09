@@ -1,4 +1,7 @@
 use super::*;
+#[cfg(feature = "native_code_generation")]
+#[path = "trace_oracle.rs"]
+mod trace_oracle;
 use std::collections::BTreeMap;
 use symbolica::{
     domains::finite_field::ToFiniteField,
@@ -41,6 +44,13 @@ pub(super) fn run(
         }
         return;
     }
+    #[cfg(feature = "native_code_generation")]
+    let mut trace = trace_oracle::TraceOracle::from_env(names);
+    #[cfg(not(feature = "native_code_generation"))]
+    assert!(
+        std::env::var_os("TRACE_ORACLE_PATH").is_none(),
+        "trace oracle requires native_code_generation"
+    );
     let setup_ms = setup.elapsed().as_secs_f64() * 1000.;
     let timeout = std::env::var("BENCH_TIMEOUT")
         .map(|s| s.parse::<f64>().unwrap())
@@ -85,6 +95,10 @@ pub(super) fn run(
                 }
                 calls += 1;
                 *probes_by_prime.entry(f.get_prime()).or_default() += 1;
+                #[cfg(feature = "native_code_generation")]
+                if let Some(trace) = &mut trace {
+                    return trace.evaluate(f, point);
+                }
                 if image
                     .as_ref()
                     .is_none_or(|(prime, _, _)| *prime != f.get_prime())
@@ -109,6 +123,10 @@ pub(super) fn run(
         )
     }));
     let elapsed_us = start.elapsed().as_secs_f64() * 1e6;
+    #[cfg(feature = "native_code_generation")]
+    if let Some(trace) = &trace {
+        assert_eq!(trace.calls(), calls);
+    }
     let mut selected = String::new();
     let (status, primes, images, reuses, fallbacks) = match result {
         Ok(Ok((r, stats))) => {

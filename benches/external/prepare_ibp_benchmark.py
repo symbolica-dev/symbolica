@@ -108,6 +108,10 @@ for entry in selected:
     expression = expressions[entry["case"]].strip() + "\n"
     (output / entry["case"]).write_text(expression)
     (output / (entry["case"] + ".variables")).write_text(" ".join(variables) + "\n")
+    trace_link = output / (entry["case"] + ".trace")
+    if trace_link.is_symlink():
+        trace_link.unlink()
+    trace_link.symlink_to(os.path.relpath(coefficients / (str(entry["output"]) + ".trace"), output))
     entry["expression_sha256"] = hashlib.sha256(expression.encode()).hexdigest()
 manifest = dict(revisions=pins, family=args.family, integral=args.integral,
                 limits=dict(zip("rsd", map(int, limits))), variables=variables,

@@ -1,0 +1,97 @@
+{
+  "baseline": "e9e6fe92",
+  "final_successful_runs": 4441,
+  "archived_statuses": {
+    "ok": 4518,
+    "unsupported_variable_count": 4,
+    "unsupported_trace_backend": 2,
+    "probe_limit": 2
+  },
+  "regressions": [
+    {
+      "suite": "nb0",
+      "runs": 3319,
+      "unchanged": true
+    },
+    {
+      "suite": "graph5",
+      "runs": 945,
+      "unchanged": true
+    },
+    {
+      "suite": "sparse",
+      "runs": 4,
+      "unchanged": true
+    },
+    {
+      "suite": "q",
+      "runs": 5,
+      "unchanged": true
+    },
+    {
+      "suite": "sheared",
+      "runs": 4,
+      "unchanged": true
+    },
+    {
+      "suite": "box2l",
+      "runs": 12,
+      "unchanged": true
+    },
+    {
+      "suite": "xbox2l2m",
+      "runs": 12,
+      "unchanged": true
+    }
+  ],
+  "trace_median_seconds": {
+    "ibp_tth2l_b16_rank0001": {
+      "FireFly_scan": 1.3246539750000002,
+      "Automatic": 0.20072531,
+      "FireFly_default": 3.382873623
+    },
+    "ibp_tth2l_b16_rank0002": {
+      "FireFly_scan": 0.059210438000000004,
+      "Automatic": 0.018306866999999998,
+      "FireFly_default": 0.17994468400000002
+    },
+    "ibp_tth2l_b16_rank0003": {
+      "FireFly_scan": 0.129612008,
+      "Automatic": 0.027589722,
+      "FireFly_default": 0.23531086799999998
+    },
+    "ibp_tth2l_b16_rank0004": {
+      "FireFly_scan": 0.12183862,
+      "Automatic": 0.02453564,
+      "FireFly_default": 0.19126259599999998
+    },
+    "ibp_xbox2l2m_rank0001": {
+      "FireFly_scan": 31.043332162000002,
+      "Automatic": 25.150360616999997
+    },
+    "ibp_xbox2l2m_rank0002": {
+      "FireFly_scan": 37.765008761,
+      "Automatic": 22.629756814
+    },
+    "ibp_xbox2l2m_rank0003": {
+      "FireFly_scan": 48.919651942,
+      "Automatic": 40.995257593999995
+    },
+    "ibp_xbox2l2m_rank0004": {
+      "FireFly_scan": 2.602671074,
+      "Automatic": 2.041918556
+    }
+  },
+  "rare_adapter_variables": 8,
+  "trace_backends": [
+    "Symbolica",
+    "FireFly"
+  ],
+  "native_prime_policies_unchanged": true,
+  "limitations": [
+    "Scalar, single-output reconstruction; not a complete multi-output IBP reduction.",
+    "Shared host, not isolated; timings exclude trace loading and input preparation.",
+    "FIRE7 native 64-bit primes exceed interpreter range; rare has no trace binding.",
+    "ordering-rare-unsupported.csv predates the extension to eight variables and is superseded by ordering-rare-b16.csv."
+  ]
+}

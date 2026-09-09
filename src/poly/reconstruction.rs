@@ -18,6 +18,7 @@ use crate::{
 };
 use rand::{Rng, SeedableRng, rngs::StdRng};
 use std::{
+    borrow::Cow,
     collections::{HashMap, HashSet},
     sync::Arc,
 };
@@ -40,7 +41,8 @@ pub enum ReconstructionMethod {
     /// costs. A shared univariate factor in the last-variable pilot triggers
     /// factor removal and balanced reconstruction with reused survey rows. All discovery
     /// probes count toward the shared budget. Uses balanced Zippel directly
-    /// for one or two variables.
+    /// for one or two variables. In higher dimensions, a dense denominator
+    /// slice can trigger a search for a better separated last variable.
     Automatic,
     /// Homogenization, Thiele degree discovery, linear solves and polynomial Zippel.
     CuytLee,
@@ -185,11 +187,13 @@ where
         balanced_initial: None,
         balanced_survey: Vec::new(),
         removed_factors: Vec::new(),
+        swapped_variable: None,
         removed_numerator_factor: None,
         fixed_last_variable: None,
     };
     for attempt in 0..options.max_attempts {
         ctx.stats.attempts = attempt + 1;
+        ctx.swapped_variable = None;
         let (selected, mut profile) = if method == ReconstructionMethod::Automatic {
             let before = ctx.stats.probes;
             let choice = ctx.select_method();
@@ -227,6 +231,7 @@ where
             };
             match result {
                 Ok(r) if ctx.verify(&r)? => {
+                    let r = ctx.restore_variable_order(r);
                     let r = Fraction::from_num_den(r.numerator, r.denominator, &ctx.field, true);
                     return Ok((r, ctx.stats));
                 }
@@ -271,6 +276,8 @@ struct Context<'a, F> {
     balanced_survey: Vec<Option<Fraction>>,
     // Sampled univariate factors, active only during a factored reconstruction.
     removed_factors: Vec<(usize, [UnivariatePolynomial<Zp64>; 2])>,
+    // Internal swap with the last variable; raw cache keys keep caller order.
+    swapped_variable: Option<usize>,
     // A last-variable factor hypothesized from generic numerator slices.
     removed_numerator_factor: Option<UnivariatePolynomial<Zp64>>,
     // Restrict probes while reconstructing the remaining variables of a factor.
@@ -350,8 +357,39 @@ impl<F: FnMut(&Zp64, &[Element]) -> Option<Element>> Context<'_, F> {
         }
         Ok(Some(value))
     }
+    fn original_point<'b>(&self, point: &'b [Element]) -> Cow<'b, [Element]> {
+        if let Some(variable) = self.swapped_variable {
+            let mut original = point.to_vec();
+            original.swap(variable, point.len() - 1);
+            Cow::Owned(original)
+        } else {
+            Cow::Borrowed(point)
+        }
+    }
+    fn has_cached_probe(&self, point: &[Element]) -> bool {
+        self.cache.contains_key(self.original_point(point).as_ref())
+    }
+    fn restore_variable_order(&self, r: Fraction) -> Fraction {
+        let Some(variable) = self.swapped_variable else {
+            return r;
+        };
+        let restore = |p: Polynomial| {
+            let mut restored = p.zero();
+            for term in &p {
+                let mut exponents = term.exponents.to_vec();
+                exponents.swap(variable, p.nvars() - 1);
+                restored.append_monomial(*term.coefficient, &exponents);
+            }
+            restored
+        };
+        Fraction {
+            numerator: restore(r.numerator),
+            denominator: restore(r.denominator),
+        }
+    }
     fn probe_raw(&mut self, point: &[Element]) -> Result<Option<Element>> {
-        if let Some(v) = self.cache.get(point) {
+        let point = self.original_point(point);
+        if let Some(v) = self.cache.get(point.as_ref()) {
             self.stats.cache_hits += 1;
             return Ok(*v);
         }
@@ -359,16 +397,16 @@ impl<F: FnMut(&Zp64, &[Element]) -> Option<Element>> Context<'_, F> {
             return Err(ReconstructionError::ProbeLimit);
         }
         self.stats.probes += 1;
-        let v = (self.black_box)(&self.field, point);
+        let v = (self.black_box)(&self.field, &point);
         self.stats.poles += usize::from(v.is_none());
-        self.cache.insert(point.to_vec(), v);
+        self.cache.insert(point.into_owned(), v);
         Ok(v)
     }
     fn verify(&mut self, r: &Fraction) -> Result<bool> {
         let mut good = 0;
         for _ in 0..self.options.verification_points * 16 {
             let point = self.point();
-            if self.cache.contains_key(&point) {
+            if self.has_cached_probe(&point) {
                 continue;
             }
             if let Some(v) = self.probe_raw(&point)? {

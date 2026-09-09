@@ -1872,3 +1872,84 @@ fn sampled_factors_are_restored_before_multi_prime_lifting() {
     let rd = r.denominator.map_coeff(|c| Rational::from(c.clone()), Q);
     assert_eq!(&rn * &d, &rd * &n);
 }
+
+#[test]
+fn automatic_reorders_a_separated_factor_and_restores_caller_coordinates() {
+    let field = Zp64::new(2_305_843_009_213_693_951);
+    for position in 0..5 {
+        let mut names = ["a", "x", "y", "z", "w"];
+        names.swap(0, position);
+        let vars = Arc::new(names.map(|s| symbol!(s).into()).to_vec());
+        let n: MultivariatePolynomial<_, u16> =
+            parse!("a^3+x^3+y^3+z^3+w^3+x*y*z*w+1").to_polynomial(&field, vars.clone());
+        let d: MultivariatePolynomial<_, u16> =
+            parse!("(a-2)^3*(a-3)^2*(x+y+z+w+4)^2").to_polynomial(&field, vars.clone());
+        let mut seen = std::collections::HashSet::new();
+        let (r, stats) = reconstruct_rational_function(
+            field.clone(),
+            vars.clone(),
+            |f, p| {
+                assert!(seen.insert(p.to_vec()), "duplicate raw oracle call");
+                let dv = d.replace_all(p);
+                (!f.is_zero(&dv)).then(|| f.div(&n.replace_all(p), &dv))
+            },
+            Automatic,
+            &ReconstructionOptions {
+                seed: 41,
+                max_degree: 20,
+                max_probes: 2000,
+                ..Default::default()
+            },
+        )
+        .unwrap();
+        assert_eq!(&r.numerator * &d, &r.denominator * &n);
+        assert_eq!(r.numerator.variables(), &vars);
+        assert_eq!(stats.probes, seen.len());
+        assert_eq!(stats.selected_method, Some(BalancedZippelSeparated));
+    }
+}
+
+#[test]
+fn reordered_coordinates_remain_consistent_across_prime_images() {
+    use symbolica::domains::finite_field::ToFiniteField;
+    use symbolica::poly::reconstruction::reconstruct_rational_function_over_q;
+    let vars = Arc::new(
+        ["x", "y", "a", "z", "w"]
+            .map(|s| symbol!(s).into())
+            .to_vec(),
+    );
+    let n: MultivariatePolynomial<_, u16> = parse!(
+        "12345678901234567890123456789012345678901234567/37*(a^3+x^3+y^3+z^3+w^3+x*y*z*w+1)"
+    )
+    .to_polynomial(&Q, vars.clone());
+    let d: MultivariatePolynomial<_, u16> =
+        parse!("(a-2)^3*(a-3)^2*(x+y+z+w+4)^2").to_polynomial(&Q, vars.clone());
+    let mut calls = 0;
+    let (r, stats) = reconstruct_rational_function_over_q(
+        vars,
+        |f, p| {
+            calls += 1;
+            let nv = n
+                .map_coeff(|c| c.to_finite_field(f), f.clone())
+                .replace_all(p);
+            let dv = d
+                .map_coeff(|c| c.to_finite_field(f), f.clone())
+                .replace_all(p);
+            (!f.is_zero(&dv)).then(|| f.div(&nv, &dv))
+        },
+        Automatic,
+        &ReconstructionOptions {
+            max_degree: 20,
+            ..Default::default()
+        },
+        12,
+    )
+    .unwrap();
+    let rn = r.numerator.map_coeff(|c| Rational::from(c.clone()), Q);
+    let rd = r.denominator.map_coeff(|c| Rational::from(c.clone()), Q);
+    assert_eq!(&rn * &d, &rd * &n);
+    assert_eq!(stats.probes, calls);
+    assert!(stats.successful_images >= 3);
+    assert!(stats.support_reuses > 0);
+    assert_eq!(stats.selected_methods[0], BalancedZippelSeparated);
+}

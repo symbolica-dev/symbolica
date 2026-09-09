@@ -29,8 +29,8 @@ impl Input {
         let mut words = source.split_whitespace();
         let n: usize = words.next().unwrap().parse().unwrap();
         assert!(
-            (1..=4).contains(&n),
-            "adapter supports one to four variables"
+            (1..=8).contains(&n),
+            "adapter supports one to eight variables"
         );
         assert_eq!(words.next(), Some("0"), "expected integer Q oracle");
         let counts: [usize; 2] = std::array::from_fn(|_| words.next().unwrap().parse().unwrap());
@@ -314,6 +314,26 @@ fn main() {
         }
         4 => {
             let r = reconstruct::<4>(&input, &mut stats, seed);
+            let t = stats.start.elapsed();
+            (r.map(|r| serialize(&r, &input.names)), t)
+        }
+        5 => {
+            let r = reconstruct::<5>(&input, &mut stats, seed);
+            let t = stats.start.elapsed();
+            (r.map(|r| serialize(&r, &input.names)), t)
+        }
+        6 => {
+            let r = reconstruct::<6>(&input, &mut stats, seed);
+            let t = stats.start.elapsed();
+            (r.map(|r| serialize(&r, &input.names)), t)
+        }
+        7 => {
+            let r = reconstruct::<7>(&input, &mut stats, seed);
+            let t = stats.start.elapsed();
+            (r.map(|r| serialize(&r, &input.names)), t)
+        }
+        8 => {
+            let r = reconstruct::<8>(&input, &mut stats, seed);
             let t = stats.start.elapsed();
             (r.map(|r| serialize(&r, &input.names)), t)
         }

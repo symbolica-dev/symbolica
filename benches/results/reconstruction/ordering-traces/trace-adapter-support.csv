@@ -1,0 +1,4 @@
+case,method,seed,status,elapsed_us,probes,primes,images,support_reuses,support_fallbacks,probes_by_prime,prime_policy,oracle,num_terms,den_terms,setup_ms,selected_methods
+ibp_tth2l_b16_rank0001,FIRE7_Q_learned,1,unsupported_trace_backend,,,,,,,,FIRE7_native_64,ratracer_trace,1102,35,,
+ibp_tth2l_b16_rank0001,Rare_scaling,1,unsupported_trace_backend,,,,,,,,Rare_native_60,ratracer_trace,1102,35,,
+ibp_tth2l_b16_rank0001,Automatic,1,ok,197141.776,1136,2,1,0,0,2305843009213693967:1133;2305843009213693973:3,Symbolica_default,ratracer_trace,1102,35,19.038,BalancedZippelSeparated

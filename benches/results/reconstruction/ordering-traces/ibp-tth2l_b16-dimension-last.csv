@@ -1,0 +1,9 @@
+case,method,seed,status,elapsed_us,probes,primes,images,support_reuses,support_fallbacks,probes_by_prime,prime_policy,oracle,num_terms,den_terms,setup_ms,selected_methods
+ibp_tth2l_b16_rank0001,FireFly_scan,1,ok,645816.265,6702,2,,,,9223372036854775643:87;9223372036854775783:6615,FireFly_default,cached_powers_Q,1102,35,,
+ibp_tth2l_b16_rank0001,Automatic,1,ok,36115.707,1067,2,1,0,0,2305843009213693967:1064;2305843009213693973:3,Symbolica_default,cached_powers_Q,1102,35,5.766,BalancedZippelSeparated
+ibp_tth2l_b16_rank0002,FireFly_scan,1,ok,18097.449,476,2,,,,9223372036854775643:55;9223372036854775783:421,FireFly_default,cached_powers_Q,108,9,,
+ibp_tth2l_b16_rank0002,Automatic,1,ok,2640.110,162,2,1,0,0,2305843009213693967:159;2305843009213693973:3,Symbolica_default,cached_powers_Q,108,9,0.537,BalancedZippelSeparated
+ibp_tth2l_b16_rank0003,FireFly_scan,1,ok,51331.104,1298,2,,,,9223372036854775643:63;9223372036854775783:1235,FireFly_default,cached_powers_Q,270,28,,
+ibp_tth2l_b16_rank0003,Automatic,1,ok,3081.552,323,2,1,0,0,2305843009213693967:320;2305843009213693973:3,Symbolica_default,cached_powers_Q,270,28,3.383,BalancedZippelSeparated
+ibp_tth2l_b16_rank0004,FireFly_scan,1,ok,51680.976,1387,2,,,,9223372036854775643:61;9223372036854775783:1326,FireFly_default,cached_powers_Q,224,28,,
+ibp_tth2l_b16_rank0004,Automatic,1,ok,2834.151,327,2,1,0,0,2305843009213693967:324;2305843009213693973:3,Symbolica_default,cached_powers_Q,224,28,2.851,BalancedZippelSeparated

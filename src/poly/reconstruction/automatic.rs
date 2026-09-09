@@ -58,6 +58,54 @@ where
             p[last] = t;
             p
         })?;
+        // Search only in higher dimensions when the current denominator slice
+        // is dense and does not already expose a nonconstant separated factor.
+        // Sparse, high-degree slices are expensive to survey and favor the
+        // existing sparse-row path. The heuristic uses no variable names.
+        let lowest = (&slice.denominator)
+            .into_iter()
+            .map(|m| m.exponents[last])
+            .min()
+            .unwrap_or(0);
+        let span = usize::from(slice.denominator.degree(last) - lowest) + 1;
+        if nv > 4
+            && self.swapped_variable.is_none()
+            && 2 * slice.denominator.nterms() > span
+            && (slice.denominator.degree(last) == 0 || slice.denominator != other.denominator)
+            && (slice.numerator != other.numerator || slice.denominator != other.denominator)
+        {
+            let known = value(&slice, &anchor);
+            let other_known = value(&other, &other_anchor);
+            for variable in 0..last {
+                let row = self.thiele_seeded(
+                    variable,
+                    |t| {
+                        let mut point = anchor.clone();
+                        point[variable] = t;
+                        point
+                    },
+                    known.map(|v| (anchor[variable], v)),
+                )?;
+                // A pure monomial is already inexpensive to remove in any
+                // position; reserve reordering for nonmonomial factors.
+                if row.denominator.nterms() < 2 {
+                    continue;
+                }
+                let second = self.thiele_seeded(
+                    variable,
+                    |t| {
+                        let mut point = other_anchor.clone();
+                        point[variable] = t;
+                        point
+                    },
+                    other_known.map(|v| (other_anchor[variable], v)),
+                )?;
+                if row.denominator == second.denominator {
+                    self.swapped_variable = Some(variable);
+                    return self.select_method();
+                }
+            }
+        }
         // Monic denominators agree when the last-variable factor separates.
         // This is only a hypothesis; ordinary final validation and fallback
         // remain responsible for accepting the reconstructed function.

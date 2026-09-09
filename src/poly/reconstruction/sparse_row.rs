@@ -104,7 +104,7 @@ where
             let t = self.random();
             let mut p = point.to_vec();
             p[variable] = t;
-            if seen.contains(&t) || self.cache.contains_key(&p) {
+            if seen.contains(&t) || self.has_cached_probe(&p) {
                 continue;
             }
             seen.insert(t);

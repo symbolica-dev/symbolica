@@ -1,0 +1,5 @@
+case,method,seed,status,elapsed_us,probes,primes,images,support_reuses,support_fallbacks,probes_by_prime,prime_policy,oracle,num_terms,den_terms,setup_ms,selected_methods
+ibp_tth2l_b16_rank0001,Rare_scaling,1,ok,49818820.951,76627,2,,,,1152921504606846883:76625;1152921504606846869:2,Rare_native_60,cached_powers_Q,1102,35,,
+ibp_tth2l_b16_rank0002,Rare_scaling,1,ok,121781.662,3582,2,,,,1152921504606846883:3580;1152921504606846869:2,Rare_native_60,cached_powers_Q,108,9,,
+ibp_tth2l_b16_rank0003,Rare_scaling,1,ok,603789.346,8178,2,,,,1152921504606846883:8176;1152921504606846869:2,Rare_native_60,cached_powers_Q,270,28,,
+ibp_tth2l_b16_rank0004,Rare_scaling,1,ok,397520.838,6569,2,,,,1152921504606846883:6567;1152921504606846869:2,Rare_native_60,cached_powers_Q,224,28,,

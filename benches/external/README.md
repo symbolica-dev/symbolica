@@ -1,5 +1,60 @@
 # FireFly, Smirnov–Zeng and scaling implementation comparison
 
+The [variable-order and trace-oracle update](../reconstruction-ordering-traces.md)
+adds a seven-variable pentabubble and a three-loop diamond family. Prepare
+them with the existing Kira/Ratracer build:
+
+```sh
+python3 benches/external/prepare_ibp_benchmark.py diamond3l \
+  'basis[1,1,1,1,1,1,1,1,-2]'
+python3 benches/external/prepare_ibp_benchmark.py tth2l_b16 \
+  'basis[2,1,1,1,1,1,0,0,0,0,0]'
+python3 benches/external/validate_ibp_benchmark.py diamond3l
+python3 benches/external/validate_ibp_benchmark.py tth2l_b16
+bash benches/external/build_rare.sh
+python3 benches/external/check_rare_adapter.py
+```
+
+The rare adapter now supports one to eight variables with the same pinned
+upstream implementation and prime policy. Larger inputs receive an explicit
+`unsupported_variable_count` status in the shared runner.
+
+To evaluate the original arithmetic trace during reconstruction, build the
+shared interpreter and the updated FireFly driver, then validate the ABI:
+
+```sh
+bash benches/external/build_trace_oracle.sh
+bash benches/external/build_stress.sh
+python3 benches/external/check_trace_oracle.py tth2l_b16
+python3 benches/external/check_trace_oracle.py xbox2l2m
+python3 benches/external/check_trace_driver.py
+export BENCH_INPUT_DIR="$PWD/target/reconstruction-external/ibp-inputs/tth2l_b16"
+export TRACE_ORACLE_DIR="$BENCH_INPUT_DIR"
+export TRACE_ORACLE_LIBRARY="$PWD/target/reconstruction-external/libtrace-oracle.so"
+mapfile -t cases < "$BENCH_INPUT_DIR/suite-cases.txt"
+BENCH_METHODS=Automatic,FireFly_scan,FireFly_default RECONSTRUCTION_REPEATS=3 \
+  python3 benches/external/run_q_stress.py target/reconstruction-external/trace-b16.csv "${cases[@]}"
+```
+
+The Symbolica example needs its default `native_code_generation` feature for
+the dynamic library binding. Preparation creates a `CASE.trace` link to each
+optimized single-output trace. Re-run preparation if an older input directory
+does not contain those links. The checker compares the interpreter with the
+expanded input over four moduli, tests intermediate poles, verifies variable
+order and counts, and rejects unsupported 64-bit moduli. The runner applies
+the external loader to the Rust process too when needed; the Python ABI checker
+reexecutes itself under that loader when configured.
+
+`TRACE_ORACLE_PATH` selects a single trace for direct driver invocations.
+Unset both trace-selection variables to restore the expanded-polynomial oracle.
+The trace backend currently supports Symbolica and FireFly. FIRE7's native
+64-bit primes exceed Ratracer's range, and the rare adapter has no trace binding;
+the runner records `unsupported_trace_backend` for those combinations. Their
+ordinary expanded-oracle comparisons remain available. Trace loading and exact
+result checking are outside the timed reconstruction. FireFly reports
+`trace_pole` or `trace_error` with attempted counts if its callback cannot return
+a value, rather than substituting a fabricated value.
+
 The [independent IBP family comparison](../reconstruction-independent-ibp.md)
 generates coefficients from the public Ratracer benchmark configurations using
 Kira equation export and Ratracer elimination. Build the pinned tools with
@@ -57,7 +112,7 @@ runner accepts `Rare_scaling` in `BENCH_METHODS`, including alongside
 `Automatic,FireFly_default,FireFly_scan,FIRE7_Q_learned`.
 
 `rare` uses its native 60-bit primes, one extra confirmation point, and a seeded
-version of the authors' scaling driver. The adapter supports one to four
+version of the authors' scaling driver. The adapter supports one to eight
 variables and at most sixteen primes; `MAX_PRIMES`, `MAX_TOTAL_PROBES` and
 `BENCH_TIMEOUT` set its limits. `PROCESS_TIMEOUT` limits the entire process.
 Only an independently verified exact Q identity reports `ok`; failed and
