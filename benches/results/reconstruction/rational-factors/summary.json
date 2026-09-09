@@ -1,0 +1,34 @@
+{
+  "baseline": "5221207f",
+  "unchanged_regression_runs": 4325,
+  "successful_recorded_runs": 4393,
+  "median_seconds": {
+    "rational-factor-joint-b25:FireFly_joint_scan": 139.86085796900002,
+    "rational-factor-joint-b25:Symbolica_joint_cache": 109.20166092800001,
+    "joint-b25:FireFly_joint_default": 182.630788805,
+    "joint-b25:FireFly_joint_scan": 124.212543603,
+    "joint-b25:Symbolica_joint_cache": 190.117703514,
+    "joint-xbox:FireFly_joint_default": 403.224894801,
+    "joint-xbox:FireFly_joint_scan": 114.055070728,
+    "joint-xbox:Symbolica_joint_cache": 204.693952123
+  },
+  "tests": 49,
+  "scalar_b25_probes": [
+    14242,
+    6027,
+    1727,
+    1778
+  ],
+  "selected_joint_b25_probes": 14694,
+  "full_joint_b25_probes": 18491,
+  "full_joint_b25_reference_probes": 16107,
+  "remaining": [
+    "Improve initial interpolation sharing for the nonplanar family and full 147-output b25 target."
+  ],
+  "notes": [
+    "Main repeated measurements precede the arithmetic-only no-factor shortcut and the added joint prime histogram; follow-up runs verify unchanged probes.",
+    "rational-factor-tests.log is the development run with the shorter performance control; both later 49-test runs pass.",
+    "The full target archive retains the joint trace; individual optimized traces can be regenerated from the pinned preparation.",
+    "All full output sets in this checkpoint belong to one integral, not a complete IBP reduction table."
+  ]
+}

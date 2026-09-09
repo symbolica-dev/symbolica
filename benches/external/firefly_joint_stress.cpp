@@ -6,12 +6,25 @@
 #include <fstream>
 #include <iomanip>
 #include <memory>
+#include <map>
+#include <sstream>
 using Clock = std::chrono::steady_clock;
 struct State {
     uint64_t probes=0, cap=2000000;
     double timeout=570;
     Clock::time_point start;
     std::string seed, method;
+    std::map<uint64_t,uint64_t> distribution;
+    std::string prime_counts() const {
+        std::ostringstream text;
+        bool first=true;
+        for(auto [prime,calls] : distribution) {
+            if(!first) text << ';';
+            first=false;
+            text << prime << ':' << calls;
+        }
+        return text.str();
+    }
 };
 struct JointBox : firefly::BlackBoxBase<JointBox> {
     std::shared_ptr<TraceOracle> trace;
@@ -20,7 +33,7 @@ struct JointBox : firefly::BlackBoxBase<JointBox> {
     [[noreturn]] void stop(const char* status) const {
         if (trace->calls()!=state->probes) std::abort();
         double elapsed=std::chrono::duration<double,std::micro>(Clock::now()-state->start).count();
-        std::cout << "method,seed,status,elapsed_us,probes,outputs,completed\n" << state->method << ',' << state->seed << ',' << status << ',' << std::fixed << std::setprecision(3) << elapsed << ',' << state->probes << ',' << trace->output_count << ",0" << std::endl;
+        std::cout << "method,seed,status,elapsed_us,probes,outputs,completed,probes_by_prime\n" << state->method << ',' << state->seed << ',' << status << ',' << std::fixed << std::setprecision(3) << elapsed << ',' << state->probes << ',' << trace->output_count << ",0," << state->prime_counts() << std::endl;
         // FireFly invokes the callback on a worker. Exceptions cannot safely
         // propagate through that worker, so flush the failure record here.
         std::_Exit(0);
@@ -31,6 +44,7 @@ struct JointBox : firefly::BlackBoxBase<JointBox> {
         std::vector<uint64_t> point;
         for (const auto& v : x) point.push_back(v.n);
         ++state->probes;
+        ++state->distribution[firefly::FFInt::p];
         std::vector<uint64_t> raw;
         try { raw=trace->evaluate_many(firefly::FFInt::p,point); }
         catch(const std::domain_error&) { stop("trace_pole"); }
@@ -87,5 +101,5 @@ int main(int argc, char** argv) {
     double elapsed=std::chrono::duration<double,std::micro>(Clock::now()-state->start).count();
     if(trace->calls()!=state->probes) throw std::runtime_error("trace probe accounting mismatch");
     if(status=="ok") for(size_t i=0;i<result.size();++i) check_q_identity(*inputs[i],result[i].to_string(inputs[i]->names));
-    std::cout << "method,seed,status,elapsed_us,probes,outputs,completed\nFireFly_joint_" << argv[4] << ',' << argv[3] << ',' << status << ',' << std::fixed << std::setprecision(3) << elapsed << ',' << state->probes << ',' << cases.size() << ',' << result.size() << std::endl;
+    std::cout << "method,seed,status,elapsed_us,probes,outputs,completed,probes_by_prime\nFireFly_joint_" << argv[4] << ',' << argv[3] << ',' << status << ',' << std::fixed << std::setprecision(3) << elapsed << ',' << state->probes << ',' << cases.size() << ',' << result.size() << ',' << state->prime_counts() << std::endl;
 }

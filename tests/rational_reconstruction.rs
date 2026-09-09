@@ -1953,3 +1953,139 @@ fn reordered_coordinates_remain_consistent_across_prime_images() {
     assert!(stats.support_reuses > 0);
     assert_eq!(stats.selected_methods[0], BalancedZippelSeparated);
 }
+
+#[test]
+fn rational_factor_reuse_reduces_high_height_lifting_and_restores_the_function() {
+    use symbolica::domains::finite_field::ToFiniteField;
+    use symbolica::poly::reconstruction::reconstruct_rational_function_over_q;
+    let vars = Arc::new(vec![symbol!("x").into(), symbol!("d").into()]);
+    let n: MultivariatePolynomial<_, u16> =
+        parse!("(d-2)^4*((10^220+37)*x^8+(10^220+38)*x^7+(10^220+40)*x^4+(10^220+44)*x+19)")
+            .to_polynomial(&Z, vars.clone());
+    let d: MultivariatePolynomial<_, u16> =
+        parse!("(2*d-3)^4*(x^3+5*x+7)").to_polynomial(&Z, vars.clone());
+    for seed in [3, 19] {
+        let mut costs = Vec::new();
+        for reuse in [false, true] {
+            let mut calls = 0;
+            let (result, stats) = reconstruct_rational_function_over_q(
+                vars.clone(),
+                |field, point| {
+                    calls += 1;
+                    let nv = n
+                        .map_coeff(|c| c.to_finite_field(field), field.clone())
+                        .replace_all(point);
+                    let dv = d
+                        .map_coeff(|c| c.to_finite_field(field), field.clone())
+                        .replace_all(point);
+                    (!field.is_zero(&dv)).then(|| field.div(&nv, &dv))
+                },
+                Automatic,
+                &ReconstructionOptions {
+                    seed,
+                    max_degree: 32,
+                    reuse_rational_factors: reuse,
+                    ..Default::default()
+                },
+                32,
+            )
+            .unwrap();
+            assert_eq!(&result.numerator * &d, &result.denominator * &n);
+            assert_eq!(stats.probes, calls);
+            assert_eq!(stats.factor_reductions, usize::from(reuse));
+            assert!(stats.successful_images > 4);
+            costs.push(calls);
+        }
+        assert!(costs[1] * 4 < costs[0] * 3, "factor reuse costs {costs:?}");
+    }
+}
+
+#[test]
+fn a_factor_appearing_only_at_the_discovery_prime_is_rejected() {
+    use symbolica::domains::finite_field::{PrimeIteratorU64, ToFiniteField};
+    use symbolica::poly::reconstruction::reconstruct_rational_function_over_q;
+    let unlucky = PrimeIteratorU64::new(1 << 61).nth(2).unwrap();
+    let vars = Arc::new(vec![symbol!("x").into(), symbol!("d").into()]);
+    let source = format!(
+        "(d-2)^4*((10^110+37)*x^8+(10^110+38)*x^7+(10^110+40)*x^4+(10^110+44)*x+19)+{unlucky}*d*x"
+    );
+    let n: MultivariatePolynomial<_, u16> = parse!(source).to_polynomial(&Z, vars.clone());
+    let d: MultivariatePolynomial<_, u16> = parse!("(x+d+3)^4+1").to_polynomial(&Z, vars.clone());
+    let (result, stats) = reconstruct_rational_function_over_q(
+        vars,
+        |field, point| {
+            let nv = n
+                .map_coeff(|c| c.to_finite_field(field), field.clone())
+                .replace_all(point);
+            let dv = d
+                .map_coeff(|c| c.to_finite_field(field), field.clone())
+                .replace_all(point);
+            (!field.is_zero(&dv)).then(|| field.div(&nv, &dv))
+        },
+        Automatic,
+        &ReconstructionOptions {
+            seed: 3,
+            max_degree: 32,
+            ..Default::default()
+        },
+        32,
+    )
+    .unwrap();
+    assert_eq!(stats.factor_hypotheses, 1);
+    assert_eq!(stats.factor_reductions, 0);
+    assert_eq!(&result.numerator * &d, &result.denominator * &n);
+}
+
+#[test]
+fn coefficient_lifting_shares_line_prefixes_between_different_outputs() {
+    use symbolica::domains::finite_field::{FiniteFieldCore, ToFiniteField};
+    use symbolica::poly::reconstruction::reconstruct_rational_function_over_q;
+    let vars = Arc::new(vec![symbol!("x").into(), symbol!("d").into()]);
+    let n: [MultivariatePolynomial<_, u16>; 2] = [
+        parse!("(10^110+37)*(x+d+3)^3+1").to_polynomial(&Z, vars.clone()),
+        parse!("(10^110+41)*(x+2*d+5)^5+1").to_polynomial(&Z, vars.clone()),
+    ];
+    let d: MultivariatePolynomial<_, u16> = parse!("(x+d+7)^2").to_polynomial(&Z, vars.clone());
+    let mut cache = std::collections::HashMap::new();
+    let mut requests = [0; 2];
+    for output in 0..2 {
+        let (result, stats) = reconstruct_rational_function_over_q(
+            vars.clone(),
+            |field, point| {
+                requests[output] += 1;
+                let values = cache
+                    .entry((field.get_prime(), point.to_vec()))
+                    .or_insert_with(|| {
+                        let denominator = d
+                            .map_coeff(|c| c.to_finite_field(field), field.clone())
+                            .replace_all(point);
+                        n.each_ref().map(|numerator| {
+                            (!field.is_zero(&denominator)).then(|| {
+                                let numerator = numerator
+                                    .map_coeff(|c| c.to_finite_field(field), field.clone())
+                                    .replace_all(point);
+                                field.div(&numerator, &denominator)
+                            })
+                        })
+                    });
+                values[output]
+            },
+            Automatic,
+            &ReconstructionOptions {
+                seed: 3,
+                max_degree: 32,
+                ..Default::default()
+            },
+            32,
+        )
+        .unwrap();
+        assert_eq!(&result.numerator * &d, &result.denominator * &n[output]);
+        assert_eq!(stats.probes, requests[output]);
+        assert!(stats.support_reuses >= 3);
+    }
+    let hits = requests.iter().sum::<usize>() - cache.len();
+    assert!(
+        hits > requests[0] / 2,
+        "requests={requests:?}, cache hits={hits}"
+    );
+}

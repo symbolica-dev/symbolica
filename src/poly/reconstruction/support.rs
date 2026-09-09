@@ -120,8 +120,16 @@ where
                     homogeneous_line(&known[0], &direction),
                     homogeneous_line(&known[1], &direction),
                 ];
-                let line =
-                    ctx.line_solve(&shift, &direction, &powers[0], &powers[1], Some(&fixed))?;
+                // A line's sample sequence must not depend on how many points
+                // previous lines required. Different outputs with the same
+                // seed can then share prefixes of their vector oracle probes.
+                let seed = ctx.options.seed
+                    ^ (i as u64).wrapping_mul(0x9e3779b97f4a7c15)
+                    ^ 0x6c696e6572657573;
+                let previous_rng = std::mem::replace(&mut ctx.rng, StdRng::seed_from_u64(seed));
+                let line = ctx.line_solve(&shift, &direction, &powers[0], &powers[1], Some(&fixed));
+                ctx.rng = previous_rng;
+                let line = line?;
                 if lines.is_empty() && check_first_line {
                     verify_line(ctx, &direction, &line)?;
                 }

@@ -26,6 +26,7 @@ use std::{
 mod automatic;
 mod factors;
 mod rational;
+mod rational_factors;
 mod sparse_row;
 mod support;
 pub use rational::{RationalReconstructionStats, reconstruct_rational_function_over_q};
@@ -77,6 +78,10 @@ pub struct ReconstructionOptions {
     /// Reuse learned support and coefficient hypotheses when lifting over Q.
     /// Reduces probes at additional interpolation cost; unused for one prime.
     pub reuse_coefficients: bool,
+    /// Retain confirmed small univariate factors when Q coefficient lifting
+    /// remains unresolved after several prime images. Requires coefficient
+    /// reuse; unused for a single finite-field reconstruction.
+    pub reuse_rational_factors: bool,
     /// Reuse univariate powers observed in an earlier balanced row when they
     /// are sparse enough to save probes, with fresh row checks and fallback.
     pub reuse_row_support: bool,
@@ -92,6 +97,7 @@ impl Default for ReconstructionOptions {
             seed: 0x7265636f6e737472,
             degree_race: false,
             reuse_coefficients: true,
+            reuse_rational_factors: true,
             reuse_row_support: true,
         }
     }

@@ -1,0 +1,2 @@
+family,method,seed,status,elapsed_us,probes,scalar_requests,cache_hits,outputs,completed,incremental_probes,probes_by_prime
+tth2l_b16_all,Symbolica_joint_cache,1,ok,931955.516,4222,5484,1262,32,32,67;67;31;98;57;40;57;34;31;25;0;64;13;21;33;38;36;20;43;216;351;249;178;322;73;59;49;327;54;302;1098;169,2305843009213693967:4219;2305843009213693973:3

@@ -1,0 +1,13 @@
+case,method,seed,status,elapsed_us,probes,primes,images,support_reuses,support_fallbacks,probes_by_prime,prime_policy,oracle,num_terms,den_terms,setup_ms,selected_methods,factor_reductions
+ibp_box2l_rank0001,Automatic,1,ok,3014.472,83,2,1,0,0,2305843009213693967:80;2305843009213693973:3,Symbolica_default,cached_powers_Q,38,8,0.569,BalancedZippel,0
+ibp_box2l_rank0001,Automatic,2,ok,1123.325,83,2,1,0,0,2305843009213693967:80;2305843009213693973:3,Symbolica_default,cached_powers_Q,38,8,0.505,BalancedZippel,0
+ibp_box2l_rank0001,Automatic,3,ok,1161.204,83,2,1,0,0,2305843009213693967:80;2305843009213693973:3,Symbolica_default,cached_powers_Q,38,8,0.477,BalancedZippel,0
+ibp_box2l_rank0002,Automatic,1,ok,5134.570,472,2,1,0,0,2305843009213693967:469;2305843009213693973:3,Symbolica_default,cached_powers_Q,257,111,2.944,BalancedZippel,0
+ibp_box2l_rank0002,Automatic,2,ok,5888.343,472,2,1,0,0,2305843009213693967:469;2305843009213693973:3,Symbolica_default,cached_powers_Q,257,111,2.893,BalancedZippel,0
+ibp_box2l_rank0002,Automatic,3,ok,5912.013,472,2,1,0,0,2305843009213693967:469;2305843009213693973:3,Symbolica_default,cached_powers_Q,257,111,3.217,BalancedZippel,0
+ibp_box2l_rank0003,Automatic,1,ok,3776.815,323,2,1,0,0,2305843009213693967:320;2305843009213693973:3,Symbolica_default,cached_powers_Q,153,60,1.986,BalancedZippel,0
+ibp_box2l_rank0003,Automatic,2,ok,3219.502,323,2,1,0,0,2305843009213693967:320;2305843009213693973:3,Symbolica_default,cached_powers_Q,153,60,2.240,BalancedZippel,0
+ibp_box2l_rank0003,Automatic,3,ok,3204.882,323,2,1,0,0,2305843009213693967:320;2305843009213693973:3,Symbolica_default,cached_powers_Q,153,60,2.120,BalancedZippel,0
+ibp_box2l_rank0004,Automatic,1,ok,2904.532,282,2,1,0,0,2305843009213693967:279;2305843009213693973:3,Symbolica_default,cached_powers_Q,165,60,1.927,BalancedZippel,0
+ibp_box2l_rank0004,Automatic,2,ok,3016.772,282,2,1,0,0,2305843009213693967:279;2305843009213693973:3,Symbolica_default,cached_powers_Q,165,60,1.616,BalancedZippel,0
+ibp_box2l_rank0004,Automatic,3,ok,2769.171,282,2,1,0,0,2305843009213693967:279;2305843009213693973:3,Symbolica_default,cached_powers_Q,165,60,1.871,BalancedZippel,0

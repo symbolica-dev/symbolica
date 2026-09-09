@@ -1,5 +1,26 @@
 # FireFly, Smirnov–Zeng and scaling implementation comparison
 
+The [factor-lifting update](../reconstruction-factor-lifting.md) retains small
+factors across prime images and aligns reused interpolation-line samples
+between outputs. The Q runner accepts `AutomaticNoFactorReuse` as an explicit
+control alongside `Automatic`; `factor_reductions` records confirmed transforms.
+It snapshots the Symbolica executable for each run. The joint runner snapshots
+both executables and its interpreter, preventing rebuilds from changing an
+ongoing comparison. `SYMBOLICA_JOINT_BINARY` and `FIREFLY_JOINT_BINARY` select
+alternate binaries; `probes_by_prime` records actual joint evaluations by field.
+
+The public eight-propagator target also has a complete 147-output preparation:
+
+```sh
+python3 benches/external/prepare_ibp_benchmark.py tth2l_b25 \
+  'basis[2,1,1,1,1,1,1,1,0,0,0]' --count 147 --label tth2l_b25_all
+python3 benches/external/validate_ibp_benchmark.py tth2l_b25_all
+python3 benches/external/check_joint_trace.py tth2l_b25_all
+MAX_PRIMES=114 JOINT_METHODS=Symbolica_joint_cache,FireFly_joint_scan \
+  python3 benches/external/run_joint_stress.py tth2l_b25_all \
+  target/reconstruction-external/joint-b25-all.csv
+```
+
 Joint-output measurements use the same trace interpreter for Symbolica and
 FireFly. Symbolica currently runs its scalar reconstructor for each output in
 trace order, caching the complete vector at every distinct prime/point pair.

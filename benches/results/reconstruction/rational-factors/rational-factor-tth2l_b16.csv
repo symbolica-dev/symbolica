@@ -1,0 +1,13 @@
+case,method,seed,status,elapsed_us,probes,primes,images,support_reuses,support_fallbacks,probes_by_prime,prime_policy,oracle,num_terms,den_terms,setup_ms,selected_methods,factor_reductions
+ibp_tth2l_b16_rank0001,Automatic,1,ok,39592.105,1136,2,1,0,0,2305843009213693967:1133;2305843009213693973:3,Symbolica_default,cached_powers_Q,1102,35,5.218,BalancedZippelSeparated,0
+ibp_tth2l_b16_rank0001,Automatic,2,ok,48248.429,1136,2,1,0,0,2305843009213693967:1133;2305843009213693973:3,Symbolica_default,cached_powers_Q,1102,35,6.274,BalancedZippelSeparated,0
+ibp_tth2l_b16_rank0001,Automatic,3,ok,50252.098,1136,2,1,0,0,2305843009213693967:1133;2305843009213693973:3,Symbolica_default,cached_powers_Q,1102,35,7.302,BalancedZippelSeparated,0
+ibp_tth2l_b16_rank0002,Automatic,1,ok,2113.879,212,2,1,0,0,2305843009213693967:209;2305843009213693973:3,Symbolica_default,cached_powers_Q,108,9,0.976,BalancedZippelSeparated,0
+ibp_tth2l_b16_rank0002,Automatic,2,ok,2271.029,212,2,1,0,0,2305843009213693967:209;2305843009213693973:3,Symbolica_default,cached_powers_Q,108,9,1.057,BalancedZippelSeparated,0
+ibp_tth2l_b16_rank0002,Automatic,3,ok,2460.260,212,2,1,0,0,2305843009213693967:209;2305843009213693973:3,Symbolica_default,cached_powers_Q,108,9,0.810,BalancedZippelSeparated,0
+ibp_tth2l_b16_rank0003,Automatic,1,ok,4323.487,378,2,1,0,0,2305843009213693967:375;2305843009213693973:3,Symbolica_default,cached_powers_Q,270,28,2.725,BalancedZippelSeparated,0
+ibp_tth2l_b16_rank0003,Automatic,2,ok,3964.555,378,2,1,0,0,2305843009213693967:375;2305843009213693973:3,Symbolica_default,cached_powers_Q,270,28,1.820,BalancedZippelSeparated,0
+ibp_tth2l_b16_rank0003,Automatic,3,ok,4024.886,378,2,1,0,0,2305843009213693967:375;2305843009213693973:3,Symbolica_default,cached_powers_Q,270,28,1.815,BalancedZippelSeparated,0
+ibp_tth2l_b16_rank0004,Automatic,1,ok,3660.065,380,2,1,0,0,2305843009213693967:377;2305843009213693973:3,Symbolica_default,cached_powers_Q,224,28,2.267,BalancedZippelSeparated,0
+ibp_tth2l_b16_rank0004,Automatic,2,ok,3385.064,380,2,1,0,0,2305843009213693967:377;2305843009213693973:3,Symbolica_default,cached_powers_Q,224,28,1.717,BalancedZippelSeparated,0
+ibp_tth2l_b16_rank0004,Automatic,3,ok,3505.524,380,2,1,0,0,2305843009213693967:377;2305843009213693973:3,Symbolica_default,cached_powers_Q,224,28,1.511,BalancedZippelSeparated,0
