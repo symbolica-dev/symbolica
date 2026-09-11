@@ -9,16 +9,17 @@ fn main() {
 
     let mut grid = DiscreteGrid::new(
         vec![
-            Some(Grid::Continuous(ContinuousGrid::new(
-                1, 10, 1000, None, false,
-            ))),
-            Some(Grid::Continuous(ContinuousGrid::new(
-                1, 10, 1000, None, false,
-            ))),
+            Some(Grid::Continuous(
+                ContinuousGrid::new(1, 10, 1000, None, false).unwrap(),
+            )),
+            Some(Grid::Continuous(
+                ContinuousGrid::new(1, 10, 1000, None, false).unwrap(),
+            )),
         ],
         0.01,
         false,
-    );
+    )
+    .unwrap();
 
     let mut rng = MonteCarloRng::new(0, 0);
 

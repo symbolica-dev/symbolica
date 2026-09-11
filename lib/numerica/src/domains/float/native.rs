@@ -10,6 +10,20 @@ use super::{Constructible, FixedPrecision, FloatLike, Real, RealLike, SingleFloa
 use crate::domains::{InternalOrdering, integer::Integer, rational::Rational};
 
 impl FloatLike for f64 {
+    fn nan(&self) -> Option<Self> {
+        Some(f64::NAN)
+    }
+
+    #[inline(always)]
+    fn real_cmp(&self, other: &Self) -> Option<std::cmp::Ordering> {
+        self.partial_cmp(other)
+    }
+
+    #[inline(always)]
+    fn needs_rescaling(&self) -> bool {
+        !self.is_normal()
+    }
+
     #[inline(always)]
     fn set_from(&mut self, other: &Self) {
         *self = *other;
@@ -151,6 +165,26 @@ impl Constructible for f64 {
 }
 
 impl Real for f64 {
+    #[inline(always)]
+    fn copy_sign(&self, sign: &Self) -> Self {
+        self.abs().copysign(*sign)
+    }
+
+    #[inline]
+    fn hypot(&self, other: &Self) -> Self {
+        let n = (*self) * (*self) + (*other) * (*other);
+        if n.is_normal() {
+            n.sqrt()
+        } else {
+            (*self).hypot(*other)
+        }
+    }
+
+    #[inline(always)]
+    fn log1p(&self) -> Self {
+        (*self).ln_1p()
+    }
+
     #[inline(always)]
     fn pi(&self) -> Self {
         std::f64::consts::PI
@@ -298,6 +332,20 @@ impl F64 {
 }
 
 impl FloatLike for F64 {
+    fn nan(&self) -> Option<Self> {
+        Some(F64(f64::NAN))
+    }
+
+    #[inline(always)]
+    fn real_cmp(&self, other: &Self) -> Option<std::cmp::Ordering> {
+        self.partial_cmp(other)
+    }
+
+    #[inline(always)]
+    fn needs_rescaling(&self) -> bool {
+        !self.0.is_normal()
+    }
+
     #[inline(always)]
     fn set_from(&mut self, other: &Self) {
         *self = *other;
@@ -572,6 +620,26 @@ impl Constructible for F64 {
 
 impl Real for F64 {
     #[inline(always)]
+    fn copy_sign(&self, sign: &Self) -> Self {
+        self.0.abs().copysign(sign.0).into()
+    }
+
+    #[inline]
+    fn hypot(&self, other: &Self) -> Self {
+        let n = self.0 * self.0 + other.0 * other.0;
+        if n.is_normal() {
+            n.sqrt().into()
+        } else {
+            self.0.hypot(other.0).into()
+        }
+    }
+
+    #[inline(always)]
+    fn log1p(&self) -> Self {
+        self.0.ln_1p().into()
+    }
+
+    #[inline(always)]
     fn pi(&self) -> Self {
         std::f64::consts::PI.into()
     }
@@ -716,7 +784,8 @@ impl PartialOrd for F64 {
 
 impl InternalOrdering for F64 {
     fn internal_cmp(&self, other: &Self) -> std::cmp::Ordering {
-        self.partial_cmp(other).unwrap_or(std::cmp::Ordering::Equal)
+        self.partial_cmp(other)
+            .unwrap_or_else(|| self.0.is_nan().cmp(&other.0.is_nan()))
     }
 }
 

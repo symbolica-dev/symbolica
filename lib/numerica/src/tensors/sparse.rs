@@ -377,10 +377,30 @@ impl<F: Ring> InternalOrdering for SparseMatrix<F> {
 }
 
 impl<F: Ring> SelfRing for SparseMatrix<F> {
+    /// Returns `true` iff the matrix is the identity matrix.
     fn is_one(&self) -> bool {
-        self.values.iter().enumerate().all(|(i, e)| {
-            i as u32 % self.ncols == i as u32 / self.ncols && self.field.is_one(e)
-                || self.field.is_zero(e)
+        if self.nrows != self.ncols {
+            return false;
+        }
+
+        (0..self.nrows as usize).all(|row| {
+            let mut found_diagonal_one = false;
+
+            for i in self.row_ptrs[row]..self.row_ptrs[row + 1] {
+                let value = &self.values[i];
+                if self.field.is_zero(value) {
+                    continue;
+                }
+
+                if self.col_idcs[i] != row as u32 || found_diagonal_one || !self.field.is_one(value)
+                {
+                    return false;
+                }
+
+                found_diagonal_one = true;
+            }
+
+            found_diagonal_one
         })
     }
 
@@ -424,6 +444,8 @@ impl<F: Ring> SparseMatrix<F> {
     /// * `row_ptrs` - indices where new rows start within `values`, including an after-end index
     /// * `col_idcs` - column indices corresponding to entries of `values`
     /// * `field` - the field of the matrix entries
+    ///
+    /// Panics on invalid CSR data. Use [`Self::try_from_csr`] to receive an error instead.
     pub fn from_csr(
         nrows: u32,
         ncols: u32,
@@ -432,16 +454,8 @@ impl<F: Ring> SparseMatrix<F> {
         col_idcs: Vec<u32>,
         field: F,
     ) -> SparseMatrix<F> {
-        assert!(values.len() == col_idcs.len());
-        assert!(row_ptrs.len() == ((nrows + 1) as usize));
-        SparseMatrix {
-            values,
-            row_ptrs,
-            col_idcs,
-            nrows,
-            ncols,
-            field,
-        }
+        Self::try_from_csr(nrows, ncols, values, row_ptrs, col_idcs, field)
+            .expect("Invalid CSR matrix")
     }
 
     /// Create a new sparse matrix over the ring/field `F` from explicit CSR data
@@ -453,6 +467,8 @@ impl<F: Ring> SparseMatrix<F> {
     /// * `row_ptrs` - indices where new rows start within `values`, including an after-end index
     /// * `col_idcs` - column indices corresponding to entries of `values`
     /// * `field` - the field of the matrix entries
+    ///
+    /// Panics on invalid CSR data, with the same validation as [`Self::from_csr`].
     pub fn from_csr_slices(
         nrows: u32,
         ncols: u32,
@@ -461,16 +477,54 @@ impl<F: Ring> SparseMatrix<F> {
         col_idcs: &[u32],
         field: F,
     ) -> SparseMatrix<F> {
-        assert!(values.len() == col_idcs.len());
-        assert!(row_ptrs.len() == ((nrows + 1) as usize));
-        SparseMatrix {
-            values: values.to_vec(),
-            row_ptrs: row_ptrs.to_vec(),
-            col_idcs: col_idcs.to_vec(),
+        Self::from_csr(
+            nrows,
+            ncols,
+            values.to_vec(),
+            row_ptrs.to_vec(),
+            col_idcs.to_vec(),
+            field,
+        )
+    }
+
+    /// Construct a sparse matrix from validated CSR data.
+    /// Rows must contain strictly increasing column indices; explicit zero values are allowed.
+    pub fn try_from_csr(
+        nrows: u32,
+        ncols: u32,
+        values: Vec<F::Element>,
+        row_ptrs: Vec<usize>,
+        col_idcs: Vec<u32>,
+        field: F,
+    ) -> Result<Self, String> {
+        if values.len() != col_idcs.len()
+            || (nrows as usize).checked_add(1) != Some(row_ptrs.len())
+            || row_ptrs.first() != Some(&0)
+            || row_ptrs.last() != Some(&values.len())
+        {
+            return Err("Invalid CSR array lengths or row endpoints".into());
+        }
+        for row in row_ptrs.windows(2) {
+            if row[0] > row[1] || row[1] > values.len() {
+                return Err("CSR row pointers must be monotone and within the values array".into());
+            }
+            let cols = &col_idcs[row[0]..row[1]];
+            if cols.iter().any(|&col| col >= ncols)
+                || cols.windows(2).any(|pair| pair[0] >= pair[1])
+            {
+                return Err(
+                    "CSR columns must be in bounds and strictly increasing within each row".into(),
+                );
+            }
+        }
+        Ok(Self {
+            values,
+            row_ptrs,
+            col_idcs,
             nrows,
             ncols,
             field,
-        }
+        })
     }
 
     /// Create a sparse matrix from ordered triplets of (row, column, entry)
@@ -478,7 +532,8 @@ impl<F: Ring> SparseMatrix<F> {
     /// # Arguments
     /// * `nrows` - number of rows
     /// * `ncols` - number of columns
-    /// * `triplets` - ordered(!) triplets of (row, column, entry). Row and column indices are 0-indexed
+    /// * `triplets` - strictly ordered triplets of (row, column, entry), without duplicates.
+    ///   Row and column indices are 0-indexed and must be in bounds.
     /// * `field` - the ring/field of the matrix entries
     ///
     /// # Example
@@ -498,7 +553,18 @@ impl<F: Ring> SparseMatrix<F> {
         triplets: Vec<(u32, u32, F::Element)>,
         field: F,
     ) -> SparseMatrix<F> {
-        debug_assert!(triplets.is_sorted_by_key(|&(row, col, _)| (row, col)));
+        assert!(
+            triplets
+                .iter()
+                .all(|(row, col, _)| *row < nrows && *col < ncols),
+            "Sparse matrix index out of bounds"
+        );
+        assert!(
+            triplets
+                .windows(2)
+                .all(|pair| (pair[0].0, pair[0].1) < (pair[1].0, pair[1].1)),
+            "Sparse matrix triplets must be strictly ordered without duplicates"
+        );
         let mut ret = SparseMatrix {
             values: Vec::with_capacity(triplets.len()),
             row_ptrs: Vec::with_capacity((nrows + 1) as usize),
@@ -796,7 +862,7 @@ impl<F: Ring> SparseMatrix<F> {
     /// Extract the last column of the matrix, sorted by the corresponding pivot column.
     ///
     /// # Arguments
-    /// * `pivots` - The pivot positions for each column, i.e. there is a pivot on column `j` and `row pivots[j]`.
+    /// * `pivots` - The pivot positions for each column, i.e. there is a pivot on column `j` and row `pivots[j]`.
     pub fn last_column_by_pivot(self, pivots: &Vec<Option<u32>>) -> SparseVector<F> {
         let mut values = self.values;
         let mut ret = SparseVector::new(self.nrows, self.field.clone());
@@ -1065,6 +1131,13 @@ impl<F: Field> SparseMatrix<F> {
         }
 
         let mut sparse_row_reducer = sparse_row_reducer.unwrap();
+
+        if sparse_row_reducer.pivots[..self.ncols as usize]
+            .iter()
+            .any(Option::is_none)
+        {
+            return Err(SparseMatrixError::Singular);
+        }
 
         sparse_row_reducer.back_substitute();
 
@@ -1502,7 +1575,7 @@ pub struct SparseRowReducer<F: Field> {
     l: SparseMatrix<F>,
 
     /// The pivot positions of U for each column.
-    /// I.e. there is a pivot on column j and row pivots[j]. No pivot present if None.
+    /// I.e. there is a pivot on column `j` and row `pivots[j]`. No pivot present if None.
     pivots: Vec<Option<u32>>,
 
     /// Whether to keep the L matrix, just record the pattern or don't record anything at all
@@ -1678,7 +1751,7 @@ impl<F: Field> SparseRowReducer<F> {
     /// Note that the correct pivots need to be provided too.
     /// # Arguments
     /// * `u` -- A sparse matrix in upper triangular form (up to row permutations).
-    /// * `pivots` -- The pivots of `u`: I.e. there is a pivot on column j and row pivots[j] or no pivot present if None.
+    /// * `pivots` -- The pivots of `u`: I.e. there is a pivot on column `j` and row `pivots[j]` or no pivot present if None.
     pub fn from_upper_triangular_matrix(u: SparseMatrix<F>, pivots: Vec<Option<u32>>) -> Self {
         Self {
             l: SparseMatrix::new(0, 0, u.field().clone()),
@@ -2577,11 +2650,11 @@ where
 
 #[cfg(test)]
 mod tests {
-    use crate::domains::{Set, rational::Q};
+    use crate::domains::{SelfRing, Set, rational::Q};
 
     use crate::tensors::{
         matrix::Matrix,
-        sparse::{LuLMode, SparseMatrix, SparseRowReducer, SparseVector},
+        sparse::{LuLMode, SparseMatrix, SparseMatrixError, SparseRowReducer, SparseVector},
     };
 
     #[test]
@@ -2606,6 +2679,19 @@ mod tests {
 
         let b = a.to_sparse().to_dense();
         assert_eq!(a, b);
+    }
+
+    #[test]
+    fn is_one_uses_the_sparse_coordinates_and_requires_a_square_matrix() {
+        assert!(SparseMatrix::identity(3, Q).is_one());
+        assert!(!SparseMatrix::new(3, 3, Q).is_one());
+
+        let wide = SparseMatrix::from_triplets(2, 3, vec![(0, 0, 1.into()), (1, 1, 1.into())], Q);
+        assert!(!wide.is_one());
+
+        let off_diagonal =
+            SparseMatrix::from_triplets(2, 2, vec![(0, 0, 1.into()), (1, 0, 1.into())], Q);
+        assert!(!off_diagonal.is_one());
     }
 
     #[test]
@@ -2852,6 +2938,13 @@ mod tests {
         let inv = mat.inv().unwrap();
 
         assert_eq!(&mat * &inv, SparseMatrix::identity(5, Q));
+    }
+
+    #[test]
+    fn sparse_inv_rejects_a_singular_matrix() {
+        let mat = SparseMatrix::from_triplets(2, 2, vec![(0, 0, 1.into())], Q);
+
+        assert!(matches!(mat.inv(), Err(SparseMatrixError::Singular)));
     }
 
     #[test]

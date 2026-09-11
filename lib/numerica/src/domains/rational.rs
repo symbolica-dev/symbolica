@@ -12,14 +12,18 @@ use crate::{
 };
 
 use super::{
-    EuclideanDomain, Field, InternalOrdering, Ring, SelfRing, UpgradeToField,
-    backend::float::{BackendRational, BackendRationalExt},
+    EuclideanDomain, Field, InternalOrdering, OrderedRing, Ring, SampleableRing, SelfRing,
+    UpgradeToField,
     finite_field::{
         FiniteField, FiniteFieldCore, FiniteFieldWorkspace, PrimeIteratorU64, ToFiniteField, Two,
         Z2, Zp,
     },
+    float::RealLike,
     integer::{Integer, IntegerRing, Z},
 };
+
+#[cfg(feature = "integer-gmp")]
+use super::integer::MultiPrecisionInteger;
 
 /// The field of rational numbers.
 pub type Q = FractionField<IntegerRing>;
@@ -94,6 +98,11 @@ impl<R: Ring> Display for FractionField<R> {
 }
 
 pub trait FractionNormalization: Ring {
+    /// Return optional algorithms and coefficient conversions for fractions over this ring.
+    fn fraction_kernels(&self) -> crate::kernels::RingKernels<'_, Fraction<Self>> {
+        crate::kernels::RingKernels::empty()
+    }
+
     /// Get the factor that normalizes the element `a`.
     /// - For a field, this is the inverse of `a`.
     /// - For the integers, this is the sign of `a`.
@@ -102,6 +111,15 @@ pub trait FractionNormalization: Ring {
 }
 
 impl FractionNormalization for Z {
+    fn fraction_kernels(&self) -> crate::kernels::RingKernels<'_, Fraction<Self>> {
+        crate::kernels::RingKernels::empty().with_rational_conversion(
+            crate::kernels::RationalCoefficientConversion {
+                to_rational: Clone::clone,
+                from_rational: |coefficient| coefficient,
+            },
+        )
+    }
+
     fn get_normalization_factor(&self, a: &Integer) -> Integer {
         if *a < 0 { (-1).into() } else { 1.into() }
     }
@@ -212,6 +230,10 @@ impl<R: EuclideanDomain + FractionNormalization> RingOps<<FractionField<R> as Se
     fn add(&self, a: Self::Element, b: Self::Element) -> Self::Element {
         let r = &self.ring;
 
+        if r.is_one(&a.denominator) && r.is_one(&b.denominator) {
+            return self.to_element_numerator(r.add(a.numerator, b.numerator));
+        }
+
         if a.denominator == b.denominator {
             let num = r.add(&a.numerator, &b.numerator);
             let g = r.gcd(&num, &a.denominator);
@@ -266,6 +288,9 @@ impl<R: EuclideanDomain + FractionNormalization> RingOps<<FractionField<R> as Se
 
     fn mul(&self, a: Self::Element, b: Self::Element) -> Self::Element {
         let r = &self.ring;
+        if r.is_one(&a.denominator) && r.is_one(&b.denominator) {
+            return self.to_element_numerator(r.mul(a.numerator, b.numerator));
+        }
         let gcd1 = r.gcd(&a.numerator, &b.denominator);
         let gcd2 = r.gcd(&a.denominator, &b.numerator);
 
@@ -314,11 +339,11 @@ impl<R: EuclideanDomain + FractionNormalization> RingOps<<FractionField<R> as Se
     }
 
     fn add_mul_assign(&self, a: &mut Self::Element, b: Self::Element, c: Self::Element) {
-        self.add_assign(a, &self.mul(b, c));
+        self.add_mul_assign(a, &b, &c);
     }
 
     fn sub_mul_assign(&self, a: &mut Self::Element, b: Self::Element, c: Self::Element) {
-        self.sub_assign(a, &self.mul(b, c));
+        self.sub_mul_assign(a, &b, &c);
     }
 
     fn neg(&self, a: Self::Element) -> Self::Element {
@@ -334,6 +359,10 @@ impl<R: EuclideanDomain + FractionNormalization> RingOps<&<FractionField<R> as S
 {
     fn add(&self, a: &Self::Element, b: &Self::Element) -> Self::Element {
         let r = &self.ring;
+
+        if r.is_one(&a.denominator) && r.is_one(&b.denominator) {
+            return self.to_element_numerator(r.add(&a.numerator, &b.numerator));
+        }
 
         if a.denominator == b.denominator {
             let num = r.add(&a.numerator, &b.numerator);
@@ -390,6 +419,9 @@ impl<R: EuclideanDomain + FractionNormalization> RingOps<&<FractionField<R> as S
 
     fn mul(&self, a: &Self::Element, b: &Self::Element) -> Self::Element {
         let r = &self.ring;
+        if r.is_one(&a.denominator) && r.is_one(&b.denominator) {
+            return self.to_element_numerator(r.mul(&a.numerator, &b.numerator));
+        }
         let gcd1 = r.gcd(&a.numerator, &b.denominator);
         let gcd2 = r.gcd(&a.denominator, &b.numerator);
 
@@ -425,11 +457,19 @@ impl<R: EuclideanDomain + FractionNormalization> RingOps<&<FractionField<R> as S
     }
 
     fn add_assign(&self, a: &mut Self::Element, b: &Self::Element) {
+        if self.ring.is_one(&a.denominator) && self.ring.is_one(&b.denominator) {
+            self.ring.add_assign(&mut a.numerator, &b.numerator);
+            return;
+        }
         // TODO: optimize
         *a = self.add(&*a, b);
     }
 
     fn sub_assign(&self, a: &mut Self::Element, b: &Self::Element) {
+        if self.ring.is_one(&a.denominator) && self.ring.is_one(&b.denominator) {
+            self.ring.sub_assign(&mut a.numerator, &b.numerator);
+            return;
+        }
         *a = self.sub(&*a, b);
     }
 
@@ -438,10 +478,26 @@ impl<R: EuclideanDomain + FractionNormalization> RingOps<&<FractionField<R> as S
     }
 
     fn add_mul_assign(&self, a: &mut Self::Element, b: &Self::Element, c: &Self::Element) {
+        if self.ring.is_one(&a.denominator)
+            && self.ring.is_one(&b.denominator)
+            && self.ring.is_one(&c.denominator)
+        {
+            self.ring
+                .add_mul_assign(&mut a.numerator, &b.numerator, &c.numerator);
+            return;
+        }
         self.add_assign(a, &self.mul(b, c));
     }
 
     fn sub_mul_assign(&self, a: &mut Self::Element, b: &Self::Element, c: &Self::Element) {
+        if self.ring.is_one(&a.denominator)
+            && self.ring.is_one(&b.denominator)
+            && self.ring.is_one(&c.denominator)
+        {
+            self.ring
+                .sub_mul_assign(&mut a.numerator, &b.numerator, &c.numerator);
+            return;
+        }
         self.sub_assign(a, &self.mul(b, c));
     }
 
@@ -454,6 +510,11 @@ impl<R: EuclideanDomain + FractionNormalization> RingOps<&<FractionField<R> as S
 }
 
 impl<R: EuclideanDomain + FractionNormalization> Ring for FractionField<R> {
+    #[inline]
+    fn kernels(&self) -> crate::kernels::RingKernels<'_, Self::Element> {
+        self.ring.fraction_kernels()
+    }
+
     fn zero(&self) -> Self::Element {
         Fraction {
             numerator: self.ring.zero(),
@@ -515,13 +576,6 @@ impl<R: EuclideanDomain + FractionNormalization> Ring for FractionField<R> {
         }
     }
 
-    fn sample(&self, rng: &mut impl rand::RngCore, range: (i64, i64)) -> Self::Element {
-        Fraction {
-            numerator: self.ring.sample(rng, range),
-            denominator: self.ring.one(),
-        }
-    }
-
     fn format<W: std::fmt::Write>(
         &self,
         element: &Self::Element,
@@ -576,6 +630,39 @@ impl<R: EuclideanDomain + FractionNormalization> Ring for FractionField<R> {
 
     fn has_independent_elements(&self) -> bool {
         self.ring.has_independent_elements()
+    }
+}
+
+impl<R> SampleableRing for FractionField<R>
+where
+    R: EuclideanDomain + FractionNormalization + SampleableRing,
+{
+    type SamplingPolicy = R::SamplingPolicy;
+
+    fn sample<G: rand::RngCore + ?Sized>(
+        &self,
+        rng: &mut G,
+        policy: &Self::SamplingPolicy,
+    ) -> Self::Element {
+        Fraction {
+            numerator: self.ring.sample(rng, policy),
+            denominator: self.ring.one(),
+        }
+    }
+}
+
+impl<R: EuclideanDomain + FractionNormalization + OrderedRing> OrderedRing for FractionField<R> {
+    fn cmp(&self, a: &Self::Element, b: &Self::Element) -> std::cmp::Ordering {
+        let left = self.ring.mul(a.numerator_ref(), b.denominator_ref());
+        let right = self.ring.mul(b.numerator_ref(), a.denominator_ref());
+        let ordering = self.ring.cmp(&left, &right);
+        let denominator = self.ring.mul(a.denominator_ref(), b.denominator_ref());
+
+        if self.ring.sign(&denominator).is_lt() {
+            ordering.reverse()
+        } else {
+            ordering
+        }
     }
 }
 
@@ -822,10 +909,36 @@ impl<T: Into<Integer>> From<(T, T)> for Rational {
     }
 }
 
-impl From<BackendRational> for Rational {
-    fn from(value: BackendRational) -> Self {
-        let (num, den) = value.into_integer_ratio();
-        Q.to_element(num.into(), den.into(), false)
+#[cfg(any(feature = "integer-gmp", feature = "float-mpfr"))]
+impl From<rug::Rational> for Rational {
+    fn from(value: rug::Rational) -> Self {
+        #[cfg(feature = "integer-gmp")]
+        {
+            let (num, den) = value.into_numer_denom();
+            return Q.to_element(
+                MultiPrecisionInteger::from_raw(num).into(),
+                MultiPrecisionInteger::from_raw(den).into(),
+                false,
+            );
+        }
+        #[cfg(feature = "integer-malachite")]
+        {
+            let value = value.to_string();
+            let (num, den) = value.split_once('/').unwrap_or((&value, "1"));
+            Q.to_element(num.parse().unwrap(), den.parse().unwrap(), false)
+        }
+    }
+}
+
+#[cfg(feature = "float-astro")]
+impl From<malachite_q::Rational> for Rational {
+    fn from(value: malachite_q::Rational) -> Self {
+        let value = value.to_string();
+        if let Some((num, den)) = value.split_once('/') {
+            Q.to_element(num.parse().unwrap(), den.parse().unwrap(), false)
+        } else {
+            Q.to_element(value.parse().unwrap(), Integer::one(), false)
+        }
     }
 }
 
@@ -925,16 +1038,21 @@ impl Rational {
     }
 
     pub fn to_f64(&self) -> f64 {
-        let numerator = self.numerator.to_string().parse::<f64>().unwrap();
-        let denominator = self.denominator.to_string().parse::<f64>().unwrap();
-        numerator / denominator
-    }
+        fn fixed_to_f64(value: &Integer) -> Option<f64> {
+            match value {
+                Integer::Single(value) => Some(*value as f64),
+                Integer::Double(value) => Some(value.get() as f64),
+                Integer::Large(_) => None,
+            }
+        }
 
-    pub fn to_multi_prec(self) -> BackendRational {
-        BackendRational::from_integer_ratio(
-            self.numerator.to_multi_prec(),
-            self.denominator.to_multi_prec(),
-        )
+        match (
+            fixed_to_f64(&self.numerator),
+            fixed_to_f64(&self.denominator),
+        ) {
+            (Some(numerator), Some(denominator)) => numerator / denominator,
+            _ => self.to_multi_prec_float(f64::MANTISSA_DIGITS).to_f64(),
+        }
     }
 
     /// Return a best approximation of the rational number where the denominator
@@ -1074,7 +1192,9 @@ impl Rational {
                 // set t to 2^20*ceil(log2(m))
                 let ceil_log2 = match &p {
                     Integer::Single(n) => u64::BITS as u64 - (*n as u64).leading_zeros() as u64,
-                    Integer::Double(n) => u128::BITS as u64 - (*n as u128).leading_zeros() as u64,
+                    Integer::Double(n) => {
+                        u128::BITS as u64 - (n.get() as u128).leading_zeros() as u64
+                    }
                     Integer::Large(n) => n.significant_bits().into(),
                 };
 
@@ -1096,14 +1216,17 @@ impl Rational {
         let (mut r, mut old_r) = (if v.is_negative() { v + p } else { v.clone() }, p.clone());
 
         while !r.is_zero() && old_r > acceptance_scale {
-            let q = &old_r / &r;
+            let (q, next_r) = old_r.quot_rem(&r);
             if q > acceptance_scale {
                 n = r.clone();
                 d = t.clone();
                 acceptance_scale = q.clone();
             }
-            (r, old_r) = (&old_r - &(&q * &r), r);
-            (t, old_t) = (&old_t - &(&q * &t), t);
+            (r, old_r) = (next_r, r);
+
+            let mut next_t = old_t;
+            Z.sub_mul_assign(&mut next_t, &q, &t);
+            (t, old_t) = (next_t, t);
         }
 
         if d.is_zero() || !Z.gcd(&n, &d).is_one() {
@@ -1375,9 +1498,9 @@ impl<'a> std::iter::Sum<&'a Self> for Rational {
 #[cfg(test)]
 mod test {
     use crate::domains::{
-        Field, Ring, RingOps,
+        Field, OrderedRing, RealEmbedding, Ring, RingOps,
         float::{Float, Real},
-        integer::Z,
+        integer::{Integer, Z},
         rational::{FractionField, Rational},
     };
 
@@ -1410,5 +1533,26 @@ mod test {
         let b = f.neg(f.nth(3.into()));
         let d = f.div(&f.add(&f.nth(100.into()), &b), &b);
         assert_eq!(d, f.to_element((-97).into(), 3.into(), false));
+    }
+
+    #[test]
+    fn ordered_fraction_comparison() {
+        let f = FractionField::new(Z);
+        let negative: Rational = (-1, 2).into();
+        let half: Rational = (1, 2).into();
+        let two_thirds: Rational = (2, 3).into();
+
+        assert_eq!(f.sign(&negative), std::cmp::Ordering::Less);
+        assert_eq!(f.sign(&Rational::zero()), std::cmp::Ordering::Equal);
+        assert_eq!(f.cmp(&half, &two_thirds), std::cmp::Ordering::Less);
+        assert_eq!(f.try_cmp(&half, &two_thirds), Ok(std::cmp::Ordering::Less));
+    }
+
+    #[test]
+    fn rational_to_f64_with_large_components() {
+        let scale = Integer::one() << 4096u32;
+        let rational = Rational::from_int_unchecked(&scale * 3, scale * 2);
+
+        assert_eq!(rational.to_f64(), 1.5);
     }
 }

@@ -13,6 +13,7 @@ mod complex;
 mod double;
 mod error;
 mod field;
+mod interval;
 mod multiprecision;
 mod native;
 #[cfg(feature = "python")]
@@ -21,16 +22,23 @@ mod rational;
 mod simd;
 
 #[cfg(test)]
+mod complex_tests;
+#[cfg(test)]
 mod tests;
 
+pub use super::backend::float::RoundingDirection;
 pub use complex::Complex;
 pub use double::DoubleFloat;
 pub use error::ErrorPropagatingFloat;
-pub use field::FloatField;
+pub use field::{FloatComparisonError, FloatField};
+pub use interval::{ComplexBall, RealBall};
 pub use multiprecision::Float;
 pub use native::F64;
 #[cfg(feature = "python")]
-pub use python::PythonMultiPrecisionFloat;
+pub use python::{
+    PythonComplexFloat, PythonFloat, PythonMultiPrecisionComplex, PythonMultiPrecisionFloat,
+    register_python_floats,
+};
 
 pub trait FloatLike:
     PartialEq
@@ -56,6 +64,20 @@ pub trait FloatLike:
     + MulAssign<Self>
     + DivAssign<Self>
 {
+    /// Compare ordered scalar values. Non-scalar types may return `None`.
+    #[inline]
+    fn real_cmp(&self, _other: &Self) -> Option<std::cmp::Ordering> {
+        None
+    }
+
+    /// Request scaled arithmetic for zero, subnormal or non-finite intermediates.
+    /// The default opts out of scalar range guards (for example for exact types
+    /// or types with multiple independently scaled components).
+    #[inline]
+    fn needs_rescaling(&self) -> bool {
+        false
+    }
+
     /// Set this value from another value. May reuse memory.
     fn set_from(&mut self, other: &Self);
 
@@ -63,6 +85,11 @@ pub trait FloatLike:
     fn mul_add(&self, a: &Self, b: &Self) -> Self;
     fn neg(&self) -> Self;
     fn zero(&self) -> Self;
+    /// Construct a NaN, preserving this value's precision and component shape.
+    /// Returns `None` for exact types, such as rationals, that cannot represent NaN.
+    fn nan(&self) -> Option<Self> {
+        None
+    }
     /// Create a zero that should only be used as a temporary value,
     /// as for some types it may have wrong precision information.
     fn new_zero() -> Self;
@@ -141,6 +168,48 @@ pub trait Real: FloatLike {
 
     fn conj(&self) -> Self;
     fn norm(&self) -> Self;
+    /// Magnitude of a pair, avoiding unnecessary overflow and underflow.
+    #[inline]
+    fn hypot(&self, other: &Self) -> Self {
+        let (mut a, mut b) = (self.norm(), other.norm());
+        match a.real_cmp(&b) {
+            Some(std::cmp::Ordering::Less) => std::mem::swap(&mut a, &mut b),
+            Some(_) => {}
+            None => return (self.clone() * self + other.clone() * other).sqrt(),
+        }
+        if b.is_fully_zero() {
+            return a;
+        }
+        let r = b / &a;
+        a * (r.one() + r.clone() * r).sqrt()
+    }
+
+    /// Absolute value with the sign of `sign`, including signed zero where supported.
+    #[inline]
+    fn copy_sign(&self, sign: &Self) -> Self {
+        if sign.real_cmp(&sign.zero()) == Some(std::cmp::Ordering::Less) {
+            -self.norm()
+        } else {
+            self.norm()
+        }
+    }
+
+    /// Compute log(1 + self), retaining small increments lost when adding one.
+    #[inline]
+    fn log1p(&self) -> Self {
+        if self.is_fully_zero() {
+            return self.clone();
+        }
+        if self.needs_rescaling() && self.real_cmp(&self.one()) == Some(std::cmp::Ordering::Greater)
+        {
+            return self.log();
+        }
+        // log(1+x) = 2 asinh(x / (2 sqrt(1+x))). This also avoids
+        // cancellation-induced precision loss in dynamically sized floats.
+        let two = self.from_usize(2);
+        (self.clone() / (self.one() + self).sqrt() / &two).asinh() * two
+    }
+
     fn sqrt(&self) -> Self;
     fn log(&self) -> Self;
     fn exp(&self) -> Self;
@@ -153,6 +222,22 @@ pub trait Real: FloatLike {
     fn sinh(&self) -> Self;
     fn cosh(&self) -> Self;
     fn tanh(&self) -> Self;
+    /// Reciprocal hyperbolic cosine, without overflowing an intermediate cosh.
+    #[inline]
+    fn sech(&self) -> Self {
+        // Split the exponential so that rounding exp(-|x|) to zero does not
+        // discard a representable subnormal value of 2 exp(-|x|).
+        let e = (-self.norm() / self.from_usize(2)).exp();
+        let e2 = e.clone() * &e;
+        (e.clone() + &e) * e / (e2.one() + e2.clone() * e2)
+    }
+
+    /// Reciprocal hyperbolic sine, retaining accuracy near zero and at infinity.
+    #[inline]
+    fn csch(&self) -> Self {
+        self.sech() / self.tanh()
+    }
+
     fn asinh(&self) -> Self;
     fn acosh(&self) -> Self;
     fn atanh(&self) -> Self;

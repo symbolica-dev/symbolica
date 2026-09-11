@@ -406,6 +406,13 @@ impl<T: FloatLike + PartialOrd> PartialOrd for ErrorPropagatingFloat<T> {
 }
 
 impl<T: RealLike> FloatLike for ErrorPropagatingFloat<T> {
+    fn nan(&self) -> Option<Self> {
+        Some(Self {
+            value: self.value.nan()?,
+            abs_err: f64::NAN,
+        })
+    }
+
     fn set_from(&mut self, other: &Self) {
         self.value.set_from(&other.value);
         self.abs_err = other.abs_err;
