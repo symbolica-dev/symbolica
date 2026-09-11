@@ -2538,7 +2538,7 @@ impl Pattern {
         atom.to_pattern()
     }
 
-    #[inline]
+    #[inline(always)]
     fn is_optional_wildcard(&self) -> bool {
         matches!(self, Pattern::Wildcard(_, true))
     }
@@ -3005,39 +3005,46 @@ impl Pattern {
                     && args.iter().all(Pattern::is_optional_wildcard)
             }
             (Pattern::Mul(_), AtomView::Mul(_)) => true,
-            (Pattern::Mul(args), _) => Self::optional_wildcards_can_match_single(args, target),
             (Pattern::Add(_), AtomView::Add(_)) => true,
-            (Pattern::Add(args), _) => Self::optional_wildcards_can_match_single(args, target),
-            (Pattern::Wildcard(w, _), x) => x.has_attributes_of(*w),
             (Pattern::Pow(_), AtomView::Pow(_)) => true,
-            (Pattern::Pow(args), _) => {
-                args[1].is_optional_wildcard() && args[0].could_match(target)
-            }
             (Pattern::Literal(p), _) => p.as_view() == target,
+            (Pattern::Wildcard(w, _), x) => x.has_attributes_of(*w),
+            (Pattern::Mul(args), _) => Self::optional_wildcards_can_match_single(args, target),
+            (Pattern::Add(args), _) => Self::optional_wildcards_can_match_single(args, target),
+            (Pattern::Pow(args), _) => {
+                args[1].is_optional_wildcard() && args[0].could_match_rec(target)
+            }
             (Pattern::Alternative(alternatives), _) => {
-                alternatives.iter().any(|p| p.could_match(target))
+                alternatives.iter().any(|p| p.could_match_rec(target))
             }
             (Pattern::Transformer(_), _) => panic!("Pattern is a transformer"),
             (_, _) => false,
         }
     }
 
+    #[cold]
+    #[inline(never)]
+    fn could_match_rec(&self, target: AtomView) -> bool {
+        self.could_match(target)
+    }
+
+    #[inline(always)]
     fn optional_wildcards_can_match_single(args: &[Pattern], target: AtomView) -> bool {
-        let mut required_matches = 0;
-
+        let mut non_optional = None;
         for arg in args {
-            if arg.is_optional_wildcard() {
-                continue;
+            if !arg.is_optional_wildcard() {
+                if non_optional.is_some() {
+                    return false;
+                }
+                non_optional = Some(arg);
             }
-
-            if !arg.could_match(target) {
-                return false;
-            }
-
-            required_matches += 1;
         }
 
-        required_matches == 1
+        if let Some(arg) = non_optional {
+            arg.could_match_rec(target)
+        } else {
+            true
+        }
     }
 
     /// Check if the expression `atom` contains a wildcard.
