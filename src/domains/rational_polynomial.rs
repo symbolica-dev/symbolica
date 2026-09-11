@@ -1769,7 +1769,7 @@ mod test {
         domains::{
             InternalOrdering, Ring, SelfRing,
             finite_field::{ToFiniteField, Zp},
-            integer::Z,
+            integer::{Integer, Z},
             rational::Q,
             rational_polynomial::RationalPolynomial,
         },
@@ -1778,7 +1778,32 @@ mod test {
         symbol,
     };
 
-    use super::RationalPolynomialField;
+    use super::{FromNumeratorAndDenominator, RationalPolynomialField};
+
+    #[test]
+    fn integer_content_is_removed_from_disjoint_variables() {
+        let variables = Arc::new(vec![
+            crate::poly::PolyVariable::Symbol(symbol!("content_x")),
+            crate::poly::PolyVariable::Symbol(symbol!("content_y")),
+        ]);
+        let numerator = parse!("21+63*content_x^2+21*content_x^20")
+            .to_polynomial::<_, u16>(&Z, Some(variables.clone()));
+        let denominator =
+            parse!("21+21*content_y").to_polynomial::<_, u16>(&Z, Some(variables.clone()));
+
+        assert_eq!(
+            numerator.gcd(&denominator),
+            numerator.constant(Integer::from(21))
+        );
+
+        let normalized = RationalPolynomial::from_num_den(numerator, denominator, &Z, true);
+        let expected: RationalPolynomial<_> = parse!(
+            "(1+3*content_x^2+content_x^20)/(1+content_y)"
+        )
+        .to_rational_polynomial(&Z, &Z, Some(variables));
+
+        assert_eq!(normalized, expected);
+    }
 
     #[test]
     fn eval_map() {

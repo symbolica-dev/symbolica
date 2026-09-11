@@ -20,7 +20,7 @@ use super::polybench_cases::{PolybenchFactorCase, PolybenchGcdCase, PolybenchGcd
 
 pub type IntegerPolynomial = MultivariatePolynomial<IntegerRing, u16>;
 pub type IntegerUnivariatePolynomial = UnivariatePolynomial<PolynomialRing<IntegerRing, u16>>;
-pub type PolybenchIntegerPolynomial = MultivariatePolynomial<IntegerRing, u8>;
+pub type PolybenchIntegerPolynomial = MultivariatePolynomial<IntegerRing, u16>;
 
 /// Namespace used to give benchmark variables stable symbol identities.
 pub const BENCHMARK_NAMESPACE: &str = "polynomial_benchmark";
@@ -58,8 +58,10 @@ pub fn parse_integer_polynomial(expression: &str) -> IntegerPolynomial {
         .to_polynomial(&Z, None)
 }
 
-/// Parses a polybench fixture with the exact variable order and `u8` exponent
-/// representation used by the upstream Symbolica adapter.
+/// Parses a polybench fixture with the exact variable order used by the
+/// upstream Symbolica adapter. Although the expanded inputs fit in `u8`,
+/// factorization can construct intermediate exponents of at least 256, so the
+/// benchmark uses `u16` throughout construction, validation, and timing.
 pub fn parse_polybench_integer_polynomial(
     expression: &str,
     variable_names: &[&str],
@@ -306,13 +308,20 @@ pub fn factorization_factors(case: FactorizationCase) -> [IntegerPolynomial; 2] 
     let variables: Arc<Vec<PolyVariable>> = Arc::new(
         case.variables
             .iter()
-            .map(|name| PolyVariable::Symbol(symbol!(name)))
+            .map(|name| PolyVariable::Symbol(symbol!(format!("{BENCHMARK_NAMESPACE}::{name}"))))
             .collect(),
     );
-    [
+    let factors = [
         powered_polynomial_with_variable_map(&Z, case.left, Some(variables.clone())),
         powered_polynomial_with_variable_map(&Z, case.right, Some(variables)),
-    ]
+    ];
+    assert!(
+        factors
+            .iter()
+            .all(|factor| factor.nvars() == case.variables.len()),
+        "generated factor inputs must use exactly their declared variables"
+    );
+    factors
 }
 
 /// Verifies that a generated factorization expands to its original polynomial.
@@ -443,10 +452,11 @@ pub fn resultant_inputs(
         parse_integer_polynomial(case.right),
     ];
     MultivariatePolynomial::unify_variables_list(&mut polynomials);
+    let elimination_variable = parse_integer_polynomial("x").variables()[0].clone();
     let variable = polynomials[0]
         .variables()
         .iter()
-        .position(|variable| variable == &PolyVariable::Symbol(symbol!("x")))
+        .position(|variable| variable == &elimination_variable)
         .expect("resultant cases must contain x");
     (
         polynomials[0].to_univariate(variable),
@@ -542,10 +552,13 @@ where
 pub fn gcd_case_config() -> GcdCaseConfig {
     static CONFIG: OnceLock<GcdCaseConfig> = OnceLock::new();
     *CONFIG.get_or_init(|| {
+        let degree = parse_env("GCD_BENCH_DEGREE", 7);
         let config = GcdCaseConfig {
             kind: parse_env("GCD_BENCH_CASE", GcdCaseKind::Dense),
             variable_count: parse_env("GCD_BENCH_NVARS", 7),
-            degree: parse_env("GCD_BENCH_DEGREE", 7),
+            left_cofactor_degree: degree,
+            right_cofactor_degree: degree,
+            common_factor_degree: degree,
             gap: parse_env("GCD_BENCH_GAP", 10),
             coefficient_bits: parse_env("GCD_BENCH_COEFFICIENT_BITS", 30),
         };
