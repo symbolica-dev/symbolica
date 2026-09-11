@@ -27,6 +27,7 @@ use crate::{
         rational_polynomial::{RationalPolynomial, RationalPolynomialField},
     },
     evaluate::{EvaluationDomain, FunctionMap, OptimizationSettings},
+    id::ConditionResult,
     poly::{
         GrevLexOrder, LexOrder, PolyVariable, PositiveExponent, groebner::GroebnerBasis,
         polynomial::MultivariatePolynomial,
@@ -144,6 +145,7 @@ fn algebraic_domain_membership(value: &Atom, domain: SolveDomain) -> DomainMembe
                 .field()
                 .element_to_atom_simplified(&element)
                 .is_integer()
+                .is_true()
             {
                 DomainMembership::Yes
             } else {
@@ -165,12 +167,17 @@ fn algebraic_domain_membership(value: &Atom, domain: SolveDomain) -> DomainMembe
 }
 
 pub(crate) fn value_in_domain(value: &Atom, domain: SolveDomain) -> DomainMembership {
-    match domain {
-        Complexes => DomainMembership::Yes,
-        Integers if value.is_integer() => DomainMembership::Yes,
-        Rationals if Rational::try_from(value.as_view()).is_ok() => DomainMembership::Yes,
-        Reals if value.is_real() => DomainMembership::Yes,
-        _ => algebraic_domain_membership(value, domain),
+    let membership = match domain {
+        Complexes => ConditionResult::True,
+        Integers => value.is_integer(),
+        Rationals if Rational::try_from(value.as_view()).is_ok() => ConditionResult::True,
+        Rationals => ConditionResult::Inconclusive,
+        Reals => value.is_real(),
+    };
+    match membership {
+        ConditionResult::True => DomainMembership::Yes,
+        ConditionResult::False => DomainMembership::No,
+        ConditionResult::Inconclusive => algebraic_domain_membership(value, domain),
     }
 }
 

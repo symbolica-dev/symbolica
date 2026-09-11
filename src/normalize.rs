@@ -969,7 +969,7 @@ impl AtomView<'_> {
                             }
                             return;
                         }
-                    } else if id.get_id() == Symbol::ABS_ID && arg.is_positive() {
+                    } else if id.get_id() == Symbol::ABS_ID && arg.is_nonnegative().is_true() {
                         let mut buffer = workspace.new_atom();
                         buffer.set_from_view(&arg);
                         out.set_from_view(&buffer.as_view());
@@ -1021,20 +1021,20 @@ impl AtomView<'_> {
                             }
                         }
                         AtomView::Pow(p) => {
-                            if arg.is_real() {
+                            if arg.is_real().is_true() {
                                 let mut inner = workspace.new_atom();
                                 inner.set_from_view(&arg);
                                 out.set_from_view(&inner.as_view());
                             } else {
                                 let (b, e) = p.get_base_exp();
-                                if e.is_integer() {
+                                if e.is_integer().is_true() {
                                     let mut new_base = workspace.new_atom();
                                     let nb = new_base.to_fun(Symbol::CONJ);
                                     nb.add_arg(b);
                                     let mut new_pow = workspace.new_atom();
                                     new_pow.to_pow(new_base.as_view(), e);
                                     new_pow.as_view().normalize(workspace, out);
-                                } else if b.is_positive() {
+                                } else if b.is_nonnegative().is_true() {
                                     let mut new_exp = workspace.new_atom();
                                     let ne = new_exp.to_fun(Symbol::CONJ);
                                     ne.add_arg(e);
@@ -1086,7 +1086,7 @@ impl AtomView<'_> {
                         let (b, e) = p.get_base_exp();
                         // TODO: support comparison with symbol?
                         if b == InlineVar::new(Symbol::E).as_view() {
-                            if e.is_real() {
+                            if e.is_real().is_true() {
                                 let mut buffer = workspace.new_atom();
                                 buffer.set_from_view(&e);
                                 out.set_from_view(&buffer.as_view());
@@ -1188,7 +1188,7 @@ impl AtomView<'_> {
                     // linearize products
                     if out_f.to_fun_view().iter().any(|a| {
                         if let AtomView::Mul(m) = a {
-                            m.has_coefficient() || m.iter().any(|a| a.is_scalar())
+                            m.has_coefficient() || m.iter().any(|a| a.is_scalar().is_true())
                         } else {
                             false
                         }
@@ -1206,7 +1206,7 @@ impl AtomView<'_> {
                                 for a in m {
                                     if let AtomView::Num(n) = a {
                                         coeff = coeff * n.get_coeff_view().to_owned();
-                                    } else if a.is_scalar() {
+                                    } else if a.is_scalar().is_true() {
                                         t.extend(a);
                                     } else {
                                         mul.extend(a);
@@ -1444,7 +1444,7 @@ impl AtomView<'_> {
                             exp_handle.to_num(new_exp_num);
                         } else if let AtomView::Pow(p_base) = base_handle.as_view() {
                             let exp_is_integer = exp_num.is_integer();
-                            if exp_is_integer || base_handle.is_positive() {
+                            if exp_is_integer || base_handle.is_nonnegative().is_true() {
                                 let (p_base_base, p_base_exp) = p_base.get_base_exp();
                                 let mut mul_h = workspace.new_atom();
                                 let mul = mul_h.to_mul();
@@ -1454,7 +1454,7 @@ impl AtomView<'_> {
                                 let mut exp_h = workspace.new_atom();
                                 mul.as_view().normalize(workspace, &mut exp_h);
 
-                                if exp_is_integer || p_base_base.is_positive() {
+                                if exp_is_integer || p_base_base.is_nonnegative().is_true() {
                                     mul_h.to_pow(p_base_base, exp_h.as_view());
                                 } else {
                                     // the base-base is real but not positive, so add abs
@@ -1492,7 +1492,7 @@ impl AtomView<'_> {
                             let s = f.get_symbol_id();
                             if s == Symbol::ABS_ID && f.get_nargs() == 1 {
                                 let abs_arg = f.iter().next().unwrap();
-                                if abs_arg.is_real() {
+                                if abs_arg.is_real().is_true() {
                                     let mut pow_h = workspace.new_atom();
                                     pow_h.to_pow(abs_arg, workspace.new_num(n).as_view());
                                     pow_h.as_view().normalize(workspace, out);
@@ -1502,7 +1502,7 @@ impl AtomView<'_> {
                             }
                         }
                     } else if let AtomView::Pow(p_base) = base_handle.as_view()
-                        && exp_handle.is_integer()
+                        && exp_handle.is_integer().is_true()
                     {
                         // rewrite (x^y)^z as x^(z*y) if z is integer
                         let (p_base_base, p_base_exp) = p_base.get_base_exp();

@@ -66,6 +66,16 @@ impl Atom {
 /// All core features of expressions, such as expansion and
 /// pattern matching that leave the expression unchanged.
 ///
+/// Mathematical property queries (`is_real`, `is_integer`, `is_scalar`,
+/// `is_positive`, and `is_nonnegative`) return [`ConditionResult`]. `True`
+/// establishes the property, `False` establishes its negation, and `Inconclusive`
+/// means neither is established under the current symbol assumptions. These
+/// inexpensive queries do not attempt exhaustive simplification. Properties
+/// concern values where the expression is defined, not absence of poles.
+///
+/// Use `.is_true()` when a transformation requires proof. Its negation means
+/// "not proven", whereas `.is_false()` means "proven false". Structural checks
+/// such as `is_zero`, `is_one`, `is_constant`, and `is_finite` remain Boolean.
 ///
 /// This trait is sealed, such that new methods can be added
 /// without breaking existing implementations.
@@ -1706,7 +1716,8 @@ pub trait AtomCore: private::Sealed + Sized {
         self.as_atom_view().contains(s.into().as_atom_view())
     }
 
-    /// Returns true iff `self` is scalar, i.e. contains only numbers and symbols with the `Scalar` attribute.
+    /// Test whether an expression is scalar under its symbol assumptions.
+    /// Missing attributes give `Inconclusive`, not `False`.
     ///
     /// # Example
     ///
@@ -1714,13 +1725,14 @@ pub trait AtomCore: private::Sealed + Sized {
     /// use symbolica::prelude::*;
     /// let _ = symbol!("x_scalar"; Scalar);
     /// let expr = parse!("3*2^x_scalar + (1+x_scalar)^2");
-    /// assert!(expr.is_scalar());
+    /// assert!(expr.is_scalar().is_true());
     /// ```
-    fn is_scalar(&self) -> bool {
+    fn is_scalar(&self) -> ConditionResult {
         self.as_atom_view().is_scalar()
     }
 
-    /// Returns true iff an expression is real. Symbols must have the `Real` attribute.
+    /// Test whether an expression is real under its symbol assumptions.
+    /// Returns `Inconclusive` when neither realness nor nonrealness is established.
     ///
     /// # Example
     ///
@@ -1728,27 +1740,30 @@ pub trait AtomCore: private::Sealed + Sized {
     /// use symbolica::prelude::*;
     /// let _ = symbol!("x_real"; Real);
     /// let expr = parse!("3*2^x_real + (1+x_real)^2 + (1/2)^x_real");
-    /// assert!(expr.is_real());
+    /// assert!(expr.is_real().is_true());
     /// ```
-    fn is_real(&self) -> bool {
+    fn is_real(&self) -> ConditionResult {
         self.as_atom_view().is_real()
     }
 
-    /// Returns true iff an expression only consists of integer numbers and symbols with the `Integer` attribute.
+    /// Test whether an expression is integer under its symbol assumptions.
+    /// Returns `Inconclusive` when neither membership nor nonmembership is established.
     ///
     /// # Example
     ///
     /// ```
     /// use symbolica::prelude::*;
     /// let _ = symbol!("x_integer"; Integer);
-    /// let expr = parse!("3*2^x_integer + (1+x_integer)^2");
-    /// assert!(expr.is_integer());
+    /// let expr = parse!("3*2^(x_integer^2) + (1+x_integer)^2");
+    /// assert!(expr.is_integer().is_true());
     /// ```
-    fn is_integer(&self) -> bool {
+    fn is_integer(&self) -> ConditionResult {
         self.as_atom_view().is_integer()
     }
 
-    /// Returns true iff an expression is positive. Symbols must have the `Positive` attribute.
+    /// Test whether an expression is strictly positive under its symbol assumptions.
+    /// Zero is `False`; a real square can be `Inconclusive` because it may vanish.
+    /// Use [`is_nonnegative`](AtomCore::is_nonnegative) for a weak inequality.
     ///
     /// # Example
     ///
@@ -1756,10 +1771,18 @@ pub trait AtomCore: private::Sealed + Sized {
     /// use symbolica::prelude::*;
     /// let _ = symbol!("x_p"; Positive);
     /// let expr = parse!("3*2^x_p + (1+x_p)^2 + (1/2)^x_p");
-    /// assert!(expr.is_positive());
+    /// assert!(expr.is_positive().is_true());
     /// ```
-    fn is_positive(&self) -> bool {
+    fn is_positive(&self) -> ConditionResult {
         self.as_atom_view().is_positive()
+    }
+
+    /// Test whether an expression is real and greater than or equal to zero.
+    /// Returns `Inconclusive` when its sign cannot be established.
+    /// Like the other mathematical property queries, this concerns values where
+    /// the expression is defined; it does not prove absence of poles.
+    fn is_nonnegative(&self) -> ConditionResult {
+        self.as_atom_view().is_nonnegative()
     }
 
     /// Returns true iff an expression has no explicit infinities and is not indeterminate.

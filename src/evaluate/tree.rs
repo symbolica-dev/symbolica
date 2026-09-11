@@ -4463,7 +4463,7 @@ impl<'a> AtomView<'a> {
         let mut rng = MonteCarloRng::new(0, 0);
 
         // TODO: actually check if the expression is real for any real input sample
-        if !self.is_real() {
+        if !self.is_real().is_true() {
             let mut vars: HashMap<_, _> = self
                 .get_all_indeterminates(true)
                 .into_iter()

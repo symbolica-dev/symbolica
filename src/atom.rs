@@ -41,6 +41,7 @@
 mod alias;
 mod coefficient;
 mod core;
+mod properties;
 pub mod representation;
 
 use ahash::{HashMap, HashSet};
@@ -1571,7 +1572,9 @@ impl Symbol {
         self.is_flat
     }
 
-    /// Check if the symbol is scalar.
+    /// Check whether the symbol carries the `Scalar` attribute.
+    /// `false` means the attribute is absent, not that nonscalarity is proven.
+    /// Use [`AtomCore::is_scalar`] to query an expression's mathematical property.
     ///
     /// # Examples
     ///
@@ -1585,7 +1588,9 @@ impl Symbol {
         self.is_scalar
     }
 
-    /// Check if the symbol is real.
+    /// Check whether the symbol carries the `Real` attribute.
+    /// `false` means the attribute is absent, not that nonrealness is proven.
+    /// Use [`AtomCore::is_real`] to query an expression's mathematical property.
     ///
     /// # Examples
     ///
@@ -1599,7 +1604,9 @@ impl Symbol {
         self.is_real
     }
 
-    /// Check if the symbol is integer.
+    /// Check whether the symbol carries the `Integer` attribute.
+    /// `false` means the attribute is absent, not that nonintegrality is proven.
+    /// Use [`AtomCore::is_integer`] to query an expression's mathematical property.
     ///
     /// # Examples
     ///
@@ -1613,7 +1620,9 @@ impl Symbol {
         self.is_integer
     }
 
-    /// Check if the symbol is positive.
+    /// Check whether the symbol carries the `Positive` attribute.
+    /// `false` means the attribute is absent, not that nonpositivity is proven.
+    /// Use [`AtomCore::is_positive`] to query an expression's mathematical property.
     ///
     /// # Examples
     ///

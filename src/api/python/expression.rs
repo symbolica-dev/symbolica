@@ -5103,17 +5103,23 @@ impl PythonExpression {
 
     /// Check if the expression is a scalar. Symbols must have the scalar attribute.
     ///
+    /// Returns None when the property is unknown. Use `is True` or `is False`
+    /// to distinguish a proof from an inconclusive result.
+    ///
     /// Examples
     /// --------
     /// >>> x = S('x', is_scalar=True)
     /// >>> e = (x +1)**2 + 5
     /// >>> print(e.is_scalar())
     /// True
-    pub fn is_scalar(&self) -> bool {
-        self.expr.is_scalar()
+    pub fn is_scalar(&self) -> Option<bool> {
+        self.expr.is_scalar().into()
     }
 
     /// Check if the expression is real. Symbols must have the real attribute.
+    ///
+    /// Returns None when the property is unknown. Use `is True` or `is False`
+    /// to distinguish a proof from an inconclusive result.
     ///
     /// Examples
     /// --------
@@ -5121,11 +5127,14 @@ impl PythonExpression {
     /// >>> e = (x + 1)**2 / 2 + 5
     /// >>> print(e.is_real())
     /// True
-    pub fn is_real(&self) -> bool {
-        self.expr.is_real()
+    pub fn is_real(&self) -> Option<bool> {
+        self.expr.is_real().into()
     }
 
     /// Check if the expression is integer. Symbols must have the integer attribute.
+    ///
+    /// Returns None when the property is unknown. Use `is True` or `is False`
+    /// to distinguish a proof from an inconclusive result.
     ///
     /// Examples
     /// --------
@@ -5133,11 +5142,15 @@ impl PythonExpression {
     /// >>> e = (x + 1)**2 + 5
     /// >>> print(e.is_integer())
     /// True
-    pub fn is_integer(&self) -> bool {
-        self.expr.is_integer()
+    pub fn is_integer(&self) -> Option<bool> {
+        self.expr.is_integer().into()
     }
 
-    /// Check if the expression is a positive scalar. Symbols must have the positive attribute.
+    /// Check if the expression is strictly positive. Zero returns False.
+    /// A real square may vanish: use is_nonnegative() for a weak inequality.
+    ///
+    /// Returns None when the property is unknown. Use `is True` or `is False`
+    /// to distinguish a proof from an inconclusive result.
     ///
     /// Examples
     /// --------
@@ -5145,8 +5158,14 @@ impl PythonExpression {
     /// >>> e = (x + 1)**2 + 5
     /// >>> print(e.is_positive())
     /// True
-    pub fn is_positive(&self) -> bool {
-        self.expr.is_positive()
+    pub fn is_positive(&self) -> Option<bool> {
+        self.expr.is_positive().into()
+    }
+
+    /// Check if the expression is real and greater than or equal to zero.
+    /// Returns None when its sign is unknown. This does not test absence of poles.
+    pub fn is_nonnegative(&self) -> Option<bool> {
+        self.expr.is_nonnegative().into()
     }
 
     /// Check if the expression has no infinities and is not indeterminate.

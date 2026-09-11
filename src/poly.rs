@@ -823,7 +823,10 @@ impl TryFrom<Atom> for PolyVariable {
             Atom::Fun(f) => Ok(PolyVariable::Function(f.get_symbol(), Atom::Fun(f))),
             Atom::Pow(p) => {
                 let (_, exp) = p.to_pow_view().get_base_exp();
-                if matches!(exp, AtomView::Num(_)) && exp.is_integer() && exp.is_positive() {
+                if matches!(exp, AtomView::Num(_))
+                    && exp.is_integer().is_true()
+                    && exp.is_nonnegative().is_true()
+                {
                     Err(format!(
                         "Cannot convert {} to a variable as it can be decomposed into a polynomial part",
                         Atom::Pow(p)

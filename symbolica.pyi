@@ -3117,9 +3117,12 @@ class Expression:
             The symbol-data key to retrieve. Omit it to return all stored data.
         """
 
-    def is_scalar(self) -> bool:
+    def is_scalar(self) -> bool | None:
         """
         Check if the expression is a scalar. Symbols must have the scalar attribute.
+
+        Returns None when the property is unknown. Use `is True` or `is False`
+        to distinguish a proof from an inconclusive result.
 
         Examples
         --------
@@ -3128,9 +3131,12 @@ class Expression:
         >>> print(e.is_scalar())  # True
         """
 
-    def is_real(self) -> bool:
+    def is_real(self) -> bool | None:
         """
         Check if the expression is real. Symbols must have the real attribute.
+
+        Returns None when the property is unknown. Use `is True` or `is False`
+        to distinguish a proof from an inconclusive result.
 
         Examples
         --------
@@ -3139,9 +3145,12 @@ class Expression:
         >>> print(e.is_real())  # True
         """
 
-    def is_integer(self) -> bool:
+    def is_integer(self) -> bool | None:
         """
         Check if the expression is integer. Symbols must have the integer attribute.
+
+        Returns None when the property is unknown. Use `is True` or `is False`
+        to distinguish a proof from an inconclusive result.
 
         Examples
         --------
@@ -3150,15 +3159,25 @@ class Expression:
         >>> print(e.is_integer())  # True
         """
 
-    def is_positive(self) -> bool:
+    def is_positive(self) -> bool | None:
         """
-        Check if the expression is a positive scalar. Symbols must have the positive attribute.
+        Check if the expression is strictly positive. Zero returns False.
+        A real square may vanish: use is_nonnegative() for a weak inequality.
+
+        Returns None when the property is unknown. Use `is True` or `is False`
+        to distinguish a proof from an inconclusive result.
 
         Examples
         --------
         >>> x = S('x', is_positive=True)
         >>> e = (x + 1)**2 + 5
         >>> print(e.is_positive())  # True
+        """
+
+    def is_nonnegative(self) -> bool | None:
+        """
+        Check if the expression is real and greater than or equal to zero.
+        Returns None when its sign is unknown. This does not test absence of poles.
         """
 
     def is_finite(self) -> bool:

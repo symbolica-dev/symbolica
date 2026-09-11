@@ -824,73 +824,14 @@ impl<'a> AtomView<'a> {
         Pattern::from_view(self, true)
     }
 
-    /// Returns true iff an expression where all indeterminates have the attribute `Scalar`.
-    pub(crate) fn is_scalar(&self) -> bool {
-        match self {
-            AtomView::Num(_) => true,
-            AtomView::Var(v) => v.get_symbol().is_scalar(),
-            AtomView::Fun(f) => f.get_symbol().is_scalar(),
-            AtomView::Pow(p) => {
-                let (base, exp) = p.get_base_exp();
-                base.is_scalar() && exp.is_scalar()
-            }
-            AtomView::Mul(m) => m.iter().all(|child| child.is_scalar()),
-            AtomView::Add(a) => a.iter().all(|child| child.is_scalar()),
-        }
-    }
-
-    /// Returns true iff an expression only consists of integer numbers and symbols with the `Integer` attribute.
-    pub(crate) fn is_integer(&self) -> bool {
-        match self {
-            AtomView::Num(n) => n.get_coeff_view().is_integer(),
-            AtomView::Var(v) => v.get_symbol().is_integer(),
-            AtomView::Fun(f) => f.get_symbol().is_integer(),
-            AtomView::Pow(p) => {
-                let (base, exp) = p.get_base_exp();
-                base.is_integer() && exp.is_integer()
-            }
-            AtomView::Mul(m) => m.iter().all(|child| child.is_integer()),
-            AtomView::Add(a) => a.iter().all(|child| child.is_integer()),
-        }
-    }
-
-    /// Returns true iff an expression only consists of real numbers and symbols with the `Real` attribute.
-    pub(crate) fn is_real(&self) -> bool {
-        match self {
-            AtomView::Num(n) => n.get_coeff_view().is_real(),
-            AtomView::Var(v) => v.get_symbol().is_real(),
-            AtomView::Fun(f) => {
-                let s = f.get_symbol();
-                match s.get_id() {
-                    Symbol::EXP_ID | Symbol::SIN_ID | Symbol::COS_ID => {
-                        f.iter().next().is_some_and(|arg| arg.is_real())
-                    }
-                    Symbol::SQRT_ID | Symbol::LOG_ID => {
-                        f.iter().next().is_some_and(|arg| arg.is_positive())
-                    }
-                    Symbol::IF_ID => {
-                        let mut iter = f.iter();
-                        iter.next().is_some()
-                            && iter.next().is_some_and(|arg| arg.is_real())
-                            && iter.next().is_some_and(|arg| arg.is_real())
-                    }
-                    _ => s.is_real(),
-                }
-            }
-            AtomView::Pow(p) => {
-                let (base, exp) = p.get_base_exp();
-                base.is_real() && (exp.is_integer() || base.is_positive() && exp.is_real())
-            }
-            AtomView::Mul(m) => m.iter().all(|child| child.is_real()),
-            AtomView::Add(a) => a.iter().all(|child| child.is_real()),
-        }
-    }
-
     /// Test if the attributes and tags of `s` are shared by `self`.
     #[inline]
     pub fn has_attributes_of(&self, s: Symbol) -> bool {
         if let Some(ss) = self.get_symbol() {
-            return ss.has_attributes_of(s);
+            // The builtin abs symbol historically carries Positive, but an
+            // application can vanish. A strict restriction needs a proof about
+            // this expression as well as matching symbol metadata.
+            return ss.has_attributes_of(s) && (!s.is_positive() || self.is_positive().is_true());
         }
 
         !s.is_antisymmetric()
@@ -899,54 +840,10 @@ impl<'a> AtomView<'a> {
             && !s.is_linear()
             && !s.is_flat()
             && s.get_tags().is_empty()
-            && (!s.is_positive() || self.is_positive())
-            && (!s.is_integer() || self.is_integer())
-            && (!s.is_real() || self.is_real())
-            && (!s.is_scalar() || self.is_scalar())
-    }
-
-    /// Returns true iff an expression only consists of real numbers and symbols with the `Real` attribute.
-    pub(crate) fn is_positive(&self) -> bool {
-        match self {
-            AtomView::Num(_) => {
-                if let Ok(k) = Rational::try_from(*self) {
-                    !k.is_negative()
-                } else {
-                    false
-                }
-            }
-            AtomView::Var(v) => v.get_symbol().is_positive(),
-            AtomView::Fun(f) => {
-                let s = f.get_symbol();
-                match s.get_id() {
-                    Symbol::EXP_ID => f.iter().next().is_some_and(|arg| arg.is_real()),
-                    Symbol::SQRT_ID => f.iter().next().is_some_and(|arg| arg.is_positive()),
-                    Symbol::IF_ID => {
-                        let mut iter = f.iter();
-                        iter.next().is_some()
-                            && iter.next().is_some_and(|arg| arg.is_positive())
-                            && iter.next().is_some_and(|arg| arg.is_positive())
-                    }
-                    _ => s.is_positive(),
-                }
-            }
-            AtomView::Pow(p) => {
-                let (base, exp) = p.get_base_exp();
-
-                // base negative is also possible if exp is an even integer
-                if let AtomView::Num(_) = exp
-                    && let Ok(k) = Rational::try_from(exp)
-                    && k.is_integer()
-                    && k.numerator_ref() % 2 == 0
-                {
-                    return base.is_real();
-                }
-
-                base.is_positive() && exp.is_real()
-            }
-            AtomView::Mul(m) => m.iter().all(|child| child.is_positive()),
-            AtomView::Add(a) => a.iter().all(|child| child.is_positive()),
-        }
+            && (!s.is_positive() || self.is_positive().is_true())
+            && (!s.is_integer() || self.is_integer().is_true())
+            && (!s.is_real() || self.is_real().is_true())
+            && (!s.is_scalar() || self.is_scalar().is_true())
     }
 
     /// Returns true iff an expression only consists of finite numbers.
@@ -4101,6 +3998,16 @@ impl From<bool> for ConditionResult {
     }
 }
 
+impl From<ConditionResult> for Option<bool> {
+    fn from(value: ConditionResult) -> Self {
+        match value {
+            ConditionResult::True => Some(true),
+            ConditionResult::False => Some(false),
+            ConditionResult::Inconclusive => None,
+        }
+    }
+}
+
 impl ConditionResult {
     pub fn is_true(&self) -> bool {
         matches!(self, ConditionResult::True)
@@ -4170,15 +4077,15 @@ pub(crate) fn compare_real_atoms(
     if let (Some(a), Some(b)) = (exact_numeric_value(lhs), exact_numeric_value(rhs)) {
         return (a.im.is_zero() && b.im.is_zero()).then(|| a.re.cmp(&b.re));
     }
-    if !lhs.is_real() || !rhs.is_real() {
+    if !lhs.is_real().is_true() || !rhs.is_real().is_true() {
         return None;
     }
     let difference = lhs - rhs;
     if difference == Atom::Zero {
         Some(std::cmp::Ordering::Equal)
-    } else if difference.is_positive() {
+    } else if difference.is_positive().is_true() {
         Some(std::cmp::Ordering::Greater)
-    } else if (-difference).is_positive() {
+    } else if (-difference).is_positive().is_true() {
         Some(std::cmp::Ordering::Less)
     } else {
         None

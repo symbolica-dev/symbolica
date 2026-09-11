@@ -55,9 +55,9 @@ impl Solution {
             let assigned = self.get(coordinate);
             let free = assigned.is_none();
             let value = assigned.unwrap_or(&variable).clone();
-            let restriction = if variable.is_integer() && self.domain != Integers {
+            let restriction = if variable.is_integer().is_true() && self.domain != Integers {
                 Some(Integers)
-            } else if variable.is_real() && self.domain == Complexes {
+            } else if variable.is_real().is_true() && self.domain == Complexes {
                 Some(Reals)
             } else {
                 None
@@ -82,23 +82,21 @@ impl Solution {
                     }
                 }
             }
-            if variable.is_positive() {
+            if variable.is_positive().is_true() {
                 let positive = if free {
                     None
-                } else if value.is_zero() || (-&value).is_positive() {
-                    Some(false)
-                } else if value.is_positive() && provably_nonzero(&value) {
-                    Some(true)
                 } else {
-                    AlgebraicContext::from_atom(value.as_view())
-                        .ok()
-                        .and_then(|mut context| {
-                            let element = context.convert_atom(value.as_view()).ok()?;
-                            Some(
-                                context.field().try_sign(&element).ok()?
-                                    == std::cmp::Ordering::Greater,
-                            )
-                        })
+                    Option::<bool>::from(value.is_positive()).or_else(|| {
+                        AlgebraicContext::from_atom(value.as_view())
+                            .ok()
+                            .and_then(|mut context| {
+                                let element = context.convert_atom(value.as_view()).ok()?;
+                                Some(
+                                    context.field().try_sign(&element).ok()?
+                                        == std::cmp::Ordering::Greater,
+                                )
+                            })
+                    })
                 };
                 match positive {
                     Some(false) => return false,
@@ -1111,7 +1109,7 @@ mod contract_tests {
             SolveCoverage::Generic
         );
         let unrestricted = parse!("a");
-        assert!(!unrestricted.is_real());
+        assert!(unrestricted.is_real().is_inconclusive());
         let result = Atom::solve(&[&x - &unrestricted])
             .over(Reals)
             .wrt(std::slice::from_ref(&x))
@@ -1120,12 +1118,11 @@ mod contract_tests {
             result.as_point_dict().unwrap()[&PolyVariable::try_from(x).unwrap()],
             unrestricted
         );
-        assert!(!unrestricted.is_real());
+        assert!(unrestricted.is_real().is_inconclusive());
     }
 }
 
-/// `is_positive` also recognizes nonnegative expressions such as a real square.
-/// That alone cannot justify dropping a nonzero guard or a strict inequality.
+/// Nonnegativity alone cannot justify dropping a nonzero guard or a strict inequality.
 fn provably_nonzero(expression: &Atom) -> bool {
     if let Some(zero) = AtomView::algebraically_zero(expression) {
         return !zero;
@@ -1138,7 +1135,8 @@ fn provably_nonzero(expression: &Atom) -> bool {
             Rational::try_from(exponent).is_ok() && provably_nonzero(&base.to_owned())
         }
         AtomView::Add(a) => {
-            a.iter().all(|t| t.is_positive()) && a.iter().any(|t| provably_nonzero(&t.to_owned()))
+            a.iter().all(|t| t.is_nonnegative().is_true())
+                && a.iter().any(|t| provably_nonzero(&t.to_owned()))
         }
         _ => false,
     }
