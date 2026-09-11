@@ -5932,7 +5932,11 @@ impl<F: Ring, E: Exponent> MultivariatePolynomial<F, E, LexOrder> {
     }
 
     /// Heap division for multivariate polynomials, using a cache so that only unique
-    /// monomial exponents appear in the heap.
+    /// monomial exponents appear in the heap. Initially each quotient term has a
+    /// product stream through the divisor. Once the quotient reaches the divisor's
+    /// term count, new quotient terms use streams through the quotient, one per
+    /// nonleading divisor term, with insertion delayed until both predecessors
+    /// have been extracted.
     /// Reference: "Sparse polynomial division using a heap" by Monagan, Pearce (2011)
     ///
     /// The input must not have negative exponents.
@@ -5953,7 +5957,7 @@ impl<F: Ring, E: Exponent> MultivariatePolynomial<F, E, LexOrder> {
         let mut r = self.zero();
 
         let mut div_monomial_in_heap = vec![false; div.nterms()];
-        let mut merged_index_of_div_monomial_in_quotient = vec![0; div.nterms()];
+        let mut next_quotient_index = vec![0; div.nterms()];
 
         let mut cache: BTreeMap<Vec<E>, Vec<(usize, usize, bool)>> = BTreeMap::new();
 
@@ -6017,11 +6021,11 @@ impl<F: Ring, E: Exponent> MultivariatePolynomial<F, E, LexOrder> {
                             }
                         }
                     } else if !next_in_divisor {
-                        merged_index_of_div_monomial_in_quotient[j] = i + 1;
+                        next_quotient_index[j] = i + 1;
 
                         if i + 1 < q.nterms()
                             && (j == 1 // the divisor starts with the sub-leading term in the heap
-                                    || merged_index_of_div_monomial_in_quotient[j - 1] > i + 1)
+                                    || next_quotient_index[j - 1] > i + 1)
                         {
                             for ((m, e1), e2) in m_cache
                                 .iter_mut()
@@ -6138,7 +6142,7 @@ impl<F: Ring, E: Exponent> MultivariatePolynomial<F, E, LexOrder> {
                             cache.insert(m_cache.clone(), vec![(q.nterms() - 1, 1, true)]);
                         }
                     }
-                } else if q.nterms() >= div.nterms() {
+                } else {
                     // using divisor heap
                     if !div_monomial_in_heap[1] {
                         div_monomial_in_heap[1] = true;
@@ -6153,25 +6157,6 @@ impl<F: Ring, E: Exponent> MultivariatePolynomial<F, E, LexOrder> {
                             } else {
                                 cache.insert(m_cache.clone(), vec![(q.nterms() - 1, 1, false)]);
                             }
-                        }
-                    }
-                } else {
-                    // switch to divisor heap
-                    for index in &mut merged_index_of_div_monomial_in_quotient {
-                        *index = q.nterms() - 1;
-                    }
-                    debug_assert!(div_monomial_in_heap.iter().any(|c| !c));
-                    div_monomial_in_heap[1] = true;
-
-                    if let Some(e) = cache.get_mut(&m_cache) {
-                        e.push((q.nterms() - 1, 1, false));
-                    } else {
-                        h.push(m_cache.clone()); // only add when new
-                        if let Some(mut qq) = q_cache.pop() {
-                            qq.push((q.nterms() - 1, 1, false));
-                            cache.insert(m_cache.clone(), qq);
-                        } else {
-                            cache.insert(m_cache.clone(), vec![(q.nterms() - 1, 1, false)]);
                         }
                     }
                 }
@@ -6241,7 +6226,7 @@ impl<F: Ring, E: Exponent> MultivariatePolynomial<F, E, LexOrder> {
         });
 
         let mut div_monomial_in_heap = vec![false; div.nterms()];
-        let mut merged_index_of_div_monomial_in_quotient = vec![0; div.nterms()];
+        let mut next_quotient_index = vec![0; div.nterms()];
 
         let mut cache: BTreeMap<u64, Vec<(usize, usize, bool)>> = BTreeMap::new();
 
@@ -6312,11 +6297,11 @@ impl<F: Ring, E: Exponent> MultivariatePolynomial<F, E, LexOrder> {
                             }
                         }
                     } else if !next_in_divisor {
-                        merged_index_of_div_monomial_in_quotient[j] = i + 1;
+                        next_quotient_index[j] = i + 1;
 
                         if i + 1 < q.nterms()
                             && (j == 1 // the divisor starts with the sub-leading term in the heap
-                                    || merged_index_of_div_monomial_in_quotient[j - 1] > i + 1)
+                                    || next_quotient_index[j - 1] > i + 1)
                         {
                             m_cache = q_exp[i + 1] + pack_div[div.nterms() - j - 1];
 
@@ -6416,7 +6401,7 @@ impl<F: Ring, E: Exponent> MultivariatePolynomial<F, E, LexOrder> {
                             cache.insert(m_cache, vec![(q.nterms() - 1, 1, true)]);
                         }
                     }
-                } else if q.nterms() >= div.nterms() {
+                } else {
                     // using divisor heap
                     if !div_monomial_in_heap[1] {
                         div_monomial_in_heap[1] = true;
@@ -6431,25 +6416,6 @@ impl<F: Ring, E: Exponent> MultivariatePolynomial<F, E, LexOrder> {
                             } else {
                                 cache.insert(m_cache, vec![(q.nterms() - 1, 1, false)]);
                             }
-                        }
-                    }
-                } else {
-                    // switch to divisor heap
-                    for index in &mut merged_index_of_div_monomial_in_quotient {
-                        *index = q.nterms() - 1;
-                    }
-                    debug_assert!(div_monomial_in_heap.iter().any(|c| !c));
-                    div_monomial_in_heap[1] = true;
-
-                    if let Some(e) = cache.get_mut(&m_cache) {
-                        e.push((q.nterms() - 1, 1, false));
-                    } else {
-                        h.push(m_cache); // only add when new
-                        if let Some(mut qq) = q_cache.pop() {
-                            qq.push((q.nterms() - 1, 1, false));
-                            cache.insert(m_cache, qq);
-                        } else {
-                            cache.insert(m_cache, vec![(q.nterms() - 1, 1, false)]);
                         }
                     }
                 }

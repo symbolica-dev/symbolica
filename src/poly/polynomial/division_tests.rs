@@ -171,3 +171,65 @@ fn nonunit_leading_coefficient_uses_generic_division() {
     assert_eq!(dividend.try_div(&divisor), Some(quotient.clone()));
     assert_eq!(dividend.try_div_owned(&divisor), Some(quotient));
 }
+
+#[test]
+fn heap_division_handles_chains_and_growing_quotients() {
+    for nvars in [3, 8, 9] {
+        let variables = Arc::new((0..nvars).map(PolyVariable::Temporary).collect());
+        let zero = MultivariatePolynomial::<_, u16>::new(&Z, None, variables);
+        for divisor_terms in [1, 2, 5, 17] {
+            for quotient_terms in [1, 2, 4, 5, 6, 16, 17, 18, 40] {
+                for sparse in [false, true] {
+                    let make = |terms: usize, offset: usize| {
+                        let mut p = zero.clone();
+                        for i in 0..terms {
+                            let mut powers = vec![0; nvars];
+                            powers[0] = (i + 1) as u16;
+                            powers[1] = if sparse {
+                                ((i * 7 + offset) % 19) as u16
+                            } else {
+                                0
+                            };
+                            powers[nvars - 1] = if sparse {
+                                ((i * i + offset) % 11) as u16
+                            } else {
+                                0
+                            };
+                            let coefficient = if i % 3 == 0 { -2 } else { 2 };
+                            p.append_monomial(Integer::from(coefficient), &powers);
+                        }
+                        p
+                    };
+                    let divisor = make(divisor_terms, 0);
+                    let quotient = make(quotient_terms, 1);
+                    let product = &quotient * &divisor;
+                    let remainder = zero.one();
+                    for packed in [None, Some(true), Some(false)] {
+                        if packed == Some(true) && nvars > 8 || packed == Some(false) && nvars > 4 {
+                            continue;
+                        }
+                        let divide = |p: MultivariatePolynomial<IntegerRing, u16>, abort, exact| {
+                            if let Some(pack_u8) = packed {
+                                p.heap_division_packed_exp(&divisor, abort, pack_u8, exact, None)
+                            } else {
+                                p.heap_division(&divisor, abort, exact, None)
+                            }
+                        };
+                        for exact in [false, true] {
+                            assert_eq!(
+                                divide(product.clone(), true, exact),
+                                (quotient.clone(), zero.clone())
+                            );
+                        }
+                        let inexact = &product + &remainder;
+                        assert_eq!(
+                            divide(inexact.clone(), false, false),
+                            (quotient.clone(), remainder.clone())
+                        );
+                        assert!(!divide(inexact, true, false).1.is_zero());
+                    }
+                }
+            }
+        }
+    }
+}
