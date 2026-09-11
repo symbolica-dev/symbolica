@@ -33,7 +33,7 @@ use crate::{
             Zp64,
         },
         float::{Complex, F64, Float, FloatField, FloatLike, Real, RealLike, SingleFloat},
-        integer::{Integer, IntegerRing, Z},
+        integer::{Integer, IntegerRing, SMALL_PRIMES, Z},
         rational::{Fraction, Q, Rational},
         rational_polynomial::{FromNumeratorAndDenominator, RationalPolynomial},
     },
@@ -74,6 +74,16 @@ pub trait ConvertToRing: Ring {
         &self,
         number: CoefficientView<'_>,
     ) -> Result<Self::Element, String>;
+
+    /// Try to convert a `base` raised to the power of `exponent` to a Ring element.
+    fn try_element_from_pow(&self, _base: AtomView, _exponent: Rational) -> Option<Self::Element> {
+        None
+    }
+
+    /// Try to convert a `root` atom to a Ring element.
+    fn try_element_from_root(&self, _root: AtomView) -> Option<Self::Element> {
+        None
+    }
 }
 
 /// A coefficient that can appear in a Symbolica expression.
@@ -149,6 +159,22 @@ impl Coefficient {
             Coefficient::Float(f) => Coefficient::Float(f.conj()),
             Coefficient::FiniteField(n, i) => Coefficient::FiniteField(*n, *i),
             Coefficient::RationalPolynomial(p) => Coefficient::RationalPolynomial(p.clone()),
+        }
+    }
+
+    pub fn is_integer(&self) -> bool {
+        match self {
+            Coefficient::Complex(c) => c.is_real() && c.re.is_integer(),
+            _ => false,
+        }
+    }
+
+    pub fn is_real(&self) -> bool {
+        match self {
+            Coefficient::Complex(c) => c.is_real(),
+            Coefficient::Float(f) => f.is_real(),
+            Coefficient::Infinity(Some(d)) => d.is_real(),
+            _ => false,
         }
     }
 }
@@ -1201,18 +1227,12 @@ impl ConvertToRing for AlgebraicExtension<Q> {
             Coefficient::Complex(r) => {
                 if r.is_real() {
                     Ok(self.constant(r.re.clone()))
-                } else if self.poly().exponents == [0, 2]
-                    && self.poly().get_constant() == Rational::one()
-                {
-                    Ok(self.to_element(
-                        self.poly().monomial(r.im.clone(), vec![1])
-                            + self.poly().constant(r.re.clone()),
-                    ))
                 } else {
-                    Err(
-                        "Cannot directly convert complex number to this extension. First create a polynomial with extension x^2+1 and then upgrade."
-                            .to_owned(),
-                    )
+                    let imaginary_unit = self.imaginary_unit()?;
+                    Ok(self.add(
+                        &self.constant(r.re.clone()),
+                        &self.mul(&self.constant(r.im.clone()), &imaginary_unit),
+                    ))
                 }
             }
             Coefficient::Float(_) => Err(format!("Cannot convert float {} to extension", number)),
@@ -1240,36 +1260,26 @@ impl ConvertToRing for AlgebraicExtension<Q> {
             CoefficientView::Natural(r, d, cr, cd) => {
                 if cr == 0 {
                     Ok(self.constant(Rational::from_int_unchecked(r, d)))
-                } else if self.poly().exponents == [0, 2]
-                    && self.poly().get_constant() == Rational::one()
-                {
-                    Ok(self.to_element(
-                        self.poly()
-                            .monomial(Rational::from_int_unchecked(cr, cd), vec![1])
-                            + self.poly().constant(Rational::from_int_unchecked(r, d)),
-                    ))
                 } else {
-                    Err(
-                        "Cannot directly convert complex number to this extension. First create a polynomial with extension x^2+1 and then upgrade."
-                            .to_owned(),
-                    )
+                    let imaginary_unit = self.imaginary_unit()?;
+                    Ok(self.add(
+                        &self.constant(Rational::from_int_unchecked(r, d)),
+                        &self.mul(
+                            &self.constant(Rational::from_int_unchecked(cr, cd)),
+                            &imaginary_unit,
+                        ),
+                    ))
                 }
             }
             CoefficientView::Large(r, i) => {
                 if i.is_zero() {
                     Ok(self.constant(r.to_rat()))
-                } else if self.poly().exponents == [0, 2]
-                    && self.poly().get_constant() == Rational::one()
-                {
-                    Ok(self.to_element(
-                        self.poly().monomial(i.to_rat(), vec![1])
-                            + self.poly().constant(r.to_rat()),
-                    ))
                 } else {
-                    Err(
-                        "Cannot directly convert complex number to this extension. First create a polynomial with extension x^2+1 and then upgrade."
-                            .to_owned(),
-                    )
+                    let imaginary_unit = self.imaginary_unit()?;
+                    Ok(self.add(
+                        &self.constant(r.to_rat()),
+                        &self.mul(&self.constant(i.to_rat()), &imaginary_unit),
+                    ))
                 }
             }
             CoefficientView::Float(_, _) => Err(format!(
@@ -1284,6 +1294,15 @@ impl ConvertToRing for AlgebraicExtension<Q> {
                 number.to_owned()
             )),
         }
+    }
+
+    fn try_element_from_pow(&self, base: AtomView, exponent: Rational) -> Option<Self::Element> {
+        let power = base.pow(Atom::num(exponent));
+        power.as_view().to_algebraic(self).ok()
+    }
+
+    fn try_element_from_root(&self, root: AtomView) -> Option<Self::Element> {
+        root.to_algebraic(self).ok()
     }
 }
 
@@ -1481,65 +1500,140 @@ impl CoefficientView<'_> {
             return (Coefficient::one(), self.to_owned(), other.to_owned());
         }
 
-        fn simplify_perfect_square(mut base: Rational, mut exp: Rational) -> (Rational, Rational) {
-            if let Some(d) = exp.denominator_ref().to_i64() {
-                if d > 1 && d < u32::MAX as i64 {
-                    assert!(!base.numerator_ref().is_negative());
-                    let root_num = base.numerator_ref().root(d as u32);
-                    if base.numerator_ref() > &1 && root_num.pow(d as u64) == *base.numerator_ref()
-                    {
-                        base = Rational::from((root_num, base.denominator().clone()));
-                        exp = Rational::from(exp.numerator());
-                    } else if base.denominator_ref() > &1 {
-                        let root_den = base.denominator_ref().root(d as u32);
-                        if root_den.pow(d as u64) == *base.denominator_ref() {
-                            base = Rational::from((base.numerator().clone(), root_den));
-                            exp = Rational::from(exp.numerator());
-                        }
+        /// Return `(extracted, rest)` such that
+        /// `base = extracted^denominator * rest`,
+        /// with `rest` denominator-th-power-free.
+        fn simplify_perfect_power_factors(
+            mut base: Integer,
+            denominator: u32,
+        ) -> (Integer, Integer) {
+            debug_assert!(!base.is_negative());
+            debug_assert!(denominator > 1);
+
+            if base <= 1 || base.root(denominator).is_one() {
+                return (Integer::one(), base);
+            }
+
+            let denominator_integer = Integer::from(denominator);
+            let mut extracted = Integer::one();
+            let mut rest = Integer::one();
+
+            for prime in SMALL_PRIMES.into_iter().map(|prime| prime as u64) {
+                let prime_integer = Integer::from(prime);
+                if prime_integer.pow(denominator as u64) > base {
+                    rest *= base;
+                    return (extracted, rest);
+                }
+
+                let mut count = Integer::zero();
+                while &base % prime == 0 {
+                    base /= prime;
+                    count += 1;
+                }
+
+                if !count.is_zero() {
+                    let occurrences = &count / &denominator_integer;
+                    let remainder = count - &occurrences * &denominator_integer;
+                    if !occurrences.is_zero() {
+                        extracted *= prime_integer.pow_i(occurrences);
                     }
+                    if !remainder.is_zero() {
+                        rest *= Integer::from(prime).pow_i(remainder);
+                    }
+                }
+
+                if base.is_one() {
+                    return (extracted, rest);
                 }
             }
 
-            (base, exp)
+            let root = base.root(denominator);
+            if root.pow(denominator as u64) == base {
+                extracted *= root;
+                return (extracted, rest);
+            }
+
+            for (prime, count) in base.factor() {
+                let occurrences = &count / &denominator_integer;
+                let remainder = count - &occurrences * &denominator_integer;
+                if !occurrences.is_zero() {
+                    extracted *= prime.pow_i(occurrences);
+                }
+                if !remainder.is_zero() {
+                    rest *= prime.pow_i(remainder);
+                }
+            }
+
+            (extracted, rest)
+        }
+
+        fn simplify_rational_perfect_power_factors(
+            base: Rational,
+            denominator: u32,
+        ) -> (Rational, Rational) {
+            debug_assert!(!base.is_negative());
+            let (extracted_numerator, rest_numerator) =
+                simplify_perfect_power_factors(base.numerator(), denominator);
+            let (extracted_denominator, rest_denominator) =
+                simplify_perfect_power_factors(base.denominator(), denominator);
+            (
+                Rational::from((extracted_numerator, extracted_denominator)),
+                Rational::from((rest_numerator, rest_denominator)),
+            )
         }
 
         fn rat_pow(
             mut base: Rational,
             mut exp: Rational,
         ) -> (Complex<Rational>, Rational, Rational) {
+            if !base.is_one()
+                && !exp.is_integer()
+                && let Some(denominator) = exp
+                    .denominator_ref()
+                    .to_u64()
+                    .and_then(|d| u32::try_from(d).ok())
+                && denominator > 1
+            {
+                let absolute_base = base.abs();
+                let (extracted, rest) =
+                    simplify_rational_perfect_power_factors(absolute_base, denominator);
+
+                if !extracted.is_one() {
+                    let numerator = exp.numerator_ref().to_i64().unwrap();
+                    let extracted = if numerator < 0 {
+                        extracted.inv().pow(numerator.unsigned_abs())
+                    } else {
+                        extracted.pow(numerator.unsigned_abs())
+                    };
+                    let rest = if base.is_negative() { -rest } else { rest };
+                    let (coefficient, base, exp) = rat_pow(rest, exp);
+                    return (coefficient * Complex::from(extracted), base, exp);
+                }
+            }
+
             if base.is_one() {
                 (Rational::one().into(), Rational::one(), Rational::one())
             } else if base.is_negative() && !exp.is_integer() {
                 let pow = exp.numerator() / exp.denominator();
                 let rest = exp.numerator() - &pow * exp.denominator();
 
-                let mut base_integer_pow = if pow.is_negative() {
+                let base_integer_pow = if pow.is_negative() {
                     base.inv().pow(pow.to_i64().unwrap().unsigned_abs())
                 } else {
                     base.pow(pow.to_i64().unwrap().unsigned_abs())
                 };
 
                 if exp.denominator_ref() == &2 {
-                    (base, exp) = simplify_perfect_square(base.abs(), exp);
-
                     (
                         if rest.is_negative() {
                             Complex::new(Rational::zero(), -base_integer_pow)
                         } else {
                             Complex::new(Rational::zero(), base_integer_pow)
                         },
-                        base,
+                        base.abs(),
                         Rational::from_int_unchecked(rest, exp.denominator()),
                     )
                 } else {
-                    let (new_base, new_exp) = simplify_perfect_square(base.abs(), exp.clone());
-
-                    if new_exp.is_integer() {
-                        // integer extraction worked
-                        base_integer_pow *= new_base;
-                        base = (-1).into();
-                    }
-
                     (
                         base_integer_pow.into(),
                         base,
@@ -1547,14 +1641,33 @@ impl CoefficientView<'_> {
                     )
                 }
             } else {
-                (base, exp) = simplify_perfect_square(base, exp);
-
                 if exp < 0 {
                     base = base.inv();
                     exp = -exp;
                 }
 
                 base = base.pow(exp.numerator().to_i64().unwrap().unsigned_abs());
+                if let Some(denominator) = exp
+                    .denominator_ref()
+                    .to_u64()
+                    .and_then(|d| u32::try_from(d).ok())
+                    && denominator > 1
+                {
+                    let (extracted, rest) =
+                        simplify_rational_perfect_power_factors(base, denominator);
+                    if !extracted.is_one() {
+                        return if rest.is_one() {
+                            (extracted.into(), Rational::one(), Rational::one())
+                        } else {
+                            (
+                                extracted.into(),
+                                rest,
+                                Rational::from_int_unchecked(Integer::one(), exp.denominator()),
+                            )
+                        };
+                    }
+                    base = rest;
+                }
                 (
                     Rational::one().into(),
                     base,
@@ -2105,6 +2218,29 @@ impl PartialOrd for CoefficientView<'_> {
 
 impl Ord for CoefficientView<'_> {
     fn cmp(&self, other: &CoefficientView) -> Ordering {
+        fn cmp_float_rational(
+            fr: &SerializedFloat,
+            fi: &SerializedFloat,
+            rr: Rational,
+            ri: Rational,
+        ) -> Ordering {
+            let difference = fr.to_float() - rr;
+            if difference.is_negative() {
+                Ordering::Less
+            } else if difference.is_zero() {
+                let difference = fi.to_float() - ri;
+                if difference.is_negative() {
+                    Ordering::Less
+                } else if difference.is_zero() {
+                    Ordering::Equal
+                } else {
+                    Ordering::Greater
+                }
+            } else {
+                Ordering::Greater
+            }
+        }
+
         match (self, other) {
             (
                 CoefficientView::Natural(n1, d1, ni1, di1),
@@ -2140,6 +2276,29 @@ impl Ord for CoefficientView<'_> {
                         .partial_cmp(&fi2.to_float())
                         .unwrap_or(Ordering::Equal)
                 }),
+            (CoefficientView::Float(fr1, fi1), CoefficientView::Natural(n2, d2, ni2, di2)) => {
+                cmp_float_rational(
+                    fr1,
+                    fi1,
+                    Rational::from_int_unchecked(*n2, *d2),
+                    Rational::from_int_unchecked(*ni2, *di2),
+                )
+            }
+            (CoefficientView::Natural(n1, d1, ni1, di1), CoefficientView::Float(fr2, fi2)) => {
+                cmp_float_rational(
+                    fr2,
+                    fi2,
+                    Rational::from_int_unchecked(*n1, *d1),
+                    Rational::from_int_unchecked(*ni1, *di1),
+                )
+                .reverse()
+            }
+            (CoefficientView::Float(fr1, fi1), CoefficientView::Large(r2, i2)) => {
+                cmp_float_rational(fr1, fi1, r2.to_rat(), i2.to_rat())
+            }
+            (CoefficientView::Large(r1, i1), CoefficientView::Float(fr2, fi2)) => {
+                cmp_float_rational(fr2, fi2, r1.to_rat(), i1.to_rat()).reverse()
+            }
             (CoefficientView::RationalPolynomial(n1), CoefficientView::RationalPolynomial(n2)) => {
                 n1.deserialize().internal_cmp(&n2.deserialize())
             }
@@ -3369,17 +3528,24 @@ impl AtomView<'_> {
 
 #[cfg(test)]
 mod test {
-    use std::sync::Arc;
+    use std::{cmp::Ordering, sync::Arc};
 
     use crate::{
-        atom::{Atom, AtomCore},
+        atom::{Atom, AtomCore, AtomView},
         domains::float::Float,
         parse,
         printer::{AtomPrinter, PrintOptions},
         symbol,
     };
 
-    use super::Coefficient;
+    use super::{Coefficient, CoefficientView};
+
+    fn coefficient_view(atom: &Atom) -> CoefficientView<'_> {
+        let AtomView::Num(number) = atom.as_view() else {
+            panic!("expected a coefficient");
+        };
+        number.get_coeff_view()
+    }
 
     #[test]
     fn rat_pow() {
@@ -3387,15 +3553,27 @@ mod test {
         assert_eq!(parse!("(-2)^(1/2)"), parse!("1i*2^(1/2)"));
         assert_eq!(parse!("(-2)^(-5/3)"), parse!("-1/2*(-2)^(-2/3)"));
         assert_eq!(parse!("(-2)^(-5/2)"), parse!("-1i/4*(1/2)^(1/2)"));
-        assert_eq!(parse!("(2)^(-5/2)"), parse!("(1/32)^(1/2)"));
+        assert_eq!(parse!("(2)^(-5/2)"), parse!("1/4*(1/2)^(1/2)"));
         assert_eq!(parse!("(4)^(1/2)"), parse!("2"));
         assert_eq!(parse!("(1/4)^(1/2)"), parse!("1/2"));
         assert_eq!(parse!("(-1/4)^(1/2)"), parse!("1i/2"));
         assert_eq!(parse!("(27)^(1/3)"), parse!("3"));
         assert_eq!(parse!("(-1/27)^(1/3)"), parse!("1/3*(-1)^(1/3)"));
         assert_eq!(parse!("(27)^(2/3)"), parse!("9"));
+        assert_eq!(parse!("8^(-1/3)"), parse!("1/2"));
+        assert_eq!(parse!("72^(3/2)"), parse!("432*2^(1/2)"));
         assert_eq!(parse!("(-2)^(3)"), parse!("-8"));
         assert_eq!(parse!("(1)^(1/2)"), parse!("1"));
+
+        assert_eq!(parse!("8^(1/2)"), parse!("2*2^(1/2)"));
+        assert_eq!(parse!("54^(1/3)"), parse!("3*2^(1/3)"));
+        assert_eq!(parse!("(-54)^(1/3)"), parse!("3*(-2)^(1/3)"));
+        assert_eq!(parse!("(4/3)^(1/2)"), parse!("2*(1/3)^(1/2)"));
+        assert_eq!(parse!("(2850/39601)^(1/2)"), parse!("5/199*114^(1/2)"));
+        assert_eq!(parse!("17408^(1/10)"), parse!("2*17^(1/10)"));
+        assert_eq!(parse!("166659413^(1/2)"), parse!("547*557^(1/2)"));
+        assert_eq!(parse!("1301820637^(1/2)"), parse!("10007*13^(1/2)"));
+        assert_eq!(parse!("(13/100140049)^(1/2)"), parse!("1/10007*13^(1/2)"));
     }
 
     #[test]
@@ -3414,6 +3592,44 @@ mod test {
             "1289378192371289372891378127893+8123781237821378123128937128937211238971238*coeff(v2)"
         );
         assert_eq!(expr + &res, Atom::new());
+    }
+
+    #[test]
+    fn compare_float_with_rational() {
+        let natural = parse!("1/2");
+        let natural_float = natural.to_float(16);
+        assert_eq!(
+            coefficient_view(&natural_float).cmp(&coefficient_view(&natural)),
+            Ordering::Equal
+        );
+        assert_eq!(
+            coefficient_view(&natural).cmp(&coefficient_view(&natural_float)),
+            Ordering::Equal
+        );
+
+        let negative_float = parse!("-2/3").to_float(16);
+        let zero = parse!("0");
+        assert_eq!(
+            coefficient_view(&negative_float).cmp(&coefficient_view(&zero)),
+            Ordering::Less
+        );
+        assert_eq!(
+            coefficient_view(&zero).cmp(&coefficient_view(&negative_float)),
+            Ordering::Greater
+        );
+
+        // This value is too large for the inline natural representation, but is
+        // exactly representable as a binary float.
+        let large = parse!("18446744073709551616");
+        let large_float = large.to_float(16);
+        assert_eq!(
+            coefficient_view(&large_float).cmp(&coefficient_view(&large)),
+            Ordering::Equal
+        );
+        assert_eq!(
+            coefficient_view(&large).cmp(&coefficient_view(&large_float)),
+            Ordering::Equal
+        );
     }
 
     #[test]

@@ -1347,6 +1347,13 @@ impl AtomView<'_> {
                 // the case var^exp is already treated, so there must be a non-integer power, or a non-polynomial base
                 let (base, exp) = p.get_base_exp();
 
+                if let Ok(exponent) = Rational::try_from(exp)
+                    && let Some(coefficient) = field.try_element_from_pow(base, exponent)
+                {
+                    return Ok(MultivariatePolynomial::new(field, None, var_map.clone())
+                        .constant(coefficient));
+                }
+
                 // split x^(a+b) into x^a * x^b
                 if let AtomView::Add(add) = exp {
                     let mut result = MultivariatePolynomial::new(field, None, var_map.clone())
@@ -1412,6 +1419,11 @@ impl AtomView<'_> {
             }
             AtomView::Fun(f) => {
                 // TODO: make sure that this coefficient does not depend on any of the variables in var_map
+
+                if let Some(coefficient) = field.try_element_from_root(*self) {
+                    return Ok(MultivariatePolynomial::new(field, None, var_map.clone())
+                        .constant(coefficient));
+                }
 
                 // check if we have seen this variable before
                 if let Some(id) = var_map.iter().position(|v| match v {
@@ -1636,6 +1648,20 @@ impl AtomView<'_> {
             AtomView::Pow(p) => {
                 let (base, exp) = p.get_base_exp();
 
+                if let Ok(exponent) = Rational::try_from(exp)
+                    && let Some(coefficient) = field.try_element_from_pow(base, exponent)
+                {
+                    let numerator = MultivariatePolynomial::new(field, None, var_map.clone())
+                        .constant(coefficient);
+                    let denominator = numerator.one();
+                    return Ok(RationalPolynomial::from_num_den(
+                        numerator,
+                        denominator,
+                        out_field,
+                        false,
+                    ));
+                }
+
                 if let AtomView::Add(add) = exp {
                     let mut result = RationalPolynomial::new(out_field, var_map.clone());
                     result.numerator = result.numerator.add_constant(out_field.one());
@@ -1689,6 +1715,18 @@ impl AtomView<'_> {
                 }
             }
             AtomView::Fun(f) => {
+                if let Some(coefficient) = field.try_element_from_root(*self) {
+                    let numerator = MultivariatePolynomial::new(field, None, var_map.clone())
+                        .constant(coefficient);
+                    let denominator = numerator.one();
+                    return Ok(RationalPolynomial::from_num_den(
+                        numerator,
+                        denominator,
+                        out_field,
+                        false,
+                    ));
+                }
+
                 // check if we have seen this variable before
                 if let Some(id) = var_map.iter().position(|v| match v {
                     PolyVariable::Function(_, vv) => vv.as_view() == *self,
