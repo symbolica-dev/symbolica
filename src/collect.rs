@@ -8,7 +8,15 @@ use numerica::domains::{
 use crate::{
     atom::{Add, Atom, AtomCore, AtomOrView, AtomView, Indeterminate, Symbol},
     coefficient::{Coefficient, CoefficientView},
-    domains::{algebraic::AlgebraicExtension, float::FloatLike, integer::Z, rational::Q},
+    domains::{
+        algebraic::AlgebraicExtension,
+        float::FloatLike,
+        integer::Z,
+        rational::Q,
+        rational_polynomial::{
+            FromNumeratorAndDenominator, RationalPolynomial, RationalPolynomialField,
+        },
+    },
     poly::{Exponent, factor::Factorize, polynomial::MultivariatePolynomial},
     state::Workspace,
     utils::Settable,
@@ -494,20 +502,27 @@ impl<'a> AtomView<'a> {
         }
     }
 
-    /// Write the expression as a sum of terms with minimal denominators in all variables.
-    pub fn apart_multivariate(&self) -> Atom {
+    /// Write the expression as a sum of terms with minimal denominators in the chosen variables.
+    /// An empty variable slice decomposes in all variables.
+    pub fn apart_multivariate(&self, variables: &[Indeterminate]) -> Atom {
         let mut out = Atom::new();
 
         Workspace::get_local().with(|ws| {
-            self.apart_multivariate_with_ws_into(ws, &mut out);
+            self.apart_multivariate_with_ws_into(ws, variables, &mut out);
         });
 
         out
     }
 
-    /// Write the expression as a sum of terms with minimal denominators in all variables.
-    pub fn apart_multivariate_with_ws_into(&self, ws: &Workspace, out: &mut Atom) {
-        if self.has_complex_coefficients() {
+    /// Write the expression as a sum of terms with minimal denominators in the chosen variables.
+    /// An empty variable slice decomposes in all variables.
+    pub fn apart_multivariate_with_ws_into(
+        &self,
+        ws: &Workspace,
+        variables: &[Indeterminate],
+        out: &mut Atom,
+    ) {
+        if variables.is_empty() && self.has_complex_coefficients() {
             let f = AlgebraicExtension::complex(Q);
             let f2 = FloatField::from_rep(Complex::new(Rational::zero(), Rational::one()));
             if let Ok(poly) = self.try_to_rational_polynomial::<_, _, u32>(&f, &f, None) {
@@ -546,7 +561,9 @@ impl<'a> AtomView<'a> {
             } else {
                 out.set_from_view(self);
             }
-        } else if let Ok(poly) = self.try_to_rational_polynomial::<_, _, u32>(&Q, &Z, None) {
+        } else if variables.is_empty()
+            && let Ok(poly) = self.try_to_rational_polynomial::<_, _, u32>(&Q, &Z, None)
+        {
             let mut a = ws.new_atom();
             let add = a.to_add();
 
@@ -554,6 +571,66 @@ impl<'a> AtomView<'a> {
             for x in poly.apart_multivariate() {
                 x.to_expression_into(&mut a);
                 add.extend(a.as_view());
+            }
+
+            add.as_view().normalize(ws, out);
+        } else if !variables.is_empty() {
+            let var_map = Arc::new(
+                variables
+                    .iter()
+                    .cloned()
+                    .map(Into::into)
+                    .collect::<Vec<_>>(),
+            );
+            let Ok(poly) = self.try_to_rational_polynomial::<_, _, u32>(&Q, &Z, Some(var_map))
+            else {
+                out.set_from_view(self);
+                return;
+            };
+
+            let vars = (0..variables.len()).collect::<Vec<_>>();
+            let coefficient_field = RationalPolynomialField::new(Z);
+            let lift_coefficient = |c: &MultivariatePolynomial<_, u32>| {
+                RationalPolynomial::from_num_den(c.clone(), c.one(), &Z, false)
+            };
+
+            let p1 = poly
+                .numerator
+                .to_polynomial_in(&vars)
+                .map_coeff(lift_coefficient, coefficient_field.clone());
+            let p2 = poly
+                .denominator
+                .to_polynomial_in(&vars)
+                .map_coeff(lift_coefficient, coefficient_field.clone());
+
+            let factors = poly
+                .denominator
+                .factor()
+                .into_iter()
+                .map(|(factor, power)| {
+                    (
+                        factor
+                            .to_polynomial_in(&vars)
+                            .map_coeff(lift_coefficient, coefficient_field.clone()),
+                        power,
+                    )
+                })
+                .collect();
+
+            let rp = RationalPolynomial {
+                numerator: p1,
+                denominator: p2,
+            };
+
+            let mut a = ws.new_atom();
+            let add = a.to_add();
+            for part in rp.apart_multivariate_with_factors(factors) {
+                add.extend(
+                    part.to_expression_with_coeff_map(|_, coefficient, out| {
+                        coefficient.to_expression_into(out)
+                    })
+                    .as_view(),
+                );
             }
 
             add.as_view().normalize(ws, out);
@@ -1639,6 +1716,14 @@ mod test {
     };
 
     #[test]
+    fn collect_denominator_factors() {
+        let expr = parse!("1/(v1*v2) + 1/(v1*v3) + v3/v1");
+        let collected = expr.as_view().collect_factors();
+        println!("{}", collected);
+        assert!(matches!(collected, Atom::Mul(_)));
+    }
+
+    #[test]
     fn collect_by_coefficient() {
         let expr = parse!("4 + 2*v1 + 3*v2 + 2*v3 + 3*v4 + 4*x5 + x6 + 3*x6*x7 + 5*x7");
         let collected = expr.as_view().collect_by_coefficient();
@@ -1770,6 +1855,22 @@ mod test {
         let out = input.apart(symbol!("v4"));
 
         let ref_out = parse!("1/2*v1^2+v3*(v4+1)^-1+v1^3*v2*v4^-1");
+
+        assert_eq!(out, ref_out);
+    }
+
+    #[test]
+    fn apart_multivariate_in_selected_variables() {
+        let input = parse!("(2*y-x)/(y*(x+z*y)*(y-x))");
+        let out = input.apart_multivariate(&[symbol!("x"), symbol!("y")]);
+
+        let ref_out = parse!("(z+2)/((z+1)*(y*x+y^2*z)) - 1/((z+1)*(y*x-y^2))");
+
+        assert_eq!(out, ref_out);
+
+        let input = parse!("(2*y-x)/((w+1)*y*(x+z*y)*(y-x))");
+        let out = input.apart_multivariate(&[symbol!("x"), symbol!("y")]);
+        let ref_out = parse!("(z+2)/((1+z+z*w+w)*(y*x+y^2*z)) - 1/((1+z+z*w+w)*(y*x-y^2))");
 
         assert_eq!(out, ref_out);
     }
