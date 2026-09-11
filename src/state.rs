@@ -38,6 +38,7 @@ use crate::{
 
 pub(crate) const SYMBOLICA_MAGIC: u32 = 0x37871367;
 pub(crate) const EXPORT_FORMAT_VERSION: u16 = 5;
+pub(crate) const SUPPORTED_IMPORT_VERSIONS: &[u16] = &[4, 5];
 pub(crate) const FULL_STATE_EXPORT_FLAG: u8 = 1;
 
 /// An id for a given finite field in a registry.
@@ -1223,15 +1224,37 @@ impl State {
         Ok(())
     }
 
+    /// Get the dependent symbols of a set of symbols.
+    fn get_dependent_symbols(mut symbols: HashSet<Symbol>) -> HashSet<Symbol> {
+        let mut data_symbols = HashSet::new();
+        for x in symbols.iter() {
+            x.get_data().get_symbols(&mut data_symbols);
+        }
+
+        let mut new_data_symbols = HashSet::new();
+        while !data_symbols.is_empty() {
+            for x in data_symbols.iter() {
+                x.get_data().get_symbols(&mut new_data_symbols);
+            }
+
+            symbols.extend(data_symbols.drain());
+            (data_symbols, new_data_symbols) = (new_data_symbols, data_symbols);
+        }
+
+        symbols
+    }
+
     /// Write the state of a part of the symbol table to a binary stream.
     #[inline(always)]
     pub fn export_partial<W: Write>(
         dest: &mut W,
-        symbols: &HashSet<Symbol>,
+        mut symbols: HashSet<Symbol>,
     ) -> Result<(), std::io::Error> {
         if ID_TO_STR.len() == 0 {
             Self::initialize_state();
         }
+
+        symbols = Self::get_dependent_symbols(symbols);
 
         dest.write_u32::<LittleEndian>(SYMBOLICA_MAGIC)?;
         dest.write_u16::<LittleEndian>(EXPORT_FORMAT_VERSION)?;
@@ -1299,7 +1322,7 @@ impl State {
         }
 
         let version = source.read_u16::<LittleEndian>()?;
-        if version != EXPORT_FORMAT_VERSION {
+        if !SUPPORTED_IMPORT_VERSIONS.contains(&version) {
             return Err(std::io::Error::new(
                 std::io::ErrorKind::InvalidData,
                 format!(
@@ -1315,7 +1338,11 @@ impl State {
             variables_lists: HashMap::default(),
         };
 
-        let is_full_state = source.read_u8()? == FULL_STATE_EXPORT_FLAG;
+        let is_full_state = if version > 4 {
+            source.read_u8()? == FULL_STATE_EXPORT_FLAG
+        } else {
+            true
+        };
 
         let n_symbols = source.read_u64::<LittleEndian>()?;
         for mut index in 0..n_symbols {
@@ -1323,8 +1350,11 @@ impl State {
                 index = source.read_u32::<LittleEndian>()? as u64
             }
 
-            let (mut name, namespace, attributes, tags, extra_data, aliases, is_exportable) =
+            let (mut name, namespace, attributes, tags, mut extra_data, aliases, is_exportable) =
                 Symbol::import_impl(source)?;
+
+            // all symbols in user data have a lower id than `index`, so we can safely rename
+            extra_data = extra_data.rename_symbols(&state_map);
 
             loop {
                 let num_symbols = ID_TO_STR.len();

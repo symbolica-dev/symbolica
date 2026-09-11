@@ -43,7 +43,7 @@ mod coefficient;
 mod core;
 pub mod representation;
 
-use ahash::HashMap;
+use ahash::{HashMap, HashSet};
 use byteorder::{LittleEndian, ReadBytesExt, WriteBytesExt};
 use numerica::domains::float::Float;
 use smartstring::{LazyCompact, SmartString};
@@ -55,7 +55,7 @@ use crate::{
     parser::{ParseSettings, Token},
     poly::series::Series,
     printer::{AnsiWrap, AtomPrinter, PrintFunction, PrintOptions, PrintState},
-    state::{CustomFunctionDefinitionKeys, RecycledAtom, State, SymbolData, Workspace},
+    state::{CustomFunctionDefinitionKeys, RecycledAtom, State, StateMap, SymbolData, Workspace},
     transformer::StatsOptions,
     utils::{BorrowedOrOwned, Settable},
     warn,
@@ -614,6 +614,58 @@ pub enum UserData {
     Map(HashMap<UserDataKey, UserData>),
     /// A serialized byte array.
     Serialized(Vec<u8>),
+}
+
+impl UserData {
+    /// Returns all symbols used in this user data, including those from nested atoms and lists.
+    pub fn get_symbols(&self, symbols: &mut HashSet<Symbol>) {
+        match self {
+            UserData::Atom(atom) => {
+                atom.as_view().get_all_symbols_impl(true, symbols);
+            }
+            UserData::List(list) => {
+                for item in list {
+                    item.get_symbols(symbols);
+                }
+            }
+            UserData::Map(map) => {
+                for (key, item) in map {
+                    if let UserDataKey::Atom(atom) = key {
+                        atom.as_view().get_all_symbols_impl(true, symbols);
+                    }
+                    item.get_symbols(symbols);
+                }
+            }
+            _ => {}
+        }
+    }
+
+    /// Rename all symbols in this user data using the given state map.
+    pub(crate) fn rename_symbols(self, state_map: &StateMap) -> Self {
+        match self {
+            UserData::Atom(atom) => UserData::Atom(atom.as_view().rename(state_map)),
+            UserData::List(list) => UserData::List(
+                list.into_iter()
+                    .map(|item| item.rename_symbols(state_map))
+                    .collect(),
+            ),
+            UserData::Map(map) => UserData::Map(
+                map.into_iter()
+                    .map(|(key, item)| {
+                        if let UserDataKey::Atom(atom) = key {
+                            (
+                                UserDataKey::Atom(atom.as_view().rename(state_map)),
+                                item.rename_symbols(state_map),
+                            )
+                        } else {
+                            (key, item.rename_symbols(state_map))
+                        }
+                    })
+                    .collect(),
+            ),
+            x => x,
+        }
+    }
 }
 
 /// Attributes that can be assigned to symbols.
