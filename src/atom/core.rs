@@ -485,6 +485,29 @@ pub trait AtomCore: private::Sealed + Sized {
         self.as_atom_view().factor_complex().wrap(self)
     }
 
+    /// Factor the expression over an algebraic number field.
+    ///
+    /// Algebraic numbers already present in the expression define the initial
+    /// field. The supplied explicit roots and rational powers are adjoined as
+    /// additional generators.
+    ///
+    /// # Example
+    ///
+    /// ```
+    /// use symbolica::prelude::*;
+    ///
+    /// let factorization = parse!("x^2-2")
+    ///     .factor_in_extension(&[parse!("sqrt(2)")])
+    ///     .unwrap();
+    /// assert_eq!(factorization, parse!("(x-sqrt(2))*(x+sqrt(2))"));
+    /// ```
+    fn factor_in_extension(&self, generators: &[Atom]) -> Result<Self::Output, String> {
+        Ok(self
+            .as_atom_view()
+            .factor_in_extension(generators)?
+            .wrap(self))
+    }
+
     /// Collect numerical factors by removing the numerical content from additions.
     /// For example, `-2*x + 4*x^2 + 6*x^3` will be transformed into `-2*(x - 2*x^2 - 3*x^3)`.
     ///
@@ -800,6 +823,38 @@ pub trait AtomCore: private::Sealed + Sized {
         vars: &[T2],
     ) -> Result<Vec<Atom>, SolveError> {
         AtomView::solve_linear_system::<E, T1, T2>(system, vars)
+    }
+
+    /// Solve a system exactly for `vars`.
+    ///
+    /// Linear systems use the linear-system solver. Polynomial nonlinear
+    /// systems over `Q` or `Q(parameters)` use a grevlex Gröbner basis, FGLM
+    /// conversion to lex, and exact algebraic roots. Every expression in
+    /// `system` is understood to equal zero. Rational powers involving the
+    /// solve variables are polynomialized with auxiliary variables, and
+    /// non-principal branches are filtered from the result. Rational
+    /// denominators are cleared and their zero loci are excluded.
+    ///
+    /// # Example
+    ///
+    /// ```
+    /// use symbolica::prelude::*;
+    ///
+    /// let (x, y) = symbol!("x", "y");
+    /// let system = [parse!("x+y"), parse!("y^2-2")];
+    /// let solutions = Atom::solve::<u16, _, Atom>(
+    ///     &system,
+    ///     &[x.into(), y.into()],
+    /// )
+    /// .unwrap();
+    ///
+    /// assert_eq!(solutions.len(), 2);
+    /// ```
+    fn solve<E: PositiveExponent + 'static, T1: AtomCore, T2: AtomCore>(
+        system: &[T1],
+        vars: &[T2],
+    ) -> Result<Vec<HashMap<crate::poly::PolyVariable, Atom>>, SolveError> {
+        AtomView::solve::<E, T1, T2>(system, vars)
     }
 
     /// Convert a system of linear equations to a matrix representation, returning the matrix

@@ -1595,15 +1595,42 @@ impl AtomView<'_> {
         RationalPolynomial<RO, E>:
             FromNumeratorAndDenominator<R, RO, E> + FromNumeratorAndDenominator<RO, RO, E>,
     {
+        let mut polynomial =
+            self.try_to_rational_polynomial_preserve_power_variables(field, out_field, var_map)?;
+        polynomial.numerator.reduce_rational_power_variable_basis();
+        polynomial
+            .denominator
+            .reduce_rational_power_variable_basis();
+        polynomial
+            .numerator
+            .unify_variables(&mut polynomial.denominator);
+        Ok(polynomial)
+    }
+
+    /// Convert to a rational polynomial without changing the supplied
+    /// rational-power variables to a different basis.
+    ///
+    /// This is used by equation lifting, where every power variable has a
+    /// defining relation and therefore must retain its original identity.
+    pub(crate) fn try_to_rational_polynomial_preserve_power_variables<
+        R: EuclideanDomain + ConvertToRing,
+        RO: EuclideanDomain + PolynomialGCD<E>,
+        E: PositiveExponent,
+    >(
+        &self,
+        field: &R,
+        out_field: &RO,
+        var_map: Option<Arc<Vec<PolyVariable>>>,
+    ) -> Result<RationalPolynomial<RO, E>, PolynomialConversionError>
+    where
+        RationalPolynomial<RO, E>:
+            FromNumeratorAndDenominator<R, RO, E> + FromNumeratorAndDenominator<RO, RO, E>,
+    {
         let mut polynomial = self.to_rational_polynomial_impl(
             field,
             out_field,
             var_map.as_ref().unwrap_or(&Arc::new(Vec::new())),
         )?;
-        polynomial.numerator.reduce_rational_power_variable_basis();
-        polynomial
-            .denominator
-            .reduce_rational_power_variable_basis();
         polynomial
             .numerator
             .unify_variables(&mut polynomial.denominator);
@@ -1653,6 +1680,27 @@ impl AtomView<'_> {
                 {
                     let numerator = MultivariatePolynomial::new(field, None, var_map.clone())
                         .constant(coefficient);
+                    let denominator = numerator.one();
+                    return Ok(RationalPolynomial::from_num_den(
+                        numerator,
+                        denominator,
+                        out_field,
+                        false,
+                    ));
+                }
+
+                // An explicitly supplied power variable may carry a defining
+                // relation in the caller. Preserve that exact variable before
+                // decomposing negative powers such as x^(-1/2) into
+                // (x^(1/2))^-1.
+                if let Some(id) = var_map.iter().position(|v| match v {
+                    PolyVariable::Power(vv) => vv.as_view() == *self,
+                    _ => false,
+                }) {
+                    let mut exp = vec![E::zero(); var_map.len()];
+                    exp[id] = E::one();
+                    let numerator = MultivariatePolynomial::new(field, None, var_map.clone())
+                        .monomial(field.one(), exp);
                     let denominator = numerator.one();
                     return Ok(RationalPolynomial::from_num_den(
                         numerator,
