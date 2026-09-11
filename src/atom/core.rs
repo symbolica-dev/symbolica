@@ -1998,6 +1998,22 @@ pub trait AtomCore: private::Sealed + Sized {
         self.as_atom_view().visitor(v)
     }
 
+    /// Return the position of `part` within `self`, if the `part` refers to data within `self`.
+    /// This position can be used with [`Atom::index`] to retrieve the corresponding [`Atom`] within `self`.
+    ///
+    /// # Example
+    ///
+    /// ```
+    /// use symbolica::prelude::*;
+    /// let expr = parse!("f(g(3+x, 2), h(4))");
+    /// let part = expr.index([0, 0, 1]).unwrap();
+    /// let pos = expr.position(part).unwrap();
+    /// assert_eq!(pos, [0, 0, 1]);
+    /// ```
+    fn position<T: AtomCore>(&self, part: T) -> Option<Vec<usize>> {
+        self.as_atom_view().position(part.as_atom_view())
+    }
+
     /// Return an iterator over matched expressions.
     /// Alternatively, use [ReplaceBuilder::match_iter].
     ///
