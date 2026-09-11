@@ -834,3 +834,176 @@ impl fmt::Debug for NmodMPoly<'_> {
         }
     }
 }
+
+/// An owned FLINT context for rational polynomial benchmarks.
+pub struct FmpqMPolyContext {
+    raw: Box<ffi::fmpq_mpoly_ctx_struct>,
+    _variable_names: Vec<CString>,
+    variable_pointers: Vec<*const c_char>,
+    _not_send_or_sync: PhantomData<Rc<()>>,
+}
+
+impl FmpqMPolyContext {
+    /// Creates an rational polynomial context with the supplied variable order.
+    pub fn new<S: AsRef<str>>(variable_names: &[S]) -> Result<Self, FlintError> {
+        initialize_single_thread();
+        let (variable_names, variable_pointers) = encode_variable_names(variable_names)?;
+        let mut raw = Box::<ffi::fmpq_mpoly_ctx_struct>::new_uninit();
+
+        // SAFETY: `raw` points to suitably aligned, writable storage, the variable
+        // count fits `slong`, and FLINT fully initializes the context.
+        unsafe {
+            ffi::fmpq_mpoly_ctx_init(
+                raw.as_mut_ptr(),
+                variable_names.len() as ffi::slong,
+                ffi::ordering_t_ORD_LEX,
+            );
+        }
+
+        Ok(Self {
+            // SAFETY: `fmpq_mpoly_ctx_init` completed initialization above.
+            raw: unsafe { raw.assume_init() },
+            _variable_names: variable_names,
+            variable_pointers,
+            _not_send_or_sync: PhantomData,
+        })
+    }
+
+    /// Parses an rational polynomial using this context's variable names.
+    pub fn parse<'context>(
+        &'context self,
+        expression: &str,
+    ) -> Result<FmpqMPoly<'context>, FlintError> {
+        FmpqMPoly::parse(self, expression)
+    }
+
+    fn as_ptr(&self) -> *const ffi::fmpq_mpoly_ctx_struct {
+        self.raw.as_ref()
+    }
+
+    fn variable_pointers(&self) -> Vec<*const c_char> {
+        self.variable_pointers.clone()
+    }
+}
+
+impl Drop for FmpqMPolyContext {
+    fn drop(&mut self) {
+        // SAFETY: The context was initialized by FLINT. Polynomial lifetimes
+        // ensure every value using it has already been dropped.
+        unsafe { ffi::fmpq_mpoly_ctx_clear(self.raw.as_mut()) };
+    }
+}
+
+/// An owned FLINT multivariate polynomial over the rationals.
+pub struct FmpqMPoly<'context> {
+    raw: Box<ffi::fmpq_mpoly_struct>,
+    context: &'context FmpqMPolyContext,
+}
+
+impl<'context> FmpqMPoly<'context> {
+    /// Creates the zero polynomial in `context`.
+    pub fn zero(context: &'context FmpqMPolyContext) -> Self {
+        let mut raw = Box::<ffi::fmpq_mpoly_struct>::new_uninit();
+
+        // SAFETY: `raw` is writable storage and `context` is a live, initialized
+        // FLINT context which outlives the returned polynomial.
+        unsafe { ffi::fmpq_mpoly_init(raw.as_mut_ptr(), context.as_ptr()) };
+
+        Self {
+            // SAFETY: `fmpq_mpoly_init` completed initialization above.
+            raw: unsafe { raw.assume_init() },
+            context,
+        }
+    }
+
+    /// Parses a polynomial using the names and monomial order in `context`.
+    pub fn parse(
+        context: &'context FmpqMPolyContext,
+        expression: &str,
+    ) -> Result<Self, FlintError> {
+        let expression = encode_expression(expression)?;
+        let mut result = Self::zero(context);
+        let mut variables = context.variable_pointers();
+
+        // SAFETY: All pointers refer to live C strings and initialized FLINT
+        // values. `variables` remains alive for the duration of the call.
+        let status = unsafe {
+            ffi::fmpq_mpoly_set_str_pretty(
+                result.raw.as_mut(),
+                expression.as_ptr(),
+                variables.as_mut_ptr(),
+                context.as_ptr(),
+            )
+        };
+        if status != 0 {
+            return Err(FlintError::new(format!(
+                "FLINT could not parse rational polynomial {expression:?}"
+            )));
+        }
+        Ok(result)
+    }
+
+    /// Multiplies two polynomials and returns a newly initialized product.
+    pub fn mul(&self, right: &Self) -> Self {
+        self.assert_same_context(right);
+        let mut result = Self::zero(self.context);
+
+        // SAFETY: Both inputs and the fresh output use the same initialized
+        // context, and the output aliases neither input.
+        unsafe {
+            ffi::fmpq_mpoly_mul(
+                result.raw.as_mut(),
+                self.raw.as_ref(),
+                right.raw.as_ref(),
+                self.context.as_ptr(),
+            );
+        }
+        result
+    }
+
+    /// Divides by `divisor` when the quotient is exact.
+    pub fn exact_div(&self, divisor: &Self) -> Result<Self, FlintError> {
+        self.assert_same_context(divisor);
+        let mut result = Self::zero(self.context);
+
+        // SAFETY: The dividend, divisor, and fresh quotient use the same live
+        // context, and the quotient aliases neither input.
+        let status = unsafe {
+            ffi::fmpq_mpoly_divides(
+                result.raw.as_mut(),
+                self.raw.as_ref(),
+                divisor.raw.as_ref(),
+                self.context.as_ptr(),
+            )
+        };
+        if status == 0 {
+            return Err(FlintError::new(
+                "FLINT rational polynomial division was not exact",
+            ));
+        }
+        Ok(result)
+    }
+
+    /// Tests equality between polynomials in the same context.
+    pub fn equals(&self, right: &Self) -> bool {
+        self.assert_same_context(right);
+        // SAFETY: Both polynomials and their common context are initialized.
+        unsafe {
+            ffi::fmpq_mpoly_equal(self.raw.as_ref(), right.raw.as_ref(), self.context.as_ptr()) != 0
+        }
+    }
+
+    fn assert_same_context(&self, right: &Self) {
+        assert!(
+            std::ptr::eq(self.context, right.context),
+            "FLINT polynomial operands belong to different contexts"
+        );
+    }
+}
+impl Drop for FmpqMPoly<'_> {
+    fn drop(&mut self) {
+        // SAFETY: The polynomial was initialized by FLINT and its borrowed
+        // context remains live for the duration of this destructor.
+        unsafe { ffi::fmpq_mpoly_clear(self.raw.as_mut(), self.context.as_ptr()) };
+    }
+}

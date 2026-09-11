@@ -1,4 +1,8 @@
 //! Single-core polynomial benchmarks comparing Symbolica with FLINT.
+//!
+//! Run rational cases with `SYMBOLICA_FLINT_BENCH_PAIRED=1` and
+//! `SYMBOLICA_FLINT_BENCH_FILTER=rational/`. Inputs and exact results are
+//! validated before the paired multiplication and division measurements.
 
 mod support;
 
@@ -681,6 +685,7 @@ mod polybench_factorization {
 }
 
 fn paired_benchmarks() {
+    paired_rational_shapes();
     paired_integer_multiplication();
     paired_exact_division();
     paired_finite_field(&Zp::new(FINITE_FIELDS[0].modulus as u32), FINITE_FIELDS[0]);
@@ -1201,6 +1206,75 @@ fn paired_polybench_factorization() {
                 || symbolica_input.factor(),
                 || flint_input.factor().unwrap(),
             );
+        }
+    }
+}
+
+/// Rational coefficients and the exponent-packing boundary, using the same
+/// generated operands as the standalone rational/integer comparison example.
+fn paired_rational_shapes() {
+    use support::{flint::FmpqMPolyContext, rational_shapes};
+    let config = PairedConfig::from_env(8);
+    let names = ["x", "y", "z", "a", "b", "c", "d", "e"];
+    let variables: Vec<PolyVariable> = [
+        symbol!("x"),
+        symbol!("y"),
+        symbol!("z"),
+        symbol!("a"),
+        symbol!("b"),
+        symbol!("c"),
+        symbol!("d"),
+        symbol!("e"),
+    ]
+    .into_iter()
+    .map(Into::into)
+    .collect();
+    for shape in rational_shapes::SHAPES {
+        for bits in [12, 63, 127] {
+            for rational in [false, true] {
+                let name = format!("rational/{shape}/b{bits}/q{rational}");
+                let multiply = format!("{name}/multiply");
+                let divide = format!("{name}/exact_division");
+                if !config.matches(&multiply) && !config.matches(&divide) {
+                    continue;
+                }
+                let nvars = if shape.starts_with("sparse") { 8 } else { 3 };
+                let [left, right] = rational_shapes::inputs(
+                    std::sync::Arc::new(variables[..nvars].to_vec()),
+                    shape,
+                    bits,
+                    rational,
+                );
+                let product = &left * &right;
+                let context = FmpqMPolyContext::new(&names[..nvars]).unwrap();
+                let flint_left = context.parse(&left.to_string()).unwrap();
+                let flint_right = context.parse(&right.to_string()).unwrap();
+                let flint_product = context.parse(&product.to_string()).unwrap();
+                assert!(flint_left.mul(&flint_right).equals(&flint_product));
+                assert!(
+                    flint_product
+                        .exact_div(&flint_left)
+                        .unwrap()
+                        .equals(&flint_right)
+                );
+                assert_eq!(product.try_div(&left).unwrap(), right);
+                if config.matches(&multiply) {
+                    run_paired(
+                        &config,
+                        &multiply,
+                        || &left * &right,
+                        || flint_left.mul(&flint_right),
+                    );
+                }
+                if config.matches(&divide) {
+                    run_paired(
+                        &config,
+                        &divide,
+                        || product.try_div(&left).unwrap(),
+                        || flint_product.exact_div(&flint_left).unwrap(),
+                    );
+                }
+            }
         }
     }
 }
