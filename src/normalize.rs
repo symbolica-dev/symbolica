@@ -1208,7 +1208,10 @@ impl AtomView<'_> {
                     }
                 }
 
-                if id.is_symmetric() || id.is_antisymmetric() {
+                let sort_antisymmetric = id.is_antisymmetric()
+                    && !out_f.to_fun_view().iter().any(|a| a.contains_wildcard());
+
+                if id.is_symmetric() || sort_antisymmetric {
                     let mut arg_buf: SmallVec<[(usize, _); 20]> = SmallVec::new();
 
                     for (i, a) in out_f.to_fun_view().iter().enumerate() {
@@ -1260,9 +1263,9 @@ impl AtomView<'_> {
                             }
 
                             let m = out.to_mul();
+                            m.extend(InlineNum::new(-1, 1).as_view());
                             m.extend(handle.as_view());
-                            handle.to_num(-1);
-                            m.extend(handle.as_view());
+                            m.set_has_coefficient(true);
                             m.set_normalized(true);
 
                             return;
