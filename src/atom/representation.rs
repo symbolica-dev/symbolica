@@ -1623,6 +1623,11 @@ impl<'a> NumView<'a> {
     }
 
     #[inline]
+    pub fn is_rational_polynomial(&self) -> bool {
+        self.data.is_rational_polynomial()
+    }
+
+    #[inline]
     pub fn get_coeff_view(&self) -> CoefficientView<'a> {
         self.data[1..].get_coeff_view().0
     }
