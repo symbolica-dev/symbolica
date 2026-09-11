@@ -1065,7 +1065,7 @@ impl PythonExpressionEvaluator {
                 self.eval_complex
                     .clone()
                     .set_coeff(&self.rational_constants)
-                    .map_coeff(&|x| x.re.to_multi_prec_float(prec)),
+                    .map_coeff_with_prec(&|x| x.re.to_multi_prec_float(prec), prec),
             ));
         }
 
@@ -1248,12 +1248,15 @@ impl PythonExpressionEvaluator {
                 self.eval_complex
                     .clone()
                     .set_coeff(&self.rational_constants)
-                    .map_coeff(&|x| {
-                        Complex::new(
-                            x.re.to_multi_prec_float(prec),
-                            x.im.to_multi_prec_float(prec),
-                        )
-                    }),
+                    .map_coeff_with_prec(
+                        &|x| {
+                            Complex::new(
+                                x.re.to_multi_prec_float(prec),
+                                x.im.to_multi_prec_float(prec),
+                            )
+                        },
+                        prec,
+                    ),
             ));
         }
 
