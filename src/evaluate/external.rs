@@ -208,10 +208,27 @@ impl<T> ExternalFunctionContainer<T> {
             })
             .unwrap();
 
-        // TODO: escape minus signs, etc
+        // A generator receives the chosen name, so it can use escaped tags.
+        // Preserve the historical names for fixed snippets and externally
+        // supplied functions, whose definitions may already depend on them.
+        let escape_tags = symbol
+            .get_evaluation_info()
+            .is_some_and(EvaluationInfo::has_cpp_generator);
         for t in &tags {
             export_name += "_";
-            export_name += &t.to_canonical_string();
+            let tag = t.to_canonical_string();
+            if escape_tags {
+                // Escape underscores as well to keep the encoding injective.
+                for byte in tag.bytes() {
+                    if byte.is_ascii_alphanumeric() {
+                        export_name.push(byte as char);
+                    } else {
+                        export_name += &format!("_{byte:02x}");
+                    }
+                }
+            } else {
+                export_name += &tag;
+            }
         }
 
         Self {
@@ -326,8 +343,10 @@ impl<T> ExternalFunctionContainer<T> {
     }
 
     #[cfg(feature = "native_code_generation")]
-    pub(super) fn cpp(&self) -> Option<&str> {
-        self.symbol.get_evaluation_info()?.get_cpp()
+    pub(super) fn cpp(&self) -> Option<std::borrow::Cow<'_, str>> {
+        self.symbol
+            .get_evaluation_info()?
+            .generate_cpp(self.export_name(), &self.tag_views())
     }
 }
 

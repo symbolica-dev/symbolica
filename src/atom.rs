@@ -404,14 +404,19 @@ pub struct EvaluationInfo {
     constant_eval_cache: OnceLock<Result<Complex<Float>, String>>,
     /// A map from the evaluation result type to either a direct tagless implementation or a tagged generator.
     eval_fns: HashMap<TypeId, ErasedEvalFn>,
-    /// A C++ snippet that defines this external function for exported code.
-    cpp: Option<String>,
+    /// C++ source, or a generator for tag-dependent C++ source.
+    cpp: Option<CppCode>,
 }
 
 pub type EvalFn<T> = Box<dyn ExternalFunction<T>>;
 type ErasedConstantEval =
     Box<dyn Fn(&[AtomView], u32) -> Result<Complex<Float>, String> + Send + Sync>;
 type ErasedTaggedEvalGen = Box<dyn Fn(&[AtomView]) -> Box<dyn Any> + Send + Sync>;
+
+enum CppCode {
+    Snippet(String),
+    Generated(Box<dyn Fn(&str, &[AtomView]) -> String + Send + Sync>),
+}
 
 enum ErasedEvalFn {
     Direct(Box<dyn Any + Send + Sync>),
@@ -482,13 +487,43 @@ impl EvaluationInfo {
     /// call to this symbol as an external function. It should define a function
     /// with the exported name, which is derived from the symbol's ASCII name.
     pub fn with_cpp(mut self, snippet: impl Into<String>) -> Self {
-        self.cpp = Some(snippet.into());
+        self.cpp = Some(CppCode::Snippet(snippet.into()));
         self
     }
 
-    /// Return the attached C++ snippet, if any.
+    /// Generate a C++ definition for each exported specialization of this function.
+    ///
+    /// The callback receives the exported C++ function name and the leading symbolic
+    /// tags. It should return source defining that function, with the tags embedded
+    /// in its body; only numeric arguments are passed at evaluation time.
+    /// The generated source is inserted verbatim, just like [`Self::with_cpp`].
+    /// Calling this method replaces any previously attached snippet or generator.
+    pub fn with_cpp_generator(
+        mut self,
+        generator: impl Fn(&str, &[AtomView]) -> String + Send + Sync + 'static,
+    ) -> Self {
+        self.cpp = Some(CppCode::Generated(Box::new(generator)));
+        self
+    }
+
+    /// Return the attached fixed C++ snippet, if any. Generators are not invoked.
     pub fn get_cpp(&self) -> Option<&str> {
-        self.cpp.as_deref()
+        match self.cpp.as_ref()? {
+            CppCode::Snippet(snippet) => Some(snippet),
+            CppCode::Generated(_) => None,
+        }
+    }
+
+    pub(crate) fn has_cpp_generator(&self) -> bool {
+        matches!(self.cpp, Some(CppCode::Generated(_)))
+    }
+
+    /// Return the C++ source for a particular exported name and set of tags.
+    pub fn generate_cpp(&self, name: &str, tags: &[AtomView]) -> Option<Cow<'_, str>> {
+        Some(match self.cpp.as_ref()? {
+            CppCode::Snippet(snippet) => Cow::Borrowed(snippet),
+            CppCode::Generated(generator) => Cow::Owned(generator(name, tags)),
+        })
     }
 
     /// Return true if a precision-aware constant evaluator is registered.

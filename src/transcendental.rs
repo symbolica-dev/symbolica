@@ -1,5 +1,7 @@
 use std::sync::{Arc, LazyLock};
 
+mod cpp;
+
 use crate::{
     atom::{Atom, AtomCore, AtomOrView, AtomView, EvaluationInfo, FunctionBuilder, Symbol},
     coefficient::{Coefficient, CoefficientView},
@@ -352,6 +354,7 @@ impl SpecialSymbols {
                 )
                 .with_evaluation_info(
                     EvaluationInfo::new()
+                    .with_cpp(cpp::unary("gamma", "tgamma", "x", false))
                     .register(|args: &[Complex<Float>]| {
                         unary_eval_complex_float(args, gamma_numeric_eval)
                     })
@@ -633,6 +636,7 @@ impl SpecialSymbols {
                 })
                 .with_evaluation_info(
                     EvaluationInfo::new()
+                    .with_cpp(cpp::unary("zeta", "riemann_zeta", "x", false))
                     .register(|args: &[Complex<Float>]| {
                         unary_eval_complex_float(args, zeta_numeric_eval)
                     })
@@ -679,6 +683,7 @@ impl SpecialSymbols {
                 })
                 .with_evaluation_info(
                     EvaluationInfo::new()
+                    .with_cpp(cpp::unary("erf", "erf", "x", false))
                     .register(|args: &[Complex<Float>]| {
                         unary_eval_complex_float(args, erf_numeric_eval)
                     })
@@ -828,7 +833,9 @@ impl GeometricSymbols {
                     Some((Atom::num(1) / &delta, -&delta / function!(tan, delta)))
                 })
                 .with_evaluation_info(
-                    EvaluationInfo::new().register(|args: &[Complex<Float>]| {
+                    EvaluationInfo::new()
+                    .with_cpp(cpp::unary("tan", "tan", "x", false))
+                    .register(|args: &[Complex<Float>]| {
                         unary_eval_complex_float(args, |z, _| z.tan())
                     })
                     .register(|args: &[Float]| unary_eval_real(args, |x| x.tan()))
@@ -870,7 +877,9 @@ impl GeometricSymbols {
                     Some((Atom::num(1) / &delta, &delta / function!(tan, delta)))
                 })
                 .with_evaluation_info(
-                    EvaluationInfo::new().register(|args: &[Complex<Float>]| {
+                    EvaluationInfo::new()
+                    .with_cpp(cpp::unary("cot", "tan", "x", true))
+                    .register(|args: &[Complex<Float>]| {
                         unary_eval_complex_float(args, |z, _| z.tan().inv())
                     })
                     .register(|args: &[Float]| unary_eval_real(args, |x| x.tan().inv()))
@@ -913,7 +922,9 @@ impl GeometricSymbols {
                     ))
                 })
                 .with_evaluation_info(
-                    EvaluationInfo::new().register(|args: &[Complex<Float>]| {
+                    EvaluationInfo::new()
+                    .with_cpp(cpp::unary("sec", "cos", "x", true))
+                    .register(|args: &[Complex<Float>]| {
                         unary_eval_complex_float(args, |z, _| z.cos().inv())
                     })
                     .register(|args: &[Float]| unary_eval_real(args, |x| x.cos().inv()))
@@ -956,7 +967,9 @@ impl GeometricSymbols {
                     ))
                 })
                 .with_evaluation_info(
-                    EvaluationInfo::new().register(|args: &[Complex<Float>]| {
+                    EvaluationInfo::new()
+                    .with_cpp(cpp::unary("csc", "sin", "x", true))
+                    .register(|args: &[Complex<Float>]| {
                         unary_eval_complex_float(args, |z, _| z.sin().inv())
                     })
                     .register(|args: &[Float]| unary_eval_real(args, |x| x.sin().inv()))
@@ -988,7 +1001,9 @@ impl GeometricSymbols {
                     }
                 })
                 .with_evaluation_info(
-                    EvaluationInfo::new().register(|args: &[Complex<Float>]| {
+                    EvaluationInfo::new()
+                    .with_cpp(cpp::unary("sinh", "sinh", "x", false))
+                    .register(|args: &[Complex<Float>]| {
                         unary_eval_complex_float(args, |z, _| z.sinh())
                     })
                     .register(|args: &[Float]| unary_eval_real(args, |x| x.sinh()))
@@ -1020,7 +1035,9 @@ impl GeometricSymbols {
                     }
                 })
                 .with_evaluation_info(
-                    EvaluationInfo::new().register(|args: &[Complex<Float>]| {
+                    EvaluationInfo::new()
+                    .with_cpp(cpp::unary("cosh", "cosh", "x", false))
+                    .register(|args: &[Complex<Float>]| {
                         unary_eval_complex_float(args, |z, _| z.cosh())
                     })
                     .register(|args: &[Float]| unary_eval_real(args, |x| x.cosh()))
@@ -1062,7 +1079,9 @@ impl GeometricSymbols {
                     Some((Atom::num(1) / &delta, &delta / function!(tanh, delta)))
                 })
                 .with_evaluation_info(
-                    EvaluationInfo::new().register(|args: &[Complex<Float>]| {
+                    EvaluationInfo::new()
+                    .with_cpp(cpp::unary("tanh", "tanh", "x", false))
+                    .register(|args: &[Complex<Float>]| {
                         unary_eval_complex_float(args, |z, _| z.tanh())
                     })
                     .register(|args: &[Float]| unary_eval_real(args, |x| x.tanh()))
@@ -1104,7 +1123,9 @@ impl GeometricSymbols {
                     Some((Atom::num(1) / &delta, &delta / function!(tanh, delta)))
                 })
                 .with_evaluation_info(
-                    EvaluationInfo::new().register(|args: &[Complex<Float>]| {
+                    EvaluationInfo::new()
+                    .with_cpp(cpp::unary("coth", "tanh", "x", true))
+                    .register(|args: &[Complex<Float>]| {
                         unary_eval_complex_float(args, |z, _| z.tanh().inv())
                     })
                     .register(|args: &[Float]| unary_eval_real(args, |x| x.tanh().inv()))
@@ -1145,7 +1166,9 @@ impl GeometricSymbols {
                     Some((Atom::num(1) / &delta, residue * &delta / function!(sinh, delta)))
                 })
                 .with_evaluation_info(
-                    EvaluationInfo::new().register(|args: &[Complex<Float>]| {
+                    EvaluationInfo::new()
+                    .with_cpp(cpp::unary("sech", "cosh", "x", true))
+                    .register(|args: &[Complex<Float>]| {
                         unary_eval_complex_float(args, |z, _| z.cosh().inv())
                     })
                     .register(|args: &[Float]| unary_eval_real(args, |x| x.cosh().inv()))
@@ -1186,7 +1209,9 @@ impl GeometricSymbols {
                     Some((Atom::num(1) / &delta, residue * &delta / function!(sinh, delta)))
                 })
                 .with_evaluation_info(
-                    EvaluationInfo::new().register(|args: &[Complex<Float>]| {
+                    EvaluationInfo::new()
+                    .with_cpp(cpp::unary("csch", "sinh", "x", true))
+                    .register(|args: &[Complex<Float>]| {
                         unary_eval_complex_float(args, |z, _| z.sinh().inv())
                     })
                     .register(|args: &[Float]| unary_eval_real(args, |x| x.sinh().inv()))
@@ -1234,6 +1259,7 @@ impl GeometricSymbols {
                 }
             },
             eval = EvaluationInfo::new()
+                .with_cpp(cpp::unary("asin", "asin", "x", false))
                 .register(|args: &[Complex<Float>]| {
                     unary_eval_complex_float(args, |z, _| z.asin())
                 })
@@ -1271,6 +1297,7 @@ impl GeometricSymbols {
                 }
             },
             eval = EvaluationInfo::new()
+                .with_cpp(cpp::unary("acos", "acos", "x", false))
                 .register(|args: &[Complex<Float>]| {
                     unary_eval_complex_float(args, |z, _| z.acos())
                 })
@@ -1322,6 +1349,7 @@ impl GeometricSymbols {
                 }
             },
             eval = EvaluationInfo::new()
+                .with_cpp(cpp::atan())
                 .register(|args: &[Complex<Float>]| match args {
                     [z] => atan_numeric_eval(z, z.re.prec().max(z.im.prec())),
                     [x, y] => atan2_numeric_eval(
@@ -1373,6 +1401,7 @@ impl GeometricSymbols {
                 }
             },
             eval = EvaluationInfo::new()
+                .with_cpp(cpp::unary("acot", "atan", "T(1) / x", false))
                 .register(|args: &[Complex<Float>]| {
                     unary_eval_complex_float(args, |z, prec| atan_numeric_eval(&z.inv(), prec))
                 })
@@ -1422,6 +1451,7 @@ impl GeometricSymbols {
                 }
             },
             eval = EvaluationInfo::new()
+                .with_cpp(cpp::unary("asec", "acos", "T(1) / x", false))
                 .register(|args: &[Complex<Float>]| {
                     unary_eval_complex_float(args, |z, _| z.inv().acos())
                 })
@@ -1456,6 +1486,7 @@ impl GeometricSymbols {
                 }
             },
             eval = EvaluationInfo::new()
+                .with_cpp(cpp::unary("acsc", "asin", "T(1) / x", false))
                 .register(|args: &[Complex<Float>]| {
                     unary_eval_complex_float(args, |z, _| z.inv().asin())
                 })
@@ -1493,6 +1524,7 @@ impl GeometricSymbols {
                 }
             },
             eval = EvaluationInfo::new()
+                .with_cpp(cpp::unary("asinh", "asinh", "x", false))
                 .register(|args: &[Complex<Float>]| {
                     unary_eval_complex_float(args, |z, _| z.asinh())
                 })
@@ -1531,6 +1563,7 @@ impl GeometricSymbols {
                 }
             },
             eval = EvaluationInfo::new()
+                .with_cpp(cpp::unary("acosh", "acosh", "x", false))
                 .register(|args: &[Complex<Float>]| {
                     unary_eval_complex_float(args, |z, _| z.acosh())
                 })
@@ -1567,6 +1600,7 @@ impl GeometricSymbols {
                 }
             },
             eval = EvaluationInfo::new()
+                .with_cpp(cpp::unary("atanh", "atanh", "x", false))
                 .register(|args: &[Complex<Float>]| {
                     unary_eval_complex_float(args, |z, _| z.atanh())
                 })
@@ -1599,6 +1633,7 @@ impl GeometricSymbols {
                 }
             },
             eval = EvaluationInfo::new()
+                .with_cpp(cpp::unary("acoth", "atanh", "T(1) / x", false))
                 .register(|args: &[Complex<Float>]| {
                     unary_eval_complex_float(args, |z, _| z.inv().atanh())
                 })
@@ -1639,6 +1674,7 @@ impl GeometricSymbols {
                 }
             },
             eval = EvaluationInfo::new()
+                .with_cpp(cpp::unary("asech", "acosh", "T(1) / x", false))
                 .register(|args: &[Complex<Float>]| {
                     unary_eval_complex_float(args, |z, _| z.inv().acosh())
                 })
@@ -1674,6 +1710,7 @@ impl GeometricSymbols {
                 }
             },
             eval = EvaluationInfo::new()
+                .with_cpp(cpp::unary("acsch", "asinh", "T(1) / x", false))
                 .register(|args: &[Complex<Float>]| {
                     unary_eval_complex_float(args, |z, _| z.inv().asinh())
                 })
@@ -1749,6 +1786,7 @@ impl BesselSymbols {
             },
             eval = EvaluationInfo::new()
                 .with_tags(1)
+                .with_cpp_generator(|name, tags| cpp::bessel("cyl_bessel_j", name, tags))
                 .register_tagged(|tags| {
                     let tags = tags.iter().map(|x| x.to_owned()).collect::<Vec<_>>();
                     Box::new(move |args: &[Complex<Float>]| {
@@ -1818,6 +1856,7 @@ impl BesselSymbols {
             },
             eval = EvaluationInfo::new()
                 .with_tags(1)
+                .with_cpp_generator(|name, tags| cpp::bessel("cyl_neumann", name, tags))
                 .register_tagged(|tags| {
                     let tags = tags.iter().map(|x| x.to_owned()).collect::<Vec<_>>();
                     Box::new(move |args: &[Complex<Float>]| {
@@ -1894,6 +1933,7 @@ impl BesselSymbols {
             },
             eval = EvaluationInfo::new()
                 .with_tags(1)
+                .with_cpp_generator(|name, tags| cpp::bessel("cyl_bessel_i", name, tags))
                 .register_tagged(|tags| {
                     let tags = tags.iter().map(|x| x.to_owned()).collect::<Vec<_>>();
                     Box::new(move |args: &[Complex<Float>]| {
@@ -1963,6 +2003,7 @@ impl BesselSymbols {
             },
             eval = EvaluationInfo::new()
                 .with_tags(1)
+                .with_cpp_generator(|name, tags| cpp::bessel("cyl_bessel_k", name, tags))
                 .register_tagged(|tags| {
                     let tags = tags.iter().map(|x| x.to_owned()).collect::<Vec<_>>();
                     Box::new(move |args: &[Complex<Float>]| {

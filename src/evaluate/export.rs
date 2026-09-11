@@ -298,7 +298,7 @@ impl<T: ExportNumber + SingleFloat> ExpressionEvaluator<T> {
                     continue;
                 };
                 if seen.insert(format!("external:{snippet}")) {
-                    output.push_str(snippet);
+                    output.push_str(&snippet);
                     if !snippet.ends_with('\n') {
                         output.push('\n');
                     }
