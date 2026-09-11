@@ -507,17 +507,20 @@ impl<'a> AtomView<'a> {
         let mut external_functions = vec![];
 
         let mut result_indices = vec![];
-        let mut arg_stack = vec![];
+        let mut args = params
+            .iter()
+            .enumerate()
+            .map(|(i, p)| (p.as_view(), vec![Slot::Param(i)]))
+            .collect();
         for expr in expressions {
             let res = expr.as_atom_view().linearize_impl(
                 fn_map,
-                params,
+                &mut args,
                 &mut constants,
                 &mut constant_map,
                 &mut external_functions,
                 &mut instr,
                 &mut subexpression,
-                &mut arg_stack,
             )?;
             result_indices.push(res);
         }
@@ -652,21 +655,18 @@ impl<'a> AtomView<'a> {
     fn linearize_impl(
         &self,
         fn_map: &'a FunctionMap,
-        params: &[Atom],
+        params: &mut HashMap<AtomView<'a>, Vec<Slot>>,
         constants: &mut Vec<Complex<Rational>>,
         constant_map: &mut HashMap<Complex<Rational>, usize>,
         external_functions: &mut Vec<ExternalFunctionContainer<Complex<Rational>>>,
         instr: &mut Vec<Instruction>,
         subexpressions: &mut HashMap<AtomView<'a>, Slot>,
-        args: &mut Vec<(AtomView<'a>, Slot)>,
     ) -> Result<Slot, EvaluationError> {
         if matches!(*self, AtomView::Var(_) | AtomView::Fun(_)) {
-            if let Some(p) = args.iter().rev().find(|s| *self == s.0) {
-                return Ok(p.1);
-            }
-
-            if let Some(p) = params.iter().position(|a| a.as_view() == *self) {
-                return Ok(Slot::Param(p));
+            if let Some(p) = params.get(self)
+                && let Some(v) = p.last()
+            {
+                return Ok(*v);
             }
         }
 
@@ -728,7 +728,6 @@ impl<'a> AtomView<'a> {
                         external_functions,
                         instr,
                         subexpressions,
-                        args,
                     );
                 }
 
@@ -773,7 +772,6 @@ impl<'a> AtomView<'a> {
                         external_functions,
                         instr,
                         subexpressions,
-                        args,
                     )?;
 
                     let temp = Slot::Temp(instr.len());
@@ -808,7 +806,6 @@ impl<'a> AtomView<'a> {
                         external_functions,
                         instr,
                         subexpressions,
-                        args,
                     )?;
 
                     // try to resolve the condition if it is fully numeric
@@ -894,7 +891,6 @@ impl<'a> AtomView<'a> {
                                 external_functions,
                                 instr,
                                 subexpressions,
-                                args,
                             )?
                         } else {
                             else_branch.linearize_impl(
@@ -905,7 +901,6 @@ impl<'a> AtomView<'a> {
                                 external_functions,
                                 instr,
                                 subexpressions,
-                                args,
                             )?
                         };
 
@@ -925,7 +920,6 @@ impl<'a> AtomView<'a> {
                         external_functions,
                         instr,
                         &mut sub_expr_pos_child,
-                        args,
                     )?;
 
                     let label_end_pos = instr.len();
@@ -942,7 +936,6 @@ impl<'a> AtomView<'a> {
                         external_functions,
                         instr,
                         &mut sub_expr_pos_child,
-                        args,
                     )?;
 
                     instr[label_end_pos] = Instruction::Goto(instr.len());
@@ -991,7 +984,6 @@ impl<'a> AtomView<'a> {
                                 external_functions,
                                 instr,
                                 subexpressions,
-                                args,
                             )
                         })
                         .collect::<Result<_, _>>()?;
@@ -1029,9 +1021,8 @@ impl<'a> AtomView<'a> {
                         });
                     }
 
-                    let old_arg_stack_len = args.len();
-
                     let mut arg_shadowed = false;
+                    let mut arg_slots = Vec::with_capacity(arg_spec.len());
                     for (eval_arg, arg_spec) in f.iter().skip(*tag_len).zip(arg_spec) {
                         let slot = eval_arg.linearize_impl(
                             fn_map,
@@ -1041,14 +1032,19 @@ impl<'a> AtomView<'a> {
                             external_functions,
                             instr,
                             subexpressions,
-                            args,
                         )?;
 
-                        if args.iter().any(|(a, _)| *a == arg_spec.as_view()) {
+                        if let Some(p) = params.get(&arg_spec.as_view())
+                            && !p.is_empty()
+                        {
                             arg_shadowed = true;
                         }
 
-                        args.push((arg_spec.as_view(), slot));
+                        arg_slots.push(slot);
+                    }
+
+                    for (eval_arg, arg_slot) in arg_spec.iter().zip(arg_slots) {
+                        params.entry(eval_arg.as_view()).or_default().push(arg_slot);
                     }
 
                     // inline function call
@@ -1062,7 +1058,7 @@ impl<'a> AtomView<'a> {
                         constant_map,
                         external_functions,
                         instr,
-                        if old_arg_stack_len == args.len() {
+                        if arg_spec.is_empty() {
                             subexpressions
                         } else {
                             // we can only inherit the subexpressions if the new function argument symbols
@@ -1073,10 +1069,11 @@ impl<'a> AtomView<'a> {
 
                             &mut sub_expr_pos_child
                         },
-                        args,
                     )?;
 
-                    args.truncate(old_arg_stack_len);
+                    for eval_arg in arg_spec {
+                        params.get_mut(&eval_arg.as_view()).unwrap().pop();
+                    }
 
                     r
                 }
@@ -1093,7 +1090,6 @@ impl<'a> AtomView<'a> {
                         external_functions,
                         instr,
                         subexpressions,
-                        args,
                     )?;
 
                     let temp = Slot::Temp(instr.len());
@@ -1116,7 +1112,6 @@ impl<'a> AtomView<'a> {
                     external_functions,
                     instr,
                     subexpressions,
-                    args,
                 )?;
 
                 if let AtomView::Num(n) = e
@@ -1172,7 +1167,6 @@ impl<'a> AtomView<'a> {
                     external_functions,
                     instr,
                     subexpressions,
-                    args,
                 )?;
 
                 let temp = Slot::Temp(instr.len());
@@ -1190,7 +1184,6 @@ impl<'a> AtomView<'a> {
                         external_functions,
                         instr,
                         subexpressions,
-                        args,
                     )?;
                     muls.push(a);
                 }
@@ -1212,7 +1205,6 @@ impl<'a> AtomView<'a> {
                         external_functions,
                         instr,
                         subexpressions,
-                        args,
                     )?);
                 }
 
