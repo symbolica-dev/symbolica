@@ -37,7 +37,8 @@ use crate::{
 };
 
 pub(crate) const SYMBOLICA_MAGIC: u32 = 0x37871367;
-pub(crate) const EXPORT_FORMAT_VERSION: u16 = 4;
+pub(crate) const EXPORT_FORMAT_VERSION: u16 = 5;
+pub(crate) const FULL_STATE_EXPORT_FLAG: u8 = 1;
 
 /// An id for a given finite field in a registry.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
@@ -1092,6 +1093,7 @@ impl State {
 
         dest.write_u32::<LittleEndian>(SYMBOLICA_MAGIC)?;
         dest.write_u16::<LittleEndian>(EXPORT_FORMAT_VERSION)?;
+        dest.write_u8(FULL_STATE_EXPORT_FLAG)?;
 
         dest.write_u64::<LittleEndian>(
             ID_TO_STR.len() as u64 - SYMBOL_OFFSET.load(Ordering::Relaxed) as u64,
@@ -1099,6 +1101,63 @@ impl State {
 
         for (s, _) in State::symbol_iter() {
             s.export(dest)?;
+        }
+
+        dest.write_u64::<LittleEndian>(FINITE_FIELDS.len() as u64)?;
+        for x in FINITE_FIELDS.iter() {
+            dest.write_u64::<LittleEndian>(x.get_prime())?;
+        }
+
+        dest.write_u64::<LittleEndian>(VARIABLE_LISTS.len() as u64)?;
+        for x in VARIABLE_LISTS.iter() {
+            dest.write_u64::<LittleEndian>(x.len() as u64)?;
+            for y in x.iter() {
+                match y {
+                    PolyVariable::Symbol(s) => {
+                        dest.write_u8(0)?;
+                        dest.write_u32::<LittleEndian>(s.get_id())?;
+                    }
+                    PolyVariable::Temporary(u) => {
+                        dest.write_u8(1)?;
+                        dest.write_u64::<LittleEndian>(*u as u64)?;
+                    }
+                    PolyVariable::Function(v, t) => {
+                        dest.write_u8(2)?;
+                        dest.write_u32::<LittleEndian>(v.get_id())?;
+                        t.as_view().write(dest.by_ref())?;
+                    }
+                    PolyVariable::Power(t) => {
+                        dest.write_u8(3)?;
+                        t.as_view().write(dest.by_ref())?;
+                    }
+                }
+            }
+        }
+
+        Ok(())
+    }
+
+    /// Write the state of a part of the symbol table to a binary stream.
+    #[inline(always)]
+    pub fn export_partial<W: Write>(
+        dest: &mut W,
+        symbols: &HashSet<Symbol>,
+    ) -> Result<(), std::io::Error> {
+        if ID_TO_STR.len() == 0 {
+            Self::initialize_state();
+        }
+
+        dest.write_u32::<LittleEndian>(SYMBOLICA_MAGIC)?;
+        dest.write_u16::<LittleEndian>(EXPORT_FORMAT_VERSION)?;
+        dest.write_u8(!FULL_STATE_EXPORT_FLAG)?;
+
+        dest.write_u64::<LittleEndian>(symbols.len() as u64)?;
+
+        for (i, (s, _)) in State::symbol_iter().enumerate() {
+            if symbols.contains(&s) {
+                dest.write_u32::<LittleEndian>(i as u32)?;
+                s.export(dest)?;
+            }
         }
 
         dest.write_u64::<LittleEndian>(FINITE_FIELDS.len() as u64)?;
@@ -1170,8 +1229,14 @@ impl State {
             variables_lists: HashMap::default(),
         };
 
+        let is_full_state = source.read_u8()? == FULL_STATE_EXPORT_FLAG;
+
         let n_symbols = source.read_u64::<LittleEndian>()?;
-        for x in 0..n_symbols {
+        for mut index in 0..n_symbols {
+            if !is_full_state {
+                index = source.read_u32::<LittleEndian>()? as u64
+            }
+
             let (mut name, namespace, attributes, tags, extra_data, aliases, is_exportable) =
                 Symbol::import_impl(source)?;
 
@@ -1196,8 +1261,8 @@ impl State {
                             );
                         }
 
-                        if x as u32 != id.get_id() {
-                            state_map.symbols.insert(x as u32, id);
+                        if index as u32 != id.get_id() {
+                            state_map.symbols.insert(index as u32, id);
                         }
                         break;
                     }
