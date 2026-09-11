@@ -658,6 +658,7 @@ impl Token {
                     match x {
                         "" => {}
                         "linear" => attributes.push(SymbolAttribute::Linear),
+                        "flat" => attributes.push(SymbolAttribute::Flat),
                         "symmetric" => attributes.push(SymbolAttribute::Symmetric),
                         "antisymmetric" => attributes.push(SymbolAttribute::Antisymmetric),
                         "cyclesymmetric" => attributes.push(SymbolAttribute::Cyclesymmetric),
@@ -2083,12 +2084,16 @@ mod test {
 
     #[test]
     fn attributes() {
-        let input = parse!("symbolica::b::{linear,symmetric,test::a}::dot_ls");
+        let input = parse!("symbolica::b::{linear,flat,symmetric,test::a}::dot_ls");
         let s = input.get_symbol().unwrap();
         assert_eq!(s.get_name(), "symbolica::b::dot_ls");
         assert_eq!(
             s.get_attributes(),
-            vec![SymbolAttribute::Symmetric, SymbolAttribute::Linear,]
+            vec![
+                SymbolAttribute::Symmetric,
+                SymbolAttribute::Linear,
+                SymbolAttribute::Flat,
+            ]
         );
         assert_eq!(s.get_tags(), vec!["test::a"]);
 

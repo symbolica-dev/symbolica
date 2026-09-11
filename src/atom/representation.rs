@@ -43,6 +43,7 @@ const SYM_EXTRA_WILDCARD_LEVEL_MASK: u32 = 0b11_000;
 const SYM_EXTRA_WILDCARD_LEVEL_1: u32 = 0b01_000;
 const SYM_EXTRA_WILDCARD_LEVEL_2: u32 = 0b10_000;
 const SYM_EXTRA_WILDCARD_LEVEL_3: u32 = 0b11_000;
+const SYM_EXTRA_FLAT_FLAG: u32 = 0b1_00_000;
 
 const MUL_HAS_COEFF_FLAG: u8 = 0b01000000;
 
@@ -111,6 +112,10 @@ impl Symbol {
             extra |= SYM_EXTRA_POSITIVE_FLAG;
         }
 
+        if self.is_flat {
+            extra |= SYM_EXTRA_FLAT_FLAG;
+        }
+
         match self.wildcard_level {
             0 => {}
             1 => extra |= SYM_EXTRA_WILDCARD_LEVEL_1,
@@ -132,6 +137,7 @@ impl Symbol {
         let is_real = (extra & SYM_EXTRA_REAL_FLAG) != 0;
         let is_integer = (extra & SYM_EXTRA_INTEGER_FLAG) != 0;
         let is_positive = (extra & SYM_EXTRA_POSITIVE_FLAG) != 0;
+        let is_flat = (extra & SYM_EXTRA_FLAT_FLAG) != 0;
         let wildcard_level = match extra & SYM_EXTRA_WILDCARD_LEVEL_MASK {
             SYM_EXTRA_WILDCARD_LEVEL_1 => 1,
             SYM_EXTRA_WILDCARD_LEVEL_2 => 2,
@@ -145,6 +151,7 @@ impl Symbol {
             is_linear,
             is_antisymmetric,
             is_cyclesymmetric,
+            is_flat,
             is_scalar,
             is_real,
             is_integer,

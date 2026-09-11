@@ -23,7 +23,6 @@ from typing import Any, Callable, Iterator, Literal, Sequence, overload
 import numpy as np
 import numpy.typing as npt
 
-
 def use_custom_logger() -> None:
     """
     Enable logging using Python's logging module instead of using the default logging.
@@ -33,12 +32,10 @@ def use_custom_logger() -> None:
     This function must be called before any Symbolica logging events are emitted.
     """
 
-
 def get_namespace() -> str:
     """
     Get the Symbolica namespace for the calling module. Use `set_namespace` to set a namespace.
     """
-
 
 def set_namespace(namespace: str) -> None:
     """
@@ -53,18 +50,15 @@ def set_namespace(namespace: str) -> None:
         The namespace to set for subsequently created symbols.
     """
 
-
 def get_version() -> str:
     """
     Get the current Symbolica version.
     """
 
-
 def is_licensed() -> bool:
     """
     Check if the current Symbolica instance has a valid license key set.
     """
-
 
 def set_license_key(key: str) -> None:
     """
@@ -77,7 +71,6 @@ def set_license_key(key: str) -> None:
         The license key to register for this machine.
     """
 
-
 def request_hobbyist_license(name: str, email: str) -> None:
     """
     Request a key for **non-professional** use for the user `name`, that will be sent to the e-mail address `email`.
@@ -89,7 +82,6 @@ def request_hobbyist_license(name: str, email: str) -> None:
     email: str
         The email address that should receive the license.
     """
-
 
 def request_trial_license(name: str, email: str, company: str) -> None:
     """
@@ -104,7 +96,6 @@ def request_trial_license(name: str, email: str, company: str) -> None:
     company: str
         The company of the user.
     """
-
 
 def request_sublicense(name: str, email: str, company: str, super_licence: str) -> None:
     """
@@ -123,7 +114,6 @@ def request_sublicense(name: str, email: str, company: str, super_licence: str) 
         The parent site-wide license key.
     """
 
-
 def get_license_key(email: str) -> str:
     """
     Get the license key for the account registered with the provided email address.
@@ -134,7 +124,6 @@ def get_license_key(email: str) -> str:
         The email address of the licensed account.
     """
 
-
 @overload
 def S(
     name: str,
@@ -142,6 +131,7 @@ def S(
     is_antisymmetric: bool | None = None,
     is_cyclesymmetric: bool | None = None,
     is_linear: bool | None = None,
+    is_flat: bool | None = None,
     is_scalar: bool | None = None,
     is_real: bool | None = None,
     is_integer: bool | None = None,
@@ -249,6 +239,8 @@ def S(
         Set to true if the symbol is cyclesymmetric.
     is_linear : bool | None
         Set to true if the symbol is linear.
+    is_flat : bool | None
+        Set to true if the symbol is flat (associative). A flat function removes nesting.
     is_scalar : bool | None
         Set to true if the symbol is a scalar. It will be moved out of linear functions.
     is_real : bool | None
@@ -298,7 +290,6 @@ def S(
         Custom user data to associate with the symbol.
     """
 
-
 @overload
 def S(
     *names: str,
@@ -306,6 +297,7 @@ def S(
     is_antisymmetric: bool | None = None,
     is_cyclesymmetric: bool | None = None,
     is_linear: bool | None = None,
+    is_flat: bool | None = None,
     is_scalar: bool | None = None,
     is_real: bool | None = None,
     is_integer: bool | None = None,
@@ -340,6 +332,8 @@ def S(
         Set to true if the symbol is cyclesymmetric.
     is_linear : bool | None
         Set to true if the symbol is multilinear.
+    is_flat : bool | None
+        Set to true if the symbol is flat (associative).
     is_scalar : bool | None
         Set to true if the symbol is a scalar. It will be moved out of linear functions.
     is_real : bool | None
@@ -351,7 +345,6 @@ def S(
     tags: Sequence[str] | None = None
         A list of tags to associate with the symbol.
     """
-
 
 def N(
     num: int | float | complex | str | Decimal, relative_error: float | None = None
@@ -382,7 +375,6 @@ def N(
     relative_error: float | None
         The maximum relative error used when converting floating-point input to a rational number.
     """
-
 
 def E(
     input: str,
@@ -416,12 +408,10 @@ def E(
         If the input is not a valid expression.
     """
 
-
 def T() -> Transformer:
     """
     Create a new transformer that maps an expression.
     """
-
 
 @overload
 def P(
@@ -442,7 +432,6 @@ def P(
     vars: Sequence[Expression] | None
         The variables to treat as polynomial variables, in the given order.
     """
-
 
 @overload
 def P(
@@ -469,7 +458,6 @@ def P(
     vars: Sequence[Expression] | None
         The variables to treat as polynomial variables, in the given order.
     """
-
 
 @overload
 def P(
@@ -506,7 +494,6 @@ def P(
         The variables to treat as polynomial variables, in the given order.
     """
 
-
 class AtomType(Enum):
     """Specifies the type of the atom."""
 
@@ -522,7 +509,6 @@ class AtomType(Enum):
     """The expression is a product."""
     Pow = 6
     """The expression is a power."""
-
 
 class SymbolAttribute(Enum):
     """Specifies the attributes of a symbol."""
@@ -543,7 +529,8 @@ class SymbolAttribute(Enum):
     """The symbol represents an integer."""
     Positive = (8,)
     """The symbol represents a positive number."""
-
+    Flat = (9,)
+    """The function is flat (associative)."""
 
 class AtomTree:
     """
@@ -570,7 +557,6 @@ class AtomTree:
     tail: list[AtomTree]
     """The list of child atoms of this atom."""
 
-
 class ParseMode(Enum):
     """Specifies the parse mode."""
 
@@ -578,7 +564,6 @@ class ParseMode(Enum):
     """Parse using Symbolica notation."""
     Mathematica = 2
     """Parse using Mathematica notation."""
-
 
 class PrintMode(Enum):
     """Specifies the print mode."""
@@ -593,7 +578,6 @@ class PrintMode(Enum):
     """Print using Sympy notation."""
     Typst = 5
     """Print using Typst notation."""
-
 
 class FormattedOutput:
     """A formatted string with rich notebook display representations."""
@@ -620,7 +604,6 @@ class FormattedOutput:
 
     def _repr_pretty_(self, pretty, cycle: bool):
         """Convert the formatted output into a pretty string representation."""
-
 
 class IntegrationStep:
     """One accepted transformation in a symbolic integration derivation."""
@@ -658,7 +641,6 @@ class IntegrationStep:
     def _repr_html_(self) -> str: ...
     def _repr_latex_(self) -> str: ...
     def _repr_pretty_(self, pretty, cycle: bool) -> None: ...
-
 
 class Symbol:
     """Built-in Symbolica symbols."""
@@ -810,7 +792,6 @@ class Symbol:
     ALT: Expression
     """The built-in alternative-pattern function."""
 
-
 class Expression:
     """
     A Symbolica expression.
@@ -834,6 +815,7 @@ class Expression:
         is_antisymmetric: bool | None = None,
         is_cyclesymmetric: bool | None = None,
         is_linear: bool | None = None,
+        is_flat: bool | None = None,
         is_scalar: bool | None = None,
         is_real: bool | None = None,
         is_integer: bool | None = None,
@@ -843,8 +825,7 @@ class Expression:
         normalization: Transformer | None = None,
         print: Callable[..., str | None] | None = None,
         derivative: Callable[[Expression, int], Expression] | None = None,
-        series: Callable[[Sequence[Series]],
-                         tuple[Expression, Expression] | None]
+        series: Callable[[Sequence[Series]], tuple[Expression, Expression] | None]
         | None = None,
         eval: dict[str, Any] | None = None,
         data: str
@@ -891,8 +872,8 @@ class Expression:
         >>> E("real_log(exp(x)) + real_log(5)")
 
         Define a custom print function:
-        >>> def print_mu(mu: Expression, latex: bool, **kwargs) -> str | None:
-        >>>     if latex:
+        >>> def print_mu(mu: Expression, mode: PrintMode, **kwargs) -> str | None:
+        >>>     if mode == PrintMode.Latex:
         >>>         if mu.get_type() == AtomType.Fn:
         >>>             return "\\mu_{" + ",".join(a.format() for a in mu) + "}"
         >>>         else:
@@ -942,6 +923,8 @@ class Expression:
             Set to true if the symbol is cyclesymmetric.
         is_linear : bool | None
             Set to true if the symbol is linear.
+        is_flat : bool | None
+            Set to true if the symbol is flat (associative).  A flat function removes nesting.
         is_scalar : bool | None
             Set to true if the symbol is a scalar. It will be moved out of linear functions.
         is_real : bool | None
@@ -1000,6 +983,7 @@ class Expression:
         is_antisymmetric: bool | None = None,
         is_cyclesymmetric: bool | None = None,
         is_linear: bool | None = None,
+        is_flat: bool | None = None,
         is_real: bool | None = None,
         is_scalar: bool | None = None,
         is_integer: bool | None = None,
@@ -1034,6 +1018,8 @@ class Expression:
             Set to true if the symbol is cyclesymmetric.
         is_linear : bool | None
             Set to true if the symbol is multilinear.
+        is_flat : bool | None
+            Set to true if the symbol is flat (associative).
         is_scalar : bool | None
             Set to true if the symbol is a scalar. It will be moved out of linear functions.
         is_real : bool | None
@@ -1328,8 +1314,7 @@ class Expression:
         show_namespaces: bool = False,
         hide_namespace: str | None = None,
         include_attributes: bool = False,
-        custom_print_mode: dict[str, int | str |
-                                dict[str | int, Any]] | None = None,
+        custom_print_mode: dict[str, int | str | dict[str | int, Any]] | None = None,
     ) -> str:
         """
         Convert the expression into a human-readable string, with tunable settings.
@@ -1438,8 +1423,7 @@ class Expression:
         show_namespaces: bool = False,
         hide_namespace: str | None = None,
         include_attributes: bool = False,
-        custom_print_mode: dict[str, int | str |
-                                dict[str | int, Any]] | None = None,
+        custom_print_mode: dict[str, int | str | dict[str | int, Any]] | None = None,
     ) -> FormattedOutput:
         """
         Convert the expression into a rich display object, with tunable settings.
@@ -3739,8 +3723,7 @@ class Expression:
     def evaluator(
         self,
         params: Sequence[Expression],
-        functions: dict[tuple[Expression,
-                              Sequence[Expression]], Expression] = {},
+        functions: dict[tuple[Expression, Sequence[Expression]], Expression] = {},
         iterations: int = 1,
         cpe_iterations: int | None = None,
         n_cores: int = 4,
@@ -3820,8 +3803,7 @@ class Expression:
         _cls,
         exprs: Sequence[Expression],
         params: Sequence[Expression],
-        functions: dict[tuple[Expression,
-                              Sequence[Expression]], Expression] = {},
+        functions: dict[tuple[Expression, Sequence[Expression]], Expression] = {},
         iterations: int = 1,
         cpe_iterations: int | None = None,
         n_cores: int = 4,
@@ -3921,7 +3903,6 @@ class Expression:
             The index patterns that should be treated as contracted, optionally grouped by a marker.
         """
 
-
 class Replacement:
     """A replacement of a pattern by a right-hand side."""
 
@@ -3973,7 +3954,6 @@ class Replacement:
         rhs_cache_size: int
             The cache size for memoizing right-hand-side evaluations.
         """
-
 
 class PatternRestriction:
     """A restriction on wildcards."""
@@ -4043,7 +4023,6 @@ class PatternRestriction:
             The callback evaluated on each match.
         """
 
-
 class Condition:
     """Relations that evaluate to booleans"""
 
@@ -4097,10 +4076,8 @@ class Condition:
         Convert the condition to a pattern restriction.
         """
 
-
 class CompareOp:
     """One of the following comparison operators: `<`,`>`,`<=`,`>=`,`==`,`!=`."""
-
 
 class HeldExpression:
     def __call__(self) -> Expression:
@@ -4387,7 +4364,6 @@ class HeldExpression:
         """
         Negate the current transformer, returning the result.
         """
-
 
 class Transformer:
     """Operations that transform an expression."""
@@ -5249,8 +5225,7 @@ class Transformer:
         hide_namespace: str | None = None,
         include_attributes: bool = False,
         max_terms: int | None = None,
-        custom_print_mode: dict[str, int | str |
-                                dict[str | int, Any]] | None = None,
+        custom_print_mode: dict[str, int | str | dict[str | int, Any]] | None = None,
     ) -> Transformer:
         """
         Create a transformer that prints the expression.
@@ -5468,7 +5443,6 @@ class Transformer:
             Whether matches are allowed inside larger expressions instead of only at the top level.
         """
 
-
 class Series:
     """
     A series expansion class.
@@ -5573,8 +5547,7 @@ class Series:
         hide_namespace: str | None = None,
         include_attributes: bool = False,
         max_terms: int | None = None,
-        custom_print_mode: dict[str, int | str |
-                                dict[str | int, Any]] | None = None,
+        custom_print_mode: dict[str, int | str | dict[str | int, Any]] | None = None,
     ) -> str:
         """
         Convert the series into a human-readable string.
@@ -5667,8 +5640,7 @@ class Series:
         show_namespaces: bool = False,
         hide_namespace: str | None = None,
         include_attributes: bool = False,
-        custom_print_mode: dict[str, int | str |
-                                dict[str | int, Any]] | None = None,
+        custom_print_mode: dict[str, int | str | dict[str | int, Any]] | None = None,
     ) -> FormattedOutput:
         """
         Convert the series into a rich display object, with tunable settings.
@@ -5893,7 +5865,6 @@ class Series:
         Convert the series to an expression
         """
 
-
 class TermStreamer:
     """
     A term streamer that can handle large expressions, by
@@ -6040,7 +6011,6 @@ class TermStreamer:
             If set, the output of the `stats` transformer will be written to a file in JSON format.
         """
 
-
 class MatchIterator:
     """An iterator over matches."""
 
@@ -6054,7 +6024,6 @@ class MatchIterator:
         Return the next match.
         """
 
-
 class ReplaceIterator:
     """An iterator over single replacements."""
 
@@ -6067,7 +6036,6 @@ class ReplaceIterator:
         """
         Return the next replacement.
         """
-
 
 class Polynomial:
     """A Symbolica polynomial with rational coefficients."""
@@ -6178,8 +6146,7 @@ class Polynomial:
         show_namespaces: bool = False,
         hide_namespace: str | None = None,
         include_attributes: bool = False,
-        custom_print_mode: dict[str, int | str |
-                                dict[str | int, Any]] | None = None,
+        custom_print_mode: dict[str, int | str | dict[str | int, Any]] | None = None,
     ) -> str:
         """
         Convert the polynomial into a human-readable string, with tunable settings.
@@ -6262,8 +6229,7 @@ class Polynomial:
         show_namespaces: bool = False,
         hide_namespace: str | None = None,
         include_attributes: bool = False,
-        custom_print_mode: dict[str, int | str |
-                                dict[str | int, Any]] | None = None,
+        custom_print_mode: dict[str, int | str | dict[str | int, Any]] | None = None,
     ) -> FormattedOutput:
         """
         Convert the polynomial into a rich display object, with tunable settings.
@@ -7036,7 +7002,6 @@ class Polynomial:
             The minimal polynomial that defines the algebraic extension.
         """
 
-
 class NumberFieldPolynomial:
     """A Symbolica polynomial with rational coefficients."""
 
@@ -7115,8 +7080,7 @@ class NumberFieldPolynomial:
         hide_namespace: str | None = None,
         include_attributes: bool = False,
         max_terms: int | None = None,
-        custom_print_mode: dict[str, int | str |
-                                dict[str | int, Any]] | None = None,
+        custom_print_mode: dict[str, int | str | dict[str | int, Any]] | None = None,
     ) -> str:
         """
         Convert the polynomial into a human-readable string, with tunable settings.
@@ -7666,7 +7630,6 @@ class NumberFieldPolynomial:
         Convert the number field polynomial to a rational polynomial.
         """
 
-
 class FiniteFieldPolynomial:
     """A Symbolica polynomial with finite field coefficients."""
 
@@ -7782,8 +7745,7 @@ class FiniteFieldPolynomial:
         hide_namespace: str | None = None,
         include_attributes: bool = False,
         max_terms: int | None = None,
-        custom_print_mode: dict[str, int | str |
-                                dict[str | int, Any]] | None = None,
+        custom_print_mode: dict[str, int | str | dict[str | int, Any]] | None = None,
     ) -> str:
         """
         Convert the polynomial into a human-readable string, with tunable settings.
@@ -8352,7 +8314,6 @@ class FiniteFieldPolynomial:
             The minimal polynomial that defines the algebraic extension.
         """
 
-
 class RationalPolynomial:
     """A Symbolica rational polynomial."""
 
@@ -8635,7 +8596,6 @@ class RationalPolynomial:
             The variable with respect to which to perform the partial-fraction decomposition.
         """
 
-
 class FiniteFieldRationalPolynomial:
     """A Symbolica rational polynomial."""
 
@@ -8855,7 +8815,6 @@ class FiniteFieldRationalPolynomial:
         x: Expression | None
             The variable with respect to which to perform the partial-fraction decomposition.
         """
-
 
 class Matrix:
     """A matrix with rational polynomial coefficients."""
@@ -9094,8 +9053,7 @@ class Matrix:
         hide_namespace: str | None = None,
         include_attributes: bool = False,
         max_terms: int | None = None,
-        custom_print_mode: dict[str, int | str |
-                                dict[str | int, Any]] | None = None,
+        custom_print_mode: dict[str, int | str | dict[str | int, Any]] | None = None,
     ) -> str:
         """
         Convert the matrix into a human-readable string, with tunable settings.
@@ -9286,7 +9244,6 @@ class Matrix:
         Negate the matrix, returning the result.
         """
 
-
 class Evaluator:
     """An optimized evaluator of an expression."""
 
@@ -9353,8 +9310,7 @@ class Evaluator:
     def get_instructions(
         self,
     ) -> tuple[
-        list[tuple[str, tuple[str, int], list[tuple[str, int]]]
-             ], int, list[Expression]
+        list[tuple[str, tuple[str, int], list[tuple[str, int]]]], int, list[Expression]
     ]:
         """
         Return the instructions for efficiently evaluating the expression, the length of the list
@@ -9884,7 +9840,6 @@ class Evaluator:
             The decimal precision used for arbitrary-precision evaluation.
         """
 
-
 class CompiledRealEvaluator:
     """A compiled evaluator of an expression."""
 
@@ -9920,7 +9875,6 @@ class CompiledRealEvaluator:
         inputs: npt.ArrayLike
             The input values or batches to evaluate.
         """
-
 
 class CompiledComplexEvaluator:
     """A compiled evaluator of an expression."""
@@ -9958,7 +9912,6 @@ class CompiledComplexEvaluator:
             The input values or batches to evaluate.
         """
 
-
 class CompiledSimdRealEvaluator:
     """A compiled evaluator of an expression that packs 4 double using SIMD."""
 
@@ -9995,7 +9948,6 @@ class CompiledSimdRealEvaluator:
             The input values or batches to evaluate.
         """
 
-
 class CompiledSimdComplexEvaluator:
     """A compiled evaluator of an expression that packs 4 double using SIMD."""
 
@@ -10031,7 +9983,6 @@ class CompiledSimdComplexEvaluator:
         inputs: npt.ArrayLike
             The input values or batches to evaluate.
         """
-
 
 class CompiledCudaRealEvaluator:
     """A compiled evaluator of an expression that uses CUDA for GPU acceleration."""
@@ -10075,7 +10026,6 @@ class CompiledCudaRealEvaluator:
             The input values or batches to evaluate.
         """
 
-
 class CompiledCudaComplexEvaluator:
     """A compiled evaluator of an expression that uses CUDA for GPU acceleration."""
 
@@ -10117,7 +10067,6 @@ class CompiledCudaComplexEvaluator:
         inputs: npt.ArrayLike
             The input values or batches to evaluate.
         """
-
 
 class NumericalIntegrator:
     """A numerical integrator for high-dimensional integrals."""
@@ -10408,7 +10357,6 @@ class NumericalIntegrator:
             Whether intermediate integration statistics should be shown.
         """
 
-
 class Sample:
     """A sample from the Symbolica integrator. It could consist of discrete layers,
     accessible with `d` (empty when there are not discrete layers), and the final continuous layer `c` if it is present."""
@@ -10420,7 +10368,6 @@ class Sample:
     """ A sample point per (nested) discrete layer. Empty if not present."""
     c: list[float]
     """ A sample in the continuous layer. Empty if not present."""
-
 
 class Probe:
     """A probe that is used to access the Jacobian weight of a point or region
@@ -10487,7 +10434,6 @@ class Probe:
             The continuous probe coordinates; use `None` to include the full range of a dimension.
         """
 
-
 class RandomNumberGenerator:
     """A reproducible, fast, non-cryptographic random number generator suitable for parallel Monte Carlo simulations.
     A `seed` has to be set, which can be any `u64` number (small numbers work just as well as large numbers).
@@ -10539,7 +10485,6 @@ class RandomNumberGenerator:
         Export the random number generator state as a bytes object of length 32, which can be imported again to restore the state.
         """
 
-
 class HalfEdge:
     """A half-edge in a graph that connects to one vertex, consisting of a direction (or `None` if undirected) and edge data."""
 
@@ -10570,7 +10515,6 @@ class HalfEdge:
         """
         Get the data of the half-edge.
         """
-
 
 class Graph:
     """A graph that supported directional edges, parallel edges, self-edges and expression data on the nodes and edges.
@@ -10850,7 +10794,6 @@ class Graph:
         other: Graph
             The other operand to combine or compare with.
         """
-
 
 class Integer:
     @classmethod

@@ -604,6 +604,8 @@ pub enum SymbolAttribute {
     Cyclesymmetric,
     /// The function is linear.
     Linear,
+    /// The function is flat (associative). A flat function removes nesting.
+    Flat,
     /// The symbol represents a scalar. It will be moved out of linear functions.
     Scalar,
     /// The symbol represents a real number.
@@ -638,6 +640,7 @@ pub struct Symbol {
     is_antisymmetric: bool,
     is_cyclesymmetric: bool,
     is_linear: bool,
+    is_flat: bool,
     is_scalar: bool,
     is_real: bool,
     is_integer: bool,
@@ -952,6 +955,7 @@ impl SymbolBuilder {
                     attr.contains(&SymbolAttribute::Antisymmetric),
                     attr.contains(&SymbolAttribute::Cyclesymmetric),
                     attr.contains(&SymbolAttribute::Linear),
+                    attr.contains(&SymbolAttribute::Flat),
                     attr.contains(&SymbolAttribute::Scalar),
                     attr.contains(&SymbolAttribute::Real),
                     attr.contains(&SymbolAttribute::Integer),
@@ -1374,6 +1378,20 @@ impl Symbol {
         self.is_linear
     }
 
+    /// Check if the symbol is flat (associative).
+    ///
+    /// # Examples
+    ///
+    /// ```
+    /// use symbolica::prelude::*;
+    ///
+    /// let f = symbol!("f"; Flat);
+    /// assert!(f.is_flat());
+    /// ```
+    pub fn is_flat(&self) -> bool {
+        self.is_flat
+    }
+
     /// Check if the symbol is scalar.
     ///
     /// # Examples
@@ -1522,6 +1540,9 @@ impl Symbol {
         if self.is_linear {
             attrs.push(SymbolAttribute::Linear);
         }
+        if self.is_flat {
+            attrs.push(SymbolAttribute::Flat);
+        }
         if self.is_scalar {
             attrs.push(SymbolAttribute::Scalar);
         }
@@ -1557,6 +1578,7 @@ impl Symbol {
             && (!s.is_symmetric() || self.is_symmetric())
             && (!s.is_cyclesymmetric() || self.is_cyclesymmetric())
             && (!s.is_linear() || self.is_linear())
+            && (!s.is_flat() || self.is_flat())
             && (!s.is_positive() || self.is_positive())
             && (!s.is_integer() || self.is_integer())
             && (!s.is_real() || self.is_real())
@@ -1575,6 +1597,7 @@ impl Symbol {
             || self.is_symmetric()
             || self.is_cyclesymmetric()
             || self.is_linear()
+            || self.is_flat()
             || self.is_positive()
             || self.is_integer()
             || self.is_real()
@@ -1673,6 +1696,9 @@ impl Symbol {
         if s.is_linear() {
             attributes.push(SymbolAttribute::Linear);
         }
+        if s.is_flat() {
+            attributes.push(SymbolAttribute::Flat);
+        }
         if s.is_scalar() {
             attributes.push(SymbolAttribute::Scalar);
         }
@@ -1770,6 +1796,7 @@ impl Symbol {
             is_antisymmetric: false,
             is_cyclesymmetric: false,
             is_linear: false,
+            is_flat: false,
             is_scalar: false,
             is_real: false,
             is_integer: false,
@@ -1788,6 +1815,7 @@ impl Symbol {
         is_antisymmetric: bool,
         is_cyclesymmetric: bool,
         is_linear: bool,
+        is_flat: bool,
         is_scalar: bool,
         is_real: bool,
         is_integer: bool,
@@ -1800,6 +1828,7 @@ impl Symbol {
             is_antisymmetric,
             is_cyclesymmetric,
             is_linear,
+            is_flat,
             is_scalar,
             is_real: is_real || is_integer || is_positive,
             is_integer,
@@ -1807,12 +1836,13 @@ impl Symbol {
         }
     }
 
-    fn get_attributes_tuple_str(&self) -> [(&'static str, bool); 8] {
+    fn get_attributes_tuple_str(&self) -> [(&'static str, bool); 9] {
         [
             ("symmetric", self.is_symmetric),
             ("antisymmetric", self.is_antisymmetric),
             ("cyclesymmetric", self.is_cyclesymmetric),
             ("linear", self.is_linear),
+            ("flat", self.is_flat),
             ("scalar", self.is_scalar),
             ("real", self.is_real),
             ("integer", self.is_integer),
@@ -1821,12 +1851,13 @@ impl Symbol {
     }
 
     /// Get the attributes of the symbol as a tuple of (attribute, bool).
-    pub fn get_attributes_tuple(&self) -> [(SymbolAttribute, bool); 8] {
+    pub fn get_attributes_tuple(&self) -> [(SymbolAttribute, bool); 9] {
         [
             (SymbolAttribute::Symmetric, self.is_symmetric),
             (SymbolAttribute::Antisymmetric, self.is_antisymmetric),
             (SymbolAttribute::Cyclesymmetric, self.is_cyclesymmetric),
             (SymbolAttribute::Linear, self.is_linear),
+            (SymbolAttribute::Flat, self.is_flat),
             (SymbolAttribute::Scalar, self.is_scalar),
             (SymbolAttribute::Real, self.is_real),
             (SymbolAttribute::Integer, self.is_integer),
@@ -4348,7 +4379,7 @@ impl AsRef<Atom> for Atom {
 #[cfg(test)]
 mod test {
     use crate::{
-        atom::{Atom, AtomCore, Symbol, UserData},
+        atom::{Atom, AtomCore, AtomView, Symbol, SymbolAttribute, UserData},
         coefficient::Coefficient,
         domains::{integer::Integer, rational::Rational},
     };
@@ -4563,5 +4594,32 @@ mod test {
         let imported = Symbol::import(&mut e.as_slice()).unwrap();
         assert_eq!(s, imported);
         assert_eq!(s.get_data(), imported.get_data());
+    }
+
+    #[test]
+    fn flat_symbol_encoding_roundtrip() {
+        let flat = crate::symbol!("flat_encoding::f_"; Flat);
+        assert!(flat.is_flat());
+        assert_eq!(flat.get_attributes(), vec![SymbolAttribute::Flat]);
+
+        let variable = Atom::var(flat);
+        let AtomView::Var(variable) = variable.as_view() else {
+            panic!("expected variable");
+        };
+        assert!(variable.get_symbol().is_flat());
+        assert_eq!(variable.get_wildcard_level(), 1);
+
+        let function = flat.call((1, 2));
+        let AtomView::Fun(function) = function.as_view() else {
+            panic!("expected function");
+        };
+        assert!(function.get_symbol().is_flat());
+        assert_eq!(function.get_symbol().get_wildcard_level(), 1);
+
+        let mut exported = vec![];
+        flat.export(&mut exported).unwrap();
+        let imported = Symbol::import(&mut exported.as_slice()).unwrap();
+        assert!(imported.is_flat());
+        assert_eq!(imported.get_wildcard_level(), 1);
     }
 }
