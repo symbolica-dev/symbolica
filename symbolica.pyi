@@ -660,19 +660,8 @@ class IntegrationStep:
     def _repr_pretty_(self, pretty, cycle: bool) -> None: ...
 
 
-class Expression:
-    """
-    A Symbolica expression.
-
-    Supports standard arithmetic operations, such
-    as addition and multiplication.
-
-    Examples
-    --------
-    >>> x = S('x')
-    >>> e = x**2 + 2 - x + 1 / x**4
-    >>> print(e)
-    """
+class Symbol:
+    """Built-in Symbolica symbols."""
 
     E: Expression
     """Euler's number `e`, approximately `2.7182`."""
@@ -721,6 +710,120 @@ class Expression:
 
     IF: Expression
     """The built-in function for piecewise-defined expressions. `IF(cond, true_expr, false_expr)` evaluates to `true_expr` if `cond` is non-zero and `false_expr` otherwise."""
+
+    TAN: Expression
+    """The built-in tangent function."""
+
+    COT: Expression
+    """The built-in cotangent function."""
+
+    SEC: Expression
+    """The built-in secant function."""
+
+    CSC: Expression
+    """The built-in cosecant function."""
+
+    ASIN: Expression
+    """The built-in inverse sine function."""
+
+    ACOS: Expression
+    """The built-in inverse cosine function."""
+
+    ATAN: Expression
+    """The built-in inverse tangent function."""
+
+    ACOT: Expression
+    """The built-in inverse cotangent function."""
+
+    ASEC: Expression
+    """The built-in inverse secant function."""
+
+    ACSC: Expression
+    """The built-in inverse cosecant function."""
+
+    SINH: Expression
+    """The built-in hyperbolic sine function."""
+
+    COSH: Expression
+    """The built-in hyperbolic cosine function."""
+
+    TANH: Expression
+    """The built-in hyperbolic tangent function."""
+
+    COTH: Expression
+    """The built-in hyperbolic cotangent function."""
+
+    SECH: Expression
+    """The built-in hyperbolic secant function."""
+
+    CSCH: Expression
+    """The built-in hyperbolic cosecant function."""
+
+    ASINH: Expression
+    """The built-in inverse hyperbolic sine function."""
+
+    ACOSH: Expression
+    """The built-in inverse hyperbolic cosine function."""
+
+    ATANH: Expression
+    """The built-in inverse hyperbolic tangent function."""
+
+    ACOTH: Expression
+    """The built-in inverse hyperbolic cotangent function."""
+
+    ASECH: Expression
+    """The built-in inverse hyperbolic secant function."""
+
+    ACSCH: Expression
+    """The built-in inverse hyperbolic cosecant function."""
+
+    ZETA: Expression
+    """The built-in Riemann zeta function."""
+
+    GAMMA: Expression
+    """The built-in gamma function."""
+
+    ERF: Expression
+    """The built-in error function."""
+
+    POLYGAMMA: Expression
+    """The built-in polygamma function."""
+
+    POLYLOG: Expression
+    """The built-in polylogarithm function."""
+
+    BESSEL_J: Expression
+    """The built-in cylindrical Bessel function of the first kind."""
+
+    BESSEL_Y: Expression
+    """The built-in cylindrical Bessel function of the second kind."""
+
+    BESSEL_I: Expression
+    """The built-in modified Bessel function of the first kind."""
+
+    BESSEL_K: Expression
+    """The built-in modified Bessel function of the second kind."""
+
+    ROOT: Expression
+    """The built-in algebraic root function."""
+
+    ALT: Expression
+    """The built-in alternative-pattern function."""
+
+
+class Expression:
+    """
+    A Symbolica expression.
+
+    Supports standard arithmetic operations, such
+    as addition and multiplication.
+
+    Examples
+    --------
+    >>> x = S('x')
+    >>> e = x**2 + 2 - x + 1 / x**4
+    >>> print(e)
+    """
 
     @overload
     @classmethod
@@ -1483,6 +1586,20 @@ class Expression:
         is a variable or function, otherwise throw an error.
         """
 
+    def get_head(self) -> Expression:
+        """
+        Get the function symbol of a function or return the variable itself.
+        Throw an error if the current atom is neither a variable nor a function.
+
+        Examples
+        --------
+        >>> x, f = S('x', 'f')
+        >>> f(x).get_head() == f
+        True
+        >>> x.get_head() == x
+        True
+        """
+
     def get_tags(self) -> list[str]:
         """
         Get the tags of a variable or function if the current atom
@@ -1925,6 +2042,12 @@ class Expression:
         `gamma(z)` is meromorphic with simple poles at the non-positive integers.
         """
 
+    def erf(self) -> Expression:
+        """
+        Compute the error function of the expression.
+        `erf(z)` is entire and odd, with derivative `2*exp(-z^2)/sqrt(pi)`.
+        """
+
     def polygamma(self, n: Expression | int | float | Decimal) -> Expression:
         """
         Apply the polygamma function of order `n` to this expression.
@@ -1990,6 +2113,29 @@ class Expression:
         ----------
         t: Transformer
             The transformer to bind to the expression.
+        """
+
+    def alt(
+        self,
+        other: Expression | int | float | complex | Decimal,
+        *others: Expression | int | float | complex | Decimal,
+    ) -> Expression:
+        """
+        Create an alternative pattern that matches this expression or any of the
+        supplied alternatives.
+
+        Examples
+        --------
+        >>> x, y, z, w_ = S('x', 'y', 'z', 'w_')
+        >>> next(E('y*a').match(x.alt(y, z) * w_), None) is not None
+        True
+
+        Parameters
+        ----------
+        other: Expression | int | float | complex | Decimal
+            The first alternative.
+        others: Expression | int | float | complex | Decimal
+            Additional alternatives.
         """
 
     def opt(self) -> Expression:
