@@ -364,11 +364,13 @@ impl<'a> AtomView<'a> {
                     for (i, a) in used_indices.iter_mut().zip(&available) {
                         i.0 |= a.0;
 
-                        // set the counter for used open indices
+                        // Merge occurrence counts across alternative branches,
+                        // including contractions completed inside a sum. Each
+                        // branch starts with the same incoming count.
                         if a.1 == 1 {
                             assert!(i.1 < 2);
-                            i.1 = 1;
                         }
+                        i.1 = i.1.max(a.1);
                     }
 
                     pp.extend(arg.as_view());
@@ -708,9 +710,9 @@ impl<'a> AtomView<'a> {
 #[cfg(test)]
 mod test {
     use crate::{
-        atom::{Atom, AtomCore, representation::InlineVar},
+        atom::{Atom, AtomCore, AtomView, representation::InlineVar},
         parse, symbol,
-        tensors::CanonicalTensor,
+        tensors::{CanonicalTensor, TensorCanonicalizationError},
     };
 
     #[test]
@@ -757,6 +759,102 @@ mod test {
         let r2 = a2.canonize_tensors(mus).unwrap();
 
         assert_eq!(r1, r2);
+    }
+
+    #[test]
+    fn nested_closed_sums_reuse_dummy_indices() {
+        let indices = vec![(parse!("nested_counter_mu"), 0)];
+        for expression in [
+            parse!(
+                "2*(a+b)*(c+d)*((f1(nested_counter_mu)+f2(nested_counter_mu))*(g1(nested_counter_mu)
+                    +g2(nested_counter_mu))+(h1(nested_counter_mu)+h2(nested_counter_mu))*(j1(nested_counter_mu)+j2(nested_counter_mu)))"
+            ),
+            parse!(
+                "2*(a+b)*(c+d)*((f1(nested_counter_mu)+f2(nested_counter_mu))^2+(g1(nested_counter_mu)+g2(nested_counter_mu))^2)"
+            ),
+        ] {
+            // Each alternative closes the same single index. The next branch
+            // must be able to reuse its name, including after a squared sum.
+            let canonical = expression.canonize_tensors(indices.clone()).unwrap();
+            assert_eq!(canonical.canonical_form, expression);
+            assert!(canonical.external_indices.is_empty());
+            assert_eq!(canonical.dummy_indices, indices);
+            assert_eq!(
+                canonical
+                    .canonical_form
+                    .canonize_tensors(indices.clone())
+                    .unwrap(),
+                canonical
+            );
+        }
+
+        // A completed contraction must not be reported as open when checking
+        // the external-index domain of a surrounding sum.
+        let inconsistent = parse!(
+            "(f1(nested_counter_mu)+f2(nested_counter_mu))*(g1(nested_counter_mu)+g2(nested_counter_mu))+h1(nested_counter_mu)"
+        );
+        assert!(matches!(
+            inconsistent.canonize_tensors(indices),
+            Err(TensorCanonicalizationError::ExternalIndexMismatch { .. })
+        ));
+    }
+
+    #[test]
+    fn sum_contractions_preserve_shared_open_indices() {
+        let external = (parse!("counter_external"), 0);
+        for (expression, dummy_count, sum_factors) in [
+            (
+                parse!(
+                    "2*(a+b)*(c+d)*((f1(mu1,mu2,counter_external)+f2(mu1,mu2,counter_external))
+                        *(g1(mu1,mu2)+g2(mu1,mu2))+(h1(mu1,mu2,counter_external)+h2(mu1,mu2,counter_external))*(j1(mu2,mu1)+j2(mu2,mu1)))"
+                ),
+                2,
+                3,
+            ),
+            (
+                parse!(
+                    "2*(a+b)*(c+d)*(f1(mu1,mu2,counter_external)+f2(mu1,mu2,counter_external))
+                        *(g1(mu1,mu3)+g2(mu1,mu3))*(h1(mu2,mu3)+h2(mu2,mu3))"
+                ),
+                3,
+                5,
+            ),
+        ] {
+            let mut indices = vec![(parse!("mu1"), 0), (parse!("mu2"), 0)];
+            if dummy_count == 3 {
+                indices.push((parse!("mu3"), 0));
+            }
+            indices.push(external.clone());
+            let renamed = expression.replace_multiple([
+                indices[0].0.to_pattern().replace_with(indices[1].0.clone()),
+                indices[1].0.to_pattern().replace_with(indices[0].0.clone()),
+            ]);
+            let canonical = expression.canonize_tensors(indices.clone()).unwrap();
+            assert_eq!(
+                canonical,
+                renamed.canonize_tensors(indices.clone()).unwrap()
+            );
+            assert_eq!(canonical.external_indices, vec![external.clone()]);
+            assert_eq!(canonical.dummy_indices.len(), dummy_count);
+            assert!(
+                canonical
+                    .dummy_indices
+                    .iter()
+                    .all(|index| indices[..dummy_count].contains(index))
+            );
+            assert_eq!(
+                canonical.canonical_form.canonize_tensors(indices).unwrap(),
+                canonical
+            );
+            // Preserve both scalar spectators and every existing product of
+            // tensor sums; no distribution is needed for canonicalization.
+            assert!(canonical.canonical_form.contains(parse!("a+b")));
+            assert!(canonical.canonical_form.contains(parse!("c+d")));
+            assert!(
+                matches!(canonical.canonical_form.as_view(), AtomView::Mul(product)
+                if product.iter().filter(|factor| matches!(factor, AtomView::Add(_))).count() == sum_factors)
+            );
+        }
     }
 
     #[test]
