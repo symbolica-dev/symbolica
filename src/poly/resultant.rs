@@ -5,16 +5,32 @@ use super::univariate::UnivariatePolynomial;
 impl<F: EuclideanDomain> UnivariatePolynomial<F> {
     /// Compute the resultant using Brown's polynomial remainder sequence algorithm.
     pub fn resultant_prs(&self, other: &Self) -> F::Element {
+        self.resultant_prs_with_linear_subresultant(other).0
+    }
+
+    /// Compute the resultant and retain the last linear member of Brown's
+    /// polynomial remainder sequence, when one occurs.
+    ///
+    /// The linear subresultant is useful when the resultant constructs a
+    /// primitive extension: its two coefficients directly recover the old
+    /// generator, avoiding a second polynomial GCD over the new field.
+    pub(crate) fn resultant_prs_with_linear_subresultant(
+        &self,
+        other: &Self,
+    ) -> (F::Element, Option<(F::Element, F::Element)>) {
         if self.degree() < other.degree() {
+            let (resultant, linear) = other.resultant_prs_with_linear_subresultant(self);
             if self.degree() % 2 == 1 && other.degree() % 2 == 1 {
-                return self.ring.neg(&other.resultant_prs(self));
-            } else {
-                return other.resultant_prs(self);
+                return (self.ring.neg(&resultant), linear);
             }
+            return (resultant, linear);
         }
 
         if other.is_constant() {
-            return self.ring.pow(&other.get_constant(), self.degree() as u64);
+            return (
+                self.ring.pow(&other.get_constant(), self.degree() as u64),
+                None,
+            );
         }
 
         let mut a = self.clone();
@@ -25,6 +41,8 @@ impl<F: EuclideanDomain> UnivariatePolynomial<F> {
         let mut init = false;
         let mut beta = self.ring.pow(&self.ring.neg(&self.ring.one()), deg + 1);
         let mut psi = self.ring.neg(&self.ring.one());
+        let mut linear_subresultant =
+            (a_new.degree() == 1).then(|| (a_new.get_constant(), a_new.lcoeff()));
 
         let mut lcs = vec![(a.lcoeff(), a.degree() as u64)];
         while !a_new.is_constant() {
@@ -60,12 +78,15 @@ impl<F: EuclideanDomain> UnivariatePolynomial<F> {
             lcs.push((a_new.lcoeff(), a_new.degree() as u64));
 
             (a, a_new) = (a_new, r.div_coeff(&beta));
+            if a_new.degree() == 1 {
+                linear_subresultant = Some((a_new.get_constant(), a_new.lcoeff()));
+            }
         }
 
         lcs.push((a_new.lcoeff(), 0));
 
         if a_new.is_zero() {
-            return self.ring.zero();
+            return (self.ring.zero(), linear_subresultant);
         }
 
         // compute the resultant from the PRS, using the fundamental theorem
@@ -86,7 +107,7 @@ impl<F: EuclideanDomain> UnivariatePolynomial<F> {
             }
         }
 
-        self.ring.quot_rem(&rho, &den).0
+        (self.ring.quot_rem(&rho, &den).0, linear_subresultant)
     }
 
     /// Compute the resultant using a primitive polynomial remainder sequence.
