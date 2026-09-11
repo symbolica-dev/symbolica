@@ -127,6 +127,8 @@ def get_license_key(email: str) -> str:
 @overload
 def S(
     name: str,
+    /,
+    *,
     is_symmetric: bool | None = None,
     is_antisymmetric: bool | None = None,
     is_cyclesymmetric: bool | None = None,
@@ -292,6 +294,9 @@ def S(
 
 @overload
 def S(
+    name0: str,
+    name1: str,
+    /,
     *names: str,
     is_symmetric: bool | None = None,
     is_antisymmetric: bool | None = None,
@@ -303,7 +308,21 @@ def S(
     is_integer: bool | None = None,
     is_positive: bool | None = None,
     tags: Sequence[str] | None = None,
-) -> Sequence[Expression]:
+    aliases: Sequence[str] | None = None,
+    normalization: Transformer | Callable[[Expression], Expression] | None = None,
+    print: Callable[..., str | None] | None = None,
+    derivative: Callable[[Expression, int], Expression] | None = None,
+    series: Callable[[Sequence[Series]], tuple[Expression, Expression] | None]
+    | None = None,
+    eval: dict[str, Any] | None = None,
+    data: str
+    | int
+    | Expression
+    | bytes
+    | list[Any]
+    | dict[str | int | Expression, Any]
+    | None = None,
+) -> list[Expression]:
     """
     Create new symbols from `names`. Symbols can have attributes,
     such as symmetries. If no attributes
@@ -914,6 +933,8 @@ class Expression:
     def symbol(
         _cls,
         name: str,
+        /,
+        *,
         is_symmetric: bool | None = None,
         is_antisymmetric: bool | None = None,
         is_cyclesymmetric: bool | None = None,
@@ -1081,18 +1102,35 @@ class Expression:
     @classmethod
     def symbol(
         _cls,
+        name0: str,
+        name1: str,
+        /,
         *names: str,
         is_symmetric: bool | None = None,
         is_antisymmetric: bool | None = None,
         is_cyclesymmetric: bool | None = None,
         is_linear: bool | None = None,
         is_flat: bool | None = None,
-        is_real: bool | None = None,
         is_scalar: bool | None = None,
+        is_real: bool | None = None,
         is_integer: bool | None = None,
         is_positive: bool | None = None,
         tags: Sequence[str] | None = None,
-    ) -> Sequence[Expression]:
+        aliases: Sequence[str] | None = None,
+        normalization: Transformer | Callable[[Expression], Expression] | None = None,
+        print: Callable[..., str | None] | None = None,
+        derivative: Callable[[Expression, int], Expression] | None = None,
+        series: Callable[[Sequence[Series]], tuple[Expression, Expression] | None]
+        | None = None,
+        eval: dict[str, Any] | None = None,
+        data: str
+        | int
+        | Expression
+        | bytes
+        | list[Any]
+        | dict[str | int | Expression, Any]
+        | None = None,
+    ) -> list[Expression]:
         """
         Create new symbols from `names`. Symbols can have attributes,
         such as symmetries. If no attributes
@@ -3056,7 +3094,7 @@ class Expression:
         --------
         >>> from symbolica import *
         >>> x = S('x')
-        >>> e = 1/(x^2+1)
+        >>> e = 1/(x**2+1)
         >>> print(e.integrate(x))  # atan(x)
 
         Parameters
@@ -3208,8 +3246,8 @@ class Expression:
     @overload
     def to_polynomial(
         self,
-        vars: Sequence[Expression] | None = None,
         *,
+        vars: Sequence[Expression] | None = None,
         extensions: None = None,
     ) -> Polynomial:
         """
@@ -3225,9 +3263,9 @@ class Expression:
     @overload
     def to_polynomial(
         self,
+        *,
         minimal_poly: Polynomial,
         vars: Sequence[Expression] | None = None,
-        *,
         extensions: None = None,
     ) -> NumberFieldPolynomial:
         """
@@ -6402,7 +6440,7 @@ class Polynomial:
         Get the list of variables in the internal ordering of the polynomial.
         """
 
-    def __eq__(self, rhs: Polynomial | int) -> bool:
+    def __eq__(self, rhs: object) -> bool:
         """
         Check if two polynomials are equal.
 
@@ -6412,7 +6450,7 @@ class Polynomial:
             The right-hand-side operand.
         """
 
-    def __ne__(self, rhs: Polynomial | int) -> bool:
+    def __ne__(self, rhs: object) -> bool:
         """
         Check if two polynomials are not equal.
 
@@ -7257,7 +7295,7 @@ class NumberFieldPolynomial:
         Get the list of variables in the internal ordering of the polynomial.
         """
 
-    def __eq__(self, rhs: Polynomial | int) -> bool:
+    def __eq__(self, rhs: object) -> bool:
         """
         Check if two polynomials are equal.
 
@@ -7267,7 +7305,7 @@ class NumberFieldPolynomial:
             The right-hand-side operand.
         """
 
-    def __ne__(self, rhs: Polynomial | int) -> bool:
+    def __ne__(self, rhs: object) -> bool:
         """
         Check if two polynomials are not equal.
 
@@ -7922,7 +7960,7 @@ class FiniteFieldPolynomial:
         Get the list of variables in the internal ordering of the polynomial.
         """
 
-    def __eq__(self, rhs: Polynomial | int) -> bool:
+    def __eq__(self, rhs: object) -> bool:
         """
         Check if two polynomials are equal.
 
@@ -7932,7 +7970,7 @@ class FiniteFieldPolynomial:
             The right-hand-side operand.
         """
 
-    def __ne__(self, rhs: Polynomial | int) -> bool:
+    def __ne__(self, rhs: object) -> bool:
         """
         Check if two polynomials are not equal.
 
@@ -8515,7 +8553,7 @@ class RationalPolynomial:
         Get the denominator.
         """
 
-    def __eq__(self, rhs: RationalPolynomial | int) -> bool:
+    def __eq__(self, rhs: object) -> bool:
         """
         Check if two rational polynomials are equal.
 
@@ -8525,7 +8563,7 @@ class RationalPolynomial:
             The right-hand-side operand.
         """
 
-    def __ne__(self, rhs: RationalPolynomial | int) -> bool:
+    def __ne__(self, rhs: object) -> bool:
         """
         Check if two rational polynomials are not equal.
 
@@ -8755,7 +8793,7 @@ class FiniteFieldRationalPolynomial:
             If the input is not a valid Symbolica rational polynomial.
         """
 
-    def __eq__(self, rhs: Polynomial | int) -> bool:
+    def __eq__(self, rhs: object) -> bool:
         """
         Check if two polynomials are equal.
 
@@ -8765,7 +8803,7 @@ class FiniteFieldRationalPolynomial:
             The right-hand-side operand.
         """
 
-    def __ne__(self, rhs: Polynomial | int) -> bool:
+    def __ne__(self, rhs: object) -> bool:
         """
         Check if two polynomials are not equal.
 
@@ -9246,7 +9284,7 @@ class Matrix:
         Convert the matrix into a pretty string representation.
         """
 
-    def __eq__(self, other: Matrix) -> bool:
+    def __eq__(self, other: object) -> bool:
         """
         Compare two matrices.
 
@@ -9256,7 +9294,7 @@ class Matrix:
             The other operand to combine or compare with.
         """
 
-    def __ne__(self, other: Matrix) -> bool:
+    def __ne__(self, other: object) -> bool:
         """
         Compare two matrices.
 
@@ -9360,7 +9398,7 @@ class FunctionDefinition:
         arguments: Sequence[Expression],
         body: Expression,
         inlining: Literal["always", "never", "auto"] = "auto",
-    ) -> Self:
+    ) -> FunctionDefinition:
         """
         Define a function for an evaluator. The function may either
         be a symbol (e.g. `f`) or a function call, where each argument is considered a tag.
@@ -10003,7 +10041,7 @@ class Evaluator:
         self,
         inputs: Sequence[tuple[float | str | Decimal, float | str | Decimal]],
         decimal_digit_precision: int,
-    ) -> list[tuple[Decimal]]:
+    ) -> list[tuple[Decimal, Decimal]]:
         """
         Input counts must match the evaluator. Precision must be positive and
         fit the supported range; violations raise ValueError. Values outside
@@ -10745,7 +10783,7 @@ class Graph:
         Get the number of nodes in the graph.
         """
 
-    def __eq__(self, other: Graph) -> bool:
+    def __eq__(self, other: object) -> bool:
         """
         Compare two graphs.
 
@@ -10755,7 +10793,7 @@ class Graph:
             The other operand to combine or compare with.
         """
 
-    def __ne__(self, other: Graph) -> bool:
+    def __ne__(self, other: object) -> bool:
         """
         Compare two graphs.
 

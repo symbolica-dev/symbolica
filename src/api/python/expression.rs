@@ -3014,8 +3014,7 @@ impl<'py> FromPyObject<'_, 'py> for ConvertibleToExpression {
 
 #[cfg(feature = "python_stubgen")]
 impl_stub_type!(
-    ConvertibleToExpression =
-        PythonExpression | PyInt | PyBackedStr | pyo3::types::PyFloat | Complex64
+    ConvertibleToExpression = PythonExpression | PyInt | PythonMultiPrecisionFloat | Complex64
 );
 
 impl<'py> FromPyObject<'_, 'py> for Symbol {
@@ -7161,7 +7160,8 @@ impl PythonExpression {
         Ok(b.into())
     }
 
-    /// Series expand in `x` around `expansion_point` to depth `depth`.
+    /// Series expand in `x` around `expansion_point`, including powers through
+    /// `depth / depth_denom`. The remainder starts at `Series.get_absolute_order()`.
     ///
     /// Examples
     /// --------
@@ -7169,7 +7169,7 @@ impl PythonExpression {
     /// >>> p = E('cos(x)/(x+1)')
     /// >>> print(p.series(S('x'), 0, 3))
     ///
-    /// yields `-1-x-1/2*x^2-1/2*x^3+𝒪(x^4)`
+    /// yields `1-x+1/2*x^2-1/2*x^3+𝒪(x^4)`
     ///
     /// Parameters
     /// ----------
@@ -7226,7 +7226,7 @@ impl PythonExpression {
     /// --------
     /// >>> from symbolica import *
     /// >>> x = S('x')
-    /// >>> e = 1/(x^2+1)
+    /// >>> e = 1/(x**2+1)
     /// >>> print(e.integrate(x))  # atan(x)
     ///
     /// Parameters
@@ -8963,103 +8963,109 @@ PyMethodsInfo {
             parameters: &[
                 ParameterInfo {
                     name: "name",
-                    kind: ParameterKind::PositionalOrKeyword,
+                    kind: ParameterKind::PositionalOnly,
                     default: ParameterDefault::None,
                     type_info: || <&str>::type_input(),
                 },
                 ParameterInfo {
                     name: "is_symmetric",
-                    kind: ParameterKind::PositionalOrKeyword,
+                    kind: ParameterKind::KeywordOnly,
                     default: ParameterDefault::Expr(NONE_ARG),
                     type_info: || Option::<bool>::type_input(),
                 },
                 ParameterInfo {
                     name: "is_antisymmetric",
-                    kind: ParameterKind::PositionalOrKeyword,
+                    kind: ParameterKind::KeywordOnly,
                     default: ParameterDefault::Expr(NONE_ARG),
                     type_info: || Option::<bool>::type_input(),
                 },
                 ParameterInfo {
                     name: "is_cyclesymmetric",
-                    kind: ParameterKind::PositionalOrKeyword,
+                    kind: ParameterKind::KeywordOnly,
                     default: ParameterDefault::Expr(NONE_ARG),
                     type_info: || Option::<bool>::type_input(),
                 },
                 ParameterInfo {
                     name: "is_linear",
-                    kind: ParameterKind::PositionalOrKeyword,
+                    kind: ParameterKind::KeywordOnly,
+                    default: ParameterDefault::Expr(NONE_ARG),
+                    type_info: || Option::<bool>::type_input(),
+                },
+                ParameterInfo {
+                    name: "is_flat",
+                    kind: ParameterKind::KeywordOnly,
                     default: ParameterDefault::Expr(NONE_ARG),
                     type_info: || Option::<bool>::type_input(),
                 },
                 ParameterInfo {
                     name: "is_scalar",
-                    kind: ParameterKind::PositionalOrKeyword,
+                    kind: ParameterKind::KeywordOnly,
                     default: ParameterDefault::Expr(NONE_ARG),
                     type_info: || Option::<bool>::type_input(),
                 },
                 ParameterInfo {
                     name: "is_real",
-                    kind: ParameterKind::PositionalOrKeyword,
+                    kind: ParameterKind::KeywordOnly,
                     default: ParameterDefault::Expr(NONE_ARG),
                     type_info: || Option::<bool>::type_input(),
                 },
                 ParameterInfo {
                     name: "is_integer",
-                    kind: ParameterKind::PositionalOrKeyword,
+                    kind: ParameterKind::KeywordOnly,
                     default: ParameterDefault::Expr(NONE_ARG),
                     type_info: || Option::<bool>::type_input(),
                 },
                 ParameterInfo {
                     name: "is_positive",
-                    kind: ParameterKind::PositionalOrKeyword,
+                    kind: ParameterKind::KeywordOnly,
                     default: ParameterDefault::Expr(NONE_ARG),
                     type_info: || Option::<bool>::type_input(),
                 },
                 ParameterInfo {
                     name: "tags",
-                    kind: ParameterKind::PositionalOrKeyword,
+                    kind: ParameterKind::KeywordOnly,
                     default: ParameterDefault::Expr(NONE_ARG),
                     type_info: || Option::<Vec<String>>::type_input(),
                 },
                 ParameterInfo {
                     name: "aliases",
-                    kind: ParameterKind::PositionalOrKeyword,
+                    kind: ParameterKind::KeywordOnly,
                     default: ParameterDefault::Expr(NONE_ARG),
                     type_info: || Option::<Vec<String>>::type_input(),
                 },
                 ParameterInfo {
                     name: "normalization",
-                    kind: ParameterKind::PositionalOrKeyword,
+                    kind: ParameterKind::KeywordOnly,
                     default: ParameterDefault::Expr(NONE_ARG),
                     type_info: || Option::<PythonNormalization>::type_input(),
                 },
                 ParameterInfo {
                     name: "print",
-                    kind: ParameterKind::PositionalOrKeyword,
+                    kind: ParameterKind::KeywordOnly,
                     default: ParameterDefault::Expr(NONE_ARG),
                     type_info: || TypeInfo::unqualified("typing.Optional[typing.Callable[..., typing.Optional[str]]]"),
                 },
                 ParameterInfo {
                     name: "derivative",
-                    kind: ParameterKind::PositionalOrKeyword,
+                    kind: ParameterKind::KeywordOnly,
                     default: ParameterDefault::Expr(NONE_ARG),
                     type_info: || TypeInfo::unqualified("typing.Optional[typing.Callable[[Expression, int], Expression]]"),
                 },
                 ParameterInfo {
                     name: "series",
-                    kind: ParameterKind::PositionalOrKeyword,
+                    kind: ParameterKind::KeywordOnly,
                     default: ParameterDefault::Expr(NONE_ARG),
                     type_info: || TypeInfo::unqualified("typing.Optional[typing.Callable[[typing.Sequence[Series]], typing.Optional[tuple[Expression, Expression]]]]"),
                 },
                 ParameterInfo {
                     name: "eval",
-                    kind: ParameterKind::PositionalOrKeyword,
+                    kind: ParameterKind::KeywordOnly,
                     default: ParameterDefault::Expr(NONE_ARG),
                     type_info: || TypeInfo::unqualified("typing.Optional[typing.Callable[[typing.Sequence[complex]], complex] | dict[str, typing.Any]]"),
                 },
                 ParameterInfo {
                     name: "data",
-                    kind: ParameterKind::PositionalOrKeyword,
+                    kind: ParameterKind::KeywordOnly,
                     default: ParameterDefault::Expr(NONE_ARG),
                     type_info: || TypeInfo::unqualified("typing.Optional[str | int | Expression | bytes | list | dict]"),
                 },
@@ -9210,6 +9216,18 @@ data: str | int | Expression | bytes | list | dict | None = None
             name: "symbol",
             parameters: &[
                 ParameterInfo {
+                    name: "name0",
+                    kind: ParameterKind::PositionalOnly,
+                    default: ParameterDefault::None,
+                    type_info: || <&str>::type_input(),
+                },
+                ParameterInfo {
+                    name: "name1",
+                    kind: ParameterKind::PositionalOnly,
+                    default: ParameterDefault::None,
+                    type_info: || <&str>::type_input(),
+                },
+                ParameterInfo {
                     name: "names",
                     kind: ParameterKind::VarPositional,
                     default: ParameterDefault::None,
@@ -9217,61 +9235,109 @@ data: str | int | Expression | bytes | list | dict | None = None
                 },
                 ParameterInfo {
                     name: "is_symmetric",
-                    kind: ParameterKind::PositionalOrKeyword,
+                    kind: ParameterKind::KeywordOnly,
                     default: ParameterDefault::Expr(NONE_ARG),
                     type_info: || Option::<bool>::type_input(),
                 },
                 ParameterInfo {
                     name: "is_antisymmetric",
-                    kind: ParameterKind::PositionalOrKeyword,
+                    kind: ParameterKind::KeywordOnly,
                     default: ParameterDefault::Expr(NONE_ARG),
                     type_info: || Option::<bool>::type_input(),
                 },
                 ParameterInfo {
                     name: "is_cyclesymmetric",
-                    kind: ParameterKind::PositionalOrKeyword,
+                    kind: ParameterKind::KeywordOnly,
                     default: ParameterDefault::Expr(NONE_ARG),
                     type_info: || Option::<bool>::type_input(),
                 },
                 ParameterInfo {
                     name: "is_linear",
-                    kind: ParameterKind::PositionalOrKeyword,
+                    kind: ParameterKind::KeywordOnly,
+                    default: ParameterDefault::Expr(NONE_ARG),
+                    type_info: || Option::<bool>::type_input(),
+                },
+                ParameterInfo {
+                    name: "is_flat",
+                    kind: ParameterKind::KeywordOnly,
                     default: ParameterDefault::Expr(NONE_ARG),
                     type_info: || Option::<bool>::type_input(),
                 },
                 ParameterInfo {
                     name: "is_scalar",
-                    kind: ParameterKind::PositionalOrKeyword,
+                    kind: ParameterKind::KeywordOnly,
                     default: ParameterDefault::Expr(NONE_ARG),
                     type_info: || Option::<bool>::type_input(),
                 },
                 ParameterInfo {
                     name: "is_real",
-                    kind: ParameterKind::PositionalOrKeyword,
+                    kind: ParameterKind::KeywordOnly,
                     default: ParameterDefault::Expr(NONE_ARG),
                     type_info: || Option::<bool>::type_input(),
                 },
                 ParameterInfo {
                     name: "is_integer",
-                    kind: ParameterKind::PositionalOrKeyword,
+                    kind: ParameterKind::KeywordOnly,
                     default: ParameterDefault::Expr(NONE_ARG),
                     type_info: || Option::<bool>::type_input(),
                 },
                 ParameterInfo {
                     name: "is_positive",
-                    kind: ParameterKind::PositionalOrKeyword,
+                    kind: ParameterKind::KeywordOnly,
                     default: ParameterDefault::Expr(NONE_ARG),
                     type_info: || Option::<bool>::type_input(),
                 },
                 ParameterInfo {
                     name: "tags",
-                    kind: ParameterKind::PositionalOrKeyword,
+                    kind: ParameterKind::KeywordOnly,
                     default: ParameterDefault::Expr(NONE_ARG),
                     type_info: || Option::<Vec<String>>::type_input(),
                 },
+                ParameterInfo {
+                    name: "aliases",
+                    kind: ParameterKind::KeywordOnly,
+                    default: ParameterDefault::Expr(NONE_ARG),
+                    type_info: || Option::<Vec<String>>::type_input(),
+                },
+                ParameterInfo {
+                    name: "normalization",
+                    kind: ParameterKind::KeywordOnly,
+                    default: ParameterDefault::Expr(NONE_ARG),
+                    type_info: || Option::<PythonNormalization>::type_input(),
+                },
+                ParameterInfo {
+                    name: "print",
+                    kind: ParameterKind::KeywordOnly,
+                    default: ParameterDefault::Expr(NONE_ARG),
+                    type_info: || TypeInfo::unqualified("typing.Optional[typing.Callable[..., typing.Optional[str]]]"),
+                },
+                ParameterInfo {
+                    name: "derivative",
+                    kind: ParameterKind::KeywordOnly,
+                    default: ParameterDefault::Expr(NONE_ARG),
+                    type_info: || TypeInfo::unqualified("typing.Optional[typing.Callable[[Expression, int], Expression]]"),
+                },
+                ParameterInfo {
+                    name: "series",
+                    kind: ParameterKind::KeywordOnly,
+                    default: ParameterDefault::Expr(NONE_ARG),
+                    type_info: || TypeInfo::unqualified("typing.Optional[typing.Callable[[typing.Sequence[Series]], typing.Optional[tuple[Expression, Expression]]]]"),
+                },
+                ParameterInfo {
+                    name: "eval",
+                    kind: ParameterKind::KeywordOnly,
+                    default: ParameterDefault::Expr(NONE_ARG),
+                    type_info: || TypeInfo::unqualified("typing.Optional[typing.Callable[[typing.Sequence[complex]], complex] | dict[str, typing.Any]]"),
+                },
+                ParameterInfo {
+                    name: "data",
+                    kind: ParameterKind::KeywordOnly,
+                    default: ParameterDefault::Expr(NONE_ARG),
+                    type_info: || TypeInfo::unqualified("typing.Optional[str | int | Expression | bytes | list | dict]"),
+                },
             ],
             r#type: MethodType::Class,
-            r#return: || TypeInfo::unqualified("typing.Sequence[Expression]"),
+            r#return: || TypeInfo::unqualified("list[Expression]"),
             doc:
             r#"Create new symbols from `names`. Symbols can have attributes,
 such as symmetries. If no attributes
@@ -9372,7 +9438,7 @@ vars: Sequence[Expression] | None
                 parameters: &[
                     ParameterInfo {
                         name: "vars",
-                        kind: ParameterKind::PositionalOrKeyword,
+                        kind: ParameterKind::KeywordOnly,
                         default: ParameterDefault::Expr(NONE_ARG),
                         type_info: || Option::<Vec<PythonExpression>>::type_input(),
                     },
@@ -9403,13 +9469,13 @@ vars: Sequence[Expression] | None
                 parameters: &[
                     ParameterInfo {
                         name: "minimal_poly",
-                        kind: ParameterKind::PositionalOrKeyword,
+                        kind: ParameterKind::KeywordOnly,
                         default: ParameterDefault::None,
                         type_info: || PythonPolynomial::type_input(),
                     },
                     ParameterInfo {
                         name: "vars",
-                        kind: ParameterKind::PositionalOrKeyword,
+                        kind: ParameterKind::KeywordOnly,
                         default: ParameterDefault::Expr(NONE_ARG),
                         type_info: || Option::<Vec<PythonExpression>>::type_input(),
                     },
