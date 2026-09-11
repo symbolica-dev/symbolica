@@ -3648,39 +3648,6 @@ class Expression:
             and requested domain.
         """
 
-    @classmethod
-    def solve_linear_system(
-        _cls,
-        system: Sequence[Expression],
-        variables: Sequence[Expression],
-        warn_if_underdetermined: bool = True,
-    ) -> Sequence[Expression]:
-        """
-        Solve a linear system in the variables `variables`, where each expression
-        in the system is understood to yield 0.
-
-        If the system is underdetermined, a partial solution is returned
-        where each bound variable is a linear combination of the free
-        variables. The free variables are chosen such that they have the highest index in the `vars` list.
-
-        Examples
-        --------
-        >>> from symbolica import *
-        >>> x, y, c = S('x', 'y', 'c')
-        >>> f = S('f')
-        >>> x_r, y_r = Expression.solve_linear_system([f(c)*x + y/c - 1, y-c/2], [x, y])
-        >>> print('x =', x_r, ', y =', y_r)
-
-        Parameters
-        ----------
-        system: Sequence[Expression]
-            The equations or polynomials that define the system.
-        variables: Sequence[Expression]
-            The variables to solve for, in order.
-        warn_if_underdetermined: bool
-            Whether to warn when the system is underdetermined.
-        """
-
     @overload
     def nsolve(
         self,
