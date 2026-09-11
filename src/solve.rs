@@ -101,6 +101,7 @@ pub enum SolveError {
         /// Partial solution found, that may contain free variables.
         partial_solution: Vec<Atom>,
     },
+    /// A failure described by a message that does not fit a more specific variant.
     Other(String),
 }
 

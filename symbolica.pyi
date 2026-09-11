@@ -18,7 +18,7 @@ from __future__ import annotations
 
 from decimal import Decimal
 from enum import Enum
-from typing import Any, Callable, Iterator, Literal, Sequence, Union, overload
+from typing import Any, Callable, Iterator, Literal, Sequence, overload
 
 import numpy as np
 import numpy.typing as npt
@@ -293,6 +293,8 @@ class Float:
         """Return the natural logarithm. Zero yields negative infinity; negative inputs yield NaN."""
     def log(self) -> Float:
         """Alias for ln(), the natural logarithm (base e)."""
+    def log1p(self) -> Float:
+        """Return log(1+self), retaining small increments lost when adding one."""
     def sin(self) -> Float:
         """Return the sine, with the argument in radians."""
     def cos(self) -> Float:
@@ -471,6 +473,10 @@ class Float:
         """Return the hyperbolic cosine with accuracy tracking."""
     def tanh(self) -> Float:
         """Return the hyperbolic tangent with accuracy tracking."""
+    def sech(self) -> Float:
+        """Return the reciprocal hyperbolic cosine without overflowing an intermediate cosh."""
+    def csch(self) -> Float:
+        """Return the reciprocal hyperbolic sine, retaining accuracy near zero and at infinity."""
     def asinh(self) -> Float:
         """Return the inverse hyperbolic sine."""
     def acosh(self) -> Float:
@@ -600,6 +606,15 @@ class Float:
         """Return 1/self. Zero raises ZeroDivisionError."""
     def norm(self) -> Float:
         """Return the magnitude as a real Float, equivalent to abs(self)."""
+    def hypot(self, other: Float | int | float | Decimal) -> Float:
+        """Return sqrt(self**2 + other**2), avoiding unnecessary overflow and underflow.
+
+        Parameters
+        ----------
+        other : Float, int, float, Decimal
+            Second coordinate. Native numbers use this value's precision;
+            existing arbitrary-precision scalars retain their precision.
+        """
     def is_zero(self) -> bool:
         """Return whether the value is zero; signed zero also counts as zero."""
     def is_one(self) -> bool:
@@ -892,6 +907,8 @@ class ComplexFloat:
         """Return the principal complex natural logarithm. Its imaginary part is the argument in [-pi, pi]."""
     def log(self) -> ComplexFloat:
         """Alias for ln(), the principal natural logarithm (base e)."""
+    def log1p(self) -> ComplexFloat:
+        """Return the principal log(1+self), retaining small increments and signed-zero branch cuts."""
     def sin(self) -> ComplexFloat:
         """Return the sine, with the argument in radians."""
     def cos(self) -> ComplexFloat:
@@ -980,6 +997,10 @@ class ComplexFloat:
         """Return the hyperbolic cosine with accuracy tracking."""
     def tanh(self) -> ComplexFloat:
         """Return the hyperbolic tangent with accuracy tracking."""
+    def sech(self) -> ComplexFloat:
+        """Return the reciprocal hyperbolic cosine without overflowing an intermediate cosh."""
+    def csch(self) -> ComplexFloat:
+        """Return the reciprocal hyperbolic sine, retaining accuracy near zero and at infinity."""
     def asinh(self) -> ComplexFloat:
         """Return the principal complex inverse hyperbolic sine."""
     def acosh(self) -> ComplexFloat:
@@ -1151,6 +1172,15 @@ class ComplexFloat:
         """Return 1/self. Zero raises ZeroDivisionError."""
     def norm(self) -> Float:
         """Return the magnitude as a real Float, equivalent to abs(self)."""
+    def hypot(self, other: Float | int | float | Decimal | ComplexFloat | complex) -> Float:
+        """Return sqrt(abs(self)**2 + abs(other)**2) as a real Float, using scaled arithmetic.
+
+        Parameters
+        ----------
+        other : Float, int, float, Decimal, ComplexFloat, complex
+            Second coordinate. Native numbers use this value's precision;
+            existing arbitrary-precision scalars retain their precision.
+        """
     def is_zero(self) -> bool:
         """Return whether the value is zero; signed zero also counts as zero."""
     def is_one(self) -> bool:
@@ -1826,20 +1856,24 @@ Rationals: SolveDomain
 Reals: SolveDomain
 Complexes: SolveDomain
 
-class SolveError(ValueError): ...
-class UnsupportedProblem(SolveError): ...
-class IncompleteCoverage(SolveError): ...
+class SolveError(ValueError):
+    """Base exception for invalid solve requests or failures to obtain the requested result."""
 
-SolveInput = Union[
-    "Expression", "Condition",
-    bool, int, float, complex, Float, ComplexFloat, Decimal,
-]
+class UnsupportedProblem(SolveError):
+    """The equations require a solving method that is not supported."""
+
+class IncompleteCoverage(SolveError):
+    """The requested conclusion cannot be established for all relevant cases."""
 
 class SolutionCondition:
+    """A formula or domain restriction under which a solution branch is valid."""
+
     @property
-    def kind(self) -> Literal["formula", "domain_membership"]: ...
+    def kind(self) -> Literal["formula", "domain_membership"]:
+        """The restriction type: ``"formula"`` or ``"domain_membership"``."""
     @property
-    def formula(self) -> Condition | None: ...
+    def formula(self) -> Condition | None:
+        """The symbolic condition, or None for a domain-membership restriction."""
     @property
     def variable(self) -> Expression | None:
         """The variable restricted by a domain-membership condition, otherwise None."""
@@ -5047,7 +5081,12 @@ class Expression:
 
     @classmethod
     def solve(
-        _cls, system: SolveInput | Sequence[SolveInput], variables: Sequence[Expression], *,
+        _cls,
+        system: (
+            Expression | Condition | bool | int | float | complex | Float | ComplexFloat | Decimal
+            | Sequence[Expression | Condition | bool | int | float | complex | Float | ComplexFloat | Decimal]
+        ),
+        variables: Sequence[Expression], *,
         domain: SolveDomain | None = None,
     ) -> SolutionSet:
         """Find exact solutions to an equation or a system of equations.
@@ -5125,7 +5164,7 @@ class Expression:
 
         Parameters
         ----------
-        system: SolveInput | Sequence[SolveInput]
+        system: Expression, Condition, bool, number, or sequence of these
             Equation or equations to satisfy, written as expressions equal to zero
             or using ``eq``. Supports polynomial and rational equations and some
             equations involving rational powers. Inequalities and general Boolean
@@ -5562,6 +5601,8 @@ class CompareOp:
     """One of the following comparison operators: `<`,`>`,`<=`,`>=`,`==`,`!=`."""
 
 class HeldExpression:
+    """A deferred symbolic computation. Call the object to execute it."""
+
     def __call__(self) -> Expression:
         """
         Execute a bound transformer. If the transformer is unbound,
@@ -12501,6 +12542,8 @@ class Graph:
         """
 
 class Integer:
+    """Number-theoretic operations on Python integers, including factoring and primality testing."""
+
     @classmethod
     def prime_iter(_cls, start: int = 1) -> Iterator[int]:
         """

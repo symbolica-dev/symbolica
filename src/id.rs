@@ -54,13 +54,22 @@ static ONE: InlineNum = InlineNum::one();
 /// ```
 #[derive(Clone)]
 pub enum Pattern {
+    /// A literal expression without pattern substitution.
     Literal(Atom),
+    /// A wildcard symbol and a flag indicating whether its match is optional.
     Wildcard(Symbol, bool),
+    /// A function-head symbol and its argument patterns.
     Fn(Symbol, Vec<Pattern>),
+    /// A base pattern and an exponent pattern, in that order.
     Pow(Box<[Pattern; 2]>),
+    /// A product of patterns.
     Mul(Vec<Pattern>),
+    /// A sum of patterns.
     Add(Vec<Pattern>),
+    /// Alternative patterns, tried in the supplied order.
     Alternative(Vec<Pattern>),
+    /// A transformer chain with an optional input pattern. With no explicit
+    /// input, the chain operates on the current expression.
     Transformer(Box<(Option<Pattern>, Vec<Transformer>)>),
 }
 
@@ -177,6 +186,8 @@ impl std::fmt::Display for Pattern {
     }
 }
 
+/// A cloneable, thread-safe callback that constructs a replacement from
+/// the current wildcard assignments.
 pub trait MatchMap: Fn(&MatchStack) -> Atom + DynClone + Send + Sync {}
 dyn_clone::clone_trait_object!(MatchMap);
 impl<T: Clone + Send + Sync + Fn(&MatchStack) -> Atom> MatchMap for T {}
@@ -186,7 +197,9 @@ impl<T: Clone + Send + Sync + Fn(&MatchStack) -> Atom> MatchMap for T {}
 /// expressed using atom transformations.
 #[derive(Clone)]
 pub enum ReplaceWith<'a> {
+    /// A pattern whose wildcards are substituted using the match.
     Pattern(BorrowedOrOwned<'a, Pattern>),
+    /// A callback that constructs the replacement from the wildcard assignments.
     Map(Box<dyn MatchMap>),
 }
 
@@ -253,9 +266,13 @@ impl std::fmt::Display for ReplaceWith<'_> {
 /// ```
 #[derive(Debug, Clone)]
 pub struct Replacement {
+    /// The pattern to find in the target expression.
     pub pat: Pattern,
+    /// The replacement pattern or callback.
     pub rhs: ReplaceWith<'static>,
+    /// Additional restrictions on wildcard assignments, or `None` for no restrictions.
     pub conditions: Option<Condition<PatternRestriction>>,
+    /// Settings controlling traversal and wildcard matching.
     pub match_settings: MatchSettings,
 }
 
@@ -343,13 +360,19 @@ impl Replacement {
 /// A borrowed version of a [Replacement].
 #[derive(Clone, Copy)]
 pub struct BorrowedReplacement<'a> {
+    /// The pattern to find in the target expression.
     pub pattern: &'a Pattern,
+    /// The replacement pattern or callback.
     pub rhs: &'a ReplaceWith<'a>,
+    /// Additional restrictions, or `None` for no restrictions.
     pub conditions: Option<&'a Condition<PatternRestriction>>,
+    /// Matching settings, or `None` to use the defaults.
     pub settings: Option<&'a MatchSettings>,
 }
 
+/// Borrow a replacement rule without cloning its patterns or callbacks.
 pub trait BorrowReplacement {
+    /// Return a view of the replacement and its matching configuration.
     fn borrow(&self) -> BorrowedReplacement<'_>;
 }
 
@@ -427,6 +450,8 @@ pub struct ReplaceBuilder<'a, 'b> {
 }
 
 impl<'a, 'b> ReplaceBuilder<'a, 'b> {
+    /// Start a replacement on `target` with the supplied search pattern.
+    /// Finish the builder with a right-hand side using [`Self::with`].
     pub fn new<T: Into<BorrowedOrOwned<'b, Pattern>>>(
         target: AtomView<'a>,
         replacement: T,
@@ -2792,6 +2817,8 @@ impl Pattern {
         }
     }
 
+    /// Construct the sum of two patterns, normalizing when both are literals.
+    /// Temporary expression storage is borrowed from `workspace`.
     pub fn add(&self, rhs: &Self, workspace: &Workspace) -> Self {
         if let Pattern::Literal(l1) = self
             && let Pattern::Literal(l2) = rhs
@@ -2825,6 +2852,8 @@ impl Pattern {
         Pattern::Add(new_args)
     }
 
+    /// Construct the product of two patterns, normalizing when both are literals.
+    /// Temporary expression storage is borrowed from `workspace`.
     pub fn mul(&self, rhs: &Self, workspace: &Workspace) -> Self {
         if let Pattern::Literal(l1) = self
             && let Pattern::Literal(l2) = rhs
@@ -2857,6 +2886,8 @@ impl Pattern {
         Pattern::Mul(new_args)
     }
 
+    /// Construct a quotient pattern by multiplying by the reciprocal of `rhs`,
+    /// normalizing literal expressions using `workspace`.
     pub fn div(&self, rhs: &Self, workspace: &Workspace) -> Self {
         if let Pattern::Literal(l2) = rhs {
             let mut pow = workspace.new_atom();
@@ -2901,6 +2932,8 @@ impl Pattern {
         }
     }
 
+    /// Construct a power pattern, normalizing when both operands are literals
+    /// using temporary storage from `workspace`.
     pub fn pow(&self, rhs: &Self, workspace: &Workspace) -> Self {
         if let Pattern::Literal(l1) = self
             && let Pattern::Literal(l2) = rhs
@@ -2917,6 +2950,7 @@ impl Pattern {
         Pattern::Pow(Box::new([self.clone(), rhs.clone()]))
     }
 
+    /// Negate this pattern, normalizing a literal operand using `workspace`.
     pub fn neg(&self, workspace: &Workspace) -> Self {
         if let Pattern::Literal(l1) = self {
             let mut e = workspace.new_atom();
@@ -3635,18 +3669,23 @@ impl std::fmt::Debug for Pattern {
     }
 }
 
+/// A cloneable, thread-safe predicate on a wildcard match, including multi-element matches.
 pub trait FilterFn: Fn(&Match) -> bool + DynClone + Send + Sync {}
 dyn_clone::clone_trait_object!(FilterFn);
 impl<T: Clone + Send + Sync + Fn(&Match) -> bool> FilterFn for T {}
 
+/// A cloneable, thread-safe predicate on a single matched expression.
 pub trait FilterSingleFn: Fn(AtomView<'_>) -> bool + DynClone + Send + Sync {}
 dyn_clone::clone_trait_object!(FilterSingleFn);
 impl<T: Clone + Send + Sync + Fn(AtomView<'_>) -> bool> FilterSingleFn for T {}
 
+/// A cloneable, thread-safe predicate comparing two wildcard matches.
 pub trait CmpFn: Fn(&Match, &Match) -> bool + DynClone + Send + Sync {}
 dyn_clone::clone_trait_object!(CmpFn);
 impl<T: Clone + Send + Sync + Fn(&Match, &Match) -> bool> CmpFn for T {}
 
+/// A cloneable, thread-safe condition on the current wildcard assignments.
+/// Return [`ConditionResult::Inconclusive`] when more assignments are needed.
 pub trait MatchStackFn: Fn(&MatchStack) -> ConditionResult + DynClone + Send + Sync {}
 dyn_clone::clone_trait_object!(MatchStackFn);
 impl<T: Clone + Send + Sync + Fn(&MatchStack) -> ConditionResult> MatchStackFn for T {}
@@ -3657,12 +3696,19 @@ impl<T: Clone + Send + Sync + Fn(&MatchStack) -> ConditionResult> MatchStackFn f
 /// does not match to `x*y*f(x*y)`, since the pattern `x_` has length
 /// 1 inside the function argument.
 pub enum WildcardRestriction {
+    /// Require a match length within inclusive lower and optional upper bounds.
     Length(usize, Option<usize>), // min-max range
+    /// Require the matched expression to have the given atom type.
     IsAtomType(AtomType),
+    /// Require the matched symbol to carry the given tag.
     HasTag(String),
+    /// Match the supplied wildcard symbol literally rather than treating it as a placeholder.
     IsLiteralWildcard(Symbol),
+    /// Accept only matches for which the predicate returns true.
     Filter(Box<dyn FilterFn>),
+    /// Compare this match with the assignment of the given wildcard symbol.
     Cmp(Symbol, Box<dyn CmpFn>),
+    /// Try shorter matches before longer matches for this wildcard.
     NotGreedy,
 }
 
@@ -3700,6 +3746,7 @@ impl std::fmt::Display for WildcardRestriction {
     }
 }
 
+/// A wildcard symbol paired with its restriction.
 pub type WildcardAndRestriction = (Symbol, WildcardRestriction);
 
 /// A restriction on a wildcard or wildcards.
@@ -3867,12 +3914,18 @@ static DEFAULT_PATTERN_CONDITION: Condition<PatternRestriction> = Condition::Tru
 /// A logical expression.
 #[derive(Clone, Debug, Default)]
 pub enum Condition<T> {
+    /// Logical conjunction of two conditions.
     And(Box<(Condition<T>, Condition<T>)>),
+    /// Logical disjunction of two conditions.
     Or(Box<(Condition<T>, Condition<T>)>),
+    /// Logical negation of a condition.
     Not(Box<Condition<T>>),
+    /// A leaf test evaluated using its own condition implementation.
     Yield(T),
     #[default]
+    /// An unconditionally true condition.
     True,
+    /// An unconditionally false condition.
     False,
 }
 
@@ -3889,7 +3942,10 @@ impl<T: std::fmt::Display> std::fmt::Display for Condition<T> {
     }
 }
 
+/// Evaluate a test with a supplied context, allowing an inconclusive result
+/// when the available information does not determine its truth.
 pub trait Evaluate {
+    /// The context needed to evaluate this test, which may borrow matched expressions.
     type State<'a>;
 
     /// Evaluate a condition.
@@ -3945,8 +4001,11 @@ impl<T> std::ops::Not for Condition<T> {
 /// true, false, or inconclusive.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum ConditionResult {
+    /// The condition is known to hold.
     True,
+    /// The condition is known not to hold.
     False,
+    /// The available information does not determine the condition.
     Inconclusive,
 }
 
@@ -4009,14 +4068,17 @@ impl From<ConditionResult> for Option<bool> {
 }
 
 impl ConditionResult {
+    /// Return whether the condition was established as true.
     pub fn is_true(&self) -> bool {
         matches!(self, ConditionResult::True)
     }
 
+    /// Return whether the condition was established as false.
     pub fn is_false(&self) -> bool {
         matches!(self, ConditionResult::False)
     }
 
+    /// Return whether the condition could not be decided.
     pub fn is_inconclusive(&self) -> bool {
         matches!(self, ConditionResult::Inconclusive)
     }
@@ -4026,14 +4088,24 @@ impl ConditionResult {
 /// a [ConditionResult] when evaluated.
 #[derive(Clone, Debug)]
 pub enum Relation {
+    /// Test equality after substituting pattern values.
     Eq(Pattern, Pattern),
+    /// Test inequality after substituting pattern values.
     Ne(Pattern, Pattern),
+    /// Test whether the first value is greater than the second.
     Gt(Pattern, Pattern),
+    /// Test whether the first value is greater than or equal to the second.
     Ge(Pattern, Pattern),
+    /// Test whether the first value is less than the second.
     Lt(Pattern, Pattern),
+    /// Test whether the first value is less than or equal to the second.
     Le(Pattern, Pattern),
+    /// Test whether the first expression contains the second expression.
     Contains(Pattern, Pattern),
+    /// Test the resulting expression's atom type.
     IsType(Pattern, AtomType),
+    /// Match the first expression against the second pattern using the supplied
+    /// wildcard restrictions and matching settings.
     Matches(
         Pattern,
         Pattern,
@@ -4598,6 +4670,8 @@ pub struct MatchSettings {
 static DEFAULT_MATCH_SETTINGS: MatchSettings = MatchSettings::new();
 
 impl MatchSettings {
+    /// Create default settings: search all levels, allow partial matches,
+    /// use greedy wildcards, and disable right-hand-side caching.
     pub const fn new() -> Self {
         Self {
             non_greedy_wildcards: Vec::new(),
@@ -4779,6 +4853,8 @@ impl std::fmt::Debug for WrappedMatchStack<'_, '_> {
 }
 
 impl<'a, 'b> WrappedMatchStack<'a, 'b> {
+    /// Create an empty match stack using a replacement's restrictions and
+    /// settings, substituting defaults when they are absent.
     pub fn from_replacement(replacement: BorrowedReplacement<'b>) -> WrappedMatchStack<'a, 'b> {
         WrappedMatchStack {
             stack: MatchStack::new(),
@@ -5350,6 +5426,8 @@ pub struct AtomMatchIterator<'a, 'b> {
 }
 
 impl<'a, 'b> AtomMatchIterator<'a, 'b> {
+    /// Create a matcher for `pattern`. Set its target with
+    /// [`Self::set_new_target`] before requesting matches.
     pub fn new(pattern: &'b Pattern) -> AtomMatchIterator<'a, 'b> {
         AtomMatchIterator {
             matcher: AtomMatcher::new(pattern),
@@ -5390,6 +5468,10 @@ impl<'a, 'b> AtomMatchIterator<'a, 'b> {
         self.matcher.set_target(target, match_stack, force_complete);
     }
 
+    /// Find the next match whose conditions are proven true, updating
+    /// `match_stack`. The returned flags identify matched children for a partial
+    /// match and are empty when no child-selection mask is needed. Returns
+    /// `None` when matching fails or is exhausted.
     pub fn next(&mut self, match_stack: &mut WrappedMatchStack<'a, 'b>) -> Option<&[bool]> {
         // Only a complete, proven match may escape to replacement/tree callers.
         // Nested matchers use next_result so unbound outer wildcards can still
@@ -5404,6 +5486,10 @@ impl<'a, 'b> AtomMatchIterator<'a, 'b> {
         }
     }
 
+    /// Advance the matcher and update `match_stack`, returning child-selection
+    /// flags or the reason matching failed. Conditions may still be inconclusive
+    /// when outer wildcards have not been assigned; use [`Self::next`] when
+    /// only fully validated matches should be returned.
     pub fn next_result(
         &mut self,
         match_stack: &mut WrappedMatchStack<'a, 'b>,
@@ -5525,8 +5611,11 @@ pub struct SubSliceIterator<'a, 'b> {
 /// Errors that can occur during iteration over matches.
 /// A match could be structurally impossible or impossible due to mismatches on wildcards.
 pub enum MatchError {
+    /// The expression structure cannot match the pattern.
     StructurallyImpossible,
+    /// Wildcard assignments or restrictions prevent a match.
     ImpossibleDueToConstraints,
+    /// All candidate matches have been exhausted.
     NoMoreMatches,
 }
 
@@ -6355,6 +6444,8 @@ pub struct PatternMatch<'a, 'b> {
 }
 
 impl<'a: 'b, 'b> PatternAtomTreeIterator<'a, 'b> {
+    /// Search the target expression tree for a pattern. Missing conditions
+    /// mean no restrictions; missing settings use [`MatchSettings::new`].
     pub fn new(
         pattern: &'b Pattern,
         target: AtomView<'a>,
@@ -6450,6 +6541,8 @@ pub struct ReplaceIterator<'a, 'b> {
 }
 
 impl<'a: 'b, 'b> ReplaceIterator<'a, 'b> {
+    /// Create an iterator of expressions obtained by replacing one match at a
+    /// time in the original target. Missing conditions and settings use the defaults.
     pub fn new(
         pattern: &'b Pattern,
         target: AtomView<'a>,

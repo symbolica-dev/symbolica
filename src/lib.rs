@@ -74,6 +74,7 @@ pub mod solve;
 pub mod state;
 pub mod streaming;
 pub mod tensors;
+/// Built-in transcendental functions, constants, and their symbolic and numerical behavior.
 pub mod transcendental;
 pub mod transformer;
 pub mod utils;

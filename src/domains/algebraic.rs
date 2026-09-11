@@ -181,7 +181,7 @@ pub struct AlgebraicQuotient<R: Ring> {
 
 /// A selected root of a univariate polynomial over `R`.
 ///
-/// For fields with an analytic embedding, such as [`Q`] and
+/// For fields with an analytic embedding, such as [`Q`](tyalias@Q) and
 /// [`AlgebraicExtension<Q>`], `index` refers to Symbolica's canonical ordering
 /// of complex roots. Over a parametric field such as `Q(a, b, ...)`, it is a
 /// formal branch label whose analytic meaning is fixed only after the
@@ -1569,7 +1569,8 @@ impl<R: EuclideanDomain> AlgebraicExtension<R> {
     /// Create a new algebraic extension from a univariate polynomial.
     /// The polynomial should be monic and irreducible.
     ///
-    /// The default embedding is root index 0. Use [`from_polynomial_with_embedding`] to specify a different root index.
+    /// The default embedding is root index 0. Use [`Self::from_polynomial_with_embedding`]
+    /// to specify a different root index.
     pub fn new(poly: MultivariatePolynomial<R, u16>) -> AlgebraicExtension<R> {
         if poly.nvars() == 1 {
             return AlgebraicExtension {

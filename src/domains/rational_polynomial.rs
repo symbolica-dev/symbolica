@@ -43,6 +43,7 @@ pub struct RationalPolynomialField<R: Ring, E: PositiveExponent = u16> {
 }
 
 impl<R: Ring, E: PositiveExponent> RationalPolynomialField<R, E> {
+    /// Create a rational-function field over `coeff_ring` with exponent type `E`.
     pub fn new(coeff_ring: R) -> RationalPolynomialField<R, E> {
         RationalPolynomialField {
             ring: coeff_ring,
@@ -50,6 +51,7 @@ impl<R: Ring, E: PositiveExponent> RationalPolynomialField<R, E> {
         }
     }
 
+    /// Create a rational-function field with the coefficient ring of `poly`.
     pub fn from_poly(poly: &MultivariatePolynomial<R, E>) -> RationalPolynomialField<R, E> {
         RationalPolynomialField {
             ring: poly.ring().clone(),
@@ -58,7 +60,12 @@ impl<R: Ring, E: PositiveExponent> RationalPolynomialField<R, E> {
     }
 }
 
+/// Construct a rational polynomial from numerator and denominator polynomials,
+/// converting coefficients from `R` to `OR` as supported by the implementation.
 pub trait FromNumeratorAndDenominator<R: Ring, OR: Ring, E: PositiveExponent> {
+    /// Construct `num / den` over `field`. The denominator must be nonzero.
+    /// Set `do_gcd` to cancel common polynomial factors; when false, the caller
+    /// must ensure the numerator and denominator are already coprime.
     fn from_num_den(
         num: MultivariatePolynomial<R, E>,
         den: MultivariatePolynomial<R, E>,
@@ -90,7 +97,9 @@ where
 /// A polynomial quotient of two multivariate polynomials over a ring.
 #[derive(Clone, PartialEq, Eq, Hash, Debug)]
 pub struct RationalPolynomial<R: Ring, E: PositiveExponent = u16> {
+    /// The numerator polynomial. It must share a variable order with the denominator.
     pub numerator: MultivariatePolynomial<R, E>,
+    /// The nonzero denominator polynomial, normalized and coprime to the numerator.
     pub denominator: MultivariatePolynomial<R, E>,
 }
 
@@ -156,6 +165,8 @@ impl<R: Ring, E: PositiveExponent> RationalPolynomial<R, E>
 where
     Self: FromNumeratorAndDenominator<R, R, E>,
 {
+    /// Unify the variable order of both rational functions in place, remapping
+    /// the numerator and denominator exponents without changing their values.
     pub fn unify_variables(&mut self, other: &mut Self) {
         assert_eq!(self.numerator.variables(), self.denominator.variables());
         assert_eq!(other.numerator.variables(), other.denominator.variables());
@@ -185,6 +196,7 @@ where
 }
 
 impl<R: Ring, E: PositiveExponent> RationalPolynomial<R, E> {
+    /// Create the zero rational function over `field` with the supplied variable order.
     pub fn new(field: &R, var_map: Arc<Vec<PolyVariable>>) -> RationalPolynomial<R, E> {
         let num = MultivariatePolynomial::new(field, None, var_map);
         let den = num.one();
@@ -195,14 +207,17 @@ impl<R: Ring, E: PositiveExponent> RationalPolynomial<R, E> {
         }
     }
 
+    /// Borrow the shared ordered variable list of the numerator and denominator.
     pub fn get_variables(&self) -> &Arc<Vec<PolyVariable>> {
         &self.numerator.variables()
     }
 
+    /// Return whether the numerator is zero.
     pub fn is_zero(&self) -> bool {
         self.numerator.is_zero()
     }
 
+    /// Return whether both numerator and denominator are constant polynomials.
     pub fn is_constant(&self) -> bool {
         self.numerator.is_constant() && self.denominator.is_constant()
     }
@@ -528,6 +543,11 @@ where
     Self: FromNumeratorAndDenominator<R, R, E>,
 {
     #[inline]
+    /// Return the reciprocal, exchanging numerator and denominator and normalizing.
+    ///
+    /// # Panics
+    ///
+    /// Panics if the rational function is zero.
     pub fn inv(self) -> Self {
         if self.numerator.is_zero() {
             panic!("Cannot invert 0");
@@ -537,6 +557,12 @@ where
         Self::from_num_den(self.denominator, self.numerator, &field, false)
     }
 
+    /// Raise this rational function to a nonnegative integer power. Exponent zero
+    /// returns one.
+    ///
+    /// # Panics
+    ///
+    /// Panics if `e` exceeds `u32::MAX`.
     pub fn pow(&self, e: u64) -> Self {
         if e > u32::MAX as u64 {
             panic!("Power of exponentiation is larger than 2^32: {e}");
@@ -564,6 +590,8 @@ where
         result
     }
 
+    /// Return the GCD of the numerators divided by the LCM of the denominators.
+    /// Both operands must use compatible coefficient rings and variable lists.
     pub fn gcd(&self, other: &Self) -> Self {
         let gcd_num = self.numerator.gcd(&other.numerator);
         let gcd_den = self.denominator.gcd(&other.denominator);
@@ -675,6 +703,9 @@ where
     }
 
     // Convert from a univariate polynomial with rational polynomial coefficients to a rational polynomial.
+    /// Flatten a univariate polynomial with rational-function coefficients into
+    /// a single rational function. Its variable is merged with the coefficient
+    /// variables as needed.
     pub fn from_univariate(
         mut f: UnivariatePolynomial<RationalPolynomialField<R, E>>,
     ) -> RationalPolynomial<R, E> {

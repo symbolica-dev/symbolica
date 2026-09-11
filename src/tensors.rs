@@ -23,11 +23,33 @@ pub struct CanonicalTensor<T, G> {
 /// Errors that can occur while canonicalizing tensor expressions.
 #[derive(Clone, Debug, PartialEq, Eq, Hash)]
 pub enum TensorCanonicalizationError {
-    ExternalIndexMismatch { index: Atom, expression: Atom },
-    ContractedMoreThanOnce { index: Atom },
-    DummyIndexAsVariable { expression: Atom },
-    UnsupportedTensorPower { expression: Atom },
-    InconsistentOpenIndices { expression: Atom },
+    /// An index is external in some terms but not in every term.
+    ExternalIndexMismatch {
+        /// The inconsistently used external index.
+        index: Atom,
+        /// The expression containing the conflicting terms.
+        expression: Atom,
+    },
+    /// A dummy index occurs in more than one contraction.
+    ContractedMoreThanOnce {
+        /// The index used too many times.
+        index: Atom,
+    },
+    /// A dummy index appears as a standalone variable instead of a tensor argument.
+    DummyIndexAsVariable {
+        /// The expression containing the invalid index occurrence.
+        expression: Atom,
+    },
+    /// A tensor is raised to a power unsupported by canonicalization.
+    UnsupportedTensorPower {
+        /// The unsupported tensor power.
+        expression: Atom,
+    },
+    /// Components of an expression have different open indices.
+    InconsistentOpenIndices {
+        /// The expression with incompatible components.
+        expression: Atom,
+    },
 }
 
 impl std::error::Error for TensorCanonicalizationError {}

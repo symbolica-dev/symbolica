@@ -100,9 +100,13 @@ pub enum Coefficient {
     Indeterminate,
     /// Infinity with an optional complex phase
     Infinity(Option<Complex<Rational>>),
+    /// An exact complex number with rational real and imaginary parts.
     Complex(Complex<Rational>),
+    /// A complex number with arbitrary-precision floating-point components.
     Float(Complex<Float>),
+    /// A finite-field element together with its registered field index.
     FiniteField(FiniteFieldElement<u64>, FiniteFieldIndex),
+    /// A rational function of polynomial variables with integer coefficients.
     RationalPolynomial(RationalPolynomial<IntegerRing, u16>),
 }
 
@@ -164,6 +168,8 @@ impl Coefficient {
         }
     }
 
+    /// Return whether this is an exact rational integer with zero imaginary part.
+    /// Floating-point and finite-field values are not classified as integers here.
     pub fn is_integer(&self) -> bool {
         match self {
             Coefficient::Complex(c) => c.is_real() && c.re.is_integer(),
@@ -171,6 +177,8 @@ impl Coefficient {
         }
     }
 
+    /// Return whether this is a rational or floating-point number with zero
+    /// imaginary part, or an infinity with a real direction.
     pub fn is_real(&self) -> bool {
         match self {
             Coefficient::Complex(c) => c.is_real(),
@@ -364,18 +372,25 @@ impl Ord for Coefficient {
 }
 
 impl Coefficient {
+    /// Create the exact coefficient zero.
     pub fn new() -> Coefficient {
         Coefficient::zero()
     }
 
+    /// Create the exact coefficient zero.
     pub fn zero() -> Coefficient {
         Coefficient::Complex(Complex::new_zero())
     }
 
+    /// Create the exact coefficient one.
     pub fn one() -> Coefficient {
         Coefficient::Complex(Complex::new(Rational::one(), Rational::zero()))
     }
 
+    /// Return the sign convention used when printing coefficients. Real and
+    /// purely imaginary numbers are negative when their nonzero component is
+    /// negative; rational polynomials use the numerator's leading coefficient.
+    /// This is not an ordering of complex numbers.
     pub fn is_negative(&self) -> bool {
         match self {
             Coefficient::Indeterminate | Coefficient::Infinity(None) => false,
@@ -390,6 +405,7 @@ impl Coefficient {
         }
     }
 
+    /// Return whether the coefficient is zero in its coefficient domain.
     pub fn is_zero(&self) -> bool {
         match self {
             Coefficient::Indeterminate | Coefficient::Infinity(_) => false,
@@ -400,6 +416,9 @@ impl Coefficient {
         }
     }
 
+    /// Test for the unit coefficient. For a rational-polynomial representation,
+    /// this checks the numerator; use the borrowed view to test both numerator
+    /// and denominator.
     pub fn is_one(&self) -> bool {
         match self {
             Coefficient::Indeterminate | Coefficient::Infinity(_) => false,
@@ -413,6 +432,9 @@ impl Coefficient {
         }
     }
 
+    /// Compute a coefficient GCD. Floating-point coefficients and non-finite
+    /// values use one as their GCD; incompatible coefficient domains yield
+    /// [`Coefficient::Indeterminate`].
     pub fn gcd(&self, rhs: &Self) -> Self {
         match (self, rhs) {
             (Coefficient::Indeterminate | Coefficient::Infinity(_), _) => Self::one(),
@@ -696,12 +718,17 @@ impl Mul for Coefficient {
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
+/// A rational number whose large numerator and denominator remain borrowed
+/// in serialized form until converted with [`Self::to_rat`].
 pub enum SerializedRational<'a> {
+    /// A small rational stored as numerator and positive denominator.
     Natural(i64, i64),
+    /// A rational with a serialized arbitrary-size numerator or denominator.
     Large(SerializedLargeRational<'a>),
 }
 
 impl SerializedRational<'_> {
+    /// Return whether the numerator is zero.
     pub fn is_zero(&self) -> bool {
         match self {
             SerializedRational::Natural(n, _) => *n == 0,
@@ -709,6 +736,7 @@ impl SerializedRational<'_> {
         }
     }
 
+    /// Return whether the rational is negative.
     pub fn is_negative(&self) -> bool {
         match self {
             SerializedRational::Natural(n, _) => *n < 0,
@@ -716,6 +744,8 @@ impl SerializedRational<'_> {
         }
     }
 
+    /// Decode an owned rational. The representation must already have a
+    /// positive denominator and coprime numerator and denominator.
     pub fn to_rat(&self) -> Rational {
         match self {
             SerializedRational::Natural(n, d) => Rational::from_int_unchecked(*n, *d),
@@ -725,6 +755,8 @@ impl SerializedRational<'_> {
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
+/// A borrowed arbitrary-size rational, stored as a sign and little-endian
+/// numerator and denominator byte sequences.
 pub struct SerializedLargeRational<'a> {
     pub(crate) is_negative: bool,
     pub(crate) num_digits: &'a [u8],
@@ -732,14 +764,18 @@ pub struct SerializedLargeRational<'a> {
 }
 
 impl SerializedLargeRational<'_> {
+    /// Return whether the serialized numerator is zero.
     pub fn is_zero(&self) -> bool {
         self.num_digits.is_empty()
     }
 
+    /// Return the stored sign of the rational.
     pub fn is_negative(&self) -> bool {
         self.is_negative
     }
 
+    /// Decode an owned rational from the serialized integer components.
+    /// The stored numerator and denominator must already be normalized.
     pub fn to_rat(&self) -> Rational {
         if self.num_digits.is_empty() {
             return Rational::zero();
@@ -754,18 +790,24 @@ impl SerializedLargeRational<'_> {
 }
 
 #[derive(Debug, Copy, Clone, PartialEq, Eq)]
+/// A borrowed rational polynomial in Symbolica's coefficient encoding.
+/// The bytes must contain a valid encoding with the corresponding symbol state.
 pub struct SerializedRationalPolynomial<'a>(pub &'a [u8]);
 
 #[derive(Debug, Copy, Clone, PartialEq, Eq)]
+/// A borrowed floating-point value encoded with its binary precision.
+/// The bytes must contain a valid serialized float.
 pub struct SerializedFloat<'a>(pub &'a [u8]);
 
 impl SerializedFloat<'_> {
+    /// Decode the floating-point value at its stored precision.
     pub fn to_float(&self) -> Float {
         let mut d = self.0;
         let prec = d.get_u32_le();
         Float::deserialize(d, prec)
     }
 
+    /// Decode the value and return whether it is zero.
     pub fn is_zero(&self) -> bool {
         self.to_float().is_zero() // TODO: improve
     }
@@ -775,7 +817,10 @@ impl SerializedFloat<'_> {
 /// serialized for efficiency.
 #[derive(Debug, Copy, Clone, PartialEq, Eq)]
 pub enum CoefficientView<'a> {
+    /// An undefined numerical result, such as `0/0`.
     Indeterminate,
+    /// Infinity with an optional direction given by rational real and imaginary
+    /// parts. `None` denotes an unspecified complex direction.
     Infinity(Option<(SerializedRational<'a>, SerializedRational<'a>)>),
     /// A complex number `(n_re, d_re, n_im, d_im)` that represents `n_re/d_re + i * n_im/d_im`.
     Natural(i64, i64, i64, i64),
@@ -783,7 +828,9 @@ pub enum CoefficientView<'a> {
     Float(SerializedFloat<'a>, SerializedFloat<'a>),
     /// A large complex number `(re, im)` that represents `re + i * im`.
     Large(SerializedRational<'a>, SerializedRational<'a>),
+    /// A finite-field element together with its registered field index.
     FiniteField(FiniteFieldElement<u64>, FiniteFieldIndex),
+    /// A borrowed serialized rational polynomial.
     RationalPolynomial(SerializedRationalPolynomial<'a>),
 }
 
@@ -1304,6 +1351,8 @@ impl ConvertToRing for AlgebraicExtension<Q> {
 }
 
 impl CoefficientView<'_> {
+    /// Create an owned coefficient, reducing the small rational components
+    /// of [`Self::Natural`] to normalized fractions.
     pub fn normalize(&self) -> Coefficient {
         match self {
             CoefficientView::Natural(nr, dr, ni, di) => {
@@ -1319,6 +1368,8 @@ impl CoefficientView<'_> {
         }
     }
 
+    /// Decode an owned coefficient. Stored rational components are assumed
+    /// to be normalized; use [`Self::normalize`] for unreduced small fractions.
     pub fn to_owned(&self) -> Coefficient {
         match self {
             CoefficientView::Natural(nr, dr, ni, di) => Coefficient::Complex(Complex::new(
@@ -1343,6 +1394,7 @@ impl CoefficientView<'_> {
         }
     }
 
+    /// Return whether the coefficient is zero in its coefficient domain.
     pub fn is_zero(&self) -> bool {
         match self {
             CoefficientView::Natural(n, _, ni, _) => *n == 0 && *ni == 0,
@@ -1354,6 +1406,7 @@ impl CoefficientView<'_> {
         }
     }
 
+    /// Return whether the coefficient is one in its coefficient domain.
     pub fn is_one(&self) -> bool {
         match self {
             CoefficientView::Natural(n, d, ni, di) => *n == *d && *ni == 0 && *di == 1,
@@ -1371,6 +1424,10 @@ impl CoefficientView<'_> {
         }
     }
 
+    /// Convert to a complex floating-point number with `binary_prec` bits.
+    /// Existing floats retain their precision unless it must be lowered.
+    /// Returns an error for finite fields, rational polynomials, indeterminate
+    /// values, and infinities with a non-real or unspecified direction.
     pub fn to_float(&self, binary_prec: u32) -> Result<Complex<Float>, String> {
         match self {
             CoefficientView::Natural(n, d, ni, di) => Ok(Complex::new(
@@ -1418,6 +1475,9 @@ impl CoefficientView<'_> {
         }
     }
 
+    /// Simplify exponentiation and return `(factor, base, exponent)` representing
+    /// `self^other = factor * base^exponent`. Exact roots may remain as powers;
+    /// undefined or unsupported cases can contain an indeterminate coefficient.
     pub fn pow(&self, other: &CoefficientView<'_>) -> (Coefficient, Coefficient, Coefficient) {
         if let CoefficientView::Natural(0, _, 0, _) = self {
             let r = match other {
@@ -2177,6 +2237,8 @@ impl CoefficientView<'_> {
         }
     }
 
+    /// Return whether the representation is an exact real integer or a
+    /// finite-field element. Floating-point values are not classified as integers.
     pub fn is_integer(&self) -> bool {
         match self {
             CoefficientView::Natural(_, d, i, _) => *i == 0 && *d == 1,
@@ -2189,6 +2251,9 @@ impl CoefficientView<'_> {
         }
     }
 
+    /// Return whether this representation has no imaginary component.
+    /// Finite-field and rational-polynomial coefficients are treated as real
+    /// by this representation-level test.
     pub fn is_real(&self) -> bool {
         match self {
             CoefficientView::Natural(_, _, i, _) => *i == 0,
@@ -2202,6 +2267,7 @@ impl CoefficientView<'_> {
         }
     }
 
+    /// Return whether this view stores floating-point components.
     pub fn is_float(&self) -> bool {
         matches!(self, CoefficientView::Float(_, _))
     }

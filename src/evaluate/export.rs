@@ -134,7 +134,9 @@ impl<T: ExportNumber + SingleFloat> ExportNumber for Complex<T> {
 /// The number class used for exporting.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum NumberClass {
+    /// Real double-precision values.
     RealF64,
+    /// Complex values with double-precision real and imaginary components.
     ComplexF64,
 }
 
@@ -487,6 +489,13 @@ impl<T: ExportNumber + SingleFloat> ExpressionEvaluator<T> {
         )
     }
 
+    /// Generate C++ source for a SIMD evaluator under the supplied exported
+    /// function name. Set `complex` for complex arithmetic; `asm` selects the
+    /// inline-assembly implementation. The C++ implementation uses xsimd.
+    ///
+    /// # Panics
+    ///
+    /// Panics if the requested assembly mode is unsupported for SIMD export.
     pub fn export_simd_str(
         &self,
         function_name: &str,
@@ -585,6 +594,9 @@ impl<T: ExportNumber + SingleFloat> ExpressionEvaluator<T> {
         res
     }
 
+    /// Generate CUDA source and host entry points for batched evaluation under
+    /// `function_name`, using the requested real or complex number class.
+    /// `settings` controls included headers and custom source.
     pub fn export_cuda_str(
         &self,
         function_name: &str,

@@ -4030,7 +4030,9 @@ impl<R: EuclideanDomain + PolynomialGCD<E>, E: PositiveExponent> MultivariatePol
 /// An error that can occur during the heuristic GCD algorithm.
 #[derive(Debug)]
 pub enum HeuristicGCDError {
+    /// The heuristic evaluation would exceed its permitted integer size.
     MaxSizeExceeded,
+    /// The reconstructed candidate could not be certified as a GCD.
     BadReconstruction,
 }
 
@@ -7323,6 +7325,8 @@ pub trait PolynomialGCD<E: PositiveExponent>: Ring {
         None
     }
 
+    /// Try a heuristic GCD, returning the GCD and the two exact cofactors
+    /// `(g, a/g, b/g)`. Return `None` when the heuristic is unavailable or fails.
     fn heuristic_gcd(
         a: &MultivariatePolynomial<Self, E>,
         b: &MultivariatePolynomial<Self, E>,
@@ -7331,18 +7335,27 @@ pub trait PolynomialGCD<E: PositiveExponent>: Ring {
         MultivariatePolynomial<Self, E>,
         MultivariatePolynomial<Self, E>,
     )>;
+    /// Compute the GCD of a nonempty collection of polynomials over this ring.
     fn gcd_multiple(f: Vec<MultivariatePolynomial<Self, E>>) -> MultivariatePolynomial<Self, E>;
+    /// Compute the polynomial GCD in the selected variable indices. `bounds`
+    /// contains degree bounds in input coordinate order and may be tightened
+    /// during computation. Inputs must have compatible variable maps.
     fn gcd(
         a: &MultivariatePolynomial<Self, E>,
         b: &MultivariatePolynomial<Self, E>,
         vars: &[usize],
         bounds: &mut [E],
     ) -> MultivariatePolynomial<Self, E>;
+    /// Compute degree bounds for the GCD of `a` and `b`, using `vars` as
+    /// the selected variable indices.
     fn get_gcd_var_bounds(
         a: &MultivariatePolynomial<Self, E>,
         b: &MultivariatePolynomial<Self, E>,
         vars: &[usize],
     ) -> SmallVec<[E; INLINED_EXPONENTS]>;
+    /// Normalize a polynomial GCD to the coefficient ring's preferred associate,
+    /// such as a monic polynomial over a field or positive leading coefficient
+    /// over the integers.
     fn normalize(a: MultivariatePolynomial<Self, E>) -> MultivariatePolynomial<Self, E>;
 }
 

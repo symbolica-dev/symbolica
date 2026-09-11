@@ -638,6 +638,8 @@ impl Atom {
 
 impl AtomView<'_> {
     #[inline(always)]
+    /// Return whether the expression is marked as requiring normalization.
+    /// This reads the stored flag rather than checking algebraic equivalence.
     pub fn needs_normalization(&self) -> bool {
         match self {
             AtomView::Num(_) | AtomView::Var(_) => false,

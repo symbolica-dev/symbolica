@@ -90,9 +90,13 @@ pub use crate::{
 /// written as `namespace::symbol`.
 #[derive(Clone)]
 pub struct NamespacedSymbol {
+    /// The namespace containing the symbol.
     pub namespace: Cow<'static, str>,
+    /// The fully qualified symbol name, including its namespace.
     pub symbol: Cow<'static, str>,
+    /// The source file of the definition, or an empty string when unavailable.
     pub file: Cow<'static, str>,
+    /// The source line of the definition, or zero when unavailable.
     pub line: usize,
 }
 
@@ -193,9 +197,13 @@ macro_rules! wrap_symbol {
 /// A string representation of an expression with a namespace, and optional positional data (file and line).
 /// Can be created with the [wrap_input!](crate::wrap_input) macro.
 pub struct DefaultNamespace<T> {
+    /// The default namespace for unqualified symbols in the input.
     pub namespace: Cow<'static, str>,
+    /// The expression input to parse.
     pub data: T,
+    /// The source file of the input, or an empty string when unavailable.
     pub file: Cow<'static, str>,
+    /// The source line of the input, or zero when unavailable.
     pub line: usize,
 }
 
@@ -409,6 +417,7 @@ pub struct EvaluationInfo {
     cpp: Option<CppCode>,
 }
 
+/// A boxed numerical implementation of an external symbolic function.
 pub type EvalFn<T> = Box<dyn ExternalFunction<T>>;
 type ErasedConstantEval =
     Box<dyn Fn(&[AtomView], u32) -> Result<Complex<Float>, String> + Send + Sync>;
@@ -1668,6 +1677,7 @@ impl Symbol {
         &self.get_global_data().tags
     }
 
+    /// Return the registered alternative names for this symbol.
     pub fn get_aliases(&self) -> &[String] {
         &self.get_global_data().aliases
     }
@@ -2053,6 +2063,8 @@ impl Symbol {
         ]
     }
 
+    /// Write the symbol using `opts` and the surrounding formatting `state`,
+    /// including its custom formatter when one is registered.
     pub fn format<W: std::fmt::Write>(
         &self,
         opts: &PrintOptions,
@@ -2388,6 +2400,7 @@ impl Indeterminate {
         }
     }
 
+    /// Borrow this indeterminate as a variable or function-call expression.
     pub fn as_view(&self) -> AtomView<'_> {
         match self {
             Indeterminate::Symbol(_, v) => v.as_view(),
@@ -2399,11 +2412,17 @@ impl Indeterminate {
 /// The type (variant) of an atom.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub enum AtomType {
+    /// A numerical coefficient.
     Num,
+    /// A symbolic variable.
     Var,
+    /// A sum.
     Add,
+    /// A product.
     Mul,
+    /// A power.
     Pow,
+    /// A function call.
     Fun,
 }
 
@@ -2423,21 +2442,33 @@ impl std::fmt::Display for AtomType {
 /// The type (variant) of a slice.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub enum SliceType {
+    /// Terms taken from a sum.
     Add,
+    /// Factors taken from a product.
     Mul,
+    /// Arguments taken from a function call.
     Arg,
+    /// A single expression viewed as a one-element slice.
     One,
+    /// The base and exponent of a power, in that order.
     Pow,
+    /// An empty slice with no parent operation.
     Empty,
 }
 
 /// A (immutable) view of an [Atom].
 pub enum AtomView<'a> {
+    /// A borrowed numerical coefficient.
     Num(NumView<'a>),
+    /// A borrowed symbolic variable.
     Var(VarView<'a>),
+    /// A borrowed function call.
     Fun(FunView<'a>),
+    /// A borrowed power.
     Pow(PowView<'a>),
+    /// A borrowed product.
     Mul(MulView<'a>),
+    /// A borrowed sum.
     Add(AddView<'a>),
 }
 
@@ -2776,8 +2807,11 @@ impl<'a> From<AddView<'a>> for AtomView<'a> {
 /// A copy-on-write structure for `Atom` and `AtomView`.
 #[derive(Clone, Debug)]
 pub enum AtomOrView<'a> {
+    /// An owned expression.
     Atom(Atom),
+    /// A variable stored inline without a heap allocation.
     InlineVar(InlineVar),
+    /// A borrowed expression.
     View(AtomView<'a>),
 }
 
@@ -2873,6 +2907,8 @@ impl<'a> From<&AtomView<'a>> for AtomOrView<'a> {
 }
 
 impl<'a> AtomOrView<'a> {
+    /// Return an owned expression, copying the contents only when they are borrowed
+    /// or stored as an inline variable.
     pub fn into_owned(self) -> Atom {
         match self {
             AtomOrView::Atom(a) => a,
@@ -2882,6 +2918,7 @@ impl<'a> AtomOrView<'a> {
     }
 
     #[inline(always)]
+    /// Borrow the expression without allocating.
     pub fn as_view(&'a self) -> AtomView<'a> {
         match self {
             AtomOrView::Atom(a) => a.as_view(),
@@ -2890,6 +2927,8 @@ impl<'a> AtomOrView<'a> {
         }
     }
 
+    /// Return mutable owned storage, first copying a borrowed expression or
+    /// materializing an inline variable when necessary.
     pub fn as_mut(&mut self) -> &mut Atom {
         match self {
             AtomOrView::Atom(a) => a,
@@ -2939,12 +2978,14 @@ impl<'a> AtomView<'a> {
 }
 
 impl AtomView<'_> {
+    /// Copy this view into a new owned expression.
     pub fn to_owned(&self) -> Atom {
         let mut a = Atom::default();
         a.set_from_view(self);
         a
     }
 
+    /// Replace `target` with a copy of this view, reusing its allocation.
     pub fn clone_into(&self, target: &mut Atom) {
         target.set_from_view(self);
     }
@@ -2977,6 +3018,7 @@ impl AtomView<'_> {
     }
 
     #[inline]
+    /// Return whether this view is a numerical zero; no symbolic simplification is performed.
     pub fn is_zero(&self) -> bool {
         if let AtomView::Num(n) = self {
             n.is_zero()
@@ -2986,6 +3028,7 @@ impl AtomView<'_> {
     }
 
     #[inline]
+    /// Return whether this view is a numerical one; no symbolic simplification is performed.
     pub fn is_one(&self) -> bool {
         if let AtomView::Num(n) = self {
             n.is_one()
@@ -3088,6 +3131,8 @@ impl AtomView<'_> {
             .normalize(workspace, out);
     }
 
+    /// Return the size in bytes of the expression's encoded representation,
+    /// excluding separately stored symbol metadata.
     pub fn get_byte_size(&self) -> usize {
         match self {
             AtomView::Num(n) => n.get_byte_size(),
@@ -3174,12 +3219,19 @@ impl AtomView<'_> {
     trait_decode(trait = crate::state::HasStateMap)
 )]
 pub enum Atom {
+    /// An owned numerical coefficient.
     Num(Num),
+    /// An owned symbolic variable.
     Var(Var),
+    /// An owned function call.
     Fun(Fun),
+    /// An owned power.
     Pow(Pow),
+    /// An owned product.
     Mul(Mul),
+    /// An owned sum.
     Add(Add),
+    /// The exact number zero, requiring no heap allocation.
     Zero,
 }
 
@@ -3269,6 +3321,7 @@ impl Ord for Atom {
     }
 }
 
+/// Access a child expression by a single index or by a path of nested indices.
 pub trait AtomIndex<T> {
     /// Returns the `index`-th sub-atom of this atom
     fn index(&self, index: T) -> Option<AtomView<'_>>;
@@ -3396,11 +3449,13 @@ impl Atom {
     }
 
     #[inline]
+    /// Return whether this atom is a numerical zero; no symbolic simplification is performed.
     pub fn is_zero(&self) -> bool {
         self.as_view().is_zero()
     }
 
     #[inline]
+    /// Return whether this atom is a numerical one; no symbolic simplification is performed.
     pub fn is_one(&self) -> bool {
         self.as_view().is_one()
     }
@@ -3433,6 +3488,8 @@ impl Atom {
     }
 
     #[inline]
+    /// Replace this atom with a coefficient, reusing its allocation, and return
+    /// mutable access to the new number.
     pub fn to_num<T: Into<Coefficient>>(&mut self, coeff: T) -> &mut Num {
         let buffer = std::mem::replace(self, Atom::Zero).into_raw();
         *self = Atom::Num(Num::new_into(coeff.into(), buffer));
@@ -3444,6 +3501,7 @@ impl Atom {
     }
 
     #[inline]
+    /// Replace this atom with the variable `id`, reusing its allocation.
     pub fn to_var(&mut self, id: Symbol) -> &mut Var {
         let buffer = std::mem::replace(self, Atom::Zero).into_raw();
         *self = Atom::Var(Var::new_into(id, buffer));
@@ -3455,6 +3513,8 @@ impl Atom {
     }
 
     #[inline]
+    /// Replace this atom with an empty function call headed by `id`, reusing
+    /// its allocation. Normalize after adding arguments.
     pub fn to_fun(&mut self, id: Symbol) -> &mut Fun {
         let buffer = std::mem::replace(self, Atom::Zero).into_raw();
         *self = Atom::Fun(Fun::new_into(id, buffer));
@@ -3466,6 +3526,7 @@ impl Atom {
     }
 
     #[inline]
+    /// Replace this atom with the unnormalized power `base^exp`, reusing its allocation.
     pub fn to_pow(&mut self, base: AtomView, exp: AtomView) -> &mut Pow {
         let buffer = std::mem::replace(self, Atom::Zero).into_raw();
         *self = Atom::Pow(Pow::new_into(base, exp, buffer));
@@ -3477,6 +3538,8 @@ impl Atom {
     }
 
     #[inline]
+    /// Replace this atom with an empty, unnormalized product, reusing its allocation.
+    /// Normalize after adding factors.
     pub fn to_mul(&mut self) -> &mut Mul {
         let buffer = std::mem::replace(self, Atom::Zero).into_raw();
         *self = Atom::Mul(Mul::new_into(buffer));
@@ -3488,6 +3551,8 @@ impl Atom {
     }
 
     #[inline]
+    /// Replace this atom with an empty, unnormalized sum, reusing its allocation.
+    /// Normalize after adding terms.
     pub fn to_add(&mut self) -> &mut Add {
         let buffer = std::mem::replace(self, Atom::Zero).into_raw();
         *self = Atom::Add(Add::new_into(buffer));
@@ -3499,6 +3564,8 @@ impl Atom {
     }
 
     #[inline(always)]
+    /// Consume the atom and return its underlying byte buffer. The allocation-free
+    /// zero variant returns an empty buffer.
     pub fn into_raw(self) -> RawAtom {
         match self {
             Atom::Num(n) => n.into_raw(),
@@ -3512,6 +3579,7 @@ impl Atom {
     }
 
     #[inline(always)]
+    /// Replace this atom with a copy of `view`, reusing its allocation.
     pub fn set_from_view(&mut self, view: &AtomView) {
         let buffer = std::mem::replace(self, Atom::Zero).into_raw();
         match view {
@@ -3525,6 +3593,7 @@ impl Atom {
     }
 
     #[inline(always)]
+    /// Borrow the expression without copying its storage.
     pub fn as_view(&self) -> AtomView<'_> {
         match self {
             Atom::Num(n) => AtomView::Num(n.to_num_view()),
@@ -3643,11 +3712,13 @@ impl FunctionBuilder {
 
 /// A trait that allows to add an argument to a function builder.
 pub trait FunctionArgument {
+    /// Append this value as an argument and return the updated builder.
     fn add_arg_to_function_builder(&self, f: FunctionBuilder) -> FunctionBuilder;
 }
 
 /// A trait that allows to add multiple arguments to a function builder.
 pub trait FunctionArguments {
+    /// Append these values as arguments and return the updated builder.
     fn add_args_to_function_builder(self, f: FunctionBuilder) -> FunctionBuilder;
 }
 

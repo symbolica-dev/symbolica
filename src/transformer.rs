@@ -52,6 +52,8 @@ pub struct StatsOptions {
 /// Represents the state of the transformer, including statistics export options.
 #[derive(Clone, Default)]
 pub struct TransformerState {
+    /// An optional shared writer for JSON statistics events. When absent,
+    /// statistics are printed to standard output.
     pub stats_export: Option<Arc<Mutex<dyn std::io::Write + Send>>>,
 }
 
@@ -89,6 +91,7 @@ impl StatsOptions {
         self
     }
 
+    /// Format a byte count with a size suffix, scaling by powers of 1024.
     pub fn format_size(&self, size: usize) -> String {
         let mut s = size as f64;
         let kb = 1024.;
@@ -105,6 +108,7 @@ impl StatsOptions {
         format!("{s:.2}EB")
     }
 
+    /// Format a term count as a decimal string.
     pub fn format_count(&self, count: usize) -> String {
         format!("{count}")
     }
@@ -116,6 +120,12 @@ impl StatsOptions {
         s
     }
 
+    /// Write one JSON statistics event, including input/output sizes and term
+    /// counts. `t` is the start time since the Unix epoch; `dt` is the elapsed time.
+    ///
+    /// # Panics
+    ///
+    /// Panics if writing to `out` fails.
     pub fn print_json(
         &self,
         input: AtomView,
@@ -153,6 +163,8 @@ impl StatsOptions {
         ).unwrap();
     }
 
+    /// Print input/output term counts, encoded sizes, and elapsed duration to
+    /// standard output. The start-time argument is currently unused.
     pub fn print(
         &self,
         input: AtomView,
@@ -209,15 +221,21 @@ impl StatsOptions {
 /// Errors that can occur during transformations.
 #[derive(Clone, Debug)]
 pub enum TransformerError {
+    /// An invalid value or unsupported transformation, with an explanation.
     ValueError(String),
+    /// Transformation was interrupted.
     Interrupt,
 }
 
 /// Operations that take an expression as the input and produce a new expression.
 #[derive(Clone)]
 pub enum Transformer {
+    /// Evaluate a condition and execute the true or false transformer chain.
     IfElse(Condition<Relation>, Vec<Transformer>, Vec<Transformer>),
+    /// Execute the first chain, then apply the second if the expression changed
+    /// or the third if it did not.
     IfChanged(Vec<Transformer>, Vec<Transformer>, Vec<Transformer>),
+    /// Stop execution of the current chain.
     BreakChain,
     /// Expand the rhs.
     Expand(Option<Atom>, bool),
@@ -239,6 +257,7 @@ pub enum Transformer {
     CollectByCoefficient,
     /// Collect numbers.
     CollectNum,
+    /// Take the complex conjugate of the input.
     Conjugate,
     /// Apply find-and-replace on the lhs.
     ReplaceAll(
@@ -270,14 +289,27 @@ pub enum Transformer {
     MapTerms(Vec<Transformer>, Option<Arc<ThreadPool>>),
     /// Split a `Mul` or `Add` into a list of arguments.
     Split,
+    /// Partition an `arg(...)` list into function calls of the given names and
+    /// sizes, summing the resulting products with their multiplicities. The flags
+    /// allow the last group to take remaining arguments and allow repeated groups.
     Partition(Vec<(Symbol, usize)>, bool, bool),
+    /// Sort the arguments of `arg(...)` in expression order.
     Sort,
+    /// Rotate a function's arguments to the smallest cyclic ordering.
     CycleSymmetrize,
+    /// Remove duplicate arguments of `arg(...)`, keeping their first occurrences.
     Deduplicate,
+    /// Sum calls to the given function over permutations of an `arg(...)` list,
+    /// including the multiplicity of repeated arguments.
     Permutations(Symbol),
+    /// Repeat the chain until the expression stops changing or the chain breaks.
     Repeat(Vec<Transformer>),
+    /// Print the input with the supplied options and pass it through unchanged.
     Print(PrintOptions),
+    /// Execute a chain and report its elapsed time and input/output sizes.
     Stats(StatsOptions, Vec<Transformer>),
+    /// Convert a rational-polynomial coefficient into an ordinary expression.
+    /// Other inputs pass through unchanged.
     FromNumber,
 }
 

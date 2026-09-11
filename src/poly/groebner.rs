@@ -70,6 +70,7 @@ use super::{
 };
 
 #[derive(Debug)]
+/// A pair of basis polynomials whose S-polynomial is a candidate for reduction.
 pub struct CriticalPair<R: Field, E: Exponent, O: MonomialOrder> {
     lcm_diff_first: Vec<E>,
     poly_first: Rc<MultivariatePolynomial<R, E, O>>,
@@ -131,7 +132,9 @@ pub struct MonomialData {
 
 /// A Groebner basis for a polynomial ideal.
 pub struct GroebnerBasis<R: Field, E: Exponent, O: MonomialOrder> {
+    /// The polynomials forming the basis, with a shared coefficient ring and variable order.
     pub system: Vec<MultivariatePolynomial<R, E, O>>,
+    /// Whether basis construction reports progress statistics.
     pub print_stats: bool,
 }
 
@@ -150,26 +153,33 @@ pub struct PolynomialSolution<R: Ring> {
 }
 
 impl<R: Ring> PolynomialSolution<R> {
+    /// Return the common algebraic extension containing all assigned values.
     pub fn field(&self) -> &AlgebraicExtension<R> {
         &self.field
     }
 
+    /// Borrow the variable assignments in the common extension field.
     pub fn values(&self) -> &HashMap<PolyVariable, AlgebraicNumber<R>> {
         &self.values
     }
 
+    /// Look up an assigned variable, returning `None` when it is absent.
     pub fn get(&self, variable: &PolyVariable) -> Option<&AlgebraicNumber<R>> {
         self.values.get(variable)
     }
 
+    /// Return the number of assigned variables.
     pub fn len(&self) -> usize {
         self.values.len()
     }
 
+    /// Return whether there are no variable assignments. This does not mean
+    /// that a system has no solutions.
     pub fn is_empty(&self) -> bool {
         self.values.is_empty()
     }
 
+    /// Consume the solution and return its common extension field and assignments.
     pub fn into_parts(
         self,
     ) -> (
@@ -225,14 +235,17 @@ pub struct ParametricExtension<E: PositiveExponent = u16> {
 }
 
 impl<E: PositiveExponent> ParametricExtension<E> {
+    /// Return the formal quotient that represents the extension.
     pub fn quotient(&self) -> &AlgebraicQuotient<ParameterField<E>> {
         &self.quotient
     }
 
+    /// Return the defining polynomial of the formal extension generator.
     pub fn polynomial(&self) -> &MultivariatePolynomial<ParameterField<E>, u16> {
         self.quotient.poly()
     }
 
+    /// Return the parameters of the rational-function coefficient field.
     pub fn parameters(&self) -> &[PolyVariable] {
         &self.parameters
     }
@@ -531,14 +544,18 @@ pub struct ParametricRoot<E: PositiveExponent = u16> {
 }
 
 impl<E: PositiveExponent> ParametricRoot<E> {
+    /// Return the formal extension containing this value.
     pub fn field(&self) -> &ParametricExtension<E> {
         &self.field
     }
 
+    /// Return the defining polynomial of the extension generator.
+    /// This need not be the minimal polynomial of this particular value.
     pub fn polynomial(&self) -> &MultivariatePolynomial<ParameterField<E>, u16> {
         self.field.polynomial()
     }
 
+    /// Return the root index selected at the final level of the adjoining tower.
     pub fn conjugate(&self) -> usize {
         *self
             .conjugates
@@ -551,10 +568,13 @@ impl<E: PositiveExponent> ParametricRoot<E> {
         &self.conjugates
     }
 
+    /// Borrow the value represented as a polynomial in the extension generator.
     pub fn value(&self) -> &AlgebraicNumber<ParameterField<E>> {
         &self.value
     }
 
+    /// Consume the root and return its extension, algebraic value, and
+    /// root indices through the adjoining tower.
     pub fn into_parts(
         self,
     ) -> (
@@ -565,6 +585,9 @@ impl<E: PositiveExponent> ParametricRoot<E> {
         (self.field, self.value, self.conjugates)
     }
 
+    /// Substitute rational values for all parameters and construct the selected
+    /// algebraic value over the rationals. Returns an error for missing parameters
+    /// or a specialization where the generic construction is not valid.
     pub fn specialize(
         &self,
         values: &HashMap<PolyVariable, Rational>,
@@ -606,10 +629,12 @@ pub struct ParametricSolution<E: PositiveExponent = u16> {
 }
 
 impl<E: PositiveExponent> ParametricSolution<E> {
+    /// Return the common formal extension containing all assigned values.
     pub fn field(&self) -> &ParametricExtension<E> {
         &self.field
     }
 
+    /// Return the root index selected at the final level of the adjoining tower.
     pub fn conjugate(&self) -> usize {
         *self
             .conjugates
@@ -622,18 +647,24 @@ impl<E: PositiveExponent> ParametricSolution<E> {
         &self.conjugates
     }
 
+    /// Borrow the variable assignments in the common formal extension.
     pub fn values(&self) -> &HashMap<PolyVariable, AlgebraicNumber<ParameterField<E>>> {
         &self.values
     }
 
+    /// Return the number of assigned variables.
     pub fn len(&self) -> usize {
         self.values.len()
     }
 
+    /// Return whether there are no variable assignments. This does not mean
+    /// that a system has no solutions.
     pub fn is_empty(&self) -> bool {
         self.values.is_empty()
     }
 
+    /// Look up a variable and return its value together with the extension
+    /// and selected root indices, or `None` when it is not assigned.
     pub fn get(&self, variable: &PolyVariable) -> Option<ParametricRoot<E>> {
         self.values
             .get(variable)
@@ -645,6 +676,8 @@ impl<E: PositiveExponent> ParametricSolution<E> {
             })
     }
 
+    /// Convert each assignment to an expression, representing algebraic values
+    /// with symbolic roots where needed.
     pub fn to_atom_map(&self) -> HashMap<PolyVariable, Atom> {
         self.values
             .iter()
@@ -659,6 +692,9 @@ impl<E: PositiveExponent> ParametricSolution<E> {
             .collect()
     }
 
+    /// Substitute rational values for all parameters to obtain a solution over
+    /// an algebraic extension of the rationals. Returns an error for missing
+    /// parameters or a specialization invalidating the generic construction.
     pub fn specialize(
         &self,
         values: &HashMap<PolyVariable, Rational>,
@@ -681,6 +717,8 @@ impl<E: PositiveExponent> ParametricSolution<E> {
         })
     }
 
+    /// Consume the solution and return its common extension, selected root
+    /// indices, and variable assignments.
     pub fn into_parts(
         self,
     ) -> (
@@ -1150,6 +1188,9 @@ impl<R: Field, E: Exponent, O: MonomialOrder> GroebnerBasis<R, E, O> {
         basis.push((index, f));
     }
 
+    /// Reduce the basis by removing redundant generators, reducing each
+    /// remaining polynomial by the others, and making leading coefficients one.
+    /// The input is expected to already be a Gröbner basis.
     pub fn reduce_basis(mut self) -> Self {
         // filter lead-reducible polynomials
         let mut res = vec![true; self.system.len()];
@@ -1194,6 +1235,9 @@ impl<R: Field, E: Exponent, O: MonomialOrder> GroebnerBasis<R, E, O> {
         }
     }
 
+    /// Test whether every pair's S-polynomial reduces to zero against `system`.
+    /// The polynomials must be nonzero and use the same coefficient ring,
+    /// variable order, and monomial ordering.
     pub fn is_groebner_basis(system: &[MultivariatePolynomial<R, E, O>]) -> bool {
         for (i, p1) in system.iter().enumerate() {
             for p2 in &system[i + 1..] {

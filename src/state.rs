@@ -67,6 +67,7 @@ enum ImportedPolyVariable {
 
 ///Trait for anything that contains a StateMap
 pub trait HasStateMap {
+    /// Borrow the map used to translate imported identifiers to the current state.
     fn get_state_map(&self) -> &StateMap;
 }
 
@@ -77,6 +78,7 @@ impl HasStateMap for StateMap {
 }
 
 impl StateMap {
+    /// Return whether the map contains no symbol, finite-field, or variable-list mappings.
     pub fn is_empty(&self) -> bool {
         self.symbols.is_empty()
             && self.finite_fields.is_empty()
@@ -1607,6 +1609,8 @@ impl Workspace {
         owned
     }
 
+    /// Return an atom's allocation to this workspace for reuse. If the pool is
+    /// already borrowed, the atom is dropped instead.
     pub fn return_atom(&self, atom: Atom) {
         if let Ok(mut a) = self.atom_buffer.try_borrow_mut() {
             a.push(atom);
@@ -1650,6 +1654,7 @@ impl RecycledAtom {
     }
 
     #[inline]
+    /// Create a variable using storage from the thread-local workspace.
     pub fn new_var(id: Symbol) -> RecycledAtom {
         let mut owned = Self::new();
         owned.to_var(id);

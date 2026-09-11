@@ -2741,6 +2741,7 @@ pub trait Factorize: Sized {
     fn square_free_factorization(&self) -> Vec<(Self, usize)>;
     /// Factor a polynomial over its coefficient ring.
     fn factor(&self) -> Vec<(Self, usize)>;
+    /// Return whether the polynomial is irreducible over its coefficient ring.
     fn is_irreducible(&self) -> bool;
 }
 

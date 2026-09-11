@@ -80,11 +80,13 @@ impl Atom {
 /// This trait is sealed, such that new methods can be added
 /// without breaking existing implementations.
 pub trait AtomCore: private::Sealed + Sized {
+    /// The expression result type returned by operations on this receiver.
     type Output;
 
     /// Take a view of the atom.
     fn as_atom_view(&self) -> AtomView<'_>;
 
+    /// Wrap an owned expression in this receiver's result type.
     fn atom_to_output(&self, atom: Atom) -> Self::Output;
 
     /// Get a function view if the atom is a function.
@@ -127,6 +129,7 @@ pub trait AtomCore: private::Sealed + Sized {
         }
     }
 
+    /// Return the outermost expression type, such as a sum, variable, or function.
     fn get_atom_type(&self) -> AtomType {
         match self.as_atom_view() {
             AtomView::Num(_) => AtomType::Num,
@@ -1249,7 +1252,7 @@ pub trait AtomCore: private::Sealed + Sized {
     /// The returned context records how every algebraic expression is embedded
     /// in the polynomial's coefficient field. When no algebraic numbers are
     /// discovered or supplied, the context represents the trivial extension of
-    /// [`Q`](crate::domains::rational::Q).
+    /// [`Q`](tyalias@crate::domains::rational::Q).
     ///
     /// # Example
     ///
@@ -1387,7 +1390,7 @@ pub trait AtomCore: private::Sealed + Sized {
     ///
     /// The returned context records how algebraic subexpressions are embedded
     /// in the rational polynomial's coefficient field. When the coefficients
-    /// are rational, the context represents the trivial extension of [`Q`](crate::domains::rational::Q).
+    /// are rational, the context represents the trivial extension of [`Q`](tyalias@crate::domains::rational::Q).
     fn to_rational_polynomial_in_algebraic_extension<E: PositiveExponent>(
         &self,
         var_map: impl IntoVariableMap,
@@ -1652,6 +1655,8 @@ pub trait AtomCore: private::Sealed + Sized {
         self.as_atom_view().canonize_tensors(indices)
     }
 
+    /// Convert to a pattern, interpreting wildcard symbols as placeholders.
+    /// Use a literal pattern when wildcard-named symbols should match themselves.
     fn to_pattern(&self) -> Pattern {
         Pattern::from_view(self.as_atom_view(), true)
     }
@@ -2126,7 +2131,8 @@ pub trait AtomCore: private::Sealed + Sized {
     }
 
     /// Return the position of `part` within `self`, if the `part` refers to data within `self`.
-    /// This position can be used with [`Atom::index`] to retrieve the corresponding [`Atom`] within `self`.
+    /// This position can be used with [`AtomIndex::index`](crate::atom::AtomIndex::index)
+    /// to retrieve the corresponding expression view within `self`.
     ///
     /// # Example
     ///

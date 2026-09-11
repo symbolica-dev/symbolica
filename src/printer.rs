@@ -27,9 +27,13 @@ static SHOULD_COLORIZE: LazyLock<bool> = LazyLock::new(|| {
 
 /// Wrap a printable object with ANSI escape codes for coloring and styling in terminal output.
 pub struct AnsiWrap<T> {
+    /// The object to display.
     pub value: T,
+    /// ANSI style code; the styling methods set its bold, dimmed, and italic bits.
     pub mode: u8,
+    /// Foreground color index in the ANSI 256-color palette.
     pub color: u8,
+    /// Policy controlling whether escape codes are emitted.
     pub color_mode: ColorMode,
 }
 
@@ -40,6 +44,7 @@ impl<T: fmt::Display> From<T> for AnsiWrap<T> {
 }
 
 impl<T> AnsiWrap<T> {
+    /// Wrap a value with automatic color detection and no text style.
     pub const fn new(value: T) -> Self {
         Self {
             value,
@@ -49,55 +54,68 @@ impl<T> AnsiWrap<T> {
         }
     }
 
+    /// Wrap a value with a red foreground.
     pub const fn red(value: T) -> Self {
         Self::new(value).color(1)
     }
 
+    /// Wrap a value with a yellow foreground.
     pub const fn yellow(value: T) -> Self {
         Self::new(value).color(3)
     }
 
+    /// Wrap a value with a purple foreground.
     pub const fn purple(value: T) -> Self {
         Self::new(value).color(5)
     }
 
+    /// Wrap a value with a cyan foreground.
     pub const fn cyan(value: T) -> Self {
         Self::new(value).color(6)
     }
 
+    /// Wrap a value with a bright magenta foreground.
     pub const fn bright_magenta(value: T) -> Self {
         Self::new(value).color(13)
     }
 
+    /// Set the foreground color using an ANSI 256-color palette index.
     pub const fn color(mut self, color: u8) -> Self {
         self.color = color;
         self
     }
 
+    /// Set whether styling is automatic, always enabled, or disabled.
     pub const fn color_mode(mut self, color_mode: ColorMode) -> Self {
         self.color_mode = color_mode;
         self
     }
 
+    /// Enable bold styling.
     pub const fn bold(mut self) -> Self {
         self.mode |= 1;
         self
     }
 
+    /// Enable dimmed styling.
     pub const fn dimmed(mut self) -> Self {
         self.mode |= 2;
         self
     }
 
+    /// Enable italic styling.
     pub const fn italic(mut self) -> Self {
         self.mode |= 4;
         self
     }
 
+    /// Return the cached automatic color decision. `SYMBOLICA_COLOR=0` disables
+    /// color, any other value enables it; when unset, stdout must be a terminal.
     pub fn should_colorize() -> bool {
         *SHOULD_COLORIZE
     }
 
+    /// Return whether styling is enabled under the given policy.
     pub fn should_colorize_with_mode(color_mode: ColorMode) -> bool {
         match color_mode {
             ColorMode::Auto => *SHOULD_COLORIZE,
@@ -413,7 +431,9 @@ define_formatters!(
 /// println!("{}", a.printer(PrintOptions::latex()));
 /// ```
 pub struct AtomPrinter<'a> {
+    /// The expression to display.
     pub atom: AtomView<'a>,
+    /// Options controlling expression layout, notation, and styling.
     pub print_opts: PrintOptions,
 }
 
@@ -426,6 +446,7 @@ impl<'a> AtomPrinter<'a> {
         }
     }
 
+    /// Create a printer for `atom` using the supplied formatting options.
     pub fn new_with_options(atom: AtomView<'a>, print_opts: PrintOptions) -> AtomPrinter<'a> {
         AtomPrinter { atom, print_opts }
     }

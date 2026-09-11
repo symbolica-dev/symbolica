@@ -1,6 +1,6 @@
 use super::*;
 
-/// Operations on integers.
+/// Number-theoretic operations on Python integers, including factoring and primality testing.
 #[cfg_attr(feature = "python_stubgen", gen_stub_pyclass)]
 #[pyclass(from_py_object, name = "Integer", module = "symbolica.core")]
 #[derive(Clone, PartialEq, Eq, Hash)]

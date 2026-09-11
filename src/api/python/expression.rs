@@ -2,7 +2,7 @@ use super::*;
 use crate::atom::{FunctionBuilder, NormalizationFunction};
 use crate::utils::Settable;
 
-/// Operations that transform an expression.
+/// A deferred symbolic computation. Call the object to execute it.
 #[cfg_attr(feature = "python_stubgen", gen_stub_pyclass)]
 #[pyclass(
     from_py_object,
@@ -12,6 +12,7 @@ use crate::utils::Settable;
 )]
 #[derive(Clone)]
 pub struct PythonHeldExpression {
+    /// The pattern describing the deferred computation.
     pub expr: Pattern,
 }
 
@@ -8338,7 +8339,7 @@ impl PythonExpression {
     ///
     /// Parameters
     /// ----------
-    /// system: SolveInput | Sequence[SolveInput]
+    /// system: Expression, Condition, bool, number, or sequence of these
     ///     Equation or equations to satisfy, written as expressions equal to zero
     ///     or using ``eq``. Supports polynomial and rational equations and some
     ///     equations involving rational powers. Inequalities and general Boolean

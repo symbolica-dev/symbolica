@@ -22,6 +22,8 @@ static TEMP_FILES_COUNTER: std::sync::atomic::AtomicU64 = std::sync::atomic::Ato
 
 /// A stream that can be read from by using `name`.
 pub trait ReadableNamedStream: Read + Send {
+    /// Open the named stream for reading. The supplied file implementations
+    /// panic if the file cannot be opened.
     fn open(name: &str) -> Self;
 }
 
@@ -39,8 +41,11 @@ impl ReadableNamedStream for Decompressor<BufReader<File>> {
 
 /// A stream that can be written to by using `name`.
 pub trait WriteableNamedStream: Write + Send {
+    /// The reader that decodes streams produced by this writer.
     type Reader: ReadableNamedStream;
 
+    /// Create the named stream for writing. The supplied file implementations
+    /// truncate an existing file and panic if it cannot be opened.
     fn create(name: &str) -> Self;
 }
 

@@ -154,19 +154,27 @@ enum ParseState {
 /// An operator in the expression.
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
 pub enum Operator {
+    /// Multiplication.
     Mul,
+    /// Addition.
     Add,
+    /// Exponentiation.
     Pow,
+    /// The comma separating function arguments.
     Argument, // comma
-    Neg,      // left side should be tagged as 'finished'
-    Inv,      // left side should be tagged as 'finished', for internal use
+    /// Unary negation.
+    Neg, // left side should be tagged as 'finished'
+    /// Unary reciprocal, used to represent division during parsing.
+    Inv, // left side should be tagged as 'finished', for internal use
 }
 
 /// The mode in which to parse the expression.
 #[derive(Debug, Clone, PartialEq, Eq, Hash, Default)]
 pub enum ParseMode {
     #[default]
+    /// Symbolica expression syntax, with parentheses for function arguments.
     Symbolica,
+    /// Supported Mathematica expression syntax, with square brackets for function arguments.
     Mathematica,
 }
 
@@ -180,16 +188,20 @@ pub struct ParseSettings {
 }
 
 impl ParseMode {
+    /// Return whether this is Mathematica parsing mode.
     pub fn is_mathematica(&self) -> bool {
         *self == ParseMode::Mathematica
     }
 
+    /// Return whether this is Symbolica parsing mode.
     pub fn is_symbolica(&self) -> bool {
         *self == ParseMode::Symbolica
     }
 }
 
 impl ParseSettings {
+    /// Create default Symbolica parsing settings, converting completed products
+    /// to expressions during parsing.
     pub const fn symbolica() -> Self {
         ParseSettings {
             mode: ParseMode::Symbolica,
@@ -198,6 +210,8 @@ impl ParseSettings {
         }
     }
 
+    /// Create Mathematica parsing settings, converting completed products
+    /// to expressions during parsing.
     pub const fn mathematica() -> Self {
         ParseSettings {
             mode: ParseMode::Mathematica,
@@ -206,6 +220,8 @@ impl ParseSettings {
         }
     }
 
+    /// Create settings for direct polynomial parsing: retain product tokens
+    /// and distribute leading negative signs.
     pub const fn polynomial() -> Self {
         ParseSettings {
             mode: ParseMode::Symbolica,
@@ -258,6 +274,8 @@ impl std::fmt::Display for Operator {
 
 impl Operator {
     #[inline]
+    /// Return the operator's parsing arity: one for negation and reciprocal,
+    /// two for the other operators.
     pub const fn get_arity(&self) -> usize {
         match self {
             Operator::Neg | Operator::Inv => 1,
@@ -266,6 +284,7 @@ impl Operator {
     }
 
     #[inline]
+    /// Return the precedence level; higher values bind more tightly.
     pub const fn get_precedence(&self) -> u8 {
         match self {
             Operator::Mul => 8,
@@ -278,6 +297,8 @@ impl Operator {
     }
 
     #[inline]
+    /// Return whether the parser may attach a same-precedence operator on
+    /// the left. Exponentiation is excluded to retain right grouping.
     pub const fn left_associative(&self) -> bool {
         match self {
             Operator::Mul => true,
@@ -290,6 +311,7 @@ impl Operator {
     }
 
     #[inline]
+    /// Return whether the parser may attach a same-precedence operator on the right.
     pub const fn right_associative(&self) -> bool {
         match self {
             Operator::Mul => true,
@@ -304,7 +326,9 @@ impl Operator {
 
 /// The position in a string, used for error messages.
 pub struct Position {
+    /// The line component of the source position.
     pub line_number: usize,
+    /// The character-position component of the source position.
     pub char_pos: usize,
 }
 
@@ -314,17 +338,31 @@ pub struct Position {
 /// an expression or a polynomial.
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
 pub enum Token {
+    /// A numeric literal and a flag indicating an imaginary-unit suffix.
     Number(SmartString<LazyCompact>, bool),
+    /// A special numeric literal identified by its character, such as infinity.
     SpecialNumber(char),
+    /// A symbol name.
     ID(SmartString<LazyCompact>),
+    /// A rational-polynomial coefficient in bracket notation.
     RationalPolynomial(SmartString<LazyCompact>),
+    /// An operator and its operands. The first two flags indicate whether
+    /// operands may still be attached on the left and right.
     Op(bool, bool, Operator, Vec<Token>),
+    /// A function with its head as the first token, followed by its arguments.
+    /// The flags indicate an unfinished argument list and square-bracket syntax.
     Fn(bool, bool, Vec<Token>),
+    /// A completed product already converted to an expression to save parsing memory.
     ParsedMul(Box<RecycledAtom>), // a partially parsed and converted expression
+    /// The start-of-input sentinel.
     Start,
+    /// An opening parenthesis.
     OpenParenthesis,
+    /// A closing parenthesis.
     CloseParenthesis,
+    /// A closing square bracket.
     CloseBracket,
+    /// The end-of-input sentinel.
     EOF,
 }
 

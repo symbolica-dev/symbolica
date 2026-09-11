@@ -13,6 +13,8 @@ use super::{
 
 use dyn_clone::DynClone;
 
+/// A cloneable, thread-safe normalization callback. Write a replacement into
+/// the output and return true to use it; return false to retain the input.
 pub trait Map: Fn(AtomView, &mut Atom) -> bool + DynClone + Send + Sync {}
 dyn_clone::clone_trait_object!(Map);
 impl<T: Clone + Send + Sync + Fn(AtomView<'_>, &mut Atom) -> bool> Map for T {}
@@ -65,6 +67,8 @@ impl Default for AtomField {
 }
 
 impl AtomField {
+    /// Create an expression field with statistical zero testing enabled,
+    /// division cancellation disabled, and no custom normalization.
     pub fn new() -> AtomField {
         AtomField {
             statistical_zero_test: true,

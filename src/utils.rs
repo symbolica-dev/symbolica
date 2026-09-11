@@ -51,7 +51,9 @@ impl<T> Settable<'_, T> {
 /// Use `Into<BorrowedOrOwned<'b, T>>>` to a accept both owned and borrowed values as arguments.
 #[derive(Debug, Clone)]
 pub enum BorrowedOrOwned<'a, T> {
+    /// An owned value.
     Owned(T),
+    /// A value borrowed for the lifetime of this wrapper.
     Borrowed(&'a T),
 }
 

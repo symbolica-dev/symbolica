@@ -139,11 +139,27 @@ fn solution_html(
     Ok(html)
 }
 
+/// Python exceptions raised by the equation solver.
 pub mod errors {
     use pyo3::create_exception;
-    create_exception!(symbolica, SolveError, pyo3::exceptions::PyValueError);
-    create_exception!(symbolica, UnsupportedProblem, SolveError);
-    create_exception!(symbolica, IncompleteCoverage, SolveError);
+    create_exception!(
+        symbolica,
+        SolveError,
+        pyo3::exceptions::PyValueError,
+        "Base exception for invalid solve requests or failures to obtain the requested result."
+    );
+    create_exception!(
+        symbolica,
+        UnsupportedProblem,
+        SolveError,
+        "The equations require a solving method that is not supported."
+    );
+    create_exception!(
+        symbolica,
+        IncompleteCoverage,
+        SolveError,
+        "The requested conclusion cannot be established for all relevant cases."
+    );
 }
 pub(super) fn solve_error(error: SolveError) -> PyErr {
     let message = error.to_string();
@@ -154,6 +170,7 @@ pub(super) fn solve_error(error: SolveError) -> PyErr {
     }
 }
 
+/// A formula or domain restriction under which a solution branch is valid.
 #[cfg_attr(feature = "python_stubgen", gen_stub_pyclass)]
 #[pyclass(
     frozen,
@@ -168,6 +185,7 @@ pub struct PythonSolutionCondition {
 #[cfg_attr(feature = "python_stubgen", gen_stub_pymethods)]
 #[pymethods]
 impl PythonSolutionCondition {
+    /// The restriction type: ``"formula"`` or ``"domain_membership"``.
     #[getter]
     fn kind(&self) -> &'static str {
         match self.condition {
@@ -175,6 +193,7 @@ impl PythonSolutionCondition {
             _ => "formula",
         }
     }
+    /// The symbolic condition, or None for a domain-membership restriction.
     #[getter]
     fn formula(&self) -> Option<PythonCondition> {
         relation_condition(&self.condition).map(Into::into)

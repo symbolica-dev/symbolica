@@ -452,6 +452,7 @@ impl<R: Ring + FractionNormalization, E: Exponent> FractionNormalization for Pol
 }
 
 impl<R: EuclideanDomain + FractionNormalization, E: Exponent> PolynomialRing<FractionField<R>, E> {
+    /// Collect the fractional coefficients into a single rational polynomial.
     pub fn to_rational_polynomial(
         &self,
         e: &<Self as Set>::Element,
@@ -478,6 +479,7 @@ impl<R: EuclideanDomain + FractionNormalization, E: Exponent> PolynomialRing<Fra
 }
 
 impl<R: Ring, E: Exponent> PolynomialRing<R, E> {
+    /// Create a polynomial ring over `coeff_ring` with exponent type `E`.
     pub fn new(coeff_ring: R) -> PolynomialRing<R, E> {
         PolynomialRing {
             ring: coeff_ring,
@@ -485,6 +487,7 @@ impl<R: Ring, E: Exponent> PolynomialRing<R, E> {
         }
     }
 
+    /// Create a polynomial ring with the same coefficient ring as `poly`.
     pub fn from_poly(poly: &MultivariatePolynomial<R, E>) -> PolynomialRing<R, E> {
         PolynomialRing {
             ring: poly.ring().clone(),
@@ -753,7 +756,13 @@ pub struct MultivariatePolynomial<F: Ring, E: Exponent = u16, O: MonomialOrder =
     // Data format: the i-th monomial is stored as coefficients[i] and
     // exponents[i * nvars .. (i + 1) * nvars]. Terms are always expanded and sorted by the exponents via
     // cmp_exponents().
+    /// Nonzero coefficients in ascending monomial order. Entry `i` corresponds
+    /// to the exponent block `exponents[i * nvars()..(i + 1) * nvars()]`.
+    ///
+    /// Direct modifications must preserve the term ordering and nonzero-coefficient invariant.
     pub coefficients: Vec<F::Element>,
+    /// Flattened exponent vectors, one block of `nvars()` entries per coefficient.
+    /// Entries within each block follow the order of [`Self::variables`].
     pub exponents: Vec<E>,
     context: Arc<PolynomialContext<F>>,
     pub(crate) _phantom: PhantomData<O>,
@@ -764,7 +773,10 @@ pub struct MultivariatePolynomial<F: Ring, E: Exponent = u16, O: MonomialOrder =
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum PositiveRealRootCountError<E> {
     /// The polynomial has more than one variable.
-    NotUnivariate { variables: usize },
+    NotUnivariate {
+        /// The number of variables in the polynomial.
+        variables: usize,
+    },
     /// The zero polynomial has infinitely many roots.
     ZeroPolynomial,
     /// A coefficient could not be compared through its real embedding.
@@ -1029,6 +1041,7 @@ impl<F: Ring, E: Exponent, O: MonomialOrder> MultivariatePolynomial<F, E, O> {
     }
 
     #[inline]
+    /// Reserve space for at least `cap` additional terms without changing the polynomial.
     pub fn reserve(&mut self, cap: usize) -> &mut Self {
         self.coefficients.reserve(cap);
         self.exponents.reserve(cap * self.nvars());
@@ -1047,11 +1060,13 @@ impl<F: Ring, E: Exponent, O: MonomialOrder> MultivariatePolynomial<F, E, O> {
     }
 
     #[inline]
+    /// Return whether this is the zero polynomial.
     pub fn is_zero(&self) -> bool {
         self.nterms() == 0
     }
 
     #[inline]
+    /// Return whether this is the constant polynomial one.
     pub fn is_one(&self) -> bool {
         self.nterms() == 1
             && self.ring().is_one(&self.coefficients[0])
@@ -1118,6 +1133,11 @@ impl<F: Ring, E: Exponent, O: MonomialOrder> MultivariatePolynomial<F, E, O> {
     }
 
     #[inline(always)]
+    /// Borrow the exponent vector of the leading monomial.
+    ///
+    /// # Panics
+    ///
+    /// Panics if the polynomial is zero.
     pub fn last_exponents(&self) -> &[E] {
         //assert!(self.nterms() > 0);
         &self.exponents[(self.nterms() - 1) * self.nvars()..self.nterms() * self.nvars()]
@@ -2084,11 +2104,21 @@ impl<F: Ring, E: Exponent, O: MonomialOrder> MultivariatePolynomial<F, E, O> {
     }
 
     #[inline]
+    /// Borrow the coefficient of the leading monomial in the monomial ordering.
+    ///
+    /// # Panics
+    ///
+    /// Panics if the polynomial is zero.
     pub fn max_coeff(&self) -> &F::Element {
         self.coefficients.last().unwrap()
     }
 
     #[inline]
+    /// Borrow the exponent vector of the leading monomial in the monomial ordering.
+    ///
+    /// # Panics
+    ///
+    /// Panics if the polynomial is zero.
     pub fn max_exp(&self) -> &[E] {
         if self.coefficients.is_empty() {
             panic!("Cannot get max exponent of empty polynomial");
@@ -2105,6 +2135,9 @@ impl<F: Ring, E: Exponent, O: MonomialOrder> MultivariatePolynomial<F, E, O> {
     }
 
     #[inline]
+    /// Multiply by a monomial with the given coefficient and exponent vector.
+    /// The exponent vector must have one entry per variable, in the same order
+    /// as [`Self::variables`].
     pub fn mul_monomial(self, coefficient: &F::Element, exponents: &[E]) -> Self {
         self.mul_coeff(coefficient.clone()).mul_exp(exponents)
     }
@@ -2161,6 +2194,8 @@ impl<F: Ring, E: Exponent, O: MonomialOrder> MultivariatePolynomial<F, E, O> {
     }
 
     // Get the highest degree of a variable in the leading monomial.
+    /// Return the exponent of variable `v` in the leading monomial, or zero
+    /// for the zero polynomial. `v` is an index into [`Self::variables`].
     pub fn ldegree(&self, v: usize) -> E {
         if self.is_zero() {
             return E::zero();
@@ -2249,6 +2284,9 @@ impl<F: Ring, E: Exponent, O: MonomialOrder> MultivariatePolynomial<F, E, O> {
         None
     }
 
+    /// Map each stored exponent to another exponent type, retaining coefficients
+    /// and variable order. The mapping must preserve distinct monomials and their
+    /// ordering; terms are not sorted or combined afterward.
     pub fn map_exp<E2: Exponent>(&self, f: impl Fn(&E) -> E2) -> MultivariatePolynomial<F, E2, O> {
         MultivariatePolynomial {
             coefficients: self.coefficients.clone(),
@@ -2659,6 +2697,9 @@ impl<F: Ring, E: PositiveExponent> MultivariatePolynomial<F, E, LexOrder> {
         res
     }
 
+    /// Evaluate numerically at `point`, using `map_coeff` to convert coefficients.
+    /// Supply one value per variable in the order of [`Self::variables`].
+    /// Exponents must be nonnegative and fit in `u32`.
     pub fn evaluate<T: FloatLike, M: Fn(&F::Element) -> T>(&self, map_coeff: M, point: &[T]) -> T {
         let mut res = map_coeff(&self.ring().zero());
 
@@ -3323,6 +3364,9 @@ impl<F: Ring, E: Exponent> MultivariatePolynomial<F, E, LexOrder> {
         MultivariatePolynomial::from_coefficient_list(coefficients, exponents, vars, &ring)
     }
 
+    /// View this polynomial as a dense univariate polynomial in variable `var`,
+    /// with polynomial coefficients in the remaining variables. `var` indexes
+    /// [`Self::variables`]; its exponents must be nonnegative.
     pub fn to_univariate(&self, var: usize) -> UnivariatePolynomial<PolynomialRing<F, E>> {
         let c = self.to_univariate_polynomial_list(var);
 
@@ -3348,6 +3392,11 @@ impl<F: Ring, E: Exponent> MultivariatePolynomial<F, E, LexOrder> {
         p
     }
 
+    /// Convert a polynomial that depends only on variable `var` to a dense
+    /// univariate polynomial over the same coefficient ring.
+    ///
+    /// `var` indexes [`Self::variables`]. The caller must ensure all other
+    /// variable exponents are zero and the exponents of `var` are nonnegative.
     pub fn to_univariate_from_univariate(&self, var: usize) -> UnivariatePolynomial<F> {
         let mut p =
             UnivariatePolynomial::new(self.ring(), None, Arc::new(self.variables()[var].clone()));
@@ -7211,7 +7260,9 @@ impl<E: Exponent> From<&MultivariatePolynomial<IntegerRing, E>>
 /// View object for a term in a multivariate polynomial.
 #[derive(Copy, Clone, Debug)]
 pub struct MonomialView<'a, F: 'a + Ring, E: 'a + Exponent> {
+    /// The coefficient of this monomial.
     pub coefficient: &'a F::Element,
+    /// The exponents of this monomial, in the parent polynomial's variable order.
     pub exponents: &'a [E],
 }
 

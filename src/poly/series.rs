@@ -35,40 +35,65 @@ use super::PolyVariable;
 /// Errors that can occur during series expansion.
 #[derive(Clone, Debug, PartialEq, Eq, Hash)]
 pub enum SeriesError {
+    /// The requested relative truncation depth is not positive.
     NonPositiveRelativeDepth {
+        /// The rejected truncation depth.
         depth: SeriesDepth,
     },
+    /// An `if` expression has a condition that cannot be resolved for expansion.
     NonConstantIf {
+        /// The conditional expression.
         expression: Atom,
     },
+    /// A function argument has a pole without a suitable series expansion rule.
     FunctionArgumentPole {
+        /// The function call requiring an expansion rule.
         expression: Atom,
     },
+    /// A power has a non-real exponent that this expansion does not support.
     UnsupportedComplexExponent {
+        /// The power expression.
         expression: Atom,
     },
+    /// An exponent exceeds the supported size for series expansion.
     UnsupportedLargeExponent {
+        /// The power expression.
         expression: Atom,
     },
+    /// A power of the expansion variable does not have a rational exponent.
     NonRationalPower {
+        /// The expression containing the unsupported power.
         expression: Atom,
     },
+    /// Simplifying exponentials and logarithms produced an unsupported form.
     UnexpectedExpLogSimplification {
+        /// The expression that could not be converted back to a series.
         expression: Atom,
     },
+    /// Applying the function to a pole would produce an essential singularity.
     EssentialSingularity {
+        /// The function being expanded.
         function: Symbol,
     },
+    /// The logarithm requires a known nonzero leading coefficient.
     MissingLogCoefficient,
+    /// A coefficient treated as constant still depends on the expansion variable.
     ConstantTermDependsOnExpansionVariable {
+        /// The function being expanded.
         function: Symbol,
+        /// The supposedly constant coefficient.
         constant: Atom,
+        /// The expansion variable that still occurs in the coefficient.
         variable: PolyVariable,
     },
+    /// The requested expansion variable is not an indeterminate.
     NonIndeterminateSeriesVariable {
+        /// The rejected expansion variable.
         variable: PolyVariable,
     },
+    /// Raising the series to zero would require representing one at infinite precision.
     ZeroPowerRequiresInfinitePrecision,
+    /// A series inversion or division has a zero divisor.
     DivisionByZero,
 }
 
@@ -503,11 +528,15 @@ impl<F: Ring> Series<F> {
     }
 
     #[inline]
+    /// Return whether no nonzero terms are stored. This tests the known terms,
+    /// not whether the unknown remainder is identically zero.
     pub fn is_zero(&self) -> bool {
         self.coefficients.is_empty()
     }
 
     #[inline]
+    /// Return whether the stored terms consist only of the constant one.
+    /// The unknown remainder is not tested.
     pub fn is_one(&self) -> bool {
         self.coefficients.len() == 1 && self.field.is_one(&self.coefficients[0]) && self.shift == 0
     }
@@ -519,6 +548,8 @@ impl<F: Ring> Series<F> {
     }
 
     #[inline]
+    /// Return the coefficient of the lowest stored power, or zero when no terms
+    /// are stored.
     pub fn get_trailing_coefficient(&self) -> F::Element {
         if self.coefficients.is_empty() {
             self.field.zero()
@@ -528,11 +559,15 @@ impl<F: Ring> Series<F> {
     }
 
     #[inline]
+    /// Return the lowest exponent represented by the series storage, including
+    /// the shift and ramification.
     pub fn get_trailing_exponent(&self) -> Rational {
         self.get_exponent(0)
     }
 
     #[inline]
+    /// Return the common denominator used to represent fractional exponents.
+    /// Adjacent coefficient slots differ in exponent by its reciprocal.
     pub fn get_ramification(&self) -> usize {
         self.ramification
     }
@@ -555,6 +590,8 @@ impl<F: Ring> Series<F> {
             .clone()
     }
 
+    /// Return the highest stored exponent, or zero when the series has no
+    /// known coefficients. This differs from the truncation order.
     pub fn degree(&self) -> Rational {
         if self.order == 0 {
             return 0.into();
@@ -590,6 +627,8 @@ impl<F: Ring> Series<F> {
         self
     }
 
+    /// Multiply every stored coefficient by `coeff`, preserving the truncation
+    /// information.
     pub fn mul_coeff(mut self, coeff: &F::Element) -> Self {
         for c in &mut self.coefficients {
             if !self.field.is_zero(c) {
@@ -1215,6 +1254,9 @@ impl Series<AtomField> {
         }
     }
 
+    /// Expand the exponential of this series to the available order.
+    /// Returns an error for a pole that would produce an essential singularity
+    /// or an unsupported exponential-logarithmic constant term.
     pub fn exp(&self) -> Result<Self, SeriesError> {
         if self.shift < 0 {
             return Err(SeriesError::EssentialSingularity {
@@ -1263,6 +1305,8 @@ impl Series<AtomField> {
         Ok(r * &shift_series)
     }
 
+    /// Expand the logarithm using the leading monomial and the remaining
+    /// positive-order terms. Returns an error if no leading coefficient is known.
     pub fn log(&self) -> Result<Self, SeriesError> {
         if self.order == 0 {
             return Err(SeriesError::MissingLogCoefficient);
@@ -1295,6 +1339,8 @@ impl Series<AtomField> {
         Ok(e)
     }
 
+    /// Expand the sine of this series to the available order. Returns an error
+    /// for poles or a constant coefficient that still depends on the expansion variable.
     pub fn sin(&self) -> Result<Self, SeriesError> {
         if self.shift < 0 {
             return Err(SeriesError::EssentialSingularity {
@@ -1354,6 +1400,8 @@ impl Series<AtomField> {
         Ok(e)
     }
 
+    /// Expand the cosine of this series to the available order. Returns an error
+    /// for poles or a constant coefficient that still depends on the expansion variable.
     pub fn cos(&self) -> Result<Self, SeriesError> {
         if self.shift < 0 {
             return Err(SeriesError::EssentialSingularity {
@@ -1483,6 +1531,8 @@ impl Series<AtomField> {
         a
     }
 
+    /// Write the stored terms as an expression into `out`, replacing its previous
+    /// contents and discarding the unknown remainder.
     pub fn to_atom_into(&self, out: &mut Atom) {
         out.to_num(0);
 

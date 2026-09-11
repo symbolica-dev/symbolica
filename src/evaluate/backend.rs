@@ -25,17 +25,27 @@ pub(crate) const CUDA_ERRMSG_LEN: usize = 256;
 /// Struct representing the data created for the CUDA evaluation.
 #[repr(C)]
 pub struct CudaEvaluationData {
+    /// Device-side input buffer allocated by the generated CUDA entry point.
     pub params: *mut c_void,
+    /// Device-side output buffer allocated by the generated CUDA entry point.
     pub out: *mut c_void,
-    pub n: usize,             // Number of evaluations
-    pub block_size: usize,    // Number of threads per block
-    pub in_dimension: usize,  // Number of input parameters
+    /// The number of independent evaluations in the batch.
+    pub n: usize, // Number of evaluations
+    /// The number of CUDA threads per block.
+    pub block_size: usize, // Number of threads per block
+    /// The number of scalar input parameters per evaluation.
+    pub in_dimension: usize, // Number of input parameters
+    /// The number of scalar outputs per evaluation.
     pub out_dimension: usize, // Number of output parameters
+    /// The last CUDA error code; zero indicates success.
     pub last_error: i32,
+    /// A null-terminated error message supplied by the generated CUDA code.
     pub errmsg: [std::os::raw::c_char; CUDA_ERRMSG_LEN],
 }
 
 impl CudaEvaluationData {
+    /// Return the stored CUDA error message when `last_error` is nonzero.
+    /// The error buffer must contain a null terminator when an error is set.
     pub fn check_for_error(&self) -> Result<(), String> {
         unsafe {
             if self.last_error != 0 {
@@ -652,9 +662,15 @@ fn function_export_name(symbol: crate::atom::Symbol, tags: &[String]) -> Option<
     Some(name)
 }
 
+/// Numerical types supported by the JIT evaluator, including conversion of
+/// constants, registration of external functions, and evaluation dispatch.
 pub trait JITCompiledNumber: Sized {
+    /// Convert a constant to the JIT compiler's double-precision complex type,
+    /// returning an error if the conversion is unsupported.
     fn to_complex_f64(&self) -> Result<symjit::Complex<f64>, String>;
 
+    /// Register external numerical functions with the JIT compiler according
+    /// to `settings`, returning an error for an unsupported implementation.
     fn convert_external_functions(
         external_functions: &[ExternalFunctionContainer<Self>],
         settings: &JITCompilationSettings,
@@ -669,11 +685,16 @@ pub trait JITCompiledNumber: Sized {
         settings: JITCompilationSettings,
     ) -> Result<JITCompiledEvaluator<Self>, String>;
 
+    /// Evaluate one set of input values. The input and output slices must
+    /// match the evaluator's dimensions and numerical representation.
     fn evaluate(eval: &mut JITCompiledEvaluator<Self>, args: &[Self], out: &mut [Self]);
 
     #[doc(hidden)]
     fn into_external_function(eval: JITCompiledEvaluator<Self>) -> Box<dyn ExternalFunction<Self>>;
 
+    /// Evaluate `rows` scalar evaluations in a batch. Scalar values use row-major
+    /// input and output matrices; SIMD values must already use the backend's
+    /// packed layout. The buffers must match the evaluator's dimensions.
     fn batch_evaluate(
         eval: &mut JITCompiledEvaluator<Self>,
         args: &[Self],
@@ -882,6 +903,9 @@ impl<T: JITCompiledNumber> JITCompiledEvaluator<T> {
     }
 
     #[inline(always)]
+    /// Evaluate `rows` scalar evaluations in a batch. Scalar inputs and outputs
+    /// are row-major matrices; SIMD types require prepacked buffers.
+    /// Use [`BatchEvaluator::evaluate_batch`] to pack scalar buffers automatically.
     pub fn batch_evaluate(&mut self, args: &[T], out: &mut [T], rows: usize) {
         T::batch_evaluate(self, args, out, rows);
     }
@@ -1509,7 +1533,9 @@ impl BatchEvaluator<Complex<f64>> for JITCompiledEvaluator<Complex<wide::f64x4>>
 
 /// A number type that can be used to call a compiled evaluator.
 pub trait CompiledNumber: Sized {
+    /// The loader and runtime evaluator for this numerical type.
     type Evaluator: EvaluatorLoader<Self>;
+    /// Settings used when loading compiled code for this numerical type.
     type Settings: Default;
     /// A unique suffix for the evaluation function for this particular number type.
     // NOTE: a rename of any suffix will prevent loading older libraries.
@@ -1522,6 +1548,7 @@ pub trait CompiledNumber: Sized {
         settings: ExportSettings,
     ) -> Result<String, String>;
 
+    /// Append the numerical type's ABI suffix to an exported function's base name.
     fn construct_function_name(function_name: &str) -> String {
         format!("{}_{}", function_name, Self::SUFFIX)
     }
@@ -1537,6 +1564,9 @@ pub trait EvaluatorLoader<T: CompiledNumber>: Sized {
     fn load(file: impl AsRef<Path>, function_name: &str) -> Result<Self, String> {
         Self::load_with_settings(file, function_name, T::Settings::default())
     }
+    /// Load the base `function_name` from a compatible generated shared library
+    /// using type-specific settings. Returns an error if loading or entry-point
+    /// initialization fails. Only load trusted libraries with the expected ABI.
     fn load_with_settings(
         file: impl AsRef<Path>,
         function_name: &str,
@@ -1698,6 +1728,9 @@ impl CompiledRealEvaluator {
         self.library.borrow_dependent().dimensions.output_len
     }
 
+    /// Load another base function name from the same shared library, allocating
+    /// independent evaluation storage. Returns an error if its entry points
+    /// are missing or incompatible.
     pub fn load_new_function(&self, function_name: &str) -> Result<CompiledRealEvaluator, String> {
         let library = LibraryRealf64::try_new(self.library.borrow_owner().clone(), |lib| {
             EvaluatorFunctionsRealf64::new(lib, function_name)
@@ -1712,6 +1745,10 @@ impl CompiledRealEvaluator {
             library,
         })
     }
+    /// Load a real double-precision evaluator from a generated shared library.
+    /// `function_name` is the base name before the numerical-type suffix.
+    /// The library must be trusted and have the generated Symbolica ABI.
+    /// Returns an error if it cannot be loaded or required entry points are missing.
     pub fn load(
         path: impl AsRef<Path>,
         function_name: &str,
@@ -2130,6 +2167,8 @@ impl CompiledSimdRealEvaluator {
         self.library.borrow_dependent().dimensions.output_len
     }
 
+    /// Load another real SIMD function from the same shared library with
+    /// independent working buffers. Supply the base name without its ABI suffix.
     pub fn load_new_function(
         &self,
         function_name: &str,
@@ -2151,6 +2190,10 @@ impl CompiledSimdRealEvaluator {
         })
     }
 
+    /// Load a real SIMD evaluator from a compatible generated shared library.
+    /// Supply the base function name without its ABI suffix. The library must
+    /// be trusted and support the target CPU; missing entry points or loading
+    /// failures return an error.
     pub fn load(
         path: impl AsRef<Path>,
         function_name: &str,
@@ -2449,6 +2492,8 @@ impl CompiledSimdComplexEvaluator {
         self.library.borrow_dependent().dimensions.output_len
     }
 
+    /// Load another complex SIMD function from the same shared library with
+    /// independent working buffers. Supply the base name without its ABI suffix.
     pub fn load_new_function(
         &self,
         function_name: &str,
@@ -2470,6 +2515,10 @@ impl CompiledSimdComplexEvaluator {
         })
     }
 
+    /// Load a complex SIMD evaluator from a compatible generated shared library.
+    /// Supply the base function name without its ABI suffix. The library must
+    /// be trusted and support the target CPU; missing entry points or loading
+    /// failures return an error.
     pub fn load(
         path: impl AsRef<Path>,
         function_name: &str,
@@ -2773,6 +2822,9 @@ impl CompiledCudaRealEvaluator {
         self.library.borrow_dependent().dimensions.output_len
     }
 
+    /// Load another real CUDA function from the same library, using the current
+    /// batch and block settings and allocating its own device buffers.
+    /// Supply the base name without its ABI suffix.
     pub fn load_new_function(
         &self,
         function_name: &str,
@@ -2798,6 +2850,10 @@ impl CompiledCudaRealEvaluator {
         })
     }
 
+    /// Load a real CUDA evaluator and allocate device buffers according to
+    /// `settings`. Supply a trusted generated library and the base function name
+    /// without its ABI suffix. Loading, missing entry points, and CUDA allocation
+    /// failures return an error.
     pub fn load(
         path: impl AsRef<Path>,
         function_name: &str,
@@ -2916,6 +2972,9 @@ impl CompiledCudaComplexEvaluator {
         self.library.borrow_dependent().dimensions.output_len
     }
 
+    /// Load another complex CUDA function from the same library, using the current
+    /// batch and block settings and allocating its own device buffers.
+    /// Supply the base name without its ABI suffix.
     pub fn load_new_function(
         &self,
         function_name: &str,
@@ -2941,6 +3000,10 @@ impl CompiledCudaComplexEvaluator {
         })
     }
 
+    /// Load a complex CUDA evaluator and allocate device buffers according to
+    /// `settings`. Supply a trusted generated library and the base function name
+    /// without its ABI suffix. Loading, missing entry points, and CUDA allocation
+    /// failures return an error.
     pub fn load(
         path: impl AsRef<Path>,
         function_name: &str,

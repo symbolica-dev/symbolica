@@ -1,5 +1,7 @@
 use super::*;
 
+/// A registered external function together with its symbolic tags, numerical
+/// implementation, and storage used by an expression evaluator.
 pub struct ExternalFunctionContainer<T> {
     pub(super) export_name: String,
     pub(super) symbol: Symbol,

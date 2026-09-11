@@ -35,6 +35,7 @@ FLOAT_METHODS = {
     "is_zero", "is_one", "is_fully_zero", "fixed_precision", "get_precision", "get_epsilon",
     "from_usize", "from_i64", "from_rational", "from_ratio", "sample_unit", "set_from",
     "pow", "powf", "atan2", "mul_add",
+    "hypot", "log1p", "sech", "csch",
 }
 TARGETS.update((cls, method) for cls in ("Float", "ComplexFloat") for method in FLOAT_METHODS)
 TARGETS.update(("Float", method) for method in ("to_f64", "round_to_nearest_integer", "to_usize_clamped"))

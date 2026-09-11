@@ -27,6 +27,7 @@ impl std::fmt::Display for Slot {
 }
 
 impl Slot {
+    /// Return a slot in the same storage area, offset by `index` entries.
     pub fn index(&self, index: usize) -> Slot {
         match self {
             Slot::Param(i) => Slot::Param(*i + index),
@@ -336,20 +337,35 @@ impl<T: Clone> ExpressionEvaluator<T> {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
+/// An operation on vector-valued slots. Its position in an instruction list
+/// identifies the temporary slot that receives its result.
 pub enum VectorInstruction {
+    /// Add the two input slots componentwise.
     Add(Slot, Slot),
+    /// Copy the input slot.
     Assign(Slot),
+    /// Multiply the two input slots componentwise.
     Mul(Slot, Slot),
+    /// Raise the input to an integer power.
     Pow(Slot, i64),
+    /// Raise the first input to the power given by the second input.
     Powf(Slot, Slot),
+    /// Apply the named built-in function to the input.
     BuiltinFun(Symbol, Slot),
+    /// Call an external function by its index with the given argument slots.
     ExternalFun(usize, Vec<Slot>),
+    /// Jump to the label when the condition is zero.
     IfElse(Slot, Label),
+    /// Jump unconditionally to the label.
     Goto(Label),
+    /// Mark a jump destination.
     Label(Label),
+    /// Select the second or third slot according to whether the first is nonzero.
     Join(Slot, Slot, Slot),
 }
 
+/// A sequence of vector operations with shared constant storage.
+/// Each constant occupies a fixed number of components determined by the list.
 pub struct InstructionList<T> {
     pub(super) instructions: Vec<VectorInstruction>,
     pub(super) constants: Vec<T>,
@@ -358,6 +374,7 @@ pub struct InstructionList<T> {
 }
 
 impl<T> InstructionList<T> {
+    /// Append an instruction and return the temporary slot containing its result.
     pub fn add(&mut self, instr: VectorInstruction) -> Slot {
         self.instructions.push(instr);
         Slot::Temp(self.instructions.len() - 1)
@@ -365,6 +382,11 @@ impl<T> InstructionList<T> {
 }
 
 impl<T: PartialEq + Clone + std::fmt::Debug> InstructionList<T> {
+    /// Store a constant vector, reusing an equal existing constant when possible.
+    ///
+    /// # Panics
+    ///
+    /// Panics if the vector length differs from the list's component count.
     pub fn add_constant(&mut self, value: Vec<T>) -> Slot {
         assert_eq!(value.len(), self.dim);
         if let Some(c) = self
@@ -381,6 +403,8 @@ impl<T: PartialEq + Clone + std::fmt::Debug> InstructionList<T> {
         }
     }
 
+    /// Store a vector with `value` in every component, reusing existing storage
+    /// when an equal constant is already present.
     pub fn add_repeated_constant(&mut self, value: T) -> Slot {
         if let Some(c) = self
             .constants
@@ -400,6 +424,7 @@ impl<T: PartialEq + Clone + std::fmt::Debug> InstructionList<T> {
 }
 
 impl<T: SingleFloat> InstructionList<T> {
+    /// Return whether `slot` refers to a known constant component equal to zero.
     pub fn is_zero(&self, slot: &Slot) -> bool {
         match slot {
             Slot::Const(c) => {
@@ -409,6 +434,7 @@ impl<T: SingleFloat> InstructionList<T> {
         }
     }
 
+    /// Return whether `slot` refers to a known constant component equal to one.
     pub fn is_one(&self, slot: &Slot) -> bool {
         match slot {
             Slot::Const(c) => self.constants[*c].is_one() && !self.unknown_constants[*c / self.dim],
@@ -416,6 +442,8 @@ impl<T: SingleFloat> InstructionList<T> {
         }
     }
 
+    /// Store a constant vector with `value` in its first component and zeros
+    /// in all remaining components.
     pub fn add_constant_in_first_component(&mut self, value: T) -> Slot {
         let mut v = vec![value.clone()];
         v.extend((1..self.dim).map(|_| value.zero()));
@@ -451,9 +479,13 @@ pub(super) enum Instr {
 #[cfg_attr(feature = "bincode", derive(bincode::Encode, bincode::Decode))]
 #[derive(Debug, Copy, Clone, PartialEq, Default, Hash)]
 pub enum ComplexPhase {
+    /// The result is real.
     Real,
+    /// The result is purely imaginary.
     Imag,
+    /// The first `usize` inputs are real; remaining inputs may be complex.
     PartialReal(usize),
     #[default]
+    /// No real or imaginary restriction is known.
     Any,
 }

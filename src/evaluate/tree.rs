@@ -7,64 +7,109 @@ use super::*;
 /// Errors that can occur while building or performing numerical expression evaluation.
 #[derive(Clone, Debug, PartialEq, Eq, Hash)]
 pub enum EvaluationError {
+    /// An expression supplied as a parameter is not a supported indeterminate.
     NotIndeterminate {
+        /// The invalid parameter expression.
         atom: Atom,
     },
+    /// The number of supplied parameter values does not match the evaluator.
     InvalidParameterCount {
+        /// The evaluator's parameter count.
         expected: usize,
+        /// The number of supplied values.
         actual: usize,
     },
+    /// The output buffer has the wrong length.
     InvalidOutputCount {
+        /// The evaluator's output count.
         expected: usize,
+        /// The supplied output length.
         actual: usize,
     },
+    /// The requested hot-start optimization is unavailable for this evaluation path.
     UnsupportedHotStart,
+    /// A coefficient cannot be converted to the evaluation domain.
     UnsupportedCoefficient {
+        /// A printable description of the unsupported coefficient.
         coefficient: String,
     },
+    /// A variable has neither a parameter value nor a registered evaluator.
     UndefinedVariable {
+        /// The unresolved variable.
         symbol: Symbol,
     },
+    /// A function call has neither a parameter value nor a registered evaluator.
     UndefinedFunction {
+        /// The unresolved function call.
         expression: Atom,
     },
+    /// A function call supplies the wrong number of arguments.
     WrongNumberOfArguments {
+        /// The called function.
         function: Symbol,
+        /// The registered argument count.
         expected: usize,
+        /// The number of supplied arguments.
         actual: usize,
     },
+    /// A built-in function is called with an unsupported number of arguments.
     UnsupportedBuiltinArity {
+        /// The built-in function.
         function: Symbol,
+        /// The supported argument count.
         expected: usize,
+        /// The number of supplied arguments.
         actual: usize,
     },
+    /// A function registration disagrees with the existing number of tag arguments.
     InconsistentFunctionTagCount {
+        /// The function being registered.
         function: Symbol,
+        /// The previously registered tag count.
         expected: usize,
+        /// The new registration's tag count.
         actual: usize,
     },
+    /// A function definition conflicts with an existing definition.
     FunctionRedefined {
+        /// The function being redefined.
         function: Atom,
     },
+    /// The evaluation domain cannot represent the imaginary unit required by the expression.
     NumericalTypeDoesNotSupportImaginaryUnit,
+    /// An expression could not be evaluated.
     EvaluationFailed {
+        /// The expression being evaluated.
         expression: Atom,
+        /// The underlying failure message.
         reason: String,
     },
+    /// An evaluation tree could not be constructed.
     EvaluationTreeConstructionFailed {
+        /// The expression being converted.
         expression: Atom,
+        /// The underlying failure message.
         reason: String,
     },
+    /// An evaluator could not be constructed.
     EvaluatorConstructionFailed {
+        /// The expression being converted.
         expression: Atom,
+        /// The underlying failure message.
         reason: String,
     },
+    /// A joint evaluator for several expressions could not be constructed.
     MultiEvaluatorConstructionFailed {
+        /// The number of requested expressions.
         expression_count: usize,
+        /// The underlying failure message.
         reason: String,
     },
+    /// No evaluator is registered for an expression in the requested numerical domain.
     MissingEvaluator {
+        /// The expression requiring an evaluator.
         expression: Atom,
+        /// The requested evaluator type.
         eval_type: String,
     },
 }
@@ -316,6 +361,9 @@ impl<'a> AtomView<'a> {
         Ok(e)
     }
 
+    /// Search for a Horner variable order that reduces the combined operation
+    /// count of `expressions`. `vars` supplies the initial order; `settings`
+    /// controls the search budget and parallelism. Returns the best order found.
     pub fn optimize_horner_scheme_multiple(
         expressions: &[Self],
         vars: &[Indeterminate],
@@ -1440,20 +1488,33 @@ pub type ExpressionHash = u64;
 #[cfg_attr(feature = "bincode", derive(bincode::Encode, bincode::Decode))]
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum Expression<T> {
+    /// A cached hash and a numerical constant.
     Const(ExpressionHash, Box<T>),
+    /// A cached hash and an index into the evaluator's parameter storage.
     Parameter(ExpressionHash, usize),
+    /// A cached hash, an index of a defined function, and its argument trees.
     Eval(ExpressionHash, u32, Vec<Expression<T>>),
+    /// A cached hash and the terms of a sum.
     Add(ExpressionHash, Vec<Expression<T>>),
+    /// A cached hash and the factors of a product.
     Mul(ExpressionHash, Vec<Expression<T>>),
+    /// A cached hash and a base raised to an integer exponent.
     Pow(ExpressionHash, Box<(Expression<T>, i64)>),
+    /// A cached hash and a pair of base and exponent expressions.
     Powf(ExpressionHash, Box<(Expression<T>, Expression<T>)>),
+    /// A cached hash and a zero-based index of an argument of the current function.
     ReadArg(ExpressionHash, usize), // read nth function argument
+    /// A cached hash, a built-in function symbol, and its argument.
     BuiltinFun(ExpressionHash, Symbol, Box<Expression<T>>),
+    /// A cached hash, an external function symbol, its symbolic tags, and argument trees.
     Fun(ExpressionHash, Symbol, Vec<String>, Vec<Expression<T>>),
+    /// A cached hash and a condition, true branch, and false branch.
+    /// A zero condition selects the false branch.
     IfElse(
         ExpressionHash,
         Box<(Expression<T>, Expression<T>, Expression<T>)>,
     ),
+    /// A cached hash and an index into the extracted common subexpressions.
     SubExpression(ExpressionHash, usize),
 }
 
@@ -1623,6 +1684,9 @@ impl<T: Eq + Hash + Clone + InternalOrdering> Expression<T> {
 
     // Count the number of operations in the expression, counting
     // subexpressions only once.
+    /// Count arithmetic operations, counting each distinct subexpression once.
+    /// `sub_expr` records visited expressions and can be shared across calls to
+    /// measure the combined cost of several trees.
     pub fn count_operations_with_subexpression<'a>(
         &'a self,
         sub_expr: &mut HashMap<&'a Self, usize>,
@@ -2008,6 +2072,8 @@ impl Expression<Complex<Rational>> {
 }
 
 impl<T: Clone + PartialEq> EvalTree<T> {
+    /// Convert all numerical coefficients with `f`, preserving the expression
+    /// structure, parameter order, and function definitions.
     pub fn map_coeff<T2: EvaluationDomain, F: Fn(&T) -> T2>(&self, f: &F) -> EvalTree<T2> {
         EvalTree {
             expressions: SplitExpression {
@@ -2641,6 +2707,8 @@ impl EvalTree<Complex<Rational>> {
 }
 
 impl Expression<Complex<Rational>> {
+    /// Rewrite sums using a Horner scheme in the supplied variable order.
+    /// The entries in `scheme` identify the subexpressions to factor out.
     pub fn apply_horner_scheme(&mut self, scheme: &[Expression<Complex<Rational>>]) {
         if scheme.is_empty() {
             return;
@@ -3013,6 +3081,8 @@ impl Expression<Complex<Rational>> {
         }
     }
 
+    /// Search for a Horner variable order that reduces this expression's operation
+    /// count. `vars` supplies the initial order and `settings` bounds the search.
     pub fn optimize_horner_scheme(
         &self,
         vars: &[Self],
@@ -3021,6 +3091,9 @@ impl Expression<Complex<Rational>> {
         Self::optimize_horner_scheme_multiple(std::slice::from_ref(self), vars, settings)
     }
 
+    /// Search for a shared Horner variable order that reduces the combined
+    /// operation count of `expressions`, accounting for common subexpressions.
+    /// `vars` supplies the initial order and `settings` bounds the search.
     pub fn optimize_horner_scheme_multiple(
         expressions: &[Self],
         vars: &[Self],
@@ -3279,6 +3352,8 @@ impl Expression<Complex<Rational>> {
 }
 
 impl<T: Clone + Default + std::fmt::Debug + Eq + std::hash::Hash + InternalOrdering> EvalTree<T> {
+    /// Extract repeated subexpressions from the outputs and each function body
+    /// so that subsequent evaluation can reuse their values.
     pub fn common_subexpression_elimination(&mut self) {
         self.expressions.common_subexpression_elimination();
 
@@ -3287,6 +3362,8 @@ impl<T: Clone + Default + std::fmt::Debug + Eq + std::hash::Hash + InternalOrder
         }
     }
 
+    /// Count arithmetic operations in the outputs, extracted subexpressions,
+    /// and function definitions, counting each stored tree once.
     pub fn count_operations(&self) -> OperationCount {
         let mut count = OperationCount::default();
         for e in &self.functions {
@@ -3471,6 +3548,9 @@ impl<T: Clone + Default + std::fmt::Debug + Eq + std::hash::Hash + InternalOrder
 
 impl<T: Clone + Default + std::fmt::Debug + Eq + std::hash::Hash + InternalOrdering> Expression<T> {
     // Count the number of operations in the expression.
+    /// Count arithmetic operations recursively, including repeated occurrences
+    /// of the same subtree. Use [`Self::count_operations_with_subexpression`]
+    /// to count shared subexpressions only once.
     pub fn count_operations(&self) -> OperationCount {
         match self {
             Expression::Const(_, _) => OperationCount::default(),

@@ -11,9 +11,13 @@ pub enum SolutionCondition {
     NonZero(Atom),
     /// The expression must be strictly positive.
     Positive(Atom),
+    /// The assigned expression must belong to the specified domain.
     DomainMembership {
+        /// The unknown whose assignment is restricted.
         variable: PolyVariable,
+        /// The assigned expression, or the variable itself when it is free.
         value: Atom,
+        /// The domain that must contain the value.
         domain: SolveDomain,
     },
 }
@@ -169,6 +173,7 @@ impl Solution {
     pub fn variables(&self) -> &[PolyVariable] {
         &self.variables
     }
+    /// Iterate over all requested variables in their original order, including free ones.
     pub fn coordinate_order(&self) -> impl Iterator<Item = &PolyVariable> {
         self.variables.iter()
     }
@@ -179,6 +184,8 @@ impl Solution {
             .find(|(v, _)| v == variable)
             .map(|(_, value)| value)
     }
+    /// Return whether this branch assigns an expression to `variable`.
+    /// Free variables are not assignment keys.
     pub fn contains_key(&self, variable: &PolyVariable) -> bool {
         self.get(variable).is_some()
     }
@@ -186,21 +193,29 @@ impl Solution {
     pub fn len(&self) -> usize {
         self.coordinates.len()
     }
+    /// Return whether the assignment mapping is empty.
+    /// An empty mapping can describe an unrestricted family of solutions.
     pub fn is_empty(&self) -> bool {
         self.coordinates.is_empty()
     }
+    /// Iterate over assigned variables and expressions in the requested variable order.
     pub fn iter(&self) -> std::slice::Iter<'_, (PolyVariable, Atom)> {
         self.coordinates.iter()
     }
+    /// Return requested variables left unassigned by this branch.
+    /// Their values must still respect the domain and branch conditions.
     pub fn free_variables(&self) -> &[PolyVariable] {
         &self.free_variables
     }
+    /// Return the restrictions under which all assignments in this branch hold.
     pub fn conditions(&self) -> &[SolutionCondition] {
         &self.conditions
     }
+    /// Return the domain selected for the unknowns when solving the system.
     pub fn domain(&self) -> SolveDomain {
         self.domain
     }
+    /// Return whether the branch retains any validity conditions.
     pub fn is_conditional(&self) -> bool {
         !self.conditions.is_empty()
     }
@@ -209,12 +224,18 @@ impl Solution {
     pub fn dimension(&self) -> Option<usize> {
         self.dimension
     }
+    /// Return the number of requested variables minus the branch dimension.
+    /// Returns `None` when the dimension cannot be established.
     pub fn codimension(&self) -> Option<usize> {
         self.dimension.map(|d| self.variables.len() - d)
     }
+    /// Return whether all requested variables are assigned without branch conditions.
     pub fn is_point(&self) -> bool {
         !self.is_conditional() && self.free_variables.is_empty()
     }
+    /// Copy the assignments of an unconditional point branch into a map.
+    ///
+    /// Returns [`SolveError::NotPoint`] if free variables or validity conditions remain.
     pub fn as_point_dict(&self) -> Result<HashMap<PolyVariable, Atom>, SolveError> {
         if !self.is_point() {
             return Err(SolveError::NotPoint);
@@ -284,15 +305,20 @@ pub struct SolutionSet {
     coverage_guard: Vec<Atom>,
 }
 impl SolutionSet {
+    /// Return the requested unknowns in the order supplied to the solver.
     pub fn variables(&self) -> &[PolyVariable] {
         &self.variables
     }
+    /// Return symbols inferred from the equations that were not selected as unknowns.
     pub fn parameters(&self) -> &[PolyVariable] {
         &self.parameters
     }
+    /// Return the domain selected for the unknowns.
     pub fn domain(&self) -> SolveDomain {
         self.domain
     }
+    /// Return whether the branches cover the full system or only the generic parameter case.
+    /// For generic coverage, consult [`Self::coverage_guard`].
     pub fn coverage(&self) -> SolveCoverage {
         self.coverage
     }
@@ -310,9 +336,14 @@ impl SolutionSet {
         }
         self.branches[0].as_point_dict()
     }
+    /// Return the number of branches, not the number of individual solution points.
     pub fn len(&self) -> usize {
         self.branches.len()
     }
+    /// Determine whether the solution set is empty.
+    ///
+    /// Returns [`SolveError::IncompleteCoverage`] for generic coverage or when
+    /// every returned branch has unresolved validity conditions.
     pub fn is_empty(&self) -> Result<bool, SolveError> {
         if self.coverage != SolveCoverage::Complete {
             Err(SolveError::IncompleteCoverage(
@@ -337,9 +368,11 @@ impl SolutionSet {
             .iter()
             .try_fold(-1, |d, b| Some(d.max(b.dimension()? as isize)))
     }
+    /// Iterate over the solution branches. Their order has no mathematical significance.
     pub fn iter(&self) -> std::slice::Iter<'_, Solution> {
         self.branches.iter()
     }
+    /// Borrow a branch by its zero-based index, returning `None` when out of range.
     pub fn get(&self, index: usize) -> Option<&Solution> {
         self.branches.get(index)
     }
@@ -379,6 +412,7 @@ impl SolveBuilder {
             domain: Complexes,
         }
     }
+    /// Select the domain of the unknowns. The default is [`Complexes`].
     pub fn over(mut self, domain: SolveDomain) -> Self {
         self.domain = domain;
         self
@@ -388,6 +422,11 @@ impl SolveBuilder {
     pub fn wrt<V: AtomCore>(&self, variables: &[V]) -> Result<SolutionSet, SolveError> {
         self.wrt_with_exponent::<u16, V>(variables)
     }
+    /// Solve for `variables` using `E` to store polynomial exponents.
+    ///
+    /// This has the same variable-order and domain behavior as [`Self::wrt`],
+    /// which uses `u16`. Choose a wider exponent type for computations that
+    /// require larger polynomial exponents.
     pub fn wrt_with_exponent<E: PositiveExponent + 'static, V: AtomCore>(
         &self,
         variables: &[V],

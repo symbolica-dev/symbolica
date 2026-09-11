@@ -163,6 +163,9 @@ impl Symbol {
 }
 
 impl UserDataKey {
+    /// Read a user-data key written by [`Self::write`]. Embedded expressions
+    /// refer to the current symbol state; invalid tags, UTF-8, or truncated data
+    /// produce an I/O error.
     pub fn read<R: Read>(source: &mut R) -> Result<UserDataKey, std::io::Error> {
         let tag = source.read_u8()?;
         match tag {
@@ -190,6 +193,8 @@ impl UserDataKey {
         }
     }
 
+    /// Write this key in binary form. Embedded expressions are written without
+    /// the symbol state, which must be transferred separately across sessions.
     pub fn write<W: std::io::Write>(&self, target: &mut W) -> Result<(), std::io::Error> {
         match self {
             UserDataKey::Integer(value) => {
@@ -210,6 +215,8 @@ impl UserDataKey {
 }
 
 impl UserData {
+    /// Read user data written by [`Self::write`], recursively decoding lists
+    /// and maps. Embedded expressions require the corresponding symbol state.
     pub fn read<R: Read>(source: &mut R) -> Result<UserData, std::io::Error> {
         let tag = source.read_u8()?;
         match tag {
@@ -262,6 +269,8 @@ impl UserData {
         }
     }
 
+    /// Write this value in binary form, recursively encoding lists and maps.
+    /// Embedded expressions are written without the symbol state.
     pub fn write<W: std::io::Write>(&self, target: &mut W) -> Result<(), std::io::Error> {
         match self {
             UserData::None => target.write_u8(0),
@@ -360,20 +369,24 @@ impl InlineVar {
         InlineVar { data, size }
     }
 
+    /// Return the symbol represented by this variable.
     pub fn get_symbol(&self) -> Symbol {
         self.as_var_view().get_symbol()
     }
 
+    /// Borrow the encoded expression bytes. Symbol metadata is stored separately.
     pub fn get_data(&self) -> &[u8] {
         &self.data[..self.size as usize]
     }
 
+    /// Borrow a typed view without copying the underlying storage.
     pub fn as_var_view(&self) -> VarView<'_> {
         VarView {
             data: &self.data[..self.size as usize],
         }
     }
 
+    /// Borrow this value as an expression view without copying its storage.
     pub fn as_view(&self) -> AtomView<'_> {
         AtomView::Var(VarView {
             data: &self.data[..self.size as usize],
@@ -442,6 +455,7 @@ impl InlineNum {
         InlineNum { data, size }
     }
 
+    /// Create the exact number zero in inline storage.
     pub const fn zero() -> InlineNum {
         InlineNum {
             data: [
@@ -451,6 +465,7 @@ impl InlineNum {
         }
     }
 
+    /// Create the exact number one in inline storage.
     pub const fn one() -> InlineNum {
         InlineNum {
             data: [
@@ -460,16 +475,19 @@ impl InlineNum {
         }
     }
 
+    /// Borrow the encoded expression bytes. Symbol metadata is stored separately.
     pub fn get_data(&self) -> &[u8] {
         &self.data[..self.size as usize]
     }
 
+    /// Borrow a typed view without copying the underlying storage.
     pub fn as_num_view(&self) -> NumView<'_> {
         NumView {
             data: &self.data[..self.size as usize],
         }
     }
 
+    /// Borrow this value as an expression view without copying its storage.
     pub fn as_view(&self) -> AtomView<'_> {
         AtomView::Num(NumView {
             data: &self.data[..self.size as usize],
@@ -661,6 +679,7 @@ pub struct Num {
 
 impl Num {
     #[inline(always)]
+    /// Create the number zero, clearing and reusing `buffer`.
     pub fn zero(mut buffer: RawAtom) -> Num {
         buffer.clear();
         buffer.put_u8(NUM_ID);
@@ -670,6 +689,7 @@ impl Num {
     }
 
     #[inline]
+    /// Create an owned number from a coefficient.
     pub fn new(num: Coefficient) -> Num {
         let mut buffer = Vec::new();
         buffer.put_u8(NUM_ID);
@@ -678,6 +698,7 @@ impl Num {
     }
 
     #[inline(always)]
+    /// Create a number from a coefficient, clearing and reusing `buffer`.
     pub fn new_into(num: Coefficient, mut buffer: RawAtom) -> Num {
         buffer.clear();
         buffer.put_u8(NUM_ID);
@@ -686,6 +707,7 @@ impl Num {
     }
 
     #[inline]
+    /// Copy the view into owned storage, clearing and reusing `buffer`.
     pub fn from_view_into(a: &NumView<'_>, mut buffer: RawAtom) -> Num {
         buffer.clear();
         buffer.extend(a.data);
@@ -693,6 +715,7 @@ impl Num {
     }
 
     #[inline]
+    /// Replace this number with `num`, reusing its allocation.
     pub fn set_from_coeff(&mut self, num: Coefficient) {
         self.data.clear();
         self.data.put_u8(NUM_ID);
@@ -700,11 +723,13 @@ impl Num {
     }
 
     #[inline]
+    /// Replace this value with a copy of the view, reusing its allocation.
     pub fn set_from_view(&mut self, a: &NumView<'_>) {
         self.data.clear();
         self.data.extend(a.data);
     }
 
+    /// Add `other` to this number in place. The coefficient domains must support addition.
     pub fn add(&mut self, other: &NumView<'_>) {
         let nv = self.to_num_view();
         let a = nv.get_coeff_view();
@@ -715,6 +740,7 @@ impl Num {
         n.write_packed(&mut self.data);
     }
 
+    /// Multiply this number by `other` in place. The coefficient domains must support multiplication.
     pub fn mul(&mut self, other: &NumView<'_>) {
         let nv = self.to_num_view();
         let a = nv.get_coeff_view();
@@ -726,16 +752,19 @@ impl Num {
     }
 
     #[inline]
+    /// Borrow a typed view without copying the underlying storage.
     pub fn to_num_view(&self) -> NumView<'_> {
         NumView { data: &self.data }
     }
 
     #[inline(always)]
+    /// Borrow this value as an expression view without copying its storage.
     pub fn as_view(&self) -> AtomView<'_> {
         AtomView::Num(self.to_num_view())
     }
 
     #[inline(always)]
+    /// Consume this value and return its encoded byte buffer.
     pub fn into_raw(self) -> RawAtom {
         self.data
     }
@@ -754,11 +783,13 @@ pub struct Var {
 
 impl Var {
     #[inline]
+    /// Create an owned variable with the given symbol.
     pub fn new(symbol: Symbol) -> Var {
         Self::new_into(symbol, RawAtom::new())
     }
 
     #[inline]
+    /// Create a variable with the given symbol, clearing and reusing `buffer`.
     pub fn new_into(symbol: Symbol, buffer: RawAtom) -> Var {
         let mut f = Var { data: buffer };
         f.set_from_symbol(symbol);
@@ -766,6 +797,7 @@ impl Var {
     }
 
     #[inline]
+    /// Copy the view into owned storage, clearing and reusing `buffer`.
     pub fn from_view_into(a: &VarView<'_>, mut buffer: RawAtom) -> Var {
         buffer.clear();
         buffer.extend(a.data);
@@ -773,6 +805,7 @@ impl Var {
     }
 
     #[inline]
+    /// Replace this variable's symbol, reusing its allocation.
     pub fn set_from_symbol(&mut self, symbol: Symbol) {
         self.data.clear();
 
@@ -784,27 +817,32 @@ impl Var {
     }
 
     #[inline]
+    /// Borrow a typed view without copying the underlying storage.
     pub fn to_var_view(&self) -> VarView<'_> {
         VarView { data: &self.data }
     }
 
     #[inline]
+    /// Replace this value with a copy of the view, reusing its allocation.
     pub fn set_from_view(&mut self, view: &VarView) {
         self.data.clear();
         self.data.extend(view.data);
     }
 
     #[inline(always)]
+    /// Borrow this value as an expression view without copying its storage.
     pub fn as_view(&self) -> AtomView<'_> {
         AtomView::Var(self.to_var_view())
     }
 
     #[inline]
+    /// Return the symbol represented by this variable.
     pub fn get_symbol(&self) -> Symbol {
         self.to_var_view().get_symbol()
     }
 
     #[inline(always)]
+    /// Consume this value and return its encoded byte buffer.
     pub fn into_raw(self) -> RawAtom {
         self.data
     }
@@ -830,6 +868,7 @@ impl Fun {
     }
 
     #[inline]
+    /// Copy the view into owned storage, clearing and reusing `buffer`.
     pub fn from_view_into(a: &FunView<'_>, mut buffer: RawAtom) -> Fun {
         buffer.clear();
         buffer.extend(a.data);
@@ -952,31 +991,37 @@ impl Fun {
     }
 
     #[inline(always)]
+    /// Borrow a typed view without copying the underlying storage.
     pub fn to_fun_view(&self) -> FunView<'_> {
         FunView { data: &self.data }
     }
 
+    /// Replace this value with a copy of the view, reusing its allocation.
     pub fn set_from_view(&mut self, view: &FunView) {
         self.data.clear();
         self.data.extend(view.data);
     }
 
     #[inline(always)]
+    /// Borrow this value as an expression view without copying its storage.
     pub fn as_view(&self) -> AtomView<'_> {
         AtomView::Fun(self.to_fun_view())
     }
 
     #[inline(always)]
+    /// Return the head symbol of this function call.
     pub fn get_symbol(&self) -> Symbol {
         self.to_fun_view().get_symbol()
     }
 
     #[inline(always)]
+    /// Return the number of function arguments.
     pub fn get_nargs(&self) -> usize {
         self.to_fun_view().get_nargs()
     }
 
     #[inline(always)]
+    /// Consume this value and return its encoded byte buffer.
     pub fn into_raw(self) -> RawAtom {
         self.data
     }
@@ -1002,6 +1047,7 @@ impl Pow {
     }
 
     #[inline]
+    /// Copy the view into owned storage, clearing and reusing `buffer`.
     pub fn from_view_into(a: &PowView<'_>, mut buffer: RawAtom) -> Pow {
         buffer.clear();
         buffer.extend(a.data);
@@ -1026,22 +1072,26 @@ impl Pow {
     }
 
     #[inline(always)]
+    /// Borrow a typed view without copying the underlying storage.
     pub fn to_pow_view(&self) -> PowView<'_> {
         PowView { data: &self.data }
     }
 
     #[inline(always)]
+    /// Replace this value with a copy of the view, reusing its allocation.
     pub fn set_from_view(&mut self, view: &PowView) {
         self.data.clear();
         self.data.extend(view.data);
     }
 
     #[inline(always)]
+    /// Borrow this value as an expression view without copying its storage.
     pub fn as_view(&self) -> AtomView<'_> {
         AtomView::Pow(self.to_pow_view())
     }
 
     #[inline(always)]
+    /// Consume this value and return its encoded byte buffer.
     pub fn into_raw(self) -> RawAtom {
         self.data
     }
@@ -1083,6 +1133,7 @@ impl Mul {
     }
 
     #[inline]
+    /// Copy the view into owned storage, clearing and reusing `buffer`.
     pub fn from_view_into(a: &MulView<'_>, mut buffer: RawAtom) -> Mul {
         buffer.clear();
         buffer.extend(a.data);
@@ -1099,6 +1150,7 @@ impl Mul {
     }
 
     #[inline]
+    /// Replace this value with a copy of the view, reusing its allocation.
     pub fn set_from_view(&mut self, view: &MulView) {
         self.data.clear();
         self.data.extend(view.data);
@@ -1197,6 +1249,7 @@ impl Mul {
     }
 
     #[inline]
+    /// Borrow a typed view without copying the underlying storage.
     pub fn to_mul_view(&self) -> MulView<'_> {
         MulView { data: &self.data }
     }
@@ -1210,16 +1263,19 @@ impl Mul {
     }
 
     #[inline(always)]
+    /// Borrow this value as an expression view without copying its storage.
     pub fn as_view(&self) -> AtomView<'_> {
         AtomView::Mul(self.to_mul_view())
     }
 
     #[inline(always)]
+    /// Return the number of factors in the product.
     pub fn get_nargs(&self) -> usize {
         self.to_mul_view().get_nargs()
     }
 
     #[inline(always)]
+    /// Consume this value and return its encoded byte buffer.
     pub fn into_raw(self) -> RawAtom {
         self.data
     }
@@ -1257,6 +1313,7 @@ impl Add {
     }
 
     #[inline]
+    /// Copy the view into owned storage, clearing and reusing `buffer`.
     pub fn from_view_into(a: &AddView<'_>, mut buffer: RawAtom) -> Add {
         buffer.clear();
         buffer.extend(a.data);
@@ -1321,27 +1378,32 @@ impl Add {
     }
 
     #[inline(always)]
+    /// Borrow a typed view without copying the underlying storage.
     pub fn to_add_view(&self) -> AddView<'_> {
         AddView { data: &self.data }
     }
 
     #[inline(always)]
+    /// Replace this value with a copy of the view, reusing its allocation.
     pub fn set_from_view(&mut self, view: AddView) {
         self.data.clear();
         self.data.extend(view.data);
     }
 
     #[inline(always)]
+    /// Borrow this value as an expression view without copying its storage.
     pub fn as_view(&self) -> AtomView<'_> {
         AtomView::Add(self.to_add_view())
     }
 
     #[inline(always)]
+    /// Return the number of terms in the sum.
     pub fn get_nargs(&self) -> usize {
         self.to_add_view().get_nargs()
     }
 
     #[inline(always)]
+    /// Consume this value and return its encoded byte buffer.
     pub fn into_raw(self) -> RawAtom {
         self.data
     }
@@ -1361,16 +1423,19 @@ impl Add {
 
 impl<'a> VarView<'a> {
     #[inline]
+    /// Copy this view into a new owned value.
     pub fn to_owned(&self) -> Var {
         Var::from_view_into(self, Vec::new())
     }
 
     #[inline]
+    /// Replace `target` with a copy of this view, reusing its allocation.
     pub fn clone_into(&self, target: &mut Var) {
         target.set_from_view(self);
     }
 
     #[inline]
+    /// Copy this view into owned storage, clearing and reusing `buffer`.
     pub fn clone_into_raw(&self, mut buffer: RawAtom) -> Var {
         buffer.clear();
         buffer.extend(self.data);
@@ -1378,6 +1443,7 @@ impl<'a> VarView<'a> {
     }
 
     #[inline(always)]
+    /// Return the symbol represented by this variable.
     pub fn get_symbol(&self) -> Symbol {
         let (id, attrs, _) = self.data[1..].get_frac_u64();
 
@@ -1386,21 +1452,26 @@ impl<'a> VarView<'a> {
     }
 
     #[inline(always)]
+    /// Return the variable's session-local symbol identifier.
     pub fn get_symbol_id(&self) -> u32 {
         let (id_and_attrs, _, _) = self.data[1..].get_frac_u64();
         id_and_attrs as u32
     }
 
     #[inline(always)]
+    /// Return the symbol's wildcard level: zero for an ordinary symbol,
+    /// or one, two, or three for its wildcard suffix.
     pub fn get_wildcard_level(&self) -> u8 {
         self.get_symbol().get_wildcard_level()
     }
 
     #[inline]
+    /// Borrow this value as an expression view without copying its storage.
     pub fn as_view(&self) -> AtomView<'a> {
         AtomView::Var(*self)
     }
 
+    /// Return the size in bytes of the encoded expression, excluding symbol metadata.
     pub fn get_byte_size(&self) -> usize {
         self.data.len()
     }
@@ -1451,14 +1522,17 @@ impl<'a> IntoIterator for &FunView<'a> {
 }
 
 impl<'a> FunView<'a> {
+    /// Copy this view into a new owned value.
     pub fn to_owned(&self) -> Fun {
         Fun::from_view_into(self, Vec::new())
     }
 
+    /// Replace `target` with a copy of this view, reusing its allocation.
     pub fn clone_into(&self, target: &mut Fun) {
         target.set_from_view(self);
     }
 
+    /// Copy this view into owned storage, clearing and reusing `buffer`.
     pub fn clone_into_raw(&self, mut buffer: RawAtom) -> Fun {
         buffer.clear();
         buffer.extend(self.data);
@@ -1466,6 +1540,7 @@ impl<'a> FunView<'a> {
     }
 
     #[inline(always)]
+    /// Return the head symbol of this function call.
     pub fn get_symbol(&self) -> Symbol {
         let (id_and_attrs, _, _) = self.data[1 + 4..].get_frac_u64();
         Symbol::decode_flags(
@@ -1496,31 +1571,37 @@ impl<'a> FunView<'a> {
     }
 
     #[inline(always)]
+    /// Return whether the function has the symmetric attribute.
     pub fn is_symmetric(&self) -> bool {
         self.data[0] & SYM_CYCLESYMMETRIC_FLAG == SYM_SYMMETRIC_FLAG
     }
 
     #[inline(always)]
+    /// Return whether the function has the antisymmetric attribute.
     pub fn is_antisymmetric(&self) -> bool {
         self.data[0] & SYM_CYCLESYMMETRIC_FLAG == SYM_ANTISYMMETRIC_FLAG
     }
 
     #[inline(always)]
+    /// Return whether the function has the cyclic-symmetry attribute.
     pub fn is_cyclesymmetric(&self) -> bool {
         self.data[0] & SYM_CYCLESYMMETRIC_FLAG == SYM_CYCLESYMMETRIC_FLAG
     }
 
     #[inline(always)]
+    /// Return whether the function has the linear attribute.
     pub fn is_linear(&self) -> bool {
         self.data[0] & SYM_LINEAR_FLAG == SYM_LINEAR_FLAG
     }
 
     #[inline(always)]
+    /// Return the function symbol's wildcard level, or zero for an ordinary symbol.
     pub fn get_wildcard_level(&self) -> u8 {
         self.get_symbol().get_wildcard_level()
     }
 
     #[inline(always)]
+    /// Return the number of function arguments.
     pub fn get_nargs(&self) -> usize {
         self.data[1 + 4..].get_frac_u64().1 as usize
     }
@@ -1531,6 +1612,7 @@ impl<'a> FunView<'a> {
     }
 
     #[inline]
+    /// Iterate over the function arguments in their stored order.
     pub fn iter(&self) -> ListIterator<'a> {
         let mut c = self.data;
         c.get_u8();
@@ -1545,10 +1627,12 @@ impl<'a> FunView<'a> {
         }
     }
 
+    /// Borrow this value as an expression view without copying its storage.
     pub fn as_view(&self) -> AtomView<'a> {
         AtomView::Fun(*self)
     }
 
+    /// Borrow the function arguments as an argument slice.
     pub fn to_slice(&self) -> ListSlice<'a> {
         let mut c = self.data;
         c.get_u8();
@@ -1564,6 +1648,7 @@ impl<'a> FunView<'a> {
         }
     }
 
+    /// Return the size in bytes of the encoded expression, excluding symbol metadata.
     pub fn get_byte_size(&self) -> usize {
         self.data.len()
     }
@@ -1588,16 +1673,19 @@ impl<'b> PartialEq<NumView<'b>> for NumView<'_> {
 
 impl<'a> NumView<'a> {
     #[inline]
+    /// Copy this view into a new owned value.
     pub fn to_owned(&self) -> Num {
         Num::from_view_into(self, Vec::new())
     }
 
     #[inline]
+    /// Replace `target` with a copy of this view, reusing its allocation.
     pub fn clone_into(&self, target: &mut Num) {
         target.set_from_view(self);
     }
 
     #[inline]
+    /// Copy this view into owned storage, clearing and reusing `buffer`.
     pub fn clone_into_raw(&self, mut buffer: RawAtom) -> Num {
         buffer.clear();
         buffer.extend(self.data);
@@ -1605,6 +1693,7 @@ impl<'a> NumView<'a> {
     }
 
     #[inline]
+    /// Return whether this coefficient is zero.
     pub fn is_zero(&self) -> bool {
         if self.data.is_small_int() {
             self.data.is_zero_rat()
@@ -1614,6 +1703,7 @@ impl<'a> NumView<'a> {
     }
 
     #[inline]
+    /// Return whether this coefficient is one.
     pub fn is_one(&self) -> bool {
         if self.data.is_small_int() {
             self.data.is_one_rat()
@@ -1623,19 +1713,23 @@ impl<'a> NumView<'a> {
     }
 
     #[inline]
+    /// Return whether the coefficient is stored as a rational polynomial.
     pub fn is_rational_polynomial(&self) -> bool {
         self.data.is_rational_polynomial()
     }
 
     #[inline]
+    /// Borrow the coefficient representation without allocating an owned coefficient.
     pub fn get_coeff_view(&self) -> CoefficientView<'a> {
         self.data[1..].get_coeff_view().0
     }
 
+    /// Borrow this value as an expression view without copying its storage.
     pub fn as_view(&self) -> AtomView<'a> {
         AtomView::Num(*self)
     }
 
+    /// Return the size in bytes of the encoded expression, excluding symbol metadata.
     pub fn get_byte_size(&self) -> usize {
         self.data.len()
     }
@@ -1676,16 +1770,19 @@ impl<'b> PartialEq<PowView<'b>> for PowView<'_> {
 
 impl<'a> PowView<'a> {
     #[inline]
+    /// Copy this view into a new owned value.
     pub fn to_owned(&self) -> Pow {
         Pow::from_view_into(self, Vec::new())
     }
 
     #[inline]
+    /// Replace `target` with a copy of this view, reusing its allocation.
     pub fn clone_into(&self, target: &mut Pow) {
         target.set_from_view(self);
     }
 
     #[inline]
+    /// Copy this view into owned storage, clearing and reusing `buffer`.
     pub fn clone_into_raw(&self, mut buffer: RawAtom) -> Pow {
         buffer.clear();
         buffer.extend(self.data);
@@ -1693,12 +1790,14 @@ impl<'a> PowView<'a> {
     }
 
     #[inline]
+    /// Borrow the base of this power.
     pub fn get_base(&self) -> AtomView<'a> {
         let (b, _) = self.get_base_exp();
         b
     }
 
     #[inline]
+    /// Borrow the exponent of this power.
     pub fn get_exp(&self) -> AtomView<'a> {
         let (_, e) = self.get_base_exp();
         e
@@ -1710,6 +1809,7 @@ impl<'a> PowView<'a> {
     }
 
     #[inline]
+    /// Borrow the base and exponent, in that order.
     pub fn get_base_exp(&self) -> (AtomView<'a>, AtomView<'a>) {
         let mut it = self.iter();
 
@@ -1717,6 +1817,7 @@ impl<'a> PowView<'a> {
     }
 
     #[inline]
+    /// Iterate over the base followed by the exponent.
     pub fn iter(&self) -> ListIterator<'a> {
         ListIterator {
             data: &self.data[1..],
@@ -1725,11 +1826,13 @@ impl<'a> PowView<'a> {
     }
 
     #[inline]
+    /// Borrow this value as an expression view without copying its storage.
     pub fn as_view(&self) -> AtomView<'a> {
         AtomView::Pow(*self)
     }
 
     #[inline]
+    /// Borrow a two-element slice containing the base followed by the exponent.
     pub fn to_slice(&self) -> ListSlice<'a> {
         ListSlice {
             data: &self.data[1..],
@@ -1738,6 +1841,7 @@ impl<'a> PowView<'a> {
         }
     }
 
+    /// Return the size in bytes of the encoded expression, excluding symbol metadata.
     pub fn get_byte_size(&self) -> usize {
         self.data.len()
     }
@@ -1778,16 +1882,19 @@ impl<'a> IntoIterator for &MulView<'a> {
 
 impl<'a> MulView<'a> {
     #[inline]
+    /// Copy this view into a new owned value.
     pub fn to_owned(&self) -> Mul {
         Mul::from_view_into(self, Vec::new())
     }
 
     #[inline]
+    /// Replace `target` with a copy of this view, reusing its allocation.
     pub fn clone_into(&self, target: &mut Mul) {
         target.set_from_view(self);
     }
 
     #[inline]
+    /// Copy this view into owned storage, clearing and reusing `buffer`.
     pub fn clone_into_raw(&self, mut buffer: RawAtom) -> Mul {
         buffer.clear();
         buffer.extend(self.data);
@@ -1799,11 +1906,13 @@ impl<'a> MulView<'a> {
         (self.data[0] & NOT_NORMALIZED) == 0
     }
 
+    /// Return the number of factors, including an explicit coefficient when present.
     pub fn get_nargs(&self) -> usize {
         self.data[1 + 4..].get_frac_u64().0 as usize
     }
 
     #[inline]
+    /// Iterate over the factors in their stored order.
     pub fn iter(&self) -> ListIterator<'a> {
         let mut c = self.data;
         c.get_u8();
@@ -1819,10 +1928,12 @@ impl<'a> MulView<'a> {
     }
 
     #[inline]
+    /// Borrow this value as an expression view without copying its storage.
     pub fn as_view(&self) -> AtomView<'a> {
         AtomView::Mul(*self)
     }
 
+    /// Borrow the factors as a product slice.
     pub fn to_slice(&self) -> ListSlice<'a> {
         let mut c = self.data;
         c.get_u8();
@@ -1839,11 +1950,14 @@ impl<'a> MulView<'a> {
     }
 
     #[inline]
+    /// Return whether this product stores an explicit numerical coefficient.
     pub fn has_coefficient(&self) -> bool {
         self.data[0] & MUL_HAS_COEFF_FLAG == MUL_HAS_COEFF_FLAG
     }
 
     #[inline]
+    /// Borrow the explicit numerical coefficient, or return `None` when it is
+    /// absent (the implicit coefficient is one).
     pub fn get_coefficient(&self) -> Option<AtomView<'a>> {
         if self.has_coefficient() {
             self.iter().next()
@@ -1852,6 +1966,7 @@ impl<'a> MulView<'a> {
         }
     }
 
+    /// Return the size in bytes of the encoded expression, excluding symbol metadata.
     pub fn get_byte_size(&self) -> usize {
         self.data.len()
     }
@@ -1891,14 +2006,17 @@ impl<'a> IntoIterator for &AddView<'a> {
 }
 
 impl<'a> AddView<'a> {
+    /// Copy this view into a new owned value.
     pub fn to_owned(&self) -> Add {
         Add::from_view_into(self, Vec::new())
     }
 
+    /// Replace `target` with a copy of this view, reusing its allocation.
     pub fn clone_into(&self, target: &mut Add) {
         target.set_from_view(*self);
     }
 
+    /// Copy this view into owned storage, clearing and reusing `buffer`.
     pub fn clone_into_raw(&self, mut buffer: RawAtom) -> Add {
         buffer.clear();
         buffer.extend(self.data);
@@ -1911,11 +2029,13 @@ impl<'a> AddView<'a> {
     }
 
     #[inline(always)]
+    /// Return the number of terms in the sum.
     pub fn get_nargs(&self) -> usize {
         self.data[1..].get_frac_u64().0 as usize
     }
 
     #[inline]
+    /// Iterate over the terms in their stored order.
     pub fn iter(&self) -> ListIterator<'a> {
         let mut c = self.data;
         c.get_u8();
@@ -1930,10 +2050,12 @@ impl<'a> AddView<'a> {
     }
 
     #[inline]
+    /// Borrow this value as an expression view without copying its storage.
     pub fn as_view(&self) -> AtomView<'a> {
         AtomView::Add(*self)
     }
 
+    /// Borrow the terms as a sum slice.
     pub fn to_slice(&self) -> ListSlice<'a> {
         let mut c = self.data;
         c.get_u8();
@@ -1948,14 +2070,21 @@ impl<'a> AddView<'a> {
         }
     }
 
+    /// Return the size in bytes of the encoded expression, excluding symbol metadata.
     pub fn get_byte_size(&self) -> usize {
         self.data.len()
     }
 }
 
 impl<'a> AtomView<'a> {
+    /// A view of the exact number zero backed by static storage.
     pub const ZERO: Self = Self::Num(NumView { data: &ZERO_DATA });
 
+    /// Interpret `source` as one complete expression in Symbolica's encoded
+    /// representation. The bytes must already be valid, such as those returned
+    /// by [`Self::get_data`], and reference the current symbol state.
+    /// This does not validate or import serialized input; use [`Atom::import`]
+    /// for expressions transferred between sessions.
     pub fn from(source: &'a [u8]) -> AtomView<'a> {
         match source[0] & TYPE_MASK {
             VAR_ID => AtomView::Var(VarView { data: source }),
@@ -1969,6 +2098,7 @@ impl<'a> AtomView<'a> {
     }
 
     #[inline(always)]
+    /// Borrow the encoded expression bytes. Symbol metadata is stored separately.
     pub fn get_data(&self) -> &'a [u8] {
         match self {
             AtomView::Num(n) => n.data,
@@ -2254,11 +2384,13 @@ impl<'a, const N: usize> TryInto<[AtomView<'a>; N]> for ListIterator<'a> {
 
 impl<'a> ListIterator<'a> {
     #[inline]
+    /// Return the number of expressions still to be yielded.
     pub fn len(&self) -> usize {
         self.length as usize
     }
 
     #[inline]
+    /// Create an iterator that yields `atom` exactly once.
     pub fn from_one(atom: AtomView<'a>) -> Self {
         ListIterator {
             data: atom.get_data(),
@@ -2318,6 +2450,8 @@ impl<'a> ListSlice<'a> {
     }
 
     #[inline]
+    /// Return the suffix after skipping `index` elements, preserving the slice type.
+    /// The caller must ensure `index <= self.len()`.
     pub fn fast_forward(&self, index: usize) -> ListSlice<'a> {
         if index == 0 {
             return *self;
@@ -2355,6 +2489,7 @@ impl<'a> ListSlice<'a> {
     }
 
     #[inline]
+    /// Return the first element and the remaining slice. The slice must be nonempty.
     pub fn pop_first(&self) -> (AtomView<'a>, ListSlice<'a>) {
         let (res, end) = Self::get_entry(self.data);
 
@@ -2368,16 +2503,20 @@ impl<'a> ListSlice<'a> {
     }
 
     #[inline]
+    /// Return the number of expressions in the slice.
     pub fn len(&self) -> usize {
         self.length
     }
 
     #[inline]
+    /// Borrow the element at `index`. The caller must ensure `index < self.len()`.
     pub fn get(&self, index: usize) -> AtomView<'a> {
         let start = self.fast_forward(index);
         Self::get_entry(start.data).0
     }
 
+    /// Borrow the elements in the half-open range, preserving the slice type.
+    /// The range must be ordered and contained in `0..self.len()`.
     pub fn get_subslice(&self, range: std::ops::Range<usize>) -> Self {
         let start = self.fast_forward(range.start);
 
@@ -2393,11 +2532,13 @@ impl<'a> ListSlice<'a> {
     }
 
     #[inline]
+    /// Return the operation from which this slice was taken.
     pub fn get_type(&self) -> SliceType {
         self.slice_type
     }
 
     #[inline]
+    /// Create a one-element slice containing `view`.
     pub fn from_one(view: AtomView<'a>) -> Self {
         ListSlice {
             data: view.get_data(),
@@ -2407,6 +2548,7 @@ impl<'a> ListSlice<'a> {
     }
 
     #[inline]
+    /// Create an empty slice with [`SliceType::Empty`].
     pub fn empty() -> Self {
         ListSlice {
             data: &[],
@@ -2416,6 +2558,7 @@ impl<'a> ListSlice<'a> {
     }
 
     #[inline]
+    /// Iterate over the expressions in this slice.
     pub fn iter(&self) -> ListSliceIterator<'a> {
         ListSliceIterator { data: *self }
     }

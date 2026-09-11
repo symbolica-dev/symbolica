@@ -488,6 +488,8 @@ impl<T: Default + Clone + Eq + Hash> ExpressionEvaluator<T> {
 }
 
 impl<T> ExpressionEvaluator<T> {
+    /// Reduce temporary storage by reusing stack slots after their last use,
+    /// remapping instructions while preserving the evaluator's results.
     pub fn optimize_stack(&mut self) {
         let mut last_use: Vec<usize> = vec![0; self.stack.len()];
 

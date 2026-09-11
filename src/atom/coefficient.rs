@@ -93,6 +93,8 @@ const fn get_size_of_natural(num_type: u8) -> u8 {
 }
 
 impl SerializedRationalPolynomial<'_> {
+    /// Decode the borrowed coefficient bytes into an owned rational polynomial.
+    /// The encoding must be valid and refer to the current symbol state.
     pub fn deserialize(self) -> RationalPolynomial<IntegerRing, u16> {
         let (index, _, _) = self.0.get_frac_u64();
         let vars = State::get_variable_list(VariableListIndex(index as usize));

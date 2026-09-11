@@ -656,14 +656,17 @@ impl<T: Default> ExpressionEvaluator<T> {
         }
     }
 
+    /// Return the number of parameter values required for one evaluation.
     pub fn get_input_len(&self) -> usize {
         self.param_count
     }
 
+    /// Return the number of results produced by one evaluation.
     pub fn get_output_len(&self) -> usize {
         self.result_indices.len()
     }
 
+    /// Borrow the numerical constants stored by the evaluator.
     pub fn get_constants(&self) -> &[T] {
         &self.stack[self.param_count..self.reserved_indices]
     }

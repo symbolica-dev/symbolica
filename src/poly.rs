@@ -61,10 +61,29 @@ where
 /// Errors that can occur while converting expressions to polynomial representations.
 #[derive(Clone, Debug, PartialEq, Eq, Hash)]
 pub enum PolynomialConversionError {
+    /// The requested polynomial variables are invalid, with an explanation.
     InvalidVariableMap(String),
-    PolynomialConversionFailed { expression: Atom, reason: String },
-    RationalPolynomialConversionFailed { expression: Atom, reason: String },
-    FactorizedRationalPolynomialConversionFailed { expression: Atom, reason: String },
+    /// An expression cannot be represented as a polynomial in the requested ring.
+    PolynomialConversionFailed {
+        /// The expression that could not be converted.
+        expression: Atom,
+        /// The underlying conversion failure.
+        reason: String,
+    },
+    /// An expression cannot be represented as a rational polynomial.
+    RationalPolynomialConversionFailed {
+        /// The expression that could not be converted.
+        expression: Atom,
+        /// The underlying conversion failure.
+        reason: String,
+    },
+    /// Conversion to a rational polynomial with a factorized denominator failed.
+    FactorizedRationalPolynomialConversionFailed {
+        /// The expression that could not be converted.
+        expression: Atom,
+        /// The underlying conversion failure.
+        reason: String,
+    },
 }
 
 /// Extract the signed integer content of an exponent, rewriting `base^exponent` as `base^(exponent/content)`.
@@ -159,14 +178,19 @@ pub trait Exponent:
     + Eq
     + TryFrom<i32>
 {
+    /// Return exponent zero.
     fn zero() -> Self;
+    /// Return exponent one.
     fn one() -> Self;
     /// Convert the exponent to `i32`. This is always possible, as `i32` is the largest supported exponent type.
     fn to_i32(&self) -> i32;
     /// Convert from `i32`. This function may panic if the exponent is too large.
     fn from_i32(n: i32) -> Self;
+    /// Return whether the exponent is zero.
     fn is_zero(&self) -> bool;
+    /// Add two exponents, returning `None` if the result cannot be represented.
     fn checked_add(&self, other: &Self) -> Option<Self>;
+    /// Return the greatest common divisor of two exponents.
     fn gcd(&self, other: &Self) -> Self;
 
     /// Pack a list of exponents into a number, such that arithmetic and
@@ -174,6 +198,8 @@ pub trait Exponent:
     /// - the list is no longer than 8 entries
     /// - each entry is not larger than 255
     fn pack(list: &[Self]) -> u64;
+    /// Unpack exponents produced by [`Self::pack`] into `out`. The output
+    /// must have the original list length, at most eight entries.
     fn unpack(n: u64, out: &mut [Self]);
 
     /// Pack a list of exponents into a number, such that arithmetic and
@@ -181,6 +207,8 @@ pub trait Exponent:
     /// - the list is no longer than 4 entries
     /// - each entry is not larger than 2^16 - 1
     fn pack_u16(list: &[Self]) -> u64;
+    /// Unpack exponents produced by [`Self::pack_u16`] into `out`. The output
+    /// must have the original list length, at most four entries.
     fn unpack_u16(n: u64, out: &mut [Self]);
 }
 
@@ -624,12 +652,15 @@ impl Exponent for i8 {
 
 /// An exponent that must be zero or higher.
 pub trait PositiveExponent: Exponent {
+    /// Convert from `u32`. Panics if `n` exceeds `i32::MAX` or cannot be
+    /// represented by this exponent type.
     fn from_u32(n: u32) -> Self {
         if n > i32::MAX as u32 {
             panic!("Exponent {n} too large for i32");
         }
         Self::from_i32(n as i32)
     }
+    /// Convert this nonnegative exponent to `u32`.
     fn to_u32(&self) -> u32;
 }
 
@@ -694,6 +725,8 @@ to_positive!(i32, u32);
 
 /// A well-order of monomials.
 pub trait MonomialOrder: Clone {
+    /// Compare two exponent vectors in this monomial ordering. Both vectors
+    /// must use the same variables in the same order.
     fn cmp<E: Exponent>(a: &[E], b: &[E]) -> Ordering;
 }
 
@@ -871,6 +904,11 @@ impl PolyVariable {
         }
     }
 
+    /// Convert this polynomial variable back to its expression.
+    ///
+    /// # Panics
+    ///
+    /// Panics for temporary variables, which have no associated expression.
     pub fn to_atom(&self) -> Atom {
         match self {
             PolyVariable::Symbol(s) => Atom::var(*s),
@@ -918,6 +956,8 @@ impl PolyVariable {
 /// tuples from `symbol!("x", "y")`, `Vec<PolyVariable>`, and `Vec<Atom>` when every
 /// atom can be used as one polynomial variable.
 pub trait IntoVariableMap {
+    /// Convert to an ordered variable map. `None` leaves variable discovery
+    /// to the caller; an error indicates an invalid variable expression.
     fn into_var_map(self) -> Result<Option<Arc<Vec<PolyVariable>>>, String>;
 }
 
@@ -1886,6 +1926,9 @@ impl AtomView<'_> {
         Ok(polynomial)
     }
 
+    /// Convert using an explicit, complete variable map and factor the denominator.
+    /// Coefficients are first interpreted in `field` and converted to `out_field`.
+    /// Returns an error if an expression or coefficient cannot be represented.
     pub fn to_factorized_rational_polynomial_impl<
         R: EuclideanDomain + ConvertToRing,
         RO: EuclideanDomain + PolynomialGCD<E>,
@@ -2280,6 +2323,12 @@ impl<R: Ring, E: Exponent, O: MonomialOrder> MultivariatePolynomial<R, E, O> {
         }
     }
 
+    /// Convert the polynomial to a normalized expression using its stored variables
+    /// and the coefficient ring's expression conversion.
+    ///
+    /// # Panics
+    ///
+    /// Panics if an occurring variable is temporary and has no expression mapping.
     pub fn to_expression(&self) -> Atom
     where
         R::Element: CoefficientToExpression<R>,
@@ -2289,6 +2338,9 @@ impl<R: Ring, E: Exponent, O: MonomialOrder> MultivariatePolynomial<R, E, O> {
         out
     }
 
+    /// Replace `out` with the normalized expression represented by this polynomial.
+    /// Occurring variables must have expression representations; temporary
+    /// variables cannot be converted by this method.
     pub fn to_expression_into(&self, out: &mut Atom)
     where
         R::Element: CoefficientToExpression<R>,
@@ -2368,12 +2420,17 @@ impl<R: Ring, E: Exponent, O: MonomialOrder> MultivariatePolynomial<R, E, O> {
         std::mem::swap(norm.deref_mut(), out);
     }
 
+    /// Convert to an expression using `f` to write each coefficient as an atom.
+    /// The callback receives the coefficient ring, the coefficient, and reusable
+    /// output storage that it must overwrite. Temporary variables are unsupported.
     pub fn to_expression_with_coeff_map<F: Fn(&R, &R::Element, &mut Atom)>(&self, f: F) -> Atom {
         let mut out = Atom::default();
         self.to_expression_with_coeff_map_into(f, &mut out);
         out
     }
 
+    /// Replace `out` with the polynomial's expression, using `f` to write each
+    /// coefficient into reusable atom storage. Temporary variables are unsupported.
     pub fn to_expression_with_coeff_map_into<F: Fn(&R, &R::Element, &mut Atom)>(
         &self,
         f: F,
@@ -2440,6 +2497,9 @@ impl<R: Ring, E: Exponent, O: MonomialOrder> MultivariatePolynomial<R, E, O> {
 }
 
 impl<R: Ring, E: PositiveExponent> RationalPolynomial<R, E> {
+    /// Convert the numerator and denominator to expressions and form their quotient.
+    /// Occurring variables must have expression representations; temporary
+    /// variables cannot be converted by this method.
     pub fn to_expression(&self) -> Atom
     where
         R::Element: CoefficientToExpression<R>,
@@ -2449,6 +2509,8 @@ impl<R: Ring, E: PositiveExponent> RationalPolynomial<R, E> {
         out
     }
 
+    /// Replace `out` with the rational function's normalized expression.
+    /// Temporary variables must first be mapped to ordinary expression variables.
     pub fn to_expression_into(&self, out: &mut Atom)
     where
         R::Element: CoefficientToExpression<R>,
@@ -2456,6 +2518,9 @@ impl<R: Ring, E: PositiveExponent> RationalPolynomial<R, E> {
         Workspace::get_local().with(|ws| self.to_expression_with_map(ws, &HashMap::default(), out));
     }
 
+    /// Convert the rational function to an expression using `f` to write the
+    /// coefficients of both numerator and denominator into reusable atom storage.
+    /// Temporary variables are unsupported.
     pub fn to_expression_with_coeff_map<F: Fn(&R, &R::Element, &mut Atom) + Clone>(
         &self,
         f: F,
@@ -2505,6 +2570,10 @@ impl<R: Ring, E: PositiveExponent> RationalPolynomial<R, E> {
 }
 
 impl Token {
+    /// Parse this token tree directly as a polynomial over `field`.
+    /// `var_name_map` gives the accepted input names in the same order as
+    /// `var_map`. Returns an error for unknown names, unsupported syntax,
+    /// or coefficients that cannot be converted to the ring.
     pub fn to_polynomial<R: Ring + ConvertToRing, E: Exponent>(
         &self,
         field: &R,

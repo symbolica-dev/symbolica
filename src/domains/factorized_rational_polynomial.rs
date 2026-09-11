@@ -34,6 +34,8 @@ pub struct FactorizedRationalPolynomialField<R: Ring, E: PositiveExponent = u16>
 }
 
 impl<R: Ring, E: PositiveExponent> FactorizedRationalPolynomialField<R, E> {
+    /// Create a rational-function field with the given coefficient ring and
+    /// ordered polynomial variables.
     pub fn new(
         coeff_ring: R,
         var_map: Arc<Vec<PolyVariable>>,
@@ -45,6 +47,7 @@ impl<R: Ring, E: PositiveExponent> FactorizedRationalPolynomialField<R, E> {
         }
     }
 
+    /// Create a field using the coefficient ring and variables of `poly`.
     pub fn new_from_poly(
         poly: &MultivariatePolynomial<R, E>,
     ) -> FactorizedRationalPolynomialField<R, E> {
@@ -56,6 +59,8 @@ impl<R: Ring, E: PositiveExponent> FactorizedRationalPolynomialField<R, E> {
     }
 }
 
+/// Construct rational functions from a numerator and denominator factors,
+/// converting coefficients from `R` to `OR` as supported by the implementation.
 pub trait FromNumeratorAndFactorizedDenominator<R: Ring, OR: Ring, E: PositiveExponent> {
     /// Construct a rational polynomial from a numerator and a factorized denominator.
     /// An empty denominator means a denominator of 1.
@@ -70,9 +75,14 @@ pub trait FromNumeratorAndFactorizedDenominator<R: Ring, OR: Ring, E: PositiveEx
 /// A rational polynomial with a factorized denominator.
 #[derive(Clone, PartialEq, Eq, Hash, Debug)]
 pub struct FactorizedRationalPolynomial<R: Ring, E: PositiveExponent = u16> {
+    /// The polynomial part of the numerator, multiplied by [`Self::numer_coeff`].
     pub numerator: MultivariatePolynomial<R, E>,
+    /// The scalar numerator factor.
     pub numer_coeff: R::Element,
+    /// The nonzero scalar denominator factor.
     pub denom_coeff: R::Element,
+    /// Nonconstant denominator factors paired with their positive multiplicities.
+    /// Their product, multiplied by [`Self::denom_coeff`], forms the denominator.
     pub denominators: Vec<(MultivariatePolynomial<R, E>, usize)>, // TODO: sort factors?
 }
 
@@ -84,6 +94,7 @@ impl<R: Ring, E: PositiveExponent> InternalOrdering for FactorizedRationalPolyno
 }
 
 impl<R: Ring, E: PositiveExponent> FactorizedRationalPolynomial<R, E> {
+    /// Create the zero rational function over `field` with the given variable order.
     pub fn new(field: &R, var_map: Arc<Vec<PolyVariable>>) -> FactorizedRationalPolynomial<R, E> {
         let num = MultivariatePolynomial::new(field, None, var_map);
 
@@ -95,10 +106,13 @@ impl<R: Ring, E: PositiveExponent> FactorizedRationalPolynomial<R, E> {
         }
     }
 
+    /// Borrow the ordered variables of the polynomial representation.
     pub fn get_variables(&self) -> &[PolyVariable] {
         self.numerator.get_vars_ref()
     }
 
+    /// Reconcile the variable lists of the two numerators and this value's
+    /// denominator factors, remapping their exponent vectors in place.
     pub fn unify_variables(&mut self, other: &mut Self) {
         self.numerator.unify_variables(&mut other.numerator);
 
@@ -107,6 +121,8 @@ impl<R: Ring, E: PositiveExponent> FactorizedRationalPolynomial<R, E> {
         }
     }
 
+    /// Return whether the numerator is constant and no polynomial denominator
+    /// factors remain.
     pub fn is_constant(&self) -> bool {
         self.numerator.is_constant() && self.denominators.is_empty()
     }
@@ -140,10 +156,12 @@ impl<R: Ring, E: PositiveExponent> FactorizedRationalPolynomial<R, E> {
         )
     }
 
+    /// Return whether the numerator polynomial is zero.
     pub fn is_zero(&self) -> bool {
         self.numerator.is_zero()
     }
 
+    /// Return whether all stored numerator and denominator factors represent one.
     pub fn is_one(&self) -> bool {
         self.numerator.is_one()
             && self.denominators.is_empty()
@@ -727,6 +745,12 @@ impl<R: EuclideanDomain + PolynomialGCD<E>, E: PositiveExponent> FactorizedRatio
 where
     Self: FromNumeratorAndFactorizedDenominator<R, R, E>,
 {
+    /// Raise this rational function to the nonnegative integer power `e`.
+    /// Returns one for exponent zero.
+    ///
+    /// # Panics
+    ///
+    /// Panics if `e` exceeds `u32::MAX`.
     pub fn pow(&self, e: u64) -> Self {
         if e > u32::MAX as u64 {
             panic!("Power of exponentiation is larger than 2^32: {e}");
@@ -747,6 +771,8 @@ where
         poly
     }
 
+    /// Compute a GCD using polynomial numerators, scalar coefficients, and
+    /// the stored denominator factors, reconciling variables when needed.
     pub fn gcd(&self, other: &Self) -> Self {
         if self.get_variables() != other.get_variables() {
             let mut a = self.clone();

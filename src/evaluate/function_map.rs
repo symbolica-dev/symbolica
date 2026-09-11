@@ -2,6 +2,9 @@ use crate::atom::InlineVar;
 
 use super::*;
 
+/// A numerical function callback receiving, in order, evaluated arguments,
+/// constant values, registered function evaluators, and a mutable cache of
+/// previously evaluated expressions.
 pub type EvalFnType<A, T> = Box<
     dyn Fn(
         &[T],
@@ -15,6 +18,7 @@ pub type EvalFnType<A, T> = Box<
 pub struct EvaluationFn<A, T>(EvalFnType<A, T>);
 
 impl<A, T> EvaluationFn<A, T> {
+    /// Wrap a numerical callback for registration in an evaluation function map.
     pub fn new(f: EvalFnType<A, T>) -> EvaluationFn<A, T> {
         EvaluationFn(f)
     }
