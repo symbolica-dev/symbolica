@@ -2651,65 +2651,41 @@ class Expression:
             Whether the comparison may be satisfied by any atom in the expression instead of only the whole match.
         """
 
-    def __eq__(self, other: Expression | int | float | complex | Decimal) -> Condition:
-        """
-        Compare two expressions.
+    def __eq__(self, other: object) -> bool:
+        """Compare structural equality and exact scalar values. Use .eq() for a deferred Condition."""
 
-        Parameters
-        ----------
-        other: Expression | int | float | complex | Decimal
-            The other operand to combine or compare with.
-        """
+    def eq(self, other: Expression | HeldExpression | Transformer | int | float | complex | Decimal) -> Condition:
+        """Construct a deferred equality Condition for solve, matching, or Transformers.
 
-    def __ne__(self, other: Expression | int | float | complex | Decimal) -> Condition:
-        """
-        Compare two expressions.
-
-        Parameters
-        ----------
-        other: Expression | int | float | complex | Decimal
-            The other operand to combine or compare with.
+        Predicate evaluation compares substituted expressions structurally, with exact-value equality for scalar numbers.
         """
 
-    def __lt__(self, other: Expression | int | float | complex | Decimal) -> Condition:
-        """
-        Compare two expressions. If any of the two expressions is not a rational number, an interal ordering is used.
+    def __ne__(self, other: object) -> bool:
+        """Compare structural equality and exact scalar values. Use .ne() for a deferred Condition."""
 
-        Parameters
-        ----------
-        other: Expression | int | float | complex | Decimal
-            The other operand to combine or compare with.
-        """
+    def ne(self, other: Expression | HeldExpression | Transformer | int | float | complex | Decimal) -> Condition:
+        """Construct a deferred disequality Condition for solve, matching, or Transformers.
 
-    def __le__(self, other: Expression | int | float | complex | Decimal) -> Condition:
-        """
-        Compare two expressions. If any of the two expressions is not a rational number, an interal ordering is used.
-
-        Parameters
-        ----------
-        other: Expression | int | float | complex | Decimal
-            The other operand to combine or compare with.
+        Predicate evaluation compares substituted expressions structurally, with exact-value equality for scalar numbers.
         """
 
-    def __gt__(self, other: Expression | int | float | complex | Decimal) -> Condition:
-        """
-        Compare two expressions. If any of the two expressions is not a rational number, an interal ordering is used.
+    def __lt__(self, other: Expression | int | float | complex | Decimal | Transformer | HeldExpression) -> Condition:
+        """Construct a mathematical ordering Condition. Undecidable bool conversion raises TypeError."""
 
-        Parameters
-        ----------
-        other: Expression | int | float | complex | Decimal
-            The other operand to combine or compare with.
-        """
+    def __le__(self, other: Expression | int | float | complex | Decimal | Transformer | HeldExpression) -> Condition:
+        """Construct a mathematical ordering Condition. Undecidable bool conversion raises TypeError."""
 
-    def __ge__(self, other: Expression | int | float | complex | Decimal) -> Condition:
-        """
-        Compare two expressions. If any of the two expressions is not a rational number, an interal ordering is used.
+    def __gt__(self, other: Expression | int | float | complex | Decimal | Transformer | HeldExpression) -> Condition:
+        """Construct a mathematical ordering Condition. Undecidable bool conversion raises TypeError."""
 
-        Parameters
-        ----------
-        other: Expression | int | float | complex | Decimal
-            The other operand to combine or compare with.
-        """
+    def __ge__(self, other: Expression | int | float | complex | Decimal | Transformer | HeldExpression) -> Condition:
+        """Construct a mathematical ordering Condition. Undecidable bool conversion raises TypeError."""
+
+    def compare_structure(self, other: Expression) -> int:
+        """Return -1, 0, or 1 for internal structural ordering; this order may change between versions."""
+
+    def __bool__(self) -> bool:
+        """Return numeric truth for scalar numbers; raise TypeError for ambiguous symbolic truth."""
 
     def __iter__(self) -> Iterator[Expression]:
         """
@@ -4148,27 +4124,16 @@ class PatternRestriction:
         """
 
 class Condition:
-    """Relations that evaluate to booleans"""
+    """A deferred relation or logical combination consumed by Transformers, matching, and solve."""
 
-    def eval(self) -> bool:
-        """
-        Evaluate the condition.
-        """
+    def eval(self) -> bool | None:
+        """Evaluate, returning None for undecidable truth. Unbound Transformers need an execution input."""
 
-    def __repr__(self) -> str:
-        """
-        Return a string representation of the condition.
-        """
-
-    def __str__(self) -> str:
-        """
-        Return a string representation of the condition.
-        """
+    def __repr__(self) -> str: ...
+    def __str__(self) -> str: ...
 
     def __bool__(self) -> bool:
-        """
-        Return the boolean value of the condition.
-        """
+        """Return known truth; raise TypeError when truth is undecidable."""
 
     def __and__(self, other: Condition) -> Condition:
         """
@@ -4218,75 +4183,69 @@ class HeldExpression:
         >>> print(e)
         """
 
-    def __eq__(
-        self, other: HeldExpression | Expression | int | float | complex | Decimal
-    ) -> Condition:
-        """
-        Compare two transformers.
+    def __eq__(self, other: object) -> bool:
+        """Compare object identity without executing the computation. Use .eq() for a deferred Condition."""
 
-        Parameters
-        ----------
-        other: HeldExpression | Expression | int | float | complex | Decimal
-            The other operand to combine or compare with.
+    def eq(self, other: Expression | HeldExpression | Transformer | int | float | complex | Decimal) -> Condition:
+        """Construct a deferred equality Condition for solve, matching, or Transformers.
+
+        Predicate evaluation compares substituted expressions structurally, with exact-value equality for scalar numbers.
         """
 
-    def __ne__(
-        self, other: HeldExpression | Expression | int | float | complex | Decimal
-    ) -> Condition:
-        """
-        Compare two transformers.
+    def __ne__(self, other: object) -> bool:
+        """Compare object identity without executing the computation. Use .ne() for a deferred Condition."""
 
-        Parameters
-        ----------
-        other: HeldExpression | Expression | int | float | complex | Decimal
-            The other operand to combine or compare with.
+    def ne(self, other: Expression | HeldExpression | Transformer | int | float | complex | Decimal) -> Condition:
+        """Construct a deferred disequality Condition for solve, matching, or Transformers.
+
+        Predicate evaluation compares substituted expressions structurally, with exact-value equality for scalar numbers.
         """
 
     def __lt__(
-        self, other: HeldExpression | Expression | int | float | complex | Decimal
+        self, other: HeldExpression | Transformer | Expression | int | float | complex | Decimal
     ) -> Condition:
         """
-        Compare two transformers. If any of the two expressions is not a rational number, an interal ordering is used.
+        Construct a deferred Condition using mathematical real ordering after execution. Unknown truth is not false.
 
         Parameters
         ----------
-        other: HeldExpression | Expression | int | float | complex | Decimal
+        other: HeldExpression | Transformer | Expression | int | float | complex | Decimal
             The other operand to combine or compare with.
         """
 
     def __le__(
-        self, other: HeldExpression | Expression | int | float | complex | Decimal
+        self, other: HeldExpression | Transformer | Expression | int | float | complex | Decimal
     ) -> Condition:
         """
-        Compare two transformers. If any of the two expressions is not a rational number, an interal ordering is used.
+        Construct a deferred Condition using mathematical real ordering after execution. Unknown truth is not false.
 
         Parameters
         ----------
-        other: HeldExpression | Expression | int | float | complex | Decimal
+        other: HeldExpression | Transformer | Expression | int | float | complex | Decimal
             The other operand to combine or compare with.
         """
 
     def __gt__(
-        self, other: HeldExpression | Expression | int | float | complex | Decimal
+        self, other: HeldExpression | Transformer | Expression | int | float | complex | Decimal
     ) -> Condition:
         """
-        Compare two transformers. If any of the two expressions is not a rational number, an interal ordering is used.
+        Construct a deferred Condition using mathematical real ordering after execution. Unknown truth is not false.
 
         Parameters
         ----------
-        other: HeldExpression | Expression | int | float | complex | Decimal
+        other: HeldExpression | Transformer | Expression | int | float | complex | Decimal
             The other operand to combine or compare with.
         """
 
     def __ge__(
-        self, other: HeldExpression | Expression | int | float | complex | Decimal
+        self, other: HeldExpression | Transformer | Expression | int | float | complex | Decimal
     ) -> Condition:
         """
-        Compare two transformers. If any of the two expressions is not a rational number, an interal ordering is used.
+        Construct a deferred Condition using mathematical real ordering after execution. Unknown truth is not false.
 
         Parameters
         ----------
-        other: HeldExpression | Expression | int | float | complex | Decimal
+        other: HeldExpression | Transformer | Expression | int | float | complex | Decimal
             The other operand to combine or compare with.
         """
 
@@ -4345,98 +4304,98 @@ class HeldExpression:
         """
 
     def __add__(
-        self, other: HeldExpression | Expression | int | float | complex | Decimal
+        self, other: HeldExpression | Transformer | Expression | int | float | complex | Decimal
     ) -> HeldExpression:
         """
         Add this transformer to `other`, returning the result.
 
         Parameters
         ----------
-        other: HeldExpression | Expression | int | float | complex | Decimal
+        other: HeldExpression | Transformer | Expression | int | float | complex | Decimal
             The other operand to combine or compare with.
         """
 
     def __radd__(
-        self, other: HeldExpression | Expression | int | float | complex | Decimal
+        self, other: HeldExpression | Transformer | Expression | int | float | complex | Decimal
     ) -> HeldExpression:
         """
         Add this transformer to `other`, returning the result.
 
         Parameters
         ----------
-        other: HeldExpression | Expression | int | float | complex | Decimal
+        other: HeldExpression | Transformer | Expression | int | float | complex | Decimal
             The other operand to combine or compare with.
         """
 
     def __sub__(
-        self, other: HeldExpression | Expression | int | float | complex | Decimal
+        self, other: HeldExpression | Transformer | Expression | int | float | complex | Decimal
     ) -> HeldExpression:
         """
         Subtract `other` from this transformer, returning the result.
 
         Parameters
         ----------
-        other: HeldExpression | Expression | int | float | complex | Decimal
+        other: HeldExpression | Transformer | Expression | int | float | complex | Decimal
             The other operand to combine or compare with.
         """
 
     def __rsub__(
-        self, other: HeldExpression | Expression | int | float | complex | Decimal
+        self, other: HeldExpression | Transformer | Expression | int | float | complex | Decimal
     ) -> HeldExpression:
         """
         Subtract this transformer from `other`, returning the result.
 
         Parameters
         ----------
-        other: HeldExpression | Expression | int | float | complex | Decimal
+        other: HeldExpression | Transformer | Expression | int | float | complex | Decimal
             The other operand to combine or compare with.
         """
 
     def __mul__(
-        self, other: HeldExpression | Expression | int | float | complex | Decimal
+        self, other: HeldExpression | Transformer | Expression | int | float | complex | Decimal
     ) -> HeldExpression:
         """
         Add this transformer to `other`, returning the result.
 
         Parameters
         ----------
-        other: HeldExpression | Expression | int | float | complex | Decimal
+        other: HeldExpression | Transformer | Expression | int | float | complex | Decimal
             The other operand to combine or compare with.
         """
 
     def __rmul__(
-        self, other: HeldExpression | Expression | int | float | complex | Decimal
+        self, other: HeldExpression | Transformer | Expression | int | float | complex | Decimal
     ) -> HeldExpression:
         """
         Add this transformer to `other`, returning the result.
 
         Parameters
         ----------
-        other: HeldExpression | Expression | int | float | complex | Decimal
+        other: HeldExpression | Transformer | Expression | int | float | complex | Decimal
             The other operand to combine or compare with.
         """
 
     def __truediv__(
-        self, other: HeldExpression | Expression | int | float | complex | Decimal
+        self, other: HeldExpression | Transformer | Expression | int | float | complex | Decimal
     ) -> HeldExpression:
         """
         Divide this transformer by `other`, returning the result.
 
         Parameters
         ----------
-        other: HeldExpression | Expression | int | float | complex | Decimal
+        other: HeldExpression | Transformer | Expression | int | float | complex | Decimal
             The other operand to combine or compare with.
         """
 
     def __rtruediv__(
-        self, other: HeldExpression | Expression | int | float | complex | Decimal
+        self, other: HeldExpression | Transformer | Expression | int | float | complex | Decimal
     ) -> HeldExpression:
         """
         Divide `other` by this transformer, returning the result.
 
         Parameters
         ----------
-        other: HeldExpression | Expression | int | float | complex | Decimal
+        other: HeldExpression | Transformer | Expression | int | float | complex | Decimal
             The other operand to combine or compare with.
         """
 
@@ -5441,35 +5400,29 @@ class Transformer:
             The percentage change threshold that should be highlighted as a large change.
         """
 
-    def __eq__(
-        self, other: Transformer | Expression | int | float | Decimal
-    ) -> Condition:
-        """
-        Compare two transformers.
+    def __eq__(self, other: object) -> bool:
+        """Compare object identity without executing the computation. Use .eq() for a deferred Condition."""
 
-        Parameters
-        ----------
-        other: Transformer | Expression | int | float | Decimal
-            The other operand to combine or compare with.
+    def eq(self, other: Expression | HeldExpression | Transformer | int | float | complex | Decimal) -> Condition:
+        """Construct a deferred equality Condition for solve, matching, or Transformers.
+
+        Predicate evaluation compares substituted expressions structurally, with exact-value equality for scalar numbers.
         """
 
-    def __ne__(
-        self, other: Transformer | Expression | int | float | Decimal
-    ) -> Condition:
-        """
-        Compare two transformers.
+    def __ne__(self, other: object) -> bool:
+        """Compare object identity without executing the computation. Use .ne() for a deferred Condition."""
 
-        Parameters
-        ----------
-        other: Transformer | Expression | int | float | Decimal
-            The other operand to combine or compare with.
+    def ne(self, other: Expression | HeldExpression | Transformer | int | float | complex | Decimal) -> Condition:
+        """Construct a deferred disequality Condition for solve, matching, or Transformers.
+
+        Predicate evaluation compares substituted expressions structurally, with exact-value equality for scalar numbers.
         """
 
     def __lt__(
         self, other: Transformer | Expression | int | float | Decimal
     ) -> Condition:
         """
-        Compare two transformers. If any of the two expressions is not a rational number, an interal ordering is used.
+        Construct a deferred Condition using mathematical real ordering after execution. Unknown truth is not false.
 
         Parameters
         ----------
@@ -5481,7 +5434,7 @@ class Transformer:
         self, other: Transformer | Expression | int | float | Decimal
     ) -> Condition:
         """
-        Compare two transformers. If any of the two expressions is not a rational number, an interal ordering is used.
+        Construct a deferred Condition using mathematical real ordering after execution. Unknown truth is not false.
 
         Parameters
         ----------
@@ -5493,7 +5446,7 @@ class Transformer:
         self, other: Transformer | Expression | int | float | Decimal
     ) -> Condition:
         """
-        Compare two transformers. If any of the two expressions is not a rational number, an interal ordering is used.
+        Construct a deferred Condition using mathematical real ordering after execution. Unknown truth is not false.
 
         Parameters
         ----------
@@ -5505,7 +5458,7 @@ class Transformer:
         self, other: Transformer | Expression | int | float | Decimal
     ) -> Condition:
         """
-        Compare two transformers. If any of the two expressions is not a rational number, an interal ordering is used.
+        Construct a deferred Condition using mathematical real ordering after execution. Unknown truth is not false.
 
         Parameters
         ----------
@@ -9424,7 +9377,28 @@ class EvaluatorInstructions:
 
     @property
     def instructions(self) -> list[tuple]:
-        """The linear evaluation instructions."""
+        """
+        Return a portable instruction representation for efficiently evaluating the expression.
+        This can be used to generate code for the expression evaluation in any programming
+        language.
+
+        There are four lists that are used in the evaluation instructions:
+        - `param`: the list of input parameters.
+        - `temp`: the list of temporary slots. Its size is available as `temporary_count`.
+        - `const`: the list of constants.
+        - `out`: the list of outputs.
+
+        The instructions are of the form:
+        - `('add', ('out', 0), [('const', 1), ('param', 0)], 0)` which means `out[0] = const[1] + param[0]` where the first `0` arguments are real.
+        - `('mul', ('out', 0), [('temp', 0), ('param', 0)], 1)` which means `out[0] = temp[0] * param[0]`, where the first `1` arguments are real.
+        - `('pow', ('out', 0), ('param', 0), -1, true)` which means `out[0] = param[0]^-1` and the output is real (`true`).
+        - `('powf', ('out', 0), ('param', 0), ('param', 1), false)` which means `out[0] = param[0]^param[1]`.
+        - `('fun', ('temp', 1), f, ["0"], [('param', 0)], true)` which means `temp[1] = f(0, param[0])` and the output is real (`true`).
+        - `('if_else', ('temp', 0), 5)` which means `if temp[0] == 0 goto label 5` (false branch).
+        - `('goto', 10)` which means `goto label 10`.
+        - `('label', 3)` which means `label 3`.
+        - `('join', ('out', 0), ('temp', 0), 3, 7)` which means `out[0] = (temp[0] != 0) ? label 3 : label 7`.
+        """
 
     @property
     def temporary_count(self) -> int:
@@ -9469,10 +9443,6 @@ class Evaluator:
     def load(
         cls,
         evaluator: bytes,
-        external_functions: dict[
-            tuple[Expression, str],
-            Callable[[Sequence[float | complex]], float | complex],
-        ] = {},
     ) -> Evaluator:
         """
         Load the evaluator into memory, preparing it for evaluation.
@@ -9481,8 +9451,6 @@ class Evaluator:
         ----------
         evaluator: bytes
             The serialized evaluator state.
-        external_functions: dict[tuple[Expression, str], Callable[[ Sequence[float | complex]], float | complex]]
-            The external functions to register.
         """
 
     def jit_compile(

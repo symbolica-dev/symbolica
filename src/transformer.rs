@@ -596,11 +596,15 @@ impl Transformer {
 
             match t {
                 Transformer::IfElse(cond, t1, t2) => {
-                    if cond
+                    let decision = cond
                         .evaluate(&Some(cur_input))
-                        .map_err(TransformerError::ValueError)?
-                        .is_true()
-                    {
+                        .map_err(TransformerError::ValueError)?;
+                    if decision.is_inconclusive() {
+                        return Err(TransformerError::ValueError(
+                            "Transformer condition is undecidable for this input".into(),
+                        ));
+                    }
+                    if decision.is_true() {
                         if Transformer::execute_chain(cur_input, t1, workspace, state, out)?
                             .is_break()
                         {

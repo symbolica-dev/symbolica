@@ -61,29 +61,84 @@ impl PythonHeldExpression {
         Ok(out.into())
     }
 
-    /// Compare two expressions. If one of the expressions is not a number, an
-    /// internal ordering will be used.
-    fn __richcmp__(&self, other: ConvertibleToPattern, op: CompareOp) -> PyResult<PythonCondition> {
-        Ok(match op {
-            CompareOp::Eq => PythonCondition {
-                condition: Relation::Eq(self.expr.clone(), other.to_pattern()?.expr).into(),
-            },
-            CompareOp::Ne => PythonCondition {
-                condition: Relation::Ne(self.expr.clone(), other.to_pattern()?.expr).into(),
-            },
-            CompareOp::Ge => PythonCondition {
-                condition: Relation::Ge(self.expr.clone(), other.to_pattern()?.expr).into(),
-            },
-            CompareOp::Gt => PythonCondition {
-                condition: Relation::Gt(self.expr.clone(), other.to_pattern()?.expr).into(),
-            },
-            CompareOp::Le => PythonCondition {
-                condition: Relation::Le(self.expr.clone(), other.to_pattern()?.expr).into(),
-            },
-            CompareOp::Lt => PythonCondition {
-                condition: Relation::Lt(self.expr.clone(), other.to_pattern()?.expr).into(),
-            },
-        })
+    /// Compare object identity without executing this computation. Use .eq() for a Condition.
+    #[gen_stub(override_return_type(type_repr = "bool"))]
+    fn __eq__(
+        slf: PyRef<'_, Self>,
+        #[gen_stub(override_type(type_repr = "object"))] other: &Bound<'_, PyAny>,
+    ) -> PyResult<Py<PyAny>> {
+        if slf.as_ptr() == other.as_ptr() {
+            true.into_py_any(other.py())
+        } else {
+            Ok(other.py().NotImplemented())
+        }
+    }
+
+    /// Construct a deferred equality Condition on the results after execution.
+    pub fn eq(&self, other: ConvertibleToOpenPattern) -> PyResult<PythonCondition> {
+        Ok(condition::relation(
+            self.expr.clone(),
+            other.to_pattern()?.expr,
+            CompareOp::Eq,
+        ))
+    }
+
+    /// Compare object identity without executing this computation. Use .ne() for a Condition.
+    #[gen_stub(override_return_type(type_repr = "bool"))]
+    fn __ne__(
+        slf: PyRef<'_, Self>,
+        #[gen_stub(override_type(type_repr = "object"))] other: &Bound<'_, PyAny>,
+    ) -> PyResult<Py<PyAny>> {
+        if slf.as_ptr() == other.as_ptr() {
+            false.into_py_any(other.py())
+        } else {
+            Ok(other.py().NotImplemented())
+        }
+    }
+
+    /// Construct a deferred disequality Condition on the results after execution.
+    pub fn ne(&self, other: ConvertibleToOpenPattern) -> PyResult<PythonCondition> {
+        Ok(condition::relation(
+            self.expr.clone(),
+            other.to_pattern()?.expr,
+            CompareOp::Ne,
+        ))
+    }
+
+    /// Construct a deferred Condition using mathematical real ordering after execution.
+    fn __lt__(&self, other: ConvertibleToOpenPattern) -> PyResult<PythonCondition> {
+        Ok(condition::relation(
+            self.expr.clone(),
+            other.to_pattern()?.expr,
+            CompareOp::Lt,
+        ))
+    }
+
+    /// Construct a deferred Condition using mathematical real ordering after execution.
+    fn __le__(&self, other: ConvertibleToOpenPattern) -> PyResult<PythonCondition> {
+        Ok(condition::relation(
+            self.expr.clone(),
+            other.to_pattern()?.expr,
+            CompareOp::Le,
+        ))
+    }
+
+    /// Construct a deferred Condition using mathematical real ordering after execution.
+    fn __gt__(&self, other: ConvertibleToOpenPattern) -> PyResult<PythonCondition> {
+        Ok(condition::relation(
+            self.expr.clone(),
+            other.to_pattern()?.expr,
+            CompareOp::Gt,
+        ))
+    }
+
+    /// Construct a deferred Condition using mathematical real ordering after execution.
+    fn __ge__(&self, other: ConvertibleToOpenPattern) -> PyResult<PythonCondition> {
+        Ok(condition::relation(
+            self.expr.clone(),
+            other.to_pattern()?.expr,
+            CompareOp::Ge,
+        ))
     }
 
     /// Test if the expression is of a certain type.
@@ -612,33 +667,84 @@ impl PythonTransformer {
         Ok(out.into())
     }
 
-    /// Compare two expressions. If one of the expressions is not a number, an
-    /// internal ordering will be used.
-    fn __richcmp__(
-        &self,
-        other: ConvertibleToOpenPattern,
-        op: CompareOp,
-    ) -> PyResult<PythonCondition> {
-        Ok(match op {
-            CompareOp::Eq => PythonCondition {
-                condition: Relation::Eq(self.to_pattern(), other.to_pattern()?.expr).into(),
-            },
-            CompareOp::Ne => PythonCondition {
-                condition: Relation::Ne(self.to_pattern(), other.to_pattern()?.expr).into(),
-            },
-            CompareOp::Ge => PythonCondition {
-                condition: Relation::Ge(self.to_pattern(), other.to_pattern()?.expr).into(),
-            },
-            CompareOp::Gt => PythonCondition {
-                condition: Relation::Gt(self.to_pattern(), other.to_pattern()?.expr).into(),
-            },
-            CompareOp::Le => PythonCondition {
-                condition: Relation::Le(self.to_pattern(), other.to_pattern()?.expr).into(),
-            },
-            CompareOp::Lt => PythonCondition {
-                condition: Relation::Lt(self.to_pattern(), other.to_pattern()?.expr).into(),
-            },
-        })
+    /// Compare object identity without executing this computation. Use .eq() for a Condition.
+    #[gen_stub(override_return_type(type_repr = "bool"))]
+    fn __eq__(
+        slf: PyRef<'_, Self>,
+        #[gen_stub(override_type(type_repr = "object"))] other: &Bound<'_, PyAny>,
+    ) -> PyResult<Py<PyAny>> {
+        if slf.as_ptr() == other.as_ptr() {
+            true.into_py_any(other.py())
+        } else {
+            Ok(other.py().NotImplemented())
+        }
+    }
+
+    /// Construct a deferred equality Condition on the results after execution.
+    pub fn eq(&self, other: ConvertibleToOpenPattern) -> PyResult<PythonCondition> {
+        Ok(condition::relation(
+            self.to_pattern(),
+            other.to_pattern()?.expr,
+            CompareOp::Eq,
+        ))
+    }
+
+    /// Compare object identity without executing this computation. Use .ne() for a Condition.
+    #[gen_stub(override_return_type(type_repr = "bool"))]
+    fn __ne__(
+        slf: PyRef<'_, Self>,
+        #[gen_stub(override_type(type_repr = "object"))] other: &Bound<'_, PyAny>,
+    ) -> PyResult<Py<PyAny>> {
+        if slf.as_ptr() == other.as_ptr() {
+            false.into_py_any(other.py())
+        } else {
+            Ok(other.py().NotImplemented())
+        }
+    }
+
+    /// Construct a deferred disequality Condition on the results after execution.
+    pub fn ne(&self, other: ConvertibleToOpenPattern) -> PyResult<PythonCondition> {
+        Ok(condition::relation(
+            self.to_pattern(),
+            other.to_pattern()?.expr,
+            CompareOp::Ne,
+        ))
+    }
+
+    /// Construct a deferred Condition using mathematical real ordering after execution.
+    fn __lt__(&self, other: ConvertibleToOpenPattern) -> PyResult<PythonCondition> {
+        Ok(condition::relation(
+            self.to_pattern(),
+            other.to_pattern()?.expr,
+            CompareOp::Lt,
+        ))
+    }
+
+    /// Construct a deferred Condition using mathematical real ordering after execution.
+    fn __le__(&self, other: ConvertibleToOpenPattern) -> PyResult<PythonCondition> {
+        Ok(condition::relation(
+            self.to_pattern(),
+            other.to_pattern()?.expr,
+            CompareOp::Le,
+        ))
+    }
+
+    /// Construct a deferred Condition using mathematical real ordering after execution.
+    fn __gt__(&self, other: ConvertibleToOpenPattern) -> PyResult<PythonCondition> {
+        Ok(condition::relation(
+            self.to_pattern(),
+            other.to_pattern()?.expr,
+            CompareOp::Gt,
+        ))
+    }
+
+    /// Construct a deferred Condition using mathematical real ordering after execution.
+    fn __ge__(&self, other: ConvertibleToOpenPattern) -> PyResult<PythonCondition> {
+        Ok(condition::relation(
+            self.to_pattern(),
+            other.to_pattern()?.expr,
+            CompareOp::Ge,
+        ))
     }
 
     /// Test if the expression is of a certain type.
@@ -2686,7 +2792,7 @@ impl PythonPatternRestriction {
     }
 }
 
-/// A restriction on wildcards.
+/// A deferred relation or logical combination for Transformers, matching, and solve.
 #[cfg_attr(feature = "python_stubgen", gen_stub_pyclass)]
 #[pyclass(from_py_object, name = "Condition", module = "symbolica.core")]
 #[derive(Clone)]
@@ -2714,18 +2820,27 @@ impl PythonCondition {
         format!("{}", self.condition)
     }
 
-    /// Evaluate the condition.
-    pub fn eval(&self) -> PyResult<bool> {
-        Ok(self
-            .condition
-            .evaluate(&None)
-            .map_err(|e| exceptions::PyValueError::new_err(e.to_string()))?
-            == ConditionResult::True)
+    /// Evaluate the condition, returning None when its truth is undecidable.
+    /// Unbound Transformers require an input and cannot be evaluated here.
+    pub fn eval(&self) -> PyResult<Option<bool>> {
+        Ok(
+            match self
+                .condition
+                .evaluate(&None)
+                .map_err(exceptions::PyValueError::new_err)?
+            {
+                ConditionResult::True => Some(true),
+                ConditionResult::False => Some(false),
+                ConditionResult::Inconclusive => None,
+            },
+        )
     }
 
-    /// Return the boolean value of the condition.
+    /// Convert a decidable condition to bool; raise TypeError for unknown truth.
     pub fn __bool__(&self) -> PyResult<bool> {
-        self.eval()
+        self.eval()?.ok_or_else(|| exceptions::PyTypeError::new_err(
+            "The truth of this Condition is undecidable. Pass it to solve, replace, or Transformer.if_then; use &, |, and ~ to combine Conditions.",
+        ))
     }
 
     /// Create a new pattern restriction that is the logical 'and' operation between two restrictions (i.e., both should hold).
@@ -2753,74 +2868,17 @@ impl PythonCondition {
     }
 }
 
-macro_rules! req_cmp_rel {
-    ($self:ident,$num:ident,$cmp_any_atom:ident,$c:ident) => {{
-        let num = if !$cmp_any_atom {
-            if let Pattern::Literal(a) = $num {
-                if let AtomView::Num(_) = a.as_view() {
-                    a
-                } else {
-                    return Err("Can only compare to number");
-                }
-            } else {
-                return Err("Can only compare to number");
-            }
-        } else if let Pattern::Literal(a) = $num {
-            a
-        } else {
-            return Err("Pattern must be literal");
-        };
-
-        if let Pattern::Wildcard(name, _) = $self {
-            if name.get_wildcard_level() == 0 {
-                return Err("Only wildcards can be restricted.");
-            }
-
-            Ok(PatternRestriction::Wildcard((
-                name,
-                WildcardRestriction::Filter(Box::new(move |v: &Match| {
-                    if let Match::Single(m) = v {
-                        if !$cmp_any_atom {
-                            if let AtomView::Num(_) = m {
-                                return m.cmp(&num.as_view()).$c();
-                            }
-                        } else {
-                            return m.cmp(&num.as_view()).$c();
-                        }
-                    }
-
-                    false
-                })),
-            )))
-        } else {
-            Err("Only wildcards can be restricted.")
-        }
-    }};
-}
-
 impl TryFrom<Relation> for PatternRestriction {
     type Error = &'static str;
 
     fn try_from(value: Relation) -> Result<Self, &'static str> {
         match value {
-            Relation::Eq(atom, atom1) => {
-                req_cmp_rel!(atom, atom1, true, is_eq)
-            }
-            Relation::Ne(atom, atom1) => {
-                req_cmp_rel!(atom, atom1, true, is_ne)
-            }
-            Relation::Gt(atom, atom1) => {
-                req_cmp_rel!(atom, atom1, true, is_gt)
-            }
-            Relation::Ge(atom, atom1) => {
-                req_cmp_rel!(atom, atom1, true, is_ge)
-            }
-            Relation::Lt(atom, atom1) => {
-                req_cmp_rel!(atom, atom1, true, is_lt)
-            }
-            Relation::Le(atom, atom1) => {
-                req_cmp_rel!(atom, atom1, true, is_le)
-            }
+            Relation::Eq(..)
+            | Relation::Ne(..)
+            | Relation::Gt(..)
+            | Relation::Ge(..)
+            | Relation::Lt(..)
+            | Relation::Le(..) => condition::matching_relation(value),
             Relation::Contains(atom, atom1) => {
                 if let Pattern::Wildcard(name, _) = atom {
                     if name.get_wildcard_level() == 0 {
@@ -4694,11 +4752,9 @@ impl PythonExpression {
         ))
     }
 
-    /// Hash the expression.
-    pub fn __hash__(&self) -> u64 {
-        let mut hasher = ahash::AHasher::default();
-        self.expr.hash(&mut hasher);
-        hasher.finish()
+    /// Hash the expression, using Python-compatible hashes for scalar numbers.
+    pub fn __hash__(&self, py: Python) -> PyResult<isize> {
+        condition::expression_hash(self.expr.as_view(), py)
     }
 
     /// Save the expression and its state to a binary file.
@@ -5158,8 +5214,19 @@ impl PythonExpression {
             AtomView::Add(a) => a.get_nargs(),
             AtomView::Mul(a) => a.get_nargs(),
             AtomView::Fun(a) => a.get_nargs(),
+            AtomView::Pow(_) => 2,
             _ => 1,
         }
+    }
+
+    /// Numeric truth for scalar numbers; general symbolic truth is ambiguous.
+    fn __bool__(&self, py: Python) -> PyResult<bool> {
+        if let Some((re, im)) = condition::numeric_parts(self.expr.as_view(), py)? {
+            return Ok(re.is_truthy()? || im.is_truthy()?);
+        }
+        Err(exceptions::PyTypeError::new_err(
+            "The truth of a symbolic expression is ambiguous. Compare explicitly or construct a Condition.",
+        ))
     }
 
     fn __int__(&self) -> PyResult<Integer> {
@@ -5168,7 +5235,7 @@ impl PythonExpression {
         }
 
         Err(exceptions::PyTypeError::new_err(format!(
-            "Cannot convert {} to float",
+            "Cannot convert {} to int",
             self.expr
         )))
     }
@@ -6034,36 +6101,76 @@ impl PythonExpression {
         }
     }
 
-    /// Compare two expressions. If one of the expressions is not a number, an
-    /// internal ordering will be used.
-    fn __richcmp__(&self, o: Py<PyAny>, op: CompareOp, py: Python) -> PyResult<PythonCondition> {
-        let Ok(other) = o.extract::<ConvertibleToPattern>(py) else {
-            return Err(exceptions::PyTypeError::new_err(format!(
-                "Cannot compare {} with {} due to incompatible types.",
-                self.expr, o
-            )));
-        };
+    /// Compare structural equality, or exact values for scalar numbers. Use .eq() for a Condition.
+    #[gen_stub(override_return_type(type_repr = "bool"))]
+    fn __eq__(
+        &self,
+        #[gen_stub(override_type(type_repr = "object"))] other: &Bound<'_, PyAny>,
+    ) -> PyResult<Py<PyAny>> {
+        condition::expression_compare(self, other, CompareOp::Eq)
+    }
 
-        Ok(match op {
-            CompareOp::Eq => PythonCondition {
-                condition: Relation::Eq(self.expr.to_pattern(), other.to_pattern()?.expr).into(),
-            },
-            CompareOp::Ne => PythonCondition {
-                condition: Relation::Ne(self.expr.to_pattern(), other.to_pattern()?.expr).into(),
-            },
-            CompareOp::Ge => PythonCondition {
-                condition: Relation::Ge(self.expr.to_pattern(), other.to_pattern()?.expr).into(),
-            },
-            CompareOp::Gt => PythonCondition {
-                condition: Relation::Gt(self.expr.to_pattern(), other.to_pattern()?.expr).into(),
-            },
-            CompareOp::Le => PythonCondition {
-                condition: Relation::Le(self.expr.to_pattern(), other.to_pattern()?.expr).into(),
-            },
-            CompareOp::Lt => PythonCondition {
-                condition: Relation::Lt(self.expr.to_pattern(), other.to_pattern()?.expr).into(),
-            },
-        })
+    /// Construct a deferred equality Condition for solve, matching, or Transformers.
+    /// Predicate evaluation compares substituted expressions structurally, with exact-value equality for scalar numbers.
+    pub fn eq(&self, other: ConvertibleToOpenPattern) -> PyResult<PythonCondition> {
+        Ok(condition::relation(
+            self.expr.to_pattern(),
+            other.to_pattern()?.expr,
+            CompareOp::Eq,
+        ))
+    }
+
+    /// Compare structural inequality, or exact values for scalar numbers. Use .ne() for a Condition.
+    #[gen_stub(override_return_type(type_repr = "bool"))]
+    fn __ne__(
+        &self,
+        #[gen_stub(override_type(type_repr = "object"))] other: &Bound<'_, PyAny>,
+    ) -> PyResult<Py<PyAny>> {
+        condition::expression_compare(self, other, CompareOp::Ne)
+    }
+
+    /// Construct a deferred disequality Condition for solve, matching, or Transformers.
+    /// Predicate evaluation compares substituted expressions structurally, with exact-value equality for scalar numbers.
+    pub fn ne(&self, other: ConvertibleToOpenPattern) -> PyResult<PythonCondition> {
+        Ok(condition::relation(
+            self.expr.to_pattern(),
+            other.to_pattern()?.expr,
+            CompareOp::Ne,
+        ))
+    }
+
+    /// Construct a deferred mathematical less-than Condition.
+    #[gen_stub(override_return_type(type_repr = "Condition"))]
+    fn __lt__(&self, other: &Bound<'_, PyAny>) -> PyResult<Py<PyAny>> {
+        condition::expression_compare(self, other, CompareOp::Lt)
+    }
+
+    /// Construct a deferred mathematical less-than-or-equal Condition.
+    #[gen_stub(override_return_type(type_repr = "Condition"))]
+    fn __le__(&self, other: &Bound<'_, PyAny>) -> PyResult<Py<PyAny>> {
+        condition::expression_compare(self, other, CompareOp::Le)
+    }
+
+    /// Construct a deferred mathematical greater-than Condition.
+    #[gen_stub(override_return_type(type_repr = "Condition"))]
+    fn __gt__(&self, other: &Bound<'_, PyAny>) -> PyResult<Py<PyAny>> {
+        condition::expression_compare(self, other, CompareOp::Gt)
+    }
+
+    /// Construct a deferred mathematical greater-than-or-equal Condition.
+    #[gen_stub(override_return_type(type_repr = "Condition"))]
+    fn __ge__(&self, other: &Bound<'_, PyAny>) -> PyResult<Py<PyAny>> {
+        condition::expression_compare(self, other, CompareOp::Ge)
+    }
+
+    /// Compare the internal structural order, returning -1, 0, or 1.
+    /// This is not a mathematical inequality and may change between versions.
+    pub fn compare_structure(&self, other: PythonExpression) -> i8 {
+        match self.expr.as_view().cmp(&other.expr.as_view()) {
+            std::cmp::Ordering::Less => -1,
+            std::cmp::Ordering::Equal => 0,
+            std::cmp::Ordering::Greater => 1,
+        }
     }
 
     /// Create a pattern restriction that passes when the wildcard is smaller than `other`.
@@ -6508,16 +6615,22 @@ impl PythonExpression {
 
         // release the GIL as Python functions may be called from
         // within the term mapper
+        let failure = Mutex::new(None);
+        let failure_ref = &failure;
         let r = py.detach(move || {
             self.expr.as_view().map_terms(
                 |x| {
+                    if failure_ref.lock().unwrap().is_some() {
+                        return Atom::Zero;
+                    }
                     let mut out = Atom::default();
                     Workspace::get_local().with(|ws| {
-                        let _ = Transformer::execute_chain(x, &op.chain, ws, &state, &mut out)
-                            .unwrap_or_else(|e| {
-                                // TODO: capture and abort the parallel run
-                                panic!("Transformer failed during parallel execution: {e:?}")
-                            });
+                        if let Err(error) =
+                            Transformer::execute_chain(x, &op.chain, ws, &state, &mut out)
+                        {
+                            failure_ref.lock().unwrap().get_or_insert(error);
+                            out = Atom::Zero;
+                        }
                     });
                     out
                 },
@@ -6525,6 +6638,14 @@ impl PythonExpression {
             )
         });
 
+        if let Some(error) = failure.into_inner().unwrap() {
+            return Err(match error {
+                TransformerError::Interrupt => {
+                    exceptions::PyKeyboardInterrupt::new_err("Interrupted by user")
+                }
+                TransformerError::ValueError(message) => exceptions::PyValueError::new_err(message),
+            });
+        }
         Ok(r.into())
     }
 

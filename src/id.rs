@@ -4148,6 +4148,56 @@ pub enum Relation {
     ),
 }
 
+/// Recover the exact stored value of a finite scalar coefficient, including floats.
+pub(crate) fn exact_numeric_value(
+    atom: AtomView<'_>,
+) -> Option<crate::domains::float::Complex<Rational>> {
+    let AtomView::Num(n) = atom else {
+        return None;
+    };
+    match n.get_coeff_view().to_owned() {
+        Coefficient::Complex(value) => Some(value),
+        Coefficient::Float(value) => Some(crate::domains::float::Complex::new(
+            value.re.try_to_rational()?,
+            value.im.try_to_rational()?,
+        )),
+        _ => None,
+    }
+}
+
+/// Structural equality for expressions, with exact-value equality for scalars.
+pub(crate) fn equal_atoms(lhs: AtomView<'_>, rhs: AtomView<'_>) -> bool {
+    if let (Some(a), Some(b)) = (exact_numeric_value(lhs), exact_numeric_value(rhs)) {
+        a == b
+    } else {
+        lhs == rhs
+    }
+}
+
+/// Mathematical ordering where it can be established without numerical guessing.
+/// Storage ordering is deliberately not a fallback for symbolic or complex values.
+pub(crate) fn compare_real_atoms(
+    lhs: AtomView<'_>,
+    rhs: AtomView<'_>,
+) -> Option<std::cmp::Ordering> {
+    if let (Some(a), Some(b)) = (exact_numeric_value(lhs), exact_numeric_value(rhs)) {
+        return (a.im.is_zero() && b.im.is_zero()).then(|| a.re.cmp(&b.re));
+    }
+    if !lhs.is_real() || !rhs.is_real() {
+        return None;
+    }
+    let difference = lhs - rhs;
+    if difference == Atom::Zero {
+        Some(std::cmp::Ordering::Equal)
+    } else if difference.is_positive() {
+        Some(std::cmp::Ordering::Greater)
+    } else if (-difference).is_positive() {
+        Some(std::cmp::Ordering::Less)
+    } else {
+        None
+    }
+}
+
 impl std::fmt::Display for Relation {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
@@ -4194,13 +4244,35 @@ impl Evaluate for Relation {
                             TransformerError::ValueError(v) => v,
                         })?;
 
+                    if out1
+                        .get_all_symbols(true)
+                        .iter()
+                        .chain(out2.get_all_symbols(true).iter())
+                        .any(|symbol| symbol.get_wildcard_level() > 0)
+                    {
+                        return Ok(ConditionResult::Inconclusive);
+                    }
+
+                    if matches!(
+                        self,
+                        Relation::Gt(..) | Relation::Ge(..) | Relation::Lt(..) | Relation::Le(..)
+                    ) {
+                        let Some(order) = compare_real_atoms(out1.as_view(), out2.as_view()) else {
+                            return Ok(ConditionResult::Inconclusive);
+                        };
+                        return Ok(match self {
+                            Relation::Gt(..) => order.is_gt(),
+                            Relation::Ge(..) => order.is_ge(),
+                            Relation::Lt(..) => order.is_lt(),
+                            Relation::Le(..) => order.is_le(),
+                            _ => unreachable!(),
+                        }
+                        .into());
+                    }
+
                     match self {
-                        Relation::Eq(_, _) => out1 == out2,
-                        Relation::Ne(_, _) => out1 != out2,
-                        Relation::Gt(_, _) => out1.as_view() > out2.as_view(),
-                        Relation::Ge(_, _) => out1.as_view() >= out2.as_view(),
-                        Relation::Lt(_, _) => out1.as_view() < out2.as_view(),
-                        Relation::Le(_, _) => out1.as_view() <= out2.as_view(),
+                        Relation::Eq(_, _) => equal_atoms(out1.as_view(), out2.as_view()),
+                        Relation::Ne(_, _) => !equal_atoms(out1.as_view(), out2.as_view()),
                         Relation::Contains(_, _) => out1.contains(out2.as_view()),
                         _ => unreachable!(),
                     }
@@ -4250,50 +4322,9 @@ impl Evaluate for Condition<PatternRestriction> {
             Condition::True => ConditionResult::True,
             Condition::False => ConditionResult::False,
             Condition::Yield(t) => match t {
-                PatternRestriction::Wildcard((v, r)) => {
-                    if let Some((_, value)) = state.stack.iter().find(|(k, _)| k == v) {
-                        match r {
-                            WildcardRestriction::IsAtomType(t) => match value {
-                                Match::Single(AtomView::Num(_)) => *t == AtomType::Num,
-                                Match::Single(AtomView::Var(_)) => *t == AtomType::Var,
-                                Match::Single(AtomView::Add(_)) => *t == AtomType::Add,
-                                Match::Single(AtomView::Mul(_)) => *t == AtomType::Mul,
-                                Match::Single(AtomView::Pow(_)) => *t == AtomType::Pow,
-                                Match::Single(AtomView::Fun(_)) => *t == AtomType::Fun,
-                                _ => false,
-                            },
-                            WildcardRestriction::IsLiteralWildcard(wc) => match value {
-                                Match::Single(AtomView::Var(v)) => wc == &v.get_symbol(),
-                                Match::FunctionName(s) => wc == s,
-                                _ => false,
-                            },
-                            WildcardRestriction::Length(min, max) => match value {
-                                Match::Single(_) | Match::FunctionName(_) => {
-                                    *min <= 1 && max.map(|m| m >= 1).unwrap_or(true)
-                                }
-                                Match::Multiple(_, slice) => {
-                                    *min <= slice.len()
-                                        && max.map(|m| m >= slice.len()).unwrap_or(true)
-                                }
-                            },
-                            WildcardRestriction::Filter(f) => f(value),
-                            WildcardRestriction::Cmp(v2, f) => {
-                                if let Some((_, value2)) = state.stack.iter().find(|(k, _)| k == v2)
-                                {
-                                    f(value, value2)
-                                } else {
-                                    return Ok(ConditionResult::Inconclusive);
-                                }
-                            }
-                            WildcardRestriction::NotGreedy => true,
-                            WildcardRestriction::HasTag(tag) => match value {
-                                Match::Single(AtomView::Var(v)) => v.get_symbol().has_tag(tag),
-                                Match::Single(AtomView::Fun(f)) => f.get_symbol().has_tag(tag),
-                                Match::FunctionName(s) => s.has_tag(tag),
-                                _ => false,
-                            },
-                        }
-                        .into()
+                PatternRestriction::Wildcard((v, _)) => {
+                    if let Some(value) = state.get(*v) {
+                        self.check_possible(*v, value, state)
                     } else {
                         ConditionResult::Inconclusive
                     }
@@ -5456,7 +5487,17 @@ impl<'a, 'b> AtomMatchIterator<'a, 'b> {
     }
 
     pub fn next(&mut self, match_stack: &mut WrappedMatchStack<'a, 'b>) -> Option<&[bool]> {
-        self.next_result(match_stack).ok()
+        // Only a complete, proven match may escape to replacement/tree callers.
+        // Nested matchers use next_result so unbound outer wildcards can still
+        // leave a restriction inconclusive while the match is being built.
+        loop {
+            self.next_result(match_stack).ok()?;
+            if match_stack.conditions.evaluate(&match_stack.stack).ok()
+                == Some(ConditionResult::True)
+            {
+                return Some(&self.used_flags);
+            }
+        }
     }
 
     pub fn next_result(
