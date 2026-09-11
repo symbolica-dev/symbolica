@@ -91,6 +91,8 @@ pub mod utils;
 /// assert_eq!(expr.derivative(x), parse!("2 + 2*x"));
 /// ```
 pub mod prelude {
+    pub use crate::rand::{Rng, RngCore, SeedableRng};
+
     pub use crate::{
         LicenseManager, create_hyperdual_from_components, create_hyperdual_single_derivative,
         function, get_symbol, hide_namespace, initialize, namespace, parse, parse_lit, symbol,
