@@ -24,7 +24,8 @@ use crate::domains::{
     SampleableRing, SelfRing, Set,
 };
 use crate::kernels::{
-    DensePolynomialExactDivisionRequest, DensePolynomialMulRequest, TotalDegreePolynomialMulRequest,
+    ChunkedDensePolynomialMulRequest, DensePolynomialExactDivisionRequest,
+    DensePolynomialMulRequest, PolynomialKernels, TotalDegreePolynomialMulRequest,
 };
 use crate::printer::{AtomPrinter, PrintOptions, PrintState};
 
@@ -36,6 +37,22 @@ use smallvec::{SmallVec, smallvec};
 const MAX_DENSE_MUL_BUFFER_SIZE: usize = 1 << 24;
 const MAX_DENSE_DIV_BUFFER_SIZE: usize = 1 << 20;
 const MAX_MIXED_RADIX_DENSE_TO_PAIR_PRODUCT_RATIO: usize = 64;
+const MIN_CHUNKED_DENSE_VARIABLES: usize = 5;
+const MIN_MIXED_RADIX_TO_SIMPLEX_RATIO: usize = 64;
+const MIN_UNCONDITIONAL_PREFERRED_TOTAL_DEGREE_DENSITY: usize = 8;
+const MIN_PREFERRED_TOTAL_DEGREE_WORKSPACE_RATIO: usize = 8;
+const MIN_TOTAL_DEGREE_PRODUCTS_PER_COEFFICIENT: usize = 32;
+const MIN_CHUNKED_DENSE_OUTPUT_LEN: usize = 1 << 18;
+const MAX_CHUNKED_DENSE_INNER_LEN: usize = 1 << 16;
+const MIN_CHUNKED_DENSE_OUTER_LEN: usize = 8;
+const MIN_CACHE_CHUNKED_DENSE_OUTPUT_LEN: usize = 1 << 10;
+const MAX_CACHE_CHUNKED_DENSE_INNER_LEN: usize = 256;
+const MAX_CACHE_CHUNKED_DENSE_OUTER_LEN: usize = 256;
+const MIN_CACHE_CHUNKED_PAIR_PRODUCTS_PER_CELL: usize = 2;
+const MAX_PACKED_ROW_MERGE_TERMS: usize = 64;
+const MAX_PACKED_ROW_MERGE_PAIR_PRODUCTS: usize = 4096;
+const MAX_PACKED_ROW_MERGE_FEW_ROWS: usize = 16;
+const MAX_PACKED_ROW_MERGE_FEW_ROW_PAIR_PRODUCTS: usize = 16384;
 thread_local! { static DENSE_MUL_BUFFER: Cell<Vec<u32>> = const { Cell::new(Vec::new()) }; }
 
 /// Return whether scanning a full mixed-radix coefficient box is bounded relative to the
@@ -51,6 +68,76 @@ fn mixed_radix_dense_work_is_bounded(
     output_len <= pair_products.saturating_mul(MAX_MIXED_RADIX_DENSE_TO_PAIR_PRODUCT_RATIO)
 }
 
+/// Return whether mixed-radix multiplication benefits from a reusable inner chunk.
+///
+/// The complete coefficient box must be large and mostly empty outside a much smaller total-degree
+/// simplex, while the carry-free inner chunk and outer convolution both remain bounded.
+#[inline]
+fn chunked_dense_mul_is_preferred(
+    variable_count: usize,
+    mixed_radix_len: usize,
+    pair_products: usize,
+    simplex_len: usize,
+    inner_len: usize,
+) -> bool {
+    variable_count >= MIN_CHUNKED_DENSE_VARIABLES
+        && mixed_radix_len >= MIN_CHUNKED_DENSE_OUTPUT_LEN
+        && mixed_radix_len > pair_products
+        && inner_len > 0
+        && inner_len <= MAX_CHUNKED_DENSE_INNER_LEN
+        && mixed_radix_len.is_multiple_of(inner_len)
+        && mixed_radix_len / inner_len >= MIN_CHUNKED_DENSE_OUTER_LEN
+        && simplex_len
+            .checked_mul(MIN_MIXED_RADIX_TO_SIMPLEX_RATIO)
+            .is_some_and(|minimum| mixed_radix_len >= minimum)
+}
+
+/// Return whether dense multiplication should reuse a small inner coefficient chunk.
+///
+/// This route applies when at least three active variables create several outer rows, the inner
+/// accumulator fits in a few KiB, and the coefficient products are dense enough to amortize row
+/// grouping. The coefficient kernel performs a second exact check on the number of cells scanned.
+#[inline]
+fn cache_sized_chunked_dense_mul_is_preferred(
+    active_variable_count: usize,
+    mixed_radix_len: usize,
+    pair_products: usize,
+    inner_len: usize,
+) -> bool {
+    let outer_len = mixed_radix_len.checked_div(inner_len).unwrap_or(0);
+    let outer_pair_probes = outer_len
+        .checked_mul(outer_len.saturating_add(1))
+        .map(|product| product / 2);
+    active_variable_count >= 3
+        && mixed_radix_len >= MIN_CACHE_CHUNKED_DENSE_OUTPUT_LEN
+        && inner_len > 0
+        && inner_len <= MAX_CACHE_CHUNKED_DENSE_INNER_LEN
+        && mixed_radix_len.is_multiple_of(inner_len)
+        && (MIN_CHUNKED_DENSE_OUTER_LEN..=MAX_CACHE_CHUNKED_DENSE_OUTER_LEN).contains(&outer_len)
+        && outer_pair_probes
+            .and_then(|probes| probes.checked_mul(2))
+            .is_some_and(|probes| probes <= mixed_radix_len)
+        && mixed_radix_len
+            .checked_mul(MIN_CACHE_CHUNKED_PAIR_PRODUCTS_PER_CELL)
+            .is_some_and(|minimum| pair_products >= minimum)
+}
+
+/// Return whether a compact total-degree kernel saves enough workspace to precede mixed-radix
+/// dense multiplication.
+#[inline]
+fn total_degree_kernel_precedes_mixed_radix(
+    mixed_radix_len: usize,
+    simplex_len: usize,
+    minimum_workspace_ratio: usize,
+) -> bool {
+    if minimum_workspace_ratio == 0 {
+        return false;
+    }
+    simplex_len
+        .checked_mul(minimum_workspace_ratio)
+        .is_some_and(|minimum| mixed_radix_len >= minimum)
+}
+
 /// Return whether a multivariate dense multiplication can use a bounded coefficient box.
 /// Sparse product checks use the same condition to avoid replacing this path with hashing.
 pub(super) fn mixed_radix_dense_mul_is_bounded(
@@ -60,6 +147,28 @@ pub(super) fn mixed_radix_dense_mul_is_bounded(
 ) -> bool {
     output_len <= MAX_DENSE_MUL_BUFFER_SIZE
         && mixed_radix_dense_work_is_bounded(output_len, left_terms, right_terms)
+}
+
+/// Return whether a packed sparse product is small enough to enumerate with a bounded row heap.
+#[inline]
+fn packed_row_merge_is_bounded(left_terms: usize, right_terms: usize) -> bool {
+    let row_count = left_terms.min(right_terms);
+    if row_count > MAX_PACKED_ROW_MERGE_TERMS {
+        return false;
+    }
+    let Some(pair_products) = left_terms.checked_mul(right_terms) else {
+        return false;
+    };
+    pair_products <= MAX_PACKED_ROW_MERGE_PAIR_PRODUCTS
+        || packed_row_merge_few_rows_is_bounded(row_count, pair_products)
+}
+
+/// Extend the row merge to larger products whose small row heap bounds its bookkeeping state.
+#[cold]
+#[inline(never)]
+fn packed_row_merge_few_rows_is_bounded(row_count: usize, pair_products: usize) -> bool {
+    row_count <= MAX_PACKED_ROW_MERGE_FEW_ROWS
+        && pair_products <= MAX_PACKED_ROW_MERGE_FEW_ROW_PAIR_PRODUCTS
 }
 
 struct TotalDegreeRankTable {
@@ -74,6 +183,103 @@ struct TotalDegreeRankTable {
     prefix_rank: Vec<u32>,
     prefix_remaining: Vec<u8>,
     suffix_rank: Vec<u32>,
+}
+
+/// Reconstruct exponent vectors from increasing compact total-degree ranks.
+///
+/// The first rank and every rank after a gap are unranked through the binomial table. Consecutive
+/// ranks advance the existing weak composition directly, which is the common output pattern for
+/// dense compact-simplex multiplication.
+struct TotalDegreeExponentCursor<'a> {
+    table: &'a TotalDegreeRankTable,
+    previous_rank: Option<usize>,
+    remaining_degree: usize,
+    exponents: Vec<usize>,
+}
+
+impl<'a> TotalDegreeExponentCursor<'a> {
+    fn new(table: &'a TotalDegreeRankTable) -> Self {
+        Self {
+            table,
+            previous_rank: None,
+            remaining_degree: 0,
+            exponents: vec![0; table.variable_count],
+        }
+    }
+
+    /// Decode one rank through the binomial counts and return the unused total degree.
+    fn unrank(&mut self, mut rank: usize) -> Option<usize> {
+        let total_degree = self.table.total_degree;
+        let variable_count = self.exponents.len();
+        if rank
+            >= self
+                .table
+                .choose(variable_count + total_degree, variable_count)
+        {
+            return None;
+        }
+
+        let mut available_degree = total_degree;
+        for (index, exponent) in self.exponents.iter_mut().enumerate() {
+            let remaining_variables = variable_count - index - 1;
+            let mut selected = false;
+            for value in 0..=available_degree {
+                let count = self.table.choose(
+                    remaining_variables + available_degree - value,
+                    remaining_variables,
+                );
+                if rank < count {
+                    *exponent = value;
+                    available_degree -= value;
+                    selected = true;
+                    break;
+                }
+                rank -= count;
+            }
+            if !selected {
+                return None;
+            }
+        }
+        (rank == 0).then_some(available_degree)
+    }
+
+    /// Advance to the next weak composition in the rank table's lexicographic order.
+    fn advance(&mut self) -> Option<usize> {
+        if self.remaining_degree > 0 {
+            let last = self.exponents.last_mut()?;
+            *last = last.checked_add(1)?;
+            return Some(self.remaining_degree - 1);
+        }
+
+        let carry_index = (1..self.exponents.len())
+            .rev()
+            .find(|&index| self.exponents[index] != 0)?;
+        let released_degree = self.exponents[carry_index];
+        self.exponents[carry_index] = 0;
+        self.exponents[carry_index - 1] = self.exponents[carry_index - 1].checked_add(1)?;
+        Some(released_degree - 1)
+    }
+
+    /// Position the cursor at a strictly increasing rank and return its exponent vector.
+    fn position(&mut self, rank: usize) -> Option<&[usize]> {
+        if self
+            .previous_rank
+            .is_some_and(|previous_rank| rank <= previous_rank)
+        {
+            return None;
+        }
+        self.remaining_degree = if self
+            .previous_rank
+            .and_then(|previous_rank| previous_rank.checked_add(1))
+            == Some(rank)
+        {
+            self.advance()?
+        } else {
+            self.unrank(rank)?
+        };
+        self.previous_rank = Some(rank);
+        Some(&self.exponents)
+    }
 }
 
 thread_local! {
@@ -1729,7 +1935,9 @@ impl<'a, F: Ring, E: Exponent> Mul<&'a MultivariatePolynomial<F, E, LexOrder>>
                 .mul_monomial(&rhs.coefficients[0], &rhs.exponents);
         }
 
-        if let Some(r) = self.mul_dense(rhs) {
+        if let Some(r) = self.try_preferred_total_degree_mul_before_mixed_radix(rhs) {
+            r
+        } else if let Some(r) = self.mul_dense(rhs) {
             r
         } else {
             self.heap_mul(rhs)
@@ -2106,6 +2314,160 @@ impl<F: Ring, E: Exponent, O: MonomialOrder> MultivariatePolynomial<F, E, O> {
         }
 
         poly
+    }
+}
+
+const MAX_LAST_VARIABLE_POWER_CACHE: usize = 100_000;
+
+/// Stores powers of one substitution value for repeated last-variable evaluations.
+///
+/// Generation stamps distinguish values that have not been computed for the current substitution,
+/// including powers whose value is zero.
+pub(crate) struct LastVariablePowerWorkspace<F: Ring> {
+    ring: F,
+    value: F::Element,
+    powers: Vec<F::Element>,
+    generations: Vec<u32>,
+    generation: u32,
+}
+
+impl<F: Ring> LastVariablePowerWorkspace<F> {
+    pub(crate) fn new(ring: &F, maximum_degree: usize) -> Self {
+        let cache_size = maximum_degree
+            .saturating_add(1)
+            .min(MAX_LAST_VARIABLE_POWER_CACHE);
+        Self {
+            ring: ring.clone(),
+            value: ring.zero(),
+            powers: vec![ring.zero(); cache_size],
+            generations: vec![0; cache_size],
+            generation: 0,
+        }
+    }
+
+    /// Start evaluating at `value` while retaining the allocated power buffers.
+    pub(crate) fn start_value(&mut self, value: &F::Element) {
+        self.value.clone_from(value);
+        self.generation = self.generation.wrapping_add(1);
+        if self.generation == 0 {
+            self.generations.fill(0);
+            self.generation = 1;
+        }
+    }
+
+    /// Return `value^exponent` when the exponent fits in the bounded power cache.
+    fn power(&mut self, exponent: usize) -> Option<&F::Element> {
+        if exponent >= self.powers.len() {
+            return None;
+        }
+        if self.generations[exponent] != self.generation {
+            self.powers[exponent] = self.ring.pow(&self.value, exponent as u64);
+            self.generations[exponent] = self.generation;
+        }
+        Some(&self.powers[exponent])
+    }
+
+    fn value(&self) -> &F::Element {
+        &self.value
+    }
+}
+
+/// Evaluates one fixed polynomial repeatedly in its last active variable.
+///
+/// Lexicographic row boundaries are recorded once. Each evaluation reuses the output allocation
+/// and emits one term for every row whose evaluated coefficient is nonzero.
+pub(crate) struct LastVariableEvaluationContext<'a, F: Ring, E: PositiveExponent> {
+    source: &'a MultivariatePolynomial<F, E, LexOrder>,
+    variable: usize,
+    rows: Vec<(usize, usize)>,
+    maximum_degree: usize,
+    output: MultivariatePolynomial<F, E, LexOrder>,
+}
+
+impl<'a, F: Ring, E: PositiveExponent> LastVariableEvaluationContext<'a, F, E> {
+    pub(crate) fn new(source: &'a MultivariatePolynomial<F, E, LexOrder>, variable: usize) -> Self {
+        assert!(variable < source.nvars());
+        debug_assert!((variable + 1..source.nvars()).all(|index| source.degree(index).is_zero()));
+
+        let mut rows = Vec::new();
+        let mut maximum_degree = 0;
+        let mut row_start = 0;
+        while row_start < source.nterms() {
+            let row_exponents = source.exponents(row_start);
+            maximum_degree = maximum_degree.max(row_exponents[variable].to_u32() as usize);
+            let mut row_end = row_start + 1;
+            while row_end < source.nterms()
+                && source.exponents(row_end)[..variable] == row_exponents[..variable]
+            {
+                maximum_degree =
+                    maximum_degree.max(source.exponents(row_end)[variable].to_u32() as usize);
+                row_end += 1;
+            }
+            rows.push((row_start, row_end));
+            row_start = row_end;
+        }
+
+        let output = source.zero_with_capacity(rows.len());
+        Self {
+            source,
+            variable,
+            rows,
+            maximum_degree,
+            output,
+        }
+    }
+
+    pub(crate) fn maximum_degree(&self) -> usize {
+        self.maximum_degree
+    }
+
+    /// Evaluate the source at the value most recently installed in `powers`.
+    pub(crate) fn evaluate(
+        &mut self,
+        powers: &mut LastVariablePowerWorkspace<F>,
+    ) -> &MultivariatePolynomial<F, E, LexOrder> {
+        debug_assert_eq!(self.source.ring(), &powers.ring);
+        debug_assert!(
+            powers.generation != 0,
+            "a substitution value must be installed before evaluation"
+        );
+        self.output.clear();
+        let ring = self.source.ring();
+        let nvars = self.source.nvars();
+
+        for &(row_start, row_end) in &self.rows {
+            let mut coefficient = ring.zero();
+            for term_index in row_start..row_end {
+                let exponent = self.source.exponents(term_index)[self.variable].to_u32() as usize;
+                if exponent == 0 {
+                    ring.add_assign(&mut coefficient, &self.source.coefficients[term_index]);
+                } else if let Some(power) = powers.power(exponent) {
+                    ring.add_mul_assign(
+                        &mut coefficient,
+                        &self.source.coefficients[term_index],
+                        power,
+                    );
+                } else {
+                    let power = ring.pow(powers.value(), exponent as u64);
+                    ring.add_mul_assign(
+                        &mut coefficient,
+                        &self.source.coefficients[term_index],
+                        &power,
+                    );
+                }
+            }
+
+            if !ring.is_zero(&coefficient) {
+                self.output.coefficients.push(coefficient);
+                self.output
+                    .exponents
+                    .extend_from_slice(self.source.exponents(row_start));
+                let output_exponent = self.output.exponents.len() - nvars + self.variable;
+                self.output.exponents[output_exponent] = E::zero();
+            }
+        }
+
+        &self.output
     }
 }
 
@@ -3263,7 +3625,8 @@ impl<F: Ring, E: Exponent> MultivariatePolynomial<F, E, LexOrder> {
             .map(|i| 1 + self.degree(i).to_i32() as usize + rhs.degree(i).to_i32() as usize)
             .collect::<Vec<_>>();
 
-        let univariate = max_degs_rev.iter().filter(|x| **x > 1).count() == 1;
+        let active_variable_count = max_degs_rev.iter().filter(|radix| **radix > 1).count();
+        let univariate = active_variable_count == 1;
         let use_generic_univariate_dense = max_degs_rev.iter().sum::<usize>() < 10000;
 
         let mut total: usize = 1;
@@ -3286,6 +3649,44 @@ impl<F: Ring, E: Exponent> MultivariatePolynomial<F, E, LexOrder> {
         if !univariate && !mixed_radix_dense_work_is_bounded(total, self.nterms(), rhs.nterms()) {
             return None;
         }
+
+        let pair_products = self.nterms().saturating_mul(rhs.nterms());
+        let last_active_radix = max_degs_rev.iter().rposition(|radix| *radix > 1);
+        let cache_sized_chunked_inner_len = last_active_radix.and_then(|last_active| {
+            let mut inner_len = 1usize;
+            let mut preferred = None;
+            for radix in &max_degs_rev[..last_active] {
+                inner_len = inner_len.checked_mul(*radix)?;
+                if cache_sized_chunked_dense_mul_is_preferred(
+                    active_variable_count,
+                    total,
+                    pair_products,
+                    inner_len,
+                ) {
+                    preferred = Some(inner_len);
+                }
+            }
+            preferred
+        });
+        let sparse_large_chunked_inner_len = if self.nvars() >= MIN_CHUNKED_DENSE_VARIABLES
+            && total > pair_products
+            && let Some(last_active) = last_active_radix
+            && let Some(inner_len) = max_degs_rev[..last_active]
+                .iter()
+                .try_fold(1usize, |product, radix| product.checked_mul(*radix))
+            && let Some(shape) = self.total_degree_dense_mul_shape(rhs)
+            && chunked_dense_mul_is_preferred(
+                self.nvars(),
+                total,
+                pair_products,
+                shape.1,
+                inner_len,
+            ) {
+            Some(inner_len)
+        } else {
+            None
+        };
+        let chunked_inner_len = cache_sized_chunked_inner_len.or(sparse_large_chunked_inner_len);
 
         #[inline(always)]
         fn to_uni_var<E: Exponent>(s: &[E], max_degs_rev: &[usize]) -> u32 {
@@ -3337,13 +3738,28 @@ impl<F: Ring, E: Exponent> MultivariatePolynomial<F, E, LexOrder> {
         }
 
         if let Some(coefficients) = self.ring().kernels().polynomial().and_then(|kernels| {
-            kernels.try_dense_mul(DensePolynomialMulRequest {
-                output_len: total,
-                left_coefficients: &self.coefficients,
-                left_indices: &uni_exp_self,
-                right_coefficients: &rhs.coefficients,
-                right_indices: &uni_exp_rhs,
-            })
+            chunked_inner_len
+                .and_then(|inner_len| {
+                    kernels.try_chunked_dense_mul(ChunkedDensePolynomialMulRequest {
+                        dense: DensePolynomialMulRequest {
+                            output_len: total,
+                            left_coefficients: &self.coefficients,
+                            left_indices: &uni_exp_self,
+                            right_coefficients: &rhs.coefficients,
+                            right_indices: &uni_exp_rhs,
+                        },
+                        inner_len,
+                    })
+                })
+                .or_else(|| {
+                    kernels.try_dense_mul(DensePolynomialMulRequest {
+                        output_len: total,
+                        left_coefficients: &self.coefficients,
+                        left_indices: &uni_exp_self,
+                        right_coefficients: &rhs.coefficients,
+                        right_indices: &uni_exp_rhs,
+                    })
+                })
         }) {
             let mut exp = vec![E::zero(); self.nvars()];
             let mut result = self.zero_with_capacity(coefficients.len());
@@ -3443,18 +3859,20 @@ impl<F: Ring, E: Exponent> MultivariatePolynomial<F, E, LexOrder> {
 
         // use a special routine if the exponents can be packed into a u64
         let mut pack_u8 = true;
-        if self.nvars() <= 8
-            && self.is_polynomial()
-            && rhs.is_polynomial()
+        let packed_u64_degrees = self.nvars() <= 8
             && degree_sum.iter().all(|deg| {
                 if *deg > 255 {
                     pack_u8 = false;
                 }
 
                 *deg <= 255 || self.nvars() <= 4 && *deg <= 65535
-            })
-        {
+            });
+        if packed_u64_degrees && self.is_polynomial() && rhs.is_polynomial() {
             return self.heap_mul_packed_exp(rhs, pack_u8);
+        }
+
+        if let Some(result) = self.try_packed_u16_wide_row_merge_mul(rhs, &degree_sum) {
+            return result;
         }
 
         let mut monomials = Vec::with_capacity(self.nterms() * self.nvars());
@@ -3467,9 +3885,14 @@ impl<F: Ring, E: Exponent> MultivariatePolynomial<F, E, LexOrder> {
 
         let monomials = UnsafeCell::new((self.nvars(), monomials));
 
-        /// In order to prevent allocations of the exponents, store them in a single
-        /// append-only vector and use a key to index into it. For performance,
-        /// we use an unsafe cell.
+        // A slot remains immutable while its key is in the heap/cache, or while
+        // the popped monomial is still needed for output. Duplicate candidates
+        // and fully consumed monomials release their slots for the next product.
+        let mut free_monomials = Vec::new();
+
+        /// Exponents live in a slot arena indexed by heap/cache keys. Mutation
+        /// through the unsafe cell is restricted to unreferenced slots and
+        /// appending storage; comparisons never overlap a mutation.
         #[derive(Clone, Copy)]
         struct Key<'a, E: Exponent> {
             index: usize,
@@ -3517,7 +3940,7 @@ impl<F: Ring, E: Exponent> MultivariatePolynomial<F, E, LexOrder> {
             }
         }
 
-        let mut res = self.zero_with_capacity(self.nterms().max(rhs.nterms()));
+        let mut res = self.zero_with_capacity(self.heap_mul_result_capacity(rhs));
 
         let mut cache: HashMap<_, Vec<(usize, usize)>> = HashMap::new();
         let mut q_cache: Vec<Vec<(usize, usize)>> = vec![];
@@ -3562,13 +3985,24 @@ impl<F: Ring, E: Exponent> MultivariatePolynomial<F, E, LexOrder> {
                 if i + 1 < self.nterms() && (j == 0 || merged_index[j - 1] > i + 1) {
                     let m = unsafe {
                         let b = &mut *monomials.get();
-                        let index = b.1.len();
-                        b.1.extend(
-                            self.exponents(i + 1)
-                                .iter()
-                                .zip(rhs.exponents(j))
-                                .map(|(e1, e2)| *e1 + *e2),
-                        );
+                        let index = if let Some(index) = free_monomials.pop() {
+                            for (target, (e1, e2)) in b.1[index..index + b.0]
+                                .iter_mut()
+                                .zip(self.exponents(i + 1).iter().zip(rhs.exponents(j)))
+                            {
+                                *target = *e1 + *e2;
+                            }
+                            index
+                        } else {
+                            let index = b.1.len();
+                            b.1.extend(
+                                self.exponents(i + 1)
+                                    .iter()
+                                    .zip(rhs.exponents(j))
+                                    .map(|(e1, e2)| *e1 + *e2),
+                            );
+                            index
+                        };
 
                         Key {
                             index,
@@ -3578,6 +4012,9 @@ impl<F: Ring, E: Exponent> MultivariatePolynomial<F, E, LexOrder> {
 
                     if let Some(e) = cache.get_mut(&m) {
                         e.push((i + 1, j));
+                        // The existing key owns its slot; this candidate was
+                        // never inserted and can be overwritten immediately.
+                        free_monomials.push(m.index);
                     } else {
                         h.push(Reverse(m)); // only add when new
                         if let Some(mut qq) = q_cache.pop() {
@@ -3594,13 +4031,24 @@ impl<F: Ring, E: Exponent> MultivariatePolynomial<F, E, LexOrder> {
                 if j + 1 < rhs.nterms() && !in_heap[j + 1] {
                     let m = unsafe {
                         let b = &mut *monomials.get();
-                        let index = b.1.len();
-                        b.1.extend(
-                            self.exponents(i)
-                                .iter()
-                                .zip(rhs.exponents(j + 1))
-                                .map(|(e1, e2)| *e1 + *e2),
-                        );
+                        let index = if let Some(index) = free_monomials.pop() {
+                            for (target, (e1, e2)) in b.1[index..index + b.0]
+                                .iter_mut()
+                                .zip(self.exponents(i).iter().zip(rhs.exponents(j + 1)))
+                            {
+                                *target = *e1 + *e2;
+                            }
+                            index
+                        } else {
+                            let index = b.1.len();
+                            b.1.extend(
+                                self.exponents(i)
+                                    .iter()
+                                    .zip(rhs.exponents(j + 1))
+                                    .map(|(e1, e2)| *e1 + *e2),
+                            );
+                            index
+                        };
 
                         Key {
                             index,
@@ -3610,6 +4058,9 @@ impl<F: Ring, E: Exponent> MultivariatePolynomial<F, E, LexOrder> {
 
                     if let Some(e) = cache.get_mut(&m) {
                         e.push((i, j + 1));
+                        // The existing key owns its slot; this candidate was
+                        // never inserted and can be overwritten immediately.
+                        free_monomials.push(m.index);
                     } else {
                         h.push(Reverse(m)); // only add when new
 
@@ -3636,9 +4087,31 @@ impl<F: Ring, E: Exponent> MultivariatePolynomial<F, E, LexOrder> {
                         .extend_from_slice(&b.1[cur_mon.0.index..cur_mon.0.index + b.0]);
                 }
             }
+            // cur_mon has left both collections, and its output exponents
+            // have now been copied (or its coefficient canceled to zero).
+            free_monomials.push(cur_mon.0.index);
         }
 
         res
+    }
+
+    /// Estimate a bounded result capacity for heap multiplication.
+    ///
+    /// Every coefficient pair contributes to at most one output term. Reserve that upper bound
+    /// when the coefficient and exponent buffers together fit in one mebibyte; larger products
+    /// retain the input-sized reservation and grow according to the number of terms encountered.
+    fn heap_mul_result_capacity(&self, other: &MultivariatePolynomial<F, E, LexOrder>) -> usize {
+        const MAX_PREALLOCATED_BYTES: usize = 1 << 20;
+
+        let input_capacity = self.nterms().max(other.nterms());
+        let bytes_per_term = mem::size_of::<F::Element>()
+            .saturating_add(self.nvars().saturating_mul(mem::size_of::<E>()))
+            .max(1);
+        let maximum_terms = MAX_PREALLOCATED_BYTES / bytes_per_term;
+        self.nterms()
+            .checked_mul(other.nterms())
+            .filter(|pair_products| *pair_products <= maximum_terms)
+            .unwrap_or(input_capacity)
     }
 
     /// Heap multiplication, but with the exponents packed into a `u64`.
@@ -3653,7 +4126,11 @@ impl<F: Ring, E: Exponent> MultivariatePolynomial<F, E, LexOrder> {
             return result;
         }
 
-        let mut res = self.zero_with_capacity(self.nterms().max(other.nterms()));
+        if pack_u8 && let Some(result) = self.try_packed_u8_row_merge_mul(other) {
+            return result;
+        }
+
+        let mut res = self.zero_with_capacity(self.heap_mul_result_capacity(other));
 
         let pack_a: Vec<_> = if pack_u8 {
             self.exponents_iter().map(|c| E::pack(c)).collect()
@@ -3755,12 +4232,256 @@ impl<F: Ring, E: Exponent> MultivariatePolynomial<F, E, LexOrder> {
         res
     }
 
-    /// Return the total degree and coefficient count for a bounded dense
-    /// total-degree multiplication, including the packed-exponent limits.
-    fn total_degree_dense_mul_shape(
+    /// Multiply a small packed-`u8` sparse product by merging its sorted coefficient-product rows.
+    ///
+    /// A row fixes one term of the smaller polynomial and advances through the ordered terms of the
+    /// larger polynomial. The heap exposes the next monomial from every row, so equal monomials can
+    /// be accumulated before the next result term is emitted.
+    #[inline(always)]
+    fn try_packed_u8_row_merge_mul(
         &self,
         other: &MultivariatePolynomial<F, E, LexOrder>,
+    ) -> Option<MultivariatePolynomial<F, E, LexOrder>> {
+        if !packed_row_merge_is_bounded(self.nterms(), other.nterms()) {
+            return None;
+        }
+
+        Some(self.packed_u8_row_merge_mul_bounded(other))
+    }
+
+    /// Multiply a validated packed-`u8` product by merging its coefficient-product rows.
+    #[inline(never)]
+    fn packed_u8_row_merge_mul_bounded(
+        &self,
+        other: &MultivariatePolynomial<F, E, LexOrder>,
+    ) -> MultivariatePolynomial<F, E, LexOrder> {
+        debug_assert!(packed_row_merge_is_bounded(self.nterms(), other.nterms()));
+
+        debug_assert_eq!(self.nvars(), other.nvars());
+        debug_assert!(self.is_polynomial() && other.is_polynomial());
+        debug_assert!((0..self.nvars()).all(|variable| {
+            self.degree(variable).to_i32() as i64 + other.degree(variable).to_i32() as i64
+                <= u8::MAX as i64
+        }));
+
+        let packed_self: Vec<_> = self.exponents_iter().map(E::pack).collect();
+        let packed_other: Vec<_> = other.exponents_iter().map(E::pack).collect();
+        let (rows, row_monomials, columns, column_monomials) = if self.nterms() <= other.nterms() {
+            (self, packed_self, other, packed_other)
+        } else {
+            (other, packed_other, self, packed_self)
+        };
+
+        // Each entry is the next coefficient product in one sorted row.
+        let mut heap = BinaryHeap::with_capacity(rows.nterms());
+        for row in 0..rows.nterms() {
+            heap.push(Reverse((row_monomials[row] + column_monomials[0], row, 0)));
+        }
+
+        #[inline(always)]
+        fn take_head_and_advance(
+            heap: &mut BinaryHeap<Reverse<(u64, usize, usize)>>,
+            row_monomials: &[u64],
+            column_monomials: &[u64],
+        ) -> Option<(u64, usize, usize)> {
+            let mut head = heap.peek_mut()?;
+            let Reverse((monomial, row, column)) = *head;
+            let next_column = column + 1;
+            if next_column == column_monomials.len() {
+                std::collections::binary_heap::PeekMut::pop(head);
+                return Some((monomial, row, column));
+            }
+
+            let next_monomial = row_monomials[row] + column_monomials[next_column];
+            debug_assert!(next_monomial > monomial);
+            *head = Reverse((next_monomial, row, next_column));
+            Some((monomial, row, column))
+        }
+
+        let mut result = self.zero_with_capacity(self.heap_mul_result_capacity(other));
+        while let Some((monomial, row, column)) =
+            take_head_and_advance(&mut heap, &row_monomials, &column_monomials)
+        {
+            let mut coefficient = self
+                .ring()
+                .mul(&rows.coefficients[row], &columns.coefficients[column]);
+
+            while heap
+                .peek()
+                .is_some_and(|Reverse((next_monomial, _, _))| *next_monomial == monomial)
+            {
+                let (_, row, column) =
+                    take_head_and_advance(&mut heap, &row_monomials, &column_monomials).unwrap();
+                self.ring().add_mul_assign(
+                    &mut coefficient,
+                    &rows.coefficients[row],
+                    &columns.coefficients[column],
+                );
+            }
+
+            if !self.ring().is_zero(&coefficient) {
+                result.coefficients.push(coefficient);
+                let exponent_start = result.exponents.len();
+                result
+                    .exponents
+                    .resize(exponent_start + self.nvars(), E::zero());
+                E::unpack(
+                    monomial,
+                    &mut result.exponents[exponent_start..exponent_start + self.nvars()],
+                );
+            }
+        }
+
+        result
+    }
+
+    /// Multiply a small five-to-eight-variable product with two packed `u16` exponent words.
+    ///
+    /// Each term is represented by a `u128` whose high and low halves contain four exponents.
+    /// The row heap then merges the sorted products without allocating or hashing exponent
+    /// vectors for every coefficient pair.
+    #[inline(always)]
+    fn try_packed_u16_wide_row_merge_mul(
+        &self,
+        other: &MultivariatePolynomial<F, E, LexOrder>,
+        degree_sum: &[i64],
+    ) -> Option<MultivariatePolynomial<F, E, LexOrder>> {
+        if self.nvars() != other.nvars()
+            || !(5..=8).contains(&self.nvars())
+            || degree_sum.len() != self.nvars()
+            || degree_sum.iter().any(|degree| {
+                !(0..=u16::MAX as i64).contains(degree) || E::try_from(*degree as i32).is_err()
+            })
+            || !packed_row_merge_is_bounded(self.nterms(), other.nterms())
+            || !self.is_polynomial()
+            || !other.is_polynomial()
+        {
+            return None;
+        }
+
+        Some(self.packed_u16_wide_row_merge_mul_bounded(other))
+    }
+
+    /// Merge a validated five-to-eight-variable product using packed `u16` exponent rows.
+    #[inline(never)]
+    fn packed_u16_wide_row_merge_mul_bounded(
+        &self,
+        other: &MultivariatePolynomial<F, E, LexOrder>,
+    ) -> MultivariatePolynomial<F, E, LexOrder> {
+        debug_assert_eq!(self.nvars(), other.nvars());
+        debug_assert!((5..=8).contains(&self.nvars()));
+        debug_assert!(self.is_polynomial() && other.is_polynomial());
+        debug_assert!(packed_row_merge_is_bounded(self.nterms(), other.nterms()));
+        debug_assert!((0..self.nvars()).all(|variable| {
+            self.degree(variable).to_i32() as i64 + other.degree(variable).to_i32() as i64
+                <= u16::MAX as i64
+        }));
+
+        #[inline(always)]
+        fn pack<E: Exponent>(exponents: &[E]) -> u128 {
+            debug_assert!((5..=8).contains(&exponents.len()));
+            ((E::pack_u16(&exponents[..4]) as u128) << 64) | E::pack_u16(&exponents[4..]) as u128
+        }
+
+        #[inline(always)]
+        fn add(left: u128, right: u128) -> u128 {
+            let high = (left >> 64) as u64 + (right >> 64) as u64;
+            let low = left as u64 + right as u64;
+            ((high as u128) << 64) | low as u128
+        }
+
+        #[inline(always)]
+        fn unpack<E: Exponent>(packed: u128, exponents: &mut [E]) {
+            debug_assert!((5..=8).contains(&exponents.len()));
+            E::unpack_u16((packed >> 64) as u64, &mut exponents[..4]);
+            E::unpack_u16(packed as u64, &mut exponents[4..]);
+        }
+
+        let packed_self: Vec<_> = self.exponents_iter().map(pack).collect();
+        let packed_other: Vec<_> = other.exponents_iter().map(pack).collect();
+        let (rows, row_monomials, columns, column_monomials) = if self.nterms() <= other.nterms() {
+            (self, packed_self, other, packed_other)
+        } else {
+            (other, packed_other, self, packed_self)
+        };
+
+        // Each entry is the next coefficient product in one sorted row.
+        let mut heap = BinaryHeap::with_capacity(rows.nterms());
+        for row in 0..rows.nterms() {
+            heap.push(Reverse((
+                add(row_monomials[row], column_monomials[0]),
+                row,
+                0,
+            )));
+        }
+
+        #[inline(always)]
+        fn take_head_and_advance(
+            heap: &mut BinaryHeap<Reverse<(u128, usize, usize)>>,
+            row_monomials: &[u128],
+            column_monomials: &[u128],
+        ) -> Option<(u128, usize, usize)> {
+            let mut head = heap.peek_mut()?;
+            let Reverse((monomial, row, column)) = *head;
+            let next_column = column + 1;
+            if next_column == column_monomials.len() {
+                std::collections::binary_heap::PeekMut::pop(head);
+                return Some((monomial, row, column));
+            }
+
+            let next_monomial = add(row_monomials[row], column_monomials[next_column]);
+            debug_assert!(next_monomial > monomial);
+            *head = Reverse((next_monomial, row, next_column));
+            Some((monomial, row, column))
+        }
+
+        let mut result = self.zero_with_capacity(self.heap_mul_result_capacity(other));
+        while let Some((monomial, row, column)) =
+            take_head_and_advance(&mut heap, &row_monomials, &column_monomials)
+        {
+            let mut coefficient = self
+                .ring()
+                .mul(&rows.coefficients[row], &columns.coefficients[column]);
+
+            while heap
+                .peek()
+                .is_some_and(|Reverse((next_monomial, _, _))| *next_monomial == monomial)
+            {
+                let (_, row, column) =
+                    take_head_and_advance(&mut heap, &row_monomials, &column_monomials).unwrap();
+                self.ring().add_mul_assign(
+                    &mut coefficient,
+                    &rows.coefficients[row],
+                    &columns.coefficients[column],
+                );
+            }
+
+            if !self.ring().is_zero(&coefficient) {
+                result.coefficients.push(coefficient);
+                let exponent_start = result.exponents.len();
+                result
+                    .exponents
+                    .resize(exponent_start + self.nvars(), E::zero());
+                unpack(
+                    monomial,
+                    &mut result.exponents[exponent_start..exponent_start + self.nvars()],
+                );
+            }
+        }
+
+        result
+    }
+
+    /// Return the total degree and coefficient count for a bounded dense total-degree
+    /// multiplication at the requested minimum product density.
+    fn total_degree_dense_mul_shape_with_density(
+        &self,
+        other: &MultivariatePolynomial<F, E, LexOrder>,
+        minimum_products_per_coefficient: usize,
     ) -> Option<(usize, usize)> {
+        if minimum_products_per_coefficient == 0 {
+            return None;
+        }
         let variable_count = self.nvars();
         if variable_count != other.nvars()
             || !(2..=8).contains(&variable_count)
@@ -3805,12 +4526,101 @@ impl<F: Ring, E: Exponent> MultivariatePolynomial<F, E, LexOrder> {
         let coefficient_count = checked_binomial(total_degree + variable_count, variable_count)?;
         let product_count = self.nterms().checked_mul(other.nterms())?;
         if coefficient_count > MAX_DENSE_DIV_BUFFER_SIZE
-            || product_count < coefficient_count.saturating_mul(32)
+            || product_count < coefficient_count.saturating_mul(minimum_products_per_coefficient)
         {
             return None;
         }
 
         Some((total_degree, coefficient_count))
+    }
+
+    /// Return the shape selected by the ordinary compact total-degree multiplication heuristic.
+    fn total_degree_dense_mul_shape(
+        &self,
+        other: &MultivariatePolynomial<F, E, LexOrder>,
+    ) -> Option<(usize, usize)> {
+        self.total_degree_dense_mul_shape_with_density(
+            other,
+            MIN_TOTAL_DEGREE_PRODUCTS_PER_COEFFICIENT,
+        )
+    }
+
+    /// Try a compact coefficient-domain kernel before mixed-radix dense multiplication when the
+    /// ordinary total-degree density threshold is not reached but the compact workspace is much
+    /// smaller than the full coefficient box.
+    #[inline(always)]
+    fn try_preferred_total_degree_mul_before_mixed_radix(
+        &self,
+        other: &MultivariatePolynomial<F, E, LexOrder>,
+    ) -> Option<MultivariatePolynomial<F, E, LexOrder>> {
+        // With fewer than four variables, the mixed-radix box cannot be eight times larger than
+        // its containing total-degree simplex, so this route cannot meet its workspace bound.
+        if !(4..=8).contains(&self.nvars()) {
+            return None;
+        }
+        let kernels = self.ring().kernels();
+        let minimum_density = kernels.preferred_total_degree_mul_density()?;
+        let polynomial_kernel = kernels.polynomial()?;
+        let (total_degree, simplex_len) =
+            self.total_degree_dense_mul_shape_with_density(other, minimum_density)?;
+        let product_count = self.nterms().checked_mul(other.nterms())?;
+        if product_count >= simplex_len.saturating_mul(MIN_TOTAL_DEGREE_PRODUCTS_PER_COEFFICIENT) {
+            return None;
+        }
+
+        // Every coordinate radix is at most one plus the combined total degree. If even that
+        // upper-bound box is too small relative to the simplex, the exact mixed-radix shape cannot
+        // justify building compact rank tables. This avoids a second pass over all terms for
+        // balanced low-dimensional products.
+        let mixed_radix_upper_bound = total_degree
+            .checked_add(1)?
+            .checked_pow(u32::try_from(self.nvars()).ok()?)?;
+        if !total_degree_kernel_precedes_mixed_radix(
+            mixed_radix_upper_bound,
+            simplex_len,
+            MIN_PREFERRED_TOTAL_DEGREE_WORKSPACE_RATIO,
+        ) {
+            return None;
+        }
+
+        let mixed_radix_len = (0..self.nvars()).try_fold(1usize, |product, variable| {
+            let radix = 1usize
+                .checked_add(self.degree(variable).to_i32() as usize)?
+                .checked_add(other.degree(variable).to_i32() as usize)?;
+            product.checked_mul(radix)
+        })?;
+        if !total_degree_kernel_precedes_mixed_radix(
+            mixed_radix_len,
+            simplex_len,
+            MIN_PREFERRED_TOTAL_DEGREE_WORKSPACE_RATIO,
+        ) {
+            return None;
+        }
+        let minimum_workspace_ratio = if product_count
+            >= simplex_len.saturating_mul(MIN_UNCONDITIONAL_PREFERRED_TOTAL_DEGREE_DENSITY)
+        {
+            MIN_PREFERRED_TOTAL_DEGREE_WORKSPACE_RATIO
+        } else {
+            polynomial_kernel.preferred_total_degree_mul_workspace_ratio(
+                &self.coefficients,
+                &other.coefficients,
+                simplex_len,
+            )?
+        };
+        if !total_degree_kernel_precedes_mixed_radix(
+            mixed_radix_len,
+            simplex_len,
+            minimum_workspace_ratio,
+        ) {
+            return None;
+        }
+
+        self.try_total_degree_dense_mul_with_density_and_kernel(
+            other,
+            minimum_density,
+            true,
+            Some(polynomial_kernel),
+        )
     }
 
     /// Return whether multiplication can use the bounded total-degree simplex workspace.
@@ -3830,8 +4640,43 @@ impl<F: Ring, E: Exponent> MultivariatePolynomial<F, E, LexOrder> {
         &self,
         other: &MultivariatePolynomial<F, E, LexOrder>,
     ) -> Option<MultivariatePolynomial<F, E, LexOrder>> {
+        self.try_total_degree_dense_mul_with_density(
+            other,
+            MIN_TOTAL_DEGREE_PRODUCTS_PER_COEFFICIENT,
+            false,
+        )
+    }
+
+    /// Multiply on a compact total-degree simplex at a specified product density.
+    ///
+    /// When `specialized_only` is true, this builds a result only when a coefficient-domain kernel
+    /// accepts the request. Otherwise it performs the generic ring-operation fallback as well.
+    fn try_total_degree_dense_mul_with_density(
+        &self,
+        other: &MultivariatePolynomial<F, E, LexOrder>,
+        minimum_products_per_coefficient: usize,
+        specialized_only: bool,
+    ) -> Option<MultivariatePolynomial<F, E, LexOrder>> {
+        let kernels = self.ring().kernels();
+        self.try_total_degree_dense_mul_with_density_and_kernel(
+            other,
+            minimum_products_per_coefficient,
+            specialized_only,
+            kernels.polynomial(),
+        )
+    }
+
+    /// Multiply on a compact total-degree simplex using the supplied coefficient-domain kernel.
+    fn try_total_degree_dense_mul_with_density_and_kernel(
+        &self,
+        other: &MultivariatePolynomial<F, E, LexOrder>,
+        minimum_products_per_coefficient: usize,
+        specialized_only: bool,
+        polynomial_kernel: Option<&dyn PolynomialKernels<F::Element>>,
+    ) -> Option<MultivariatePolynomial<F, E, LexOrder>> {
         let variable_count = self.nvars();
-        let (total_degree, coefficient_count) = self.total_degree_dense_mul_shape(other)?;
+        let (total_degree, coefficient_count) = self
+            .total_degree_dense_mul_shape_with_density(other, minimum_products_per_coefficient)?;
 
         let rank_table = total_degree_rank_table(variable_count, total_degree)?;
         let radix = total_degree + 1;
@@ -3862,8 +4707,7 @@ impl<F: Ring, E: Exponent> MultivariatePolynomial<F, E, LexOrder> {
         let left_codes = encode_terms(self);
         let right_codes = encode_terms(other);
 
-        let mut coefficients = vec![self.ring().zero(); coefficient_count];
-        let specialized = self.ring().kernels().polynomial().and_then(|kernels| {
+        let specialized = polynomial_kernel.and_then(|kernels| {
             kernels.try_total_degree_mul(TotalDegreePolynomialMulRequest {
                 output_len: coefficient_count,
                 left_coefficients: &self.coefficients,
@@ -3877,76 +4721,68 @@ impl<F: Ring, E: Exponent> MultivariatePolynomial<F, E, LexOrder> {
             })
         });
 
+        let mut exponent_cursor = TotalDegreeExponentCursor::new(&rank_table);
+
         if let Some(specialized) = specialized {
+            let mut result = self.zero_with_capacity(specialized.len());
             for (rank, coefficient) in specialized {
-                *coefficients.get_mut(rank as usize)? = coefficient;
+                let rank = rank as usize;
+                if rank >= coefficient_count || self.ring().is_zero(&coefficient) {
+                    return None;
+                }
+                let exponents = exponent_cursor.position(rank)?;
+                result.coefficients.push(coefficient);
+                result.exponents.extend(
+                    exponents
+                        .iter()
+                        .map(|&exponent| E::from_i32(exponent as i32)),
+                );
             }
-        } else {
-            for (left_coefficient, &(left_prefix, left_suffix)) in
-                self.coefficients.iter().zip(&left_codes)
+            return Some(result);
+        }
+        if specialized_only {
+            return None;
+        }
+
+        let mut coefficients = vec![self.ring().zero(); coefficient_count];
+        for (left_coefficient, &(left_prefix, left_suffix)) in
+            self.coefficients.iter().zip(&left_codes)
+        {
+            for (right_coefficient, &(right_prefix, right_suffix)) in
+                other.coefficients.iter().zip(&right_codes)
             {
-                for (right_coefficient, &(right_prefix, right_suffix)) in
-                    other.coefficients.iter().zip(&right_codes)
-                {
-                    let prefix = left_prefix + right_prefix;
-                    let suffix = left_suffix + right_suffix;
-                    let remaining_degree =
-                        unsafe { *rank_table.prefix_remaining.get_unchecked(prefix) } as usize;
-                    debug_assert_ne!(remaining_degree, u8::MAX as usize);
-                    let rank = unsafe { *rank_table.prefix_rank.get_unchecked(prefix) } as usize
-                        + unsafe {
-                            *rank_table
-                                .suffix_rank
-                                .get_unchecked(remaining_degree * suffix_code_count + suffix)
-                        } as usize;
-                    debug_assert!(rank < coefficient_count);
-                    self.ring().add_mul_assign(
-                        unsafe { coefficients.get_unchecked_mut(rank) },
-                        left_coefficient,
-                        right_coefficient,
-                    );
-                }
+                let prefix = left_prefix + right_prefix;
+                let suffix = left_suffix + right_suffix;
+                let remaining_degree =
+                    unsafe { *rank_table.prefix_remaining.get_unchecked(prefix) } as usize;
+                debug_assert_ne!(remaining_degree, u8::MAX as usize);
+                let rank = unsafe { *rank_table.prefix_rank.get_unchecked(prefix) } as usize
+                    + unsafe {
+                        *rank_table
+                            .suffix_rank
+                            .get_unchecked(remaining_degree * suffix_code_count + suffix)
+                    } as usize;
+                debug_assert!(rank < coefficient_count);
+                self.ring().add_mul_assign(
+                    unsafe { coefficients.get_unchecked_mut(rank) },
+                    left_coefficient,
+                    right_coefficient,
+                );
             }
         }
 
-        fn unrank(
-            mut rank: usize,
-            total_degree: usize,
-            exponents: &mut [usize],
-            choose: impl Fn(usize, usize) -> usize,
-        ) {
-            let mut available_degree = total_degree;
-            let variable_count = exponents.len();
-            for (index, exponent) in exponents.iter_mut().enumerate() {
-                let remaining_variables = variable_count - index - 1;
-                for value in 0..=available_degree {
-                    let count = choose(
-                        remaining_variables + available_degree - value,
-                        remaining_variables,
-                    );
-                    if rank < count {
-                        *exponent = value;
-                        available_degree -= value;
-                        break;
-                    }
-                    rank -= count;
-                }
-            }
-            debug_assert_eq!(rank, 0);
-        }
-
-        let choose = |n: usize, k: usize| rank_table.choose(n, k);
-        let mut digits = vec![0usize; variable_count];
         let mut result = self.zero_with_capacity(coefficient_count);
         for (rank, coefficient) in coefficients.into_iter().enumerate() {
             if self.ring().is_zero(&coefficient) {
                 continue;
             }
-            unrank(rank, total_degree, &mut digits, choose);
+            let exponents = exponent_cursor.position(rank)?;
             result.coefficients.push(coefficient);
-            result
-                .exponents
-                .extend(digits.iter().map(|&exponent| E::from_i32(exponent as i32)));
+            result.exponents.extend(
+                exponents
+                    .iter()
+                    .map(|&exponent| E::from_i32(exponent as i32)),
+            );
         }
         Some(result)
     }
@@ -6175,6 +7011,8 @@ mod test {
 
     use rand::{SeedableRng, rngs::StdRng};
 
+    #[cfg(feature = "integer-gmp")]
+    use crate::domains::integer::MultiPrecisionInteger;
     use crate::{
         atom::AtomCore,
         domains::{
@@ -6190,9 +7028,50 @@ mod test {
     };
 
     use super::{
-        IntegerPolynomialCrtContext, MultivariatePolynomial, PolynomialRing,
-        PolynomialSamplingPolicy, mixed_radix_dense_work_is_bounded,
+        IntegerPolynomialCrtContext, LastVariableEvaluationContext, LastVariablePowerWorkspace,
+        MultivariatePolynomial, PolynomialRing, PolynomialSamplingPolicy,
+        TotalDegreeExponentCursor, cache_sized_chunked_dense_mul_is_preferred,
+        chunked_dense_mul_is_preferred, mixed_radix_dense_mul_is_bounded,
+        mixed_radix_dense_work_is_bounded, packed_row_merge_is_bounded,
+        total_degree_kernel_precedes_mixed_radix, total_degree_rank_table,
     };
+
+    #[test]
+    fn total_degree_exponent_cursor_matches_fresh_unranking() {
+        for variable_count in 1..=8 {
+            for total_degree in 0..=6 {
+                let table = total_degree_rank_table(variable_count, total_degree).unwrap();
+                let coefficient_count = table.choose(variable_count + total_degree, variable_count);
+                let mut cursor = TotalDegreeExponentCursor::new(&table);
+                for rank in 0..coefficient_count {
+                    let actual = cursor.position(rank).unwrap().to_vec();
+                    let mut fresh = TotalDegreeExponentCursor::new(&table);
+                    assert_eq!(actual, fresh.position(rank).unwrap());
+                }
+                assert!(cursor.position(coefficient_count).is_none());
+            }
+        }
+
+        let table = total_degree_rank_table(5, 6).unwrap();
+        let coefficient_count = table.choose(11, 5);
+        let ranks = [
+            0,
+            1,
+            7,
+            8,
+            41,
+            42,
+            coefficient_count - 2,
+            coefficient_count - 1,
+        ];
+        let mut cursor = TotalDegreeExponentCursor::new(&table);
+        for rank in ranks {
+            let actual = cursor.position(rank).unwrap().to_vec();
+            let mut fresh = TotalDegreeExponentCursor::new(&table);
+            assert_eq!(actual, fresh.position(rank).unwrap());
+        }
+        assert!(cursor.position(coefficient_count - 1).is_none());
+    }
 
     #[test]
     fn replace_univariate_horner_matches_dense_evaluation() {
@@ -6577,6 +7456,357 @@ mod test {
         assert_eq!(b.to_expression(), r)
     }
 
+    fn diagonal_integer_polynomial(
+        terms: &[(i64, u8)],
+        variables: Arc<Vec<crate::poly::PolyVariable>>,
+    ) -> MultivariatePolynomial<IntegerRing, u8> {
+        let mut polynomial = MultivariatePolynomial::new(&Z, Some(terms.len()), variables);
+        for (coefficient, degree) in terms {
+            polynomial.append_monomial((*coefficient).into(), &[*degree; 8]);
+        }
+        polynomial
+    }
+
+    fn reference_integer_product<E: Exponent>(
+        left: &MultivariatePolynomial<IntegerRing, E>,
+        right: &MultivariatePolynomial<IntegerRing, E>,
+    ) -> MultivariatePolynomial<IntegerRing, E> {
+        let mut terms = BTreeMap::<Vec<E>, Integer>::new();
+        for left_term in left {
+            for right_term in right {
+                let exponents = left_term
+                    .exponents
+                    .iter()
+                    .zip(right_term.exponents)
+                    .map(|(left, right)| *left + *right)
+                    .collect::<Vec<_>>();
+                let coefficient = left_term.coefficient * right_term.coefficient;
+                terms
+                    .entry(exponents)
+                    .and_modify(|current| *current += &coefficient)
+                    .or_insert(coefficient);
+            }
+        }
+
+        let mut result = left.zero_with_capacity(terms.len());
+        for (exponents, coefficient) in terms {
+            if !coefficient.is_zero() {
+                result.append_monomial(coefficient, &exponents);
+            }
+        }
+        result
+    }
+
+    fn multiplication_degree_sums<F: Ring, E: Exponent>(
+        left: &MultivariatePolynomial<F, E>,
+        right: &MultivariatePolynomial<F, E>,
+    ) -> Vec<i64> {
+        (0..left.nvars())
+            .map(|variable| {
+                left.degree(variable).to_i32() as i64 + right.degree(variable).to_i32() as i64
+            })
+            .collect()
+    }
+
+    fn packed_row_merge_variables() -> Arc<Vec<crate::poly::PolyVariable>> {
+        Arc::new(vec![
+            symbol!("x1").into(),
+            symbol!("x2").into(),
+            symbol!("x3").into(),
+            symbol!("x4").into(),
+            symbol!("x5").into(),
+            symbol!("x6").into(),
+            symbol!("x7").into(),
+            symbol!("x8").into(),
+        ])
+    }
+
+    #[test]
+    fn packed_row_merge_combines_and_cancels_equal_monomials() {
+        let variables = packed_row_merge_variables();
+        let left = diagonal_integer_polynomial(&[(1, 0), (1, 100)], variables.clone());
+        let right = diagonal_integer_polynomial(&[(1, 0), (-1, 100)], variables);
+        let expected = reference_integer_product(&left, &right);
+
+        let direct = left.try_packed_u8_row_merge_mul(&right).unwrap();
+        let dispatched = &left * &right;
+        direct.check_consistency();
+        dispatched.check_consistency();
+        assert_eq!(direct, expected);
+        assert_eq!(dispatched, expected);
+        assert_eq!(direct.nterms(), 2);
+    }
+
+    #[test]
+    fn packed_row_merge_uses_the_smaller_asymmetric_support_for_rows() {
+        let variables = packed_row_merge_variables();
+        let left = diagonal_integer_polynomial(
+            &[(2, 0), (-3, 7), (5, 29), (11, 61), (-13, 100)],
+            variables.clone(),
+        );
+        let right = diagonal_integer_polynomial(&[(17, 0), (19, 13), (-23, 55)], variables);
+        let expected = reference_integer_product(&left, &right);
+
+        assert_eq!(left.try_packed_u8_row_merge_mul(&right).unwrap(), expected);
+        assert_eq!(right.try_packed_u8_row_merge_mul(&left).unwrap(), expected);
+        assert_eq!(&left * &right, expected);
+        assert_eq!(&right * &left, expected);
+    }
+
+    #[test]
+    fn packed_row_merge_accepts_the_u8_exponent_boundary() {
+        let variables = packed_row_merge_variables();
+        let left = diagonal_integer_polynomial(&[(2, 0), (3, 200)], variables.clone());
+        let right = diagonal_integer_polynomial(&[(5, 0), (7, 55)], variables);
+        let expected = reference_integer_product(&left, &right);
+
+        let actual = &left * &right;
+        assert_eq!(actual, expected);
+        assert_eq!(actual.nterms(), 4);
+        assert!(
+            actual
+                .last_exponents()
+                .iter()
+                .all(|exponent| *exponent == 255)
+        );
+    }
+
+    #[test]
+    fn packed_row_merge_matches_irregular_u16_polynomials() {
+        let variables = packed_row_merge_variables();
+        let left = parse!("2*x1^130*x3^7+3*x2^125*x8^4-5*x4^80*x6^55+7*x5^64*x7^70")
+            .to_polynomial::<_, u16>(&Z, Some(variables.clone()));
+        let right = parse!("11*x1^100*x2^20-13*x3^120*x4^5+17*x5^90*x8^40-19*x6^110*x7^10+23")
+            .to_polynomial::<_, u16>(&Z, Some(variables));
+
+        assert!(packed_row_merge_is_bounded(left.nterms(), right.nterms()));
+        assert_eq!(&left * &right, reference_integer_product(&left, &right));
+    }
+
+    #[test]
+    fn packed_row_merge_matches_a_collision_heavy_dense_box() {
+        let variables = packed_row_merge_variables();
+        let left = parse!("(1+x1+x2)^5")
+            .expand()
+            .to_polynomial::<_, u8>(&Z, Some(variables.clone()));
+        let right = parse!("(1-x1+2*x2)^5")
+            .expand()
+            .to_polynomial::<_, u8>(&Z, Some(variables));
+
+        assert_eq!(
+            left.try_packed_u8_row_merge_mul(&right).unwrap(),
+            reference_integer_product(&left, &right)
+        );
+    }
+
+    #[test]
+    fn packed_row_merge_guard_preserves_the_existing_large_product_path() {
+        assert!(packed_row_merge_is_bounded(9, 1287));
+        assert!(packed_row_merge_is_bounded(16, 1024));
+        assert!(!packed_row_merge_is_bounded(16, 1025));
+        assert!(!packed_row_merge_is_bounded(17, 241));
+        assert!(packed_row_merge_is_bounded(64, 64));
+        assert!(!packed_row_merge_is_bounded(64, 65));
+
+        let variables = packed_row_merge_variables();
+        let left_terms = (0..65)
+            .map(|degree| (i64::from(degree % 7) + 1, degree as u8))
+            .collect::<Vec<_>>();
+        let right_terms = (0..65)
+            .map(|degree| (-(i64::from(degree % 11) + 1), degree as u8))
+            .collect::<Vec<_>>();
+        let left = diagonal_integer_polynomial(&left_terms, variables.clone());
+        let right = diagonal_integer_polynomial(&right_terms, variables);
+        let expected = reference_integer_product(&left, &right);
+
+        assert!(left.try_packed_u8_row_merge_mul(&right).is_none());
+        let actual = &left * &right;
+        actual.check_consistency();
+        assert_eq!(actual, expected);
+    }
+
+    #[test]
+    fn packed_row_merge_handles_a_large_product_with_few_rows() {
+        let variables = packed_row_merge_variables();
+        let dense = parse!("(1+x1+x2+x3+x4+x5+x6+x7+x8)^5")
+            .expand()
+            .to_polynomial::<_, u8>(&Z, Some(variables.clone()));
+        let sparse = parse!("1+x1^5+2*x2^5+3*x3^5+5*x4^5+7*x5^5+11*x6^5+13*x7^5+17*x8^5")
+            .to_polynomial::<_, u8>(&Z, Some(variables));
+        assert_eq!(dense.nterms(), 1287);
+        assert_eq!(sparse.nterms(), 9);
+        assert!(packed_row_merge_is_bounded(dense.nterms(), sparse.nterms()));
+        assert!(!dense.total_degree_dense_mul_is_bounded(&sparse));
+        assert!(!mixed_radix_dense_mul_is_bounded(
+            11usize.pow(8),
+            dense.nterms(),
+            sparse.nterms()
+        ));
+
+        let expected = reference_integer_product(&dense, &sparse);
+        assert_eq!(
+            dense.try_packed_u8_row_merge_mul(&sparse).unwrap(),
+            expected
+        );
+        assert_eq!(
+            sparse.try_packed_u8_row_merge_mul(&dense).unwrap(),
+            expected
+        );
+        assert_eq!(&dense * &sparse, expected);
+        assert_eq!(&sparse * &dense, expected);
+    }
+
+    #[test]
+    fn packed_u16_wide_row_merge_matches_the_high_gap_eight_variable_product() {
+        let variables = packed_row_merge_variables();
+        let dense = parse!("(1+3*x1+5*x2+7*x3+9*x4+11*x5+13*x6+15*x7+17*x8)^4-1")
+            .expand()
+            .to_polynomial::<_, u16>(&Z, Some(variables.clone()));
+        let sparse =
+            parse!("1+x1^256+2*x2^256+3*x3^256+5*x4^256+7*x5^256+11*x6^256+13*x7^256+17*x8^256")
+                .to_polynomial::<_, u16>(&Z, Some(variables));
+        assert_eq!(dense.nterms(), 494);
+        assert_eq!(sparse.nterms(), 9);
+        let degree_sum = multiplication_degree_sums(&dense, &sparse);
+        assert_eq!(degree_sum, vec![260; 8]);
+
+        let expected = reference_integer_product(&dense, &sparse);
+        assert_eq!(expected.nterms(), 4446);
+        assert_eq!(
+            dense
+                .try_packed_u16_wide_row_merge_mul(&sparse, &degree_sum)
+                .unwrap(),
+            expected
+        );
+        assert_eq!(
+            sparse
+                .try_packed_u16_wide_row_merge_mul(&dense, &degree_sum)
+                .unwrap(),
+            expected
+        );
+        assert_eq!(&dense * &sparse, expected);
+        assert_eq!(&sparse * &dense, expected);
+    }
+
+    #[test]
+    fn packed_u16_wide_row_merge_handles_boundaries_and_cancellation() {
+        let variables = Arc::new(
+            packed_row_merge_variables()
+                .iter()
+                .take(5)
+                .cloned()
+                .collect::<Vec<_>>(),
+        );
+        let left = parse!("1+2*x1^40000*x4^123*x5^40001")
+            .to_polynomial::<_, u16>(&Z, Some(variables.clone()));
+        let right = parse!("1+3*x1^25535*x4^65412*x5^25534")
+            .to_polynomial::<_, u16>(&Z, Some(variables.clone()));
+        let degree_sum = multiplication_degree_sums(&left, &right);
+        assert_eq!(degree_sum, vec![65535, 0, 0, 65535, 65535]);
+        let expected = reference_integer_product(&left, &right);
+        assert_eq!(
+            left.try_packed_u16_wide_row_merge_mul(&right, &degree_sum)
+                .unwrap(),
+            expected
+        );
+        assert_eq!(&left * &right, expected);
+
+        let over_bound_left =
+            parse!("1+x1^40000").to_polynomial::<_, u32>(&Z, Some(variables.clone()));
+        let over_bound_right =
+            parse!("1+x1^25536").to_polynomial::<_, u32>(&Z, Some(variables.clone()));
+        let over_bound_degree_sum = multiplication_degree_sums(&over_bound_left, &over_bound_right);
+        assert_eq!(over_bound_degree_sum[0], 65536);
+        assert!(
+            over_bound_left
+                .try_packed_u16_wide_row_merge_mul(&over_bound_right, &over_bound_degree_sum)
+                .is_none()
+        );
+        assert_eq!(
+            &over_bound_left * &over_bound_right,
+            reference_integer_product(&over_bound_left, &over_bound_right)
+        );
+
+        let u8_left = parse!("1+x1^128").to_polynomial::<_, u8>(&Z, Some(variables.clone()));
+        let u8_right = parse!("1+x1^128").to_polynomial::<_, u8>(&Z, Some(variables.clone()));
+        let u8_degree_sum = multiplication_degree_sums(&u8_left, &u8_right);
+        assert_eq!(u8_degree_sum[0], 256);
+        assert!(
+            u8_left
+                .try_packed_u16_wide_row_merge_mul(&u8_right, &u8_degree_sum)
+                .is_none()
+        );
+
+        let i16_left = parse!("1+x1^20000").to_polynomial::<_, i16>(&Z, Some(variables.clone()));
+        let i16_right = parse!("1+x1^12768").to_polynomial::<_, i16>(&Z, Some(variables));
+        let i16_degree_sum = multiplication_degree_sums(&i16_left, &i16_right);
+        assert_eq!(i16_degree_sum[0], 32768);
+        assert!(
+            i16_left
+                .try_packed_u16_wide_row_merge_mul(&i16_right, &i16_degree_sum)
+                .is_none()
+        );
+
+        let variables = packed_row_merge_variables();
+        let low_half_left = parse!("1+2*x5^40000*x6^40000*x7^40000*x8^40000")
+            .to_polynomial::<_, u16>(&Z, Some(variables.clone()));
+        let low_half_right = parse!("1+3*x5^25535*x6^25535*x7^25535*x8^25535")
+            .to_polynomial::<_, u16>(&Z, Some(variables.clone()));
+        let low_half_degree_sum = multiplication_degree_sums(&low_half_left, &low_half_right);
+        assert_eq!(
+            low_half_degree_sum,
+            vec![0, 0, 0, 0, 65535, 65535, 65535, 65535]
+        );
+        let low_half_expected = reference_integer_product(&low_half_left, &low_half_right);
+        assert_eq!(
+            low_half_left
+                .try_packed_u16_wide_row_merge_mul(&low_half_right, &low_half_degree_sum)
+                .unwrap(),
+            low_half_expected
+        );
+        assert_eq!(&low_half_left * &low_half_right, low_half_expected);
+
+        let cancel_left = parse!("1+x1^300*x2^300*x3^300*x4^300*x5^300*x6^300*x7^300*x8^300")
+            .to_polynomial::<_, u16>(&Z, Some(variables.clone()));
+        let cancel_right = parse!("1-x1^300*x2^300*x3^300*x4^300*x5^300*x6^300*x7^300*x8^300")
+            .to_polynomial::<_, u16>(&Z, Some(variables));
+        let cancel_degree_sum = multiplication_degree_sums(&cancel_left, &cancel_right);
+        let cancel_expected = reference_integer_product(&cancel_left, &cancel_right);
+        let cancel_actual = cancel_left
+            .try_packed_u16_wide_row_merge_mul(&cancel_right, &cancel_degree_sum)
+            .unwrap();
+        assert_eq!(cancel_actual, cancel_expected);
+        assert_eq!(cancel_actual.nterms(), 2);
+
+        let field = Zp::new(17);
+        let finite_left =
+            cancel_left.map_coeff(|coefficient| field.nth(coefficient.clone()), field.clone());
+        let finite_right =
+            cancel_right.map_coeff(|coefficient| field.nth(coefficient.clone()), field.clone());
+        let finite_expected =
+            cancel_expected.map_coeff(|coefficient| field.nth(coefficient.clone()), field.clone());
+        assert_eq!(
+            finite_left
+                .try_packed_u16_wide_row_merge_mul(&finite_right, &cancel_degree_sum)
+                .unwrap(),
+            finite_expected
+        );
+        assert_eq!(&finite_left * &finite_right, finite_expected);
+    }
+
+    #[test]
+    fn heap_result_preallocation_is_bounded() {
+        let left = parse!("1+x^3").to_polynomial::<_, u16>(&Z, None);
+        let right = parse!("1-x^5").to_polynomial::<_, u16>(&Z, left.variables().clone());
+        assert_eq!(left.heap_mul_result_capacity(&right), 4);
+
+        let mut large = left.zero_with_capacity(512);
+        for degree in 0..512 {
+            large.append_monomial(1.into(), &[degree]);
+        }
+        assert_eq!(large.heap_mul_result_capacity(&large), large.nterms());
+    }
+
     #[test]
     fn mixed_radix_dense_dispatch_rejects_polybench_sparse_boxes() {
         assert!(!mixed_radix_dense_work_is_bounded(5_025_500, 47, 48));
@@ -6588,6 +7818,77 @@ mod test {
         // The existing three-variable dense-small benchmark has 24 slots per variable and
         // 455-by-364 input terms.
         assert!(mixed_radix_dense_work_is_bounded(24usize.pow(3), 455, 364));
+    }
+
+    #[test]
+    fn chunked_dense_dispatch_selects_only_bounded_dominant_chunks() {
+        assert!(chunked_dense_mul_is_preferred(
+            5, 759_375, 627_264, 11_628, 50_625,
+        ));
+        assert!(!chunked_dense_mul_is_preferred(
+            4, 759_375, 627_264, 11_628, 50_625,
+        ));
+        assert!(!chunked_dense_mul_is_preferred(
+            5, 11_881_376, 53_004_029, 142_506, 456_976,
+        ));
+        assert!(chunked_dense_mul_is_preferred(
+            5, 262_144, 262_143, 4_096, 32_768,
+        ));
+        assert!(!chunked_dense_mul_is_preferred(
+            5, 262_144, 262_143, 4_097, 32_768,
+        ));
+
+        assert!(cache_sized_chunked_dense_mul_is_preferred(
+            3, 1_728, 4_648, 144,
+        ));
+        assert!(!cache_sized_chunked_dense_mul_is_preferred(
+            2, 1_728, 4_648, 144,
+        ));
+        assert!(!cache_sized_chunked_dense_mul_is_preferred(
+            3, 1_728, 3_455, 144,
+        ));
+        assert!(!cache_sized_chunked_dense_mul_is_preferred(
+            3, 1_728, 4_648, 288,
+        ));
+        assert!(cache_sized_chunked_dense_mul_is_preferred(
+            8, 6_561, 20_000, 243,
+        ));
+        assert!(!cache_sized_chunked_dense_mul_is_preferred(
+            3, 1_024, 2_048, 4,
+        ));
+    }
+
+    #[test]
+    fn cache_sized_chunked_dense_multiplication_matches_heap_product() {
+        let left = parse!("(1+3*x+5*y+7*z)^6-1").to_polynomial::<_, u8>(&Z, None);
+        let right =
+            parse!("(1-3*x+5*y-7*z)^5+1").to_polynomial::<_, u8>(&Z, left.variables().clone());
+        assert_eq!(left.nterms(), 83);
+        assert_eq!(right.nterms(), 56);
+
+        let expected = left.heap_mul(&right);
+        let actual = &left * &right;
+        assert_eq!(actual, expected);
+        assert_eq!(actual.nterms(), 360);
+    }
+
+    #[test]
+    fn preferred_total_degree_kernel_requires_a_smaller_workspace() {
+        assert!(total_degree_kernel_precedes_mixed_radix(
+            9usize.pow(5),
+            1_287,
+            8,
+        ));
+        assert!(!total_degree_kernel_precedes_mixed_radix(
+            13usize.pow(2),
+            91,
+            8,
+        ));
+        assert!(!total_degree_kernel_precedes_mixed_radix(
+            usize::MAX,
+            usize::MAX,
+            8,
+        ));
     }
 
     #[test]
@@ -6650,6 +7951,227 @@ mod test {
         let right =
             parse!("(1-a+b+c-d-e+f+g-h)^5+1").to_polynomial::<_, u8>(&Z, left.variables().clone());
         assert_product(&left, &right);
+
+        let left = parse!("1000000000*(1+a+b+c+d+e)^8").to_polynomial::<_, u8>(&Z, None);
+        let right = parse!("1000000000*(1-a+2*b-c+2*d-e)^8")
+            .to_polynomial::<_, u8>(&Z, left.variables().clone());
+        let actual = left.try_total_degree_dense_mul(&right).unwrap();
+        let expected = reference_integer_product(&left, &right);
+        assert_eq!(actual, expected);
+        assert!(
+            actual
+                .coefficients
+                .iter()
+                .any(|coefficient| matches!(coefficient, Integer::Double(_)))
+        );
+
+        let left = parse!("(1+3*a+5*b+7*c+9*d+11*e)^7-1").to_polynomial::<_, u8>(&Z, None);
+        let right = parse!("(1+3*a+5*b+7*c+9*d-11*e)^7+3")
+            .to_polynomial::<_, u8>(&Z, left.variables().clone());
+        assert!(
+            left.try_preferred_total_degree_mul_before_mixed_radix(&right)
+                .is_none()
+        );
+        let chunked = &left * &right;
+        let compact = left.try_total_degree_dense_mul(&right).unwrap();
+        assert_eq!(chunked, compact);
+        assert_eq!(chunked.nterms(), 6_967);
+    }
+
+    #[cfg(feature = "integer-gmp")]
+    #[test]
+    fn total_degree_limb_multiplication_precedes_sparse_mixed_radix_workspace() {
+        let left = parse!(
+            "(1+100000000000000000000000000000000000000*a+100000000000000000000000000000000000003*b+100000000000000000000000000000000000007*c+100000000000000000000000000000000000009*d+100000000000000000000000000000000000021*e)^4-1"
+        )
+        .to_polynomial::<_, u8>(&Z, None);
+        let right = parse!(
+            "(1-100000000000000000000000000000000000033*a+100000000000000000000000000000000000037*b-100000000000000000000000000000000000039*c+100000000000000000000000000000000000051*d-100000000000000000000000000000000000063*e)^4+1"
+        )
+        .to_polynomial::<_, u8>(&Z, left.variables().clone());
+
+        assert!(
+            left.total_degree_dense_mul_shape_with_density(&right, 32)
+                .is_none()
+        );
+        assert!(
+            left.total_degree_dense_mul_shape_with_density(&right, 8)
+                .is_some()
+        );
+        assert!(
+            left.try_preferred_total_degree_mul_before_mixed_radix(&right)
+                .is_some()
+        );
+        let compact = left
+            .try_total_degree_dense_mul_with_density(&right, 8, true)
+            .unwrap();
+        let expected = reference_integer_product(&left, &right);
+        assert_eq!(compact, expected);
+        assert_eq!(&left * &right, expected);
+    }
+
+    #[cfg(feature = "integer-gmp")]
+    #[test]
+    fn preferred_total_degree_density_handles_an_asymmetric_simplex_product() {
+        let variables = packed_row_merge_variables();
+        let cofactor = parse!("(1+2*x1+3*x2+5*x3+7*x4+11*x5+13*x6+17*x7+19*x8)^2")
+            .to_polynomial::<_, u8>(&Z, Some(variables.clone()));
+        let common = parse!("(1-x1+2*x2-3*x3+5*x4-7*x5+11*x6-13*x7+17*x8)^3")
+            .to_polynomial::<_, u8>(&Z, Some(variables));
+        assert_eq!(cofactor.nterms(), 45);
+        assert_eq!(common.nterms(), 165);
+        assert!(
+            cofactor
+                .total_degree_dense_mul_shape_with_density(&common, 8)
+                .is_none()
+        );
+        assert!(
+            cofactor
+                .total_degree_dense_mul_shape_with_density(&common, 5)
+                .is_some()
+        );
+        assert!(!mixed_radix_dense_mul_is_bounded(
+            6usize.pow(8),
+            cofactor.nterms(),
+            common.nterms()
+        ));
+        assert!(cofactor.mul_dense(&common).is_none());
+        assert!(
+            cofactor
+                .try_preferred_total_degree_mul_before_mixed_radix(&common)
+                .is_some()
+        );
+
+        let expected = reference_integer_product(&cofactor, &common);
+        let compact = cofactor
+            .try_total_degree_dense_mul_with_density(&common, 5, true)
+            .unwrap();
+        compact.check_consistency();
+        assert_eq!(compact, expected);
+        assert_eq!(&cofactor * &common, expected);
+        assert_eq!(&common * &cofactor, expected);
+    }
+
+    #[cfg(feature = "integer-gmp")]
+    #[test]
+    fn higher_workspace_ratio_preserves_balanced_mixed_radix_products() {
+        let variables = Arc::new(
+            packed_row_merge_variables()
+                .iter()
+                .take(4)
+                .cloned()
+                .collect::<Vec<_>>(),
+        );
+        let left = parse!("(1+x1+x2+x3+x4)^3").to_polynomial::<_, u8>(&Z, Some(variables.clone()));
+        let right = parse!("(1+2*x1-3*x2+5*x3-7*x4)^3").to_polynomial::<_, u8>(&Z, Some(variables));
+        assert_eq!(left.nterms(), 35);
+        assert_eq!(right.nterms(), 35);
+        assert!(
+            left.total_degree_dense_mul_shape_with_density(&right, 8)
+                .is_none()
+        );
+        assert!(
+            left.total_degree_dense_mul_shape_with_density(&right, 5)
+                .is_some()
+        );
+        assert!(mixed_radix_dense_mul_is_bounded(
+            7usize.pow(4),
+            left.nterms(),
+            right.nterms()
+        ));
+        assert!(
+            left.try_preferred_total_degree_mul_before_mixed_radix(&right)
+                .is_none()
+        );
+
+        let expected = reference_integer_product(&left, &right);
+        assert_eq!(left.mul_dense(&right).unwrap(), expected);
+        assert_eq!(&left * &right, expected);
+    }
+
+    #[cfg(feature = "integer-gmp")]
+    #[test]
+    fn limb_total_degree_kernel_uses_a_smaller_workspace_ratio() {
+        let variables = Arc::new(
+            packed_row_merge_variables()
+                .iter()
+                .take(4)
+                .cloned()
+                .collect::<Vec<_>>(),
+        );
+        let established_left =
+            parse!("(1+x1+x2+x3+x4)^4").to_polynomial::<_, u8>(&Z, Some(variables.clone()));
+        let established_right =
+            parse!("(1+2*x1-3*x2+5*x3-7*x4)^4").to_polynomial::<_, u8>(&Z, Some(variables.clone()));
+        assert!(
+            established_left
+                .try_preferred_total_degree_mul_before_mixed_radix(&established_right)
+                .is_some()
+        );
+
+        let small_left =
+            parse!("(1+x1+x2+x3+x4)^3").to_polynomial::<_, u8>(&Z, Some(variables.clone()));
+        let small_right =
+            parse!("(1+2*x1-3*x2+5*x3-7*x4)^3").to_polynomial::<_, u8>(&Z, Some(variables.clone()));
+        assert_eq!(small_left.nterms(), 35);
+        assert_eq!(small_right.nterms(), 35);
+        assert!(
+            small_left
+                .try_preferred_total_degree_mul_before_mixed_radix(&small_right)
+                .is_none()
+        );
+
+        let left = parse!("10000000000000000000000000000000000000000*(1+x1+x2+x3+x4)^3")
+            .to_polynomial::<_, u8>(&Z, Some(variables.clone()));
+        let right = parse!("10000000000000000000000000000000000000003*(1+2*x1-3*x2+5*x3-7*x4)^3")
+            .to_polynomial::<_, u8>(&Z, Some(variables));
+        assert!(
+            left.coefficients
+                .iter()
+                .chain(&right.coefficients)
+                .all(|coefficient| matches!(coefficient, Integer::Large(_)))
+        );
+        assert!(mixed_radix_dense_mul_is_bounded(
+            7usize.pow(4),
+            left.nterms(),
+            right.nterms()
+        ));
+        assert!(
+            left.try_preferred_total_degree_mul_before_mixed_radix(&right)
+                .is_some()
+        );
+
+        let expected = reference_integer_product(&left, &right);
+        assert_eq!(&left * &right, expected);
+    }
+
+    #[cfg(feature = "integer-gmp")]
+    #[test]
+    fn total_degree_limb_kernel_multiplies_wide_coefficients() {
+        let variables = Arc::new(
+            packed_row_merge_variables()
+                .iter()
+                .take(4)
+                .cloned()
+                .collect::<Vec<_>>(),
+        );
+        let left_scale = Integer::from(MultiPrecisionInteger::from(1u32) << 4096u32);
+        let right_scale = Integer::from(
+            (MultiPrecisionInteger::from(1u32) << 4095u32) + MultiPrecisionInteger::from(37u32),
+        );
+        let left = parse!("(1+x1+x2+x3+x4)^4")
+            .to_polynomial::<_, u8>(&Z, Some(variables.clone()))
+            .mul_coeff(left_scale);
+        let right = parse!("(1+2*x1-3*x2+5*x3-7*x4)^4")
+            .to_polynomial::<_, u8>(&Z, Some(variables))
+            .mul_coeff(right_scale);
+
+        assert!(
+            left.try_preferred_total_degree_mul_before_mixed_radix(&right)
+                .is_some()
+        );
+        let expected = reference_integer_product(&left, &right);
+        assert_eq!(&left * &right, expected);
     }
 
     #[test]
@@ -6765,6 +8287,40 @@ mod test {
             }
 
             assert_eq!(polynomial.replace_last(2, &value), expected);
+        }
+    }
+
+    #[test]
+    fn repeated_last_variable_evaluation_matches_replace_last() {
+        let field = Zp::new(2_147_483_659);
+        let variables = Arc::new(vec![
+            symbol!("x").into(),
+            symbol!("y").into(),
+            symbol!("z").into(),
+            symbol!("w").into(),
+        ]);
+        let mut polynomials = [
+            parse!("x*z^100001+3*x*z^4-4*x+y*z^3-y*z+5")
+                .to_polynomial::<_, u32>(&field, Some(variables.clone())),
+            parse!("2*x^2*z^17-7*x^2*z+11*y*z^9+13")
+                .to_polynomial::<_, u32>(&field, Some(variables)),
+        ];
+        MultivariatePolynomial::unify_variables_list(&mut polynomials);
+        let [left, right] = &polynomials;
+        let mut left_context = LastVariableEvaluationContext::new(left, 2);
+        let mut right_context = LastVariableEvaluationContext::new(right, 2);
+        let maximum_degree = left_context
+            .maximum_degree()
+            .max(right_context.maximum_degree());
+        let mut powers = LastVariablePowerWorkspace::new(&field, maximum_degree);
+
+        for value in [0, 2, 7, 2] {
+            let value = field.to_element(value);
+            powers.start_value(&value);
+            let actual_left = left_context.evaluate(&mut powers);
+            let actual_right = right_context.evaluate(&mut powers);
+            assert_eq!(actual_left, &left.replace_last(2, &value));
+            assert_eq!(actual_right, &right.replace_last(2, &value));
         }
     }
 
