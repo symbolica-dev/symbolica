@@ -2044,10 +2044,8 @@ impl<'a> AtomView<'a> {
                 CoefficientView::RationalPolynomial(r) => {
                     let (old_id, _, _) = r.0.get_frac_u64();
 
-                    if let Some(nv) = state_map.variables_lists.get(&old_id) {
-                        let mut rr = r.deserialize();
-                        rr.numerator.set_variables(nv.clone());
-                        rr.denominator.set_variables(nv.clone());
+                    if let Some(nv) = state_map.get_variable_list(old_id) {
+                        let rr = r.deserialize_with_variables(nv);
                         out.to_num(Coefficient::RationalPolynomial(rr));
                     }
                 }
